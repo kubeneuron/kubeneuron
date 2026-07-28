@@ -1,19 +1,38 @@
 version: 2
 updates:
+  # One grouped PR per ecosystem per week: twelve simultaneous PRs (each
+  # running the full CI matrix including the 30-minute kind job) is noise,
+  # not diligence.
   - package-ecosystem: gomod
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 3
     groups:
       kubernetes:
         patterns:
+          - "k8s.io/*"
+          - "sigs.k8s.io/*"
+      go-dependencies:
+        patterns:
+          - "*"
+        exclude-patterns:
           - "k8s.io/*"
           - "sigs.k8s.io/*"
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 2
+    groups:
+      actions:
+        patterns:
+          - "*"
   - package-ecosystem: docker
     directory: /build
     schedule:
       interval: weekly
+    groups:
+      images:
+        patterns:
+          - "*"
