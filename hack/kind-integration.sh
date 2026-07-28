@@ -1735,7 +1735,7 @@ operator_manifest="$work_dir/operator-deployment.yaml"
 sed -E "s|image: ghcr\.io/kubeneuron/kube-neuron/operator:[A-Za-z0-9._-]+(@sha256:[a-f0-9]+)?|image: $OPERATOR_IMAGE|" \
 	"$REPO_ROOT/config/default/operator_deployment.yaml" >"$operator_manifest"
 grep -Fq "image: $OPERATOR_IMAGE" "$operator_manifest" || die "operator image substitution failed"
-if grep -Fq 'ghcr.io/kubeneuron/kube-neuron/operator:latest' "$operator_manifest"; then
+if grep -Fq 'ghcr.io/kubeneuron/kubeneuron/operator:latest' "$operator_manifest"; then
 	die "operator manifest retained its published image placeholder"
 fi
 

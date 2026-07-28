@@ -5,10 +5,10 @@
 # separate, deliberate step — see the production install guide.
 
 image:
-  repository: ghcr.io/kubeneuron/kube-neuron/operator
+  repository: ghcr.io/kubeneuron/kubeneuron/operator
   # Pin an exact release tag or digest; the CRDs reject :latest for managed
   # workload images and the operator deserves the same discipline.
-  tag: v0.1.0@sha256:8537e13836b6d0748c6cf9084cdb250f013b002b18edebd76e17a39a066ecc98
+  tag: v0.1.1
   pullPolicy: IfNotPresent
 
 replicas: 1

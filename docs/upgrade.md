@@ -42,8 +42,8 @@ Always: **CRDs → operator → controller/agent images.**
    ```sh
    kubectl patch kubeneuron <name> --type=merge -p '{
      "spec": {
-       "controller": {"image": "ghcr.io/kubeneuron/kube-neuron/controller:vX.Y.Z"},
-       "agent":      {"image": "ghcr.io/kubeneuron/kube-neuron/agent:vX.Y.Z"}
+       "controller": {"image": "ghcr.io/kubeneuron/kubeneuron/controller:vX.Y.Z"},
+       "agent":      {"image": "ghcr.io/kubeneuron/kubeneuron/agent:vX.Y.Z"}
      }
    }'
    ```

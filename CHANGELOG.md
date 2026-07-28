@@ -11,6 +11,28 @@ API is `v1alpha1`.
 
 Nothing yet.
 
+## [v0.1.1] - 2026-07-28
+
+First release from the public repository.
+
+### Changed
+- Module path and container image namespace moved to
+  `github.com/kubeneuron/kubeneuron` and
+  `ghcr.io/kubeneuron/kubeneuron/*`; install manifests, Helm values, and
+  the installer follow.
+
+### Added
+- Password and OIDC single sign-on for the control panel
+  (`spec.auth.users`, `spec.auth.oidc`) with server-side sessions; audit
+  actors carry the verified identity.
+- Redesigned control panel: sidebar app shell, per-GPU fleet health grid,
+  incident filters, and an incident drawer with playbook progress and the
+  audit timeline.
+- `deploy/install.sh`: one-command installation (pipe-safe, `curl … | bash`)
+  and `kubeneuronctl passwd` for panel password hashes.
+- Product tour with screenshots and a recorded demo, plus a one-page
+  product overview.
+
 ## [v0.1.0] - 2026-07-26
 
 First tagged release: the complete DryRun control plane with a shippable,

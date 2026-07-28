@@ -98,7 +98,7 @@ pull_baseline() {
 		fi
 		# The install manifest and the root object reference tag form; retag
 		# the digest-pinned pull so kind serves both reference styles.
-		"$DOCKER_BIN" tag "$ref" "ghcr.io/kubeneuron/kube-neuron/${component}:${BASELINE}"
+		"$DOCKER_BIN" tag "$ref" "ghcr.io/kubeneuron/kubeneuron/${component}:${BASELINE}"
 	done
 }
 
@@ -113,7 +113,7 @@ build_baseline_from_tag() {
 	local target
 	for target in operator controller agent; do
 		"$DOCKER_BIN" build --target "$target" \
-			--tag "ghcr.io/kubeneuron/kube-neuron/${target}:${BASELINE}" \
+			--tag "ghcr.io/kubeneuron/kubeneuron/${target}:${BASELINE}" \
 			--file "$baseline_tree/test/integration/Dockerfile" "$baseline_tree" >/dev/null
 	done
 }
@@ -135,9 +135,9 @@ export KUBECONFIG="$work_dir/kubeconfig"
 
 note "loading baseline images into kind"
 "$KIND_BIN" load docker-image --name "$CLUSTER_NAME" \
-	"ghcr.io/kubeneuron/kube-neuron/operator:${BASELINE}" \
-	"ghcr.io/kubeneuron/kube-neuron/controller:${BASELINE}" \
-	"ghcr.io/kubeneuron/kube-neuron/agent:${BASELINE}"
+	"ghcr.io/kubeneuron/kubeneuron/operator:${BASELINE}" \
+	"ghcr.io/kubeneuron/kubeneuron/controller:${BASELINE}" \
+	"ghcr.io/kubeneuron/kubeneuron/agent:${BASELINE}"
 
 note "installing baseline $BASELINE (CRDs + operator)"
 "$KUBECTL_BIN" apply -f "$install_manifest" >/dev/null
@@ -185,9 +185,9 @@ metadata:
 spec:
   namespace: $NS
   controller:
-    image: ghcr.io/kubeneuron/kube-neuron/controller:$BASELINE
+    image: ghcr.io/kubeneuron/kubeneuron/controller:$BASELINE
   agent:
-    image: ghcr.io/kubeneuron/kube-neuron/agent:$BASELINE
+    image: ghcr.io/kubeneuron/kubeneuron/agent:$BASELINE
     tolerations:
       - operator: Exists
   safety:

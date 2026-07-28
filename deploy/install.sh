@@ -189,7 +189,7 @@ if [[ -n $ADMIN_USER ]]; then
 fi
 
 say "applying the starter configuration and root object"
-image_repo=ghcr.io/kubeneuron/kube-neuron
+image_repo=ghcr.io/kubeneuron/kubeneuron
 if [[ -z $VERSION && -n $repo_root && -f $repo_root/config/samples/kubeneuron_v1alpha1_kubeneuron.yaml ]]; then
 	controller_image=$(sed -n 's/.*image: *\(.*controller.*\)/\1/p' "$repo_root/config/samples/kubeneuron_v1alpha1_kubeneuron.yaml" | head -1)
 	agent_image=$(sed -n 's/.*image: *\(.*\/agent.*\)/\1/p' "$repo_root/config/samples/kubeneuron_v1alpha1_kubeneuron.yaml" | head -1)
