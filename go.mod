@@ -6,7 +6,7 @@ toolchain go1.25.12
 
 require (
 	github.com/coreos/go-oidc/v3 v3.20.0
-	github.com/jackc/pgx/v5 v5.9.2
+	github.com/jackc/pgx/v5 v5.10.0
 	github.com/prometheus/client_golang v1.22.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.53.0
