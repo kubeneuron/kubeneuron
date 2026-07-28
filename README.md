@@ -387,6 +387,13 @@ production mode today.
 **Later evaluations:** ClickHouse archival, Slurm, and ticketing
 integrations.
 
+## Community
+
+Questions, incident stories, and "is this a KubeNeuron problem or a driver
+problem?" belong in the [Discord](https://discord.gg/HHhHFT8v7W); design
+proposals and long-form discussion belong in
+[GitHub Discussions](https://github.com/kubeneuron/kubeneuron/discussions).
+
 ## Contributing
 
 Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and
