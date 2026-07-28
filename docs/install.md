@@ -32,9 +32,11 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
     The one-liner:
     ```sh
     curl -sfL https://github.com/kubeneuron/kubeneuron/releases/latest/download/install.sh \
-      | bash -s -- --version latest
+      | bash -s -- --version v0.1.1
     ```
-    (pipe-safe; the script downloads the pinned install manifest itself).
+    Pin the version in anything repeatable: it selects the matching signed
+    images and install manifest. `--version latest` exists for a quick
+    look, not for a production install.
 
 ## 2. Namespace and root object
 

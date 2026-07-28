@@ -43,9 +43,15 @@ var xidTable = map[int]XIDInfo{
 		Threshold:   3, ThresholdWindow: "1h",
 	},
 	43: {
-		Code: 43, Name: "gpu-stopped-processing",
+		Code: 43, Name: "reset-channel-verification-error",
 		Class: types.ClassXIDApp, Severity: types.SeverityInfo,
-		Description: "GPU stopped processing (app crash / reset channel). Counted only; no incident by default.",
+		Description: "Reset channel verification error. Usually secondary to an application termination or another GPU fault; correlate with the triggering event rather than acting on it alone.",
+		Threshold:   10, ThresholdWindow: "24h",
+	},
+	46: {
+		Code: 46, Name: "gpu-stopped-processing",
+		Class: types.ClassXIDApp, Severity: types.SeverityInfo,
+		Description: "GPU stopped processing. Typically follows an application crash or a preceding fault; hardware is suspect only when it recurs across different workloads.",
 		Threshold:   10, ThresholdWindow: "24h",
 	},
 	48: {
@@ -56,12 +62,12 @@ var xidTable = map[int]XIDInfo{
 	63: {
 		Code: 63, Name: "row-remap-recorded",
 		Class: types.ClassRowRemapOK, Severity: types.SeverityWarning,
-		Description: "ECC page retirement / row remap recorded successfully. A GPU reset is required for the remap to take effect — schedule reset-when-idle.",
+		Description: "ECC page retirement / row remap recorded successfully — this is the recovery mechanism working, not a failure. The remap applies on the next GPU reset, so schedule one when the device is idle.",
 	},
 	64: {
 		Code: 64, Name: "row-remap-failed",
 		Class: types.ClassRowRemapFailure, Severity: types.SeverityCritical,
-		Description: "ECC page retirement / row remap FAILED. Do not retry resets: cordon, drain, and start the RMA path.",
+		Description: "ECC page retirement / row remap could not be recorded. Drain, reset, and re-check row-remap state and diagnostics; escalate to hardware replacement when it recurs.",
 	},
 	74: {
 		Code: 74, Name: "nvlink-error",

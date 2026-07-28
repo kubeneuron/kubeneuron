@@ -62,7 +62,7 @@ even run, with DCGM/NVML corroboration as runtime evidence.
 
 ## Proof, not claims
 
-- Signed multi-arch releases with SBOMs (`v0.1.0` on GHCR).
+- Signed multi-arch releases with SBOMs (`v0.1.1` on GHCR).
 - The full ladder — kernel-injected XID 79 → cordon → drain → approval →
   reboot → uncordon — validated end to end on a **real Tesla T4** on AWS
   EKS, approver identity in the audit.
@@ -74,7 +74,8 @@ even run, with DCGM/NVML corroboration as runtime evidence.
 ## Get started in minutes
 
 ```console
-$ ./install-v0.1.0.sh        # one command: operator, secrets, TLS, starter config
+$ curl -sfL https://github.com/kubeneuron/kubeneuron/releases/latest/download/install.sh \
+    | bash -s -- --version v0.1.1
 ✓ KubeNeuron is Ready.
   Sign in       admin / <generated password>
 ```

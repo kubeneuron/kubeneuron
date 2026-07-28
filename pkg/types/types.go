@@ -64,7 +64,7 @@ func (t Target) IsGPU() bool { return t.GPUUUID != "" }
 type ProblemClass string
 
 const (
-	ClassXIDApp          ProblemClass = "xid-app"           // XID 13/31/43: usually workload bugs
+	ClassXIDApp          ProblemClass = "xid-app"           // XID 13/31/43/46: usually workload bugs
 	ClassECCDBE          ProblemClass = "ecc-dbe"           // XID 48/95, volatile DBE counters
 	ClassECCSBERate      ProblemClass = "ecc-sbe-rate"      // XID 92: high correctable-error rate
 	ClassECCContained    ProblemClass = "ecc-contained"     // XID 94: contained ECC error

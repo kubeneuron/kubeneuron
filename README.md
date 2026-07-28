@@ -3,20 +3,29 @@
 **GPU failure detection and remediation for NVIDIA clusters, with a
 Kubernetes-native configuration model.**
 
-KubeNeuron is intended to turn GPU and driver signals into an audited,
-policy-driven remediation workflow. The target escalation ladder ranges from
-observation and workload eviction through GPU reset, node drain, reboot, and
-hardware escalation.
+KubeNeuron turns GPU and driver signals into an audited, policy-driven
+remediation workflow. The escalation ladder ranges from observation and
+workload eviction through GPU reset, node drain, reboot, and hardware
+escalation.
 
-> **Status: Kubernetes dry-run preview; not production-ready.** The
-> controller's dry-run workflow, audit trail, durable controller queue,
-> authenticated operator API, CLI, CRD reconciliation, and agent mTLS plus
-> Pod-bound identity are exercised. The operator rejects `executionMode:
-> Enabled` both at CEL admission and during compilation: its managed DaemonSet
-> does not yet supply host GPU tooling or approved scripts, and its agent-side
-> completion cache is not crash-safe across a restart. **No NVIDIA, NVML,
-> DCGM, GPU action, or real-hardware remediation claim is made from this
-> CPU-only environment.**
+> **Status: released (v0.1.1); dry-run is the supported production mode.**
+> Working today: kernel-log XID detection on real NVIDIA hardware, GPU
+> inventory through `nvidia-smi` (mounted into the agent with
+> `spec.agent.hostTooling`), the full incident workflow with safety gates,
+> approvals with verified operator identity (password, OIDC SSO, or
+> Kubernetes RBAC), transactional audit, a durable action queue with lease
+> and boot-ID binding, PostgreSQL HA with leader election, the operator
+> REST API, control panel, and CLI. Validated end to end on a real Tesla T4
+> (AWS EKS, g4dn): a kernel-injected XID 79 walked the complete
+> cordon → drain → approval → reboot → uncordon ladder with the approver's
+> identity in the audit trail.
+>
+> **Deliberately still closed:** `executionMode: Enabled` — real destructive
+> reset and reboot — is rejected at CEL admission and during compilation, and
+> by three further independent gates. It stays closed until the hardware
+> verification matrix in [PRODUCT_PLAN.md](PRODUCT_PLAN.md) passes on a
+> dedicated GPU lab. Everything above runs in dry-run: the workflow executes
+> end to end and records what it *would* do, without touching a node.
 
 ## Architecture
 
@@ -42,9 +51,9 @@ The repository builds four custom binaries:
 
 | Binary | Responsibility | Current maturity |
 |---|---|---|
-| `kubeneuron-operator` | Watches KubeNeuron CRDs, validates and compiles their configuration, and reconciles the controller and agent Kubernetes workloads. | Working preview reconciler; SQLite store; `DryRun`/`Paused`; `Enabled` is deliberately rejected until the managed agent runtime is hardware-verified. Alertmanager webhook authentication is mandatory; Paused also requires an API token. |
-| `kubeneuron-controller` | Ingests Alertmanager and agent events and owns incident, policy, safety, and workflow execution. | Full dry-run workflow implemented: state walk, safety gates, approvals, escalation, transactional audit, durable action queue, authenticated operator REST API. |
-| `kubeneuron-agent` | Runs on GPU nodes, watches kernel events, reports inventory/events, and executes queued actions. | Registration/events use mTLS plus projected Pod-bound identity on the operator path. The binary has typed action contracts, including idle checks, but the managed image currently lacks the host GPU binaries and scripts required to claim action execution; `Enabled` remains unavailable. |
+| `kubeneuron-operator` | Watches KubeNeuron CRDs, validates and compiles their configuration, and reconciles the controller and agent Kubernetes workloads. | Released. SQLite or PostgreSQL store; `DryRun`/`Paused`; `Enabled` is deliberately rejected until the destructive-action matrix is hardware-verified. Alertmanager webhook authentication is mandatory; Paused also requires an API token. Emits Kubernetes Events; readiness follows informer-cache sync. |
+| `kubeneuron-controller` | Ingests Alertmanager and agent events and owns incident, policy, safety, and workflow execution. | Released. State walk, safety gates, approvals with verified actor identity, escalation, transactional audit, durable action queue with lease/boot-ID binding, authenticated operator REST API, embedded control panel. PostgreSQL HA with leader election; failover is proven not to duplicate an action. |
+| `kubeneuron-agent` | Runs on GPU nodes, watches kernel events, reports inventory/events, and executes queued actions. | Released. Registration and events use mTLS plus projected Pod-bound identity. `spec.agent.hostTooling` mounts the node's `nvidia-smi`/driver libraries into the distroless image — verified reading a real Tesla T4 — and arms `--require-real-driver`. Typed action contracts execute in dry-run; destructive execution stays gated by `Enabled`, which the operator never sets. |
 | `kubeneuronctl` | Operator-facing CLI for status, incidents, approvals, manual remediation, and pause/resume. | All declared commands implemented against the operator REST API. |
 
 VictoriaMetrics, vmalert, Alertmanager, Grafana, dcgm-exporter, and
@@ -315,8 +324,8 @@ safety case:
   and requires `spec.notifications.operatorAPIToken`; `Enabled` is rejected
   until the managed agent runtime has host tooling, crash-safe completion, and
   hardware-gated verification;
-- the API reserves `Postgres` as a future workflow-store value, but the
-  operator rejects it because the controller has no PostgreSQL backend;
+- the API accepts `SQLite` (single controller) and `Postgres` (two replicas
+  with Lease-based leader election and readiness that follows leadership);
 - observability currently accepts only credential-free `External` endpoints;
   `Managed` discovery/readiness and ClickHouse archival are rejected until
   their runtime paths exist;
@@ -324,8 +333,9 @@ safety case:
   shell commands;
 - credentials are represented by Secret references, not inline values.
 
-Approval delivery, full action execution and verification, and the complete
-pause/resume control path are still roadmap work.
+Approval delivery (Slack, generic webhook, PagerDuty), verification before
+resolution, and the pause/resume control path are implemented. Real
+destructive execution remains the one deliberately closed door.
 
 ## Configuration sources
 
