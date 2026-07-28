@@ -1,0 +1,75 @@
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMAlertmanager
+metadata:
+  name: kubeneuron
+  namespace: kubeneuron-monitoring
+  labels:
+    app.kubernetes.io/part-of: kube-neuron-dependencies
+spec:
+  image:
+    repository: prom/alertmanager
+    tag: v0.32.1
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  # The controller webhook is never anonymous: copy the installation's
+  # webhook-token Secret into this namespace so Alertmanager can present it
+  # (Secrets are namespace-local):
+  #   kubectl -n kube-neuron get secret kubeneuron-alertmanager-webhook-token -o yaml \
+  #     | sed 's/namespace: kube-neuron/namespace: kubeneuron-monitoring/' | kubectl apply -f -
+  secrets:
+    - kubeneuron-alertmanager-webhook-token
+  # No persistent Alertmanager storage is configured in this preview profile;
+  # silences and notification state do not survive replacement/removal.
+  configRawYaml: |
+    route:
+      # Safe default: anything unmatched goes to humans, never silently to
+      # the remediation webhook.
+      receiver: human-default
+      group_by: [alertname, node, UUID]
+      group_wait: 15s
+      group_interval: 1m
+      repeat_interval: 4h
+      routes:
+        # GPU signal alerts (and the agent-down signal) feed the controller
+        # webhook and become incidents. alertname must stay in the
+        # controller's alertClassMap.
+        - receiver: kubeneuron
+          matchers:
+            - alertname =~ "Gpu.*|KubeNeuronAgentDown"
+        # KubeNeuron self-monitoring routes to humans. severity=critical is
+        # the paging tier; split it into its own receiver when you wire a
+        # real pager.
+        - receiver: human-default
+          matchers:
+            - alertname =~ "KubeNeuron.*"
+    inhibit_rules:
+      # A down controller cannot ingest or notify: mute its downstream
+      # symptoms and page on the cause only.
+      - source_matchers: ['alertname = "KubeNeuronControllerDown"']
+        target_matchers:
+          - alertname =~ "KubeNeuron(AgentDown|SignalsDropped|NotificationsDropped|AgentSpoolBacklog|IncidentNeedsHuman)"
+      # A dead exporter on a node makes its per-GPU series absent/stale:
+      # keep the exporter-down page, mute that node's per-GPU alerts.
+      - source_matchers: ['alertname = "GpuExporterDown"']
+        target_matchers:
+          - alertname =~ "Gpu(DoubleBitEcc|RowRemap|RemappedRows|NvlinkCrc|PcieReplay|ThermalThrottle|TempCritical|PowerBrake).*"
+        equal: [node]
+    receivers:
+      - name: kubeneuron
+        webhook_configs:
+          - url: http://kubeneuron-controller.kube-neuron.svc:8080/api/v1/webhooks/alertmanager
+            send_resolved: true
+            http_config:
+              authorization:
+                type: Bearer
+                credentials_file: /etc/vm/secrets/kubeneuron-alertmanager-webhook-token/token
+      # Placeholder: replace with your Slack/PagerDuty/Opsgenie receiver.
+      # An empty receiver drops notifications — do not ship this to
+      # production unconfigured.
+      - name: human-default
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi

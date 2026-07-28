@@ -1,0 +1,235 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", "deploy/grafana/**"]
+  pull_request:
+    paths-ignore: ["**.md", "docs/**", "deploy/grafana/**"]
+
+permissions:
+  contents: read
+
+# A newer push supersedes the running build of the same ref; finishing the
+# stale one only burns minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: kubeneuron
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.12"
+          cache: true
+
+      - name: Verify generated code
+        run: make verify-generate
+
+      - name: Build
+        run: make build
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (both store backends)
+        env:
+          KUBENEURON_TEST_POSTGRES_DSN: postgres://postgres:test@127.0.0.1:5432/kubeneuron?sslmode=disable
+        run: go test -race -count=1 ./...
+
+  kind-integration:
+    # Hosted runners: free and unlimited on public repositories.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      KIND_VERSION: v0.32.0
+      KIND_SHA256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
+      KUBECTL_VERSION: v1.33.12
+      KUBECTL_SHA256: fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
+      KIND_CLUSTER_NAME: kubeneuron-ci
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner context is not available in job-level env — an expression
+      # there invalidates the whole workflow file ("No jobs were run").
+      - name: Set temp paths
+        run: |
+          echo "KIND_KUBECONFIG=$RUNNER_TEMP/kubeneuron-ci.kubeconfig" >> "$GITHUB_ENV"
+          echo "KIND_ARTIFACTS_DIR=$RUNNER_TEMP/kubeneuron-kind-artifacts" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.12"
+          cache: true
+
+      - name: Install pinned Kubernetes clients
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          tools="$RUNNER_TEMP/kubeneuron-tools"
+          mkdir -p "$tools"
+          curl --fail --location --retry 3 \
+            --output "$tools/kind" \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          printf '%s  %s\n' "$KIND_SHA256" "$tools/kind" | sha256sum --check -
+          curl --fail --location --retry 3 \
+            --output "$tools/kubectl" \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          printf '%s  %s\n' "$KUBECTL_SHA256" "$tools/kubectl" | sha256sum --check -
+          chmod 0755 "$tools/kind" "$tools/kubectl"
+          echo "$tools" >> "$GITHUB_PATH"
+
+      - name: Raise inotify limits for the multi-node cluster
+        run: |
+          sudo sysctl fs.inotify.max_user_instances=512 \
+            fs.inotify.max_user_watches=524288
+
+      - name: Verify tooling and Docker
+        shell: bash
+        run: |
+          set -euo pipefail
+          kind version
+          kubectl version --client=true -o yaml
+          timeout 30s bash -c 'until docker info >/dev/null 2>&1; do sleep 2; done'
+          docker version
+          docker info --format 'driver={{.Driver}} cgroup={{.CgroupVersion}} os={{.OperatingSystem}}'
+
+      - name: Run pinned kind integration
+        env:
+          KEEP_CLUSTER: "1"
+          KEEP_RESOURCES: "1"
+        run: make test-integration-kind
+
+      - name: Collect kind diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p "$KIND_ARTIFACTS_DIR"
+          kind version >"$KIND_ARTIFACTS_DIR/kind-version.txt" 2>&1
+          docker version >"$KIND_ARTIFACTS_DIR/docker-version.txt" 2>&1
+          if kind get clusters 2>/dev/null | grep -Fxq "$KIND_CLUSTER_NAME"; then
+            export KUBECONFIG="$KIND_KUBECONFIG"
+            kubectl version -o yaml >"$KIND_ARTIFACTS_DIR/kubernetes-version.yaml" 2>&1
+            kubectl get nodes,storageclasses -o wide >"$KIND_ARTIFACTS_DIR/cluster.txt" 2>&1
+            kubectl get crds >"$KIND_ARTIFACTS_DIR/crds.txt" 2>&1
+            kubectl get kubeneurons.kubeneuron.io -o yaml >"$KIND_ARTIFACTS_DIR/roots.yaml" 2>&1
+            kubectl get all,pvc,configmap,serviceaccount,poddisruptionbudget \
+              --all-namespaces -o wide >"$KIND_ARTIFACTS_DIR/resources.txt" 2>&1
+            kubectl get events --all-namespaces --sort-by=.metadata.creationTimestamp \
+              >"$KIND_ARTIFACTS_DIR/events.txt" 2>&1
+            kubectl -n kube-neuron logs deployment/kubeneuron-operator \
+              --all-containers --tail=-1 >"$KIND_ARTIFACTS_DIR/operator.log" 2>&1
+            kubectl -n kubeneuron-integration-smoke logs \
+              deployment/integration-smoke-controller --all-containers --tail=-1 \
+              >"$KIND_ARTIFACTS_DIR/controller.log" 2>&1
+            kubectl -n kubeneuron-integration-smoke logs \
+              daemonset/integration-smoke-agent --all-containers --tail=-1 \
+              >"$KIND_ARTIFACTS_DIR/agent.log" 2>&1
+            node="$(kind get nodes --name "$KIND_CLUSTER_NAME" | head -n1)"
+            docker inspect "$node" --format '{{json .Config.Image}}' \
+              >"$KIND_ARTIFACTS_DIR/node-image.txt" 2>&1
+            docker logs "$node" >"$KIND_ARTIFACTS_DIR/kind-node.log" 2>&1
+          fi
+
+      - name: Delete kind cluster
+        if: always()
+        run: make kind-clean || true
+
+      - name: Upload kind diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kind-integration-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.KIND_ARTIFACTS_DIR }}
+          if-no-files-found: warn
+          retention-days: 7
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.12"
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.5.0
+
+      - name: actionlint (workflow files stay valid)
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.12"
+          cache: true
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build docs (strict)
+        run: |
+          pip install "mkdocs-material==9.*"
+          mkdocs build --strict
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint and template the chart
+        run: |
+          helm lint deploy/helm/kubeneuron
+          helm template kubeneuron deploy/helm/kubeneuron \
+            --namespace kube-neuron > /tmp/helm-out.yaml
+
+      - name: Chart must match the kustomize manifests
+        shell: python
+        run: |
+          import yaml
+          helm_docs = list(yaml.safe_load_all(open('/tmp/helm-out.yaml')))
+          helm_cr = next(d for d in helm_docs if d and d.get('kind') == 'ClusterRole')
+          kust_cr = yaml.safe_load(open('config/rbac/operator_role.yaml'))
+          assert helm_cr['rules'] == kust_cr['rules'], 'ClusterRole rules diverge'
+          helm_dep = next(d for d in helm_docs if d and d.get('kind') == 'Deployment')
+          kust_dep = yaml.safe_load(open('config/default/operator_deployment.yaml'))
+          hc = helm_dep['spec']['template']['spec']['containers'][0]
+          kc = kust_dep['spec']['template']['spec']['containers'][0]
+          assert hc['args'] == kc['args'] and hc['image'] == kc['image'], 'Deployment diverges'
+          print('chart matches kustomize manifests')

@@ -1,0 +1,145 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.serviceAccount.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kubeneuron.labels" . | nindent 4 }}
+---
+# Mirrors config/rbac/operator_role.yaml — keep the two in lockstep.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Values.serviceAccount.name }}
+  labels:
+    {{- include "kubeneuron.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["kubeneuron.io"]
+    resources:
+      - kubeneurons
+      - gpuremediationpolicies
+      - gpuplaybooks
+      - gpusignalmappings
+      - gpumaintenancewindows
+      - gpunodeconfigs
+      - acceleratorruntimeprofiles
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kubeneuron.io"]
+    resources:
+      - kubeneurons/status
+      - gpuremediationpolicies/status
+      - gpuplaybooks/status
+      - acceleratorruntimeprofiles/status
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["kubeneuron.io"]
+    resources: ["kubeneurons/finalizers"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps", "serviceaccounts", "services"]
+    verbs: ["create", "get", "list", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "get", "list", "update", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets", "deployments"]
+    verbs: ["create", "get", "list", "update", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["create", "get", "list", "update", "watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["create", "get", "list", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Values.serviceAccount.name }}
+  labels:
+    {{- include "kubeneuron.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Values.serviceAccount.name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccount.name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.serviceAccount.name }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kubeneuron.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.serviceAccount.name }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kubeneuron.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Values.serviceAccount.name }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccount.name }}
+    namespace: {{ .Release.Namespace }}
+---
+# Events for the cluster-scoped KubeNeuron object land in the "default"
+# namespace; the grant is scoped to exactly that namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.serviceAccount.name }}-root-events
+  namespace: default
+  labels:
+    {{- include "kubeneuron.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.serviceAccount.name }}-root-events
+  namespace: default
+  labels:
+    {{- include "kubeneuron.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Values.serviceAccount.name }}-root-events
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccount.name }}
+    namespace: {{ .Release.Namespace }}

@@ -1,0 +1,16 @@
+# Targeted restart of the workload on the affected GPU (XID 94 contained
+# ECC): the error corrupted only that workload; the GPU itself stays in
+# service. Recurrence escalates to drain-and-reset.
+name: workload-restart
+target: gpu
+cooldown: 15m
+steps:
+  - name: evict-workload
+    action: platform.evict_gpu_workload
+    timeout: 10m
+  - name: verify
+    action: verify.gpu_health
+    params:
+      quiet_window: 10m
+on_failure:
+  escalate_to: drain-and-reset

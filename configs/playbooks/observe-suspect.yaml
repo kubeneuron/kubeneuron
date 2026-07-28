@@ -1,0 +1,13 @@
+# Observe-only playbook for app-level or facility signals (XID 13/31,
+# thermal, power, PCIe). Records and notifies; escalation to a suspect-GPU
+# drain happens when the policy threshold is crossed.
+name: observe-suspect
+target: gpu
+cooldown: 30m
+steps:
+  - name: record
+    action: notify.observe
+    params:
+      note: "counted; threshold policy decides escalation"
+on_failure:
+  escalate_to: drain-and-reset

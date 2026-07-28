@@ -1,0 +1,504 @@
+{
+  "__comment": "KubeNeuron overview dashboard. Import into Grafana with a Prometheus/VictoriaMetrics datasource scraping the controller's /metrics and dcgm-exporter. Rows at y>=29 cover self-monitoring: availability, notification drops, spool backlog, and TLS expiry.",
+  "title": "KubeNeuron",
+  "uid": "kubeneuron-overview",
+  "schemaVersion": 39,
+  "tags": [
+    "kubeneuron",
+    "gpu"
+  ],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Incidents needing a human",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum(kubeneuron_incidents{state=\"NEEDS_HUMAN\"})",
+          "legendFormat": "needs human"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Awaiting approval",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum(kubeneuron_incidents{state=\"AWAITING_APPROVAL\"})",
+          "legendFormat": "awaiting"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Active incidents",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum(kubeneuron_incidents{state!~\"RESOLVED|EXPIRED\"})",
+          "legendFormat": "active"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Signals dropped (queue overflow)",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(kubeneuron_signals_dropped_total[1h]))",
+          "legendFormat": "dropped 1h"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Gate denials (1h)",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(kubeneuron_gate_denials_total[1h]))",
+          "legendFormat": "denials 1h"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Escalations (24h)",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(kubeneuron_escalations_total[24h]))",
+          "legendFormat": "escalations 24h"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Incidents by state",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "targets": [
+        {
+          "expr": "kubeneuron_incidents",
+          "legendFormat": "{{state}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Signal rate by class",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "targets": [
+        {
+          "expr": "sum by (class) (rate(kubeneuron_signals_total[5m]))",
+          "legendFormat": "{{class}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Incidents opened by class",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "targets": [
+        {
+          "expr": "sum by (class) (increase(kubeneuron_incidents_opened_total[1h]))",
+          "legendFormat": "{{class}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Playbook steps by outcome",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (increase(kubeneuron_steps_total[1h]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "GPU ECC uncorrectable errors (DCGM)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "targets": [
+        {
+          "expr": "sum by (Hostname, gpu) (increase(DCGM_FI_DEV_ECC_DBE_VOL_TOTAL[1h]))",
+          "legendFormat": "{{Hostname}} gpu{{gpu}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "GPU temperature (DCGM)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_GPU_TEMP",
+          "legendFormat": "{{Hostname}} gpu{{gpu}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Controller up",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 29
+      },
+      "targets": [
+        {
+          "expr": "min(up{job=\"kubeneuron-controller\"})",
+          "legendFormat": "controller"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Agents down",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 29
+      },
+      "targets": [
+        {
+          "expr": "count(up{job=\"kubeneuron-agent\"} == 0) OR on() vector(0)",
+          "legendFormat": "agents down"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Notifications dropped (24h)",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 29
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(kubeneuron_notifications_dropped_total[24h])) OR on() vector(0)",
+          "legendFormat": "dropped"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Spooled events (fleet)",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 12,
+        "y": 29
+      },
+      "targets": [
+        {
+          "expr": "sum(kubeneuron_agent_spool_depth) OR on() vector(0)",
+          "legendFormat": "spooled"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "TLS: days to first expiry",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 29
+      },
+      "targets": [
+        {
+          "expr": "(min(kubeneuron_tls_certificate_not_after_seconds) - time()) / 86400",
+          "legendFormat": "days left"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 14
+              },
+              {
+                "color": "green",
+                "value": 30
+              }
+            ]
+          },
+          "unit": "d"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Agent event delivery (fleet rate)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 34
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(kubeneuron_agent_events_posted_total[5m]))",
+          "legendFormat": "posted/s"
+        },
+        {
+          "expr": "sum(rate(kubeneuron_agent_events_spooled_total[5m]))",
+          "legendFormat": "spooled/s"
+        },
+        {
+          "expr": "sum(kubeneuron_agent_spool_depth)",
+          "legendFormat": "spool depth"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "TLS certificate days to expiry (per artifact)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "targets": [
+        {
+          "expr": "(kubeneuron_tls_certificate_not_after_seconds - time()) / 86400",
+          "legendFormat": "{{certificate}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "d"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconcile pass latency (p50/p99) and action backlog",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 42
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(kubeneuron_reconcile_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(kubeneuron_reconcile_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99"
+        },
+        {
+          "expr": "kubeneuron_actions_pending",
+          "legendFormat": "pending actions"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMAlert
+metadata:
+  name: kubeneuron
+  namespace: kubeneuron-monitoring
+  labels:
+    app.kubernetes.io/part-of: kube-neuron-dependencies
+spec:
+  image:
+    repository: victoriametrics/vmalert
+    tag: v1.147.0
+    pullPolicy: IfNotPresent
+  datasource:
+    url: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8428
+  remoteRead:
+    url: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8428
+  remoteWrite:
+    url: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8428
+  notifier:
+    url: http://vmalertmanager-kubeneuron.kubeneuron-monitoring.svc:9093
+  evaluationInterval: 30s
+  ruleSelector:
+    matchLabels:
+      kubeneuron.io/rule-set: default
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi

@@ -1,0 +1,66 @@
+apiVersion: kubeneuron.io/v1alpha1
+kind: KubeNeuron
+metadata:
+  name: kubeneuron
+spec:
+  namespace: kube-neuron
+  controller:
+    image: ghcr.io/kubeneuron/kube-neuron/controller:v0.1.0@sha256:16b3907dcef9933c28631998d0be260ea2533d199b088936d527fa522636c7ad
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        memory: 512Mi
+  agent:
+    image: ghcr.io/kubeneuron/kube-neuron/agent:v0.1.0@sha256:eff72e3d6af13eceb1b6e7a4bfde439ba186f0ed00448db8bf6fc66063041d70
+    nodeSelector:
+      nvidia.com/gpu.present: "true"
+    tolerations:
+      - operator: Exists
+  safety:
+    executionMode: DryRun
+    maxConcurrentRemediations: 2
+    maxConcurrentReboots: 1
+    verifyQuietWindow: 10m
+    flapCount: 3
+    flapWindow: 24h
+  approvals:
+    ttl: 12h
+  # Alertmanager ingress is always bearer-authenticated. The operator API
+  # token is also required when starting Paused so an authenticated operator
+  # can resume the gate. Both Secret keys default to "token".
+  notifications:
+    operatorAPIToken:
+      name: kubeneuron-operator-api-token
+    webhookToken:
+      name: kubeneuron-alertmanager-webhook-token
+    # slack:
+    #   name: kubeneuron-slack
+  workflowStore:
+    # SQLite is intended only for a single-controller dry-run installation.
+    type: SQLite
+    sqlite:
+      size: 5Gi
+      # storageClassName: fast-retain
+  # These four Secrets are installation-local. No service mesh or external
+  # certificate operator is required; hack/kind-integration.sh generates
+  # ephemeral fixtures with the same key and SAN contract for its smoke test.
+  tls:
+    serverSecretRef:
+      name: kubeneuron-controller-tls
+    clientCASecretRef:
+      name: kubeneuron-agent-client-ca
+    clientSecretRef:
+      name: kubeneuron-agent-tls
+    serverCASecretRef:
+      name: kubeneuron-controller-server-ca
+  observability:
+    victoriaMetrics:
+      # Installed separately by deploy/kubernetes/dependencies; KubeNeuron
+      # declares but never owns this upstream-managed service.
+      mode: External
+      endpoint: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8428
+    alertmanager:
+      mode: External
+      endpoint: http://vmalertmanager-kubeneuron.kubeneuron-monitoring.svc:9093

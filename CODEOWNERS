@@ -1,0 +1,11 @@
+# Default owner for everything in the repository.
+* @andreypetruk
+
+# Safety-critical paths: require owner review on any change.
+/api/ @andreypetruk
+/internal/safety/ @andreypetruk
+/internal/operator/ @andreypetruk
+/internal/agent/executor/ @andreypetruk
+/internal/agent/actionjournal/ @andreypetruk
+/hack/tls-rotate.sh @andreypetruk
+/hack/tls-emergency-recover.sh @andreypetruk

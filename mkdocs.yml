@@ -1,0 +1,45 @@
+site_name: KubeNeuron
+site_description: GPU failure detection and remediation for NVIDIA Kubernetes clusters
+repo_url: https://github.com/kubeneuron/kubeneuron
+edit_uri: blob/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: blue grey
+      toggle: { icon: material/weather-night, name: light mode }
+    - scheme: default
+      primary: blue grey
+      toggle: { icon: material/weather-sunny, name: dark mode }
+  features:
+    - navigation.sections
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Why KubeNeuron (one-pager): one-pager.md
+      - Product tour (screenshots & demo): product-tour.md
+      - Quickstart (dry-run demo): quickstart.md
+      - Production install: install.md
+  - Operating:
+      - Operations guide: operations.md
+      - Alert runbooks: runbooks.md
+      - Upgrades and rollback: upgrade.md
+      - Troubleshooting: troubleshooting.md
+  - Configuring:
+      - Playbook authoring: playbook-authoring.md
+      - XID catalog: xid-catalog.md
+  - Reference:
+      - REST API: reference-api.md
+      - kubeneuronctl: reference-cli.md
+      - Metrics and alerts: reference-metrics.md
+      - Design document: design.md

@@ -1,0 +1,23 @@
+# End of the ladder: quarantine the node and hand off to hardware support.
+# Collects a diagnostic bundle (nvidia-bug-report, dcgmi diag -r 3, XID
+# history) and opens a ticket. The node stays cordoned until a human
+# resolves the incident.
+name: rma
+target: node
+cooldown: 24h
+steps:
+  - name: cordon
+    action: platform.cordon
+  - name: drain
+    action: platform.drain
+    timeout: 60m
+  - name: collect-bundle
+    action: agent.collect_bundle
+    timeout: 30m
+    params:
+      diag_level: "3"
+  - name: open-ticket
+    action: notify.ticket
+    approval: required
+    params:
+      quarantine: "true"

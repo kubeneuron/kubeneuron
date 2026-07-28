@@ -1,0 +1,149 @@
+# The chart artifact and checksum are pinned in ../versions.lock.yaml. These
+# values deliberately repeat the chart's relevant image defaults so a chart
+# upgrade cannot silently change the KubeNeuron telemetry boundary during
+# review. Review the platform and driver decisions in ../README.md before use.
+nfd:
+  # Set this to false when a compatible cluster-wide NFD installation already
+  # owns node feature discovery.
+  enabled: true
+
+sandboxWorkloads:
+  # KubeVirt/Kata passthrough is outside this telemetry profile.
+  enabled: false
+
+operator:
+  repository: nvcr.io/nvidia
+  image: gpu-operator
+  version: v26.3.3
+  # CRD deletion is a separate, explicit cluster-administrator decision.
+  cleanupCRD: false
+
+validator:
+  repository: nvcr.io/nvidia
+  image: gpu-operator
+  version: v26.3.3
+
+driver:
+  # Set this to false for nodes with a supported pre-installed NVIDIA driver.
+  enabled: true
+  repository: nvcr.io/nvidia
+  image: driver
+  version: "580.126.20"
+  kernelModuleType: auto
+  upgradePolicy:
+    # A future, explicitly reviewed Helm change to driver.version rolls nodes
+    # according to the chart's bounded upgrade policy.
+    autoUpgrade: true
+    maxParallelUpgrades: 1
+    maxUnavailable: 25%
+    waitForCompletion:
+      timeoutSeconds: 0
+      podSelector: ""
+    gpuPodDeletion:
+      force: false
+      timeoutSeconds: 300
+      deleteEmptyDir: false
+    # Draining is deliberately not enabled by a generic profile. Clusters
+    # that require it must review PDBs and make it explicit in an overlay.
+    drain:
+      enable: false
+      force: false
+      podSelector: ""
+      timeoutSeconds: 300
+      deleteEmptyDir: false
+  manager:
+    repository: nvcr.io/nvidia/cloud-native
+    image: k8s-driver-manager
+    version: v0.11.0
+
+toolkit:
+  enabled: true
+  repository: nvcr.io/nvidia/k8s
+  image: container-toolkit
+  version: v1.19.1
+
+devicePlugin:
+  enabled: true
+  repository: nvcr.io/nvidia
+  image: k8s-device-plugin
+  version: v0.19.3
+
+gfd:
+  enabled: true
+  repository: nvcr.io/nvidia
+  image: k8s-device-plugin
+  version: v0.19.3
+
+dcgm:
+  # dcgm-exporter runs its embedded host engine in this profile.
+  enabled: false
+  repository: nvcr.io/nvidia/cloud-native
+  image: dcgm
+  version: 4.5.2-1-ubuntu22.04
+
+dcgmExporter:
+  enabled: true
+  repository: nvcr.io/nvidia/k8s
+  image: dcgm-exporter
+  version: 4.5.3-4.8.2-distroless
+  serviceMonitor:
+    # The observability profile scrapes the dcgm-exporter Service directly.
+    enabled: false
+  config:
+    # GPU Operator v26.3.3 creates this ConfigMap and points ClusterPolicy at
+    # its dcgm-metrics.csv key. Keep this list synchronized with the DCGM_*
+    # expressions in ../observability/rules.yaml.
+    name: kubeneuron-dcgm-metrics
+    create: true
+    data: |-
+      # Format: DCGM FIELD, Prometheus metric type, help message
+      DCGM_FI_DEV_ECC_DBE_VOL_TOTAL, counter, Total volatile double-bit ECC errors.
+      DCGM_FI_DEV_ECC_DBE_AGG_TOTAL, counter, Total aggregate double-bit ECC errors.
+      DCGM_FI_DEV_ROW_REMAP_PENDING, gauge, Whether a row remap is pending.
+      DCGM_FI_DEV_ROW_REMAP_FAILURE, gauge, Whether row remapping has failed.
+      DCGM_FI_DEV_UNCORRECTABLE_REMAPPED_ROWS, counter, Uncorrectable remapped rows.
+      DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL, counter, Total NVLink flow-control CRC errors.
+      DCGM_FI_DEV_PCIE_REPLAY_COUNTER, counter, Total PCIe retries.
+      DCGM_FI_DEV_CLOCK_THROTTLE_REASONS, gauge, Active clock-throttle reason bitmask.
+      DCGM_FI_DEV_GPU_TEMP, gauge, GPU temperature in degrees Celsius.
+
+migManager:
+  enabled: true
+  repository: nvcr.io/nvidia/cloud-native
+  image: k8s-mig-manager
+  version: v0.14.2
+
+# Optional driver, virtualization, sandbox, and confidential-computing
+# operands are deliberately outside this profile. Enable and pin them only in
+# a reviewed platform-specific overlay.
+gds:
+  enabled: false
+
+gdrcopy:
+  enabled: false
+
+vgpuManager:
+  enabled: false
+
+vgpuDeviceManager:
+  enabled: false
+
+vfioManager:
+  enabled: false
+
+kataManager:
+  enabled: false
+
+sandboxDevicePlugin:
+  enabled: false
+
+kataSandboxDevicePlugin:
+  enabled: false
+
+ccManager:
+  enabled: false
+
+node-feature-discovery:
+  image:
+    repository: registry.k8s.io/nfd/node-feature-discovery
+    tag: v0.18.3

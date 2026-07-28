@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - bases/kubeneuron.io_kubeneurons.yaml
+  - bases/kubeneuron.io_gpuremediationpolicies.yaml
+  - bases/kubeneuron.io_gpuplaybooks.yaml
+  - bases/kubeneuron.io_gpusignalmappings.yaml
+  - bases/kubeneuron.io_gpumaintenancewindows.yaml
+  - bases/kubeneuron.io_gpunodeconfigs.yaml
+  - bases/kubeneuron.io_acceleratorruntimeprofiles.yaml

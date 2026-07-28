@@ -1,0 +1,10 @@
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: observe-gsp-errors
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 10
+  match:
+    class: gsp-error
+  playbookRef: observe-gpu

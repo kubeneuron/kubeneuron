@@ -1,0 +1,63 @@
+# KubeNeuron controller configuration: safety limits, approvals, and
+# signal-class -> playbook policy bindings (first match wins).
+#
+# Problem classes are defined in pkg/types (ProblemClass); playbook names
+# must exist in configs/playbooks/.
+
+safety:
+  # Dry-run is ON by default: the full pipeline runs and reports
+  # "would execute X" without touching anything. Run at least two weeks in
+  # dry-run before enabling automation.
+  dry_run: true
+  max_concurrent_remediations: 2
+  max_concurrent_reboots: 1
+  flap:
+    count: 3
+    window: 24h
+  # No new signals for this long after an action => healthy.
+  verify_quiet_window: 10m
+
+approvals:
+  channels: [slack, cli, web]
+  ttl: 12h
+
+policies:
+  # --- hardware-critical: act immediately ---
+  - match: { class: fell-off-bus }        # XID 79: reset won't help
+    playbook: fell-off-bus
+  - match: { class: ecc-dbe }             # XID 48/95, volatile DBE alerts
+    playbook: drain-and-reset
+  - match: { class: row-remap-failure }   # XID 64: straight to RMA
+    playbook: rma
+  - match: { class: nvlink }              # XID 74, NVLink CRC storms
+    playbook: drain-and-reset
+  - match: { class: gsp-error }           # XID 119/120
+    playbook: gpu-reset
+  - match: { class: driver-hang }
+    playbook: drain-and-reset
+
+  # --- scheduled / soft actions ---
+  - match: { class: row-remap-ok }        # XID 63: reset applies the remap
+    playbook: reset-when-idle
+  - match: { class: ecc-contained }       # XID 94: restart affected workload
+    playbook: workload-restart
+  - match: { class: row-remap-budget }    # remapped rows near exhaustion
+    playbook: rma
+
+  # --- observe-first (app-level or facility issues) ---
+  - match: { class: xid-app }             # XID 13/31: workload bugs unless recurrent
+    playbook: observe-suspect
+    params: { threshold: "3", window: "1h" }
+  - match: { class: ecc-sbe-rate }        # XID 92: corrected errors, watch the trend
+    playbook: observe-suspect
+    params: { threshold: "3", window: "24h" }
+  - match: { class: thermal }             # facility issue: drain, don't reset
+    playbook: observe-suspect
+  - match: { class: power }
+    playbook: observe-suspect
+  - match: { class: pcie }
+    playbook: observe-suspect
+  - match: { class: gpu-lost }
+    playbook: drain-and-reset
+  - match: { class: diag-failure }
+    playbook: observe-suspect

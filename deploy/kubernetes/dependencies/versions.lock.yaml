@@ -1,0 +1,64 @@
+# Machine-readable dependency snapshot. This is not a Kubernetes object.
+schemaVersion: 1
+verifiedAt: "2026-07-11"
+
+artifacts:
+  nvidiaGpuOperatorChart:
+    version: v26.3.3
+    url: https://helm.ngc.nvidia.com/nvidia/charts/gpu-operator-v26.3.3.tgz
+    sha256: 59abb5852a24b3ae0ef757bfea3051f419acbf559ee5efd72f0672d28af56a68
+  victoriaMetricsOperatorManifest:
+    version: v0.73.1
+    variant: install-no-webhook
+    url: https://github.com/VictoriaMetrics/operator/releases/download/v0.73.1/install-no-webhook.yaml
+    sha256: 28f0ab848df7a00f9d46685cd2864024a0d998df4840bb9a1fce471dd4163628
+
+charts:
+  nvidiaGpuOperator:
+    version: v26.3.3
+  nodeFeatureDiscovery:
+    version: 0.18.3
+
+images:
+  nvidiaGpuOperator:
+    repository: nvcr.io/nvidia/gpu-operator
+    tag: v26.3.3
+  nvidiaDriver:
+    repository: nvcr.io/nvidia/driver
+    version: "580.126.20"
+    # GPU Operator appends the detected node OS, for example
+    # 580.126.20-ubuntu22.04, when it resolves the runtime image tag.
+    runtimeTagPattern: "580.126.20-<node-os-version>"
+  nvidiaDriverManager:
+    repository: nvcr.io/nvidia/cloud-native/k8s-driver-manager
+    tag: v0.11.0
+  nvidiaContainerToolkit:
+    repository: nvcr.io/nvidia/k8s/container-toolkit
+    tag: v1.19.1
+  nvidiaDevicePluginAndGfd:
+    repository: nvcr.io/nvidia/k8s-device-plugin
+    tag: v0.19.3
+  nvidiaDcgmExporter:
+    repository: nvcr.io/nvidia/k8s/dcgm-exporter
+    tag: 4.5.3-4.8.2-distroless
+  nvidiaMigManager:
+    repository: nvcr.io/nvidia/cloud-native/k8s-mig-manager
+    tag: v0.14.2
+  nodeFeatureDiscovery:
+    repository: registry.k8s.io/nfd/node-feature-discovery
+    tag: v0.18.3
+  victoriaMetricsOperator:
+    repository: docker.io/victoriametrics/operator
+    tag: v0.73.1
+  victoriaMetricsSingle:
+    repository: victoriametrics/victoria-metrics
+    tag: v1.147.0
+  victoriaMetricsAgent:
+    repository: victoriametrics/vmagent
+    tag: v1.147.0
+  victoriaMetricsAlert:
+    repository: victoriametrics/vmalert
+    tag: v1.147.0
+  prometheusAlertmanager:
+    repository: prom/alertmanager
+    tag: v0.32.1

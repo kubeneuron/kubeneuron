@@ -1,0 +1,13 @@
+apiVersion: v2
+name: kubeneuron
+description: >-
+  KubeNeuron operator and CRDs — GPU failure detection and remediation for
+  NVIDIA Kubernetes clusters. Installs the API and the operator only;
+  installations are created afterwards as KubeNeuron custom resources.
+type: application
+version: 0.1.0
+appVersion: "v0.1.0"
+home: https://github.com/kubeneuron/kubeneuron
+sources:
+  - https://github.com/kubeneuron/kubeneuron
+kubeVersion: ">=1.29.0-0"

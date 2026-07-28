@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: kubeneuron-monitoring
+
+resources:
+  - namespace.yaml
+  # Kept as separate files so install, upgrade, and removal can be gated in
+  # dependency order. See ../README.md for the ordered commands.
+  - vmsingle.yaml
+  - vmagent.yaml
+  - vmalertmanager.yaml
+  - vmalert.yaml
+  - rules.yaml

@@ -1,0 +1,86 @@
+# Scheduled online backups of the KubeNeuron SQLite workflow store.
+#
+# The controller serves GET /api/v1/backup behind the operator API token: a
+# transactionally consistent VACUUM INTO snapshot streamed over HTTP. The
+# distroless controller image needs no sqlite3/tar, and this Job needs no
+# pods/exec RBAC — only the operator token Secret and network reach to the
+# controller Service.
+#
+# Prerequisites:
+#   - spec.notifications.operatorAPIToken set on the installation (the same
+#     unowned Secret is referenced below).
+#   - Adjust INSTALLATION/namespace below (or kustomize-patch them).
+#   - With spec.tls.publicServerSecretRef set, switch SCHEME to https and
+#     mount/trust the serving CA (see the commented lines).
+#
+# Restore procedure: docs/operations.md §"SQLite workflow store".
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kubeneuron-backups
+  namespace: kube-neuron            # spec.namespace of your installation
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kubeneuron-backup
+  namespace: kube-neuron
+spec:
+  schedule: "15 2 * * *"            # daily 02:15
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 900
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: backup
+              image: curlimages/curl:8.14.1   # pin a digest in production
+              env:
+                - name: INSTALLATION
+                  value: fleet                # your KubeNeuron object name
+                - name: SCHEME
+                  value: http                 # https with publicServerSecretRef
+                - name: KEEP
+                  value: "14"                 # dated copies to retain
+                - name: OPERATOR_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: kubeneuron-operator-api-token  # your token Secret
+                      key: token
+              command: ["/bin/sh", "-ceu"]
+              args:
+                - |
+                  stamp=$(date -u +%Y%m%dT%H%M%SZ)
+                  out="/backups/kubeneuron-$stamp.db"
+                  echo "downloading snapshot -> $out"
+                  curl --fail --silent --show-error --retry 3 \
+                    -H "Authorization: Bearer $OPERATOR_TOKEN" \
+                    "$SCHEME://$INSTALLATION-controller:8080/api/v1/backup" \
+                    -o "$out"
+                  # For https, add: --cacert /etc/kubeneuron-ca/ca.crt
+                  test -s "$out"
+                  ls -1t /backups/kubeneuron-*.db | tail -n +$((KEEP + 1)) | xargs -r rm -v
+                  echo "retained:"; ls -lh /backups
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+                # - name: public-ca            # https variant
+                #   mountPath: /etc/kubeneuron-ca
+                #   readOnly: true
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: kubeneuron-backups
+            # - name: public-ca
+            #   secret:
+            #     secretName: kubeneuron-public-ca

@@ -1,0 +1,20 @@
+# Events for the cluster-scoped KubeNeuron object land in the "default"
+# namespace (client-go records an event in the involved object's namespace,
+# and a cluster-scoped object has none). Scoping the grant to exactly that
+# namespace keeps the operator unable to write events anywhere else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubeneuron-operator-root-events
+  namespace: default
+  labels:
+    app.kubernetes.io/name: kube-neuron
+    app.kubernetes.io/component: operator
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch

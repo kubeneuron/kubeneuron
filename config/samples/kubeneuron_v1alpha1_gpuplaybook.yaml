@@ -1,0 +1,14 @@
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: observe-gpu
+spec:
+  kubeNeuronRef: kubeneuron
+  target: GPU
+  cooldown: 30m
+  steps:
+    - name: notify
+      action: Observe
+    - name: verify-health
+      action: VerifyGPUHealth
+      timeout: 10m

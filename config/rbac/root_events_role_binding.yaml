@@ -1,0 +1,16 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubeneuron-operator-root-events
+  namespace: default
+  labels:
+    app.kubernetes.io/name: kube-neuron
+    app.kubernetes.io/component: operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kubeneuron-operator-root-events
+subjects:
+  - kind: ServiceAccount
+    name: kubeneuron-operator
+    namespace: kube-neuron

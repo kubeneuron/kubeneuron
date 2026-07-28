@@ -1,0 +1,91 @@
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMAgent
+metadata:
+  name: kubeneuron
+  namespace: kubeneuron-monitoring
+  labels:
+    app.kubernetes.io/part-of: kube-neuron-dependencies
+spec:
+  image:
+    repository: victoriametrics/vmagent
+    tag: v1.147.0
+    pullPolicy: IfNotPresent
+  selectAllByDefault: false
+  scrapeInterval: 30s
+  remoteWrite:
+    - url: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8428/api/v1/write
+  inlineScrapeConfig: |
+    - job_name: dcgm-exporter
+      kubernetes_sd_configs:
+        - role: endpoints
+          namespaces:
+            names:
+              - gpu-operator
+      relabel_configs:
+        - action: keep
+          source_labels: [__meta_kubernetes_service_name]
+          regex: nvidia-dcgm-exporter
+        - action: keep
+          source_labels: [__meta_kubernetes_endpoint_port_name]
+          regex: gpu-metrics
+        - source_labels: [__meta_kubernetes_pod_node_name]
+          target_label: node
+    # KubeNeuron's own control plane: controller (:http /metrics) and agent
+    # (:health /metrics) pods carry the operator-stamped labels below in
+    # every installation namespace.
+    - job_name: kubeneuron-controller
+      kubernetes_sd_configs:
+        - role: pod
+      relabel_configs:
+        - action: keep
+          source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+          regex: kube-neuron
+        - action: keep
+          source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+          regex: controller
+        - action: keep
+          source_labels: [__meta_kubernetes_pod_container_port_name]
+          regex: http
+        - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+          target_label: installation
+        - source_labels: [__meta_kubernetes_pod_node_name]
+          target_label: node
+    - job_name: kubeneuron-agent
+      kubernetes_sd_configs:
+        - role: pod
+      relabel_configs:
+        - action: keep
+          source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+          regex: kube-neuron
+        - action: keep
+          source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+          regex: agent
+        - action: keep
+          source_labels: [__meta_kubernetes_pod_container_port_name]
+          regex: health
+        - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_instance]
+          target_label: installation
+        - source_labels: [__meta_kubernetes_pod_node_name]
+          target_label: node
+    - job_name: kubeneuron-operator
+      kubernetes_sd_configs:
+        - role: pod
+          namespaces:
+            names:
+              - kube-neuron
+      relabel_configs:
+        - action: keep
+          source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+          regex: kube-neuron
+        - action: keep
+          source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+          regex: operator
+        - action: keep
+          source_labels: [__meta_kubernetes_pod_container_port_name]
+          regex: metrics
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi

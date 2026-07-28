@@ -1,0 +1,91 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubeneuron-integration-smoke
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: integration-smoke-observe
+spec:
+  kubeNeuronRef: integration-smoke
+  target: GPU
+  steps:
+    - name: observe
+      action: Observe
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: integration-smoke-ladder
+spec:
+  kubeNeuronRef: integration-smoke
+  target: Node
+  steps:
+    - name: cordon
+      action: Cordon
+    - name: reboot
+      action: Reboot
+      approval: Required
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: integration-restart-policy
+spec:
+  kubeNeuronRef: integration-smoke
+  priority: 2
+  match:
+    class: integration-restart-test
+  playbookRef: integration-smoke-ladder
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: integration-smoke-policy
+spec:
+  kubeNeuronRef: integration-smoke
+  priority: 1
+  match:
+    class: integration-smoke-test
+  playbookRef: integration-smoke-observe
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: KubeNeuron
+metadata:
+  name: integration-smoke
+spec:
+  namespace: kubeneuron-integration-smoke
+  controller:
+    image: @CONTROLLER_IMAGE@
+  agent:
+    image: @AGENT_IMAGE@
+    tolerations:
+      - operator: Exists
+  safety:
+    executionMode: DryRun
+  notifications:
+    operatorAPIToken:
+      name: integration-smoke-operator-api-token
+    webhookToken:
+      name: integration-smoke-webhook-token
+  workflowStore:
+    type: SQLite
+    sqlite:
+      size: 1Gi
+  observability:
+    victoriaMetrics:
+      mode: External
+      endpoint: http://vmsingle-unused.kubeneuron-integration-smoke.svc:8428
+    alertmanager:
+      mode: External
+      endpoint: http://alertmanager-unused.kubeneuron-integration-smoke.svc:9093
+  tls:
+    serverSecretRef:
+      name: integration-smoke-controller-tls
+    clientCASecretRef:
+      name: integration-smoke-agent-client-ca
+    clientSecretRef:
+      name: integration-smoke-agent-tls
+    serverCASecretRef:
+      name: integration-smoke-controller-server-ca

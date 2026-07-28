@@ -1,0 +1,147 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeneuron-operator
+  labels:
+    app.kubernetes.io/name: kube-neuron
+    app.kubernetes.io/component: operator
+rules:
+  - apiGroups:
+      - kubeneuron.io
+    resources:
+      - kubeneurons
+      - gpuremediationpolicies
+      - gpuplaybooks
+      - gpusignalmappings
+      - gpumaintenancewindows
+      - gpunodeconfigs
+      - acceleratorruntimeprofiles
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - kubeneuron.io
+    resources:
+      - kubeneurons/status
+      - gpuremediationpolicies/status
+      - gpuplaybooks/status
+      - acceleratorruntimeprofiles/status
+    verbs:
+      - get
+      - patch
+      - update
+  - apiGroups:
+      - kubeneuron.io
+    resources:
+      - kubeneurons/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - serviceaccounts
+      - services
+    verbs:
+      - create
+      - get
+      - list
+      - update
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumeclaims
+    verbs:
+      - create
+      - get
+      - list
+      - update
+      - watch
+  - apiGroups:
+      - apps
+    resources:
+      - daemonsets
+      - deployments
+    verbs:
+      - create
+      - get
+      - list
+      - update
+      - watch
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - create
+      - get
+      - list
+      - update
+      - watch
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - clusterroles
+      - clusterrolebindings
+    verbs:
+      - create
+      - get
+      - list
+      - update
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods/eviction
+    verbs:
+      - create
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+  # Granted onward to the managed controller for operator-API authorization
+  # (SubjectAccessReview of authenticated callers against the KubeNeuron CR).
+  - apiGroups:
+      - authorization.k8s.io
+    resources:
+      - subjectaccessreviews
+    verbs:
+      - create
+  # Required to delegate leader-election Lease access to the managed
+  # controller role (RBAC escalation prevention: you cannot grant what you
+  # do not hold).
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - create
+      - get
+      - update

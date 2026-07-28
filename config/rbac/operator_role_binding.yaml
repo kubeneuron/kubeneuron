@@ -1,0 +1,15 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubeneuron-operator
+  labels:
+    app.kubernetes.io/name: kube-neuron
+    app.kubernetes.io/component: operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubeneuron-operator
+subjects:
+  - kind: ServiceAccount
+    name: kubeneuron-operator
+    namespace: kube-neuron

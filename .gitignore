@@ -1,0 +1,31 @@
+# Binaries
+/bin/
+/dist/
+
+# mkdocs output
+/site/
+
+# Go
+*.test
+*.out
+coverage.html
+
+# Local state
+*.db
+*.db-wal
+*.db-shm
+
+# Web
+# web/dist/index.html (panel v1) is committed and embedded via web/embed.go;
+# ignore only dependency/build byproducts.
+web/node_modules/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local env
+.env
+.env.local

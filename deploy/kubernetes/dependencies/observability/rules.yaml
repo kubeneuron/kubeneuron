@@ -1,0 +1,200 @@
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
+metadata:
+  name: kubeneuron-gpu
+  namespace: kubeneuron-monitoring
+  labels:
+    app.kubernetes.io/part-of: kube-neuron-dependencies
+    kubeneuron.io/rule-set: default
+spec:
+  # The gpu-* groups mirror configs/vmalert/gpu-rules.yaml exactly (a unit
+  # test in internal/detect pins them together); those alerts feed the
+  # controller webhook and become incidents. The kubeneuron-self group is
+  # additional here: it watches KubeNeuron itself and routes to humans, not
+  # to the webhook.
+  groups:
+    - name: gpu-hardware
+      interval: 30s
+      rules:
+        - alert: GpuDoubleBitEccVolatile
+          expr: increase(DCGM_FI_DEV_ECC_DBE_VOL_TOTAL[5m]) > 0
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpudoublebiteccvolatile"
+            summary: "Double-bit ECC error on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "Uncorrectable memory fault. Playbook: drain-and-reset."
+
+        - alert: GpuDoubleBitEccAggregate
+          expr: DCGM_FI_DEV_ECC_DBE_AGG_TOTAL > 4
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpudoublebiteccaggregate"
+            summary: "Aggregate DBE count high on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "Lifetime double-bit ECC count is elevated; evaluate for RMA."
+
+        - alert: GpuRowRemapPending
+          expr: DCGM_FI_DEV_ROW_REMAP_PENDING == 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpurowremappending"
+            summary: "Row remap pending on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "A GPU reset is needed to apply the remap. Playbook: reset-when-idle."
+
+        - alert: GpuRowRemapFailure
+          expr: DCGM_FI_DEV_ROW_REMAP_FAILURE == 1
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpurowremapfailure"
+            summary: "Row remap FAILED on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "Memory can no longer be remapped. Playbook: rma."
+
+        - alert: GpuRemappedRowsHigh
+          expr: DCGM_FI_DEV_UNCORRECTABLE_REMAPPED_ROWS >= 8
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpuremappedrowshigh"
+            summary: "Remapped-row budget nearly exhausted on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "Uncorrectable remapped rows >= 8 (bank exhaustion proxy). Evaluate for RMA."
+
+        - alert: GpuNvlinkCrcErrors
+          expr: increase(DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL[15m]) > 100
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpunvlinkcrcerrors"
+            summary: "NVLink CRC errors on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "Sustained NVLink CRC errors. Playbook: drain-and-reset; check cabling/topology."
+
+        - alert: GpuPcieReplayHigh
+          expr: increase(DCGM_FI_DEV_PCIE_REPLAY_COUNTER[1h]) > 1000
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpupciereplayhigh"
+            summary: "PCIe replay storm on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "High PCIe replay rate — reseat/RMA candidate; observe first."
+
+    - name: gpu-thermal-power
+      interval: 30s
+      rules:
+        # bitmap_and is MetricsQL (vmalert/VictoriaMetrics). Throttle-reason
+        # bits: 8=HW_SLOWDOWN, 32=SW_THERMAL, 64=HW_THERMAL, 128=HW_POWER_BRAKE.
+        - alert: GpuThermalThrottle
+          expr: bitmap_and(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS, 104) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gputhermalthrottle"
+            summary: "Thermal throttling on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "HW slowdown/thermal throttle for 10m. Usually a facility issue — do not reset."
+
+        - alert: GpuTempCritical
+          expr: DCGM_FI_DEV_GPU_TEMP > 88
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gputempcritical"
+            summary: "Critical GPU temperature on {{ $labels.node }} GPU {{ $labels.gpu }} ({{ $value }}C)"
+            description: "Sustained temperature above 88C. Drain the node; investigate cooling."
+
+        - alert: GpuPowerBrake
+          expr: bitmap_and(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS, 128) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpupowerbrake"
+            summary: "HW power brake on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "External power brake asserted for 10m — facility/PSU issue."
+
+    - name: gpu-liveness
+      interval: 30s
+      rules:
+        - alert: GpuExporterDown
+          expr: up{job="dcgm-exporter"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpuexporterdown"
+            summary: "dcgm-exporter down on {{ $labels.node }}"
+            description: "No GPU metrics for 5m — driver hang or node failure. Playbook: drain-and-reset via node triage."
+
+        - alert: KubeNeuronAgentDown
+          expr: up{job="kubeneuron-agent"} == 0
+          for: 3m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronagentdown"
+            summary: "kubeneuron-agent down on {{ $labels.node }}"
+            description: "Agent metrics endpoint unreachable for 3m. Auto-actions on this node are suppressed (cannot verify)."
+
+    - name: kubeneuron-self
+      interval: 30s
+      rules:
+        - alert: KubeNeuronControllerDown
+          expr: up{job="kubeneuron-controller"} == 0
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuroncontrollerdown"
+            summary: "KubeNeuron controller down"
+            description: "Controller metrics endpoint unreachable for 3m — no ingestion, no remediation walk."
+
+        - alert: KubeNeuronIncidentNeedsHuman
+          expr: kubeneuron_incidents{state="NEEDS_HUMAN"} > 0
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronincidentneedshuman"
+            summary: "{{ $value }} incident(s) need a human decision"
+            description: "Automation stopped (quarantine/rejection/flap); review with kubeneuronctl incidents."
+
+        - alert: KubeNeuronSignalsDropped
+          expr: increase(kubeneuron_signals_dropped_total[15m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronsignalsdropped"
+            summary: "KubeNeuron dropped {{ $value }} signals in 15m"
+            description: "Ingest queue overflow — incidents may be missing. Check controller load."
+
+        - alert: KubeNeuronNotificationsDropped
+          expr: increase(kubeneuron_notifications_dropped_total[15m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronnotificationsdropped"
+            summary: "KubeNeuron dropped {{ $value }} notifications in 15m"
+            description: "Delivery queue overflow — approval requests may be among the lost messages."
+
+        - alert: KubeNeuronAgentSpoolBacklog
+          expr: kubeneuron_agent_spool_depth > 100
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronagentspoolbacklog"
+            summary: "Agent event spool backlog on {{ $labels.node }}"
+            description: "More than 100 undelivered events for 15m — the controller is unreachable from this node."
+
+        - alert: KubeNeuronTLSCertExpiringSoon
+          expr: (kubeneuron_tls_certificate_not_after_seconds - time()) < 30 * 86400
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneurontlscertexpiringsoon"
+            summary: "KubeNeuron TLS artifact {{ $labels.certificate }} expires in under 30 days"
+            description: "Rotate with hack/tls-rotate.sh before expiry; the fleet leaf has a hard 100-day ceiling and there is no auto-renewal."

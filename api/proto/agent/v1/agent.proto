@@ -1,0 +1,58 @@
+// Agent RPC contract: the controller calls the kubeneuron-agent on a node to
+// execute actions and check health. Transport is gRPC over mTLS.
+//
+// Generate with: make proto
+syntax = "proto3";
+
+package kubeneuron.agent.v1;
+
+option go_package = "github.com/andreypetruk/kube-neuron/api/proto/agent/v1;agentv1";
+
+service Agent {
+  // ExecuteAction runs an action locally. Idempotent by action_id: the
+  // agent caches completed results and replays them on retry.
+  rpc ExecuteAction(ExecuteActionRequest) returns (ExecuteActionResponse);
+
+  // GetHealth is a cheap liveness/driver-health probe. A hung NVML call is
+  // reported as unhealthy (driver hang detection).
+  rpc GetHealth(GetHealthRequest) returns (GetHealthResponse);
+
+  // GetInventory returns the node's identity, boot ID, and GPU list.
+  rpc GetInventory(GetInventoryRequest) returns (GetInventoryResponse);
+}
+
+message ExecuteActionRequest {
+  string action_id = 1; // deterministic: hash(incident, step, attempt)
+  string type = 2;      // gpu_reset | run_diag | collect_bundle | reboot | ...
+  map<string, string> params = 3;
+  int64 timeout_seconds = 4;
+}
+
+message ExecuteActionResponse {
+  string action_id = 1;
+  bool ok = 2;
+  string output = 3;
+  string error = 4;
+}
+
+message GetHealthRequest {}
+
+message GetHealthResponse {
+  bool healthy = 1;
+  bool driver_responsive = 2; // false => driver hang suspected
+  string detail = 3;
+}
+
+message GetInventoryRequest {}
+
+message GPU {
+  int32 index = 1;
+  string uuid = 2;
+  string model = 3;
+}
+
+message GetInventoryResponse {
+  string node = 1;
+  string boot_id = 2;
+  repeated GPU gpus = 3;
+}

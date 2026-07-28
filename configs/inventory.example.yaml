@@ -1,0 +1,26 @@
+# Bare-metal inventory for KubeNeuron (copy to inventory.yaml).
+#
+# The file is optional when every node runs kubeneuron-agent: agents
+# self-register on startup. List nodes here to provide the SSH/BMC
+# actuation fallbacks used when an agent is unreachable, or to pre-seed
+# the fleet view before agents are rolled out.
+
+nodes:
+  - name: gpu-node-01
+    ssh_addr: 10.0.1.11:22
+    bmc_addr: 10.0.100.11        # IPMI/Redfish endpoint (Phase 2)
+    labels:
+      rack: r1
+      sku: hgx-h100
+  - name: gpu-node-02
+    ssh_addr: 10.0.1.12:22
+    bmc_addr: 10.0.100.12
+    labels:
+      rack: r1
+      sku: hgx-h100
+  - name: gpu-node-03
+    ssh_addr: 10.0.1.13:22
+    labels:
+      rack: r2
+      sku: dgx-a100
+    paused: true                  # maintenance: no auto-actions

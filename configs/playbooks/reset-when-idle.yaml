@@ -1,0 +1,20 @@
+# Deferred GPU reset for XID 63 (row remap recorded): the remap only takes
+# effect after a reset, but there is no urgency — wait for the GPU to go
+# idle instead of evicting work.
+name: reset-when-idle
+target: gpu
+cooldown: 6h
+steps:
+  - name: wait-for-idle
+    action: agent.wait_idle
+    timeout: 12h
+  - name: reset
+    action: agent.gpu_reset
+    timeout: 5m
+  - name: verify
+    action: verify.gpu_health
+    params:
+      diag_level: "1"
+      quiet_window: 10m
+on_failure:
+  escalate_to: drain-and-reset

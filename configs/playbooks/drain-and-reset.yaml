@@ -1,0 +1,24 @@
+# The workhorse playbook for hardware-critical GPU errors (XID 48/95,
+# NVLink, driver hang): move workloads off, reset the GPU, verify, return
+# the node to service. Fully automatic — no approval needed.
+name: drain-and-reset
+target: gpu
+cooldown: 1h
+steps:
+  - name: cordon
+    action: platform.cordon
+  - name: drain
+    action: platform.drain
+    timeout: 30m
+  - name: reset
+    action: agent.gpu_reset
+    timeout: 5m
+  - name: verify
+    action: verify.gpu_health
+    params:
+      diag_level: "1"
+      quiet_window: 10m
+  - name: uncordon
+    action: platform.uncordon
+on_failure:
+  escalate_to: reboot

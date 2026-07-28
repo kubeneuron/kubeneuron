@@ -1,0 +1,29 @@
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMSingle
+metadata:
+  name: kubeneuron
+  namespace: kubeneuron-monitoring
+  labels:
+    app.kubernetes.io/part-of: kube-neuron-dependencies
+spec:
+  image:
+    repository: victoriametrics/victoria-metrics
+    tag: v1.147.0
+    pullPolicy: IfNotPresent
+  retentionPeriod: 30d
+  # Preserve the claim when this CR is deleted. Deleting its namespace still
+  # deletes the PVC; follow the data-retention procedure in ../README.md.
+  removePvcAfterDelete: false
+  storage:
+    # storageClassName: fast-retain
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: 100Gi
+  resources:
+    requests:
+      cpu: 150m
+      memory: 500Mi
+    limits:
+      memory: 2Gi
