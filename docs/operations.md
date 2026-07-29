@@ -225,6 +225,51 @@ the node). Keep `hostTooling`
 unset on CPU-only node pools — use `nodeSelector` to split GPU and CPU
 installs if needed.
 
+## DCGM runtime attestation (required for destructive actions)
+
+Before the controller admits a real reset or reboot, the node's agent must
+attest the running DCGM version. Without that evidence the accelerator
+report stays `degraded` and every destructive step is refused — the system
+fails closed, which is why this section matters before you enable anything.
+
+**The engine is not there by default.** The NVIDIA GPU Operator ships the
+standalone host engine disabled (`dcgm.enabled=false`) because its metrics
+exporter embeds a private one that nothing else can reach. Enable it:
+
+```sh
+helm upgrade --install gpu-operator nvidia/gpu-operator -n gpu-operator   --set dcgm.enabled=true
+```
+
+Then point the agent at it:
+
+```yaml
+agent:
+  hostTooling:
+    dcgmEndpoint: nvidia-dcgm.gpu-operator.svc:5555
+```
+
+**Why a Service and not the node's address.** Measured on a live cluster:
+the operator runs the engine as an ordinary pod with no host port, so
+neither `<node-ip>:5555` nor the node's loopback reaches it — both are
+refused with `unable to establish a connection`. The Service is the only
+path, and it is safe for this purpose because the operator sets
+`internalTrafficPolicy: Local`: a request from a pod only ever lands on the
+engine sharing its node, so the attestation describes the hardware the
+agent is actually standing on. If you point `dcgmEndpoint` at any other
+Service, check that policy first — without it, attestation silently becomes
+a statement about someone else's GPU.
+
+!!! warning "DCGM has no authentication"
+    Once the standalone engine is enabled, **any pod on that node can use
+    the full DCGM API** — no credentials, no authorization. Verified from
+    an unprivileged pod: it read the GPU model, PCI address, and UUID, and
+    reached the configuration API. An attacker with a foothold in any
+    workload can therefore inventory your accelerators, run diagnostics
+    that disrupt training jobs, and alter power, clock, and ECC settings.
+    This is upstream behaviour, not a KubeNeuron setting.
+    `internalTrafficPolicy: Local` confines the blast radius to one node's
+    engine. Treat GPU nodes accordingly: restrict who may schedule there.
+
 ## Remediation scripts on nodes
 
 `driver_reload`/`driver_reinstall`/`run_script` are binary-level action

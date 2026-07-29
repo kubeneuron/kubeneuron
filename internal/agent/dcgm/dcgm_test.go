@@ -56,3 +56,43 @@ func TestProberGPUCountRequiresDiscoveryEvidence(t *testing.T) {
 		})
 	}
 }
+
+// dcgmi rejects --host before the subcommand: it prints usage and exits
+// zero-ish, which would look like a successful probe returning nothing.
+// Measured against dcgmi 4.5 on a live node, so this ordering is a contract
+// with the binary, not a style preference.
+func TestDiscoveryPlacesHostAfterSubcommand(t *testing.T) {
+	var got []string
+	p := NewWithEndpoint("dcgmi", "nvidia-dcgm.gpu-operator.svc:5555")
+	p.run = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		got = args
+		return []byte("1 GPU found (Active).\n"), nil
+	}
+	if _, err := p.GPUCount(context.Background()); err != nil {
+		t.Fatalf("GPUCount: %v", err)
+	}
+	want := []string{"discovery", "--host", "nvidia-dcgm.gpu-operator.svc:5555", "-l"}
+	if len(got) != len(want) {
+		t.Fatalf("args = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("args = %v, want %v", got, want)
+		}
+	}
+
+	// Without an endpoint the probe stays local and carries no host flag.
+	local := New("dcgmi")
+	local.run = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		got = args
+		return []byte("1 GPU found (Active).\n"), nil
+	}
+	if _, err := local.GPUCount(context.Background()); err != nil {
+		t.Fatalf("local GPUCount: %v", err)
+	}
+	for _, arg := range got {
+		if arg == "--host" {
+			t.Fatalf("local probe carried --host: %v", got)
+		}
+	}
+}

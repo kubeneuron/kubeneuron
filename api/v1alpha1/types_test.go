@@ -137,7 +137,12 @@ func TestGeneratedKubeNeuronCRDContainsFailClosedTransitionRules(t *testing.T) {
 		"serverCASecretRef are required",
 		"message: TLS key-pair Secret references cannot select one key",
 		"message: TLS Secret references must omit namespace and use spec.namespace",
-		"message: executionMode Enabled is disabled until",
+		// Enabled is no longer unreachable, but it is unreachable without a
+		// declared set of nodes and a verbatim acknowledgement. Guard both
+		// halves: dropping either would quietly re-open fleet-wide
+		// destructive execution.
+		"executionMode Enabled requires spec.safety.destructiveExecution",
+		"message: acknowledgement text must match exactly",
 		"notifications.webhookToken is required",
 		"notifications.operatorAPIToken is required for Paused mode",
 		"operatorAPIToken",

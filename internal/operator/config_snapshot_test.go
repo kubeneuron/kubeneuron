@@ -246,18 +246,19 @@ func testPolicyFixture() ([]kubeneuronv1alpha1.GPURemediationPolicy, []kubeneuro
 	return policies, playbooks
 }
 
-func TestCompileSnapshotRejectsEnabledUntilHardwareRuntimeExists(t *testing.T) {
+func TestCompileSnapshotRejectsEnabledWithoutDeclaredNodes(t *testing.T) {
 	installation := testKubeNeuron()
 	installation.Spec.Safety.ExecutionMode = kubeneuronv1alpha1.ExecutionModeEnabled
 	policies, playbooks := testPolicyFixture()
 
-	// A notification channel does not make missing host GPU tooling, script
-	// provisioning, and crash-safe execution safe. Enabled stays fail-closed.
+	// A notification channel does not authorise destructive execution.
+	// Enabled stays fail-closed until the nodes permitted to run real
+	// resets and reboots are declared explicitly.
 	installation.Spec.Notifications = &kubeneuronv1alpha1.NotificationsSpec{
 		Slack: &kubeneuronv1alpha1.SecretReference{Name: "slack-webhook"},
 	}
 	_, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "Enabled is disabled") {
+	if err == nil || !strings.Contains(err.Error(), "requires spec.safety.destructiveExecution") {
 		t.Fatalf("expected Enabled to fail closed, got %v", err)
 	}
 }

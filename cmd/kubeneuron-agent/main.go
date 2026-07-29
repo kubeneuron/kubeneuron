@@ -67,6 +67,11 @@ func main() {
 			"",
 			"dcgmi binary used for bounded local DCGM runtime attestation (default: dcgmi from PATH)",
 		)
+		nvidiaDCGMEndpoint = flag.String(
+			"nvidia-dcgm-endpoint",
+			"",
+			"DCGM host engine address for runtime attestation, e.g. 10.0.1.7:5555; empty uses dcgmi's local default. It must be this node's own engine.",
+		)
 		nvidiaPartitionTopology = flag.String(
 			"nvidia-partition-topology",
 			"unknown",
@@ -151,6 +156,7 @@ func main() {
 			DriverVersion:        *nvidiaDriverVersion,
 			RuntimeVersion:       *nvidiaRuntimeVersion,
 			DCGMPath:             *nvidiaDCGMPath,
+			DCGMEndpoint:         *nvidiaDCGMEndpoint,
 			PartitionTopology:    nvidiaPartitionTopologyValue(*nvidiaPartitionTopology),
 			ProfileDigest:        *nvidiaProfileDigest,
 			UseControllerProfile: *nvidiaControllerProfile,

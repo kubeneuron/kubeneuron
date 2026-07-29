@@ -91,9 +91,12 @@ func CompileSnapshot(
 		return nil, fmt.Errorf("spec.approvals.ttl: %w", err)
 	}
 
+	// Dry-run is the default and stays on for every mode except Enabled,
+	// which validateRuntimeSupport has already confined to the declared
+	// destructive-execution nodes.
 	cfg := config.Config{
 		Safety: config.Safety{
-			DryRun:                    true,
+			DryRun:                    effectiveExecutionMode(installation.Spec.Safety) != kubeneuronv1alpha1.ExecutionModeEnabled,
 			MaxConcurrentRemediations: effectivePositive(installation.Spec.Safety.MaxConcurrentRemediations, 2),
 			MaxConcurrentReboots:      effectivePositive(installation.Spec.Safety.MaxConcurrentReboots, 1),
 			Flap: config.Flap{
@@ -239,13 +242,29 @@ func validateInstallation(s *kubeneuronv1alpha1.KubeNeuron) error {
 // validateRuntimeSupport rejects API values reserved for future runtime
 // implementations. Keep this check separate from structural validation so
 // resource construction can apply the same fail-closed boundary.
+// destructiveExecutionAcknowledgement is the exact sentence an operator
+// must type to arm real destructive execution. Deliberately long and
+// unambiguous: it cannot be produced by a stray `true`.
+const destructiveExecutionAcknowledgement = "I understand these nodes may be reset, rebooted, or destroyed"
+
 func validateRuntimeSupport(s *kubeneuronv1alpha1.KubeNeuron) error {
-	// The current Kubernetes DaemonSet does not provide the host GPU tooling,
-	// driver scripts, or crash-safe action journal required for real side
-	// effects. Reject Enabled until that safety boundary is implemented and
-	// verified on hardware. Paused remains a dry-run belt-and-suspenders mode.
+	// Real side effects are confined to explicitly declared nodes: Enabled
+	// without spec.safety.destructiveExecution stays rejected, and the block
+	// itself must name those nodes. This is the compiler-side half of the
+	// boundary; the CRD enforces the same rule at admission, and the
+	// operator arms the agent only on nodes matching the selector. Paused
+	// remains a dry-run belt-and-suspenders mode.
 	if effectiveExecutionMode(s.Spec.Safety) == kubeneuronv1alpha1.ExecutionModeEnabled {
-		return fmt.Errorf("spec.safety.executionMode Enabled is disabled until the Kubernetes agent runtime and hardware-gated verification are implemented")
+		destructive := s.Spec.Safety.DestructiveExecution
+		if destructive == nil {
+			return fmt.Errorf("spec.safety.executionMode Enabled requires spec.safety.destructiveExecution: real reset and reboot are confined to explicitly declared nodes")
+		}
+		if len(destructive.NodeSelector) == 0 {
+			return fmt.Errorf("spec.safety.destructiveExecution.nodeSelector must name the permitted nodes; an empty selector would arm the whole fleet")
+		}
+		if destructive.Acknowledgement != destructiveExecutionAcknowledgement {
+			return fmt.Errorf("spec.safety.destructiveExecution.acknowledgement must read exactly %q", destructiveExecutionAcknowledgement)
+		}
 	}
 	if webhookTokenRef(s) == nil {
 		return fmt.Errorf("spec.notifications.webhookToken is required: Alertmanager ingress must be authenticated")

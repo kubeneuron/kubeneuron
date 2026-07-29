@@ -263,6 +263,17 @@ check_root "auth with users and OIDC" "" \
 check_root "cross-namespace auth users Secret" \
 	"auth Secret references must omit namespace" \
 	'.metadata.name="cel-auth-users-ns" | .spec.auth={users: {name: "panel-users", namespace: "other"}}'
+check_root "Enabled without a destructive-execution block" \
+	"executionMode Enabled requires spec.safety.destructiveExecution" \
+	'.metadata.name="cel-enabled-bare" | .spec.safety.executionMode="Enabled"'
+check_root "Enabled with declared destructive nodes" "" \
+	'.metadata.name="cel-enabled-declared" | .spec.safety.executionMode="Enabled" | .spec.safety.destructiveExecution={nodeSelector: {"kubeneuron.io/destructive": "true"}, acknowledgement: "I understand these nodes may be reset, rebooted, or destroyed"}'
+check_root "destructive execution with an empty selector" \
+	"should have at least 1 propert" \
+	'.metadata.name="cel-enabled-noselector" | .spec.safety.executionMode="Enabled" | .spec.safety.destructiveExecution={nodeSelector: {}, acknowledgement: "I understand these nodes may be reset, rebooted, or destroyed"}'
+check_root "destructive execution with a sloppy acknowledgement" \
+	"acknowledgement text must match exactly" \
+	'.metadata.name="cel-enabled-badack" | .spec.safety.executionMode="Enabled" | .spec.safety.destructiveExecution={nodeSelector: {"lab": "true"}, acknowledgement: "yes"}'
 check_root "plain-http OIDC issuer" \
 	"issuerURL must be https" \
 	'.metadata.name="cel-auth-oidc-http" | .spec.auth={oidc: {issuerURL: "http://sso.example.com", clientID: "kn", clientSecretRef: {name: "oidc-client"}, redirectURL: "https://panel.example.com/cb"}}'
@@ -367,5 +378,5 @@ if "$KUBECTL_BIN" get kubeneuron "$FIXTURE_NAME" >/dev/null 2>&1; then
 fi
 pass "persisted CEL fixture cleaned up"
 
-((passed == 63)) || fail "internal check count is $passed, want 63"
+((passed == 67)) || fail "internal check count is $passed, want 67"
 log "admission matrix complete: $passed checks passed on server $server_version"

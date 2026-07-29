@@ -24,10 +24,22 @@ type runner func(context.Context, string, ...string) ([]byte, error)
 // Path defaults to dcgmi from PATH.
 type Prober struct {
 	Path string
+	// Endpoint is the DCGM host engine address, e.g. "10.0.1.7:5555".
+	// Empty uses dcgmi's own default (the local engine). The caller is
+	// responsible for it naming this node: an endpoint pointing elsewhere
+	// would attest the wrong hardware.
+	Endpoint string
 	run  runner
 }
 
 // New returns a bounded DCGM version prober.
+// NewWithEndpoint builds a prober that talks to a specific host engine.
+func NewWithEndpoint(path, endpoint string) *Prober {
+	p := New(path)
+	p.Endpoint = strings.TrimSpace(endpoint)
+	return p
+}
+
 func New(path string) *Prober {
 	if path == "" {
 		path = "dcgmi"
@@ -35,6 +47,18 @@ func New(path string) *Prober {
 	return &Prober{Path: path, run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		return exec.CommandContext(ctx, name, args...).CombinedOutput()
 	}}
+}
+
+// hostArgs points dcgmi at the configured host engine. The flag must follow
+// the subcommand: dcgmi parses "dcgmi discovery --host X -l" but answers
+// "dcgmi --host X discovery -l" with its usage text, which a caller reading
+// only the exit status would mistake for a working probe. Only queries that
+// need the engine carry it; --version answers from the client binary alone.
+func (p *Prober) hostArgs() []string {
+	if p == nil || strings.TrimSpace(p.Endpoint) == "" {
+		return nil
+	}
+	return []string{"--host", p.Endpoint}
 }
 
 // Version returns a normalized exact DCGM version, prefixed with dcgm-. It
@@ -67,7 +91,8 @@ func (p *Prober) GPUCount(ctx context.Context) (int, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	out, err := p.run(ctx, p.Path, "discovery", "-l")
+	args := append([]string{"discovery"}, p.hostArgs()...)
+	out, err := p.run(ctx, p.Path, append(args, "-l")...)
 	if err != nil {
 		return 0, fmt.Errorf("dcgmi discovery -l: %w", err)
 	}

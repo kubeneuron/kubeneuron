@@ -10,7 +10,7 @@ usage() {
 	cat <<'EOF'
 Usage: hack/kind-integration.sh
 
-Creates a dedicated, digest-pinned kind cluster by default, runs the 63-case
+Creates a dedicated, digest-pinned kind cluster by default, runs the 67-case
 CEL admission matrix, installs locally built KubeNeuron images and the
 operator, and verifies mTLS/token node identity, readiness, ownership
 collisions, non-adoption, recovery, ordered certificate rotation/rollback, and
@@ -1701,7 +1701,7 @@ for crd in "${crd_names[@]}"; do
 		--timeout="${TIMEOUT_SECONDS}s" >/dev/null
 done
 
-note "running the 63-case CEL admission matrix"
+note "running the 67-case CEL admission matrix"
 CEL_ALLOW_CLUSTER_MUTATION=1 KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" bash "$CEL_SCRIPT"
 
 if ((BUILD_IMAGES)); then
@@ -1922,5 +1922,5 @@ if grep -Fq 'real NVML driver not wired yet; using fake driver (skeleton)' <<<"$
 	note "agent explicitly reports its fake NVML skeleton"
 fi
 
-	note "PASS: 63 CEL checks, scoped RBAC, mTLS plus Pod/node identity rejection, authenticated public API and Alertmanager webhook, manual immutable/versioned routine TLS rotation, explicit dual-leaf emergency recovery, stale-state/plan rejection, failed-leaf and failed-contraction rollback, fresh registration proof, durable readiness loss/recovery, 11 owners, ownership collision/non-adoption/recovery, and acknowledged no-op reconciliation, plus a controller restart mid-playbook with durable approval state and no re-executed step"
+	note "PASS: 67 CEL checks, scoped RBAC, mTLS plus Pod/node identity rejection, authenticated public API and Alertmanager webhook, manual immutable/versioned routine TLS rotation, explicit dual-leaf emergency recovery, stale-state/plan rejection, failed-leaf and failed-contraction rollback, fresh registration proof, durable readiness loss/recovery, 11 owners, ownership collision/non-adoption/recovery, and acknowledged no-op reconciliation, plus a controller restart mid-playbook with durable approval state and no re-executed step"
 note "CPU-only boundary: this validates transport, the tested manual TLS-rotation and leaf-recovery contracts, and Kubernetes workload identity; it does not validate automatic issuance/expiry detection, emergency CA revocation, NVIDIA, NVML, DCGM, GPU actions, or remediation"

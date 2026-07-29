@@ -133,6 +133,25 @@ type HostToolingSpec struct {
 	// which the operator does not set; the mount alone executes nothing.
 	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !self.contains(':')",message="scriptsDir must be an absolute host path without ':'"
 	ScriptsDir string `json:"scriptsDir,omitempty"`
+	// DCGMEndpoint is where this node's DCGM host engine listens. Runtime
+	// attestation — the evidence every destructive action depends on —
+	// needs to reach it.
+	//
+	// With the NVIDIA GPU Operator this is
+	// "nvidia-dcgm.gpu-operator.svc:5555" — measured, not assumed: the
+	// operator runs the engine as an ordinary pod with no host port, so
+	// neither the node's address nor its loopback reaches it. That Service
+	// carries internalTrafficPolicy=Local, which is what keeps the evidence
+	// node-local: a request only ever lands on the engine sharing this
+	// node. Verify that policy before pointing this at any other Service,
+	// or attestation quietly becomes hearsay about someone else's hardware.
+	//
+	// The engine must exist: the operator ships it disabled
+	// (dcgm.enabled=false) because its exporter embeds a private one. Empty
+	// here keeps dcgmi's local default and, with no reachable engine,
+	// leaves the report degraded — fail-closed, no destructive action.
+	// +kubebuilder:validation:XValidation:rule="self.contains(':')",message="dcgmEndpoint must be host:port, for example nvidia-dcgm.gpu-operator.svc:5555"
+	DCGMEndpoint string `json:"dcgmEndpoint,omitempty"`
 }
 
 // SafetySpec holds execution limits. ExecutionMode defaults to DryRun in the
@@ -153,6 +172,28 @@ type SafetySpec struct {
 	FlapCount int32 `json:"flapCount,omitempty"`
 	// +kubebuilder:default="24h"
 	FlapWindow string `json:"flapWindow,omitempty"`
+	// DestructiveExecution is the only way to reach executionMode Enabled.
+	// It arms real reset, reboot, and driver actions, and it deliberately
+	// cannot be switched on fleet-wide: a node selector is mandatory, and
+	// only nodes matching it ever receive an agent armed for destructive
+	// work.
+	DestructiveExecution *DestructiveExecutionSpec `json:"destructiveExecution,omitempty"`
+}
+
+// DestructiveExecutionSpec confines real destructive actions to an
+// explicitly named set of nodes. Every field is required on purpose: a
+// half-configured block must not resolve to "the whole fleet".
+type DestructiveExecutionSpec struct {
+	// NodeSelector selects the nodes permitted to execute destructive
+	// actions. It must be non-empty, and the operator arms the agent only
+	// on nodes that match it.
+	// +kubebuilder:validation:MinProperties=1
+	NodeSelector map[string]string `json:"nodeSelector"`
+	// Acknowledgement must read exactly
+	// "I understand these nodes may be reset, rebooted, or destroyed".
+	// A typo is a rejected installation, not a rebooted production node.
+	// +kubebuilder:validation:XValidation:rule="self == 'I understand these nodes may be reset, rebooted, or destroyed'",message="acknowledgement text must match exactly"
+	Acknowledgement string `json:"acknowledgement"`
 }
 
 // ApprovalSpec configures human approval behavior.
@@ -337,7 +378,7 @@ type TLSSpec struct {
 // KubeNeuronSpec is the root desired-state resource for one KubeNeuron
 // installation. All configuration resources reference this object by name.
 // +kubebuilder:validation:XValidation:rule="!has(self.tls.serverSecretRef.namespace) && !has(self.tls.clientCASecretRef.namespace) && !has(self.tls.clientSecretRef.namespace) && !has(self.tls.serverCASecretRef.namespace) && (!has(self.tls.publicServerSecretRef) || !has(self.tls.publicServerSecretRef.namespace))",message="TLS Secret references must omit namespace and use spec.namespace"
-// +kubebuilder:validation:XValidation:rule="!has(self.safety) || self.safety.executionMode != 'Enabled'",message="executionMode Enabled is disabled until the Kubernetes agent runtime and hardware-gated verification are implemented"
+// +kubebuilder:validation:XValidation:rule="!has(self.safety) || self.safety.executionMode != 'Enabled' || has(self.safety.destructiveExecution)",message="executionMode Enabled requires spec.safety.destructiveExecution: real reset and reboot are confined to explicitly declared nodes"
 // +kubebuilder:validation:XValidation:rule="has(self.notifications) && has(self.notifications.webhookToken)",message="notifications.webhookToken is required: Alertmanager ingress must be authenticated"
 // +kubebuilder:validation:XValidation:rule="!has(self.safety) || self.safety.executionMode != 'Paused' || (has(self.notifications) && has(self.notifications.operatorAPIToken))",message="notifications.operatorAPIToken is required for Paused mode so the gate can be resumed through the authenticated API"
 // +kubebuilder:validation:XValidation:rule="!has(self.auth) || ((!has(self.auth.users) || !has(self.auth.users.namespace)) && (!has(self.auth.oidc) || !has(self.auth.oidc.clientSecretRef.namespace)))",message="auth Secret references must omit namespace and use spec.namespace"
@@ -703,7 +744,7 @@ const (
 // only a physical device and must require verified-unpartitioned topology; an
 // agent report remains the runtime evidence for that precondition.
 // +kubebuilder:validation:XValidation:rule="self.action != 'reset-device' || (self.scopes.all(scope, scope == 'physical-device') && self.requireVerifiedUnpartitionedTopology)",message="reset-device only supports physical-device scope and requires requireVerifiedUnpartitionedTopology=true"
-// +kubebuilder:validation:XValidation:rule="self.action == 'reset-device' || !self.requireVerifiedUnpartitionedTopology",message="requireVerifiedUnpartitionedTopology is only valid for reset-device"
+// +kubebuilder:validation:XValidation:rule="self.action == 'reset-device' || !has(self.requireVerifiedUnpartitionedTopology) || !self.requireVerifiedUnpartitionedTopology",message="requireVerifiedUnpartitionedTopology is only valid for reset-device"
 type AcceleratorRuntimeActionPolicy struct {
 	Action AcceleratorRuntimeAction `json:"action"`
 	// Scopes is bounded (there are only three scope values) so the CEL cost

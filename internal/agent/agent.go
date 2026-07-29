@@ -82,7 +82,11 @@ type NVIDIAObservationConfig struct {
 	RuntimeVersion string
 	// DCGMPath identifies the reviewed dcgmi binary used for a bounded local
 	// runtime attestation. Empty means dcgmi from PATH.
-	DCGMPath             string
+	DCGMPath string
+	// DCGMEndpoint is this node's DCGM host engine, e.g. "10.0.1.7:5555".
+	// Empty uses dcgmi's local default. It must name this node: attestation
+	// from another node's engine is evidence about the wrong hardware.
+	DCGMEndpoint         string
 	PartitionTopology    nvidia.PartitionTopology
 	ProfileDigest        string
 	UseControllerProfile bool
@@ -288,7 +292,7 @@ func New(cfg Config, driver nvml.GPUDriver, log *slog.Logger) (*Agent, error) {
 		}
 		agent.nvidia = &nvidiaObservation{
 			preflight:                adapter,
-			runtimeProber:            dcgm.New(cfg.NVIDIAObservation.DCGMPath),
+			runtimeProber:            dcgm.NewWithEndpoint(cfg.NVIDIAObservation.DCGMPath, cfg.NVIDIAObservation.DCGMEndpoint),
 			driverVersion:            cfg.NVIDIAObservation.DriverVersion,
 			runtimeVersion:           cfg.NVIDIAObservation.RuntimeVersion,
 			profileDigest:            cfg.NVIDIAObservation.ProfileDigest,

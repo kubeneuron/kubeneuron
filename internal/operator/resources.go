@@ -584,6 +584,9 @@ func agentHostToolingWiring(tooling *kubeneuronv1alpha1.HostToolingSpec) (args [
 	// Host tooling declared means a Fake-driver fallback is a configuration
 	// error, not a tolerable degradation.
 	args = append(args, "--require-real-driver")
+	if endpoint := strings.TrimSpace(tooling.DCGMEndpoint); endpoint != "" {
+		args = append(args, "--nvidia-dcgm-endpoint="+endpoint)
+	}
 	if tooling.ScriptsDir != "" {
 		mounts = append(mounts, corev1.VolumeMount{Name: "scripts", MountPath: "/etc/kube-neuron/scripts", ReadOnly: true})
 		volumes = append(volumes, corev1.Volume{Name: "scripts", VolumeSource: corev1.VolumeSource{
@@ -594,10 +597,36 @@ func agentHostToolingWiring(tooling *kubeneuronv1alpha1.HostToolingSpec) (args [
 	return args, env, mounts, volumes
 }
 
+// destructiveAgentWiring arms the agent for real destructive actions, but
+// only on the nodes spec.safety.destructiveExecution names. Because a
+// DaemonSet carries one argument set for every node it lands on, arming it
+// also narrows where it lands: in Enabled mode the agent runs exactly on
+// the declared nodes and nowhere else. That is the conservative direction
+// — a mixed fleet needs a second DaemonSet, which is deliberately left for
+// when a real installation asks for it rather than guessed at now.
+func destructiveAgentWiring(installation *kubeneuronv1alpha1.KubeNeuron) (args []string, nodeSelector map[string]string) {
+	safety := installation.Spec.Safety
+	if effectiveExecutionMode(safety) != kubeneuronv1alpha1.ExecutionModeEnabled || safety.DestructiveExecution == nil {
+		return nil, nil
+	}
+	return []string{"--enable-destructive-actions"}, copyStringMap(safety.DestructiveExecution.NodeSelector)
+}
+
 func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot) *appsv1.DaemonSet {
 	labels := resourceLabels(installation, "agent")
 	privileged := true
 	toolingArgs, toolingEnv, toolingMounts, toolingVolumes := agentHostToolingWiring(installation.Spec.Agent.HostTooling)
+	destructiveArgs, destructiveNodes := destructiveAgentWiring(installation)
+	toolingArgs = append(toolingArgs, destructiveArgs...)
+	agentNodes := copyStringMap(installation.Spec.Agent.NodeSelector)
+	if len(destructiveNodes) > 0 {
+		if agentNodes == nil {
+			agentNodes = map[string]string{}
+		}
+		for key, value := range destructiveNodes {
+			agentNodes[key] = value
+		}
+	}
 	return &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        installation.Name + "-agent",
@@ -626,7 +655,7 @@ func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snaps
 					SecurityContext:               &corev1.PodSecurityContext{},
 					SchedulerName:                 corev1.DefaultSchedulerName,
 					HostPID:                       true,
-					NodeSelector:                  copyStringMap(installation.Spec.Agent.NodeSelector),
+					NodeSelector:                  agentNodes,
 					Tolerations:                   append([]corev1.Toleration(nil), installation.Spec.Agent.Tolerations...),
 					Containers: []corev1.Container{{
 						Name:            "agent",

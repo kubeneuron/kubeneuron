@@ -124,7 +124,8 @@ spec:
                       scope == 'physical-device') && self.requireVerifiedUnpartitionedTopology)
                   - message: requireVerifiedUnpartitionedTopology is only valid for
                       reset-device
-                    rule: self.action == 'reset-device' || !self.requireVerifiedUnpartitionedTopology
+                    rule: self.action == 'reset-device' || !has(self.requireVerifiedUnpartitionedTopology)
+                      || !self.requireVerifiedUnpartitionedTopology
                 maxItems: 8
                 type: array
                 x-kubernetes-list-map-keys:

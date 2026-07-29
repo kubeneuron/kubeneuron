@@ -111,11 +111,18 @@ func TestSMIPartitionTopologyFailsClosed(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		"all disabled":          {output: "Disabled\nDisabled\n", want: "none"},
-		"one enabled":           {output: "Disabled\nEnabled\n", want: "mig"},
-		"unsupported state":     {output: "[N/A]\n[N/A]\n", want: "unknown"},
-		"partial device list":   {output: "Disabled\n", want: "unknown", wantErr: true},
-		"partial list sees MIG": {output: "Enabled\n", want: "mig"},
+		"all disabled": {output: "Disabled\nDisabled\n", want: "none"},
+		"one enabled":  {output: "Disabled\nEnabled\n", want: "mig"},
+		// A MIG-incapable device (T4, V100, consumer parts) reports N/A.
+		// That is evidence it cannot be partitioned, not missing evidence:
+		// treating it as unknown would make every such GPU permanently
+		// ineligible for a reset that requires verified topology.
+		"MIG-incapable device":   {output: "[N/A]\n[N/A]\n", want: "none"},
+		"lowercase n/a":          {output: "n/a\nn/a\n", want: "none"},
+		"mixed N/A and disabled": {output: "[N/A]\nDisabled\n", want: "none"},
+		"unrecognised state":     {output: "Weird\nWeird\n", want: "unknown"},
+		"partial device list":    {output: "Disabled\n", want: "unknown", wantErr: true},
+		"partial list sees MIG":  {output: "Enabled\n", want: "mig"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, _ := newTestSMI(nil)

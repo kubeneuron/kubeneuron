@@ -323,7 +323,7 @@ func TestControllerDeploymentRejectsUnsupportedRuntimeConfiguration(t *testing.T
 			mutate: func(installation *kubeneuronv1alpha1.KubeNeuron) {
 				installation.Spec.Safety.ExecutionMode = kubeneuronv1alpha1.ExecutionModeEnabled
 			},
-			want: "Enabled is disabled",
+			want: "requires spec.safety.destructiveExecution",
 		},
 		{
 			name: "Postgres store without a DSN secret",
@@ -880,5 +880,110 @@ func TestControllerDeploymentAuthWiring(t *testing.T) {
 	plainJoined := strings.Join(plain.Spec.Template.Spec.Containers[0].Args, "\n")
 	if strings.Contains(plainJoined, "auth-users") || strings.Contains(plainJoined, "oidc") {
 		t.Fatalf("plain install carries auth flags: %s", plainJoined)
+	}
+}
+
+func TestDestructiveExecutionArmsOnlyDeclaredNodes(t *testing.T) {
+	// Without the block, nothing is armed and the agent lands wherever the
+	// agent selector says.
+	plain := agentDaemonSet(testKubeNeuron(), &Snapshot{Digest: "abc123"})
+	if strings.Contains(strings.Join(plain.Spec.Template.Spec.Containers[0].Args, "\n"), "enable-destructive-actions") {
+		t.Fatal("dry-run install armed destructive actions")
+	}
+
+	installation := testKubeNeuron()
+	installation.Spec.Agent.NodeSelector = map[string]string{"gpu": "true"}
+	installation.Spec.Safety.ExecutionMode = kubeneuronv1alpha1.ExecutionModeEnabled
+	installation.Spec.Safety.DestructiveExecution = &kubeneuronv1alpha1.DestructiveExecutionSpec{
+		NodeSelector:    map[string]string{"kubeneuron.io/destructive": "true"},
+		Acknowledgement: "I understand these nodes may be reset, rebooted, or destroyed",
+	}
+	armed := agentDaemonSet(installation, &Snapshot{Digest: "abc123"})
+	if !strings.Contains(strings.Join(armed.Spec.Template.Spec.Containers[0].Args, "\n"), "--enable-destructive-actions") {
+		t.Fatal("Enabled install did not arm the agent")
+	}
+	// Arming narrows placement: both the agent selector and the declared
+	// destructive selector must match, so an undeclared node never receives
+	// an armed agent.
+	want := map[string]string{"gpu": "true", "kubeneuron.io/destructive": "true"}
+	if len(armed.Spec.Template.Spec.NodeSelector) != len(want) {
+		t.Fatalf("node selector = %v, want %v", armed.Spec.Template.Spec.NodeSelector, want)
+	}
+	for key, value := range want {
+		if armed.Spec.Template.Spec.NodeSelector[key] != value {
+			t.Fatalf("node selector = %v, want %v", armed.Spec.Template.Spec.NodeSelector, want)
+		}
+	}
+}
+
+func TestEnabledRequiresDeclaredDestructiveNodes(t *testing.T) {
+	base := func() *kubeneuronv1alpha1.KubeNeuron {
+		k := testKubeNeuron()
+		k.Spec.Safety.ExecutionMode = kubeneuronv1alpha1.ExecutionModeEnabled
+		return k
+	}
+	ack := "I understand these nodes may be reset, rebooted, or destroyed"
+
+	for _, tt := range []struct {
+		name    string
+		mutate  func(*kubeneuronv1alpha1.KubeNeuron)
+		wantErr string
+	}{
+		{"no block at all", func(k *kubeneuronv1alpha1.KubeNeuron) {}, "requires spec.safety.destructiveExecution"},
+		{"empty selector", func(k *kubeneuronv1alpha1.KubeNeuron) {
+			k.Spec.Safety.DestructiveExecution = &kubeneuronv1alpha1.DestructiveExecutionSpec{Acknowledgement: ack}
+		}, "must name the permitted nodes"},
+		{"wrong acknowledgement", func(k *kubeneuronv1alpha1.KubeNeuron) {
+			k.Spec.Safety.DestructiveExecution = &kubeneuronv1alpha1.DestructiveExecutionSpec{
+				NodeSelector: map[string]string{"lab": "true"}, Acknowledgement: "yes",
+			}
+		}, "must read exactly"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			k := base()
+			tt.mutate(k)
+			err := validateRuntimeSupport(k)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want one containing %q", err, tt.wantErr)
+			}
+		})
+	}
+
+	// Fully declared: accepted, and the compiled snapshot leaves dry-run.
+	k := base()
+	k.Spec.Safety.DestructiveExecution = &kubeneuronv1alpha1.DestructiveExecutionSpec{
+		NodeSelector: map[string]string{"kubeneuron.io/destructive": "true"}, Acknowledgement: ack,
+	}
+	if err := validateRuntimeSupport(k); err != nil {
+		t.Fatalf("fully declared install rejected: %v", err)
+	}
+	policies, playbooks := testPolicyFixture()
+	snapshot, err := CompileSnapshot(k, policies, playbooks, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(snapshot.PoliciesYAML), "dry_run: false") {
+		t.Fatalf("compiled safety did not leave dry-run:\n%s", snapshot.PoliciesYAML)
+	}
+}
+
+func TestHostToolingPassesTheDCGMEndpoint(t *testing.T) {
+	installation := testKubeNeuron()
+	installation.Spec.Agent.HostTooling = &kubeneuronv1alpha1.HostToolingSpec{
+		DCGMEndpoint: "nvidia-dcgm.gpu-operator.svc:5555",
+	}
+	armed := agentDaemonSet(installation, &Snapshot{Digest: "abc123"})
+	if !strings.Contains(strings.Join(armed.Spec.Template.Spec.Containers[0].Args, "\n"),
+		"--nvidia-dcgm-endpoint=nvidia-dcgm.gpu-operator.svc:5555") {
+		t.Fatalf("agent args missing the DCGM endpoint: %v", armed.Spec.Template.Spec.Containers[0].Args)
+	}
+
+	// Host tooling without an endpoint leaves the probe local: the flag is
+	// absent rather than empty, so dcgmi keeps its own default.
+	plain := testKubeNeuron()
+	plain.Spec.Agent.HostTooling = &kubeneuronv1alpha1.HostToolingSpec{}
+	local := agentDaemonSet(plain, &Snapshot{Digest: "abc123"})
+	if strings.Contains(strings.Join(local.Spec.Template.Spec.Containers[0].Args, "\n"), "nvidia-dcgm-endpoint") {
+		t.Fatal("agent carries a DCGM endpoint flag without one configured")
 	}
 }

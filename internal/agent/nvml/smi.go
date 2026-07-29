@@ -248,6 +248,12 @@ func (s *SMI) PartitionTopology(ctx context.Context) (string, error) {
 			return "mig", nil
 		case "disabled":
 			// Continue: every device must explicitly report Disabled.
+		case "[n/a]", "n/a":
+			// The driver reports N/A for devices that cannot do MIG at all
+			// (T4, V100, consumer parts). A device without partitioning
+			// support cannot be partitioned, so this is positive evidence of
+			// an unpartitioned device — not missing evidence. Note the
+			// difference from a failed query above, which stays unknown.
 		case "":
 			return "unknown", fmt.Errorf("MIG mode query returned an empty GPU state")
 		default:

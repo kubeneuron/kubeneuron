@@ -75,6 +75,29 @@ spec:
                         x-kubernetes-validations:
                         - message: binDir must be an absolute host path without ':'
                           rule: self.startsWith('/') && !self.contains(':')
+                      dcgmEndpoint:
+                        description: |-
+                          DCGMEndpoint is where this node's DCGM host engine listens. Runtime
+                          attestation — the evidence every destructive action depends on —
+                          needs to reach it.
+
+                          With the NVIDIA GPU Operator this is
+                          "nvidia-dcgm.gpu-operator.svc:5555" — measured, not assumed: the
+                          operator runs the engine as an ordinary pod with no host port, so
+                          neither the node's address nor its loopback reaches it. That Service
+                          carries internalTrafficPolicy=Local, which is what keeps the evidence
+                          node-local: a request only ever lands on the engine sharing this
+                          node. Verify that policy before pointing this at any other Service,
+                          or attestation quietly becomes hearsay about someone else's hardware.
+
+                          The engine must exist: the operator ships it disabled
+                          (dcgm.enabled=false) because its exporter embeds a private one. Empty
+                          here keeps dcgmi's local default and, with no reachable engine,
+                          leaves the report degraded — fail-closed, no destructive action.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: dcgmEndpoint must be host:port, for example nvidia-dcgm.gpu-operator.svc:5555
+                          rule: self.contains(':')
                       libDirs:
                         default:
                         - /usr/lib64
@@ -616,6 +639,37 @@ spec:
                   SafetySpec holds execution limits. ExecutionMode defaults to DryRun in the
                   operator, even when omitted from the CR.
                 properties:
+                  destructiveExecution:
+                    description: |-
+                      DestructiveExecution is the only way to reach executionMode Enabled.
+                      It arms real reset, reboot, and driver actions, and it deliberately
+                      cannot be switched on fleet-wide: a node selector is mandatory, and
+                      only nodes matching it ever receive an agent armed for destructive
+                      work.
+                    properties:
+                      acknowledgement:
+                        description: |-
+                          Acknowledgement must read exactly
+                          "I understand these nodes may be reset, rebooted, or destroyed".
+                          A typo is a rejected installation, not a rebooted production node.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: acknowledgement text must match exactly
+                          rule: self == 'I understand these nodes may be reset, rebooted,
+                            or destroyed'
+                      nodeSelector:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          NodeSelector selects the nodes permitted to execute destructive
+                          actions. It must be non-empty, and the operator arms the agent only
+                          on nodes that match it.
+                        minProperties: 1
+                        type: object
+                    required:
+                    - acknowledgement
+                    - nodeSelector
+                    type: object
                   executionMode:
                     default: DryRun
                     description: ExecutionMode controls whether the operator may schedule
@@ -854,9 +908,10 @@ spec:
               rule: '!has(self.tls.serverSecretRef.namespace) && !has(self.tls.clientCASecretRef.namespace)
                 && !has(self.tls.clientSecretRef.namespace) && !has(self.tls.serverCASecretRef.namespace)
                 && (!has(self.tls.publicServerSecretRef) || !has(self.tls.publicServerSecretRef.namespace))'
-            - message: executionMode Enabled is disabled until the Kubernetes agent
-                runtime and hardware-gated verification are implemented
-              rule: '!has(self.safety) || self.safety.executionMode != ''Enabled'''
+            - message: 'executionMode Enabled requires spec.safety.destructiveExecution:
+                real reset and reboot are confined to explicitly declared nodes'
+              rule: '!has(self.safety) || self.safety.executionMode != ''Enabled''
+                || has(self.safety.destructiveExecution)'
             - message: 'notifications.webhookToken is required: Alertmanager ingress
                 must be authenticated'
               rule: has(self.notifications) && has(self.notifications.webhookToken)
