@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 )
 
 type registrationBackend struct {
+	arming        types.AgentArming
 	err           error
 	registrations []types.AgentRegistration
 	events        []types.AgentEvent
@@ -39,9 +41,9 @@ func (b *registrationBackend) HandleAgentEvent(_ *http.Request, event types.Agen
 	return b.err
 }
 
-func (b *registrationBackend) RegisterNode(_ *http.Request, registration types.AgentRegistration) error {
+func (b *registrationBackend) RegisterNode(_ *http.Request, registration types.AgentRegistration) (types.AgentArming, error) {
 	b.registrations = append(b.registrations, registration)
-	return b.err
+	return b.arming, b.err
 }
 
 func TestRegister(t *testing.T) {
@@ -137,7 +139,11 @@ func TestAlertmanagerPayloadIsBounded(t *testing.T) {
 		`{"alerts":[]}`+strings.Repeat(" ", maxAlertmanagerBytes+1),
 	))
 	response := httptest.NewRecorder()
-	New(backend).Routes().ServeHTTP(response, request)
+	// The webhook fails closed without a token; opt into the development-only
+	// insecure mode so this test exercises the body-size guard, not the auth gate.
+	s := New(backend)
+	s.AllowInsecureWebhook()
+	s.Routes().ServeHTTP(response, request)
 	if response.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413; body = %q", response.Code, response.Body.String())
 	}
@@ -171,6 +177,24 @@ func TestAgentRoutesAuthenticateAndBindBodyNode(t *testing.T) {
 			name:       "authenticated event",
 			path:       "/api/v1/events",
 			body:       `{"node":"node-a","xid":79}`,
+			principal:  AgentPrincipal{NodeName: "node-a"},
+			wantStatus: http.StatusAccepted,
+			wantCalls:  1,
+		},
+		{
+			// Exactly one fault identity per event: classification is
+			// Fault-first, so a nonzero XID beside a Fault would be silently
+			// ignored. Ambiguity is rejected, never interpreted.
+			name:       "event with both an XID and a neutral fault",
+			path:       "/api/v1/events",
+			body:       `{"node":"node-a","xid":79,"fault":{"vendor":"nvidia","source":"nvidia-smi","code":"ecc-dbe"}}`,
+			principal:  AgentPrincipal{NodeName: "node-a"},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "neutral-fault event",
+			path:       "/api/v1/events",
+			body:       `{"node":"node-a","xid":0,"fault":{"vendor":"nvidia","source":"nvidia-smi","code":"ecc-dbe"}}`,
 			principal:  AgentPrincipal{NodeName: "node-a"},
 			wantStatus: http.StatusAccepted,
 			wantCalls:  1,
@@ -323,4 +347,82 @@ func (b *registrationBackend) NextAction(*http.Request, string) (*types.QueuedAc
 
 func (b *registrationBackend) CompleteAction(*http.Request, string, string, string, types.ActionResult) error {
 	return nil
+}
+
+// Round-7 item C: the v2 registration protocol requires the arming
+// declaration; the v1 protocol must keep REJECTING it — the field is known to
+// the shared Go struct, so without the explicit check strict decoding alone
+// would quietly erode v1's mixed-version corruption guard.
+func TestRegistrationV2RequiresArmingAndV1RejectsIt(t *testing.T) {
+	armed := true
+	v2Body := func(a *bool) string {
+		reg := types.AgentRegistration{Name: "node-a", DestructiveArmed: a}
+		b, _ := json.Marshal(reg)
+		return string(b)
+	}
+
+	backend := &registrationBackend{}
+	routes := New(backend).AgentRoutes(fixedAgentAuthenticator{principal: AgentPrincipal{NodeName: "node-a"}})
+
+	// v2 capability serves its exact token.
+	capability := httptest.NewRecorder()
+	routes.ServeHTTP(capability, httptest.NewRequest(http.MethodGet, types.AgentRegistrationV2Path, nil))
+	if capability.Code != http.StatusOK || capability.Body.String() != types.AgentRegistrationV2Protocol+"\n" {
+		t.Fatalf("v2 capability = %d %q", capability.Code, capability.Body.String())
+	}
+
+	for _, tt := range []struct {
+		name, path, body string
+		wantStatus       int
+		wantArming       *bool
+	}{
+		{"v2 with arming accepted", types.AgentRegistrationV2Path, v2Body(&armed), http.StatusNoContent, &armed},
+		{"v2 without arming rejected", types.AgentRegistrationV2Path, v2Body(nil), http.StatusBadRequest, nil},
+		{"v1 with arming rejected", types.AgentRegistrationPath, v2Body(&armed), http.StatusBadRequest, nil},
+		{"v1 without arming accepted as unknown", types.AgentRegistrationPath, v2Body(nil), http.StatusNoContent, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			before := len(backend.registrations)
+			response := httptest.NewRecorder()
+			routes.ServeHTTP(response, httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.body)))
+			if response.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body %q", response.Code, tt.wantStatus, response.Body.String())
+			}
+			if tt.wantStatus != http.StatusNoContent {
+				if len(backend.registrations) != before {
+					t.Fatal("a rejected registration must not reach the backend")
+				}
+				return
+			}
+			got := backend.registrations[len(backend.registrations)-1]
+			switch {
+			case tt.wantArming == nil && got.DestructiveArmed != nil:
+				t.Fatalf("arming = %v, want absent (unknown)", *got.DestructiveArmed)
+			case tt.wantArming != nil && (got.DestructiveArmed == nil || *got.DestructiveArmed != *tt.wantArming):
+				t.Fatalf("arming = %v, want %v", got.DestructiveArmed, *tt.wantArming)
+			}
+		})
+	}
+}
+
+// Round-8 (N4 retirement): the v2 registration response carries the
+// controller-served arming answer; v1 responses stay bare.
+func TestV2RegistrationResponseCarriesServedArming(t *testing.T) {
+	armed := true
+	body, _ := json.Marshal(types.AgentRegistration{Name: "node-a", DestructiveArmed: &armed})
+	backend := &registrationBackend{arming: types.AgentArmingArmed}
+	routes := New(backend).AgentRoutes(fixedAgentAuthenticator{principal: AgentPrincipal{NodeName: "node-a"}})
+
+	v2 := httptest.NewRecorder()
+	routes.ServeHTTP(v2, httptest.NewRequest(http.MethodPost, types.AgentRegistrationV2Path, strings.NewReader(string(body))))
+	if v2.Code != http.StatusNoContent || v2.Header().Get(types.AgentArmingHeader) != "armed" {
+		t.Fatalf("v2 response = %d, arming header %q; want 204 with 'armed'", v2.Code, v2.Header().Get(types.AgentArmingHeader))
+	}
+
+	v1Body, _ := json.Marshal(types.AgentRegistration{Name: "node-a"})
+	v1 := httptest.NewRecorder()
+	routes.ServeHTTP(v1, httptest.NewRequest(http.MethodPost, types.AgentRegistrationPath, strings.NewReader(string(v1Body))))
+	if v1.Code != http.StatusNoContent || v1.Header().Get(types.AgentArmingHeader) != "" {
+		t.Fatalf("v1 response = %d, arming header %q; want 204 with no header (frozen v1 contract)", v1.Code, v1.Header().Get(types.AgentArmingHeader))
+	}
 }

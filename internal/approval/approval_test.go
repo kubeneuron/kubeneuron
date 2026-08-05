@@ -66,7 +66,7 @@ func TestDecideRecordsOnlyForAwaitingApproval(t *testing.T) {
 	}
 
 	m := New(st, time.Hour)
-	if err := m.Decide(ctx, "inc-1", "reboot", "alice", "api", types.ApprovalApproved); err != nil {
+	if err := m.Decide(ctx, "inc-1", StepIdentity{StepName: "reboot", StepAction: "agent.reboot", PlaybookName: "pb", StepHash: "h"}, "alice", "api", types.ApprovalApproved); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	recorded, err := st.LatestApproval(ctx, "inc-1")
@@ -74,12 +74,13 @@ func TestDecideRecordsOnlyForAwaitingApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	if recorded.Decision != types.ApprovalApproved || recorded.Actor != "alice" ||
-		recorded.Channel != "api" || recorded.StepName != "reboot" {
+		recorded.Channel != "api" || recorded.StepName != "reboot" ||
+		recorded.StepAction != "agent.reboot" || recorded.PlaybookName != "pb" || recorded.StepHash != "h" {
 		t.Fatalf("approval = %+v", recorded)
 	}
 
 	// A decision for an unknown incident fails loudly.
-	if err := m.Decide(ctx, "missing", "reboot", "alice", "api", types.ApprovalApproved); err == nil {
+	if err := m.Decide(ctx, "missing", StepIdentity{StepName: "reboot"}, "alice", "api", types.ApprovalApproved); err == nil {
 		t.Fatal("decision for an unknown incident must fail")
 	}
 
@@ -93,7 +94,7 @@ func TestDecideRecordsOnlyForAwaitingApproval(t *testing.T) {
 	if err := st.CreateIncident(ctx, executing); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Decide(ctx, "inc-2", "reboot", "alice", "api", types.ApprovalRejected); err == nil {
+	if err := m.Decide(ctx, "inc-2", StepIdentity{StepName: "reboot"}, "alice", "api", types.ApprovalRejected); err == nil {
 		t.Fatal("decision outside AWAITING_APPROVAL must be rejected")
 	}
 	if _, err := st.LatestApproval(ctx, "inc-2"); err == nil {

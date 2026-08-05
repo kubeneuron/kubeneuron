@@ -131,7 +131,7 @@ func TestAcceleratorRuntimeProfileCheckActionFailsClosedOnReportDrift(t *testing
 		},
 		"different runtime version": {
 			mutate: func(r *types.AgentAcceleratorReport) { r.RuntimeVersion = "dcgm-3.3.0" },
-			want:   "runtime version does not match",
+			want:   "does not satisfy the pinned",
 		},
 		"missing declared capability": {
 			mutate: func(r *types.AgentAcceleratorReport) { r.Capabilities = nil },

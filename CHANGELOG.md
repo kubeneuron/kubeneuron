@@ -9,7 +9,438 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
-Nothing yet.
+## [v0.2.1] - 2026-08-05
+
+### Added
+- Second GPU fault detection source beside the kernel log: a DCGM poll
+  (`dcgmi dmon -e 230`) with an `nvidia-smi -q` ECC/row-remap fallback,
+  normalized into the same event and deduplicated against kmsg within a
+  short window so one fault never opens two incidents. Runs only on the
+  real driver.
+- Vendor-neutral fault envelope on the agent event (`AgentEvent.Fault`,
+  a `FaultSignal` of vendor/source/code/attributes): an honest landing
+  place for a fault that is not an XID. The `nvidia-smi` ECC/row-remap
+  fallback now emits neutral NVIDIA faults (`ecc-dbe`, `row-remap-failure`)
+  instead of synthesizing fake XID 48/64; XID stays the NVIDIA-native
+  encoding for the kmsg line and DCGM's real last-XID field. The detector
+  maps `(vendor, code)` to the same `ProblemClass` the former synthesized
+  XID produced, and cross-source dedup now keys on that shared class so a
+  kmsg XID and the neutral fallback fault for one condition still collapse
+  to one incident. A future AMD/Intel source adds a `FaultSignal` and a
+  `faultTable` row with no XID pretense. Additive and optional; the wire
+  stays backward-tolerant. (`GPUSignalMapping` neutralization is follow-on.)
+- Hardware GPU end-to-end CI target (`.github/workflows/hw-e2e.yaml`,
+  `hack/hw-e2e.sh`): `workflow_dispatch` + weekly cron on ephemeral EKS
+  with always-on teardown and a leak sweep, gated behind a typed
+  confirmation and the `gpu-lab` environment; a separate reaper workflow
+  force-deletes any cluster past its lifetime. Per-commit CI stays
+  CPU-only. **Now proven against a live lab** (kubeneuron-e2e10,
+  us-east-1, g4dn.xlarge/Tesla T4): all three test phases pass — the
+  XID-79 dry-run ladder (cordon→drain→approval→dry-run reboot, ~90s, the
+  approval-round notification and `token:`-prefixed approver in the
+  audit), the confined destructive ReplaceNode (real
+  `ec2:TerminateInstances` under the run-scoped IRSA role, nodegroup
+  replacement, resolved through the ladder), and a NEW `test-threshold`
+  phase — XID 92, the only code with distinct pipeline behavior: one
+  signal must hold in OBSERVING, the third (each injected past the
+  agent's 2-minute dedup window) crosses the policy threshold and the
+  observe-only ladder resolves. Running it for the first time surfaced
+  and fixed twelve dead assumptions in the harness (EOL EKS default,
+  pre-refactor `spec.cloud` shape, the XID *name* used where the problem
+  *class* belongs, `NEEDS_HUMAN` instead of `AWAITING_APPROVAL`, a
+  nonexistent "Approve" audit action and the un-prefixed approver, the
+  nested detail response, halted incidents matched by `wait_for_incident`,
+  the operator-image repoint racing `install.sh`'s re-apply, an invented
+  mapping source, asserting the vanished-node janitor's closure on the
+  happy path, no wait for the controller's ConfigMap hot-reload, plus an
+  `up-finish` resume command) — and two real product gaps now fixed in
+  their own entries (GPUSignalMapping status, TLS revision scope).
+
+### Added
+- `GPUSignalMapping` reaches the neutral fault encoding: source `"fault"` with
+  `spec.faults[]{vendor, code}` overrides classification of vendor-neutral
+  fault codes, so remapping a condition (e.g. `nvidia/ecc-dbe`) applies to the
+  nvidia-smi/DCGM fallback source exactly as `xidCodes` applies to the kmsg
+  source — previously a user-visible policy split between the two encodings
+  of one physical condition. An override can also make an unknown vendor code
+  actionable. CEL matrix +3.
+- Per-instance recycle viability at admission: cloud providers now answer
+  `CheckRecycle` for the exact instance, beyond their static capability. The
+  AWS provider refuses stop/start for autoscaling-group members (the group's
+  health check terminates a stopped member mid-recycle); the controller
+  escalates a `recycle_node` step to the next rung the moment it becomes
+  current — before requesting approval — instead of a human approving a step
+  that fails by timeout. `RecycleNode` re-checks before issuing any stop.
+- Fleet-wide detection under `executionMode: Enabled`: arming narrows the
+  primary agent DaemonSet to the destructive blast radius, which silently
+  dropped fault detection on unarmed GPU nodes. The operator now maintains a
+  detection-only companion DaemonSet (`<name>-agent-detect`) on exactly the
+  complement (required anti-affinity per destructive selector key), removed
+  again outside Enabled. The agent authenticator accepts both DaemonSets
+  (`--agent-daemonset` is comma-separated) with the owner UID still verified
+  against the live object; readiness covers the companion and tolerates an
+  empty complement.
+
+### Fixed
+- The kmsg watcher no longer loses XIDs printed while the agent was down:
+  a durable, crash-safe sequence cursor resumes from the oldest buffered
+  record. The cursor and the cross-source dedup set now advance only after
+  an event is accepted by the controller or fsynced to the spool, so a
+  failed or interrupted delivery replays instead of being dropped.
+- The kmsg cursor is now boot-scoped: `/dev/kmsg` sequence numbers restart
+  after a reboot, so a stale pre-reboot cursor no longer suppresses every
+  XID printed after a node reboot (a normal escalation-ladder rung).
+- The event spool repairs a torn final line on open instead of gluing the
+  next append onto it and silently dropping both on replay.
+- Cross-source deduplication no longer opens two incidents for one fault
+  when the kmsg side cannot attribute the GPU (the expected XID 79 case,
+  where the device vanishes from `nvidia-smi`): it falls back to a
+  node+XID key so the DCGM observation collapses against it.
+- `gpu_reset` resolves the target index from the incident's GPU UUID at
+  execution time and fails closed if the UUID is absent, gone, or now maps
+  to a different index — a topology change (XID 79, driver reload) can no
+  longer reset a healthy neighbor by a stale index.
+- `UpdateIncident` uses optimistic concurrency (a version guard) so a
+  concurrent signal ingest and a step-completion write can no longer lose
+  an update or, on PostgreSQL, regress an incident's state/step and
+  re-execute a non-idempotent platform action.
+- Rewinding an incident to its quiesce step no longer collides action IDs
+  with the completed original, so the re-quiesce actually re-executes
+  instead of replaying a stale success and escalating on it.
+- Controller-side destructive steps (cordon/drain/recycle/replace) are now
+  confined to `spec.safety.destructiveExecution.nodeSelector`: a non-dry-run
+  incident targeting a node outside the selector (e.g. from an Alertmanager
+  webhook) fails closed to NEEDS_HUMAN instead of executing.
+- An incident whose GPU could not be attributed (empty UUID — the expected
+  XID 79 case) no longer cordons and drains a node and then holds forever on
+  a reset it can never satisfy; the impossible reset is refused up front and
+  the incident goes NEEDS_HUMAN.
+- The event spool now self-heals a torn tail left by a failed in-process
+  append, not only one found at open, so the next event cannot be glued onto
+  a partial line and lost.
+- The DCGM/nvidia-smi source persists its emitted (GPU, XID) set boot-scoped,
+  so an agent restart (e.g. a DaemonSet rollout) no longer re-emits a
+  retained last-XID and re-opens incidents for long-remediated faults.
+- The safety gate rebuilds its concurrency/reboot occupancy from durable
+  EXECUTING incidents on leader acquisition, so the concurrency caps hold
+  across a controller failover.
+- Smaller: the unattributed dedup key keeps the PCI address so two GPUs
+  failing with the same XID on one node stay distinct; `paramInt` rejects
+  trailing garbage; `CompleteAction` returns 5xx (not 403) on a store outage.
+- Action cancellation now actually works: the incident ID is carried on the
+  queued action (it was smuggled through an unset param, so every enqueued
+  action had an empty `incident_id` and `CancelPendingActionsForIncident`
+  matched nothing) — a superseded destructive step is tombstoned instead of
+  being handed to a returning agent hours later; the claim query also skips
+  actions of terminalized incidents and dead-letters poison actions/events.
+- The Alertmanager webhook fails closed when no token is configured, validates
+  the alert severity, and drops alerts for nodes not in inventory — a spoofed
+  label can no longer drive cordon/drain on an arbitrary node.
+- A threshold-crossed incident with no bound playbook no longer livelocks
+  OBSERVING↔EVALUATING (it holds/quiet-resolves); a destructive step whose node
+  labels are transiently unresolvable holds-and-retries instead of quarantining
+  terminally; an approval is never recorded against an unresolvable step.
+- Quiesce host state survives a partial-quiesce retry (it no longer conflicts
+  the stored pre-mutation snapshot against the partially-mutated live state);
+  `waitDeviceReleased` is bounded so a never-releasing holder can't hang the
+  agent's action loop; the reset's idle/holder preflights and persistence-mode
+  restore address the GPU by UUID, matching the reset itself.
+- PKI leaf renewal runs independently of config compilation (an inert
+  playbook can no longer freeze it), a managed leaf that no longer chains to
+  the current CA is reissued, and the password-login and bearer throttles no
+  longer lock out valid operators behind a shared NAT while still rate-limiting
+  bad credentials. OIDC surfaces an id-token claims-decode error and sets
+  cookies Secure under proxied TLS.
+- "Destructive" is now an `internal/action` registry fact rather than a
+  hand-maintained map, so the controller-side blast-radius confinement can
+  never drift from the action set.
+- The PostgreSQL action queue no longer double-leases one action to
+  concurrent claimers (the outer update re-checks the claimable state; the
+  event outbox uses `FOR UPDATE SKIP LOCKED`), preserving one lease per node.
+- Device holders are now persisted, so the pre-disruption reset refusal and
+  `spec.safety.quiesce.forbidResetWhenPresent` actually take effect (they
+  were dead code — the store dropped the field on upsert).
+- The kmsg cursor advances only to a contiguous-ack watermark, so an event
+  that fails both delivery and spool is no longer skipped when a later event
+  is acknowledged.
+- The DCGM/nvidia-smi source emits a fault that first appears after startup
+  (rather than baselining it away permanently), and same-source distinct
+  XIDs that share a problem class are no longer over-collapsed by dedup.
+- Controller-side escalation rejects cyclic ladders at compile/load, caps
+  attempts to `NEEDS_HUMAN`, and honors cooldown on escalated rungs — no
+  unbounded destructive loop; an obstructed reset escalates instead of
+  looping in `EVALUATING`.
+- An approval is bound to the specific step (playbook + name + action +
+  content hash); a hot config reload that swaps the action under a granted
+  approval re-parks instead of executing an action the human never saw.
+- A `RecycleNode`/`ReplaceNode` playbook is rejected at compile when no cloud
+  provider is configured; `refresh` (`nvidia-smi`) has its own timeout so a
+  wedged driver can't hang the agent's main loop; `gpu_reset` targets the GPU
+  by UUID and scopes persistence-mode and holder checks to the device;
+  orphaned leased actions of terminalized incidents are dead-lettered; a
+  boot-bound action requires a matching boot ID to complete; OIDC requires a
+  verified email; PKI renewal is capped so a decade-long CA does not freeze
+  reconcile years early; negative durations and NAT-shared auth lockouts are
+  handled.
+- **The nvidia-smi/DCGM fallback detection source survives the durable event
+  outbox.** The `events` table stored only the XID, and the controller
+  classifies an event after reading it back from the outbox, so a fallback
+  event carrying `XID=0` plus a neutral fault (`ecc-dbe`) lost its fault on
+  the round trip and was durably acknowledged as non-actionable — a double-bit
+  ECC error seen only by the second source opened no incident. The fault
+  envelope and PCI address are now persisted (migrations 0015 SQLite /
+  0006 PostgreSQL) and rehydrated; legacy rows scan back to no fault.
+  Regression tests cross the real durable seam on both engines.
+- Audit-retention pruning deletes a pruned terminal incident's spared
+  expired-lease actions in the same transaction. Deleting only the incident
+  made the terminal-incident claim guard vacuous (its join found no row) and
+  handed a stale `gpu_reset`/`reboot` back to the node's next claim.
+- The accelerator-stack janitor can no longer freeze the controller: its
+  agent restore waits a bounded 30s inside the reconcile loop (the action
+  stays queued; the next tick re-attaches by deterministic ID), where it
+  previously waited on the process context — one quiesced node with a dead
+  agent halted all incident processing and signal ingestion until restart.
+  Every playbook step also now gets a default 30-minute timeout when it
+  declares none, so a silent agent cannot leak the step's goroutine and gate
+  slot forever.
+- `quiesce_accelerator_stack` is destructive in the action registry: standing
+  down DCGM and the device plugin on a node outside the declared
+  `spec.safety.destructiveExecution` blast radius is now refused like any
+  other destructive platform step.
+- An approval decision binds to the step identity recorded when the incident
+  parked — what the human was shown — not the step current at click time. A
+  playbook hot-swap between the approval request and the click could
+  previously make the decision capture the swapped-in step, which then matched
+  itself at resume; now it mismatches and the incident re-parks for a fresh
+  approval of the step that will actually run.
+- `MaxConcurrentRemediations` caps concurrent remediations, not concurrent
+  steps: a target's gate slot is held from its first admitted step until the
+  incident terminalizes, instead of being released between steps — which let
+  unrelated targets interleave steps far past the cap. Leader failover
+  re-seeds the slots of every mid-remediation incident.
+- The stack janitor stamps its queued restore action with the owning
+  incident's ID (or none), not the node name; and the operator renews TLS
+  material even when listing child configuration fails, matching the existing
+  invalid-configuration path — an apiserver blip can no longer freeze
+  certificate renewal.
+- **(Round 7, superseding the entry above)** The janitor's restore carries NO
+  incident stamp at all: the janitor acts precisely when the owner is halted,
+  and the terminal-incident claim guard refuses actions stamped with a halted
+  incident — the round-5 stamp made the restore permanently unclaimable
+  (monitoring stayed down; each tick burned the full bounded wait).
+  Provenance moved to action params, and a regression test crosses the real
+  EnqueueAction→ClaimNextAction seam. The janitor's bounded wait is also now
+  ONE budget per reconcile tick shared across all quiesced nodes, and the
+  cordon janitor's per-tick node List is served from the informer cache.
+- The agent drops an event the controller permanently rejects instead of
+  retrying or spooling it forever (spool replay is head-of-line: one poison
+  event silenced every detection behind it). The poison verdict requires the
+  explicit `X-KubeNeuron-Event-Rejected` marker the controller sets only on
+  semantic rejections — a bare 400 (an older controller strict-decoding a
+  newer agent's payload during a rolling upgrade, or a middlebox) keeps
+  spooling and drains after the skew clears. Dropped events are not
+  remembered into dedup, so the sibling source's valid encoding of the same
+  fault stays deliverable; counted in
+  `kubeneuron_agent_events_rejected_total`.
+- Remediation-slot ownership is durable: `remediation_slot_held` on the
+  incident row (sqlite migration 0016 / postgres 0007, with backfill), set
+  atomically with the first EXECUTING transition and cleared atomically with
+  the halting one. The leader-failover rebuild reads the bit instead of
+  inferring from state/StepIndex — the inference dropped an escalated
+  incident's slot (escalation resets StepIndex mid-remediation) and the cap
+  undercounted across failover.
+- Agent arming is controller-visible data (round 7): registration protocol v2
+  (`/api/v1/agents/register/narrow-v2`) always declares whether the agent
+  runs `--enable-destructive-actions`; agents probe v2 and fall back to v1
+  omitting the field, so every mixed-version pairing degrades to "unknown"
+  (sqlite 0017 / pg 0008: tri-state `nodes.agent_arming`). The controller
+  escalates an agent-destructive step at admission on a fresh, explicit
+  "unarmed" declaration — before an approval is requested, and before a
+  ladder cordons a node for a reboot its agent will refuse. Unknown or stale
+  declarations change nothing; the agent executor stays the enforcement.
+- **The two-DaemonSet scheme is retired (round 8): arming is controller-SERVED
+  data.** One agent DaemonSet covers the whole fleet in every execution mode —
+  no `--enable-destructive-actions` arg is rendered, no blast-radius
+  narrowing, no detection-only companion (the `-agent-detect` DaemonSet is
+  removed on upgrade). The agent boots unarmed and adopts the
+  `X-KubeNeuron-Agent-Arming` answer on each v2 registration response,
+  computed with the same selector-vs-labels match as blast-radius confinement
+  so the two boundaries cannot disagree; every uncertainty answers unarmed.
+  The agent arms/disarms live (logged loudly), refuses to arm on a non-real
+  GPU driver, and reports its effective state back — closing the
+  declared-vs-acked loop for the admission gate. The flag survives as a
+  static pin for bare-metal use. Mixed-version pairings all degrade to
+  today's behavior.
+- The approval protocol is first-class rounds (round 8, hardened in round 9):
+  each park mints an epoch and its request record atomically (sqlite 0018 /
+  pg 0009: `incidents.approval_epoch`, `approvals.park_epoch`); decisions
+  bind to a round and a re-park orphans them by construction, so a playbook
+  swap AFTER a decision can never execute under it. (Round 10 closes the
+  other half — the re-park landing between the notification and the click —
+  by carrying the round through the notification channels and refusing a
+  decision pinned to a superseded round.) Epoch 0 — the entire pre-upgrade
+  population, requests and orphaned decisions alike — is never consulted as
+  a round: such parks are migrated into round 1 and re-decided, closing a
+  review-found hole where a stale pre-upgrade approval could pair with a
+  different park's request and execute an unapproved step. A park pending
+  across the upgrade needs one re-approval.
+- The three background janitors run off the walk thread on their own
+  goroutine, so a fleet event (dead agents, mass cordons) no longer stretches
+  reconcile ticks or delays signal draining. Remediation-slot ownership,
+  optimistic incident versioning, and the mutex-guarded caches were already
+  cross-thread-safe, which is what made the move cheap.
+- One configuration snapshot is pinned per incident advance (carried on the
+  call-tree context, inherited by the step goroutine), completing the
+  runtime-config work: an advance and the step it spawns can never mix
+  configuration generations. Round 9 extends the same pin to each janitor
+  pass.
+- `StateChangedAt` is now the incident write-fence (round 9): the janitors
+  run concurrently with the walk, and the quiesce rewind — a field-only
+  rewrite — bumps it so `transition()`/`parkForApproval()` detect a conflict
+  instead of silently writing a stale `StepIndex` back over the rewind (a
+  review-found race that could have driven a reset against a restored
+  stack). The janitor also holds the stack restore until every rewind has
+  committed, and the concurrency model now runs as a model in a `-race`
+  walk+janitor test.
+- Undo is always allowed (round 9): `restore_accelerator_host` executes even
+  on a DISARMED agent — it can only replay a prior quiesce's crash-safe host
+  snapshot — so shrinking `destructiveExecution.nodeSelector` (or switching
+  `Enabled` off) mid-remediation no longer strands a quiesced node with its
+  monitoring down. A persistently failing restore is now surfaced once per
+  node as a needs-human notification plus
+  `kubeneuron_stack_restore_failures_total`, instead of a silent per-tick
+  log.
+- The approval round travels all the way to the click (round 10): every
+  approval notification renders its round and suggests `kubeneuronctl
+  approve <id> --round <n>`; the decision API accepts the round the client
+  displayed (`park_epoch` in the decision body, `--round` on the CLI, sent
+  automatically by the operator panel) and refuses a decision pinned to a
+  superseded round with a "re-read the incident" error instead of silently
+  binding the click to a request the human never saw. Omitting the round
+  (older clients, raw curl) keeps the bind-to-current behavior, which the
+  resume-time request check still guards.
+- A node inside the destructive-execution blast radius whose agent freshly
+  registers unarmed is now held as arming-in-flight for a bounded grace
+  (2 minutes, four registration ticks) instead of parking for approval;
+  past the grace the declaration is treated as a verdict — the agent cannot
+  adopt served arming (non-real GPU driver, static pin) — and the incident
+  escalates to a human early (round 10). Previously such a node looped
+  approve → executor refusal → escalate, spending a human approval on a
+  step the node could never execute.
+- The kind admission suite's self-check counted 70 expected CEL checks but
+  the `faults` signal-matcher cases had grown the matrix to 73, failing the
+  run after every check passed; the count is 73 again. Two timing races in
+  the kind harness are also fixed: the rogue-certificate scenario accepted
+  only the `tls: bad certificate` alert spelling, but TLS 1.3 rejects the
+  client cert after the handshake completes from the client's view, so the
+  agent nondeterministically sees `broken pipe` instead — the assertion now
+  also accepts the (deterministic) never-acknowledged registration warning;
+  and the rotation scope assertions could capture their "before" workload
+  generations while the previous phase's trailing operator update was still
+  landing — they now wait for generation stability with completed rollouts
+  first.
+- `GPUSignalMapping` now publishes the same generation-bound status the
+  other child configuration kinds have: `Ready=True/Compiled` with a digest
+  of its compiled override, or `Ready=False/CompilationFailed` when the
+  installation's configuration is invalid. The CRD had declared the status
+  subresource since the mappings became consumable (N2), but the operator
+  never wrote it — a selected mapping gave no positive feedback and could
+  only be inferred from the root. Found by the live AWS hardware run, whose
+  harness waits on the mapping's own Ready. RBAC adds
+  `gpusignalmappings/status` (get/patch/update).
+- TLS rotation phases roll only their consumers again: the PKI rework had
+  collapsed the per-workload TLS digest into one union hash of all four
+  roles stamped on BOTH workloads, so expanding the agents' server-CA trust
+  also rolled the controller Deployment (and vice versa) — violating the
+  rotation protocol's scope guarantee and briefly interrupting the
+  controller on every trust expansion. The revision is split
+  (`TLSRevisions{Controller, Agent}`): each workload's digest hashes
+  exactly the Secret data it mounts. Caught deterministically by the kind
+  rotation-scope assertion; pinned by a unit test per role.
+- An agent that boots straight into a persistent registration failure (a
+  rejected client certificate, a wrong controller URL) was silent at the
+  default log level forever: "acknowledgment lost" only fired after a prior
+  acknowledgment, and retry failures log at Debug — the single boot-time
+  warning could carry a transient error (connection refused) rather than
+  the persistent one. Never-acknowledged agents now warn once with the
+  current error after `RegistrationStaleAfter` (found by the kind rogue-
+  certificate scenario, whose log assertion depends on the TLS error being
+  visible).
+
+### Changed
+- **Breaking (`v1alpha1`):** `spec.cloud` is now provider-scoped — the AWS
+  region and IRSA role ARN move under `spec.cloud.aws.{region,iamRoleARN}`
+  (previously top-level `spec.cloud.{region,iamRoleARN}`). The cloud seam is
+  provider-neutral: each provider parses its own `providerID` and declares
+  which node-remediation primitives it supports, and the operator rejects a
+  `RecycleNode`/`ReplaceNode` playbook a configured provider cannot perform.
+  Adding a new cloud (GCP/Azure) is a new package plus one registry line, not
+  a core edit. AWS runtime behavior is unchanged.
+- Internal: action metadata (executor kind, safety-gate class, forced
+  approval, capability gate, cloud primitive) is unified into one declarative
+  registry (`internal/action`) that the operator compiler, controller
+  dispatch, playbook validation, and safety gate all derive from, replacing
+  the copies previously smeared across those layers. Behavior-preserving; a
+  test pins the CRD enum ↔ registry bijection.
+- Docs: `executionMode: Enabled` arming narrows the agent DaemonSet to the
+  named nodes — documented as a warning, since it also confines fault
+  detection to those nodes. (Superseded in this release by the detection-only
+  companion DaemonSet above.) The canonical `docs/design.md` and `PRODUCT_PLAN.md`
+  gained a superseded-status banner (their v0.1.x status claims are stale;
+  README/CHANGELOG/PRODUCTION_READINESS_PLAN are authoritative);
+  `docs/design.md` now documents the three architectural seams (action
+  registry, cloud provider seam, fault envelope) as invariants.
+- The controller rejects an agent event carrying both a nonzero XID and a
+  neutral fault (400): classification is Fault-first, so the XID would be
+  silently ignored; ambiguity is refused, never interpreted.
+- Node inventory on the Kubernetes platform is served from an informer-backed
+  watch cache once synced (live List until then, and as fallback):
+  blast-radius confinement resolves node labels on the destructive-admission
+  path, which previously paid an apiserver round trip per check.
+- Internal, from the sixth (structural) round: `reconcile.go` split along its
+  seams (state walk / admission / execution / node resolution);
+  `types.IncidentState.Halted()` is the single definition of "automation has
+  ended", pinned to the store's claim-guard SQL by test; `EnqueueAction`
+  lost its duplicate incident-ID parameter (`Action.IncidentID` is the only
+  spelling); system-level tests now cross the real durable pipeline
+  (ingest → outbox → classify-the-row-read-back → incident), the seam the
+  round-5 critical hid in.
+- Internal, from the seventh (structural) round: the reloadable runtime
+  configuration is one immutable snapshot behind an atomic pointer — the
+  reload path installs it whole (mixed config generations are impossible
+  mid-pass), the previously UNGUARDED timing fields' data race is fixed and
+  pinned by a `-race` test, and a step goroutine completes against the engine
+  that admitted it. The action registry is closed (the last three wire-string
+  matches now derive from registry facts; the `gateAction` string fallback is
+  gone; the agent-dedup-is-catalog-blind boundary is pinned). The execution
+  half of the pipeline gained its assembled-system rig: a fake agent speaking
+  the real claim/complete protocol against the real store and actuator, over
+  five scenarios including controller death mid-step (exactly-once
+  re-attach), lease rebinding across a node reboot, and
+  cancellation-vs-claim.
+
+## [v0.2.0] - 2026-08-01
+
+Production-readiness for EKS. Destructive execution is now a supported,
+off-by-default mode confined by `spec.safety.destructiveExecution`.
+
+### Added
+- Cloud GPU node remediation: `ReplaceNode` (terminate → node-group
+  replacement) as the primary primitive on autoscaled fleets and
+  `RecycleNode` (stop/start) for self-managed nodes, driven controller-side
+  through IRSA. Validated end to end on live EKS.
+- Operator-issued mTLS on `spec.tls.issuer: Operator`, with automatic
+  renewal and a rollout of the consumers on reissue.
+- Evidence-based reset refusal: the agent refuses a per-device GPU reset
+  where the guest has no PCI reset (virtualized instances) and the cloud
+  replace stands in.
+
+### Changed
+- Controller configuration hot-reloads in place instead of rolling the
+  Deployment, removing the HA leader-election rollout deadlock so config
+  changes apply without downtime.
+- Agent host state (persistence mode, DCGM) is snapshotted crash-safe
+  across restarts.
 
 ## [v0.1.1] - 2026-07-28
 

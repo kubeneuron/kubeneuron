@@ -205,16 +205,25 @@ func cmdIncidents() *cobra.Command {
 	return c
 }
 
-func decisionCommand(use, short, route string) *cobra.Command {
+func decisionCommand(use, short, route string, withRound bool) *cobra.Command {
 	c := &cobra.Command{Use: use, Short: short, Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		cl, err := newClient(cmd)
 		if err != nil {
 			return err
 		}
 		reason, _ := cmd.Flags().GetString("reason")
-		body := map[string]string{"actor": actorOrLocalUser(cmd)}
+		body := map[string]any{"actor": actorOrLocalUser(cmd)}
 		if reason != "" {
 			body["reason"] = reason
+		}
+		if withRound {
+			// Pin the decision to the approval round the notification showed:
+			// the controller refuses it if a re-park has since replaced the
+			// request, instead of binding the click to content the human
+			// never saw. Omitted (0) keeps bind-to-current.
+			if round, _ := cmd.Flags().GetInt("round"); round > 0 {
+				body["park_epoch"] = round
+			}
 		}
 		if err := cl.do("POST", "/api/v1/incidents/"+args[0]+route, body, nil); err != nil {
 			return err
@@ -224,19 +233,22 @@ func decisionCommand(use, short, route string) *cobra.Command {
 	}}
 	c.Flags().String("actor", "", "audited actor (default: $USER)")
 	c.Flags().String("reason", "", "reason recorded in the audit trail")
+	if withRound {
+		c.Flags().Int("round", 0, "approval round from the notification; refused if the request changed since")
+	}
 	return c
 }
 
 func cmdApprove() *cobra.Command {
-	return decisionCommand("approve <incident-id>", "Approve a pending risky action", "/approve")
+	return decisionCommand("approve <incident-id>", "Approve a pending risky action", "/approve", true)
 }
 
 func cmdReject() *cobra.Command {
-	return decisionCommand("reject <incident-id>", "Reject a pending risky action", "/reject")
+	return decisionCommand("reject <incident-id>", "Reject a pending risky action", "/reject", true)
 }
 
 func cmdResolve() *cobra.Command {
-	return decisionCommand("resolve <incident-id>", "Manually resolve an incident", "/resolve")
+	return decisionCommand("resolve <incident-id>", "Manually resolve an incident", "/resolve", false)
 }
 
 func cmdRemediate() *cobra.Command {

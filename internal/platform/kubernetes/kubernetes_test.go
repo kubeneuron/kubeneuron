@@ -71,6 +71,56 @@ func TestListNodesFiltersOnGPUCapacity(t *testing.T) {
 	}
 }
 
+// Once StartNodeCache syncs, ListNodes serves from the informer cache — same
+// filtering, same shape — and tracks watch updates without touching the
+// apiserver List path again (admission checks must not pay a round trip per
+// destructive step).
+func TestListNodesServesFromSyncedNodeCache(t *testing.T) {
+	gpu := gpuNode("gpu-1", "8")
+	client := fake.NewSimpleClientset(gpu, gpuNode("cpu-1", ""))
+	p := &Platform{client: client}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	p.StartNodeCache(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for p.nodeLister.Load() == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("node cache never synced")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	nodes, err := p.ListNodes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Name != "gpu-1" {
+		t.Fatalf("cached nodes = %+v, want only gpu-1", nodes)
+	}
+
+	// A label change arriving through the watch is visible without a List.
+	fresh := gpuNode("gpu-1", "8")
+	fresh.Labels = map[string]string{"blast-radius": "yes"}
+	if _, err := client.CoreV1().Nodes().Update(context.Background(), fresh, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		nodes, err = p.ListNodes(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(nodes) == 1 && nodes[0].Labels["blast-radius"] == "yes" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cache never observed the label update; nodes = %+v", nodes)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestCordonSetsUnschedulableAndReason(t *testing.T) {
 	client := fake.NewSimpleClientset(gpuNode("gpu-1", "8"))
 	p := &Platform{client: client}

@@ -55,6 +55,16 @@ spec:
       name: kubeneuron-agent-tls
     serverCASecretRef:
       name: kubeneuron-controller-server-ca
+  # Node recycle/replace remediation against the cloud behind the nodes.
+  # Provider-scoped: the provider selects which per-provider block applies.
+  # Leave the whole block out to disable it (RecycleNode/ReplaceNode then fail
+  # closed). AWS declares both primitives; a provider that lacks one is rejected
+  # at compile time for any playbook that would use it.
+  # cloud:
+  #   provider: aws
+  #   aws:
+  #     region: us-east-1
+  #     iamRoleARN: arn:aws:iam::123456789012:role/kubeneuron-recycle
   observability:
     victoriaMetrics:
       # Installed separately by deploy/kubernetes/dependencies; KubeNeuron

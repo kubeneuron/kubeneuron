@@ -58,7 +58,42 @@ type Core struct {
 	SQL        *sql.DB
 	rebind     func(string) string
 	Checkpoint func(ctx context.Context, db *sql.DB) error
+	// SkipLocked is the dialect's row-locking clause appended to the
+	// event-outbox candidate select: " FOR UPDATE SKIP LOCKED" on PostgreSQL,
+	// empty on SQLite (whose single writer connection already serializes
+	// claimers). It lets concurrent outbox workers lock and claim distinct rows
+	// in parallel instead of all contending on the single oldest row. It is
+	// deliberately NOT used for the action queue, whose "at most one unexpired
+	// lease per node" invariant requires every claimer to converge on the same
+	// row rather than fan out to sibling actions of the same node.
+	SkipLocked string
 }
+
+// MaxActionAttempts caps how many leases one action may be issued before it is
+// dead-lettered. A poison action — repeatedly claimed, never completed (a
+// crash loop, or an incident a human already took over) — must stop re-entering
+// the claimable pool on every lease expiry instead of retrying unboundedly.
+const MaxActionAttempts = 8
+
+// MaxEventAttempts caps how many leases one outbox event may be issued before
+// it is dead-lettered, mirroring MaxActionAttempts for the action queue. A
+// deterministically-failing ("poison") event must stop re-leasing forever and
+// aborting each drain batch; past the budget it leaves the claimable pool.
+const MaxEventAttempts = 8
+
+// terminalIncidentStates is the set of incident states past which no queued
+// action may be handed out: the incident is resolved, expired, or parked for a
+// human (quarantine fails closed to NEEDS_HUMAN). CancelPendingActionsForIncident
+// runs once at terminalization and spares an action under an unexpired lease; if
+// that action's agent then crashes, the lease expires and — without this guard —
+// the action would re-enter the claimable pool and be handed to a restarted
+// agent for an incident a human already took over. The join is on incident_id,
+// so an action with no matching incident row (unstamped) stays claimable.
+//
+// This SQL literal must stay in lockstep with types.IncidentState.Halted —
+// the single definition of "automation has ended" — and a test pins the two
+// together so a new state cannot silently join only one of them.
+const terminalIncidentStates = `('RESOLVED','EXPIRED','NEEDS_HUMAN')`
 
 // NewCore wires a Core over db. rebind may be nil for engines that accept
 // '?' placeholders natively; checkpoint may be nil for engines that need no
@@ -168,8 +203,12 @@ func (c *Core) Prune(ctx context.Context, dataRetention, auditRetention time.Dur
 				 AND id NOT IN (SELECT event_row_id FROM event_outbox)`, cutoff); err != nil {
 				return err
 			}
+			// Terminal actions are prunable: 'done' completed, 'dead' exhausted its
+			// attempt budget, 'cancelled' was tombstoned when its incident
+			// terminalized. Leaving 'dead'/'cancelled' rows unpruned let them
+			// accumulate forever.
 			if stats.Actions, err = q.execCount(ctx,
-				`DELETE FROM actions WHERE state='done' AND updated_at < ?`, cutoff); err != nil {
+				`DELETE FROM actions WHERE state IN ('done','dead','cancelled') AND updated_at < ?`, cutoff); err != nil {
 				return err
 			}
 			return nil
@@ -194,6 +233,21 @@ func (c *Core) Prune(ctx context.Context, dataRetention, auditRetention time.Dur
 				`DELETE FROM audit_log WHERE incident_id IN (`+terminalOld+`)`, cutoff); err != nil {
 				return err
 			}
+			// Delete any actions still stamped with an incident being pruned, in
+			// the SAME transaction, BEFORE the incident row disappears. The
+			// terminal-incident claim guard in ClaimNextAction (NOT EXISTS ...
+			// incidents ... terminal) only keeps a spared expired-lease action out
+			// of the pool WHILE its incident row exists; once Prune removes the
+			// incident the join is vacuously satisfied and a stale gpu_reset/reboot
+			// becomes claimable again. Actions with no matching pruned incident
+			// (incident_id='' or a janitor stamp) are not in the terminalOld set and
+			// stay untouched.
+			var prunedActions int64
+			if prunedActions, err = q.execCount(ctx,
+				`DELETE FROM actions WHERE incident_id IN (`+terminalOld+`)`, cutoff); err != nil {
+				return err
+			}
+			stats.Actions += prunedActions
 			if stats.Incidents, err = q.execCount(ctx,
 				`DELETE FROM incidents WHERE state IN ('RESOLVED','EXPIRED') AND updated_at < ?`, cutoff); err != nil {
 				return err
@@ -228,15 +282,22 @@ func (q *Queries) CreateIncident(ctx context.Context, inc *types.Incident) error
 	}
 	_, err := q.db.ExecContext(ctx, `
 		INSERT INTO incidents (id, node, gpu_uuid, gpu_index, class, state, playbook,
-		                       step_index, attempt, dry_run, signals_seen, opened_at, updated_at, state_changed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		                       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
+		                       opened_at, updated_at, state_changed_at, version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		inc.ID, inc.Target.Node, inc.Target.GPUUUID, inc.Target.GPUIndex,
 		string(inc.Class), string(inc.State), inc.Playbook,
-		inc.StepIndex, inc.Attempt, b2i(inc.DryRun), inc.SignalSeen,
-		ts(inc.OpenedAt), ts(inc.UpdatedAt), ts(stateChanged))
+		inc.StepIndex, inc.Attempt, b2i(inc.DryRun), inc.SignalSeen, b2i(inc.RemediationSlotHeld), inc.ApprovalEpoch,
+		ts(inc.OpenedAt), ts(inc.UpdatedAt), ts(stateChanged), inc.Version)
 	return err
 }
 
+// UpdateIncident persists inc under an optimistic-concurrency guard: it matches
+// the row by id AND version and bumps the stored version, so a writer holding a
+// stale snapshot cannot silently overwrite a row a concurrent writer advanced.
+// A 0-row update is disambiguated: ErrNotFound when the row is gone, ErrConflict
+// when it exists with a newer version. On success inc.Version is advanced to the
+// value just persisted so the caller can keep writing without re-reading.
 func (q *Queries) UpdateIncident(ctx context.Context, inc *types.Incident) error {
 	var resolved any
 	if inc.ResolvedAt != nil {
@@ -244,16 +305,30 @@ func (q *Queries) UpdateIncident(ctx context.Context, inc *types.Incident) error
 	}
 	res, err := q.db.ExecContext(ctx, `
 		UPDATE incidents SET state=?, playbook=?, step_index=?, attempt=?, dry_run=?,
-		                     signals_seen=?, updated_at=?, state_changed_at=?, resolved_at=?
-		WHERE id=?`,
+		                     signals_seen=?, remediation_slot_held=?, approval_epoch=?, updated_at=?, state_changed_at=?, resolved_at=?,
+		                     version=version+1
+		WHERE id=? AND version=?`,
 		string(inc.State), inc.Playbook, inc.StepIndex, inc.Attempt, b2i(inc.DryRun),
-		inc.SignalSeen, ts(inc.UpdatedAt), ts(inc.StateChangedAt), resolved, inc.ID)
+		inc.SignalSeen, b2i(inc.RemediationSlotHeld), inc.ApprovalEpoch, ts(inc.UpdatedAt), ts(inc.StateChangedAt), resolved, inc.ID, inc.Version)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return store.ErrNotFound
+		// No row matched (id, version). Either the incident is gone or a
+		// concurrent writer moved its version on; distinguish the two so the
+		// caller can retry a conflict but surface a genuine disappearance.
+		var current int
+		switch err := q.db.QueryRowContext(ctx,
+			`SELECT version FROM incidents WHERE id=?`, inc.ID).Scan(&current); {
+		case err == sql.ErrNoRows:
+			return store.ErrNotFound
+		case err != nil:
+			return err
+		default:
+			return store.ErrConflict
+		}
 	}
+	inc.Version++
 	return nil
 }
 
@@ -330,7 +405,8 @@ func (q *Queries) CountIncidentsByState(ctx context.Context) (map[types.Incident
 
 const incidentSelect = `
 	SELECT id, node, gpu_uuid, gpu_index, class, state, playbook,
-	       step_index, attempt, dry_run, signals_seen, opened_at, updated_at, state_changed_at, resolved_at
+	       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
+	       opened_at, updated_at, state_changed_at, resolved_at, version
 	FROM incidents`
 
 type rowScanner interface{ Scan(dest ...any) error }
@@ -338,11 +414,11 @@ type rowScanner interface{ Scan(dest ...any) error }
 func scanIncident(r rowScanner) (*types.Incident, error) {
 	var inc types.Incident
 	var class, state, opened, updated, stateChanged string
-	var dryRun int
+	var dryRun, slotHeld int
 	var resolved sql.NullString
 	err := r.Scan(&inc.ID, &inc.Target.Node, &inc.Target.GPUUUID, &inc.Target.GPUIndex,
 		&class, &state, &inc.Playbook, &inc.StepIndex, &inc.Attempt, &dryRun,
-		&inc.SignalSeen, &opened, &updated, &stateChanged, &resolved)
+		&inc.SignalSeen, &slotHeld, &inc.ApprovalEpoch, &opened, &updated, &stateChanged, &resolved, &inc.Version)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
@@ -352,6 +428,7 @@ func scanIncident(r rowScanner) (*types.Incident, error) {
 	inc.Class = types.ProblemClass(class)
 	inc.State = types.IncidentState(state)
 	inc.DryRun = dryRun != 0
+	inc.RemediationSlotHeld = slotHeld != 0
 	inc.OpenedAt = parseTS(opened)
 	inc.UpdatedAt = parseTS(updated)
 	inc.StateChangedAt = parseTS(stateChanged)
@@ -409,19 +486,64 @@ func (q *Queries) AuditTrail(ctx context.Context, incidentID string) ([]*types.A
 
 func (q *Queries) RecordApproval(ctx context.Context, a *types.Approval) error {
 	_, err := q.db.ExecContext(ctx, `
-		INSERT INTO approvals (incident_id, step_name, decision, actor, channel, at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		a.IncidentID, a.StepName, string(a.Decision), a.Actor, a.Channel, ts(a.At))
+		INSERT INTO approvals (incident_id, step_name, decision, actor, channel, at, playbook_name, step_action, step_hash, park_epoch)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.IncidentID, a.StepName, string(a.Decision), a.Actor, a.Channel, ts(a.At),
+		a.PlaybookName, a.StepAction, a.StepHash, a.ParkEpoch)
 	return err
 }
 
 func (q *Queries) LatestApproval(ctx context.Context, incidentID string) (*types.Approval, error) {
 	row := q.db.QueryRowContext(ctx, `
-		SELECT incident_id, step_name, decision, actor, channel, at
+		SELECT incident_id, step_name, decision, actor, channel, at, playbook_name, step_action, step_hash, park_epoch
 		FROM approvals WHERE incident_id=? ORDER BY id DESC LIMIT 1`, incidentID)
 	var a types.Approval
 	var decision, at string
-	err := row.Scan(&a.IncidentID, &a.StepName, &decision, &a.Actor, &a.Channel, &at)
+	err := row.Scan(&a.IncidentID, &a.StepName, &decision, &a.Actor, &a.Channel, &at,
+		&a.PlaybookName, &a.StepAction, &a.StepHash, &a.ParkEpoch)
+	if err == sql.ErrNoRows {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	a.Decision = types.ApprovalDecision(decision)
+	a.At = parseTS(at)
+	return &a, nil
+}
+
+// approvalRoundSelect is shared by the two per-epoch approval reads.
+const approvalRoundSelect = `
+	SELECT incident_id, step_name, decision, actor, channel, at, playbook_name, step_action, step_hash, park_epoch
+	FROM approvals WHERE incident_id=? AND park_epoch=?`
+
+// GetApprovalRequest returns the "requested" record of one approval round —
+// the durable statement of exactly what the human was asked to approve when
+// the incident parked at this epoch. ErrNotFound means the round has no
+// request record (a pre-epoch park); a decision must not be honored for it.
+func (q *Queries) GetApprovalRequest(ctx context.Context, incidentID string, epoch int) (*types.Approval, error) {
+	row := q.db.QueryRowContext(ctx,
+		approvalRoundSelect+` AND decision=? ORDER BY id DESC LIMIT 1`,
+		incidentID, epoch, string(types.ApprovalRequested))
+	return scanApproval(row)
+}
+
+// LatestApprovalDecision returns the newest human decision belonging to one
+// approval round, or ErrNotFound while the round is undecided. A decision
+// recorded for an earlier epoch is invisible here by construction — that is
+// the whole point: a re-park mints a new epoch and orphans stale decisions.
+func (q *Queries) LatestApprovalDecision(ctx context.Context, incidentID string, epoch int) (*types.Approval, error) {
+	row := q.db.QueryRowContext(ctx,
+		approvalRoundSelect+` AND decision<>? ORDER BY id DESC LIMIT 1`,
+		incidentID, epoch, string(types.ApprovalRequested))
+	return scanApproval(row)
+}
+
+func scanApproval(row *sql.Row) (*types.Approval, error) {
+	var a types.Approval
+	var decision, at string
+	err := row.Scan(&a.IncidentID, &a.StepName, &decision, &a.Actor, &a.Channel, &at,
+		&a.PlaybookName, &a.StepAction, &a.StepHash, &a.ParkEpoch)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
@@ -462,14 +584,19 @@ func (q *Queries) UpsertAgentRegistration(ctx context.Context, n *types.Node) er
 	if !n.AgentLastSeen.IsZero() {
 		lastSeen = ts(n.AgentLastSeen)
 	}
+	// agent_arming is written through UNCONDITIONALLY, like gpus/boot_id:
+	// registration is the agent's authoritative self-snapshot, and preserving
+	// a stale 'armed' across an agent downgrade or pod replacement would be a
+	// stale-authority bug. '' (unknown) overwrites too, by design.
 	_, err := q.db.ExecContext(ctx, `
-		INSERT INTO nodes (name, node_uid, platform, gpus, boot_id, agent_last_seen)
-		VALUES (?, ?, 'agent', ?, ?, ?)
+		INSERT INTO nodes (name, node_uid, platform, gpus, boot_id, agent_last_seen, agent_arming)
+		VALUES (?, ?, 'agent', ?, ?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
 			node_uid=CASE WHEN excluded.node_uid<>'' THEN excluded.node_uid ELSE nodes.node_uid END,
 			gpus=excluded.gpus, boot_id=excluded.boot_id,
-			agent_last_seen=excluded.agent_last_seen`,
-		n.Name, n.UID, string(gpus), n.BootID, lastSeen)
+			agent_last_seen=excluded.agent_last_seen,
+			agent_arming=excluded.agent_arming`,
+		n.Name, n.UID, string(gpus), n.BootID, lastSeen, string(n.AgentArming))
 	return err
 }
 
@@ -515,15 +642,15 @@ func (q *Queries) ListNodes(ctx context.Context) ([]*types.Node, error) {
 }
 
 const nodeSelect = `
-	SELECT name, node_uid, platform, labels, ssh_addr, bmc_addr, gpus, boot_id, paused, agent_last_seen
+	SELECT name, node_uid, platform, labels, ssh_addr, bmc_addr, gpus, boot_id, paused, agent_last_seen, agent_arming
 	FROM nodes`
 
 func scanNode(r rowScanner) (*types.Node, error) {
 	var n types.Node
-	var labels, gpus string
+	var labels, gpus, arming string
 	var paused int
 	var lastSeen sql.NullString
-	err := r.Scan(&n.Name, &n.UID, &n.Platform, &labels, &n.SSHAddr, &n.BMCAddr, &gpus, &n.BootID, &paused, &lastSeen)
+	err := r.Scan(&n.Name, &n.UID, &n.Platform, &labels, &n.SSHAddr, &n.BMCAddr, &gpus, &n.BootID, &paused, &lastSeen, &arming)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
@@ -531,6 +658,7 @@ func scanNode(r rowScanner) (*types.Node, error) {
 		return nil, err
 	}
 	n.Paused = paused != 0
+	n.AgentArming = types.AgentArming(arming)
 	_ = json.Unmarshal([]byte(labels), &n.Labels)
 	_ = json.Unmarshal([]byte(gpus), &n.GPUs)
 	if lastSeen.Valid {
@@ -568,18 +696,18 @@ func (c *Core) UpsertAcceleratorReport(ctx context.Context, report *types.AgentA
 	err = c.wrap(tx).QueryRowContext(ctx, acceleratorReportPayloadSelect+` WHERE node=? AND vendor=?`, report.Node, string(report.Vendor)).Scan(
 		&current.ObservedAtNS, &current.NodeUID, &current.ProfileDigest, &current.ProfileUID, &current.ProfileGeneration, &current.Readiness,
 		&current.ReasonsJSON, &current.DevicesJSON, &current.DriverVersion,
-		&current.RuntimeVersion, &current.TopologySafety, &current.CapabilitiesJSON)
+		&current.RuntimeVersion, &current.TopologySafety, &current.CapabilitiesJSON, &current.HoldersJSON)
 	switch {
 	case err == sql.ErrNoRows:
 		if _, err := c.wrap(tx).ExecContext(ctx, `
 			INSERT INTO accelerator_reports (
 				node, vendor, node_uid, observed_at_ns, profile_digest, profile_uid, profile_generation, readiness, reasons_json,
-				devices_json, driver_version, runtime_version, topology_safety, capabilities_json
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				devices_json, driver_version, runtime_version, topology_safety, capabilities_json, holders_json
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			report.Node, string(report.Vendor), payload.NodeUID, payload.ObservedAtNS, payload.ProfileDigest, payload.ProfileUID, payload.ProfileGeneration,
 			payload.Readiness, payload.ReasonsJSON, payload.DevicesJSON,
 			payload.DriverVersion, payload.RuntimeVersion, payload.TopologySafety,
-			payload.CapabilitiesJSON); err != nil {
+			payload.CapabilitiesJSON, payload.HoldersJSON); err != nil {
 			return rollback(fmt.Errorf("insert accelerator report: %w", err))
 		}
 	case err != nil:
@@ -598,11 +726,11 @@ func (c *Core) UpsertAcceleratorReport(ctx context.Context, report *types.AgentA
 			UPDATE accelerator_reports SET
 				node_uid=?, observed_at_ns=?, profile_digest=?, profile_uid=?, profile_generation=?, readiness=?, reasons_json=?,
 				devices_json=?, driver_version=?, runtime_version=?, topology_safety=?,
-				capabilities_json=?
+				capabilities_json=?, holders_json=?
 			WHERE node=? AND vendor=? AND observed_at_ns < ?`,
 			payload.NodeUID, payload.ObservedAtNS, payload.ProfileDigest, payload.ProfileUID, payload.ProfileGeneration, payload.Readiness,
 			payload.ReasonsJSON, payload.DevicesJSON, payload.DriverVersion,
-			payload.RuntimeVersion, payload.TopologySafety, payload.CapabilitiesJSON,
+			payload.RuntimeVersion, payload.TopologySafety, payload.CapabilitiesJSON, payload.HoldersJSON,
 			report.Node, string(report.Vendor), payload.ObservedAtNS)
 		if err != nil {
 			return rollback(fmt.Errorf("update accelerator report: %w", err))
@@ -651,12 +779,12 @@ func (q *Queries) ListAcceleratorReports(ctx context.Context, node string) ([]*t
 
 const acceleratorReportSelect = `
 	SELECT node, vendor, node_uid, observed_at_ns, profile_digest, profile_uid, profile_generation, readiness, reasons_json,
-	       devices_json, driver_version, runtime_version, topology_safety, capabilities_json
+	       devices_json, driver_version, runtime_version, topology_safety, capabilities_json, holders_json
 	FROM accelerator_reports`
 
 const acceleratorReportPayloadSelect = `
 	SELECT observed_at_ns, node_uid, profile_digest, profile_uid, profile_generation, readiness, reasons_json, devices_json,
-	       driver_version, runtime_version, topology_safety, capabilities_json
+	       driver_version, runtime_version, topology_safety, capabilities_json, holders_json
 	FROM accelerator_reports`
 
 type acceleratorReportPayload struct {
@@ -672,6 +800,12 @@ type acceleratorReportPayload struct {
 	RuntimeVersion    string
 	TopologySafety    string
 	CapabilitiesJSON  string
+	// HoldersJSON is the marshalled DeviceHolders slice. It preserves the
+	// nil-vs-empty distinction the reset gate depends on: json 'null' means the
+	// agent did not look, '[]' means it looked and found nothing holding a
+	// device. Legacy rows default to 'null' so an old report stays "not
+	// observed" rather than being misread as "observed, none present".
+	HoldersJSON string
 }
 
 func (p acceleratorReportPayload) equal(other acceleratorReportPayload) bool {
@@ -691,6 +825,12 @@ func marshalAcceleratorReport(report *types.AgentAcceleratorReport) (accelerator
 	if err != nil {
 		return acceleratorReportPayload{}, fmt.Errorf("marshal capabilities: %w", err)
 	}
+	// json.Marshal renders a nil slice as 'null' and an empty non-nil slice as
+	// '[]', so the nil-vs-empty holders distinction survives the round trip.
+	holders, err := json.Marshal(report.DeviceHolders)
+	if err != nil {
+		return acceleratorReportPayload{}, fmt.Errorf("marshal device holders: %w", err)
+	}
 	return acceleratorReportPayload{
 		ObservedAtNS:      report.ObservedAt.UnixNano(),
 		NodeUID:           report.NodeUID,
@@ -704,6 +844,7 @@ func marshalAcceleratorReport(report *types.AgentAcceleratorReport) (accelerator
 		RuntimeVersion:    report.RuntimeVersion,
 		TopologySafety:    string(report.TopologySafety),
 		CapabilitiesJSON:  string(capabilities),
+		HoldersJSON:       string(holders),
 	}, nil
 }
 
@@ -711,11 +852,11 @@ func scanAcceleratorReport(r rowScanner) (*types.AgentAcceleratorReport, error) 
 	var report types.AgentAcceleratorReport
 	var vendor string
 	var observedAtNS int64
-	var reasons, devices, capabilities string
+	var reasons, devices, capabilities, holders string
 	var readiness, topologySafety string
 	err := r.Scan(&report.Node, &vendor, &report.NodeUID, &observedAtNS, &report.ProfileDigest, &report.ProfileUID, &report.ProfileGeneration,
 		&readiness, &reasons, &devices, &report.DriverVersion,
-		&report.RuntimeVersion, &topologySafety, &capabilities)
+		&report.RuntimeVersion, &topologySafety, &capabilities, &holders)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
@@ -735,6 +876,12 @@ func scanAcceleratorReport(r rowScanner) (*types.AgentAcceleratorReport, error) 
 	if err := json.Unmarshal([]byte(capabilities), &report.Capabilities); err != nil {
 		return nil, fmt.Errorf("accelerator report %s/%s: corrupt capabilities: %w", report.Node, report.Vendor, err)
 	}
+	// report.DeviceHolders starts nil; a stored 'null' leaves it nil ("agent
+	// did not look"), '[]' makes it non-nil empty ("looked, none present").
+	// Keeping the two apart is load-bearing for the controller's reset gate.
+	if err := json.Unmarshal([]byte(holders), &report.DeviceHolders); err != nil {
+		return nil, fmt.Errorf("accelerator report %s/%s: corrupt device holders: %w", report.Node, report.Vendor, err)
+	}
 	if err := report.Validate(); err != nil {
 		return nil, fmt.Errorf("accelerator report %s/%s: corrupt persisted report: %w", report.Node, report.Vendor, err)
 	}
@@ -743,7 +890,7 @@ func scanAcceleratorReport(r rowScanner) (*types.AgentAcceleratorReport, error) 
 
 // --- action queue ---
 
-func (q *Queries) EnqueueAction(ctx context.Context, node, incidentID string, a types.Action) error {
+func (q *Queries) EnqueueAction(ctx context.Context, node string, a types.Action) error {
 	params, err := json.Marshal(a.Params)
 	if err != nil {
 		return err
@@ -753,7 +900,7 @@ func (q *Queries) EnqueueAction(ctx context.Context, node, incidentID string, a 
 		INSERT INTO actions (id, node, incident_id, type, params, timeout_ns, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO NOTHING`,
-		a.ID, node, incidentID, string(a.Type), string(params), int64(a.Timeout), now, now)
+		a.ID, node, a.IncidentID, string(a.Type), string(params), int64(a.Timeout), now, now)
 	return err
 }
 
@@ -768,6 +915,33 @@ func (c *Core) ClaimNextAction(ctx context.Context, node, bootID string, leaseDu
 	now := time.Now()
 	nowNS := now.UnixNano()
 	minimumLeaseNS := int64(leaseDuration)
+
+	// Dead-letter poison actions before claiming. An action that has exhausted
+	// its attempt budget and is provably not executing — pending, or leased with
+	// an expired lease — must leave the claimable pool for good rather than be
+	// re-leased on every expiry forever. A genuinely in-flight action (unexpired
+	// lease) is left untouched so the boot-ID/lease completion contract holds
+	// for work that may still be running.
+	if _, err := c.db.ExecContext(ctx, `
+		UPDATE actions
+		SET state='dead', lease_token='', lease_expires_at_ns=0, updated_at=?
+		WHERE node=? AND attempts>=?
+		  AND (state='pending' OR (state='leased' AND lease_expires_at_ns <= ?))`,
+		ts(now), node, MaxActionAttempts, nowNS); err != nil {
+		return nil, fmt.Errorf("claim action: dead-letter exhausted actions: %w", err)
+	}
+
+	// The claim is atomic under concurrency without FOR UPDATE SKIP LOCKED.
+	// Every concurrent claimer's inner SELECT deterministically resolves to the
+	// same oldest candidate, so they serialize on that one row's write lock; the
+	// OUTER claimable-state predicate is then re-checked against the row each
+	// waiter finally sees. Once the winner has leased it the row is no longer
+	// pending-or-expired, so every loser updates zero rows and reports no work.
+	// This both prevents the double-lease (two claimers overwriting one row's
+	// token and double-counting attempts) and preserves "at most one unexpired
+	// lease per node": SKIP LOCKED is intentionally absent here because it would
+	// let a loser lease a different action for the same node and break that
+	// invariant.
 	row := c.db.QueryRowContext(ctx, `
 		UPDATE actions
 		SET state='leased', lease_token=?,
@@ -780,32 +954,50 @@ func (c *Core) ClaimNextAction(ctx context.Context, node, bootID string, leaseDu
 			WHERE candidate.node=?
 			  AND (candidate.state='pending'
 			       OR (candidate.state='leased' AND candidate.lease_expires_at_ns <= ?))
+			  AND candidate.attempts < ?
 			  AND NOT EXISTS (
 				SELECT 1 FROM actions AS held
 				WHERE held.node=candidate.node
 				  AND held.state='leased'
 				  AND held.lease_expires_at_ns > ?
 			  )
+			  AND NOT EXISTS (
+				SELECT 1 FROM incidents AS inc
+				WHERE inc.id=candidate.incident_id
+				  AND inc.state IN `+terminalIncidentStates+`
+			  )
 			ORDER BY candidate.created_at, candidate.id
 			LIMIT 1
 		)
+		  AND (state='pending' OR (state='leased' AND lease_expires_at_ns <= ?))
 		RETURNING id, node, incident_id, type, params, timeout_ns, state, result,
 		          lease_token, lease_expires_at_ns, attempts, executor_boot_id`,
-		token, nowNS, minimumLeaseNS, minimumLeaseNS, bootID, ts(now), node, nowNS, nowNS)
+		token, nowNS, minimumLeaseNS, minimumLeaseNS, bootID, ts(now),
+		node, nowNS, MaxActionAttempts, nowNS, nowNS)
 	return scanAction(row)
 }
 
 // CancelPendingActionsForIncident tombstones the incident's undelivered
-// actions. Only 'pending' work is cancellable: a leased action may already
-// be executing on the node, and pretending it was revoked would lie about a
-// possible side effect. Returns how many actions were cancelled.
+// actions when the incident terminalizes. A 'pending' action was never
+// delivered, and a 'leased' action whose lease has expired is provably not
+// executing (the lease is the node's promise to be running it), so both can be
+// safely revoked. An action under an unexpired lease is left alone: it may
+// still be executing on the node, and pretending it was revoked would lie
+// about a possible side effect. This closes the hole where a leased-then-
+// orphaned action of a quarantined or resolved incident re-entered the
+// claimable pool on every lease expiry — a crashed agent being handed a stale
+// gpu_reset for an incident a human already took over. Returns the count
+// cancelled.
 func (q *Queries) CancelPendingActionsForIncident(ctx context.Context, incidentID string) (int64, error) {
 	if incidentID == "" {
 		return 0, fmt.Errorf("cancel actions: incident ID is required")
 	}
 	out, err := q.db.ExecContext(ctx, `
-		UPDATE actions SET state='cancelled', updated_at=?
-		WHERE incident_id=? AND state='pending'`, ts(time.Now()), incidentID)
+		UPDATE actions SET state='cancelled', lease_token='', lease_expires_at_ns=0, updated_at=?
+		WHERE incident_id=?
+		  AND (state='pending'
+		       OR (state='leased' AND lease_expires_at_ns <= ?))`,
+		ts(time.Now()), incidentID, time.Now().UnixNano())
 	if err != nil {
 		return 0, err
 	}
@@ -829,13 +1021,17 @@ func (q *Queries) CompleteClaimedAction(ctx context.Context, actionID, leaseToke
 	now := time.Now()
 	// The boot guard binds the result to the node boot that claimed the
 	// action: a result posted after an unnoticed reboot is not evidence
-	// that the side effect completed on the boot that started it.
+	// that the side effect completed on the boot that started it. An action
+	// claimed with a boot ID (executor_boot_id != '') must be completed with a
+	// matching one; an absent/empty completion boot ID no longer bypasses the
+	// guard (it fails closed with ErrExecutorBootMismatch below). Actions
+	// claimed without a boot ID (executor_boot_id='') carry no boot to check.
 	out, err := q.db.ExecContext(ctx, `
 		UPDATE actions
 		SET state='done', result=?, lease_token='', lease_expires_at_ns=0, updated_at=?
 		WHERE id=? AND state='leased' AND lease_token=? AND lease_expires_at_ns > ?
-		  AND (executor_boot_id='' OR ?='' OR executor_boot_id=?)`,
-		string(blob), ts(now), actionID, leaseToken, now.UnixNano(), bootID, bootID)
+		  AND (executor_boot_id='' OR executor_boot_id=?)`,
+		string(blob), ts(now), actionID, leaseToken, now.UnixNano(), bootID)
 	if err != nil {
 		return err
 	}
@@ -843,13 +1039,17 @@ func (q *Queries) CompleteClaimedAction(ctx context.Context, actionID, leaseToke
 		return nil
 	}
 	// Preserve ErrNotFound for an unknown ID; distinguish a boot mismatch
-	// from a wrong/expired lease so operators see the reboot.
+	// from a wrong/expired lease so operators see the reboot. A boot mismatch
+	// is only diagnosable while the lease is otherwise current — token still
+	// matching AND unexpired — but the completing boot differs from the one
+	// that claimed it. An expired lease is ErrLeaseLost regardless of boot: the
+	// action was reclaimable, so reporting a boot mismatch would misdiagnose it.
 	current, err := q.GetAction(ctx, actionID)
 	if err != nil {
 		return err
 	}
-	if bootID != "" && current.ExecutorBootID != "" && current.ExecutorBootID != bootID &&
-		current.LeaseToken == leaseToken {
+	if current.LeaseToken == leaseToken && current.LeaseExpiresAt.After(now) &&
+		current.ExecutorBootID != "" && current.ExecutorBootID != bootID {
 		return store.ErrExecutorBootMismatch
 	}
 	return store.ErrLeaseLost
@@ -945,15 +1145,32 @@ func (c *Core) ArchiveAndEnqueueEvent(ctx context.Context, ev *types.AgentEvent)
 		return false, cause
 	}
 
+	// The neutral fault envelope and PCI address must survive the archive round
+	// trip: the controller classifies the event AFTER reading it back from the
+	// outbox, so a fallback event carrying XID=0 + Fault{nvidia, ecc-dbe} whose
+	// Fault was dropped here would classify as non-actionable and open no
+	// incident. A nil Fault marshals to the empty string so legacy rows (which
+	// only ever carried an XID) and genuine no-fault events both scan back to a
+	// nil Fault rather than a fabricated one.
+	faultJSON := ""
+	if ev.Fault != nil {
+		blob, err := json.Marshal(ev.Fault)
+		if err != nil {
+			return rollback(fmt.Errorf("marshal event fault: %w", err))
+		}
+		faultJSON = string(blob)
+	}
+
 	// RETURNING keeps this portable: PostgreSQL has no LastInsertId, and a
 	// conflicting (duplicate) insert returns no row on both engines.
 	var eventRowID int64
 	err = c.wrap(tx).QueryRowContext(ctx, `
-		INSERT INTO events (event_id, node, gpu_index, gpu_uuid, xid, raw, timestamp)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO events (event_id, node, gpu_index, gpu_uuid, xid, raw, timestamp, fault_json, pci_addr)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT DO NOTHING
 		RETURNING id`,
-		ev.EventID, ev.Node, ev.GPUIndex, ev.GPUUUID, ev.XID, ev.Raw, ts(ev.Timestamp)).Scan(&eventRowID)
+		ev.EventID, ev.Node, ev.GPUIndex, ev.GPUUUID, ev.XID, ev.Raw, ts(ev.Timestamp),
+		faultJSON, ev.PCIAddr).Scan(&eventRowID)
 	if errors.Is(err, sql.ErrNoRows) {
 		if err := tx.Commit(); err != nil {
 			return false, fmt.Errorf("commit duplicate event archive: %w", err)
@@ -989,7 +1206,31 @@ func (c *Core) ClaimNextEvent(ctx context.Context, workerID string, leaseDuratio
 	now := time.Now()
 	nowNS := now.UnixNano()
 	expiresAtNS := now.Add(leaseDuration).UnixNano()
+
+	// Dead-letter poison events before claiming, mirroring the action queue. An
+	// event that has exhausted its attempt budget and is provably not being
+	// processed — pending, or leased with an expired lease — leaves the
+	// claimable pool for good rather than re-leasing on every expiry and
+	// aborting each drain batch forever. An event under an unexpired lease is
+	// left untouched so a worker still holding a valid claim can complete it.
+	if _, err := c.db.ExecContext(ctx, `
+		UPDATE event_outbox
+		SET state='dead', lease_owner='', lease_token='', lease_expires_at_ns=0, updated_at=?
+		WHERE attempts>=?
+		  AND (state='pending' OR (state='leased' AND lease_expires_at_ns <= ?))`,
+		ts(now), MaxEventAttempts, nowNS); err != nil {
+		return nil, fmt.Errorf("claim event: dead-letter exhausted events: %w", err)
+	}
+
 	var outboxID int64
+	// The outbox is a parallel work queue with no per-worker exclusivity, so
+	// FOR UPDATE SKIP LOCKED (PostgreSQL) lets each concurrent worker lock and
+	// claim a distinct row instead of two claimers picking the same one under
+	// READ COMMITTED. The OUTER state predicate re-checks the row at UPDATE time
+	// so that, even where the dialect has no skip-locked clause (SQLite), a
+	// stale candidate that was leased out from under this claimer updates zero
+	// rows rather than being re-leased. SQLite serializes writers on one
+	// connection, so its empty clause is already safe.
 	err = c.db.QueryRowContext(ctx, `
 		UPDATE event_outbox
 		SET state='leased', attempts=attempts+1, lease_owner=?, lease_token=?,
@@ -997,13 +1238,15 @@ func (c *Core) ClaimNextEvent(ctx context.Context, workerID string, leaseDuratio
 		WHERE id = (
 			SELECT candidate.id
 			FROM event_outbox AS candidate
-			WHERE candidate.state='pending'
-			   OR (candidate.state='leased' AND candidate.lease_expires_at_ns <= ?)
+			WHERE candidate.attempts < ?
+			  AND (candidate.state='pending'
+			       OR (candidate.state='leased' AND candidate.lease_expires_at_ns <= ?))
 			ORDER BY candidate.created_at, candidate.id
-			LIMIT 1
+			LIMIT 1`+c.SkipLocked+`
 		)
+		  AND (state='pending' OR (state='leased' AND lease_expires_at_ns <= ?))
 		RETURNING id`,
-		workerID, token, expiresAtNS, ts(now), nowNS).Scan(&outboxID)
+		workerID, token, expiresAtNS, ts(now), MaxEventAttempts, nowNS, nowNS).Scan(&outboxID)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
@@ -1011,7 +1254,11 @@ func (c *Core) ClaimNextEvent(ctx context.Context, workerID string, leaseDuratio
 		return nil, fmt.Errorf("claim event: %w", err)
 	}
 
-	row := c.db.QueryRowContext(ctx, eventOutboxSelect+` WHERE o.id=?`, outboxID)
+	// Re-read filtered on the lease token this claim just issued: if the row was
+	// leased out from under us (a stall past the lease before this read), the
+	// token no longer matches and scanClaimedEvent reports no work rather than
+	// this worker adopting another worker's claim.
+	row := c.db.QueryRowContext(ctx, eventOutboxSelect+` WHERE o.id=? AND o.lease_token=?`, outboxID, token)
 	claimed, err := scanClaimedEvent(row)
 	if err != nil {
 		return nil, err
@@ -1109,23 +1356,35 @@ func (q *Queries) requireCurrentEventLease(ctx context.Context, outboxID int64, 
 
 const eventOutboxSelect = `
 	SELECT o.id, e.event_id, e.node, e.gpu_index, e.gpu_uuid, e.xid, e.raw, e.timestamp,
+	       e.fault_json, e.pci_addr,
 	       o.attempts, o.lease_token, o.lease_expires_at_ns
 	FROM event_outbox AS o
 	JOIN events AS e ON e.id=o.event_row_id`
 
 func scanClaimedEvent(r rowScanner) (*store.ClaimedEvent, error) {
 	var claimed store.ClaimedEvent
-	var timestamp string
+	var timestamp, faultJSON string
 	var leaseExpiresAtNS int64
 	err := r.Scan(&claimed.OutboxID, &claimed.Event.EventID, &claimed.Event.Node,
 		&claimed.Event.GPUIndex, &claimed.Event.GPUUUID, &claimed.Event.XID,
-		&claimed.Event.Raw, &timestamp, &claimed.Attempt, &claimed.LeaseToken,
-		&leaseExpiresAtNS)
+		&claimed.Event.Raw, &timestamp, &faultJSON, &claimed.Event.PCIAddr,
+		&claimed.Attempt, &claimed.LeaseToken, &leaseExpiresAtNS)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
 	if err != nil {
 		return nil, err
+	}
+	// An empty fault_json ("no fault", including every legacy row) leaves Fault
+	// nil, keeping the XID-vs-Fault authority distinction the classifier depends
+	// on; a stored envelope is rehydrated so the fallback detection source
+	// survives the durable round trip.
+	if faultJSON != "" {
+		var fault types.FaultSignal
+		if err := json.Unmarshal([]byte(faultJSON), &fault); err != nil {
+			return nil, fmt.Errorf("event outbox %d: corrupt fault envelope: %w", claimed.OutboxID, err)
+		}
+		claimed.Event.Fault = &fault
 	}
 	claimed.Event.Timestamp = parseTS(timestamp)
 	if claimed.LeaseToken == "" || leaseExpiresAtNS <= 0 {

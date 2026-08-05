@@ -15,6 +15,12 @@ import (
 var (
 	// ErrNotFound is returned when a requested record does not exist.
 	ErrNotFound = errors.New("store: not found")
+	// ErrConflict is returned by UpdateIncident when the row still exists but
+	// its version no longer matches the caller's snapshot: another writer
+	// advanced it in between. It is the optimistic-concurrency signal that the
+	// caller must re-read and retry rather than overwrite; it is deliberately
+	// distinct from ErrNotFound, which means the row is gone for good.
+	ErrConflict = errors.New("store: incident update conflict")
 	// ErrLeaseLost is returned when an action result is submitted with a
 	// lease that is no longer current. Callers must not treat this as a
 	// successful completion: the action may have been reclaimed and executed
@@ -24,6 +30,11 @@ var (
 	// a different node boot than the one that claimed the action: the node
 	// rebooted mid-execution and the outcome must be treated as unknown.
 	ErrExecutorBootMismatch = errors.New("store: action result from a different executor boot")
+	// ErrActionForeignNode is returned when a node submits a result for an
+	// action that belongs to a different node. It is an authorization failure,
+	// not a transient one: the caller must never retry, and the API surfaces it
+	// as a 403 rather than a 5xx.
+	ErrActionForeignNode = errors.New("store: action belongs to another node")
 	// ErrEventLeaseLost is returned when an outbox event is acknowledged with
 	// a lease that is no longer current. The worker must not treat this as a
 	// successful completion: another worker may have reclaimed the event after
@@ -54,7 +65,15 @@ type Tx interface {
 	// workflow consumers use it to decide whether to open or update an
 	// incident, then persist the decision and its audit entry atomically.
 	GetOpenIncident(ctx context.Context, target types.Target, class types.ProblemClass) (*types.Incident, error)
+	// GetIncident reads an incident by ID through the transaction, so a caller
+	// can re-read the current row (and its optimistic version) inside the same
+	// transaction as the mutation it is about to apply.
+	GetIncident(ctx context.Context, id string) (*types.Incident, error)
 	CreateIncident(ctx context.Context, inc *types.Incident) error
+	// UpdateIncident persists inc guarded by its optimistic version. It returns
+	// ErrConflict when the stored row has a newer version than inc.Version, and
+	// ErrNotFound when the row is absent. On success it bumps inc.Version to the
+	// value it just persisted.
 	UpdateIncident(ctx context.Context, inc *types.Incident) error
 	AppendAudit(ctx context.Context, e *types.AuditEntry) error
 	RecordApproval(ctx context.Context, a *types.Approval) error
@@ -66,7 +85,9 @@ type Store interface {
 	// through the Tx commits, or none do. fn must not retain the Tx.
 	WithTx(ctx context.Context, fn func(Tx) error) error
 
-	// Incidents
+	// Incidents. UpdateIncident is guarded by the incident's optimistic
+	// version: it returns ErrConflict when a concurrent writer has advanced the
+	// row past inc.Version, and bumps inc.Version on success.
 	CreateIncident(ctx context.Context, inc *types.Incident) error
 	UpdateIncident(ctx context.Context, inc *types.Incident) error
 	GetIncident(ctx context.Context, id string) (*types.Incident, error)
@@ -83,19 +104,34 @@ type Store interface {
 
 	// Approvals
 	RecordApproval(ctx context.Context, a *types.Approval) error
-	// LatestApproval returns the most recent decision for an incident, or
-	// ErrNotFound when none has been recorded.
+	// LatestApproval returns the most recent approvals ROW of any kind for an
+	// incident (requests and decisions alike), or ErrNotFound.
+	//
+	// Deprecated for protocol decisions: it ignores approval rounds, which is
+	// exactly the bug class the round-scoped queries below retired. Use
+	// GetApprovalRequest/LatestApprovalDecision with the incident's
+	// ApprovalEpoch; this remains only as a raw inspection read (tests, UI).
 	LatestApproval(ctx context.Context, incidentID string) (*types.Approval, error)
+	// GetApprovalRequest returns the "requested" record of one approval round
+	// (park epoch) — what the human was asked. ErrNotFound: no record; a
+	// decision must not be honored for such a round.
+	GetApprovalRequest(ctx context.Context, incidentID string, epoch int) (*types.Approval, error)
+	// LatestApprovalDecision returns the newest human decision of one round,
+	// or ErrNotFound while the round is undecided. Decisions of earlier
+	// epochs are invisible by construction.
+	LatestApprovalDecision(ctx context.Context, incidentID string, epoch int) (*types.Approval, error)
 
 	// Action queue (controller -> agent dispatch). EnqueueAction is
-	// idempotent on Action.ID. ClaimNextAction atomically leases the oldest
+	// idempotent on Action.ID; the owning incident is Action.IncidentID
+	// (empty for unowned work such as janitor restores).
+	// ClaimNextAction atomically leases the oldest
 	// available action for a node. At most one unexpired lease can exist for a
 	// node, and an expired lease is eligible to be reclaimed. The returned
 	// QueuedAction carries the opaque lease token that must be supplied to
 	// CompleteClaimedAction. The requested duration is a minimum; the store
 	// extends the lease to cover the action's declared timeout. A non-positive
 	// lease duration is invalid.
-	EnqueueAction(ctx context.Context, node, incidentID string, a types.Action) error
+	EnqueueAction(ctx context.Context, node string, a types.Action) error
 	ClaimNextAction(ctx context.Context, node, bootID string, leaseDuration time.Duration) (*types.QueuedAction, error)
 	// CompleteClaimedAction conditionally completes an action only when the
 	// supplied lease token still owns an unexpired lease. It returns

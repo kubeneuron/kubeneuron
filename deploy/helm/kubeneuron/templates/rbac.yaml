@@ -30,6 +30,7 @@ rules:
       - gpuremediationpolicies/status
       - gpuplaybooks/status
       - acceleratorruntimeprofiles/status
+      - gpusignalmappings/status
     verbs: ["get", "patch", "update"]
   - apiGroups: ["kubeneuron.io"]
     resources: ["kubeneurons/finalizers"]

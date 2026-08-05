@@ -32,7 +32,12 @@ import (
 )
 
 const (
-	reconcileRetry                   = 30 * time.Second
+	reconcileRetry = 30 * time.Second
+	// pkiCheckInterval is how often a settled installation re-examines its TLS
+	// material. Certificates are renewed with a third of their life remaining —
+	// 30 days on a 90-day certificate — so checking twice a day is frequent
+	// enough to be irrelevant to the margin and rare enough to cost nothing.
+	pkiCheckInterval                 = 12 * time.Hour
 	deploymentSystemAnnotationPrefix = "deployment.kubernetes.io/"
 	daemonSetSystemAnnotationPrefix  = "deprecated.daemonset."
 )
@@ -81,13 +86,30 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 
 	policies, playbooks, mappings, maintenance, nodeConfigs, acceleratorProfiles, err := r.configuration(ctx)
 	if err != nil {
+		// Same rationale as the compile-failure path below: certificates expire on
+		// a wall-clock deadline, so a transient failure to list child configuration
+		// must not freeze leaf renewal. Renew best-effort, then report the failure.
+		if _, pkiErr := r.ReconcilePKI(ctx, &installation, time.Now()); pkiErr != nil {
+			r.event(&installation, corev1.EventTypeWarning, "ReconcileFailed",
+				fmt.Sprintf("reconcile TLS material while configuration is unlistable: %v", pkiErr))
+		}
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, nil, err)
 	}
 	snapshot, err := CompileSnapshot(&installation, policies, playbooks, mappings, maintenance, nodeConfigs, acceleratorProfiles)
 	if err != nil {
 		r.event(&installation, corev1.EventTypeWarning, "ConfigurationInvalid", err.Error())
-		if statusErr := r.updateChildConfigurationStatuses(ctx, &installation, policies, playbooks, acceleratorProfiles, nil, err); statusErr != nil {
+		if statusErr := r.updateChildConfigurationStatuses(ctx, &installation, policies, playbooks, mappings, acceleratorProfiles, nil, err); statusErr != nil {
 			err = errors.Join(err, fmt.Errorf("update child configuration statuses: %w", statusErr))
+		}
+		// PKI renewal must not depend on the configuration compiling. Certificates
+		// expire on a wall-clock deadline regardless of whether the latest CRD edit
+		// is valid, so freezing leaf renewal behind an inert config error (e.g. a
+		// RecycleNode playbook with no spec.cloud) would take fleet mTLS down over a
+		// mistake that never changed anything at runtime. Renew here, best-effort,
+		// and still report the configuration failure as the reconcile outcome.
+		if _, pkiErr := r.ReconcilePKI(ctx, &installation, time.Now()); pkiErr != nil {
+			r.event(&installation, corev1.EventTypeWarning, "ReconcileFailed",
+				fmt.Sprintf("reconcile TLS material while configuration is invalid: %v", pkiErr))
 		}
 		return ctrl.Result{RequeueAfter: reconcileRetry}, r.updateStatus(ctx, &installation, nil, err, false, "")
 	}
@@ -95,12 +117,20 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 		r.event(&installation, corev1.EventTypeNormal, "SnapshotPublished",
 			"configuration snapshot "+snapshot.Digest+" compiled and rolling out")
 	}
-	if err := r.updateChildConfigurationStatuses(ctx, &installation, policies, playbooks, acceleratorProfiles, snapshot, nil); err != nil {
+	if err := r.updateChildConfigurationStatuses(ctx, &installation, policies, playbooks, mappings, acceleratorProfiles, snapshot, nil); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("update child configuration statuses: %w", err))
 	}
 
 	if err := r.targetNamespaceExists(ctx, &installation); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, err)
+	}
+
+	// TLS material is settled before anything that mounts it is created or
+	// rolled. Nothing renewed certificates before this existed, so an
+	// installation stopped authenticating about a year after it was made.
+	pkiResult, err := r.ReconcilePKI(ctx, &installation, time.Now())
+	if err != nil {
+		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile TLS material: %w", err))
 	}
 
 	if err := r.ensureConfigMap(ctx, &installation, runtimeConfigMap(&installation, snapshot)); err != nil {
@@ -135,15 +165,21 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 			return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile controller PersistentVolumeClaim: %w", err))
 		}
 	}
-	deployment, err := controllerDeployment(&installation, snapshot)
+	deployment, err := controllerDeployment(&installation, snapshot, pkiResult.Revisions.Controller)
 	if err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, err)
 	}
 	if err := r.ensureDeployment(ctx, &installation, deployment); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile controller Deployment: %w", err))
 	}
-	if err := r.ensureDaemonSet(ctx, &installation, agentDaemonSet(&installation, snapshot)); err != nil {
+	if err := r.ensureDaemonSet(ctx, &installation, agentDaemonSet(&installation, snapshot, pkiResult.Revisions.Agent)); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile agent DaemonSet: %w", err))
+	}
+	// The two-DaemonSet era is retired: arming is controller-served data, one
+	// DaemonSet covers the whole fleet, and the old "-agent-detect" companion
+	// is removed on upgrade (only when owned by this installation).
+	if err := r.removeOwnedDaemonSet(ctx, &installation, installation.Name+"-agent-detect"); err != nil {
+		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("remove retired detection agent DaemonSet: %w", err))
 	}
 	if err := r.ensurePDB(ctx, &installation, controllerPDB(&installation)); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile controller PodDisruptionBudget: %w", err))
@@ -159,7 +195,11 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 	if !ready {
 		return ctrl.Result{RequeueAfter: reconcileRetry}, nil
 	}
-	return ctrl.Result{}, nil
+	// Certificate expiry is a deadline, not an event: nothing in the cluster
+	// changes when material gets closer to being unusable. A settled
+	// installation therefore still has to wake up and look, or renewal would
+	// never fire and the whole point of issuing the material would be lost.
+	return ctrl.Result{RequeueAfter: pkiCheckInterval}, nil
 }
 
 func (r *KubeNeuronReconciler) configuration(ctx context.Context) (
@@ -315,6 +355,7 @@ func (r *KubeNeuronReconciler) workloadsReady(ctx context.Context, installation 
 		agents.Status.NumberMisscheduled != 0 {
 		return false, "agent daemonset is not fully available at its current generation", nil
 	}
+
 	return true, "runtime is available", nil
 }
 
@@ -453,6 +494,7 @@ func (r *KubeNeuronReconciler) updateChildConfigurationStatuses(
 	installation *kubeneuronv1alpha1.KubeNeuron,
 	policies []kubeneuronv1alpha1.GPURemediationPolicy,
 	playbooks []kubeneuronv1alpha1.GPUPlaybook,
+	mappings []kubeneuronv1alpha1.GPUSignalMapping,
 	acceleratorProfiles []kubeneuronv1alpha1.AcceleratorRuntimeProfile,
 	snapshot *Snapshot,
 	validationErr error,
@@ -492,6 +534,63 @@ func (r *KubeNeuronReconciler) updateChildConfigurationStatuses(
 		if err := r.updateAcceleratorRuntimeProfileStatus(ctx, profile, validationErr); err != nil {
 			return err
 		}
+	}
+	for i := range mappings {
+		mapping := &mappings[i]
+		if mapping.Spec.KubeNeuronRef != installation.Name {
+			continue
+		}
+		if err := r.updateGPUSignalMappingStatus(ctx, installation, mapping, validationErr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// updateGPUSignalMappingStatus publishes whether a selected mapping joined the
+// immutable runtime snapshot — the same generation-bound Ready contract the
+// other child configuration kinds have had since they became consumable. A
+// selected-but-invalid mapping already fails the whole installation closed;
+// this is the positive half, so an operator (or a harness) can wait on the
+// mapping itself instead of inferring from the root.
+func (r *KubeNeuronReconciler) updateGPUSignalMappingStatus(
+	ctx context.Context,
+	installation *kubeneuronv1alpha1.KubeNeuron,
+	mapping *kubeneuronv1alpha1.GPUSignalMapping,
+	validationErr error,
+) error {
+	before := mapping.DeepCopy()
+	mapping.Status.ObservedGeneration = mapping.Generation
+	if validationErr != nil {
+		mapping.Status.Digest = ""
+		meta.SetStatusCondition(&mapping.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			Reason:             "CompilationFailed",
+			Message:            validationErr.Error(),
+			ObservedGeneration: mapping.Generation,
+			LastTransitionTime: metav1.Now(),
+		})
+	} else {
+		data, err := compileSignalMappings(installation.Name, []kubeneuronv1alpha1.GPUSignalMapping{*mapping})
+		if err != nil {
+			return fmt.Errorf("compile GPUSignalMapping %q for status: %w", mapping.Name, err)
+		}
+		mapping.Status.Digest = sha256Hex(data)
+		meta.SetStatusCondition(&mapping.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionTrue,
+			Reason:             "Compiled",
+			Message:            "signal mapping compiled into the immutable runtime snapshot",
+			ObservedGeneration: mapping.Generation,
+			LastTransitionTime: metav1.Now(),
+		})
+	}
+	if reflect.DeepEqual(before.Status, mapping.Status) {
+		return nil
+	}
+	if err := r.Status().Patch(ctx, mapping, client.MergeFrom(before)); err != nil {
+		return fmt.Errorf("update GPUSignalMapping %q status: %w", mapping.Name, err)
 	}
 	return nil
 }
@@ -651,6 +750,17 @@ func (r *KubeNeuronReconciler) ensureServiceAccount(ctx context.Context, install
 			return err
 		}
 		actual.Labels = copyStringMap(wanted.Labels)
+		// Merge annotations rather than replace: the IRSA role annotation comes
+		// from the CR, but a cluster tool may have added its own that must
+		// survive a reconcile.
+		if len(wanted.Annotations) != 0 {
+			if actual.Annotations == nil {
+				actual.Annotations = map[string]string{}
+			}
+			for k, v := range wanted.Annotations {
+				actual.Annotations[k] = v
+			}
+		}
 		actual.AutomountServiceAccountToken = wanted.AutomountServiceAccountToken
 		return setOwner(r.Scheme, installation, actual)
 	})
@@ -793,6 +903,24 @@ func (r *KubeNeuronReconciler) ensureDaemonSet(ctx context.Context, installation
 	return err
 }
 
+// removeOwnedDaemonSet deletes a DaemonSet this installation controls, and
+// only then: an unowned object with the same name is reported, never deleted.
+// Absence is success.
+func (r *KubeNeuronReconciler) removeOwnedDaemonSet(ctx context.Context, installation *kubeneuronv1alpha1.KubeNeuron, name string) error {
+	var actual appsv1.DaemonSet
+	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: installation.Spec.Namespace}, &actual)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !metav1.IsControlledBy(&actual, installation) {
+		return fmt.Errorf("DaemonSet %s exists but is not controlled by this installation; refusing to delete it", name)
+	}
+	return client.IgnoreNotFound(r.Delete(ctx, &actual))
+}
+
 func (r *KubeNeuronReconciler) ensurePDB(ctx context.Context, installation *kubeneuronv1alpha1.KubeNeuron, wanted *policyv1.PodDisruptionBudget) error {
 	actual := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: wanted.Name, Namespace: wanted.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, actual, func() error {
@@ -856,12 +984,44 @@ func (r *KubeNeuronReconciler) mapConfigurationToKubeNeuron(_ context.Context, o
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: kubeNeuronRef}}}
 }
 
+// mapTLSSecretToKubeNeuron promptly rolls workloads when any mounted TLS
+// Secret changes, including material managed by cert-manager or another issuer.
+// Owner references only cover operator-issued Secrets, so Owns alone is not
+// sufficient here.
+func (r *KubeNeuronReconciler) mapTLSSecretToKubeNeuron(ctx context.Context, object client.Object) []reconcile.Request {
+	secret, ok := object.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+	var installations kubeneuronv1alpha1.KubeNeuronList
+	if err := r.List(ctx, &installations); err != nil {
+		return nil
+	}
+	var requests []reconcile.Request
+	for i := range installations.Items {
+		installation := &installations.Items[i]
+		if installation.Spec.Namespace != secret.Namespace {
+			continue
+		}
+		if _, used := tlsSecretNames(installation)[secret.Name]; used {
+			requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{Name: installation.Name}})
+		}
+	}
+	return requests
+}
+
 // SetupWithManager registers the root reconciler and maps configuration CR
 // changes back to the referenced KubeNeuron installation.
 func (r *KubeNeuronReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kubeneuronv1alpha1.KubeNeuron{}).
 		Owns(&corev1.ConfigMap{}).
+		// The operator issues TLS material, so it has to notice that material
+		// being deleted or replaced. Without this a certificate could vanish and
+		// nothing would put it back until some unrelated change happened to
+		// trigger a reconcile.
+		Owns(&corev1.Secret{}).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapTLSSecretToKubeNeuron)).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&corev1.PersistentVolumeClaim{}).

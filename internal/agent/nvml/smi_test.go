@@ -6,7 +6,17 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
+
+func hasCall(calls []string, want string) bool {
+	for _, c := range calls {
+		if c == want {
+			return true
+		}
+	}
+	return false
+}
 
 const smiInventory = ` 0, GPU-aaaa-1111, NVIDIA H100 80GB HBM3, 00000000:3B:00.0
 1, GPU-bbbb-2222, NVIDIA H100 80GB HBM3, 00000000:AF:00.0
@@ -105,6 +115,74 @@ func TestSMIResetAndHealthy(t *testing.T) {
 	}
 }
 
+// TestSMIRefreshImposesItsOwnDeadline is the regression for the unbounded
+// nvidia-smi in the XID hot path. refresh runs on the agent's main Run loop with
+// the process-lifetime context (no deadline); a driver that wedges nvidia-smi
+// when a GPU falls off the bus would otherwise hang that loop forever. refresh
+// must bound itself and return promptly instead.
+func TestSMIRefreshImposesItsOwnDeadline(t *testing.T) {
+	s := NewSMI("")
+	s.queryTimeout = 20 * time.Millisecond
+	// A wedged driver: nvidia-smi never returns on its own; it ends only when the
+	// context refresh derived is cancelled.
+	s.run = func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		// context.Background() carries NO deadline, exactly like the hot path.
+		_, err := s.GPUByPCIAddr(context.Background(), "0000:3b:00")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("GPUByPCIAddr must return a timeout error when nvidia-smi wedges, not succeed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("GPUByPCIAddr hung well past refresh's own deadline; the main loop would be wedged")
+	}
+}
+
+// TestSMIResetGPUByUUID is the regression for the reset landing on a renumbered
+// neighbor: the reset must target the stable UUID, not an integer index.
+func TestSMIResetGPUByUUID(t *testing.T) {
+	s, r := newTestSMI(nil)
+	if err := s.ResetGPUByUUID(context.Background(), "GPU-aaaa-1111"); err != nil {
+		t.Fatal(err)
+	}
+	if !hasCall(r.calls, "--gpu-reset -i GPU-aaaa-1111") {
+		t.Fatalf("calls = %v, want the reset issued by UUID", r.calls)
+	}
+
+	failing, _ := newTestSMI(map[string]error{"--gpu-reset": errors.New("reset failed")})
+	if err := failing.ResetGPUByUUID(context.Background(), "GPU-bbbb-2222"); err == nil || !strings.Contains(err.Error(), "GPU-bbbb-2222") {
+		t.Fatalf("failed reset = %v, want the UUID named in the error", err)
+	}
+}
+
+// TestSMISetPersistenceModeScopesToTargetGPU is the regression for the node-wide
+// persistence toggle: -pm must carry -i <index> so a per-GPU quiesce cannot flip
+// persistence for every GPU on the node.
+func TestSMISetPersistenceModeScopesToTargetGPU(t *testing.T) {
+	s, r := newTestSMI(nil)
+	if err := s.SetPersistenceMode(context.Background(), 2, true); err != nil {
+		t.Fatal(err)
+	}
+	if !hasCall(r.calls, "-pm 1 -i 2") {
+		t.Fatalf("calls = %v, want persistence enabled only on GPU 2", r.calls)
+	}
+	if err := s.SetPersistenceMode(context.Background(), 5, false); err != nil {
+		t.Fatal(err)
+	}
+	if !hasCall(r.calls, "-pm 0 -i 5") {
+		t.Fatalf("calls = %v, want persistence disabled only on GPU 5", r.calls)
+	}
+}
+
 func TestSMIPartitionTopologyFailsClosed(t *testing.T) {
 	for name, tc := range map[string]struct {
 		output  string
@@ -181,6 +259,59 @@ func TestSMIDriverVersionRequiresCompleteUniformEvidence(t *testing.T) {
 				t.Fatalf("DriverVersion() = %q, %v; want %q, error=%t", got, err, tc.want, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestSMIEnsureIdleByUUID is the regression for the reset preflight being bound
+// to a stale index while the reset targets a UUID: the idle check must address
+// the same stable UUID with -i.
+func TestSMIEnsureIdleByUUID(t *testing.T) {
+	var selector string
+	s := NewSMI("")
+	s.run = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		for i, a := range args {
+			if a == "-i" && i+1 < len(args) {
+				selector = args[i+1]
+			}
+		}
+		return nil, nil
+	}
+	if err := s.EnsureIdleByUUID(context.Background(), "GPU-aaaa-1111"); err != nil {
+		t.Fatal(err)
+	}
+	if selector != "GPU-aaaa-1111" {
+		t.Fatalf("idle check -i selector = %q, want the UUID", selector)
+	}
+
+	busy := NewSMI("")
+	busy.run = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if strings.Contains(strings.Join(args, " "), "query-compute-apps") {
+			return []byte("12345\n"), nil
+		}
+		return nil, nil
+	}
+	if err := busy.EnsureIdleByUUID(context.Background(), "GPU-bbbb-2222"); err == nil ||
+		!strings.Contains(err.Error(), "GPU-bbbb-2222") || !strings.Contains(err.Error(), "not idle") {
+		t.Fatalf("busy GPU = %v, want a not-idle error naming the UUID", err)
+	}
+}
+
+// TestSMISetPersistenceModeByUUID is the regression for restore re-applying
+// persistence by a stale index: -pm must carry -i <uuid> so the toggle stays on
+// the original device across an enumeration shift.
+func TestSMISetPersistenceModeByUUID(t *testing.T) {
+	s, r := newTestSMI(nil)
+	if err := s.SetPersistenceModeByUUID(context.Background(), "GPU-aaaa-1111", true); err != nil {
+		t.Fatal(err)
+	}
+	if !hasCall(r.calls, "-pm 1 -i GPU-aaaa-1111") {
+		t.Fatalf("calls = %v, want persistence enabled by UUID", r.calls)
+	}
+	if err := s.SetPersistenceModeByUUID(context.Background(), "GPU-bbbb-2222", false); err != nil {
+		t.Fatal(err)
+	}
+	if !hasCall(r.calls, "-pm 0 -i GPU-bbbb-2222") {
+		t.Fatalf("calls = %v, want persistence disabled by UUID", r.calls)
 	}
 }
 

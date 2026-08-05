@@ -29,7 +29,7 @@ func TestNVIDIAResetCapabilityGateRequiresProfileFreshReportAndExactDevice(t *te
 	}
 	c := New(st, nil, nil, nil, nil, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	target := types.Target{Node: "node-a", GPUUUID: "GPU-a"}
-	if err := c.allowNVIDIAReset(ctx, target); !errors.Is(err, config.ErrNoAcceleratorRuntimeProfile) {
+	if err := c.allowNVIDIAReset(ctx, &types.Incident{ID: "inc-gate"}, target); !errors.Is(err, config.ErrNoAcceleratorRuntimeProfile) {
 		t.Fatalf("default-deny reset gate = %v, want ErrNoAcceleratorRuntimeProfile", err)
 	}
 
@@ -41,12 +41,48 @@ func TestNVIDIAResetCapabilityGateRequiresProfileFreshReportAndExactDevice(t *te
 	if err := st.UpsertAcceleratorReport(ctx, &report); err != nil {
 		t.Fatalf("UpsertAcceleratorReport() error = %v", err)
 	}
-	if err := c.allowNVIDIAReset(ctx, target); err != nil {
+	if err := c.allowNVIDIAReset(ctx, &types.Incident{ID: "inc-gate"}, target); err != nil {
 		t.Fatalf("fresh matching report reset gate = %v", err)
 	}
 
-	if err := c.allowNVIDIAReset(ctx, types.Target{Node: "node-a", GPUUUID: "GPU-missing"}); err == nil || !strings.Contains(err.Error(), "does not contain targeted") {
+	if err := c.allowNVIDIAReset(ctx, &types.Incident{ID: "inc-gate"}, types.Target{Node: "node-a", GPUUUID: "GPU-missing"}); err == nil || !strings.Contains(err.Error(), "does not contain targeted") {
 		t.Fatalf("unknown device reset gate = %v, want physical inventory denial", err)
+	}
+}
+
+// TestAcceleratorGateFiresOnlyForRegisteredCapability locks in the collapsed
+// special-case: allowAcceleratorStep engages the NVIDIA reset gate for the one
+// registry action that declares it (agent.gpu_reset) and is a no-op for every
+// other agent action, so the gate is a registry fact, not a string match.
+func TestAcceleratorGateFiresOnlyForRegisteredCapability(t *testing.T) {
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	if err := st.UpsertNode(ctx, &types.Node{Name: "node-a", UID: "node-uid-a", Labels: map[string]string{"accelerator": "nvidia-h100"}}); err != nil {
+		t.Fatal(err)
+	}
+	c := New(st, nil, nil, nil, nil, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	inc := &types.Incident{ID: "inc-gate", Target: types.Target{Node: "node-a", GPUUUID: "GPU-a"}, DryRun: false}
+
+	// A non-reset agent action never touches the capability gate.
+	for _, ungated := range []string{"agent.collect_bundle", "agent.run_diag", "platform.cordon", "agent.driver_reinstall"} {
+		if err := c.allowAcceleratorStep(ctx, inc, &playbook.Step{Action: ungated}); err != nil {
+			t.Errorf("allowAcceleratorStep(%q) = %v, want nil (ungated)", ungated, err)
+		}
+	}
+
+	// agent.gpu_reset engages the gate, which default-denies without a profile.
+	if err := c.allowAcceleratorStep(ctx, inc, &playbook.Step{Action: "agent.gpu_reset"}); !errors.Is(err, config.ErrNoAcceleratorRuntimeProfile) {
+		t.Fatalf("allowAcceleratorStep(agent.gpu_reset) = %v, want the reset gate default-deny", err)
+	}
+
+	// Dry-run keeps the planned ladder observable without any capability.
+	dry := &types.Incident{ID: "inc-dry", Target: types.Target{Node: "node-a", GPUUUID: "GPU-a"}, DryRun: true}
+	if err := c.allowAcceleratorStep(ctx, dry, &playbook.Step{Action: "agent.gpu_reset"}); err != nil {
+		t.Fatalf("allowAcceleratorStep(dry-run gpu_reset) = %v, want nil", err)
 	}
 }
 
@@ -93,7 +129,7 @@ func TestNVIDIAResetCapabilityGateRejectsStaleOrPartitionedEvidence(t *testing.T
 			if err := st.UpsertAcceleratorReport(ctx, &report); err != nil {
 				t.Fatal(err)
 			}
-			if err := c.allowNVIDIAReset(ctx, types.Target{Node: "node-a", GPUUUID: "GPU-a"}); err == nil {
+			if err := c.allowNVIDIAReset(ctx, &types.Incident{ID: "inc-gate"}, types.Target{Node: "node-a", GPUUUID: "GPU-a"}); err == nil {
 				t.Fatal("stale or partitioned evidence passed the reset capability gate")
 			}
 		})

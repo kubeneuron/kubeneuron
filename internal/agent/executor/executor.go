@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,10 @@ const (
 	// scripts that already exist in this root-controlled directory can run;
 	// a playbook or CRD can select among them but can never inject content.
 	defaultScriptsDir = "/etc/kube-neuron/scripts"
+	// defaultAcceleratorHostStatePath records the original host state before a
+	// quiesce changes it. The managed agent mounts this directory from the host,
+	// so a controller or agent restart cannot lose the restoration contract.
+	defaultAcceleratorHostStatePath = "/var/lib/kube-neuron/accelerator-host-state.json"
 	// maxCapturedOutput bounds subprocess output kept in an ActionResult.
 	maxCapturedOutput = 16 << 10
 	// waitIdlePollInterval keeps an explicitly requested idle wait responsive
@@ -39,7 +44,25 @@ const (
 	// unit-test regression from rebooting or resetting the host running tests.
 	// Only a dedicated, disposable hardware lab runner may opt in.
 	destructiveLabEnv = "KUBENEURON_DESTRUCTIVE_LAB"
+	// rebootPreflightTimeout bounds the startup check that the host reboot
+	// mechanism is reachable. It only enters the host namespaces and returns.
+	rebootPreflightTimeout = 10 * time.Second
 )
+
+// defaultRebootCommand asks the host's init to reboot from inside the agent
+// container. `systemctl` alone fails with exit 127: the agent image is
+// distroless and, even with the binary present, systemd must be addressed in
+// the host's namespaces. The managed DaemonSet already runs privileged with
+// hostPID, so entering PID 1's namespaces is available; nsenter ships in the
+// agent image for exactly this call. Operators on a different init can replace
+// the whole command with --reboot-command.
+func defaultRebootCommand() []string {
+	return []string{nsenterPath, "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "systemctl", "reboot"}
+}
+
+// nsenterPath is the static nsenter shipped in the agent image. It is busybox
+// installed under the applet's own name, so argv[0] selects nsenter.
+const nsenterPath = "/bin/nsenter"
 
 // Options controls capabilities that must never be enabled implicitly.
 type Options struct {
@@ -48,6 +71,15 @@ type Options struct {
 	// configuration. It is still blocked from go test binaries unless
 	// KUBENEURON_DESTRUCTIVE_LAB=1 is set for a dedicated hardware lab run.
 	EnableDestructiveActions bool
+	// Armed, when set, is the LIVE arming source consulted on every
+	// destructive dispatch — the agent wires it to its controller-served
+	// arming state, so one process can arm and disarm as the declared blast
+	// radius changes without a restart. When nil, the static
+	// EnableDestructiveActions value applies for the process lifetime.
+	Armed func() bool
+	// AcceleratorHostStatePath stores the crash-safe host quiesce snapshots.
+	// Empty selects the managed host-path default.
+	AcceleratorHostStatePath string
 }
 
 // Executor executes actions on the local node.
@@ -57,14 +89,24 @@ type Executor struct {
 	BundleDir string
 	// ScriptsDir holds operator-provisioned scripts; default defaultScriptsDir.
 	ScriptsDir string
+	// RebootCommand reboots the host; default defaultRebootCommand(). It is
+	// replaceable because the mechanism is environment-specific, but it is
+	// never derived from action parameters: a playbook can request a reboot,
+	// it can never choose how the host is rebooted.
+	RebootCommand []string
 
 	// run executes a subprocess and returns combined output; tests inject it.
 	run runner
 	// readBootID returns the current boot ID; tests inject it.
 	readBootID func() (string, error)
-	// enableDestructiveActions is deliberately opt-in. A normal executor is
+	// armed is deliberately opt-in and consulted per dispatch. A normal executor is
 	// observation-only with respect to host and GPU state.
-	enableDestructiveActions bool
+	armed                    func() bool
+	acceleratorHostStatePath string
+	// acceleratorHostMu serializes node-wide persistence-daemon transitions.
+	// Different per-GPU actions can otherwise race through the same durable
+	// host-state record and restore the wrong state.
+	acceleratorHostMu sync.Mutex
 
 	mu      sync.Mutex
 	done    map[string]cached        // action ID -> result
@@ -89,13 +131,19 @@ func New(driver nvml.GPUDriver) *Executor {
 // and GPU operations remain unavailable unless EnableDestructiveActions is
 // explicitly true. This constructor does not bypass the go test lab guard.
 func NewWithOptions(driver nvml.GPUDriver, options Options) *Executor {
+	hostStatePath := options.AcceleratorHostStatePath
+	if hostStatePath == "" {
+		hostStatePath = defaultAcceleratorHostStatePath
+	}
 	return &Executor{
 		driver:                   driver,
 		BundleDir:                defaultBundleDir,
 		ScriptsDir:               defaultScriptsDir,
+		RebootCommand:            defaultRebootCommand(),
 		run:                      execRunner,
 		readBootID:               currentBootID,
-		enableDestructiveActions: options.EnableDestructiveActions,
+		armed:                    armedSource(options),
+		acceleratorHostStatePath: hostStatePath,
 		done:                     map[string]cached{},
 		running:                  map[string]chan struct{}{},
 	}
@@ -189,20 +237,37 @@ func (e *Executor) dispatch(ctx context.Context, a types.Action, res *types.Acti
 	case types.ActionWaitIdle:
 		return e.waitIdle(ctx, a)
 	case types.ActionGPUReset:
-		idx, err := paramInt(a.Params, "gpu_index")
+		// Bind the reset to the physical device by its stable UUID before doing
+		// anything: the request's gpu_index was captured when the incident
+		// opened and may no longer point at the same GPU.
+		idx, err := e.resolveResetIndex(ctx, a)
 		if err != nil {
 			return err
 		}
+		uuid := strings.TrimSpace(a.Params["gpu_uuid"])
 		// Final safety net after the drain: never reset a GPU that still has
-		// processes attached.
-		if err := e.driver.EnsureIdle(ctx, idx); err != nil {
+		// processes attached. The reset targets the stable UUID, so the preflight
+		// must too — resolveResetIndex proved UUID->idx a moment ago, but a renumber
+		// between that resolve and here would leave an index-bound idle/holder check
+		// clearing a healthy neighbor while ResetGPUByUUID resets the real (possibly
+		// non-idle) target. Addressing the idle and holder checks by the SAME UUID
+		// keeps preflight and reset pinned to one device. Drivers with no UUID
+		// addressing fall back to the freshly-resolved index.
+		if err := e.ensureIdle(ctx, uuid, idx); err != nil {
 			return err
 		}
-		return e.driver.ResetGPU(ctx, idx)
+		if err := e.ensureNoDeviceHolders(uuid, idx, res); err != nil {
+			return err
+		}
+		return e.resetGPU(ctx, uuid, idx)
 	case types.ActionRunDiag:
 		return e.runDiag(ctx, a, res)
 	case types.ActionCollectBundle:
 		return e.collectBundle(ctx, a, res)
+	case types.ActionQuiesceAcceleratorHost:
+		return e.quiesceAcceleratorHost(ctx, a, res)
+	case types.ActionRestoreAcceleratorHost:
+		return e.restoreAcceleratorHost(ctx, a, res)
 	case types.ActionReboot:
 		return e.reboot(ctx, a, res)
 	case types.ActionDriverReload:
@@ -224,8 +289,15 @@ func (e *Executor) dispatch(ctx context.Context, a types.Action, res *types.Acti
 // policy, approvals, and node drain are necessary higher-level safeguards,
 // but none of them should let an ordinary test process alter its host.
 func (e *Executor) allowDestructiveAction(action types.ActionType) error {
-	if !e.enableDestructiveActions {
-		return fmt.Errorf("%s: destructive actions are disabled; enable them explicitly in the agent configuration", action)
+	// Undoing is always allowed: restore_accelerator_host can only put back
+	// state a previously-ARMED quiesce changed (it replays the crash-safe
+	// host snapshot; with no snapshot it restores nothing), so it executes
+	// even on a node that has since been disarmed — a shrunk blast radius or
+	// a disabled Enabled mode must not strand a quiesced node with its
+	// monitoring down because its agent now refuses the restore. The go-test
+	// lab guard below still applies to it.
+	if action != types.ActionRestoreAcceleratorHost && !e.armed() {
+		return fmt.Errorf("%s: destructive actions are disabled on this node; the controller has not armed it (spec.safety.destructiveExecution.nodeSelector) and no explicit agent flag did", action)
 	}
 	if runningGoTest() && os.Getenv(destructiveLabEnv) != "1" {
 		return fmt.Errorf("%s: destructive actions are blocked while running under go test; %s=1 is required on a dedicated hardware lab runner", action, destructiveLabEnv)
@@ -237,6 +309,8 @@ func isDestructive(action types.ActionType) bool {
 	switch action {
 	case types.ActionGPUReset,
 		types.ActionReboot,
+		types.ActionQuiesceAcceleratorHost,
+		types.ActionRestoreAcceleratorHost,
 		types.ActionDriverReload,
 		types.ActionDriverReinstall,
 		types.ActionRunScript,
@@ -263,6 +337,149 @@ func (e *Executor) idleCheck(ctx context.Context, a types.Action) error {
 		return fmt.Errorf("idle_check: %w", err)
 	}
 	return nil
+}
+
+// resolveResetIndex binds a gpu_reset to a physical device by its stable UUID
+// rather than the index the controller captured when the incident opened.
+//
+// NVIDIA GPU indices are not stable. An XID 79 ("fallen off the bus") drops the
+// failing device from enumeration and renumbers every higher-indexed GPU down
+// by one; an earlier driver-reload or reboot rung in the same remediation
+// ladder can renumber them too. The controller-side evidence gate only proves
+// the target UUID still appears in the report — never that it still maps to the
+// index in the request. Resetting by that stale index can therefore land on a
+// healthy neighbor, and the EnsureIdle/holder preflight would clear it because
+// the neighbor is idle on a drained node.
+//
+// So we re-resolve the index from live inventory at execution time and fail
+// closed on any ambiguity: a missing UUID, a UUID absent from current
+// inventory, or a resolved index that disagrees with the request. A
+// disagreement means the topology changed under the incident and a human must
+// look before a destructive action lands.
+func (e *Executor) resolveResetIndex(ctx context.Context, a types.Action) (int, error) {
+	requestedIndex, err := paramInt(a.Params, "gpu_index")
+	if err != nil {
+		return 0, err
+	}
+	uuid := strings.TrimSpace(a.Params["gpu_uuid"])
+	if uuid == "" {
+		return 0, fmt.Errorf("gpu_reset: gpu_uuid is required to bind the reset to a physical device; refusing to reset GPU index %d by index alone", requestedIndex)
+	}
+	gpus, err := e.driver.ListGPUs(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("gpu_reset: cannot read GPU inventory to resolve %s: %w", uuid, err)
+	}
+	resolvedIndex := -1
+	for _, g := range gpus {
+		if strings.TrimSpace(g.UUID) == uuid {
+			resolvedIndex = g.Index
+			break
+		}
+	}
+	if resolvedIndex < 0 {
+		return 0, fmt.Errorf("gpu_reset: GPU %s is not in current inventory; it may have fallen off the bus or been renumbered — refusing to reset", uuid)
+	}
+	if resolvedIndex != requestedIndex {
+		return 0, fmt.Errorf("gpu_reset: GPU %s is now at index %d but the request targets index %d; topology changed under the incident — refusing to reset, a human must confirm", uuid, resolvedIndex, requestedIndex)
+	}
+	return resolvedIndex, nil
+}
+
+// gpuUUIDResetter is implemented by drivers that can reset a GPU by its stable
+// UUID. It is optional so the fake driver and any future driver stay usable
+// through the index-based ResetGPU fallback.
+type gpuUUIDResetter interface {
+	ResetGPUByUUID(ctx context.Context, uuid string) error
+}
+
+// resetGPU issues the reset against the device's stable UUID when the driver
+// supports it, closing the resolve->reset renumber window that an integer index
+// leaves open. resolveResetIndex has already proven the UUID still maps to the
+// requested index; passing the UUID here means an index shift in the moment
+// before the reset still cannot move it onto a healthy neighbor. Drivers with
+// no UUID reset fall back to the index.
+func (e *Executor) resetGPU(ctx context.Context, uuid string, index int) error {
+	if r, ok := e.driver.(gpuUUIDResetter); ok {
+		return r.ResetGPUByUUID(ctx, uuid)
+	}
+	return e.driver.ResetGPU(ctx, index)
+}
+
+// ensureIdle runs the post-drain idle safety net against the same physical
+// device the reset will target. It prefers the UUID-addressed check so an
+// enumeration shift after the resolve cannot let a healthy neighbor clear the
+// gate; drivers without UUID addressing fall back to the freshly-resolved index.
+func (e *Executor) ensureIdle(ctx context.Context, uuid string, index int) error {
+	if uuid != "" {
+		if idler, ok := e.driver.(gpuUUIDIdler); ok {
+			return idler.EnsureIdleByUUID(ctx, uuid)
+		}
+	}
+	return e.driver.EnsureIdle(ctx, index)
+}
+
+// deviceHolderLister is implemented by drivers that can name the processes
+// holding a GPU device node. It is optional so the fake driver and any future
+// driver stay usable without it.
+type deviceHolderLister interface {
+	DeviceHolders(index int) ([]nvml.DeviceHolder, error)
+}
+
+// gpuUUIDIdler runs the idle check addressing the device by its stable UUID
+// (nvidia-smi accepts a UUID wherever it accepts an index for -i), so the
+// preflight cannot be pointed at a neighbor by a post-resolve renumber. Optional,
+// preferred when present.
+type gpuUUIDIdler interface {
+	EnsureIdleByUUID(ctx context.Context, uuid string) error
+}
+
+// uuidDeviceHolderLister names the processes holding a device resolved by its
+// stable UUID, so the holder/minor resolution targets the same device as the
+// reset rather than a renumbered index. Optional, preferred when present.
+type uuidDeviceHolderLister interface {
+	DeviceHoldersByUUID(uuid string) ([]nvml.DeviceHolder, error)
+}
+
+// ensureNoDeviceHolders refuses a reset while any process holds the device.
+//
+// EnsureIdle only sees compute applications. On a stock GPU Operator node
+// nv-hostengine, dcgm-exporter and nvidia-device-plugin each keep an open
+// handle on /dev/nvidia0 without running a CUDA context, so the idle check
+// passes and nvidia-smi --gpu-reset then fails with exit 19 and the useless
+// text "currently in use by another process". Naming the holders here turns
+// that dead end into an actionable failure — and into the input for the
+// quiesce step that releases them.
+func (e *Executor) ensureNoDeviceHolders(uuid string, index int, res *types.ActionResult) error {
+	holders, listed, err := e.deviceHolders(uuid, index)
+	if err != nil {
+		// Fail closed: an unreadable process table cannot clear a reset.
+		return fmt.Errorf("gpu_reset: cannot determine which processes hold GPU %d: %w", index, err)
+	}
+	if !listed || len(holders) == 0 {
+		return nil
+	}
+	res.Output = truncateOutput([]byte(nvml.FormatHolders(holders)))
+	return fmt.Errorf("gpu_reset: GPU %d is held by %d process(es) and cannot be reset: %s; release them first (a quiesce step must stop the NVIDIA monitoring stack on this node)",
+		index, len(holders), nvml.FormatHolders(holders))
+}
+
+// deviceHolders lists the processes holding the reset target, preferring the
+// UUID-addressed lister so the holder/minor resolution follows the same device
+// as the reset rather than a renumbered index. listed reports whether any lister
+// was available at all: a driver with neither cannot name holders and the caller
+// treats that as "nothing to enforce", exactly as before.
+func (e *Executor) deviceHolders(uuid string, index int) (holders []nvml.DeviceHolder, listed bool, err error) {
+	if uuid != "" {
+		if lister, ok := e.driver.(uuidDeviceHolderLister); ok {
+			holders, err = lister.DeviceHoldersByUUID(uuid)
+			return holders, true, err
+		}
+	}
+	if lister, ok := e.driver.(deviceHolderLister); ok {
+		holders, err = lister.DeviceHolders(index)
+		return holders, true, err
+	}
+	return nil, false, nil
 }
 
 func (e *Executor) waitIdle(ctx context.Context, a types.Action) error {
@@ -343,13 +560,64 @@ func (e *Executor) reboot(ctx context.Context, a types.Action, res *types.Action
 		res.Output = fmt.Sprintf("already rebooted: boot ID %s differs from requested %s", current, expected)
 		return nil
 	}
-	out, err := e.run(ctx, "systemctl", "reboot")
+	command := e.rebootCommand()
+	if len(command) == 0 {
+		return fmt.Errorf("reboot: no reboot command is configured")
+	}
+	out, err := e.run(ctx, command[0], command[1:]...)
 	if err != nil {
 		res.Output = truncateOutput(out)
-		return fmt.Errorf("systemctl reboot: %w", err)
+		return fmt.Errorf("%s: %w", strings.Join(command, " "), err)
 	}
 	res.Output = "reboot initiated (boot ID " + current + ")"
 	return nil
+}
+
+func (e *Executor) rebootCommand() []string {
+	if len(e.RebootCommand) != 0 {
+		return e.RebootCommand
+	}
+	return defaultRebootCommand()
+}
+
+// PreflightReboot reports whether the configured reboot mechanism can actually
+// reach the host. A node that cannot reboot must say so at startup, not at the
+// moment an operator approves the most destructive step in a playbook — the
+// first hardware run failed exactly there, with `systemctl reboot: exit status
+// 127` arriving after the approval.
+//
+// The check runs the configured command's namespace-entry prefix against
+// `true`, so it proves reachability without rebooting anything. A command with
+// no recognizable prefix cannot be probed and is reported as unverifiable
+// rather than silently assumed good.
+func (e *Executor) PreflightReboot(ctx context.Context) error {
+	command := e.rebootCommand()
+	if len(command) == 0 {
+		return fmt.Errorf("no reboot command is configured")
+	}
+	probe, ok := rebootProbeCommand(command)
+	if !ok {
+		return fmt.Errorf("reboot command %q cannot be preflighted; it will only be exercised by a real reboot", strings.Join(command, " "))
+	}
+	ctx, cancel := context.WithTimeout(ctx, rebootPreflightTimeout)
+	defer cancel()
+	if out, err := e.run(ctx, probe[0], probe[1:]...); err != nil {
+		return fmt.Errorf("%s: %w (output: %s)", strings.Join(probe, " "), err, truncateOutput(out))
+	}
+	return nil
+}
+
+// rebootProbeCommand turns a reboot command into a harmless equivalent: the
+// part that enters the host's namespaces is kept, and whatever it would have
+// run there is replaced with `true`.
+func rebootProbeCommand(command []string) ([]string, bool) {
+	for i, arg := range command {
+		if arg == "--" && i+1 < len(command) {
+			probe := append([]string(nil), command[:i+1]...)
+			return append(probe, "true"), true
+		}
+	}
+	return nil, false
 }
 
 // runAllowListedScript executes one operator-provisioned script from
@@ -406,9 +674,22 @@ func paramInt(params map[string]string, key string) (int, error) {
 	if !ok {
 		return 0, fmt.Errorf("missing required param %q", key)
 	}
-	var n int
-	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
+	// Strict whole-string parse: fmt.Sscanf("%d") accepts trailing garbage
+	// ("5abc" -> 5), which would silently misread a malformed parameter. Reject
+	// anything that is not a clean integer so the action fails closed.
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
 		return 0, fmt.Errorf("param %q: %w", key, err)
 	}
 	return n, nil
+}
+
+// armedSource resolves the effective arming source: the live function when
+// provided, else the static option frozen for the process lifetime.
+func armedSource(options Options) func() bool {
+	if options.Armed != nil {
+		return options.Armed
+	}
+	static := options.EnableDestructiveActions
+	return func() bool { return static }
 }

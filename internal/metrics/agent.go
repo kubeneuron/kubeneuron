@@ -27,10 +27,35 @@ var (
 		Help: "Events currently queued in the agent's durable spool.",
 	})
 
+	// AgentEventsRejected counts events the controller permanently rejected
+	// (HTTP 400/413) and the agent therefore dropped instead of spooling or
+	// replaying — a nonzero rate means an agent is emitting payloads the
+	// controller refuses and detections are being discarded.
+	AgentEventsRejected = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "kubeneuron_agent_events_rejected_total",
+		Help: "Agent events permanently rejected by the controller and dropped.",
+	})
+
 	// AgentRegistrationAcks counts durable controller registration
 	// acknowledgments; staleness here mirrors the /readyz probe.
 	AgentRegistrationAcks = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "kubeneuron_agent_registration_acks_total",
 		Help: "Durable controller registration acknowledgments received.",
 	})
+
+	// AgentDetections counts observed detection signals by their source
+	// (e.g. "kmsg", "dcgm"). It counts detections before agent-side
+	// deduplication, so the two sources can be compared independently.
+	AgentDetections = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_agent_detections_total",
+		Help: "GPU fault detections observed by the agent, labeled by detection source.",
+	}, []string{"source"})
+
+	// AgentDetectionsDeduplicated counts detections dropped because an
+	// equivalent fault (same GPU and XID) was already emitted within the
+	// dedup window — most often the same fault seen by both kmsg and DCGM.
+	AgentDetectionsDeduplicated = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_agent_detections_deduplicated_total",
+		Help: "Detections suppressed by agent-side deduplication, labeled by the source that was dropped.",
+	}, []string{"source"})
 )

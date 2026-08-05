@@ -16,14 +16,24 @@ import (
 )
 
 type scripted struct {
-	calls  []string
-	output string
-	err    error
+	calls   []string
+	output  string
+	err     error
+	outputs []string
+	errs    []error
 }
 
 func (s *scripted) run(_ context.Context, name string, args ...string) ([]byte, error) {
+	i := len(s.calls)
 	s.calls = append(s.calls, name+" "+strings.Join(args, " "))
-	return []byte(s.output), s.err
+	output, err := s.output, s.err
+	if i < len(s.outputs) {
+		output = s.outputs[i]
+	}
+	if i < len(s.errs) {
+		err = s.errs[i]
+	}
+	return []byte(output), err
 }
 
 func newTestExecutor(t *testing.T, bootID string, run *scripted) *Executor {
@@ -223,7 +233,9 @@ func TestRebootGuardedByBootID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reboot = %+v, %v", res, err)
 	}
-	if len(run2.calls) != 1 || run2.calls[0] != "systemctl reboot" {
+	// The host's init is only reachable through PID 1's namespaces; a bare
+	// "systemctl reboot" from the distroless agent image exits 127.
+	if len(run2.calls) != 1 || run2.calls[0] != "/bin/nsenter -t 1 -m -u -i -n -p -- systemctl reboot" {
 		t.Fatalf("calls = %v", run2.calls)
 	}
 
@@ -325,5 +337,51 @@ func TestRunScriptNameValidation(t *testing.T) {
 	err := e.runAllowListedScript(context.Background(), "clean_fabric.sh", types.Action{ID: "good", Type: types.ActionRunScript}, res)
 	if err != nil {
 		t.Fatalf("valid script = %+v, %v", res, err)
+	}
+}
+
+// TestParamIntRejectsTrailingGarbage is the regression test for paramInt
+// accepting "5abc" as 5 under fmt.Sscanf("%d"). A malformed controller-authored
+// parameter must fail closed rather than being silently misread.
+func TestParamIntRejectsTrailingGarbage(t *testing.T) {
+	for _, good := range []struct {
+		in   string
+		want int
+	}{{"5", 5}, {"  42 ", 42}, {"-3", -3}, {"0", 0}} {
+		got, err := paramInt(map[string]string{"k": good.in}, "k")
+		if err != nil || got != good.want {
+			t.Fatalf("paramInt(%q) = (%d, %v), want (%d, nil)", good.in, got, err, good.want)
+		}
+	}
+	for _, bad := range []string{"5abc", "5 6", "0x10", "", "abc", "5.0", "1_000", "+"} {
+		if got, err := paramInt(map[string]string{"k": bad}, "k"); err == nil {
+			t.Fatalf("paramInt(%q) = (%d, nil), want an error (fail closed)", bad, got)
+		}
+	}
+	if _, err := paramInt(map[string]string{}, "missing"); err == nil {
+		t.Fatal("paramInt with a missing key must error")
+	}
+}
+
+// Round-9: undoing is always allowed. An UNARMED executor must not refuse
+// restore_accelerator_host on the arming boundary (it can only replay a
+// prior quiesce's crash-safe snapshot) — under go test only the lab guard
+// may block it. Every other destructive action still fails the arming check
+// first.
+func TestUnarmedExecutorAllowsHostRestoreOnly(t *testing.T) {
+	e := NewWithOptions(&nvml.Fake{}, Options{}) // unarmed
+
+	err := e.allowDestructiveAction(types.ActionRestoreAcceleratorHost)
+	if err == nil {
+		t.Fatal("under go test the lab guard must still block execution")
+	}
+	if strings.Contains(err.Error(), "destructive actions are disabled on this node") {
+		t.Fatalf("restore was refused on the ARMING boundary: %v — undo must be allowed unarmed", err)
+	}
+	for _, act := range []types.ActionType{types.ActionReboot, types.ActionGPUReset, types.ActionQuiesceAcceleratorHost} {
+		err := e.allowDestructiveAction(act)
+		if err == nil || !strings.Contains(err.Error(), "destructive actions are disabled on this node") {
+			t.Fatalf("%s unarmed = %v, want the arming refusal", act, err)
+		}
 	}
 }

@@ -10,13 +10,16 @@ import (
 	"sync"
 	"time"
 
+	actionreg "github.com/kubeneuron/kubeneuron/internal/action"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
 // Limits are the operator-configured safety limits (configs/policies.yaml).
 type Limits struct {
-	// MaxConcurrentRemediations caps how many targets may be in
-	// EXECUTING/VERIFYING at once.
+	// MaxConcurrentRemediations caps how many targets may be mid-remediation
+	// at once. A target counts from its first admitted step until its incident
+	// reaches a terminal state — not merely while a step is executing, or N
+	// incidents could interleave their steps and far exceed the cap.
 	MaxConcurrentRemediations int
 	// MaxConcurrentReboots caps reboot-class actions specifically.
 	MaxConcurrentReboots int
@@ -79,25 +82,21 @@ func (g *Gate) DryRun() bool { g.mu.Lock(); defer g.mu.Unlock(); return g.limits
 // SetDryRun toggles dry-run mode at runtime (admin API).
 func (g *Gate) SetDryRun(v bool) { g.mu.Lock(); g.limits.DryRun = v; g.mu.Unlock() }
 
-// Allow admits an action on a target, reserving a concurrency slot. Callers
-// MUST call Done when the action (and its verification) finishes. A non-nil
-// error is always *Denial.
+// Allow admits the FIRST step of a remediation on a target, reserving the
+// target's remediation slot and the step's reboot-class slot. The remediation
+// slot is held until ReleaseRemediation (the incident terminalized); the step's
+// reboot slot until StepDone. Subsequent steps of the same remediation are
+// admitted with AllowHeld. A non-nil error is always *Denial.
 func (g *Gate) Allow(target types.Target, action types.ActionType) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if g.paused {
-		return &Denial{Reason: "system is paused"}
-	}
 	key := targetKey(target)
-	if until, ok := g.cooldownUntil[key+"|"+string(action)]; ok && g.now().Before(until) {
-		return &Denial{Reason: fmt.Sprintf("cooldown until %s for %s on %s", until.Format(time.RFC3339), action, key)}
+	if reason := g.stepDenialLocked(key, action); reason != "" {
+		return &Denial{Reason: reason}
 	}
 	if g.active[key] == 0 && len(g.active) >= g.limits.MaxConcurrentRemediations {
 		return &Denial{Reason: fmt.Sprintf("concurrency limit reached (%d targets in remediation)", len(g.active))}
-	}
-	if isRebootClass(action) && g.reboots[key] == 0 && len(g.reboots) >= g.limits.MaxConcurrentReboots {
-		return &Denial{Reason: fmt.Sprintf("reboot concurrency limit reached (%d in progress)", len(g.reboots))}
 	}
 
 	g.active[key]++
@@ -107,20 +106,75 @@ func (g *Gate) Allow(target types.Target, action types.ActionType) error {
 	return nil
 }
 
-// Done releases the concurrency slot reserved by a matching Allow and records
-// the action's cooldown. Slots are refcounted: the target frees its
-// concurrency (and reboot) slot only when every admitted action on it has
-// called Done, so one incident finishing cannot release a slot another
-// incident on the same target still holds.
-func (g *Gate) Done(target types.Target, action types.ActionType, cooldown time.Duration) {
+// AllowHeld admits one more step for a target that already holds a remediation
+// slot: it applies the per-step checks (pause, cooldown, the reboot cap) but
+// not the remediation cap, and reserves only the step's reboot-class slot.
+// Without this split, releasing and re-acquiring the target slot between steps
+// let MaxConcurrentRemediations cap concurrent steps instead of concurrent
+// remediations. A non-nil error is always *Denial.
+func (g *Gate) AllowHeld(target types.Target, action types.ActionType) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if reason := g.stepDenialLocked(targetKey(target), action); reason != "" {
+		return &Denial{Reason: reason}
+	}
+	if isRebootClass(action) {
+		g.reboots[targetKey(target)]++
+	}
+	return nil
+}
+
+// stepDenialLocked evaluates the per-step admission checks shared by Allow and
+// AllowHeld. Called with g.mu held; returns a denial reason or "".
+func (g *Gate) stepDenialLocked(key string, action types.ActionType) string {
+	if g.paused {
+		return "system is paused"
+	}
+	if until, ok := g.cooldownUntil[key+"|"+string(action)]; ok && g.now().Before(until) {
+		return fmt.Sprintf("cooldown until %s for %s on %s", until.Format(time.RFC3339), action, key)
+	}
+	if isRebootClass(action) && g.reboots[key] == 0 && len(g.reboots) >= g.limits.MaxConcurrentReboots {
+		return fmt.Sprintf("reboot concurrency limit reached (%d in progress)", len(g.reboots))
+	}
+	return ""
+}
+
+// OccupyRemediation unconditionally reserves a target's remediation slot,
+// bypassing every admission check (pause, cooldown, limits). It exists for one
+// caller: rebuilding the gate's occupancy from durable state on leadership
+// acquisition, so MaxConcurrentRemediations stays an invariant across a leader
+// failover. A new leader that started with empty slots would admit
+// remediations past the cap while agents were still running leased destructive
+// actions the previous leader had admitted. Each occupied slot is released by
+// ReleaseRemediation when its incident terminalizes, exactly like a slot
+// reserved by Allow.
+func (g *Gate) OccupyRemediation(target types.Target) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.active[targetKey(target)]++
+}
+
+// OccupyStep unconditionally reserves the reboot-class slot for a recovered
+// in-flight step (rebuild-on-leadership only; a no-op for non-reboot actions).
+// Released by StepDone when the recovered incident leaves EXECUTING.
+func (g *Gate) OccupyStep(target types.Target, action types.ActionType) {
+	if !isRebootClass(action) {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.reboots[targetKey(target)]++
+}
+
+// StepDone releases the per-step reservation of a matching Allow/AllowHeld —
+// the reboot-class slot — and records the action's cooldown. The target's
+// remediation slot stays held until ReleaseRemediation: releasing it here,
+// between steps, is what reduced MaxConcurrentRemediations to a per-step cap.
+func (g *Gate) StepDone(target types.Target, action types.ActionType, cooldown time.Duration) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	key := targetKey(target)
-	if g.active[key] > 0 {
-		if g.active[key]--; g.active[key] == 0 {
-			delete(g.active, key)
-		}
-	}
 	if isRebootClass(action) && g.reboots[key] > 0 {
 		if g.reboots[key]--; g.reboots[key] == 0 {
 			delete(g.reboots, key)
@@ -132,6 +186,31 @@ func (g *Gate) Done(target types.Target, action types.ActionType, cooldown time.
 	g.pruneCooldownsLocked()
 	if cooldown > 0 {
 		g.persistLocked()
+	}
+}
+
+// Done fully releases one admitted action: its per-step reservation and its
+// target's remediation slot, in one call. It is StepDone followed by
+// ReleaseRemediation, for callers whose remediation is a single admitted
+// action. The controller's step lifecycle keeps the two apart: StepDone at
+// step end, ReleaseRemediation when the incident terminalizes.
+func (g *Gate) Done(target types.Target, action types.ActionType, cooldown time.Duration) {
+	g.StepDone(target, action, cooldown)
+	g.ReleaseRemediation(target)
+}
+
+// ReleaseRemediation releases the target's remediation slot reserved by Allow
+// (or OccupyRemediation). Slots are refcounted: the target frees its slot only
+// when every incident remediating it has released, so one incident finishing
+// cannot release a slot another incident on the same target still holds.
+func (g *Gate) ReleaseRemediation(target types.Target) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	key := targetKey(target)
+	if g.active[key] > 0 {
+		if g.active[key]--; g.active[key] == 0 {
+			delete(g.active, key)
+		}
 	}
 }
 
@@ -176,8 +255,10 @@ func (g *Gate) pruneCooldownsLocked() {
 	}
 }
 
+// isRebootClass delegates to the action registry so the reboot-class set lives
+// in one place with the rest of each action's facts.
 func isRebootClass(a types.ActionType) bool {
-	return a == types.ActionReboot || a == types.ActionPowerCycle || a == types.ActionDriverReinstall
+	return actionreg.IsRebootClass(a)
 }
 
 func targetKey(t types.Target) string {

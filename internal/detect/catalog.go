@@ -15,6 +15,7 @@ import (
 type Catalog struct {
 	xid    map[int]XIDInfo
 	alerts map[string]alertOverride
+	faults map[FaultKey]FaultInfo
 }
 
 type alertOverride struct {
@@ -27,6 +28,7 @@ func NewCatalog(overrides []config.SignalOverride) (*Catalog, error) {
 	c := &Catalog{
 		xid:    map[int]XIDInfo{},
 		alerts: map[string]alertOverride{},
+		faults: map[FaultKey]FaultInfo{},
 	}
 	for _, o := range overrides {
 		if err := o.Validate(); err != nil {
@@ -38,6 +40,19 @@ func NewCatalog(overrides []config.SignalOverride) (*Catalog, error) {
 			}
 			c.alerts[o.AlertName] = alertOverride{class: o.Class, severity: o.Severity}
 			continue
+		}
+		for _, f := range o.Faults {
+			key := FaultKey{Vendor: f.Vendor, Code: f.Code}
+			if _, dup := c.faults[key]; dup {
+				return nil, fmt.Errorf("signal override %q: fault %s/%s is already overridden", o.Name, f.Vendor, f.Code)
+			}
+			c.faults[key] = FaultInfo{
+				Vendor:   f.Vendor,
+				Code:     f.Code,
+				Name:     o.Name,
+				Class:    o.Class,
+				Severity: o.Severity,
+			}
 		}
 		for _, code := range o.XIDCodes {
 			if _, dup := c.xid[code]; dup {
@@ -64,6 +79,19 @@ func (c *Catalog) ClassifyXID(code int) (XIDInfo, bool) {
 		}
 	}
 	return ClassifyXID(code)
+}
+
+// ClassifyFault resolves a vendor-native neutral fault code against overrides
+// first, then the built-in table — the exact analogue of ClassifyXID, so a
+// policy override reaches both fault encodings rather than silently applying
+// to only the XID spelling of a condition.
+func (c *Catalog) ClassifyFault(vendor, code string) (FaultInfo, bool) {
+	if c != nil && c.faults != nil {
+		if info, ok := c.faults[FaultKey{Vendor: vendor, Code: code}]; ok {
+			return info, true
+		}
+	}
+	return ClassifyFault(vendor, code)
 }
 
 // ObservePolicy reports the catalog's observation threshold for a problem
@@ -100,9 +128,14 @@ func (c *Catalog) ObservePolicy(class types.ProblemClass) (threshold int, window
 	return threshold, window, ok
 }
 
-// SignalFromAgentEvent converts an agent XID event into a Signal using this
-// catalog, or ok=false when the XID is not actionable.
+// SignalFromAgentEvent converts an agent event into a Signal using this
+// catalog, or ok=false when it is not actionable. Both encodings consult
+// overrides: XID events through the XID override table, neutral-envelope
+// events through the fault override table.
 func (c *Catalog) SignalFromAgentEvent(ev types.AgentEvent) (types.Signal, bool) {
+	if ev.Fault != nil {
+		return c.signalFromFault(ev)
+	}
 	info, ok := c.ClassifyXID(ev.XID)
 	if !ok {
 		return types.Signal{}, false

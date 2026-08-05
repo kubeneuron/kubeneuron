@@ -98,16 +98,68 @@ func TestIncidentLifecycleAndTxAtomicity(t *testing.T) {
 	}
 }
 
+func TestUpdateIncidentOptimisticConcurrency(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	inc := testIncident("inc-oc")
+	if err := s.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two writers snapshot the same version.
+	a, err := s.GetIncident(ctx, "inc-oc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.GetIncident(ctx, "inc-oc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Version != 0 {
+		t.Fatalf("fresh incident version = %d, want 0", a.Version)
+	}
+
+	// The first writer wins and its in-memory version advances.
+	a.SignalSeen = 7
+	if err := s.UpdateIncident(ctx, a); err != nil {
+		t.Fatalf("first update = %v", err)
+	}
+	if a.Version != 1 {
+		t.Fatalf("version after successful update = %d, want 1", a.Version)
+	}
+
+	// The stale writer must conflict, not clobber. On READ COMMITTED this is the
+	// exact case that used to regress state/StepIndex: a writer working from an
+	// earlier snapshot is now rejected instead of overwriting the newer row.
+	b.SignalSeen = 99
+	if err := s.UpdateIncident(ctx, b); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("stale update = %v, want ErrConflict", err)
+	}
+	got, err := s.GetIncident(ctx, "inc-oc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SignalSeen != 7 {
+		t.Fatalf("SignalSeen = %d, want 7 (the winning write must survive)", got.SignalSeen)
+	}
+
+	// A genuinely absent incident is ErrNotFound, never ErrConflict.
+	if err := s.UpdateIncident(ctx, testIncident("inc-ghost")); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("update of absent incident = %v, want ErrNotFound", err)
+	}
+}
+
 func TestActionLeaseProtocol(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	action := types.Action{ID: "act-1", Type: types.ActionRunDiag, Timeout: time.Minute}
-	if err := s.EnqueueAction(ctx, "node-a", "inc-1", action); err != nil {
+	action := types.Action{ID: "act-1", IncidentID: "inc-1", Type: types.ActionRunDiag, Timeout: time.Minute}
+	if err := s.EnqueueAction(ctx, "node-a", action); err != nil {
 		t.Fatal(err)
 	}
 	// Idempotent enqueue (ON CONFLICT DO NOTHING).
-	if err := s.EnqueueAction(ctx, "node-a", "inc-1", action); err != nil {
+	if err := s.EnqueueAction(ctx, "node-a", action); err != nil {
 		t.Fatal(err)
 	}
 
@@ -219,7 +271,7 @@ func TestPruneAndSchemaCeiling(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	if err := s.EnqueueAction(ctx, "n1", "inc-a", types.Action{ID: "act-old", Type: types.ActionRunDiag}); err != nil {
+	if err := s.EnqueueAction(ctx, "n1", types.Action{IncidentID: "inc-a", ID: "act-old", Type: types.ActionRunDiag}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.CompleteAction(ctx, "act-old", types.ActionResult{ActionID: "act-old", OK: true}); err != nil {
@@ -254,7 +306,7 @@ func TestActionProtocolAttemptsBootAndCancellation(t *testing.T) {
 	for _, a := range []struct{ id, incident string }{
 		{"act-1", "inc-1"}, {"act-2", "inc-1"}, {"act-3", "inc-2"},
 	} {
-		if err := s.EnqueueAction(ctx, "node-a", a.incident, types.Action{
+		if err := s.EnqueueAction(ctx, "node-a", types.Action{IncidentID: a.incident,
 			ID: a.id, Type: types.ActionRunDiag,
 		}); err != nil {
 			t.Fatal(err)

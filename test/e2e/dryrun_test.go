@@ -96,6 +96,9 @@ func newHarness(t *testing.T) *harness {
 
 	api := httpapi.New(ctrl)
 	api.EnableOperatorAPI(ctrl, operatorToken)
+	// The dry-run harness posts to the webhook without a token; the webhook now
+	// fails closed by default, so opt into the development-only insecure mode.
+	api.AllowInsecureWebhook()
 	api.SetBackupStore(st, t.TempDir())
 	metricsStore.Store(st)
 	metricsOnce.Do(func() {
@@ -322,6 +325,11 @@ func TestPauseBlocksAutomationOverTheWire(t *testing.T) {
 // payload lands as an incident for the labeled node.
 func TestWebhookPathOpensIncident(t *testing.T) {
 	h := newHarness(t)
+
+	// The webhook cross-checks the alert's node against known inventory, so an
+	// alert can never drive remediation on a node the controller has never seen.
+	// Register the node first, exactly as a live agent would on startup.
+	h.postJSON(h.agent.URL, types.AgentRegistrationPath, map[string]any{"name": "gpu-node-1"}, http.StatusNoContent)
 
 	payload := map[string]any{
 		"version": "4", "status": "firing",

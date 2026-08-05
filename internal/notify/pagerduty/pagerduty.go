@@ -91,7 +91,7 @@ func (n *Notifier) RequestApproval(ctx context.Context, inc *types.Incident, ste
 	return n.post(ctx, event{
 		RoutingKey: n.RoutingKey, EventAction: "trigger", DedupKey: inc.ID,
 		Payload: n.eventPayload(inc, "critical",
-			fmt.Sprintf("KubeNeuron approval required: step %s on %s — kubeneuronctl approve %s", stepName, inc.Target.Node, inc.ID)),
+			fmt.Sprintf("KubeNeuron approval required: step %s on %s — kubeneuronctl approve %s --round %d", stepName, inc.Target.Node, inc.ID, inc.ApprovalEpoch)),
 	})
 }
 

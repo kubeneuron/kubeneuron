@@ -6,3 +6,5 @@ web/node_modules/
 *.db
 *.db-wal
 *.db-shm
+AGENT_SESSION_STATE.md
+TRANSFER_HANDOFF.md

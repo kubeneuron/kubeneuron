@@ -2,8 +2,10 @@ package spool
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
 	"testing"
 
@@ -149,6 +151,135 @@ func TestSpoolLenTracksAppendsAndReplays(t *testing.T) {
 	}
 	if got := s.Len(); got != 2 {
 		t.Fatalf("Len after replay = %d, want 2", got)
+	}
+}
+
+// TestOpenRepairsTornTailSoNextAppendSurvives is the regression test for the
+// torn-tail corruption bug. A power loss mid-Append can leave a newline-less
+// partial final line. Without repair, the next Append O_APPENDs its JSON onto
+// that fragment, producing one unparseable record that replay silently drops —
+// destroying the fresh event while reporting it durable. Open must truncate the
+// uncommitted fragment so the next appended event survives replay intact.
+func TestOpenRepairsTornTailSoNextAppendSurvives(t *testing.T) {
+	path := t.TempDir() + "/spool.jsonl"
+
+	// One committed event (with its fsynced newline) followed by a torn tail:
+	// a JSON fragment with no trailing newline, as a crash mid-Append leaves it.
+	committed, err := json.Marshal(types.AgentEvent{EventID: "committed", Node: "node-1", XID: 48})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk := append(committed, '\n')
+	disk = append(disk, []byte(`{"event_id":"torn","node":"node-1","xi`)...) // no newline
+	if err := os.WriteFile(path, disk, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	// The uncommitted fragment is dropped; only the committed event remains.
+	if got := s.Len(); got != 1 {
+		t.Fatalf("Len after torn-tail repair = %d, want 1", got)
+	}
+
+	// A fresh event appended after recovery must be durable and parseable, not
+	// glued onto the partial line.
+	if err := s.Append(types.AgentEvent{EventID: "fresh", Node: "node-1", XID: 79}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	var ids []string
+	if _, err := s.ReplayBatch(context.Background(), 10, func(_ context.Context, ev types.AgentEvent) error {
+		ids = append(ids, ev.EventID)
+		return nil
+	}); err != nil {
+		t.Fatalf("ReplayBatch() error = %v", err)
+	}
+	if want := []string{"committed", "fresh"}; !reflect.DeepEqual(ids, want) {
+		t.Fatalf("replayed events = %v, want %v (fresh event must survive the torn tail)", ids, want)
+	}
+}
+
+// TestOpenTruncatesAWhollyUncommittedFile covers a torn tail with no committed
+// newline anywhere: the entire file is one uncommitted record and must be
+// dropped, leaving an empty, appendable spool.
+func TestOpenTruncatesAWhollyUncommittedFile(t *testing.T) {
+	path := t.TempDir() + "/spool.jsonl"
+	if err := os.WriteFile(path, []byte(`{"event_id":"torn","node":"n"`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if got := s.Len(); got != 0 {
+		t.Fatalf("Len after repair = %d, want 0", got)
+	}
+	if err := s.Append(types.AgentEvent{EventID: "fresh", Node: "n", XID: 79}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	if got := replayXIDs(t, s, 10); !reflect.DeepEqual(got, []int{79}) {
+		t.Fatalf("replayed XIDs = %v, want [79]", got)
+	}
+}
+
+// TestAppendSelfHealsTornTailFromFailedInProcessAppend is the regression test
+// for the in-process torn-tail loss. When an Append fails after a partial write
+// (a short write on ENOSPC/EIO — exactly the regime the spool exists for) the
+// tail is left without its committing newline while the process keeps running.
+// Without self-healing, the NEXT Append O_APPENDs its JSON onto the fragment,
+// fsyncs, and reports the fresh event durable — but on replay the glued line is
+// one unparseable record that is skipped, silently losing BOTH the torn event
+// and the fresh one. The healing Append must repair the tail first so the fresh
+// event survives.
+func TestAppendSelfHealsTornTailFromFailedInProcessAppend(t *testing.T) {
+	path := t.TempDir() + "/spool.jsonl"
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+
+	// A first event committed normally (record + fsynced newline).
+	if err := s.Append(types.AgentEvent{EventID: "A", Node: "n", XID: 48}); err != nil {
+		t.Fatalf("Append(A) error = %v", err)
+	}
+
+	// Simulate an Append that failed after a partial write: a newline-less JSON
+	// fragment is on disk and the spool was marked dirty, but count was never
+	// incremented (the increment only happens after a successful fsync).
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte(`{"event_id":"torn","node":"n","xi`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.dirty = true
+	s.mu.Unlock()
+
+	// The next Append must heal the torn tail before writing, not glue onto it.
+	if err := s.Append(types.AgentEvent{EventID: "B", Node: "n", XID: 79}); err != nil {
+		t.Fatalf("Append(B) error = %v", err)
+	}
+	if got := s.Len(); got != 2 {
+		t.Fatalf("Len after heal = %d, want 2 (A and B, torn fragment dropped)", got)
+	}
+
+	var ids []string
+	if _, err := s.ReplayBatch(context.Background(), 10, func(_ context.Context, ev types.AgentEvent) error {
+		ids = append(ids, ev.EventID)
+		return nil
+	}); err != nil {
+		t.Fatalf("ReplayBatch() error = %v", err)
+	}
+	if want := []string{"A", "B"}; !reflect.DeepEqual(ids, want) {
+		t.Fatalf("replayed events = %v, want %v (fresh event must not be lost to a torn tail)", ids, want)
 	}
 }
 

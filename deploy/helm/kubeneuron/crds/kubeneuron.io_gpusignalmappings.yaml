@@ -49,6 +49,31 @@ spec:
               class:
                 minLength: 1
                 type: string
+              faults:
+                description: |-
+                  Faults overrides classification of vendor-neutral fault codes (source
+                  "fault"), so a policy override reaches both detection encodings: an
+                  installation that remaps XID 48 can remap the equivalent neutral
+                  "nvidia/ecc-dbe" the fallback source emits, instead of the two sources
+                  silently applying different policy for one physical condition.
+                items:
+                  description: |-
+                    FaultCodeSelector names one vendor-native neutral fault code — the
+                    non-XID analogue of an XID number, matching AgentEvent.Fault (vendor,
+                    code) as emitted by e.g. the nvidia-smi/DCGM fallback source.
+                  properties:
+                    code:
+                      minLength: 1
+                      type: string
+                    vendor:
+                      minLength: 1
+                      type: string
+                  required:
+                  - code
+                  - vendor
+                  type: object
+                minItems: 1
+                type: array
               kubeNeuronRef:
                 minLength: 1
                 type: string
@@ -79,8 +104,9 @@ spec:
             - source
             type: object
             x-kubernetes-validations:
-            - message: exactly one of xidCodes or alertName must be set
-              rule: has(self.xidCodes) != has(self.alertName)
+            - message: exactly one of xidCodes, alertName, or faults must be set
+              rule: '(has(self.xidCodes) ? 1 : 0) + (has(self.alertName) ? 1 : 0)
+                + (has(self.faults) ? 1 : 0) == 1'
           status:
             description: GPUSignalMappingStatus records mapping validation.
             properties:

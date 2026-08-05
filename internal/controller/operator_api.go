@@ -38,9 +38,53 @@ func (c *Controller) IncidentDetail(ctx context.Context, id string) (*types.Inci
 }
 
 // DecideApproval records an authenticated human decision; the reconcile walk
-// picks it up on its next pass.
-func (c *Controller) DecideApproval(ctx context.Context, id, actor, channel string, decision types.ApprovalDecision) error {
-	return approval.New(c.store, c.approvalTTL).Decide(ctx, id, "", actor, channel, decision)
+// picks it up on its next pass. The decision is bound to the identity of the
+// step that is current now — the one the human is approving — so a later
+// hot-swap or rewind that changes the action at this index is caught at resume
+// and the approval is not honored for an action the human never saw.
+func (c *Controller) DecideApproval(ctx context.Context, id, actor, channel string, decision types.ApprovalDecision, expectedEpoch int) error {
+	inc, err := c.store.GetIncident(ctx, id)
+	if err != nil {
+		return err
+	}
+	// The decision binds to the incident's CURRENT approval round: it inherits
+	// the round's request record — the durable statement of what the round
+	// asked — and the round's epoch, so a re-park (new epoch) orphans the
+	// decision by construction and a swap AFTER the click cannot execute
+	// under it. The notification-to-click half is covered by expectedEpoch
+	// below, for every client that carries the round it displayed (the panel
+	// and notification channels do; see RequestApproval).
+	//
+	// Epoch 0 is NOT a round: it is the pre-upgrade population, whose rows
+	// (requests AND orphaned decisions from any number of old parks) all
+	// carry park_epoch 0 — pairing them would let a stale approval execute a
+	// step from a different park. Refuse; the walk re-parks epoch-0 incidents
+	// into round 1, and the human decides that verifiable round.
+	if inc.ApprovalEpoch == 0 {
+		return fmt.Errorf("cannot record a decision for %s: its park predates approval rounds; the controller will re-park it — decide the fresh request", id)
+	}
+	// expectedEpoch closes the notification-to-click half of the hot-swap
+	// window: when the client passes the round it DISPLAYED (>0) and a
+	// re-park has since minted a newer round, the click must not be recorded
+	// against content the human never saw. Zero means the client did not
+	// carry a round (older CLI, raw curl) and keeps the bind-to-current
+	// behavior, which the resume-time requestMismatch still guards.
+	if expectedEpoch > 0 && expectedEpoch != inc.ApprovalEpoch {
+		return fmt.Errorf("the approval request for %s changed since it was displayed (you decided round %d; round %d is current) — re-read the incident and decide again",
+			id, expectedEpoch, inc.ApprovalEpoch)
+	}
+	request, err := c.store.GetApprovalRequest(ctx, id, inc.ApprovalEpoch)
+	if err != nil {
+		return fmt.Errorf("cannot record a decision for %s: its current approval round has no request record; wait for the controller to re-park it", id)
+	}
+	step := approval.StepIdentity{
+		PlaybookName: request.PlaybookName,
+		StepName:     request.StepName,
+		StepAction:   request.StepAction,
+		StepHash:     request.StepHash,
+		ParkEpoch:    request.ParkEpoch,
+	}
+	return approval.New(c.store, c.runtimeConfig(ctx).ApprovalTTL).Decide(ctx, id, step, actor, channel, decision)
 }
 
 // ResolveIncident manually resolves an incident (typically from
@@ -100,9 +144,7 @@ func (c *Controller) AcceleratorObservationProfile(ctx context.Context, node str
 	if labels == nil {
 		return nil, fmt.Errorf("node labels are unavailable for runtime profile selection")
 	}
-	c.acceleratorProfilesMu.RLock()
-	profiles := append([]config.AcceleratorRuntimeProfile(nil), c.acceleratorProfiles...)
-	c.acceleratorProfilesMu.RUnlock()
+	profiles := c.runtimeConfig(ctx).AcceleratorProfiles
 	profile, err := (config.Config{AcceleratorProfiles: profiles}).ResolveAcceleratorRuntimeProfile(labels, vendor)
 	if errors.Is(err, config.ErrNoAcceleratorRuntimeProfile) {
 		return nil, nil

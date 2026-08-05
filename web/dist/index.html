@@ -403,9 +403,11 @@ function route(){
 window.addEventListener("hashchange", route);
 
 /* ---------- actions ---------- */
-async function decide(id, verb){
+async function decide(id, verb, round){
   try {
-    await api(`/api/v1/incidents/${encodeURIComponent(id)}/${verb}`, "POST", {actor: actor()});
+    const body = {actor: actor()};
+    if(round > 0) body.park_epoch = round; // pin to the round the row displayed
+    await api(`/api/v1/incidents/${encodeURIComponent(id)}/${verb}`, "POST", body);
     toast(`${verb} recorded for ${id.slice(0,34)}…`, verb === "reject" ? "bad" : "good");
     await tick();
   } catch(e){ toast(e.message, "bad"); }
@@ -441,9 +443,11 @@ function statCard(n, label, cls){
 }
 function rowActions(inc){
   let out = "";
-  if(inc.state === "AWAITING_APPROVAL")
-    out += `<button class="btn good" onclick="event.stopPropagation();decide('${esc(inc.id)}','approve')">Approve</button>
-      <button class="btn danger" onclick="event.stopPropagation();decide('${esc(inc.id)}','reject')">Reject</button> `;
+  if(inc.state === "AWAITING_APPROVAL"){
+    const round = inc.approval_epoch || 0;
+    out += `<button class="btn good" onclick="event.stopPropagation();decide('${esc(inc.id)}','approve',${round})">Approve</button>
+      <button class="btn danger" onclick="event.stopPropagation();decide('${esc(inc.id)}','reject',${round})">Reject</button> `;
+  }
   if(ACTIVE(inc.state))
     out += `<button class="btn" onclick="event.stopPropagation();decide('${esc(inc.id)}','resolve')">Resolve</button>`;
   return out;

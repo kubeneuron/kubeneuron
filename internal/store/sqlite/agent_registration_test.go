@@ -152,3 +152,38 @@ func openTestStore(t *testing.T) *Store {
 	})
 	return st
 }
+
+// Round-7 item C: agent_arming is agent-owned and written through
+// UNCONDITIONALLY at registration — including reverting to unknown (”) when
+// a registration carries no declaration (agent downgrade, v1 protocol) — and
+// the platform inventory refresh (UpsertNode) must never clobber it.
+func TestAgentArmingWriteThroughAndInventoryPreservation(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if err := s.UpsertAgentRegistration(ctx, &types.Node{
+		Name: "n1", AgentLastSeen: time.Now(), AgentArming: types.AgentArmingArmed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.GetNode(ctx, "n1"); err != nil || n.AgentArming != types.AgentArmingArmed {
+		t.Fatalf("after armed registration: %+v, %v", n, err)
+	}
+
+	// Platform inventory refresh must not touch the agent-owned fact.
+	if err := s.UpsertNode(ctx, &types.Node{Name: "n1", Platform: "kubernetes", Labels: map[string]string{"a": "b"}}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.GetNode(ctx, "n1"); err != nil || n.AgentArming != types.AgentArmingArmed {
+		t.Fatalf("inventory refresh clobbered arming: %+v, %v", n, err)
+	}
+
+	// A registration with no declaration reverts to unknown: a stale 'armed'
+	// surviving an agent downgrade would be a stale-authority bug.
+	if err := s.UpsertAgentRegistration(ctx, &types.Node{Name: "n1", AgentLastSeen: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.GetNode(ctx, "n1"); err != nil || n.AgentArming != types.AgentArmingUnknown {
+		t.Fatalf("undeclared registration must revert to unknown: %+v, %v", n, err)
+	}
+}

@@ -63,9 +63,11 @@ func (n *Notifier) RequestApproval(ctx context.Context, inc *types.Incident, ste
 	if inc == nil {
 		return fmt.Errorf("slack: approval request for step %q carries no incident", stepName)
 	}
+	// The suggested commands carry --round so the decision is refused if a
+	// re-park mints a newer round between this message and the human's click.
 	text := fmt.Sprintf(
-		":raised_hand: KubeNeuron approval required: `%s`\n*node:* %s   *class:* %s   *step:* %s\nDecide with:\n```kubeneuronctl approve %s\nkubeneuronctl reject %s```",
-		inc.ID, inc.Target.Node, inc.Class, stepName, inc.ID, inc.ID)
+		":raised_hand: KubeNeuron approval required: `%s` (round %d)\n*node:* %s   *class:* %s   *step:* %s\nDecide with:\n```kubeneuronctl approve %s --round %d\nkubeneuronctl reject %s --round %d```",
+		inc.ID, inc.ApprovalEpoch, inc.Target.Node, inc.Class, stepName, inc.ID, inc.ApprovalEpoch, inc.ID, inc.ApprovalEpoch)
 	return n.post(ctx, text)
 }
 

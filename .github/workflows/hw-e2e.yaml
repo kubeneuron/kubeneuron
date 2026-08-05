@@ -1,0 +1,116 @@
+name: Hardware GPU E2E
+
+# Real-NVIDIA end-to-end on an EPHEMERAL EKS cluster (g4dn / Tesla T4).
+#
+# Deliberately NOT per-commit (Phase 4 tiering decision): every push/PR stays
+# CPU-only in ci.yaml. This target is manual (`workflow_dispatch`, gated behind
+# a typed confirmation and the `gpu-lab` environment approval) plus a weekly
+# cron, and is mandatory before cutting a release tag. It always destroys the
+# cluster and sweeps for cost leaks, even on failure.
+#
+# It stands up nothing here in the repo — a human enables it once the secrets,
+# vars, and the `gpu-lab` environment (below) exist. See docs/operations.md,
+# section "Hardware GPU end-to-end CI".
+#
+# Required secrets:   AWS_GPU_LAB_ROLE_ARN  (IAM role assumed via GitHub OIDC)
+# Required vars:       AWS_REGION, ECR_REGISTRY
+# Required environment: gpu-lab  (add required reviewers to gate every run)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "RUN GPU HARDWARE E2E" to confirm a paid, destructive run'
+        required: true
+        type: string
+  schedule:
+    # Weekly, Monday 07:00 UTC. Off-hours so a hung run is reaped before load.
+    - cron: "0 7 * * 1"
+
+permissions:
+  contents: read
+  id-token: write # GitHub OIDC -> AWS role assumption; no static keys.
+
+# One ephemeral cluster at a time. Never cancel a run mid-flight: a cancelled
+# run would abandon a live cluster. Queue instead so teardown always completes.
+concurrency:
+  group: hw-e2e-ephemeral-eks
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+  # Unique per run; the e2e prefix is what teardown/sweep/reap key on.
+  CLUSTER_NAME: kubeneuron-e2e-gh${{ github.run_number }}
+
+jobs:
+  gpu-e2e:
+    runs-on: ubuntu-latest
+    # Gated by the gpu-lab environment: add required reviewers there so every
+    # dispatch and cron run waits for a human approval before spending money.
+    environment: gpu-lab
+    # Hard ceiling. The out-of-band reaper (hack/hw-e2e.sh reap) is the second
+    # line of defence if the runner itself dies without running teardown.
+    timeout-minutes: 120
+    steps:
+      - name: Confirm destructive manual runs
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [ "$CONFIRM" != "RUN GPU HARDWARE E2E" ]; then
+            echo "::error::confirm input did not match the required phrase" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.12"
+          cache: true
+
+      - name: Assume the GPU-lab AWS role (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GPU_LAB_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Install eksctl and kubectl
+        env:
+          EKSCTL_VERSION: v0.199.0
+          KUBECTL_VERSION: v1.30.6
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/hw-e2e-tools"
+          mkdir -p "$tools"
+          curl --fail --location --retry 3 \
+            "https://github.com/eksctl-io/eksctl/releases/download/${EKSCTL_VERSION}/eksctl_Linux_amd64.tar.gz" \
+            | tar -xz -C "$tools" eksctl
+          curl --fail --location --retry 3 \
+            --output "$tools/kubectl" \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod 0755 "$tools/eksctl" "$tools/kubectl"
+          echo "$tools" >> "$GITHUB_PATH"
+
+      - name: Preflight
+        run: hack/hw-e2e.sh preflight
+
+      - name: Stand up the ephemeral GPU cluster
+        run: hack/hw-e2e.sh up
+
+      - name: Deploy KubeNeuron (build+push to ECR, operator install)
+        run: hack/hw-e2e.sh deploy
+
+      - name: Dry-run ladder (XID 79 -> cordon -> drain -> approval)
+        run: hack/hw-e2e.sh test-dryrun
+
+      - name: Confined destructive ReplaceNode (executionMode Enabled)
+        run: hack/hw-e2e.sh test-destructive
+
+      # Always destroy and sweep, even when a step above failed or was
+      # cancelled. This is the cost guarantee — it runs eksctl delete --force
+      # then asserts zero leftover EC2, stacks, EBS volumes, and IAM role.
+      - name: Teardown and sweep (always)
+        if: always()
+        run: hack/hw-e2e.sh teardown

@@ -28,6 +28,19 @@ type Safety struct {
 	MaxConcurrentReboots      int      `yaml:"max_concurrent_reboots"`
 	Flap                      Flap     `yaml:"flap"`
 	VerifyQuietWindow         Duration `yaml:"verify_quiet_window"`
+	// QuiesceForbidResetWhenPresent lists process names whose presence on a
+	// node means a per-device reset must not be attempted there. See the CRD
+	// field of the same name: the motivating case is nv-fabricmanager, which
+	// holds the GPUs and must not be stopped to make room for a remediation.
+	QuiesceForbidResetWhenPresent []string `yaml:"quiesce_forbid_reset_when_present,omitempty"`
+	// DestructiveExecutionNodeSelector is the compiled
+	// spec.safety.destructiveExecution.nodeSelector. It is the declared blast
+	// radius: on an Enabled install the controller must confine its own
+	// destructive platform steps (cordon, drain, evict, recycle/replace) to
+	// nodes whose labels match this selector, exactly as the agent DaemonSet is
+	// already confined. Empty means no confinement is configured (every
+	// non-Enabled install is globally dry-run, so nothing executes anyway).
+	DestructiveExecutionNodeSelector map[string]string `yaml:"destructive_execution_node_selector,omitempty"`
 }
 
 // Flap configures flap detection.

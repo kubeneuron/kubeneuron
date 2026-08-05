@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -14,6 +15,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
+	"github.com/kubeneuron/kubeneuron/internal/action"
+	"github.com/kubeneuron/kubeneuron/internal/cloud"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
@@ -68,6 +71,9 @@ func CompileSnapshot(
 	if err != nil {
 		return nil, err
 	}
+	if err := validateCloudCapabilities(installation, playbooks); err != nil {
+		return nil, err
+	}
 
 	compiledPolicies, err := compilePolicies(installation, policies, books)
 	if err != nil {
@@ -103,7 +109,9 @@ func CompileSnapshot(
 				Count:  effectivePositive(installation.Spec.Safety.FlapCount, 3),
 				Window: flapWindow,
 			},
-			VerifyQuietWindow: quietWindow,
+			VerifyQuietWindow:                quietWindow,
+			QuiesceForbidResetWhenPresent:    quiesceForbiddenHolders(installation.Spec.Safety.Quiesce),
+			DestructiveExecutionNodeSelector: destructiveNodeSelector(installation.Spec.Safety),
 		},
 		Approvals: config.Approvals{
 			Channels: append([]string(nil), installation.Spec.Approvals.Channels...),
@@ -206,6 +214,66 @@ func compileMaintenanceWindows(installationName string, maintenance []kubeneuron
 	return data, nil
 }
 
+// validateCloudCapabilities fails a compile closed when a playbook uses a cloud
+// primitive the configured provider does not declare. It is the compile-time
+// half of the fail-closed boundary: a provider that cannot reinitialize an
+// instance in place must not admit a RecycleNode playbook, rather than the
+// controller discovering the gap in the middle of an incident.
+//
+// The capability axis is provider-side: the required primitive comes from the
+// action registry, and whether the provider has it comes from that provider's
+// own declaration (internal/cloud), queried by name without any credentials.
+// When NO provider is configured a cloud action can never run at all — there is
+// nothing that could ever perform it — so such a playbook is rejected here
+// rather than shipped to compile-clean and then fail closed mid-incident, after
+// a cordon+drain+approval, at the runtime check. An unregistered provider name
+// also fails closed here.
+func validateCloudCapabilities(installation *kubeneuronv1alpha1.KubeNeuron, playbooks []kubeneuronv1alpha1.GPUPlaybook) error {
+	cloudSpec := installation.Spec.Cloud
+	providerConfigured := cloudSpec != nil && cloudSpec.Provider != ""
+	var caps cloud.Capabilities
+	var known bool
+	if providerConfigured {
+		caps, known = cloud.DeclaredCapabilities(cloudSpec.Provider)
+	}
+	for i := range playbooks {
+		pb := &playbooks[i]
+		if pb.Spec.KubeNeuronRef != installation.Name {
+			continue
+		}
+		for _, step := range pb.Spec.Steps {
+			def, found := action.ByPlaybookAction(step.Action)
+			if !found || def.CloudPrimitive == action.CloudPrimitiveNone {
+				continue
+			}
+			if !providerConfigured {
+				return fmt.Errorf("playbook %q step %q: action %s is a cloud operation but spec.cloud is not configured; no provider can ever perform it, so the playbook is rejected", pb.Name, step.Name, step.Action)
+			}
+			if !known {
+				return fmt.Errorf("playbook %q step %q: action %s needs cloud provider %q, which is not a known provider", pb.Name, step.Name, step.Action, cloudSpec.Provider)
+			}
+			if !cloudCapabilitySatisfied(def.CloudPrimitive, caps) {
+				return fmt.Errorf("playbook %q step %q: action %s requires the %q capability, which cloud provider %q does not declare", pb.Name, step.Name, step.Action, def.CloudPrimitive, cloudSpec.Provider)
+			}
+		}
+	}
+	return nil
+}
+
+// cloudCapabilitySatisfied maps a required cloud primitive to the provider's
+// declared capability. An unknown primitive is treated as satisfied: it names
+// no gate, so it cannot be the thing that fails a compile.
+func cloudCapabilitySatisfied(primitive action.CloudPrimitive, caps cloud.Capabilities) bool {
+	switch primitive {
+	case action.CloudPrimitiveReinitializeInPlace:
+		return caps.ReinitializeInPlace
+	case action.CloudPrimitiveReplace:
+		return caps.Replace
+	default:
+		return true
+	}
+}
+
 func validateInstallation(s *kubeneuronv1alpha1.KubeNeuron) error {
 	if s.Name == "" {
 		return fmt.Errorf("installation name is required")
@@ -247,6 +315,60 @@ func validateInstallation(s *kubeneuronv1alpha1.KubeNeuron) error {
 // unambiguous: it cannot be produced by a stray `true`.
 const destructiveExecutionAcknowledgement = "I understand these nodes may be reset, rebooted, or destroyed"
 
+// destructiveNodeSelector returns the compiled blast-radius selector the
+// controller confines its own destructive platform steps to. It is populated
+// only for an Enabled install with a destructiveExecution block —
+// validateRuntimeSupport has already proven that block names a non-empty
+// selector — so an empty result means "no confinement configured", which is
+// safe because every other mode is globally dry-run.
+func destructiveNodeSelector(safety kubeneuronv1alpha1.SafetySpec) map[string]string {
+	if effectiveExecutionMode(safety) != kubeneuronv1alpha1.ExecutionModeEnabled || safety.DestructiveExecution == nil {
+		return nil
+	}
+	return copyStringMap(safety.DestructiveExecution.NodeSelector)
+}
+
+// quiesceForbiddenHolders normalizes the declared process names, dropping blanks
+// so a stray empty entry cannot forbid every reset by matching a blank command.
+func quiesceForbiddenHolders(quiesce *kubeneuronv1alpha1.QuiesceSpec) []string {
+	if quiesce == nil {
+		return nil
+	}
+	var out []string
+	for _, name := range quiesce.ForbidResetWhenPresent {
+		if name = strings.TrimSpace(name); name != "" {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// validateHostTooling rejects host tooling that could not work at runtime.
+//
+// binDir is the only host directory mounted into the agent, so a dcgmiPath
+// outside it names a file that would simply not exist in the container. Saying
+// so at compile time beats a node whose attestation silently stays degraded.
+func validateHostTooling(tooling *kubeneuronv1alpha1.HostToolingSpec) error {
+	if tooling == nil {
+		return nil
+	}
+	dcgmiPath := strings.TrimSpace(tooling.DCGMIPath)
+	if dcgmiPath == "" {
+		return nil
+	}
+	binDir := strings.TrimSpace(tooling.BinDir)
+	if binDir == "" {
+		binDir = "/usr/bin"
+	}
+	if filepath.Dir(filepath.Clean(dcgmiPath)) != filepath.Clean(binDir) {
+		return fmt.Errorf(
+			"spec.agent.hostTooling.dcgmiPath %q must be directly inside binDir %q: binDir is the only host directory mounted into the agent",
+			dcgmiPath, binDir)
+	}
+	return nil
+}
+
 func validateRuntimeSupport(s *kubeneuronv1alpha1.KubeNeuron) error {
 	// Real side effects are confined to explicitly declared nodes: Enabled
 	// without spec.safety.destructiveExecution stays rejected, and the block
@@ -265,6 +387,9 @@ func validateRuntimeSupport(s *kubeneuronv1alpha1.KubeNeuron) error {
 		if destructive.Acknowledgement != destructiveExecutionAcknowledgement {
 			return fmt.Errorf("spec.safety.destructiveExecution.acknowledgement must read exactly %q", destructiveExecutionAcknowledgement)
 		}
+	}
+	if err := validateHostTooling(s.Spec.Agent.HostTooling); err != nil {
+		return err
 	}
 	if webhookTokenRef(s) == nil {
 		return fmt.Errorf("spec.notifications.webhookToken is required: Alertmanager ingress must be authenticated")
@@ -522,6 +647,14 @@ func configDuration(value, defaultValue string) (config.Duration, error) {
 	if err != nil {
 		return 0, err
 	}
+	// These are windows and TTLs (flap, verify quiet, approval). A negative value
+	// silently subverts the declared intent — a negative flapWindow disables flap
+	// quarantine entirely instead of tightening it — and a zero window/TTL is
+	// meaningless, so both are rejected here rather than compiling into a snapshot
+	// that behaves nothing like what was written.
+	if duration <= 0 {
+		return 0, fmt.Errorf("duration must be positive, got %q", value)
+	}
 	return config.Duration(duration), nil
 }
 
@@ -599,12 +732,8 @@ func compilePlaybookIndex(installationName string, playbooks []kubeneuronv1alpha
 		}
 		books[book.Name] = book
 	}
-	for name, book := range books {
-		if next := book.OnFailure.EscalateTo; next != "" {
-			if _, exists := books[next]; !exists {
-				return nil, fmt.Errorf("playbook %q escalates to missing playbook %q", name, next)
-			}
-		}
+	if err := playbook.ValidateEscalationGraph(books); err != nil {
+		return nil, err
 	}
 	return books, nil
 }
@@ -641,8 +770,10 @@ func compilePlaybook(in *kubeneuronv1alpha1.GPUPlaybook) (*playbook.Playbook, er
 		default:
 			return nil, fmt.Errorf("playbook %q step %q: unknown approval requirement %q", in.Name, step.Name, step.Approval)
 		}
-		if step.Action == kubeneuronv1alpha1.ActionReboot && approval != "required" {
-			return nil, fmt.Errorf("playbook %q step %q: Reboot requires approval Required", in.Name, step.Name)
+		// Every whole-VM action requires an explicit human decision: they
+		// restart or destroy the instance, not just a process on it.
+		if requiresApproval(step.Action) && approval != "required" {
+			return nil, fmt.Errorf("playbook %q step %q: %s requires approval Required", in.Name, step.Name, step.Action)
 		}
 		timeout, err := playbookDuration(step.Timeout)
 		if err != nil {
@@ -682,39 +813,22 @@ func compilePlaybook(in *kubeneuronv1alpha1.GPUPlaybook) (*playbook.Playbook, er
 	return book, nil
 }
 
-func legacyAction(action kubeneuronv1alpha1.PlaybookAction) (legacy string, scope string, err error) {
-	switch action {
-	case kubeneuronv1alpha1.ActionObserve:
-		return "notify.observe", "gpu", nil
-	case kubeneuronv1alpha1.ActionCordon:
-		return "platform.cordon", "node", nil
-	case kubeneuronv1alpha1.ActionDrain:
-		return "platform.drain", "node", nil
-	case kubeneuronv1alpha1.ActionUncordon:
-		return "platform.uncordon", "node", nil
-	case kubeneuronv1alpha1.ActionEvictGPUWorkload:
-		return "platform.evict_gpu_workload", "gpu", nil
-	case kubeneuronv1alpha1.ActionIdleCheck:
-		return "agent.idle_check", "gpu", nil
-	case kubeneuronv1alpha1.ActionWaitIdle:
-		return "agent.wait_idle", "gpu", nil
-	case kubeneuronv1alpha1.ActionGPUReset:
-		return "agent.gpu_reset", "gpu", nil
-	case kubeneuronv1alpha1.ActionCollectBundle:
-		return "agent.collect_bundle", "node", nil
-	case kubeneuronv1alpha1.ActionReboot:
-		return "agent.reboot", "node", nil
-	case kubeneuronv1alpha1.ActionRunDiag:
-		return "agent.run_diag", "node", nil
-	case kubeneuronv1alpha1.ActionVerifyGPUHealth:
-		return "verify.gpu_health", "gpu", nil
-	case kubeneuronv1alpha1.ActionVerifyNodeHealth:
-		return "verify.node_health", "node", nil
-	case kubeneuronv1alpha1.ActionOpenTicket:
-		return "notify.ticket", "node", nil
-	default:
-		return "", "", fmt.Errorf("unsupported action %q", action)
+// requiresApproval reports whether an action restarts or destroys a whole node
+// and therefore must not run without a human decision. It reads the registry's
+// ForcesApproval flag so the whole-VM set lives in exactly one place.
+func requiresApproval(a kubeneuronv1alpha1.PlaybookAction) bool {
+	def, ok := action.ByPlaybookAction(a)
+	return ok && def.ForcesApproval
+}
+
+// legacyAction maps a CRD enum action to its runtime wire string and
+// failure-domain scope, both taken from the action registry.
+func legacyAction(a kubeneuronv1alpha1.PlaybookAction) (wire string, scope string, err error) {
+	def, ok := action.ByPlaybookAction(a)
+	if !ok {
+		return "", "", fmt.Errorf("unsupported action %q", a)
 	}
+	return def.Wire, string(def.Scope), nil
 }
 
 func playbookDuration(value string) (playbook.Duration, error) {
@@ -724,6 +838,12 @@ func playbookDuration(value string) (playbook.Duration, error) {
 	duration, err := time.ParseDuration(value)
 	if err != nil {
 		return 0, err
+	}
+	// Zero is the legitimate "unset" for a cooldown or step timeout, but a
+	// negative duration is nonsense that would otherwise compile — a negative
+	// cooldown never gates, a negative timeout diverges from the declared budget.
+	if duration < 0 {
+		return 0, fmt.Errorf("duration must not be negative, got %q", value)
 	}
 	return playbook.Duration(duration), nil
 }
@@ -841,8 +961,9 @@ func selectorsMayOverlap(left, right map[string]string) bool {
 
 // compileSignalMappings validates the mappings selecting this installation
 // and serializes them as detection-catalog overrides. Only the implemented
-// subset is accepted: source "xid" with xidCodes or source "alertmanager"
-// with alertName; label matchers stay fail-closed.
+// subset is accepted: source "xid" with xidCodes, source "alertmanager" with
+// alertName, or source "fault" with faults (vendor-neutral codes); label
+// matchers stay fail-closed.
 func compileSignalMappings(installationName string, mappings []kubeneuronv1alpha1.GPUSignalMapping) ([]byte, error) {
 	var overrides []config.SignalOverride
 	for i := range mappings {
@@ -862,6 +983,9 @@ func compileSignalMappings(installationName string, mappings []kubeneuronv1alpha
 		for _, code := range m.Spec.XIDCodes {
 			override.XIDCodes = append(override.XIDCodes, int(code))
 		}
+		for _, f := range m.Spec.Faults {
+			override.Faults = append(override.Faults, config.FaultOverride{Vendor: f.Vendor, Code: f.Code})
+		}
 		switch m.Spec.Source {
 		case "xid":
 			if len(override.XIDCodes) == 0 {
@@ -871,8 +995,12 @@ func compileSignalMappings(installationName string, mappings []kubeneuronv1alpha
 			if override.AlertName == "" {
 				return nil, fmt.Errorf("signal mapping %q: source alertmanager requires alertName", m.Name)
 			}
+		case "fault":
+			if len(override.Faults) == 0 {
+				return nil, fmt.Errorf("signal mapping %q: source fault requires faults", m.Name)
+			}
 		default:
-			return nil, fmt.Errorf("signal mapping %q: source must be \"xid\" or \"alertmanager\", got %q", m.Name, m.Spec.Source)
+			return nil, fmt.Errorf("signal mapping %q: source must be \"xid\", \"alertmanager\", or \"fault\", got %q", m.Name, m.Spec.Source)
 		}
 		if err := override.Validate(); err != nil {
 			return nil, err

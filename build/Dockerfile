@@ -39,10 +39,47 @@ ENTRYPOINT ["/kubeneuron-controller"]
 
 # The agent runs privileged with hostPID in the managed DaemonSet and must
 # read /dev/kmsg, so it stays root; the runtime pod spec is the authority.
-FROM gcr.io/distroless/static-debian12 AS agent
+#
+# busybox supplies one binary the agent cannot do without: nsenter. Rebooting
+# the node means asking the host's init, and the host's init is only reachable
+# through PID 1's namespaces — a distroless image has no way to get there, so
+# the Reboot action failed with exit 127 on real hardware. busybox is static
+# (uclibc), so it needs no loader in an image that has none.
+FROM busybox:uclibc AS busybox
+
+# The DCGM client. With the NVIDIA GPU Operator installed, dcgmi lives inside
+# NVIDIA's own container and is absent from the node, so mounting host binaries
+# cannot find it and the agent's runtime attestation stays degraded. The client
+# is small (one shared library) and speaks to whichever host engine
+# --nvidia-dcgm-endpoint names, so the agent carries its own.
+#
+# The version is pinned: it is what the agent attests as the DCGM runtime, so it
+# must not drift silently between builds.
+FROM debian:12-slim AS dcgm
+ARG TARGETARCH
+ARG DCGM_VERSION=4.6.1-1
+RUN set -eux; \
+    apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "$arch" in \
+      amd64) repo=x86_64; pkgarch=amd64 ;; \
+      arm64) repo=sbsa;   pkgarch=arm64 ;; \
+      *) echo "unsupported architecture $arch for the DCGM client" >&2; exit 1 ;; \
+    esac; \
+    url="https://developer.download.nvidia.com/compute/cuda/repos/debian12/${repo}/datacenter-gpu-manager-4-core_${DCGM_VERSION}_${pkgarch}.deb"; \
+    curl -fsSL "$url" -o /tmp/dcgm.deb; \
+    dpkg-deb -x /tmp/dcgm.deb /dcgm; \
+    test -x /dcgm/usr/bin/dcgmi; \
+    # distroless/base carries glibc but not libgcc_s, which dcgmi links against.
+    cp -a /lib/*-linux-gnu*/libgcc_s.so.1 /dcgm/usr/lib/
+
+FROM gcr.io/distroless/base-debian12 AS agent
 LABEL org.opencontainers.image.source="https://github.com/andreypetruk/kube-neuron" \
       org.opencontainers.image.description="KubeNeuron node agent" \
       org.opencontainers.image.licenses="Apache-2.0"
+COPY --from=busybox /bin/busybox /bin/nsenter
+COPY --from=dcgm /dcgm/usr/bin/dcgmi /usr/bin/dcgmi
+COPY --from=dcgm /dcgm/usr/lib/ /usr/lib/
 COPY --from=build /out/kubeneuron-agent /kubeneuron-agent
 ENTRYPOINT ["/kubeneuron-agent"]
 

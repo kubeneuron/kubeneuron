@@ -29,7 +29,6 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/agentauth"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/controller"
-	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/httpapi"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/notify"
@@ -83,7 +82,7 @@ func main() {
 		agentAudience          = flag.String("agent-token-audience", "kubeneuron-controller", "required projected ServiceAccount token audience")
 		agentNamespace         = flag.String("agent-token-namespace", "", "namespace containing the managed agent Pods")
 		agentServiceAccount    = flag.String("agent-token-service-account", "", "ServiceAccount required for managed agent Pods")
-		agentDaemonSet         = flag.String("agent-daemonset", "", "DaemonSet required to own authenticated agent Pods")
+		agentDaemonSet         = flag.String("agent-daemonset", "", "comma-separated DaemonSet names allowed to own authenticated agent Pods")
 		installationName       = flag.String("installation-name", "", "KubeNeuron installation name used for workload identity")
 		installationUID        = flag.String("installation-uid", "", "KubeNeuron installation UID used for certificate identity")
 		slackWebhookFile       = flag.String("slack-webhook-file", "", "file with a Slack incoming-webhook URL; empty disables Slack notifications")
@@ -114,6 +113,8 @@ func main() {
 		leaderElectionNS       = flag.String("leader-election-namespace", os.Getenv("POD_NAMESPACE"), "namespace for the leader-election Lease (default: POD_NAMESPACE)")
 		leaderElectionName     = flag.String("leader-election-name", "", "Lease name (default: <installation-name>-controller)")
 		platformName           = flag.String("platform", "kubernetes", "platform: kubernetes | baremetal")
+		cloudProvider          = flag.String("cloud-provider", "", "cloud provider for node recycle/replace: empty (disabled) | aws. AWS needs an IRSA role with ec2:Stop/Start/Terminate/DescribeInstances.")
+		cloudRegion            = flag.String("cloud-region", os.Getenv("AWS_REGION"), "cloud region for the provider (default: AWS_REGION)")
 		kubeconfig             = flag.String("kubeconfig", "", "kubeconfig path (out-of-cluster)")
 		inventoryPath          = flag.String("inventory", "", "bare-metal inventory YAML")
 		showVersion            = flag.Bool("version", false, "print version and exit")
@@ -160,7 +161,7 @@ func main() {
 		enabled:   *leaderElect,
 		namespace: *leaderElectionNS,
 		name:      *leaderElectionName,
-	}); err != nil {
+	}, *cloudProvider, *cloudRegion); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}
@@ -215,7 +216,7 @@ type electionConfig struct {
 	name      string
 }
 
-func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, paths runtimeConfigPaths, dbPath, platformName, kubeconfig, inventoryPath, apiTokenFile string, apiAuthnKubernetes bool, auth humanAuth, webhookTokenFile string, notifyCfg notifyFiles, startPaused bool, storeRetention, auditRetention time.Duration, publicTLSCert, publicTLSKey, storeKind, postgresDSNFile string, election electionConfig) error {
+func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, paths runtimeConfigPaths, dbPath, platformName, kubeconfig, inventoryPath, apiTokenFile string, apiAuthnKubernetes bool, auth humanAuth, webhookTokenFile string, notifyCfg notifyFiles, startPaused bool, storeRetention, auditRetention time.Duration, publicTLSCert, publicTLSKey, storeKind, postgresDSNFile string, election electionConfig, cloudProvider, cloudRegion string) error {
 	if (publicTLSCert == "") != (publicTLSKey == "") {
 		return fmt.Errorf("public TLS requires both -public-tls-cert and -public-tls-key")
 	}
@@ -272,6 +273,14 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 			return fmt.Errorf("kubernetes platform: %w", err)
 		}
 		plat = kubePlatform
+		if cloudProvider != "" {
+			recycler, err := newInstanceRecycler(context.Background(), cloudProvider, cloudRegion)
+			if err != nil {
+				return fmt.Errorf("cloud provider %q: %w", cloudProvider, err)
+			}
+			kubePlatform.SetInstanceRecycler(recycler)
+			log.Info("cloud node recycling enabled", "provider", cloudProvider)
+		}
 	case "baremetal":
 		plat, err = baremetal.New(inventoryPath, baremetal.Hooks{})
 		if err != nil {
@@ -307,6 +316,12 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if kubePlatform != nil {
+		// Node inventory sits on the destructive-admission path; serve it from
+		// a watch-maintained cache instead of a per-check apiserver List.
+		kubePlatform.StartNodeCache(ctx)
+	}
 
 	// leading is true when this replica may write: always without leader
 	// election, only while holding the Lease with it.
@@ -385,52 +400,19 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 		addAsync(pagerduty.New(key))
 	}
 	ctrl := controller.New(st, st, engine, gate, flap, plat, act, notifier, log)
-	ctrl.SetTimings(cfg.Safety.VerifyQuietWindow.Std(), cfg.Approvals.TTL.Std())
-	if err := ctrl.SetAcceleratorRuntimeProfiles(cfg.AcceleratorProfiles); err != nil {
-		return fmt.Errorf("installing accelerator runtime profiles: %w", err)
-	}
-	if len(cfg.AcceleratorProfiles) > 0 {
-		log.Info("accelerator runtime profiles loaded", "count", len(cfg.AcceleratorProfiles))
-	}
-	if paths.windows != "" {
-		windows, err := config.LoadWindows(paths.windows)
-		if err != nil {
-			return fmt.Errorf("loading maintenance windows: %w", err)
-		}
-		ctrl.SetMaintenanceWindows(windows)
-		if len(windows) > 0 {
-			log.Info("maintenance windows loaded", "count", len(windows))
-		}
-	}
-	var catalog *detect.Catalog
-	if paths.mappings != "" {
-		overrides, err := config.LoadSignalOverrides(paths.mappings)
-		if err != nil {
-			return fmt.Errorf("loading signal mappings: %w", err)
-		}
-		if len(overrides) > 0 {
-			catalog, err = detect.NewCatalog(overrides)
-			if err != nil {
-				return fmt.Errorf("building signal catalog: %w", err)
-			}
-			ctrl.SetSignalCatalog(catalog)
-			log.Info("signal overrides loaded", "count", len(overrides))
-		}
-	}
-	if paths.nodeConfigs != "" {
-		nodeConfigs, err := config.LoadNodeConfigs(paths.nodeConfigs)
-		if err != nil {
-			return fmt.Errorf("loading node configs: %w", err)
-		}
-		if err := ctrl.ApplyNodeConfigs(ctx, nodeConfigs); err != nil {
-			return fmt.Errorf("applying node configs: %w", err)
-		}
-	}
 	api := httpapi.New(ctrl)
-	if catalog != nil {
-		api.SetSignalCatalog(catalog)
+	// Install the full runtime configuration in place, and keep it current by
+	// watching the mounted files rather than by rolling the Deployment — see
+	// applyRuntimeConfig for why a rollout cannot work under leader election.
+	if err := applyRuntimeConfig(ctx, ctrl, api, paths, log); err != nil {
+		return err
 	}
+	go watchRuntimeConfig(ctx, ctrl, api, paths, log)
 	api.SetMetricsHandler(metrics.Handler())
+	// When the public listener serves plain HTTP it is expected to sit behind a
+	// TLS-terminating load balancer, so honor X-Forwarded-Proto to mark panel
+	// cookies Secure. When it terminates TLS itself, r.TLS already answers that.
+	api.TrustProxyHeaders(publicTLSCert == "")
 	if sqliteBackup != nil && dbPath != ":memory:" {
 		// The snapshot endpoint is SQLite-only; PostgreSQL backups use
 		// pg_dump/PITR (see operations).
@@ -512,6 +494,11 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 		api.SetWebhookToken(token)
 		api.SetWebhookTokenProvider(newCachedTokenFile(webhookTokenFile, token, log).get)
 	} else {
+		// Fail-closed by default: without a token the webhook rejects every
+		// caller, because a firing alert can drive cordon/drain. Opt into the
+		// unauthenticated development mode explicitly so the security property
+		// lives in the code path, not in whether a flag happened to be set.
+		api.AllowInsecureWebhook()
 		log.Warn("Alertmanager webhook is unauthenticated: no -webhook-token-file configured (development only)")
 	}
 
@@ -522,7 +509,7 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 		Audience:         agentServer.TokenAudience,
 		Namespace:        agentServer.Namespace,
 		ServiceAccount:   agentServer.ServiceAccount,
-		AgentDaemonSet:   agentServer.DaemonSet,
+		AgentDaemonSets:  splitNonEmpty(agentServer.DaemonSet, ","),
 		InstallationName: agentServer.InstallationName,
 		InstallationUID:  agentServer.InstallationUID,
 	})
@@ -742,4 +729,15 @@ func serve(name string, err error) error {
 		return nil
 	}
 	return fmt.Errorf("%s server: %w", name, err)
+}
+
+// splitNonEmpty splits s on sep, trims whitespace, and drops empty entries.
+func splitNonEmpty(s, sep string) []string {
+	var out []string
+	for _, part := range strings.Split(s, sep) {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }

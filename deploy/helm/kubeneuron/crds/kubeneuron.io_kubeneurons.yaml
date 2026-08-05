@@ -98,6 +98,22 @@ spec:
                         x-kubernetes-validations:
                         - message: dcgmEndpoint must be host:port, for example nvidia-dcgm.gpu-operator.svc:5555
                           rule: self.contains(':')
+                      dcgmiPath:
+                        description: |-
+                          DCGMIPath selects a dcgmi client already installed on the node instead
+                          of the one shipped in the agent image.
+
+                          Leave it unset unless you mean it. The attested runtime version is
+                          whichever client answers, and an AcceleratorRuntimeProfile pins one exact
+                          value; taking the client from the node makes that value depend on how
+                          each node was provisioned, so a fleet built from mixed images would
+                          attest different versions and part of it would go degraded. Set this only
+                          when the node's client is deliberately the one your profile pins.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: dcgmiPath must be an absolute host path without
+                            ':'
+                          rule: self.startsWith('/') && !self.contains(':')
                       libDirs:
                         default:
                         - /usr/lib64
@@ -335,9 +351,53 @@ spec:
                     - name
                     type: object
                 type: object
+              cloud:
+                description: |-
+                  Cloud enables node recycle/replace remediation against the cloud provider
+                  behind the nodes. Leave empty to disable it; a RecycleNode/ReplaceNode
+                  step then fails closed rather than silently succeeding.
+                properties:
+                  aws:
+                    description: AWS carries the AWS-specific configuration. Required
+                      when provider is aws.
+                    properties:
+                      iamRoleARN:
+                        description: |-
+                          IAMRoleARN is set as the eks.amazonaws.com/role-arn annotation on the
+                          controller ServiceAccount so IRSA grants ec2:Stop/Start/Terminate/
+                          DescribeInstances. Required unless the role is attached another way.
+                        type: string
+                      region:
+                        description: |-
+                          Region is the EC2 region (e.g. us-east-1). Empty uses the controller's
+                          ambient region (AWS_REGION).
+                        type: string
+                    type: object
+                  provider:
+                    description: Provider is the cloud backing the nodes. Only "aws"
+                      is implemented.
+                    enum:
+                    - aws
+                    type: string
+                required:
+                - provider
+                type: object
+                x-kubernetes-validations:
+                - message: spec.cloud.aws is required when provider is aws
+                  rule: self.provider != 'aws' || has(self.aws)
               controller:
                 description: ComponentSpec configures a managed controller component.
                 properties:
+                  allowGPUNodes:
+                    description: |-
+                      AllowGPUNodes lets the controller be scheduled onto GPU nodes.
+
+                      Off by default, and worth leaving off: a reboot playbook has been
+                      observed rebooting the node its own controller was running on, which cut
+                      the playbook off mid-step and left the node cordoned. Enable it only on
+                      clusters where every node has a GPU, and accept that a node reboot will
+                      interrupt whatever the controller was doing.
+                    type: boolean
                   image:
                     description: |-
                       Image must be pinned by an explicit tag or digest; the floating
@@ -697,6 +757,32 @@ spec:
                     format: int32
                     minimum: 1
                     type: integer
+                  quiesce:
+                    description: |-
+                      Quiesce tunes how the vendor's own components are stood down before a
+                      GPU reset.
+                    properties:
+                      forbidResetWhenPresent:
+                        description: |-
+                          ForbidResetWhenPresent lists process names whose presence on a node means
+                          a per-device reset must not be attempted there at all.
+
+                          Some processes hold the GPU and must not be stopped. `nv-fabricmanager`
+                          is the standing example: on NVSwitch machines it is required for the GPUs
+                          to function, and the honest answer is "this node is not reset per-device"
+                          rather than killing a critical daemon to make room for a remediation.
+                          Declaring it here turns a reset attempt into an early, explained refusal
+                          instead of a cordoned and drained node followed by a failure.
+
+                          Names are matched against the process name the node reports (Linux
+                          truncates these to 15 characters, so give the truncated form when it is
+                          longer).
+                        items:
+                          minLength: 1
+                          type: string
+                        maxItems: 32
+                        type: array
+                    type: object
                   verifyQuietWindow:
                     default: 10m
                     type: string
@@ -746,6 +832,32 @@ spec:
                     required:
                     - name
                     type: object
+                  issuer:
+                    allOf:
+                    - enum:
+                      - External
+                      - Operator
+                    - enum:
+                      - External
+                      - Operator
+                    default: External
+                    description: |-
+                      Issuer decides who fills in the Secrets this block names.
+
+                      External, the default, means somebody else owns them: the installer,
+                      cert-manager, an organisation's own CA. The operator never writes them,
+                      and reports how close they are to expiry so they cannot lapse silently.
+
+                      Operator means KubeNeuron issues and renews them itself — a long-lived
+                      authority signing short-lived certificates that are replaced well before
+                      they expire.
+
+                      It is deliberately explicit rather than inferred from whether the Secrets
+                      happen to exist. "Absent" and "supposed to be mine" are different things:
+                      treating a missing Secret as an invitation would let the operator take
+                      over material somebody else manages the moment they deleted it mid-
+                      rotation.
+                    type: string
                   publicServerSecretRef:
                     description: |-
                       PublicServerSecretRef optionally selects a kubernetes.io/tls-style

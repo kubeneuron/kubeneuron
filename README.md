@@ -8,24 +8,41 @@ remediation workflow. The escalation ladder ranges from observation and
 workload eviction through GPU reset, node drain, reboot, and hardware
 escalation.
 
-> **Status: released (v0.1.1); dry-run is the supported production mode.**
+> **Status: released (v0.2.0); dry-run is the default, and real cloud node
+> remediation is validated on live EKS.**
 > Working today: kernel-log XID detection on real NVIDIA hardware, GPU
 > inventory through `nvidia-smi` (mounted into the agent with
 > `spec.agent.hostTooling`), the full incident workflow with safety gates,
 > approvals with verified operator identity (password, OIDC SSO, or
 > Kubernetes RBAC), transactional audit, a durable action queue with lease
 > and boot-ID binding, PostgreSQL HA with leader election, the operator
-> REST API, control panel, and CLI. Validated end to end on a real Tesla T4
-> (AWS EKS, g4dn): a kernel-injected XID 79 walked the complete
-> cordon → drain → approval → reboot → uncordon ladder with the approver's
-> identity in the audit trail.
+> REST API, control panel, and CLI. v0.2.0 adds operator-issued mTLS with
+> automatic renewal, in-place controller configuration hot-reload (no HA
+> rollout deadlock), crash-safe host state across an agent restart, and
+> cloud GPU node remediation.
 >
-> **Deliberately still closed:** `executionMode: Enabled` — real destructive
-> reset and reboot — is rejected at CEL admission and during compilation, and
-> by three further independent gates. It stays closed until the hardware
-> verification matrix in [PRODUCT_PLAN.md](PRODUCT_PLAN.md) passes on a
-> dedicated GPU lab. Everything above runs in dry-run: the workflow executes
-> end to end and records what it *would* do, without touching a node.
+> **Validated end to end on live EKS (g4dn, real Tesla T4).** A
+> kernel-injected XID 79 (`fell-off-bus`) walked
+> cordon → drain → **approval** → `ReplaceNode` → close-as-replaced: the
+> controller terminated the real EC2 instance through IRSA, the node group
+> replaced it, a fresh node attested clean, and the incident closed as
+> *replaced* — with the named approver in the audit trail. `ReplaceNode` is
+> the first ladder step executed for real against live hardware; the reboot
+> ladder has walked end to end in dry-run on the same T4 node.
+>
+> **`executionMode: Enabled` is now a supported, off-by-default mode**, not a
+> closed door. It is confined by construction: enabling it requires
+> `spec.safety.destructiveExecution` with a non-empty `nodeSelector` naming
+> the permitted nodes (an empty selector is rejected so it can never arm the
+> whole fleet) and the exact acknowledgement sentence, and only the agents on
+> those selected nodes are armed. Dry-run stays the default for every other
+> mode and node.
+>
+> **Still deliberately unproven:** per-device *hardware* GPU reset. A
+> virtualized EC2 instance has no guest PCI reset (measured on g4dn), so the
+> agent refuses reset there on evidence and substitutes cloud replace;
+> validating an actual per-device reset needs bare metal, which the hardware
+> matrix in [PRODUCT_PLAN.md](PRODUCT_PLAN.md) still gates.
 
 ## Architecture
 
@@ -51,9 +68,9 @@ The repository builds four custom binaries:
 
 | Binary | Responsibility | Current maturity |
 |---|---|---|
-| `kubeneuron-operator` | Watches KubeNeuron CRDs, validates and compiles their configuration, and reconciles the controller and agent Kubernetes workloads. | Released. SQLite or PostgreSQL store; `DryRun`/`Paused`; `Enabled` is deliberately rejected until the destructive-action matrix is hardware-verified. Alertmanager webhook authentication is mandatory; Paused also requires an API token. Emits Kubernetes Events; readiness follows informer-cache sync. |
+| `kubeneuron-operator` | Watches KubeNeuron CRDs, validates and compiles their configuration, and reconciles the controller and agent Kubernetes workloads. | Released. SQLite or PostgreSQL store; `DryRun`/`Paused`/`Enabled`, where `Enabled` requires `spec.safety.destructiveExecution` (a non-empty node selector plus the exact acknowledgement) and arms only the named nodes. Issues and automatically renews the installation's operator-issued mTLS material and rolls the consumers on renewal. Alertmanager webhook authentication is mandatory; Paused also requires an API token. Emits Kubernetes Events; readiness follows informer-cache sync. |
 | `kubeneuron-controller` | Ingests Alertmanager and agent events and owns incident, policy, safety, and workflow execution. | Released. State walk, safety gates, approvals with verified actor identity, escalation, transactional audit, durable action queue with lease/boot-ID binding, authenticated operator REST API, embedded control panel. PostgreSQL HA with leader election; failover is proven not to duplicate an action. |
-| `kubeneuron-agent` | Runs on GPU nodes, watches kernel events, reports inventory/events, and executes queued actions. | Released. Registration and events use mTLS plus projected Pod-bound identity. `spec.agent.hostTooling` mounts the node's `nvidia-smi`/driver libraries into the distroless image — verified reading a real Tesla T4 — and arms `--require-real-driver`. Typed action contracts execute in dry-run; destructive execution stays gated by `Enabled`, which the operator never sets. |
+| `kubeneuron-agent` | Runs on GPU nodes, watches kernel events, reports inventory/events, and executes queued actions. | Released. Registration and events use mTLS plus projected Pod-bound identity. `spec.agent.hostTooling` mounts the node's `nvidia-smi`/driver libraries into the distroless image — verified reading a real Tesla T4 — and arms `--require-real-driver`. Typed action contracts execute in dry-run unless the installation is `Enabled` and the agent is on a `destructiveExecution` node, where it is armed with `--enable-destructive-actions`; host state (persistence mode, DCGM) is snapshotted crash-safe across restarts, and a hardware GPU reset is refused on evidence where the guest has no PCI reset. |
 | `kubeneuronctl` | Operator-facing CLI for status, incidents, approvals, manual remediation, and pause/resume. | All declared commands implemented against the operator REST API. |
 
 VictoriaMetrics, vmalert, Alertmanager, Grafana, dcgm-exporter, and
@@ -279,10 +296,14 @@ both CA references unchanged, and waits for controller/agent rollouts and
 `Ready=True`. It cannot repair an expired, revoked, or compromised CA and is
 not an issuance or revocation protocol.
 
-These are manual, dependency-free procedures, not automated PKI. Issuance,
-expiry scheduling/alerts, CA recovery/revocation orchestration, CRL/OCSP, and
-hot reload remain unimplemented. A controller TLS rollout uses the
-single-replica `Recreate` Deployment and causes real ingress downtime.
+These manual, dependency-free procedures cover the externally-issued path.
+With `spec.tls.issuer: Operator`, the operator now issues the installation's
+mTLS material itself and renews it automatically before expiry — reissuing the
+managed Secrets (marked by provenance so material it does not own is reported
+but never touched) and rolling the consumers, since certificates are still
+read only at process start. CA recovery/revocation orchestration and CRL/OCSP
+remain unimplemented. A controller TLS rollout uses the single-replica
+`Recreate` Deployment and causes real ingress downtime.
 Replacing only a leaf under the same retained CA is renewal, not revocation of
 a stolen old leaf; effective revocation in this contract rotates/removes the
 issuing CA and replaces every old consumer process.
@@ -321,9 +342,10 @@ safety case:
 - shipped file configuration and an omitted CR `executionMode` default to
   dry-run;
 - `executionMode: Paused` starts the controller with the global gate closed
-  and requires `spec.notifications.operatorAPIToken`; `Enabled` is rejected
-  until the managed agent runtime has host tooling, crash-safe completion, and
-  hardware-gated verification;
+  and requires `spec.notifications.operatorAPIToken`; `Enabled` lifts dry-run
+  but only under `spec.safety.destructiveExecution` — a non-empty node
+  selector and the exact acknowledgement sentence — and arms exclusively the
+  agents on the named nodes, so the blast radius is declared, not global;
 - the API accepts `SQLite` (single controller) and `Postgres` (two replicas
   with Lease-based leader election and readiness that follows leadership);
 - observability currently accepts only credential-free `External` endpoints;
@@ -335,7 +357,11 @@ safety case:
 
 Approval delivery (Slack, generic webhook, PagerDuty), verification before
 resolution, and the pause/resume control path are implemented. Real
-destructive execution remains the one deliberately closed door.
+destructive execution is now open for cloud node remediation — validated end
+to end on live EKS — under the `destructiveExecution` confinement above. The
+one door still deliberately closed is per-device *hardware* GPU reset, which a
+virtualized instance cannot perform and which the agent refuses on evidence
+until the bare-metal matrix passes.
 
 ## Configuration sources
 
@@ -377,12 +403,24 @@ uses the real `nvidia-smi` binary through opt-in host mounts
 (`spec.agent.hostTooling`), verified end-to-end on a live T4 node —
 kernel XID through the full dry-run remediation ladder.
 
-**Remaining, deliberately hardware-gated:** a standing GPU lab CI target
-(destructive reset/reboot validation) and an NVML/DCGM event stream as a
-second detection source beside kmsg. `executionMode: Enabled` stays
-rejected by construction until the hardware verification matrix in
-[PRODUCT_PLAN.md](PRODUCT_PLAN.md) passes — dry-run is the supported
-production mode today.
+**Done and released (v0.2.0):** operator-issued mTLS with automatic
+renewal (no manual rotation on the operator-issuer path); in-place
+controller configuration hot-reload, which removes the HA rollout
+deadlock so config changes apply without a Deployment roll; crash-safe
+agent host state across restarts; and cloud GPU node remediation —
+`ReplaceNode` (terminate → node-group replacement) as the primary
+primitive on autoscaled fleets and `RecycleNode` (stop/start) for
+self-managed nodes, driven controller-side through IRSA. The destructive
+path is validated on live EKS: a `fell-off-bus` incident ran
+cordon → drain → approval → `ReplaceNode` → close-as-replaced against a
+real g4dn instance, under the `destructiveExecution` node confinement.
+
+**Remaining, deliberately hardware-gated:** per-device *hardware* GPU
+reset on bare metal (a virtualized instance has no guest PCI reset, so the
+agent refuses it on evidence), a standing GPU-lab CI target for it, and an
+NVML/DCGM event stream as a second detection source beside kmsg. That
+matrix in [PRODUCT_PLAN.md](PRODUCT_PLAN.md) still gates per-device reset;
+cloud node remediation no longer waits on it.
 
 **Later evaluations:** ClickHouse archival, Slurm, and ticketing
 integrations.

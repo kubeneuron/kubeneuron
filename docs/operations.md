@@ -240,6 +240,32 @@ exporter embeds a private one that nothing else can reach. Enable it:
 helm upgrade --install gpu-operator nvidia/gpu-operator -n gpu-operator   --set dcgm.enabled=true
 ```
 
+**The client ships with the agent.** With the GPU Operator installed, `dcgmi`
+lives inside NVIDIA's own container and is *not* on the node — verified
+directly on a live cluster — so mounting host binaries cannot find it and
+attestation stays degraded. The agent image therefore carries its own pinned
+DCGM client, and uses it by default.
+
+**If you already installed DCGM on your nodes**, that client is *not* picked up
+automatically, even though `hostTooling.binDir` comes first on the agent's PATH
+(it has to, so `nvidia-smi` matches the host driver). This is deliberate: the
+attested version is whatever client answers, and an `AcceleratorRuntimeProfile`
+pins one exact value for the whole fleet. Letting the node decide would make
+that value a property of how each node was provisioned — nodes built from
+different images would attest different versions and part of the fleet would go
+degraded for no visible reason. Name it explicitly when you mean it:
+
+```yaml
+agent:
+  hostTooling:
+    binDir: /usr/bin
+    dcgmiPath: /usr/bin/dcgmi   # must live directly in binDir
+```
+
+Then pin your profile's `runtimeVersion` to *that* client's version. A mismatch
+names the binary that produced the version, so "which client answered" is never
+something you have to guess at.
+
 Then point the agent at it:
 
 ```yaml
@@ -270,11 +296,337 @@ a statement about someone else's GPU.
     `internalTrafficPolicy: Local` confines the blast radius to one node's
     engine. Treat GPU nodes accordingly: restrict who may schedule there.
 
+!!! note "The attested version is the client's, not the engine's"
+    `dcgmi --version` answers from the local binary and never contacts the
+    engine, and DCGM exposes no way to ask the engine for its build. A newer
+    client serving an older engine is normal with the GPU Operator. So an
+    `AcceleratorRuntimeProfile`'s `runtimeVersion` pins the client the agent
+    image ships; the engine is attested separately, by a live connection whose
+    GPU count must match the independent `nvidia-smi` inventory. Both must hold
+    before a report becomes `ready`.
+
+    Matching is on major and minor, not the patch level: `dcgm-4.6` and
+    `dcgm-4.6.1` both accept an attested `dcgm-4.6.2`. Otherwise every bump of
+    the bundled client would degrade each fleet still pinning the previous
+    patch — an outage caused by a release rather than by anything on the nodes.
+    A newer *minor* is still refused, because a profile names the runtime it was
+    reviewed against.
+
+## Resetting a GPU means stopping NVIDIA's own monitoring
+
+A drained node is still not a resettable one. Measured on live hardware:
+`nv-hostengine`, `dcgm-exporter` and the device plugin each hold an open handle
+on `/dev/nvidia0` without appearing as compute applications, and
+`nvidia-smi --gpu-reset` fails with exit 19 while any of them runs.
+
+Not all of them are Kubernetes workloads: `nvidia-persistenced` is a host
+service, and on EKS the device plugin comes from the machine image rather than
+the GPU Operator.
+
+Put a `QuiesceAcceleratorStack` step before `GPUReset` and a
+`RestoreAcceleratorStack` step after it. The quiesce switches the GPU Operator's
+components off through its own `nvidia.com/gpu.deploy.*` node labels (touching
+only those that were running), stops the persistence daemon, and then has the
+node confirm from its own process table that nothing holds the GPU. A holder
+that outlasts the step's timeout fails the step by name — the controller never
+guesses that the stack has settled. Because stopping DCGM also erases the
+attestation the reset gate reads, the quiesce step validates that evidence first
+and pins it for the rest of the playbook — and refuses to stop anything when the
+evidence would not have admitted a reset anyway.
+
+Monitoring is restored automatically once the incident stops running, so a
+playbook that fails at the reset never leaves the cluster blind.
+
+!!! note "A device plugin from the machine image is not covered"
+    On EKS the NVIDIA device plugin is a `kube-system` DaemonSet from the AMI
+    with no `nvidia.com/gpu.deploy.*` label, so the quiesce cannot stand it
+    down. It keeps `/dev/nvidia0` open and the step fails naming it. Stand it
+    down yourself before a reset on such a cluster.
+
+!!! warning "GPU reset is impossible on most cloud VMs"
+    On AWS EC2 g4dn (passthrough T4) the guest has no PCI reset for the device
+    — `/sys/bus/pci/devices/<addr>/reset` does not exist — and the reset fails
+    even with zero holders, persistence mode off, and the NVIDIA kernel modules
+    unloaded. NVIDIA's "currently in use by another process" text is generic and
+    misleading here. Validate resets on bare metal or on-prem.
+
+    The agent probes for this during attestation, so such a node **does not
+    advertise `reset-device` at all** and the accelerator report says why:
+
+    ```
+    physical-device reset unavailable: GPU 0 cannot be reset: the kernel
+    exposes no PCI reset for device 0000:00:1e.0; on a virtualized instance
+    the hypervisor withholds it and no GPU reset can succeed
+    ```
+
+    A playbook targeting such a fleet is refused before it cordons or drains
+    anything. Route those clusters through reboot and node replacement instead.
+
+## GPU reset on cloud VMs: recycle or replace the instance
+
+A hardware GPU reset is impossible on a virtualized instance — the hypervisor
+withholds the PCI reset from the guest (measured on AWS g4dn), so the agent does
+not advertise `reset-device` there. The cloud-native equivalent is to
+reinitialize the instance itself:
+
+- **ReplaceNode** terminates the instance; the node group's ASG or Karpenter
+  provisions a fresh node. This is the primary primitive on any autoscaled
+  fleet — an EKS managed node group, a self-managed ASG, or Karpenter — because
+  the group's health check already owns instance lifecycle. The replacement
+  boots clean, attests through the full pipeline, and the terminated node's
+  incident closes as replaced once the node object disappears.
+- **RecycleNode** stops and starts the *same* EC2 instance. Stop/start detaches
+  it from its physical host and reattaches it, so the GPU passthrough is torn
+  down and re-established from scratch — same node, EBS volumes and IP, a clean
+  GPU. Use it **only on nodes that are not under an autoscaler.** On an ASG-backed
+  group (which includes every EKS managed node group) the group's health check
+  reaps the instance the moment it stops and launches a replacement — measured
+  live: a recycle of a managed-node-group instance was overtaken by the ASG,
+  which terminated the stopped node and brought up a new one mid-recycle. There
+  the recycle wins you nothing that ReplaceNode does not, and races the ASG.
+
+Because a recycle is not done when the instance is merely powered on — the OS,
+kubelet and agent take minutes more to return — RecycleNode waits for the node
+to become `Ready` again before the ladder advances to `verify`. On an autoscaled
+group that node never comes back (the ASG replaced it), so the wait times out
+with a message telling you to use ReplaceNode: the honest signal that RecycleNode
+was the wrong action there.
+
+Both restart or destroy the whole VM, so the compiler forces `approval:
+Required` on them, exactly as for `Reboot`. Both are driven by the controller,
+never the agent — the agent dies the moment its instance stops and could never
+issue the Start that follows.
+
+Enable it with a provider-scoped `spec.cloud` block. The provider selects which
+per-provider block applies; the provider-specific settings live inside it, so a
+future cloud adds its own block rather than widening a shared top level:
+
+```yaml
+spec:
+  cloud:
+    provider: aws
+    aws:
+      region: us-east-1
+      # Set as the eks.amazonaws.com/role-arn annotation on the controller
+      # ServiceAccount, so IRSA grants the EC2 permissions below. Omit only if
+      # the role is attached to the controller some other way.
+      iamRoleARN: arn:aws:iam::123456789012:role/kubeneuron-recycle
+```
+
+The `iamRoleARN` must grant an IRSA role scoped to the cluster's own instances:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": ["ec2:StopInstances", "ec2:StartInstances",
+             "ec2:TerminateInstances", "ec2:DescribeInstances"],
+  "Resource": "*",
+  "Condition": {"StringEquals": {"aws:ResourceTag/kubernetes.io/cluster/<cluster>": "owned"}}
+}
+```
+
+Each provider declares which primitives it can perform safely: AWS advertises
+both recycle (stop/start) and replace (terminate). If a playbook uses a cloud
+action the configured provider does not declare — a `RecycleNode` under a
+provider whose only restart is a soft reboot, say — the operator **rejects the
+installation at compile time** with a clear message, rather than the controller
+discovering the gap mid-incident. A provider new to KubeNeuron is a new package
+plus one registry line; no workflow or controller code changes to add it.
+
+Without a cloud provider configured at all, a `RecycleNode`/`ReplaceNode` step
+fails closed with a clear message rather than reporting a node recycled that was
+never touched.
+
+On an autoscaled fleet — the common EKS case — the ladder is just cordon, drain,
+replace; there is no node to uncordon because a fresh one takes its place:
+
+```yaml
+steps:
+  - {name: cordon,  action: Cordon}
+  - {name: drain,   action: Drain, timeout: "10m"}
+  - {name: replace, action: ReplaceNode, approval: Required, timeout: "10m"}
+# no verify/uncordon: the terminated node's incident closes as replaced, and
+# the ASG's new node attests through the normal pipeline on its own.
+```
+
+Only on a fleet whose nodes are *not* under an autoscaler does recycle-first make
+sense, with replace as the escalation rung:
+
+```yaml
+steps:
+  - {name: cordon,   action: Cordon}
+  - {name: drain,    action: Drain, timeout: "10m"}
+  - {name: recycle,  action: RecycleNode, approval: Required, timeout: "10m"}
+  - {name: verify,   action: VerifyNodeHealth, timeout: "10m"}
+  - {name: uncordon, action: Uncordon}
+onFailure: {escalateTo: replace-node}   # ReplaceNode as the next rung
+```
+
+## Rebooting a node from the agent container
+
+The agent image is distroless and its own PID namespace is not the host's, so a
+plain `systemctl reboot` exits 127. The `Reboot` action instead enters PID 1's
+namespaces (`nsenter`, shipped in the agent image) and asks the host's init. The
+managed DaemonSet already runs privileged with `hostPID`, which is what makes
+this reachable.
+
+When destructive actions are armed, the agent probes this mechanism at startup
+and logs the result. A node that cannot reboot says so then — not after an
+operator has approved the most destructive step a playbook has. Hosts with a
+different init can replace the whole command with the agent's
+`--reboot-command`; it is never derived from a playbook or action parameter.
+
+The action is idempotent on `boot_id`: if the controller stamped the boot ID it
+observed and the node has since rebooted, a retry reports success without
+rebooting again.
+
+## TLS material and its renewal
+
+The controller and its agents authenticate to each other with mTLS. The operator
+issues that material and renews it: a long-lived authority (10 years) signs
+short-lived certificates (90 days), and each certificate is replaced once less
+than a third of its life remains. Renewal needs no coordination because the
+signer never changes — everyone already trusts it — and the workloads mounting a
+replaced certificate are rolled automatically.
+
+The asymmetry is deliberate. Rotating an authority means every party must trust
+the new one *before* anything presents a certificate signed by it, which is a
+multi-phase rollout that has to survive restarts. Rotating a leaf under a stable
+authority is a single write. Replacing the authority therefore stays a rare,
+operator-driven event.
+
+**Bringing your own material** still works. Create the four Secrets named in
+`spec.tls` before installing — from cert-manager, a corporate CA, anything — and
+the operator will not touch them. It watches them instead, and raises a
+`TLSMaterialExpiring` warning event when one is close to expiry, because nothing
+else will:
+
+```
+Secret kubeneuron-agent-client-ca was not issued by KubeNeuron and expires
+2027-07-29T10:14:00Z; nothing will renew it
+```
+
+Secrets the operator issued carry `kubeneuron.io/managed-pki: "true"`. That label
+is the whole distinction: without it the material is treated as somebody else's
+and is never overwritten.
+
+!!! warning "Installations created before this existed"
+    `deploy/install.sh` used to generate the four Secrets with `openssl` and
+    nothing renewed them. Those Secrets have no `kubeneuron.io/managed-pki`
+    label, so the operator will report their expiry but will not replace them.
+    To hand them over, delete them and let the operator reissue:
+
+    ```sh
+    kubectl -n kube-neuron delete secret \
+      kubeneuron-controller-tls kubeneuron-controller-server-ca \
+      kubeneuron-agent-tls kubeneuron-agent-client-ca
+    ```
+
+    The controller and agents reconnect once the new material rolls out.
+
 ## Remediation scripts on nodes
 
 `driver_reload`/`driver_reinstall`/`run_script` are binary-level action
 contracts only. `hostTooling.scriptsDir` mounts operator-provisioned scripts
-read-only at the agent's `--scripts-dir`, but `executionMode: Enabled` is
-still rejected and the operator never sets `-enable-destructive-actions`.
-Do not treat these actions as available in a Kubernetes installation until
-the host-runtime and hardware validation checkpoint is completed.
+read-only at the agent's `--scripts-dir`. `executionMode: Enabled` arms
+`-enable-destructive-actions`, but only on the nodes named by
+`spec.safety.destructiveExecution.nodeSelector` (see the warning below), and a
+per-device hardware GPU *reset* still refuses on virtualized instances that
+have no guest PCI reset — there the cloud `ReplaceNode` primitive stands in.
+
+!!! warning "Arming destructive execution narrows where the agent runs"
+    `executionMode: Enabled` merges
+    `spec.safety.destructiveExecution.nodeSelector` into the agent DaemonSet's
+    own node selector, so the agent — and therefore GPU fault **detection** —
+    is scheduled **only** on the armed nodes. This is deliberate: the
+    destructive-capable binary never lands on a node you did not name. But it
+    means arming a *subset* of the fleet silently stops detecting faults on
+    every other node. In production, set the selector to match **all** GPU
+    nodes you want covered, not a narrow subset; if you must arm a subset while
+    keeping detection fleet-wide, run a second `DryRun` installation for the
+    unarmed nodes.
+
+## Hardware GPU end-to-end CI
+
+Real-NVIDIA validation runs on an **ephemeral** EKS cluster (a g4dn.xlarge /
+Tesla T4 GPU node beside a small CPU nodegroup), never on per-commit CI. Every
+push and pull request stays CPU-only (`.github/workflows/ci.yaml`); the GPU
+suite is a separate, gated target that always destroys its cluster afterward.
+
+- **Workflow:** `.github/workflows/hw-e2e.yaml`.
+- **Driver script:** `hack/hw-e2e.sh` (all the heavy logic; the YAML is thin).
+- **Watchdog:** `.github/workflows/hw-e2e-reaper.yaml` runs `hack/hw-e2e.sh reap`
+  on its own 30-minute schedule.
+
+### When it runs
+
+- **`workflow_dispatch`** — a human triggers it from the Actions tab and must
+  type the phrase `RUN GPU HARDWARE E2E` into the `confirm` input. A wrong or
+  empty phrase fails the run before any cloud resource is created.
+- **Weekly `schedule`** — Monday 07:00 UTC, so a regression is caught even
+  when nobody dispatches it.
+- **Before every release tag** — running it green is a mandatory gate before
+  pushing a `v*` tag. It is not wired into `release.yaml`; run it by hand (or
+  confirm the latest weekly run is green) and only then tag.
+
+A permanent self-hosted GPU runner is intentionally out of scope; if a physical
+lab box ever appears it would host a nightly destructive ladder, tracked
+separately.
+
+### What it proves
+
+1. Stands up the cluster with `eksctl`, installs the **EBS CSI addon** (a
+   prerequisite — the controller's SQLite PVC never binds without it), marks
+   `gp2` the default StorageClass, and installs the NVIDIA GPU operator.
+2. Builds and pushes the operator/controller/agent images to ECR and installs
+   KubeNeuron through `deploy/install.sh` (stays `DryRun`).
+3. Injects a kernel **XID 79** into a GPU node's `/dev/kmsg` and asserts the
+   incident walks cordon → drain → approval → dry-run reboot ladder, with the
+   approver identity recorded in the audit trail.
+4. Flips to `executionMode: Enabled` under a confined
+   `spec.safety.destructiveExecution` block (node selector + the exact
+   acknowledgement string) and asserts the **ReplaceNode** path closes the
+   incident as replaced. A hardware GPU *reset* is impossible on a virtualized
+   g4dn, so ReplaceNode is the destructive primitive exercised here.
+
+!!! note "CSI volumes need `fsGroup`"
+    The controller mounts its SQLite PVC through the EBS CSI driver, whose
+    volumes are only writable when the pod sets an `fsGroup`. This is captured
+    as an explicit prerequisite because a live run failed on it before the
+    addon and `fsGroup` were in place.
+
+### Required secrets, vars, and environment
+
+| Kind        | Name                   | Purpose                                            |
+| ----------- | ---------------------- | -------------------------------------------------- |
+| secret      | `AWS_GPU_LAB_ROLE_ARN` | IAM role assumed via GitHub OIDC (no static keys). |
+| var         | `AWS_REGION`           | e.g. `us-east-1`.                                   |
+| var         | `ECR_REGISTRY`         | ECR host `<acct>.dkr.ecr.<region>.amazonaws.com`.  |
+| environment | `gpu-lab`              | Add required reviewers; gates every dispatch/cron. |
+
+No account id or credential is committed. The assumed role needs permission to
+run `eksctl` (EKS, CloudFormation, EC2, IAM for the cluster's service roles),
+push to ECR, and — for the sweep — terminate EC2, delete CloudFormation stacks
+and EBS volumes, and delete the recycle IAM role.
+
+### Cost and teardown guarantee
+
+The teardown step runs `if: always()` — on success, failure, or cancellation.
+It runs `eksctl delete cluster --force` and then **sweeps for leaks**: it
+asserts there is no surviving cluster, no non-terminated `kubeneuron:e2e` EC2
+instance, no `eksctl-<cluster>-*` CloudFormation stack, no orphaned e2e EBS
+volume (a real run once leaked a 1 GiB SQLite volume), and deletes any
+manually-created recycle IAM role. If it cannot delete something it fails
+loudly rather than leaving a paid resource running.
+
+The reaper is the second line of defence: it force-deletes any
+`kubeneuron-e2e*` cluster whose `kubeneuron:e2e-expires-at` tag has passed, so a
+wedged runner that never reaches teardown still cannot leak a cluster past its
+max lifetime (`MAX_LIFETIME_MINUTES`, default 180). The job's own
+`timeout-minutes: 120` bounds a single run; the reaper bounds everything else.
+
+You can run the teardown and sweep locally against a stuck run:
+
+```sh
+CLUSTER_NAME=kubeneuron-e2e-gh42 AWS_REGION=us-east-1 hack/hw-e2e.sh teardown
+```

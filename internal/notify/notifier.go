@@ -5,6 +5,7 @@ package notify
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -66,7 +67,8 @@ func (l *Log) RequestApproval(ctx context.Context, inc *types.Incident, stepName
 		"node", inc.Target.Node,
 		"class", inc.Class,
 		"step", stepName,
-		"hint", "approve with: kubeneuronctl approve "+inc.ID,
+		"round", inc.ApprovalEpoch,
+		"hint", fmt.Sprintf("approve with: kubeneuronctl approve %s --round %d", inc.ID, inc.ApprovalEpoch),
 	)
 	return nil
 }

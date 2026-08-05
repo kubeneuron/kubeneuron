@@ -31,7 +31,6 @@ import (
 type Controller struct {
 	store    store.Store
 	sink     store.EventSink
-	engine   *playbook.Engine
 	gate     *safety.Gate
 	flap     *safety.FlapDetector
 	platform platform.Platform
@@ -50,22 +49,39 @@ type Controller struct {
 	inFlightMu sync.Mutex
 	inFlight   map[string]bool
 
-	verifyQuiet    time.Duration
-	approvalTTL    time.Duration
+	// recoveredSlots holds the per-step (reboot-class) gate occupancy seeded on
+	// leadership acquisition from durable EXECUTING incidents (see
+	// RebuildGateOccupancy). Each entry is released exactly once — the first
+	// time its incident leaves EXECUTING — so the reserved step slot is handed
+	// back as recovery re-admits or closes it. The incident's REMEDIATION slot
+	// has no in-memory tracking at all: ownership is the durable
+	// Incident.RemediationSlotHeld bit, written atomically with the EXECUTING
+	// and halting transitions.
+	recoveredMu    sync.Mutex
+	recoveredSlots map[string]recoveredSlot
+
+	// reconcileEvery paces the walk; set before Run only, never reloaded.
 	reconcileEvery time.Duration
 
-	windowsMu sync.RWMutex
-	windows   []config.MaintenanceWindow
+	// runtime is the current immutable RuntimeConfig snapshot (never nil);
+	// runtimeMu serializes read-modify-write installs (the reloader vs the
+	// per-field test hooks). See runtimeconfig.go.
+	runtime   atomic.Pointer[RuntimeConfig]
+	runtimeMu sync.Mutex
 
-	acceleratorProfilesMu sync.RWMutex
-	acceleratorProfiles   []config.AcceleratorRuntimeProfile
+	// pinnedEvidence holds the accelerator evidence captured when an incident
+	// quiesced the vendor stack, keyed by incident ID. See pinAcceleratorEvidence.
+	pinnedEvidenceMu sync.Mutex
+	pinnedEvidence   map[string]pinnedAcceleratorEvidence
 
-	// catalog classifies signals; nil means built-ins only.
-	catalog *detect.Catalog
+	// cordonReported remembers which stuck cordons have been announced.
+	cordonReported cordonReportedKeys
 }
 
 // SetSignalCatalog installs the declarative signal-override catalog.
-func (c *Controller) SetSignalCatalog(catalog *detect.Catalog) { c.catalog = catalog }
+func (c *Controller) SetSignalCatalog(catalog *detect.Catalog) {
+	c.mutateRuntimeConfig(func(rc *RuntimeConfig) { rc.Catalog = catalog })
+}
 
 // ApplyNodeConfigs persists per-node desired state: the listed paused nodes
 // become the complete pause set (the walk consults it before every step).
@@ -88,9 +104,59 @@ func (c *Controller) ApplyNodeConfigs(ctx context.Context, configs []config.Node
 // SetMaintenanceWindows installs the maintenance windows the walk consults;
 // execution holds while a window covering the target node is active.
 func (c *Controller) SetMaintenanceWindows(windows []config.MaintenanceWindow) {
-	c.windowsMu.Lock()
-	c.windows = append([]config.MaintenanceWindow(nil), windows...)
-	c.windowsMu.Unlock()
+	windows = append([]config.MaintenanceWindow(nil), windows...)
+	c.mutateRuntimeConfig(func(rc *RuntimeConfig) { rc.Windows = windows })
+}
+
+// SetEngine swaps the playbook engine in place. Config changes reload the
+// engine here instead of rolling the controller Deployment: under leader
+// election a rolling update deadlocks (only the leader is Ready, so a new pod
+// can never become Ready to retire the old one), which left config changes
+// unable to take effect at all.
+func (c *Controller) SetEngine(engine *playbook.Engine) {
+	c.mutateRuntimeConfig(func(rc *RuntimeConfig) { rc.Engine = engine })
+}
+
+// currentEngine returns the LIVE engine (unpinned). Reconcile-path reads use
+// c.runtimeConfig(ctx).Engine so they observe the snapshot pinned for their
+// advance; this accessor remains for callers with no call-tree pin.
+func (c *Controller) currentEngine() *playbook.Engine {
+	return c.runtime.Load().Engine
+}
+
+// SetQuiesceForbiddenHolders installs the process names whose presence on a node
+// forbids a per-device reset there. See the CRD field of the same name: some
+// processes hold the GPU and must not be stopped, and declaring them turns a
+// reset into an early refusal rather than a cordoned node and a late failure.
+func (c *Controller) SetQuiesceForbiddenHolders(names []string) {
+	names = append([]string(nil), names...)
+	c.mutateRuntimeConfig(func(rc *RuntimeConfig) { rc.QuiesceForbidden = names })
+}
+
+func (c *Controller) forbiddenHolders(ctx context.Context) []string {
+	return c.runtimeConfig(ctx).QuiesceForbidden
+}
+
+// SetDestructiveNodeSelector installs the compiled
+// spec.safety.destructiveExecution.nodeSelector — the declared blast radius.
+// On an Enabled install the controller refuses to run a destructive platform
+// step (cordon, drain, evict, recycle/replace) against a node whose labels do
+// not match it, so the confinement the agent DaemonSet already has covers the
+// controller path too. An empty selector disables the check (every other
+// execution mode is globally dry-run, so nothing executes anyway).
+func (c *Controller) SetDestructiveNodeSelector(selector map[string]string) {
+	var copied map[string]string
+	if len(selector) > 0 {
+		copied = make(map[string]string, len(selector))
+		for k, v := range selector {
+			copied[k] = v
+		}
+	}
+	c.mutateRuntimeConfig(func(rc *RuntimeConfig) { rc.DestructiveSelector = copied })
+}
+
+func (c *Controller) destructiveNodeSelector(ctx context.Context) map[string]string {
+	return c.runtimeConfig(ctx).DestructiveSelector
 }
 
 // SetAcceleratorRuntimeProfiles installs the server-owned runtime contracts
@@ -98,6 +164,18 @@ func (c *Controller) SetMaintenanceWindows(windows []config.MaintenanceWindow) {
 // ready agent may do; they never change the global execution mode. An empty
 // set is intentional default-deny for accelerator remediation.
 func (c *Controller) SetAcceleratorRuntimeProfiles(profiles []config.AcceleratorRuntimeProfile) error {
+	if err := ValidateAcceleratorRuntimeProfiles(profiles); err != nil {
+		return err
+	}
+	profiles = append([]config.AcceleratorRuntimeProfile(nil), profiles...)
+	c.mutateRuntimeConfig(func(rc *RuntimeConfig) { rc.AcceleratorProfiles = profiles })
+	return nil
+}
+
+// ValidateAcceleratorRuntimeProfiles performs the non-mutating half of profile
+// installation. Runtime reload validates before its only fallible store write,
+// so a failed reload cannot expose any part of a new configuration.
+func ValidateAcceleratorRuntimeProfiles(profiles []config.AcceleratorRuntimeProfile) error {
 	seen := make(map[string]struct{}, len(profiles))
 	for _, profile := range profiles {
 		if err := profile.Validate(); err != nil {
@@ -108,9 +186,6 @@ func (c *Controller) SetAcceleratorRuntimeProfiles(profiles []config.Accelerator
 		}
 		seen[profile.Name] = struct{}{}
 	}
-	c.acceleratorProfilesMu.Lock()
-	c.acceleratorProfiles = append([]config.AcceleratorRuntimeProfile(nil), profiles...)
-	c.acceleratorProfilesMu.Unlock()
 	return nil
 }
 
@@ -146,7 +221,6 @@ func New(
 	c := &Controller{
 		store:          st,
 		sink:           sink,
-		engine:         engine,
 		gate:           gate,
 		flap:           flap,
 		platform:       plat,
@@ -157,10 +231,14 @@ func New(
 		eventWake:      make(chan struct{}, 1),
 		eventWorkerID:  fmt.Sprintf("controller-%d", time.Now().UnixNano()),
 		inFlight:       map[string]bool{},
-		verifyQuiet:    defaultVerifyQuietWindow,
-		approvalTTL:    defaultApprovalTTL,
+		recoveredSlots: map[string]recoveredSlot{},
 		reconcileEvery: defaultReconcileInterval,
 	}
+	c.runtime.Store(&RuntimeConfig{
+		Engine:      engine,
+		VerifyQuiet: defaultVerifyQuietWindow,
+		ApprovalTTL: defaultApprovalTTL,
+	})
 	if outbox, ok := sink.(store.EventOutbox); ok {
 		c.eventOutbox = outbox
 	}
@@ -180,9 +258,26 @@ func (c *Controller) Run(ctx context.Context) error {
 	defer tick.Stop()
 	outboxTick := time.NewTicker(eventOutboxLeaseDuration)
 	defer outboxTick.Stop()
+	// Before the first reconcile, rebuild the safety gate's occupancy from the
+	// durable EXECUTING incidents so the concurrency caps hold across a leader
+	// failover (see RebuildGateOccupancy). Best-effort: a store error here only
+	// degrades to the pre-fix transient undercount, never to a blocked walk.
+	if err := c.RebuildGateOccupancy(ctx); err != nil {
+		c.log.Warn("rebuilding safety gate occupancy failed; concurrency caps may transiently undercount until recovery re-admits each incident", "err", err)
+	}
 	// Drain once before waiting for new input so a restart resumes events that
 	// were archived before the previous controller process died.
 	c.drainEventOutbox(ctx)
+	// Janitors run on their own goroutine, NOT the walk thread. They are
+	// idempotent reconcilers that talk only to the store and the platform, and
+	// they can legitimately block on slow externals (an unresponsive agent's
+	// bounded restore wait, apiserver calls) — which previously stretched every
+	// reconcile tick and delayed signal draining exactly when a fleet event
+	// made the janitors busiest. Walk-vs-janitor writes to the same incident
+	// are already safe: janitors skip inFlight incidents and every store write
+	// is guarded by optimistic versioning, so a racing update degrades to one
+	// side's ErrConflict and a retry next tick.
+	go c.runJanitors(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -197,6 +292,30 @@ func (c *Controller) Run(ctx context.Context) error {
 			c.drainEventOutbox(ctx)
 		case <-outboxTick.C:
 			c.drainEventOutbox(ctx)
+		}
+	}
+}
+
+// runJanitors drives the three background reconcilers until ctx ends:
+// monitoring that a playbook switched off must come back even when the
+// playbook never reaches its restore step, a node a playbook cordoned must
+// not stay out of service because the playbook died before uncordoning it,
+// and incidents on deleted nodes must be closed as replaced.
+func (c *Controller) runJanitors(ctx context.Context) {
+	tick := time.NewTicker(c.reconcileEvery)
+	defer tick.Stop()
+	for {
+		// One pinned configuration snapshot per janitor pass, exactly like
+		// the walk pins one per advance: a pass must never observe mixed
+		// generations across its loop.
+		passCtx := c.pinRuntimeConfig(ctx)
+		c.restoreAbandonedAcceleratorStacks(passCtx)
+		c.reconcileCordonedNodes(passCtx)
+		c.resolveIncidentsOnVanishedNodes(passCtx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
 		}
 	}
 }
@@ -277,7 +396,7 @@ func (c *Controller) HandleAgentEvent(r *http.Request, ev types.AgentEvent) erro
 		}
 		return nil
 	}
-	if sig, ok := c.catalog.SignalFromAgentEvent(ev); ok {
+	if sig, ok := c.runtimeConfig(r.Context()).Catalog.SignalFromAgentEvent(ev); ok {
 		c.HandleSignal(r, sig)
 	}
 	return nil
@@ -300,7 +419,7 @@ func (c *Controller) drainEventOutbox(ctx context.Context) {
 			c.log.Error("event outbox claim failed", "err", err)
 			return
 		}
-		if sig, ok := c.catalog.SignalFromAgentEvent(claimed.Event); ok {
+		if sig, ok := c.runtimeConfig(ctx).Catalog.SignalFromAgentEvent(claimed.Event); ok {
 			if err := c.ingestClaimedEvent(ctx, claimed, sig); err != nil {
 				if !errors.Is(err, store.ErrEventLeaseLost) {
 					c.log.Error("event outbox workflow failed", "err", err, "event_id", claimed.Event.EventID)
@@ -322,7 +441,7 @@ func (c *Controller) drainEventOutbox(ctx context.Context) {
 
 // RegisterNode implements httpapi.Backend. The controller, rather than the
 // agent, is authoritative for the persisted heartbeat timestamp.
-func (c *Controller) RegisterNode(r *http.Request, registration types.AgentRegistration) error {
+func (c *Controller) RegisterNode(r *http.Request, registration types.AgentRegistration) (types.AgentArming, error) {
 	n := &types.Node{
 		Name:          registration.Name,
 		UID:           registration.NodeUID,
@@ -330,11 +449,44 @@ func (c *Controller) RegisterNode(r *http.Request, registration types.AgentRegis
 		BootID:        registration.BootID,
 		AgentLastSeen: time.Now(),
 	}
+	// The tri-state mapping is deliberate: absent (a v1 registration, or an
+	// old agent) is UNKNOWN, never a declared value in either direction.
+	if registration.DestructiveArmed != nil {
+		if *registration.DestructiveArmed {
+			n.AgentArming = types.AgentArmingArmed
+		} else {
+			n.AgentArming = types.AgentArmingUnarmed
+		}
+	}
 	if err := c.store.UpsertAgentRegistration(r.Context(), n); err != nil {
 		c.log.Error("node registration failed", "err", err, "node", n.Name)
-		return err
+		return types.AgentArmingUnknown, err
 	}
-	return nil
+	return c.servedArming(r.Context(), registration.Name), nil
+}
+
+// servedArming answers whether one node's agent should arm its destructive
+// executor: the compiled spec.safety.destructiveExecution.nodeSelector
+// matched against the node's labels — the same computation the controller
+// path's blast-radius confinement uses, so the two boundaries can never
+// disagree about which nodes are in scope. Fail-closed on every uncertainty:
+// no selector (not an Enabled install), unresolvable labels, or a non-match
+// all answer unarmed; the next registration tick recovers a transient blip.
+// A stale-armed window is inert by construction — destructive actions are
+// dispatched by this same controller, which re-confines them at admission.
+func (c *Controller) servedArming(ctx context.Context, node string) types.AgentArming {
+	selector := c.runtimeConfig(ctx).DestructiveSelector
+	if len(selector) == 0 {
+		return types.AgentArmingUnarmed
+	}
+	labels, err := c.nodeLabelsForConfinement(ctx, node)
+	if err != nil {
+		return types.AgentArmingUnarmed
+	}
+	if labelsMatchSelector(selector, labels) {
+		return types.AgentArmingArmed
+	}
+	return types.AgentArmingUnarmed
 }
 
 // HandleAcceleratorReport implements httpapi.AcceleratorReportBackend. The
@@ -378,7 +530,7 @@ func (c *Controller) CompleteAction(r *http.Request, node, actionID, leaseToken 
 		return err
 	}
 	if queued.Node != node {
-		return fmt.Errorf("action %s belongs to node %s, not %s", actionID, queued.Node, node)
+		return fmt.Errorf("action %s belongs to node %s, not %s: %w", actionID, queued.Node, node, store.ErrActionForeignNode)
 	}
 	return c.store.CompleteClaimedAction(r.Context(), actionID, leaseToken, r.Header.Get(types.AgentBootIDHeader), res)
 }
@@ -451,8 +603,8 @@ func (c *Controller) openIncidentTx(ctx context.Context, tx store.Tx, sig types.
 		UpdatedAt:      now,
 		StateChangedAt: now,
 	}
-	if c.engine != nil {
-		if book, ok := c.engine.Select(sig); ok {
+	if engine := c.runtimeConfig(ctx).Engine; engine != nil {
+		if book, ok := engine.Select(sig); ok {
 			inc.Playbook = book.Name
 		}
 	}

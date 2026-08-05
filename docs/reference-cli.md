@@ -22,8 +22,8 @@ In-cluster, port-forward first:
 | `kubeneuronctl nodes` | registered nodes with GPU inventory and heartbeat age |
 | `kubeneuronctl incidents [--state ...] [--node ...]` | list incidents |
 | `kubeneuronctl incidents show <id>` | one incident with its full audit trail |
-| `kubeneuronctl approve <incident-id> --actor <who>` | approve the pending risky step |
-| `kubeneuronctl reject <incident-id> --actor <who>` | reject the pending risky step |
+| `kubeneuronctl approve <incident-id> --actor <who> [--round <n>]` | approve the pending risky step; `--round` (from the notification) is refused if the request changed since it was displayed |
+| `kubeneuronctl reject <incident-id> --actor <who> [--round <n>]` | reject the pending risky step |
 | `kubeneuronctl resolve <incident-id> --actor <who>` | manually resolve an incident |
 | `kubeneuronctl remediate <node> --class <problem-class> --actor <who>` | manually open an incident for a node |
 | `kubeneuronctl pause` / `kubeneuronctl resume` | global automation pause (big red button) |

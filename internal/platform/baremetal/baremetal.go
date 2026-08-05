@@ -55,6 +55,7 @@ type Platform struct {
 }
 
 var _ platform.Platform = (*Platform)(nil)
+var _ platform.NodePresence = (*Platform)(nil)
 
 // New builds a Platform from an inventory file (optional — pass "" to rely
 // solely on agent self-registration) and hooks.
@@ -117,6 +118,16 @@ func (p *Platform) ListNodes(ctx context.Context) ([]types.Node, error) {
 		out = append(out, n)
 	}
 	return out, nil
+}
+
+// NodeExists answers from the merged declared/registered inventory. Bare-metal
+// has no independent node API, so an unknown node is the strongest presence
+// signal it can provide.
+func (p *Platform) NodeExists(ctx context.Context, node string) (bool, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	_, ok := p.nodes[node]
+	return ok, nil
 }
 
 // WatchNodes returns a channel that closes on ctx.Done(); bare metal has no

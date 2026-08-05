@@ -163,6 +163,137 @@ func TestWatchSeeksToTailOfRegularFile(t *testing.T) {
 	}
 }
 
+// TestWatchDeliversLowSeqAfterReboot is the regression test for the cross-boot
+// cursor suppression bug. A durable cursor from the pre-reboot boot sits at a
+// high sequence (500000); after a reboot the ring's sequence restarts near zero
+// (42). With the old boot-blind cursor the watcher discarded every record with
+// seq <= 500000, so a recurring XID was silently suppressed. Binding the cursor
+// to the boot ID makes the stale cursor a no-op (fail safe to tail-seek), so the
+// low-sequence XID from the new boot is delivered.
+func TestWatchDeliversLowSeqAfterReboot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kmsg")
+	cursorPath := filepath.Join(dir, "cursor.json")
+
+	// Pre-reboot cursor: boot-A at a high sequence.
+	if err := saveCursor(cursorPath, "boot-A", 500000); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	writer, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Fresh boot: kmsg sequence numbers have restarted near zero.
+	w := &Watcher{Path: path, CursorPath: cursorPath, BootID: "boot-B"}
+	events, err := w.Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// seq 42 is far below the stale 500000 cursor; under the old rule this would
+	// be suppressed and the read below would time out.
+	if _, err := writer.WriteString(
+		"6,42,100;NVRM: Xid (PCI:0000:3b:00): 79, recurring after reboot\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ev, ok := <-events:
+		if !ok {
+			t.Fatal("event channel closed without delivering the post-reboot XID")
+		}
+		if ev.XID != 79 {
+			t.Fatalf("delivered XID = %d, want 79", ev.XID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("post-reboot low-seq XID was suppressed by a stale cross-boot cursor")
+	}
+}
+
+// TestCursorDoesNotAdvancePastAnUnacknowledgedGap is the regression test for the
+// per-event cursor advancing past an undelivered lower sequence. If seq 100 fails
+// BOTH the controller POST and the spool append (controller down + ENOSPC — the
+// exact regime the spool exists for) it is never acknowledged. Under the old
+// per-event cursor, when the LATER seq 101 delivered and acked, the durable cursor
+// jumped to 101, and a restart replayed nothing <= 101 — losing seq 100 forever.
+// The contiguous-ack watermark pins the cursor just below the gap so seq 100
+// replays after a restart.
+func TestCursorDoesNotAdvancePastAnUnacknowledgedGap(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "kmsg")
+	cursorPath := filepath.Join(dir, "cursor.json")
+
+	// A prior cursor at seq 50 forces a seek-to-start (resume), so both records
+	// below are read rather than tail-seeked past.
+	if err := saveCursor(cursorPath, "boot-A", 50); err != nil {
+		t.Fatal(err)
+	}
+	content := "6,100,1000;NVRM: Xid (PCI:0000:3b:00): 79, failed both post and spool\n" +
+		"6,101,1010;NVRM: Xid (PCI:0000:af:00): 48, delivered and acknowledged\n"
+	if err := os.WriteFile(logPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	w := &Watcher{Path: logPath, CursorPath: cursorPath, BootID: "boot-A"}
+	events, err := w.Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []XIDEvent
+	for ev := range events {
+		got = append(got, ev)
+	}
+	if len(got) != 2 || got[0].XID != 79 || got[1].XID != 48 {
+		t.Fatalf("delivered = %+v, want XID 79 (seq100) then XID 48 (seq101)", got)
+	}
+	// seq 100 (XID 79) fails delivery entirely and is NEVER acknowledged; only the
+	// later seq 101 (XID 48) is acknowledged.
+	if err := got[1].Acknowledge(); err != nil {
+		t.Fatalf("acknowledge seq 101: %v", err)
+	}
+
+	// The persisted cursor must NOT have advanced to or past the un-acked seq 100.
+	seq, ok, err := loadCursor(cursorPath, "boot-A")
+	if err != nil {
+		t.Fatalf("loadCursor: %v", err)
+	}
+	if ok && seq >= 100 {
+		t.Fatalf("cursor advanced to %d, at/past the un-acked seq 100; event 100 would be lost forever", seq)
+	}
+
+	// Simulated restart: seq 100 must be replayed (redelivered) because the cursor
+	// was pinned below it.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	w2 := &Watcher{Path: logPath, CursorPath: cursorPath, BootID: "boot-A"}
+	events2, err := w2.Watch(ctx2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replayed []int
+	for ev := range events2 {
+		replayed = append(replayed, ev.XID)
+	}
+	found := false
+	for _, x := range replayed {
+		if x == 79 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("after restart replayed = %v, want the un-acked seq 100 (XID 79) redelivered", replayed)
+	}
+}
+
 func TestWatchFailsWithoutDevice(t *testing.T) {
 	w := &Watcher{Path: filepath.Join(t.TempDir(), "missing")}
 	if _, err := w.Watch(context.Background()); err == nil {

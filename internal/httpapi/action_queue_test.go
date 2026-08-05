@@ -2,21 +2,24 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
 // actionBackend serves one queued action and records completions.
 type actionBackend struct {
 	registrationBackend
-	queued    map[string]*types.QueuedAction // by node
-	completed []string
-	rejected  bool
+	queued      map[string]*types.QueuedAction // by node
+	completed   []string
+	rejected    bool
+	completeErr error // when set, returned even for a matching action
 }
 
 func (b *actionBackend) NextAction(_ *http.Request, node string) (*types.QueuedAction, error) {
@@ -27,7 +30,13 @@ func (b *actionBackend) CompleteAction(_ *http.Request, node, actionID, leaseTok
 	qa := b.queued[node]
 	if qa == nil || qa.Action.ID != actionID || qa.LeaseToken != leaseToken {
 		b.rejected = true
-		return http.ErrNotSupported
+		// Match the real backend's contract: a definitive authorization/lookup
+		// rejection is a store sentinel the handler maps to 403, distinct from a
+		// transient store error (5xx). A foreign node has no queued action here.
+		return store.ErrActionForeignNode
+	}
+	if b.completeErr != nil {
+		return b.completeErr
 	}
 	b.completed = append(b.completed, actionID)
 	return nil
@@ -142,5 +151,40 @@ func TestActionResultRequiresLeaseHeader(t *testing.T) {
 	}
 	if len(backend.completed) != 0 {
 		t.Fatalf("completed = %v, want none", backend.completed)
+	}
+}
+
+// A store/transient failure while recording a result must be signalled as a
+// 5xx, not a 403: the persisted lease is still valid and the agent must retry,
+// rather than discard a real result because the database was briefly
+// unreachable. A definitive rejection (a stale lease) stays a 403.
+func TestActionResultTransientErrorIs5xxDefinitiveIs403(t *testing.T) {
+	newReq := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, types.AgentActionLeasePath+"/act-1/result",
+			strings.NewReader(`{"action_id":"act-1","ok":true,"started_at":"2026-07-14T00:00:00Z","finished_at":"2026-07-14T00:00:00Z"}`))
+		req.Header.Set(types.AgentActionLeaseHeader, "lease-a")
+		return req
+	}
+
+	// A generic (non-sentinel) store error is transient: 5xx.
+	transient := &actionBackend{
+		queued:      map[string]*types.QueuedAction{"node-a": {Node: "node-a", Action: types.Action{ID: "act-1"}, LeaseToken: "lease-a"}},
+		completeErr: errors.New("dial tcp: connection refused"),
+	}
+	rec := httptest.NewRecorder()
+	agentRoutesFor(transient, "node-a").ServeHTTP(rec, newReq())
+	if rec.Code < 500 {
+		t.Fatalf("transient store error status = %d, want a 5xx so the agent retries via its lease", rec.Code)
+	}
+
+	// A stale/incorrect lease is a definitive rejection: 403, do not retry.
+	definitive := &actionBackend{
+		queued:      map[string]*types.QueuedAction{"node-a": {Node: "node-a", Action: types.Action{ID: "act-1"}, LeaseToken: "lease-a"}},
+		completeErr: store.ErrLeaseLost,
+	}
+	rec = httptest.NewRecorder()
+	agentRoutesFor(definitive, "node-a").ServeHTTP(rec, newReq())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("stale-lease status = %d, want 403", rec.Code)
 	}
 }

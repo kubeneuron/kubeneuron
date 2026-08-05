@@ -83,6 +83,62 @@ func TestWithTxRollsBackEverything(t *testing.T) {
 	}
 }
 
+func TestUpdateIncidentOptimisticConcurrency(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+
+	inc := testIncident("inc-oc", time.Now())
+	if err := s.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two writers snapshot the same version.
+	a, err := s.GetIncident(ctx, "inc-oc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.GetIncident(ctx, "inc-oc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Version != 0 {
+		t.Fatalf("fresh incident version = %d, want 0", a.Version)
+	}
+
+	// The first writer wins and its in-memory version advances.
+	a.SignalSeen = 7
+	if err := s.UpdateIncident(ctx, a); err != nil {
+		t.Fatalf("first update = %v", err)
+	}
+	if a.Version != 1 {
+		t.Fatalf("version after successful update = %d, want 1", a.Version)
+	}
+
+	// The second writer holds the stale version 0 and must be told it conflicts
+	// rather than silently clobbering the winner's write.
+	b.SignalSeen = 99
+	if err := s.UpdateIncident(ctx, b); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("stale update = %v, want ErrConflict", err)
+	}
+	got, err := s.GetIncident(ctx, "inc-oc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SignalSeen != 7 {
+		t.Fatalf("SignalSeen = %d, want 7 (the winning write must survive)", got.SignalSeen)
+	}
+
+	// A genuinely absent incident is ErrNotFound, never ErrConflict.
+	ghost := testIncident("inc-ghost", time.Now())
+	if err := s.UpdateIncident(ctx, ghost); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("update of absent incident = %v, want ErrNotFound", err)
+	}
+}
+
 func TestStateChangedAtSurvivesSignalBumps(t *testing.T) {
 	s, err := Open(":memory:")
 	if err != nil {
@@ -406,13 +462,13 @@ func TestPruneEnforcesRetentionBoundaries(t *testing.T) {
 	}
 
 	// One completed old action, one pending old action.
-	if err := s.EnqueueAction(ctx, "n1", "inc-a", types.Action{ID: "act-done", Type: types.ActionRunDiag}); err != nil {
+	if err := s.EnqueueAction(ctx, "n1", types.Action{IncidentID: "inc-a", ID: "act-done", Type: types.ActionRunDiag}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.CompleteAction(ctx, "act-done", types.ActionResult{ActionID: "act-done", OK: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.EnqueueAction(ctx, "n1", "inc-a", types.Action{ID: "act-live", Type: types.ActionRunDiag}); err != nil {
+	if err := s.EnqueueAction(ctx, "n1", types.Action{IncidentID: "inc-a", ID: "act-live", Type: types.ActionRunDiag}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.sqlDB.Exec(`UPDATE actions SET updated_at=?`, old.UTC().Format(time.RFC3339Nano)); err != nil {

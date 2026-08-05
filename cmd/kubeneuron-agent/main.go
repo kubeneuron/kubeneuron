@@ -10,11 +10,13 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/accelerator/nvidia"
 	"github.com/kubeneuron/kubeneuron/internal/agent"
+	"github.com/kubeneuron/kubeneuron/internal/agent/dcgm"
 	"github.com/kubeneuron/kubeneuron/internal/agent/nvml"
 )
 
@@ -22,16 +24,21 @@ var version = "dev"
 
 func main() {
 	var (
-		controllerURL        = flag.String("controller", "https://localhost:8443", "controller agent-API base URL")
-		nodeName             = flag.String("node", "", "node name (default: hostname)")
-		token                = flag.String("token", "", "static bearer token for controller auth (development only)")
-		tokenFile            = flag.String("token-file", "", "projected Pod-bound bearer token file")
-		tlsCAFile            = flag.String("tls-ca", "", "CA bundle used to verify the controller")
-		tlsCertFile          = flag.String("tls-cert", "", "agent fleet client certificate")
-		tlsKeyFile           = flag.String("tls-key", "", "agent fleet client private key")
-		allowInsecureHTTP    = flag.Bool("allow-insecure-http", false, "allow plaintext controller HTTP for local development only")
-		spoolPath            = flag.String("spool", "/var/lib/kube-neuron/spool.jsonl", "event spool file")
-		scriptsDir           = flag.String("scripts-dir", "/etc/kube-neuron/scripts", "directory of operator-provisioned remediation scripts")
+		controllerURL     = flag.String("controller", "https://localhost:8443", "controller agent-API base URL")
+		nodeName          = flag.String("node", "", "node name (default: hostname)")
+		token             = flag.String("token", "", "static bearer token for controller auth (development only)")
+		tokenFile         = flag.String("token-file", "", "projected Pod-bound bearer token file")
+		tlsCAFile         = flag.String("tls-ca", "", "CA bundle used to verify the controller")
+		tlsCertFile       = flag.String("tls-cert", "", "agent fleet client certificate")
+		tlsKeyFile        = flag.String("tls-key", "", "agent fleet client private key")
+		allowInsecureHTTP = flag.Bool("allow-insecure-http", false, "allow plaintext controller HTTP for local development only")
+		spoolPath         = flag.String("spool", "/var/lib/kube-neuron/spool.jsonl", "event spool file")
+		scriptsDir        = flag.String("scripts-dir", "/etc/kube-neuron/scripts", "directory of operator-provisioned remediation scripts")
+		rebootCommand     = flag.String(
+			"reboot-command",
+			"",
+			"space-separated command that reboots the host; empty uses the default, which enters PID 1's namespaces and asks systemd. Never taken from a playbook.",
+		)
 		healthListen         = flag.String("health-listen", ":9402", "health probe listen address")
 		registrationInterval = flag.Duration(
 			"registration-interval",
@@ -64,8 +71,8 @@ func main() {
 		)
 		nvidiaDCGMPath = flag.String(
 			"nvidia-dcgmi",
-			"",
-			"dcgmi binary used for bounded local DCGM runtime attestation (default: dcgmi from PATH)",
+			dcgm.BundledClientPath,
+			"dcgmi binary used for bounded local DCGM runtime attestation. Defaults to the client shipped in the agent image so the attested version is the same on every node; point it at a host client only if you intend that client's version to be what the runtime profile pins.",
 		)
 		nvidiaDCGMEndpoint = flag.String(
 			"nvidia-dcgm-endpoint",
@@ -147,6 +154,7 @@ func main() {
 		AllowInsecureHTTP:        *allowInsecureHTTP,
 		SpoolPath:                *spoolPath,
 		ScriptsDir:               *scriptsDir,
+		RebootCommand:            strings.Fields(*rebootCommand),
 		EnableDestructiveActions: *enableDestructive,
 		HealthListenAddress:      *healthListen,
 		RegistrationInterval:     *registrationInterval,

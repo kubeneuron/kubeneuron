@@ -14,11 +14,19 @@ import (
 // and take precedence over the built-in catalog in internal/detect.
 type SignalOverride struct {
 	Name string `yaml:"name"`
-	// Exactly one of XIDCodes or AlertName is set.
+	// Exactly one of XIDCodes, AlertName, or Faults is set.
 	XIDCodes  []int              `yaml:"xid_codes,omitempty"`
 	AlertName string             `yaml:"alert_name,omitempty"`
+	Faults    []FaultOverride    `yaml:"faults,omitempty"`
 	Class     types.ProblemClass `yaml:"class"`
 	Severity  types.Severity     `yaml:"severity"`
+}
+
+// FaultOverride names one vendor-native neutral fault code (the non-XID
+// analogue of an XID number) whose classification the override replaces.
+type FaultOverride struct {
+	Vendor string `yaml:"vendor"`
+	Code   string `yaml:"code"`
 }
 
 // Validate checks structural invariants.
@@ -26,8 +34,23 @@ func (o SignalOverride) Validate() error {
 	if o.Name == "" {
 		return fmt.Errorf("signal override: name is required")
 	}
-	if (len(o.XIDCodes) == 0) == (o.AlertName == "") {
-		return fmt.Errorf("signal override %q: exactly one of xid_codes or alert_name must be set", o.Name)
+	matchers := 0
+	if len(o.XIDCodes) > 0 {
+		matchers++
+	}
+	if o.AlertName != "" {
+		matchers++
+	}
+	if len(o.Faults) > 0 {
+		matchers++
+	}
+	if matchers != 1 {
+		return fmt.Errorf("signal override %q: exactly one of xid_codes, alert_name, or faults must be set", o.Name)
+	}
+	for _, f := range o.Faults {
+		if f.Vendor == "" || f.Code == "" {
+			return fmt.Errorf("signal override %q: fault entries require both vendor and code", o.Name)
+		}
 	}
 	if o.Class == "" {
 		return fmt.Errorf("signal override %q: class is required", o.Name)

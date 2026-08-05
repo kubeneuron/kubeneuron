@@ -16,6 +16,26 @@ const (
 	// AgentRegistrationProtocol is the exact capability token an agent requires
 	// before it sends the narrow registration payload.
 	AgentRegistrationProtocol = "kubeneuron-agent-registration/v1"
+	// AgentRegistrationV2Path/Protocol are the v2 registration route beside
+	// v1. v2's contract is "arming is always declared": the payload MUST carry
+	// destructive_armed. A new route, not a new field on v1 — the v1 handler
+	// strict-decodes (unknown fields 400) and the v1 capability is an exact
+	// whole-body match, so neither side of v1 can be extended without breaking
+	// one direction of a rolling upgrade. Agents probe v2 first and fall back
+	// to v1 (omitting the field) against older controllers.
+	AgentRegistrationV2Path     = "/api/v1/agents/register/narrow-v2"
+	AgentRegistrationV2Protocol = "kubeneuron-agent-registration/v2"
+	// AgentArmingHeader carries the controller's arming answer on a v2
+	// registration response: whether THIS node's agent should arm its
+	// destructive executor, computed from the compiled
+	// spec.safety.destructiveExecution.nodeSelector against the node's
+	// labels. The agent adopts the answer each registration tick (unless its
+	// arming was pinned by an explicit --enable-destructive-actions flag),
+	// which is what lets ONE DaemonSet cover the whole fleet: arming is data
+	// served over the authenticated channel, not scheduling geometry. An
+	// absent header (an older controller) changes nothing — the agent keeps
+	// its current state, which defaults to unarmed.
+	AgentArmingHeader = "X-KubeNeuron-Agent-Arming"
 	// AgentActionLeasePath is the versioned agent action-delivery route. An
 	// agent only executes work claimed through this lease-bearing protocol;
 	// old agents therefore fail closed during a rolling upgrade instead of
@@ -45,6 +65,14 @@ const (
 	// that made it and rejects a result from a different boot: a reboot
 	// mid-execution makes the outcome unknown, not complete.
 	AgentBootIDHeader = "X-KubeNeuron-Executor-Boot-Id"
+	// AgentEventRejectedHeader marks a controller response that SEMANTICALLY
+	// rejects the posted event: retrying can never succeed, so the agent must
+	// drop the event instead of spooling or replaying it. The header — not the
+	// bare status code — is the poison signal, because a 400 alone also means
+	// "this controller is older than the agent" (strict JSON decoding during a
+	// rolling upgrade) or a middlebox rejection, and those events must keep
+	// spooling and drain once the skew clears.
+	AgentEventRejectedHeader = "X-KubeNeuron-Event-Rejected"
 )
 
 // Target identifies what an incident or signal is about: a whole node, or a
@@ -133,6 +161,17 @@ func (s IncidentState) Terminal() bool {
 	return s == StateResolved || s == StateExpired
 }
 
+// Halted reports whether automated remediation has ended for the state: the
+// incident is lifecycle-terminal (RESOLVED/EXPIRED) or parked for a human
+// (NEEDS_HUMAN, which only a manual decision leaves). This is the single
+// definition behind the store's claim guard (a queued action whose incident
+// is halted must never be handed to an agent), the controller's
+// active-incident checks, and the remediation-slot release — the three copies
+// previously drifting past each other.
+func (s IncidentState) Halted() bool {
+	return s.Terminal() || s == StateNeedsHuman
+}
+
 // Incident is one open problem on one target. At most one non-terminal
 // incident exists per (Target, Class); correlated signals attach to it.
 type Incident struct {
@@ -145,14 +184,30 @@ type Incident struct {
 	Attempt    int           `json:"attempt"`
 	DryRun     bool          `json:"dry_run"`
 	SignalSeen int           `json:"signals_seen"`
-	OpenedAt   time.Time     `json:"opened_at"`
-	UpdatedAt  time.Time     `json:"updated_at"`
+	// RemediationSlotHeld records durably that this incident holds its
+	// target's safety-gate remediation slot: set in the same transaction as
+	// its first EXECUTING transition, cleared in the same transaction as the
+	// transition that halts it. A new leader rebuilds gate occupancy from
+	// this bit; the gate's in-memory refcounts are a projection of it.
+	RemediationSlotHeld bool `json:"remediation_slot_held,omitempty"`
+	// ApprovalEpoch identifies the incident's current approval round: bumped
+	// in the same transaction as each park (and re-park) for approval, which
+	// also records the round's "requested" row. See Approval.ParkEpoch.
+	ApprovalEpoch int       `json:"approval_epoch,omitempty"`
+	OpenedAt      time.Time `json:"opened_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 	// StateChangedAt is when State last changed. Unlike UpdatedAt it is not
 	// bumped by attaching duplicate signals, so timeouts that anchor to a
 	// state (approval TTL, verification quiet windows) cannot be postponed
 	// by a signal storm.
 	StateChangedAt time.Time  `json:"state_changed_at"`
 	ResolvedAt     *time.Time `json:"resolved_at,omitempty"`
+	// Version is the optimistic-concurrency counter. The store bumps it on
+	// every UpdateIncident and matches on its prior value, so a writer holding
+	// a stale snapshot cannot overwrite a row a concurrent writer has since
+	// advanced. It is store-owned bookkeeping, not part of the incident's
+	// domain state.
+	Version int `json:"-"`
 }
 
 // Clone returns a deep copy. Use it whenever an incident crosses a goroutine
@@ -198,17 +253,29 @@ const (
 	ActionDriverReload    ActionType = "driver_reload"
 	ActionDriverReinstall ActionType = "driver_reinstall"
 	ActionRunScript       ActionType = "run_script"
-	ActionPowerCycle      ActionType = "power_cycle"
+	// ActionQuiesceAcceleratorHost releases the node-side handles on the GPU
+	// that no Kubernetes label can reach: the persistence daemon holds the
+	// device even on a fully drained node, and a reset fails while it does.
+	ActionQuiesceAcceleratorHost ActionType = "quiesce_accelerator_host"
+	// ActionRestoreAcceleratorHost undoes it.
+	ActionRestoreAcceleratorHost ActionType = "restore_accelerator_host"
+	ActionPowerCycle             ActionType = "power_cycle"
 )
 
 // Action is a single unit of work executed on a node. ID is deterministic —
 // hash(incident, step, attempt) — so replays after a controller restart are
 // idempotent: executors keep a short-lived cache of completed action IDs.
 type Action struct {
-	ID      string            `json:"id"`
-	Type    ActionType        `json:"type"`
-	Params  map[string]string `json:"params,omitempty"`
-	Timeout time.Duration     `json:"timeout,omitempty"`
+	ID string `json:"id"`
+	// IncidentID is the incident this action was enqueued for. It is carried
+	// explicitly (not smuggled through Params) so the actuator can stamp it onto
+	// the durable queue entry, which is what CancelPendingActionsForIncident
+	// matches when a superseded ladder rung must be tombstoned. Empty for actions
+	// not bound to an incident.
+	IncidentID string            `json:"incident_id,omitempty"`
+	Type       ActionType        `json:"type"`
+	Params     map[string]string `json:"params,omitempty"`
+	Timeout    time.Duration     `json:"timeout,omitempty"`
 }
 
 // QueuedAction is an Action dispatched to a node through the durable work
@@ -270,7 +337,23 @@ type Node struct {
 	Paused  bool      `json:"paused,omitempty"`  // maintenance: no auto-actions
 	// AgentLastSeen is the last heartbeat/registration from kubeneuron-agent.
 	AgentLastSeen time.Time `json:"agent_last_seen,omitempty"`
+	// AgentArming is the tri-state destructive-arming fact the node's agent
+	// reported at its last registration. Empty means unknown: an agent too
+	// old to report it, or one talking to this controller through the v1
+	// registration protocol.
+	AgentArming AgentArming `json:"agent_arming,omitempty"`
 }
+
+// AgentArming is the destructive-arming state a node's agent declares at
+// registration. Empty is UNKNOWN and must never be treated as a declared
+// value in either direction.
+type AgentArming string
+
+const (
+	AgentArmingUnknown AgentArming = ""
+	AgentArmingArmed   AgentArming = "armed"
+	AgentArmingUnarmed AgentArming = "unarmed"
+)
 
 // AgentRegistration is the inventory data an agent is allowed to own. Fields
 // such as platform, labels, actuation addresses, and pause state are managed by
@@ -279,6 +362,12 @@ type AgentRegistration struct {
 	Name   string    `json:"name"`
 	GPUs   []GPUInfo `json:"gpus,omitempty"`
 	BootID string    `json:"boot_id,omitempty"`
+	// DestructiveArmed reports whether this agent process was started with
+	// --enable-destructive-actions. Pointer, not bool: it is omitted entirely
+	// on the v1 wire (old controllers reject unknown fields with strict JSON
+	// decoding), and absent means unknown — an old agent, or a new agent
+	// talking to an old controller. The v2 registration protocol REQUIRES it.
+	DestructiveArmed *bool `json:"destructive_armed,omitempty"`
 	// NodeUID is installed only by the authenticated HTTP handler. It is
 	// intentionally excluded from JSON so an agent cannot self-assert an
 	// immutable platform identity in a registration body.
@@ -291,13 +380,54 @@ type AgentEvent struct {
 	// EventID is assigned once when the agent captures the event. Spool
 	// replay is at-least-once; the controller deduplicates on this ID so a
 	// resend after a lost acknowledgment cannot double-count a signal.
-	EventID   string    `json:"event_id,omitempty"`
-	Node      string    `json:"node"`
-	GPUIndex  int       `json:"gpu_index"`
-	GPUUUID   string    `json:"gpu_uuid,omitempty"`
-	XID       int       `json:"xid"`
-	Raw       string    `json:"raw,omitempty"` // original kmsg line
-	Timestamp time.Time `json:"timestamp"`
+	EventID  string `json:"event_id,omitempty"`
+	Node     string `json:"node"`
+	GPUIndex int    `json:"gpu_index"`
+	GPUUUID  string `json:"gpu_uuid,omitempty"`
+	// PCIAddr is the GPU's PCI address when the source knows it (the kmsg XID
+	// line always carries it, even when the device has fallen off the bus and
+	// cannot be resolved to an index/UUID). It disambiguates two distinct GPUs
+	// that fail with the same XID on one node while both are unattributed.
+	PCIAddr string `json:"pci_addr,omitempty"`
+	// XID is the NVIDIA-native fault encoding. It stays authoritative for the
+	// two paths that carry a GENUINE XID: the kmsg NVRM line and DCGM's real
+	// last-XID field (DCGM_FI_DEV_XID_ERRORS). It is NOT a universal fault
+	// identity: a non-NVIDIA source, or an NVIDIA source that observes a fault
+	// without a real XID, uses Fault instead and leaves XID zero.
+	XID int `json:"xid"`
+	// Fault is the optional, vendor-neutral fault descriptor. It is the honest
+	// landing place for a fault that is not an XID — a future AMD/Intel source,
+	// or the nvidia-smi ECC/row-remap counter fallback, which observes a real
+	// NVIDIA fault it must not pretend is an XID. The field is additive and
+	// optional so the wire stays backward-tolerant. Exactly one identity may
+	// be set per event: classification is Fault-first (a set Fault is
+	// authoritative and the XID is not consulted), and the controller rejects
+	// an event carrying both a nonzero XID and a Fault at ingest.
+	Fault     *FaultSignal `json:"fault,omitempty"`
+	Raw       string       `json:"raw,omitempty"` // original kmsg line
+	Timestamp time.Time    `json:"timestamp"`
+}
+
+// FaultSignal is a vendor-neutral fault descriptor carried on an AgentEvent
+// beside the NVIDIA-specific XID. It keeps XID as the NVIDIA-native encoding
+// rather than the universal one: a source that has a genuine XID sets XID; a
+// source that does not (a non-NVIDIA accelerator, or the nvidia-smi ECC/remap
+// fallback) describes the fault here. The detector maps (Vendor, Code) to a
+// ProblemClass alongside the XID catalog, so a migrated NVIDIA fault classifies
+// to exactly the class its former synthesized XID produced.
+type FaultSignal struct {
+	// Vendor is the accelerator vendor: "nvidia", "amd", "intel", ...
+	Vendor string `json:"vendor"`
+	// Source is the detection source that observed the fault: "kmsg", "dcgm",
+	// "nvidia-smi", ... It is provenance, not classification input.
+	Source string `json:"source"`
+	// Code is a vendor-native fault code string, e.g. "ecc-dbe" or
+	// "row-remap-failure". It is deliberately not an XID: XID stays the
+	// NVIDIA-specific encoding on its own field.
+	Code string `json:"code"`
+	// Attributes carries optional source-specific detail (observed counters,
+	// etc.). It never carries classification authority.
+	Attributes map[string]string `json:"attributes,omitempty"`
 }
 
 // AcceleratorVendor identifies the runtime that owns the reported
@@ -477,6 +607,24 @@ type AgentAcceleratorReport struct {
 	// gate requires both fields to match its current profile.
 	ProfileUID        string `json:"profile_uid,omitempty"`
 	ProfileGeneration int64  `json:"profile_generation,omitempty"`
+	// DeviceHolders are the processes currently holding a GPU device node.
+	//
+	// They are reported continuously, not only when a reset is attempted, so
+	// the controller can refuse a reset playbook before it cordons and drains a
+	// node whose device something will never release. An empty slice means
+	// nothing holds a device; a nil slice means the agent did not look, and the
+	// two must not be confused by a gate.
+	DeviceHolders []AgentDeviceHolder `json:"device_holders,omitempty"`
+}
+
+// AgentDeviceHolder is a process holding an accelerator device node. It is not
+// the same thing as a compute application: on a stock GPU Operator node the
+// vendor's own monitoring holds the device without ever running a CUDA context,
+// and a reset fails for as long as it does.
+type AgentDeviceHolder struct {
+	PID     int    `json:"pid"`
+	Command string `json:"command"`
+	Device  string `json:"device"`
 }
 
 // AgentAcceleratorObservationProfile is the deliberately narrow controller
@@ -642,15 +790,31 @@ func (r AgentAcceleratorReport) Validate() error {
 	return nil
 }
 
-// ApprovalDecision is a human decision on a pending approval.
+// ApprovalDecision is a human decision on a pending approval — or, for
+// ApprovalRequested, the system's durable record of what was asked.
 type ApprovalDecision string
 
 const (
 	ApprovalApproved ApprovalDecision = "approved"
 	ApprovalRejected ApprovalDecision = "rejected"
+	// ApprovalRequested is not a decision: it records, at the moment an
+	// incident parks for approval, the identity of the step the human is being
+	// asked to approve. A later decision binds to this requested identity — the
+	// step the human was shown — so a playbook hot-swap between the request and
+	// the click cannot substitute the action being approved.
+	ApprovalRequested ApprovalDecision = "requested"
 )
 
 // Approval records who decided what, and through which channel.
+//
+// The decision is bound to the identity of the step it was made for — not just
+// the incident. A playbook can be hot-swapped in place (CR/ConfigMap edit) or an
+// incident rewound while a decision is pending, either of which can change the
+// action sitting at the incident's current step index. The bound identity lets
+// the resume path detect that the current step is no longer the one that was
+// approved and fail closed (re-park) rather than execute an action the human
+// never saw. PlaybookName/StepAction/StepHash are empty for legacy rows recorded
+// before this binding existed.
 type Approval struct {
 	IncidentID string           `json:"incident_id"`
 	StepName   string           `json:"step_name"`
@@ -658,4 +822,19 @@ type Approval struct {
 	Actor      string           `json:"actor"`
 	Channel    string           `json:"channel"` // "slack" | "cli" | "web"
 	At         time.Time        `json:"at"`
+	// PlaybookName is the playbook the approved step belonged to at decision time.
+	PlaybookName string `json:"playbook_name,omitempty"`
+	// StepAction is the wire action of the approved step (e.g. "agent.reboot").
+	StepAction string `json:"step_action,omitempty"`
+	// StepHash is a content hash over the approved step (playbook, name, action,
+	// approval, params), so an edited step at the same index is detected even if
+	// its name and action are unchanged.
+	StepHash string `json:"step_hash,omitempty"`
+	// ParkEpoch is the approval round this row belongs to: each park (and
+	// re-park) of an incident bumps Incident.ApprovalEpoch, the park writes a
+	// "requested" row carrying the new epoch, and a decision inherits the
+	// epoch of the request it answers. Resume honors a decision only when its
+	// epoch equals the incident's current one, so a decision can never be
+	// carried across a re-park.
+	ParkEpoch int `json:"park_epoch,omitempty"`
 }

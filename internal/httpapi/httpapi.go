@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/detect"
@@ -74,8 +75,10 @@ type Backend interface {
 	// event: agents rely on a non-2xx response to retain and replay their
 	// fsynced spool entry.
 	HandleAgentEvent(r *http.Request, ev types.AgentEvent) error
-	// RegisterNode ingests an agent self-registration.
-	RegisterNode(r *http.Request, registration types.AgentRegistration) error
+	// RegisterNode ingests an agent self-registration and answers the node's
+	// controller-served arming (unknown when it cannot be computed); the v2
+	// route returns the answer to the agent via AgentArmingHeader.
+	RegisterNode(r *http.Request, registration types.AgentRegistration) (types.AgentArming, error)
 	// NextAction atomically claims the oldest available action for the node,
 	// or returns nil when the queue is empty. The QueuedAction lease token is
 	// delivered only to that authenticated node.
@@ -114,16 +117,26 @@ type Server struct {
 	operatorTokenFn func() string
 	webhookToken    string
 	webhookTokenFn  func() string
-	authLimiter     *failureLimiter
-	sessions        *sessionStore
-	basicUsersDir   string
-	oidc            *oidcAuthenticator
-	catalog         *detect.Catalog
-	metrics         http.Handler
-	ui              http.Handler
-	backupStore     BackupStore
-	backupDir       string
-	readyCheck      func() bool
+	// webhookInsecureAllowed opts the Alertmanager webhook into running without
+	// a token. Off by default: with no token the webhook fails closed, because
+	// an unauthenticated caller could POST a firing critical alert for any node
+	// and drive cordon/drain. Only an explicit development opt-in flips it.
+	webhookInsecureAllowed bool
+	// trustProxyHeaders lets the panel honor X-Forwarded-Proto when deciding
+	// whether a request arrived over TLS, so cookies are marked Secure behind a
+	// TLS-terminating load balancer that speaks plain HTTP to the controller.
+	trustProxyHeaders bool
+	authLimiter       *failureLimiter
+	negativeAuth      *negativeAuthCache
+	sessions          *sessionStore
+	basicUsersDir     string
+	oidc              *oidcAuthenticator
+	catalog           atomic.Pointer[detect.Catalog]
+	metrics           http.Handler
+	ui                http.Handler
+	backupStore       BackupStore
+	backupDir         string
+	readyCheck        func() bool
 }
 
 // BackupStore produces a transactionally consistent database snapshot at the
@@ -156,11 +169,45 @@ func (s *Server) SetMetricsHandler(h http.Handler) { s.metrics = h }
 
 // SetSignalCatalog installs declarative signal overrides for alert mapping;
 // nil keeps the built-in catalog.
-func (s *Server) SetSignalCatalog(catalog *detect.Catalog) { s.catalog = catalog }
+func (s *Server) SetSignalCatalog(catalog *detect.Catalog) { s.catalog.Store(catalog) }
 
 // New builds the API server.
 func New(backend Backend) *Server {
-	return &Server{backend: backend, authLimiter: newFailureLimiter(), sessions: newSessionStore()}
+	return &Server{
+		backend:      backend,
+		authLimiter:  newFailureLimiter(),
+		negativeAuth: newNegativeAuthCache(),
+		sessions:     newSessionStore(),
+	}
+}
+
+// AllowInsecureWebhook opts the Alertmanager webhook into running without a
+// token (development only). Without it, and without a configured webhook token,
+// the webhook fails closed. Production installs mandate
+// spec.notifications.webhookToken, so this is never enabled there.
+func (s *Server) AllowInsecureWebhook() { s.webhookInsecureAllowed = true }
+
+// TrustProxyHeaders enables honoring X-Forwarded-Proto when deciding whether a
+// request is secure. Enable it only when the controller sits behind a trusted
+// TLS-terminating proxy/load balancer, so panel cookies are marked Secure even
+// though the proxy speaks plain HTTP to the controller.
+func (s *Server) TrustProxyHeaders(trust bool) { s.trustProxyHeaders = trust }
+
+// requestIsSecure reports whether the request reached the controller over TLS,
+// directly (r.TLS) or via a trusted TLS-terminating proxy (X-Forwarded-Proto).
+// It gates the Secure attribute on session/state cookies.
+func (s *Server) requestIsSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if !s.trustProxyHeaders {
+		return false
+	}
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if i := strings.IndexByte(proto, ','); i >= 0 {
+		proto = proto[:i] // the client-facing scheme is the first hop
+	}
+	return strings.EqualFold(strings.TrimSpace(proto), "https")
 }
 
 // Routes returns the controller's non-agent HTTP mux. Agent endpoints are
@@ -227,6 +274,8 @@ func (s *Server) AgentRoutes(authenticator AgentAuthenticator) http.Handler {
 	mux.HandleFunc("POST /api/v1/events", s.handleAgentEvent)
 	mux.HandleFunc("GET "+types.AgentRegistrationPath, s.handleRegistrationCapability)
 	mux.HandleFunc("POST "+types.AgentRegistrationPath, s.handleRegister)
+	mux.HandleFunc("GET "+types.AgentRegistrationV2Path, s.handleRegistrationCapabilityV2)
+	mux.HandleFunc("POST "+types.AgentRegistrationV2Path, s.handleRegisterV2)
 	mux.HandleFunc("GET "+types.AgentAcceleratorProfilePath, s.handleAcceleratorObservationProfile)
 	mux.HandleFunc("POST "+types.AgentAcceleratorReportPath, s.handleAcceleratorReport)
 	// The first lease-bearing action protocol is intentionally versioned. The
@@ -287,20 +336,45 @@ func (s *Server) handleRegistrationCapability(w http.ResponseWriter, _ *http.Req
 	_, _ = io.WriteString(w, types.AgentRegistrationProtocol+"\n")
 }
 
-// handleAlertmanager ingests the slow-path webhook. When a webhook token is
-// configured, Alertmanager must present it (http_config.authorization).
+// handleRegistrationCapabilityV2 advertises the v2 registration protocol
+// (arming always declared). Same exact-token discipline as v1.
+func (s *Server) handleRegistrationCapabilityV2(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, types.AgentRegistrationV2Protocol+"\n")
+}
+
+// handleAlertmanager ingests the slow-path webhook. It fails closed: a webhook
+// token must be configured (Alertmanager presents it via
+// http_config.authorization) unless an operator has explicitly opted into an
+// insecure development mode. A firing alert can drive cordon/drain, so an
+// unauthenticated webhook is a remediation-driven denial-of-service vector.
 func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
-	if token := s.currentWebhookToken(); token != "" && !bearerMatches(r, token) {
-		source := remoteSource(r)
-		if s.authLimiter.blocked(source) {
-			http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
+	switch token := s.currentWebhookToken(); {
+	case token != "":
+		if !bearerMatches(r, token) {
+			source := remoteSource(r)
+			if s.authLimiter.blocked(source) {
+				http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
+				return
+			}
+			s.authLimiter.record(source)
+			metrics.AuthFailures.WithLabelValues("webhook").Inc()
+			slog.Warn("webhook authentication failed", "remote", source)
+			w.Header().Set("WWW-Authenticate", `Bearer realm="kubeneuron-webhook"`)
+			http.Error(w, "webhook authentication failed", http.StatusUnauthorized)
 			return
 		}
-		s.authLimiter.record(source)
+	case s.webhookInsecureAllowed:
+		// Explicit development opt-in: run unauthenticated. Never reached in a
+		// production install, which mandates spec.notifications.webhookToken.
+	default:
+		// Fail CLOSED. Without a token anyone with network reach could POST a
+		// firing critical alert for an arbitrary node and drive remediation.
 		metrics.AuthFailures.WithLabelValues("webhook").Inc()
-		slog.Warn("webhook authentication failed", "remote", source)
+		slog.Warn("rejecting Alertmanager webhook: no webhook token configured", "remote", remoteSource(r))
 		w.Header().Set("WWW-Authenticate", `Bearer realm="kubeneuron-webhook"`)
-		http.Error(w, "webhook authentication failed", http.StatusUnauthorized)
+		http.Error(w, "webhook authentication is not configured", http.StatusUnauthorized)
 		return
 	}
 	var payload detect.AlertmanagerWebhook
@@ -315,11 +389,40 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, alert := range payload.Alerts {
-		if sig, ok := s.catalog.SignalFromAlert(alert); ok {
-			s.backend.HandleSignal(r, sig)
+		sig, ok := s.catalog.Load().SignalFromAlert(alert)
+		if !ok {
+			continue
 		}
+		// Cross-check the node the alert claims against known inventory. The node
+		// identity comes from spoofable alert labels, so an alert for a node the
+		// controller has never seen must not be allowed to drive remediation on an
+		// arbitrary target. Drop it (loudly) rather than opening an incident.
+		if !s.alertTargetKnown(r.Context(), sig.Target.Node) {
+			metrics.AuthFailures.WithLabelValues("webhook").Inc()
+			slog.Warn("dropping Alertmanager alert for unknown node",
+				"node", sig.Target.Node, "remote", remoteSource(r))
+			continue
+		}
+		s.backend.HandleSignal(r, sig)
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// alertTargetKnown reports whether the node an alert targets exists in the
+// controller's inventory. When no inventory source is wired (the operator API
+// is disabled, a development-only configuration) it cannot verify and returns
+// true rather than dropping every alert; production wires the operator backend,
+// where an unknown or spoofed node label is dropped.
+func (s *Server) alertTargetKnown(ctx context.Context, node string) bool {
+	node = strings.TrimSpace(node)
+	if node == "" {
+		return false
+	}
+	if s.operator == nil {
+		return true
+	}
+	n, err := s.operator.Node(ctx, node)
+	return err == nil && n != nil
 }
 
 // handleAgentEvent ingests the fast-path XID events.
@@ -348,6 +451,19 @@ func (s *Server) handleAgentEvent(w http.ResponseWriter, r *http.Request) {
 	// Stamp the authenticated value even after the equality check so future
 	// wire changes cannot accidentally reintroduce caller-owned identity.
 	ev.Node = principal.NodeName
+	// Exactly one fault identity is authoritative per event: a genuine XID, or
+	// a neutral fault envelope. An event carrying both is ambiguous — the
+	// classifier is Fault-first, so a nonzero XID beside a Fault would be
+	// silently ignored — and no shipped source produces it, so it is rejected
+	// here rather than being interpreted either way.
+	if ev.XID != 0 && ev.Fault != nil {
+		// The marker header tells the agent this is a semantic verdict on the
+		// payload — poison, never retryable — as opposed to a schema-skew or
+		// middlebox 400, which must stay retryable.
+		w.Header().Set(types.AgentEventRejectedHeader, "conflicting-identity")
+		http.Error(w, "event claims both an XID and a neutral fault; exactly one identity may be set", http.StatusBadRequest)
+		return
+	}
 	if err := s.backend.HandleAgentEvent(r, ev); err != nil {
 		http.Error(w, "event persistence unavailable", http.StatusServiceUnavailable)
 		return
@@ -355,8 +471,21 @@ func (s *Server) handleAgentEvent(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// handleRegister ingests agent self-registrations.
+// handleRegister ingests v1 agent self-registrations. The v1 wire must NOT
+// carry destructive_armed: the field is known to the Go struct (shared with
+// v2), so strict decoding alone would silently accept it here, quietly
+// eroding v1's mixed-version corruption guard. Reject it explicitly.
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	s.handleRegisterVersion(w, r, false)
+}
+
+// handleRegisterV2 ingests v2 registrations, whose contract is "arming is
+// always declared": destructive_armed is required.
+func (s *Server) handleRegisterV2(w http.ResponseWriter, r *http.Request) {
+	s.handleRegisterVersion(w, r, true)
+}
+
+func (s *Server) handleRegisterVersion(w http.ResponseWriter, r *http.Request, v2 bool) {
 	var registration types.AgentRegistration
 	r.Body = http.MaxBytesReader(w, r.Body, maxAgentRegistrationBytes)
 	dec := json.NewDecoder(r.Body)
@@ -367,6 +496,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := ensureJSONEOF(dec); err != nil {
 		writeJSONDecodeError(w, "bad registration", err)
+		return
+	}
+	if v2 && registration.DestructiveArmed == nil {
+		http.Error(w, "bad registration: the v2 protocol requires destructive_armed", http.StatusBadRequest)
+		return
+	}
+	if !v2 && registration.DestructiveArmed != nil {
+		http.Error(w, "bad registration: destructive_armed is a v2 field; register via "+types.AgentRegistrationV2Path, http.StatusBadRequest)
 		return
 	}
 	trimmedName := strings.TrimSpace(registration.Name)
@@ -389,9 +526,16 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	registration.Name = principal.NodeName
 	registration.NodeUID = principal.NodeUID
-	if err := s.backend.RegisterNode(r, registration); err != nil {
+	arming, err := s.backend.RegisterNode(r, registration)
+	if err != nil {
 		http.Error(w, "registration persistence unavailable", http.StatusServiceUnavailable)
 		return
+	}
+	// The v2 response carries the controller-served arming answer; the agent
+	// adopts it each tick. v1 responses stay bare (old agents ignore headers
+	// anyway, but the v1 contract is frozen).
+	if v2 && arming != types.AgentArmingUnknown {
+		w.Header().Set(types.AgentArmingHeader, string(arming))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -565,7 +709,21 @@ func (s *Server) handleActionResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.backend.CompleteAction(r, principal.NodeName, actionID, leaseToken, res); err != nil {
-		http.Error(w, "action result rejected", http.StatusForbidden)
+		// Only a genuine authorization/definitive rejection is a 403: a foreign
+		// node, an unknown action, a stale/incorrect lease, or a boot mismatch —
+		// none of which the agent should retry. Every other error is a store or
+		// transient failure and must be signalled honestly as a 5xx so the agent
+		// keeps the action in its persisted lease and retries, rather than
+		// discarding a real result because the database was briefly unreachable.
+		switch {
+		case errors.Is(err, store.ErrActionForeignNode),
+			errors.Is(err, store.ErrNotFound),
+			errors.Is(err, store.ErrLeaseLost),
+			errors.Is(err, store.ErrExecutorBootMismatch):
+			http.Error(w, "action result rejected", http.StatusForbidden)
+		default:
+			http.Error(w, "action result could not be recorded", http.StatusServiceUnavailable)
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

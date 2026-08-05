@@ -208,11 +208,24 @@ check_root "public TLS key selector" \
 check_root "cross-namespace public TLS reference" \
 	"TLS Secret references must omit namespace and use spec.namespace" \
 	'.metadata.name="cel-tls-public-namespace" | .spec.tls.publicServerSecretRef={name:"public-tls",namespace:"other"}'
-check_root "Enabled without notification channel" \
-	"executionMode Enabled is disabled" \
-	'.metadata.name="cel-enabled-no-notifier" | .spec.safety.executionMode="Enabled"'
-check_root "Enabled with Slack notifier" "executionMode Enabled is disabled" \
+# Enabled is admitted only alongside a destructiveExecution block that names the
+# nodes and carries the acknowledgement verbatim. Every half-configured shape
+# below must be rejected: a partially filled block must never resolve to "the
+# whole fleet".
+check_root "Enabled without a destructive-execution block" \
+	"executionMode Enabled requires spec.safety.destructiveExecution" \
+	'.metadata.name="cel-enabled-bare" | .spec.safety.executionMode="Enabled"'
+check_root "Enabled with a notifier but no destructive-execution block" \
+	"executionMode Enabled requires spec.safety.destructiveExecution" \
 	'.metadata.name="cel-enabled-notifier" | .spec.safety.executionMode="Enabled" | .spec.notifications.slack={name:"slack-webhook"}'
+check_root "Enabled with an empty node selector" \
+	"should have at least 1 properties" \
+	'.metadata.name="cel-enabled-empty-selector" | .spec.safety.executionMode="Enabled" | .spec.safety.destructiveExecution={nodeSelector:{},acknowledgement:"I understand these nodes may be reset, rebooted, or destroyed"}'
+check_root "Enabled with a mistyped acknowledgement" \
+	"acknowledgement text must match exactly" \
+	'.metadata.name="cel-enabled-bad-ack" | .spec.safety.executionMode="Enabled" | .spec.safety.destructiveExecution={nodeSelector:{"kubeneuron/lab":"true"},acknowledgement:"I understand"}'
+check_root "Enabled with named nodes and the exact acknowledgement" "" \
+	'.metadata.name="cel-enabled-declared" | .spec.safety.executionMode="Enabled" | .spec.safety.destructiveExecution={nodeSelector:{"kubeneuron/lab":"true"},acknowledgement:"I understand these nodes may be reset, rebooted, or destroyed"}'
 check_root "missing authenticated Alertmanager webhook" \
 	"notifications.webhookToken is required" \
 	'.metadata.name="cel-no-webhook-token" | del(.spec.notifications.webhookToken)'
@@ -304,11 +317,19 @@ SIGNAL_VALID=$("$JQ_BIN" -cn '{
 }')
 check_document "single xidCodes signal matcher" "" "$SIGNAL_VALID"
 check_document "both signal matchers" \
-	"exactly one of xidCodes or alertName must be set" \
+	"exactly one of xidCodes, alertName, or faults must be set" \
 	"$("$JQ_BIN" -c '.metadata.name="cel-signal-both" | .spec.alertName="GPUXidError"' <<<"$SIGNAL_VALID")"
 check_document "no signal matcher" \
-	"exactly one of xidCodes or alertName must be set" \
+	"exactly one of xidCodes, alertName, or faults must be set" \
 	"$("$JQ_BIN" -c '.metadata.name="cel-signal-neither" | del(.spec.xidCodes)' <<<"$SIGNAL_VALID")"
+check_document "single faults signal matcher" "" \
+	"$("$JQ_BIN" -c '.metadata.name="cel-signal-fault" | del(.spec.xidCodes) | .spec.source="fault" | .spec.faults=[{vendor:"nvidia",code:"ecc-dbe"}]' <<<"$SIGNAL_VALID")"
+check_document "faults beside xidCodes" \
+	"exactly one of xidCodes, alertName, or faults must be set" \
+	"$("$JQ_BIN" -c '.metadata.name="cel-signal-fault-and-xid" | .spec.faults=[{vendor:"nvidia",code:"ecc-dbe"}]' <<<"$SIGNAL_VALID")"
+check_document "fault entry missing code" \
+	"should be at least 1 chars long" \
+	"$("$JQ_BIN" -c '.metadata.name="cel-signal-fault-nocode" | del(.spec.xidCodes) | .spec.faults=[{vendor:"nvidia",code:""}]' <<<"$SIGNAL_VALID")"
 
 MAINTENANCE_VALID=$("$JQ_BIN" -cn '{
   apiVersion:"kubeneuron.io/v1alpha1",
@@ -378,5 +399,5 @@ if "$KUBECTL_BIN" get kubeneuron "$FIXTURE_NAME" >/dev/null 2>&1; then
 fi
 pass "persisted CEL fixture cleaned up"
 
-((passed == 67)) || fail "internal check count is $passed, want 67"
+((passed == 73)) || fail "internal check count is $passed, want 73"
 log "admission matrix complete: $passed checks passed on server $server_version"

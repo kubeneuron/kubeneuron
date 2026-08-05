@@ -22,7 +22,7 @@ func openLeaseTestStore(t *testing.T) *Store {
 
 func enqueueLeaseTestAction(t *testing.T, s *Store, id string) {
 	t.Helper()
-	if err := s.EnqueueAction(context.Background(), "node-a", "incident-a", types.Action{
+	if err := s.EnqueueAction(context.Background(), "node-a", types.Action{IncidentID: "incident-a",
 		ID: id, Type: types.ActionGPUReset,
 	}); err != nil {
 		t.Fatalf("EnqueueAction(%q): %v", id, err)
@@ -152,7 +152,7 @@ func TestClaimedActionRequiresCurrentUnexpiredLease(t *testing.T) {
 func TestClaimLeaseCoversDeclaredActionTimeout(t *testing.T) {
 	s := openLeaseTestStore(t)
 	ctx := context.Background()
-	if err := s.EnqueueAction(ctx, "node-a", "incident-a", types.Action{
+	if err := s.EnqueueAction(ctx, "node-a", types.Action{IncidentID: "incident-a",
 		ID: "long-action", Type: types.ActionWaitIdle, Timeout: 12 * time.Hour,
 	}); err != nil {
 		t.Fatal(err)
@@ -164,5 +164,33 @@ func TestClaimLeaseCoversDeclaredActionTimeout(t *testing.T) {
 	}
 	if claimed.LeaseExpiresAt.Before(before) {
 		t.Fatalf("lease expiry = %v, want at least declared action timeout after %v", claimed.LeaseExpiresAt, before)
+	}
+}
+
+// A boot-bound action (claimed with a non-empty boot ID) must be completed
+// with a matching boot ID. An absent/empty completion boot ID used to bypass
+// the reboot guard entirely (compat fail-open); it must now fail closed.
+func TestCompleteClaimedActionRejectsEmptyExecutorBoot(t *testing.T) {
+	s := openLeaseTestStore(t)
+	ctx := context.Background()
+	enqueueLeaseTestAction(t, s, "action-1")
+
+	claimed, err := s.ClaimNextAction(ctx, "node-a", "boot-1", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Completing with no boot ID after a boot-bound claim: the agent may have
+	// rebooted and lost its binding, so this is not evidence of completion.
+	err = s.CompleteClaimedAction(ctx, claimed.Action.ID, claimed.LeaseToken, "", types.ActionResult{
+		ActionID: claimed.Action.ID, OK: true,
+	})
+	if !errors.Is(err, store.ErrExecutorBootMismatch) {
+		t.Fatalf("empty-boot completion of a boot-bound action = %v, want ErrExecutorBootMismatch", err)
+	}
+	// The matching boot ID still completes.
+	if err := s.CompleteClaimedAction(ctx, claimed.Action.ID, claimed.LeaseToken, "boot-1", types.ActionResult{
+		ActionID: claimed.Action.ID, OK: true,
+	}); err != nil {
+		t.Fatalf("same-boot completion after rejection: %v", err)
 	}
 }

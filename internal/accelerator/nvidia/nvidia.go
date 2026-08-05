@@ -171,6 +171,12 @@ type driverVersionProber interface {
 	DriverVersion(context.Context) (string, error)
 }
 
+// resetCapabilityProber reports whether the platform can reset a GPU's PCI
+// function at all. Optional for the same reason as the probes above.
+type resetCapabilityProber interface {
+	ResetCapability(ctx context.Context, index int) (nvml.ResetCapability, error)
+}
+
 var _ accelerator.Adapter = (*Adapter)(nil)
 var _ accelerator.DetectionWatcher = (*Adapter)(nil)
 
@@ -285,7 +291,7 @@ func (a *Adapter) capabilities(ctx context.Context, topology PartitionTopology) 
 			},
 		},
 	}
-	if topology == PartitionTopologyNone {
+	if topology == PartitionTopologyNone && a.platformCanReset(ctx) {
 		capabilities = append(capabilities, accelerator.ActionCapability{
 			Action: accelerator.ActionResetDevice,
 			Scopes: []accelerator.TargetScope{accelerator.ScopePhysicalDevice},
@@ -295,6 +301,51 @@ func (a *Adapter) capabilities(ctx context.Context, topology PartitionTopology) 
 		return nil, fmt.Errorf("nvidia adapter: invalid capabilities: %w", err)
 	}
 	return capabilities, nil
+}
+
+// platformCanReset reports whether the machine can actually reset a GPU.
+//
+// An unpartitioned topology and a healthy driver are not enough: on a
+// virtualized instance the hypervisor withholds the PCI reset entirely, and the
+// only symptom is a reset that fails after a playbook has already cordoned and
+// drained the node. Declaring the capability only when the kernel exposes a
+// reset turns that into an honest ladder that ends in reboot or replacement.
+//
+// A driver that cannot answer keeps the previous behaviour rather than losing
+// the capability: the fake driver and any future driver without the probe must
+// not be silently downgraded. The reset gate and the node-side preflight both
+// still apply.
+func (a *Adapter) platformCanReset(ctx context.Context) bool {
+	_, ok := a.resetCapability(ctx)
+	return ok
+}
+
+// resetCapability returns an operator-facing explanation alongside the verdict.
+func (a *Adapter) resetCapability(ctx context.Context) (string, bool) {
+	prober, ok := a.driver.(resetCapabilityProber)
+	if !ok {
+		return "", true
+	}
+	devices, err := a.driver.ListGPUs(ctx)
+	if err != nil {
+		return fmt.Sprintf("PCI reset probe could not enumerate GPUs: %v", err), false
+	}
+	if len(devices) == 0 {
+		return "PCI reset probe found no GPUs", false
+	}
+	for _, device := range devices {
+		capability, err := prober.ResetCapability(ctx, device.Index)
+		if err != nil {
+			return fmt.Sprintf("PCI reset probe failed for GPU %d: %v", device.Index, err), false
+		}
+		if !capability.Supported {
+			// One device without a reset is enough: the machine as a whole
+			// cannot be trusted to perform one, and per-device capability is
+			// not something the report models.
+			return fmt.Sprintf("GPU %d cannot be reset: %s", device.Index, capability.Detail), false
+		}
+	}
+	return "", true
 }
 
 // Preflight collects the current NVIDIA inventory, declared capabilities, and
@@ -376,7 +427,14 @@ func (a *Adapter) Preflight(ctx context.Context) PreflightReport {
 	}
 	if !capabilities.Supports(accelerator.ActionResetDevice, accelerator.ScopePhysicalDevice) {
 		report.Readiness = PreflightObservedOnly
-		report.Reasons = append(report.Reasons, "physical-device reset unavailable: adapter did not declare reset capability")
+		reason := "physical-device reset unavailable: adapter did not declare reset capability"
+		// Say why. "Capability not declared" sends an operator looking for a
+		// configuration mistake; "the hypervisor exposes no PCI reset" tells
+		// them the machine is the wrong shape and no setting will help.
+		if detail, _ := a.resetCapability(ctx); detail != "" {
+			reason = "physical-device reset unavailable: " + detail
+		}
+		report.Reasons = append(report.Reasons, reason)
 		return report
 	}
 

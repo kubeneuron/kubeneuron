@@ -8,15 +8,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/kubeneuron/kubeneuron/internal/platform"
@@ -35,10 +41,17 @@ var drainPollInterval = 5 * time.Second
 
 // Platform implements platform.Platform on Kubernetes.
 type Platform struct {
-	client kubernetes.Interface
+	client   kubernetes.Interface
+	recycler platform.InstanceRecycler
+	// nodeLister, once published by StartNodeCache after its informer syncs,
+	// serves ListNodes from the watch-maintained cache instead of a per-call
+	// apiserver List. Nil until synced (and always nil when the cache was
+	// never started): callers then get the live List path.
+	nodeLister atomic.Pointer[corev1listers.NodeLister]
 }
 
 var _ platform.Platform = (*Platform)(nil)
+var _ platform.NodePresence = (*Platform)(nil)
 
 // New builds a Platform from an in-cluster config, falling back to the given
 // kubeconfig path (empty means default loading rules).
@@ -68,8 +81,49 @@ func (p *Platform) Name() string { return "kubernetes" }
 // TokenReview authenticator. Callers must still use narrowly scoped RBAC.
 func (p *Platform) Client() kubernetes.Interface { return p.client }
 
-// ListNodes returns all nodes advertising nvidia.com/gpu capacity.
+// StartNodeCache begins an informer-backed watch of Nodes and, once the cache
+// has synced, serves ListNodes from it instead of a per-call apiserver List.
+// ListNodes sits on the controller's destructive-admission path (blast-radius
+// confinement resolves node labels through it), so before this cache every
+// admission check paid an apiserver round trip and apiserver latency fed
+// straight back into remediation. Returns immediately; until the sync
+// completes (or if ctx ends first) ListNodes keeps using live Lists, so a
+// controller that cannot watch degrades to the old behavior rather than
+// failing.
+func (p *Platform) StartNodeCache(ctx context.Context) {
+	factory := informers.NewSharedInformerFactory(p.client, 0)
+	nodes := factory.Core().V1().Nodes()
+	informer := nodes.Informer()
+	lister := nodes.Lister()
+	go func() {
+		factory.Start(ctx.Done())
+		if !cache.WaitForCacheSync(ctx.Done(), informer.HasSynced) {
+			return // shutdown before sync; live Lists remain in force
+		}
+		p.nodeLister.Store(&lister)
+	}()
+}
+
+// ListNodes returns all nodes advertising nvidia.com/gpu capacity, from the
+// informer cache when StartNodeCache has synced, else from a live List.
 func (p *Platform) ListNodes(ctx context.Context) ([]types.Node, error) {
+	if lp := p.nodeLister.Load(); lp != nil {
+		cached, err := (*lp).List(labels.Everything())
+		if err == nil {
+			out := make([]types.Node, 0, len(cached))
+			for _, n := range cached {
+				if _, ok := n.Status.Capacity[gpuResource]; !ok {
+					continue
+				}
+				out = append(out, nodeFromK8s(n))
+			}
+			// The cache iterates in map order; keep the inventory stable for
+			// callers and logs.
+			sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+			return out, nil
+		}
+		// A lister failure is unexpected; fall through to the live path.
+	}
 	list, err := p.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -83,6 +137,20 @@ func (p *Platform) ListNodes(ctx context.Context) ([]types.Node, error) {
 		out = append(out, nodeFromK8s(n))
 	}
 	return out, nil
+}
+
+// NodeExists checks the Kubernetes Node object itself rather than the filtered
+// GPU inventory. A lost device-plugin capacity must not close an active
+// remediation as though the machine had been deleted.
+func (p *Platform) NodeExists(ctx context.Context, node string) (bool, error) {
+	_, err := p.client.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // WatchNodes streams GPU node inventory changes.
@@ -126,21 +194,80 @@ func (p *Platform) WatchNodes(ctx context.Context) (<-chan platform.NodeEvent, e
 	return ch, nil
 }
 
-// Cordon marks the node unschedulable and records the reason.
+// doNotDisruptAnnotation asks Karpenter to leave the node alone.
+//
+// A node autoscaler that consolidates or replaces a node in the middle of a
+// remediation turns a controlled repair into an orphaned incident: the agent
+// disappears, the evidence is bound to a node UID that no longer exists, and
+// whatever the playbook had already done to the node goes with it. Cordoning is
+// not enough — consolidation targets underutilised nodes, and a cordoned,
+// drained node is the most underutilised node in the cluster.
+const doNotDisruptAnnotation = "karpenter.sh/do-not-disrupt"
+
+// Cordon marks the node unschedulable, records the reason, and protects it from
+// being replaced while the remediation runs.
 func (p *Platform) Cordon(ctx context.Context, node string, reason string) error {
 	patch, _ := json.Marshal(map[string]any{
-		"spec":     map[string]any{"unschedulable": true},
-		"metadata": map[string]any{"annotations": map[string]string{cordonReasonAnnotation: reason}},
+		"spec": map[string]any{"unschedulable": true},
+		"metadata": map[string]any{"annotations": map[string]string{
+			cordonReasonAnnotation: reason,
+			doNotDisruptAnnotation: "true",
+		}},
 	})
 	_, err := p.client.CoreV1().Nodes().Patch(ctx, node, k8stypes.StrategicMergePatchType, patch, metav1.PatchOptions{})
 	return err
 }
 
-// Uncordon makes the node schedulable again and clears the reason.
+// CordonedNodes lists the nodes this product cordoned and has not released.
+//
+// The record lives on the node, so it survives a controller that dies between
+// cordoning a node and finishing the playbook that cordoned it.
+func (p *Platform) CordonedNodes(ctx context.Context) ([]platform.CordonedNode, error) {
+	// Serve from the informer cache once synced: this runs on every reconcile
+	// tick, and a live List per tick is exactly the apiserver load the node
+	// cache exists to remove. The janitor tolerates the cache's staleness — a
+	// cordon it misses this tick it sees the next, and Uncordon itself is a
+	// live patch.
+	if lp := p.nodeLister.Load(); lp != nil {
+		cached, err := (*lp).List(labels.Everything())
+		if err == nil {
+			var out []platform.CordonedNode
+			for _, node := range cached {
+				reason, ours := node.Annotations[cordonReasonAnnotation]
+				if !ours || !node.Spec.Unschedulable {
+					continue
+				}
+				out = append(out, platform.CordonedNode{Name: node.Name, Reason: reason})
+			}
+			sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+			return out, nil
+		}
+	}
+	nodes, err := p.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	var out []platform.CordonedNode
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+		reason, ours := node.Annotations[cordonReasonAnnotation]
+		if !ours || !node.Spec.Unschedulable {
+			continue
+		}
+		out = append(out, platform.CordonedNode{Name: node.Name, Reason: reason})
+	}
+	return out, nil
+}
+
+// Uncordon makes the node schedulable again, clears the reason, and lifts the
+// autoscaler protection the cordon put in place.
 func (p *Platform) Uncordon(ctx context.Context, node string) error {
 	patch, _ := json.Marshal(map[string]any{
-		"spec":     map[string]any{"unschedulable": false},
-		"metadata": map[string]any{"annotations": map[string]*string{cordonReasonAnnotation: nil}},
+		"spec": map[string]any{"unschedulable": false},
+		"metadata": map[string]any{"annotations": map[string]*string{
+			cordonReasonAnnotation: nil,
+			doNotDisruptAnnotation: nil,
+		}},
 	})
 	_, err := p.client.CoreV1().Nodes().Patch(ctx, node, k8stypes.StrategicMergePatchType, patch, metav1.PatchOptions{})
 	return err

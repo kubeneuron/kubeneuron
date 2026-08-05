@@ -6,9 +6,11 @@ package spool
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -27,9 +29,20 @@ type Spool struct {
 	// count tracks the parseable events on disk so Append does not have to
 	// re-read the file to enforce the bound.
 	count int
+	// dirty marks that an in-process Append failed after a partial write, so the
+	// tail may lack its committing newline. The next Append/ReplayBatch repairs
+	// it before touching the file. Open handles the cross-process crash case;
+	// this handles a write/sync failure while the same process keeps running —
+	// the exact ENOSPC/EIO regime the spool exists to survive.
+	dirty bool
+	// Logger, when set, records spool recovery events: a repaired torn tail and
+	// any corrupt lines skipped during replay. Recovery still proceeds when nil.
+	Logger *slog.Logger
 }
 
-// Open creates or opens a spool file, creating its directory if needed.
+// Open creates or opens a spool file, creating its directory if needed. A torn
+// final line left by a crash mid-Append is repaired before the file is read,
+// so the next Append cannot glue its JSON onto a partial record.
 func Open(path string) (*Spool, error) {
 	if dir := filepath.Dir(path); dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -42,12 +55,79 @@ func Open(path string) (*Spool, error) {
 	}
 	_ = f.Close()
 	s := &Spool{path: path}
+	if err := s.repairTornTailLocked(); err != nil {
+		return nil, err
+	}
 	events, err := s.readLocked()
 	if err != nil {
 		return nil, err
 	}
 	s.count = len(events)
 	return s, nil
+}
+
+// repairTornTailLocked truncates a partial final line left by a power loss or
+// crash mid-Append. Append's durability contract is that it fsyncs the record
+// AND its trailing newline in one write before returning success, so a file
+// that does not end in '\n' has an uncommitted tail that was never reported
+// durable. Left in place, the next Append would O_APPEND its JSON onto the
+// partial line, producing one unparseable record that replay silently drops —
+// losing both the torn event and the fresh one. Mirrors the action journal's
+// torn-tail handling. Called before the file is read; safe on an empty file.
+func (s *Spool) repairTornTailLocked() error {
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		return err
+	}
+	if len(data) == 0 || data[len(data)-1] == '\n' {
+		return nil
+	}
+	// Keep everything through the last committed newline; drop the rest. When
+	// there is no newline at all the whole file is one uncommitted record.
+	keep := int64(bytes.LastIndexByte(data, '\n') + 1)
+	f, err := os.OpenFile(s.path, os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := f.Truncate(keep); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if s.Logger != nil {
+		s.Logger.Warn("repaired torn spool tail from an interrupted append",
+			"path", s.path, "dropped_bytes", int64(len(data))-keep)
+	}
+	return nil
+}
+
+// healTornTailLocked repairs a torn tail left by an in-process Append that
+// failed after a partial write, then reconciles count with what is actually
+// durable on disk. A no-op unless a prior Append/ReplayBatch marked the spool
+// dirty, so the happy path pays no extra I/O. Called with mu held.
+func (s *Spool) healTornTailLocked() error {
+	if !s.dirty {
+		return nil
+	}
+	if err := s.repairTornTailLocked(); err != nil {
+		return err
+	}
+	// A failed Append never incremented count, but recompute it from disk so any
+	// drift (e.g. a sync that failed after the record was durable) is corrected
+	// to the truncated, parseable state rather than trusted blindly.
+	events, err := s.readLocked()
+	if err != nil {
+		return err
+	}
+	s.count = len(events)
+	s.dirty = false
+	return nil
 }
 
 // Len reports how many events are queued.
@@ -63,6 +143,10 @@ func (s *Spool) Append(ev types.AgentEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err := s.healTornTailLocked(); err != nil {
+		return err
+	}
+
 	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -73,9 +157,17 @@ func (s *Spool) Append(ev types.AgentEvent) error {
 		return err
 	}
 	if _, err := f.Write(append(line, '\n')); err != nil {
+		// A partial write leaves the tail without its committing newline. Mark
+		// the spool dirty so the next Append repairs it instead of gluing its
+		// JSON onto the fragment (which would make one unparseable record that
+		// replay drops, silently losing this event AND the next one).
+		s.dirty = true
 		return err
 	}
 	if err := f.Sync(); err != nil {
+		// The write may or may not have reached disk intact; repair before the
+		// next append and recompute count from what is actually durable.
+		s.dirty = true
 		return err
 	}
 	s.count++
@@ -106,6 +198,10 @@ func (s *Spool) ReplayBatch(
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if err := s.healTornTailLocked(); err != nil {
+		return 0, err
+	}
 
 	events, err := s.readLocked()
 	if err != nil {
@@ -149,16 +245,25 @@ func (s *Spool) readLocked() ([]types.AgentEvent, error) {
 	defer func() { _ = f.Close() }()
 
 	var events []types.AgentEvent
+	skipped := 0
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		var event types.AgentEvent
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
-			continue // skip corrupt lines rather than wedging the spool
+			// Skip corrupt lines rather than wedging the spool, but never
+			// silently: a corrupt line means an event was lost, which the
+			// operator must be able to see.
+			skipped++
+			continue
 		}
 		events = append(events, event)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
+	}
+	if skipped > 0 && s.Logger != nil {
+		s.Logger.Error("skipped corrupt spool lines during replay; events were lost",
+			"path", s.path, "skipped", skipped)
 	}
 	return events, nil
 }

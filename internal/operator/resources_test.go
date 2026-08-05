@@ -3,6 +3,7 @@ package operator
 import (
 	"context"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -40,13 +41,16 @@ func TestControllerRBACTargetsManagedServiceAccount(t *testing.T) {
 	for _, wanted := range []struct {
 		apiGroup string
 		resource string
+		names    []string
 	}{
-		{apiGroup: "", resource: "serviceaccounts"},
-		{apiGroup: "apps", resource: "daemonsets"},
+		{apiGroup: "", resource: "serviceaccounts", names: []string{"fleet-agent"}},
+		// Both agent DaemonSets may own authenticated Pods: the primary and
+		// the detection-only companion that exists under Enabled arming.
+		{apiGroup: "apps", resource: "daemonsets", names: []string{"fleet-agent", "fleet-agent-detect"}},
 	} {
 		rule := findRule(role.Rules, wanted.apiGroup, wanted.resource)
-		if rule == nil || len(rule.ResourceNames) != 1 || rule.ResourceNames[0] != "fleet-agent" {
-			t.Errorf("controller %s rule = %#v, want only resourceName fleet-agent", wanted.resource, rule)
+		if rule == nil || !reflect.DeepEqual(rule.ResourceNames, wanted.names) {
+			t.Errorf("controller %s rule = %#v, want resourceNames %v", wanted.resource, rule, wanted.names)
 		}
 	}
 
@@ -237,7 +241,7 @@ func TestSQLiteControllerDeploymentUsesKubeNeuronStatePath(t *testing.T) {
 		"--agent-token-audience=kubeneuron-controller",
 		"--agent-token-namespace=kube-neuron-system",
 		"--agent-token-service-account=fleet-agent",
-		"--agent-daemonset=fleet-agent",
+		"--agent-daemonset=fleet-agent,fleet-agent-detect",
 		"--installation-name=fleet",
 		"--installation-uid=installation-uid",
 	} {
@@ -268,8 +272,15 @@ func TestSQLiteControllerDeploymentUsesKubeNeuronStatePath(t *testing.T) {
 			t.Errorf("controller %s mount = %#v, want read-only", name, mount)
 		}
 	}
-	if got := deployment.Spec.Template.Annotations["kubeneuron.io/config-digest"]; got != "abc123" {
-		t.Fatalf("config digest annotation = %q, want abc123", got)
+	// The pod template must NOT carry the config-digest: config reloads in
+	// place, so stamping the digest here would roll the Deployment on every
+	// config change and deadlock under leader election. The digest lives on the
+	// Deployment object instead.
+	if got := deployment.Spec.Template.Annotations["kubeneuron.io/config-digest"]; got != "" {
+		t.Fatalf("pod template config-digest = %q, want it absent so config changes do not roll the controller", got)
+	}
+	if got := deployment.Annotations["kubeneuron.io/config-digest"]; got != "abc123" {
+		t.Fatalf("Deployment config-digest = %q, want abc123 for observability", got)
 	}
 	if got := deployment.Spec.Template.Annotations[storageRequestAnnotation]; got != "5Gi" {
 		t.Fatalf("storage request annotation = %q, want 5Gi", got)
@@ -656,6 +667,22 @@ func TestControllerDeploymentPublicTLS(t *testing.T) {
 	}
 }
 
+func TestTLSRevisionRollsControllerAndAgents(t *testing.T) {
+	installation := testKubeNeuron()
+	revision := "tls-material-digest"
+	deployment, err := controllerDeployment(installation, &Snapshot{Digest: "config"}, revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := agentDaemonSet(installation, &Snapshot{Digest: "config"}, revision)
+	if got := deployment.Spec.Template.Annotations["kubeneuron.io/tls-digest"]; got != revision {
+		t.Fatalf("controller TLS digest = %q, want %q", got, revision)
+	}
+	if got := agents.Spec.Template.Annotations["kubeneuron.io/tls-digest"]; got != revision {
+		t.Fatalf("agent TLS digest = %q, want %q", got, revision)
+	}
+}
+
 // The controller runs as the distroless nonroot user; without fsGroup the
 // SQLite store cannot write CSI-provisioned volumes (EBS mounts root-owned).
 // Found on the first real EKS deployment — kind's permissive local-path
@@ -708,6 +735,16 @@ func TestControllerDeploymentPostgresStore(t *testing.T) {
 	}
 	if _, ok := deployment.Spec.Template.Annotations[storageRequestAnnotation]; ok {
 		t.Fatal("Postgres deployment must not carry the SQLite storage annotation")
+	}
+	// The two properties that together prevented config changes from ever
+	// applying on a real HA cluster: a RollingUpdate under leader election
+	// deadlocks (only the leader is Ready), and the config-digest on the pod
+	// template is what triggered that rollout.
+	if deployment.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+		t.Fatalf("Postgres controller strategy = %q, want Recreate so an image upgrade cannot deadlock under leader election", deployment.Spec.Strategy.Type)
+	}
+	if got := deployment.Spec.Template.Annotations["kubeneuron.io/config-digest"]; got != "" {
+		t.Fatalf("Postgres pod template config-digest = %q, want it absent so config changes reload in place instead of rolling", got)
 	}
 }
 
@@ -883,14 +920,12 @@ func TestControllerDeploymentAuthWiring(t *testing.T) {
 	}
 }
 
-func TestDestructiveExecutionArmsOnlyDeclaredNodes(t *testing.T) {
-	// Without the block, nothing is armed and the agent lands wherever the
-	// agent selector says.
-	plain := agentDaemonSet(testKubeNeuron(), &Snapshot{Digest: "abc123"})
-	if strings.Contains(strings.Join(plain.Spec.Template.Spec.Containers[0].Args, "\n"), "enable-destructive-actions") {
-		t.Fatal("dry-run install armed destructive actions")
-	}
-
+// Round-8 (N4 retirement): arming is controller-served data, never rendered
+// into the DaemonSet. An Enabled install arms nothing at the workload level —
+// no --enable-destructive-actions arg, no blast-radius narrowing — because
+// the agent adopts the controller's per-node arming answer at registration,
+// and ONE DaemonSet covers the whole fleet.
+func TestEnabledInstallRendersNoWorkloadLevelArming(t *testing.T) {
 	installation := testKubeNeuron()
 	installation.Spec.Agent.NodeSelector = map[string]string{"gpu": "true"}
 	installation.Spec.Safety.ExecutionMode = kubeneuronv1alpha1.ExecutionModeEnabled
@@ -898,21 +933,15 @@ func TestDestructiveExecutionArmsOnlyDeclaredNodes(t *testing.T) {
 		NodeSelector:    map[string]string{"kubeneuron.io/destructive": "true"},
 		Acknowledgement: "I understand these nodes may be reset, rebooted, or destroyed",
 	}
-	armed := agentDaemonSet(installation, &Snapshot{Digest: "abc123"})
-	if !strings.Contains(strings.Join(armed.Spec.Template.Spec.Containers[0].Args, "\n"), "--enable-destructive-actions") {
-		t.Fatal("Enabled install did not arm the agent")
+	ds := agentDaemonSet(installation, &Snapshot{Digest: "abc123"})
+	if strings.Contains(strings.Join(ds.Spec.Template.Spec.Containers[0].Args, "\n"), "enable-destructive-actions") {
+		t.Fatal("arming must be controller-served, never a DaemonSet arg")
 	}
-	// Arming narrows placement: both the agent selector and the declared
-	// destructive selector must match, so an undeclared node never receives
-	// an armed agent.
-	want := map[string]string{"gpu": "true", "kubeneuron.io/destructive": "true"}
-	if len(armed.Spec.Template.Spec.NodeSelector) != len(want) {
-		t.Fatalf("node selector = %v, want %v", armed.Spec.Template.Spec.NodeSelector, want)
+	if len(ds.Spec.Template.Spec.NodeSelector) != 1 || ds.Spec.Template.Spec.NodeSelector["gpu"] != "true" {
+		t.Fatalf("node selector = %v, want ONLY the base agent selector (no blast-radius narrowing)", ds.Spec.Template.Spec.NodeSelector)
 	}
-	for key, value := range want {
-		if armed.Spec.Template.Spec.NodeSelector[key] != value {
-			t.Fatalf("node selector = %v, want %v", armed.Spec.Template.Spec.NodeSelector, want)
-		}
+	if ds.Spec.Template.Spec.Affinity != nil {
+		t.Fatalf("affinity = %+v, want none — one DaemonSet covers the whole fleet", ds.Spec.Template.Spec.Affinity)
 	}
 }
 
@@ -985,5 +1014,49 @@ func TestHostToolingPassesTheDCGMEndpoint(t *testing.T) {
 	local := agentDaemonSet(plain, &Snapshot{Digest: "abc123"})
 	if strings.Contains(strings.Join(local.Spec.Template.Spec.Containers[0].Args, "\n"), "nvidia-dcgm-endpoint") {
 		t.Fatal("agent carries a DCGM endpoint flag without one configured")
+	}
+}
+
+// The operator must translate spec.cloud into the controller flags and the
+// IRSA annotation, or node recycling cannot be enabled through the CR.
+func TestControllerCloudWiring(t *testing.T) {
+	installation := testKubeNeuron()
+	installation.Spec.Cloud = &kubeneuronv1alpha1.CloudSpec{
+		Provider: "aws",
+		AWS: &kubeneuronv1alpha1.AWSCloudSpec{
+			Region:     "us-east-1",
+			IAMRoleARN: "arn:aws:iam::123:role/kubeneuron-recycle",
+		},
+	}
+	deployment, err := controllerDeployment(installation, &Snapshot{Digest: "d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := deployment.Spec.Template.Spec.Containers[0].Args
+	for _, want := range []string{"--cloud-provider=aws", "--cloud-region=us-east-1"} {
+		if !containsString(args, want) {
+			t.Fatalf("controller args %v missing %q", args, want)
+		}
+	}
+	sa := controllerServiceAccount(installation)
+	if got := sa.Annotations["eks.amazonaws.com/role-arn"]; got != "arn:aws:iam::123:role/kubeneuron-recycle" {
+		t.Fatalf("SA IRSA annotation = %q, want the role ARN", got)
+	}
+}
+
+// With no cloud configured the flags and annotation must be absent — recycling
+// stays off and fails closed at execution.
+func TestControllerNoCloudByDefault(t *testing.T) {
+	deployment, err := controllerDeployment(testKubeNeuron(), &Snapshot{Digest: "d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range deployment.Spec.Template.Spec.Containers[0].Args {
+		if strings.HasPrefix(a, "--cloud-provider") {
+			t.Fatalf("cloud must be off by default, found %q", a)
+		}
+	}
+	if _, ok := controllerServiceAccount(testKubeNeuron()).Annotations["eks.amazonaws.com/role-arn"]; ok {
+		t.Fatal("no IRSA annotation without spec.cloud")
 	}
 }

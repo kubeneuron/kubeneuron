@@ -23,6 +23,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
+	// Blank import registers every cloud provider so the operator can gate a
+	// playbook against a provider's declared capabilities at compile time.
+	_ "github.com/kubeneuron/kubeneuron/internal/cloud/providers"
 	"github.com/kubeneuron/kubeneuron/internal/operator"
 )
 

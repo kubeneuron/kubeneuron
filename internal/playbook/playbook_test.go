@@ -216,3 +216,36 @@ func TestEscalationFollowsFailurePolicy(t *testing.T) {
 		t.Fatalf("Playbook lookup = %v, %v", book, ok)
 	}
 }
+
+// --- Fix 6: escalation cycles and self-references are rejected ---
+
+func TestValidateEscalationGraphRejectsCyclesAndSelfReferences(t *testing.T) {
+	step := []Step{{Name: "s", Action: "agent.reboot"}}
+	book := func(name, escalateTo string) *Playbook {
+		return &Playbook{Name: name, Target: "gpu", Steps: step, OnFailure: OnFailure{EscalateTo: escalateTo}}
+	}
+
+	// A self-reference is the smallest cycle.
+	self := map[string]*Playbook{"a": book("a", "a")}
+	if err := ValidateEscalationGraph(self); err == nil || !strings.Contains(err.Error(), "itself") {
+		t.Fatalf("self-reference must be rejected, got %v", err)
+	}
+
+	// A two-hop cycle A->B->A compiles clean on a per-playbook existence check.
+	cycle := map[string]*Playbook{"a": book("a", "b"), "b": book("b", "a")}
+	if err := ValidateEscalationGraph(cycle); err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("A->B->A cycle must be rejected, got %v", err)
+	}
+
+	// An unknown target still fails (existence is part of the same check).
+	missing := map[string]*Playbook{"a": book("a", "ghost")}
+	if err := ValidateEscalationGraph(missing); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("unknown escalation target must be rejected, got %v", err)
+	}
+
+	// A finite acyclic ladder A->B->C is accepted.
+	acyclic := map[string]*Playbook{"a": book("a", "b"), "b": book("b", "c"), "c": book("c", "")}
+	if err := ValidateEscalationGraph(acyclic); err != nil {
+		t.Fatalf("acyclic ladder must be accepted, got %v", err)
+	}
+}

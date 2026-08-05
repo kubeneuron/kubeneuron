@@ -74,6 +74,31 @@ func TestSignalFromAgentEvent(t *testing.T) {
 	}
 }
 
+// A spoofed or malformed severity label at the webhook must not become an
+// authoritative severity that could drive escalation: it is ignored in favor of
+// the validated default. A known severity still wins.
+func TestSignalFromAlertIgnoresUnknownSeverity(t *testing.T) {
+	base := Alert{
+		Status: "firing",
+		Labels: map[string]string{"alertname": "GpuRowRemapFailure", "node": "n1"},
+	}
+
+	base.Labels["severity"] = "emergency" // not a known severity
+	sig, ok := SignalFromAlert(base)
+	if !ok {
+		t.Fatal("a known firing alert must still map even with a bad severity label")
+	}
+	if sig.Severity != types.SeverityWarning {
+		t.Fatalf("unknown severity must fall back to the validated default; got %q", sig.Severity)
+	}
+
+	base.Labels["severity"] = "critical" // a known severity is honored
+	sig, _ = SignalFromAlert(base)
+	if sig.Severity != types.SeverityCritical {
+		t.Fatalf("a known severity must be honored; got %q", sig.Severity)
+	}
+}
+
 func TestSignalFromAlert(t *testing.T) {
 	a := Alert{
 		Status: "firing",

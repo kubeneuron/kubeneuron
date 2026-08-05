@@ -26,10 +26,15 @@ const (
 
 // Config is the fixed installation identity an agent request must match.
 type Config struct {
-	Audience          string
-	Namespace         string
-	ServiceAccount    string
-	AgentDaemonSet    string
+	Audience       string
+	Namespace      string
+	ServiceAccount string
+	// AgentDaemonSets are the DaemonSet names allowed to own authenticated
+	// agent Pods: the primary agent DaemonSet, plus the detection-only
+	// companion that exists when Enabled arming narrows the primary. A listed
+	// name with no live DaemonSet admits nothing — the owner UID is always
+	// verified against the live object.
+	AgentDaemonSets   []string
 	InstallationName  string
 	InstallationUID   string
 	MaximumCertPeriod time.Duration
@@ -42,6 +47,17 @@ type Authenticator struct {
 	now    func() time.Time
 }
 
+// allowedDaemonSet reports whether name is one of the configured agent
+// DaemonSets.
+func (a *Authenticator) allowedDaemonSet(name string) bool {
+	for _, allowed := range a.cfg.AgentDaemonSets {
+		if name == allowed {
+			return true
+		}
+	}
+	return false
+}
+
 // New builds a fail-closed Kubernetes agent authenticator.
 func New(client kubernetes.Interface, cfg Config) (*Authenticator, error) {
 	if client == nil {
@@ -51,12 +67,19 @@ func New(client kubernetes.Interface, cfg Config) (*Authenticator, error) {
 		"audience":          cfg.Audience,
 		"namespace":         cfg.Namespace,
 		"service account":   cfg.ServiceAccount,
-		"agent DaemonSet":   cfg.AgentDaemonSet,
 		"installation name": cfg.InstallationName,
 		"installation UID":  cfg.InstallationUID,
 	} {
 		if strings.TrimSpace(value) == "" {
 			return nil, fmt.Errorf("%s is required", name)
+		}
+	}
+	if len(cfg.AgentDaemonSets) == 0 {
+		return nil, fmt.Errorf("agent DaemonSet is required")
+	}
+	for _, name := range cfg.AgentDaemonSets {
+		if strings.TrimSpace(name) == "" {
+			return nil, fmt.Errorf("agent DaemonSet names must be non-empty")
 		}
 	}
 	if cfg.MaximumCertPeriod == 0 {
@@ -127,24 +150,32 @@ func (a *Authenticator) AuthenticateAgent(r *http.Request) (httpapi.AgentPrincip
 	if pod.Spec.NodeName == "" {
 		return httpapi.AgentPrincipal{}, forbidden("Pod is not bound to a node")
 	}
+	component := pod.Labels["app.kubernetes.io/component"]
 	if pod.Labels["app.kubernetes.io/name"] != "kube-neuron" ||
 		pod.Labels["app.kubernetes.io/instance"] != a.cfg.InstallationName ||
-		pod.Labels["app.kubernetes.io/component"] != "agent" ||
+		(component != "agent" && component != "agent-detect") ||
 		pod.Labels["app.kubernetes.io/managed-by"] != "kubeneuron-operator" {
 		return httpapi.AgentPrincipal{}, forbidden("Pod labels do not identify the expected agent")
 	}
 
-	daemonSet, err := a.client.AppsV1().DaemonSets(a.cfg.Namespace).Get(r.Context(), a.cfg.AgentDaemonSet, metav1.GetOptions{})
+	// The Pod's controller must be one of the allow-listed agent DaemonSets —
+	// the primary, or the detection-only companion under Enabled arming — and
+	// the owner UID must match the live object, so a recreated or foreign
+	// DaemonSet with a familiar name admits nothing.
+	owner := metav1.GetControllerOf(pod)
+	if owner == nil || owner.APIVersion != "apps/v1" || owner.Kind != "DaemonSet" ||
+		!a.allowedDaemonSet(owner.Name) {
+		return httpapi.AgentPrincipal{}, forbidden("Pod is not controlled by an expected agent DaemonSet")
+	}
+	daemonSet, err := a.client.AppsV1().DaemonSets(a.cfg.Namespace).Get(r.Context(), owner.Name, metav1.GetOptions{})
 	if err != nil {
 		return httpapi.AgentPrincipal{}, lookupError("DaemonSet", err)
 	}
 	if daemonSet.DeletionTimestamp != nil {
 		return httpapi.AgentPrincipal{}, forbidden("agent DaemonSet is terminating")
 	}
-	owner := metav1.GetControllerOf(pod)
-	if owner == nil || owner.APIVersion != "apps/v1" || owner.Kind != "DaemonSet" ||
-		owner.Name != daemonSet.Name || owner.UID != daemonSet.UID {
-		return httpapi.AgentPrincipal{}, forbidden("Pod is not controlled by the expected agent DaemonSet")
+	if owner.UID != daemonSet.UID {
+		return httpapi.AgentPrincipal{}, forbidden("Pod is not controlled by an expected agent DaemonSet")
 	}
 
 	node, err := a.client.CoreV1().Nodes().Get(r.Context(), pod.Spec.NodeName, metav1.GetOptions{})

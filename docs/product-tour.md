@@ -114,6 +114,41 @@ runs on the nodes; the alert pack next to the dashboard
 `KubeNeuronTLSCertExpiringSoon`, …) ships with per-alert
 [runbooks](runbooks.md).
 
+## 8. The operator console
+
+An interactive operator console — **[open it live](https://kubeneuron.com/console)**
+— presents the same incident model as three focused views. Every value
+below is from a real remediation cycle recorded on live EKS (g4dn / Tesla
+T4): a kernel-injected XID 79 (`fell-off-bus`) that walked
+cordon → drain → approval → `ReplaceNode` → close-as-replaced.
+
+<video controls autoplay muted loop playsinline poster="assets/tour/console-incidents.png" style="width:100%;border-radius:10px">
+  <source src="assets/tour/console-demo.webm" type="video/webm">
+  <source src="assets/tour/console-demo.mp4" type="video/mp4">
+</video>
+
+The **incident** view is master/detail: the escalation ladder as a
+timeline, the destructive step held at an approval gate, the raw kernel
+signal and its classification, and the audit trail — including
+evidence-based reset refusal, where a virtualized instance has no PCI
+reset and the console shows the cloud replace substituted for it.
+
+![Operator console — incident detail with the escalation ladder and approval gate](assets/tour/console-incidents.png)
+
+The **fleet** view is a node map: every GPU node with its accelerators,
+ECC state, temperature, utilization, and exactly where it sits in
+remediation — healthy, observing, cordoned, remediating, needs-human, or
+replaced.
+
+![Operator console — fleet node map](assets/tour/console-fleet.png)
+
+The **playbook** view renders each escalation ladder as a step flow. The
+destructive rungs (`ResetDevice`, `Reboot`, `RecycleNode`, `ReplaceNode`)
+are forced to require approval by the compiler; the action catalog beside
+it is the closed set of allow-listed steps.
+
+![Operator console — playbook editor and action catalog](assets/tour/console-playbooks.png)
+
 ## Using it day to day
 
 Everything the panel shows is also in the CLI and REST API:

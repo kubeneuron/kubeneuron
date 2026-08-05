@@ -1,6 +1,7 @@
 package agentauth
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -276,7 +277,7 @@ func newTestingFixture(t *testing.T) *testingFixture {
 		Audience:         testAudience,
 		Namespace:        testNamespace,
 		ServiceAccount:   testServiceAccount,
-		AgentDaemonSet:   testDaemonSet,
+		AgentDaemonSets:  []string{testDaemonSet},
 		InstallationName: testInstallation,
 		InstallationUID:  testInstallationUID,
 	})
@@ -308,5 +309,42 @@ func newTestingFixture(t *testing.T) *testingFixture {
 		review:        review,
 		pod:           pod,
 		daemonSet:     daemonSet,
+	}
+}
+
+// N4: a Pod owned by the detection-only companion DaemonSet (which exists
+// when Enabled arming narrows the primary) authenticates exactly like a
+// primary agent Pod — and a DaemonSet missing from the allow-list admits
+// nothing even when every label matches.
+func TestAuthenticateAgentAcceptsDetectionCompanionDaemonSet(t *testing.T) {
+	fixture := newTestingFixture(t)
+	controller := true
+	detect := &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "fleet-agent-detect", Namespace: testNamespace, UID: k8stypes.UID("detect-daemonset-uid"),
+	}}
+	if err := fixture.client.Tracker().Add(detect); err != nil {
+		t.Fatal(err)
+	}
+	fixture.pod.Labels["app.kubernetes.io/component"] = "agent-detect"
+	fixture.pod.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "apps/v1", Kind: "DaemonSet", Name: detect.Name,
+		UID: detect.UID, Controller: &controller,
+	}}
+	if _, err := fixture.client.CoreV1().Pods(testNamespace).Update(context.Background(), fixture.pod, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Not allow-listed: perfect labels and a live DaemonSet admit nothing.
+	if _, err := fixture.authenticator.AuthenticateAgent(fixture.request); err == nil {
+		t.Fatal("a DaemonSet outside the allow-list must not own authenticated agents")
+	}
+
+	fixture.authenticator.cfg.AgentDaemonSets = []string{testDaemonSet, detect.Name}
+	principal, err := fixture.authenticator.AuthenticateAgent(fixture.request)
+	if err != nil {
+		t.Fatalf("detection-companion Pod failed to authenticate: %v", err)
+	}
+	if principal.NodeName != testNode {
+		t.Fatalf("principal = %#v, want node %s", principal, testNode)
 	}
 }

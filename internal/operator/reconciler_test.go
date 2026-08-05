@@ -240,6 +240,98 @@ func TestReconcileClearsChildSuccessStatusWhenConfigurationIsInvalid(t *testing.
 	}
 }
 
+// Fix H-F4: PKI renewal must not depend on the configuration compiling. An
+// inert config error (e.g. a playbook the compiler rejects) must not freeze
+// certificate renewal, or the fleet loses mTLS over a mistake that never
+// changed anything at runtime.
+func TestReconcilePKIRunsEvenWhenConfigurationIsInvalid(t *testing.T) {
+	ctx := context.Background()
+	scheme := newOperatorScheme(t)
+	installation := testKubeNeuron()
+	installation.Spec.TLS.Issuer = kubeneuronv1alpha1.TLSIssuerOperator
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: installation.Spec.Namespace}}
+	playbook, policy := reconcileConfiguration(installation)
+	// An action the compiler does not know fails CompileSnapshot.
+	playbook.Spec.Steps[0].Action = kubeneuronv1alpha1.PlaybookAction("Unsupported")
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(
+			&kubeneuronv1alpha1.KubeNeuron{},
+			&kubeneuronv1alpha1.GPUPlaybook{},
+			&kubeneuronv1alpha1.GPURemediationPolicy{},
+		).
+		WithObjects(installation, namespace, playbook, policy).
+		Build()
+	reconciler := &KubeNeuronReconciler{Client: fakeClient, Scheme: scheme}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: installation.Name}})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter != reconcileRetry {
+		t.Fatalf("Reconcile() requeue = %v, want %v (configuration still invalid)", result.RequeueAfter, reconcileRetry)
+	}
+
+	// Despite the compile failure, the managed TLS material was issued.
+	for _, name := range []string{
+		"fleet-controller-server-ca", "fleet-agent-client-ca",
+		"fleet-controller-tls", "fleet-agent-tls",
+	} {
+		var secret corev1.Secret
+		if err := fakeClient.Get(ctx, client.ObjectKey{Name: name, Namespace: installation.Spec.Namespace}, &secret); err != nil {
+			t.Fatalf("PKI Secret %s must be issued even when configuration is invalid: %v", name, err)
+		}
+	}
+}
+
+// Round-5 finding: the config-list failure path returned before ReconcilePKI,
+// so an apiserver blip on a List — unlike an invalid configuration — still
+// froze certificate renewal. Both configuration failure modes must leave PKI
+// renewal running.
+func TestReconcilePKIRunsEvenWhenConfigurationCannotBeListed(t *testing.T) {
+	ctx := context.Background()
+	scheme := newOperatorScheme(t)
+	installation := testKubeNeuron()
+	installation.Spec.TLS.Issuer = kubeneuronv1alpha1.TLSIssuerOperator
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: installation.Spec.Namespace}}
+	playbook, policy := reconcileConfiguration(installation)
+	listErr := errors.New("apiserver unavailable")
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(
+			&kubeneuronv1alpha1.KubeNeuron{},
+			&kubeneuronv1alpha1.GPUPlaybook{},
+			&kubeneuronv1alpha1.GPURemediationPolicy{},
+		).
+		WithObjects(installation, namespace, playbook, policy).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*kubeneuronv1alpha1.GPUPlaybookList); ok {
+					return listErr
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).
+		Build()
+	reconciler := &KubeNeuronReconciler{Client: fakeClient, Scheme: scheme}
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: installation.Name}})
+	if err == nil || !strings.Contains(err.Error(), "list GPUPlaybook") {
+		t.Fatalf("Reconcile() error = %v, want the list failure reported", err)
+	}
+
+	// Despite the list failure, the managed TLS material was issued.
+	for _, name := range []string{
+		"fleet-controller-server-ca", "fleet-agent-client-ca",
+		"fleet-controller-tls", "fleet-agent-tls",
+	} {
+		var secret corev1.Secret
+		if err := fakeClient.Get(ctx, client.ObjectKey{Name: name, Namespace: installation.Spec.Namespace}, &secret); err != nil {
+			t.Fatalf("PKI Secret %s must be issued even when configuration cannot be listed: %v", name, err)
+		}
+	}
+}
+
 func TestReconcileClearsStaleReadyWhenTargetNamespaceIsMissing(t *testing.T) {
 	ctx := context.Background()
 	scheme := newOperatorScheme(t)

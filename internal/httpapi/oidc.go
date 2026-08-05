@@ -65,6 +65,42 @@ func (s *Server) EnableOIDC(ctx context.Context, cfg OIDCConfig) error {
 	return nil
 }
 
+// authorize resolves the audited actor from verified OIDC claims and enforces
+// the email trust rules. The email claim is authority only when the IdP marks it
+// verified: it becomes the actor whenever present and gates AllowedEmailDomains,
+// so an unverified email (from an IdP that allows self-asserted addresses) must
+// be refused rather than granting an outsider a full operator session. Returns a
+// non-nil error the caller surfaces as 403.
+func (cfg OIDCConfig) authorize(email string, emailVerified bool, subject string) (string, error) {
+	actor := email
+	if actor == "" {
+		actor = subject
+	}
+	if email != "" && !emailVerified {
+		return "", fmt.Errorf("your identity provider has not verified this email address")
+	}
+	if len(cfg.AllowedEmailDomains) > 0 {
+		if email == "" {
+			return "", fmt.Errorf("an email-domain allowlist is configured but the identity provider returned no email")
+		}
+		domain := ""
+		if at := strings.LastIndexByte(email, '@'); at > 0 {
+			domain = strings.ToLower(email[at+1:])
+		}
+		allowed := false
+		for _, want := range cfg.AllowedEmailDomains {
+			if domain == strings.ToLower(want) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return "", fmt.Errorf("your account's email domain is not allowed here")
+		}
+	}
+	return actor, nil
+}
+
 // handleOIDCLogin starts the authorization code flow.
 func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	if s.oidc == nil {
@@ -80,7 +116,7 @@ func (s *Server) handleOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: oidcStateCookie, Value: state, Path: "/api/v1/auth/oidc",
 		HttpOnly: true, SameSite: http.SameSiteLaxMode,
-		Secure: r.TLS != nil, MaxAge: int(oidcStateTTL.Seconds()),
+		Secure: s.requestIsSecure(r), MaxAge: int(oidcStateTTL.Seconds()),
 	})
 	http.Redirect(w, r, s.oidc.oauth.AuthCodeURL(state), http.StatusFound)
 }
@@ -119,28 +155,19 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		Email         string `json:"email"`
 		EmailVerified bool   `json:"email_verified"`
 	}
-	_ = idToken.Claims(&claims)
-
-	actor := claims.Email
-	if actor == "" {
-		actor = idToken.Subject
+	if err := idToken.Claims(&claims); err != nil {
+		// A decode failure is not a benign empty-claims case: an IdP that emits
+		// email_verified as a string (some do) would otherwise silently look like
+		// an unverified email and be refused for the wrong reason. Surface it so
+		// the misconfiguration is diagnosable rather than misattributed.
+		http.Error(w, "id_token claims could not be read", http.StatusBadGateway)
+		return
 	}
-	if len(s.oidc.cfg.AllowedEmailDomains) > 0 {
-		domain := ""
-		if at := strings.LastIndexByte(claims.Email, '@'); at > 0 {
-			domain = strings.ToLower(claims.Email[at+1:])
-		}
-		allowed := false
-		for _, want := range s.oidc.cfg.AllowedEmailDomains {
-			if domain == strings.ToLower(want) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			http.Error(w, "your account's email domain is not allowed here", http.StatusForbidden)
-			return
-		}
+
+	actor, err := s.oidc.cfg.authorize(claims.Email, claims.EmailVerified, idToken.Subject)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
 	}
 	if err := s.issueSession(w, r, actor, "oidc"); err != nil {
 		http.Error(w, "session unavailable", http.StatusInternalServerError)

@@ -24,6 +24,37 @@ familiar with the codebase.
 - There is no shippable artifact: CI publishes no images, no git tag exists,
   and every documented install path references images nothing builds.
 
+## Post-audit safety closure (2026-07-31)
+
+These corrections were added after exercising the NVIDIA GPU Operator path and
+reviewing the recovery and certificate lifecycles. They are deliberately
+fail-closed and are covered by CPU-only regression tests; no hardware action
+is executed by the test suite.
+
+- [x] TLS leaf renewal now stamps a digest of mounted TLS material on the
+      controller Deployment and agent DaemonSet templates, so operator- and
+      externally-issued Secret changes roll processes that cache certificates.
+      CA replacement is explicitly blocked: it requires the documented manual
+      expand/activate/retire rotation, never an unsafe in-place overwrite.
+- [x] The cordon janitor keeps a node cordoned when its incident lookup fails;
+      only a confirmed missing incident releases an orphaned cordon.
+- [x] A node disappearance is established through an authoritative single-node
+      lookup, not GPU-filtered inventory. A temporary device-plugin or capacity
+      outage cannot resolve a live incident.
+- [x] Accelerator-host quiesce snapshots the original persistence service and
+      mode to an fsync-backed host file before mutation. Kubernetes records a
+      host recovery marker even without recognized GPU Operator labels, and
+      clears it only after agent-side restoration succeeds.
+- [x] Per-process GPU-holder inspection is fail-closed: an unreadable live
+      process or descriptor blocks a reset instead of being silently skipped.
+- [x] Runtime configuration reload validates all candidate settings and applies
+      the sole fallible node-pause-store update before replacing live settings;
+      a store failure keeps the previous configuration intact.
+- [x] Public publication now uses a separate curated checkout, never a private
+      history mirror. Its release audit rejects credential-shaped material,
+      kubeconfigs, private session/incident artefacts, logs, and unexpected
+      symlinks; its buildable OSS source remains independently reviewed.
+
 ---
 
 ## Phase 1 — Ship an artifact and clean the tree (target: v0.1.0)
@@ -352,9 +383,27 @@ Phases 1–3 made concrete.
       g4dn recipe, full teardown) and mandatory before each release tag;
       (c) a permanent self-hosted GPU runner only if a physical lab
       machine appears — nightly destructive ladder there. Not needed now.
-- [ ] (M) [hw] NVML/DCGM event stream as a second detection source beside kmsg
-      (kmsg is currently the sole real-driver source and loses events across
-      agent restarts by seeking to the tail).
+      **SCAFFOLDED 2026-08-01:** the tiering above is now encoded —
+      `.github/workflows/hw-e2e.yaml` (workflow_dispatch with a typed
+      confirmation + `gpu-lab` environment approval, plus a weekly cron),
+      `.github/workflows/hw-e2e-reaper.yaml` (out-of-band max-lifetime
+      watchdog), and `hack/hw-e2e.sh` (up → deploy → dry-run + destructive
+      ReplaceNode assertions → always-teardown with a leak sweep). Per-commit
+      CI is untouched. actionlint/bash -n clean; **not yet executed against a
+      live lab**, so it stays `[ ]` until a first green dispatch run.
+- [ ] (M) [hw] NVML/DCGM event stream as a second detection source beside kmsg.
+      **CODE LANDED 2026-08-01:** `internal/agent/gpuhealth/` polls DCGM's
+      last-XID (`dcgmi dmon -e 230`, level-triggered) with an `nvidia-smi -q`
+      ECC/row-remap counter fallback (baselined, so history never replays),
+      normalized into the same `types.AgentEvent`; a shared `handleDetection`
+      path deduplicates a fault seen by both sources within a 2-minute window;
+      the source runs only on the real driver. The kmsg tail-seek loss is
+      separately fixed by a durable, crash-safe sequence cursor
+      (`internal/agent/kmsg/cursor.go`) that fails safe to tail-seek. All
+      unit-tested against synthetic `dcgmi`/`nvidia-smi` fixtures.
+      **Still `[hw]`:** the real `dcgmi dmon` column layout, the
+      driver-dependent `nvidia-smi -q` section labels, and `/dev/kmsg` ring
+      semantics need validation on a live node before this is closed.
 
 **Exit criteria:** documented, reproducible remediation of an induced failure
 on real hardware in dry-run *and* lab-enabled mode, with full audit.

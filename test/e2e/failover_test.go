@@ -3,10 +3,13 @@ package e2e
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/kubeneuron/kubeneuron/internal/actuator/agentrpc"
 	"github.com/kubeneuron/kubeneuron/internal/store"
@@ -43,6 +46,11 @@ func TestFailoverReplayAttachesToTheSameAction(t *testing.T) {
 		if dsn == "" {
 			t.Skip("KUBENEURON_TEST_POSTGRES_DSN not set")
 		}
+		// Run in a private database: go test runs packages in PARALLEL, and the
+		// store conformance suite truncates every table of the shared database
+		// between ITS tests — which raced this test's rows out from under it
+		// whenever both packages ran with the DSN set.
+		dsn = privateDatabase(t, dsn, "kubeneuron_e2e_failover")
 		st, err := postgres.Open(context.Background(), dsn)
 		if err != nil {
 			t.Fatal(err)
@@ -154,4 +162,28 @@ func runFailoverReplay(t *testing.T, st failoverStore) {
 	if _, err := st.ClaimNextAction(ctx, node.Name, "boot-1", time.Minute); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("post-completion claim = %v, want an empty queue", err)
 	}
+}
+
+// privateDatabase derives a DSN pointing at a dedicated database (dropped and
+// recreated fresh), so this package cannot race the store conformance suite's
+// table truncation on the shared database when go test runs both in parallel.
+func privateDatabase(t *testing.T, dsn, name string) string {
+	t.Helper()
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse DSN: %v", err)
+	}
+	admin, err := pgx.Connect(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("connect for database setup: %v", err)
+	}
+	defer func() { _ = admin.Close(context.Background()) }()
+	if _, err := admin.Exec(context.Background(), "DROP DATABASE IF EXISTS "+name); err != nil {
+		t.Fatalf("drop private database: %v", err)
+	}
+	if _, err := admin.Exec(context.Background(), "CREATE DATABASE "+name); err != nil {
+		t.Fatalf("create private database: %v", err)
+	}
+	u.Path = "/" + name
+	return u.String()
 }

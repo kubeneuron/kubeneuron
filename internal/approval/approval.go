@@ -24,9 +24,24 @@ func New(s store.Store, ttl time.Duration) *Manager {
 	return &Manager{store: s, ttl: ttl}
 }
 
+// StepIdentity binds a decision to the specific step it was made for — the
+// identity of the approval round's request — so a later hot-swap or rewind
+// that changes the action at the incident's current step index is detected at
+// resume and the decision is not honored for an action the human never saw.
+// ParkEpoch scopes the decision to one approval round: a re-park mints a new
+// epoch and orphans the decision by construction.
+type StepIdentity struct {
+	PlaybookName string
+	StepName     string
+	StepAction   string
+	StepHash     string
+	ParkEpoch    int
+}
+
 // Decide records a decision for an incident's pending step. The caller
-// (HTTP API) has already authenticated the actor.
-func (m *Manager) Decide(ctx context.Context, incidentID, stepName, actor, channel string, decision types.ApprovalDecision) error {
+// (HTTP API) has already authenticated the actor and resolved the identity of
+// the step being approved.
+func (m *Manager) Decide(ctx context.Context, incidentID string, step StepIdentity, actor, channel string, decision types.ApprovalDecision) error {
 	inc, err := m.store.GetIncident(ctx, incidentID)
 	if err != nil {
 		return err
@@ -35,12 +50,16 @@ func (m *Manager) Decide(ctx context.Context, incidentID, stepName, actor, chann
 		return fmt.Errorf("incident %s is in state %s, not awaiting approval", incidentID, inc.State)
 	}
 	return m.store.RecordApproval(ctx, &types.Approval{
-		IncidentID: incidentID,
-		StepName:   stepName,
-		Decision:   decision,
-		Actor:      actor,
-		Channel:    channel,
-		At:         time.Now(),
+		IncidentID:   incidentID,
+		StepName:     step.StepName,
+		Decision:     decision,
+		Actor:        actor,
+		Channel:      channel,
+		At:           time.Now(),
+		PlaybookName: step.PlaybookName,
+		StepAction:   step.StepAction,
+		StepHash:     step.StepHash,
+		ParkEpoch:    step.ParkEpoch,
 	})
 }
 

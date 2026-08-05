@@ -59,6 +59,15 @@ var (
 		Help: "Playbook escalations after step or verification failures.",
 	})
 
+	// StackRestoreFailures counts failed attempts by the accelerator-stack
+	// janitor to restore a quiesced node's monitoring. A growing rate means a
+	// node's GPU monitoring is staying down and its agent needs attention;
+	// the once-only stuck-restore notification names the node.
+	StackRestoreFailures = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "kubeneuron_stack_restore_failures_total",
+		Help: "Failed accelerator-stack restore attempts by the janitor.",
+	})
+
 	// AuthFailures counts rejected authentication attempts by API surface
 	// (operator, webhook, agent). A burst is either a misconfigured client
 	// or someone probing; both deserve an alert before they page as an

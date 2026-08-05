@@ -1,6 +1,7 @@
 package operator
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
+	"github.com/kubeneuron/kubeneuron/internal/cloud"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 )
 
@@ -621,6 +623,14 @@ func TestCompileSignalMappingsAndNodeConfigs(t *testing.T) {
 				Class: "driver-hang", Severity: "critical",
 			},
 		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "quiet-dbe"},
+			Spec: kubeneuronv1alpha1.GPUSignalMappingSpec{
+				KubeNeuronRef: "fleet", Source: "fault",
+				Faults: []kubeneuronv1alpha1.FaultCodeSelector{{Vendor: "nvidia", Code: "ecc-dbe"}},
+				Class:  "ecc-contained", Severity: "warning",
+			},
+		},
 	}
 	nodeConfigs := []kubeneuronv1alpha1.GPUNodeConfig{{
 		ObjectMeta: metav1.ObjectMeta{Name: "n1-paused"},
@@ -632,8 +642,18 @@ func TestCompileSignalMappingsAndNodeConfigs(t *testing.T) {
 		t.Fatalf("CompileSnapshot() error = %v", err)
 	}
 	overrides, err := config.LoadSignalOverridesFromBytes(snapshot.MappingsYAML)
-	if err != nil || len(overrides) != 2 {
+	if err != nil || len(overrides) != 3 {
 		t.Fatalf("compiled overrides = %+v, %v", overrides, err)
+	}
+	var faultOverride *config.SignalOverride
+	for i := range overrides {
+		if overrides[i].Name == "quiet-dbe" {
+			faultOverride = &overrides[i]
+		}
+	}
+	if faultOverride == nil || len(faultOverride.Faults) != 1 ||
+		faultOverride.Faults[0] != (config.FaultOverride{Vendor: "nvidia", Code: "ecc-dbe"}) {
+		t.Fatalf("fault mapping survived compile as %+v, want nvidia/ecc-dbe", faultOverride)
 	}
 	nodes, err := config.LoadNodeConfigsFromBytes(snapshot.NodeConfigsYAML)
 	if err != nil || len(nodes) != 1 || !nodes[0].Paused || nodes[0].NodeName != "n1" {
@@ -666,6 +686,10 @@ func TestCompileSignalMappingsFailClosed(t *testing.T) {
 		},
 		"source mismatch": {
 			KubeNeuronRef: "fleet", Source: "xid", AlertName: "A",
+			Class: "x", Severity: "info",
+		},
+		"fault source without faults": {
+			KubeNeuronRef: "fleet", Source: "fault", XIDCodes: []int32{45},
 			Class: "x", Severity: "info",
 		},
 	} {
@@ -719,5 +743,302 @@ func TestCompileNodeConfigsFailClosed(t *testing.T) {
 		})
 	if err == nil {
 		t.Fatal("duplicate node configs must fail closed")
+	}
+}
+
+// RecycleNode and ReplaceNode restart or destroy the whole VM, so the compiler
+// must force approval on them exactly as it does for Reboot.
+func TestCompileSnapshotRequiresApprovalForCloudActions(t *testing.T) {
+	for _, action := range []kubeneuronv1alpha1.PlaybookAction{
+		kubeneuronv1alpha1.ActionRecycleNode,
+		kubeneuronv1alpha1.ActionReplaceNode,
+	} {
+		installation := testKubeNeuron()
+		playbooks := []kubeneuronv1alpha1.GPUPlaybook{{
+			ObjectMeta: metav1.ObjectMeta{Name: "cloud"},
+			Spec: kubeneuronv1alpha1.GPUPlaybookSpec{
+				KubeNeuronRef: installation.Name,
+				Target:        kubeneuronv1alpha1.PlaybookTargetNode,
+				Steps:         []kubeneuronv1alpha1.PlaybookStep{{Name: "act", Action: action}},
+			},
+		}}
+		_, err := CompileSnapshot(installation, nil, playbooks, nil, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "requires approval Required") {
+			t.Fatalf("%s without approval: got %v, want an approval error", action, err)
+		}
+	}
+}
+
+// With approval set, a RecycleNode step compiles to the platform action the
+// controller executes.
+func TestCompileSnapshotRecycleNodeCompiles(t *testing.T) {
+	installation := testKubeNeuron()
+	// A cloud action needs a capable provider to compile: with none configured
+	// the playbook is now rejected (see TestCloudCapabilityGateRejectsWithoutCloud).
+	installation.Spec.Cloud = &kubeneuronv1alpha1.CloudSpec{Provider: fauxFullCloud}
+	playbooks := []kubeneuronv1alpha1.GPUPlaybook{{
+		ObjectMeta: metav1.ObjectMeta{Name: "recycle"},
+		Spec: kubeneuronv1alpha1.GPUPlaybookSpec{
+			KubeNeuronRef: installation.Name,
+			Target:        kubeneuronv1alpha1.PlaybookTargetNode,
+			Steps: []kubeneuronv1alpha1.PlaybookStep{{
+				Name:     "recycle",
+				Action:   kubeneuronv1alpha1.ActionRecycleNode,
+				Approval: kubeneuronv1alpha1.ApprovalRequired,
+			}},
+		},
+	}}
+	policies := []kubeneuronv1alpha1.GPURemediationPolicy{{
+		ObjectMeta: metav1.ObjectMeta{Name: "p"},
+		Spec: kubeneuronv1alpha1.GPURemediationPolicySpec{
+			KubeNeuronRef: installation.Name,
+			Priority:      1,
+			Match:         kubeneuronv1alpha1.SignalMatch{Class: "fell-off-bus"},
+			PlaybookRef:   "recycle",
+		},
+	}}
+	snapshot, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(snapshot.Playbooks["recycle.yaml"]); !strings.Contains(got, "platform.recycle_node") {
+		t.Fatalf("compiled playbook = %q, want platform.recycle_node", got)
+	}
+}
+
+// The capability gate is proven with in-package test-double providers, never
+// AWS: the seam is provider-agnostic, so a provider is just a name plus a
+// declared capability set. These register once under unique names.
+//
+//	fauxFullCloud   — declares both primitives (a fully-capable provider)
+//	fauxReplaceOnly — can Replace but not ReinitializeInPlace
+//	fauxNoPrimitive — declares nothing (a provider with no safe primitive)
+const (
+	fauxFullCloud    = "faux-full"
+	fauxReplaceOnly  = "faux-replace-only"
+	fauxNoPrimitive  = "faux-none"
+	fauxUnregistered = "faux-unregistered"
+)
+
+func init() {
+	// The factory is never called by the capability gate (it queries the static
+	// declaration), but Register requires a non-nil one.
+	unusedFactory := func(context.Context, cloud.Config) (cloud.Provider, error) {
+		return nil, nil
+	}
+	cloud.Register(fauxFullCloud, cloud.Capabilities{ReinitializeInPlace: true, Replace: true}, unusedFactory)
+	cloud.Register(fauxReplaceOnly, cloud.Capabilities{Replace: true}, unusedFactory)
+	cloud.Register(fauxNoPrimitive, cloud.Capabilities{}, unusedFactory)
+}
+
+// cloudPlaybookInstallation builds a valid installation pinned to a cloud
+// provider, plus a policy and a single-step node playbook using the given
+// action, so CompileSnapshot exercises the capability gate.
+func cloudPlaybookInstallation(provider string, act kubeneuronv1alpha1.PlaybookAction) (*kubeneuronv1alpha1.KubeNeuron, []kubeneuronv1alpha1.GPURemediationPolicy, []kubeneuronv1alpha1.GPUPlaybook) {
+	installation := testKubeNeuron()
+	installation.Spec.Cloud = &kubeneuronv1alpha1.CloudSpec{Provider: provider}
+	playbooks := []kubeneuronv1alpha1.GPUPlaybook{{
+		ObjectMeta: metav1.ObjectMeta{Name: "cloud"},
+		Spec: kubeneuronv1alpha1.GPUPlaybookSpec{
+			KubeNeuronRef: installation.Name,
+			Target:        kubeneuronv1alpha1.PlaybookTargetNode,
+			Steps: []kubeneuronv1alpha1.PlaybookStep{{
+				Name:     "act",
+				Action:   act,
+				Approval: kubeneuronv1alpha1.ApprovalRequired,
+			}},
+		},
+	}}
+	policies := []kubeneuronv1alpha1.GPURemediationPolicy{{
+		ObjectMeta: metav1.ObjectMeta{Name: "p"},
+		Spec: kubeneuronv1alpha1.GPURemediationPolicySpec{
+			KubeNeuronRef: installation.Name,
+			Priority:      1,
+			Match:         kubeneuronv1alpha1.SignalMatch{Class: "fell-off-bus"},
+			PlaybookRef:   "cloud",
+		},
+	}}
+	return installation, policies, playbooks
+}
+
+// TestCloudCapabilityGateFailsClosed proves the operator rejects a playbook
+// whose cloud action the configured provider cannot perform, and admits one it
+// can — the whole point of the provider-neutral capability declaration.
+func TestCloudCapabilityGateFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		provider string
+		action   kubeneuronv1alpha1.PlaybookAction
+		wantErr  string // substring; empty means compile must succeed
+	}{
+		{
+			name:     "fully capable provider admits recycle",
+			provider: fauxFullCloud,
+			action:   kubeneuronv1alpha1.ActionRecycleNode,
+		},
+		{
+			name:     "fully capable provider admits replace",
+			provider: fauxFullCloud,
+			action:   kubeneuronv1alpha1.ActionReplaceNode,
+		},
+		{
+			name:     "replace-only provider rejects recycle",
+			provider: fauxReplaceOnly,
+			action:   kubeneuronv1alpha1.ActionRecycleNode,
+			wantErr:  "reinitialize-in-place",
+		},
+		{
+			name:     "replace-only provider admits replace",
+			provider: fauxReplaceOnly,
+			action:   kubeneuronv1alpha1.ActionReplaceNode,
+		},
+		{
+			name:     "no-primitive provider rejects replace",
+			provider: fauxNoPrimitive,
+			action:   kubeneuronv1alpha1.ActionReplaceNode,
+			wantErr:  "replace",
+		},
+		{
+			name:     "unregistered provider fails closed",
+			provider: fauxUnregistered,
+			action:   kubeneuronv1alpha1.ActionRecycleNode,
+			wantErr:  "not a known provider",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installation, policies, playbooks := cloudPlaybookInstallation(tc.provider, tc.action)
+			_, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("provider %q + %s: got error %v, want a clean compile", tc.provider, tc.action, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("provider %q + %s: got %v, want an error containing %q", tc.provider, tc.action, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// --- Fix 6: an escalation cycle is rejected at compile time ---
+
+// Two playbooks that escalate to each other (A->B->A) pass a per-playbook
+// existence check but, under a persistent fault, would let the ladder repeat its
+// destructive rungs forever. The compiler must reject the cycle.
+func TestCompileSnapshotRejectsEscalationCycle(t *testing.T) {
+	installation := testKubeNeuron()
+	step := []kubeneuronv1alpha1.PlaybookStep{{Name: "reset", Action: kubeneuronv1alpha1.ActionGPUReset}}
+	playbooks := []kubeneuronv1alpha1.GPUPlaybook{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "a"},
+			Spec: kubeneuronv1alpha1.GPUPlaybookSpec{
+				KubeNeuronRef: installation.Name, Target: kubeneuronv1alpha1.PlaybookTargetGPU,
+				Steps: step, OnFailure: &kubeneuronv1alpha1.PlaybookFailure{PlaybookRef: "b"},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "b"},
+			Spec: kubeneuronv1alpha1.GPUPlaybookSpec{
+				KubeNeuronRef: installation.Name, Target: kubeneuronv1alpha1.PlaybookTargetGPU,
+				Steps: step, OnFailure: &kubeneuronv1alpha1.PlaybookFailure{PlaybookRef: "a"},
+			},
+		},
+	}
+	policies := []kubeneuronv1alpha1.GPURemediationPolicy{{
+		ObjectMeta: metav1.ObjectMeta{Name: "p"},
+		Spec: kubeneuronv1alpha1.GPURemediationPolicySpec{
+			KubeNeuronRef: installation.Name, Priority: 1,
+			Match: kubeneuronv1alpha1.SignalMatch{Class: "fell-off-bus"}, PlaybookRef: "a",
+		},
+	}}
+	_, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("A->B->A escalation must fail compile with a cycle error, got %v", err)
+	}
+}
+
+// --- Fix 14: negative (and zero) durations are rejected at compile ---
+
+// A negative flapWindow silently disables flap quarantine rather than tightening
+// it; a negative/zero window or TTL diverges from the declared intent. These
+// must fail compile, not compile into a snapshot that behaves nothing like the
+// configuration.
+func TestCompileSnapshotRejectsNonPositiveDurations(t *testing.T) {
+	playbooks := []kubeneuronv1alpha1.GPUPlaybook{{
+		ObjectMeta: metav1.ObjectMeta{Name: "gpu-reset"},
+		Spec: kubeneuronv1alpha1.GPUPlaybookSpec{
+			KubeNeuronRef: "fleet", Target: kubeneuronv1alpha1.PlaybookTargetGPU,
+			Steps: []kubeneuronv1alpha1.PlaybookStep{{Name: "reset", Action: kubeneuronv1alpha1.ActionGPUReset}},
+		},
+	}}
+	policies := []kubeneuronv1alpha1.GPURemediationPolicy{{
+		ObjectMeta: metav1.ObjectMeta{Name: "p"},
+		Spec: kubeneuronv1alpha1.GPURemediationPolicySpec{
+			KubeNeuronRef: "fleet", Priority: 1,
+			Match: kubeneuronv1alpha1.SignalMatch{Class: "fell-off-bus"}, PlaybookRef: "gpu-reset",
+		},
+	}}
+
+	for _, tc := range []struct {
+		name string
+		set  func(*kubeneuronv1alpha1.KubeNeuron)
+		want string
+	}{
+		{"negative flap window", func(k *kubeneuronv1alpha1.KubeNeuron) { k.Spec.Safety.FlapWindow = "-24h" }, "flapWindow"},
+		{"zero verify quiet window", func(k *kubeneuronv1alpha1.KubeNeuron) { k.Spec.Safety.VerifyQuietWindow = "0s" }, "verifyQuietWindow"},
+		{"negative approval ttl", func(k *kubeneuronv1alpha1.KubeNeuron) { k.Spec.Approvals.TTL = "-1h" }, "ttl"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installation := testKubeNeuron()
+			tc.set(installation)
+			_, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want an error mentioning %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A negative cooldown on a playbook is likewise rejected.
+func TestCompileSnapshotRejectsNegativePlaybookCooldown(t *testing.T) {
+	installation := testKubeNeuron()
+	playbooks := []kubeneuronv1alpha1.GPUPlaybook{{
+		ObjectMeta: metav1.ObjectMeta{Name: "gpu-reset"},
+		Spec: kubeneuronv1alpha1.GPUPlaybookSpec{
+			KubeNeuronRef: installation.Name, Target: kubeneuronv1alpha1.PlaybookTargetGPU,
+			Cooldown: "-1h",
+			Steps:    []kubeneuronv1alpha1.PlaybookStep{{Name: "reset", Action: kubeneuronv1alpha1.ActionGPUReset}},
+		},
+	}}
+	policies := []kubeneuronv1alpha1.GPURemediationPolicy{{
+		ObjectMeta: metav1.ObjectMeta{Name: "p"},
+		Spec: kubeneuronv1alpha1.GPURemediationPolicySpec{
+			KubeNeuronRef: installation.Name, Priority: 1,
+			Match: kubeneuronv1alpha1.SignalMatch{Class: "fell-off-bus"}, PlaybookRef: "gpu-reset",
+		},
+	}}
+	_, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "negative") {
+		t.Fatalf("negative cooldown must fail compile, got %v", err)
+	}
+}
+
+// TestCloudCapabilityGateRejectsWithoutCloud confirms a cloud-action playbook is
+// rejected at compile time when NO provider is configured: nothing can ever
+// perform a RecycleNode/ReplaceNode with no spec.cloud, so the gap must be
+// caught here rather than surfacing mid-incident at the runtime fail-closed
+// check (after cordon+drain+approval).
+func TestCloudCapabilityGateRejectsWithoutCloud(t *testing.T) {
+	for _, act := range []kubeneuronv1alpha1.PlaybookAction{
+		kubeneuronv1alpha1.ActionRecycleNode,
+		kubeneuronv1alpha1.ActionReplaceNode,
+	} {
+		_, policies, playbooks := cloudPlaybookInstallation(fauxFullCloud, act)
+		installation := testKubeNeuron() // no spec.cloud
+		_, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "spec.cloud is not configured") {
+			t.Fatalf("%s with no cloud configured must fail compile, got %v", act, err)
+		}
 	}
 }

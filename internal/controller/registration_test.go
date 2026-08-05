@@ -33,7 +33,7 @@ func TestRegisterNodeServerStampsLastSeen(t *testing.T) {
 	}
 
 	before := time.Now()
-	if err := c.RegisterNode(req, registration); err != nil {
+	if _, err := c.RegisterNode(req, registration); err != nil {
 		t.Fatalf("RegisterNode() error = %v", err)
 	}
 	after := time.Now()
@@ -55,7 +55,7 @@ func TestActionResultRequiresCurrentLease(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 	c := New(st, nil, nil, nil, nil, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	req := httptest.NewRequest("GET", types.AgentActionLeasePath, nil)
-	if err := st.EnqueueAction(req.Context(), "node-a", "incident-a", types.Action{
+	if err := st.EnqueueAction(req.Context(), "node-a", types.Action{IncidentID: "incident-a",
 		ID: "leased-action", Type: types.ActionGPUReset,
 	}); err != nil {
 		t.Fatal(err)

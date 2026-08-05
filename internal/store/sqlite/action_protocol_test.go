@@ -66,7 +66,7 @@ func TestCancelPendingActionsForIncidentSparesLeasedWork(t *testing.T) {
 	// action-3 belongs to another incident and must be untouched.
 	enqueueLeaseTestAction(t, s, "action-1")
 	enqueueLeaseTestAction(t, s, "action-2")
-	if err := s.EnqueueAction(ctx, "node-a", "incident-b", types.Action{
+	if err := s.EnqueueAction(ctx, "node-a", types.Action{IncidentID: "incident-b",
 		ID: "action-3", Type: types.ActionRunDiag,
 	}); err != nil {
 		t.Fatal(err)

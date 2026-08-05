@@ -1,22 +1,35 @@
 # KubeNeuron — Design Document
 
-Status: **accepted target architecture; dry-run runtime implemented**
+Status: **accepted target architecture** — implementation status frozen at
+2026-07-14; see below.
 
 Last updated: 2026-07-14
 
-KubeNeuron is intended to monitor NVIDIA GPU clusters for hardware and driver
-failures and drive a configurable, audited escalation ladder. Kubernetes and
-bare metal are the first target environments; other schedulers and machine
-types remain future extensions.
+> **⚠️ Implementation-status claims in this document are frozen at 2026-07-14
+> and several are now superseded. For the current, authoritative capability
+> surface use `README.md` and `CHANGELOG.md`;
+> for status-by-item use
+> `PRODUCTION_READINESS_PLAN.md`.** As of
+> v0.2.0 the following statements in this document are OUT OF DATE: `Enabled`
+> is no longer rejected — it is a supported, off-by-default mode confined by
+> `spec.safety.destructiveExecution`; PostgreSQL is an accepted, HA store (not
+> rejected); the Alertmanager webhook is authenticated; the control panel and
+> metrics surface ship; and cloud node remediation (RecycleNode/ReplaceNode)
+> is validated on live EKS. The *architecture* below still holds; only the
+> "implemented / rejected / not yet" annotations may lie.
+
+KubeNeuron monitors NVIDIA GPU clusters for hardware and driver failures and
+drives a configurable, audited escalation ladder. Kubernetes and bare metal are
+the first target environments; other schedulers and machine types remain future
+extensions.
 
 Unless a section explicitly says that a path is implemented, this document
-describes the target design. The Kubernetes dry-run loop is implemented end to
-end for its control-plane paths (workflow walk, action queue, operator API,
-CLI, approvals, and authenticated registration). `Enabled` is deliberately
-rejected: the managed agent runtime lacks the host GPU tooling, script
-provisioning, and crash-safe action completion required for real side effects.
-The Web UI, metrics surface, and hardware-gated tests are incomplete. Do not
-remediate production nodes yet.
+describes the target design. The Kubernetes control-plane paths (workflow walk,
+action queue, operator API, CLI, approvals, authenticated registration) are
+implemented; `executionMode: Enabled` is a supported, off-by-default mode gated
+by `spec.safety.destructiveExecution`. Dry-run remains the default. Consult the
+authoritative documents above before relying on any "implemented" or "rejected"
+annotation in the sections that follow.
 
 ## 1. Goals and non-goals
 
@@ -82,7 +95,7 @@ do.
 | `KubeNeuron` | Root installation: target namespace, images, execution mode, safety settings, workflow store, TLS references, and observability/archive integration declarations. |
 | `GPURemediationPolicy` | Priority-ordered mapping from a normalized problem class to a playbook. |
 | `GPUPlaybook` | Typed steps selected from a closed action enum, with approval and failure/escalation metadata. |
-| `GPUSignalMapping` | Declarative XID/alert overrides compiled into signal-mappings.yaml and applied by the detection catalog (label matchers rejected fail-closed). |
+| `GPUSignalMapping` | Declarative XID / alert / neutral-fault-code overrides compiled into signal-mappings.yaml and applied by the detection catalog (label matchers rejected fail-closed). |
 | `GPUMaintenanceWindow` | Time-bounded automation pause for selected nodes; compiled into windows.yaml and enforced by the reconcile walk (matchLabels only; matchExpressions rejected fail-closed). |
 | `GPUNodeConfig` | Per-node settings compiled into node-configs.yaml; `paused` is the complete per-node pause set (SSH/BMC refs rejected fail-closed). |
 
@@ -334,27 +347,150 @@ identity wiring. Legacy static Kubernetes, Compose, and systemd assets still
 describe the retired plaintext/bare-metal path; current fail-closed binaries
 do not form a supported runtime from those assets.
 
+### 2.4a The action registry (`internal/action`)
+
+Every action KubeNeuron can take — playbook-visible or runtime-only — is one
+declarative record in a single registry, keyed by its wire string
+(`platform.drain`, `agent.gpu_reset`, ...). A record declares everything the
+rest of the system needs to know about the action:
+
+- **Executor kind** (platform / agent / verify / notify) — controller dispatch
+  derives from it, not from string prefixes.
+- **Safety-gate class** (`GateAction`) — which concurrency cap the step
+  consumes, including the reboot class.
+- **`ForcesApproval`** — the compiler injects a required approval on the step.
+- **`Destructive`** — the controller's blast-radius confinement
+  (`spec.safety.destructiveExecution.nodeSelector`) refuses the step on any
+  node it cannot prove is inside the declared scope. Quiesce is in this set:
+  standing down DCGM and the device plugin degrades a node like a drain does.
+- **`CapabilityGate`** — the runtime-evidence gate (today: NVIDIA reset
+  requires a fresh, profile-matched accelerator report).
+- **`CloudPrimitive`** — the provider capability a cloud action needs; the
+  operator rejects a playbook whose configured provider lacks it.
+
+The operator compiler, controller dispatch, playbook validation, safety gate,
+and confinement all read the registry; none keeps a private copy of these
+facts. Adding an action is one registry record plus its executor — tests pin
+the CRD enum ↔ registry bijection and the exact destructive set.
+
+### 2.4b The cloud provider seam (`internal/cloud`)
+
+Node-scope remediation on virtualized instances (where a PCI-level GPU reset
+is impossible — measured on EC2 g4dn) is a cloud concern behind a
+provider-neutral seam. Each provider registers by name and owns three things:
+
+1. **Its providerID scheme** — `InstanceID(providerID)` parses the
+   Kubernetes node providerID in the provider's own format; the platform
+   layer never learns any scheme.
+2. **Its primitives** — `Recycle` (stop/start: tears down and re-establishes
+   GPU passthrough in place) and `Replace` (terminate for the autoscaler).
+3. **Its capability declaration** — static, credential-free, queried by the
+   operator at compile time so a `RecycleNode`/`ReplaceNode` playbook is
+   rejected when the configured provider cannot perform it.
+
+Capabilities are provider-scoped; **viability is instance-scoped**.
+`CheckRecycle` renders a per-instance verdict (typed
+`cloud.ErrRecycleNotViable`) — the AWS provider refuses stop/start for
+autoscaling-group members, whose group would terminate a stopped instance
+mid-recycle. The controller consults it when a `recycle_node` step becomes
+current and escalates at admission instead of asking a human to approve a
+step that will fail by timeout; `RecycleNode` re-checks before issuing the
+stop. The package imports only the standard library; SDKs are linked only by
+the binaries that wire a provider. Adding a cloud is a new package plus one
+registry line.
+
+### 2.4c The fault envelope (`AgentEvent.Fault`)
+
+XID stays the NVIDIA-native fault encoding for sources that observe a genuine
+XID (the kmsg NVRM line, DCGM's last-XID field). Every other fault — the
+nvidia-smi ECC/row-remap counter fallback today, AMD/Intel sources tomorrow —
+travels as a vendor-neutral `FaultSignal{vendor, source, code, attributes}`
+beside it. The invariants:
+
+- **Exactly one identity per event.** Classification is Fault-first, and the
+  controller rejects an event carrying both a nonzero XID and a Fault at
+  ingest rather than interpreting the ambiguity.
+- **The envelope is durable.** The controller acknowledges an event before
+  classifying it and always classifies the row read back from the event
+  outbox, so the fault envelope (and PCI address) are persisted columns, not
+  request-scoped values. System tests cross this exact seam.
+- **One policy surface.** `internal/detect/fault.go` maps `(vendor, code)`
+  into the same `ProblemClass` vocabulary as the XID catalog, cross-source
+  dedup keys on the shared class, and `GPUSignalMapping` overrides cover both
+  encodings (`xidCodes` and `faults`), so remapping a condition applies to
+  every source that observes it.
+
+**Vendor seam ledger.** The data model is vendor-neutral, but a real second
+accelerator vendor hits these NVIDIA-specific joints, in the order it would
+break: (1) `verifyRuntimeEvidence` requires an NVIDIA accelerator report for
+every GPU-class target; (2) arming requires the concrete `*nvml.SMI` driver
+(constructor guard and served-arming adoption); (3) the physical-reset gate
+is `CapabilityNVIDIAReset`/`allowNVIDIAReset` only; (4) kmsg parsing is
+NVRM/XID-only and the quiesce stack manipulates NVIDIA components. None of
+this should be generalized speculatively; this ledger exists so the cost is
+a known quantity when a vendor lands.
+
+### 2.4d Concurrency and lifecycle invariants (rounds 7–9)
+
+These are the rules the controller's correctness rests on. Violating any of
+them reintroduces a defect a past review round removed.
+
+- **The durable bit is truth; the gate is a projection.**
+  `Incident.RemediationSlotHeld` is set atomically with the first EXECUTING
+  transition and cleared atomically with the halting one; the in-memory
+  `safety.Gate` refcounts are rebuilt from the bits on leadership
+  acquisition. The gate never persists; the bit never caches. A new cap must
+  follow the same shape.
+- **Approvals are rounds.** Each park mints `Incident.ApprovalEpoch` and its
+  `park_epoch`-stamped request record in one transaction; decisions inherit
+  the round's request identity and epoch; resume consults only the current
+  round. Epoch 0 is the pre-upgrade population and is never consulted as a
+  round — such parks are migrated into round 1 and re-decided. The round
+  also travels to the click: notifications render it, and a decision that
+  carries the round it displayed (`park_epoch` in the decision body,
+  `--round` on the CLI, automatic in the panel) is refused if a re-park has
+  superseded it. A round-less decision binds to the current round.
+- **`StateChangedAt` is the write-fence.** Signal ingest owns
+  `SignalSeen`/`UpdatedAt` and never touches `StateChangedAt`; every
+  field-level rewrite that changes an incident's playbook position without a
+  state change (the quiesce rewind) must bump `StateChangedAt`, and
+  `transition()`/`parkForApproval()` conflict when the fresh row's value
+  differs from their caller's snapshot. This is what makes the janitors safe
+  on their own goroutine.
+- **Configuration is pinned per pass.** One immutable `RuntimeConfig`
+  snapshot behind an atomic pointer; the walk pins one snapshot per advance
+  (carried on the call-tree context, inherited by the step goroutine) and
+  each janitor pass pins its own; unpinned callers read live. Never pin
+  twice; never install piecewise.
+- **Arming is served, and undo is always allowed.** The controller answers
+  each v2 registration with the node's arming, computed by the same
+  selector-vs-labels match as blast-radius confinement; the agent adopts it
+  live and its executor consults it per dispatch. `restore_accelerator_host`
+  executes even unarmed — it can only replay a prior quiesce's snapshot —
+  so shrinking the blast radius can never strand a quiesced node.
+
 ### 2.5 Scale posture
 
-The target is roughly 10 to 500+ nodes without changing the incident model,
-but the current skeleton has not established that performance envelope.
+The target is roughly 10 to 500+ nodes without changing the incident model.
 
-- The current controller is a single process using SQLite. It is appropriate
-  only for development while the workflow is incomplete.
-- PostgreSQL and active/standby controller behavior are design targets, not
-  implemented features. The operator itself supports Kubernetes Lease leader
-  election, which does not make the runtime controller highly available.
-- The design avoids requiring a message broker: Alertmanager retry and durable
-  agent spooling are intended to cover their respective boundaries. Their
-  complete delivery semantics still require integration tests.
+- SQLite is the single-replica default; **PostgreSQL is an implemented,
+  conformance-tested HA store** (shared `sqlcore` engine, advisory-locked
+  migrations, no-double-lease semantics) with Lease-based leader election and
+  readiness-follows-leadership, so an active/standby pair keeps exactly one
+  writer. Failover loses only in-memory projections that are rebuilt from
+  durable state (gate occupancy, evidence pins).
+- The design avoids requiring a message broker: Alertmanager retry, the
+  durable agent spool, and the controller-side event outbox cover their
+  respective delivery boundaries, with system tests crossing the seams.
 
 ## 3. Detection catalog
 
 Static XID classification lives in `internal/detect/xid.go`; rationale is in
 [xid-catalog.md](xid-catalog.md). Alert rules live in
-`configs/vmalert/gpu-rules.yaml`. `GPUSignalMapping` is reserved for a future
-replacement or extension of that hard-coded path; the operator currently
-rejects selected mapping objects instead of compiling an ignored file.
+`configs/vmalert/gpu-rules.yaml`. `GPUSignalMapping` overrides the built-in
+classification declaratively for all three encodings — XID codes, alert
+names, and vendor-neutral fault codes — and is compiled by the operator into
+`signal-mappings.yaml` for the detection catalog.
 
 The table records intended default policy, not a claim that every response is
 currently executable:

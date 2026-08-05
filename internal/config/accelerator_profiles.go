@@ -241,8 +241,9 @@ func (p AcceleratorRuntimeProfile) CheckReport(now time.Time, report types.Agent
 	if report.DriverVersion != p.DriverVersion {
 		return fmt.Errorf("accelerator runtime profile %q: report driver version does not match", p.Name)
 	}
-	if report.RuntimeVersion != p.RuntimeVersion {
-		return fmt.Errorf("accelerator runtime profile %q: report runtime version does not match", p.Name)
+	if !runtimeVersionSatisfies(report.RuntimeVersion, p.RuntimeVersion) {
+		return fmt.Errorf("accelerator runtime profile %q: attested runtime version %q does not satisfy the pinned %q",
+			p.Name, report.RuntimeVersion, p.RuntimeVersion)
 	}
 	if report.ObservedAt.After(now) {
 		return fmt.Errorf("accelerator runtime profile %q: report observation is in the future", p.Name)

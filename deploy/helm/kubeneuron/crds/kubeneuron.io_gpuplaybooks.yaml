@@ -78,9 +78,13 @@ spec:
                       - EvictGPUWorkload
                       - IdleCheck
                       - WaitIdle
+                      - QuiesceAcceleratorStack
+                      - RestoreAcceleratorStack
                       - GPUReset
                       - CollectBundle
                       - Reboot
+                      - RecycleNode
+                      - ReplaceNode
                       - RunDiag
                       - VerifyGPUHealth
                       - VerifyNodeHealth

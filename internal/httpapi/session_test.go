@@ -72,7 +72,7 @@ func TestPasswordLoginIssuesAuditedSession(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("session approve = %d %s", rec.Code, rec.Body.String())
 	}
-	if len(opRef.decisions) != 1 || opRef.decisions[0] != "inc-1:approved:user:alice" {
+	if len(opRef.decisions) != 1 || opRef.decisions[0] != "inc-1:approved:user:alice:0" {
 		t.Fatalf("decisions = %v, want the verified user:alice actor", opRef.decisions)
 	}
 
@@ -111,6 +111,65 @@ func TestPasswordLoginRejectsAndThrottles(t *testing.T) {
 	}
 	if rec := login(t, handler, `{"username":"alice","password":"wrong"}`); rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("post-budget login = %d, want 429", rec.Code)
+	}
+}
+
+// Fix H-F2: a correct password must authenticate even from an IP that has
+// exhausted its failure budget, so a shared NAT egress cannot lock out every
+// legitimate operator behind it.
+func TestPasswordLoginNotLockedOutBySharedIP(t *testing.T) {
+	_, handler, _ := basicAuthServer(t)
+
+	// Burn the per-source failure budget with wrong passwords.
+	for i := 0; i < authFailureLimit+5; i++ {
+		login(t, handler, `{"username":"alice","password":"wrong"}`)
+	}
+	// A further wrong password from that source is throttled.
+	if rec := login(t, handler, `{"username":"alice","password":"wrong"}`); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("throttled wrong password = %d, want 429", rec.Code)
+	}
+	// But the CORRECT password from the same IP must still authenticate.
+	rec := login(t, handler, `{"username":"alice","password":"s3cret-pass"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("correct password from a throttled shared IP = %d, want 200", rec.Code)
+	}
+}
+
+// Fix H-F6: behind a TLS-terminating proxy the panel speaks plain HTTP, so the
+// session cookie must be marked Secure from a trusted X-Forwarded-Proto rather
+// than only from r.TLS.
+func TestSessionCookieSecureUnderProxiedTLS(t *testing.T) {
+	s, handler, _ := basicAuthServer(t)
+
+	loginProxied := func() *http.Cookie {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/v1/login", strings.NewReader(`{"username":"alice","password":"s3cret-pass"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-Proto", "https")
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("login = %d %s", rec.Code, rec.Body.String())
+		}
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == sessionCookie {
+				return c
+			}
+		}
+		t.Fatal("no session cookie issued")
+		return nil
+	}
+
+	// With proxy headers trusted, a forwarded https scheme marks the cookie Secure.
+	s.TrustProxyHeaders(true)
+	if c := loginProxied(); !c.Secure {
+		t.Fatalf("cookie must be Secure behind proxied TLS: %+v", c)
+	}
+
+	// Without trusting the header, a caller-supplied X-Forwarded-Proto must not
+	// be able to influence the decision (and plain HTTP stays non-Secure).
+	s.TrustProxyHeaders(false)
+	if c := loginProxied(); c.Secure {
+		t.Fatalf("untrusted X-Forwarded-Proto must not set Secure: %+v", c)
 	}
 }
 

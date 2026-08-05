@@ -120,3 +120,105 @@ func TestNilCatalogFallsBackToBuiltins(t *testing.T) {
 		t.Fatal("nil catalog must map built-in alerts")
 	}
 }
+
+// N2: a GPUSignalMapping override must reach the neutral fault encoding too.
+// Before this, remapping XID 48 changed policy for the kmsg source while the
+// nvidia-smi/DCGM fallback kept the built-in classification for the same
+// physical condition — a user-visible policy split between detection sources.
+func TestCatalogFaultOverrideWinsOverBuiltin(t *testing.T) {
+	catalog, err := NewCatalog([]config.SignalOverride{{
+		Name:   "quieter-dbe",
+		Faults: []config.FaultOverride{{Vendor: "nvidia", Code: "ecc-dbe"}},
+		Class:  "custom-ecc", Severity: types.SeverityWarning,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ev := types.AgentEvent{
+		Node: "n1", GPUUUID: "GPU-a", Timestamp: time.Now(),
+		Fault: &types.FaultSignal{Vendor: "nvidia", Source: "nvidia-smi", Code: "ecc-dbe"},
+	}
+	sig, ok := catalog.SignalFromAgentEvent(ev)
+	if !ok {
+		t.Fatal("overridden fault must map")
+	}
+	if sig.Class != "custom-ecc" || sig.Severity != types.SeverityWarning {
+		t.Fatalf("signal = %+v, want override class/severity", sig)
+	}
+
+	// Non-overridden fault codes keep the built-in classification.
+	ev.Fault = &types.FaultSignal{Vendor: "nvidia", Source: "nvidia-smi", Code: "row-remap-failure"}
+	if sig, ok := catalog.SignalFromAgentEvent(ev); !ok || sig.Class != types.ClassRowRemapFailure {
+		t.Fatalf("built-in fallback = %+v, %v", sig, ok)
+	}
+	// The package-level (catalog-less) path stays built-in-only.
+	ev.Fault = &types.FaultSignal{Vendor: "nvidia", Source: "nvidia-smi", Code: "ecc-dbe"}
+	if sig, _ := SignalFromFault(ev); sig.Class != types.ClassECCDBE {
+		t.Fatalf("built-in SignalFromFault = %+v, want ClassECCDBE", sig)
+	}
+}
+
+// N2: an override can make an unknown vendor code actionable (the fault-table
+// analogue of adding an unknown XID), and duplicate fault overrides are
+// rejected at catalog build.
+func TestCatalogFaultOverrideAddsUnknownCodeAndRejectsDuplicates(t *testing.T) {
+	catalog, err := NewCatalog([]config.SignalOverride{{
+		Name:   "amd-page-retire",
+		Faults: []config.FaultOverride{{Vendor: "amd", Code: "page-retirement"}},
+		Class:  types.ClassECCContained, Severity: types.SeverityWarning,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := types.AgentEvent{
+		Node: "n1", Timestamp: time.Now(),
+		Fault: &types.FaultSignal{Vendor: "amd", Source: "amd-smi", Code: "page-retirement"},
+	}
+	if _, ok := SignalFromFault(ev); ok {
+		t.Fatal("unknown vendor code must not be actionable without the override")
+	}
+	if sig, ok := catalog.SignalFromAgentEvent(ev); !ok || sig.Class != types.ClassECCContained {
+		t.Fatalf("override must make the vendor code actionable: %+v, %v", sig, ok)
+	}
+
+	if _, err := NewCatalog([]config.SignalOverride{
+		{Name: "a", Faults: []config.FaultOverride{{Vendor: "nvidia", Code: "ecc-dbe"}}, Class: "x", Severity: types.SeverityInfo},
+		{Name: "b", Faults: []config.FaultOverride{{Vendor: "nvidia", Code: "ecc-dbe"}}, Class: "y", Severity: types.SeverityInfo},
+	}); err == nil {
+		t.Fatal("duplicate fault overrides must be rejected")
+	}
+}
+
+// Pin of a DESIGN BOUNDARY, not a defect: the agent's cross-source dedup
+// anchors on the built-in classification (detect.FaultClass) and is
+// deliberately catalog-blind — GPUSignalMapping overrides are controller
+// configuration and are never shipped to node agents. An override therefore
+// changes controller-side classification (incident identity, playbook
+// selection, severity) but NOT which raw events the agent collapses before
+// they reach the controller. If this test breaks because FaultClass grew
+// catalog awareness, the override config must be shipped to agents in the
+// same change, or agent- and controller-side identities will drift apart.
+func TestAgentDedupClassIsCatalogBlindByDesign(t *testing.T) {
+	catalog, err := NewCatalog([]config.SignalOverride{{
+		Name:   "remapped-dbe",
+		Faults: []config.FaultOverride{{Vendor: "nvidia", Code: "ecc-dbe"}},
+		Class:  "custom-ecc", Severity: types.SeverityWarning,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := types.AgentEvent{
+		Node: "n1", Timestamp: time.Now(),
+		Fault: &types.FaultSignal{Vendor: "nvidia", Source: "nvidia-smi", Code: "ecc-dbe"},
+	}
+
+	// Controller-side: the override wins.
+	if sig, ok := catalog.SignalFromAgentEvent(ev); !ok || sig.Class != "custom-ecc" {
+		t.Fatalf("controller classification = %+v, %v; want the override class", sig, ok)
+	}
+	// Agent-side dedup identity: the built-in class, regardless of overrides.
+	if class, ok := FaultClass(ev); !ok || class != types.ClassECCDBE {
+		t.Fatalf("agent dedup class = %v, %v; want the built-in ClassECCDBE", class, ok)
+	}
+}

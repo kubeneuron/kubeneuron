@@ -114,7 +114,7 @@ func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, actor, met
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: id, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteLaxMode,
-		Secure: r.TLS != nil, MaxAge: int(sessionTTL.Seconds()),
+		Secure: s.requestIsSecure(r), MaxAge: int(sessionTTL.Seconds()),
 	})
 	return nil
 }
@@ -143,10 +143,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	source := remoteSource(r)
-	if s.authLimiter.blocked(source) {
-		http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
-		return
-	}
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -156,9 +152,19 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	// Verify the password BEFORE consulting the per-source throttle, mirroring
+	// the bearer path: a correct password must authenticate even from an IP with
+	// many prior failures, so a shared NAT egress cannot lock every operator
+	// behind it out. Only a *wrong* password feeds the limiter. The bcrypt input
+	// is capped at 72 bytes, so verifying first cannot be turned into a cost
+	// amplification.
 	if !s.verifyBasicUser(strings.TrimSpace(req.Username), req.Password) {
 		s.authLimiter.record(source)
 		metrics.AuthFailures.WithLabelValues("operator").Inc()
+		if s.authLimiter.blocked(source) {
+			http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
+			return
+		}
 		http.Error(w, "invalid username or password", http.StatusUnauthorized)
 		return
 	}

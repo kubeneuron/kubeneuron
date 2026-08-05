@@ -59,6 +59,8 @@ func (a *Actuator) Capabilities() []types.ActionType {
 		types.ActionDriverReload,
 		types.ActionDriverReinstall,
 		types.ActionRunScript,
+		types.ActionQuiesceAcceleratorHost,
+		types.ActionRestoreAcceleratorHost,
 	}
 }
 
@@ -70,7 +72,7 @@ func (a *Actuator) Execute(ctx context.Context, node types.Node, act types.Actio
 	if node.Name == "" {
 		return nil, fmt.Errorf("agentrpc: node name is required")
 	}
-	if err := a.store.EnqueueAction(ctx, node.Name, act.Params["incident_id"], act); err != nil {
+	if err := a.store.EnqueueAction(ctx, node.Name, act); err != nil {
 		return nil, fmt.Errorf("agentrpc: enqueue: %w", err)
 	}
 	tick := time.NewTicker(resultPollInterval)

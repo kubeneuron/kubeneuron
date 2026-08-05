@@ -26,6 +26,44 @@ const (
 	IntegrationModeDisabled IntegrationMode = "Disabled"
 )
 
+// CloudSpec configures node recycle/replace against a cloud provider. On AWS a
+// RecycleNode stops/starts the EC2 instance (reinitializing the GPU
+// passthrough) and a ReplaceNode terminates it for the autoscaler.
+//
+// Provider-specific settings live in a per-provider sub-block (aws today) so a
+// future provider adds its own block rather than widening a shared top level:
+// nothing here is cloud-specific except which block the provider selects.
+// +kubebuilder:validation:XValidation:rule="self.provider != 'aws' || has(self.aws)",message="spec.cloud.aws is required when provider is aws"
+type CloudSpec struct {
+	// Provider is the cloud backing the nodes. Only "aws" is implemented.
+	// +kubebuilder:validation:Enum=aws
+	Provider string `json:"provider"`
+	// AWS carries the AWS-specific configuration. Required when provider is aws.
+	AWS *AWSCloudSpec `json:"aws,omitempty"`
+}
+
+// AWSCloudSpec configures the AWS EC2 backing for node recycle/replace.
+type AWSCloudSpec struct {
+	// Region is the EC2 region (e.g. us-east-1). Empty uses the controller's
+	// ambient region (AWS_REGION).
+	Region string `json:"region,omitempty"`
+	// IAMRoleARN is set as the eks.amazonaws.com/role-arn annotation on the
+	// controller ServiceAccount so IRSA grants ec2:Stop/Start/Terminate/
+	// DescribeInstances. Required unless the role is attached another way.
+	IAMRoleARN string `json:"iamRoleARN,omitempty"`
+}
+
+// TLSIssuer names who fills in an installation's TLS Secrets.
+// +kubebuilder:validation:Enum=External;Operator
+type TLSIssuer string
+
+const (
+	// TLSIssuerExternal leaves the material to whoever created it.
+	TLSIssuerExternal TLSIssuer = "External"
+	// TLSIssuerOperator has KubeNeuron issue and renew the material.
+	TLSIssuerOperator TLSIssuer = "Operator"
+)
+
 // PlaybookTarget is the failure-domain target a playbook addresses.
 // +kubebuilder:validation:Enum=GPU;Node
 // +kubebuilder:validation:Enum=GPU;Node
@@ -38,7 +76,7 @@ const (
 
 // PlaybookAction is deliberately closed. Arbitrary commands must never be
 // admitted through a configuration CRD.
-// +kubebuilder:validation:Enum=Observe;Cordon;Drain;Uncordon;EvictGPUWorkload;IdleCheck;WaitIdle;GPUReset;CollectBundle;Reboot;RunDiag;VerifyGPUHealth;VerifyNodeHealth;OpenTicket
+// +kubebuilder:validation:Enum=Observe;Cordon;Drain;Uncordon;EvictGPUWorkload;IdleCheck;WaitIdle;QuiesceAcceleratorStack;RestoreAcceleratorStack;GPUReset;CollectBundle;Reboot;RecycleNode;ReplaceNode;RunDiag;VerifyGPUHealth;VerifyNodeHealth;OpenTicket
 type PlaybookAction string
 
 const (
@@ -49,9 +87,26 @@ const (
 	ActionEvictGPUWorkload PlaybookAction = "EvictGPUWorkload"
 	ActionIdleCheck        PlaybookAction = "IdleCheck"
 	ActionWaitIdle         PlaybookAction = "WaitIdle"
-	ActionGPUReset         PlaybookAction = "GPUReset"
-	ActionCollectBundle    PlaybookAction = "CollectBundle"
-	ActionReboot           PlaybookAction = "Reboot"
+	// ActionQuiesceAcceleratorStack stops the GPU vendor's own monitoring
+	// components on the node. They hold open handles on the device nodes, so a
+	// GPUReset fails while they run no matter how well the node was drained.
+	ActionQuiesceAcceleratorStack PlaybookAction = "QuiesceAcceleratorStack"
+	// ActionRestoreAcceleratorStack puts back exactly what the quiesce step
+	// stopped. The controller also restores automatically once an incident
+	// stops running, so a playbook that fails midway cannot leave monitoring
+	// switched off.
+	ActionRestoreAcceleratorStack PlaybookAction = "RestoreAcceleratorStack"
+	ActionGPUReset                PlaybookAction = "GPUReset"
+	ActionCollectBundle           PlaybookAction = "CollectBundle"
+	ActionReboot                  PlaybookAction = "Reboot"
+	// ActionRecycleNode stops and starts the node's cloud instance. It is the
+	// cloud-native stand-in for a GPU reset on a virtualized instance, where a
+	// hardware reset is impossible: stop/start reinitializes the GPU passthrough
+	// on the same node. Whole-VM restart, so approval is required.
+	ActionRecycleNode PlaybookAction = "RecycleNode"
+	// ActionReplaceNode terminates the node's cloud instance for the autoscaler
+	// to replace with a fresh one. The escalation rung after RecycleNode.
+	ActionReplaceNode      PlaybookAction = "ReplaceNode"
 	ActionRunDiag          PlaybookAction = "RunDiag"
 	ActionVerifyGPUHealth  PlaybookAction = "VerifyGPUHealth"
 	ActionVerifyNodeHealth PlaybookAction = "VerifyNodeHealth"
@@ -81,6 +136,14 @@ type SecretReference struct {
 
 // ComponentSpec configures a managed controller component.
 type ComponentSpec struct {
+	// AllowGPUNodes lets the controller be scheduled onto GPU nodes.
+	//
+	// Off by default, and worth leaving off: a reboot playbook has been
+	// observed rebooting the node its own controller was running on, which cut
+	// the playbook off mid-step and left the node cordoned. Enable it only on
+	// clusters where every node has a GPU, and accept that a node reboot will
+	// interrupt whatever the controller was doing.
+	AllowGPUNodes bool `json:"allowGPUNodes,omitempty"`
 	// Image must be pinned by an explicit tag or digest; the floating
 	// :latest tag is rejected so a managed rollout is always reproducible.
 	// +kubebuilder:validation:MinLength=1
@@ -152,6 +215,17 @@ type HostToolingSpec struct {
 	// leaves the report degraded — fail-closed, no destructive action.
 	// +kubebuilder:validation:XValidation:rule="self.contains(':')",message="dcgmEndpoint must be host:port, for example nvidia-dcgm.gpu-operator.svc:5555"
 	DCGMEndpoint string `json:"dcgmEndpoint,omitempty"`
+	// DCGMIPath selects a dcgmi client already installed on the node instead
+	// of the one shipped in the agent image.
+	//
+	// Leave it unset unless you mean it. The attested runtime version is
+	// whichever client answers, and an AcceleratorRuntimeProfile pins one exact
+	// value; taking the client from the node makes that value depend on how
+	// each node was provisioned, so a fleet built from mixed images would
+	// attest different versions and part of it would go degraded. Set this only
+	// when the node's client is deliberately the one your profile pins.
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !self.contains(':')",message="dcgmiPath must be an absolute host path without ':'"
+	DCGMIPath string `json:"dcgmiPath,omitempty"`
 }
 
 // SafetySpec holds execution limits. ExecutionMode defaults to DryRun in the
@@ -178,6 +252,29 @@ type SafetySpec struct {
 	// only nodes matching it ever receive an agent armed for destructive
 	// work.
 	DestructiveExecution *DestructiveExecutionSpec `json:"destructiveExecution,omitempty"`
+	// Quiesce tunes how the vendor's own components are stood down before a
+	// GPU reset.
+	Quiesce *QuiesceSpec `json:"quiesce,omitempty"`
+}
+
+// QuiesceSpec declares node-side facts KubeNeuron cannot discover on its own.
+type QuiesceSpec struct {
+	// ForbidResetWhenPresent lists process names whose presence on a node means
+	// a per-device reset must not be attempted there at all.
+	//
+	// Some processes hold the GPU and must not be stopped. `nv-fabricmanager`
+	// is the standing example: on NVSwitch machines it is required for the GPUs
+	// to function, and the honest answer is "this node is not reset per-device"
+	// rather than killing a critical daemon to make room for a remediation.
+	// Declaring it here turns a reset attempt into an early, explained refusal
+	// instead of a cordoned and drained node followed by a failure.
+	//
+	// Names are matched against the process name the node reports (Linux
+	// truncates these to 15 characters, so give the truncated form when it is
+	// longer).
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MinLength=1
+	ForbidResetWhenPresent []string `json:"forbidResetWhenPresent,omitempty"`
 }
 
 // DestructiveExecutionSpec confines real destructive actions to an
@@ -347,6 +444,24 @@ type ArchiveSpec struct {
 // +kubebuilder:validation:XValidation:rule="has(self.serverSecretRef) && has(self.clientCASecretRef) && has(self.clientSecretRef) && has(self.serverCASecretRef)",message="serverSecretRef, clientCASecretRef, clientSecretRef, and serverCASecretRef are required"
 // +kubebuilder:validation:XValidation:rule="!has(self.serverSecretRef.key) && !has(self.clientSecretRef.key) && (!has(self.publicServerSecretRef) || !has(self.publicServerSecretRef.key))",message="TLS key-pair Secret references cannot select one key"
 type TLSSpec struct {
+	// Issuer decides who fills in the Secrets this block names.
+	//
+	// External, the default, means somebody else owns them: the installer,
+	// cert-manager, an organisation's own CA. The operator never writes them,
+	// and reports how close they are to expiry so they cannot lapse silently.
+	//
+	// Operator means KubeNeuron issues and renews them itself — a long-lived
+	// authority signing short-lived certificates that are replaced well before
+	// they expire.
+	//
+	// It is deliberately explicit rather than inferred from whether the Secrets
+	// happen to exist. "Absent" and "supposed to be mine" are different things:
+	// treating a missing Secret as an invitation would let the operator take
+	// over material somebody else manages the moment they deleted it mid-
+	// rotation.
+	// +kubebuilder:validation:Enum=External;Operator
+	// +kubebuilder:default=External
+	Issuer TLSIssuer `json:"issuer,omitempty"`
 	// ServerSecretRef selects a kubernetes.io/tls-style Secret containing
 	// tls.crt and tls.key. The certificate must cover the controller Service DNS
 	// name and be valid for server authentication.
@@ -397,9 +512,13 @@ type KubeNeuronSpec struct {
 	Approvals     ApprovalSpec       `json:"approvals,omitempty"`
 	Notifications *NotificationsSpec `json:"notifications,omitempty"`
 	WorkflowStore WorkflowStoreSpec  `json:"workflowStore"`
-	Observability ObservabilitySpec  `json:"observability"`
-	Archive       *ArchiveSpec       `json:"archive,omitempty"`
-	TLS           TLSSpec            `json:"tls"`
+	// Cloud enables node recycle/replace remediation against the cloud provider
+	// behind the nodes. Leave empty to disable it; a RecycleNode/ReplaceNode
+	// step then fails closed rather than silently succeeding.
+	Cloud         *CloudSpec        `json:"cloud,omitempty"`
+	Observability ObservabilitySpec `json:"observability"`
+	Archive       *ArchiveSpec      `json:"archive,omitempty"`
+	TLS           TLSSpec           `json:"tls"`
 }
 
 // KubeNeuronStatus summarizes the operator's observed desired state.
@@ -557,9 +676,19 @@ type GPUPlaybookList struct {
 	Items           []GPUPlaybook `json:"items"`
 }
 
+// FaultCodeSelector names one vendor-native neutral fault code — the
+// non-XID analogue of an XID number, matching AgentEvent.Fault (vendor,
+// code) as emitted by e.g. the nvidia-smi/DCGM fallback source.
+type FaultCodeSelector struct {
+	// +kubebuilder:validation:MinLength=1
+	Vendor string `json:"vendor"`
+	// +kubebuilder:validation:MinLength=1
+	Code string `json:"code"`
+}
+
 // GPUSignalMappingSpec makes signal normalization declarative. Exactly one
 // source matcher should be set for a mapping.
-// +kubebuilder:validation:XValidation:rule="has(self.xidCodes) != has(self.alertName)",message="exactly one of xidCodes or alertName must be set"
+// +kubebuilder:validation:XValidation:rule="(has(self.xidCodes) ? 1 : 0) + (has(self.alertName) ? 1 : 0) + (has(self.faults) ? 1 : 0) == 1",message="exactly one of xidCodes, alertName, or faults must be set"
 type GPUSignalMappingSpec struct {
 	// +kubebuilder:validation:MinLength=1
 	KubeNeuronRef string `json:"kubeNeuronRef"`
@@ -569,8 +698,15 @@ type GPUSignalMappingSpec struct {
 	// +kubebuilder:validation:items:Minimum=1
 	XIDCodes []int32 `json:"xidCodes,omitempty"`
 	// +kubebuilder:validation:MinLength=1
-	AlertName string            `json:"alertName,omitempty"`
-	Labels    map[string]string `json:"labels,omitempty"`
+	AlertName string `json:"alertName,omitempty"`
+	// Faults overrides classification of vendor-neutral fault codes (source
+	// "fault"), so a policy override reaches both detection encodings: an
+	// installation that remaps XID 48 can remap the equivalent neutral
+	// "nvidia/ecc-dbe" the fallback source emits, instead of the two sources
+	// silently applying different policy for one physical condition.
+	// +kubebuilder:validation:MinItems=1
+	Faults []FaultCodeSelector `json:"faults,omitempty"`
+	Labels map[string]string   `json:"labels,omitempty"`
 	// +kubebuilder:validation:MinLength=1
 	Class string `json:"class"`
 	// +kubebuilder:validation:Enum=info;warning;critical
@@ -787,6 +923,14 @@ type AcceleratorRuntimeProfileSpec struct {
 	// reviewed with this profile, normalized as dcgm-X.Y[.Z...]. It must match
 	// a bounded node-local probe; this declaration never substitutes for
 	// runtime evidence.
+	//
+	// This is the DCGM *client* the agent runs, which is not necessarily the
+	// version of the host engine it queries: `dcgmi --version` answers from the
+	// binary alone, and DCGM exposes no way to ask the engine for its build. A
+	// newer client serving an older engine is normal with the GPU Operator. The
+	// engine is attested separately, by a live connection whose GPU count must
+	// match the independent nvidia-smi inventory. Pin this to the client the
+	// agent image ships.
 	// +kubebuilder:validation:MinLength=1
 	RuntimeVersion string `json:"runtimeVersion"`
 	// MaxReportAge bounds how long an agent observation can support a

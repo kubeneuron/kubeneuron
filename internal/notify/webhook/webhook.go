@@ -57,9 +57,12 @@ func (n *Notifier) Notify(ctx context.Context, ev notify.NotifyEvent) error {
 
 // RequestApproval implements notify.Notifier.
 func (n *Notifier) RequestApproval(ctx context.Context, inc *types.Incident, stepName string) error {
+	// The incident payload carries approval_epoch; the hint repeats it as
+	// --round so a receiver that only forwards the message text still hands
+	// the human a round-pinned command.
 	return n.post(ctx, Payload{
 		Version: 1, Kind: "approval_required", Step: stepName,
-		Message:  "approve with: kubeneuronctl approve " + inc.ID,
+		Message:  fmt.Sprintf("approve with: kubeneuronctl approve %s --round %d", inc.ID, inc.ApprovalEpoch),
 		Incident: inc,
 	})
 }

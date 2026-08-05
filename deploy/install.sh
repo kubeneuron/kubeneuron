@@ -254,40 +254,23 @@ $auth_block
     victoriaMetrics: {mode: External, endpoint: "http://vmsingle-unset.$NS.svc:8428"}
     alertmanager: {mode: External, endpoint: "http://alertmanager-unset.$NS.svc:9093"}
   tls:
+    issuer: Operator
     serverSecretRef: {name: $NAME-controller-tls}
     serverCASecretRef: {name: $NAME-controller-server-ca}
     clientSecretRef: {name: $NAME-agent-tls}
     clientCASecretRef: {name: $NAME-agent-client-ca}
 EOF
 
-say "generating the four-Secret TLS material"
-root_uid=$(kubectl get kubeneuron "$NAME" -o jsonpath='{.metadata.uid}')
-[[ -n $root_uid ]] || die "root object has no UID"
-pki="$work/pki"; mkdir -p "$pki"
-gen_ca() { # $1=name
-	openssl ecparam -name prime256v1 -genkey -noout -out "$pki/$1.key" 2>/dev/null
-	openssl req -x509 -new -key "$pki/$1.key" -out "$pki/$1.crt" -subj "/CN=$NAME-$1" -days 365 >/dev/null 2>&1
-}
-gen_ca server-ca
-gen_ca client-ca
-openssl ecparam -name prime256v1 -genkey -noout -out "$pki/server.key" 2>/dev/null
-openssl req -new -key "$pki/server.key" -out "$pki/server.csr" -subj "/CN=$NAME-controller.$NS.svc" >/dev/null 2>&1
-openssl x509 -req -in "$pki/server.csr" -CA "$pki/server-ca.crt" -CAkey "$pki/server-ca.key" \
-	-CAcreateserial -out "$pki/server.crt" -days 90 \
-	-extfile <(printf 'extendedKeyUsage=serverAuth\nsubjectAltName=DNS:%s-controller.%s.svc,DNS:%s-controller.%s.svc.cluster.local\n' "$NAME" "$NS" "$NAME" "$NS") >/dev/null 2>&1
-openssl ecparam -name prime256v1 -genkey -noout -out "$pki/client.key" 2>/dev/null
-openssl req -new -key "$pki/client.key" -out "$pki/client.csr" -subj "/" >/dev/null 2>&1
-openssl x509 -req -in "$pki/client.csr" -CA "$pki/client-ca.crt" -CAkey "$pki/client-ca.key" \
-	-CAcreateserial -out "$pki/client.crt" -days 90 \
-	-extfile <(printf 'extendedKeyUsage=clientAuth\nsubjectAltName=URI:spiffe://kubeneuron.io/installation/%s/agent\n' "$root_uid") >/dev/null 2>&1
-kubectl -n "$NS" create secret tls "$NAME-controller-tls" \
-	--cert="$pki/server.crt" --key="$pki/server.key" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-kubectl -n "$NS" create secret generic "$NAME-controller-server-ca" \
-	--from-file=ca.crt="$pki/server-ca.crt" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-kubectl -n "$NS" create secret tls "$NAME-agent-tls" \
-	--cert="$pki/client.crt" --key="$pki/client.key" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-kubectl -n "$NS" create secret generic "$NAME-agent-client-ca" \
-	--from-file=ca.crt="$pki/client-ca.crt" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+# TLS material is issued by the operator, not here.
+#
+# It used to be generated with openssl at install time, which meant nothing ever
+# renewed it: an installation stopped being able to authenticate roughly a year
+# after it was created, silently. The operator now issues a long-lived authority
+# and short-lived certificates and replaces those well before they expire.
+#
+# Supplying your own material still works — cert-manager, a corporate CA,
+# anything. Create the four Secrets before this runs and the operator will leave
+# them alone, reporting their expiry rather than replacing them.
 
 say "waiting for the installation to become Ready"
 deadline=$((SECONDS + 300))

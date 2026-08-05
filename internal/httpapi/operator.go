@@ -24,7 +24,7 @@ import (
 type OperatorBackend interface {
 	ListIncidents(ctx context.Context, states []string, node string, limit int) ([]*types.Incident, error)
 	IncidentDetail(ctx context.Context, id string) (*types.Incident, []*types.AuditEntry, error)
-	DecideApproval(ctx context.Context, id, actor, channel string, decision types.ApprovalDecision) error
+	DecideApproval(ctx context.Context, id, actor, channel string, decision types.ApprovalDecision, expectedEpoch int) error
 	ResolveIncident(ctx context.Context, id, actor, reason string) error
 	Nodes(ctx context.Context) ([]*types.Node, error)
 	Node(ctx context.Context, name string) (*types.Node, error)
@@ -137,10 +137,27 @@ func (s *Server) requireOperatorVerb(verb string, next http.HandlerFunc) http.Ha
 		switch {
 		case bearerMatches(r, s.currentOperatorToken()):
 			identity = OperatorIdentity{Method: "static-token"}
-		case s.authLimiter.blocked(source):
-			http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
-			return
 		case s.operatorAuth != nil:
+			// Authenticate before consulting the per-source-IP throttle: a valid
+			// SAR-token operator must never be locked out because other clients
+			// behind the same shared egress IP (NAT / load balancer) exhausted the
+			// failure budget during an incident. Only a *failed* authentication
+			// feeds and is gated by the limiter, so online brute force is still
+			// throttled while known principals keep working.
+			//
+			// But full verification is expensive (a TokenReview round-trip). A
+			// blocked source replaying the SAME already-proven-bad credential must
+			// not force a fresh TokenReview every time, or the failure limiter is
+			// cosmetic. Short-circuit that exact case from a short-TTL negative
+			// cache. A *different* credential from the same source is not in the
+			// cache and is still verified, so a valid principal behind a shared NAT
+			// keeps working.
+			credKey := s.negativeAuth.hash(bearerCredential(r))
+			if s.authLimiter.blocked(source) && s.negativeAuth.seen(credKey) {
+				metrics.AuthFailures.WithLabelValues("operator").Inc()
+				http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
+				return
+			}
 			authenticated, err := s.operatorAuth.AuthenticateOperator(r, verb)
 			if err != nil {
 				status := http.StatusUnauthorized
@@ -150,8 +167,13 @@ func (s *Server) requireOperatorVerb(verb string, next http.HandlerFunc) http.Ha
 				}
 				if status == http.StatusUnauthorized || status == http.StatusForbidden {
 					s.authLimiter.record(source)
+					s.negativeAuth.remember(credKey)
 					metrics.AuthFailures.WithLabelValues("operator").Inc()
 					slog.Warn("operator authentication failed", "remote", source, "status", status)
+				}
+				if s.authLimiter.blocked(source) {
+					http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
+					return
 				}
 				if status == http.StatusUnauthorized {
 					w.Header().Set("WWW-Authenticate", `Bearer realm="kubeneuron-operator"`)
@@ -160,6 +182,9 @@ func (s *Server) requireOperatorVerb(verb string, next http.HandlerFunc) http.Ha
 				return
 			}
 			identity = authenticated
+		case s.authLimiter.blocked(source):
+			http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
+			return
 		default:
 			s.authLimiter.record(source)
 			metrics.AuthFailures.WithLabelValues("operator").Inc()
@@ -335,6 +360,12 @@ func (s *Server) handleManualIncident(w http.ResponseWriter, r *http.Request) {
 type DecisionRequest struct {
 	Actor  string `json:"actor"`
 	Reason string `json:"reason,omitempty"`
+	// ParkEpoch is the approval round the client DISPLAYED when the human
+	// decided (Incident.ApprovalEpoch at read time). When set (>0) the
+	// decision is refused if a re-park has since minted a newer round, so a
+	// click can never be recorded against content the human never saw. Zero
+	// (older clients) keeps the bind-to-current behavior.
+	ParkEpoch int `json:"park_epoch,omitempty"`
 }
 
 func (s *Server) handleDecision(decision types.ApprovalDecision) http.HandlerFunc {
@@ -348,7 +379,7 @@ func (s *Server) handleDecision(decision types.ApprovalDecision) http.HandlerFun
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := s.operator.DecideApproval(r.Context(), r.PathValue("id"), actor, "api", decision); err != nil {
+		if err := s.operator.DecideApproval(r.Context(), r.PathValue("id"), actor, "api", decision, req.ParkEpoch); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}

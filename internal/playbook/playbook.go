@@ -6,27 +6,9 @@ package playbook
 import (
 	"fmt"
 	"time"
-)
 
-var supportedActions = map[string]struct{}{
-	"platform.cordon":             {},
-	"platform.drain":              {},
-	"platform.uncordon":           {},
-	"platform.evict_gpu_workload": {},
-	"agent.idle_check":            {},
-	"agent.wait_idle":             {},
-	"agent.gpu_reset":             {},
-	"agent.collect_bundle":        {},
-	"agent.reboot":                {},
-	"agent.run_diag":              {},
-	"agent.driver_reload":         {},
-	"agent.driver_reinstall":      {},
-	"agent.run_script":            {},
-	"verify.gpu_health":           {},
-	"verify.node_health":          {},
-	"notify.observe":              {},
-	"notify.ticket":               {},
-}
+	"github.com/kubeneuron/kubeneuron/internal/action"
+)
 
 // Playbook is a declarative remediation procedure: an ordered list of steps
 // executed against a target, with an optional escalation on failure.
@@ -90,7 +72,7 @@ func (p *Playbook) Validate() error {
 		if s.Action == "" {
 			return fmt.Errorf("playbook %q: step %q: action is required", p.Name, s.Name)
 		}
-		if _, ok := supportedActions[s.Action]; !ok {
+		if !action.Supported(s.Action) {
 			return fmt.Errorf("playbook %q: step %q: unsupported action %q", p.Name, s.Name, s.Action)
 		}
 		if s.Approval != "" && s.Approval != "none" && s.Approval != "required" {

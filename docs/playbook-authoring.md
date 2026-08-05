@@ -4,11 +4,13 @@ Remediation behavior is data: **policies** bind a normalized problem class
 to a **playbook**, and a playbook is an ordered list of typed steps with an
 optional escalation target. On Kubernetes both arrive as CRDs
 (`GPURemediationPolicy`, `GPUPlaybook`); the operator compiles them into
-the controller's runtime files. These are action contracts, not a claim that
-the Kubernetes-managed agent can perform the named host operation today:
-`executionMode: Enabled` is rejected at admission and compilation. The
-managed Kubernetes path remains `DryRun` until host tooling, crash-safe action
-completion, and hardware-gated verification exist.
+the controller's runtime files.
+
+`DryRun` is the default and every step is an audited no-op in it. Real
+execution requires `executionMode: Enabled`, which in turn requires
+`spec.safety.destructiveExecution` naming the permitted nodes and carrying the
+exact acknowledgement string — and each step still passes the safety, runtime
+attestation, and approval gates at execution time.
 
 ## The mental model
 
@@ -28,9 +30,9 @@ playbook: step₁ → step₂ → … → verify quiet window → RESOLVED
 
 ## Actions (closed set)
 
-In the current Kubernetes preview every action is a dry-run contract. This
-CPU-only environment does not validate NVIDIA, NVML, DCGM, GPU telemetry, or
-host-side remediation.
+`GPUReset`, `Reboot`, `QuiesceAcceleratorStack` and `RestoreAcceleratorStack`
+have been exercised against real NVIDIA hardware; a successful GPU reset has
+not, because no cloud VM tested so far permits one (see below).
 
 | CRD action | Intended effect | Notes |
 |---|---|---|
@@ -38,10 +40,11 @@ host-side remediation.
 | `Cordon` / `Uncordon` | Kubernetes cordon | intended to annotate the node with the incident reason |
 | `Drain` | Eviction API drain | intended PDB-aware behavior; set a generous `timeout` |
 | `EvictGPUWorkload` | evicts only GPU-consuming pods | intended XID 94 targeted restart |
-| `GPUReset` | `nvidia-smi --gpu-reset` on the node | host tooling and idle safety are prerequisites for future Enabled support |
+| `GPUReset` | `nvidia-smi --gpu-reset` on the node | refuses while any process holds the device node, naming the holders; pair with `QuiesceAcceleratorStack` |
+| `QuiesceAcceleratorStack` / `RestoreAcceleratorStack` | stops/restarts the GPU vendor's own monitoring on the node | required before `GPUReset` on a GPU Operator cluster (see below) |
 | `RunDiag` | `dcgmi diag -r <params.diag_level>` | levels 1–3 when DCGM is available |
 | `CollectBundle` | `nvidia-bug-report.sh` | future host-side bundle collection |
-| `Reboot` | `systemctl reboot` | **must** set `approval: Required` when implementation is enabled |
+| `Reboot` | asks the host's init to reboot, from PID 1's namespaces | **must** set `approval: Required`; idempotent on `boot_id` so a retry cannot bounce the node twice |
 | `IdleCheck` / `WaitIdle` | GPU idleness probes | typed contracts exist; cross-restart completion persistence is still required |
 | `VerifyGPUHealth` / `VerifyNodeHealth` | health probes | agent heartbeat freshness is exercised; DCGM verification is roadmap |
 | `OpenTicket` | notification with quarantine note | intended end of the ladder (RMA) |
@@ -49,6 +52,56 @@ host-side remediation.
 `DriverReload`/`DriverReinstall`/`RunScript` are reserved for a future
 host-provisioned scripts directory. They must use fixed names (or a strictly
 validated `params.script`), never command content from the CRD.
+
+## Why a GPU reset needs a quiesce step
+
+Draining the node is not enough to reset a GPU. NVIDIA's own components keep
+open handles on the device nodes: on a stock GPU Operator install, measured on
+live hardware, `nv-hostengine`, `dcgm-exporter` and the device plugin each hold
+`/dev/nvidia0` without ever appearing as compute applications. With any of them
+running, `nvidia-smi --gpu-reset` fails with exit 19 and the text "currently in
+use by another process", which names nothing.
+
+`QuiesceAcceleratorStack` does two things. It switches the GPU Operator's
+components off through the vendor's own `nvidia.com/gpu.deploy.*` node labels,
+touching only those that were running so a restore never enables something the
+cluster had deliberately switched off. Then it asks the node itself to release
+what no label can reach — chiefly `nvidia-persistenced`, an ordinary host
+service that holds the device even on a fully drained node — and to confirm,
+from its own process table, that nothing holds the GPU any more.
+
+That confirmation is deliberately the node's job. Inferring it from pod labels
+failed on a real cluster: the device plugin came from the machine image rather
+than the GPU Operator, carried labels the controller did not recognise, and the
+step reported a settled stack while the plugin still held `/dev/nvidia0`. If
+anything still holds the device when the step's timeout expires, the step fails
+with those processes named rather than clearing a reset that cannot work.
+
+Two consequences worth knowing:
+
+- **DCGM supplies the attestation the reset gate requires, and stopping it
+  erases that attestation.** The quiesce step therefore validates the evidence
+  first and pins it for the rest of the playbook. If the evidence is not already
+  good enough to admit a reset, nothing is switched off at all.
+- **Monitoring always comes back.** `RestoreAcceleratorStack` is the explicit
+  step, but the controller also restores automatically once the incident stops
+  running, so a playbook that fails at the reset cannot leave the cluster blind.
+
+Components outside the GPU Operator are not covered, and this is not
+hypothetical: on EKS the NVIDIA device plugin ships in the machine image as a
+`kube-system` DaemonSet with no `nvidia.com/gpu.deploy.*` label, so nothing
+KubeNeuron does stands it down. Measured on that cluster, the quiesce released
+everything else — the DCGM engine, the exporter, the persistence daemon — and
+then failed by name on the one it could not reach:
+
+```
+quiesce_accelerator_host: GPU 0 is still held by 3 process(es):
+  nvidia-device-p(11621) holds /dev/nvidia-uvm, ... /dev/nvidia0, ... /dev/nvidiactl
+```
+
+Stand such a plugin down yourself before the reset, or the step will keep
+failing this way. It fails loudly rather than proceeding into a reset that
+cannot succeed.
 
 ## Compiler-enforced safety rules
 
@@ -70,10 +123,15 @@ spec:
   kubeNeuronRef: fleet
   target: GPU
   cooldown: "1h"
+  # Cordon/Drain and the quiesce steps act on the whole node, so a GPU-target
+  # playbook must declare that effect; the compiler rejects it otherwise.
+  effects: [nodeScheduling]
   steps:
     - { name: cordon,   action: Cordon }
     - { name: drain,    action: Drain,    timeout: "30m" }
+    - { name: quiesce,  action: QuiesceAcceleratorStack, timeout: "5m" }
     - { name: reset,    action: GPUReset, timeout: "5m" }
+    - { name: restore,  action: RestoreAcceleratorStack, timeout: "5m" }
     - { name: verify,   action: VerifyGPUHealth, params: { quiet_window: "10m" } }
     - { name: uncordon, action: Uncordon }
   onFailure: { escalateTo: reboot }

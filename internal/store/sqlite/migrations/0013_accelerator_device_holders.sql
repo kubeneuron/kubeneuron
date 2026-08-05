@@ -1,0 +1,14 @@
+-- 0013 — persist agent-observed device holders per accelerator report.
+--
+-- The controller's pre-disruption reset refusal (refuseInfeasibleReset) and
+-- spec.safety.quiesce.forbidResetWhenPresent both read report.DeviceHolders,
+-- and the store previously dropped it: every GetAcceleratorReport returned nil
+-- holders, so the gate read "agent did not look" and skipped, leaving a GPU
+-- held by a process (e.g. nv-fabricmanager) unprotected.
+--
+-- The column stores the JSON-marshalled holder slice. The nil-vs-empty
+-- distinction is load-bearing and preserved by JSON: 'null' means the agent did
+-- not look, '[]' means it looked and found nothing holding a device. The
+-- 'null' default keeps rows written before this column "not observed" rather
+-- than misreading them as "observed, none present".
+ALTER TABLE accelerator_reports ADD COLUMN holders_json TEXT NOT NULL DEFAULT 'null';

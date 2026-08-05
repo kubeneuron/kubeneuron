@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,8 +47,8 @@ func (f *fakeOperator) IncidentDetail(_ context.Context, id string) (*types.Inci
 	return &types.Incident{ID: id}, []*types.AuditEntry{{IncidentID: id, Action: "open"}}, nil
 }
 
-func (f *fakeOperator) DecideApproval(_ context.Context, id, actor, channel string, decision types.ApprovalDecision) error {
-	f.decisions = append(f.decisions, id+":"+string(decision)+":"+actor)
+func (f *fakeOperator) DecideApproval(_ context.Context, id, actor, channel string, decision types.ApprovalDecision, expectedEpoch int) error {
+	f.decisions = append(f.decisions, fmt.Sprintf("%s:%s:%s:%d", id, decision, actor, expectedEpoch))
 	return nil
 }
 
@@ -162,8 +163,19 @@ func TestOperatorAPIReadsAndDecisions(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("approve status = %d %s", rec.Code, rec.Body.String())
 	}
-	if len(op.decisions) != 1 || op.decisions[0] != "inc-1:approved:token:alice" {
+	if len(op.decisions) != 1 || op.decisions[0] != "inc-1:approved:token:alice:0" {
 		t.Fatalf("decisions = %v", op.decisions)
+	}
+
+	// A round-pinned click (park_epoch from the panel/notification) reaches
+	// the backend intact so a mid-click re-park can refuse it.
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, operatorRequest("POST", "/api/v1/incidents/inc-1/reject", "secret", `{"actor":"alice","park_epoch":3}`))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("pinned reject status = %d %s", rec.Code, rec.Body.String())
+	}
+	if op.decisions[len(op.decisions)-1] != "inc-1:rejected:token:alice:3" {
+		t.Fatalf("decisions = %v, want the pinned round forwarded", op.decisions)
 	}
 
 	rec = httptest.NewRecorder()
@@ -237,6 +249,61 @@ func TestWebhookTokenEnforcement(t *testing.T) {
 	}
 }
 
+// inventoryOperator knows only an explicit set of nodes, so the webhook's
+// node-inventory cross-check can be exercised.
+type inventoryOperator struct {
+	*fakeOperator
+	known map[string]bool
+}
+
+func (o *inventoryOperator) Node(_ context.Context, name string) (*types.Node, error) {
+	if o.known[name] {
+		return &types.Node{Name: name}, nil
+	}
+	return nil, errors.New("node not found")
+}
+
+func TestWebhookFailsClosedWithoutToken(t *testing.T) {
+	// No token configured and no explicit dev opt-in: the webhook must reject,
+	// because an unauthenticated caller could POST a firing critical alert for an
+	// arbitrary node and drive cordon/drain.
+	s := New(&registrationBackend{})
+	rec := httptest.NewRecorder()
+	s.Routes().ServeHTTP(rec, operatorRequest("POST", "/api/v1/webhooks/alertmanager", "", `{"alerts":[]}`))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("tokenless webhook = %d, want 401 (fail closed)", rec.Code)
+	}
+}
+
+func TestWebhookDropsAlertsForUnknownNodes(t *testing.T) {
+	backend := &registrationBackend{}
+	s := New(backend)
+	s.EnableOperatorAPI(&inventoryOperator{fakeOperator: &fakeOperator{}, known: map[string]bool{"known-node": true}}, "op")
+	s.SetWebhookToken("hook")
+	handler := s.Routes()
+
+	firing := func(node string) string {
+		return `{"alerts":[{"status":"firing","labels":{"alertname":"GpuRowRemapFailure","node":"` + node + `"}}]}`
+	}
+
+	// A spoofed node label the controller has never seen must not drive a signal.
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, operatorRequest("POST", "/api/v1/webhooks/alertmanager", "hook", firing("ghost-node")))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("webhook status = %d, want 202", rec.Code)
+	}
+	if len(backend.signals) != 0 {
+		t.Fatalf("an alert for an unknown node must not drive remediation; got %d signals", len(backend.signals))
+	}
+
+	// A real node still drives exactly one signal.
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, operatorRequest("POST", "/api/v1/webhooks/alertmanager", "hook", firing("known-node")))
+	if len(backend.signals) != 1 || backend.signals[0].Target.Node != "known-node" {
+		t.Fatalf("a known-node alert must drive one signal; got %+v", backend.signals)
+	}
+}
+
 func TestTargetsServesHTTPSD(t *testing.T) {
 	handler := operatorServer(&fakeOperator{}, "secret")
 
@@ -305,7 +372,7 @@ func TestOperatorAPIAuthenticatedIdentityOverridesClaimedActor(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("approve status = %d %s", rec.Code, rec.Body.String())
 	}
-	if len(op.decisions) != 1 || op.decisions[0] != "inc-1:approved:system:serviceaccount:ops:sre-bot" {
+	if len(op.decisions) != 1 || op.decisions[0] != "inc-1:approved:system:serviceaccount:ops:sre-bot:0" {
 		t.Fatalf("decisions = %v, want the authenticated principal", op.decisions)
 	}
 	// The authenticated caller does not need to claim any actor at all.
@@ -332,7 +399,7 @@ func TestOperatorAPIAuthenticatedIdentityOverridesClaimedActor(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("static-token approve = %d", rec.Code)
 	}
-	if op.decisions[len(op.decisions)-1] != "inc-1:approved:token:alice" {
+	if op.decisions[len(op.decisions)-1] != "inc-1:approved:token:alice:0" {
 		t.Fatalf("static-token decision = %v", op.decisions)
 	}
 }

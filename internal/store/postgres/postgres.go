@@ -57,6 +57,10 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		return nil, fmt.Errorf("postgres ping: %w", err)
 	}
 	s := &Store{Core: sqlcore.NewCore(db, sqlcore.RebindQuestion, nil), sqlDB: db}
+	// PostgreSQL allows concurrent claimers; skip rows another worker has
+	// locked so outbox workers claim distinct events in parallel. SQLite leaves
+	// this empty and relies on its single writer connection.
+	s.SkipLocked = " FOR UPDATE SKIP LOCKED"
 	if err := s.migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err

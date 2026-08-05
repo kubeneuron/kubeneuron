@@ -27,6 +27,7 @@ rules:
       - gpuremediationpolicies/status
       - gpuplaybooks/status
       - acceleratorruntimeprofiles/status
+      - gpusignalmappings/status
     verbs:
       - get
       - patch
@@ -59,6 +60,20 @@ rules:
       - ""
     resources:
       - persistentvolumeclaims
+    verbs:
+      - create
+      - get
+      - list
+      - update
+      - watch
+  # The operator issues and renews the installation's own mTLS material.
+  # Deliberately no delete: nothing about certificate rotation requires
+  # removing a Secret, and not holding the verb means a bug here cannot destroy
+  # credentials an operator supplied.
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
     verbs:
       - create
       - get

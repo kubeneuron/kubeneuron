@@ -56,7 +56,7 @@ func TestExecuteReturnsFailureAsError(t *testing.T) {
 	ctx := context.Background()
 
 	action := types.Action{ID: "act-fail", Type: types.ActionGPUReset}
-	if err := st.EnqueueAction(ctx, "n1", "", action); err != nil {
+	if err := st.EnqueueAction(ctx, "n1", action); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.CompleteAction(ctx, "act-fail", types.ActionResult{
@@ -80,7 +80,7 @@ func TestExecuteReplayReturnsStoredResult(t *testing.T) {
 	ctx := context.Background()
 
 	action := types.Action{ID: "act-replay", Type: types.ActionGPUReset}
-	if err := st.EnqueueAction(ctx, "n1", "", action); err != nil {
+	if err := st.EnqueueAction(ctx, "n1", action); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.CompleteAction(ctx, "act-replay", types.ActionResult{

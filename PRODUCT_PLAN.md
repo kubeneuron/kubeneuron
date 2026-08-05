@@ -1,8 +1,14 @@
 # KubeNeuron Product Completion Plan
 
-Status: **canonical product plan**. This document supersedes the release
-ordering in `ROADMAP.md`; that file retains the detailed historical checklist
-and completed work record.
+Status: **canonical product *plan*** (direction and sequencing). This document
+supersedes the release ordering in `ROADMAP.md`.
+
+> **⚠️ For current implementation status, `README.md`, `CHANGELOG.md`, and
+> `PRODUCTION_READINESS_PLAN.md` are authoritative — not this file.** Some
+> "current checkpoint" claims below are superseded as of v0.2.0: `executionMode:
+> Enabled` is no longer unavailable (it is supported, off-by-default, confined
+> by `spec.safety.destructiveExecution`); there are seven CRDs, not six; and
+> cloud node remediation is validated on live EKS. The plan's *direction* stands.
 
 ## Product outcome
 
@@ -16,13 +22,16 @@ GPU Operator. The core is accelerator-neutral: later profiles add AMD, Intel,
 and TPU support without changing workflow, safety, audit, or Kubernetes
 workload-control semantics.
 
-`executionMode: Enabled` remains deliberately unavailable until every
-precondition in this plan is met. Removing the admission or compilation guard
-is the final enablement step, never a shortcut for development.
+`executionMode: Enabled` is now a supported, off-by-default mode confined by
+`spec.safety.destructiveExecution` (a non-empty node selector plus an exact
+acknowledgement), validated for cloud node remediation on live EKS. The one
+door still deliberately closed is per-device *hardware* GPU reset, which a
+virtualized instance cannot perform and which remains hardware-gated. Dry-run
+stays the default for every other mode and node.
 
 ## Current checkpoint
 
-The Kubernetes DryRun control plane is implemented and exercised: six CRDs,
+The Kubernetes control plane is implemented and exercised: seven CRDs,
 configuration compilation, controller/agent mTLS plus Pod-bound identity,
 Alertmanager and agent ingestion, incident workflow, approvals, audit,
 a durable controller action queue with conditional lease-token completion,

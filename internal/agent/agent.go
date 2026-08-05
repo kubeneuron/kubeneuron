@@ -20,8 +20,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -30,9 +32,11 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/agent/actionjournal"
 	"github.com/kubeneuron/kubeneuron/internal/agent/dcgm"
 	"github.com/kubeneuron/kubeneuron/internal/agent/executor"
+	"github.com/kubeneuron/kubeneuron/internal/agent/gpuhealth"
 	"github.com/kubeneuron/kubeneuron/internal/agent/kmsg"
 	"github.com/kubeneuron/kubeneuron/internal/agent/nvml"
 	"github.com/kubeneuron/kubeneuron/internal/agent/spool"
+	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -62,6 +66,11 @@ const (
 	actionPollInterval       = 5 * time.Second
 	maxActionBytes           = 1 << 20
 	defaultActionJournalPath = "/var/lib/kube-neuron/actions.jsonl"
+	// detectionDedupWindow is how long one underlying fault (same GPU + XID)
+	// is remembered so a second detection source cannot re-report it. It is
+	// short: a genuinely recurrent fault after this window is a new signal the
+	// controller's escalation ladder should still see.
+	detectionDedupWindow = 2 * time.Minute
 )
 
 // NVIDIAObservationConfig explicitly opts a real NVIDIA runtime into the
@@ -122,10 +131,18 @@ type Config struct {
 	// ScriptsDir holds operator-provisioned remediation scripts, default
 	// /etc/kube-neuron/scripts.
 	ScriptsDir string
-	// EnableDestructiveActions arms reset/reboot/driver/script execution on
-	// this node. It requires the real nvidia-smi driver and is never set by
-	// the operator until the Enabled admission gate ships; every action
-	// still passes the controller's safety, capability, and approval gates.
+	// RebootCommand overrides how the host is rebooted. Empty uses the default,
+	// which enters PID 1's namespaces and asks systemd. Set it for hosts with a
+	// different init; it is never derived from a playbook or action parameter.
+	RebootCommand []string
+	// EnableDestructiveActions statically PINS the agent armed for its whole
+	// process lifetime (a bare-metal or lab override; it requires the real
+	// nvidia-smi driver). When false — the operator-managed default — the
+	// agent boots UNARMED and adopts the controller-served arming answer
+	// delivered with every v2 registration response, computed from
+	// spec.safety.destructiveExecution.nodeSelector against this node's
+	// labels. Every action still passes the controller's safety, capability,
+	// and approval gates; this is the node-local boundary.
 	EnableDestructiveActions bool
 	// HealthListenAddress is the address serving /livez and /readyz.
 	HealthListenAddress string
@@ -146,12 +163,18 @@ type Agent struct {
 	cfg      Config
 	driver   nvml.GPUDriver
 	executor *executor.Executor
-	spool    *spool.Spool
-	journal  *actionjournal.Journal
+	// armed is the LIVE arming state the executor consults per dispatch.
+	// Seeded from cfg.EnableDestructiveActions; when that flag is false, each
+	// v2 registration response's controller-served answer is adopted here. A
+	// true flag PINS it for the process lifetime (a bare-metal override).
+	armed   *atomic.Bool
+	spool   *spool.Spool
+	journal *actionjournal.Journal
 	// journalLock remains held for the Agent lifetime. It ensures two local
 	// processes cannot concurrently act on the same durable journal.
 	journalLock *os.File
 	watcher     *kmsg.Watcher
+	health      *gpuhealth.Watcher
 	client      *http.Client
 	log         *slog.Logger
 	nvidia      *nvidiaObservation
@@ -159,12 +182,19 @@ type Agent struct {
 	bootIDOnce sync.Once
 	bootID     string
 
-	registrationMu      sync.Mutex
-	lastRegistrationAck time.Time
-	registrationAckSeq  uint64
-	registrationLost    bool
-	now                 func() time.Time
-	listen              func(network, address string) (net.Listener, error)
+	// detectionMu guards the short-window deduplication of detections across
+	// the kmsg and DCGM/nvidia-smi sources, so one underlying fault seen by
+	// both does not open two incidents.
+	detectionMu   sync.Mutex
+	detectionSeen map[string]time.Time
+
+	registrationMu       sync.Mutex
+	lastRegistrationAck  time.Time
+	registrationAckSeq   uint64
+	registrationLost     bool
+	firstRegistrationTry time.Time
+	now                  func() time.Time
+	listen               func(network, address string) (net.Listener, error)
 }
 
 // nvidiaPreflighter makes report construction testable without treating a
@@ -182,6 +212,7 @@ type runtimeVersionProber interface {
 type nvidiaObservation struct {
 	preflight                nvidiaPreflighter
 	runtimeProber            runtimeVersionProber
+	dcgmPath                 string
 	driverVersion            string
 	runtimeVersion           string
 	profileDigest            string
@@ -236,37 +267,92 @@ func New(cfg Config, driver nvml.GPUDriver, log *slog.Logger) (*Agent, error) {
 	if cfg.RegistrationStaleAfter < cfg.RegistrationInterval {
 		return nil, fmt.Errorf("registration stale-after must be at least the registration interval")
 	}
-	sp, err := spool.Open(cfg.SpoolPath)
-	if err != nil {
-		return nil, fmt.Errorf("opening spool: %w", err)
-	}
+	// Acquire the node-singleton lock BEFORE opening (and self-healing) the spool.
+	// The spool's torn-tail repair truncates an uncommitted tail; if a second
+	// agent ran that repair while the first was mid-Append, it could truncate the
+	// running agent's in-flight tail and the first agent's fsync would then
+	// "succeed" on a record that no longer exists, letting the cursor ack an event
+	// that was silently lost. Holding the exclusive lock first means only one
+	// agent ever repairs or writes the spool. Linux releases the flock on process
+	// death, so a genuinely dead prior agent does not wedge startup.
 	journalLock, err := acquireActionJournalLock(cfg.ActionJournalPath)
 	if err != nil {
 		return nil, fmt.Errorf("locking action journal: %w", err)
 	}
+	sp, err := spool.Open(cfg.SpoolPath)
+	if err != nil {
+		_ = releaseActionJournalLock(journalLock)
+		return nil, fmt.Errorf("opening spool: %w", err)
+	}
+	sp.Logger = log
 	journal, err := actionjournal.Open(cfg.ActionJournalPath)
 	if err != nil {
 		_ = releaseActionJournalLock(journalLock)
 		return nil, fmt.Errorf("opening action journal: %w", err)
 	}
+	armed := &atomic.Bool{}
+	armed.Store(cfg.EnableDestructiveActions)
 	exec := executor.NewWithOptions(driver, executor.Options{
-		EnableDestructiveActions: cfg.EnableDestructiveActions,
+		Armed: armed.Load,
 	})
 	if cfg.ScriptsDir != "" {
 		exec.ScriptsDir = cfg.ScriptsDir
 	}
+	if len(cfg.RebootCommand) != 0 {
+		exec.RebootCommand = append([]string(nil), cfg.RebootCommand...)
+	}
+	if cfg.EnableDestructiveActions {
+		// A node that cannot reboot must say so now, not after an operator has
+		// approved the most destructive step a playbook has. Reachability is
+		// environment-specific, so this reports rather than refuses to start:
+		// every other destructive action stays available.
+		if err := exec.PreflightReboot(context.Background()); err != nil {
+			log.Error("host reboot mechanism is not reachable; Reboot steps on this node will fail",
+				"command", strings.Join(exec.RebootCommand, " "), "err", err)
+		} else {
+			log.Info("host reboot mechanism verified", "command", strings.Join(exec.RebootCommand, " "))
+		}
+	}
+	watcher := kmsg.NewWatcher()
+	// Persist the kmsg resume cursor beside the spool on durable node-local
+	// storage, so a restart resumes from the last consumed XID instead of
+	// seeking to the tail and silently dropping everything printed while down.
+	watcher.CursorPath = filepath.Join(filepath.Dir(cfg.SpoolPath), "kmsg-cursor.json")
+	watcher.Logger = log
 	agent := &Agent{
 		cfg:         cfg,
 		driver:      driver,
 		executor:    exec,
+		armed:       armed,
 		spool:       sp,
 		journal:     journal,
 		journalLock: journalLock,
-		watcher:     kmsg.NewWatcher(),
+		watcher:     watcher,
 		client:      client,
 		log:         log,
 		now:         time.Now,
 		listen:      net.Listen,
+	}
+	// Bind the kmsg cursor to the current boot. /dev/kmsg sequence numbers
+	// restart near zero after a reboot, so a cursor from a prior boot must not
+	// suppress the new boot's XIDs; a boot-ID mismatch makes the watcher fail
+	// safe to tail-seek. Reuses the same host boot-ID source as registration.
+	watcher.BootID = agent.currentBootID()
+	// The DCGM/nvidia-smi health poll is a second, observation-only detection
+	// source beside kmsg. It runs only on a real nvidia-smi runtime: the Fake
+	// driver must never fabricate events, mirroring --require-real-driver, so a
+	// CPU-only install simply has no second source rather than crashing.
+	if smi, ok := driver.(*nvml.SMI); ok {
+		health := gpuhealth.New(cfg.NodeName, cfg.NVIDIAObservation.DCGMPath, cfg.NVIDIAObservation.DCGMEndpoint, smi.Path)
+		health.Logger = log
+		health.ResolveGPU = agent.resolveGPUByIndex
+		// Persist which retained XIDs have already been emitted, beside the spool
+		// and kmsg cursor, boot-scoped like the cursor. Without this a routine
+		// agent restart re-emits DCGM's retained last-XID on every node and
+		// re-opens incidents for long-remediated faults.
+		health.StatePath = filepath.Join(filepath.Dir(cfg.SpoolPath), "gpuhealth-state.json")
+		health.BootID = agent.currentBootID()
+		agent.health = health
 	}
 	if cfg.NVIDIAObservation.Enabled {
 		// A configuration declaration cannot make the simulator or another
@@ -293,6 +379,7 @@ func New(cfg Config, driver nvml.GPUDriver, log *slog.Logger) (*Agent, error) {
 		agent.nvidia = &nvidiaObservation{
 			preflight:                adapter,
 			runtimeProber:            dcgm.NewWithEndpoint(cfg.NVIDIAObservation.DCGMPath, cfg.NVIDIAObservation.DCGMEndpoint),
+			dcgmPath:                 cfg.NVIDIAObservation.DCGMPath,
 			driverVersion:            cfg.NVIDIAObservation.DriverVersion,
 			runtimeVersion:           cfg.NVIDIAObservation.RuntimeVersion,
 			profileDigest:            cfg.NVIDIAObservation.ProfileDigest,
@@ -413,6 +500,18 @@ func (a *Agent) Run(ctx context.Context) error {
 		a.log.Error("kmsg watcher unavailable, will retry", "err", err)
 	}
 
+	// The DCGM/nvidia-smi second source polls on its own schedule. It never
+	// returns an error (an unusable source degrades to observed-only), and a
+	// nil channel simply never fires in the select below.
+	var healthEvents <-chan types.AgentEvent
+	if a.health != nil {
+		if ch, herr := a.health.Watch(ctx); herr != nil {
+			a.log.Error("gpu health second source unavailable", "err", herr)
+		} else {
+			healthEvents = ch
+		}
+	}
+
 	// Queued actions execute on their own loop: a long-running action (a
 	// reset or reboot) must not stall event capture or heartbeats.
 	go a.actionLoop(ctx)
@@ -437,7 +536,24 @@ func (a *Agent) Run(ctx context.Context) error {
 				a.log.Error("kmsg watcher stopped, will reopen")
 				continue
 			}
-			a.handleXID(ctx, ev)
+			if a.handleXID(ctx, ev) {
+				// The watcher cursor is advanced only after this event is
+				// accepted by the controller or fsynced to the local spool.
+				// A cursor persistence failure is safe: the event can replay,
+				// whereas acknowledging it early could lose it on restart.
+				if err := ev.Acknowledge(); err != nil {
+					a.log.Warn("kmsg cursor acknowledge failed; event may replay", "err", err)
+				}
+			}
+		case ev, ok := <-healthEvents:
+			if !ok {
+				// The second source stopped; kmsg remains the primary path.
+				// Detection must not silently go dark, so this is loud.
+				healthEvents = nil
+				a.log.Error("gpu health second source stopped")
+				continue
+			}
+			a.handleDetection(ctx, ev, "gpuhealth")
 		case <-retry.C:
 			if events == nil && ctx.Err() == nil {
 				if ch, err := a.watcher.Watch(ctx); err != nil {
@@ -457,7 +573,7 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 // handleXID maps a kernel XID event to a GPU and pushes it to the controller.
-func (a *Agent) handleXID(ctx context.Context, ev kmsg.XIDEvent) {
+func (a *Agent) handleXID(ctx context.Context, ev kmsg.XIDEvent) bool {
 	gpu, err := a.driver.GPUByPCIAddr(ctx, ev.PCIAddr)
 	if err != nil {
 		a.log.Warn("cannot resolve GPU for XID", "pci", ev.PCIAddr, "xid", ev.XID, "err", err)
@@ -466,26 +582,292 @@ func (a *Agent) handleXID(ctx context.Context, ev kmsg.XIDEvent) {
 		gpu.Index = -1
 		gpu.UUID = ""
 	}
-	agentEv := types.AgentEvent{
-		EventID:   newEventID(),
+	return a.handleDetection(ctx, types.AgentEvent{
 		Node:      a.cfg.NodeName,
 		GPUIndex:  gpu.Index,
 		GPUUUID:   gpu.UUID,
+		PCIAddr:   ev.PCIAddr,
 		XID:       ev.XID,
 		Raw:       ev.Raw,
 		Timestamp: ev.Timestamp,
+	}, "kmsg")
+}
+
+// handleDetection is the shared path both detection sources funnel through: it
+// deduplicates a fault seen by more than one source within a short window, then
+// posts (spooling on failure). The source label is observability only; it never
+// changes handling or enables any action.
+func (a *Agent) handleDetection(ctx context.Context, ev types.AgentEvent, source string) bool {
+	metrics.AgentDetections.WithLabelValues(source).Inc()
+	// The coarse node+XID cross-source anchor can only safely collapse an
+	// unattributed observation into a later attributed one on a single-GPU node
+	// (see duplicateDetection). Determine that off the driver inventory here,
+	// OUTSIDE the dedup lock and only when it could matter (an attributed event),
+	// so the bounded inventory probe never blocks the dedup fast path or holds the
+	// lock across a subprocess.
+	singleGPU := false
+	if isAttributed(ev) {
+		singleGPU = a.nodeIsSingleGPU(ctx)
 	}
-	if err := a.post(ctx, "/api/v1/events", agentEv); err != nil {
-		a.log.Warn("event push failed, spooling", "xid", ev.XID, "err", err)
-		if err := a.spool.Append(agentEv); err != nil {
+	if a.duplicateDetection(ev, a.now(), singleGPU) {
+		metrics.AgentDetectionsDeduplicated.WithLabelValues(source).Inc()
+		a.log.Debug("duplicate detection suppressed",
+			"source", source, "xid", ev.XID, "gpu_index", ev.GPUIndex, "gpu_uuid", ev.GPUUUID)
+		// The original equivalent detection was already accepted by the
+		// controller or spool before it entered the dedup set, so treating this
+		// duplicate as durably covered cannot lose an event.
+		return true
+	}
+	if ev.EventID == "" {
+		ev.EventID = newEventID()
+	}
+	durable := false
+	if err := a.post(ctx, "/api/v1/events", ev); err != nil {
+		if errors.Is(err, errEventRejected) {
+			// The controller refused this exact payload; spooling it would put a
+			// permanent head-of-line blocker in front of every later detection.
+			// Drop it loudly. Deliberately NOT remembered into the dedup set: the
+			// sibling source's representation of the same fault (a different,
+			// controller-acceptable encoding) must stay deliverable — remembering
+			// the rejected copy would silence the healthy source too, widening
+			// the loss beyond the malformed payload. The re-emit/re-reject churn
+			// this allows is bounded by the source's own detection pacing and is
+			// visible in the rejected counter.
+			metrics.AgentEventsRejected.Inc()
+			a.log.Error("event permanently rejected by the controller; dropping it (NOT spooling)",
+				"source", source, "xid", ev.XID, "gpu_index", ev.GPUIndex, "err", err)
+			return true
+		}
+		a.log.Warn("event push failed, spooling", "source", source, "xid", ev.XID, "err", err)
+		if err := a.spool.Append(ev); err != nil {
 			a.log.Error("spool append failed", "err", err)
 		} else {
 			metrics.AgentEventsSpooled.Inc()
+			durable = true
 		}
 	} else {
 		metrics.AgentEventsPosted.Inc()
+		durable = true
+	}
+	if durable {
+		a.rememberDetection(ev, a.now())
 	}
 	metrics.AgentSpoolDepth.Set(float64(a.spool.Len()))
+	return durable
+}
+
+// duplicateDetection reports whether an equivalent fault (same GPU and XID) was
+// already accepted by the controller or the durable spool within
+// detectionDedupWindow. It deduplicates across sources — the kmsg watcher and
+// the DCGM/nvidia-smi poll routinely observe the same underlying fault — so two
+// sources cannot open two incidents for one event. Failed deliveries are never
+// remembered, since suppressing their retry would lose the only copy.
+func (a *Agent) duplicateDetection(ev types.AgentEvent, now time.Time, singleGPU bool) bool {
+	a.detectionMu.Lock()
+	defer a.detectionMu.Unlock()
+	a.expireDetectionsLocked(now)
+	// An event's own precise key is the per-GPU identity when it is attributed,
+	// and the node+native fallback when it is not. This is source-native, so a
+	// recurrence of the SAME fault from the same or another source collapses,
+	// while two distinct XIDs that share a class do not.
+	if a.seenWithinLocked(detectionKey(ev), now) {
+		return true
+	}
+	if isAttributed(ev) {
+		// Cross-source, cross-representation: an XID and the neutral fault for the
+		// same condition on the same GPU share a ProblemClass. Probe the OTHER
+		// representation's class anchor so a kmsg XID and the nvidia-smi neutral
+		// fault collapse to one incident, while two XIDs of one class do not.
+		if class, ok := detect.FaultClass(ev); ok &&
+			a.seenWithinLocked(classAnchorKey(ev, otherRepresentationTag(ev), class), now) {
+			return true
+		}
+		// An attributed observation must also collapse against a PRIOR unattributed
+		// observation of the SAME fault (the XID-79 case: the device falls off the
+		// bus, so the fast kmsg path records index -1/uuid "" while the later DCGM
+		// poll resolves index|uuid|79).
+		//
+		// When this attributed event carries a PCI address, the unattributed
+		// fallback key folds in that PCI address, which names ONE physical device —
+		// so collapsing against it cannot suppress a neighbor's fault, on any node.
+		if ev.PCIAddr != "" && a.seenWithinLocked(pciFaultKey(ev), now) {
+			return true
+		}
+		// The coarser node+XID anchor carries no device identity. It is the only
+		// bridge when the attributed observation has no PCI address (the DCGM poll
+		// resolves an index/UUID but not the bus address), but node+XID cannot tell
+		// two GPUs apart: on a multi-GPU node GPU1's unattributed XID 79 would
+		// suppress GPU0's later ATTRIBUTED XID 79 and lose GPU0's fault entirely.
+		// So restrict it to a single-GPU node, where node+XID is unambiguous. On a
+		// multi-GPU node a duplicate incident (safe) is preferred over a lost fault.
+		if singleGPU && a.seenWithinLocked(nodeFaultKey(ev), now) {
+			return true
+		}
+	}
+	return false
+}
+
+// nodeIsSingleGPU reports whether the node has exactly one GPU. It fails closed:
+// if the inventory cannot be read, it returns false so the coarse node+XID
+// collapse is NOT applied and a genuine per-GPU fault is never suppressed.
+func (a *Agent) nodeIsSingleGPU(ctx context.Context) bool {
+	gpus, err := a.driver.ListGPUs(ctx)
+	if err != nil || len(gpus) == 0 {
+		return false
+	}
+	return len(gpus) == 1
+}
+
+func (a *Agent) rememberDetection(ev types.AgentEvent, now time.Time) {
+	a.detectionMu.Lock()
+	defer a.detectionMu.Unlock()
+	a.expireDetectionsLocked(now)
+	// Store the event's own precise key: an attributed event under its per-GPU
+	// key, an unattributed one under its fallback key (node+PCI+native when the
+	// PCI address is known, else node+native).
+	a.detectionSeen[detectionKey(ev)] = now
+	if isAttributed(ev) {
+		// Record this GPU's class anchor under this event's OWN representation, so
+		// the other representation of the same condition (an XID vs the neutral
+		// fault) dedups against it in duplicateDetection. Two events of the same
+		// representation never probe their own tag, so distinct XIDs sharing a
+		// class are not collapsed here.
+		if class, ok := detect.FaultClass(ev); ok {
+			a.detectionSeen[classAnchorKey(ev, representationTag(ev), class)] = now
+		}
+		return
+	}
+	// An unattributed event that carries a PCI address is remembered under the
+	// coarse node+native key as well, so a LATER attributed observation of the
+	// same node fault — which may not carry a PCI address (the DCGM poll resolves
+	// an index/UUID but not the bus address) — still collapses via the cross-source
+	// probe. Distinct unattributed GPUs stay separate because their own lookup
+	// uses the precise per-PCI key, never this coarse anchor.
+	if ev.PCIAddr != "" {
+		a.detectionSeen[nodeFaultKey(ev)] = now
+	}
+}
+
+// isAttributed reports whether an event carries a trustworthy per-GPU identity.
+// An unresolved kmsg event (device gone) uses index -1 and an empty UUID.
+func isAttributed(ev types.AgentEvent) bool {
+	return ev.GPUIndex >= 0 && ev.GPUUUID != ""
+}
+
+// detectionKey is the PRECISE dedup identity for an event: the per-GPU key when
+// attributed, else the unattributed fallback. The fallback folds in the PCI
+// address when the event carries one, so two distinct GPUs that fall off the bus
+// with the same fault on one node (both unattributed: index -1, empty UUID) do
+// not collapse into a single detection and lose one GPU's fault. It uses the
+// source-native identity (raw XID / vendor+code), NOT the ProblemClass, so two
+// distinct XIDs that share a class are never over-collapsed by same-source dedup.
+func detectionKey(ev types.AgentEvent) string {
+	if !isAttributed(ev) {
+		if ev.PCIAddr != "" {
+			return pciFaultKey(ev)
+		}
+		return nodeFaultKey(ev)
+	}
+	return fmt.Sprintf("%d|%s|%s", ev.GPUIndex, ev.GPUUUID, nativeToken(ev))
+}
+
+// pciFaultKey is the per-device fallback identity for an event carrying a PCI
+// address but no resolved UUID: node+PCI+native. Because the PCI address names
+// one physical device, an attributed observation that carries a PCI address can
+// safely collapse against a prior unattributed one under this key without any
+// risk of suppressing a different GPU's fault — unlike the coarse node+XID key.
+func pciFaultKey(ev types.AgentEvent) string {
+	return fmt.Sprintf("node|%s|%s|%s", ev.Node, ev.PCIAddr, nativeToken(ev))
+}
+
+// nodeFaultKey is the coarse node+fault fallback identity, used both when a PCI
+// address is truly absent and as the cross-source anchor that lets a later
+// attributed observation (which may not carry a PCI address) collapse against a
+// prior unattributed one of the same node fault — the XID-79 fell-off-the-bus
+// case, where both observations carry the SAME native XID. It uses the native
+// token so an unattributed XID 13 and an attributed XID 31 (distinct XIDs) are
+// not collapsed by a shared class.
+func nodeFaultKey(ev types.AgentEvent) string {
+	return fmt.Sprintf("node|%s|%s", ev.Node, nativeToken(ev))
+}
+
+// nativeToken is the source-native fault identity: the vendor+code for a neutral
+// fault, else the raw XID. It is the PRECISE per-GPU dedup identity, so two
+// distinct XIDs that merely share a ProblemClass (13/31/43/46 -> ClassXIDApp,
+// 48/95 -> ClassECCDBE, 119/120 -> ClassGSPError) keep distinct keys and are
+// never collapsed into one detection. The class is used only for the separate
+// cross-source anchors below.
+func nativeToken(ev types.AgentEvent) string {
+	if ev.Fault != nil {
+		return "fault|" + ev.Fault.Vendor + "|" + ev.Fault.Code
+	}
+	return "xid|" + strconv.Itoa(ev.XID)
+}
+
+// representationTag distinguishes the two encodings one condition can arrive in:
+// a genuine XID (kmsg NRVM line, DCGM last-XID) versus a vendor-neutral fault
+// (the nvidia-smi ECC/remap fallback). The cross-source class anchor is keyed by
+// this tag so an XID and a neutral fault of the SAME class bridge to one another,
+// while two XIDs (same tag) never do.
+func representationTag(ev types.AgentEvent) string {
+	if ev.Fault != nil {
+		return "fault"
+	}
+	return "xid"
+}
+
+func otherRepresentationTag(ev types.AgentEvent) string {
+	if ev.Fault != nil {
+		return "xid"
+	}
+	return "fault"
+}
+
+// classAnchorKey is the GPU-scoped, class-based, representation-tagged
+// cross-source anchor. An attributed event stores it under its OWN representation
+// and probes it under the OTHER, so a kmsg XID 48 and an nvidia-smi neutral
+// "ecc-dbe" on one GPU (the same condition, two encodings) dedup to one incident,
+// while a kmsg XID 13 and a kmsg XID 31 on one GPU (same class, same encoding)
+// stay two distinct detections.
+func classAnchorKey(ev types.AgentEvent, tag string, class types.ProblemClass) string {
+	return fmt.Sprintf("classanchor|%s|%d|%s|%s", tag, ev.GPUIndex, ev.GPUUUID, class)
+}
+
+// expireDetectionsLocked drops dedup entries older than the window. Called with
+// detectionMu held.
+func (a *Agent) expireDetectionsLocked(now time.Time) {
+	if a.detectionSeen == nil {
+		a.detectionSeen = make(map[string]time.Time)
+		return
+	}
+	for k, seenAt := range a.detectionSeen {
+		if now.Sub(seenAt) > detectionDedupWindow {
+			delete(a.detectionSeen, k)
+		}
+	}
+}
+
+// seenWithinLocked reports whether key was recorded inside the dedup window.
+// Called with detectionMu held.
+func (a *Agent) seenWithinLocked(key string, now time.Time) bool {
+	last, ok := a.detectionSeen[key]
+	return ok && now.Sub(last) < detectionDedupWindow
+}
+
+// resolveGPUByIndex maps a DCGM GPU index to inventory so the second source can
+// attribute a UUID. A failed or missing lookup returns ok=false and the caller
+// keeps the trustworthy index alone.
+func (a *Agent) resolveGPUByIndex(ctx context.Context, index int) (types.GPUInfo, bool) {
+	gpus, err := a.driver.ListGPUs(ctx)
+	if err != nil {
+		return types.GPUInfo{}, false
+	}
+	for _, gpu := range gpus {
+		if gpu.Index == index {
+			return gpu, true
+		}
+	}
+	return types.GPUInfo{}, false
 }
 
 // flushSpool drains the spool in batches until it is empty, a send fails, or
@@ -495,8 +877,22 @@ func (a *Agent) flushSpool(ctx context.Context) {
 	flushCtx, cancel := context.WithTimeout(ctx, spoolFlushBudget)
 	defer cancel()
 	for {
+		rejected := 0
 		sent, err := a.spool.ReplayBatch(flushCtx, spoolReplayBatchSize, func(ctx context.Context, event types.AgentEvent) error {
-			return a.post(ctx, "/api/v1/events", event)
+			err := a.post(ctx, "/api/v1/events", event)
+			if errors.Is(err, errEventRejected) {
+				// Replay is strictly head-of-line: one permanently rejected
+				// event would block every detection behind it forever. Drop it
+				// loudly and keep draining. Counted below, only once the batch's
+				// removal from the spool commits — a failed rewrite leaves these
+				// events in place to be re-rejected, and counting here would
+				// tally them twice.
+				rejected++
+				a.log.Error("spooled event permanently rejected by the controller; dropping it",
+					"event_id", event.EventID, "xid", event.XID, "err", err)
+				return nil
+			}
+			return err
 		})
 		if err != nil {
 			if ctx.Err() == nil && !errors.Is(err, context.DeadlineExceeded) {
@@ -505,7 +901,8 @@ func (a *Agent) flushSpool(ctx context.Context) {
 			return
 		}
 		if sent > 0 {
-			metrics.AgentEventsPosted.Add(float64(sent))
+			metrics.AgentEventsPosted.Add(float64(sent - rejected))
+			metrics.AgentEventsRejected.Add(float64(rejected))
 			metrics.AgentSpoolDepth.Set(float64(a.spool.Len()))
 		}
 		if sent < spoolReplayBatchSize {
@@ -780,7 +1177,23 @@ func (a *Agent) fetchAction(ctx context.Context) (claimedAction, bool) {
 
 // register reports identity, GPU inventory, and boot ID to the controller.
 func (a *Agent) register(ctx context.Context) error {
-	if err := a.requireRegistrationCapability(ctx); err != nil {
+	// Prefer the v2 protocol (arming always declared); fall back to v1
+	// against an older controller, OMITTING the arming field entirely — the
+	// v1 handler strict-decodes and must keep rejecting extended payloads.
+	// The probe runs every registration tick, so a controller upgrade is
+	// picked up within one tick with no capability caching.
+	path := types.AgentRegistrationPath
+	var armed *bool
+	v2 := false
+	if err := a.requireCapability(ctx, types.AgentRegistrationV2Path, types.AgentRegistrationV2Protocol); err == nil {
+		path = types.AgentRegistrationV2Path
+		v2 = true
+		// Report the CURRENT effective state — what this process would do if
+		// handed a destructive action right now — not the boot flag. The
+		// controller's admission gate reasons about this declaration.
+		effective := a.armed.Load()
+		armed = &effective
+	} else if err := a.requireCapability(ctx, types.AgentRegistrationPath, types.AgentRegistrationProtocol); err != nil {
 		a.recordRegistrationFailure(err)
 		return err
 	}
@@ -791,13 +1204,39 @@ func (a *Agent) register(ctx context.Context) error {
 	}
 	bootID, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
 	registration := types.AgentRegistration{
-		Name:   a.cfg.NodeName,
-		GPUs:   gpus,
-		BootID: string(bytes.TrimSpace(bootID)),
+		Name:             a.cfg.NodeName,
+		GPUs:             gpus,
+		BootID:           string(bytes.TrimSpace(bootID)),
+		DestructiveArmed: armed,
 	}
-	if err := a.postExpectStatus(ctx, types.AgentRegistrationPath, registration, http.StatusNoContent); err != nil {
+	served, err := a.postExpectStatusHeader(ctx, path, registration, http.StatusNoContent, types.AgentArmingHeader)
+	if err != nil {
 		a.recordRegistrationFailure(err)
 		return err
+	}
+	// Adopt the controller-served arming answer, unless the flag pinned this
+	// process armed. An absent header (an older controller, or the v1 route)
+	// keeps the current state — which defaults to unarmed at boot.
+	if v2 && !a.cfg.EnableDestructiveActions {
+		switch types.AgentArming(served) {
+		case types.AgentArmingArmed:
+			if _, realSMI := a.driver.(*nvml.SMI); !realSMI {
+				// The same defense-in-depth as the static flag's constructor
+				// guard: nothing may arm destructive actions against a driver
+				// that fakes success.
+				a.log.Error("controller served an armed answer but this agent runs a non-real GPU driver; staying unarmed")
+				break
+			}
+			if a.armed.CompareAndSwap(false, true) {
+				a.log.Warn("controller armed this node's destructive executor",
+					"reason", "node matches spec.safety.destructiveExecution.nodeSelector")
+			}
+		case types.AgentArmingUnarmed:
+			if a.armed.CompareAndSwap(true, false) {
+				a.log.Warn("controller DISARMED this node's destructive executor",
+					"reason", "node no longer matches spec.safety.destructiveExecution.nodeSelector")
+			}
+		}
 	}
 	a.recordRegistrationAcknowledgment()
 	return nil
@@ -920,6 +1359,7 @@ func (a *Agent) nvidiaAcceleratorReportWithProfile(ctx context.Context, profile 
 		Vendor:            types.AcceleratorVendorNVIDIA,
 		ObservedAt:        observedAt,
 		Devices:           devices,
+		DeviceHolders:     a.deviceHolders(),
 		DriverVersion:     driverVersion,
 		RuntimeVersion:    runtimeVersion,
 		TopologySafety:    topology,
@@ -942,10 +1382,14 @@ func (a *Agent) nvidiaAcceleratorReportWithProfile(ctx context.Context, profile 
 			report.Readiness = types.AcceleratorReadinessDegraded
 			report.ReadinessReasons = append(report.ReadinessReasons,
 				"NVIDIA runtime is not attested by matching local DCGM version and discovery probes")
-		} else if report.RuntimeVersion != profile.RuntimeVersion {
+		} else if !runtimeVersionMatchesProfile(report.RuntimeVersion, profile.RuntimeVersion) {
 			report.Readiness = types.AcceleratorReadinessDegraded
-			report.ReadinessReasons = append(report.ReadinessReasons,
-				"locally attested NVIDIA runtime version does not match the controller profile")
+			// Name the binary that produced the version. When a node carries
+			// its own dcgmi, the mismatch is usually "which client answered",
+			// not "which engine runs" — and that is invisible otherwise.
+			report.ReadinessReasons = append(report.ReadinessReasons, fmt.Sprintf(
+				"locally attested NVIDIA runtime version %q from %s does not match the controller profile %q",
+				report.RuntimeVersion, a.nvidia.dcgmClientPath(), profile.RuntimeVersion))
 		} else if len(report.ReadinessReasons) != 0 {
 			return types.AgentAcceleratorReport{}, fmt.Errorf("NVIDIA eligible preflight included readiness reasons")
 		} else {
@@ -1166,12 +1610,12 @@ func ensureJSONEOF(dec *json.Decoder) error {
 	return nil
 }
 
-// requireRegistrationCapability verifies the exact protocol served on the
-// versioned narrow-registration path. The versioned POST path itself keeps a
-// legacy full-Node handler from decoding this payload, even when requests in a
-// rolling update reach different controller Pods.
-func (a *Agent) requireRegistrationCapability(ctx context.Context) error {
-	const path = types.AgentRegistrationPath
+// requireCapability verifies the exact protocol token served on a versioned
+// registration path before the agent posts to it. The versioned POST path
+// itself keeps a legacy handler from decoding the payload, even when requests
+// in a rolling update reach different controller Pods; the exact-match token
+// is the mixed-version corruption guard for the GET half.
+func (a *Agent) requireCapability(ctx context.Context, path, protocol string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.cfg.ControllerURL+path, nil)
 	if err != nil {
 		return err
@@ -1191,7 +1635,7 @@ func (a *Agent) requireRegistrationCapability(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read registration capability: %w", err)
 	}
-	want := types.AgentRegistrationProtocol + "\n"
+	want := protocol + "\n"
 	if string(body) != want {
 		return fmt.Errorf("GET %s: incompatible registration protocol capability %q", path, body)
 	}
@@ -1202,31 +1646,57 @@ func (a *Agent) post(ctx context.Context, path string, v any) error {
 	return a.postExpectStatus(ctx, path, v, 0)
 }
 
+// errEventRejected wraps a controller response that permanently rejects THIS
+// payload: no retry can ever succeed, so the sender must drop the event
+// (loudly) instead of replaying it forever. Only a response carrying the
+// explicit AgentEventRejectedHeader marker qualifies — the controller sets it
+// exclusively on semantic verdicts about the payload (e.g. the XID+Fault
+// double-identity rejection). A bare 400 is NOT poison: during a rolling
+// upgrade an older controller 400s every event from a newer agent (strict
+// JSON decoding), and a middlebox can 400/413 an event the controller would
+// accept; those must keep spooling and drain once the skew clears. Auth
+// statuses (401/403) likewise stay retryable.
+var errEventRejected = errors.New("the controller permanently rejected this event")
+
 func (a *Agent) postExpectStatus(ctx context.Context, path string, v any, expectedStatus int) error {
+	_, err := a.postExpectStatusHeader(ctx, path, v, expectedStatus, "")
+	return err
+}
+
+// postExpectStatusHeader is postExpectStatus that additionally returns the
+// named response header's value on success ("" when absent or unnamed).
+func (a *Agent) postExpectStatusHeader(ctx context.Context, path string, v any, expectedStatus int, header string) (string, error) {
 	body, err := json.Marshal(v)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.cfg.ControllerURL+path, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if err := a.authorize(req); err != nil {
-		return err
+		return "", err
 	}
 	resp, err := a.client.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if expectedStatus != 0 && resp.StatusCode != expectedStatus {
-		return fmt.Errorf("POST %s: expected %d, got %s", path, expectedStatus, resp.Status)
+		return "", fmt.Errorf("POST %s: expected %d, got %s", path, expectedStatus, resp.Status)
 	}
 	if expectedStatus == 0 && resp.StatusCode >= 300 {
-		return fmt.Errorf("POST %s: %s", path, resp.Status)
+		if resp.StatusCode >= 400 && resp.Header.Get(types.AgentEventRejectedHeader) != "" {
+			return "", fmt.Errorf("POST %s: %s (%s): %w", path, resp.Status,
+				resp.Header.Get(types.AgentEventRejectedHeader), errEventRejected)
+		}
+		return "", fmt.Errorf("POST %s: %s", path, resp.Status)
 	}
-	return nil
+	if header == "" {
+		return "", nil
+	}
+	return resp.Header.Get(header), nil
 }
 
 // postActionResult submits a result for one explicitly leased action. The
@@ -1384,7 +1854,32 @@ func (a *Agent) recordRegistrationFailure(registrationErr error) {
 	now := a.now()
 	a.registrationMu.Lock()
 	lastAck := a.lastRegistrationAck
-	if lastAck.IsZero() || a.registrationLost || now.Sub(lastAck) < a.cfg.RegistrationStaleAfter {
+	if lastAck.IsZero() {
+		// Never acknowledged: an agent that boots into a persistent failure
+		// (a rejected client certificate, a wrong controller URL) must not
+		// stay silent at the default log level forever — the boot-time
+		// "initial registration failed" line may have caught a transient
+		// error, not the persistent one. Measure staleness from the first
+		// failed attempt and report ONCE, with the current error.
+		if a.firstRegistrationTry.IsZero() {
+			a.firstRegistrationTry = now
+		}
+		if a.registrationLost || now.Sub(a.firstRegistrationTry) < a.cfg.RegistrationStaleAfter {
+			a.registrationMu.Unlock()
+			return
+		}
+		a.registrationLost = true
+		a.registrationMu.Unlock()
+
+		a.log.Warn(
+			"controller registration never acknowledged",
+			"since", a.firstRegistrationTry,
+			"stale_after", a.cfg.RegistrationStaleAfter,
+			"err", registrationErr,
+		)
+		return
+	}
+	if a.registrationLost || now.Sub(lastAck) < a.cfg.RegistrationStaleAfter {
 		a.registrationMu.Unlock()
 		return
 	}
@@ -1397,4 +1892,72 @@ func (a *Agent) recordRegistrationFailure(registrationErr error) {
 		"stale_after", a.cfg.RegistrationStaleAfter,
 		"err", registrationErr,
 	)
+}
+
+// dcgmClientPath names the DCGM client that answered the attestation probe.
+// The default is the client shipped in the agent image; an operator can point
+// the agent at one installed on the node, and which one answered is exactly
+// what an unexpected version mismatch needs to disclose.
+func (o nvidiaObservation) dcgmClientPath() string {
+	if path := strings.TrimSpace(o.dcgmPath); path != "" {
+		return path
+	}
+	return "dcgmi from PATH"
+}
+
+// deviceHolders reports the processes holding a GPU device node right now.
+//
+// This rides the ordinary accelerator report rather than waiting for a reset,
+// so the controller can refuse a doomed reset playbook before it cordons and
+// drains anything. A driver that cannot answer, or a process table that cannot
+// be read, reports nil rather than an empty list: "we did not look" and
+// "nothing holds the device" must never be indistinguishable to a gate.
+func (a *Agent) deviceHolders() []types.AgentDeviceHolder {
+	lister, ok := a.driver.(interface {
+		DeviceHolders(index int) ([]nvml.DeviceHolder, error)
+	})
+	if !ok {
+		return nil
+	}
+	holders, err := lister.DeviceHolders(-1)
+	if err != nil {
+		return nil
+	}
+	out := make([]types.AgentDeviceHolder, 0, len(holders))
+	for _, h := range holders {
+		out = append(out, types.AgentDeviceHolder{PID: h.PID, Command: h.Command, Device: h.Device})
+	}
+	return out
+}
+
+// runtimeVersionMatchesProfile mirrors the controller's profile comparison so
+// the agent's own readiness verdict cannot disagree with the gate's.
+//
+// The patch level is deliberately not compared. The agent image ships a pinned
+// DCGM client, so bumping it would otherwise degrade every fleet whose profile
+// still names the previous patch — a fleet-wide outage caused by a release, not
+// by anything on the nodes. Major and minor must still match exactly: a profile
+// names the runtime it was reviewed against, and an unreviewed newer minor is
+// not automatically safe to reset hardware with.
+func runtimeVersionMatchesProfile(attested, pinned string) bool {
+	attested, pinned = strings.TrimSpace(attested), strings.TrimSpace(pinned)
+	if attested == "" || pinned == "" {
+		return false
+	}
+	return attested == pinned || majorMinorRuntime(attested) == majorMinorRuntime(pinned)
+}
+
+// majorMinorRuntime reduces "dcgm-4.6.1" to "dcgm-4.6". A version pinned only
+// to a major ("dcgm-4") reduces to itself, so an operator can opt into a looser
+// rule deliberately rather than by accident.
+func majorMinorRuntime(version string) string {
+	prefix, number := "", version
+	if index := strings.LastIndex(version, "-"); index >= 0 {
+		prefix, number = version[:index+1], version[index+1:]
+	}
+	parts := strings.Split(number, ".")
+	if len(parts) > 2 {
+		parts = parts[:2]
+	}
+	return prefix + strings.Join(parts, ".")
 }

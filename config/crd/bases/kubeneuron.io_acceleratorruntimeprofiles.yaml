@@ -206,6 +206,14 @@ spec:
                   reviewed with this profile, normalized as dcgm-X.Y[.Z...]. It must match
                   a bounded node-local probe; this declaration never substitutes for
                   runtime evidence.
+
+                  This is the DCGM *client* the agent runs, which is not necessarily the
+                  version of the host engine it queries: `dcgmi --version` answers from the
+                  binary alone, and DCGM exposes no way to ask the engine for its build. A
+                  newer client serving an older engine is normal with the GPU Operator. The
+                  engine is attested separately, by a live connection whose GPU count must
+                  match the independent nvidia-smi inventory. Pin this to the client the
+                  agent image ships.
                 minLength: 1
                 type: string
               vendor:

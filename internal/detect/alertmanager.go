@@ -72,9 +72,16 @@ func SignalFromAlert(a Alert) (types.Signal, bool) {
 func signalFromAlertWithClass(a Alert, class types.ProblemClass, defaultSeverity types.Severity) (types.Signal, bool) {
 	name := a.Labels["alertname"]
 
+	// The alert's own severity label may override the default, but only when it
+	// names a severity we actually know. An unknown or spoofed value (e.g. a
+	// hand-crafted "emergency" posted at the webhook) must not become an
+	// authoritative severity that could drive escalation: fall back to the
+	// validated default instead of trusting arbitrary caller-supplied text.
 	sev := defaultSeverity
 	if s := a.Labels["severity"]; s != "" {
-		sev = types.Severity(s)
+		if candidate := types.Severity(s); validSeverity(candidate) {
+			sev = candidate
+		}
 	}
 
 	gpuIndex := 0
@@ -106,6 +113,18 @@ func signalFromAlertWithClass(a Alert, class types.ProblemClass, defaultSeverity
 		Evidence:   evidence,
 		ObservedAt: a.StartsAt,
 	}, true
+}
+
+// validSeverity reports whether s is one of the severities the pipeline
+// recognises. It mirrors the set validated for declarative overrides, so an
+// alert label can never smuggle in a severity the config plane would reject.
+func validSeverity(s types.Severity) bool {
+	switch s {
+	case types.SeverityInfo, types.SeverityWarning, types.SeverityCritical:
+		return true
+	default:
+		return false
+	}
 }
 
 // KnownAlertNames returns the alert names this package can map, for

@@ -2,6 +2,7 @@ package operator
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -78,13 +79,36 @@ func playbooksConfigMap(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *S
 }
 
 func controllerServiceAccount(installation *kubeneuronv1alpha1.KubeNeuron) *corev1.ServiceAccount {
+	var annotations map[string]string
+	// IRSA is AWS-specific and stays scoped to the aws provider block: the
+	// operator owns this ServiceAccount, so the role annotation must come from
+	// the CR, or a reconcile would strip an annotation the user added by hand and
+	// break node recycling. A future provider wires its own identity here without
+	// touching the AWS branch.
+	if cloud := installation.Spec.Cloud; cloud != nil && cloud.Provider == "aws" && cloud.AWS != nil && cloud.AWS.IAMRoleARN != "" {
+		annotations = map[string]string{"eks.amazonaws.com/role-arn": cloud.AWS.IAMRoleARN}
+	}
 	return &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      installation.Name + "-controller",
-			Namespace: installation.Spec.Namespace,
-			Labels:    resourceLabels(installation, "controller"),
+			Name:        installation.Name + "-controller",
+			Namespace:   installation.Spec.Namespace,
+			Labels:      resourceLabels(installation, "controller"),
+			Annotations: annotations,
 		},
 	}
+}
+
+// cloudRegion returns the region declared in the active provider's block. It is
+// provider-scoped rather than a shared top-level field, so a future provider
+// adds a case here instead of the region living in one cloud's namespace.
+func cloudRegion(cloud *kubeneuronv1alpha1.CloudSpec) string {
+	switch cloud.Provider {
+	case "aws":
+		if cloud.AWS != nil {
+			return cloud.AWS.Region
+		}
+	}
+	return ""
 }
 
 func agentServiceAccount(installation *kubeneuronv1alpha1.KubeNeuron) *corev1.ServiceAccount {
@@ -109,7 +133,7 @@ func controllerClusterRole(installation *kubeneuronv1alpha1.KubeNeuron) *rbacv1.
 			{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list", "watch"}},
 			{APIGroups: []string{""}, Resources: []string{"serviceaccounts"}, ResourceNames: []string{installation.Name + "-agent"}, Verbs: []string{"get"}},
 			{APIGroups: []string{""}, Resources: []string{"pods/eviction"}, Verbs: []string{"create"}},
-			{APIGroups: []string{"apps"}, Resources: []string{"daemonsets"}, ResourceNames: []string{installation.Name + "-agent"}, Verbs: []string{"get"}},
+			{APIGroups: []string{"apps"}, Resources: []string{"daemonsets"}, ResourceNames: []string{installation.Name + "-agent", installation.Name + "-agent-detect"}, Verbs: []string{"get"}},
 			{APIGroups: []string{"authentication.k8s.io"}, Resources: []string{"tokenreviews"}, Verbs: []string{"create"}},
 			// Operator-API authorization: callers authenticated by TokenReview
 			// are admitted only if RBAC lets them get/update this KubeNeuron.
@@ -217,12 +241,51 @@ func sqliteStorageClassIntent(store kubeneuronv1alpha1.WorkflowStoreSpec) string
 	return "explicit:" + *store.SQLite.StorageClassName
 }
 
-func controllerDeployment(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot) (*appsv1.Deployment, error) {
+// controllerAffinity keeps the controller off the GPU nodes it remediates.
+//
+// It is not a preference. On a hardware run a reboot playbook rebooted the very
+// node the controller was running on: the reboot itself succeeded and the
+// boot_id guard prevented a second one, but the playbook was cut off mid-step
+// and left the node cordoned. A controller that can be taken down by its own
+// remediation cannot finish it.
+//
+// Nodes are excluded by the presence of a GPU rather than by the installation's
+// own selector, because the agent's node set can be widened later without
+// anyone remembering to re-check where the controller sits. Scheduling is
+// required, not preferred: a cluster whose only nodes have GPUs should make
+// that choice explicitly rather than silently inherit the failure mode.
+func controllerAffinity(installation *kubeneuronv1alpha1.KubeNeuron) *corev1.Affinity {
+	if installation.Spec.Controller.AllowGPUNodes {
+		return nil
+	}
+	return &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+					MatchExpressions: []corev1.NodeSelectorRequirement{{
+						Key:      gpuPresentLabel,
+						Operator: corev1.NodeSelectorOpNotIn,
+						Values:   []string{"true"},
+					}},
+				}},
+			},
+		},
+	}
+}
+
+// gpuPresentLabel is set by NVIDIA's node-feature-discovery on every node that
+// has a GPU.
+const gpuPresentLabel = "nvidia.com/gpu.present"
+
+func controllerDeployment(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot, tlsRevision ...string) (*appsv1.Deployment, error) {
 	if err := validateRuntimeSupport(installation); err != nil {
 		return nil, err
 	}
 	annotations := map[string]string{
 		"kubeneuron.io/config-digest": snapshot.Digest,
+	}
+	if len(tlsRevision) != 0 && tlsRevision[0] != "" {
+		annotations["kubeneuron.io/tls-digest"] = tlsRevision[0]
 	}
 	if installation.Spec.WorkflowStore.Type == "SQLite" {
 		storageRequest, err := sqliteStorageQuantity(installation.Spec.WorkflowStore)
@@ -241,7 +304,11 @@ func controllerDeployment(installation *kubeneuronv1alpha1.KubeNeuron, snapshot 
 		"--agent-token-audience=" + agentTokenAudience,
 		"--agent-token-namespace=" + installation.Spec.Namespace,
 		"--agent-token-service-account=" + installation.Name + "-agent",
-		"--agent-daemonset=" + installation.Name + "-agent",
+		// Both agent DaemonSets may authenticate: the primary, and the
+		// detection-only companion that exists under Enabled arming. Listing
+		// the detect name unconditionally is safe — the authenticator verifies
+		// the live owner UID, so a name with no DaemonSet admits nothing.
+		"--agent-daemonset=" + installation.Name + "-agent," + installation.Name + "-agent-detect",
 		"--installation-name=" + installation.Name,
 		"--installation-uid=" + string(installation.UID),
 		"--config=/etc/kube-neuron/policies.yaml",
@@ -250,6 +317,14 @@ func controllerDeployment(installation *kubeneuronv1alpha1.KubeNeuron, snapshot 
 		"--node-configs=/etc/kube-neuron/node-configs.yaml",
 		"--playbooks=/etc/kube-neuron/playbooks",
 		"--platform=kubernetes",
+	}
+	if cloud := installation.Spec.Cloud; cloud != nil && cloud.Provider != "" {
+		// The flags are provider-neutral (--cloud-provider/--cloud-region); the
+		// region is read from whichever provider block is set.
+		args = append(args, "--cloud-provider="+cloud.Provider)
+		if region := cloudRegion(cloud); region != "" {
+			args = append(args, "--cloud-region="+region)
+		}
 	}
 	if effectiveExecutionMode(installation.Spec.Safety) == kubeneuronv1alpha1.ExecutionModePaused {
 		// Paused installs run the full pipeline with the global gate closed;
@@ -512,10 +587,19 @@ func controllerDeployment(installation *kubeneuronv1alpha1.KubeNeuron, snapshot 
 			RevisionHistoryLimit:    ptr.To(int32(defaultRevisionHistoryLimit)),
 			ProgressDeadlineSeconds: ptr.To(int32(defaultProgressDeadline)),
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: copyStringMap(annotations)},
+				// The pod template deliberately omits the config-digest. The
+				// controller reloads configuration in place from the mounted
+				// ConfigMap (see applyRuntimeConfig), so stamping the digest here
+				// would only trigger a Deployment rollout — which, under leader
+				// election, deadlocks: only the leader is Ready, so a new pod can
+				// never become Ready to retire the old one, and the stale-config
+				// leader would serve forever. The digest stays on the Deployment
+				// object for observability.
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: controllerPodAnnotations(annotations)},
 				Spec: corev1.PodSpec{
 					ServiceAccountName:            installation.Name + "-controller",
 					DeprecatedServiceAccount:      installation.Name + "-controller",
+					Affinity:                      controllerAffinity(installation),
 					RestartPolicy:                 corev1.RestartPolicyAlways,
 					TerminationGracePeriodSeconds: ptr.To(int64(defaultTerminationGrace)),
 					DNSPolicy:                     corev1.DNSClusterFirst,
@@ -529,9 +613,9 @@ func controllerDeployment(installation *kubeneuronv1alpha1.KubeNeuron, snapshot 
 						RunAsGroup:   ptr.To(int64(65532)),
 						FSGroup:      ptr.To(int64(65532)),
 					},
-					SchedulerName:                 corev1.DefaultSchedulerName,
-					Containers:                    []corev1.Container{container},
-					Volumes:                       volumes,
+					SchedulerName: corev1.DefaultSchedulerName,
+					Containers:    []corev1.Container{container},
+					Volumes:       volumes,
 				},
 			},
 		},
@@ -544,6 +628,11 @@ func controllerDeployment(installation *kubeneuronv1alpha1.KubeNeuron, snapshot 
 // processes the agent execs), and an optional scripts directory lands at the
 // agent's --scripts-dir. Everything is mounted read-only at stable /host/...
 // container paths so a hostile node image cannot shadow agent binaries.
+// hostToolingBinMount is where the node's tooling directory appears inside the
+// agent container. It is a fixed path so a hostile node image cannot shadow
+// agent binaries by choosing a clever binDir.
+const hostToolingBinMount = "/host/nvidia/bin"
+
 func agentHostToolingWiring(tooling *kubeneuronv1alpha1.HostToolingSpec) (args []string, env []corev1.EnvVar, mounts []corev1.VolumeMount, volumes []corev1.Volume) {
 	if tooling == nil {
 		return nil, nil, nil, nil
@@ -556,7 +645,7 @@ func agentHostToolingWiring(tooling *kubeneuronv1alpha1.HostToolingSpec) (args [
 	if len(libDirs) == 0 {
 		libDirs = []string{"/usr/lib64"}
 	}
-	mounts = append(mounts, corev1.VolumeMount{Name: "nvidia-bin", MountPath: "/host/nvidia/bin", ReadOnly: true})
+	mounts = append(mounts, corev1.VolumeMount{Name: "nvidia-bin", MountPath: hostToolingBinMount, ReadOnly: true})
 	volumes = append(volumes, corev1.Volume{Name: "nvidia-bin", VolumeSource: corev1.VolumeSource{
 		HostPath: &corev1.HostPathVolumeSource{Path: binDir, Type: hostPathType(corev1.HostPathDirectory)},
 	}})
@@ -578,7 +667,7 @@ func agentHostToolingWiring(tooling *kubeneuronv1alpha1.HostToolingSpec) (args [
 	// contains the loader, so the default satisfies this.
 	mounts = append(mounts, corev1.VolumeMount{Name: "nvidia-lib-0", MountPath: "/lib64", ReadOnly: true})
 	env = append(env,
-		corev1.EnvVar{Name: "PATH", Value: "/host/nvidia/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+		corev1.EnvVar{Name: "PATH", Value: hostToolingBinMount + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
 		corev1.EnvVar{Name: "LD_LIBRARY_PATH", Value: strings.Join(ldPaths, ":")},
 	)
 	// Host tooling declared means a Fake-driver fallback is a configuration
@@ -586,6 +675,15 @@ func agentHostToolingWiring(tooling *kubeneuronv1alpha1.HostToolingSpec) (args [
 	args = append(args, "--require-real-driver")
 	if endpoint := strings.TrimSpace(tooling.DCGMEndpoint); endpoint != "" {
 		args = append(args, "--nvidia-dcgm-endpoint="+endpoint)
+	}
+	// Only an explicit request switches attestation to the node's own client.
+	// The agent's default is the client in its image, so the attested version
+	// is the same on every node regardless of how each one was provisioned.
+	// binDir is the only host directory mounted, so the client must live in it;
+	// the compiler rejects anything else rather than passing a path that would
+	// not exist in the container.
+	if path := strings.TrimSpace(tooling.DCGMIPath); path != "" {
+		args = append(args, "--nvidia-dcgmi="+hostToolingBinMount+"/"+filepath.Base(path))
 	}
 	if tooling.ScriptsDir != "" {
 		mounts = append(mounts, corev1.VolumeMount{Name: "scripts", MountPath: "/etc/kube-neuron/scripts", ReadOnly: true})
@@ -597,42 +695,30 @@ func agentHostToolingWiring(tooling *kubeneuronv1alpha1.HostToolingSpec) (args [
 	return args, env, mounts, volumes
 }
 
-// destructiveAgentWiring arms the agent for real destructive actions, but
-// only on the nodes spec.safety.destructiveExecution names. Because a
-// DaemonSet carries one argument set for every node it lands on, arming it
-// also narrows where it lands: in Enabled mode the agent runs exactly on
-// the declared nodes and nowhere else. That is the conservative direction
-// — a mixed fleet needs a second DaemonSet, which is deliberately left for
-// when a real installation asks for it rather than guessed at now.
-func destructiveAgentWiring(installation *kubeneuronv1alpha1.KubeNeuron) (args []string, nodeSelector map[string]string) {
-	safety := installation.Spec.Safety
-	if effectiveExecutionMode(safety) != kubeneuronv1alpha1.ExecutionModeEnabled || safety.DestructiveExecution == nil {
-		return nil, nil
-	}
-	return []string{"--enable-destructive-actions"}, copyStringMap(safety.DestructiveExecution.NodeSelector)
-}
-
-func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot) *appsv1.DaemonSet {
+// agentDaemonSet builds the ONE agent DaemonSet, covering the whole agent
+// fleet on the base spec.agent.nodeSelector in every execution mode. Arming
+// is no longer scheduling geometry: the agent boots unarmed and adopts the
+// controller-served arming answer delivered with each v2 registration
+// response (computed from spec.safety.destructiveExecution.nodeSelector
+// against the node's live labels), so no --enable-destructive-actions arg is
+// rendered, no blast-radius narrowing is applied, and no detection-only
+// companion DaemonSet exists anymore. The retired "-agent-detect" companion
+// from the two-DaemonSet era is removed by the reconciler on upgrade.
+func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot, tlsRevision ...string) *appsv1.DaemonSet {
 	labels := resourceLabels(installation, "agent")
 	privileged := true
 	toolingArgs, toolingEnv, toolingMounts, toolingVolumes := agentHostToolingWiring(installation.Spec.Agent.HostTooling)
-	destructiveArgs, destructiveNodes := destructiveAgentWiring(installation)
-	toolingArgs = append(toolingArgs, destructiveArgs...)
 	agentNodes := copyStringMap(installation.Spec.Agent.NodeSelector)
-	if len(destructiveNodes) > 0 {
-		if agentNodes == nil {
-			agentNodes = map[string]string{}
-		}
-		for key, value := range destructiveNodes {
-			agentNodes[key] = value
-		}
+	annotations := map[string]string{"kubeneuron.io/config-digest": snapshot.Digest}
+	if len(tlsRevision) != 0 && tlsRevision[0] != "" {
+		annotations["kubeneuron.io/tls-digest"] = tlsRevision[0]
 	}
 	return &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        installation.Name + "-agent",
 			Namespace:   installation.Spec.Namespace,
 			Labels:      labels,
-			Annotations: map[string]string{"kubeneuron.io/config-digest": snapshot.Digest},
+			Annotations: annotations,
 		},
 		Spec: appsv1.DaemonSetSpec{
 			Selector:             &metav1.LabelSelector{MatchLabels: labels},
@@ -645,7 +731,7 @@ func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snaps
 				},
 			},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: map[string]string{"kubeneuron.io/config-digest": snapshot.Digest}},
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: copyStringMap(annotations)},
 				Spec: corev1.PodSpec{
 					ServiceAccountName:            installation.Name + "-agent",
 					DeprecatedServiceAccount:      installation.Name + "-agent",
@@ -766,13 +852,27 @@ func controllerReplicas(installation *kubeneuronv1alpha1.KubeNeuron) int32 {
 	return 1
 }
 
-// controllerStrategy: Recreate protects the single SQLite writer; the
-// Postgres pair rolls, because the Lease already serializes writers.
+// controllerStrategy is Recreate for both stores.
+//
+// Config changes never reach here — they reload in place — so the only thing
+// that rolls the controller now is a genuine spec change, chiefly an image
+// upgrade. Recreate is required for that under leader election: a RollingUpdate
+// waits for the new pods to become Ready before retiring the old, but only the
+// leader is ever Ready, so it would deadlock and the old image would serve
+// forever. Recreate deletes the old pods first, which frees the Lease so a new
+// pod can win it and become Ready. The cost is a brief control-plane gap during
+// an upgrade — acceptable because incidents are durable and agents retry, and
+// far better than an upgrade that cannot complete at all.
 func controllerStrategy(installation *kubeneuronv1alpha1.KubeNeuron) appsv1.DeploymentStrategy {
-	if installation.Spec.WorkflowStore.Type == "Postgres" {
-		return appsv1.DeploymentStrategy{Type: appsv1.RollingUpdateDeploymentStrategyType}
-	}
 	return appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
+}
+
+// controllerPodAnnotations returns the Deployment annotations without the
+// config-digest, so an ordinary configuration change does not roll the pods.
+func controllerPodAnnotations(annotations map[string]string) map[string]string {
+	out := copyStringMap(annotations)
+	delete(out, "kubeneuron.io/config-digest")
+	return out
 }
 
 func hostPathType(value corev1.HostPathType) *corev1.HostPathType { return &value }

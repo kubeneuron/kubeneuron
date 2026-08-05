@@ -126,9 +126,14 @@ func XIDTable() []XIDInfo {
 	return out
 }
 
-// SignalFromAgentEvent converts an agent XID event into a Signal, or returns
-// ok=false when the XID is not actionable (it should still be counted).
+// SignalFromAgentEvent converts an agent event into a Signal, or returns
+// ok=false when it is not actionable (it should still be counted). A
+// neutral-envelope event (types.FaultSignal) classifies through the fault
+// catalog; otherwise the genuine XID classifies through the XID catalog.
 func SignalFromAgentEvent(ev types.AgentEvent) (types.Signal, bool) {
+	if ev.Fault != nil {
+		return SignalFromFault(ev)
+	}
 	info, ok := ClassifyXID(ev.XID)
 	if !ok {
 		return types.Signal{}, false
