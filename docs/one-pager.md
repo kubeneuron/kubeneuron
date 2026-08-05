@@ -1,7 +1,8 @@
 # KubeNeuron — GPU incident response that earns the right to act
 
-**Autonomous GPU failure detection and safe, audited remediation for
-NVIDIA Kubernetes clusters.**
+**A vendor-neutral GPU fleet reliability control plane that detects
+degradation, protects workloads, automates safe recovery, and measures
+recovered.**
 
 ![Fleet overview](assets/tour/02-overview.png)
 

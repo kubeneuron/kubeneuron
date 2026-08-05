@@ -68,6 +68,44 @@ var (
 		Help: "Failed accelerator-stack restore attempts by the janitor.",
 	})
 
+	// --- Recovery outcome: what the fleet got back -------------------------
+	//
+	// These three answer the question an operator's budget holder asks:
+	// how much accelerator capacity was degraded, how much of it came back,
+	// and how much of that needed a human. Everything else in this file is
+	// process telemetry; this block is the outcome.
+
+	// IncidentDuration measures open-to-halted wall time per incident —
+	// KubeNeuron's MTTR. Labelled by how it ended, because "resolved in 4
+	// minutes" and "escalated to a human after 4 hours" are different
+	// stories that a single average would blend into nonsense.
+	IncidentDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "kubeneuron_incident_duration_seconds",
+		Help: "Wall time from incident open to its halting state, by class and outcome.",
+		// 30s to ~9h: fast automated recoveries at the bottom, approval
+		// waits (12h default TTL) spilling into the top bucket.
+		Buckets: []float64{30, 60, 300, 900, 1800, 3600, 7200, 14400, 32400},
+	}, []string{"class", "outcome"})
+
+	// IncidentsRecovered counts incidents that ended RESOLVED, split by
+	// whether a human decision was needed. unattended="true" is the
+	// automation's actual yield: degradation the fleet absorbed without
+	// waking anybody.
+	IncidentsRecovered = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_incidents_recovered_total",
+		Help: "Incidents that reached RESOLVED, by class and whether they needed a human decision.",
+	}, []string{"class", "unattended"})
+
+	// DegradedGPUSeconds accumulates GPU-seconds spent under an open
+	// incident, labelled by how that incident ended. It is deliberately NOT
+	// called "unavailable": a degraded GPU may still have been serving.
+	// Divide by 3600 for GPU-hours; the outcome="resolved" share is the
+	// capacity remediation brought back.
+	DegradedGPUSeconds = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_degraded_gpu_seconds_total",
+		Help: "GPU-seconds spent under an open incident, by class and outcome (resolved = returned to service).",
+	}, []string{"class", "outcome"})
+
 	// RuntimeConfigInfo is an info metric identifying the loaded runtime
 	// configuration: exactly one series with the digest of the
 	// operator-compiled snapshot currently live in this process. Alert on it

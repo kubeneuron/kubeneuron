@@ -19,6 +19,9 @@ the operator's controller-runtime metrics.
 | `kubeneuron_reconcile_seconds` | histogram | — | reconcile-walk duration; p99 above a few seconds delays approvals and verification |
 | `kubeneuron_stack_restore_failures_total` | counter | — | failed accelerator-stack restores by the janitor — a growing rate means a node's GPU monitoring is staying down |
 | `kubeneuron_runtime_config_info` | gauge | `digest` | identity of the loaded runtime configuration (always 1); a digest lagging `KubeNeuron.status.configDigest` is a rollout that never landed |
+| `kubeneuron_incident_duration_seconds` | histogram | `class`, `outcome` | open-to-halted wall time — MTTR, split by how the incident ended |
+| `kubeneuron_incidents_recovered_total` | counter | `class`, `unattended` | incidents that reached RESOLVED; `unattended="true"` never needed a human decision |
+| `kubeneuron_degraded_gpu_seconds_total` | counter | `class`, `outcome` | GPU-seconds spent under an open incident; the `outcome="resolved"` share is capacity returned to service (÷3600 for GPU-hours) |
 | `kubeneuron_gate_denials_total` | counter | — | steps denied by the safety gate (pause, cooldown, concurrency, capability) |
 | `kubeneuron_escalations_total` | counter | — | ladder escalations after step/verification failures |
 | `kubeneuron_notifications_dropped_total` | counter | `kind` (`event`, `approval_request`, `dead_letter`) | notifications lost to queue overflow or dead-lettered after delivery retries |

@@ -30,6 +30,7 @@ nav:
       - Product tour (screenshots & demo): product-tour.md
       - Quickstart (dry-run demo): quickstart.md
       - Production install: install.md
+      - Pilot checklist: pilot-checklist.md
   - Operating:
       - Operations guide: operations.md
       - Alert runbooks: runbooks.md
@@ -38,6 +39,9 @@ nav:
   - Configuring:
       - Playbook authoring: playbook-authoring.md
       - XID catalog: xid-catalog.md
+  - Roadmap:
+      - Making the definition true: definition-plan.md
+      - Hardware E2E dispatch: hw-e2e-dispatch.md
   - Reference:
       - REST API: reference-api.md
       - kubeneuronctl: reference-cli.md

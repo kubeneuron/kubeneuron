@@ -1,7 +1,8 @@
 # KubeNeuron
 
-**GPU failure detection and remediation for NVIDIA clusters, with a
-Kubernetes-native configuration model.**
+**A vendor-neutral GPU fleet reliability control plane that detects
+degradation, protects workloads, automates safe recovery, and measures
+recovered.**
 
 KubeNeuron models GPU and driver signals (XID errors, ECC faults, row-remap
 exhaustion, NVLink/PCIe degradation, thermal events) as an audited,

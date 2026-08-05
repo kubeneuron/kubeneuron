@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/internal/store/sqlite"
@@ -325,5 +328,54 @@ func TestLateBindsIncidentOpenedBeforeItsPolicyExisted(t *testing.T) {
 	}
 	if !bound {
 		t.Fatalf("audit trail lacks the bind-playbook entry: %+v", trail)
+	}
+}
+
+// The outcome metrics are the product's headline claim ("measures the
+// capacity it recovers"): they must fire exactly once, on the committed
+// halting transition, and distinguish an unattended recovery from one that
+// needed a human.
+func TestRecoveryOutcomeMetricsRecordedOnce(t *testing.T) {
+	pb := &playbook.Playbook{
+		Name: "observe", Target: "gpu",
+		Steps: []playbook.Step{{Name: "Observe", Action: "notify.observe"}},
+	}
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{"observe": pb},
+		[]playbook.Policy{{Class: types.ClassFellOffBus, Playbook: "observe"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, st, _ := miniController(t, engine)
+	ctx := context.Background()
+	if err := st.UpsertNode(ctx, &types.Node{
+		Name: "n1", GPUs: []types.GPUInfo{{Index: 0, UUID: "GPU-a"}, {Index: 1, UUID: "GPU-b"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	before := testutil.ToFloat64(metrics.IncidentsRecovered.WithLabelValues(string(types.ClassFellOffBus), "true"))
+	beforeGPU := testutil.ToFloat64(metrics.DegradedGPUSeconds.WithLabelValues(string(types.ClassFellOffBus), "resolved"))
+
+	// A node-scoped incident that never parked for approval: unattended.
+	inc := &types.Incident{
+		ID: "inc-outcome", Target: types.Target{Node: "n1"},
+		Class: types.ClassFellOffBus, State: types.StateObserving, DryRun: true, Playbook: "observe",
+		OpenedAt: time.Now().Add(-90 * time.Second), UpdatedAt: time.Now(), StateChangedAt: time.Now(),
+	}
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.transition(ctx, inc, types.StateResolved, "system", "resolve", "healthy", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := testutil.ToFloat64(metrics.IncidentsRecovered.WithLabelValues(string(types.ClassFellOffBus), "true")); got != before+1 {
+		t.Fatalf("unattended recovery counter = %v, want %v", got, before+1)
+	}
+	// Two GPUs on the node, ~90s open: the degraded-capacity counter must
+	// scale with inventory, not count the incident once.
+	gained := testutil.ToFloat64(metrics.DegradedGPUSeconds.WithLabelValues(string(types.ClassFellOffBus), "resolved")) - beforeGPU
+	if gained < 150 {
+		t.Fatalf("degraded GPU-seconds gained = %v, want ~180 (2 GPUs x ~90s)", gained)
 	}
 }

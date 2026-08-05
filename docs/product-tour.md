@@ -13,13 +13,10 @@ as a named human, watch the ladder finish, hit the big red button.
 
 ## What you are looking at
 
-KubeNeuron is a GPU failure detection and remediation system for NVIDIA
-Kubernetes clusters. It watches every node's kernel log for XID errors
-(the NVIDIA driver's fault codes), classifies them, opens an **incident**,
-and walks a declarative **playbook** — cordon, drain, reset, reboot —
-under hard safety gates: concurrency limits, cooldowns, flap detection,
-human approval for destructive steps, and an append-only audit trail as
-the system of record.
+KubeNeuron is a vendor-neutral GPU fleet reliability control plane: it
+detects degradation, protects workloads, automates safe recovery, and
+measures recovered. Detection ships NVIDIA-only today; the fault envelope
+and accelerator seam are vendor-agnostic by construction.
 
 Three components, all shipped as distroless images:
 

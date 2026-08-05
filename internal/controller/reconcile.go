@@ -673,7 +673,57 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 	// incident re-enters EVALUATING later, the propagation grace starts over
 	// from its next first observation.
 	c.clearArmingHold(inc.ID)
+	if to.Halted() {
+		c.recordRecoveryOutcome(ctx, inc, to)
+	}
 	return nil
+}
+
+// recordRecoveryOutcome emits the outcome metrics once per incident, on the
+// committed halting transition: how long it was open, whether it came back,
+// and how much accelerator capacity was degraded meanwhile. Everything else
+// the controller exports is process telemetry; this is what the fleet got
+// back, which is the number a capacity owner actually budgets against.
+//
+// Emitted AFTER the commit so a conflicting transition cannot double-count,
+// and only for halting states so an incident is measured exactly once.
+func (c *Controller) recordRecoveryOutcome(ctx context.Context, inc *types.Incident, to types.IncidentState) {
+	if inc.OpenedAt.IsZero() {
+		return
+	}
+	duration := time.Since(inc.OpenedAt).Seconds()
+	if duration < 0 {
+		return
+	}
+	outcome := strings.ToLower(string(to))
+	class := string(inc.Class)
+	metrics.IncidentDuration.WithLabelValues(class, outcome).Observe(duration)
+	if to == types.StateResolved {
+		// An incident that never minted an approval round was handled end to
+		// end without a human decision — the automation's actual yield.
+		unattended := "false"
+		if inc.ApprovalEpoch == 0 {
+			unattended = "true"
+		}
+		metrics.IncidentsRecovered.WithLabelValues(class, unattended).Inc()
+	}
+	metrics.DegradedGPUSeconds.WithLabelValues(class, outcome).
+		Add(duration * float64(c.affectedGPUs(ctx, inc)))
+}
+
+// affectedGPUs is how many accelerators the incident covered: one for a
+// GPU-scoped incident, the node's whole inventory for a node-scoped one.
+// Unknown inventory counts as one — undercounting is the honest failure
+// direction for a capacity number.
+func (c *Controller) affectedGPUs(ctx context.Context, inc *types.Incident) int {
+	if inc.Target.IsGPU() {
+		return 1
+	}
+	node, err := c.store.GetNode(ctx, inc.Target.Node)
+	if err != nil || node == nil || len(node.GPUs) == 0 {
+		return 1
+	}
+	return len(node.GPUs)
 }
 
 // appendAudit records an event that does not change state (e.g. a failed

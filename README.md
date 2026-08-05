@@ -1,7 +1,8 @@
 # KubeNeuron
 
-**GPU failure detection and remediation for NVIDIA Kubernetes clusters —
-audited, policy-driven, and never a black box.**
+**A vendor-neutral GPU fleet reliability control plane that detects
+degradation, protects workloads, automates safe recovery, and measures
+recovered.**
 
 A GPU falls off the bus at 3am. KubeNeuron catches the kernel's XID event,
 opens an incident, cordons and drains the node, and pages a human with
@@ -10,15 +11,31 @@ a transactional audit trail. Detection is automatic; anything destructive
 runs a policy ladder you wrote, behind safety gates you configured, with a
 named approver on the record.
 
-- **Detects** GPU faults from the kernel log (XID) and DCGM/`nvidia-smi`,
-  normalized into problem classes — no metrics stack required to act.
-- **Decides** through declarative playbooks and policies (CRDs): observe →
-  evict → drain → reset/reboot → replace the cloud node, each rung gated
-  by concurrency caps, quiet windows, and human approval where you demand
-  it.
-- **Answers to you**: approvals carry verified identity (password, OIDC
-  SSO, or Kubernetes RBAC), a control panel, a CLI, and an audit trail
-  that survives controller restarts and failover (PostgreSQL HA).
+- **Detects degradation**, not just failure: kernel XIDs and
+  DCGM/`nvidia-smi`, normalized into problem classes — single-bit ECC
+  rates and row-remap budgets included, so a GPU on its way out is an
+  incident before it takes a job with it.
+- **Protects workloads** first: evict GPU pods, cordon, drain with PDB
+  respect, and prove the device is idle before anything destructive runs.
+  Maintenance windows and per-node pauses hold the ladder when you need
+  the fleet untouched.
+- **Automates safe recovery** through declarative playbooks and policies
+  (CRDs): observe → evict → drain → reset/reboot → replace the cloud
+  node, each rung gated by concurrency caps, quiet windows, and human
+  approval where you demand it — with verified approver identity
+  (password, OIDC SSO, or Kubernetes RBAC) and an audit trail that
+  survives restarts and failover.
+- **Measures recovered**: MTTR per class, incidents recovered with and
+  without a human, and GPU-hours of degradation returned to service —
+  `kubeneuron_incident_duration_seconds`,
+  `kubeneuron_incidents_recovered_total`,
+  `kubeneuron_degraded_gpu_seconds_total`. What the fleet got back is a
+  number, not a feeling.
+- **Vendor-neutral by construction, NVIDIA today.** The fault envelope and
+  the accelerator seam carry `(vendor, source, code)` with no XID
+  pretense, so an AMD or Intel source is a new detection adapter and a
+  catalog row — not a fork. Shipping detection is NVIDIA-only; see the
+  [definition plan](docs/definition-plan.md) for the AMD track.
 - **Fails closed.** Dry-run is the default everywhere. Real execution
   (`executionMode: Enabled`) must be confined to an explicit node selector
   plus an acknowledgement sentence — it can never arm the whole fleet.

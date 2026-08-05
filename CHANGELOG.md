@@ -10,6 +10,25 @@ API is `v1alpha1`.
 ## [Unreleased]
 
 ### Added
+- **The product definition is now a gradeable contract.** KubeNeuron is
+  "a vendor-neutral GPU fleet reliability control plane that detects
+  degradation, protects workloads, automates safe recovery, and measures
+  recovered" — and `docs/definition-plan.md` grades every clause against
+  the code (shipped / partial / stated), with the work that closes each
+  gap and the release it lands in. Vendor-neutrality is stated honestly:
+  the fault envelope and accelerator seam are vendor-agnostic by
+  construction, every shipping detection path is NVIDIA, and the AMD
+  track is planned rather than implied.
+- Recovery outcome metrics — the "measures recovered" clause, made true:
+  `kubeneuron_incident_duration_seconds{class,outcome}` (MTTR, split by
+  how the incident ended), `kubeneuron_incidents_recovered_total{class,unattended}`
+  (what the automation absorbed without waking anyone), and
+  `kubeneuron_degraded_gpu_seconds_total{class,outcome}` (GPU-seconds
+  under an open incident; the resolved share is capacity returned to
+  service). Emitted once per incident on the committed halting
+  transition, scaled by the node's accelerator inventory for node-scoped
+  incidents. Everything else the controller exports is process telemetry;
+  this is the outcome a capacity owner budgets against.
 - Self-health alert rules for KubeNeuron itself
   (`configs/vmalert/self-rules.yaml`, mirrored into the deployed VMRule and
   pinned by a unit test): auth-failure bursts, failing stack restores, a
