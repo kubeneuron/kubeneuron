@@ -9,6 +9,21 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+## [v0.2.2] - 2026-08-05
+
+Release evidence: full CI (both store backends plus the kind integration
+suite) green as the tag's gate; `hack/kind-upgrade.sh` converged
+v0.2.2-rc.3 → HEAD in the documented order with a seeded incident and its
+audit trail surviving the store migration; and a live hardware run
+(kubeneuron-e2e11, EKS g4dn.xlarge / Tesla T4) passed all five phases —
+the XID-79 dry-run ladder with the approver audited, the DCGM source
+parsing live `dmon` output, a recurrence during VERIFYING escalating to
+NEEDS_HUMAN instead of resolving, XID-92 threshold accumulation, and a
+confined `ReplaceNode` terminating the real instance — with teardown
+sweeping the account to zero leftovers. Three release-candidate cuts
+preceded this tag and each found one defect the pipeline could not show
+any other way.
+
 ### Added
 - **AMD detection, so "vendor-neutral" is a fact and not only a seam**
   (`internal/agent/amdhealth`): `amd-smi metric --json` with a
