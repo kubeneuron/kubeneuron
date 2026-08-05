@@ -10,6 +10,26 @@ API is `v1alpha1`.
 ## [Unreleased]
 
 ### Added
+- Self-health alert rules for KubeNeuron itself
+  (`configs/vmalert/self-rules.yaml`, mirrored into the deployed VMRule and
+  pinned by a unit test): auth-failure bursts, failing stack restores, a
+  stuck action queue, expired approvals, rejected agent events, an agent
+  that is alive but **never acknowledged** (which `KubeNeuronAgentDown`
+  cannot see, because a rejected registration keeps serving metrics), and a
+  slow reconcile walk. Each links to a new runbook entry with
+  detection → diagnosis → the safe action. Seven metrics that shipped with
+  no alert and no documentation now have both.
+- `docs/pilot-checklist.md`: the ordered path from a green install to a
+  first incident on a real EKS GPU cluster — real observability endpoints
+  (install.sh writes placeholders), the webhook token copy, a policy set
+  that covers more than one class, `hostTooling`, and a synthetic webhook
+  injection that proves the pipeline without waiting for a fault.
+- The documented SQLite restore is now executable and rehearsed: a
+  `restore-helper.yaml` pod mounts the state volume (the controller image
+  is distroless and the claim is RWO, so the old "copy into a helper pod"
+  instruction had no helper pod to copy into), the procedure is numbered
+  end to end, and the kind suite runs backup → wipe the live database →
+  restore → assert the incident history survived on every run.
 - The controller publishes the identity of the configuration it is actually
   running: the operator-compiled snapshot digest appears on `/readyz`
   (`ready config=<digest>`), as the `kubeneuron_runtime_config_info` metric,
@@ -53,6 +73,61 @@ API is `v1alpha1`.
   `hw-e2e.yaml` gains the `test-threshold` phase the harness already had.
 
 ### Fixed
+- **The round-11 arming-grace fix inverted the bug it was closing.** The
+  hold anchor was cleared on every non-hold verdict, including the
+  `proceed` returned for steps that are not agent-destructive at all — and
+  the playbook-scope preflight walks EVERY step each pass, so on the
+  standard cordon→drain→reboot ladder the first two rungs reset the third's
+  anchor every pass. The grace never expired and a never-armable in-scope
+  node held in EVALUATING silently forever: no escalation, no page, no
+  audit row. The anchor is now touched only by verdicts about
+  agent-destructive steps, and a refusal leaves it for the escalating
+  transition to clear (clearing before the commit would grant a fresh
+  grace after every transition conflict). Regression test uses a
+  three-step ladder — the shape that was broken.
+- The published runtime-config identity could go permanently stale: the
+  reload change-detector hashed the configuration files but not the
+  operator's `config-digest` markers, and the policies and playbooks
+  ConfigMaps sync independently — so a playbooks-only rollout never
+  triggered a reload and the advertised digest stayed wrong forever. The
+  markers now feed the detector, disagreeing markers (mid-sync) publish no
+  identity at all rather than one describing half of what is loaded, and a
+  vanished marker clears the info metric instead of leaving a stale series.
+- Release pipeline, all latent since before v0.2.1: images were published
+  to the **legacy hyphenated GHCR namespace** no manifest, chart, doc, or
+  upgrade harness has referenced since v0.1.x (the digest-pinned manifest
+  job would have failed deterministically on the first real tag); a
+  prerelease tag would have become `releases/latest`, which is what the
+  advertised install one-liner downloads; and the arm64 image compiled
+  under QEMU emulation because the build stage lacked
+  `--platform=$BUILDPLATFORM` despite cross-compile args being plumbed.
+  The install-manifest tag-leak assertion now rejects any tag-shaped
+  reference, not only `v`-prefixed ones.
+- `hack/kind-upgrade.sh` has been unrunnable since 2026-07-28: one image
+  path was missed in the namespace rename, so the substitution guard
+  killed every run. Fixed, and a baseline whose release published no
+  assets (a release run that died early) now falls back to building the
+  install manifest from that tag's own tree.
+- The two hardware-harness phases written blind in round 11 were both
+  broken in ways only a paid run would have revealed: `test-dcgm` probed
+  the agent's metrics with `wget` inside a **distroless image that has
+  neither wget nor a shell** (now a disposable curl pod against the agent
+  Pod IP), and `test-verify-recur` re-injected the same XID inside the
+  agent's 2-minute dedup window (silently swallowed) and left a
+  NEEDS_HUMAN incident that the destructive phase's fault would have
+  ATTACHED to, failing the next phase deterministically (now spaced past
+  the window and resolved at the end).
+- The hw-e2e reaper — the watchdog whose failure means "a paid cluster may
+  be leaking" — could never have assumed the documented OIDC role: it
+  declares no environment, so its token subject is the branch form and an
+  environment-scoped secret is invisible to it. `docs/hw-e2e-dispatch.md`
+  now documents both subjects and a repository-level secret.
+- The docs-lint's migration-head check could not fire on the drift it
+  guards (a commit adding only a `.sql` file matched no trigger path).
+  Its first run after the fix caught three more stale claims: PostgreSQL
+  "reserved, operator rejects it" and "child-resource status is still work
+  to do" in design.md, and pre-v0.2 "preview/unfinished" language in the
+  dependency profile.
 - The arming-propagation grace is anchored to the FIRST observation of the
   hold (in-memory, cleared on any transition), not to `StateChangedAt` —
   which pre-ages while an incident sits in EVALUATING behind a per-node

@@ -15,6 +15,10 @@ the operator's controller-runtime metrics.
 | `kubeneuron_events_duplicate_total` | counter | — | agent-event replays rejected by capture ID |
 | `kubeneuron_incidents_opened_total` | counter | `class` | incidents opened |
 | `kubeneuron_steps_total` | counter | `outcome` (`ok`, `failed`, `dry_run`) | playbook steps executed |
+| `kubeneuron_actions_pending` | gauge | — | agent actions dispatched and not yet claimed; sustained non-zero means an unreachable or unregistered agent |
+| `kubeneuron_reconcile_seconds` | histogram | — | reconcile-walk duration; p99 above a few seconds delays approvals and verification |
+| `kubeneuron_stack_restore_failures_total` | counter | — | failed accelerator-stack restores by the janitor — a growing rate means a node's GPU monitoring is staying down |
+| `kubeneuron_runtime_config_info` | gauge | `digest` | identity of the loaded runtime configuration (always 1); a digest lagging `KubeNeuron.status.configDigest` is a rollout that never landed |
 | `kubeneuron_gate_denials_total` | counter | — | steps denied by the safety gate (pause, cooldown, concurrency, capability) |
 | `kubeneuron_escalations_total` | counter | — | ladder escalations after step/verification failures |
 | `kubeneuron_notifications_dropped_total` | counter | `kind` (`event`, `approval_request`, `dead_letter`) | notifications lost to queue overflow or dead-lettered after delivery retries |
@@ -32,6 +36,9 @@ the operator's controller-runtime metrics.
 | `kubeneuron_agent_events_posted_total` | counter | XID events delivered to the controller |
 | `kubeneuron_agent_events_spooled_total` | counter | events diverted to the durable spool after a failed post |
 | `kubeneuron_agent_spool_depth` | gauge | undelivered events currently spooled |
+| `kubeneuron_agent_detections_total` | counter | `node`, `source` | faults observed per detection source (`kmsg`, `gpuhealth`) — the only way to tell which source saw a fault |
+| `kubeneuron_agent_detections_deduplicated_total` | counter | `node` | detections collapsed as duplicates of one physical fault across sources |
+| `kubeneuron_agent_events_rejected_total` | counter | `node` | events the controller semantically rejected and the agent dropped — non-zero means detections are being discarded |
 | `kubeneuron_agent_registration_acks_total` | counter | durable controller registration acknowledgments |
 
 Both processes also export the standard Go runtime and process collectors.
@@ -42,7 +49,13 @@ The dependency profile's `kubeneuron-self` VMRule group covers:
 `KubeNeuronControllerDown`, `KubeNeuronAgentDown`,
 `KubeNeuronIncidentNeedsHuman`, `KubeNeuronSignalsDropped`,
 `KubeNeuronNotificationsDropped`, `KubeNeuronAgentSpoolBacklog`, and
-`KubeNeuronTLSCertExpiringSoon` (30 days before expiry). GPU-signal alerts
-(`Gpu*`) live in the `gpu-*` groups and feed the controller webhook; a unit
-test pins the deployed rules to the canonical
-`configs/vmalert/gpu-rules.yaml`.
+`KubeNeuronTLSCertExpiringSoon` (30 days before expiry), plus the
+round-12 additions: `KubeNeuronAuthFailureBurst`,
+`KubeNeuronStackRestoreFailing`, `KubeNeuronActionQueueStuck`,
+`KubeNeuronIncidentExpired`, `KubeNeuronAgentEventsRejected`,
+`KubeNeuronAgentNeverAcked`, and `KubeNeuronReconcileSlow`. Running your own
+Prometheus instead of the reference profile? Load
+[`configs/vmalert/self-rules.yaml`](https://github.com/kubeneuron/kubeneuron/blob/main/configs/vmalert/self-rules.yaml)
+— every rule links to its [runbook](runbooks.md) entry. GPU-signal alerts
+(`Gpu*`) live in the `gpu-*` groups and feed the controller webhook; unit
+tests pin the deployed rules to both canonical files.

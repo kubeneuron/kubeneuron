@@ -227,6 +227,36 @@ func TestCatalogObservePolicy(t *testing.T) {
 	}
 }
 
+// TestDeployedSelfRulesContainCanonicalAlerts pins the deployed VMRule to the
+// canonical SELF-health rules the same way the signal rules are pinned: an
+// operator running their own Prometheus loads configs/vmalert/self-rules.yaml
+// directly, and the two must not fork.
+func TestDeployedSelfRulesContainCanonicalAlerts(t *testing.T) {
+	canonical, err := os.ReadFile(filepath.Join("..", "..", "configs", "vmalert", "self-rules.yaml"))
+	if err != nil {
+		t.Fatalf("reading canonical self rules: %v", err)
+	}
+	deployed, err := os.ReadFile(filepath.Join("..", "..", "deploy", "kubernetes", "dependencies", "observability", "rules.yaml"))
+	if err != nil {
+		t.Fatalf("reading deployed rules: %v", err)
+	}
+	re := regexp.MustCompile(`(?m)^\s*- alert:\s*(\S+)`)
+	deployedNames := map[string]bool{}
+	for _, m := range re.FindAllStringSubmatch(string(deployed), -1) {
+		deployedNames[m[1]] = true
+	}
+	count := 0
+	for _, m := range re.FindAllStringSubmatch(string(canonical), -1) {
+		count++
+		if !deployedNames[m[1]] {
+			t.Errorf("canonical self alert %q is missing from the deployed VMRule", m[1])
+		}
+	}
+	if count == 0 {
+		t.Fatal("no alerts found in the canonical self rules — parsing broken?")
+	}
+}
+
 // TestDeployedRulesContainCanonicalAlerts pins the deployed VMRule
 // (deploy/kubernetes/dependencies/observability/rules.yaml) to the canonical
 // vmalert rules file: every canonical signal alert must ship in the deployed

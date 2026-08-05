@@ -69,20 +69,20 @@ Supporting integrations are not KubeNeuron binaries:
 
 | Integration | Target responsibility | Current repository state |
 |---|---|---|
-| dcgm-exporter / node_exporter | GPU and host metrics | A pinned GPU Operator profile supplies dcgm-exporter; node_exporter remains outside the preview profile. |
+| dcgm-exporter / node_exporter | GPU and host metrics | A pinned GPU Operator profile supplies dcgm-exporter; node_exporter remains outside the reference dependency profile. |
 | VictoriaMetrics / vmagent / vmalert | Metric storage, scraping, and rule evaluation | A pinned upstream-operator profile exists; the KubeNeuron operator does not create these systems. |
 | Alertmanager | Group and route alerts to the controller and humans | The pinned profile routes to the implemented webhook; approval interaction does not exist. |
 | SQLite | Single-process development store | Implemented for controller incidents/audit foundations. |
-| PostgreSQL | Durable workflow store for a future HA/automation mode | Reserved in the API; the operator rejects it because no controller PostgreSQL backend exists yet. |
+| PostgreSQL | Durable workflow store for HA operation | Implemented and operator-accepted: DSN from a mounted Secret, leader-elected controller pair, same conformance suite as SQLite. |
 | ClickHouse | Optional raw-event archive | Future work. |
 | Grafana | Dashboards | Development container only; dashboards are future work. |
 
 ### 2.2 Kubernetes API and operator reconciliation
 
 The `kubeneuron.io/v1alpha1` API contains seven cluster-scoped kinds. Each schema
-has a status subresource; today the reconciler primarily updates the root
-installation status, while detailed child-resource status is still work to
-do.
+has a status subresource, and the reconciler publishes generation-bound
+`Ready` status on the root installation and on every selected child
+configuration kind.
 
 | Kind | Desired state |
 |---|---|
@@ -143,7 +143,7 @@ The preview runtime accepts credential-free `External` VictoriaMetrics and
 Alertmanager declarations only. `Managed` remains an API-reserved value but is
 rejected until upstream-resource discovery and readiness exist. ClickHouse may
 only be omitted or explicitly disabled. KubeNeuron never creates these
-dependencies; the version-pinned preview profile under
+dependencies; the version-pinned reference profile under
 [`deploy/kubernetes/dependencies`](../deploy/kubernetes/dependencies/) is an
 independent cluster-administrator workflow.
 

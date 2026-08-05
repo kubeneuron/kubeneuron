@@ -161,7 +161,7 @@ crash-safe completion across an agent restart, or remediation behavior.
 
 ## Operator preview install
 
-The CRDs use Kubernetes quantity CEL functions, so the preview profile requires
+The CRDs use Kubernetes quantity CEL functions, so the installation requires
 Kubernetes 1.29 or newer. A separately owned, version-pinned GPU/observability
 dependency profile and its install, upgrade, and removal gates are documented
 in [`deploy/kubernetes/dependencies/`](deploy/kubernetes/dependencies/). Install

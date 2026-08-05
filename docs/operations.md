@@ -108,26 +108,53 @@ CA. Alternatively snapshot the PVC with your CSI driver's VolumeSnapshot —
 take the snapshot while the controller is scaled to zero, or accept that WAL
 replay happens on restore.
 
-**Restore:**
+**Restore** (SQLite). The controller image is distroless and the claim is
+`ReadWriteOnce`, so the restore runs with the controller stopped and a
+helper pod holding the volume — `deploy/kubernetes/backup/restore-helper.yaml`
+is that pod:
 
 ```sh
+# 1. Stop the controller so nothing writes the database (and the RWO claim
+#    is released).
 kubectl -n <ns> scale deploy/<name>-controller --replicas=0
-kubectl -n <ns> cp ./kubeneuron-YYYY-MM-DD.db <helper-pod>:/var/lib/kube-neuron/kubeneuron.db
-# also delete kubeneuron.db-wal / kubeneuron.db-shm if present
+kubectl -n <ns> rollout status deploy/<name>-controller --timeout=2m
+
+# 2. Mount the state volume somewhere with a shell.
+kubectl -n <ns> apply -f deploy/kubernetes/backup/restore-helper.yaml
+kubectl -n <ns> wait --for=condition=Ready pod/kubeneuron-restore-helper --timeout=2m
+
+# 3. Copy the snapshot in and remove any stale WAL sidecars: they belong to
+#    the OLD database file and would corrupt the restored one.
+kubectl -n <ns> cp ./kubeneuron-YYYY-MM-DD.db \
+  kubeneuron-restore-helper:/state/kubeneuron.db
+kubectl -n <ns> exec kubeneuron-restore-helper -- \
+  sh -c 'rm -f /state/kubeneuron.db-wal /state/kubeneuron.db-shm; ls -l /state'
+
+# 4. Release the volume and bring the controller back.
+kubectl -n <ns> delete pod kubeneuron-restore-helper --wait=true
 kubectl -n <ns> scale deploy/<name>-controller --replicas=1
+kubectl -n <ns> rollout status deploy/<name>-controller --timeout=5m
+
+# 5. Verify against what you expect from the snapshot's age.
+kubeneuronctl incidents --state RESOLVED | head
 ```
 
 The controller applies schema migrations forward automatically on start
 (`schema_version` table); never restore a database from a *newer* version
-of the controller onto an older binary.
+of the controller onto an older binary — it refuses to start rather than
+downgrade a schema.
+
+**Restore (PostgreSQL):** there is no KubeNeuron-side restore. Use your
+platform's `pg_restore`/PITR with the controller scaled to zero, then scale
+back up; the schema-version refusal above applies identically.
 
 **Scheduled backups:** the CronJob template in
 [`deploy/kubernetes/backup/`](https://github.com/kubeneuron/kubeneuron/tree/main/deploy/kubernetes/backup)
 downloads the snapshot endpoint daily onto a dedicated backup PVC with dated
 retention. It needs only the operator-token Secret and network reach to the
 controller Service — no `pods/exec` RBAC and nothing extra in the distroless
-image. Rehearse the restore procedure above against a downloaded snapshot
-before relying on the schedule.
+image. The kind integration suite rehearses the full backup→wipe→restore
+cycle on every run, so the procedure above is exercised, not just written.
 
 **Retention:** the PVC is owned by the root `KubeNeuron`; deleting the root
 garbage-collects the claim, and the StorageClass reclaim policy then

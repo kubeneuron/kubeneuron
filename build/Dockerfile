@@ -2,7 +2,7 @@
 # Production multi-target build for the four KubeNeuron binaries.
 # TARGETOS/TARGETARCH are set by buildx for multi-arch builds and default to
 # the native platform under the classic builder (empty GOOS/GOARCH).
-FROM golang:1.25.12 AS build
+FROM --platform=$BUILDPLATFORM golang:1.25.12 AS build
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev

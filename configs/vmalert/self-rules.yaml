@@ -1,0 +1,82 @@
+# KubeNeuron self-health alert rules — plain Prometheus format.
+#
+# These watch KubeNeuron itself and route to HUMANS; they are not GPU signals
+# and must never be sent to the controller's Alertmanager webhook (that path
+# is for hardware faults, configs/vmalert/gpu-rules.yaml).
+#
+# Deployed profile users get these through the VMRule in
+# deploy/kubernetes/dependencies/observability/rules.yaml, which mirrors this
+# file (pinned by TestDeployedSelfRulesContainCanonicalAlerts). Anyone running
+# their own Prometheus/AMP loads this file directly.
+groups:
+  - name: kubeneuron-self
+    interval: 30s
+    rules:
+      - alert: KubeNeuronAuthFailureBurst
+        expr: increase(kubeneuron_auth_failures_total[5m]) > 10
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronauthfailureburst"
+          summary: "{{ $value }} rejected authentications on the {{ $labels.api }} API in 5m"
+          description: "Either a misconfigured client or someone probing. The per-source limiter throttles online brute force, but a burst deserves eyes before it pages as an outage elsewhere."
+
+      - alert: KubeNeuronStackRestoreFailing
+        expr: increase(kubeneuron_stack_restore_failures_total[30m]) > 3
+        labels:
+          severity: critical
+        annotations:
+          runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronstackrestorefailing"
+          summary: "The accelerator-stack janitor cannot restore a quiesced node"
+          description: "A node's GPU monitoring is staying DOWN after a quiesce. GpuExporterDown on that node inhibits its per-GPU alerts, so the blind spot hides itself — act on this alert, not on the silence."
+
+      - alert: KubeNeuronActionQueueStuck
+        expr: kubeneuron_actions_pending > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronactionqueuestuck"
+          summary: "{{ $value }} agent action(s) pending for 30m"
+          description: "Dispatched work nobody claimed: the target node's agent is unreachable, unregistered, or its lease keeps expiring."
+
+      - alert: KubeNeuronIncidentExpired
+        expr: kubeneuron_incidents{state="EXPIRED"} > 0
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronincidentexpired"
+          summary: "{{ $value }} incident(s) expired without a human decision"
+          description: "An approval request timed out. The node may be left cordoned and drained — notifications are droppable, so this metric is the reliable signal."
+
+      - alert: KubeNeuronAgentEventsRejected
+        expr: increase(kubeneuron_agent_events_rejected_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronagenteventsrejected"
+          summary: "Agent on {{ $labels.node }} dropped {{ $value }} controller-rejected events"
+          description: "The controller semantically rejected these events, so detections are being discarded rather than spooled. Usually a malformed or unsupported encoding after a partial upgrade."
+
+      - alert: KubeNeuronAgentNeverAcked
+        # An agent whose registration is refused keeps serving /metrics, so
+        # KubeNeuronAgentDown never fires: the fleet can lose automation
+        # silently. Alive process, no acknowledgment, is the real signal.
+        expr: up{job="kubeneuron-agent"} == 1 and increase(kubeneuron_agent_registration_acks_total[15m]) == 0
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronagentneveracked"
+          summary: "Agent on {{ $labels.node }} is running but never acknowledged by the controller"
+          description: "mTLS identity, token, or CA problem. This node's faults are invisible and its remediation cannot execute, while the pod looks healthy."
+
+      - alert: KubeNeuronReconcileSlow
+        expr: histogram_quantile(0.99, sum(rate(kubeneuron_reconcile_seconds_bucket[5m])) by (le)) > 5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronreconcileslow"
+          summary: "Reconcile p99 is {{ $value }}s"
+          description: "The walk is falling behind: approvals resume late and verification windows stretch. Check open-incident count and store latency."

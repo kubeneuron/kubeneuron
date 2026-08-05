@@ -130,3 +130,100 @@ is manual and phased. Follow the rotation procedure with
 `hack/tls-rotate.sh` (server and client directions separately). The fleet
 client leaf has a hard 100-day ceiling; an expired leaf takes agent
 transport down fleet-wide.
+
+### KubeNeuronIncidentExpired
+
+An approval request timed out (default TTL 12h) and the incident moved to
+`EXPIRED`. **Nothing uncordons the node on expiry** — if the ladder had
+already run its cordon/drain rungs, the node is still unschedulable and
+its workloads are gone.
+
+1. Find it and see how far it got:
+   `kubeneuronctl incidents --state EXPIRED` then
+   `kubeneuronctl incidents show <id>` — the audit trail names the last
+   executed step.
+2. Decide the disposition. An expired incident is closed: it cannot be
+   approved. Either fix the fault out of band and release the node, or
+   re-open remediation with
+   `kubeneuronctl remediate <node> --class <class> --actor <you>`.
+3. Release the node when you are done:
+   `kubectl uncordon <node>` (check `kubectl get node <node>` first — a
+   node cordoned by something else must not be uncordoned by reflex).
+
+Prevention: shorten `spec.approvals.ttl` so a forgotten request fails fast,
+or route approvals to a channel with an on-call rotation. Notifications are
+droppable by design, so treat this alert — not the Slack ping — as the
+reliable signal.
+
+### KubeNeuronAgentNeverAcked
+
+The agent process is alive and serving metrics, but the controller has
+never acknowledged its registration — so this node's faults are invisible
+and no remediation can execute on it, while the pod looks healthy.
+`KubeNeuronAgentDown` will NOT fire for this.
+
+1. Read the agent's own verdict:
+   `kubectl -n <ns> logs ds/<name>-agent | grep -i "registration"` — look
+   for `controller registration never acknowledged` and the error it
+   carries (TLS, 401/403, connection refused).
+2. Follow the identity ladder in
+   [troubleshooting](troubleshooting.md#agent-cannot-register): CA
+   mismatch, expired leaf (hard 100-day ceiling), URI-SAN vs. a recreated
+   root UID, Pod-token race.
+3. **If the whole fleet is affected at once** (expired or wrong CA), do not
+   reach for the phased rotation — that is a planned-change tool. Use
+   `hack/tls-emergency-recover.sh` with explicitly approved replacement
+   leaf Secrets; it retains both CA bundles and records recovery
+   annotations.
+
+### KubeNeuronStackRestoreFailing
+
+The accelerator-stack janitor keeps failing to restore a node whose vendor
+stack was quiesced for a reset. That node's GPU monitoring is **down**, and
+because `GpuExporterDown` inhibits its per-GPU alerts, the blind spot hides
+itself. Act on this alert, not on the silence.
+
+1. Read why the janitor is holding:
+   `kubectl -n <ns> logs deploy/<name>-controller | grep -iE "restore|quiesce"`.
+   The janitor deliberately holds the restore until every incident that
+   quiesced the node has been rewound — an incident stuck mid-rewind blocks
+   it.
+2. Clear the blocker: resolve or escalate that incident
+   (`kubeneuronctl incidents show <id>`, then `resolve` if the hardware is
+   fine). The next janitor pass restores the stack.
+3. Last resort, by hand on the node: restore the GPU-operator labels the
+   quiesce removed (`nvidia.com/gpu.deploy.*=true`) and confirm the
+   device-plugin and DCGM pods return. Re-check
+   `kubeneuron_stack_restore_failures_total` stops growing.
+
+### KubeNeuronAuthFailureBurst
+
+More than ten rejected authentications in five minutes on the named API
+surface. Either a misconfigured client (a rotated token that some caller
+did not pick up) or someone probing. The per-source-IP limiter throttles
+online brute force, so this is a signal to investigate, not an outage.
+Check the controller log lines `operator authentication failed` for the
+source, and verify the token Secrets match what callers hold.
+
+### KubeNeuronActionQueueStuck
+
+Agent actions have been pending for 30 minutes: work was dispatched that
+nobody claimed. Usually the target node's agent is unreachable,
+unregistered (see **KubeNeuronAgentNeverAcked**), or its lease keeps
+expiring. Identify the node from the incident
+(`kubeneuronctl incidents --state EXECUTING`) and check that agent first.
+
+### KubeNeuronAgentEventsRejected
+
+The controller semantically rejected events from this node's agent, so the
+agent dropped them rather than spooling forever. Detections are being
+discarded. Almost always a partial upgrade: a newer agent encoding that
+this controller does not understand. Compare image versions and complete
+the rollout.
+
+### KubeNeuronReconcileSlow
+
+The reconcile walk's p99 exceeded 5s for 15 minutes: approvals resume late
+and verification windows stretch. Check the open-incident count
+(`kubeneuron_incidents`) and store latency — SQLite on a slow PVC and a
+large open-incident backlog are the usual causes.

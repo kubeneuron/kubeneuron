@@ -277,6 +277,75 @@ func TestInScopeUnarmedAgentHoldsThenEscalates(t *testing.T) {
 			t.Fatal("no approval may be requested while arming is still propagating")
 		}
 	})
+	t.Run("a multi-step ladder still expires the grace (H1 regression)", func(t *testing.T) {
+		// The standard cordon->drain->reboot shape: the preflight loop
+		// checks EVERY step each pass, and the non-destructive cordon/drain
+		// verdicts must NOT reset the reboot rung's hold anchor — that made
+		// the grace unexpirable and a never-armable node hold forever.
+		ladder := &playbook.Playbook{
+			Name: "ladder", Target: "node",
+			Steps: []playbook.Step{
+				{Name: "Cordon", Action: "platform.cordon"},
+				{Name: "Drain", Action: "platform.drain"},
+				{Name: "Reboot", Action: "agent.reboot", Approval: "required"},
+			},
+		}
+		ladderEngine, err := playbook.NewEngine(map[string]*playbook.Playbook{"ladder": ladder}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st, err := sqlite.Open(":memory:")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		ctx := context.Background()
+		notifier := &recordingNotifier{}
+		c := New(st, st, ladderEngine, safety.NewGate(safety.Limits{MaxConcurrentRemediations: 4, MaxConcurrentReboots: 1}),
+			nil, nil, nil, notifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		c.SetDestructiveNodeSelector(map[string]string{"pool": "canary"})
+		if err := st.UpsertNode(ctx, &types.Node{Name: "n1", Labels: map[string]string{"pool": "canary"}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.UpsertAgentRegistration(ctx, &types.Node{
+			Name: "n1", AgentLastSeen: time.Now(), AgentArming: types.AgentArmingUnarmed,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		inc := &types.Incident{
+			ID: "inc-ladder", Target: types.Target{Node: "n1"},
+			Class: types.ClassFellOffBus, State: types.StateEvaluating,
+			Playbook: "ladder",
+			OpenedAt: time.Now(), UpdatedAt: time.Now(), StateChangedAt: time.Now(),
+		}
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		// First pass: hold recorded.
+		got, err := st.GetIncident(ctx, inc.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.advanceEvaluating(ctx, got); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ = st.GetIncident(ctx, inc.ID); got.State != types.StateEvaluating {
+			t.Fatalf("first pass state = %s, want a hold", got.State)
+		}
+		// Age the anchor, then run TWO more passes: the cordon/drain proceed
+		// verdicts in each pass must not reset it.
+		c.armingHoldMu.Lock()
+		c.armingHoldSince[inc.ID] = time.Now().Add(-armingPropagationGrace - time.Minute)
+		c.armingHoldMu.Unlock()
+		got, _ = st.GetIncident(ctx, inc.ID)
+		if err := c.advanceEvaluating(ctx, got); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ = st.GetIncident(ctx, inc.ID); got.State != types.StateNeedsHuman {
+			t.Fatalf("state = %s, want NEEDS_HUMAN — the multi-step ladder must still expire the grace", got.State)
+		}
+	})
+
 	t.Run("past the observed grace the node is never-armable and escalates", func(t *testing.T) {
 		c, st, notifier, id := fixture(t, time.Now())
 		if inc := advance(t, c, st, id); inc.State != types.StateEvaluating {

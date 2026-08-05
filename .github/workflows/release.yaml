@@ -17,7 +17,11 @@ on:
 permissions: {}
 
 env:
-  IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/kube-neuron
+  # MUST match what every consumer looks at (config/default, the Helm
+  # chart, deploy/install.sh, docs): ghcr.io/<owner>/kubeneuron/<image>.
+  # The legacy hyphenated namespace shipped v0.1.x and is frozen; publishing
+  # there would put images where no manifest or chart ever looks.
+  IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/kubeneuron
   KUSTOMIZE_VERSION: v5.6.0
 
 jobs:
@@ -134,7 +138,9 @@ jobs:
           grep -q "image: ${IMAGE_REPO}/operator@${operator_digest}" \
             "dist/kubeneuron-install-${version}.yaml"
           # The manifest must not smuggle any tag-pinned image reference.
-          if grep -E "image: .*:(v[0-9][^@]*)$" "dist/kubeneuron-install-${version}.yaml"; then
+          # Any tag-shaped reference (:v1.2.3, :1.2.3, :latest) is a leak;
+          # only digest pins may survive.
+          if grep -E "image: [^@[:space:]]+:[^@[:space:]]+$" "dist/kubeneuron-install-${version}.yaml"; then
             echo "tag-pinned image reference in the install manifest" >&2
             exit 1
           fi
@@ -229,6 +235,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: false
+          # A tag containing '-' is a prerelease (v0.2.2-rc.1): it must never
+          # become releases/latest, which is what install.md's advertised
+          # one-liner downloads.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
           body_path: notes.md
           files: dist/*

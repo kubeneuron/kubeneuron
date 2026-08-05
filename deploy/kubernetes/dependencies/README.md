@@ -1,9 +1,10 @@
 # KubeNeuron external dependency profile
 
-This directory is a version-pinned **preview** profile for the upstream
+This directory is a version-pinned reference profile for the upstream
 components that supply GPU telemetry, metric storage, rule evaluation, and
-alert delivery to KubeNeuron. It does not make the unfinished KubeNeuron
-runtime production-ready.
+alert delivery to KubeNeuron. It is a convenience, not a dependency: bring
+your own Prometheus/Alertmanager stack if you have one — KubeNeuron only
+needs DCGM metrics scraped and an Alertmanager that can reach the webhook.
 
 ## Ownership boundary
 
@@ -17,7 +18,7 @@ These resources are not owned by the KubeNeuron reconciler:
   backup, upgrades, and removal of both upstream operators.
 
 The KubeNeuron API reserves `Managed` for future upstream-resource discovery,
-but the preview operator rejects it because that discovery/readiness path does
+but the operator rejects it because that discovery/readiness path does
 not exist. Even though dedicated upstream operators own this profile, declare
 its endpoints to KubeNeuron as `External`. Deleting a `KubeNeuron` custom
 resource does not delete anything in this directory.
@@ -360,7 +361,7 @@ until they have finalized their custom resources.
 
 VMSingle retains metrics for 30 days but this profile provides no backup job.
 Alertmanager has no persistent volume, so silences and notification state are
-ephemeral. These limitations are acceptable only for the current preview.
+ephemeral. Mirror and digest-pin the images before relying on this profile in production.
 
 ## Deliberate exclusions
 
@@ -372,7 +373,7 @@ ephemeral. These limitations are acceptable only for the current preview.
 - ClickHouse: raw-event archive ingestion is not implemented and the operator
   rejects enabled archive configuration.
 - Grafana, node_exporter, ingress, external authentication, TLS, HA, and
-  automated backup: outside this preview profile.
+  automated backup: outside this reference profile.
 - NVIDIA GDS/GDRCopy, vGPU/VFIO, KubeVirt/Kata sandbox, and confidential
   computing operands: explicitly disabled in the base values; enable and pin
   them only in a reviewed platform-specific overlay.

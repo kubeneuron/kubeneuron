@@ -83,7 +83,10 @@ identity.
 ```sh
 kubectl -n <ns> logs deploy/<name>-controller --since=1h > controller.log
 kubeneuronctl incidents show <id> > incident.txt
-kubectl -n <ns> exec deploy/<name>-controller -- sqlite3 /var/lib/kube-neuron/kubeneuron.db ".backup /tmp/db"  # optional
+# A database snapshot, if the vendor asks for one (the controller image is
+# distroless — there is no sqlite3 to exec; use the authenticated endpoint):
+curl -fsS -H "Authorization: Bearer $OPERATOR_TOKEN" \
+  http://<name>-controller.<ns>.svc:8080/api/v1/backup -o kubeneuron.db  # optional
 ```
 
 Include the root's `status.conditions`, the compiled config digest, and

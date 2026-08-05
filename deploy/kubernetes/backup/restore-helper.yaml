@@ -1,0 +1,43 @@
+# Restore helper: a shell-bearing pod that mounts the controller's SQLite
+# state volume so a backup can be copied back in.
+#
+# The controller image is distroless (no shell, no sqlite3), and the restore
+# runs with the controller scaled to zero — so nothing would otherwise mount
+# the claim. Apply this, copy the file in, delete it. See
+# docs/operations.md, "Restoring from a backup".
+#
+# Edit NAMESPACE and the claimName to match your installation:
+#   kubectl -n <ns> apply -f restore-helper.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kubeneuron-restore-helper
+  labels:
+    app.kubernetes.io/name: kubeneuron
+    app.kubernetes.io/component: restore-helper
+spec:
+  restartPolicy: Never
+  # Match the controller's fsGroup so the copied file is writable by the
+  # controller's non-root user when it comes back up.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+  containers:
+    - name: helper
+      image: busybox:1.36
+      command: ["sh", "-c", "sleep 3600"]
+      volumeMounts:
+        - name: state
+          mountPath: /state
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+  volumes:
+    - name: state
+      persistentVolumeClaim:
+        # Default installation name; change if your root object is not
+        # called "kubeneuron".
+        claimName: kubeneuron-controller-state

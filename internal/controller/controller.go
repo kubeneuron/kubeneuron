@@ -55,8 +55,12 @@ type Controller struct {
 	// StateChangedAt, which pre-ages during pauses, maintenance windows, and
 	// playbook cooldowns that hold an incident in EVALUATING without
 	// touching it, and would make the very first arming check "expire" a
-	// grace that never ran. Entries are cleared on any non-hold arming
-	// verdict and on every state transition, so the map cannot leak.
+	// grace that never ran. Entries are cleared on an armingProceed verdict
+	// for an agent-destructive step and on every committed state transition,
+	// so the map cannot leak. In-memory is a deliberate trade: a controller
+	// restart or failover mid-hold restarts the grace (bounded at one extra
+	// grace per restart) — a durable anchor would re-import the F1 hazard
+	// of measuring time the check never observed.
 	armingHoldMu    sync.Mutex
 	armingHoldSince map[string]time.Time
 

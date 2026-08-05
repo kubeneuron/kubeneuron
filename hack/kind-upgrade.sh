@@ -72,9 +72,20 @@ for command in "$KIND_BIN" "$KUBECTL_BIN" "$JQ_BIN" "$DOCKER_BIN" curl openssl g
 done
 
 note "downloading the $BASELINE release manifest and image digests"
-gh release download "$BASELINE" -p "kubeneuron-install-$BASELINE.yaml" -p images.txt \
-	--dir "$work_dir" --clobber
 install_manifest="$work_dir/kubeneuron-install-$BASELINE.yaml"
+if ! gh release download "$BASELINE" -p "kubeneuron-install-$BASELINE.yaml" -p images.txt \
+	--dir "$work_dir" --clobber 2>/dev/null || [[ ! -s $install_manifest ]]; then
+	# A baseline whose release published no assets (a release run that died
+	# before the manifest job) is still a usable baseline: build the install
+	# manifest from that tag's own tree.
+	note "release assets unavailable for $BASELINE; building the manifest from the tag's tree"
+	baseline_tree="$work_dir/baseline-tree"
+	rm -rf "$baseline_tree"
+	git -C "$REPO_ROOT" worktree add --detach "$baseline_tree" "$BASELINE" >/dev/null 2>&1 ||
+		die "cannot check out baseline $BASELINE to build its manifest"
+	("$KUBECTL_BIN" kustomize "$baseline_tree/config/default" >"$install_manifest")
+	git -C "$REPO_ROOT" worktree remove --force "$baseline_tree" >/dev/null 2>&1 || true
+fi
 [[ -s $install_manifest ]] || die "release install manifest is empty"
 
 declare -A baseline_image=()
@@ -338,7 +349,7 @@ note "upgrade step 1/2: HEAD CRDs, RBAC, and operator (docs/upgrade.md order)"
 "$KUBECTL_BIN" apply -k "$REPO_ROOT/config/crd" >/dev/null
 "$KUBECTL_BIN" apply -k "$REPO_ROOT/config/rbac" >/dev/null
 operator_manifest="$work_dir/operator-head.yaml"
-sed -E "s|image: ghcr\.io/kubeneuron/kube-neuron/operator:[A-Za-z0-9._-]+(@sha256:[a-f0-9]+)?|image: kubeneuron-operator:$head_tag|" \
+sed -E "s|image: ghcr\.io/kubeneuron/kubeneuron/operator[:@][A-Za-z0-9._:-]+|image: kubeneuron-operator:$head_tag|" \
 	"$REPO_ROOT/config/default/operator_deployment.yaml" >"$operator_manifest"
 grep -Fq "image: kubeneuron-operator:$head_tag" "$operator_manifest" || die "operator image substitution failed"
 "$KUBECTL_BIN" apply -f "$operator_manifest" >/dev/null

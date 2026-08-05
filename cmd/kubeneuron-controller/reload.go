@@ -118,10 +118,7 @@ func applyRuntimeConfig(
 	// operator API, and the info metric answer "which configuration is
 	// live?". Absent file (file-based deployments, older operators) means no
 	// identity, never an error.
-	sourceDigest := ""
-	if raw, err := os.ReadFile(filepath.Join(filepath.Dir(paths.policies), "config-digest")); err == nil {
-		sourceDigest = strings.TrimSpace(string(raw))
-	}
+	sourceDigest := readSourceDigest(paths)
 	if err := ctrl.InstallRuntimeConfig(controller.RuntimeConfig{
 		Engine:              engine,
 		Catalog:             catalog,
@@ -145,8 +142,11 @@ func applyRuntimeConfig(
 		Policies:     len(policies),
 		SignalRules:  signalRules,
 	})
+	// Reset unconditionally: a marker that disappeared (or two markers that
+	// disagree mid-sync) must clear the series, not leave the previous
+	// digest advertised while the API reports none.
+	metrics.RuntimeConfigInfo.Reset()
 	if sourceDigest != "" {
-		metrics.RuntimeConfigInfo.Reset()
 		metrics.RuntimeConfigInfo.WithLabelValues(sourceDigest).Set(1)
 	}
 	return nil
@@ -193,6 +193,13 @@ func watchRuntimeConfig(
 func runtimeConfigDigest(paths runtimeConfigPaths) (string, error) {
 	h := sha256.New()
 	files := []string{paths.policies, paths.windows, paths.mappings, paths.nodeConfigs}
+	// The operator's config-digest markers ride in BOTH mounted ConfigMaps
+	// and must feed the change detector, not just the published identity:
+	// the two mounts sync independently, so a change confined to the
+	// playbooks ConfigMap would otherwise never trigger a reload and the
+	// advertised identity would stay wrong permanently — the exact lie this
+	// feature exists to prevent (round-12 review M2).
+	files = append(files, configDigestPaths(paths)...)
 	for _, f := range files {
 		if f == "" {
 			continue
@@ -226,6 +233,44 @@ func runtimeConfigDigest(paths runtimeConfigPaths) (string, error) {
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// configDigestPaths names the operator-written digest markers beside each
+// mounted configuration source. Both are optional: a file-based deployment
+// with no operator has neither.
+func configDigestPaths(paths runtimeConfigPaths) []string {
+	var out []string
+	if paths.policies != "" {
+		out = append(out, filepath.Join(filepath.Dir(paths.policies), "config-digest"))
+	}
+	if paths.playbooks != "" {
+		out = append(out, filepath.Join(paths.playbooks, "config-digest"))
+	}
+	return out
+}
+
+// readSourceDigest returns the operator-compiled snapshot digest the mounted
+// configuration claims, or "" when no marker is present (file deployments,
+// older operators). When both markers exist and DISAGREE, the two ConfigMaps
+// are mid-sync: report "" rather than a digest that describes only half of
+// what is loaded.
+func readSourceDigest(paths runtimeConfigPaths) string {
+	seen := ""
+	for _, marker := range configDigestPaths(paths) {
+		raw, err := os.ReadFile(marker)
+		if err != nil {
+			continue
+		}
+		value := strings.TrimSpace(string(raw))
+		if value == "" {
+			continue
+		}
+		if seen != "" && seen != value {
+			return ""
+		}
+		seen = value
+	}
+	return seen
 }
 
 func hashFile(h interface{ Write([]byte) (int, error) }, path string) error {

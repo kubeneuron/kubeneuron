@@ -106,7 +106,10 @@ KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
 E2E_STATE_DIR="${E2E_STATE_DIR:-${RUNNER_TEMP:-/tmp}/kubeneuron-hw-e2e/${CLUSTER_NAME}}"
 E2E_KUBECONFIG="${E2E_KUBECONFIG:-${E2E_STATE_DIR}/kubeconfig}"
 case "$E2E_KUBECONFIG" in
-*:*) die "E2E_KUBECONFIG must name one file, not a colon-separated kubeconfig list" ;;
+*:*)
+	printf 'hw-e2e: %s\n' "E2E_KUBECONFIG must name one file, not a colon-separated kubeconfig list" >&2
+	exit 1
+	;;
 esac
 export KUBECONFIG="$E2E_KUBECONFIG"
 RECYCLE_ROLE_ARN="${RECYCLE_ROLE_ARN:-}"
@@ -543,22 +546,22 @@ cmd_test_dcgm() {
 	dcgm_pod=$(kubectl -n gpu-operator get pods -l app=nvidia-dcgm \
 		--field-selector "spec.nodeName=$node" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
+	# The agent image is distroless (no shell, no wget): scrape its metrics
+	# endpoint from a disposable curl pod against the agent Pod IP instead of
+	# exec-ing into it (round-12 review H2).
+	local agent_ip
+	agent_ip=$(kubectl -n "$RUNTIME_NAMESPACE" get pod "$agent_pod" -o jsonpath='{.status.podIP}')
+	[ -n "$agent_ip" ] || die "cannot resolve the agent Pod IP on $node"
+
 	local baseline
-	baseline=$(kubectl -n "$RUNTIME_NAMESPACE" exec "$agent_pod" -- \
-		wget -qO- http://127.0.0.1:9402/metrics 2>/dev/null |
-		grep -E 'kubeneuron_agent_detections_total\{[^}]*source="gpuhealth"' |
-		grep -oE '[0-9]+$' | head -1 || echo 0)
-	baseline=${baseline:-0}
+	baseline=$(gpuhealth_detections "$agent_ip")
 
 	if [ -n "$dcgm_pod" ] &&
 		kubectl -n gpu-operator exec "$dcgm_pod" -- dcgmi test --inject --gpuid 0 \
 			-f 230 -v "$THRESHOLD_XID" >/dev/null 2>&1; then
 		log "test-dcgm: injected XID $THRESHOLD_XID as a DCGM field value; waiting for the gpuhealth source"
 		wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
-			'current=$(kubectl -n '"$RUNTIME_NAMESPACE"' exec '"$agent_pod"' -- \
-				wget -qO- http://127.0.0.1:9402/metrics 2>/dev/null |
-				grep -E "kubeneuron_agent_detections_total\{[^}]*source=\"gpuhealth\"" |
-				grep -oE "[0-9]+$" | head -1); [ "${current:-0}" -gt '"$baseline"' ]'
+			'[ "$(gpuhealth_detections '"$agent_ip"')" -gt '"$baseline"' ]'
 		log "test-dcgm: PASS (gpuhealth source observed the injected DCGM fault)"
 		return 0
 	fi
@@ -595,13 +598,23 @@ cmd_test_verify_recur() {
 	wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
 		'api GET "/api/v1/incidents/'"$incident"'" | jq -e ".incident.state==\"VERIFYING\"" >/dev/null'
 
-	log "test-verify-recur: re-injecting XID $DRYRUN_XID inside the quiet window"
+	# The agent deduplicates one fault for 2 minutes; an immediate
+	# re-injection would be swallowed and the incident would quiet-resolve.
+	# Space it past the window — the verify quiet window is re-armed by the
+	# recurrence, so the incident is still VERIFYING when it lands.
+	log "test-verify-recur: waiting past the agent dedup window, then re-injecting XID $DRYRUN_XID"
+	sleep 130
 	inject_xid "$node" "$DRYRUN_XID"
 	wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
 		'api GET "/api/v1/incidents/'"$incident"'" \
 			 | jq -e ".incident.state!=\"VERIFYING\" and .incident.state!=\"RESOLVED\"" >/dev/null'
 	local state
 	state=$(api GET "/api/v1/incidents/$incident" | jq -r .incident.state)
+	# Close it: an escalated incident stays OPEN (NEEDS_HUMAN is not halted
+	# for correlation purposes), and the next phase's fault on the same
+	# node+class would ATTACH to it instead of opening its own incident.
+	api POST "/api/v1/incidents/$incident/resolve" \
+		'{"actor":"hw-e2e","reason":"verification-recurrence phase complete"}' >/dev/null
 	log "test-verify-recur: PASS (recurrence during VERIFYING escalated to $state, not RESOLVED)"
 }
 
@@ -777,6 +790,19 @@ cmd_reap() {
 
 # ---------------------------------------------------------------------------
 # helpers
+
+# gpuhealth_detections reads the agent's DCGM/nvidia-smi source counter from
+# a disposable curl pod: the agent image is distroless, so exec-based probes
+# cannot work there.
+gpuhealth_detections() {
+	local ip="$1" out
+	out=$(kubectl -n "$RUNTIME_NAMESPACE" run "kn-metrics-$RANDOM" --rm -i --restart=Never \
+		--image=curlimages/curl:8.10.1 --quiet -- \
+		curl -fsS --max-time 10 "http://${ip}:9402/metrics" 2>/dev/null |
+		grep -E 'kubeneuron_agent_detections_total\{[^}]*source="gpuhealth"' |
+		grep -oE '[0-9]+$' | head -1 || true)
+	printf '%s' "${out:-0}"
+}
 
 gpu_node() {
 	kubectl get nodes -l role=gpu -o jsonpath='{.items[0].metadata.name}'

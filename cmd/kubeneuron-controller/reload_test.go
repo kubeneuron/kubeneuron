@@ -185,6 +185,65 @@ accelerator_profiles:
 	}
 }
 
+// R12 (review M2): the digest markers feed the CHANGE detector, and a
+// playbooks-only edit must therefore reload. Two markers that disagree mean
+// the ConfigMaps are mid-sync: publish no identity rather than one that
+// describes half of what is loaded.
+func TestConfigDigestMarkersDriveReloadAndDisagreementPublishesNothing(t *testing.T) {
+	dir := t.TempDir()
+	playbooks := filepath.Join(dir, "playbooks")
+	if err := os.MkdirAll(playbooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	policies := filepath.Join(dir, "runtime.yaml")
+	if err := os.WriteFile(policies,
+		[]byte("policies:\n  - match: {class: gsp-error}\n    playbook: observe\nsafety: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(playbooks, "observe.yaml"),
+		[]byte("name: observe\ntarget: gpu\nsteps:\n  - name: observe\n    action: notify.observe\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	paths := runtimeConfigPaths{policies: policies, playbooks: playbooks}
+
+	before, err := runtimeConfigDigest(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A marker landing in the PLAYBOOKS mount alone must move the digest —
+	// otherwise a playbooks-only rollout never reloads and the published
+	// identity stays wrong forever.
+	if err := os.WriteFile(filepath.Join(playbooks, "config-digest"), []byte("abc123\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after, err := runtimeConfigDigest(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after == before {
+		t.Fatal("a config-digest marker change must move the reload digest")
+	}
+
+	// Only one marker: that is the identity.
+	if got := readSourceDigest(paths); got != "abc123" {
+		t.Fatalf("source digest = %q, want abc123", got)
+	}
+	// Markers disagree (mid-sync): no identity at all.
+	if err := os.WriteFile(filepath.Join(dir, "config-digest"), []byte("def456\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSourceDigest(paths); got != "" {
+		t.Fatalf("source digest = %q, want empty while the mounts disagree", got)
+	}
+	// Both agree: identity again.
+	if err := os.WriteFile(filepath.Join(dir, "config-digest"), []byte("abc123\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := readSourceDigest(paths); got != "abc123" {
+		t.Fatalf("source digest = %q after both mounts agree, want abc123", got)
+	}
+}
+
 // R11.3: a successful apply publishes the operator-compiled snapshot digest
 // (the "config-digest" file beside the mounted config) as the loaded-config
 // identity — on readyz, and only after everything parsed. An absent file is

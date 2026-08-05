@@ -103,15 +103,19 @@ owns, or generates Secret data.
 
 ## 4. Tokens and notifications
 
+The one-command installer already creates these as `<name>-operator-api-token`
+and `<name>-webhook-token`; create them by hand only on the manual path, and
+keep the names consistent with whichever path you used:
+
 ```sh
 openssl rand -hex 32 > operator-token
 openssl rand -hex 32 > webhook-token
-kubectl -n <ns> create secret generic kubeneuron-operator-api-token --from-file=token=operator-token
-kubectl -n <ns> create secret generic kubeneuron-alertmanager-webhook-token --from-file=token=webhook-token
-kubectl -n <ns> create secret generic kubeneuron-slack --from-literal=webhook-url=https://hooks.slack.com/services/...
+kubectl -n <ns> create secret generic <name>-operator-api-token --from-file=token=operator-token
+kubectl -n <ns> create secret generic <name>-webhook-token --from-file=token=webhook-token
+kubectl -n <ns> create secret generic <name>-slack --from-literal=webhook-url=https://hooks.slack.com/services/...
 ```
 
-Reference `kubeneuron-alertmanager-webhook-token` from
+Reference `<name>-webhook-token` from
 `spec.notifications.webhookToken`: it is mandatory, so the operator-managed
 Alertmanager endpoint is never anonymous. Copy the same Secret into the
 monitoring namespace so Alertmanager can present it — the dependency
@@ -119,9 +123,12 @@ profile's `VMAlertmanager` mounts it and sends
 `Authorization: Bearer <token>` with every webhook delivery:
 
 ```sh
-kubectl -n <ns> get secret kubeneuron-alertmanager-webhook-token -o yaml \
+kubectl -n <ns> get secret <name>-webhook-token -o yaml \
   | sed 's/namespace: <ns>/namespace: kubeneuron-monitoring/' | kubectl apply -f -
-``` Reference the API Secret from
+```
+
+New to this? [docs/pilot-checklist.md](pilot-checklist.md) walks the whole
+path from a green install to a first incident visible in the panel. Reference the API Secret from
 `spec.notifications.operatorAPIToken` to enable `kubeneuronctl`, the web
 panel, and `http_sd`; it is mandatory when `executionMode: Paused` so an
 authenticated operator can resume the gate. Slack is optional and is

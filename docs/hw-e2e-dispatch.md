@@ -14,11 +14,15 @@ aws iam create-open-id-connect-provider \
   --client-id-list sts.amazonaws.com
 ```
 
-## 2. Trust policy — environment-scoped, not branch-scoped
+## 2. Trust policy — two subjects: the lab run and the reaper
 
-The workflow declares `environment: gpu-lab`, so the token's `sub` is
-`repo:<org>/<repo>:environment:gpu-lab`. Scope trust to THAT — a
-branch-scoped subject would let any branch dispatch the lab.
+The E2E workflow declares `environment: gpu-lab`, so its token's `sub` is
+`repo:<org>/<repo>:environment:gpu-lab`. The **reaper** — the out-of-band
+cost watchdog — deliberately declares no environment (it must run without a
+human approval gate, on a schedule), so its subject is the branch form
+`repo:<org>/<repo>:ref:refs/heads/main`. Both must be trusted, or the one
+workflow whose failure means "a paid cluster may be leaking" cannot even
+authenticate.
 
 ```json
 {
@@ -29,13 +33,22 @@ branch-scoped subject would let any branch dispatch the lab.
     "Action": "sts:AssumeRoleWithWebIdentity",
     "Condition": {
       "StringEquals": {
-        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-        "token.actions.githubusercontent.com:sub": "repo:<ORG>/<REPO>:environment:gpu-lab"
+        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+      },
+      "StringLike": {
+        "token.actions.githubusercontent.com:sub": [
+          "repo:<ORG>/<REPO>:environment:gpu-lab",
+          "repo:<ORG>/<REPO>:ref:refs/heads/main"
+        ]
       }
     }
   }]
 }
 ```
+
+Store the role ARN as a **repository** secret (`AWS_GPU_LAB_ROLE_ARN`), not
+an environment secret: an environment secret is invisible to the reaper,
+which declares no environment.
 
 ## 3. Permission policy — bounded to the e2e naming scheme
 
@@ -55,8 +68,9 @@ eksctl needs CloudFormation, EC2, and IAM role creation; bound every one:
 
 ## 4. Wire it
 
-Set the role ARN as the `gpu-lab` environment variable/secret the workflow's
-`aws-actions/configure-aws-credentials` step consumes, keep the typed
-confirmation input, and require environment reviewers on `gpu-lab`. The first
+Set the role ARN as the repository secret `AWS_GPU_LAB_ROLE_ARN` (see above),
+set the repository variable `HW_E2E_ENABLED=true` to arm the schedules, keep
+the typed confirmation input, and require environment reviewers on
+`gpu-lab`. The first
 dispatched run proves reproducibility without a workstation; until then the
 weekly cron should stay disabled or it will fail red on missing credentials.

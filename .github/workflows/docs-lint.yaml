@@ -8,9 +8,19 @@ name: Docs lint
 on:
   push:
     branches: [main]
-    paths: ["**.md", "hack/stale-claims.txt", "hack/verify-docs.sh"]
+    paths:
+      - "**.md"
+      - "hack/stale-claims.txt"
+      - "hack/verify-docs.sh"
+      # Migrations feed the derived-fact check: a commit that adds only a
+      # .sql file must still prove the documented heads still match.
+      - "internal/store/*/migrations/**"
   pull_request:
-    paths: ["**.md", "hack/stale-claims.txt", "hack/verify-docs.sh"]
+    paths:
+      - "**.md"
+      - "hack/stale-claims.txt"
+      - "hack/verify-docs.sh"
+      - "internal/store/*/migrations/**"
 
 permissions:
   contents: read

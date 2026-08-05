@@ -1129,6 +1129,84 @@ exercise_agent_authentication() {
 # ladder to AWAITING_APPROVAL, kills the controller Pod, and proves the
 # SQLite workflow state survives: the incident is still parked, no dry-run
 # step re-executes, and the post-restart approval resumes the ladder.
+# exercise_backup_restore proves the DOCUMENTED restore procedure works:
+# snapshot through the authenticated endpoint, destroy the live database,
+# restore it through the helper pod, and confirm the incident history that
+# only existed in the snapshot is back. Without this, docs/operations.md is
+# describing a procedure nobody has ever run.
+exercise_backup_restore() {
+	note "exercising the documented backup -> wipe -> restore cycle"
+	local pf_log="$work_dir/backup-port-forward.log"
+	local pf_pid= port= snapshot="$work_dir/kubeneuron-backup.db"
+	local before after helper=kubeneuron-restore-helper
+
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+		"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
+	pf_pid=$!
+	local deadline=$((SECONDS + 30))
+	while ((SECONDS < deadline)); do
+		port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$pf_log")
+		[[ -n $port ]] && break
+		sleep 1
+	done
+	[[ -n $port ]] || die "backup-phase port-forward allocated no local port"
+
+	curl --silent --show-error --fail --noproxy '*' --max-time 60 \
+		-H 'Authorization: Bearer integration-operator-token' \
+		"http://127.0.0.1:${port}/api/v1/backup" -o "$snapshot" ||
+		die "backup endpoint did not return a snapshot"
+	[[ -s $snapshot ]] || die "backup snapshot is empty"
+	before=$(curl --silent --noproxy '*' --max-time 10 \
+		-H 'Authorization: Bearer integration-operator-token' \
+		"http://127.0.0.1:${port}/api/v1/incidents" | "$JQ_BIN" 'length')
+	kill "$pf_pid" >/dev/null 2>&1 || true
+	wait "$pf_pid" >/dev/null 2>&1 || true
+
+	# Follow docs/operations.md exactly: stop, mount, wipe, restore, start.
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" scale "deploy/${ROOT_NAME}-controller" --replicas=0 >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status "deploy/${ROOT_NAME}-controller" --timeout=120s >/dev/null
+
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete pod "$helper" --ignore-not-found --wait=true >/dev/null
+	sed "s/claimName: kubeneuron-controller-state/claimName: ${ROOT_NAME}-controller-state/" \
+		"$REPO_ROOT/deploy/kubernetes/backup/restore-helper.yaml" |
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" apply -f - >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" wait --for=condition=Ready "pod/$helper" --timeout=120s >/dev/null
+
+	# Destroy the live database so the restore has to be real.
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" exec "$helper" -- \
+		sh -c 'rm -f /state/kubeneuron.db /state/kubeneuron.db-wal /state/kubeneuron.db-shm' >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" cp "$snapshot" "${helper}:/state/kubeneuron.db" >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" exec "$helper" -- \
+		sh -c 'test -s /state/kubeneuron.db' || die "restored database is missing or empty"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete pod "$helper" --wait=true >/dev/null
+
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" scale "deploy/${ROOT_NAME}-controller" --replicas=1 >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status "deploy/${ROOT_NAME}-controller" --timeout=300s >/dev/null
+	assert_runtime_ready
+
+	pf_log="$work_dir/backup-port-forward-2.log"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+		"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
+	pf_pid=$!
+	port=
+	deadline=$((SECONDS + 60))
+	while ((SECONDS < deadline)); do
+		port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$pf_log")
+		[[ -n $port ]] && break
+		sleep 1
+	done
+	[[ -n $port ]] || die "post-restore port-forward allocated no local port"
+	after=$(curl --silent --noproxy '*' --max-time 10 \
+		-H 'Authorization: Bearer integration-operator-token' \
+		"http://127.0.0.1:${port}/api/v1/incidents" | "$JQ_BIN" 'length')
+	kill "$pf_pid" >/dev/null 2>&1 || true
+	wait "$pf_pid" >/dev/null 2>&1 || true
+
+	[[ "$after" == "$before" ]] ||
+		die "restored incident count $after != snapshot count $before"
+	note "backup snapshot restored through the documented helper-pod procedure; $after incident(s) survived a wiped database"
+}
+
 exercise_controller_restart_mid_playbook() {
 	note "exercising a controller restart in the middle of an approval-gated playbook"
 	local pf_log="$work_dir/restart-port-forward.log"
@@ -1923,6 +2001,7 @@ exercise_agent_authentication
 wait_root_condition True RuntimeAvailable
 assert_runtime_ready
 exercise_controller_restart_mid_playbook
+exercise_backup_restore
 wait_root_condition True RuntimeAvailable
 assert_runtime_ready
 exercise_routine_tls_rotation

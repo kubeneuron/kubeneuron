@@ -386,18 +386,30 @@ func (c *Controller) clearArmingHold(id string) {
 }
 
 func (c *Controller) refuseUnarmedAgent(ctx context.Context, inc *types.Incident, step *playbook.Step) (reason string, verdict armingAdmission) {
-	defer func() {
-		if verdict != armingHold {
-			c.clearArmingHold(inc.ID)
-		}
-	}()
 	if inc.DryRun {
 		return "", armingProceed
 	}
 	def, ok := action.ByWire(step.Action)
 	if !ok || !def.AgentDestructive {
+		// NOT an agent-destructive step: this verdict says nothing about the
+		// agent's arming, so it must not touch the hold anchor. The
+		// playbook-scope preflight walks EVERY step each pass — clearing
+		// here made the cordon/drain rungs of a standard ladder reset the
+		// reboot rung's anchor every pass, so the grace never expired and a
+		// never-armable node held silently forever (round-12 review H1).
 		return "", armingProceed
 	}
+	// From here every verdict IS about arming. A proceed (armed, unknown,
+	// stale declaration) ends any hold epoch; a hold keeps its anchor; a
+	// refuse leaves the anchor for the ESCALATING TRANSITION to clear once
+	// it commits — clearing before the commit would grant a fresh full
+	// grace after every transition conflict, postponing the refusal
+	// indefinitely (round-12 review M1).
+	defer func() {
+		if verdict == armingProceed {
+			c.clearArmingHold(inc.ID)
+		}
+	}()
 	node, err := c.store.GetNode(ctx, inc.Target.Node)
 	if err != nil || node == nil {
 		return "", armingProceed // transient: no inventory row right now
