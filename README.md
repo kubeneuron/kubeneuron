@@ -27,10 +27,11 @@ named approver on the record.
 EKS cluster with a real Tesla T4, a kernel-injected XID walked
 cordon → drain → approval → `ReplaceNode`, and the controller terminated
 the actual EC2 instance under a scoped IAM role before the incident closed
-as *replaced*. Honest boundary: per-device *hardware* GPU reset remains
-unvalidated (cloud guests have no PCI reset; it needs bare metal — see
-[PRODUCT_PLAN.md](PRODUCT_PLAN.md)). Full history:
-[CHANGELOG.md](CHANGELOG.md).
+as *replaced*. On cloud GPUs, where the guest has no PCI reset, the agent
+refuses a per-device reset **on measured evidence** and the ladder routes
+to node replace instead — reset stays reserved for bare metal, where the
+hardware matrix in [PRODUCT_PLAN.md](PRODUCT_PLAN.md) gates it. Full
+history: [CHANGELOG.md](CHANGELOG.md).
 
 **Start here:** [product tour](docs/product-tour.md) (screenshots + live
 demo) · [install](docs/install.md) · [one-pager](docs/one-pager.md) ·
