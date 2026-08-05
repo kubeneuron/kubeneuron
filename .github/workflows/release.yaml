@@ -198,6 +198,11 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          # ONLY this workflow's own build artifacts. Without the pattern
+          # this pulls every artifact in the run — including the kind gate's
+          # diagnostic dump (controller/agent logs, cluster resources) — and
+          # ships it as release assets. The rc-1 run proved it.
+          pattern: "*-dist"
           path: collected
 
       - uses: sigstore/cosign-installer@v3
@@ -209,6 +214,14 @@ jobs:
           version="${GITHUB_REF_NAME}"
           mkdir -p dist
           cp collected/*/* dist/
+          # Fail loudly rather than ship a surprise: the release carries
+          # exactly the four artifact kinds below.
+          for f in dist/*; do
+            case "$(basename "$f")" in
+              kubeneuronctl-*|sbom-*|images.txt|install.sh|install-*.sh|kubeneuron-install-*.yaml) ;;
+              *) echo "unexpected release asset: $f" >&2; exit 1 ;;
+            esac
+          done
           (
             cd dist
             sha256sum -- * > "checksums-${version}.txt"
