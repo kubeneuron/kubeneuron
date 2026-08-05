@@ -23,6 +23,11 @@ set -euo pipefail
 #   KEEP_CLUSTER=1    retain the cluster for inspection
 
 BASELINE=${BASELINE:-v0.1.0}
+# Releases are published from the PUBLIC repository; this working tree may be
+# the private development mirror, whose remote has neither the release nor the
+# tag. Resolve both against the release repository explicitly instead of
+# whatever `gh` infers from the local remote.
+RELEASE_REPO=${RELEASE_REPO:-kubeneuron/kubeneuron}
 CLUSTER_NAME=${CLUSTER_NAME:-kubeneuron-upgrade}
 KIND_BIN=${KIND_BIN:-kind}
 KUBECTL_BIN=${KUBECTL_BIN:-kubectl}
@@ -73,7 +78,8 @@ done
 
 note "downloading the $BASELINE release manifest and image digests"
 install_manifest="$work_dir/kubeneuron-install-$BASELINE.yaml"
-if ! gh release download "$BASELINE" -p "kubeneuron-install-$BASELINE.yaml" -p images.txt \
+if ! gh release download "$BASELINE" -R "$RELEASE_REPO" \
+	-p "kubeneuron-install-$BASELINE.yaml" -p images.txt \
 	--dir "$work_dir" --clobber 2>/dev/null || [[ ! -s $install_manifest ]]; then
 	# A baseline whose release published no assets (a release run that died
 	# before the manifest job) is still a usable baseline: build the install
@@ -81,8 +87,14 @@ if ! gh release download "$BASELINE" -p "kubeneuron-install-$BASELINE.yaml" -p i
 	note "release assets unavailable for $BASELINE; building the manifest from the tag's tree"
 	baseline_tree="$work_dir/baseline-tree"
 	rm -rf "$baseline_tree"
+	if ! git -C "$REPO_ROOT" rev-parse --verify "refs/tags/$BASELINE" >/dev/null 2>&1; then
+		# The tag may exist only in the release repository (this tree is the
+		# private mirror). Fetch it by name before giving up.
+		git -C "$REPO_ROOT" fetch --quiet "https://github.com/${RELEASE_REPO}.git" \
+			"refs/tags/${BASELINE}:refs/tags/${BASELINE}" 2>/dev/null || true
+	fi
 	git -C "$REPO_ROOT" worktree add --detach "$baseline_tree" "$BASELINE" >/dev/null 2>&1 ||
-		die "cannot check out baseline $BASELINE to build its manifest"
+		die "cannot check out baseline $BASELINE to build its manifest (not in this tree and not fetchable from $RELEASE_REPO)"
 	("$KUBECTL_BIN" kustomize "$baseline_tree/config/default" >"$install_manifest")
 	git -C "$REPO_ROOT" worktree remove --force "$baseline_tree" >/dev/null 2>&1 || true
 fi

@@ -69,6 +69,15 @@ jobs:
           mkdir -p dist
           digests="{"
           # published image name -> Dockerfile stage
+          # --provenance=false is deliberate, and was re-added after the
+          # v0.2.2-rc.2 upgrade rehearsal failed on it: buildx attestations
+          # ride in the image index as unknown/unknown manifests, and
+          # `kind load docker-image` (which runs `ctr import --all-platforms`)
+          # cannot import an index whose attestation blobs the local daemon
+          # never pulled. That breaks the most common way anyone verifies a
+          # released image locally. Supply-chain evidence is not lost: every
+          # image is cosign-signed and every component ships an SBOM as a
+          # release asset.
           for entry in operator=operator controller=controller agent=agent kubeneuronctl=cli; do
             name="${entry%%=*}"
             stage="${entry#*=}"
@@ -79,6 +88,7 @@ jobs:
               --target "$stage" \
               --build-arg VERSION="$version" \
               --tag "$image:$version" \
+              --provenance=false \
               --push .
             digest="$(docker buildx imagetools inspect "$image:$version" \
               --format '{{json .Manifest}}' | jq -r .digest)"
