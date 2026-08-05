@@ -33,6 +33,13 @@ env:
 
 jobs:
   reap:
+    # No-op until the OIDC role exists (docs/hw-e2e-dispatch.md): without
+    # this guard the schedule failed red every 30 minutes on missing
+    # credentials, which trains people to ignore the one workflow whose
+    # failure should mean "a paid cluster may be leaking".
+    # Enable by setting the repository variable HW_E2E_ENABLED=true once the
+    # role from docs/hw-e2e-dispatch.md exists.
+    if: vars.HW_E2E_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

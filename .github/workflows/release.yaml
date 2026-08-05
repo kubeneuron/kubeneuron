@@ -23,11 +23,13 @@ env:
 jobs:
   # The gate IS the CI workflow — identical checks, zero drift.
   gates:
+    if: github.repository == 'kubeneuron/kubeneuron'
     permissions:
       contents: read
     uses: ./.github/workflows/ci.yaml
 
   images:
+    if: github.repository == 'kubeneuron/kubeneuron'
     needs: [gates]
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -93,6 +95,7 @@ jobs:
           retention-days: 1
 
   manifest:
+    if: github.repository == 'kubeneuron/kubeneuron'
     needs: [images]
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -145,6 +148,7 @@ jobs:
           retention-days: 1
 
   ctl:
+    if: github.repository == 'kubeneuron/kubeneuron'
     needs: [gates]
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -178,6 +182,7 @@ jobs:
           retention-days: 1
 
   release:
+    if: github.repository == 'kubeneuron/kubeneuron'
     needs: [images, manifest, ctl]
     runs-on: ubuntu-latest
     timeout-minutes: 15

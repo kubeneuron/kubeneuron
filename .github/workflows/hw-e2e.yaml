@@ -45,6 +45,12 @@ env:
 
 jobs:
   gpu-e2e:
+    # The weekly cron is a no-op until the OIDC role exists (set the
+    # repository variable HW_E2E_ENABLED=true; docs/hw-e2e-dispatch.md) —
+    # a red cron on missing credentials is noise that buries real failures.
+    # Manual dispatch stays available regardless: it fails fast and visibly
+    # in front of the human who clicked it.
+    if: github.event_name == 'workflow_dispatch' || vars.HW_E2E_ENABLED == 'true'
     runs-on: ubuntu-latest
     # Gated by the gpu-lab environment: add required reviewers there so every
     # dispatch and cron run waits for a human approval before spending money.

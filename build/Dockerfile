@@ -24,14 +24,14 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
       -o /out/kubeneuronctl ./cmd/kubeneuronctl
 
 FROM gcr.io/distroless/static-debian12:nonroot AS operator
-LABEL org.opencontainers.image.source="https://github.com/andreypetruk/kube-neuron" \
+LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron" \
       org.opencontainers.image.description="KubeNeuron operator" \
       org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /out/kubeneuron-operator /kubeneuron-operator
 ENTRYPOINT ["/kubeneuron-operator"]
 
 FROM gcr.io/distroless/static-debian12:nonroot AS controller
-LABEL org.opencontainers.image.source="https://github.com/andreypetruk/kube-neuron" \
+LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron" \
       org.opencontainers.image.description="KubeNeuron controller" \
       org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /out/kubeneuron-controller /kubeneuron-controller
@@ -74,7 +74,7 @@ RUN set -eux; \
     cp -a /lib/*-linux-gnu*/libgcc_s.so.1 /dcgm/usr/lib/
 
 FROM gcr.io/distroless/base-debian12 AS agent
-LABEL org.opencontainers.image.source="https://github.com/andreypetruk/kube-neuron" \
+LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron" \
       org.opencontainers.image.description="KubeNeuron node agent" \
       org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=busybox /bin/busybox /bin/nsenter
@@ -84,7 +84,7 @@ COPY --from=build /out/kubeneuron-agent /kubeneuron-agent
 ENTRYPOINT ["/kubeneuron-agent"]
 
 FROM gcr.io/distroless/static-debian12:nonroot AS cli
-LABEL org.opencontainers.image.source="https://github.com/andreypetruk/kube-neuron" \
+LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron" \
       org.opencontainers.image.description="kubeneuronctl CLI" \
       org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /out/kubeneuronctl /kubeneuronctl
