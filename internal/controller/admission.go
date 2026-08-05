@@ -359,7 +359,38 @@ const armingPropagationGrace = 2 * time.Minute
 // silent bypass. This check is advisory-early — a human must not be asked to
 // approve a step the node will provably refuse — the executor's own boundary
 // remains the enforcement.
-func (c *Controller) refuseUnarmedAgent(ctx context.Context, inc *types.Incident, step *playbook.Step) (string, armingAdmission) {
+// armingHoldDuration returns how long the incident has been observed in the
+// arming-in-flight hold, recording the first observation. The grace is
+// measured from here, NOT from StateChangedAt: pauses, maintenance windows,
+// and playbook cooldowns hold an incident in EVALUATING without touching it,
+// and an anchor on StateChangedAt would expire a grace that never ran the
+// moment such a hold clears (review F1).
+func (c *Controller) armingHoldDuration(id string) time.Duration {
+	now := time.Now()
+	c.armingHoldMu.Lock()
+	defer c.armingHoldMu.Unlock()
+	first, ok := c.armingHoldSince[id]
+	if !ok {
+		c.armingHoldSince[id] = now
+		return 0
+	}
+	return now.Sub(first)
+}
+
+// clearArmingHold forgets an incident's hold anchor. Called on every non-hold
+// arming verdict and on every state transition, so the map cannot leak.
+func (c *Controller) clearArmingHold(id string) {
+	c.armingHoldMu.Lock()
+	delete(c.armingHoldSince, id)
+	c.armingHoldMu.Unlock()
+}
+
+func (c *Controller) refuseUnarmedAgent(ctx context.Context, inc *types.Incident, step *playbook.Step) (reason string, verdict armingAdmission) {
+	defer func() {
+		if verdict != armingHold {
+			c.clearArmingHold(inc.ID)
+		}
+	}()
 	if inc.DryRun {
 		return "", armingProceed
 	}
@@ -385,14 +416,16 @@ func (c *Controller) refuseUnarmedAgent(ctx context.Context, inc *types.Incident
 	// propagation — the agent refuses served arming (non-real GPU driver,
 	// static unarmed pin) and can NEVER execute this step — so escalate now
 	// instead of looping approve→executor-refusal→escalate. The hold clock
-	// is StateChangedAt: it is not bumped while holding, so the grace
-	// accumulates across passes and resets only on a real transition.
+	// is the FIRST hold observation (armingHoldDuration), so the grace
+	// genuinely runs for its full length regardless of how long the incident
+	// already sat in EVALUATING behind a pause, window, or cooldown.
 	if c.servedArming(ctx, inc.Target.Node) == types.AgentArmingArmed {
-		if time.Since(inc.StateChangedAt) <= armingPropagationGrace {
+		held := c.armingHoldDuration(inc.ID)
+		if held <= armingPropagationGrace {
 			return "", armingHold
 		}
-		return fmt.Sprintf("refusing %s before requesting approval: node %s is inside spec.safety.destructiveExecution.nodeSelector but its agent has kept registering unarmed for over %s — it cannot adopt served arming (non-real GPU driver or a static pin); fix the agent or route the ladder to a platform-side rung",
-			step.Action, inc.Target.Node, armingPropagationGrace), armingRefuse
+		return fmt.Sprintf("refusing %s before requesting approval: node %s is inside spec.safety.destructiveExecution.nodeSelector but its agent kept registering unarmed for %s of arming-propagation grace — it cannot adopt served arming (non-real GPU driver or a static pin); fix the agent or route the ladder to a platform-side rung",
+			step.Action, inc.Target.Node, held.Round(time.Second)), armingRefuse
 	}
 	return fmt.Sprintf("refusing %s before requesting approval: node %s's agent registered as unarmed and the node is outside spec.safety.destructiveExecution.nodeSelector; label it into the blast radius or route the ladder to a platform-side rung",
 		step.Action, inc.Target.Node), armingRefuse

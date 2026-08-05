@@ -262,7 +262,7 @@ func TestApprovalDoesNotExecuteHotSwappedStep(t *testing.T) {
 	}
 
 	// The human approves the reboot they were shown; the decision binds to it.
-	if err := c.DecideApproval(ctx, inc.ID, "alice", "cli", types.ApprovalApproved, 0); err != nil {
+	if err := c.DecideApproval(ctx, inc.ID, "alice", "cli", types.ApprovalApproved, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	approvalsBefore := len(notifier.approvals)

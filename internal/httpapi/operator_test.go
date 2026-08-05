@@ -47,7 +47,7 @@ func (f *fakeOperator) IncidentDetail(_ context.Context, id string) (*types.Inci
 	return &types.Incident{ID: id}, []*types.AuditEntry{{IncidentID: id, Action: "open"}}, nil
 }
 
-func (f *fakeOperator) DecideApproval(_ context.Context, id, actor, channel string, decision types.ApprovalDecision, expectedEpoch int) error {
+func (f *fakeOperator) DecideApproval(_ context.Context, id, actor, channel string, decision types.ApprovalDecision, expectedEpoch int, reason string) error {
 	f.decisions = append(f.decisions, fmt.Sprintf("%s:%s:%s:%d", id, decision, actor, expectedEpoch))
 	return nil
 }

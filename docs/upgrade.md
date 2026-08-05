@@ -56,6 +56,12 @@ Always: **CRDs → operator → controller/agent images.**
    turns Ready only after a fresh durable registration acknowledgment from
    the new controller.
 
+   Upgrading **to v0.2.2 or later** rolls the controller Deployment and the
+   agent DaemonSet once each even with unchanged TLS material: the TLS
+   digest became per-workload (a trust expansion now rolls only its
+   consumers), so both `kubeneuron.io/tls-digest` annotations change format
+   on the first reconcile. One-time, expected, and safe.
+
 3. **Verify**: root `Ready=True`, controller `/metrics` serving, agent
    DaemonSet fully available, and a synthetic signal walks to an incident
    (see [quickstart](quickstart.md) step 5).

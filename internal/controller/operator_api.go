@@ -42,7 +42,7 @@ func (c *Controller) IncidentDetail(ctx context.Context, id string) (*types.Inci
 // step that is current now — the one the human is approving — so a later
 // hot-swap or rewind that changes the action at this index is caught at resume
 // and the approval is not honored for an action the human never saw.
-func (c *Controller) DecideApproval(ctx context.Context, id, actor, channel string, decision types.ApprovalDecision, expectedEpoch int) error {
+func (c *Controller) DecideApproval(ctx context.Context, id, actor, channel string, decision types.ApprovalDecision, expectedEpoch int, reason string) error {
 	inc, err := c.store.GetIncident(ctx, id)
 	if err != nil {
 		return err
@@ -84,7 +84,19 @@ func (c *Controller) DecideApproval(ctx context.Context, id, actor, channel stri
 		StepHash:     request.StepHash,
 		ParkEpoch:    request.ParkEpoch,
 	}
-	return approval.New(c.store, c.runtimeConfig(ctx).ApprovalTTL).Decide(ctx, id, step, actor, channel, decision)
+	if err := approval.New(c.store, c.runtimeConfig(ctx).ApprovalTTL).Decide(ctx, id, step, actor, channel, decision); err != nil {
+		return err
+	}
+	// The decision moment itself belongs in the audit trail — with the
+	// human's stated reason, which the API and CLI accept and promise to
+	// record (review F2: it used to be silently dropped). The resume pass
+	// later audits the resulting transition separately.
+	if err := c.appendAudit(ctx, inc, actor,
+		"approval-"+string(decision),
+		firstNonBlank(reason, fmt.Sprintf("round %d %s via %s", inc.ApprovalEpoch, decision, channel))); err != nil {
+		c.log.Error("decision audit append failed", "incident", id, "err", err)
+	}
+	return nil
 }
 
 // ResolveIncident manually resolves an incident (typically from

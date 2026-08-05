@@ -68,6 +68,17 @@ var (
 		Help: "Failed accelerator-stack restore attempts by the janitor.",
 	})
 
+	// RuntimeConfigInfo is an info metric identifying the loaded runtime
+	// configuration: exactly one series with the digest of the
+	// operator-compiled snapshot currently live in this process. Alert on it
+	// disagreeing with KubeNeuron.status.configDigest for longer than the
+	// kubelet ConfigMap sync period — that is a config rollout that never
+	// landed. Reset+set on every successful reload keeps it single-series.
+	RuntimeConfigInfo = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kubeneuron_runtime_config_info",
+		Help: "Identity of the loaded runtime configuration (value is always 1).",
+	}, []string{"digest"})
+
 	// AuthFailures counts rejected authentication attempts by API surface
 	// (operator, webhook, agent). A burst is either a misconfigured client
 	// or someone probing; both deserve an alert before they page as an

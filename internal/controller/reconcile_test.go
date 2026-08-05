@@ -207,7 +207,7 @@ func TestWalkApprovalParkAndApprove(t *testing.T) {
 	// A human approves through the real decision API, which binds the decision
 	// to the current approval round's request; the incident resumes and
 	// finishes the ladder.
-	if err := c.DecideApproval(context.Background(), id, "alice", "cli", types.ApprovalApproved, 0); err != nil {
+	if err := c.DecideApproval(context.Background(), id, "alice", "cli", types.ApprovalApproved, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	inc := drive(t, c, st, id, types.StateVerifying)
@@ -221,7 +221,7 @@ func TestWalkApprovalRejectionQuarantines(t *testing.T) {
 	id := openIncidentFor(t, c, types.ClassFellOffBus)
 
 	drive(t, c, st, id, types.StateAwaitingApproval)
-	if err := c.DecideApproval(context.Background(), id, "bob", "cli", types.ApprovalRejected, 0); err != nil {
+	if err := c.DecideApproval(context.Background(), id, "bob", "cli", types.ApprovalRejected, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	drive(t, c, st, id, types.StateNeedsHuman)

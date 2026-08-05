@@ -26,8 +26,9 @@ named approver on the record.
 **Status (v0.2.1):** the full workflow is real and validated live — on an
 EKS cluster with a real Tesla T4, a kernel-injected XID walked
 cordon → drain → approval → `ReplaceNode`, and the controller terminated
-the actual EC2 instance under a scoped IAM role before the incident closed
-as *replaced*. On cloud GPUs, where the guest has no PCI reset, the agent
+the actual EC2 instance under a scoped IAM role, the node group replaced
+it, and the incident resolved through the verification quiet window. On
+cloud GPUs, where the guest has no PCI reset, the agent
 refuses a per-device reset **on measured evidence** and the ladder routes
 to node replace instead — reset stays reserved for bare metal, where the
 hardware matrix in [PRODUCT_PLAN.md](PRODUCT_PLAN.md) gates it. Full
@@ -405,8 +406,10 @@ agent host state across restarts; and cloud GPU node remediation —
 primitive on autoscaled fleets and `RecycleNode` (stop/start) for
 self-managed nodes, driven controller-side through IRSA. The destructive
 path is validated on live EKS: a `fell-off-bus` incident ran
-cordon → drain → approval → `ReplaceNode` → close-as-replaced against a
-real g4dn instance, under the `destructiveExecution` node confinement.
+cordon → drain → approval → `ReplaceNode` against a real g4dn instance —
+the controller terminated it, the node group replaced it, and the
+incident resolved through the verification quiet window — under the
+`destructiveExecution` node confinement.
 
 **Remaining, deliberately hardware-gated:** per-device *hardware* GPU
 reset on bare metal (a virtualized instance has no guest PCI reset, so the

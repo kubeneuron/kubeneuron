@@ -44,6 +44,10 @@ Commands (the workflow runs them in this order):
                      dedup window) and assert the threshold path: one signal
                      holds in OBSERVING, the third crosses the policy threshold
                      and the observe-only ladder resolves.
+  test-dcgm          Exercise the DCGM detection source via field injection
+                     (fallback: live dmon parse-clean check). UNEXERCISED LIVE.
+  test-verify-recur  Re-inject during VERIFYING; assert recurrence escalates.
+                     UNEXERCISED LIVE.
   test-destructive   Flip to executionMode=Enabled under a confined
                      destructiveExecution block and assert the ReplaceNode path
                      closes the incident as replaced.
@@ -333,14 +337,15 @@ cmd_deploy() {
 			sleep 2
 		done
 	) &
-	local repoint_pid=$!
+	_REPOINT_PID=$!
 	local install_rc=0
 	"$REPO_ROOT/deploy/install.sh" \
 		--name "$ROOT_NAME" --namespace "$RUNTIME_NAMESPACE" \
 		--controller-image "$ECR_REGISTRY/kubeneuron/controller:$IMAGE_TAG" \
 		--agent-image "$ECR_REGISTRY/kubeneuron/agent:$IMAGE_TAG" || install_rc=$?
-	kill "$repoint_pid" 2>/dev/null || true
-	wait "$repoint_pid" 2>/dev/null || true
+	kill "$_REPOINT_PID" 2>/dev/null || true
+	wait "$_REPOINT_PID" 2>/dev/null || true
+	_REPOINT_PID=""
 	[ "$install_rc" -eq 0 ] || die "install.sh failed with $install_rc"
 	assert_kube_target
 
@@ -425,8 +430,6 @@ cmd_test_threshold() {
 	assert_kube_target
 
 	log "test-threshold: installing an observe-only ladder for ecc-sbe-rate (threshold 3)"
-	local apply_time
-	apply_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 	kubectl apply -f - <<EOF
 apiVersion: kubeneuron.io/v1alpha1
 kind: GPUPlaybook
@@ -466,24 +469,27 @@ EOF
 	# the CONTROLLER only picks that up via mounted-file hot-reload, and
 	# kubelet propagation adds up to ~2 minutes. Playbook binding is
 	# open-time, so injecting before the reload opens an incident with NO
-	# playbook — it would hold in OBSERVING past any threshold. Wait for a
-	# reload logged after our apply; if none arrives (e.g. a re-run applied
-	# no change, so no reload will ever fire), restart the controller — a
+	# playbook — it would hold in OBSERVING past any threshold. The
+	# controller publishes its loaded-config identity on /readyz
+	# ("ready config=<digest>"); wait until it equals the digest the operator
+	# advertised on the root status. Fallback: restart the controller — a
 	# fresh pod mounts the already-updated ConfigMap immediately.
-	log "test-threshold: waiting for the controller to hot-reload the new policy"
-	local waited=0 reloaded=0
+	local digest
+	digest=$(kubectl -n "$RUNTIME_NAMESPACE" get kubeneuron "$ROOT_NAME" \
+		-o jsonpath='{.status.configDigest}')
+	[ -n "$digest" ] || die "root has no configDigest to wait on"
+	log "test-threshold: waiting for the controller to load configuration ${digest:0:12}"
+	local waited=0 loaded=0
 	while ((waited < 180)); do
-		if kubectl -n "$RUNTIME_NAMESPACE" logs "deployment/${ROOT_NAME}-controller" \
-			--since-time="$apply_time" 2>/dev/null |
-			grep -q "runtime configuration reloaded in place"; then
-			reloaded=1
+		if api GET "/readyz" 2>/dev/null | grep -q "config=${digest}"; then
+			loaded=1
 			break
 		fi
 		sleep 10
 		waited=$((waited + 10))
 	done
-	if ((reloaded == 0)); then
-		log "test-threshold: no reload observed; restarting the controller to load the compiled snapshot"
+	if ((loaded == 0)); then
+		log "test-threshold: loaded digest never matched; restarting the controller to load the compiled snapshot"
 		kubectl -n "$RUNTIME_NAMESPACE" rollout restart "deployment/${ROOT_NAME}-controller"
 		kubectl -n "$RUNTIME_NAMESPACE" rollout status "deployment/${ROOT_NAME}-controller" --timeout=5m
 	fi
@@ -512,6 +518,91 @@ EOF
 		'api GET "/api/v1/incidents/'"$incident"'" \
 			 | jq -e ".incident.state==\"RESOLVED\" and any(.audit[]; .action==\"observe-threshold\")" >/dev/null'
 	log "test-threshold: PASS (sub-threshold hold, 3-signal escalation, observe-only resolution)"
+}
+
+# cmd_test_dcgm exercises the DCGM poll source — the one detection path the
+# XID phases (which write to /dev/kmsg) never touch. DCGM supports field-value
+# injection into a live hostengine; if this build refuses injection, fall back
+# to asserting the agent parses the live `dcgmi dmon` layout cleanly.
+# UNEXERCISED LIVE: written after the first green run; validate on the next
+# paid stand before trusting a red result.
+cmd_test_dcgm() {
+	guard_cluster_name
+	require_cmd kubectl
+	require_cmd jq
+	require_cmd curl
+	local node
+	node=$(gpu_node)
+	assert_kube_target
+
+	local agent_pod dcgm_pod
+	agent_pod=$(kubectl -n "$RUNTIME_NAMESPACE" get pods \
+		-l "app.kubernetes.io/instance=${ROOT_NAME},app.kubernetes.io/component=agent" \
+		--field-selector "spec.nodeName=$node" -o jsonpath='{.items[0].metadata.name}')
+	[ -n "$agent_pod" ] || die "no agent pod on $node"
+	dcgm_pod=$(kubectl -n gpu-operator get pods -l app=nvidia-dcgm \
+		--field-selector "spec.nodeName=$node" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+	local baseline
+	baseline=$(kubectl -n "$RUNTIME_NAMESPACE" exec "$agent_pod" -- \
+		wget -qO- http://127.0.0.1:9402/metrics 2>/dev/null |
+		grep -E 'kubeneuron_agent_detections_total\{[^}]*source="gpuhealth"' |
+		grep -oE '[0-9]+$' | head -1 || echo 0)
+	baseline=${baseline:-0}
+
+	if [ -n "$dcgm_pod" ] &&
+		kubectl -n gpu-operator exec "$dcgm_pod" -- dcgmi test --inject --gpuid 0 \
+			-f 230 -v "$THRESHOLD_XID" >/dev/null 2>&1; then
+		log "test-dcgm: injected XID $THRESHOLD_XID as a DCGM field value; waiting for the gpuhealth source"
+		wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
+			'current=$(kubectl -n '"$RUNTIME_NAMESPACE"' exec '"$agent_pod"' -- \
+				wget -qO- http://127.0.0.1:9402/metrics 2>/dev/null |
+				grep -E "kubeneuron_agent_detections_total\{[^}]*source=\"gpuhealth\"" |
+				grep -oE "[0-9]+$" | head -1); [ "${current:-0}" -gt '"$baseline"' ]'
+		log "test-dcgm: PASS (gpuhealth source observed the injected DCGM fault)"
+		return 0
+	fi
+
+	log "test-dcgm: DCGM injection unavailable; asserting the live dmon layout parses cleanly"
+	if kubectl -n "$RUNTIME_NAMESPACE" logs "$agent_pod" --tail=-1 2>/dev/null |
+		grep -qiE "gpuhealth.*(parse|column|layout).*(error|warn|fail)"; then
+		die "agent logged gpuhealth parse problems against the live dmon layout"
+	fi
+	log "test-dcgm: PASS (fallback: no gpuhealth parse warnings against live dmon output)"
+}
+
+# cmd_test_verify_recur asserts the verification NEGATIVE path: a signal that
+# recurs while an incident is VERIFYING must escalate, not quiet-resolve.
+# UNEXERCISED LIVE: written after the first green run; validate on the next
+# paid stand before trusting a red result.
+cmd_test_verify_recur() {
+	guard_cluster_name
+	require_cmd kubectl
+	require_cmd jq
+	require_cmd curl
+	local node
+	node=$(gpu_node)
+	assert_kube_target
+
+	log "test-verify-recur: opening a fresh dry-run ladder (XID $DRYRUN_XID)"
+	inject_xid "$node" "$DRYRUN_XID"
+	local incident
+	incident=$(wait_for_incident "$node" fell-off-bus)
+	[ -n "$incident" ] || die "no incident opened"
+	wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
+		'api GET "/api/v1/incidents/'"$incident"'" | jq -e ".incident.state==\"AWAITING_APPROVAL\"" >/dev/null'
+	api POST "/api/v1/incidents/$incident/approve" '{"actor":"hw-e2e-approver"}' >/dev/null
+	wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
+		'api GET "/api/v1/incidents/'"$incident"'" | jq -e ".incident.state==\"VERIFYING\"" >/dev/null'
+
+	log "test-verify-recur: re-injecting XID $DRYRUN_XID inside the quiet window"
+	inject_xid "$node" "$DRYRUN_XID"
+	wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
+		'api GET "/api/v1/incidents/'"$incident"'" \
+			 | jq -e ".incident.state!=\"VERIFYING\" and .incident.state!=\"RESOLVED\"" >/dev/null'
+	local state
+	state=$(api GET "/api/v1/incidents/$incident" | jq -r .incident.state)
+	log "test-verify-recur: PASS (recurrence during VERIFYING escalated to $state, not RESOLVED)"
 }
 
 cmd_test_destructive() {
@@ -916,6 +1007,7 @@ api() {
 _API_LOCAL_PORT=""
 _API_TOKEN=""
 _PF_PID=""
+_REPOINT_PID=""
 _ensure_portforward() {
 	[ -n "$_PF_PID" ] && kill -0 "$_PF_PID" 2>/dev/null && return 0
 	_API_TOKEN=$(kubectl -n "$RUNTIME_NAMESPACE" get secret kubeneuron-operator-api-token \
@@ -960,6 +1052,11 @@ cleanup() {
 	if [ -n "$_PF_PID" ]; then
 		kill "$_PF_PID" 2>/dev/null || true
 	fi
+	# A cancelled run must not leak the operator-image repoint loop on the
+	# runner (review F6): the EXIT trap fires on SIGTERM too under -E.
+	if [ -n "$_REPOINT_PID" ]; then
+		kill "$_REPOINT_PID" 2>/dev/null || true
+	fi
 }
 trap cleanup EXIT
 
@@ -977,6 +1074,8 @@ main() {
 	deploy) cmd_deploy "$@" ;;
 	test-dryrun) cmd_test_dryrun "$@" ;;
 	test-threshold) cmd_test_threshold "$@" ;;
+	test-dcgm) cmd_test_dcgm "$@" ;;
+	test-verify-recur) cmd_test_verify_recur "$@" ;;
 	test-destructive) cmd_test_destructive "$@" ;;
 	teardown) cmd_teardown "$@" ;;
 	sweep) cmd_sweep "$@" ;;

@@ -467,7 +467,23 @@ them reintroduces a defect a past review round removed.
   selector-vs-labels match as blast-radius confinement; the agent adopts it
   live and its executor consults it per dispatch. `restore_accelerator_host`
   executes even unarmed — it can only replay a prior quiesce's snapshot —
-  so shrinking the blast radius can never strand a quiesced node.
+  so shrinking the blast radius can never strand a quiesced node. The
+  arming-in-flight hold (in scope, agent freshly unarmed) is bounded by a
+  propagation grace anchored to the FIRST hold observation, kept in memory
+  and cleared on every transition — never to `StateChangedAt`, which
+  pre-ages behind pauses, windows, and cooldowns.
+- **Loaded configuration is identifiable.** The controller publishes the
+  operator-compiled snapshot digest it is actually running (`/readyz`
+  suffix, `kubeneuron_runtime_config_info`, `GET /api/v1/runtime-config`);
+  a digest lagging `KubeNeuron.status.configDigest` is a rollout that has
+  not landed. Playbook binding is open-time; the ONE exception is the
+  narrow late-bind: an incident with NO playbook may be bound in OBSERVING
+  when a matching policy appears (write-fence bump + `bind-playbook` audit
+  row) — bound incidents are never re-bound.
+- **MIG instances are not remediation units.** The physical GPU is. A
+  `MIG-` instance UUID is refused by the reset preflight fail-closed;
+  remediation targets the parent device or escalates to a human. Actual
+  MIG-parent semantics on real MIG hardware remain a gated decision.
 
 ### 2.5 Scale posture
 
@@ -608,7 +624,8 @@ controller does not serve the embedded files. See
 | `GET/POST/DELETE /api/v1/pause` | global automation control | implemented; operator bearer token |
 | `GET /api/v1/targets` | vmagent HTTP service discovery | implemented; operator bearer token |
 | `GET /metrics` | controller Prometheus telemetry | implemented |
-| `POST /api/v1/auth/login`, `GET /api/v1/auth/oidc/*`, `GET /api/v1/session` | operator identity: password users (`spec.auth.users`) and OIDC, server-side sessions; decisions audited under the verified identity | implemented |
+| `POST /api/v1/login`, `GET /api/v1/auth/oidc/*`, `GET /api/v1/session` | operator identity: password users (`spec.auth.users`) and OIDC, server-side sessions; decisions audited under the verified identity | implemented |
+| `GET /api/v1/runtime-config` | identity and shape of the configuration live in this controller (`/readyz` carries the same digest unauthenticated) | implemented; operator bearer token |
 | summary/stream proxy APIs | Web UI data beyond the incident/node reads above | planned |
 | configuration/version APIs | validated UI administration | planned |
 | per-role authorization (beyond authenticated-operator) | granular access control | planned |

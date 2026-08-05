@@ -189,13 +189,14 @@ func TestServedArmingMatchesTheDeclaredBlastRadius(t *testing.T) {
 	}
 }
 
-// R10.2: a node INSIDE the destructive-execution blast radius whose agent
-// freshly registers unarmed is arming-in-flight, not out of scope. Within the
-// propagation grace the walk holds — no human is asked to approve a step the
-// node cannot execute yet. Past the grace the declaration is a verdict: the
-// agent can never adopt served arming (non-real GPU driver, static pin) and
-// the incident escalates early, instead of the old
-// approve→executor-refusal→escalate loop.
+// R10.2/R11.1: a node INSIDE the destructive-execution blast radius whose
+// agent freshly registers unarmed is arming-in-flight, not out of scope. The
+// walk holds, and the propagation grace is measured from the FIRST hold
+// observation — never from StateChangedAt, which pre-ages while an incident
+// sits in EVALUATING behind a pause, maintenance window, or cooldown (review
+// F1: the old anchor expired a grace that never ran). Past the real grace the
+// declaration is a verdict: the agent can never adopt served arming and the
+// incident escalates early instead of wasting a human approval.
 func TestInScopeUnarmedAgentHoldsThenEscalates(t *testing.T) {
 	book := &playbook.Playbook{
 		Name: "reboot", Target: "node",
@@ -206,7 +207,7 @@ func TestInScopeUnarmedAgentHoldsThenEscalates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	run := func(t *testing.T, stateChanged time.Time) (*types.Incident, *recordingNotifier) {
+	fixture := func(t *testing.T, stateChanged time.Time) (*Controller, *sqlite.Store, *recordingNotifier, string) {
 		t.Helper()
 		st, err := sqlite.Open(":memory:")
 		if err != nil {
@@ -235,32 +236,69 @@ func TestInScopeUnarmedAgentHoldsThenEscalates(t *testing.T) {
 		if err := st.CreateIncident(ctx, inc); err != nil {
 			t.Fatal(err)
 		}
-		if err := c.advanceEvaluating(ctx, inc); err != nil {
-			t.Fatal(err)
-		}
-		got, err := st.GetIncident(ctx, inc.ID)
+		return c, st, notifier, inc.ID
+	}
+
+	advance := func(t *testing.T, c *Controller, st *sqlite.Store, id string) *types.Incident {
+		t.Helper()
+		ctx := context.Background()
+		inc, err := st.GetIncident(ctx, id)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return got, notifier
+		if err := c.advanceEvaluating(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		got, err := st.GetIncident(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
 	}
 
 	t.Run("within the grace the walk holds", func(t *testing.T) {
-		inc, notifier := run(t, time.Now())
-		if inc.State != types.StateEvaluating {
+		c, st, notifier, id := fixture(t, time.Now())
+		if inc := advance(t, c, st, id); inc.State != types.StateEvaluating {
 			t.Fatalf("state = %s, want still EVALUATING (held, re-checked next pass)", inc.State)
 		}
 		if len(notifier.approvals) != 0 {
 			t.Fatal("no approval may be requested while arming is still propagating")
 		}
 	})
-	t.Run("past the grace the node is never-armable and escalates", func(t *testing.T) {
-		inc, notifier := run(t, time.Now().Add(-armingPropagationGrace-time.Minute))
-		if inc.State != types.StateNeedsHuman {
+	t.Run("a pre-aged incident still gets its full grace (F1 regression)", func(t *testing.T) {
+		// The incident sat in EVALUATING for 10 minutes behind a maintenance
+		// window; StateChangedAt is ancient. The FIRST arming check must
+		// still hold — the grace runs from first observation, not history.
+		c, st, notifier, id := fixture(t, time.Now().Add(-10*time.Minute))
+		if inc := advance(t, c, st, id); inc.State != types.StateEvaluating {
+			t.Fatalf("state = %s, want EVALUATING (first observation must open a fresh grace)", inc.State)
+		}
+		if len(notifier.approvals) != 0 {
+			t.Fatal("no approval may be requested while arming is still propagating")
+		}
+	})
+	t.Run("past the observed grace the node is never-armable and escalates", func(t *testing.T) {
+		c, st, notifier, id := fixture(t, time.Now())
+		if inc := advance(t, c, st, id); inc.State != types.StateEvaluating {
+			t.Fatalf("first pass state = %s, want a hold", inc.State)
+		}
+		// Age the hold anchor itself past the grace: the next pass treats the
+		// fresh-unarmed declaration as a verdict.
+		c.armingHoldMu.Lock()
+		c.armingHoldSince[id] = time.Now().Add(-armingPropagationGrace - time.Minute)
+		c.armingHoldMu.Unlock()
+		if inc := advance(t, c, st, id); inc.State != types.StateNeedsHuman {
 			t.Fatalf("state = %s, want NEEDS_HUMAN (early escalation, no approval round)", inc.State)
 		}
 		if len(notifier.approvals) != 0 {
 			t.Fatal("a never-armable node must escalate without asking for approval")
+		}
+		// The transition must have cleared the hold anchor (no leak).
+		c.armingHoldMu.Lock()
+		_, still := c.armingHoldSince[id]
+		c.armingHoldMu.Unlock()
+		if still {
+			t.Fatal("the escalating transition must clear the arming-hold anchor")
 		}
 	})
 }

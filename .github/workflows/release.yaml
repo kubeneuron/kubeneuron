@@ -1,31 +1,44 @@
 name: Release
 
-# Tag-driven release: multi-arch images to GHCR (cosign-signed, with SBOMs),
-# a single-file install manifest, kubeneuronctl binaries, and checksums.
+# Tag-driven release: gated on the full CI (build/vet/tests on both store
+# backends + the kind integration suite), then multi-arch images to GHCR
+# (cosign-keyless-signed, with SBOMs), a DIGEST-pinned single-file install
+# manifest, kubeneuronctl binaries, and one checksums file — assembled into a
+# published (non-draft) GitHub release whose notes carry the digest table.
+#
+# A tag on a broken tree must ship nothing: every publishing job `needs` the
+# gates. Nothing here uses a stored secret — GHCR auth is GITHUB_TOKEN and
+# cosign signing is keyless via the job's OIDC identity token.
 on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
-  packages: write
-  id-token: write # cosign keyless signing
+# Default-deny; each job asks for exactly what it publishes with.
+permissions: {}
 
 env:
   IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/kube-neuron
   KUSTOMIZE_VERSION: v5.6.0
 
 jobs:
-  release:
+  # The gate IS the CI workflow — identical checks, zero drift.
+  gates:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yaml
+
+  images:
+    needs: [gates]
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # cosign keyless signing
+    outputs:
+      digests: ${{ steps.build.outputs.digests }}
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.25.12"
-          cache: true
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -42,11 +55,13 @@ jobs:
         id: syft
 
       - name: Build, push, sign, and SBOM the images
+        id: build
         shell: bash
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME}"
           mkdir -p dist
+          digests="{"
           # published image name -> Dockerfile stage
           for entry in operator=operator controller=controller agent=agent kubeneuronctl=cli; do
             name="${entry%%=*}"
@@ -58,7 +73,6 @@ jobs:
               --target "$stage" \
               --build-arg VERSION="$version" \
               --tag "$image:$version" \
-              --provenance=false \
               --push .
             digest="$(docker buildx imagetools inspect "$image:$version" \
               --format '{{json .Manifest}}' | jq -r .digest)"
@@ -67,35 +81,89 @@ jobs:
             "${{ steps.syft.outputs.cmd }}" "$image:$version" \
               -o spdx-json > "dist/sbom-${name}-${version}.spdx.json"
             echo "${image}@${digest}" >> dist/images.txt
+            digests="${digests}\"${name}\":\"${digest}\","
           done
+          digests="${digests%,}}"
+          echo "digests=${digests}" >> "$GITHUB_OUTPUT"
 
-      - name: Build single-file install manifest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: images-dist
+          path: dist/
+          retention-days: 1
+
+  manifest:
+    needs: [images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.12"
+          cache: true
+
+      - name: Build DIGEST-pinned single-file install manifest
         shell: bash
+        env:
+          DIGESTS: ${{ needs.images.outputs.digests }}
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME}"
-          go run "sigs.k8s.io/kustomize/kustomize/v5@${KUSTOMIZE_VERSION}" \
-            version
+          mkdir -p dist
+          operator_digest="$(jq -r .operator <<<"$DIGESTS")"
+          [[ "$operator_digest" == sha256:* ]]
           workdir="$(mktemp -d)"
           cp -r config "$workdir/config"
           (
             cd "$workdir/config/default"
+            # Pin by digest, not tag: a re-pushed tag can never change what
+            # an already-downloaded manifest installs.
             go run "sigs.k8s.io/kustomize/kustomize/v5@${KUSTOMIZE_VERSION}" \
               edit set image \
-              "${IMAGE_REPO}/operator=${IMAGE_REPO}/operator:${version}"
+              "${IMAGE_REPO}/operator=${IMAGE_REPO}/operator@${operator_digest}"
           )
           go run "sigs.k8s.io/kustomize/kustomize/v5@${KUSTOMIZE_VERSION}" \
             build "$workdir/config/default" > "dist/kubeneuron-install-${version}.yaml"
-          grep -q "image: ${IMAGE_REPO}/operator:${version}" \
+          grep -q "image: ${IMAGE_REPO}/operator@${operator_digest}" \
             "dist/kubeneuron-install-${version}.yaml"
+          # The manifest must not smuggle any tag-pinned image reference.
+          if grep -E "image: .*:(v[0-9][^@]*)$" "dist/kubeneuron-install-${version}.yaml"; then
+            echo "tag-pinned image reference in the install manifest" >&2
+            exit 1
+          fi
           cp deploy/install.sh "dist/install-${version}.sh"
           cp deploy/install.sh dist/install.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: manifest-dist
+          path: dist/
+          retention-days: 1
+
+  ctl:
+    needs: [gates]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.12"
+          cache: true
 
       - name: Build kubeneuronctl binaries
         shell: bash
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME}"
+          mkdir -p dist
           for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
             goos="${platform%%/*}"; goarch="${platform#*/}"
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
@@ -103,17 +171,59 @@ jobs:
               -o "dist/kubeneuronctl-${version}-${goos}-${goarch}" ./cmd/kubeneuronctl
           done
 
-      - name: Checksums
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ctl-dist
+          path: dist/
+          retention-days: 1
+
+  release:
+    needs: [images, manifest, ctl]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write # cosign sign-blob of the checksums file
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: collected
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Assemble dist, checksums, and digest table
         shell: bash
         run: |
           set -euo pipefail
-          cd dist
-          sha256sum -- * > "../checksums-${GITHUB_REF_NAME}.txt"
-          mv "../checksums-${GITHUB_REF_NAME}.txt" .
+          version="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          cp collected/*/* dist/
+          (
+            cd dist
+            sha256sum -- * > "checksums-${version}.txt"
+            cosign sign-blob --yes \
+              --output-signature "checksums-${version}.txt.sig" \
+              --output-certificate "checksums-${version}.txt.pem" \
+              "checksums-${version}.txt"
+          )
+          {
+            echo "## Images (multi-arch, cosign-signed, digest-pinned)"
+            echo
+            echo '```'
+            cat dist/images.txt
+            echo '```'
+            echo
+            echo "Install manifest and installer pin these digests; verify any"
+            echo "image with \`cosign verify\` against the GitHub OIDC issuer."
+            echo
+            echo "Store migration heads: sqlite 0018 / postgres 0009. A park"
+            echo "pending across the upgrade needs one re-approval."
+          } > notes.md
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          draft: true
+          draft: false
           generate_release_notes: true
+          body_path: notes.md
           files: dist/*

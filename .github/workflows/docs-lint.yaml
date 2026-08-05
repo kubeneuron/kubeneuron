@@ -1,0 +1,24 @@
+name: Docs lint
+
+# Mechanical guard against documentation rot: forbidden stale-status claims
+# (hack/stale-claims.txt) and derived facts (store migration heads). Runs on
+# every doc-touching push — the main CI deliberately ignores doc paths, so
+# this cheap seconds-long job is the one that would have caught five docs
+# claiming "Enabled is rejected" two releases late.
+on:
+  push:
+    branches: [main]
+    paths: ["**.md", "hack/stale-claims.txt", "hack/verify-docs.sh"]
+  pull_request:
+    paths: ["**.md", "hack/stale-claims.txt", "hack/verify-docs.sh"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash hack/verify-docs.sh

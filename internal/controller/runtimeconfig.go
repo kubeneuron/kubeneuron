@@ -39,6 +39,12 @@ type RuntimeConfig struct {
 	// DestructiveSelector is the compiled destructiveExecution.nodeSelector —
 	// the declared blast radius; empty disables the confinement check.
 	DestructiveSelector map[string]string
+	// SourceDigest identifies the operator-compiled snapshot these settings
+	// came from (the config-digest key the operator writes into the mounted
+	// ConfigMaps). Empty for file-based deployments with no operator. It is
+	// identity only — nothing branches on it; it exists so /readyz, the
+	// operator API, and the info metric can say WHICH configuration is live.
+	SourceDigest string
 	// VerifyQuiet and ApprovalTTL are always > 0 (defaulted at seed;
 	// InstallRuntimeConfig treats zero as keep-current, matching the
 	// SetTimings contract).

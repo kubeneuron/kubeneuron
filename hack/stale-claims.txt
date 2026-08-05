@@ -1,0 +1,20 @@
+# Forbidden documentation claims — one extended regex per line, '#' comments.
+#
+# Each entry is a status claim that WAS true once and went false; hack/
+# verify-docs.sh greps every published markdown file and fails on any match,
+# so a stale spelling can never rot silently back in (the failure mode the
+# 2026-08-05 re-audit found in five audience-facing docs at once). When a
+# status flips, add the old spelling here in the same commit.
+#
+# Keep patterns narrow enough not to forbid HISTORY sections: CHANGELOG.md is
+# exempt in the checker.
+executionMode:? .?Enabled.? (is|remains|stays) (deliberately )?(rejected|prohibited|locked)
+operator rejects .?(executionMode:? )?.?Enabled
+PostgreSQL.{0,40}(is not implemented|rejects that store)
+webhook.{0,30}does not (yet )?authenticate
+does not yet authenticate Alertmanager
+the (current )?skeleton
+still an early skeleton
+frozen at 2026-07-14
+six CRDs
+--version v0\.1\.[01]

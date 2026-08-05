@@ -6,6 +6,9 @@ on:
     paths-ignore: ["**.md", "docs/**", "deploy/grafana/**"]
   pull_request:
     paths-ignore: ["**.md", "docs/**", "deploy/grafana/**"]
+  # Lets release.yaml reuse this whole workflow as its gate: a tag must pass
+  # exactly what every push passes before anything is signed or published.
+  workflow_call:
 
 permissions:
   contents: read

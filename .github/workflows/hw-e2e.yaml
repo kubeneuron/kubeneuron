@@ -105,6 +105,9 @@ jobs:
       - name: Dry-run ladder (XID 79 -> cordon -> drain -> approval)
         run: hack/hw-e2e.sh test-dryrun
 
+      - name: Threshold path (XID 92 sub-threshold hold, 3-signal escalation)
+        run: hack/hw-e2e.sh test-threshold
+
       - name: Confined destructive ReplaceNode (executionMode Enabled)
         run: hack/hw-e2e.sh test-destructive
 

@@ -17,6 +17,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/controller"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/httpapi"
+	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 )
 
@@ -74,11 +75,13 @@ func applyRuntimeConfig(
 	}
 
 	var catalog *detect.Catalog
+	signalRules := 0
 	if paths.mappings != "" {
 		overrides, err := config.LoadSignalOverrides(paths.mappings)
 		if err != nil {
 			return fmt.Errorf("loading signal mappings: %w", err)
 		}
+		signalRules = len(overrides)
 		if len(overrides) > 0 {
 			catalog, err = detect.NewCatalog(overrides)
 			if err != nil {
@@ -109,9 +112,20 @@ func applyRuntimeConfig(
 	// controller installs first, the API's alert catalog second — the two
 	// components classify independent inputs, so the sub-second skew between
 	// them is harmless.
+	// The operator writes the compiled snapshot's digest beside the config
+	// files it mounts (the "config-digest" ConfigMap key). Reading it here —
+	// and only on a fully successful apply — is what lets /readyz, the
+	// operator API, and the info metric answer "which configuration is
+	// live?". Absent file (file-based deployments, older operators) means no
+	// identity, never an error.
+	sourceDigest := ""
+	if raw, err := os.ReadFile(filepath.Join(filepath.Dir(paths.policies), "config-digest")); err == nil {
+		sourceDigest = strings.TrimSpace(string(raw))
+	}
 	if err := ctrl.InstallRuntimeConfig(controller.RuntimeConfig{
 		Engine:              engine,
 		Catalog:             catalog,
+		SourceDigest:        sourceDigest,
 		Windows:             windows,
 		AcceleratorProfiles: cfg.AcceleratorProfiles,
 		QuiesceForbidden:    cfg.Safety.QuiesceForbidResetWhenPresent,
@@ -124,6 +138,17 @@ func applyRuntimeConfig(
 		return fmt.Errorf("installing runtime configuration: %w", err)
 	}
 	api.SetSignalCatalog(catalog)
+	api.SetRuntimeConfigInfo(httpapi.RuntimeConfigInfo{
+		SourceDigest: sourceDigest,
+		LoadedAt:     time.Now(),
+		Playbooks:    len(books),
+		Policies:     len(policies),
+		SignalRules:  signalRules,
+	})
+	if sourceDigest != "" {
+		metrics.RuntimeConfigInfo.Reset()
+		metrics.RuntimeConfigInfo.WithLabelValues(sourceDigest).Set(1)
+	}
 	return nil
 }
 

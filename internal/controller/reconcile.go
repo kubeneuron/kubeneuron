@@ -132,6 +132,32 @@ func (c *Controller) advanceOpen(ctx context.Context, inc *types.Incident) error
 // advanceObserving escalates once the policy threshold is crossed and
 // resolves incidents that stay quiet for the whole observation window.
 func (c *Controller) advanceObserving(ctx context.Context, inc *types.Incident) error {
+	// Late-bind, narrowly: an incident that opened before its policy existed
+	// carries no playbook (binding is open-time), and without one it can only
+	// quiet-resolve — a fault that raced a configuration rollout would get
+	// neither remediation nor a page. Bind here IF a policy now matches:
+	// only never-bound incidents, only in OBSERVING (no approval round, no
+	// gate slot, no step state exists yet), from this pass's pinned
+	// snapshot. Bound incidents are never re-bound — selection changes must
+	// not move a mid-ladder incident between playbooks.
+	if inc.Playbook == "" {
+		if book, ok := c.runtimeConfig(ctx).Engine.Select(types.Signal{Class: inc.Class}); ok && book != nil {
+			// Field-only rewrite: bump StateChangedAt — the WRITE-FENCE —
+			// so a concurrent transition off a stale snapshot conflicts
+			// instead of silently overwriting the bind.
+			inc.StateChangedAt = time.Now()
+			inc.Playbook = book.Name
+			if err := c.store.UpdateIncident(ctx, inc); err != nil {
+				return err // conflict: the next pass re-reads and retries
+			}
+			if err := c.appendAudit(ctx, inc, "system", "bind-playbook",
+				fmt.Sprintf("policy for class %s appeared after open; bound playbook %q", inc.Class, book.Name)); err != nil {
+				c.log.Error("bind-playbook audit append failed", "incident", inc.ID, "err", err)
+			}
+			c.log.Info("late-bound playbook to incident opened before its policy existed",
+				"incident", inc.ID, "class", inc.Class, "playbook", book.Name)
+		}
+	}
 	threshold, window := c.observePolicy(ctx, inc.Class)
 	if threshold > 0 && inc.SignalSeen >= threshold {
 		// Only escalate to EVALUATING when a playbook is actually bound to act on.
@@ -643,6 +669,10 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 		// expired, or parked for a human. Hand back the target's slot.
 		c.gate.ReleaseRemediation(inc.Target)
 	}
+	// Any committed transition ends the arming-in-flight hold epoch: if the
+	// incident re-enters EVALUATING later, the propagation grace starts over
+	// from its next first observation.
+	c.clearArmingHold(inc.ID)
 	return nil
 }
 

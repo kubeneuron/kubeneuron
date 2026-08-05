@@ -49,6 +49,17 @@ type Controller struct {
 	inFlightMu sync.Mutex
 	inFlight   map[string]bool
 
+	// armingHoldSince records when each incident FIRST hit the
+	// arming-in-flight hold (in scope, agent freshly unarmed). The
+	// propagation grace is measured from this first observation — never from
+	// StateChangedAt, which pre-ages during pauses, maintenance windows, and
+	// playbook cooldowns that hold an incident in EVALUATING without
+	// touching it, and would make the very first arming check "expire" a
+	// grace that never ran. Entries are cleared on any non-hold arming
+	// verdict and on every state transition, so the map cannot leak.
+	armingHoldMu    sync.Mutex
+	armingHoldSince map[string]time.Time
+
 	// recoveredSlots holds the per-step (reboot-class) gate occupancy seeded on
 	// leadership acquisition from durable EXECUTING incidents (see
 	// RebuildGateOccupancy). Each entry is released exactly once — the first
@@ -219,20 +230,21 @@ func New(
 	log *slog.Logger,
 ) *Controller {
 	c := &Controller{
-		store:          st,
-		sink:           sink,
-		gate:           gate,
-		flap:           flap,
-		platform:       plat,
-		actuator:       act,
-		notifier:       notifier,
-		log:            log,
-		signals:        make(chan types.Signal, 256),
-		eventWake:      make(chan struct{}, 1),
-		eventWorkerID:  fmt.Sprintf("controller-%d", time.Now().UnixNano()),
-		inFlight:       map[string]bool{},
-		recoveredSlots: map[string]recoveredSlot{},
-		reconcileEvery: defaultReconcileInterval,
+		store:           st,
+		sink:            sink,
+		gate:            gate,
+		flap:            flap,
+		platform:        plat,
+		actuator:        act,
+		notifier:        notifier,
+		log:             log,
+		signals:         make(chan types.Signal, 256),
+		eventWake:       make(chan struct{}, 1),
+		eventWorkerID:   fmt.Sprintf("controller-%d", time.Now().UnixNano()),
+		inFlight:        map[string]bool{},
+		armingHoldSince: map[string]time.Time{},
+		recoveredSlots:  map[string]recoveredSlot{},
+		reconcileEvery:  defaultReconcileInterval,
 	}
 	c.runtime.Store(&RuntimeConfig{
 		Engine:      engine,

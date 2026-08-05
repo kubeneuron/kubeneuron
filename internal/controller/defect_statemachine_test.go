@@ -159,7 +159,7 @@ func TestDecideApprovalRefusesUnresolvableStep(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := c.DecideApproval(ctx, inc.ID, "alice", "cli", types.ApprovalApproved, 0); err == nil {
+	if err := c.DecideApproval(ctx, inc.ID, "alice", "cli", types.ApprovalApproved, 0, ""); err == nil {
 		t.Fatal("DecideApproval must refuse to record a decision when the current step is unresolvable")
 	}
 	if _, err := st.LatestApproval(ctx, inc.ID); !errors.Is(err, store.ErrNotFound) {

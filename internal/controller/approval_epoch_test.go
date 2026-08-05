@@ -74,7 +74,7 @@ func TestReParkOrphansThePreviousRoundsDecision(t *testing.T) {
 	ctx := context.Background()
 
 	// Approve round 1 through the real API.
-	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0); err != nil {
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	// Before the walk resumes, the playbook hot-swaps: resume detects the
@@ -111,7 +111,7 @@ func TestReParkOrphansThePreviousRoundsDecision(t *testing.T) {
 		t.Fatalf("state=%s step=%d, want the incident still parked", still.State, still.StepIndex)
 	}
 	// Approving round 2 executes the step that round 2 asked about.
-	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0); err != nil {
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	decision, err := st.LatestApprovalDecision(ctx, id, 2)
@@ -151,7 +151,7 @@ func TestPreEpochParkFailsClosedIntoAFreshRound(t *testing.T) {
 	}
 
 	// The decision API refuses: epoch 0 is not a verifiable round.
-	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0); err == nil {
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0, ""); err == nil {
 		t.Fatal("a pre-epoch park must not accept a decision")
 	}
 	// Resume must NOT pair the stale approval with any epoch-0 request: it
@@ -186,11 +186,11 @@ func TestDecisionPinnedToDisplayedRoundRefusedAfterRePark(t *testing.T) {
 
 	// A decision pinned to the wrong round is refused even before any
 	// re-park: the client's view must match the current round exactly.
-	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 7); err == nil {
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 7, ""); err == nil {
 		t.Fatal("a decision pinned to a round that never existed must be refused")
 	}
 	// Pinned to the current round: accepted.
-	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 1); err != nil {
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 1, ""); err != nil {
 		t.Fatalf("decision pinned to the current round refused: %v", err)
 	}
 
@@ -217,7 +217,7 @@ func TestDecisionPinnedToDisplayedRoundRefusedAfterRePark(t *testing.T) {
 
 	// The click from the stale round-1 message must bounce with a re-read
 	// instruction, not bind to round 2.
-	if err := c.DecideApproval(ctx, id, "bob", "slack", types.ApprovalApproved, 1); err == nil {
+	if err := c.DecideApproval(ctx, id, "bob", "slack", types.ApprovalApproved, 1, ""); err == nil {
 		t.Fatal("a round-1 click after the re-park into round 2 must be refused")
 	}
 	if _, err := st.LatestApprovalDecision(ctx, id, 2); !errors.Is(err, store.ErrNotFound) {
@@ -225,11 +225,105 @@ func TestDecisionPinnedToDisplayedRoundRefusedAfterRePark(t *testing.T) {
 	}
 	// A fresh read shows round 2; deciding it (pinned or legacy-unpinned)
 	// works.
-	if err := c.DecideApproval(ctx, id, "bob", "slack", types.ApprovalApproved, 2); err != nil {
+	if err := c.DecideApproval(ctx, id, "bob", "slack", types.ApprovalApproved, 2, ""); err != nil {
 		t.Fatalf("decision pinned to the fresh round refused: %v", err)
 	}
 	decision, err := st.LatestApprovalDecision(ctx, id, 2)
 	if err != nil || decision.StepAction != "platform.replace_node" {
 		t.Fatalf("round-2 decision = %+v, %v; want it bound to round 2's request", decision, err)
+	}
+}
+
+// R11.2 (review F2): the decision moment — and the human's stated reason —
+// lands in the audit trail at decide time, not only at resume.
+func TestDecisionReasonIsAudited(t *testing.T) {
+	c, st, id := approvalEpochFixture(t)
+	ctx := context.Background()
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalRejected, 1, "wrong node, hardware ticket filed"); err != nil {
+		t.Fatal(err)
+	}
+	trail, err := st.AuditTrail(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range trail {
+		if e.Action == "approval-rejected" && e.Actor == "alice" && e.Result == "wrong node, hardware ticket filed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("audit trail lacks the decision entry with its reason: %+v", trail)
+	}
+}
+
+// R11.4: an incident that opened BEFORE its policy existed (playbook binding
+// is open-time) is late-bound in OBSERVING once a matching policy appears —
+// with the write-fence bump and an audit row — instead of holding unbound
+// until quiet-resolve buries the fault. Bound incidents are never re-bound.
+func TestLateBindsIncidentOpenedBeforeItsPolicyExisted(t *testing.T) {
+	emptyEngine, err := playbook.NewEngine(map[string]*playbook.Playbook{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, st, _ := miniController(t, emptyEngine)
+	ctx := context.Background()
+	if err := st.UpsertNode(ctx, &types.Node{Name: "n1"}); err != nil {
+		t.Fatal(err)
+	}
+	inc := &types.Incident{
+		ID: "inc-latebind", Target: types.Target{Node: "n1"},
+		Class: types.ClassFellOffBus, State: types.StateObserving, DryRun: true,
+		OpenedAt: time.Now(), UpdatedAt: time.Now(), StateChangedAt: time.Now(),
+	}
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+
+	// No policy yet: the pass leaves the incident unbound.
+	c.reconcile(ctx)
+	got, err := st.GetIncident(ctx, inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Playbook != "" {
+		t.Fatalf("playbook = %q, want unbound while no policy matches", got.Playbook)
+	}
+	fence := got.StateChangedAt
+
+	// The policy arrives (config rollout lands). The next pass binds it.
+	pb := &playbook.Playbook{
+		Name: "late", Target: "node",
+		Steps: []playbook.Step{{Name: "Observe", Action: "notify.observe"}},
+	}
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{"late": pb},
+		[]playbook.Policy{{Class: types.ClassFellOffBus, Playbook: "late"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetEngine(engine)
+	c.reconcile(ctx)
+	got, err = st.GetIncident(ctx, inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Playbook != "late" {
+		t.Fatalf("playbook = %q, want late-bound %q", got.Playbook, "late")
+	}
+	if !got.StateChangedAt.After(fence) {
+		t.Fatal("late-bind must bump StateChangedAt (the write-fence)")
+	}
+	trail, err := st.AuditTrail(ctx, inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := false
+	for _, e := range trail {
+		if e.Action == "bind-playbook" {
+			bound = true
+		}
+	}
+	if !bound {
+		t.Fatalf("audit trail lacks the bind-playbook entry: %+v", trail)
 	}
 }

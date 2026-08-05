@@ -148,6 +148,22 @@ func TestGPUResetBindsToUUIDNotStaleIndex(t *testing.T) {
 		}
 	})
 
+	t.Run("MIG instance UUID fails closed (MIG decision: physical GPU is the remediation unit)", func(t *testing.T) {
+		driver := &holdingDriver{Fake: &nvml.Fake{GPUs: inventory}}
+		e := destructiveExecutor(t, driver)
+
+		err := e.dispatch(context.Background(), types.Action{
+			ID: "mig", Type: types.ActionGPUReset,
+			Params: map[string]string{"gpu_index": "0", "gpu_uuid": "MIG-4b5c6d7e-1234-5678-9abc-def012345678"},
+		}, &types.ActionResult{})
+		if err == nil || !strings.Contains(err.Error(), "MIG instance UUID") {
+			t.Fatalf("err = %v, want a fail-closed refusal for a MIG instance UUID", err)
+		}
+		if driver.reset != 0 {
+			t.Fatalf("reset ran %d time(s); a MIG instance must never be reset per-instance", driver.reset)
+		}
+	})
+
 	t.Run("missing gpu_uuid fails closed", func(t *testing.T) {
 		driver := &holdingDriver{Fake: &nvml.Fake{GPUs: inventory}}
 		e := destructiveExecutor(t, driver)

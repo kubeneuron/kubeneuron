@@ -365,6 +365,14 @@ func (e *Executor) resolveResetIndex(ctx context.Context, a types.Action) (int, 
 	if uuid == "" {
 		return 0, fmt.Errorf("gpu_reset: gpu_uuid is required to bind the reset to a physical device; refusing to reset GPU index %d by index alone", requestedIndex)
 	}
+	// MIG decision (design.md): the remediation unit is the PHYSICAL GPU.
+	// A MIG compute-instance UUID ("MIG-<uuid>") names a partition, not a
+	// device the driver can reset — resetting through it would take down
+	// every instance on the parent while the incident's evidence describes
+	// only one. Fail closed; a human routes the ladder at the parent.
+	if strings.HasPrefix(uuid, "MIG-") {
+		return 0, fmt.Errorf("gpu_reset: %s is a MIG instance UUID, not a physical GPU; per-instance reset is not a supported remediation unit — target the parent GPU or escalate", uuid)
+	}
 	gpus, err := e.driver.ListGPUs(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("gpu_reset: cannot read GPU inventory to resolve %s: %w", uuid, err)

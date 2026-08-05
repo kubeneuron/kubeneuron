@@ -366,8 +366,9 @@ ephemeral. These limitations are acceptable only for the current preview.
 
 - cert-manager: not needed because the VictoriaMetrics Operator
   `install-no-webhook` artifact is used.
-- PostgreSQL: the KubeNeuron controller backend is not implemented and the
-  operator rejects it.
+- PostgreSQL: the KubeNeuron controller supports it as the HA workflow
+  store, but this dependency profile does not provision a PostgreSQL server
+  — bring your own and reference its DSN Secret in `spec.workflowStore`.
 - ClickHouse: raw-event archive ingestion is not implemented and the operator
   rejects enabled archive configuration.
 - Grafana, node_exporter, ingress, external authentication, TLS, HA, and

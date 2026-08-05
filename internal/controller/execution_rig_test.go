@@ -323,7 +323,7 @@ func TestRigApprovalParkDecideResumeExecute(t *testing.T) {
 		t.Fatalf("park request row = %+v, %v", requested, err)
 	}
 
-	if err := c.DecideApproval(ctx, inc.ID, "alice", "cli", types.ApprovalApproved, 0); err != nil {
+	if err := c.DecideApproval(ctx, inc.ID, "alice", "cli", types.ApprovalApproved, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	c.reconcile(ctx)

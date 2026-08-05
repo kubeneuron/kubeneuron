@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -181,5 +182,76 @@ accelerator_profiles:
 	}
 	if profile == nil || profile.ProfileDigest != old.ProfileDigest {
 		t.Fatalf("profile after failed reload = %#v, want old profile %q", profile, old.ProfileDigest)
+	}
+}
+
+// R11.3: a successful apply publishes the operator-compiled snapshot digest
+// (the "config-digest" file beside the mounted config) as the loaded-config
+// identity — on readyz, and only after everything parsed. An absent file is
+// a file-based deployment, not an error.
+func TestApplyRuntimeConfigPublishesSourceDigest(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	playbooks := filepath.Join(dir, "playbooks")
+	if err := os.MkdirAll(playbooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	policies := filepath.Join(dir, "runtime.yaml")
+	if err := os.WriteFile(policies,
+		[]byte("policies:\n  - match: {class: gsp-error}\n    playbook: observe\nsafety: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(playbooks, "observe.yaml"),
+		[]byte("name: observe\ntarget: gpu\nsteps:\n  - name: observe\n    action: notify.observe\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctrl := controller.New(st, nil, nil, nil, nil, nil, nil, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	api := httpapi.New(ctrl)
+	paths := runtimeConfigPaths{policies: policies, playbooks: playbooks}
+	logSink := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	readyz := func() string {
+		rec := httptest.NewRecorder()
+		api.Routes().ServeHTTP(rec, httptest.NewRequest("GET", "/readyz", nil))
+		return rec.Body.String()
+	}
+
+	// No digest file: identity absent, readyz stays plain.
+	if err := applyRuntimeConfig(ctx, ctrl, api, paths, logSink); err != nil {
+		t.Fatal(err)
+	}
+	if got := readyz(); got != "ready" {
+		t.Fatalf("readyz without digest = %q, want plain ready", got)
+	}
+
+	// Digest file present: identity published on readyz.
+	if err := os.WriteFile(filepath.Join(dir, "config-digest"), []byte("abc123def456\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyRuntimeConfig(ctx, ctrl, api, paths, logSink); err != nil {
+		t.Fatal(err)
+	}
+	if got := readyz(); got != "ready config=abc123def456" {
+		t.Fatalf("readyz with digest = %q", got)
+	}
+
+	// A failed apply must NOT advance the published identity.
+	if err := os.WriteFile(filepath.Join(dir, "config-digest"), []byte("NEWDIGEST\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(playbooks, "broken.yaml"), []byte("name: [unparsable\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyRuntimeConfig(ctx, ctrl, api, paths, logSink); err == nil {
+		t.Fatal("apply with a broken playbook must fail")
+	}
+	if got := readyz(); got != "ready config=abc123def456" {
+		t.Fatalf("readyz after failed apply = %q, want the previous identity retained", got)
 	}
 }

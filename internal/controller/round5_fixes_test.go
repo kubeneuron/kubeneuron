@@ -287,7 +287,7 @@ func TestApprovalBindsToTheStepShownAtRequestTime(t *testing.T) {
 	c.SetEngine(engineV2)
 
 	// The human clicks approve on the reboot they were shown.
-	if err := c.DecideApproval(ctx, inc.ID, "alice", "cli", types.ApprovalApproved, 0); err != nil {
+	if err := c.DecideApproval(ctx, inc.ID, "alice", "cli", types.ApprovalApproved, 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	decision, err := st.LatestApproval(ctx, inc.ID)

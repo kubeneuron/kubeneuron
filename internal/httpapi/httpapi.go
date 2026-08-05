@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -137,6 +138,7 @@ type Server struct {
 	backupStore       BackupStore
 	backupDir         string
 	readyCheck        func() bool
+	runtimeConfigInfo atomic.Pointer[RuntimeConfigInfo]
 }
 
 // BackupStore produces a transactionally consistent database snapshot at the
@@ -166,6 +168,26 @@ func (s *Server) SetUI(files http.FileSystem) { s.ui = http.FileServer(files) }
 // SetMetricsHandler serves Prometheus metrics at GET /metrics on the public
 // listener. Metrics are operational aggregates; no secrets appear in them.
 func (s *Server) SetMetricsHandler(h http.Handler) { s.metrics = h }
+
+// RuntimeConfigInfo identifies the runtime configuration currently live in
+// this process. SourceDigest is the operator-compiled snapshot digest (empty
+// for file-based deployments); the counts are a coarse shape summary so an
+// operator can sanity-check what loaded without reading the ConfigMaps.
+type RuntimeConfigInfo struct {
+	SourceDigest string    `json:"source_digest,omitempty"`
+	LoadedAt     time.Time `json:"loaded_at"`
+	Playbooks    int       `json:"playbooks"`
+	Policies     int       `json:"policies"`
+	SignalRules  int       `json:"signal_rules"`
+}
+
+// SetRuntimeConfigInfo publishes the identity of the configuration a
+// successful (re)load installed. The digest is world-readable already (it is
+// KubeNeuron.status.configDigest), so /readyz may expose it unauthenticated;
+// the richer endpoint sits behind the operator token.
+func (s *Server) SetRuntimeConfigInfo(info RuntimeConfigInfo) {
+	s.runtimeConfigInfo.Store(&info)
+}
 
 // SetSignalCatalog installs declarative signal overrides for alert mapping;
 // nil keeps the built-in catalog.
@@ -248,6 +270,13 @@ func (s *Server) Routes() http.Handler {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
+		// The loaded-config digest rides on readyz so a harness (or a human
+		// with curl) can see WHICH configuration is live without auth — the
+		// digest is already world-readable in KubeNeuron.status.configDigest.
+		if info := s.runtimeConfigInfo.Load(); info != nil && info.SourceDigest != "" {
+			_, _ = fmt.Fprintf(w, "ready config=%s", info.SourceDigest)
+			return
+		}
 		_, _ = w.Write([]byte("ready"))
 	})
 	if s.metrics != nil {

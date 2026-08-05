@@ -9,6 +9,71 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+### Added
+- The controller publishes the identity of the configuration it is actually
+  running: the operator-compiled snapshot digest appears on `/readyz`
+  (`ready config=<digest>`), as the `kubeneuron_runtime_config_info` metric,
+  and via `GET /api/v1/runtime-config` (digest + load time + shape counts).
+  A digest lagging `KubeNeuron.status.configDigest` is a config rollout that
+  has not landed — previously invisible outside controller logs, which is
+  exactly how the first live hardware run lost an incident to it.
+- Narrow late-bind: an incident that opened BEFORE its policy existed
+  (playbook binding is open-time) is bound in OBSERVING once a matching
+  policy appears — with the write-fence `StateChangedAt` bump and a
+  `bind-playbook` audit row. Only never-bound incidents, only in OBSERVING;
+  bound incidents are never moved between playbooks.
+- Approve/reject decisions land in the audit trail at decide time, carrying
+  the `reason` the API and CLI accept (it was previously dropped silently);
+  the entry is `approval-approved`/`approval-rejected` under the deciding
+  actor.
+- A MIG compute-instance UUID (`MIG-…`) is refused by the `gpu_reset`
+  preflight fail-closed: the physical GPU is the remediation unit
+  (documented as a design invariant); per-instance reset would take down
+  every instance on the parent on the evidence of one.
+- Documentation anti-rot: `hack/verify-docs.sh` (wired into a cheap
+  `docs-lint` workflow) fails the build on forbidden stale-status claims
+  (`hack/stale-claims.txt`) and on migration heads that disagree with the
+  filesystem. Its first run immediately caught a fifth "PostgreSQL is not
+  implemented" claim surviving in `deploy/kubernetes/dependencies/`.
+- Two hardware-harness phases written for the next paid run (marked
+  unexercised): `test-dcgm` (DCGM field-value injection exercising the
+  gpuhealth source, with a parse-clean fallback) and `test-verify-recur`
+  (a recurrence during VERIFYING must escalate, not resolve). Plus
+  `docs/hw-e2e-dispatch.md`: the exact OIDC trust/permission policy recipe
+  for dispatching hw-e2e from GitHub Actions (deliberately not scripted —
+  durable account infrastructure).
+
+### Changed
+- The release workflow is gated and digest-pinned: publishing jobs run only
+  after the FULL CI (build/vet, both store backends, kind integration)
+  passes for the tag; the single-file install manifest pins images by
+  digest (a re-pushed tag can never change what a downloaded manifest
+  installs); the GitHub release publishes non-draft with the image-digest
+  table and a signed checksums file; per-job least-privilege permissions.
+  `hw-e2e.yaml` gains the `test-threshold` phase the harness already had.
+
+### Fixed
+- The arming-propagation grace is anchored to the FIRST observation of the
+  hold (in-memory, cleared on any transition), not to `StateChangedAt` —
+  which pre-ages while an incident sits in EVALUATING behind a per-node
+  pause, maintenance window, or playbook cooldown, and made the very first
+  arming check after such a hold escalate to a human with a false
+  "never-armable" diagnosis when the agent was one registration tick from
+  arming (round-11 review F1). The escalation message now reports the
+  actually-observed grace.
+- The Helm chart's ClusterRole regained the operator's `secrets` rule
+  (create/get/list/update/watch): the PKI work added it to `config/rbac`
+  but not the chart, so a Helm-installed operator could not issue or renew
+  TLS material — caught by the public CI's chart-vs-kustomize assertion,
+  which fails the whole run on any rule divergence.
+- Cheap round-11 review cleanups: design.md's route table names the real
+  `POST /api/v1/login` route; the README describes the live destructive
+  run's actual closure (resolved through the verification quiet window,
+  not the vanished-node janitor's "replaced" path); docs/upgrade.md
+  documents the one-time double workload roll caused by the per-workload
+  TLS digest format change; a cancelled hw-e2e run no longer leaks the
+  operator-image repoint loop on the runner.
+
 ## [v0.2.1] - 2026-08-05
 
 ### Added

@@ -24,7 +24,7 @@ import (
 type OperatorBackend interface {
 	ListIncidents(ctx context.Context, states []string, node string, limit int) ([]*types.Incident, error)
 	IncidentDetail(ctx context.Context, id string) (*types.Incident, []*types.AuditEntry, error)
-	DecideApproval(ctx context.Context, id, actor, channel string, decision types.ApprovalDecision, expectedEpoch int) error
+	DecideApproval(ctx context.Context, id, actor, channel string, decision types.ApprovalDecision, expectedEpoch int, reason string) error
 	ResolveIncident(ctx context.Context, id, actor, reason string) error
 	Nodes(ctx context.Context) ([]*types.Node, error)
 	Node(ctx context.Context, name string) (*types.Node, error)
@@ -240,6 +240,7 @@ func (s *Server) registerOperatorRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/nodes/{node}", s.requireOperator(s.handleGetNode))
 	mux.HandleFunc("GET /api/v1/nodes/{node}/accelerators", s.requireOperator(s.handleAcceleratorReports))
 	mux.HandleFunc("GET /api/v1/targets", s.requireOperator(s.handleTargets))
+	mux.HandleFunc("GET /api/v1/runtime-config", s.requireOperator(s.handleRuntimeConfig))
 	mux.HandleFunc("GET /api/v1/pause", s.requireOperator(s.handleGetPause))
 	mux.HandleFunc("POST /api/v1/pause", s.requireOperatorMutation(s.handleSetPause(true)))
 	mux.HandleFunc("DELETE /api/v1/pause", s.requireOperatorMutation(s.handleSetPause(false)))
@@ -379,7 +380,7 @@ func (s *Server) handleDecision(decision types.ApprovalDecision) http.HandlerFun
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := s.operator.DecideApproval(r.Context(), r.PathValue("id"), actor, "api", decision, req.ParkEpoch); err != nil {
+		if err := s.operator.DecideApproval(r.Context(), r.PathValue("id"), actor, "api", decision, req.ParkEpoch, req.Reason); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
@@ -521,4 +522,18 @@ func decodeStrict(w http.ResponseWriter, r *http.Request, v any) bool {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// handleRuntimeConfig reports the identity and coarse shape of the runtime
+// configuration currently live in this process — the observable end of the
+// config pipeline (operator compiles → ConfigMap → kubelet sync → in-place
+// reload). When this digest lags KubeNeuron.status.configDigest, the rollout
+// has not landed here yet.
+func (s *Server) handleRuntimeConfig(w http.ResponseWriter, _ *http.Request) {
+	info := s.runtimeConfigInfo.Load()
+	if info == nil {
+		http.Error(w, "runtime configuration identity not published yet", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, info)
 }
