@@ -1,50 +1,40 @@
 # KubeNeuron
 
-**GPU failure detection and remediation for NVIDIA clusters, with a
-Kubernetes-native configuration model.**
+**GPU failure detection and remediation for NVIDIA Kubernetes clusters —
+audited, policy-driven, and never a black box.**
 
-KubeNeuron turns GPU and driver signals into an audited, policy-driven
-remediation workflow. The escalation ladder ranges from observation and
-workload eviction through GPU reset, node drain, reboot, and hardware
-escalation.
+A GPU falls off the bus at 3am. KubeNeuron catches the kernel's XID event,
+opens an incident, cordons and drains the node, and pages a human with
+exactly one question — *approve the reboot?* — with every step recorded in
+a transactional audit trail. Detection is automatic; anything destructive
+runs a policy ladder you wrote, behind safety gates you configured, with a
+named approver on the record.
 
-> **Status: released (v0.2.1); dry-run is the default, and real cloud node
-> remediation is validated on live EKS.**
-> Working today: kernel-log XID detection on real NVIDIA hardware, GPU
-> inventory through `nvidia-smi` (mounted into the agent with
-> `spec.agent.hostTooling`), the full incident workflow with safety gates,
-> approvals with verified operator identity (password, OIDC SSO, or
-> Kubernetes RBAC), transactional audit, a durable action queue with lease
-> and boot-ID binding, PostgreSQL HA with leader election, the operator
-> REST API, control panel, and CLI. v0.2.0 adds operator-issued mTLS with
-> automatic renewal, in-place controller configuration hot-reload (no HA
-> rollout deadlock), crash-safe host state across an agent restart, and
-> cloud GPU node remediation. v0.2.1 adds the approval-round protocol end
-> to end, controller-served arming, and the first green live hardware E2E
-> run.
->
-> **Validated end to end on live EKS (g4dn, real Tesla T4).** A
-> kernel-injected XID 79 (`fell-off-bus`) walked
-> cordon → drain → **approval** → `ReplaceNode` → close-as-replaced: the
-> controller terminated the real EC2 instance through IRSA, the node group
-> replaced it, a fresh node attested clean, and the incident closed as
-> *replaced* — with the named approver in the audit trail. `ReplaceNode` is
-> the first ladder step executed for real against live hardware; the reboot
-> ladder has walked end to end in dry-run on the same T4 node.
->
-> **`executionMode: Enabled` is now a supported, off-by-default mode**, not a
-> closed door. It is confined by construction: enabling it requires
-> `spec.safety.destructiveExecution` with a non-empty `nodeSelector` naming
-> the permitted nodes (an empty selector is rejected so it can never arm the
-> whole fleet) and the exact acknowledgement sentence, and only the agents on
-> those selected nodes are armed. Dry-run stays the default for every other
-> mode and node.
->
-> **Still deliberately unproven:** per-device *hardware* GPU reset. A
-> virtualized EC2 instance has no guest PCI reset (measured on g4dn), so the
-> agent refuses reset there on evidence and substitutes cloud replace;
-> validating an actual per-device reset needs bare metal, which the hardware
-> matrix in [PRODUCT_PLAN.md](PRODUCT_PLAN.md) still gates.
+- **Detects** GPU faults from the kernel log (XID) and DCGM/`nvidia-smi`,
+  normalized into problem classes — no metrics stack required to act.
+- **Decides** through declarative playbooks and policies (CRDs): observe →
+  evict → drain → reset/reboot → replace the cloud node, each rung gated
+  by concurrency caps, quiet windows, and human approval where you demand
+  it.
+- **Answers to you**: approvals carry verified identity (password, OIDC
+  SSO, or Kubernetes RBAC), a control panel, a CLI, and an audit trail
+  that survives controller restarts and failover (PostgreSQL HA).
+- **Fails closed.** Dry-run is the default everywhere. Real execution
+  (`executionMode: Enabled`) must be confined to an explicit node selector
+  plus an acknowledgement sentence — it can never arm the whole fleet.
+
+**Status (v0.2.1):** the full workflow is real and validated live — on an
+EKS cluster with a real Tesla T4, a kernel-injected XID walked
+cordon → drain → approval → `ReplaceNode`, and the controller terminated
+the actual EC2 instance under a scoped IAM role before the incident closed
+as *replaced*. Honest boundary: per-device *hardware* GPU reset remains
+unvalidated (cloud guests have no PCI reset; it needs bare metal — see
+[PRODUCT_PLAN.md](PRODUCT_PLAN.md)). Full history:
+[CHANGELOG.md](CHANGELOG.md).
+
+**Start here:** [product tour](docs/product-tour.md) (screenshots + live
+demo) · [install](docs/install.md) · [one-pager](docs/one-pager.md) ·
+[docs site](docs/index.md)
 
 ## Architecture
 
