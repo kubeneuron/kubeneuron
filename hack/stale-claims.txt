@@ -32,8 +32,12 @@ child-resource status is still
 # COMMIT as the matrix cells — that deletion is the deliberate act this file
 # exists to force.
 [Ss]upports? (both )?(NVIDIA and (AMD|Intel)|(AMD|Intel) and NVIDIA)
-(AMD|Intel|ROCm)[^|]{0,40}(is|are) (now |fully |already )*(supported|shipped|hardware-validated)
-[Ss]hips? (an?|the) (AMD|Intel|ROCm)[a-z -]{0,20}(detection|source|driver|adapter|support)
+(AMD|Intel|ROCm)[^|]{0,40}(is|are) (now |fully |already )*(supported|hardware-validated)
 [Mm]ulti-?vendor[^|]{0,20}(support|detection|remediation) (is|has) (shipped|landed|arrived|live)
 (amd-smi|rocm-smi|amdgpu|xpu-smi|[Ll]evel ?[Zz]ero)[^|]{0,40}(ships|shipped|is (implemented|wired|supported))
-(AMD|Intel)[^|]{0,30}(detection|remediation) (ships|shipped|is (live|implemented))
+# AMD detection ships (unvalidated) since the definition round; the
+# overclaim to guard is now VALIDATION, not existence.
+(AMD|Intel|ROCm)[^|]{0,40}(hardware[- ]validated|validated on (real |AMD |Intel )*hardware|proven on hardware)
+# Vendor-support claims that go stale the moment a vendor adapter lands.
+[Ss]hipping detection is NVIDIA-only
+[Ss]hipping detection is NVIDIA[- ]only

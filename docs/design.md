@@ -45,7 +45,10 @@ annotation in the sections that follow.
 - KubeNeuron is not a general node-health system; use established node tooling
   for unrelated disk, network, and kernel problems.
 - It is not a scheduler or workload retry service.
-- Initial hardware support is NVIDIA-only.
+- Hardware validation is NVIDIA-only. AMD detection ships unvalidated and
+  Intel is a seam; the per-vendor grading lives in
+  `docs/reference-capabilities.md`, which CI machine-checks against the
+  code in both directions.
 - The KubeNeuron operator does not own the lifecycle of VictoriaMetrics,
   Alertmanager, PostgreSQL, or ClickHouse. External installations or their
   dedicated upstream operators own storage, backup, and upgrades.

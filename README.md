@@ -31,11 +31,15 @@ named approver on the record.
   `kubeneuron_incidents_recovered_total`,
   `kubeneuron_degraded_gpu_seconds_total`. What the fleet got back is a
   number, not a feeling.
-- **Vendor-neutral by construction, NVIDIA today.** The fault envelope and
-  the accelerator seam carry `(vendor, source, code)` with no XID
-  pretense, so an AMD or Intel source is a new detection adapter and a
-  catalog row — not a fork. Shipping detection is NVIDIA-only; see the
-  [definition plan](docs/definition-plan.md) for the AMD track.
+- **Vendor-neutral by construction — NVIDIA validated, AMD shipping.** The
+  fault envelope and the accelerator seam carry `(vendor, source, code)`
+  with no XID pretense, so a new vendor is a detection adapter and a
+  catalog row rather than a fork. NVIDIA detection is validated on real
+  hardware; AMD detection ships (`amd-smi`/`rocm-smi` polling plus
+  `amdgpu` kernel-log parsing) but **has never run against an AMD GPU** —
+  its parser fixtures are reconstructed, not captured. Intel is seam only.
+  Every cell of that claim is graded per vendor, against the code, in the
+  [capability matrix](docs/reference-capabilities.md).
 - **Fails closed.** Dry-run is the default everywhere. Real execution
   (`executionMode: Enabled`) must be confined to an explicit node selector
   plus an acknowledgement sentence — it can never arm the whole fleet.
