@@ -86,6 +86,14 @@ readonly XID_ACK="I understand these nodes may be reset, rebooted, or destroyed"
 readonly CONFIRM_INCIDENT_TIMEOUT=600
 readonly DRYRUN_XID=79
 readonly DESTRUCTIVE_XID=45
+# RECUR_XID exists because a recurrence must be a DIFFERENT fault identity.
+# The agent deduplicates one (gpu, xid) pair for two minutes, while the
+# verification quiet window on this stand is thirty seconds — so re-injecting
+# the SAME code during VERIFYING is swallowed by dedup and the incident
+# quiet-resolves before dedup would ever let it through. A second test-only
+# code mapped to the same class is accepted immediately and attaches to the
+# open incident, which is exactly what a real recurrence looks like.
+readonly RECUR_XID=44
 readonly THRESHOLD_XID=92
 readonly E2E_RUN_TAG="kubeneuron:e2e-run"
 
@@ -598,13 +606,12 @@ cmd_test_verify_recur() {
 	wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
 		'api GET "/api/v1/incidents/'"$incident"'" | jq -e ".incident.state==\"VERIFYING\"" >/dev/null'
 
-	# The agent deduplicates one fault for 2 minutes; an immediate
-	# re-injection would be swallowed and the incident would quiet-resolve.
-	# Space it past the window — the verify quiet window is re-armed by the
-	# recurrence, so the incident is still VERIFYING when it lands.
-	log "test-verify-recur: waiting past the agent dedup window, then re-injecting XID $DRYRUN_XID"
-	sleep 130
-	inject_xid "$node" "$DRYRUN_XID"
+	# Recur with a DIFFERENT code mapped to the same class: dedup keys on
+	# (gpu, xid), so this is accepted at once and attaches to the open
+	# incident, while the same code would be swallowed for two minutes —
+	# far longer than the thirty-second quiet window it must land inside.
+	log "test-verify-recur: injecting XID $RECUR_XID (same class) inside the verification quiet window"
+	inject_xid "$node" "$RECUR_XID"
 	wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
 		'api GET "/api/v1/incidents/'"$incident"'" \
 			 | jq -e ".incident.state!=\"VERIFYING\" and .incident.state!=\"RESOLVED\"" >/dev/null'
@@ -872,7 +879,7 @@ metadata:
 spec:
   kubeNeuronRef: ${ROOT_NAME}
   source: xid
-  xidCodes: [${DESTRUCTIVE_XID}]
+  xidCodes: [${DESTRUCTIVE_XID}, ${RECUR_XID}]
   class: fell-off-bus
   severity: critical
 EOF
