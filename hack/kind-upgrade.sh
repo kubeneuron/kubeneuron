@@ -28,6 +28,10 @@ BASELINE=${BASELINE:-v0.1.0}
 # tag. Resolve both against the release repository explicitly instead of
 # whatever `gh` infers from the local remote.
 RELEASE_REPO=${RELEASE_REPO:-kubeneuron/kubeneuron}
+# The single platform the kind nodes run. Baseline images are pulled for
+# exactly this one so the local image index carries no platform whose blobs
+# are absent (see pull_baseline).
+LOAD_PLATFORM=${LOAD_PLATFORM:-linux/$(go env GOARCH 2>/dev/null || echo amd64)}
 CLUSTER_NAME=${CLUSTER_NAME:-kubeneuron-upgrade}
 KIND_BIN=${KIND_BIN:-kind}
 KUBECTL_BIN=${KUBECTL_BIN:-kubectl}
@@ -111,17 +115,47 @@ for component in operator controller agent; do
 done
 
 pull_baseline() {
-	local component ref
+	local component ref archive
 	for component in operator controller agent; do
 		ref=${baseline_image[$component]}
-		if ! "$DOCKER_BIN" pull --quiet "$ref" >/dev/null 2>&1; then
+		# Pull ONE platform explicitly. A released image is a multi-arch
+		# index, and `kind load docker-image` runs `ctr import
+		# --all-platforms`, which fails on an index whose other platforms'
+		# blobs the local daemon never fetched — under the containerd image
+		# store the index survives the pull, so this is not hypothetical: it
+		# is what the v0.2.2-rc rehearsals hit.
+		if ! "$DOCKER_BIN" pull --quiet --platform "$LOAD_PLATFORM" "$ref" >/dev/null 2>&1; then
 			gh auth token | "$DOCKER_BIN" login ghcr.io \
 				--username "$(gh api user -q .login)" --password-stdin >/dev/null 2>&1 || true
-			"$DOCKER_BIN" pull --quiet "$ref" >/dev/null 2>&1 || return 1
+			"$DOCKER_BIN" pull --quiet --platform "$LOAD_PLATFORM" "$ref" >/dev/null 2>&1 || return 1
 		fi
 		# The install manifest and the root object reference tag form; retag
 		# the digest-pinned pull so kind serves both reference styles.
 		"$DOCKER_BIN" tag "$ref" "ghcr.io/kubeneuron/kubeneuron/${component}:${BASELINE}"
+	done
+	return 0
+}
+
+# load_baseline_images hands the baseline images to kind as SINGLE-PLATFORM
+# archives.
+#
+# `kind load docker-image` runs `ctr import --all-platforms`, and a released
+# image is a multi-arch index. Under the containerd image store that index
+# survives locally even after a single-platform pull, so the import demands
+# blobs for a platform that was never fetched and fails — which is exactly
+# what killed the v0.2.2-rc rehearsals. `docker save --platform` exports one
+# platform's bytes with no dangling references, and `kind load image-archive`
+# takes it as-is.
+load_baseline_images() {
+	local component archive
+	for component in operator controller agent; do
+		archive="$work_dir/${component}-${BASELINE}.tar"
+		"$DOCKER_BIN" save --platform "$LOAD_PLATFORM" \
+			-o "$archive" "ghcr.io/kubeneuron/kubeneuron/${component}:${BASELINE}" ||
+			die "cannot export baseline image for $component"
+		"$KIND_BIN" load image-archive "$archive" --name "$CLUSTER_NAME" ||
+			die "cannot load baseline image for $component into kind"
+		rm -f "$archive"
 	done
 }
 
@@ -157,10 +191,7 @@ fi
 export KUBECONFIG="$work_dir/kubeconfig"
 
 note "loading baseline images into kind"
-"$KIND_BIN" load docker-image --name "$CLUSTER_NAME" \
-	"ghcr.io/kubeneuron/kubeneuron/operator:${BASELINE}" \
-	"ghcr.io/kubeneuron/kubeneuron/controller:${BASELINE}" \
-	"ghcr.io/kubeneuron/kubeneuron/agent:${BASELINE}"
+load_baseline_images
 
 note "installing baseline $BASELINE (CRDs + operator)"
 "$KUBECTL_BIN" apply -f "$install_manifest" >/dev/null
