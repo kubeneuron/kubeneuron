@@ -1,22 +1,16 @@
 # KubeNeuron — Design Document
 
-Status: **accepted target architecture** — implementation status frozen at
-2026-07-14; see below.
+Status: **accepted target architecture**, actively maintained.
 
-Last updated: 2026-07-14
+Last updated: 2026-08-05 (v0.2.1)
 
-> **⚠️ Implementation-status claims in this document are frozen at 2026-07-14
-> and several are now superseded. For the current, authoritative capability
-> surface use `README.md` and `CHANGELOG.md`;
-> for status-by-item use
-> `PRODUCTION_READINESS_PLAN.md`.** As of
-> v0.2.0 the following statements in this document are OUT OF DATE: `Enabled`
-> is no longer rejected — it is a supported, off-by-default mode confined by
-> `spec.safety.destructiveExecution`; PostgreSQL is an accepted, HA store (not
-> rejected); the Alertmanager webhook is authenticated; the control panel and
-> metrics surface ship; and cloud node remediation (RecycleNode/ReplaceNode)
-> is validated on live EKS. The *architecture* below still holds; only the
-> "implemented / rejected / not yet" annotations may lie.
+> This document is the architecture and its invariants (see §2.4): the seams,
+> the concurrency/lifecycle rules, and the reasoning behind them. It is kept
+> in sync with the code — the stale-status freeze notice that used to sit
+> here is gone because the claims below were re-audited against v0.2.1. For
+> the release-by-release capability surface, `README.md` and `CHANGELOG.md`
+> remain the quickest references; `PRODUCTION_READINESS_PLAN.md` tracks
+> status-by-item.
 
 KubeNeuron monitors NVIDIA GPU clusters for hardware and driver failures and
 drives a configurable, audited escalation ladder. Kubernetes and bare metal are
@@ -135,10 +129,15 @@ configured stale window, and the Pod propagates a failure after its next
 narrow-payload agent from posting to a legacy full-node registration endpoint;
 coordinated rolling-upgrade behavior is not implemented. Reconciliation
 failures overwrite stale Ready state. The reconciler wires the authenticated
-agent ingress described below, but does not yet provide production-grade
-dependency readiness, certificate issuance/rotation, backup/restore or
-retention policy, per-child status, upgrade, or deletion behavior beyond
-owner-reference garbage collection.
+agent ingress described below, issues and renews the installation's TLS
+material when `spec.tls.issuer: Operator` (foreign material is watched and
+warned about, never replaced; per-workload TLS revisions roll exactly the
+consumers that mount changed material), and publishes generation-bound Ready
+status on every selected child configuration kind. External dependency
+readiness (metrics stack, Alertmanager) remains owned by their upstream
+operators; store backup is a controller API (`GET /api/v1/backup`), not an
+operator-scheduled policy; deletion behavior beyond owner-reference garbage
+collection is not implemented.
 
 The preview runtime accepts credential-free `External` VictoriaMetrics and
 Alertmanager declarations only. `Managed` remains an API-reserved value but is
@@ -173,11 +172,12 @@ dcgm-exporter / node_exporter / kubeneuron-agent metrics
   -> POST /api/v1/webhooks/alertmanager on kubeneuron-controller
 ```
 
-The Alertmanager receiver is implemented. Scraping, rules, and routing are
-currently assembled through development manifests rather than reconciled by
-the KubeNeuron operator. The receiver is on the public controller listener and
-does not yet authenticate Alertmanager, so it is not a trusted cross-node
-incident source for enabled remediation.
+The Alertmanager receiver is implemented and authenticated: operator-managed
+installations require a bearer token (`spec.notifications.webhookToken`), the
+route fails closed when the token is unconfigured, and payload severity/node
+fields are validated. Scraping, rules, and routing are still assembled
+through the pinned upstream-operator profile rather than reconciled by the
+KubeNeuron operator.
 
 The target discrete-event path is:
 
@@ -606,10 +606,12 @@ controller does not serve the embedded files. See
 | `GET /api/v1/incidents[/{id}]`, `GET /api/v1/nodes[/{node}]` | fleet and incident state incl. audit trail | implemented; operator bearer token, fail-closed when unconfigured |
 | `POST /api/v1/incidents[/{id}/approve\|reject\|resolve]` | manual trigger, decisions, manual resolution | implemented; operator bearer token, audited actor |
 | `GET/POST/DELETE /api/v1/pause` | global automation control | implemented; operator bearer token |
-| `/api/v1/targets` | vmagent HTTP service discovery | planned |
-| summary/stream/metrics proxy APIs | Web UI data | planned |
+| `GET /api/v1/targets` | vmagent HTTP service discovery | implemented; operator bearer token |
+| `GET /metrics` | controller Prometheus telemetry | implemented |
+| `POST /api/v1/auth/login`, `GET /api/v1/auth/oidc/*`, `GET /api/v1/session` | operator identity: password users (`spec.auth.users`) and OIDC, server-side sessions; decisions audited under the verified identity | implemented |
+| summary/stream proxy APIs | Web UI data beyond the incident/node reads above | planned |
 | configuration/version APIs | validated UI administration | planned |
-| role-based auth and controller `/metrics` | granular access control and telemetry | planned (single operator token today) |
+| per-role authorization (beyond authenticated-operator) | granular access control | planned |
 
 Controller→agent actions flow through the durable store-backed work queue
 above: the agent polls over its authenticated channel and posts results, so
@@ -646,10 +648,12 @@ REST API with bearer-token authentication.
 
 ## 8. Persistence and optional analytics
 
-SQLite is the only implemented and operator-accepted controller store and is
-suitable for the current single-process skeleton. PostgreSQL is the intended
-durable workflow authority for future enabled/HA operation, but its backend is
-not implemented and the operator rejects that store selection today.
+SQLite (on a `ReadWriteOnce` claim) and PostgreSQL are both implemented and
+operator-accepted controller stores. PostgreSQL is the HA choice: the DSN
+comes from a mounted Secret, the controller Deployment is stateless, and the
+store backend passes the same conformance suite as SQLite (see §2.5 for the
+honest scope of what that parity does and does not prove). Migration heads
+travel in lockstep (sqlite 0018 / postgres 0009 as of v0.2.1).
 
 The operator provisions a `ReadWriteOnce` claim for SQLite, defaulting to
 `5Gi`. Reconciliation preserves API-selected/bound fields, permits only

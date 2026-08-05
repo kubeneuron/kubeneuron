@@ -48,9 +48,11 @@ Always: **CRDs → operator → controller/agent images.**
    }'
    ```
 
-   The controller Deployment uses `Recreate` with a single replica: expect a
-   short public-API/webhook outage while the new Pod starts (Alertmanager
-   retries deliveries). The agent DaemonSet rolls node by node; each agent
+   On SQLite installs the controller Deployment uses `Recreate` with a
+   single replica: expect a short public-API/webhook outage while the new
+   Pod starts (Alertmanager retries deliveries). PostgreSQL HA installs run
+   two replicas with rolling updates and leader-following readiness, so
+   there is no such gap. The agent DaemonSet rolls node by node; each agent
    turns Ready only after a fresh durable registration acknowledgment from
    the new controller.
 

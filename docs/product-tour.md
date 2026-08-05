@@ -199,9 +199,12 @@ EXECUTING → VERIFYING      [system]           uncordon
 
 ## What this tour deliberately did not show
 
-`executionMode: Enabled` — real (non-dry-run) reset and reboot — is
-rejected by the admission layer and four further independent gates. That
-is a feature: destructive autonomy stays locked until the hardware
-verification matrix in PRODUCT_PLAN.md passes on a dedicated GPU lab.
-DryRun with human-approved, audited workflows is the supported production
-mode today.
+Broad destructive autonomy. `executionMode: Enabled` — real (non-dry-run)
+side effects — is supported but off by default, confined by
+`spec.safety.destructiveExecution` (a non-empty node selector plus an
+exact acknowledgement) and enforced at admission, compilation, controller
+dispatch, and the agent executor. Section 8 shows exactly that confined
+path live: a real `ReplaceNode` terminating an EKS instance. Autonomy
+beyond the confined blast radius stays deliberately gated, and per-device
+GPU reset remains hardware-gated (bare metal). DryRun with human-approved,
+audited workflows is the recommended production mode today.

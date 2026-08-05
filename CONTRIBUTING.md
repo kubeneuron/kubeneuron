@@ -1,8 +1,8 @@
 # Contributing to KubeNeuron
 
-Thanks for contributing. KubeNeuron is still an early skeleton, so keep a
-clear distinction between implemented behavior and target design in code,
-tests, and documentation.
+Thanks for contributing. KubeNeuron is a young project with real, documented
+validation gaps, so keep a clear distinction between implemented behavior and
+target design in code, tests, and documentation.
 
 ## Before you start
 
@@ -15,8 +15,8 @@ tests, and documentation.
 
 ## Development setup
 
-Requirements: Go 1.25+, `make`, and optionally Docker for the development
-Compose topology. Kubernetes API/operator work also needs `kubectl`; the
+Requirements: Go 1.25+, `make`, and Docker for the kind integration target
+and `make docker` image builds. Kubernetes API/operator work also needs `kubectl`; the
 checked-in integration target uses Docker, jq, kind v0.32.0, and kubectl
 v1.33.12 to create a digest-pinned Kubernetes v1.33.12 cluster. Kubernetes
 1.29+ remains the API minimum, while unit tests require no cluster or GPU.
@@ -95,8 +95,8 @@ kubectl get kubeneurons.kubeneuron.io
 
 The samples contain development settings. Review image references, Secret
 references, store selection, and `executionMode` before applying them to any
-shared cluster. Installing cleanly is not evidence that the unfinished
-runtime can safely remediate real nodes.
+shared cluster. Installing cleanly is not evidence that the runtime can
+safely remediate real nodes.
 
 When changing the reconciler, add focused tests for validation, ownership,
 idempotent convergence, status conditions, and deletion/update behavior. The

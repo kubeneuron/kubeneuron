@@ -8,8 +8,9 @@ carries only agent registration, events, action polling, and accelerator
 reports; it has no human-facing routes and is not documented for direct use.
 
 Authentication: every `/api/v1/*` route below requires an
-`Authorization: Bearer` credential except the Alertmanager webhook, which
-requires the separate webhook token. Two credentials are accepted:
+`Authorization: Bearer` credential or a server-side session except the
+Alertmanager webhook, which requires the separate webhook token. Two
+bearer credentials are accepted:
 
 - **A Kubernetes credential (recommended, managed installations):** any
   bearer token the API server can verify — `kubectl create token <sa>`, an
@@ -22,6 +23,13 @@ requires the separate webhook token. Two credentials are accepted:
 - **The shared static operator token (break-glass):** the `actor` body
   field is then required and recorded as `token:<actor>` — visibly a
   self-asserted claim, not a verified identity.
+
+Two interactive sign-ins issue server-side sessions instead of a bearer
+header: **password users** declared in `spec.auth.users`
+(`POST /api/v1/login`) and **OIDC**
+(`GET /api/v1/auth/oidc/login` → provider →
+`GET /api/v1/auth/oidc/callback`). `GET /api/v1/session` returns the
+current session's identity; audit rows record the verified user.
 
 Without a configured operator token the operator API is disabled entirely
 (fail closed).
@@ -47,11 +55,13 @@ Without a configured operator token the operator API is disabled entirely
 | `GET /api/v1/incidents` | list; filters `?state=OPEN,EXECUTING&node=<node>&limit=<n>` |
 | `GET /api/v1/incidents/{id}` | detail including the audit trail |
 | `POST /api/v1/incidents` | manual remediation trigger; body `{"node","class","actor?","gpu_uuid?","gpu_index?"}` — `node` and `class` are required; `actor` only with the static token |
-| `POST /api/v1/incidents/{id}/approve` | approve the pending step; body `{"actor"}` |
-| `POST /api/v1/incidents/{id}/reject` | reject the pending step; body `{"actor"}` |
+| `POST /api/v1/incidents/{id}/approve` | approve the pending step; body `{"actor","reason?","park_epoch?"}` |
+| `POST /api/v1/incidents/{id}/reject` | reject the pending step; body `{"actor","reason?","park_epoch?"}` |
 | `POST /api/v1/incidents/{id}/resolve` | manually resolve; body `{"actor"}` |
 
-Decisions return `204 No Content`. With a Kubernetes credential the audit
+Decisions return `204 No Content`. `park_epoch` pins the decision to the
+approval round shown to the human; a decision against a superseded round
+is refused. With a Kubernetes credential the audit
 actor is the authenticated principal and the body `actor` is ignored; with
 the static token the claim is recorded as `token:<actor>`.
 
@@ -80,6 +90,6 @@ the static token the claim is recorded as `token:<actor>`.
 
 ## Not implemented
 
-Slack interactive approvals, SSE streaming, a metrics query proxy, versioned
-config editing, and token login are design targets that do **not** exist;
+Slack interactive approvals, SSE streaming, a metrics query proxy, and
+versioned config editing are design targets that do **not** exist;
 the API deliberately does not advertise them.

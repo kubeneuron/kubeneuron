@@ -15,7 +15,7 @@ dcgm-exporter) and the VictoriaMetrics operator — following
 
 ```sh
 kubectl apply -k config/default
-kubectl get crd | grep kubeneuron.io   # six CRDs Established
+kubectl get crd | grep kubeneuron.io   # seven CRDs Established
 kubectl -n kube-neuron get deployment kubeneuron-operator
 ```
 
@@ -23,20 +23,19 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
     [`deploy/install.sh`](https://github.com/kubeneuron/kubeneuron/blob/main/deploy/install.sh)
     (also attached to every release as `install-vX.Y.Z.sh`) performs the
     whole procedure below in one run: CRDs + operator, generated tokens
-    and a panel admin password, a self-signed 90-day TLS bootstrap, a
-    starter observe-only configuration, and a readiness wait — then
-    prints your sign-in credentials. It is the fastest path to a working
+    and a panel admin password, a starter observe-only configuration, and
+    a readiness wait — then prints your sign-in credentials. It does not
+    generate TLS material; the operator issues that itself. It is the fastest path to a working
     DryRun installation; return to this page for production TLS,
     notifications, and real playbooks. `--uninstall` reverts it.
 
     The one-liner:
     ```sh
     curl -sfL https://github.com/kubeneuron/kubeneuron/releases/latest/download/install.sh \
-      | bash -s -- --version v0.1.1
+      | bash -s -- --version latest
     ```
-    Pin the version in anything repeatable: it selects the matching signed
-    images and install manifest. `--version latest` exists for a quick
-    look, not for a production install.
+    Pin a concrete version in anything repeatable: it selects the matching
+    signed images and install manifest.
 
 ## 2. Namespace and root object
 
@@ -51,11 +50,18 @@ Read back the installation UID — the certificate identity depends on it:
 ROOT_UID=$(kubectl get kubeneuron <name> -o jsonpath='{.metadata.uid}')
 ```
 
-## 3. TLS bootstrap (manual, four Secrets)
+## 3. TLS (operator-issued by default)
 
 Agent↔controller traffic requires TLS 1.3 mTLS plus a projected Pod-bound
-ServiceAccount token. No cert-manager or service mesh is required, but you
-(or an offline issuer) must create the material once:
+ServiceAccount token. By default (`spec.tls.issuer: Operator`) the
+operator issues and auto-renews all TLS material itself — no cert-manager,
+service mesh, or manual Secrets are required. Foreign material in the
+managed Secrets is only watched and warned about, never overwritten, and
+per-workload TLS revisions roll exactly the consumers that mount changed
+material.
+
+To bring your own PKI instead, you (or an offline issuer) create the
+material once, as four Secrets:
 
 1. **Controller serving leaf** — `serverAuth`, subject/SAN covering
    `<name>-controller.<namespace>.svc`.
@@ -74,15 +80,18 @@ ServiceAccount token. No cert-manager or service mesh is required, but you
 
 Create them in `spec.namespace` under the names referenced by `spec.tls`
 (key-pair Secrets as `kubernetes.io/tls`; CA bundles under `ca.crt` or a
-custom key). References must omit `namespace`. The operator only wires the
-volume mounts — it never reads, owns, or generates Secret data.
+custom key). References must omit `namespace`. With bring-your-own
+material the operator only wires the volume mounts — it never reads,
+owns, or generates Secret data.
 
 !!! note "Rotation"
-    Issuance, renewal, and revocation are manual at this stage; certificate
-    changes require coordinated workload restarts. The kind harness tests
-    an immutable-versioned rotation procedure end to end — follow that
-    pattern (new versioned Secrets → expand trust → switch leaf → contract
-    trust).
+    Operator-issued material renews automatically, and renewal rolls
+    exactly the workloads that mount the changed material. For
+    bring-your-own material, issuance, renewal, and revocation are manual
+    and certificate changes require coordinated workload restarts. The
+    kind harness tests an immutable-versioned rotation procedure end to
+    end — follow that pattern (new versioned Secrets → expand trust →
+    switch leaf → contract trust).
 
 !!! tip "cert-manager convenience path"
     [`deploy/cert-manager/`](https://github.com/kubeneuron/kubeneuron/tree/main/deploy/cert-manager)
@@ -140,8 +149,11 @@ acknowledged within 90 s" — it is a connectivity signal, not GPU health.
 ## 7. Burn in
 
 Run at least two weeks in `DryRun`, watching `kubeneuron_*` metrics and the
-audit trails of the incidents the system *would* have remediated. The current
-operator rejects `executionMode: Enabled` at CEL admission and during
-compilation: its Kubernetes agent image does not yet provide the host GPU
-tooling, script provisioning, or crash-safe action journal needed for real
-side effects.
+audit trails of the incidents the system *would* have remediated.
+`executionMode: Enabled` is supported but off by default: admission,
+compilation, controller dispatch, and the agent executor all require
+`spec.safety.destructiveExecution` with a non-empty node selector and an
+exact acknowledgement, and the agent records every side effect in a
+crash-safe action journal (intent before start, outcome before reporting).
+Confine any move to `Enabled` to the narrowest node selector that covers
+the fleet you intend.

@@ -125,8 +125,9 @@ no-op. This is the heart of the project.
 - [x] (M) **REST read APIs**: incidents list/get, nodes, audit; wire
       `kubeneuronctl status|nodes|incidents` to them.
 - [x] (M) **Decision APIs**: approve/reject/resolve + pause/resume with
-      audited actor; `kubeneuronctl` fully wired. Remaining: the operator
-      still rejects `executionMode: Paused` (runtime pause exists via API).
+      audited actor; `kubeneuronctl` fully wired. The operator has since
+      accepted `executionMode: Paused` as well (runtime pause also exists
+      via API).
 - [x] (S) **Slack notifier** via incoming webhook behind `notify.Async`,
       so delivery never stalls ingest or the walk. Interactive
       Approve/Reject buttons (Slack app + signing secret) remain open.
@@ -142,8 +143,10 @@ a complete audit log. Release **v0.1.0** and publish a demo walkthrough.
 ## Milestone 3 — Real actions, guarded enablement
 
 Goal: after the remaining safety and hardware gates, `executionMode: Enabled`
-can stop being rejected and a real GPU node can be remediated. The current
-implementation rejects `Enabled` fail-closed.
+can stop being rejected and a real GPU node can be remediated. The blanket
+`Enabled` rejection was removed in v0.2.0: `Enabled` is supported,
+off-by-default, and confined by `spec.safety.destructiveExecution` (a
+non-empty node selector plus an exact acknowledgement).
 
 - [ ] (M) **Guarded enablement:** accept `Enabled` only after explicit
       preconditions, crash-safe action completion across restarts, and

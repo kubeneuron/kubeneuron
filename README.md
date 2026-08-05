@@ -8,7 +8,7 @@ remediation workflow. The escalation ladder ranges from observation and
 workload eviction through GPU reset, node drain, reboot, and hardware
 escalation.
 
-> **Status: released (v0.2.0); dry-run is the default, and real cloud node
+> **Status: released (v0.2.1); dry-run is the default, and real cloud node
 > remediation is validated on live EKS.**
 > Working today: kernel-log XID detection on real NVIDIA hardware, GPU
 > inventory through `nvidia-smi` (mounted into the agent with
@@ -19,7 +19,9 @@ escalation.
 > REST API, control panel, and CLI. v0.2.0 adds operator-issued mTLS with
 > automatic renewal, in-place controller configuration hot-reload (no HA
 > rollout deadlock), crash-safe host state across an agent restart, and
-> cloud GPU node remediation.
+> cloud GPU node remediation. v0.2.1 adds the approval-round protocol end
+> to end, controller-served arming, and the first green live hardware E2E
+> run.
 >
 > **Validated end to end on live EKS (g4dn, real Tesla T4).** A
 > kernel-injected XID 79 (`fell-off-bus`) walked
@@ -162,8 +164,8 @@ multi-node cluster with an agent per worker. Its spoof test still rejects an
 arbitrary other node name; replaying real node-A credentials against node B
 remains future work. It does not validate NVIDIA drivers, real
 NVML, DCGM, GPU telemetry or actions, automated issuance/expiry detection,
-CA revocation/recovery, the future action RPC, crash-safe action completion
-across an agent restart, or remediation behavior.
+CA revocation/recovery, the (shipped) durable action protocol and its
+crash-safe completion across an agent restart, or remediation behavior.
 
 ## Operator preview install
 
@@ -187,9 +189,9 @@ kubectl get kubeneurons.kubeneuron.io
 
 Review the sample image references and all safety/store settings before
 applying them. The samples are development examples, and successful creation
-of the CRs does not imply that the unfinished controller/agent execution path
-is production-ready. Omit `config/samples` if you only want to install the API
-and operator.
+of the CRs does not imply that the controller/agent execution path
+is production-ready for your environment. Omit `config/samples` if you only
+want to install the API and operator.
 
 Operator-managed SQLite uses a `ReadWriteOnce` PersistentVolumeClaim. Its
 request defaults to `5Gi` and may be increased, but not decreased; the
@@ -336,8 +338,8 @@ ownership and projected identity required by the controller.
 
 The target design includes dry-run, concurrency limits, cooldowns, flap
 detection, typed actions, approval gates, idempotency, and a durable audit
-trail. The current skeleton provides some foundations, not the completed
-safety case:
+trail. The shipped implementation provides real foundations, not the
+completed safety case:
 
 - shipped file configuration and an omitted CR `executionMode` default to
   dry-run;
@@ -417,10 +419,12 @@ real g4dn instance, under the `destructiveExecution` node confinement.
 
 **Remaining, deliberately hardware-gated:** per-device *hardware* GPU
 reset on bare metal (a virtualized instance has no guest PCI reset, so the
-agent refuses it on evidence), a standing GPU-lab CI target for it, and an
-NVML/DCGM event stream as a second detection source beside kmsg. That
-matrix in [PRODUCT_PLAN.md](PRODUCT_PLAN.md) still gates per-device reset;
-cloud node remediation no longer waits on it.
+agent refuses it on evidence), live `dcgmi dmon` column-layout
+confirmation (the hardware E2E injects XIDs via kmsg, not DCGM), and
+step-time verification depth. The GPU-lab CI target now exists and has run
+green on live EKS, and the DCGM/nvidia-smi second detection source beside
+kmsg has shipped. That matrix in [PRODUCT_PLAN.md](PRODUCT_PLAN.md) still
+gates per-device reset; cloud node remediation no longer waits on it.
 
 **Later evaluations:** ClickHouse archival, Slurm, and ticketing
 integrations.

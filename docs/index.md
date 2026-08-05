@@ -8,12 +8,15 @@ exhaustion, NVLink/PCIe degradation, thermal events) as an audited,
 policy-driven escalation ladder: observe → workload restart → GPU reset →
 drain-and-reset → reboot → driver remediation → hardware escalation.
 
-!!! warning "Status: Kubernetes dry-run preview; not production-ready"
-    The end-to-end **dry-run** loop is implemented and tested. The
-    operator rejects `Enabled` mode (real side effects) at admission and
-    compilation because its managed agent runtime has not passed host-tooling
-    and hardware-gated verification. Keep production installs in `DryRun`.
-    See the
+!!! warning "Status: dry-run by default; confined destructive execution supported"
+    The end-to-end **dry-run** loop is implemented and tested, and remains
+    the default and recommended mode. `Enabled` mode (real side effects) is
+    supported but off by default: it must be confined by
+    `spec.safety.destructiveExecution` (a non-empty node selector plus an
+    exact acknowledgement), enforced at admission, compilation, controller
+    dispatch, and the agent executor. The confined destructive path has been
+    validated on a live EKS GPU cluster; per-device GPU reset remains
+    hardware-gated and needs bare metal to validate. See the
     [roadmap](https://github.com/kubeneuron/kubeneuron/blob/main/ROADMAP.md).
 
 ## Why KubeNeuron

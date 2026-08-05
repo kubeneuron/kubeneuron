@@ -21,11 +21,19 @@ and carries no support guarantee.
 
 ## Scope notes
 
-- KubeNeuron is **not production-ready**; `executionMode: Enabled` is
-  deliberately rejected. Reports about the documented, fail-closed rejection
-  paths working as documented are not vulnerabilities.
+- `executionMode: Enabled` (real destructive remediation) is a supported,
+  off-by-default mode confined by `spec.safety.destructiveExecution`: a
+  non-empty node selector plus an exact acknowledgement string, enforced at
+  admission, compilation, controller dispatch, and the agent executor.
+  **Bypasses of that confinement — executing a destructive action on a node
+  outside the declared selector, arming an agent the controller did not
+  arm, or resuming an approval for content the human never saw — are
+  exactly the class of report we most want.** Fail-closed rejection paths
+  working as documented are not vulnerabilities.
 - The trust boundaries of interest are: agent ↔ controller (mTLS + Pod-bound
-  token), human/CLI ↔ operator API (bearer token), Alertmanager ↔ webhook
+  token; controller-served arming header), human/CLI/panel ↔ operator API
+  (static bearer tokens, password users with server-side sessions, or OIDC —
+  decisions are audited under the verified identity), Alertmanager ↔ webhook
   (bearer token), and the operator's Kubernetes RBAC surface.
 - Vulnerabilities in third-party dependencies (VictoriaMetrics, Alertmanager,
   dcgm-exporter, GPU Operator) should be reported upstream; version-bump

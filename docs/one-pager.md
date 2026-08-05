@@ -30,8 +30,10 @@ even run, with DCGM/NVML corroboration as runtime evidence.
 ## Why it is different
 
 - **Fail-closed by construction.** Real destructive execution
-  (`executionMode: Enabled`) is rejected by five independent layers until
-  a hardware verification matrix passes. Concurrency limits, cooldowns,
+  (`executionMode: Enabled`) is off by default and confined by
+  `spec.safety.destructiveExecution` — a non-empty node selector plus an
+  exact acknowledgement, enforced at admission, compilation, controller
+  dispatch, and the agent executor. Concurrency limits, cooldowns,
   flap detection, maintenance windows, per-node pause, and a global big
   red button all fail toward *not acting*. The default production mode is
   dry-run with human-approved workflows.
@@ -62,7 +64,8 @@ even run, with DCGM/NVML corroboration as runtime evidence.
 
 ## Proof, not claims
 
-- Signed multi-arch releases with SBOMs (`v0.1.1` on GHCR).
+- Signed multi-arch releases with SBOMs on GHCR (latest published
+  images: `v0.1.1`).
 - The full ladder — kernel-injected XID 79 → cordon → drain → approval →
   reboot → uncordon — validated end to end on a **real Tesla T4** on AWS
   EKS, approver identity in the audit.
@@ -75,7 +78,7 @@ even run, with DCGM/NVML corroboration as runtime evidence.
 
 ```console
 $ curl -sfL https://github.com/kubeneuron/kubeneuron/releases/latest/download/install.sh \
-    | bash -s -- --version v0.1.1
+    | bash -s -- --version latest
 ✓ KubeNeuron is Ready.
   Sign in       admin / <generated password>
 ```

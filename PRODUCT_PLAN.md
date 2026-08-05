@@ -42,9 +42,12 @@ idle checks, reset, and bounded driver probing. It also has typed diagnostic,
 bundle, guarded reboot, and allow-listed-script action contracts. A fsynced
 action journal is now wired to the versioned lease protocol, alongside a
 vendor-neutral accelerator contract and fail-closed NVIDIA adapter. This is
-not yet a production agent runtime or hardware qualification: the current
-distroless image does not provision the required NVIDIA or DCGM host tooling,
-remediation scripts, or a qualified execution environment.
+not yet a production agent runtime or hardware qualification: at this
+checkpoint the distroless image did not provision the required NVIDIA or DCGM
+host tooling, remediation scripts, or a qualified execution environment.
+(Since shipped as `spec.agent.hostTooling`, which mounts the host
+`nvidia-smi`/`dcgmi`/driver libraries and a scripts directory into the
+distroless agent; verified on a live T4.)
 
 Recent durability foundations, still insufficient for Enabled mode:
 
@@ -69,9 +72,9 @@ Recent durability foundations, still insufficient for Enabled mode:
   and `dcgmi discovery -l` observations prove a matching DCGM runtime and the
   same GPU count as `nvidia-smi`; the version must exactly match the
   server-selected profile. Missing, malformed, or mismatched probe output
-  remains `degraded`. The current operator image does not provision `dcgmi`,
-  so this is still a production-runtime blocker until its image and host
-  tooling contract is completed.
+  remains `degraded`. The host tooling contract has since been completed via
+  `spec.agent.hostTooling`; whether `dcgmi` is present is now a host fact
+  (the stock EKS NVIDIA AMI ships without it).
 - A versioned, agent-authenticated accelerator-report protocol now persists
   the newest observation per `(node, vendor)`. It carries stable inventory,
   driver/runtime versions, topology safety, semantic capabilities, readiness
@@ -85,15 +88,25 @@ The following gaps block production remediation:
    boot identity, cancellation, and a production multi-controller recovery
    model. The current local journal/lease recovery is intentionally
    single-node-agent and fails closed when a second local process appears.
+   (Closed: server-recorded attempts, executor boot-identity binding, and
+   pending-only cancellation shipped.)
 2. Verification currently proves an agent heartbeat and a quiet window, not
    DCGM/NVML health, expected device inventory, or successful diagnostics.
+   (Closed: verification before `RESOLVED` now includes DCGM health/diag,
+   expected inventory, and a driver probe.)
 3. SQLite and a single Recreate controller are suitable for DryRun, not an
-   enabled fleet with failover.
+   enabled fleet with failover. (Closed: PostgreSQL HA with leader election
+   and proven no-duplicate failover shipped.)
 4. The operator API uses one bearer token and accepts an actor supplied in
    JSON; a production audit must derive the actor from an authenticated
-   principal.
+   principal. (Closed: Kubernetes TokenReview, password users, and OIDC with
+   server-side sessions ship; actors derive from authenticated principals,
+   and static tokens are audited as `token:<name>`.)
 5. CPU-only kind tests and one-node platform smoke checks do not qualify GPU
    remediation, cross-node identity, action replay, or upgrades on hardware.
+   (Largely closed: the hardware E2E has run green on live EKS, including a
+   real confined destructive `ReplaceNode`; bare-metal per-device reset and
+   upgrades on hardware remain open.)
 6. A `v1alpha1` `AcceleratorRuntimeProfile` now compiles into the immutable
    controller snapshot and gates physical NVIDIA reset on selector, digest,
    reviewed driver version, report age, readiness, declared capability, exact physical GPU, and
@@ -213,7 +226,8 @@ execute a host script; public documentation makes no unsupported claim.
   Same-vendor selector overlap is rejected, and a physical reset must satisfy
   the matching server profile (including its reviewed NVIDIA driver version)
   plus a fresh matching agent report. The profile has no execution-mode field;
-  `Enabled` remains prohibited.
+  `Enabled` is governed separately and is now supported, off-by-default,
+  confined by `spec.safety.destructiveExecution`.
 - Completed foundation: the managed DaemonSet requests its selected NVIDIA
   profile digest, UID, and generation from the authenticated controller and
   reports only with that binding. No selected profile, ambiguous selection, or
@@ -271,6 +285,8 @@ posts cannot perform a reset or reboot twice.
 - Add NVIDIA NVML or DCGM event monitoring beside kmsg; add periodic inventory
   drift, driver, DCGM, and exporter probes. The initial NVIDIA adapter maps
   existing XID events and driver liveness only; it is not a DCGM replacement.
+  (Second detection source shipped in v0.2.x: `internal/agent/gpuhealth`
+  DCGM poll with an `nvidia-smi` fallback, real-driver only.)
 - Completed foundation: the SQLite transactional outbox commits each item's
   incident/audit mutation and `done` acknowledgement together. Promote this
   behavior to the production storage backend and test controller
@@ -302,15 +318,20 @@ in `NEEDS_HUMAN` with the node protected from new workloads.
 ### Phase 5 — Production control plane and access security
 
 - Implement PostgreSQL storage, migrations, backup/restore/PITR procedures,
-  retention, leader election, and controller failover.
+  retention, leader election, and controller failover. (Shipped in v0.1.x:
+  PostgreSQL HA store with leader election and no-duplicate failover.)
 - Replace the operator bearer-token actor model with OIDC and/or Kubernetes
   RBAC roles. Persist the authenticated principal, role, request identity,
-  and decision channel in audit entries.
+  and decision channel in audit entries. (Shipped in v0.1.x/v0.2.x:
+  TokenReview + RBAC, password users, OIDC with server-side sessions.)
 - Add TLS for human-facing access, NetworkPolicies, least-privilege service
   accounts, signed images/SBOMs, vulnerability policy, and a review of the
-  privileged node-agent threat boundary.
+  privileged node-agent threat boundary. (Shipped in v0.1.x.)
 - Add automated certificate issuance/renewal convenience, expiry monitoring,
   auditable rotation, and a documented emergency revocation procedure.
+  (Shipped in v0.2.0: operator-issued TLS with automatic renewal
+  (`spec.tls.issuer: Operator`), plus `hack/tls-rotate.sh` and
+  `deploy/cert-manager/`.)
 
 Exit: a controller failover leaves no duplicate action, restore is rehearsed,
 and every human mutation has a verifiable identity.
@@ -347,6 +368,11 @@ Exit: a documented pilot proves the full signal-to-remediation flow on real
 hardware and all V1 release criteria pass.
 
 ## Enabled admission gate
+
+*Note: the shipped acceptance contract (since v0.2.0) is
+`spec.safety.destructiveExecution` — a non-empty node selector plus the exact
+acknowledgement sentence. The stricter matrix below remains the aspirational
+bar for full autonomy, not the implemented gate.*
 
 The operator may accept `executionMode: Enabled` only when all conditions are
 true for the installation generation:

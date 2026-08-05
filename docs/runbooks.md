@@ -90,8 +90,8 @@ its `/readyz`, and the mTLS material if it logs TLS errors.
 
 The controller is unreachable (3m): no ingestion, no reconcile walk, no
 notifications. Downstream KubeNeuron alerts are inhibited while this fires.
-Check the Deployment (`Recreate` — a rollout implies a short gap), the PVC,
-and controller logs. Signals are not lost: Alertmanager retries and agents
+Check the Deployment (`Recreate` on SQLite installs — a rollout implies a
+short gap; PostgreSQL HA rolls without one), the PVC, and controller logs. Signals are not lost: Alertmanager retries and agents
 spool events durably.
 
 ### KubeNeuronIncidentNeedsHuman

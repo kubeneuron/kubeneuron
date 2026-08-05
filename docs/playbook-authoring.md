@@ -43,9 +43,11 @@ not, because no cloud VM tested so far permits one (see below).
 | `GPUReset` | `nvidia-smi --gpu-reset` on the node | refuses while any process holds the device node, naming the holders; pair with `QuiesceAcceleratorStack` |
 | `QuiesceAcceleratorStack` / `RestoreAcceleratorStack` | stops/restarts the GPU vendor's own monitoring on the node | required before `GPUReset` on a GPU Operator cluster (see below) |
 | `RunDiag` | `dcgmi diag -r <params.diag_level>` | levels 1–3 when DCGM is available |
-| `CollectBundle` | `nvidia-bug-report.sh` | future host-side bundle collection |
+| `CollectBundle` | `nvidia-bug-report.sh` | the agent runs it host-side into a bundle |
 | `Reboot` | asks the host's init to reboot, from PID 1's namespaces | **must** set `approval: Required`; idempotent on `boot_id` so a retry cannot bounce the node twice |
-| `IdleCheck` / `WaitIdle` | GPU idleness probes | typed contracts exist; cross-restart completion persistence is still required |
+| `RecycleNode` | cloud stop/start of the instance | approval-forced; AWS via scoped IRSA; refuses ASG members |
+| `ReplaceNode` | terminates the instance for the autoscaler to replace | approval-forced; AWS via scoped IRSA |
+| `IdleCheck` / `WaitIdle` | GPU idleness probes | the action journal persists intent and outcome across agent restarts |
 | `VerifyGPUHealth` / `VerifyNodeHealth` | health probes | agent heartbeat freshness is exercised; DCGM verification is roadmap |
 | `OpenTicket` | notification with quarantine note | intended end of the ladder (RMA) |
 

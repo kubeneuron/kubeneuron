@@ -10,7 +10,11 @@ scope or safety rules, `PRODUCT_PLAN.md` wins.
 Sizing: **S** ≈ up to a day, **M** ≈ days, **L** ≈ a week+, for one developer
 familiar with the codebase.
 
-## Verified checkpoint (2026-07-25)
+## Superseded checkpoint (2026-07-25)
+
+> [Historical snapshot from the original audit; see `CHANGELOG.md` (v0.2.1)
+> for current state — tagged releases and signed images exist, and confined
+> destructive remediation is validated on live EKS.]
 
 - `make build`, `go vet ./...`, and `go test -race ./...` are green on a fresh
   checkout (~30 packages).
@@ -368,7 +372,7 @@ Phases 1–3 made concrete.
       the stock EKS NVIDIA AMI — readiness stayed observed-only, as
       designed. Remaining for full closure: MIG-capable GPU (A100/H100)
       fixtures and `dcgmi` outputs.
-- [ ] (L) [hw] Hardware CI target (first manual run PASSED 2026-07-25 on
+- [x] (L) [hw] Hardware CI target (first manual run PASSED 2026-07-25 on
       ephemeral EKS: multi-node mTLS registration, kernel-injected XID 79 →
       cordon→drain→approval→reboot→uncordon dry-run ladder with full audit;
       infra findings fixed: fsGroup for CSI volumes, EBS CSI addon
@@ -389,8 +393,14 @@ Phases 1–3 made concrete.
       `.github/workflows/hw-e2e-reaper.yaml` (out-of-band max-lifetime
       watchdog), and `hack/hw-e2e.sh` (up → deploy → dry-run + destructive
       ReplaceNode assertions → always-teardown with a leak sweep). Per-commit
-      CI is untouched. actionlint/bash -n clean; **not yet executed against a
-      live lab**, so it stays `[ ]` until a first green dispatch run.
+      CI is untouched. actionlint/bash -n clean.
+      **FIRST GREEN RUN 2026-08-05** on ephemeral EKS `kubeneuron-e2e10`
+      (us-east-1, g4dn.xlarge/T4): the XID-79 dry-run ladder, a real
+      confined destructive `ReplaceNode` instance termination, and the
+      XID-92 threshold phase all passed, and teardown swept to zero
+      leftovers. The run was driven locally via `hack/hw-e2e.sh`; the
+      GitHub Actions `workflow_dispatch` path itself has not yet been
+      exercised.
 - [ ] (M) [hw] NVML/DCGM event stream as a second detection source beside kmsg.
       **CODE LANDED 2026-08-01:** `internal/agent/gpuhealth/` polls DCGM's
       last-XID (`dcgmi dmon -e 230`, level-triggered) with an `nvidia-smi -q`
@@ -472,8 +482,10 @@ The Enabled admission gate and verification matrix in
 [PRODUCT_PLAN.md](PRODUCT_PLAN.md) apply verbatim and are not restated here.
 Sequence: multi-node hardware qualification green → chaos/failover/restore
 rehearsed → pilot on a real fleet → hardware E2E green for two consecutive
-minor releases → remove the `Enabled` rejection as the final step, never
-earlier.
+minor releases. (The blanket `Enabled` rejection was replaced in v0.2.0 by
+`spec.safety.destructiveExecution` confinement — selector plus
+acknowledgement; the remaining sequence items still gate any broadening of
+autonomy defaults.)
 
 ---
 
@@ -484,22 +496,22 @@ loss, B = operational outage, C = correctness/hygiene.
 
 | # | Sev | Defect | Location |
 |---|-----|--------|----------|
-| 1 | A | Gate over-releases concurrency slots; `advanceVerifying` releases unowned slot | `internal/safety/limits.go:87,102-112`; `internal/controller/reconcile.go:219` |
-| 2 | A | `notify.Async` shares mutable `*Incident` across goroutines (race) | `internal/notify/async.go:66-77` |
-| 3 | A | Drain escalates on PDB 429 instead of retrying | `internal/platform/kubernetes/kubernetes.go:169-171` |
-| 4 | A | `Fake` NVML driver reports success for `ResetGPU`; silent fallback | `internal/agent/nvml/nvml.go:70,73`; `cmd/kubeneuron-agent/main.go:98-104` |
-| 5 | B | Action journal wedges permanently at 10k/64MiB, no compaction | `internal/agent/actionjournal/actionjournal.go:182,379` |
-| 6 | B | SQLite store has zero retention; unbounded growth | `internal/store/sqlite/` |
-| 7 | B | `synchronous` pragma unset; spool rewrite not crash-durable | `internal/store/sqlite/sqlite.go:57-68`; `internal/agent/spool/spool.go:201` |
-| 8 | B | PDB `minAvailable:1` on 1-replica Recreate controller blocks drains | `internal/operator/resources.go:514-523` |
-| 9 | B | Gate cooldowns / flap history in-memory only; reset on restart | `internal/safety/` |
-| 10 | B | Notify queue drops approvals silently, no metric | `internal/notify/async.go:72,82` |
-| 11 | B | Backup CronJob cannot run (no sqlite3/tar in distroless image) | `deploy/kubernetes/backup/backup-cronjob.yaml` |
-| 12 | B | No cert-expiry metric/alert; 100-day leaf is unmonitored | — |
-| 13 | C | Flap detector counts new incidents as reopens; keys never GC'd | `internal/controller/reconcile.go:88` |
-| 14 | C | Detection thresholds (XID 13/31/43) populated but never enforced | `internal/detect/xid.go:23-26` |
-| 15 | C | `httpapi` docs advertise six unregistered routes | `internal/httpapi/httpapi.go:140-157` |
-| 16 | C | Unresolvable XID reports `GPUIndex: 0` in evidence | `internal/agent/agent.go:434-447` |
+| 1 | A | ~~Gate over-releases concurrency slots; `advanceVerifying` releases unowned slot~~ FIXED (Phase 2.1) | `internal/safety/limits.go:87,102-112`; `internal/controller/reconcile.go:219` |
+| 2 | A | ~~`notify.Async` shares mutable `*Incident` across goroutines (race)~~ FIXED (Phase 2.2) | `internal/notify/async.go:66-77` |
+| 3 | A | ~~Drain escalates on PDB 429 instead of retrying~~ FIXED (Phase 2.2) | `internal/platform/kubernetes/kubernetes.go:169-171` |
+| 4 | A | ~~`Fake` NVML driver reports success for `ResetGPU`; silent fallback~~ FIXED (Phase 4: `-require-real-driver`; destructive mode refused with a Fake driver) | `internal/agent/nvml/nvml.go:70,73`; `cmd/kubeneuron-agent/main.go:98-104` |
+| 5 | B | ~~Action journal wedges permanently at 10k/64MiB, no compaction~~ FIXED (Phase 2.3) | `internal/agent/actionjournal/actionjournal.go:182,379` |
+| 6 | B | ~~SQLite store has zero retention; unbounded growth~~ FIXED (Phase 2.3) | `internal/store/sqlite/` |
+| 7 | B | ~~`synchronous` pragma unset; spool rewrite not crash-durable~~ FIXED (Phase 2.4) | `internal/store/sqlite/sqlite.go:57-68`; `internal/agent/spool/spool.go:201` |
+| 8 | B | ~~PDB `minAvailable:1` on 1-replica Recreate controller blocks drains~~ CLOSED as a documented deliberate trade (Phase 2.5) | `internal/operator/resources.go:514-523` |
+| 9 | B | ~~Gate cooldowns / flap history in-memory only; reset on restart~~ FIXED (Phase 2.4) | `internal/safety/` |
+| 10 | B | ~~Notify queue drops approvals silently, no metric~~ FIXED (Phase 2.2) | `internal/notify/async.go:72,82` |
+| 11 | B | ~~Backup CronJob cannot run (no sqlite3/tar in distroless image)~~ FIXED (Phase 3.3) | `deploy/kubernetes/backup/backup-cronjob.yaml` |
+| 12 | B | ~~No cert-expiry metric/alert; 100-day leaf is unmonitored~~ FIXED (Phase 3.1) | — |
+| 13 | C | ~~Flap detector counts new incidents as reopens; keys never GC'd~~ FIXED (Phase 2.2) | `internal/controller/reconcile.go:88` |
+| 14 | C | ~~Detection thresholds (XID 13/31/43) populated but never enforced~~ FIXED (Phase 2.5) | `internal/detect/xid.go:23-26` |
+| 15 | C | ~~`httpapi` docs advertise six unregistered routes~~ FIXED (Phase 2.5) | `internal/httpapi/httpapi.go:140-157` |
+| 16 | C | ~~Unresolvable XID reports `GPUIndex: 0` in evidence~~ FIXED (Phase 2.5) | `internal/agent/agent.go:434-447` |
 | 17 | C | systemd deploy path cannot start as shipped | `deploy/systemd/*.service`; `cmd/kubeneuron-controller/main.go:282-284` |
 | 18 | C | 12 tracked `.orig`/`.rej` files incl. core reconciler `.rej` | `internal/operator/reconciler.go.rej` et al. |
 | 19 | C | `make docker` declared but has no rule; docs reference unbuilt images | `Makefile`; `config/default` |

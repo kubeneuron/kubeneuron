@@ -61,12 +61,13 @@ plain text. Common holds (all deliberate, all retried every tick):
 
 ## Duplicate or missing remediation after restarts
 
-The agent now single-flights and caches an action ID only within its current
-process. It does **not** yet atomically claim and durably record a side effect
-across an agent crash between dispatch and result. Therefore the Kubernetes
-operator rejects `executionMode: Enabled`; no operational remediation should
-depend on this boundary yet. Capture the incident audit trail and agent logs
-when exercising development fixtures.
+The agent single-flights actions and records each one in a crash-safe
+action journal: intent is persisted before a side effect starts and the
+outcome before it is reported, so a crash between dispatch and result
+recovers as a conservative *outcome unknown* rather than a second firing.
+`executionMode: Enabled` remains off by default and confined by
+`spec.safety.destructiveExecution`. Capture the incident audit trail and
+agent logs to establish what actually ran on an outcome-unknown action.
 
 ## Metrics/panel/CLI return 401 or 503
 
