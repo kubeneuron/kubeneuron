@@ -41,9 +41,12 @@ nav:
       - XID catalog: xid-catalog.md
   - Roadmap:
       - Making the definition true: definition-plan.md
+      - MIG semantics decision: mig-decision.md
+      - Checkpoint coordination design: checkpoint-coordination-design.md
       - Hardware E2E dispatch: hw-e2e-dispatch.md
   - Reference:
       - REST API: reference-api.md
       - kubeneuronctl: reference-cli.md
       - Metrics and alerts: reference-metrics.md
+      - Capability matrix (per vendor): reference-capabilities.md
       - Design document: design.md

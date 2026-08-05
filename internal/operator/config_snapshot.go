@@ -112,6 +112,7 @@ func CompileSnapshot(
 			VerifyQuietWindow:                quietWindow,
 			QuiesceForbidResetWhenPresent:    quiesceForbiddenHolders(installation.Spec.Safety.Quiesce),
 			DestructiveExecutionNodeSelector: destructiveNodeSelector(installation.Spec.Safety),
+			TaintDegradedNodes:               degradedNodeTaint(installation.Spec.Safety.TaintDegradedNodes),
 		},
 		Approvals: config.Approvals{
 			Channels: append([]string(nil), installation.Spec.Approvals.Channels...),
@@ -326,6 +327,23 @@ func destructiveNodeSelector(safety kubeneuronv1alpha1.SafetySpec) map[string]st
 		return nil
 	}
 	return copyStringMap(safety.DestructiveExecution.NodeSelector)
+}
+
+// degradedNodeTaint compiles spec.safety.taintDegradedNodes, emitting the key
+// ONLY for an installation that explicitly enabled it. An absent block, and an
+// explicit enabled=false, both compile to nothing at all — so the controller's
+// own default (no taint) is the one in force, and switching the field back off
+// removes the whole key rather than leaving a disabled-but-present setting for
+// a future reader to misinterpret.
+//
+// The effect is deliberately NOT defaulted here: the CRD defaults it to
+// PreferNoSchedule, and config.Validate defaults an empty value the same way,
+// so the weak effect is the answer at every layer that could be reached first.
+func degradedNodeTaint(spec *kubeneuronv1alpha1.TaintDegradedNodesSpec) *config.TaintDegradedNodes {
+	if spec == nil || !spec.Enabled {
+		return nil
+	}
+	return &config.TaintDegradedNodes{Enabled: true, Effect: string(spec.Effect)}
 }
 
 // quiesceForbiddenHolders normalizes the declared process names, dropping blanks

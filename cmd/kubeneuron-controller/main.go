@@ -439,6 +439,11 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 		if err != nil {
 			return fmt.Errorf("operator API token: %w", err)
 		}
+		// The recovery report reaches the API through an optional interface,
+		// so a signature drift would degrade to a permanent 503 instead of a
+		// build failure. Assert the wiring here, where both packages are in
+		// scope.
+		var _ httpapi.RecoveryReportBackend = ctrl
 		api.EnableOperatorAPI(ctrl, token)
 		api.SetOperatorTokenProvider(newCachedTokenFile(apiTokenFile, token, log).get)
 		if auth.usersDir != "" {

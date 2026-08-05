@@ -248,7 +248,7 @@ func TestCursorDoesNotAdvancePastAnUnacknowledgedGap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got []XIDEvent
+	var got []Event
 	for ev := range events {
 		got = append(got, ev)
 	}

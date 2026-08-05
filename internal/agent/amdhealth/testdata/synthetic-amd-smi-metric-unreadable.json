@@ -1,0 +1,32 @@
+[
+  {
+    "gpu": 0,
+    "bdf": "0000:C3:00.0",
+    "uuid": "amd-c3000000-0000-1000-8000-000000000001",
+    "temperature": {
+      "edge": { "value": "N/A", "unit": "C" },
+      "hotspot": { "value": "N/A", "unit": "C" }
+    },
+    "throttle": {
+      "thermal_throttle_status": "SOMETHING-NEW"
+    },
+    "ecc": {
+      "total_correctable_count": "N/A",
+      "total_uncorrectable_count": "N/A"
+    },
+    "ras": {
+      "retired_page_count": null
+    },
+    "xgmi": {
+      "link_error_count": -1
+    }
+  },
+  {
+    "bdf": "0000:C6:00.0",
+    "uuid": "amd-c6000000-0000-1000-8000-000000000002",
+    "ecc": {
+      "total_correctable_count": 9,
+      "total_uncorrectable_count": 9
+    }
+  }
+]

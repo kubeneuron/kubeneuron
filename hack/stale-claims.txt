@@ -21,3 +21,19 @@ six CRDs
 unfinished (KubeNeuron )?runtime
 preview profile
 child-resource status is still
+
+# --- vendor support claims -------------------------------------------------
+# The second category in this file: claims that are not yet true. Shipping
+# detection and actions are NVIDIA-only (docs/reference-capabilities.md is the
+# per-vendor matrix, machine-checked against the filesystem by verify-docs.sh).
+# These patterns fail the build on the prose spellings of shipped multi-vendor
+# support, so a README or tour sentence cannot quietly outrun the matrix.
+# When a vendor genuinely lands, delete the patterns it makes true IN THE SAME
+# COMMIT as the matrix cells — that deletion is the deliberate act this file
+# exists to force.
+[Ss]upports? (both )?(NVIDIA and (AMD|Intel)|(AMD|Intel) and NVIDIA)
+(AMD|Intel|ROCm)[^|]{0,40}(is|are) (now |fully |already )*(supported|shipped|hardware-validated)
+[Ss]hips? (an?|the) (AMD|Intel|ROCm)[a-z -]{0,20}(detection|source|driver|adapter|support)
+[Mm]ulti-?vendor[^|]{0,20}(support|detection|remediation) (is|has) (shipped|landed|arrived|live)
+(amd-smi|rocm-smi|amdgpu|xpu-smi|[Ll]evel ?[Zz]ero)[^|]{0,40}(ships|shipped|is (implemented|wired|supported))
+(AMD|Intel)[^|]{0,30}(detection|remediation) (ships|shipped|is (live|implemented))

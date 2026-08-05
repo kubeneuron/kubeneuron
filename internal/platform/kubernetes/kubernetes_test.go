@@ -295,3 +295,33 @@ func TestNodeWorkloadsReportsGPUUsage(t *testing.T) {
 		t.Fatalf("GPU usage detection wrong: %v", byName)
 	}
 }
+
+// A hardcoded nvidia.com/gpu made two failures silent: an AMD or Intel node
+// inventoried as zero GPUs, and evict_gpu_workload reporting success while
+// leaving live jobs on a device about to be reset. The matcher is the fix, so
+// it carries the regression.
+func TestAcceleratorResourceMatchingIsVendorNeutral(t *testing.T) {
+	accelerators := []string{
+		"nvidia.com/gpu",
+		"amd.com/gpu",
+		"gpu.intel.com/i915",
+		"gpu.intel.com/xe",
+		"nvidia.com/mig-1g.5gb",
+	}
+	for _, name := range accelerators {
+		if !isAcceleratorResource(corev1.ResourceName(name)) {
+			t.Errorf("%s must be recognised as an accelerator — an unrecognised one silently skips eviction", name)
+		}
+	}
+	notAccelerators := []string{
+		"cpu", "memory", "ephemeral-storage",
+		"hugepages-2Mi",
+		"example.com/fpga",
+		"example.com/gpumemory",
+	}
+	for _, name := range notAccelerators {
+		if isAcceleratorResource(corev1.ResourceName(name)) {
+			t.Errorf("%s must not be treated as an accelerator", name)
+		}
+	}
+}

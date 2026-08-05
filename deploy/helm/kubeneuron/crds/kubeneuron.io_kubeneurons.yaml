@@ -783,6 +783,38 @@ spec:
                         maxItems: 32
                         type: array
                     type: object
+                  taintDegradedNodes:
+                    description: |-
+                      TaintDegradedNodes optionally stops a node under an open incident from
+                      attracting NEW GPU work, before any playbook cordons it.
+
+                      Omitted means off. Scheduling is the one thing every workload in the
+                      cluster depends on, so this must never arrive by default with an
+                      upgrade.
+                    properties:
+                      effect:
+                        default: PreferNoSchedule
+                        description: |-
+                          Effect selects how hard the hint is.
+
+                          PreferNoSchedule, the default, is a bias: the scheduler avoids the node
+                          when it has somewhere else to put the pod, and still uses it rather than
+                          leaving work pending. NoSchedule is a wall — for a node under an OPEN
+                          incident, whose fault may yet turn out to be benign, that is a bigger
+                          hammer than the cordon a playbook applies deliberately and after
+                          evidence, which is why it is never the default.
+                        enum:
+                        - PreferNoSchedule
+                        - NoSchedule
+                        type: string
+                      enabled:
+                        default: false
+                        description: |-
+                          Enabled turns the taint on. Default false, and false is also what an
+                          absent block means: KubeNeuron does not touch node scheduling until
+                          somebody asks it to.
+                        type: boolean
+                    type: object
                   verifyQuietWindow:
                     default: 10m
                     type: string

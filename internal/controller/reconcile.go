@@ -192,9 +192,11 @@ func (c *Controller) advanceObserving(ctx context.Context, inc *types.Incident) 
 // approval or reserves a safety slot and starts execution.
 func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident) error {
 	if paused, err := c.nodePaused(ctx, inc.Target.Node); err == nil && paused {
+		c.deferPlaybook(ctx, inc, metrics.DeferNodePaused)
 		return nil // per-node pause: hold position, retry next tick
 	}
 	if window, active := c.activeMaintenanceWindow(ctx, inc.Target.Node); active {
+		c.deferPlaybook(ctx, inc, metrics.DeferMaintenanceWindow)
 		c.log.Debug("maintenance window active, holding incident",
 			"incident", inc.ID, "node", inc.Target.Node, "window", window)
 		return nil
@@ -212,6 +214,7 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 	// the escalation cap.
 	if inc.StepIndex == 0 {
 		if remaining := c.gate.CooldownRemaining(inc.Target, playbookCooldownAction(inc.Playbook)); remaining > 0 {
+			c.deferPlaybook(ctx, inc, metrics.DeferPlaybookCooldown)
 			c.log.Debug("playbook in cooldown", "incident", inc.ID, "playbook", inc.Playbook, "remaining", remaining)
 			return nil
 		}
@@ -222,6 +225,14 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 		if err := c.refuseInfeasibleReset(ctx, inc, book); err != nil {
 			c.log.Info("reset playbook refused before any disruptive step",
 				"incident", inc.ID, "playbook", inc.Playbook, "reason", err.Error())
+			if !errors.Is(err, errResetTargetUnattributed) {
+				// Only the holder refusal is protection: processes are using the
+				// device, so nothing was disrupted for a reset that could not
+				// have worked. An unattributed incident is a structural dead end
+				// — the ladder escalates to a rung that DOES run — so counting it
+				// as protection would claim a disruption that still happens.
+				c.deferPlaybook(ctx, inc, metrics.DeferDeviceHolders)
+			}
 			if errors.Is(err, errResetTargetUnattributed) {
 				// An unattributed incident has no device to reset and can never gain
 				// one. From EVALUATING the ladder cannot legally re-enter EVALUATING to
@@ -240,11 +251,13 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 			for i := range book.Steps {
 				reason, verdict := c.refuseUnarmedAgent(ctx, inc, &book.Steps[i])
 				if verdict == armingHold {
+					c.deferStep(inc, &book.Steps[i], metrics.DeferUnarmedAgent)
 					c.log.Info("holding: destructive-execution arming is still propagating to the node's agent",
 						"incident", inc.ID, "node", inc.Target.Node)
 					return nil
 				}
 				if verdict == armingRefuse {
+					c.deferStep(inc, &book.Steps[i], metrics.DeferUnarmedAgent)
 					c.log.Info("playbook needs an armed agent the node does not have",
 						"incident", inc.ID, "playbook", inc.Playbook, "reason", reason)
 					return c.escalate(ctx, inc, reason)
@@ -266,13 +279,16 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 	// step on a node whose agent definitively registered as unarmed: the human
 	// must never be asked to approve a step the node will provably refuse.
 	if reason, refused := c.refuseUnrecyclableNode(ctx, inc, step); refused {
+		c.deferStep(inc, step, metrics.DeferRecycleNotViable)
 		return c.escalate(ctx, inc, reason)
 	}
 	if reason, verdict := c.refuseUnarmedAgent(ctx, inc, step); verdict == armingHold {
+		c.deferStep(inc, step, metrics.DeferUnarmedAgent)
 		c.log.Info("holding before approval: destructive-execution arming is still propagating to the node's agent",
 			"incident", inc.ID, "node", inc.Target.Node)
 		return nil
 	} else if verdict == armingRefuse {
+		c.deferStep(inc, step, metrics.DeferUnarmedAgent)
 		return c.escalate(ctx, inc, reason)
 	}
 	if step.NeedsApproval() {
@@ -386,6 +402,7 @@ func (c *Controller) advanceAwaitingApproval(ctx context.Context, inc *types.Inc
 				return c.parkForApproval(ctx, inc, step, "not executing approved step: "+reason)
 			}
 			if window, active := c.activeMaintenanceWindow(ctx, inc.Target.Node); active {
+				c.deferStep(inc, step, metrics.DeferMaintenanceWindow)
 				c.log.Debug("maintenance window active, holding approved step",
 					"incident", inc.ID, "node", inc.Target.Node, "window", window)
 				return nil // execute once the window closes; approval stays recorded
@@ -673,6 +690,10 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 	// incident re-enters EVALUATING later, the propagation grace starts over
 	// from its next first observation.
 	c.clearArmingHold(inc.ID)
+	// Scheduler feedback rides on the committed transition, never on the
+	// attempt: a node must not be marked degraded by a transition that lost its
+	// conflict check and never happened.
+	c.syncDegradedTaint(ctx, inc, from, to)
 	if to.Halted() {
 		c.recordRecoveryOutcome(ctx, inc, to)
 	}

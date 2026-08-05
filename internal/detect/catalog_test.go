@@ -162,10 +162,18 @@ func TestCatalogFaultOverrideWinsOverBuiltin(t *testing.T) {
 // N2: an override can make an unknown vendor code actionable (the fault-table
 // analogue of adding an unknown XID), and duplicate fault overrides are
 // rejected at catalog build.
+//
+// The example code must be one the built-in table does NOT know: "amd/
+// page-retirement" served here until the AMD source shipped and made it a
+// built-in row, at which point this test would have asserted nothing.
 func TestCatalogFaultOverrideAddsUnknownCodeAndRejectsDuplicates(t *testing.T) {
+	const unknownCode = "hbm-stack-vendor-quirk"
+	if _, builtin := ClassifyFault("amd", unknownCode); builtin {
+		t.Fatalf("%q is now a built-in fault code; this test needs a code the table does not know", unknownCode)
+	}
 	catalog, err := NewCatalog([]config.SignalOverride{{
-		Name:   "amd-page-retire",
-		Faults: []config.FaultOverride{{Vendor: "amd", Code: "page-retirement"}},
+		Name:   "amd-hbm-quirk",
+		Faults: []config.FaultOverride{{Vendor: "amd", Code: unknownCode}},
 		Class:  types.ClassECCContained, Severity: types.SeverityWarning,
 	}})
 	if err != nil {
@@ -173,7 +181,7 @@ func TestCatalogFaultOverrideAddsUnknownCodeAndRejectsDuplicates(t *testing.T) {
 	}
 	ev := types.AgentEvent{
 		Node: "n1", Timestamp: time.Now(),
-		Fault: &types.FaultSignal{Vendor: "amd", Source: "amd-smi", Code: "page-retirement"},
+		Fault: &types.FaultSignal{Vendor: "amd", Source: "amd-smi", Code: unknownCode},
 	}
 	if _, ok := SignalFromFault(ev); ok {
 		t.Fatal("unknown vendor code must not be actionable without the override")

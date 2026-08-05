@@ -104,6 +104,12 @@ type Definition struct {
 	// can be restorative for confinement purposes (restore_accelerator_stack)
 	// yet still require an armed agent to execute its host half.
 	AgentDestructive bool
+	// IdleGuard marks an action whose ONLY job is to refuse when the device is
+	// still in use. Its failure is not a remediation failure: it is the system
+	// declining to disrupt a running workload, and the protection metric counts
+	// it as such. A flag rather than a wire-string match so a second vendor's
+	// idle guard is covered by adding a row here.
+	IdleGuard bool
 	// CapabilityGate is the runtime evidence gate the controller enforces
 	// before dispatch.
 	CapabilityGate CapabilityGate
@@ -136,8 +142,8 @@ var definitions = []Definition{
 	{PlaybookAction: kubeneuronv1alpha1.ActionDrain, Wire: "platform.drain", Kind: KindPlatform, Op: "drain", Scope: ScopeNode, Destructive: true},
 	{PlaybookAction: kubeneuronv1alpha1.ActionUncordon, Wire: "platform.uncordon", Kind: KindPlatform, Op: "uncordon", Scope: ScopeNode},
 	{PlaybookAction: kubeneuronv1alpha1.ActionEvictGPUWorkload, Wire: "platform.evict_gpu_workload", Kind: KindPlatform, Op: "evict_gpu_workload", Scope: ScopeGPU, Destructive: true},
-	{PlaybookAction: kubeneuronv1alpha1.ActionIdleCheck, Wire: "agent.idle_check", Kind: KindAgent, Op: "idle_check", Scope: ScopeGPU},
-	{PlaybookAction: kubeneuronv1alpha1.ActionWaitIdle, Wire: "agent.wait_idle", Kind: KindAgent, Op: "wait_idle", Scope: ScopeGPU},
+	{PlaybookAction: kubeneuronv1alpha1.ActionIdleCheck, Wire: "agent.idle_check", Kind: KindAgent, Op: "idle_check", Scope: ScopeGPU, IdleGuard: true},
+	{PlaybookAction: kubeneuronv1alpha1.ActionWaitIdle, Wire: "agent.wait_idle", Kind: KindAgent, Op: "wait_idle", Scope: ScopeGPU, IdleGuard: true},
 	// Quiescing stands down DCGM and the device plugin on the node — it degrades
 	// the node's monitoring and scheduling exactly like a drain degrades its
 	// workloads, so it must stay inside the destructiveExecution blast radius.

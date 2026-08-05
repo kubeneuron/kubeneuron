@@ -292,6 +292,46 @@ func TestCompileSnapshotPausedCompilesDryRun(t *testing.T) {
 	}
 }
 
+// §3.3: the degraded-node taint reaches the controller only when an operator
+// explicitly asked for it. An omitted block and an explicit enabled=false must
+// both compile to nothing at all, so a controller reading a snapshot cannot
+// start marking nodes as a side effect of an upgrade.
+func TestCompileSnapshotOmitsTheDegradedTaintUnlessEnabled(t *testing.T) {
+	compileSafety := func(t *testing.T, taint *kubeneuronv1alpha1.TaintDegradedNodesSpec) (config.Safety, string) {
+		t.Helper()
+		installation := testKubeNeuron()
+		installation.Spec.Safety.TaintDegradedNodes = taint
+		policies, playbooks := testPolicyFixture()
+		snapshot, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("CompileSnapshot() error = %v", err)
+		}
+		var compiled config.Config
+		if err := yaml.Unmarshal(snapshot.PoliciesYAML, &compiled); err != nil {
+			t.Fatalf("unmarshal compiled policies: %v", err)
+		}
+		return compiled.Safety, string(snapshot.PoliciesYAML)
+	}
+
+	safety, yamlText := compileSafety(t, nil)
+	if safety.TaintDegradedNodes != nil || strings.Contains(yamlText, "taint_degraded_nodes") {
+		t.Fatalf("an omitted block must leave no trace in the snapshot:\n%s", yamlText)
+	}
+	safety, yamlText = compileSafety(t, &kubeneuronv1alpha1.TaintDegradedNodesSpec{
+		Enabled: false, Effect: kubeneuronv1alpha1.TaintEffectNoSchedule,
+	})
+	if safety.TaintDegradedNodes != nil || strings.Contains(yamlText, "taint_degraded_nodes") {
+		t.Fatalf("enabled=false must not carry its effect through:\n%s", yamlText)
+	}
+	safety, _ = compileSafety(t, &kubeneuronv1alpha1.TaintDegradedNodesSpec{
+		Enabled: true, Effect: kubeneuronv1alpha1.TaintEffectPreferNoSchedule,
+	})
+	if safety.TaintDegradedNodes == nil || !safety.TaintDegradedNodes.Enabled ||
+		safety.TaintDegradedNodes.Effect != config.TaintEffectPreferNoSchedule {
+		t.Fatalf("compiled taint = %+v, want the requested effect carried through", safety.TaintDegradedNodes)
+	}
+}
+
 func TestCompileSnapshotRejectsMissingWebhookTokenAndPausedAPIAuthentication(t *testing.T) {
 	installation := testKubeNeuron()
 	installation.Spec.Notifications.WebhookToken = nil

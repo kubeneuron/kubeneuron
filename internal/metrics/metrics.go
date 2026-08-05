@@ -106,6 +106,46 @@ var (
 		Help: "GPU-seconds spent under an open incident, by class and outcome (resolved = returned to service).",
 	}, []string{"class", "outcome"})
 
+	// --- Protection: what the fleet did NOT lose ---------------------------
+	//
+	// Sibling of the recovery-outcome block above, and outcome rather than
+	// process telemetry for the same reason: the system protects workloads
+	// constantly — evicting GPU pods ahead of a destructive step, refusing a
+	// reset while the device is busy, holding for a maintenance window,
+	// blocking on a concurrency cap — and until these two series none of it
+	// was countable. The number of times automation chose NOT to disrupt is
+	// the protection story; without it, a platform team can only see the
+	// disruptions that did happen.
+
+	// WorkloadsEvicted counts GPU workloads moved off a node ahead of a
+	// destructive step, by node and by the problem class that caused it.
+	// reason is the incident's class rather than the step name: "which faults
+	// cost us evictions" is the question a capacity owner asks, and the step
+	// is always the same one.
+	WorkloadsEvicted = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_workloads_evicted_total",
+		Help: "GPU workloads evicted ahead of a destructive step, by node and problem class.",
+	}, []string{"node", "reason"})
+
+	// DestructiveStepsDeferred counts destructive steps that did NOT run, by
+	// why. Use the Defer* constants below — the label set is closed, so a new
+	// deferral path adds a named constant rather than an ad-hoc string.
+	//
+	// It counts DECISIONS, not incidents: a hold that persists (a maintenance
+	// window, a paused node) is re-decided on every reconcile pass and counts
+	// again each time, so rate() reads as "how much protection is currently in
+	// force" while a one-shot refusal appears once. Deduplicating per incident
+	// would need in-memory state that a controller restart leaks.
+	//
+	// Dry-run incidents and playbooks with no disruptive rung are deliberately
+	// excluded by the caller: neither was ever going to touch a workload, and
+	// counting them would inflate the protection story with events that risked
+	// nothing.
+	DestructiveStepsDeferred = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_destructive_steps_deferred_total",
+		Help: "Destructive steps that did not run, by the guard that stopped them.",
+	}, []string{"reason"})
+
 	// RuntimeConfigInfo is an info metric identifying the loaded runtime
 	// configuration: exactly one series with the digest of the
 	// operator-compiled snapshot currently live in this process. Alert on it
@@ -159,6 +199,52 @@ var (
 		Name: "kubeneuron_tls_certificate_not_after_seconds",
 		Help: "NotAfter of loaded TLS material (unix seconds), by artifact; bundles report their earliest expiry.",
 	}, []string{"certificate"})
+)
+
+// Deferral reasons for DestructiveStepsDeferred. The set is closed on
+// purpose: a metric whose label values are invented at each call site cannot
+// be alerted on, and the value of this series is completeness — a missing
+// path makes it lie by omission.
+const (
+	// DeferNotIdle: an idle guard (agent.idle_check / agent.wait_idle) refused
+	// because the device was still in use, so the destructive rung it guards
+	// never ran.
+	DeferNotIdle = "not_idle"
+	// DeferDeviceHolders: processes hold the GPU that KubeNeuron cannot
+	// release, so a reset playbook is refused before its first disruptive step.
+	DeferDeviceHolders = "device_holders"
+	// DeferMaintenanceWindow: a declared maintenance window covers the node.
+	DeferMaintenanceWindow = "maintenance_window"
+	// DeferNodePaused: the node is paused by a GPUNodeConfig.
+	DeferNodePaused = "node_paused"
+	// DeferConcurrencyCap: MaxConcurrentRemediations or MaxConcurrentReboots is
+	// full — the guard that stops a fleet-wide fault from draining half the
+	// cluster at once.
+	DeferConcurrencyCap = "concurrency_cap"
+	// DeferPlaybookCooldown: the target is inside a cooldown recorded by an
+	// earlier run of this playbook (or of this action class on the gate).
+	DeferPlaybookCooldown = "playbook_cooldown"
+	// DeferUnarmedAgent: the node's agent is not armed for destructive
+	// execution, so the step is held or routed away before a human is asked to
+	// approve something the node will refuse.
+	DeferUnarmedAgent = "unarmed_agent"
+	// DeferConfinement: the node is outside — or cannot be proven inside —
+	// spec.safety.destructiveExecution.nodeSelector, the declared blast radius.
+	DeferConfinement = "confinement"
+	// DeferRecycleNotViable: the instance behind the node provably cannot be
+	// stop/started (an autoscaling-group member), so the recycle is refused
+	// before approval.
+	DeferRecycleNotViable = "recycle_not_viable"
+	// DeferGlobalPause: the safety gate's big red button is down. Distinct from
+	// node_paused, which is one node declared out of scope by configuration;
+	// this is a human having stopped all automation fleet-wide, and blending
+	// the two would hide which lever is actually holding a remediation.
+	DeferGlobalPause = "global_pause"
+	// DeferAcceleratorEvidence: the runtime evidence a capability-gated reset
+	// needs is missing, stale, or bound to different hardware. The step is
+	// held, not escalated, so this is genuinely a deferral: fail-closed on
+	// absent evidence is the single most common reason a reset does not run.
+	DeferAcceleratorEvidence = "accelerator_evidence"
 )
 
 // RecordCertBundleExpiry parses PEM material and records the earliest

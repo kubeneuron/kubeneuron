@@ -5,6 +5,7 @@
 package safety
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -27,13 +28,40 @@ type Limits struct {
 	DryRun bool
 }
 
+// DenialKind classifies a refusal into the lever that caused it. It exists so
+// a caller can label a metric without parsing Reason, which is human-facing
+// prose that changes whenever the message improves.
+type DenialKind string
+
+const (
+	// DenialGlobalPause: the fleet-wide pause switch is down.
+	DenialGlobalPause DenialKind = "global_pause"
+	// DenialCooldown: this (target, action) pair ran recently.
+	DenialCooldown DenialKind = "cooldown"
+	// DenialConcurrency: a remediation or reboot cap is full.
+	DenialConcurrency DenialKind = "concurrency"
+)
+
 // Denial explains why an action was not allowed. It is surfaced in metrics,
 // logs, and the incident audit trail.
 type Denial struct {
+	// Kind is the machine-readable lever; Reason is what a human reads.
+	Kind   DenialKind
 	Reason string
 }
 
 func (d *Denial) Error() string { return "safety: " + d.Reason }
+
+// DenialKindOf reports the lever behind an admission error, and whether the
+// error was a *Denial at all. Callers use it instead of a type switch so the
+// classification stays in one place.
+func DenialKindOf(err error) (DenialKind, bool) {
+	var denial *Denial
+	if errors.As(err, &denial) {
+		return denial.Kind, true
+	}
+	return "", false
+}
 
 // Gate is the single admission point for remediation actions.
 type Gate struct {
@@ -92,11 +120,12 @@ func (g *Gate) Allow(target types.Target, action types.ActionType) error {
 	defer g.mu.Unlock()
 
 	key := targetKey(target)
-	if reason := g.stepDenialLocked(key, action); reason != "" {
-		return &Denial{Reason: reason}
+	if kind, reason := g.stepDenialLocked(key, action); reason != "" {
+		return &Denial{Kind: kind, Reason: reason}
 	}
 	if g.active[key] == 0 && len(g.active) >= g.limits.MaxConcurrentRemediations {
-		return &Denial{Reason: fmt.Sprintf("concurrency limit reached (%d targets in remediation)", len(g.active))}
+		return &Denial{Kind: DenialConcurrency,
+			Reason: fmt.Sprintf("concurrency limit reached (%d targets in remediation)", len(g.active))}
 	}
 
 	g.active[key]++
@@ -116,8 +145,8 @@ func (g *Gate) AllowHeld(target types.Target, action types.ActionType) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if reason := g.stepDenialLocked(targetKey(target), action); reason != "" {
-		return &Denial{Reason: reason}
+	if kind, reason := g.stepDenialLocked(targetKey(target), action); reason != "" {
+		return &Denial{Kind: kind, Reason: reason}
 	}
 	if isRebootClass(action) {
 		g.reboots[targetKey(target)]++
@@ -126,18 +155,19 @@ func (g *Gate) AllowHeld(target types.Target, action types.ActionType) error {
 }
 
 // stepDenialLocked evaluates the per-step admission checks shared by Allow and
-// AllowHeld. Called with g.mu held; returns a denial reason or "".
-func (g *Gate) stepDenialLocked(key string, action types.ActionType) string {
+// AllowHeld. Called with g.mu held; returns the classified lever and a denial
+// reason, or an empty reason when the step is admitted.
+func (g *Gate) stepDenialLocked(key string, action types.ActionType) (DenialKind, string) {
 	if g.paused {
-		return "system is paused"
+		return DenialGlobalPause, "system is paused"
 	}
 	if until, ok := g.cooldownUntil[key+"|"+string(action)]; ok && g.now().Before(until) {
-		return fmt.Sprintf("cooldown until %s for %s on %s", until.Format(time.RFC3339), action, key)
+		return DenialCooldown, fmt.Sprintf("cooldown until %s for %s on %s", until.Format(time.RFC3339), action, key)
 	}
 	if isRebootClass(action) && g.reboots[key] == 0 && len(g.reboots) >= g.limits.MaxConcurrentReboots {
-		return fmt.Sprintf("reboot concurrency limit reached (%d in progress)", len(g.reboots))
+		return DenialConcurrency, fmt.Sprintf("reboot concurrency limit reached (%d in progress)", len(g.reboots))
 	}
-	return ""
+	return "", ""
 }
 
 // OccupyRemediation unconditionally reserves a target's remediation slot,

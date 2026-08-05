@@ -31,8 +31,9 @@ func main() {
 	root.PersistentFlags().String("token-file", "", "file containing the bearer token")
 
 	root.AddCommand(
-		cmdStatus(), cmdNodes(), cmdIncidents(), cmdApprove(), cmdReject(),
-		cmdResolve(), cmdRemediate(), cmdPause(), cmdResume(), cmdPasswd(),
+		cmdStatus(), cmdNodes(), cmdIncidents(), cmdReport(), cmdApprove(),
+		cmdReject(), cmdResolve(), cmdRemediate(), cmdPause(), cmdResume(),
+		cmdPasswd(),
 	)
 
 	if err := root.Execute(); err != nil {

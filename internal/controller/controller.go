@@ -312,11 +312,13 @@ func (c *Controller) Run(ctx context.Context) error {
 	}
 }
 
-// runJanitors drives the three background reconcilers until ctx ends:
-// monitoring that a playbook switched off must come back even when the
-// playbook never reaches its restore step, a node a playbook cordoned must
-// not stay out of service because the playbook died before uncordoning it,
-// and incidents on deleted nodes must be closed as replaced.
+// runJanitors drives the background reconcilers until ctx ends: monitoring
+// that a playbook switched off must come back even when the playbook never
+// reaches its restore step, a node a playbook cordoned must not stay out of
+// service because the playbook died before uncordoning it, a degraded-node
+// taint must not outlive the incident that placed it, and incidents on deleted
+// nodes must be closed as replaced. Each reads the cluster's own residue
+// rather than this process's memory, so recovery survives a restart.
 func (c *Controller) runJanitors(ctx context.Context) {
 	tick := time.NewTicker(c.reconcileEvery)
 	defer tick.Stop()
@@ -327,6 +329,7 @@ func (c *Controller) runJanitors(ctx context.Context) {
 		passCtx := c.pinRuntimeConfig(ctx)
 		c.restoreAbandonedAcceleratorStacks(passCtx)
 		c.reconcileCordonedNodes(passCtx)
+		c.reconcileDegradedTaints(passCtx)
 		c.resolveIncidentsOnVanishedNodes(passCtx)
 		select {
 		case <-ctx.Done():

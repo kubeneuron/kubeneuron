@@ -35,8 +35,10 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 	switch reason, res := c.destructiveStepConfinement(ctx, inc, step); res {
 	case confinementOutOfScope:
 		// Confirmed outside the blast radius: fail closed to a human. Never execute.
+		c.deferStep(inc, step, metrics.DeferConfinement)
 		return c.quarantine(ctx, inc, reason)
 	case confinementUnresolved:
+		c.deferStep(inc, step, metrics.DeferConfinement)
 		// The node's labels could not be resolved right now (a transient
 		// platform/apiserver blip). This is missing evidence, not a confirmed
 		// scope violation, so hold in EVALUATING and retry — matching the
@@ -63,6 +65,11 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 			// re-deny this reset on every tick after the node was cordoned/drained.
 			return c.quarantine(ctx, inc, err.Error())
 		}
+		// Everything else here is missing/stale/mismatched evidence: the step is
+		// HELD, so the device keeps running whatever it is running. That is a
+		// deferral, not a failure, and it is the most common reason a reset does
+		// not happen.
+		c.deferStep(inc, step, metrics.DeferAcceleratorEvidence)
 		metrics.GateDenials.Inc()
 		c.log.Info("accelerator capability gate denied step, will hold",
 			"incident", inc.ID, "step", step.Name, "reason", err.Error())
@@ -86,6 +93,7 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 		admit = c.gate.Allow(inc.Target, action)
 	}
 	if admit != nil {
+		c.deferForGateDenial(inc, step, admit)
 		metrics.GateDenials.Inc()
 		c.log.Info("safety gate denied step, will retry",
 			"incident", inc.ID, "step", step.Name, "reason", admit.Error())
@@ -132,6 +140,10 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 	}
 	if err != nil {
 		metrics.StepsExecuted.WithLabelValues("failed").Inc()
+		// An idle guard that refuses is the device saying "I am still working".
+		// The rung it stands in front of does not run, which is protection, not
+		// a malfunction — count it as such before the ladder escalates.
+		c.recordIdleRefusal(inc, step)
 		c.log.Warn("step failed", "incident", inc.ID, "step", step.Name, "err", err)
 		if auditErr := c.appendAudit(ctx, inc, "system", step.Name, "FAILED: "+err.Error()); auditErr != nil {
 			c.log.Error("audit append failed", "incident", inc.ID, "err", auditErr)
@@ -276,6 +288,23 @@ func (c *Controller) executePlatformStep(ctx context.Context, inc *types.Inciden
 				return nil, fmt.Errorf("evicting %s/%s: %w", w.Namespace, w.Name, err)
 			}
 			evicted++
+			// Counted per workload and only after the eviction was accepted, so
+			// the series is what the fleet actually lost rather than what the
+			// step intended. Dry-run never reaches here (executeStep returns
+			// earlier), which is why no DryRun guard is needed.
+			metrics.WorkloadsEvicted.WithLabelValues(node, string(inc.Class)).Inc()
+		}
+		if evicted == 0 {
+			// "evicted 0" used to read as success and let the ladder proceed
+			// to a reset believing the device was clear. Say plainly that
+			// nothing matched: either the node genuinely runs no accelerator
+			// pods, or their resource name is one the matcher does not know —
+			// and the operator must be able to tell those apart from the
+			// audit trail alone.
+			c.log.Info("evict_gpu_workload matched no accelerator workloads",
+				"incident", inc.ID, "node", node, "pods_considered", len(workloads))
+			return okResult(inc, fmt.Sprintf(
+				"no accelerator workloads to evict from %s (%d pods considered)", node, len(workloads))), nil
 		}
 		return okResult(inc, fmt.Sprintf("evicted %d GPU workloads from %s", evicted, node)), nil
 	default:

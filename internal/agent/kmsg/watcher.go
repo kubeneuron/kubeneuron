@@ -1,6 +1,15 @@
-// Package kmsg watches the kernel log (/dev/kmsg) for NVIDIA XID error
-// lines. This is the fast detection path: an XID reaches the controller
-// seconds after the kernel prints it, long before a metrics scrape would.
+// Package kmsg watches the kernel log (/dev/kmsg) for accelerator fault lines:
+// NVIDIA's NVRM Xid family and AMD's amdgpu families. This is the fast
+// detection path: a kernel-printed fault reaches the controller seconds after
+// it happens, long before a metrics scrape would.
+//
+// Both vendors log to the same device, so they share one reader, one durable
+// cursor, one boot scoping rule, and one contiguous-acknowledgement watermark.
+// That sharing is the point: the delivery guarantees were the hard part, and a
+// second vendor must not get a second, less-tested copy of them. Only the line
+// grammar is vendor-specific — see amdgpu.go — and only the emitted identity
+// differs: an Xid line carries a genuine XID, an amdgpu line carries a neutral
+// types.FaultSignal because it has no XID to honestly claim.
 package kmsg
 
 import (
@@ -17,14 +26,27 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
-// XIDEvent is a parsed NVIDIA XID line from the kernel log.
-type XIDEvent struct {
-	// XID is the error code (e.g. 79 for "GPU has fallen off the bus").
+// Event is a parsed accelerator fault line from the kernel log. It is not
+// named XIDEvent any more because it no longer always carries an XID: an
+// amdgpu line has no such code, and calling its neutral fault an "XID event"
+// is exactly the vendor pretense types.FaultSignal exists to remove.
+type Event struct {
+	// XID is the NVIDIA error code (e.g. 79 for "GPU has fallen off the bus"),
+	// set only for NVRM Xid lines. Zero when Fault is set.
 	XID int
+	// Fault is the vendor-neutral descriptor for a kernel line that is not an
+	// NVRM Xid. Exactly one of XID and Fault is ever set: the controller
+	// rejects an event claiming both identities, and the classifier is
+	// Fault-first, so a line must commit to one encoding.
+	Fault *types.FaultSignal
 	// PCIAddr is the GPU's PCI address as printed by the driver,
-	// e.g. "0000:3b:00". The agent maps it to a GPU index/UUID via NVML.
+	// e.g. "0000:3b:00" (NVRM) or "0000:c3:00.0" (amdgpu). The agent maps it
+	// to a GPU index/UUID through the vendor's own inventory, or leaves the
+	// event unattributed when it has none.
 	PCIAddr string
 	// Raw is the message part of the kmsg line, kept for evidence.
 	Raw string
@@ -44,7 +66,7 @@ type XIDEvent struct {
 // acknowledge only after the event has either been accepted by the controller
 // or fsynced to a local retry spool; otherwise a restart could skip an event
 // that was only handed to an in-memory channel.
-func (e XIDEvent) Acknowledge() error {
+func (e Event) Acknowledge() error {
 	if e.acknowledge == nil {
 		return nil
 	}
@@ -57,32 +79,45 @@ func (e XIDEvent) Acknowledge() error {
 //	NVRM: Xid (0000:af:00): 48, pid='<unknown>', name=<unknown>, Ch 00000008
 var xidRe = regexp.MustCompile(`NVRM: Xid \((?:PCI:)?([0-9a-fA-F:.]+)\):? (\d+),`)
 
-// ParseLine extracts an XID event from one kmsg line (or any kernel log
-// line), returning ok=false for lines without an XID.
-func ParseLine(line string) (XIDEvent, bool) {
+// ParseLine extracts an accelerator fault event from one kmsg line (or any
+// kernel log line), returning ok=false for lines that carry none.
+func ParseLine(line string) (Event, bool) {
+	ev, ok, _ := parseLine(line)
+	return ev, ok
+}
+
+// parseLine is ParseLine plus the refusal reason. A non-empty reason means the
+// line looked like a vendor fault report and was deliberately NOT converted
+// into one; the watcher logs it so a decision to stay silent is visible to an
+// operator instead of looking like a healthy node.
+func parseLine(line string) (Event, bool, string) {
 	// /dev/kmsg lines are "prefix;message" — parse the message part, but
 	// accept bare messages too (tests, journald sources).
 	msg := line
 	if i := strings.IndexByte(line, ';'); i >= 0 {
 		msg = line[i+1:]
 	}
-	m := xidRe.FindStringSubmatch(msg)
-	if m == nil {
-		return XIDEvent{}, false
+	if m := xidRe.FindStringSubmatch(msg); m != nil {
+		xid, err := strconv.Atoi(m[2])
+		if err != nil {
+			return Event{}, false, ""
+		}
+		return Event{
+			XID:       xid,
+			PCIAddr:   strings.ToLower(m[1]),
+			Raw:       strings.TrimSpace(msg),
+			Timestamp: time.Now(),
+		}, true, ""
 	}
-	xid, err := strconv.Atoi(m[2])
-	if err != nil {
-		return XIDEvent{}, false
+	ev, ok, refusal := parseAMDGPU(msg)
+	if !ok {
+		return Event{}, false, refusal
 	}
-	return XIDEvent{
-		XID:       xid,
-		PCIAddr:   strings.ToLower(m[1]),
-		Raw:       strings.TrimSpace(msg),
-		Timestamp: time.Now(),
-	}, true
+	ev.Timestamp = time.Now()
+	return ev, true, ""
 }
 
-// Watcher tails a kernel log stream and emits XID events.
+// Watcher tails a kernel log stream and emits accelerator fault events.
 type Watcher struct {
 	// Path is the kmsg device, default /dev/kmsg. Tests may point it at a
 	// FIFO or regular file.
@@ -122,6 +157,13 @@ type Watcher struct {
 	// permanent gap keeps exactly its own sequence here (O(1) memory), pinning the
 	// watermark just below it until that event is redelivered and acknowledged.
 	pending map[uint64]struct{}
+
+	// refusalMu guards refusalLogged, which records the parser refusals already
+	// reported. A refusal is logged once per reason: a driver that prints the
+	// same ambiguous line thousands of times must not turn an operator-visible
+	// decision into a log storm that hides everything else.
+	refusalMu     sync.Mutex
+	refusalLogged map[string]bool
 }
 
 // NewWatcher builds a watcher for /dev/kmsg.
@@ -147,10 +189,10 @@ func parseSeq(line string) (uint64, bool) {
 	return seq, true
 }
 
-// Watch opens the kernel log and streams XID events until ctx is done.
+// Watch opens the kernel log and streams fault events until ctx is done.
 // Reading /dev/kmsg requires CAP_SYSLOG (the agent runs privileged /
 // hostPID on Kubernetes, root via systemd on bare metal).
-func (w *Watcher) Watch(ctx context.Context) (<-chan XIDEvent, error) {
+func (w *Watcher) Watch(ctx context.Context) (<-chan Event, error) {
 	f, err := os.Open(w.Path)
 	if err != nil {
 		return nil, fmt.Errorf("kmsg: %w", err)
@@ -181,7 +223,7 @@ func (w *Watcher) Watch(ctx context.Context) (<-chan XIDEvent, error) {
 		}
 	}
 
-	ch := make(chan XIDEvent, 64)
+	ch := make(chan Event, 64)
 	// The file closes exactly once, from whichever side finishes first: the
 	// ctx goroutine (to unblock a reader parked in ReadString) or the reader
 	// itself. done also releases the ctx goroutine when the reader exits
@@ -208,7 +250,11 @@ func (w *Watcher) Watch(ctx context.Context) (<-chan XIDEvent, error) {
 				seq, hasSeq := parseSeq(line)
 				skip := haveCursor && hasSeq && seq <= resumeSeq
 				if !skip {
-					if ev, ok := ParseLine(line); ok {
+					ev, ok, refusal := parseLine(line)
+					if refusal != "" {
+						w.logRefusal(refusal, line)
+					}
+					if ok {
 						if hasSeq {
 							// Register the sequence as pending BEFORE it is handed
 							// out, so a later ack cannot advance the watermark past
@@ -245,6 +291,29 @@ func (w *Watcher) Watch(ctx context.Context) (<-chan XIDEvent, error) {
 		}
 	}()
 	return ch, nil
+}
+
+// logRefusal reports, once per distinct reason, that a kernel line which looked
+// like an accelerator fault was deliberately not turned into one. Silence is
+// the dangerous outcome for a detection source: without this an operator
+// cannot tell a node with no faults from a node whose fault lines this parser
+// declines to interpret. The first offending line is included as the evidence
+// needed to fix the parser.
+func (w *Watcher) logRefusal(reason, line string) {
+	if w.Logger == nil {
+		return
+	}
+	w.refusalMu.Lock()
+	if w.refusalLogged == nil {
+		w.refusalLogged = make(map[string]bool)
+	}
+	already := w.refusalLogged[reason]
+	w.refusalLogged[reason] = true
+	w.refusalMu.Unlock()
+	if already {
+		return
+	}
+	w.Logger.Warn("kernel fault line not classified", "reason", reason, "line", strings.TrimSpace(line))
 }
 
 // initCursorState seeds the in-memory watermark from the persisted cursor and

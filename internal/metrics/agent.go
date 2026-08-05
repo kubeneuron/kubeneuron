@@ -43,9 +43,13 @@ var (
 		Help: "Durable controller registration acknowledgments received.",
 	})
 
-	// AgentDetections counts observed detection signals by their source
-	// (e.g. "kmsg", "dcgm"). It counts detections before agent-side
-	// deduplication, so the two sources can be compared independently.
+	// AgentDetections counts observed detection signals by their source:
+	// "kmsg" (NVRM Xid lines), "kmsg-amd" (amdgpu kernel families),
+	// "gpuhealth" (the DCGM/nvidia-smi poll) and "amdhealth" (the
+	// amd-smi/rocm-smi poll). The vendor paths are separate label values on
+	// purpose — a dead AMD source is otherwise indistinguishable from a
+	// healthy AMD fleet. It counts detections before agent-side
+	// deduplication, so the sources can be compared independently.
 	AgentDetections = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "kubeneuron_agent_detections_total",
 		Help: "GPU fault detections observed by the agent, labeled by detection source.",

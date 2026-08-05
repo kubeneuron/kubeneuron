@@ -559,3 +559,71 @@ func TestOpenRefusesNewerSchemaVersion(t *testing.T) {
 		t.Fatalf("Open must refuse a future schema, got %v", err)
 	}
 }
+
+// The recovery report's window filter must keep the incidents that cost
+// capacity inside the window, which is NOT the same set as "opened inside the
+// window": a long incident opened before the cutoff is exactly the expensive
+// one, and dropping it would flatter every number computed from the result.
+func TestListIncidentsActiveSinceKeepsWhatStillCostCapacity(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+	now := time.Now()
+	cutoff := now.Add(-24 * time.Hour)
+
+	// One incident per GPU: at most one non-terminal incident may exist per
+	// (target, class).
+	windowIncident := func(id string, opened time.Time) *types.Incident {
+		inc := testIncident(id, opened)
+		inc.Target.GPUUUID = "GPU-" + id
+		return inc
+	}
+	terminate := func(inc *types.Incident, state types.IncidentState, at time.Time) {
+		inc.State = state
+		inc.UpdatedAt, inc.StateChangedAt = at, at
+		if state == types.StateResolved {
+			resolved := at
+			inc.ResolvedAt = &resolved
+		}
+		if err := s.UpdateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Resolved before the cutoff: out.
+	old := windowIncident("resolved-before", now.Add(-72*time.Hour))
+	// Opened before the cutoff, resolved inside it: in — it cost capacity in
+	// the window.
+	straddling := windowIncident("resolved-inside", now.Add(-48*time.Hour))
+	// Expired before the cutoff: out. EXPIRED sets no resolved_at, so this
+	// only holds if the filter falls back to state_changed_at.
+	expired := windowIncident("expired-before", now.Add(-72*time.Hour))
+	// Opened before the cutoff and still running: always in.
+	stillOpen := windowIncident("still-open", now.Add(-96*time.Hour))
+	for _, inc := range []*types.Incident{old, straddling, expired, stillOpen} {
+		if err := s.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	terminate(old, types.StateResolved, now.Add(-48*time.Hour))
+	terminate(straddling, types.StateResolved, now.Add(-2*time.Hour))
+	terminate(expired, types.StateExpired, now.Add(-36*time.Hour))
+
+	got, err := s.ListIncidents(ctx, store.IncidentFilter{ActiveSince: cutoff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := map[string]bool{}
+	for _, inc := range got {
+		kept[inc.ID] = true
+	}
+	if !kept["resolved-inside"] || !kept["still-open"] {
+		t.Fatalf("window dropped incidents that cost capacity in it: %v", kept)
+	}
+	if kept["resolved-before"] || kept["expired-before"] {
+		t.Fatalf("window kept incidents that ended before it: %v", kept)
+	}
+}

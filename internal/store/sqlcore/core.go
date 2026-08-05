@@ -357,6 +357,24 @@ func (q *Queries) ListIncidents(ctx context.Context, f store.IncidentFilter) ([]
 		qs += ` AND node=?`
 		args = append(args, f.Node)
 	}
+	if !f.ActiveSince.IsZero() {
+		// A terminal incident ends at resolved_at (RESOLVED) or at the
+		// transition that terminated it (EXPIRED, which sets no resolved_at);
+		// everything else is still running and always qualifies.
+		//
+		// The cutoff is padded by a second because timestamps are stored as
+		// RFC3339Nano text, whose trailing-zero trimming makes lexical order
+		// disagree with chronological order within a single second
+		// ("…:00Z" sorts after "…:00.5Z"). Keeping one extra second of rows
+		// cannot produce a wrong answer: the caller clips to the exact window
+		// in Go. Losing a row silently would.
+		// NULLIF covers pre-0002 rows whose state_changed_at is the empty
+		// string: an unknown end time falls back to updated_at rather than
+		// sorting before every cutoff and dropping the row.
+		qs += ` AND (state NOT IN ('RESOLVED','EXPIRED')
+			OR COALESCE(NULLIF(resolved_at, ''), NULLIF(state_changed_at, ''), updated_at) >= ?)`
+		args = append(args, ts(f.ActiveSince.Add(-time.Second)))
+	}
 	qs += ` ORDER BY opened_at DESC`
 	if f.Limit > 0 {
 		qs += ` LIMIT ?`

@@ -24,13 +24,65 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+	"strings"
 
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
-// gpuResource is the extended resource GPU nodes advertise.
+// gpuResource is the extended resource NVIDIA GPU nodes advertise. It stays
+// named for its vendor deliberately: it is one entry in the neutral matcher
+// below, not the definition of "a GPU".
 const gpuResource = "nvidia.com/gpu"
+
+// isAcceleratorResource reports whether an extended-resource name names a GPU
+// or GPU partition, for ANY vendor.
+//
+// Hardcoding "nvidia.com/gpu" made two failures silent rather than loud: an
+// AMD or Intel node inventoried as ZERO GPUs (invisible to the whole control
+// plane), and `evict_gpu_workload` reported "evicted 0 GPU workloads"
+// successfully while leaving live jobs on a device about to be reset — the
+// exact disruption the step exists to prevent. Both are wrong in the
+// dangerous direction, so the matcher errs toward recognising an accelerator:
+// a false positive costs one unnecessary eviction on a node that is being
+// drained anyway, while a false negative destroys somebody's training run.
+//
+// MIG partitions (nvidia.com/mig-1g.5gb under the device plugin's mixed
+// strategy) are included for the same reason: a pod holding a partition is a
+// pod on the physical device being remediated.
+func isAcceleratorResource(name corev1.ResourceName) bool {
+	resource := string(name)
+	// A core resource (cpu, memory, ephemeral-storage) has no domain prefix;
+	// only domain-qualified extended resources can name an accelerator.
+	domain, kind, qualified := strings.Cut(resource, "/")
+	if !qualified {
+		return false
+	}
+	switch {
+	case kind == "gpu" || strings.HasPrefix(kind, "gpu-"):
+		// nvidia.com/gpu, amd.com/gpu, and any future <vendor>/gpu.
+		return true
+	case strings.HasPrefix(kind, "mig-"):
+		// NVIDIA MIG compute instances.
+		return true
+	case domain == "gpu.intel.com":
+		// Intel advertises the device family as the kind (i915, xe).
+		return true
+	}
+	return false
+}
+
+// nodeAdvertisesAccelerator reports whether a node's capacity names any
+// vendor's GPU. Used for fleet visibility: a node this returns false for is
+// not a GPU node as far as KubeNeuron is concerned.
+func nodeAdvertisesAccelerator(capacity corev1.ResourceList) bool {
+	for name := range capacity {
+		if isAcceleratorResource(name) {
+			return true
+		}
+	}
+	return false
+}
 
 // cordonReasonAnnotation records why KubeNeuron cordoned a node.
 const cordonReasonAnnotation = "kubeneuron.io/cordon-reason"
@@ -112,7 +164,7 @@ func (p *Platform) ListNodes(ctx context.Context) ([]types.Node, error) {
 		if err == nil {
 			out := make([]types.Node, 0, len(cached))
 			for _, n := range cached {
-				if _, ok := n.Status.Capacity[gpuResource]; !ok {
+				if !nodeAdvertisesAccelerator(n.Status.Capacity) {
 					continue
 				}
 				out = append(out, nodeFromK8s(n))
@@ -131,7 +183,7 @@ func (p *Platform) ListNodes(ctx context.Context) ([]types.Node, error) {
 	var out []types.Node
 	for i := range list.Items {
 		n := &list.Items[i]
-		if _, ok := n.Status.Capacity[gpuResource]; !ok {
+		if !nodeAdvertisesAccelerator(n.Status.Capacity) {
 			continue
 		}
 		out = append(out, nodeFromK8s(n))
@@ -175,7 +227,7 @@ func (p *Platform) WatchNodes(ctx context.Context) (<-chan platform.NodeEvent, e
 				if !ok {
 					continue
 				}
-				if _, hasGPU := n.Status.Capacity[gpuResource]; !hasGPU {
+				if !nodeAdvertisesAccelerator(n.Status.Capacity) {
 					continue
 				}
 				var t platform.NodeEventType
@@ -423,8 +475,10 @@ func skipDuringDrain(pod *corev1.Pod, force bool) bool {
 
 func podUsesGPU(pod *corev1.Pod) bool {
 	for i := range pod.Spec.Containers {
-		if _, ok := pod.Spec.Containers[i].Resources.Limits[gpuResource]; ok {
-			return true
+		for name := range pod.Spec.Containers[i].Resources.Limits {
+			if isAcceleratorResource(name) {
+				return true
+			}
 		}
 	}
 	return false

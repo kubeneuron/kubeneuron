@@ -22,11 +22,26 @@ the operator's controller-runtime metrics.
 | `kubeneuron_incident_duration_seconds` | histogram | `class`, `outcome` | open-to-halted wall time — MTTR, split by how the incident ended |
 | `kubeneuron_incidents_recovered_total` | counter | `class`, `unattended` | incidents that reached RESOLVED; `unattended="true"` never needed a human decision |
 | `kubeneuron_degraded_gpu_seconds_total` | counter | `class`, `outcome` | GPU-seconds spent under an open incident; the `outcome="resolved"` share is capacity returned to service (÷3600 for GPU-hours) |
+| `kubeneuron_workloads_evicted_total` | counter | `node`, `reason` | GPU workloads moved off a node ahead of a destructive step, by problem class — what remediation cost |
+| `kubeneuron_destructive_steps_deferred_total` | counter | `reason` | destructive steps that did **not** run, by the guard that stopped them — what remediation deliberately did not cost |
 | `kubeneuron_gate_denials_total` | counter | — | steps denied by the safety gate (pause, cooldown, concurrency, capability) |
 | `kubeneuron_escalations_total` | counter | — | ladder escalations after step/verification failures |
 | `kubeneuron_notifications_dropped_total` | counter | `kind` (`event`, `approval_request`, `dead_letter`) | notifications lost to queue overflow or dead-lettered after delivery retries |
 | `kubeneuron_auth_failures_total` | counter | `api` (`operator`, `webhook`, `agent`) | rejected authentication attempts; repeated failures from one source are throttled with `429` |
 | `kubeneuron_tls_certificate_not_after_seconds` | gauge | `certificate` | NotAfter (unix s) of every loaded TLS artifact; bundles report their earliest expiry |
+
+`kubeneuron_destructive_steps_deferred_total` `reason` values: `not_idle`
+(an idle guard found the device busy), `device_holders` (processes hold the GPU
+that KubeNeuron cannot release), `maintenance_window`, `node_paused` (a
+GPUNodeConfig pause), `global_pause` (the fleet-wide switch), `concurrency_cap`,
+`playbook_cooldown`, `unarmed_agent`, `confinement` (outside the declared
+destructiveExecution blast radius), `recycle_not_viable`, and
+`accelerator_evidence` (a reset held for missing or stale runtime evidence).
+It counts *decisions*, so a hold that persists — a maintenance window, a paused
+node — is counted again on every reconcile pass: read it with `rate()` as "how
+much protection is currently in force", and one-shot refusals as single events.
+Dry-run incidents and playbooks with no disruptive rung never appear, because
+neither was going to touch a workload.
 
 `certificate` label values: `controller-server-leaf`, `agent-client-ca`,
 `public-server-leaf` (when public TLS is enabled) on the controller;

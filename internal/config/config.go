@@ -41,7 +41,30 @@ type Safety struct {
 	// already confined. Empty means no confinement is configured (every
 	// non-Enabled install is globally dry-run, so nothing executes anyway).
 	DestructiveExecutionNodeSelector map[string]string `yaml:"destructive_execution_node_selector,omitempty"`
+	// TaintDegradedNodes is the compiled spec.safety.taintDegradedNodes. A nil
+	// pointer is the whole of "off": the operator emits this key only when an
+	// installation explicitly enables the taint, so a controller reading a
+	// configuration written before the feature existed cannot start marking
+	// nodes after an upgrade.
+	TaintDegradedNodes *TaintDegradedNodes `yaml:"taint_degraded_nodes,omitempty"`
 }
+
+// TaintDegradedNodes configures the kubeneuron.io/degraded taint. See the CRD
+// field of the same name.
+type TaintDegradedNodes struct {
+	Enabled bool `yaml:"enabled"`
+	// Effect is PreferNoSchedule or NoSchedule. Empty defaults to
+	// PreferNoSchedule in Validate; any other value is a rejected
+	// configuration, never a silently stronger effect.
+	Effect string `yaml:"effect,omitempty"`
+}
+
+// Taint effect values accepted in a compiled configuration. They are the
+// Kubernetes spellings so the platform can pass them straight through.
+const (
+	TaintEffectPreferNoSchedule = "PreferNoSchedule"
+	TaintEffectNoSchedule       = "NoSchedule"
+)
 
 // Flap configures flap detection.
 type Flap struct {
@@ -96,6 +119,20 @@ func (c *Config) Validate() error {
 	}
 	if c.Approvals.TTL == 0 {
 		c.Approvals.TTL = Duration(12 * time.Hour)
+	}
+	if t := c.Safety.TaintDegradedNodes; t != nil {
+		switch t.Effect {
+		case "":
+			t.Effect = TaintEffectPreferNoSchedule
+		case TaintEffectPreferNoSchedule, TaintEffectNoSchedule:
+		default:
+			// Rejecting the whole configuration is the point: a typo'd effect
+			// must not fall back to a working default, because the operator
+			// asking for one effect and getting another is how a scheduling
+			// preference becomes an outage.
+			return fmt.Errorf("config: safety.taint_degraded_nodes.effect %q is not %s or %s",
+				t.Effect, TaintEffectPreferNoSchedule, TaintEffectNoSchedule)
+		}
 	}
 	if len(c.Policies) == 0 {
 		return fmt.Errorf("config: at least one policy is required")

@@ -94,6 +94,27 @@ func main() {
 			false,
 			"obtain the NVIDIA observation profile digest from the authenticated controller; mutually exclusive with --nvidia-profile-digest",
 		)
+		amdDetection = flag.Bool(
+			"amd-detection",
+			false,
+			"poll amd-smi/rocm-smi as an observation-only AMD detection source; it stays disabled unless one of those binaries is actually present, and it never enables remediation",
+		)
+		amdSMIPath  = flag.String("amd-smi", "amd-smi", "amd-smi binary used by the AMD detection source (preferred over rocm-smi)")
+		rocmSMIPath = flag.String(
+			"rocm-smi",
+			"rocm-smi",
+			"rocm-smi binary used when amd-smi is absent or fails; it reports retired pages and temperature only",
+		)
+		amdThermalCriticalC = flag.Float64(
+			"amd-thermal-critical-c",
+			0,
+			"hotspot temperature at which an AMD reading with no explicit throttle flag becomes a thermal fault; 0 (default) observes temperatures without ever promoting one, because the critical value is SKU-specific",
+		)
+		amdCorrectableRateMinDelta = flag.Uint64(
+			"amd-correctable-ecc-min-delta",
+			0,
+			"how many new corrected AMD ECC errors must accumulate before the rate fault reports again; 0 uses the built-in conservative default",
+		)
 		showVersion = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -168,6 +189,13 @@ func main() {
 			PartitionTopology:    nvidiaPartitionTopologyValue(*nvidiaPartitionTopology),
 			ProfileDigest:        *nvidiaProfileDigest,
 			UseControllerProfile: *nvidiaControllerProfile,
+		},
+		AMDDetection: agent.AMDDetectionConfig{
+			Enabled:                 *amdDetection,
+			AMDSMIPath:              *amdSMIPath,
+			ROCmSMIPath:             *rocmSMIPath,
+			ThermalCriticalC:        *amdThermalCriticalC,
+			CorrectableRateMinDelta: *amdCorrectableRateMinDelta,
 		},
 	}, driver, log)
 	if err != nil {

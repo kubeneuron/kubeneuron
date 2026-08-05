@@ -53,6 +53,17 @@ type IncidentFilter struct {
 	States []types.IncidentState
 	Node   string
 	Limit  int
+	// ActiveSince keeps incidents whose lifetime reaches into [ActiveSince,
+	// now): everything not lifecycle-terminal is kept regardless of when it
+	// opened, and a terminal incident is kept when it ended at or after the
+	// cutoff. It is the window filter behind the recovery report — an
+	// incident opened last month and resolved yesterday still cost capacity
+	// yesterday, so "opened after the cutoff" would be the wrong question.
+	//
+	// It is a PREFILTER: implementations may keep a little more than asked
+	// (see the sqlcore note on text timestamp ordering). Callers that need an
+	// exact boundary must compare the returned timestamps themselves.
+	ActiveSince time.Time
 }
 
 // Tx groups mutations that must commit atomically. The state machine

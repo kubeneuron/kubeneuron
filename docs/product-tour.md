@@ -95,10 +95,12 @@ new executes, the pause itself is audited, and a banner stays up until an
 ## 7. Grafana: the fleet on one screen
 
 The shipped dashboard (`deploy/grafana/kubeneuron-dashboard.json`,
-20 panels) covers both the fleet and KubeNeuron itself: incident states
-and rates, playbook step outcomes, escalations, gate denials, agent event
-delivery and spool backlog, reconcile latency, notification drops, and
-TLS expiry. The dependency profile
+23 panels) leads with the recovery row a capacity owner reads — GPU-hours
+degraded and returned to service, unattended-recovery share, MTTR p50/p90
+by class — and then covers both the fleet and KubeNeuron itself: incident
+states and rates, playbook step outcomes, escalations, gate denials, agent
+event delivery and spool backlog, reconcile latency, notification drops,
+and TLS expiry. The dependency profile
 (`deploy/kubernetes/dependencies/`) installs a VictoriaMetrics stack whose
 vmagent scrapes the controller, agents, and operator automatically; point
 any Grafana at it and import the dashboard (UID `kubeneuron-overview`).

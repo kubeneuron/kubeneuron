@@ -40,6 +40,16 @@ type AcceleratorReportOperatorBackend interface {
 	AcceleratorReports(ctx context.Context, node string) ([]*types.AgentAcceleratorReport, error)
 }
 
+// RecoveryReportBackend is an optional read-only extension that aggregates
+// the incident store into the capacity-owner view of a window. It is separate
+// from OperatorBackend for the same reason the accelerator reports are: a
+// controller that cannot compute the report must say so with a 503 rather
+// than return a plausible-looking empty one — a zero recovery report reads as
+// "nothing broke", which is the opposite of "I could not tell you".
+type RecoveryReportBackend interface {
+	RecoveryReport(ctx context.Context, window time.Duration) (*types.RecoveryReport, error)
+}
+
 // OperatorIdentity is the authenticated principal behind an operator API
 // request. Actor is empty for the shared static token: the token proves
 // possession, not identity, so the caller's self-asserted name is recorded
@@ -239,6 +249,7 @@ func (s *Server) registerOperatorRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/nodes", s.requireOperator(s.handleListNodes))
 	mux.HandleFunc("GET /api/v1/nodes/{node}", s.requireOperator(s.handleGetNode))
 	mux.HandleFunc("GET /api/v1/nodes/{node}/accelerators", s.requireOperator(s.handleAcceleratorReports))
+	mux.HandleFunc("GET /api/v1/report/recovery", s.requireOperator(s.handleRecoveryReport))
 	mux.HandleFunc("GET /api/v1/targets", s.requireOperator(s.handleTargets))
 	mux.HandleFunc("GET /api/v1/runtime-config", s.requireOperator(s.handleRuntimeConfig))
 	mux.HandleFunc("GET /api/v1/pause", s.requireOperator(s.handleGetPause))
@@ -442,6 +453,43 @@ func (s *Server) handleAcceleratorReports(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, reports)
+}
+
+const (
+	// defaultReportWindow matches `kubeneuronctl report`'s default: a week is
+	// the shortest window in which a fleet's weekend behaviour is visible.
+	defaultReportWindow = 7 * 24 * time.Hour
+	// maxReportWindow rejects windows longer than any retention policy keeps.
+	// A year of "no incidents" that is really "no rows" must not be served as
+	// an answer. The backend enforces the same bound independently.
+	maxReportWindow = 366 * 24 * time.Hour
+)
+
+// handleRecoveryReport aggregates the window server-side. The alternative —
+// letting the client pull the incident list and add it up — would ship
+// thousands of rows to compute six numbers, and would put the definition of
+// "recovered" in every client instead of in one place.
+func (s *Server) handleRecoveryReport(w http.ResponseWriter, r *http.Request) {
+	reportBackend, ok := s.operator.(RecoveryReportBackend)
+	if !ok {
+		http.Error(w, "recovery report unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	window := defaultReportWindow
+	if v := strings.TrimSpace(r.URL.Query().Get("window")); v != "" {
+		parsed, err := time.ParseDuration(v)
+		if err != nil || parsed <= 0 || parsed > maxReportWindow {
+			http.Error(w, "window must be a positive Go duration no longer than 8784h, e.g. 720h", http.StatusBadRequest)
+			return
+		}
+		window = parsed
+	}
+	report, err := reportBackend.RecoveryReport(r.Context(), window)
+	if err != nil {
+		http.Error(w, "recovery report failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, report)
 }
 
 // sdTarget is one Prometheus HTTP service-discovery group.

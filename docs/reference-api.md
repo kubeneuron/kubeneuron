@@ -73,6 +73,7 @@ the static token the claim is recorded as `token:<actor>`.
 | `GET /api/v1/nodes/{node}` | one node's detail |
 | `GET /api/v1/nodes/{node}/accelerators` | latest per-vendor accelerator runtime reports |
 | `GET /api/v1/targets?port=<p>` | Prometheus `http_sd` target groups for registered nodes |
+| `GET /api/v1/report/recovery?window=<Go duration>` | recovery report aggregated from the incident store over a trailing window (default `168h`, max `8784h`): degraded and recovered GPU-hours, unattended share, MTTR by class, incidents still open. See [`kubeneuronctl report`](reference-cli.md#report--what-the-fleet-got-back) for what each number counts. A controller that cannot compute it answers `503`, never an empty report |
 
 ## Control
 

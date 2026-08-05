@@ -97,6 +97,32 @@ type CordonJanitor interface {
 	CordonedNodes(ctx context.Context) ([]CordonedNode, error)
 }
 
+// NodeTainter is implemented by platforms whose scheduler can be told to
+// prefer other nodes.
+//
+// It is deliberately separate from Cordon. A cordon is a decision — this node
+// is not fit, take it out of service — made after evidence and undone
+// deliberately. This is a hint attached to the mere EXISTENCE of an open
+// incident: the node may still be perfectly usable, nothing running on it is
+// touched, and the only effect is that the scheduler stops adding to the pile
+// while the incident is worked. Both are opt-in and both must be removable
+// without the process that applied them.
+type NodeTainter interface {
+	// ApplyDegradedTaint marks the node degraded with the given value and
+	// effect. It must be idempotent and must not disturb taints it does not
+	// own.
+	ApplyDegradedTaint(ctx context.Context, node, value, effect string) error
+	// RemoveDegradedTaint clears the mark. Safe on a node that carries none.
+	RemoveDegradedTaint(ctx context.Context, node string) error
+	// DegradedTaintedNodes lists the nodes currently carrying the mark.
+	//
+	// It exists for the same reason CordonJanitor does: the marks live on the
+	// cluster, not in this process's memory, so a controller that died between
+	// applying one and closing its incident must be able to find it again. A
+	// taint nobody will ever come back for is worse than no taint at all.
+	DegradedTaintedNodes(ctx context.Context) ([]string, error)
+}
+
 // InstanceRecycler drives the cloud instance behind a node. It is satisfied by
 // any cloud provider (internal/cloud) and injected into the platform, so the
 // platform stays free of any cloud SDK and of any provider's providerID scheme.

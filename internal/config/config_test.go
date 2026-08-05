@@ -64,6 +64,10 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 		"missing playbook": {"policies:\n  - match: { class: ecc-dbe }", "playbook is required"},
 		"bad duration":     {"safety: { verify_quiet_window: nonsense }\npolicies:\n  - match: { class: x }\n    playbook: y", "invalid duration"},
 		"bad yaml":         {"policies: [", "yaml"},
+		// A typo'd taint effect must fail the load, not fall back to something
+		// that works: the whole point of the field is that the operator gets
+		// the scheduling effect they asked for.
+		"bad taint effect": {"safety:\n  taint_degraded_nodes: { enabled: true, effect: NoExecute }\npolicies:\n  - match: { class: x }\n    playbook: y", "taint_degraded_nodes.effect"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := Load(writeConfig(t, tc.content))
@@ -71,6 +75,19 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 				t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// The weak effect is what an operator who only said "enabled" gets. A stronger
+// one has to be typed out.
+func TestTaintEffectDefaultsToPreferNoSchedule(t *testing.T) {
+	cfg, err := Load(writeConfig(t,
+		"safety:\n  taint_degraded_nodes: { enabled: true }\npolicies:\n  - match: { class: x }\n    playbook: y"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Safety.TaintDegradedNodes == nil || cfg.Safety.TaintDegradedNodes.Effect != TaintEffectPreferNoSchedule {
+		t.Fatalf("compiled taint = %+v, want the weak default effect", cfg.Safety.TaintDegradedNodes)
 	}
 }
 

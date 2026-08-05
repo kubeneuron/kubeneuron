@@ -1,6 +1,8 @@
-// Package agent wires the kubeneuron-agent: the kmsg XID watcher, the NVML
-// driver, the local action executor, and the event push loop toward the
-// controller (with a file-backed spool for outages).
+// Package agent wires the kubeneuron-agent: the kmsg kernel-fault watcher
+// (NVRM Xid and amdgpu families), the NVML driver, the polled second sources
+// (DCGM/nvidia-smi and amd-smi/rocm-smi), the local action executor, and the
+// event push loop toward the controller (with a file-backed spool for
+// outages).
 package agent
 
 import (
@@ -30,6 +32,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/accelerator"
 	"github.com/kubeneuron/kubeneuron/internal/accelerator/nvidia"
 	"github.com/kubeneuron/kubeneuron/internal/agent/actionjournal"
+	"github.com/kubeneuron/kubeneuron/internal/agent/amdhealth"
 	"github.com/kubeneuron/kubeneuron/internal/agent/dcgm"
 	"github.com/kubeneuron/kubeneuron/internal/agent/executor"
 	"github.com/kubeneuron/kubeneuron/internal/agent/gpuhealth"
@@ -156,6 +159,33 @@ type Config struct {
 	// are retried independently and can never make this agent ready or execute
 	// a remediation action.
 	NVIDIAObservation NVIDIAObservationConfig
+	// AMDDetection controls the optional AMD detection source. Like every
+	// other second source it is observation-only and can never execute an
+	// action.
+	AMDDetection AMDDetectionConfig
+}
+
+// AMDDetectionConfig opts a node into the AMD detection source. Enabled alone
+// is deliberately insufficient: New also requires amd-smi or rocm-smi to
+// actually resolve on the node, so a declaration in a DaemonSet manifest can
+// never turn a node with no AMD tooling into a source of AMD faults. That is
+// the same real-binary-evidence rule the NVIDIA paths follow — there is no fake
+// AMD driver to fall back to, by design.
+type AMDDetectionConfig struct {
+	Enabled bool
+	// AMDSMIPath and ROCmSMIPath name the binaries; empty uses PATH lookup of
+	// "amd-smi" / "rocm-smi". A binary that does not resolve stays disabled.
+	AMDSMIPath  string
+	ROCmSMIPath string
+	// ThermalCriticalC is the hotspot temperature at or above which a reading
+	// with no explicit throttle flag becomes a thermal fault. Zero (the
+	// default) means a bare temperature is never promoted to a fault, because
+	// the critical value is SKU-specific and this code cannot know it.
+	ThermalCriticalC float64
+	// CorrectableRateMinDelta is how many new corrected ECC errors must
+	// accumulate before the rate fault reports again; zero uses the package
+	// default.
+	CorrectableRateMinDelta uint64
 }
 
 // Agent is the per-node daemon.
@@ -175,16 +205,22 @@ type Agent struct {
 	journalLock *os.File
 	watcher     *kmsg.Watcher
 	health      *gpuhealth.Watcher
+	amdHealth   *amdhealth.Watcher
 	client      *http.Client
 	log         *slog.Logger
 	nvidia      *nvidiaObservation
 
 	bootIDOnce sync.Once
 	bootID     string
+	// foreignVendorOnce keeps the "no inventory for this vendor" warning to one
+	// line per process; the limitation is permanent, so repeating it per event
+	// would only bury the events themselves.
+	foreignVendorOnce sync.Once
 
 	// detectionMu guards the short-window deduplication of detections across
-	// the kmsg and DCGM/nvidia-smi sources, so one underlying fault seen by
-	// both does not open two incidents.
+	// every source (kmsg, the DCGM/nvidia-smi poll, the amd-smi/rocm-smi poll),
+	// so one underlying fault seen by more than one does not open two
+	// incidents.
 	detectionMu   sync.Mutex
 	detectionSeen map[string]time.Time
 
@@ -354,6 +390,27 @@ func New(cfg Config, driver nvml.GPUDriver, log *slog.Logger) (*Agent, error) {
 		health.BootID = agent.currentBootID()
 		agent.health = health
 	}
+	// The AMD detection source is independent of the NVIDIA driver: an AMD node
+	// runs no nvidia-smi, so gating it on the NVIDIA runtime would make it
+	// permanently dead exactly where it is needed. Its evidence gate is its own
+	// tooling, checked below, and it never touches the executor.
+	if cfg.AMDDetection.Enabled {
+		amd := amdhealth.New(cfg.NodeName, amdToolPath(cfg.AMDDetection.AMDSMIPath, "amd-smi"),
+			amdToolPath(cfg.AMDDetection.ROCmSMIPath, "rocm-smi"))
+		if !amd.Enabled() {
+			// Requested but impossible. A source that polls nothing forever
+			// looks like coverage on a dashboard, so refuse it out loud instead
+			// of wiring a permanently silent watcher.
+			log.Warn("AMD detection requested but disabled: neither amd-smi nor rocm-smi is present on this node")
+		} else {
+			amd.Logger = log
+			amd.ThermalCriticalC = cfg.AMDDetection.ThermalCriticalC
+			amd.CorrectableRateMinDelta = cfg.AMDDetection.CorrectableRateMinDelta
+			agent.amdHealth = amd
+			log.Info("AMD detection source enabled", "amd_smi", amd.AMDSMIPath, "rocm_smi", amd.ROCmSMIPath,
+				"thermal_critical_c", cfg.AMDDetection.ThermalCriticalC)
+		}
+	}
 	if cfg.NVIDIAObservation.Enabled {
 		// A configuration declaration cannot make the simulator or another
 		// vendor's GPUDriver into NVIDIA evidence. The command only constructs
@@ -388,6 +445,16 @@ func New(cfg Config, driver nvml.GPUDriver, log *slog.Logger) (*Agent, error) {
 		}
 	}
 	return agent, nil
+}
+
+// amdToolPath falls back to the bare tool name so amdhealth resolves it on
+// PATH. An empty configured path must not disable the tool silently — that
+// would make the default configuration a no-op source.
+func amdToolPath(configured, defaultName string) string {
+	if p := strings.TrimSpace(configured); p != "" {
+		return p
+	}
+	return defaultName
 }
 
 // acquireActionJournalLock takes an exclusive, process-scoped lock on the
@@ -512,6 +579,18 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}
 
+	// The AMD source is wired exactly like the NVIDIA one: same event type,
+	// same handler, same dedup. Its only distinction downstream is the metric
+	// label, so a fleet can see which vendor's tooling is actually reporting.
+	var amdEvents <-chan types.AgentEvent
+	if a.amdHealth != nil {
+		if ch, aerr := a.amdHealth.Watch(ctx); aerr != nil {
+			a.log.Error("AMD detection source unavailable", "err", aerr)
+		} else {
+			amdEvents = ch
+		}
+	}
+
 	// Queued actions execute on their own loop: a long-running action (a
 	// reset or reboot) must not stall event capture or heartbeats.
 	go a.actionLoop(ctx)
@@ -536,7 +615,7 @@ func (a *Agent) Run(ctx context.Context) error {
 				a.log.Error("kmsg watcher stopped, will reopen")
 				continue
 			}
-			if a.handleXID(ctx, ev) {
+			if a.handleKernelEvent(ctx, ev) {
 				// The watcher cursor is advanced only after this event is
 				// accepted by the controller or fsynced to the local spool.
 				// A cursor persistence failure is safe: the event can replay,
@@ -554,6 +633,15 @@ func (a *Agent) Run(ctx context.Context) error {
 				continue
 			}
 			a.handleDetection(ctx, ev, "gpuhealth")
+		case ev, ok := <-amdEvents:
+			if !ok {
+				// Same rule as the NVIDIA second source: a source going dark is
+				// loud, because silence is indistinguishable from health.
+				amdEvents = nil
+				a.log.Error("AMD detection source stopped")
+				continue
+			}
+			a.handleDetection(ctx, ev, "amdhealth")
 		case <-retry.C:
 			if events == nil && ctx.Err() == nil {
 				if ch, err := a.watcher.Watch(ctx); err != nil {
@@ -572,8 +660,30 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 }
 
-// handleXID maps a kernel XID event to a GPU and pushes it to the controller.
-func (a *Agent) handleXID(ctx context.Context, ev kmsg.XIDEvent) bool {
+// handleKernelEvent maps a kernel fault line to a GPU and pushes it to the
+// controller. Both vendors' kernel families arrive here; only the NVIDIA XID
+// path may consult the NVML inventory for attribution.
+func (a *Agent) handleKernelEvent(ctx context.Context, ev kmsg.Event) bool {
+	detection := types.AgentEvent{
+		Node:      a.cfg.NodeName,
+		GPUIndex:  -1,
+		PCIAddr:   ev.PCIAddr,
+		XID:       ev.XID,
+		Fault:     ev.Fault,
+		Raw:       ev.Raw,
+		Timestamp: ev.Timestamp,
+	}
+	if ev.Fault != nil && ev.Fault.Vendor != string(types.AcceleratorVendorNVIDIA) {
+		// The only inventory this agent has is NVIDIA's. Asking it to resolve
+		// an AMD PCI address could only ever produce a wrong answer or an
+		// error, and an AMD fault filed against an NVIDIA GPU's index/UUID
+		// would point every downstream decision — incident target, holder
+		// check, remediation — at the wrong device. Vendor-scoped inventory is
+		// §1.3 and does not exist yet, so the honest result is an event that is
+		// addressed by PCI address and attributed to nothing.
+		a.logForeignVendorKernelFault(ev)
+		return a.handleDetection(ctx, detection, "kmsg-"+ev.Fault.Vendor)
+	}
 	gpu, err := a.driver.GPUByPCIAddr(ctx, ev.PCIAddr)
 	if err != nil {
 		a.log.Warn("cannot resolve GPU for XID", "pci", ev.PCIAddr, "xid", ev.XID, "err", err)
@@ -582,18 +692,25 @@ func (a *Agent) handleXID(ctx context.Context, ev kmsg.XIDEvent) bool {
 		gpu.Index = -1
 		gpu.UUID = ""
 	}
-	return a.handleDetection(ctx, types.AgentEvent{
-		Node:      a.cfg.NodeName,
-		GPUIndex:  gpu.Index,
-		GPUUUID:   gpu.UUID,
-		PCIAddr:   ev.PCIAddr,
-		XID:       ev.XID,
-		Raw:       ev.Raw,
-		Timestamp: ev.Timestamp,
-	}, "kmsg")
+	detection.GPUIndex = gpu.Index
+	detection.GPUUUID = gpu.UUID
+	return a.handleDetection(ctx, detection, "kmsg")
 }
 
-// handleDetection is the shared path both detection sources funnel through: it
+// logForeignVendorKernelFault records that a non-NVIDIA kernel fault could not
+// be attributed to a device. The limitation is reported loudly ONCE — an
+// operator must know this agent cannot name AMD devices — and then per event at
+// debug, so a ring-timeout storm cannot drown the log.
+func (a *Agent) logForeignVendorKernelFault(ev kmsg.Event) {
+	a.foreignVendorOnce.Do(func() {
+		a.log.Warn("kernel fault from a non-NVIDIA accelerator: this agent has no inventory for that vendor, so its events stay unattributed (addressed by PCI address only)",
+			"vendor", ev.Fault.Vendor, "code", ev.Fault.Code, "pci", ev.PCIAddr)
+	})
+	a.log.Debug("unattributed vendor kernel fault",
+		"vendor", ev.Fault.Vendor, "code", ev.Fault.Code, "pci", ev.PCIAddr, "raw", ev.Raw)
+}
+
+// handleDetection is the shared path every detection source funnels through: it
 // deduplicates a fault seen by more than one source within a short window, then
 // posts (spooling on failure). The source label is observability only; it never
 // changes handling or enables any action.

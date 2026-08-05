@@ -255,6 +255,52 @@ type SafetySpec struct {
 	// Quiesce tunes how the vendor's own components are stood down before a
 	// GPU reset.
 	Quiesce *QuiesceSpec `json:"quiesce,omitempty"`
+	// TaintDegradedNodes optionally stops a node under an open incident from
+	// attracting NEW GPU work, before any playbook cordons it.
+	//
+	// Omitted means off. Scheduling is the one thing every workload in the
+	// cluster depends on, so this must never arrive by default with an
+	// upgrade.
+	TaintDegradedNodes *TaintDegradedNodesSpec `json:"taintDegradedNodes,omitempty"`
+}
+
+// NodeTaintEffect is the scheduling effect of the degraded-node taint.
+// +kubebuilder:validation:Enum=PreferNoSchedule;NoSchedule
+type NodeTaintEffect string
+
+const (
+	// TaintEffectPreferNoSchedule biases the scheduler away from the node
+	// without forbidding anything.
+	TaintEffectPreferNoSchedule NodeTaintEffect = "PreferNoSchedule"
+	// TaintEffectNoSchedule refuses every new pod that does not tolerate the
+	// taint.
+	TaintEffectNoSchedule NodeTaintEffect = "NoSchedule"
+)
+
+// TaintDegradedNodesSpec configures the kubeneuron.io/degraded taint: applied
+// when an incident starts working on a node, removed when that incident halts.
+//
+// It is scheduler feedback, not remediation. A node that has already begun
+// failing keeps being handed fresh jobs right up to the moment a playbook
+// cordons it, and every job started in that window is one more workload the
+// remediation has to evict. The taint closes that window without taking any
+// capacity away: nothing already running is touched.
+type TaintDegradedNodesSpec struct {
+	// Enabled turns the taint on. Default false, and false is also what an
+	// absent block means: KubeNeuron does not touch node scheduling until
+	// somebody asks it to.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+	// Effect selects how hard the hint is.
+	//
+	// PreferNoSchedule, the default, is a bias: the scheduler avoids the node
+	// when it has somewhere else to put the pod, and still uses it rather than
+	// leaving work pending. NoSchedule is a wall — for a node under an OPEN
+	// incident, whose fault may yet turn out to be benign, that is a bigger
+	// hammer than the cordon a playbook applies deliberately and after
+	// evidence, which is why it is never the default.
+	// +kubebuilder:default=PreferNoSchedule
+	Effect NodeTaintEffect `json:"effect,omitempty"`
 }
 
 // QuiesceSpec declares node-side facts KubeNeuron cannot discover on its own.

@@ -482,8 +482,19 @@ them reintroduces a defect a past review round removed.
   row) — bound incidents are never re-bound.
 - **MIG instances are not remediation units.** The physical GPU is. A
   `MIG-` instance UUID is refused by the reset preflight fail-closed;
-  remediation targets the parent device or escalates to a human. Actual
-  MIG-parent semantics on real MIG hardware remain a gated decision.
+  remediation targets the parent device or escalates to a human.
+  Per-instance reset is rejected permanently, not pending: NVIDIA exposes
+  no such primitive, and recovering at instance granularity means
+  destroying and recreating instances — a MIG-manager lifecycle operation
+  that changes what the scheduler advertises, which a remediation step
+  must never do. The decided parent semantics
+  ([mig-decision.md](mig-decision.md)) are: remediate the parent only with
+  the parent's instances enumerated, only when EVERY instance is idle, and
+  only with the blast radius (instances, pods, namespaces) named in the
+  approval — opt-in, and today still refused because none of it can be
+  validated without A100/H100 MIG hardware. Note the asymmetry this
+  leaves: node-scope rungs (drain, reboot, recycle, replace) have no MIG
+  awareness at all and destroy every instance on the node today.
 
 ### 2.5 Scale posture
 

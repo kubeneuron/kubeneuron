@@ -45,4 +45,5 @@ drain-and-reset → reboot → driver remediation → hardware escalation.
 | Run it day-2: tokens, pauses, backups, metrics | [Operations](operations.md) |
 | Write or tune remediation behavior | [Playbook authoring](playbook-authoring.md) |
 | Understand why each XID maps where it does | [XID catalog](xid-catalog.md) |
+| Know exactly what ships for my vendor | [Capability matrix](reference-capabilities.md) |
 | Understand the architecture and its honest limits | [Design](design.md) |

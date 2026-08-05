@@ -9,6 +9,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/config"
@@ -39,6 +40,11 @@ type RuntimeConfig struct {
 	// DestructiveSelector is the compiled destructiveExecution.nodeSelector —
 	// the declared blast radius; empty disables the confinement check.
 	DestructiveSelector map[string]string
+	// DegradedTaint is the compiled spec.safety.taintDegradedNodes. The zero
+	// value is disabled, which is what every configuration written before the
+	// field existed decodes to — the feature can only arrive by being asked
+	// for.
+	DegradedTaint DegradedTaintPolicy
 	// SourceDigest identifies the operator-compiled snapshot these settings
 	// came from (the config-digest key the operator writes into the mounted
 	// ConfigMaps). Empty for file-based deployments with no operator. It is
@@ -50,6 +56,15 @@ type RuntimeConfig struct {
 	// SetTimings contract).
 	VerifyQuiet time.Duration
 	ApprovalTTL time.Duration
+}
+
+// DegradedTaintPolicy is the resolved degraded-node taint setting. Effect is
+// meaningless while Enabled is false, and Enabled is false in the zero value:
+// a snapshot installed by any path that has not heard of this feature leaves
+// node scheduling alone.
+type DegradedTaintPolicy struct {
+	Enabled bool
+	Effect  string
 }
 
 // pinnedRuntimeConfigKey carries one snapshot through a call tree, so every
@@ -81,6 +96,20 @@ func (c *Controller) runtimeConfig(ctx context.Context) *RuntimeConfig {
 func (c *Controller) InstallRuntimeConfig(rc RuntimeConfig) error {
 	if err := ValidateAcceleratorRuntimeProfiles(rc.AcceleratorProfiles); err != nil {
 		return err
+	}
+	// Reject an unrecognised effect rather than repairing it: the reload path
+	// keeps the previous configuration in force on an error, and a node
+	// scheduling hint that silently becomes something other than what was
+	// asked for is worse than a configuration that visibly refuses to load.
+	if rc.DegradedTaint.Enabled {
+		switch rc.DegradedTaint.Effect {
+		case "":
+			rc.DegradedTaint.Effect = config.TaintEffectPreferNoSchedule
+		case config.TaintEffectPreferNoSchedule, config.TaintEffectNoSchedule:
+		default:
+			return fmt.Errorf("degraded-node taint effect %q is not %s or %s",
+				rc.DegradedTaint.Effect, config.TaintEffectPreferNoSchedule, config.TaintEffectNoSchedule)
+		}
 	}
 	c.runtimeMu.Lock()
 	defer c.runtimeMu.Unlock()

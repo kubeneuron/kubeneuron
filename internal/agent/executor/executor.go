@@ -365,11 +365,34 @@ func (e *Executor) resolveResetIndex(ctx context.Context, a types.Action) (int, 
 	if uuid == "" {
 		return 0, fmt.Errorf("gpu_reset: gpu_uuid is required to bind the reset to a physical device; refusing to reset GPU index %d by index alone", requestedIndex)
 	}
-	// MIG decision (design.md): the remediation unit is the PHYSICAL GPU.
-	// A MIG compute-instance UUID ("MIG-<uuid>") names a partition, not a
-	// device the driver can reset — resetting through it would take down
-	// every instance on the parent while the incident's evidence describes
-	// only one. Fail closed; a human routes the ladder at the parent.
+	// MIG decision (docs/mig-decision.md, design.md §2.4d): the remediation
+	// unit is the PHYSICAL GPU, and per-instance reset is rejected
+	// permanently rather than pending.
+	//
+	// A "MIG-<uuid>" names a compute instance, not a device the driver can
+	// reset: NVIDIA exposes no per-instance reset at all. The only thing
+	// that could be done at instance granularity is destroying and
+	// recreating the instance, which reconfigures the partitioning and
+	// changes what the device plugin advertises to the scheduler — a
+	// MIG-manager lifecycle operation, never a remediation step. And a
+	// reset issued through the parent would take down every instance on it
+	// while the incident's evidence describes exactly one.
+	//
+	// Remediating the parent is a decided but unbuilt capability, and it is
+	// not what this branch withholds: the preflight here cannot see inside
+	// MIG at all. EnsureIdle addresses the parent, and whether that reports
+	// processes running INSIDE its instances is unverified; the holder scan
+	// resolves a device minor that a MIG parent may report as [N/A] and
+	// looks for /dev/nvidiaN, while instance consumers hold
+	// /dev/nvidia-caps nodes. So "idle" here would be a claim this code
+	// cannot support on partitioned hardware. Fail closed; a human routes
+	// the ladder at the parent.
+	//
+	// Reaching this branch at all should be rare: the agent reports a
+	// MIG-mode node as TopologySafety=partitioned/Readiness=degraded, which
+	// the controller's reset gate already refuses. This is the last of four
+	// independent refusals, kept because a UUID can arrive from a
+	// hand-authored playbook or a stale incident target.
 	if strings.HasPrefix(uuid, "MIG-") {
 		return 0, fmt.Errorf("gpu_reset: %s is a MIG instance UUID, not a physical GPU; per-instance reset is not a supported remediation unit — target the parent GPU or escalate", uuid)
 	}

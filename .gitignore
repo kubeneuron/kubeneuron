@@ -30,3 +30,6 @@ web/node_modules/
 .env
 .env.local
 /kubeneuron-controller
+
+# Agent worktrees and local session scratch
+.claude/

@@ -10,6 +10,56 @@ API is `v1alpha1`.
 ## [Unreleased]
 
 ### Added
+- **AMD detection, so "vendor-neutral" is a fact and not only a seam**
+  (`internal/agent/amdhealth`): `amd-smi metric --json` with a
+  `rocm-smi` fallback, emitting neutral `(vendor, source, code)` faults —
+  `ecc-uncorrectable`, `ecc-correctable-rate`, `page-retirement`,
+  `xgmi-link-error`, `thermal-throttle`, `gpu-lost` — through the same
+  event path as the NVIDIA source, with the same fail-closed posture
+  (real-binary gate, counters baselined on the first poll, absent ≠ zero,
+  unparseable output degrades to observed-only). The kernel watcher gained
+  the `amdgpu` line families on the SAME cursor, boot-scoping, and ack
+  watermark. Every problem class reachable through the XID table is now
+  also reachable through a neutral `(vendor, code)` row, and a test fails
+  the build if that ever stops being true. **The fixtures are synthetic:
+  the amd-smi JSON schema is reconstructed, not captured from hardware —
+  the capability matrix says so.**
+- `docs/reference-capabilities.md` — a per-vendor capability matrix whose
+  every cell is derived from the code and cites the file that backs it,
+  machine-checked by `hack/verify-docs.sh` in BOTH directions: an
+  implementation that lands without a matrix update fails CI, and a matrix
+  that claims support with no implementation behind it fails too. It
+  earned its keep immediately, catching both directions during this
+  change.
+- `docs/mig-decision.md` and `docs/checkpoint-coordination-design.md` —
+  the plan's two "decide before building" items, each ending in a
+  recommendation rather than a survey: the physical GPU stays the
+  remediation unit (per-instance reset is rejected permanently, not
+  deferred), and checkpoint coordination is designed as an opt-in Pod
+  annotation with a controller→workload notification patched onto the Pod
+  itself, because an HTTP call from the controller to a workload endpoint
+  would be an SSRF primitive aimed at the component holding cluster and
+  cloud credentials.
+- Protection is now countable (`kubeneuron_workloads_evicted_total`,
+  `kubeneuron_destructive_steps_deferred_total` over a closed set of
+  reasons): the number of times automation chose NOT to disrupt was
+  previously invisible, which is why the clause was undersold. Twelve
+  deferral paths are instrumented; dry-run incidents and observe-only
+  playbooks are deliberately excluded, because neither was ever going to
+  touch a workload.
+- Opt-in degraded-node taint (`spec.safety.taintDegradedNodes`, default
+  off, `PreferNoSchedule`): a node under an open incident stops attracting
+  new GPU work before it is cordoned. A janitor converges the marks both
+  ways from what the cluster reports, so a controller that dies mid-mark
+  cannot leave one behind.
+- `kubeneuronctl report --since 30d` and a recovery row at the top of the
+  Grafana dashboard: GPU-hours degraded and recovered, the share recovered
+  without a human, cost by class, MTTR percentiles, and what is still
+  open. The report computes from the incident store rather than
+  Prometheus — exact instead of bucket-interpolated, survives a counter
+  reset, and works on a fresh install with no monitoring stack — through a
+  new `GET /api/v1/report/recovery` so "recovered" is defined once,
+  server-side, instead of once per client.
 - **The product definition is now a gradeable contract.** KubeNeuron is
   "a vendor-neutral GPU fleet reliability control plane that detects
   degradation, protects workloads, automates safe recovery, and measures
@@ -92,6 +142,16 @@ API is `v1alpha1`.
   `hw-e2e.yaml` gains the `test-threshold` phase the harness already had.
 
 ### Fixed
+- Two silent no-ops the capability audit found, both wrong in the
+  dangerous direction: a hardcoded `nvidia.com/gpu` decided what counts as
+  a GPU, so an AMD or Intel node inventoried as ZERO GPUs — invisible to
+  the entire control plane — and `evict_gpu_workload` reported "evicted 0
+  GPU workloads" as success while leaving live jobs on a device the ladder
+  was about to reset, which is the exact disruption that step exists to
+  prevent. Resource matching is now vendor-neutral (including NVIDIA MIG
+  partitions) and errs toward recognising an accelerator; the eviction
+  step says plainly when it matched nothing and how many pods it
+  considered.
 - **The round-11 arming-grace fix inverted the bug it was closing.** The
   hold anchor was cleared on every non-hold verdict, including the
   `proceed` returned for steps that are not agent-destructive at all — and

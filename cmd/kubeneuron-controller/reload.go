@@ -127,6 +127,7 @@ func applyRuntimeConfig(
 		AcceleratorProfiles: cfg.AcceleratorProfiles,
 		QuiesceForbidden:    cfg.Safety.QuiesceForbidResetWhenPresent,
 		DestructiveSelector: cfg.Safety.DestructiveExecutionNodeSelector,
+		DegradedTaint:       degradedTaintPolicy(cfg.Safety.TaintDegradedNodes),
 		VerifyQuiet:         cfg.Safety.VerifyQuietWindow.Std(),
 		ApprovalTTL:         cfg.Approvals.TTL.Std(),
 	}); err != nil {
@@ -150,6 +151,18 @@ func applyRuntimeConfig(
 		metrics.RuntimeConfigInfo.WithLabelValues(sourceDigest).Set(1)
 	}
 	return nil
+}
+
+// degradedTaintPolicy resolves the compiled degraded-node taint setting. An
+// absent key is off, which is the whole default: a controller loading a
+// configuration written before this feature existed must not start marking
+// nodes. The effect is normalized by config.Validate before this is reached;
+// InstallRuntimeConfig rejects anything else.
+func degradedTaintPolicy(compiled *config.TaintDegradedNodes) controller.DegradedTaintPolicy {
+	if compiled == nil || !compiled.Enabled {
+		return controller.DegradedTaintPolicy{}
+	}
+	return controller.DegradedTaintPolicy{Enabled: true, Effect: compiled.Effect}
 }
 
 // watchRuntimeConfig re-applies the configuration whenever the mounted files
