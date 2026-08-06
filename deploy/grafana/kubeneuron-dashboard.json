@@ -16,8 +16,8 @@
   "panels": [
     {
       "type": "timeseries",
-      "title": "GPU-hours degraded by outcome (resolved = returned to service)",
-      "description": "Accelerator time spent under an open incident, in GPU-hours (GPU-seconds / 3600), stacked by how the incident ended. The resolved band is the capacity remediation brought back; needs_human and expired never returned to service. Degraded is not unavailable: a degraded GPU may still have been serving.",
+      "title": "GPU-hours degraded, cumulative by outcome (resolved = returned to service)",
+      "description": "Cumulative GPU-hours spent under an open incident since controller start, split by how each incident ended; the resolved series is capacity remediation brought back. Drawn from the counter directly because recoveries are sparse enough that increase() over a dashboard window frequently reports zero.",
       "gridPos": {
         "h": 8,
         "w": 10,
@@ -26,7 +26,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (outcome) (increase(kubeneuron_degraded_gpu_seconds_total[$__interval])) / 3600",
+          "expr": "sum by (outcome) (kubeneuron_degraded_gpu_seconds_total) / 3600",
           "legendFormat": "{{outcome}}"
         }
       ],
@@ -44,8 +44,8 @@
     },
     {
       "type": "stat",
-      "title": "Unattended recovery (selected window)",
-      "description": "Share of RESOLVED incidents that never asked a human for an approval, over the dashboard's time range. No data means nothing was recovered in the window - that is not 0%.",
+      "title": "Unattended recovery share (since controller start)",
+      "description": "Share of recovered incidents that never needed a human decision. Computed from the raw counters rather than increase() over the window: recoveries are sparse, and a counter series born inside the window shows no growth to increase(), which silently rendered this panel empty on exactly the fleets it matters for. Resets when the controller restarts; use kubeneuronctl report for a windowed figure computed from the incident store.",
       "gridPos": {
         "h": 8,
         "w": 4,
@@ -54,7 +54,7 @@
       },
       "targets": [
         {
-          "expr": "100 * sum(increase(kubeneuron_incidents_recovered_total{unattended=\"true\"}[$__range])) / sum(increase(kubeneuron_incidents_recovered_total[$__range]))",
+          "expr": "100 * sum(kubeneuron_incidents_recovered_total{unattended=\"true\"}) / sum(kubeneuron_incidents_recovered_total)",
           "legendFormat": "unattended"
         }
       ],
@@ -84,7 +84,7 @@
     {
       "type": "timeseries",
       "title": "MTTR p50/p90 by class (resolved incidents)",
-      "description": "Open-to-resolved wall time, quantiles over a trailing window as wide as the dashboard's time range so sparse incident histograms still produce a value. Only outcome=resolved is included: an incident escalated to a human or expired has no recovery time.",
+      "description": "Median and 90th-percentile time from incident open to resolution, per problem class, over every resolved incident since controller start. Not rate()-based: a fleet resolving a handful of incidents a day leaves a histogram too sparse for a windowed rate to report anything at all.",
       "gridPos": {
         "h": 8,
         "w": 10,
@@ -93,11 +93,11 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.5, sum by (class, le) (rate(kubeneuron_incident_duration_seconds_bucket{outcome=\"resolved\"}[$__range])))",
+          "expr": "histogram_quantile(0.5, sum by (class, le) (kubeneuron_incident_duration_seconds_bucket{outcome=\"resolved\"}))",
           "legendFormat": "{{class}} p50"
         },
         {
-          "expr": "histogram_quantile(0.9, sum by (class, le) (rate(kubeneuron_incident_duration_seconds_bucket{outcome=\"resolved\"}[$__range])))",
+          "expr": "histogram_quantile(0.9, sum by (class, le) (kubeneuron_incident_duration_seconds_bucket{outcome=\"resolved\"}))",
           "legendFormat": "{{class}} p90"
         }
       ],

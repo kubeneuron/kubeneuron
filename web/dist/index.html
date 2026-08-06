@@ -26,12 +26,14 @@ aside{
   padding:1rem .8rem;display:flex;flex-direction:column;gap:.25rem;position:sticky;top:0;height:100vh;
 }
 .brand{display:flex;align-items:center;gap:.6rem;padding:.25rem .5rem 1rem}
-.mark{width:30px;height:30px;border-radius:8px;flex:none;position:relative;
-  background:linear-gradient(135deg,var(--accent),var(--accent2));
-  box-shadow:0 0 18px #5b8cff40, inset 0 1px 0 #ffffff30}
-.mark::after{content:"";position:absolute;inset:0;margin:auto;width:9px;height:9px;border-radius:50%;
-  background:#fff;box-shadow:0 0 9px #fff;animation:pulse 2.4s ease-in-out infinite}
-@keyframes pulse{0%,100%{transform:scale(.8);opacity:.85}50%{transform:scale(1.15);opacity:1}}
+/* The brand chip mark, inlined as a data URI so the panel stays a
+   single file with no external requests. It must match the mark on
+   kubeneuron.com and in the repository's logo assets — the panel used to
+   draw a generic gradient square here, so the product and the site
+   showed different brands to the same person. */
+.mark{width:30px;height:30px;flex:none;
+  background:url("data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2296%22%20height%3D%2296%22%20viewBox%3D%220%200%2048%2048%22%20fill%3D%22none%22%3E%20%3Crect%20x%3D%221.5%22%20y%3D%221.5%22%20width%3D%2245%22%20height%3D%2245%22%20rx%3D%2211.5%22%20fill%3D%22%230d1030%22%2F%3E%20%3Crect%20x%3D%2214%22%20y%3D%2214%22%20width%3D%2220%22%20height%3D%2220%22%20rx%3D%224.2%22%20stroke%3D%22%232fd8f2%22%20stroke-width%3D%222.4%22%2F%3E%20%3Cpath%20d%3D%22M20%208v6M28%208v6M20%2034v6M28%2034v6M8%2020h6M8%2028h6M34%2020h6M34%2028h6%22%20stroke%3D%22%232fd8f2%22%20stroke-width%3D%222.4%22%20stroke-linecap%3D%22round%22%2F%3E%20%3Ccircle%20cx%3D%2224%22%20cy%3D%2224%22%20r%3D%223.4%22%20fill%3D%22%232fd8f2%22%2F%3E%20%3C%2Fsvg%3E") center/contain no-repeat;
+  filter:drop-shadow(0 0 12px #2fd8f240)}
 .brand b{font-size:1.02rem;letter-spacing:.01em}
 .nav{display:flex;flex-direction:column;gap:2px}
 .nav a{
