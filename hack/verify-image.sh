@@ -72,9 +72,23 @@ agent_image="kubeneuron-agent:${TAG}"
 # check passed. A gate added specifically to catch a missing nsenter could not
 # catch a missing nsenter. Listing the layers cannot be fooled that way.
 image_contains() {
-	local image=$1 path=$2 cid rc=0
+	local image=$1 path=$2 cid listing rc=0
 	cid=$("$DOCKER_BIN" create "$image") || return 1
-	"$DOCKER_BIN" export "$cid" | tar -tf - | grep -qx "${path#/}" || rc=1
+	listing=$(mktemp)
+	# Materialise the listing before grepping it. Piping `docker export | tar
+	# -tf - | grep -q` looks natural and is wrong: grep exits at the first
+	# match, tar then writes to a closed pipe and fails, and under `set -o
+	# pipefail` the whole pipeline reports failure — so a file that IS present
+	# was reported missing. It failed in the safe direction, which is exactly
+	# why it survived a local run and only showed up in CI.
+	"$DOCKER_BIN" export "$cid" >"$listing.tar" 2>/dev/null || rc=1
+	if ((rc == 0)); then
+		tar -tf "$listing.tar" >"$listing" 2>/dev/null || rc=1
+	fi
+	if ((rc == 0)) && ! grep -qx "${path#/}" "$listing"; then
+		rc=1
+	fi
+	rm -f "$listing" "$listing.tar"
 	"$DOCKER_BIN" rm -f "$cid" >/dev/null 2>&1 || true
 	return $rc
 }
