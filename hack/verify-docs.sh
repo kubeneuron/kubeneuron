@@ -153,8 +153,16 @@ fi
 # how it rotted the first time.
 chart_tag=$(sed -n 's|^  tag: \(v[0-9][0-9.]*\)$|\1|p' deploy/helm/kubeneuron/values.yaml | head -1)
 changelog_tag=$(sed -n 's|^## \[\(v[0-9][0-9.]*\)\].*|\1|p' CHANGELOG.md | head -1)
+kust_tag=$(sed -n 's|.*image: ghcr.io/kubeneuron/kubeneuron/operator:\(v[0-9][0-9.]*\)$|\1|p' config/default/operator_deployment.yaml | head -1)
 if [[ -n $chart_tag && -n $changelog_tag && $chart_tag != "$changelog_tag" ]]; then
 	echo "STALE HELM CHART: deploy/helm/kubeneuron/values.yaml pins ${chart_tag}, CHANGELOG's newest release is ${changelog_tag}" >&2
+	fail=1
+fi
+if [[ -n $kust_tag && -n $chart_tag && $kust_tag != "$chart_tag" ]]; then
+	# CI asserts the chart and the kustomize base deploy an identical
+	# Deployment. Fixing one pin and not the other breaks that check at the
+	# release gate rather than here, which is the slower place to learn it.
+	echo "PIN DIVERGENCE: kustomize pins ${kust_tag}, the Helm chart pins ${chart_tag}" >&2
 	fail=1
 fi
 

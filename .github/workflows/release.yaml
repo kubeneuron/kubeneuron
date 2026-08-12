@@ -179,6 +179,10 @@ jobs:
           # this is the same lesson as the installer digests above, in a file
           # that is executable rather than descriptive.
           sed -i -E "s|^(  tag: ).*|\1${version}|" deploy/helm/kubeneuron/values.yaml
+          # The kustomize base carries the same pin, and CI asserts the two
+          # deploy an identical Deployment — so they rot together or not at all.
+          sed -i -E "s|(image: ghcr.io/kubeneuron/kubeneuron/operator:).*|\1${version}|" \
+            config/default/operator_deployment.yaml
           sed -i -E "s|^(version: ).*|\1${version#v}|; s|^(appVersion: ).*|\1\"${version}\"|" \
             deploy/helm/kubeneuron/Chart.yaml
           grep -q "tag: ${version}$" deploy/helm/kubeneuron/values.yaml

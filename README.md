@@ -2,7 +2,7 @@
 
 **A vendor-neutral GPU fleet reliability control plane that detects
 degradation, protects workloads, automates safe recovery, and measures
-recovered.**
+recovered capacity.**
 
 A GPU falls off the bus at 3am. KubeNeuron catches the kernel's XID event,
 opens an incident, cordons and drains the node, and pages a human with
