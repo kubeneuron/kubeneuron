@@ -9,6 +9,25 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+## [v0.2.3] - 2026-08-12
+
+Release evidence: full CI on the public repository green as the tag's gate —
+including the new `image` job, which builds all four published images with the
+classic builder and asserts what only the artifact can show, and the kind
+integration suite building the PRODUCTION `build/Dockerfile` rather than a
+stand-in. That suite now also lets a playbook really change a cluster: one
+phase arms a disposable worker, drives a cordon for real, and proves the
+janitor gives the capacity back — the first time a destructive step and its
+recovery have run under test outside unit tests.
+
+This release is mostly the closing of fail-open paths that two review rounds
+and that new phase found. Four of them could not be seen by any unit test:
+they live at the seam between the operator, a ConfigMap and a live cluster,
+and the kind suite could not see them either, because every other phase runs
+in dry-run and so had never switched execution mode or applied confinement for
+real. **If you run AMD, or you have ever changed `spec.safety.executionMode`
+on a running installation, read the Fixed section before upgrading.**
+
 ### Fixed
 - **`spec.safety.executionMode` had no effect on a running controller**
   (`cmd/kubeneuron-controller/reload.go`, `internal/safety/limits.go`). The
