@@ -166,12 +166,15 @@ build_baseline_from_tag() {
 	note "building baseline images from git tag $BASELINE (no registry access)"
 	baseline_tree="$work_dir/baseline-src"
 	git -C "$REPO_ROOT" worktree add --detach "$baseline_tree" "$BASELINE" >/dev/null
-	make -C "$baseline_tree" build >/dev/null
 	local target
 	for target in operator controller agent; do
+		# That tag's own production Dockerfile, so a fallback baseline is the
+		# same KIND of artifact as the pulled one and as HEAD. Comparing a
+		# scratch baseline against a distroless HEAD would rehearse an upgrade
+		# nobody performs. It compiles in-image, so no `make build` first.
 		"$DOCKER_BIN" build --target "$target" \
 			--tag "ghcr.io/kubeneuron/kubeneuron/${target}:${BASELINE}" \
-			--file "$baseline_tree/test/integration/Dockerfile" "$baseline_tree" >/dev/null
+			--file "$baseline_tree/build/Dockerfile" "$baseline_tree" >/dev/null
 	done
 }
 
@@ -376,14 +379,16 @@ audit_before=$(api_curl "http://127.0.0.1:${public_port}/api/v1/incidents/${inci
 ((audit_before >= 1)) || die "seed incident has no audit trail"
 note "seeded incident $incident_id with $audit_before audit entries"
 
-note "building HEAD images"
-for binary in kubeneuron-operator kubeneuron-controller kubeneuron-agent; do
-	[[ -x $REPO_ROOT/bin/$binary ]] || die "missing static binary bin/$binary; run 'make build' first"
-done
+# The PRODUCTION Dockerfile, for the same reason kind-integration uses it: the
+# baseline side of this rehearsal is the real released image, so building HEAD
+# from a FROM-scratch stand-in would prove an upgrade between two artifacts,
+# only one of which anybody deploys. It also compiles inside the build stage,
+# so no bin/ tree has to exist first — which is what this step used to die on.
+note "building HEAD images from build/Dockerfile"
 head_tag="upgrade-head-$$"
 for target in operator controller agent; do
 	"$DOCKER_BIN" build --target "$target" --tag "kubeneuron-$target:$head_tag" \
-		--file "$REPO_ROOT/test/integration/Dockerfile" "$REPO_ROOT" >/dev/null
+		--file "$REPO_ROOT/build/Dockerfile" "$REPO_ROOT" >/dev/null
 done
 "$KIND_BIN" load docker-image --name "$CLUSTER_NAME" \
 	"kubeneuron-operator:$head_tag" "kubeneuron-controller:$head_tag" "kubeneuron-agent:$head_tag"
