@@ -145,6 +145,19 @@ if ! python3 hack/verify-spec-paths.py; then
 	fail=1
 fi
 
+# --- derived facts: the Helm chart's pinned image tag ------------------------
+# The chart pins its own tag, and it had rotted two minor releases behind the
+# CHANGELOG: `helm install` with no explicit --set deployed last quarter's
+# operator. The release pipeline stamps it now; this catches the window where
+# a release has been cut and the chart has not caught up, which is precisely
+# how it rotted the first time.
+chart_tag=$(sed -n 's|^  tag: \(v[0-9][0-9.]*\)$|\1|p' deploy/helm/kubeneuron/values.yaml | head -1)
+changelog_tag=$(sed -n 's|^## \[\(v[0-9][0-9.]*\)\].*|\1|p' CHANGELOG.md | head -1)
+if [[ -n $chart_tag && -n $changelog_tag && $chart_tag != "$changelog_tag" ]]; then
+	echo "STALE HELM CHART: deploy/helm/kubeneuron/values.yaml pins ${chart_tag}, CHANGELOG's newest release is ${changelog_tag}" >&2
+	fail=1
+fi
+
 if ((fail)); then
 	echo "verify-docs: FAILED — fix the claims above (or, if a claim became true again, remove its pattern)" >&2
 	exit 1

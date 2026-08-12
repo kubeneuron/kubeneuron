@@ -5,8 +5,8 @@ description: >-
   NVIDIA Kubernetes clusters. Installs the API and the operator only;
   installations are created afterwards as KubeNeuron custom resources.
 type: application
-version: 0.1.0
-appVersion: "v0.1.0"
+version: 0.2.3
+appVersion: "v0.2.3"
 home: https://github.com/kubeneuron/kubeneuron
 sources:
   - https://github.com/kubeneuron/kubeneuron

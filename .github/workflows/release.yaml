@@ -173,6 +173,17 @@ jobs:
           bash -n "dist/install-${version}.sh"
           cp "dist/install-${version}.sh" dist/install.sh
 
+          # The Helm chart pins its own image tag, and it had gone stale by two
+          # minor releases: `helm install` without an explicit --set deployed
+          # last quarter's operator. A version typed into a file by hand rots;
+          # this is the same lesson as the installer digests above, in a file
+          # that is executable rather than descriptive.
+          sed -i -E "s|^(  tag: ).*|\1${version}|" deploy/helm/kubeneuron/values.yaml
+          sed -i -E "s|^(version: ).*|\1${version#v}|; s|^(appVersion: ).*|\1\"${version}\"|" \
+            deploy/helm/kubeneuron/Chart.yaml
+          grep -q "tag: ${version}$" deploy/helm/kubeneuron/values.yaml
+          grep -q "appVersion: \"${version}\"" deploy/helm/kubeneuron/Chart.yaml
+
       - uses: actions/upload-artifact@v4
         with:
           name: manifest-dist
@@ -230,6 +241,10 @@ jobs:
       BASELINE: ${{ vars.UPGRADE_BASELINE || 'v0.2.2' }}
       RELEASE_REPO: ${{ github.repository }}
       CLUSTER_NAME: kubeneuron-upgrade-ci
+      KIND_VERSION: v0.32.0
+      KIND_SHA256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
+      KUBECTL_VERSION: v1.33.12
+      KUBECTL_SHA256: fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
     steps:
       - uses: actions/checkout@v4
 
@@ -238,14 +253,27 @@ jobs:
           go-version: "1.25.12"
           cache: true
 
-      - name: Install kind and kubectl
+      # Same shape as ci.yaml's kind job, including the checksums: a runner's
+      # /usr/local/bin is not writable by the job user, and an unverified
+      # download of the tool that builds the cluster this release is gated on
+      # is not a shortcut worth taking.
+      - name: Install pinned Kubernetes clients
+        shell: bash
         run: |
           set -euo pipefail
-          curl --fail --location --retry 3 -o /usr/local/bin/kind \
-            "https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64"
-          curl --fail --location --retry 3 -o /usr/local/bin/kubectl \
-            "https://dl.k8s.io/release/v1.33.12/bin/linux/amd64/kubectl"
-          chmod 0755 /usr/local/bin/kind /usr/local/bin/kubectl
+          test "$(uname -m)" = x86_64
+          tools="$RUNNER_TEMP/kubeneuron-tools"
+          mkdir -p "$tools"
+          curl --fail --location --retry 3 \
+            --output "$tools/kind" \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          printf '%s  %s\n' "$KIND_SHA256" "$tools/kind" | sha256sum --check -
+          curl --fail --location --retry 3 \
+            --output "$tools/kubectl" \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          printf '%s  %s\n' "$KUBECTL_SHA256" "$tools/kubectl" | sha256sum --check -
+          chmod 0755 "$tools/kind" "$tools/kubectl"
+          echo "$tools" >> "$GITHUB_PATH"
 
       - name: Raise inotify limits for the multi-node cluster
         run: |
