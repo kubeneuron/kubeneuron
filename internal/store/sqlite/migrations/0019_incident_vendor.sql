@@ -1,0 +1,14 @@
+-- An incident about a device must know whose device it is.
+--
+-- Without this the reset preflight could not tell an AMD-attributed incident
+-- from an NVIDIA one, so an AMD fault bound to a reset-bearing playbook
+-- cordoned and drained the node and then re-denied the reset on every
+-- reconcile tick forever: the target UUID can never appear in an NVIDIA
+-- accelerator report, but "absent from the report" is indistinguishable from
+-- "the agent has not looked yet", which is a HOLD, not a refusal. The node
+-- stayed drained and nothing ever paged.
+--
+-- Empty means unknown, which is every row that predates this column and every
+-- signal that carries no vendor. Unknown imposes no constraint, so upgrading
+-- changes nothing for existing incidents.
+ALTER TABLE incidents ADD COLUMN vendor TEXT NOT NULL DEFAULT '';

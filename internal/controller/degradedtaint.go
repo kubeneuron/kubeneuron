@@ -95,6 +95,20 @@ func (c *Controller) syncDegradedTaint(ctx context.Context, inc *types.Incident,
 		// is the only place that can find marks this process never placed.
 		return
 	}
+	if inc.DryRun {
+		// A dry-run installation promises it changes nothing in the cluster,
+		// and a NoSchedule taint is a cluster-wide scheduling change: work
+		// stops landing on the node for every workload, not only ours. An
+		// evaluator who was told nothing would happen would be right to call
+		// that a broken promise. The taint is opt-in anyway, so an operator
+		// who wants the scheduler steered can have it by leaving dry-run.
+		//
+		// The removal direction is NOT skipped: if the installation was
+		// switched into dry-run while marks were live, they must still come
+		// off, and the janitor is what does it.
+		c.logDryRunTaintOnce(inc)
+		return
+	}
 	switch {
 	case to.Halted():
 		// Removed on EVERY halting state, including NEEDS_HUMAN — deliberately
@@ -120,11 +134,19 @@ func (c *Controller) syncDegradedTaint(ctx context.Context, inc *types.Incident,
 			c.log.Warn("removing the degraded taint failed; the janitor will retry",
 				"node", inc.Target.Node, "incident", inc.ID, "err", err)
 		}
-	case from == types.StateOpen:
-		// The first non-terminal state the walk routes a fresh incident into —
-		// OBSERVING for observe-first classes, EVALUATING for the rest. Marking
-		// here rather than at open keeps it off incidents that are quarantined
-		// as flapping on their very first pass.
+	case from == types.StateOpen, from.Halted():
+		// from == StateOpen is the first non-terminal state the walk routes a
+		// fresh incident into — OBSERVING for observe-first classes, EVALUATING
+		// for the rest. Marking here rather than at open keeps it off incidents
+		// that are quarantined as flapping on their very first pass.
+		//
+		// from.Halted() is the unpark: NEEDS_HUMAN -> EVALUATING is a legal
+		// transition, and halting REMOVED the mark on the way in. Without this
+		// case an incident a human sent back for another attempt runs with the
+		// scheduler still free to pile new work onto the failing node, until
+		// the janitor happens to notice — which is the whole window this
+		// feature exists to close, re-opened at the moment somebody is actively
+		// working the incident.
 		if err := tainter.ApplyDegradedTaint(ctx, inc.Target.Node, degradedTaintValue(inc), policy.Effect); err != nil {
 			c.log.Warn("marking a node degraded failed; the janitor will retry",
 				"node", inc.Target.Node, "incident", inc.ID, "err", err)
@@ -181,9 +203,26 @@ func (c *Controller) reconcileDegradedTaints(ctx context.Context) {
 	isMarked := make(map[string]bool, len(marked))
 	for _, node := range marked {
 		isMarked[node] = true
-		if _, stillOpen := open[node]; !stillOpen {
-			c.removeDegradedTaint(ctx, tainter, node, "no incident on it is open any more")
+		if _, stillOpen := open[node]; stillOpen {
+			continue
 		}
+		// The two reads above are not a snapshot: the marked-node list was
+		// taken before the incident list, so an incident that opened in the gap
+		// is invisible here and this node looks abandoned when it is not.
+		// Removing on that basis returns a node to the scheduler's rotation at
+		// the exact moment a fault is being worked on it, so confirm against
+		// the store for THIS node before acting. The opposite error — leaving a
+		// stale mark one pass longer — costs nothing and self-heals.
+		stillOpen, err := c.nodeHasOpenIncident(ctx, node)
+		if err != nil {
+			c.log.Warn("cannot confirm whether a marked node is still under an incident; leaving its degraded taint",
+				"node", node, "err", err)
+			continue
+		}
+		if stillOpen {
+			continue
+		}
+		c.removeDegradedTaint(ctx, tainter, node, "no incident on it is open any more")
 	}
 	for node, inc := range open {
 		if isMarked[node] {
@@ -198,23 +237,37 @@ func (c *Controller) reconcileDegradedTaints(ctx context.Context) {
 	}
 }
 
+// activeIncidentStates is every state in which an incident is still being
+// worked. Kept in one place so the three taint queries below cannot drift
+// apart — a state missing from one of them silently changes what the janitor
+// thinks is abandoned.
+func activeIncidentStates() []types.IncidentState {
+	return []types.IncidentState{
+		types.StateOpen, types.StateObserving, types.StateEvaluating,
+		types.StateAwaitingApproval, types.StateExecuting, types.StateVerifying,
+	}
+}
+
 // otherOpenIncidentsOnNode reports whether any incident OTHER than this one is
 // still non-halted on the same node.
 func (c *Controller) otherOpenIncidentsOnNode(ctx context.Context, inc *types.Incident) (bool, error) {
 	incidents, err := c.store.ListIncidents(ctx, store.IncidentFilter{
-		Node: inc.Target.Node,
-		States: []types.IncidentState{
-			types.StateOpen, types.StateObserving, types.StateEvaluating,
-			types.StateAwaitingApproval, types.StateExecuting, types.StateVerifying,
-		},
+		Node:   inc.Target.Node,
+		States: activeIncidentStates(),
 	})
 	if err != nil {
 		return false, err
 	}
 	for _, other := range incidents {
-		if other.ID != inc.ID {
-			return true, nil
+		if other.ID == inc.ID || other.DryRun {
+			// Dry-run incidents never place a mark, so one cannot be the
+			// reason to keep it. Its two siblings — nodesUnderOpenIncidents
+			// and nodeHasOpenIncident — already filter this; the shared
+			// activeIncidentStates() exists so the three cannot drift apart,
+			// and this was the one that had.
+			continue
 		}
+		return true, nil
 	}
 	return false, nil
 }
@@ -223,10 +276,7 @@ func (c *Controller) otherOpenIncidentsOnNode(ctx context.Context, inc *types.In
 // those incidents (which one is immaterial: the value only names the mark).
 func (c *Controller) nodesUnderOpenIncidents(ctx context.Context) (map[string]*types.Incident, error) {
 	incidents, err := c.store.ListIncidents(ctx, store.IncidentFilter{
-		States: []types.IncidentState{
-			types.StateOpen, types.StateObserving, types.StateEvaluating,
-			types.StateAwaitingApproval, types.StateExecuting, types.StateVerifying,
-		},
+		States: activeIncidentStates(),
 	})
 	if err != nil {
 		return nil, err
@@ -236,11 +286,48 @@ func (c *Controller) nodesUnderOpenIncidents(ctx context.Context) (map[string]*t
 		if inc.Target.Node == "" {
 			continue
 		}
+		if inc.DryRun {
+			// Same promise as the fast path: a dry-run installation does not
+			// write taints. Note this leaves the node absent from the map, so
+			// a mark left behind by a non-dry-run incident is still removed.
+			continue
+		}
 		if _, seen := out[inc.Target.Node]; !seen {
 			out[inc.Target.Node] = inc
 		}
 	}
 	return out, nil
+}
+
+// nodeHasOpenIncident asks the store directly whether one node still carries a
+// non-halted, non-dry-run incident. Used to confirm a removal that a
+// two-read janitor pass would otherwise base on a stale list.
+func (c *Controller) nodeHasOpenIncident(ctx context.Context, node string) (bool, error) {
+	incidents, err := c.store.ListIncidents(ctx, store.IncidentFilter{
+		Node:   node,
+		States: activeIncidentStates(),
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, inc := range incidents {
+		if !inc.DryRun {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// logDryRunTaintOnce says, once per node, that a mark was withheld because the
+// installation is in dry-run. Once per node rather than per transition: an
+// incident walks several states and the message is about the installation, not
+// about any one of them.
+func (c *Controller) logDryRunTaintOnce(inc *types.Incident) {
+	if !c.logOnce.first("dry-run-taint/" + inc.Target.Node) {
+		return
+	}
+	c.log.Info("not marking a node degraded: the installation is in dry-run, which changes nothing in the cluster",
+		"node", inc.Target.Node, "incident", inc.ID)
 }
 
 func (c *Controller) removeDegradedTaint(ctx context.Context, tainter platform.NodeTainter, node, why string) {

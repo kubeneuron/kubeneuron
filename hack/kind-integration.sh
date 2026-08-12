@@ -77,7 +77,14 @@ CEL_SCRIPT="$REPO_ROOT/test/integration/cel-admission.sh"
 ROTATION_SCRIPT="$REPO_ROOT/hack/tls-rotate.sh"
 EMERGENCY_TLS_SCRIPT="$REPO_ROOT/hack/tls-emergency-recover.sh"
 SMOKE_TEMPLATE="$REPO_ROOT/test/integration/operator-smoke.yaml.tmpl"
-IMAGE_DOCKERFILE="$REPO_ROOT/test/integration/Dockerfile"
+# The PRODUCTION Dockerfile, on purpose. This suite used to package the
+# host-built binaries into FROM scratch, which tested an image nobody ships:
+# the real one is distroless, carries nsenter and dcgmi that the agent shells
+# out to, and runs as a different user. Every property that divergence hides is
+# one this suite is otherwise well placed to catch — the reboot action failing
+# with exit 127 for want of nsenter was found on live hardware instead of here.
+# Set INTEGRATION_IMAGE_DOCKERFILE to the old file for a fast local loop.
+IMAGE_DOCKERFILE=${INTEGRATION_IMAGE_DOCKERFILE:-$REPO_ROOT/build/Dockerfile}
 
 KIND_BIN=${KIND_BIN:-kind}
 KUBECTL_BIN=${KUBECTL_BIN:-kubectl}
@@ -1207,6 +1214,162 @@ exercise_backup_restore() {
 	note "backup snapshot restored through the documented helper-pod procedure; $after incident(s) survived a wiped database"
 }
 
+# exercise_real_cordon_and_uncordon is the only phase in this suite that lets a
+# playbook actually change the cluster.
+#
+# Everything else runs in dry-run, which means the cordon path had never
+# cordoned anything and the cordon JANITOR — the code that gives a pilot its
+# capacity back after an incident resolves — had never executed outside unit
+# tests. That is the cheapest real-execution coverage available anywhere in the
+# project: a kind worker is disposable, cordon is reversible, and the assertion
+# is a single field on the Node object.
+#
+# The installation is switched to Enabled with confinement naming exactly one
+# worker, and switched back afterwards regardless of outcome.
+exercise_real_cordon_and_uncordon() {
+	note "exercising REAL cordon and the janitor's uncordon on one worker"
+	local pf_log="$work_dir/cordon-port-forward.log"
+	local pf_pid= public_port= target_node incident_id state deadline
+
+	# A worker, never the control plane: cordoning the control plane would
+	# disturb everything else running in this cluster.
+	target_node=$("$KUBECTL_BIN" get nodes \
+		-l '!node-role.kubernetes.io/control-plane' \
+		-o jsonpath='{.items[0].metadata.name}')
+	[[ -n $target_node ]] || die "no worker node for the cordon scenario"
+
+	local restore_done=0
+	restore_dry_run() {
+		((restore_done)) && return 0
+		restore_done=1
+		"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=merge \
+			-p '{"spec":{"safety":{"executionMode":"DryRun","destructiveExecution":null}}}' >/dev/null 2>&1 || true
+		"$KUBECTL_BIN" uncordon "$target_node" >/dev/null 2>&1 || true
+		"$KUBECTL_BIN" label node "$target_node" kubeneuron.io/cordon-test- >/dev/null 2>&1 || true
+	}
+	# Restore on ANY exit from here, including a die() in the middle: leaving a
+	# cluster armed for destructive execution would silently change what every
+	# later phase means.
+	trap restore_dry_run RETURN
+
+	"$KUBECTL_BIN" label node "$target_node" kubeneuron.io/cordon-test=yes --overwrite >/dev/null
+
+	"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=merge -p "$(cat <<-JSON
+		{"spec":{"safety":{"executionMode":"Enabled","destructiveExecution":{
+		  "nodeSelector":{"kubeneuron.io/cordon-test":"yes"},
+		  "acknowledgement":"I understand these nodes may be reset, rebooted, or destroyed"}}}}
+	JSON
+	)" >/dev/null
+	# Do NOT wait on a rollout here: the operator deliberately keeps the
+	# config-digest off the controller's pod template, so a safety change
+	# reloads in place and the Deployment never rolls. `rollout status` returns
+	# instantly and means nothing, which is what made the first three attempts
+	# at this phase trigger an incident against a controller still in dry-run —
+	# and dry_run is stamped on the incident at OPEN, so it stayed dry-run for
+	# life. Wait for the controller to say the mode took effect instead.
+
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+		"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
+	pf_pid=$!
+	deadline=$((SECONDS + 30))
+	while ((SECONDS < deadline)); do
+		public_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$pf_log")
+		[[ -n $public_port ]] && break
+		sleep 1
+	done
+	[[ -n $public_port ]] || die "cordon-phase port-forward allocated no local port"
+
+	cordon_api() {
+		curl --silent --show-error --noproxy '*' --max-time 10 \
+			-H 'Authorization: Bearer integration-operator-token' "$@"
+	}
+	node_unschedulable() {
+		"$KUBECTL_BIN" get node "$target_node" -o jsonpath='{.spec.unschedulable}' 2>/dev/null
+	}
+
+	[[ "$(node_unschedulable)" != "true" ]] || die "$target_node was already cordoned before this phase"
+
+	# The controller reports what it is ACTUALLY doing, not what was asked for.
+	# The chain from a patched CR to an armed controller runs through the
+	# operator, a ConfigMap, the kubelet's volume sync and the reload poll, and
+	# on this cluster it takes about a minute.
+	local mode deadline
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		mode=$(cordon_api "http://127.0.0.1:${public_port}/api/v1/runtime-config" |
+			"$JQ_BIN" -r '.execution_mode // empty')
+		[[ $mode == enabled ]] && break
+		sleep 3
+	done
+	[[ $mode == enabled ]] ||
+		die "the controller still reports execution_mode=${mode:-unknown} after patching the installation to Enabled"
+	note "the controller picked up executionMode: Enabled"
+
+	local trigger_code
+	trigger_code=$(cordon_api -H 'Content-Type: application/json' \
+		--data-binary "{\"node\":\"${target_node}\",\"class\":\"integration-cordon-test\",\"actor\":\"harness\"}" \
+		-o /dev/null -w '%{http_code}' \
+		"http://127.0.0.1:${public_port}/api/v1/incidents")
+	[[ $trigger_code == 202 ]] || die "cordon-test incident returned $trigger_code, want 202"
+
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		incident_id=$(cordon_api "http://127.0.0.1:${public_port}/api/v1/incidents?node=${target_node}" |
+			"$JQ_BIN" -r '[.[] | select(.class == "integration-cordon-test")][0].id // empty')
+		[[ -n $incident_id ]] && break
+		sleep 1
+	done
+	[[ -n $incident_id ]] || die "cordon-test incident never appeared"
+
+	# THE assertion: the node is really unschedulable, in the cluster.
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		[[ "$(node_unschedulable)" == "true" ]] && break
+		sleep 2
+	done
+	if [[ "$(node_unschedulable)" != "true" ]]; then
+		# Say WHY, not just that. A phase that reports only "it did not
+		# happen" costs a full 40-minute run per hypothesis, which is how
+		# three cycles went by on guesses read from the source.
+		echo "--- cordon phase diagnostics: the incident ---" >&2
+		cordon_api "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}" >&2 || true
+		echo >&2
+		echo "--- cordon phase diagnostics: the controller's runtime config ---" >&2
+		cordon_api "http://127.0.0.1:${public_port}/api/v1/runtime-config" >&2 || true
+		echo >&2
+		echo "--- cordon phase diagnostics: node labels as the cluster has them ---" >&2
+		"$KUBECTL_BIN" get node "$target_node" -o jsonpath='{.metadata.labels}' >&2 || true
+		echo >&2
+		echo "--- cordon phase diagnostics: controller log tail ---" >&2
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" logs \
+			deployment/"${ROOT_NAME}-controller" --tail=80 >&2 2>&1 || true
+		die "$target_node was never cordoned; the Cordon action does not reach the cluster"
+	fi
+	note "real cordon applied: $target_node is unschedulable"
+
+	# And the half nothing had ever run: resolving the incident must give the
+	# capacity back, without anybody uncordoning by hand.
+	local resolve_code
+	resolve_code=$(cordon_api -X POST -H 'Content-Type: application/json' \
+		--data-binary '{"actor":"harness","reason":"cordon phase complete"}' \
+		-o /dev/null -w '%{http_code}' \
+		"http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}/resolve")
+	[[ $resolve_code == 204 || $resolve_code == 202 ]] ||
+		die "resolving the cordon-test incident returned $resolve_code"
+
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		[[ "$(node_unschedulable)" != "true" ]] && break
+		sleep 2
+	done
+	[[ "$(node_unschedulable)" != "true" ]] ||
+		die "$target_node is still cordoned after its incident resolved; the janitor never gave the capacity back"
+
+	kill "$pf_pid" >/dev/null 2>&1 || true
+	wait "$pf_pid" >/dev/null 2>&1 || true
+	note "the cordon janitor uncordoned $target_node after its incident resolved"
+}
+
 exercise_controller_restart_mid_playbook() {
 	note "exercising a controller restart in the middle of an approval-gated playbook"
 	local pf_log="$work_dir/restart-port-forward.log"
@@ -1882,17 +2045,21 @@ note "running the 67-case CEL admission matrix"
 CEL_ALLOW_CLUSTER_MUTATION=1 KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" bash "$CEL_SCRIPT"
 
 if ((BUILD_IMAGES)); then
-	for binary in kubeneuron-operator kubeneuron-controller kubeneuron-agent; do
-		[[ -x $REPO_ROOT/bin/$binary ]] || \
-			die "missing static binary bin/$binary; run 'make build' first"
-	done
+	# The production Dockerfile compiles inside the build stage, so no
+	# bin/ artifacts are required; the legacy scratch file copies them in.
+	if [[ $IMAGE_DOCKERFILE == *test/integration/Dockerfile ]]; then
+		for binary in kubeneuron-operator kubeneuron-controller kubeneuron-agent; do
+			[[ -x $REPO_ROOT/bin/$binary ]] || \
+				die "missing static binary bin/$binary; run 'make build' first"
+		done
+	fi
 	for target_and_image in \
 		"operator=$OPERATOR_IMAGE" \
 		"controller=$CONTROLLER_IMAGE" \
 		"agent=$AGENT_IMAGE"; do
 		target=${target_and_image%%=*}
 		image=${target_and_image#*=}
-		note "packaging static integration target $target as $image"
+		note "building image target $target as $image from ${IMAGE_DOCKERFILE#"$REPO_ROOT"/}"
 		"$DOCKER_BIN" build --target "$target" --tag "$image" \
 			--file "$IMAGE_DOCKERFILE" "$REPO_ROOT"
 	done
@@ -2001,6 +2168,7 @@ exercise_agent_authentication
 wait_root_condition True RuntimeAvailable
 assert_runtime_ready
 exercise_controller_restart_mid_playbook
+exercise_real_cordon_and_uncordon
 exercise_backup_restore
 wait_root_condition True RuntimeAvailable
 assert_runtime_ready
@@ -2104,5 +2272,5 @@ if grep -Fq 'real NVML driver not wired yet; using fake driver (skeleton)' <<<"$
 	note "agent explicitly reports its fake NVML skeleton"
 fi
 
-	note "PASS: 73 CEL checks (including the destructive-execution admission gate), scoped RBAC, mTLS plus Pod/node identity rejection, authenticated public API and Alertmanager webhook, manual immutable/versioned routine TLS rotation, explicit dual-leaf emergency recovery, stale-state/plan rejection, failed-leaf and failed-contraction rollback, fresh registration proof, durable readiness loss/recovery, 11 owners, ownership collision/non-adoption/recovery, and acknowledged no-op reconciliation, plus a controller restart mid-playbook with durable approval state and no re-executed step"
-note "CPU-only boundary: this validates transport, the tested manual TLS-rotation and leaf-recovery contracts, and Kubernetes workload identity; it also proves operator-issued TLS reissuance for a deleted, operator-owned set; it does not validate expiry-driven renewal timing, emergency CA revocation, NVIDIA, NVML, DCGM, GPU actions, or remediation"
+	note "PASS: 73 CEL checks (including the destructive-execution admission gate), scoped RBAC, mTLS plus Pod/node identity rejection, authenticated public API and Alertmanager webhook, manual immutable/versioned routine TLS rotation, explicit dual-leaf emergency recovery, stale-state/plan rejection, failed-leaf and failed-contraction rollback, fresh registration proof, durable readiness loss/recovery, 11 owners, ownership collision/non-adoption/recovery, and acknowledged no-op reconciliation, plus a controller restart mid-playbook with durable approval state and no re-executed step, and a REAL cordon with the janitor's uncordon on an armed worker"
+note "CPU-only boundary: this validates transport, the tested manual TLS-rotation and leaf-recovery contracts, and Kubernetes workload identity; it also proves operator-issued TLS reissuance for a deleted, operator-owned set; it does not validate expiry-driven renewal timing, emergency CA revocation, NVIDIA, NVML, DCGM, or GPU actions. Remediation is now partly covered: one destructive controller-side step (Cordon) and its janitor run for real against an armed node"

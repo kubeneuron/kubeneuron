@@ -8,12 +8,15 @@ package controller
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
+	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/internal/store/sqlite"
@@ -332,9 +335,10 @@ func TestLateBindsIncidentOpenedBeforeItsPolicyExisted(t *testing.T) {
 }
 
 // The outcome metrics are the product's headline claim ("measures the
-// capacity it recovers"): they must fire exactly once, on the committed
-// halting transition, and distinguish an unattended recovery from one that
-// needed a human.
+// capacity it recovers"), so they carry three properties the review found
+// broken: they fire once per incident even across a park, they ignore
+// dry-run (the shipped default, which executes nothing), and they scale by
+// the node's accelerator inventory.
 func TestRecoveryOutcomeMetricsRecordedOnce(t *testing.T) {
 	pb := &playbook.Playbook{
 		Name: "observe", Target: "gpu",
@@ -352,30 +356,119 @@ func TestRecoveryOutcomeMetricsRecordedOnce(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	class := string(types.ClassFellOffBus)
+	before := testutil.ToFloat64(metrics.IncidentsRecovered.WithLabelValues(class, "true"))
+	beforeGPU := testutil.ToFloat64(metrics.DegradedGPUSeconds.WithLabelValues(class, "resolved"))
 
-	before := testutil.ToFloat64(metrics.IncidentsRecovered.WithLabelValues(string(types.ClassFellOffBus), "true"))
-	beforeGPU := testutil.ToFloat64(metrics.DegradedGPUSeconds.WithLabelValues(string(types.ClassFellOffBus), "resolved"))
-
-	// A node-scoped incident that never parked for approval: unattended.
-	inc := &types.Incident{
-		ID: "inc-outcome", Target: types.Target{Node: "n1"},
-		Class: types.ClassFellOffBus, State: types.StateObserving, DryRun: true, Playbook: "observe",
-		OpenedAt: time.Now().Add(-90 * time.Second), UpdatedAt: time.Now(), StateChangedAt: time.Now(),
+	open := func(id string, dryRun bool) *types.Incident {
+		inc := &types.Incident{
+			ID: id, Target: types.Target{Node: "n1"},
+			Class: types.ClassFellOffBus, State: types.StateObserving, DryRun: dryRun, Playbook: "observe",
+			OpenedAt: time.Now().Add(-90 * time.Second), UpdatedAt: time.Now(), StateChangedAt: time.Now(),
+		}
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		return inc
 	}
-	if err := st.CreateIncident(ctx, inc); err != nil {
+
+	// A dry-run incident resolves and must contribute NOTHING: it executed
+	// nothing, so it recovered nothing. Dry-run is the shipped default, so
+	// counting it would make a fresh install report fabricated capacity.
+	dry := open("inc-dry", true)
+	if err := c.transition(ctx, dry, types.StateResolved, "system", "resolve", "healthy", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.transition(ctx, inc, types.StateResolved, "system", "resolve", "healthy", nil); err != nil {
+	if got := testutil.ToFloat64(metrics.IncidentsRecovered.WithLabelValues(class, "true")); got != before {
+		t.Fatalf("dry-run moved the recovery counter to %v; it must contribute nothing", got)
+	}
+
+	// A real incident that PARKS for a human and is then resolved must be
+	// measured exactly once. NEEDS_HUMAN is halted but reversible, and
+	// measuring there charged the whole incident again at every park.
+	inc := open("inc-outcome", false)
+	if err := c.transition(ctx, inc, types.StateNeedsHuman, "system", "escalate", "needs a human", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := testutil.ToFloat64(metrics.IncidentsRecovered.WithLabelValues(class, "true")); got != before {
+		t.Fatalf("a park moved the recovery counter to %v; only a terminal state may record", got)
+	}
+	if err := c.transition(ctx, inc, types.StateResolved, "human", "manual-resolve", "fixed by hand", nil); err != nil {
 		t.Fatal(err)
 	}
 
-	if got := testutil.ToFloat64(metrics.IncidentsRecovered.WithLabelValues(string(types.ClassFellOffBus), "true")); got != before+1 {
-		t.Fatalf("unattended recovery counter = %v, want %v", got, before+1)
+	if got := testutil.ToFloat64(metrics.IncidentsRecovered.WithLabelValues(class, "true")); got != before+1 {
+		t.Fatalf("unattended recovery counter = %v, want %v — exactly one observation per incident", got, before+1)
 	}
-	// Two GPUs on the node, ~90s open: the degraded-capacity counter must
-	// scale with inventory, not count the incident once.
-	gained := testutil.ToFloat64(metrics.DegradedGPUSeconds.WithLabelValues(string(types.ClassFellOffBus), "resolved")) - beforeGPU
-	if gained < 150 {
-		t.Fatalf("degraded GPU-seconds gained = %v, want ~180 (2 GPUs x ~90s)", gained)
+	// Two GPUs on the node, ~90s open, charged ONCE: ~180 GPU-seconds. The
+	// park must not have charged a second interval.
+	gained := testutil.ToFloat64(metrics.DegradedGPUSeconds.WithLabelValues(class, "resolved")) - beforeGPU
+	if gained < 150 || gained > 260 {
+		t.Fatalf("degraded GPU-seconds gained = %v, want ~180 (2 GPUs x ~90s, counted once)", gained)
+	}
+}
+
+// TestDegradedGPUsCountsWhatTheCounterCannot is the other half of the recovery
+// story. kubeneuron_degraded_gpu_seconds_total is charged once, on the terminal
+// transition, so an incident parked in NEEDS_HUMAN contributes nothing to it —
+// permanently, and for exactly the population whose capacity is most lost.
+func TestDegradedGPUsCountsWhatTheCounterCannot(t *testing.T) {
+	st, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	c := New(st, st, nil, nil, nil, nil, nil, &notify.Log{Logger: log}, log)
+
+	// An 8-GPU node, so a node-scoped incident must expand.
+	gpus := make([]types.GPUInfo, 8)
+	for i := range gpus {
+		gpus[i] = types.GPUInfo{Index: i, UUID: "GPU-" + string(rune('a'+i))}
+	}
+	if err := st.UpsertNode(ctx, &types.Node{Name: "n1", UID: "n1-uid", GPUs: gpus}); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	mk := func(id string, state types.IncidentState, gpu string, class types.ProblemClass, dryRun bool) {
+		t.Helper()
+		inc := &types.Incident{
+			ID: id, Target: types.Target{Node: "n1", GPUUUID: gpu}, Class: class,
+			State: state, DryRun: dryRun,
+			OpenedAt: now, UpdatedAt: now, StateChangedAt: now,
+		}
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("parked", types.StateNeedsHuman, "GPU-a", types.ClassECCDBE, false)
+	mk("working", types.StateExecuting, "GPU-b", types.ClassFellOffBus, false)
+	mk("node-wide", types.StateEvaluating, "", types.ClassThermal, false)
+	mk("dry", types.StateNeedsHuman, "GPU-c", types.ClassNVLink, true)
+	mk("closed", types.StateResolved, "GPU-d", types.ClassGPULost, false)
+
+	got, err := c.DegradedGPUs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[metrics.DegradedKey]int{
+		{Class: string(types.ClassECCDBE), Owner: "human"}:          1,
+		{Class: string(types.ClassFellOffBus), Owner: "automation"}: 1,
+		{Class: string(types.ClassThermal), Owner: "automation"}:    8, // node-scoped expands
+	}
+	if len(got) != len(want) {
+		t.Fatalf("degraded = %+v, want %+v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("degraded[%+v] = %d, want %d", k, got[k], v)
+		}
+	}
+	// The parked incident is the whole point: it is invisible to the counter
+	// and must be visible here.
+	if got[metrics.DegradedKey{Class: string(types.ClassECCDBE), Owner: "human"}] == 0 {
+		t.Fatal("an incident parked in NEEDS_HUMAN is degrading the fleet and must be counted somewhere")
 	}
 }

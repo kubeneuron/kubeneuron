@@ -9,6 +9,38 @@ Names below assume the default root object name `kubeneuron` and namespace
 `kube-neuron`. Substitute yours consistently — the Secret names install.sh
 creates are all `<name>-…`.
 
+## 0. Is your fleet a good fit?
+
+Read this before the rest. Every fact below is stated somewhere in
+[the capability matrix](reference-capabilities.md), but nobody assembles them
+into the question you actually have, so here it is assembled.
+
+| Your fleet | Detection | Protection (cordon, drain, taint) | Repair |
+|---|---|---|---|
+| **NVIDIA on AWS** | proven on hardware (kernel XID) | proven | proven — but the validated repair is `ReplaceNode`, which throws the machine away |
+| **NVIDIA on GCP / Azure** | proven on hardware | proven | **the ladder tops out at a reboot rung that has never executed** — no cloud provider is implemented but AWS |
+| **NVIDIA on bare metal** | proven on hardware | proven | **your pilot would be the first real per-device GPU reset anywhere** |
+| **AMD, anywhere** | shipped, synthetic fixtures only — never run on AMD silicon | proven | detect, protect and close only: no arming, no reset |
+| **Intel** | none | — | — |
+
+Two rows deserve a sentence rather than a cell.
+
+**Bare metal is the sharp one.** In a cloud VM there is no PCI reset, so the
+agent refuses a per-device reset on measured evidence — a refusal that has
+been validated. On bare metal `/sys/bus/pci/devices/<addr>/reset` exists, the
+capability is granted, and that code path runs for the first time in your
+cluster. Keep `executionMode: DryRun` longer than you otherwise would, and
+tell us before you arm it.
+
+**AMD detects but does not repair.** Faults are recognised, classified, and
+the node is cordoned and drained; the incident then resolves on the agent
+heartbeat rather than on a device attestation, which the controller logs as
+reduced verification depth. Nothing arms, and no reset exists. That is a
+useful product — it is not the whole one.
+
+If you are on NVIDIA/AWS, the rest of this page is an hour. If you are not,
+say so when you get in touch: which cloud you run decides what we build next.
+
 ## 1. Dependencies, before KubeNeuron
 
 Install the pinned observability + GPU profile:
@@ -124,7 +156,13 @@ day one: `KubeNeuronAgentNeverAcked`, `KubeNeuronIncidentExpired`,
 ## 9. Stay in DryRun until you have watched it decide
 
 `executionMode: DryRun` is the default and it executes nothing: every step
-is logged and audited as "would execute". Run the pilot here first. When
+is logged and audited as "would execute". Run the pilot here first.
+
+While you are here, `kubeneuronctl report` prints a `SIMULATED` section: how
+many incidents the ladder would have carried to resolution, how many without
+asking anybody, and the GPU-hours involved. The degraded hours are real; the
+recovery is not. That section is the argument for phase two — take it to
+whoever pays for the fleet before you enable enforcement, not after. When
 you are ready for real remediation, confine it explicitly — see
 [install.md](install.md#enabling-real-execution) for
 `spec.safety.destructiveExecution` (a non-empty node selector plus the exact

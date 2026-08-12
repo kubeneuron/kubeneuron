@@ -107,13 +107,45 @@ func stepIsIdleGuard(step *playbook.Step) bool {
 	return ok && def.IdleGuard
 }
 
-// recordIdleRefusal counts an idle guard that refused. It is called on the
-// step-failure path because that is what an idle guard's refusal looks like
-// from the executor: agent.idle_check returns an error, the ladder escalates,
-// and the reset the guard stood in front of never happens. Charging that to
-// "steps failed" alone loses the fact that the failure WAS the protection.
-func (c *Controller) recordIdleRefusal(inc *types.Incident, step *playbook.Step) {
-	if inc.DryRun || !stepIsIdleGuard(step) {
+// idleGuardStopped reports whether a failed step was an idle guard at all —
+// the CONTROL decision, deliberately separate from the metric below.
+//
+// Any failure of a guard means the guard did not clear the device. Busy,
+// missing nvidia-smi, wedged driver, timeout, a transport error with no result
+// at all: in every one of them we do NOT know the device is idle, and the rung
+// the guard stands in front of is by construction more destructive than the
+// guard. So the ladder stops, always.
+//
+// Basing this on the refusal CODE instead was a fail-open across the ordinary
+// upgrade window: docs/upgrade.md mandates controller-first, so every
+// not-yet-upgraded agent sends no code, and a new controller read that absence
+// as "not a refusal" and escalated — reaching for a bigger hammer on a device
+// a guard had just failed to clear. Absence of evidence must not choose the
+// destructive branch.
+func idleGuardStopped(step *playbook.Step) bool {
+	return stepIsIdleGuard(step)
+}
+
+// idleGuardRefused reports whether a failed idle-guard step failed because the
+// device was BUSY, as opposed to because the probe could not run.
+//
+// The distinction is the whole value of the metric. nvidia-smi missing, a
+// wedged driver, and a timed-out probe all fail the same step and all fail
+// closed, but none of them is evidence that a workload was spared. The agent
+// says which happened in ActionResult.Refusal; the prose in Error is never
+// parsed, and an absent field (an agent older than the field, a platform step,
+// a transport error with no result at all) counts as no evidence rather than
+// as a refusal. Under-counting protection is the honest direction: this metric
+// is a claim about value delivered.
+func idleGuardRefused(step *playbook.Step, result *types.ActionResult) bool {
+	return stepIsIdleGuard(step) && result != nil && result.Refusal == types.RefusalNotIdle
+}
+
+// recordIdleRefusal counts an idle guard that refused because the device was
+// still working. Charging that to "steps failed" alone loses the fact that the
+// failure WAS the protection.
+func (c *Controller) recordIdleRefusal(inc *types.Incident, step *playbook.Step, result *types.ActionResult) {
+	if inc.DryRun || !idleGuardRefused(step, result) {
 		return
 	}
 	metrics.DestructiveStepsDeferred.WithLabelValues(metrics.DeferNotIdle).Inc()

@@ -148,6 +148,12 @@ func SignalFromAgentEvent(ev types.AgentEvent) (types.Signal, bool) {
 		Severity: info.Severity,
 		Source:   types.SourceAgentEvent,
 		Evidence: map[string]string{
+			// An XID is an NVIDIA-native encoding — there is no such thing as
+			// an AMD XID — so the vendor is not an inference here, it is what
+			// the encoding means. Declaring it keeps incidents opened by the
+			// oldest and most common detection path from being the ones with
+			// no vendor on them.
+			"vendor":   string(types.AcceleratorVendorNVIDIA),
 			"xid":      strconv.Itoa(ev.XID),
 			"xid_name": info.Name,
 			"raw":      ev.Raw,

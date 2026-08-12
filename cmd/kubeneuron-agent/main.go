@@ -115,6 +115,16 @@ func main() {
 			0,
 			"how many new corrected AMD ECC errors must accumulate before the rate fault reports again; 0 uses the built-in conservative default",
 		)
+		amdXGMILinkMinDelta = flag.Uint64(
+			"amd-xgmi-link-min-delta",
+			0,
+			"how many new AMD XGMI link errors must accumulate before the fabric fault reports again; 0 uses the built-in default. The counter also moves on corrected link retries, so reporting every increment pages on a healthy fabric",
+		)
+		amdBadPageThreshold = flag.Uint64(
+			"amd-bad-page-threshold",
+			0,
+			"retired-page count at or above which an AMD GPU is reported as OUT OF SPARE MEMORY (a replace-the-device condition) rather than as having retired a page successfully; 0 (default) never makes that claim, because the bad-page budget is SKU-specific",
+		)
 		showVersion = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -196,6 +206,8 @@ func main() {
 			ROCmSMIPath:             *rocmSMIPath,
 			ThermalCriticalC:        *amdThermalCriticalC,
 			CorrectableRateMinDelta: *amdCorrectableRateMinDelta,
+			XGMILinkMinDelta:        *amdXGMILinkMinDelta,
+			BadPageThreshold:        *amdBadPageThreshold,
 		},
 	}, driver, log)
 	if err != nil {

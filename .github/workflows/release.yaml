@@ -154,8 +154,24 @@ jobs:
             echo "tag-pinned image reference in the install manifest" >&2
             exit 1
           fi
-          cp deploy/install.sh "dist/install-${version}.sh"
-          cp deploy/install.sh dist/install.sh
+          # Stamp the published digests into the installer. Without this the
+          # manifest above pins the operator by digest while install.sh
+          # resolves the controller and the agent — the two components that
+          # actually run the fleet — as moveable tags, so "digest-pinned
+          # install" was true of one image out of three.
+          controller_digest="$(jq -r .controller <<<"$DIGESTS")"
+          agent_digest="$(jq -r .agent <<<"$DIGESTS")"
+          [[ "$controller_digest" == sha256:* && "$agent_digest" == sha256:* ]]
+          sed -E \
+            -e "s|^RELEASE_STAMPED=.*|RELEASE_STAMPED=\${RELEASE_STAMPED:-${version}}|" \
+            -e "s|^CONTROLLER_DIGEST=.*|CONTROLLER_DIGEST=\${CONTROLLER_DIGEST:-${controller_digest}}|" \
+            -e "s|^AGENT_DIGEST=.*|AGENT_DIGEST=\${AGENT_DIGEST:-${agent_digest}}|" \
+            deploy/install.sh > "dist/install-${version}.sh"
+          grep -q "RELEASE_STAMPED:-${version}" "dist/install-${version}.sh"
+          grep -q "CONTROLLER_DIGEST:-${controller_digest}" "dist/install-${version}.sh"
+          grep -q "AGENT_DIGEST:-${agent_digest}" "dist/install-${version}.sh"
+          bash -n "dist/install-${version}.sh"
+          cp "dist/install-${version}.sh" dist/install.sh
 
       - uses: actions/upload-artifact@v4
         with:
@@ -197,15 +213,65 @@ jobs:
           path: dist/
           retention-days: 1
 
+
+  # No tag ships without an upgrade from the release before it, rehearsed in
+  # the documented order on a real cluster. hack/kind-upgrade.sh has caught
+  # what neither unit tests nor the integration suite can see: a store
+  # migration that an existing installation cannot cross, and a CRD whose new
+  # fields the upgraded API does not actually serve.
+  upgrade-rehearsal:
+    needs: [gates]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+    env:
+      BASELINE: ${{ vars.UPGRADE_BASELINE || 'v0.2.2' }}
+      RELEASE_REPO: ${{ github.repository }}
+      CLUSTER_NAME: kubeneuron-upgrade-ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.12"
+          cache: true
+
+      - name: Install kind and kubectl
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 -o /usr/local/bin/kind \
+            "https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-amd64"
+          curl --fail --location --retry 3 -o /usr/local/bin/kubectl \
+            "https://dl.k8s.io/release/v1.33.12/bin/linux/amd64/kubectl"
+          chmod 0755 /usr/local/bin/kind /usr/local/bin/kubectl
+
+      - name: Raise inotify limits for the multi-node cluster
+        run: |
+          sudo sysctl fs.inotify.max_user_instances=512 \
+            fs.inotify.max_user_watches=524288
+
+      - name: Rehearse the upgrade from the previous release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash hack/kind-upgrade.sh
+
   release:
     if: github.repository == 'kubeneuron/kubeneuron'
-    needs: [images, manifest, ctl]
+    needs: [images, manifest, ctl, upgrade-rehearsal]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
       id-token: write # cosign sign-blob of the checksums file
     steps:
+      # The notes derive the store migration heads from the tree, so this job
+      # needs the source as well as the artifacts. Hardcoding them rotted the
+      # moment a migration landed, which is exactly the class of drift the
+      # docs lint exists to catch — and the lint cannot see workflow YAML.
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           # ONLY this workflow's own build artifacts. Without the pattern
@@ -250,11 +316,21 @@ jobs:
             echo "Install manifest and installer pin these digests; verify any"
             echo "image with \`cosign verify\` against the GitHub OIDC issuer."
             echo
-            echo "Store migration heads: sqlite 0018 / postgres 0009. A park"
+            head_of() {
+              local f head=""
+              for f in "$1"/[0-9][0-9][0-9][0-9]_*.sql; do
+                f=$(basename "$f"); head=${f:0:4}
+              done
+              printf '%s' "$head"
+            }
+            sqlite_head=$(head_of internal/store/sqlite/migrations)
+            pg_head=$(head_of internal/store/postgres/migrations)
+            echo "Store migration heads: sqlite ${sqlite_head} / postgres ${pg_head}. A park"
             echo "pending across the upgrade needs one re-approval."
           } > notes.md
 
       - name: Create GitHub release
+        id: publish
         uses: softprops/action-gh-release@v2
         with:
           draft: false
@@ -265,3 +341,21 @@ jobs:
           generate_release_notes: true
           body_path: notes.md
           files: dist/*
+
+  # The only job that looks at the release the way a stranger does: it
+  # downloads the published assets and checks what install.md promises about
+  # them. Everything upstream verifies inputs; three release candidates each
+  # found a defect that only the finished artifact could show.
+  release-verify:
+    needs: [release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sigstore/cosign-installer@v3
+      - name: Verify the published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash hack/verify-release.sh "${GITHUB_REF_NAME}" "${GITHUB_REPOSITORY}"

@@ -35,6 +35,8 @@ const (
 	codeAMDPCIeError    = "pcie-error"
 	amdRefusalNoDevice  = "amdgpu fault line carries no PCI device address; refusing to attribute it to a GPU"
 	amdRefusalRetireBad = "amdgpu bad-page line reports a FAILED reservation; refusing to record it as a successful retirement"
+	amdRefusalSoftRecov = "amdgpu ring timeout was soft-recovered by the driver; no reset happened, so this is not a hang to remediate"
+	amdRefusalRASClear  = "amdgpu RAS line reports NO uncorrectable errors; refusing to read an all-clear as a fault"
 )
 
 var (
@@ -45,6 +47,13 @@ var (
 	// A GPU engine (ring) stopped making progress: the kernel-confirmed hang
 	// that precedes an amdgpu-initiated GPU reset.
 	amdgpuRingTimeoutRe = regexp.MustCompile(`(?i)\bring\s+(\S+)\s+timeout\b`)
+	// ...unless the driver recovered the ring in place. amdgpu prints
+	// "ring sdma0 timeout, but soft recovered" when it killed the offending
+	// job and the engine kept running: no reset, no lost device, nothing for
+	// a playbook to fix. Cordoning a healthy node over a soft recovery is a
+	// self-inflicted outage, and these are common enough under a buggy kernel
+	// to do it repeatedly.
+	amdgpuSoftRecoveredRe = regexp.MustCompile(`(?i)\bsoft\s+recover(?:ed|y)\b`)
 
 	// The RAS counter report the driver prints per error block. The COUNT is
 	// load-bearing: amdgpu prints this line with a zero count as a routine
@@ -53,6 +62,12 @@ var (
 	amdgpuRASCountRe = regexp.MustCompile(`(?i)\b(\d+)\s+uncorrectable\s+hardware\s+errors?\s+detected(?:\s+in\s+(\S+)\s+block)?`)
 	// The countless spelling, evaluated only when no count was printed.
 	amdgpuRASEventRe = regexp.MustCompile(`(?i)\buncorrectable\s+(?:hardware\s+)?error(?:s)?\s+detected\b`)
+	// The countless spelling has an all-clear twin: "no uncorrectable
+	// hardware errors detected". The substring the fault pattern looks for
+	// sits inside it verbatim, so without this guard every clean RAS poll
+	// opens an ECC incident on a healthy GPU — the loudest possible false
+	// positive, on the class that ends in node replacement.
+	amdgpuRASNegatedRe = regexp.MustCompile(`(?i)\bno\s+(?:new\s+)?(?:uncorrectable|correctable)\b`)
 
 	// Bad-page reservation: AMD's page retirement, the peer of an NVIDIA row
 	// remap. "reserved"/"retired" is the mechanism succeeding.
@@ -110,6 +125,9 @@ func parseAMDGPU(msg string) (Event, bool, string) {
 // first; the first match wins, so one kernel line never produces two faults.
 func amdgpuFault(msg string) (code string, attrs map[string]string, refusal string) {
 	if m := amdgpuRingTimeoutRe.FindStringSubmatch(msg); m != nil {
+		if amdgpuSoftRecoveredRe.MatchString(msg) {
+			return "", nil, amdRefusalSoftRecov
+		}
 		return codeAMDRingTimeout, map[string]string{"ring": strings.Trim(m[1], ",")}, ""
 	}
 	if m := amdgpuRASCountRe.FindStringSubmatch(msg); m != nil {
@@ -128,6 +146,9 @@ func amdgpuFault(msg string) (code string, attrs map[string]string, refusal stri
 		return codeAMDECCUncorr, attrs, ""
 	}
 	if amdgpuRASEventRe.MatchString(msg) {
+		if amdgpuRASNegatedRe.MatchString(msg) {
+			return "", nil, amdRefusalRASClear
+		}
 		return codeAMDECCUncorr, map[string]string{"uncorrectable_errors": "unspecified"}, ""
 	}
 	if amdgpuBadPageRe.MatchString(msg) {

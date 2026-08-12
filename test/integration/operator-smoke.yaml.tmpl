@@ -28,6 +28,33 @@ spec:
       action: Reboot
       approval: Required
 ---
+# Cordon ONLY, and no approval. The real-execution phase drives this one with
+# executionMode temporarily switched to Enabled, so every rung it contains
+# actually runs against the cluster — which is the point: nothing else in this
+# suite has ever cordoned a node for real, and the janitor's uncordon path had
+# never executed outside unit tests.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: integration-smoke-cordon-only
+spec:
+  kubeNeuronRef: integration-smoke
+  target: Node
+  steps:
+    - name: cordon
+      action: Cordon
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: integration-cordon-policy
+spec:
+  kubeNeuronRef: integration-smoke
+  priority: 3
+  match:
+    class: integration-cordon-test
+  playbookRef: integration-smoke-cordon-only
+---
 apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:

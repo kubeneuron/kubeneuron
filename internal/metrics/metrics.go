@@ -96,14 +96,25 @@ var (
 		Help: "Incidents that reached RESOLVED, by class and whether they needed a human decision.",
 	}, []string{"class", "unattended"})
 
-	// DegradedGPUSeconds accumulates GPU-seconds spent under an open
-	// incident, labelled by how that incident ended. It is deliberately NOT
-	// called "unavailable": a degraded GPU may still have been serving.
+	// DegradedGPUSeconds accumulates GPU-seconds spent under an incident that
+	// REACHED A TERMINAL STATE, labelled by how it ended. It is deliberately
+	// NOT called "unavailable": a degraded GPU may still have been serving.
 	// Divide by 3600 for GPU-hours; the outcome="resolved" share is the
 	// capacity remediation brought back.
+	//
+	// "Terminal" is load-bearing and is the one thing to understand before
+	// reading this series. It is recorded exactly once, when the incident
+	// resolves or expires, so a park/unpark cycle cannot charge the same time
+	// twice — and so an incident sitting in NEEDS_HUMAN contributes NOTHING
+	// here until somebody closes it. That population is the fleet's worst
+	// capacity loss, so read this counter beside kubeneuron_degraded_gpus,
+	// which is the scrape-time gauge of what is degraded right now, including
+	// everything a human still owns. `kubeneuronctl report` answers the
+	// windowed version of the same question from the incident store and does
+	// charge parked incidents.
 	DegradedGPUSeconds = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "kubeneuron_degraded_gpu_seconds_total",
-		Help: "GPU-seconds spent under an open incident, by class and outcome (resolved = returned to service).",
+		Help: "GPU-seconds charged when an incident reached a terminal state, by class and outcome (resolved = returned to service). Parked incidents are counted by kubeneuron_degraded_gpus until they close.",
 	}, []string{"class", "outcome"})
 
 	// --- Protection: what the fleet did NOT lose ---------------------------
@@ -118,14 +129,23 @@ var (
 	// disruptions that did happen.
 
 	// WorkloadsEvicted counts GPU workloads moved off a node ahead of a
-	// destructive step, by node and by the problem class that caused it.
-	// reason is the incident's class rather than the step name: "which faults
-	// cost us evictions" is the question a capacity owner asks, and the step
-	// is always the same one.
+	// destructive step, by the problem class that caused it. reason is the
+	// incident's class rather than the step name: "which faults cost us
+	// evictions" is the question a capacity owner asks, and the step is always
+	// the same one.
+	//
+	// There is deliberately no node label. Node names are not a bounded set in
+	// a KubeNeuron fleet — this control plane REPLACES nodes, so every
+	// ReplaceNode mints a name that never appears again, and a cluster
+	// autoscaler mints more. A per-node series would grow for the life of the
+	// process and never shrink, which is the classic way a metric takes the
+	// monitoring stack down at the moment the fleet is busiest. Which node was
+	// evicted is recorded where it can be queried without unbounded retention
+	// cost: the incident record and its audit trail.
 	WorkloadsEvicted = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "kubeneuron_workloads_evicted_total",
-		Help: "GPU workloads evicted ahead of a destructive step, by node and problem class.",
-	}, []string{"node", "reason"})
+		Help: "GPU workloads evicted ahead of a destructive step, by problem class.",
+	}, []string{"reason"})
 
 	// DestructiveStepsDeferred counts destructive steps that did NOT run, by
 	// why. Use the Defer* constants below — the label set is closed, so a new
@@ -208,7 +228,11 @@ var (
 const (
 	// DeferNotIdle: an idle guard (agent.idle_check / agent.wait_idle) refused
 	// because the device was still in use, so the destructive rung it guards
-	// never ran.
+	// never ran. Counted only when the agent said so in
+	// types.ActionResult.Refusal — an idle probe that could not run at all
+	// (missing nvidia-smi, wedged driver, timeout) fails the same step but is
+	// not evidence that any workload was spared, and is deliberately absent
+	// from this series.
 	DeferNotIdle = "not_idle"
 	// DeferDeviceHolders: processes hold the GPU that KubeNeuron cannot
 	// release, so a reset playbook is refused before its first disruptive step.
@@ -303,6 +327,56 @@ func RegisterIncidentStates(count func() map[types.IncidentState]int) {
 		),
 		count: count,
 	})
+}
+
+// DegradedGPUsGauge is the scrape-time companion to
+// DegradedGPUSeconds: how many accelerators are under a non-terminal incident
+// right now, split by problem class and by whether automation is still working
+// the incident or a human owns it.
+//
+// It exists because DegradedGPUSeconds is recorded once, on the terminal
+// transition, so an incident parked in NEEDS_HUMAN contributes NOTHING to it —
+// permanently, and for exactly the population that matters most, the ones
+// automation could not recover. `kubeneuronctl report` deliberately keeps
+// charging those incidents, so the two answers disagreed. Integrating this
+// gauge over time (`sum_over_time`) closes the gap without double-counting the
+// counter, which is the idiomatic split: a counter for what finished, a gauge
+// for what is still happening.
+type degradedGPUCollector struct {
+	desc  *prometheus.Desc
+	count func() map[DegradedKey]int
+}
+
+// DegradedKey identifies one currently-degraded population.
+type DegradedKey struct {
+	Class string
+	// Owner is "automation" while the ladder is still working the incident,
+	// and "human" once it has been handed over. The distinction is the point:
+	// capacity sitting in NEEDS_HUMAN is lost until somebody acts, and that is
+	// a different operational fact from capacity mid-remediation.
+	Owner string
+}
+
+// RegisterDegradedGPUs installs the currently-degraded gauge; count is called
+// on every scrape and must be cheap.
+func RegisterDegradedGPUs(count func() map[DegradedKey]int) {
+	prometheus.MustRegister(&degradedGPUCollector{
+		desc: prometheus.NewDesc(
+			"kubeneuron_degraded_gpus",
+			"Accelerators currently under a non-terminal incident, by problem class and who owns it.",
+			[]string{"class", "owner"}, nil,
+		),
+		count: count,
+	})
+}
+
+func (c *degradedGPUCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
+
+func (c *degradedGPUCollector) Collect(ch chan<- prometheus.Metric) {
+	for key, n := range c.count() {
+		ch <- prometheus.MustNewConstMetric(
+			c.desc, prometheus.GaugeValue, float64(n), key.Class, key.Owner)
+	}
 }
 
 func (c *stateCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }

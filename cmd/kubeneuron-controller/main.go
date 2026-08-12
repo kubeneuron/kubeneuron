@@ -423,6 +423,14 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	} else {
 		log.Warn("embedded web panel unavailable", "err", err)
 	}
+	metrics.RegisterDegradedGPUs(func() map[metrics.DegradedKey]int {
+		degraded, err := ctrl.DegradedGPUs(context.Background())
+		if err != nil {
+			log.Warn("degraded-GPU metric collection failed", "err", err)
+			return nil
+		}
+		return degraded
+	})
 	metrics.RegisterIncidentStates(func() map[types.IncidentState]int {
 		counts, err := st.CountIncidentsByState(context.Background())
 		if err != nil {

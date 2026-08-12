@@ -333,3 +333,106 @@ func TestDegradedTaintValueIsAlwaysAcceptable(t *testing.T) {
 		}
 	}
 }
+
+// TestDryRunNeverWritesATaint holds the promise dry-run makes. A NoSchedule
+// mark is a cluster-wide scheduling change affecting every workload, not only
+// the ones KubeNeuron would remediate, so an installation told to change
+// nothing must not write one.
+func TestDryRunNeverWritesATaint(t *testing.T) {
+	c, st, p := taintFixture(t, DegradedTaintPolicy{Enabled: true, Effect: "NoSchedule"})
+	inc := openIncident(t, st, "inc-dry", "n1", types.StateOpen)
+	inc.DryRun = true
+	if err := st.UpdateIncident(context.Background(), inc); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.transition(context.Background(), inc, types.StateObserving, "system", "observe", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if effect, ok := p.marked("n1"); ok {
+		t.Fatalf("dry-run wrote a real %s taint on n1; dry-run promises it changes nothing", effect)
+	}
+
+	// The janitor must not put it back either.
+	c.reconcileDegradedTaints(context.Background())
+	if _, ok := p.marked("n1"); ok {
+		t.Fatal("the janitor marked a node whose only incident is dry-run")
+	}
+}
+
+// TestUnparkedIncidentIsMarkedAgain covers the transition halting removed the
+// mark on: NEEDS_HUMAN -> EVALUATING is legal, and an incident somebody sent
+// back for another attempt is being actively worked. Leaving it unmarked
+// re-opens the exact window the feature closes, at the worst moment.
+func TestUnparkedIncidentIsMarkedAgain(t *testing.T) {
+	c, st, p := taintFixture(t, DegradedTaintPolicy{Enabled: true, Effect: "PreferNoSchedule"})
+	ctx := context.Background()
+	inc := openIncident(t, st, "inc-park", "n1", types.StateOpen)
+
+	if err := c.transition(ctx, inc, types.StateEvaluating, "system", "evaluate", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p.marked("n1"); !ok {
+		t.Fatal("precondition: the node should be marked while the incident is worked")
+	}
+	if err := c.transition(ctx, inc, types.StateNeedsHuman, "system", "park", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p.marked("n1"); ok {
+		t.Fatal("precondition: halting removes the mark")
+	}
+
+	if err := c.transition(ctx, inc, types.StateEvaluating, "operator", "unpark", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p.marked("n1"); !ok {
+		t.Fatal("an unparked incident left the node unmarked; the scheduler is free to pile new work " +
+			"onto failing hardware exactly while somebody is working the incident")
+	}
+}
+
+// staleListStore serves the janitor's FLEET-WIDE incident list from a snapshot
+// taken before an incident opened, while per-node reads see the truth. That is
+// exactly the shape of the janitor's two-read race: the marked-node list and
+// the incident list are taken at different moments, and anything that opens in
+// the gap is invisible to the second one.
+type staleListStore struct {
+	store.Store
+}
+
+func (s staleListStore) ListIncidents(ctx context.Context, f store.IncidentFilter) ([]*types.Incident, error) {
+	if f.Node == "" {
+		return nil, nil // the stale fleet-wide snapshot
+	}
+	return s.Store.ListIncidents(ctx, f)
+}
+
+// TestJanitorConfirmsBeforeRemovingAMark covers the two-read race. Removing a
+// mark on a stale read returns a node to the scheduler's rotation while a
+// fault is actively being worked on it — the one direction of this janitor's
+// error that costs anybody anything.
+func TestJanitorConfirmsBeforeRemovingAMark(t *testing.T) {
+	c, st, p := taintFixture(t, DegradedTaintPolicy{Enabled: true, Effect: "NoSchedule"})
+	ctx := context.Background()
+	p.mark("n1", "NoSchedule")
+	openIncident(t, st, "inc-late", "n1", types.StateEvaluating)
+	c.store = staleListStore{Store: st}
+
+	c.reconcileDegradedTaints(ctx)
+	if _, ok := p.marked("n1"); !ok {
+		t.Fatal("the janitor removed the mark from a node under an open incident, " +
+			"trusting a fleet-wide list taken before that incident opened")
+	}
+}
+
+// The confirming read must not resurrect the case the janitor exists for: a
+// mark with genuinely nothing behind it still comes off.
+func TestJanitorStillClearsATrulyAbandonedMark(t *testing.T) {
+	c, _, p := taintFixture(t, DegradedTaintPolicy{Enabled: true, Effect: "NoSchedule"})
+	p.mark("ghost", "NoSchedule")
+
+	c.reconcileDegradedTaints(context.Background())
+	if _, ok := p.marked("ghost"); ok {
+		t.Fatal("a mark with no incident behind it survived the janitor")
+	}
+}

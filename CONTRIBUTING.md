@@ -33,7 +33,48 @@ The build outputs are `kubeneuron-operator`, `kubeneuron-controller`,
 
 Local container images for the four binaries can be built with `make docker`
 (see `build/Dockerfile`). The end-to-end dry-run behavior is exercised by
-`go test ./test/e2e/...` and the kind integration harness.
+`go test ./test/e2e/...` and the kind integration harness. The kind harness
+builds that same production `build/Dockerfile` rather than a stand-in, because
+the properties worth catching there — the distroless image starting at all,
+the agent finding the `nsenter` and `dcgmi` it shells out to — belong to the
+artifact and not to the code. Set `INTEGRATION_IMAGE_DOCKERFILE` to
+`test/integration/Dockerfile` for a faster local loop, knowing it tests an
+image nobody deploys.
+
+Gates come in two tiers, and the split is deliberate: bundling a four-second
+check with a forty-minute one is how the four-second check stops being run.
+
+```sh
+make gates        # minutes: generate, build, lint, race tests, docs
+make gates-full   # + Docker and a cluster: published images, kind integration
+```
+
+Run `make gates` before every commit. `make lint` inside it also runs
+actionlint (and, through it, shellcheck on every inline workflow script),
+pinned to the version CI uses — workflow YAML is the one place a defect cannot
+be found by running the code.
+
+Two checks stay outside both tiers because each needs something neither has:
+
+```sh
+bash hack/verify-release.sh vX.Y.Z   # a PUBLISHED release, downloaded and checked
+make test-integration-kind           # also reachable directly
+```
+
+`verify-release` runs after a tag is published, against the release itself.
+The PostgreSQL conformance suite needs a running server:
+
+```sh
+docker start kubeneuron-pg-test
+KUBENEURON_TEST_POSTGRES_DSN='postgres://postgres:test@127.0.0.1:15432/kubeneuron?sslmode=disable' \
+  go test ./internal/store/...
+docker stop kubeneuron-pg-test
+```
+
+`make lint` also runs actionlint (and, through it, shellcheck on every inline
+workflow script), pinned to the version CI uses. Workflow YAML is the one
+place where a defect cannot be found by running the code, so it is worth
+catching before the push rather than in the run it breaks.
 
 ## Kubernetes API and operator changes
 

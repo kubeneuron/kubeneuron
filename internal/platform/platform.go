@@ -183,6 +183,24 @@ type NodePresence interface {
 	NodeExists(ctx context.Context, node string) (bool, error)
 }
 
+// NodeLabeler is implemented by platforms that can read one exact node's
+// labels WITHOUT going through the GPU-filtered inventory.
+//
+// It exists for the same reason NodePresence does, and the omission was the
+// same mistake in a more dangerous place. Destructive blast-radius confinement
+// asks "is this node inside spec.safety.destructiveExecution.nodeSelector?",
+// and answering it from ListNodes means a node that has dropped out of the GPU
+// inventory — a device plugin restarting, a driver reloading, exactly the
+// conditions under which remediation is wanted — becomes UNRESOLVABLE. Every
+// destructive step on it then holds forever, leaving the machine cordoned and
+// drained with no path forward and nobody paged.
+//
+// A node that is not found is (nil, false, nil): a resolved absence, not an
+// error, so the caller can distinguish "gone" from "cannot tell right now".
+type NodeLabeler interface {
+	NodeLabels(ctx context.Context, node string) (labels map[string]string, found bool, err error)
+}
+
 // AcceleratorStackController is implemented by platforms that can stop and
 // restart the vendor's own monitoring stack on one node.
 //

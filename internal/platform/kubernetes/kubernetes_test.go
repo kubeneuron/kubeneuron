@@ -22,7 +22,7 @@ import (
 func gpuNode(name string, gpus string) *corev1.Node {
 	n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}}
 	if gpus != "" {
-		n.Status.Capacity = corev1.ResourceList{gpuResource: resource.MustParse(gpus)}
+		n.Status.Capacity = corev1.ResourceList{"nvidia.com/gpu": resource.MustParse(gpus)}
 	}
 	return n
 }
@@ -277,7 +277,7 @@ func TestNodeWorkloadsReportsGPUUsage(t *testing.T) {
 	gpuPod.Spec.Containers = []corev1.Container{{
 		Name: "main",
 		Resources: corev1.ResourceRequirements{
-			Limits: corev1.ResourceList{gpuResource: resource.MustParse("1")},
+			Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
 		},
 	}}
 	client := fake.NewSimpleClientset(gpuPod, pod("web", controllerRef("ReplicaSet"), corev1.PodRunning, false))
@@ -323,5 +323,77 @@ func TestAcceleratorResourceMatchingIsVendorNeutral(t *testing.T) {
 		if isAcceleratorResource(corev1.ResourceName(name)) {
 			t.Errorf("%s must not be treated as an accelerator", name)
 		}
+	}
+}
+
+// TestFleetMembershipRejectsLookalikeResources pins the blast-radius side of
+// the accelerator matcher. A resource that merely has a GPU-ish shape must
+// not admit a machine to the fleet: everything in the fleet is a machine a
+// playbook may cordon, drain and reboot.
+func TestFleetMembershipRejectsLookalikeResources(t *testing.T) {
+	cases := []struct {
+		name     string
+		capacity corev1.ResourceList
+		want     bool
+		wantGPUs int
+	}{
+		{"nvidia whole device", corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("8")}, true, 8},
+		{"amd whole device", corev1.ResourceList{"amd.com/gpu": resource.MustParse("4")}, true, 4},
+		{"intel family", corev1.ResourceList{"gpu.intel.com/i915": resource.MustParse("2")}, true, 2},
+		// A partition count is not a device count: reporting it would put a
+		// fabricated capacity number in front of whoever pays for the fleet.
+		// Zero means unknown until the agent registers the real devices.
+		{"mig partitions only", corev1.ResourceList{"nvidia.com/mig-1g.5gb": resource.MustParse("7")}, true, 0},
+		{
+			"mixed strategy counts silicon once",
+			corev1.ResourceList{
+				"nvidia.com/gpu":        resource.MustParse("2"),
+				"nvidia.com/mig-1g.5gb": resource.MustParse("14"),
+			},
+			true, 2,
+		},
+		{
+			"gpu memory is not a device count",
+			corev1.ResourceList{"aliyun.com/gpu-mem": resource.MustParse("16384")},
+			true, 0,
+		},
+		{
+			"third-party licence counter is not a GPU",
+			corev1.ResourceList{"example.com/gpu-licence": resource.MustParse("100")},
+			false, 0,
+		},
+		{"cpu only", corev1.ResourceList{"cpu": resource.MustParse("64")}, false, 0},
+		{"unqualified gpu name", corev1.ResourceList{"gpu": resource.MustParse("1")}, false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nodeAdvertisesAccelerator(tc.capacity); got != tc.want {
+				t.Errorf("nodeAdvertisesAccelerator = %v, want %v", got, tc.want)
+			}
+			if got := acceleratorCount(tc.capacity); got != tc.wantGPUs {
+				t.Errorf("acceleratorCount = %d, want %d", got, tc.wantGPUs)
+			}
+		})
+	}
+}
+
+// TestEvictionMatcherStaysGenerous is the other half of the asymmetry: on the
+// eviction path an unrecognised vendor must still count as holding a device,
+// because failing to evict leaves a live job on hardware about to be reset.
+func TestEvictionMatcherStaysGenerous(t *testing.T) {
+	unknownVendor := pod("training", controllerRef("ReplicaSet"), corev1.PodRunning, false)
+	unknownVendor.Spec.Containers = []corev1.Container{{
+		Name: "main",
+		Resources: corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{"newvendor.example/gpu": resource.MustParse("1")},
+		},
+	}}
+	if !podUsesGPU(unknownVendor) {
+		t.Fatal("pod holding an unrecognised vendor's GPU was not seen as a GPU workload; " +
+			"it would be left running on a device under remediation")
+	}
+	if nodeAdvertisesAccelerator(corev1.ResourceList{"newvendor.example/gpu": resource.MustParse("1")}) {
+		t.Fatal("the same unrecognised resource admitted a node to the fleet; " +
+			"fleet membership must be the conservative side")
 	}
 }

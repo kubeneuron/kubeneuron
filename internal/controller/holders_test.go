@@ -1,9 +1,18 @@
 package controller
 
 import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/notify"
+	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/internal/safety"
+	storesqlite "github.com/kubeneuron/kubeneuron/internal/store/sqlite"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -107,5 +116,168 @@ func TestObstructionsAreReportedOncePerProcess(t *testing.T) {
 func TestNoHoldersMeansNoObstructions(t *testing.T) {
 	if got := resetObstructions(gpuNode(nil), []types.AgentDeviceHolder{}, []string{"", "  "}); len(got) != 0 {
 		t.Fatalf("obstructions = %v, want none", got)
+	}
+}
+
+// C1 regression: an AMD-attributed incident bound to a reset-bearing playbook
+// used to cordon the node, drain every workload off it, and then re-deny the
+// reset on every reconcile tick forever — the AMD UUID can never appear in an
+// NVIDIA accelerator report, but "absent from the report" reads as evidence
+// that has not arrived, which HOLDS. Nothing ever reached a human. The vendor
+// mismatch must be refused BEFORE the first disruptive step.
+func TestAMDIncidentRefusesNVIDIAResetBeforeAnyDisruption(t *testing.T) {
+	book := &playbook.Playbook{
+		Name: "drain-and-reset", Target: "gpu",
+		Steps: []playbook.Step{
+			{Name: "Cordon", Action: "platform.cordon"},
+			{Name: "Drain", Action: "platform.drain"},
+			{Name: "Reset", Action: "agent.gpu_reset"},
+		},
+	}
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{"drain-and-reset": book},
+		[]playbook.Policy{{Class: types.ClassNVLink, Playbook: "drain-and-reset"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, st, _ := miniController(t, engine)
+	ctx := context.Background()
+	if err := st.UpsertNode(ctx, &types.Node{Name: "n1"}); err != nil {
+		t.Fatal(err)
+	}
+	inc := &types.Incident{
+		ID: "inc-amd", Target: types.Target{Node: "n1", GPUUUID: "amd-0000-1111"},
+		Class: types.ClassNVLink, State: types.StateEvaluating, Playbook: "drain-and-reset",
+		Vendor:   types.AcceleratorVendorAMD,
+		OpenedAt: time.Now(), UpdatedAt: time.Now(), StateChangedAt: time.Now(),
+	}
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.advanceEvaluating(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetIncident(ctx, inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != types.StateNeedsHuman {
+		t.Fatalf("state = %s, want NEEDS_HUMAN: a reset that can never run must reach a human, not hold", got.State)
+	}
+	if got.StepIndex != 0 {
+		t.Fatalf("step index = %d, want 0 — nothing may execute, least of all cordon and drain", got.StepIndex)
+	}
+	trail, err := st.AuditTrail(ctx, inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range trail {
+		if e.Action == "Cordon" || e.Action == "Drain" {
+			t.Fatalf("audit shows %q ran before the refusal — the node was disrupted for a reset that cannot happen", e.Action)
+		}
+	}
+	// An NVIDIA incident on the same playbook must be untouched by the guard.
+	nv := &types.Incident{
+		ID: "inc-nv", Target: types.Target{Node: "n1", GPUUUID: "GPU-abc"},
+		Class: types.ClassNVLink, State: types.StateEvaluating, Playbook: "drain-and-reset",
+		Vendor:   types.AcceleratorVendorNVIDIA,
+		OpenedAt: time.Now(), UpdatedAt: time.Now(), StateChangedAt: time.Now(),
+	}
+	if err := st.CreateIncident(ctx, nv); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.advanceEvaluating(ctx, nv); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := st.GetIncident(ctx, nv.ID); got.State == types.StateNeedsHuman {
+		t.Fatal("an NVIDIA incident must not be refused by the vendor guard")
+	}
+}
+
+// TestVendorlessIncidentRefusesAResetTheNodeCannotServe closes the door the
+// incident-side check cannot see. An incident opened by a manual trigger or a
+// metric alert never learns its vendor, so resetVendorMismatch has nothing to
+// compare — yet the node itself reports which runtime it has. Without this,
+// such an incident cordoned and drained the node and only then failed at the
+// reset step on missing evidence: a hold with no deadline, re-denying every
+// tick, node left drained, nobody paged.
+func TestVendorlessIncidentRefusesAResetTheNodeCannotServe(t *testing.T) {
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+
+	book := &playbook.Playbook{Name: "reset-nv", Target: "gpu", Steps: []playbook.Step{
+		{Name: "cordon", Action: "platform.cordon"},
+		{Name: "reset", Action: "agent.gpu_reset"},
+	}}
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{book.Name: book}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	c := New(st, st, engine,
+		safety.NewGate(safety.Limits{MaxConcurrentRemediations: 4, MaxConcurrentReboots: 1}),
+		nil, nil, nil, &notify.Log{Logger: log}, log)
+
+	if err := st.UpsertNode(ctx, &types.Node{
+		Name: "node-amd", UID: "node-amd-uid", AgentLastSeen: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The machine says what it runs: AMD, and no NVIDIA.
+	if err := st.UpsertAcceleratorReport(ctx, &types.AgentAcceleratorReport{
+		Node: "node-amd", NodeUID: "node-amd-uid", Vendor: types.AcceleratorVendorAMD,
+		Readiness: types.AcceleratorReadinessReady, ObservedAt: time.Now(),
+		TopologySafety: types.AcceleratorTopologyVerifiedUnpartitioned,
+		DriverVersion:  "6.8.5", RuntimeVersion: "amd-smi 24.6.2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	inc := &types.Incident{
+		ID: "inc-vendorless", Target: types.Target{Node: "node-amd", GPUUUID: "GPU-amd-0"},
+		Class: types.ClassECCDBE, State: types.StateEvaluating, Playbook: book.Name,
+		// Vendor deliberately unset: a manual trigger names none.
+		OpenedAt: time.Now(), UpdatedAt: time.Now(), StateChangedAt: time.Now(),
+	}
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+
+	err = c.refuseInfeasibleReset(ctx, inc, book)
+	if !errors.Is(err, errResetVendorMismatch) {
+		t.Fatalf("refuseInfeasibleReset = %v, want errResetVendorMismatch: the node reports an AMD "+
+			"runtime and no NVIDIA one, so this reset can never run and must be refused BEFORE the cordon", err)
+	}
+}
+
+// A node that has simply not reported yet must be left alone: "no evidence
+// yet" is not "evidence of a different runtime", and refusing on it would
+// block every legitimate reset during an agent restart.
+func TestSilentNodeDoesNotTriggerTheVendorAbsenceRefusal(t *testing.T) {
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+
+	book := &playbook.Playbook{Name: "reset-nv", Target: "gpu", Steps: []playbook.Step{
+		{Name: "reset", Action: "agent.gpu_reset"},
+	}}
+	inc := &types.Incident{
+		ID: "inc-silent", Target: types.Target{Node: "node-quiet", GPUUUID: "GPU-0"},
+		Class: types.ClassECCDBE, State: types.StateEvaluating, Playbook: book.Name,
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	c := New(st, st, nil,
+		safety.NewGate(safety.Limits{MaxConcurrentRemediations: 4, MaxConcurrentReboots: 1}),
+		nil, nil, nil, &notify.Log{Logger: log}, log)
+
+	if _, mismatched := c.resetVendorAbsentFromNode(ctx, inc, book); mismatched {
+		t.Fatal("refused a reset on a node that has reported nothing at all; " +
+			"an agent that has not spoken yet is not evidence of a different runtime")
 	}
 }

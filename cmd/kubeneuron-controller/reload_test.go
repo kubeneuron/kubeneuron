@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/controller"
 	"github.com/kubeneuron/kubeneuron/internal/httpapi"
+	"github.com/kubeneuron/kubeneuron/internal/safety"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	storesqlite "github.com/kubeneuron/kubeneuron/internal/store/sqlite"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -312,5 +314,75 @@ func TestApplyRuntimeConfigPublishesSourceDigest(t *testing.T) {
 	}
 	if got := readyz(); got != "ready config=abc123def456" {
 		t.Fatalf("readyz after failed apply = %q, want the previous identity retained", got)
+	}
+}
+
+// TestReloadAppliesExecutionMode is the defect a real-cluster cordon phase
+// found on its first successful run.
+//
+// The operator deliberately keeps the config-digest OFF the controller's pod
+// template, so an ordinary configuration change reloads in place instead of
+// rolling the Deployment — which under leader election would deadlock. But the
+// reload never re-applied the safety gate's dry-run flag: it was read once, at
+// process start, and `SetDryRun` had no caller anywhere in the tree.
+//
+// So `spec.safety.executionMode` did nothing to a running controller. Both
+// directions are wrong and the second is dangerous: switching DryRun→Enabled
+// left an installation that believes it is armed executing nothing, and
+// switching Enabled→DryRun — the lever an operator reaches for to STOP damage
+// — left it executing.
+func TestReloadAppliesExecutionMode(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	playbooks := filepath.Join(dir, "playbooks")
+	if err := os.MkdirAll(playbooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(playbooks, "observe.yaml"),
+		[]byte("name: observe\ntarget: gpu\nsteps:\n  - name: observe\n    action: notify.observe\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	policies := filepath.Join(dir, "runtime.yaml")
+	write := func(dryRun bool, remediations int) {
+		t.Helper()
+		body := fmt.Sprintf(
+			"policies:\n  - match: {class: gsp-error}\n    playbook: observe\n"+
+				"safety:\n  dry_run: %t\n  max_concurrent_remediations: %d\n",
+			dryRun, remediations)
+		if err := os.WriteFile(policies, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	gate := safety.NewGate(safety.Limits{MaxConcurrentRemediations: 2, DryRun: true})
+	ctrl := controller.New(st, nil, nil, gate, nil, nil, nil, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	api := httpapi.New(ctrl)
+	paths := runtimeConfigPaths{policies: policies, playbooks: playbooks}
+	logSink := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// The operator switches the installation to Enabled.
+	write(false, 4)
+	if err := applyRuntimeConfig(ctx, ctrl, api, paths, logSink); err != nil {
+		t.Fatal(err)
+	}
+	if gate.DryRun() {
+		t.Fatal("executionMode: Enabled reloaded, but the gate is still in dry-run; " +
+			"the installation believes it is armed and executes nothing")
+	}
+
+	// And back — the lever an operator pulls to stop damage.
+	write(true, 4)
+	if err := applyRuntimeConfig(ctx, ctrl, api, paths, logSink); err != nil {
+		t.Fatal(err)
+	}
+	if !gate.DryRun() {
+		t.Fatal("executionMode: DryRun reloaded, but the gate is still executing; " +
+			"the documented way to stop remediation does not stop it")
 	}
 }

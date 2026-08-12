@@ -34,6 +34,12 @@ import (
 // it can only claim a completeness the store does not have.
 const maxReportWindow = 366 * 24 * time.Hour
 
+// maxReportIncidents bounds how many incident rows one report will hold in
+// memory. Sized for a large fleet's normal year — roughly 270 incidents a day
+// across the whole installation — so reaching it means either an unusually
+// wide window or a fault storm worth looking at directly.
+const maxReportIncidents = 100_000
+
 // RecoveryReport aggregates the incident store over the trailing window. The
 // window is anchored to the controller's clock, which is the clock that
 // stamped the incident rows: a caller passing a duration therefore gets a
@@ -48,9 +54,25 @@ func (c *Controller) RecoveryReport(ctx context.Context, window time.Duration) (
 	}
 	to := time.Now()
 	from := to.Add(-window)
-	incidents, err := c.store.ListIncidents(ctx, store.IncidentFilter{ActiveSince: from})
+	// Bounded read, deliberately fail-loud. This query has no natural size: a
+	// 500-node fleet over the 366-day horizon can hold far more incidents than
+	// belong in one process's memory at once. The tempting fix — a plain LIMIT
+	// — is the one thing that must not happen here, because a truncated set
+	// still aggregates cleanly and hands back a capacity number that looks
+	// authoritative and is simply wrong. Ask for one row more than the cap so
+	// hitting it is detectable, and say so instead of answering.
+	incidents, err := c.store.ListIncidents(ctx, store.IncidentFilter{
+		ActiveSince: from,
+		Limit:       maxReportIncidents + 1,
+	})
 	if err != nil {
 		return nil, err
+	}
+	if len(incidents) > maxReportIncidents {
+		return nil, fmt.Errorf(
+			"the window %s covers more than %d incidents, which is more than this report will total in one pass; "+
+				"narrow the window (a truncated total would be wrong rather than merely incomplete)",
+			window, maxReportIncidents)
 	}
 	nodes, err := c.store.ListNodes(ctx)
 	if err != nil {
@@ -87,7 +109,38 @@ func (c *Controller) RecoveryReport(ctx context.Context, window time.Duration) (
 //   - MTTR uses the FULL open-to-resolved duration of incidents that resolved
 //     inside the window. A clipped duration is not a recovery time.
 func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, from, to time.Time) *types.RecoveryReport {
-	report := &types.RecoveryReport{From: from, To: to}
+	report := aggregateRecoverySubset(incidents, gpusPerNode, from, to, false)
+	// The simulated view answers the question a pilot actually has. The
+	// checklist tells them to stay in dry-run until they have watched the
+	// system decide, and for that whole period the real report is empty by
+	// construction — so at the moment somebody asks "what would this have got
+	// us", the answer was a blank table. Same arithmetic, same incidents,
+	// labelled as a simulation and never folded into the headline.
+	if report.DryRunExcluded > 0 {
+		sim := aggregateRecoverySubset(incidents, gpusPerNode, from, to, true)
+		report.Simulated = &types.SimulatedRecovery{
+			Incidents:              sim.Incidents,
+			WouldRecover:           sim.Recovered,
+			WouldRecoverUnattended: sim.RecoveredUnattended,
+			DegradedGPUHours:       sim.DegradedGPUHours,
+			WouldRecoverGPUHours:   sim.RecoveredGPUHours,
+			MTTR:                   sim.MTTR,
+		}
+	}
+	return report
+}
+
+// aggregateRecoverySubset is the arithmetic, over either the real incidents or
+// the dry-run ones.
+func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string]int, from, to time.Time, wantDryRun bool) *types.RecoveryReport {
+	report := &types.RecoveryReport{
+		From: from, To: to,
+		// Both slices are initialised so an empty report marshals as [] and
+		// not null: a client iterating the array should not have to special-
+		// case the quiet fleet, which is the normal one.
+		Classes: make([]types.RecoveryClassReport, 0),
+		Open:    make([]types.RecoveryOpenIncident, 0),
+	}
 	type classAccum struct {
 		row       types.RecoveryClassReport
 		durations []float64
@@ -96,6 +149,23 @@ func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, 
 	var mttrSamples []float64
 
 	for _, inc := range incidents {
+		if inc != nil && inc.DryRun != wantDryRun {
+			// Dry-run executes nothing, so nothing was recovered. Dry-run is
+			// also the SHIPPED DEFAULT, and its incidents run the whole ladder
+			// on synthetic successes and reach RESOLVED with no approval —
+			// which would have made a fresh install report GPU-hours "returned
+			// to service" and 100% unattended recovery for a system that had
+			// not touched a node. The one number this report exists to be
+			// trusted on cannot be the one that lies out of the box.
+			//
+			// So they are aggregated SEPARATELY rather than dropped: the same
+			// arithmetic over the same incidents, labelled as the simulation
+			// it is. See RecoveryReport.Simulated.
+			if !wantDryRun {
+				report.DryRunExcluded++
+			}
+			continue
+		}
 		if inc == nil || inc.OpenedAt.IsZero() {
 			// Without an open time there is no interval to charge. Skipping
 			// undercounts; guessing one would invent capacity loss.

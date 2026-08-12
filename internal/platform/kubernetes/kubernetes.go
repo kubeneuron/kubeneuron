@@ -1,5 +1,6 @@
 // Package kubernetes implements platform.Platform for Kubernetes clusters.
-// Inventory comes from watching Nodes with an nvidia.com/gpu capacity;
+// Inventory comes from watching Nodes that advertise a GPU extended resource
+// from a recognised vendor domain (see acceleratorDomains);
 // workload control uses cordon (spec.unschedulable) and the Eviction API so
 // PodDisruptionBudgets are respected.
 package kubernetes
@@ -8,7 +9,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,58 +33,108 @@ import (
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
-// gpuResource is the extended resource NVIDIA GPU nodes advertise. It stays
-// named for its vendor deliberately: it is one entry in the neutral matcher
-// below, not the definition of "a GPU".
-const gpuResource = "nvidia.com/gpu"
+// acceleratorDomains are the extended-resource domains whose GPU resources
+// KubeNeuron will treat as evidence that a node belongs to the GPU fleet.
+//
+// This list is deliberately an allow-list rather than a shape test. Fleet
+// membership is a blast-radius decision: a node in the inventory can be
+// cordoned, drained, tainted and rebooted by a playbook, so a resource named
+// "example.com/gpu-licence" — a licence count, not a device — must not drag
+// a CPU node into the set of machines KubeNeuron may act on.
+var acceleratorDomains = map[string]struct{}{
+	"nvidia.com":    {},
+	"amd.com":       {},
+	"intel.com":     {},
+	"gpu.intel.com": {},
+	"habana.ai":     {},
+	"aliyun.com":    {}, // gpu-mem / gpu-count, fractional-GPU scheduling
+}
 
 // isAcceleratorResource reports whether an extended-resource name names a GPU
-// or GPU partition, for ANY vendor.
+// or GPU partition, for ANY vendor. This is the PERMISSIVE matcher: it
+// decides which pods are holding a device, and is used only where a false
+// positive is cheap.
 //
 // Hardcoding "nvidia.com/gpu" made two failures silent rather than loud: an
 // AMD or Intel node inventoried as ZERO GPUs (invisible to the whole control
 // plane), and `evict_gpu_workload` reported "evicted 0 GPU workloads"
 // successfully while leaving live jobs on a device about to be reset — the
 // exact disruption the step exists to prevent. Both are wrong in the
-// dangerous direction, so the matcher errs toward recognising an accelerator:
-// a false positive costs one unnecessary eviction on a node that is being
-// drained anyway, while a false negative destroys somebody's training run.
+// dangerous direction, so this matcher errs toward recognising an
+// accelerator: a false positive costs one unnecessary eviction on a node that
+// is being drained anyway, while a false negative destroys somebody's
+// training run.
 //
 // MIG partitions (nvidia.com/mig-1g.5gb under the device plugin's mixed
 // strategy) are included for the same reason: a pod holding a partition is a
 // pod on the physical device being remediated.
+//
+// Do NOT use this to decide fleet membership — see
+// nodeAdvertisesAccelerator, where the asymmetry runs the other way.
 func isAcceleratorResource(name corev1.ResourceName) bool {
+	_, ok := acceleratorResourceKind(name)
+	return ok
+}
+
+// acceleratorResourceKind splits a resource name and reports whether its kind
+// has an accelerator shape, returning the domain that claimed it.
+func acceleratorResourceKind(name corev1.ResourceName) (domain string, ok bool) {
 	resource := string(name)
 	// A core resource (cpu, memory, ephemeral-storage) has no domain prefix;
 	// only domain-qualified extended resources can name an accelerator.
 	domain, kind, qualified := strings.Cut(resource, "/")
 	if !qualified {
-		return false
+		return "", false
 	}
 	switch {
-	case kind == "gpu" || strings.HasPrefix(kind, "gpu-"):
-		// nvidia.com/gpu, amd.com/gpu, and any future <vendor>/gpu.
-		return true
+	case kind == "gpu" || strings.HasPrefix(kind, "gpu-") || strings.HasPrefix(kind, "gpu."):
+		// nvidia.com/gpu, amd.com/gpu, nvidia.com/gpu.shared, and any future
+		// <vendor>/gpu.
+		return domain, true
 	case strings.HasPrefix(kind, "mig-"):
 		// NVIDIA MIG compute instances.
-		return true
+		return domain, true
 	case domain == "gpu.intel.com":
 		// Intel advertises the device family as the kind (i915, xe).
-		return true
+		return domain, true
 	}
-	return false
+	return "", false
 }
 
-// nodeAdvertisesAccelerator reports whether a node's capacity names any
-// vendor's GPU. Used for fleet visibility: a node this returns false for is
-// not a GPU node as far as KubeNeuron is concerned.
+// unknownAcceleratorDomains remembers which GPU-shaped resources from
+// unrecognised domains we have already complained about, so the warning is
+// one line per domain rather than one per List call.
+var unknownAcceleratorDomains sync.Map
+
+// nodeAdvertisesAccelerator reports whether a node's capacity names a GPU
+// from a domain KubeNeuron recognises. Used for fleet membership: a node this
+// returns false for is not a GPU node as far as KubeNeuron is concerned, and
+// no playbook can touch it.
+//
+// The asymmetry with isAcceleratorResource is intentional. On the eviction
+// side an over-match costs one extra eviction on a node already being
+// drained. Here an over-match admits a machine to the set KubeNeuron may
+// cordon, drain and reboot, so this side must be sure rather than generous.
+// An accelerator we fail to recognise is logged loudly instead of silently
+// dropped, because an invisible GPU node is the other failure worth catching.
 func nodeAdvertisesAccelerator(capacity corev1.ResourceList) bool {
+	found := false
 	for name := range capacity {
-		if isAcceleratorResource(name) {
-			return true
+		domain, shaped := acceleratorResourceKind(name)
+		if !shaped {
+			continue
+		}
+		if _, known := acceleratorDomains[domain]; known {
+			found = true
+			continue
+		}
+		if _, warned := unknownAcceleratorDomains.LoadOrStore(domain, struct{}{}); !warned {
+			slog.Warn("ignoring GPU-shaped resource from an unrecognised vendor domain; "+
+				"this node will not be treated as part of the GPU fleet",
+				"resource", string(name), "domain", domain)
 		}
 	}
-	return false
+	return found
 }
 
 // cordonReasonAnnotation records why KubeNeuron cordoned a node.
@@ -104,6 +157,7 @@ type Platform struct {
 
 var _ platform.Platform = (*Platform)(nil)
 var _ platform.NodePresence = (*Platform)(nil)
+var _ platform.NodeLabeler = (*Platform)(nil)
 
 // New builds a Platform from an in-cluster config, falling back to the given
 // kubeconfig path (empty means default loading rules).
@@ -203,6 +257,36 @@ func (p *Platform) NodeExists(ctx context.Context, node string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// NodeLabels implements platform.NodeLabeler by reading the Kubernetes Node
+// object itself, never the GPU-filtered inventory — see the interface for why
+// that distinction is load-bearing for confinement.
+func (p *Platform) NodeLabels(ctx context.Context, node string) (map[string]string, bool, error) {
+	if lp := p.nodeLister.Load(); lp != nil {
+		// The watch-maintained cache: fresher than a periodic sync and cheaper
+		// than an apiserver round trip.
+		if n, err := (*lp).Get(node); err == nil {
+			if n.Labels == nil {
+				return map[string]string{}, true, nil
+			}
+			return n.Labels, true, nil
+		} else if apierrors.IsNotFound(err) {
+			return nil, false, nil
+		}
+		// Any other lister error falls through to the live read.
+	}
+	n, err := p.client.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if n.Labels == nil {
+		return map[string]string{}, true, nil
+	}
+	return n.Labels, true, nil
 }
 
 // WatchNodes streams GPU node inventory changes.
@@ -484,11 +568,65 @@ func podUsesGPU(pod *corev1.Pod) bool {
 	return false
 }
 
-func nodeFromK8s(n *corev1.Node) types.Node {
-	gpus := 0
-	if q, ok := n.Status.Capacity[gpuResource]; ok {
-		gpus = int(q.Value())
+// acceleratorCount reads the device count off a node's capacity for whichever
+// vendor advertises it.
+//
+// Reading only nvidia.com/gpu inventoried every AMD and Intel node as ZERO
+// GPUs, which then surfaced as the report's AssumedSingleGPU fallback: the
+// degraded-GPU-hours a non-NVIDIA fleet recovered were charged at one device
+// per incident regardless of how many were really affected.
+//
+// Whole-device counts win over partition counts, and the maximum is taken
+// rather than the sum: under the device plugin's mixed strategy one physical
+// GPU is advertised twice (nvidia.com/gpu and nvidia.com/mig-1g.5gb), so
+// summing would double-count the same silicon.
+func acceleratorCount(capacity corev1.ResourceList) int {
+	whole, partitioned := 0, 0
+	for name, q := range capacity {
+		domain, shaped := acceleratorResourceKind(name)
+		if !shaped {
+			continue
+		}
+		if _, known := acceleratorDomains[domain]; !known {
+			continue
+		}
+		_, kind, _ := strings.Cut(string(name), "/")
+		switch {
+		case kind == "gpu", domain == "gpu.intel.com":
+			// Intel names the device family as the kind (i915, xe) and that
+			// count IS whole devices, not partitions.
+			whole = max(whole, int(q.Value()))
+		default:
+			// Everything else counts something that is not a physical device:
+			// MIG instances, time-sliced replicas (nvidia.com/gpu.shared),
+			// aliyun.com/gpu-mem's MiB. Only note that such a resource exists.
+			partitioned++
+		}
 	}
+	if whole > 0 {
+		return whole
+	}
+	if partitioned > 0 {
+		// The node advertises partitions or replicas but no whole devices, so
+		// the physical device count is genuinely NOT KNOWABLE from capacity: a
+		// fully-MIG'd A100 pair advertises 56 instances, and a time-sliced node
+		// advertises whatever replica factor somebody chose. Reporting those as
+		// GPUs put a fabricated capacity number in front of whoever pays for
+		// the fleet.
+		//
+		// Zero here means "unknown", and it is short-lived: the agent's
+		// self-registration reports the real devices, which is where every
+		// number that matters comes from. Until then the fleet view shows the
+		// node with no device count rather than a wrong one, and
+		// affectedGPUs's own fallback charges one — undercounting, the honest
+		// direction.
+		return 0
+	}
+	return 0
+}
+
+func nodeFromK8s(n *corev1.Node) types.Node {
+	gpus := acceleratorCount(n.Status.Capacity)
 	// GPU UUIDs are not in the Node object; the agent's self-registration
 	// fills them in. Capacity gives us the count for early display.
 	infos := make([]types.GPUInfo, gpus)

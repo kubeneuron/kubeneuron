@@ -155,11 +155,28 @@ func (c *Controller) refuseInfeasibleReset(ctx context.Context, inc *types.Incid
 		return fmt.Errorf("playbook %q resets a GPU but incident %s is unattributed (no GPU UUID); a per-device reset is impossible: %w",
 			book.Name, inc.ID, errResetTargetUnattributed)
 	}
+	if vendor, mismatched := resetVendorMismatch(inc, book); mismatched {
+		return fmt.Errorf("playbook %q resets a %s GPU but incident %s is about a %s device; that reset can never run: %w",
+			book.Name, vendor, inc.ID, inc.Vendor, errResetVendorMismatch)
+	}
+	if vendor, mismatched := c.resetVendorAbsentFromNode(ctx, inc, book); mismatched {
+		return fmt.Errorf("playbook %q resets a %s GPU but node %s reports no %s runtime; that reset can never run: %w",
+			book.Name, vendor, inc.Target.Node, vendor, errResetVendorMismatch)
+	}
 	reports, ok := c.store.(store.AcceleratorReportStore)
 	if !ok {
 		return nil
 	}
-	report, err := reports.GetAcceleratorReport(ctx, inc.Target.Node, types.AcceleratorVendorNVIDIA)
+	// Read the report for the incident's OWN vendor. Reading NVIDIA's on an AMD
+	// incident asked a question about the wrong runtime: it found nothing,
+	// returned nil, and the obstruction check silently no-opped — conservative
+	// in direction, but it meant this preflight protected nothing outside
+	// NVIDIA while appearing to run.
+	vendor := inc.Vendor
+	if !vendor.Valid() {
+		vendor = types.AcceleratorVendorNVIDIA
+	}
+	report, err := reports.GetAcceleratorReport(ctx, inc.Target.Node, vendor)
 	if err != nil || report == nil || report.DeviceHolders == nil {
 		// No report, or an agent that did not look. The node-side preflight
 		// stays the backstop; refusing on absent evidence would block resets on
@@ -185,6 +202,67 @@ func playbookResetsAGPU(book *playbook.Playbook) bool {
 		}
 	}
 	return false
+}
+
+// resetVendorMismatch reports the vendor a playbook's reset is scoped to when
+// the incident is about a DIFFERENT vendor's device. An incident with no
+// vendor (an XID, an alert, or a row predating the column) constrains
+// nothing and never mismatches, so this cannot refuse anything that worked
+// before the field existed.
+// resetVendorAbsentFromNode catches the same impossibility as
+// resetVendorMismatch, from the other side: the NODE, not the incident.
+//
+// An incident that never learned its vendor — a manual operator trigger, a
+// metric alert — bound to a playbook whose reset targets a vendor the machine
+// does not run would otherwise pass every check here, cordon and drain the
+// node, and only then fail at the reset step on missing evidence: a hold with
+// no deadline, re-denying on every tick, with the node left drained and
+// nobody paged. That is exactly the failure errResetVendorMismatch exists to
+// prevent, reached through a different door.
+//
+// It requires POSITIVE evidence of the mismatch: at least one report from this
+// node, and none from the vendor the reset needs. A node that has simply not
+// reported yet — a fresh install, a restarted agent — reports nothing at all
+// and is left alone, because "no evidence yet" and "evidence of a different
+// runtime" are not the same claim.
+func (c *Controller) resetVendorAbsentFromNode(ctx context.Context, inc *types.Incident, book *playbook.Playbook) (types.AcceleratorVendor, bool) {
+	if inc.Vendor.Valid() {
+		return "", false // resetVendorMismatch already answered this
+	}
+	reports, ok := c.store.(store.AcceleratorReportStore)
+	if !ok {
+		return "", false
+	}
+	present, err := reports.ListAcceleratorReports(ctx, inc.Target.Node)
+	if err != nil || len(present) == 0 {
+		return "", false
+	}
+	has := make(map[types.AcceleratorVendor]bool, len(present))
+	for _, r := range present {
+		has[r.Vendor] = true
+	}
+	for i := range book.Steps {
+		def, ok := action.ByWire(book.Steps[i].Action)
+		if !ok || def.Vendor == "" || has[def.Vendor] {
+			continue
+		}
+		return def.Vendor, true
+	}
+	return "", false
+}
+
+func resetVendorMismatch(inc *types.Incident, book *playbook.Playbook) (types.AcceleratorVendor, bool) {
+	if !inc.Vendor.Valid() {
+		return "", false
+	}
+	for _, step := range book.Steps {
+		def, ok := action.ByWire(step.Action)
+		if !ok || def.Vendor == "" || def.Vendor == inc.Vendor {
+			continue
+		}
+		return def.Vendor, true
+	}
+	return "", false
 }
 
 // FormatObstructions renders obstructions for one operator-facing message.

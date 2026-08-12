@@ -3,11 +3,17 @@ package gpuhealth
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/kubeneuron/kubeneuron/internal/metrics"
 
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -32,7 +38,7 @@ func isDCGM(args []string) bool {
 }
 
 func TestParseDCGMXIDSkipsHealthyAndNA(t *testing.T) {
-	got, err := parseDCGMXID(readFixture(t, "dcgmi-dmon-xid.txt"))
+	got, unreadable, err := parseDCGMXID(readFixture(t, "dcgmi-dmon-xid.txt"))
 	if err != nil {
 		t.Fatalf("parseDCGMXID: %v", err)
 	}
@@ -42,6 +48,40 @@ func TestParseDCGMXIDSkipsHealthyAndNA(t *testing.T) {
 	c := got[0]
 	if c.index != 1 || c.xid != 79 || !c.level || c.value != 79 {
 		t.Fatalf("candidate = %+v, want index 1 xid 79 level", c)
+	}
+	if unreadable != 0 {
+		t.Fatalf("unreadable = %d on a layout this build understands, want 0", unreadable)
+	}
+}
+
+// TestParseDCGMXIDCountsAnUnreadableLayout is the case that made the hardware
+// harness's DCGM phase vacuous. A DCGM release that changes the dmon layout
+// produced zero candidates and zero noise: the detection source went dark and
+// nothing said so. Silence remains correct for the FAULT path — an unreadable
+// line must never become a fault — but it must be COUNTED.
+func TestParseDCGMXIDCountsAnUnreadableLayout(t *testing.T) {
+	// A plausible future layout: a device column that is no longer "GPU <n>".
+	future := "# Entity  XID\nDEV 0    N/A\nDEV 1    79\n"
+	got, unreadable, err := parseDCGMXID(future)
+	if err != nil {
+		t.Fatalf("parseDCGMXID: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("candidates = %+v, want none: an unreadable line must never become a fault", got)
+	}
+	if unreadable != 2 {
+		t.Fatalf("unreadable = %d, want 2 — a layout this build cannot read must be reported, "+
+			"or the DCGM source goes dark silently", unreadable)
+	}
+
+	// A row whose value column is not a number is unreadable too; "N/A" is not
+	// (it is the engine saying this GPU has recorded no XID).
+	_, unreadable, err = parseDCGMXID("GPU 0 N/A\nGPU 1 ERR!\n")
+	if err != nil {
+		t.Fatalf("parseDCGMXID: %v", err)
+	}
+	if unreadable != 1 {
+		t.Fatalf("unreadable = %d, want 1 (ERR! unreadable, N/A is a health report)", unreadable)
 	}
 }
 
@@ -332,5 +372,58 @@ func TestDCGMEndpointFollowsSubcommand(t *testing.T) {
 	want := []string{"dmon", "--host", "10.0.1.7:5555", "-e", dcgmXIDFieldID, "-c", "1"}
 	if strings.Join(captured, " ") != strings.Join(want, " ") {
 		t.Fatalf("dcgmi args = %v, want %v", captured, want)
+	}
+}
+
+// TestHealthSourceIsPublished pins the signal the hardware harness needs.
+// DCGM is preferred and nvidia-smi is narrower, so an agent silently falling
+// back changes what it can detect — and before this, nothing outside the
+// process could tell the two apart.
+func TestHealthSourceIsPublished(t *testing.T) {
+	active := func() string {
+		for _, s := range []string{"dcgm", "nvidia-smi", "none"} {
+			if testutil.ToFloat64(metrics.AgentHealthSource.WithLabelValues(s)) == 1 {
+				return s
+			}
+		}
+		return ""
+	}
+
+	// DCGM answers: it is the source.
+	w := &Watcher{
+		NodeName: "n1", DCGMPath: "dcgmi", NVIDIASMIPath: "nvidia-smi",
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	w.run = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if isDCGM(args) {
+			return []byte("#Entity   XIDERRORS\n     Id\nGPU 0            0\n"), nil
+		}
+		return nil, errors.New("should not be called")
+	}
+	w.poll(context.Background())
+	if got := active(); got != "dcgm" {
+		t.Fatalf("active source = %q, want dcgm", got)
+	}
+
+	// DCGM fails: the narrower fallback takes over, and that must be visible.
+	w.run = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if isDCGM(args) {
+			return nil, errors.New("engine unreachable")
+		}
+		return []byte(readFixture(t, "nvidia-smi-q-faults.txt")), nil
+	}
+	w.poll(context.Background())
+	if got := active(); got != "nvidia-smi" {
+		t.Fatalf("active source = %q, want nvidia-smi after a DCGM failure; "+
+			"a silent degrade to the narrower source is exactly what this metric exists to show", got)
+	}
+
+	// Neither works: observed-only, and it says so.
+	w.run = func(context.Context, string, ...string) ([]byte, error) {
+		return nil, errors.New("no tool")
+	}
+	w.poll(context.Background())
+	if got := active(); got != "none" {
+		t.Fatalf("active source = %q, want none", got)
 	}
 }

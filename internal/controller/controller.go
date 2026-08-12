@@ -49,6 +49,16 @@ type Controller struct {
 	inFlightMu sync.Mutex
 	inFlight   map[string]bool
 
+	// logOnce suppresses repeated explanations of conditions that persist.
+	//
+	// Keyed strings, ONE map, and bounded — because the keys include node
+	// names. This control plane replaces nodes, so node names are not a
+	// bounded set: an unbounded map keyed by them grows for the life of the
+	// process, which is the exact argument that removed the `node` label from
+	// kubeneuron_workloads_evicted_total. Losing a suppression entry costs one
+	// repeated log line; the alternative costs memory forever.
+	logOnce *lru
+
 	// armingHoldSince records when each incident FIRST hit the
 	// arming-in-flight hold (in scope, agent freshly unarmed). The
 	// propagation grace is measured from this first observation — never from
@@ -234,18 +244,21 @@ func New(
 	log *slog.Logger,
 ) *Controller {
 	c := &Controller{
-		store:           st,
-		sink:            sink,
-		gate:            gate,
-		flap:            flap,
-		platform:        plat,
-		actuator:        act,
-		notifier:        notifier,
-		log:             log,
-		signals:         make(chan types.Signal, 256),
-		eventWake:       make(chan struct{}, 1),
-		eventWorkerID:   fmt.Sprintf("controller-%d", time.Now().UnixNano()),
-		inFlight:        map[string]bool{},
+		store:         st,
+		sink:          sink,
+		gate:          gate,
+		flap:          flap,
+		platform:      plat,
+		actuator:      act,
+		notifier:      notifier,
+		log:           log,
+		signals:       make(chan types.Signal, 256),
+		eventWake:     make(chan struct{}, 1),
+		eventWorkerID: fmt.Sprintf("controller-%d", time.Now().UnixNano()),
+		inFlight:      map[string]bool{},
+		// Sized well past any real fleet's distinct (condition, node) pairs, so
+		// eviction is a backstop rather than something a normal install meets.
+		logOnce:         newLogOnce(4096),
 		armingHoldSince: map[string]time.Time{},
 		recoveredSlots:  map[string]recoveredSlot{},
 		reconcileEvery:  defaultReconcileInterval,
@@ -599,6 +612,23 @@ func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal
 	}
 	inc.SignalSeen++
 	inc.UpdatedAt = time.Now()
+	// Backfill the vendor from a later signal. AMD and NVIDIA deliberately
+	// SHARE problem classes (internal/detect/fault.go), and the open-incident
+	// lookup is keyed by (target, class) — so an incident opened by an XID, an
+	// Alertmanager alert or a manual operator trigger, none of which names a
+	// vendor, can later be joined by a neutral fault envelope that does. Taking
+	// that identification is what lets the reset preflight tell an impossible
+	// device action from one still waiting for evidence.
+	//
+	// First identification wins and is never overwritten: two vendors on one
+	// (node, GPU, class) would mean the target itself is wrong, and silently
+	// flipping the answer under a running remediation is worse than keeping
+	// the one the incident was reasoned about with.
+	if !inc.Vendor.Valid() {
+		if vendor := types.AcceleratorVendor(sig.Evidence["vendor"]); vendor.Valid() {
+			inc.Vendor = vendor
+		}
+	}
 	if err := tx.UpdateIncident(ctx, inc); err != nil {
 		return nil, err
 	}
@@ -621,6 +651,12 @@ func (c *Controller) openIncidentTx(ctx context.Context, tx store.Tx, sig types.
 		OpenedAt:       now,
 		UpdatedAt:      now,
 		StateChangedAt: now,
+	}
+	// The fault envelope names its vendor; XIDs and alerts do not. Carrying
+	// it onto the incident is what lets the reset preflight distinguish an
+	// impossible device action from one still waiting for evidence.
+	if vendor := types.AcceleratorVendor(sig.Evidence["vendor"]); vendor.Valid() {
+		inc.Vendor = vendor
 	}
 	if engine := c.runtimeConfig(ctx).Engine; engine != nil {
 		if book, ok := engine.Select(sig); ok {

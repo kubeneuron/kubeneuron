@@ -97,6 +97,14 @@ var faultTable = map[FaultKey]FaultInfo{
 		Vendor: "amd", Code: "page-retirement", Name: "page-retirement-recorded",
 		Class: types.ClassRowRemapOK, Severity: types.SeverityWarning,
 	},
+	{Vendor: "amd", Code: "page-retirement-exhausted"}: {
+		// The peer of XID 64. A retirement below the budget is the mechanism
+		// working (ClassRowRemapOK above); past the budget the device has no
+		// spares left to retire into, which is the same standing as an NVIDIA
+		// row-remap failure and gets the same class and severity.
+		Vendor: "amd", Code: "page-retirement-exhausted", Name: "page-retirement-budget-exhausted",
+		Class: types.ClassRowRemapFailure, Severity: types.SeverityCritical,
+	},
 	{Vendor: "amd", Code: "xgmi-link-error"}: {
 		// XGMI is AMD's inter-GPU fabric, the structural peer of NVLink. The
 		// class name is NVIDIA's spelling for historical reasons; minting a

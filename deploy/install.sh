@@ -190,9 +190,32 @@ fi
 
 say "applying the starter configuration and root object"
 image_repo=ghcr.io/kubeneuron/kubeneuron
+# The release pipeline rewrites these two lines with the digests it published,
+# so a downloaded installer deploys exactly the images the release names. Left
+# as-is when this script runs from a source checkout, where there is no release
+# to pin to. A digest here is what makes the install actually immutable: the
+# operator manifest was already digest-pinned, but the controller and the agent
+# — the two components that run the fleet — were resolved as MOVEABLE TAGS, so
+# the supply-chain guarantee stopped exactly where it started to matter.
+# RELEASE_STAMPED is set to the tag by the release pipeline at the same moment
+# it writes the two digests below. Its presence is what tells this script it is
+# a RELEASE artifact: without it, a stamping step that half-succeeded would be
+# indistinguishable from a plain source checkout, and both digests would fall
+# silently back to moveable tags — the precise failure this stamping exists to
+# prevent, reappearing quietly.
+RELEASE_STAMPED=${RELEASE_STAMPED:-}
+CONTROLLER_DIGEST=${CONTROLLER_DIGEST:-}
+AGENT_DIGEST=${AGENT_DIGEST:-}
+if [[ -n $RELEASE_STAMPED ]]; then
+	[[ $CONTROLLER_DIGEST == sha256:* && $AGENT_DIGEST == sha256:* ]] ||
+		die "this installer was published for $RELEASE_STAMPED but carries no image digests; refusing to fall back to moveable tags"
+fi
 if [[ -z $VERSION && -n $repo_root && -f $repo_root/config/samples/kubeneuron_v1alpha1_kubeneuron.yaml ]]; then
 	controller_image=$(sed -n 's/.*image: *\(.*controller.*\)/\1/p' "$repo_root/config/samples/kubeneuron_v1alpha1_kubeneuron.yaml" | head -1)
 	agent_image=$(sed -n 's/.*image: *\(.*\/agent.*\)/\1/p' "$repo_root/config/samples/kubeneuron_v1alpha1_kubeneuron.yaml" | head -1)
+elif [[ $CONTROLLER_DIGEST == sha256:* && $AGENT_DIGEST == sha256:* ]]; then
+	controller_image=$image_repo/controller@$CONTROLLER_DIGEST
+	agent_image=$image_repo/agent@$AGENT_DIGEST
 else
 	controller_image=$image_repo/controller:$VERSION
 	agent_image=$image_repo/agent:$VERSION

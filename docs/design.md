@@ -425,13 +425,33 @@ beside it. The invariants:
 
 **Vendor seam ledger.** The data model is vendor-neutral, but a real second
 accelerator vendor hits these NVIDIA-specific joints, in the order it would
-break: (1) `verifyRuntimeEvidence` requires an NVIDIA accelerator report for
-every GPU-class target; (2) arming requires the concrete `*nvml.SMI` driver
-(constructor guard and served-arming adoption); (3) the physical-reset gate
-is `CapabilityNVIDIAReset`/`allowNVIDIAReset` only; (4) kmsg parsing is
-NVRM/XID-only and the quiesce stack manipulates NVIDIA components. None of
-this should be generalized speculatively; this ledger exists so the cost is
-a known quantity when a vendor lands.
+break: (1) **fixed in v0.2.3** — `verifyRuntimeEvidence` used to read an
+NVIDIA accelerator report for every GPU-class target, so a device-scoped
+incident on any other vendor could not RESOLVE; a vendor with no runtime
+adapter now verifies on the agent heartbeat, at reduced depth, and says so;
+(2) arming
+requires the concrete `*nvml.SMI` driver (constructor guard and served-arming
+adoption); (3) the physical-reset gate is
+`CapabilityNVIDIAReset`/`allowNVIDIAReset` only; (4) the device-holder
+preflight reads an NVIDIA report, so it silently no-ops elsewhere; (5) the
+quiesce stack manipulates NVIDIA components.
+
+Joint (1) was qualitatively different from the rest: the others withhold a
+CAPABILITY a second vendor does not have yet, while (1) broke the lifecycle
+for detections that vendor genuinely produces. Detection for AMD shipped in
+v0.2.2, which made it live rather than hypothetical — and it was found by
+assessment rather than by any test, because no test asserted that an incident
+of a vendor with no adapter could reach a terminal state at all. That absence
+is the more useful lesson: the seam was checked for what it withholds, never
+for what it strands.
+
+The seam itself is also positioned lower than the decisions that need it:
+`internal/accelerator` is consumed by the AGENT, which translates its model
+into wire structs, while the CONTROLLER — where every vendor-dependent
+decision is actually made — never imports it and answers `nvidia` at four
+call sites. A second vendor therefore needs a dispatch point invented, not
+merely an adapter written. None of this should be generalized speculatively;
+this ledger exists so the cost is a known quantity when a vendor lands.
 
 ### 2.4d Concurrency and lifecycle invariants (rounds 7–9)
 
@@ -684,7 +704,7 @@ operator-accepted controller stores. PostgreSQL is the HA choice: the DSN
 comes from a mounted Secret, the controller Deployment is stateless, and the
 store backend passes the same conformance suite as SQLite (see §2.5 for the
 honest scope of what that parity does and does not prove). Migration heads
-travel in lockstep (sqlite 0018 / postgres 0009 as of v0.2.1).
+travel in lockstep (sqlite 0019 / postgres 0010 as of v0.2.1).
 
 The operator provisions a `ReadWriteOnce` claim for SQLite, defaulting to
 `5Gi`. Reconciliation preserves API-selected/bound fields, permits only

@@ -85,7 +85,14 @@ func disruptivePlaybook() *playbook.Playbook {
 // inventory and an EVALUATING incident bound to it.
 func protectionFixture(t *testing.T, book *playbook.Playbook, gate *safety.Gate, plat platform.Platform, act actuator.Actuator) (*Controller, *sqlite.Store, *types.Incident) {
 	t.Helper()
-	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{book.Name: book}, nil)
+	return protectionFixtureBooks(t, book, map[string]*playbook.Playbook{book.Name: book}, gate, plat, act)
+}
+
+// protectionFixtureBooks is protectionFixture with a whole playbook set, so a
+// test can give the ladder a real escalation target.
+func protectionFixtureBooks(t *testing.T, book *playbook.Playbook, books map[string]*playbook.Playbook, gate *safety.Gate, plat platform.Platform, act actuator.Actuator) (*Controller, *sqlite.Store, *types.Incident) {
+	t.Helper()
+	engine, err := playbook.NewEngine(books, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,34 +271,105 @@ func TestMissingAcceleratorEvidenceIsCountedAsProtection(t *testing.T) {
 	assertDeferred(t, before, metrics.DeferAcceleratorEvidence)
 }
 
-// refusingActuator stands in for an agent whose idle guard says the device is
-// still in use.
-type refusingActuator struct{ err error }
+// refusingActuator stands in for an agent whose idle guard reports back. The
+// refusal code is what distinguishes "the device is busy" from "the probe
+// broke": both fail the step, only the first spared a workload.
+type refusingActuator struct {
+	err     error
+	refusal string
+}
 
 func (a refusingActuator) Name() string                              { return "refusing" }
 func (a refusingActuator) Capabilities() []types.ActionType          { return nil }
 func (a refusingActuator) Healthy(context.Context, types.Node) error { return nil }
 func (a refusingActuator) Execute(context.Context, types.Node, types.Action) (*types.ActionResult, error) {
-	return nil, a.err
+	return &types.ActionResult{OK: false, Error: a.err.Error(), Refusal: a.refusal}, nil
+}
+
+// idleRefusalFixture wires a guarded playbook that HAS somewhere to escalate
+// to. The escalation target is load-bearing: without it the ladder quarantines
+// on exhaustion anyway, and a test built on such a playbook passes whether the
+// guard stops the ladder or not — proving nothing about the thing it names.
+func idleRefusalFixture(t *testing.T, refusal string) (*Controller, *types.Incident, *playbook.Playbook) {
+	t.Helper()
+	guarded := &playbook.Playbook{
+		Name: "prot", Target: "gpu",
+		Steps: []playbook.Step{
+			{Name: "idle", Action: "agent.idle_check"},
+			{Name: "reset", Action: "agent.gpu_reset"},
+		},
+		OnFailure: playbook.OnFailure{EscalateTo: "hammer"},
+	}
+	// Strictly more destructive than the rung the guard protects — which is
+	// what makes escalating past a guard the wrong answer.
+	hammer := &playbook.Playbook{Name: "hammer", Target: "node", Steps: []playbook.Step{
+		{Name: "reboot", Action: "agent.reboot"},
+	}}
+	act := refusingActuator{err: errors.New("GPU 0 is still held by trainer(11621)"), refusal: refusal}
+	c, st, inc := protectionFixtureBooks(t, guarded, map[string]*playbook.Playbook{
+		guarded.Name: guarded, hammer.Name: hammer,
+	}, nil, nil, act)
+	inc.State = types.StateExecuting
+	if err := st.UpdateIncident(context.Background(), inc); err != nil {
+		t.Fatal(err)
+	}
+	return c, inc, guarded
 }
 
 // An idle guard that refuses is not a malfunction: it is the device saying it
 // is still working, and the destructive rung behind it not running.
 func TestIdleGuardRefusalIsCountedAsProtection(t *testing.T) {
-	book := &playbook.Playbook{Name: "prot", Target: "gpu", Steps: []playbook.Step{
-		{Name: "idle", Action: "agent.idle_check"},
-		{Name: "reset", Action: "agent.gpu_reset"},
-	}}
-	act := refusingActuator{err: errors.New("GPU 0 is still held by trainer(11621)")}
-	c, st, inc := protectionFixture(t, book, nil, nil, act)
-	ctx := context.Background()
-	inc.State = types.StateExecuting
-	if err := st.UpdateIncident(ctx, inc); err != nil {
-		t.Fatal(err)
-	}
+	c, inc, book := idleRefusalFixture(t, types.RefusalNotIdle)
 	before := snapshotDeferrals()
-	c.runStep(ctx, c.currentEngine(), inc, &book.Steps[0])
+	c.runStep(context.Background(), c.currentEngine(), inc, &book.Steps[0])
 	assertDeferred(t, before, metrics.DeferNotIdle)
+}
+
+// A broken idle probe fails the same step and fails just as closed, but it is
+// not evidence that anybody's job was spared. Counting it would report a
+// missing nvidia-smi as value delivered.
+func TestABrokenIdleProbeIsNotCountedAsProtection(t *testing.T) {
+	c, inc, book := idleRefusalFixture(t, "") // no refusal code: the probe could not run
+	before := snapshotDeferrals()
+	c.runStep(context.Background(), c.currentEngine(), inc, &book.Steps[0])
+	if delta := snapshotDeferrals()[metrics.DeferNotIdle] - before[metrics.DeferNotIdle]; delta != 0 {
+		t.Fatalf("deferrals[not_idle] moved by %v for a probe that never ran; "+
+			"a broken driver must not be reported as a protected workload", delta)
+	}
+}
+
+// The guard exists to stop the destructive rung. Escalating past it reaches for
+// a BIGGER hammer than the one just refused — which turns the guard into a
+// trigger. Whether to end a running job is a human's decision.
+//
+// The table is the point: the refusal CODE must not decide this. An agent that
+// predates the field sends none, and docs/upgrade.md mandates controller-first,
+// so every not-yet-upgraded node in a rolling upgrade lands in the second row.
+// Reading that absence as "not a refusal" escalated to a more destructive rung
+// on a device the guard had just failed to clear.
+func TestAnyIdleGuardFailureHandsOverInsteadOfEscalating(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		refusal string
+	}{
+		{"agent reports the device is busy", types.RefusalNotIdle},
+		{"agent predates the refusal field", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, inc, book := idleRefusalFixture(t, tc.refusal)
+			ctx := context.Background()
+			c.runStep(ctx, c.currentEngine(), inc, &book.Steps[0])
+
+			got, err := c.store.GetIncident(ctx, inc.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.State != types.StateNeedsHuman {
+				t.Fatalf("state = %s, want NEEDS_HUMAN: a guard that did not clear the device "+
+					"must never let the ladder climb to a more destructive step", got.State)
+			}
+		})
+	}
 }
 
 // A step failure that is NOT an idle guard is a failure, full stop. Counting it
@@ -376,8 +454,8 @@ func TestEvictedGPUWorkloadsAreCounted(t *testing.T) {
 	plat := &evictPlatform{}
 	c, _, inc := protectionFixture(t, disruptivePlaybook(), nil, plat, nil)
 	ctx := context.Background()
-	before := testutil.ToFloat64(metrics.WorkloadsEvicted.WithLabelValues("n1", string(types.ClassFellOffBus)))
-	nonGPU := testutil.ToFloat64(metrics.WorkloadsEvicted.WithLabelValues("n1", "cpu"))
+	before := testutil.ToFloat64(metrics.WorkloadsEvicted.WithLabelValues(string(types.ClassFellOffBus)))
+	nonGPU := testutil.ToFloat64(metrics.WorkloadsEvicted.WithLabelValues("cpu"))
 
 	if _, err := c.executePlatformStep(ctx, inc, "evict_gpu_workload",
 		&playbook.Step{Name: "evict", Action: "platform.evict_gpu_workload"}); err != nil {
@@ -386,11 +464,11 @@ func TestEvictedGPUWorkloadsAreCounted(t *testing.T) {
 	if len(plat.evicted) != 1 || plat.evicted[0] != "ml/trainer" {
 		t.Fatalf("evicted %v, want only the GPU workload", plat.evicted)
 	}
-	after := testutil.ToFloat64(metrics.WorkloadsEvicted.WithLabelValues("n1", string(types.ClassFellOffBus)))
+	after := testutil.ToFloat64(metrics.WorkloadsEvicted.WithLabelValues(string(types.ClassFellOffBus)))
 	if after-before != 1 {
 		t.Fatalf("evictions counted = %v, want exactly the one GPU workload", after-before)
 	}
-	if got := testutil.ToFloat64(metrics.WorkloadsEvicted.WithLabelValues("n1", "cpu")); got != nonGPU {
+	if got := testutil.ToFloat64(metrics.WorkloadsEvicted.WithLabelValues("cpu")); got != nonGPU {
 		t.Fatal("a workload that holds no GPU must not appear in the eviction count")
 	}
 }

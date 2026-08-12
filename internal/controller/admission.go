@@ -110,6 +110,20 @@ func (c *Controller) releaseRecoveredSlot(incidentID string) {
 // can never be filled in by a later report.
 var errResetTargetUnattributed = errors.New("physical NVIDIA reset requires a GPU UUID target, but this incident is unattributed (empty GPU UUID)")
 
+// errResetVendorMismatch marks a reset step that can NEVER run for this
+// incident because the action is scoped to one accelerator vendor and the
+// incident is about another's device.
+//
+// It is a distinct sentinel from "evidence has not arrived" on purpose. The
+// evidence path HOLDS, because an agent that has not reported yet will. A
+// vendor mismatch never resolves: the target UUID cannot appear in that
+// vendor's accelerator report at any future time. Held as missing evidence,
+// such an incident cordons the node, drains every workload off it, then
+// re-denies the reset on every reconcile tick with nothing ever reaching a
+// human — silent, unbounded capacity loss. Refusing permanently, before the
+// first disruptive step, is the only safe reading.
+var errResetVendorMismatch = errors.New("this incident's accelerator vendor cannot be reset by a vendor-scoped reset action")
+
 // confinementResult classifies a destructive step against the declared
 // destructiveExecution blast radius.
 type confinementResult int

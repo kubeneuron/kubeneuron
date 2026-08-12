@@ -56,6 +56,52 @@ type RecoveryReport struct {
 	// registered GPU inventory and were therefore charged one GPU. It exists
 	// so the undercount is visible instead of silently flattering the report.
 	AssumedSingleGPU int `json:"assumed_single_gpu"`
+	// DryRunExcluded counts incidents left out because their installation was
+	// in dry-run and therefore executed nothing. Reported rather than hidden:
+	// on a fresh install — dry-run is the default — an empty report with a
+	// large count here means "the system is watching but not acting", which
+	// is a different and much better answer than a fabricated one.
+	DryRunExcluded int `json:"dry_run_excluded"`
+	// Simulated is what the excluded dry-run incidents WOULD have produced,
+	// present only when there were any. It is deliberately a separate object
+	// rather than a set of fields alongside the real ones: nothing here may be
+	// added to a number above, and a reader skimming the headline must not be
+	// able to mistake one for the other.
+	//
+	// It exists because dry-run is the shipped default and the pilot checklist
+	// tells operators to stay in it until they have watched the system decide.
+	// For that entire period every number above is zero by construction, so
+	// the question that decides whether to enable enforcement — "what would
+	// this have got us?" — had a blank table for an answer.
+	Simulated *SimulatedRecovery `json:"simulated,omitempty"`
+}
+
+// SimulatedRecovery is the dry-run half of the window: the same arithmetic
+// over incidents that ran the whole ladder against synthetic successes.
+//
+// Every field is named in the conditional on purpose. A dry-run incident
+// reached RESOLVED without touching a node, so "recovered" would be a claim
+// about capacity that was never returned; "would recover" is a claim about
+// what the policy decided, which is exactly what a pilot is evaluating and is
+// all this can honestly support.
+type SimulatedRecovery struct {
+	Incidents int `json:"incidents"`
+	// WouldRecover counts dry-run incidents that reached RESOLVED, i.e. the
+	// ladder ran to completion without needing a human.
+	WouldRecover int `json:"would_recover"`
+	// WouldRecoverUnattended is the subset that never minted an approval
+	// round — the automation's projected yield if enforcement were on.
+	WouldRecoverUnattended int `json:"would_recover_unattended"`
+	// DegradedGPUHours is real: the hardware was genuinely degraded for this
+	// long. Only the recovery is hypothetical.
+	DegradedGPUHours float64 `json:"degraded_gpu_hours"`
+	// WouldRecoverGPUHours is the share belonging to incidents the ladder
+	// carried to RESOLVED. Nothing was returned to service; this is what
+	// enforcement would have addressed.
+	WouldRecoverGPUHours float64 `json:"would_recover_gpu_hours"`
+	// MTTR here is how long the ladder TOOK to decide, not how long a repair
+	// took — no repair happened.
+	MTTR RecoveryLatency `json:"mttr"`
 }
 
 // RecoveryLatency is a duration distribution computed from the raw incident

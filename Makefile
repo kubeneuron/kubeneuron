@@ -16,7 +16,7 @@ IMAGE_TARGETS := operator controller agent kubeneuronctl
 image_stage = $(if $(filter kubeneuronctl,$(1)),cli,$(1))
 GENERATED_PATHS := api/v1alpha1/zz_generated.deepcopy.go config/crd/bases deploy/helm/kubeneuron/crds
 
-.PHONY: all build test test-integration-kind kind-clean lint clean tidy generate verify-generate proto web docs docs-serve docker
+.PHONY: all build test test-integration-kind kind-clean lint clean tidy generate verify-generate proto web docs docs-serve docker gates gates-full verify-docs verify-image mirror
 
 all: build
 
@@ -31,9 +31,55 @@ $(BIN_DIR):
 test:
 	$(GO) test ./...
 
+# --- gates -------------------------------------------------------------------
+#
+# The gate set used to live only as CI job steps and as prose in a checkpoint
+# document. That was survivable while every push ran CI; it stopped being so
+# when Actions was disabled on the private development repository, because the
+# public repository now sees one squashed commit per release — CI runs after
+# every decision has already been made.
+#
+# Two tiers, deliberately. Bundling a four-second check with a forty-minute one
+# is how the four-second check stops being run: `gates` is fast enough to run
+# before every commit, `gates-full` is what a release deserves.
+
+## gates: everything that finishes in minutes. Run before every commit.
+gates:
+	$(MAKE) verify-generate
+	$(GO) build ./...
+	$(MAKE) lint
+	$(GO) test -race ./...
+	$(MAKE) verify-docs
+	@echo
+	@echo "gates: OK (generate, build, lint, race tests, docs)"
+	@echo "note: the PostgreSQL conformance suite and the kind/image/release"
+	@echo "      gates are in 'make gates-full' — this tier proves the code,"
+	@echo "      not the artifact."
+
+## gates-full: gates plus everything that needs Docker or a cluster.
+gates-full: gates
+	$(MAKE) verify-image
+	$(MAKE) test-integration-kind
+	@echo
+	@echo "gates-full: OK (code gates, published images, kind integration)"
+
+verify-docs:
+	bash hack/verify-docs.sh
+
+verify-image:
+	bash hack/verify-image.sh
+
+## mirror: publish this tree to the public repository. See hack/mirror.sh.
+mirror:
+	bash hack/mirror.sh
+
 lint:
 	$(GO) vet ./...
 	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run ./... || echo "golangci-lint not installed, skipped"
+# actionlint (with its embedded shellcheck) is the one CI linter that golangci-lint
+# does not cover, and workflow YAML is the one place a defect cannot be caught by
+# running the code. It is pinned to the same version CI uses.
+	$(GO) run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
 
 tidy:
 	$(GO) mod tidy

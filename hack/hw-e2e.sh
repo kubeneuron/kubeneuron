@@ -574,12 +574,29 @@ cmd_test_dcgm() {
 		return 0
 	fi
 
-	log "test-dcgm: DCGM injection unavailable; asserting the live dmon layout parses cleanly"
+	# The fallback. Two assertions, because the first version of this branch
+	# asserted only the absence of a parse warning — and parseDCGMXID had no
+	# code path that could emit one, so it passed without proving anything and
+	# the release notes then claimed the DCGM source had been exercised.
+	log "test-dcgm: DCGM injection unavailable; asserting the agent actually reads the live dmon layout"
+
+	# 1. The warning now exists, so its absence means something. An agent that
+	#    cannot parse this DCGM build's layout says so once, loudly.
 	if kubectl -n "$RUNTIME_NAMESPACE" logs "$agent_pod" --tail=-1 2>/dev/null |
-		grep -qiE "gpuhealth.*(parse|column|layout).*(error|warn|fail)"; then
-		die "agent logged gpuhealth parse problems against the live dmon layout"
+		grep -qiE "dmon printed rows this build cannot parse"; then
+		die "the agent cannot parse this DCGM build's dmon layout; the DCGM detection source is dark"
 	fi
-	log "test-dcgm: PASS (fallback: no gpuhealth parse warnings against live dmon output)"
+
+	# 2. Positive evidence that the DCGM path is the one serving this node. A
+	#    parser that is never invoked also emits no warning, which is the hole
+	#    the assertion above cannot cover alone: an agent quietly falling back
+	#    to the narrower nvidia-smi source would pass it.
+	local active
+	active=$(agent_health_source "$agent_ip")
+	if [ "$active" != "dcgm" ]; then
+		die "the agent's active health source is '${active}', not dcgm; this phase would prove nothing about DCGM"
+	fi
+	log "test-dcgm: PASS (fallback: the DCGM source is serving this node and parses its dmon layout)"
 }
 
 # cmd_test_verify_recur asserts the verification NEGATIVE path: a signal that
@@ -801,6 +818,18 @@ cmd_reap() {
 # gpuhealth_detections reads the agent's DCGM/nvidia-smi source counter from
 # a disposable curl pod: the agent image is distroless, so exec-based probes
 # cannot work there.
+# agent_health_source prints which second-source probe served the agent's last
+# poll: dcgm, nvidia-smi, or none.
+agent_health_source() {
+	local ip="$1" out
+	out=$(kubectl -n "$RUNTIME_NAMESPACE" run "kn-src-$RANDOM" --rm -i --restart=Never \
+		--image=curlimages/curl:8.10.1 --quiet -- \
+		curl -fsS --max-time 10 "http://${ip}:9402/metrics" 2>/dev/null |
+		grep -E '^kubeneuron_agent_health_source\{source="[a-z-]+"\} 1$' |
+		sed -E 's/.*source="([a-z-]+)".*/\1/' | head -1 || true)
+	printf '%s' "${out:-none}"
+}
+
 gpuhealth_detections() {
 	local ip="$1" out
 	out=$(kubectl -n "$RUNTIME_NAMESPACE" run "kn-metrics-$RANDOM" --rm -i --restart=Never \

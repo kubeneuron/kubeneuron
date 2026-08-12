@@ -126,7 +126,7 @@ Concretely, the decided semantics:
 3. **The preflight is all-instances-idle, not parent-idle.** Every instance on
    the parent must be free of compute processes and of device-node holders
    before a reset. A busy instance blocks the reset exactly as a busy GPU does
-   today; `wait_idle` bounds the wait, and the ladder escalates on expiry. This
+   today; `wait_idle` bounds the wait; on expiry the ladder STOPS and hands the incident to a human rather than escalating, because every rung above an idle guard is more destructive than the one the guard just failed to clear. This
    is C.
 4. **Eviction is explicit, enumerated, and approved.** When the ladder needs the
    instances emptied, the step evicts the pods holding them — it never relies on

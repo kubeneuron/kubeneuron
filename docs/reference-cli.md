@@ -42,6 +42,33 @@ capacity was degraded over a window, how much of it came back, and how much
 came back without waking anybody. `--since` accepts `24h`, `7d`, `4w`
 (default `7d`); `--json` emits the same numbers as a document.
 
+### On a dry-run fleet
+
+Dry-run is the shipped default, and the [pilot
+checklist](pilot-checklist.md) tells you to stay in it until you have watched
+the system decide. Every number above is zero for that whole period, by
+construction: dry-run executes nothing, so it recovers nothing, and counting
+its synthetic successes as recovered capacity would make the one number this
+report exists to be trusted on the one that lies out of the box.
+
+So those incidents are reported separately, under `SIMULATED`, with the same
+arithmetic and conditional names:
+
+```
+SIMULATED — what dry-run WOULD have done (nothing was executed)
+  incidents             37
+  would recover         31 (27 without asking a human)
+  degraded GPU-hours    412.8   ← real: the hardware was degraded this long
+  would recover         366.5   ← hypothetical: no capacity was returned
+  ladder decision time  p50 12m22s  p90 52m0s
+```
+
+The degraded hours are real — the hardware was genuinely in that state. Only
+the recovery is hypothetical. Read this as *what the policy would have
+chosen*, which is exactly what a dry-run pilot is evaluating, and never as
+capacity returned. In `--json` it is the `simulated` object, absent entirely
+when the window contains no dry-run incidents.
+
 The numbers come from the controller's **incident store**, not from
 Prometheus: the store is the ground truth the outcome metrics are derived
 from, so the report is exact rather than bucket-interpolated, it survives a

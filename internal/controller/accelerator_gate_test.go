@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -401,4 +402,136 @@ func TestVerifyRequiresRuntimeEvidenceForRealIncidents(t *testing.T) {
 			t.Fatalf("state = %s, want VERIFYING hold when the GPU vanished", got.State)
 		}
 	})
+}
+
+// TestVendorWithoutARuntimeAdapterVerifiesOnTheHeartbeat is the AMD dead-end.
+//
+// verifyRuntimeEvidence used to read an NVIDIA accelerator report for every
+// GPU-scoped incident regardless of the incident's vendor, and only the NVIDIA
+// adapter exists. On a perfectly healthy AMD node no report is ever produced,
+// so a device-scoped AMD incident held for the evidence deadline and then
+// parked in NEEDS_HUMAN — after the cordon and drain had already run, with a
+// reason naming no action anybody could take. Every such incident landed as
+// outcome="needs_human", so an AMD fleet's recovery report read 0% recovered
+// for a system that had recovered them.
+func TestVendorWithoutARuntimeAdapterVerifiesOnTheHeartbeat(t *testing.T) {
+	newFixture := func(t *testing.T) (*Controller, *storesqlite.Store, context.Context) {
+		t.Helper()
+		st, err := storesqlite.Open(":memory:")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		engine, err := playbook.NewEngine(map[string]*playbook.Playbook{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		log := slog.New(slog.NewTextHandler(io.Discard, nil))
+		c := New(st, st, engine,
+			safety.NewGate(safety.Limits{MaxConcurrentRemediations: 4, MaxConcurrentReboots: 1}),
+			nil, nil, nil, &notify.Log{Logger: log}, log)
+		c.SetTimings(time.Millisecond, time.Hour)
+		ctx := context.Background()
+		// A healthy node: fresh heartbeat, registered inventory.
+		if err := st.UpsertNode(ctx, &types.Node{
+			Name: "node-amd", UID: "node-amd-uid", AgentLastSeen: time.Now(),
+			GPUs: []types.GPUInfo{{Index: 0, UUID: "GPU-amd-0"}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return c, st, ctx
+	}
+
+	incident := func(vendor types.AcceleratorVendor) *types.Incident {
+		changed := time.Now().Add(-15 * time.Minute) // past the 10m evidence floor
+		return &types.Incident{
+			ID:     "inc-" + string(vendor),
+			Target: types.Target{Node: "node-amd", GPUUUID: "GPU-amd-0"},
+			Class:  types.ClassECCDBE, State: types.StateVerifying, Vendor: vendor,
+			OpenedAt: changed, UpdatedAt: changed, StateChangedAt: changed,
+		}
+	}
+
+	t.Run("amd resolves rather than dead-ending", func(t *testing.T) {
+		c, st, ctx := newFixture(t)
+		inc := incident(types.AcceleratorVendorAMD)
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.advance(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := st.GetIncident(ctx, inc.ID)
+		if got.State != types.StateResolved {
+			t.Fatalf("state = %s, want RESOLVED: this build has no AMD runtime adapter, so the "+
+				"report it was waiting for can never be produced by any agent", got.State)
+		}
+	})
+
+	// The other half, and the one that must not regress: NVIDIA is attested by
+	// this build, so a missing report there is a degraded agent, not an absent
+	// runtime — and it must still fail closed.
+	t.Run("nvidia still fails closed without its report", func(t *testing.T) {
+		c, st, ctx := newFixture(t)
+		inc := incident(types.AcceleratorVendorNVIDIA)
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.advance(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := st.GetIncident(ctx, inc.ID)
+		if got.State != types.StateNeedsHuman {
+			t.Fatalf("state = %s, want NEEDS_HUMAN: a missing report from a vendor this build "+
+				"CAN attest is a degraded agent, and resolving on it would be the one "+
+				"direction verification must never fail", got.State)
+		}
+	})
+
+	// An incident that never learned its vendor keeps the conservative path.
+	t.Run("unknown vendor still fails closed", func(t *testing.T) {
+		c, st, ctx := newFixture(t)
+		inc := incident("")
+		inc.ID = "inc-unknown"
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.advance(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := st.GetIncident(ctx, inc.ID)
+		if got.State != types.StateNeedsHuman {
+			t.Fatalf("state = %s, want NEEDS_HUMAN for an unattributed incident", got.State)
+		}
+	})
+}
+
+// TestAttestedVendorsMatchTheAdapters fails the build when an accelerator
+// adapter package lands without being declared attested — otherwise the new
+// vendor's incidents would silently take the reduced-verification path while a
+// real adapter sat there able to attest them.
+func TestAttestedVendorsMatchTheAdapters(t *testing.T) {
+	entries, err := os.ReadDir("../accelerator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		vendor := types.AcceleratorVendor(e.Name())
+		if !vendor.Valid() {
+			continue
+		}
+		if !vendorRuntimeAttested(vendor) {
+			t.Errorf("internal/accelerator/%s exists but %s is not in attestedRuntimeVendors; "+
+				"its incidents would verify on the heartbeat alone despite having a real adapter", e.Name(), vendor)
+		}
+	}
+	for vendor := range attestedRuntimeVendors {
+		if _, err := os.Stat("../accelerator/" + string(vendor)); err != nil {
+			t.Errorf("attestedRuntimeVendors claims %s, but internal/accelerator/%s does not exist; "+
+				"incidents would wait for a report nothing can produce", vendor, vendor)
+		}
+	}
 }

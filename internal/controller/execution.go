@@ -142,11 +142,32 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 		metrics.StepsExecuted.WithLabelValues("failed").Inc()
 		// An idle guard that refuses is the device saying "I am still working".
 		// The rung it stands in front of does not run, which is protection, not
-		// a malfunction — count it as such before the ladder escalates.
-		c.recordIdleRefusal(inc, step)
+		// a malfunction — count it as such before the ladder moves on.
+		// The control decision asks only "was this a guard?" — see
+		// idleGuardStopped. The metric asks the narrower question.
+		stopped := idleGuardStopped(step)
+		c.recordIdleRefusal(inc, step, result)
 		c.log.Warn("step failed", "incident", inc.ID, "step", step.Name, "err", err)
 		if auditErr := c.appendAudit(ctx, inc, "system", step.Name, "FAILED: "+err.Error()); auditErr != nil {
 			c.log.Error("audit append failed", "incident", inc.ID, "err", auditErr)
+		}
+		if stopped {
+			// Do NOT escalate. Escalation switches to the failure playbook,
+			// whose rungs are by construction bigger hammers than the one that
+			// just got stopped — so a guard that refused BECAUSE live work is
+			// on the device would be answered by reaching for something more
+			// destructive. That inverts the guard into a trigger.
+			//
+			// Whether to end somebody's running job is a human's call, so the
+			// incident is handed over with the holders named in the audit
+			// trail. The node keeps whatever cordon the ladder already applied,
+			// so nothing new lands on it while the decision is pending.
+			reason := fmt.Sprintf("%s did not clear the device (%v); automation stops here "+
+				"rather than escalating to a more destructive step", step.Name, err)
+			if qErr := c.quarantine(ctx, inc, reason); qErr != nil {
+				c.log.Error("quarantine after an idle refusal failed", "incident", inc.ID, "err", qErr)
+			}
+			return
 		}
 		if escErr := c.escalate(ctx, inc, fmt.Sprintf("step %s failed: %v", step.Name, err)); escErr != nil {
 			c.log.Error("escalation failed", "incident", inc.ID, "err", escErr)
@@ -292,7 +313,7 @@ func (c *Controller) executePlatformStep(ctx context.Context, inc *types.Inciden
 			// the series is what the fleet actually lost rather than what the
 			// step intended. Dry-run never reaches here (executeStep returns
 			// earlier), which is why no DryRun guard is needed.
-			metrics.WorkloadsEvicted.WithLabelValues(node, string(inc.Class)).Inc()
+			metrics.WorkloadsEvicted.WithLabelValues(string(inc.Class)).Inc()
 		}
 		if evicted == 0 {
 			// "evicted 0" used to read as success and let the ladder proceed

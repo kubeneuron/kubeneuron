@@ -10,10 +10,21 @@ package nvml
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
+
+// ErrNotIdle means the device is genuinely still held by live processes — the
+// idle guard REFUSING, which is the protection working.
+//
+// It exists to be distinguishable from the other way an idle check fails: a
+// probe that could not run at all (nvidia-smi missing, a wedged driver, a
+// timeout). Both fail closed and neither lets a reset through, but only the
+// first is evidence that a workload was spared, and a control plane that
+// counts the second as protection reports a broken driver as value delivered.
+var ErrNotIdle = errors.New("device is not idle")
 
 // GPUDriver is what the agent needs from NVML.
 type GPUDriver interface {

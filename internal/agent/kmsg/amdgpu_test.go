@@ -41,11 +41,29 @@ func TestParseAMDGPULineFamilies(t *testing.T) {
 		},
 		{
 			name:      "compute ring timeout without kmsg prefix",
-			line:      `amdgpu 0000:c6:00.0: amdgpu: ring comp_1.0.1 timeout, but soft recovered`,
+			line:      `amdgpu 0000:c6:00.0: amdgpu: ring comp_1.0.1 timeout, signaled seq=44, emitted seq=46`,
 			wantOK:    true,
 			wantCode:  codeAMDRingTimeout,
 			wantPCI:   "0000:c6:00.0",
 			wantAttrs: map[string]string{"ring": "comp_1.0.1"},
+		},
+		{
+			name:        "soft-recovered ring timeout is not a hang",
+			line:        `amdgpu 0000:c6:00.0: amdgpu: ring comp_1.0.1 timeout, but soft recovered`,
+			wantOK:      false,
+			wantRefusal: amdRefusalSoftRecov,
+			// The driver killed the offending job and the engine kept running.
+			// No reset, no lost device. Treating this as a hang cordons and
+			// drains a node that never stopped working — and a kernel that
+			// soft-recovers once tends to do it on a loop.
+			why: "a soft recovery is the driver succeeding, not a fault to remediate",
+		},
+		{
+			name:        "RAS all-clear in the countless spelling",
+			line:        `3,2212,4053155111,-;amdgpu 0000:c3:00.0: amdgpu: no uncorrectable hardware errors detected in umc block`,
+			wantOK:      false,
+			wantRefusal: amdRefusalRASClear,
+			why:         "the fault spelling is a literal substring of the all-clear; without a negation guard every clean poll opens an ECC incident",
 		},
 		{
 			name:      "RAS uncorrectable errors with a nonzero count",

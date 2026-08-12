@@ -7,6 +7,8 @@ import (
 
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
+
+	"github.com/kubeneuron/kubeneuron/internal/platform"
 )
 
 // This file is node resolution: how the controller answers "what do I know
@@ -83,23 +85,66 @@ func (c *Controller) nodeLabels(ctx context.Context, node string) map[string]str
 // with no labels is a resolved answer (empty map, no error): it simply cannot
 // match a non-empty selector.
 func (c *Controller) nodeLabelsForConfinement(ctx context.Context, node string) (map[string]string, error) {
+	// The PLATFORM first, deliberately, and the store only as a fallback.
+	//
+	// This is the blast-radius decision — the one lookup in the system where a
+	// stale answer is a safety failure rather than a display glitch. Reading
+	// the store's cached copy first got both directions wrong. A cached label
+	// that still matches lets a destructive step run on a node the operator
+	// has just taken OUT of the declared radius, which is the direction that
+	// costs somebody a machine. A cached label that has not caught up yet
+	// refuses a node the operator just brought IN — and a resolved non-match
+	// quarantines rather than retrying, so that incident never recovers on its
+	// own either.
+	//
+	// The cost is one lookup per destructive step, and on Kubernetes it is not
+	// even an apiserver call: ListNodes is served from the watch-maintained
+	// informer cache, so this is both fresher and cheaper than it looks.
+	// An UNFILTERED read of the exact node, when the platform can do one. This
+	// is the only source that answers the question actually being asked: what
+	// labels does this machine carry right now. ListNodes below is the GPU
+	// inventory, and a node that has dropped out of it — a device plugin
+	// restarting, a driver reloading — would otherwise make confinement
+	// permanently unresolvable and hold every destructive step forever, in
+	// exactly the conditions under which remediation is wanted.
+	if labeler, ok := c.platform.(platform.NodeLabeler); ok && c.platform != nil {
+		labels, found, err := labeler.NodeLabels(ctx, node)
+		switch {
+		case err == nil && found:
+			return labels, nil
+		case err == nil && !found:
+			// A resolved absence: the machine is gone. That is an answer, and
+			// it cannot match a non-empty selector.
+			return nil, fmt.Errorf("node %s does not exist", node)
+		}
+		// A platform error falls through to the sources below rather than
+		// becoming an unresolvable answer on a blip.
+	}
+	if c.platform != nil {
+		nodes, err := c.platform.ListNodes(ctx)
+		if err == nil {
+			for _, n := range nodes {
+				if n.Name != node {
+					continue
+				}
+				if n.Labels == nil {
+					return map[string]string{}, nil
+				}
+				return n.Labels, nil
+			}
+			// The platform answered and this node is not in it. Fall through
+			// to the store rather than concluding anything: a GPU-less node,
+			// or one the platform filters out of its GPU inventory, still has
+			// labels worth checking before a destructive step.
+		}
+		// A platform error falls through too — a blip must not become an
+		// unresolvable answer while the store still holds a usable one.
+	}
 	if n, err := c.store.GetNode(ctx, node); err == nil && len(n.Labels) > 0 {
 		return n.Labels, nil
 	}
 	if c.platform == nil {
 		return nil, fmt.Errorf("node %s labels are unavailable (no platform configured and not labeled in inventory)", node)
-	}
-	nodes, err := c.platform.ListNodes(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("listing nodes: %w", err)
-	}
-	for _, n := range nodes {
-		if n.Name == node {
-			if n.Labels == nil {
-				return map[string]string{}, nil
-			}
-			return n.Labels, nil
-		}
 	}
 	return nil, fmt.Errorf("node %s is not present in the current inventory", node)
 }

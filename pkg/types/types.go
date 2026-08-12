@@ -65,6 +65,17 @@ const (
 	// that made it and rejects a result from a different boot: a reboot
 	// mid-execution makes the outcome unknown, not complete.
 	AgentBootIDHeader = "X-KubeNeuron-Executor-Boot-Id"
+	// AgentActionRefusalHeader carries an action's machine-readable refusal
+	// code alongside its result.
+	//
+	// A HEADER, not a field on the result body, for the reason stated at the
+	// v2 registration route above: the result route strict-decodes, so an
+	// unknown field is a 400. A new agent posting to a controller that
+	// predates the code — which happens on rollback, and whenever agents are
+	// upgraded first — would have had every result rejected, retried, and
+	// finally timed out. An unknown HEADER is ignored by every version, in
+	// both directions, with no negotiation and no second route.
+	AgentActionRefusalHeader = "X-KubeNeuron-Action-Refusal"
 	// AgentEventRejectedHeader marks a controller response that SEMANTICALLY
 	// rejects the posted event: retrying can never succeed, so the agent must
 	// drop the event instead of spooling or replaying it. The header — not the
@@ -184,6 +195,14 @@ type Incident struct {
 	Attempt    int           `json:"attempt"`
 	DryRun     bool          `json:"dry_run"`
 	SignalSeen int           `json:"signals_seen"`
+	// Vendor is the accelerator vendor the originating fault named, empty
+	// when the signal did not say (every XID, every alert, and every row
+	// that predates the column). It exists so a preflight can tell an
+	// IMPOSSIBLE device action from one whose evidence has not arrived yet:
+	// a reset scoped to one vendor can never satisfy an incident about
+	// another's device, and treating that as missing evidence holds the
+	// incident — after cordon and drain — forever.
+	Vendor AcceleratorVendor `json:"vendor,omitempty"`
 	// RemediationSlotHeld records durably that this incident holds its
 	// target's safety-gate remediation slot: set in the same transaction as
 	// its first EXECUTING transition, cleared in the same transaction as the
@@ -304,13 +323,35 @@ type QueuedAction struct {
 
 // ActionResult is the outcome of executing an Action.
 type ActionResult struct {
-	ActionID   string    `json:"action_id"`
-	OK         bool      `json:"ok"`
-	Output     string    `json:"output,omitempty"`
-	Error      string    `json:"error,omitempty"`
+	ActionID string `json:"action_id"`
+	OK       bool   `json:"ok"`
+	Output   string `json:"output,omitempty"`
+	Error    string `json:"error,omitempty"`
+	// Refusal is a machine-readable reason the action declined to act, as
+	// distinct from failing to act. Empty means the failure was not a
+	// recognised refusal — including on an older agent that predates it,
+	// which is why every consumer must treat an empty value as "no evidence
+	// of a refusal" rather than guessing from Error's prose. Nothing that
+	// chooses between stopping and escalating may depend on it; see
+	// idleGuardStopped.
+	//
+	// `json:"-"` is deliberate: this travels in AgentActionRefusalHeader, not
+	// in the strict-decoded result body. The cost is that an agent restart
+	// between execution and the result post loses the code, so the protection
+	// metric under-counts — the same honest direction it already documents.
+	Refusal    string    `json:"-"`
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at"`
 }
+
+// Refusal codes carried in ActionResult.Refusal. They are wire values: renaming
+// one silently changes what a controller counts as protection.
+const (
+	// RefusalNotIdle: an idle guard found live processes still holding the
+	// device. The guard did its job — this is the protection working, and it
+	// is NOT the same event as an idle probe that could not run at all.
+	RefusalNotIdle = "not_idle"
+)
 
 // GPUInfo describes a single GPU on a node.
 type GPUInfo struct {

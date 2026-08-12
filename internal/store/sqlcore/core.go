@@ -283,12 +283,12 @@ func (q *Queries) CreateIncident(ctx context.Context, inc *types.Incident) error
 	_, err := q.db.ExecContext(ctx, `
 		INSERT INTO incidents (id, node, gpu_uuid, gpu_index, class, state, playbook,
 		                       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
-		                       opened_at, updated_at, state_changed_at, version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		                       vendor, opened_at, updated_at, state_changed_at, version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		inc.ID, inc.Target.Node, inc.Target.GPUUUID, inc.Target.GPUIndex,
 		string(inc.Class), string(inc.State), inc.Playbook,
 		inc.StepIndex, inc.Attempt, b2i(inc.DryRun), inc.SignalSeen, b2i(inc.RemediationSlotHeld), inc.ApprovalEpoch,
-		ts(inc.OpenedAt), ts(inc.UpdatedAt), ts(stateChanged), inc.Version)
+		string(inc.Vendor), ts(inc.OpenedAt), ts(inc.UpdatedAt), ts(stateChanged), inc.Version)
 	return err
 }
 
@@ -305,11 +305,12 @@ func (q *Queries) UpdateIncident(ctx context.Context, inc *types.Incident) error
 	}
 	res, err := q.db.ExecContext(ctx, `
 		UPDATE incidents SET state=?, playbook=?, step_index=?, attempt=?, dry_run=?,
-		                     signals_seen=?, remediation_slot_held=?, approval_epoch=?, updated_at=?, state_changed_at=?, resolved_at=?,
+		                     signals_seen=?, remediation_slot_held=?, approval_epoch=?, vendor=?, updated_at=?, state_changed_at=?, resolved_at=?,
 		                     version=version+1
 		WHERE id=? AND version=?`,
 		string(inc.State), inc.Playbook, inc.StepIndex, inc.Attempt, b2i(inc.DryRun),
-		inc.SignalSeen, b2i(inc.RemediationSlotHeld), inc.ApprovalEpoch, ts(inc.UpdatedAt), ts(inc.StateChangedAt), resolved, inc.ID, inc.Version)
+		inc.SignalSeen, b2i(inc.RemediationSlotHeld), inc.ApprovalEpoch, string(inc.Vendor),
+		ts(inc.UpdatedAt), ts(inc.StateChangedAt), resolved, inc.ID, inc.Version)
 	if err != nil {
 		return err
 	}
@@ -424,19 +425,19 @@ func (q *Queries) CountIncidentsByState(ctx context.Context) (map[types.Incident
 const incidentSelect = `
 	SELECT id, node, gpu_uuid, gpu_index, class, state, playbook,
 	       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
-	       opened_at, updated_at, state_changed_at, resolved_at, version
+	       vendor, opened_at, updated_at, state_changed_at, resolved_at, version
 	FROM incidents`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
 func scanIncident(r rowScanner) (*types.Incident, error) {
 	var inc types.Incident
-	var class, state, opened, updated, stateChanged string
+	var class, state, vendor, opened, updated, stateChanged string
 	var dryRun, slotHeld int
 	var resolved sql.NullString
 	err := r.Scan(&inc.ID, &inc.Target.Node, &inc.Target.GPUUUID, &inc.Target.GPUIndex,
 		&class, &state, &inc.Playbook, &inc.StepIndex, &inc.Attempt, &dryRun,
-		&inc.SignalSeen, &slotHeld, &inc.ApprovalEpoch, &opened, &updated, &stateChanged, &resolved, &inc.Version)
+		&inc.SignalSeen, &slotHeld, &inc.ApprovalEpoch, &vendor, &opened, &updated, &stateChanged, &resolved, &inc.Version)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
@@ -445,6 +446,7 @@ func scanIncident(r rowScanner) (*types.Incident, error) {
 	}
 	inc.Class = types.ProblemClass(class)
 	inc.State = types.IncidentState(state)
+	inc.Vendor = types.AcceleratorVendor(vendor)
 	inc.DryRun = dryRun != 0
 	inc.RemediationSlotHeld = slotHeld != 0
 	inc.OpenedAt = parseTS(opened)

@@ -110,6 +110,27 @@ func (g *Gate) DryRun() bool { g.mu.Lock(); defer g.mu.Unlock(); return g.limits
 // SetDryRun toggles dry-run mode at runtime (admin API).
 func (g *Gate) SetDryRun(v bool) { g.mu.Lock(); g.limits.DryRun = v; g.mu.Unlock() }
 
+// ApplyLimits installs a new limit set on a RUNNING gate, leaving every piece
+// of live state — held slots, cooldowns, pause — exactly where it is.
+//
+// It exists because the controller reloads its configuration in place rather
+// than rolling its Deployment (the operator keeps the config-digest off the
+// pod template on purpose: under leader election a rollout deadlocks). Until
+// this, the reload re-installed playbooks, profiles and the confinement
+// selector but never these, so `spec.safety.executionMode` did nothing at all
+// to a running controller — an installation switched to Enabled executed
+// nothing, and one switched back to DryRun to STOP damage kept executing.
+//
+// Lowering a concurrency cap below what is currently held is allowed and does
+// not evict anything: the in-flight work finishes and the new cap binds the
+// next admission. Preempting a running remediation to satisfy a config change
+// would be a more violent act than the change asked for.
+func (g *Gate) ApplyLimits(limits Limits) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.limits = limits
+}
+
 // Allow admits the FIRST step of a remediation on a target, reserving the
 // target's remediation slot and the step's reboot-class slot. The remediation
 // slot is held until ReleaseRemediation (the incident terminalized); the step's

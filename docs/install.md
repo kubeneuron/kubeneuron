@@ -37,6 +37,22 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
     Pin a concrete version in anything repeatable: it selects the matching
     signed images and install manifest.
 
+!!! note "What the release pins, and how to check it yourself"
+    Every release publishes `images.txt` — the four images by digest — and
+    both the install manifest and the versioned installer deploy those exact
+    digests, so a re-pushed tag cannot change what an already-downloaded
+    artifact installs. Override either component with `CONTROLLER_IMAGE` /
+    `AGENT_IMAGE` if you mirror images into your own registry.
+
+    The assets are covered by a single `checksums-vX.Y.Z.txt`, signed with
+    cosign against this repository's GitHub OIDC identity. To verify a release
+    end to end — asset set, checksum coverage, signature, and digest pinning —
+    run the same script the release pipeline runs on itself:
+
+    ```sh
+    hack/verify-release.sh v0.2.2
+    ```
+
 ## 2. Namespace and root object
 
 Create the runtime namespace yourself (the operator deliberately never

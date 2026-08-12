@@ -68,9 +68,14 @@ const (
 	CodeECCUncorr   = "ecc-uncorrectable"
 	CodeECCCorrRate = "ecc-correctable-rate"
 	CodePageRetire  = "page-retirement"
-	CodeXGMILink    = "xgmi-link-error"
-	CodeThermal     = "thermal-throttle"
-	CodeGPULost     = "gpu-lost"
+	// CodePageRetireExhausted is the peer of NVIDIA's XID 64: not "a page was
+	// retired" (the mechanism working) but "the device has retired so many
+	// pages that its spare budget is gone". It is a level, not an event — the
+	// GPU is out of spares right now — so it is emitted as a state series.
+	CodePageRetireExhausted = "page-retirement-exhausted"
+	CodeXGMILink            = "xgmi-link-error"
+	CodeThermal             = "thermal-throttle"
+	CodeGPULost             = "gpu-lost"
 
 	// defaultCorrectableRateMinDelta is how many NEW correctable ECC errors a
 	// GPU must accumulate since the last report before this source raises the
@@ -80,6 +85,16 @@ const (
 	// chosen WITHOUT AMD field data — operators with real fleets should set
 	// CorrectableRateMinDelta from their own observed baseline.
 	defaultCorrectableRateMinDelta = 128
+
+	// defaultXGMILinkMinDelta is how many NEW XGMI link errors must accumulate
+	// before the fabric fault reports again. XGMI link errors are classified
+	// CRITICAL, and the counter increments on corrected link retries as well as
+	// on real degradation: with no delta a single retry under load pages
+	// somebody about a healthy fabric. Like the correctable-ECC delta this
+	// number was chosen WITHOUT AMD field data — it is set low because a
+	// degrading link climbs fast, and operators with real fleets should set
+	// XGMILinkMinDelta from their own observed baseline.
+	defaultXGMILinkMinDelta = 4
 )
 
 // runner abstracts subprocess execution for tests, matching gpuhealth and the
@@ -104,6 +119,16 @@ type Watcher struct {
 	ThermalCriticalC float64
 	// CorrectableRateMinDelta overrides defaultCorrectableRateMinDelta.
 	CorrectableRateMinDelta uint64
+	// XGMILinkMinDelta overrides defaultXGMILinkMinDelta.
+	XGMILinkMinDelta uint64
+	// BadPageThreshold, when > 0, is the retired-page count at or above which
+	// the device is reported as having exhausted its spare memory — a
+	// replace-the-GPU condition rather than the routine retirement below it.
+	// It is deliberately unset by default, for the same reason as
+	// ThermalCriticalC: the bad-page budget differs by SKU and HBM stack, so
+	// with no operator-supplied value KubeNeuron reports retirements and never
+	// claims the device is out of spares.
+	BadPageThreshold uint64
 	// Logger records source selection, degradation, and every refusal; nil
 	// disables logging, which is only appropriate in tests.
 	Logger *slog.Logger
@@ -300,6 +325,7 @@ func (w *Watcher) candidates(samples []sample, source string) []candidate {
 	present := map[int]bool{}
 	for _, s := range samples {
 		present[s.index] = true
+		w.forgetReplacedDeviceLocked(s)
 		w.lastKnown[s.index] = deviceIdentity{uuid: s.uuid, bdf: s.bdf, source: source}
 		out = append(out, w.deviceCandidates(s, source)...)
 		// A present device clears its own loss series, so a device that
@@ -367,9 +393,31 @@ func (w *Watcher) deviceCandidates(s sample, source string) []candidate {
 		add(CodePageRetire, *s.retiredPages, 0,
 			map[string]string{"retired_pages": strconv.FormatUint(*s.retiredPages, 10)},
 			fmt.Sprintf("%s: GPU %d retired page count=%d", source, s.index, *s.retiredPages))
+		if w.BadPageThreshold > 0 {
+			// A LEVEL series, not a counter. "Out of spare pages" is a
+			// condition the device is in right now, so it must survive the
+			// startup baseline that (correctly) swallows the retirement
+			// history: a GPU already past its budget when the agent starts is
+			// still a GPU that needs replacing.
+			exhausted := uint64(0)
+			if *s.retiredPages >= w.BadPageThreshold {
+				exhausted = 1
+			}
+			out = append(out, candidate{
+				index: s.index, uuid: s.uuid, bdf: s.bdf, code: CodePageRetireExhausted,
+				source: source, level: true,
+				key: seriesKey(CodePageRetireExhausted, s.index), value: exhausted,
+				attrs: map[string]string{
+					"retired_pages": strconv.FormatUint(*s.retiredPages, 10),
+					"threshold":     strconv.FormatUint(w.BadPageThreshold, 10),
+				},
+				raw: fmt.Sprintf("%s: GPU %d retired page count=%d at or above the configured bad-page threshold %d",
+					source, s.index, *s.retiredPages, w.BadPageThreshold),
+			})
+		}
 	}
 	if s.xgmiErrors != nil {
-		add(CodeXGMILink, *s.xgmiErrors, 0,
+		add(CodeXGMILink, *s.xgmiErrors, w.xgmiMinDeltaLocked(),
 			map[string]string{"xgmi_link_errors": strconv.FormatUint(*s.xgmiErrors, 10)},
 			fmt.Sprintf("%s: GPU %d XGMI link errors=%d", source, s.index, *s.xgmiErrors))
 	}
@@ -520,6 +568,13 @@ func (w *Watcher) correctableMinDeltaLocked() uint64 {
 	return defaultCorrectableRateMinDelta
 }
 
+func (w *Watcher) xgmiMinDeltaLocked() uint64 {
+	if w.XGMILinkMinDelta > 0 {
+		return w.XGMILinkMinDelta
+	}
+	return defaultXGMILinkMinDelta
+}
+
 // logOnce emits a persistent condition's log line exactly once per watcher.
 // Every refusal in this package is logged: a source that silently declines to
 // report is indistinguishable from a healthy fleet, which is the failure this
@@ -542,6 +597,45 @@ func (w *Watcher) logOnceLocked(key string, level slog.Level, msg string, args .
 
 func seriesKey(code string, index int) string {
 	return code + "|" + strconv.Itoa(index)
+}
+
+// codesWithSeries lists every code that keeps per-index state, so replacing a
+// device can clear all of it. Missing an entry here leaves one counter series
+// attributed to hardware that is no longer in the machine.
+var codesWithSeries = []string{
+	CodeECCUncorr, CodeECCCorrRate, CodePageRetire, CodePageRetireExhausted,
+	CodeXGMILink, CodeThermal, CodeGPULost,
+}
+
+// forgetReplacedDeviceLocked drops every series belonging to an index whose
+// device has been physically swapped.
+//
+// Series are keyed by GPU index rather than UUID on purpose: the rocm-smi
+// fallback reports no UUID at all, so a UUID-keyed series would re-baseline —
+// and hide a real increase — every time amd-smi failed over. The cost of index
+// keying is that an RMA'd GPU inherits its predecessor's counter history: the
+// replacement's lifetime totals are compared against a dead device's, which
+// either replays its whole history as one enormous delta or silently absorbs a
+// real fault as a "counter went backwards" reset.
+//
+// So identity is checked rather than assumed. Only a CHANGE between two
+// non-empty UUIDs counts: an absent UUID is the fallback tool being narrow, not
+// evidence that the hardware changed.
+func (w *Watcher) forgetReplacedDeviceLocked(s sample) {
+	prev, ok := w.lastKnown[s.index]
+	if !ok || prev.uuid == "" || s.uuid == "" || prev.uuid == s.uuid {
+		return
+	}
+	for _, code := range codesWithSeries {
+		key := seriesKey(code, s.index)
+		delete(w.seen, key)
+		delete(w.baselined, key)
+		delete(w.emittedAt, key)
+	}
+	if w.Logger != nil {
+		w.Logger.Info("AMD GPU index now reports a different device; starting its counter series over",
+			"index", s.index, "previous_uuid", prev.uuid, "uuid", s.uuid)
+	}
 }
 
 // identityText names a device for an operator without pretending to an identity

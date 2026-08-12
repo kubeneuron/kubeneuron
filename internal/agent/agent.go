@@ -186,6 +186,16 @@ type AMDDetectionConfig struct {
 	// accumulate before the rate fault reports again; zero uses the package
 	// default.
 	CorrectableRateMinDelta uint64
+	// XGMILinkMinDelta is how many new XGMI link errors must accumulate before
+	// the fabric fault reports again; zero uses the package default. The
+	// counter also moves on corrected link retries, so with no delta a healthy
+	// fabric under load raises a critical fault.
+	XGMILinkMinDelta uint64
+	// BadPageThreshold is the retired-page count at or above which the device
+	// is reported as out of spare memory rather than as having retired a page
+	// successfully. Zero (the default) never makes that claim, because the
+	// bad-page budget is SKU-specific and this code cannot know it.
+	BadPageThreshold uint64
 }
 
 // Agent is the per-node daemon.
@@ -406,6 +416,8 @@ func New(cfg Config, driver nvml.GPUDriver, log *slog.Logger) (*Agent, error) {
 			amd.Logger = log
 			amd.ThermalCriticalC = cfg.AMDDetection.ThermalCriticalC
 			amd.CorrectableRateMinDelta = cfg.AMDDetection.CorrectableRateMinDelta
+			amd.XGMILinkMinDelta = cfg.AMDDetection.XGMILinkMinDelta
+			amd.BadPageThreshold = cfg.AMDDetection.BadPageThreshold
 			agent.amdHealth = amd
 			log.Info("AMD detection source enabled", "amd_smi", amd.AMDSMIPath, "rocm_smi", amd.ROCmSMIPath,
 				"thermal_critical_c", cfg.AMDDetection.ThermalCriticalC)
@@ -1835,6 +1847,9 @@ func (a *Agent) postActionResult(ctx context.Context, path, leaseToken string, r
 	req.Header.Set(types.AgentActionLeaseHeader, leaseToken)
 	if bootID := a.currentBootID(); bootID != "" {
 		req.Header.Set(types.AgentBootIDHeader, bootID)
+	}
+	if result.Refusal != "" {
+		req.Header.Set(types.AgentActionRefusalHeader, result.Refusal)
 	}
 	if err := a.authorize(req); err != nil {
 		return err

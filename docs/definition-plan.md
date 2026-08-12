@@ -107,7 +107,7 @@ draining half the cluster at once.
 
 **3.1 Make the protection visible** (~2 days). None of the above appears
 in a metric or in the panel as *protection*. Add
-`kubeneuron_workloads_evicted_total{node,reason}` and
+`kubeneuron_workloads_evicted_total{reason}` and
 `kubeneuron_destructive_steps_deferred_total{reason}` (idle-check refusal,
 maintenance window, concurrency cap, PDB block) — the count of times the
 system chose *not* to disrupt is the protection story, and right now it is

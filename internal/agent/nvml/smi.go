@@ -262,7 +262,7 @@ func (s *SMI) ensureIdleSelector(ctx context.Context, selector, label string) er
 			continue
 		}
 		if pids := strings.TrimSpace(string(out)); pids != "" && !strings.EqualFold(pids, "[N/A]") {
-			return fmt.Errorf("%s is not idle: processes still attached (%s)", label, firstLine([]byte(pids)))
+			return fmt.Errorf("%s: processes still attached (%s): %w", label, firstLine([]byte(pids)), ErrNotIdle)
 		}
 	}
 	return nil

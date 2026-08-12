@@ -41,7 +41,7 @@ tooling, kernel-log format, or Kubernetes resource names.
 | Polled telemetry fault detection (DCGM / vendor SMI) | shipped, not hardware-validated — `internal/agent/gpuhealth/gpuhealth.go` | shipped, not hardware-validated — `internal/agent/amdhealth/amdhealth.go` (fixtures are synthetic: the amd-smi JSON schema is reconstructed, not captured) | seam only (no implementation) |
 | Metric-alert fault detection (vmalert → Alertmanager) | shipped, not hardware-validated — `configs/vmalert/gpu-rules.yaml`, `internal/detect/alertmanager.go` | seam only (no implementation) | seam only (no implementation) |
 | XID catalog (vendor-native fault encoding) | shipped & hardware-validated — `internal/detect/xid.go` | not applicable | not applicable |
-| Neutral fault catalog (`(vendor, code)` → class) | shipped, not hardware-validated — `internal/detect/fault.go` | shipped, not hardware-validated — `internal/detect/fault.go` (8 AMD rows; coverage pinned by `fault_coverage_test.go`) | seam only (no implementation) |
+| Neutral fault catalog (`(vendor, code)` → class) | shipped, not hardware-validated — `internal/detect/fault.go` (9 NVIDIA rows; coverage pinned by `fault_coverage_test.go`) | shipped, not hardware-validated — `internal/detect/fault.go` (9 AMD rows; coverage pinned by `fault_coverage_test.go`) | seam only (no implementation) |
 | Accelerator inventory and runtime attestation | shipped & hardware-validated — `internal/agent/nvml/smi.go`, `internal/accelerator/nvidia/nvidia.go` | seam only (no implementation) | seam only (no implementation) |
 | Idle / device-holder preflight | shipped, not hardware-validated — `internal/agent/executor/executor.go`, `internal/agent/nvml/holders.go` | seam only (no implementation) | seam only (no implementation) |
 | Per-device reset | shipped, not hardware-validated — `internal/agent/nvml/smi.go`, `internal/agent/nvml/resetcap.go` | seam only (no implementation) | seam only (no implementation) |
@@ -108,12 +108,34 @@ kernel-log XIDs 79 and 92 read off a live node into `ClassFellOffBus` and
 threshold hold.
 
 **Neutral fault catalog — not hardware-validated.** `internal/detect/fault.go`
-holds exactly two rows, both `nvidia`: `ecc-dbe` and `row-remap-failure`. They
-are emitted only by the `nvidia-smi -q` fallback, which has never run on
-hardware. `GPUSignalMapping.spec.faults[]` can add `{vendor: amd, code: …}` rows
-declaratively today (`internal/detect/catalog.go`, covered by
-`catalog_test.go`) — **classification is genuinely vendor-neutral; production is
-not**, because no source emits a non-NVIDIA fault.
+holds 18 rows across two vendors: 9 `nvidia` and 9 `amd`. Both vendors' rows
+are emitted by shipping sources — the NVIDIA rows by the `nvidia-smi -q`
+fallback, the AMD rows by `internal/agent/amdhealth` and the `amdgpu` kmsg
+families — and `fault_coverage_test.go` fails the build if any class the XID
+catalog can reach stops being reachable through a neutral `(vendor, code)` row.
+`GPUSignalMapping.spec.faults[]` can add further rows declaratively
+(`internal/detect/catalog.go`, covered by `catalog_test.go`).
+
+**Classification is vendor-neutral; verification DEPTH is not.** A GPU-scoped
+incident clears `verifyRuntimeEvidence` (`internal/controller/reconcile.go`)
+against an accelerator report — and a report exists only for vendors this
+build has a runtime adapter for, which today means NVIDIA alone. An AMD
+incident is therefore verified on the agent's durable heartbeat, the same
+evidence a node-scoped incident uses, and the controller logs that the depth
+was reduced. It resolves; it is simply attested less strongly, and that is
+stated rather than hidden.
+
+Until v0.2.3 it did not resolve at all: the NVIDIA report was read
+unconditionally, so an AMD device-scoped incident held for the evidence
+deadline and then parked in `NEEDS_HUMAN` after the cordon and drain had
+already run — and an AMD fleet's recovery report read 0% recovered for a
+system that had recovered it.
+
+**What AMD still does not get: arming, per-device reset, or a device-holder
+preflight with anything to read.** Detection, classification, cordon, drain
+and resolution work; the destructive rungs do not. The honest summary is that
+for AMD this is a detect-protect-and-close product, not yet a
+repair-the-device one.
 
 **Accelerator inventory — hardware-validated.** `nvidia-smi --query-gpu=index,uuid,name,pci.bus_id`,
 `driver_version` and `mig.mode.current` parsed real Tesla T4 output (driver
@@ -122,12 +144,13 @@ not**, because no source emits a non-NVIDIA fault.
 `Healthy` also ran against a live L4 host.
 
 **Kubernetes GPU inventory — hardware-validated; targeted eviction — not.**
-`internal/platform/kubernetes/kubernetes.go` hardcodes
-`gpuResource = "nvidia.com/gpu"` for both the node's GPU count and
-`podUsesGPU`. The capacity read was validated on EKS (the node advertised
-`nvidia.com/gpu=1` and appeared with its GPU in the fleet inventory).
-`evict_gpu_workload` has never executed on hardware — every hardware playbook
-used `Cordon → Drain`. See the silent-no-op warning below.
+`internal/platform/kubernetes/kubernetes.go` now spans every recognised
+vendor: `acceleratorCount` reads the device count from whichever vendor
+resource the node advertises, and `podUsesGPU` matches any vendor's GPU or MIG
+partition. The capacity read was validated on EKS (the node advertised
+`nvidia.com/gpu=1` and appeared with its GPU in the fleet inventory); the
+non-NVIDIA paths are covered by tests only. `evict_gpu_workload` has never
+executed on hardware — every hardware playbook used `Cordon → Drain`.
 
 **Idle / device-holder preflight — not hardware-validated (the shipped path).**
 `EnsureIdle` (index-addressed) ran against a live L4 and passed, and the holder
@@ -172,24 +195,37 @@ hardware attempt failed with `systemctl reboot: exit status 127` *after* a human
 had approved it, which is why `Executor.PreflightReboot` exists. Every EKS
 ladder that reached a reboot rung ran it in dry-run.
 
-## Two silent no-ops (read before claiming multi-vendor)
+## Two silent no-ops (fixed in v0.2.2 and v0.2.3)
 
 Most missing vendor support fails loudly — no driver, no detection source, no
-events. Two places fail **quietly**, which is worse:
+events. Two places used to fail **quietly**, which is worse. Both are fixed;
+they are kept here because the shape of the failure is the one to look for
+when adding the next vendor.
 
-1. **Node GPU count.** `nodeFromK8s` reads `nvidia.com/gpu` capacity. An AMD
-   node (`amd.com/gpu`) or Intel node (`gpu.intel.com/i915`) is inventoried with
-   **zero GPUs** and looks like a healthy CPU node.
-2. **Targeted GPU-pod eviction.** `platform.evict_gpu_workload` selects pods by
-   the same `nvidia.com/gpu` limit. On a non-NVIDIA node — and, as
-   [the MIG decision](mig-decision.md) records, on a MIG node running the device
-   plugin's *mixed* strategy, where pods request `nvidia.com/mig-1g.5gb` — it
-   evicts nothing and **reports success**. The workload-protection rung silently
-   protects nothing.
+1. **Node GPU count.** `nodeFromK8s` read `nvidia.com/gpu` capacity, so an AMD
+   node (`amd.com/gpu`) or Intel node (`gpu.intel.com/i915`) was inventoried
+   with **zero GPUs** and looked like a healthy CPU node. It now counts
+   whichever recognised vendor resource the node advertises, preferring whole
+   devices over MIG partitions so the mixed strategy does not count the same
+   silicon twice.
+2. **Targeted GPU-pod eviction.** `platform.evict_gpu_workload` selected pods
+   by the same `nvidia.com/gpu` limit. On a non-NVIDIA node — and, as
+   [the MIG decision](mig-decision.md) records, on a MIG node running the
+   device plugin's *mixed* strategy, where pods request
+   `nvidia.com/mig-1g.5gb` — it evicted nothing and **reported success**. The
+   matcher now spans every vendor and MIG partitions, and evicting zero pods
+   is reported as the refusal it is rather than as a completed step.
 
-Fixing both is one change: the GPU resource name must become a set, not a
-constant. It is a prerequisite for §1.1/§1.3 of the
-[definition plan](definition-plan.md), not a follow-up.
+The two matchers are deliberately **not** the same function, and that
+asymmetry is the thing to preserve. Deciding which pods hold a device errs
+toward matching: a false positive costs one extra eviction on a node already
+being drained, while a false negative leaves a live training job on hardware
+about to be reset. Deciding which nodes are in the fleet errs toward refusing:
+everything in the fleet is a machine a playbook may cordon, drain and reboot,
+so membership is anchored to recognised vendor domains and a GPU-shaped
+resource from anywhere else is ignored and logged. See
+[upgrading](upgrade.md#fleet-membership-changed-in-v022--check-it-before-you-upgrade)
+for the audit that change deserves.
 
 ## What is actually vendor-neutral today
 
@@ -205,11 +241,11 @@ ledger in [design.md §2.4c](design.md) with this page's cell for each:
 
 | Joint | Matrix consequence |
 |---|---|
-| `verifyRuntimeEvidence` requires an NVIDIA accelerator report for every GPU-class target | no non-NVIDIA incident can execute a gated step |
+| ~~`verifyRuntimeEvidence` reads an NVIDIA accelerator report for every GPU-class target~~ | **fixed in v0.2.3.** A vendor with no runtime adapter now verifies on the agent heartbeat, logged as reduced depth, instead of holding for a report nothing can produce |
 | arming requires the concrete `*nvml.SMI` driver | no non-NVIDIA node can be armed for destructive execution |
 | the physical-reset gate is `CapabilityNVIDIAReset` / `allowNVIDIAReset` only | per-device reset is structurally NVIDIA-only, not merely unimplemented |
-| kmsg parsing is NVRM/XID-only; the quiesce stack manipulates NVIDIA components | detection and reset-prerequisite rungs are NVIDIA-only |
-| `gpuResource = "nvidia.com/gpu"` | the two silent no-ops above |
+| device-holder preflight (`holders.go`) has no non-NVIDIA report to read | it reads the incident's own vendor now, but only NVIDIA agents produce holder data, so the pre-cordon obstruction check is unprotected elsewhere — conservative in direction, absent in effect |
+| the quiesce stack manipulates NVIDIA components | the reset-prerequisite rungs are NVIDIA-only |
 
 ## Anti-rot
 

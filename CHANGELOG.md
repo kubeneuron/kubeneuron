@@ -9,6 +9,391 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+### Fixed
+- **`spec.safety.executionMode` had no effect on a running controller**
+  (`cmd/kubeneuron-controller/reload.go`, `internal/safety/limits.go`). The
+  operator deliberately keeps the config-digest off the controller's pod
+  template — under leader election a rollout deadlocks, because only the
+  leader is Ready — so configuration reloads in place. But the reload
+  re-installed playbooks, profiles and the confinement selector and never the
+  safety gate's dry-run flag: it was read once at process start, and
+  `SetDryRun` had no caller anywhere in the tree. Switching to `Enabled` left
+  an installation that believed it was armed executing nothing; switching back
+  to `DryRun` — the lever an operator pulls to STOP damage — left it
+  executing. `Gate.ApplyLimits` now moves the limits with the file they travel
+  in, leaving live state (held slots, cooldowns, pause) untouched.
+- **Blast-radius confinement followed a cache instead of the cluster**
+  (`internal/controller/noderesolution.go`). `nodeLabelsForConfinement`
+  preferred the store's cached node record whenever it carried any labels at
+  all. Both directions were wrong and one is dangerous: a cached label that
+  still matches lets a destructive step run on a node the operator has just
+  taken OUT of the declared radius, and a label that has not caught up yet
+  refuses a node just brought IN — where a resolved non-match QUARANTINES
+  rather than retrying, so that incident never recovers on its own. The
+  platform is now asked first; on Kubernetes that is the watch-maintained
+  informer cache, so it is both fresher and cheaper than an apiserver call.
+- **Confinement was unresolvable for a node absent from the GPU inventory**
+  (`internal/platform`, `internal/platform/kubernetes`,
+  `internal/controller/noderesolution.go`). Labels were read through
+  `ListNodes`, which is the GPU-filtered inventory — so a node that dropped
+  out of it, a device plugin restarting or a driver reloading, made the blast
+  radius permanently unknowable. Every destructive step then held forever and
+  the machine sat cordoned and drained with nothing to advance it and nobody
+  paged, in exactly the conditions remediation exists for. The codebase had
+  already learned this for `NodeExists`; the same reasoning had not reached
+  the more dangerous caller. New `platform.NodeLabeler` reads the Node object
+  itself.
+- **A device-scoped incident on a vendor this build cannot attest now
+  resolves instead of dead-ending** (`internal/controller/reconcile.go`).
+  `verifyRuntimeEvidence` read an NVIDIA accelerator report for every
+  GPU-scoped incident regardless of the incident's vendor, and only the NVIDIA
+  adapter exists — so on a perfectly healthy AMD node no report was ever
+  produced, the incident held for the evidence deadline and then parked in
+  `NEEDS_HUMAN`, **after the cordon and drain had already run**, with a reason
+  naming no action anybody could take. Every such incident landed as
+  `outcome="needs_human"`, so an AMD fleet's recovery report read 0% recovered
+  for a system that had recovered them. Where this build has no runtime
+  adapter for a vendor, verification now falls back to the same durable
+  heartbeat a node-scoped incident uses, and says so — in the log and in
+  `docs/reference-capabilities.md` — rather than presenting it as the same
+  check. NVIDIA is unchanged and still fails closed on a missing report,
+  because there the absence means a degraded agent, not an absent runtime.
+  `TestAttestedVendorsMatchTheAdapters` fails the build if an adapter lands
+  without being declared.
+- **An incident learns its vendor from any signal that names one**
+  (`internal/store/sqlcore/core.go`, `internal/controller/controller.go`,
+  `internal/detect/xid.go`). `UpdateIncident`'s SQL did not list the `vendor`
+  column, so the field was writable only at open — and only from a neutral
+  fault envelope, since XIDs, Alertmanager alerts and manual triggers name no
+  vendor. Because AMD and NVIDIA deliberately share problem classes, an
+  incident opened by any of those and later joined by an AMD fault stayed
+  vendorless. The column now persists, a later signal backfills it (first
+  identification wins), and an XID declares NVIDIA — which is not an inference
+  but what the encoding means.
+- **A reset the node's runtime cannot serve is refused before the cordon**
+  (`internal/controller/holders.go`). The incident-side vendor check cannot
+  see a vendorless incident, so a manual trigger on an AMD node bound to a
+  reset playbook passed every check, cordoned and drained the node, and only
+  then failed at the reset step on missing evidence — a hold with no deadline,
+  re-denying every tick, node left drained, nobody paged. The node's own
+  reports now answer it. It requires positive evidence of the mismatch: a node
+  that has simply not reported yet is left alone, because "no evidence yet"
+  and "evidence of a different runtime" are not the same claim.
+- **The device-holder preflight reads the incident's own vendor**
+  (`internal/controller/holders.go`). It asked for an NVIDIA report on every
+  incident, found nothing on other vendors, and silently no-opped — protecting
+  nothing outside NVIDIA while appearing to run.
+- **An idle guard that fails now stops the ladder regardless of WHY it
+  failed** (`internal/controller/protection.go`,
+  `internal/controller/execution.go`). The round-13 fix keyed that decision on
+  the agent's refusal code, and an agent that predates the code sends none —
+  so a new controller read the absence as "not a refusal" and escalated to a
+  more destructive rung on a device the guard had just failed to clear.
+  `docs/upgrade.md` mandates controller-first, so every not-yet-upgraded node
+  in a rolling upgrade ran with the guard inverted. Absence of evidence must
+  not select the destructive branch: the control decision now asks only "was
+  this a guard?", while the protection metric keeps the narrower question,
+  where under-counting is the honest direction. The regression test covers
+  both skew directions — and its playbook now has a real escalation target,
+  without which it passed either way.
+- **The refusal code travels in a header, not the result body**
+  (`pkg/types/types.go`, `internal/agent/agent.go`,
+  `internal/httpapi/httpapi.go`). The result route strict-decodes, so the new
+  field made every result from a newer agent a `400 unknown field "refusal"`
+  on any controller that predates it — a rollback, or an upgrade that reaches
+  agents first, would have had results rejected, retried, and timed out. The
+  codebase already states this rule where the v2 registration route is
+  defined; this broke it. `AgentActionRefusalHeader` is ignored by every
+  version in both directions, and a test now fails the build if anything
+  creeps back onto that body.
+
+### Added
+- **`kubeneuronctl report` answers the dry-run pilot's question**
+  (`internal/controller/report.go`, `pkg/types/report.go`,
+  `cmd/kubeneuronctl/report.go`). Dry-run is the shipped default and
+  `docs/pilot-checklist.md` tells operators to stay in it until they have
+  watched the system decide — for that whole period every number in the report
+  was zero by construction, so the question that decides whether to enable
+  enforcement had a blank table for an answer. Those incidents now aggregate
+  into a separate `SIMULATED` section: how many the ladder would have carried
+  to resolution, how many without asking anybody, and the GPU-hours involved.
+  The headline stays dry-run-free — that exclusion is what keeps the one
+  number this report exists to be trusted on from lying out of the box — and
+  every simulated field is named in the conditional, because the degraded
+  hours are real while the recovery is not.
+- **`execution_mode` and `confinement` on `GET /api/v1/runtime-config`**
+  (`internal/httpapi`, `cmd/kubeneuron-controller/reload.go`). Configuration
+  reloads in place rather than rolling the Deployment, so an operator who
+  switched `spec.safety.executionMode` had the CR, the config digest and
+  `/readyz` all agreeing with them and no way at all to see whether the
+  running process had picked the change up. A digest is the identity of a
+  configuration, not evidence that its most consequential field took effect.
+  Both fields are read from the live gate, so they report what IS, not what
+  was requested.
+- **`kubeneuron_agent_health_source`** (`internal/metrics`,
+  `internal/agent/gpuhealth`). DCGM is the preferred second detection source
+  and `nvidia-smi` is the narrower fallback, and nothing observable
+  distinguished them: a fleet whose DCGM engine became unreachable degraded
+  silently to a source that sees less. It also gave the hardware harness the
+  positive signal it lacked — see below.
+- **A real cordon and uncordon in the kind suite**
+  (`hack/kind-integration.sh`). Every other phase runs in dry-run, so the
+  cordon path had never cordoned anything and the cordon janitor — the code
+  that gives a pilot its capacity back after an incident resolves — had never
+  executed outside unit tests. The new phase arms one disposable worker,
+  drives a cordon-only playbook for real, asserts the Node is unschedulable,
+  resolves the incident, and asserts the janitor gives it back. The
+  installation is restored to dry-run on any exit, including a failure
+  mid-phase.
+
+  It found four defects on its way to passing, every one of them invisible to
+  unit tests because they live at the seam between the operator, a ConfigMap
+  and a live cluster — and invisible to this suite before, because every other
+  phase runs in dry-run and so had never switched the mode or applied
+  confinement for real. All four are listed under Fixed.
+- **A fleet-fit table** (`docs/pilot-checklist.md`, linked from the README).
+  Every fact in it was already stated in the capability matrix; nobody
+  assembled them into the question an evaluator actually has. NVIDIA on AWS is
+  validated end to end; NVIDIA elsewhere tops out at a reboot rung that has
+  never executed; AMD detects, protects and closes but arms nothing; Intel is
+  a seam. The bare-metal row says plainly that such a pilot would be the first
+  real per-device GPU reset anywhere.
+- **`kubeneuron_degraded_gpus`, the gauge the counter cannot be**
+  (`internal/metrics`, `internal/controller/reconcile.go`).
+  `kubeneuron_degraded_gpu_seconds_total` is charged once, on the terminal
+  transition — which is what stops a park/unpark cycle billing the same hour
+  twice, and also means an incident sitting in `NEEDS_HUMAN` contributes
+  **nothing** to it, permanently, for exactly the population whose capacity is
+  most thoroughly lost. `kubeneuronctl report` deliberately keeps charging
+  those, so the two answers disagreed while both claimed to measure
+  "GPU-seconds under an open incident". The new gauge reports what is degraded
+  right now, split by whether automation still owns the incident or a human
+  does; the counter's help text and `docs/reference-metrics.md` now say what
+  each one actually measures and how to read them together.
+- **`make gates` and `make gates-full`.** The documented gate set lived only
+  as CI job steps and as prose in a checkpoint document — survivable while
+  every push ran CI, not once Actions was disabled on the development
+  repository. Two tiers on purpose: bundling a four-second check with a
+  forty-minute one is how the four-second check stops being run.
+- **`hack/mirror.sh`.** The mirror procedure is now the enforcement boundary
+  between development and public CI, and it was a sequence of commands typed
+  by hand with a five-item exclusion list held in somebody's head. It now
+  lives in one place, and the script asserts afterwards that the published
+  tree differs from the development tree by exactly those exclusions — the
+  check the hand-typed procedure never made. It prepares and reports; it does
+  not commit or push.
+- **The kind integration suite now builds the image that actually ships**
+  (`hack/kind-integration.sh`). It packaged the host-built binaries into `FROM
+  scratch` — an artifact nobody deploys. The real one is distroless, carries
+  `nsenter` and `dcgmi` that the agent shells out to, and runs as a different
+  user, so every property that divergence hid was invisible to the one suite
+  best placed to catch it. That is how `Reboot` reached live hardware and
+  exited 127 for want of `nsenter`. The whole 73-check suite passes against
+  the production image; set `INTEGRATION_IMAGE_DOCKERFILE` to the old file for
+  a fast local loop.
+- **`hack/verify-image.sh` and a CI job that runs it.** Its host-tool check
+  asserts on the image filesystem, not on a command's output: the first
+  version grepped the combined output of running the binary, and when the
+  binary is absent Docker's own error (`exec: "/bin/nsenter": no such file`)
+  contains the word — so a gate added specifically to catch a missing
+  `nsenter` passed an image with no `nsenter`. Verified against the controller
+  image, which has neither tool.  Builds all four
+  published targets with the classic builder — the path `make docker` takes,
+  which has broken on its own — then asserts what only the artifact can show:
+  every entrypoint starts and names itself, the agent carries a working
+  `nsenter` and `dcgmi`, each image runs as the user its deployment assumes
+  (root for the agent, 65532 for the rest), and the OCI source and licence
+  labels are present.
+- **`hack/verify-release.sh` and a `release-verify` job.** Everything else
+  verifies inputs; nothing looked at the finished release the way a stranger
+  does. It downloads the published assets and checks the asset set is closed
+  (a release once shipped CI diagnostics as user-facing assets), that the
+  checksum file covers *every* asset rather than merely matching the ones it
+  lists, that the cosign signature over it verifies against the repository's
+  GitHub OIDC identity, and that what a user applies names the digests
+  `images.txt` names.
+- **A release is gated on a rehearsed upgrade** (`upgrade-rehearsal` in
+  `release.yaml`). `hack/kind-upgrade.sh` ran by hand before the last two
+  tags; no tag can now be published without it converging the previous
+  release to HEAD in the documented order on a real cluster.
+- **`hack/verify-spec-paths.py`, wired into the docs lint.** Every `spec.a.b`
+  path a published document names must exist in a generated CRD.
+  `docs/upgrade.md` named `spec.execution.confinement` twice — in the section
+  written specifically to make a blast-radius change safe to upgrade through
+  — and every other check passed. An invented field is the most expensive
+  kind of documentation defect: it reads as authoritative, an operator acts on
+  it, and the action silently does nothing. Justified exceptions live in
+  `hack/spec-path-exceptions.txt` with their reason beside them.
+- **The hardware DCGM phase can now fail** (`hack/hw-e2e.sh`). Its fallback
+  branch asserted only the absence of a parse warning, and `parseDCGMXID` had
+  no code path that could emit one — so the phase passed without exercising
+  DCGM at all, and v0.2.2's release notes then cited it as evidence. It now
+  makes two assertions the code can violate: no unreadable-layout warning, and
+  `kubeneuron_agent_health_source` reporting `dcgm` as the source actually
+  serving the node. The second closes the hole the first cannot: a parser that
+  is never invoked also emits no warning.
+- **The DCGM parser reports output it cannot read**
+  (`internal/agent/gpuhealth`). `parseDCGMXID` silently skipped every
+  unreadable line, so a DCGM release that changed the `dmon` layout would have
+  produced zero candidates forever — a detection source going dark with
+  nothing anywhere saying so. Silence is still correct for the fault path; the
+  count is not. This also made the hardware harness's DCGM fallback assertion
+  ("no gpuhealth parse warnings") vacuous, because no code path could emit
+  one.
+- **The Grafana dashboard is checked against the code**
+  (`internal/metrics/dashboard_test.go`). The dashboard was the only shipped
+  artifact whose correctness nothing compiled: a renamed metric or a dropped
+  label does not break a build, does not fail a test, and does not error at
+  query time — the panel just renders empty, which reads as "nothing is wrong"
+  precisely when somebody is looking for what is wrong. Two tests now fail the
+  build if a panel queries a metric this build does not register, or groups by
+  a label its metrics do not carry.
+
+### Changed
+- **The released installer pins the controller and the agent by digest**
+  (`deploy/install.sh`, `.github/workflows/release.yaml`). The install
+  manifest was carefully digest-pinned and even refused any tag-shaped
+  reference — but it only carries the operator. `install.sh` resolved the
+  controller and the agent, the two components that actually run the fleet, as
+  moveable tags, so "digest-pinned install" was true of one image out of
+  three. The release now stamps the published digests into the installer it
+  ships, and `hack/verify-release.sh` fails a release where it has not.
+- **Fleet membership is anchored to recognised vendor domains, and the
+  blast-radius change v0.2.2 made silently is now disclosed**
+  (`internal/platform/kubernetes`). v0.2.2 replaced the `nvidia.com/gpu`
+  test with a vendor-neutral one so AMD and Intel nodes stop being
+  invisible; what its notes failed to say is that this also widened the set
+  of machines a playbook may cordon, drain, taint and reboot. The matcher
+  had no lower bound either — it accepted any domain whose resource merely
+  looked GPU-shaped, so a third-party counter such as
+  `example.com/gpu-licence` admitted a CPU node to the fleet.
+
+  Fleet membership now requires the resource's domain to be one KubeNeuron
+  recognises (`nvidia.com`, `amd.com`, `intel.com`, `gpu.intel.com`,
+  `habana.ai`, `aliyun.com`). A GPU-shaped resource from any other domain is
+  ignored for membership and logged once, loudly, because an accelerator we
+  fail to recognise is an invisible node and that is the other failure worth
+  catching.
+
+  The eviction path keeps the generous matcher on purpose. The asymmetry is
+  the point: over-matching there costs one extra eviction on a node already
+  being drained, while under-matching leaves a live training job on a device
+  about to be reset. Over-matching on the membership side hands a playbook a
+  machine it should never have been offered.
+
+  [`docs/upgrade.md`](docs/upgrade.md) now opens with the audit — a `jq`
+  one-liner that prints the fleet as the new matcher sees it, so you can
+  diff it against `kubeneuronctl nodes` before upgrading.
+- **`docs/reference-capabilities.md` stopped contradicting its own table.**
+  The "two silent no-ops" section still described both vendor-neutrality gaps
+  as open after they had been closed, and its AMD fault-row count was a number
+  somebody typed once. `hack/verify-docs.sh` now derives that count from
+  `internal/detect/fault.go`, so a new `(vendor, code)` row the matrix does not
+  know about fails the build. Dashboard panels built on `increase()` carry an
+  explicit counter-reset caveat: these are process-lifetime counters and a
+  controller restart reads as a cliff.
+
+### Fixed
+- **Dry-run no longer writes a real taint, and an unparked incident is marked
+  again** (`internal/controller/degradedtaint.go`). A dry-run installation was
+  writing genuine `NoSchedule`/`PreferNoSchedule` marks — a cluster-wide
+  scheduling change for every workload, from a mode whose whole promise is
+  that it changes nothing. Separately, halting removes the mark, so an
+  incident a human sent back from `NEEDS_HUMAN` to `EVALUATING` ran unmarked
+  until the janitor happened to notice: the scheduler was free to pile new
+  work onto failing hardware precisely while somebody was working the
+  incident.
+- **The taint janitor confirms before it removes a mark**
+  (`internal/controller/degradedtaint.go`). It lists marked nodes and then
+  lists open incidents; anything that opened between the two reads was
+  invisible to the second, and the node looked abandoned. Removing on that
+  basis returns a node to the scheduler's rotation while a fault is being
+  worked on it, so the removal is now confirmed with a per-node read. Leaving
+  a stale mark one pass longer costs nothing and self-heals; the other
+  direction does not.
+- **A busy device and a broken idle probe are no longer the same event**
+  (`internal/agent/nvml`, `internal/agent/executor`, `internal/controller`).
+  Every idle-guard failure counted as `kubeneuron_destructive_steps_deferred_
+  total{reason="not_idle"}` — including a missing `nvidia-smi`, a wedged
+  driver, and a timeout, none of which is evidence that a workload was spared.
+  The agent now reports `ActionResult.Refusal` (a wire field with a closed set
+  of codes) and only a real refusal counts; an agent too old to send the field
+  under-counts protection rather than inventing it.
+- **An idle refusal stops the ladder instead of escalating it**
+  (`internal/controller/execution.go`). A guard that refused because live work
+  held the device escalated to the failure playbook, whose rungs are by
+  construction bigger hammers than the one just stopped — the guard became a
+  trigger for something more destructive. The incident is now handed to a
+  human with the holders named in the audit trail, keeping whatever cordon the
+  ladder already applied.
+- **A replaced AMD GPU no longer inherits its predecessor's counters**
+  (`internal/agent/amdhealth`). Counter series are keyed by GPU index (the
+  `rocm-smi` fallback reports no UUID, so UUID keying would re-baseline on
+  every failover and hide a real increase), which meant an RMA'd device was
+  compared against the dead one's lifetime totals. A replacement reading
+  HIGHER replayed the difference as one enormous delta and opened a critical
+  uncorrectable-ECC incident on a GPU installed minutes earlier. A change
+  between two known UUIDs on the same index now starts the series over.
+- **`kubeneuron_workloads_evicted_total` lost its `node` label**
+  (`internal/metrics`). Node names are not a bounded set in a KubeNeuron
+  fleet — this control plane replaces nodes, so every `ReplaceNode` mints a
+  name that never recurs, and an autoscaler mints more. The series grew for
+  the life of the process and never shrank. Per-node detail is in the incident
+  record and audit trail, where querying it costs no retention. **Dashboards
+  or alerts that group this counter by node must drop the grouping.**
+- **The recovery report refuses rather than truncating**
+  (`internal/controller/report.go`). The query behind `kubeneuronctl report`
+  had no bound, so a large fleet over a long window loaded every incident into
+  memory at once. A plain `LIMIT` would have been worse: a truncated set still
+  aggregates cleanly and returns a capacity number that looks authoritative
+  and is wrong. It now reads one row past a 100,000-incident cap and asks for
+  a narrower window if it hits it.
+- **The GPU-inventory fallback says when it is guessing**
+  (`internal/controller/reconcile.go`). A node-scoped incident whose node
+  inventory could not be read is charged one GPU; on an 8-GPU node that
+  understates recovered capacity eightfold, and the store error behind it was
+  silently swallowed. It is now logged, and distinguished from a node that
+  genuinely has no registered inventory.
+- **The amdgpu kernel parser no longer reads two all-clear lines as faults**
+  (`internal/agent/kmsg/amdgpu.go`). `ring sdma0 timeout, but soft recovered`
+  is the driver reporting that it killed the offending job and the engine
+  kept running — no reset, no lost device — and it was being classified as a
+  ring-timeout hang, which cordons and drains a node that never stopped
+  working. Worse, a kernel that soft-recovers once tends to do it on a loop.
+  Separately, `no uncorrectable hardware errors detected` contains the fault
+  spelling as a literal substring, so every clean RAS poll opened an ECC
+  incident on a healthy GPU — the loudest possible false positive, on the
+  class that ends in node replacement. Both lines now produce a logged
+  refusal instead of a fault. The test that asserted the soft-recovery line
+  WAS a fault had encoded the bug; it now asserts the refusal.
+- **XGMI link errors need a reporting delta before they page anyone**
+  (`internal/agent/amdhealth`). The fabric counter reported on any increment
+  while classifying CRITICAL, and it moves on corrected link retries as well
+  as on real degradation. It now uses the same accumulate-then-report rule as
+  the correctable-ECC rate, with `--amd-xgmi-link-min-delta` to set it from a
+  real fleet's baseline.
+- **A retired page and an exhausted spare-page budget are no longer the same
+  event** (`internal/agent/amdhealth`, `internal/detect/fault.go`). Every
+  retirement mapped to `ClassRowRemapOK` — the recovery mechanism working —
+  with nothing that could ever say the device had run out of spares to retire
+  into. The new `amd/page-retirement-exhausted` code maps to
+  `ClassRowRemapFailure`, the peer of NVIDIA's XID 64, and is emitted as a
+  LEVEL rather than a counter so a GPU already past its budget when the agent
+  starts is reported instead of being absorbed by the startup baseline.
+  `--amd-bad-page-threshold` is unset by default and makes no claim until an
+  operator supplies the number: the budget is SKU-specific and guessing it
+  would end in an unwarranted node replacement.
+- **Node inventory counts devices for the vendor that advertises them**
+  (`internal/platform/kubernetes`). The device count was still read from
+  `nvidia.com/gpu` alone, so every AMD and Intel node was inventoried as
+  zero GPUs and fell through to the report's `AssumedSingleGPU` fallback:
+  the recovered GPU-hours of a non-NVIDIA fleet were charged at one device
+  per incident no matter how many were really degraded. Counts now come
+  from whichever recognised vendor resource the node carries, preferring
+  whole devices over MIG partitions so the mixed strategy does not
+  double-count the same silicon, and ignoring `gpu-mem`-style resources
+  that measure MiB rather than devices.
+
 ## [v0.2.2] - 2026-08-05
 
 Release evidence: full CI (both store backends plus the kind integration
@@ -16,13 +401,22 @@ suite) green as the tag's gate; `hack/kind-upgrade.sh` converged
 v0.2.2-rc.3 → HEAD in the documented order with a seeded incident and its
 audit trail surviving the store migration; and a live hardware run
 (kubeneuron-e2e11, EKS g4dn.xlarge / Tesla T4) passed all five phases —
-the XID-79 dry-run ladder with the approver audited, the DCGM source
-parsing live `dmon` output, a recurrence during VERIFYING escalating to
-NEEDS_HUMAN instead of resolving, XID-92 threshold accumulation, and a
-confined `ReplaceNode` terminating the real instance — with teardown
-sweeping the account to zero leftovers. Three release-candidate cuts
-preceded this tag and each found one defect the pipeline could not show
-any other way.
+the XID-79 dry-run ladder with the approver audited, a DCGM phase, a
+recurrence during VERIFYING escalating to NEEDS_HUMAN instead of
+resolving, XID-92 threshold accumulation, and a confined `ReplaceNode`
+terminating the real instance — with teardown sweeping the account to
+zero leftovers. Three release-candidate cuts preceded this tag and each
+found one defect the pipeline could not show any other way.
+
+**Correction (2026-08-10):** this paragraph originally described the DCGM
+phase as "the DCGM source parsing live `dmon` output". The run log shows
+that phase took its fallback branch (`DCGM injection unavailable`), and
+that branch asserts only the absence of `gpuhealth` parse warnings — which
+`parseDCGMXID` has no code path to emit. The assertion could not fail, so
+the phase proved nothing about DCGM. The DCGM source remains **not
+hardware-validated**, exactly as `docs/reference-capabilities.md` has said
+throughout; only this release-evidence sentence overstated it. The harness
+assertion is being replaced with one the parser can violate.
 
 ### Added
 - **AMD detection, so "vendor-neutral" is a fact and not only a seam**

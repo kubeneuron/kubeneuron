@@ -32,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -119,6 +120,10 @@ type Watcher struct {
 	// degradedLogged ensures the "no usable health source" warning is emitted
 	// once, not every poll.
 	degradedLogged bool
+	// unreadableDCGMLogged ensures an unparseable dmon layout is warned about
+	// once. A layout this build cannot read does not change between polls, so
+	// repeating it every tick would bury it in the noise it is warning about.
+	unreadableDCGMLogged bool
 }
 
 // New builds a health watcher, auto-detecting which binaries are present. A
@@ -217,6 +222,7 @@ func (w *Watcher) poll(ctx context.Context) []types.AgentEvent {
 		candidates []candidate
 		haveSource bool
 	)
+	source := "none"
 	if w.DCGMPath != "" {
 		if cs, err := w.pollDCGM(ctx); err != nil {
 			if w.Logger != nil {
@@ -225,6 +231,7 @@ func (w *Watcher) poll(ctx context.Context) []types.AgentEvent {
 		} else {
 			candidates = cs
 			haveSource = true
+			source = "dcgm"
 		}
 	}
 	if !haveSource && w.NVIDIASMIPath != "" {
@@ -235,7 +242,18 @@ func (w *Watcher) poll(ctx context.Context) []types.AgentEvent {
 		} else {
 			candidates = cs
 			haveSource = true
+			source = "nvidia-smi"
 		}
+	}
+	// Publish which source served this poll. DCGM is preferred and nvidia-smi
+	// is narrower, so silently degrading between them changes what this agent
+	// can detect — an operator and the hardware harness both need to see it.
+	for _, s := range []string{"dcgm", "nvidia-smi", "none"} {
+		v := 0.0
+		if s == source {
+			v = 1
+		}
+		metrics.AgentHealthSource.WithLabelValues(s).Set(v)
 	}
 	if !haveSource {
 		w.mu.Lock()
@@ -412,15 +430,44 @@ func (w *Watcher) pollDCGM(ctx context.Context) ([]candidate, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dcgmi dmon: %w (output: %s)", err, firstLine(out))
 	}
-	return parseDCGMXID(string(out))
+	candidates, unreadable, err := parseDCGMXID(string(out))
+	if err != nil {
+		return nil, err
+	}
+	if unreadable > 0 {
+		w.mu.Lock()
+		first := !w.unreadableDCGMLogged
+		w.unreadableDCGMLogged = true
+		w.mu.Unlock()
+		if first && w.Logger != nil {
+			w.Logger.Warn("dcgmi dmon printed rows this build cannot parse; "+
+				"the DCGM detection source is degraded and may be reporting nothing",
+				"unreadable_rows", unreadable, "first_line", firstLine(out))
+		}
+	}
+	return candidates, nil
 }
 
 // dcgmRowRe matches a dmon data row: "GPU <index> <value>". The value column is
 // the last XID error code, "N/A" when the engine has recorded none.
 var dcgmRowRe = regexp.MustCompile(`^GPU\s+(\d+)\s+(\S+)`)
 
-func parseDCGMXID(out string) ([]candidate, error) {
+// parseDCGMXID reads `dcgmi dmon` output. The second return value is how many
+// non-comment lines it could NOT read as a data row.
+//
+// That count is the whole point of the signature. Every unreadable line used
+// to be silently skipped, so a DCGM release that changed the dmon layout would
+// have produced zero candidates forever — a detection source going dark with
+// nothing anywhere saying so, on a fleet that believes it is being watched. It
+// also made the hardware harness's fallback assertion ("no gpuhealth parse
+// warnings") vacuous: there was no code path that could emit one, so the phase
+// passed without proving anything.
+//
+// Silence is still the behaviour for the FAULT path — an unreadable line must
+// never become a fault. It is only the reporting that changes.
+func parseDCGMXID(out string) ([]candidate, int, error) {
 	var candidates []candidate
+	unreadable := 0
 	for _, line := range strings.Split(out, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
@@ -428,18 +475,35 @@ func parseDCGMXID(out string) ([]candidate, error) {
 		}
 		m := dcgmRowRe.FindStringSubmatch(trimmed)
 		if m == nil {
+			// dmon's header is TWO lines — "#Entity   XIDERRORS" then a bare
+			// "Id" continuation — and only the first carries the comment
+			// marker. A label line is the one thing here that is not a data
+			// row and not a defect, and it is reliably digit-free: every real
+			// row names an entity index. Counting the continuation as
+			// unreadable would make this warn on every healthy fleet, which is
+			// how a signal gets ignored.
+			if strings.ContainsAny(trimmed, "0123456789") {
+				unreadable++
+			}
 			continue
 		}
 		index, err := strconv.Atoi(m[1])
 		if err != nil {
+			unreadable++
 			continue
 		}
 		value := strings.TrimSpace(m[2])
 		if strings.EqualFold(value, "N/A") {
+			// The engine has recorded no XID for this GPU. A health report,
+			// not an unreadable line.
 			continue
 		}
 		xid, err := strconv.Atoi(value)
-		if err != nil || xid <= 0 {
+		if err != nil {
+			unreadable++
+			continue
+		}
+		if xid <= 0 {
 			continue
 		}
 		candidates = append(candidates, candidate{
@@ -451,7 +515,7 @@ func parseDCGMXID(out string) ([]candidate, error) {
 			level: true,
 		})
 	}
-	return candidates, nil
+	return candidates, unreadable, nil
 }
 
 func (w *Watcher) pollSMI(ctx context.Context) ([]candidate, error) {

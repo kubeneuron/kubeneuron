@@ -19,6 +19,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/httpapi"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/internal/safety"
 )
 
 // runtimeConfigReloadInterval is how often the controller re-reads its mounted
@@ -119,6 +120,18 @@ func applyRuntimeConfig(
 	// live?". Absent file (file-based deployments, older operators) means no
 	// identity, never an error.
 	sourceDigest := readSourceDigest(paths)
+	// The safety limits travel in the same file and must move with it. They
+	// were previously read once at process start, which made
+	// spec.safety.executionMode inert on a running controller — see
+	// safety.Gate.ApplyLimits for why that is worse in the direction nobody
+	// expects.
+	if gate := ctrl.Gate(); gate != nil {
+		gate.ApplyLimits(safety.Limits{
+			MaxConcurrentRemediations: cfg.Safety.MaxConcurrentRemediations,
+			MaxConcurrentReboots:      cfg.Safety.MaxConcurrentReboots,
+			DryRun:                    cfg.Safety.DryRun,
+		})
+	}
 	if err := ctrl.InstallRuntimeConfig(controller.RuntimeConfig{
 		Engine:              engine,
 		Catalog:             catalog,
@@ -137,11 +150,13 @@ func applyRuntimeConfig(
 	}
 	api.SetSignalCatalog(catalog)
 	api.SetRuntimeConfigInfo(httpapi.RuntimeConfigInfo{
-		SourceDigest: sourceDigest,
-		LoadedAt:     time.Now(),
-		Playbooks:    len(books),
-		Policies:     len(policies),
-		SignalRules:  signalRules,
+		SourceDigest:  sourceDigest,
+		LoadedAt:      time.Now(),
+		Playbooks:     len(books),
+		Policies:      len(policies),
+		SignalRules:   signalRules,
+		ExecutionMode: executionModeOf(ctrl.Gate()),
+		Confinement:   cfg.Safety.DestructiveExecutionNodeSelector,
 	})
 	// Reset unconditionally: a marker that disappeared (or two markers that
 	// disagree mid-sync) must clear the series, not leave the previous
@@ -300,4 +315,22 @@ func hashFile(h interface{ Write([]byte) (int, error) }, path string) error {
 	_, _ = h.Write([]byte(path))
 	_, _ = h.Write(data)
 	return nil
+}
+
+// executionModeOf reports what the gate is doing, in the vocabulary the CRD
+// uses, so an operator comparing the API answer to spec.safety.executionMode
+// is comparing like with like. Read from the live gate rather than from the
+// config that was just parsed: the point is to report what took EFFECT, not
+// what was requested.
+func executionModeOf(gate *safety.Gate) string {
+	switch {
+	case gate == nil:
+		return "unknown"
+	case gate.Paused():
+		return "paused"
+	case gate.DryRun():
+		return "dry-run"
+	default:
+		return "enabled"
+	}
 }

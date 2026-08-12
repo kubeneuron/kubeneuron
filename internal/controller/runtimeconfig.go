@@ -15,6 +15,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/internal/safety"
 )
 
 // RuntimeConfig is one immutable, coherent view of the reloadable runtime
@@ -93,6 +94,15 @@ func (c *Controller) runtimeConfig(ctx context.Context) *RuntimeConfig {
 // This is the reload path's single install point: a reconcile pass observes
 // either the old snapshot or the new one, never a mixture. The snapshot is
 // defensively copied on the way in; zero timings keep their current values.
+// Gate exposes the safety gate so the configuration reload can re-apply the
+// limits that travel in the same file. Nil on a controller built without one
+// (tests, the paneldemo).
+//
+// Deliberately narrow: this returns the gate rather than taking a Limits, so
+// the reload path owns the decision about WHICH fields move on a reload and
+// the controller does not grow a second opinion about safety configuration.
+func (c *Controller) Gate() *safety.Gate { return c.gate }
+
 func (c *Controller) InstallRuntimeConfig(rc RuntimeConfig) error {
 	if err := ValidateAcceleratorRuntimeProfiles(rc.AcceleratorProfiles); err != nil {
 		return err

@@ -225,7 +225,7 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 		if err := c.refuseInfeasibleReset(ctx, inc, book); err != nil {
 			c.log.Info("reset playbook refused before any disruptive step",
 				"incident", inc.ID, "playbook", inc.Playbook, "reason", err.Error())
-			if !errors.Is(err, errResetTargetUnattributed) {
+			if !errors.Is(err, errResetTargetUnattributed) && !errors.Is(err, errResetVendorMismatch) {
 				// Only the holder refusal is protection: processes are using the
 				// device, so nothing was disrupted for a reset that could not
 				// have worked. An unattributed incident is a structural dead end
@@ -233,7 +233,7 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 				// as protection would claim a disruption that still happens.
 				c.deferPlaybook(ctx, inc, metrics.DeferDeviceHolders)
 			}
-			if errors.Is(err, errResetTargetUnattributed) {
+			if errors.Is(err, errResetTargetUnattributed) || errors.Is(err, errResetVendorMismatch) {
 				// An unattributed incident has no device to reset and can never gain
 				// one. From EVALUATING the ladder cannot legally re-enter EVALUATING to
 				// swap in the reboot rung, so fail closed to a human with the reason —
@@ -569,13 +569,42 @@ func (c *Controller) verifyRuntimeEvidence(ctx context.Context, inc *types.Incid
 		// arrive with the hardware-qualified runtime.
 		return true, ""
 	}
+	if vendor := inc.Vendor; vendor.Valid() && !vendorRuntimeAttested(vendor) {
+		// This build has no runtime adapter for the incident's vendor, so the
+		// report it would wait for cannot be produced by any agent, ever.
+		//
+		// Holding anyway is not caution, it is a dead end: the incident sits
+		// out the evidence deadline and then parks in NEEDS_HUMAN — AFTER the
+		// cordon and drain have run — with a reason that names no action a
+		// human can take. Every AMD device-scoped incident on a healthy node
+		// ended that way, which made the recovery report read 0% recovered for
+		// a system that had recovered them.
+		//
+		// So verify on the same evidence a node-scoped incident uses: the
+		// durable agent heartbeat, already checked above. That is a genuine
+		// reduction in verification depth and it is recorded as one, in the
+		// audit trail and in docs/reference-capabilities.md, rather than
+		// quietly presented as the same check.
+		c.logReducedVerificationOnce(inc, vendor)
+		return true, ""
+	}
 	reports, ok := c.store.(store.AcceleratorReportStore)
 	if !ok {
 		return false, "accelerator report store is not configured"
 	}
-	report, err := reports.GetAcceleratorReport(ctx, inc.Target.Node, types.AcceleratorVendorNVIDIA)
+	// An unknown vendor still reads NVIDIA. XIDs and neutral fault envelopes
+	// both name their vendor now, so what reaches here is an incident opened
+	// by a manual trigger or a metric alert — and on the fleets that have one,
+	// NVIDIA is the runtime that exists. Guessing "no runtime" for those would
+	// turn a degraded NVIDIA agent into a resolved incident, which is the one
+	// direction this function must never fail.
+	vendor := inc.Vendor
+	if !vendor.Valid() {
+		vendor = types.AcceleratorVendorNVIDIA
+	}
+	report, err := reports.GetAcceleratorReport(ctx, inc.Target.Node, vendor)
 	if err != nil {
-		return false, "no accelerator report for the node"
+		return false, fmt.Sprintf("no %s accelerator report for the node", vendor)
 	}
 	if time.Since(report.ObservedAt) > verifyEvidenceMaxAge {
 		return false, "accelerator report is stale"
@@ -591,6 +620,34 @@ func (c *Controller) verifyRuntimeEvidence(ctx context.Context, inc *types.Incid
 		}
 	}
 	return false, fmt.Sprintf("GPU %s is missing from the current inventory", inc.Target.GPUUUID)
+}
+
+// attestedRuntimeVendors are the accelerator vendors THIS BUILD can attest at
+// runtime — the vendors for which an internal/accelerator adapter exists and
+// an agent can therefore produce a report.
+//
+// It is a property of the build, not of the fleet. A vendor absent here has no
+// report to wait for, so anything that blocks on one must take a different
+// path rather than waiting forever. TestAttestedVendorsMatchTheAdapters fails
+// the build if an adapter package lands without being listed.
+var attestedRuntimeVendors = map[types.AcceleratorVendor]bool{
+	types.AcceleratorVendorNVIDIA: true,
+}
+
+func vendorRuntimeAttested(v types.AcceleratorVendor) bool {
+	return attestedRuntimeVendors[v]
+}
+
+// logReducedVerificationOnce records, once per (node, vendor), that an
+// incident was verified on the heartbeat alone because this build cannot
+// attest its vendor's runtime. Once per pair rather than per incident: it is a
+// statement about the build and the machine, not about any one fault.
+func (c *Controller) logReducedVerificationOnce(inc *types.Incident, vendor types.AcceleratorVendor) {
+	if !c.logOnce.first("reduced-verify/" + inc.Target.Node + "/" + string(vendor)) {
+		return
+	}
+	c.log.Warn("verifying a remediation on the agent heartbeat alone: this build has no runtime adapter for the incident's accelerator vendor, so no report can attest the device",
+		"node", inc.Target.Node, "vendor", vendor, "incident", inc.ID)
 }
 
 // recoverOrphanedExecution handles EXECUTING incidents with no running step
@@ -694,22 +751,34 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 	// attempt: a node must not be marked degraded by a transition that lost its
 	// conflict check and never happened.
 	c.syncDegradedTaint(ctx, inc, from, to)
-	if to.Halted() {
+	if to.Terminal() {
 		c.recordRecoveryOutcome(ctx, inc, to)
 	}
 	return nil
 }
 
 // recordRecoveryOutcome emits the outcome metrics once per incident, on the
-// committed halting transition: how long it was open, whether it came back,
+// committed TERMINAL transition: how long it was open, whether it came back,
 // and how much accelerator capacity was degraded meanwhile. Everything else
 // the controller exports is process telemetry; this is what the fleet got
 // back, which is the number a capacity owner actually budgets against.
 //
-// Emitted AFTER the commit so a conflicting transition cannot double-count,
-// and only for halting states so an incident is measured exactly once.
+// Terminal, not Halted. NEEDS_HUMAN is halted but reversible — a human can
+// resolve it or send it back to EVALUATING — and measuring there charged the
+// SAME incident again, in full from its open time, at every park. A single
+// incident cycling park/unpark three times reported four times its real
+// degraded GPU-seconds, unbounded in the number of cycles, and inflated the
+// stacked dashboard panel past the fleet's actual capacity. RESOLVED and
+// EXPIRED are the states nothing returns from, so each incident lands here
+// exactly once.
+//
+// Dry-run incidents are excluded for the reason the protection metrics
+// exclude them: dry-run executes nothing, so nothing was recovered. Counting
+// them would make a default install — dry-run is the shipped default —
+// report GPU-hours "returned to service" by a system that took no action at
+// all, which is the one number this feature exists to be trusted on.
 func (c *Controller) recordRecoveryOutcome(ctx context.Context, inc *types.Incident, to types.IncidentState) {
-	if inc.OpenedAt.IsZero() {
+	if inc.OpenedAt.IsZero() || inc.DryRun {
 		return
 	}
 	duration := time.Since(inc.OpenedAt).Seconds()
@@ -732,16 +801,73 @@ func (c *Controller) recordRecoveryOutcome(ctx context.Context, inc *types.Incid
 		Add(duration * float64(c.affectedGPUs(ctx, inc)))
 }
 
+// DegradedGPUs reports how many accelerators sit under a non-terminal,
+// non-dry-run incident right now, keyed by problem class and by whether
+// automation still owns the incident or a human does.
+//
+// It lives here rather than in the store because it must expand a node-scoped
+// incident with exactly the rule affectedGPUs uses — the two numbers describe
+// the same fleet and must not drift — and because a node's GPU inventory is a
+// JSON column, so the expansion is not portable SQL.
+//
+// It exists because kubeneuron_degraded_gpu_seconds_total is charged once, on
+// the terminal transition: an incident parked in NEEDS_HUMAN contributes
+// nothing to it until somebody closes it, which is precisely the population
+// whose capacity is most thoroughly lost. This is the gauge that shows it.
+func (c *Controller) DegradedGPUs(ctx context.Context) (map[metrics.DegradedKey]int, error) {
+	incidents, err := c.store.ListIncidents(ctx, store.IncidentFilter{States: activeIncidentStates()})
+	if err != nil {
+		return nil, err
+	}
+	parked, err := c.store.ListIncidents(ctx, store.IncidentFilter{
+		States: []types.IncidentState{types.StateNeedsHuman},
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := map[metrics.DegradedKey]int{}
+	for _, group := range [][]*types.Incident{incidents, parked} {
+		for _, inc := range group {
+			if inc.DryRun {
+				// Dry-run executes nothing, so it neither degrades nor
+				// recovers anything — the same exclusion the counter and the
+				// report both apply.
+				continue
+			}
+			owner := "automation"
+			if inc.State == types.StateNeedsHuman {
+				owner = "human"
+			}
+			out[metrics.DegradedKey{Class: string(inc.Class), Owner: owner}] += c.affectedGPUs(ctx, inc)
+		}
+	}
+	return out, nil
+}
+
 // affectedGPUs is how many accelerators the incident covered: one for a
 // GPU-scoped incident, the node's whole inventory for a node-scoped one.
 // Unknown inventory counts as one — undercounting is the honest failure
 // direction for a capacity number.
+//
+// The fallback is not silent. A node-scoped incident on an 8-GPU node charged
+// as one device understates recovered capacity eightfold, and the number ends
+// up in front of whoever pays for the fleet; if that is happening because the
+// store could not be read, somebody has to be able to find out why. The
+// reporting-side twin of this fallback is Report.AssumedSingleGPU, which
+// counts how often it was taken.
 func (c *Controller) affectedGPUs(ctx context.Context, inc *types.Incident) int {
 	if inc.Target.IsGPU() {
 		return 1
 	}
 	node, err := c.store.GetNode(ctx, inc.Target.Node)
-	if err != nil || node == nil || len(node.GPUs) == 0 {
+	switch {
+	case err != nil:
+		c.log.Warn("cannot read a node's GPU inventory; charging its incident one GPU, so recovered capacity is understated",
+			"node", inc.Target.Node, "incident", inc.ID, "err", err)
+		return 1
+	case node == nil || len(node.GPUs) == 0:
+		c.log.Info("a node-scoped incident closed on a node with no registered GPU inventory; charging it one GPU",
+			"node", inc.Target.Node, "incident", inc.ID)
 		return 1
 	}
 	return len(node.GPUs)

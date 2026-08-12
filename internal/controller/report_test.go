@@ -250,3 +250,74 @@ func TestAggregateRecoveryClampsBackwardsAndFutureStamps(t *testing.T) {
 		t.Fatalf("future incident produced %+v, want an empty report", report)
 	}
 }
+
+// TestDryRunFleetGetsSimulatedNumbers is the pilot's whole first month. The
+// checklist tells operators to stay in dry-run until they have watched the
+// system decide, and for that entire period every real number is zero by
+// construction — so the question that decides whether to enable enforcement
+// had a blank table for an answer.
+func TestDryRunFleetGetsSimulatedNumbers(t *testing.T) {
+	now := time.Now()
+	from, to := now.Add(-24*time.Hour), now
+	opened := now.Add(-3 * time.Hour)
+	resolved := now.Add(-2 * time.Hour)
+
+	inc := func(id string, dryRun bool, epoch int) *types.Incident {
+		r := resolved
+		return &types.Incident{
+			ID: id, Target: types.Target{Node: "n1", GPUUUID: "GPU-" + id},
+			Class: types.ClassECCDBE, State: types.StateResolved, DryRun: dryRun,
+			ApprovalEpoch: epoch,
+			OpenedAt:      opened, UpdatedAt: r, StateChangedAt: r, ResolvedAt: &r,
+		}
+	}
+	report := aggregateRecovery([]*types.Incident{
+		inc("a", true, 0), // dry-run, unattended
+		inc("b", true, 1), // dry-run, needed an approval
+	}, map[string]int{"n1": 1}, from, to)
+
+	// The headline stays honest: nothing was executed, so nothing recovered.
+	if report.Incidents != 0 || report.RecoveredGPUHours != 0 {
+		t.Fatalf("headline = %d incidents / %.2f recovered GPU-hours, want zero: "+
+			"dry-run executed nothing", report.Incidents, report.RecoveredGPUHours)
+	}
+	if report.DryRunExcluded != 2 {
+		t.Fatalf("DryRunExcluded = %d, want 2", report.DryRunExcluded)
+	}
+
+	sim := report.Simulated
+	if sim == nil {
+		t.Fatal("a dry-run fleet got no simulated numbers; the pilot's whole evaluation " +
+			"period reports a blank table")
+	}
+	if sim.Incidents != 2 || sim.WouldRecover != 2 {
+		t.Fatalf("simulated = %+v, want 2 incidents both reaching RESOLVED", sim)
+	}
+	if sim.WouldRecoverUnattended != 1 {
+		t.Fatalf("WouldRecoverUnattended = %d, want 1 (the other minted an approval round)",
+			sim.WouldRecoverUnattended)
+	}
+	// One hour degraded per incident, one GPU each.
+	if sim.DegradedGPUHours < 1.9 || sim.DegradedGPUHours > 2.1 {
+		t.Fatalf("simulated DegradedGPUHours = %.2f, want ~2", sim.DegradedGPUHours)
+	}
+}
+
+// A fleet with no dry-run incidents must not grow a simulated section: an
+// empty one would invite the reader to look for meaning in zeros.
+func TestRealFleetHasNoSimulatedSection(t *testing.T) {
+	now := time.Now()
+	r := now.Add(-1 * time.Hour)
+	report := aggregateRecovery([]*types.Incident{{
+		ID: "real", Target: types.Target{Node: "n1", GPUUUID: "GPU-1"},
+		Class: types.ClassECCDBE, State: types.StateResolved,
+		OpenedAt: now.Add(-2 * time.Hour), UpdatedAt: r, StateChangedAt: r, ResolvedAt: &r,
+	}}, map[string]int{"n1": 1}, now.Add(-24*time.Hour), now)
+
+	if report.Simulated != nil {
+		t.Fatalf("a fleet with no dry-run incidents got a simulated section: %+v", report.Simulated)
+	}
+	if report.Recovered != 1 {
+		t.Fatalf("Recovered = %d, want 1", report.Recovered)
+	}
+}

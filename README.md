@@ -378,6 +378,17 @@ one door still deliberately closed is per-device *hardware* GPU reset, which a
 virtualized instance cannot perform and which the agent refuses on evidence
 until the bare-metal matrix passes.
 
+**How much of this is proven depends on which fleet you have**, and the
+difference is large enough that it belongs before the install command rather
+than in a footnote. NVIDIA on AWS is validated end to end; NVIDIA elsewhere
+tops out at a reboot rung that has never executed on hardware; AMD detects,
+protects and closes incidents but arms nothing and resets nothing; Intel is a
+seam with no implementation behind it. The table is in
+[the pilot checklist](docs/pilot-checklist.md#0-is-your-fleet-a-good-fit), and
+[the capability matrix](docs/reference-capabilities.md) states every cell of
+it against the code, with `hack/verify-docs.sh` failing the build when the two
+disagree.
+
 ## Configuration sources
 
 - [`api/v1alpha1/`](api/v1alpha1/) — Kubernetes API types.

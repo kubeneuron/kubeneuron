@@ -164,7 +164,8 @@ func TestEmittedEventsCarryNoXID(t *testing.T) {
 // silently open no incident — detection that looks like coverage and is not.
 func TestEveryEmittedCodeIsClassified(t *testing.T) {
 	for _, code := range []string{
-		CodeECCUncorr, CodeECCCorrRate, CodePageRetire, CodeXGMILink, CodeThermal, CodeGPULost,
+		CodeECCUncorr, CodeECCCorrRate, CodePageRetire, CodePageRetireExhausted,
+		CodeXGMILink, CodeThermal, CodeGPULost,
 	} {
 		info, ok := detect.ClassifyFault(FaultVendor, code)
 		if !ok {
@@ -543,5 +544,172 @@ func TestWatchStreamsEventsAndStopsWithContext(t *testing.T) {
 	}
 	cancel()
 	for range ch { //nolint:revive // draining until the watcher closes the channel is the assertion
+	}
+}
+
+// TestXGMILinkErrorsNeedADeltaBeforePagingAnyone covers the fabric counter.
+// XGMI link errors classify CRITICAL and the counter also moves on corrected
+// link retries, so reporting every increment wakes somebody about a healthy
+// fabric under load.
+func TestXGMILinkErrorsNeedADeltaBeforePagingAnyone(t *testing.T) {
+	errs := 0
+	w := testWatcher(t, func([]string) ([]byte, error) {
+		return []byte(`[{"gpu":0,"bdf":"0000:c3:00.0","ecc":{"total_uncorrectable_count":0},` +
+			`"xgmi":{"link_error_count":` + strconv.Itoa(errs) + `}}]`), nil
+	})
+	w.XGMILinkMinDelta = 4
+	w.poll(context.Background()) // baseline
+
+	errs = 3
+	if got := w.poll(context.Background()); len(got) != 0 {
+		t.Fatalf("poll = %+v, want silence below the fabric reporting delta", got)
+	}
+	errs = 4
+	got := eventsByCode(w.poll(context.Background()))
+	if len(got[CodeXGMILink]) != 1 {
+		t.Fatalf("events = %+v, want one XGMI report once the delta is crossed", got)
+	}
+	if got[CodeXGMILink][0].Fault.Attributes["xgmi_link_errors"] != "4" {
+		t.Fatalf("attributes = %+v, want the cumulative link error count", got[CodeXGMILink][0].Fault.Attributes)
+	}
+}
+
+// TestBadPageThresholdSeparatesRetirementFromExhaustion pins the distinction
+// the fault table encodes: retiring a page is the recovery mechanism WORKING
+// (ClassRowRemapOK), while retiring past the device's budget means there are
+// no spares left to retire into (ClassRowRemapFailure, the peer of XID 64).
+func TestBadPageThresholdSeparatesRetirementFromExhaustion(t *testing.T) {
+	pages := 0
+	newWatcher := func(threshold uint64) *Watcher {
+		w := testWatcher(t, func([]string) ([]byte, error) {
+			return []byte(`[{"gpu":0,"bdf":"0000:c3:00.0","ecc":{"total_uncorrectable_count":0},` +
+				`"ras":{"retired_page_count":` + strconv.Itoa(pages) + `}}]`), nil
+		})
+		w.BadPageThreshold = threshold
+		return w
+	}
+
+	// With no threshold configured KubeNeuron never claims a device is out of
+	// spares — the budget is SKU-specific and inventing one would be a guess
+	// that ends in a node replacement.
+	w := newWatcher(0)
+	w.poll(context.Background())
+	pages = 5000
+	for code := range eventsByCode(w.poll(context.Background())) {
+		if code == CodePageRetireExhausted {
+			t.Fatal("claimed the spare-page budget was exhausted with no threshold configured")
+		}
+	}
+
+	pages = 0
+	w = newWatcher(64)
+	w.poll(context.Background()) // baseline
+	pages = 10
+	got := eventsByCode(w.poll(context.Background()))
+	if len(got[CodePageRetire]) != 1 {
+		t.Fatalf("events = %+v, want the routine retirement below the threshold", got)
+	}
+	if len(got[CodePageRetireExhausted]) != 0 {
+		t.Fatalf("events = %+v, want no exhaustion claim below the threshold", got)
+	}
+
+	pages = 64
+	got = eventsByCode(w.poll(context.Background()))
+	if len(got[CodePageRetireExhausted]) != 1 {
+		t.Fatalf("events = %+v, want the exhaustion level to fire at the threshold", got)
+	}
+	attrs := got[CodePageRetireExhausted][0].Fault.Attributes
+	if attrs["retired_pages"] != "64" || attrs["threshold"] != "64" {
+		t.Fatalf("attributes = %+v, want the count and the threshold that judged it", attrs)
+	}
+	info, ok := detect.ClassifyFault(FaultVendor, CodePageRetireExhausted)
+	if !ok || info.Class != types.ClassRowRemapFailure {
+		t.Fatalf("class = %v (found=%v), want ClassRowRemapFailure — an exhausted budget is XID 64's peer, not a successful retirement",
+			info.Class, ok)
+	}
+
+	// It is a LEVEL: staying past the budget must not re-open an incident on
+	// every poll.
+	pages = 70
+	if got := eventsByCode(w.poll(context.Background())); len(got[CodePageRetireExhausted]) != 0 {
+		t.Fatalf("events = %+v, want silence while the exhausted condition persists", got)
+	}
+}
+
+// TestExhaustedBudgetSurvivesTheStartupBaseline is the case the counter rules
+// would get wrong. A GPU that is ALREADY past its bad-page budget when the
+// agent starts is not history to be absorbed — it is a device that needs
+// replacing right now.
+func TestExhaustedBudgetSurvivesTheStartupBaseline(t *testing.T) {
+	w := testWatcher(t, func([]string) ([]byte, error) {
+		return []byte(`[{"gpu":0,"bdf":"0000:c3:00.0","ecc":{"total_uncorrectable_count":0},` +
+			`"ras":{"retired_page_count":900}}]`), nil
+	})
+	w.BadPageThreshold = 64
+
+	got := eventsByCode(w.poll(context.Background()))
+	if len(got[CodePageRetire]) != 0 {
+		t.Fatalf("events = %+v, want the retirement HISTORY absorbed by the baseline", got)
+	}
+	if len(got[CodePageRetireExhausted]) != 1 {
+		t.Fatal("a GPU already out of spare pages at startup reported nothing; " +
+			"the exhausted condition is current, not historical")
+	}
+}
+
+// TestReplacedDeviceDoesNotInheritCounterHistory covers the RMA case. Series
+// are keyed by GPU index (the rocm-smi fallback reports no UUID, so a
+// UUID-keyed series would re-baseline on every failover), which means a
+// replacement device is otherwise compared against its predecessor's lifetime
+// totals.
+//
+// The dangerous direction is a replacement whose own lifetime counter is
+// HIGHER than the baseline the dead device left behind — a refurbished spare,
+// or simply a device with a longer history. The difference is then replayed as
+// one enormous delta and opens a CRITICAL uncorrectable-ECC incident on a GPU
+// that was installed minutes ago. (A replacement that reads LOWER is already
+// caught by the counter-went-backwards rule, which is why that case proves
+// nothing on its own.)
+func TestReplacedDeviceDoesNotInheritCounterHistory(t *testing.T) {
+	uuid, uncorr := "amd-gpu-old", 10
+	w := testWatcher(t, func([]string) ([]byte, error) {
+		return []byte(`[{"gpu":0,"bdf":"0000:c3:00.0","uuid":"` + uuid + `",` +
+			`"ecc":{"total_uncorrectable_count":` + strconv.Itoa(uncorr) + `}}]`), nil
+	})
+	w.poll(context.Background()) // baselines the dying device at 10
+
+	uuid, uncorr = "amd-gpu-new", 900
+	if got := eventsByCode(w.poll(context.Background())); len(got[CodeECCUncorr]) != 0 {
+		t.Fatalf("events = %+v: a freshly installed GPU was charged 890 uncorrectable ECC errors "+
+			"it inherited from the device it replaced", got)
+	}
+
+	// It is baselined, not ignored: its own next error still reports.
+	uncorr = 901
+	got := eventsByCode(w.poll(context.Background()))
+	if len(got[CodeECCUncorr]) != 1 {
+		t.Fatalf("events = %+v, want the replacement's OWN first error reported", got)
+	}
+}
+
+// The other half: a fallback poll that reports no UUID must NOT be read as a
+// device swap, or every amd-smi failure would re-baseline the fleet and hide
+// whatever went wrong while it was down.
+func TestMissingUUIDIsNotReadAsAReplacement(t *testing.T) {
+	withUUID, uncorr := true, 100
+	w := testWatcher(t, func([]string) ([]byte, error) {
+		id := ""
+		if withUUID {
+			id = `"uuid":"amd-gpu-0",`
+		}
+		return []byte(`[{"gpu":0,"bdf":"0000:c3:00.0",` + id +
+			`"ecc":{"total_uncorrectable_count":` + strconv.Itoa(uncorr) + `}}]`), nil
+	})
+	w.poll(context.Background()) // baseline at 100
+
+	withUUID, uncorr = false, 102
+	got := eventsByCode(w.poll(context.Background()))
+	if len(got[CodeECCUncorr]) != 1 {
+		t.Fatalf("events = %+v, want the increase still reported when the tool omits the UUID", got)
 	}
 }

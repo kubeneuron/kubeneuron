@@ -220,7 +220,8 @@
             ]
           }
         }
-      }
+      },
+      "description": "Counter-reset caveat: these are process-lifetime counters, so a controller restart (upgrade, rollout, crash) resets them to zero and increase() attributes the gap to the restart rather than to the fleet. Treat a sudden drop as a restart until you have checked, and use kubeneuronctl report for any figure that has to survive one."
     },
     {
       "type": "stat",
@@ -236,7 +237,8 @@
           "expr": "sum(increase(kubeneuron_gate_denials_total[1h]))",
           "legendFormat": "denials 1h"
         }
-      ]
+      ],
+      "description": "Counter-reset caveat: these are process-lifetime counters, so a controller restart (upgrade, rollout, crash) resets them to zero and increase() attributes the gap to the restart rather than to the fleet. Treat a sudden drop as a restart until you have checked, and use kubeneuronctl report for any figure that has to survive one."
     },
     {
       "type": "stat",
@@ -252,7 +254,8 @@
           "expr": "sum(increase(kubeneuron_escalations_total[24h]))",
           "legendFormat": "escalations 24h"
         }
-      ]
+      ],
+      "description": "Counter-reset caveat: these are process-lifetime counters, so a controller restart (upgrade, rollout, crash) resets them to zero and increase() attributes the gap to the restart rather than to the fleet. Treat a sudden drop as a restart until you have checked, and use kubeneuronctl report for any figure that has to survive one."
     },
     {
       "type": "timeseries",
@@ -300,7 +303,8 @@
           "expr": "sum by (class) (increase(kubeneuron_incidents_opened_total[1h]))",
           "legendFormat": "{{class}}"
         }
-      ]
+      ],
+      "description": "Counter-reset caveat: these are process-lifetime counters, so a controller restart (upgrade, rollout, crash) resets them to zero and increase() attributes the gap to the restart rather than to the fleet. Treat a sudden drop as a restart until you have checked, and use kubeneuronctl report for any figure that has to survive one."
     },
     {
       "type": "timeseries",
@@ -316,7 +320,8 @@
           "expr": "sum by (outcome) (increase(kubeneuron_steps_total[1h]))",
           "legendFormat": "{{outcome}}"
         }
-      ]
+      ],
+      "description": "Counter-reset caveat: these are process-lifetime counters, so a controller restart (upgrade, rollout, crash) resets them to zero and increase() attributes the gap to the restart rather than to the fleet. Treat a sudden drop as a restart until you have checked, and use kubeneuronctl report for any figure that has to survive one."
     },
     {
       "type": "timeseries",
@@ -332,7 +337,8 @@
           "expr": "sum by (Hostname, gpu) (increase(DCGM_FI_DEV_ECC_DBE_VOL_TOTAL[1h]))",
           "legendFormat": "{{Hostname}} gpu{{gpu}}"
         }
-      ]
+      ],
+      "description": "Counter-reset caveat: these are process-lifetime counters, so a controller restart (upgrade, rollout, crash) resets them to zero and increase() attributes the gap to the restart rather than to the fleet. Treat a sudden drop as a restart until you have checked, and use kubeneuronctl report for any figure that has to survive one."
     },
     {
       "type": "timeseries",
@@ -447,7 +453,8 @@
             ]
           }
         }
-      }
+      },
+      "description": "Counter-reset caveat: these are process-lifetime counters, so a controller restart (upgrade, rollout, crash) resets them to zero and increase() attributes the gap to the restart rather than to the fleet. Treat a sudden drop as a restart until you have checked, and use kubeneuronctl report for any figure that has to survive one."
     },
     {
       "type": "stat",

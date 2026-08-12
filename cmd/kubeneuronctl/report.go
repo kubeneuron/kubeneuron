@@ -156,6 +156,34 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		_, _ = fmt.Fprintf(out, "\nnote: %d node-scoped incident(s) hit nodes with no registered GPU inventory\n"+
 			"and were charged 1 GPU each — the real degraded GPU-hours are higher.\n", r.AssumedSingleGPU)
 	}
+	if r.DryRunExcluded > 0 {
+		// Say this loudly. On a fresh install every incident is dry-run, so a
+		// silent zero would read as "nothing happened" when the truth is
+		// "everything was watched and nothing was executed, by design".
+		_, _ = fmt.Fprintf(out, "\nnote: %d incident(s) excluded because their installation was in dry-run.\n"+
+			"Dry-run executes nothing, so it recovers nothing; these are not counted as capacity\n"+
+			"returned to service. Switch to executionMode: Enabled (confined) to measure real recovery.\n",
+			r.DryRunExcluded)
+	}
+	if sim := r.Simulated; sim != nil {
+		// Printed AFTER the note above and under its own heading, never
+		// interleaved with the real numbers. A reader skimming must not be
+		// able to carry one of these away as a measurement.
+		_, _ = fmt.Fprintf(out, "\nSIMULATED — what dry-run WOULD have done (nothing was executed)\n"+
+			"  incidents             %d\n"+
+			"  would recover         %d (%d without asking a human)\n"+
+			"  degraded GPU-hours    %s   ← real: the hardware was degraded this long\n"+
+			"  would recover         %s   ← hypothetical: no capacity was returned\n"+
+			"  ladder decision time  p50 %s  p90 %s\n",
+			sim.Incidents,
+			sim.WouldRecover, sim.WouldRecoverUnattended,
+			gpuHours(sim.DegradedGPUHours),
+			gpuHours(sim.WouldRecoverGPUHours),
+			seconds(sim.MTTR.P50Seconds), seconds(sim.MTTR.P90Seconds))
+		_, _ = fmt.Fprint(out, "\nThese are decisions, not repairs: every one of them reached RESOLVED against a\n"+
+			"synthetic success, so they measure what the policy would have chosen — which is\n"+
+			"what a dry-run pilot is for — and not what came back.\n")
+	}
 	return nil
 }
 

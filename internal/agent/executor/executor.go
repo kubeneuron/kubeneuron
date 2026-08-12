@@ -6,6 +6,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -206,6 +207,13 @@ func (e *Executor) Execute(ctx context.Context, a types.Action) (*types.ActionRe
 	res.OK = err == nil
 	if err != nil {
 		res.Error = err.Error()
+		if errors.Is(err, nvml.ErrNotIdle) {
+			// Say so in a field rather than leaving the controller to read the
+			// prose: "the device is busy" and "the idle probe is broken" are
+			// the same failure to the ladder but opposite facts to anyone
+			// asking what the control plane protected.
+			res.Refusal = types.RefusalNotIdle
+		}
 	}
 
 	e.mu.Lock()

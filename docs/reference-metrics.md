@@ -20,9 +20,10 @@ the operator's controller-runtime metrics.
 | `kubeneuron_stack_restore_failures_total` | counter | — | failed accelerator-stack restores by the janitor — a growing rate means a node's GPU monitoring is staying down |
 | `kubeneuron_runtime_config_info` | gauge | `digest` | identity of the loaded runtime configuration (always 1); a digest lagging `KubeNeuron.status.configDigest` is a rollout that never landed |
 | `kubeneuron_incident_duration_seconds` | histogram | `class`, `outcome` | open-to-halted wall time — MTTR, split by how the incident ended |
-| `kubeneuron_incidents_recovered_total` | counter | `class`, `unattended` | incidents that reached RESOLVED; `unattended="true"` never needed a human decision |
-| `kubeneuron_degraded_gpu_seconds_total` | counter | `class`, `outcome` | GPU-seconds spent under an open incident; the `outcome="resolved"` share is capacity returned to service (÷3600 for GPU-hours) |
-| `kubeneuron_workloads_evicted_total` | counter | `node`, `reason` | GPU workloads moved off a node ahead of a destructive step, by problem class — what remediation cost |
+| `kubeneuron_incidents_recovered_total` | counter | `class`, `unattended` | incidents that reached RESOLVED; `unattended="true"` never needed a human decision. Dry-run incidents are excluded — dry-run executes nothing, so it recovers nothing |
+| `kubeneuron_degraded_gpu_seconds_total` | counter | `class`, `outcome` | GPU-seconds charged when an incident reached a terminal state; the `outcome="resolved"` share is capacity returned to service (÷3600 for GPU-hours). Recorded once per incident, on its terminal transition only, and never for dry-run — so an incident parked in `NEEDS_HUMAN` contributes **nothing here** until somebody closes it |
+| `kubeneuron_degraded_gpus` | gauge | `class`, `owner` | accelerators under a non-terminal incident right now. `owner="human"` is the `NEEDS_HUMAN` population — capacity that stays lost until a person acts — and is exactly what the counter above cannot show. Node-scoped incidents expand to the node's GPU count |
+| `kubeneuron_workloads_evicted_total` | counter | `reason` | GPU workloads moved off a node ahead of a destructive step, by problem class — what remediation cost. No `node` label by design: this control plane replaces nodes, so node names are an unbounded set and a per-node series would grow for the life of the process. Per-node detail lives in the incident record and audit trail |
 | `kubeneuron_destructive_steps_deferred_total` | counter | `reason` | destructive steps that did **not** run, by the guard that stopped them — what remediation deliberately did not cost |
 | `kubeneuron_gate_denials_total` | counter | — | steps denied by the safety gate (pause, cooldown, concurrency, capability) |
 | `kubeneuron_escalations_total` | counter | — | ladder escalations after step/verification failures |
@@ -42,6 +43,26 @@ node — is counted again on every reconcile pass: read it with `rate()` as "how
 much protection is currently in force", and one-shot refusals as single events.
 Dry-run incidents and playbooks with no disruptive rung never appear, because
 neither was going to touch a workload.
+
+`not_idle` counts only a guard the agent reported as a refusal: the device was
+genuinely held by live processes. An idle probe that could not run at all — a
+missing `nvidia-smi`, a wedged driver, a timeout — fails the same step and
+fails just as closed, but it is not evidence that a workload was spared, so it
+is deliberately absent. An agent older than the refusal field reports no
+refusals, which under-counts protection rather than inventing it. A `not_idle`
+refusal also stops the ladder and hands the incident to a human rather than
+escalating, because every rung above the guard is more destructive than the one
+it just stopped — expect `kubeneuron_incidents_recovered_total` not to move for
+these and `NEEDS_HUMAN` to gain one.
+
+The two recovery series answer different questions and must be read together.
+The counter is what FINISHED: closed incidents, charged once, so a park and
+unpark cannot bill the same hour twice. The gauge is what is HAPPENING: it
+includes every parked incident, which the counter deliberately omits. To get
+degraded GPU-hours over a window including parked incidents, integrate the
+gauge (`sum_over_time(kubeneuron_degraded_gpus[7d]) * <scrape interval> / 3600`)
+or ask `kubeneuronctl report`, which computes it from the incident store and
+does charge parked incidents.
 
 `certificate` label values: `controller-server-leaf`, `agent-client-ca`,
 `public-server-leaf` (when public TLS is enabled) on the controller;

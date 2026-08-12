@@ -7,6 +7,55 @@ This runbook covers upgrading KubeNeuron itself. Third-party dependencies
 The API is `v1alpha1`: minor releases may change it without conversion
 support. Read the release notes for every version you skip.
 
+## Fleet membership changed in v0.2.2 — check it before you upgrade
+
+Through v0.2.1 a node joined the GPU fleet only if it advertised
+`nvidia.com/gpu`. v0.2.2 replaced that with a vendor-neutral matcher so AMD
+and Intel nodes stop being invisible — but that widened the set of machines
+KubeNeuron may cordon, drain, taint and reboot, and the v0.2.2 notes did not
+say so. If you upgraded to v0.2.2 already, treat the list below as an audit
+you still owe yourself.
+
+The matcher is now anchored to recognised vendor domains (`nvidia.com`,
+`amd.com`, `intel.com`, `gpu.intel.com`, `habana.ai`, `aliyun.com`) rather
+than to the shape of the resource name, so a third-party counter such as
+`example.com/gpu-licence` no longer drags a CPU node into the fleet.
+
+Before upgrading, print the fleet as the new matcher will see it:
+
+```
+kubectl get nodes -o json | jq -r '
+  .items[]
+  | select([.status.capacity | keys[]
+      | select(test("^((nvidia|amd|intel)\\.com|habana\\.ai|aliyun\\.com)/(gpu|mig-)|^gpu\\.intel\\.com/"))]
+      | length > 0)
+  | .metadata.name'
+```
+
+Compare it against `kubeneuronctl nodes` on the running version. Any node
+that appears only in the new list is newly in scope. Two things bound what
+that means in practice, and both are worth confirming rather than assuming:
+
+- Confinement still applies. A node is only eligible for destructive steps
+  if it matches `spec.safety.destructiveExecution.nodeSelector`, so a newly
+  visible node is not automatically actionable.
+- Non-destructive protection does apply immediately — a newly visible node
+  can be cordoned and drained.
+
+If a node should never be touched, label it `kubeneuron.io/pause=""` before
+you upgrade, or narrow `spec.safety.destructiveExecution.nodeSelector`
+first.
+
+A GPU resource from a domain not on the list is now ignored for fleet
+membership and logged once by the controller:
+
+```
+kubectl -n kube-neuron logs deploy/kubeneuron-controller | grep 'unrecognised vendor domain'
+```
+
+If that line names a real accelerator on your fleet, open an issue — the
+node is invisible to KubeNeuron until the domain is recognised.
+
 ## Before any upgrade
 
 1. Take a fresh workflow-store backup (see

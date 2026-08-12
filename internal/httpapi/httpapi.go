@@ -179,6 +179,21 @@ type RuntimeConfigInfo struct {
 	Playbooks    int       `json:"playbooks"`
 	Policies     int       `json:"policies"`
 	SignalRules  int       `json:"signal_rules"`
+	// ExecutionMode is what the controller is ACTUALLY doing right now:
+	// "dry-run", "enabled", or "paused".
+	//
+	// It is here because nothing else could answer the question. Configuration
+	// reloads in place rather than rolling the Deployment, so an operator who
+	// switches spec.safety.executionMode has the CR, the config digest and
+	// /readyz all agreeing with them — and, until this build, no way at all to
+	// see whether the running process had picked the change up. A digest is
+	// the identity of a configuration, not evidence that its most consequential
+	// field took effect.
+	ExecutionMode string `json:"execution_mode"`
+	// Confinement is the destructive blast radius in force, empty when none is
+	// configured. Also unanswerable before now, and it decides which machines
+	// a playbook may touch.
+	Confinement map[string]string `json:"confinement,omitempty"`
 }
 
 // SetRuntimeConfigInfo publishes the identity of the configuration a
@@ -726,6 +741,14 @@ func (s *Server) handleActionResult(w http.ResponseWriter, r *http.Request) {
 	if err := ensureJSONEOF(dec); err != nil {
 		writeJSONDecodeError(w, "bad action result", err)
 		return
+	}
+	// The refusal code rides a header rather than the strict-decoded body, so
+	// neither direction of a rolling upgrade can reject it. Only codes this
+	// build knows are accepted: an unrecognised string must read as "no
+	// refusal" rather than as an unknown one, since every consumer treats a
+	// known code as a positive claim.
+	if refusal := r.Header.Get(types.AgentActionRefusalHeader); refusal == types.RefusalNotIdle {
+		res.Refusal = refusal
 	}
 	actionID := r.PathValue("id")
 	if actionID == "" || res.ActionID != actionID {
