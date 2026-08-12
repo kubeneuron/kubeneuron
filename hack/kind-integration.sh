@@ -112,6 +112,7 @@ kubeconfig_identity=
 kubeconfig_temp_identity=
 kubeconfig_temp=
 work_dir=
+tls_forward_restart=
 port_forward_pid=
 declare -A tls_secret_uids=()
 declare -A tls_secret_hashes=()
@@ -864,17 +865,44 @@ assert_tls_curl_failure() {
 	local expected_pattern=$2
 	local log_file=$3
 	shift 3
-	local rc
-	set +e
-	"$@" >/dev/null 2>"$log_file"
-	rc=$?
-	set -e
-	((rc != 0)) || die "$label unexpectedly completed a TLS request"
-	if ! grep -Eiq "$expected_pattern" "$log_file"; then
-		printf '%s\n' "$(<"$log_file")" >&2
-		die "$label failed without the expected TLS error class"
-	fi
-	kill -0 "$port_forward_pid" >/dev/null 2>&1 || die "$label coincided with a dead port-forward"
+	local rc attempt
+
+	# tls_forward_restart names the caller's own restart function, because the
+	# rotation phase and the auth phase run different tunnels. Naming one of
+	# them here would have worked in the phase I was looking at and failed in
+	# the other.
+	#
+	# The liveness check after the request is the load-bearing part: a TLS
+	# rejection is only evidence if it came from the server rather than from a
+	# tunnel that had already died. But `kubectl port-forward` genuinely dies
+	# under CPU pressure on a small runner, and refusing to answer at all turned
+	# an infrastructure hiccup into a red release gate.
+	#
+	# So retry with a FRESH tunnel instead of either accepting an unattributable
+	# result or weakening the assertion. Three attempts: a real defect fails all
+	# three identically, while a dead tunnel is gone by the next one.
+	for attempt in 1 2 3; do
+		set +e
+		"$@" >/dev/null 2>"$log_file"
+		rc=$?
+		set -e
+		((rc != 0)) || die "$label unexpectedly completed a TLS request"
+		if ! grep -Eiq "$expected_pattern" "$log_file"; then
+			printf '%s\n' "$(<"$log_file")" >&2
+			die "$label failed without the expected TLS error class"
+		fi
+		if kill -0 "$port_forward_pid" >/dev/null 2>&1; then
+			return 0
+		fi
+		if ((attempt == 3)); then
+			die "$label coincided with a dead port-forward on every attempt"
+		fi
+		if [[ -z ${tls_forward_restart:-} ]]; then
+			die "$label coincided with a dead port-forward and no restart hook is set"
+		fi
+		note "$label: port-forward died mid-check; restarting it and re-asserting (attempt $attempt)"
+		"$tls_forward_restart"
+	done
 }
 
 exercise_agent_bad_certificate_readiness() {
@@ -974,6 +1002,7 @@ exercise_agent_authentication() {
 	write_bearer_header "$wrong_sa_token" "$wrong_sa_header"
 
 	port_forward_log="$work_dir/controller-port-forward.log"
+	tls_forward_restart=start_auth_port_forward
 	start_auth_port_forward() {
 		local deadline
 		if [[ -n ${port_forward_pid:-} ]]; then
@@ -1765,6 +1794,7 @@ assert_post_rotation_identity() {
 
 	port_forward_log="$work_dir/rotated-controller-port-forward.log"
 	local agent_base=''
+	tls_forward_restart=start_rotated_port_forward
 	start_rotated_port_forward() {
 		if [[ -n ${port_forward_pid:-} ]]; then
 			kill "$port_forward_pid" >/dev/null 2>&1 || true
