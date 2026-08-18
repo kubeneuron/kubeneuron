@@ -13,6 +13,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/internal/safety"
 	storesqlite "github.com/kubeneuron/kubeneuron/internal/store/sqlite"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -100,7 +101,12 @@ func stackTestControllerWithActuator(t *testing.T, p platform.Platform, act actu
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	c := New(st, nil, nil, nil, nil, p, act, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// A real gate, not nil: executeStep asks the LIVE gate whether this step
+	// must be simulated, and a controller with no gate at all fails closed —
+	// so a fixture that omits it turns every step into a no-op and the tests
+	// below would pass without reaching the actuator they exist to observe.
+	c := New(st, nil, nil, safety.NewGate(safety.Limits{MaxConcurrentRemediations: 2}),
+		nil, p, act, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx := context.Background()
 	if err := st.UpsertNode(ctx, &types.Node{
 		Name: "node-a", UID: "node-uid-a", Labels: map[string]string{"accelerator": "nvidia-h100"},

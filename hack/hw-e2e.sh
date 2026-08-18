@@ -293,15 +293,33 @@ cmd_up_finish() {
 	helm repo update nvidia >/dev/null
 	# The EKS NVIDIA AMI already carries the driver; let the operator manage the
 	# device plugin / toolkit only. driver.enabled=false matches the g4dn AMI.
+	#
+	# dcgm.enabled=true is what makes the DCGM phase mean anything. The operator
+	# ships the standalone host engine DISABLED, because its exporter embeds a
+	# private one that nothing outside the exporter can reach. Left at the
+	# default there is no nvidia-dcgm pod and no nvidia-dcgm Service, so the
+	# agent's dcgmEndpoint resolves to nothing, runtime attestation stays
+	# degraded, and test-dcgm can only ever take its fallback branch — against a
+	# source that was never serving the node in the first place.
 	helm upgrade --install gpu-operator nvidia/gpu-operator \
 		--namespace gpu-operator --create-namespace \
 		--version "$GPU_OPERATOR_VERSION" \
 		--set driver.enabled=false \
+		--set dcgm.enabled=true \
 		--wait --timeout 15m
 
 	log "up: waiting for a GPU to be schedulable"
 	wait_for 600 'kubectl get nodes -l role=gpu \
 		-o jsonpath="{.items[*].status.allocatable.nvidia\.com/gpu}" | grep -q "[1-9]"'
+
+	# Assert the engine the agent is about to be pointed at exists. --wait above
+	# covers the release, not this one subchart's rollout, and an absent engine
+	# is indistinguishable at the agent from a healthy one that reports nothing.
+	log "up: waiting for the standalone DCGM host engine"
+	wait_for 600 'kubectl -n gpu-operator get pods -l app=nvidia-dcgm \
+		-o jsonpath="{.items[*].status.phase}" | grep -q Running'
+	kubectl -n gpu-operator get svc nvidia-dcgm >/dev/null 2>&1 ||
+		die "no nvidia-dcgm Service; spec.agent.hostTooling.dcgmEndpoint would point at nothing"
 }
 
 cmd_deploy() {
@@ -360,6 +378,30 @@ cmd_deploy() {
 	[ "$install_rc" -eq 0 ] || die "install.sh failed with $install_rc"
 	assert_kube_target
 
+	# Arm the agent's host tooling. THIS IS THE STEP THAT MAKES THIS TARGET
+	# ABOUT NVIDIA AT ALL, and it was missing for every run this stand has ever
+	# done.
+	#
+	# install.sh writes an agent block of image + tolerations and nothing else,
+	# because it also installs onto CPU-only clusters. The shipped agent image is
+	# distroless and carries exactly three executables — its own binary, dcgmi
+	# and nsenter — so with no host mounts there is no nvidia-smi on PATH, and
+	# cmd/kubeneuron-agent/main.go takes its default branch: warn once, run on
+	# nvml.Fake. Everything this target claims to prove then unravels quietly:
+	# the DCGM/nvidia-smi watcher is only built for a real driver, NVIDIA
+	# observation is switched off so no accelerator report is ever produced,
+	# GPUByPCIAddr finds nothing so every incident is node-scoped rather than
+	# device-scoped, and the agent refuses the controller's armed answer. The run
+	# stays green throughout, on a real T4, having exercised a simulator.
+	#
+	# Declaring hostTooling is also what arms --require-real-driver, which turns
+	# that silent fallback into a startup failure. That is the real assertion
+	# here; assert_real_driver below is the second one, for a regression in the
+	# wiring itself rather than in the node.
+	log "deploy: arming host tooling so the agent runs on the node's real driver"
+	kubectl -n "$RUNTIME_NAMESPACE" patch kubeneuron "$ROOT_NAME" --type merge \
+		-p '{"spec":{"agent":{"hostTooling":{"binDir":"/usr/bin","libDirs":["/usr/lib64"],"dcgmEndpoint":"nvidia-dcgm.gpu-operator.svc:5555"}}}}'
+
 	log "deploy: installing an explicit, test-only dry-run ladder"
 	apply_e2e_playbook Reboot
 	kubectl -n "$RUNTIME_NAMESPACE" patch kubeneuron "$ROOT_NAME" --type merge \
@@ -373,7 +415,43 @@ cmd_deploy() {
 	log "deploy: waiting for the operator and controller to be Ready"
 	kubectl -n "$OPERATOR_NAMESPACE" rollout status deployment/kubeneuron-operator --timeout=5m
 	wait_for_installation_ready
+	assert_real_driver
 	log "deploy: KubeNeuron Ready"
+}
+
+# assert_real_driver refuses to let the NVIDIA phases run against nvml.Fake.
+#
+# Two independent checks, because they fail for different reasons:
+#
+#   1. The DaemonSet rolls out. With hostTooling declared the agent runs with
+#      --require-real-driver, so an agent that cannot find nvidia-smi crash-loops
+#      instead of falling back. If the node's NVIDIA userspace is not where
+#      binDir/libDirs say it is, this is where the run stops — at deploy, for a
+#      nameable reason, rather than fifty minutes later in an assertion about
+#      something else.
+#   2. No pod logged the fallback. Check (1) cannot see a regression in the
+#      operator's own wiring: if agentHostToolingWiring stopped emitting
+#      --require-real-driver, the agent would start happily on Fake and roll out
+#      clean. The warning is the only evidence of that, and it is one grep.
+assert_real_driver() {
+	local node agent_pod
+	node=$(gpu_node)
+	[ -n "$node" ] || die "no GPU node to assert a driver on"
+
+	log "deploy: asserting the agent on $node is on the node's real driver"
+	kubectl -n "$RUNTIME_NAMESPACE" rollout status "daemonset/${ROOT_NAME}-agent" --timeout=5m ||
+		die "the agent DaemonSet did not roll out after host tooling was armed; --require-real-driver refuses to start without nvidia-smi, so check binDir/libDirs against this AMI's NVIDIA userspace layout"
+
+	agent_pod=$(kubectl -n "$RUNTIME_NAMESPACE" get pods \
+		-l "app.kubernetes.io/instance=${ROOT_NAME},app.kubernetes.io/component=agent" \
+		--field-selector "spec.nodeName=$node" -o jsonpath='{.items[0].metadata.name}')
+	[ -n "$agent_pod" ] || die "no agent pod on the GPU node $node"
+
+	if kubectl -n "$RUNTIME_NAMESPACE" logs "$agent_pod" --tail=-1 2>/dev/null |
+		grep -q "using fake GPU driver"; then
+		die "the agent on $node fell back to the fake GPU driver on real hardware; every NVIDIA assertion after this point would pass against a simulator"
+	fi
+	log "deploy: the agent on $node is on a real driver"
 }
 
 cmd_test_dryrun() {
@@ -414,10 +492,22 @@ cmd_test_dryrun() {
 		'api GET "/api/v1/incidents/'"$incident"'" \
 		 | jq -e "any(.audit[]; .action==\"Reboot\" and .actor==\"token:hw-e2e-approver\")" >/dev/null'
 
-	log "test-dryrun: asserting the reboot ran as a dry-run no-op (DryRun mode)"
-	wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
-		'api GET "/api/v1/incidents/'"$incident"'" \
-			 | jq -e "[.audit[].action] | index(\"Reboot\") != null" >/dev/null'
+	# Assert the mode, not the audit entry.
+	#
+	# This used to re-assert that a Reboot entry exists in the audit — which the
+	# approval assertion four lines above already proves, and which is written
+	# identically whether the step simulated or rebooted a T4. The phase called
+	# "dry-run" could not distinguish DryRun from Enabled. That is the same
+	# shape of defect as the inert executionMode found in round 14, and this
+	# phase was structurally unable to catch it.
+	#
+	# The controller's own answer can fail: it reports what the loaded Gate is
+	# doing, not what the CR asks for or what digest the operator stamped.
+	log "test-dryrun: asserting the controller was in dry-run while that step ran"
+	local mode
+	mode=$(api GET /api/v1/runtime-config | jq -r '.execution_mode')
+	[ "$mode" = "dry-run" ] ||
+		die "the controller reports execution_mode='${mode}', not dry-run; this phase just approved a destructive ladder in ${mode} mode on real hardware"
 
 	# Incidents correlate by (node, class). Finish this DryRun incident before
 	# changing execution mode so the destructive stage can only open a new one.
@@ -634,6 +724,16 @@ cmd_test_verify_recur() {
 			 | jq -e ".incident.state!=\"VERIFYING\" and .incident.state!=\"RESOLVED\"" >/dev/null'
 	local state
 	state=$(api GET "/api/v1/incidents/$incident" | jq -r .incident.state)
+
+	# Assert WHY it left VERIFYING, not merely that it did.
+	#
+	# Leaving VERIFYING for anything other than RESOLVED satisfies the wait
+	# above — an approval timeout, an unrelated escalation, a store error. The
+	# phase would report PASS for a recurrence it never detected. The audit
+	# names the cause, so require it.
+	api GET "/api/v1/incidents/$incident" |
+		jq -e '[.audit[] | select(.result | test("signal recurred during quiet window"))] | length > 0' >/dev/null ||
+		die "the incident left VERIFYING as $state, but no audit entry attributes it to a recurrence; this phase proved nothing about the quiet window"
 	# Close it: an escalated incident stays OPEN (NEEDS_HUMAN is not halted
 	# for correlation purposes), and the next phase's fault on the same
 	# node+class would ATTACH to it instead of opening its own incident.
@@ -667,6 +767,27 @@ EOF
 	)"
 	apply_e2e_playbook ReplaceNode
 	wait_for_installation_ready
+
+	# Wait for the CONTROLLER, not the operator.
+	#
+	# wait_for_installation_ready above answers a different question: it says the
+	# operator observed the new generation and stamped the root object Ready. The
+	# controller reloads its configuration in place, so there is a window in
+	# which the CR says Enabled, the digest has moved, the root object is Ready —
+	# and the running Gate is still in DryRun.
+	#
+	# The cost of injecting inside that window is not a retry. dry_run is stamped
+	# on the incident at OPEN and never revisited, so an incident born one tick
+	# early is dry-run for its whole life, and this phase then spends fifteen
+	# minutes waiting for a `terminated` result that can never arrive. Three kind
+	# runs were lost to precisely this before the endpoint existed to prevent it.
+	#
+	# Assert the blast radius too. Enabled with the wrong confinement is not a
+	# slower failure, it is a destructive action aimed at the wrong machines.
+	log "test-destructive: waiting for the controller to actually load Enabled + the confinement"
+	wait_for 300 'api GET /api/v1/runtime-config |
+		jq -e ".execution_mode==\"enabled\" and .confinement.\"kubeneuron.io/e2e\"==\"true\"" >/dev/null'
+
 	verify_controller_irsa
 
 	log "test-destructive: injecting distinct test-only XID $DESTRUCTIVE_XID into $node"
@@ -727,12 +848,29 @@ cmd_sweep() {
 	fi
 
 	log "sweep: no non-terminated e2e EC2 instances"
-	local instances
-	instances=$(aws ec2 describe-instances --region "$AWS_REGION" \
+	# Two independent queries, unioned, because the first one's premise is not
+	# guaranteed. kubeneuron:e2e and the run tag are declared on the eksctl
+	# managedNodeGroups; whether EKS propagates node-group tags down to the EC2
+	# instances is version-dependent, and historically it did not. If it does
+	# not, that filter matches nothing and this check reports "clean" while the
+	# instances bill by the hour — a sweep that cannot see a leak is worse than
+	# no sweep, because it is written down as proof.
+	#
+	# aws:eks:cluster-name is stamped by EKS itself on every managed node, so it
+	# holds whether or not our tags propagated.
+	local instances tagged_instances eks_instances
+	tagged_instances=$(aws ec2 describe-instances --region "$AWS_REGION" \
 		--filters "Name=tag:kubeneuron:e2e,Values=true" \
 		"Name=tag:${E2E_RUN_TAG},Values=${CLUSTER_NAME}" \
 		"Name=instance-state-name,Values=pending,running,stopping,stopped" \
 		--query 'Reservations[].Instances[].InstanceId' --output text)
+	eks_instances=$(aws ec2 describe-instances --region "$AWS_REGION" \
+		--filters "Name=tag:aws:eks:cluster-name,Values=${CLUSTER_NAME}" \
+		"Name=instance-state-name,Values=pending,running,stopping,stopped" \
+		--query 'Reservations[].Instances[].InstanceId' --output text)
+	instances=$(printf '%s %s' "$tagged_instances" "$eks_instances" | tr -s ' \t' '\n' |
+		grep -v '^$' | sort -u | tr '\n' ' ')
+	instances=${instances% }
 	if [ -n "$instances" ]; then
 		log "sweep: terminating leaked instances: $instances"
 		# shellcheck disable=SC2086 # word-splitting the id list is intended.
@@ -743,8 +881,16 @@ cmd_sweep() {
 
 	log "sweep: no e2e CloudFormation stacks"
 	local stacks
+	# DELETE_FAILED belongs at the front of this list, not off it. It is the
+	# single most likely state for a leaked eksctl VPC or nodegroup stack —
+	# an orphaned ENI or a security group still in use wedges the delete — and
+	# it is precisely the state that means "something is stuck and costing
+	# money". Omitting it made the one condition worth sweeping for invisible
+	# to the sweep.
 	stacks=$(aws cloudformation list-stacks --region "$AWS_REGION" \
-		--stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE CREATE_FAILED \
+		--stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE ROLLBACK_COMPLETE \
+		CREATE_FAILED DELETE_FAILED ROLLBACK_FAILED UPDATE_ROLLBACK_COMPLETE \
+		UPDATE_ROLLBACK_FAILED \
 		--query "StackSummaries[?starts_with(StackName, 'eksctl-${CLUSTER_NAME}-')].StackName" \
 		--output text)
 	local stack
@@ -760,13 +906,24 @@ cmd_sweep() {
 		--filters "Name=tag:kubeneuron:e2e,Values=true" \
 		"Name=tag:${E2E_RUN_TAG},Values=${CLUSTER_NAME}" "Name=status,Values=available" \
 		--query 'Volumes[].VolumeId' --output text)
-	# Also catch the controller's PVC volume tagged with the cluster name.
-	local cluster_volumes
+	# Also catch the controller's PVC volume — the 5Gi SQLite claim, which is
+	# the leak this check was written for after a real run left one behind.
+	#
+	# KubernetesCluster is the LEGACY in-tree provisioner's tag. EKS provisions
+	# through the EBS CSI driver, which does not write it; the tags it does
+	# write are CSIVolumeName and kubernetes.io/created-for/pvc/*. So the filter
+	# aimed at that volume could not match that volume. Query by what the CSI
+	# driver actually writes, and keep the legacy filter for older clusters.
+	local cluster_volumes csi_volumes
 	cluster_volumes=$(aws ec2 describe-volumes --region "$AWS_REGION" \
 		--filters "Name=tag:KubernetesCluster,Values=${CLUSTER_NAME}" "Name=status,Values=available" \
 		--query 'Volumes[].VolumeId' --output text)
+	csi_volumes=$(aws ec2 describe-volumes --region "$AWS_REGION" \
+		--filters "Name=tag:kubernetes.io/created-for/pvc/namespace,Values=${RUNTIME_NAMESPACE}" \
+		"Name=status,Values=available" \
+		--query 'Volumes[].VolumeId' --output text)
 	local vol
-	for vol in $volumes $cluster_volumes; do
+	for vol in $volumes $cluster_volumes $csi_volumes; do
 		log "sweep: deleting orphaned volume $vol"
 		aws ec2 delete-volume --region "$AWS_REGION" --volume-id "$vol" || leaks=1
 	done
@@ -774,10 +931,22 @@ cmd_sweep() {
 	log "sweep: delete any manually-created recycle IAM role ($RECYCLE_ROLE_NAME)"
 	delete_iam_role "$RECYCLE_ROLE_NAME" || true
 
+	# The images this run pushed. Every run pushes three at a fresh e2e-<stamp>
+	# tag and nothing ever removed them, so "the sweep leaves nothing behind"
+	# was false by construction — cheap, but this script's whole claim is that
+	# it can be believed about cost.
+	log "sweep: delete this run's ECR images (tag $IMAGE_TAG)"
+	local repo
+	for repo in operator controller agent; do
+		aws ecr batch-delete-image --region "$AWS_REGION" \
+			--repository-name "kubeneuron/$repo" \
+			--image-ids "imageTag=$IMAGE_TAG" >/dev/null 2>&1 || true
+	done
+
 	if [ "$leaks" -ne 0 ]; then
 		die "sweep found leftovers it could not delete — investigate before the next run"
 	fi
-	log "sweep: clean (no cluster, EC2, stacks, volumes, or recycle role)"
+	log "sweep: clean (no cluster, EC2, stacks, volumes, recycle role, or run images)"
 }
 
 # cmd_reap is the out-of-band watchdog. Run it from an INDEPENDENT schedule (a
@@ -790,8 +959,22 @@ cmd_reap() {
 	now=$(date -u +%s)
 	log "reap: scanning for e2e clusters past their expiry"
 	local names
-	names=$(eksctl get cluster --region "$AWS_REGION" -o json 2>/dev/null |
-		jq -r '.[].Name // .[].name' | grep "^${E2E_PREFIX}" || true)
+	# Enumerate through the EKS API, not eksctl.
+	#
+	# This used to parse `eksctl get cluster -o json` with `.[].Name // .[].name`,
+	# which assumes one of two flat shapes. eksctl has also emitted the nested
+	# {"metadata":{"name":...}} form, and against that BOTH selectors are null,
+	# jq prints "null", the prefix grep drops it, and the reaper reports success
+	# having reaped nothing. A watchdog whose enumeration can silently return
+	# empty is indistinguishable from a clean account — which is the exact
+	# failure it exists to prevent, and it would only ever be discovered by the
+	# bill.
+	#
+	# aws eks list-clusters has one documented shape and is the authority on
+	# what exists. It also drops the jq dependency this function never declared.
+	names=$(aws eks list-clusters --region "$AWS_REGION" \
+		--query "clusters[?starts_with(@, '${E2E_PREFIX}')]" --output text 2>/dev/null |
+		tr '\t' '\n' | grep -v '^$' || true)
 	for name in $names; do
 		expiry=$(aws eks describe-cluster --name "$name" --region "$AWS_REGION" \
 			--query 'cluster.tags."kubeneuron:e2e-expires-at"' --output text 2>/dev/null || echo "")
@@ -934,6 +1117,7 @@ create_recycle_role() {
 	account=$(printf '%s' "$identity" | cut -d: -f5)
 	issuer=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" \
 		--query 'cluster.identity.oidc.issuer' --output text)
+	# shellcheck disable=SC2015 # both conjuncts failing must die; that is the intent.
 	[ -n "$issuer" ] && [ "$issuer" != "None" ] || die "EKS OIDC issuer is unavailable for $CLUSTER_NAME"
 	issuer_host=${issuer#https://}
 	provider_arn="arn:${partition}:iam::${account}:oidc-provider/${issuer_host}"

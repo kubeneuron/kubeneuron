@@ -57,7 +57,12 @@ jobs:
     environment: gpu-lab
     # Hard ceiling. The out-of-band reaper (hack/hw-e2e.sh reap) is the second
     # line of defence if the runner itself dies without running teardown.
-    timeout-minutes: 120
+    #
+    # This must stay comfortably BELOW the reaper's MAX_LIFETIME_MINUTES (180).
+    # If the two ever meet, the watchdog force-deletes a cluster whose run is
+    # still using it, and the run fails for a reason that looks like a product
+    # defect. Two phases were added here, so 120 -> 150 keeps the same margin.
+    timeout-minutes: 150
     steps:
       - name: Confirm destructive manual runs
         if: github.event_name == 'workflow_dispatch'
@@ -73,7 +78,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.12"
+          go-version: "1.25.13"
           cache: true
 
       - name: Assume the GPU-lab AWS role (OIDC)
@@ -110,6 +115,16 @@ jobs:
 
       - name: Dry-run ladder (XID 79 -> cordon -> drain -> approval)
         run: hack/hw-e2e.sh test-dryrun
+
+      # These two phases existed in hack/hw-e2e.sh and were never steps here, so
+      # nothing has ever run them: the only two phases that exercise the DCGM
+      # detection source and the VERIFYING-recurrence escalation were dead code
+      # on the only stand that has the hardware to run them.
+      - name: DCGM detection source (injected field, else live-layout proof)
+        run: hack/hw-e2e.sh test-dcgm
+
+      - name: Recurrence during VERIFYING escalates rather than resolving
+        run: hack/hw-e2e.sh test-verify-recur
 
       - name: Threshold path (XID 92 sub-threshold hold, 3-signal escalation)
         run: hack/hw-e2e.sh test-threshold

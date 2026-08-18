@@ -54,6 +54,51 @@ for f in "$work"/*; do
 	esac
 done
 
+# --- the asset set is COMPLETE ------------------------------------------------
+# The allow-list above rejects assets that should not be there. Nothing
+# required the ones that should — and every downstream check is written as a
+# loop over a glob, so when the glob expands to nothing the loop simply does
+# not run and the script reports OK.
+#
+# Run this against a release carrying only the CLI tarballs and images.txt and
+# the old version printed "asset set closed, checksums complete and matching,
+# images digest-pinned" — while never once looking at the installer or the
+# manifest, which are the artifacts an operator actually applies. An empty
+# dist/ is the exact failure mode of a broken release job, i.e. the one this
+# script exists to catch.
+note "asset set completeness"
+#
+# Count with an array, not `ls $pattern`. nullglob is set above, so an
+# unmatched pattern expands to NOTHING and `ls -1d` would run bare, list the
+# working directory, and report one match — the completeness check would then
+# pass on precisely the release it exists to reject.
+# Then filter by existence, because nullglob only removes patterns that
+# CONTAIN a metacharacter: a literal path with no wildcard expands to itself
+# whether or not the file is there, so the signature and certificate — the two
+# entries named literally — would have passed on a release that has neither.
+require_one() {
+	local what=$1 pattern=$2 hit
+	local -a hits present=()
+	# shellcheck disable=SC2206 # the pattern must glob; that is the point.
+	hits=($pattern)
+	for hit in "${hits[@]}"; do
+		[[ -e $hit ]] && present+=("$hit")
+	done
+	((${#present[@]} > 0)) ||
+		bad "no ${what} in the release (${pattern}); every check that reads it silently did nothing"
+}
+require_one "kubeneuronctl archive" "$work/kubeneuronctl-*"
+require_one "SBOM" "$work/sbom-*"
+require_one "image digest table" "$work/images.txt"
+require_one "install manifest" "$work/kubeneuron-install-*.yaml"
+require_one "installer script" "$work/install*.sh"
+require_one "checksum file" "$work/checksums-${TAG}.txt"
+# The signature pair is required whether or not this machine can verify it.
+# Absent cosign explains why the signature was not CHECKED; it does not excuse
+# a release published without one.
+require_one "cosign signature" "$work/checksums-${TAG}.txt.sig"
+require_one "cosign certificate" "$work/checksums-${TAG}.txt.pem"
+
 # --- checksums cover everything and match -------------------------------------
 note "checksums"
 sums="$work/checksums-${TAG}.txt"

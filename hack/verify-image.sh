@@ -50,7 +50,7 @@ for target in operator controller agent cli; do
 	esac
 	if out=$("$DOCKER_BIN" run --rm "$image" --version 2>&1); then
 		grep -q "$binary" <<<"$out" ||
-			bad "$image --version printed %q, which does not name $binary" "$out"
+			bad "$image --version printed '$out', which does not name $binary"
 	else
 		bad "$image could not run --version: $out"
 	fi
@@ -98,7 +98,7 @@ image_contains "$agent_image" /usr/bin/dcgmi ||
 	bad "$agent_image has no /usr/bin/dcgmi; the agent's runtime attestation stays degraded"
 if out=$("$DOCKER_BIN" run --rm --entrypoint /usr/bin/dcgmi "$agent_image" --version 2>&1); then
 	grep -qE 'version: *[0-9]' <<<"$out" ||
-		bad "$agent_image dcgmi --version printed %q with no version" "$out"
+		bad "$agent_image dcgmi --version printed '$out' with no version"
 else
 	bad "$agent_image has no working /usr/bin/dcgmi: $out"
 fi

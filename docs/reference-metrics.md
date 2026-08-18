@@ -64,6 +64,16 @@ gauge (`sum_over_time(kubeneuron_degraded_gpus[7d]) * <scrape interval> / 3600`)
 or ask `kubeneuronctl report`, which computes it from the incident store and
 does charge parked incidents.
 
+!!! note "Store-derived gauges come from the leader only"
+    `kubeneuron_degraded_gpus`, `kubeneuron_incidents` and
+    `kubeneuron_actions_pending` describe the fleet, not the process reporting
+    them: they are counted from the shared workflow store on the scrape. A
+    standby replica publishes no series for them at all, so `sum(...)` is
+    correct on a multi-replica PostgreSQL installation — every replica
+    answering would have reported the same numbers once per replica. Collection
+    is also bounded, so a slow store costs one empty gauge rather than a scrape
+    timeout that marks the whole target down.
+
 `certificate` label values: `controller-server-leaf`, `agent-client-ca`,
 `public-server-leaf` (when public TLS is enabled) on the controller;
 `fleet-client-leaf`, `controller-server-ca` on the agent.

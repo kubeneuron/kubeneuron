@@ -2,7 +2,6 @@ package detect
 
 import (
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/config"
@@ -140,22 +139,9 @@ func (c *Catalog) SignalFromAgentEvent(ev types.AgentEvent) (types.Signal, bool)
 	if !ok {
 		return types.Signal{}, false
 	}
-	return types.Signal{
-		Target: types.Target{
-			Node:     ev.Node,
-			GPUUUID:  ev.GPUUUID,
-			GPUIndex: ev.GPUIndex,
-		},
-		Class:    info.Class,
-		Severity: info.Severity,
-		Source:   types.SourceAgentEvent,
-		Evidence: map[string]string{
-			"xid":      strconv.Itoa(ev.XID),
-			"xid_name": info.Name,
-			"raw":      ev.Raw,
-		},
-		ObservedAt: ev.Timestamp,
-	}, true
+	// Shared with the package-level builder on purpose: this is the copy the
+	// controller actually calls, and the two drifted once already.
+	return signalFromXID(ev, info), true
 }
 
 // SignalFromAlert converts a firing alert into a Signal using this catalog.

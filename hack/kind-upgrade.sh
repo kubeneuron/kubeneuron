@@ -423,6 +423,7 @@ note "asserting the upgraded CRD serves new-schema fields"
 
 note "asserting the seeded incident survived the store migration"
 start_port_forward
+# shellcheck disable=SC2016 # $id below is a jq variable, not a shell one.
 survived=$(api_curl "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}" |
 	"$JQ_BIN" --arg id "$incident_id" '(.incident.id == $id) and ((.audit | length) >= 1)')
 [[ $survived == true ]] || die "seed incident/audit did not survive the upgrade"

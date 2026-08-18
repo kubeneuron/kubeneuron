@@ -465,7 +465,7 @@ wait_agent_registration_readiness() {
 wait_agent_log() {
 	local pattern=$1
 	local deadline=$((SECONDS + TIMEOUT_SECONDS))
-	local logs= pod=
+	local logs='' pod=''
 	while ((SECONDS < deadline)); do
 		# Aggregate all agent pods: the daemonset/ selector reads one
 		# arbitrary pod, which is not enough on a multi-node cluster.
@@ -1173,7 +1173,7 @@ exercise_agent_authentication() {
 exercise_backup_restore() {
 	note "exercising the documented backup -> wipe -> restore cycle"
 	local pf_log="$work_dir/backup-port-forward.log"
-	local pf_pid= port= snapshot="$work_dir/kubeneuron-backup.db"
+	local pf_pid='' port='' snapshot="$work_dir/kubeneuron-backup.db"
 	local before after helper=kubeneuron-restore-helper
 
 	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
@@ -1258,7 +1258,7 @@ exercise_backup_restore() {
 exercise_real_cordon_and_uncordon() {
 	note "exercising REAL cordon and the janitor's uncordon on one worker"
 	local pf_log="$work_dir/cordon-port-forward.log"
-	local pf_pid= public_port= target_node incident_id state deadline
+	local pf_pid='' public_port='' target_node incident_id state deadline
 
 	# A worker, never the control plane: cordoning the control plane would
 	# disturb everything else running in this cluster.
@@ -1402,7 +1402,7 @@ exercise_real_cordon_and_uncordon() {
 exercise_controller_restart_mid_playbook() {
 	note "exercising a controller restart in the middle of an approval-gated playbook"
 	local pf_log="$work_dir/restart-port-forward.log"
-	local pf_pid= public_port= node_name incident_json incident_id state
+	local pf_pid='' public_port='' node_name incident_id state
 	local audit_json cordon_count controller_pod deadline
 
 	node_name=$("$KUBECTL_BIN" get nodes -o jsonpath='{.items[0].metadata.name}')

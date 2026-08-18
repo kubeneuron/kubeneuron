@@ -138,6 +138,20 @@ func SignalFromAgentEvent(ev types.AgentEvent) (types.Signal, bool) {
 	if !ok {
 		return types.Signal{}, false
 	}
+	return signalFromXID(ev, info), true
+}
+
+// signalFromXID builds the Signal for a classified XID.
+//
+// It is a shared function rather than a body repeated twice because the two
+// copies had already diverged. The vendor key below was added to the
+// package-level SignalFromAgentEvent, which nothing in the controller calls:
+// ingest goes through Catalog.SignalFromAgentEvent, whose identical-looking
+// copy did not have it. So every XID-opened incident — the oldest and most
+// common detection path — still carried no vendor at all, while the comment
+// explaining the key claimed otherwise. The Catalog is nil-safe, so this was
+// true with and without a signal-mapping override, i.e. always.
+func signalFromXID(ev types.AgentEvent, info XIDInfo) types.Signal {
 	return types.Signal{
 		Target: types.Target{
 			Node:     ev.Node,
@@ -159,5 +173,5 @@ func SignalFromAgentEvent(ev types.AgentEvent) (types.Signal, bool) {
 			"raw":      ev.Raw,
 		},
 		ObservedAt: ev.Timestamp,
-	}, true
+	}
 }

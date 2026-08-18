@@ -90,10 +90,6 @@ func (c *Controller) runtimeConfig(ctx context.Context) *RuntimeConfig {
 	return c.runtime.Load()
 }
 
-// InstallRuntimeConfig atomically replaces the whole runtime configuration.
-// This is the reload path's single install point: a reconcile pass observes
-// either the old snapshot or the new one, never a mixture. The snapshot is
-// defensively copied on the way in; zero timings keep their current values.
 // Gate exposes the safety gate so the configuration reload can re-apply the
 // limits that travel in the same file. Nil on a controller built without one
 // (tests, the paneldemo).
@@ -103,6 +99,10 @@ func (c *Controller) runtimeConfig(ctx context.Context) *RuntimeConfig {
 // the controller does not grow a second opinion about safety configuration.
 func (c *Controller) Gate() *safety.Gate { return c.gate }
 
+// InstallRuntimeConfig atomically replaces the whole runtime configuration.
+// This is the reload path's single install point: a reconcile pass observes
+// either the old snapshot or the new one, never a mixture. The snapshot is
+// defensively copied on the way in; zero timings keep their current values.
 func (c *Controller) InstallRuntimeConfig(rc RuntimeConfig) error {
 	if err := ValidateAcceleratorRuntimeProfiles(rc.AcceleratorProfiles); err != nil {
 		return err

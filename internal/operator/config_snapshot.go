@@ -320,8 +320,17 @@ const destructiveExecutionAcknowledgement = "I understand these nodes may be res
 // controller confines its own destructive platform steps to. It is populated
 // only for an Enabled install with a destructiveExecution block —
 // validateRuntimeSupport has already proven that block names a non-empty
-// selector — so an empty result means "no confinement configured", which is
-// safe because every other mode is globally dry-run.
+// selector — so an empty result means "no confinement configured".
+//
+// That reading is only safe because the CONTROLLER re-checks the live gate
+// before executing a step. It used to be justified with "every other mode is
+// globally dry-run", which is not true of an incident already open: dry-run is
+// stamped at open, so switching a running install to DryRun emptied this
+// selector while in-flight ladders kept their live flag — and an empty
+// selector is read downstream as no confinement. The documented emergency stop
+// widened the blast radius of everything already in flight to the whole
+// cluster. See Controller.effectiveDryRun; do not weaken that check on the
+// strength of this comment.
 func destructiveNodeSelector(safety kubeneuronv1alpha1.SafetySpec) map[string]string {
 	if effectiveExecutionMode(safety) != kubeneuronv1alpha1.ExecutionModeEnabled || safety.DestructiveExecution == nil {
 		return nil

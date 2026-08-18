@@ -86,6 +86,42 @@ Three independent mechanisms, all fail toward not acting:
    optional `matchLabels` node selector. Incidents hold their position and
    continue after the window closes; recorded approvals survive the wait.
 
+## Draining the controller's own node
+
+`kubectl drain` on the node running the controller **will hang, by design.**
+Expect it, because nothing about the symptom says so: the eviction is refused
+repeatedly with a disruption-budget message and no timeout.
+
+The controller ships a PodDisruptionBudget with `minAvailable: 1` over a
+single replica, which admits no voluntary eviction at all. That is a deliberate
+trade against automated node maintenance: evicting the controller mid-ladder
+strands in-flight incidents part-way through a remediation, and with the SQLite
+store the RWO claim pins the pod to that node anyway — so a "successful"
+eviction would only produce a Pod that cannot schedule.
+
+To drain that node, take the controller down on purpose first:
+
+```sh
+# Where is it?
+kubectl -n kube-neuron get pod -l app.kubernetes.io/component=controller -o wide
+
+# Quiesce first: nothing should be mid-remediation when it goes away.
+kubeneuronctl pause
+kubeneuronctl incidents --state EXECUTING     # expect none
+
+kubectl -n kube-neuron scale deployment/kubeneuron-controller --replicas=0
+kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
+# ... maintenance ...
+kubectl uncordon <node>
+kubectl -n kube-neuron scale deployment/kubeneuron-controller --replicas=1
+kubeneuronctl resume
+```
+
+Deleting the Pod directly also works and is faster, but it comes back on the
+same node while the PVC is bound there — fine for a restart, useless for a
+drain. On PostgreSQL with more than one replica the claim no longer pins
+anything and this section stops applying; the pause step still does.
+
 ## SQLite workflow store: backup and restore
 
 The controller's state (incidents, audit, approvals, node inventory, action
@@ -604,17 +640,40 @@ separately.
 
 1. Stands up the cluster with `eksctl`, installs the **EBS CSI addon** (a
    prerequisite — the controller's SQLite PVC never binds without it), marks
-   `gp2` the default StorageClass, and installs the NVIDIA GPU operator.
-2. Builds and pushes the operator/controller/agent images to ECR and installs
-   KubeNeuron through `deploy/install.sh` (stays `DryRun`).
+   `gp2` the default StorageClass, and installs the NVIDIA GPU operator with
+   `dcgm.enabled=true` so a standalone DCGM host engine exists to attest
+   against.
+2. Builds and pushes the operator/controller/agent images to ECR, installs
+   KubeNeuron through `deploy/install.sh` (stays `DryRun`), then arms
+   `spec.agent.hostTooling` and **asserts the agent is on the node's real
+   driver**. The installer writes a vendor-neutral agent block, so without this
+   the distroless agent finds no `nvidia-smi`, falls back to the fake driver,
+   and every NVIDIA assertion below would pass against a simulator running on
+   real hardware.
 3. Injects a kernel **XID 79** into a GPU node's `/dev/kmsg` and asserts the
    incident walks cordon → drain → approval → dry-run reboot ladder, with the
-   approver identity recorded in the audit trail.
-4. Flips to `executionMode: Enabled` under a confined
+   approver identity recorded in the audit trail — and that the controller
+   itself reports `execution_mode: dry-run` while that step ran.
+4. Exercises the **DCGM detection source**: either an injected DCGM field
+   raises a `gpuhealth` detection, or the fallback proves DCGM is the source
+   actually serving the node and that the agent parses this build's `dmon`
+   layout.
+5. Asserts a same-class **recurrence during `VERIFYING`** escalates rather than
+   letting the quiet window resolve the incident.
+6. Exercises the **threshold path**: XID 92 holds sub-threshold in `OBSERVING`
+   and the third signal escalates.
+7. Flips to `executionMode: Enabled` under a confined
    `spec.safety.destructiveExecution` block (node selector + the exact
-   acknowledgement string) and asserts the **ReplaceNode** path closes the
-   incident as replaced. A hardware GPU *reset* is impossible on a virtualized
-   g4dn, so ReplaceNode is the destructive primitive exercised here.
+   acknowledgement string), waits for the **controller** to report that mode
+   and that confinement as live — not merely for the operator to stamp the root
+   object Ready — and asserts the **ReplaceNode** step terminates the instance
+   and the incident resolves through the ladder. A hardware GPU *reset* is
+   impossible on a virtualized g4dn, so ReplaceNode is the destructive
+   primitive exercised here.
+
+    The separate `node-replaced` audit action belongs to the vanished-node
+    janitor — the other closure path, taken only when the node disappears
+    before the ladder finishes — so this phase deliberately does not assert it.
 
 !!! note "CSI volumes need `fsGroup`"
     The controller mounts its SQLite PVC through the EBS CSI driver, whose
@@ -630,6 +689,21 @@ separately.
 | var         | `AWS_REGION`           | e.g. `us-east-1`.                                   |
 | var         | `ECR_REGISTRY`         | ECR host `<acct>.dkr.ecr.<region>.amazonaws.com`.  |
 | environment | `gpu-lab`              | Add required reviewers; gates every dispatch/cron. |
+| var         | `HW_E2E_ENABLED`       | `true` arms the weekly cron **and the reaper**.    |
+
+!!! danger "None of these exist yet, and two of the gaps are not symmetric"
+    On `kubeneuron/kubeneuron` the secret, both vars and the environment are
+    all absent, so no hardware run has ever been dispatched from CI and **the
+    reaper has never executed** — every scheduled run reports `skipped`. Two
+    consequences to get right when arming it:
+
+    - GitHub **auto-creates** a missing environment on first use, with no
+      protection rules. Create `gpu-lab` with required reviewers *before*
+      dispatching, or the approval gate this table describes silently is not
+      one.
+    - `HW_E2E_ENABLED=true` arms the reaper **and** the Monday 07:00 UTC cron
+      together. With an ungated environment that is a recurring unattended paid
+      run. Set the environment up first.
 
 No account id or credential is committed. The assumed role needs permission to
 run `eksctl` (EKS, CloudFormation, EC2, IAM for the cluster's service roles),
@@ -640,17 +714,37 @@ and EBS volumes, and delete the recycle IAM role.
 
 The teardown step runs `if: always()` — on success, failure, or cancellation.
 It runs `eksctl delete cluster --force` and then **sweeps for leaks**: it
-asserts there is no surviving cluster, no non-terminated `kubeneuron:e2e` EC2
-instance, no `eksctl-<cluster>-*` CloudFormation stack, no orphaned e2e EBS
-volume (a real run once leaked a 1 GiB SQLite volume), and deletes any
-manually-created recycle IAM role. If it cannot delete something it fails
-loudly rather than leaving a paid resource running.
+asserts there is no surviving cluster, no non-terminated e2e EC2 instance, no
+`eksctl-<cluster>-*` CloudFormation stack, no orphaned e2e EBS volume (a real
+run once leaked a 1 GiB SQLite volume), and deletes both the run's ECR images
+and any manually-created recycle IAM role. If it cannot delete something it
+fails loudly rather than leaving a paid resource running.
+
+Each of those queries is deliberately redundant, because a sweep whose filter
+matches nothing is indistinguishable from a clean account and is then written
+down as proof:
+
+- **Instances** are looked up by our own run tags *and* by `aws:eks:cluster-name`,
+  which EKS stamps itself — node-group tag propagation is version-dependent.
+- **Stacks** include `DELETE_FAILED` in the status filter. That is the state a
+  stack lands in when an orphaned ENI or in-use security group wedges the
+  delete, i.e. the one state that means "stuck and costing money".
+- **Volumes** are looked up by `kubernetes.io/created-for/pvc/namespace`, which
+  is what the EBS CSI driver actually writes, as well as by the legacy
+  `KubernetesCluster` tag.
 
 The reaper is the second line of defence: it force-deletes any
 `kubeneuron-e2e*` cluster whose `kubeneuron:e2e-expires-at` tag has passed, so a
 wedged runner that never reaches teardown still cannot leak a cluster past its
 max lifetime (`MAX_LIFETIME_MINUTES`, default 180). The job's own
-`timeout-minutes: 120` bounds a single run; the reaper bounds everything else.
+`timeout-minutes: 150` bounds a single run; the reaper bounds everything else.
+Keep that margin: if the two ever meet, the watchdog deletes a cluster whose
+run is still using it.
+
+Two limits worth stating plainly. The reaper is armed by `HW_E2E_ENABLED` and
+has never run (see the note above). And it enumerates *clusters*: if a cluster
+is already gone but a volume, stack or role leaked, no schedule will find it —
+that is what makes the teardown sweep, not the reaper, the load-bearing check.
 
 You can run the teardown and sweep locally against a stuck run:
 

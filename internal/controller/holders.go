@@ -140,6 +140,23 @@ func componentIsOperatorManaged(node *types.Node, component string) bool {
 // fact that will not change on its own — a process holding the GPU that nothing
 // in KubeNeuron can release — so waiting would only postpone the same failure
 // until after the node had been cordoned and drained.
+//
+// Escalating here, while idleGuardStopped quarantines on what looks like the
+// same fact, is not an inconsistency — the two see it at different points with
+// different information, and the difference is what makes each right:
+//
+//   - Here, nothing has been disrupted yet, and escalation climbs to a rung
+//     that begins with cordon and drain and requires a human approval before
+//     the reboot itself. A workload holding the device is moved gracefully by
+//     that drain, not killed. The alternative — parking — leaves a degraded
+//     GPU in service because somebody was using it.
+//   - The idle guard runs as a step INSIDE the ladder, after that cordon and
+//     drain have already happened. A holder still present there is one the
+//     graceful path could not move, so the next rung's drain would not help
+//     either, and escalating really would be trading the workload for the
+//     device. Quarantine is the honest answer at that point.
+//
+// Written down because reading either site alone makes the other look wrong.
 func (c *Controller) refuseInfeasibleReset(ctx context.Context, inc *types.Incident, book *playbook.Playbook) error {
 	if inc.DryRun || book == nil || !playbookResetsAGPU(book) {
 		return nil
@@ -204,13 +221,16 @@ func playbookResetsAGPU(book *playbook.Playbook) bool {
 	return false
 }
 
-// resetVendorMismatch reports the vendor a playbook's reset is scoped to when
-// the incident is about a DIFFERENT vendor's device. An incident with no
-// vendor (an XID, an alert, or a row predating the column) constrains
-// nothing and never mismatches, so this cannot refuse anything that worked
-// before the field existed.
 // resetVendorAbsentFromNode catches the same impossibility as
 // resetVendorMismatch, from the other side: the NODE, not the incident.
+//
+// INERT IN THIS BUILD, and deliberately kept. internal/accelerator carries one
+// adapter, so every report a node can produce says nvidia and the only action
+// with a declared vendor needs nvidia — the lookup below can never miss. The
+// failure described next is therefore one this build cannot reach; it becomes
+// reachable the day a second adapter lands, which is when a check written
+// afterwards would be written under pressure. TestAttestedVendorsMatchThe
+// Adapters is what will notice that day arriving.
 //
 // An incident that never learned its vendor — a manual operator trigger, a
 // metric alert — bound to a playbook whose reset targets a vendor the machine
@@ -251,6 +271,11 @@ func (c *Controller) resetVendorAbsentFromNode(ctx context.Context, inc *types.I
 	return "", false
 }
 
+// resetVendorMismatch reports the vendor a playbook's reset is scoped to when
+// the incident is about a DIFFERENT vendor's device. An incident with no
+// vendor (an XID, an alert, or a row predating the column) constrains nothing
+// and never mismatches, so this cannot refuse anything that worked before the
+// field existed.
 func resetVendorMismatch(inc *types.Incident, book *playbook.Playbook) (types.AcceleratorVendor, bool) {
 	if !inc.Vendor.Valid() {
 		return "", false

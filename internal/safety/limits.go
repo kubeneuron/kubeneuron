@@ -119,7 +119,14 @@ func (g *Gate) SetDryRun(v bool) { g.mu.Lock(); g.limits.DryRun = v; g.mu.Unlock
 // this, the reload re-installed playbooks, profiles and the confinement
 // selector but never these, so `spec.safety.executionMode` did nothing at all
 // to a running controller — an installation switched to Enabled executed
-// nothing, and one switched back to DryRun to STOP damage kept executing.
+// nothing.
+//
+// It does NOT by itself stop an incident that is already open. The dry-run
+// decision was stamped on each incident when it opened, so making the gate
+// answer differently changes nothing for work already in flight; the
+// controller has to consult this gate at execution time as well, which is what
+// Controller.effectiveDryRun does. Both halves are needed, and this comment
+// claimed the whole fix for a while when it was only one of them.
 //
 // Lowering a concurrency cap below what is currently held is allowed and does
 // not evict anything: the in-flight work finishes and the new cap binds the

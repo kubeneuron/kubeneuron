@@ -152,7 +152,7 @@ const (
 // not a hand-maintained map. Dry-run incidents and installs with no selector
 // are never in scope for the check (nothing executes for them).
 func (c *Controller) destructiveStepConfinement(ctx context.Context, inc *types.Incident, step *playbook.Step) (string, confinementResult) {
-	if inc.DryRun {
+	if c.effectiveDryRun(inc) {
 		return "", confinementAllowed
 	}
 	def, ok := action.ByWire(step.Action)
@@ -161,7 +161,16 @@ func (c *Controller) destructiveStepConfinement(ctx context.Context, inc *types.
 	}
 	selector := c.destructiveNodeSelector(ctx)
 	if len(selector) == 0 {
-		return "", confinementAllowed // no confinement configured
+		// "No confinement configured" — a file-based deployment may run
+		// live with no selector; Config.Validate does not require one.
+		//
+		// An operator-managed install cannot reach here with an empty
+		// selector and a live step: the operator compiles the selector only
+		// for an Enabled install, so any other mode empties it, and
+		// effectiveDryRun above has already turned every step into a no-op by
+		// then. That ordering is load-bearing rather than incidental — see
+		// effectiveDryRun for what it used to cost.
+		return "", confinementAllowed
 	}
 	labels, err := c.nodeLabelsForConfinement(ctx, inc.Target.Node)
 	if err != nil {
@@ -361,18 +370,6 @@ const (
 // the selector says to arm, is not propagating — it CANNOT arm.
 const armingPropagationGrace = 2 * time.Minute
 
-// refuseUnarmedAgent judges an agent-destructive step against the node's
-// arming declaration. It refuses when the agent has DEFINITIVELY declared
-// itself unarmed: the registration explicitly said "unarmed" AND is fresh
-// (AgentLastSeen within verifyEvidenceMaxAge — the same bound the verifier
-// already trusts heartbeats for, and ten registration ticks). Everything else
-// — unknown (an old agent or a v1 registration), no node row, a stale
-// declaration (the pod may have been replaced by an armed one after a
-// selector change) — is transient and proceeds: the agent executor
-// re-refuses at dispatch, so the worst case is a crisp step failure, never a
-// silent bypass. This check is advisory-early — a human must not be asked to
-// approve a step the node will provably refuse — the executor's own boundary
-// remains the enforcement.
 // armingHoldDuration returns how long the incident has been observed in the
 // arming-in-flight hold, recording the first observation. The grace is
 // measured from here, NOT from StateChangedAt: pauses, maintenance windows,
@@ -399,6 +396,18 @@ func (c *Controller) clearArmingHold(id string) {
 	c.armingHoldMu.Unlock()
 }
 
+// refuseUnarmedAgent judges an agent-destructive step against the node's
+// arming declaration. It refuses when the agent has DEFINITIVELY declared
+// itself unarmed: the registration explicitly said "unarmed" AND is fresh
+// (AgentLastSeen within verifyEvidenceMaxAge — the same bound the verifier
+// already trusts heartbeats for, and ten registration ticks). Everything else
+// — unknown (an old agent or a v1 registration), no node row, a stale
+// declaration (the pod may have been replaced by an armed one after a
+// selector change) — is transient and proceeds: the agent executor
+// re-refuses at dispatch, so the worst case is a crisp step failure, never a
+// silent bypass. This check is advisory-early — a human must not be asked to
+// approve a step the node will provably refuse — the executor's own boundary
+// remains the enforcement.
 func (c *Controller) refuseUnarmedAgent(ctx context.Context, inc *types.Incident, step *playbook.Step) (reason string, verdict armingAdmission) {
 	if inc.DryRun {
 		return "", armingProceed

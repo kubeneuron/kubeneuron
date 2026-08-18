@@ -1030,11 +1030,50 @@ func (q *Queries) NextPendingAction(ctx context.Context, node string) (*types.Qu
 	return scanAction(row)
 }
 
+// storedActionResult is how a result is written to the actions table.
+//
+// It exists for one field. types.ActionResult.Refusal is `json:"-"` on
+// purpose: the refusal code travels in AgentActionRefusalHeader because the
+// result ROUTE strict-decodes, and an unknown body field would 400 every
+// result posted by a newer agent to an older controller. That reasoning is
+// about the WIRE and is right.
+//
+// The store is not the wire. Marshalling types.ActionResult straight into the
+// result column applied the wire's rule to a private blob, so the code the
+// header carefully preserved was dropped on the way to disk — and the
+// controller never sees the HTTP response anyway: agentrpc.Execute polls the
+// store. So Refusal was set by the agent, accepted by the API, persisted as
+// nothing, and read back empty. idleGuardRefused could never be true and
+// kubeneuron_destructive_steps_deferred_total{reason="not_idle"} — the series
+// docs/reference-metrics.md offers as evidence that workloads are protected —
+// was structurally pinned at zero.
+//
+// Embedding keeps the on-disk shape identical apart from one added key, so
+// blobs written by earlier builds decode unchanged with an empty refusal.
+type storedActionResult struct {
+	types.ActionResult
+	Refusal string `json:"refusal,omitempty"`
+}
+
+func marshalActionResult(res types.ActionResult) ([]byte, error) {
+	return json.Marshal(storedActionResult{ActionResult: res, Refusal: res.Refusal})
+}
+
+func unmarshalActionResult(blob string, out *types.ActionResult) error {
+	var stored storedActionResult
+	if err := json.Unmarshal([]byte(blob), &stored); err != nil {
+		return err
+	}
+	*out = stored.ActionResult
+	out.Refusal = stored.Refusal
+	return nil
+}
+
 func (q *Queries) CompleteClaimedAction(ctx context.Context, actionID, leaseToken, bootID string, res types.ActionResult) error {
 	if leaseToken == "" {
 		return store.ErrLeaseLost
 	}
-	blob, err := json.Marshal(res)
+	blob, err := marshalActionResult(res)
 	if err != nil {
 		return err
 	}
@@ -1076,7 +1115,7 @@ func (q *Queries) CompleteClaimedAction(ctx context.Context, actionID, leaseToke
 }
 
 func (q *Queries) CompleteAction(ctx context.Context, actionID string, res types.ActionResult) error {
-	blob, err := json.Marshal(res)
+	blob, err := marshalActionResult(res)
 	if err != nil {
 		return err
 	}
@@ -1132,7 +1171,7 @@ func scanAction(r rowScanner) (*types.QueuedAction, error) {
 	}
 	if qa.Done && result != "" {
 		qa.Result = &types.ActionResult{}
-		if err := json.Unmarshal([]byte(result), qa.Result); err != nil {
+		if err := unmarshalActionResult(result, qa.Result); err != nil {
 			return nil, fmt.Errorf("action %s: corrupt result: %w", qa.Action.ID, err)
 		}
 	}

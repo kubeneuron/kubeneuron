@@ -9,6 +9,97 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+Round 15. Two independent reviews of released v0.2.3 — one adversarial on the
+code, one on what the project has evidence for — plus public CI's own verdict,
+which had been red on every Dependabot pull request since the 1.25.13 Go
+advisories landed.
+
+**If you have ever set `spec.safety.executionMode: DryRun` on a running
+installation to stop a remediation, read the first Fixed entry.**
+
+### Security
+
+- **Go 1.25.13.** Six standard-library advisories, all reachable from shipped
+  code, all present in the v0.2.3 binaries and images: `encoding/xml` recursion
+  depth on the EC2 decoder in the ReplaceNode path, `encoding/asn1` recursion
+  depth in `pki.LoadAuthority`, and four in `net/http` reachable from the
+  controller's TLS listener, the agent's health server and every AWS SDK
+  request. Nine version pins move together — go.mod, `build/Dockerfile`, and
+  the `go-version` in the CI, release and hardware workflows — because a
+  workflow pinned below go.mod does not fail, it silently downloads the newer
+  toolchain and the pin becomes a lie about what built the artifact.
+
+### Fixed
+
+- **Switching to `DryRun` to stop damage removed the blast radius from every
+  incident already in flight.** `inc.DryRun` is stamped when an incident opens
+  and was never re-read, the operator compiles
+  `spec.safety.destructiveExecution.nodeSelector` only for an `Enabled`
+  install, and an empty selector is read as "no confinement configured". So the
+  documented emergency stop emptied the selector while in-flight ladders kept
+  their live flag: a destructive step refused a second earlier for being outside
+  the declared blast radius became allowed on any node in the cluster.
+  Execution now consults the live gate, monotonically toward safety — an
+  incident opened in `DryRun` still never becomes live.
+- **The idle-guard refusal code never survived the store**, so
+  `kubeneuron_destructive_steps_deferred_total{reason="not_idle"}` was
+  structurally pinned at zero and `idleGuardRefused` could not be true. The
+  field is `json:"-"` for wire-compatibility reasons that are correct about the
+  wire; the store is not the wire, and the controller reads results from the
+  store rather than from the agent's HTTP response. No migration; results
+  written by earlier builds decode unchanged.
+- **`hack/verify-release.sh` reported OK on a release with no installer, no
+  manifest and no signature** — every downstream check is a loop over a glob,
+  and an unmatched glob simply skipped its loop. It now asserts the asset set is
+  complete before checking that it is correct.
+- **`hack/mirror.sh` checked one direction while its header claimed two.** The
+  array holding the mirror's own state was assigned and never read, so a
+  scratch file left beside the code was copied into the public checkout and
+  published with no assertion at all. It now fails on additions and honours
+  `.gitignore`.
+- Every XID-opened incident carried no vendor: v0.2.3 added the evidence key to
+  one of two near-identical signal builders, and the controller calls the other.
+- Store-derived gauges (`kubeneuron_degraded_gpus`, `kubeneuron_incidents`,
+  `kubeneuron_actions_pending`) were published by every replica, so `sum(...)`
+  double-counted on a PostgreSQL HA pair, and were collected on the scrape path
+  with no deadline. Leader-only now, under a five-second budget.
+- `docs/pilot-checklist.md` told operators to enable host tooling with a
+  `hostTooling.enabled` field that does not exist; the CRD's structural schema
+  prunes it silently, and a reader writing `enabled: false` to turn it OFF
+  would have turned it ON.
+
+### Added
+
+- **The hardware GPU stand now runs against a real driver.** Every previous run
+  — including those recorded as evidence — executed the agent on the fake NVML
+  driver on a real Tesla T4, because the stand never set `spec.agent.
+  hostTooling` and the distroless agent image carries no `nvidia-smi`. Nothing
+  detected it: no accelerator report was produced, every incident was
+  node-scoped rather than device-scoped, the DCGM watcher was never built, and
+  no run ever armed a node. The stand now arms host tooling, installs the GPU
+  operator with its standalone DCGM engine, and asserts the agent is not on the
+  fake driver before any NVIDIA phase runs.
+- The `test-dcgm` and `test-verify-recur` phases existed in the script and in no
+  workflow, so the only two phases exercising the DCGM source and the
+  `VERIFYING`-recurrence escalation had never run.
+- The destructive phase waits for the CONTROLLER to report the mode and
+  confinement it will act under, not for the operator to stamp the root object
+  Ready — the window between them is where three earlier runs were lost.
+- The teardown sweep no longer reports clean because its filters matched
+  nothing: instances are found by EKS's own tag as well as ours, `DELETE_FAILED`
+  is in the CloudFormation status filter, volumes are found by the tag the EBS
+  CSI driver actually writes, the run's ECR images are deleted, and the reaper
+  enumerates clusters through the EKS API rather than parsing a JSON shape that
+  can silently yield nothing.
+- `shellcheck` runs over `hack/*.sh` and `deploy/install.sh` in `make lint`;
+  `hack/verify-spec-paths.py` now walks JSON patch bodies against the CRD schema
+  rather than only dotted prose; the dashboard test suite gained a code→panel
+  coverage check and now parses label matchers as its doc always claimed.
+- Panels for the protection family — degraded accelerators by owner, workloads
+  evicted, destructive steps deferred, and the agent's active detection source.
+- `docs/operations.md` gained a section on draining the controller's own node,
+  which hangs by design and said so only in a code comment.
+
 ## [v0.2.3] - 2026-08-12
 
 Release evidence: full CI on the public repository green as the tag's gate —

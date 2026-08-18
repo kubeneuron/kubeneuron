@@ -175,7 +175,10 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 		return
 	}
 
-	if inc.DryRun {
+	// The label must describe what this step DID, not what the incident was
+	// opened as, or a ladder simulated after a mid-flight switch to DryRun is
+	// counted as having executed.
+	if c.effectiveDryRun(inc) {
 		metrics.StepsExecuted.WithLabelValues("dry_run").Inc()
 	} else {
 		metrics.StepsExecuted.WithLabelValues("ok").Inc()
@@ -200,6 +203,41 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 	}
 }
 
+// effectiveDryRun answers whether this step must be simulated, from the
+// incident AND the gate that is live right now.
+//
+// inc.DryRun alone is not that answer. It is stamped once, in openIncidentTx,
+// and never revisited — which was the only correct reading while configuration
+// arrived by rolling the Deployment, because a mode change restarted the
+// process and no incident outlived it. Configuration now reloads in place, so
+// an operator who sets executionMode: DryRun to STOP damage changes what the
+// gate says while every already-open incident keeps executing for real.
+//
+// That is bad on its own and worse in combination: the operator compiles the
+// destructive node selector only for an Enabled install, so the same flip
+// empties the selector, and an empty selector is read as "no confinement
+// configured" and allowed. The documented way to stop a runaway remediation
+// therefore removed the blast radius from every ladder already in flight — a
+// step refused a second earlier for being outside spec.safety.
+// destructiveExecution.nodeSelector became allowed on any node in the cluster.
+//
+// Reading the live gate here is monotonic toward safety. An incident opened in
+// DryRun stays dry-run for life whatever the gate later says, which is the
+// existing stamped-at-open guarantee and the direction worth keeping; an
+// incident opened Enabled becomes a no-op the moment the operator asks for
+// one, and resumes if they change their mind.
+//
+// Pause is already enforced, separately and earlier, by gate.Allow.
+func (c *Controller) effectiveDryRun(inc *types.Incident) bool {
+	if inc == nil || inc.DryRun {
+		return true
+	}
+	if c.gate == nil {
+		return true
+	}
+	return c.gate.DryRun()
+}
+
 // executeStep dispatches a step to the platform, the actuator, verification,
 // or notification. Dry-run incidents never touch anything: every step
 // becomes an auditable no-op, including platform operations.
@@ -221,7 +259,7 @@ func (c *Controller) executeStep(ctx context.Context, inc *types.Incident, step 
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, timeout+agentResultGrace)
 	defer cancel()
-	if inc.DryRun {
+	if c.effectiveDryRun(inc) {
 		now := time.Now()
 		return &types.ActionResult{
 			ActionID:   actionID(inc),

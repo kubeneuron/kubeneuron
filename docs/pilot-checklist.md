@@ -23,7 +23,17 @@ into the question you actually have, so here it is assembled.
 | **AMD, anywhere** | shipped, synthetic fixtures only — never run on AMD silicon | proven | detect, protect and close only: no arming, no reset |
 | **Intel** | none | — | — |
 
-Two rows deserve a sentence rather than a cell.
+Three rows deserve a sentence rather than a cell.
+
+**"Proven on hardware" is narrower than it sounds.** What ran on a real T4 is
+the kernel-log transport: an XID *we injected* into `/dev/kmsg`, classified,
+opening an incident. That is the load-bearing path and it works. But the
+faults were injected rather than emitted by a dying GPU, and until now the
+stand's agent had no host tooling — so the incidents it opened were
+node-scoped, with no per-device attribution and no second detection source
+behind them. Read the cell as *the detection pipeline is proven end to end on
+real hardware*, not as *every detector has met a real fault*. The capability
+matrix splits this hair per row; this table cannot.
 
 **Bare metal is the sharp one.** In a cloud VM there is no PCI reset, so the
 agent refuses a per-device reset on measured evidence — a refusal that has
@@ -100,12 +110,30 @@ with `Authorization: Bearer <token>`.
 The starter policy binds one class (`xid-app`). Every other class your
 rules emit — `ecc-dbe`, `thermal`, `fell-off-bus`, … — would open an
 incident with **no playbook**, which observes and quiet-resolves without
-remediating. Apply the samples (or your own) so each class you care about
-has a policy and a playbook:
+remediating.
+
+Be clear about what the samples do and do not fix. They add exactly one more
+class (`gsp-error`), so applying them takes you from one bound class to two,
+out of the twenty-odd the detectors can emit. They are a worked example of the
+shape, not a starter pack:
 
 ```sh
 kubectl apply -k config/samples
 kubectl get gpuremediationpolicy -o wide   # Ready=True, resolvedPlaybook set
+```
+
+**Write a policy and a playbook for each class you actually care about.** This
+is the step most worth your time, and the one whose absence is least visible
+later: an unbound class does not error, does not alert, and does not appear as
+a gap. It observes, quiet-resolves, and is then counted as *recovered* in the
+capacity report — so an incomplete policy set does not merely fail to help,
+it inflates the number you take to whoever pays for the fleet.
+
+Reconcile the two lists before you go further:
+
+```sh
+# What your rules can emit, against what you have bound.
+kubectl get gpuremediationpolicy -o jsonpath='{range .items[*]}{.spec.match.class}{"\n"}{end}' | sort -u
 ```
 
 Late-binding covers the race: an incident opened before its policy existed
@@ -114,16 +142,38 @@ is bound as soon as the policy lands.
 ## 6. Give the agent host tooling (real GPU nodes)
 
 The agent image is distroless; `nvidia-smi`, `dcgmi`, and the driver
-libraries come from the host:
+libraries come from the host. Declaring the block is what enables it — there is
+no `enabled` field, and the paths below are the AL2023 NVIDIA AMI's layout:
 
 ```sh
 kubectl -n kube-neuron patch kubeneuron kubeneuron --type merge -p '{
-  "spec": {"agent": {"hostTooling": {"enabled": true}}}}'
+  "spec": {"agent": {"hostTooling": {
+    "binDir": "/usr/bin",
+    "libDirs": ["/usr/lib64"],
+    "dcgmEndpoint": "nvidia-dcgm.gpu-operator.svc:5555"}}}}'
 ```
 
-Confirm the agent stopped reporting the fake driver:
-`kubectl -n kube-neuron logs ds/kubeneuron-agent | grep -i "fake GPU driver"`
-should print nothing.
+`dcgmEndpoint` is not optional in practice, even though the API allows omitting
+it. The agent pod is not host-networked, so `dcgmi`'s local default reaches no
+engine: leave it empty and runtime attestation stays degraded and the second
+detection source quietly falls back to `nvidia-smi` — which is the narrower
+source, and nothing says so out loud. The value above is the GPU operator's
+Service; it carries `internalTrafficPolicy: Local`, which is what keeps the
+evidence node-local. Verify that before pointing it anywhere else, or
+attestation becomes hearsay about another node's hardware. It also requires the
+standalone engine from §1 (`dcgm.enabled=true`) — the operator ships it off.
+
+Declaring the block also arms `--require-real-driver`, so an agent that cannot
+find `nvidia-smi` now fails to start instead of silently running the fake
+driver. Confirm the rollout completed, then that nothing reports the fallback:
+
+```sh
+kubectl -n kube-neuron rollout status ds/kubeneuron-agent
+kubectl -n kube-neuron logs ds/kubeneuron-agent | grep -i "fake GPU driver"
+```
+
+The second command should print nothing. A crash-looping agent here means the
+paths above do not match your AMI — read the container log, not the events.
 
 ## 7. Prove the pipeline end to end, synthetically
 

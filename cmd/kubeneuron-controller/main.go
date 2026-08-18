@@ -423,21 +423,51 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	} else {
 		log.Warn("embedded web panel unavailable", "err", err)
 	}
+	// Store-derived gauges are collected by the LEADER only, under a deadline.
+	//
+	// Leader-only because the value describes the fleet, not this process: two
+	// replicas reading the same rows publish the same number twice, so
+	// `sum(kubeneuron_degraded_gpus)` reports double the degraded capacity on a
+	// PostgreSQL HA pair. A standby publishing no series is the shape every
+	// natural query already assumes. A standby also has nothing useful to say —
+	// it is not walking incidents.
+	//
+	// Under a deadline because this runs on the SCRAPE path: DegradedGPUs
+	// issues two ListIncidents plus a node lookup per node-scoped incident, and
+	// with context.Background() a slow store held the scrape open with no
+	// bound. Prometheus gives up on its own timeout and records the target as
+	// down, which reads as "the controller is gone" rather than "the store is
+	// slow" — and it does so for every metric on the endpoint, not just this
+	// one.
+	const scrapeCollectBudget = 5 * time.Second
 	metrics.RegisterDegradedGPUs(func() map[metrics.DegradedKey]int {
-		degraded, err := ctrl.DegradedGPUs(context.Background())
+		if !leading.Load() {
+			return nil
+		}
+		collectCtx, cancel := context.WithTimeout(ctx, scrapeCollectBudget)
+		defer cancel()
+		degraded, err := ctrl.DegradedGPUs(collectCtx)
 		if err != nil {
 			log.Warn("degraded-GPU metric collection failed", "err", err)
 			return nil
 		}
 		return degraded
 	})
+	// Same shape, same two reasons: fleet-wide counts read from the shared
+	// store, so a standby would double them, and both queries ran unbounded on
+	// the scrape path.
 	metrics.RegisterIncidentStates(func() map[types.IncidentState]int {
-		counts, err := st.CountIncidentsByState(context.Background())
+		if !leading.Load() {
+			return nil
+		}
+		collectCtx, cancel := context.WithTimeout(ctx, scrapeCollectBudget)
+		defer cancel()
+		counts, err := st.CountIncidentsByState(collectCtx)
 		if err != nil {
 			log.Warn("incident state metric collection failed", "err", err)
 			return nil
 		}
-		if pending, err := st.CountPendingActions(context.Background()); err == nil {
+		if pending, err := st.CountPendingActions(collectCtx); err == nil {
 			metrics.ActionsPending.Set(float64(pending))
 		}
 		return counts

@@ -80,6 +80,14 @@ lint:
 # does not cover, and workflow YAML is the one place a defect cannot be caught by
 # running the code. It is pinned to the same version CI uses.
 	$(GO) run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+# actionlint's shellcheck reaches `run:` blocks only. Everything load-bearing in
+# hack/ is a standalone script it never sees — the mirror, the release check,
+# the image check, the hardware stand — and those are exactly the scripts whose
+# job is to refuse. hack/mirror.sh carried a dead array for as long as it
+# existed (SC2034), so its drift assertion checked one direction while its
+# header claimed two; nothing reported it because nothing ran shellcheck here.
+	@command -v shellcheck >/dev/null 2>&1 && shellcheck hack/*.sh deploy/install.sh \
+		|| echo "shellcheck not installed, skipped"
 
 tidy:
 	$(GO) mod tidy

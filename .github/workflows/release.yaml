@@ -120,7 +120,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.12"
+          go-version: "1.25.13"
           cache: true
 
       - name: Build DIGEST-pinned single-file install manifest
@@ -206,7 +206,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.12"
+          go-version: "1.25.13"
           cache: true
 
       - name: Build kubeneuronctl binaries
@@ -254,7 +254,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.12"
+          go-version: "1.25.13"
           cache: true
 
       # Same shape as ci.yaml's kind job, including the checksums: a runner's

@@ -70,6 +70,15 @@ fi
 
 note "syncing the tree"
 rsync_args=(-a --delete)
+# Honour .gitignore as well as the explicit list above.
+#
+# The explicit list names three documents and three directories. It cannot name
+# the working tree's debris, and rsync copied all of it: a 126 MB
+# kubeneuron-controller build output at the repository root rode into the
+# public checkout on every mirror. It was never COMMITTED, because the mirrored
+# .gitignore ignores it there too — which is precisely why nobody noticed. The
+# mirror should carry what git tracks, not whatever happens to be lying around.
+rsync_args+=(--filter="dir-merge,- .gitignore")
 for e in "${EXCLUDES[@]}"; do
 	rsync_args+=(--exclude "$e")
 done
@@ -95,7 +104,9 @@ excluded() {
 }
 
 unexpected=0
+declare -A tracked=()
 for path in "${here[@]}"; do
+	tracked["$path"]=1
 	if excluded "$path"; then
 		if [[ -e "$TARGET/$path" ]]; then
 			echo "LEAKED: $path is on the exclusion list but is present in the mirror" >&2
@@ -107,6 +118,24 @@ for path in "${here[@]}"; do
 		echo "MISSING: $path is tracked here but absent from the mirror" >&2
 		unexpected=1
 	fi
+done
+
+# The other direction, which this script claimed in its header and did not
+# check: anything the mirror would ADD.
+#
+# `there` was computed and then never read — shellcheck SC2034, and shellcheck
+# is not in make gates, so nothing said so. The loop above only walks this
+# tree's tracked files, so it can report MISSING and LEAKED and never ADDED.
+# Meanwhile rsync copies every untracked, non-ignored working-tree file into
+# the checkout and the script signs off with `git add -A && git commit && git
+# push` — so a scratch file left beside the code is published, and the
+# assertion written to make that impossible was inert.
+for path in "${there[@]}"; do
+	[[ -n $path ]] || continue
+	[[ -n ${tracked["$path"]:-} ]] && continue
+	excluded "$path" && continue
+	echo "ADDED: $path is in the mirror but is not tracked here; it would be published" >&2
+	unexpected=1
 done
 ((unexpected == 0)) || die "the mirror does not match this tree; fix before publishing"
 
