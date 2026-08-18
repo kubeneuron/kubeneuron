@@ -112,6 +112,20 @@ type Store interface {
 	// Audit log (append-only)
 	AppendAudit(ctx context.Context, e *types.AuditEntry) error
 	AuditTrail(ctx context.Context, incidentID string) ([]*types.AuditEntry, error)
+	// ExecutedStepResults returns, for each requested incident that has any,
+	// the Result text of every audit row recording a transition INTO
+	// EXECUTING. It is the durable answer to "did a playbook step actually
+	// run for this incident", which nothing on the incident row can give:
+	// StepIndex is reset by every escalation and RemediationSlotHeld is
+	// cleared when the incident halts.
+	//
+	// Bulk rather than per incident on purpose. The recovery report asks this
+	// of every resolved incident in its window, and AuditTrail would issue one
+	// query per row of a report that already caps itself at 100,000 rows.
+	// Incidents with no such row are absent from the map rather than present
+	// with an empty slice, so "nothing ran" and "not asked about" stay
+	// distinguishable at the call site.
+	ExecutedStepResults(ctx context.Context, incidentIDs []string) (map[string][]string, error)
 
 	// Approvals
 	RecordApproval(ctx context.Context, a *types.Approval) error

@@ -105,7 +105,12 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		r.Recovered, r.Incidents, share(float64(r.Recovered), float64(r.Incidents)))
 	_, _ = fmt.Fprintf(w, "  without a human\t%d of %d\t%s of recovered\n",
 		r.RecoveredUnattended, r.Recovered, share(float64(r.RecoveredUnattended), float64(r.Recovered)))
-	_, _ = fmt.Fprintf(w, "MTTR (resolved, n=%d)\tp50 %s\tp90 %s\tmean %s\n",
+	// Printed directly under "recovered" on purpose: this is the number that
+	// used to be inside it, and the pair only makes sense read together.
+	_, _ = fmt.Fprintf(w, "closed, nothing done\t%d of %d\t%s\t(%s degraded)\n",
+		r.ObservedOnly, r.Incidents, share(float64(r.ObservedOnly), float64(r.Incidents)),
+		gpuHours(r.ObservedOnlyGPUHours))
+	_, _ = fmt.Fprintf(w, "MTTR (recovered, n=%d)\tp50 %s\tp90 %s\tmean %s\n",
 		r.MTTR.Samples, seconds(r.MTTR.P50Seconds), seconds(r.MTTR.P90Seconds), seconds(r.MTTR.MeanSeconds))
 	if err := w.Flush(); err != nil {
 		return err
@@ -114,11 +119,11 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 	if len(r.Classes) > 0 {
 		_, _ = fmt.Fprintln(out, "\ntop problem classes by degraded GPU-hours:")
 		w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
-		_, _ = fmt.Fprintln(w, "CLASS\tINCIDENTS\tDEGRADED\tRECOVERED\tUNATTENDED\tMTTR P50\tMTTR P90")
+		_, _ = fmt.Fprintln(w, "CLASS\tINCIDENTS\tDEGRADED\tRECOVERED\tNOTHING DONE\tUNATTENDED\tMTTR P50\tMTTR P90")
 		for _, class := range r.Classes {
-			_, _ = fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%d\t%s\t%s\n",
+			_, _ = fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%d\t%d\t%s\t%s\n",
 				class.Class, class.Incidents, gpuHours(class.DegradedGPUHours),
-				gpuHours(class.RecoveredGPUHours), class.RecoveredUnattended,
+				gpuHours(class.RecoveredGPUHours), class.ObservedOnly, class.RecoveredUnattended,
 				seconds(class.MTTR.P50Seconds), seconds(class.MTTR.P90Seconds))
 		}
 		if err := w.Flush(); err != nil {
@@ -144,14 +149,21 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 	// wrong reading, and a capacity report that has to be interpreted is a
 	// report that will be misquoted.
 	_, _ = fmt.Fprint(out, "\nlegend:\n"+
-		"  recovered   = the incident reached RESOLVED. NEEDS_HUMAN and EXPIRED do not count,\n"+
-		"                and an incident parked for a human keeps accruing degraded time.\n"+
-		"  unattended  = resolved without ever asking for an approval (no human decision).\n"+
-		"  GPU-hours   = degraded GPU-time clipped to the window, not lost GPU-time:\n"+
-		"                a degraded GPU may still have been serving.\n"+
-		"                1 GPU for a GPU-scoped incident, the node's registered inventory\n"+
-		"                for a node-scoped one.\n"+
-		"  MTTR        = full open-to-resolved time of incidents that resolved in the window.\n")
+		"  recovered     = the incident reached RESOLVED *and* a remediation step executed.\n"+
+		"                  NEEDS_HUMAN and EXPIRED do not count, and an incident parked for\n"+
+		"                  a human keeps accruing degraded time.\n"+
+		"  nothing done  = reached RESOLVED with no remediation step ever executed — the\n"+
+		"                  incident was observed and closed. Usually a problem class with no\n"+
+		"                  policy bound to it: it does not error, it does not alert, and it\n"+
+		"                  is not recovered capacity. Check `kubectl get gpuremediationpolicy`\n"+
+		"                  against the classes your detectors emit.\n"+
+		"  unattended    = recovered without ever asking for an approval (no human decision).\n"+
+		"  GPU-hours     = degraded GPU-time clipped to the window, not lost GPU-time:\n"+
+		"                  a degraded GPU may still have been serving.\n"+
+		"                  1 GPU for a GPU-scoped incident, the node's registered inventory\n"+
+		"                  for a node-scoped one.\n"+
+		"  MTTR          = full open-to-resolved time of incidents that RECOVERED in the\n"+
+		"                  window; an incident nothing repaired contributes no repair time.\n")
 	if r.AssumedSingleGPU > 0 {
 		_, _ = fmt.Fprintf(out, "\nnote: %d node-scoped incident(s) hit nodes with no registered GPU inventory\n"+
 			"and were charged 1 GPU each — the real degraded GPU-hours are higher.\n", r.AssumedSingleGPU)
@@ -172,11 +184,13 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		_, _ = fmt.Fprintf(out, "\nSIMULATED — what dry-run WOULD have done (nothing was executed)\n"+
 			"  incidents             %d\n"+
 			"  would recover         %d (%d without asking a human)\n"+
+			"  no ladder to run      %d   ← closed with no policy bound to the class\n"+
 			"  degraded GPU-hours    %s   ← real: the hardware was degraded this long\n"+
 			"  would recover         %s   ← hypothetical: no capacity was returned\n"+
 			"  ladder decision time  p50 %s  p90 %s\n",
 			sim.Incidents,
 			sim.WouldRecover, sim.WouldRecoverUnattended,
+			sim.ObservedOnly,
 			gpuHours(sim.DegradedGPUHours),
 			gpuHours(sim.WouldRecoverGPUHours),
 			seconds(sim.MTTR.P50Seconds), seconds(sim.MTTR.P90Seconds))

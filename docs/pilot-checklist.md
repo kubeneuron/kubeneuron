@@ -105,36 +105,55 @@ Receiver URL:
 `http://kubeneuron-controller.kube-neuron.svc:8080/api/v1/webhooks/alertmanager`
 with `Authorization: Bearer <token>`.
 
-## 5. Apply a policy set that covers real classes
+## 5. Check the policy set — and specialise it
 
-The starter policy binds one class (`xid-app`). Every other class your
-rules emit — `ecc-dbe`, `thermal`, `fell-off-bus`, … — would open an
-incident with **no playbook**, which observes and quiet-resolves without
-remediating.
-
-Be clear about what the samples do and do not fix. They add exactly one more
-class (`gsp-error`), so applying them takes you from one bound class to two,
-out of the twenty-odd the detectors can emit. They are a worked example of the
-shape, not a starter pack:
+`install.sh` applies the **baseline policy pack**: one binding for every
+problem class the shipped detectors can emit, from `xid-app` at the observe end
+to `row-remap-failure` at the RMA end. Confirm it landed:
 
 ```sh
-kubectl apply -k config/samples
 kubectl get gpuremediationpolicy -o wide   # Ready=True, resolvedPlaybook set
+kubectl get gpuplaybook -l kubeneuron.io/policy-pack=baseline
 ```
 
-**Write a policy and a playbook for each class you actually care about.** This
-is the step most worth your time, and the one whose absence is least visible
-later: an unbound class does not error, does not alert, and does not appear as
-a gap. It observes, quiet-resolves, and is then counted as *recovered* in the
-capacity report — so an incomplete policy set does not merely fail to help,
-it inflates the number you take to whoever pays for the fleet.
-
-Reconcile the two lists before you go further:
+If you installed some other way (Helm, a pre-downloaded manifest), apply the
+same pack from a checkout:
 
 ```sh
-# What your rules can emit, against what you have bound.
-kubectl get gpuremediationpolicy -o jsonpath='{range .items[*]}{.spec.match.class}{"\n"}{end}' | sort -u
+kubectl apply -k config/policies
 ```
+
+Use `config/policies`, **not** `config/samples`. The samples kustomization also
+carries a `KubeNeuron` root object, so applying it over a live installation
+rewrites that installation's images, secret references and endpoints.
+
+**Nothing in the pack is armed.** Every step that ends running work — drain,
+targeted eviction, device reset, reboot — requires an approval, so the ladders
+cordon, collect evidence, verify and close on their own and stop for a human
+before they cost anybody a job. That stays true after you leave DryRun; the
+approval gates are the design, not the phase. The reasoning for each binding is
+in [`config/policies/policies.yaml`](https://github.com/kubeneuron/kubeneuron/blob/main/config/policies/policies.yaml)
+and for each ladder in
+[`playbooks.yaml`](https://github.com/kubeneuron/kubeneuron/blob/main/config/policies/playbooks.yaml)
+— read them, because the right answer for *your* fleet is not necessarily the
+generic one.
+
+Specialise by **adding**, not editing: every baseline binding sits at priority
+900, and lower wins, so your own policy for a class overrides the pack without
+deleting anything.
+
+```sh
+# What is bound, and to what.
+kubectl get gpuremediationpolicy \
+  -o jsonpath='{range .items[*]}{.spec.match.class}{" -> "}{.spec.playbookRef}{"\n"}{end}' | sort
+```
+
+One class is deliberately unbound: `diag-failure`, which no shipped detector
+emits today. If you add rules of your own that classify into a class the pack
+does not cover, bind it — an unbound class does not error, does not alert, and
+does not appear as a gap. It observes and quiet-resolves, and `kubeneuronctl
+report` counts it in the **"nothing done"** column rather than as recovered
+capacity, which is where you will see the omission if one exists.
 
 Late-binding covers the race: an incident opened before its policy existed
 is bound as soon as the policy lands.
@@ -152,6 +171,30 @@ kubectl -n kube-neuron patch kubeneuron kubeneuron --type merge -p '{
     "libDirs": ["/usr/lib64"],
     "dcgmEndpoint": "nvidia-dcgm.gpu-operator.svc:5555"}}}}'
 ```
+
+!!! warning "Check the DCGM versions agree, or this degrades in silence"
+    The agent image ships its own `dcgmi` client, and a DCGM 4.x client cannot
+    talk to a 3.x host engine — every call returns `API version mismatch`. The
+    NVIDIA GPU Operator pins the engine, and older operator releases ship 3.x:
+    v24.9.0 deploys DCGM **3.3.8**, while the shipped agent carries **4.6.1**.
+    Measured on a real EKS T4 node, not inferred.
+
+    When they disagree the agent falls back to `nvidia-smi`, which detects
+    less, and the installation otherwise looks healthy. Since v0.2.4 the agent
+    says so once, at WARN, naming the endpoint. Check both before you trust
+    the second source:
+
+    ```sh
+    kubectl -n kube-neuron exec ds/kubeneuron-agent -- /usr/bin/dcgmi --version
+    kubectl -n gpu-operator get pods -l app=nvidia-dcgm \
+      -o jsonpath='{.items[0].spec.containers[0].image}'
+    # and the authoritative answer, from the agent itself:
+    kubectl -n kube-neuron logs ds/kubeneuron-agent | grep -i "DCGM health probe"
+    ```
+
+    Either use a GPU Operator release whose engine matches the client's major
+    version, or point `dcgmiPath` at a client already on the node that matches
+    your engine.
 
 `dcgmEndpoint` is not optional in practice, even though the API allows omitting
 it. The agent pod is not host-networked, so `dcgmi`'s local default reaches no
@@ -212,7 +255,13 @@ While you are here, `kubeneuronctl report` prints a `SIMULATED` section: how
 many incidents the ladder would have carried to resolution, how many without
 asking anybody, and the GPU-hours involved. The degraded hours are real; the
 recovery is not. That section is the argument for phase two — take it to
-whoever pays for the fleet before you enable enforcement, not after. When
+whoever pays for the fleet before you enable enforcement, not after.
+
+Read the `no ladder to run` line in that section, and the `nothing done` line
+in the real one, before you quote either. Both count incidents that reached
+RESOLVED with no step ever executing — an observation, not a repair. A large
+number there is a coverage gap in your policy set, and it is the one thing that
+can make this report flatter you. When
 you are ready for real remediation, confine it explicitly — see
 [install.md](install.md#enabling-real-execution) for
 `spec.safety.destructiveExecution` (a non-empty node selector plus the exact

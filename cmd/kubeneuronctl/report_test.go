@@ -77,9 +77,13 @@ func TestReportTextOutputStatesWhatItCounts(t *testing.T) {
 		"p50 2h0m0s", "p90 4h0m0s",
 		"fell-off-bus", "ecc-dbe-n1-abc", "NEEDS_HUMAN",
 		// The legend is load-bearing: a reader must never have to guess what
-		// "recovered" counted.
-		"recovered   = the incident reached RESOLVED",
-		"unattended  = resolved without ever asking for an approval",
+		// "recovered" counted — and, since an incident can now reach RESOLVED
+		// without anything having been done to the fleet, what it did NOT
+		// count is just as load-bearing.
+		"recovered     = the incident reached RESOLVED *and* a remediation step executed",
+		"nothing done  = reached RESOLVED with no remediation step ever executed",
+		"unattended    = recovered without ever asking for an approval",
+		"closed, nothing done",
 		// The inventory undercount is disclosed rather than hidden.
 		"were charged 1 GPU each",
 	} {

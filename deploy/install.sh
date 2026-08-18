@@ -224,31 +224,391 @@ fi
 [[ -n $AGENT_IMAGE ]] && agent_image=$AGENT_IMAGE
 [[ -n $controller_image && -n $agent_image ]] || die "could not resolve component images"
 
+# The baseline policy pack: one binding for every problem class the shipped
+# detectors can emit.
+#
+# This used to be a single observe-only binding for xid-app, and that was not
+# merely thin coverage. A class with no policy bound to it opens an incident,
+# observes, and quiet-resolves without remediating — and nothing about that
+# reads as a gap: it does not error, it does not alert, and until the recovery
+# report learned to count it separately it was reported as capacity KubeNeuron
+# returned to service, unattended, because an incident nothing acted on never
+# asks anybody's permission. A pilot installing this script got a product that
+# detected faults and measured recoveries it had not performed.
+#
+# It is a COPY of config/policies/, and the duplication cannot be removed: this
+# script is advertised as `curl … | bash`, which has no checkout to read the
+# pack out of, and the release manifest is `kustomize build config/default` —
+# CRDs and the operator, no policies. internal/operator/policy_pack_test.go
+# pins the two together on the thing that must never differ: which class gets
+# which ladder.
+#
+# NOTHING HERE IS ARMED. Every step that ends running work — drain, targeted
+# eviction, device reset, reboot — carries approval: Required, so the ladders
+# cordon, collect evidence, verify and close on their own and stop for a human
+# before they cost anybody a job. That holds after executionMode is switched
+# away from DryRun, which is the point: dry-run is a phase, the approval gates
+# are the design. See config/policies/playbooks.yaml for the reasoning per
+# ladder and config/policies/policies.yaml for the reasoning per class.
 kubectl apply -f - >/dev/null <<EOF
 apiVersion: kubeneuron.io/v1alpha1
 kind: GPUPlaybook
 metadata:
   name: $NAME-observe
-  labels: {kubeneuron.io/installed-by: install-sh}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   target: GPU
+  cooldown: 30m
   steps:
-    - name: observe
+    - name: record
       action: Observe
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: $NAME-workload-restart
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  target: GPU
+  cooldown: 15m
+  steps:
+    - name: evict-workload
+      action: EvictGPUWorkload
+      approval: Required
+      timeout: 10m
+    - name: verify
+      action: VerifyGPUHealth
+      params:
+        quiet_window: 10m
+  onFailure:
+    playbookRef: $NAME-drain-and-reset
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: $NAME-reset-when-idle
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  target: GPU
+  cooldown: 6h
+  steps:
+    - name: wait-for-idle
+      action: WaitIdle
+      timeout: 12h
+    - name: reset
+      action: GPUReset
+      approval: Required
+      timeout: 5m
+    - name: verify
+      action: VerifyGPUHealth
+      params:
+        diag_level: "1"
+        quiet_window: 10m
+  onFailure:
+    playbookRef: $NAME-drain-and-reset
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: $NAME-gpu-reset
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  target: GPU
+  cooldown: 30m
+  steps:
+    - name: idle-check
+      action: IdleCheck
+      timeout: 2m
+    - name: reset
+      action: GPUReset
+      approval: Required
+      timeout: 5m
+    - name: verify
+      action: VerifyGPUHealth
+      params:
+        diag_level: "1"
+        quiet_window: 10m
+  onFailure:
+    playbookRef: $NAME-drain-and-reset
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: $NAME-drain-and-reset
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  target: GPU
+  effects: [nodeScheduling]
+  cooldown: 1h
+  steps:
+    - name: cordon
+      action: Cordon
+    - name: drain
+      action: Drain
+      approval: Required
+      timeout: 30m
+    - name: reset
+      action: GPUReset
+      timeout: 5m
+    - name: verify
+      action: VerifyGPUHealth
+      params:
+        diag_level: "1"
+        quiet_window: 10m
+    - name: uncordon
+      action: Uncordon
+  onFailure:
+    playbookRef: $NAME-reboot
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: $NAME-reboot
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  target: Node
+  cooldown: 6h
+  steps:
+    - name: cordon
+      action: Cordon
+    - name: drain
+      action: Drain
+      approval: Required
+      timeout: 30m
+    - name: collect-bundle
+      action: CollectBundle
+      timeout: 15m
+    - name: reboot
+      action: Reboot
+      approval: Required
+      timeout: 20m
+    - name: verify
+      action: VerifyNodeHealth
+      params:
+        diag_level: "2"
+        quiet_window: 15m
+    - name: uncordon
+      action: Uncordon
+  onFailure:
+    playbookRef: $NAME-rma
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: $NAME-rma
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  target: Node
+  cooldown: 24h
+  steps:
+    - name: cordon
+      action: Cordon
+    - name: drain
+      action: Drain
+      approval: Required
+      timeout: 60m
+    - name: collect-bundle
+      action: CollectBundle
+      timeout: 30m
+      params:
+        diag_level: "3"
+    - name: open-ticket
+      action: OpenTicket
+      approval: Required
+      params:
+        quarantine: "true"
 ---
 apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
-  name: $NAME-default-observe
-  labels: {kubeneuron.io/installed-by: install-sh}
+  name: $NAME-xid-app
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
-  priority: 1000
-  match:
-    class: xid-app
+  priority: 900
+  match: {class: xid-app}
+  playbookRef: $NAME-observe
+  parameters:
+    threshold: "3"
+    window: "1h"
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-ecc-sbe-rate
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: ecc-sbe-rate}
+  playbookRef: $NAME-observe
+  parameters:
+    threshold: "3"
+    window: "24h"
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-thermal
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: thermal}
   playbookRef: $NAME-observe
 ---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-power
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: power}
+  playbookRef: $NAME-observe
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-pcie
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: pcie}
+  playbookRef: $NAME-observe
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-agent-down
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: agent-down}
+  playbookRef: $NAME-observe
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-ecc-contained
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: ecc-contained}
+  playbookRef: $NAME-workload-restart
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-row-remap-ok
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: row-remap-ok}
+  playbookRef: $NAME-reset-when-idle
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-gsp-error
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: gsp-error}
+  playbookRef: $NAME-gpu-reset
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-driver-hang
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: driver-hang}
+  playbookRef: $NAME-gpu-reset
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-ecc-dbe
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: ecc-dbe}
+  playbookRef: $NAME-drain-and-reset
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-nvlink
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: nvlink}
+  playbookRef: $NAME-drain-and-reset
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-fell-off-bus
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: fell-off-bus}
+  playbookRef: $NAME-reboot
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-gpu-lost
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: gpu-lost}
+  playbookRef: $NAME-reboot
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-row-remap-failure
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: row-remap-failure}
+  playbookRef: $NAME-rma
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-row-remap-budget
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: row-remap-budget}
+  playbookRef: $NAME-rma
+EOF
+
+kubectl apply -f - >/dev/null <<EOF
 apiVersion: kubeneuron.io/v1alpha1
 kind: KubeNeuron
 metadata:

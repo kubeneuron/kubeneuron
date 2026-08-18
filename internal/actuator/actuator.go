@@ -35,18 +35,44 @@ type Actuator interface {
 // identically in dry-run mode.
 type DryRun struct {
 	Inner Actuator
+	// When is consulted on EVERY Execute. Nil means always simulate.
+	//
+	// It is a predicate rather than a bool because this wrapper used to be
+	// installed conditionally, once, at process start — and the controller
+	// reloads its configuration in place rather than rolling its Deployment,
+	// precisely so a mode change does not need a restart. So an installation
+	// that started in DryRun and was later switched to Enabled kept this
+	// wrapper forever: controller-side platform steps (cordon, drain, evict,
+	// replace_node) executed for real while every agent step returned a
+	// successful "DRY-RUN: would execute ..." — the GPU never reset, the node
+	// never rebooted, the step counted as executed, the quiet window quiet
+	// because the node had been drained, and the incident RESOLVED with the
+	// fault untouched and the node handed back to the scheduler.
+	//
+	// Wrap unconditionally and decide here, and that cannot happen.
+	When func() bool
 }
+
+func (d *DryRun) simulating() bool { return d.When == nil || d.When() }
 
 var _ Actuator = (*DryRun)(nil)
 
 // Name implements Actuator.
-func (d *DryRun) Name() string { return "dry-run(" + d.Inner.Name() + ")" }
+func (d *DryRun) Name() string {
+	if !d.simulating() {
+		return d.Inner.Name()
+	}
+	return "dry-run(" + d.Inner.Name() + ")"
+}
 
 // Capabilities implements Actuator.
 func (d *DryRun) Capabilities() []types.ActionType { return d.Inner.Capabilities() }
 
 // Execute records what would have happened without doing it.
 func (d *DryRun) Execute(ctx context.Context, node types.Node, a types.Action) (*types.ActionResult, error) {
+	if !d.simulating() {
+		return d.Inner.Execute(ctx, node, a)
+	}
 	now := time.Now()
 	return &types.ActionResult{
 		ActionID:   a.ID,

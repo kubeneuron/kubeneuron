@@ -7,6 +7,7 @@ import (
 
 	"io/fs"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -625,5 +626,107 @@ func TestListIncidentsActiveSinceKeepsWhatStillCostCapacity(t *testing.T) {
 	}
 	if kept["resolved-before"] || kept["expired-before"] {
 		t.Fatalf("window kept incidents that ended before it: %v", kept)
+	}
+}
+
+// TestExecutedStepResultsReadsRemediationEvidence pins the bulk audit read the
+// recovery report leans on to tell a repair from an incident that merely aged
+// out quietly. It has to hold three lines at once: only transitions INTO
+// EXECUTING count, the failure row an already-executing step appends is not a
+// second execution, and an incident nobody ever acted on must be absent from
+// the map rather than present and empty — "nothing ran" and "not asked about"
+// are different answers.
+func TestExecutedStepResultsReadsRemediationEvidence(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+	now := time.Now()
+
+	for _, id := range []string{"acted", "observed", "unasked"} {
+		inc := testIncident(id, now)
+		inc.Target.GPUUUID = "GPU-" + id // one open incident per (target, class)
+		if err := s.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	audit := func(id string, from, to types.IncidentState, action, result string) {
+		t.Helper()
+		if err := s.AppendAudit(ctx, &types.AuditEntry{
+			IncidentID: id, Time: now, FromState: from, ToState: to,
+			Actor: "system", Action: action, Result: result,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	audit("acted", types.StateEvaluating, types.StateExecuting, "cordon", "executing platform.cordon")
+	audit("acted", types.StateExecuting, types.StateExecuting, "cordon", "FAILED: node unreachable")
+	audit("acted", types.StateExecuting, types.StateVerifying, "cordon", "done")
+	audit("observed", types.StateOpen, types.StateObserving, "observe", "")
+	audit("observed", types.StateObserving, types.StateResolved, "observe-quiet", "no recurrence within 24h")
+
+	got, err := s.ExecutedStepResults(ctx, []string{"acted", "observed", "unasked", "no-such-incident"})
+	if err != nil {
+		t.Fatalf("ExecutedStepResults: %v", err)
+	}
+	if len(got["acted"]) != 1 || got["acted"][0] != "executing platform.cordon" {
+		t.Fatalf("acted = %q, want exactly the one transition into EXECUTING; the FAILED row "+
+			"that follows it is the same step, not a second one", got["acted"])
+	}
+	for _, id := range []string{"observed", "unasked", "no-such-incident"} {
+		if _, present := got[id]; present {
+			t.Errorf("%s appears in the map with %q, but nothing ever moved it into EXECUTING",
+				id, got[id])
+		}
+	}
+
+	// An empty request is a legitimate report over a quiet window, not a query
+	// with a dangling IN clause.
+	empty, err := s.ExecutedStepResults(ctx, nil)
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("ExecutedStepResults(nil) = %v, %v; want an empty map and no error", empty, err)
+	}
+}
+
+// The chunking exists because SQLite builds older than 3.32 cap host
+// parameters at 999, and a report over a busy year asks about far more
+// incidents than that. A query that works on a small fleet and fails on a
+// large one is the kind of limit nobody finds until the report matters.
+func TestExecutedStepResultsSpansMoreIncidentsThanOneINClause(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+	now := time.Now()
+
+	const count = 1200 // more than two chunks, and more than the 999 limit
+	ids := make([]string, 0, count)
+	for i := range count {
+		id := "inc-" + strconv.Itoa(i)
+		ids = append(ids, id)
+		inc := testIncident(id, now)
+		inc.Target.GPUUUID = "GPU-" + id // one open incident per (target, class)
+		if err := s.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.AppendAudit(ctx, &types.AuditEntry{
+			IncidentID: id, Time: now,
+			FromState: types.StateEvaluating, ToState: types.StateExecuting,
+			Actor: "system", Action: "reset", Result: "executing agent.gpu_reset",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ExecutedStepResults(ctx, ids)
+	if err != nil {
+		t.Fatalf("ExecutedStepResults over %d incidents: %v", count, err)
+	}
+	if len(got) != count {
+		t.Fatalf("got evidence for %d of %d incidents; the report would under-count recovery "+
+			"on exactly the fleets big enough to care", len(got), count)
 	}
 }

@@ -1,10 +1,18 @@
+# A worked example of the GPURemediationPolicy shape, not a starter pack —
+# the shipped policy set is config/policies/, which binds every problem class
+# the detectors can emit.
+#
+# priority 1000 is deliberate. Lower wins, and every baseline binding sits at
+# 900, so this example sits UNDERNEATH the pack: applying config/samples on top
+# of a real installation demonstrates the shape without quietly replacing
+# gsp-error's reset ladder with an observe-only one.
 apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: observe-gsp-errors
 spec:
   kubeNeuronRef: kubeneuron
-  priority: 10
+  priority: 1000
   match:
     class: gsp-error
   playbookRef: observe-gpu

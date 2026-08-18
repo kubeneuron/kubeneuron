@@ -309,10 +309,15 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 		log.Warn("starting with automated remediation PAUSED; resume via the operator API or kubeneuronctl resume")
 	}
 
+	// Wrapped unconditionally, deciding per call. Wrapping only when the gate
+	// happened to say dry-run at startup froze the answer for the life of the
+	// process, and configuration reloads in place — so enabling a running
+	// installation left every agent step permanently simulated while the
+	// controller-side platform steps went live. The wrapper is also the
+	// janitor's only dry-run guard (restoreAcceleratorHost calls the actuator
+	// outside executeStep), so it must stay in the chain either way.
 	var act actuator.Actuator = &actuator.Chain{Actuators: []actuator.Actuator{agentrpc.New(st, 0)}}
-	if gate.DryRun() {
-		act = &actuator.DryRun{Inner: act}
-	}
+	act = &actuator.DryRun{Inner: act, When: gate.DryRun}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -458,6 +463,12 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	// the scrape path.
 	metrics.RegisterIncidentStates(func() map[types.IncidentState]int {
 		if !leading.Load() {
+			// Zero, not the last value this process happened to see: a plain
+			// gauge keeps whatever was last written, so a replica that loses
+			// leadership would otherwise publish a frozen queue depth. The
+			// state gauge needs no equivalent — a nil map makes its collector
+			// emit nothing at all.
+			metrics.ActionsPending.Set(0)
 			return nil
 		}
 		collectCtx, cancel := context.WithTimeout(ctx, scrapeCollectBudget)

@@ -136,8 +136,15 @@ func TestIngestWithoutPolicyOpensObserveOnlyIncident(t *testing.T) {
 	c, st := newIngestTestController(t)
 	ctx := context.Background()
 
-	// agent-down has no policy binding in the shipped config.
-	if err := c.ingest(ctx, signal(types.ClassAgentDown, "n1", "")); err != nil {
+	// A class nothing binds. This used to be agent-down, borrowed from the
+	// shipped configuration's own coverage gap — which made the test quietly
+	// depend on that gap staying open, and it broke the moment the gap was
+	// closed. What is under test is the CONTROLLER's behaviour when a signal
+	// arrives with no policy for it (an operator's own class, a mapping added
+	// ahead of its policy), so the unbound class is now constructed here
+	// instead of found in the product.
+	const unbound = types.ProblemClass("no-policy-binds-this")
+	if err := c.ingest(ctx, signal(unbound, "n1", "")); err != nil {
 		t.Fatal(err)
 	}
 	incidents, err := st.ListIncidents(ctx, store.IncidentFilter{})

@@ -502,6 +502,52 @@ func (q *Queries) AuditTrail(ctx context.Context, incidentID string) ([]*types.A
 	return out, rows.Err()
 }
 
+// executedStepResultsChunk bounds how many incident IDs go into one IN clause.
+// SQLite's compiled-in host-parameter limit is 999 on builds that predate
+// 3.32, and a report over a busy year can ask about far more incidents than
+// that; a query that fails on a large fleet and works on a small one is the
+// kind of limit nobody finds until the report matters.
+const executedStepResultsChunk = 500
+
+// ExecutedStepResults implements store.Store.
+func (q *Queries) ExecutedStepResults(ctx context.Context, incidentIDs []string) (map[string][]string, error) {
+	out := make(map[string][]string, len(incidentIDs))
+	for start := 0; start < len(incidentIDs); start += executedStepResultsChunk {
+		end := min(start+executedStepResultsChunk, len(incidentIDs))
+		chunk := incidentIDs[start:end]
+		args := make([]any, 0, len(chunk))
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		// from_state <> to_state isolates a genuine transition INTO EXECUTING.
+		// A step that fails appends a non-transition row (from EXECUTING to
+		// EXECUTING) carrying "FAILED: …", and counting that as a second entry
+		// would say a step ran twice.
+		rows, err := q.db.QueryContext(ctx, `
+			SELECT DISTINCT incident_id, result FROM audit_log
+			WHERE to_state='EXECUTING' AND from_state <> 'EXECUTING'
+			  AND incident_id IN (?`+repeat(",?", len(chunk)-1)+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		err = func() error {
+			defer func() { _ = rows.Close() }()
+			for rows.Next() {
+				var id, result string
+				if err := rows.Scan(&id, &result); err != nil {
+					return err
+				}
+				out[id] = append(out[id], result)
+			}
+			return rows.Err()
+		}()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 // --- approvals ---
 
 func (q *Queries) RecordApproval(ctx context.Context, a *types.Approval) error {

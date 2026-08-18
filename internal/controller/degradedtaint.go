@@ -95,7 +95,13 @@ func (c *Controller) syncDegradedTaint(ctx context.Context, inc *types.Incident,
 		// is the only place that can find marks this process never placed.
 		return
 	}
-	if inc.DryRun {
+	// The LIVE gate, not the flag stamped when the incident opened. Otherwise
+	// an operator who switches a running installation to DryRun to stop it
+	// keeps getting NoSchedule taints written and re-applied for every
+	// incident that was already open — which is the promise three lines below
+	// being broken at exactly the moment somebody is relying on it. Removal
+	// stays unconditional, so the marks already placed still come off.
+	if c.effectiveDryRun(inc) {
 		// A dry-run installation promises it changes nothing in the cluster,
 		// and a NoSchedule taint is a cluster-wide scheduling change: work
 		// stops landing on the node for every workload, not only ours. An
@@ -286,7 +292,7 @@ func (c *Controller) nodesUnderOpenIncidents(ctx context.Context) (map[string]*t
 		if inc.Target.Node == "" {
 			continue
 		}
-		if inc.DryRun {
+		if c.effectiveDryRun(inc) {
 			// Same promise as the fast path: a dry-run installation does not
 			// write taints. Note this leaves the node absent from the map, so
 			// a mark left behind by a non-dry-run incident is still removed.
@@ -311,7 +317,7 @@ func (c *Controller) nodeHasOpenIncident(ctx context.Context, node string) (bool
 		return false, err
 	}
 	for _, inc := range incidents {
-		if !inc.DryRun {
+		if !c.effectiveDryRun(inc) {
 			return true, nil
 		}
 	}

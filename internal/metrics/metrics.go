@@ -383,6 +383,17 @@ func (c *stateCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
 
 func (c *stateCollector) Collect(ch chan<- prometheus.Metric) {
 	counts := c.count()
+	// A nil map means "this process is not the one counting" — the standby of a
+	// leader-elected pair, whose collector declines rather than reading the
+	// shared store a second time. Publish nothing at all in that case.
+	//
+	// Enumerating the state list regardless would emit a full set of zeros,
+	// which is a different claim: `sum()` still adds up correctly, but any
+	// panel or alert reading the raw series sees a replica confidently
+	// asserting there are no incidents in any state.
+	if counts == nil {
+		return
+	}
 	for _, state := range incidentStates {
 		ch <- prometheus.MustNewConstMetric(
 			c.desc, prometheus.GaugeValue, float64(counts[state]), string(state))

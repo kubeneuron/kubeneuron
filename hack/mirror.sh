@@ -82,6 +82,18 @@ rsync_args+=(--filter="dir-merge,- .gitignore")
 for e in "${EXCLUDES[@]}"; do
 	rsync_args+=(--exclude "$e")
 done
+# A tracked file that ALSO matches .gitignore would be skipped by that filter,
+# and rsync does not delete what it excludes — so an already-published copy
+# would stay in the mirror unchanged, the MISSING check would pass because the
+# file is present, and that file would be frozen at its old contents forever.
+# git itself can answer whether any such file exists, so ask before syncing.
+frozen=$(git ls-files -i -c --exclude-standard)
+if [[ -n $frozen ]]; then
+	echo "TRACKED BUT IGNORED — rsync would skip these, and their published copies would silently stop updating:" >&2
+	echo "$frozen" >&2
+	die "resolve the .gitignore/tracked-file conflict before mirroring"
+fi
+
 rsync "${rsync_args[@]}" "$repo_root/" "$TARGET/"
 
 # --- the assertion the hand-typed procedure never made ------------------------
@@ -93,7 +105,12 @@ listing() {
 	git -C "$1" ls-files
 }
 mapfile -t here < <(listing "$repo_root")
-mapfile -t there < <(git -C "$TARGET" status --porcelain --untracked-files=all | sed 's/^...//')
+# Files PRESENT in the mirror that git there does not track. `status
+# --porcelain` was the wrong question: it also reports DELETIONS, so a file
+# rsync --delete removed — a retired document, a rename — came back as
+# "ADDED: ... it would be published", which is the exact inverse of the truth,
+# and blocked every mirror that removes a file until a human overrode the gate.
+mapfile -t there < <(git -C "$TARGET" ls-files --others --exclude-standard)
 
 excluded() {
 	local path=$1 e

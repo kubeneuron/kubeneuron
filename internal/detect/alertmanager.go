@@ -53,6 +53,22 @@ var alertClassMap = map[string]types.ProblemClass{
 	// ClassDiagFailure stay reachable through the XID paths meanwhile.
 }
 
+// AlertClasses returns every problem class the metric-alert path can produce.
+// It is the third detection source beside XIDTable and FaultTable, and it
+// exists so a coverage audit can ask "what can this build emit?" without
+// hard-coding a list that goes stale the next time a rule is mapped.
+func AlertClasses() []types.ProblemClass {
+	out := make([]types.ProblemClass, 0, len(alertClassMap))
+	seen := make(map[types.ProblemClass]bool, len(alertClassMap))
+	for _, class := range alertClassMap {
+		if !seen[class] {
+			seen[class] = true
+			out = append(out, class)
+		}
+	}
+	return out
+}
+
 // SignalFromAlert converts a firing alert into a Signal. Resolved alerts and
 // unknown alert names return ok=false (unknown names are still worth logging
 // by the caller — they usually mean rules and code drifted apart).

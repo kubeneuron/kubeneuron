@@ -680,6 +680,10 @@ REST API with bearer-token authentication.
 - `config/crd/bases` — generated CRD YAML.
 - `config/default` — operator CRD/RBAC/deployment Kustomize entry point.
 - `config/samples` — development custom-resource examples.
+- `config/policies` — the baseline policy pack (`kubectl apply -k
+  config/policies`): a GPURemediationPolicy for every problem class the
+  detectors can emit, and the GPUPlaybook ladders they bind to. Coverage is
+  gated by `internal/operator/policy_pack_test.go`.
 - `cmd/kubeneuron-operator` — operator process.
 - `internal/operator` — CRD compilation, resource construction, and
   reconciliation.

@@ -394,6 +394,9 @@ disagree.
 - [`api/v1alpha1/`](api/v1alpha1/) — Kubernetes API types.
 - [`config/crd/bases/`](config/crd/bases/) — generated CRD manifests.
 - [`config/samples/`](config/samples/) — development custom-resource examples.
+- [`config/policies/`](config/policies/) — the baseline policy pack: one
+  binding for every problem class the shipped detectors can emit, with the
+  blast-radius reasoning per class. `install.sh` applies a copy of it.
 - [`configs/policies.yaml`](configs/policies.yaml) and
   [`configs/playbooks/`](configs/playbooks/) — current file-based controller
   input used by local and bare-metal development.

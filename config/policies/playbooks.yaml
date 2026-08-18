@@ -1,0 +1,269 @@
+# KubeNeuron baseline playbook pack — the ladders policies.yaml binds to.
+#
+# WHY THESE AND NOT configs/playbooks/*.yaml
+#
+# There are two configuration planes in this product. configs/playbooks/*.yaml
+# is the file-based one a controller reads straight off disk; these GPUPlaybook
+# objects are the Kubernetes-native one the operator compiles into a snapshot,
+# and a `kubectl apply -k`/install.sh installation only ever sees THESE. The
+# ladders are deliberately the same ladders under the same names — one
+# vocabulary, so an operator reading the XID catalog finds the playbook it
+# names — with two differences that the CRD plane forces or deserves, both
+# called out where they occur:
+#
+#   * driver-reinstall has no CRD action (it runs an operator-provided script),
+#     so the node ladder tops out at kubeneuron-rma instead of escalating
+#     through a reinstall.
+#   * RecycleNode/ReplaceNode are absent. They are cloud operations, and a
+#     playbook that names one is REJECTED AT COMPILE TIME unless spec.cloud is
+#     configured — which a fresh installation's is not. Shipping one would make
+#     the whole snapshot fail to compile rather than degrade.
+#
+# WHERE THE APPROVAL GATES ARE, AND WHY
+#
+# One rule, applied everywhere: a human decides before the first step that ENDS
+# RUNNING WORK. Cordon, the idle guards, bundle collection and verification run
+# unattended — they protect or observe, and every one of them is reversible.
+# Drain, targeted eviction, a device reset and a reboot are not, so each ladder
+# parks at the first of those it reaches.
+#
+# A ladder does NOT re-ask further down. Once a human has agreed to empty a
+# node, stopping again before touching the now-idle device would leave the node
+# out of service waiting for a second click — a real cost paid for no extra
+# decision. The exception is Reboot, which the CRD schema itself requires an
+# approval for and which cannot be waived here; that gate is also the right
+# place to reconsider, because the reboot is what takes the machine away.
+#
+# The net effect: an installation that applies this pack and then switches
+# spec.safety.executionMode to Enabled has automated detection, protection,
+# verification and closure — and cannot evict, reset or reboot anything without
+# somebody saying so.
+---
+# Record and notify. No node is touched, ever.
+#
+# This is the shipped answer for every class where the correct response is a
+# human reading the evidence: application-level faults, corrected errors,
+# facility problems, and the meta-signal that KubeNeuron itself has lost sight
+# of a node. A single notify step is also what the controller recognises as an
+# observe-first ladder, so these incidents wait in OBSERVING and quiet-resolve
+# unless the class threshold is crossed.
+#
+# It has no onFailure on purpose. Escalating a FAILED NOTIFICATION into a drain
+# would mean a broken notifier evicting workloads; a notification that cannot
+# be delivered is a matter for a human, not a bigger hammer.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: kubeneuron-observe
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  target: GPU
+  cooldown: 30m
+  steps:
+    - name: record
+      action: Observe
+---
+# Evict the workload holding the affected GPU, leave the GPU in service.
+#
+# Blast radius: one workload on one device. Nothing else on the node moves and
+# the device is never reset. This is the smallest rung in the pack that ends
+# running work, which is why the eviction asks first.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: kubeneuron-workload-restart
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  target: GPU
+  cooldown: 15m
+  steps:
+    - name: evict-workload
+      action: EvictGPUWorkload
+      approval: Required
+      timeout: 10m
+    - name: verify
+      action: VerifyGPUHealth
+      params:
+        quiet_window: 10m
+  onFailure:
+    playbookRef: kubeneuron-drain-and-reset
+---
+# Wait for the device to go idle by itself, then reset it.
+#
+# Blast radius: nothing at all until the GPU is free — the wait is a guard, not
+# an action, and it holds for up to 12 hours rather than evicting anybody. The
+# reset still asks, because "idle" is measured evidence and evidence can be
+# wrong, and a reset of a device something is quietly holding takes that work
+# with it.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: kubeneuron-reset-when-idle
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  target: GPU
+  cooldown: 6h
+  steps:
+    - name: wait-for-idle
+      action: WaitIdle
+      timeout: 12h
+    - name: reset
+      action: GPUReset
+      approval: Required
+      timeout: 5m
+    - name: verify
+      action: VerifyGPUHealth
+      params:
+        diag_level: "1"
+        quiet_window: 10m
+  onFailure:
+    playbookRef: kubeneuron-drain-and-reset
+---
+# Reset the device in place, without touching the node's scheduling.
+#
+# Blast radius: one device, and only when the idle check says nothing is using
+# it. The guard runs FIRST and refuses on live processes — a refusal that stops
+# the ladder for a human rather than escalating, so a device with work on it is
+# never answered with a bigger hammer.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: kubeneuron-gpu-reset
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  target: GPU
+  cooldown: 30m
+  steps:
+    - name: idle-check
+      action: IdleCheck
+      timeout: 2m
+    - name: reset
+      action: GPUReset
+      approval: Required
+      timeout: 5m
+    - name: verify
+      action: VerifyGPUHealth
+      params:
+        diag_level: "1"
+        quiet_window: 10m
+  onFailure:
+    playbookRef: kubeneuron-drain-and-reset
+---
+# Move the work off the node, reset the device, put the node back.
+#
+# Blast radius: every workload on the node. This is the first ladder that costs
+# somebody else's job, so the drain is the decision point — and the cordon runs
+# before it unattended, because closing a node to NEW work while a human is
+# deciding is protection, and it is undone by the uncordon at the end.
+#
+# The reset does not ask again: by the time it runs, a human has already agreed
+# to empty this node, and pausing a second time would strand a drained node.
+#
+# effects: [nodeScheduling] is required by the compiler — the target is a GPU
+# but the ladder changes the whole node's scheduling, and that has to be
+# declared rather than inferred.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: kubeneuron-drain-and-reset
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  target: GPU
+  effects: [nodeScheduling]
+  cooldown: 1h
+  steps:
+    - name: cordon
+      action: Cordon
+    - name: drain
+      action: Drain
+      approval: Required
+      timeout: 30m
+    - name: reset
+      action: GPUReset
+      timeout: 5m
+    - name: verify
+      action: VerifyGPUHealth
+      params:
+        diag_level: "1"
+        quiet_window: 10m
+    - name: uncordon
+      action: Uncordon
+  onFailure:
+    playbookRef: kubeneuron-reboot
+---
+# Take the whole machine down and bring it back.
+#
+# Blast radius: the node. Two approvals, and the second one is not this pack's
+# choice — the CRD schema refuses a Reboot step that does not require one. The
+# bundle is collected between them so the evidence survives the reboot that
+# destroys the kernel log it came from.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: kubeneuron-reboot
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  target: Node
+  cooldown: 6h
+  steps:
+    - name: cordon
+      action: Cordon
+    - name: drain
+      action: Drain
+      approval: Required
+      timeout: 30m
+    - name: collect-bundle
+      action: CollectBundle
+      timeout: 15m
+    - name: reboot
+      action: Reboot
+      approval: Required
+      timeout: 20m
+    - name: verify
+      action: VerifyNodeHealth
+      params:
+        diag_level: "2"
+        quiet_window: 15m
+    - name: uncordon
+      action: Uncordon
+  onFailure:
+    playbookRef: kubeneuron-rma
+---
+# End of every ladder: quarantine the machine and hand it to hardware support.
+#
+# Blast radius: the node stays out of service until a human resolves the
+# incident. There is no uncordon and no onFailure — that is the point. The
+# ticket step asks, because quarantining a machine indefinitely is a decision
+# about capacity somebody is paying for.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: kubeneuron-rma
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  target: Node
+  cooldown: 24h
+  steps:
+    - name: cordon
+      action: Cordon
+    - name: drain
+      action: Drain
+      approval: Required
+      timeout: 60m
+    - name: collect-bundle
+      action: CollectBundle
+      timeout: 30m
+      params:
+        diag_level: "3"
+    - name: open-ticket
+      action: OpenTicket
+      approval: Required
+      params:
+        quarantine: "true"

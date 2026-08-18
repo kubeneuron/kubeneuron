@@ -120,13 +120,30 @@ case "$E2E_KUBECONFIG" in
 	;;
 esac
 export KUBECONFIG="$E2E_KUBECONFIG"
+
+# Read the tag this cluster was deployed with, or mint one and record it.
+image_tag_file="${E2E_STATE_DIR}/image-tag"
+if [ -z "$IMAGE_TAG" ] && [ -r "$image_tag_file" ]; then
+	IMAGE_TAG=$(cat "$image_tag_file")
+fi
+if [ -z "$IMAGE_TAG" ]; then
+	IMAGE_TAG="e2e-$(date -u +%Y%m%d%H%M%S)"
+	mkdir -p "$E2E_STATE_DIR"
+	printf '%s' "$IMAGE_TAG" >"$image_tag_file"
+fi
+readonly IMAGE_TAG
 RECYCLE_ROLE_ARN="${RECYCLE_ROLE_ARN:-}"
 
 readonly OPERATOR_NAMESPACE=kube-neuron
 readonly RUNTIME_NAMESPACE=kube-neuron
 readonly ROOT_NAME=kubeneuron
-IMAGE_TAG="e2e-$(date -u +%Y%m%d%H%M%S)"
-readonly IMAGE_TAG
+# IMAGE_TAG must survive across invocations. deploy and teardown are separate
+# `hack/hw-e2e.sh <cmd>` processes — that is how the workflow runs them — so a
+# tag computed here was a FRESH timestamp in the sweep, and the ECR cleanup
+# deleted a tag that had never existed. Proved on the first real run: teardown
+# reported success and left three images behind. Persist it beside the
+# kubeconfig, which is already per-cluster and already survives the same way.
+IMAGE_TAG="${IMAGE_TAG:-}"
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly SCRIPT_DIR
@@ -398,9 +415,24 @@ cmd_deploy() {
 	# that silent fallback into a startup failure. That is the real assertion
 	# here; assert_real_driver below is the second one, for a regression in the
 	# wiring itself rather than in the node.
-	log "deploy: arming host tooling so the agent runs on the node's real driver"
+	# The nodeSelector is not optional here, and leaving it out breaks the run
+	# before the assertion below can say anything useful.
+	#
+	# hostTooling is a property of the ONE agent DaemonSet, and install.sh gives
+	# that DaemonSet no nodeSelector at all — it tolerates everything, because it
+	# also installs onto CPU-only clusters. This stand's cluster has a two-node
+	# m6i.large CPU nodegroup beside the GPU one. Arming host tooling fleet-wide
+	# therefore hands --require-real-driver to the CPU agents too, and that flag
+	# does exactly what it promises: no nvidia-smi, exit 1, CrashLoopBackOff.
+	#
+	# The operator's Ready condition requires every scheduled agent to be
+	# available, so wait_for_installation_ready below would time out after five
+	# minutes with "condition never met" — after paying for a cluster and three
+	# image builds, and without ever reaching assert_real_driver, whose whole
+	# job is to name this class of failure.
+	log "deploy: arming host tooling on the GPU nodes so the agent runs on a real driver"
 	kubectl -n "$RUNTIME_NAMESPACE" patch kubeneuron "$ROOT_NAME" --type merge \
-		-p '{"spec":{"agent":{"hostTooling":{"binDir":"/usr/bin","libDirs":["/usr/lib64"],"dcgmEndpoint":"nvidia-dcgm.gpu-operator.svc:5555"}}}}'
+		-p '{"spec":{"agent":{"nodeSelector":{"nvidia.com/gpu.present":"true"},"hostTooling":{"binDir":"/usr/bin","libDirs":["/usr/lib64"],"dcgmEndpoint":"nvidia-dcgm.gpu-operator.svc:5555"}}}}'
 
 	log "deploy: installing an explicit, test-only dry-run ladder"
 	apply_e2e_playbook Reboot
@@ -627,6 +659,24 @@ EOF
 # to asserting the agent parses the live `dcgmi dmon` layout cleanly.
 # UNEXERCISED LIVE: written after the first green run; validate on the next
 # paid stand before trusting a red result.
+# dcgm_diagnostics prints what the run needs to name a DCGM failure: the
+# agent's own account, and the two version numbers that have to agree. The
+# first hardware run failed here for a reason nothing in the output stated —
+# the agent's dcgmi client was 4.6.1 and the operator's host engine 3.3.8, so
+# every poll returned "API version mismatch" and the agent quietly served the
+# narrower nvidia-smi source instead.
+dcgm_diagnostics() {
+	local agent_pod="$1"
+	log "test-dcgm: the agent's own account of the DCGM path:"
+	kubectl -n "$RUNTIME_NAMESPACE" logs "$agent_pod" --tail=-1 2>/dev/null |
+		grep -iE 'DCGM health probe|dmon printed rows' | tail -3 >&2 || true
+	log "test-dcgm: client vs engine version (these must agree on major):"
+	kubectl -n "$RUNTIME_NAMESPACE" exec "$agent_pod" -- /usr/bin/dcgmi --version 2>&1 | tail -1 >&2 || true
+	kubectl -n gpu-operator get pods -l app=nvidia-dcgm \
+		-o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null >&2 || true
+	echo >&2
+}
+
 cmd_test_dcgm() {
 	guard_cluster_name
 	require_cmd kubectl
@@ -658,8 +708,15 @@ cmd_test_dcgm() {
 		kubectl -n gpu-operator exec "$dcgm_pod" -- dcgmi test --inject --gpuid 0 \
 			-f 230 -v "$THRESHOLD_XID" >/dev/null 2>&1; then
 		log "test-dcgm: injected XID $THRESHOLD_XID as a DCGM field value; waiting for the gpuhealth source"
-		wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
-			'[ "$(gpuhealth_detections '"$agent_ip"')" -gt '"$baseline"' ]'
+		# The injection runs the OPERATOR's dcgmi against its own engine, so it
+		# succeeds even when the AGENT's client cannot read the same engine —
+		# which is exactly what the first hardware run found. Without the trap
+		# below this branch times out with no diagnosis at all.
+		if ! wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
+			'[ "$(gpuhealth_detections '"$agent_ip"')" -gt '"$baseline"' ]'; then
+			dcgm_diagnostics "$agent_pod"
+			die "the agent never observed an XID injected straight into the DCGM engine on its own node"
+		fi
 		log "test-dcgm: PASS (gpuhealth source observed the injected DCGM fault)"
 		return 0
 	fi
@@ -684,6 +741,13 @@ cmd_test_dcgm() {
 	local active
 	active=$(agent_health_source "$agent_ip")
 	if [ "$active" != "dcgm" ]; then
+		# Print the agent's own diagnosis before dying. The first run to reach
+		# this assertion failed for a reason nothing in the output named: the
+		# dcgmi client in the agent image and the operator's host engine
+		# disagreed on API version, so every poll failed and the agent fell
+		# back to the narrower source. Reading it out of the log here is the
+		# difference between "the source is wrong" and "here is why".
+		dcgm_diagnostics "$agent_pod"
 		die "the agent's active health source is '${active}', not dcgm; this phase would prove nothing about DCGM"
 	fi
 	log "test-dcgm: PASS (fallback: the DCGM source is serving this node and parses its dmon layout)"
@@ -693,6 +757,25 @@ cmd_test_dcgm() {
 # recurs while an incident is VERIFYING must escalate, not quiet-resolve.
 # UNEXERCISED LIVE: written after the first green run; validate on the next
 # paid stand before trusting a red result.
+# close_incident resolves an incident so the NEXT phase cannot inherit it.
+#
+# Incidents correlate by (node, class), and NEEDS_HUMAN is deliberately not
+# halted for correlation purposes — so an incident this phase leaves open
+# ATTACHES the next phase's fault to itself instead of opening a fresh one.
+# The first real run showed what that costs: a phase died on a bad assertion
+# before reaching its cleanup line, and the destructive phase then spent ten
+# minutes waiting for AWAITING_APPROVAL on an incident that was already parked
+# in NEEDS_HUMAN. One phase's bug became three phases' failures.
+#
+# Registered as a trap by its callers, so it runs whether the phase passes,
+# fails an assertion, or dies.
+close_incident() {
+	local incident="$1" reason="$2"
+	[ -n "$incident" ] || return 0
+	api POST "/api/v1/incidents/${incident}/resolve" \
+		"{\"actor\":\"hw-e2e\",\"reason\":\"${reason}\"}" >/dev/null 2>&1 || true
+}
+
 cmd_test_verify_recur() {
 	guard_cluster_name
 	require_cmd kubectl
@@ -707,6 +790,9 @@ cmd_test_verify_recur() {
 	local incident
 	incident=$(wait_for_incident "$node" fell-off-bus)
 	[ -n "$incident" ] || die "no incident opened"
+	# Armed HERE, not after the assertions: the point is that it runs when an
+	# assertion fails, which is the case that poisoned the next phase.
+	trap 'close_incident "$incident" "verification-recurrence phase cleanup"' RETURN
 	wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
 		'api GET "/api/v1/incidents/'"$incident"'" | jq -e ".incident.state==\"AWAITING_APPROVAL\"" >/dev/null'
 	api POST "/api/v1/incidents/$incident/approve" '{"actor":"hw-e2e-approver"}' >/dev/null
@@ -731,14 +817,19 @@ cmd_test_verify_recur() {
 	# above — an approval timeout, an unrelated escalation, a store error. The
 	# phase would report PASS for a recurrence it never detected. The audit
 	# names the cause, so require it.
+	# `.result // ""` because an audit row may legitimately carry no result —
+	# jq's test() errors on null and takes the whole filter down with it, so the
+	# assertion failed on rows it was not even asking about. Found on the first
+	# hardware run: the product had done exactly the right thing (the audit read
+	# "verification failed: signal recurred during quiet window") and the phase
+	# still reported failure.
 	api GET "/api/v1/incidents/$incident" |
-		jq -e '[.audit[] | select(.result | test("signal recurred during quiet window"))] | length > 0' >/dev/null ||
+		jq -e '[.audit[] | select((.result // "") | test("signal recurred during quiet window"))] | length > 0' >/dev/null ||
 		die "the incident left VERIFYING as $state, but no audit entry attributes it to a recurrence; this phase proved nothing about the quiet window"
 	# Close it: an escalated incident stays OPEN (NEEDS_HUMAN is not halted
 	# for correlation purposes), and the next phase's fault on the same
 	# node+class would ATTACH to it instead of opening its own incident.
-	api POST "/api/v1/incidents/$incident/resolve" \
-		'{"actor":"hw-e2e","reason":"verification-recurrence phase complete"}' >/dev/null
+	close_incident "$incident" "verification-recurrence phase complete"
 	log "test-verify-recur: PASS (recurrence during VERIFYING escalated to $state, not RESOLVED)"
 }
 
@@ -868,8 +959,14 @@ cmd_sweep() {
 		--filters "Name=tag:aws:eks:cluster-name,Values=${CLUSTER_NAME}" \
 		"Name=instance-state-name,Values=pending,running,stopping,stopped" \
 		--query 'Reservations[].Instances[].InstanceId' --output text)
+	# `|| true` because grep exits 1 when it selects nothing, and selecting
+	# nothing is the ORDINARY case: a clean account. Under this file's `set -o
+	# pipefail` that exit status failed the assignment and returned from
+	# cmd_sweep — so on every successful run the teardown step reported failure
+	# and the CloudFormation, EBS, IAM-role and ECR checks after it never ran.
+	# A cost guard that only executes when there is already a leak is not one.
 	instances=$(printf '%s %s' "$tagged_instances" "$eks_instances" | tr -s ' \t' '\n' |
-		grep -v '^$' | sort -u | tr '\n' ' ')
+		grep -v '^$' | sort -u | tr '\n' ' ' || true)
 	instances=${instances% }
 	if [ -n "$instances" ]; then
 		log "sweep: terminating leaked instances: $instances"
@@ -922,8 +1019,14 @@ cmd_sweep() {
 		--filters "Name=tag:kubernetes.io/created-for/pvc/namespace,Values=${RUNTIME_NAMESPACE}" \
 		"Name=status,Values=available" \
 		--query 'Volumes[].VolumeId' --output text)
+	# Deduplicate. The three filters deliberately overlap — that is what makes
+	# them a safety net — so a volume matched by two of them was deleted twice,
+	# and the second delete's failure set the leak flag. The first real run
+	# ended with "sweep found leftovers it could not delete" on an account that
+	# was, in fact, clean.
 	local vol
-	for vol in $volumes $cluster_volumes $csi_volumes; do
+	for vol in $(printf '%s %s %s' "$volumes" "$cluster_volumes" "$csi_volumes" |
+		tr -s ' \t' '\n' | grep -v '^$' | sort -u || true); do
 		log "sweep: deleting orphaned volume $vol"
 		aws ec2 delete-volume --region "$AWS_REGION" --volume-id "$vol" || leaks=1
 	done

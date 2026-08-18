@@ -103,7 +103,7 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 		inc.RemediationSlotHeld = true // persisted by the transition below
 	}
 	if err := c.transition(ctx, inc, types.StateExecuting, actor, step.Name,
-		"executing "+step.Action, step.Params); err != nil {
+		auditExecutingResult(step.Action), step.Params); err != nil {
 		c.gate.StepDone(inc.Target, action, 0)
 		if !alreadyHeld {
 			// The transition never committed, so the bit was never persisted;

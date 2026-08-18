@@ -139,11 +139,25 @@ for doc in sorted(set(docs)):
             continue
         line = text.count("\n", 0, offset) + 1
         rel = os.path.relpath(doc, root)
+        # Pick the schema that matches BEST, then always walk it.
+        #
+        # Requiring every top-level key to be known before walking meant a body
+        # whose invented key was at the top matched no schema at all and was
+        # dropped in silence — so `{"spec": {"totallyMadeUpBlock": ...}}`, the
+        # simplest possible instance of what this check exists to catch, passed.
+        # Scoring instead means the worst case is walking against a plausible
+        # schema and reporting the unmatched keys, which is the point.
+        best, best_score = None, -1
         for schema in schemas:
             spec = (schema.get("properties") or {}).get("spec")
-            if spec and all(k in (spec.get("properties") or {}) for k in obj["spec"]):
-                walk_body(spec, obj["spec"], "spec", f"{rel}:{line}", bad)
-                break
+            if not spec:
+                continue
+            props = spec.get("properties") or {}
+            score = sum(1 for k in obj["spec"] if k in props)
+            if score > best_score:
+                best, best_score = spec, score
+        if best is not None:
+            walk_body(best, obj["spec"], "spec", f"{rel}:{line}", bad)
 
 if bad:
     print("INVENTED SPEC PATHS (a doc names a field the API does not have):", file=sys.stderr)

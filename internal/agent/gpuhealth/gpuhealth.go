@@ -124,6 +124,35 @@ type Watcher struct {
 	// once. A layout this build cannot read does not change between polls, so
 	// repeating it every tick would bury it in the noise it is warning about.
 	unreadableDCGMLogged bool
+	// dcgmFailLogged ensures the fell-back-to-nvidia-smi warning is emitted
+	// once per outage rather than per poll, and re-armed when DCGM recovers.
+	dcgmFailLogged bool
+}
+
+// noteDCGMFailure warns, once per outage, that this agent is running on the
+// narrower detection source and why.
+func (w *Watcher) noteDCGMFailure(err error) {
+	w.mu.Lock()
+	first := !w.dcgmFailLogged
+	w.dcgmFailLogged = true
+	w.mu.Unlock()
+	if first && w.Logger != nil {
+		w.Logger.Warn("DCGM health probe failed; this node's second detection source has degraded to nvidia-smi, which detects less",
+			"err", err, "endpoint", w.DCGMEndpoint,
+			"hint", "check that the dcgmi client in the agent image and the DCGM host engine agree on API version, and that the endpoint is reachable")
+	}
+}
+
+// noteDCGMRecovered re-arms the warning and says so, so a stale warning cannot
+// outlive the outage it described.
+func (w *Watcher) noteDCGMRecovered() {
+	w.mu.Lock()
+	recovered := w.dcgmFailLogged
+	w.dcgmFailLogged = false
+	w.mu.Unlock()
+	if recovered && w.Logger != nil {
+		w.Logger.Info("DCGM health probe recovered; the second detection source is DCGM again", "endpoint", w.DCGMEndpoint)
+	}
 }
 
 // New builds a health watcher, auto-detecting which binaries are present. A
@@ -225,10 +254,24 @@ func (w *Watcher) poll(ctx context.Context) []types.AgentEvent {
 	source := "none"
 	if w.DCGMPath != "" {
 		if cs, err := w.pollDCGM(ctx); err != nil {
-			if w.Logger != nil {
-				w.Logger.Debug("DCGM health probe failed, falling back to nvidia-smi", "err", err)
-			}
+			// WARN once, not Debug every tick.
+			//
+			// This was Debug, and the agent runs at Info, so the deeper of the
+			// two detection sources could fail on every single poll and say
+			// nothing at all. The first hardware run to reach this code found
+			// exactly that: the dcgmi client shipped in the agent image and the
+			// GPU Operator's host engine disagreed on API version, every poll
+			// failed, and the only trace anywhere was a gauge nobody is told to
+			// read. The product ran on the narrower source, which detects less,
+			// and reported nothing unusual.
+			//
+			// Once rather than per-poll because the cause does not change
+			// between ticks — a version skew, an unreachable endpoint — and
+			// repeating it would bury it in the noise it is warning about. The
+			// recovery is logged too, so the warning cannot outlive the fault.
+			w.noteDCGMFailure(err)
 		} else {
+			w.noteDCGMRecovered()
 			candidates = cs
 			haveSource = true
 			source = "dcgm"

@@ -14,11 +14,14 @@ import "time"
 // (kubeneuron_degraded_gpu_seconds_total and friends) answer the same
 // question for dashboards, where a range query is natural.
 //
-// Two conventions must be stated wherever these numbers are shown, because a
+// Three conventions must be stated wherever these numbers are shown, because a
 // reader who guesses will guess wrong:
-//   - "recovered" means the incident reached RESOLVED. Nothing else counts —
-//     an incident parked in NEEDS_HUMAN or aged out to EXPIRED did not return
+//   - "recovered" means the incident reached RESOLVED **and** something was
+//     executed against the fleet on its behalf. Nothing else counts — an
+//     incident parked in NEEDS_HUMAN or aged out to EXPIRED did not return
 //     capacity to service as far as KubeNeuron can prove.
+//   - "observed only" is the rest of RESOLVED: an incident that closed with no
+//     remediation step ever running. See ObservedOnly.
 //   - GPU-hours are degraded-GPU-hours, not lost-GPU-hours: a degraded GPU may
 //     still have been serving traffic.
 type RecoveryReport struct {
@@ -37,11 +40,26 @@ type RecoveryReport struct {
 	// Incidents counts incidents whose degraded interval overlaps the window,
 	// including ones opened before it and ones still open now.
 	Incidents int `json:"incidents"`
-	// Recovered counts those that reached RESOLVED; RecoveredUnattended is the
-	// subset that never minted an approval round, i.e. no human decided.
+	// Recovered counts those that reached RESOLVED with at least one
+	// remediation step executed; RecoveredUnattended is the subset that never
+	// minted an approval round, i.e. no human decided.
 	Recovered           int `json:"recovered"`
 	RecoveredUnattended int `json:"recovered_unattended"`
-	// MTTR is measured over incidents that RESOLVED inside the window, using
+	// ObservedOnly counts incidents that reached RESOLVED without a single
+	// remediation step ever executing, and ObservedOnlyGPUHours is their share
+	// of DegradedGPUHours. They are the honest name for what an incomplete
+	// policy set produces: a problem class with no playbook bound to it opens
+	// an incident, observes, and quiet-resolves.
+	//
+	// They are a SEPARATE bucket rather than a subset of Recovered because the
+	// two answer different questions and only one of them belongs in a budget
+	// conversation. Counting them as recovered — which is what happened until
+	// this field existed — meant a fleet that had bound one problem class out
+	// of twenty reported near-total recovery, and reported it as unattended
+	// too, since an incident nothing acted on never asks anybody's permission.
+	ObservedOnly         int     `json:"observed_only"`
+	ObservedOnlyGPUHours float64 `json:"observed_only_gpu_hours"`
+	// MTTR is measured over incidents that RECOVERED inside the window, using
 	// the full open-to-resolved duration (not the clipped one — a clipped
 	// duration is not a recovery time).
 	MTTR RecoveryLatency `json:"mttr"`
@@ -92,6 +110,13 @@ type SimulatedRecovery struct {
 	// WouldRecoverUnattended is the subset that never minted an approval
 	// round — the automation's projected yield if enforcement were on.
 	WouldRecoverUnattended int `json:"would_recover_unattended"`
+	// ObservedOnly counts the dry-run incidents that reached RESOLVED with no
+	// ladder step simulated at all — the ones with no policy bound to their
+	// class. They are the pilot's coverage gap, and they are the reason this
+	// field is here rather than folded into WouldRecover: a projection that
+	// silently includes "we would have done nothing" is the projection most
+	// likely to be quoted.
+	ObservedOnly int `json:"observed_only"`
 	// DegradedGPUHours is real: the hardware was genuinely degraded for this
 	// long. Only the recovery is hypothetical.
 	DegradedGPUHours float64 `json:"degraded_gpu_hours"`
@@ -117,13 +142,20 @@ type RecoveryLatency struct {
 
 // RecoveryClassReport is one problem class's contribution to the window.
 type RecoveryClassReport struct {
-	Class               ProblemClass    `json:"class"`
-	Incidents           int             `json:"incidents"`
-	DegradedGPUHours    float64         `json:"degraded_gpu_hours"`
-	RecoveredGPUHours   float64         `json:"recovered_gpu_hours"`
-	Recovered           int             `json:"recovered"`
-	RecoveredUnattended int             `json:"recovered_unattended"`
-	MTTR                RecoveryLatency `json:"mttr"`
+	Class             ProblemClass `json:"class"`
+	Incidents         int          `json:"incidents"`
+	DegradedGPUHours  float64      `json:"degraded_gpu_hours"`
+	RecoveredGPUHours float64      `json:"recovered_gpu_hours"`
+	Recovered         int          `json:"recovered"`
+	// ObservedOnly and ObservedOnlyGPUHours are this class's share of the
+	// report-level buckets of the same name. Per class is where they are most
+	// useful: a class whose whole column is observed-only is a class with no
+	// playbook bound to it, which is a configuration gap the fleet's owner can
+	// read straight off the table.
+	ObservedOnly         int             `json:"observed_only"`
+	ObservedOnlyGPUHours float64         `json:"observed_only_gpu_hours"`
+	RecoveredUnattended  int             `json:"recovered_unattended"`
+	MTTR                 RecoveryLatency `json:"mttr"`
 }
 
 // RecoveryOpenIncident is an incident still costing capacity at the end of

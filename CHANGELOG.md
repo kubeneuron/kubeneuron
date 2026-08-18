@@ -31,6 +31,40 @@ installation to stop a remediation, read the first Fixed entry.**
 
 ### Fixed
 
+- **What a pilot installs now remediates more than one problem class, and the
+  recovery report no longer counts the rest as recovered.** `deploy/install.sh`
+  bound exactly one class (`xid-app`, observe-only) and `config/samples` added
+  one more, out of the seventeen `pkg/types` declares and the detectors emit.
+  An unbound class is not a quiet gap: the incident opens, observes, and
+  quiet-resolves without remediating, and `internal/controller/report.go`
+  counted "reached RESOLVED" as recovered with no check that anything ran — and
+  as recovered *unattended*, because an incident nothing acted on never asks
+  anybody's permission. An installation binding one class out of twenty
+  therefore reported near-total unattended recovery, and
+  `docs/pilot-checklist.md` told the operator to take that number to whoever
+  pays for the fleet. Three changes, together:
+  - `config/policies/` is a baseline pack binding every class the detectors can
+    emit, with the severity and blast-radius reasoning written beside each
+    binding. `install.sh` applies a copy — a piped install has no checkout to
+    read it from, and `internal/operator/policy_pack_test.go` pins the two
+    together on which class gets which ladder. Nothing in it is armed: every
+    step that ends running work — drain, targeted eviction, device reset,
+    reboot — requires an approval, and a test fails the build if one stops
+    doing so. Two bindings deliberately differ from the file-based
+    `configs/policies.yaml`, which was corrected to match: `driver-hang` no
+    longer answers a dead exporter by draining a node full of training jobs,
+    and `gpu-lost` no longer spends a cordon and a drain reaching a reset that
+    is structurally impossible on a device with no UUID.
+  - The recovery report reads the audit trail for a transition into `EXECUTING`
+    and puts a close with no remediation step in its own `nothing done` bucket
+    — never in `recovered`, `recovered_unattended`, recovered GPU-hours, or
+    MTTR. A notification-only step is not remediation. The simulated (dry-run)
+    section carries the same split, so a pilot's projection cannot silently
+    include "we would have done nothing".
+  - `internal/operator/policy_pack_test.go` fails the build when a class the
+    detectors can emit has no binding, with a reason required per exception.
+    `diag-failure` is the only entry — nothing emits it — and that exception
+    fails the moment something does.
 - **Switching to `DryRun` to stop damage removed the blast radius from every
   incident already in flight.** `inc.DryRun` is stamped when an incident opens
   and was never re-read, the operator compiles

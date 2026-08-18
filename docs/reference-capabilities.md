@@ -70,6 +70,16 @@ none of these rungs is ever climbed on those nodes unless a human opens the
 incident by hand (`POST /api/v1/incidents`) or authors alert rules for a
 non-NVIDIA exporter.
 
+The same sentence used to apply to NVIDIA for a different reason, and it is
+worth recording because it made every cell below weaker than it reads: an
+installation from `deploy/install.sh` bound exactly ONE problem class, so on a
+default install none of these rungs could be reached by a detected fault
+either. The baseline pack in `config/policies` (applied by `install.sh`, and
+`kubectl apply -k config/policies` otherwise) binds every class the detectors
+emit; `internal/operator/policy_pack_test.go` fails the build if a class stops
+being covered. That changes what is REACHABLE, not what is validated — every
+evidence statement below still describes the same runs.
+
 | Capability | Status | Notes |
 |---|---|---|
 | Cordon / drain | shipped & hardware-validated | `internal/platform/kubernetes/kubernetes.go`. Both executed for real on the EKS node in the confined destructive phase (`Cordon → Drain → ReplaceNode`, `hack/hw-e2e.sh`). Vendor-blind: eviction is a pod operation. The PDB-blocked retry loop is fixture-tested only — no hardware run has had an eviction refused by a budget. |

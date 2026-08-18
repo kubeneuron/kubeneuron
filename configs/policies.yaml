@@ -33,8 +33,14 @@ policies:
     playbook: drain-and-reset
   - match: { class: gsp-error }           # XID 119/120
     playbook: gpu-reset
+  # driver-hang: nvidia-smi timeout, a dead exporter, an amdgpu ring timeout.
+  # NOT drain-and-reset. The most common emitter is GpuExporterDown, which is a
+  # MONITORING outage — and answering that by draining a node full of training
+  # jobs is a worse failure than the one being reported. gpu-reset leads with an
+  # idle check, so a busy device stops for a human and only an idle one is
+  # reset; escalation still reaches the drain when the reset does not clear it.
   - match: { class: driver-hang }
-    playbook: drain-and-reset
+    playbook: gpu-reset
 
   # --- scheduled / soft actions ---
   - match: { class: row-remap-ok }        # XID 63: reset applies the remap
@@ -57,7 +63,20 @@ policies:
     playbook: observe-suspect
   - match: { class: pcie }
     playbook: observe-suspect
+  # gpu-lost: a device has vanished from the vendor tool's own enumeration.
+  # NOT drain-and-reset: a missing device has no UUID to address, so the reset
+  # preflight refuses it as structurally impossible and the incident fails
+  # closed to a human — after the cordon and drain have already run. The reboot
+  # ladder spends the same disruption on a rung that can return the device.
   - match: { class: gpu-lost }
-    playbook: drain-and-reset
+    playbook: reboot
   - match: { class: diag-failure }
+    playbook: observe-suspect
+  # agent-down: the node's agent stopped reporting. Every rung above observe is
+  # executed BY that agent, over the channel that is down, on a node whose
+  # telemetry we no longer have — remediating it would mean acting blind
+  # through a broken pipe. The page is KubeNeuronAgentNeverAcked; this binding
+  # exists so the incident is recorded and notified rather than sitting
+  # unbound, which looks identical in the store and says nothing about intent.
+  - match: { class: agent-down }
     playbook: observe-suspect

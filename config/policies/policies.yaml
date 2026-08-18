@@ -1,0 +1,319 @@
+# KubeNeuron baseline policy pack — one binding per problem class the shipped
+# detectors can emit.
+#
+# WHY THIS FILE EXISTS
+#
+# A problem class with no policy bound to it is not a quiet gap. The incident
+# opens, observes, and quiet-resolves — no playbook, no step, no node touched —
+# and until the recovery report learned to tell the difference, that close was
+# counted as capacity KubeNeuron returned, and as capacity it returned WITHOUT
+# A HUMAN, because an incident nothing acted on never asks anybody's
+# permission. An installation binding one class out of twenty therefore
+# reported near-total unattended recovery. `kubeneuronctl report` now shows
+# those closes in their own "nothing done" column; this pack is the other half
+# of the fix, which is to have far fewer of them.
+#
+# HOW TO READ A BINDING
+#
+# Every entry states the fault, the least destructive rung that can plausibly
+# help it, and why the next rung down would be wrong. The ladders themselves
+# are in playbooks.yaml, which carries the approval rule: nothing that ends
+# running work runs without a human saying so.
+#
+# PRIORITY
+#
+# Lower number wins, and every binding here sits at 900 — the whole ordinary
+# range is left free, so ANY policy of your own for a class overrides this pack
+# without deleting anything. That is the intended way to specialise: bind your
+# class at priority 100 and leave the baseline underneath as the answer for
+# everything you have not thought about yet.
+#
+# WHAT THIS PACK DELIBERATELY DOES NOT BIND
+#
+#   diag-failure — no shipped detector emits it. The GpuDcgmDiagFailed rule in
+#     configs/vmalert/gpu-rules.yaml is not wired into detect.alertClassMap, so
+#     nothing can classify into this class today and a binding would be
+#     configuration that never runs. It is listed in the coverage gate's
+#     exceptions with exactly this reason, and that exception fails the build
+#     the moment a detector starts emitting the class.
+#
+# Nothing else is unbound. Where the right answer is "a human reads this", the
+# binding is kubeneuron-observe rather than an omission — an omission and a
+# deliberate decision to only observe look identical to an operator, and only
+# one of them is a decision.
+---
+# XID 13/31/43/46 — graphics engine exception, page fault, channel
+# verification, stopped processing. The XID catalog is unambiguous: these are
+# almost always application bugs, and hardware is suspect only when different
+# workloads trip the same device. Anything that touches the GPU would punish
+# the fleet for somebody's bad kernel. Threshold repeats the catalog's 3-in-1h
+# so a recurring pattern surfaces instead of accumulating silently.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-xid-app
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: xid-app}
+  playbookRef: kubeneuron-observe
+  parameters:
+    threshold: "3"
+    window: "1h"
+---
+# XID 92 — high single-bit ECC rate. Corrected errors: no data was wrong and no
+# workload was harmed. The trend matters (it precedes row remaps), the
+# individual event does not, so this is a watch, not a repair. Catalog window
+# is 3-in-24h.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-ecc-sbe-rate
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: ecc-sbe-rate}
+  playbookRef: kubeneuron-observe
+  parameters:
+    threshold: "3"
+    window: "24h"
+---
+# Thermal throttle / critical temperature. A facility problem wearing a GPU
+# costume: the device is behaving correctly by slowing down. Resetting it fixes
+# nothing, and draining the node moves the heat to a neighbour rather than
+# removing it. Somebody has to look at the airflow.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-thermal
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: thermal}
+  playbookRef: kubeneuron-observe
+---
+# Power brake / PSU events. Same reasoning as thermal, and the same conclusion:
+# the fault is upstream of the device, so no action available to this product
+# addresses it.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-power
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: power}
+  playbookRef: kubeneuron-observe
+---
+# PCIe replay storms. A link-degradation TREND, not an event: replays are
+# corrected by definition, and the actionable response is a link retrain or a
+# riser/seating check, neither of which is an action this product has. Observe
+# so the trend is on the record when the device eventually falls off the bus.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-pcie
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: pcie}
+  playbookRef: kubeneuron-observe
+---
+# The node's agent stopped reporting. This is the one class where automating
+# anything would be actively unsafe, and it is worth stating why rather than
+# leaving it to inference: every rung above observe is executed BY that agent,
+# over the channel that is down, on a node whose telemetry we no longer have.
+# Remediating it would mean acting blind through a broken pipe.
+#
+# The alert KubeNeuronAgentNeverAcked in configs/vmalert/self-rules.yaml is the
+# real response, and it pages. This binding exists so the incident is recorded
+# and notified rather than sitting unbound, which looks the same in the store
+# and says nothing about intent.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-agent-down
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: agent-down}
+  playbookRef: kubeneuron-observe
+---
+# XID 94 — contained ECC error (A100+). Containment means exactly one
+# workload's context was corrupted and the rest of the device is sound, so the
+# surgical response IS the correct one: evict that workload, keep the GPU
+# serving. Escalation to drain-and-reset covers the case the catalog warns
+# about — repeated containment is a degrading part being masked.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-ecc-contained
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: ecc-contained}
+  playbookRef: kubeneuron-workload-restart
+---
+# XID 63 — row remap recorded, and AMD's page retirement. This is the RECOVERY
+# MECHANISM WORKING, not a failure: a bad row was retired successfully. The
+# remap only takes effect at the next reset, and there is no urgency whatsoever
+# about when that happens — so the ladder waits for the device to go idle by
+# itself rather than spending somebody's job to apply a fix that is already
+# recorded.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-row-remap-ok
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: row-remap-ok}
+  playbookRef: kubeneuron-reset-when-idle
+---
+# XID 119/120 — GSP RPC timeout and GSP error. The catalog's ladder is reset,
+# then reboot, then driver reinstall; the first rung is an in-place reset,
+# which needs no drain because the idle check decides whether the device is
+# free. Escalation reaches drain-and-reset and then the reboot, which is the
+# catalog's ladder minus the reinstall the CRD plane cannot express.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-gsp-error
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: gsp-error}
+  playbookRef: kubeneuron-gpu-reset
+---
+# Driver hang: nvidia-smi timeout, a dead exporter, an amdgpu ring timeout.
+#
+# NOT drain-and-reset, which is what the file-based configs/policies.yaml
+# binds. The most common emitter of this class is GpuExporterDown — a
+# MONITORING outage — and answering a monitoring outage by draining a node full
+# of training jobs is a worse failure than the one being reported. The in-place
+# reset ladder starts with an idle check, so a hung driver on a busy device
+# stops for a human instead, and only a genuinely idle device is reset.
+# Escalation still reaches the drain when the reset does not clear it.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-driver-hang
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: driver-hang}
+  playbookRef: kubeneuron-gpu-reset
+---
+# XID 48/95 and the volatile DBE counters — uncorrectable memory faults.
+#
+# This is the one place the pack does NOT choose the gentlest rung, and the
+# reason is that the gentler rungs are not gentle here: a workload running on a
+# device with an uncorrectable ECC fault is producing WRONG NUMBERS, and
+# letting it continue is the expensive outcome. The catalog says drain and
+# reset immediately; the drain still asks a human first, so nothing is armed by
+# this binding — it is the fastest correct answer, not an automatic one.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-ecc-dbe
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: ecc-dbe}
+  playbookRef: kubeneuron-drain-and-reset
+---
+# XID 74 — NVLink errors, and AMD's XGMI link errors.
+#
+# A fabric fault affects every peer that routes through the link, so it is not
+# containable to one workload the way a contained ECC error is; the catalog's
+# answer is drain and reset, and recurrence means cabling. Same note as ECC
+# DBE: the drain asks first.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-nvlink
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: nvlink}
+  playbookRef: kubeneuron-drain-and-reset
+---
+# XID 79 — the GPU has fallen off the bus.
+#
+# A device that is gone from PCIe cannot be reset: there is nothing to address.
+# The catalog says so explicitly, and the reset ladder would spend a cordon and
+# a drain discovering it. Reboot is the least destructive rung that can
+# actually work, and it asks twice before it runs.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-fell-off-bus
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: fell-off-bus}
+  playbookRef: kubeneuron-reboot
+---
+# GPU count below inventory: a device has vanished from the vendor tool's own
+# enumeration.
+#
+# NOT drain-and-reset, which is what the file-based configs/policies.yaml
+# binds. A missing device has no UUID to address, so the reset preflight
+# refuses it as structurally impossible and the incident fails closed to a
+# human — AFTER the cordon and the drain have already run. Binding the reboot
+# ladder directly spends the same disruption on a rung that can actually
+# return the device.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-gpu-lost
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: gpu-lost}
+  playbookRef: kubeneuron-reboot
+---
+# XID 64 — the row remap could not be RECORDED, and AMD's exhausted page
+# retirement. The device's own repair mechanism has failed or run out of
+# spares. Nothing software can do restores it; a reset would only hide the
+# state until the next uncorrectable error. Quarantine and hand it to hardware.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-row-remap-failure
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: row-remap-failure}
+  playbookRef: kubeneuron-rma
+---
+# Remapped rows approaching the bank's budget. The mechanism still works, but
+# it is measurably running out, and the failure it is heading for is the
+# uncorrectable one. This is the only class in the pack bound on a FORECAST
+# rather than a fault, which is exactly why the ticket step asks before the
+# machine is quarantined.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-row-remap-budget
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: row-remap-budget}
+  playbookRef: kubeneuron-rma

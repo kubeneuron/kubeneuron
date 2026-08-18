@@ -16,6 +16,20 @@ func at(base time.Time, hours float64) time.Time {
 	return base.Add(time.Duration(hours * float64(time.Hour)))
 }
 
+// allRemediated is the "a step ran for every one of these" evidence map. The
+// cases below are about window arithmetic and GPU scope, not about coverage,
+// so they assert against a fleet whose ladders all executed; the observed-only
+// half has its own tests further down.
+func allRemediated(incidents []*types.Incident) map[string]bool {
+	out := make(map[string]bool, len(incidents))
+	for _, inc := range incidents {
+		if inc != nil {
+			out[inc.ID] = true
+		}
+	}
+	return out
+}
+
 func incident(id string, class types.ProblemClass, node, gpu string, state types.IncidentState, opened, changed time.Time) *types.Incident {
 	inc := &types.Incident{
 		ID:             id,
@@ -148,7 +162,7 @@ func TestAggregateRecovery(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := aggregateRecovery(tc.incidents, inventory, from, to)
+			got := aggregateRecovery(tc.incidents, inventory, allRemediated(tc.incidents), from, to)
 			if got.Incidents != tc.want.Incidents {
 				t.Errorf("incidents = %d, want %d", got.Incidents, tc.want.Incidents)
 			}
@@ -185,7 +199,7 @@ func TestAggregateRecoveryRanksClassesAndListsOpenIncidents(t *testing.T) {
 	attended := incident("attended", "ecc-dbe", "node-8gpu", "GPU-2", types.StateResolved, at(to, -8), at(to, -6))
 	attended.ApprovalEpoch = 1
 
-	report := aggregateRecovery([]*types.Incident{
+	incidents := []*types.Incident{
 		// 8 GPUs x 4h = 32 GPU-hours, recovered without a human.
 		incident("bus", "fell-off-bus", "node-8gpu", "", types.StateResolved, at(to, -10), at(to, -6)),
 		// 1 GPU x 2h = 2 GPU-hours, recovered after an approval.
@@ -194,7 +208,8 @@ func TestAggregateRecoveryRanksClassesAndListsOpenIncidents(t *testing.T) {
 		incident("running", "ecc-dbe", "node-8gpu", "GPU-3", types.StateExecuting, at(to, -1), at(to, -1)),
 		// 1 GPU x 12h = 12 GPU-hours, parked for a human since hour 11.
 		incident("parked", "ecc-dbe", "node-8gpu", "GPU-4", types.StateNeedsHuman, at(to, -12), at(to, -11)),
-	}, inventory, from, to)
+	}
+	report := aggregateRecovery(incidents, inventory, allRemediated(incidents), from, to)
 
 	if report.DegradedGPUHours != 47 || report.RecoveredGPUHours != 34 {
 		t.Fatalf("degraded/recovered = %v/%v GPU-hours, want 47/34", report.DegradedGPUHours, report.RecoveredGPUHours)
@@ -237,7 +252,7 @@ func TestAggregateRecoveryClampsBackwardsAndFutureStamps(t *testing.T) {
 	// A resolved_at before opened_at (clock step, hand-edited row) must never
 	// subtract capacity loss from the fleet total.
 	backwards := incident("backwards", "ecc-dbe", "n1", "GPU-1", types.StateResolved, at(to, -2), at(to, -3))
-	report := aggregateRecovery([]*types.Incident{backwards}, nil, from, to)
+	report := aggregateRecovery([]*types.Incident{backwards}, nil, allRemediated([]*types.Incident{backwards}), from, to)
 	if report.Incidents != 0 || report.DegradedGPUHours != 0 {
 		t.Fatalf("backwards incident produced %+v, want an empty report", report)
 	}
@@ -245,7 +260,7 @@ func TestAggregateRecoveryClampsBackwardsAndFutureStamps(t *testing.T) {
 	// An incident opened after the window end contributes nothing rather than
 	// a negative overlap.
 	future := incident("future", "ecc-dbe", "n1", "GPU-1", types.StateExecuting, at(to, 1), at(to, 1))
-	report = aggregateRecovery([]*types.Incident{future}, nil, from, to)
+	report = aggregateRecovery([]*types.Incident{future}, nil, allRemediated([]*types.Incident{future}), from, to)
 	if report.Incidents != 0 {
 		t.Fatalf("future incident produced %+v, want an empty report", report)
 	}
@@ -271,10 +286,11 @@ func TestDryRunFleetGetsSimulatedNumbers(t *testing.T) {
 			OpenedAt:      opened, UpdatedAt: r, StateChangedAt: r, ResolvedAt: &r,
 		}
 	}
-	report := aggregateRecovery([]*types.Incident{
+	incidents := []*types.Incident{
 		inc("a", true, 0), // dry-run, unattended
 		inc("b", true, 1), // dry-run, needed an approval
-	}, map[string]int{"n1": 1}, from, to)
+	}
+	report := aggregateRecovery(incidents, map[string]int{"n1": 1}, allRemediated(incidents), from, to)
 
 	// The headline stays honest: nothing was executed, so nothing recovered.
 	if report.Incidents != 0 || report.RecoveredGPUHours != 0 {
@@ -312,12 +328,137 @@ func TestRealFleetHasNoSimulatedSection(t *testing.T) {
 		ID: "real", Target: types.Target{Node: "n1", GPUUUID: "GPU-1"},
 		Class: types.ClassECCDBE, State: types.StateResolved,
 		OpenedAt: now.Add(-2 * time.Hour), UpdatedAt: r, StateChangedAt: r, ResolvedAt: &r,
-	}}, map[string]int{"n1": 1}, now.Add(-24*time.Hour), now)
+	}}, map[string]int{"n1": 1}, map[string]bool{"real": true}, now.Add(-24*time.Hour), now)
 
 	if report.Simulated != nil {
 		t.Fatalf("a fleet with no dry-run incidents got a simulated section: %+v", report.Simulated)
 	}
 	if report.Recovered != 1 {
 		t.Fatalf("Recovered = %d, want 1", report.Recovered)
+	}
+}
+
+// TestAnIncidentNothingActedOnIsNotRecoveredCapacity is the defect this
+// bucket exists for, in its exact shipped shape.
+//
+// A problem class with no GPURemediationPolicy bound to it opens an incident,
+// observes, and quiet-resolves — no playbook, no step, no node touched. That
+// incident reached RESOLVED, so it was counted as recovered; it never minted
+// an approval round either, because nothing ever asked anybody, so it was also
+// counted as recovered WITHOUT A HUMAN. An installation that had bound one
+// class out of twenty therefore reported near-total unattended recovery, and
+// docs/pilot-checklist.md tells the operator to take that number to whoever
+// pays for the fleet.
+func TestAnIncidentNothingActedOnIsNotRecoveredCapacity(t *testing.T) {
+	to := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	from := to.Add(-24 * time.Hour)
+
+	repaired := incident("repaired", "ecc-dbe", "n1", "GPU-1", types.StateResolved, at(to, -6), at(to, -4))
+	unbound := incident("unbound", "thermal", "n1", "GPU-2", types.StateResolved, at(to, -6), at(to, -4))
+
+	report := aggregateRecovery([]*types.Incident{repaired, unbound},
+		map[string]int{"n1": 8},
+		// Only the first has an EXECUTING row in its audit trail.
+		map[string]bool{"repaired": true},
+		from, to)
+
+	if report.Recovered != 1 || report.RecoveredUnattended != 1 {
+		t.Fatalf("recovered/unattended = %d/%d, want 1/1: an incident with no policy bound to "+
+			"its class was counted as capacity this product returned",
+			report.Recovered, report.RecoveredUnattended)
+	}
+	if report.ObservedOnly != 1 {
+		t.Fatalf("ObservedOnly = %d, want 1", report.ObservedOnly)
+	}
+	// Both incidents degraded one GPU for two hours. The hours are real for
+	// both; only one of them came back.
+	if report.DegradedGPUHours != 4 || report.RecoveredGPUHours != 2 || report.ObservedOnlyGPUHours != 2 {
+		t.Fatalf("degraded/recovered/observed-only = %v/%v/%v GPU-hours, want 4/2/2",
+			report.DegradedGPUHours, report.RecoveredGPUHours, report.ObservedOnlyGPUHours)
+	}
+	// And it contributes no repair time: nothing was repaired.
+	if report.MTTR.Samples != 1 {
+		t.Fatalf("MTTR samples = %d, want 1: an observed-only close is not a recovery time",
+			report.MTTR.Samples)
+	}
+
+	byClass := map[types.ProblemClass]types.RecoveryClassReport{}
+	for _, row := range report.Classes {
+		byClass[row.Class] = row
+	}
+	if row := byClass["thermal"]; row.Recovered != 0 || row.ObservedOnly != 1 {
+		t.Fatalf("thermal row = %+v, want 0 recovered / 1 observed-only: the per-class column "+
+			"is where an operator reads which classes have no ladder bound", row)
+	}
+}
+
+// TestObserveOnlyLadderIsNotAWheelOfRecovery covers the subtler half. An
+// observe-first class that crosses its threshold DOES execute — one
+// notify.observe step — and then resolves. A step ran, so a naive "did
+// anything execute" test would call it recovered capacity, which is a claim
+// about a GPU made by a step whose entire effect was to write a line.
+func TestObserveOnlyLadderIsNotAWheelOfRecovery(t *testing.T) {
+	if remediationExecuted([]string{auditExecutingResult("notify.observe")}) {
+		t.Fatal("a ladder whose only executed step was a notification counted as a repair")
+	}
+	if remediationExecuted([]string{auditExecutingResult("notify.ticket")}) {
+		t.Fatal("opening a ticket is how a playbook asks a human to act; it is not the act")
+	}
+	// config/samples ships exactly this ladder — Observe then VerifyGPUHealth —
+	// and it is the shape that slips past a naive "did any step run" test.
+	// Reading health back is not repairing anything.
+	if remediationExecuted([]string{
+		auditExecutingResult("notify.observe"),
+		auditExecutingResult("verify.gpu_health"),
+	}) {
+		t.Fatal("a ladder that observed and then checked health returned no capacity to service")
+	}
+	if !remediationExecuted([]string{
+		auditExecutingResult("notify.observe"),
+		auditExecutingResult("platform.cordon"),
+	}) {
+		t.Fatal("a ladder that notified and then cordoned did act on the fleet")
+	}
+	if remediationExecuted(nil) {
+		t.Fatal("an incident with no EXECUTING audit row at all had no step to run")
+	}
+	// A row an older controller wrote carries no recognisable action. Calling
+	// that observation would rewrite an existing installation's whole history
+	// into "nothing was ever done", which is the louder lie of the two.
+	if !remediationExecuted([]string{"reset complete"}) {
+		t.Fatal("an unrecognised EXECUTING row must be read as 'a step ran, we cannot say which'")
+	}
+}
+
+// The simulated section carries the same split. A dry-run pilot whose policy
+// set covers two classes out of twenty must not read "would recover: all of
+// them" — that projection is the argument for turning enforcement on.
+func TestSimulatedRecoverySeparatesTheClassesWithNoLadder(t *testing.T) {
+	now := time.Now()
+	from, to := now.Add(-24*time.Hour), now
+	opened, resolved := now.Add(-3*time.Hour), now.Add(-2*time.Hour)
+
+	inc := func(id string, class types.ProblemClass) *types.Incident {
+		r := resolved
+		return &types.Incident{
+			ID: id, Target: types.Target{Node: "n1", GPUUUID: "GPU-" + id},
+			Class: class, State: types.StateResolved, DryRun: true,
+			OpenedAt: opened, UpdatedAt: r, StateChangedAt: r, ResolvedAt: &r,
+		}
+	}
+	report := aggregateRecovery(
+		[]*types.Incident{inc("bound", types.ClassECCDBE), inc("unbound", types.ClassPower)},
+		map[string]int{"n1": 1},
+		map[string]bool{"bound": true},
+		from, to)
+
+	sim := report.Simulated
+	if sim == nil {
+		t.Fatal("a dry-run fleet got no simulated numbers")
+	}
+	if sim.WouldRecover != 1 || sim.ObservedOnly != 1 {
+		t.Fatalf("simulated would-recover/observed-only = %d/%d, want 1/1: the class with no "+
+			"policy bound was projected as a recovery enforcement would have delivered",
+			sim.WouldRecover, sim.ObservedOnly)
 	}
 }

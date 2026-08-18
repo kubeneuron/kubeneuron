@@ -1,6 +1,14 @@
 # Observe-only playbook for app-level or facility signals (XID 13/31,
-# thermal, power, PCIe). Records and notifies; escalation to a suspect-GPU
-# drain happens when the policy threshold is crossed.
+# thermal, power, PCIe). Records and notifies; nothing here touches a node.
+#
+# It carries no on_failure, and that is the point. The only step is a
+# notification, so an on_failure would mean "a notifier we could not reach
+# escalates to draining a node" — a broken pipe evicting somebody's job. A
+# notification that cannot be delivered is a matter for a human.
+#
+# Escalation for these classes is by THRESHOLD, not by failure: crossing the
+# policy's threshold moves the incident out of OBSERVING, and a class that
+# should climb a real ladder on recurrence is bound to that ladder directly.
 name: observe-suspect
 target: gpu
 cooldown: 30m
@@ -9,5 +17,3 @@ steps:
     action: notify.observe
     params:
       note: "counted; threshold policy decides escalation"
-on_failure:
-  escalate_to: drain-and-reset

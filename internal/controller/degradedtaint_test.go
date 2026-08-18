@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/platform"
+	"github.com/kubeneuron/kubeneuron/internal/safety"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/internal/store/sqlite"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -88,7 +89,10 @@ func taintFixture(t *testing.T, policy DegradedTaintPolicy) (*Controller, *sqlit
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	p := newTaintPlatform()
-	c := New(st, st, nil, nil, nil, p, nil, &recordingNotifier{},
+	// A live gate, not nil: the taint decision reads the LIVE execution mode,
+	// and a controller with none fails closed — so a gateless fixture would
+	// silently assert nothing.
+	c := New(st, st, nil, safety.NewGate(safety.Limits{MaxConcurrentRemediations: 2}), nil, p, nil, &recordingNotifier{},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	c.SetDegradedTaintPolicy(policy)
 	return c, st, p
@@ -285,7 +289,10 @@ func TestControllerWithoutATaintingPlatformIsInert(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	c := New(st, st, nil, nil, nil, nil, nil, &recordingNotifier{},
+	// A live gate, not nil: the taint decision reads the LIVE execution mode,
+	// and a controller with none fails closed — so a gateless fixture would
+	// silently assert nothing.
+	c := New(st, st, nil, safety.NewGate(safety.Limits{MaxConcurrentRemediations: 2}), nil, nil, nil, &recordingNotifier{},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	c.SetDegradedTaintPolicy(DegradedTaintPolicy{Enabled: true, Effect: "PreferNoSchedule"})
 	ctx := context.Background()

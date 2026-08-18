@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/action"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -85,7 +87,74 @@ func (c *Controller) RecoveryReport(ctx context.Context, window time.Duration) (
 	for _, n := range nodes {
 		gpusPerNode[n.Name] = len(n.GPUs)
 	}
-	return aggregateRecovery(incidents, gpusPerNode, from, to), nil
+	// And one audit read for the whole report, asked only about the incidents
+	// whose answer can change a number: RESOLVED is the only state that counts
+	// toward recovery, so nothing else needs its trail read.
+	resolved := make([]string, 0, len(incidents))
+	for _, inc := range incidents {
+		if inc != nil && inc.State == types.StateResolved {
+			resolved = append(resolved, inc.ID)
+		}
+	}
+	executed, err := c.store.ExecutedStepResults(ctx, resolved)
+	if err != nil {
+		// Fail loud. Without the audit there is no way to tell a repair from an
+		// incident that merely aged out quietly, and the difference is the whole
+		// meaning of the headline number — answering anyway would hand back a
+		// figure that looks authoritative and may be entirely observation.
+		return nil, fmt.Errorf("reading remediation evidence from the audit trail: %w", err)
+	}
+	remediated := make(map[string]bool, len(executed))
+	for id, results := range executed {
+		remediated[id] = remediationExecuted(results)
+	}
+	return aggregateRecovery(incidents, gpusPerNode, remediated, from, to), nil
+}
+
+// auditExecutingResult is the Result text written on every transition INTO
+// EXECUTING, and remediationExecuted is the only reader of that format. They
+// live together because they are one contract: the audit row's Action column
+// carries the STEP NAME, which a playbook author chooses freely ("record",
+// "notify", "reset"), so the wire action is recoverable from nowhere else.
+//
+// This is what lets the report tell a repair from an observation without a
+// schema migration: the audit already carries the fact, it was simply never
+// read back.
+const auditExecutingPrefix = "executing "
+
+func auditExecutingResult(wireAction string) string { return auditExecutingPrefix + wireAction }
+
+// remediationExecuted reports whether an incident's EXECUTING audit rows prove
+// that something was actually DONE to the fleet.
+//
+// The test is the action registry's Kind, which already divides the actions
+// that change the fleet from the two that do not. A notify step records and
+// tells somebody; a verify step reads health back. Neither is a repair, and a
+// ladder made only of those — the shipped observe-first ones, and the
+// two-step Observe+VerifyGPUHealth example in config/samples — reaches
+// RESOLVED having changed nothing at all. Counting that as returned capacity
+// is the same claim as counting a class with no playbook, made one layer down.
+//
+// Anything this build cannot classify is counted as remediation: a row written
+// by an older controller, or one naming an action this binary no longer has.
+// "A step ran, we cannot say which" honestly reads as a step having run, and
+// guessing the other way would retroactively rewrite an existing
+// installation's whole history into observation. The headline defect — a class
+// with no playbook at all — produces no EXECUTING row whatsoever, so it is
+// caught regardless.
+func remediationExecuted(results []string) bool {
+	for _, result := range results {
+		wire, formatted := strings.CutPrefix(result, auditExecutingPrefix)
+		if !formatted {
+			return true
+		}
+		def, known := action.ByWire(wire)
+		if known && (def.Kind == action.KindNotify || def.Kind == action.KindVerify) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // aggregateRecovery turns raw incidents into the window's capacity numbers.
@@ -98,18 +167,32 @@ func (c *Controller) RecoveryReport(ctx context.Context, window time.Duration) (
 //     incidents a capacity owner cares most about — the long ones.
 //   - Degraded GPU-hours are clipped to the window, so the number can never
 //     exceed the GPU-time the window actually contained.
-//   - RECOVERED means the incident reached RESOLVED. NEEDS_HUMAN and EXPIRED
+//   - RECOVERED means the incident reached RESOLVED **and** its audit trail
+//     records a remediation step actually executing. NEEDS_HUMAN and EXPIRED
 //     do not count, and a NEEDS_HUMAN incident keeps accruing degraded time:
 //     automation stopped, the capacity did not come back. This is stricter
 //     than kubeneuron_incidents_recovered_total's sibling histogram, which
 //     stops the clock at the park; the strict reading is the one that cannot
 //     overclaim.
+//   - OBSERVED ONLY is the rest of RESOLVED: an incident that closed without
+//     anything being done to the fleet. A problem class with no policy bound
+//     to it opens an incident, observes, and quiet-resolves — and used to be
+//     counted as recovered capacity, so an incomplete policy set inflated the
+//     one number this report exists to be trusted on. It is reported as its
+//     own bucket rather than dropped, because those incidents did degrade the
+//     fleet and the hours are real; only the recovery is absent.
 //   - UNATTENDED means the incident never minted an approval round
-//     (ApprovalEpoch == 0), the same test recordRecoveryOutcome applies.
-//   - MTTR uses the FULL open-to-resolved duration of incidents that resolved
-//     inside the window. A clipped duration is not a recovery time.
-func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, from, to time.Time) *types.RecoveryReport {
-	report := aggregateRecoverySubset(incidents, gpusPerNode, from, to, false)
+//     (ApprovalEpoch == 0), the same test recordRecoveryOutcome applies. It is
+//     a subset of RECOVERED, so an observed-only close can no longer arrive in
+//     it by never having asked anybody.
+//   - MTTR uses the FULL open-to-resolved duration of incidents that RECOVERED
+//     inside the window. A clipped duration is not a recovery time, and
+//     neither is the age of an incident nothing repaired.
+//
+// remediated answers "did a remediation step run" per incident ID; an ID
+// absent from it did not.
+func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, remediated map[string]bool, from, to time.Time) *types.RecoveryReport {
+	report := aggregateRecoverySubset(incidents, gpusPerNode, remediated, from, to, false)
 	// The simulated view answers the question a pilot actually has. The
 	// checklist tells them to stay in dry-run until they have watched the
 	// system decide, and for that whole period the real report is empty by
@@ -117,11 +200,12 @@ func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, 
 	// us", the answer was a blank table. Same arithmetic, same incidents,
 	// labelled as a simulation and never folded into the headline.
 	if report.DryRunExcluded > 0 {
-		sim := aggregateRecoverySubset(incidents, gpusPerNode, from, to, true)
+		sim := aggregateRecoverySubset(incidents, gpusPerNode, remediated, from, to, true)
 		report.Simulated = &types.SimulatedRecovery{
 			Incidents:              sim.Incidents,
 			WouldRecover:           sim.Recovered,
 			WouldRecoverUnattended: sim.RecoveredUnattended,
+			ObservedOnly:           sim.ObservedOnly,
 			DegradedGPUHours:       sim.DegradedGPUHours,
 			WouldRecoverGPUHours:   sim.RecoveredGPUHours,
 			MTTR:                   sim.MTTR,
@@ -132,7 +216,7 @@ func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, 
 
 // aggregateRecoverySubset is the arithmetic, over either the real incidents or
 // the dry-run ones.
-func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string]int, from, to time.Time, wantDryRun bool) *types.RecoveryReport {
+func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string]int, remediated map[string]bool, from, to time.Time, wantDryRun bool) *types.RecoveryReport {
 	report := &types.RecoveryReport{
 		From: from, To: to,
 		// Both slices are initialised so an empty report marshals as [] and
@@ -192,7 +276,18 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 		acc.row.Incidents++
 		acc.row.DegradedGPUHours += hours
 
-		if inc.State == types.StateResolved {
+		switch {
+		case inc.State != types.StateResolved:
+			// Not closed: neither recovered nor observed-only yet.
+		case !remediated[inc.ID]:
+			// RESOLVED, but nothing was ever executed against the fleet. The
+			// degraded hours above are real and stay in the total; the recovery
+			// is not, so it is counted here and nowhere else.
+			report.ObservedOnly++
+			report.ObservedOnlyGPUHours += hours
+			acc.row.ObservedOnly++
+			acc.row.ObservedOnlyGPUHours += hours
+		default:
 			report.Recovered++
 			report.RecoveredGPUHours += hours
 			acc.row.Recovered++
@@ -225,11 +320,13 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 
 	report.DegradedGPUHours = roundHours(report.DegradedGPUHours)
 	report.RecoveredGPUHours = roundHours(report.RecoveredGPUHours)
+	report.ObservedOnlyGPUHours = roundHours(report.ObservedOnlyGPUHours)
 	report.MTTR = summarizeLatency(mttrSamples)
 	report.Classes = make([]types.RecoveryClassReport, 0, len(classes))
 	for _, acc := range classes {
 		acc.row.DegradedGPUHours = roundHours(acc.row.DegradedGPUHours)
 		acc.row.RecoveredGPUHours = roundHours(acc.row.RecoveredGPUHours)
+		acc.row.ObservedOnlyGPUHours = roundHours(acc.row.ObservedOnlyGPUHours)
 		acc.row.MTTR = summarizeLatency(acc.durations)
 		report.Classes = append(report.Classes, acc.row)
 	}
