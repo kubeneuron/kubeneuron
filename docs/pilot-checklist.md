@@ -176,8 +176,10 @@ kubectl -n kube-neuron patch kubeneuron kubeneuron --type merge -p '{
     The agent image ships its own `dcgmi` client, and a DCGM 4.x client cannot
     talk to a 3.x host engine — every call returns `API version mismatch`. The
     NVIDIA GPU Operator pins the engine, and older operator releases ship 3.x:
-    v24.9.0 deploys DCGM **3.3.8**, while the shipped agent carries **4.6.1**.
-    Measured on a real EKS T4 node, not inferred.
+    v24.9.0 deploys DCGM **3.3.8** and v24.9.2 deploys 3.3.9, while the shipped
+    agent carries **4.6.1**. The v25.3 line ships 4.x — v25.3.4 deploys 4.3.1 —
+    so that is the earliest release that pairs with the agent. Measured on a
+    real EKS T4 node, not inferred.
 
     When they disagree the agent falls back to `nvidia-smi`, which detects
     less, and the installation otherwise looks healthy. Since v0.2.4 the agent

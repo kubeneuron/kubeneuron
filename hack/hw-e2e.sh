@@ -102,7 +102,15 @@ AWS_REGION="${AWS_REGION:-us-east-1}"
 ECR_REGISTRY="${ECR_REGISTRY:-}"
 GPU_INSTANCE_TYPE="${GPU_INSTANCE_TYPE:-g4dn.xlarge}"
 K8S_VERSION="${K8S_VERSION:-1.33}"
-GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION:-v24.9.0}"
+# The GPU operator version decides the DCGM HOST ENGINE version, and the agent
+# image ships its own dcgmi CLIENT. A 4.x client cannot talk to a 3.x engine —
+# every call returns "API version mismatch" — and the first real hardware run
+# hit exactly that: agent dcgmi 4.6.1 against v24.9.0's engine 3.3.8, so the
+# DCGM detection source failed on every poll and the agent silently served the
+# narrower nvidia-smi one. v24.9.x ships 3.3.x; v25.3.4 ships 4.3.1, which is
+# the same major as the client. assert_dcgm_versions_agree below enforces the
+# pairing rather than trusting this line to stay correct.
+GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION:-v25.3.4}"
 RECYCLE_ROLE_NAME="${RECYCLE_ROLE_NAME:-${CLUSTER_NAME}-recycle}"
 MAX_LIFETIME_MINUTES="${MAX_LIFETIME_MINUTES:-180}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
@@ -122,6 +130,11 @@ esac
 export KUBECONFIG="$E2E_KUBECONFIG"
 
 # Read the tag this cluster was deployed with, or mint one and record it.
+#
+# The default is set HERE and not further down: the assignment that used to
+# hold it sits below this block, so under `set -u` the first read of
+# $IMAGE_TAG was an unbound variable and every command died at startup.
+IMAGE_TAG="${IMAGE_TAG:-}"
 image_tag_file="${E2E_STATE_DIR}/image-tag"
 if [ -z "$IMAGE_TAG" ] && [ -r "$image_tag_file" ]; then
 	IMAGE_TAG=$(cat "$image_tag_file")
@@ -143,8 +156,6 @@ readonly ROOT_NAME=kubeneuron
 # deleted a tag that had never existed. Proved on the first real run: teardown
 # reported success and left three images behind. Persist it beside the
 # kubeconfig, which is already per-cluster and already survives the same way.
-IMAGE_TAG="${IMAGE_TAG:-}"
-
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly SCRIPT_DIR
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd -P)
@@ -484,6 +495,33 @@ assert_real_driver() {
 		die "the agent on $node fell back to the fake GPU driver on real hardware; every NVIDIA assertion after this point would pass against a simulator"
 	fi
 	log "deploy: the agent on $node is on a real driver"
+	assert_dcgm_versions_agree "$agent_pod"
+}
+
+# assert_dcgm_versions_agree refuses to run the DCGM phases against an engine
+# the agent's own client cannot speak to.
+#
+# Without it the run reaches test-dcgm forty minutes later and fails there for a
+# reason nothing in the output names, having proved nothing. The first real run
+# did exactly that. Majors only: DCGM keeps wire compatibility within a major
+# and breaks it across one, which is the failure that was actually observed
+# (client 4.6.1, engine 3.3.8, "API version mismatch" on every call).
+assert_dcgm_versions_agree() {
+	local agent_pod="$1" client engine client_major engine_major
+	client=$(kubectl -n "$RUNTIME_NAMESPACE" exec "$agent_pod" -- /usr/bin/dcgmi --version 2>/dev/null |
+		grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+	engine=$(kubectl -n gpu-operator get pods -l app=nvidia-dcgm \
+		-o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null |
+		grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+	if [ -z "$client" ] || [ -z "$engine" ]; then
+		die "cannot read the dcgmi client (${client:-unknown}) or the DCGM engine (${engine:-unknown}) version; the DCGM phases would be unattributable"
+	fi
+	client_major=${client%%.*}
+	engine_major=${engine%%.*}
+	if [ "$client_major" != "$engine_major" ]; then
+		die "the agent's dcgmi client is ${client} and the DCGM host engine is ${engine}: a ${client_major}.x client cannot speak to a ${engine_major}.x engine, so the DCGM detection source would fail on every poll and the agent would serve nvidia-smi instead. Set GPU_OPERATOR_VERSION to a release whose engine matches, or point spec.agent.hostTooling.dcgmiPath at a matching client on the node."
+	fi
+	log "deploy: dcgmi client ${client} and DCGM engine ${engine} agree on major version"
 }
 
 cmd_test_dryrun() {

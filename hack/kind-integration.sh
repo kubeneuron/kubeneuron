@@ -881,26 +881,49 @@ assert_tls_curl_failure() {
 	# So retry with a FRESH tunnel instead of either accepting an unattributable
 	# result or weakening the assertion. Three attempts: a real defect fails all
 	# three identically, while a dead tunnel is gone by the next one.
+	#
+	# ORDER MATTERS, and it was wrong. The pattern check used to come first and
+	# die outright, with the liveness check below it — so the retry could only
+	# ever help when the pattern MATCHED and the tunnel then died. The common
+	# failure is the opposite: the tunnel dies first, curl reports "Failed to
+	# connect ... Couldn't connect to server", that is not a TLS error class, and
+	# the helper died on attempt one. The retry written to survive a dead tunnel
+	# could not survive a dead tunnel, and public CI went red on exactly that.
+	#
+	# So: whenever the outcome is not the expected TLS class, ask whether the
+	# tunnel was alive before judging it. Alive and wrong is a real defect and
+	# still dies immediately. Dead is an infrastructure hiccup and is retried.
 	for attempt in 1 2 3; do
 		set +e
 		"$@" >/dev/null 2>"$log_file"
 		rc=$?
 		set -e
 		((rc != 0)) || die "$label unexpectedly completed a TLS request"
-		if ! grep -Eiq "$expected_pattern" "$log_file"; then
+
+		local matched=0 alive=0
+		grep -Eiq "$expected_pattern" "$log_file" && matched=1
+		kill -0 "$port_forward_pid" >/dev/null 2>&1 && alive=1
+
+		# The only outcome that proves anything: the server rejected it, over a
+		# tunnel that was still up when we looked.
+		((matched == 1 && alive == 1)) && return 0
+
+		if ((alive == 1)); then
+			# The tunnel was fine, so this result is attributable — and it is
+			# the wrong one.
 			printf '%s\n' "$(<"$log_file")" >&2
 			die "$label failed without the expected TLS error class"
 		fi
-		if kill -0 "$port_forward_pid" >/dev/null 2>&1; then
-			return 0
-		fi
+
 		if ((attempt == 3)); then
+			printf '%s\n' "$(<"$log_file")" >&2
 			die "$label coincided with a dead port-forward on every attempt"
 		fi
 		if [[ -z ${tls_forward_restart:-} ]]; then
+			printf '%s\n' "$(<"$log_file")" >&2
 			die "$label coincided with a dead port-forward and no restart hook is set"
 		fi
-		note "$label: port-forward died mid-check; restarting it and re-asserting (attempt $attempt)"
+		note "$label: port-forward died mid-check (matched=${matched}); restarting it and re-asserting (attempt $attempt)"
 		"$tls_forward_restart"
 	done
 }
