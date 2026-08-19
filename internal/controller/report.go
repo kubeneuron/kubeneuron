@@ -142,6 +142,17 @@ func auditExecutingResult(wireAction string) string { return auditExecutingPrefi
 // installation's whole history into observation. The headline defect — a class
 // with no playbook at all — produces no EXECUTING row whatsoever, so it is
 // caught regardless.
+// A step that entered EXECUTING and then FAILED still counts, and that is
+// deliberate rather than an oversight. The entry row is written before the step
+// runs, so a failure leaves it behind — but a failed step never resolves an
+// incident on its own: escalate() either quarantines it (NEEDS_HUMAN, which is
+// not RESOLVED and so never reaches this function) or climbs to the next rung,
+// whose own execution writes its own entry row. The only way a failed step's
+// row is the sole evidence is a ladder that escalated to an observe-only rung
+// and then quiet-resolved — and there, remediation genuinely did run and
+// genuinely did disrupt the node before the fault stopped recurring. Reporting
+// that as recovered is a different claim from the one this function exists to
+// refuse, which is an incident that changed nothing whatsoever.
 func remediationExecuted(results []string) bool {
 	for _, result := range results {
 		wire, formatted := strings.CutPrefix(result, auditExecutingPrefix)

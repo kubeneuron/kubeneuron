@@ -1,6 +1,7 @@
 package operator
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
+	"github.com/kubeneuron/kubeneuron/internal/action"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -391,4 +393,102 @@ func stripYAMLComments(doc string) string {
 		}
 	}
 	return strings.Join(kept, "\n")
+}
+
+// vendorScopedByDesign records bindings whose ladder contains a vendor-scoped
+// action that a NON-matching vendor can also reach, with why that is the right
+// answer rather than a gap to close.
+//
+// Policies match on class and nothing else — GPURemediationPolicySpec rejects
+// source, severity and nodeSelector at admission, and there is no vendor field
+// — so a class both vendors emit gets exactly one ladder. Where that ladder
+// resets a GPU, the reset action is scoped to NVIDIA, and an AMD incident is
+// refused by resetVendorMismatch and parked for a human rather than executed.
+//
+// That is fail-closed and it matches what docs/reference-capabilities.md
+// already promises AMD ("detect, protect and close only: no arming, no reset").
+// It is recorded here because the pack otherwise reads as full coverage, and
+// the first person to run it on a mixed fleet deserves to find this written
+// down rather than in an incident that never moved.
+var vendorScopedByDesign = map[types.ProblemClass]string{
+	types.ClassECCDBE: "the ladder resets the device; there is no AMD reset action, " +
+		"so an AMD incident is refused before the first disruptive step and parked for a human",
+	types.ClassNVLink: "same: XGMI link errors classify here, and the repair rung is an NVIDIA reset",
+	types.ClassRowRemapOK: "same: AMD page retirement classifies here, and the ladder waits " +
+		"for an idle device to reset it",
+	types.ClassDriverHang: "same: an amdgpu ring timeout classifies here",
+}
+
+// TestVendorScopedLaddersAreDeclared fails when a binding's ladder carries a
+// vendor-scoped action reachable by a vendor it is not scoped to, unless that
+// pairing is recorded above.
+//
+// It exists because nothing else could see it. TestPolicyPackCompiles proves
+// the pack is valid and TestEveryEmittableClassIsBoundOrExcused proves every
+// class has a binding; neither constructs an incident, so neither notices that
+// four of the sixteen bindings cannot execute their ladder on AMD silicon.
+func TestVendorScopedLaddersAreDeclared(t *testing.T) {
+	playbooks, policies := loadPolicyPack(t)
+
+	byName := map[string]kubeneuronv1alpha1.GPUPlaybook{}
+	for _, pb := range playbooks {
+		byName[pb.Name] = pb
+	}
+
+	// Which vendors can emit each class, from the detector tables themselves.
+	emitters := map[types.ProblemClass]map[types.AcceleratorVendor]bool{}
+	for _, f := range detect.FaultTable() {
+		if emitters[f.Class] == nil {
+			emitters[f.Class] = map[types.AcceleratorVendor]bool{}
+		}
+		emitters[f.Class][types.AcceleratorVendor(f.Vendor)] = true
+	}
+
+	var undeclared, stale []string
+	seen := map[types.ProblemClass]bool{}
+	for _, pol := range policies {
+		class := types.ProblemClass(pol.Spec.Match.Class)
+		pb, ok := byName[pol.Spec.PlaybookRef]
+		if !ok {
+			continue // TestPolicyPackCompiles owns dangling references
+		}
+		for _, step := range pb.Spec.Steps {
+			def, known := action.ByPlaybookAction(step.Action)
+			if !known || def.Vendor == "" {
+				continue
+			}
+			for vendor := range emitters[class] {
+				if vendor == def.Vendor || vendor == "" {
+					continue
+				}
+				seen[class] = true
+				if _, declared := vendorScopedByDesign[class]; !declared {
+					undeclared = append(undeclared, fmt.Sprintf(
+						"class %s is emitted for vendor %q but its ladder %q resets via %s, which is scoped to %s: "+
+							"that incident is refused and parked, never remediated",
+						class, vendor, pb.Name, def.Wire, def.Vendor))
+				}
+			}
+		}
+	}
+	sort.Strings(undeclared)
+	if len(undeclared) > 0 {
+		t.Fatalf("bindings whose ladder cannot run for a vendor that emits the class:\n  %s\n"+
+			"Either bind a ladder that works for both, or record the pairing in vendorScopedByDesign "+
+			"with the reason a human should be the one to act.", strings.Join(undeclared, "\n  "))
+	}
+	for class, reason := range vendorScopedByDesign {
+		if strings.TrimSpace(reason) == "" {
+			t.Errorf("vendorScopedByDesign[%s] carries no reason", class)
+		}
+		if !seen[class] {
+			stale = append(stale, string(class))
+		}
+	}
+	sort.Strings(stale)
+	if len(stale) > 0 {
+		t.Fatalf("vendorScopedByDesign records pairings that no longer exist: %s\n"+
+			"A vendor-neutral ladder or a second adapter would do that — remove the entries so the "+
+			"list keeps meaning what it says.", strings.Join(stale, ", "))
+	}
 }

@@ -53,13 +53,41 @@ type DryRun struct {
 	When func() bool
 }
 
-func (d *DryRun) simulating() bool { return d.When == nil || d.When() }
+// undoActions are executed even in dry-run, because simulating them is not
+// "changing nothing" — it is leaving a change already made in place forever.
+//
+// restore_accelerator_host reverses quiesce_accelerator_host: the agent stopped
+// the persistence daemon and turned persistence mode off so a reset could
+// proceed. Only this action puts the node back. Wrapping the actuator
+// unconditionally — correct for everything else — made the janitor's restore
+// return a synthetic OK the moment an operator switched a running installation
+// to DryRun to STOP damage. The janitor then treated the node as restored,
+// cleared the durable marker that would have retried it, and never looked
+// again: the node's GPU monitoring stays off permanently, silently, on the one
+// path whose whole purpose is to undo.
+//
+// The rule is narrow on purpose. An action belongs here only if KubeNeuron
+// made the change it reverses, so refusing to run it cannot cause a state the
+// installation did not already create.
+var undoActions = map[types.ActionType]bool{
+	types.ActionRestoreAcceleratorHost: true,
+}
+
+func (d *DryRun) simulating(a types.Action) bool {
+	if undoActions[a.Type] {
+		return false
+	}
+	return d.When == nil || d.When()
+}
+
+// simulatingAny answers for no particular action, which is all Name() can ask.
+func (d *DryRun) simulatingAny() bool { return d.When == nil || d.When() }
 
 var _ Actuator = (*DryRun)(nil)
 
 // Name implements Actuator.
 func (d *DryRun) Name() string {
-	if !d.simulating() {
+	if !d.simulatingAny() {
 		return d.Inner.Name()
 	}
 	return "dry-run(" + d.Inner.Name() + ")"
@@ -70,7 +98,7 @@ func (d *DryRun) Capabilities() []types.ActionType { return d.Inner.Capabilities
 
 // Execute records what would have happened without doing it.
 func (d *DryRun) Execute(ctx context.Context, node types.Node, a types.Action) (*types.ActionResult, error) {
-	if !d.simulating() {
+	if !d.simulating(a) {
 		return d.Inner.Execute(ctx, node, a)
 	}
 	now := time.Now()

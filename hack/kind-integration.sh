@@ -864,7 +864,7 @@ assert_tls_curl_failure() {
 	local label=$1
 	local expected_pattern=$2
 	local log_file=$3
-	shift 3
+	local probe=$4
 	local rc attempt
 
 	# tls_forward_restart names the caller's own restart function, because the
@@ -895,7 +895,17 @@ assert_tls_curl_failure() {
 	# still dies immediately. Dead is an infrastructure hiccup and is retried.
 	for attempt in 1 2 3; do
 		set +e
-		"$@" >/dev/null 2>"$log_file"
+		# A FUNCTION, not pre-expanded argv.
+		#
+		# The restart hook starts `kubectl port-forward` with an empty local
+		# port, so kubectl allocates a fresh random one every time. Argv built
+		# once at the call site pinned the FIRST port, so attempt two dialled a
+		# port nothing was listening on, got a connection error rather than a
+		# TLS one — over a tunnel that was by then alive — and the assertion
+		# died saying the wrong thing. The retry was structurally incapable of
+		# succeeding. A function re-reads agent_local_port and agent_base as
+		# they are now.
+		"$probe" >/dev/null 2>"$log_file"
 		rc=$?
 		set -e
 		((rc != 0)) || die "$label unexpectedly completed a TLS request"
@@ -1138,26 +1148,35 @@ exercise_agent_authentication() {
 	# alert. Start an independent forwarding session for every negative TLS
 	# probe so one expected reset cannot make the next assertion a TCP failure.
 	start_auth_port_forward
-	assert_tls_curl_failure "missing client certificate" \
-		'certificate required|alert certificate' "$work_dir/no-client-cert.log" \
+	probe_missing_client_certificate() {
 		curl --silent --show-error --noproxy '*' --max-time 10 \
 		--resolve "${service_dns}:${agent_local_port}:127.0.0.1" --cacert "$pki_dir/server-ca.crt" \
 		"${agent_base}/api/v1/agents/register/narrow-v1"
+	}
+	assert_tls_curl_failure "missing client certificate" \
+		'certificate required|alert certificate' "$work_dir/no-client-cert.log" \
+		probe_missing_client_certificate
 	start_auth_port_forward
-	assert_tls_curl_failure "rogue client certificate" \
-		'unknown ca|bad certificate|certificate unknown' "$work_dir/rogue-client-cert.log" \
+	probe_rogue_client_certificate() {
 		curl --silent --show-error --noproxy '*' --max-time 10 \
 		--resolve "${service_dns}:${agent_local_port}:127.0.0.1" --cacert "$pki_dir/server-ca.crt" \
 		--cert "$pki_dir/rogue-client.crt" --key "$pki_dir/rogue-client.key" \
 		"${agent_base}/api/v1/agents/register/narrow-v1"
+	}
+	assert_tls_curl_failure "rogue client certificate" \
+		'unknown ca|bad certificate|certificate unknown' "$work_dir/rogue-client-cert.log" \
+		probe_rogue_client_certificate
 	start_auth_port_forward
-	assert_tls_curl_failure "wrong controller CA" \
-		'certificate problem|unable to get local issuer certificate|self-signed certificate|unknown ca' \
-		"$work_dir/wrong-server-ca.log" \
+	probe_wrong_controller_ca() {
 		curl --silent --show-error --noproxy '*' --max-time 10 \
 		--resolve "${service_dns}:${agent_local_port}:127.0.0.1" --cacert "$pki_dir/rogue-ca.crt" \
 		--cert "$pki_dir/client.crt" --key "$pki_dir/client.key" \
 		"${agent_base}/api/v1/agents/register/narrow-v1"
+	}
+	assert_tls_curl_failure "wrong controller CA" \
+		'certificate problem|unable to get local issuer certificate|self-signed certificate|unknown ca' \
+		"$work_dir/wrong-server-ca.log" \
+		probe_wrong_controller_ca
 
 	start_auth_port_forward
 	final_valid_code=$(curl "${valid_tls[@]}" -H "@$header_file" -o /dev/null -w '%{http_code}' \
@@ -1852,22 +1871,28 @@ assert_post_rotation_identity() {
 	# host. Use a fresh forwarding session per negative TLS assertion so the
 	# assertion remains about TLS rather than a follow-on TCP refusal.
 	start_rotated_port_forward
-	assert_tls_curl_failure "retired client certificate" \
-		'unknown ca|bad certificate|certificate unknown' "$work_dir/retired-client-cert.log" \
+	probe_retired_client_certificate() {
 		curl --silent --show-error --noproxy '*' --max-time 10 \
 		--resolve "${service_dns}:${agent_local_port}:127.0.0.1" \
 		--cacert "$pki_dir/server-ca-v2.crt" \
 		--cert "$pki_dir/client.crt" --key "$pki_dir/client.key" \
 		-H "@$header_file" "${agent_base}/api/v1/agents/register/narrow-v1"
+	}
+	assert_tls_curl_failure "retired client certificate" \
+		'unknown ca|bad certificate|certificate unknown' "$work_dir/retired-client-cert.log" \
+		probe_retired_client_certificate
 	start_rotated_port_forward
-	assert_tls_curl_failure "retired server CA" \
-		'certificate problem|unable to get local issuer certificate|self-signed certificate|unknown ca' \
-		"$work_dir/retired-server-ca.log" \
+	probe_retired_server_ca() {
 		curl --silent --show-error --noproxy '*' --max-time 10 \
 		--resolve "${service_dns}:${agent_local_port}:127.0.0.1" \
 		--cacert "$pki_dir/server-ca.crt" \
 		--cert "$pki_dir/client-v2.crt" --key "$pki_dir/client-v2.key" \
 		-H "@$header_file" "${agent_base}/api/v1/agents/register/narrow-v1"
+	}
+	assert_tls_curl_failure "retired server CA" \
+		'certificate problem|unable to get local issuer certificate|self-signed certificate|unknown ca' \
+		"$work_dir/retired-server-ca.log" \
+		probe_retired_server_ca
 
 	kill "$port_forward_pid" >/dev/null 2>&1 || true
 	wait "$port_forward_pid" >/dev/null 2>&1 || true

@@ -14,7 +14,7 @@ type countingActuator struct {
 
 func (c *countingActuator) Name() string { return "counting" }
 func (c *countingActuator) Capabilities() []types.ActionType {
-	return []types.ActionType{types.ActionReboot}
+	return []types.ActionType{types.ActionReboot, types.ActionRestoreAcceleratorHost}
 }
 func (c *countingActuator) Healthy(context.Context, types.Node) error { return nil }
 func (c *countingActuator) Execute(context.Context, types.Node, types.Action) (*types.ActionResult, error) {
@@ -70,7 +70,11 @@ func TestDryRunFollowsTheLiveMode(t *testing.T) {
 			"resolve the incident and give the node back", res.Output)
 	}
 	if d.Name() != "counting" {
-		t.Fatalf("Name() = %q, want the inner name once it is really executing — this string reaches the audit trail", d.Name())
+		// Not because the audit reads it — audit rows carry the step name and
+		// the incident's own dry-run flag, never the actuator's name. The one
+		// consumer is Chain.Execute's error string, so this is about a
+		// diagnostic staying true, not about corrupting a record.
+		t.Fatalf("Name() = %q, want the inner name once it is really executing", d.Name())
 	}
 }
 
@@ -84,5 +88,44 @@ func TestDryRunWithNoPredicateAlwaysSimulates(t *testing.T) {
 	}
 	if inner.calls != 0 {
 		t.Fatal("a DryRun wrapper with no predicate executed for real")
+	}
+}
+
+// TestDryRunNeverSimulatesAnUndo covers the janitor's host restore.
+//
+// The wrapper became unconditional so that enabling a running installation
+// would stop leaving agent steps simulated. That was right for every action
+// that MAKES a change and wrong for the one that reverses one. A playbook
+// quiesces the accelerator host — persistence daemon stopped, persistence mode
+// off — and only restore_accelerator_host puts it back. Simulate that and the
+// janitor reads a synthetic OK as success, clears the durable marker that
+// would have retried it, and never looks at the node again: its GPU monitoring
+// stays off permanently.
+//
+// "A dry-run installation changes nothing" is a promise about what KubeNeuron
+// DOES, not a licence to abandon what it already did.
+func TestDryRunNeverSimulatesAnUndo(t *testing.T) {
+	inner := &countingActuator{}
+	d := &DryRun{Inner: inner, When: func() bool { return true }}
+
+	res, err := d.Execute(context.Background(), types.Node{Name: "n"},
+		types.Action{ID: "a", Type: types.ActionRestoreAcceleratorHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("restore_accelerator_host was simulated (%q); the node it undoes for stays quiesced forever "+
+			"and the janitor clears the marker that would have retried", res.Output)
+	}
+
+	// And the ordinary case is unaffected: a change-making action still
+	// simulates under the same wrapper.
+	before := inner.calls
+	if _, err := d.Execute(context.Background(), types.Node{Name: "n"},
+		types.Action{ID: "b", Type: types.ActionReboot}); err != nil {
+		t.Fatal(err)
+	}
+	if inner.calls != before {
+		t.Fatal("the undo exemption leaked to reboot; dry-run must still simulate a change")
 	}
 }

@@ -148,6 +148,16 @@ kubectl get gpuremediationpolicy \
   -o jsonpath='{range .items[*]}{.spec.match.class}{" -> "}{.spec.playbookRef}{"\n"}{end}' | sort
 ```
 
+**On AMD, four of the sixteen bindings stop for a human rather than running.**
+`ecc-dbe`, `nvlink`, `row-remap-ok` and `driver-hang` are emitted by both
+vendors' detectors, and a policy matches on class alone — there is no vendor
+field — so each has one ladder, and that ladder's repair rung is an NVIDIA
+device reset. An AMD incident is refused before the first disruptive step and
+parked in `NEEDS_HUMAN` with the reason. Nothing is damaged and nothing is
+hidden, but the node is not repaired automatically. That is the same limit the
+[capability matrix](reference-capabilities.md) states for AMD — detect, protect
+and close only — expressed as what you will actually see in the panel.
+
 One class is deliberately unbound: `diag-failure`, which no shipped detector
 emits today. If you add rules of your own that classify into a class the pack
 does not cover, bind it — an unbound class does not error, does not alert, and

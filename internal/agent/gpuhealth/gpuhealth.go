@@ -127,7 +127,16 @@ type Watcher struct {
 	// dcgmFailLogged ensures the fell-back-to-nvidia-smi warning is emitted
 	// once per outage rather than per poll, and re-armed when DCGM recovers.
 	dcgmFailLogged bool
+	// dcgmOKStreak counts consecutive successful DCGM polls since the last
+	// failure. Re-arming on the FIRST success made an intermittent engine emit
+	// a Warn/Info pair per poll pair — exactly the per-poll noise the warning
+	// exists to avoid.
+	dcgmOKStreak int
 }
+
+// dcgmRecoveryStreak is how many consecutive good polls end an outage. Three
+// at the default 30s interval is a minute and a half of steady DCGM.
+const dcgmRecoveryStreak = 3
 
 // noteDCGMFailure warns, once per outage, that this agent is running on the
 // narrower detection source and why.
@@ -135,6 +144,7 @@ func (w *Watcher) noteDCGMFailure(err error) {
 	w.mu.Lock()
 	first := !w.dcgmFailLogged
 	w.dcgmFailLogged = true
+	w.dcgmOKStreak = 0
 	w.mu.Unlock()
 	if first && w.Logger != nil {
 		w.Logger.Warn("DCGM health probe failed; this node's second detection source has degraded to nvidia-smi, which detects less",
@@ -147,8 +157,16 @@ func (w *Watcher) noteDCGMFailure(err error) {
 // outlive the outage it described.
 func (w *Watcher) noteDCGMRecovered() {
 	w.mu.Lock()
-	recovered := w.dcgmFailLogged
-	w.dcgmFailLogged = false
+	recovered := false
+	if w.dcgmFailLogged {
+		w.dcgmOKStreak++
+		// A flapping engine alternates fail/ok, so one good poll is not a
+		// recovery — it is the other half of the flap.
+		if w.dcgmOKStreak >= dcgmRecoveryStreak {
+			w.dcgmFailLogged = false
+			recovered = true
+		}
+	}
 	w.mu.Unlock()
 	if recovered && w.Logger != nil {
 		w.Logger.Info("DCGM health probe recovered; the second detection source is DCGM again", "endpoint", w.DCGMEndpoint)
