@@ -62,9 +62,22 @@ FROM busybox:uclibc AS busybox
 #
 # The version is pinned: it is what the agent attests as the DCGM runtime, so it
 # must not drift silently between builds.
+#
+# It must also be NO NEWER than the host engine it will talk to. DCGM tolerates
+# an engine newer than the client and not the reverse: a 4.6 client against a
+# 4.3 engine connects, lists the GPU, and then fails every field read with
+# "Return -20: The requested function was not found". Measured on a real T4,
+# not inferred — and the previous pin of 4.6.1 was newer than the engine in
+# EVERY NVIDIA GPU Operator release: v25.3 ships 4.3.1, v25.10 ships 4.4.x,
+# v26.3 ships 4.5.2. The bundled client could therefore not speak to the engine
+# in the deployment the documentation recommends, on any version, and the agent
+# silently served the narrower nvidia-smi source instead.
+#
+# So pin to the OLDEST engine we support rather than the newest client
+# available: 4.3.1 works against 4.3.1 and everything above it.
 FROM debian:12-slim AS dcgm
 ARG TARGETARCH
-ARG DCGM_VERSION=4.6.1-1
+ARG DCGM_VERSION=4.3.1-1
 RUN set -eux; \
     apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \

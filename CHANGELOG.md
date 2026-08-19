@@ -9,6 +9,102 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+Rounds 15-17. Two independent reviews per round, and **two paid runs on real
+NVIDIA hardware** — an EKS g4dn.xlarge with a Tesla T4 — which is where most of
+what follows came from.
+
+### Proven on hardware, for the first time
+
+The stand had never run the agent against a real driver: it never set
+`spec.agent.hostTooling`, and the distroless agent image carries no
+`nvidia-smi`, so every previous run — including those recorded as evidence —
+executed a simulator on a real T4. With that fixed, the second run proved end
+to end, on hardware: a confined `ReplaceNode` terminating a real EC2 instance
+with the approver audited and the incident resolved; the dry-run ladder with
+the controller itself reporting `execution_mode: dry-run` while it ran; a
+recurrence inside the verification quiet window escalating rather than
+resolving; and the threshold path holding sub-threshold and escalating on the
+third signal. Teardown swept the account to zero across nine resource classes.
+
+### The DCGM detection source could not work at all
+
+Two defects, one behind the other, and only real hardware could show either.
+
+The agent bundles its own `dcgmi` because the GPU Operator keeps one inside its
+own container. That client was pinned to **4.6.1**, and no GPU Operator release
+ships a host engine that new — v25.3 ships 4.3.1, v25.10 ships 4.4.x, v26.3
+ships 4.5.2. DCGM tolerates an engine newer than the client and not the
+reverse, so **the second detection source could not function in the deployment
+the documentation recommends, on any operator version.** The client is now
+pinned to 4.3.1, the oldest engine supported.
+
+Worse than the failure was the silence: the fallback to `nvidia-smi` was logged
+at Debug, below the agent's own level, so the deeper source could fail on every
+poll for the life of the process and say nothing. Only a gauge nobody is told
+to read showed it. It is now a warning, once per outage, naming the failing
+command and what to check — and that warning is what found the second defect
+after the first was fixed.
+
+### Fixed
+
+- **Setting `executionMode: DryRun` to stop damage removed the blast radius
+  from every incident already in flight.** The dry-run flag is stamped when an
+  incident opens and was never re-read; the operator compiles the destructive
+  node selector only for an `Enabled` install; and an empty selector reads as
+  "no confinement configured". Execution now consults the live gate.
+- **Enabling a running installation left every agent step simulated.** The
+  dry-run actuator wrapper was installed once at process start, and
+  configuration reloads in place, so platform steps went live while every agent
+  step returned a successful `DRY-RUN: would execute ...` — the ladder drained
+  the node for real, counted the reboot as executed, and resolved the incident
+  with the fault untouched.
+- **...and the fix for that broke the janitor's host restore**, which calls the
+  actuator directly. Switching a running installation to DryRun made the
+  restore return a synthetic OK, so the janitor cleared the durable marker that
+  would have retried and never looked again, leaving the node's GPU monitoring
+  off permanently. The wrapper now refuses to simulate an undo.
+- **A stock install reported 100% recovered, 100% unattended, having touched
+  nothing.** `install.sh` bound one problem class, and the report counted
+  "reached RESOLVED" as recovered without checking that anything ran.
+- **The idle-guard refusal code never survived the store**, pinning
+  `kubeneuron_destructive_steps_deferred_total{reason="not_idle"}` at zero.
+- Six reachable standard-library advisories, via Go 1.25.13.
+- `docs/pilot-checklist.md` documented a `hostTooling.enabled` field that does
+  not exist; a reader writing `enabled: false` to turn it OFF would have turned
+  it ON.
+- Store-derived gauges were published by every replica, so `sum(...)` doubled
+  on a PostgreSQL HA pair, and were collected on the scrape path with no
+  deadline.
+
+### Added
+
+- **A baseline policy pack** (`config/policies/`) binding every problem class
+  the detectors can emit. **Nothing in it is armed:** a human decides before any
+  step that ends running work. Four bindings cannot execute on AMD — a policy
+  matches on class alone and those ladders repair through an NVIDIA-scoped
+  reset — and a test now derives the emitting vendors from the detector tables
+  and requires each such pairing to be declared.
+- `recovered` requires an audited transition into `EXECUTING` for a real
+  remediation step; everything else that closes lands in a "nothing done"
+  bucket.
+- Gates that can actually fail: `shellcheck` over every shipped script,
+  JSON patch bodies walked against the CRD schema, a code-to-dashboard coverage
+  check, release-asset completeness, and a mirror that fails on additions.
+- Panels for the protection metrics, which had none.
+
+### Also fixed, in the things that were supposed to prove all of the above
+
+`hack/verify-release.sh` reported OK on a release with no installer and no
+signature. `hack/mirror.sh` checked one direction while claiming two. The
+kind suite's dead-port-forward retry could not retry a dead port-forward — the
+order of its checks was wrong, and underneath that the restart allocated a new
+local port the pre-expanded curl argv could not follow. The hardware stand sweep
+returned early on a clean account, deleted an ECR tag that never existed, and
+double-deleted a volume it found twice; its cleanup trap fired everywhere
+except where it was needed.
+
+---
+
 Round 15. Two independent reviews of released v0.2.3 — one adversarial on the
 code, one on what the project has evidence for — plus public CI's own verdict,
 which had been red on every Dependabot pull request since the 1.25.13 Go

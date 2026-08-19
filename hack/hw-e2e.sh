@@ -507,7 +507,7 @@ assert_real_driver() {
 # and breaks it across one, which is the failure that was actually observed
 # (client 4.6.1, engine 3.3.8, "API version mismatch" on every call).
 assert_dcgm_versions_agree() {
-	local agent_pod="$1" client engine client_major engine_major
+	local agent_pod="$1" client engine
 	client=$(kubectl -n "$RUNTIME_NAMESPACE" exec "$agent_pod" -- /usr/bin/dcgmi --version 2>/dev/null |
 		grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
 	engine=$(kubectl -n gpu-operator get pods -l app=nvidia-dcgm \
@@ -516,12 +516,19 @@ assert_dcgm_versions_agree() {
 	if [ -z "$client" ] || [ -z "$engine" ]; then
 		die "cannot read the dcgmi client (${client:-unknown}) or the DCGM engine (${engine:-unknown}) version; the DCGM phases would be unattributable"
 	fi
-	client_major=${client%%.*}
-	engine_major=${engine%%.*}
-	if [ "$client_major" != "$engine_major" ]; then
-		die "the agent's dcgmi client is ${client} and the DCGM host engine is ${engine}: a ${client_major}.x client cannot speak to a ${engine_major}.x engine, so the DCGM detection source would fail on every poll and the agent would serve nvidia-smi instead. Set GPU_OPERATOR_VERSION to a release whose engine matches, or point spec.agent.hostTooling.dcgmiPath at a matching client on the node."
+	# The engine must be NO OLDER than the client, not merely the same major.
+	#
+	# Requiring only a matching major was this assertion's first form, and the
+	# second hardware run walked straight through it: client 4.6.1 against
+	# engine 4.3.1 passed, then dcgmi connected, reported the GPU as found, and
+	# failed every field read with "Return -20: The requested function was not
+	# found". DCGM tolerates an engine newer than the client and not the
+	# reverse, and the reverse is the worse failure because it looks like it is
+	# working.
+	if ! printf '%s\n%s\n' "$client" "$engine" | sort -V -C; then
+		die "the agent's dcgmi client is ${client} and the DCGM host engine is ${engine}: DCGM tolerates an engine NEWER than the client and not the reverse, so the client would connect, find the GPU, and fail every field read with \"function was not found\" while the agent quietly served nvidia-smi. Raise GPU_OPERATOR_VERSION until its engine is at least ${client}, or lower DCGM_VERSION in build/Dockerfile."
 	fi
-	log "deploy: dcgmi client ${client} and DCGM engine ${engine} agree on major version"
+	log "deploy: dcgmi client ${client} is not newer than DCGM engine ${engine}"
 }
 
 cmd_test_dryrun() {
@@ -828,9 +835,20 @@ cmd_test_verify_recur() {
 	local incident
 	incident=$(wait_for_incident "$node" fell-off-bus)
 	[ -n "$incident" ] || die "no incident opened"
-	# Armed HERE, not after the assertions: the point is that it runs when an
-	# assertion fails, which is the case that poisoned the next phase.
-	trap 'close_incident "$incident" "verification-recurrence phase cleanup"' RETURN
+	# Recorded HERE, not after the assertions: the point is that the cleanup
+	# runs when an assertion FAILS, which is the case that poisoned the next
+	# phase.
+	#
+	# A `trap ... RETURN` was the obvious way and it was wrong twice. Bash runs
+	# a RETURN trap when a function returns, not when the shell exits — and
+	# every assertion below leaves through `die`, which exits — so it never
+	# fired for the case it was written for. It then fired somewhere it had no
+	# business firing, on main's own return, where $incident is out of scope:
+	# under `set -u` the phase PASSED its assertions and the script died anyway
+	# with "incident: unbound variable".
+	#
+	# The script already has one EXIT trap that runs on every path. Use it.
+	_OPEN_INCIDENT="$incident"
 	wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
 		'api GET "/api/v1/incidents/'"$incident"'" | jq -e ".incident.state==\"AWAITING_APPROVAL\"" >/dev/null'
 	api POST "/api/v1/incidents/$incident/approve" '{"actor":"hw-e2e-approver"}' >/dev/null
@@ -868,6 +886,7 @@ cmd_test_verify_recur() {
 	# for correlation purposes), and the next phase's fault on the same
 	# node+class would ATTACH to it instead of opening its own incident.
 	close_incident "$incident" "verification-recurrence phase complete"
+	_OPEN_INCIDENT=""
 	log "test-verify-recur: PASS (recurrence during VERIFYING escalated to $state, not RESOLVED)"
 }
 
@@ -1435,7 +1454,18 @@ delete_iam_role() {
 	aws iam delete-role --role-name "$role"
 }
 
+# _OPEN_INCIDENT is the incident a phase must not leave behind. Incidents
+# correlate by (node, class) and NEEDS_HUMAN is deliberately not halted for
+# correlation, so an incident one phase leaves open ATTACHES the next phase's
+# fault to itself. On the first hardware run that turned one phase's bad
+# assertion into three failed phases.
+_OPEN_INCIDENT="${_OPEN_INCIDENT:-}"
+
 cleanup() {
+	if [ -n "${_OPEN_INCIDENT:-}" ]; then
+		close_incident "$_OPEN_INCIDENT" "phase ended without closing its incident"
+		_OPEN_INCIDENT=""
+	fi
 	if [ -n "$_PF_PID" ]; then
 		kill "$_PF_PID" 2>/dev/null || true
 	fi
