@@ -48,7 +48,12 @@ gates:
 	$(MAKE) verify-generate
 	$(GO) build ./...
 	$(MAKE) lint
-	$(GO) test -race ./...
+# -timeout 30m, not the default 10m. internal/controller under -race takes
+# ~185s on an idle box; this one also runs kind clusters, docker builds and
+# hardware E2E, and a package that crosses 600s dies with "test timed out" and
+# passes on a quiet re-run. That is the signature of the two unreproducible
+# gate failures nobody could explain — 3.2x headroom is not headroom here.
+	$(GO) test -race -timeout 30m ./...
 	$(MAKE) verify-docs
 	@echo
 	@echo "gates: OK (generate, build, lint, race tests, docs)"
@@ -79,7 +84,12 @@ lint:
 # actionlint (with its embedded shellcheck) is the one CI linter that golangci-lint
 # does not cover, and workflow YAML is the one place a defect cannot be caught by
 # running the code. It is pinned to the same version CI uses.
-	$(GO) run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+#
+# Run from the module's own tool dependency, not `go run …@v1.7.7`: the @version
+# form is the only step in `gates` that reaches the network, so a cold module
+# cache or a proxy hiccup fails the whole gate and a retry passes. That is the
+# other half of the unreproducible-failure signature.
+	$(GO) tool actionlint
 # actionlint's shellcheck reaches `run:` blocks only. Everything load-bearing in
 # hack/ is a standalone script it never sees — the mirror, the release check,
 # the image check, the hardware stand — and those are exactly the scripts whose

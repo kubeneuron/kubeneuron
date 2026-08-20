@@ -780,6 +780,15 @@ cmd_test_dcgm() {
 			dcgm_diagnostics "$agent_pod"
 			die "the agent never observed an XID injected straight into the DCGM engine on its own node"
 		fi
+		# The detection this phase just proved opens an INCIDENT, and every
+		# later phase shares this node. Close it before leaving, or the next
+		# phase inherits it — which is exactly what happened the first time
+		# this phase passed.
+		local opened
+		opened=$(wait_for_incident "$node" ecc-sbe-rate 2>/dev/null || true)
+		if [ -n "$opened" ]; then
+			close_incident "$opened" "dcgm phase complete"
+		fi
 		log "test-dcgm: PASS (gpuhealth source observed the injected DCGM fault)"
 		return 0
 	fi
@@ -879,9 +888,22 @@ cmd_test_verify_recur() {
 	# far longer than the thirty-second quiet window it must land inside.
 	log "test-verify-recur: injecting XID $RECUR_XID (same class) inside the verification quiet window"
 	inject_xid "$node" "$RECUR_XID"
-	wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
+	# Diagnose before dying, rather than leaving the next reader to guess from
+	# a bare timeout. Run 4 failed here with nothing but "condition never met",
+	# and the cluster was gone by the time anyone looked.
+	if ! wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
 		'api GET "/api/v1/incidents/'"$incident"'" \
-			 | jq -e ".incident.state!=\"VERIFYING\" and .incident.state!=\"RESOLVED\"" >/dev/null'
+			 | jq -e ".incident.state!=\"VERIFYING\" and .incident.state!=\"RESOLVED\"" >/dev/null'; then
+		log "test-verify-recur: the incident never left VERIFYING; here is what the controller saw"
+		api GET "/api/v1/incidents/$incident" |
+			jq -r '"state=\(.incident.state) signals=\(.incident.signal_seen) updated=\(.incident.updated_at)"' >&2 || true
+		api GET "/api/v1/incidents/$incident" |
+			jq -r '.audit[] | "  \(.time) \(.action): \(.result // "")"' | tail -8 >&2 || true
+		log "test-verify-recur: every open incident on this node, in case the recurrence landed on another one"
+		api GET "/api/v1/incidents" |
+			jq -r '.[] | select(.target.node=="'"$node"'") | "  \(.id) \(.state) \(.class)"' >&2 || true
+		die "the recurrence injected inside the quiet window did not move the incident out of VERIFYING"
+	fi
 	local state
 	state=$(api GET "/api/v1/incidents/$incident" | jq -r .incident.state)
 
@@ -959,8 +981,14 @@ EOF
 	log "test-destructive: injecting distinct test-only XID $DESTRUCTIVE_XID into $node"
 	inject_xid "$node" "$DESTRUCTIVE_XID"
 	local incident
-	incident=$(wait_for_incident "$node")
-	[ -n "$incident" ] || die "no incident opened for destructive run"
+	# Filtered by CLASS, like every other phase. This was the one that was not,
+	# and it stopped mattering only because the phases before it used to fail.
+	# Once test-dcgm started passing it left an ecc-sbe-rate incident behind,
+	# and this unfiltered wait attached to THAT — so the destructive phase
+	# waited for approval on somebody else's incident and timed out after ten
+	# minutes on a paid cluster.
+	incident=$(wait_for_incident "$node" fell-off-bus)
+	[ -n "$incident" ] || die "no fell-off-bus incident opened for the destructive run"
 	log "test-destructive: incident $incident opened"
 
 	wait_for "$CONFIRM_INCIDENT_TIMEOUT" \

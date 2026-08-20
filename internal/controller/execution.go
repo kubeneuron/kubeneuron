@@ -105,8 +105,11 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 	// The audit records what this step WILL do, from the live gate, not from
 	// the flag stamped when the incident opened. A ladder that simulates after
 	// a mid-flight switch to DryRun must not read later as remediation.
+	//
+	// Decided ONCE, here, and carried: see pinnedSimulateKey.
+	ctx, simulate := c.pinSimulate(ctx, inc)
 	if err := c.transition(ctx, inc, types.StateExecuting, actor, step.Name,
-		auditStepResult(step.Action, c.effectiveDryRun(inc)), step.Params); err != nil {
+		auditStepResult(step.Action, simulate), step.Params); err != nil {
 		c.gate.StepDone(inc.Target, action, 0)
 		if !alreadyHeld {
 			// The transition never committed, so the bit was never persisted;
@@ -178,10 +181,11 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 		return
 	}
 
-	// The label must describe what this step DID, not what the incident was
-	// opened as, or a ladder simulated after a mid-flight switch to DryRun is
-	// counted as having executed.
-	if c.effectiveDryRun(inc) {
+	// The label must describe what this step DID — the decision pinned when it
+	// was admitted, not the gate as it stands now. Re-reading here reported a
+	// step that really ran as simulated whenever the operator flipped the mode
+	// while the agent held the action.
+	if c.simulating(ctx, inc) {
 		metrics.StepsExecuted.WithLabelValues("dry_run").Inc()
 	} else {
 		metrics.StepsExecuted.WithLabelValues("ok").Inc()
@@ -231,6 +235,39 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 // one, and resumes if they change their mind.
 //
 // Pause is already enforced, separately and earlier, by gate.Allow.
+// pinnedSimulateKey carries ONE step's simulate-or-execute decision.
+//
+// The gate reloads in place, so reading it three times per step — once for the
+// audit row, once to decide, once to label the metric — reads three different
+// answers across a window that is the whole step, minutes for a reboot. Both
+// disagreements were observable: a step dispatched for real while the operator
+// flipped to DryRun mid-flight was counted as simulated, so the very counter
+// used to confirm the stop had taken effect reported a real fleet change as a
+// no-op; and the reverse flip made the audit say "simulating" for a step that
+// then really rebooted a node, which the recovery report reads as
+// observed-only. The audit trail is the only evidence a repair happened, and
+// this made it lie about a destructive act.
+//
+// It mirrors how the engine and the runtime config are already pinned for the
+// life of a step: decide once, at admission, and carry the decision.
+type pinnedSimulateKey struct{}
+
+// pinSimulate evaluates the decision once and returns it with a context that
+// carries it to the step goroutine.
+func (c *Controller) pinSimulate(ctx context.Context, inc *types.Incident) (context.Context, bool) {
+	simulate := c.effectiveDryRun(inc)
+	return context.WithValue(ctx, pinnedSimulateKey{}, simulate), simulate
+}
+
+// simulating reports this step's pinned decision, falling back to the live
+// gate for callers outside a step (the janitor's own actuator calls).
+func (c *Controller) simulating(ctx context.Context, inc *types.Incident) bool {
+	if pinned, ok := ctx.Value(pinnedSimulateKey{}).(bool); ok {
+		return pinned
+	}
+	return c.effectiveDryRun(inc)
+}
+
 func (c *Controller) effectiveDryRun(inc *types.Incident) bool {
 	if inc == nil || inc.DryRun {
 		return true
@@ -262,7 +299,7 @@ func (c *Controller) executeStep(ctx context.Context, inc *types.Incident, step 
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, timeout+agentResultGrace)
 	defer cancel()
-	if c.effectiveDryRun(inc) {
+	if c.simulating(ctx, inc) {
 		now := time.Now()
 		return &types.ActionResult{
 			ActionID:   actionID(inc),

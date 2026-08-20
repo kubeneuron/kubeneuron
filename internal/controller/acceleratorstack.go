@@ -436,11 +436,19 @@ func (c *Controller) restoreAcceleratorHost(ctx context.Context, orphanedInciden
 	// Discard a finished row under this ID before dispatching.
 	//
 	// The janitor only reaches this function while the node is STILL recorded
-	// as quiesced, so a completed restore row is stale by construction: a
-	// restore that actually succeeded cleared that record. Leaving the row in
-	// place meant the queue answered from history instead of dispatching —
-	// enqueue is idempotent on the ID and completed rows live for the
-	// retention window, 90 days by default.
+	// as quiesced, so a terminal row under this ID is stale or redundant, and
+	// either way re-dispatching is correct because the restore is idempotent.
+	//
+	// Not "stale by construction", which an earlier version of this comment
+	// claimed: the host restore does not clear the quiesce record.
+	// RestoreAcceleratorStack does, it runs afterwards, and it can fail — so a
+	// pass where the host half succeeded and the platform half did not leaves a
+	// completed row on a still-quiesced node. Worth stating precisely, because
+	// a later round will reason from it.
+	//
+	// Leaving the row in place meant the queue answered from history instead of
+	// dispatching — enqueue is idempotent on the ID and terminal rows live for
+	// the retention window, 90 days by default.
 	//
 	// Both directions were harmful. A restore that failed once returned that
 	// stored failure to every later pass in zero milliseconds with no agent
@@ -450,12 +458,14 @@ func (c *Controller) restoreAcceleratorHost(ctx context.Context, orphanedInciden
 	// next time that node was quiesced and abandoned, the janitor replayed the
 	// old success, cleared the durable marker on the strength of it, and left
 	// the node's GPU monitoring off with nothing left to retry.
-	if discarder, ok := c.store.(interface {
-		DiscardCompletedAction(context.Context, string) error
-	}); ok {
-		if err := discarder.DiscardCompletedAction(ctx, actionID); err != nil {
-			return fmt.Errorf("clearing the previous restore attempt for %s: %w", nodeName, err)
-		}
+	// Called directly, not through a type assertion. store.Store declares the
+	// method, so the assertion could never fail for a real store — but it was
+	// silent by construction, and the controller's own fakes embed a nil
+	// store.Store, which SATISFIES the assertion and panics rather than
+	// skipping. It provided no protection while looking like it did; the
+	// compiler provides the real thing.
+	if err := c.store.DiscardCompletedAction(ctx, actionID); err != nil {
+		return fmt.Errorf("clearing the previous restore attempt for %s: %w", nodeName, err)
 	}
 
 	result, err := c.actuator.Execute(ctx, node, types.Action{

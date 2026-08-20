@@ -1192,11 +1192,21 @@ func (q *Queries) CompleteAction(ctx context.Context, actionID string, res types
 // later one, and a successful one makes a genuinely new attempt report success
 // it never performed.
 //
-// Only a finished row is removed, so this can never race a live claim: an
+// All THREE terminal states, matching the prune query above: 'done' completed,
+// 'dead' exhausted its attempt budget, 'cancelled' was tombstoned. Omitting
+// 'dead' left the worst case open — an agent that crash-loops or is restarted
+// by its own ladder's reboot rung fails eight claims, the row dead-letters, and
+// from then on the discard matches nothing, the enqueue conflicts away, and
+// agentrpc polls a row it can never claim until the caller's deadline. The
+// janitor's restore budget is SHARED across every quiesced node, so that one
+// node consumes it on every tick and starves the rest, and the condition
+// self-heals only when retention drops the row — ninety days by default.
+//
+// Only a terminal row is removed, so this can never race a live claim: an
 // action still pending or leased is left exactly where it is.
 func (q *Queries) DiscardCompletedAction(ctx context.Context, actionID string) error {
 	_, err := q.db.ExecContext(ctx,
-		`DELETE FROM actions WHERE id=? AND state IN ('done','cancelled')`, actionID)
+		`DELETE FROM actions WHERE id=? AND state IN ('done','dead','cancelled')`, actionID)
 	return err
 }
 

@@ -777,8 +777,16 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 // them would make a default install — dry-run is the shipped default —
 // report GPU-hours "returned to service" by a system that took no action at
 // all, which is the one number this feature exists to be trusted on.
+//
+// The LIVE gate decides that, not the flag stamped when the incident opened.
+// Execution consults the live gate, so an incident opened Enabled and switched
+// to DryRun mid-ladder simulates every remaining step while still carrying
+// DryRun=false — and charging it here would report exactly the GPU-hours the
+// paragraph above refuses to report, to an operator who had just pressed stop.
+// kubeneuronctl report reaches the same conclusion from the audit trail; this
+// is the same rule applied where that trail is not available.
 func (c *Controller) recordRecoveryOutcome(ctx context.Context, inc *types.Incident, to types.IncidentState) {
-	if inc.OpenedAt.IsZero() || inc.DryRun {
+	if inc.OpenedAt.IsZero() || c.effectiveDryRun(inc) {
 		return
 	}
 	duration := time.Since(inc.OpenedAt).Seconds()

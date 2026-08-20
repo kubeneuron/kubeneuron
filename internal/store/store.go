@@ -172,9 +172,11 @@ type Store interface {
 	NextPendingAction(ctx context.Context, node string) (*types.QueuedAction, error)
 	CompleteAction(ctx context.Context, actionID string, res types.ActionResult) error
 	GetAction(ctx context.Context, actionID string) (*types.QueuedAction, error)
-	// DiscardCompletedAction drops a finished row so a caller with a
-	// deterministic action ID can begin a new attempt instead of re-reading
-	// the previous one's stored result. Pending and leased rows are untouched.
+	// DiscardCompletedAction drops a TERMINAL row — completed, dead-lettered
+	// or cancelled — so a caller with a deterministic action ID can begin a new
+	// attempt instead of re-reading the previous one's stored result or
+	// conflicting with a row no agent can ever claim. Pending and leased rows
+	// are untouched.
 	DiscardCompletedAction(ctx context.Context, actionID string) error
 
 	// Node inventory / state

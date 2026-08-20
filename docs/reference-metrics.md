@@ -67,6 +67,13 @@ terminal transition, where that audit read is not available; the report is
 computed from the store afterwards, where it is. When the two disagree, the
 report is the number to quote and the difference is your coverage gap.
 
+Both do agree about execution MODE, which is a different question and the more
+dangerous one. Neither charges an incident whose steps were simulated, and both
+decide that from the mode live at the time rather than the one recorded when
+the incident opened — so an installation switched to `DryRun` to stop a
+remediation does not go on reporting recovered capacity from the ladders that
+then simulated to a close.
+
 The two recovery series answer different questions and must be read together.
 The counter is what FINISHED: closed incidents, charged once, so a park and
 unpark cannot bill the same hour twice. The gauge is what is HAPPENING: it

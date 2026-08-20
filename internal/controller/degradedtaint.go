@@ -296,10 +296,23 @@ func (c *Controller) nodesUnderOpenIncidents(ctx context.Context) (map[string]*t
 		if inc.Target.Node == "" {
 			continue
 		}
-		if c.effectiveDryRun(inc) {
-			// Same promise as the fast path: a dry-run installation does not
-			// write taints. Note this leaves the node absent from the map, so
-			// a mark left behind by a non-dry-run incident is still removed.
+		// inc.DryRun, NOT the live gate.
+		//
+		// This map decides which nodes KEEP their mark, so filtering it on the
+		// live gate meant an operator switching a running installation to
+		// DryRun dropped every node with a live incident out of it at once —
+		// and the janitor then removed the degraded taint from all of them.
+		// Fresh GPU work starts landing on actively-failing GPUs at exactly the
+		// moment the operator asked the system to stop.
+		//
+		// Removing a NoSchedule mark is itself a cluster-wide scheduling
+		// change, and the more consequential of the two: not placing one leaves
+		// a fault unadvertised, while removing one advertises a broken GPU as
+		// healthy. So the mode gates PLACING a mark (the fast path above, which
+		// reads the live gate on purpose) and the incident's own nature gates
+		// keeping it. A mark placed by a live incident comes off when that
+		// incident halts, which is what the janitor is for.
+		if inc.DryRun {
 			continue
 		}
 		if _, seen := out[inc.Target.Node]; !seen {
@@ -321,7 +334,10 @@ func (c *Controller) nodeHasOpenIncident(ctx context.Context, node string) (bool
 		return false, err
 	}
 	for _, inc := range incidents {
-		if !c.effectiveDryRun(inc) {
+		// Same reasoning as nodesUnderOpenIncidents: this confirms a REMOVAL,
+		// so it must not start answering "nothing is wrong here" the moment
+		// the mode changes under a node whose incident is still open.
+		if !inc.DryRun {
 			return true, nil
 		}
 	}

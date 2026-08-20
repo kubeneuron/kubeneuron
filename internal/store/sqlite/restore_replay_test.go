@@ -114,3 +114,66 @@ func TestDiscardCompletedActionLeavesLiveRowsAlone(t *testing.T) {
 		t.Fatalf("a LEASED action was deleted out from under its agent: %v", err)
 	}
 }
+
+// TestDiscardCompletedActionClearsADeadLetteredRow covers the third terminal
+// state, which the first version of the discard did not know about.
+//
+// The actions queue dead-letters a row after MaxActionAttempts claims. An agent
+// that crash-loops — or that is restarted by its own ladder's reboot rung
+// mid-action — burns those attempts on the janitor's deterministic restore ID.
+// From then on the discard matched nothing, the enqueue conflicted away, and
+// agentrpc polled a row no agent could ever claim until the caller's deadline.
+//
+// The janitor's restore budget is shared across every quiesced node, so that
+// one node consumed it on every reconcile tick and starved the rest, and the
+// condition self-healed only when retention dropped the row — ninety days by
+// default. Exactly the harm the discard was added to prevent, through a
+// different door.
+func TestDiscardCompletedActionClearsADeadLetteredRow(t *testing.T) {
+	s := openLeaseTestStore(t)
+	ctx := context.Background()
+	const id = "restore-node-c"
+
+	if err := s.EnqueueAction(ctx, "node-c", types.Action{
+		ID: id, Type: types.ActionRestoreAcceleratorHost, Timeout: time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Burn the attempt budget the way a crash-looping agent does: claim, never
+	// complete, let the lease expire, claim again.
+	for i := 0; i < 12; i++ {
+		claimed, err := s.ClaimNextAction(ctx, "node-c", "boot-1", time.Minute)
+		if err != nil || claimed == nil {
+			break
+		}
+		if _, err := s.sqlDB.ExecContext(ctx,
+			`UPDATE actions SET lease_expires_at_ns=? WHERE id=?`,
+			time.Now().Add(-time.Second).UnixNano(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var state string
+	if err := s.sqlDB.QueryRowContext(ctx, `SELECT state FROM actions WHERE id=?`, id).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "dead" {
+		t.Skipf("the attempt budget did not dead-letter the row (state=%q); this test needs that state", state)
+	}
+
+	if err := s.DiscardCompletedAction(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnqueueAction(ctx, "node-c", types.Action{
+		ID: id, Type: types.ActionRestoreAcceleratorHost, Timeout: time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := s.ClaimNextAction(ctx, "node-c", "boot-2", time.Minute)
+	if err != nil || claimed == nil {
+		t.Fatalf("a dead-lettered restore could not be re-dispatched (%v); this node's GPU "+
+			"monitoring would stay off for the whole retention window while consuming the "+
+			"janitor's shared budget on every tick", err)
+	}
+}

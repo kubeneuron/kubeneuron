@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
@@ -122,4 +124,65 @@ func TestDryRunIncidentsNeverBecomeLive(t *testing.T) {
 	if !c.effectiveDryRun(inc) {
 		t.Fatal("an incident opened in DryRun started executing for real when the installation was Enabled mid-ladder")
 	}
+}
+
+// TestStoppedLaddersAreNotCountedAsRecovered pins the metric half of the
+// emergency stop.
+//
+// kubeneuronctl report reads the audit trail and refuses to count a simulated
+// ladder. The Prometheus counters are charged at the terminal transition,
+// where that trail is not available, and they used to read the flag stamped
+// when the incident opened — so the two disagreed in the worst direction: an
+// operator who pressed stop, watched every remaining ladder simulate to a
+// close, and then opened the dashboard was told the fleet had recovered those
+// GPU-hours.
+func TestStoppedLaddersAreNotCountedAsRecovered(t *testing.T) {
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	gate := safety.NewGate(safety.Limits{MaxConcurrentRemediations: 2, DryRun: false})
+	c := New(st, st, nil, gate, nil, nil, nil, &notify.Log{Logger: log}, log)
+
+	// Opened while Enabled, so its own flag says live for the rest of its life.
+	inc := &types.Incident{
+		ID: "inc-stopped", Target: types.Target{Node: "n1", GPUUUID: "GPU-1"},
+		Class: types.ClassFellOffBus, DryRun: false,
+		OpenedAt: time.Now().Add(-time.Hour),
+	}
+
+	before := testutilCounterValue(t, "kubeneuron_incidents_recovered_total")
+	// The operator presses stop; the ladder then simulates to a close.
+	gate.ApplyLimits(safety.Limits{MaxConcurrentRemediations: 2, DryRun: true})
+	c.recordRecoveryOutcome(context.Background(), inc, types.StateResolved)
+	after := testutilCounterValue(t, "kubeneuron_incidents_recovered_total")
+
+	if after != before {
+		t.Fatal("a ladder that simulated after the operator stopped execution was counted as " +
+			"recovered capacity; the dashboard would report GPU-hours returned by a system " +
+			"that had just been told to stop")
+	}
+}
+
+// testutilCounterValue sums every series of a counter from the default
+// registry. Summing rather than selecting one label set keeps the assertion
+// about "did this counter move at all", which is the question.
+func testutilCounterValue(t *testing.T, name string) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0.0
+	for _, f := range families {
+		if f.GetName() != name {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			total += m.GetCounter().GetValue()
+		}
+	}
+	return total
 }
