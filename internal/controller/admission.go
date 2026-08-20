@@ -152,7 +152,9 @@ const (
 // not a hand-maintained map. Dry-run incidents and installs with no selector
 // are never in scope for the check (nothing executes for them).
 func (c *Controller) destructiveStepConfinement(ctx context.Context, inc *types.Incident, step *playbook.Step) (string, confinementResult) {
-	if c.effectiveDryRun(inc) {
+	// The step's PINNED decision when there is one, so this and the execution
+	// that follows cannot answer differently about the same step.
+	if c.simulating(ctx, inc) {
 		return "", confinementAllowed
 	}
 	def, ok := action.ByWire(step.Action)

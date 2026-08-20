@@ -55,7 +55,11 @@ jobs:
       - name: Test (both store backends)
         env:
           KUBENEURON_TEST_POSTGRES_DSN: postgres://postgres:test@127.0.0.1:5432/kubeneuron?sslmode=disable
-        run: go test -race -count=1 ./...
+        # -timeout 30m, not the default 10m per package. internal/controller
+        # under -race takes minutes, and a hosted runner under load can cross
+        # 600s and die with "test timed out" — an unexplained red that passes
+        # on re-run, which is the most expensive kind of CI failure there is.
+        run: go test -race -count=1 -timeout 30m ./...
 
   kind-integration:
     # Hosted runners: free and unlimited on public repositories.
@@ -182,7 +186,10 @@ jobs:
           version: v2.5.0
 
       - name: actionlint (workflow files stay valid)
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+        # From the module's own tool dependency, not @version: the fetch form
+        # reaches the network on every run, so a proxy hiccup fails the lint
+        # job for a reason that has nothing to do with the change under test.
+        run: go tool actionlint
 
   govulncheck:
     runs-on: ubuntu-latest

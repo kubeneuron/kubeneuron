@@ -238,6 +238,23 @@ func (c *Controller) reconcileDegradedTaints(ctx context.Context) {
 		if isMarked[node] {
 			continue
 		}
+		// The live gate, matching the fast path. PLACING a mark is a
+		// cluster-wide scheduling change and the mode governs it.
+		//
+		// This loop used to be inert in dry-run for the wrong reason: the map
+		// it walks was filtered on the live gate, so it was simply empty. When
+		// that filter moved to the incident's own flag — correct, because
+		// KEEPING a mark must not follow the mode — this loop inherited every
+		// live-flagged incident and started writing taints the fast path
+		// deliberately refuses to write. An operator who pressed the emergency
+		// stop got a NoSchedule taint applied afterwards, by the janitor,
+		// affecting every workload on the node and not only ours.
+		//
+		// So: two rules on purpose, one per direction. Placing reads the mode;
+		// keeping reads the incident.
+		if c.effectiveDryRun(inc) {
+			continue
+		}
 		if err := tainter.ApplyDegradedTaint(ctx, node, degradedTaintValue(inc), policy.Effect); err != nil {
 			c.log.Warn("marking a node degraded failed, will retry", "node", node, "incident", inc.ID, "err", err)
 			continue
@@ -269,12 +286,14 @@ func (c *Controller) otherOpenIncidentsOnNode(ctx context.Context, inc *types.In
 		return false, err
 	}
 	for _, other := range incidents {
-		if other.ID == inc.ID || c.effectiveDryRun(other) {
+		// inc.DryRun, like the other KEEP-side checks. This answer decides
+		// whether a mark stays, and a mode flip must not turn it into "nothing
+		// is wrong here" under a node whose incident is still open. The comment
+		// this replaces asserted the three sibling checks could not drift; they
+		// did, in both directions, one round each.
+		if other.ID == inc.ID || other.DryRun {
 			// Dry-run incidents never place a mark, so one cannot be the
-			// reason to keep it. Its two siblings — nodesUnderOpenIncidents
-			// and nodeHasOpenIncident — already filter this; the shared
-			// activeIncidentStates() exists so the three cannot drift apart,
-			// and this was the one that had.
+			// reason to keep it.
 			continue
 		}
 		return true, nil

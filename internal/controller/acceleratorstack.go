@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -393,6 +394,51 @@ func (c *Controller) forgetStuckRestore(node string) {
 	delete(c.cordonReported.seen, "stack-restore/"+node+"/")
 }
 
+// restoreActionID picks the identity for THIS restore attempt.
+//
+// A deterministic per-node ID was right for one thing and wrong for another.
+// Right: a janitor pass that returns before the agent finishes must re-attach
+// to the SAME action next pass rather than stacking a second one. Wrong: once
+// an attempt has terminated, the next attempt has to be a NEW action — and not
+// only to the controller's queue. The AGENT keeps a durable journal keyed on
+// the same ID and never forgets, so re-dispatching a reported ID is refused
+// with "cannot claim reported action" and the restore silently never runs
+// again. Rounds 18 and 19 cleared the queue row and left the journal, so the
+// fix was correct in intent and inert in fact.
+//
+// So the identity carries an attempt index, and the index advances only when
+// the previous attempt is over. Probing the queue answers that without any new
+// durable state: a row that is absent or still live IS this attempt; a
+// terminal row means that attempt finished and the next index begins a fresh
+// one, to the agent as well as to the queue.
+//
+// The finished row is dropped as we pass it, so a node that needs many
+// attempts does not accumulate one row per attempt until retention.
+const maxRestoreAttempts = 64
+
+func (c *Controller) restoreActionID(ctx context.Context, nodeName string) (string, error) {
+	for attempt := 0; attempt < maxRestoreAttempts; attempt++ {
+		h := sha256.Sum256(fmt.Appendf(nil, "%s|restore-accelerator-host|%d", nodeName, attempt))
+		id := hex.EncodeToString(h[:8])
+		queued, err := c.store.GetAction(ctx, id)
+		if errors.Is(err, store.ErrNotFound) {
+			return id, nil // never dispatched: this attempt is ours
+		}
+		if err != nil {
+			return "", fmt.Errorf("reading the restore queue for %s: %w", nodeName, err)
+		}
+		if !queued.Done && !queued.Cancelled {
+			return id, nil // still in flight: re-attach, do not stack
+		}
+		// Terminal. That attempt is over; free its row and try the next index.
+		if err := c.store.DiscardCompletedAction(ctx, id); err != nil {
+			return "", fmt.Errorf("clearing restore attempt %d for %s: %w", attempt, nodeName, err)
+		}
+	}
+	return "", fmt.Errorf("node %s has exhausted %d restore attempts without succeeding; its accelerator host needs a human",
+		nodeName, maxRestoreAttempts)
+}
+
 // restoreAcceleratorHost puts the node's own accelerator state back: the
 // persistence daemon and persistence mode that the quiesce turned off.
 //
@@ -426,46 +472,23 @@ func (c *Controller) restoreAcceleratorHost(ctx context.Context, orphanedInciden
 	if err != nil {
 		return err
 	}
+	// Provenance stays in params, where the claim guard does not read it —
+	// stamping it on Action.IncidentID made the restore permanently
+	// unclaimable, which is why it lives here.
+	//
+	// It is also present on some passes and absent on others, because the
+	// caller only knows the owner when the quiesce was held, and the agent's
+	// durable journal rejects a second dispatch of one ID with different
+	// params. That is safe only because the ID below carries an attempt index:
+	// each ID is dispatched once, and a re-attach conflicts away in the queue
+	// so the agent always sees the params the row was created with.
 	params := map[string]string{"host_state_key": nodeName}
 	if orphanedIncidentID != "" {
 		params["orphaned_incident"] = orphanedIncidentID
 	}
-	h := sha256.Sum256(fmt.Appendf(nil, "%s|restore-accelerator-host", nodeName))
-	actionID := hex.EncodeToString(h[:8])
-
-	// Discard a finished row under this ID before dispatching.
-	//
-	// The janitor only reaches this function while the node is STILL recorded
-	// as quiesced, so a terminal row under this ID is stale or redundant, and
-	// either way re-dispatching is correct because the restore is idempotent.
-	//
-	// Not "stale by construction", which an earlier version of this comment
-	// claimed: the host restore does not clear the quiesce record.
-	// RestoreAcceleratorStack does, it runs afterwards, and it can fail — so a
-	// pass where the host half succeeded and the platform half did not leaves a
-	// completed row on a still-quiesced node. Worth stating precisely, because
-	// a later round will reason from it.
-	//
-	// Leaving the row in place meant the queue answered from history instead of
-	// dispatching — enqueue is idempotent on the ID and terminal rows live for
-	// the retention window, 90 days by default.
-	//
-	// Both directions were harmful. A restore that failed once returned that
-	// stored failure to every later pass in zero milliseconds with no agent
-	// involved, so a single transient hiccup left the node's persistence
-	// daemon stopped permanently — and the stuck-restore report fires once per
-	// node, so nobody was told twice. A restore that SUCCEEDED was worse: the
-	// next time that node was quiesced and abandoned, the janitor replayed the
-	// old success, cleared the durable marker on the strength of it, and left
-	// the node's GPU monitoring off with nothing left to retry.
-	// Called directly, not through a type assertion. store.Store declares the
-	// method, so the assertion could never fail for a real store — but it was
-	// silent by construction, and the controller's own fakes embed a nil
-	// store.Store, which SATISFIES the assertion and panics rather than
-	// skipping. It provided no protection while looking like it did; the
-	// compiler provides the real thing.
-	if err := c.store.DiscardCompletedAction(ctx, actionID); err != nil {
-		return fmt.Errorf("clearing the previous restore attempt for %s: %w", nodeName, err)
+	actionID, err := c.restoreActionID(ctx, nodeName)
+	if err != nil {
+		return err
 	}
 
 	result, err := c.actuator.Execute(ctx, node, types.Action{

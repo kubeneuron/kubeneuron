@@ -32,6 +32,17 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 	// drain, evict, recycle/replace) was not, so a non-dry-run incident on a node
 	// outside the selector could cordon and drain it and one approval from
 	// terminating it. Fail closed to NEEDS_HUMAN with an audited reason instead.
+	// Pinned HERE, before the confinement check, not later beside the audit.
+	//
+	// Confinement reads the execution MODE while the blast radius comes from
+	// the pinned runtime config, and the reload writes those two in separate
+	// statements — so on a DryRun -> Enabled reload there is a window where the
+	// gate says Enabled and the selector is still the empty one DryRun
+	// compiled, and an empty selector is read as "no confinement configured"
+	// and allowed. Deciding the mode once, above both reads, closes the half of
+	// that window this function owns: a step cannot be waved through as a
+	// simulation and then executed for real by the same call.
+	ctx, simulate := c.pinSimulate(ctx, inc)
 	switch reason, res := c.destructiveStepConfinement(ctx, inc, step); res {
 	case confinementOutOfScope:
 		// Confirmed outside the blast radius: fail closed to a human. Never execute.
@@ -106,8 +117,6 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 	// the flag stamped when the incident opened. A ladder that simulates after
 	// a mid-flight switch to DryRun must not read later as remediation.
 	//
-	// Decided ONCE, here, and carried: see pinnedSimulateKey.
-	ctx, simulate := c.pinSimulate(ctx, inc)
 	if err := c.transition(ctx, inc, types.StateExecuting, actor, step.Name,
 		auditStepResult(step.Action, simulate), step.Params); err != nil {
 		c.gate.StepDone(inc.Target, action, 0)
@@ -210,31 +219,6 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 	}
 }
 
-// effectiveDryRun answers whether this step must be simulated, from the
-// incident AND the gate that is live right now.
-//
-// inc.DryRun alone is not that answer. It is stamped once, in openIncidentTx,
-// and never revisited — which was the only correct reading while configuration
-// arrived by rolling the Deployment, because a mode change restarted the
-// process and no incident outlived it. Configuration now reloads in place, so
-// an operator who sets executionMode: DryRun to STOP damage changes what the
-// gate says while every already-open incident keeps executing for real.
-//
-// That is bad on its own and worse in combination: the operator compiles the
-// destructive node selector only for an Enabled install, so the same flip
-// empties the selector, and an empty selector is read as "no confinement
-// configured" and allowed. The documented way to stop a runaway remediation
-// therefore removed the blast radius from every ladder already in flight — a
-// step refused a second earlier for being outside spec.safety.
-// destructiveExecution.nodeSelector became allowed on any node in the cluster.
-//
-// Reading the live gate here is monotonic toward safety. An incident opened in
-// DryRun stays dry-run for life whatever the gate later says, which is the
-// existing stamped-at-open guarantee and the direction worth keeping; an
-// incident opened Enabled becomes a no-op the moment the operator asks for
-// one, and resumes if they change their mind.
-//
-// Pause is already enforced, separately and earlier, by gate.Allow.
 // pinnedSimulateKey carries ONE step's simulate-or-execute decision.
 //
 // The gate reloads in place, so reading it three times per step — once for the
@@ -268,6 +252,31 @@ func (c *Controller) simulating(ctx context.Context, inc *types.Incident) bool {
 	return c.effectiveDryRun(inc)
 }
 
+// effectiveDryRun answers whether this step must be simulated, from the
+// incident AND the gate that is live right now.
+//
+// inc.DryRun alone is not that answer. It is stamped once, in openIncidentTx,
+// and never revisited — which was the only correct reading while configuration
+// arrived by rolling the Deployment, because a mode change restarted the
+// process and no incident outlived it. Configuration now reloads in place, so
+// an operator who sets executionMode: DryRun to STOP damage changes what the
+// gate says while every already-open incident keeps executing for real.
+//
+// That is bad on its own and worse in combination: the operator compiles the
+// destructive node selector only for an Enabled install, so the same flip
+// empties the selector, and an empty selector is read as "no confinement
+// configured" and allowed. The documented way to stop a runaway remediation
+// therefore removed the blast radius from every ladder already in flight — a
+// step refused a second earlier for being outside spec.safety.
+// destructiveExecution.nodeSelector became allowed on any node in the cluster.
+//
+// Reading the live gate here is monotonic toward safety. An incident opened in
+// DryRun stays dry-run for life whatever the gate later says, which is the
+// existing stamped-at-open guarantee and the direction worth keeping; an
+// incident opened Enabled becomes a no-op the moment the operator asks for
+// one, and resumes if they change their mind.
+//
+// Pause is already enforced, separately and earlier, by gate.Allow.
 func (c *Controller) effectiveDryRun(inc *types.Incident) bool {
 	if inc == nil || inc.DryRun {
 		return true

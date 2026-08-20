@@ -443,3 +443,44 @@ func TestJanitorStillClearsATrulyAbandonedMark(t *testing.T) {
 		t.Fatal("a mark with no incident behind it survived the janitor")
 	}
 }
+
+// TestJanitorDoesNotTaintWhileTheInstallationIsInDryRun covers the direction
+// the two rules do not share.
+//
+// KEEPING a mark reads the incident's own flag, so a mode flip cannot strand a
+// degraded GPU advertised as healthy. PLACING one reads the live mode, because
+// writing a NoSchedule taint is a cluster-wide scheduling change affecting
+// every workload on the node.
+//
+// The janitor's apply loop read neither. It used to be inert in dry-run only
+// because the map it walks was filtered on the live gate; once that filter
+// moved to the incident's flag — correct for keeping — the loop inherited
+// every live-flagged incident and began writing taints the fast path
+// deliberately refuses to write. An operator who pressed the emergency stop
+// got one applied afterwards, by the janitor.
+func TestJanitorDoesNotTaintWhileTheInstallationIsInDryRun(t *testing.T) {
+	c, st, p := taintFixture(t, DegradedTaintPolicy{Enabled: true, Effect: "NoSchedule"})
+	ctx := context.Background()
+
+	if err := st.UpsertNode(ctx, &types.Node{Name: "n1", UID: "n1-uid"}); err != nil {
+		t.Fatal(err)
+	}
+	inc := &types.Incident{
+		ID: "inc-live", Target: types.Target{Node: "n1"}, Class: types.ClassFellOffBus,
+		State: types.StateEvaluating, DryRun: false,
+		OpenedAt: time.Now(), UpdatedAt: time.Now(), StateChangedAt: time.Now(),
+	}
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+
+	// The operator presses the emergency stop before the mark ever landed.
+	c.gate.ApplyLimits(safety.Limits{MaxConcurrentRemediations: 2, DryRun: true})
+	c.reconcileDegradedTaints(ctx)
+
+	if len(p.marks) != 0 {
+		t.Fatalf("the janitor wrote %v while the installation is in DryRun; a NoSchedule taint "+
+			"affects every workload on the node, applied at the moment the operator asked the "+
+			"system to change nothing", p.marks)
+	}
+}

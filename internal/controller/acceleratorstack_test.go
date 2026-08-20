@@ -11,6 +11,7 @@ import (
 
 	"github.com/kubeneuron/kubeneuron/internal/actuator"
 	"github.com/kubeneuron/kubeneuron/internal/config"
+	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
@@ -445,5 +446,72 @@ func TestRewoundQuiesceGetsAFreshActionIDSoItReExecutes(t *testing.T) {
 	}
 	if id := actionID(got); id == originalQuiesceID {
 		t.Fatalf("rewound quiesce action ID %s collides with the completed original; it would replay the stale 'done' result instead of re-executing", id)
+	}
+}
+
+// TestRestoreAttemptGetsAFreshIdentity covers the half of the janitor's restore
+// that rounds 18 and 19 fixed in the controller and left broken in the agent.
+//
+// A per-node deterministic ID is right while an attempt is in flight — a
+// janitor pass that returns before the agent finishes must re-attach rather
+// than stack a second action. It is wrong once that attempt has terminated,
+// because the AGENT keeps a durable journal keyed on the same ID and never
+// forgets: re-dispatching a reported ID is refused with "cannot claim reported
+// action", so the restore silently never runs again. Clearing the queue row
+// and leaving the journal made the fix correct in intent and inert in fact.
+func TestRestoreAttemptGetsAFreshIdentity(t *testing.T) {
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	c := New(st, st, nil, safety.NewGate(safety.Limits{MaxConcurrentRemediations: 2}),
+		nil, nil, nil, &notify.Log{Logger: log}, log)
+	ctx := context.Background()
+
+	first, err := c.restoreActionID(ctx, "n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// While that attempt is in flight, a later pass must re-attach to it.
+	if err := st.EnqueueAction(ctx, "n1", types.Action{
+		ID: first, Type: types.ActionRestoreAcceleratorHost, Timeout: time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	again, err := c.restoreActionID(ctx, "n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != first {
+		t.Fatalf("a pass while the attempt is still in flight minted a new action (%s != %s); "+
+			"the janitor would stack a second restore beside the one the agent is running", again, first)
+	}
+
+	// Once it terminates, the next attempt must be a DIFFERENT action — the
+	// agent's journal will refuse the old identity forever.
+	claimed, err := st.ClaimNextAction(ctx, "n1", "boot-1", time.Minute)
+	if err != nil || claimed == nil {
+		t.Fatalf("claiming the first attempt: %v", err)
+	}
+	if err := st.CompleteClaimedAction(ctx, first, claimed.LeaseToken, "boot-1",
+		types.ActionResult{ActionID: first, OK: false, Output: "attempt 1 failed"}); err != nil {
+		t.Fatal(err)
+	}
+	next, err := c.restoreActionID(ctx, "n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next == first {
+		t.Fatal("the attempt after a terminated one reused its action ID; the agent's durable " +
+			"journal refuses a reported ID, so this node's restore would never run again")
+	}
+
+	// And the finished row is gone, so a node needing many attempts does not
+	// accumulate one row per attempt until retention.
+	if _, err := st.GetAction(ctx, first); err == nil {
+		t.Fatal("the terminated attempt's row was left behind")
 	}
 }
