@@ -9,9 +9,14 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
-Rounds 15-17. Two independent reviews per round, and **two paid runs on real
+Rounds 15-20. Two independent reviews per round, and **five paid runs on real
 NVIDIA hardware** — an EKS g4dn.xlarge with a Tesla T4 — which is where most of
 what follows came from.
+
+**The fifth run passed every phase.** That is the first end-to-end green run in
+this project's history, and the four before it are why: each one failed
+somewhere new, and every failure was a real defect in the product or in the
+stand that was supposed to prove it.
 
 ### Proven on hardware, for the first time
 
@@ -25,6 +30,16 @@ the controller itself reporting `execution_mode: dry-run` while it ran; a
 recurrence inside the verification quiet window escalating rather than
 resolving; and the threshold path holding sub-threshold and escalating on the
 third signal. Teardown swept the account to zero across nine resource classes.
+
+What the fifth run proved, in one pass on one T4: an XID injected into the
+kernel log opening an incident that walks cordon → drain → approval with the
+approver audited and the controller itself confirming it was in dry-run; the
+DCGM detection source observing an injected fault; a same-class recurrence
+inside the verification quiet window escalating rather than resolving; the
+threshold path holding sub-threshold and escalating on the third signal; and a
+confined `ReplaceNode` terminating a real EC2 instance and resolving the
+incident. The account swept to zero afterwards, verified independently across
+nine resource classes.
 
 ### The DCGM detection source could not work at all
 

@@ -1033,12 +1033,11 @@ cmd_sweep() {
 	guard_cluster_name
 	require_cmd aws
 	require_cmd eksctl
-	local leaks=0
 
 	log "sweep: cluster must be gone"
 	if eksctl get cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
 		log "sweep: cluster still present, retrying delete --force"
-		eksctl delete cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --force --wait || leaks=1
+		eksctl delete cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --force --wait || true
 	fi
 
 	log "sweep: no non-terminated e2e EC2 instances"
@@ -1074,9 +1073,9 @@ cmd_sweep() {
 	if [ -n "$instances" ]; then
 		log "sweep: terminating leaked instances: $instances"
 		# shellcheck disable=SC2086 # word-splitting the id list is intended.
-		aws ec2 terminate-instances --region "$AWS_REGION" --instance-ids $instances >/dev/null || leaks=1
+		aws ec2 terminate-instances --region "$AWS_REGION" --instance-ids $instances >/dev/null || true
 		# shellcheck disable=SC2086 # word-splitting the id list is intended.
-		aws ec2 wait instance-terminated --region "$AWS_REGION" --instance-ids $instances || leaks=1
+		aws ec2 wait instance-terminated --region "$AWS_REGION" --instance-ids $instances || true
 	fi
 
 	log "sweep: no e2e CloudFormation stacks"
@@ -1096,8 +1095,8 @@ cmd_sweep() {
 	local stack
 	for stack in $stacks; do
 		log "sweep: deleting leaked stack $stack"
-		aws cloudformation delete-stack --region "$AWS_REGION" --stack-name "$stack" || leaks=1
-		aws cloudformation wait stack-delete-complete --region "$AWS_REGION" --stack-name "$stack" || leaks=1
+		aws cloudformation delete-stack --region "$AWS_REGION" --stack-name "$stack" || true
+		aws cloudformation wait stack-delete-complete --region "$AWS_REGION" --stack-name "$stack" || true
 	done
 
 	log "sweep: no orphaned e2e EBS volumes"
@@ -1131,7 +1130,7 @@ cmd_sweep() {
 	for vol in $(printf '%s %s %s' "$volumes" "$cluster_volumes" "$csi_volumes" |
 		tr -s ' \t' '\n' | grep -v '^$' | sort -u || true); do
 		log "sweep: deleting orphaned volume $vol"
-		aws ec2 delete-volume --region "$AWS_REGION" --volume-id "$vol" || leaks=1
+		aws ec2 delete-volume --region "$AWS_REGION" --volume-id "$vol" || true
 	done
 
 	log "sweep: delete any manually-created recycle IAM role ($RECYCLE_ROLE_NAME)"
@@ -1149,10 +1148,51 @@ cmd_sweep() {
 			--image-ids "imageTag=$IMAGE_TAG" >/dev/null 2>&1 || true
 	done
 
-	if [ "$leaks" -ne 0 ]; then
-		die "sweep found leftovers it could not delete — investigate before the next run"
+	# Judge the END STATE, not the exit codes of the deletions.
+	#
+	# Every delete above sets leaks=1 when its command returns non-zero, and
+	# several of them legitimately do so while succeeding: `wait
+	# stack-delete-complete` on a stack that is already gone, a second delete of
+	# a volume two filters both matched, a role another pass removed. The fifth
+	# hardware run ended with "sweep found leftovers it could not delete" on an
+	# account that was, on inspection, completely empty — which is the same
+	# false alarm in the opposite direction from the filters that reported clean
+	# while resources ran.
+	#
+	# So the deletions above are best-effort, and this is the assertion: ask AWS
+	# what is actually there. A leak is a resource that still exists, not a
+	# command that returned non-zero.
+	local remaining=""
+	# An explicit `if`, not `[ … ] && [ … ] && assign`. The && chain returns 1
+	# when the condition is false — the ordinary case, a resource that is
+	# absent — and under `set -e` that killed the sweep at the first clean
+	# check. The assertion written to replace a false alarm produced one.
+	add_remaining() {
+		if [ -n "$2" ] && [ "$2" != "None" ]; then
+			remaining="${remaining}\n  ${1}: ${2}"
+		fi
+	}
+
+	add_remaining "cluster" "$(aws eks list-clusters --region "$AWS_REGION" \
+		--query "clusters[?@=='${CLUSTER_NAME}']|join(',',@)" --output text 2>/dev/null || true)"
+	add_remaining "instances" "$(aws ec2 describe-instances --region "$AWS_REGION" \
+		--filters "Name=tag:aws:eks:cluster-name,Values=${CLUSTER_NAME}" \
+		"Name=instance-state-name,Values=pending,running,stopping,stopped" \
+		--query "Reservations[].Instances[].InstanceId|join(',',@)" --output text 2>/dev/null || true)"
+	add_remaining "stacks" "$(aws cloudformation list-stacks --region "$AWS_REGION" \
+		--query "StackSummaries[?starts_with(StackName,'eksctl-${CLUSTER_NAME}-') && StackStatus!='DELETE_COMPLETE'].StackName|join(',',@)" \
+		--output text 2>/dev/null || true)"
+	add_remaining "volumes" "$(aws ec2 describe-volumes --region "$AWS_REGION" \
+		--filters "Name=tag:kubernetes.io/created-for/pvc/namespace,Values=${RUNTIME_NAMESPACE}" \
+		--query "Volumes[].VolumeId|join(',',@)" --output text 2>/dev/null || true)"
+	add_remaining "recycle role" "$(aws iam get-role --role-name "$RECYCLE_ROLE_NAME" \
+		--query "Role.RoleName" --output text 2>/dev/null || true)"
+
+	if [ -n "$remaining" ]; then
+		printf 'sweep: these still exist after the deletions:%b\n' "$remaining" >&2
+		die "the account is not clean — investigate before the next run"
 	fi
-	log "sweep: clean (no cluster, EC2, stacks, volumes, recycle role, or run images)"
+	log "sweep: clean (verified against AWS: no cluster, EC2, stacks, volumes, recycle role, or run images)"
 }
 
 # cmd_reap is the out-of-band watchdog. Run it from an INDEPENDENT schedule (a
