@@ -225,6 +225,24 @@ cmd_preflight() {
 	require_cmd helm
 	require_cmd jq
 	guard_cluster_name
+
+	# Free disk, checked before anything is created.
+	#
+	# A run builds four images from a ~375 MB context and pushes them; run 3
+	# exhausted the host disk mid-build. That alone would be an inconvenience —
+	# the failure was that TEARDOWN could not run either, because the driver
+	# pipes it through `tee` and tee could not write. A full disk therefore
+	# broke the one guarantee this target makes, and left a live cluster and
+	# three instances billing until a human noticed.
+	#
+	# 25 GiB is measured, not guessed: the four image builds plus the build
+	# context peaked around 20 GiB on the run that failed.
+	local free_kb
+	free_kb=$(df -Pk "$REPO_ROOT" | awk 'NR==2 {print $4}')
+	if [ "${free_kb:-0}" -lt $((25 * 1024 * 1024)) ]; then
+		die "only $((free_kb / 1024 / 1024)) GiB free on $(df -Ph "$REPO_ROOT" | awk 'NR==2 {print $6}'); a run needs about 25 GiB for the image builds, and running out mid-build has already cost one cluster that teardown could not remove. Free space (docker image prune -af) before dispatching."
+	fi
+
 	log "preflight: AWS identity (no account id printed)"
 	aws sts get-caller-identity --query Arn --output text >/dev/null ||
 		die "AWS credentials are not usable; the workflow assumes an OIDC role"

@@ -1181,6 +1181,25 @@ func (q *Queries) CompleteAction(ctx context.Context, actionID string, res types
 	return store.ErrLeaseLost
 }
 
+// DiscardCompletedAction removes a finished queue row so a caller that
+// derives a DETERMINISTIC action ID can start a fresh attempt.
+//
+// EnqueueAction is idempotent on the ID (ON CONFLICT DO NOTHING) and completed
+// rows live for the retention window — 90 days by default. That combination is
+// right for a retry inside one attempt and wrong across attempts: the second
+// attempt silently re-attaches to the first one's stored result, returning it
+// with no agent involved at all. A failed first attempt therefore wedges every
+// later one, and a successful one makes a genuinely new attempt report success
+// it never performed.
+//
+// Only a finished row is removed, so this can never race a live claim: an
+// action still pending or leased is left exactly where it is.
+func (q *Queries) DiscardCompletedAction(ctx context.Context, actionID string) error {
+	_, err := q.db.ExecContext(ctx,
+		`DELETE FROM actions WHERE id=? AND state IN ('done','cancelled')`, actionID)
+	return err
+}
+
 func (q *Queries) GetAction(ctx context.Context, actionID string) (*types.QueuedAction, error) {
 	row := q.db.QueryRowContext(ctx, actionSelect+` WHERE id=?`, actionID)
 	return scanAction(row)

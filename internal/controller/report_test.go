@@ -462,3 +462,64 @@ func TestSimulatedRecoverySeparatesTheClassesWithNoLadder(t *testing.T) {
 			sim.WouldRecover, sim.ObservedOnly)
 	}
 }
+
+// TestSimulatedStepsAreNotRemediation covers the ladder that executed nothing
+// because the operator switched a running installation to DryRun mid-flight.
+//
+// Execution follows the LIVE gate; the incident's own dry-run flag is stamped
+// once, when it opens. So such an incident carries DryRun=false, simulates
+// every step, resolves — and every accounting read keyed on that flag folds it
+// into the REAL report. A fleet whose faults simply stopped recurring would be
+// told it got its GPU-hours back from ladders that touched nothing, which is
+// the number the observed-only bucket exists to protect.
+func TestSimulatedStepsAreNotRemediation(t *testing.T) {
+	cases := []struct {
+		name    string
+		results []string
+		want    bool
+		why     string
+	}{
+		{
+			name:    "a real cordon is remediation",
+			results: []string{auditStepResult("platform.cordon", false)},
+			want:    true,
+		},
+		{
+			name:    "the same cordon simulated is not",
+			results: []string{auditStepResult("platform.cordon", true)},
+			want:    false,
+			why:     "the step entered EXECUTING and then did nothing at all",
+		},
+		{
+			name: "a ladder that simulated every rung is not",
+			results: []string{
+				auditStepResult("platform.cordon", true),
+				auditStepResult("platform.drain", true),
+				auditStepResult("agent.reboot", true),
+			},
+			want: false,
+			why:  "three rungs, no disruption, and the incident still reached RESOLVED",
+		},
+		{
+			name: "one real rung among simulated ones counts",
+			results: []string{
+				auditStepResult("platform.cordon", true),
+				auditStepResult("platform.drain", false),
+			},
+			want: true,
+			why:  "the drain really moved workloads, whatever happened around it",
+		},
+		{
+			name:    "notify-only is still not remediation",
+			results: []string{auditStepResult("notify.observe", false)},
+			want:    false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := remediationExecuted(tc.results); got != tc.want {
+				t.Fatalf("remediationExecuted = %v, want %v — %s", got, tc.want, tc.why)
+			}
+		})
+	}
+}

@@ -399,7 +399,9 @@ func (c *Controller) forgetStuckRestore(node string) {
 // The action ID is derived from the node alone, not from a playbook step,
 // because this runs when no step is executing (and, for an unowned quiesce,
 // with no incident either). It stays deterministic so a retry re-attaches to
-// the same queued action instead of stacking new ones.
+// the same queued action instead of stacking new ones — which is right WITHIN
+// one restore attempt and wrong across them, so any finished row is discarded
+// first. See the DiscardCompletedAction call below.
 //
 // Action.IncidentID is DELIBERATELY empty. The janitor acts precisely when no
 // active incident owns the quiesce — the owner is halted or gone — and the
@@ -429,8 +431,35 @@ func (c *Controller) restoreAcceleratorHost(ctx context.Context, orphanedInciden
 		params["orphaned_incident"] = orphanedIncidentID
 	}
 	h := sha256.Sum256(fmt.Appendf(nil, "%s|restore-accelerator-host", nodeName))
+	actionID := hex.EncodeToString(h[:8])
+
+	// Discard a finished row under this ID before dispatching.
+	//
+	// The janitor only reaches this function while the node is STILL recorded
+	// as quiesced, so a completed restore row is stale by construction: a
+	// restore that actually succeeded cleared that record. Leaving the row in
+	// place meant the queue answered from history instead of dispatching —
+	// enqueue is idempotent on the ID and completed rows live for the
+	// retention window, 90 days by default.
+	//
+	// Both directions were harmful. A restore that failed once returned that
+	// stored failure to every later pass in zero milliseconds with no agent
+	// involved, so a single transient hiccup left the node's persistence
+	// daemon stopped permanently — and the stuck-restore report fires once per
+	// node, so nobody was told twice. A restore that SUCCEEDED was worse: the
+	// next time that node was quiesced and abandoned, the janitor replayed the
+	// old success, cleared the durable marker on the strength of it, and left
+	// the node's GPU monitoring off with nothing left to retry.
+	if discarder, ok := c.store.(interface {
+		DiscardCompletedAction(context.Context, string) error
+	}); ok {
+		if err := discarder.DiscardCompletedAction(ctx, actionID); err != nil {
+			return fmt.Errorf("clearing the previous restore attempt for %s: %w", nodeName, err)
+		}
+	}
+
 	result, err := c.actuator.Execute(ctx, node, types.Action{
-		ID:      hex.EncodeToString(h[:8]),
+		ID:      actionID,
 		Type:    types.ActionRestoreAcceleratorHost,
 		Params:  params,
 		Timeout: acceleratorHostRestoreTimeout,

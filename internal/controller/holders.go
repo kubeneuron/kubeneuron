@@ -158,9 +158,26 @@ func componentIsOperatorManaged(node *types.Node, component string) bool {
 //
 // Written down because reading either site alone makes the other look wrong.
 func (c *Controller) refuseInfeasibleReset(ctx context.Context, inc *types.Incident, book *playbook.Playbook) error {
-	if inc.DryRun || book == nil || !playbookResetsAGPU(book) {
+	if book == nil || !playbookResetsAGPU(book) {
 		return nil
 	}
+	// The STRUCTURAL refusals below run for a dry-run incident too. They read
+	// permanent reported facts — no device UUID, a reset scoped to a vendor
+	// this incident is not about — and refusing costs nothing, because a
+	// dry-run ladder disrupts nothing either way.
+	//
+	// Skipping them made the simulation model a strictly MORE capable system
+	// than the live one: on AMD silicon, ecc-dbe walked its whole ladder in
+	// dry-run and landed in "would have recovered", while the same incident
+	// live is refused before the first disruptive step and parked for a human.
+	// The pilot checklist's entire premise is to sit in dry-run and read what
+	// this would have got you, and that number was inflated worst on exactly
+	// the fleets where the honest answer is "nothing".
+	//
+	// The holder check further down stays waived for dry-run: which processes
+	// hold a device is live state that changes between now and any real run,
+	// so refusing on it would report a permanent verdict about a temporary
+	// fact.
 	if inc.Target.GPUUUID == "" {
 		// An unattributed incident (kmsg PCI->GPU resolution failed while
 		// nvidia-smi was wedged) carries no device to reset, and no later report
@@ -179,6 +196,9 @@ func (c *Controller) refuseInfeasibleReset(ctx context.Context, inc *types.Incid
 	if vendor, mismatched := c.resetVendorAbsentFromNode(ctx, inc, book); mismatched {
 		return fmt.Errorf("playbook %q resets a %s GPU but node %s reports no %s runtime; that reset can never run: %w",
 			book.Name, vendor, inc.Target.Node, vendor, errResetVendorMismatch)
+	}
+	if inc.DryRun {
+		return nil // the holder check below reads live state; see above
 	}
 	reports, ok := c.store.(store.AcceleratorReportStore)
 	if !ok {

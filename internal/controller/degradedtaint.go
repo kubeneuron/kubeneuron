@@ -99,8 +99,12 @@ func (c *Controller) syncDegradedTaint(ctx context.Context, inc *types.Incident,
 	// an operator who switches a running installation to DryRun to stop it
 	// keeps getting NoSchedule taints written and re-applied for every
 	// incident that was already open — which is the promise three lines below
-	// being broken at exactly the moment somebody is relying on it. Removal
-	// stays unconditional, so the marks already placed still come off.
+	// being broken at exactly the moment somebody is relying on it.
+	//
+	// This early return skips the halted branch too, so a mark already placed
+	// is not taken off HERE; the janitor removes it on its next pass. One pass
+	// late, never leaked — and worth stating precisely, because an earlier
+	// version of this comment claimed removal was unconditional and it is not.
 	if c.effectiveDryRun(inc) {
 		// A dry-run installation promises it changes nothing in the cluster,
 		// and a NoSchedule taint is a cluster-wide scheduling change: work
@@ -265,7 +269,7 @@ func (c *Controller) otherOpenIncidentsOnNode(ctx context.Context, inc *types.In
 		return false, err
 	}
 	for _, other := range incidents {
-		if other.ID == inc.ID || other.DryRun {
+		if other.ID == inc.ID || c.effectiveDryRun(other) {
 			// Dry-run incidents never place a mark, so one cannot be the
 			// reason to keep it. Its two siblings — nodesUnderOpenIncidents
 			// and nodeHasOpenIncident — already filter this; the shared

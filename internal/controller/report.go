@@ -120,9 +120,30 @@ func (c *Controller) RecoveryReport(ctx context.Context, window time.Duration) (
 // This is what lets the report tell a repair from an observation without a
 // schema migration: the audit already carries the fact, it was simply never
 // read back.
-const auditExecutingPrefix = "executing "
+const (
+	auditExecutingPrefix = "executing "
+	// auditSimulatingPrefix marks a step the controller entered EXECUTING for
+	// and then simulated, because the LIVE gate said dry-run.
+	//
+	// The distinction has to be durable and per-step. Execution follows the
+	// live gate while the incident's own dry-run flag is stamped once, at open
+	// — so an incident opened Enabled and switched to DryRun mid-ladder
+	// executes nothing at all and still carries DryRun=false. Every accounting
+	// read keyed on that flag then folds it into the REAL report: the fleet is
+	// told it got its GPU-hours back from ladders that touched nothing. That is
+	// precisely the number the observed-only bucket exists to protect, reached
+	// one layer down.
+	auditSimulatingPrefix = "simulating "
+)
 
 func auditExecutingResult(wireAction string) string { return auditExecutingPrefix + wireAction }
+
+func auditStepResult(wireAction string, simulated bool) string {
+	if simulated {
+		return auditSimulatingPrefix + wireAction
+	}
+	return auditExecutingResult(wireAction)
+}
 
 // remediationExecuted reports whether an incident's EXECUTING audit rows prove
 // that something was actually DONE to the fleet.
@@ -153,8 +174,15 @@ func auditExecutingResult(wireAction string) string { return auditExecutingPrefi
 // genuinely did disrupt the node before the fault stopped recurring. Reporting
 // that as recovered is a different claim from the one this function exists to
 // refuse, which is an incident that changed nothing whatsoever.
+//
+// A step the controller SIMULATED is not remediation either, however the
+// incident was stamped when it opened. Those rows carry their own prefix and
+// are skipped here — see auditSimulatingPrefix.
 func remediationExecuted(results []string) bool {
 	for _, result := range results {
+		if strings.HasPrefix(result, auditSimulatingPrefix) {
+			continue
+		}
 		wire, formatted := strings.CutPrefix(result, auditExecutingPrefix)
 		if !formatted {
 			return true

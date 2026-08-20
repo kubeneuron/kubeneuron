@@ -281,3 +281,56 @@ func TestSilentNodeDoesNotTriggerTheVendorAbsenceRefusal(t *testing.T) {
 			"an agent that has not spoken yet is not evidence of a different runtime")
 	}
 }
+
+// TestDryRunRefusesAStructurallyImpossibleReset covers the number a pilot is
+// told to read.
+//
+// The structural refusals used to be skipped for dry-run incidents, so the
+// simulation modelled a strictly MORE capable system than the live one: on AMD
+// silicon an ecc-dbe incident walked its whole ladder and landed in "would
+// have recovered", while the same incident live is refused before the first
+// disruptive step and parked for a human. The pilot checklist's whole premise
+// is to sit in dry-run and read what this would have got you, and the answer
+// was inflated worst on exactly the fleets where it should read "nothing".
+func TestDryRunRefusesAStructurallyImpossibleReset(t *testing.T) {
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	c := New(st, st, nil, safety.NewGate(safety.Limits{MaxConcurrentRemediations: 2}),
+		nil, nil, nil, &notify.Log{Logger: log}, log)
+
+	book := &playbook.Playbook{Name: "drain-and-reset", Steps: []playbook.Step{
+		{Name: "reset", Action: "agent.gpu_reset"},
+	}}
+
+	// An AMD device, a ladder whose repair rung is scoped to NVIDIA.
+	amd := &types.Incident{
+		ID: "amd-1", Target: types.Target{Node: "n1", GPUUUID: "GPU-AMD-1"},
+		Class: types.ClassECCDBE, Vendor: types.AcceleratorVendorAMD, DryRun: true,
+	}
+	if err := c.refuseInfeasibleReset(context.Background(), amd, book); err == nil {
+		t.Fatal("a dry-run AMD incident simulated an NVIDIA-scoped reset; the report would " +
+			"count it as capacity this fleet would have recovered, which it provably would not")
+	}
+
+	// And an unattributed incident, which can never gain a device.
+	unattributed := &types.Incident{
+		ID: "un-1", Target: types.Target{Node: "n1"},
+		Class: types.ClassECCDBE, DryRun: true,
+	}
+	if err := c.refuseInfeasibleReset(context.Background(), unattributed, book); err == nil {
+		t.Fatal("a dry-run incident with no GPU UUID simulated a per-device reset")
+	}
+
+	// A well-formed NVIDIA incident is untouched: the simulation still runs.
+	ok := &types.Incident{
+		ID: "nv-1", Target: types.Target{Node: "n1", GPUUUID: "GPU-NV-1"},
+		Class: types.ClassECCDBE, Vendor: types.AcceleratorVendorNVIDIA, DryRun: true,
+	}
+	if err := c.refuseInfeasibleReset(context.Background(), ok, book); err != nil {
+		t.Fatalf("a valid dry-run reset was refused: %v", err)
+	}
+}

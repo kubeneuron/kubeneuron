@@ -224,6 +224,18 @@ func (s *Server) resolveActor(r *http.Request, claimed string) (string, error) {
 }
 
 func bearerMatches(r *http.Request, token string) bool {
+	// An empty configured token matches nothing, ever.
+	//
+	// ConstantTimeCompare("", "") returns 1, so without this an empty token
+	// plus a bare "Authorization: Bearer " header authenticates. Today the
+	// enable-gate above rejects an empty s.operatorToken before reaching here,
+	// so this is unreachable — but that gate reads the FIELD while this reads
+	// currentOperatorToken(), and the day someone aligns the two (a
+	// provider-only install whose file has not landed yet) the difference
+	// between "disabled" and "open to everyone" would be this line.
+	if token == "" {
+		return false
+	}
 	auth := r.Header.Get("Authorization")
 	const prefix = "Bearer "
 	if !strings.HasPrefix(auth, prefix) {
