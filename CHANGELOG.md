@@ -9,14 +9,26 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
-Rounds 15-20. Two independent reviews per round, and **five paid runs on real
+Rounds 15-22. An independent review per round, and **six paid runs on real
 NVIDIA hardware** — an EKS g4dn.xlarge with a Tesla T4 — which is where most of
 what follows came from.
 
-**The fifth run passed every phase.** That is the first end-to-end green run in
-this project's history, and the four before it are why: each one failed
-somewhere new, and every failure was a real defect in the product or in the
-stand that was supposed to prove it.
+**The fifth and sixth runs passed every phase.** The fifth was the first
+end-to-end green run in this project's history, and the four before it are why
+it took five: each one failed somewhere new, and every failure was a real
+defect in the product or in the stand that was supposed to prove it.
+
+One pattern is worth stating on its own, because it shaped this whole stretch:
+every round found the previous round's regression, and by round 21 a reviewer
+named the reason. It was the same defect class each time — **a set of states
+enumerated inline at a new site instead of asked of one shared predicate.** The
+action queue terminalises three ways; the prune knew three, a discard knew two,
+and a probe added later knew two different ones. Each omission wedged a node's
+GPU monitoring for the retention window. The fix that finally held was not any
+of the one-line corrections but `QueuedAction.Terminal()` plus a matching SQL
+constant, with regression tests driven from the state STRINGS so that adding a
+state without teaching the predicate fails. The class recurred once more after
+that, one queue over and one call site over, and those are now converted too.
 
 ### Proven on hardware, for the first time
 
@@ -60,7 +72,42 @@ to read showed it. It is now a warning, once per outage, naming the failing
 command and what to check — and that warning is what found the second defect
 after the first was fixed.
 
-### Fixed
+**With both closed, the source now works, and that is recorded evidence.** The
+fifth and sixth hardware runs each injected a DCGM field value on a real Tesla
+T4 and watched the agent's `gpuhealth` source observe it — 59 seconds on the
+first of them. `docs/reference-capabilities.md` promotes the polled-telemetry
+row for NVIDIA from *shipped, not hardware-validated* to *shipped &
+hardware-validated* on the strength of these runs, which is the only kind of
+evidence that page accepts.
+
+### Fixed — the emergency stop, which did not stop things
+
+An operator switching a running installation to `DryRun` is the documented way
+to halt a runaway remediation. Four separate defects meant it did not:
+
+- **It removed the blast radius from every incident already in flight.** The
+  dry-run flag is stamped when an incident opens and was never re-read; the
+  operator compiles the destructive node selector only for an `Enabled`
+  install; and an empty selector reads as "no confinement configured".
+- **Every agent step stayed simulated after enabling**, because the dry-run
+  actuator wrapper was installed once at process start and configuration
+  reloads in place. Platform steps went live while agent steps returned a
+  successful `DRY-RUN: would execute …` — the ladder drained the node for real,
+  counted the reboot as executed, and resolved the incident with the fault
+  untouched.
+- **...and fixing that broke the janitor's host restore**, which calls the
+  actuator directly: a simulated restore returned OK, so the janitor cleared
+  the durable marker that would have retried and left the node's GPU monitoring
+  off permanently. The wrapper now refuses to simulate an undo.
+- **The dashboard and the report disagreed about what had happened.** Execution
+  followed the live gate while accounting followed the stamped flag, so a fleet
+  whose faults stopped recurring after the stop was told it had recovered those
+  GPU-hours.
+- **The janitor began writing `NoSchedule` taints in dry-run**, and at one point
+  removing protective ones. Placing a mark now reads the mode; keeping one reads
+  the incident, which are different questions.
+
+### Fixed — elsewhere
 
 - **Setting `executionMode: DryRun` to stop damage removed the blast radius
   from every incident already in flight.** The dry-run flag is stamped when an
@@ -106,6 +153,32 @@ after the first was fixed.
   JSON patch bodies walked against the CRD schema, a code-to-dashboard coverage
   check, release-asset completeness, and a mirror that fails on additions.
 - Panels for the protection metrics, which had none.
+
+### Fixed — the agent, which nobody had reviewed
+
+Rounds 21 and 22 were the first time anyone read `internal/agent/nvml` and
+`internal/agent/dcgm` adversarially. Both findings are the same shape: a probe
+whose failure looked like a result.
+
+- **`nvidia-smi` placeholders were accepted as device identities.** Only the
+  index was validated. A driver that is up but unhappy prints `[N/A]` or `ERR!`
+  rather than failing, so two GPUs could share the UUID `[N/A]` — their
+  registration entry, their accelerator-report device, and the target key of
+  any incident opened for either. The inventory now fails closed.
+- **The idle guard could wedge a node permanently.** It ran a second probe,
+  `--query-accounted-apps`, whose underlying NVML call documents returning
+  processes *in running or terminated state* from a buffer that survives until
+  explicitly cleared. On a node with accounting mode enabled, once any job had
+  run the device was never idle again — and that refusal deliberately does not
+  escalate, so the incident parked for a human while the control plane recorded
+  that live work had been spared. Removed; the compute-apps probe and the
+  `/proc` holder scan already cover it.
+- `run_diag` resolved `dcgmi` from `PATH`, which the agent puts host tooling at
+  the front of — so the version the agent *attests* came from the pinned client
+  while the diagnostic that advances or halts a ladder came from whatever the
+  node carried.
+- Dead-lettered work — the moment something permanently stops being retried —
+  left no trace on either queue. `kubeneuron_dead_lettered_total` and a panel.
 
 ### Also fixed, in the things that were supposed to prove all of the above
 

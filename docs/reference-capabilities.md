@@ -38,7 +38,7 @@ tooling, kernel-log format, or Kubernetes resource names.
 | Capability | NVIDIA | AMD | Intel |
 |---|---|---|---|
 | Kernel-log fault detection (`/dev/kmsg`) | shipped & hardware-validated — `internal/agent/kmsg/watcher.go` | shipped, not hardware-validated — `internal/agent/kmsg/amdgpu.go` | seam only (no implementation) |
-| Polled telemetry fault detection (DCGM / vendor SMI) | shipped, not hardware-validated — `internal/agent/gpuhealth/gpuhealth.go` | shipped, not hardware-validated — `internal/agent/amdhealth/amdhealth.go` (fixtures are synthetic: the amd-smi JSON schema is reconstructed, not captured) | seam only (no implementation) |
+| Polled telemetry fault detection (DCGM / vendor SMI) | shipped & hardware-validated — `internal/agent/gpuhealth/gpuhealth.go` | shipped, not hardware-validated — `internal/agent/amdhealth/amdhealth.go` (fixtures are synthetic: the amd-smi JSON schema is reconstructed, not captured) | seam only (no implementation) |
 | Metric-alert fault detection (vmalert → Alertmanager) | shipped, not hardware-validated — `configs/vmalert/gpu-rules.yaml`, `internal/detect/alertmanager.go` | seam only (no implementation) | seam only (no implementation) |
 | XID catalog (vendor-native fault encoding) | shipped & hardware-validated — `internal/detect/xid.go` | not applicable | not applicable |
 | Neutral fault catalog (`(vendor, code)` → class) | shipped, not hardware-validated — `internal/detect/fault.go` (9 NVIDIA rows; coverage pinned by `fault_coverage_test.go`) | shipped, not hardware-validated — `internal/detect/fault.go` (9 AMD rows; coverage pinned by `fault_coverage_test.go`) | seam only (no implementation) |
