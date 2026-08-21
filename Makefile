@@ -107,6 +107,18 @@ generate:
 	$(GO) tool controller-gen crd:allowDangerousTypes=true paths=./api/v1alpha1 output:crd:artifacts:config=config/crd/bases
 	cp config/crd/bases/*.yaml deploy/helm/kubeneuron/crds/
 
+# NOT SAFE TO RUN CONCURRENTLY WITH ITSELF, and that is the best explanation
+# anyone has for the unreproducible `make gates` failures.
+#
+# It runs `generate`, which REWRITES tracked files, and then asserts they are
+# unchanged. Two `make gates` on one working tree — a reviewer's and yours, say
+# — interleave a rewrite with the other's `git diff`, and one of them fails on
+# a file the other was mid-write. It passes on a re-run because by then nothing
+# else is writing.
+#
+# 32 clean runs of `go test -race ./...` (25 here, 7 by a reviewer) failed to
+# reproduce anything in the tests, while every observed gate failure coincided
+# with a second agent working in this tree. One `make gates` at a time.
 verify-generate: generate
 	@git diff --exit-code -- $(GENERATED_PATHS)
 	@test -z "$$(git ls-files --others --exclude-standard -- $(GENERATED_PATHS))" || \
