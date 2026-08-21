@@ -210,6 +210,19 @@ var (
 		Help: "Durable queued actions not yet completed by agents.",
 	})
 
+	// DeadLettered counts work that permanently left the claimable pool after
+	// exhausting its attempt budget, by queue.
+	//
+	// Both dead-letter sweeps were silent UPDATEs: an agent event that failed
+	// ingestion eight times, or a queued action no agent could complete,
+	// disappeared with nothing to log and nothing to alert on. That is the one
+	// moment when work stops being retried, which makes it the one moment
+	// somebody has to be told.
+	DeadLettered = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_dead_lettered_total",
+		Help: "Work that exhausted its attempt budget and left the claimable pool, by queue.",
+	}, []string{"queue"})
+
 	// TLSCertificateNotAfter exposes the expiry (unix seconds) of every TLS
 	// artifact a process loaded at startup. Certificates load only at
 	// process start, so these values are exact for the process lifetime;

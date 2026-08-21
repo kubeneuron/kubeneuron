@@ -369,16 +369,27 @@ func (w *Watcher) acknowledgeSeq(seq uint64) error {
 	}
 	safe := w.maxAcked
 	if len(w.pending) > 0 {
-		minPending := uint64(0)
+		// A separate flag rather than 0-as-sentinel: sequence 0 is a legal
+		// kernel sequence, and using it to mean "no minimum" would make a
+		// pending 0 invisible to the watermark it is supposed to pin. Nothing
+		// emits an XID at sequence 0 in practice — it is the boot banner — but
+		// a delivery guarantee should not rest on that.
+		var minPending uint64
+		havePending := false
 		for p := range w.pending {
-			if minPending == 0 || p < minPending {
-				minPending = p
+			if !havePending || p < minPending {
+				minPending, havePending = p, true
 			}
 		}
 		// The watermark must stay strictly below the lowest un-acked sequence, so
 		// that sequence still replays after a restart.
-		if minPending > 0 && minPending-1 < safe {
+		if havePending && minPending > 0 && minPending-1 < safe {
 			safe = minPending - 1
+		}
+		if havePending && minPending == 0 {
+			// Sequence 0 itself is un-acked, so nothing below it is durable and
+			// the watermark cannot advance at all this pass.
+			return nil
 		}
 	}
 	if safe <= w.watermark {

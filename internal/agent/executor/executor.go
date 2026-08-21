@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/kubeneuron/kubeneuron/internal/agent/dcgm"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -556,7 +557,15 @@ func (e *Executor) runDiag(ctx context.Context, a types.Action, res *types.Actio
 	if level != "1" && level != "2" && level != "3" {
 		return fmt.Errorf("run_diag: invalid diag_level %q", level)
 	}
-	out, err := e.run(ctx, "dcgmi", "diag", "-r", level)
+	// The PINNED client, not a bare "dcgmi".
+	//
+	// The agent's PATH begins with the host tooling directory, so a bare
+	// lookup silently prefers whatever client the node happens to carry —
+	// which is precisely the reasoning dcgm.BundledClientPath is absolute for.
+	// It meant the version the agent ATTESTS came from the pinned client while
+	// the diagnostic whose verdict advances or halts a remediation ladder came
+	// from an arbitrary node-provisioned one.
+	out, err := e.run(ctx, dcgm.BundledClientPath, "diag", "-r", level)
 	res.Output = truncateOutput(out)
 	if err != nil {
 		return fmt.Errorf("dcgmi diag -r %s: %w", level, err)

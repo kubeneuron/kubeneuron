@@ -33,3 +33,6 @@ web/node_modules/
 
 # Agent worktrees and local session scratch
 .claude/
+
+# The lock make verify-generate serialises on.
+.make-generate.lock

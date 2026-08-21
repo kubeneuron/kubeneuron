@@ -360,3 +360,45 @@ func TestSMIEnsureIdle(t *testing.T) {
 		t.Fatal("failed probe must fail closed")
 	}
 }
+
+// TestPlaceholderUUIDsAreRefused covers what nvidia-smi prints when the driver
+// is up but unhappy: "[N/A]" or "ERR!" in place of a value, rather than an
+// error exit.
+//
+// Only the index used to be validated, so those placeholders became device
+// identities — two GPUs sharing the UUID "[N/A]", which is then their
+// registration entry, their accelerator-report device, and the target key of
+// any incident opened for either. Two physical devices with one incident
+// identity is the failure the whole per-device story exists to avoid.
+func TestPlaceholderUUIDsAreRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+	}{
+		{"not available", "0, [N/A], [N/A], 00000000:00:1E.0\n1, [N/A], [N/A], 00000000:00:1F.0\n"},
+		{"error marker", "0, ERR!, ERR!, 00000000:00:1E.0\n"},
+		{"empty", "0, , Tesla T4, 00000000:00:1E.0\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &SMI{run: func(context.Context, string, ...string) ([]byte, error) {
+				return []byte(tc.out), nil
+			}}
+			if _, err := s.ListGPUs(context.Background()); err == nil {
+				t.Fatal("a placeholder was accepted as a device identity; two GPUs can end up " +
+					"sharing one UUID, and with it one incident")
+			}
+		})
+	}
+
+	// A real inventory still parses.
+	s := &SMI{run: func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("0, GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee, Tesla T4, 00000000:00:1E.0\n"), nil
+	}}
+	gpus, err := s.ListGPUs(context.Background())
+	if err != nil {
+		t.Fatalf("a well-formed inventory was rejected: %v", err)
+	}
+	if len(gpus) != 1 || gpus[0].UUID != "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" {
+		t.Fatalf("parsed %+v", gpus)
+	}
+}

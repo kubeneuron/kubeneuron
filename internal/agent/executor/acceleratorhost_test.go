@@ -207,7 +207,7 @@ func TestWaitDeviceReleasedIsBoundedWithoutAnActionTimeout(t *testing.T) {
 	// timeout. Without the self-imposed bound this call would never return.
 	done := make(chan []nvml.DeviceHolder, 1)
 	go func() {
-		holders, _ := e.waitDeviceReleased(context.Background(), 0)
+		holders, _ := e.waitDeviceReleased(context.Background(), "", 0)
 		done <- holders
 	}()
 

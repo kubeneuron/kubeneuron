@@ -85,7 +85,7 @@ func (e *Executor) quiesceAcceleratorHost(ctx context.Context, a types.Action, r
 			return fmt.Errorf("quiesce_accelerator_host: %w", err)
 		}
 	}
-	holders, err := e.waitDeviceReleased(ctx, index)
+	holders, err := e.waitDeviceReleased(ctx, state.GPUUUID, index)
 	if err != nil {
 		return fmt.Errorf("quiesce_accelerator_host: %w", err)
 	}
@@ -192,13 +192,28 @@ func (e *Executor) persistenceServiceActive(ctx context.Context) (bool, error) {
 	}
 }
 
+// deviceLabel names a device the way an operator should see it: by the UUID
+// when one is known, because an index is only meaningful until the next
+// renumber.
+func deviceLabel(uuid string, index int) string {
+	if uuid != "" {
+		return uuid
+	}
+	return fmt.Sprintf("%d", index)
+}
+
 // waitDeviceReleased polls until nothing holds the device, or the action's
 // deadline passes. It returns the holders that outlasted the wait.
-func (e *Executor) waitDeviceReleased(ctx context.Context, index int) ([]nvml.DeviceHolder, error) {
-	lister, ok := e.driver.(deviceHolderLister)
-	if !ok {
-		return nil, nil
-	}
+//
+// Addressed by UUID where one is known, through the same lookup the reset
+// preflight uses. It took an index alone, which is the one thing the quiesce
+// itself argues at length must not be trusted: an XID that drops a device
+// renumbers its neighbours, so a wait keyed on the index could watch a
+// NEIGHBOUR's device node — free on a drained node — and report the target
+// quiesced having proved nothing about it. The reset preflight does use the
+// UUID and catches it one step later, so this was a misleading report rather
+// than an unsafe act; it is still the report an operator reads.
+func (e *Executor) waitDeviceReleased(ctx context.Context, uuid string, index int) ([]nvml.DeviceHolder, error) {
 	// Bound the wait even when the action carries no timeout, so a holder that
 	// never releases cannot hang the agent's action loop indefinitely. When the
 	// deadline passes the loop below returns the outstanding holders and the
@@ -210,11 +225,14 @@ func (e *Executor) waitDeviceReleased(ctx context.Context, index int) ([]nvml.De
 		defer cancel()
 	}
 	for {
-		holders, err := lister.DeviceHolders(index)
+		holders, listed, err := e.deviceHolders(uuid, index)
+		if !listed {
+			return nil, nil // no lister at all: nothing to enforce, as before
+		}
 		if err != nil {
 			// Fail closed: without a readable process table there is no
 			// evidence the device is free.
-			return nil, fmt.Errorf("cannot determine which processes hold GPU %d: %w", index, err)
+			return nil, fmt.Errorf("cannot determine which processes hold GPU %s: %w", deviceLabel(uuid, index), err)
 		}
 		if len(holders) == 0 {
 			return nil, nil

@@ -4,6 +4,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -308,7 +309,7 @@ func cmdResume() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if err := cl.do("DELETE", "/api/v1/pause?actor="+actorOrLocalUser(cmd), nil, nil); err != nil {
+		if err := cl.do("DELETE", "/api/v1/pause?actor="+url.QueryEscape(actorOrLocalUser(cmd)), nil, nil); err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "automation resumed")

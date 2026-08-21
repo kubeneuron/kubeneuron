@@ -5,7 +5,7 @@
 CREATE TABLE IF NOT EXISTS event_outbox (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     event_row_id        INTEGER NOT NULL UNIQUE REFERENCES events (id),
-    state               TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'leased' | 'done'
+    state               TEXT NOT NULL DEFAULT 'pending', -- 'pending' | 'leased' | 'done' | 'dead'
     attempts            INTEGER NOT NULL DEFAULT 0,
     lease_owner         TEXT NOT NULL DEFAULT '',
     lease_token         TEXT NOT NULL DEFAULT '',

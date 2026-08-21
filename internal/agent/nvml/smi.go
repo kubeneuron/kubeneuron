@@ -134,10 +134,27 @@ func (s *SMI) refresh(ctx context.Context) ([]smiGPU, error) {
 		if err != nil {
 			return nil, fmt.Errorf("unexpected GPU index in %q", line)
 		}
+		uuid := strings.TrimSpace(fields[1])
+		// The UUID is validated as strictly as the index, and for a worse
+		// reason: it is an IDENTITY, and nvidia-smi emits placeholders.
+		//
+		// A driver that is up but unhappy prints "[N/A]" or "ERR!" in these
+		// columns rather than failing, and every one of them was taken
+		// verbatim. Two GPUs then share the UUID "[N/A]" — which becomes their
+		// registration entry, their accelerator-report device, and the target
+		// key of any incident opened for either. Two physical devices with one
+		// incident identity is the failure this whole per-device story exists
+		// to avoid.
+		//
+		// Fail the refresh closed, as an unparseable index already does: an
+		// inventory this build cannot trust is not an inventory.
+		if !strings.HasPrefix(uuid, "GPU-") && !strings.HasPrefix(uuid, "MIG-") {
+			return nil, fmt.Errorf("nvidia-smi reported %q as a GPU UUID in %q; a device identity must be GPU-… or MIG-…", uuid, line)
+		}
 		gpus = append(gpus, smiGPU{
 			info: types.GPUInfo{
 				Index: index,
-				UUID:  strings.TrimSpace(fields[1]),
+				UUID:  uuid,
 				Model: strings.TrimSpace(fields[2]),
 			},
 			pci: NormalizePCI(strings.TrimSpace(fields[3])),
@@ -251,19 +268,32 @@ func (s *SMI) EnsureIdleByUUID(ctx context.Context, uuid string) error {
 func (s *SMI) ensureIdleSelector(ctx context.Context, selector, label string) error {
 	ctx, cancel := context.WithTimeout(ctx, smiProbeTimeout)
 	defer cancel()
-	for _, query := range []string{"--query-compute-apps=pid", "--query-accounted-apps=pid"} {
-		out, err := s.run(ctx, s.Path, query, "--format=csv,noheader", "-i", selector)
-		if err != nil {
-			// Accounted-apps requires accounting mode; only the compute-apps
-			// probe is authoritative. Fail closed on its errors alone.
-			if query == "--query-compute-apps=pid" {
-				return fmt.Errorf("idle check on %s failed: %w (output: %s)", label, err, firstLine(out))
-			}
-			continue
-		}
-		if pids := strings.TrimSpace(string(out)); pids != "" && !strings.EqualFold(pids, "[N/A]") {
-			return fmt.Errorf("%s: processes still attached (%s): %w", label, firstLine([]byte(pids)), ErrNotIdle)
-		}
+	// compute-apps only. --query-accounted-apps was here and had to go.
+	//
+	// NVML documents nvmlDeviceGetAccountingPids — which is what that flag
+	// reads — as returning processes "in running OR TERMINATED state", retained
+	// in a circular buffer until `nvidia-smi -caa` clears it. So on any node
+	// with accounting mode enabled (some DCGM deployments turn it on for
+	// DCGM_FI_DEV_ACCOUNTING_DATA), once ANY job has ever run on the GPU this
+	// probe reports PIDs forever and the device is never idle again.
+	//
+	// The consequence is not a slow retry. The executor stamps the refusal as
+	// not_idle, the controller declines to escalate — correctly, because
+	// escalating past an idle guard trades the workload for the device — and
+	// quarantines to NEEDS_HUMAN having recorded that live work was spared.
+	// A broken probe reported as value delivered is exactly the conflation
+	// ErrNotIdle exists to prevent, arriving through a door that comment did
+	// not anticipate.
+	//
+	// Nothing is lost by dropping it: compute-apps reports current attachment,
+	// and the /proc holder scan is strictly stronger than either, seeing every
+	// process holding the device node rather than only CUDA contexts.
+	out, err := s.run(ctx, s.Path, "--query-compute-apps=pid", "--format=csv,noheader", "-i", selector)
+	if err != nil {
+		return fmt.Errorf("idle check on %s failed: %w (output: %s)", label, err, firstLine(out))
+	}
+	if pids := strings.TrimSpace(string(out)); pids != "" && !strings.EqualFold(pids, "[N/A]") {
+		return fmt.Errorf("%s: processes still attached (%s): %w", label, firstLine([]byte(pids)), ErrNotIdle)
 	}
 	return nil
 }

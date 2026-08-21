@@ -75,10 +75,10 @@ func (e *Executor) saveAcceleratorHostState(key string, state acceleratorHostSta
 }
 
 func (e *Executor) deleteAcceleratorHostState(key string) error {
+	// No os.ErrNotExist branch: readAcceleratorHostStateFile turns a missing
+	// file into a valid empty one and can never return it. A dead check here
+	// reads as a handled case and is not one, which is worse than its absence.
 	stateFile, err := e.readAcceleratorHostStateFile()
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
 	if err != nil {
 		return err
 	}

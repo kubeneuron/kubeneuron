@@ -15,8 +15,10 @@ IMAGE_TARGETS := operator controller agent kubeneuronctl
 # Dockerfile stage per published image name.
 image_stage = $(if $(filter kubeneuronctl,$(1)),cli,$(1))
 GENERATED_PATHS := api/v1alpha1/zz_generated.deepcopy.go config/crd/bases deploy/helm/kubeneuron/crds
+# The lock verify-generate serialises on. In .gitignore; created on first use.
+GENERATE_LOCK := .make-generate.lock
 
-.PHONY: all build test test-integration-kind kind-clean lint clean tidy generate verify-generate proto web docs docs-serve docker gates gates-full verify-docs verify-image mirror
+.PHONY: all build test test-integration-kind kind-clean lint clean tidy generate verify-generate verify-generate-locked proto web docs docs-serve docker gates gates-full verify-docs verify-image mirror
 
 all: build
 
@@ -107,19 +109,37 @@ generate:
 	$(GO) tool controller-gen crd:allowDangerousTypes=true paths=./api/v1alpha1 output:crd:artifacts:config=config/crd/bases
 	cp config/crd/bases/*.yaml deploy/helm/kubeneuron/crds/
 
-# NOT SAFE TO RUN CONCURRENTLY WITH ITSELF, and that is the best explanation
-# anyone has for the unreproducible `make gates` failures.
+# Serialised, because it REWRITES tracked files and then asserts they are
+# unchanged. Two of these on one working tree can in principle interleave one's
+# rewrite with the other's `git diff`.
 #
-# It runs `generate`, which REWRITES tracked files, and then asserts they are
-# unchanged. Two `make gates` on one working tree — a reviewer's and yours, say
-# — interleave a rewrite with the other's `git diff`, and one of them fails on
-# a file the other was mid-write. It passes on a re-run because by then nothing
-# else is writing.
+# Read that as removing a hazard, NOT as the fix for a known bug. `make gates`
+# has failed three times unreproducibly on this machine and the cause is still
+# unknown. What has been ruled out: 32 clean runs of `go test -race ./...` (25
+# in one sitting, 7 by a reviewer) reproduced nothing in the tests; actionlint's
+# network fetch is gone; the 10-minute per-package timeout is gone; no OOM kill
+# appears in the kernel log. This hypothesis fitted — every observed failure
+# coincided with a second agent working in the tree — but six concurrent
+# unserialised pairs did not reproduce it either, so it is a hypothesis that
+# survives rather than one that was confirmed.
 #
-# 32 clean runs of `go test -race ./...` (25 here, 7 by a reviewer) failed to
-# reproduce anything in the tests, while every observed gate failure coincided
-# with a second agent working in this tree. One `make gates` at a time.
-verify-generate: generate
+# The lock is cheap and removes the class without changing what generation does.
+# controller-gen's `object` mode writes zz_generated.deepcopy.go beside its
+# source and takes no output directory, so generating into a scratch tree and
+# comparing would mean copying the module — more machinery than the problem is
+# worth. Serialising costs nothing when nobody else is running.
+#
+# flock is not everywhere (macOS ships none), so its absence degrades to the
+# old behaviour with a warning rather than failing the gate.
+verify-generate:
+	@if command -v flock >/dev/null 2>&1; then \
+		flock "$(GENERATE_LOCK)" $(MAKE) verify-generate-locked; \
+	else \
+		echo "flock not found; running verify-generate unserialised (do not run two at once)" >&2; \
+		$(MAKE) verify-generate-locked; \
+	fi
+
+verify-generate-locked: generate
 	@git diff --exit-code -- $(GENERATED_PATHS)
 	@test -z "$$(git ls-files --others --exclude-standard -- $(GENERATED_PATHS))" || \
 		(echo "untracked generated files found; run 'make generate' and commit the result" >&2; \

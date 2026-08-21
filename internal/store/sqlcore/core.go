@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -194,8 +195,17 @@ func (c *Core) Prune(ctx context.Context, dataRetention, auditRetention time.Dur
 			q := tx.(*Queries)
 			var err error
 			// Order respects the event_outbox -> events foreign key.
+			//
+			// BOTH terminal states, for the same reason the actions prune takes
+			// all three of its own — and this queue got the dead-letter
+			// mechanism in the same round as that one and not the prune.
+			//
+			// The cost here is worse than accumulation. The events delete below
+			// spares any row still referenced by the outbox, so every dead
+			// outbox row pins its raw event past the configured retention
+			// FOREVER: kernel fault text that was promised to age out does not.
 			if stats.Outbox, err = q.execCount(ctx,
-				`DELETE FROM event_outbox WHERE state='done' AND updated_at < ?`, cutoff); err != nil {
+				`DELETE FROM event_outbox WHERE state IN `+terminalEventStates+` AND updated_at < ?`, cutoff); err != nil {
 				return err
 			}
 			if stats.Events, err = q.execCount(ctx,
@@ -988,13 +998,16 @@ func (c *Core) ClaimNextAction(ctx context.Context, node, bootID string, leaseDu
 	// re-leased on every expiry forever. A genuinely in-flight action (unexpired
 	// lease) is left untouched so the boot-ID/lease completion contract holds
 	// for work that may still be running.
-	if _, err := c.db.ExecContext(ctx, `
+	if res, err := c.db.ExecContext(ctx, `
 		UPDATE actions
 		SET state='dead', lease_token='', lease_expires_at_ns=0, updated_at=?
 		WHERE node=? AND attempts>=?
 		  AND (state='pending' OR (state='leased' AND lease_expires_at_ns <= ?))`,
 		ts(now), node, MaxActionAttempts, nowNS); err != nil {
 		return nil, fmt.Errorf("claim action: dead-letter exhausted actions: %w", err)
+	} else if n, _ := res.RowsAffected(); n > 0 {
+		// Counted, because this is the moment work stops being retried.
+		metrics.DeadLettered.WithLabelValues("actions").Add(float64(n))
 	}
 
 	// The claim is atomic under concurrency without FOR UPDATE SKIP LOCKED.
@@ -1187,6 +1200,12 @@ func (q *Queries) CompleteAction(ctx context.Context, actionID string, res types
 // how many there are — which they have, repeatedly, one omission per round.
 const terminalActionStates = `('done','dead','cancelled')`
 
+// terminalEventStates is the same idea for the event outbox, which
+// terminalises two ways: 'done' delivered, 'dead' exhausted MaxEventAttempts.
+// Written beside its sibling so the next person adding a queue sees that this
+// is how the question is asked here.
+const terminalEventStates = `('done','dead')`
+
 // DiscardCompletedAction removes a finished queue row so a caller that
 // derives a DETERMINISTIC action ID can start a fresh attempt.
 //
@@ -1356,13 +1375,15 @@ func (c *Core) ClaimNextEvent(ctx context.Context, workerID string, leaseDuratio
 	// claimable pool for good rather than re-leasing on every expiry and
 	// aborting each drain batch forever. An event under an unexpired lease is
 	// left untouched so a worker still holding a valid claim can complete it.
-	if _, err := c.db.ExecContext(ctx, `
+	if res, err := c.db.ExecContext(ctx, `
 		UPDATE event_outbox
 		SET state='dead', lease_owner='', lease_token='', lease_expires_at_ns=0, updated_at=?
 		WHERE attempts>=?
 		  AND (state='pending' OR (state='leased' AND lease_expires_at_ns <= ?))`,
 		ts(now), MaxEventAttempts, nowNS); err != nil {
 		return nil, fmt.Errorf("claim event: dead-letter exhausted events: %w", err)
+	} else if n, _ := res.RowsAffected(); n > 0 {
+		metrics.DeadLettered.WithLabelValues("events").Add(float64(n))
 	}
 
 	var outboxID int64

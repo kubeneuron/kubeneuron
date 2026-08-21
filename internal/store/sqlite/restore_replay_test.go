@@ -252,3 +252,55 @@ func TestNonTerminalStatesAreNotTerminal(t *testing.T) {
 			"beside the one the agent is executing")
 	}
 }
+
+// TestPruneRemovesEveryTerminalOutboxState is the event-outbox half of the
+// guard that round 21 built for the action queue — and it is here because the
+// class recurred one queue over within a day.
+//
+// The outbox terminalises two ways: delivered, and dead-lettered after
+// MaxEventAttempts. The prune knew one. Beyond accumulation, the events delete
+// spares any row still referenced by the outbox, so a dead outbox row pins its
+// raw kernel fault text past the configured retention permanently.
+//
+// Driven from the STATE STRINGS, like its sibling: a third terminal state added
+// without teaching the prune fails here.
+func TestPruneRemovesEveryTerminalOutboxState(t *testing.T) {
+	for _, state := range []string{"done", "dead"} {
+		t.Run(state, func(t *testing.T) {
+			s := openLeaseTestStore(t)
+			ctx := context.Background()
+			old := time.Now().Add(-90 * 24 * time.Hour)
+
+			stamp := old.UTC().Format(time.RFC3339Nano)
+			if _, err := s.sqlDB.ExecContext(ctx,
+				`INSERT INTO events (id, node, xid, raw, timestamp) VALUES (1, 'n1', 79, 'Xid 79', ?)`,
+				stamp); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.sqlDB.ExecContext(ctx,
+				`INSERT INTO event_outbox (event_row_id, state, attempts, created_at, updated_at)
+				 VALUES (1, ?, 0, ?, ?)`, state, stamp, stamp); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := s.Prune(ctx, 24*time.Hour, 0); err != nil {
+				t.Fatal(err)
+			}
+
+			var outbox, events int
+			if err := s.sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_outbox`).Scan(&outbox); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events`).Scan(&events); err != nil {
+				t.Fatal(err)
+			}
+			if outbox != 0 {
+				t.Fatalf("a %q outbox row survived the prune", state)
+			}
+			if events != 0 {
+				t.Fatalf("a %q outbox row pinned its raw event past retention; kernel fault text "+
+					"that was promised to age out does not", state)
+			}
+		})
+	}
+}

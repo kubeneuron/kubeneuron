@@ -87,7 +87,29 @@ func (a *Actuator) Execute(ctx context.Context, node types.Node, act types.Actio
 			// agent claimed this entry; fail the step without executing.
 			return nil, fmt.Errorf("agentrpc: %s on %s was cancelled before delivery", act.Type, node.Name)
 		}
-		if queued.Done && queued.Result != nil {
+		if queued.Dead {
+			// Terminal, and no agent can ever claim it again. Round 21 gave
+			// QueuedAction one Terminal() predicate so no site would enumerate
+			// the states itself; this is the site that kept doing so, and it
+			// is the one whose symptom that round described without fixing.
+			//
+			// Polling on instead of failing is not merely wasteful. The
+			// controller derives an action ID from (incident, step, attempt)
+			// and re-dispatches the SAME id after an interrupted execution, so
+			// the enqueue conflicts away against the dead row and this loop
+			// burns the whole step timeout holding a concurrency slot. runStep
+			// then reads that timeout as a step failure and escalates to the
+			// failure playbook — a bigger hammer, for a step that provably
+			// never ran.
+			return nil, fmt.Errorf("agentrpc: %s on %s exhausted its attempt budget after %d claims and was dead-lettered; no agent completed it",
+				act.Type, node.Name, queued.Attempts)
+		}
+		if queued.Done && queued.Result == nil {
+			// A completed action with no recorded result cannot be waited on
+			// either: the loop below would poll it until the caller's deadline.
+			return nil, fmt.Errorf("agentrpc: %s on %s is recorded complete with no result", act.Type, node.Name)
+		}
+		if queued.Done {
 			if !queued.Result.OK {
 				return queued.Result, fmt.Errorf("agentrpc: %s on %s failed: %s",
 					act.Type, node.Name, queued.Result.Error)

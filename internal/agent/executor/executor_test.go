@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/kubeneuron/kubeneuron/internal/agent/dcgm"
 	"os"
 	"strings"
 	"sync"
@@ -132,8 +133,13 @@ func TestRunDiagValidatesLevelAndCapturesOutput(t *testing.T) {
 	if err != nil || !strings.Contains(res.Output, "Pass") {
 		t.Fatalf("diag = %+v, %v", res, err)
 	}
-	if run.calls[0] != "dcgmi diag -r 2" {
-		t.Fatalf("call = %q", run.calls[0])
+	// The PINNED client path, not a bare "dcgmi". The agent's PATH begins with
+	// the host tooling directory, so a bare lookup would run whatever client
+	// the node carries — while the version the agent attests comes from the
+	// bundled one. The diagnostic whose verdict advances or halts a
+	// remediation ladder must come from the client we shipped.
+	if run.calls[0] != dcgm.BundledClientPath+" diag -r 2" {
+		t.Fatalf("call = %q, want the bundled client at %s", run.calls[0], dcgm.BundledClientPath)
 	}
 
 	if _, err := e.Execute(context.Background(), types.Action{
