@@ -319,7 +319,25 @@ type QueuedAction struct {
 	ExecutorBootID string `json:"executor_boot_id,omitempty"`
 	// Cancelled marks undelivered work tombstoned by the controller.
 	Cancelled bool `json:"cancelled,omitempty"`
+	// Dead marks work that exhausted its attempt budget. It is a TERMINAL
+	// state like the other two, and it is the one that keeps being forgotten:
+	// a row in it can never be claimed again, so code that tests only Done and
+	// Cancelled reads it as "still in flight" and waits for something that will
+	// never happen.
+	Dead bool `json:"dead,omitempty"`
 }
+
+// Terminal reports whether this action can never make further progress.
+//
+// It exists because the answer was being spelled out inline, differently, at
+// every new site that needed it — and eight review rounds running found the
+// same defect wearing a different hat: the store's prune query knew three
+// terminal states, the discard knew two, the janitor's re-dispatch probe knew
+// two different ones. Each omission wedged a node's GPU monitoring for the
+// retention window while consuming a shared budget on every tick.
+//
+// So there is one predicate, and asking it is the only supported way to know.
+func (q QueuedAction) Terminal() bool { return q.Done || q.Dead || q.Cancelled }
 
 // ActionResult is the outcome of executing an Action.
 type ActionResult struct {

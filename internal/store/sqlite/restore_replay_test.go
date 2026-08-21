@@ -177,3 +177,78 @@ func TestDiscardCompletedActionClearsADeadLetteredRow(t *testing.T) {
 			"janitor's shared budget on every tick", err)
 	}
 }
+
+// TestTerminalCoversEveryTerminalState is the guard against the defect class
+// that recurred in eight consecutive review rounds: a terminal-state set
+// spelled out inline at a new site instead of asked of one shared predicate.
+//
+// The queue terminalises three ways. The prune query knew three; the discard
+// knew two until it was fixed; the janitor's re-dispatch probe, added after
+// that, knew two DIFFERENT ones — so a dead-lettered restore read back as
+// "still in flight" and the probe handed back its wedged ID forever, leaving a
+// node's GPU monitoring off for the retention window while consuming the
+// janitor's shared budget on every tick.
+//
+// Driven from the STATE STRINGS on purpose. A fourth terminal state added to
+// the schema without teaching QueuedAction.Terminal() about it fails here,
+// which is the only way this stops happening.
+func TestTerminalCoversEveryTerminalState(t *testing.T) {
+	for _, state := range []string{"done", "dead", "cancelled"} {
+		t.Run(state, func(t *testing.T) {
+			s := openLeaseTestStore(t)
+			ctx := context.Background()
+			const id = "act-terminal"
+			if err := s.EnqueueAction(ctx, "node-t", types.Action{
+				ID: id, Type: types.ActionRestoreAcceleratorHost, Timeout: time.Minute,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.sqlDB.ExecContext(ctx,
+				`UPDATE actions SET state=?, lease_token='', lease_expires_at_ns=0 WHERE id=?`,
+				state, id); err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.GetAction(ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.Terminal() {
+				t.Fatalf("an action in state %q reports Terminal()=false; every caller that asks "+
+					"whether it can still make progress is told to keep waiting for something "+
+					"that will never happen", state)
+			}
+		})
+	}
+}
+
+// TestNonTerminalStatesAreNotTerminal: the predicate is only useful if it also
+// says no. A pending or leased action belongs to an agent that may be running
+// it right now.
+func TestNonTerminalStatesAreNotTerminal(t *testing.T) {
+	s := openLeaseTestStore(t)
+	ctx := context.Background()
+	const id = "act-live"
+	if err := s.EnqueueAction(ctx, "node-l", types.Action{
+		ID: id, Type: types.ActionRestoreAcceleratorHost, Timeout: time.Minute,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetAction(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Terminal() {
+		t.Fatal("a pending action reports Terminal()=true; the janitor would mint a second " +
+			"restore beside the one an agent is about to claim")
+	}
+	if _, err := s.ClaimNextAction(ctx, "node-l", "boot-1", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = s.GetAction(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if got.Terminal() {
+		t.Fatal("a LEASED action reports Terminal()=true; a second copy would be dispatched " +
+			"beside the one the agent is executing")
+	}
+}

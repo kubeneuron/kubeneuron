@@ -483,11 +483,28 @@ func validateTLS(s *kubeneuronv1alpha1.KubeNeuron) error {
 			keyPair bool
 		}{name: "publicServerSecretRef", ref: ref, keyPair: true})
 	}
+	// Each role must name a DISTINCT Secret.
+	//
+	// The PKI keys its material by role, not by Secret name, so two roles
+	// pointing at one Secret with issuer: Operator mints two authorities and
+	// writes both under the same name — the second wins, and the controller's
+	// serving leaf is then signed by an authority the agents' mounted CA does
+	// not contain. "One CA for everything" is a plausible simplification for
+	// somebody to try, and nothing said no.
+	//
+	// With default keys it self-heals on the next pass, because the leaf
+	// provenance check reissues on a mismatch. With distinct ref.Key values it
+	// wedges permanently: the authority load fails, which raises
+	// CARotationRequired, and that deliberately blocks everything in the
+	// installation until a human runs the rotation procedure. Refusing the
+	// configuration is far kinder than either.
+	seen := map[string]string{}
 	for _, item := range refs {
 		if item.ref == nil {
 			return fmt.Errorf("spec.tls.%s is required", item.name)
 		}
-		if strings.TrimSpace(item.ref.Name) == "" {
+		name := strings.TrimSpace(item.ref.Name)
+		if name == "" {
 			return fmt.Errorf("spec.tls.%s.name is required", item.name)
 		}
 		if item.ref.Namespace != "" {
@@ -496,6 +513,12 @@ func validateTLS(s *kubeneuronv1alpha1.KubeNeuron) error {
 		if item.keyPair && item.ref.Key != "" {
 			return fmt.Errorf("spec.tls.%s.key is not supported for a TLS key-pair Secret", item.name)
 		}
+		if first, dup := seen[name]; dup {
+			return fmt.Errorf("spec.tls.%s and spec.tls.%s both name Secret %q; each TLS role needs its own Secret, "+
+				"because the operator issues material per role and would overwrite one with the other",
+				first, item.name, name)
+		}
+		seen[name] = item.name
 	}
 	return nil
 }

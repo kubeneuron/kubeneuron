@@ -427,7 +427,7 @@ func (c *Controller) restoreActionID(ctx context.Context, nodeName string) (stri
 		if err != nil {
 			return "", fmt.Errorf("reading the restore queue for %s: %w", nodeName, err)
 		}
-		if !queued.Done && !queued.Cancelled {
+		if !queued.Terminal() {
 			return id, nil // still in flight: re-attach, do not stack
 		}
 		// Terminal. That attempt is over; free its row and try the next index.

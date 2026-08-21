@@ -77,3 +77,69 @@ func TestACompletedRotationClearsIt(t *testing.T) {
 			"rotation somebody had already completed")
 	}
 }
+
+// TestTwoTLSRolesCannotShareOneSecret covers a plausible simplification —
+// "one CA for everything" — that the API used to accept and the PKI could not
+// honour.
+//
+// The PKI keys its material by ROLE, not by Secret name, so two roles pointing
+// at one Secret with issuer: Operator mint two authorities and write both under
+// the same name. The second wins, and the controller's serving leaf is then
+// signed by an authority the agents' mounted CA does not contain — the fleet
+// stops authenticating.
+//
+// With default keys it self-heals on the next pass, because the leaf provenance
+// check reissues on a mismatch. With distinct keys it wedges permanently: the
+// authority load fails, which raises CARotationRequired, and that deliberately
+// blocks everything in the installation until a human runs the rotation
+// procedure. Refusing the configuration is kinder than either.
+func TestTwoTLSRolesCannotShareOneSecret(t *testing.T) {
+	inst := validTLSInstallation()
+	inst.Spec.TLS.ServerCASecretRef.Name = inst.Spec.TLS.ClientCASecretRef.Name
+
+	err := validateTLS(inst)
+	if err == nil {
+		t.Fatal("two TLS roles naming one Secret was accepted; the operator would issue two " +
+			"authorities under that name and the fleet would stop mutually authenticating")
+	}
+	if !strings.Contains(err.Error(), inst.Spec.TLS.ClientCASecretRef.Name) {
+		t.Fatalf("the error does not name the shared Secret: %v", err)
+	}
+
+	// And the ordinary configuration is still accepted.
+	if err := validateTLS(validTLSInstallation()); err != nil {
+		t.Fatalf("a well-formed TLS block was rejected: %v", err)
+	}
+}
+
+func validTLSInstallation() *kubeneuronv1alpha1.KubeNeuron {
+	ref := func(name string) *kubeneuronv1alpha1.SecretReference {
+		return &kubeneuronv1alpha1.SecretReference{Name: name}
+	}
+	inst := &kubeneuronv1alpha1.KubeNeuron{}
+	inst.Spec.TLS.ServerSecretRef = ref("kn-controller-tls")
+	inst.Spec.TLS.ClientCASecretRef = ref("kn-agent-client-ca")
+	inst.Spec.TLS.ClientSecretRef = ref("kn-agent-tls")
+	inst.Spec.TLS.ServerCASecretRef = ref("kn-controller-server-ca")
+	return inst
+}
+
+// TestAnUnrelatedFailureDoesNotClearIt: the condition exists to be alerted on,
+// and an alert that blinks off on every apiserver blip is one people mute.
+//
+// Two reconcile paths renew TLS best-effort and then report an unrelated error
+// — a failure to list child configuration, an invalid compile. Neither learned
+// anything about the CA, so neither may clear its verdict.
+func TestAnUnrelatedFailureDoesNotClearIt(t *testing.T) {
+	inst := &kubeneuronv1alpha1.KubeNeuron{}
+	setTLSMaterialCondition(inst, &CARotationRequiredError{Secret: "s", Reason: "expiring"})
+	if meta.FindStatusCondition(inst.Status.Conditions, "TLSMaterialValid") == nil {
+		t.Fatal("setup failed: the condition was never raised")
+	}
+
+	setTLSMaterialCondition(inst, fmt.Errorf("list GPUPlaybooks: apiserver unavailable"))
+	if meta.FindStatusCondition(inst.Status.Conditions, "TLSMaterialValid") == nil {
+		t.Fatal("an unrelated reconcile failure cleared the CA-rotation condition; the signal " +
+			"would flap off and on with every transient apiserver error")
+	}
+}

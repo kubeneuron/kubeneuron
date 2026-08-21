@@ -450,9 +450,18 @@ func (r *KubeNeuronReconciler) updateStatus(ctx context.Context, installation *k
 func setTLSMaterialCondition(installation *kubeneuronv1alpha1.KubeNeuron, reconcileErr error) {
 	var caErr *CARotationRequiredError
 	if !errors.As(reconcileErr, &caErr) {
-		// Healthy, or failing for some other reason: a completed rotation must
-		// not leave its condition behind for somebody to alert on forever.
-		meta.RemoveStatusCondition(&installation.Status.Conditions, "TLSMaterialValid")
+		// Clearing it is only honest when the PKI was actually reconciled.
+		//
+		// Two paths above call this with an unrelated error — a failure to list
+		// child configuration, an invalid compile — after renewing TLS material
+		// best-effort. Removing the condition there would flap the one signal
+		// that exists to be alerted on: red, then absent for one pass on an
+		// apiserver blip, then red again. A non-nil error that is not a CA
+		// rotation says nothing about the CA, so leave whatever the last
+		// PKI-bearing pass concluded.
+		if reconcileErr == nil {
+			meta.RemoveStatusCondition(&installation.Status.Conditions, "TLSMaterialValid")
+		}
 		return
 	}
 	meta.SetStatusCondition(&installation.Status.Conditions, metav1.Condition{

@@ -1175,15 +1175,40 @@ cmd_sweep() {
 
 	add_remaining "cluster" "$(aws eks list-clusters --region "$AWS_REGION" \
 		--query "clusters[?@=='${CLUSTER_NAME}']|join(',',@)" --output text 2>/dev/null || true)"
+	# The assertion must be at least as WIDE as the deletions it verifies, or a
+	# resource the sweep deleted best-effort and missed is never checked — the
+	# file's own words: a sweep that cannot see a leak is worse than no sweep,
+	# because it is written down as proof. Both instance filters, all three
+	# volume filters.
 	add_remaining "instances" "$(aws ec2 describe-instances --region "$AWS_REGION" \
 		--filters "Name=tag:aws:eks:cluster-name,Values=${CLUSTER_NAME}" \
+		"Name=instance-state-name,Values=pending,running,stopping,stopped" \
+		--query "Reservations[].Instances[].InstanceId|join(',',@)" --output text 2>/dev/null || true)"
+	add_remaining "instances (run-tagged)" "$(aws ec2 describe-instances --region "$AWS_REGION" \
+		--filters "Name=tag:kubeneuron:e2e,Values=true" \
+		"Name=tag:${E2E_RUN_TAG},Values=${CLUSTER_NAME}" \
 		"Name=instance-state-name,Values=pending,running,stopping,stopped" \
 		--query "Reservations[].Instances[].InstanceId|join(',',@)" --output text 2>/dev/null || true)"
 	add_remaining "stacks" "$(aws cloudformation list-stacks --region "$AWS_REGION" \
 		--query "StackSummaries[?starts_with(StackName,'eksctl-${CLUSTER_NAME}-') && StackStatus!='DELETE_COMPLETE'].StackName|join(',',@)" \
 		--output text 2>/dev/null || true)"
-	add_remaining "volumes" "$(aws ec2 describe-volumes --region "$AWS_REGION" \
+	# `status` is filtered, and `deleting` is deliberately excluded: delete-volume
+	# is asynchronous, so a volume the sweep just removed sits in `deleting` for
+	# up to a minute and only the three fast ECR deletes separate the loop from
+	# this check. Without the filter a SUCCESSFUL sweep reports the account
+	# unclean — the same false alarm this assertion replaced, reintroduced
+	# inside it.
+	local volume_states="Name=status,Values=available,in-use,error"
+	add_remaining "volumes (csi)" "$(aws ec2 describe-volumes --region "$AWS_REGION" \
 		--filters "Name=tag:kubernetes.io/created-for/pvc/namespace,Values=${RUNTIME_NAMESPACE}" \
+		"$volume_states" \
+		--query "Volumes[].VolumeId|join(',',@)" --output text 2>/dev/null || true)"
+	add_remaining "volumes (run-tagged)" "$(aws ec2 describe-volumes --region "$AWS_REGION" \
+		--filters "Name=tag:kubeneuron:e2e,Values=true" \
+		"Name=tag:${E2E_RUN_TAG},Values=${CLUSTER_NAME}" "$volume_states" \
+		--query "Volumes[].VolumeId|join(',',@)" --output text 2>/dev/null || true)"
+	add_remaining "volumes (legacy tag)" "$(aws ec2 describe-volumes --region "$AWS_REGION" \
+		--filters "Name=tag:KubernetesCluster,Values=${CLUSTER_NAME}" "$volume_states" \
 		--query "Volumes[].VolumeId|join(',',@)" --output text 2>/dev/null || true)"
 	add_remaining "recycle role" "$(aws iam get-role --role-name "$RECYCLE_ROLE_NAME" \
 		--query "Role.RoleName" --output text 2>/dev/null || true)"
@@ -1192,7 +1217,10 @@ cmd_sweep() {
 		printf 'sweep: these still exist after the deletions:%b\n' "$remaining" >&2
 		die "the account is not clean — investigate before the next run"
 	fi
-	log "sweep: clean (verified against AWS: no cluster, EC2, stacks, volumes, recycle role, or run images)"
+	# ECR is deliberately absent from the assertion and therefore from this
+	# line: the images are deleted best-effort and cost cents, and probing them
+	# would claim a verification this does not perform.
+	log "sweep: clean (verified against AWS: no cluster, EC2, stacks, volumes or recycle role; run images deleted best-effort)"
 }
 
 # cmd_reap is the out-of-band watchdog. Run it from an INDEPENDENT schedule (a

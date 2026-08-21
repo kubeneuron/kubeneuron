@@ -685,7 +685,16 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 					leading.Store(true)
 					log.Info("leadership acquired; starting the remediation walk")
 					if err := ctrl.Run(leadCtx); err != nil {
-						log.Error("controller run", "err", err)
+						// Release leadership, like the two restore failures
+						// above. client-go runs this callback in a goroutine
+						// and keeps renewing the Lease regardless, so simply
+						// logging would leave this replica holding the lock,
+						// reporting Ready, and doing no work — with no standby
+						// able to take over. Run returns nil on ctx.Done()
+						// today, so this is unreachable; the invariant is one
+						// edit away from being false and the cost is a line.
+						log.Error("controller run; releasing leadership", "err", err)
+						stop()
 					}
 				},
 				OnStoppedLeading: func() {

@@ -208,7 +208,7 @@ func (c *Core) Prune(ctx context.Context, dataRetention, auditRetention time.Dur
 			// terminalized. Leaving 'dead'/'cancelled' rows unpruned let them
 			// accumulate forever.
 			if stats.Actions, err = q.execCount(ctx,
-				`DELETE FROM actions WHERE state IN ('done','dead','cancelled') AND updated_at < ?`, cutoff); err != nil {
+				`DELETE FROM actions WHERE state IN `+terminalActionStates+` AND updated_at < ?`, cutoff); err != nil {
 				return err
 			}
 			return nil
@@ -1181,6 +1181,12 @@ func (q *Queries) CompleteAction(ctx context.Context, actionID string, res types
 	return store.ErrLeaseLost
 }
 
+// terminalActionStates is the SQL half of types.QueuedAction.Terminal(): the
+// three states from which an action can never make further progress. Written
+// once so the prune, the discard and the Go predicate cannot disagree about
+// how many there are — which they have, repeatedly, one omission per round.
+const terminalActionStates = `('done','dead','cancelled')`
+
 // DiscardCompletedAction removes a finished queue row so a caller that
 // derives a DETERMINISTIC action ID can start a fresh attempt.
 //
@@ -1206,7 +1212,7 @@ func (q *Queries) CompleteAction(ctx context.Context, actionID string, res types
 // action still pending or leased is left exactly where it is.
 func (q *Queries) DiscardCompletedAction(ctx context.Context, actionID string) error {
 	_, err := q.db.ExecContext(ctx,
-		`DELETE FROM actions WHERE id=? AND state IN ('done','dead','cancelled')`, actionID)
+		`DELETE FROM actions WHERE id=? AND state IN `+terminalActionStates, actionID)
 	return err
 }
 
@@ -1239,6 +1245,9 @@ func scanAction(r rowScanner) (*types.QueuedAction, error) {
 	}
 	qa.Done = state == "done"
 	qa.Cancelled = state == "cancelled"
+	// The third terminal state, set here so QueuedAction.Terminal() can be the
+	// only place anyone has to know there are three.
+	qa.Dead = state == "dead"
 	if state == "leased" && leaseExpiresAtNS > 0 {
 		qa.LeaseExpiresAt = time.Unix(0, leaseExpiresAtNS).UTC()
 	} else {

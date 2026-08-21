@@ -113,10 +113,9 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 	if !alreadyHeld {
 		inc.RemediationSlotHeld = true // persisted by the transition below
 	}
-	// The audit records what this step WILL do, from the live gate, not from
-	// the flag stamped when the incident opened. A ladder that simulates after
-	// a mid-flight switch to DryRun must not read later as remediation.
-	//
+	// The audit records what this step WILL do — the decision pinned above,
+	// not the flag stamped when the incident opened. A ladder that simulates
+	// after a mid-flight switch to DryRun must not read later as remediation.
 	if err := c.transition(ctx, inc, types.StateExecuting, actor, step.Name,
 		auditStepResult(step.Action, simulate), step.Params); err != nil {
 		c.gate.StepDone(inc.Target, action, 0)
