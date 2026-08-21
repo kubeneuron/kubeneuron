@@ -573,6 +573,26 @@ Secrets the operator issued carry `kubeneuron.io/managed-pki: "true"`. That labe
 is the whole distinction: without it the material is treated as somebody else's
 and is never overwritten.
 
+!!! warning "A managed CA inside its renewal window blocks every other change"
+    When a CA the operator issued approaches expiry, the reconcile stops before
+    anything converges — no ConfigMap, no Deployment, no DaemonSet. That is
+    deliberate: replacing a trust root in place leaves a fleet that cannot
+    mutually authenticate, so it has to be the documented expand/activate/retire
+    procedure and not an automatic write. But it means configuration changes you
+    make during that window will not land, and the window is up to 45 days.
+
+    **Alert on it.** The installation carries a condition naming exactly this,
+    distinct from any other reconcile failure:
+
+    ```sh
+    kubectl -n kube-neuron get kubeneuron kubeneuron \
+      -o jsonpath='{.status.conditions[?(@.type=="TLSMaterialValid")]}'
+    ```
+
+    `status: "False"` with `reason: CARotationRequired` means rotate now; the
+    message names the Secret. The condition is absent when the CA is healthy,
+    including immediately after a rotation you have completed.
+
 !!! warning "Installations created before this existed"
     `deploy/install.sh` used to generate the four Secrets with `openssl` and
     nothing renewed them. Those Secrets have no `kubeneuron.io/managed-pki`

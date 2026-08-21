@@ -401,6 +401,7 @@ func (r *KubeNeuronReconciler) updateStatus(ctx context.Context, installation *k
 			ObservedGeneration: installation.Generation,
 			LastTransitionTime: metav1.Now(),
 		})
+		setTLSMaterialCondition(installation, nil)
 		meta.SetStatusCondition(&installation.Status.Conditions, metav1.Condition{
 			Type:               "DependenciesConfigured",
 			Status:             metav1.ConditionTrue,
@@ -432,6 +433,38 @@ func (r *KubeNeuronReconciler) updateStatus(ctx context.Context, installation *k
 		return nil
 	}
 	return r.Status().Patch(ctx, installation, client.MergeFrom(before))
+}
+
+// setTLSMaterialCondition raises TLSMaterialValid=False when the failure is a
+// CA that needs rotating, and clears it otherwise.
+//
+// It is its own condition because it is the one reconcile failure a human must
+// act on, and the action is a documented procedure rather than a bug report.
+// It also blocks EVERYTHING — no ConfigMap, Deployment or DaemonSet converges
+// while it stands — for up to maxRenewalLead before the certificate actually
+// expires. That is deliberate: replacing a trust root in place leaves a fleet
+// that cannot mutually authenticate. But "Ready=False, reason
+// ReconciliationFailed" is indistinguishable from a transient apiserver blip,
+// so an operator could watch configuration changes silently fail to land for
+// weeks with nothing to alert on.
+func setTLSMaterialCondition(installation *kubeneuronv1alpha1.KubeNeuron, reconcileErr error) {
+	var caErr *CARotationRequiredError
+	if !errors.As(reconcileErr, &caErr) {
+		// Healthy, or failing for some other reason: a completed rotation must
+		// not leave its condition behind for somebody to alert on forever.
+		meta.RemoveStatusCondition(&installation.Status.Conditions, "TLSMaterialValid")
+		return
+	}
+	meta.SetStatusCondition(&installation.Status.Conditions, metav1.Condition{
+		Type:   "TLSMaterialValid",
+		Status: metav1.ConditionFalse,
+		Reason: "CARotationRequired",
+		Message: fmt.Sprintf("%s: %s. Nothing else in this installation will converge until it is rotated — "+
+			"follow the expand/activate/retire procedure in docs/operations.md (TLS material and its renewal).",
+			caErr.Secret, caErr.Reason),
+		ObservedGeneration: installation.Generation,
+		LastTransitionTime: metav1.Now(),
+	})
 }
 
 func (r *KubeNeuronReconciler) updateReconcileFailure(
@@ -473,6 +506,20 @@ func (r *KubeNeuronReconciler) updateReconcileFailure(
 		ObservedGeneration: installation.Generation,
 		LastTransitionTime: metav1.Now(),
 	})
+
+	// A CA that needs rotating gets its own condition, because it is the one
+	// reconcile failure a human must act on and the action is a documented
+	// procedure rather than a bug report.
+	//
+	// It also blocks EVERYTHING — no ConfigMap, Deployment or DaemonSet
+	// converges while it stands — for up to maxRenewalLead before the CA
+	// actually expires. That is deliberate (a trust root replaced in place
+	// leaves a fleet that cannot mutually authenticate), but "Ready=False,
+	// reason ReconciliationFailed" is indistinguishable from a transient
+	// apiserver blip, so an operator could watch configuration changes
+	// silently not land for weeks. Naming it makes it alertable.
+	setTLSMaterialCondition(installation, reconcileErr)
+
 	if reflect.DeepEqual(before.Status, installation.Status) {
 		return reconcileErr
 	}
