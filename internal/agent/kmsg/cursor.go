@@ -58,6 +58,18 @@ func loadCursor(path, bootID string) (uint64, bool, error) {
 	if err := json.Unmarshal(data, &cf); err != nil {
 		return 0, false, fmt.Errorf("decode kmsg cursor: %w", err)
 	}
+	// `cf.Seq == 0` stays, and deliberately, unlike the two other zero-checks
+	// in this package that were removed.
+	//
+	// The file has no "is there a cursor" bit, so a persisted 0 is genuinely
+	// indistinguishable from an absent cursor — and resuming from 0 means
+	// replaying the entire ring on every start, which is far worse than the
+	// cost of not resuming: at most one re-delivered event at sequence 0, and
+	// re-delivery is safe because the controller deduplicates by capture ID.
+	//
+	// The defect the other two had is absent here for that reason. Adding a
+	// bit to the file would need a format version bump to buy back one event
+	// that is the boot banner in practice.
 	if cf.Version != cursorVersion || cf.Seq == 0 {
 		return 0, false, fmt.Errorf("unsupported kmsg cursor")
 	}

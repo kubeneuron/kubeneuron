@@ -128,6 +128,10 @@ type Server struct {
 	// TLS-terminating load balancer that speaks plain HTTP to the controller.
 	trustProxyHeaders bool
 	authLimiter       *failureLimiter
+	// loginSlots bounds how many password verifications run at once. bcrypt is
+	// deliberately expensive, /api/v1/login is unauthenticated, and this
+	// process is the sole elected leader — see the comment at its use.
+	loginSlots chan struct{}
 	negativeAuth      *negativeAuthCache
 	sessions          *sessionStore
 	basicUsersDir     string
@@ -209,10 +213,18 @@ func (s *Server) SetRuntimeConfigInfo(info RuntimeConfigInfo) {
 func (s *Server) SetSignalCatalog(catalog *detect.Catalog) { s.catalog.Store(catalog) }
 
 // New builds the API server.
+// maxConcurrentLogins bounds simultaneous bcrypt verifications on the
+// unauthenticated sign-in route.
+const maxConcurrentLogins = 4
+
 func New(backend Backend) *Server {
 	return &Server{
 		backend:      backend,
 		authLimiter:  newFailureLimiter(),
+		// Four concurrent password verifications: enough that a handful of
+		// operators signing in together never queue, small enough that the
+		// worst an attacker can spend is four cores' worth of bcrypt.
+		loginSlots: make(chan struct{}, maxConcurrentLogins),
 		negativeAuth: newNegativeAuthCache(),
 		sessions:     newSessionStore(),
 	}

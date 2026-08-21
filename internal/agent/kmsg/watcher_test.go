@@ -300,3 +300,51 @@ func TestWatchFailsWithoutDevice(t *testing.T) {
 		t.Fatal("missing kmsg device must be an error, not a silent no-op")
 	}
 }
+
+// TestSequenceZeroPinsTheWatermark covers the guarantee a previous round's
+// comment claimed and the code did not provide.
+//
+// Durability was encoded in the VALUE of the watermark: zero meant "nothing is
+// durable", and zero is also a legal kernel sequence. trackEmitted refuses any
+// seq <= watermark, so with the watermark at its zero value a genuine sequence
+// 0 could never enter the pending set — and acknowledging sequence 1 then
+// persisted a cursor covering an XID that had never been acknowledged. A
+// restart would skip it.
+func TestSequenceZeroPinsTheWatermark(t *testing.T) {
+	dir := t.TempDir()
+	w := &Watcher{CursorPath: dir + "/cursor", BootID: "boot-A"}
+	w.initCursorState(0)
+	// initCursorState(0) is the "no persisted cursor" case; nothing is durable.
+	w.cursorMu.Lock()
+	w.watermark, w.haveWatermark = 0, false
+	w.cursorMu.Unlock()
+
+	w.trackEmitted(0)
+	w.trackEmitted(1)
+
+	w.cursorMu.Lock()
+	_, zeroPending := w.pending[0]
+	w.cursorMu.Unlock()
+	if !zeroPending {
+		t.Fatal("sequence 0 was never registered as pending, so nothing pins the watermark below " +
+			"it; acknowledging sequence 1 would persist a cursor covering an XID that was never " +
+			"acknowledged, and a restart would skip it")
+	}
+
+	// Acknowledging 1 while 0 is outstanding must not advance the cursor.
+	if err := w.acknowledgeSeq(1); err != nil {
+		t.Fatal(err)
+	}
+	if seq, ok, _ := loadCursor(w.CursorPath, "boot-A"); ok {
+		t.Fatalf("a cursor at %d was persisted while sequence 0 was still un-acknowledged", seq)
+	}
+
+	// Once 0 is acknowledged the watermark may advance past both.
+	if err := w.acknowledgeSeq(0); err != nil {
+		t.Fatal(err)
+	}
+	seq, ok, err := loadCursor(w.CursorPath, "boot-A")
+	if err != nil || !ok || seq != 1 {
+		t.Fatalf("after both acks the cursor is %d,%v,%v; want 1,true,nil", seq, ok, err)
+	}
+}

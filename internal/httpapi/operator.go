@@ -168,7 +168,13 @@ func (s *Server) requireOperatorVerb(verb string, next http.HandlerFunc) http.Ha
 				http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
 				return
 			}
-			authenticated, err := s.operatorAuth.AuthenticateOperator(r, verb)
+			// Bounded, like the agent path. Without it a wedged apiserver holds
+			// operator requests open for as long as the client will wait —
+			// including the panel's, and including the requests an operator
+			// makes to find out what is wrong.
+			authCtx, cancel := context.WithTimeout(r.Context(), agentAuthenticationTimeout)
+			authenticated, err := s.operatorAuth.AuthenticateOperator(r.WithContext(authCtx), verb)
+			cancel()
 			if err != nil {
 				status := http.StatusUnauthorized
 				var statusErr HTTPStatusError

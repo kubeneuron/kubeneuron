@@ -150,6 +150,16 @@ type Watcher struct {
 	// lower sequence, so a delivery gap pins the durable cursor below the gap and
 	// the un-acked event replays after a restart instead of being lost.
 	watermark uint64
+	// haveWatermark says whether watermark MEANS anything yet.
+	//
+	// Zero was doing that job, in three places, and zero is a legal kernel
+	// sequence. The consequence was not theoretical: trackEmitted refuses any
+	// seq <= watermark, so with watermark at its zero value a genuine sequence
+	// 0 could never enter the pending set — and an ack of sequence 1 then
+	// persisted a cursor covering an XID that had never been acknowledged. A
+	// previous round moved the sentinel here rather than removing it, and
+	// wrote a comment claiming the guarantee this flag actually provides.
+	haveWatermark bool
 	// maxAcked is the highest acknowledged sequence, used to raise the watermark
 	// once a gap below it finally drains.
 	maxAcked uint64
@@ -325,8 +335,8 @@ func (w *Watcher) initCursorState(resumeSeq uint64) {
 	if w.pending == nil {
 		w.pending = make(map[uint64]struct{})
 	}
-	if resumeSeq > w.watermark {
-		w.watermark = resumeSeq
+	if !w.haveWatermark || resumeSeq > w.watermark {
+		w.watermark, w.haveWatermark = resumeSeq, true
 	}
 	if resumeSeq > w.maxAcked {
 		w.maxAcked = resumeSeq
@@ -342,7 +352,7 @@ func (w *Watcher) trackEmitted(seq uint64) {
 	if w.pending == nil {
 		w.pending = make(map[uint64]struct{})
 	}
-	if seq <= w.watermark {
+	if w.haveWatermark && seq <= w.watermark {
 		return // already durably covered
 	}
 	w.pending[seq] = struct{}{}
@@ -360,7 +370,7 @@ func (w *Watcher) acknowledgeSeq(seq uint64) error {
 	if w.pending == nil {
 		w.pending = make(map[uint64]struct{})
 	}
-	if seq <= w.watermark {
+	if w.haveWatermark && seq <= w.watermark {
 		return nil // already durable
 	}
 	delete(w.pending, seq)
@@ -369,11 +379,10 @@ func (w *Watcher) acknowledgeSeq(seq uint64) error {
 	}
 	safe := w.maxAcked
 	if len(w.pending) > 0 {
-		// A separate flag rather than 0-as-sentinel: sequence 0 is a legal
-		// kernel sequence, and using it to mean "no minimum" would make a
-		// pending 0 invisible to the watermark it is supposed to pin. Nothing
-		// emits an XID at sequence 0 in practice — it is the boot banner — but
-		// a delivery guarantee should not rest on that.
+		// A separate flag rather than 0-as-sentinel, for the same reason
+		// haveWatermark exists: sequence 0 is a legal kernel sequence, and
+		// using it to mean "no minimum" makes a pending 0 invisible to the
+		// watermark it is supposed to pin.
 		var minPending uint64
 		havePending := false
 		for p := range w.pending {
@@ -392,7 +401,7 @@ func (w *Watcher) acknowledgeSeq(seq uint64) error {
 			return nil
 		}
 	}
-	if safe <= w.watermark {
+	if w.haveWatermark && safe <= w.watermark {
 		return nil // a lower gap pins the watermark: no contiguous advance yet
 	}
 	// Persist under the lock so a concurrent ack cannot interleave a lower
@@ -400,7 +409,7 @@ func (w *Watcher) acknowledgeSeq(seq uint64) error {
 	if err := saveCursor(w.CursorPath, w.BootID, safe); err != nil {
 		return err
 	}
-	w.watermark = safe
+	w.watermark, w.haveWatermark = safe, true
 	return nil
 }
 

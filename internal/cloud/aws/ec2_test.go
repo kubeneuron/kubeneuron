@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -22,6 +23,10 @@ type fakeEC2 struct {
 	missing                               bool
 	stopErr                               error
 	asgName                               string
+	// describeErr fails every DescribeInstances; describeErrFirst fails only
+	// the first N, modelling EC2 throttling that clears.
+	describeErr      error
+	describeErrFirst int
 }
 
 func (f *fakeEC2) StopInstances(context.Context, *ec2.StopInstancesInput, ...func(*ec2.Options)) (*ec2.StopInstancesOutput, error) {
@@ -39,6 +44,12 @@ func (f *fakeEC2) TerminateInstances(context.Context, *ec2.TerminateInstancesInp
 func (f *fakeEC2) DescribeInstances(context.Context, *ec2.DescribeInstancesInput, ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
 	i := f.describeCalls
 	f.describeCalls++
+	if f.describeErr != nil {
+		return nil, f.describeErr
+	}
+	if i < f.describeErrFirst {
+		return nil, errors.New("RequestLimitExceeded")
+	}
 	if f.missing {
 		return &ec2.DescribeInstancesOutput{}, nil
 	}
@@ -142,4 +153,51 @@ func TestCheckRecycleMissingInstanceIsNotAViabilityVerdict(t *testing.T) {
 	if err == nil || errors.Is(err, cloud.ErrRecycleNotViable) {
 		t.Fatalf("missing instance = %v, want a plain error, not a definitive non-viability verdict", err)
 	}
+}
+
+// TestRecycleAlwaysAttemptsTheStart covers the worst outcome this action has:
+// a machine the operator approved "stop and start" for, left stopped.
+//
+// StartInstances is issued from exactly one place in this program, so returning
+// between the stop and it means nothing will ever bring that instance back. The
+// two ways to get there are ordinary: EC2 throttling one DescribeInstances, or
+// the step deadline expiring during the stop-wait.
+func TestRecycleAlwaysAttemptsTheStart(t *testing.T) {
+	t.Run("the stop-wait never succeeds", func(t *testing.T) {
+		f := &fakeEC2{instanceID: "i-1", describeErr: errors.New("RequestLimitExceeded")}
+		r := &Recycler{api: f, pollInterval: time.Millisecond}
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+
+		if err := r.Recycle(ctx, "i-1"); err == nil {
+			t.Fatal("a failed stop-wait reported success")
+		}
+		if f.startCalls == 0 {
+			t.Fatal("the instance was stopped and no start was ever issued; nothing else in this " +
+				"program starts one, so the machine stays powered off indefinitely")
+		}
+	})
+
+	t.Run("a transient throttle does not strand it", func(t *testing.T) {
+		f := &fakeEC2{
+			instanceID:       "i-2",
+			describeErrFirst: 2,
+			// The first two describes error, and describeCalls advances on
+			// those too, so the state list is offset by two.
+			states: []ec2types.InstanceStateName{
+				ec2types.InstanceStateNameStopping, ec2types.InstanceStateNameStopping,
+				ec2types.InstanceStateNameStopped, ec2types.InstanceStateNameRunning,
+			},
+		}
+		r := &Recycler{api: f, pollInterval: time.Millisecond}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		if err := r.Recycle(ctx, "i-2"); err != nil {
+			t.Fatalf("two throttled describes failed the whole recycle: %v", err)
+		}
+		if f.startCalls == 0 {
+			t.Fatal("no start was issued")
+		}
+	})
 }

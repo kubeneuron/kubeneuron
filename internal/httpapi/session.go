@@ -152,12 +152,32 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	// Verify the password BEFORE consulting the per-source throttle, mirroring
-	// the bearer path: a correct password must authenticate even from an IP with
-	// many prior failures, so a shared NAT egress cannot lock every operator
-	// behind it out. Only a *wrong* password feeds the limiter. The bcrypt input
-	// is capped at 72 bytes, so verifying first cannot be turned into a cost
-	// amplification.
+	// Bounded concurrency around the verification.
+	//
+	// The ordering below is deliberate and stays: verifying BEFORE consulting
+	// the per-source throttle is what lets a correct password authenticate from
+	// an IP with many prior failures, so a shared NAT egress cannot lock every
+	// operator behind it out. But it also means the throttle prevents no bcrypt
+	// at all, and bcrypt at cost 10 is ~100ms of CPU on the process that is the
+	// sole elected leader. Unauthenticated, at whatever rate the attacker
+	// chooses, that starves the reconcile walk, agent action polling and the
+	// outbox drain.
+	//
+	// The 72-byte cap the comment used to lean on answers a different question:
+	// it bounds the cost of ONE request, not the rate of them.
+	//
+	// A semaphore keeps both properties. A correct password still authenticates
+	// from anywhere; the fleet's control plane cannot be spent on password
+	// guesses. Past the limit callers are told to retry rather than queued,
+	// because queueing is the same starvation with extra memory.
+	select {
+	case s.loginSlots <- struct{}{}:
+		defer func() { <-s.loginSlots }()
+	default:
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "too many sign-in attempts in flight", http.StatusServiceUnavailable)
+		return
+	}
 	if !s.verifyBasicUser(strings.TrimSpace(req.Username), req.Password) {
 		s.authLimiter.record(source)
 		metrics.AuthFailures.WithLabelValues("operator").Inc()

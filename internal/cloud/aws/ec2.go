@@ -121,13 +121,43 @@ func (r *Recycler) Recycle(ctx context.Context, instanceID string) error {
 	}); err != nil {
 		return fmt.Errorf("aws: stopping %s: %w", instanceID, err)
 	}
-	if err := r.waitForState(ctx, instanceID, ec2types.InstanceStateNameStopped); err != nil {
-		return fmt.Errorf("aws: waiting for %s to stop: %w", instanceID, err)
+	// From here the instance is stopping or stopped, and the ONLY code in this
+	// program that starts one again is four lines below. Returning between the
+	// two leaves a machine powered off with nothing that will ever bring it
+	// back — and the operator approved "stop and start", not "stop".
+	//
+	// Two ordinary paths reached that: EC2 throttling a single DescribeInstances
+	// (waitForState used to return on the first error), and the step deadline
+	// expiring during the stop-wait. Neither is exotic, and the error the human
+	// eventually read said "waiting for i-… to stop failed" without mentioning
+	// that the machine was off.
+	//
+	// So the start is attempted whatever the stop-wait concluded, on a deadline
+	// detached from the caller's — the caller's may be the thing that just
+	// expired — and both errors are reported together.
+	stopErr := r.waitForState(ctx, instanceID, ec2types.InstanceStateNameStopped)
+	if stopErr != nil {
+		stopErr = fmt.Errorf("aws: waiting for %s to stop: %w", instanceID, stopErr)
 	}
-	if _, err := r.api.StartInstances(ctx, &ec2.StartInstancesInput{
+	startCtx := ctx
+	if stopErr != nil {
+		var cancel context.CancelFunc
+		startCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), recoveryStartTimeout)
+		defer cancel()
+	}
+	if _, err := r.api.StartInstances(startCtx, &ec2.StartInstancesInput{
 		InstanceIds: []string{instanceID},
 	}); err != nil {
-		return fmt.Errorf("aws: starting %s: %w", instanceID, err)
+		err = fmt.Errorf("aws: INSTANCE %s IS STOPPED AND WAS NOT RESTARTED: starting it failed: %w", instanceID, err)
+		if stopErr != nil {
+			return errors.Join(stopErr, err)
+		}
+		return err
+	}
+	if stopErr != nil {
+		// The start was issued, so the machine is coming back; the recycle
+		// still failed and the caller must not treat it as done.
+		return errors.Join(stopErr, fmt.Errorf("aws: a start was issued for %s to avoid leaving it stopped", instanceID))
 	}
 	if err := r.waitForState(ctx, instanceID, ec2types.InstanceStateNameRunning); err != nil {
 		return fmt.Errorf("aws: waiting for %s to run: %w", instanceID, err)
@@ -151,15 +181,39 @@ func (r *Recycler) Replace(ctx context.Context, instanceID string) error {
 	return nil
 }
 
+// recoveryStartTimeout bounds the start issued after a failed stop-wait. It is
+// deliberately short: the call either reaches EC2 or it does not, and the
+// caller is already past its own deadline.
+const recoveryStartTimeout = 30 * time.Second
+
+// describeErrorBudget is how many consecutive DescribeInstances failures a wait
+// tolerates before giving up. EC2 throttles — RequestLimitExceeded is routine —
+// and returning on the first error meant one throttled call could strand a
+// stopped instance.
+const describeErrorBudget = 5
+
 // waitForState polls until the instance reaches the target state, the context
 // is done, or the instance vanishes (which only a target of terminated treats
 // as success).
 func (r *Recycler) waitForState(ctx context.Context, instanceID string, target ec2types.InstanceStateName) error {
+	describeErrors := 0
 	for {
 		state, found, err := r.instanceState(ctx, instanceID)
 		if err != nil {
-			return err
+			describeErrors++
+			if describeErrors >= describeErrorBudget {
+				return fmt.Errorf("describing %s failed %d times in a row: %w", instanceID, describeErrors, err)
+			}
+			timer := time.NewTimer(r.pollInterval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return fmt.Errorf("instance %s: %w (last describe error: %v)", instanceID, ctx.Err(), err)
+			case <-timer.C:
+			}
+			continue
 		}
+		describeErrors = 0
 		if !found {
 			return fmt.Errorf("instance %s no longer exists", instanceID)
 		}
