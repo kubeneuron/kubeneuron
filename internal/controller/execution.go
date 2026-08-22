@@ -366,7 +366,19 @@ func (c *Controller) executePlatformStep(ctx context.Context, inc *types.Inciden
 		return okResult(inc, "uncordoned "+node), nil
 	case "drain":
 		err := c.platform.Drain(ctx, node, platform.DrainOptions{
-			GracePeriod: defaultDrainGracePeriod,
+			// The POD's own grace period, not ours.
+			//
+			// DeleteOptions.GracePeriodSeconds overrides the pod spec in both
+			// directions, so passing a constant 30s SIGKILLed a job that
+			// declared terminationGracePeriodSeconds: 600 precisely so it could
+			// checkpoint on SIGTERM — the workload most likely to be running on
+			// the GPU we are about to reset, and the one with the most to lose.
+			//
+			// Negative means "do not override", which evictPod already
+			// anticipates. The drain's own wait is bounded by the step timeout,
+			// so a pod with a long grace period delays the ladder rather than
+			// hanging it.
+			GracePeriod: platform.DrainUsePodGracePeriod,
 			Timeout:     step.Timeout.Std(),
 		})
 		if err != nil {

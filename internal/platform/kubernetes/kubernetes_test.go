@@ -196,9 +196,21 @@ func TestDrainEvictsOnlyEvictablePods(t *testing.T) {
 	})
 
 	p := &Platform{client: client}
-	err := p.Drain(context.Background(), "n1", platform.DrainOptions{Timeout: 5 * time.Second, GracePeriod: 30 * time.Second})
-	if err != nil {
-		t.Fatalf("Drain: %v", err)
+	err := p.Drain(context.Background(), "n1", platform.DrainOptions{
+		Timeout: 5 * time.Second, GracePeriod: platform.DrainUsePodGracePeriod,
+	})
+	// A pod with no controller is not evicted AND the drain must say so.
+	//
+	// This assertion used to be `err != nil -> fatal`, which encoded the
+	// defect: the bare pod was skipped, Drain returned nil, and the ladder
+	// rebooted a node with somebody's unmanaged job still on it. kubectl drain
+	// aborts in exactly this case unless --force is given.
+	if err == nil {
+		t.Fatal("Drain reported success while a pod with no controller was left running; " +
+			"nothing reschedules that pod, and the ladder's next rung reboots the node")
+	}
+	if !strings.Contains(err.Error(), "default/bare") {
+		t.Fatalf("the refusal does not name the pod a human has to deal with: %v", err)
 	}
 	if len(evicted) != 1 || evicted[0] != "app" {
 		t.Fatalf("evicted = %v, want only the ReplicaSet pod", evicted)
@@ -208,6 +220,58 @@ func TestDrainEvictsOnlyEvictablePods(t *testing.T) {
 		if _, err := client.CoreV1().Pods("default").Get(context.Background(), name, metav1.GetOptions{}); err != nil {
 			t.Fatalf("pod %s must survive drain: %v", name, err)
 		}
+	}
+}
+
+// TestDrainDoesNotTruncateThePodGracePeriod covers the workload with the most
+// to lose on the node we are about to reset.
+//
+// DeleteOptions.GracePeriodSeconds overrides the pod spec in BOTH directions,
+// and the drain passed a hardcoded 30s — so a job declaring
+// terminationGracePeriodSeconds: 600 precisely so it could checkpoint on
+// SIGTERM was SIGKILLed at 30 instead.
+func TestDrainDoesNotTruncateThePodGracePeriod(t *testing.T) {
+	long := int64(600)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "trainer", Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "rs",
+				Controller: func() *bool { b := true; return &b }(),
+			}},
+		},
+		Spec:   corev1.PodSpec{NodeName: "n1", TerminationGracePeriodSeconds: &long},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	client := fake.NewSimpleClientset(pod)
+
+	var override *int64
+	var sawEviction bool
+	client.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "eviction" {
+			return false, nil, nil
+		}
+		ev := action.(k8stesting.CreateAction).GetObject().(*policyv1.Eviction)
+		sawEviction = true
+		if ev.DeleteOptions != nil {
+			override = ev.DeleteOptions.GracePeriodSeconds
+		}
+		return true, nil, client.Tracker().Delete(
+			corev1.SchemeGroupVersion.WithResource("pods"), ev.Namespace, ev.Name)
+	})
+
+	p := &Platform{client: client}
+	if err := p.Drain(context.Background(), "n1", platform.DrainOptions{
+		Timeout: 5 * time.Second, GracePeriod: platform.DrainUsePodGracePeriod,
+	}); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if !sawEviction {
+		t.Fatal("no eviction was issued, so this test proves nothing")
+	}
+	if override != nil {
+		t.Fatalf("the eviction overrode the pod's grace period with %ds; a job that asked for "+
+			"%ds to checkpoint gets SIGKILL instead", *override, long)
 	}
 }
 
@@ -395,5 +459,75 @@ func TestEvictionMatcherStaysGenerous(t *testing.T) {
 	if nodeAdvertisesAccelerator(corev1.ResourceList{"newvendor.example/gpu": resource.MustParse("1")}) {
 		t.Fatal("the same unrecognised resource admitted a node to the fleet; " +
 			"fleet membership must be the conservative side")
+	}
+}
+
+// TestUncordonRestoresMarksItDidNotPlace covers the node somebody else was
+// already holding.
+//
+// Both things Cordon writes may already belong to another party: a human who
+// ran `kubectl cordon`, or an operator who pinned the node with
+// karpenter.sh/do-not-disrupt because a long training job is on it — which is
+// precisely what that annotation is for. Uncordon used to null both
+// unconditionally, so a KubeNeuron cordon/uncordon cycle handed Karpenter a
+// node its owner had deliberately pinned and returned to the scheduler a node
+// a human had deliberately removed from it.
+func TestUncordonRestoresMarksItDidNotPlace(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "n1",
+			Annotations: map[string]string{doNotDisruptAnnotation: "true"},
+		},
+		Spec: corev1.NodeSpec{Unschedulable: true}, // a human cordoned it
+	}
+	client := fake.NewSimpleClientset(node)
+	p := &Platform{client: client}
+	ctx := context.Background()
+
+	if err := p.Cordon(ctx, "n1", "incident inc-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Uncordon(ctx, "n1"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := client.CoreV1().Nodes().Get(ctx, "n1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Spec.Unschedulable {
+		t.Fatal("a node a human had cordoned came back schedulable after our cordon/uncordon cycle")
+	}
+	if _, pinned := got.Annotations[doNotDisruptAnnotation]; !pinned {
+		t.Fatal("karpenter.sh/do-not-disrupt was deleted; Karpenter is now free to consolidate a " +
+			"node its owner pinned, and that annotation exists to stop exactly that")
+	}
+	if _, held := got.Annotations[cordonReasonAnnotation]; held {
+		t.Fatal("our own cordon record survived the uncordon")
+	}
+}
+
+// TestUncordonReleasesAMarkItDidPlace: the ordinary case must still work, or
+// the fix above would strand every node this product cordons.
+func TestUncordonReleasesAMarkItDidPlace(t *testing.T) {
+	client := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n2"}})
+	p := &Platform{client: client}
+	ctx := context.Background()
+
+	if err := p.Cordon(ctx, "n2", "incident inc-2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Uncordon(ctx, "n2"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.CoreV1().Nodes().Get(ctx, "n2", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Spec.Unschedulable {
+		t.Fatal("a node we cordoned ourselves was not released")
+	}
+	if _, pinned := got.Annotations[doNotDisruptAnnotation]; pinned {
+		t.Fatal("our own do-not-disrupt pin survived the uncordon")
 	}
 }

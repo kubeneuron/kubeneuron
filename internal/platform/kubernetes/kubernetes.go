@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -161,6 +162,12 @@ var _ platform.NodeLabeler = (*Platform)(nil)
 
 // New builds a Platform from an in-cluster config, falling back to the given
 // kubeconfig path (empty means default loading rules).
+// clientQPS and clientBurst replace client-go's 5/10 defaults. See New.
+const (
+	clientQPS   = 50
+	clientBurst = 100
+)
+
 func New(kubeconfig string) (*Platform, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
@@ -172,6 +179,24 @@ func New(kubeconfig string) (*Platform, error) {
 			return nil, fmt.Errorf("kubernetes: no in-cluster config and no kubeconfig: %w", err)
 		}
 	}
+	// client-go defaults to 5 QPS / 10 burst, which this controller cannot
+	// live within.
+	//
+	// A janitor pass does a live Get plus a Patch per marked node and a full
+	// List; a drain issues one Evict per pod plus a List every five seconds.
+	// On a fifty-node degraded set that is a hundred serialised requests, and
+	// twenty seconds of pure client-side throttling per pass — which presents
+	// as unexplained reconcile latency, never as an error, because the limiter
+	// simply waits.
+	//
+	// The apiserver's own priority-and-fairness is the real limit; this one was
+	// a default nobody chose.
+	cfg.QPS = clientQPS
+	cfg.Burst = clientBurst
+	// Named, so this controller is identifiable in an apiserver audit log
+	// rather than appearing as an anonymous Go client.
+	cfg.UserAgent = "kubeneuron-controller"
+
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -340,18 +365,57 @@ func (p *Platform) WatchNodes(ctx context.Context) (<-chan platform.NodeEvent, e
 // drained node is the most underutilised node in the cluster.
 const doNotDisruptAnnotation = "karpenter.sh/do-not-disrupt"
 
+// cordonRestoreAnnotation records what the node looked like before we cordoned
+// it, so Uncordon puts it back rather than clearing marks it did not place.
+const cordonRestoreAnnotation = "kubeneuron.io/cordon-restore"
+
 // Cordon marks the node unschedulable, records the reason, and protects it from
 // being replaced while the remediation runs.
 func (p *Platform) Cordon(ctx context.Context, node string, reason string) error {
+	// Record what was already there, so Uncordon restores rather than clears.
+	//
+	// Both of the things this writes may already be somebody else's. A human
+	// may have run `kubectl cordon` on the node an hour ago; an operator may
+	// have pinned it with karpenter.sh/do-not-disrupt because a long training
+	// job is on it — which is exactly what that annotation is for. Clearing
+	// them on the way out handed Karpenter a node its owner had deliberately
+	// pinned, and returned to the scheduler a node a human had deliberately
+	// removed from it.
+	prior, err := p.priorCordonState(ctx, node)
+	if err != nil {
+		return err
+	}
 	patch, _ := json.Marshal(map[string]any{
 		"spec": map[string]any{"unschedulable": true},
 		"metadata": map[string]any{"annotations": map[string]string{
-			cordonReasonAnnotation: reason,
-			doNotDisruptAnnotation: "true",
+			cordonReasonAnnotation:  reason,
+			cordonRestoreAnnotation: prior,
+			doNotDisruptAnnotation:  "true",
 		}},
 	})
-	_, err := p.client.CoreV1().Nodes().Patch(ctx, node, k8stypes.StrategicMergePatchType, patch, metav1.PatchOptions{})
+	_, err = p.client.CoreV1().Nodes().Patch(ctx, node, k8stypes.StrategicMergePatchType, patch, metav1.PatchOptions{})
 	return err
+}
+
+// priorCordonState captures what a later Uncordon must put back. It is written
+// only on the FIRST cordon: re-cordoning a node we already hold must not
+// overwrite the original record with our own marks.
+func (p *Platform) priorCordonState(ctx context.Context, node string) (string, error) {
+	current, err := p.client.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("reading %s before cordoning it: %w", node, err)
+	}
+	if existing, held := current.Annotations[cordonRestoreAnnotation]; held {
+		return existing, nil
+	}
+	var parts []string
+	if current.Spec.Unschedulable {
+		parts = append(parts, "unschedulable")
+	}
+	if _, pinned := current.Annotations[doNotDisruptAnnotation]; pinned {
+		parts = append(parts, "do-not-disrupt")
+	}
+	return strings.Join(parts, ","), nil
 }
 
 // CordonedNodes lists the nodes this product cordoned and has not released.
@@ -398,14 +462,28 @@ func (p *Platform) CordonedNodes(ctx context.Context) ([]platform.CordonedNode, 
 // Uncordon makes the node schedulable again, clears the reason, and lifts the
 // autoscaler protection the cordon put in place.
 func (p *Platform) Uncordon(ctx context.Context, node string) error {
+	// Restore, do not clear. See Cordon: either mark may have been somebody
+	// else's before we touched the node, and the record says which.
+	current, err := p.client.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("reading %s before uncordoning it: %w", node, err)
+	}
+	prior := strings.Split(current.Annotations[cordonRestoreAnnotation], ",")
+	keepUnschedulable := slices.Contains(prior, "unschedulable")
+	keepPinned := slices.Contains(prior, "do-not-disrupt")
+
+	annotations := map[string]*string{
+		cordonReasonAnnotation:  nil,
+		cordonRestoreAnnotation: nil,
+	}
+	if !keepPinned {
+		annotations[doNotDisruptAnnotation] = nil
+	}
 	patch, _ := json.Marshal(map[string]any{
-		"spec": map[string]any{"unschedulable": false},
-		"metadata": map[string]any{"annotations": map[string]*string{
-			cordonReasonAnnotation: nil,
-			doNotDisruptAnnotation: nil,
-		}},
+		"spec":     map[string]any{"unschedulable": keepUnschedulable},
+		"metadata": map[string]any{"annotations": annotations},
 	})
-	_, err := p.client.CoreV1().Nodes().Patch(ctx, node, k8stypes.StrategicMergePatchType, patch, metav1.PatchOptions{})
+	_, err = p.client.CoreV1().Nodes().Patch(ctx, node, k8stypes.StrategicMergePatchType, patch, metav1.PatchOptions{})
 	return err
 }
 
@@ -427,9 +505,15 @@ func (p *Platform) Drain(ctx context.Context, node string, opts platform.DrainOp
 	// step instead would escalate the incident to a more destructive rung,
 	// which is exactly backwards for a deliberate availability guard.
 	var blocked []*corev1.Pod
+	// Pods this drain cannot evict and did not: reported, never silently
+	// dropped. See the refusal below.
+	var unmanaged []string
 	for i := range pods {
 		pod := &pods[i]
 		if skipDuringDrain(pod, opts.Force) {
+			if unmanagedPod(pod) && !opts.Force {
+				unmanaged = append(unmanaged, pod.Namespace+"/"+pod.Name)
+			}
 			continue
 		}
 		switch err := p.evictPod(ctx, pod, opts); {
@@ -463,7 +547,30 @@ func (p *Platform) Drain(ctx context.Context, node string, opts platform.DrainOp
 	}
 
 	// Wait until evictable pods are gone.
-	return p.waitDrained(ctx, node, opts, time.NewTicker(drainPollInterval))
+	if err := p.waitDrained(ctx, node, opts, time.NewTicker(drainPollInterval)); err != nil {
+		return err
+	}
+
+	// A pod with no controller was never evicted, and the caller must not be
+	// told the node is drained.
+	//
+	// This branch used to `continue` silently and Drain returned nil, so a
+	// bare pod — kubectl run, a researcher's job, an orphan — sat on a machine
+	// the ladder then rebooted. The comment claimed kubectl drain semantics;
+	// kubectl does the opposite, aborting with an error naming the pods unless
+	// --force is given, and that refusal is the whole point of the flag.
+	//
+	// Failing here does escalate the incident, which is the cost. It is the
+	// right cost: escalation is visible and reversible, and a human reads the
+	// names. Rebooting a node with somebody's unmanaged job still on it is
+	// neither.
+	if len(unmanaged) > 0 {
+		sort.Strings(unmanaged)
+		return fmt.Errorf("drain of %s: %d pod(s) have no controller and were not evicted (%s); "+
+			"nothing will reschedule them, so this node is not drained",
+			node, len(unmanaged), strings.Join(unmanaged, ", "))
+	}
+	return nil
 }
 
 // evictPod issues one Eviction API call for the pod.
@@ -522,10 +629,37 @@ func (p *Platform) NodeWorkloads(ctx context.Context, node string) ([]platform.W
 }
 
 // EvictWorkload evicts a single pod (targeted restart, e.g. XID 94).
+//
+// It handles a 404 and a 429 the way Drain does, and for the same reason Drain
+// spells out: a step failure here escalates the incident to a MORE destructive
+// rung — workload-restart's on_failure is drain-and-reset — so returning the
+// raw error turned a deliberate availability guard, or a pod that had already
+// exited, into draining and resetting the whole GPU.
+//
+// The 404 is the likelier of the two: an XID 94 kills the workload, its pod
+// exits between listing and evicting, and a targeted restart escalates to a
+// node-wide one for work that is already gone.
 func (p *Platform) EvictWorkload(ctx context.Context, w platform.Workload) error {
-	return p.client.PolicyV1().Evictions(w.Namespace).Evict(ctx, &policyv1.Eviction{
-		ObjectMeta: metav1.ObjectMeta{Name: w.Name, Namespace: w.Namespace},
-	})
+	tick := time.NewTicker(drainPollInterval)
+	defer tick.Stop()
+	for {
+		err := p.client.PolicyV1().Evictions(w.Namespace).Evict(ctx, &policyv1.Eviction{
+			ObjectMeta: metav1.ObjectMeta{Name: w.Name, Namespace: w.Namespace},
+		})
+		switch {
+		case err == nil, apierrors.IsNotFound(err):
+			return nil
+		case apierrors.IsTooManyRequests(err):
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("evicting %s/%s: still blocked by a PodDisruptionBudget: %w",
+					w.Namespace, w.Name, ctx.Err())
+			case <-tick.C:
+			}
+		default:
+			return fmt.Errorf("evicting %s/%s: %w", w.Namespace, w.Name, err)
+		}
+	}
 }
 
 func (p *Platform) nodePods(ctx context.Context, node string) ([]corev1.Pod, error) {
@@ -540,6 +674,18 @@ func (p *Platform) nodePods(ctx context.Context, node string) ([]corev1.Pod, err
 
 // skipDuringDrain mirrors kubectl drain semantics: leave DaemonSet pods and
 // mirror pods alone; leave unmanaged pods alone unless force is set.
+// unmanagedPod reports a pod with no controller — the one skipDuringDrain
+// class that is somebody's live work rather than infrastructure.
+func unmanagedPod(pod *corev1.Pod) bool {
+	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+		return false
+	}
+	if _, isMirror := pod.Annotations[corev1.MirrorPodAnnotationKey]; isMirror {
+		return false
+	}
+	return metav1.GetControllerOf(pod) == nil
+}
+
 func skipDuringDrain(pod *corev1.Pod, force bool) bool {
 	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 		return true
@@ -557,11 +703,24 @@ func skipDuringDrain(pod *corev1.Pod, force bool) bool {
 	return false
 }
 
+// Init containers are walked too, not only regular ones.
+//
+// A native sidecar is an initContainer with restartPolicy: Always — GA since
+// 1.29 — and it runs for the whole pod lifetime, so it can hold an accelerator
+// for as long as the workload does. Missing it meant evict_gpu_workload
+// reported "no accelerator workloads to evict" for a pod that was using the
+// GPU, which is the silent failure the vendor-neutral matcher exists to
+// eliminate.
+//
+// Limits alone is deliberate and stays: the apiserver rejects an extended
+// resource declared with requests and no limit.
 func podUsesGPU(pod *corev1.Pod) bool {
-	for i := range pod.Spec.Containers {
-		for name := range pod.Spec.Containers[i].Resources.Limits {
-			if isAcceleratorResource(name) {
-				return true
+	for _, containers := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
+		for i := range containers {
+			for name := range containers[i].Resources.Limits {
+				if isAcceleratorResource(name) {
+					return true
+				}
 			}
 		}
 	}
@@ -580,8 +739,14 @@ func podUsesGPU(pod *corev1.Pod) bool {
 // rather than the sum: under the device plugin's mixed strategy one physical
 // GPU is advertised twice (nvidia.com/gpu and nvidia.com/mig-1g.5gb), so
 // summing would double-count the same silicon.
+// maxAdvertisedAccelerators bounds a node-advertised device count. The largest
+// real machines today carry a few dozen; a thousand leaves room for hardware
+// nobody has shipped yet while keeping the allocation it drives trivial.
+const maxAdvertisedAccelerators = 1024
+
 func acceleratorCount(capacity corev1.ResourceList) int {
 	whole, partitioned := 0, 0
+	implausibleCapacity := false
 	for name, q := range capacity {
 		domain, shaped := acceleratorResourceKind(name)
 		if !shaped {
@@ -595,7 +760,25 @@ func acceleratorCount(capacity corev1.ResourceList) int {
 		case kind == "gpu", domain == "gpu.intel.com":
 			// Intel names the device family as the kind (i915, xe) and that
 			// count IS whole devices, not partitions.
-			whole = max(whole, int(q.Value()))
+			// Clamped, because this number is written by the NODE, not by us.
+			//
+			// A kubelet may set its own status.capacity (NodeRestriction
+			// permits it) and Quantity.Value() saturates at MaxInt64, so a
+			// malformed or hostile value reached `make([]GPUInfo, n)` in
+			// nodeFromK8s and panicked the controller — on the reconcile tick
+			// and on the destructive-admission path, with the same object
+			// waiting in the informer cache after the restart. There is no
+			// recover() anywhere in this program, so one bad node crash-looped
+			// the whole control plane.
+			//
+			// A count past the bound is not knowable capacity, so it takes the
+			// path this function already has for that: zero, meaning unknown,
+			// with the agent's own registration supplying the real number.
+			if n := q.Value(); n > 0 && n <= maxAdvertisedAccelerators {
+				whole = max(whole, int(n))
+			} else if n > maxAdvertisedAccelerators {
+				implausibleCapacity = true
+			}
 		default:
 			// Everything else counts something that is not a physical device:
 			// MIG instances, time-sliced replicas (nvidia.com/gpu.shared),
@@ -605,6 +788,9 @@ func acceleratorCount(capacity corev1.ResourceList) int {
 	}
 	if whole > 0 {
 		return whole
+	}
+	if implausibleCapacity {
+		return 0 // unknowable, same as the partition case below
 	}
 	if partitioned > 0 {
 		// The node advertises partitions or replicas but no whole devices, so

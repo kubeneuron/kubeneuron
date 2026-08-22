@@ -29,7 +29,6 @@ const (
 	defaultVerifyQuietWindow = 10 * time.Minute
 	defaultApprovalTTL       = 12 * time.Hour
 	defaultObserveWindow     = 24 * time.Hour
-	defaultDrainGracePeriod  = 30 * time.Second
 	defaultReconcileInterval = 10 * time.Second
 	// agentResultGrace is how much longer the controller waits than the agent's
 	// own action budget, so a failing action's reason survives the deadline.

@@ -31,6 +31,12 @@ type NodeEvent struct {
 }
 
 // DrainOptions controls workload eviction during a drain.
+// DrainUsePodGracePeriod tells Drain to leave each pod's own
+// terminationGracePeriodSeconds alone. DeleteOptions.GracePeriodSeconds
+// overrides the pod spec in BOTH directions, so any concrete value here
+// silently truncates a workload that asked for longer.
+const DrainUsePodGracePeriod = -1
+
 type DrainOptions struct {
 	// Timeout bounds the whole drain; expiry fails the playbook step.
 	Timeout time.Duration
