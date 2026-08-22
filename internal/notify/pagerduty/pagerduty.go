@@ -88,6 +88,9 @@ func (n *Notifier) Notify(ctx context.Context, ev notify.NotifyEvent) error {
 // RequestApproval implements notify.Notifier. An approval request pages:
 // automation is deliberately stopped until a human decides.
 func (n *Notifier) RequestApproval(ctx context.Context, inc *types.Incident, stepName string) error {
+	if inc == nil {
+		return fmt.Errorf("pagerduty: approval request for step %q carries no incident", stepName)
+	}
 	return n.post(ctx, event{
 		RoutingKey: n.RoutingKey, EventAction: "trigger", DedupKey: inc.ID,
 		Payload: n.eventPayload(inc, "critical",

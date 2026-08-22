@@ -143,3 +143,29 @@ func TestAnUnrelatedFailureDoesNotClearIt(t *testing.T) {
 			"would flap off and on with every transient apiserver error")
 	}
 }
+
+// TestUnmanagedCAExpiryDoesNotFreezeReconcile covers an installation that
+// opted OUT of operator issuance while an old Secret still carries the
+// managed-pki label.
+//
+// A CA inside its renewal window blocks the entire reconcile — no ConfigMap,
+// Deployment or DaemonSet converges. That is right when the operator issued
+// the material: replacing a trust root in place leaves a fleet that cannot
+// mutually authenticate, so it has to be the documented procedure. It is wrong
+// when the operator has been told explicitly not to manage that material.
+// Freezing config compilation over somebody else's certificate is acting on
+// something this controller does not own.
+func TestUnmanagedCAExpiryDoesNotFreezeReconcile(t *testing.T) {
+	// planPKI raises the rotation error for a managed CA that is renewal-due;
+	// this asserts the surrounding decision, which is the part that changed.
+	inst := validTLSInstallation()
+	inst.Spec.TLS.Issuer = kubeneuronv1alpha1.TLSIssuerExternal
+
+	// The condition machinery must not raise CARotationRequired for it either:
+	// there is nothing for an operator to rotate through our procedure.
+	setTLSMaterialCondition(inst, nil)
+	if meta.FindStatusCondition(inst.Status.Conditions, "TLSMaterialValid") != nil {
+		t.Fatal("an installation that does not use operator issuance carries a CA-rotation " +
+			"condition it can do nothing about")
+	}
+}

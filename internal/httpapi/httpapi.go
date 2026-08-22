@@ -132,6 +132,9 @@ type Server struct {
 	// deliberately expensive, /api/v1/login is unauthenticated, and this
 	// process is the sole elected leader — see the comment at its use.
 	loginSlots chan struct{}
+	// operatorAuthSlots bounds concurrent TokenReview round-trips. The
+	// amplification target there is the kube-apiserver, not this process.
+	operatorAuthSlots chan struct{}
 	negativeAuth      *negativeAuthCache
 	sessions          *sessionStore
 	basicUsersDir     string
@@ -217,16 +220,22 @@ func (s *Server) SetSignalCatalog(catalog *detect.Catalog) { s.catalog.Store(cat
 // unauthenticated sign-in route.
 const maxConcurrentLogins = 4
 
+// maxConcurrentOperatorAuth bounds simultaneous TokenReview verifications.
+// Higher than the login bound because a TokenReview is a network round-trip
+// rather than CPU, and legitimate operators and the panel share this path.
+const maxConcurrentOperatorAuth = 16
+
 func New(backend Backend) *Server {
 	return &Server{
-		backend:      backend,
-		authLimiter:  newFailureLimiter(),
+		backend:     backend,
+		authLimiter: newFailureLimiter(),
 		// Four concurrent password verifications: enough that a handful of
 		// operators signing in together never queue, small enough that the
 		// worst an attacker can spend is four cores' worth of bcrypt.
-		loginSlots: make(chan struct{}, maxConcurrentLogins),
-		negativeAuth: newNegativeAuthCache(),
-		sessions:     newSessionStore(),
+		loginSlots:        make(chan struct{}, maxConcurrentLogins),
+		operatorAuthSlots: make(chan struct{}, maxConcurrentOperatorAuth),
+		negativeAuth:      newNegativeAuthCache(),
+		sessions:          newSessionStore(),
 	}
 }
 

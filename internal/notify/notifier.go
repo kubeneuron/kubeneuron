@@ -48,7 +48,16 @@ type Log struct {
 var _ Notifier = (*Log)(nil)
 
 // Notify implements Notifier.
+//
+// The nil guard matters MORE here than in its siblings, not less. Log is the
+// only notifier that is not wrapped in Async — it runs on the reconcile and
+// ingest goroutines — so a nil incident here is a panic in the control loop
+// rather than an error returned to a queue. slack, webhook and pagerduty all
+// check; this one dereferenced.
 func (l *Log) Notify(ctx context.Context, ev NotifyEvent) error {
+	if ev.Incident == nil {
+		return fmt.Errorf("log: notify event %q carries no incident", ev.Kind)
+	}
 	l.Logger.Info("incident notification",
 		"kind", ev.Kind,
 		"incident", ev.Incident.ID,
@@ -62,6 +71,9 @@ func (l *Log) Notify(ctx context.Context, ev NotifyEvent) error {
 
 // RequestApproval implements Notifier.
 func (l *Log) RequestApproval(ctx context.Context, inc *types.Incident, stepName string) error {
+	if inc == nil {
+		return fmt.Errorf("log: approval request for step %q carries no incident", stepName)
+	}
 	l.Logger.Warn("approval required",
 		"incident", inc.ID,
 		"node", inc.Target.Node,

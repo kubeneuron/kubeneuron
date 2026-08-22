@@ -123,6 +123,28 @@ func (r *KubeNeuronReconciler) ReconcilePKI(
 		var rotation *CARotationRequiredError
 		if errors.As(err, &rotation) {
 			r.event(installation, corev1.EventTypeWarning, "TLSCARotationRequired", rotation.Error())
+			if !issuing {
+				// Not ours to rotate.
+				//
+				// A CA that needs rotating blocks the ENTIRE reconcile — no
+				// ConfigMap, Deployment or DaemonSet converges — which is right
+				// when the operator issued the material and must not replace a
+				// trust root in place. It is not right for an installation that
+				// switched away from Issuer: Operator while its old Secret still
+				// carries the managed-pki label: the operator has been told
+				// explicitly not to manage that material, and freezing config
+				// compilation over it is acting on something it does not own.
+				//
+				// Report it the way every other unmanaged-material problem is
+				// reported — a warning naming what is aging — and let the rest
+				// of the reconcile proceed.
+				r.event(installation, corev1.EventTypeWarning, "TLSMaterialExpiring", rotation.Error())
+				revision, revErr := r.tlsRevision(ctx, installation, existing, nil)
+				if revErr != nil {
+					return PKIReconcileResult{}, revErr
+				}
+				return PKIReconcileResult{Revisions: revision}, nil
+			}
 		}
 		return PKIReconcileResult{}, err
 	}

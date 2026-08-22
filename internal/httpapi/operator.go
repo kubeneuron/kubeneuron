@@ -162,7 +162,27 @@ func (s *Server) requireOperatorVerb(verb string, next http.HandlerFunc) http.Ha
 			// cache. A *different* credential from the same source is not in the
 			// cache and is still verified, so a valid principal behind a shared NAT
 			// keeps working.
+			// The negative cache short-circuits a REPEATED bad credential, and
+			// that is all it can do — an attacker guessing tokens presents a
+			// novel one every time, so nothing it sends is ever in the cache
+			// and every attempt still costs a full TokenReview against the
+			// kube-apiserver. Against the one attacker this limiter exists for,
+			// the cache is not the throttle; the concurrency bound below is.
+			//
+			// Bounding rather than rejecting outright keeps the property the
+			// comment above argues for: a valid principal behind a shared NAT
+			// egress still authenticates, it just queues behind at most a few
+			// verifications instead of amplifying into the apiserver.
 			credKey := s.negativeAuth.hash(bearerCredential(r))
+			select {
+			case s.operatorAuthSlots <- struct{}{}:
+				defer func() { <-s.operatorAuthSlots }()
+			default:
+				metrics.AuthFailures.WithLabelValues("operator").Inc()
+				w.Header().Set("Retry-After", "1")
+				http.Error(w, "too many authentications in flight", http.StatusServiceUnavailable)
+				return
+			}
 			if s.authLimiter.blocked(source) && s.negativeAuth.seen(credKey) {
 				metrics.AuthFailures.WithLabelValues("operator").Inc()
 				http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
@@ -315,11 +335,23 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// maxStateFilter caps the ?state= list. See the comment at its use.
+const maxStateFilter = 32
+
 func (s *Server) handleListIncidents(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	var states []string
 	if v := strings.TrimSpace(q.Get("state")); v != "" {
 		states = strings.Split(v, ",")
+		// Every element becomes one SQL placeholder. PostgreSQL's extended
+		// protocol refuses a statement past 65535 of them and SQLite's limit is
+		// lower, so an unbounded list turns one authenticated GET into a 500.
+		// There are nine incident states; anything beyond a generous multiple
+		// of that is a mistake or an attempt.
+		if len(states) > maxStateFilter {
+			http.Error(w, "too many state values", http.StatusBadRequest)
+			return
+		}
 	}
 	limit := 0
 	if v := q.Get("limit"); v != "" {

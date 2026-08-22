@@ -57,6 +57,9 @@ func (n *Notifier) Notify(ctx context.Context, ev notify.NotifyEvent) error {
 
 // RequestApproval implements notify.Notifier.
 func (n *Notifier) RequestApproval(ctx context.Context, inc *types.Incident, stepName string) error {
+	if inc == nil {
+		return fmt.Errorf("webhook: approval request for step %q carries no incident", stepName)
+	}
 	// The incident payload carries approval_epoch; the hint repeats it as
 	// --round so a receiver that only forwards the message text still hands
 	// the human a round-pinned command.
