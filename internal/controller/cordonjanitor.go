@@ -75,17 +75,39 @@ func (c *Controller) reconcileCordonedNodes(ctx context.Context) {
 			continue
 		}
 		if errors.Is(err, store.ErrNotFound) || inc == nil {
-			// The incident is gone but its cordon is not. Nothing will ever
-			// come back for it, so release the node.
-			c.uncordonAbandoned(ctx, node.Name, incidentID, "its incident no longer exists")
+			// The incident is gone but its cordon is not.
+			//
+			// Absence is not proof of abandonment. Retention prunes RESOLVED
+			// and EXPIRED incidents alike, so an incident that timed out
+			// awaiting approval — whose cordon this janitor deliberately
+			// REFUSED to release while the row existed — was released the
+			// moment that row was swept, inverting the rule stated at the top
+			// of this file. A store restored from backup does the same for
+			// every held cordon at once.
+			//
+			// The held mark lives on the node and outlives the row, so an
+			// unreadable incident can no longer be mistaken for a resolved one.
+			if node.Held {
+				c.log.Info("keeping a held cordon whose incident row is gone",
+					"node", node.Name, "incident", incidentID)
+				continue
+			}
+			c.uncordonAbandoned(ctx, node.Name, incidentID, "its incident no longer exists", node.Reason)
 			continue
 		}
 		if isActiveIncidentState(inc.State) {
 			continue
 		}
 		if inc.State == types.StateResolved {
-			c.uncordonAbandoned(ctx, node.Name, incidentID, "its incident resolved without reaching the uncordon step")
+			c.uncordonAbandoned(ctx, node.Name, incidentID, "its incident resolved without reaching the uncordon step", node.Reason)
 			continue
+		}
+		// Halted but not resolved: a human owns this node. Mark it, so the
+		// decision survives the incident row that retention will prune.
+		if !node.Held {
+			if err := janitor.MarkCordonHeld(ctx, node.Name); err != nil {
+				c.log.Warn("recording a held cordon failed, will retry", "node", node.Name, "err", err)
+			}
 		}
 		c.reportStuckCordon(ctx, node.Name, inc)
 	}
@@ -169,10 +191,31 @@ func (c *Controller) resolveIncidentsOnVanishedNodes(ctx context.Context) {
 	}
 }
 
-func (c *Controller) uncordonAbandoned(ctx context.Context, node, incidentID, why string) {
-	if err := c.platform.Uncordon(ctx, node); err != nil {
+// uncordonAbandoned releases a cordon whose incident is finished, but only if
+// the node still carries the reason this decision was made about.
+//
+// The listing this decision came from is served from an informer cache. A
+// stale entry is not a missed cordon — it is a cordon that has since been
+// REPLACED: a node that resolved and immediately faulted again is cordoned by a
+// NEW incident while the old reason is still cached, and releasing on that
+// basis hands the scheduler a machine in the middle of its own drain. The
+// sibling taint janitor already refuses to act on a two-read snapshot for
+// exactly this reason and says so; this one had neither the re-read nor the
+// conditional write.
+func (c *Controller) uncordonAbandoned(ctx context.Context, node, incidentID, why, reason string) {
+	janitor, ok := c.platform.(platform.CordonJanitor)
+	if !ok {
+		return
+	}
+	released, err := janitor.UncordonIfReason(ctx, node, reason)
+	if err != nil {
 		c.log.Warn("uncordoning an abandoned node failed, will retry",
 			"node", node, "incident", incidentID, "err", err)
+		return
+	}
+	if !released {
+		c.log.Info("skipped uncordoning a node whose cordon was replaced since it was listed",
+			"node", node, "incident", incidentID)
 		return
 	}
 	c.log.Info("uncordoned a node left behind by a finished playbook",

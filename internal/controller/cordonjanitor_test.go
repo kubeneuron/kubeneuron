@@ -15,6 +15,10 @@ type janitorPlatform struct {
 	stackPlatform
 	cordoned   []platform.CordonedNode
 	uncordoned []string
+	// live overrides a node's current cordon reason, modelling a listing that
+	// has gone stale between the cache read and the write.
+	live map[string]string
+	held map[string]bool
 }
 
 func (p *janitorPlatform) CordonedNodes(context.Context) ([]platform.CordonedNode, error) {
@@ -23,6 +27,25 @@ func (p *janitorPlatform) CordonedNodes(context.Context) ([]platform.CordonedNod
 
 func (p *janitorPlatform) Uncordon(_ context.Context, node string) error {
 	p.uncordoned = append(p.uncordoned, node)
+	return nil
+}
+
+// UncordonIfReason models the live re-check: it releases only when the node
+// still carries the reason the janitor decided on. `live` overrides what the
+// listing said, standing in for a cordon replaced since the cache was filled.
+func (p *janitorPlatform) UncordonIfReason(_ context.Context, node, expected string) (bool, error) {
+	if want, overridden := p.live[node]; overridden && want != expected {
+		return false, nil
+	}
+	p.uncordoned = append(p.uncordoned, node)
+	return true, nil
+}
+
+func (p *janitorPlatform) MarkCordonHeld(_ context.Context, node string) error {
+	if p.held == nil {
+		p.held = map[string]bool{}
+	}
+	p.held[node] = true
 	return nil
 }
 
@@ -235,5 +258,62 @@ func TestIncidentOnALiveNodeIsUntouched(t *testing.T) {
 	}
 	if got.State == types.StateResolved {
 		t.Fatal("an incident on a node that still exists must not be closed")
+	}
+}
+
+// TestAReplacedCordonIsNotReleased covers the node that faulted again.
+//
+// The janitor's listing is served from an informer cache. A stale entry is not
+// a missed cordon — it is a cordon that has since been REPLACED: a node that
+// resolved and immediately faulted again is cordoned by a NEW incident while
+// the old reason is still cached. Releasing on that basis hands the scheduler a
+// machine in the middle of its own drain, at the moment a fault is being worked
+// on it.
+func TestAReplacedCordonIsNotReleased(t *testing.T) {
+	inc := resetIncident()
+	inc.State = types.StateResolved
+	p := &janitorPlatform{
+		// The cache says the node is held by the resolved incident...
+		cordoned: []platform.CordonedNode{{Name: "node-a", Reason: cordonReason(inc)}},
+		// ...but the live node was re-cordoned by a newer one.
+		live: map[string]string{"node-a": cordonReason(&types.Incident{ID: "other-id", Class: inc.Class})},
+	}
+	c, st := stackTestController(t, p)
+	ctx := context.Background()
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+
+	c.reconcileCordonedNodes(ctx)
+	if len(p.uncordoned) != 0 {
+		t.Fatalf("uncordoned = %v; the live cordon belongs to a different incident, and releasing "+
+			"it returns a node to the scheduler while its own drain is in progress", p.uncordoned)
+	}
+}
+
+// TestAHeldCordonSurvivesItsIncidentBeingPruned covers the invariant this file
+// states at the top: an incident that ended in NEEDS_HUMAN or expired is not
+// uncordoned, because putting the node back silently would undo that judgement.
+//
+// Retention prunes RESOLVED and EXPIRED alike, so an incident that timed out
+// awaiting approval lost its row — and the janitor then read "no such
+// incident" as "nothing will come back for it" and released the very cordon it
+// had refused to release the day before.
+func TestAHeldCordonSurvivesItsIncidentBeingPruned(t *testing.T) {
+	pruned := &types.Incident{ID: "pruned-id", Class: types.ClassFellOffBus}
+	p := &janitorPlatform{cordoned: []platform.CordonedNode{{
+		Name:   "node-a",
+		Reason: cordonReason(pruned),
+		Held:   true,
+	}}}
+	c, _ := stackTestController(t, p)
+
+	c.reconcileCordonedNodes(context.Background())
+	if len(p.uncordoned) != 0 {
+		t.Fatalf("uncordoned = %v; a cordon a human owns was released because retention swept its "+
+			"incident row, which is exactly the judgement this janitor refuses to undo", p.uncordoned)
 	}
 }

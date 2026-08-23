@@ -30,20 +30,28 @@ type NodeEvent struct {
 	Node types.Node
 }
 
-// DrainOptions controls workload eviction during a drain.
 // DrainUsePodGracePeriod tells Drain to leave each pod's own
-// terminationGracePeriodSeconds alone. DeleteOptions.GracePeriodSeconds
-// overrides the pod spec in BOTH directions, so any concrete value here
-// silently truncates a workload that asked for longer.
-const DrainUsePodGracePeriod = -1
+// terminationGracePeriodSeconds alone, clamping only where the step's own
+// deadline cannot accommodate it. DeleteOptions.GracePeriodSeconds overrides
+// the pod spec in BOTH directions, so any concrete value here silently
+// truncates a workload that asked for longer.
+//
+// It is also the ZERO VALUE of DrainOptions.GracePeriod, on purpose: an
+// explicit 0 means "SIGKILL immediately", and that must never be what a
+// caller gets by writing DrainOptions{Timeout: x} and thinking about the
+// timeout. The most destructive eviction possible should require saying so.
+const DrainUsePodGracePeriod = 0
 
+// DrainOptions controls workload eviction during a drain.
 type DrainOptions struct {
 	// Timeout bounds the whole drain; expiry fails the playbook step.
 	Timeout time.Duration
 	// Force evicts workloads that lack a controller/manager.
 	Force bool
-	// GracePeriod overrides the workload's own termination grace period
-	// when >= 0.
+	// GracePeriod overrides the workload's own termination grace period when
+	// POSITIVE. Zero (the default) leaves the pod's own period in place — see
+	// DrainUsePodGracePeriod. There is deliberately no way to express
+	// "SIGKILL immediately" here; nothing in this product wants it.
 	GracePeriod time.Duration
 }
 
@@ -89,6 +97,9 @@ type Platform interface {
 type CordonedNode struct {
 	Name   string
 	Reason string
+	// Held is set once the janitor has decided a human owns this cordon. It
+	// survives the incident row, which retention eventually prunes.
+	Held bool
 }
 
 // CordonJanitor is implemented by platforms that can report the nodes this
@@ -101,6 +112,19 @@ type CordonedNode struct {
 // depending on every failure path remembering to clean up after itself.
 type CordonJanitor interface {
 	CordonedNodes(ctx context.Context) ([]CordonedNode, error)
+	// UncordonIfReason releases a cordon only if the node still carries the
+	// reason the caller decided on, reporting whether it did.
+	//
+	// The listing above is served from a cache, and a stale entry is not a
+	// missed cordon — it is a cordon that has since been REPLACED. A node that
+	// resolved and immediately faulted again is cordoned by a new incident
+	// while the old reason is still in the cache, and releasing on that basis
+	// hands the scheduler a machine in the middle of its own drain. The check
+	// has to happen against the live object, at the moment of the write.
+	UncordonIfReason(ctx context.Context, node, expectedReason string) (released bool, err error)
+	// MarkCordonHeld records on the node that a human owns this cordon, so a
+	// later pass cannot mistake an unreadable incident for a resolved one.
+	MarkCordonHeld(ctx context.Context, node string) error
 }
 
 // NodeTainter is implemented by platforms whose scheduler can be told to

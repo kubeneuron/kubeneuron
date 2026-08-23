@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
+	kubernetesplatform "github.com/kubeneuron/kubeneuron/internal/platform/kubernetes"
 )
 
 const (
@@ -704,6 +705,34 @@ func agentHostToolingWiring(tooling *kubeneuronv1alpha1.HostToolingSpec) (args [
 // rendered, no blast-radius narrowing is applied, and no detection-only
 // companion DaemonSet exists anymore. The retired "-agent-detect" companion
 // from the two-DaemonSet era is removed by the reconciler on upgrade.
+// agentTolerations is the operator's declared agent tolerations plus one this
+// product owes itself.
+//
+// spec.safety.taintDegradedNodes can place kubeneuron.io/degraded with effect
+// NoSchedule, and nothing in this repository declared a toleration for it —
+// the DaemonSet controller auto-tolerates the seven built-in node-condition
+// taints and no custom key. NoSchedule does not evict, so the steady state was
+// fine; the trap is any event that needs the agent pod RE-SCHEDULED on a
+// degraded node — a config-digest change rolling the DaemonSet, a manual pod
+// delete, an API-initiated eviction. The new pod could not be placed, the
+// taint is only removed when the incident halts, and the incident cannot halt
+// without the agent.
+//
+// No effect is specified, so it covers whichever effect the installation
+// chose, including one added later.
+func agentTolerations(installation *kubeneuronv1alpha1.KubeNeuron) []corev1.Toleration {
+	out := append([]corev1.Toleration(nil), installation.Spec.Agent.Tolerations...)
+	for _, t := range out {
+		if t.Key == kubernetesplatform.DegradedTaintKey {
+			return out // the operator declared their own; do not duplicate it
+		}
+	}
+	return append(out, corev1.Toleration{
+		Key:      kubernetesplatform.DegradedTaintKey,
+		Operator: corev1.TolerationOpExists,
+	})
+}
+
 func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot, tlsRevision ...string) *appsv1.DaemonSet {
 	labels := resourceLabels(installation, "agent")
 	privileged := true
@@ -742,7 +771,7 @@ func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snaps
 					SchedulerName:                 corev1.DefaultSchedulerName,
 					HostPID:                       true,
 					NodeSelector:                  agentNodes,
-					Tolerations:                   append([]corev1.Toleration(nil), installation.Spec.Agent.Tolerations...),
+					Tolerations:                   agentTolerations(installation),
 					Containers: []corev1.Container{{
 						Name:            "agent",
 						Image:           installation.Spec.Agent.Image,

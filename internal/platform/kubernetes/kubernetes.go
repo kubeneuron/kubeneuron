@@ -369,6 +369,13 @@ const doNotDisruptAnnotation = "karpenter.sh/do-not-disrupt"
 // it, so Uncordon puts it back rather than clearing marks it did not place.
 const cordonRestoreAnnotation = "kubeneuron.io/cordon-restore"
 
+// cordonHeldAnnotation records that a human owns this cordon. It lives on the
+// NODE because the incident row does not live forever: retention prunes
+// RESOLVED and EXPIRED incidents, and without this an expired incident's
+// deliberately-held cordon was released the moment its row was swept, which
+// inverts the janitor's whole stated rule.
+const cordonHeldAnnotation = "kubeneuron.io/cordon-held"
+
 // Cordon marks the node unschedulable, records the reason, and protects it from
 // being replaced while the remediation runs.
 func (p *Platform) Cordon(ctx context.Context, node string, reason string) error {
@@ -437,7 +444,8 @@ func (p *Platform) CordonedNodes(ctx context.Context) ([]platform.CordonedNode, 
 				if !ours || !node.Spec.Unschedulable {
 					continue
 				}
-				out = append(out, platform.CordonedNode{Name: node.Name, Reason: reason})
+				_, held := node.Annotations[cordonHeldAnnotation]
+				out = append(out, platform.CordonedNode{Name: node.Name, Reason: reason, Held: held})
 			}
 			sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 			return out, nil
@@ -454,13 +462,106 @@ func (p *Platform) CordonedNodes(ctx context.Context) ([]platform.CordonedNode, 
 		if !ours || !node.Spec.Unschedulable {
 			continue
 		}
-		out = append(out, platform.CordonedNode{Name: node.Name, Reason: reason})
+		_, held := node.Annotations[cordonHeldAnnotation]
+		out = append(out, platform.CordonedNode{Name: node.Name, Reason: reason, Held: held})
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+// UncordonIfReason implements platform.CordonJanitor.
+//
+// The reason is tested against the LIVE object inside the same patch, so a
+// cordon that has been replaced since the janitor listed it is not released by
+// a decision made about its predecessor. A JSON Patch `test` op is the only way
+// to say that without a read-modify-write race, and it stays on the `patch`
+// verb this controller already holds.
+func (p *Platform) UncordonIfReason(ctx context.Context, node, expectedReason string) (bool, error) {
+	current, err := p.client.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+	if err != nil {
+		return false, fmt.Errorf("reading %s before releasing its cordon: %w", node, err)
+	}
+	if current.Annotations[cordonReasonAnnotation] != expectedReason {
+		return false, nil // replaced since we listed it; not ours to release
+	}
+	keepUnschedulable, keepPinned, known := priorMarks(current.Annotations)
+	if !known {
+		keepUnschedulable, keepPinned = false, true
+	}
+
+	ops := []map[string]any{{
+		"op":    "test",
+		"path":  "/metadata/annotations/" + escapeJSONPointer(cordonReasonAnnotation),
+		"value": expectedReason,
+	}, {
+		"op": "replace", "path": "/spec/unschedulable", "value": keepUnschedulable,
+	}, {
+		"op": "remove", "path": "/metadata/annotations/" + escapeJSONPointer(cordonReasonAnnotation),
+	}}
+	for _, ann := range []string{cordonRestoreAnnotation, cordonHeldAnnotation} {
+		if _, present := current.Annotations[ann]; present {
+			ops = append(ops, map[string]any{
+				"op": "remove", "path": "/metadata/annotations/" + escapeJSONPointer(ann),
+			})
+		}
+	}
+	if !keepPinned {
+		if _, present := current.Annotations[doNotDisruptAnnotation]; present {
+			ops = append(ops, map[string]any{
+				"op": "remove", "path": "/metadata/annotations/" + escapeJSONPointer(doNotDisruptAnnotation),
+			})
+		}
+	}
+	patch, _ := json.Marshal(ops)
+	if _, err := p.client.CoreV1().Nodes().Patch(ctx, node, k8stypes.JSONPatchType, patch, metav1.PatchOptions{}); err != nil {
+		if apierrors.IsInvalid(err) {
+			// The test op failed: the reason changed between the Get and the
+			// Patch. Not an error — the next pass sees the new one.
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// MarkCordonHeld implements platform.CordonJanitor.
+func (p *Platform) MarkCordonHeld(ctx context.Context, node string) error {
+	patch, _ := json.Marshal(map[string]any{
+		"metadata": map[string]any{"annotations": map[string]string{cordonHeldAnnotation: "true"}},
+	})
+	_, err := p.client.CoreV1().Nodes().Patch(ctx, node, k8stypes.StrategicMergePatchType, patch, metav1.PatchOptions{})
+	return err
+}
+
+// escapeJSONPointer escapes a map key for use in a JSON Pointer path.
+func escapeJSONPointer(key string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(key, "~", "~0"), "/", "~1")
 }
 
 // Uncordon makes the node schedulable again, clears the reason, and lifts the
 // autoscaler protection the cordon put in place.
+// priorMarks decodes the cordon-restore record into what Uncordon must put
+// back, and says whether the record existed at all.
+//
+// The distinction is load-bearing and the first version did not make it. An
+// EMPTY record means "we looked, and the node was clean"; an ABSENT one means
+// "we do not know" — a node cordoned by a build that predates the record and
+// still held across the upgrade, or an annotation a human edited. Splitting a
+// missing key yields [""] for both, which resolves the unknown case in the
+// fail-open direction: it deletes a karpenter.sh/do-not-disrupt somebody else
+// placed, which is the exact harm the record was added to prevent.
+//
+// Unknown therefore restores nothing and clears nothing: the node keeps
+// whatever it has, and a human can see it.
+func priorMarks(annotations map[string]string) (keepUnschedulable, keepPinned, known bool) {
+	record, present := annotations[cordonRestoreAnnotation]
+	if !present {
+		return true, true, false
+	}
+	parts := strings.Split(record, ",")
+	return slices.Contains(parts, "unschedulable"), slices.Contains(parts, "do-not-disrupt"), true
+}
+
 func (p *Platform) Uncordon(ctx context.Context, node string) error {
 	// Restore, do not clear. See Cordon: either mark may have been somebody
 	// else's before we touched the node, and the record says which.
@@ -468,9 +569,11 @@ func (p *Platform) Uncordon(ctx context.Context, node string) error {
 	if err != nil {
 		return fmt.Errorf("reading %s before uncordoning it: %w", node, err)
 	}
-	prior := strings.Split(current.Annotations[cordonRestoreAnnotation], ",")
-	keepUnschedulable := slices.Contains(prior, "unschedulable")
-	keepPinned := slices.Contains(prior, "do-not-disrupt")
+	keepUnschedulable, keepPinned, known := priorMarks(current.Annotations)
+	if !known {
+		// No record: leave the node's own marks alone. See priorMarks.
+		keepUnschedulable, keepPinned = false, true
+	}
 
 	annotations := map[string]*string{
 		cordonReasonAnnotation:  nil,
@@ -504,16 +607,37 @@ func (p *Platform) Drain(ctx context.Context, node string, opts platform.DrainOp
 	// kubectl drain retries those until the budget frees up; failing the
 	// step instead would escalate the incident to a more destructive rung,
 	// which is exactly backwards for a deliberate availability guard.
+	// PRE-FLIGHT: refuse before evicting anything.
+	//
+	// A pod with no controller is not evictable and nothing will reschedule it,
+	// so a node carrying one cannot be drained — and kubectl aborts on exactly
+	// this, before issuing a single eviction, which is the entire point of
+	// --force. The first version of this refusal collected the names inside the
+	// eviction loop and returned at the end: it evicted every managed pod,
+	// waited for them to die, and only then failed. The ladder then escalated
+	// through every remaining rung, evicting the customer's jobs again at each
+	// one, for a node it could never drain — while the pod that caused it (an
+	// SRE's `kubectl debug node/...`, which creates a bare pod) sat there
+	// untouched. Doing the disruption and then refusing is worse than either.
+	if !opts.Force {
+		var unmanaged []string
+		for i := range pods {
+			if unmanagedPod(&pods[i]) {
+				unmanaged = append(unmanaged, pods[i].Namespace+"/"+pods[i].Name)
+			}
+		}
+		if len(unmanaged) > 0 {
+			sort.Strings(unmanaged)
+			return fmt.Errorf("drain of %s: %d pod(s) have no controller and cannot be evicted (%s); "+
+				"nothing would reschedule them, so this node cannot be drained — nothing was evicted",
+				node, len(unmanaged), strings.Join(unmanaged, ", "))
+		}
+	}
+
 	var blocked []*corev1.Pod
-	// Pods this drain cannot evict and did not: reported, never silently
-	// dropped. See the refusal below.
-	var unmanaged []string
 	for i := range pods {
 		pod := &pods[i]
 		if skipDuringDrain(pod, opts.Force) {
-			if unmanagedPod(pod) && !opts.Force {
-				unmanaged = append(unmanaged, pod.Namespace+"/"+pod.Name)
-			}
 			continue
 		}
 		switch err := p.evictPod(ctx, pod, opts); {
@@ -551,35 +675,65 @@ func (p *Platform) Drain(ctx context.Context, node string, opts platform.DrainOp
 		return err
 	}
 
-	// A pod with no controller was never evicted, and the caller must not be
-	// told the node is drained.
-	//
-	// This branch used to `continue` silently and Drain returned nil, so a
-	// bare pod — kubectl run, a researcher's job, an orphan — sat on a machine
-	// the ladder then rebooted. The comment claimed kubectl drain semantics;
-	// kubectl does the opposite, aborting with an error naming the pods unless
-	// --force is given, and that refusal is the whole point of the flag.
-	//
-	// Failing here does escalate the incident, which is the cost. It is the
-	// right cost: escalation is visible and reversible, and a human reads the
-	// names. Rebooting a node with somebody's unmanaged job still on it is
-	// neither.
-	if len(unmanaged) > 0 {
-		sort.Strings(unmanaged)
-		return fmt.Errorf("drain of %s: %d pod(s) have no controller and were not evicted (%s); "+
-			"nothing will reschedule them, so this node is not drained",
-			node, len(unmanaged), strings.Join(unmanaged, ", "))
-	}
 	return nil
 }
 
 // evictPod issues one Eviction API call for the pod.
+// evictionGrace decides whether to override the pod's own grace period, and
+// with what. It returns capped=false to mean "leave the pod's spec alone".
+func evictionGrace(ctx context.Context, pod *corev1.Pod, opts platform.DrainOptions) (time.Duration, bool) {
+	if opts.GracePeriod > 0 {
+		return opts.GracePeriod, true // an explicit caller override
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return 0, false // unbounded step: the pod's own period governs
+	}
+	budget := time.Until(deadline) - evictionGraceMargin
+	if budget < 0 {
+		budget = 0
+	}
+	own := time.Duration(0)
+	if pod.Spec.TerminationGracePeriodSeconds != nil {
+		own = time.Duration(*pod.Spec.TerminationGracePeriodSeconds) * time.Second
+	} else {
+		own = corev1DefaultGracePeriod
+	}
+	if own <= budget {
+		return 0, false // it fits; do not touch the spec
+	}
+	return budget, true
+}
+
+// evictionGraceMargin is the slack left between an eviction's grace period and
+// the step deadline, so the kubelet's SIGKILL and the pod's disappearance both
+// land inside the window rather than the drain timing out mid-termination.
+const evictionGraceMargin = 30 * time.Second
+
+// corev1DefaultGracePeriod is Kubernetes' own default when a pod declares none.
+const corev1DefaultGracePeriod = 30 * time.Second
+
 func (p *Platform) evictPod(ctx context.Context, pod *corev1.Pod, opts platform.DrainOptions) error {
 	eviction := &policyv1.Eviction{
 		ObjectMeta: metav1.ObjectMeta{Name: pod.Name, Namespace: pod.Namespace},
 	}
-	if opts.GracePeriod >= 0 {
-		secs := int64(opts.GracePeriod / time.Second)
+	// Clamp to what is left of the step, rather than choosing a number.
+	//
+	// terminationGracePeriodSeconds is tenant-writable and unbounded. Honouring
+	// it unconditionally — the right instinct, and the point of the previous
+	// change — hands the drain's duration to whoever wrote the pod: a spec
+	// declaring 24h cannot terminate inside a 30-minute step, so the drain times
+	// out, the step fails, and the incident climbs the whole ladder to
+	// NEEDS_HUMAN having repaired nothing. A tenant should not be able to deny
+	// remediation of the node they are on.
+	//
+	// So the pod keeps its own grace period whenever it fits, and is cut only
+	// by the deadline the step already had — which is the bound that existed
+	// anyway. The margin leaves room for the kubelet to act on the SIGKILL
+	// before the context dies, so the node is actually drained rather than
+	// abandoned mid-termination.
+	if grace, capped := evictionGrace(ctx, pod, opts); capped {
+		secs := int64(grace / time.Second)
 		eviction.DeleteOptions = &metav1.DeleteOptions{GracePeriodSeconds: &secs}
 	}
 	return p.client.PolicyV1().Evictions(pod.Namespace).Evict(ctx, eviction)

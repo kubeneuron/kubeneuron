@@ -212,8 +212,13 @@ func TestDrainEvictsOnlyEvictablePods(t *testing.T) {
 	if !strings.Contains(err.Error(), "default/bare") {
 		t.Fatalf("the refusal does not name the pod a human has to deal with: %v", err)
 	}
-	if len(evicted) != 1 || evicted[0] != "app" {
-		t.Fatalf("evicted = %v, want only the ReplicaSet pod", evicted)
+	// And NOTHING was evicted. The refusal is a pre-flight, like kubectl's:
+	// the first version collected the names inside the eviction loop, so it
+	// destroyed the customer's managed pods, waited for them to terminate, and
+	// only then failed — after which the ladder escalated and did it again at
+	// every remaining rung, for a node it could never drain.
+	if len(evicted) != 0 {
+		t.Fatalf("evicted = %v; a drain that cannot succeed must not disrupt anything first", evicted)
 	}
 	// DaemonSet and unmanaged pods must survive a non-forced drain.
 	for _, name := range []string{"ds", "bare"} {
@@ -261,8 +266,9 @@ func TestDrainDoesNotTruncateThePodGracePeriod(t *testing.T) {
 	})
 
 	p := &Platform{client: client}
+	// A step budget that comfortably fits the pod's 600s: the pod keeps its own.
 	if err := p.Drain(context.Background(), "n1", platform.DrainOptions{
-		Timeout: 5 * time.Second, GracePeriod: platform.DrainUsePodGracePeriod,
+		Timeout: 30 * time.Minute, GracePeriod: platform.DrainUsePodGracePeriod,
 	}); err != nil {
 		t.Fatalf("Drain: %v", err)
 	}
@@ -272,6 +278,58 @@ func TestDrainDoesNotTruncateThePodGracePeriod(t *testing.T) {
 	if override != nil {
 		t.Fatalf("the eviction overrode the pod's grace period with %ds; a job that asked for "+
 			"%ds to checkpoint gets SIGKILL instead", *override, long)
+	}
+}
+
+// TestDrainClampsAGracePeriodItCannotHonour covers the other side of the same
+// decision.
+//
+// terminationGracePeriodSeconds is tenant-writable and unbounded. Honouring it
+// unconditionally hands the drain's duration to whoever wrote the pod: a spec
+// declaring far more than the step's budget cannot terminate inside it, so the
+// drain times out, the step fails, and the incident climbs the whole ladder to
+// NEEDS_HUMAN having repaired nothing. A tenant must not be able to deny
+// remediation of the node they are running on.
+func TestDrainClampsAGracePeriodItCannotHonour(t *testing.T) {
+	day := int64(86400)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "squatter", Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "rs",
+				Controller: func() *bool { b := true; return &b }(),
+			}},
+		},
+		Spec:   corev1.PodSpec{NodeName: "n1", TerminationGracePeriodSeconds: &day},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	client := fake.NewSimpleClientset(pod)
+
+	var override *int64
+	client.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() != "eviction" {
+			return false, nil, nil
+		}
+		ev := action.(k8stesting.CreateAction).GetObject().(*policyv1.Eviction)
+		if ev.DeleteOptions != nil {
+			override = ev.DeleteOptions.GracePeriodSeconds
+		}
+		return true, nil, client.Tracker().Delete(
+			corev1.SchemeGroupVersion.WithResource("pods"), ev.Namespace, ev.Name)
+	})
+
+	p := &Platform{client: client}
+	if err := p.Drain(context.Background(), "n1", platform.DrainOptions{
+		Timeout: 10 * time.Minute, GracePeriod: platform.DrainUsePodGracePeriod,
+	}); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if override == nil {
+		t.Fatal("a pod asking for 24 hours against a 10-minute step was left unclamped; the drain " +
+			"cannot finish, and the ladder escalates to a human having repaired nothing")
+	}
+	if *override <= 0 || *override >= day {
+		t.Fatalf("clamped to %ds, want something inside the step budget and above zero", *override)
 	}
 }
 
@@ -529,5 +587,45 @@ func TestUncordonReleasesAMarkItDidPlace(t *testing.T) {
 	}
 	if _, pinned := got.Annotations[doNotDisruptAnnotation]; pinned {
 		t.Fatal("our own do-not-disrupt pin survived the uncordon")
+	}
+}
+
+// TestUncordonWithNoRecordDoesNotClearSomebodysPin covers the node cordoned by
+// a build that predates the cordon-restore record and still held across the
+// upgrade — the annotations live on the Node and survive the controller.
+//
+// An empty record means "we looked, and the node was clean". An ABSENT one
+// means "we do not know". Splitting a missing key yields the same thing for
+// both, which resolves the unknown case in the fail-open direction and deletes
+// a karpenter.sh/do-not-disrupt somebody else placed — the exact harm the
+// record was added to prevent.
+func TestUncordonWithNoRecordDoesNotClearSomebodysPin(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "n1",
+			Annotations: map[string]string{
+				cordonReasonAnnotation: "kubeneuron: fell-off-bus (inc-1)",
+				doNotDisruptAnnotation: "true", // a human's pin
+				// deliberately NO cordonRestoreAnnotation
+			},
+		},
+		Spec: corev1.NodeSpec{Unschedulable: true},
+	}
+	client := fake.NewSimpleClientset(node)
+	p := &Platform{client: client}
+
+	if err := p.Uncordon(context.Background(), "n1"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.CoreV1().Nodes().Get(context.Background(), "n1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, pinned := got.Annotations[doNotDisruptAnnotation]; !pinned {
+		t.Fatal("with no record of what was there before, the uncordon deleted a do-not-disrupt " +
+			"annotation it cannot know it placed; Karpenter is now free to consolidate the node")
+	}
+	if got.Spec.Unschedulable {
+		t.Fatal("the node was never released, so a cordon from before the upgrade is stranded forever")
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/action"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
+	kubernetesplatform "github.com/kubeneuron/kubeneuron/internal/platform/kubernetes"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -490,5 +492,50 @@ func TestVendorScopedLaddersAreDeclared(t *testing.T) {
 		t.Fatalf("vendorScopedByDesign records pairings that no longer exist: %s\n"+
 			"A vendor-neutral ladder or a second adapter would do that — remove the entries so the "+
 			"list keeps meaning what it says.", strings.Join(stale, ", "))
+	}
+}
+
+// TestAgentToleratesOurOwnDegradedTaint covers a deadlock this product could
+// create for itself.
+//
+// spec.safety.taintDegradedNodes can place kubeneuron.io/degraded with effect
+// NoSchedule, and nothing declared a toleration for it — the DaemonSet
+// controller auto-tolerates the built-in node-condition taints and no custom
+// key. NoSchedule does not evict, so the steady state was fine; the trap is any
+// event needing the agent RE-SCHEDULED on a degraded node. The new pod cannot
+// be placed, the taint is removed only when the incident halts, and the
+// incident cannot halt without the agent.
+func TestAgentToleratesOurOwnDegradedTaint(t *testing.T) {
+	inst := &kubeneuronv1alpha1.KubeNeuron{}
+	inst.Name = "kubeneuron"
+	inst.Spec.Namespace = "kube-neuron"
+
+	tolerated := false
+	for _, tol := range agentTolerations(inst) {
+		if tol.Key == kubernetesplatform.DegradedTaintKey {
+			tolerated = true
+			if tol.Effect != "" {
+				t.Fatalf("the toleration pins effect %q; it must cover whichever effect the "+
+					"installation chose, including one added later", tol.Effect)
+			}
+		}
+	}
+	if !tolerated {
+		t.Fatal("the agent does not tolerate this product's own degraded taint; a node it marked " +
+			"cannot take the agent back, and the incident that placed the mark cannot halt without it")
+	}
+
+	// An operator who declares their own must not get a duplicate.
+	inst.Spec.Agent.Tolerations = []corev1.Toleration{{
+		Key: kubernetesplatform.DegradedTaintKey, Operator: corev1.TolerationOpExists,
+	}}
+	n := 0
+	for _, tol := range agentTolerations(inst) {
+		if tol.Key == kubernetesplatform.DegradedTaintKey {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("the degraded toleration appears %d times when the operator declared their own", n)
 	}
 }
