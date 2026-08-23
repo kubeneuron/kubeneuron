@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -247,5 +248,77 @@ func TestValidateEscalationGraphRejectsCyclesAndSelfReferences(t *testing.T) {
 	acyclic := map[string]*Playbook{"a": book("a", "b"), "b": book("b", "c"), "c": book("c", "")}
 	if err := ValidateEscalationGraph(acyclic); err != nil {
 		t.Fatalf("acyclic ladder must be accepted, got %v", err)
+	}
+}
+
+// TestForceParamRules pins the three rules params.force lives by. It exists at
+// all because the parameter was added mid-round and each rule closes a way the
+// first version was quietly wrong.
+func TestForceParamRules(t *testing.T) {
+	book := func(action, force, approval string) *Playbook {
+		return &Playbook{
+			Name: "p", Target: "node",
+			Steps: []Step{{
+				Name: "s", Action: action, Approval: approval,
+				Params: map[string]string{"force": force},
+			}},
+		}
+	}
+
+	// 1. Unparseable values are rejected at load. They used to read as false,
+	// which is the safe direction but a silent one: the author of `force: yes`
+	// found out when the ladder escalated past a refused drain at 3am.
+	if err := book("platform.drain", "yes", "required").Validate(); err == nil {
+		t.Fatal("force: yes was accepted; it reads as false at execution time and the author " +
+			"is never told")
+	}
+
+	// 2. force on an action that does not read it is rejected, rather than
+	// validated and then silently dropped.
+	if err := book("platform.cordon", "true", "required").Validate(); err == nil {
+		t.Fatal("force was accepted on platform.cordon, which ignores it; a load-time boolean " +
+			"check implies the key does something there")
+	}
+
+	// 3. A forced drain requires approval. It destroys pods nothing will
+	// recreate, and no other gate in the system can see the difference between
+	// this and an ordinary drain.
+	if err := book("platform.drain", "true", "none").Validate(); err == nil {
+		t.Fatal("a forced drain was accepted without approval; it ends a tenant's work outright " +
+			"while every blast-radius gate still sees an ordinary Drain")
+	}
+
+	// And the well-formed spelling loads.
+	if err := book("platform.drain", "true", "required").Validate(); err != nil {
+		t.Fatalf("a correctly declared forced drain was rejected: %v", err)
+	}
+	// As does an ordinary drain with no force at all.
+	if err := (&Playbook{Name: "p", Target: "node",
+		Steps: []Step{{Name: "s", Action: "platform.drain"}}}).Validate(); err != nil {
+		t.Fatalf("an ordinary drain was rejected: %v", err)
+	}
+}
+
+// TestNegativeDurationsAreRejected: a negative cooldown is not a slow cooldown,
+// it is none at all — every "has enough time passed" comparison is already
+// true, so the playbook that just failed on this GPU re-runs on the next tick
+// and keeps re-running. A negative step timeout is the same shape: the deadline
+// is already past when it is computed, so the step is cancelled before doing
+// anything and the ladder escalates to a more destructive rung on a playbook
+// that never ran.
+func TestNegativeDurationsAreRejected(t *testing.T) {
+	step := Step{Name: "s", Action: "platform.drain"}
+
+	p := &Playbook{Name: "p", Target: "node", Cooldown: Duration(-time.Hour), Steps: []Step{step}}
+	if err := p.Validate(); err == nil {
+		t.Fatal("a negative cooldown was accepted; it suppresses nothing, so a reset loop can " +
+			"cycle a card on every tick")
+	}
+
+	step.Timeout = Duration(-time.Minute)
+	p = &Playbook{Name: "p", Target: "node", Steps: []Step{step}}
+	if err := p.Validate(); err == nil {
+		t.Fatal("a negative step timeout was accepted; the step is cancelled before it acts and " +
+			"the ladder escalates past it")
 	}
 }

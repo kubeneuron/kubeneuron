@@ -159,7 +159,15 @@ func TestDiscardCompletedActionClearsADeadLetteredRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	if state != "dead" {
-		t.Skipf("the attempt budget did not dead-letter the row (state=%q); this test needs that state", state)
+		// Not a skip. This test's whole subject is the dead-lettered row, and
+		// skipping when the setup does not produce one is how the SQL half of
+		// the guard went unnoticed for four rounds: the run stayed green while
+		// covering nothing. TestDiscardRemovesEveryTerminalActionState covers
+		// the states directly; this one covers the PATH that reaches them, so
+		// if that path stops dead-lettering, that is the finding.
+		t.Fatalf("burning the claim-attempt budget left the row in state %q, not \"dead\"; a "+
+			"crash-looping agent no longer dead-letters its action, so the queue has no "+
+			"terminal state for work that can never succeed", state)
 	}
 
 	if err := s.DiscardCompletedAction(ctx, id); err != nil {
@@ -175,6 +183,55 @@ func TestDiscardCompletedActionClearsADeadLetteredRow(t *testing.T) {
 		t.Fatalf("a dead-lettered restore could not be re-dispatched (%v); this node's GPU "+
 			"monitoring would stay off for the whole retention window while consuming the "+
 			"janitor's shared budget on every tick", err)
+	}
+}
+
+// TestDiscardRemovesEveryTerminalActionState is the SQL half of the guard, and
+// it is here because the half above turned out not to cover it.
+//
+// QueuedAction.Terminal() and terminalActionStates are two halves of one rule.
+// Cutting the SQL constant down to ('done') leaves the test above PASSING —
+// it asks the Go predicate — and leaves the replay test passing too, because
+// that one only ever uses "done". The single test that did reach 'dead' got
+// there by burning the claim-attempt budget and t.Skip'd when it did not, and
+// a skipped test guards nothing. So the SQL half of the defect class that
+// recurred for nine consecutive rounds was unguarded on both engines.
+//
+// Set the state directly: no attempt budgets, nothing to skip.
+func TestDiscardRemovesEveryTerminalActionState(t *testing.T) {
+	for _, state := range []string{"done", "dead", "cancelled"} {
+		t.Run(state, func(t *testing.T) {
+			s := openLeaseTestStore(t)
+			ctx := context.Background()
+			const id = "restore-node-x"
+
+			if err := s.EnqueueAction(ctx, "node-x", types.Action{
+				ID: id, Type: types.ActionRestoreAcceleratorHost, Timeout: time.Minute,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.sqlDB.ExecContext(ctx,
+				`UPDATE actions SET state=?, lease_token='', lease_expires_at_ns=0 WHERE id=?`,
+				state, id); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := s.DiscardCompletedAction(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+
+			var rows int
+			if err := s.sqlDB.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM actions WHERE id=?`, id).Scan(&rows); err != nil {
+				t.Fatal(err)
+			}
+			if rows != 0 {
+				t.Fatalf("a %q action survived the discard; the janitor's next restore on this "+
+					"node conflicts away against a row no agent can ever claim, so the node's "+
+					"GPU monitoring stays off for the whole retention window while consuming "+
+					"the janitor's shared restore budget on every reconcile tick", state)
+			}
+		})
 	}
 }
 

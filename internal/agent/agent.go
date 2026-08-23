@@ -39,6 +39,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/agent/kmsg"
 	"github.com/kubeneuron/kubeneuron/internal/agent/nvml"
 	"github.com/kubeneuron/kubeneuron/internal/agent/spool"
+	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -1511,7 +1512,7 @@ func (a *Agent) nvidiaAcceleratorReportWithProfile(ctx context.Context, profile 
 			report.Readiness = types.AcceleratorReadinessDegraded
 			report.ReadinessReasons = append(report.ReadinessReasons,
 				"NVIDIA runtime is not attested by matching local DCGM version and discovery probes")
-		} else if !runtimeVersionMatchesProfile(report.RuntimeVersion, profile.RuntimeVersion) {
+		} else if !config.RuntimeVersionSatisfies(report.RuntimeVersion, profile.RuntimeVersion) {
 			report.Readiness = types.AcceleratorReadinessDegraded
 			// Name the binary that produced the version. When a node carries
 			// its own dcgmi, the mismatch is usually "which client answered",
@@ -2060,36 +2061,4 @@ func (a *Agent) deviceHolders() []types.AgentDeviceHolder {
 		out = append(out, types.AgentDeviceHolder{PID: h.PID, Command: h.Command, Device: h.Device})
 	}
 	return out
-}
-
-// runtimeVersionMatchesProfile mirrors the controller's profile comparison so
-// the agent's own readiness verdict cannot disagree with the gate's.
-//
-// The patch level is deliberately not compared. The agent image ships a pinned
-// DCGM client, so bumping it would otherwise degrade every fleet whose profile
-// still names the previous patch — a fleet-wide outage caused by a release, not
-// by anything on the nodes. Major and minor must still match exactly: a profile
-// names the runtime it was reviewed against, and an unreviewed newer minor is
-// not automatically safe to reset hardware with.
-func runtimeVersionMatchesProfile(attested, pinned string) bool {
-	attested, pinned = strings.TrimSpace(attested), strings.TrimSpace(pinned)
-	if attested == "" || pinned == "" {
-		return false
-	}
-	return attested == pinned || majorMinorRuntime(attested) == majorMinorRuntime(pinned)
-}
-
-// majorMinorRuntime reduces "dcgm-4.6.1" to "dcgm-4.6". A version pinned only
-// to a major ("dcgm-4") reduces to itself, so an operator can opt into a looser
-// rule deliberately rather than by accident.
-func majorMinorRuntime(version string) string {
-	prefix, number := "", version
-	if index := strings.LastIndex(version, "-"); index >= 0 {
-		prefix, number = version[:index+1], version[index+1:]
-	}
-	parts := strings.Split(number, ".")
-	if len(parts) > 2 {
-		parts = parts[:2]
-	}
-	return prefix + strings.Join(parts, ".")
 }

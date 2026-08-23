@@ -2,7 +2,7 @@ package config
 
 import "strings"
 
-// runtimeVersionSatisfies reports whether an attested runtime version is
+// RuntimeVersionSatisfies reports whether an attested runtime version is
 // acceptable for a profile that pins another.
 //
 // Exact equality was the original rule, and it turned every DCGM client bump
@@ -24,7 +24,7 @@ import "strings"
 //
 // A profile that pins a bare major ("dcgm-4") is satisfied by any 4.x, which
 // lets an operator opt into a looser rule deliberately rather than by accident.
-func runtimeVersionSatisfies(attested, pinned string) bool {
+func RuntimeVersionSatisfies(attested, pinned string) bool {
 	attested = strings.TrimSpace(attested)
 	pinned = strings.TrimSpace(pinned)
 	if attested == "" || pinned == "" {

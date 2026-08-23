@@ -364,11 +364,36 @@ func quiesceForbiddenHolders(quiesce *kubeneuronv1alpha1.QuiesceSpec) []string {
 	var out []string
 	for _, name := range quiesce.ForbidResetWhenPresent {
 		if name = strings.TrimSpace(name); name != "" {
-			out = append(out, name)
+			out = append(out, truncateToComm(name))
 		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+// commMax is the Linux limit on /proc/<pid>/comm, which is what the node
+// reports and what these names are matched against exactly.
+const commMax = 15
+
+// truncateToComm cuts a declared process name to what the kernel will actually
+// report, so a declaration longer than that is not silently inert.
+//
+// The CRD's own standing example, nv-fabricmanager, is 16 characters and
+// arrives from the node as "nv-fabricmanage" — so the documented way to write
+// this field could never match. The field doc did say to give the truncated
+// form when it is longer, but nothing enforced it and the example broke its
+// own advice.
+//
+// For fabricmanager the cost was only a misleading refusal message, since an
+// unrecognised holder is refused anyway. It is genuinely permissive for any
+// name that IS agent-releasable: forbidResetWhenPresent: [nvidia-persistenced]
+// is 19 characters, never matched "nvidia-persiste", and the reset went ahead
+// against an operator's explicit instruction that it must not.
+func truncateToComm(name string) string {
+	if len(name) > commMax {
+		return name[:commMax]
+	}
+	return name
 }
 
 // validateHostTooling rejects host tooling that could not work at runtime.

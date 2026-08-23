@@ -29,8 +29,8 @@ func TestRuntimeVersionIgnoresPatchButNotMinor(t *testing.T) {
 		{"empty pinned", "dcgm-4.6.1", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := runtimeVersionSatisfies(tc.attested, tc.pinned); got != tc.want {
-				t.Fatalf("runtimeVersionSatisfies(%q, %q) = %v, want %v",
+			if got := RuntimeVersionSatisfies(tc.attested, tc.pinned); got != tc.want {
+				t.Fatalf("RuntimeVersionSatisfies(%q, %q) = %v, want %v",
 					tc.attested, tc.pinned, got, tc.want)
 			}
 		})

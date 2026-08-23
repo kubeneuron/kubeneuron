@@ -65,6 +65,15 @@ spec:
                       fallback becomes a startup failure instead of a lie. Leave unset on
                       CPU-only installs and on nodes where the device plugin injects the
                       tooling by other means.
+
+                      On a MIXED cluster, set spec.agent.nodeSelector alongside it. The two are
+                      not coupled automatically because an all-GPU fleet with no selector is a
+                      legitimate and common installation, and refusing it to protect mixed
+                      clusters would break those. But with tooling declared and no selector,
+                      the DaemonSet lands on CPU nodes too, where --require-real-driver refuses
+                      to start and the hostPath type: Directory check leaves pods in
+                      ContainerCreating — visible and loud, and the installation stays
+                      Ready=False until it is fixed.
                     properties:
                       binDir:
                         default: /usr/bin
@@ -774,9 +783,9 @@ spec:
                           Declaring it here turns a reset attempt into an early, explained refusal
                           instead of a cordoned and drained node followed by a failure.
 
-                          Names are matched against the process name the node reports (Linux
-                          truncates these to 15 characters, so give the truncated form when it is
-                          longer).
+                          Names are matched against the process name the node reports, which Linux
+                          truncates to 15 characters. Longer entries are truncated here to match,
+                          so `nv-fabricmanager` and `nv-fabricmanage` both work.
                         items:
                           minLength: 1
                           type: string

@@ -34,6 +34,10 @@ var acceleratorStackComponents = []string{
 const (
 	// acceleratorStackLabelPrefix is the GPU Operator's per-component switch.
 	acceleratorStackLabelPrefix = "nvidia.com/gpu.deploy."
+	// acceleratorStackLabelEnabled is the only value this acts on. Named
+	// rather than spelled inline, because the controller's preflight asking a
+	// different question about the same label is the defect this closes.
+	acceleratorStackLabelEnabled = "true"
 	// acceleratorStackQuiescedAnnotation records which components KubeNeuron
 	// switched off, so a restore puts back exactly what it took away and never
 	// enables a component the cluster had deliberately disabled.
@@ -60,8 +64,12 @@ func (p *Platform) QuiesceAcceleratorStack(ctx context.Context, node string) ([]
 	var quiesced []string
 	for _, component := range acceleratorStackComponents {
 		key := acceleratorStackLabelPrefix + component
-		value, present := current.Labels[key]
-		if !present || value != "true" {
+		// Same rule the controller's preflight asks — see
+		// componentIsOperatorManaged. The two disagreed once, with the
+		// preflight testing presence while this tested the value, and the
+		// disagreement was invisible until a node had been cordoned and
+		// drained for a reset that could not run.
+		if current.Labels[key] != acceleratorStackLabelEnabled {
 			continue // absent or already off: nothing of ours to undo later
 		}
 		labels[key] = strPtr("false")

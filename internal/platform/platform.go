@@ -122,9 +122,16 @@ type CordonJanitor interface {
 	// hands the scheduler a machine in the middle of its own drain. The check
 	// has to happen against the live object, at the moment of the write.
 	UncordonIfReason(ctx context.Context, node, expectedReason string) (released bool, err error)
-	// MarkCordonHeld records on the node that a human owns this cordon, so a
+	// MarkCordonHeldIfReason records on the node that a human owns this cordon, so a
 	// later pass cannot mistake an unreadable incident for a resolved one.
-	MarkCordonHeld(ctx context.Context, node string) error
+	// Reason-scoped for the same reason its sibling above is: the listing it
+	// is called from comes from the informer cache, and a stale entry is not a
+	// missed cordon but a cordon that has since been REPLACED. Stamping the
+	// held mark from a decision made about incident A onto incident B's live
+	// cordon is worse than doing nothing, because the mark deliberately
+	// OUTLIVES the incident row — when B's row is pruned the janitor sees the
+	// mark and keeps the node cordoned forever.
+	MarkCordonHeldIfReason(ctx context.Context, node, expectedReason string) (marked bool, err error)
 }
 
 // NodeTainter is implemented by platforms whose scheduler can be told to

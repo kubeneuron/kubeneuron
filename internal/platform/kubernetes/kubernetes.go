@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"slices"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"strings"
 
+	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -47,8 +49,13 @@ var acceleratorDomains = map[string]struct{}{
 	"amd.com":       {},
 	"intel.com":     {},
 	"gpu.intel.com": {},
-	"habana.ai":     {},
+	"habana.ai":     {}, // gaudi/gaudi2/gaudi3/greco/goya
 	"aliyun.com":    {}, // gpu-mem / gpu-count, fractional-GPU scheduling
+	// Inf1/Inf2/Trn1. Absent until now, in a repo that ships an AWS cloud
+	// provider: a Neuron node was invisible to the whole control plane, and
+	// silently — the unrecognised-domain warning only fires for GPU-SHAPED
+	// names, and "neuron" is not one.
+	"aws.amazon.com": {},
 }
 
 // isAcceleratorResource reports whether an extended-resource name names a GPU
@@ -77,29 +84,97 @@ func isAcceleratorResource(name corev1.ResourceName) bool {
 	return ok
 }
 
-// acceleratorResourceKind splits a resource name and reports whether its kind
-// has an accelerator shape, returning the domain that claimed it.
-func acceleratorResourceKind(name corev1.ResourceName) (domain string, ok bool) {
+// acceleratorResourceClass says what an extended resource actually COUNTS.
+//
+// Three different questions used to be answered from one boolean and a switch
+// spelled out at each call site — is this node in the fleet, how many devices
+// does it have, does this pod hold a GPU — and they drifted apart exactly the
+// way every other inline-enumerated set in this codebase has. The table below
+// is the single answer all three read.
+type acceleratorResourceClass int
+
+const (
+	// notAnAccelerator: not a GPU resource at all.
+	notAnAccelerator acceleratorResourceClass = iota
+	// wholeDevice: the quantity IS a count of physical accelerators.
+	wholeDevice
+	// devicePartition: the quantity counts slices, replicas, cores,
+	// millicores or megabytes of a device — never devices. Its presence marks
+	// the node as an accelerator node; its VALUE must never become a count.
+	devicePartition
+	// monitoringHandle: an operator bookkeeping resource that is not hardware
+	// and must not confer fleet membership on its own.
+	monitoringHandle
+)
+
+// wholeDeviceKinds names, per vendor domain, the resources whose quantity is a
+// physical device count. Anything accelerator-shaped and absent from here is a
+// partition, which is the safe direction: a partition contributes existence
+// but never a number, and an unknown resource reported as N devices is how one
+// Intel card came to be reported as a thousand.
+var wholeDeviceKinds = map[string]map[string]struct{}{
+	"nvidia.com": {"gpu": {}},
+	"amd.com":    {"gpu": {}},
+	// Intel names the device family as the kind. Everything else it advertises
+	// — millicores, tiles, memory.max — describes ONE card.
+	"gpu.intel.com": {"i915": {}, "xe": {}},
+	"intel.com":     {"gpu": {}},
+	"habana.ai":     {"gaudi": {}, "gaudi2": {}, "gaudi3": {}, "greco": {}, "goya": {}},
+	// Inf1/Inf2/Trn1: neuron and neurondevice count devices, neuroncore counts
+	// cores within them.
+	"aws.amazon.com": {"neuron": {}, "neurondevice": {}},
+	// Fractional-GPU scheduling: gpu-count is devices, gpu-mem is MiB.
+	"aliyun.com": {"gpu-count": {}},
+}
+
+// classifyAcceleratorResource is the one table. Callers ask it what a resource
+// means rather than re-deciding per site.
+func classifyAcceleratorResource(name corev1.ResourceName) (domain string, class acceleratorResourceClass) {
 	resource := string(name)
 	// A core resource (cpu, memory, ephemeral-storage) has no domain prefix;
 	// only domain-qualified extended resources can name an accelerator.
 	domain, kind, qualified := strings.Cut(resource, "/")
 	if !qualified {
-		return "", false
+		return "", notAnAccelerator
+	}
+	// Bookkeeping first: gpu.intel.com/i915_monitoring is a handle the device
+	// plugin advertises for its own exporter. Counted as a device it reported
+	// a GPU that does not exist, and — worse — a node advertising ONLY it was
+	// admitted to the set of machines playbooks may cordon, drain and reboot.
+	if strings.HasSuffix(kind, "_monitoring") {
+		return domain, monitoringHandle
+	}
+	if kinds, ok := wholeDeviceKinds[domain]; ok {
+		if _, whole := kinds[kind]; whole {
+			return domain, wholeDevice
+		}
 	}
 	switch {
 	case kind == "gpu" || strings.HasPrefix(kind, "gpu-") || strings.HasPrefix(kind, "gpu."):
-		// nvidia.com/gpu, amd.com/gpu, nvidia.com/gpu.shared, and any future
-		// <vendor>/gpu.
-		return domain, true
+		// A GPU-shaped kind from a domain with no entry above, plus the
+		// known partition spellings: nvidia.com/gpu.shared (time-sliced
+		// replicas), aliyun.com/gpu-mem (MiB), aliyun.com/gpu-core.percentage.
+		return domain, devicePartition
 	case strings.HasPrefix(kind, "mig-"):
 		// NVIDIA MIG compute instances.
-		return domain, true
+		return domain, devicePartition
 	case domain == "gpu.intel.com":
-		// Intel advertises the device family as the kind (i915, xe).
-		return domain, true
+		// millicores, tiles, memory.max: all describe one card.
+		return domain, devicePartition
+	case domain == "aws.amazon.com" && strings.HasPrefix(kind, "neuron"):
+		// neuroncore and friends.
+		return domain, devicePartition
+	case domain == "habana.ai":
+		return domain, devicePartition
 	}
-	return "", false
+	return "", notAnAccelerator
+}
+
+// acceleratorResourceKind reports whether a resource is accelerator-shaped at
+// all, for callers that only need membership rather than meaning.
+func acceleratorResourceKind(name corev1.ResourceName) (domain string, ok bool) {
+	domain, class := classifyAcceleratorResource(name)
+	return domain, class != notAnAccelerator
 }
 
 // unknownAcceleratorDomains remembers which GPU-shaped resources from
@@ -121,8 +196,14 @@ var unknownAcceleratorDomains sync.Map
 func nodeAdvertisesAccelerator(capacity corev1.ResourceList) bool {
 	found := false
 	for name := range capacity {
-		domain, shaped := acceleratorResourceKind(name)
-		if !shaped {
+		domain, class := classifyAcceleratorResource(name)
+		switch class {
+		case notAnAccelerator:
+			continue
+		case monitoringHandle:
+			// Real hardware always advertises a device resource beside this
+			// one, so ignoring it costs nothing; counting it admitted a node
+			// with no accelerator at all to the set playbooks may reboot.
 			continue
 		}
 		if _, known := acceleratorDomains[domain]; known {
@@ -486,7 +567,7 @@ func (p *Platform) UncordonIfReason(ctx context.Context, node, expectedReason st
 	}
 	keepUnschedulable, keepPinned, known := priorMarks(current.Annotations)
 	if !known {
-		keepUnschedulable, keepPinned = false, true
+		unknownRestoreRecord(node)
 	}
 
 	ops := []map[string]any{{
@@ -524,13 +605,45 @@ func (p *Platform) UncordonIfReason(ctx context.Context, node, expectedReason st
 	return true, nil
 }
 
-// MarkCordonHeld implements platform.CordonJanitor.
-func (p *Platform) MarkCordonHeld(ctx context.Context, node string) error {
-	patch, _ := json.Marshal(map[string]any{
-		"metadata": map[string]any{"annotations": map[string]string{cordonHeldAnnotation: "true"}},
-	})
-	_, err := p.client.CoreV1().Nodes().Patch(ctx, node, k8stypes.StrategicMergePatchType, patch, metav1.PatchOptions{})
-	return err
+// MarkCordonHeldIfReason implements platform.CordonJanitor.
+//
+// Same live re-check and same JSON-Patch test op as UncordonIfReason, and for
+// the same reason: both act on a listing served from the informer cache, where
+// a stale entry means the cordon has been REPLACED rather than missed. This one
+// went without the guard for a round, which was the more dangerous omission of
+// the two — the held mark is designed to outlive the incident row, so stamping
+// it onto the wrong live incident's cordon leaves a GPU node out of the fleet
+// permanently once that incident is pruned, on the strength of a decision made
+// about a different incident.
+func (p *Platform) MarkCordonHeldIfReason(ctx context.Context, node, expectedReason string) (bool, error) {
+	current, err := p.client.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading %s before marking its cordon held: %w", node, err)
+	}
+	if current.Annotations[cordonReasonAnnotation] != expectedReason {
+		return false, nil // replaced since we listed it; not ours to mark
+	}
+	ops := []map[string]any{{
+		"op":    "test",
+		"path":  "/metadata/annotations/" + escapeJSONPointer(cordonReasonAnnotation),
+		"value": expectedReason,
+	}, {
+		"op":    "add",
+		"path":  "/metadata/annotations/" + escapeJSONPointer(cordonHeldAnnotation),
+		"value": "true",
+	}}
+	patch, _ := json.Marshal(ops)
+	if _, err := p.client.CoreV1().Nodes().Patch(
+		ctx, node, k8stypes.JSONPatchType, patch, metav1.PatchOptions{}); err != nil {
+		if apierrors.IsInvalid(err) || apierrors.IsConflict(err) {
+			return false, nil // the test op lost the race
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // escapeJSONPointer escapes a map key for use in a JSON Pointer path.
@@ -553,6 +666,22 @@ func escapeJSONPointer(key string) string {
 //
 // Unknown therefore restores nothing and clears nothing: the node keeps
 // whatever it has, and a human can see it.
+//
+// That claim used to be false for half of it. Both callers discarded this
+// return and substituted (false, true), so the pin was preserved — the half
+// the change was written for — while the CORDON was cleared. The most common
+// way a node is already cordoned when a remediation opens on it is that an
+// engineer ran kubectl cordon, so the fail-open half destroyed exactly the
+// deliberate act Cordon's own comment names as the reason this record exists,
+// and put tenant work back on a machine somebody took out of service.
+//
+// The cost of the honest answer is real and worth stating: on upgrade from a
+// build that predates the record, a node WE cordoned now stays cordoned until
+// somebody uncordons it. That is stranded capacity. But it is stranded in
+// plain sight — our annotations are stripped, so the node looks exactly like
+// one a human cordoned, which is the state it may well be in — whereas the
+// other direction silently returns a machine to service against somebody's
+// explicit decision, and nothing in the audit trail says who did it.
 func priorMarks(annotations map[string]string) (keepUnschedulable, keepPinned, known bool) {
 	record, present := annotations[cordonRestoreAnnotation]
 	if !present {
@@ -560,6 +689,17 @@ func priorMarks(annotations map[string]string) (keepUnschedulable, keepPinned, k
 	}
 	parts := strings.Split(record, ",")
 	return slices.Contains(parts, "unschedulable"), slices.Contains(parts, "do-not-disrupt"), true
+}
+
+// unknownRestoreRecord logs the one case priorMarks cannot resolve. Uncordon
+// runs below the controller, with no notifier, so this is the loudest signal
+// available here; the node itself carries the other half of the message by
+// keeping its cordon and losing our annotations.
+func unknownRestoreRecord(node string) {
+	slog.Warn("node has a KubeNeuron cordon reason but no restore record, so we cannot tell "+
+		"whether we cordoned it or found it cordoned; leaving it cordoned and removing our "+
+		"annotations — uncordon it by hand if it should return to service",
+		"node", node)
 }
 
 func (p *Platform) Uncordon(ctx context.Context, node string) error {
@@ -571,8 +711,7 @@ func (p *Platform) Uncordon(ctx context.Context, node string) error {
 	}
 	keepUnschedulable, keepPinned, known := priorMarks(current.Annotations)
 	if !known {
-		// No record: leave the node's own marks alone. See priorMarks.
-		keepUnschedulable, keepPinned = false, true
+		unknownRestoreRecord(node)
 	}
 
 	annotations := map[string]*string{
@@ -619,19 +758,29 @@ func (p *Platform) Drain(ctx context.Context, node string, opts platform.DrainOp
 	// one, for a node it could never drain — while the pod that caused it (an
 	// SRE's `kubectl debug node/...`, which creates a bare pod) sat there
 	// untouched. Doing the disruption and then refusing is worse than either.
-	if !opts.Force {
-		var unmanaged []string
-		for i := range pods {
-			if unmanagedPod(&pods[i]) {
-				unmanaged = append(unmanaged, pods[i].Namespace+"/"+pods[i].Name)
-			}
+	//
+	// Computed unconditionally, not only when refusing. These are the pods
+	// nothing will recreate, so with force set they are the ones this drain
+	// destroys outright — and that was the one case where their names were
+	// never collected, logged or returned. The step recorded "drained node-x",
+	// no metric moved, and the only trace of a researcher's work was a
+	// Kubernetes Event on a pod that no longer exists.
+	var unmanaged []string
+	for i := range pods {
+		if unmanagedPod(&pods[i]) {
+			unmanaged = append(unmanaged, pods[i].Namespace+"/"+pods[i].Name)
 		}
-		if len(unmanaged) > 0 {
-			sort.Strings(unmanaged)
+	}
+	sort.Strings(unmanaged)
+	if len(unmanaged) > 0 {
+		if !opts.Force {
 			return fmt.Errorf("drain of %s: %d pod(s) have no controller and cannot be evicted (%s); "+
 				"nothing would reschedule them, so this node cannot be drained — nothing was evicted",
 				node, len(unmanaged), strings.Join(unmanaged, ", "))
 		}
+		slog.Warn("forced drain is destroying pods that nothing will recreate",
+			"node", node, "count", len(unmanaged), "pods", strings.Join(unmanaged, ", "))
+		metrics.ForcedUnmanagedEvictions.Add(float64(len(unmanaged)))
 	}
 
 	var blocked []*corev1.Pod
@@ -701,6 +850,28 @@ func evictionGrace(ctx context.Context, pod *corev1.Pod, opts platform.DrainOpti
 	}
 	if own <= budget {
 		return 0, false // it fits; do not touch the spec
+	}
+	// Below the platform's own default this stops being a clamp and becomes a
+	// force-delete. GracePeriodSeconds: 0 removes the object from etcd at once
+	// and the kubelet SIGKILLs with no SIGTERM — the single most destructive
+	// eviction there is, and the one platform.DrainUsePodGracePeriod's contract
+	// says nothing in this product wants. The clamp reached it by arithmetic:
+	// the PDB retry loop recomputes this on every 5s attempt, so as the step
+	// deadline approaches the budget decays through 4s, 1s, 0s and the tail of
+	// every contended drain force-deleted.
+	//
+	// That is worse than failing. A tenant who set terminationGracePeriodSeconds
+	// specifically to checkpoint before a GPU reset loses the run without a
+	// signal, and waitDrained then sees no pods, reports the node drained, and
+	// lets the ladder proceed to a reset while the process may still hold
+	// /dev/nvidia*. A drain that times out escalates visibly; this one succeeds
+	// and lies.
+	//
+	// So: if what remains cannot cover even the default, decline to override.
+	// The pod keeps its own period, the drain overruns its step, and the step
+	// fails where somebody can see it.
+	if budget < corev1DefaultGracePeriod {
+		return 0, false
 	}
 	return budget, true
 }
@@ -837,6 +1008,17 @@ func unmanagedPod(pod *corev1.Pod) bool {
 	if _, isMirror := pod.Annotations[corev1.MirrorPodAnnotationKey]; isMirror {
 		return false
 	}
+	// Already on its way out. The refusal exists because nothing would
+	// recreate this pod elsewhere; a pod whose deletion has been requested is
+	// not staying either way, so blocking on it only costs the rung.
+	//
+	// kubectl behaves the other way by default, but kubectl is typed by a
+	// human who sees the message and retries ten seconds later. A ladder has
+	// nobody there: an SRE who deletes their `kubectl debug` pod just before
+	// the drain step fires would still fail the rung and spend an escalation.
+	if pod.DeletionTimestamp != nil {
+		return false
+	}
 	return metav1.GetControllerOf(pod) == nil
 }
 
@@ -898,22 +1080,36 @@ func podUsesGPU(pod *corev1.Pod) bool {
 // nobody has shipped yet while keeping the allocation it drives trivial.
 const maxAdvertisedAccelerators = 1024
 
-func acceleratorCount(capacity corev1.ResourceList) int {
+// gpuReplicasLabel is GPU Feature Discovery's time-slicing replica factor.
+const gpuReplicasLabel = "nvidia.com/gpu.replicas"
+
+// parsePositiveLabel reads a small positive integer from a node label, or 0
+// when it is absent or is anything else. Node-written, so nothing here may
+// panic or overflow on it.
+func parsePositiveLabel(labels map[string]string, key string) int {
+	n, err := strconv.Atoi(labels[key])
+	if err != nil || n <= 0 || n > maxAdvertisedAccelerators {
+		return 0
+	}
+	return n
+}
+
+func acceleratorCount(capacity corev1.ResourceList, nodeLabels map[string]string) int {
 	whole, partitioned := 0, 0
 	implausibleCapacity := false
 	for name, q := range capacity {
-		domain, shaped := acceleratorResourceKind(name)
-		if !shaped {
+		domain, class := classifyAcceleratorResource(name)
+		if class == notAnAccelerator {
 			continue
 		}
 		if _, known := acceleratorDomains[domain]; !known {
 			continue
 		}
-		_, kind, _ := strings.Cut(string(name), "/")
-		switch {
-		case kind == "gpu", domain == "gpu.intel.com":
-			// Intel names the device family as the kind (i915, xe) and that
-			// count IS whole devices, not partitions.
+		switch class {
+		case monitoringHandle:
+			// Not hardware. Counting it reported a GPU that does not exist.
+			continue
+		case wholeDevice:
 			// Clamped, because this number is written by the NODE, not by us.
 			//
 			// A kubelet may set its own status.capacity (NodeRestriction
@@ -936,11 +1132,26 @@ func acceleratorCount(capacity corev1.ResourceList) int {
 		default:
 			// Everything else counts something that is not a physical device:
 			// MIG instances, time-sliced replicas (nvidia.com/gpu.shared),
-			// aliyun.com/gpu-mem's MiB. Only note that such a resource exists.
+			// aliyun.com/gpu-mem's MiB, Intel's millicores and tiles, Neuron
+			// cores. Only note that such a resource exists.
 			partitioned++
 		}
 	}
 	if whole > 0 {
+		// Time-slicing with renameByDefault: false advertises
+		// physical x replicas under the SAME nvidia.com/gpu name, so the
+		// device count silently multiplies on the primary vendor — the same
+		// defect as Intel's millicores, wearing the resource name everything
+		// else trusts, and small enough to stay under the clamp. GPU Feature
+		// Discovery publishes the factor as a label; when it is there, divide
+		// by it.
+		//
+		// Absent, unparseable or <= 1, nothing changes. Guarding the division
+		// rather than trusting the label matters: it is node-written, like the
+		// capacity itself.
+		if replicas := parsePositiveLabel(nodeLabels, gpuReplicasLabel); replicas > 1 {
+			whole = max(1, whole/replicas)
+		}
 		return whole
 	}
 	if implausibleCapacity {
@@ -966,7 +1177,7 @@ func acceleratorCount(capacity corev1.ResourceList) int {
 }
 
 func nodeFromK8s(n *corev1.Node) types.Node {
-	gpus := acceleratorCount(n.Status.Capacity)
+	gpus := acceleratorCount(n.Status.Capacity, n.Labels)
 	// GPU UUIDs are not in the Node object; the agent's self-registration
 	// fills them in. Capacity gives us the count for early display.
 	infos := make([]types.GPUInfo, gpus)

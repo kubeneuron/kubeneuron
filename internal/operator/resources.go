@@ -760,7 +760,20 @@ func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snaps
 				},
 			},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: copyStringMap(annotations)},
+				// Without the config digest — the agent does not read the
+				// snapshot, so rolling it on a config change buys nothing and
+				// costs the fleet's detection coverage.
+				//
+				// The agent mounts no ConfigMap and takes no config-file flag:
+				// it boots unarmed and receives its arming and profile from
+				// the controller at registration. This annotation is a
+				// leftover from the two-DaemonSet era, when arming really was
+				// scheduling geometry. Left in place, editing one
+				// GPUSignalMapping to quiet a noisy XID restarted every agent
+				// in the fleet, serially at maxUnavailable 1 — on 500 nodes, a
+				// multi-hour rolling blind spot walking the fleet, during
+				// which each node has no kmsg watcher and no DCGM poll.
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: controllerPodAnnotations(annotations)},
 				Spec: corev1.PodSpec{
 					ServiceAccountName:            installation.Name + "-agent",
 					DeprecatedServiceAccount:      installation.Name + "-agent",
@@ -896,11 +909,29 @@ func controllerStrategy(installation *kubeneuronv1alpha1.KubeNeuron) appsv1.Depl
 	return appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
 }
 
-// controllerPodAnnotations returns the Deployment annotations without the
+// controllerPodAnnotations returns workload annotations without the
 // config-digest, so an ordinary configuration change does not roll the pods.
+//
+// Used by both the controller Deployment and the agent DaemonSet. Neither pod
+// reads the snapshot from its own spec — the controller reloads it from the
+// mounted ConfigMap, the agent receives it from the controller — so for both
+// of them a digest on the POD template turns every child-CR edit into a
+// restart. The digest stays on the workload OBJECT, where it is useful for
+// seeing which snapshot an install is on without causing a rollout.
 func controllerPodAnnotations(annotations map[string]string) map[string]string {
 	out := copyStringMap(annotations)
 	delete(out, "kubeneuron.io/config-digest")
+	if len(out) == 0 {
+		// nil, not an empty map. The apiserver round-trips an empty
+		// annotations map back as nil, so returning {} makes the rendered
+		// object differ from the stored one on a field nobody set — a diff
+		// that reports as "API defaults were overwritten" and, in a
+		// reconciler that writes on any difference, is a write every tick
+		// forever. Only reachable now that the agent uses this too: the
+		// controller always has a config digest to strip, the agent on an
+		// install with no TLS revision has nothing left.
+		return nil
+	}
 	return out
 }
 

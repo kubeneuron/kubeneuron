@@ -82,9 +82,32 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 		// not happen.
 		c.deferStep(inc, step, metrics.DeferAcceleratorEvidence)
 		metrics.GateDenials.Inc()
-		c.log.Info("accelerator capability gate denied step, will hold",
-			"incident", inc.ID, "step", step.Name, "reason", err.Error())
-		return nil
+		// But the hold has to END somewhere, and it did not.
+		//
+		// Both siblings in this function bound their equivalent wait — the
+		// confinement hold above, and the VERIFYING evidence hold in
+		// reconcile.go — because evidence that is merely late becomes evidence
+		// that is never coming, and the two are indistinguishable from here.
+		// This one held forever, and the shipped drain-and-reset ladder reaches
+		// the reset rung AFTER cordon and drain. So a node whose evidence can
+		// never arrive — no PCI reset on a virtualised instance, MIG enabled
+		// after the incident opened, a relabelled profile, a dead agent — sat
+		// cordoned and emptied of work indefinitely, in EVALUATING rather than
+		// NEEDS_HUMAN, on no alert and in nobody's queue. A metric counter
+		// climbed and nothing else said anything.
+		//
+		// Past the deadline this is not missing evidence any more, it is an
+		// answer: this reset cannot be admitted here. Fail closed to a human,
+		// who can then uncordon the node or fix the profile. Inside the
+		// deadline the hold is unchanged — refusing to escalate to a bigger
+		// hammer on absent evidence is right, and stays.
+		if time.Since(inc.StateChangedAt) < c.verifyEvidenceDeadline(ctx) {
+			c.log.Info("accelerator capability gate denied step, will hold",
+				"incident", inc.ID, "step", step.Name, "reason", err.Error())
+			return nil
+		}
+		return c.quarantine(ctx, inc,
+			"accelerator reset evidence still unavailable past the evidence deadline: "+err.Error())
 	}
 	action := gateAction(step)
 	// The first admitted step acquires the target's remediation slot, held from
@@ -210,7 +233,7 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 		c.log.Error("post-step transition failed", "incident", inc.ID, "err", err)
 		return
 	}
-	if notifyErr := c.notifier.Notify(ctx, notify.NotifyEvent{
+	if notifyErr := c.notify(ctx, notify.NotifyEvent{
 		Kind: notify.EventActionTaken, Incident: inc,
 		Message: fmt.Sprintf("step %s: %s", step.Name, firstNonBlank(output, "done")),
 	}); notifyErr != nil {
@@ -334,7 +357,7 @@ func (c *Controller) executeStep(ctx context.Context, inc *types.Incident, step 
 		}
 		return okResult(inc, step.Action+" passed"), nil
 	case action.KindNotify:
-		err := c.notifier.Notify(ctx, notify.NotifyEvent{
+		err := c.notify(ctx, notify.NotifyEvent{
 			Kind: notify.EventActionTaken, Incident: inc,
 			Message: firstNonBlank(step.Params["note"], step.Action),
 		})
@@ -374,12 +397,29 @@ func (c *Controller) executePlatformStep(ctx context.Context, inc *types.Inciden
 			// checkpoint on SIGTERM — the workload most likely to be running on
 			// the GPU we are about to reset, and the one with the most to lose.
 			//
-			// Negative means "do not override", which evictPod already
-			// anticipates. The drain's own wait is bounded by the step timeout,
-			// so a pod with a long grace period delays the ladder rather than
-			// hanging it.
+			// The zero value means "do not override", and evictPod clamps it
+			// to the step's own remaining budget so a tenant-declared period
+			// cannot outlast the window the ladder has.
 			GracePeriod: platform.DrainUsePodGracePeriod,
 			Timeout:     step.Timeout.Std(),
+			// force: a playbook author's answer to "what should happen when a
+			// pod has no controller".
+			//
+			// Drain refuses such a node by default, because nothing would
+			// reschedule that pod and kubectl refuses for the same reason. But
+			// kubectl is typed by a human who can add --force; a remediation
+			// ladder has nobody at that moment, so without a way to say it a
+			// node carrying one transient `kubectl run` pod could never be
+			// remediated at all — and that pod is often a debug shell somebody
+			// left open on the very node that is failing.
+			//
+			// Off by default, and stated per step, so evicting somebody's
+			// unmanaged work is a decision written down in a playbook rather
+			// than a default nobody chose.
+			// Validate rejects an unparseable value at load, so the error here
+			// is only reachable for an absent key: that is the default, and the
+			// default is off.
+			Force: func() bool { v, _ := strconv.ParseBool(step.Params["force"]); return v }(),
 		})
 		if err != nil {
 			return nil, err
@@ -510,7 +550,7 @@ func (c *Controller) escalate(ctx context.Context, inc *types.Incident, reason s
 		fmt.Sprintf("%s; escalating %s -> %s (attempt %d)", reason, previous, next.Name, inc.Attempt), nil); err != nil {
 		return err
 	}
-	return c.notifier.Notify(ctx, notify.NotifyEvent{
+	return c.notify(ctx, notify.NotifyEvent{
 		Kind: notify.EventActionTaken, Incident: inc,
 		Message: fmt.Sprintf("escalated to playbook %s: %s", next.Name, reason),
 	})
@@ -537,7 +577,7 @@ func (c *Controller) quarantine(ctx context.Context, inc *types.Incident, reason
 	if err := c.transition(ctx, inc, types.StateNeedsHuman, "system", "quarantine", reason, nil); err != nil {
 		return err
 	}
-	return c.notifier.Notify(ctx, notify.NotifyEvent{
+	return c.notify(ctx, notify.NotifyEvent{
 		Kind: notify.EventNeedsHuman, Incident: inc,
 		Message: reason,
 	})

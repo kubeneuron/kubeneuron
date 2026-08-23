@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/kubeneuron/kubeneuron/internal/platform"
+	kubernetesplatform "github.com/kubeneuron/kubeneuron/internal/platform/kubernetes"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -41,12 +42,19 @@ func (p *janitorPlatform) UncordonIfReason(_ context.Context, node, expected str
 	return true, nil
 }
 
-func (p *janitorPlatform) MarkCordonHeld(_ context.Context, node string) error {
+// MarkCordonHeldIfReason models the same live re-check as UncordonIfReason:
+// the listing is served from a cache, and a cordon replaced since then must
+// not inherit this incident's verdict. The held mark outlives the incident
+// row, so marking the wrong one strands a node for good.
+func (p *janitorPlatform) MarkCordonHeldIfReason(_ context.Context, node, expected string) (bool, error) {
+	if want, overridden := p.live[node]; overridden && want != expected {
+		return false, nil
+	}
 	if p.held == nil {
 		p.held = map[string]bool{}
 	}
 	p.held[node] = true
-	return nil
+	return true, nil
 }
 
 // The cordon reason is the only link between a node and the incident that took
@@ -316,4 +324,51 @@ func TestAHeldCordonSurvivesItsIncidentBeingPruned(t *testing.T) {
 		t.Fatalf("uncordoned = %v; a cordon a human owns was released because retention swept its "+
 			"incident row, which is exactly the judgement this janitor refuses to undo", p.uncordoned)
 	}
+}
+
+// TestHeldMarkIsNotStampedOnAReplacedCordon covers the staleness guard that
+// MarkCordonHeld went without for a round, while its sibling two lines away
+// had one.
+//
+// Both act on a listing served from the informer cache, where a stale entry
+// does not mean a missed cordon — it means a cordon that has since been
+// REPLACED by a newer incident's. Releasing the wrong one is bad and
+// self-heals; marking the wrong one does not, because the held mark is
+// deliberately designed to outlive the incident row. When the newer incident
+// is pruned, the janitor sees the mark, keeps the node cordoned, and a GPU
+// node is out of the fleet permanently on the strength of a decision made
+// about a different incident.
+func TestHeldMarkIsNotStampedOnAReplacedCordon(t *testing.T) {
+	p := &janitorPlatform{
+		cordoned: []platform.CordonedNode{{
+			Name:   "gpu-1",
+			Reason: cordonReason(&types.Incident{ID: "inc-1", Class: types.ClassECCDBE}),
+		}},
+		// By the time the write lands, inc-2 owns this cordon.
+		live: map[string]string{
+			"gpu-1": cordonReason(&types.Incident{ID: "inc-2", Class: types.ClassECCDBE}),
+		},
+	}
+	marked, err := p.MarkCordonHeldIfReason(context.Background(), "gpu-1",
+		cordonReason(&types.Incident{ID: "inc-1", Class: types.ClassECCDBE}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marked || p.held["gpu-1"] {
+		t.Fatal("a held mark decided about inc-1 was stamped onto inc-2's live cordon; when " +
+			"inc-2's row is pruned the janitor will keep this node cordoned forever")
+	}
+}
+
+// TestCordonJanitorInterfaceIsSatisfied guards a failure mode this file found
+// the hard way: the janitor is reached by a type assertion to
+// platform.CordonJanitor, so a platform missing ONE method does not fail to
+// compile — it silently stops being a janitor, and every abandoned cordon it
+// would have released stays put with no error anywhere.
+//
+// Adding a method to that interface without adding it to a platform is
+// therefore a silent capacity leak. This makes it a build failure instead.
+func TestCordonJanitorInterfaceIsSatisfied(t *testing.T) {
+	var _ platform.CordonJanitor = (*janitorPlatform)(nil)
+	var _ platform.CordonJanitor = (*kubernetesplatform.Platform)(nil)
 }

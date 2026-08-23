@@ -673,7 +673,17 @@ type AgentAcceleratorReport struct {
 	// node whose device something will never release. An empty slice means
 	// nothing holds a device; a nil slice means the agent did not look, and the
 	// two must not be confused by a gate.
-	DeviceHolders []AgentDeviceHolder `json:"device_holders,omitempty"`
+	//
+	// Deliberately WITHOUT omitempty, unlike every other optional field here.
+	// omitempty elides a zero-length slice whether or not it is nil, so the
+	// wire could not carry the distinction at all: every report from a healthy
+	// node whose agent looked and found the device clear arrived as "did not
+	// look". The store goes to real trouble to preserve the difference, with
+	// round-trip tests on both engines, and none of it could ever observe the
+	// empty case. Harmless today — the one gate that reads this treats nil and
+	// empty alike — and silently wrong in the permissive direction for the
+	// next reader who asks whether the agent actually looked.
+	DeviceHolders []AgentDeviceHolder `json:"device_holders"`
 }
 
 // AgentDeviceHolder is a process holding an accelerator device node. It is not

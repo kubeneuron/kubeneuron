@@ -652,6 +652,32 @@
     },
     {
       "type": "timeseries",
+      "title": "Unmanaged pods destroyed by a forced drain (work that does NOT come back)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 66
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(kubeneuron_forced_unmanaged_evictions_total[5m]))",
+          "legendFormat": "destroyed/s",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ],
+      "description": "Pods with no controller that a drain was told to evict anyway. Nothing recreates these \u2014 they are typically a `kubectl run` or the debug shell somebody left open on the node that is failing. Any sustained rate here means a playbook has params.force set on a rung that should not have it."
+    },
+    {
+      "type": "timeseries",
       "title": "Destructive steps deferred by a guard (what remediation deliberately did not cost)",
       "datasource": {
         "type": "prometheus",
@@ -661,7 +687,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 66
+        "y": 74
       },
       "targets": [
         {
@@ -686,7 +712,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 66
+        "y": 74
       },
       "targets": [
         {
@@ -711,7 +737,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 74
+        "y": 82
       },
       "targets": [
         {

@@ -169,6 +169,11 @@ func TestNVIDIAResetCapabilityPreconditionHoldsInsteadOfEscalating(t *testing.T)
 	inc := &types.Incident{
 		ID: "incident-a", State: types.StateEvaluating,
 		Target: types.Target{Node: "node-a", GPUUUID: "GPU-a"}, DryRun: false,
+		// INSIDE the evidence deadline. The hold this test is about is the
+		// one that applies while evidence may still be on its way; the zero
+		// value meant "long ago", which is now a different case with its own
+		// test below.
+		StateChangedAt: time.Now(),
 	}
 	if err := c.startStep(context.Background(), inc, &playbook.Step{Name: "reset", Action: "agent.gpu_reset"}, "system"); err != nil {
 		t.Fatalf("startStep() error = %v", err)
@@ -533,5 +538,158 @@ func TestAttestedVendorsMatchTheAdapters(t *testing.T) {
 			t.Errorf("attestedRuntimeVendors claims %s, but internal/accelerator/%s does not exist; "+
 				"incidents would wait for a report nothing can produce", vendor, vendor)
 		}
+	}
+}
+
+// TestAcceleratorEvidenceHoldEndsAtTheDeadline is the other half, and the one
+// that was missing: evidence that is merely late becomes evidence that is never
+// coming, and from inside the controller the two are indistinguishable.
+//
+// The hold above was unbounded. The shipped drain-and-reset ladder reaches the
+// reset rung AFTER cordon and drain, so a node whose evidence can never arrive
+// — no PCI reset on a virtualised instance, MIG enabled after the incident
+// opened, a relabelled profile, a dead agent — sat cordoned and emptied of
+// every tenant workload indefinitely. It stayed in EVALUATING rather than
+// NEEDS_HUMAN, so it was on no alert and in nobody's queue: a deferral counter
+// climbed and nothing else in the system said a word.
+//
+// Both siblings of this hold already bound themselves this way. This is the
+// third.
+func TestAcceleratorEvidenceHoldEndsAtTheDeadline(t *testing.T) {
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	actuator := &resetGateActuator{}
+	c := New(st, nil, nil,
+		safety.NewGate(safety.Limits{MaxConcurrentRemediations: 1, MaxConcurrentReboots: 1}),
+		nil, nil, actuator, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	ctx := context.Background()
+	inc := &types.Incident{
+		ID: "incident-stranded", State: types.StateEvaluating,
+		Target: types.Target{Node: "node-a", GPUUUID: "GPU-a"}, DryRun: false,
+		OpenedAt: time.Now().Add(-24 * time.Hour), UpdatedAt: time.Now(),
+		// Held here for a day: well past any evidence deadline.
+		StateChangedAt: time.Now().Add(-24 * time.Hour),
+	}
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.startStep(ctx, inc, &playbook.Step{Name: "reset", Action: "agent.gpu_reset"}, "system"); err != nil {
+		t.Fatalf("startStep() error = %v", err)
+	}
+
+	if inc.State != types.StateNeedsHuman {
+		t.Fatalf("after a day of unavailable reset evidence the incident is in %s, not NEEDS_HUMAN; "+
+			"the node stays cordoned and drained with no tenant work on it, on no alert and in "+
+			"nobody's queue, for as long as the evidence never arrives", inc.State)
+	}
+	if actuator.calls != 0 {
+		t.Fatalf("executor calls = %d: the deadline must fail CLOSED to a human, never open into "+
+			"a reset the gate refused", actuator.calls)
+	}
+}
+
+// TestRevokedProfileStopsAPinnedReset covers what the quiesce pin is allowed to
+// remember.
+//
+// Stopping the DCGM host engine erases the agent's attestation from every later
+// report, so the report must be pinned — that is the pin's entire reason to
+// exist. The profile and the node UID were pinned beside it, and neither is
+// destroyed by a quiesce: both can be read live at admission. Keeping them
+// turned a snapshot of EVIDENCE into a snapshot of the controller's own
+// AUTHORITY.
+//
+// The scenario is an operator's: resets are landing and going wrong, so they
+// edit spec.acceleratorProfiles to revoke reset-device — the documented way to
+// withdraw permission — and then watch a reset execute anyway on a node that
+// was already quiesced, with nothing in the audit trail saying why.
+func TestRevokedProfileStopsAPinnedReset(t *testing.T) {
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	if err := st.UpsertNode(ctx, &types.Node{
+		Name: "node-a", UID: "node-uid-a", Labels: map[string]string{"accelerator": "nvidia-h100"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c := New(st, nil, nil, nil, nil, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	profile := testNVIDIAResetProfile()
+	if err := c.SetAcceleratorRuntimeProfiles([]config.AcceleratorRuntimeProfile{profile}); err != nil {
+		t.Fatal(err)
+	}
+	report := readyNVIDIAResetReport(time.Now().UTC(), profile.ProfileDigest)
+	if err := st.UpsertAcceleratorReport(ctx, &report); err != nil {
+		t.Fatal(err)
+	}
+
+	inc := &types.Incident{ID: "inc-pinned", Target: types.Target{Node: "node-a", GPUUUID: "GPU-a"}}
+	target := inc.Target
+
+	// The quiesce step pins the evidence, exactly as it does in production.
+	c.pinAcceleratorEvidence(inc.ID, pinnedAcceleratorEvidence{
+		node: "node-a", report: report, pinnedAt: time.Now(),
+	})
+
+	// The operator revokes reset permission while the incident is in flight.
+	if err := c.SetAcceleratorRuntimeProfiles(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.allowNVIDIAReset(ctx, inc, target); err == nil {
+		t.Fatal("a reset was admitted from pinned evidence after its profile was revoked; the " +
+			"documented way to withdraw reset permission does nothing for exactly the " +
+			"incidents that are already quiesced and about to reset")
+	}
+}
+
+// TestPinnedResetStillChecksNodeIdentityLive: the node-UID check exists so a
+// deleted-and-recreated node cannot inherit a matching profile or capability.
+// With both operands taken from the same pin it was vacuous by construction —
+// it compared a value to itself.
+func TestPinnedResetStillChecksNodeIdentityLive(t *testing.T) {
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	if err := st.UpsertNode(ctx, &types.Node{
+		Name: "node-a", UID: "node-uid-a", Labels: map[string]string{"accelerator": "nvidia-h100"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c := New(st, nil, nil, nil, nil, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	profile := testNVIDIAResetProfile()
+	if err := c.SetAcceleratorRuntimeProfiles([]config.AcceleratorRuntimeProfile{profile}); err != nil {
+		t.Fatal(err)
+	}
+	report := readyNVIDIAResetReport(time.Now().UTC(), profile.ProfileDigest)
+	if err := st.UpsertAcceleratorReport(ctx, &report); err != nil {
+		t.Fatal(err)
+	}
+
+	inc := &types.Incident{ID: "inc-recreated", Target: types.Target{Node: "node-a", GPUUUID: "GPU-a"}}
+	c.pinAcceleratorEvidence(inc.ID, pinnedAcceleratorEvidence{
+		node: "node-a", report: report, pinnedAt: time.Now(),
+	})
+
+	// The autoscaler replaces the machine: same name, new object.
+	if err := st.UpsertNode(ctx, &types.Node{
+		Name: "node-a", UID: "node-uid-REPLACED", Labels: map[string]string{"accelerator": "nvidia-h100"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.allowNVIDIAReset(ctx, inc, inc.Target); err == nil {
+		t.Fatal("a reset pinned against the previous node object was admitted on its " +
+			"replacement; the identity check compared the pin to itself")
 	}
 }

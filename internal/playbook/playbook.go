@@ -5,6 +5,7 @@ package playbook
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/action"
@@ -60,6 +61,14 @@ func (p *Playbook) Validate() error {
 	if len(p.Steps) == 0 {
 		return fmt.Errorf("playbook %q: at least one step is required", p.Name)
 	}
+	// A negative cooldown is not a slow cooldown, it is none at all: every
+	// "has enough time passed" comparison is already true, so the playbook
+	// that just failed on this GPU re-runs on the next tick and keeps
+	// re-running. The suppression a cooldown exists to provide is exactly what
+	// stops a reset loop from cycling a card forever.
+	if p.Cooldown < 0 {
+		return fmt.Errorf("playbook %q: cooldown must not be negative, got %s", p.Name, p.Cooldown.Std())
+	}
 	seen := map[string]bool{}
 	for i, s := range p.Steps {
 		if s.Name == "" {
@@ -78,9 +87,55 @@ func (p *Playbook) Validate() error {
 		if s.Approval != "" && s.Approval != "none" && s.Approval != "required" {
 			return fmt.Errorf("playbook %q: step %q: approval must be \"none\" or \"required\"", p.Name, s.Name)
 		}
+		// Likewise a negative timeout: the step's deadline is already in the
+		// past when it is computed, so the step is cancelled before it does
+		// anything and the ladder escalates to the next, more destructive rung
+		// on a playbook that never actually ran.
+		if s.Timeout < 0 {
+			return fmt.Errorf("playbook %q: step %q: timeout must not be negative, got %s",
+				p.Name, s.Name, s.Timeout.Std())
+		}
+		// force is read as a bool at execution time and anything unparseable
+		// reads as false. False is the safe direction, but silently: an author
+		// who writes `force: yes` gets a drain that refuses the node, and finds
+		// out when the ladder escalates past it at 3am rather than here.
+		//
+		// Scoped to the one action that reads it. Validating it everywhere was
+		// worse than not validating at all: a boolean check on
+		// `platform.cordon` or `agent.gpu_reset` implies the key does
+		// something there, and it is silently dropped.
+		if v, ok := s.Params["force"]; ok {
+			if s.Action != forceAwareAction {
+				return fmt.Errorf("playbook %q: step %q: params.force has no meaning for action %q "+
+					"and would be silently ignored; it is read only by %q",
+					p.Name, s.Name, s.Action, forceAwareAction)
+			}
+			forced, err := strconv.ParseBool(v)
+			if err != nil {
+				return fmt.Errorf("playbook %q: step %q: params.force must be a boolean, got %q",
+					p.Name, s.Name, v)
+			}
+			// A forced drain is a different kind of act from a drain, and
+			// every other gate that reasons about blast radius sees an
+			// unchanged Drain: the action registry's Destructive flag, the
+			// destructive-step confinement, the compiler's whole-VM rule. An
+			// ordinary drain MOVES work; this one ENDS it, for pods nothing
+			// will recreate. The registry already forces approval on
+			// RecycleNode and ReplaceNode because they destroy an instance;
+			// this destroys a tenant's running job with no equivalent, so it
+			// gets the equivalent here.
+			if forced && !s.NeedsApproval() {
+				return fmt.Errorf("playbook %q: step %q: params.force destroys pods that nothing "+
+					"will recreate, so the step must set approval: required",
+					p.Name, s.Name)
+			}
+		}
 	}
 	return nil
 }
+
+// forceAwareAction is the only step that reads params.force.
+const forceAwareAction = "platform.drain"
 
 // Duration wraps time.Duration for YAML ("30m", "6h") round-tripping.
 type Duration time.Duration

@@ -198,7 +198,7 @@ func TestPinnedEvidenceExpiresWithTheReportItCameFrom(t *testing.T) {
 	inc := resetIncident()
 	report := readyNVIDIAResetReport(time.Now().UTC().Add(-time.Hour), "digest")
 	c.pinAcceleratorEvidence(inc.ID, pinnedAcceleratorEvidence{
-		node: "node-a", nodeUID: "node-uid-a", report: report, pinnedAt: time.Now(),
+		node: "node-a", report: report, pinnedAt: time.Now(),
 	})
 	if _, ok := c.takePinnedAcceleratorEvidence(inc.ID, time.Now()); ok {
 		t.Fatal("stale evidence must not be usable just because it was pinned")

@@ -123,13 +123,31 @@ func dedupeObstructionsByCommand(in []ResetObstruction) []ResetObstruction {
 // be Kubernetes at all.
 const acceleratorDeployLabelPrefix = "nvidia.com/gpu.deploy."
 
+// componentIsOperatorManaged reports whether the quiesce could actually stand
+// this component down — which is a question about the label's VALUE, not its
+// presence.
+//
+// The quiesce skips any component whose label is not exactly "true". Asking
+// only whether the key exists therefore answered a different question than the
+// one the caller needs, and answered it in the permissive direction: with
+// nvidia.com/gpu.deploy.dcgm=false and nv-hostengine still holding the device,
+// refuseInfeasibleReset reported nothing standing in the way, the ladder
+// cordoned and drained the node, the quiesce stood nothing down, and the reset
+// failed on the holder it had just been told was releasable. That preflight
+// exists precisely to refuse a doomed reset BEFORE the first cordon, so being
+// wrong here costs a node's worth of evicted tenant work for a repair that was
+// never going to happen. A GPU Operator mid-upgrade produces exactly this.
 func componentIsOperatorManaged(node *types.Node, component string) bool {
 	if node == nil || node.Labels == nil {
 		return false
 	}
-	_, present := node.Labels[acceleratorDeployLabelPrefix+component]
-	return present
+	return node.Labels[acceleratorDeployLabelPrefix+component] == acceleratorDeployLabelEnabled
 }
+
+// acceleratorDeployLabelEnabled is the only value the quiesce acts on. Named
+// rather than spelled inline at each site, because the two sites disagreeing
+// about it is the whole defect above.
+const acceleratorDeployLabelEnabled = "true"
 
 // refuseInfeasibleReset reports why a playbook containing a GPU reset cannot
 // work on this node, or nil when nothing is known to stand in the way.

@@ -334,3 +334,74 @@ func TestDryRunRefusesAStructurallyImpossibleReset(t *testing.T) {
 		t.Fatalf("a valid dry-run reset was refused: %v", err)
 	}
 }
+
+// TestDisabledComponentIsAnObstruction covers the difference between a label
+// that EXISTS and a label the quiesce will act on.
+//
+// The preflight asked whether the key was present; the quiesce skips any
+// component whose value is not exactly "true". So on a node carrying
+// nvidia.com/gpu.deploy.dcgm=false — a GPU Operator mid-upgrade, or a component
+// that came from the machine image on a node that also carries the operator's
+// labels — the preflight reported the path clear, the ladder cordoned and
+// drained the node, the quiesce stood nothing down, and the reset died on the
+// holder the preflight had just called releasable.
+//
+// That preflight exists precisely to refuse a doomed reset BEFORE the first
+// cordon (it runs at StepIndex 0), so being permissive here costs a node's
+// worth of evicted tenant work for a repair that was never going to happen.
+func TestDisabledComponentIsAnObstruction(t *testing.T) {
+	node := gpuNode(map[string]string{"nvidia.com/gpu.deploy.dcgm": "false"})
+	got := resetObstructions(node,
+		[]types.AgentDeviceHolder{holder("nv-hostengine", 1, "/dev/nvidia0")}, nil)
+	if len(got) == 0 {
+		t.Fatal("a component whose deploy label is \"false\" was reported as releasable; the " +
+			"quiesce will skip it, so the node gets cordoned and drained for a reset that " +
+			"then fails on the very holder this preflight was asked about")
+	}
+}
+
+// TestUnsetComponentValueIsAnObstruction: the empty value is the same case.
+// A label present with no value is not a component the quiesce turns off.
+func TestUnsetComponentValueIsAnObstruction(t *testing.T) {
+	node := gpuNode(map[string]string{"nvidia.com/gpu.deploy.dcgm": ""})
+	got := resetObstructions(node,
+		[]types.AgentDeviceHolder{holder("nv-hostengine", 1, "/dev/nvidia0")}, nil)
+	if len(got) == 0 {
+		t.Fatal("a component whose deploy label is empty was reported as releasable")
+	}
+}
+
+// TestForbiddenHolderMatchesTheTruncatedName covers the CRD's own standing
+// example, which could never match.
+//
+// Names here are compared exactly against /proc/<pid>/comm, which Linux caps at
+// 15 characters. `nv-fabricmanager` is 16, so the node reports it as
+// `nv-fabricmanage` and the declaration was silently inert. The compile now
+// truncates declared names to what the kernel will report.
+//
+// For fabricmanager the old cost was only a misleading message. It is genuinely
+// permissive for any name the agent CAN release: `nvidia-persistenced` is 19
+// characters, never matched, and the reset went ahead against an operator's
+// explicit instruction not to.
+func TestForbiddenHolderMatchesTheTruncatedName(t *testing.T) {
+	node := gpuNode(map[string]string{"nvidia.com/gpu.deploy.dcgm": "true"})
+
+	// nvidia-persistenced is agent-releasable, so without truncation it falls
+	// through to "the quiesce can handle this" and the reset proceeds.
+	got := resetObstructions(node,
+		[]types.AgentDeviceHolder{holder("nvidia-persiste", 4, "/dev/nvidia0")},
+		[]string{truncatedForTest("nvidia-persistenced")})
+	if len(got) == 0 {
+		t.Fatal("a declared forbidden holder did not match the name the node actually reports, " +
+			"so a reset ran on a node whose operator had explicitly forbidden it")
+	}
+}
+
+// truncatedForTest mirrors the compile-time truncation, so this test states the
+// contract from the operator's side: what you write in the CRD is what matches.
+func truncatedForTest(name string) string {
+	if len(name) > 15 {
+		return name[:15]
+	}
+	return name
+}

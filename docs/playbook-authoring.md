@@ -38,7 +38,7 @@ not, because no cloud VM tested so far permits one (see below).
 |---|---|---|
 | `Observe` | records + notifies | observe-first playbooks hold in OBSERVING; policy `params.threshold`/`window` control escalation |
 | `Cordon` / `Uncordon` | Kubernetes cordon | intended to annotate the node with the incident reason |
-| `Drain` | Eviction API drain | intended PDB-aware behavior; set a generous `timeout` |
+| `Drain` | Eviction API drain | intended PDB-aware behavior; set a generous `timeout`; `params.force` — see below |
 | `EvictGPUWorkload` | evicts only GPU-consuming pods | intended XID 94 targeted restart |
 | `GPUReset` | `nvidia-smi --gpu-reset` on the node | refuses while any process holds the device node, naming the holders; pair with `QuiesceAcceleratorStack` |
 | `QuiesceAcceleratorStack` / `RestoreAcceleratorStack` | stops/restarts the GPU vendor's own monitoring on the node | required before `GPUReset` on a GPU Operator cluster (see below) |
@@ -54,6 +54,42 @@ not, because no cloud VM tested so far permits one (see below).
 `DriverReload`/`DriverReinstall`/`RunScript` are reserved for a future
 host-provisioned scripts directory. They must use fixed names (or a strictly
 validated `params.script`), never command content from the CRD.
+
+### `Drain` and `params.force`
+
+A pod with no controller has nothing that would recreate it elsewhere, so
+evicting it destroys work outright. `kubectl drain` refuses such a node for that
+reason and makes you type `--force`; `Drain` refuses for the same reason, before
+it evicts anything, and names the pods.
+
+`params.force: "true"` is how a playbook says the eviction should happen anyway.
+It is off by default, there is no global switch, and **the step must also set
+`approval: Required`** — the loader refuses the playbook otherwise. The pods it
+destroys are usually somebody's `kubectl run` or the debug shell an engineer
+left open on the very node that is failing, so the eviction should be a decision
+written down in a playbook and confirmed by a human, not a default nobody chose.
+
+Approval is required because every other gate that reasons about blast radius —
+the action registry, the destructive-step confinement, the compiler's whole-VM
+rule — sees an unchanged `Drain`. An ordinary drain moves work; this one ends
+it. `RecycleNode` and `ReplaceNode` force approval because they destroy an
+instance; this destroys a tenant's running job.
+
+The pods a forced drain destroys are named in the step's log line and counted by
+`kubeneuron_forced_unmanaged_evictions_total`, so "where did my job go" has an
+answer that does not depend on a Kubernetes Event for a pod that no longer
+exists.
+
+The trade-off is real in both directions. Without `force`, one transient bare
+pod makes that node undrainable — and because every rung of the shipped ladder
+begins with `cordon, drain`, the refusal fires at each one in turn: four rungs,
+four pages, and no repair, ending in `NEEDS_HUMAN`. Nothing more destructive
+runs, which is the point, but nothing is fixed either. Decide per playbook which
+is worse for the fault class it handles.
+
+Two spellings that used to fail quietly now fail at load: a non-boolean value
+(`force: yes` read as "no" and you found out at 3am), and `force` on any action
+other than `Drain`, where it was validated and then silently ignored.
 
 ## Why a GPU reset needs a quiesce step
 

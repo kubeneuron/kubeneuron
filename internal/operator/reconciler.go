@@ -98,7 +98,7 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 	snapshot, err := CompileSnapshot(&installation, policies, playbooks, mappings, maintenance, nodeConfigs, acceleratorProfiles)
 	if err != nil {
 		r.event(&installation, corev1.EventTypeWarning, "ConfigurationInvalid", err.Error())
-		if statusErr := r.updateChildConfigurationStatuses(ctx, &installation, policies, playbooks, mappings, acceleratorProfiles, nil, err); statusErr != nil {
+		if statusErr := r.updateChildConfigurationStatuses(ctx, &installation, policies, playbooks, mappings, acceleratorProfiles, maintenance, nodeConfigs, nil, err); statusErr != nil {
 			err = errors.Join(err, fmt.Errorf("update child configuration statuses: %w", statusErr))
 		}
 		// PKI renewal must not depend on the configuration compiling. Certificates
@@ -117,7 +117,7 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 		r.event(&installation, corev1.EventTypeNormal, "SnapshotPublished",
 			"configuration snapshot "+snapshot.Digest+" compiled and rolling out")
 	}
-	if err := r.updateChildConfigurationStatuses(ctx, &installation, policies, playbooks, mappings, acceleratorProfiles, snapshot, nil); err != nil {
+	if err := r.updateChildConfigurationStatuses(ctx, &installation, policies, playbooks, mappings, acceleratorProfiles, maintenance, nodeConfigs, snapshot, nil); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("update child configuration statuses: %w", err))
 	}
 
@@ -552,6 +552,8 @@ func (r *KubeNeuronReconciler) updateChildConfigurationStatuses(
 	playbooks []kubeneuronv1alpha1.GPUPlaybook,
 	mappings []kubeneuronv1alpha1.GPUSignalMapping,
 	acceleratorProfiles []kubeneuronv1alpha1.AcceleratorRuntimeProfile,
+	maintenance []kubeneuronv1alpha1.GPUMaintenanceWindow,
+	nodeConfigs []kubeneuronv1alpha1.GPUNodeConfig,
 	snapshot *Snapshot,
 	validationErr error,
 ) error {
@@ -599,6 +601,115 @@ func (r *KubeNeuronReconciler) updateChildConfigurationStatuses(
 		if err := r.updateGPUSignalMappingStatus(ctx, installation, mapping, validationErr); err != nil {
 			return err
 		}
+	}
+	// The two kinds below compile into the snapshot and can fail the whole
+	// installation, and until now neither ever received a status.
+	//
+	// Both have a Conditions array in their CRD that nothing wrote. The cost
+	// is not cosmetic: a GPUMaintenanceWindow that fails to compile — a
+	// nodeSelector spelled with matchExpressions, which admission accepts —
+	// leaves the live windows.yaml unchanged, so automation is NOT paused
+	// while a technician works the row, and remediation cordons, drains and
+	// reboots nodes somebody is physically handling. Meanwhile the status
+	// signal pointed at the wrong objects entirely: three innocent siblings
+	// went Ready=False with CompilationFailed and the window that caused it
+	// looked clean.
+	//
+	// The same shape applies to GPUNodeConfig{paused: true}, the per-node
+	// "leave this node alone" switch.
+	for i := range maintenance {
+		window := &maintenance[i]
+		if window.Spec.KubeNeuronRef != installation.Name {
+			continue
+		}
+		if err := r.updateGPUMaintenanceWindowStatus(ctx, installation, window, validationErr); err != nil {
+			return err
+		}
+	}
+	for i := range nodeConfigs {
+		nodeConfig := &nodeConfigs[i]
+		if nodeConfig.Spec.KubeNeuronRef != installation.Name {
+			continue
+		}
+		if err := r.updateGPUNodeConfigStatus(ctx, installation, nodeConfig, validationErr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// updateGPUMaintenanceWindowStatus publishes whether a window actually reached
+// the runtime. A window an operator can see in kubectl but that never landed is
+// the one failure in this controller where "looks applied" and "is applied"
+// diverge silently, and the divergence is only visible during the outage the
+// window was opened for.
+func (r *KubeNeuronReconciler) updateGPUMaintenanceWindowStatus(
+	ctx context.Context,
+	installation *kubeneuronv1alpha1.KubeNeuron,
+	window *kubeneuronv1alpha1.GPUMaintenanceWindow,
+	validationErr error,
+) error {
+	before := window.DeepCopy()
+	window.Status.ObservedGeneration = window.Generation
+	condition := metav1.Condition{
+		Type:               "Ready",
+		ObservedGeneration: window.Generation,
+		LastTransitionTime: metav1.Now(),
+	}
+	if validationErr != nil {
+		condition.Status, condition.Reason, condition.Message =
+			metav1.ConditionFalse, "CompilationFailed", validationErr.Error()
+	} else if _, err := compileMaintenanceWindows(installation.Name,
+		[]kubeneuronv1alpha1.GPUMaintenanceWindow{*window}); err != nil {
+		// This window is the one that cannot compile. Say so HERE, on the
+		// object an operator would look at, rather than only on the root.
+		condition.Status, condition.Reason, condition.Message =
+			metav1.ConditionFalse, "CompilationFailed", err.Error()
+	} else {
+		condition.Status, condition.Reason, condition.Message =
+			metav1.ConditionTrue, "Compiled", "maintenance window compiled into the immutable runtime snapshot"
+	}
+	meta.SetStatusCondition(&window.Status.Conditions, condition)
+	if reflect.DeepEqual(before.Status, window.Status) {
+		return nil
+	}
+	if err := r.Status().Patch(ctx, window, client.MergeFrom(before)); err != nil {
+		return fmt.Errorf("update GPUMaintenanceWindow %q status: %w", window.Name, err)
+	}
+	return nil
+}
+
+// updateGPUNodeConfigStatus is the same contract for the per-node switch.
+func (r *KubeNeuronReconciler) updateGPUNodeConfigStatus(
+	ctx context.Context,
+	installation *kubeneuronv1alpha1.KubeNeuron,
+	nodeConfig *kubeneuronv1alpha1.GPUNodeConfig,
+	validationErr error,
+) error {
+	before := nodeConfig.DeepCopy()
+	nodeConfig.Status.ObservedGeneration = nodeConfig.Generation
+	condition := metav1.Condition{
+		Type:               "Ready",
+		ObservedGeneration: nodeConfig.Generation,
+		LastTransitionTime: metav1.Now(),
+	}
+	if validationErr != nil {
+		condition.Status, condition.Reason, condition.Message =
+			metav1.ConditionFalse, "CompilationFailed", validationErr.Error()
+	} else if _, err := compileNodeConfigs(installation.Name,
+		[]kubeneuronv1alpha1.GPUNodeConfig{*nodeConfig}); err != nil {
+		condition.Status, condition.Reason, condition.Message =
+			metav1.ConditionFalse, "CompilationFailed", err.Error()
+	} else {
+		condition.Status, condition.Reason, condition.Message =
+			metav1.ConditionTrue, "Compiled", "node configuration compiled into the immutable runtime snapshot"
+	}
+	meta.SetStatusCondition(&nodeConfig.Status.Conditions, condition)
+	if reflect.DeepEqual(before.Status, nodeConfig.Status) {
+		return nil
+	}
+	if err := r.Status().Patch(ctx, nodeConfig, client.MergeFrom(before)); err != nil {
+		return fmt.Errorf("update GPUNodeConfig %q status: %w", nodeConfig.Name, err)
 	}
 	return nil
 }

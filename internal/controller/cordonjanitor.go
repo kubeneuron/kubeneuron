@@ -105,7 +105,9 @@ func (c *Controller) reconcileCordonedNodes(ctx context.Context) {
 		// Halted but not resolved: a human owns this node. Mark it, so the
 		// decision survives the incident row that retention will prune.
 		if !node.Held {
-			if err := janitor.MarkCordonHeld(ctx, node.Name); err != nil {
+			// Scoped to the reason we listed, so a cordon replaced since then
+			// does not inherit this incident's verdict.
+			if _, err := janitor.MarkCordonHeldIfReason(ctx, node.Name, node.Reason); err != nil {
 				c.log.Warn("recording a held cordon failed, will retry", "node", node.Name, "err", err)
 			}
 		}

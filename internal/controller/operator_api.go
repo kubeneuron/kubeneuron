@@ -111,7 +111,7 @@ func (c *Controller) ResolveIncident(ctx context.Context, id, actor, reason stri
 		firstNonBlank(reason, "manually resolved"), nil); err != nil {
 		return err
 	}
-	return c.notifier.Notify(ctx, notify.NotifyEvent{
+	return c.notify(ctx, notify.NotifyEvent{
 		Kind: notify.EventResolved, Incident: inc,
 		Message: fmt.Sprintf("manually resolved by %s: %s", actor, firstNonBlank(reason, "no reason given")),
 	})

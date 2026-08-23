@@ -109,7 +109,7 @@ func TestJanitorRestoreCarriesNoIncidentStampSoTheClaimGuardCannotBlockIt(t *tes
 			t.Fatal(err)
 		}
 		c.pinAcceleratorEvidence(inc.ID, pinnedAcceleratorEvidence{
-			node: "node-a", nodeUID: "node-uid-a",
+			node:     "node-a",
 			report:   readyNVIDIAResetReport(time.Now().UTC(), "digest"),
 			pinnedAt: time.Now(),
 		})
@@ -155,7 +155,7 @@ func TestJanitorRestoreIsClaimableWhileItsFormerOwnerIsHalted(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.pinAcceleratorEvidence(inc.ID, pinnedAcceleratorEvidence{
-		node: "node-a", nodeUID: "node-uid-a",
+		node:     "node-a",
 		report:   readyNVIDIAResetReport(time.Now().UTC(), "digest"),
 		pinnedAt: time.Now(),
 	})

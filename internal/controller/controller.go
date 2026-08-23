@@ -683,13 +683,28 @@ func (c *Controller) afterSignalCommitted(ctx context.Context, sig types.Signal,
 		return nil
 	}
 	metrics.IncidentsOpened.WithLabelValues(string(opened.Class)).Inc()
-	if c.notifier == nil {
-		return nil
-	}
-	return c.notifier.Notify(ctx, notify.NotifyEvent{
+	return c.notify(ctx, notify.NotifyEvent{
 		Kind: notify.EventOpened, Incident: opened,
 		Message: fmt.Sprintf("incident opened: %s on %s (playbook: %s)", opened.Class, opened.Target.Node, orNone(opened.Playbook)),
 	})
+}
+
+// notify sends an event, tolerating an absent notifier.
+//
+// Four call sites dereferenced c.notifier directly and three checked it first —
+// the same question answered two ways, which is the shape every one of the last
+// several review rounds found something in. New accepts a nil notifier, so the
+// unguarded sites were a panic waiting for a caller that passes one; the binary
+// always builds a notify.Multi with a log sink, so no shipped configuration
+// reaches it, but "no shipped configuration" is a property of main.go rather
+// than of this package. The site that mattered most was quarantine: the panic
+// would be on the FAIL-CLOSED path, taking down the control plane at the exact
+// moment an incident was being parked for a human.
+func (c *Controller) notify(ctx context.Context, event notify.NotifyEvent) error {
+	if c.notifier == nil {
+		return nil
+	}
+	return c.notifier.Notify(ctx, event)
 }
 
 // incidentID is deterministic enough for uniqueness and readable in Slack:

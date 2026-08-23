@@ -11,7 +11,6 @@ import (
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
 	"github.com/kubeneuron/kubeneuron/internal/action"
-	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
@@ -36,10 +35,15 @@ import (
 // Recovery does not need it: the platform records which nodes are quiesced, so a
 // restarted controller restores them and sends any incident still running there
 // back to its quiesce step, which re-attests from scratch.
+//
+// It carries the REPORT and nothing else that a gate reasons from. The profile
+// and node UID used to be pinned here too, and both are things the controller
+// can read live at admission time; keeping them turned a snapshot of evidence
+// into a snapshot of the controller's own authority, so a revoked profile went
+// on granting resets. Fields removed rather than left unread, because an unused
+// field on this struct is an invitation to consult it again.
 type pinnedAcceleratorEvidence struct {
 	node     string
-	nodeUID  string
-	profile  *config.AcceleratorRuntimeProfile
 	report   types.AgentAcceleratorReport
 	pinnedAt time.Time
 }
@@ -226,14 +230,12 @@ func (c *Controller) quiesceAcceleratorStack(ctx context.Context, inc *types.Inc
 // pinAcceleratorEvidenceForReset validates the live evidence exactly as the
 // reset gate would, and pins it.
 func (c *Controller) pinAcceleratorEvidenceForReset(ctx context.Context, inc *types.Incident) error {
-	report, nodeUID, profile, err := c.acceleratorEvidenceForReset(ctx, inc.Target)
+	report, _, _, err := c.acceleratorEvidenceForReset(ctx, inc.Target)
 	if err != nil {
 		return err
 	}
 	c.pinAcceleratorEvidence(inc.ID, pinnedAcceleratorEvidence{
 		node:     inc.Target.Node,
-		nodeUID:  nodeUID,
-		profile:  profile,
 		report:   *report,
 		pinnedAt: time.Now(),
 	})

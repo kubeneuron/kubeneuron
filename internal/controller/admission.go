@@ -227,16 +227,59 @@ func (c *Controller) allowAcceleratorStep(ctx context.Context, inc *types.Incide
 // stopping the DCGM host engine is what makes the reset possible at all, and it
 // also erases the attestation from every later report. The pin is the same
 // evidence, validated by this same gate a moment earlier, and it is still
-// subject to verifyEvidenceMaxAge. Every other check is re-run against it.
+// subject to verifyEvidenceMaxAge. Every other check is re-run against it, and
+// the profile and node identity it is checked against are read LIVE — see
+// liveResetAuthority.
 func (c *Controller) allowNVIDIAReset(ctx context.Context, inc *types.Incident, target types.Target) error {
 	if pin, ok := c.takePinnedAcceleratorEvidence(inc.ID, time.Now()); ok {
 		if pin.node != target.Node {
 			return fmt.Errorf("pinned accelerator evidence belongs to node %q, not %q", pin.node, target.Node)
 		}
-		return checkNVIDIAResetEvidence(pin.profile, &pin.report, pin.nodeUID, target)
+		// Only the REPORT is taken from the pin. The report is the one thing
+		// the quiesce destroys — stopping the host engine erases the
+		// attestation — and it is the only thing worth remembering.
+		//
+		// The profile and the node UID were pinned beside it, and both are
+		// things the controller can always read right now. Pinning them froze
+		// the controller's own authority rather than preserving evidence:
+		// an operator who edits spec.acceleratorProfiles to revoke
+		// reset-device — the documented way to withdraw permission, typically
+		// typed while resets are actively going wrong — was ignored for the
+		// life of the pin, and a reset executed on an already-quiesced node
+		// with nothing in the audit trail explaining why. And because both
+		// operands of the node-UID check came from the same pin, that check
+		// was vacuous by construction: it exists so a recreated node cannot
+		// inherit a matching profile, which is exactly what it could not
+		// detect here.
+		profile, nodeUID, err := c.liveResetAuthority(ctx, target)
+		if err != nil {
+			return err
+		}
+		return checkNVIDIAResetEvidence(profile, &pin.report, nodeUID, target)
 	}
 	_, _, _, err := c.acceleratorEvidenceForReset(ctx, target)
 	return err
+}
+
+// liveResetAuthority resolves the two things a reset gate must never take from
+// a snapshot: the profile that grants the action, and the identity of the node
+// it applies to. Neither is destroyed by a quiesce, so neither has any reason
+// to be remembered.
+func (c *Controller) liveResetAuthority(ctx context.Context, target types.Target) (*config.AcceleratorRuntimeProfile, string, error) {
+	node, ok := c.acceleratorNode(ctx, target.Node)
+	if !ok || node.UID == "" {
+		return nil, "", fmt.Errorf("node UID is unavailable for accelerator report binding")
+	}
+	if node.Labels == nil {
+		return nil, "", fmt.Errorf("node labels are unavailable for runtime profile selection")
+	}
+	profiles := c.runtimeConfig(ctx).AcceleratorProfiles
+	profile, err := (config.Config{AcceleratorProfiles: profiles}).
+		ResolveAcceleratorRuntimeProfile(node.Labels, types.AcceleratorVendorNVIDIA)
+	if err != nil {
+		return nil, "", err
+	}
+	return profile, node.UID, nil
 }
 
 // acceleratorEvidenceForReset resolves and validates the live evidence for a
@@ -256,15 +299,7 @@ func (c *Controller) acceleratorEvidenceForReset(ctx context.Context, target typ
 	// Node names and labels can change with a Kubernetes delete/recreate. Read
 	// both from one current inventory object before considering a report, so a
 	// previous node object cannot inherit a matching profile or capability.
-	node, ok := c.acceleratorNode(ctx, target.Node)
-	if !ok || node.UID == "" {
-		return nil, "", nil, fmt.Errorf("node UID is unavailable for accelerator report binding")
-	}
-	if node.Labels == nil {
-		return nil, "", nil, fmt.Errorf("node labels are unavailable for runtime profile selection")
-	}
-	profiles := c.runtimeConfig(ctx).AcceleratorProfiles
-	profile, err := (config.Config{AcceleratorProfiles: profiles}).ResolveAcceleratorRuntimeProfile(node.Labels, types.AcceleratorVendorNVIDIA)
+	profile, nodeUID, err := c.liveResetAuthority(ctx, target)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -276,10 +311,10 @@ func (c *Controller) acceleratorEvidenceForReset(ctx context.Context, target typ
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("load NVIDIA accelerator report: %w", err)
 	}
-	if err := checkNVIDIAResetEvidence(profile, report, node.UID, target); err != nil {
+	if err := checkNVIDIAResetEvidence(profile, report, nodeUID, target); err != nil {
 		return nil, "", nil, err
 	}
-	return report, node.UID, profile, nil
+	return report, nodeUID, profile, nil
 }
 
 // checkNVIDIAResetEvidence is the whole evidence test, applied identically to a

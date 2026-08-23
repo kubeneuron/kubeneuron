@@ -492,7 +492,7 @@ func TestFleetMembershipRejectsLookalikeResources(t *testing.T) {
 			if got := nodeAdvertisesAccelerator(tc.capacity); got != tc.want {
 				t.Errorf("nodeAdvertisesAccelerator = %v, want %v", got, tc.want)
 			}
-			if got := acceleratorCount(tc.capacity); got != tc.wantGPUs {
+			if got := acceleratorCount(tc.capacity, nil); got != tc.wantGPUs {
 				t.Errorf("acceleratorCount = %d, want %d", got, tc.wantGPUs)
 			}
 		})
@@ -625,7 +625,198 @@ func TestUncordonWithNoRecordDoesNotClearSomebodysPin(t *testing.T) {
 		t.Fatal("with no record of what was there before, the uncordon deleted a do-not-disrupt " +
 			"annotation it cannot know it placed; Karpenter is now free to consolidate the node")
 	}
-	if got.Spec.Unschedulable {
-		t.Fatal("the node was never released, so a cordon from before the upgrade is stranded forever")
+	// And the cordon is kept, for the same reason as the pin.
+	//
+	// This assertion is the reverse of what it said a round ago, and the
+	// reversal is the point. The first version released the cordon so that a
+	// node cordoned by a pre-record build would not be stranded across the
+	// upgrade — a real cost, and the reason it was written that way. But it
+	// applied the two marks asymmetrically for no stated reason, and the
+	// asymmetry ran toward the worse outcome: the single most common way a
+	// node is already cordoned when a remediation opens on it is that an
+	// engineer typed kubectl cordon, and releasing that puts tenant work back
+	// on a machine somebody is physically working on, with nothing in the
+	// audit trail naming who released it.
+	//
+	// Stranded capacity is recoverable by one kubectl command and is visible
+	// in kubectl get nodes. The other direction is neither.
+	if !got.Spec.Unschedulable {
+		t.Fatal("with no record of what was there before, the uncordon released a cordon it " +
+			"cannot know it placed; if a human cordoned this node, tenant work is now " +
+			"scheduling onto a machine they deliberately took out of service")
+	}
+	// Our own annotations must go, so the node reads as a plain human cordon
+	// rather than a KubeNeuron cordon nothing will ever clean up.
+	if _, ours := got.Annotations[cordonReasonAnnotation]; ours {
+		t.Fatal("the node kept a KubeNeuron cordon reason it will never be released by; it is " +
+			"now stranded AND invisible, which is the worst of both")
+	}
+}
+
+// TestEvictionGraceNeverForceDeletes is the guard for the defect the clamp
+// introduced: a grace of zero on the wire is a force-delete, and the platform
+// contract states there is deliberately no way to express it.
+//
+// Driven across the whole gradient rather than one case, because the clamp
+// reached zero by ARITHMETIC, not by a branch anybody wrote — the PDB retry
+// loop recomputes it every 5s, so a contended drain walks the budget down
+// through every value below on its way to the deadline.
+func TestEvictionGraceNeverForceDeletes(t *testing.T) {
+	pod := &corev1.Pod{}
+	long := int64(600) // a job that checkpoints on SIGTERM
+	pod.Spec.TerminationGracePeriodSeconds = &long
+
+	for _, remaining := range []time.Duration{
+		30 * time.Minute, 11 * time.Minute, 10 * time.Minute, time.Minute,
+		35 * time.Second, 30 * time.Second, 10 * time.Second, time.Second, 0,
+	} {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(remaining))
+		grace, capped := evictionGrace(ctx, pod, platform.DrainOptions{})
+		cancel()
+
+		if !capped {
+			continue // the pod keeps its own period; nothing goes on the wire
+		}
+		if grace <= 0 {
+			t.Fatalf("with %s left the clamp emitted GracePeriodSeconds=%d: the pod is removed "+
+				"from etcd at once and SIGKILLed with no SIGTERM, so a tenant who asked for 600s "+
+				"to checkpoint before a GPU reset gets none — and waitDrained then reports the "+
+				"node drained, letting the ladder reset a GPU whose process may still hold the "+
+				"device", remaining, int64(grace/time.Second))
+		}
+		if grace < corev1DefaultGracePeriod {
+			t.Fatalf("with %s left the clamp emitted %s, below Kubernetes' own default of %s; "+
+				"below that this is a force-delete in all but name", remaining, grace,
+				corev1DefaultGracePeriod)
+		}
+	}
+}
+
+// TestEvictionGraceStillClampsWhenItCan: the guard above must not be satisfied
+// by never clamping at all. A tenant-declared period is unbounded, and honouring
+// it unconditionally hands the drain's duration to whoever wrote the pod — a
+// spec declaring 24h cannot terminate inside a 30-minute step, so the drain
+// times out and the incident climbs the whole ladder having repaired nothing.
+func TestEvictionGraceStillClampsWhenItCan(t *testing.T) {
+	pod := &corev1.Pod{}
+	day := int64(86400)
+	pod.Spec.TerminationGracePeriodSeconds = &day
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(10*time.Minute))
+	defer cancel()
+	grace, capped := evictionGrace(ctx, pod, platform.DrainOptions{})
+	if !capped {
+		t.Fatal("a pod declaring 24h was left unclamped inside a 10m step; the tenant can deny " +
+			"remediation of the node they are running on")
+	}
+	if grace <= 0 || grace >= 10*time.Minute {
+		t.Fatalf("clamped to %s, which is not inside the step's remaining budget", grace)
+	}
+}
+
+// TestAcceleratorCountVendorMatrix pins what each vendor's resources MEAN.
+//
+// The count used to be decided by a switch that read "kind == gpu, or the
+// domain is Intel's" — so every Intel resource was whole devices, and one card
+// advertising millicores: 1000 was reported as a thousand GPUs. That number
+// reaches kubeneuron_degraded_gpu_seconds_total and the degraded-GPU gauge, so
+// a single node-scoped incident on one card billed a thousand GPU-hours of
+// degraded capacity and tripped every fleet-fraction alert. A clamp added a
+// round earlier masked it at two or more cards and left the single-card case
+// exposed — doing real work, for the wrong reason.
+//
+// Driven as a matrix, and asserting BOTH directions, because the over-count had
+// three siblings that reported too many and four that reported none at all.
+func TestAcceleratorCountVendorMatrix(t *testing.T) {
+	q := resource.MustParse
+	for _, tc := range []struct {
+		name     string
+		capacity corev1.ResourceList
+		labels   map[string]string
+		want     int
+		fleet    bool
+		why      string
+	}{
+		{
+			name: "one Intel card with its full advertisement",
+			capacity: corev1.ResourceList{
+				"gpu.intel.com/i915": q("1"), "gpu.intel.com/millicores": q("1000"),
+				"gpu.intel.com/memory.max": q("17179869184"), "gpu.intel.com/tiles": q("1"),
+			},
+			want: 1, fleet: true,
+			why: "millicores are a fraction of ONE card; it reported 1000",
+		},
+		{
+			name:     "one Ponte Vecchio card with two tiles",
+			capacity: corev1.ResourceList{"gpu.intel.com/i915": q("1"), "gpu.intel.com/tiles": q("2")},
+			want:     1, fleet: true,
+			why: "tiles are within a card; a silent 2x, well under the clamp",
+		},
+		{
+			name:     "Intel monitoring handle alone",
+			capacity: corev1.ResourceList{"gpu.intel.com/i915_monitoring": q("1")},
+			want:     0, fleet: false,
+			why: "a bookkeeping handle is not hardware, and must not admit a node to the " +
+				"set of machines a playbook may cordon, drain and reboot",
+		},
+		{
+			name:     "Habana Gaudi",
+			capacity: corev1.ResourceList{"habana.ai/gaudi": q("8")},
+			want:     8, fleet: true,
+			why: "habana.ai was in the domain allow-list but unreachable — no gaudi kind is " +
+				"GPU-shaped — so a whole Gaudi fleet was invisible, and silently: the " +
+				"unrecognised-domain warning only fires for GPU-shaped names",
+		},
+		{
+			name:     "AWS Neuron",
+			capacity: corev1.ResourceList{"aws.amazon.com/neuron": q("16"), "aws.amazon.com/neuroncore": q("32")},
+			want:     16, fleet: true,
+			why: "Inf2/Trn1 were invisible entirely, in a repo that ships an AWS cloud provider",
+		},
+		{
+			name:     "Aliyun fractional scheduling",
+			capacity: corev1.ResourceList{"aliyun.com/gpu-count": q("4"), "aliyun.com/gpu-mem": q("65536")},
+			want:     4, fleet: true,
+			why: "gpu-count is devices; gpu-mem is MiB. Claimed support that reported 0",
+		},
+		{
+			name:     "NVIDIA plain",
+			capacity: corev1.ResourceList{"nvidia.com/gpu": q("8")},
+			want:     8, fleet: true,
+		},
+		{
+			name:     "NVIDIA time-sliced, four replicas per card",
+			capacity: corev1.ResourceList{"nvidia.com/gpu": q("32")},
+			labels:   map[string]string{"nvidia.com/gpu.replicas": "4"},
+			want:     8, fleet: true,
+			why: "the same multiplication as Intel's millicores, wearing the resource name " +
+				"everything else trusts, and small enough to stay under the clamp",
+		},
+		{
+			name:     "NVIDIA fully MIG'd",
+			capacity: corev1.ResourceList{"nvidia.com/mig-1g.5gb": q("56")},
+			want:     0, fleet: true,
+			why: "partitions never yield a device count; 0 means unknown",
+		},
+		{
+			name:     "AMD",
+			capacity: corev1.ResourceList{"amd.com/gpu": q("4")},
+			want:     4, fleet: true,
+		},
+		{
+			name:     "a hostile capacity",
+			capacity: corev1.ResourceList{"nvidia.com/gpu": q("9223372036854775807")},
+			want:     0, fleet: true,
+			why: "node-written; unknowable is 0, and it must not reach make([]GPUInfo, n)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := acceleratorCount(tc.capacity, tc.labels); got != tc.want {
+				t.Errorf("acceleratorCount = %d, want %d — %s", got, tc.want, tc.why)
+			}
+			if got := nodeAdvertisesAccelerator(tc.capacity); got != tc.fleet {
+				t.Errorf("nodeAdvertisesAccelerator = %v, want %v — %s", got, tc.fleet, tc.why)
+			}
+		})
 	}
 }

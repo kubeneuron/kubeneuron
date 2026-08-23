@@ -147,6 +147,24 @@ var (
 		Help: "GPU workloads evicted ahead of a destructive step, by problem class.",
 	}, []string{"reason"})
 
+	// ForcedUnmanagedEvictions counts pods destroyed by a drain that was told
+	// to proceed anyway — pods with no controller, which nothing recreates.
+	//
+	// Separate from WorkloadsEvicted because it is a different event. An
+	// ordinary eviction moves work; this one ends it, and the pods it ends are
+	// typically somebody's `kubectl run` or the debug shell an engineer left
+	// open on the node that is failing. A platform team should be able to see
+	// that this ever happens without reading the audit trail, and to alert if
+	// it starts happening often — a playbook with force set on the wrong rung
+	// looks exactly like a healthy fleet until somebody asks where their job
+	// went.
+	//
+	// No node label, for the reason given above WorkloadsEvicted.
+	ForcedUnmanagedEvictions = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "kubeneuron_forced_unmanaged_evictions_total",
+		Help: "Pods with no controller destroyed by a forced drain; nothing recreates these.",
+	})
+
 	// DestructiveStepsDeferred counts destructive steps that did NOT run, by
 	// why. Use the Defer* constants below — the label set is closed, so a new
 	// deferral path adds a named constant rather than an ad-hoc string.
