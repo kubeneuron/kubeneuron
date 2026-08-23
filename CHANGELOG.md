@@ -9,7 +9,7 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
-Rounds 15-22. An independent review per round, and **six paid runs on real
+Rounds 15-26. An independent review per round, and **eight paid runs on real
 NVIDIA hardware** — an EKS g4dn.xlarge with a Tesla T4 — which is where most of
 what follows came from.
 
@@ -29,6 +29,96 @@ of the one-line corrections but `QueuedAction.Terminal()` plus a matching SQL
 constant, with regression tests driven from the state STRINGS so that adding a
 state without teaching the predicate fails. The class recurred once more after
 that, one queue over and one call site over, and those are now converted too.
+
+### Rounds 23-26: what the reviews found where nobody had looked
+
+Round 25's reviewers produced a coverage report — which files had never been
+read adversarially — and round 26 sent three readers into exactly those. Ranked
+by what each cost an operator:
+
+- **The reset-evidence hold never ended.** Both of its siblings in the same
+  function bound their equivalent wait, because evidence that is merely late
+  becomes evidence that is never coming and the two are indistinguishable from
+  inside the controller. This one held forever, and the shipped ladder reaches
+  the reset rung *after* cordon and drain — so a node whose evidence can never
+  arrive sat cordoned and emptied of tenant work indefinitely, in EVALUATING
+  rather than NEEDS_HUMAN: on no alert, in nobody's queue, with a deferral
+  counter climbing and nothing else saying a word.
+- **A grace clamp added in round 24 reintroduced the force-delete its own API
+  contract calls unexpressible.** It reached `GracePeriodSeconds: 0` by
+  arithmetic rather than by any branch: the PDB retry loop recomputes it every
+  five seconds, so the tail of every contended drain force-deleted. A tenant who
+  set `terminationGracePeriodSeconds` specifically to checkpoint before a GPU
+  reset got none — and the drain then reported the node drained, which is worse
+  than the timeout it replaced, because a timeout escalates visibly.
+- **One Intel GPU was counted as a thousand.** `gpu.intel.com/millicores` was
+  read as whole devices, so a single node-scoped incident billed a thousand
+  GPU-hours of degraded capacity and tripped every fleet-fraction alert. It had
+  seven siblings in both directions — including NVIDIA time-slicing replicas on
+  the primary vendor, and entire Habana and AWS Neuron fleets that were
+  invisible to the control plane, silently, because the unrecognised-vendor
+  warning only fires for GPU-shaped resource names. Replaced with one
+  classification table that fleet membership and counting both read.
+- **A maintenance window could be accepted by `kubectl` and never applied.**
+  `GPUMaintenanceWindow` and `GPUNodeConfig` compile into the snapshot and can
+  fail the whole installation, and neither ever received a status. A window
+  written with `matchExpressions` left `windows.yaml` unchanged, so automation
+  was not paused while a technician worked the row — and the status signal
+  pointed at the wrong objects, with three innocent siblings showing
+  `CompilationFailed` while the culprit looked clean.
+- **Editing one signal mapping rolled the entire agent fleet.** The agent pod
+  template carried the config digest, left over from the retired two-DaemonSet
+  era. The agent mounts no ConfigMap and reads no snapshot; on 500 nodes at
+  `maxUnavailable: 1` that was a multi-hour rolling detection blind spot walking
+  the fleet.
+- Smaller, same shape: the quiesce pin froze the controller's own *authority*
+  rather than the evidence a quiesce destroys, so a revoked profile went on
+  granting resets and the node-identity check compared a value to itself; the
+  agent's copy of the runtime-version rule disagreed with the controller's on a
+  bare-major pin, which stamps every report on such a fleet degraded and denies
+  every reset; the reset preflight tested a deploy label's *presence* while the
+  quiesce requires the value `"true"`, clearing a node for cordon and drain
+  ahead of a reset that could not run; a declared forbidden holder longer than
+  15 characters could never match, because that is where Linux truncates a
+  process name — and the CRD's own standing example was 16.
+
+`params.force` on a drain was added this round and finished in the same round
+after review: it now requires `approval: Required`, names the pods it destroys
+in the audit trail, counts them in
+`kubeneuron_forced_unmanaged_evictions_total`, and is rejected on actions that
+would ignore it.
+
+**Run 8 passed every phase, and then found a defect in the stand itself.** The
+EXIT-trap cleanup added in round 24 — which exists so a phase cannot leave an
+open incident for the next one to attach to — called the controller API through
+a `curl` with no `--max-time`. A `kubectl port-forward` keeps its local listener
+bound after the remote end dies, so the connect succeeds and the read never
+returns: the trap hung for two hours with the GPU cluster still billing. That is
+the second time this stand's cost guarantee has died on a cleanup step that
+could not fail (the first was a teardown piped through `tee`), so every API call
+is now bounded, the port-forward is probed rather than assumed live, and `make
+lint` fails the build on an unbounded `curl` in the script that holds a paid
+cluster.
+
+**And the run showed that the drain has never really been exercised.** The
+destructive ladder does contain a real `Drain` and does run it in Enabled mode —
+but the stand places no workload on the GPU node, so that drain has always
+walked an empty pod list, and no phase has ever asserted anything about it. The
+most expensive defect of round 26 lived in exactly that code, which is why four
+green runs did not find it. A new `test-drain` phase puts a tenant Deployment
+and one bare pod on the node and asserts the refusal happens with **nothing
+evicted** — the difference between a pre-flight refusal and one issued after the
+damage, which only a real pod list can show. Not yet validated on a paid stand.
+
+**A test-suite finding worth recording on its own.** The postgres half of the
+round-22/25 queue claims had never been run — only sqlite. Writing it exposed
+something worse than a missing engine: cutting `terminalActionStates` down to
+`('done')` left the action-side guards *passing* on both engines. One asks the
+Go predicate, one only ever uses `"done"`, and the single test that covered
+`dead` reached that state by burning the claim-attempt budget and `t.Skip`ped
+when it did not get there. So the SQL half of the defect class that recurred for
+nine consecutive rounds was unguarded, through four rounds of green runs. The
+states are now set directly, on both engines, with nothing to skip.
 
 ### Proven on hardware, for the first time
 

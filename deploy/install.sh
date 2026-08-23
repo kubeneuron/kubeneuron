@@ -94,7 +94,10 @@ fi
 REPO_SLUG=${KUBENEURON_REPO:-kubeneuron/kubeneuron}
 resolve_latest() {
 	local tag
-	tag=$(curl -sfL "https://api.github.com/repos/$REPO_SLUG/releases/latest" 2>/dev/null |
+	# Bounded: an install that hangs on a network black hole looks identical to
+	# one that is merely slow, and there is a working fallback right below.
+	tag=$(curl -sfL --connect-timeout 10 --max-time 30 \
+		"https://api.github.com/repos/$REPO_SLUG/releases/latest" 2>/dev/null |
 		sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
 	if [[ -z $tag ]] && command -v gh >/dev/null; then
 		tag=$(gh release view --repo "$REPO_SLUG" --json tagName -q .tagName 2>/dev/null || true)
@@ -105,7 +108,8 @@ resolve_latest() {
 
 fetch_manifest() { # $1=version $2=dest
 	local url="https://github.com/$REPO_SLUG/releases/download/$1/kubeneuron-install-$1.yaml"
-	if curl -sfL "$url" -o "$2" 2>/dev/null && grep -q "kind: CustomResourceDefinition" "$2"; then
+	if curl -sfL --connect-timeout 10 --max-time 120 "$url" -o "$2" 2>/dev/null &&
+		grep -q "kind: CustomResourceDefinition" "$2"; then
 		return 0
 	fi
 	command -v gh >/dev/null || die "release download needs public releases or the gh CLI"

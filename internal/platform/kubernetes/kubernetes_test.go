@@ -820,3 +820,41 @@ func TestAcceleratorCountVendorMatrix(t *testing.T) {
 		})
 	}
 }
+
+// TestLocalScratchIsNamedNotRefused pins the shape of the answer to kubectl's
+// second abort condition.
+//
+// kubectl drain refuses on local data and makes you type
+// --delete-emptydir-data. Refusing here would be wrong: nearly every serious
+// GPU workload mounts an emptyDir for /dev/shm, so a refusal would make almost
+// every GPU node in a real fleet undrainable. The pod reschedules; only the
+// data does not follow it. So the drain proceeds and says what it destroyed.
+func TestLocalScratchIsNamedNotRefused(t *testing.T) {
+	withScratch := func(name string, medium corev1.StorageMedium) corev1.Pod {
+		return corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{
+					Kind: "ReplicaSet", Name: "rs", Controller: ptrTrue(),
+				}},
+			},
+			Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+				Name:         "scratch",
+				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: medium}},
+			}}},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+	}
+
+	got := podsWithLocalData([]corev1.Pod{
+		withScratch("checkpointer", ""),                     // disk-backed: real data
+		withScratch("shm-only", corev1.StorageMediumMemory), // tmpfs: nothing survives a restart anyway
+	})
+
+	if len(got) != 1 || got[0] != "default/checkpointer" {
+		t.Fatalf("pods with destroyable scratch = %v, want exactly [default/checkpointer]; a "+
+			"training job's checkpoints are lost here and nothing recorded that it happened", got)
+	}
+}
+
+func ptrTrue() *bool { b := true; return &b }

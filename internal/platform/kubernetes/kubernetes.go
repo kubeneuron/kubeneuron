@@ -783,6 +783,26 @@ func (p *Platform) Drain(ctx context.Context, node string, opts platform.DrainOp
 		metrics.ForcedUnmanagedEvictions.Add(float64(len(unmanaged)))
 	}
 
+	// kubectl drain has TWO abort conditions, and this had only ever
+	// implemented one. The second is local data: a pod writing to an emptyDir
+	// loses that directory when it is evicted, which is why kubectl makes you
+	// type --delete-emptydir-data separately from --force.
+	//
+	// Not a refusal, deliberately. Nearly every serious GPU workload mounts an
+	// emptyDir for /dev/shm — PyTorch's dataloaders require it — so refusing
+	// would make almost every GPU node in a real fleet undrainable, which is
+	// the opposite of useful. The pod is also managed and does reschedule; it
+	// is only the DATA that does not follow it.
+	//
+	// So: say what is being destroyed, on the way past. A training job
+	// checkpointing into a scratch volume loses those checkpoints here, and
+	// until now nothing anywhere recorded that it had happened.
+	if withData := podsWithLocalData(pods); len(withData) > 0 {
+		slog.Warn("drain is evicting pods with local scratch data; the pods reschedule, the "+
+			"data does not",
+			"node", node, "count", len(withData), "pods", strings.Join(withData, ", "))
+	}
+
 	var blocked []*corev1.Pod
 	for i := range pods {
 		pod := &pods[i]
@@ -1001,6 +1021,31 @@ func (p *Platform) nodePods(ctx context.Context, node string) ([]corev1.Pod, err
 // mirror pods alone; leave unmanaged pods alone unless force is set.
 // unmanagedPod reports a pod with no controller — the one skipDuringDrain
 // class that is somebody's live work rather than infrastructure.
+// podsWithLocalData names the pods whose on-node scratch an eviction destroys.
+//
+// Memory-backed emptyDirs are excluded: those are tmpfs, they hold no data that
+// survives a restart anyway, and /dev/shm is the overwhelmingly common case. It
+// is the disk-backed ones that carry a checkpoint somebody wanted.
+func podsWithLocalData(pods []corev1.Pod) []string {
+	var out []string
+	for i := range pods {
+		pod := &pods[i]
+		if skipDuringDrain(pod, true) {
+			continue // not evicted by this drain either way
+		}
+		for _, volume := range pod.Spec.Volumes {
+			dir := volume.EmptyDir
+			if dir == nil || dir.Medium == corev1.StorageMediumMemory {
+				continue
+			}
+			out = append(out, pod.Namespace+"/"+pod.Name)
+			break
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func unmanagedPod(pod *corev1.Pod) bool {
 	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 		return false

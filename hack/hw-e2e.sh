@@ -48,6 +48,9 @@ Commands (the workflow runs them in this order):
                      (fallback: live dmon parse-clean check). UNEXERCISED LIVE.
   test-verify-recur  Re-inject during VERIFYING; assert recurrence escalates.
                      UNEXERCISED LIVE.
+  test-drain         Real drain over a real pod list: refuse a node carrying
+                     a pod with no controller having evicted NOTHING, then
+                     drain it for real once that pod is gone
   test-destructive   Flip to executionMode=Enabled under a confined
                      destructiveExecution block and assert the ReplaceNode path
                      closes the incident as replaced.
@@ -95,6 +98,14 @@ readonly DESTRUCTIVE_XID=45
 # open incident, which is exactly what a real recurrence looks like.
 readonly RECUR_XID=44
 readonly THRESHOLD_XID=92
+# DRAIN_XID gives the drain phase its own fault identity, for the same reason
+# every other phase has one: incidents correlate by (node, class), so sharing a
+# class would attach this phase's fault to a previous phase's incident.
+readonly DRAIN_XID=48
+# The second drain incident needs a different fault identity for the same
+# reason RECUR_XID exists — a recurrence must not deduplicate into the first —
+# but it must map to THIS phase's class, which RECUR_XID does not.
+readonly DRAIN_RECUR_XID=13
 readonly E2E_RUN_TAG="kubeneuron:e2e-run"
 
 CLUSTER_NAME="${CLUSTER_NAME:-kubeneuron-e2e-local}"
@@ -930,6 +941,200 @@ cmd_test_verify_recur() {
 	log "test-verify-recur: PASS (recurrence during VERIFYING escalated to $state, not RESOLVED)"
 }
 
+# cmd_test_drain exercises the one destructive step this stand has been running
+# for eight paid runs without ever loading it.
+#
+# The ReplaceNode ladder does contain a real Drain, and it runs in Enabled mode
+# — but the stand puts no workload on the GPU node, so that drain has always
+# walked an empty pod list, and nothing has ever asserted anything about it. The
+# most expensive defect found in round 26 lived in exactly that unexercised
+# code, which is why it survived four green runs.
+#
+# What this asserts, in order:
+#
+#   1. A node carrying a pod with no controller is REFUSED, and refused with
+#      NOTHING EVICTED. That second half is the whole point: the first version
+#      of this refusal collected the unmanaged names inside the eviction loop,
+#      so it evicted every managed pod, waited for them to terminate, and only
+#      then refused. Doing the disruption and then declining is worse than
+#      either choice on its own, and only a real drain over a real pod list can
+#      tell the two implementations apart.
+#   2. Once the unmanaged pod is gone, the same ladder drains the node for real
+#      and the tenant workload is actually evicted.
+#
+# UNEXERCISED LIVE: written after run 8; validate on the next paid stand before
+# trusting a red result from it.
+cmd_test_drain() {
+	guard_cluster_name
+	require_cmd kubectl
+	require_cmd jq
+	require_cmd curl
+	local node
+	node=$(gpu_node)
+	assert_kube_target
+
+	log "test-drain: placing a managed tenant workload and one bare pod on $node"
+	kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2e-tenant
+  namespace: default
+  labels: {kubeneuron.io/hw-e2e: "true"}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: e2e-tenant}}
+  template:
+    metadata: {labels: {app: e2e-tenant}}
+    spec:
+      nodeName: ${node}
+      tolerations: [{operator: Exists}]
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: sleep
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 3600"]
+EOF
+	# A bare pod: no controller, so nothing would recreate it elsewhere. This is
+	# what `kubectl debug node/...` leaves behind, and what an engineer's
+	# `kubectl run` creates.
+	kubectl apply -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: e2e-bare
+  namespace: default
+  labels: {kubeneuron.io/hw-e2e: "true"}
+spec:
+  nodeName: ${node}
+  tolerations: [{operator: Exists}]
+  terminationGracePeriodSeconds: 5
+  containers:
+    - name: sleep
+      image: busybox:1.36
+      command: ["sh", "-c", "sleep 3600"]
+EOF
+	wait_for 180 'kubectl -n default get pod e2e-bare -o jsonpath="{.status.phase}" | grep -q Running'
+	wait_for 180 'kubectl -n default get pods -l app=e2e-tenant \
+		-o jsonpath="{.items[0].status.phase}" | grep -q Running'
+
+	log "test-drain: confining destructive execution to the e2e GPU node"
+	kubectl -n "$RUNTIME_NAMESPACE" patch kubeneuron "$ROOT_NAME" --type merge -p "$(
+		cat <<EOF
+{"spec":{"safety":{"executionMode":"Enabled",
+   "destructiveExecution":{"nodeSelector":{"kubeneuron.io/e2e":"true"},
+     "acknowledgement":"${XID_ACK}"}}}}
+EOF
+	)"
+	apply_drain_playbook
+	wait_for_installation_ready
+	# Wait for the CONTROLLER, not the operator — dry_run is stamped on the
+	# incident at OPEN and never revisited, so an incident born one tick early
+	# is a simulation for its whole life and every assertion below passes
+	# vacuously. Assert the blast radius too: Enabled with the wrong
+	# confinement is a destructive action aimed at the wrong machines.
+	wait_for 300 'api GET /api/v1/runtime-config |
+		jq -e ".execution_mode==\"enabled\" and .confinement.\"kubeneuron.io/e2e\"==\"true\"" >/dev/null'
+
+	log "test-drain: injecting XID $DRAIN_XID; the drain must REFUSE while the bare pod is there"
+	inject_xid "$node" "$DRAIN_XID"
+	local incident
+	incident=$(wait_for_incident "$node" drain-probe)
+	[ -n "$incident" ] || die "no drain-probe incident opened"
+	_OPEN_INCIDENT="$incident"
+	log "test-drain: incident $incident opened"
+
+	# The ladder has no escalation target, so a failed Drain parks it.
+	wait_for 600 'api GET "/api/v1/incidents/'"$incident"'" |
+		jq -e ".incident.state==\"NEEDS_HUMAN\"" >/dev/null' ||
+		die "the drain did not refuse a node carrying a pod with no controller"
+
+	# The refusal must NAME the pod, so an operator knows what to do about it.
+	api GET "/api/v1/incidents/$incident" |
+		jq -e 'any(.audit[]; .action=="Drain" and (.result|test("default/e2e-bare")))' >/dev/null ||
+		die "the drain refused without naming the pod that blocked it"
+
+	# And — the assertion this phase exists for — it refused having evicted
+	# NOTHING. A tenant workload still running here is the difference between a
+	# pre-flight refusal and a refusal issued after the damage.
+	kubectl -n default get pods -l app=e2e-tenant \
+		-o jsonpath='{.items[0].status.phase}' | grep -q Running ||
+		die "the drain evicted the tenant workload and THEN refused; the refusal is not a pre-flight"
+	log "test-drain: PASS (refused, named the pod, evicted nothing)"
+
+	close_incident "$incident" "drain refusal asserted"
+	_OPEN_INCIDENT=""
+	kubectl -n default delete pod e2e-bare --wait=true --timeout=120s >/dev/null
+
+	log "test-drain: with the bare pod gone, the same ladder must drain for real"
+	kubectl uncordon "$node" >/dev/null 2>&1 || true
+	inject_xid "$node" "$DRAIN_RECUR_XID"
+	incident=$(wait_for_incident "$node" drain-probe)
+	[ -n "$incident" ] || die "no second drain-probe incident opened"
+	_OPEN_INCIDENT="$incident"
+
+	wait_for 900 'kubectl -n default get pods -l app=e2e-tenant \
+		-o jsonpath="{.items[0].spec.nodeName}" 2>/dev/null | grep -qv "'"$node"'"' ||
+		die "the drain did not evict the tenant workload off $node"
+	log "test-drain: PASS (real drain evicted the tenant workload)"
+
+	close_incident "$incident" "drain success asserted"
+	_OPEN_INCIDENT=""
+	kubectl uncordon "$node" >/dev/null 2>&1 || true
+	kubectl -n default delete deployment e2e-tenant --wait=false >/dev/null 2>&1 || true
+}
+
+# apply_drain_playbook installs a Cordon -> Drain ladder with NO escalation
+# target, so a refused drain parks the incident in NEEDS_HUMAN instead of
+# climbing to something more destructive. That is what makes the refusal
+# observable as a state rather than inferred from a later step's absence.
+apply_drain_playbook() {
+	kubectl apply -f - <<EOF
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: ${ROOT_NAME}-e2e-drain-probe
+  labels: {kubeneuron.io/hw-e2e: "true"}
+spec:
+  kubeNeuronRef: ${ROOT_NAME}
+  target: GPU
+  effects: [nodeScheduling]
+  steps:
+    - name: Cordon
+      action: Cordon
+    - name: Drain
+      action: Drain
+      timeout: 5m
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: ${ROOT_NAME}-e2e-drain-probe
+  labels: {kubeneuron.io/hw-e2e: "true"}
+spec:
+  kubeNeuronRef: ${ROOT_NAME}
+  priority: 5
+  match:
+    class: drain-probe
+  playbookRef: ${ROOT_NAME}-e2e-drain-probe
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUSignalMapping
+metadata:
+  name: ${ROOT_NAME}-e2e-drain-xid
+  labels: {kubeneuron.io/hw-e2e: "true"}
+spec:
+  kubeNeuronRef: ${ROOT_NAME}
+  source: xid
+  xidCodes: [${DRAIN_XID}, ${DRAIN_RECUR_XID}]
+  class: drain-probe
+  severity: critical
+EOF
+	wait_for_configured_object gpuplaybook "${ROOT_NAME}-e2e-drain-probe"
+	wait_for_configured_object gpuremediationpolicy "${ROOT_NAME}-e2e-drain-probe"
+	wait_for_configured_object gpusignalmapping "${ROOT_NAME}-e2e-drain-xid"
+}
+
 cmd_test_destructive() {
 	guard_cluster_name
 	require_cmd kubectl
@@ -1511,32 +1716,58 @@ wait_for_incident() {
 
 # api calls the controller REST API through a background port-forward, with the
 # operator API token read from its Secret. GET/POST only.
+#
+# Every call is bounded. A port-forward keeps its LOCAL listener up after the
+# remote end dies, so the TCP connect succeeds and nothing ever answers: an
+# unbounded curl there waits forever. That is not hypothetical — it hung the
+# EXIT trap of run 8 for two hours with the cluster still billing, which is the
+# second time this stand's cost guarantee died on an unbounded cleanup call
+# (the first was a teardown piped through tee).
+#
+# API_MAX_TIME is generous enough for the slowest real call and finite, which
+# is the only property that matters here.
 api() {
 	local method="$1" path="$2" body="${3:-}"
 	_ensure_portforward
 	local base="http://127.0.0.1:${_API_LOCAL_PORT}"
 	if [ "$method" = POST ]; then
-		curl -fsS -X POST -H 'Content-Type: application/json' \
+		curl -fsS --max-time "$API_MAX_TIME" -X POST -H 'Content-Type: application/json' \
 			-H "Authorization: Bearer ${_API_TOKEN}" \
 			--data "$body" "${base}${path}"
 	else
-		curl -fsS -H "Authorization: Bearer ${_API_TOKEN}" "${base}${path}"
+		curl -fsS --max-time "$API_MAX_TIME" \
+			-H "Authorization: Bearer ${_API_TOKEN}" "${base}${path}"
 	fi
 }
+
+# API_MAX_TIME bounds every controller API call. No network call in this script
+# may be unbounded; see api().
+API_MAX_TIME="${API_MAX_TIME:-30}"
 
 _API_LOCAL_PORT=""
 _API_TOKEN=""
 _PF_PID=""
 _REPOINT_PID=""
 _ensure_portforward() {
-	[ -n "$_PF_PID" ] && kill -0 "$_PF_PID" 2>/dev/null && return 0
+	# A LIVE process is not a live tunnel. kubectl port-forward keeps its
+	# listener bound after the remote connection breaks, so kill -0 alone
+	# happily returned a forward that answered nothing — which is how run 8
+	# came to hang. Probe it, cheaply, and rebuild it if it has gone deaf.
+	if [ -n "$_PF_PID" ] && kill -0 "$_PF_PID" 2>/dev/null; then
+		if curl -fsS --max-time 5 -o /dev/null \
+			"http://127.0.0.1:${_API_LOCAL_PORT}/healthz" 2>/dev/null; then
+			return 0
+		fi
+		kill "$_PF_PID" 2>/dev/null || true
+		_PF_PID=""
+	fi
 	_API_TOKEN=$(kubectl -n "$RUNTIME_NAMESPACE" get secret kubeneuron-operator-api-token \
 		-o jsonpath='{.data.token}' | base64 -d)
 	_API_LOCAL_PORT=18080
 	kubectl -n "$RUNTIME_NAMESPACE" port-forward \
 		"service/${ROOT_NAME}-controller" "${_API_LOCAL_PORT}:8080" >/dev/null 2>&1 &
 	_PF_PID=$!
-	wait_for 60 'curl -fsS -o /dev/null "http://127.0.0.1:'"$_API_LOCAL_PORT"'/healthz"'
+	wait_for 60 'curl -fsS --max-time 5 -o /dev/null "http://127.0.0.1:'"$_API_LOCAL_PORT"'/healthz"'
 }
 
 # wait_for polls a shell condition until it succeeds or the timeout elapses.
@@ -1575,6 +1806,20 @@ delete_iam_role() {
 # assertion into three failed phases.
 _OPEN_INCIDENT="${_OPEN_INCIDENT:-}"
 
+# cleanup must always terminate.
+#
+# It runs from the EXIT trap, which is the last thing standing between a failed
+# phase and a cluster that keeps billing, so nothing in here may block forever.
+# The only step that talks to the network is close_incident, and it is bounded
+# by construction now: api() caps each curl at API_MAX_TIME, and the port-forward
+# it may rebuild is capped by its own wait_for. Worst case is on the order of a
+# minute and cannot become infinite.
+#
+# Deliberately NOT wrapped in an extra `timeout` subshell. The first version was,
+# and it re-declared these functions into a child shell with the port-forward
+# state interpolated into a string — more moving parts, on the one path that has
+# to work when everything else has already gone wrong. Bounding the call itself
+# is the smaller and more reliable fix.
 cleanup() {
 	if [ -n "${_OPEN_INCIDENT:-}" ]; then
 		close_incident "$_OPEN_INCIDENT" "phase ended without closing its incident"
@@ -1607,6 +1852,7 @@ main() {
 	test-threshold) cmd_test_threshold "$@" ;;
 	test-dcgm) cmd_test_dcgm "$@" ;;
 	test-verify-recur) cmd_test_verify_recur "$@" ;;
+	test-drain) cmd_test_drain "$@" ;;
 	test-destructive) cmd_test_destructive "$@" ;;
 	teardown) cmd_teardown "$@" ;;
 	sweep) cmd_sweep "$@" ;;

@@ -100,6 +100,35 @@ lint:
 # header claimed two; nothing reported it because nothing ran shellcheck here.
 	@command -v shellcheck >/dev/null 2>&1 && shellcheck hack/*.sh deploy/install.sh \
 		|| echo "shellcheck not installed, skipped"
+# No unbounded network call in the scripts that spend money.
+#
+# The hardware stand's cost guarantee has now died twice on a cleanup step that
+# could not fail: once on a teardown piped through tee, and once on a curl with
+# no --max-time, which hung an EXIT trap for two hours with a GPU cluster still
+# billing. A port-forward keeps its local listener up after the remote end dies,
+# so the connect succeeds and the read never returns — the failure looks exactly
+# like a slow test.
+#
+# Scoped to hw-e2e.sh, and the scope is the honest limit of a grep.
+#
+# That is the only script that holds a PAID cluster, and every curl in it is
+# written with its flags inline, so a line-oriented check can actually prove
+# something there. The kind scripts build their flags in arrays
+# (valid_tls=(... --max-time 10)) and kind-upgrade.sh wraps curl in api_curl —
+# both bounded, neither visible to grep on the invocation line. Widening this to
+# hack/*.sh produced five false positives and zero real ones, which is how a
+# guard gets deleted six months later.
+#
+# deploy/install.sh is bounded too (a hung install costs patience, not dollars)
+# but is not what this guards.
+#
+# Cheap, mechanical, and it fails the build rather than a paid run.
+	@! grep -nEw 'curl' hack/hw-e2e.sh \
+		| grep -v -- '--max-time' | grep -vE ':[[:space:]]*#|require_cmd|curlimages/' | grep . \
+		|| (echo "curl without --max-time in hack/hw-e2e.sh, which holds a paid cluster:" >&2; \
+		    grep -nEw 'curl' hack/hw-e2e.sh \
+		      | grep -v -- '--max-time' | grep -vE ':[[:space:]]*#|require_cmd|curlimages/' >&2; \
+		    exit 1)
 
 tidy:
 	$(GO) mod tidy
