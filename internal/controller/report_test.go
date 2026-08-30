@@ -523,3 +523,43 @@ func TestSimulatedStepsAreNotRemediation(t *testing.T) {
 		})
 	}
 }
+
+// TestAPCIOnlyIncidentIsChargedOneDevice covers a capacity number that goes in
+// front of whoever pays for the fleet.
+//
+// Both counters asked Target.IsGPU() — "do we know the UUID" — where the real
+// question is "is this about one card or the whole machine". A card knocked off
+// the bus has no UUID, so a PCI-only incident was charged the node's ENTIRE
+// inventory. That was merely an overstatement while such faults collapsed into
+// one incident per node. Once each device got its own incident, an 8-GPU node
+// losing its PCIe switch produced eight incidents each charging eight GPUs:
+// 64 GPU-seconds per second on a node that has eight.
+//
+// A node-scoped incident — no UUID and no address — must still charge the whole
+// node, which is the case this rule exists for.
+func TestAPCIOnlyIncidentIsChargedOneDevice(t *testing.T) {
+	perNode := map[string]int{"n1": 8}
+
+	pciOnly := &types.Incident{Target: types.Target{Node: "n1", PCIAddr: "0000:3b:00"}}
+	if got, assumed := affectedGPUCount(pciOnly, perNode); got != 1 || assumed {
+		t.Errorf("a PCI-only incident was charged %d GPUs (assumed=%v), want 1: it names one "+
+			"card, and with one incident per device this multiplies the fleet's degraded-"+
+			"capacity bill by the number of cards on the node", got, assumed)
+	}
+
+	attributed := &types.Incident{Target: types.Target{Node: "n1", GPUUUID: "GPU-a"}}
+	if got, _ := affectedGPUCount(attributed, perNode); got != 1 {
+		t.Errorf("an attributed incident was charged %d GPUs, want 1", got)
+	}
+
+	nodeScoped := &types.Incident{Target: types.Target{Node: "n1"}}
+	if got, assumed := affectedGPUCount(nodeScoped, perNode); got != 8 || assumed {
+		t.Errorf("a node-scoped incident was charged %d GPUs (assumed=%v), want the node's 8: "+
+			"understating this hides how much capacity remediation brought back", got, assumed)
+	}
+
+	unknownInventory := &types.Incident{Target: types.Target{Node: "n-unknown"}}
+	if got, assumed := affectedGPUCount(unknownInventory, perNode); got != 1 || !assumed {
+		t.Errorf("unknown inventory charged %d (assumed=%v), want 1 and flagged", got, assumed)
+	}
+}

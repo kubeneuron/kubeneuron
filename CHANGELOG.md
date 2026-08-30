@@ -9,6 +9,147 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-08-27
+
+A minor rather than a patch: this carries schema migrations on both engines
+(sqlite 0020, postgres 0011) and changes behaviour operators will notice.
+
+**Read this before upgrading if you run a documented restore.** The backup and
+restore procedure in `docs/operations.md` was wrong in a way that could corrupt
+the database it exists to restore. It said "stop the controller so nothing
+writes the database" and scaled the Deployment to zero — but the operator owns
+that replica count and reconciles it straight back, so the wipe replaced the
+SQLite file underneath a running writer. Both that procedure and the node-
+maintenance one now stop the operator first and wait for the Pod, not for
+`kubectl rollout status`, which reports a scale-to-zero complete the instant
+after the scale. The integration suite verified the stop the same broken way,
+which is why this survived: it had been proving a procedure it never performed.
+
+### Fixed — incidents could not tell two GPUs apart, and cordons had one owner
+
+- **Two unattributed GPUs on one node collided into one incident.** A kernel
+  fault that knocks a card off the bus prints a PCI address and nothing else, so
+  the incident's identity was `(node, '', class)` and the second card's fault was
+  folded into the first card's incident — never remediated, never reported.
+- **The precise signal that arrived seconds later was thrown away.** When the
+  vendor tool resolved that same address to a UUID, the agent's dedup window
+  discarded it as a repeat. The ladder then cordoned and drained the node and
+  refused the reset permanently as "target unattributed", for a device whose
+  exact identity had been available all along. Incidents are now promoted onto
+  their UUID atomically when it arrives.
+- **A finished incident uncordoned a node another was still remediating.** The
+  uncordon step called the unguarded release with no ownership check, so the
+  first incident to finish returned the whole machine to the scheduler while a
+  GPU on it was being reset — and restored from whichever snapshot survived the
+  second cordon, which could take a human's own cordon and their
+  `karpenter.sh/do-not-disrupt` pin with it. A cordon is now held by a set of
+  owners and released only when the last one leaves.
+- **A human's verdict on one hold stranded every other hold on that node**, and
+  did so as a deadlock: the mark blocked release of the other holds and clears
+  only when the owner set empties, which it then never could. Eight GPUs out of
+  the fleet permanently, with no page — the stuck-cordon signal needs a live
+  incident, and retention had swept it.
+- **The concurrency cap stopped applying to sibling GPUs.** The safety gate keyed
+  an unattributed target by the bare node name, so once one incident per device
+  became possible, a PCIe switch failure taking eight cards off one node ran
+  eight ladders against a cap set to two — the correlated failure the cap exists
+  for.
+- **Degraded-capacity was overcounted eightfold.** Both counters asked "do we
+  know the UUID" where the question is "one card or the whole machine", so a
+  PCI-only incident was charged the node's entire inventory. That number goes in
+  front of whoever pays for the fleet.
+- A drain now records the pods a forced eviction destroys, and the ones whose
+  local scratch it takes with them. A cordoned node whose owner annotation
+  cannot be parsed is counted by a new gauge rather than only logged once.
+
+### Fixed — raised against the release candidate, before wide rollout
+
+- **A timing-out action could not report why.** The lease ended exactly at the
+  action's own deadline, so the executor's result — the reason, the processes
+  still holding the device — arrived a moment after the store stopped accepting
+  it. The controller saw a bare timeout with no cause, and the row read as
+  reclaimable: for the shipped 12h `WaitIdle` rung, another twelve hours of a
+  card out of service before anything changed. The lease now covers the deadline
+  plus a reporting grace, and that grace is one constant three components share
+  rather than a number two of them knew.
+- **A human could not take a node over.** The restore snapshot answers "what was
+  here before us"; nothing answered "what did a person decide after us". An
+  engineer who kept a cordoned node out of service set the same flag KubeNeuron
+  had — there is only one — so the last release read the marks as its own and
+  returned the machine. `kubeneuron.io/cordon-handoff` is the one key KubeNeuron
+  never writes, checked with a JSON-Patch `test` op so a claim landing mid-
+  release cannot be raced past. See `docs/operations.md`.
+- **Counted cordon ownership was optional**, with a fallback to the unguarded
+  pair — so a platform that simply did not implement it silently got back the
+  P0 the counting exists to prevent. It is part of the platform interface now:
+  forgetting it is a compile error, and bare metal, which had exactly that gap,
+  counts holders.
+- **Policies could not be scoped to a vendor.** A problem class is not
+  vendor-specific while the ladder answering it is, so AMD nodes selected the
+  NVIDIA ladder and were refused at the capability gate — after the cordon and
+  the drain. Policies now take an optional `match.vendor`; unscoped ones still
+  match everything. A signal naming no vendor matches no scoped policy, because
+  these ladders reset hardware. Vendor adapters and AMD/TPU remediation are
+  deliberately still absent: what this enables today is a separate, safe AMD
+  ladder that stops short of a reset.
+
+### Fixed — found by an independent review of the release candidate
+
+An external reviewer was given the four commits and asked for defects at the
+SEAMS between them, without being told what had already been found. All six of
+its findings were real, and every one lived between changes rather than inside
+one — which is where three internal review passes had stopped finding anything.
+
+- **A promoted incident leaked its safety-gate slot permanently.** The durable
+  bit said WHETHER a remediation slot was held, never under which key — and the
+  key stopped being derivable once a promotion could change an incident's target
+  mid-flight. A step goroutine carries the incident as it was when its step
+  began, so it released the pre-promotion key while the reservation sat under
+  the new one: a unit of `MaxConcurrentRemediations` gone for the life of the
+  process, charged to an incident that had already finished, with no incident
+  visibly responsible. The controller now records the key it reserved under.
+- **A node-scoped signal joined a device incident.** The node-scoped lookup
+  constrained the GPU UUID alone, and every PCI-only incident has an empty UUID
+  too — so an alert or a manual trigger attached to the oldest same-class
+  incident about ONE CARD, drove that card's ladder, and left the node-scoped
+  fault with no incident at all.
+- **A human takeover was ignored on pre-upgrade cordons.** The annotation was
+  honoured in the restore path but not on the release path a cordon from an
+  older build takes, so an operator could claim such a node and watch the
+  finishing incident hand it back anyway.
+- **Bare metal recorded a cordon owner a failed hook never earned.** The owner
+  went into the set before the hook ran; if the hook failed, the next incident
+  saw "already down", reported success, and never retried it — and the ladder
+  drained and reset a node that had never been taken out of service.
+- **The janitor asked for a capability wider than it used**, so an adapter with
+  the required pair but not the held-mark method fell through to the reason-only
+  release and lost owner counting entirely. The test fake had exactly that gap,
+  which means every janitor test had been exercising the fallback.
+- **Two policy lookups discarded the vendor.** The late bind built a signal from
+  the class alone, so an incident that raced a policy rollout could never bind
+  its vendor's ladder; and the observation threshold came from the first policy
+  of that class, so an AMD incident escalated on NVIDIA's timing. Selection now
+  lives in one predicate all three paths ask.
+
+Two of these were hidden by tests that could not fail: one released the slot
+under the promoted target — the one thing production could not do — and the
+other satisfied its interface through an embedded nil.
+
+### Fixed — the hardware stand
+
+Three paid runs died holding a live GPU cluster, each on a different mechanism:
+a teardown piped through a dead `tee`, a `curl` with no `--max-time` in an EXIT
+trap, and a bash sitting in `do_wait` for a port-forward child that never
+exited. The last cost 11h38m. Closing causes one at a time did not work; phases
+now run in their own process group under a deadline.
+
+A new `test-drain` phase puts a tenant workload and one bare pod on the GPU node
+and asserts the drain refuses **having evicted nothing** — the difference
+between a pre-flight refusal and one issued after the damage, which only a real
+pod list can show. Run 9 passed seven phases on a real T4 and exercised that for
+the first time in nine paid runs.
+
+
 Rounds 15-26. An independent review per round, and **eight paid runs on real
 NVIDIA hardware** — an EKS g4dn.xlarge with a Tesla T4 — which is where most of
 what follows came from.

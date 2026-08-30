@@ -678,6 +678,32 @@
     },
     {
       "type": "timeseries",
+      "title": "Nodes whose cordon state cannot be read (stranded, and nothing else says so)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 74
+      },
+      "targets": [
+        {
+          "expr": "max(kubeneuron_cordon_state_unreadable_nodes)",
+          "legendFormat": "unreadable",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ],
+      "description": "A cordoned node whose KubeNeuron owner annotation cannot be parsed is dropped from the janitor's listing on purpose \u2014 releasing a cordon we cannot reason about would be worse. But then nothing releases it either: kubectl shows an ordinary cordon, the incident row ages out, and there is no owner left to ask. Any non-zero value here is GPU capacity out of the fleet that no incident explains. Usually a hand-edited annotation."
+    },
+    {
+      "type": "timeseries",
       "title": "Destructive steps deferred by a guard (what remediation deliberately did not cost)",
       "datasource": {
         "type": "prometheus",
@@ -687,7 +713,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 74
+        "y": 82
       },
       "targets": [
         {
@@ -712,7 +738,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 74
+        "y": 82
       },
       "targets": [
         {
@@ -737,7 +763,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 82
+        "y": 90
       },
       "targets": [
         {

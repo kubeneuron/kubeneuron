@@ -24,6 +24,20 @@ func cordonReason(inc *types.Incident) string {
 	return fmt.Sprintf("%s%s (%s)", cordonReasonPrefix, inc.Class, inc.ID)
 }
 
+// incidentFromCordonOwner extracts the incident ID from one entry of a node's
+// cordon owner set.
+//
+// An ordinary entry IS the incident ID: the executor writes inc.ID when it takes
+// the node's cordon. A legacy entry stands in for a cordon placed before owner
+// sets existed, which identified itself only by its reason, so that one is
+// parsed the old way.
+func incidentFromCordonOwner(owner string) (string, bool) {
+	if reason, legacy := strings.CutPrefix(owner, platform.LegacyCordonOwnerPrefix); legacy {
+		return incidentFromCordonReason(reason)
+	}
+	return owner, owner != ""
+}
+
 // incidentFromCordonReason extracts the incident ID from a recorded reason.
 // Incident IDs contain no ")", so the last parenthesised group is unambiguous.
 func incidentFromCordonReason(reason string) (string, bool) {
@@ -63,55 +77,102 @@ func (c *Controller) reconcileCordonedNodes(ctx context.Context) {
 		return
 	}
 	for _, node := range nodes {
-		incidentID, parsed := incidentFromCordonReason(node.Reason)
-		if !parsed {
-			continue // cordoned by something else wearing our annotation
+		// Every remediation holding this node, not just the one whose reason is
+		// on it. On a multi-GPU node two incidents can hold one cordon, and the
+		// reason annotation belongs to whichever cordoned LAST — so judging the
+		// node by the reason alone both misses the abandoned hold whose reason
+		// was overwritten and judges one incident's cordon by another's verdict.
+		//
+		// Holds() also covers the node cordoned by a build that predates owner
+		// sets, which names its single holder by reason; asking it rather than
+		// unfolding that rule here keeps this loop, the held-mark verdict and the
+		// release path agreeing about the same node.
+		for _, owner := range node.Holds() {
+			c.reconcileCordonOwner(ctx, janitor, node, owner)
 		}
-		inc, err := c.store.GetIncident(ctx, incidentID)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			// A store outage is not proof that the remediation has gone away.
-			// Releasing this cordon would put an unverified node back into service.
-			c.log.Warn("reading a cordon incident failed, keeping the node cordoned", "node", node.Name, "incident", incidentID, "err", err)
-			continue
+	}
+}
+
+// reconcileCordonOwner decides what to do about ONE remediation's hold on a
+// cordoned node: leave it alone, release it, or record that a human owns it.
+func (c *Controller) reconcileCordonOwner(ctx context.Context, janitor platform.CordonJanitor, node platform.CordonedNode, owner string) {
+	incidentID, parsed := incidentFromCordonOwner(owner)
+	if !parsed {
+		return // cordoned by something else wearing our annotation
+	}
+	inc, err := c.store.GetIncident(ctx, incidentID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		// A store outage is not proof that the remediation has gone away.
+		// Releasing this cordon would put an unverified node back into service.
+		c.log.Warn("reading a cordon incident failed, keeping the node cordoned", "node", node.Name, "incident", incidentID, "err", err)
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) || inc == nil {
+		// The incident is gone but its cordon is not.
+		//
+		// Absence is not proof of abandonment. Retention prunes RESOLVED
+		// and EXPIRED incidents alike, so an incident that timed out
+		// awaiting approval — whose cordon this janitor deliberately
+		// REFUSED to release while the row existed — was released the
+		// moment that row was swept, inverting the rule stated at the top
+		// of this file. A store restored from backup does the same for
+		// every held cordon at once.
+		//
+		// The held mark lives on the node and outlives the row, so an
+		// unreadable incident can no longer be mistaken for a resolved one.
+		//
+		// Asked about THIS hold, never about the node. A node-scoped answer says
+		// "a human owns this" for every other remediation on the machine too, so
+		// one halted remediation made every abandoned hold beside it permanent:
+		// the owner set could never empty, and the mark blocking it is only
+		// cleared when it does. The node deadlocks out of the fleet with no
+		// incident row left to explain it.
+		if node.HeldBy(owner) {
+			c.log.Info("keeping a held cordon whose incident row is gone",
+				"node", node.Name, "incident", incidentID)
+			return
 		}
-		if errors.Is(err, store.ErrNotFound) || inc == nil {
-			// The incident is gone but its cordon is not.
-			//
-			// Absence is not proof of abandonment. Retention prunes RESOLVED
-			// and EXPIRED incidents alike, so an incident that timed out
-			// awaiting approval — whose cordon this janitor deliberately
-			// REFUSED to release while the row existed — was released the
-			// moment that row was swept, inverting the rule stated at the top
-			// of this file. A store restored from backup does the same for
-			// every held cordon at once.
-			//
-			// The held mark lives on the node and outlives the row, so an
-			// unreadable incident can no longer be mistaken for a resolved one.
-			if node.Held {
-				c.log.Info("keeping a held cordon whose incident row is gone",
-					"node", node.Name, "incident", incidentID)
-				continue
-			}
-			c.uncordonAbandoned(ctx, node.Name, incidentID, "its incident no longer exists", node.Reason)
-			continue
-		}
-		if isActiveIncidentState(inc.State) {
-			continue
-		}
-		if inc.State == types.StateResolved {
-			c.uncordonAbandoned(ctx, node.Name, incidentID, "its incident resolved without reaching the uncordon step", node.Reason)
-			continue
-		}
-		// Halted but not resolved: a human owns this node. Mark it, so the
-		// decision survives the incident row that retention will prune.
-		if !node.Held {
-			// Scoped to the reason we listed, so a cordon replaced since then
-			// does not inherit this incident's verdict.
-			if _, err := janitor.MarkCordonHeldIfReason(ctx, node.Name, node.Reason); err != nil {
-				c.log.Warn("recording a held cordon failed, will retry", "node", node.Name, "err", err)
-			}
-		}
-		c.reportStuckCordon(ctx, node.Name, inc)
+		c.uncordonAbandoned(ctx, node, owner, incidentID, "its incident no longer exists")
+		return
+	}
+	if isActiveIncidentState(inc.State) {
+		return
+	}
+	if inc.State == types.StateResolved {
+		c.uncordonAbandoned(ctx, node, owner, incidentID, "its incident resolved without reaching the uncordon step")
+		return
+	}
+	// Halted but not resolved: a human owns this hold. Mark it, so the
+	// decision survives the incident row that retention will prune.
+	if !node.HeldBy(owner) {
+		c.markCordonHeld(ctx, janitor, node, owner)
+	}
+	c.reportStuckCordon(ctx, node.Name, inc)
+}
+
+// markCordonHeld records that a human owns this node's cordon, scoped to the
+// hold the verdict was actually reached about.
+//
+// The scoping is the point, in both forms. The listing came from an informer
+// cache, so a hold that has gone since then is not a missed one — it is a hold
+// that has been RELEASED, and the held mark deliberately outlives the incident
+// row, so a mark written from a stale verdict keeps a GPU node out of the fleet
+// permanently once the row that explains it is pruned.
+//
+// On a shared cordon the reason cannot serve as that scope. It belongs to
+// whichever incident cordoned LAST and stays on the node when any OTHER holder
+// leaves, so it still matches long after the hold this verdict was reached about
+// has gone — the write lands and nothing about the reason says it should not.
+// The hold itself is the only thing that can be tested here.
+func (c *Controller) markCordonHeld(ctx context.Context, janitor platform.CordonJanitor, node platform.CordonedNode, owner string) {
+	var err error
+	if owned, ok := c.platform.(platform.CordonOwnership); ok && node.Tracked() {
+		_, err = owned.MarkCordonHeldIfOwner(ctx, node.Name, owner)
+	} else {
+		_, err = janitor.MarkCordonHeldIfReason(ctx, node.Name, node.Reason)
+	}
+	if err != nil {
+		c.log.Warn("recording a held cordon failed, will retry", "node", node.Name, "err", err)
 	}
 }
 
@@ -193,8 +254,8 @@ func (c *Controller) resolveIncidentsOnVanishedNodes(ctx context.Context) {
 	}
 }
 
-// uncordonAbandoned releases a cordon whose incident is finished, but only if
-// the node still carries the reason this decision was made about.
+// uncordonAbandoned drops one finished remediation's hold on a node, and returns
+// the node to service only if that was the last hold on it.
 //
 // The listing this decision came from is served from an informer cache. A
 // stale entry is not a missed cordon — it is a cordon that has since been
@@ -204,24 +265,48 @@ func (c *Controller) resolveIncidentsOnVanishedNodes(ctx context.Context) {
 // sibling taint janitor already refuses to act on a two-read snapshot for
 // exactly this reason and says so; this one had neither the re-read nor the
 // conditional write.
-func (c *Controller) uncordonAbandoned(ctx context.Context, node, incidentID, why, reason string) {
-	janitor, ok := c.platform.(platform.CordonJanitor)
-	if !ok {
+//
+// The same staleness argument is why the owner-set release is compare-and-swap
+// rather than a read-modify-write, and why an owner that is no longer on the
+// node is a silent no-op: this janitor runs on every reconcile tick and must be
+// able to say the same thing twice without consequence.
+func (c *Controller) uncordonAbandoned(ctx context.Context, node platform.CordonedNode, owner, incidentID, why string) {
+	{
+		// Counting holders is required of every platform now, so this asks for
+		// nothing extra. It used to assert platform.CordonOwnership, which also
+		// demands MarkCordonHeldIfOwner — so an adapter that implemented the
+		// required pair but not the held mark fell through to the reason-only
+		// release and lost owner counting entirely. The janitor would then
+		// release one resolved hold and make a node schedulable while another
+		// GPU remediation still owned it: the P0 this whole mechanism exists to
+		// prevent, reachable through a capability check that no longer matched
+		// what the code needs.
+		if c.platform == nil {
+			// Only reachable from a test fixture that builds a controller
+			// without one. Stated explicitly because the type assertion this
+			// replaced used to absorb it: an assertion on a nil interface
+			// simply reports "not supported", so removing the assertion also
+			// removed a guard nobody had written down.
+			return
+		}
+		released, remaining, err := c.platform.ReleaseCordonOwners(ctx, node.Name, []string{owner})
+		if err != nil {
+			c.log.Warn("releasing an abandoned remediation's hold on a node failed, will retry",
+				"node", node.Name, "incident", incidentID, "err", err)
+			return
+		}
+		if !released {
+			// Either the hold was already gone (a replaced cordon, or a release
+			// that has since landed) or other remediations still hold this node.
+			// Both mean the node stays cordoned, which is the fail-closed answer.
+			c.log.Info("did not return a node to service: it is still held",
+				"node", node.Name, "incident", incidentID, "remaining_holders", remaining)
+			return
+		}
+		c.log.Info("uncordoned a node left behind by a finished playbook",
+			"node", node.Name, "incident", incidentID, "reason", why)
 		return
 	}
-	released, err := janitor.UncordonIfReason(ctx, node, reason)
-	if err != nil {
-		c.log.Warn("uncordoning an abandoned node failed, will retry",
-			"node", node, "incident", incidentID, "err", err)
-		return
-	}
-	if !released {
-		c.log.Info("skipped uncordoning a node whose cordon was replaced since it was listed",
-			"node", node, "incident", incidentID)
-		return
-	}
-	c.log.Info("uncordoned a node left behind by a finished playbook",
-		"node", node, "incident", incidentID, "reason", why)
 }
 
 // reportStuckCordon tells an operator once that a node is out of service.

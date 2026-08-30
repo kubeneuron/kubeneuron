@@ -86,6 +86,22 @@ type Tx interface {
 	// ErrNotFound when the row is absent. On success it bumps inc.Version to the
 	// value it just persisted.
 	UpdateIncident(ctx context.Context, inc *types.Incident) error
+	// PromoteIncidentTarget gives an incident that could only be addressed by
+	// PCI address the GPU UUID a later, more precise signal carried. It is the
+	// ONLY statement in this store that changes an incident's device identity,
+	// and it is fenced on the incident's version, on the UUID still being
+	// empty, and on the PCI address it was matched by, so a promotion happens
+	// exactly once even when two precise signals are ingested concurrently.
+	// It returns ErrConflict when the row is no longer promotable (already
+	// promoted, advanced, or terminal) and ErrNotFound when it is gone; both
+	// mean re-read and retry, never overwrite.
+	//
+	// Without it an incident opened by a kernel fault stayed unattributed for
+	// life, and the reset preflight — correctly treating an empty UUID as
+	// permanently unfixable — parked a node that had already been cordoned and
+	// drained for a human, although the exact device had been identified
+	// seconds after the fault.
+	PromoteIncidentTarget(ctx context.Context, inc *types.Incident, to types.Target) error
 	AppendAudit(ctx context.Context, e *types.AuditEntry) error
 	RecordApproval(ctx context.Context, a *types.Approval) error
 }

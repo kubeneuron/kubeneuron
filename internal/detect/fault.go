@@ -186,11 +186,7 @@ func (c *Catalog) signalFromFault(ev types.AgentEvent) (types.Signal, bool) {
 		evidence["attr_"+k] = v
 	}
 	return types.Signal{
-		Target: types.Target{
-			Node:     ev.Node,
-			GPUUUID:  ev.GPUUUID,
-			GPUIndex: ev.GPUIndex,
-		},
+		Target:     TargetFromAgentEvent(ev),
 		Class:      info.Class,
 		Severity:   info.Severity,
 		Source:     types.SourceAgentEvent,

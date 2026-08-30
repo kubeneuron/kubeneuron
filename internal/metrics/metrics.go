@@ -228,6 +228,25 @@ var (
 		Help: "Durable queued actions not yet completed by agents.",
 	})
 
+	// CordonsUnreadable is how many cordoned nodes the janitor is refusing to
+	// touch because their KubeNeuron cordon annotations do not parse.
+	//
+	// The refusal itself is right — guessing at an owner set would release a
+	// machine several remediations may be holding mid-reset — but its cost is a
+	// GPU node held out of the fleet by nothing at all, and the only trace was
+	// one log line, deduplicated forever after. Nobody greps for a warning they
+	// have never seen. That is capacity nobody can bill for and nobody can find:
+	// the incident row that would explain it is long gone, kubectl shows an
+	// ordinary cordon, and there is no owner to ask.
+	//
+	// Recomputed on every listing rather than incremented, so it falls back to
+	// zero by itself the moment somebody fixes or removes the annotation, and so
+	// a controller restart does not lose the count.
+	CordonsUnreadable = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "kubeneuron_cordon_state_unreadable_nodes",
+		Help: "Cordoned nodes left alone by the janitor because their KubeNeuron cordon annotations cannot be read.",
+	})
+
 	// DeadLettered counts work that permanently left the claimable pool after
 	// exhausting its attempt budget, by queue.
 	//

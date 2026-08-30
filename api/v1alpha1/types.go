@@ -614,7 +614,22 @@ type KubeNeuronList struct {
 // SignalMatch selects normalized signals for a remediation policy.
 type SignalMatch struct {
 	// +kubebuilder:validation:MinLength=1
-	Class        string                `json:"class"`
+	Class string `json:"class"`
+	// Vendor scopes this policy to one accelerator vendor. Leave it unset to
+	// match any, which is what every policy did before this field existed.
+	//
+	// A problem class is not vendor-specific — an uncorrectable ECC error
+	// happens on NVIDIA, AMD and Intel alike — but the ladder that answers it
+	// is: a GPU reset is an NVIDIA contract, and quiescing the vendor stack
+	// means different things per vendor. Without this, adding AMD nodes to a
+	// fleet meant their faults selected the NVIDIA ladder, which is refused at
+	// the capability gate — after the cordon and the drain have already run.
+	//
+	// A signal that names NO vendor does not match a vendor-scoped policy. That
+	// is deliberate: these ladders reset and reboot hardware, so acting on an
+	// unconfirmed guess is the wrong direction to fail in.
+	// +kubebuilder:validation:Enum=nvidia;amd;intel
+	Vendor       string                `json:"vendor,omitempty"`
 	Source       string                `json:"source,omitempty"`
 	Severity     string                `json:"severity,omitempty"`
 	NodeSelector *metav1.LabelSelector `json:"nodeSelector,omitempty"`

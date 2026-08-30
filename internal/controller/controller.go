@@ -82,8 +82,17 @@ type Controller struct {
 	// has no in-memory tracking at all: ownership is the durable
 	// Incident.RemediationSlotHeld bit, written atomically with the EXECUTING
 	// and halting transitions.
-	recoveredMu    sync.Mutex
-	recoveredSlots map[string]recoveredSlot
+	//
+	// The durable bit says WHETHER a slot is held; remediationSlots says under
+	// WHICH KEY, and that stopped being derivable from the incident once a
+	// promotion could change its target mid-flight. The step goroutine holds
+	// the incident as it was when the step began, so a promotion during
+	// EXECUTING left it releasing the pre-promotion key while the reservation
+	// sat under the new one — a unit of MaxConcurrentRemediations consumed for
+	// the life of the process, on an incident that had already finished.
+	recoveredMu      sync.Mutex
+	recoveredSlots   map[string]recoveredSlot
+	remediationSlots map[string]types.Target
 
 	// reconcileEvery paces the walk; set before Run only, never reloaded.
 	reconcileEvery time.Duration
@@ -258,10 +267,11 @@ func New(
 		inFlight:      map[string]bool{},
 		// Sized well past any real fleet's distinct (condition, node) pairs, so
 		// eviction is a backstop rather than something a normal install meets.
-		logOnce:         newLogOnce(4096),
-		armingHoldSince: map[string]time.Time{},
-		recoveredSlots:  map[string]recoveredSlot{},
-		reconcileEvery:  defaultReconcileInterval,
+		logOnce:          newLogOnce(4096),
+		armingHoldSince:  map[string]time.Time{},
+		recoveredSlots:   map[string]recoveredSlot{},
+		remediationSlots: map[string]types.Target{},
+		reconcileEvery:   defaultReconcileInterval,
 	}
 	c.runtime.Store(&RuntimeConfig{
 		Engine:      engine,
@@ -573,42 +583,83 @@ func (c *Controller) CompleteAction(r *http.Request, node, actionID, leaseToken 
 // Its incident and audit mutations share a transaction even for direct signal
 // sources, matching the durable outbox path below.
 func (c *Controller) ingest(ctx context.Context, sig types.Signal) error {
-	var opened *types.Incident
+	var outcome ingestOutcome
 	if err := c.store.WithTx(ctx, func(tx store.Tx) error {
 		var err error
-		opened, err = c.ingestTx(ctx, tx, sig)
+		outcome, err = c.ingestTx(ctx, tx, sig)
 		return err
 	}); err != nil {
 		return err
 	}
-	return c.afterSignalCommitted(ctx, sig, opened)
+	return c.afterSignalCommitted(ctx, sig, outcome)
 }
 
 // ingestClaimedEvent processes an outbox item in the same transaction as its
 // incident/audit mutation. A crash can therefore leave either both changes
 // committed or neither; a reclaimed item can never increase SignalSeen twice.
 func (c *Controller) ingestClaimedEvent(ctx context.Context, claimed *store.ClaimedEvent, sig types.Signal) error {
-	var opened *types.Incident
+	var outcome ingestOutcome
 	if err := c.eventOutbox.ProcessClaimedEvent(ctx, claimed.OutboxID, claimed.LeaseToken, func(tx store.Tx) error {
 		var err error
-		opened, err = c.ingestTx(ctx, tx, sig)
+		outcome, err = c.ingestTx(ctx, tx, sig)
 		return err
 	}); err != nil {
 		return err
 	}
-	return c.afterSignalCommitted(ctx, sig, opened)
+	return c.afterSignalCommitted(ctx, sig, outcome)
 }
 
 // ingestTx performs the durable incident mutation for one signal. It does not
 // notify or update metrics: those effects happen only after the transaction
 // commits, so an outbox retry has no duplicated incident accounting.
-func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal) (*types.Incident, error) {
+func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal) (ingestOutcome, error) {
 	inc, err := tx.GetOpenIncident(ctx, sig.Target, sig.Class)
 	switch {
 	case err == store.ErrNotFound:
-		return c.openIncidentTx(ctx, tx, sig)
+		opened, err := c.openIncidentTx(ctx, tx, sig)
+		return ingestOutcome{opened: opened}, err
 	case err != nil:
-		return nil, err
+		return ingestOutcome{}, err
+	}
+	var outcome ingestOutcome
+	if inc.Target.IsUnattributed() && sig.Target.IsGPU() {
+		// The store returned this incident as a PROMOTION candidate: it was
+		// opened from a kernel fault that could only name the device by PCI
+		// address, and this signal names the SAME address with a real GPU UUID.
+		//
+		// Taking the identification is the whole point. An empty GPU UUID is
+		// read downstream as a permanent infeasibility — errResetTargetUnattributed
+		// — so leaving it empty here condemns an incident whose device is known
+		// to be parked for a human AFTER the ladder has cordoned and drained
+		// the node. Attaching the signal without promoting would be exactly the
+		// old defect wearing a different shape.
+		//
+		// It is the store's conditional UPDATE that makes this safe under
+		// concurrency, not this check: if two precise signals for one device
+		// are ingested at once, only one promotion matches and the other gets
+		// ErrConflict, which propagates and is retried against a row that by
+		// then simply matches on its UUID.
+		from := inc.Target
+		if err := tx.PromoteIncidentTarget(ctx, inc, types.Target{
+			Node:     inc.Target.Node,
+			GPUUUID:  sig.Target.GPUUUID,
+			GPUIndex: sig.Target.GPUIndex,
+			PCIAddr:  inc.Target.PCIAddr,
+		}); err != nil {
+			return ingestOutcome{}, err
+		}
+		if err := tx.AppendAudit(ctx, &types.AuditEntry{
+			IncidentID: inc.ID, Time: time.Now(),
+			FromState: inc.State, ToState: inc.State,
+			Actor: "system", Action: "promote-target",
+			Result: fmt.Sprintf("device at PCI %s identified as %s (index %d); the incident is no longer unattributed",
+				inc.Target.PCIAddr, inc.Target.GPUUUID, inc.Target.GPUIndex),
+			DryRun: inc.DryRun,
+		}); err != nil {
+			return ingestOutcome{}, err
+		}
+		outcome.promotedFrom = &from
+		outcome.promoted = inc
 	}
 	inc.SignalSeen++
 	inc.UpdatedAt = time.Now()
@@ -625,14 +676,28 @@ func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal
 	// flipping the answer under a running remediation is worse than keeping
 	// the one the incident was reasoned about with.
 	if !inc.Vendor.Valid() {
-		if vendor := types.AcceleratorVendor(sig.Evidence["vendor"]); vendor.Valid() {
+		if vendor := sig.Vendor(); vendor.Valid() {
 			inc.Vendor = vendor
 		}
 	}
 	if err := tx.UpdateIncident(ctx, inc); err != nil {
-		return nil, err
+		return ingestOutcome{}, err
 	}
-	return nil, nil
+	return outcome, nil
+}
+
+// ingestOutcome carries the parts of a committed ingest that have effects
+// OUTSIDE the transaction: a newly opened incident to announce, and a
+// promotion whose new identity the in-memory safety gate has to be told about.
+// Both are deliberately deferred until after commit, so an outbox retry of a
+// rolled-back transaction cannot double-count an incident or move a gate slot
+// that no durable row ever moved.
+type ingestOutcome struct {
+	opened *types.Incident
+	// promoted is the incident whose device identity changed, and promotedFrom
+	// is the target it was addressed by before. Both are set together.
+	promoted     *types.Incident
+	promotedFrom *types.Target
 }
 
 func (c *Controller) openIncidentTx(ctx context.Context, tx store.Tx, sig types.Signal) (*types.Incident, error) {
@@ -655,7 +720,7 @@ func (c *Controller) openIncidentTx(ctx context.Context, tx store.Tx, sig types.
 	// The fault envelope names its vendor; XIDs and alerts do not. Carrying
 	// it onto the incident is what lets the reset preflight distinguish an
 	// impossible device action from one still waiting for evidence.
-	if vendor := types.AcceleratorVendor(sig.Evidence["vendor"]); vendor.Valid() {
+	if vendor := sig.Vendor(); vendor.Valid() {
 		inc.Vendor = vendor
 	}
 	if engine := c.runtimeConfig(ctx).Engine; engine != nil {
@@ -677,8 +742,10 @@ func (c *Controller) openIncidentTx(ctx context.Context, tx store.Tx, sig types.
 	return inc, nil
 }
 
-func (c *Controller) afterSignalCommitted(ctx context.Context, sig types.Signal, opened *types.Incident) error {
+func (c *Controller) afterSignalCommitted(ctx context.Context, sig types.Signal, outcome ingestOutcome) error {
 	metrics.SignalsTotal.WithLabelValues(string(sig.Source), string(sig.Class)).Inc()
+	c.rekeyGateAfterPromotion(outcome)
+	opened := outcome.opened
 	if opened == nil {
 		return nil
 	}
@@ -687,6 +754,48 @@ func (c *Controller) afterSignalCommitted(ctx context.Context, sig types.Signal,
 		Kind: notify.EventOpened, Incident: opened,
 		Message: fmt.Sprintf("incident opened: %s on %s (playbook: %s)", opened.Class, opened.Target.Node, orNone(opened.Playbook)),
 	})
+}
+
+// rekeyGateAfterPromotion moves a promoted incident's remediation reservation
+// in the safety gate from the target it was admitted under to the one it now
+// has. It runs only after the promotion has COMMITTED, because the gate's
+// refcounts are a projection of the durable incident rows.
+//
+// It is needed because the gate keys a reservation by target, and an
+// unattributed incident's key is the bare node name while an attributed one's
+// is node/GPU-UUID (internal/safety.targetKey). An incident that had already
+// reached its first destructive step held a slot under the node key; after the
+// promotion every later lookup — including the release when the incident
+// terminalizes — would use the new key, find nothing, and leave the node
+// counted as remediating forever. That slot is a unit of
+// MaxConcurrentRemediations, so the leak is permanent fleet-wide capacity loss
+// that no incident is visibly responsible for.
+//
+// The order is occupy-then-release on purpose. The overlap over-counts this
+// target for the duration of two map operations, which can only ever ADMIT
+// LESS; releasing first would open a window in which the cap admits a
+// remediation the fleet is not entitled to.
+//
+// The step-scoped reservations are deliberately untouched. A step already in
+// flight captured its own target snapshot when it was admitted and releases
+// under exactly that key, so it stays balanced with the Allow that reserved
+// it; re-keying underneath a running goroutine is what would unbalance it.
+func (c *Controller) rekeyGateAfterPromotion(outcome ingestOutcome) {
+	if c.gate == nil || outcome.promoted == nil || outcome.promotedFrom == nil {
+		return
+	}
+	if !outcome.promoted.RemediationSlotHeld {
+		// Nothing was ever reserved for this incident, so there is nothing to
+		// move. This is the common case: the precise signal normally arrives
+		// seconds after the fault, long before the ladder admits a step.
+		return
+	}
+	c.gate.OccupyRemediation(outcome.promoted.Target)
+	c.gate.ReleaseRemediation(*outcome.promotedFrom)
+	c.noteRemediationSlot(outcome.promoted.ID, outcome.promoted.Target)
+	c.log.Info("incident device identified mid-remediation; moved its safety-gate slot",
+		"incident", outcome.promoted.ID, "pci", outcome.promoted.Target.PCIAddr,
+		"gpu_uuid", outcome.promoted.Target.GPUUUID)
 }
 
 // notify sends an event, tolerating an absent notifier.
@@ -710,7 +819,10 @@ func (c *Controller) notify(ctx context.Context, event notify.NotifyEvent) error
 // incidentID is deterministic enough for uniqueness and readable in Slack:
 // <class>-<node>-<hash8>.
 func incidentID(sig types.Signal, t time.Time) string {
-	h := sha256.Sum256([]byte(sig.Target.Node + sig.Target.GPUUUID + string(sig.Class) + t.Format(time.RFC3339Nano)))
+	// The bus address is part of the hashed identity because two DIFFERENT
+	// unattributed GPUs on one node now keep two incidents, and they share
+	// everything else that goes into this hash except the instant they opened.
+	h := sha256.Sum256([]byte(sig.Target.Node + sig.Target.GPUUUID + sig.Target.PCIAddr + string(sig.Class) + t.Format(time.RFC3339Nano)))
 	return fmt.Sprintf("%s-%s-%s", sig.Class, sig.Target.Node, hex.EncodeToString(h[:4]))
 }
 

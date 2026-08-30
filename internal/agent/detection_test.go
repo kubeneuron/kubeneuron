@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -395,5 +397,102 @@ func TestRealSMIDriverGetsSecondSource(t *testing.T) {
 	}
 	if a.health.NodeName != "gpu-node-1" {
 		t.Fatalf("second source node = %q, want gpu-node-1", a.health.NodeName)
+	}
+}
+
+// TestPreciseObservationForAKnownPCIAddressIsDeliveredNotDeduplicated is the
+// regression test for the dedup window eating the one observation that could
+// name the device.
+//
+// A kernel fault knocks a GPU off the bus. nvidia-smi no longer lists it, so
+// the kmsg path can only report the PCI address: index -1, empty UUID. The
+// controller opens an incident it can address only by that address. Moments
+// later the vendor poll resolves the SAME address to a real UUID.
+//
+// The window used to suppress that second observation as a duplicate, and the
+// cost of doing so was not a missing log line. An empty GPU UUID is read
+// downstream as a PERMANENT infeasibility (errResetTargetUnattributed), so the
+// playbook cordons the node, drains every tenant job off it, reaches the reset
+// rung, refuses it because the target is unattributed, and parks the node for a
+// human — although the exact device had been identified seconds after the
+// fault. The precise observation must reach the controller, which collapses the
+// two into one incident by PROMOTING that incident onto this UUID.
+func TestPreciseObservationForAKnownPCIAddressIsDeliveredNotDeduplicated(t *testing.T) {
+	var mu sync.Mutex
+	var got []types.AgentEvent
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveRegistrationCapability(w, r) {
+			return
+		}
+		if r.URL.Path == "/api/v1/events" && r.Method == http.MethodPost {
+			var ev types.AgentEvent
+			if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+				t.Errorf("decoding posted event: %v", err)
+			}
+			mu.Lock()
+			got = append(got, ev)
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer controller.Close()
+
+	clock := &testClock{now: time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)}
+	a := newTestAgent(t, controller.URL, clock, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+
+	// kmsg sees XID 79 and cannot resolve the vanished device.
+	a.handleDetection(ctx, types.AgentEvent{
+		Node: "gpu-node-1", GPUIndex: -1, GPUUUID: "", PCIAddr: "0000:3b:00", XID: 79, Raw: "kmsg",
+	}, "kmsg")
+	// Two seconds later the vendor poll names the device at that same address.
+	// It is deliberately spelled the way nvidia-smi prints it, which is not the
+	// way the kernel printed it: the two must still be recognized as one slot.
+	clock.Advance(2 * time.Second)
+	a.handleDetection(ctx, types.AgentEvent{
+		Node: "gpu-node-1", GPUIndex: 3, GPUUUID: "GPU-abc", PCIAddr: "00000000:3B:00.0", XID: 79, Raw: "DCGM",
+	}, "gpuhealth")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("the controller received %d events, want 2: the observation carrying GPU-abc was suppressed as a "+
+			"duplicate of the PCI-only kernel fault, so the incident stays unattributed and the node is cordoned, "+
+			"drained and then parked for a human although the exact device was identified two seconds later", len(got))
+	}
+	if got[1].GPUUUID != "GPU-abc" {
+		t.Fatalf("the second delivered event names GPU %q, want GPU-abc: the promotion the controller needs must "+
+			"carry the resolved device identity", got[1].GPUUUID)
+	}
+	if got[1].PCIAddr == "" {
+		t.Fatal("the promoting event carries no PCI address: without it the controller cannot tie the precise " +
+			"observation to the incident already open for that bus address, and it opens a second incident instead")
+	}
+}
+
+// TestRepeatedUnattributedFaultAtOneAddressStaysOneDetection guards the flip
+// side: relaxing the window for promotions must not turn a persistent
+// unattributed fault into an event storm. Two spellings of the SAME address
+// are one device and one detection.
+func TestRepeatedUnattributedFaultAtOneAddressStaysOneDetection(t *testing.T) {
+	var posted int64
+	controller := eventCountingController(t, &posted)
+	defer controller.Close()
+
+	clock := &testClock{now: time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)}
+	a := newTestAgent(t, controller.URL, clock, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+
+	base := types.AgentEvent{Node: "gpu-node-1", GPUIndex: -1, GPUUUID: "", XID: 79}
+	first := base
+	first.PCIAddr = "0000:3b:00"
+	second := base
+	second.PCIAddr = "00000000:3B:00.0"
+	a.handleDetection(ctx, first, "kmsg")
+	a.handleDetection(ctx, second, "gpuhealth")
+	if got := atomic.LoadInt64(&posted); got != 1 {
+		t.Fatalf("posted = %d, want 1: %q and %q are the same physical slot, and keying them separately posts one "+
+			"fault twice and opens two incidents that each cordon the same node",
+			got, first.PCIAddr, second.PCIAddr)
 	}
 }

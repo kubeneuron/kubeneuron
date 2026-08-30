@@ -167,6 +167,75 @@ capture_operator_logs() {
 	note "captured and checked operator logs before $phase"
 }
 
+# wait_deployment_stopped waits for a Deployment scaled to zero to have no Pod
+# left. NEVER use "kubectl rollout status" for that: it cannot express it.
+#
+# kubectl's Deployment status viewer asks three questions once the Deployment
+# controller has observed the generation — is UpdatedReplicas still short of
+# spec.replicas, are there old replicas pending termination, are updated
+# replicas unavailable. At spec.replicas=0 all three are trivially satisfied by
+# the state that exists one instant after the scale (0 < 0 is false, 1 > 1 is
+# false, 1 < 1 is false), so it prints "successfully rolled out" while the Pod
+# is still running and still serving. Nothing in it waits for Pods to go away.
+#
+# That cost a whole CI run. The registration-outage phase scaled the operator
+# to zero, rollout status returned immediately, and the still-live operator
+# reconciled the very next statement — the controller's own scale to zero —
+# straight back to one replica. The controller never went down, the agents
+# never lost their acknowledgment, and the run died 240s later in "timed out
+# waiting for agent registration readiness to become stale" with the controller
+# Deployment sitting at 1/1 and the root reporting the operator's own
+# "controller deployment is not fully available at its current generation".
+#
+# Poll the Pods, not the replica counts. A Pod object survives until the kubelet
+# confirms the container is gone, which is exactly "the process has stopped". A
+# ReplicaSet's status.replicas is not that: it stops counting a Pod the moment
+# the Pod is marked for deletion, seconds before the process exits.
+wait_deployment_stopped() {
+	local namespace=$1
+	local deployment=$2
+	local selector deadline remaining
+	selector=$("$KUBECTL_BIN" -n "$namespace" get deployment "$deployment" \
+		-o go-template='{{range $k, $v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}')
+	selector=${selector%,}
+	[[ -n $selector ]] || die "deployment $namespace/$deployment has no matchLabels selector"
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		remaining=$("$KUBECTL_BIN" -n "$namespace" get pods \
+			--selector "$selector" -o name 2>/dev/null | wc -l || true)
+		((remaining == 0)) && return 0
+		sleep 2
+	done
+	"$KUBECTL_BIN" -n "$namespace" get pods --selector "$selector" -o wide >&2 || true
+	die "timed out waiting for deployment $namespace/$deployment to stop every Pod"
+}
+
+# wait_deployment_ready waits for a Deployment to actually be serving, and is
+# the mirror of wait_deployment_stopped. "kubectl rollout status" cannot do this
+# either when the replica count is not yet what you expect: at spec.replicas=0
+# every condition it checks is trivially satisfied, so it reports success on a
+# Deployment that has no Pods at all.
+#
+# That matters wherever something ELSE restores the replica count — the operator
+# owns the controller's, so right after the operator comes back the controller
+# is still at zero and rollout status waves it through. Poll readyReplicas: it
+# cannot be satisfied by an absence.
+wait_deployment_ready() {
+	local namespace=$1
+	local deployment=$2
+	local want=${3:-1}
+	local deadline=$((SECONDS + TIMEOUT_SECONDS))
+	local ready
+	while ((SECONDS < deadline)); do
+		ready=$("$KUBECTL_BIN" -n "$namespace" get deployment "$deployment" \
+			-o jsonpath='{.status.readyReplicas}' 2>/dev/null)
+		[[ -n $ready ]] && ((ready >= want)) && return 0
+		sleep 2
+	done
+	"$KUBECTL_BIN" -n "$namespace" get deployment "$deployment" -o wide >&2 || true
+	die "timed out waiting for deployment $namespace/$deployment to have $want ready replica(s)"
+}
+
 scale_operator() {
 	local replicas=$1
 	local phase=${2:-}
@@ -176,11 +245,15 @@ scale_operator() {
 	fi
 	"$KUBECTL_BIN" -n "$OPERATOR_NAMESPACE" scale \
 		deployment "$OPERATOR_DEPLOYMENT" --replicas="$replicas" >/dev/null
-	"$KUBECTL_BIN" -n "$OPERATOR_NAMESPACE" rollout status \
-		deployment "$OPERATOR_DEPLOYMENT" --timeout="${TIMEOUT_SECONDS}s" >/dev/null
 	if ((replicas == 0)); then
+		# Every caller scales the operator down in order to mutate something
+		# the operator owns; one surviving reconcile silently undoes it. Wait
+		# for the process, not for rollout status.
+		wait_deployment_stopped "$OPERATOR_NAMESPACE" "$OPERATOR_DEPLOYMENT"
 		operator_scaled_down=1
 	else
+		"$KUBECTL_BIN" -n "$OPERATOR_NAMESPACE" rollout status \
+			deployment "$OPERATOR_DEPLOYMENT" --timeout="${TIMEOUT_SECONDS}s" >/dev/null
 		operator_scaled_down=0
 	fi
 }
@@ -1218,6 +1291,16 @@ exercise_backup_restore() {
 	local pf_pid='' port='' snapshot="$work_dir/kubeneuron-backup.db"
 	local before after helper=kubeneuron-restore-helper
 
+	# Create the log BEFORE forking, because the wait loop below reads it with
+	# a command substitution and this script runs under `set -e`.
+	#
+	# `port=$(sed ... "$pf_log")` propagates sed's exit status, so the first
+	# iteration killed the whole run whenever the parent got to it before the
+	# forked child had created the file — a plain fork race, and the loop that
+	# exists to tolerate the file not being ready yet was the thing that could
+	# not tolerate it. It failed exactly once, printed one sed error, and the
+	# run died with no `integration FAIL:` line to say why.
+	: >"$pf_log"
 	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
 		"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
 	pf_pid=$!
@@ -1240,9 +1323,25 @@ exercise_backup_restore() {
 	kill "$pf_pid" >/dev/null 2>&1 || true
 	wait "$pf_pid" >/dev/null 2>&1 || true
 
-	# Follow docs/operations.md exactly: stop, mount, wipe, restore, start.
+	# Follow docs/operations.md exactly: stop the operator, stop the controller,
+	# mount, wipe, restore, start.
+	#
+	# Stopping the OPERATOR is step zero and is not optional. It owns the
+	# controller Deployment's replica count and reconciles a manual scale
+	# straight back to one, so without this the controller returns within a
+	# reconcile and the wipe below replaces the database file underneath a
+	# running writer — corrupting the database the procedure exists to restore.
+	#
+	# This phase ran for months without it and passed, because it verified the
+	# stop with `rollout status`, which reports a scale-to-zero complete the
+	# instant after the scale. The suite was proving a procedure it never
+	# actually performed; waiting for the Pod is what exposed it.
+	scale_operator 0 backup-restore
 	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" scale "deploy/${ROOT_NAME}-controller" --replicas=0 >/dev/null
-	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status "deploy/${ROOT_NAME}-controller" --timeout=120s >/dev/null
+	# The wipe below deletes the SQLite file out from under the controller, so
+	# "stopped" has to mean the process is gone, not what rollout status calls
+	# a finished scale-to-zero. See wait_deployment_stopped.
+	wait_deployment_stopped "$TARGET_NAMESPACE" "${ROOT_NAME}-controller"
 
 	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete pod "$helper" --ignore-not-found --wait=true >/dev/null
 	sed "s/claimName: kubeneuron-controller-state/claimName: ${ROOT_NAME}-controller-state/" \
@@ -1258,11 +1357,18 @@ exercise_backup_restore() {
 		sh -c 'test -s /state/kubeneuron.db' || die "restored database is missing or empty"
 	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete pod "$helper" --wait=true >/dev/null
 
-	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" scale "deploy/${ROOT_NAME}-controller" --replicas=1 >/dev/null
-	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status "deploy/${ROOT_NAME}-controller" --timeout=300s >/dev/null
+	# Restarting the operator is what restores the replica count, exactly as the
+	# documented procedure says; scaling the Deployment by hand would be undone
+	# by the next reconcile anyway.
+	scale_operator 1
+	# NOT rollout status: the controller is still at zero replicas until the
+	# operator acquires its lease and reconciles, and rollout status reports a
+	# Deployment with no Pods as successfully rolled out.
+	wait_deployment_ready "$TARGET_NAMESPACE" "${ROOT_NAME}-controller"
 	assert_runtime_ready
 
 	pf_log="$work_dir/backup-port-forward-2.log"
+	: >"$pf_log" # same fork race as the first port-forward above
 	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
 		"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
 	pf_pid=$!
@@ -1339,6 +1445,7 @@ exercise_real_cordon_and_uncordon() {
 	# and dry_run is stamped on the incident at OPEN, so it stayed dry-run for
 	# life. Wait for the controller to say the mode took effect instead.
 
+	: >"$pf_log" # same fork race as the backup phase's port-forwards
 	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
 		"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
 	pf_pid=$!
@@ -2257,8 +2364,10 @@ note "exercising registration-readiness loss and recovery during controller outa
 scale_operator 0 registration-outage
 "$KUBECTL_BIN" -n "$TARGET_NAMESPACE" scale \
 	deployment "${ROOT_NAME}-controller" --replicas=0 >/dev/null
-"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status \
-	deployment/"${ROOT_NAME}-controller" --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+# The agents only lose their acknowledgment once nothing answers registration,
+# so the outage has to be a real one before the staleness clock can start.
+# rollout status reports a scale-to-zero done while the Pod still serves.
+wait_deployment_stopped "$TARGET_NAMESPACE" "${ROOT_NAME}-controller"
 wait_agent_registration_readiness stale
 wait_agent_log 'controller registration acknowledgment lost'
 

@@ -63,6 +63,7 @@ func (c *Controller) RebuildGateOccupancy(ctx context.Context) error {
 			continue
 		}
 		c.gate.OccupyRemediation(inc.Target)
+		c.noteRemediationSlot(inc.ID, inc.Target)
 		if inc.State == types.StateExecuting {
 			// The previous leader also held this incident's per-step (reboot
 			// class) slot; reserve it too until recovery moves the incident out
@@ -92,6 +93,28 @@ func (c *Controller) RebuildGateOccupancy(ctx context.Context) error {
 // releases the reservation, so the later normal EXECUTING exits are no-ops.
 // The incident's remediation slot is not touched here — it lives until the
 // incident terminalizes (releaseHeldSlot).
+// noteRemediationSlot records the target an incident's remediation slot was
+// reserved under, so the release finds it however stale the caller's copy of
+// the incident is. Called on acquisition and again whenever the identity moves.
+func (c *Controller) noteRemediationSlot(incidentID string, target types.Target) {
+	c.recoveredMu.Lock()
+	c.remediationSlots[incidentID] = target
+	c.recoveredMu.Unlock()
+}
+
+// takeRemediationSlotTarget returns the recorded target and forgets it, falling
+// back to the caller's own when nothing was recorded — a slot taken before this
+// process started, or by a path that predates the bookkeeping.
+func (c *Controller) takeRemediationSlotTarget(incidentID string, fallback types.Target) types.Target {
+	c.recoveredMu.Lock()
+	defer c.recoveredMu.Unlock()
+	if target, ok := c.remediationSlots[incidentID]; ok {
+		delete(c.remediationSlots, incidentID)
+		return target
+	}
+	return fallback
+}
+
 func (c *Controller) releaseRecoveredSlot(incidentID string) {
 	c.recoveredMu.Lock()
 	slot, ok := c.recoveredSlots[incidentID]

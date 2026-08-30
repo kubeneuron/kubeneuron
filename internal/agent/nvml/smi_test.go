@@ -322,19 +322,6 @@ func TestSMIInitFailsWithoutGPUs(t *testing.T) {
 	}
 }
 
-func TestNormalizePCI(t *testing.T) {
-	for in, want := range map[string]string{
-		"00000000:3B:00.0": "0000:3b:00",
-		"0000:3b:00":       "0000:3b:00",
-		"3b:00":            "0000:3b:00",
-		"0001:AF:00.0":     "0001:af:00",
-	} {
-		if got := NormalizePCI(in); got != want {
-			t.Errorf("NormalizePCI(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestSMIEnsureIdle(t *testing.T) {
 	// No processes: idle.
 	idle, _ := newTestSMI(nil)

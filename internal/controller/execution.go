@@ -135,6 +135,9 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 	}
 	if !alreadyHeld {
 		inc.RemediationSlotHeld = true // persisted by the transition below
+		// Remember the key, not just that we hold one: the release may run from
+		// a goroutine holding this incident as it looked before a promotion.
+		c.noteRemediationSlot(inc.ID, inc.Target)
 	}
 	// The audit records what this step WILL do — the decision pinned above,
 	// not the flag stamped when the incident opened. A ladder that simulates
@@ -378,15 +381,12 @@ func (c *Controller) executePlatformStep(ctx context.Context, inc *types.Inciden
 	reason := cordonReason(inc)
 	switch op {
 	case "cordon":
-		if err := c.platform.Cordon(ctx, node, reason); err != nil {
+		if err := c.cordonForIncident(ctx, inc, node, reason); err != nil {
 			return nil, err
 		}
 		return okResult(inc, "cordoned "+node), nil
 	case "uncordon":
-		if err := c.platform.Uncordon(ctx, node); err != nil {
-			return nil, err
-		}
-		return okResult(inc, "uncordoned "+node), nil
+		return c.uncordonForIncident(ctx, inc, node, reason)
 	case "drain":
 		err := c.platform.Drain(ctx, node, platform.DrainOptions{
 			// The POD's own grace period, not ours.
@@ -469,6 +469,63 @@ func (c *Controller) executePlatformStep(ctx context.Context, inc *types.Inciden
 	default:
 		return nil, fmt.Errorf("unknown platform action %q", op)
 	}
+}
+
+// cordonForIncident takes this incident's own hold on the node.
+//
+// A node has many GPUs and an incident is per (target, class), so two
+// remediations can be working two GPUs of one machine at once. Platforms that
+// can count holders take the incident ID and add it to the node's owner set;
+// the rest keep the single-owner behaviour, which is all they ever had and is
+// correct for one remediation at a time.
+func (c *Controller) cordonForIncident(ctx context.Context, inc *types.Incident, node, reason string) error {
+	// No capability check and no fallback. Counting holders is part of
+	// platform.Platform now, so a platform that cannot do it does not compile;
+	// the type assertion this used to make was a silent path back to the
+	// single-owner behaviour whose P0 the counting exists to prevent.
+	return c.platform.CordonForOwner(ctx, node, inc.ID, reason)
+}
+
+// uncordonForIncident drops this incident's hold and returns the node to service
+// only if no other remediation still holds it.
+//
+// The unguarded release is what this replaces, and it was a P0: two incidents on
+// two GPUs of one node both cordoned it, and whichever finished first uncordoned
+// the machine outright. The scheduler then put tenant work onto a node whose
+// other GPU was about to be reset, and the restore ran from whatever snapshot
+// survived the second cordon — which could clear a human's own `kubectl cordon`
+// and their karpenter.sh/do-not-disrupt pin.
+//
+// A step that hands its hold back while somebody else keeps the node cordoned
+// has done its whole job, so this succeeds and says what happened rather than
+// failing a playbook that has nothing left to do.
+func (c *Controller) uncordonForIncident(ctx context.Context, inc *types.Incident, node, reason string) (*types.ActionResult, error) {
+	// Both names this incident may be recorded under: its own ID, and — for a
+	// cordon it placed before the upgrade that introduced owner sets — the reason
+	// that build wrote instead of an owner.
+	//
+	// No fallback to the unguarded Uncordon: releasing a node without knowing
+	// who else holds it is the P0 this replaced, and counting holders is now
+	// part of platform.Platform rather than a capability a platform may lack.
+	released, remaining, err := c.platform.ReleaseCordonOwners(ctx, node,
+		[]string{inc.ID, platform.LegacyCordonOwner(reason)})
+	if err != nil {
+		return nil, err
+	}
+	if released {
+		return okResult(inc, "uncordoned "+node), nil
+	}
+	if remaining == 0 {
+		// Nothing of this incident's was on the node and nobody else holds it
+		// either: a replayed step, or a cordon a human or the janitor has since
+		// taken off. There is nothing to do and nothing to fail.
+		return okResult(inc, "no cordon of this incident's left to release on "+node), nil
+	}
+	c.log.Info("released this incident's hold on a node other remediations still hold",
+		"incident", inc.ID, "node", node, "remaining_holders", remaining)
+	return okResult(inc, fmt.Sprintf(
+		"released this incident's hold on %s; %d other remediation(s) still hold it, so it stays cordoned",
+		node, remaining)), nil
 }
 
 func (c *Controller) executeAgentStep(ctx context.Context, inc *types.Incident, op string, step *playbook.Step) (*types.ActionResult, error) {

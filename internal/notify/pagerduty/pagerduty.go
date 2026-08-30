@@ -110,6 +110,12 @@ func (n *Notifier) eventPayload(inc *types.Incident, severity, summary string) *
 			if inc.Target.GPUUUID != "" {
 				return inc.Target.GPUUUID
 			}
+			// A card knocked off the bus has no UUID to report, but it does
+			// have a slot. "gpu" tells the person woken up nothing; the bus
+			// address tells them which card to look at.
+			if inc.Target.PCIAddr != "" {
+				return "pci:" + inc.Target.PCIAddr
+			}
 			return "gpu"
 		}(),
 		CustomDetails: map[string]any{

@@ -812,24 +812,47 @@ func (a *Agent) duplicateDetection(ev types.AgentEvent, now time.Time, singleGPU
 			a.seenWithinLocked(classAnchorKey(ev, otherRepresentationTag(ev), class), now) {
 			return true
 		}
-		// An attributed observation must also collapse against a PRIOR unattributed
-		// observation of the SAME fault (the XID-79 case: the device falls off the
-		// bus, so the fast kmsg path records index -1/uuid "" while the later DCGM
-		// poll resolves index|uuid|79).
+		// Everything below this point exists to collapse this ATTRIBUTED
+		// observation into a PRIOR UNATTRIBUTED one of the same fault (the XID-79
+		// case: the device falls off the bus, so the fast kmsg path records index
+		// -1/uuid "" while the later DCGM poll resolves index|uuid|79). Both keys
+		// are only ever WRITTEN by unattributed events, so a hit here always means
+		// "the vague observation went first".
 		//
-		// When this attributed event carries a PCI address, the unattributed
-		// fallback key folds in that PCI address, which names ONE physical device —
-		// so collapsing against it cannot suppress a neighbor's fault, on any node.
-		if ev.PCIAddr != "" && a.seenWithinLocked(pciFaultKey(ev), now) {
-			return true
+		// That collapse is not free, and for a long time this window paid for it
+		// with the one thing the fleet could least afford to lose. Suppressing the
+		// attributed observation here means the controller never learns the device's
+		// UUID: the incident it already opened stays addressed by PCI address alone,
+		// and an empty GPU UUID is read downstream as a PERMANENT infeasibility. The
+		// playbook cordons the node, drains every tenant job off it, reaches the
+		// reset rung, refuses it, and parks the node for a human — although the
+		// exact device had been identified two seconds after the fault.
+		//
+		// So when this event carries a PCI address it is NOT a duplicate, it is a
+		// promotion, and it must be delivered. The controller matches it to the
+		// open incident on that same address and promotes the incident onto this
+		// UUID, which collapses the two observations into one incident just as this
+		// window used to — only without throwing the device identity away. The
+		// extra traffic is exactly one event per device per fault per window: the
+		// attributed observation's own precise key is remembered on delivery, so a
+		// repeat of it is still suppressed above.
+		if ev.PCIAddr != "" {
+			return false
 		}
-		// The coarser node+XID anchor carries no device identity. It is the only
-		// bridge when the attributed observation has no PCI address (the DCGM poll
-		// resolves an index/UUID but not the bus address), but node+XID cannot tell
-		// two GPUs apart: on a multi-GPU node GPU1's unattributed XID 79 would
-		// suppress GPU0's later ATTRIBUTED XID 79 and lose GPU0's fault entirely.
-		// So restrict it to a single-GPU node, where node+XID is unambiguous. On a
-		// multi-GPU node a duplicate incident (safe) is preferred over a lost fault.
+		// No bus address on this event, so nothing downstream can tie it to the
+		// earlier observation and no promotion is possible — the choice here is
+		// only between one incident and two. The coarse node+XID anchor cannot
+		// tell two GPUs apart: on a multi-GPU node GPU1's unattributed XID 79
+		// would suppress GPU0's later ATTRIBUTED XID 79 and lose GPU0's fault
+		// entirely. So it is restricted to a single-GPU node, where node+XID is
+		// unambiguous. On a multi-GPU node a duplicate incident (safe) is
+		// preferred over a lost fault.
+		//
+		// KNOWN RESIDUAL COST: on a single-GPU node this still trades the UUID for
+		// a single incident, so an attributed observation that arrives without a
+		// bus address cannot promote. Closing it needs the device address on the
+		// attributed side too (the vendor inventory knows it), which is a change
+		// to the driver inventory contract rather than to this window.
 		if singleGPU && a.seenWithinLocked(nodeFaultKey(ev), now) {
 			return true
 		}
@@ -906,8 +929,12 @@ func detectionKey(ev types.AgentEvent) string {
 // one physical device, an attributed observation that carries a PCI address can
 // safely collapse against a prior unattributed one under this key without any
 // risk of suppressing a different GPU's fault — unlike the coarse node+XID key.
+// The address is normalized through the one shared rule rather than compared
+// raw: kmsg prints "0000:c3:00.0" and a vendor poll may report "00000000:C3:00.0"
+// for the same slot, and two spellings of one device would key two detections,
+// so the fault would be posted twice and the recurrence guard would never fire.
 func pciFaultKey(ev types.AgentEvent) string {
-	return fmt.Sprintf("node|%s|%s|%s", ev.Node, ev.PCIAddr, nativeToken(ev))
+	return fmt.Sprintf("node|%s|%s|%s", ev.Node, types.NormalizePCIAddress(ev.PCIAddr), nativeToken(ev))
 }
 
 // nodeFaultKey is the coarse node+fault fallback identity, used both when a PCI

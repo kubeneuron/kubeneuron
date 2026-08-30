@@ -126,6 +126,27 @@ func XIDTable() []XIDInfo {
 	return out
 }
 
+// TargetFromAgentEvent is the ONE place an agent event becomes an incident
+// target. Both encodings (a genuine XID and a neutral fault envelope) build
+// their signal through it, so neither can quietly grow or drop a component of
+// the device's identity while the other keeps the old shape — which is exactly
+// how the vendor key came to exist on one of these builders and not the other.
+//
+// The PCI address is normalized here rather than trusted as it arrived. The
+// event comes off the wire from an agent that may be a different build, and
+// the address is now matched on in SQL: an un-normalized "00000000:3B:00.0"
+// would not equal the "0000:3b:00" already stored on the open incident for the
+// very same GPU, so the incident would never be promoted onto the device the
+// kernel had just named.
+func TargetFromAgentEvent(ev types.AgentEvent) types.Target {
+	return types.Target{
+		Node:     ev.Node,
+		GPUUUID:  ev.GPUUUID,
+		GPUIndex: ev.GPUIndex,
+		PCIAddr:  types.NormalizePCIAddress(ev.PCIAddr),
+	}
+}
+
 // SignalFromAgentEvent converts an agent event into a Signal, or returns
 // ok=false when it is not actionable (it should still be counted). A
 // neutral-envelope event (types.FaultSignal) classifies through the fault
@@ -153,11 +174,7 @@ func SignalFromAgentEvent(ev types.AgentEvent) (types.Signal, bool) {
 // true with and without a signal-mapping override, i.e. always.
 func signalFromXID(ev types.AgentEvent, info XIDInfo) types.Signal {
 	return types.Signal{
-		Target: types.Target{
-			Node:     ev.Node,
-			GPUUUID:  ev.GPUUUID,
-			GPUIndex: ev.GPUIndex,
-		},
+		Target:   TargetFromAgentEvent(ev),
 		Class:    info.Class,
 		Severity: info.Severity,
 		Source:   types.SourceAgentEvent,

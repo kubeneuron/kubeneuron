@@ -319,9 +319,33 @@ func isRebootClass(a types.ActionType) bool {
 	return actionreg.IsRebootClass(a)
 }
 
+// targetKey is the identity the gate counts, refcounts and cools down by. Two
+// incidents about the SAME target deliberately share one slot — the cap is a
+// cap on targets in remediation, not on incidents — so this function must not
+// map two DIFFERENT devices onto one key.
+//
+// It used to, and the day two unattributed GPUs on one node stopped collapsing
+// into a single incident, that started to matter. With no UUID the key was the
+// bare node, so a PCIe switch failure — eight cards falling off one node's bus,
+// the classic correlated fault — produced eight incidents that all shared one
+// key. Each was then admitted by the refcount as though it were another action
+// on the same device, and MaxConcurrentRemediations, which the operator sets
+// precisely to bound this, never fired. A correlated multi-device failure is
+// exactly when a blast-radius cap most needs to hold.
+//
+// The bus address is the device identity available before a UUID is, which is
+// the whole reason it is on the Target. Using it here also makes the release
+// after a promotion precise: releasing the old key used to decrement a count
+// siblings were sharing.
+//
+// A target with neither a UUID nor an address is node-scoped, and still keys to
+// the node alone — unchanged.
 func targetKey(t types.Target) string {
 	if t.IsGPU() {
 		return t.Node + "/" + t.GPUUUID
+	}
+	if t.PCIAddr != "" {
+		return t.Node + "/pci:" + t.PCIAddr
 	}
 	return t.Node
 }

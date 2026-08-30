@@ -152,11 +152,20 @@ func TestDetectionSourceLabelsDistinguishTheVendorPaths(t *testing.T) {
 	}
 }
 
-// TestAMDKernelAndPollFaultForOneDeviceDeduplicate closes the loop between the
-// two new sources: the kernel line and the amd-smi poll observe ONE physical
-// fault on one device, and the existing dedup must collapse them into one
-// incident exactly as it does for NVIDIA's two sources.
-func TestAMDKernelAndPollFaultForOneDeviceDeduplicate(t *testing.T) {
+// TestAMDKernelAndPollFaultForOneDeviceDeliverTheAttributedObservation closes
+// the loop between the two new sources: the kernel line and the amd-smi poll
+// observe ONE physical fault on one device, and that must end as ONE incident —
+// but the collapse belongs to the controller, which can promote the incident
+// onto the resolved device, not to this window, which can only discard.
+//
+// This test previously asserted that the agent suppressed the amd-smi
+// observation. That is the defect: the kernel line names the device only by
+// BDF, so the incident it opens has an empty GPU UUID, and an empty GPU UUID is
+// read downstream as a permanent infeasibility. Dropping the one observation
+// that carried the UUID meant the node was cordoned, drained of every tenant
+// job, refused its reset and parked for a human — for a device amd-smi had
+// named seconds earlier.
+func TestAMDKernelAndPollFaultForOneDeviceDeliverTheAttributedObservation(t *testing.T) {
 	var posted int64
 	controller := eventCountingController(t, &posted)
 	defer controller.Close()
@@ -171,12 +180,24 @@ func TestAMDKernelAndPollFaultForOneDeviceDeduplicate(t *testing.T) {
 	a.handleKernelEvent(ctx, kernel)
 	// The amd-smi poll sees the same ECC counter move seconds later and CAN
 	// attribute it, because amd-smi reports the UUID and the same BDF.
-	a.handleDetection(ctx, types.AgentEvent{
+	precise := types.AgentEvent{
 		Node: "gpu-node-1", GPUIndex: 0, GPUUUID: "amd-gpu-0", PCIAddr: "0000:c3:00.0",
 		Fault: &types.FaultSignal{Vendor: "amd", Source: "amd-smi", Code: "ecc-uncorrectable"},
-	}, "amdhealth")
+	}
+	a.handleDetection(ctx, precise, "amdhealth")
 
-	if got := atomic.LoadInt64(&posted); got != 1 {
-		t.Fatalf("posted = %d, want 1: one physical AMD fault seen by two sources is one incident", got)
+	if got := atomic.LoadInt64(&posted); got != 2 {
+		t.Fatalf("posted = %d, want 2: the amd-smi observation carrying the device UUID was suppressed as a "+
+			"duplicate of the kernel line that could only name a BDF, so the incident stays unattributed and the "+
+			"node is cordoned, drained and parked for a human although amd-smi named the exact device seconds later", got)
+	}
+
+	// The promotion is delivered ONCE. A repeat of the attributed observation
+	// inside the window is a genuine duplicate and must still be suppressed, or
+	// every amd-smi poll re-posts the same fault for as long as it persists.
+	a.handleDetection(ctx, precise, "amdhealth")
+	if got := atomic.LoadInt64(&posted); got != 2 {
+		t.Fatalf("posted = %d, want 2: a repeat of the SAME attributed observation is a duplicate and must stay "+
+			"suppressed; letting the promotion re-post on every poll turns a persistent fault into an event storm", got)
 	}
 }

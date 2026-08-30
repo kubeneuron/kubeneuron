@@ -334,3 +334,68 @@ func TestFlapHistorySurvivesRestart(t *testing.T) {
 		t.Fatal("flap history must survive the restart and reach threshold 2")
 	}
 }
+
+// TestTwoUnattributedGPUsOnOneNodeAreTwoTargets is the seam between two changes
+// that were written independently: cordon ownership, and device identity.
+//
+// Two unattributed GPUs on one node used to collapse into ONE incident — that
+// was a defect, and fixing it made this configuration ordinary. But the gate
+// keyed an unattributed target by the bare node name, so the two incidents
+// shared one slot. The cap deliberately counts TARGETS and refcounts incidents
+// against them, so every sibling was waved through as though it were another
+// action on the same device: a PCIe switch failure taking eight cards off one
+// node's bus produced eight concurrent remediations against a cap the operator
+// had set to two, which is precisely the situation the cap exists for.
+func TestTwoUnattributedGPUsOnOneNodeAreTwoTargets(t *testing.T) {
+	g := NewGate(Limits{MaxConcurrentRemediations: 1, MaxConcurrentReboots: 1})
+
+	first := types.Target{Node: "n1", PCIAddr: "0000:3b:00"}
+	sibling := types.Target{Node: "n1", PCIAddr: "0000:86:00"}
+
+	if err := g.Allow(first, types.ActionGPUReset); err != nil {
+		t.Fatalf("the first remediation was refused: %v", err)
+	}
+	if err := g.Allow(sibling, types.ActionGPUReset); err == nil {
+		t.Fatal("a second physical GPU on the same node was admitted under a cap of one; a " +
+			"correlated multi-device failure would run every ladder at once, which is the " +
+			"one case MaxConcurrentRemediations exists to bound")
+	}
+
+	// Freeing the first device must free the slot — the two are independent.
+	g.ReleaseRemediation(first)
+	if err := g.Allow(sibling, types.ActionGPUReset); err != nil {
+		t.Fatalf("the sibling was still refused after the first device finished: %v", err)
+	}
+}
+
+// TestOneTargetStillSharesOneSlot guards the invariant the fix above must not
+// break: two incidents about the SAME device are one target in remediation, and
+// the slot is refcounted so the first to finish does not release it.
+func TestOneTargetStillSharesOneSlot(t *testing.T) {
+	g := NewGate(Limits{MaxConcurrentRemediations: 1, MaxConcurrentReboots: 1})
+	same := types.Target{Node: "n1", PCIAddr: "0000:3b:00"}
+
+	if err := g.Allow(same, types.ActionGPUReset); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if err := g.Allow(same, types.ActionCollectBundle); err != nil {
+		t.Fatalf("a second action on the SAME device must share the slot: %v", err)
+	}
+	g.ReleaseRemediation(same)
+	if err := g.Allow(types.Target{Node: "n2"}, types.ActionGPUReset); err == nil {
+		t.Fatal("the slot was released while one action on the device was still in flight")
+	}
+}
+
+// TestANodeScopedTargetStillKeysToTheNode: a target with neither a UUID nor a
+// bus address is about the whole machine, and must keep sharing the node's slot
+// with anything else about that machine.
+func TestANodeScopedTargetStillKeysToTheNode(t *testing.T) {
+	if got := targetKey(types.Target{Node: "n1"}); got != "n1" {
+		t.Fatalf("node-scoped target keyed as %q, want \"n1\"", got)
+	}
+	if got := targetKey(types.Target{Node: "n1", GPUUUID: "GPU-a", PCIAddr: "0000:3b:00"}); got != "n1/GPU-a" {
+		t.Fatalf("an attributed target keyed as %q; the UUID must win so a promotion moves the "+
+			"slot to a stable key", got)
+	}
+}

@@ -91,6 +91,17 @@ type Policy struct {
 // Match selects signals a policy applies to.
 type Match struct {
 	Class types.ProblemClass `yaml:"class"`
+	// Vendor scopes the policy to one accelerator vendor. Empty matches any,
+	// which is what every policy written before this field did and still does.
+	//
+	// It exists because a problem class is not vendor-specific — "ecc-dbe"
+	// happens on NVIDIA, AMD and Intel alike — while the ladder that answers it
+	// very much is: a GPU reset is an NVIDIA contract, and quiescing the vendor
+	// stack means different things per vendor. Without this, an operator adding
+	// AMD nodes to a fleet could not give them their own ladder; the NVIDIA one
+	// would be selected for their cards and refused at the capability gate,
+	// after the cordon and the drain.
+	Vendor types.AcceleratorVendor `yaml:"vendor,omitempty"`
 }
 
 // Load reads and validates the controller configuration file.

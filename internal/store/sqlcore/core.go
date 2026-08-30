@@ -291,11 +291,12 @@ func (q *Queries) CreateIncident(ctx context.Context, inc *types.Incident) error
 		stateChanged = inc.OpenedAt
 	}
 	_, err := q.db.ExecContext(ctx, `
-		INSERT INTO incidents (id, node, gpu_uuid, gpu_index, class, state, playbook,
+		INSERT INTO incidents (id, node, gpu_uuid, gpu_index, pci_addr, class, state, playbook,
 		                       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
 		                       vendor, opened_at, updated_at, state_changed_at, version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		inc.ID, inc.Target.Node, inc.Target.GPUUUID, inc.Target.GPUIndex,
+		types.NormalizePCIAddress(inc.Target.PCIAddr),
 		string(inc.Class), string(inc.State), inc.Playbook,
 		inc.StepIndex, inc.Attempt, b2i(inc.DryRun), inc.SignalSeen, b2i(inc.RemediationSlotHeld), inc.ApprovalEpoch,
 		string(inc.Vendor), ts(inc.OpenedAt), ts(inc.UpdatedAt), ts(stateChanged), inc.Version)
@@ -348,11 +349,169 @@ func (q *Queries) GetIncident(ctx context.Context, id string) (*types.Incident, 
 	return scanIncident(row)
 }
 
+// openIncidentTail orders and clips every open-incident lookup. More than one
+// row can match the coarsest of them (a node-scoped signal against several
+// unattributed device incidents), and QueryRow would then pick an arbitrary
+// one — so which incident a signal joined could differ between two identical
+// calls. Oldest-first makes it the incident that has been waiting longest.
+const openIncidentTail = ` AND state NOT IN ('RESOLVED','EXPIRED') ORDER BY opened_at LIMIT 1`
+
+// GetOpenIncident finds the non-terminal incident a signal belongs to, or
+// ErrNotFound.
+//
+// The lookup is layered because a device has two possible identities and they
+// do not always arrive together. A signal that carries a GPU UUID is matched
+// on the UUID exactly as it always was; only if that finds nothing does the
+// PCI address get a say. So the attributed path — the common one — is
+// unchanged, and the PCI address can never redirect a signal that already
+// names its device.
+//
+// The second layer is the one that was missing. A kernel fault that knocks a
+// GPU off the bus names it only by PCI address, so its incident is opened
+// unattributed; when the vendor tool resolves that same address to a real UUID
+// seconds later, this returns that unattributed incident as a PROMOTION
+// candidate (see PromoteIncidentTarget) instead of ErrNotFound. Without it the
+// precise signal either opened a second incident or was thrown away, and the
+// original incident stayed unattributed until the ladder had cordoned and
+// drained the node and then refused its reset for want of a UUID.
+//
+// The candidate is restricted to rows with an EMPTY gpu_uuid. A row that
+// already carries a different UUID for this PCI address is a device that was
+// replaced, not the same device seen more precisely, and attaching a new GPU's
+// fault to the old GPU's incident would point every later decision — reset
+// target, holder check, evidence gate — at a device that is no longer there.
 func (q *Queries) GetOpenIncident(ctx context.Context, target types.Target, class types.ProblemClass) (*types.Incident, error) {
-	row := q.db.QueryRowContext(ctx, incidentSelect+`
-		WHERE node=? AND gpu_uuid=? AND class=? AND state NOT IN ('RESOLVED','EXPIRED')`,
-		target.Node, target.GPUUUID, string(class))
-	return scanIncident(row)
+	pci := types.NormalizePCIAddress(target.PCIAddr)
+	if target.GPUUUID != "" {
+		inc, err := scanIncident(q.db.QueryRowContext(ctx, incidentSelect+`
+			WHERE node=? AND gpu_uuid=? AND class=?`+openIncidentTail,
+			target.Node, target.GPUUUID, string(class)))
+		if err != store.ErrNotFound || pci == "" {
+			return inc, err
+		}
+		// No incident for this device's UUID, but this signal names a bus
+		// address: an incident opened for that address before anything could
+		// resolve it is this same physical device, and it is promotable.
+		return scanIncident(q.db.QueryRowContext(ctx, incidentSelect+`
+			WHERE node=? AND gpu_uuid='' AND pci_addr=? AND class=?`+openIncidentTail,
+			target.Node, pci, string(class)))
+	}
+	if pci != "" {
+		// An unattributed signal that names a bus address is matched on that
+		// address, whether or not the incident has since been promoted off it.
+		// Matching it on gpu_uuid='' instead is what merged two distinct
+		// unattributed GPUs of one node into a single incident, and what would
+		// now open a SECOND incident for a device whose incident had just been
+		// promoted.
+		inc, err := scanIncident(q.db.QueryRowContext(ctx, incidentSelect+`
+			WHERE node=? AND pci_addr=? AND class=?`+openIncidentTail,
+			target.Node, pci, string(class)))
+		if err != store.ErrNotFound {
+			return inc, err
+		}
+		// Nothing carries this address. Fall back to an incident that names no
+		// device at all, which is what every row opened before this column
+		// existed looks like: during an upgrade the recurrence of a fault whose
+		// incident is already open must join it rather than open a duplicate
+		// that cordons the same node twice. This is the pre-existing rule, and
+		// it is reached only after the exact address has been ruled out, so it
+		// can never win over a device-addressed incident.
+		return scanIncident(q.db.QueryRowContext(ctx, incidentSelect+`
+			WHERE node=? AND gpu_uuid='' AND pci_addr='' AND class=?`+openIncidentTail,
+			target.Node, string(class)))
+	}
+	// A signal that names neither a UUID nor a bus address is node-scoped
+	// (an alert, a manual trigger), and it must find a node-scoped incident —
+	// one that names no device either.
+	//
+	// Constraining gpu_uuid alone was not that. Every PCI-only incident also
+	// has an empty gpu_uuid, so a node alert joined the oldest same-class
+	// DEVICE incident instead of opening its own: the node's fault then
+	// advanced a ladder aimed at one card and could reset it, while the
+	// node-scoped problem never got an incident at all. Rows written before
+	// the column have pci_addr '', so the upgrade case still matches here.
+	return scanIncident(q.db.QueryRowContext(ctx, incidentSelect+`
+		WHERE node=? AND gpu_uuid='' AND pci_addr='' AND class=?`+openIncidentTail,
+		target.Node, string(class)))
+}
+
+// PromoteIncidentTarget replaces an unattributed incident's device identity
+// with the precise one a later signal carried, in the caller's transaction.
+//
+// This is the write the identity defect needed. An incident opened from a
+// kernel fault can only be addressed by PCI address, and an empty GPU UUID is
+// treated downstream as PERMANENTLY unfixable — the reset preflight refuses it
+// outright, which is the right reading of a UUID that can never arrive, and
+// the wrong outcome entirely when the UUID did arrive two seconds later. By
+// then the playbook has usually cordoned and drained the node, so the cost of
+// dropping the precise signal is a drained machine parked for a human.
+//
+// It is deliberately NOT part of UpdateIncident. Everything else about a
+// target is immutable for the life of an incident, and keeping it that way
+// means the only statement in this store that can move an incident from one
+// device to another is this one, with the guards below attached to it.
+//
+// The guards are the whole point, so they are in the WHERE clause rather than
+// in a preceding read:
+//
+//   - version=? is the same optimistic fence UpdateIncident uses, so a caller
+//     holding a stale snapshot cannot overwrite a row somebody else advanced.
+//   - an empty gpu_uuid makes promotion strictly once. If two precise signals for
+//     one device are ingested concurrently, exactly one UPDATE matches; the
+//     loser sees ErrConflict and retries, finds the now-attributed incident by
+//     UUID on the ordinary path, and simply attaches. Neither can overwrite
+//     the other's identity, and no signal is lost.
+//   - pci_addr=? pins the promotion to the address the caller matched on, so a
+//     concurrent promotion of a DIFFERENT device cannot be silently accepted.
+//   - the terminal-state exclusion keeps a resolved or expired incident from
+//     being re-identified after automation has finished with it.
+//
+// The unique index on (node, gpu_uuid, class) for attributed rows is the last
+// guard, and it is the database's rather than this function's: if an open
+// incident already exists for this UUID and class, the UPDATE fails with a
+// constraint error and the transaction aborts. That is loud and retryable,
+// which is the correct outcome — two open incidents for one device would let
+// two ladders drive the same GPU.
+func (q *Queries) PromoteIncidentTarget(ctx context.Context, inc *types.Incident, to types.Target) error {
+	if to.GPUUUID == "" {
+		return fmt.Errorf("promoting incident %s needs a GPU UUID: an empty one is the state being promoted out of", inc.ID)
+	}
+	if to.Node != inc.Target.Node {
+		return fmt.Errorf("promoting incident %s cannot move it from node %q to node %q", inc.ID, inc.Target.Node, to.Node)
+	}
+	matchedPCI := types.NormalizePCIAddress(inc.Target.PCIAddr)
+	if matchedPCI == "" {
+		return fmt.Errorf("promoting incident %s needs the PCI address it was opened with: without it nothing proves the precise signal names the same device", inc.ID)
+	}
+	now := time.Now()
+	res, err := q.db.ExecContext(ctx, `
+		UPDATE incidents SET gpu_uuid=?, gpu_index=?, updated_at=?, version=version+1
+		WHERE id=? AND version=? AND gpu_uuid='' AND pci_addr=?
+		  AND state NOT IN ('RESOLVED','EXPIRED')`,
+		to.GPUUUID, to.GPUIndex, ts(now), inc.ID, inc.Version, matchedPCI)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		var current int
+		switch err := q.db.QueryRowContext(ctx,
+			`SELECT version FROM incidents WHERE id=?`, inc.ID).Scan(&current); {
+		case err == sql.ErrNoRows:
+			return store.ErrNotFound
+		case err != nil:
+			return err
+		default:
+			// The row is still there but no longer promotable: another writer
+			// advanced its version, filled in the UUID, or terminalized it.
+			// All three are retry-and-re-read, never overwrite.
+			return store.ErrConflict
+		}
+	}
+	inc.Target.GPUUUID = to.GPUUUID
+	inc.Target.GPUIndex = to.GPUIndex
+	inc.UpdatedAt = now
+	inc.Version++
+	return nil
 }
 
 func (q *Queries) ListIncidents(ctx context.Context, f store.IncidentFilter) ([]*types.Incident, error) {
@@ -433,7 +592,7 @@ func (q *Queries) CountIncidentsByState(ctx context.Context) (map[types.Incident
 }
 
 const incidentSelect = `
-	SELECT id, node, gpu_uuid, gpu_index, class, state, playbook,
+	SELECT id, node, gpu_uuid, gpu_index, pci_addr, class, state, playbook,
 	       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
 	       vendor, opened_at, updated_at, state_changed_at, resolved_at, version
 	FROM incidents`
@@ -446,7 +605,7 @@ func scanIncident(r rowScanner) (*types.Incident, error) {
 	var dryRun, slotHeld int
 	var resolved sql.NullString
 	err := r.Scan(&inc.ID, &inc.Target.Node, &inc.Target.GPUUUID, &inc.Target.GPUIndex,
-		&class, &state, &inc.Playbook, &inc.StepIndex, &inc.Attempt, &dryRun,
+		&inc.Target.PCIAddr, &class, &state, &inc.Playbook, &inc.StepIndex, &inc.Attempt, &dryRun,
 		&inc.SignalSeen, &slotHeld, &inc.ApprovalEpoch, &vendor, &opened, &updated, &stateChanged, &resolved, &inc.Version)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
@@ -991,6 +1150,22 @@ func (c *Core) ClaimNextAction(ctx context.Context, node, bootID string, leaseDu
 	now := time.Now()
 	nowNS := now.UnixNano()
 	minimumLeaseNS := int64(leaseDuration)
+	// The lease outlives the action's own deadline by the reporting grace.
+	//
+	// Sized exactly at the deadline, it made a timing-out action's result
+	// unreportable BY CONSTRUCTION: the executor cancels the work at T and
+	// POSTs the reason a moment later, and CompleteClaimedAction requires
+	// lease_expires_at_ns > now. So the only result worth having — why it timed
+	// out, which processes still held the device — was the one guaranteed to be
+	// refused, and the controller saw a generic timeout with no cause. The row
+	// also read as reclaimable, so the action could be dispatched again: for
+	// the shipped 12h WaitIdle rung, another twelve hours of a GPU held out of
+	// service before anything changes.
+	//
+	// The grace is types.AgentResultGrace, the same value the controller waits
+	// beyond the agent's budget, because a controller listening for an answer
+	// the store will reject is worse than one that does not wait at all.
+	resultGraceNS := int64(types.AgentResultGrace)
 
 	// Dead-letter poison actions before claiming. An action that has exhausted
 	// its attempt budget and is provably not executing — pending, or leased with
@@ -1024,7 +1199,7 @@ func (c *Core) ClaimNextAction(ctx context.Context, node, bootID string, leaseDu
 	row := c.db.QueryRowContext(ctx, `
 		UPDATE actions
 		SET state='leased', lease_token=?,
-		    lease_expires_at_ns=? + (CASE WHEN timeout_ns > ? THEN timeout_ns ELSE ? END),
+		    lease_expires_at_ns=? + (CASE WHEN timeout_ns > ? THEN timeout_ns ELSE ? END) + ?,
 		    attempts=attempts+1, executor_boot_id=?,
 		    updated_at=?
 		WHERE id = (
@@ -1051,7 +1226,7 @@ func (c *Core) ClaimNextAction(ctx context.Context, node, bootID string, leaseDu
 		  AND (state='pending' OR (state='leased' AND lease_expires_at_ns <= ?))
 		RETURNING id, node, incident_id, type, params, timeout_ns, state, result,
 		          lease_token, lease_expires_at_ns, attempts, executor_boot_id`,
-		token, nowNS, minimumLeaseNS, minimumLeaseNS, bootID, ts(now),
+		token, nowNS, minimumLeaseNS, minimumLeaseNS, resultGraceNS, bootID, ts(now),
 		node, nowNS, MaxActionAttempts, nowNS, nowNS)
 	return scanAction(row)
 }

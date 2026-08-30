@@ -45,7 +45,7 @@ func TestSetEngineSwapsThePlaybookInUse(t *testing.T) {
 	if _, ok := c.currentEngine().Playbook("old-book"); ok {
 		t.Fatal("the old engine must be fully replaced, not merged")
 	}
-	if _, ok := c.currentEngine().PolicyFor(types.ProblemClass("new-class")); !ok {
+	if _, ok := c.currentEngine().PolicyFor(types.ProblemClass("new-class"), ""); !ok {
 		t.Fatal("the swapped engine's policies must be the ones in force")
 	}
 }

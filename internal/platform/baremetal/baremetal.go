@@ -49,9 +49,17 @@ type Platform struct {
 	mu    sync.RWMutex
 	nodes map[string]types.Node
 	hooks Hooks
-	// cordoned tracks nodes KubeNeuron has cordoned; on bare metal "cordoned"
-	// is KubeNeuron-internal state unless a cordon hook propagates it.
-	cordoned map[string]bool
+	// cordoned maps a node to the set of remediations holding it down. On bare
+	// metal "cordoned" is KubeNeuron-internal state unless a cordon hook
+	// propagates it.
+	//
+	// A SET, not a flag, because a machine has several GPUs and two incidents
+	// can be working two of them at once. With a flag, the first to finish
+	// cleared it and the node went back into service while the other was still
+	// resetting a GPU on it. The unowned Cordon/Uncordon below keep working by
+	// holding one reserved owner, so a caller acting on the node rather than on
+	// behalf of an incident still cannot release somebody else's hold.
+	cordoned map[string]map[string]struct{}
 }
 
 var _ platform.Platform = (*Platform)(nil)
@@ -63,7 +71,7 @@ func New(inventoryPath string, hooks Hooks) (*Platform, error) {
 	p := &Platform{
 		nodes:    map[string]types.Node{},
 		hooks:    hooks,
-		cordoned: map[string]bool{},
+		cordoned: map[string]map[string]struct{}{},
 	}
 	if inventoryPath != "" {
 		data, err := os.ReadFile(inventoryPath)
@@ -138,21 +146,90 @@ func (p *Platform) WatchNodes(ctx context.Context) (<-chan platform.NodeEvent, e
 	return ch, nil
 }
 
+// unownedCordonOwner is the holder recorded for a Cordon that named no owner.
+// It is a real entry in the set, so an unowned cordon cannot be released by an
+// incident's own release and vice versa.
+const unownedCordonOwner = "kubeneuron:unowned"
+
 // Cordon marks the node cordoned (KubeNeuron-internal) and runs the cordon
-// hook when configured.
+// hook when configured. Prefer CordonForOwner; this one holds the node under a
+// single reserved owner.
 func (p *Platform) Cordon(ctx context.Context, node string, reason string) error {
-	p.mu.Lock()
-	p.cordoned[node] = true
-	p.mu.Unlock()
-	return p.runHook(ctx, p.hooks.CordonScript, "cordon", node)
+	return p.CordonForOwner(ctx, node, unownedCordonOwner, reason)
 }
 
-// Uncordon reverses Cordon.
+// Uncordon drops the unowned hold. It does NOT return a node another
+// remediation is still holding — that was the whole defect.
 func (p *Platform) Uncordon(ctx context.Context, node string) error {
+	_, _, err := p.ReleaseCordonOwners(ctx, node, []string{unownedCordonOwner})
+	return err
+}
+
+// CordonForOwner implements platform.Platform. The hook runs only when the node
+// goes down, not once per holder: a hook is an operator's script and running it
+// again for a node already cordoned is a side effect nobody asked for.
+func (p *Platform) CordonForOwner(ctx context.Context, node, owner, reason string) error {
+	if owner == "" {
+		return fmt.Errorf("cordon of %s: an owner is required", node)
+	}
 	p.mu.Lock()
-	delete(p.cordoned, node)
+	owners, existed := p.cordoned[node]
+	_, held := owners[owner]
 	p.mu.Unlock()
-	return p.runHook(ctx, p.hooks.CordonScript, "uncordon", node)
+
+	if existed {
+		// The node is already down. Record the joiner and do not run the hook
+		// again: a hook is an operator's script, and running it a second time
+		// for a node already cordoned is a side effect nobody asked for.
+		if !held {
+			p.mu.Lock()
+			p.cordoned[node][owner] = struct{}{}
+			p.mu.Unlock()
+		}
+		return nil
+	}
+
+	// FIRST holder: the hook is what actually takes the node out of service, so
+	// the owner is recorded only once it has succeeded.
+	//
+	// Recording first was wrong in the direction that matters. A failed hook
+	// left the owner in the set, so the next incident to arrive took the
+	// "already down" branch above, reported success, and never retried the
+	// hook — and the ladder went on to drain and reset a node that had never
+	// been removed from service at all.
+	if err := p.runHook(ctx, p.hooks.CordonScript, "cordon", node); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	if p.cordoned[node] == nil {
+		p.cordoned[node] = map[string]struct{}{}
+	}
+	p.cordoned[node][owner] = struct{}{}
+	p.mu.Unlock()
+	return nil
+}
+
+// ReleaseCordonOwners implements platform.Platform: the node comes back only
+// when the last holder leaves.
+func (p *Platform) ReleaseCordonOwners(ctx context.Context, node string, owners []string) (bool, int, error) {
+	p.mu.Lock()
+	held, present := p.cordoned[node]
+	if !present {
+		p.mu.Unlock()
+		return false, 0, nil // nothing holds it; releasing again is a no-op
+	}
+	for _, owner := range owners {
+		delete(held, owner)
+	}
+	remaining := len(held)
+	if remaining == 0 {
+		delete(p.cordoned, node)
+	}
+	p.mu.Unlock()
+	if remaining > 0 {
+		return false, remaining, nil
+	}
+	return true, 0, p.runHook(ctx, p.hooks.CordonScript, "uncordon", node)
 }
 
 // Drain runs the drain hook, or no-ops with success when none is configured

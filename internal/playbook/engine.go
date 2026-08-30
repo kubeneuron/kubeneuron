@@ -9,7 +9,10 @@ import (
 // Policy binds a problem class to a playbook. Policies come from
 // configs/policies.yaml (see internal/config).
 type Policy struct {
-	Class    types.ProblemClass
+	Class types.ProblemClass
+	// Vendor scopes the policy to one accelerator vendor; empty matches any.
+	// See config.Match.Vendor for why a problem class alone is not enough.
+	Vendor   types.AcceleratorVendor
 	Playbook string
 	// Params can override playbook defaults, e.g. observe thresholds.
 	Params map[string]string
@@ -37,10 +40,8 @@ func NewEngine(books map[string]*Playbook, policies []Policy) (*Engine, error) {
 // Select returns the playbook bound to the signal's problem class, or
 // ok=false when no policy matches (the signal is then observe-only).
 func (e *Engine) Select(sig types.Signal) (*Playbook, bool) {
-	for _, pol := range e.policies {
-		if pol.Class == sig.Class {
-			return e.books[pol.Playbook], true
-		}
+	if pol, ok := e.PolicyFor(sig.Class, sig.Vendor()); ok {
+		return e.books[pol.Playbook], true
 	}
 	return nil, false
 }
@@ -48,13 +49,38 @@ func (e *Engine) Select(sig types.Signal) (*Playbook, bool) {
 // PolicyFor returns the first policy matching the class (the same rule
 // Select uses), so callers can read policy params such as observe
 // thresholds.
-func (e *Engine) PolicyFor(class types.ProblemClass) (Policy, bool) {
+// PolicyFor is the ONE place the selection rule lives. Select, the late bind
+// that runs when a playbook was unbound, and the observation threshold lookup
+// all ask it — they used to answer the question separately, and two of them
+// answered it without the vendor at all.
+//
+// A vendor-scoped policy claims only its own vendor's signals, and a signal
+// naming no vendor is not one of them: these ladders reset and reboot hardware,
+// so acting on an unconfirmed guess is the wrong direction to fail in. An
+// unscoped policy still matches everything, so nothing written before the
+// vendor field changes behaviour.
+func (e *Engine) PolicyFor(class types.ProblemClass, vendor types.AcceleratorVendor) (Policy, bool) {
 	for _, pol := range e.policies {
-		if pol.Class == class {
-			return pol, true
+		if pol.Class != class {
+			continue
 		}
+		if pol.Vendor != "" && pol.Vendor != vendor {
+			continue
+		}
+		return pol, true
 	}
 	return Policy{}, false
+}
+
+// SelectFor binds a playbook from a class and vendor directly, for the late
+// bind: an incident that lost its playbook to an engine reload has no signal to
+// reconstruct, and building a fake one dropped the vendor on the floor.
+func (e *Engine) SelectFor(class types.ProblemClass, vendor types.AcceleratorVendor) (*Playbook, bool) {
+	pol, ok := e.PolicyFor(class, vendor)
+	if !ok {
+		return nil, false
+	}
+	return e.books[pol.Playbook], true
 }
 
 // NextStep returns the step an incident should execute next, or done=true

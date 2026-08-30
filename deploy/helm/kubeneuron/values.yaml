@@ -8,7 +8,7 @@ image:
   repository: ghcr.io/kubeneuron/kubeneuron/operator
   # Pin an exact release tag or digest; the CRDs reject :latest for managed
   # workload images and the operator deserves the same discipline.
-  tag: v0.2.3
+  tag: v0.3.0
   pullPolicy: IfNotPresent
 
 replicas: 1

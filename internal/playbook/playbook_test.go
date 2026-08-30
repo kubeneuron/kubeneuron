@@ -170,11 +170,11 @@ func TestSelectAndPolicyForUseFirstMatch(t *testing.T) {
 	if _, ok := engine.Select(types.Signal{Class: types.ClassXIDApp}); ok {
 		t.Fatal("unbound class must select nothing (observe-only)")
 	}
-	policy, ok := engine.PolicyFor(types.ClassECCDBE)
+	policy, ok := engine.PolicyFor(types.ClassECCDBE, "")
 	if !ok || policy.Playbook != "gpu-recover" {
 		t.Fatalf("PolicyFor = %+v, %v", policy, ok)
 	}
-	if _, ok := engine.PolicyFor(types.ClassXIDApp); ok {
+	if _, ok := engine.PolicyFor(types.ClassXIDApp, ""); ok {
 		t.Fatal("unbound class must have no policy")
 	}
 }
@@ -320,5 +320,130 @@ func TestNegativeDurationsAreRejected(t *testing.T) {
 	if err := p.Validate(); err == nil {
 		t.Fatal("a negative step timeout was accepted; the step is cancelled before it acts and " +
 			"the ladder escalates past it")
+	}
+}
+
+// TestAVendorScopedPolicyDoesNotClaimAnotherVendorsSignal is the first half of
+// making multi-vendor remediation expressible at all.
+//
+// A problem class is not vendor-specific — an uncorrectable ECC error happens on
+// NVIDIA, AMD and Intel alike — but the ladder that answers it is. Selection
+// matched on class alone, so an operator adding AMD nodes could not give them
+// their own ladder: their faults selected the NVIDIA one, whose reset is then
+// refused at the capability gate. Refused AFTER the cordon and the drain, which
+// is the expensive part — the tenant's work is already gone by the time
+// anything notices the reset could never run.
+func TestAVendorScopedPolicyDoesNotClaimAnotherVendorsSignal(t *testing.T) {
+	book := func(name string) *Playbook {
+		return &Playbook{Name: name, Target: "gpu", Steps: []Step{{Name: "s", Action: "platform.cordon"}}}
+	}
+	e, err := NewEngine(
+		map[string]*Playbook{"nvidia-ladder": book("nvidia-ladder"), "amd-ladder": book("amd-ladder")},
+		[]Policy{
+			{Class: "ecc-dbe", Vendor: types.AcceleratorVendorNVIDIA, Playbook: "nvidia-ladder"},
+			{Class: "ecc-dbe", Vendor: types.AcceleratorVendorAMD, Playbook: "amd-ladder"},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sig := func(vendor string) types.Signal {
+		s := types.Signal{Class: "ecc-dbe", Target: types.Target{Node: "n1", GPUUUID: "GPU-a"}}
+		if vendor != "" {
+			s.Evidence = map[string]string{"vendor": vendor}
+		}
+		return s
+	}
+
+	got, ok := e.Select(sig("nvidia"))
+	if !ok || got.Name != "nvidia-ladder" {
+		t.Fatalf("an NVIDIA fault selected %v (ok=%v), want nvidia-ladder", got, ok)
+	}
+	got, ok = e.Select(sig("amd"))
+	if !ok || got.Name != "amd-ladder" {
+		t.Fatalf("an AMD fault selected %v (ok=%v), want amd-ladder: the AMD card would get the "+
+			"NVIDIA ladder, refused at the capability gate only after the node has been "+
+			"cordoned and drained", got, ok)
+	}
+
+	// A signal naming NO vendor matches neither scoped policy. These ladders
+	// reset and reboot hardware; acting on an unconfirmed guess is the wrong
+	// direction to fail in.
+	if got, ok := e.Select(sig("")); ok {
+		t.Fatalf("a signal naming no vendor selected %q; a vendor's ladder ran against hardware "+
+			"nobody confirmed was that vendor's", got.Name)
+	}
+}
+
+// TestAnUnscopedPolicyStillMatchesEverything: every policy written before the
+// vendor field must behave exactly as it did, including for signals that name
+// no vendor at all. Otherwise this change silently stops existing fleets from
+// remediating.
+func TestAnUnscopedPolicyStillMatchesEverything(t *testing.T) {
+	e, err := NewEngine(
+		map[string]*Playbook{"any-ladder": {Name: "any-ladder", Target: "gpu",
+			Steps: []Step{{Name: "s", Action: "platform.cordon"}}}},
+		[]Policy{{Class: "ecc-dbe", Playbook: "any-ladder"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, vendor := range []string{"nvidia", "amd", ""} {
+		sig := types.Signal{Class: "ecc-dbe", Target: types.Target{Node: "n1"}}
+		if vendor != "" {
+			sig.Evidence = map[string]string{"vendor": vendor}
+		}
+		if got, ok := e.Select(sig); !ok || got.Name != "any-ladder" {
+			t.Fatalf("vendor %q no longer selects an unscoped policy", vendor)
+		}
+	}
+}
+
+// TestEveryPolicyLookupHonoursTheVendor covers the seam a vendor-aware Select
+// left behind: two other paths ask the same question and asked it without the
+// vendor.
+//
+// The late bind (an incident whose playbook an engine reload unbound) built a
+// signal from the class alone, so it could never bind to a vendor-scoped
+// policy — the incident quietly resolved with no ladder. And the observation
+// threshold lookup took the first policy of that class whatever its vendor, so
+// an AMD incident escalated on NVIDIA's timing: a decision nobody made, about
+// hardware nobody looked at.
+func TestEveryPolicyLookupHonoursTheVendor(t *testing.T) {
+	book := func(name string) *Playbook {
+		return &Playbook{Name: name, Target: "gpu", Steps: []Step{{Name: "s", Action: "platform.cordon"}}}
+	}
+	e, err := NewEngine(
+		map[string]*Playbook{"nvidia-ladder": book("nvidia-ladder"), "amd-ladder": book("amd-ladder")},
+		[]Policy{
+			{Class: "ecc-dbe", Vendor: types.AcceleratorVendorNVIDIA, Playbook: "nvidia-ladder",
+				Params: map[string]string{"threshold": "3"}},
+			{Class: "ecc-dbe", Vendor: types.AcceleratorVendorAMD, Playbook: "amd-ladder",
+				Params: map[string]string{"threshold": "7"}},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The late bind reaches the right ladder for each vendor.
+	got, ok := e.SelectFor("ecc-dbe", types.AcceleratorVendorAMD)
+	if !ok || got.Name != "amd-ladder" {
+		t.Fatalf("late bind for AMD selected %v (ok=%v), want amd-ladder: an incident that raced "+
+			"a policy rollout would resolve with no ladder at all", got, ok)
+	}
+
+	// And the observation threshold is read from that vendor's own policy.
+	pol, ok := e.PolicyFor("ecc-dbe", types.AcceleratorVendorAMD)
+	if !ok || pol.Params["threshold"] != "7" {
+		t.Fatalf("AMD read threshold %q from policy %q, want 7 from the AMD policy: escalating "+
+			"on another vendor's timing is a decision nobody made",
+			pol.Params["threshold"], pol.Playbook)
+	}
+
+	// A vendor nobody scoped for still finds nothing rather than the first one.
+	if got, ok := e.SelectFor("ecc-dbe", types.AcceleratorVendorIntel); ok {
+		t.Fatalf("an Intel incident bound %q", got.Name)
 	}
 }

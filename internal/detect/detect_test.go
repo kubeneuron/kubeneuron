@@ -286,3 +286,57 @@ func TestDeployedRulesContainCanonicalAlerts(t *testing.T) {
 		t.Fatal("no alerts found in canonical rules — parsing broken?")
 	}
 }
+
+// TestEveryAgentEventEncodingCarriesTheNormalizedDeviceAddress pins the one
+// rule that lets a kernel fault and a vendor tool's later report be recognized
+// as the same physical GPU.
+//
+// The kernel names an off-the-bus device by PCI address and nothing else, so
+// the incident it opens can be addressed only that way. The store then matches
+// the vendor tool's UUID-bearing report against that address to PROMOTE the
+// incident onto the real device. If either signal builder drops the address, or
+// carries it in the source's own spelling, the match fails: the incident stays
+// unattributed, an empty GPU UUID is read as a permanent infeasibility, and a
+// node that has already been cordoned and drained is parked for a human
+// although the exact device was identified seconds after the fault.
+//
+// Both encodings are checked because they are two builders of one thing, and
+// the vendor key has already been added to one of them and not the other.
+func TestEveryAgentEventEncodingCarriesTheNormalizedDeviceAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ev   types.AgentEvent
+	}{
+		// The address is nvidia-smi's spelling of the slot the kernel printed
+		// as "0000:3b:00"; both must reduce to one comparable identity.
+		{"genuine XID", types.AgentEvent{
+			Node: "node07", GPUIndex: -1, PCIAddr: "00000000:3B:00.0", XID: 79,
+		}},
+		{"neutral fault envelope", types.AgentEvent{
+			Node: "node07", GPUIndex: -1, PCIAddr: "00000000:3B:00.0",
+			Fault: &types.FaultSignal{Vendor: "nvidia", Source: "nvidia-smi", Code: "ecc-dbe"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sig, ok := SignalFromAgentEvent(tc.ev)
+			if !ok {
+				t.Fatalf("the %s must be actionable; the test would otherwise prove nothing", tc.name)
+			}
+			if sig.Target.PCIAddr != "0000:3b:00" {
+				t.Fatalf("the %s produced a target addressed %q, want %q: an incident opened from a kernel "+
+					"fault can be matched to its device ONLY by this address, so a dropped or unnormalized "+
+					"one leaves the incident permanently unattributed — the node is cordoned, drained and "+
+					"parked for a human with no reset possible",
+					tc.name, sig.Target.PCIAddr, "0000:3b:00")
+			}
+			// The catalog-aware builder is the copy the controller actually
+			// calls, and the two have drifted before.
+			viaCatalog, ok := (*Catalog)(nil).SignalFromAgentEvent(tc.ev)
+			if !ok || viaCatalog.Target != sig.Target {
+				t.Fatalf("Catalog.SignalFromAgentEvent produced target %+v (ok=%v), want %+v: the builder the "+
+					"controller uses must not carry a different device identity from the package-level one",
+					viaCatalog.Target, ok, sig.Target)
+			}
+		})
+	}
+}

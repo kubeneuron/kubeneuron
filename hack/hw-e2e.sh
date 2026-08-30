@@ -973,6 +973,7 @@ cmd_test_drain() {
 	node=$(gpu_node)
 	assert_kube_target
 
+	_DRAIN_FIXTURE_NODE="$node"
 	log "test-drain: placing a managed tenant workload and one bare pod on $node"
 	kubectl apply -f - <<EOF
 apiVersion: apps/v1
@@ -987,7 +988,13 @@ spec:
   template:
     metadata: {labels: {app: e2e-tenant}}
     spec:
-      nodeName: ${node}
+      # nodeSelector, NEVER nodeName. nodeName bypasses the scheduler, so the
+      # ReplicaSet puts every replacement straight back onto the node no matter
+      # what — a cordon does not apply, the node can never be drained, and the
+      # drain step correctly times out with "1 pods remaining". That is not a
+      # test of the drain, it is a test of a node nobody could drain by hand
+      # either.
+      nodeSelector: {role: gpu}
       tolerations: [{operator: Exists}]
       terminationGracePeriodSeconds: 5
       containers:
@@ -1006,7 +1013,7 @@ metadata:
   namespace: default
   labels: {kubeneuron.io/hw-e2e: "true"}
 spec:
-  nodeName: ${node}
+  nodeSelector: {role: gpu}
   tolerations: [{operator: Exists}]
   terminationGracePeriodSeconds: 5
   containers:
@@ -1073,15 +1080,33 @@ EOF
 	[ -n "$incident" ] || die "no second drain-probe incident opened"
 	_OPEN_INCIDENT="$incident"
 
-	wait_for 900 'kubectl -n default get pods -l app=e2e-tenant \
-		-o jsonpath="{.items[0].spec.nodeName}" 2>/dev/null | grep -qv "'"$node"'"' ||
-		die "the drain did not evict the tenant workload off $node"
-	log "test-drain: PASS (real drain evicted the tenant workload)"
+	# The node must stop running it. Not "it moved" — with one role=gpu node the
+	# replacement has nowhere to go and sits Pending, which is a drained node,
+	# and asserting a move would fail on a correct product.
+	wait_for 900 '[ "$(kubectl -n default get pods -l app=e2e-tenant \
+		-o jsonpath="{range .items[*]}{.spec.nodeName}{\"\n\"}{end}" 2>/dev/null |
+		grep -c "^'"$node"'$")" = 0 ]' ||
+		die "the drain left the tenant workload on $node"
+	log "test-drain: PASS (real drain took the tenant workload off the node)"
 
 	close_incident "$incident" "drain success asserted"
 	_OPEN_INCIDENT=""
-	kubectl uncordon "$node" >/dev/null 2>&1 || true
-	kubectl -n default delete deployment e2e-tenant --wait=false >/dev/null 2>&1 || true
+	drain_fixture_cleanup
+}
+
+# _DRAIN_FIXTURE_NODE names the node test-drain put a workload on. The EXIT trap
+# clears it whichever way the phase ends; leaving a pod behind on a cordoned
+# node is how this phase failed the destructive phase after it.
+_DRAIN_FIXTURE_NODE="${_DRAIN_FIXTURE_NODE:-}"
+
+drain_fixture_cleanup() {
+	[ -n "${_DRAIN_FIXTURE_NODE:-}" ] || return 0
+	kubectl -n default delete deployment e2e-tenant --ignore-not-found --wait=false >/dev/null 2>&1 || true
+	kubectl -n default delete pod e2e-bare --ignore-not-found --wait=false >/dev/null 2>&1 || true
+	# Uncordon too: this phase's ladder has no uncordon step, so a node left
+	# cordoned here is a node the next phase cannot drain.
+	kubectl uncordon "$_DRAIN_FIXTURE_NODE" >/dev/null 2>&1 || true
+	_DRAIN_FIXTURE_NODE=""
 }
 
 # apply_drain_playbook installs a Cordon -> Drain ladder with NO escalation
@@ -1821,6 +1846,7 @@ _OPEN_INCIDENT="${_OPEN_INCIDENT:-}"
 # to work when everything else has already gone wrong. Bounding the call itself
 # is the smaller and more reliable fix.
 cleanup() {
+	drain_fixture_cleanup
 	if [ -n "${_OPEN_INCIDENT:-}" ]; then
 		close_incident "$_OPEN_INCIDENT" "phase ended without closing its incident"
 		_OPEN_INCIDENT=""

@@ -60,7 +60,7 @@ func applyRuntimeConfig(
 	}
 	policies := make([]playbook.Policy, 0, len(cfg.Policies))
 	for _, p := range cfg.Policies {
-		policies = append(policies, playbook.Policy{Class: p.Match.Class, Playbook: p.Playbook, Params: p.Params})
+		policies = append(policies, playbook.Policy{Class: p.Match.Class, Vendor: p.Match.Vendor, Playbook: p.Playbook, Params: p.Params})
 	}
 	engine, err := playbook.NewEngine(books, policies)
 	if err != nil {

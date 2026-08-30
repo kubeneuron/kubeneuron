@@ -450,12 +450,87 @@ const doNotDisruptAnnotation = "karpenter.sh/do-not-disrupt"
 // it, so Uncordon puts it back rather than clearing marks it did not place.
 const cordonRestoreAnnotation = "kubeneuron.io/cordon-restore"
 
+// cordonOwnersAnnotation records every remediation currently holding this node
+// cordoned, as a JSON array of owner names (incident IDs).
+//
+// A node has many GPUs and an incident is per (target, class), so two of them
+// can be remediating two GPUs of one machine at the same time. With only
+// cordonReasonAnnotation to go on, the second cordon overwrote the first and the
+// first incident's uncordon then released the whole node: the scheduler put
+// tenant work onto a machine whose other GPU was about to be reset, and the
+// restore ran from whichever snapshot happened to survive, so a human's own
+// cordon and their karpenter.sh/do-not-disrupt pin could be wiped by an incident
+// that never saw them.
+//
+// Holding the set on the NODE rather than in the controller is what makes it
+// survive a controller restart mid-remediation: the owners are still there when
+// the process comes back, and an owner whose incident died without releasing it
+// is the cordon janitor's job, exactly as before.
+const cordonOwnersAnnotation = "kubeneuron.io/cordon-owners"
+
+// cordonPatchAttempts bounds the compare-and-swap retry on the owner set. Each
+// attempt re-reads and recomputes; the race being retried is another
+// remediation on the SAME node joining or leaving the set between our read and
+// our write, which is rare and self-clearing.
+const cordonPatchAttempts = 4
+
 // cordonHeldAnnotation records that a human owns this cordon. It lives on the
 // NODE because the incident row does not live forever: retention prunes
 // RESOLVED and EXPIRED incidents, and without this an expired incident's
 // deliberately-held cordon was released the moment its row was swept, which
 // inverts the janitor's whole stated rule.
 const cordonHeldAnnotation = "kubeneuron.io/cordon-held"
+
+// cordonHeldOwnersAnnotation records WHICH holds on this node a human has taken
+// charge of, as a JSON array of owner names, alongside the owner set itself.
+//
+// cordonHeldAnnotation above is node-scoped, and on a multi-GPU node that answers
+// for remediations it was never about. The held mark is the one thing that stops
+// the janitor releasing a hold whose incident row retention has swept, so one
+// halted remediation made every OTHER hold on the same machine permanent: the
+// abandoned hold beside it could never be dropped, the owner set could never
+// empty, and the node-scoped mark blocking it is only cleared when the set DOES
+// empty. Eight GPUs deadlock out of the fleet with no incident row left to
+// explain it and no notification, since the incident behind the surviving hold
+// is gone — the only trace is an Info log line on every reconcile tick.
+//
+// The node-scoped mark stays for untracked cordons, where there is exactly one
+// holder and it cannot be wrong. See platform.CordonedNode.HeldBy.
+const cordonHeldOwnersAnnotation = "kubeneuron.io/cordon-held-owners"
+
+// cordonAnnotations is everything this product writes to hold a node cordoned,
+// listed once. Every release path removes the whole list: an annotation left
+// behind on a node that is back in service makes the next janitor pass read it
+// as a cordon we still own, and a held mark left behind makes that cordon
+// unreleasable forever. This was three separate literal lists, and the third one
+// added is how the held mark came to survive Uncordon.
+// cordonHandoffAnnotation is a HUMAN's claim on a node KubeNeuron cordoned.
+//
+// The restore snapshot answers "what was here before us". Nothing answered
+// "what did a person decide after us" — so an engineer who looked at a cordoned
+// node at 3am and chose to keep it out of service had no way to say so that we
+// could tell apart from our own doing. They set the same unschedulable flag we
+// had; the last release compared against the snapshot, concluded the marks were
+// ours, and handed the machine back to the scheduler over their decision.
+//
+// Deliberately a key KubeNeuron NEVER writes. That is the whole point: it is
+// the one signal that cannot be confused with our own state, because our state
+// can never contain it. The controller reads it and removes it never; only the
+// person who set it takes it off.
+//
+// Not cordon-held. That one means "this incident halted and a human is dealing
+// with it", which is a different event — here the incident may be finishing
+// perfectly normally and the person has simply decided to keep the node.
+// Folding them together would make an incident's completion drop a takeover.
+const cordonHandoffAnnotation = "kubeneuron.io/cordon-handoff"
+
+var cordonAnnotations = []string{
+	cordonOwnersAnnotation,
+	cordonReasonAnnotation,
+	cordonRestoreAnnotation,
+	cordonHeldAnnotation,
+	cordonHeldOwnersAnnotation,
+}
 
 // Cordon marks the node unschedulable, records the reason, and protects it from
 // being replaced while the remediation runs.
@@ -496,6 +571,14 @@ func (p *Platform) priorCordonState(ctx context.Context, node string) (string, e
 	if existing, held := current.Annotations[cordonRestoreAnnotation]; held {
 		return existing, nil
 	}
+	return cordonSnapshot(current), nil
+}
+
+// cordonSnapshot renders what a later restore must put back for a node nobody
+// has recorded yet. An EMPTY result means "we looked, and the node was clean" —
+// which is a different statement from the annotation being absent, and priorMarks
+// depends on the difference.
+func cordonSnapshot(current *corev1.Node) string {
 	var parts []string
 	if current.Spec.Unschedulable {
 		parts = append(parts, "unschedulable")
@@ -503,7 +586,576 @@ func (p *Platform) priorCordonState(ctx context.Context, node string) (string, e
 	if _, pinned := current.Annotations[doNotDisruptAnnotation]; pinned {
 		parts = append(parts, "do-not-disrupt")
 	}
-	return strings.Join(parts, ","), nil
+	return strings.Join(parts, ",")
+}
+
+var _ platform.CordonOwnership = (*Platform)(nil)
+
+// CordonForOwner implements platform.CordonOwnership.
+//
+// The write is a JSON Patch whose first operation TESTS the owner set this call
+// read — the same compare-and-swap discipline as UncordonIfReason and
+// rewriteTaints, and needed here for the same reason: a plain read-modify-write
+// of the annotation drops the entry another remediation on the same node added a
+// millisecond earlier, and a dropped owner is a node released while that
+// remediation is still resetting a GPU on it. Losing the race is not an error;
+// the loser re-reads and re-applies.
+//
+// A node with no owner set yet but with a cordon reason on it was cordoned by a
+// build that predates this, and that build's remediation may still be running.
+// Its reason is seeded into the set as a legacy owner rather than being
+// overwritten, so the upgrade does not make the older incident invisible.
+func (p *Platform) CordonForOwner(ctx context.Context, node, owner, reason string) error {
+	if owner == "" {
+		// An unnamed owner can never be released by name, so it would hold the
+		// node out of the fleet until a human noticed. Refuse to write it.
+		return fmt.Errorf("cordoning %s: a cordon owner is required", node)
+	}
+	var lastErr error
+	for range cordonPatchAttempts {
+		// The live object, not the informer cache: a stale read here cannot
+		// produce a wrong write (the test op rejects it) but does produce a
+		// guaranteed retry.
+		current, err := p.client.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("reading %s before cordoning it: %w", node, err)
+		}
+		raw, hasOwners := current.Annotations[cordonOwnersAnnotation]
+		owners, err := decodeCordonOwners(raw)
+		if err != nil {
+			return fmt.Errorf("reading the cordon owners of %s: %w", node, err)
+		}
+		var seedHeld []string
+		if !hasOwners {
+			// This node's cordon predates the owner set, so its single holder is
+			// named by the reason on it. That holder is seeded into the new set,
+			// and — since the janitor may already have decided a human owns it —
+			// so is its held mark, which is node-scoped only while the cordon is
+			// untracked. Dropping the mark here would let the very next janitor
+			// pass release a cordon a human had taken charge of before the
+			// upgrade.
+			if prior, ours := current.Annotations[cordonReasonAnnotation]; ours {
+				priorOwner := owner // a replay of our own cordon: same holder, new name
+				if prior != reason {
+					priorOwner = platform.LegacyCordonOwner(prior)
+					owners = append(owners, priorOwner)
+				}
+				if _, held := current.Annotations[cordonHeldAnnotation]; held {
+					seedHeld = []string{priorOwner}
+				}
+			}
+		}
+		if !slices.Contains(owners, owner) {
+			owners = append(owners, owner)
+		}
+
+		ops := ownerSetGuard(current, raw, hasOwners)
+		// Every test op has to come before the first mutation: JSON Patch applies
+		// operations in order, so a test placed after the write it is guarding
+		// reads back what we just wrote and always passes.
+		_, recorded := current.Annotations[cordonRestoreAnnotation]
+		if !recorded {
+			ops = append(ops, snapshotGuard(current)...)
+		}
+		ops = append(ops,
+			setAnnotationOp(cordonOwnersAnnotation, encodeCordonOwners(owners)),
+			setAnnotationOp(cordonReasonAnnotation, reason),
+			// See doNotDisruptAnnotation: a cordoned, drained node is the most
+			// attractive consolidation target in the cluster, and losing the node
+			// mid-remediation orphans the incident.
+			setAnnotationOp(doNotDisruptAnnotation, "true"),
+			// "add" rather than "replace": spec.unschedulable is omitted from the
+			// object entirely when false, and replace on an absent member fails.
+			map[string]any{"op": "add", "path": "/spec/unschedulable", "value": true},
+		)
+		if len(seedHeld) > 0 {
+			ops = append(ops, setAnnotationOp(cordonHeldOwnersAnnotation, encodeCordonOwners(seedHeld)))
+		}
+		if !recorded {
+			// Written exactly once, by whoever cordons first, and never touched
+			// again. A later owner writing its own snapshot would record OUR
+			// cordon and OUR pin as the node's original state, and the last
+			// release would then leave the node cordoned and pinned forever.
+			ops = append(ops, setAnnotationOp(cordonRestoreAnnotation, cordonSnapshot(current)))
+		}
+
+		patch, err := json.Marshal(ops)
+		if err != nil {
+			return err
+		}
+		if _, err := p.client.CoreV1().Nodes().Patch(
+			ctx, node, k8stypes.JSONPatchType, patch, metav1.PatchOptions{}); err != nil {
+			if !apierrors.IsInvalid(err) && !apierrors.IsConflict(err) {
+				return err
+			}
+			lastErr = err // somebody else moved the set: re-read and recompute
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("the cordon owners of node %s changed under every attempt to join them: %w", node, lastErr)
+}
+
+// ReleaseCordonOwners implements platform.CordonOwnership.
+//
+// The node is only handed back to the scheduler when the set empties. Every
+// other release just shrinks it, under the same compare-and-swap as the join, so
+// a concurrent release cannot resurrect an owner that has already left or drop
+// one that has just arrived.
+func (p *Platform) ReleaseCordonOwners(ctx context.Context, node string, owners []string) (bool, int, error) {
+	var lastErr error
+	for range cordonPatchAttempts {
+		current, err := p.client.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			// The node object is gone (a spot reclaim, a node group roll). There
+			// is nothing left to return to service and no annotation to clear,
+			// and failing the step would only escalate an incident whose hardware
+			// no longer exists.
+			return false, 0, nil
+		}
+		if err != nil {
+			return false, 0, fmt.Errorf("reading %s before releasing its cordon: %w", node, err)
+		}
+		raw, hasOwners := current.Annotations[cordonOwnersAnnotation]
+		if !hasOwners {
+			released, err := p.releaseUntrackedCordon(ctx, node, current, owners)
+			return released, 0, err
+		}
+		held, err := decodeCordonOwners(raw)
+		if err != nil {
+			return false, 0, fmt.Errorf("reading the cordon owners of %s: %w", node, err)
+		}
+		remaining := slices.DeleteFunc(slices.Clone(held), func(o string) bool {
+			return slices.Contains(owners, o)
+		})
+		if len(remaining) == len(held) {
+			// None of these owners is on the node. A replayed step, a retried
+			// janitor pass, or a release that already landed — all of them are
+			// nothing to do, and none of them is a failure.
+			return false, len(remaining), nil
+		}
+
+		ops := []map[string]any{
+			annotationTestOp(cordonOwnersAnnotation, raw, true),
+			// The held-owner record has to be pinned as well, and pinning the
+			// owner set does not do it. A janitor pass recording that a human owns
+			// SOME OTHER hold on this node writes that record and leaves the owner
+			// set untouched, so the test above still passes — and both branches
+			// below then rewrite the record from the value this call read a
+			// moment earlier. The shrink removes a verdict that arrived since; the
+			// restore leaves one behind on a node it is handing back.
+			//
+			// A discarded verdict does not hurt in the window. It hurts weeks
+			// later, when retention prunes the halted incident's row: the janitor
+			// finds a hold nothing explains, releases it, and the last release
+			// puts a machine back into the schedulable pool with the GPU an
+			// engineer deliberately withdrew still in it. Losing this test costs a
+			// re-read.
+			heldOwnerSetGuard(current.Annotations[cordonHeldOwnersAnnotation], current.Annotations),
+		}
+		if len(remaining) > 0 {
+			// Somebody else is still remediating this machine. Shrink the set and
+			// leave everything else exactly as it is: the node stays
+			// unschedulable, stays pinned against the autoscaler, and keeps the
+			// snapshot the first owner took.
+			ops = append(ops, setAnnotationOp(cordonOwnersAnnotation, encodeCordonOwners(remaining)))
+			dropped, err := p.dropHeldOwnersOps(node, current, owners)
+			if err != nil {
+				return false, 0, err
+			}
+			ops = append(ops, dropped...)
+		} else {
+			ops = append(ops, p.restoreOps(node, current)...)
+		}
+		patch, err := json.Marshal(ops)
+		if err != nil {
+			return false, 0, err
+		}
+		if _, err := p.client.CoreV1().Nodes().Patch(
+			ctx, node, k8stypes.JSONPatchType, patch, metav1.PatchOptions{}); err != nil {
+			if !apierrors.IsInvalid(err) && !apierrors.IsConflict(err) {
+				return false, 0, err
+			}
+			lastErr = err // the set moved under us: re-read and recompute
+			continue
+		}
+		return len(remaining) == 0, len(remaining), nil
+	}
+	return false, 0, fmt.Errorf("the cordon owners of node %s changed under every attempt to leave them: %w", node, lastErr)
+}
+
+// releaseUntrackedCordon handles the node that carries a cordon reason but no
+// owner set: one this build's predecessor cordoned, still held across the
+// upgrade.
+//
+// The old build's rule was "one reason, one owner", so a matching reason means
+// the caller IS the sole owner and the node can be put back. A reason that does
+// not match belongs to somebody else and is left alone — the same fail-closed
+// answer UncordonIfReason gives, which is where the actual write happens so the
+// live re-check and the restore rules stay in one place.
+func (p *Platform) releaseUntrackedCordon(ctx context.Context, node string, current *corev1.Node, owners []string) (bool, error) {
+	reason, ours := current.Annotations[cordonReasonAnnotation]
+	if !ours {
+		return false, nil // nothing of ours on this node at all
+	}
+	for _, owner := range owners {
+		if owner == platform.LegacyCordonOwner(reason) {
+			// A takeover binds here as well. This path serves a node cordoned
+			// by a build that predates owner sets, and it reached the release
+			// through a different door — so it checked the reason and the
+			// counted state and nothing else. An operator who annotated an
+			// upgrade-era cordon to keep a suspect node down would have watched
+			// the finishing incident hand it back anyway, which is the exact
+			// harm the annotation was added to prevent.
+			if _, handedOff := current.Annotations[cordonHandoffAnnotation]; handedOff {
+				slog.Warn("an upgrade-era cordon was taken over by hand; leaving the node down "+
+					"and clearing only KubeNeuron's own annotations",
+					"node", node, "annotation", cordonHandoffAnnotation)
+				return false, p.clearOurAnnotations(ctx, node, current)
+			}
+			return p.UncordonIfReason(ctx, node, reason)
+		}
+	}
+	return false, nil
+}
+
+// dropHeldOwnersOps removes the departing holds from the record of which holds a
+// human owns, so the record shrinks with the owner set it describes.
+//
+// A verdict that outlives the hold it was about is exactly as bad as one written
+// about the wrong hold: it is the thing that stops the janitor releasing a hold
+// whose incident row has been pruned, so a stale entry keeps a machine out of
+// the fleet for good. Its own compare-and-swap comes from the owner-set test op
+// this is appended to — the two annotations only ever move together here.
+func (p *Platform) dropHeldOwnersOps(node string, current *corev1.Node, leaving []string) ([]map[string]any, error) {
+	rawHeld, present := current.Annotations[cordonHeldOwnersAnnotation]
+	if !present {
+		return nil, nil
+	}
+	held, err := decodeCordonOwners(rawHeld)
+	if err != nil {
+		return nil, fmt.Errorf("reading the held cordon owners of %s: %w", node, err)
+	}
+	kept := slices.DeleteFunc(slices.Clone(held), func(o string) bool { return slices.Contains(leaving, o) })
+	if len(kept) == len(held) {
+		return nil, nil
+	}
+	if len(kept) == 0 {
+		// Removed rather than written empty. An empty set left behind is another
+		// annotation the next release has to reason about, and "present but says
+		// nothing" is the shape that keeps producing these defects.
+		return []map[string]any{{
+			"op": "remove", "path": "/metadata/annotations/" + escapeJSONPointer(cordonHeldOwnersAnnotation),
+		}}, nil
+	}
+	return []map[string]any{setAnnotationOp(cordonHeldOwnersAnnotation, encodeCordonOwners(kept))}, nil
+}
+
+// restoreOps builds the patch operations that put a node back the way its first
+// owner found it. Only ever appended after a test op that pins the owner set.
+func (p *Platform) restoreOps(node string, current *corev1.Node) []map[string]any {
+	// A human has taken this node over: strip our bookkeeping and leave the
+	// machine exactly as they are holding it.
+	//
+	// The handoff forbids only one thing — returning the node to the scheduler.
+	// Our annotations still come off, because a node that reads as
+	// KubeNeuron-cordoned with no live incident collects stuck-cordon reports
+	// nobody can act on.
+	//
+	// spec.unschedulable and the Karpenter pin are left ALONE, not restored
+	// from the snapshot. Restoring would undo the takeover, and dropping the
+	// pin while the node stays cordoned would expose a machine somebody is
+	// working on to consolidation — we are also about to delete the record that
+	// says whether the pin was ours, so leaving it is the only answer we can
+	// still justify afterwards.
+	if _, handedOff := current.Annotations[cordonHandoffAnnotation]; handedOff {
+		ops := []map[string]any{
+			// The takeover must still be there when the write lands. If the
+			// person removed it in the meantime this op fails, the attempt is
+			// retried, and the retry takes the ordinary restore below.
+			annotationTestOp(cordonHandoffAnnotation, current.Annotations[cordonHandoffAnnotation], true),
+		}
+		ops = append(ops, removeOurAnnotationOps(current)...)
+		slog.Warn("node was taken over by hand during remediation; leaving it cordoned and "+
+			"removing only KubeNeuron's own annotations. It will not return to the fleet until "+
+			"somebody removes the takeover annotation",
+			"node", node, "annotation", cordonHandoffAnnotation,
+			"value", current.Annotations[cordonHandoffAnnotation])
+		return ops
+	}
+
+	keepUnschedulable, keepPinned, known := priorMarks(current.Annotations)
+	if !known {
+		unknownRestoreRecord(node)
+	}
+	// "add", not "replace": a human may have uncordoned this node by hand while
+	// the remediation ran, and spec.unschedulable is then absent from the object
+	// entirely — a replace would 422 on every attempt and leave our annotations
+	// on the node forever.
+	ops := []map[string]any{
+		// No takeover as we write, either. Without this the window between the
+		// read above and the patch is exactly long enough for somebody to claim
+		// the node and have us hand it back anyway — a GET, a check and a PATCH
+		// is not a check at all here.
+		annotationTestOp(cordonHandoffAnnotation, "", false),
+		{"op": "add", "path": "/spec/unschedulable", "value": keepUnschedulable},
+	}
+	// Everything we wrote comes off together. Leaving any of it behind makes the
+	// node look cordoned by KubeNeuron to the next janitor pass, which is how a
+	// node that is back in service acquires a stuck-cordon report nobody can act
+	// on.
+	ops = append(ops, removeOurAnnotationOps(current)...)
+	if !keepPinned {
+		if _, present := current.Annotations[doNotDisruptAnnotation]; present {
+			ops = append(ops, map[string]any{
+				"op": "remove", "path": "/metadata/annotations/" + escapeJSONPointer(doNotDisruptAnnotation),
+			})
+		}
+	}
+	return ops
+}
+
+// removeOurAnnotationOps strips every annotation KubeNeuron wrote, and only
+// those. Shared by both restore paths so a sixth annotation cannot be added to
+// cordonAnnotations and then be left behind by one of them.
+func removeOurAnnotationOps(current *corev1.Node) []map[string]any {
+	var ops []map[string]any
+	for _, ann := range cordonAnnotations {
+		if _, present := current.Annotations[ann]; present {
+			ops = append(ops, map[string]any{
+				"op": "remove", "path": "/metadata/annotations/" + escapeJSONPointer(ann),
+			})
+		}
+	}
+	return ops
+}
+
+// clearOurAnnotations removes KubeNeuron's own cordon bookkeeping and touches
+// nothing else — the node's unschedulable flag and any Karpenter pin stay as
+// the person holding it left them. Used when a takeover forbids the restore but
+// the node must not keep looking KubeNeuron-cordoned to the next janitor pass.
+func (p *Platform) clearOurAnnotations(ctx context.Context, node string, current *corev1.Node) error {
+	ops := append([]map[string]any{
+		annotationTestOp(cordonHandoffAnnotation, current.Annotations[cordonHandoffAnnotation], true),
+	}, removeOurAnnotationOps(current)...)
+	if len(ops) == 1 {
+		return nil // nothing of ours is on the node
+	}
+	patch, err := json.Marshal(ops)
+	if err != nil {
+		return err
+	}
+	_, err = p.client.CoreV1().Nodes().Patch(ctx, node, k8stypes.JSONPatchType, patch, metav1.PatchOptions{})
+	if apierrors.IsInvalid(err) || apierrors.IsConflict(err) {
+		return nil // the takeover moved under us; the next pass re-reads
+	}
+	return err
+}
+
+// MarkCordonHeldIfOwner implements platform.CordonOwnership.
+//
+// The mark names the HOLD, not the node. A node-scoped mark answers "a human
+// owns this cordon" for every other remediation on the same machine, and since
+// that answer is what stops the janitor releasing a hold whose incident row has
+// been pruned, one halted remediation made every abandoned hold beside it
+// permanent — the owner set could never empty, and the mark is only cleared when
+// it does.
+func (p *Platform) MarkCordonHeldIfOwner(ctx context.Context, node, owner string) (bool, error) {
+	current, err := p.client.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading %s before marking its cordon held: %w", node, err)
+	}
+	raw, hasOwners := current.Annotations[cordonOwnersAnnotation]
+	if !hasOwners {
+		return false, nil // untracked cordon; MarkCordonHeldIfReason owns that case
+	}
+	owners, err := decodeCordonOwners(raw)
+	if err != nil {
+		return false, fmt.Errorf("reading the cordon owners of %s: %w", node, err)
+	}
+	if !slices.Contains(owners, owner) {
+		return false, nil // this owner has left since we listed it; not ours to mark
+	}
+	rawHeld := current.Annotations[cordonHeldOwnersAnnotation]
+	held, err := decodeCordonOwners(rawHeld)
+	if err != nil {
+		return false, fmt.Errorf("reading the held cordon owners of %s: %w", node, err)
+	}
+	if slices.Contains(held, owner) {
+		return true, nil // already recorded; nothing to write
+	}
+	ops := []map[string]any{{
+		"op":    "test",
+		"path":  "/metadata/annotations/" + escapeJSONPointer(cordonOwnersAnnotation),
+		"value": raw,
+	},
+		// The held set moves independently of the owner set — two janitor passes
+		// can reach a verdict about two different holds on one node without the
+		// owner set changing at all — so a write that tested only the owner set
+		// would drop the other verdict. A dropped verdict returns a node a human
+		// took charge of to the scheduler once its incident row is pruned.
+		heldOwnerSetGuard(rawHeld, current.Annotations),
+		setAnnotationOp(cordonHeldOwnersAnnotation, encodeCordonOwners(append(held, owner))),
+		// The node-scoped mark is kept in step for anything still reading it, and
+		// it is what an operator greps for.
+		setAnnotationOp(cordonHeldAnnotation, "true"),
+	}
+	patch, _ := json.Marshal(ops)
+	if _, err := p.client.CoreV1().Nodes().Patch(
+		ctx, node, k8stypes.JSONPatchType, patch, metav1.PatchOptions{}); err != nil {
+		if apierrors.IsInvalid(err) || apierrors.IsConflict(err) {
+			return false, nil // the test op lost the race; the next pass re-decides
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// ownerSetGuard returns the compare-and-swap prefix for a write to the owner
+// set: the value we read must still be there when the patch lands.
+//
+// A node with no annotations at all needs the map created first, and a `test`
+// against a member of a map that does not exist fails as MISSING rather than as
+// a failed test — an error the retry loop cannot clear. Testing the map itself
+// for null covers both the creation and the race.
+//
+// Keyed on the map being EMPTY rather than nil, because the two are the same
+// thing on the wire: ObjectMeta.Annotations is omitempty, so an empty map is
+// absent from the JSON the patch is applied to even when the decoded Go object
+// carries one.
+func ownerSetGuard(current *corev1.Node, raw string, hasOwners bool) []map[string]any {
+	if len(current.Annotations) == 0 {
+		return []map[string]any{
+			{"op": "test", "path": "/metadata/annotations", "value": nil},
+			{"op": "add", "path": "/metadata/annotations", "value": map[string]string{}},
+		}
+	}
+	return []map[string]any{annotationTestOp(cordonOwnersAnnotation, raw, hasOwners)}
+}
+
+// countedCordon reports whether a node's cordon is reference-counted — held by a
+// SET of remediations recorded in cordonOwnersAnnotation, rather than by the
+// single holder named in its reason.
+//
+// One predicate, because every path that acts on the strength of the reason
+// alone has to ask the same question, and each of them is only safe on an
+// uncounted cordon. UncordonIfReason and Uncordon would hand back a machine
+// whose other owners are still resetting GPUs on it. MarkCordonHeldIfReason
+// would write a node-scoped human verdict that CordonedNode.HeldBy will not read
+// on a counted cordon, so the verdict silently evaporates and the janitor
+// releases the hold as soon as retention prunes its incident row. Spelling the
+// test inline at each site is exactly how the third one came to be written
+// without it.
+func countedCordon(annotations map[string]string) bool {
+	_, counted := annotations[cordonOwnersAnnotation]
+	return counted
+}
+
+// heldOwnerSetGuard pins the record of which holds a human owns, so a write that
+// adds one verdict cannot silently discard another that landed since the read.
+// Only valid on a node that already has annotations — every caller has just read
+// the owner set off it.
+func heldOwnerSetGuard(raw string, annotations map[string]string) map[string]any {
+	_, present := annotations[cordonHeldOwnersAnnotation]
+	return annotationTestOp(cordonHeldOwnersAnnotation, raw, present)
+}
+
+// annotationTestOp is the compare-and-swap op for one annotation: it asserts the
+// key still holds the value that was read, or is still absent.
+//
+// Absence is expressed as a null value rather than by omitting the op, because
+// "there was nothing here" is a real thing to assert — the whole point of a
+// join is that it must not overwrite a set somebody created a millisecond
+// earlier. A `test` against a member of a map that does not EXIST fails as
+// missing rather than as a failed test, which the retry loop cannot clear, so
+// this must not be used on a node with no annotations at all; see ownerSetGuard.
+func annotationTestOp(key, value string, present bool) map[string]any {
+	var want any // null tests that the annotation is still ABSENT
+	if present {
+		want = value
+	}
+	return map[string]any{
+		"op": "test", "path": "/metadata/annotations/" + escapeJSONPointer(key), "value": want,
+	}
+}
+
+// snapshotGuard pins the two marks the restore record is a statement ABOUT, for
+// the one patch that writes it.
+//
+// The record says what the node looked like before this product touched it, and
+// it is decided from an object read some milliseconds earlier. Neither thing it
+// describes is the owner-set annotation the rest of the patch tests: `kubectl
+// cordon` writes spec.unschedulable and touches nothing else, and pinning a node
+// writes karpenter.sh/do-not-disrupt. Either can land in that window while the
+// owner set sits perfectly still, and the record then says "the node was clean"
+// over the top of a mark an engineer had just placed deliberately.
+//
+// The bill arrives at the LAST release, hours later and with no connection to
+// the window: a node a human took out of service is handed back to the
+// scheduler, or a pin somebody put on to keep a week-long training run away from
+// the autoscaler is lifted. Losing this test just means a re-read.
+func snapshotGuard(current *corev1.Node) []map[string]any {
+	var unschedulable any // null tests that the member is still ABSENT, i.e. false
+	if current.Spec.Unschedulable {
+		unschedulable = true
+	}
+	pin, pinned := current.Annotations[doNotDisruptAnnotation]
+	return []map[string]any{
+		{"op": "test", "path": "/spec/unschedulable", "value": unschedulable},
+		annotationTestOp(doNotDisruptAnnotation, pin, pinned),
+	}
+}
+
+// setAnnotationOp writes one annotation. "add" replaces an existing member
+// (RFC 6902), so it works whether or not the key is already there.
+func setAnnotationOp(key, value string) map[string]any {
+	return map[string]any{
+		"op": "add", "path": "/metadata/annotations/" + escapeJSONPointer(key), "value": value,
+	}
+}
+
+// encodeCordonOwners renders the owner set: sorted and de-duplicated, so the
+// same set always produces the same annotation value and the compare-and-swap
+// tests above cannot fail on ordering alone. JSON, not a comma-separated list,
+// because a legacy owner carries a whole reason string inside it and reasons are
+// written by humans.
+func encodeCordonOwners(owners []string) string {
+	sorted := slices.Clone(owners)
+	slices.Sort(sorted)
+	sorted = slices.Compact(sorted)
+	if len(sorted) == 0 {
+		// json.Marshal of a nil slice is the literal `null`, and every reader here
+		// decodes that back to an empty set without complaint — so an owner set
+		// that emptied by this route would sit on the node saying "present, and
+		// nobody holds it". The join and release paths both refuse to touch a node
+		// whose owner annotation is PRESENT, so that node could never be released
+		// by anything again. No caller writes an empty set today; this makes sure
+		// one that starts to cannot create that state.
+		return "[]"
+	}
+	encoded, err := json.Marshal(sorted)
+	if err != nil { // unreachable for []string
+		return "[]"
+	}
+	return string(encoded)
+}
+
+// decodeCordonOwners reads the owner set. An absent or empty annotation is an
+// empty set; anything present that does not parse is an ERROR rather than an
+// empty set, because treating a hand-edited annotation as "nobody holds this
+// node" would release a machine that may be mid-reset.
+func decodeCordonOwners(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var owners []string
+	if err := json.Unmarshal([]byte(raw), &owners); err != nil {
+		return nil, fmt.Errorf("annotation %s is not a JSON array of owners (%q): %w", cordonOwnersAnnotation, raw, err)
+	}
+	return owners, nil
 }
 
 // CordonedNodes lists the nodes this product cordoned and has not released.
@@ -519,35 +1171,102 @@ func (p *Platform) CordonedNodes(ctx context.Context) ([]platform.CordonedNode, 
 	if lp := p.nodeLister.Load(); lp != nil {
 		cached, err := (*lp).List(labels.Everything())
 		if err == nil {
-			var out []platform.CordonedNode
-			for _, node := range cached {
-				reason, ours := node.Annotations[cordonReasonAnnotation]
-				if !ours || !node.Spec.Unschedulable {
-					continue
-				}
-				_, held := node.Annotations[cordonHeldAnnotation]
-				out = append(out, platform.CordonedNode{Name: node.Name, Reason: reason, Held: held})
-			}
-			sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-			return out, nil
+			return collectCordonedNodes(cached), nil
 		}
 	}
 	nodes, err := p.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
-	var out []platform.CordonedNode
+	live := make([]*corev1.Node, len(nodes.Items))
 	for i := range nodes.Items {
-		node := &nodes.Items[i]
-		reason, ours := node.Annotations[cordonReasonAnnotation]
-		if !ours || !node.Spec.Unschedulable {
-			continue
-		}
-		_, held := node.Annotations[cordonHeldAnnotation]
-		out = append(out, platform.CordonedNode{Name: node.Name, Reason: reason, Held: held})
+		live[i] = &nodes.Items[i]
 	}
+	return collectCordonedNodes(live), nil
+}
+
+// collectCordonedNodes renders one whole listing, and publishes how much of the
+// fleet this pass had to give up on.
+//
+// The count is set here, over the complete listing, rather than incremented
+// where the giving-up happens: it is a statement about the fleet right now, so
+// it has to fall back to zero on its own when somebody fixes the annotation, and
+// it has to survive a controller restart without being replayed. Both paths in
+// CordonedNodes go through this so the two cannot report different fleets.
+func collectCordonedNodes(nodes []*corev1.Node) []platform.CordonedNode {
+	var out []platform.CordonedNode
+	unreadable := 0
+	for _, node := range nodes {
+		cordoned, ours, err := cordonedNodeFrom(node)
+		switch {
+		case err != nil:
+			// Left cordoned on purpose, but held out of the fleet by nothing that
+			// can be asked to let go — no owner, no incident row, and a log line
+			// that is printed once and never again. Somebody has to be able to see
+			// that the machine is gone.
+			unreadable++
+		case ours:
+			out = append(out, cordoned)
+		}
+	}
+	metrics.CordonsUnreadable.Set(float64(unreadable))
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
+	return out
+}
+
+// corruptOwnerSets remembers which unreadable owner sets have been reported, so
+// a hand-edited annotation is not warned about on every reconcile tick until
+// people stop reading the log.
+var corruptOwnerSets sync.Map
+
+// cordonedNodeFrom decides whether one node carries a cordon this product placed
+// and renders it for the janitor.
+//
+// The three answers are deliberately distinct. Not ours, ours, and OURS BUT
+// UNREADABLE — the last is a machine held out of the fleet that nothing will
+// ever release, and collapsing it into "not ours" is what made that state
+// invisible. It is the only one of the three anybody needs to be told about, so
+// it is the only one that is an error.
+func cordonedNodeFrom(node *corev1.Node) (platform.CordonedNode, bool, error) {
+	reason, hasReason := node.Annotations[cordonReasonAnnotation]
+	raw, hasOwners := node.Annotations[cordonOwnersAnnotation]
+	if (!hasReason && !hasOwners) || !node.Spec.Unschedulable {
+		return platform.CordonedNode{}, false, nil
+	}
+	owners, err := decodeCordonOwners(raw)
+	if err != nil {
+		// Fail closed: reporting the node with no owners would send the janitor
+		// down the single-owner path and release a machine that several
+		// remediations may be holding. Leaving it out keeps it cordoned, which is
+		// the recoverable direction, and says so once.
+		reportUnreadableCordonSet(node.Name, cordonOwnersAnnotation, raw, err)
+		return platform.CordonedNode{}, false, err
+	}
+	rawHeld := node.Annotations[cordonHeldOwnersAnnotation]
+	heldOwners, err := decodeCordonOwners(rawHeld)
+	if err != nil {
+		// Same direction, and for a sharper reason: this annotation is the record
+		// of which holds a HUMAN has taken charge of. Reporting the node without
+		// it tells the janitor nobody owns any of them, and the next pass hands
+		// back a machine somebody deliberately took out of service.
+		reportUnreadableCordonSet(node.Name, cordonHeldOwnersAnnotation, rawHeld, err)
+		return platform.CordonedNode{}, false, err
+	}
+	_, held := node.Annotations[cordonHeldAnnotation]
+	return platform.CordonedNode{
+		Name: node.Name, Reason: reason, Owners: owners, Held: held, HeldOwners: heldOwners,
+	}, true, nil
+}
+
+// reportUnreadableCordonSet says once that a cordon annotation cannot be parsed
+// and the node is therefore being left alone.
+func reportUnreadableCordonSet(node, annotation, value string, err error) {
+	if _, warned := corruptOwnerSets.LoadOrStore(node+"\x00"+annotation+"\x00"+value, struct{}{}); warned {
+		return
+	}
+	slog.Warn("a node's cordon owner annotation cannot be read, so it is left cordoned and "+
+		"out of the janitor's reach; fix or remove the annotation by hand",
+		"node", node, "annotation", annotation, "value", value, "err", err)
 }
 
 // UncordonIfReason implements platform.CordonJanitor.
@@ -565,6 +1284,14 @@ func (p *Platform) UncordonIfReason(ctx context.Context, node, expectedReason st
 	if current.Annotations[cordonReasonAnnotation] != expectedReason {
 		return false, nil // replaced since we listed it; not ours to release
 	}
+	if countedCordon(current.Annotations) {
+		// This node's cordon is reference-counted and the reason belongs to
+		// whichever remediation cordoned LAST. Releasing on the reason alone
+		// would put the machine back into service while the other owners are
+		// still resetting GPUs on it, which is the defect the owner set exists to
+		// close. ReleaseCordonOwners is the only way out of a shared cordon.
+		return false, nil
+	}
 	keepUnschedulable, keepPinned, known := priorMarks(current.Annotations)
 	if !known {
 		unknownRestoreRecord(node)
@@ -575,11 +1302,17 @@ func (p *Platform) UncordonIfReason(ctx context.Context, node, expectedReason st
 		"path":  "/metadata/annotations/" + escapeJSONPointer(cordonReasonAnnotation),
 		"value": expectedReason,
 	}, {
-		"op": "replace", "path": "/spec/unschedulable", "value": keepUnschedulable,
+		// "add", not "replace": spec.unschedulable is omitted entirely when
+		// false, so a human uncordoning the node by hand while the remediation
+		// ran would make a replace fail forever and strand our annotations on it.
+		"op": "add", "path": "/spec/unschedulable", "value": keepUnschedulable,
 	}, {
 		"op": "remove", "path": "/metadata/annotations/" + escapeJSONPointer(cordonReasonAnnotation),
 	}}
-	for _, ann := range []string{cordonRestoreAnnotation, cordonHeldAnnotation} {
+	for _, ann := range cordonAnnotations {
+		if ann == cordonReasonAnnotation {
+			continue // already removed unconditionally above
+		}
 		if _, present := current.Annotations[ann]; present {
 			ops = append(ops, map[string]any{
 				"op": "remove", "path": "/metadata/annotations/" + escapeJSONPointer(ann),
@@ -625,6 +1358,23 @@ func (p *Platform) MarkCordonHeldIfReason(ctx context.Context, node, expectedRea
 	}
 	if current.Annotations[cordonReasonAnnotation] != expectedReason {
 		return false, nil // replaced since we listed it; not ours to mark
+	}
+	if countedCordon(current.Annotations) {
+		// The mark this writes is NODE-scoped, and on a reference-counted cordon
+		// CordonedNode.HeldBy deliberately refuses to read it — a node-scoped
+		// verdict answers "a human owns this" for every other remediation on the
+		// machine and strands their holds forever. So a verdict written here onto
+		// a counted cordon is invisible to everything that acts on it: recorded,
+		// and worth nothing. The janitor then releases the hold the moment
+		// retention prunes its incident row, handing back a machine somebody took
+		// out of service deliberately.
+		//
+		// This is reachable, not defensive. The janitor chooses between this and
+		// MarkCordonHeldIfOwner from an informer listing, so a node listed before
+		// its first owner joined is counted by the time the write lands. Refusing
+		// costs one reconcile tick: the next listing shows the owner set and the
+		// verdict is recorded against the hold it was reached about.
+		return false, nil
 	}
 	ops := []map[string]any{{
 		"op":    "test",
@@ -709,14 +1459,29 @@ func (p *Platform) Uncordon(ctx context.Context, node string) error {
 	if err != nil {
 		return fmt.Errorf("reading %s before uncordoning it: %w", node, err)
 	}
+	if countedCordon(current.Annotations) {
+		// This node is held by a counted set of remediations and this call
+		// carries no owner, so it cannot know whether it is the last one out.
+		// Releasing anyway returns a machine to the scheduler while another
+		// incident is still resetting a GPU on it. Callers that know who they are
+		// use ReleaseCordonOwners; this one does nothing and says so.
+		slog.Warn("refusing an unowned uncordon of a node several remediations hold; "+
+			"release it through the owner set instead",
+			"node", node, "owners", current.Annotations[cordonOwnersAnnotation])
+		return nil
+	}
 	keepUnschedulable, keepPinned, known := priorMarks(current.Annotations)
 	if !known {
 		unknownRestoreRecord(node)
 	}
 
-	annotations := map[string]*string{
-		cordonReasonAnnotation:  nil,
-		cordonRestoreAnnotation: nil,
+	// The held marks go too. They deliberately OUTLIVE the incident row, so one
+	// left behind on a node that is back in service is read by the next janitor
+	// pass as "a human owns this cordon" — and the next incident to cordon this
+	// machine can then never have its cordon cleaned up.
+	annotations := map[string]*string{}
+	for _, ann := range cordonAnnotations {
+		annotations[ann] = nil
 	}
 	if !keepPinned {
 		annotations[doNotDisruptAnnotation] = nil

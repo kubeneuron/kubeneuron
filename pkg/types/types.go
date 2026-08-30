@@ -92,10 +92,72 @@ type Target struct {
 	Node     string `json:"node"`
 	GPUUUID  string `json:"gpu_uuid,omitempty"`
 	GPUIndex int    `json:"gpu_index,omitempty"`
+	// PCIAddr is the device's normalized bus address (types.NormalizePCIAddress),
+	// empty when the signal's source did not name one.
+	//
+	// It exists because GPUUUID alone is not a complete device identity at the
+	// moment it is needed most. A kernel fault that knocks a GPU off the bus
+	// names the device by PCI address and CANNOT name it by UUID: nvidia-smi
+	// no longer lists it. Before this field, every such incident was addressed
+	// as "some GPU on this node", which had two consequences an operator paid
+	// for. Two different unattributed GPUs on one node became one incident,
+	// because nothing in the key told them apart. And when the vendor tool
+	// resolved the same PCI address to a real UUID seconds later, that precise
+	// signal was discarded as a duplicate of the vague one, so the incident
+	// stayed unattributed and — after the ladder had already cordoned and
+	// drained the node — was refused a reset and parked for a human with
+	// "reset target unattributed".
+	//
+	// It is therefore matched on, not merely reported: it distinguishes two
+	// unattributed devices, and it is the key the store promotes an
+	// unattributed incident onto its real UUID by.
+	//
+	// Always store the normalized form. Sources spell the address differently
+	// (see NormalizePCIAddress) and a raw value here would compare unequal to
+	// itself across sources.
+	PCIAddr string `json:"pci_addr,omitempty"`
 }
 
 // IsGPU reports whether the target is a single GPU rather than a whole node.
 func (t Target) IsGPU() bool { return t.GPUUUID != "" }
+
+// IsDeviceScoped reports whether the target is about ONE accelerator rather
+// than the whole machine.
+//
+// Distinct from IsGPU, which asks only whether a UUID is known. A target
+// carrying a bus address but no UUID names exactly one physical device — the
+// card that fell off the bus — and the two questions came apart the day two
+// unattributed GPUs on one node stopped collapsing into a single incident.
+//
+// Ask this wherever the answer decides how much capacity an incident covers.
+// Both capacity counters used to ask IsGPU there, so a PCI-only incident was
+// charged the node's ENTIRE inventory; with one incident per device, an 8-GPU
+// node losing its PCIe switch billed 64 GPU-seconds per second.
+func (t Target) IsDeviceScoped() bool { return t.GPUUUID != "" || t.PCIAddr != "" }
+
+// IsUnattributed reports whether the target names a device that has not been
+// resolved to a GPU UUID. Such a target can still name a physical device
+// through PCIAddr; that is what makes an incident on it promotable rather than
+// permanently unfixable.
+func (t Target) IsUnattributed() bool { return t.GPUUUID == "" }
+
+// AgentResultGrace is how long AFTER an action's own deadline its result is
+// still accepted.
+//
+// An action's lease used to end exactly at its deadline, which made a
+// timing-out action's result unreportable by construction: the executor
+// cancels the work at T, POSTs the reason a moment later, and the store's
+// completion predicate requires the lease to still be live. So the one result
+// worth having — WHY it timed out, which processes still held the device — was
+// the one guaranteed to be rejected, and the controller saw a generic timeout
+// instead. The action then looked reclaimable and could be dispatched again;
+// for the shipped 12h WaitIdle rung that is another twelve hours.
+//
+// It lives here because three components must agree on it: the store sizes the
+// lease with it, the controller waits this much longer than the agent's budget
+// for an answer, and the agent reports inside it. Two of those knew the number
+// and the third did not.
+const AgentResultGrace = 15 * time.Second
 
 // ProblemClass is a normalized failure category. Signals from different
 // sources (XID events, vmalert alerts) map into the same class so the policy
@@ -150,6 +212,18 @@ type Signal struct {
 	Source     SignalSource      `json:"source"`
 	Evidence   map[string]string `json:"evidence,omitempty"` // e.g. xid, raw kmsg line, alert labels
 	ObservedAt time.Time         `json:"observed_at"`
+}
+
+// Vendor is the accelerator vendor this signal names, or "" when it says
+// nothing. Detectors carry it in Evidence because not every source knows one:
+// an Alertmanager rule or a bare kernel line may not.
+//
+// One accessor rather than the map lookup spelled at each site, because the
+// answer now decides which remediation ladder runs. An NVIDIA reset ladder
+// selected for an AMD card is not a failed step, it is the wrong hammer on
+// somebody's hardware.
+func (s Signal) Vendor() AcceleratorVendor {
+	return AcceleratorVendor(s.Evidence["vendor"])
 }
 
 // IncidentState is a state of the per-target incident state machine.

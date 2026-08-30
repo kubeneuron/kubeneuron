@@ -417,7 +417,9 @@ func degradedInterval(inc *types.Incident, now time.Time) (start, end time.Time)
 // inventory counts as one and is reported as an assumption, because
 // undercounting is the honest failure direction for a capacity number.
 func affectedGPUCount(inc *types.Incident, gpusPerNode map[string]int) (gpus int, assumed bool) {
-	if inc.Target.IsGPU() {
+	// The same rule as affectedGPUs, asked of the same predicate, because these
+	// two numbers are supposed to agree and drifted apart once already.
+	if inc.Target.IsDeviceScoped() {
 		return 1, false
 	}
 	if n := gpusPerNode[inc.Target.Node]; n > 0 {

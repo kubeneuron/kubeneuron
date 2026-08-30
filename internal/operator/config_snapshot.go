@@ -776,7 +776,10 @@ func compilePolicies(
 			return nil, fmt.Errorf("policy %q references missing playbook %q", policy.Name, policy.Spec.PlaybookRef)
 		}
 		result = append(result, config.Policy{
-			Match:    config.Match{Class: types.ProblemClass(policy.Spec.Match.Class)},
+			Match: config.Match{
+				Class:  types.ProblemClass(policy.Spec.Match.Class),
+				Vendor: types.AcceleratorVendor(policy.Spec.Match.Vendor),
+			},
 			Playbook: policy.Spec.PlaybookRef,
 			Params:   copyStringMap(policy.Spec.Parameters),
 		})

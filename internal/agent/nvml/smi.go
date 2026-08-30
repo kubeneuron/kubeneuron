@@ -157,7 +157,7 @@ func (s *SMI) refresh(ctx context.Context) ([]smiGPU, error) {
 				UUID:  uuid,
 				Model: strings.TrimSpace(fields[2]),
 			},
-			pci: NormalizePCI(strings.TrimSpace(fields[3])),
+			pci: types.NormalizePCIAddress(fields[3]),
 		})
 	}
 	if len(gpus) == 0 {
@@ -186,7 +186,7 @@ func (s *SMI) ListGPUs(ctx context.Context) ([]types.GPUInfo, error) {
 // "0000:3b:00" while nvidia-smi reports "00000000:3B:00.0"; both normalize
 // to the same "dddd:bb:dd" key.
 func (s *SMI) GPUByPCIAddr(ctx context.Context, pciAddr string) (types.GPUInfo, error) {
-	want := NormalizePCI(pciAddr)
+	want := types.NormalizePCIAddress(pciAddr)
 	s.mu.Lock()
 	cached := s.gpus
 	s.mu.Unlock()
@@ -406,29 +406,6 @@ func (s *SMI) DriverVersion(ctx context.Context) (string, error) {
 		}
 	}
 	return version, nil
-}
-
-// NormalizePCI reduces the PCI address spellings seen in kmsg XID lines and
-// nvidia-smi output to one comparable "dddd:bb:dd" form: lowercase, function
-// suffix dropped, domain trimmed/padded to four hex digits.
-func NormalizePCI(addr string) string {
-	a := strings.ToLower(strings.TrimSpace(addr))
-	if i := strings.LastIndexByte(a, '.'); i >= 0 {
-		a = a[:i] // drop the PCI function (".0")
-	}
-	parts := strings.Split(a, ":")
-	if len(parts) == 2 {
-		parts = append([]string{"0000"}, parts...) // no domain printed
-	}
-	if len(parts) != 3 {
-		return a
-	}
-	domain := strings.TrimLeft(parts[0], "0")
-	if len(domain) > 4 {
-		return a
-	}
-	domain = strings.Repeat("0", 4-len(domain)) + domain
-	return domain + ":" + parts[1] + ":" + parts[2]
 }
 
 func firstLine(out []byte) string {

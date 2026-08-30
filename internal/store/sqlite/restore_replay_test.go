@@ -361,3 +361,120 @@ func TestPruneRemovesEveryTerminalOutboxState(t *testing.T) {
 		})
 	}
 }
+
+// TestATimingOutActionCanStillReportWhyItTimedOut covers a result that was
+// unreportable by construction.
+//
+// The lease used to end exactly at the action's own deadline. The executor
+// cancels the work at T and POSTs the reason a moment later, and the
+// completion predicate requires lease_expires_at_ns > now — so the ONE result
+// worth having was the one guaranteed to be refused. The controller saw a bare
+// timeout with no cause, and the row read as reclaimable, so the action could
+// be handed out again.
+//
+// Driven with the shipped WaitIdle rung's 12h budget, because that is where it
+// costs most: the reason is "GPU 0 still has 3 processes on it", the controller
+// never hears it, and the redispatch is another twelve hours of a card held out
+// of service.
+func TestATimingOutActionCanStillReportWhyItTimedOut(t *testing.T) {
+	s := openLeaseTestStore(t)
+	ctx := context.Background()
+	const id = "act-waitidle"
+	const budget = 12 * time.Hour
+
+	if err := s.EnqueueAction(ctx, "node-a", types.Action{
+		ID: id, Type: types.ActionWaitIdle, Timeout: budget,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := s.ClaimNextAction(ctx, "node-a", "boot-1", budget)
+	if err != nil || claimed == nil {
+		t.Fatalf("claiming: %v", err)
+	}
+
+	// The lease must survive the action's own deadline, or the agent has
+	// nowhere to put the answer.
+	var leaseNS int64
+	if err := s.sqlDB.QueryRowContext(ctx,
+		`SELECT lease_expires_at_ns FROM actions WHERE id=?`, id).Scan(&leaseNS); err != nil {
+		t.Fatal(err)
+	}
+	remaining := time.Until(time.Unix(0, leaseNS))
+	if remaining <= budget {
+		t.Fatalf("the lease expires %s from now, at or before the action's own %s deadline; a "+
+			"result POSTed the moment the work is cancelled is refused, so the controller "+
+			"gets a timeout with no cause and the action can be dispatched again",
+			remaining.Round(time.Second), budget)
+	}
+
+	// And the reason really is accepted at that boundary: wind the lease back
+	// to exactly the deadline plus the grace, as it will be in production, and
+	// complete.
+	if _, err := s.sqlDB.ExecContext(ctx,
+		`UPDATE actions SET lease_expires_at_ns=? WHERE id=?`,
+		time.Now().Add(types.AgentResultGrace).UnixNano(), id); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompleteClaimedAction(ctx, id, claimed.LeaseToken, "boot-1",
+		types.ActionResult{
+			ActionID: id, OK: false,
+			Output: "GPU-a still has 3 compute processes after 12h",
+		}); err != nil {
+		t.Fatalf("the agent could not report why the action timed out: %v", err)
+	}
+
+	got, err := s.GetAction(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Result == nil || got.Result.Output == "" {
+		t.Fatal("the action completed with no reason recorded; the controller has a timeout and " +
+			"nothing to tell an operator about it")
+	}
+}
+
+// TestANodeScopedSignalDoesNotJoinADeviceIncident covers a seam between two
+// changes: adding a bus address to the target, and the lookup that decides
+// which incident a signal belongs to.
+//
+// The node-scoped branch constrained gpu_uuid alone — and every PCI-only
+// incident has an empty gpu_uuid too. So a node-level alert or a manual trigger
+// joined the oldest same-class DEVICE incident: the node's fault advanced a
+// ladder aimed at one card, up to and including resetting it, while the
+// node-scoped problem never opened an incident of its own.
+func TestANodeScopedSignalDoesNotJoinADeviceIncident(t *testing.T) {
+	s := openLeaseTestStore(t)
+	ctx := context.Background()
+
+	device := &types.Incident{
+		ID: "inc-device", Class: types.ClassECCDBE, State: types.StateOpen,
+		Target:   types.Target{Node: "n1", PCIAddr: "0000:3b:00"},
+		OpenedAt: time.Now(), UpdatedAt: time.Now(), StateChangedAt: time.Now(),
+	}
+	if err := s.CreateIncident(ctx, device); err != nil {
+		t.Fatal(err)
+	}
+
+	// A node-scoped signal: no UUID, no bus address.
+	got, err := s.GetOpenIncident(ctx, types.Target{Node: "n1"}, types.ClassECCDBE)
+	if err == nil && got != nil {
+		t.Fatalf("a node-scoped signal joined %q, an incident about the card at %s; the node's "+
+			"fault would drive that card's ladder and could reset it, and the node-scoped "+
+			"problem would never open an incident of its own",
+			got.ID, got.Target.PCIAddr)
+	}
+
+	// And a node-scoped incident is still found by a node-scoped signal.
+	nodeWide := &types.Incident{
+		ID: "inc-node", Class: types.ClassECCDBE, State: types.StateOpen,
+		Target:   types.Target{Node: "n1"},
+		OpenedAt: time.Now(), UpdatedAt: time.Now(), StateChangedAt: time.Now(),
+	}
+	if err := s.CreateIncident(ctx, nodeWide); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetOpenIncident(ctx, types.Target{Node: "n1"}, types.ClassECCDBE)
+	if err != nil || got == nil || got.ID != "inc-node" {
+		t.Fatalf("a node-scoped signal did not find its own node-scoped incident: %v %v", got, err)
+	}
+}

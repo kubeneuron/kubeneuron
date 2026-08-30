@@ -32,7 +32,10 @@ const (
 	defaultReconcileInterval = 10 * time.Second
 	// agentResultGrace is how much longer the controller waits than the agent's
 	// own action budget, so a failing action's reason survives the deadline.
-	agentResultGrace = 15 * time.Second
+	// The store sizes the action lease with the same value — see
+	// types.AgentResultGrace — because a controller willing to hear an answer
+	// the store will refuse to accept is worse than not waiting at all.
+	agentResultGrace = types.AgentResultGrace
 	// defaultStepTimeout bounds a step whose playbook declares no timeout. It is
 	// generous — a drain or a reboot can legitimately take many minutes — because
 	// its job is not pacing but leak prevention: without any bound, a step whose
@@ -140,7 +143,11 @@ func (c *Controller) advanceObserving(ctx context.Context, inc *types.Incident) 
 	// snapshot. Bound incidents are never re-bound — selection changes must
 	// not move a mid-ladder incident between playbooks.
 	if inc.Playbook == "" {
-		if book, ok := c.runtimeConfig(ctx).Engine.Select(types.Signal{Class: inc.Class}); ok && book != nil {
+		// SelectFor, not a reconstructed Signal: building one from the class
+		// alone dropped the incident's vendor, so an incident that raced a
+		// vendor-scoped policy rollout could never late-bind to it and would
+		// quietly resolve with no ladder at all.
+		if book, ok := c.runtimeConfig(ctx).Engine.SelectFor(inc.Class, inc.Vendor); ok && book != nil {
 			// Field-only rewrite: bump StateChangedAt — the WRITE-FENCE —
 			// so a concurrent transition off a stale snapshot conflicts
 			// instead of silently overwriting the bind.
@@ -157,7 +164,7 @@ func (c *Controller) advanceObserving(ctx context.Context, inc *types.Incident) 
 				"incident", inc.ID, "class", inc.Class, "playbook", book.Name)
 		}
 	}
-	threshold, window := c.observePolicy(ctx, inc.Class)
+	threshold, window := c.observePolicy(ctx, inc.Class, inc.Vendor)
 	if threshold > 0 && inc.SignalSeen >= threshold {
 		// Only escalate to EVALUATING when a playbook is actually bound to act on.
 		// A threshold-crossed class with no bound playbook (a CRD-compiled policy
@@ -739,8 +746,17 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 	}
 	if release && c.gate != nil {
 		// Halted: the remediation is over, whatever route it took — resolved,
-		// expired, or parked for a human. Hand back the target's slot.
-		c.gate.ReleaseRemediation(inc.Target)
+		// expired, or parked for a human. Hand back the slot under the key it
+		// was actually reserved with.
+		//
+		// NOT inc.Target. A step goroutine carries the incident as it was when
+		// the step began, and a precise signal can promote the incident onto
+		// its GPU UUID while that step runs — so this used to release the
+		// pre-promotion key and miss the live reservation entirely. The slot
+		// then stayed held for the life of the process, against an incident
+		// that had already finished, and unrelated nodes were refused
+		// remediation by a cap that was silently one short.
+		c.gate.ReleaseRemediation(c.takeRemediationSlotTarget(inc.ID, inc.Target))
 	}
 	// Any committed transition ends the arming-in-flight hold epoch: if the
 	// incident re-enters EVALUATING later, the propagation grace starts over
@@ -852,7 +868,8 @@ func (c *Controller) DegradedGPUs(ctx context.Context) (map[metrics.DegradedKey]
 }
 
 // affectedGPUs is how many accelerators the incident covered: one for a
-// GPU-scoped incident, the node's whole inventory for a node-scoped one.
+// DEVICE-scoped incident (a UUID or a bus address names one card), the node's
+// whole inventory for a node-scoped one.
 // Unknown inventory counts as one — undercounting is the honest failure
 // direction for a capacity number.
 //
@@ -863,7 +880,9 @@ func (c *Controller) DegradedGPUs(ctx context.Context) (map[metrics.DegradedKey]
 // reporting-side twin of this fallback is Report.AssumedSingleGPU, which
 // counts how often it was taken.
 func (c *Controller) affectedGPUs(ctx context.Context, inc *types.Incident) int {
-	if inc.Target.IsGPU() {
+	// One device, whether or not we know its UUID. A bus address names a card
+	// as precisely as a UUID does for this purpose — see IsDeviceScoped.
+	if inc.Target.IsDeviceScoped() {
 		return 1
 	}
 	node, err := c.store.GetNode(ctx, inc.Target.Node)
@@ -913,12 +932,15 @@ func (c *Controller) setInFlight(id string, v bool) {
 // threshold ("XID 13 is actionable after 3 occurrences in 1h") applies, so
 // the documented catalog semantics are enforced rather than advisory.
 // threshold 0 means "never auto-escalate".
-func (c *Controller) observePolicy(ctx context.Context, class types.ProblemClass) (threshold int, window time.Duration) {
+// The vendor is part of the lookup: an AMD incident reading an NVIDIA policy's
+// threshold escalates on another vendor's timing, which is a decision nobody
+// made about hardware nobody looked at.
+func (c *Controller) observePolicy(ctx context.Context, class types.ProblemClass, vendor types.AcceleratorVendor) (threshold int, window time.Duration) {
 	window = defaultObserveWindow
 	if catThreshold, catWindow, ok := c.runtimeConfig(ctx).Catalog.ObservePolicy(class); ok {
 		threshold, window = catThreshold, catWindow
 	}
-	pol, ok := c.runtimeConfig(ctx).Engine.PolicyFor(class)
+	pol, ok := c.runtimeConfig(ctx).Engine.PolicyFor(class, vendor)
 	if !ok {
 		return threshold, window
 	}

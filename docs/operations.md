@@ -86,6 +86,56 @@ Three independent mechanisms, all fail toward not acting:
    optional `matchLabels` node selector. Incidents hold their position and
    continue after the window closes; recorded approvals survive the wait.
 
+## Taking a node over from a remediation
+
+KubeNeuron cordons a node while it remediates it, and returns it to the
+scheduler when the last incident holding that cordon finishes. If you decide the
+node should stay out of service — a bad riser, an RMA raised, anything you want
+to look at yourself — say so with an annotation:
+
+```sh
+kubectl annotate node <node> \
+  kubeneuron.io/cordon-handoff="bad riser, RMA 12345 — leave it down"
+```
+
+**The node will not return to the fleet until you remove that annotation.** That
+is the point of it, and it is the whole cost: capacity stays withheld until
+somebody acts.
+
+```sh
+# When you are done, hand it back.
+kubectl annotate node <node> kubeneuron.io/cordon-handoff-
+kubectl uncordon <node>
+```
+
+Cordoning the node yourself is **not** enough, and this is worth understanding
+before you rely on it. KubeNeuron records what the node looked like before it
+cordoned it, and restores that. An engineer who cordons a node KubeNeuron has
+already cordoned sets exactly the value KubeNeuron set — there is only one such
+flag — so the restore cannot tell the two apart and hands the machine back. The
+annotation is the one signal KubeNeuron never writes itself, which is why it is
+the one it can trust.
+
+What the handoff does and does not do:
+
+- It prevents **only** the return to a schedulable state. Nothing else about the
+  remediation changes: the ladder runs, incidents resolve, and steps execute as
+  they otherwise would.
+- KubeNeuron still removes its own `kubeneuron.io/cordon-*` bookkeeping when the
+  last holder leaves, so the node does not accumulate stuck-cordon reports for
+  an incident that has finished.
+- It never touches your annotation, and it leaves the node's unschedulable flag and any
+  `karpenter.sh/do-not-disrupt` pin exactly as they are — the pin stays so a
+  machine you are working on is not consolidated out from under you. Remove it
+  yourself if you no longer want it.
+- It is distinct from `kubeneuron.io/cordon-held`, which KubeNeuron sets itself
+  when an incident halts and a human has to decide. The handoff is your claim on
+  a node whose remediation may be finishing perfectly normally.
+
+The check is made against the live object at the moment of the write, so
+annotating a node while a release is already in flight is safe: the write is
+rejected and retried, and the retry sees your claim.
+
 ## Draining the controller's own node
 
 `kubectl drain` on the node running the controller **will hang, by design.**
@@ -109,11 +159,16 @@ kubectl -n kube-neuron get pod -l app.kubernetes.io/component=controller -o wide
 kubeneuronctl pause
 kubeneuronctl incidents --state EXECUTING     # expect none
 
+# The operator reconciles the controller's replica count, so stop it first or
+# the controller comes straight back.
+kubectl -n kube-neuron-system scale deploy/kubeneuron-operator --replicas=0
 kubectl -n kube-neuron scale deployment/kubeneuron-controller --replicas=0
+kubectl -n kube-neuron wait --for=delete pod \
+  -l app.kubernetes.io/component=controller --timeout=2m
 kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
 # ... maintenance ...
 kubectl uncordon <node>
-kubectl -n kube-neuron scale deployment/kubeneuron-controller --replicas=1
+kubectl -n kube-neuron-system scale deploy/kubeneuron-operator --replicas=1
 kubeneuronctl resume
 ```
 
@@ -150,10 +205,26 @@ helper pod holding the volume — `deploy/kubernetes/backup/restore-helper.yaml`
 is that pod:
 
 ```sh
+# 0. Stop the OPERATOR first, or none of this works.
+#    The operator owns the controller Deployment's replica count and
+#    reconciles a manual scale straight back to one. Skip this and step 1
+#    appears to succeed, the controller returns within a reconcile, and step 3
+#    replaces the database file underneath a running writer — corrupting the
+#    database this procedure exists to restore.
+kubectl -n kube-neuron-system scale deploy/kubeneuron-operator --replicas=0
+kubectl -n kube-neuron-system wait --for=delete pod \
+  -l app.kubernetes.io/name=kubeneuron-operator --timeout=2m
+
 # 1. Stop the controller so nothing writes the database (and the RWO claim
 #    is released).
+#
+#    Wait for the POD, not for `rollout status`. With the replica count at
+#    zero, every condition rollout status checks is trivially true the instant
+#    after the scale, so it reports success while the Pod is still running and
+#    still serving.
 kubectl -n <ns> scale deploy/<name>-controller --replicas=0
-kubectl -n <ns> rollout status deploy/<name>-controller --timeout=2m
+kubectl -n <ns> wait --for=delete pod \
+  -l app.kubernetes.io/component=controller --timeout=2m
 
 # 2. Mount the state volume somewhere with a shell.
 kubectl -n <ns> apply -f deploy/kubernetes/backup/restore-helper.yaml
@@ -167,9 +238,13 @@ kubectl -n <ns> exec kubeneuron-restore-helper -- \
   sh -c 'rm -f /state/kubeneuron.db-wal /state/kubeneuron.db-shm; ls -l /state'
 
 # 4. Release the volume and bring the controller back.
+#    Restarting the OPERATOR is what restores the replica count; scaling the
+#    Deployment by hand here would be undone by the next reconcile anyway.
 kubectl -n <ns> delete pod kubeneuron-restore-helper --wait=true
-kubectl -n <ns> scale deploy/<name>-controller --replicas=1
-kubectl -n <ns> rollout status deploy/<name>-controller --timeout=5m
+kubectl -n kube-neuron-system scale deploy/kubeneuron-operator --replicas=1
+#    Again: not `rollout status`. Until the operator reconciles, the controller
+#    is still at zero replicas, and rollout status calls that rolled out.
+kubectl -n <ns> wait --for=condition=Available deploy/<name>-controller --timeout=5m
 
 # 5. Verify against what you expect from the snapshot's age.
 kubeneuronctl incidents --state RESOLVED | head
