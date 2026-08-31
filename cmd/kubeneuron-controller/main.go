@@ -36,7 +36,6 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/notify/slack"
 	"github.com/kubeneuron/kubeneuron/internal/notify/webhook"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
-	"github.com/kubeneuron/kubeneuron/internal/platform/baremetal"
 	"github.com/kubeneuron/kubeneuron/internal/platform/kubernetes"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
@@ -112,11 +111,10 @@ func main() {
 		leaderElect            = flag.Bool("leader-elect", false, "enable Lease-based leader election; standbys stay unready so Services route to the single leader")
 		leaderElectionNS       = flag.String("leader-election-namespace", os.Getenv("POD_NAMESPACE"), "namespace for the leader-election Lease (default: POD_NAMESPACE)")
 		leaderElectionName     = flag.String("leader-election-name", "", "Lease name (default: <installation-name>-controller)")
-		platformName           = flag.String("platform", "kubernetes", "platform: kubernetes | baremetal")
+		platformName           = flag.String("platform", "kubernetes", "platform: kubernetes")
 		cloudProvider          = flag.String("cloud-provider", "", "cloud provider for node recycle/replace: empty (disabled) | aws. AWS needs an IRSA role with ec2:Stop/Start/Terminate/DescribeInstances.")
 		cloudRegion            = flag.String("cloud-region", os.Getenv("AWS_REGION"), "cloud region for the provider (default: AWS_REGION)")
 		kubeconfig             = flag.String("kubeconfig", "", "kubeconfig path (out-of-cluster)")
-		inventoryPath          = flag.String("inventory", "", "bare-metal inventory YAML")
 		showVersion            = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -145,7 +143,7 @@ func main() {
 		mappings:    *mappingsPath,
 		nodeConfigs: *nodeConfigsPath,
 		playbooks:   *playbooksDir,
-	}, *dbPath, *platformName, *kubeconfig, *inventoryPath, *apiTokenFile, *apiAuthnKubernetes, humanAuth{
+	}, *dbPath, *platformName, *kubeconfig, *apiTokenFile, *apiAuthnKubernetes, humanAuth{
 		usersDir:           *authUsersDir,
 		oidcIssuer:         *oidcIssuer,
 		oidcClientID:       *oidcClientID,
@@ -216,9 +214,15 @@ type electionConfig struct {
 	name      string
 }
 
-func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, paths runtimeConfigPaths, dbPath, platformName, kubeconfig, inventoryPath, apiTokenFile string, apiAuthnKubernetes bool, auth humanAuth, webhookTokenFile string, notifyCfg notifyFiles, startPaused bool, storeRetention, auditRetention time.Duration, publicTLSCert, publicTLSKey, storeKind, postgresDSNFile string, election electionConfig, cloudProvider, cloudRegion string) error {
+func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, paths runtimeConfigPaths, dbPath, platformName, kubeconfig, apiTokenFile string, apiAuthnKubernetes bool, auth humanAuth, webhookTokenFile string, notifyCfg notifyFiles, startPaused bool, storeRetention, auditRetention time.Duration, publicTLSCert, publicTLSKey, storeKind, postgresDSNFile string, election electionConfig, cloudProvider, cloudRegion string) error {
 	if (publicTLSCert == "") != (publicTLSKey == "") {
 		return fmt.Errorf("public TLS requires both -public-tls-cert and -public-tls-key")
+	}
+	if platformName != "kubernetes" {
+		if platformName == "baremetal" {
+			return fmt.Errorf("-platform baremetal is not supported by this controller build: the authenticated agent API requires Kubernetes workload identity")
+		}
+		return fmt.Errorf("unsupported platform %q: this controller build supports kubernetes only", platformName)
 	}
 	cfg, err := config.Load(paths.policies)
 	if err != nil {
@@ -281,13 +285,8 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 			kubePlatform.SetInstanceRecycler(recycler)
 			log.Info("cloud node recycling enabled", "provider", cloudProvider)
 		}
-	case "baremetal":
-		plat, err = baremetal.New(inventoryPath, baremetal.Hooks{})
-		if err != nil {
-			return fmt.Errorf("baremetal platform: %w", err)
-		}
 	default:
-		return fmt.Errorf("unknown platform %q", platformName)
+		return fmt.Errorf("unsupported platform %q: this controller build supports kubernetes only", platformName)
 	}
 
 	gate := safety.NewGate(safety.Limits{
@@ -305,7 +304,9 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 		return fmt.Errorf("restore flap history: %w", err)
 	}
 	if startPaused {
-		gate.Pause()
+		if err := gate.SetPaused(true, "startup"); err != nil {
+			return fmt.Errorf("persist start-paused state: %w", err)
+		}
 		log.Warn("starting with automated remediation PAUSED; resume via the operator API or kubeneuronctl resume")
 	}
 
@@ -406,6 +407,10 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	}
 	ctrl := controller.New(st, st, engine, gate, flap, plat, act, notifier, log)
 	api := httpapi.New(ctrl)
+	// Install the leader fence before either listener starts.  A standby may be
+	// addressed directly even though it is unready, so readiness alone cannot
+	// protect the short startup interval before leader election begins.
+	api.SetReadyCheck(leading.Load)
 	// Install the full runtime configuration in place, and keep it current by
 	// watching the mounted files rather than by rolling the Deployment — see
 	// applyRuntimeConfig for why a rollout cannot work under leader election.
@@ -635,8 +640,6 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 		serverErr <- serve("agent mTLS", secureAgentServer.ListenAndServeTLS(agentServer.TLSCertFile, agentServer.TLSKeyFile))
 		stop()
 	}()
-
-	api.SetReadyCheck(leading.Load)
 
 	if election.enabled {
 		if kubePlatform == nil {

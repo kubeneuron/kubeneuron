@@ -15,7 +15,7 @@ attestation, and approval gates at execution time.
 ## The mental model
 
 ```
-signal (class) ──policy (first match wins)──▶ playbook
+signal (class, vendor) ──policy (exact vendor, then first generic fallback)──▶ playbook
 playbook: step₁ → step₂ → … → verify quiet window → RESOLVED
    any step fails ──▶ on_failure.escalate_to (next rung) ──▶ … ──▶ NEEDS_HUMAN
 ```

@@ -38,6 +38,7 @@ EXCLUDES=(
 	"AGENT_SESSION_STATE.md"
 	"TRANSFER_HANDOFF.md"
 	"blocker.md"
+	"main.md"
 	# NOT excluded, deliberately: PRODUCT_PLAN.md and
 	# PRODUCTION_READINESS_PLAN.md. They are published product roadmap
 	# documents — hack/verify-docs.sh lints them as such, and they have been in

@@ -109,6 +109,39 @@ func TestIngestDeduplicatesToOneOpenIncident(t *testing.T) {
 	}
 }
 
+// A signal can identify the incident's vendor while a reconcile goroutine is
+// transitioning a stale copy. Vendor is not part of StateChangedAt's fence (an
+// ingest deliberately does not change playbook progress), so transition must
+// merge it from its fresh row instead of writing the old empty value back.
+func TestTransitionPreservesVendorBackfilledByConcurrentIngest(t *testing.T) {
+	c, st := newIngestTestController(t)
+	ctx := context.Background()
+	base := signal(types.ClassECCDBE, "n1", "GPU-1")
+	if err := c.ingest(ctx, base); err != nil {
+		t.Fatal(err)
+	}
+	incidents, err := st.ListIncidents(ctx, store.IncidentFilter{})
+	if err != nil || len(incidents) != 1 {
+		t.Fatalf("incidents = %+v, %v", incidents, err)
+	}
+	stale := *incidents[0]
+	backfill := base
+	backfill.Evidence = map[string]string{"vendor": string(types.AcceleratorVendorAMD)}
+	if err := c.ingest(ctx, backfill); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.transition(ctx, &stale, types.StateObserving, "system", "observe", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetIncident(ctx, stale.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Vendor != types.AcceleratorVendorAMD {
+		t.Fatalf("vendor after transition = %q, want AMD: a stale transition erased the only identity that prevents an incompatible reset ladder", got.Vendor)
+	}
+}
+
 func TestIngestSeparatesTargetsAndClasses(t *testing.T) {
 	c, st := newIngestTestController(t)
 	ctx := context.Background()

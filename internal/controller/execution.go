@@ -26,6 +26,25 @@ import (
 // startStep reserves a gate slot, moves the incident to EXECUTING, and runs
 // the step in its own goroutine.
 func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *playbook.Step, actor string) error {
+	// A reload is a writer; admission is a reader.  Holding the read lock until
+	// the step has acquired its gate slot and durably entered EXECUTING gives the
+	// reload a linearization point: when a DryRun reload returns, every later
+	// admission observes its snapshot.  A pass that pinned an older generation
+	// before waiting for this lock simply retries on the next tick instead of
+	// starting work under a configuration the operator has replaced.
+	//
+	// This does not try to cancel an action already admitted before the reload;
+	// that is the normal in-flight-action contract.  executeStep has a second,
+	// last-mile dry-run check for a goroutine that was admitted but has not yet
+	// reached its side effect.
+	c.runtimeMu.RLock()
+	defer c.runtimeMu.RUnlock()
+	if c.runtimeConfig(ctx) != c.runtime.Load() {
+		c.log.Info("skipping step admission from a superseded runtime configuration",
+			"incident", inc.ID, "step", step.Name)
+		return nil
+	}
+
 	// A destructive controller-side platform step must stay inside the declared
 	// blast radius. On an Enabled install the agent path is already confined to
 	// spec.safety.destructiveExecution.nodeSelector; the controller path (cordon,
@@ -135,9 +154,6 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 	}
 	if !alreadyHeld {
 		inc.RemediationSlotHeld = true // persisted by the transition below
-		// Remember the key, not just that we hold one: the release may run from
-		// a goroutine holding this incident as it looked before a promotion.
-		c.noteRemediationSlot(inc.ID, inc.Target)
 	}
 	// The audit records what this step WILL do — the decision pinned above,
 	// not the flag stamped when the incident opened. A ladder that simulates
@@ -264,7 +280,10 @@ type pinnedSimulateKey struct{}
 // pinSimulate evaluates the decision once and returns it with a context that
 // carries it to the step goroutine.
 func (c *Controller) pinSimulate(ctx context.Context, inc *types.Incident) (context.Context, bool) {
-	simulate := c.effectiveDryRun(inc)
+	if pinned, ok := ctx.Value(pinnedSimulateKey{}).(bool); ok {
+		return ctx, pinned
+	}
+	simulate := c.effectiveDryRun(ctx, inc)
 	return context.WithValue(ctx, pinnedSimulateKey{}, simulate), simulate
 }
 
@@ -274,7 +293,7 @@ func (c *Controller) simulating(ctx context.Context, inc *types.Incident) bool {
 	if pinned, ok := ctx.Value(pinnedSimulateKey{}).(bool); ok {
 		return pinned
 	}
-	return c.effectiveDryRun(inc)
+	return c.effectiveDryRun(ctx, inc)
 }
 
 // effectiveDryRun answers whether this step must be simulated, from the
@@ -302,29 +321,22 @@ func (c *Controller) simulating(ctx context.Context, inc *types.Incident) bool {
 // one, and resumes if they change their mind.
 //
 // Pause is already enforced, separately and earlier, by gate.Allow.
-func (c *Controller) effectiveDryRun(inc *types.Incident) bool {
+func (c *Controller) effectiveDryRun(ctx context.Context, inc *types.Incident) bool {
 	if inc == nil || inc.DryRun {
 		return true
 	}
-	if c.gate == nil {
+	limits := c.runtimeConfig(ctx).SafetyLimits
+	if limits == nil {
 		return true
 	}
-	return c.gate.DryRun()
+	return limits.DryRun
 }
 
 // executeStep dispatches a step to the platform, the actuator, verification,
 // or notification. Dry-run incidents never touch anything: every step
 // becomes an auditable no-op, including platform operations.
 func (c *Controller) executeStep(ctx context.Context, inc *types.Incident, step *playbook.Step) (*types.ActionResult, error) {
-	timeout := step.Timeout.Std()
-	if timeout <= 0 {
-		// Every step gets an upper bound, declared or not. A step with no
-		// timeout inherited the process context, and an agent that never
-		// answered (agentrpc polls until its context dies) kept the step
-		// goroutine, its inFlight mark, and its gate slot alive forever —
-		// silently eating a MaxConcurrentRemediations slot until restart.
-		timeout = defaultStepTimeout
-	}
+	timeout := effectiveStepTimeout(step)
 	// The agent gets the step's timeout; the controller waits slightly
 	// longer. Given the same deadline the controller always wins the race
 	// and reports "context deadline exceeded", throwing away the agent's
@@ -333,7 +345,15 @@ func (c *Controller) executeStep(ctx context.Context, inc *types.Incident, step 
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, timeout+agentResultGrace)
 	defer cancel()
-	if c.simulating(ctx, inc) {
+	// The reconciliation pass pins its decision so all of its preconditions use
+	// one coherent configuration.  At the final side-effect boundary, however,
+	// a newly installed DryRun may only make that decision safer: do not let a
+	// goroutine that was admitted immediately before an emergency reload call a
+	// controller-side platform operation after the stop succeeded.  This is
+	// deliberately one-way.  A newly Enabled snapshot never makes an older
+	// simulated pass live, which would reopen the selector/mode split this
+	// snapshot design prevents.
+	if c.simulating(ctx, inc) || c.currentRuntimeDryRun() {
 		now := time.Now()
 		return &types.ActionResult{
 			ActionID:   actionID(inc),
@@ -371,6 +391,26 @@ func (c *Controller) executeStep(ctx context.Context, inc *types.Incident, step 
 	default:
 		return nil, fmt.Errorf("unknown step action %q", step.Action)
 	}
+}
+
+// currentRuntimeDryRun reads the currently installed snapshot without a
+// context pin.  It is used only as the one-way last-mile stop in executeStep;
+// normal planning and admission use the coherent snapshot carried by ctx.
+func (c *Controller) currentRuntimeDryRun() bool {
+	rc := c.runtime.Load()
+	return rc == nil || rc.SafetyLimits == nil || rc.SafetyLimits.DryRun
+}
+
+// effectiveStepTimeout is the single timeout contract for both halves of an
+// agent action.  The controller waits for this budget plus result grace, and
+// the agent receives this exact budget in its queued Action.  Keeping the
+// derivation here avoids a controller timing out a zero-timeout action while
+// the agent continues it without a deadline.
+func effectiveStepTimeout(step *playbook.Step) time.Duration {
+	if step != nil && step.Timeout.Std() > 0 {
+		return step.Timeout.Std()
+	}
+	return defaultStepTimeout
 }
 
 func (c *Controller) executePlatformStep(ctx context.Context, inc *types.Incident, op string, step *playbook.Step) (*types.ActionResult, error) {
@@ -572,7 +612,7 @@ func (c *Controller) executeAgentStep(ctx context.Context, inc *types.Incident, 
 		IncidentID: inc.ID,
 		Type:       types.ActionType(op),
 		Params:     params,
-		Timeout:    step.Timeout.Std(),
+		Timeout:    effectiveStepTimeout(step),
 	})
 	if err != nil {
 		return nil, err

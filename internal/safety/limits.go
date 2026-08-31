@@ -68,6 +68,11 @@ type Gate struct {
 	mu     sync.Mutex
 	limits Limits
 	paused bool
+	// pauseActor and pauseChangedAt make the durable red-button state
+	// inspectable when a new leader restores it.  They are not used as an
+	// authorization decision; identity is owned by the API boundary.
+	pauseActor     string
+	pauseChangedAt time.Time
 	// active and reboots are refcounts per target key (node[/gpu-uuid]).
 	// Several concurrent incidents may act on the same target; the target
 	// counts once against the limit, and its slot is only released when the
@@ -95,17 +100,58 @@ func NewGate(limits Limits) *Gate {
 	}
 }
 
-// Pause freezes all automated execution (the "big red button").
-func (g *Gate) Pause() { g.mu.Lock(); g.paused = true; g.mu.Unlock() }
+// Pause freezes all automated execution (the "big red button").  It remains
+// available to tests and early startup, where no persistent store has been
+// attached yet.  The operator API must use SetPaused, which refuses to claim a
+// durable pause when its write fails.
+func (g *Gate) Pause() { g.setPausedBestEffort(true, "") }
 
-// Resume re-enables automated execution.
-func (g *Gate) Resume() { g.mu.Lock(); g.paused = false; g.mu.Unlock() }
+// Resume re-enables automated execution. See Pause for why the operator API
+// uses SetPaused instead.
+func (g *Gate) Resume() { g.setPausedBestEffort(false, "") }
 
 // Paused reports the pause state.
 func (g *Gate) Paused() bool { g.mu.Lock(); defer g.mu.Unlock(); return g.paused }
 
 // DryRun reports whether the gate is in dry-run mode.
 func (g *Gate) DryRun() bool { g.mu.Lock(); defer g.mu.Unlock(); return g.limits.DryRun }
+
+// Limits returns a point-in-time copy of the gate's accounting limits.  The
+// controller seeds each immutable runtime snapshot from it; callers must not
+// retain the result as a live view.
+func (g *Gate) Limits() Limits { g.mu.Lock(); defer g.mu.Unlock(); return g.limits }
+
+// SetPaused changes the global pause only after its replacement state was
+// durably written.  A red button that acknowledges success in one leader's
+// memory but disappears on failover is worse than a visible 503: it invites an
+// operator to believe remediation stopped while a replacement process resumes
+// it.  Store attachment happens in RestoreAndPersist before the controller API
+// is exposed.
+func (g *Gate) SetPaused(paused bool, actor string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.store == nil {
+		return errors.New("global pause persistence is unavailable")
+	}
+	changedAt := g.now().UTC()
+	if err := g.persistPauseLocked(paused, actor, changedAt); err != nil {
+		return err
+	}
+	g.paused, g.pauseActor, g.pauseChangedAt = paused, actor, changedAt
+	return nil
+}
+
+func (g *Gate) setPausedBestEffort(paused bool, actor string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	changedAt := g.now().UTC()
+	if g.store != nil {
+		if err := g.persistPauseLocked(paused, actor, changedAt); err != nil && g.storeLog != nil {
+			g.storeLog.Warn("persisting global pause failed; state survives in memory only", "err", err)
+		}
+	}
+	g.paused, g.pauseActor, g.pauseChangedAt = paused, actor, changedAt
+}
 
 // SetDryRun toggles dry-run mode at runtime (admin API).
 func (g *Gate) SetDryRun(v bool) { g.mu.Lock(); g.limits.DryRun = v; g.mu.Unlock() }
@@ -341,11 +387,14 @@ func isRebootClass(a types.ActionType) bool {
 // A target with neither a UUID nor an address is node-scoped, and still keys to
 // the node alone — unchanged.
 func targetKey(t types.Target) string {
+	if t.PCIAddr != "" {
+		// A later signal can promote this target from PCI-only to a UUID without
+		// changing the physical device. Keep the gate under that immutable
+		// identity, rather than moving a reservation after a transaction commits.
+		return t.Node + "/pci:" + types.NormalizePCIAddress(t.PCIAddr)
+	}
 	if t.IsGPU() {
 		return t.Node + "/" + t.GPUUUID
-	}
-	if t.PCIAddr != "" {
-		return t.Node + "/pci:" + t.PCIAddr
 	}
 	return t.Node
 }

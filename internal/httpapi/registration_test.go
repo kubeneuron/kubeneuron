@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 type registrationBackend struct {
 	arming        types.AgentArming
 	err           error
+	signalErr     error
 	registrations []types.AgentRegistration
 	events        []types.AgentEvent
 	signals       []types.Signal
@@ -34,6 +36,11 @@ func authenticatedAgentRoutes(backend Backend) http.Handler {
 
 func (b *registrationBackend) HandleSignal(_ *http.Request, sig types.Signal) {
 	b.signals = append(b.signals, sig)
+}
+
+func (b *registrationBackend) IngestSignal(_ context.Context, sig types.Signal) error {
+	b.signals = append(b.signals, sig)
+	return b.signalErr
 }
 
 func (b *registrationBackend) HandleAgentEvent(_ *http.Request, event types.AgentEvent) error {
@@ -146,6 +153,39 @@ func TestAlertmanagerPayloadIsBounded(t *testing.T) {
 	s.Routes().ServeHTTP(response, request)
 	if response.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413; body = %q", response.Code, response.Body.String())
+	}
+}
+
+func TestAlertmanagerOnlyAcknowledgesDurableSignalIngest(t *testing.T) {
+	backend := &registrationBackend{signalErr: errors.New("database unavailable")}
+	s := New(backend)
+	s.AllowInsecureWebhook()
+	// GpuRowRemapFailure is a built-in normalized signal, so the request reaches
+	// the durable backend instead of being ignored as an unknown alert.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/alertmanager",
+		strings.NewReader(`{"alerts":[{"status":"firing","labels":{"alertname":"GpuRowRemapFailure","node":"node-a"}}]}`))
+	rec := httptest.NewRecorder()
+	s.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("durable ingest failure status = %d, want 503", rec.Code)
+	}
+	if len(backend.signals) != 1 {
+		t.Fatalf("durable ingest calls = %d, want 1", len(backend.signals))
+	}
+}
+
+func TestAgentRoutesRejectDirectStandbyAccess(t *testing.T) {
+	backend := &registrationBackend{}
+	s := New(backend)
+	s.SetReadyCheck(func() bool { return false })
+	handler := s.AgentRoutes(fixedAgentAuthenticator{principal: AgentPrincipal{NodeName: "node-a", NodeUID: "node-uid-a"}})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, types.AgentRegistrationPath, strings.NewReader(`{"name":"node-a"}`)))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("standby agent route status = %d, want 503", rec.Code)
+	}
+	if len(backend.registrations) != 0 {
+		t.Fatal("standby must not persist an agent registration")
 	}
 }
 

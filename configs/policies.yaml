@@ -1,5 +1,7 @@
 # KubeNeuron controller configuration: safety limits, approvals, and
-# signal-class -> playbook policy bindings (first match wins).
+# signal-class -> playbook policy bindings. Within one vendor scope the first
+# match wins; a vendor-specific binding takes precedence over the unscoped
+# fallback for that vendor.
 #
 # Problem classes are defined in pkg/types (ProblemClass); playbook names
 # must exist in configs/playbooks/.

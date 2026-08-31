@@ -60,9 +60,13 @@ func TestSwitchingToDryRunStopsIncidentsAlreadyOpen(t *testing.T) {
 	c := New(st, st, nil, gate, nil,
 		&livePlatform{labels: map[string]string{"kubernetes.io/hostname": "n1"}},
 		nil, &notify.Log{Logger: log}, log)
-	c.mutateRuntimeConfig(func(rc *RuntimeConfig) {
-		rc.DestructiveSelector = map[string]string{"blast": "yes"}
-	})
+	liveLimits := safety.Limits{MaxConcurrentRemediations: 2, DryRun: false}
+	if err := c.InstallRuntimeConfig(RuntimeConfig{
+		SafetyLimits:        &liveLimits,
+		DestructiveSelector: map[string]string{"blast": "yes"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	// Opened while Enabled, so it is not a dry-run incident and never will be.
 	inc := &types.Incident{
@@ -77,12 +81,14 @@ func TestSwitchingToDryRunStopsIncidentsAlreadyOpen(t *testing.T) {
 	}
 
 	// Exactly what cmd/kubeneuron-controller/reload.go does when the operator
-	// sets executionMode: DryRun — the gate's limits are re-applied in place
-	// and the compiled selector empties, with no restart between them.
-	gate.ApplyLimits(safety.Limits{MaxConcurrentRemediations: 2, DryRun: true})
-	c.mutateRuntimeConfig(func(rc *RuntimeConfig) { rc.DestructiveSelector = nil })
+	// sets executionMode: DryRun: one runtime snapshot replaces the mode and the
+	// selector together, with no mixed generation exposed to a step.
+	dryLimits := safety.Limits{MaxConcurrentRemediations: 2, DryRun: true}
+	if err := c.InstallRuntimeConfig(RuntimeConfig{SafetyLimits: &dryLimits}); err != nil {
+		t.Fatal(err)
+	}
 
-	if !c.effectiveDryRun(inc) {
+	if !c.effectiveDryRun(ctx, inc) {
 		t.Fatal("the gate is in dry-run but an incident opened before the switch still reports live execution; " +
 			"the operator's emergency stop does not reach work already in flight")
 	}
@@ -97,6 +103,44 @@ func TestSwitchingToDryRunStopsIncidentsAlreadyOpen(t *testing.T) {
 	}
 	if !strings.HasPrefix(res.Output, "DRY-RUN:") {
 		t.Fatalf("executeStep produced %q; a live replace_node ran after the operator asked for dry-run", res.Output)
+	}
+}
+
+// A reconcile pass can pin the former Enabled snapshot immediately before a
+// reload.  DryRun must still be a one-way stop at the final dispatch boundary:
+// an already-admitted action may finish, but a goroutine that has not reached
+// the platform call must not begin it after the reload succeeded.
+func TestEmergencyDryRunStopsAPreviouslyPinnedPlatformDispatch(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	p := &recyclePlatform{configured: true, nodeReady: true}
+	gate := safety.NewGate(safety.Limits{MaxConcurrentRemediations: 2, DryRun: false})
+	c := New(nil, nil, nil, gate, nil, p, nil, &notify.Log{Logger: log}, log)
+	inc := &types.Incident{ID: "inc-pinned", Target: types.Target{Node: "node-a"}, DryRun: false}
+	step := &playbook.Step{Name: "replace", Action: "platform.replace_node"}
+
+	live := safety.Limits{MaxConcurrentRemediations: 2, DryRun: false}
+	if err := c.InstallRuntimeConfig(RuntimeConfig{SafetyLimits: &live}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := c.pinRuntimeConfig(context.Background())
+	ctx, simulated := c.pinSimulate(ctx, inc)
+	if simulated {
+		t.Fatal("test setup pinned DryRun instead of Enabled")
+	}
+
+	dry := safety.Limits{MaxConcurrentRemediations: 2, DryRun: true}
+	if err := c.InstallRuntimeConfig(RuntimeConfig{SafetyLimits: &dry}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := c.executeStep(ctx, inc, step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.replaced != "" {
+		t.Fatalf("reload-to-DryRun replaced %q after the stop succeeded", p.replaced)
+	}
+	if result == nil || !strings.Contains(result.Output, "DRY-RUN") {
+		t.Fatalf("result = %+v, want a dry-run result", result)
 	}
 }
 
@@ -120,9 +164,45 @@ func TestDryRunIncidentsNeverBecomeLive(t *testing.T) {
 		ID: "inc-2", Target: types.Target{Node: "n1"}, Class: types.ClassFellOffBus,
 		State: types.StateEvaluating, DryRun: true,
 	}
-	gate.ApplyLimits(safety.Limits{MaxConcurrentRemediations: 2, DryRun: false})
-	if !c.effectiveDryRun(inc) {
+	// Even after the installation is Enabled, the stamped dry-run incident stays
+	// simulated. Install through the runtime snapshot, not the raw gate.
+	liveLimits := safety.Limits{MaxConcurrentRemediations: 2, DryRun: false}
+	if err := c.InstallRuntimeConfig(RuntimeConfig{SafetyLimits: &liveLimits}); err != nil {
+		t.Fatal(err)
+	}
+	if !c.effectiveDryRun(context.Background(), inc) {
 		t.Fatal("an incident opened in DryRun started executing for real when the installation was Enabled mid-ladder")
+	}
+}
+
+// The stop lever must change every live-only admission gate, not merely the
+// final dispatcher. Otherwise a ladder that was live at open can wait for a
+// missing reset profile or an unarmed agent and eventually quarantine a node
+// after the operator explicitly requested no further automated action.
+func TestEmergencyDryRunBypassesLiveOnlyEvidenceAndArmingGates(t *testing.T) {
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	if err := st.UpsertNode(ctx, &types.Node{
+		Name: "n1", AgentArming: types.AgentArmingUnarmed, AgentLastSeen: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gate := safety.NewGate(safety.Limits{MaxConcurrentRemediations: 2, DryRun: false})
+	c := New(st, st, nil, gate, nil, nil, nil, &notify.Log{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	dryLimits := safety.Limits{MaxConcurrentRemediations: 2, DryRun: true}
+	if err := c.InstallRuntimeConfig(RuntimeConfig{SafetyLimits: &dryLimits}); err != nil {
+		t.Fatal(err)
+	}
+	inc := &types.Incident{ID: "inc-emergency-stop", Target: types.Target{Node: "n1", GPUUUID: "GPU-1"}, DryRun: false}
+	if err := c.allowAcceleratorStep(ctx, inc, &playbook.Step{Action: "agent.gpu_reset"}); err != nil {
+		t.Fatalf("dry-run reset must not wait for live accelerator evidence: %v", err)
+	}
+	if reason, verdict := c.refuseUnarmedAgent(ctx, inc, &playbook.Step{Action: "agent.reboot"}); verdict != armingProceed || reason != "" {
+		t.Fatalf("dry-run reboot arming = %q/%v, want proceed; a stop must not park a live incident behind an unarmed agent", reason, verdict)
 	}
 }
 
@@ -155,7 +235,10 @@ func TestStoppedLaddersAreNotCountedAsRecovered(t *testing.T) {
 
 	before := testutilCounterValue(t, "kubeneuron_incidents_recovered_total")
 	// The operator presses stop; the ladder then simulates to a close.
-	gate.ApplyLimits(safety.Limits{MaxConcurrentRemediations: 2, DryRun: true})
+	dryLimits := safety.Limits{MaxConcurrentRemediations: 2, DryRun: true}
+	if err := c.InstallRuntimeConfig(RuntimeConfig{SafetyLimits: &dryLimits}); err != nil {
+		t.Fatal(err)
+	}
 	c.recordRecoveryOutcome(context.Background(), inc, types.StateResolved)
 	after := testutilCounterValue(t, "kubeneuron_incidents_recovered_total")
 

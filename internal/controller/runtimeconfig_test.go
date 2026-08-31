@@ -137,6 +137,77 @@ func TestInstallRuntimeConfigIsAtomicAndZeroTimingsKeepCurrent(t *testing.T) {
 	}
 }
 
+func TestRuntimeConfigCopyOwnsNestedAcceleratorProfileCollections(t *testing.T) {
+	source := RuntimeConfig{AcceleratorProfiles: []config.AcceleratorRuntimeProfile{{
+		NodeSelector: map[string]string{"pool": "canary"},
+		AllowedActions: []config.AcceleratorActionPolicy{{
+			Scopes: []types.AcceleratorTargetScope{types.AcceleratorScopePhysicalDevice},
+		}},
+	}}}
+	copy := copyRuntimeConfig(&source)
+	source.AcceleratorProfiles[0].NodeSelector["pool"] = "production"
+	source.AcceleratorProfiles[0].AllowedActions[0].Scopes[0] = types.AcceleratorScopeNode
+	if got := copy.AcceleratorProfiles[0].NodeSelector["pool"]; got != "canary" {
+		t.Fatalf("profile selector aliases caller memory: got %q", got)
+	}
+	if got := copy.AcceleratorProfiles[0].AllowedActions[0].Scopes[0]; got != types.AcceleratorScopePhysicalDevice {
+		t.Fatalf("profile action scopes alias caller memory: got %q", got)
+	}
+}
+
+// Execution mode and destructive selector are one safety decision. This test
+// alternates only valid pairs and verifies that readers never observe the
+// forbidden hybrid: Enabled with an empty selector from the previous DryRun
+// generation.
+func TestRuntimeSnapshotNeverMixesExecutionModeAndBlastRadius(t *testing.T) {
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	gate := safety.NewGate(safety.Limits{MaxConcurrentRemediations: 2, DryRun: true})
+	c := New(st, st, engine, gate, nil, nil, nil, &recordingNotifier{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	dry := safety.Limits{MaxConcurrentRemediations: 2, DryRun: true}
+	live := safety.Limits{MaxConcurrentRemediations: 2, DryRun: false}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(stop)
+		for i := 0; i < 1000; i++ {
+			if err := c.InstallRuntimeConfig(RuntimeConfig{SafetyLimits: &dry, Engine: engine}); err != nil {
+				t.Errorf("install dry snapshot: %v", err)
+				return
+			}
+			if err := c.InstallRuntimeConfig(RuntimeConfig{SafetyLimits: &live, Engine: engine, DestructiveSelector: map[string]string{"pool": "canary"}}); err != nil {
+				t.Errorf("install enabled snapshot: %v", err)
+				return
+			}
+		}
+	}()
+	for {
+		rc := c.runtimeConfig(context.Background())
+		if rc.SafetyLimits == nil {
+			t.Fatal("runtime snapshot lost its safety limits")
+		}
+		if !rc.SafetyLimits.DryRun && len(rc.DestructiveSelector) == 0 {
+			t.Fatal("observed Enabled execution with an empty destructive selector from another generation")
+		}
+		select {
+		case <-stop:
+			wg.Wait()
+			return
+		default:
+		}
+	}
+}
+
 // A long-running step completes against the engine that ADMITTED it, even if
 // the configuration was hot-swapped mid-step; the next advance re-reads fresh.
 func TestStepCompletesAgainstTheAdmittingEngine(t *testing.T) {

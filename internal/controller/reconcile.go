@@ -100,6 +100,11 @@ func (c *Controller) advance(ctx context.Context, inc *types.Incident) error {
 	// the same generation; the next advance re-pins fresh, so a hot reload is
 	// visible within one tick without ever mixing generations mid-decision.
 	ctx = c.pinRuntimeConfig(ctx)
+	// Pin execution mode alongside the runtime configuration.  Admission gates
+	// (evidence, arming, approvals) and the eventual dispatcher must agree that
+	// this pass is dry-run; otherwise an emergency stop can still strand a node
+	// behind a live-only precondition.
+	ctx, _ = c.pinSimulate(ctx, inc)
 	switch inc.State {
 	case types.StateOpen:
 		return c.advanceOpen(ctx, inc)
@@ -253,7 +258,7 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 		// is agent-destructive and the node's agent has definitively declared
 		// itself unarmed, escalate before the first cordon/drain — not after
 		// the node is disrupted and the reboot rung dies at the executor.
-		if !inc.DryRun && playbookNeedsArmedAgent(book) {
+		if !c.simulating(ctx, inc) && playbookNeedsArmedAgent(book) {
 			for i := range book.Steps {
 				reason, verdict := c.refuseUnarmedAgent(ctx, inc, &book.Steps[i])
 				if verdict == armingHold {
@@ -502,7 +507,7 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 	if time.Since(inc.StateChangedAt) < c.runtimeConfig(ctx).VerifyQuiet {
 		return nil
 	}
-	if !inc.DryRun {
+	if !c.simulating(ctx, inc) {
 		ok, reason := c.verifyRuntimeEvidence(ctx, inc)
 		if !ok {
 			if time.Since(inc.StateChangedAt) < c.verifyEvidenceDeadline(ctx) {
@@ -706,9 +711,9 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 		// SignalSeen. Writing the stale snapshot back would erase that count
 		// (and, under a READ COMMITTED backend, could regress state/StepIndex).
 		// The reconcile path owns state and playbook progress; the ingest path
-		// owns SignalSeen — so take SignalSeen and the current version from the
-		// fresh row, and fail closed if the state OR the fence moved out from
-		// under us.
+		// owns SignalSeen and late vendor identification — so take those fields
+		// and the current version from the fresh row, and fail closed if the
+		// state OR the fence moved out from under us.
 		fresh, err := tx.GetIncident(ctx, inc.ID)
 		if err != nil {
 			return err
@@ -720,6 +725,7 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 			release = release && fresh.RemediationSlotHeld
 		}
 		inc.SignalSeen = fresh.SignalSeen
+		inc.Vendor = fresh.Vendor
 		inc.Version = fresh.Version
 		if err := tx.UpdateIncident(ctx, inc); err != nil {
 			return err
@@ -745,18 +751,11 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 		c.releaseRecoveredSlot(inc.ID)
 	}
 	if release && c.gate != nil {
-		// Halted: the remediation is over, whatever route it took — resolved,
-		// expired, or parked for a human. Hand back the slot under the key it
-		// was actually reserved with.
-		//
-		// NOT inc.Target. A step goroutine carries the incident as it was when
-		// the step began, and a precise signal can promote the incident onto
-		// its GPU UUID while that step runs — so this used to release the
-		// pre-promotion key and miss the live reservation entirely. The slot
-		// then stayed held for the life of the process, against an incident
-		// that had already finished, and unrelated nodes were refused
-		// remediation by a cap that was silently one short.
-		c.gate.ReleaseRemediation(c.takeRemediationSlotTarget(inc.ID, inc.Target))
+		// A promotion preserves PCIAddr, and the safety gate keys every target
+		// with a PCI address by that immutable physical identity. A stale step
+		// snapshot therefore releases the same reservation as the promoted row,
+		// without a post-commit re-key race.
+		c.gate.ReleaseRemediation(inc.Target)
 	}
 	// Any committed transition ends the arming-in-flight hold epoch: if the
 	// incident re-enters EVALUATING later, the propagation grace starts over
@@ -801,7 +800,7 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 // kubeneuronctl report reaches the same conclusion from the audit trail; this
 // is the same rule applied where that trail is not available.
 func (c *Controller) recordRecoveryOutcome(ctx context.Context, inc *types.Incident, to types.IncidentState) {
-	if inc.OpenedAt.IsZero() || c.effectiveDryRun(inc) {
+	if inc.OpenedAt.IsZero() || c.effectiveDryRun(ctx, inc) {
 		return
 	}
 	duration := time.Since(inc.OpenedAt).Seconds()

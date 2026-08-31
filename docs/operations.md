@@ -136,6 +136,18 @@ The check is made against the live object at the moment of the write, so
 annotating a node while a release is already in flight is safe: the write is
 rejected and retried, and the retry sees your claim.
 
+## Bare-metal status
+
+The standalone `-platform baremetal` controller is not supported in this build.
+Although the platform package has durable cordon/drain hooks, the controller's
+mandatory agent API authenticates Kubernetes workload identity and has no
+equivalent bare-metal node identity contract. The binary rejects the flag at
+startup before it opens listeners; use the Kubernetes operator-managed path.
+
+The hook package remains an internal integration seam. It must not be presented
+as a runnable controller deployment until a node-registration and mTLS identity
+model for bare-metal agents exists.
+
 ## Draining the controller's own node
 
 `kubectl drain` on the node running the controller **will hang, by design.**
@@ -320,7 +332,7 @@ operator (CloudNativePG, RDS, …) and own its HA, backups, and PITR there:
   (stale after 90 s without a controller acknowledgment); the
   `KubeNeuronAgentDown` rule fires on an unreachable agent metrics endpoint.
 
-## Bare-metal scrape discovery
+## External scrape discovery
 
 `GET /api/v1/targets?port=9400` (operator token required) serves Prometheus
 `http_sd` groups for every registered node. vmagent example:

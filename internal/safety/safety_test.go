@@ -309,6 +309,35 @@ func TestGateCooldownSurvivesRestart(t *testing.T) {
 	}
 }
 
+// The global pause is an operator command, not a best-effort local cache. A
+// new leader must restore it before it can admit another remediation.
+func TestGatePauseSurvivesRestart(t *testing.T) {
+	store := &memStateStore{}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	g1 := NewGate(Limits{MaxConcurrentRemediations: 10, MaxConcurrentReboots: 1})
+	if err := g1.RestoreAndPersist(store, log); err != nil {
+		t.Fatal(err)
+	}
+	if err := g1.SetPaused(true, "alice"); err != nil {
+		t.Fatalf("SetPaused: %v", err)
+	}
+
+	g2 := NewGate(Limits{MaxConcurrentRemediations: 10, MaxConcurrentReboots: 1})
+	if err := g2.RestoreAndPersist(store, log); err != nil {
+		t.Fatal(err)
+	}
+	if !g2.Paused() {
+		t.Fatal("global pause must survive restart/failover")
+	}
+	if g2.pauseActor != "alice" || g2.pauseChangedAt.IsZero() {
+		t.Fatalf("restored pause audit = actor=%q at=%s, want alice and a timestamp", g2.pauseActor, g2.pauseChangedAt)
+	}
+	if err := g2.Allow(target("n1"), types.ActionGPUReset); err == nil {
+		t.Fatal("restored pause must still deny automation")
+	}
+}
+
 // Flap cycles counted before a restart must keep counting after it.
 func TestFlapHistorySurvivesRestart(t *testing.T) {
 	store := &memStateStore{}
@@ -394,8 +423,8 @@ func TestANodeScopedTargetStillKeysToTheNode(t *testing.T) {
 	if got := targetKey(types.Target{Node: "n1"}); got != "n1" {
 		t.Fatalf("node-scoped target keyed as %q, want \"n1\"", got)
 	}
-	if got := targetKey(types.Target{Node: "n1", GPUUUID: "GPU-a", PCIAddr: "0000:3b:00"}); got != "n1/GPU-a" {
-		t.Fatalf("an attributed target keyed as %q; the UUID must win so a promotion moves the "+
-			"slot to a stable key", got)
+	if got := targetKey(types.Target{Node: "n1", GPUUUID: "GPU-a", PCIAddr: "0000:3b:00"}); got != "n1/pci:0000:3b:00" {
+		t.Fatalf("an attributed target keyed as %q; the PCI address must win so a promotion keeps "+
+			"one stable key without a post-commit re-key race", got)
 	}
 }

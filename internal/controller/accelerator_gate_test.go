@@ -66,6 +66,10 @@ func TestAcceleratorGateFiresOnlyForRegisteredCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := New(st, nil, nil, nil, nil, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	liveLimits := safety.Limits{MaxConcurrentRemediations: 2, MaxConcurrentReboots: 1, DryRun: false}
+	if err := c.InstallRuntimeConfig(RuntimeConfig{SafetyLimits: &liveLimits}); err != nil {
+		t.Fatal(err)
+	}
 	inc := &types.Incident{ID: "inc-gate", Target: types.Target{Node: "node-a", GPUUUID: "GPU-a"}, DryRun: false}
 
 	// A non-reset agent action never touches the capability gate.

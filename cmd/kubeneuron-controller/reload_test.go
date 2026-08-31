@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +25,17 @@ import (
 type failingNodeConfigStore struct {
 	store.Store
 	err error
+}
+
+func TestRunRejectsUnsupportedBareMetalBeforeOpeningState(t *testing.T) {
+	err := run(
+		slog.New(slog.NewTextHandler(io.Discard, nil)), ":0", agentServerConfig{}, runtimeConfigPaths{},
+		"", "baremetal", "", "", false, humanAuth{}, "", notifyFiles{},
+		false, 0, 0, "", "", "sqlite", "", electionConfig{}, "", "",
+	)
+	if err == nil || !strings.Contains(err.Error(), "baremetal is not supported") {
+		t.Fatalf("baremetal startup error = %v, want a clear unsupported-platform error", err)
+	}
 }
 
 func (s failingNodeConfigStore) ApplyNodeConfigPauses(context.Context, []string) error {

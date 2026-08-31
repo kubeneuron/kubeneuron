@@ -90,6 +90,15 @@ type Backend interface {
 	CompleteAction(r *http.Request, node, actionID, leaseToken string, res types.ActionResult) error
 }
 
+// DurableSignalBackend accepts a webhook signal only after its incident/audit
+// mutation is committed.  Alertmanager interprets 2xx as an acknowledgement,
+// so routing it through the controller's bounded in-memory queue would make a
+// queue overflow an invisible lost alert.  The optional shape preserves the
+// small Backend used by API-only tests and older integrations.
+type DurableSignalBackend interface {
+	IngestSignal(ctx context.Context, sig types.Signal) error
+}
+
 // AcceleratorReportBackend is the narrow optional extension for the
 // versioned accelerator-preflight report. It intentionally remains separate
 // while the controller/store integration lands: a controller that has not
@@ -144,7 +153,11 @@ type Server struct {
 	ui                http.Handler
 	backupStore       BackupStore
 	backupDir         string
-	readyCheck        func() bool
+	// leaderCheck is installed by the controller when leader election is on.
+	// Readiness keeps Services on the active replica, while this explicit guard
+	// protects direct Pod access and port-forwarding from creating a second
+	// writer on a standby.
+	leaderCheck       func() bool
 	runtimeConfigInfo atomic.Pointer[RuntimeConfigInfo]
 }
 
@@ -162,10 +175,22 @@ func (s *Server) SetBackupStore(store BackupStore, dir string) {
 	s.backupDir = dir
 }
 
-// SetReadyCheck gates GET /readyz. With leader election an active/standby
-// pair keeps only the leader Ready, so Services route every request —
-// human, webhook, and agent — to exactly one writer.
-func (s *Server) SetReadyCheck(ready func() bool) { s.readyCheck = ready }
+// SetReadyCheck installs the elected-leader predicate. It gates GET /readyz
+// and every state-changing route; readiness alone is not an authorization
+// fence because a caller can address a standby Pod directly.
+func (s *Server) SetReadyCheck(ready func() bool) { s.leaderCheck = ready }
+
+func (s *Server) isLeader() bool { return s.leaderCheck == nil || s.leaderCheck() }
+
+func (s *Server) requireLeader(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.isLeader() {
+			http.Error(w, "standby: not the elected leader", http.StatusServiceUnavailable)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 // SetUI serves the embedded control panel at GET /{$} and /ui/. The static
 // assets are public; every API call the panel makes still requires the
@@ -295,13 +320,13 @@ func (s *Server) requestIsSecure(r *http.Request) bool {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /api/v1/webhooks/alertmanager", s.handleAlertmanager)
+	mux.Handle("POST /api/v1/webhooks/alertmanager", s.requireLeader(http.HandlerFunc(s.handleAlertmanager)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if s.readyCheck != nil && !s.readyCheck() {
+		if !s.isLeader() {
 			http.Error(w, "standby: not the elected leader", http.StatusServiceUnavailable)
 			return
 		}
@@ -348,7 +373,7 @@ func (s *Server) AgentRoutes(authenticator AgentAuthenticator) http.Handler {
 	// hold actions rather than risking an unconditionally accepted result.
 	mux.HandleFunc("GET "+types.AgentActionLeasePath, s.handleNextAction)
 	mux.HandleFunc("POST "+types.AgentActionLeasePath+"/{id}/result", s.handleActionResult)
-	return authenticateAgent(authenticator, mux)
+	return s.requireLeader(authenticateAgent(authenticator, mux))
 }
 
 func authenticateAgent(authenticator AgentAuthenticator, next http.Handler) http.Handler {
@@ -468,6 +493,15 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 				"node", sig.Target.Node, "remote", remoteSource(r))
 			continue
 		}
+		if durable, ok := s.backend.(DurableSignalBackend); ok {
+			if err := durable.IngestSignal(r.Context(), sig); err != nil {
+				http.Error(w, "signal persistence unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			continue
+		}
+		// Compatibility fallback for a Backend that predates durable webhook
+		// intake. The production controller implements DurableSignalBackend.
 		s.backend.HandleSignal(r, sig)
 	}
 	w.WriteHeader(http.StatusAccepted)

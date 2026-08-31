@@ -65,8 +65,8 @@ func (f *fakeOperator) Node(_ context.Context, name string) (*types.Node, error)
 	return &types.Node{Name: name}, nil
 }
 
-func (f *fakeOperator) SetPaused(paused bool, _ string) { f.paused = paused }
-func (f *fakeOperator) Paused() bool                    { return f.paused }
+func (f *fakeOperator) SetPaused(paused bool, _ string) error { f.paused = paused; return nil }
+func (f *fakeOperator) Paused() bool                          { return f.paused }
 
 func operatorServer(op OperatorBackend, token string) http.Handler {
 	s := New(&registrationBackend{})
@@ -211,6 +211,26 @@ func TestOperatorAPIPauseResume(t *testing.T) {
 	handler.ServeHTTP(rec, operatorRequest("DELETE", "/api/v1/pause?actor=alice", "secret", ""))
 	if rec.Code != http.StatusNoContent || op.paused {
 		t.Fatalf("resume = %d, paused %v", rec.Code, op.paused)
+	}
+}
+
+// A Service normally removes a standby from endpoints through readiness, but
+// port-forwarding or a direct Pod address bypasses that routing rule. Mutations
+// must still be fenced to the elected leader rather than returning a successful
+// process-local pause that the active replica never sees.
+func TestOperatorMutationIsRejectedOnStandby(t *testing.T) {
+	op := &fakeOperator{}
+	s := New(&registrationBackend{})
+	s.EnableOperatorAPI(op, "secret")
+	s.SetReadyCheck(func() bool { return false })
+
+	rec := httptest.NewRecorder()
+	s.Routes().ServeHTTP(rec, operatorRequest("POST", "/api/v1/pause", "secret", `{"actor":"alice"}`))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("standby pause status = %d, want 503", rec.Code)
+	}
+	if op.paused {
+		t.Fatal("a standby must not mutate its private pause state")
 	}
 }
 

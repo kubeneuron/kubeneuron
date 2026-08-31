@@ -16,6 +16,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
+	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
 // RuntimeConfig is one immutable, coherent view of the reloadable runtime
@@ -25,6 +26,12 @@ import (
 // deliberately NOT here — it is store-persisted, transactional, and must
 // survive restarts.
 type RuntimeConfig struct {
+	// SafetyLimits travel with the execution policy rather than being read from
+	// the mutable gate during a decision.  The gate still owns slot accounting
+	// and pause enforcement, but a step's dry-run decision and its destructive
+	// selector must come from the same immutable snapshot.  Nil is retained for
+	// the per-field test hooks and means "keep the current limits" on install.
+	SafetyLimits *safety.Limits
 	// Engine selects playbooks and yields next steps; never nil after New.
 	Engine *playbook.Engine
 	// Catalog classifies signals; nil means built-ins only (every Catalog
@@ -130,6 +137,17 @@ func (c *Controller) InstallRuntimeConfig(rc RuntimeConfig) error {
 	if rc.ApprovalTTL <= 0 {
 		rc.ApprovalTTL = cur.ApprovalTTL
 	}
+	// Apply the gate's accounting limits while holding the install mutex, but
+	// make safety decisions from SafetyLimits in the snapshot.  Therefore a
+	// concurrent advance sees either the old mode and old selector or the new
+	// mode and new selector; it can never combine a new Enabled mode with an
+	// old, empty blast-radius selector.
+	if rc.SafetyLimits == nil {
+		rc.SafetyLimits = cur.SafetyLimits
+	}
+	if c.gate != nil && rc.SafetyLimits != nil {
+		c.gate.ApplyLimits(*rc.SafetyLimits)
+	}
 	c.runtime.Store(copyRuntimeConfig(&rc))
 	return nil
 }
@@ -143,15 +161,35 @@ func (c *Controller) mutateRuntimeConfig(mutate func(rc *RuntimeConfig)) {
 	defer c.runtimeMu.Unlock()
 	rc := *c.runtime.Load()
 	mutate(&rc)
-	c.runtime.Store(&rc)
+	c.runtime.Store(copyRuntimeConfig(&rc))
 }
 
 // copyRuntimeConfig deep-copies the snapshot's owned collections so no caller
 // retains a mutable alias into an installed snapshot.
 func copyRuntimeConfig(rc *RuntimeConfig) *RuntimeConfig {
 	out := *rc
+	if rc.SafetyLimits != nil {
+		limits := *rc.SafetyLimits
+		out.SafetyLimits = &limits
+	}
 	out.Windows = append([]config.MaintenanceWindow(nil), rc.Windows...)
-	out.AcceleratorProfiles = append([]config.AcceleratorRuntimeProfile(nil), rc.AcceleratorProfiles...)
+	out.AcceleratorProfiles = make([]config.AcceleratorRuntimeProfile, len(rc.AcceleratorProfiles))
+	for i, profile := range rc.AcceleratorProfiles {
+		cloned := profile
+		if len(profile.NodeSelector) > 0 {
+			cloned.NodeSelector = make(map[string]string, len(profile.NodeSelector))
+			for key, value := range profile.NodeSelector {
+				cloned.NodeSelector[key] = value
+			}
+		}
+		cloned.AllowedActions = make([]config.AcceleratorActionPolicy, len(profile.AllowedActions))
+		for j, policy := range profile.AllowedActions {
+			clonedPolicy := policy
+			clonedPolicy.Scopes = append([]types.AcceleratorTargetScope(nil), policy.Scopes...)
+			cloned.AllowedActions[j] = clonedPolicy
+		}
+		out.AcceleratorProfiles[i] = cloned
+	}
 	out.QuiesceForbidden = append([]string(nil), rc.QuiesceForbidden...)
 	if len(rc.DestructiveSelector) > 0 {
 		out.DestructiveSelector = make(map[string]string, len(rc.DestructiveSelector))

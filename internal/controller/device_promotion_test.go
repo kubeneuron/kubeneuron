@@ -239,18 +239,15 @@ func TestAttributedSignalIngestIsUnchanged(t *testing.T) {
 	}
 }
 
-// TestPromotionMovesTheSafetyGateSlotItWasAdmittedUnder covers the atomicity
+// TestPromotionKeepsTheSafetyGateSlotUnderItsStablePCIKey covers the atomicity
 // consequence of changing an incident's identity mid-remediation.
 //
-// The safety gate keys a target's remediation reservation by target, and an
-// unattributed incident's key is the bare node name while an attributed one's
-// is node/GPU-UUID. An incident that had already reached its first destructive
-// step therefore holds a slot under the node key; after a promotion, every
-// later lookup — including the release when the incident terminalizes — uses
-// the new key, finds nothing, and leaves the node counted as remediating
-// forever. That slot is a unit of MaxConcurrentRemediations, so the leak is
-// permanent fleet-wide capacity loss with no incident visibly responsible.
-func TestPromotionMovesTheSafetyGateSlotItWasAdmittedUnder(t *testing.T) {
+// PCIAddr is present before and after promotion, so it gives the gate one
+// immutable physical identity. Re-keying an in-memory reservation after the
+// promotion commits has an unavoidable race with a terminal transition: the
+// terminal release can happen before the re-key and the late code then creates
+// a fresh slot for an incident that is already over.
+func TestPromotionKeepsTheSafetyGateSlotUnderItsStablePCIKey(t *testing.T) {
 	c, st := newIngestTestController(t)
 	ctx := context.Background()
 
@@ -265,8 +262,8 @@ func TestPromotionMovesTheSafetyGateSlotItWasAdmittedUnder(t *testing.T) {
 	}
 	inc := incidents[0]
 
-	// The ladder admits its first destructive step: the incident takes the
-	// node-keyed remediation slot and records that durably.
+	// The ladder admits its first destructive step under the PCI-keyed
+	// remediation slot and records that durably.
 	unattributed := inc.Target
 	if err := c.gate.Allow(unattributed, types.ActionIdleCheck); err != nil {
 		t.Fatalf("admitting the first step: %v", err)

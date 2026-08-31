@@ -215,7 +215,7 @@ func (c *Controller) refuseInfeasibleReset(ctx context.Context, inc *types.Incid
 		return fmt.Errorf("playbook %q resets a %s GPU but node %s reports no %s runtime; that reset can never run: %w",
 			book.Name, vendor, inc.Target.Node, vendor, errResetVendorMismatch)
 	}
-	if inc.DryRun {
+	if c.simulating(ctx, inc) {
 		return nil // the holder check below reads live state; see above
 	}
 	reports, ok := c.store.(store.AcceleratorReportStore)

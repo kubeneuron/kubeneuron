@@ -105,7 +105,7 @@ func (c *Controller) syncDegradedTaint(ctx context.Context, inc *types.Incident,
 	// is not taken off HERE; the janitor removes it on its next pass. One pass
 	// late, never leaked — and worth stating precisely, because an earlier
 	// version of this comment claimed removal was unconditional and it is not.
-	if c.effectiveDryRun(inc) {
+	if c.effectiveDryRun(ctx, inc) {
 		// A dry-run installation promises it changes nothing in the cluster,
 		// and a NoSchedule taint is a cluster-wide scheduling change: work
 		// stops landing on the node for every workload, not only ours. An
@@ -252,7 +252,7 @@ func (c *Controller) reconcileDegradedTaints(ctx context.Context) {
 		//
 		// So: two rules on purpose, one per direction. Placing reads the mode;
 		// keeping reads the incident.
-		if c.effectiveDryRun(inc) {
+		if c.effectiveDryRun(ctx, inc) {
 			continue
 		}
 		if err := tainter.ApplyDegradedTaint(ctx, node, degradedTaintValue(inc), policy.Effect); err != nil {

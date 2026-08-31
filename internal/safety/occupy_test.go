@@ -71,6 +71,28 @@ func TestRemediationSlotSpansSteps(t *testing.T) {
 	}
 }
 
+func TestPCIAddressKeepsAGateReservationStableAcrossUUIDPromotion(t *testing.T) {
+	before := types.Target{Node: "node-a", PCIAddr: "0000:3b:00"}
+	after := types.Target{Node: "node-a", PCIAddr: "00000000:3B:00.0", GPUUUID: "GPU-a"}
+	if got, want := targetKey(before), targetKey(after); got != want {
+		t.Fatalf("promotion changed gate key from %q to %q", got, want)
+	}
+	g := NewGate(Limits{MaxConcurrentRemediations: 1})
+	if err := g.Allow(before, types.ActionIdleCheck); err != nil {
+		t.Fatal(err)
+	}
+	// A promoted incident is still the same physical remediation, not a second
+	// fleet slot. This would be denied if its UUID switched the map key.
+	if err := g.AllowHeld(after, types.ActionCollectBundle); err != nil {
+		t.Fatalf("promoted target was not recognized as holding its original slot: %v", err)
+	}
+	g.StepDone(after, types.ActionCollectBundle, 0)
+	g.ReleaseRemediation(after)
+	if err := g.Allow(types.Target{Node: "node-b"}, types.ActionIdleCheck); err != nil {
+		t.Fatalf("stable promoted reservation did not release: %v", err)
+	}
+}
+
 // AllowHeld still applies the per-step checks: pause, cooldown, and the
 // reboot cap deny a held target's next step exactly as they deny a first step.
 func TestAllowHeldAppliesStepChecks(t *testing.T) {

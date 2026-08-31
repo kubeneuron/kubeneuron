@@ -80,6 +80,15 @@ func (p *janitorPlatform) MarkCordonHeldIfReason(_ context.Context, node, expect
 	return true, nil
 }
 
+// This fake has no counted state, so a per-owner handoff delegates to the same
+// live check. Real counted platforms must keep the owner name (see
+// ownedPlatform below); the method is present here because CordonJanitor now
+// makes that capability mandatory rather than letting a shared cordon fall
+// back to a node-scoped reason mark.
+func (p *janitorPlatform) MarkCordonHeldIfOwner(ctx context.Context, node, owner string) (bool, error) {
+	return p.MarkCordonHeldIfReason(ctx, node, owner)
+}
+
 // The cordon reason is the only link between a node and the incident that took
 // it out of service, so the format is a contract.
 func TestCordonReasonRoundTripsTheIncidentID(t *testing.T) {

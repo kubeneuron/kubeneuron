@@ -180,6 +180,7 @@ func TestJanitorRestoreIsClaimableWhileItsFormerOwnerIsHalted(t *testing.T) {
 type deadlineCapturingActuator struct {
 	hadDeadline bool
 	until       time.Duration
+	action      types.Action
 }
 
 func (a *deadlineCapturingActuator) Name() string { return "deadline-test" }
@@ -190,7 +191,8 @@ func (a *deadlineCapturingActuator) Capabilities() []types.ActionType {
 
 func (a *deadlineCapturingActuator) Healthy(context.Context, types.Node) error { return nil }
 
-func (a *deadlineCapturingActuator) Execute(ctx context.Context, _ types.Node, _ types.Action) (*types.ActionResult, error) {
+func (a *deadlineCapturingActuator) Execute(ctx context.Context, _ types.Node, action types.Action) (*types.ActionResult, error) {
+	a.action = action
 	if dl, ok := ctx.Deadline(); ok {
 		a.hadDeadline = true
 		a.until = time.Until(dl)
@@ -222,6 +224,9 @@ func TestExecuteStepBoundsAStepWithNoTimeout(t *testing.T) {
 	}
 	if act.until <= 0 || act.until > defaultStepTimeout+agentResultGrace {
 		t.Fatalf("deadline %s away, want within the default step budget %s", act.until, defaultStepTimeout+agentResultGrace)
+	}
+	if act.action.Timeout != defaultStepTimeout {
+		t.Fatalf("agent action timeout = %s, want default %s; an agent must not outlive the controller's fallback deadline", act.action.Timeout, defaultStepTimeout)
 	}
 }
 

@@ -120,19 +120,17 @@ func applyRuntimeConfig(
 	// live?". Absent file (file-based deployments, older operators) means no
 	// identity, never an error.
 	sourceDigest := readSourceDigest(paths)
-	// The safety limits travel in the same file and must move with it. They
-	// were previously read once at process start, which made
-	// spec.safety.executionMode inert on a running controller — see
-	// safety.Gate.ApplyLimits for why that is worse in the direction nobody
-	// expects.
-	if gate := ctrl.Gate(); gate != nil {
-		gate.ApplyLimits(safety.Limits{
-			MaxConcurrentRemediations: cfg.Safety.MaxConcurrentRemediations,
-			MaxConcurrentReboots:      cfg.Safety.MaxConcurrentReboots,
-			DryRun:                    cfg.Safety.DryRun,
-		})
+	// The safety limits travel inside the immutable snapshot.  InstallRuntimeConfig
+	// updates the gate's slot-accounting limits too, but execution reads this
+	// snapshot for the mode so it cannot observe a newly Enabled gate with an old
+	// empty destructive selector.
+	limits := safety.Limits{
+		MaxConcurrentRemediations: cfg.Safety.MaxConcurrentRemediations,
+		MaxConcurrentReboots:      cfg.Safety.MaxConcurrentReboots,
+		DryRun:                    cfg.Safety.DryRun,
 	}
 	if err := ctrl.InstallRuntimeConfig(controller.RuntimeConfig{
+		SafetyLimits:        &limits,
 		Engine:              engine,
 		Catalog:             catalog,
 		SourceDigest:        sourceDigest,

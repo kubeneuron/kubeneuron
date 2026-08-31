@@ -28,7 +28,7 @@ type OperatorBackend interface {
 	ResolveIncident(ctx context.Context, id, actor, reason string) error
 	Nodes(ctx context.Context) ([]*types.Node, error)
 	Node(ctx context.Context, name string) (*types.Node, error)
-	SetPaused(paused bool, actor string)
+	SetPaused(paused bool, actor string) error
 	Paused() bool
 }
 
@@ -129,7 +129,13 @@ func (s *Server) requireOperator(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) requireOperatorMutation(next http.HandlerFunc) http.HandlerFunc {
-	return s.requireOperatorVerb("update", next)
+	return s.requireOperatorVerb("update", func(w http.ResponseWriter, r *http.Request) {
+		if !s.isLeader() {
+			http.Error(w, "standby: not the elected leader", http.StatusServiceUnavailable)
+			return
+		}
+		next(w, r)
+	})
 }
 
 func (s *Server) requireOperatorVerb(verb string, next http.HandlerFunc) http.HandlerFunc {
@@ -597,7 +603,10 @@ func (s *Server) handleSetPause(paused bool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		s.operator.SetPaused(paused, actor)
+		if err := s.operator.SetPaused(paused, actor); err != nil {
+			http.Error(w, "persisting global pause failed", http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

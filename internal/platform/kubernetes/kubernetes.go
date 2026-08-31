@@ -591,7 +591,7 @@ func cordonSnapshot(current *corev1.Node) string {
 
 var _ platform.CordonOwnership = (*Platform)(nil)
 
-// CordonForOwner implements platform.CordonOwnership.
+// CordonForOwner implements platform.Platform.
 //
 // The write is a JSON Patch whose first operation TESTS the owner set this call
 // read — the same compare-and-swap discipline as UncordonIfReason and
@@ -696,7 +696,7 @@ func (p *Platform) CordonForOwner(ctx context.Context, node, owner, reason strin
 	return fmt.Errorf("the cordon owners of node %s changed under every attempt to join them: %w", node, lastErr)
 }
 
-// ReleaseCordonOwners implements platform.CordonOwnership.
+// ReleaseCordonOwners implements platform.Platform.
 //
 // The node is only handed back to the scheduler when the set empties. Every
 // other release just shrinks it, under the same compare-and-swap as the join, so

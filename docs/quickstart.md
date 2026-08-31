@@ -27,37 +27,18 @@ the full dry-run audit trail down to `RESOLVED`.
 
 ## 3. Run the controller interactively
 
-```sh
-openssl rand -hex 32 > /tmp/kn-token
+The controller currently supports Kubernetes deployments only. Its agent API
+authenticates Kubernetes workload identity, so `-platform baremetal` exits
+before opening listeners rather than presenting a runnable-but-unsafe setup.
+For a local ingestion demonstration, use the E2E suite above; for a cluster,
+use the operator-managed installation in the README.
 
-./bin/kubeneuron-controller \
-  -platform baremetal -inventory configs/inventory.example.yaml \
-  -db /tmp/kubeneuron.db \
-  -api-token-file /tmp/kn-token \
-  -agent-listen :8443 -agent-tls-cert ... # see note below
-```
+## 4. Operate an installed controller
 
-> The controller requires the mTLS agent listener configuration on the
-> Kubernetes path. For a pure ingestion demo without agents, the E2E suite
-> above is the supported route; the operator-managed install
-> (README “Operator preview install”) is the supported cluster route.
-
-## 4. Poke it
-
-```sh
-export KUBENEURONCTL_TOKEN=$(cat /tmp/kn-token)
-
-# open an incident manually (class selects the playbook via policy)
-./bin/kubeneuronctl --server http://localhost:8080 remediate node-a --class ecc-dbe
-
-./bin/kubeneuronctl --server http://localhost:8080 incidents
-./bin/kubeneuronctl --server http://localhost:8080 incidents show <id>
-./bin/kubeneuronctl --server http://localhost:8080 approve <id>
-./bin/kubeneuronctl --server http://localhost:8080 status
-```
-
-Or open `http://localhost:8080/` in a browser, paste the token, and drive
-the same flow from the embedded panel.
+After the Kubernetes installation is reachable, use `kubeneuronctl` with the
+operator token and public controller address to list incidents, approve a
+pending step, or invoke the global pause. The exact token retrieval and TLS
+configuration are deployment-specific; see [operations.md](operations.md).
 
 ## 5. What to read next
 

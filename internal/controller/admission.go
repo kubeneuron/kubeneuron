@@ -63,7 +63,6 @@ func (c *Controller) RebuildGateOccupancy(ctx context.Context) error {
 			continue
 		}
 		c.gate.OccupyRemediation(inc.Target)
-		c.noteRemediationSlot(inc.ID, inc.Target)
 		if inc.State == types.StateExecuting {
 			// The previous leader also held this incident's per-step (reboot
 			// class) slot; reserve it too until recovery moves the incident out
@@ -93,28 +92,6 @@ func (c *Controller) RebuildGateOccupancy(ctx context.Context) error {
 // releases the reservation, so the later normal EXECUTING exits are no-ops.
 // The incident's remediation slot is not touched here — it lives until the
 // incident terminalizes (releaseHeldSlot).
-// noteRemediationSlot records the target an incident's remediation slot was
-// reserved under, so the release finds it however stale the caller's copy of
-// the incident is. Called on acquisition and again whenever the identity moves.
-func (c *Controller) noteRemediationSlot(incidentID string, target types.Target) {
-	c.recoveredMu.Lock()
-	c.remediationSlots[incidentID] = target
-	c.recoveredMu.Unlock()
-}
-
-// takeRemediationSlotTarget returns the recorded target and forgets it, falling
-// back to the caller's own when nothing was recorded — a slot taken before this
-// process started, or by a path that predates the bookkeeping.
-func (c *Controller) takeRemediationSlotTarget(incidentID string, fallback types.Target) types.Target {
-	c.recoveredMu.Lock()
-	defer c.recoveredMu.Unlock()
-	if target, ok := c.remediationSlots[incidentID]; ok {
-		delete(c.remediationSlots, incidentID)
-		return target
-	}
-	return fallback
-}
-
 func (c *Controller) releaseRecoveredSlot(incidentID string) {
 	c.recoveredMu.Lock()
 	slot, ok := c.recoveredSlots[incidentID]
@@ -224,7 +201,7 @@ func (c *Controller) allowAcceleratorStep(ctx context.Context, inc *types.Incide
 	// Dry-run executes no side effect and is intentionally usable without a
 	// hardware profile, so operators can see the planned ladder before
 	// qualifying a node/runtime combination.
-	if inc.DryRun {
+	if c.simulating(ctx, inc) {
 		return nil
 	}
 	// The capability gate is a registry fact now, not a hard-coded
@@ -391,7 +368,7 @@ func (c *Controller) refuseUnrecyclableNode(ctx context.Context, inc *types.Inci
 	// Registry fact, not a wire-string match: any action that reinitializes the
 	// instance in place needs the same per-instance viability verdict.
 	def, ok := action.ByWire(step.Action)
-	if inc.DryRun || !ok || def.CloudPrimitive != action.CloudPrimitiveReinitializeInPlace {
+	if c.simulating(ctx, inc) || !ok || def.CloudPrimitive != action.CloudPrimitiveReinitializeInPlace {
 		return "", false
 	}
 	recycler, ok := c.platform.(platform.NodeRecycler)
@@ -469,7 +446,7 @@ func (c *Controller) clearArmingHold(id string) {
 // approve a step the node will provably refuse — the executor's own boundary
 // remains the enforcement.
 func (c *Controller) refuseUnarmedAgent(ctx context.Context, inc *types.Incident, step *playbook.Step) (reason string, verdict armingAdmission) {
-	if inc.DryRun {
+	if c.simulating(ctx, inc) {
 		return "", armingProceed
 	}
 	def, ok := action.ByWire(step.Action)

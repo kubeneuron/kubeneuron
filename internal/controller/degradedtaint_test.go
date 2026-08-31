@@ -475,7 +475,11 @@ func TestJanitorDoesNotTaintWhileTheInstallationIsInDryRun(t *testing.T) {
 	}
 
 	// The operator presses the emergency stop before the mark ever landed.
-	c.gate.ApplyLimits(safety.Limits{MaxConcurrentRemediations: 2, DryRun: true})
+	// Runtime installation moves the mode with every other safety decision.
+	dryLimits := safety.Limits{MaxConcurrentRemediations: 2, DryRun: true}
+	if err := c.InstallRuntimeConfig(RuntimeConfig{SafetyLimits: &dryLimits, DegradedTaint: DegradedTaintPolicy{Enabled: true, Effect: "NoSchedule"}}); err != nil {
+		t.Fatal(err)
+	}
 	c.reconcileDegradedTaints(ctx)
 
 	if len(p.marks) != 0 {

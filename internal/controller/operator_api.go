@@ -173,14 +173,18 @@ func (c *Controller) AcceleratorObservationProfile(ctx context.Context, node str
 	}, nil
 }
 
-// SetPaused flips the global automation pause (the big red button).
-func (c *Controller) SetPaused(paused bool, actor string) {
-	if paused {
-		c.gate.Pause()
-	} else {
-		c.gate.Resume()
+// SetPaused flips the global automation pause (the big red button) only after
+// its replacement state is durable.  The caller returns an error instead of
+// acknowledging a process-local pause that a leader failover would erase.
+func (c *Controller) SetPaused(paused bool, actor string) error {
+	if c.gate == nil {
+		return fmt.Errorf("global pause is unavailable: safety gate is not configured")
+	}
+	if err := c.gate.SetPaused(paused, actor); err != nil {
+		return err
 	}
 	c.log.Warn("automation pause changed", "paused", paused, "actor", actor)
+	return nil
 }
 
 // Paused reports the global pause state.

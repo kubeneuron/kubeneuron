@@ -130,7 +130,7 @@ type CordonedNode struct {
 	Name   string
 	Reason string
 	// Owners lists every remediation currently holding this node cordoned, as
-	// recorded by CordonOwnership.CordonForOwner. Empty means the platform does
+	// recorded by Platform.CordonForOwner. Empty means the platform does
 	// not track ownership, or the node carries a cordon placed by a build that
 	// predates the owner set — in both cases the single Reason above is the only
 	// thing linking the node to whatever took it out of service.
@@ -243,6 +243,14 @@ type CordonJanitor interface {
 	// OUTLIVES the incident row — when B's row is pruned the janitor sees the
 	// mark and keeps the node cordoned forever.
 	MarkCordonHeldIfReason(ctx context.Context, node, expectedReason string) (marked bool, err error)
+	// MarkCordonHeldIfOwner records that a human owns one exact counted hold.
+	//
+	// Every platform now has counted CordonForOwner/ReleaseCordonOwners
+	// operations, so a janitor that can list a counted cordon must be able to
+	// persist the corresponding per-owner handoff. Falling back to a
+	// node-reason mark is unsafe: on a shared cordon the reason belongs to the
+	// most recent holder, not necessarily to the holder the janitor judged.
+	MarkCordonHeldIfOwner(ctx context.Context, node, owner string) (marked bool, err error)
 }
 
 // CordonOwnership is implemented by platforms that can hold ONE node cordoned on
@@ -264,28 +272,17 @@ type CordonJanitor interface {
 // compare-and-swap against the value that was read, so two controllers racing
 // cannot both win.
 //
-// It is a separate interface, like CordonJanitor and NodeTainter, because not
-// every platform has an object to hold the set on. Platforms that do not
-// implement it keep the single-owner Cordon/Uncordon behaviour, which is correct
-// for one remediation at a time and is all they ever had.
+// The two mutation methods are declared on Platform, not here: every adapter
+// must count holders, and a new one cannot opt out of it. This interface
+// therefore carries only what is genuinely OPTIONAL on top of that — recording
+// a human's verdict against one hold — and embeds Platform so a caller that
+// needs ownership semantics still gets the whole contract from one name.
+//
+// They were declared in both for a while, which is the same duplication this
+// codebase keeps finding in its predicates: two places stating one rule, free
+// to drift.
 type CordonOwnership interface {
-	// CordonForOwner cordons the node on behalf of one remediation, adding owner
-	// to the node's owner set. It is idempotent: an owner already in the set is
-	// not added twice, and the original-state snapshot is written only by the
-	// first owner, never overwritten by a later one.
-	CordonForOwner(ctx context.Context, node, owner, reason string) error
-	// ReleaseCordonOwners removes the named owners from the node's owner set and
-	// reports whether that emptied it — released is true only when the node was
-	// actually returned to service, and remaining counts the holders left.
-	//
-	// Removing an owner that is not in the set is a no-op and not an error:
-	// steps are retried and replayed, and a release that already happened must
-	// stay quiet rather than fail a playbook that has nothing left to do.
-	//
-	// The caller passes every name it may be known by — its incident ID and, for
-	// a cordon it placed before this product tracked ownership,
-	// LegacyCordonOwner(reason).
-	ReleaseCordonOwners(ctx context.Context, node string, owners []string) (released bool, remaining int, err error)
+	Platform
 	// MarkCordonHeldIfOwner records that a human owns THIS HOLD, but only while
 	// owner is still in the node's owner set. The mark it writes is reported back
 	// as CordonedNode.HeldOwners and must name the hold, not the node.

@@ -166,8 +166,8 @@ func (c *Controller) reconcileCordonOwner(ctx context.Context, janitor platform.
 // The hold itself is the only thing that can be tested here.
 func (c *Controller) markCordonHeld(ctx context.Context, janitor platform.CordonJanitor, node platform.CordonedNode, owner string) {
 	var err error
-	if owned, ok := c.platform.(platform.CordonOwnership); ok && node.Tracked() {
-		_, err = owned.MarkCordonHeldIfOwner(ctx, node.Name, owner)
+	if node.Tracked() {
+		_, err = janitor.MarkCordonHeldIfOwner(ctx, node.Name, owner)
 	} else {
 		_, err = janitor.MarkCordonHeldIfReason(ctx, node.Name, node.Reason)
 	}

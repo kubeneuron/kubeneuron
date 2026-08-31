@@ -376,6 +376,32 @@ func TestAVendorScopedPolicyDoesNotClaimAnotherVendorsSignal(t *testing.T) {
 	}
 }
 
+// A generic policy is a fallback, not a way for file order to disable a
+// vendor-specific safety ladder. This was especially easy to hit with CR
+// priorities: a broad policy at priority 1 shadowed an AMD policy at priority
+// 2, and the node reached cordon/drain before its NVIDIA-only action failed.
+func TestVendorSpecificPolicyBeatsAnEarlierGenericFallback(t *testing.T) {
+	book := func(name string) *Playbook {
+		return &Playbook{Name: name, Target: "gpu", Steps: []Step{{Name: "s", Action: "platform.cordon"}}}
+	}
+	e, err := NewEngine(
+		map[string]*Playbook{"generic": book("generic"), "amd": book("amd")},
+		[]Policy{
+			{Class: "ecc-dbe", Playbook: "generic"},
+			{Class: "ecc-dbe", Vendor: types.AcceleratorVendorAMD, Playbook: "amd"},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := e.SelectFor("ecc-dbe", types.AcceleratorVendorAMD); !ok || got.Name != "amd" {
+		t.Fatalf("AMD selected %v (ok=%v), want the vendor-specific policy", got, ok)
+	}
+	if got, ok := e.SelectFor("ecc-dbe", types.AcceleratorVendorNVIDIA); !ok || got.Name != "generic" {
+		t.Fatalf("NVIDIA selected %v (ok=%v), want the generic fallback", got, ok)
+	}
+}
+
 // TestAnUnscopedPolicyStillMatchesEverything: every policy written before the
 // vendor field must behave exactly as it did, including for signals that name
 // no vendor at all. Otherwise this change silently stops existing fleets from

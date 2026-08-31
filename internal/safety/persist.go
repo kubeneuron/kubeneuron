@@ -20,7 +20,17 @@ type StateStore interface {
 const (
 	stateKindCooldowns = "cooldowns"
 	stateKindFlap      = "flap"
+	stateKindPause     = "pause"
 )
+
+// pauseSnapshot is deliberately separate from cooldowns: a pause is a
+// durable operator intent, not a cache that may safely age out.  Actor and
+// ChangedAt are retained so the restored state has an accountable explanation.
+type pauseSnapshot struct {
+	Paused    bool      `json:"paused"`
+	Actor     string    `json:"actor,omitempty"`
+	ChangedAt time.Time `json:"changed_at,omitempty"`
+}
 
 // RestoreAndPersist loads previously stored cooldowns into the gate and
 // enables write-through persistence for future changes. Expired cooldowns
@@ -29,6 +39,10 @@ func (g *Gate) RestoreAndPersist(store StateStore, log *slog.Logger) error {
 	payload, err := store.LoadSafetyState(stateKindCooldowns)
 	if err != nil {
 		return fmt.Errorf("load persisted cooldowns: %w", err)
+	}
+	pausePayload, err := store.LoadSafetyState(stateKindPause)
+	if err != nil {
+		return fmt.Errorf("load persisted pause: %w", err)
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -44,8 +58,18 @@ func (g *Gate) RestoreAndPersist(store StateStore, log *slog.Logger) error {
 			}
 		}
 	}
+	if pausePayload != nil {
+		var pause pauseSnapshot
+		if err := json.Unmarshal(pausePayload, &pause); err != nil {
+			return fmt.Errorf("decode persisted pause: %w", err)
+		}
+		g.paused, g.pauseActor, g.pauseChangedAt = pause.Paused, pause.Actor, pause.ChangedAt
+	}
 	g.store, g.storeLog = store, log
 	g.persistLocked()
+	if err := g.persistPauseLocked(g.paused, g.pauseActor, g.pauseChangedAt); err != nil && g.storeLog != nil {
+		g.storeLog.Warn("persisting restored global pause failed; state survives in memory only", "err", err)
+	}
 	return nil
 }
 
@@ -61,6 +85,20 @@ func (g *Gate) persistLocked() {
 	if err != nil && g.storeLog != nil {
 		g.storeLog.Warn("persisting gate cooldowns failed; state survives in memory only", "err", err)
 	}
+}
+
+// persistPauseLocked writes an explicit pause replacement. Called with g.mu
+// held. Unlike cooldown persistence, its error reaches SetPaused so the API
+// never acknowledges a pause that cannot survive failover.
+func (g *Gate) persistPauseLocked(paused bool, actor string, changedAt time.Time) error {
+	if g.store == nil {
+		return fmt.Errorf("global pause persistence is unavailable")
+	}
+	payload, err := json.Marshal(pauseSnapshot{Paused: paused, Actor: actor, ChangedAt: changedAt})
+	if err != nil {
+		return err
+	}
+	return g.store.SaveSafetyState(stateKindPause, payload)
 }
 
 // flapSnapshot is the persisted form of FlapDetector state.

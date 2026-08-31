@@ -81,7 +81,9 @@ type Approvals struct {
 	TTL Duration `yaml:"ttl"`
 }
 
-// Policy binds a problem class to a playbook (first match wins).
+// Policy binds a problem class to a playbook. Within the same vendor scope the
+// first match wins; a vendor-specific match takes precedence over an unscoped
+// fallback for that vendor.
 type Policy struct {
 	Match    Match             `yaml:"match"`
 	Playbook string            `yaml:"playbook"`
