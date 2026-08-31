@@ -79,7 +79,11 @@ Three independent mechanisms, all fail toward not acting:
 1. **Global pause (big red button):** `kubeneuronctl pause` /
    `kubeneuronctl resume`, the panel button, or
    `POST/DELETE /api/v1/pause`. Also available at install time via
-   `executionMode: Paused` (controller starts gate-closed).
+   `executionMode: Paused` (controller starts gate-closed). The controller
+   immediately tombstones undelivered destructive agent actions; actions
+   queued while paused are also discarded before a later resume. Work already
+   under an unexpired agent lease may already be running and is reported
+   honestly rather than falsely marked cancelled.
 2. **Per-node pause:** create a `GPUNodeConfig` with `paused: true` for the
    node. The compiled set is authoritative: deleting the CR unpauses.
 3. **Maintenance windows:** `GPUMaintenanceWindow` with a time range and
@@ -298,8 +302,10 @@ controller stateless: no state PVC, **two replicas** with Lease-based
 leader election, rolling updates, and readiness that follows leadership —
 Services always route humans, Alertmanager, and agents to the single
 elected writer. A deposed leader exits immediately and rejoins as a
-standby; the new leader reloads persisted cooldowns and flap history
-before its first reconcile pass.
+standby; the new leader reloads persisted cooldowns, flap history, and the
+leader-owned `GPUNodeConfig` pause set before its first reconcile pass.
+Standbys reload local policies and playbooks but never write the shared pause
+set.
 
 KubeNeuron does **not** deploy or manage PostgreSQL. Use your platform's
 operator (CloudNativePG, RDS, …) and own its HA, backups, and PITR there:
@@ -698,23 +704,19 @@ and is never overwritten.
 
 `driver_reload`/`driver_reinstall`/`run_script` are binary-level action
 contracts only. `hostTooling.scriptsDir` mounts operator-provisioned scripts
-read-only at the agent's `--scripts-dir`. `executionMode: Enabled` arms
-`-enable-destructive-actions`, but only on the nodes named by
-`spec.safety.destructiveExecution.nodeSelector` (see the warning below), and a
-per-device hardware GPU *reset* still refuses on virtualized instances that
-have no guest PCI reset — there the cloud `ReplaceNode` primitive stands in.
+read-only at the agent's `--scripts-dir`. A per-device hardware GPU *reset*
+still refuses on virtualized instances that have no guest PCI reset — there the
+cloud `ReplaceNode` primitive stands in.
 
-!!! warning "Arming destructive execution narrows where the agent runs"
-    `executionMode: Enabled` merges
-    `spec.safety.destructiveExecution.nodeSelector` into the agent DaemonSet's
-    own node selector, so the agent — and therefore GPU fault **detection** —
-    is scheduled **only** on the armed nodes. This is deliberate: the
-    destructive-capable binary never lands on a node you did not name. But it
-    means arming a *subset* of the fleet silently stops detecting faults on
-    every other node. In production, set the selector to match **all** GPU
-    nodes you want covered, not a narrow subset; if you must arm a subset while
-    keeping detection fleet-wide, run a second `DryRun` installation for the
-    unarmed nodes.
+!!! warning "The destructive selector is a blast radius, not a scheduling selector"
+    `executionMode: Enabled` leaves the agent DaemonSet on the base
+    `spec.agent.nodeSelector`, so detection remains fleet-wide across the
+    nodes where the agent is scheduled. At each durable registration the
+    controller serves arming only when the node's live labels match
+    `spec.safety.destructiveExecution.nodeSelector`; agents outside that set
+    remain unarmed and cannot execute destructive contracts. Keep the base
+    agent selector broad enough for the fleet you want to observe, and use the
+    destructive selector only to narrow the remediation blast radius.
 
 ## Hardware GPU end-to-end CI
 

@@ -111,6 +111,13 @@ func (c *Controller) Gate() *safety.Gate { return c.gate }
 // either the old snapshot or the new one, never a mixture. The snapshot is
 // defensively copied on the way in; zero timings keep their current values.
 func (c *Controller) InstallRuntimeConfig(rc RuntimeConfig) error {
+	return c.InstallRuntimeConfigContext(context.Background(), rc)
+}
+
+// InstallRuntimeConfigContext is InstallRuntimeConfig with the caller's
+// cancellation budget. The mounted-config reloader uses it so a blocked store
+// cannot leave a safety-mode transition waiting past process shutdown.
+func (c *Controller) InstallRuntimeConfigContext(ctx context.Context, rc RuntimeConfig) error {
 	if err := ValidateAcceleratorRuntimeProfiles(rc.AcceleratorProfiles); err != nil {
 		return err
 	}
@@ -128,6 +135,11 @@ func (c *Controller) InstallRuntimeConfig(rc RuntimeConfig) error {
 				rc.DegradedTaint.Effect, config.TaintEffectPreferNoSchedule, config.TaintEffectNoSchedule)
 		}
 	}
+	// Claiming an action and changing a safety mode are one shared critical
+	// section. In particular, changing DryRun must not race a poll which saw a
+	// pending row just before the stop and leases it just after the stop.
+	c.dispatchMu.Lock()
+	defer c.dispatchMu.Unlock()
 	c.runtimeMu.Lock()
 	defer c.runtimeMu.Unlock()
 	cur := c.runtime.Load()
@@ -145,10 +157,47 @@ func (c *Controller) InstallRuntimeConfig(rc RuntimeConfig) error {
 	if rc.SafetyLimits == nil {
 		rc.SafetyLimits = cur.SafetyLimits
 	}
+	wasDryRun := cur.SafetyLimits != nil && cur.SafetyLimits.DryRun
+	willDryRun := rc.SafetyLimits != nil && rc.SafetyLimits.DryRun
+	pauseActive := c.gate != nil && c.gate.Paused()
+	// Before leaving DryRun, discard anything a live incident enqueued while
+	// execution was stopped. Otherwise enabling would turn a historical queue
+	// entry into a surprise action the operator never re-authorized.
+	if wasDryRun && !willDryRun {
+		if err := c.cancelUndeliveredActionsForSafetyStop(ctx); err != nil {
+			return fmt.Errorf("cancel queued actions before enabling execution: %w", err)
+		}
+	}
 	if c.gate != nil && rc.SafetyLimits != nil {
 		c.gate.ApplyLimits(*rc.SafetyLimits)
 	}
 	c.runtime.Store(copyRuntimeConfig(&rc))
+	// Entering DryRun (or starting/reloading while globally paused) changes the
+	// live admission boundary first. A cancellation failure can therefore only
+	// leave more work tombstoned later; it can never leave execution live after
+	// the API reported the emergency stop applied.
+	if (!wasDryRun && willDryRun) || pauseActive {
+		if err := c.cancelUndeliveredActionsForSafetyStop(ctx); err != nil {
+			return fmt.Errorf("cancel queued actions after disabling execution: %w", err)
+		}
+	}
+	return nil
+}
+
+func (c *Controller) cancelUndeliveredActionsForSafetyStop(ctx context.Context) error {
+	// A handful of narrow unit tests intentionally construct an in-memory
+	// controller without a store to exercise only platform dispatch. Production
+	// controllers always have the durable queue; keep those unit seams focused.
+	if c.store == nil {
+		return nil
+	}
+	cancelled, err := c.store.CancelPendingActionsForSafetyStop(ctx)
+	if err != nil {
+		return err
+	}
+	if cancelled > 0 {
+		c.log.Warn("cancelled undelivered actions for safety stop", "count", cancelled)
+	}
 	return nil
 }
 

@@ -65,8 +65,11 @@ func (f *fakeOperator) Node(_ context.Context, name string) (*types.Node, error)
 	return &types.Node{Name: name}, nil
 }
 
-func (f *fakeOperator) SetPaused(paused bool, _ string) error { f.paused = paused; return nil }
-func (f *fakeOperator) Paused() bool                          { return f.paused }
+func (f *fakeOperator) SetPaused(_ context.Context, paused bool, _ string) error {
+	f.paused = paused
+	return nil
+}
+func (f *fakeOperator) Paused() bool { return f.paused }
 
 func operatorServer(op OperatorBackend, token string) http.Handler {
 	s := New(&registrationBackend{})
@@ -248,6 +251,19 @@ func TestManualIncidentTriggersSignal(t *testing.T) {
 	}
 	if len(backend.signals) != 1 || backend.signals[0].Source != types.SourceManual {
 		t.Fatalf("signals = %+v, want one manual signal", backend.signals)
+	}
+}
+
+func TestManualIncidentFailsClosedWithoutDurableAcceptance(t *testing.T) {
+	backend := &registrationBackend{signalErr: errors.New("store unavailable")}
+	s := New(backend)
+	s.EnableOperatorAPI(&fakeOperator{}, "secret")
+
+	rec := httptest.NewRecorder()
+	s.Routes().ServeHTTP(rec, operatorRequest("POST", "/api/v1/incidents", "secret",
+		`{"node":"n1","class":"ecc-dbe","actor":"alice"}`))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("manual incident persistence failure = %d %s, want 503", rec.Code, rec.Body.String())
 	}
 }
 

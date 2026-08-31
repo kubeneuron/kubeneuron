@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -30,11 +31,40 @@ type failingNodeConfigStore struct {
 func TestRunRejectsUnsupportedBareMetalBeforeOpeningState(t *testing.T) {
 	err := run(
 		slog.New(slog.NewTextHandler(io.Discard, nil)), ":0", agentServerConfig{}, runtimeConfigPaths{},
-		"", "baremetal", "", "", false, humanAuth{}, "", notifyFiles{},
+		"", "baremetal", "", "", false, humanAuth{}, "", false, notifyFiles{},
 		false, 0, 0, "", "", "sqlite", "", electionConfig{}, "", "",
 	)
 	if err == nil || !strings.Contains(err.Error(), "baremetal is not supported") {
 		t.Fatalf("baremetal startup error = %v, want a clear unsupported-platform error", err)
+	}
+}
+
+func TestAlertmanagerWebhookRequiresExplicitInsecureOptIn(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	request := func(api *httpapi.Server) int {
+		rec := httptest.NewRecorder()
+		api.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost,
+			"/api/v1/webhooks/alertmanager", strings.NewReader(`{"alerts":[]}`)))
+		return rec.Code
+	}
+
+	secure := httpapi.New(nil)
+	if err := configureAlertmanagerWebhook(secure, "", false, log); err != nil {
+		t.Fatal(err)
+	}
+	if got := request(secure); got != http.StatusUnauthorized {
+		t.Fatalf("webhook without token or opt-in = %d, want 401", got)
+	}
+
+	development := httpapi.New(nil)
+	if err := configureAlertmanagerWebhook(development, "", true, log); err != nil {
+		t.Fatal(err)
+	}
+	if got := request(development); got != http.StatusAccepted {
+		t.Fatalf("explicit insecure webhook = %d, want 202", got)
+	}
+	if err := configureAlertmanagerWebhook(httpapi.New(nil), "/token", true, log); err == nil {
+		t.Fatal("token file plus insecure opt-in must be rejected")
 	}
 }
 
@@ -396,5 +426,63 @@ func TestReloadAppliesExecutionMode(t *testing.T) {
 	if !gate.DryRun() {
 		t.Fatal("executionMode: DryRun reloaded, but the gate is still executing; " +
 			"the documented way to stop remediation does not stop it")
+	}
+}
+
+func TestStandbyRuntimeReloadDoesNotWriteLeaderOwnedNodePauses(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	playbooks := filepath.Join(dir, "playbooks")
+	if err := os.MkdirAll(playbooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(playbooks, "observe.yaml"),
+		[]byte("name: observe\ntarget: gpu\nsteps:\n  - name: observe\n    action: notify.observe\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	policies := filepath.Join(dir, "policies.yaml")
+	if err := os.WriteFile(policies, []byte("policies:\n  - match: {class: gsp-error}\n    playbook: observe\nsafety: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nodeConfigs := filepath.Join(dir, "nodes.yaml")
+	if err := os.WriteFile(nodeConfigs, []byte("nodes:\n  - node_name: leader-intent\n    paused: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.ApplyNodeConfigPauses(ctx, []string{"old-leader-intent"}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := controller.New(st, nil, nil, nil, nil, nil, nil, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	api := httpapi.New(ctrl)
+	paths := runtimeConfigPaths{policies: policies, playbooks: playbooks, nodeConfigs: nodeConfigs}
+	logSink := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	if err := applyRuntimeConfigWithNodePauses(ctx, ctrl, api, paths, logSink, false); err != nil {
+		t.Fatalf("standby reload: %v", err)
+	}
+	old, err := st.GetNode(ctx, "old-leader-intent")
+	if err != nil || !old.Paused {
+		t.Fatalf("standby changed leader pause = %+v, %v; want retained paused node", old, err)
+	}
+	if _, err := st.GetNode(ctx, "leader-intent"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("standby created configured node = %v, want ErrNotFound", err)
+	}
+
+	if err := applyRuntimeConfigWithNodePauses(ctx, ctrl, api, paths, logSink, true); err != nil {
+		t.Fatalf("leader reload: %v", err)
+	}
+	old, err = st.GetNode(ctx, "old-leader-intent")
+	if err != nil || old.Paused {
+		t.Fatalf("leader did not replace old pause set = %+v, %v", old, err)
+	}
+	current, err := st.GetNode(ctx, "leader-intent")
+	if err != nil || !current.Paused {
+		t.Fatalf("leader pause set = %+v, %v; want leader-intent paused", current, err)
 	}
 }

@@ -28,7 +28,7 @@ type OperatorBackend interface {
 	ResolveIncident(ctx context.Context, id, actor, reason string) error
 	Nodes(ctx context.Context) ([]*types.Node, error)
 	Node(ctx context.Context, name string) (*types.Node, error)
-	SetPaused(paused bool, actor string) error
+	SetPaused(ctx context.Context, paused bool, actor string) error
 	Paused() bool
 }
 
@@ -414,13 +414,26 @@ func (s *Server) handleManualIncident(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.backend.HandleSignal(r, types.Signal{
+	signal := types.Signal{
 		Target:   types.Target{Node: req.Node, GPUUUID: req.GPUUUID, GPUIndex: req.GPUIndex},
 		Class:    types.ProblemClass(req.Class),
 		Severity: types.SeverityWarning,
 		Source:   types.SourceManual,
 		Evidence: map[string]string{"actor": actor, "trigger": "manual"},
-	})
+	}
+	// A 202 is a promise that the incident can survive this process. The old
+	// in-memory fallback was appropriate only for pre-durable webhook tests;
+	// for a human-triggered remediation it could acknowledge work that vanished
+	// on a full signal channel or leader restart.
+	durable, ok := s.backend.(DurableSignalBackend)
+	if !ok {
+		http.Error(w, "manual incident intake is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := durable.IngestSignal(r.Context(), signal); err != nil {
+		http.Error(w, "manual incident persistence unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -603,7 +616,7 @@ func (s *Server) handleSetPause(paused bool) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := s.operator.SetPaused(paused, actor); err != nil {
+		if err := s.operator.SetPaused(r.Context(), paused, actor); err != nil {
 			http.Error(w, "persisting global pause failed", http.StatusServiceUnavailable)
 			return
 		}

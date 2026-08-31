@@ -155,17 +155,17 @@ func (c *Core) WithTx(ctx context.Context, fn func(store.Tx) error) error {
 	return tx.Commit()
 }
 
-func (c *Core) SaveSafetyState(kind string, payload []byte) error {
-	_, err := c.db.ExecContext(context.Background(),
+func (c *Core) SaveSafetyState(ctx context.Context, kind string, payload []byte) error {
+	_, err := c.db.ExecContext(ctx,
 		`INSERT INTO safety_state (kind, payload, updated_at) VALUES (?, ?, ?)
 		 ON CONFLICT(kind) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at`,
 		kind, string(payload), ts(time.Now()))
 	return err
 }
 
-func (c *Core) LoadSafetyState(kind string) ([]byte, error) {
+func (c *Core) LoadSafetyState(ctx context.Context, kind string) ([]byte, error) {
 	var payload string
-	err := c.db.QueryRowContext(context.Background(),
+	err := c.db.QueryRowContext(ctx,
 		`SELECT payload FROM safety_state WHERE kind=?`, kind).Scan(&payload)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1252,6 +1252,25 @@ func (q *Queries) CancelPendingActionsForIncident(ctx context.Context, incidentI
 		  AND (state='pending'
 		       OR (state='leased' AND lease_expires_at_ns <= ?))`,
 		ts(time.Now()), incidentID, time.Now().UnixNano())
+	if err != nil {
+		return 0, err
+	}
+	return out.RowsAffected()
+}
+
+// CancelPendingActionsForSafetyStop revokes queued destructive work after a
+// fleet-wide emergency stop. The restore action is an exception: it only
+// undoes a prior host quiesce, and blocking it can strand GPU monitoring off.
+// A leased action with a live lease may already be running on the node, so it
+// remains truthful and is never relabelled as cancelled.
+func (q *Queries) CancelPendingActionsForSafetyStop(ctx context.Context) (int64, error) {
+	now := time.Now()
+	out, err := q.db.ExecContext(ctx, `
+		UPDATE actions SET state='cancelled', lease_token='', lease_expires_at_ns=0, updated_at=?
+		WHERE type<>?
+		  AND (state='pending'
+		       OR (state='leased' AND lease_expires_at_ns <= ?))`,
+		ts(now), string(types.ActionRestoreAcceleratorHost), now.UnixNano())
 	if err != nil {
 		return 0, err
 	}

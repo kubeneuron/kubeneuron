@@ -95,6 +95,13 @@ type Controller struct {
 	runtime   atomic.Pointer[RuntimeConfig]
 	runtimeMu sync.RWMutex
 
+	// dispatchMu is the final fence between an agent polling the durable queue
+	// and an operator emergency stop. NextAction holds its read side through
+	// the claim; a pause or a DryRun transition holds the write side while it
+	// tombstones undelivered work. This gives the stop lever a real linearization
+	// point instead of merely changing what future reconciles might enqueue.
+	dispatchMu sync.RWMutex
+
 	// pinnedEvidence holds the accelerator evidence captured when an incident
 	// quiesced the vendor stack, keyed by incident ID. See pinAcceleratorEvidence.
 	pinnedEvidenceMu sync.Mutex
@@ -567,12 +574,31 @@ func (c *Controller) HandleAcceleratorReport(r *http.Request, report types.Agent
 // available queued action. The opaque claim token is returned only to the
 // authenticated node and must accompany its result.
 func (c *Controller) NextAction(r *http.Request, node string) (*types.QueuedAction, error) {
+	c.dispatchMu.RLock()
+	defer c.dispatchMu.RUnlock()
+	if c.agentDispatchStopped() {
+		return nil, nil
+	}
 	bootID := r.Header.Get(types.AgentBootIDHeader)
 	queued, err := c.store.ClaimNextAction(r.Context(), node, bootID, actionLeaseDuration)
 	if err == store.ErrNotFound {
 		return nil, nil
 	}
 	return queued, err
+}
+
+func (c *Controller) agentDispatchStopped() bool {
+	// A controller intentionally built without a gate is an observation/test
+	// seam, not a production remediation controller; preserve its legacy queue
+	// behavior. Every runnable controller wires a gate and is fail-closed here.
+	if c.gate == nil {
+		return false
+	}
+	if c.gate.Paused() {
+		return true
+	}
+	rc := c.runtime.Load()
+	return rc != nil && rc.SafetyLimits != nil && rc.SafetyLimits.DryRun
 }
 
 // CompleteAction implements httpapi.Backend. The action must belong to the

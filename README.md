@@ -85,7 +85,7 @@ The repository builds four custom binaries:
 |---|---|---|
 | `kubeneuron-operator` | Watches KubeNeuron CRDs, validates and compiles their configuration, and reconciles the controller and agent Kubernetes workloads. | Released. SQLite or PostgreSQL store; `DryRun`/`Paused`/`Enabled`, where `Enabled` requires `spec.safety.destructiveExecution` (a non-empty node selector plus the exact acknowledgement) and arms only the named nodes. Issues and automatically renews the installation's operator-issued mTLS material and rolls the consumers on renewal. Alertmanager webhook authentication is mandatory; Paused also requires an API token. Emits Kubernetes Events; readiness follows informer-cache sync. |
 | `kubeneuron-controller` | Ingests Alertmanager and agent events and owns incident, policy, safety, and workflow execution. | Released. State walk, safety gates, approvals with verified actor identity, escalation, transactional audit, durable action queue with lease/boot-ID binding, authenticated operator REST API, embedded control panel. PostgreSQL HA with leader election; failover is proven not to duplicate an action. |
-| `kubeneuron-agent` | Runs on GPU nodes, watches kernel events, reports inventory/events, and executes queued actions. | Released. Registration and events use mTLS plus projected Pod-bound identity. `spec.agent.hostTooling` mounts the node's `nvidia-smi`/driver libraries into the distroless image — verified reading a real Tesla T4 — and arms `--require-real-driver`. Typed action contracts execute in dry-run unless the installation is `Enabled` and the agent is on a `destructiveExecution` node, where it is armed with `--enable-destructive-actions`; host state (persistence mode, DCGM) is snapshotted crash-safe across restarts, and a hardware GPU reset is refused on evidence where the guest has no PCI reset. |
+| `kubeneuron-agent` | Runs on GPU nodes, watches kernel events, reports inventory/events, and executes queued actions. | Released. Registration and events use mTLS plus projected Pod-bound identity. `spec.agent.hostTooling` mounts the node's `nvidia-smi`/driver libraries into the distroless image — verified reading a real Tesla T4 — and arms `--require-real-driver`. Typed action contracts execute in dry-run unless a live controller serves arming for a node inside `destructiveExecution.nodeSelector`; agents outside that blast radius remain scheduled for detection but cannot execute destructive work. Host state (persistence mode, DCGM) is snapshotted crash-safe across restarts, and a hardware GPU reset is refused on evidence where the guest has no PCI reset. |
 | `kubeneuronctl` | Operator-facing CLI for status, incidents, approvals, manual remediation, and pause/resume. | All declared commands implemented against the operator REST API. |
 
 VictoriaMetrics, vmalert, Alertmanager, Grafana, dcgm-exporter, and
@@ -336,9 +336,9 @@ actuation addresses, or pause state. This is a connectivity/persistence signal,
 not GPU health. Registration and event routes exist only on the controller's
 TLS 1.3 client-certificate listener at port 8443. Public health and the
 Alertmanager webhook remain on port 8080. In the operator-managed path the
-webhook requires `spec.notifications.webhookToken`; an intentionally direct
-development controller may omit its flag, but that configuration is not a
-supported operator installation.
+webhook requires `spec.notifications.webhookToken`; a direct development
+controller must explicitly pass `-allow-insecure-webhook` to opt out, but that
+configuration is not a supported operator installation.
 
 The remaining `deploy/` content is current: version-pinned third-party
 dependency profiles under `deploy/kubernetes/dependencies/`, the SQLite

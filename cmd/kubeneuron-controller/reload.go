@@ -50,6 +50,21 @@ func applyRuntimeConfig(
 	paths runtimeConfigPaths,
 	log *slog.Logger,
 ) error {
+	return applyRuntimeConfigWithNodePauses(ctx, ctrl, api, paths, log, true)
+}
+
+// applyRuntimeConfigWithNodePauses installs local runtime configuration on any
+// replica, but persists the cluster-wide GPUNodeConfig pause set only when the
+// caller owns the leader lease. A standby must be ready to take over without
+// being allowed to erase the current leader's durable node intent.
+func applyRuntimeConfigWithNodePauses(
+	ctx context.Context,
+	ctrl *controller.Controller,
+	api *httpapi.Server,
+	paths runtimeConfigPaths,
+	log *slog.Logger,
+	persistNodePauses bool,
+) error {
 	cfg, err := config.Load(paths.policies)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
@@ -100,13 +115,15 @@ func applyRuntimeConfig(
 	}
 
 	// Everything parsed. Validate before the only fallible installation step.
-	// Persisting node pause state first means an error leaves every live runtime
-	// setting untouched; the snapshot install below is then non-failing.
+	// The node pause set is durable cluster state, not a process-local runtime
+	// setting, so only the leader is allowed to write it.
 	if err := controller.ValidateAcceleratorRuntimeProfiles(cfg.AcceleratorProfiles); err != nil {
 		return fmt.Errorf("validating accelerator runtime profiles: %w", err)
 	}
-	if err := ctrl.ApplyNodeConfigs(ctx, nodeConfigs); err != nil {
-		return fmt.Errorf("applying node configs: %w", err)
+	if persistNodePauses {
+		if err := ctrl.ApplyNodeConfigs(ctx, nodeConfigs); err != nil {
+			return fmt.Errorf("applying node configs: %w", err)
+		}
 	}
 	// ONE atomic install: a reconcile pass observes either the whole previous
 	// configuration or the whole new one, never a mixture of generations. The
@@ -129,7 +146,7 @@ func applyRuntimeConfig(
 		MaxConcurrentReboots:      cfg.Safety.MaxConcurrentReboots,
 		DryRun:                    cfg.Safety.DryRun,
 	}
-	if err := ctrl.InstallRuntimeConfig(controller.RuntimeConfig{
+	if err := ctrl.InstallRuntimeConfigContext(ctx, controller.RuntimeConfig{
 		SafetyLimits:        &limits,
 		Engine:              engine,
 		Catalog:             catalog,
@@ -180,13 +197,17 @@ func degradedTaintPolicy(compiled *config.TaintDegradedNodes) controller.Degrade
 
 // watchRuntimeConfig re-applies the configuration whenever the mounted files
 // change, until ctx is done. It runs on every replica, leader or not, so a
-// standby that later wins the lease already holds current configuration.
+// standby that later wins the lease already holds current local configuration.
+// In HA, node pauses are watched by a separate leader-context loop below: a
+// process-wide reloader must never become a shared-state writer merely because
+// it observed a transient leadership flag.
 func watchRuntimeConfig(
 	ctx context.Context,
 	ctrl *controller.Controller,
 	api *httpapi.Server,
 	paths runtimeConfigPaths,
 	log *slog.Logger,
+	persistNodePauses bool,
 ) {
 	last, _ := runtimeConfigDigest(paths)
 	tick := time.NewTicker(runtimeConfigReloadInterval)
@@ -201,7 +222,7 @@ func watchRuntimeConfig(
 		if err != nil || digest == last {
 			continue
 		}
-		if err := applyRuntimeConfig(ctx, ctrl, api, paths, log); err != nil {
+		if err := applyRuntimeConfigWithNodePauses(ctx, ctrl, api, paths, log, persistNodePauses); err != nil {
 			// Keep the previous configuration and retry on the next tick; do
 			// not advance the digest, so a transient read during the kubelet's
 			// atomic symlink swap is retried rather than skipped.
@@ -211,6 +232,52 @@ func watchRuntimeConfig(
 		last = digest
 		log.Info("runtime configuration reloaded in place", "digest", digest[:12])
 	}
+}
+
+// watchNodeConfigPauses runs only in the leader callback's context. It owns
+// the shared GPUNodeConfig pause set after the initial leader apply, while the
+// process-wide runtime watcher above remains deliberately local on standbys.
+func watchNodeConfigPauses(ctx context.Context, ctrl *controller.Controller, path string, log *slog.Logger) {
+	if path == "" {
+		return
+	}
+	last, _ := nodeConfigDigest(path)
+	tick := time.NewTicker(runtimeConfigReloadInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		digest, err := nodeConfigDigest(path)
+		if err != nil || digest == last {
+			continue
+		}
+		configs, err := config.LoadNodeConfigs(path)
+		if err != nil {
+			log.Warn("node configuration reload failed; keeping previous pause set", "err", err)
+			continue
+		}
+		if err := ctrl.ApplyNodeConfigs(ctx, configs); err != nil {
+			// Do not advance the digest: a lost/cancelled leadership context exits
+			// this loop, while a transient store failure is retried by this leader.
+			if ctx.Err() == nil {
+				log.Warn("applying node configuration reload failed; keeping previous pause set", "err", err)
+			}
+			continue
+		}
+		last = digest
+		log.Info("leader node configuration reloaded in place", "digest", digest[:12])
+	}
+}
+
+func nodeConfigDigest(path string) (string, error) {
+	h := sha256.New()
+	if err := hashFile(h, path); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // runtimeConfigDigest hashes every configuration input so a change can be

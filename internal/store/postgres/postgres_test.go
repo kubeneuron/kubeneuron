@@ -258,10 +258,10 @@ func TestAcceleratorReportStalenessAndSafetyState(t *testing.T) {
 		t.Fatalf("GetAcceleratorReport = %+v, %v", got, err)
 	}
 
-	if err := s.SaveSafetyState("cooldowns", []byte(`{"k":"v"}`)); err != nil {
+	if err := s.SaveSafetyState(ctx, "cooldowns", []byte(`{"k":"v"}`)); err != nil {
 		t.Fatal(err)
 	}
-	payload, err := s.LoadSafetyState("cooldowns")
+	payload, err := s.LoadSafetyState(ctx, "cooldowns")
 	if err != nil || string(payload) != `{"k":"v"}` {
 		t.Fatalf("LoadSafetyState = %q, %v", payload, err)
 	}

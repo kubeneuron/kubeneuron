@@ -89,6 +89,14 @@ func newHarness(t *testing.T) *harness {
 	})
 	flap := safety.NewFlapDetector(cfg.Safety.Flap.Count, cfg.Safety.Flap.Window.Std())
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// Mirror the production controller bootstrap: the pause API is deliberately
+	// unavailable until its replacement state has a durable store behind it.
+	if err := gate.RestoreAndPersist(context.Background(), st, log); err != nil {
+		t.Fatal(err)
+	}
+	if err := flap.RestoreAndPersist(context.Background(), st, log); err != nil {
+		t.Fatal(err)
+	}
 
 	ctrl := controller.New(st, st, engine, gate, flap, nil, nil, &notify.Log{Logger: log}, log)
 	ctrl.SetTimings(80*time.Millisecond, time.Hour)

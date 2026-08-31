@@ -1,6 +1,7 @@
 package safety
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"sync"
@@ -262,7 +263,7 @@ type memStateStore struct {
 	kinds map[string][]byte
 }
 
-func (m *memStateStore) SaveSafetyState(kind string, payload []byte) error {
+func (m *memStateStore) SaveSafetyState(_ context.Context, kind string, payload []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.kinds == nil {
@@ -272,7 +273,7 @@ func (m *memStateStore) SaveSafetyState(kind string, payload []byte) error {
 	return nil
 }
 
-func (m *memStateStore) LoadSafetyState(kind string) ([]byte, error) {
+func (m *memStateStore) LoadSafetyState(_ context.Context, kind string) ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.kinds[kind], nil
@@ -285,7 +286,7 @@ func TestGateCooldownSurvivesRestart(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	g1 := NewGate(Limits{MaxConcurrentRemediations: 10, MaxConcurrentReboots: 1})
-	if err := g1.RestoreAndPersist(store, log); err != nil {
+	if err := g1.RestoreAndPersist(context.Background(), store, log); err != nil {
 		t.Fatal(err)
 	}
 	g1.RecordCooldown(target("n1"), types.ActionGPUReset, 30*time.Minute)
@@ -293,7 +294,7 @@ func TestGateCooldownSurvivesRestart(t *testing.T) {
 
 	// "Restart": a fresh gate restoring from the same store.
 	g2 := NewGate(Limits{MaxConcurrentRemediations: 10, MaxConcurrentReboots: 1})
-	if err := g2.RestoreAndPersist(store, log); err != nil {
+	if err := g2.RestoreAndPersist(context.Background(), store, log); err != nil {
 		t.Fatal(err)
 	}
 	if err := g2.Allow(target("n1"), types.ActionGPUReset); err == nil {
@@ -316,15 +317,15 @@ func TestGatePauseSurvivesRestart(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	g1 := NewGate(Limits{MaxConcurrentRemediations: 10, MaxConcurrentReboots: 1})
-	if err := g1.RestoreAndPersist(store, log); err != nil {
+	if err := g1.RestoreAndPersist(context.Background(), store, log); err != nil {
 		t.Fatal(err)
 	}
-	if err := g1.SetPaused(true, "alice"); err != nil {
+	if err := g1.SetPaused(context.Background(), true, "alice"); err != nil {
 		t.Fatalf("SetPaused: %v", err)
 	}
 
 	g2 := NewGate(Limits{MaxConcurrentRemediations: 10, MaxConcurrentReboots: 1})
-	if err := g2.RestoreAndPersist(store, log); err != nil {
+	if err := g2.RestoreAndPersist(context.Background(), store, log); err != nil {
 		t.Fatal(err)
 	}
 	if !g2.Paused() {
@@ -344,7 +345,7 @@ func TestFlapHistorySurvivesRestart(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	f1 := NewFlapDetector(2, 24*time.Hour)
-	if err := f1.RestoreAndPersist(store, log); err != nil {
+	if err := f1.RestoreAndPersist(context.Background(), store, log); err != nil {
 		t.Fatal(err)
 	}
 	f1.RecordResolved(target("n1"), types.ClassECCDBE)
@@ -354,7 +355,7 @@ func TestFlapHistorySurvivesRestart(t *testing.T) {
 	f1.RecordResolved(target("n1"), types.ClassECCDBE)
 
 	f2 := NewFlapDetector(2, 24*time.Hour)
-	if err := f2.RestoreAndPersist(store, log); err != nil {
+	if err := f2.RestoreAndPersist(context.Background(), store, log); err != nil {
 		t.Fatal(err)
 	}
 	// The pending resolution and the first counted cycle both survived, so

@@ -5,6 +5,7 @@
 package safety
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -127,14 +128,16 @@ func (g *Gate) Limits() Limits { g.mu.Lock(); defer g.mu.Unlock(); return g.limi
 // operator to believe remediation stopped while a replacement process resumes
 // it.  Store attachment happens in RestoreAndPersist before the controller API
 // is exposed.
-func (g *Gate) SetPaused(paused bool, actor string) error {
+func (g *Gate) SetPaused(ctx context.Context, paused bool, actor string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.store == nil {
 		return errors.New("global pause persistence is unavailable")
 	}
 	changedAt := g.now().UTC()
-	if err := g.persistPauseLocked(paused, actor, changedAt); err != nil {
+	persistCtx, cancel := boundedStateContext(ctx)
+	defer cancel()
+	if err := g.persistPauseLocked(persistCtx, paused, actor, changedAt); err != nil {
 		return err
 	}
 	g.paused, g.pauseActor, g.pauseChangedAt = paused, actor, changedAt
@@ -146,7 +149,10 @@ func (g *Gate) setPausedBestEffort(paused bool, actor string) {
 	defer g.mu.Unlock()
 	changedAt := g.now().UTC()
 	if g.store != nil {
-		if err := g.persistPauseLocked(paused, actor, changedAt); err != nil && g.storeLog != nil {
+		persistCtx, cancel := boundedStateContext(context.Background())
+		err := g.persistPauseLocked(persistCtx, paused, actor, changedAt)
+		cancel()
+		if err != nil && g.storeLog != nil {
 			g.storeLog.Warn("persisting global pause failed; state survives in memory only", "err", err)
 		}
 	}
@@ -289,7 +295,9 @@ func (g *Gate) StepDone(target types.Target, action types.ActionType, cooldown t
 	}
 	g.pruneCooldownsLocked()
 	if cooldown > 0 {
-		g.persistLocked()
+		persistCtx, cancel := boundedStateContext(context.Background())
+		g.persistLocked(persistCtx)
+		cancel()
 	}
 }
 
@@ -330,7 +338,9 @@ func (g *Gate) RecordCooldown(target types.Target, action types.ActionType, cool
 	defer g.mu.Unlock()
 	g.cooldownUntil[targetKey(target)+"|"+string(action)] = g.now().Add(cooldown)
 	g.pruneCooldownsLocked()
-	g.persistLocked()
+	persistCtx, cancel := boundedStateContext(context.Background())
+	g.persistLocked(persistCtx)
+	cancel()
 }
 
 // CooldownRemaining reports how long the (target, action) pair remains in

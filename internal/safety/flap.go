@@ -1,6 +1,7 @@
 package safety
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"time"
@@ -52,7 +53,9 @@ func (f *FlapDetector) RecordResolved(target types.Target, class types.ProblemCl
 	defer f.mu.Unlock()
 	f.pendingResolve[targetKey(target)+"|"+string(class)] = f.now()
 	f.gcLocked()
-	f.persistLocked()
+	persistCtx, cancel := boundedStateContext(context.Background())
+	f.persistLocked(persistCtx)
+	cancel()
 }
 
 // RecordReopen registers that a new incident opened on (target, class) and
@@ -86,7 +89,9 @@ func (f *FlapDetector) RecordReopen(target types.Target, class types.ProblemClas
 		f.reopens[key] = kept
 	}
 	f.gcLocked()
-	f.persistLocked()
+	persistCtx, cancel := boundedStateContext(context.Background())
+	f.persistLocked(persistCtx)
+	cancel()
 	return len(kept) >= f.threshold
 }
 

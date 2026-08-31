@@ -645,7 +645,7 @@ controller does not serve the embedded files. See
 
 | Route | Purpose | State |
 |---|---|---|
-| `POST /api/v1/webhooks/alertmanager` on 8080 | slow-path alert ingestion | implemented; bearer token required for operator-managed installations (`spec.notifications.webhookToken`); a directly started development binary may opt out only by omitting `-webhook-token-file` |
+| `POST /api/v1/webhooks/alertmanager` on 8080 | slow-path alert ingestion | implemented; bearer token required for operator-managed installations (`spec.notifications.webhookToken`); a directly started development binary may opt out only with explicit `-allow-insecure-webhook` |
 | `POST /api/v1/events` on 8443 | agent event ingestion; replay-deduplicated by capture event ID | implemented; mTLS plus Pod/node authorization |
 | `GET /api/v1/agents/register/narrow-v1` on 8443 | exact narrow-registration capability preflight | implemented; mTLS plus Pod/node authorization |
 | `POST /api/v1/agents/register/narrow-v1` on 8443 | narrow agent registration/heartbeat; durable acknowledgment | implemented; mTLS plus Pod/node authorization |

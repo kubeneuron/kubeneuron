@@ -97,7 +97,8 @@ func main() {
 		oidcRedirectURL        = flag.String("oidc-redirect-url", "", "externally reachable OIDC callback URL (https://<panel>/api/v1/auth/oidc/callback)")
 		oidcAllowedDomains     = flag.String("oidc-allowed-email-domains", "", "comma-separated email domains allowed to sign in via OIDC; empty allows any authenticated principal")
 		apiAuthnKubernetes     = flag.Bool("api-authn-kubernetes", false, "additionally accept per-caller Kubernetes credentials on the operator API (TokenReview identity + RBAC on the KubeNeuron object); the static token stays as break-glass")
-		webhookTokenFile       = flag.String("webhook-token-file", "", "file with the Alertmanager webhook bearer token; empty leaves the webhook unauthenticated (development only)")
+		webhookTokenFile       = flag.String("webhook-token-file", "", "file with the Alertmanager webhook bearer token; required unless -allow-insecure-webhook is explicitly set")
+		allowInsecureWebhook   = flag.Bool("allow-insecure-webhook", false, "allow an unauthenticated Alertmanager webhook (development only; never use in production)")
 		configPath             = flag.String("config", "configs/policies.yaml", "policies/safety config file")
 		windowsPath            = flag.String("windows", "", "maintenance windows YAML (missing file means no windows)")
 		mappingsPath           = flag.String("signal-mappings", "", "signal-override YAML (missing file means built-in catalog only)")
@@ -150,7 +151,7 @@ func main() {
 		oidcClientSecretF:  *oidcClientSecretF,
 		oidcRedirectURL:    *oidcRedirectURL,
 		oidcAllowedDomains: *oidcAllowedDomains,
-	}, *webhookTokenFile, notifyFiles{
+	}, *webhookTokenFile, *allowInsecureWebhook, notifyFiles{
 		slackWebhook:        *slackWebhookFile,
 		webhookURL:          *notifyWebhookURLFile,
 		webhookToken:        *notifyWebhookTokenFile,
@@ -180,8 +181,8 @@ type runtimeStore interface {
 	store.Store
 	store.EventOutbox
 	store.AcceleratorReportStore
-	SaveSafetyState(kind string, payload []byte) error
-	LoadSafetyState(kind string) ([]byte, error)
+	SaveSafetyState(ctx context.Context, kind string, payload []byte) error
+	LoadSafetyState(ctx context.Context, kind string) ([]byte, error)
 	Prune(ctx context.Context, dataRetention, auditRetention time.Duration) (sqlcore.PruneStats, error)
 	CountPendingActions(ctx context.Context) (int, error)
 	CountIncidentsByState(ctx context.Context) (map[types.IncidentState]int, error)
@@ -214,7 +215,7 @@ type electionConfig struct {
 	name      string
 }
 
-func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, paths runtimeConfigPaths, dbPath, platformName, kubeconfig, apiTokenFile string, apiAuthnKubernetes bool, auth humanAuth, webhookTokenFile string, notifyCfg notifyFiles, startPaused bool, storeRetention, auditRetention time.Duration, publicTLSCert, publicTLSKey, storeKind, postgresDSNFile string, election electionConfig, cloudProvider, cloudRegion string) error {
+func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, paths runtimeConfigPaths, dbPath, platformName, kubeconfig, apiTokenFile string, apiAuthnKubernetes bool, auth humanAuth, webhookTokenFile string, allowInsecureWebhook bool, notifyCfg notifyFiles, startPaused bool, storeRetention, auditRetention time.Duration, publicTLSCert, publicTLSKey, storeKind, postgresDSNFile string, election electionConfig, cloudProvider, cloudRegion string) error {
 	if (publicTLSCert == "") != (publicTLSKey == "") {
 		return fmt.Errorf("public TLS requires both -public-tls-cert and -public-tls-key")
 	}
@@ -297,14 +298,14 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	flap := safety.NewFlapDetector(cfg.Safety.Flap.Count, cfg.Safety.Flap.Window.Std())
 	// Cooldowns and flap history survive restarts: a crash-looping
 	// controller must not shed exactly the protections a signal storm needs.
-	if err := gate.RestoreAndPersist(st, log); err != nil {
+	if err := gate.RestoreAndPersist(context.Background(), st, log); err != nil {
 		return fmt.Errorf("restore gate cooldowns: %w", err)
 	}
-	if err := flap.RestoreAndPersist(st, log); err != nil {
+	if err := flap.RestoreAndPersist(context.Background(), st, log); err != nil {
 		return fmt.Errorf("restore flap history: %w", err)
 	}
 	if startPaused {
-		if err := gate.SetPaused(true, "startup"); err != nil {
+		if err := gate.SetPaused(context.Background(), true, "startup"); err != nil {
 			return fmt.Errorf("persist start-paused state: %w", err)
 		}
 		log.Warn("starting with automated remediation PAUSED; resume via the operator API or kubeneuronctl resume")
@@ -414,10 +415,10 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	// Install the full runtime configuration in place, and keep it current by
 	// watching the mounted files rather than by rolling the Deployment — see
 	// applyRuntimeConfig for why a rollout cannot work under leader election.
-	if err := applyRuntimeConfig(ctx, ctrl, api, paths, log); err != nil {
+	if err := applyRuntimeConfigWithNodePauses(ctx, ctrl, api, paths, log, !election.enabled); err != nil {
 		return err
 	}
-	go watchRuntimeConfig(ctx, ctrl, api, paths, log)
+	go watchRuntimeConfig(ctx, ctrl, api, paths, log, !election.enabled)
 	api.SetMetricsHandler(metrics.Handler())
 	// When the public listener serves plain HTTP it is expected to sit behind a
 	// TLS-terminating load balancer, so honor X-Forwarded-Proto to mark panel
@@ -545,20 +546,8 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	} else {
 		log.Warn("operator API disabled: no -api-token-file configured")
 	}
-	if webhookTokenFile != "" {
-		token, err := readTokenFile(webhookTokenFile)
-		if err != nil {
-			return fmt.Errorf("webhook token: %w", err)
-		}
-		api.SetWebhookToken(token)
-		api.SetWebhookTokenProvider(newCachedTokenFile(webhookTokenFile, token, log).get)
-	} else {
-		// Fail-closed by default: without a token the webhook rejects every
-		// caller, because a firing alert can drive cordon/drain. Opt into the
-		// unauthenticated development mode explicitly so the security property
-		// lives in the code path, not in whether a flag happened to be set.
-		api.AllowInsecureWebhook()
-		log.Warn("Alertmanager webhook is unauthenticated: no -webhook-token-file configured (development only)")
+	if err := configureAlertmanagerWebhook(api, webhookTokenFile, allowInsecureWebhook, log); err != nil {
+		return err
 	}
 
 	if kubePlatform == nil {
@@ -675,17 +664,27 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 				OnStartedLeading: func(leadCtx context.Context) {
 					// Reload persisted cooldowns/flap history: the previous
 					// leader may have written since this process started.
-					if err := gate.RestoreAndPersist(st, log); err != nil {
+					if err := gate.RestoreAndPersist(leadCtx, st, log); err != nil {
 						log.Error("reload gate state on leadership", "err", err)
 						stop()
 						return
 					}
-					if err := flap.RestoreAndPersist(st, log); err != nil {
+					if err := flap.RestoreAndPersist(leadCtx, st, log); err != nil {
 						log.Error("reload flap state on leadership", "err", err)
 						stop()
 						return
 					}
+					// This is the only path by which an HA replica writes the
+					// durable GPUNodeConfig pause set. A standby still reloads the
+					// rest locally, then refreshes this leader-owned state before it
+					// becomes Ready or starts a reconcile walk.
+					if err := applyRuntimeConfigWithNodePauses(leadCtx, ctrl, api, paths, log, true); err != nil {
+						log.Error("reload runtime configuration on leadership", "err", err)
+						stop()
+						return
+					}
 					leading.Store(true)
+					go watchNodeConfigPauses(leadCtx, ctrl, paths.nodeConfigs, log)
 					log.Info("leadership acquired; starting the remediation walk")
 					if err := ctrl.Run(leadCtx); err != nil {
 						// Release leadership, like the two restore failures
@@ -720,6 +719,31 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	default:
 		return nil
 	}
+}
+
+// configureAlertmanagerWebhook keeps the unauthenticated development escape
+// hatch visibly separate from the secure default. A firing alert can drive
+// cordon/drain, so an absent token must never silently imply permission.
+func configureAlertmanagerWebhook(api *httpapi.Server, tokenFile string, allowInsecure bool, log *slog.Logger) error {
+	if tokenFile != "" {
+		if allowInsecure {
+			return fmt.Errorf("-allow-insecure-webhook cannot be combined with -webhook-token-file")
+		}
+		token, err := readTokenFile(tokenFile)
+		if err != nil {
+			return fmt.Errorf("webhook token: %w", err)
+		}
+		api.SetWebhookToken(token)
+		api.SetWebhookTokenProvider(newCachedTokenFile(tokenFile, token, log).get)
+		return nil
+	}
+	if allowInsecure {
+		api.AllowInsecureWebhook()
+		log.Warn("Alertmanager webhook is explicitly unauthenticated (development only)")
+		return nil
+	}
+	log.Warn("Alertmanager webhook is disabled: configure -webhook-token-file or explicitly opt into development mode")
+	return nil
 }
 
 // cachedTokenFile re-reads a mounted token Secret with a short TTL so

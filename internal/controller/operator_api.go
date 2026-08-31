@@ -176,12 +176,31 @@ func (c *Controller) AcceleratorObservationProfile(ctx context.Context, node str
 // SetPaused flips the global automation pause (the big red button) only after
 // its replacement state is durable.  The caller returns an error instead of
 // acknowledging a process-local pause that a leader failover would erase.
-func (c *Controller) SetPaused(paused bool, actor string) error {
+func (c *Controller) SetPaused(ctx context.Context, paused bool, actor string) error {
 	if c.gate == nil {
 		return fmt.Errorf("global pause is unavailable: safety gate is not configured")
 	}
-	if err := c.gate.SetPaused(paused, actor); err != nil {
-		return err
+	c.dispatchMu.Lock()
+	defer c.dispatchMu.Unlock()
+	if !paused {
+		// A resumption is a new authorization boundary, not permission to run
+		// arbitrary work that accumulated while paused.
+		if err := c.cancelUndeliveredActionsForSafetyStop(ctx); err != nil {
+			return fmt.Errorf("cancel queued actions before resuming automation: %w", err)
+		}
+		if err := c.gate.SetPaused(ctx, false, actor); err != nil {
+			return err
+		}
+	} else {
+		// Persist the red button before acknowledging it. Once that succeeds the
+		// controller is fail-closed even if queue cancellation has a transient
+		// store error and the caller receives a retryable response.
+		if err := c.gate.SetPaused(ctx, true, actor); err != nil {
+			return err
+		}
+		if err := c.cancelUndeliveredActionsForSafetyStop(ctx); err != nil {
+			return fmt.Errorf("cancel queued actions after pausing automation: %w", err)
+		}
 	}
 	c.log.Warn("automation pause changed", "paused", paused, "actor", actor)
 	return nil

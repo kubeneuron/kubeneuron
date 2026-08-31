@@ -181,6 +181,14 @@ type Store interface {
 	// CancelPendingActionsForIncident tombstones the incident's undelivered
 	// ('pending') actions; leased work may already be executing and stays.
 	CancelPendingActionsForIncident(ctx context.Context, incidentID string) (int64, error)
+	// CancelPendingActionsForSafetyStop tombstones undelivered destructive
+	// actions across the fleet when automation is paused or switched to
+	// DryRun. restore_accelerator_host is deliberately spared: it is an undo
+	// operation which puts monitoring back after a prior quiesce.
+	//
+	// As with incident cancellation, pending work and expired leases are safe
+	// to revoke; an unexpired lease may already be executing and is left alone.
+	CancelPendingActionsForSafetyStop(ctx context.Context) (int64, error)
 
 	// NextPendingAction and CompleteAction are legacy unleased helpers. New
 	// dispatch paths must use ClaimNextAction and CompleteClaimedAction so a
