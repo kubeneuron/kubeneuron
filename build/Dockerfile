@@ -9,7 +9,7 @@
 # multi-arch image cross-compiles instead of emulating, and a plain local
 # build keeps working.
 ARG BUILDPLATFORM=linux/amd64
-FROM --platform=$BUILDPLATFORM golang:1.25.13 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.0 AS build
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
@@ -75,7 +75,7 @@ FROM busybox:uclibc AS busybox
 #
 # So pin to the OLDEST engine we support rather than the newest client
 # available: 4.3.1 works against 4.3.1 and everything above it.
-FROM debian:12-slim AS dcgm
+FROM debian:13-slim AS dcgm
 ARG TARGETARCH
 ARG DCGM_VERSION=4.3.1-1
 RUN set -eux; \
