@@ -571,15 +571,28 @@ func (c *Controller) HandleAcceleratorReport(r *http.Request, report types.Agent
 }
 
 // NextAction implements httpapi.Backend: atomically claim the node's oldest
-// available queued action. The opaque claim token is returned only to the
-// authenticated node and must accompany its result.
+// normally available action, or only its compensating host restore during an
+// emergency stop. The opaque claim token is returned only to the authenticated
+// node and must accompany its result.
 func (c *Controller) NextAction(r *http.Request, node string) (*types.QueuedAction, error) {
 	c.dispatchMu.RLock()
 	defer c.dispatchMu.RUnlock()
-	if c.agentDispatchStopped() {
-		return nil, nil
-	}
 	bootID := r.Header.Get(types.AgentBootIDHeader)
+	if c.agentDispatchStopped() {
+		// A stop rejects all new remediation, but leaving a host whose GPU
+		// stack KubeNeuron quiesced with monitoring disabled is not a safer
+		// state. Do not claim normally and inspect the result: that would lease
+		// a destructive action. The store performs the type filter atomically.
+		restorative, ok := c.store.(store.RestorativeActionClaimer)
+		if !ok {
+			return nil, nil // out-of-tree stores remain fail-closed by default
+		}
+		queued, err := restorative.ClaimNextRestorativeAction(r.Context(), node, bootID, actionLeaseDuration)
+		if err == store.ErrNotFound {
+			return nil, nil
+		}
+		return queued, err
+	}
 	queued, err := c.store.ClaimNextAction(r.Context(), node, bootID, actionLeaseDuration)
 	if err == store.ErrNotFound {
 		return nil, nil

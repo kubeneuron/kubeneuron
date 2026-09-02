@@ -12,7 +12,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
-func TestDryRunTombstonesQueuedDestructiveActions(t *testing.T) {
+func TestDryRunTombstonesQueuedNonRestorativeActions(t *testing.T) {
 	ctx := context.Background()
 	st, err := storesqlite.Open(":memory:")
 	if err != nil {
@@ -25,6 +25,9 @@ func TestDryRunTombstonesQueuedDestructiveActions(t *testing.T) {
 	if err := st.EnqueueAction(ctx, "node-a", types.Action{ID: "stop-me", Type: types.ActionGPUReset}); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.EnqueueAction(ctx, "node-a", types.Action{ID: "also-stop-me", Type: types.ActionRunDiag}); err != nil {
+		t.Fatal(err)
+	}
 
 	dry := safety.Limits{MaxConcurrentRemediations: 1, DryRun: true}
 	if err := c.InstallRuntimeConfigContext(ctx, RuntimeConfig{SafetyLimits: &dry}); err != nil {
@@ -33,6 +36,10 @@ func TestDryRunTombstonesQueuedDestructiveActions(t *testing.T) {
 	stopped, err := st.GetAction(ctx, "stop-me")
 	if err != nil || !stopped.Cancelled {
 		t.Fatalf("queued action after stop = %+v, %v; want cancelled", stopped, err)
+	}
+	diagnostic, err := st.GetAction(ctx, "also-stop-me")
+	if err != nil || !diagnostic.Cancelled {
+		t.Fatalf("queued diagnostic after stop = %+v, %v; want cancelled", diagnostic, err)
 	}
 	if got, err := c.NextAction(httptest.NewRequest("GET", types.AgentActionLeasePath, nil), "node-a"); err != nil || got != nil {
 		t.Fatalf("NextAction during DryRun = %+v, %v; want no action", got, err)
@@ -84,17 +91,18 @@ func TestPauseTombstonesQueuedActionsButPreservesHostRestore(t *testing.T) {
 		t.Fatalf("host restore after pause = %+v, %v; want retained", restore, err)
 	}
 
-	// The queue is also closed while paused, including restorative work; it is
-	// handed out only after an explicit resume, when restoring monitoring is
-	// safe and needed.
-	if got, err := c.NextAction(httptest.NewRequest("GET", types.AgentActionLeasePath, nil), "node-a"); err != nil || got != nil {
-		t.Fatalf("NextAction while paused = %+v, %v; want no action", got, err)
-	}
-	if err := c.SetPaused(ctx, false, "alice"); err != nil {
-		t.Fatalf("resume: %v", err)
+	// A destructive action that arrived after the stop must not hide the older
+	// restore. NextAction filters in the atomic claim, rather than leasing the
+	// oldest action first and discovering too late that it is unsafe.
+	if err := st.EnqueueAction(ctx, "node-a", types.Action{ID: "queued-after-pause", Type: types.ActionGPUReset}); err != nil {
+		t.Fatal(err)
 	}
 	claimed, err := c.NextAction(httptest.NewRequest("GET", types.AgentActionLeasePath, nil), "node-a")
 	if err != nil || claimed == nil || claimed.Action.Type != types.ActionRestoreAcceleratorHost {
-		t.Fatalf("NextAction after resume = %+v, %v; want retained host restore", claimed, err)
+		t.Fatalf("NextAction while paused = %+v, %v; want retained host restore", claimed, err)
+	}
+	unsafe, err := st.GetAction(ctx, "queued-after-pause")
+	if err != nil || unsafe.LeaseToken != "" || unsafe.Cancelled {
+		t.Fatalf("destructive action while paused = %+v, %v; want pending and unleased", unsafe, err)
 	}
 }

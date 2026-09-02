@@ -35,6 +35,41 @@ func TestClaimRecordsAttemptsAndExecutorBoot(t *testing.T) {
 	}
 }
 
+func TestClaimNextRestorativeActionSkipsOtherActionTypes(t *testing.T) {
+	s := openLeaseTestStore(t)
+	ctx := context.Background()
+	if err := s.EnqueueAction(ctx, "node-a", types.Action{ID: "destructive-first", Type: types.ActionGPUReset}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnqueueAction(ctx, "node-a", types.Action{ID: "restore-second", Type: types.ActionRestoreAcceleratorHost}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The safe claim must not lease the oldest action and inspect it after the
+	// fact: that would hand an agent a GPU reset while an emergency stop is in
+	// force. It selects the restore in one atomic statement instead.
+	claimed, err := s.ClaimNextRestorativeAction(ctx, "node-a", "boot-1", time.Minute)
+	if err != nil || claimed == nil || claimed.Action.ID != "restore-second" {
+		t.Fatalf("restorative claim = %+v, %v; want restore-second", claimed, err)
+	}
+	unsafe, err := s.GetAction(ctx, "destructive-first")
+	if err != nil || unsafe.LeaseToken != "" || unsafe.Cancelled || unsafe.Done {
+		t.Fatalf("skipped action = %+v, %v; want pending and unleased", unsafe, err)
+	}
+	if err := s.CompleteClaimedAction(ctx, claimed.Action.ID, claimed.LeaseToken, "boot-1", types.ActionResult{
+		ActionID: claimed.Action.ID, OK: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimNextRestorativeAction(ctx, "node-a", "boot-1", time.Minute); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("second restorative claim = %v, want ErrNotFound", err)
+	}
+	ordinary, err := s.ClaimNextAction(ctx, "node-a", "boot-1", time.Minute)
+	if err != nil || ordinary == nil || ordinary.Action.ID != "destructive-first" {
+		t.Fatalf("ordinary claim after restore = %+v, %v; want destructive-first", ordinary, err)
+	}
+}
+
 func TestCompleteClaimedActionRejectsExecutorBootMismatch(t *testing.T) {
 	s := openLeaseTestStore(t)
 	ctx := context.Background()

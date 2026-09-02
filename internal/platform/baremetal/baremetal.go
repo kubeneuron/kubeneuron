@@ -446,7 +446,7 @@ func (p *Platform) loadCordonState() error {
 	return nil
 }
 
-func (p *Platform) persistCordonStateLocked() error {
+func (p *Platform) persistCordonStateLocked() (retErr error) {
 	if p.hooks.CordonStateFile == "" {
 		return nil
 	}
@@ -471,21 +471,34 @@ func (p *Platform) persistCordonStateLocked() error {
 		return fmt.Errorf("creating baremetal cordon journal: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	tmpOpen := true
+	installed := false
+	defer func() {
+		if tmpOpen {
+			if err := tmp.Close(); err != nil && retErr == nil {
+				retErr = fmt.Errorf("closing baremetal cordon journal after failure: %w", err)
+			}
+		}
+		if !installed {
+			if err := os.Remove(tmpName); err != nil && !errors.Is(err, os.ErrNotExist) && retErr == nil {
+				retErr = fmt.Errorf("removing incomplete baremetal cordon journal: %w", err)
+			}
+		}
+	}()
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
 		return fmt.Errorf("writing baremetal cordon journal: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
 		return fmt.Errorf("syncing baremetal cordon journal: %w", err)
 	}
+	tmpOpen = false
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("closing baremetal cordon journal: %w", err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("installing baremetal cordon journal: %w", err)
 	}
+	installed = true
 	// Rename makes readers atomic; syncing the directory makes that rename
 	// survive a power loss as well. Without it a reboot can resurrect the old
 	// owner set after a successful hook, the same class of lost-hold bug this
@@ -494,9 +507,14 @@ func (p *Platform) persistCordonStateLocked() error {
 	if err != nil {
 		return fmt.Errorf("opening baremetal cordon journal directory: %w", err)
 	}
-	defer dirFile.Close()
 	if err := dirFile.Sync(); err != nil {
+		if closeErr := dirFile.Close(); closeErr != nil {
+			return fmt.Errorf("syncing baremetal cordon journal directory: %w (also closing it: %v)", err, closeErr)
+		}
 		return fmt.Errorf("syncing baremetal cordon journal directory: %w", err)
+	}
+	if err := dirFile.Close(); err != nil {
+		return fmt.Errorf("closing baremetal cordon journal directory: %w", err)
 	}
 	return nil
 }

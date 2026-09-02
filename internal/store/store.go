@@ -181,10 +181,11 @@ type Store interface {
 	// CancelPendingActionsForIncident tombstones the incident's undelivered
 	// ('pending') actions; leased work may already be executing and stays.
 	CancelPendingActionsForIncident(ctx context.Context, incidentID string) (int64, error)
-	// CancelPendingActionsForSafetyStop tombstones undelivered destructive
-	// actions across the fleet when automation is paused or switched to
-	// DryRun. restore_accelerator_host is deliberately spared: it is an undo
-	// operation which puts monitoring back after a prior quiesce.
+	// CancelPendingActionsForSafetyStop tombstones every undelivered action
+	// across the fleet when automation is paused or switched to DryRun, except
+	// restore_accelerator_host. The exception is an undo operation which puts
+	// monitoring back after a prior quiesce; all other automation, including
+	// diagnostic work, waits for a newly authorized incident after the stop.
 	//
 	// As with incident cancellation, pending work and expired leases are safe
 	// to revoke; an unexpired lease may already be executing and is left alone.
@@ -217,6 +218,18 @@ type Store interface {
 	ApplyNodeConfigPauses(ctx context.Context, pausedNodes []string) error
 
 	Close() error
+}
+
+// RestorativeActionClaimer is an optional narrow extension of Store for an
+// emergency stop. It can claim only the host-restore action which reverses a
+// KubeNeuron-initiated accelerator-stack quiesce. A controller without this
+// extension remains fail-closed while stopped.
+//
+// Kept separate from Store so an out-of-tree Store implementation cannot
+// silently turn a newly introduced stopped-mode dispatch path into ordinary
+// action delivery.
+type RestorativeActionClaimer interface {
+	ClaimNextRestorativeAction(ctx context.Context, node, bootID string, leaseDuration time.Duration) (*types.QueuedAction, error)
 }
 
 // EventSink receives raw events for long-term archival/analytics. The

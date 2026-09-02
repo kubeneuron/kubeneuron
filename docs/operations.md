@@ -80,10 +80,14 @@ Three independent mechanisms, all fail toward not acting:
    `kubeneuronctl resume`, the panel button, or
    `POST/DELETE /api/v1/pause`. Also available at install time via
    `executionMode: Paused` (controller starts gate-closed). The controller
-   immediately tombstones undelivered destructive agent actions; actions
-   queued while paused are also discarded before a later resume. Work already
-   under an unexpired agent lease may already be running and is reported
-   honestly rather than falsely marked cancelled.
+   immediately tombstones every undelivered agent action except
+   `restore_accelerator_host`; non-compensating actions queued while paused
+   are also discarded before a later resume. Work already under an unexpired
+   agent lease may already be running and is reported honestly rather than
+   falsely marked cancelled. The sole exception may be delivered while stopped
+   to undo KubeNeuron's own recorded accelerator-stack quiesce, so GPU
+   monitoring is not left disabled. It cannot claim or run any other queued
+   action.
 2. **Per-node pause:** create a `GPUNodeConfig` with `paused: true` for the
    node. The compiled set is authoritative: deleting the CR unpauses.
 3. **Maintenance windows:** `GPUMaintenanceWindow` with a time range and

@@ -1139,7 +1139,22 @@ func (q *Queries) EnqueueAction(ctx context.Context, node string, a types.Action
 	return err
 }
 
+// ClaimNextAction atomically claims the oldest action eligible for normal
+// dispatch on node.
 func (c *Core) ClaimNextAction(ctx context.Context, node, bootID string, leaseDuration time.Duration) (*types.QueuedAction, error) {
+	return c.claimNextAction(ctx, node, bootID, leaseDuration, "")
+}
+
+// ClaimNextRestorativeAction atomically claims only restore_accelerator_host.
+// It is deliberately separate from ClaimNextAction because an emergency stop
+// must never inspect and lease an arbitrary action merely to learn its type.
+// Host restore only reverses a quiesce KubeNeuron recorded itself, so it is
+// safe to keep monitoring recovery available while new remediation is stopped.
+func (c *Core) ClaimNextRestorativeAction(ctx context.Context, node, bootID string, leaseDuration time.Duration) (*types.QueuedAction, error) {
+	return c.claimNextAction(ctx, node, bootID, leaseDuration, types.ActionRestoreAcceleratorHost)
+}
+
+func (c *Core) claimNextAction(ctx context.Context, node, bootID string, leaseDuration time.Duration, onlyType types.ActionType) (*types.QueuedAction, error) {
 	if leaseDuration <= 0 {
 		return nil, fmt.Errorf("claim action: lease duration must be positive")
 	}
@@ -1173,12 +1188,21 @@ func (c *Core) ClaimNextAction(ctx context.Context, node, bootID string, leaseDu
 	// re-leased on every expiry forever. A genuinely in-flight action (unexpired
 	// lease) is left untouched so the boot-ID/lease completion contract holds
 	// for work that may still be running.
+	deadLetterTypeFilter := ""
+	if onlyType != "" {
+		deadLetterTypeFilter = " AND type=?"
+	}
+	deadLetterArgs := []any{ts(now), node}
+	if onlyType != "" {
+		deadLetterArgs = append(deadLetterArgs, string(onlyType))
+	}
+	deadLetterArgs = append(deadLetterArgs, MaxActionAttempts, nowNS)
 	if res, err := c.db.ExecContext(ctx, `
 		UPDATE actions
 		SET state='dead', lease_token='', lease_expires_at_ns=0, updated_at=?
-		WHERE node=? AND attempts>=?
+		WHERE node=?`+deadLetterTypeFilter+` AND attempts>=?
 		  AND (state='pending' OR (state='leased' AND lease_expires_at_ns <= ?))`,
-		ts(now), node, MaxActionAttempts, nowNS); err != nil {
+		deadLetterArgs...); err != nil {
 		return nil, fmt.Errorf("claim action: dead-letter exhausted actions: %w", err)
 	} else if n, _ := res.RowsAffected(); n > 0 {
 		// Counted, because this is the moment work stops being retried.
@@ -1196,6 +1220,15 @@ func (c *Core) ClaimNextAction(ctx context.Context, node, bootID string, leaseDu
 	// lease per node": SKIP LOCKED is intentionally absent here because it would
 	// let a loser lease a different action for the same node and break that
 	// invariant.
+	candidateTypeFilter := ""
+	if onlyType != "" {
+		candidateTypeFilter = " AND candidate.type=?"
+	}
+	claimArgs := []any{token, nowNS, minimumLeaseNS, minimumLeaseNS, resultGraceNS, bootID, ts(now), node}
+	if onlyType != "" {
+		claimArgs = append(claimArgs, string(onlyType))
+	}
+	claimArgs = append(claimArgs, nowNS, MaxActionAttempts, nowNS, nowNS)
 	row := c.db.QueryRowContext(ctx, `
 		UPDATE actions
 		SET state='leased', lease_token=?,
@@ -1205,7 +1238,7 @@ func (c *Core) ClaimNextAction(ctx context.Context, node, bootID string, leaseDu
 		WHERE id = (
 			SELECT candidate.id
 			FROM actions AS candidate
-			WHERE candidate.node=?
+			WHERE candidate.node=?`+candidateTypeFilter+`
 			  AND (candidate.state='pending'
 			       OR (candidate.state='leased' AND candidate.lease_expires_at_ns <= ?))
 			  AND candidate.attempts < ?
@@ -1226,8 +1259,7 @@ func (c *Core) ClaimNextAction(ctx context.Context, node, bootID string, leaseDu
 		  AND (state='pending' OR (state='leased' AND lease_expires_at_ns <= ?))
 		RETURNING id, node, incident_id, type, params, timeout_ns, state, result,
 		          lease_token, lease_expires_at_ns, attempts, executor_boot_id`,
-		token, nowNS, minimumLeaseNS, minimumLeaseNS, resultGraceNS, bootID, ts(now),
-		node, nowNS, MaxActionAttempts, nowNS, nowNS)
+		claimArgs...)
 	return scanAction(row)
 }
 
@@ -1258,9 +1290,11 @@ func (q *Queries) CancelPendingActionsForIncident(ctx context.Context, incidentI
 	return out.RowsAffected()
 }
 
-// CancelPendingActionsForSafetyStop revokes queued destructive work after a
-// fleet-wide emergency stop. The restore action is an exception: it only
-// undoes a prior host quiesce, and blocking it can strand GPU monitoring off.
+// CancelPendingActionsForSafetyStop revokes every queued action after a
+// fleet-wide emergency stop. The restore action is the sole exception: it
+// only undoes a prior host quiesce, and blocking it can strand GPU monitoring
+// off. Non-destructive work is also cancelled because a resume is a new
+// authorization boundary, not permission to execute arbitrary stale work.
 // A leased action with a live lease may already be running on the node, so it
 // remains truthful and is never relabelled as cancelled.
 func (q *Queries) CancelPendingActionsForSafetyStop(ctx context.Context) (int64, error) {

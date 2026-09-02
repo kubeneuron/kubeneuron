@@ -36,6 +36,7 @@ type Store struct {
 type PruneStats = sqlcore.PruneStats
 
 var _ store.Store = (*Store)(nil)
+var _ store.RestorativeActionClaimer = (*Store)(nil)
 var _ store.EventSink = (*Store)(nil)
 var _ store.EventOutbox = (*Store)(nil)
 var _ store.AcceleratorReportStore = (*Store)(nil)

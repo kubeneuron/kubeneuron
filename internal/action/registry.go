@@ -104,6 +104,12 @@ type Definition struct {
 	// can be restorative for confinement purposes (restore_accelerator_stack)
 	// yet still require an armed agent to execute its host half.
 	AgentDestructive bool
+	// Compensating marks the one reversal that must remain live after a
+	// DryRun safety stop: it restores monitoring only when KubeNeuron's own
+	// durable quiesce marker says KubeNeuron previously disabled it. It is
+	// intentionally narrower than Destructive=false; for example uncordon
+	// still obeys its ownership and manual-handoff protocol.
+	Compensating bool
 	// IdleGuard marks an action whose ONLY job is to refuse when the device is
 	// still in use. Its failure is not a remediation failure: it is the system
 	// declining to disrupt a running workload, and the protection metric counts
@@ -148,7 +154,7 @@ var definitions = []Definition{
 	// the node's monitoring and scheduling exactly like a drain degrades its
 	// workloads, so it must stay inside the destructiveExecution blast radius.
 	{PlaybookAction: kubeneuronv1alpha1.ActionQuiesceAcceleratorStack, Wire: "platform.quiesce_accelerator_stack", Kind: KindPlatform, Op: "quiesce_accelerator_stack", Scope: ScopeNode, Destructive: true, AgentDestructive: true},
-	{PlaybookAction: kubeneuronv1alpha1.ActionRestoreAcceleratorStack, Wire: "platform.restore_accelerator_stack", Kind: KindPlatform, Op: "restore_accelerator_stack", Scope: ScopeNode},
+	{PlaybookAction: kubeneuronv1alpha1.ActionRestoreAcceleratorStack, Wire: "platform.restore_accelerator_stack", Kind: KindPlatform, Op: "restore_accelerator_stack", Scope: ScopeNode, Compensating: true},
 	{PlaybookAction: kubeneuronv1alpha1.ActionGPUReset, Wire: "agent.gpu_reset", Kind: KindAgent, Op: "gpu_reset", Scope: ScopeGPU, AgentDestructive: true, CapabilityGate: CapabilityNVIDIAReset, Vendor: types.AcceleratorVendorNVIDIA},
 	{PlaybookAction: kubeneuronv1alpha1.ActionCollectBundle, Wire: "agent.collect_bundle", Kind: KindAgent, Op: "collect_bundle", Scope: ScopeNode},
 	{PlaybookAction: kubeneuronv1alpha1.ActionReboot, Wire: "agent.reboot", Kind: KindAgent, Op: "reboot", Scope: ScopeNode, ForcesApproval: true, AgentDestructive: true},

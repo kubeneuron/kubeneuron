@@ -172,6 +172,19 @@ func TestDestructiveActionSet(t *testing.T) {
 	}
 }
 
+// TestCompensatingActionSet pins the deliberately tiny exception to DryRun's
+// no-side-effects rule. Broadening it would make a global stop capable of
+// mutating capacity or scheduling state rather than merely undoing an earlier
+// KubeNeuron accelerator-stack quiesce.
+func TestCompensatingActionSet(t *testing.T) {
+	for _, d := range definitions {
+		want := d.Wire == "platform.restore_accelerator_stack"
+		if d.Compensating != want {
+			t.Errorf("%q Compensating = %v, want %v", d.Wire, d.Compensating, want)
+		}
+	}
+}
+
 // TestForcesApproval pins the whole-node actions the compiler forces approval
 // on.
 func TestForcesApproval(t *testing.T) {

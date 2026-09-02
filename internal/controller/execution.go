@@ -333,8 +333,10 @@ func (c *Controller) effectiveDryRun(ctx context.Context, inc *types.Incident) b
 }
 
 // executeStep dispatches a step to the platform, the actuator, verification,
-// or notification. Dry-run incidents never touch anything: every step
-// becomes an auditable no-op, including platform operations.
+// or notification. Dry-run incidents normally touch nothing. The sole
+// exception is the compensating accelerator-stack restore: it reverses only a
+// KubeNeuron-recorded quiesce, and simulating it could strand GPU monitoring
+// off after the operator stopped new remediation.
 func (c *Controller) executeStep(ctx context.Context, inc *types.Incident, step *playbook.Step) (*types.ActionResult, error) {
 	timeout := effectiveStepTimeout(step)
 	// The agent gets the step's timeout; the controller waits slightly
@@ -353,7 +355,11 @@ func (c *Controller) executeStep(ctx context.Context, inc *types.Incident, step 
 	// deliberately one-way.  A newly Enabled snapshot never makes an older
 	// simulated pass live, which would reopen the selector/mode split this
 	// snapshot design prevents.
-	if c.simulating(ctx, inc) || c.currentRuntimeDryRun() {
+	def, ok := action.ByWire(step.Action)
+	if !ok {
+		return nil, fmt.Errorf("unknown step action %q", step.Action)
+	}
+	if (c.simulating(ctx, inc) || c.currentRuntimeDryRun()) && !def.Compensating {
 		now := time.Now()
 		return &types.ActionResult{
 			ActionID:   actionID(inc),
@@ -362,11 +368,6 @@ func (c *Controller) executeStep(ctx context.Context, inc *types.Incident, step 
 			StartedAt:  now,
 			FinishedAt: now,
 		}, nil
-	}
-
-	def, ok := action.ByWire(step.Action)
-	if !ok {
-		return nil, fmt.Errorf("unknown step action %q", step.Action)
 	}
 	switch def.Kind {
 	case action.KindPlatform:

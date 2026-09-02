@@ -144,6 +144,37 @@ func TestEmergencyDryRunStopsAPreviouslyPinnedPlatformDispatch(t *testing.T) {
 	}
 }
 
+// Stopping new remediation must not strand a node whose GPU monitoring stack
+// KubeNeuron itself already quiesced. This is the narrow inverse of the test
+// above: only the recorded accelerator-stack restoration may pass the final
+// DryRun boundary; replace, drain, reset, and every other action stay no-ops.
+func TestEmergencyDryRunStillRestoresAcceleratorStack(t *testing.T) {
+	act := &hostActuator{output: "nvidia-persistenced started"}
+	p := &stackPlatform{quiescedNodes: []string{"node-a"}}
+	c, _ := stackTestControllerWithActuator(t, p, act)
+	inc := resetIncident()
+	dry := safety.Limits{MaxConcurrentRemediations: 2, DryRun: true}
+	if err := c.InstallRuntimeConfig(RuntimeConfig{SafetyLimits: &dry}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := c.executeStep(context.Background(), inc, &playbook.Step{
+		Name: "restore", Action: "platform.restore_accelerator_stack",
+	})
+	if err != nil {
+		t.Fatalf("execute compensating restore: %v", err)
+	}
+	if result == nil || strings.HasPrefix(result.Output, "DRY-RUN:") {
+		t.Fatalf("restore result = %+v; want a real compensating action", result)
+	}
+	if len(p.restored) != 1 || len(p.quiescedNodes) != 0 {
+		t.Fatalf("platform restore state = restored %v, pending %v; want one completed restore", p.restored, p.quiescedNodes)
+	}
+	if len(act.actions) != 1 || act.actions[0] != types.ActionRestoreAcceleratorHost {
+		t.Fatalf("agent actions = %v; want only restore_accelerator_host", act.actions)
+	}
+}
+
 // TestDryRunIncidentsNeverBecomeLive pins the other direction, which must NOT
 // follow the gate: an incident opened in DryRun stays a no-op for its whole
 // life even if the installation is later Enabled. Stamping at open is the
