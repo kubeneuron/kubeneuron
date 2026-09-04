@@ -111,15 +111,12 @@ func (c *Controller) RecoveryReport(ctx context.Context, window time.Duration) (
 	return aggregateRecovery(incidents, gpusPerNode, remediated, from, to), nil
 }
 
-// auditExecutingResult is the Result text written on every transition INTO
-// EXECUTING, and remediationExecuted is the only reader of that format. They
-// live together because they are one contract: the audit row's Action column
-// carries the STEP NAME, which a playbook author chooses freely ("record",
-// "notify", "reset"), so the wire action is recoverable from nowhere else.
-//
-// This is what lets the report tell a repair from an observation without a
-// schema migration: the audit already carries the fact, it was simply never
-// read back.
+// auditExecutingResult is the historical result format written by releases
+// before outcome auditing. The current format records a step-start transition
+// and a post-dispatch outcome separately. The wire action must live in Result,
+// rather than Action, because the latter is a playbook author's arbitrary step
+// name ("record", "notify", "reset"). This preserves report compatibility
+// without a schema migration.
 const (
 	auditExecutingPrefix = "executing "
 	// auditSimulatingPrefix marks a step the controller entered EXECUTING for
@@ -134,6 +131,16 @@ const (
 	// precisely the number the observed-only bucket exists to protect, reached
 	// one layer down.
 	auditSimulatingPrefix = "simulating "
+	// auditStepStartPrefix says a step durably entered EXECUTING. It deliberately
+	// does not claim that its side effect ran: a DryRun reload can land after
+	// admission but before executeStep's final safety check. The corresponding
+	// step-outcome record below is the evidence the recovery report consumes.
+	auditStepStartPrefix = "step-start: "
+	// auditStepOutcomePrefix namespaces the durable post-dispatch outcome. It
+	// is kept separate from the historical executing/simulating prefixes so the
+	// store can fall back to records written before outcome auditing existed.
+	auditStepOutcomePrefix = "step-outcome: "
+	auditStepUnknownPrefix = auditStepOutcomePrefix + "unknown "
 )
 
 func auditExecutingResult(wireAction string) string { return auditExecutingPrefix + wireAction }
@@ -145,8 +152,18 @@ func auditStepResult(wireAction string, simulated bool) string {
 	return auditExecutingResult(wireAction)
 }
 
-// remediationExecuted reports whether an incident's EXECUTING audit rows prove
-// that something was actually DONE to the fleet.
+func auditStepStartResult(wireAction string) string { return auditStepStartPrefix + wireAction }
+
+func auditStepOutcomeResult(wireAction string, simulated, known bool) string {
+	if !known {
+		return auditStepUnknownPrefix + wireAction
+	}
+	return auditStepOutcomePrefix + auditStepResult(wireAction, simulated)
+}
+
+// remediationExecuted reports whether an incident's durable step outcomes
+// prove that something was actually DONE to the fleet. It also accepts the
+// former transition-into-EXECUTING records as a compatibility fallback.
 //
 // The test is the action registry's Kind, which already divides the actions
 // that change the fleet from the two that do not. A notify step records and
@@ -163,23 +180,19 @@ func auditStepResult(wireAction string, simulated bool) string {
 // installation's whole history into observation. The headline defect — a class
 // with no playbook at all — produces no EXECUTING row whatsoever, so it is
 // caught regardless.
-// A step that entered EXECUTING and then FAILED still counts, and that is
-// deliberate rather than an oversight. The entry row is written before the step
-// runs, so a failure leaves it behind — but a failed step never resolves an
-// incident on its own: escalate() either quarantines it (NEEDS_HUMAN, which is
-// not RESOLVED and so never reaches this function) or climbs to the next rung,
-// whose own execution writes its own entry row. The only way a failed step's
-// row is the sole evidence is a ladder that escalated to an observe-only rung
-// and then quiet-resolved — and there, remediation genuinely did run and
-// genuinely did disrupt the node before the fault stopped recurring. Reporting
-// that as recovered is a different claim from the one this function exists to
-// refuse, which is an incident that changed nothing whatsoever.
-//
-// A step the controller SIMULATED is not remediation either, however the
-// incident was stamped when it opened. Those rows carry their own prefix and
-// are skipped here — see auditSimulatingPrefix.
+// A failed or rejected action without a successful executor result is unknown
+// rather than remediation. Its separate failure audit preserves the diagnosis;
+// reporting capacity as recovered without a success acknowledgement would be
+// an unsupported claim. Simulated outcomes do not count either, however the
+// incident was stamped when it opened.
 func remediationExecuted(results []string) bool {
 	for _, result := range results {
+		if outcome, ok := strings.CutPrefix(result, auditStepOutcomePrefix); ok {
+			result = outcome
+		}
+		if strings.HasPrefix(result, "unknown ") {
+			continue
+		}
 		if strings.HasPrefix(result, auditSimulatingPrefix) {
 			continue
 		}

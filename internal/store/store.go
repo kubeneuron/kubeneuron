@@ -129,8 +129,8 @@ type Store interface {
 	AppendAudit(ctx context.Context, e *types.AuditEntry) error
 	AuditTrail(ctx context.Context, incidentID string) ([]*types.AuditEntry, error)
 	// ExecutedStepResults returns, for each requested incident that has any,
-	// the Result text of every audit row recording a transition INTO
-	// EXECUTING. It is the durable answer to "did a playbook step actually
+	// the Result text of every durable step outcome and each legacy transition
+	// INTO EXECUTING. It is the durable answer to "did a playbook step actually
 	// run for this incident", which nothing on the incident row can give:
 	// StepIndex is reset by every escalation and RemediationSlotHeld is
 	// cleared when the incident halts.

@@ -86,8 +86,10 @@ Three independent mechanisms, all fail toward not acting:
    agent lease may already be running and is reported honestly rather than
    falsely marked cancelled. The sole exception may be delivered while stopped
    to undo KubeNeuron's own recorded accelerator-stack quiesce, so GPU
-   monitoring is not left disabled. It cannot claim or run any other queued
-   action.
+   monitoring is not left disabled. The matching controller-side
+   `platform.restore_accelerator_stack` step is also allowed to start while
+   paused; it only completes that recorded undo and cannot begin another
+   remediation. It cannot claim or run any other queued action.
 2. **Per-node pause:** create a `GPUNodeConfig` with `paused: true` for the
    node. The compiled set is authoritative: deleting the CR unpauses.
 3. **Maintenance windows:** `GPUMaintenanceWindow` with a time range and

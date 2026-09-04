@@ -142,6 +142,89 @@ func TestEmergencyDryRunStopsAPreviouslyPinnedPlatformDispatch(t *testing.T) {
 	if result == nil || !strings.Contains(result.Output, "DRY-RUN") {
 		t.Fatalf("result = %+v, want a dry-run result", result)
 	}
+	if got, want := c.stepOutcome(ctx, inc, step, result), auditStepOutcomeResult(step.Action, true, true); got != want {
+		t.Fatalf("outcome = %q, want %q; a final DryRun stop must not be reported as a real repair", got, want)
+	}
+}
+
+// A global pause normally denies every new step. The one exception is the
+// compensating restore of KubeNeuron's own accelerator-stack quiesce: without
+// it, pressing pause after quiesce and before restore leaves monitoring off
+// forever because the active incident prevents the janitor taking ownership.
+func TestGlobalPauseStillStartsCompensatingStackRestore(t *testing.T) {
+	act := &hostActuator{output: "nvidia-persistenced started"}
+	p := &stackPlatform{quiescedNodes: []string{"node-a"}}
+	c, st := stackTestControllerWithActuator(t, p, act)
+
+	book := &playbook.Playbook{
+		Name: "restore-only", Target: "gpu",
+		Steps: []playbook.Step{{Name: "restore", Action: "platform.restore_accelerator_stack"}},
+	}
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{book.Name: book}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.InstallRuntimeConfig(RuntimeConfig{Engine: engine}); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	inc := &types.Incident{
+		ID: "inc-paused-restore", Target: types.Target{Node: "node-a", GPUUUID: "GPU-a"},
+		State: types.StateEvaluating, Playbook: book.Name,
+		OpenedAt: now, UpdatedAt: now, StateChangedAt: now,
+	}
+	ctx := context.Background()
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	inc, err = st.GetIncident(ctx, inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.gate.Pause()
+	step := &book.Steps[0]
+	ctx = c.pinRuntimeConfig(ctx)
+	ctx, _ = c.pinSimulate(ctx, inc)
+	if err := c.startStep(ctx, inc, step, "system"); err != nil {
+		t.Fatalf("start compensating restore while paused: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for c.isInFlight(inc.ID) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if c.isInFlight(inc.ID) {
+		t.Fatal("compensating restore did not finish")
+	}
+	got, err := st.GetIncident(ctx, inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != types.StateVerifying {
+		t.Fatalf("state = %s, want VERIFYING; global pause must not hold the restore in EVALUATING", got.State)
+	}
+	if len(p.restored) != 1 || len(p.quiescedNodes) != 0 {
+		t.Fatalf("platform restore state = restored %v, pending %v; want one completed restore", p.restored, p.quiescedNodes)
+	}
+	results, err := st.ExecutedStepResults(ctx, []string{inc.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := results[inc.ID]; len(got) != 1 || got[0] != "step-outcome: executing platform.restore_accelerator_stack" {
+		t.Fatalf("restoration evidence = %q, want one actual post-dispatch outcome", got)
+	}
+}
+
+func TestUnsuccessfulStepDoesNotClaimAnExecutionOutcome(t *testing.T) {
+	c := New(nil, nil, nil, safety.NewGate(safety.Limits{MaxConcurrentRemediations: 1}), nil, nil, nil, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	inc := &types.Incident{ID: "inc-unknown", Target: types.Target{Node: "node-a"}}
+	step := &playbook.Step{Name: "cordon", Action: "platform.cordon"}
+	result := &types.ActionResult{OK: false, Error: "platform rejected the call"}
+	if got, want := c.stepOutcome(context.Background(), inc, step, result), auditStepOutcomeResult(step.Action, false, false); got != want {
+		t.Fatalf("outcome = %q, want %q; a rejected action is not proof of remediation", got, want)
+	}
 }
 
 // Stopping new remediation must not strand a node whose GPU monitoring stack

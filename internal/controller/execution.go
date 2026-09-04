@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/action"
@@ -14,6 +15,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/internal/safety"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -61,7 +63,8 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 	// and allowed. Deciding the mode once, above both reads, closes the half of
 	// that window this function owns: a step cannot be waved through as a
 	// simulation and then executed for real by the same call.
-	ctx, simulate := c.pinSimulate(ctx, inc)
+	ctx, _ = c.pinSimulate(ctx, inc)
+	def, known := action.ByWire(step.Action)
 	switch reason, res := c.destructiveStepConfinement(ctx, inc, step); res {
 	case confinementOutOfScope:
 		// Confirmed outside the blast radius: fail closed to a human. Never execute.
@@ -146,6 +149,16 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 		admit = c.gate.Allow(inc.Target, action)
 	}
 	if admit != nil {
+		// A global pause stops new remediation, but this exact compensating
+		// action only reverses KubeNeuron's own recorded GPU-stack quiesce. It
+		// must be able to start even when it has not yet enqueued its agent-side
+		// restore; otherwise pausing between quiesce and restore strands
+		// monitoring off. Other gate denials remain in force.
+		if known && def.Compensating && isGlobalPauseDenial(admit) {
+			admit = nil
+		}
+	}
+	if admit != nil {
 		c.deferForGateDenial(inc, step, admit)
 		metrics.GateDenials.Inc()
 		c.log.Info("safety gate denied step, will retry",
@@ -155,11 +168,12 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 	if !alreadyHeld {
 		inc.RemediationSlotHeld = true // persisted by the transition below
 	}
-	// The audit records what this step WILL do — the decision pinned above,
-	// not the flag stamped when the incident opened. A ladder that simulates
-	// after a mid-flight switch to DryRun must not read later as remediation.
+	// Entering EXECUTING is durable before the goroutine can run, but it is not
+	// proof of a side effect: a DryRun reload may stop the action at its final
+	// boundary. runStep appends the actual outcome before it changes state; the
+	// recovery report reads that outcome rather than this start record.
 	if err := c.transition(ctx, inc, types.StateExecuting, actor, step.Name,
-		auditStepResult(step.Action, simulate), step.Params); err != nil {
+		auditStepStartResult(step.Action), step.Params); err != nil {
 		c.gate.StepDone(inc.Target, action, 0)
 		if !alreadyHeld {
 			// The transition never committed, so the bit was never persisted;
@@ -189,6 +203,12 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 // the engine snapshot that admitted the step.
 func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *types.Incident, step *playbook.Step) {
 	result, err := c.executeStep(ctx, inc, step)
+	if auditErr := c.appendAudit(ctx, inc, "system", step.Name, c.stepOutcome(ctx, inc, step, result)); auditErr != nil {
+		// The start record remains, but intentionally does not count as a repair
+		// without this outcome. Logging and proceeding is safer than repeating a
+		// side effect merely because its audit write was temporarily unavailable.
+		c.log.Error("step outcome audit append failed", "incident", inc.ID, "step", step.Name, "err", auditErr)
+	}
 
 	output := ""
 	if result != nil {
@@ -235,7 +255,7 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 	// was admitted, not the gate as it stands now. Re-reading here reported a
 	// step that really ran as simulated whenever the operator flipped the mode
 	// while the agent held the action.
-	if c.simulating(ctx, inc) {
+	if c.stepWasSimulated(ctx, inc, step, result) {
 		metrics.StepsExecuted.WithLabelValues("dry_run").Inc()
 	} else {
 		metrics.StepsExecuted.WithLabelValues("ok").Inc()
@@ -258,6 +278,31 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 	}); notifyErr != nil {
 		c.log.Warn("notification failed", "incident", inc.ID, "err", notifyErr)
 	}
+}
+
+func isGlobalPauseDenial(err error) bool {
+	kind, ok := safety.DenialKindOf(err)
+	return ok && kind == safety.DenialGlobalPause
+}
+
+// stepWasSimulated reports the outcome, rather than merely the decision at
+// admission. executeStep repeats the live DryRun check immediately before its
+// side effect, so a step admitted just before a stop can become a no-op. The
+// synthetic result prefix is controller-owned and is the same durable wording
+// users see in the audit trail.
+func (c *Controller) stepWasSimulated(ctx context.Context, inc *types.Incident, step *playbook.Step, result *types.ActionResult) bool {
+	if result != nil && strings.HasPrefix(result.Output, "DRY-RUN:") {
+		return true
+	}
+	def, ok := action.ByWire(step.Action)
+	return c.simulating(ctx, inc) && (!ok || !def.Compensating)
+}
+
+func (c *Controller) stepOutcome(ctx context.Context, inc *types.Incident, step *playbook.Step, result *types.ActionResult) string {
+	if result == nil || !result.OK {
+		return auditStepOutcomeResult(step.Action, false, false)
+	}
+	return auditStepOutcomeResult(step.Action, c.stepWasSimulated(ctx, inc, step, result), true)
 }
 
 // pinnedSimulateKey carries ONE step's simulate-or-execute decision.

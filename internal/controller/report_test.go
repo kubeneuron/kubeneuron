@@ -514,6 +514,30 @@ func TestSimulatedStepsAreNotRemediation(t *testing.T) {
 			results: []string{auditStepResult("notify.observe", false)},
 			want:    false,
 		},
+		{
+			name:    "an explicit real outcome is remediation",
+			results: []string{auditStepOutcomeResult("platform.cordon", false, true)},
+			want:    true,
+		},
+		{
+			name:    "an explicit simulated outcome is not remediation",
+			results: []string{auditStepOutcomeResult("platform.cordon", true, true)},
+			want:    false,
+		},
+		{
+			name:    "an unknown outcome is not remediation",
+			results: []string{auditStepOutcomeResult("platform.cordon", false, false)},
+			want:    false,
+		},
+		{
+			name: "a legacy action remains evidence beside a new simulated outcome",
+			results: []string{
+				auditStepResult("platform.cordon", false),
+				auditStepOutcomeResult("platform.drain", true, true),
+			},
+			want: true,
+			why:  "the incident crossed an upgrade after the cordon really ran",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

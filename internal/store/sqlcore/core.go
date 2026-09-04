@@ -688,14 +688,23 @@ func (q *Queries) ExecutedStepResults(ctx context.Context, incidentIDs []string)
 		for _, id := range chunk {
 			args = append(args, id)
 		}
-		// from_state <> to_state isolates a genuine transition INTO EXECUTING.
-		// A step that fails appends a non-transition row (from EXECUTING to
-		// EXECUTING) carrying "FAILED: …", and counting that as a second entry
-		// would say a step ran twice.
+		// New records carry an explicit post-dispatch outcome. A new step-start
+		// row is deliberately excluded: a DryRun reload can occur after that
+		// transition but before executeStep's last-mile check, so admission is
+		// not proof that a side effect occurred.
+		//
+		// Keep historical transition-into-EXECUTING records alongside new
+		// outcomes. An incident can span an upgrade, with a real legacy action
+		// followed by a newly simulated one; discarding the former merely because
+		// the latter exists would erase evidence that the fleet was changed.
 		rows, err := q.db.QueryContext(ctx, `
 			SELECT DISTINCT incident_id, result FROM audit_log
-			WHERE to_state='EXECUTING' AND from_state <> 'EXECUTING'
-			  AND incident_id IN (?`+repeat(",?", len(chunk)-1)+`)`, args...)
+			WHERE incident_id IN (?`+repeat(",?", len(chunk)-1)+`)
+			  AND (
+				result LIKE 'step-outcome: %'
+				OR (to_state='EXECUTING' AND from_state <> 'EXECUTING'
+					AND result NOT LIKE 'step-start: %')
+			  )`, args...)
 		if err != nil {
 			return nil, err
 		}

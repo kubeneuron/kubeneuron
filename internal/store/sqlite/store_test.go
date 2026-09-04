@@ -631,11 +631,10 @@ func TestListIncidentsActiveSinceKeepsWhatStillCostCapacity(t *testing.T) {
 
 // TestExecutedStepResultsReadsRemediationEvidence pins the bulk audit read the
 // recovery report leans on to tell a repair from an incident that merely aged
-// out quietly. It has to hold three lines at once: only transitions INTO
-// EXECUTING count, the failure row an already-executing step appends is not a
-// second execution, and an incident nobody ever acted on must be absent from
-// the map rather than present and empty — "nothing ran" and "not asked about"
-// are different answers.
+// out quietly. It has to hold three lines at once: a new explicit outcome
+// coexists with legacy evidence during an upgrade, an incident nobody ever
+// acted on must be absent from the map rather than present and empty, and
+// "nothing ran" and "not asked about" are different answers.
 func TestExecutedStepResultsReadsRemediationEvidence(t *testing.T) {
 	s, err := Open(":memory:")
 	if err != nil {
@@ -645,7 +644,7 @@ func TestExecutedStepResultsReadsRemediationEvidence(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	for _, id := range []string{"acted", "observed", "unasked"} {
+	for _, id := range []string{"acted", "outcome", "observed", "unasked"} {
 		inc := testIncident(id, now)
 		inc.Target.GPUUUID = "GPU-" + id // one open incident per (target, class)
 		if err := s.CreateIncident(ctx, inc); err != nil {
@@ -664,16 +663,32 @@ func TestExecutedStepResultsReadsRemediationEvidence(t *testing.T) {
 	audit("acted", types.StateEvaluating, types.StateExecuting, "cordon", "executing platform.cordon")
 	audit("acted", types.StateExecuting, types.StateExecuting, "cordon", "FAILED: node unreachable")
 	audit("acted", types.StateExecuting, types.StateVerifying, "cordon", "done")
+	// A real old action and a newly simulated step can coexist during an
+	// upgrade. Keep both: the current start record has its own prefix and is
+	// excluded, but deleting historical evidence would rewrite fleet history.
+	audit("outcome", types.StateEvaluating, types.StateExecuting, "cordon", "executing platform.cordon")
+	audit("outcome", types.StateExecuting, types.StateExecuting, "cordon", "step-outcome: simulating platform.cordon")
 	audit("observed", types.StateOpen, types.StateObserving, "observe", "")
 	audit("observed", types.StateObserving, types.StateResolved, "observe-quiet", "no recurrence within 24h")
 
-	got, err := s.ExecutedStepResults(ctx, []string{"acted", "observed", "unasked", "no-such-incident"})
+	got, err := s.ExecutedStepResults(ctx, []string{"acted", "outcome", "observed", "unasked", "no-such-incident"})
 	if err != nil {
 		t.Fatalf("ExecutedStepResults: %v", err)
 	}
 	if len(got["acted"]) != 1 || got["acted"][0] != "executing platform.cordon" {
 		t.Fatalf("acted = %q, want exactly the one transition into EXECUTING; the FAILED row "+
 			"that follows it is the same step, not a second one", got["acted"])
+	}
+	hasResult := func(results []string, want string) bool {
+		for _, result := range results {
+			if result == want {
+				return true
+			}
+		}
+		return false
+	}
+	if len(got["outcome"]) != 2 || !hasResult(got["outcome"], "executing platform.cordon") || !hasResult(got["outcome"], "step-outcome: simulating platform.cordon") {
+		t.Fatalf("outcome = %q, want both the legacy action and explicit simulated outcome", got["outcome"])
 	}
 	for _, id := range []string{"observed", "unasked", "no-such-incident"} {
 		if _, present := got[id]; present {

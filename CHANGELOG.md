@@ -9,6 +9,17 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+### Fixed
+
+- A global pause could still strand GPU monitoring off when it landed after
+  KubeNeuron quiesced the accelerator stack but before the matching
+  controller-side restore started. The narrow compensating restore now passes
+  that one gate denial; no other remediation can begin while paused.
+- Recovery accounting now records a post-dispatch step outcome. An admission
+  immediately followed by an emergency DryRun switch is no longer reported as
+  a real fleet repair; pre-upgrade audit evidence remains intact for incidents
+  that span the update.
+
 ## [v0.3.0] - 2026-08-27
 
 A minor rather than a patch: this carries schema migrations on both engines
