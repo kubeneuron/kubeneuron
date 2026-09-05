@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,8 +20,9 @@ import (
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
-// pinnedAcceleratorEvidence is the runtime attestation captured at the moment
-// the vendor stack was switched off.
+// pinnedAcceleratorEvidence is an in-memory claim that an incident owns an
+// accelerator-stack quiesce. For a GPU reset, it also carries the runtime
+// attestation captured at the moment the vendor stack was switched off.
 //
 // The capability gate normally reads the node's latest accelerator report. That
 // breaks down for exactly one step: quiescing stops the DCGM host engine, the
@@ -31,12 +33,15 @@ import (
 //
 // The pin lives in memory only, and deliberately so. Persisting it would make a
 // snapshot taken before a crash durable, and evidence that outlives the process
-// which validated it is exactly what a fail-closed gate must not accept.
-// Recovery does not need it: the platform records which nodes are quiesced, so a
-// restarted controller restores them and sends any incident still running there
-// back to its quiesce step, which re-attests from scratch.
+// which validated it is exactly what a fail-closed gate must not accept. During
+// a running process it also prevents the recovery janitor from restoring a
+// node-scoped marker underneath its active owner. After a restart the platform
+// still records which nodes are quiesced, so the controller restores them and
+// sends any incident still running there back to its quiesce step, which
+// re-attests from scratch.
 //
-// It carries the REPORT and nothing else that a gate reasons from. The profile
+// GPU-reset pins carry the REPORT and nothing else that a gate reasons from;
+// node-only quiesces use an empty report and retain ownership only. The profile
 // and node UID used to be pinned here too, and both are things the controller
 // can read live at admission time; keeping them turned a snapshot of evidence
 // into a snapshot of the controller's own authority, so a revoked profile went
@@ -81,15 +86,21 @@ func (c *Controller) forgetPinnedAcceleratorEvidence(incidentID string) {
 	delete(c.pinnedEvidence, incidentID)
 }
 
-// pinnedAcceleratorIncidentsByNode maps each pinned node to the incident that
-// pinned it. Keyed by node because recovery starts from what the platform says
-// is quiesced, not from what this process happens to remember.
-func (c *Controller) pinnedAcceleratorIncidentsByNode() map[string]string {
+// pinnedAcceleratorIncidentIDsByNode maps each pinned node to every incident
+// that pinned it. Multiple GPU incidents can legitimately share a node; a
+// single map value chosen during map iteration could be terminal while a
+// sibling was still resetting, letting the janitor restore the shared stack
+// underneath that sibling. The IDs are sorted so recovery provenance and any
+// re-attached agent action remain deterministic.
+func (c *Controller) pinnedAcceleratorIncidentIDsByNode() map[string][]string {
 	c.pinnedEvidenceMu.Lock()
 	defer c.pinnedEvidenceMu.Unlock()
-	out := make(map[string]string, len(c.pinnedEvidence))
+	out := make(map[string][]string, len(c.pinnedEvidence))
 	for incidentID, pin := range c.pinnedEvidence {
-		out[pin.node] = incidentID
+		out[pin.node] = append(out[pin.node], incidentID)
+	}
+	for node := range out {
+		sort.Strings(out[node])
 	}
 	return out
 }
@@ -200,10 +211,17 @@ func (c *Controller) quiesceAcceleratorStack(ctx context.Context, inc *types.Inc
 		return nil, fmt.Errorf("platform.quiesce_accelerator_stack: platform %q cannot control the accelerator stack", c.platform.Name())
 	}
 	node := inc.Target.Node
+	// Every quiesce needs an ownership pin, not only a per-GPU reset. The
+	// marker is node-scoped and the janitor runs concurrently, so a node-target
+	// quiesce without one could be mistaken for an abandoned marker between the
+	// platform half and the host-side settle. A GPU-target pin also carries
+	// reset-grade evidence; a node-target pin carries ownership only.
 	if inc.Target.GPUUUID != "" {
 		if err := c.pinAcceleratorEvidenceForReset(ctx, inc); err != nil {
 			return nil, fmt.Errorf("platform.quiesce_accelerator_stack: refusing to stop monitoring without reset-grade evidence: %w", err)
 		}
+	} else {
+		c.pinAcceleratorEvidence(inc.ID, pinnedAcceleratorEvidence{node: node, pinnedAt: time.Now()})
 	}
 	quiesced, err := controller.QuiesceAcceleratorStack(ctx, node)
 	if err != nil {
@@ -309,13 +327,30 @@ func (c *Controller) restoreAbandonedAcceleratorStacks(ctx context.Context) {
 	// pass, where their already-enqueued actions re-attach.
 	ctx, cancel := context.WithTimeout(ctx, acceleratorHostRestoreWait)
 	defer cancel()
-	owners := c.pinnedAcceleratorIncidentsByNode()
+	owners := c.pinnedAcceleratorIncidentIDsByNode()
 	for _, node := range nodes {
-		incidentID, held := owners[node]
+		incidentIDs, held := owners[node]
+		incidentID := strings.Join(incidentIDs, ",")
 		if held {
-			inc, err := c.store.GetIncident(ctx, incidentID)
-			if err == nil && inc != nil && isActiveIncidentState(inc.State) {
-				continue // a running playbook owns this quiesce
+			owned := false
+			for _, id := range incidentIDs {
+				inc, err := c.store.GetIncident(ctx, id)
+				if err != nil && !errors.Is(err, store.ErrNotFound) {
+					// The durable marker says the shared stack is down, but a
+					// transient store failure leaves us unable to prove that no
+					// owner is still resetting. Hold and retry rather than restore
+					// underneath a possibly live sibling.
+					c.log.Warn("cannot inspect accelerator-stack owner; holding restore", "node", node, "incident", id, "err", err)
+					owned = true
+					break
+				}
+				if err == nil && inc != nil && isActiveIncidentState(inc.State) {
+					owned = true
+					break
+				}
+			}
+			if owned {
+				continue // a running or unreadable playbook owns this quiesce
 			}
 		}
 		if !held {
@@ -353,7 +388,9 @@ func (c *Controller) restoreAbandonedAcceleratorStacks(ctx context.Context) {
 		}
 		c.forgetStuckRestore(node)
 		if held {
-			c.forgetPinnedAcceleratorEvidence(incidentID)
+			for _, id := range incidentIDs {
+				c.forgetPinnedAcceleratorEvidence(id)
+			}
 		}
 		if len(restored) != 0 {
 			c.log.Info("restored accelerator stack on a node no playbook is driving",

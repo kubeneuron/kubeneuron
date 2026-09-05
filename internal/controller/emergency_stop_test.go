@@ -182,6 +182,7 @@ func TestGlobalPauseStillStartsCompensatingStackRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.pinAcceleratorEvidence(inc.ID, pinnedAcceleratorEvidence{node: inc.Target.Node})
 	c.gate.Pause()
 	step := &book.Steps[0]
 	ctx = c.pinRuntimeConfig(ctx)
@@ -216,6 +217,66 @@ func TestGlobalPauseStillStartsCompensatingStackRestore(t *testing.T) {
 	}
 }
 
+// A registry-declared compensating action is not itself proof that there is
+// anything for this incident to compensate. A hand-authored restore-only
+// playbook used to punch through the global pause even when another incident
+// owned the node marker; that could start the agent-side host restore during an
+// emergency stop. Both the durable marker and this incident's pin earn the
+// narrow exception.
+func TestGlobalPauseDoesNotStartForeignCompensatingStackRestore(t *testing.T) {
+	act := &hostActuator{output: "nvidia-persistenced started"}
+	p := &stackPlatform{quiescedNodes: []string{"node-a"}}
+	c, st := stackTestControllerWithActuator(t, p, act)
+	c.pinAcceleratorEvidence("inc-other-owner", pinnedAcceleratorEvidence{node: "node-a"})
+
+	book := &playbook.Playbook{
+		Name: "restore-only", Target: "gpu",
+		Steps: []playbook.Step{{Name: "restore", Action: "platform.restore_accelerator_stack"}},
+	}
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{book.Name: book}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.InstallRuntimeConfig(RuntimeConfig{Engine: engine}); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	inc := &types.Incident{
+		ID: "inc-paused-unrecorded-restore", Target: types.Target{Node: "node-a", GPUUUID: "GPU-a"},
+		State: types.StateEvaluating, Playbook: book.Name,
+		OpenedAt: now, UpdatedAt: now, StateChangedAt: now,
+	}
+	ctx := context.Background()
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	inc, err = st.GetIncident(ctx, inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.gate.Pause()
+	ctx = c.pinRuntimeConfig(ctx)
+	ctx, _ = c.pinSimulate(ctx, inc)
+	if err := c.startStep(ctx, inc, &book.Steps[0], "system"); err != nil {
+		t.Fatalf("start foreign restore while paused: %v", err)
+	}
+
+	if c.isInFlight(inc.ID) {
+		t.Fatal("foreign restore started while the global pause was active")
+	}
+	got, err := st.GetIncident(ctx, inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != types.StateEvaluating {
+		t.Fatalf("state = %s, want EVALUATING while paused", got.State)
+	}
+	if len(p.restored) != 0 || len(act.actions) != 0 {
+		t.Fatalf("foreign restore changed platform=%v agent=%v while paused", p.restored, act.actions)
+	}
+}
+
 func TestUnsuccessfulStepDoesNotClaimAnExecutionOutcome(t *testing.T) {
 	c := New(nil, nil, nil, safety.NewGate(safety.Limits{MaxConcurrentRemediations: 1}), nil, nil, nil, nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -236,6 +297,7 @@ func TestEmergencyDryRunStillRestoresAcceleratorStack(t *testing.T) {
 	p := &stackPlatform{quiescedNodes: []string{"node-a"}}
 	c, _ := stackTestControllerWithActuator(t, p, act)
 	inc := resetIncident()
+	c.pinAcceleratorEvidence(inc.ID, pinnedAcceleratorEvidence{node: inc.Target.Node})
 	dry := safety.Limits{MaxConcurrentRemediations: 2, DryRun: true}
 	if err := c.InstallRuntimeConfig(RuntimeConfig{SafetyLimits: &dry}); err != nil {
 		t.Fatal(err)
@@ -255,6 +317,33 @@ func TestEmergencyDryRunStillRestoresAcceleratorStack(t *testing.T) {
 	}
 	if len(act.actions) != 1 || act.actions[0] != types.ActionRestoreAcceleratorHost {
 		t.Fatalf("agent actions = %v; want only restore_accelerator_host", act.actions)
+	}
+}
+
+// A DryRun stop may restore only a quiesce this incident owns. Without that
+// guard, a hand-authored restore-only playbook reached the agent and platform
+// despite DryRun having been selected as the emergency safety boundary.
+func TestEmergencyDryRunDoesNotRestoreUnrecordedAcceleratorStack(t *testing.T) {
+	act := &hostActuator{output: "nvidia-persistenced started"}
+	p := &stackPlatform{}
+	c, _ := stackTestControllerWithActuator(t, p, act)
+	inc := resetIncident()
+	dry := safety.Limits{MaxConcurrentRemediations: 2, DryRun: true}
+	if err := c.InstallRuntimeConfig(RuntimeConfig{SafetyLimits: &dry}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := c.executeStep(context.Background(), inc, &playbook.Step{
+		Name: "restore", Action: "platform.restore_accelerator_stack",
+	})
+	if err != nil {
+		t.Fatalf("execute unrecorded compensating restore: %v", err)
+	}
+	if result == nil || !strings.HasPrefix(result.Output, "DRY-RUN:") {
+		t.Fatalf("restore result = %+v, want a DryRun no-op", result)
+	}
+	if len(p.restored) != 0 || len(act.actions) != 0 {
+		t.Fatalf("unrecorded DryRun restore changed platform=%v agent=%v", p.restored, act.actions)
 	}
 }
 

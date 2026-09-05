@@ -33,12 +33,13 @@ TARGET=${1:-${MIRROR_DIR:-}}
 # reason it must not. Anything added here must also be added to the doc-lint
 # skip list in hack/verify-docs.sh, which knows the same three documents.
 EXCLUDES=(
-	# Agent working state: session checkpoints, handoff notes, and a scratch
+	# Agent working state, session checkpoints, handoff notes, and a scratch
 	# blocker file. Internal process, not product.
 	"AGENT_SESSION_STATE.md"
 	"TRANSFER_HANDOFF.md"
 	"blocker.md"
 	"main.md"
+	"main-codex.md"
 	# NOT excluded, deliberately: PRODUCT_PLAN.md and
 	# PRODUCTION_READINESS_PLAN.md. They are published product roadmap
 	# documents — hack/verify-docs.sh lints them as such, and they have been in
@@ -167,7 +168,7 @@ done
 # should, and flagging it would train everyone to ignore this check.
 note "sweeping published prose for references to excluded documents"
 sweep=0
-for e in AGENT_SESSION_STATE.md TRANSFER_HANDOFF.md blocker.md; do
+for e in AGENT_SESSION_STATE.md TRANSFER_HANDOFF.md blocker.md main-codex.md; do
 	if hits=$(git -C "$TARGET" grep -n --untracked -F -- "$e" -- '*.md' 2>/dev/null); then
 		echo "A PUBLISHED DOCUMENT REFERENCES $e, WHICH IS NOT PUBLISHED:" >&2
 		echo "$hits" >&2

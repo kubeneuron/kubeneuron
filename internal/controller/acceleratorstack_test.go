@@ -193,6 +193,43 @@ func TestQuiesceRefusesToStopMonitoringWithoutResetGradeEvidence(t *testing.T) {
 	}
 }
 
+// Node-scoped quiesce has no GPU evidence to pin, but it still owns a
+// node-scoped marker until restoration. If it did not leave an ownership pin,
+// the concurrently running janitor could restore the marker mid-step.
+func TestNodeScopedQuiescePinsOwnershipUntilRecovery(t *testing.T) {
+	p := &stackPlatform{}
+	c, st := stackTestController(t, p)
+	ctx := context.Background()
+	now := time.Now()
+	inc := &types.Incident{
+		ID: "inc-node-quiesce", Target: types.Target{Node: "node-a"},
+		State: types.StateEvaluating, OpenedAt: now, UpdatedAt: now, StateChangedAt: now,
+	}
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.quiesceAcceleratorStack(ctx, inc, &playbook.Step{Name: "quiesce"}); err != nil {
+		t.Fatalf("node-scoped quiesce: %v", err)
+	}
+	owners := c.pinnedAcceleratorIncidentIDsByNode()
+	if got := owners["node-a"]; len(got) != 1 || got[0] != inc.ID {
+		t.Fatalf("owners = %v, want %q", got, inc.ID)
+	}
+	c.restoreAbandonedAcceleratorStacks(ctx)
+	if len(p.restored) != 0 {
+		t.Fatal("janitor restored an active node-scoped quiesce")
+	}
+
+	inc.State = types.StateNeedsHuman
+	if err := st.UpdateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	c.restoreAbandonedAcceleratorStacks(ctx)
+	if len(p.restored) != 1 || len(p.quiescedNodes) != 0 {
+		t.Fatalf("restored=%v quiesced=%v; terminal node-scoped quiesce must recover", p.restored, p.quiescedNodes)
+	}
+}
+
 func TestPinnedEvidenceExpiresWithTheReportItCameFrom(t *testing.T) {
 	c, _ := stackTestController(t, &stackPlatform{})
 	inc := resetIncident()
@@ -251,6 +288,51 @@ func TestAbandonedQuiesceIsRestoredOnceTheIncidentStopsRunning(t *testing.T) {
 	c.restoreAbandonedAcceleratorStacks(ctx)
 	if len(p.restored) != 1 {
 		t.Fatalf("restored = %v, want exactly one restore", p.restored)
+	}
+}
+
+// The accelerator stack is node-scoped even when incidents are per GPU. A
+// stopped incident must therefore not make the janitor restore it while a
+// sibling incident that also quiesced the same node is still active.
+func TestAbandonedQuiesceWaitsForEveryPinnedIncidentOnSharedNode(t *testing.T) {
+	p := &stackPlatform{quiescedNodes: []string{"node-a"}}
+	c, st := stackTestController(t, p)
+	ctx := context.Background()
+	now := time.Now()
+	stopped := &types.Incident{
+		ID: "inc-stopped", Target: types.Target{Node: "node-a", GPUUUID: "GPU-a"},
+		State: types.StateNeedsHuman, OpenedAt: now, UpdatedAt: now, StateChangedAt: now,
+	}
+	running := &types.Incident{
+		ID: "inc-running", Target: types.Target{Node: "node-a", GPUUUID: "GPU-b"},
+		State: types.StateEvaluating, OpenedAt: now, UpdatedAt: now, StateChangedAt: now,
+	}
+	for _, inc := range []*types.Incident{stopped, running} {
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		c.pinAcceleratorEvidence(inc.ID, pinnedAcceleratorEvidence{node: inc.Target.Node})
+	}
+
+	owners := c.pinnedAcceleratorIncidentIDsByNode()
+	if got := owners["node-a"]; len(got) != 2 || got[0] != "inc-running" || got[1] != "inc-stopped" {
+		t.Fatalf("owners = %v, want both stable incident IDs", got)
+	}
+	c.restoreAbandonedAcceleratorStacks(ctx)
+	if len(p.restored) != 0 || len(p.quiescedNodes) != 1 {
+		t.Fatalf("restored=%v quiesced=%v; an active sibling must keep the shared stack down", p.restored, p.quiescedNodes)
+	}
+
+	running.State = types.StateNeedsHuman
+	if err := st.UpdateIncident(ctx, running); err != nil {
+		t.Fatal(err)
+	}
+	c.restoreAbandonedAcceleratorStacks(ctx)
+	if len(p.restored) != 1 || len(p.quiescedNodes) != 0 {
+		t.Fatalf("restored=%v quiesced=%v; the stack should recover after every owner stops", p.restored, p.quiescedNodes)
+	}
+	if owners := c.pinnedAcceleratorIncidentIDsByNode(); len(owners["node-a"]) != 0 {
+		t.Fatalf("owners remain after restore: %v", owners)
 	}
 }
 

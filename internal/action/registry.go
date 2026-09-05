@@ -105,10 +105,11 @@ type Definition struct {
 	// yet still require an armed agent to execute its host half.
 	AgentDestructive bool
 	// Compensating marks the one reversal that must remain live after a
-	// DryRun safety stop: it restores monitoring only when KubeNeuron's own
-	// durable quiesce marker says KubeNeuron previously disabled it. It is
-	// intentionally narrower than Destructive=false; for example uncordon
-	// still obeys its ownership and manual-handoff protocol.
+	// DryRun safety stop: it restores monitoring only when the exact incident
+	// has an in-memory ownership pin and the platform's durable quiesce marker
+	// proves there is a recorded stack change to undo. It is intentionally
+	// narrower than Destructive=false; for example uncordon still obeys its
+	// ownership and manual-handoff protocol.
 	Compensating bool
 	// IdleGuard marks an action whose ONLY job is to refuse when the device is
 	// still in use. Its failure is not a remediation failure: it is the system

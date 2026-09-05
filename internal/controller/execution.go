@@ -153,8 +153,11 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 		// action only reverses KubeNeuron's own recorded GPU-stack quiesce. It
 		// must be able to start even when it has not yet enqueued its agent-side
 		// restore; otherwise pausing between quiesce and restore strands
-		// monitoring off. Other gate denials remain in force.
-		if known && def.Compensating && isGlobalPauseDenial(admit) {
+		// monitoring off. A compensating action name alone is not enough: a
+		// hand-authored restore-only playbook must not start the host-side restore
+		// while paused when there is no durable quiesce for it to undo.
+		if known && def.Compensating && isGlobalPauseDenial(admit) &&
+			c.hasRecordedAcceleratorStackQuiesce(ctx, inc) {
 			admit = nil
 		}
 	}
@@ -285,6 +288,44 @@ func isGlobalPauseDenial(err error) bool {
 	return ok && kind == safety.DenialGlobalPause
 }
 
+// hasRecordedAcceleratorStackQuiesce reports whether this exact incident still
+// owns a KubeNeuron-recorded accelerator-stack quiesce. Both facts matter: the
+// in-memory pin links the incident to its quiesce attempt, while the platform
+// marker proves there is still a node-level change to undo. A marker for a
+// different incident must not give a hand-authored restore-only playbook an
+// exception to either a global pause or DryRun.
+//
+// Failure to read the marker is intentionally a denial. The normal janitor
+// will retry recovery once the platform is reachable; letting a pause exception
+// depend on unavailable evidence would turn an emergency stop into permission
+// to act.
+func (c *Controller) hasRecordedAcceleratorStackQuiesce(ctx context.Context, inc *types.Incident) bool {
+	if inc == nil {
+		return false
+	}
+	c.pinnedEvidenceMu.Lock()
+	pin, owned := c.pinnedEvidence[inc.ID]
+	c.pinnedEvidenceMu.Unlock()
+	if !owned || pin.node != inc.Target.Node {
+		return false
+	}
+	controller, ok := c.platform.(platform.AcceleratorStackController)
+	if !ok {
+		return false
+	}
+	nodes, err := controller.QuiescedNodes(ctx)
+	if err != nil {
+		c.log.Warn("cannot verify accelerator-stack quiesce for compensating restore", "node", inc.Target.Node, "err", err)
+		return false
+	}
+	for _, quiesced := range nodes {
+		if quiesced == inc.Target.Node {
+			return true
+		}
+	}
+	return false
+}
+
 // stepWasSimulated reports the outcome, rather than merely the decision at
 // admission. executeStep repeats the live DryRun check immediately before its
 // side effect, so a step admitted just before a stop can become a no-op. The
@@ -404,7 +445,8 @@ func (c *Controller) executeStep(ctx context.Context, inc *types.Incident, step 
 	if !ok {
 		return nil, fmt.Errorf("unknown step action %q", step.Action)
 	}
-	if (c.simulating(ctx, inc) || c.currentRuntimeDryRun()) && !def.Compensating {
+	if (c.simulating(ctx, inc) || c.currentRuntimeDryRun()) &&
+		(!def.Compensating || !c.hasRecordedAcceleratorStackQuiesce(ctx, inc)) {
 		now := time.Now()
 		return &types.ActionResult{
 			ActionID:   actionID(inc),
