@@ -155,6 +155,27 @@ func (c *Core) WithTx(ctx context.Context, fn func(store.Tx) error) error {
 	return tx.Commit()
 }
 
+// AppendOperationalAudit serializes one per-resource hash-chain append in a
+// transaction.  Operational resources are allowed on PostgreSQL HA stores;
+// a plain read-last-hash/insert sequence would let two writers fork the same
+// chain, so the Query implementation advances a conditional head row before
+// inserting the event.  Keeping the whole operation in one transaction also
+// means a failed audit INSERT cannot leave a head that points at a nonexistent
+// event.
+func (c *Core) AppendOperationalAudit(ctx context.Context, event *types.OperationalAuditEvent) error {
+	tx, err := c.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := c.txQueries(tx).AppendOperationalAudit(ctx, event); err != nil {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && rollbackErr != sql.ErrTxDone {
+			return fmt.Errorf("%w (rollback failed: %v)", err, rollbackErr)
+		}
+		return err
+	}
+	return tx.Commit()
+}
+
 func (c *Core) SaveSafetyState(ctx context.Context, kind string, payload []byte) error {
 	_, err := c.db.ExecContext(ctx,
 		`INSERT INTO safety_state (kind, payload, updated_at) VALUES (?, ?, ?)
@@ -177,12 +198,16 @@ func (c *Core) LoadSafetyState(ctx context.Context, kind string) ([]byte, error)
 }
 
 type PruneStats struct {
-	Events    int64
-	Outbox    int64
-	Actions   int64
-	Incidents int64
-	Audit     int64
-	Approvals int64
+	Events                 int64
+	Outbox                 int64
+	Actions                int64
+	Incidents              int64
+	Audit                  int64
+	Approvals              int64
+	OperationalResources   int64
+	OperationalIdempotency int64
+	OperationalAudit       int64
+	OperationalAuditHeads  int64
 }
 
 func (c *Core) Prune(ctx context.Context, dataRetention, auditRetention time.Duration) (PruneStats, error) {
@@ -219,6 +244,23 @@ func (c *Core) Prune(ctx context.Context, dataRetention, auditRetention time.Dur
 			// accumulate forever.
 			if stats.Actions, err = q.execCount(ctx,
 				`DELETE FROM actions WHERE state IN `+terminalActionStates+` AND updated_at < ?`, cutoff); err != nil {
+				return err
+			}
+			// Idempotency keys are a retry boundary, not permanent user data.
+			// Once their explicit expiry passes they no longer protect a client
+			// retry, so retaining them would grow the write-key table forever.
+			if stats.OperationalIdempotency, err = q.execCount(ctx,
+				`DELETE FROM operational_idempotency WHERE expires_at < ?`, cutoff); err != nil {
+				return err
+			}
+			// Expired terminal summaries can be pruned without deleting their
+			// audit chain. Active plans/runs are deliberately excluded even if a
+			// buggy worker left an expiry in the past: reconcile must first make
+			// their terminal outcome visible to an operator.
+			if stats.OperationalResources, err = q.execCount(ctx, `
+					DELETE FROM operational_resources
+					WHERE expires_at IS NOT NULL AND expires_at < ?
+					  AND state IN ('captured','uploaded','revoked','complete','completed','blocked','cancelled','failed','timed_out','permitted','incident-created','accepted','simulation-only','RolledBack','Expired')`, cutoff); err != nil {
 				return err
 			}
 			return nil
@@ -260,6 +302,29 @@ func (c *Core) Prune(ctx context.Context, dataRetention, auditRetention time.Dur
 			stats.Actions += prunedActions
 			if stats.Incidents, err = q.execCount(ctx,
 				`DELETE FROM incidents WHERE state IN ('RESOLVED','EXPIRED') AND updated_at < ?`, cutoff); err != nil {
+				return err
+			}
+			// Never cut the middle out of a hash chain. A whole operational
+			// chain becomes eligible only after its resource summary was pruned
+			// and its newest event predates the audit-retention boundary. That
+			// leaves every retained chain independently verifiable.
+			if stats.OperationalAudit, err = q.execCount(ctx, `
+				DELETE FROM operational_audit AS event
+				WHERE NOT EXISTS (
+					SELECT 1 FROM operational_resources AS resource
+					WHERE resource.kind=event.kind AND resource.id=event.resource_id
+				) AND NOT EXISTS (
+					SELECT 1 FROM operational_audit AS newer
+					WHERE newer.kind=event.kind AND newer.resource_id=event.resource_id AND newer.time >= ?
+				)`, cutoff); err != nil {
+				return err
+			}
+			if stats.OperationalAuditHeads, err = q.execCount(ctx, `
+				DELETE FROM operational_audit_heads AS head
+				WHERE NOT EXISTS (
+					SELECT 1 FROM operational_audit AS event
+					WHERE event.kind=head.kind AND event.resource_id=head.resource_id
+				)`); err != nil {
 				return err
 			}
 			return nil
@@ -1429,6 +1494,28 @@ func (q *Queries) CompleteAction(ctx context.Context, actionID string, res types
 		return err
 	}
 	return store.ErrLeaseLost
+}
+
+// CancelPendingAction tombstones exactly one not-yet-leased queue entry.  A
+// zero-row update is deliberately not success: callers must distinguish an
+// action safely cancelled before dispatch from an action an agent may already
+// be executing under a lease.
+func (q *Queries) CancelPendingAction(ctx context.Context, actionID string) (bool, error) {
+	if actionID == "" {
+		return false, fmt.Errorf("cancel pending action: action ID is required")
+	}
+	result, err := q.db.ExecContext(ctx, `
+		UPDATE actions
+		SET state='cancelled', lease_token='', lease_expires_at_ns=0, updated_at=?
+		WHERE id=? AND state='pending'`, ts(time.Now()), actionID)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
 }
 
 // terminalActionStates is the SQL half of types.QueuedAction.Terminal(): the

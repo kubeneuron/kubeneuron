@@ -26,6 +26,12 @@ const (
 	negativeAuthTTL = 30 * time.Second
 	// negativeAuthMaxEntries bounds the negative cache under credential churn.
 	negativeAuthMaxEntries = 4096
+	// operationalMutationWindow is a deliberately modest in-process abuse
+	// guard for v0.4 workflows. Deployments may add a stronger gateway quota,
+	// but candidate parsing and fleet previews must still be bounded when the
+	// controller is addressed directly through a port-forward.
+	operationalMutationWindow     = time.Minute
+	operationalMutationMaxSources = 4096
 )
 
 // failureLimiter is a fixed-window per-source failed-authentication
@@ -170,4 +176,61 @@ func remoteSource(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// operationRateLimiter bounds expensive, authenticated v0.4 write paths per
+// source and operation. It is intentionally separate from failureLimiter:
+// valid operators should not be counted as authentication failures, while a
+// candidate compiler or fleet simulation still needs back-pressure.
+type operationRateLimiter struct {
+	mu      sync.Mutex
+	now     func() time.Time
+	windows map[string]*operationRateWindow
+}
+
+type operationRateWindow struct {
+	start time.Time
+	used  int
+}
+
+func newOperationRateLimiter() *operationRateLimiter {
+	return &operationRateLimiter{now: time.Now, windows: make(map[string]*operationRateWindow)}
+}
+
+// allow records one request when it fits the fixed window. The returned
+// retry-after duration is conservative and can be surfaced directly as an
+// HTTP Retry-After header without revealing any caller identity.
+func (l *operationRateLimiter) allow(key string, limit int) (bool, time.Duration) {
+	if limit <= 0 {
+		return false, operationalMutationWindow
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	if len(l.windows) >= operationalMutationMaxSources {
+		for candidate, window := range l.windows {
+			if now.Sub(window.start) >= operationalMutationWindow {
+				delete(l.windows, candidate)
+			}
+		}
+		if len(l.windows) >= operationalMutationMaxSources {
+			// Losing an old counter is preferable to allowing a client to turn
+			// source-key churn into an unbounded memory allocation.
+			l.windows = make(map[string]*operationRateWindow)
+		}
+	}
+	window, ok := l.windows[key]
+	if !ok || now.Sub(window.start) >= operationalMutationWindow {
+		l.windows[key] = &operationRateWindow{start: now, used: 1}
+		return true, 0
+	}
+	if window.used < limit {
+		window.used++
+		return true, 0
+	}
+	retry := operationalMutationWindow - now.Sub(window.start)
+	if retry < time.Second {
+		retry = time.Second
+	}
+	return false, retry
 }

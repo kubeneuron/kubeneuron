@@ -17,6 +17,10 @@ the operator's controller-runtime metrics.
 | `kubeneuron_steps_total` | counter | `outcome` (`ok`, `failed`, `dry_run`) | playbook steps executed |
 | `kubeneuron_actions_pending` | gauge | — | agent actions dispatched and not yet claimed; sustained non-zero means an unreachable or unregistered agent |
 | `kubeneuron_reconcile_seconds` | histogram | — | reconcile-walk duration; p99 above a few seconds delays approvals and verification |
+| `kubeneuron_decision_evaluations_total` | counter | `adapter`, `state` | shared evaluator outcomes for the closed adapters `live-admission`, `readiness`, `preview`, and `snapshot`; use it to spot a growing `Blocked`/`Unknown` population without adding a node label |
+| `kubeneuron_decision_evaluation_seconds` | histogram | `adapter` | time spent inside the pure shared evaluator; separate from inventory capture and candidate compilation |
+| `kubeneuron_decision_stale_evidence_total` | counter | `adapter`, `reason` | decisions held for `EvidenceStale`, `NoHealthyAgent`, or `EvidenceSourceMissing`; a rising rate is an evidence-source/agent investigation signal, not a remediation-success signal |
+| `kubeneuron_decision_compatibility_holds_total` | counter | `state` | legacy live reset admissions the shared v0.4 evaluator would hold while the compatibility path remains authoritative; it never proves that a hardware action occurred |
 | `kubeneuron_stack_restore_failures_total` | counter | — | failed accelerator-stack restores by the janitor — a growing rate means a node's GPU monitoring is staying down |
 | `kubeneuron_runtime_config_info` | gauge | `digest` | identity of the loaded runtime configuration (always 1); a digest lagging `KubeNeuron.status.configDigest` is a rollout that never landed |
 | `kubeneuron_incident_duration_seconds` | histogram | `class`, `outcome` | open-to-halted wall time — MTTR, split by how the incident ended |

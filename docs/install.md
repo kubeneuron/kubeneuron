@@ -15,7 +15,7 @@ dcgm-exporter) and the VictoriaMetrics operator — following
 
 ```sh
 kubectl apply -k config/default
-kubectl get crd | grep kubeneuron.io   # seven CRDs Established
+kubectl get crd | grep kubeneuron.io   # eight CRDs Established
 kubectl -n kube-neuron get deployment kubeneuron-operator
 ```
 

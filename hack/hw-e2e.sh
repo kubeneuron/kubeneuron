@@ -681,25 +681,7 @@ EOF
 	# ("ready config=<digest>"); wait until it equals the digest the operator
 	# advertised on the root status. Fallback: restart the controller — a
 	# fresh pod mounts the already-updated ConfigMap immediately.
-	local digest
-	digest=$(kubectl -n "$RUNTIME_NAMESPACE" get kubeneuron "$ROOT_NAME" \
-		-o jsonpath='{.status.configDigest}')
-	[ -n "$digest" ] || die "root has no configDigest to wait on"
-	log "test-threshold: waiting for the controller to load configuration ${digest:0:12}"
-	local waited=0 loaded=0
-	while ((waited < 180)); do
-		if api GET "/readyz" 2>/dev/null | grep -q "config=${digest}"; then
-			loaded=1
-			break
-		fi
-		sleep 10
-		waited=$((waited + 10))
-	done
-	if ((loaded == 0)); then
-		log "test-threshold: loaded digest never matched; restarting the controller to load the compiled snapshot"
-		kubectl -n "$RUNTIME_NAMESPACE" rollout restart "deployment/${ROOT_NAME}-controller"
-		kubectl -n "$RUNTIME_NAMESPACE" rollout status "deployment/${ROOT_NAME}-controller" --timeout=5m
-	fi
+	wait_for_controller_config
 
 	log "test-threshold: injecting XID $THRESHOLD_XID (1/3) into $node"
 	inject_xid "$node" "$THRESHOLD_XID"
@@ -853,10 +835,23 @@ cmd_test_dcgm() {
 # Registered as a trap by its callers, so it runs whether the phase passes,
 # fails an assertion, or dies.
 close_incident() {
-	local incident="$1" reason="$2"
+	local incident="$1" reason="$2" err
 	[ -n "$incident" ] || return 0
-	api POST "/api/v1/incidents/${incident}/resolve" \
-		"{\"actor\":\"hw-e2e\",\"reason\":\"${reason}\"}" >/dev/null 2>&1 || true
+	# Non-fatal, because this runs from the EXIT trap — but never silent. A
+	# resolve the controller refused used to vanish into /dev/null, and the
+	# phase after it then failed for a reason nothing in the output named.
+	#
+	# The error goes through a FILE, not a $(...) capture. api may rebuild the
+	# port-forward, and a child left holding the write end of a capture pipe
+	# keeps the substitution waiting for an EOF that never comes — inside the
+	# EXIT trap, with the cluster still billing. That is the hang from the
+	# memory note, and the first version of this function reproduced it.
+	err="${E2E_STATE_DIR}/close-incident.err"
+	if ! api POST "/api/v1/incidents/${incident}/resolve" \
+		"{\"actor\":\"hw-e2e\",\"reason\":\"${reason}\"}" >/dev/null 2>"$err"; then
+		log "close_incident: the controller refused to resolve ${incident} ($(tail -n 1 "$err" 2>/dev/null)); the next phase on this node may attach to it"
+	fi
+	rm -f "$err"
 }
 
 cmd_test_verify_recur() {
@@ -994,8 +989,16 @@ spec:
       # drain step correctly times out with "1 pods remaining". That is not a
       # test of the drain, it is a test of a node nobody could drain by hand
       # either.
+      #
+      # And no blanket toleration, for the same reason. A bare operator: Exists
+      # also tolerates node.kubernetes.io/unschedulable — the taint a cordon
+      # applies — so the scheduler put the evicted pod's replacement straight
+      # back onto the cordoned node ten seconds after the Cordon step, and the
+      # drain timed out with "1 pods remaining" having evicted correctly (run
+      # 10). The stand's GPU node carries no taint of its own; tolerate only
+      # the one an accelerator-tainted pool could add.
       nodeSelector: {role: gpu}
-      tolerations: [{operator: Exists}]
+      tolerations: [{key: nvidia.com/gpu, operator: Exists}]
       terminationGracePeriodSeconds: 5
       containers:
         - name: sleep
@@ -1014,7 +1017,7 @@ metadata:
   labels: {kubeneuron.io/hw-e2e: "true"}
 spec:
   nodeSelector: {role: gpu}
-  tolerations: [{operator: Exists}]
+  tolerations: [{key: nvidia.com/gpu, operator: Exists}]
   terminationGracePeriodSeconds: 5
   containers:
     - name: sleep
@@ -1035,6 +1038,9 @@ EOF
 	)"
 	apply_drain_playbook
 	wait_for_installation_ready
+	# The mapping that makes XID 48 a drain-probe fault must be LOADED, not
+	# merely compiled, before it is injected — see wait_for_controller_config.
+	wait_for_controller_config
 	# Wait for the CONTROLLER, not the operator — dry_run is stamped on the
 	# incident at OPEN and never revisited, so an incident born one tick early
 	# is a simulation for its whole life and every assertion below passes
@@ -1185,6 +1191,9 @@ EOF
 	)"
 	apply_e2e_playbook ReplaceNode
 	wait_for_installation_ready
+	# Same open-time binding as test-drain: the ReplaceNode ladder must be the
+	# one the controller has LOADED before the fault that binds to it lands.
+	wait_for_controller_config
 
 	# Wait for the CONTROLLER, not the operator.
 	#
@@ -1544,6 +1553,35 @@ wait_for_configured_object() {
 		any(.status.conditions[]?; .type == \"Ready\" and .status == \"True\")" >/dev/null'
 }
 
+# wait_for_controller_config blocks until the CONTROLLER has loaded the
+# snapshot the operator advertises on the root status (/readyz reports
+# "ready config=<digest>"). Ready on the CRs and on the root object means the
+# operator compiled them; the controller only picks that up through the
+# mounted-file hot-reload, and kubelet propagation adds up to ~2 minutes.
+# Signal classification and playbook binding are both open-time, so a fault
+# injected inside that window is classified by the PREVIOUS snapshot: run 10
+# injected the drain phase's XID three seconds after its mapping went Ready,
+# the controller opened the incident under the built-in class, and the phase
+# waited ten minutes for an incident that could never open. Fallback: restart
+# the controller — a fresh pod mounts the already-updated ConfigMap at once.
+wait_for_controller_config() {
+	local digest waited=0
+	digest=$(kubectl -n "$RUNTIME_NAMESPACE" get kubeneuron "$ROOT_NAME" \
+		-o jsonpath='{.status.configDigest}')
+	[ -n "$digest" ] || die "root has no configDigest to wait on"
+	log "waiting for the controller to load configuration ${digest:0:12}"
+	while ((waited < 180)); do
+		if api GET "/readyz" 2>/dev/null | grep -q "config=${digest}"; then
+			return 0
+		fi
+		sleep 10
+		waited=$((waited + 10))
+	done
+	log "loaded digest never matched; restarting the controller to load the compiled snapshot"
+	kubectl -n "$RUNTIME_NAMESPACE" rollout restart "deployment/${ROOT_NAME}-controller"
+	kubectl -n "$RUNTIME_NAMESPACE" rollout status "deployment/${ROOT_NAME}-controller" --timeout=5m
+}
+
 # apply_e2e_playbook installs the only policy used by the hardware test. The
 # standard installer intentionally creates an Observe-only example, so using it
 # would make this target claim it exercised actions it never selected. XID 45
@@ -1756,8 +1794,14 @@ api() {
 	_ensure_portforward
 	local base="http://127.0.0.1:${_API_LOCAL_PORT}"
 	if [ "$method" = POST ]; then
+		# Every mutable operator route requires an Idempotency-Key
+		# (docs/reference-api.md). A v0.4 controller answers a resolve without
+		# one with 400, and close_incident used to swallow that: run 10 left
+		# every phase's incident open, and the next phase on the node attached
+		# to it. One fresh key per call; nothing here is ever retried.
 		curl -fsS --max-time "$API_MAX_TIME" -X POST -H 'Content-Type: application/json' \
 			-H "Authorization: Bearer ${_API_TOKEN}" \
+			-H "Idempotency-Key: hw-e2e-$(date -u +%s%N)-$$-$RANDOM" \
 			--data "$body" "${base}${path}"
 	else
 		curl -fsS --max-time "$API_MAX_TIME" \

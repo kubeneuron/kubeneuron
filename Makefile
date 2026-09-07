@@ -82,7 +82,15 @@ mirror:
 
 lint:
 	$(GO) vet ./...
-	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run ./... || echo "golangci-lint not installed, skipped"
+# An explicit if/else, not `command -v X && X || echo skipped`. The && chain
+# returns X's exit status into `|| echo`, so a real lint FAILURE printed
+# "not installed, skipped" and the gate passed — golangci-lint reported four
+# issues under a green `make lint`. Same fix applies to shellcheck below.
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		golangci-lint run ./...; \
+	else \
+		echo "golangci-lint not installed, skipped"; \
+	fi
 # actionlint (with its embedded shellcheck) is the one CI linter that golangci-lint
 # does not cover, and workflow YAML is the one place a defect cannot be caught by
 # running the code. It is pinned to the same version CI uses.
@@ -98,8 +106,11 @@ lint:
 # job is to refuse. hack/mirror.sh carried a dead array for as long as it
 # existed (SC2034), so its drift assertion checked one direction while its
 # header claimed two; nothing reported it because nothing ran shellcheck here.
-	@command -v shellcheck >/dev/null 2>&1 && shellcheck hack/*.sh deploy/install.sh \
-		|| echo "shellcheck not installed, skipped"
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck hack/*.sh deploy/install.sh; \
+	else \
+		echo "shellcheck not installed, skipped"; \
+	fi
 # No unbounded network call in the scripts that spend money.
 #
 # The hardware stand's cost guarantee has now died twice on a cleanup step that

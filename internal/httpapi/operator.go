@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
+	"github.com/kubeneuron/kubeneuron/internal/operations"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -30,6 +31,22 @@ type OperatorBackend interface {
 	Node(ctx context.Context, name string) (*types.Node, error)
 	SetPaused(ctx context.Context, paused bool, actor string) error
 	Paused() bool
+}
+
+// IncidentAcknowledgementBackend is an optional v0.4.0 extension. Keeping it
+// separate preserves fail-closed compatibility for an older controller: the
+// new endpoint returns 503 instead of accepting an acknowledgement it cannot
+// persist with idempotency and optimistic concurrency.
+type IncidentAcknowledgementBackend interface {
+	AcknowledgeIncident(ctx context.Context, id, actor, reason string, expectedVersion int, idempotencyKey string) (*types.Incident, bool, error)
+}
+
+// IncidentResolutionBackend is the idempotent v0.4.0 resolution extension.
+// The legacy OperatorBackend method remains for compatibility with an older
+// out-of-tree controller; current controllers expose this form and the public
+// route then requires an idempotency key and displayed resource version.
+type IncidentResolutionBackend interface {
+	ResolveIncidentRequest(ctx context.Context, id, actor, reason string, expectedVersion int, idempotencyKey string) (*types.Incident, bool, error)
 }
 
 // AcceleratorReportOperatorBackend is an optional read-only extension for
@@ -50,6 +67,13 @@ type RecoveryReportBackend interface {
 	RecoveryReport(ctx context.Context, window time.Duration) (*types.RecoveryReport, error)
 }
 
+// OperationsProvider exposes the v0.4.0 durable product service.  It remains
+// optional so an older/out-of-tree controller fails closed with 503 instead of
+// presenting an in-memory-looking candidate, diagnostic, or simulation API.
+type OperationsProvider interface {
+	Operations() *operations.Manager
+}
+
 // OperatorIdentity is the authenticated principal behind an operator API
 // request. Actor is empty for the shared static token: the token proves
 // possession, not identity, so the caller's self-asserted name is recorded
@@ -61,6 +85,10 @@ type OperatorIdentity struct {
 	Actor string
 	// Method names the authentication path, e.g. "kubernetes".
 	Method string
+	// Roles are authorization attributes supplied by the authenticated identity
+	// provider. They are deliberately never read from an API request body.
+	// Kubernetes authentication maps these to verified group membership.
+	Roles []string
 }
 
 // OperatorAuthenticator authenticates one operator API request with a
@@ -77,6 +105,31 @@ type operatorIdentityContextKey struct{}
 func OperatorIdentityFromContext(ctx context.Context) (OperatorIdentity, bool) {
 	identity, ok := ctx.Value(operatorIdentityContextKey{}).(OperatorIdentity)
 	return identity, ok
+}
+
+const (
+	roleExtendedDiagnostics      = "diagnostics-extended"
+	roleDisruptionBudgetApprover = "disruption-budget-approver"
+)
+
+// requireVerifiedRole fences operations whose authorization cannot safely be
+// delegated to a shared token or a caller-supplied JSON field. A static token
+// intentionally carries no principal or roles, while a Kubernetes identity
+// carries only groups verified by TokenReview.
+func (s *Server) requireVerifiedRole(w http.ResponseWriter, r *http.Request, role string) bool {
+	role = strings.TrimSpace(role)
+	identity, ok := OperatorIdentityFromContext(r.Context())
+	if !ok || identity.Actor == "" || role == "" {
+		http.Error(w, "a verified identity with the required role is required", http.StatusForbidden)
+		return false
+	}
+	for _, granted := range identity.Roles {
+		if granted == role {
+			return true
+		}
+	}
+	http.Error(w, fmt.Sprintf("authenticated role %q is required", role), http.StatusForbidden)
+	return false
 }
 
 // EnableOperatorAPI attaches the operator routes behind a required bearer
@@ -133,6 +186,32 @@ func (s *Server) requireOperatorMutation(next http.HandlerFunc) http.HandlerFunc
 		if !s.isLeader() {
 			http.Error(w, "standby: not the elected leader", http.StatusServiceUnavailable)
 			return
+		}
+		next(w, r)
+	})
+}
+
+// requireOperationalMutation adds a bounded per-source quota after ordinary
+// operator authentication and leader fencing.  Candidate compilation,
+// fleet-wide preview, diagnostics, and simulation are intentionally more
+// expensive than a normal incident decision; direct Pod access must not turn
+// one valid credential into an unbounded parser or inventory-evaluation loop.
+func (s *Server) requireOperationalMutation(operation string, limit int, next http.HandlerFunc) http.HandlerFunc {
+	return s.requireOperatorMutation(func(w http.ResponseWriter, r *http.Request) {
+		if s.operationLimiter != nil {
+			allowed, retryAfter := s.operationLimiter.allow(remoteSource(r)+"\x00"+operation, limit)
+			if !allowed {
+				seconds := int(retryAfter.Seconds())
+				if retryAfter%time.Second != 0 {
+					seconds++
+				}
+				if seconds < 1 {
+					seconds = 1
+				}
+				w.Header().Set("Retry-After", strconv.Itoa(seconds))
+				http.Error(w, "operational request quota exceeded; retry later", http.StatusTooManyRequests)
+				return
+			}
 		}
 		next(w, r)
 	})
@@ -289,10 +368,41 @@ func (s *Server) registerOperatorRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/incidents", s.requireOperatorMutation(s.handleManualIncident))
 	mux.HandleFunc("POST /api/v1/incidents/{id}/approve", s.requireOperatorMutation(s.handleDecision(types.ApprovalApproved)))
 	mux.HandleFunc("POST /api/v1/incidents/{id}/reject", s.requireOperatorMutation(s.handleDecision(types.ApprovalRejected)))
+	mux.HandleFunc("POST /api/v1/incidents/{id}/acknowledge", s.requireOperatorMutation(s.handleAcknowledge))
 	mux.HandleFunc("POST /api/v1/incidents/{id}/resolve", s.requireOperatorMutation(s.handleResolve))
+	mux.HandleFunc("GET /api/v1/readiness", s.requireOperator(s.handleFleetReadiness))
+	mux.HandleFunc("GET /api/v1/audit-events", s.requireOperator(s.handleListOperationalAuditEvents))
 	mux.HandleFunc("GET /api/v1/nodes", s.requireOperator(s.handleListNodes))
 	mux.HandleFunc("GET /api/v1/nodes/{node}", s.requireOperator(s.handleGetNode))
+	mux.HandleFunc("GET /api/v1/nodes/{node}/readiness", s.requireOperator(s.handleNodeReadiness))
+	mux.HandleFunc("GET /api/v1/nodes/{node}/evidence", s.requireOperator(s.handleNodeEvidence))
+	mux.HandleFunc("GET /api/v1/nodes/{node}/health-checks", s.requireOperator(s.handleListNodeHealthChecks))
 	mux.HandleFunc("GET /api/v1/nodes/{node}/accelerators", s.requireOperator(s.handleAcceleratorReports))
+	mux.HandleFunc("POST /api/v1/candidates", s.requireOperationalMutation("candidate-upload", 20, s.handleCreateCandidate))
+	mux.HandleFunc("GET /api/v1/candidates", s.requireOperator(s.handleListCandidates))
+	mux.HandleFunc("GET /api/v1/candidates/{id}", s.requireOperator(s.handleGetCandidate))
+	mux.HandleFunc("DELETE /api/v1/candidates/{id}", s.requireOperationalMutation("candidate-revoke", 60, s.handleRevokeCandidate))
+	mux.HandleFunc("POST /api/v1/candidates/{id}/preview", s.requireOperationalMutation("candidate-preview", 20, s.handleCreatePreview))
+	mux.HandleFunc("GET /api/v1/candidates/{id}/preview", s.requireOperator(s.handleGetCandidatePreview))
+	mux.HandleFunc("GET /api/v1/previews", s.requireOperator(s.handleListPreviews))
+	mux.HandleFunc("GET /api/v1/previews/{id}", s.requireOperator(s.handleGetPreview))
+	mux.HandleFunc("POST /api/v1/health-checks", s.requireOperationalMutation("health-check", 30, s.handleCreateHealthCheck))
+	mux.HandleFunc("GET /api/v1/health-checks", s.requireOperator(s.handleListHealthChecks))
+	mux.HandleFunc("GET /api/v1/health-checks/{id}", s.requireOperator(s.handleGetHealthCheck))
+	mux.HandleFunc("POST /api/v1/health-checks/{id}/cancel", s.requireOperationalMutation("health-check-cancel", 60, s.handleCancelHealthCheck))
+	mux.HandleFunc("POST /api/v1/simulations", s.requireOperationalMutation("simulation", 30, s.handleCreateSimulation))
+	mux.HandleFunc("GET /api/v1/simulations", s.requireOperator(s.handleListSimulations))
+	mux.HandleFunc("GET /api/v1/simulations/{id}", s.requireOperator(s.handleGetSimulation))
+	mux.HandleFunc("POST /api/v1/incidents/from-simulation", s.requireOperationalMutation("incident-from-simulation", 30, s.handleCreateIncidentFromSimulation))
+	mux.HandleFunc("POST /api/v1/autonomy/plans", s.requireOperationalMutation("autonomy-plan", 20, s.handleCreateAutonomyPlan))
+	mux.HandleFunc("GET /api/v1/autonomy/plans", s.requireOperator(s.handleListAutonomyPlans))
+	mux.HandleFunc("GET /api/v1/autonomy/plans/{id}", s.requireOperator(s.handleGetAutonomyPlan))
+	mux.HandleFunc("GET /api/v1/autonomy/plans/{id}/rollout", s.requireOperator(s.handleGetAutonomyRollout))
+	mux.HandleFunc("POST /api/v1/autonomy/plans/{id}/simulation", s.requireOperationalMutation("autonomy-simulation", 30, s.handleAttachAutonomySimulation))
+	mux.HandleFunc("POST /api/v1/autonomy/plans/{id}/approve", s.requireOperationalMutation("autonomy-approve", 60, s.handleApproveAutonomyPlan))
+	mux.HandleFunc("POST /api/v1/autonomy/plans/{id}/pause", s.requireOperationalMutation("autonomy-pause", 60, s.handlePauseAutonomyPlan))
+	mux.HandleFunc("POST /api/v1/autonomy/plans/{id}/resume", s.requireOperationalMutation("autonomy-resume", 60, s.handleResumeAutonomyPlan))
+	mux.HandleFunc("POST /api/v1/autonomy/plans/{id}/rollback", s.requireOperationalMutation("autonomy-rollback", 60, s.handleRollbackAutonomyPlan))
 	mux.HandleFunc("GET /api/v1/report/recovery", s.requireOperator(s.handleRecoveryReport))
 	mux.HandleFunc("GET /api/v1/targets", s.requireOperator(s.handleTargets))
 	mux.HandleFunc("GET /api/v1/runtime-config", s.requireOperator(s.handleRuntimeConfig))
@@ -469,6 +579,10 @@ func (s *Server) handleDecision(decision types.ApprovalDecision) http.HandlerFun
 }
 
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+	if backend, ok := s.operator.(IncidentResolutionBackend); ok {
+		s.handleIdempotentResolve(w, r, backend)
+		return
+	}
 	var req DecisionRequest
 	if !decodeStrict(w, r, &req) {
 		return
@@ -483,6 +597,87 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type resolveIncidentRequest struct {
+	Actor           string `json:"actor"`
+	Reason          string `json:"reason,omitempty"`
+	ResourceVersion int    `json:"resource_version,omitempty"`
+}
+
+func (s *Server) handleIdempotentResolve(w http.ResponseWriter, r *http.Request, backend IncidentResolutionBackend) {
+	key, ok := operationalIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	var request resolveIncidentRequest
+	if !decodeStrict(w, r, &request) {
+		return
+	}
+	actor, err := s.resolveActor(r, request.Actor)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	incident, replayed, err := backend.ResolveIncidentRequest(r.Context(), r.PathValue("id"), actor, request.Reason, request.ResourceVersion, key)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			http.Error(w, "incident not found", http.StatusNotFound)
+		case errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrOperationalConflict):
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
+		return
+	}
+	if replayed {
+		w.Header().Set("Idempotent-Replay", "true")
+	}
+	writeOperationalJSON(w, http.StatusOK, incident)
+}
+
+type acknowledgeIncidentRequest struct {
+	Actor           string `json:"actor"`
+	Reason          string `json:"reason,omitempty"`
+	ResourceVersion int    `json:"resource_version,omitempty"`
+}
+
+func (s *Server) handleAcknowledge(w http.ResponseWriter, r *http.Request) {
+	backend, ok := s.operator.(IncidentAcknowledgementBackend)
+	if !ok {
+		http.Error(w, "incident acknowledgement is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	key, ok := operationalIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	var request acknowledgeIncidentRequest
+	if !decodeStrict(w, r, &request) {
+		return
+	}
+	actor, err := s.resolveActor(r, request.Actor)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	incident, replayed, err := backend.AcknowledgeIncident(r.Context(), r.PathValue("id"), actor, request.Reason, request.ResourceVersion, key)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			http.Error(w, "incident not found", http.StatusNotFound)
+		case errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrOperationalConflict):
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
+		return
+	}
+	if replayed {
+		w.Header().Set("Idempotent-Replay", "true")
+	}
+	writeOperationalJSON(w, http.StatusOK, incident)
 }
 
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {

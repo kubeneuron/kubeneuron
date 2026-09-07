@@ -79,6 +79,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "registering reconciler:", err)
 		os.Exit(1)
 	}
+	if err := (&operator.GPUAutonomyPlanReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		fmt.Fprintln(os.Stderr, "registering GPUAutonomyPlan reconciler:", err)
+		os.Exit(1)
+	}
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		fmt.Fprintln(os.Stderr, "adding health check:", err)
 		os.Exit(1)

@@ -1,6 +1,6 @@
 // Package web embeds the built control-panel SPA (web/dist) into the
-// controller binary. Run `make web` before `make build` to include a fresh
-// UI; without a build, the placeholder below is served.
+// controller binary. The repository's dependency-free console is checked in
+// under web/dist, so normal controller builds always carry the current panel.
 package web
 
 import (

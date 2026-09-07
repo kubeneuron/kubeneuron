@@ -9,6 +9,8 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/action"
 	"github.com/kubeneuron/kubeneuron/internal/cloud"
 	"github.com/kubeneuron/kubeneuron/internal/config"
+	"github.com/kubeneuron/kubeneuron/internal/decision"
+	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/store"
@@ -231,6 +233,22 @@ func (c *Controller) allowAcceleratorStep(ctx context.Context, inc *types.Incide
 // the profile and node identity it is checked against are read LIVE — see
 // liveResetAuthority.
 func (c *Controller) allowNVIDIAReset(ctx context.Context, inc *types.Incident, target types.Target) error {
+	// Run the common evaluator for every live reset admission. This release
+	// keeps the long-established reset-specific gate authoritative while the
+	// compatibility telemetry is compared in production: pinned evidence after
+	// a stack quiesce is a legacy exception the pure snapshot cannot represent
+	// without widening its authority. The result is nevertheless the same
+	// recorded contract surfaced by readiness, preview and simulation.
+	if result, err := c.LiveAdmissionDecision(ctx, target.Node, decision.Request{
+		Class: decision.ActionRemediate, AcceleratorAction: types.AcceleratorActionResetDevice,
+		Scope: types.AcceleratorScopePhysicalDevice, TargetDeviceID: target.GPUUUID,
+	}); err != nil {
+		c.log.Debug("shared evaluator could not capture live reset admission", "incident", inc.ID, "err", err)
+	} else if !result.Permitted() {
+		metrics.DecisionCompatibilityHolds.WithLabelValues(string(result.State)).Inc()
+		c.log.Debug("shared evaluator compatibility hold for live reset admission",
+			"incident", inc.ID, "state", result.State, "reasons", result.ReasonCodes)
+	}
 	if pin, ok := c.takePinnedAcceleratorEvidence(inc.ID, time.Now()); ok {
 		if pin.node != target.Node {
 			return fmt.Errorf("pinned accelerator evidence belongs to node %q, not %q", pin.node, target.Node)

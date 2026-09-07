@@ -23,6 +23,7 @@ rules:
       - gpumaintenancewindows
       - gpunodeconfigs
       - acceleratorruntimeprofiles
+      - gpuautonomyplans
     verbs: ["get", "list", "watch"]
   - apiGroups: ["kubeneuron.io"]
     resources:
@@ -31,6 +32,7 @@ rules:
       - gpuplaybooks/status
       - acceleratorruntimeprofiles/status
       - gpusignalmappings/status
+      - gpuautonomyplans/status
     verbs: ["get", "patch", "update"]
   - apiGroups: ["kubeneuron.io"]
     resources: ["kubeneurons/finalizers"]

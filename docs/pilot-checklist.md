@@ -72,7 +72,7 @@ curl -sfL https://github.com/kubeneuron/kubeneuron/releases/latest/download/inst
   | bash -s -- --version latest
 ```
 
-Confirm: `kubectl get crd | grep kubeneuron.io` shows seven CRDs Established,
+Confirm: `kubectl get crd | grep kubeneuron.io` shows eight CRDs Established,
 and `kubectl -n kube-neuron get kubeneuron kubeneuron -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}'`
 prints `RuntimeAvailable`.
 

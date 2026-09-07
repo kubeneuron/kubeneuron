@@ -9,3 +9,4 @@ resources:
   - bases/kubeneuron.io_gpumaintenancewindows.yaml
   - bases/kubeneuron.io_gpunodeconfigs.yaml
   - bases/kubeneuron.io_acceleratorruntimeprofiles.yaml
+  - bases/kubeneuron.io_gpuautonomyplans.yaml

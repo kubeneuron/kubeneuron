@@ -294,10 +294,69 @@ garbage-collects the claim, and the StorageClass reclaim policy then
 decides whether data survives. Use `Retain` for production. The claim can
 grow (`workflowStore.sqlite.size`) but never shrink. High-volume operational
 tables (events, outbox, completed actions) are pruned hourly with a 90-day
-default (`-store-retention`). Audit rows and their incidents are append-only
+default (`-store-retention`). v0.4 candidate, preview, health-check,
+simulation, autonomy-plan, rollout, and effect summaries follow the same data
+retention window only after they are terminal and expired. Idempotency records
+expire after their retry window. Operational audit chains are different: a
+chain is deleted only as a whole, after its summary is gone and its newest
+event is older than `-store-audit-retention`; no pruning operation removes the
+middle of a retained hash chain. Audit rows and their incidents are append-only
 by default; budget roughly a few KB per incident step, or opt in to
 `-store-audit-retention` to prune *terminal* incidents with their audit and
 approval history after a window you choose.
+
+## v0.4 remediation intelligence and autonomy
+
+The native operations paths are the system of record for readiness, candidate
+review, diagnostics, simulation, incident custody, autonomy observations, and
+the append-only audit explorer. Use `kubeneuronctl readiness <node>` to obtain
+the live decision snapshot and evidence references, and retain the resource ID
+and `resource_version` when acting on a candidate, health check, simulation,
+incident, or autonomy plan. Mutations require an idempotency key; the CLI
+creates one, while direct API clients must retain and reuse theirs after a
+transport retry.
+
+Diagnostic summaries intentionally do not copy agent command output into the
+general console/API record. They contain a digest and a safe outcome; inspect
+the restricted action evidence through the authorized incident/support path
+when raw output is needed. Treat a reported `unsupported` result as a real
+terminal capability outcome, not as a successful empty diagnostic.
+
+Extended diagnostics require a Kubernetes TokenReview identity in both the
+`diagnostics-extended` and `disruption-budget-approver` groups; the shared
+token and browser sessions cannot self-authorize those grants. For autonomy,
+each requested approval role is likewise verified against the caller's
+TokenReview groups and stored under the immutable verified subject. A named
+`maintenance_windows` guardrail is a live gate, not annotation: every name
+must currently resolve to an active matching controller window for the node.
+For hardware-qualified effects, an executor acknowledgement is only hand-off;
+the bake needs fresh accelerator evidence observed after the effect and passing
+the shared evaluator. Its deterministic effect record remains retained until
+the plan expires, preventing a retention sweep from enabling a repeat dispatch.
+
+`GPUAutonomyPlan` creation is safe to enable for review, but the stock
+controller has **no hardware autonomy executor**. It records a
+`simulation-only` canary and never touches a device. Before wiring a
+hardware-qualified adapter, rehearse these operations in a non-production
+scope:
+
+1. Create the frozen simulation and attach it to the plan; collect the two
+   distinct role approvals using Kubernetes bearer credentials whose verified
+   groups match the plan roles.
+2. Verify every selected node has fresh agent/controller/DCGM evidence and
+   that the current configuration digest still matches the approval binding.
+3. During canary or bake, use `kubeneuronctl autonomy pause <plan-id> --reason
+   ...` for a hold, or `kubeneuronctl autonomy rollback <plan-id> --reason ...`
+   to terminally stop expansion. A resume returns to a fresh canary, never
+   directly to Enabled.
+4. Test the global `kubeneuronctl pause` separately. It wins over new effects;
+   an already leased external action must be investigated from its durable
+   effect record rather than presumed cancelled.
+
+Do not represent a simulation-only observation, an accepted executor hand-off,
+or a dashboard data point as hardware qualification. Qualification, rollback
+compensation, and driver/runtime support are deployment-specific evidence that
+must be recorded by the adapter and its operating procedure.
 
 ## PostgreSQL workflow store (HA installations)
 

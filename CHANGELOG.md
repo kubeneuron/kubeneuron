@@ -9,12 +9,100 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+## [v0.4.0] - 2026-09-07
+
+### Added
+
+- The remediation-intelligence product surface: a pure versioned decision and
+  evidence evaluator, fleet/node readiness explanations, immutable decision
+  snapshots, candidate configuration upload/preview, bounded health checks,
+  frozen remediation simulation, and simulation-linked incident creation.
+- Durable v0.4 operational resources for candidates, previews, diagnostics,
+  simulations, autonomy plans/rollouts/effects, idempotency records, and a
+  globally searchable per-resource SHA-256 audit chain. SQLite migration head
+  is 0023 and PostgreSQL migration head is 0014.
+- Native CLI, REST, and control-panel paths for the new operational workflow,
+  including candidate revocation, health-check cancellation, incident
+  acknowledgement/resolution with idempotency/version fencing, and audit
+  exploration.
+- `GPUAutonomyPlan` CRD, generated Helm CRD, RBAC, safe Draft sample, and
+  operator status validation for immutable references, evidence requirements,
+  distinct approvers, bounded canary/bake/expansion, expiry, and one action
+  class per plan.
+
+### Changed
+
+- **`POST /api/v1/incidents/{id}/resolve` is now idempotency-fenced**, like
+  every other v0.4 mutation: it requires an `Idempotency-Key` header, accepts
+  an optional `resource_version`, and answers `200` with the resolved incident
+  instead of `204`. A request without the header is refused with `400`.
+  `kubeneuronctl resolve`, the control panel and the hardware harness send the
+  key already; a raw `curl` or a script written against v0.3.0 must add it
+  (see docs/reference-api.md). The kind integration suite was carrying exactly
+  such a call and is updated with this release.
+- The kind integration suite installs eight generated CRDs and runs an 81-case
+  CEL admission matrix: the new `GPUAutonomyPlan` envelope rules (immutable
+  references, matchLabels-only selector, distinct approvers, canary within the
+  concurrency cap, no-active-incident guardrail) are each driven once against
+  a real API server.
+
+### Safety and operability
+
+- Autonomous canary/expansion re-evaluates fresh evidence before every effect,
+  bakes each bounded batch, verifies the current configuration digest against
+  the approved simulation, respects tenant/cluster node labels, and records a
+  durable effect hand-off before an explicitly wired executor can run.
+- The stock controller has no hardware autonomy executor. Its rollout is
+  explicitly `simulation-only`; this release does not claim a new hardware,
+  driver, or runtime qualification.
+- Diagnostics now persist their run/audit record before queueing agent work and
+  expose only safe summaries plus evidence digests, not raw command output.
+- Added evaluator distribution/latency/stale-evidence/compatibility metrics,
+  bounded per-operation API quotas, operational-record retention, upgrade and
+  rollback guidance, and v0.4 API/CLI documentation.
+
 ### Fixed
 
+- **A real device-scoped NVIDIA incident on a node no `AcceleratorRuntimeProfile`
+  selects could never resolve** (`internal/controller/reconcile.go`). The
+  operator-managed agent holds observation — posts no accelerator report —
+  whenever the controller answers that no profile selects its node, which is
+  the deliberate capability default-deny. `verifyRuntimeEvidence` read that
+  same absence as a degraded agent and failed closed, so on an ordinary
+  `Enabled` install with a real driver (the standard samples, chart and
+  installer create no profile, and a profile is documented as narrowing
+  actions, not as a prerequisite for closing an incident) every device-scoped
+  incident held for the evidence deadline and parked in `NEEDS_HUMAN` after
+  the cordon and drain, with a reason naming no action anybody could take.
+  Hardware run 12 found it: the first real-mode, device-scoped resolution ever
+  attempted on a real driver — an observe-only ladder — waited ten minutes for
+  a report the agent had been told not to send. The controller now asks the
+  question the agent asked: a node no profile selects verifies on the durable
+  heartbeat plus the quiet window, at reduced depth named in the resolve audit
+  entry and logged once per node; a node a profile selects still fails closed
+  on a missing or stale report; a fresh not-ready report is never outranked;
+  overlapping profiles or unresolvable labels fail closed with the cause in
+  the reason. The resolve audit entry now also names the reduced depth for a
+  vendor this build cannot attest, which the v0.2.3 note claimed and the code
+  only logged.
 - A global pause could still strand GPU monitoring off when it landed after
   KubeNeuron quiesced the accelerator stack but before the matching
   controller-side restore started. The narrow compensating restore now passes
   that one gate denial; no other remediation can begin while paused.
+- **That compensating exception is now bound to the quiesce it undoes.** A
+  compensating action name alone no longer earns the pause or DryRun
+  exception: the restore starts under a stop only when the exact incident
+  holds the in-memory ownership pin for its node *and* the platform's durable
+  marker still records that node as quiesced, so a hand-authored restore-only
+  playbook, or a marker another incident owns, gets no exception, and an
+  unreadable marker is a denial rather than permission. Every quiesce now
+  takes an ownership pin, node-scoped ones included, so the recovery janitor
+  cannot mistake a quiesce between its platform half and host-side settle for
+  an abandoned marker. The janitor also tracks every incident pinned to a node
+  instead of one chosen by map iteration, so two GPU incidents sharing a node
+  cannot have the stack restored underneath the one still resetting, and it
+  holds rather than restores when the store cannot say whether an owner is
+  still active, retrying on the next pass.
 - Recovery accounting now records a post-dispatch step outcome. An admission
   immediately followed by an emergency DryRun switch is no longer reported as
   a real fleet repair; pre-upgrade audit evidence remains intact for incidents

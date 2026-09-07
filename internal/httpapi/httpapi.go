@@ -137,6 +137,7 @@ type Server struct {
 	// TLS-terminating load balancer that speaks plain HTTP to the controller.
 	trustProxyHeaders bool
 	authLimiter       *failureLimiter
+	operationLimiter  *operationRateLimiter
 	// loginSlots bounds how many password verifications run at once. bcrypt is
 	// deliberately expensive, /api/v1/login is unauthenticated, and this
 	// process is the sole elected leader — see the comment at its use.
@@ -252,8 +253,9 @@ const maxConcurrentOperatorAuth = 16
 
 func New(backend Backend) *Server {
 	return &Server{
-		backend:     backend,
-		authLimiter: newFailureLimiter(),
+		backend:          backend,
+		authLimiter:      newFailureLimiter(),
+		operationLimiter: newOperationRateLimiter(),
 		// Four concurrent password verifications: enough that a handful of
 		// operators signing in together never queue, small enough that the
 		// worst an attacker can spend is four cores' worth of bcrypt.

@@ -221,6 +221,42 @@ var (
 		Buckets: prometheus.ExponentialBuckets(0.001, 4, 8), // 1ms .. ~65s
 	})
 
+	// DecisionEvaluations is the bounded result distribution of the shared
+	// evaluator. `adapter` is a closed internal call-site name (never a node,
+	// tenant, or user), so the native readiness/preview/autonomy product can
+	// be observed without creating unbounded Prometheus series.
+	DecisionEvaluations = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_decision_evaluations_total",
+		Help: "Shared decision-evaluator results by adapter and disposition.",
+	}, []string{"adapter", "state"})
+
+	// DecisionEvaluationSeconds exposes evaluator cost independently of the
+	// surrounding API operation. A slow fleet preview is actionable only when
+	// operators can tell whether capture, compilation, or pure evaluation is
+	// the contributor.
+	DecisionEvaluationSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "kubeneuron_decision_evaluation_seconds",
+		Help:    "Wall time spent in the shared pure decision evaluator by adapter.",
+		Buckets: prometheus.ExponentialBuckets(0.00005, 4, 8), // 50µs .. ~819ms
+	}, []string{"adapter"})
+
+	// DecisionEvidenceStale makes a source/evidence degradation visible before
+	// a plan reaches an autonomy gate. The reason label is a closed reason-code
+	// subset rather than raw diagnostic text.
+	DecisionEvidenceStale = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_decision_stale_evidence_total",
+		Help: "Shared decisions held for stale, absent, or unhealthy evidence by adapter and reason.",
+	}, []string{"adapter", "reason"})
+
+	// DecisionCompatibilityHolds counts live reset admissions where the v0.4
+	// evaluator would hold while the established compatibility gate continues
+	// its narrower pinned-evidence path. It is a detector, not evidence that a
+	// device action occurred; operators use it to retire compatibility cases.
+	DecisionCompatibilityHolds = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_decision_compatibility_holds_total",
+		Help: "Live reset admissions the shared evaluator held while the compatibility gate remained authoritative, by disposition.",
+	}, []string{"state"})
+
 	// ActionsPending is the durable action-queue depth (queued work agents
 	// have not yet completed).
 	ActionsPending = promauto.NewGauge(prometheus.GaugeOpts{

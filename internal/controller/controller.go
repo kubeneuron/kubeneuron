@@ -20,6 +20,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/notify"
+	"github.com/kubeneuron/kubeneuron/internal/operations"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
@@ -109,6 +110,12 @@ type Controller struct {
 
 	// cordonReported remembers which stuck cordons have been announced.
 	cordonReported cordonReportedKeys
+
+	// operations owns the v0.4.0 durable product workflows.  It is nil only
+	// for legacy/out-of-tree stores that do not implement OperationalStore;
+	// their API surface fails closed instead of keeping workflow state in
+	// process memory.
+	operations *operations.Manager
 }
 
 // SetSignalCatalog installs the declarative signal-override catalog.
@@ -286,6 +293,17 @@ func New(
 	})
 	if outbox, ok := sink.(store.EventOutbox); ok {
 		c.eventOutbox = outbox
+	}
+	if resources, ok := st.(store.OperationalStore); ok {
+		c.operations = operations.New(operations.Options{
+			Resources:                       resources,
+			Workflow:                        st,
+			BuildSnapshot:                   c.BuildDecisionSnapshot,
+			ListNodes:                       c.Nodes,
+			CreateIncident:                  c.CreateIncidentFromSimulation,
+			GetIncident:                     c.store.GetIncident,
+			AutonomyMaintenanceWindowActive: c.autonomyMaintenanceWindowActive,
+		})
 	}
 	return c
 }

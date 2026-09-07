@@ -5,7 +5,7 @@ metadata:
 spec:
   namespace: kube-neuron
   controller:
-    image: ghcr.io/kubeneuron/kubeneuron/controller:v0.1.1
+    image: ghcr.io/kubeneuron/kubeneuron/controller:v0.4.0
     resources:
       requests:
         cpu: 100m
@@ -13,7 +13,7 @@ spec:
       limits:
         memory: 512Mi
   agent:
-    image: ghcr.io/kubeneuron/kubeneuron/agent:v0.1.1
+    image: ghcr.io/kubeneuron/kubeneuron/agent:v0.4.0
     nodeSelector:
       nvidia.com/gpu.present: "true"
     tolerations:

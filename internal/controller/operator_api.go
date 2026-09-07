@@ -2,12 +2,17 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/approval"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/notify"
+	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -116,6 +121,199 @@ func (c *Controller) ResolveIncident(ctx context.Context, id, actor, reason stri
 		Message: fmt.Sprintf("manually resolved by %s: %s", actor, firstNonBlank(reason, "no reason given")),
 	})
 }
+
+// ResolveIncidentRequest is the v0.4 idempotent/optimistic-concurrency form
+// of manual resolution. The older ResolveIncident method remains for existing
+// integrations, while the public API uses this form whenever the controller
+// advertises it. A retry returns the resolved incident instead of attempting a
+// second terminal transition or sending a second resolution notification.
+func (c *Controller) ResolveIncidentRequest(ctx context.Context, id, actor, reason string, expectedVersion int, idempotencyKey string) (*types.Incident, bool, error) {
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(actor) == "" || strings.TrimSpace(idempotencyKey) == "" {
+		return nil, false, fmt.Errorf("incident ID, actor, and idempotency key are required")
+	}
+	operational, ok := c.store.(store.OperationalStore)
+	if !ok {
+		return nil, false, fmt.Errorf("incident resolution requires the v0.4.0 operational store")
+	}
+	current, err := c.store.GetIncident(ctx, id)
+	if err != nil {
+		return nil, false, err
+	}
+	digest := incidentOperationDigest("resolve", id, actor, reason, expectedVersion)
+	storageKey := incidentOperationKey("resolve", idempotencyKey)
+	if existing, lookupErr := operational.GetOperationalIdempotency(ctx, types.ResourceIncidentOperation, actor, storageKey); lookupErr == nil {
+		if existing.RequestDigest != digest || existing.ResourceID != id {
+			return nil, false, store.ErrOperationalConflict
+		}
+		if current.State != types.StateResolved {
+			// A record without the terminal result means the original request
+			// lost a race or failed after reservation. Never masquerade that
+			// partial write as a successful resolution; the caller must reread
+			// and issue a fresh operation key if resolution is still appropriate.
+			return nil, false, fmt.Errorf("%w: prior resolution request did not reach a terminal incident state", store.ErrOperationalConflict)
+		}
+		return current, true, nil
+	} else if !errors.Is(lookupErr, store.ErrNotFound) {
+		return nil, false, lookupErr
+	}
+	if expectedVersion > 0 && current.Version != expectedVersion {
+		return nil, false, store.ErrConflict
+	}
+	// Validate the state transition before reserving the retry key. A typo or
+	// stale terminal row must not poison a key an operator needs after rereading
+	// the current incident.
+	probe := *current
+	if err := playbook.Transition(&probe, types.StateResolved); err != nil {
+		return nil, false, err
+	}
+	record, created, err := operational.PutOperationalIdempotency(ctx, &types.OperationalIdempotencyRecord{
+		Kind: types.ResourceIncidentOperation, Actor: actor, Key: storageKey,
+		RequestDigest: digest, ResourceID: id,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if !created {
+		if record.RequestDigest != digest || record.ResourceID != id {
+			return nil, false, store.ErrOperationalConflict
+		}
+		incident, getErr := c.store.GetIncident(ctx, id)
+		if getErr == nil && incident.State != types.StateResolved {
+			return nil, false, fmt.Errorf("%w: prior resolution request did not reach a terminal incident state", store.ErrOperationalConflict)
+		}
+		return incident, true, getErr
+	}
+	if err := c.transition(ctx, current, types.StateResolved, actor, "manual-resolve", firstNonBlank(reason, "manually resolved"), nil); err != nil {
+		return nil, false, err
+	}
+	if err := c.notify(ctx, notify.NotifyEvent{
+		Kind: notify.EventResolved, Incident: current,
+		Message: fmt.Sprintf("manually resolved by %s: %s", actor, firstNonBlank(reason, "no reason given")),
+	}); err != nil {
+		// The transactional state transition/audit is the operation's durable
+		// result. Do not turn a notifier outage into a retry that appears
+		// successful yet cannot re-deliver from this request key.
+		c.log.Warn("manual resolution notification failed", "incident", id, "err", err)
+	}
+	if err := operational.AppendOperationalAudit(ctx, &types.OperationalAuditEvent{
+		Kind: types.ResourceIncidentOperation, ResourceID: id, Time: current.UpdatedAt,
+		Actor: actor, Action: "resolve", RequestID: idempotencyKey,
+		Params: map[string]string{"reason": firstNonBlank(reason, "manually resolved")}, Result: "resolved",
+	}); err != nil {
+		c.log.Error("operational incident resolution audit append failed", "incident", id, "err", err)
+	}
+	return current, false, nil
+}
+
+// AcknowledgeIncident records that an identified operator has taken custody
+// of an active incident without changing its remediation state.  It is a
+// first-class, optimistic-versioned operation rather than a UI-only audit
+// comment: callers can safely retry with the same idempotency key and an old
+// browser tab cannot acknowledge a row that has already moved on.
+func (c *Controller) AcknowledgeIncident(ctx context.Context, id, actor, reason string, expectedVersion int, idempotencyKey string) (*types.Incident, bool, error) {
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(actor) == "" || strings.TrimSpace(idempotencyKey) == "" {
+		return nil, false, fmt.Errorf("incident ID, actor, and idempotency key are required")
+	}
+	operational, ok := c.store.(store.OperationalStore)
+	if !ok {
+		return nil, false, fmt.Errorf("incident acknowledgement requires the v0.4.0 operational store")
+	}
+	// Validate the caller's observed version before claiming the key. A bad
+	// request must never leave an idempotency reservation that makes a later
+	// corrected acknowledgement unretryable.
+	current, err := c.store.GetIncident(ctx, id)
+	if err != nil {
+		return nil, false, err
+	}
+	digest := incidentOperationDigest("acknowledge", id, actor, reason, expectedVersion)
+	storageKey := incidentOperationKey("acknowledge", idempotencyKey)
+	if existing, lookupErr := operational.GetOperationalIdempotency(ctx, types.ResourceIncidentOperation, actor, storageKey); lookupErr == nil {
+		if existing.RequestDigest != digest || existing.ResourceID != id {
+			return nil, false, store.ErrOperationalConflict
+		}
+		return current, true, nil
+	} else if !errors.Is(lookupErr, store.ErrNotFound) {
+		return nil, false, lookupErr
+	}
+	if expectedVersion > 0 && current.Version != expectedVersion {
+		return nil, false, store.ErrConflict
+	}
+	if current.State.Terminal() {
+		return nil, false, fmt.Errorf("incident %q is already terminal", id)
+	}
+	record, created, err := operational.PutOperationalIdempotency(ctx, &types.OperationalIdempotencyRecord{
+		Kind: types.ResourceIncidentOperation, Actor: actor, Key: storageKey,
+		RequestDigest: digest, ResourceID: id,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if !created {
+		if record.RequestDigest != digest || record.ResourceID != id {
+			return nil, false, store.ErrOperationalConflict
+		}
+		incident, err := c.store.GetIncident(ctx, id)
+		return incident, true, err
+	}
+
+	var acknowledged *types.Incident
+	err = c.store.WithTx(ctx, func(tx store.Tx) error {
+		incident, err := tx.GetIncident(ctx, id)
+		if err != nil {
+			return err
+		}
+		if expectedVersion > 0 && incident.Version != expectedVersion {
+			return store.ErrConflict
+		}
+		if incident.State.Terminal() {
+			return fmt.Errorf("incident %q is already terminal", id)
+		}
+		incident.UpdatedAt = time.Now().UTC()
+		if err := tx.UpdateIncident(ctx, incident); err != nil {
+			return err
+		}
+		if err := tx.AppendAudit(ctx, &types.AuditEntry{
+			IncidentID: incident.ID, Time: incident.UpdatedAt, FromState: incident.State, ToState: incident.State,
+			Actor: actor, Action: "acknowledge", Params: map[string]string{"reason": firstNonBlank(reason, "acknowledged")},
+			Result: "acknowledged", DryRun: incident.DryRun,
+		}); err != nil {
+			return err
+		}
+		acknowledged = incident
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	// The incident transition/audit above is the transactional system of
+	// record. The operational chain adds global explorer correlation without
+	// storing raw incident evidence a second time.
+	if err := operational.AppendOperationalAudit(ctx, &types.OperationalAuditEvent{
+		Kind: types.ResourceIncidentOperation, ResourceID: id, Time: acknowledged.UpdatedAt,
+		Actor: actor, Action: "acknowledge", RequestID: idempotencyKey,
+		Params: map[string]string{"reason": firstNonBlank(reason, "acknowledged")}, Result: "acknowledged",
+	}); err != nil {
+		// The incident mutation and its native audit record committed together
+		// above, so reporting this secondary explorer-index failure as a failed
+		// acknowledgement would make a client retry look like an idempotent
+		// success while never repairing the outcome.  Keep the transactional
+		// incident trail authoritative and surface the degraded global explorer
+		// through logs/monitoring instead.
+		c.log.Error("operational incident acknowledgement audit append failed", "incident", id, "err", err)
+	}
+	return acknowledged, false, nil
+}
+
+func incidentOperationDigest(action, id, actor, reason string, expectedVersion int) string {
+	value := strings.Join([]string{action, id, actor, reason, fmt.Sprintf("%d", expectedVersion)}, "\x00")
+	sum := sha256.Sum256([]byte(value))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// incidentOperationKey keeps a client retry token local to one endpoint. The
+// same operator can safely use a UI-generated key for an acknowledgement and
+// a later resolution without one lifecycle operation shadowing the other.
+func incidentOperationKey(action, key string) string { return action + ":" + key }
 
 // Nodes lists the persisted inventory.
 func (c *Controller) Nodes(ctx context.Context) ([]*types.Node, error) {

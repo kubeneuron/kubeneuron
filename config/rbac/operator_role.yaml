@@ -16,6 +16,7 @@ rules:
       - gpumaintenancewindows
       - gpunodeconfigs
       - acceleratorruntimeprofiles
+      - gpuautonomyplans
     verbs:
       - get
       - list
@@ -28,6 +29,7 @@ rules:
       - gpuplaybooks/status
       - acceleratorruntimeprofiles/status
       - gpusignalmappings/status
+      - gpuautonomyplans/status
     verbs:
       - get
       - patch

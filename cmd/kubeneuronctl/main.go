@@ -33,8 +33,9 @@ func main() {
 
 	root.AddCommand(
 		cmdStatus(), cmdNodes(), cmdIncidents(), cmdReport(), cmdApprove(),
-		cmdReject(), cmdResolve(), cmdRemediate(), cmdPause(), cmdResume(),
-		cmdPasswd(),
+		cmdReject(), cmdAcknowledge(), cmdResolve(), cmdRemediate(), cmdPause(), cmdResume(),
+		cmdPasswd(), cmdReadiness(), cmdCandidates(), cmdPreview(), cmdHealthCheck(),
+		cmdSimulate(), cmdAutonomy(), cmdAuditEvents(),
 	)
 
 	if err := root.Execute(); err != nil {
@@ -249,8 +250,58 @@ func cmdReject() *cobra.Command {
 	return decisionCommand("reject <incident-id>", "Reject a pending risky action", "/reject", true)
 }
 
+func cmdAcknowledge() *cobra.Command {
+	command := &cobra.Command{
+		Use:   "acknowledge <incident-id>",
+		Short: "Record ownership of an active incident without changing its state",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newClient(cmd)
+			if err != nil {
+				return err
+			}
+			reason, _ := cmd.Flags().GetString("reason")
+			version, _ := cmd.Flags().GetInt("resource-version")
+			body := map[string]any{"actor": actorOrLocalUser(cmd), "reason": reason, "resource_version": version}
+			var incident types.Incident
+			if err := client.doHeaders("POST", "/api/v1/incidents/"+url.PathEscape(args[0])+"/acknowledge", body, &incident, map[string]string{"Idempotency-Key": operationKey()}); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "acknowledged: %s (resource version %d)\n", incident.ID, incident.Version)
+			return err
+		},
+	}
+	command.Flags().String("actor", "", "audited actor (default: $USER)")
+	command.Flags().String("reason", "", "acknowledgement rationale recorded in audit")
+	command.Flags().Int("resource-version", 0, "optimistic version from incidents show (0 reads current)")
+	return command
+}
+
 func cmdResolve() *cobra.Command {
-	return decisionCommand("resolve <incident-id>", "Manually resolve an incident", "/resolve", false)
+	command := &cobra.Command{
+		Use:   "resolve <incident-id>",
+		Short: "Manually resolve an incident",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newClient(cmd)
+			if err != nil {
+				return err
+			}
+			reason, _ := cmd.Flags().GetString("reason")
+			version, _ := cmd.Flags().GetInt("resource-version")
+			body := map[string]any{"actor": actorOrLocalUser(cmd), "reason": reason, "resource_version": version}
+			var incident types.Incident
+			if err := client.doHeaders("POST", "/api/v1/incidents/"+url.PathEscape(args[0])+"/resolve", body, &incident, map[string]string{"Idempotency-Key": operationKey()}); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "resolved: %s (resource version %d)\n", incident.ID, incident.Version)
+			return err
+		},
+	}
+	command.Flags().String("actor", "", "audited actor (default: $USER)")
+	command.Flags().String("reason", "", "resolution rationale recorded in audit")
+	command.Flags().Int("resource-version", 0, "optimistic version from incidents show (0 reads current)")
+	return command
 }
 
 func cmdRemediate() *cobra.Command {

@@ -91,6 +91,18 @@ func (c *Controller) reconcile(ctx context.Context) {
 				"incident", inc.ID, "state", inc.State, "err", err)
 		}
 	}
+	// Health-check completion is a read of the existing durable action queue;
+	// it never dispatches a new action.  Keeping it in the controller tick
+	// means agent loss, safety-stop cancellation and timeout survive process
+	// restart just like incident reconciliation does.
+	if c.operations != nil {
+		if err := c.operations.ReconcileHealthChecks(ctx); err != nil {
+			c.log.Error("reconcile: health checks", "err", err)
+		}
+		if err := c.operations.ReconcileAutonomy(ctx); err != nil {
+			c.log.Error("reconcile: autonomy plans", "err", err)
+		}
+	}
 }
 
 func (c *Controller) advance(ctx context.Context, inc *types.Incident) error {
@@ -507,6 +519,10 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 	if time.Since(inc.StateChangedAt) < c.runtimeConfig(ctx).VerifyQuiet {
 		return nil
 	}
+	// depth names a reduced verification, when one was accepted, so the
+	// resolve audit entry says what the resolution was attested on rather than
+	// presenting every RESOLVED as the same check.
+	var depth string
 	if !c.simulating(ctx, inc) {
 		ok, reason := c.verifyRuntimeEvidence(ctx, inc)
 		if !ok {
@@ -524,6 +540,7 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 				Message: "cannot verify remediation: " + reason,
 			})
 		}
+		depth = reason
 	}
 	cooldown := time.Duration(0)
 	if book, ok := c.runtimeConfig(ctx).Engine.Playbook(inc.Playbook); ok {
@@ -533,8 +550,11 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 	// step released its own in startStep), so it must not call Done and
 	// release a reservation a concurrent incident on the same target owns.
 	c.gate.RecordCooldown(inc.Target, playbookCooldownAction(inc.Playbook), cooldown)
-	if err := c.transition(ctx, inc, types.StateResolved, "system", "resolve",
-		fmt.Sprintf("healthy: quiet for %s", c.runtimeConfig(ctx).VerifyQuiet), nil); err != nil {
+	result := fmt.Sprintf("healthy: quiet for %s", c.runtimeConfig(ctx).VerifyQuiet)
+	if depth != "" {
+		result += "; " + depth
+	}
+	if err := c.transition(ctx, inc, types.StateResolved, "system", "resolve", result, nil); err != nil {
 		return err
 	}
 	if c.flap != nil {
@@ -565,7 +585,10 @@ func (c *Controller) verifyEvidenceDeadline(ctx context.Context) time.Duration {
 // resolution: a fresh agent heartbeat, and — for GPU-class targets — a
 // fresh, ready NVIDIA accelerator report bound to the current node that
 // still lists the target device. It returns ok=false with a reason that is
-// safe to surface to operators.
+// safe to surface to operators. When it accepts a resolution at REDUCED
+// depth — the heartbeat alone, because no report can exist for this node —
+// it returns ok=true with a note naming that depth, so the caller can record
+// it beside the resolution rather than presenting it as the full check.
 func (c *Controller) verifyRuntimeEvidence(ctx context.Context, inc *types.Incident) (bool, string) {
 	node, err := c.store.GetNode(ctx, inc.Target.Node)
 	if err != nil || node == nil {
@@ -597,7 +620,7 @@ func (c *Controller) verifyRuntimeEvidence(ctx context.Context, inc *types.Incid
 		// audit trail and in docs/reference-capabilities.md, rather than
 		// quietly presented as the same check.
 		c.logReducedVerificationOnce(inc, vendor)
-		return true, ""
+		return true, fmt.Sprintf("verified on the agent heartbeat: this build has no %s runtime adapter", vendor)
 	}
 	reports, ok := c.store.(store.AcceleratorReportStore)
 	if !ok {
@@ -615,10 +638,10 @@ func (c *Controller) verifyRuntimeEvidence(ctx context.Context, inc *types.Incid
 	}
 	report, err := reports.GetAcceleratorReport(ctx, inc.Target.Node, vendor)
 	if err != nil {
-		return false, fmt.Sprintf("no %s accelerator report for the node", vendor)
+		return c.verifyWithoutCurrentReport(ctx, inc, vendor, fmt.Sprintf("no %s accelerator report for the node", vendor))
 	}
 	if time.Since(report.ObservedAt) > verifyEvidenceMaxAge {
-		return false, "accelerator report is stale"
+		return c.verifyWithoutCurrentReport(ctx, inc, vendor, "accelerator report is stale")
 	}
 	if report.Readiness != types.AcceleratorReadinessReady {
 		return false, fmt.Sprintf("accelerator runtime is %s, not ready", report.Readiness)
@@ -631,6 +654,66 @@ func (c *Controller) verifyRuntimeEvidence(ctx context.Context, inc *types.Incid
 		}
 	}
 	return false, fmt.Sprintf("GPU %s is missing from the current inventory", inc.Target.GPUUUID)
+}
+
+// verifyWithoutCurrentReport decides what a missing or stale accelerator
+// report means for a GPU-scoped incident whose vendor this build CAN attest.
+// absence is the operator-facing reason the report path produced.
+//
+// The operator-managed agent is started with --nvidia-controller-profile and
+// asks the controller, every tick, which AcceleratorRuntimeProfile selects
+// its node. On "none" (204) it deliberately holds observation and posts no
+// report at all — the default-deny that keeps a DaemonSet from claiming
+// capabilities during a rollout or a selector change. That answer is a
+// property of the installation, not of the agent's health, and an ordinary
+// Enabled install ships no profile: the standard samples, the Helm chart and
+// deploy/install.sh create none, and a profile is documented as a contract
+// that NARROWS accelerator actions, never as a prerequisite for closing an
+// incident.
+//
+// So "no report" has two causes with opposite meanings, and the controller
+// must ask the same question the agent asked to tell them apart:
+//
+//   - a profile selects the node, and there is still no current report: the
+//     agent was told to report and has not. That is a degraded agent, and the
+//     resolution fails closed exactly as before;
+//   - no profile selects the node: the report cannot arrive by construction.
+//     Holding for it is the AMD dead end again — the incident sits out the
+//     evidence deadline and parks in NEEDS_HUMAN after the cordon and drain,
+//     with a reason naming no action anybody can take, and every incident on
+//     a healthy Enabled fleet ends that way. Run 12 of the hardware stand was
+//     the first real-mode, device-scoped resolution ever attempted on a real
+//     driver, and it ended there. Without a profile no accelerator-runtime
+//     action (reset, quiesce) can have been admitted for this incident
+//     either, so the ladder that ran was platform actions only — the same
+//     ladder a node-scoped incident runs, verified on the same evidence: the
+//     durable heartbeat already checked, plus the quiet window. The reduced
+//     depth is named in the resolve audit entry and logged once per node.
+//
+// Anything in between — labels unavailable, overlapping profiles — cannot say
+// what the agent was told, and fails closed with the cause in the reason.
+func (c *Controller) verifyWithoutCurrentReport(ctx context.Context, inc *types.Incident, vendor types.AcceleratorVendor, absence string) (bool, string) {
+	selected, err := c.AcceleratorObservationProfile(ctx, inc.Target.Node, vendor)
+	if err != nil {
+		return false, absence + "; cannot tell whether a runtime profile selects the node: " + err.Error()
+	}
+	if selected != nil {
+		return false, absence
+	}
+	c.logNoProfileVerificationOnce(inc, vendor)
+	return true, fmt.Sprintf("verified on the agent heartbeat: no %s accelerator runtime profile selects the node, so its agent holds observation and no report can exist", vendor)
+}
+
+// logNoProfileVerificationOnce records, once per (node, vendor), that an
+// incident was verified on the heartbeat alone because no runtime profile
+// selects the node. Once per pair rather than per incident: it is a statement
+// about the installation and the machine, not about any one fault.
+func (c *Controller) logNoProfileVerificationOnce(inc *types.Incident, vendor types.AcceleratorVendor) {
+	if !c.logOnce.first("no-profile-verify/" + inc.Target.Node + "/" + string(vendor)) {
+		return
+	}
+	c.log.Warn("verifying a remediation on the agent heartbeat alone: no accelerator runtime profile selects this node, so its agent holds observation and never posts a report; create an AcceleratorRuntimeProfile selecting the node to verify device-scoped incidents against a runtime report",
+		"node", inc.Target.Node, "vendor", vendor, "incident", inc.ID)
 }
 
 // attestedRuntimeVendors are the accelerator vendors THIS BUILD can attest at

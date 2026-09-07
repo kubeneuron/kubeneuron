@@ -69,6 +69,29 @@ node is invisible to KubeNeuron until the domain is recognised.
 3. Check `kubectl get kubeneurons -o yaml` status conditions are all
    `Ready=True` — never start an upgrade from a degraded installation.
 
+## v0.4.0 migration and autonomy notes
+
+v0.4.0 adds SQLite migrations **0021–0023** and PostgreSQL migrations
+**0012–0014** for durable decision snapshots, candidates, previews,
+diagnostics, simulations, autonomy records, idempotency records, and
+hash-chained operational audit heads with tenant/cluster scope. They are applied automatically when the
+new controller starts and are forward-only. Take and verify the backup in the
+previous section before rolling the controller image.
+
+The release also installs the additive `GPUAutonomyPlan` CRD. Existing
+installations do not gain automatic device actions from that CRD or from the
+database migration: the stock v0.4 controller has no hardware autonomy
+executor and records simulation-only rollout observations. Review every new
+plan as a Draft, attach a new frozen simulation, and obtain distinct approvals
+after the controller is upgraded; do not copy an approval or a digest from an
+older policy revision.
+
+If tenant/cluster labels are used, verify their values on the managed nodes
+before creating scoped v0.4 resources. Candidate previews, diagnostics,
+simulations, and autonomy selection now enforce those labels as a scope
+boundary; a mismatched request is refused rather than falling back to an
+unscoped node.
+
 ## Upgrade order
 
 Always: **CRDs → operator → controller/agent images.**
@@ -134,7 +157,10 @@ versions longer than a rolling upgrade needs.
   backup are lost — that is the RPO of your backup schedule.
 - **Operator/CRDs**: re-apply the previous release's install manifest.
   Kubernetes does not remove already-stored fields; older operators ignore
-  spec fields they do not know, and compilation stays fail-closed.
+  spec fields they do not know, and compilation stays fail-closed. The v0.4
+  `GPUAutonomyPlan` CRD may remain installed during a rollback; old
+  controllers do not consume it. Pause or roll back every active v0.4 plan
+  and preserve its audit export before restoring an older store snapshot.
 
 ## Certificate material during upgrades
 

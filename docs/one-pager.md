@@ -65,8 +65,9 @@ even run, with DCGM/NVML corroboration as runtime evidence.
 
 ## Proof, not claims
 
-- Signed multi-arch releases with SBOMs on GHCR (latest published
-  images: `v0.1.1`).
+- Release artifacts are versioned with the chart and manifests (v0.4.0).
+  Verify the image digest and SBOM for the artifact you install; this document
+  does not treat a tag as a hardware qualification claim.
 - The full ladder — kernel-injected XID 79 → cordon → drain → approval →
   reboot → uncordon — validated end to end on a **real Tesla T4** on AWS
   EKS, approver identity in the audit.

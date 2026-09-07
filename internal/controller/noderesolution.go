@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/store"
@@ -50,6 +51,48 @@ func (c *Controller) activeMaintenanceWindow(ctx context.Context, node string) (
 		}
 	}
 	return "", false
+}
+
+// autonomyMaintenanceWindowActive answers the narrower question required by
+// GPUAutonomyPlan: whether one of the plan's declared window references is
+// active and covers the target node. A missing selector inventory answer is an
+// error so the autonomy adapter fails closed rather than treating it as an
+// open window.
+func (c *Controller) autonomyMaintenanceWindowActive(ctx context.Context, node string, references []string) (bool, error) {
+	if len(references) == 0 {
+		return false, nil
+	}
+	wanted := make(map[string]struct{}, len(references))
+	for _, reference := range references {
+		if reference = strings.TrimSpace(reference); reference != "" {
+			wanted[reference] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return false, fmt.Errorf("autonomy maintenance window references are empty")
+	}
+	now := time.Now()
+	var labels map[string]string
+	labelsResolved := false
+	for _, window := range c.runtimeConfig(ctx).Windows {
+		if _, selected := wanted[window.Name]; !selected || !window.ActiveAt(now) {
+			continue
+		}
+		if len(window.MatchLabels) == 0 {
+			return true, nil
+		}
+		if !labelsResolved {
+			labels = c.nodeLabels(ctx, node)
+			labelsResolved = true
+		}
+		if labels == nil {
+			return false, fmt.Errorf("autonomy maintenance window %q cannot resolve labels for node %q", window.Name, node)
+		}
+		if window.MatchesLabels(labels) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // nodeLabels resolves node labels from inventory, falling back to the

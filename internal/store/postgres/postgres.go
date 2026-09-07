@@ -37,9 +37,12 @@ type PruneStats = sqlcore.PruneStats
 
 var _ store.Store = (*Store)(nil)
 var _ store.RestorativeActionClaimer = (*Store)(nil)
+var _ store.ActiveActionLeaseInspector = (*Store)(nil)
+var _ store.PendingActionCanceller = (*Store)(nil)
 var _ store.EventSink = (*Store)(nil)
 var _ store.EventOutbox = (*Store)(nil)
 var _ store.AcceleratorReportStore = (*Store)(nil)
+var _ store.OperationalStore = (*Store)(nil)
 
 // Open connects to PostgreSQL at dsn and applies pending migrations. The
 // caller owns DSN secrecy (pass it via file/secret, never argv).

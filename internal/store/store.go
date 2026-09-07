@@ -46,6 +46,11 @@ var (
 	// obtain a fresh preflight observation rather than treating stale runtime
 	// capability data as current.
 	ErrStaleAcceleratorReport = errors.New("store: stale accelerator report")
+	// ErrOperationalConflict is returned when a v0.4.0 durable resource was
+	// updated from an obsolete resource version, or when an idempotency key is
+	// reused for a different request.  Callers must re-read rather than
+	// overwriting the current decision/audit state.
+	ErrOperationalConflict = errors.New("store: operational resource conflict")
 )
 
 // IncidentFilter narrows ListIncidents.
@@ -232,6 +237,23 @@ type RestorativeActionClaimer interface {
 	ClaimNextRestorativeAction(ctx context.Context, node, bootID string, leaseDuration time.Duration) (*types.QueuedAction, error)
 }
 
+// ActiveActionLeaseInspector is an optional narrow extension of Store that
+// reports whether a node currently has an action under a live lease: an
+// action in state 'leased' whose lease has not yet expired. It never inspects
+// pending, expired, or terminal rows, so a caller can use it to decide whether
+// an agent may still be executing on the node without touching the queue.
+type ActiveActionLeaseInspector interface {
+	HasActiveActionLease(ctx context.Context, node string) (bool, error)
+}
+
+// PendingActionCanceller is the narrow cancellation operation used by bounded
+// diagnostics.  It can tombstone only an action that has not been leased to an
+// agent; a leased action may already be affecting a node and must report its
+// real outcome instead of being relabelled as cancelled.
+type PendingActionCanceller interface {
+	CancelPendingAction(ctx context.Context, actionID string) (bool, error)
+}
+
 // EventSink receives raw events for long-term archival/analytics. The
 // default sink is the primary store itself; a ClickHouse sink can be added
 // for fleet-scale analytics (design.md §ClickHouse) — the controller fans
@@ -306,4 +328,20 @@ type AcceleratorReportStore interface {
 	// ListAcceleratorReports returns reports for node, ordered by node then
 	// vendor. An empty node lists the current report for every node/vendor.
 	ListAcceleratorReports(ctx context.Context, node string) ([]*types.AgentAcceleratorReport, error)
+}
+
+// OperationalStore persists the durable product records introduced in v0.4.0.
+// It is intentionally an optional extension: existing controller-only Store
+// implementations remain safe and the API can fail closed when its durable
+// backing is unavailable rather than silently becoming in-memory.
+type OperationalStore interface {
+	CreateOperationalResource(ctx context.Context, resource *types.OperationalResource) error
+	GetOperationalResource(ctx context.Context, kind types.OperationalResourceKind, id string) (*types.OperationalResource, error)
+	UpdateOperationalResource(ctx context.Context, resource *types.OperationalResource, expectedVersion int) error
+	ListOperationalResources(ctx context.Context, filter types.OperationalResourceFilter) ([]*types.OperationalResource, error)
+	PutOperationalIdempotency(ctx context.Context, record *types.OperationalIdempotencyRecord) (*types.OperationalIdempotencyRecord, bool, error)
+	GetOperationalIdempotency(ctx context.Context, kind types.OperationalResourceKind, actor, key string) (*types.OperationalIdempotencyRecord, error)
+	AppendOperationalAudit(ctx context.Context, event *types.OperationalAuditEvent) error
+	ListOperationalAudit(ctx context.Context, kind types.OperationalResourceKind, resourceID string, limit int) ([]*types.OperationalAuditEvent, error)
+	ListOperationalAuditEvents(ctx context.Context, filter types.OperationalAuditFilter) ([]*types.OperationalAuditEvent, error)
 }

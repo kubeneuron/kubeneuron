@@ -2,12 +2,12 @@
 
 Status: **accepted target architecture**, actively maintained.
 
-Last updated: 2026-08-05 (v0.2.1)
+Last updated: 2026-09-06 (v0.4.0)
 
 > This document is the architecture and its invariants (see §2.4): the seams,
 > the concurrency/lifecycle rules, and the reasoning behind them. It is kept
 > in sync with the code — the stale-status freeze notice that used to sit
-> here is gone because the claims below were re-audited against v0.2.1. For
+> here is gone because the claims below were re-audited against v0.4.0. For
 > the release-by-release capability surface, `README.md` and `CHANGELOG.md`
 > remain the quickest references; `PRODUCTION_READINESS_PLAN.md` tracks
 > status-by-item.
@@ -78,11 +78,11 @@ Supporting integrations are not KubeNeuron binaries:
 | SQLite | Single-process development store | Implemented for controller incidents/audit foundations. |
 | PostgreSQL | Durable workflow store for HA operation | Implemented and operator-accepted: DSN from a mounted Secret, leader-elected controller pair, same conformance suite as SQLite. |
 | ClickHouse | Optional raw-event archive | Future work. |
-| Grafana | Dashboards | Development container only; dashboards are future work. |
+| Grafana | Dashboards and external drill-through | External visualization integration; remediation decisions, evidence, and audit remain in the native controller console. |
 
 ### 2.2 Kubernetes API and operator reconciliation
 
-The `kubeneuron.io/v1alpha1` API contains seven cluster-scoped kinds. Each schema
+The `kubeneuron.io/v1alpha1` API contains eight cluster-scoped kinds. Each schema
 has a status subresource, and the reconciler publishes generation-bound
 `Ready` status on the root installation and on every selected child
 configuration kind.
@@ -95,9 +95,13 @@ configuration kind.
 | `GPUSignalMapping` | Declarative XID / alert / neutral-fault-code overrides compiled into signal-mappings.yaml and applied by the detection catalog (label matchers rejected fail-closed). |
 | `GPUMaintenanceWindow` | Time-bounded automation pause for selected nodes; compiled into windows.yaml and enforced by the reconcile walk (matchLabels only; matchExpressions rejected fail-closed). |
 | `GPUNodeConfig` | Per-node settings compiled into node-configs.yaml; `paused` is the complete per-node pause set (SSH/BMC refs rejected fail-closed). |
+| `AcceleratorRuntimeProfile` | Server-owned driver/DCGM/capability contract that narrows accelerator actions; it never enables execution by itself. |
+| `GPUAutonomyPlan` | Declarative, time-bounded autonomy envelope validated and status-projected by the operator; durable simulations, approvals, effects, and audit remain controller-owned. |
 
-Every configuration object uses `spec.kubeNeuronRef` to select its root
-`KubeNeuron` object. The intended reconciliation boundary is:
+The configuration objects use `spec.kubeNeuronRef` to select their root
+`KubeNeuron` object. `GPUAutonomyPlan` deliberately has its own narrow
+envelope and cannot be turned into a hardware action by a GitOps write alone.
+The intended reconciliation boundary is:
 
 ```text
 KubeNeuron + referenced configuration CRs
@@ -117,12 +121,14 @@ KubeNeuron + referenced configuration CRs
 The current reconciler performs that core compile/converge path. It rejects
 several values the runtime cannot consume rather than silently ignoring them,
 defaults an omitted execution mode to `DryRun`, and rolls managed workloads
-when the compiled digest changes. It continues to watch all seven kinds, and all seven now compile into the
-runtime: policies/playbooks into their YAML files, maintenance windows into
-`windows.yaml`, signal mappings into `signal-mappings.yaml`, and node
-configs into `node-configs.yaml` — every file digest-covered so any change
-rolls the controller. Unsupported sub-fields (matchExpressions, label
-matchers, SSH/BMC refs) still fail closed.
+when the compiled digest changes. It watches all eight kinds. Runtime
+configuration kinds compile into policies/playbooks YAML, `windows.yaml`,
+`signal-mappings.yaml`, `node-configs.yaml`, and accelerator-profile data —
+every runtime file is digest-covered so any change rolls the controller.
+`GPUAutonomyPlan` is validated and receives a status projection, while the
+controller's durable v0.4 operational API owns its frozen simulation,
+distinct approvals, rollout observations, and effect hand-off. Unsupported
+sub-fields (matchExpressions, label matchers, SSH/BMC refs) still fail closed.
 SQLite state is mounted from an owned, grow-only PersistentVolumeClaim.
 Readiness requires a Bound, fully resized claim and current observed
 Deployment/DaemonSet generations; the agent readiness endpoint specifically
@@ -311,14 +317,16 @@ This path is implemented for dry-run operation and exercised end to end by
 gate admission, approval parking, execution, verification quiet windows,
 escalation, and flap quarantine, persisting every transition with its audit
 row in one store transaction. Actions dispatch through a durable work queue
-that the agent polls over its authenticated channel. Real NVML and most
-agent-side action implementations remain outstanding, so only dry-run
-deployments complete this path with meaningful effects.
+that the agent polls over its authenticated channel. Hardware effects remain
+bounded by the configured runtime profile, current evidence,
+destructive-execution scope, approvals, and deployed agent capabilities; a
+supported driver/runtime combination still requires the deployment's
+qualification procedure.
 
 The approval path parks an incident in `AWAITING_APPROVAL`, records an
 authenticated decision and channel, and expires it after a TTL without ever
-auto-approving. REST and CLI decisions are implemented; Slack and Web UI
-delivery are not wired.
+auto-approving. REST, CLI, and the native control panel record decisions;
+Slack interactive delivery remains an optional integration.
 
 ### 2.4 Platform and actuation seams
 
@@ -608,37 +616,37 @@ placeholders.
 |---|---|---|
 | dry-run | All side effects become auditable no-ops until explicitly enabled. | File config defaults to dry-run; omitted CR mode compiles to dry-run. |
 | typed actions | Configuration cannot inject arbitrary node commands. | CRD action enum and compiler validation exist. |
-| concurrency/cooldown | Bound simultaneous targets/reboots and repeated actions. | In-memory gate exists; unfinished workflow does not exercise the complete lifecycle. |
-| flap detection | Repeated reopen cycles stop automation. | Detector exists; reconcile wiring is incomplete. |
-| approvals | Risky steps wait for authenticated, expiring human decisions. | Store/manager foundations exist; routes and channels are not wired. |
-| pause | Global and per-node maintenance controls fail closed. | In-memory gate and CRD shapes exist; operational API/CLI path is not complete. |
-| idempotency | Retries reuse an action ID and replay prior results. | In-process action-ID single-flight and short-lived result cache exist; no durable crash-safe claim/result transaction exists. |
-| audit | Persist actor, transition, action parameters/result, and dry-run state. | SQLite primitives and incident-open audit exist; full step audit is pending. |
-| verification | Require agent/driver/DCGM health and a quiet window before resolve. | Configuration shape exists; execution is pending. |
+| concurrency/cooldown | Bound simultaneous targets/reboots and repeated actions. | Durable gate occupancy is rebuilt on leader hand-off; the controller enforces configured action and remediation bounds. |
+| flap detection | Repeated reopen cycles stop automation. | Detector and reconcile hold/quarantine path are wired. |
+| approvals | Risky steps wait for authenticated, expiring human decisions. | REST, CLI, browser-session and Kubernetes-identity paths record audited decisions; external interactive channels remain optional integrations. |
+| pause | Global and per-node maintenance controls fail closed. | Durable global pause plus maintenance windows are enforced; authenticated REST/CLI controls are implemented. |
+| idempotency | Retries reuse an action ID and replay prior results. | Leased action IDs and v0.4 durable operational idempotency records fence retries; external hardware adapters must honor their deterministic effect ID. |
+| audit | Persist actor, transition, action parameters/result, and dry-run state. | Incident transitions are transactional with audit rows; v0.4 adds per-resource hash-chained operational audit records. |
+| verification | Require agent/driver/DCGM health and a quiet window before resolve. | Current agent/runtime evidence and verification windows gate supported actions; hardware qualification remains deployment-specific. |
 
-The CR API reserves `Postgres` and `executionMode: Enabled` for future runtime
-implementations; current operator validation rejects both. `Paused` is
-supported as a second safety gate over compiled dry-run, but requires an
-operator API token so it can be resumed only through an authenticated path.
-The operator-managed runtime remains PVC-backed SQLite until a PostgreSQL
-backend is implemented and tested.
+Both `Postgres` and `executionMode: Enabled` are implemented, but remain
+explicit deployment choices rather than defaults. `Paused` is a second safety
+gate over execution mode and requires authenticated control to resume. SQLite
+uses a single-writer PVC; PostgreSQL is the supported HA workflow store.
 
 ## 5. Web UI
 
-The intended React/TypeScript control panel has four surfaces:
+The native control panel has these product surfaces:
 
 1. Fleet and GPU health.
 2. Incidents, audit history, and approvals.
 3. Manual operations and pause/resume.
 4. Validated, versioned configuration.
 
-The authorization design uses `viewer`, `operator`, and `admin` roles and
-requires every mutation to carry an audited actor. SSE updates, metrics proxy,
-configuration editing, and OIDC are target capabilities.
+Every mutation carries an audited actor. The panel supports password/OIDC
+sessions and the break-glass token path; Kubernetes RBAC provides the
+recommended API authorization. SSE updates, a metrics query proxy, and
+versioned configuration editing remain future capabilities.
 
-Current state: `web/dist/index.html` is only a placeholder and `web/embed.go`
-provides an embedding primitive. There is no frontend package and the
-controller does not serve the embedded files. See
+Current state: `web/dist/index.html` is a deliberately dependency-free native
+operations console embedded and served by the controller. It covers fleet
+readiness, candidate preview, diagnostics, simulation-to-incident handoff,
+autonomy lifecycle controls, and the audit explorer. See
 [web/README.md](https://github.com/kubeneuron/kubeneuron/blob/main/web/README.md).
 
 ## 6. APIs
@@ -662,7 +670,8 @@ controller does not serve the embedded files. See
 | `GET /api/v1/runtime-config` | identity and shape of the configuration live in this controller (`/readyz` carries the same digest unauthenticated) | implemented; operator bearer token |
 | summary/stream proxy APIs | Web UI data beyond the incident/node reads above | planned |
 | configuration/version APIs | validated UI administration | planned |
-| per-role authorization (beyond authenticated-operator) | granular access control | planned |
+| critical v0.4 role authorization | Extended diagnostics and autonomy approvals require verified Kubernetes TokenReview group membership; shared tokens and browser sessions cannot self-assert these grants | implemented |
+| general per-role authorization beyond the critical v0.4 operations | granular access control for every operator action | planned |
 
 Controller→agent actions flow through the durable store-backed work queue
 above: the agent polls over its authenticated channel and posts results, so
@@ -670,9 +679,9 @@ no per-node listener or serving certificate exists.
 `api/proto/agent/v1/agent.proto` records a possible future push-style
 `ExecuteAction`/`GetHealth`/`GetInventory` gRPC contract; it is not wired.
 
-`kubeneuronctl` implements `status`, `nodes`, `incidents[ show]`, `approve`,
-`reject`, `resolve`, `remediate`, `pause`, and `resume` against the operator
-REST API with bearer-token authentication.
+`kubeneuronctl` implements incident control, pause/resume, readiness,
+candidates/previews, health checks, simulations/incidents, autonomy plans and
+the v0.4 audit explorer against the authenticated operator REST API.
 
 ## 7. Repository layout
 
@@ -708,7 +717,7 @@ operator-accepted controller stores. PostgreSQL is the HA choice: the DSN
 comes from a mounted Secret, the controller Deployment is stateless, and the
 store backend passes the same conformance suite as SQLite (see §2.5 for the
 honest scope of what that parity does and does not prove). Migration heads
-travel in lockstep (sqlite 0020 / postgres 0011 as of v0.2.3).
+travel in lockstep (sqlite 0023 / postgres 0014 as of v0.4.0).
 
 The operator provisions a `ReadWriteOnce` claim for SQLite, defaulting to
 `5Gi`. Reconciliation preserves API-selected/bound fields, permits only
@@ -719,9 +728,12 @@ transition validation cannot be bypassed by removal/re-addition. Storage
 growth rolls the single controller and readiness waits for reported capacity
 and cleared resize state. The claim is controller-owned by the root
 `KubeNeuron`, so deleting that root triggers claim garbage collection; the
-PersistentVolume reclaim policy then controls data retention. Backup, restore,
-resize-failure recovery, and an explicit retain/existing-claim policy remain
-future work.
+PersistentVolume reclaim policy then controls data retention. The controller
+offers a SQLite snapshot endpoint and the operations runbook defines a
+stop/restore procedure. Schema migrations remain forward-only: rollback after
+a migration restores a pre-upgrade snapshot rather than running an old binary
+against a new schema. Explicit retain/existing-claim lifecycle policy remains
+an installer responsibility.
 
 ClickHouse remains optional. It may become useful for multi-year raw XID
 analytics, fleet-wide hardware/firmware comparisons, or high-volume raw event
@@ -732,7 +744,8 @@ retention. It must never become the incident lock or workflow authority.
 ### Current foundation
 
 - Four build targets and package skeletons.
-- Six `v1alpha1` CRDs and a first operator reconciliation path.
+- Eight `v1alpha1` CRDs and an operator reconciliation path, including the
+  GPUAutonomyPlan validation/status projection.
 - TLS 1.3 agent HTTP ingress with fleet certificates and live Pod-bound
   Kubernetes authorization for registration/events on the operator path.
 - File and CRD configuration validation, playbook model, state transitions,
@@ -769,7 +782,7 @@ PVC mutation rules, generation-aware runtime readiness, ownership collisions,
 and stale Ready-condition clearing. Registration tests cover strict HTTP
 acknowledgment, preservation of controller-owned node fields, staleness, and
 loss/recovery transitions. A checked-in, CPU-only kind target installs and
-establishes all seven CRDs, exercises 53 CEL cases across `KubeNeuron`,
+establishes all eight CRDs, exercises the CEL admission matrix across `KubeNeuron`,
 `GPUSignalMapping`, and `GPUMaintenanceWindow`, and reconciles `GPUPlaybook` and
 `GPURemediationPolicy` fixtures. It also verifies minimal operator RBAC, durable
 registration-readiness loss/recovery, all 11 managed ownership references,

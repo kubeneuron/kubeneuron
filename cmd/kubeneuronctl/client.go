@@ -50,6 +50,13 @@ func newClient(cmd *cobra.Command) (*client, error) {
 // do performs a request; when out is non-nil the JSON response is decoded
 // into it.
 func (c *client) do(method, path string, in, out any) error {
+	return c.doHeaders(method, path, in, out, nil)
+}
+
+// doHeaders is the operation-aware variant of do. v0.4.0 mutations carry an
+// Idempotency-Key so a terminal retry never creates a second diagnostic,
+// simulation, approval or autonomous rollout transition.
+func (c *client) doHeaders(method, path string, in, out any, headers map[string]string) error {
 	var body io.Reader
 	if in != nil {
 		payload, err := json.Marshal(in)
@@ -64,6 +71,9 @@ func (c *client) do(method, path string, in, out any) error {
 	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
 	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
@@ -80,6 +90,35 @@ func (c *client) do(method, path string, in, out any) error {
 			msg += " (set --token-file or KUBENEURONCTL_TOKEN; the controller needs -api-token-file)"
 		}
 		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, msg)
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(out)
+}
+
+func (c *client) doBytes(method, path string, payload []byte, contentType string, out any, headers map[string]string) error {
+	req, err := http.NewRequest(method, c.base+path, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 300 {
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(detail)))
 	}
 	if out == nil {
 		return nil

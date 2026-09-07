@@ -46,6 +46,7 @@ plain text. Common holds (all deliberate, all retried every tick):
 | `AWAITING_APPROVAL` | nobody decided; check Slack/panel; expires to `EXPIRED` after the TTL |
 | `OBSERVING` | below the policy threshold — that's the design |
 | `NEEDS_HUMAN` | ladder exhausted, flap quarantine, or a rejected approval; fix the node, then `kubeneuronctl resolve <id>` |
+| `NEEDS_HUMAN` with `verify-evidence` | a real incident could not be verified: the agent heartbeat went stale, or — on a node an `AcceleratorRuntimeProfile` selects — the agent never posted a fresh accelerator report (check its logs). A node **no** profile selects verifies on the heartbeat instead and does not park here. Fix the agent, then `kubeneuronctl resolve <id>` |
 | `EXECUTING` for very long | a drain honoring PDBs, or (non-dry-run) an action waiting for the agent — check the actions queue and agent logs |
 
 ## Signals arrive but no incident opens

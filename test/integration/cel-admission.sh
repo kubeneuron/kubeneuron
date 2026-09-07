@@ -392,6 +392,48 @@ check_document "node config with SSH credentials" \
 	"sshSecretRef/bmcSecretRef are not supported" \
 	"$("$JQ_BIN" -c '.metadata.name="cel-nodeconfig-ssh" | .spec.sshSecretRef={name:"ssh-key"}' <<<"$NODECONFIG_VALID")"
 
+# GPUAutonomyPlan: the envelope's CEL rules are the first line of the
+# fail-closed contract, so every rule is driven once from a shape that mirrors
+# the shipped Draft sample. Creating the valid plan never enables an action.
+AUTONOMY_VALID=$("$JQ_BIN" -cn '{
+  apiVersion:"kubeneuron.io/v1alpha1",
+  kind:"GPUAutonomyPlan",
+  metadata:{name:"cel-autonomy"},
+  spec:{
+    selector:{matchLabels:{"accelerator-pool":"cel-canary"}},
+    policyRef:"ecc-reset@sha256:0123456789abcdef",
+    profileRef:"nvidia-a100#7",
+    allowedActions:["reset-device"],
+    evidence:{maxAge:"5m",requiredSources:["agent","controller","dcgm"]},
+    guardrails:{maintenanceWindows:["gpu-maintenance-weekly"],maxConcurrentNodes:2,maxActionsPerHour:1,errorBudget:0,noActiveIncident:true},
+    rollout:{canaryNodes:1,bakeDuration:"30m",expansionSteps:[2,4]},
+    approvals:{requiredRoles:["platform-approver","safety-approver"],distinctSubjects:true},
+    expiresAt:"2099-01-01T00:00:00Z"
+  }
+}')
+check_document "draft autonomy plan with immutable references" "" "$AUTONOMY_VALID"
+check_document "autonomy plan without matchLabels" \
+	"selector.matchLabels is required and cannot select every node" \
+	"$("$JQ_BIN" -c '.metadata.name="cel-autonomy-nolabels" | .spec.selector={matchLabels:{}}' <<<"$AUTONOMY_VALID")"
+check_document "autonomy plan with matchExpressions" \
+	"selector supports matchLabels only" \
+	"$("$JQ_BIN" -c '.metadata.name="cel-autonomy-expr" | .spec.selector.matchExpressions=[{key:"accelerator-pool",operator:"Exists"}]' <<<"$AUTONOMY_VALID")"
+check_document "autonomy plan with mutable policyRef" \
+	"policyRef must name an immutable revision" \
+	"$("$JQ_BIN" -c '.metadata.name="cel-autonomy-policy" | .spec.policyRef="ecc-reset"' <<<"$AUTONOMY_VALID")"
+check_document "autonomy plan with mutable profileRef" \
+	"profileRef must name an immutable revision" \
+	"$("$JQ_BIN" -c '.metadata.name="cel-autonomy-profile" | .spec.profileRef="nvidia-a100"' <<<"$AUTONOMY_VALID")"
+check_document "autonomy plan allowing an active incident" \
+	"guardrails.noActiveIncident must be true" \
+	"$("$JQ_BIN" -c '.metadata.name="cel-autonomy-incident" | .spec.guardrails.noActiveIncident=false' <<<"$AUTONOMY_VALID")"
+check_document "autonomy plan canary wider than its concurrency cap" \
+	"canaryNodes cannot exceed maxConcurrentNodes" \
+	"$("$JQ_BIN" -c '.metadata.name="cel-autonomy-canary" | .spec.rollout.canaryNodes=3' <<<"$AUTONOMY_VALID")"
+check_document "autonomy plan without distinct approvers" \
+	"GPUAutonomyPlan requires distinctSubjects=true" \
+	"$("$JQ_BIN" -c '.metadata.name="cel-autonomy-approvers" | .spec.approvals.distinctSubjects=false' <<<"$AUTONOMY_VALID")"
+
 "$KUBECTL_BIN" delete kubeneuron "$FIXTURE_NAME" --wait=true --timeout=60s >/dev/null
 fixture_created=0
 if "$KUBECTL_BIN" get kubeneuron "$FIXTURE_NAME" >/dev/null 2>&1; then
@@ -399,5 +441,5 @@ if "$KUBECTL_BIN" get kubeneuron "$FIXTURE_NAME" >/dev/null 2>&1; then
 fi
 pass "persisted CEL fixture cleaned up"
 
-((passed == 73)) || fail "internal check count is $passed, want 73"
+((passed == 81)) || fail "internal check count is $passed, want 81"
 log "admission matrix complete: $passed checks passed on server $server_version"

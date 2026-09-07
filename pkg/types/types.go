@@ -298,9 +298,10 @@ type Incident struct {
 	// Version is the optimistic-concurrency counter. The store bumps it on
 	// every UpdateIncident and matches on its prior value, so a writer holding
 	// a stale snapshot cannot overwrite a row a concurrent writer has since
-	// advanced. It is store-owned bookkeeping, not part of the incident's
-	// domain state.
-	Version int `json:"-"`
+	// advanced. It is exposed as resource_version for first-class incident
+	// operations (acknowledge and resolve) rather than asking API clients to
+	// infer concurrency from a timestamp.
+	Version int `json:"resource_version"`
 }
 
 // Clone returns a deep copy. Use it whenever an incident crosses a goroutine

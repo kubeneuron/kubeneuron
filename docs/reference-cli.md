@@ -25,7 +25,8 @@ In-cluster, port-forward first:
 | `kubeneuronctl report [--since 30d] [--json]` | recovery report for a window: GPU-hours degraded and recovered, share recovered without a human, cost by class, MTTR, incidents still open |
 | `kubeneuronctl approve <incident-id> --actor <who> [--round <n>]` | approve the pending risky step; `--round` (from the notification) is refused if the request changed since it was displayed |
 | `kubeneuronctl reject <incident-id> --actor <who> [--round <n>]` | reject the pending risky step |
-| `kubeneuronctl resolve <incident-id> --actor <who>` | manually resolve an incident |
+| `kubeneuronctl acknowledge <incident-id> --actor <who> [--resource-version <n>]` | record custody of an active incident without changing its state |
+| `kubeneuronctl resolve <incident-id> --actor <who> [--resource-version <n>]` | manually resolve an incident through the idempotent v0.4 lifecycle API |
 | `kubeneuronctl remediate <node> --class <problem-class> --actor <who>` | manually open an incident for a node |
 | `kubeneuronctl pause` / `kubeneuronctl resume` | global automation pause (big red button) |
 
@@ -34,6 +35,37 @@ use a real, attributable identity, not a shared team name. Decision commands
 also take `--reason`, recorded alongside the decision. `incidents` filters
 with `--state/-s` and shows detail via `incidents show <id>`; `remediate`
 targets a GPU with `--gpu-uuid`/`--gpu`.
+
+## Remediation intelligence commands (v0.4.0)
+
+Every command below creates its own `Idempotency-Key`. For an important
+operator action, retain the returned JSON/resource ID; a client retry after a
+transport failure should repeat the same HTTP request and key rather than
+create a second review or diagnostic run. Mutations that accept
+`--resource-version` use `0` as an explicit “read current” compatibility
+mode; scripts should prefer the version returned by `show`.
+
+| Command | Purpose |
+|---|---|
+| `kubeneuronctl readiness [node]` | fleet table or full node decision snapshot/evidence explanation |
+| `kubeneuronctl candidates upload <file> [--tenant … --cluster … --expires-at …]` | strict candidate upload; it never applies the file to Kubernetes |
+| `kubeneuronctl candidates list`, `show <id>`, `revoke <id> --reason …` | inspect or logically revoke retained candidate configurations |
+| `kubeneuronctl preview <candidate-id>` | capture inventory and create a deterministic policy-impact preview |
+| `kubeneuronctl health-check <node> --profile Passive|Quick|Extended --reason …` | request bounded diagnostics; Extended requires a Kubernetes-authenticated bearer identity in the verified `diagnostics-extended` and `disruption-budget-approver` groups plus a live maintenance window. The client never sends authorization grants. |
+| `kubeneuronctl health-check list`, `show <run-id>`, `cancel <run-id>` | inspect or cancel durable diagnostic work |
+| `kubeneuronctl simulate <node> --class … --rationale … [--action … --scope … --device-id …]` | create a no-side-effect frozen remediation graph |
+| `kubeneuronctl simulate list`, `show <id>`, `incident <id> --rationale …` | inspect simulations or make a permitted one an incident with an auditable rationale |
+| `kubeneuronctl autonomy create <json-file>`, `list`, `show <plan-id>` | create/read a bounded GPUAutonomyPlan envelope |
+| `kubeneuronctl autonomy attach-simulation <plan-id> <simulation-id>` | bind a permitted matching simulation to a draft plan |
+| `kubeneuronctl autonomy approve|pause|resume|rollback <plan-id> …` | role-bound approval and explicitly reasoned lifecycle transitions |
+| `kubeneuronctl autonomy rollout <plan-id>` | inspect canary, bake, expansion, decision, and effect observations |
+| `kubeneuronctl audit-events [--kind … --tenant … --cluster … --actor … --request-id … --cursor …]` | query the append-only v0.4 operational audit explorer; pass back its opaque cursor to continue a page |
+
+The installed controller has no default hardware autonomy executor. A plan can
+therefore advance visibly through a `simulation-only` canary, but the CLI does
+not claim that a device action happened unless the rollout reports a
+hardware-qualified effect reference. See the [REST API reference](reference-api.md#gpuautonomyplan)
+for the exact plan contract and safety gates.
 
 ## `report` — what the fleet got back
 

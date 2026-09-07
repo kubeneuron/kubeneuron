@@ -480,8 +480,26 @@ func TestVendorWithoutARuntimeAdapterVerifiesOnTheHeartbeat(t *testing.T) {
 	// The other half, and the one that must not regress: NVIDIA is attested by
 	// this build, so a missing report there is a degraded agent, not an absent
 	// runtime — and it must still fail closed.
+	//
+	// "Told to report" is what makes the absence a degraded agent: the node
+	// carries the label a configured profile selects, so its agent was served
+	// that profile and has still posted nothing. Without the profile the
+	// absence means something else entirely — see
+	// TestNVIDIAIncidentWithoutASelectingProfileVerifiesOnTheHeartbeat — and a
+	// label-less node would make this case pass through the "cannot tell"
+	// branch rather than the one it is about.
 	t.Run("nvidia still fails closed without its report", func(t *testing.T) {
 		c, st, ctx := newFixture(t)
+		if err := st.UpsertNode(ctx, &types.Node{
+			Name: "node-amd", UID: "node-amd-uid", AgentLastSeen: time.Now(),
+			Labels: map[string]string{"accelerator": "nvidia-h100"},
+			GPUs:   []types.GPUInfo{{Index: 0, UUID: "GPU-amd-0"}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.SetAcceleratorRuntimeProfiles([]config.AcceleratorRuntimeProfile{testNVIDIAResetProfile()}); err != nil {
+			t.Fatal(err)
+		}
 		inc := incident(types.AcceleratorVendorNVIDIA)
 		if err := st.CreateIncident(ctx, inc); err != nil {
 			t.Fatal(err)
@@ -492,8 +510,8 @@ func TestVendorWithoutARuntimeAdapterVerifiesOnTheHeartbeat(t *testing.T) {
 		got, _ := st.GetIncident(ctx, inc.ID)
 		if got.State != types.StateNeedsHuman {
 			t.Fatalf("state = %s, want NEEDS_HUMAN: a missing report from a vendor this build "+
-				"CAN attest is a degraded agent, and resolving on it would be the one "+
-				"direction verification must never fail", got.State)
+				"CAN attest, on a node a profile selects, is a degraded agent, and resolving "+
+				"on it would be the one direction verification must never fail", got.State)
 		}
 	})
 
@@ -511,6 +529,248 @@ func TestVendorWithoutARuntimeAdapterVerifiesOnTheHeartbeat(t *testing.T) {
 		got, _ := st.GetIncident(ctx, inc.ID)
 		if got.State != types.StateNeedsHuman {
 			t.Fatalf("state = %s, want NEEDS_HUMAN for an unattributed incident", got.State)
+		}
+	})
+}
+
+// TestNVIDIAIncidentWithoutASelectingProfileVerifiesOnTheHeartbeat is the
+// no-profile dead end, the seam between two deliberate behaviours.
+//
+// The operator-managed agent runs with --nvidia-controller-profile and holds
+// observation — posts no accelerator report at all — whenever the controller
+// answers that no AcceleratorRuntimeProfile selects its node. That is the
+// default-deny for CAPABILITIES. verifyRuntimeEvidence read the same absence
+// as a degraded agent and failed closed, which is right when the agent was
+// told to report, and a dead end when it was told not to: the ordinary Enabled
+// install ships no profile (the samples, the chart and install.sh create
+// none), so on a real driver every device-scoped incident held for the
+// evidence deadline and parked in NEEDS_HUMAN after the cordon and drain.
+// Hardware run 12 found it: the first real-mode, device-scoped resolution ever
+// attempted on a real driver, an observe-only ladder, waited ten minutes for a
+// report the agent had been told not to send.
+//
+// The contract now: a node NO profile selects verifies on the heartbeat, at
+// reduced depth, named in the audit; a node a profile DOES select still fails
+// closed on a missing report; anything that cannot say which fails closed
+// with the cause in the reason. Fresh negative evidence is never overridden.
+func TestNVIDIAIncidentWithoutASelectingProfileVerifiesOnTheHeartbeat(t *testing.T) {
+	const node = "node-a"
+	labels := map[string]string{"accelerator": "nvidia-h100", "nvidia.com/gpu.present": "true"}
+
+	newFixture := func(t *testing.T, heartbeat time.Time) (*Controller, *storesqlite.Store, context.Context) {
+		t.Helper()
+		st, err := storesqlite.Open(":memory:")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		engine, err := playbook.NewEngine(map[string]*playbook.Playbook{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		log := slog.New(slog.NewTextHandler(io.Discard, nil))
+		c := New(st, st, engine,
+			safety.NewGate(safety.Limits{MaxConcurrentRemediations: 4, MaxConcurrentReboots: 1}),
+			nil, nil, nil, &notify.Log{Logger: log}, log)
+		c.SetTimings(time.Millisecond, time.Hour)
+		ctx := context.Background()
+		if err := st.UpsertNode(ctx, &types.Node{
+			Name: node, UID: "node-uid-a", AgentLastSeen: heartbeat, Labels: labels,
+			GPUs: []types.GPUInfo{{Index: 0, UUID: "GPU-a"}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return c, st, ctx
+	}
+
+	// A real (non-dry-run) NVIDIA device-scoped incident past its quiet window.
+	incident := func(id string, stateChangedAgo time.Duration) *types.Incident {
+		changed := time.Now().Add(-stateChangedAgo)
+		return &types.Incident{
+			ID:     id,
+			Target: types.Target{Node: node, GPUUUID: "GPU-a"},
+			Class:  types.ClassECCSBERate, State: types.StateVerifying, Vendor: types.AcceleratorVendorNVIDIA,
+			OpenedAt: changed, UpdatedAt: changed, StateChangedAt: changed,
+		}
+	}
+	const insideDeadline = time.Minute
+	const pastDeadline = 15 * time.Minute // past the 10m evidence floor
+
+	advance := func(t *testing.T, c *Controller, st *storesqlite.Store, ctx context.Context, inc *types.Incident) *types.Incident {
+		t.Helper()
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.advance(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		got, err := st.GetIncident(ctx, inc.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	lastAudit := func(t *testing.T, st *storesqlite.Store, ctx context.Context, id string) *types.AuditEntry {
+		t.Helper()
+		trail, err := st.AuditTrail(ctx, id)
+		if err != nil || len(trail) == 0 {
+			t.Fatalf("audit trail for %s: %v (%d entries)", id, err, len(trail))
+		}
+		return trail[len(trail)-1]
+	}
+
+	t.Run("no profile selects the node: resolves on the heartbeat, inside the deadline, and the audit names the depth", func(t *testing.T) {
+		c, st, ctx := newFixture(t, time.Now())
+		got := advance(t, c, st, ctx, incident("inc-no-profile", insideDeadline))
+		if got.State != types.StateResolved {
+			t.Fatalf("state = %s, want RESOLVED: no profile selects the node, so its agent holds "+
+				"observation and the report this hold waited for cannot be produced", got.State)
+		}
+		entry := lastAudit(t, st, ctx, got.ID)
+		if entry.Action != "resolve" || !strings.Contains(entry.Result, "healthy: quiet for") ||
+			!strings.Contains(entry.Result, "verified on the agent heartbeat") ||
+			!strings.Contains(entry.Result, "no nvidia accelerator runtime profile selects the node") {
+			t.Fatalf("resolve audit = %q %q, want the reduced depth and its cause named beside the resolution", entry.Action, entry.Result)
+		}
+	})
+
+	t.Run("no profile and only a stale report: resolves on the heartbeat", func(t *testing.T) {
+		// A report from before the profile was removed. The agent has been
+		// holding since, so waiting for a fresher one is the same dead end.
+		c, st, ctx := newFixture(t, time.Now())
+		stale := readyNVIDIAResetReport(time.Now().Add(-time.Hour).UTC(), "digest")
+		if err := st.UpsertAcceleratorReport(ctx, &stale); err != nil {
+			t.Fatal(err)
+		}
+		got := advance(t, c, st, ctx, incident("inc-no-profile-stale", insideDeadline))
+		if got.State != types.StateResolved {
+			t.Fatalf("state = %s, want RESOLVED", got.State)
+		}
+	})
+
+	t.Run("no profile but a fresh not-ready report: fresh negative evidence still fails closed", func(t *testing.T) {
+		// A statically configured agent can report without a controller
+		// profile. A current report saying the runtime is not ready is real
+		// evidence, and the heartbeat must never outrank it.
+		c, st, ctx := newFixture(t, time.Now())
+		degraded := readyNVIDIAResetReport(time.Now().UTC(), "digest")
+		degraded.Readiness = types.AcceleratorReadinessNotReady
+		degraded.ReadinessReasons = []string{"nvidia-smi timed out"}
+		if err := st.UpsertAcceleratorReport(ctx, &degraded); err != nil {
+			t.Fatal(err)
+		}
+		got := advance(t, c, st, ctx, incident("inc-no-profile-notready", pastDeadline))
+		if got.State != types.StateNeedsHuman {
+			t.Fatalf("state = %s, want NEEDS_HUMAN on a fresh not-ready report", got.State)
+		}
+	})
+
+	t.Run("no profile and a stale heartbeat: still fails closed", func(t *testing.T) {
+		c, st, ctx := newFixture(t, time.Now().Add(-time.Hour))
+		got := advance(t, c, st, ctx, incident("inc-no-profile-dead-agent", pastDeadline))
+		if got.State != types.StateNeedsHuman {
+			t.Fatalf("state = %s, want NEEDS_HUMAN: the heartbeat is the evidence this path rests on", got.State)
+		}
+		if entry := lastAudit(t, st, ctx, got.ID); !strings.Contains(entry.Result, "agent heartbeat is stale") {
+			t.Fatalf("audit result = %q, want the stale heartbeat named", entry.Result)
+		}
+	})
+
+	t.Run("a profile selects the node and no report arrived: holds, then fails closed naming the absence", func(t *testing.T) {
+		c, st, ctx := newFixture(t, time.Now())
+		if err := c.SetAcceleratorRuntimeProfiles([]config.AcceleratorRuntimeProfile{testNVIDIAResetProfile()}); err != nil {
+			t.Fatal(err)
+		}
+		if held := advance(t, c, st, ctx, incident("inc-profile-hold", insideDeadline)); held.State != types.StateVerifying {
+			t.Fatalf("state = %s, want VERIFYING hold inside the deadline: the agent was told to report", held.State)
+		}
+		// One open incident per (node, device, class): the past-deadline
+		// sibling is a different class on the same device.
+		aged := incident("inc-profile-needs-human", pastDeadline)
+		aged.Class = types.ClassECCDBE
+		got := advance(t, c, st, ctx, aged)
+		if got.State != types.StateNeedsHuman {
+			t.Fatalf("state = %s, want NEEDS_HUMAN past the deadline", got.State)
+		}
+		if entry := lastAudit(t, st, ctx, got.ID); !strings.Contains(entry.Result, "no nvidia accelerator report for the node") {
+			t.Fatalf("audit result = %q, want the missing report named", entry.Result)
+		}
+	})
+
+	t.Run("a profile selects the node and the report is stale: fails closed", func(t *testing.T) {
+		c, st, ctx := newFixture(t, time.Now())
+		if err := c.SetAcceleratorRuntimeProfiles([]config.AcceleratorRuntimeProfile{testNVIDIAResetProfile()}); err != nil {
+			t.Fatal(err)
+		}
+		stale := readyNVIDIAResetReport(time.Now().Add(-time.Hour).UTC(), testNVIDIAResetProfile().ProfileDigest)
+		if err := st.UpsertAcceleratorReport(ctx, &stale); err != nil {
+			t.Fatal(err)
+		}
+		got := advance(t, c, st, ctx, incident("inc-profile-stale", pastDeadline))
+		if got.State != types.StateNeedsHuman {
+			t.Fatalf("state = %s, want NEEDS_HUMAN", got.State)
+		}
+		if entry := lastAudit(t, st, ctx, got.ID); !strings.Contains(entry.Result, "accelerator report is stale") {
+			t.Fatalf("audit result = %q, want the stale report named", entry.Result)
+		}
+	})
+
+	t.Run("a profile selects the node and a fresh ready report lists the device: resolves at full depth", func(t *testing.T) {
+		c, st, ctx := newFixture(t, time.Now())
+		if err := c.SetAcceleratorRuntimeProfiles([]config.AcceleratorRuntimeProfile{testNVIDIAResetProfile()}); err != nil {
+			t.Fatal(err)
+		}
+		report := readyNVIDIAResetReport(time.Now().UTC(), testNVIDIAResetProfile().ProfileDigest)
+		if err := st.UpsertAcceleratorReport(ctx, &report); err != nil {
+			t.Fatal(err)
+		}
+		got := advance(t, c, st, ctx, incident("inc-profile-full", insideDeadline))
+		if got.State != types.StateResolved {
+			t.Fatalf("state = %s, want RESOLVED", got.State)
+		}
+		if entry := lastAudit(t, st, ctx, got.ID); strings.Contains(entry.Result, "verified on the agent heartbeat") {
+			t.Fatalf("audit result = %q: a full-depth resolution must not be labelled reduced", entry.Result)
+		}
+	})
+
+	t.Run("overlapping profiles: cannot tell what the agent was told, fails closed naming the ambiguity", func(t *testing.T) {
+		c, st, ctx := newFixture(t, time.Now())
+		second := testNVIDIAResetProfile()
+		second.Name = "nvidia-h100-reset-v2"
+		second.ProfileUID = "nvidia-h100-reset-uid-2"
+		if err := c.SetAcceleratorRuntimeProfiles([]config.AcceleratorRuntimeProfile{testNVIDIAResetProfile(), second}); err != nil {
+			t.Fatal(err)
+		}
+		got := advance(t, c, st, ctx, incident("inc-ambiguous", pastDeadline))
+		if got.State != types.StateNeedsHuman {
+			t.Fatalf("state = %s, want NEEDS_HUMAN", got.State)
+		}
+		if entry := lastAudit(t, st, ctx, got.ID); !strings.Contains(entry.Result, "multiple accelerator runtime profiles match") {
+			t.Fatalf("audit result = %q, want the overlapping profiles named", entry.Result)
+		}
+	})
+
+	t.Run("node labels unavailable: cannot tell, fails closed", func(t *testing.T) {
+		c, st, ctx := newFixture(t, time.Now())
+		if err := st.UpsertNode(ctx, &types.Node{Name: node, UID: "node-uid-a", AgentLastSeen: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		got := advance(t, c, st, ctx, incident("inc-no-labels", pastDeadline))
+		if got.State != types.StateNeedsHuman {
+			t.Fatalf("state = %s, want NEEDS_HUMAN when profile selection cannot be resolved", got.State)
+		}
+		if entry := lastAudit(t, st, ctx, got.ID); !strings.Contains(entry.Result, "cannot tell whether a runtime profile selects the node") {
+			t.Fatalf("audit result = %q, want the unresolved selection named", entry.Result)
+		}
+	})
+
+	t.Run("dry-run is untouched", func(t *testing.T) {
+		c, st, ctx := newFixture(t, time.Now().Add(-time.Hour))
+		inc := incident("inc-dry", insideDeadline)
+		inc.DryRun = true
+		if got := advance(t, c, st, ctx, inc); got.State != types.StateResolved {
+			t.Fatalf("state = %s, want RESOLVED on the quiet window alone", got.State)
 		}
 	})
 }

@@ -258,6 +258,10 @@ var notCharted = map[string]string{
 	"kubeneuron_agent_detections_total":              "per-agent counter; the fleet view is the signal-rate panel, which is what an operator actually asks",
 	"kubeneuron_agent_detections_deduplicated_total": "the dedup ratio is a debugging question, answered ad hoc",
 	"kubeneuron_events_duplicate_total":              "same: a dedup counter, not a fleet health signal",
+	"kubeneuron_decision_evaluations_total":          "the native readiness and audit surfaces show per-decision detail; alerting/recording rules consume this bounded distribution rather than a dashboard counter",
+	"kubeneuron_decision_evaluation_seconds":         "diagnostic performance metric; use it in a preview/readiness SLO rather than a permanent panel",
+	"kubeneuron_decision_stale_evidence_total":       "alert-only: a growing rate means a source is unhealthy, while the console identifies affected nodes",
+	"kubeneuron_decision_compatibility_holds_total":  "release-compatibility detector; it should trend to zero before the legacy reset gate can be retired",
 }
 
 // TestEveryMetricIsChartedOrExcused fails when this package registers a metric

@@ -1054,6 +1054,143 @@ type AcceleratorRuntimeProfileList struct {
 	Items           []AcceleratorRuntimeProfile `json:"items"`
 }
 
+// GPUAutonomyEvidenceSpec names the bounded evidence contract an autonomy
+// plan must re-check immediately before an effect. Sources are names, not
+// arbitrary URLs or credentials; raw diagnostics remain outside the CRD.
+type GPUAutonomyEvidenceSpec struct {
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
+	MaxAge string `json:"maxAge"`
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:Enum=agent;controller;dcgm
+	// +listType=set
+	RequiredSources []string `json:"requiredSources"`
+}
+
+// GPUAutonomyGuardrailsSpec bounds one plan's blast radius. These are upper
+// bounds, never permissions: the controller's global pause, runtime profile,
+// agent arming and existing safety gates remain mandatory.
+type GPUAutonomyGuardrailsSpec struct {
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MinLength=1
+	// +listType=set
+	MaintenanceWindows []string `json:"maintenanceWindows,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	MaxConcurrentNodes int32 `json:"maxConcurrentNodes"`
+	// +kubebuilder:validation:Minimum=1
+	MaxActionsPerHour int32 `json:"maxActionsPerHour"`
+	// +kubebuilder:validation:Minimum=0
+	ErrorBudget      int32 `json:"errorBudget"`
+	NoActiveIncident bool  `json:"noActiveIncident"`
+}
+
+// GPUAutonomyRolloutSpec defines the bounded canary and bake envelope.
+type GPUAutonomyRolloutSpec struct {
+	// +kubebuilder:validation:Minimum=1
+	CanaryNodes int32 `json:"canaryNodes"`
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
+	BakeDuration string `json:"bakeDuration"`
+	// ExpansionSteps are absolute bounded target counts. A plan remains
+	// one-action-class and one selector; an expansion cannot introduce a
+	// different device or workload scope.
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:Minimum=1
+	ExpansionSteps []int32 `json:"expansionSteps,omitempty"`
+}
+
+// GPUAutonomyApprovalsSpec requires multi-party approval before a plan can
+// leave simulation. The API/controller bind every approval to the immutable
+// configuration digest in status; this spec cannot be a global switch.
+// +kubebuilder:validation:XValidation:rule="self.distinctSubjects == true",message="GPUAutonomyPlan requires distinctSubjects=true"
+type GPUAutonomyApprovalsSpec struct {
+	// +kubebuilder:validation:MinItems=2
+	// +kubebuilder:validation:MaxItems=8
+	// +listType=set
+	RequiredRoles    []string `json:"requiredRoles"`
+	DistinctSubjects bool     `json:"distinctSubjects"`
+}
+
+// GPUAutonomyPlanSpec is a deliberately narrow autonomous effect envelope.
+// It does not replace the controller's global execution mode; every effect is
+// still re-evaluated against the profile, evidence, ownership and pause gates.
+// +kubebuilder:validation:XValidation:rule="has(self.selector.matchLabels) && self.selector.matchLabels.size() > 0",message="selector.matchLabels is required and cannot select every node"
+// +kubebuilder:validation:XValidation:rule="!has(self.selector.matchExpressions) || self.selector.matchExpressions.size() == 0",message="selector supports matchLabels only"
+// +kubebuilder:validation:XValidation:rule="self.policyRef.contains('@sha256:') || self.policyRef.contains('#')",message="policyRef must name an immutable revision"
+// +kubebuilder:validation:XValidation:rule="self.profileRef.contains('@sha256:') || self.profileRef.contains('#')",message="profileRef must name an immutable revision"
+// +kubebuilder:validation:XValidation:rule="self.guardrails.noActiveIncident == true",message="guardrails.noActiveIncident must be true"
+// +kubebuilder:validation:XValidation:rule="self.rollout.canaryNodes <= self.guardrails.maxConcurrentNodes",message="canaryNodes cannot exceed maxConcurrentNodes"
+type GPUAutonomyPlanSpec struct {
+	Selector metav1.LabelSelector `json:"selector"`
+	// PolicyRef and ProfileRef identify immutable reviewed revisions (usually
+	// name@digest or name#generation), not a mutable default policy.
+	// +kubebuilder:validation:MinLength=1
+	PolicyRef string `json:"policyRef"`
+	// +kubebuilder:validation:MinLength=1
+	ProfileRef string `json:"profileRef"`
+	// v0.4.0 intentionally permits exactly one action class per plan. A
+	// second action needs a separate approval and canary envelope.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=1
+	// +listType=set
+	AllowedActions []AcceleratorRuntimeAction `json:"allowedActions"`
+	Evidence       GPUAutonomyEvidenceSpec    `json:"evidence"`
+	Guardrails     GPUAutonomyGuardrailsSpec  `json:"guardrails"`
+	Rollout        GPUAutonomyRolloutSpec     `json:"rollout"`
+	Approvals      GPUAutonomyApprovalsSpec   `json:"approvals"`
+	ExpiresAt      metav1.Time                `json:"expiresAt"`
+}
+
+// GPUAutonomyApprovalStatus is a non-secret audit summary. The approving
+// subject and role are retained, but no bearer token, raw diagnostic payload,
+// or authorization assertion is copied into the CRD.
+type GPUAutonomyApprovalStatus struct {
+	Actor        string      `json:"actor"`
+	Role         string      `json:"role"`
+	ConfigDigest string      `json:"configDigest"`
+	ApprovedAt   metav1.Time `json:"approvedAt"`
+}
+
+// GPUAutonomyPlanStatus projects the durable autonomy lifecycle for kubectl
+// and GitOps readers. It is not an authority to execute: the controller's
+// operational store remains the append-only audit and effect authority.
+type GPUAutonomyPlanStatus struct {
+	ObservedGeneration int64                       `json:"observedGeneration,omitempty"`
+	State              string                      `json:"state,omitempty"`
+	ConfigDigest       string                      `json:"configDigest,omitempty"`
+	SimulationID       string                      `json:"simulationID,omitempty"`
+	RolloutID          string                      `json:"rolloutID,omitempty"`
+	Approvals          []GPUAutonomyApprovalStatus `json:"approvals,omitempty"`
+	LastTransitionTime *metav1.Time                `json:"lastTransitionTime,omitempty"`
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:scope=Cluster,shortName=gautonomy
+// +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state"
+// +kubebuilder:printcolumn:name="Expires",type="date",JSONPath=".spec.expiresAt"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+
+// GPUAutonomyPlan declares a time-bounded, independently approved automatic
+// action envelope. Creating it alone never enables cluster-wide automation.
+type GPUAutonomyPlan struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              GPUAutonomyPlanSpec   `json:"spec"`
+	Status            GPUAutonomyPlanStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// GPUAutonomyPlanList contains GPUAutonomyPlan objects.
+type GPUAutonomyPlanList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []GPUAutonomyPlan `json:"items"`
+}
+
 func init() {
 	SchemeBuilder.Register(
 		&KubeNeuron{}, &KubeNeuronList{},
@@ -1063,5 +1200,6 @@ func init() {
 		&GPUMaintenanceWindow{}, &GPUMaintenanceWindowList{},
 		&GPUNodeConfig{}, &GPUNodeConfigList{},
 		&AcceleratorRuntimeProfile{}, &AcceleratorRuntimeProfileList{},
+		&GPUAutonomyPlan{}, &GPUAutonomyPlanList{},
 	)
 }

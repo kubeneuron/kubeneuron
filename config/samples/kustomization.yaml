@@ -5,3 +5,4 @@ resources:
   - kubeneuron_v1alpha1_kubeneuron.yaml
   - kubeneuron_v1alpha1_gpuplaybook.yaml
   - kubeneuron_v1alpha1_gpuremediationpolicy.yaml
+  - kubeneuron_v1alpha1_gpuautonomyplan.yaml

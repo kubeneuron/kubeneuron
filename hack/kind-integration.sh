@@ -10,7 +10,7 @@ usage() {
 	cat <<'EOF'
 Usage: hack/kind-integration.sh
 
-Creates a dedicated, digest-pinned kind cluster by default, runs the 67-case
+Creates a dedicated, digest-pinned kind cluster by default, runs the 81-case
 CEL admission matrix, installs locally built KubeNeuron images and the
 operator, and verifies mTLS/token node identity, readiness, ownership
 collisions, non-adoption, recovery, ordered certificate rotation/rollback, and
@@ -1527,12 +1527,18 @@ exercise_real_cordon_and_uncordon() {
 
 	# And the half nothing had ever run: resolving the incident must give the
 	# capacity back, without anybody uncordoning by hand.
+	#
+	# Since v0.4.0 every mutable operator route requires an Idempotency-Key and
+	# a resolve answers 200 with the incident it resolved (docs/reference-api.md).
+	# The older 204/202 are still accepted so the phase keeps reading on a
+	# controller that predates the fencing; the 400 a missing key earns is not.
 	local resolve_code
 	resolve_code=$(cordon_api -X POST -H 'Content-Type: application/json' \
+		-H "Idempotency-Key: kind-integration-${RUN_ID}-cordon-resolve" \
 		--data-binary '{"actor":"harness","reason":"cordon phase complete"}' \
 		-o /dev/null -w '%{http_code}' \
 		"http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}/resolve")
-	[[ $resolve_code == 204 || $resolve_code == 202 ]] ||
+	[[ $resolve_code == 200 || $resolve_code == 204 || $resolve_code == 202 ]] ||
 		die "resolving the cordon-test incident returned $resolve_code"
 
 	deadline=$((SECONDS + TIMEOUT_SECONDS))
@@ -2213,20 +2219,20 @@ if "$KUBECTL_BIN" get crd/gpuremediationpolicies.kubeneuron.io >/dev/null 2>&1 &
 	die "refusing to replace existing GPURemediationPolicy fixture $POLICY_NAME"
 fi
 
-note "installing seven generated CRDs"
+note "installing eight generated CRDs"
 "$KUBECTL_BIN" apply -k "$REPO_ROOT/config/crd" >/dev/null
 mapfile -t crd_names < <(
 	for file in "$REPO_ROOT"/config/crd/bases/*.yaml; do
 		sed -n 's/^  name: \(.*\.kubeneuron\.io\)$/\1/p' "$file"
 	done
 )
-((${#crd_names[@]} == 7)) || die "found ${#crd_names[@]} generated CRDs, want 7"
+((${#crd_names[@]} == 8)) || die "found ${#crd_names[@]} generated CRDs, want 8"
 for crd in "${crd_names[@]}"; do
 	"$KUBECTL_BIN" wait --for=condition=Established "crd/$crd" \
 		--timeout="${TIMEOUT_SECONDS}s" >/dev/null
 done
 
-note "running the 67-case CEL admission matrix"
+note "running the 81-case CEL admission matrix"
 CEL_ALLOW_CLUSTER_MUTATION=1 KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" bash "$CEL_SCRIPT"
 
 if ((BUILD_IMAGES)); then
@@ -2459,5 +2465,5 @@ if grep -Fq 'real NVML driver not wired yet; using fake driver (skeleton)' <<<"$
 	note "agent explicitly reports its fake NVML skeleton"
 fi
 
-	note "PASS: 73 CEL checks (including the destructive-execution admission gate), scoped RBAC, mTLS plus Pod/node identity rejection, authenticated public API and Alertmanager webhook, manual immutable/versioned routine TLS rotation, explicit dual-leaf emergency recovery, stale-state/plan rejection, failed-leaf and failed-contraction rollback, fresh registration proof, durable readiness loss/recovery, 11 owners, ownership collision/non-adoption/recovery, and acknowledged no-op reconciliation, plus a controller restart mid-playbook with durable approval state and no re-executed step, and a REAL cordon with the janitor's uncordon on an armed worker"
+	note "PASS: 81 CEL checks (including the destructive-execution admission gate and the GPUAutonomyPlan envelope rules), scoped RBAC, mTLS plus Pod/node identity rejection, authenticated public API and Alertmanager webhook, manual immutable/versioned routine TLS rotation, explicit dual-leaf emergency recovery, stale-state/plan rejection, failed-leaf and failed-contraction rollback, fresh registration proof, durable readiness loss/recovery, 11 owners, ownership collision/non-adoption/recovery, and acknowledged no-op reconciliation, plus a controller restart mid-playbook with durable approval state and no re-executed step, and a REAL cordon with the janitor's uncordon on an armed worker"
 note "CPU-only boundary: this validates transport, the tested manual TLS-rotation and leaf-recovery contracts, and Kubernetes workload identity; it also proves operator-issued TLS reissuance for a deleted, operator-owned set; it does not validate expiry-driven renewal timing, emergency CA revocation, NVIDIA, NVML, DCGM, or GPU actions. Remediation is now partly covered: one destructive controller-side step (Cordon) and its janitor run for real against an armed node"

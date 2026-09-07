@@ -7,6 +7,7 @@ import (
 
 	"io/fs"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -338,6 +339,75 @@ func TestMigrateExistingAcceleratorReportDatabaseAddsIdentityColumns(t *testing.
 	}
 	if nodeUIDColumn != 1 {
 		t.Fatal("node_uid column missing from nodes after v7 upgrade")
+	}
+}
+
+func TestMigrateOperationalAuditScopeBackfillsExistingRows(t *testing.T) {
+	// Model a database produced by the initial v0.4.0 binary. The new scope
+	// columns must be added exactly once and inherit the durable envelope's
+	// tenant/cluster rather than making historic audit rows appear unscoped.
+	path := filepath.Join(t.TempDir(), "operational-v22.db")
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := fs.Glob(migrationsFS, "migrations/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if name >= "migrations/0023_operational_audit_scope.sql" {
+			break
+		}
+		data, readErr := fs.ReadFile(migrationsFS, name)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if _, execErr := raw.Exec(string(data)); execErr != nil {
+			t.Fatalf("apply %s: %v", name, execErr)
+		}
+	}
+	if _, err := raw.Exec(`CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO schema_version (version, applied_at) VALUES (22, '2026-09-06T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`
+		INSERT INTO operational_resources
+			(kind, id, state, tenant, cluster, actor, config_digest, payload, created_at, updated_at, version)
+		VALUES ('candidate-configuration', 'candidate-v22', 'uploaded', 'tenant-a', 'cluster-a', 'alice', '', '{}', '2026-09-06T00:00:00Z', '2026-09-06T00:00:00Z', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`
+		INSERT INTO operational_audit
+			(kind, resource_id, time, actor, action, params, hash)
+		VALUES ('candidate-configuration', 'candidate-v22', '2026-09-06T00:00:00Z', 'alice', 'upload', '{}', 'sha256:legacy')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("opening v22 operational database: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	var version int
+	var tenant, cluster string
+	if err := s.sqlDB.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 23 {
+		t.Fatalf("schema version = %d, want 23", version)
+	}
+	if err := s.sqlDB.QueryRow(`SELECT tenant, cluster FROM operational_audit WHERE resource_id='candidate-v22'`).Scan(&tenant, &cluster); err != nil {
+		t.Fatal(err)
+	}
+	if tenant != "tenant-a" || cluster != "cluster-a" {
+		t.Fatalf("backfilled audit scope = %q/%q, want tenant-a/cluster-a", tenant, cluster)
 	}
 }
 

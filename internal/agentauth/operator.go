@@ -3,6 +3,7 @@ package agentauth
 import (
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -81,7 +82,9 @@ func (a *OperatorAuthenticator) AuthenticateOperator(r *http.Request, verb strin
 		return httpapi.OperatorIdentity{}, forbidden(fmt.Sprintf(
 			"%s may not %s kubeneurons/%s", user.Username, verb, a.installation))
 	}
-	return httpapi.OperatorIdentity{Actor: user.Username, Method: "kubernetes"}, nil
+	roles := append([]string(nil), user.Groups...)
+	sort.Strings(roles)
+	return httpapi.OperatorIdentity{Actor: user.Username, Method: "kubernetes", Roles: roles}, nil
 }
 
 var _ httpapi.OperatorAuthenticator = (*OperatorAuthenticator)(nil)

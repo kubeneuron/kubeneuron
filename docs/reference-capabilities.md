@@ -141,6 +141,28 @@ deadline and then parked in `NEEDS_HUMAN` after the cordon and drain had
 already run — and an AMD fleet's recovery report read 0% recovered for a
 system that had recovered it.
 
+**An NVIDIA node that no `AcceleratorRuntimeProfile` selects is verified the
+same way, and for the same reason.** The operator-managed agent asks the
+controller which profile selects its node and, when none does, holds
+observation: it posts no accelerator report at all (the default-deny that
+keeps a DaemonSet from claiming capabilities during a rollout). A profile is a
+contract that narrows accelerator actions; the standard install ships none,
+and creating one is not a prerequisite for closing an incident. So on such a
+node the report cannot exist by construction, and a real (non-dry-run)
+device-scoped incident resolves on the durable heartbeat plus the quiet
+window, with the resolve audit entry naming that reduced depth. Without a
+profile no accelerator-runtime action (reset, quiesce) can have been admitted
+for that incident either, so the ladder it verifies is the same platform
+ladder a node-scoped incident runs. The full-depth check is unchanged
+wherever the agent WAS told to report: a node a profile selects still fails
+closed on a missing or stale report, a fresh report that says the runtime is
+not ready is never outranked by the heartbeat, and overlapping profiles or
+unresolvable node labels fail closed with the cause in the reason. Until
+v0.4.0 the no-profile case was indistinguishable from a degraded agent, so
+every device-scoped incident on an ordinary Enabled install with a real
+driver parked in `NEEDS_HUMAN` after the evidence deadline; hardware run 12
+was the first to attempt one and found it.
+
 **What AMD still does not get: arming, per-device reset, or a device-holder
 preflight with anything to read.** Detection, classification, cordon, drain
 and resolution work; the destructive rungs do not. The honest summary is that

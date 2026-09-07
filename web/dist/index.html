@@ -82,7 +82,10 @@ main{padding:1.3rem 1.7rem 3rem;max-width:1180px;width:100%}
 .btn.primary:hover{filter:brightness(1.12)}
 input,select{background:#0b0f1a;color:var(--fg);border:1px solid var(--line2);border-radius:8px;
   padding:.45rem .7rem;font-size:.85rem;outline:none;transition:all .15s;font-family:var(--sans)}
+textarea{background:#0b0f1a;color:var(--fg);border:1px solid var(--line2);border-radius:8px;
+  padding:.55rem .7rem;font-size:.8rem;outline:none;transition:all .15s;font-family:var(--mono);width:100%;min-height:9rem;resize:vertical}
 input:focus{border-color:var(--accent);box-shadow:0 0 0 3px #5b8cff21}
+textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px #5b8cff21}
 .mono{font-family:var(--mono);font-size:.8rem}
 .dim{color:var(--dim)}.dimmer{color:var(--dimmer)}
 .err{color:var(--bad);font-size:.82rem;min-height:1.1rem}
@@ -146,6 +149,20 @@ tr:last-child td{border-bottom:none}
 tr.sel{cursor:pointer;transition:background .12s}
 tr.sel:hover td{background:#5b8cff0d}
 tr.selected td{background:#5b8cff14}
+
+/* ============ v0.4 operations ============ */
+.opsgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:.75rem}
+.panel{padding:1rem}
+.panel h2{font-size:.92rem;margin-bottom:.2rem}.panel p{font-size:.76rem;color:var(--dim);margin-bottom:.8rem}
+.stack{display:flex;flex-direction:column;gap:.55rem}.row{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+.row > input,.row > select{min-width:0;flex:1}.row .btn{flex:none}
+.filters{padding:.75rem 1rem;margin-bottom:.8rem;display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
+.filters input,.filters select{max-width:220px}.filters .btn{margin-left:auto}
+.codebox{white-space:pre-wrap;word-break:break-word;background:#090c14;border:1px solid var(--line);border-radius:10px;
+  padding:.8rem;max-height:320px;overflow:auto;font: .75rem/1.45 var(--mono);color:#bdcae4}
+.state.Eligible{color:var(--ok)}.state.ObservedOnly{color:var(--warn)}.state.Blocked,.state.Unknown{color:var(--bad)}
+.reason{display:inline-block;border:1px solid var(--line2);border-radius:99px;color:var(--dim);font: .66rem var(--mono);padding:.1rem .4rem;margin:.08rem}
+.small{font-size:.73rem}.nowrap{white-space:nowrap}
 
 /* ============ drawer ============ */
 #drawer{
@@ -260,6 +277,10 @@ footer.lf{margin-top:1.4rem;color:var(--dimmer);font-size:.7rem;text-align:cente
       <a href="#/overview" data-view="overview"><span class="ic">◈</span> Overview</a>
       <a href="#/incidents" data-view="incidents"><span class="ic">⚑</span> Incidents <span class="count" id="incCount">0</span></a>
       <a href="#/fleet" data-view="fleet"><span class="ic">▦</span> Fleet <span class="count" id="nodeCount">0</span></a>
+      <a href="#/readiness" data-view="readiness"><span class="ic">◉</span> Readiness</a>
+      <a href="#/operations" data-view="operations"><span class="ic">⌁</span> Operations</a>
+      <a href="#/autonomy" data-view="autonomy"><span class="ic">⟲</span> Autonomy</a>
+      <a href="#/audit" data-view="audit"><span class="ic">≣</span> Audit</a>
     </nav>
     <div class="spacer"></div>
     <div id="pauseChip">⏸ Automation paused<br><button class="btn good" onclick="setPause(false)">Resume</button></div>
@@ -298,6 +319,56 @@ footer.lf{margin-top:1.4rem;color:var(--dimmer);font-size:.7rem;text-align:cente
         <th>Node</th><th>Platform</th><th>GPUs</th><th>Inventory</th><th>Paused</th><th>Agent last seen</th>
       </tr></thead><tbody id="nodeRows"></tbody></table>
     </section>
+
+    <!-- readiness -->
+    <section id="view-readiness" style="display:none">
+      <div class="viewhead"><h1>Fleet readiness</h1><span class="sub">The same evaluator used by preview, simulation, and autonomy</span><span class="live">live</span></div>
+      <div class="stats" id="readinessStats"></div>
+      <div class="filters card">
+        <select id="readyState"><option value="">All states</option><option>Eligible</option><option>ObservedOnly</option><option>Blocked</option><option>Unknown</option></select>
+        <select id="readyVendor"><option value="">All vendors</option><option value="nvidia">NVIDIA</option><option value="amd">AMD</option><option value="intel">Intel</option></select>
+        <input id="readyTenant" placeholder="tenant">
+        <input id="readyCluster" placeholder="cluster">
+        <label class="small dim"><input id="readyStale" type="checkbox"> stale only</label>
+        <button class="btn" onclick="loadReadiness()">Refresh</button>
+      </div>
+      <table class="card"><thead><tr><th>Node</th><th>Decision</th><th>Reasons / prerequisites</th><th>Evidence</th><th>Profile</th><th>Config</th></tr></thead><tbody id="readinessRows"></tbody></table>
+    </section>
+
+    <!-- operations -->
+    <section id="view-operations" style="display:none">
+      <div class="viewhead"><h1>Operations</h1><span class="sub">Candidate review, bounded diagnostics, and no-side-effect simulations</span></div>
+      <div class="filters card"><input id="opsTenant" placeholder="tenant scope (optional)"><input id="opsCluster" placeholder="cluster scope (optional)"><span class="small dim">Scope is checked against controller-owned node labels.</span></div>
+      <div class="opsgrid">
+        <div class="card panel"><h2>Candidate configuration</h2><p>Upload a strict YAML/JSON candidate. It is never applied to Kubernetes from this console.</p>
+          <div class="stack"><input id="candidateFile" type="file" accept=".yaml,.yml,.json,application/yaml,application/json"><input id="candidateActor" placeholder="audited actor (required with shared token)"><button class="btn primary" onclick="uploadCandidate()">Upload candidate</button></div>
+        </div>
+        <div class="card panel"><h2>Health check</h2><p>Passive uses existing evidence; Quick queues bounded agent diagnostics. Extended also requires a verified Kubernetes bearer identity in the <code>diagnostics-extended</code> and <code>disruption-budget-approver</code> groups plus a live maintenance window; shared tokens and browser sessions are rejected.</p>
+          <div class="stack"><input id="healthNode" placeholder="node"><input id="healthReason" placeholder="reason"><div class="row"><select id="healthProfile"><option>Passive</option><option>Quick</option><option>Extended</option></select><input id="healthDevice" placeholder="device ID"></div><input id="healthActor" placeholder="audited actor"><button class="btn primary" onclick="requestHealthCheck()">Request health check</button></div>
+        </div>
+        <div class="card panel"><h2>Simulation studio</h2><p>Build a frozen decision and action graph. Simulation never contacts an executor.</p>
+          <div class="stack"><input id="simulationNode" placeholder="node"><div class="row"><input id="simulationClass" placeholder="problem class"><input id="simulationAction" placeholder="action, e.g. reset-device"></div><div class="row"><input id="simulationScope" placeholder="scope, e.g. physical-device"><input id="simulationDevice" placeholder="device ID"></div><input id="simulationRationale" placeholder="operator rationale"><input id="simulationActor" placeholder="audited actor"><button class="btn primary" onclick="createSimulation()">Create simulation</button></div>
+        </div>
+      </div>
+      <div class="sectiontitle">Candidates</div><table class="card"><thead><tr><th>ID</th><th>State</th><th>Digest</th><th>Expires</th><th>Actor</th><th style="text-align:right">Actions</th></tr></thead><tbody id="candidateRows"></tbody></table>
+      <pre class="codebox" id="previewDetail" style="margin-top:.7rem">Select “Show preview” to inspect the deterministic per-node policy delta.</pre>
+      <div class="sectiontitle">Health checks</div><table class="card"><thead><tr><th>ID</th><th>Node</th><th>Profile</th><th>State</th><th>Outcome</th></tr></thead><tbody id="healthRows"></tbody></table>
+      <div class="sectiontitle">Simulations</div><table class="card"><thead><tr><th>ID</th><th>Node</th><th>Decision</th><th>Action graph</th><th>Incident</th></tr></thead><tbody id="simulationRows"></tbody></table>
+    </section>
+
+    <!-- autonomy -->
+    <section id="view-autonomy" style="display:none">
+      <div class="viewhead"><h1>GPU autonomy plans</h1><span class="sub">Narrow, time-bounded envelopes — never a global automation switch</span></div>
+      <div class="opsgrid"><div class="card panel"><h2>Create plan</h2><p>Paste the REST plan JSON. It must carry a simulated decision and two distinct approval roles before canary. An approval is accepted only from a verified Kubernetes bearer identity in the requested group; shared tokens and browser sessions cannot approve.</p><textarea id="autonomyJSON" spellcheck="false" placeholder='{"selector":{"pool":"a100"}, ...}'></textarea><button class="btn primary" style="margin-top:.6rem" onclick="createAutonomyPlan()">Create autonomy plan</button></div><div class="card panel"><h2>Plan / rollout detail</h2><p>Every canary observation contains its immutable DecisionSnapshot link.</p><pre class="codebox" id="autonomyDetail">Select a plan to inspect its rollout.</pre></div></div>
+      <div class="sectiontitle">Approval and rollout queue</div><table class="card"><thead><tr><th>Plan</th><th>State</th><th>Action</th><th>Expires</th><th>Approvals</th><th style="text-align:right">Controls</th></tr></thead><tbody id="autonomyRows"></tbody></table>
+    </section>
+
+    <!-- audit -->
+    <section id="view-audit" style="display:none">
+      <div class="viewhead"><h1>Audit explorer</h1><span class="sub">Append-only, hash-chained operational events</span></div>
+      <div class="filters card"><input id="auditKind" placeholder="resource kind"><input id="auditTenant" placeholder="tenant"><input id="auditCluster" placeholder="cluster"><input id="auditActor" placeholder="actor"><input id="auditAction" placeholder="action"><button class="btn" onclick="loadAudit()">Search</button></div>
+      <table class="card"><thead><tr><th>Time</th><th>Resource</th><th>Actor</th><th>Action</th><th>Decision / request</th><th>Result</th></tr></thead><tbody id="auditRows"></tbody></table>
+    </section>
   </main>
 </div>
 
@@ -327,14 +398,15 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let token = sessionStorage.getItem("kn-token") || "";
 let me = {authenticated:false};
-let cache = {incidents:[], nodes:[], pause:{paused:false}};
+let cache = {incidents:[], nodes:[], pause:{paused:false}, readiness:[], candidates:[], healthChecks:[], simulations:[], autonomy:[], audit:[]};
 let openIncident = null;
 let filter = sessionStorage.getItem("kn-filter") || "active";
 
 /* ---------- api ---------- */
-async function api(path, method, body){
+async function api(path, method, body, extraHeaders){
   const opts = { method: method || "GET", headers: {} , credentials: "same-origin"};
   if(token) opts.headers["Authorization"] = "Bearer " + token;
+  if(extraHeaders) Object.assign(opts.headers, extraHeaders);
   if(body){ opts.headers["Content-Type"]="application/json"; opts.body = JSON.stringify(body); }
   const resp = await fetch(path, opts);
   if(resp.status === 401){ showLogin(); throw new Error("unauthorized"); }
@@ -343,6 +415,16 @@ async function api(path, method, body){
   return resp.json();
 }
 function actor(){ return me.actor || "web-panel"; }
+function operationKey(){ return (window.crypto && window.crypto.randomUUID) ? "panel-" + window.crypto.randomUUID() : "panel-" + Date.now() + "-" + Math.random().toString(16).slice(2); }
+async function apiBytes(path, bytes, contentType, headers){
+  const opts = {method:"POST", headers:Object.assign({}, headers || {}), body:bytes, credentials:"same-origin"};
+  if(token) opts.headers["Authorization"] = "Bearer " + token;
+  opts.headers["Content-Type"] = contentType;
+  const resp = await fetch(path, opts);
+  if(resp.status === 401){ showLogin(); throw new Error("unauthorized"); }
+  if(!resp.ok) throw new Error((await resp.text()).trim() || String(resp.status));
+  return resp.json();
+}
 
 /* ---------- auth ---------- */
 async function boot(){
@@ -393,7 +475,7 @@ function enterApp(){
 }
 
 /* ---------- routing ---------- */
-const VIEWS = ["overview","incidents","fleet"];
+const VIEWS = ["overview","incidents","fleet","readiness","operations","autonomy","audit"];
 function route(){
   const want = (location.hash.replace("#/","") || "overview");
   const view = VIEWS.includes(want) ? want : "overview";
@@ -401,6 +483,7 @@ function route(){
     $("view-"+v).style.display = v === view ? "block" : "none";
     document.querySelector(`.nav a[data-view="${v}"]`).classList.toggle("on", v === view);
   }
+  loadView(view);
 }
 window.addEventListener("hashchange", route);
 
@@ -412,6 +495,20 @@ async function decide(id, verb, round){
     await api(`/api/v1/incidents/${encodeURIComponent(id)}/${verb}`, "POST", body);
     toast(`${verb} recorded for ${id.slice(0,34)}…`, verb === "reject" ? "bad" : "good");
     await tick();
+  } catch(e){ toast(e.message, "bad"); }
+}
+async function acknowledgeIncident(id, version){
+  try {
+    const reason = prompt("Acknowledgement rationale (optional):") || "";
+    await api(`/api/v1/incidents/${encodeURIComponent(id)}/acknowledge`, "POST", {actor:actor(), reason, resource_version:version || 0}, {"Idempotency-Key":operationKey()});
+    toast(`acknowledged ${id.slice(0,34)}…`, "good"); await tick();
+  } catch(e){ toast(e.message, "bad"); }
+}
+async function resolveIncident(id, version){
+  try {
+    const reason = prompt("Resolution rationale (optional):") || "";
+    await api(`/api/v1/incidents/${encodeURIComponent(id)}/resolve`, "POST", {actor:actor(), reason, resource_version:version || 0}, {"Idempotency-Key":operationKey()});
+    toast(`resolved ${id.slice(0,34)}…`, "good"); await tick();
   } catch(e){ toast(e.message, "bad"); }
 }
 async function setPause(paused){
@@ -451,7 +548,7 @@ function rowActions(inc){
       <button class="btn danger" onclick="event.stopPropagation();decide('${esc(inc.id)}','reject',${round})">Reject</button> `;
   }
   if(ACTIVE(inc.state))
-    out += `<button class="btn" onclick="event.stopPropagation();decide('${esc(inc.id)}','resolve')">Resolve</button>`;
+    out += `<button class="btn" onclick="event.stopPropagation();acknowledgeIncident('${esc(inc.id)}',${Number(inc.resource_version)||0})">Acknowledge</button> <button class="btn" onclick="event.stopPropagation();resolveIncident('${esc(inc.id)}',${Number(inc.resource_version)||0})">Resolve</button>`;
   return out;
 }
 function renderIncidents(){
@@ -526,6 +623,164 @@ function renderFleet(){
   }).join("") || `<tr><td colspan="6" class="dimmer">no nodes registered</td></tr>`;
 }
 
+/* ---------- v0.4 operations console ---------- */
+function statePill(state){ return `<span class="pill ${esc(state)}">${esc(state || "—")}</span>`; }
+function reasons(result){
+  const codes = (result && result.reason_codes) || [];
+  const required = (result && result.required_actions) || [];
+  const codeHTML = codes.map(code => `<span class="reason">${esc(code)}</span>`).join("") || '<span class="dimmer">none</span>';
+  return `${codeHTML}${required.length ? `<div class="small dim" style="margin-top:.2rem">${esc(required.join(", "))}</div>` : ""}`;
+}
+function evidenceAge(snapshot){
+  const at = snapshot && snapshot.report && snapshot.report.observed_at;
+  if(!at) return "unavailable";
+  const ms = Date.now() - Date.parse(at);
+  if(!Number.isFinite(ms)) return "unknown";
+  return ms < 1000 ? "fresh" : `${Math.floor(ms/1000)}s old`;
+}
+function renderReadiness(){
+  const all = cache.readiness || [];
+  const counts = {Eligible:0,ObservedOnly:0,Blocked:0,Unknown:0};
+  all.forEach(item => { const state=item.decision && item.decision.state; if(Object.prototype.hasOwnProperty.call(counts,state)) counts[state]++; });
+  $("readinessStats").innerHTML = statCard(counts.Eligible,"eligible","ok") + statCard(counts.ObservedOnly,"observed only","attn") + statCard(counts.Blocked,"blocked","bad") + statCard(counts.Unknown,"unknown","bad");
+  $("readinessRows").innerHTML = all.map(item => {
+    const snap=item.snapshot||{}, decision=item.decision||{}, profile=snap.profile||{};
+    return `<tr><td class="mono">${esc(item.node)}</td><td class="state ${esc(decision.state)}">${statePill(decision.state)}</td><td>${reasons(decision)}</td><td class="small"><span class="mono">${esc(evidenceAge(snap))}</span><br><span class="dim">${esc(((decision.evidence_refs||[]).map(ref=>ref.source).join(", ")) || "—")}</span></td><td>${esc(profile.name || "—")}</td><td class="mono small" title="${esc(decision.config_digest||"")}">${esc((decision.config_digest||"—").slice(0,18))}</td></tr>`;
+  }).join("") || `<tr><td colspan="6" class="dimmer">no managed nodes match these filters</td></tr>`;
+}
+async function loadReadiness(){
+  try {
+    const query = new URLSearchParams({limit:"200"});
+    if($("readyState").value) query.set("state", $("readyState").value);
+    if($("readyVendor").value) query.set("vendor", $("readyVendor").value);
+    if($("readyTenant").value.trim()) query.set("tenant", $("readyTenant").value.trim());
+    if($("readyCluster").value.trim()) query.set("cluster", $("readyCluster").value.trim());
+    if($("readyStale").checked) query.set("stale", "true");
+    const response = await api("/api/v1/readiness?"+query.toString());
+    cache.readiness = response.items || []; renderReadiness();
+  } catch(e){ toast("readiness: "+e.message, "bad"); }
+}
+function renderOperations(){
+  $("candidateRows").innerHTML = (cache.candidates||[]).map(candidate => `<tr><td class="mono">${esc(candidate.id)}</td><td>${statePill(candidate.state)}</td><td class="mono small" title="${esc(candidate.normalized_digest)}">${esc((candidate.normalized_digest||"—").slice(0,20))}</td><td class="mono small">${esc((candidate.expires_at||"—").replace("T"," ").slice(0,19))}</td><td>${esc(candidate.actor||"—")}</td><td style="text-align:right"><button class="btn" onclick="showPreview('${esc(candidate.id)}')">Show preview</button>${candidate.state==="uploaded" ? ` <button class="btn" onclick="createPreview('${esc(candidate.id)}')">Preview</button> <button class="btn danger" onclick="revokeCandidate('${esc(candidate.id)}',${Number(candidate.resource_version)||0})">Revoke</button>` : ' <span class="dimmer">retained for audit</span>'}</td></tr>`).join("") || `<tr><td colspan="6" class="dimmer">no candidate uploads yet</td></tr>`;
+  $("healthRows").innerHTML = (cache.healthChecks||[]).map(run => `<tr><td class="mono">${esc(run.id)}</td><td class="mono">${esc(run.node)}</td><td>${esc(run.profile)}</td><td>${statePill(run.state)}</td><td class="small dim">${esc(run.outcome||"queued")}${run.state==="queued" ? ` <button class="btn" onclick="cancelHealthCheck('${esc(run.id)}',${Number(run.resource_version)||0})">Cancel</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="dimmer">no health checks yet</td></tr>`;
+  $("simulationRows").innerHTML = (cache.simulations||[]).map(sim => `<tr><td class="mono">${esc(sim.id)}</td><td class="mono">${esc(sim.node)}</td><td>${statePill((sim.decision||{}).state)}</td><td class="small">${esc((sim.steps||[]).map(step=>step.action).join(" → ") || "—")}</td><td class="mono">${esc(sim.incident_id||"—")}${!sim.incident_id && sim.decision && sim.decision.state==="Eligible" ? ` <button class="btn" onclick="createIncidentFromSimulation('${esc(sim.id)}',${Number(sim.resource_version)||0})">Create incident</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="dimmer">no simulations yet</td></tr>`;
+}
+async function loadOperations(){
+  try {
+    const scope = new URLSearchParams();
+    if($("opsTenant").value.trim()) scope.set("tenant", $("opsTenant").value.trim());
+    if($("opsCluster").value.trim()) scope.set("cluster", $("opsCluster").value.trim());
+    const suffix = scope.toString() ? "&"+scope.toString() : "";
+    const [candidates, healthChecks, simulations] = await Promise.all([
+      api("/api/v1/candidates?limit=100"+suffix), api("/api/v1/health-checks?limit=100"+suffix), api("/api/v1/simulations?limit=100"+suffix)
+    ]);
+    cache.candidates=candidates.items||[]; cache.healthChecks=healthChecks.items||[]; cache.simulations=simulations.items||[]; renderOperations();
+  } catch(e){ toast("operations: "+e.message, "bad"); }
+}
+async function uploadCandidate(){
+  const file=$("candidateFile").files[0];
+  if(!file){ toast("choose a YAML or JSON candidate first", "bad"); return; }
+  const claimed=$("candidateActor").value.trim() || actor();
+  try {
+    const content=await file.arrayBuffer();
+    const type=file.name.toLowerCase().endsWith(".json") ? "application/json" : "application/yaml";
+    const query = new URLSearchParams({actor:claimed});
+    if($("opsTenant").value.trim()) query.set("tenant", $("opsTenant").value.trim());
+    if($("opsCluster").value.trim()) query.set("cluster", $("opsCluster").value.trim());
+    const candidate=await apiBytes("/api/v1/candidates?"+query.toString(), content, type, {"Idempotency-Key":operationKey()});
+    toast(`candidate ${candidate.id} uploaded`, "good"); await loadOperations();
+  } catch(e){ toast(e.message, "bad"); }
+}
+async function createPreview(id){
+  try { const preview=await api(`/api/v1/candidates/${encodeURIComponent(id)}/preview`, "POST", {actor:actor()}, {"Idempotency-Key":operationKey()}); toast(`preview ${preview.id} completed`, "good"); await loadOperations(); }
+  catch(e){ toast(e.message, "bad"); }
+}
+async function showPreview(id){
+  try { const preview=await api(`/api/v1/candidates/${encodeURIComponent(id)}/preview`); $("previewDetail").textContent=JSON.stringify(preview,null,2); }
+  catch(e){ toast(e.message, "bad"); }
+}
+async function revokeCandidate(id, version){
+  const reason=prompt("Why revoke this candidate?"); if(!reason) return;
+  try { await api(`/api/v1/candidates/${encodeURIComponent(id)}`,"DELETE",{actor:actor(),reason,resource_version:version},{"Idempotency-Key":operationKey()}); toast(`candidate ${id} revoked`,"good"); await loadOperations(); }
+  catch(e){ toast(e.message,"bad"); }
+}
+async function requestHealthCheck(){
+  const node=$("healthNode").value.trim(), reason=$("healthReason").value.trim();
+  if(!node || !reason){ toast("health check needs node and reason", "bad"); return; }
+  const body={actor:$("healthActor").value.trim()||actor(),node,reason,profile:$("healthProfile").value,device_id:$("healthDevice").value.trim(),tenant:$("opsTenant").value.trim(),cluster:$("opsCluster").value.trim()};
+  try { const run=await api("/api/v1/health-checks","POST",body,{"Idempotency-Key":operationKey()}); toast(`health check ${run.id}: ${run.state}`,run.state==="blocked"?"bad":"good"); await loadOperations(); }
+  catch(e){ toast(e.message,"bad"); }
+}
+async function cancelHealthCheck(id, version){
+  try { const run=await api(`/api/v1/health-checks/${encodeURIComponent(id)}/cancel`, "POST", {actor:actor(),resource_version:version}, {"Idempotency-Key":operationKey()}); toast(`health check ${run.id} cancelled`, "good"); await loadOperations(); }
+  catch(e){ toast(e.message, "bad"); }
+}
+async function createSimulation(){
+  const node=$("simulationNode").value.trim(), cls=$("simulationClass").value.trim(), rationale=$("simulationRationale").value.trim();
+  if(!node || !cls || !rationale){ toast("simulation needs node, problem class, and rationale", "bad"); return; }
+  const body={actor:$("simulationActor").value.trim()||actor(),node,class:cls,rationale,action:$("simulationAction").value.trim(),scope:$("simulationScope").value.trim(),device_id:$("simulationDevice").value.trim(),tenant:$("opsTenant").value.trim(),cluster:$("opsCluster").value.trim()};
+  try { const sim=await api("/api/v1/simulations","POST",body,{"Idempotency-Key":operationKey()}); toast(`simulation ${sim.id} created`,sim.decision&&sim.decision.state==="Eligible"?"good":"bad"); await loadOperations(); }
+  catch(e){ toast(e.message,"bad"); }
+}
+async function createIncidentFromSimulation(id, version){
+  const rationale=prompt("Incident rationale:"); if(!rationale) return;
+  try { const incident=await api("/api/v1/incidents/from-simulation", "POST", {actor:actor(),simulation_id:id,rationale,resource_version:version}, {"Idempotency-Key":operationKey()}); toast(`incident ${incident.id} created`, "good"); await loadOperations(); await tick(); }
+  catch(e){ toast(e.message, "bad"); }
+}
+function renderAutonomy(){
+  $("autonomyRows").innerHTML = (cache.autonomy||[]).map(plan => `<tr><td class="mono">${esc(plan.id)}</td><td>${statePill(plan.state)}</td><td>${esc((plan.allowed_actions||[]).join(", "))}</td><td class="mono small">${esc((plan.expires_at||"—").replace("T"," ").slice(0,19))}</td><td>${esc((plan.approvals||[]).map(a=>a.role+": "+a.actor).join(" · ") || "pending")}</td><td style="text-align:right;white-space:nowrap"><button class="btn" onclick="showAutonomy('${esc(plan.id)}')">Detail</button>${plan.state==="Draft" ? ` <button class="btn" onclick="attachAutonomySimulation('${esc(plan.id)}')">Attach simulation</button>` : ""}${["Simulated","AwaitingApproval","Canary"].includes(plan.state) ? ` <button class="btn good" onclick="approveAutonomy('${esc(plan.id)}')">Approve</button>` : ""}${plan.state==="Paused" ? ` <button class="btn good" onclick="mutateAutonomy('${esc(plan.id)}','resume')">Resume</button>` : ""}${!["RolledBack","Expired"].includes(plan.state) ? ` <button class="btn danger" onclick="mutateAutonomy('${esc(plan.id)}','pause')">Pause</button> <button class="btn danger" onclick="mutateAutonomy('${esc(plan.id)}','rollback')">Rollback</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="6" class="dimmer">no autonomy plans yet</td></tr>`;
+}
+async function loadAutonomy(){
+  try { const response=await api("/api/v1/autonomy/plans?limit=100"); cache.autonomy=response.items||[]; renderAutonomy(); }
+  catch(e){ toast("autonomy: "+e.message,"bad"); }
+}
+async function createAutonomyPlan(){
+  let body;
+  try { body=JSON.parse($("autonomyJSON").value); } catch(e){ toast("plan JSON is invalid", "bad"); return; }
+  if(!body.actor) body.actor=actor();
+  try { const plan=await api("/api/v1/autonomy/plans","POST",body,{"Idempotency-Key":operationKey()}); toast(`autonomy plan ${plan.id} created`, "good"); $("autonomyJSON").value=""; await loadAutonomy(); }
+  catch(e){ toast(e.message,"bad"); }
+}
+async function freshAutonomyPlan(id){ return api("/api/v1/autonomy/plans/"+encodeURIComponent(id)); }
+async function attachAutonomySimulation(id){
+  const simulation_id=prompt("Permitted simulation ID:"); if(!simulation_id) return;
+  try { const plan=await freshAutonomyPlan(id); const result=await api(`/api/v1/autonomy/plans/${encodeURIComponent(id)}/simulation`, "POST", {actor:actor(),simulation_id,resource_version:plan.resource_version}, {"Idempotency-Key":operationKey()}); toast(`plan is ${result.state}`, "good"); await loadAutonomy(); }
+  catch(e){ toast(e.message, "bad"); }
+}
+async function approveAutonomy(id){
+  const role=prompt("Required approval role (verified Kubernetes group):"); if(!role) return;
+  try { const plan=await freshAutonomyPlan(id); const result=await api(`/api/v1/autonomy/plans/${encodeURIComponent(id)}/approve`,"POST",{actor:actor(),role,resource_version:plan.resource_version},{"Idempotency-Key":operationKey()}); toast(`plan is ${result.state}`,"good"); await loadAutonomy(); }
+  catch(e){ toast(e.message,"bad"); }
+}
+async function mutateAutonomy(id, action){
+  const reason=prompt(`${action} rationale:`); if(!reason) return;
+  try { const plan=await freshAutonomyPlan(id); const result=await api(`/api/v1/autonomy/plans/${encodeURIComponent(id)}/${action}`,"POST",{actor:actor(),reason,resource_version:plan.resource_version},{"Idempotency-Key":operationKey()}); toast(`plan is ${result.state}`,action==="rollback"?"bad":"good"); await loadAutonomy(); }
+  catch(e){ toast(e.message,"bad"); }
+}
+async function showAutonomy(id){
+  try { const [plan, rollout]=await Promise.all([freshAutonomyPlan(id), api(`/api/v1/autonomy/plans/${encodeURIComponent(id)}/rollout`).catch(()=>null)]); $("autonomyDetail").textContent=JSON.stringify({plan,rollout},null,2); }
+  catch(e){ toast(e.message,"bad"); }
+}
+function renderAudit(){
+  $("auditRows").innerHTML=(cache.audit||[]).map(event=>`<tr><td class="mono small">${esc((event.time||"").replace("T"," ").slice(0,19))}</td><td><span class="mono small">${esc(event.kind)}</span><br><span class="dim mono small">${esc(event.resource_id)}</span></td><td>${esc(event.actor)}</td><td>${esc(event.action)}</td><td class="mono small">${esc(event.decision_id||event.request_id||"—")}</td><td class="small dim">${esc(event.result||"—")}</td></tr>`).join("")||`<tr><td colspan="6" class="dimmer">no audit events match these filters</td></tr>`;
+}
+async function loadAudit(){
+  const query=new URLSearchParams({limit:"100"});
+  if($("auditKind").value.trim()) query.set("kind",$("auditKind").value.trim());
+  if($("auditTenant").value.trim()) query.set("tenant",$("auditTenant").value.trim());
+  if($("auditCluster").value.trim()) query.set("cluster",$("auditCluster").value.trim());
+  if($("auditActor").value.trim()) query.set("actor",$("auditActor").value.trim());
+  if($("auditAction").value.trim()) query.set("action",$("auditAction").value.trim());
+  try { const response=await api("/api/v1/audit-events?"+query.toString()); cache.audit=response.items||[]; renderAudit(); }
+  catch(e){ toast("audit: "+e.message,"bad"); }
+}
+async function loadView(view){
+  if(view==="readiness") return loadReadiness();
+  if(view==="operations") return loadOperations();
+  if(view==="autonomy") return loadAutonomy();
+  if(view==="audit") return loadAudit();
+}
+
 /* ---------- drawer ---------- */
 async function openDrawer(id){
   openIncident = id;
@@ -587,7 +842,7 @@ async function tick(){
   try {
     const [pause, incidents, nodes] = await Promise.all([
       api("/api/v1/pause"), api("/api/v1/incidents"), api("/api/v1/nodes")]);
-    cache = {pause, incidents: incidents || [], nodes: nodes || []};
+    cache = Object.assign(cache, {pause, incidents: incidents || [], nodes: nodes || []});
     $("pauseChip").style.display = pause.paused ? "block" : "none";
     const active = cache.incidents.filter(i => ACTIVE(i.state)).length;
     const approvals = cache.incidents.filter(i => i.state === "AWAITING_APPROVAL").length;
@@ -597,6 +852,8 @@ async function tick(){
     $("nodeCount").textContent = String(cache.nodes.length);
     renderOverview(); renderIncidents(); renderFleet();
     if(openIncident) await renderDrawer();
+    const activeView = (location.hash.replace("#/","") || "overview");
+    if(["readiness","operations","autonomy","audit"].includes(activeView)) await loadView(activeView);
   } catch(e){ /* auth redirect handled in api() */ }
 }
 setInterval(() => { if($("shell").style.display !== "none") tick(); }, 5000);

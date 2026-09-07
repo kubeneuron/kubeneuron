@@ -44,16 +44,16 @@ named approver on the record.
   (`executionMode: Enabled`) must be confined to an explicit node selector
   plus an acknowledgement sentence — it can never arm the whole fleet.
 
-**Status (v0.2.1):** the full workflow is real and validated live — on an
-EKS cluster with a real Tesla T4, a kernel-injected XID walked
-cordon → drain → approval → `ReplaceNode`, and the controller terminated
-the actual EC2 instance under a scoped IAM role, the node group replaced
-it, and the incident resolved through the verification quiet window. On
-cloud GPUs, where the guest has no PCI reset, the agent
-refuses a per-device reset **on measured evidence** and the ladder routes
-to node replace instead — reset stays reserved for bare metal, where the
-hardware matrix in [PRODUCT_PLAN.md](PRODUCT_PLAN.md) gates it. Full
-history: [CHANGELOG.md](CHANGELOG.md).
+**Status (v0.4.0):** the controller now includes the durable remediation
+intelligence surface: one explainable decision/evidence evaluator, readiness,
+candidate preview, bounded diagnostics, frozen simulation, incident custody,
+an operational audit explorer, and a time-bounded `GPUAutonomyPlan` envelope.
+The installed controller intentionally runs autonomy in **simulation-only**
+mode unless a deployment explicitly wires a hardware-qualified effect adapter;
+this repository does not claim a new driver/runtime qualification merely from
+unit or integration fixtures. Existing destructive remediation remains behind
+its separate dry-run, confinement, approval, and evidence gates. Full history:
+[CHANGELOG.md](CHANGELOG.md).
 
 **Start here:** [product tour](docs/product-tour.md) (screenshots + live
 demo) · [install](docs/install.md) · [one-pager](docs/one-pager.md) ·
@@ -99,7 +99,7 @@ explicit implementation boundaries.
 
 ## Kubernetes API
 
-The `kubeneuron.io/v1alpha1` API currently defines seven cluster-scoped
+The `kubeneuron.io/v1alpha1` API currently defines eight cluster-scoped
 custom resources:
 
 | Kind | Purpose |
@@ -111,15 +111,18 @@ custom resources:
 | `GPUMaintenanceWindow` | Bounded automation pause for selected nodes; compiled into the runtime and enforced by the reconcile walk (matchLabels selectors, pauseAutomation only). |
 | `GPUNodeConfig` | Per-node settings; `paused` is enforced by the walk (SSH/BMC credential refs rejected fail-closed until an actuator consumes them). |
 | `AcceleratorRuntimeProfile` | Server-owned accelerator runtime contract (selector, pinned driver/DCGM versions, allowed semantic actions); gates physical reset eligibility, never enables execution. |
+| `GPUAutonomyPlan` | A narrow, expiring, declarative envelope for one approved action class; validation/status are CRD-native, while frozen simulation, approvals, rollout observations, and effects remain durable controller records. |
 
 Configuration objects select their root installation through
-`spec.kubeNeuronRef`. The operator compiles the supported subset into runtime
+`spec.kubeNeuronRef`; `GPUAutonomyPlan` is intentionally independent so a
+GitOps write cannot itself trigger an effect. The operator compiles the supported subset into runtime
 ConfigMaps, annotates managed workloads with a deterministic configuration
 digest, and reports validation/readiness on the root `KubeNeuron` status.
-All seven kinds are consumed: signal mappings override the detection catalog,
-maintenance windows and node-config pauses hold automation, and unsupported
-sub-fields inside any of them still fail validation rather than being
-silently serialized.
+All eight kinds are consumed or reconciled: signal mappings override the
+detection catalog, maintenance windows and node-config pauses hold automation,
+accelerator profiles narrow action authority, and autonomy plans receive a
+fail-closed status projection. Unsupported sub-fields still fail validation
+rather than being silently serialized.
 The API is `v1alpha1` and may change without compatibility guarantees.
 
 ## Build and local checks
@@ -216,8 +219,11 @@ resize state, and the current controller/agent workload generations are fully
 available. Deleting the root
 `KubeNeuron` also garbage-collects its owned claim, after which the
 StorageClass/PersistentVolume reclaim policy determines whether the data is
-retained. Backup, restore, and an explicit retention policy are not yet
-implemented.
+retained. The controller provides a SQLite snapshot endpoint and the
+[operations runbook](docs/operations.md#sqlite-workflow-store-backup-and-restore)
+defines restore; schema migrations are forward-only, so a rollback restores a
+pre-upgrade snapshot. Retention controls cover terminal operational resources,
+idempotency records, and audit chains as described in that runbook.
 
 The public listener (operator API, Alertmanager webhook, control panel, and
 metrics) serves plain HTTP by default and should sit behind a TLS-terminating
