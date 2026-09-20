@@ -265,6 +265,10 @@ cleanup_fixtures() {
 		--ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
 	"$KUBECTL_BIN" delete gpuplaybook "$PLAYBOOK_NAME" "$LADDER_PLAYBOOK_NAME" \
 		--ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
+	"$KUBECTL_BIN" delete acceleratorruntimeprofile kind-runtime-contract-e2e \
+		--ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
+	"$KUBECTL_BIN" label nodes -l kubeneuron.io/runtime-contract-e2e \
+		kubeneuron.io/runtime-contract-e2e- >/dev/null 2>&1 || true
 	"$KUBECTL_BIN" delete namespace "$TARGET_NAMESPACE" \
 		--ignore-not-found --wait=true --timeout=90s >/dev/null 2>&1 || true
 	"$KUBECTL_BIN" wait --for=delete "clusterrole/${ROOT_NAME}-controller" \
@@ -1274,6 +1278,685 @@ exercise_agent_authentication() {
 	wait "$port_forward_pid" >/dev/null 2>&1 || true
 	port_forward_pid=
 	note "public API and Alertmanager webhook required their distinct bearer tokens; the agent boundary rejected public/plaintext access, malformed/wrong tokens, missing/rogue certificates, wrong installation identity, deleted-Pod tokens, and arbitrary node payloads"
+}
+
+# exercise_runtime_contract_lifecycle drives the runtime contract through the
+# real kind controller and store: it labels the node one managed agent runs on
+# (the DaemonSet also schedules onto the control plane, so this may not be a
+# worker), applies an AcceleratorRuntimeProfile selecting it, waits until the
+# public coverage API itself reports that exact profile identity as selected,
+# posts a synthetic NVIDIA report from the real agent identity that
+# acknowledges the live profile UID/generation, and asserts the read-only
+# coverage endpoint classifies the node as Exact/FreshCompatible/Full. The
+# kind nodes have no GPU, so the report is test-only CPU evidence; it proves
+# the wiring, not the hardware.
+exercise_runtime_contract_lifecycle() {
+	local profile_name=kind-runtime-contract-e2e
+	local profile_label=kubeneuron.io/runtime-contract-e2e
+	local profile_digest='sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+	local profile_driver=570.1 profile_runtime=dcgm-4.1 profile_max_age=10m
+	local service_dns="${ROOT_NAME}-controller.${TARGET_NAMESPACE}.svc"
+	local pki_dir="$work_dir/pki"
+	local agent_pod agent_node agent_node_uid token_file header_file profile_manifest
+	local profile_uid='' profile_generation='' observed_generation='' deadline
+	local port_forward_log agent_local_port='' public_local_port='' agent_base=''
+	local report_file report_code coverage_file coverage_code coverage_summary
+	local selection attestation depth cov_node cov_node_uid cov_profile cov_uid cov_generation cov_digest
+	local -a valid_tls=()
+
+	agent_pod=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get pods \
+		-l "app.kubernetes.io/instance=${ROOT_NAME},app.kubernetes.io/component=agent" \
+		--field-selector=status.phase=Running \
+		-o jsonpath='{.items[0].metadata.name}')
+	[[ -n $agent_pod ]] || die "could not find a running managed agent Pod for the runtime contract test"
+	agent_node=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get pod "$agent_pod" -o jsonpath='{.spec.nodeName}')
+	[[ -n $agent_node ]] || die "agent Pod $agent_pod is not scheduled to a node"
+	# The agent DaemonSet tolerates the control plane, so the managed-agent
+	# node selected here may be the control-plane node rather than a worker;
+	# nothing below assumes otherwise.
+	agent_node_uid=$("$KUBECTL_BIN" get node "$agent_node" -o jsonpath='{.metadata.uid}')
+	[[ -n $agent_node_uid ]] || die "managed-agent node $agent_node has no UID"
+
+	token_file="$work_dir/runtime-contract-agent-token"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create token "${ROOT_NAME}-agent" \
+		--audience="$agentTokenAudience" --duration=10m \
+		--bound-object-kind=Pod --bound-object-name="$agent_pod" >"$token_file"
+	header_file="$work_dir/runtime-contract-authorization-header"
+	write_bearer_header "$token_file" "$header_file"
+
+	"$KUBECTL_BIN" label node "$agent_node" "${profile_label}=true" --overwrite >/dev/null
+	profile_manifest="$work_dir/runtime-contract-profile.yaml"
+	cat >"$profile_manifest" <<EOF
+apiVersion: kubeneuron.io/v1alpha1
+kind: AcceleratorRuntimeProfile
+metadata:
+  name: ${profile_name}
+spec:
+  kubeNeuronRef: ${ROOT_NAME}
+  vendor: nvidia
+  nodeSelector:
+    matchLabels:
+      ${profile_label}: "true"
+  profileDigest: ${profile_digest}
+  driverVersion: "${profile_driver}"
+  runtimeVersion: ${profile_runtime}
+  maxReportAge: ${profile_max_age}
+  allowedActions:
+    - action: reset-device
+      scopes:
+        - physical-device
+      requireVerifiedUnpartitionedTopology: true
+EOF
+	"$KUBECTL_BIN" apply -f "$profile_manifest" >/dev/null
+
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		profile_uid=$("$KUBECTL_BIN" get acceleratorruntimeprofile "$profile_name" \
+			-o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+		profile_generation=$("$KUBECTL_BIN" get acceleratorruntimeprofile "$profile_name" \
+			-o jsonpath='{.metadata.generation}' 2>/dev/null || true)
+		[[ -n $profile_uid && -n $profile_generation ]] && ((profile_generation > 0)) && break
+		sleep 1
+	done
+	[[ -n $profile_uid && -n $profile_generation ]] || die "AcceleratorRuntimeProfile $profile_name never reported UID and generation"
+	wait_deployment_ready "$TARGET_NAMESPACE" "${ROOT_NAME}-controller"
+	wait_root_condition True RuntimeAvailable
+	observed_generation=$("$KUBECTL_BIN" get acceleratorruntimeprofile "$profile_name" \
+		-o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)
+	note "runtime contract profile $profile_name uid=$profile_uid generation=$profile_generation observedGeneration=${observed_generation:-<unset>} selects $agent_node (uid=$agent_node_uid)"
+
+	port_forward_log="$work_dir/runtime-contract-port-forward.log"
+	: >"$port_forward_log"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+		"service/${ROOT_NAME}-controller" ":${agentIngressPort}" ":${controllerPort}" \
+		>"$port_forward_log" 2>&1 &
+	port_forward_pid=$!
+	deadline=$((SECONDS + 30))
+	while ((SECONDS < deadline)); do
+		agent_local_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${agentIngressPort}$/\\1/p" "$port_forward_log")
+		public_local_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$port_forward_log")
+		[[ -n $agent_local_port && -n $public_local_port ]] && break
+		kill -0 "$port_forward_pid" >/dev/null 2>&1 || {
+			printf '%s\n' "$(<"$port_forward_log")" >&2
+			die "runtime-contract port-forward exited early"
+		}
+		sleep 1
+	done
+	[[ -n $agent_local_port && -n $public_local_port ]] || die "runtime-contract port-forward did not allocate both local ports"
+	agent_base="https://${service_dns}:${agent_local_port}"
+	valid_tls=(
+		--silent --show-error --noproxy '*' --max-time 10
+		--resolve "${service_dns}:${agent_local_port}:127.0.0.1"
+		--cacert "$pki_dir/server-ca.crt"
+		--cert "$pki_dir/client.crt"
+		--key "$pki_dir/client.key"
+	)
+
+	# The profile reaches the controller through the operator's rendered
+	# ConfigMap projection and a controller reload, neither of which the
+	# Deployment readiness or the root RuntimeAvailable condition above waits
+	# for. Posting the report before that lands would be answered with
+	# ProfileNotFound coverage, so the public coverage API itself is polled
+	# until it reports the exact profile identity just applied as selected;
+	# only the attestation is still expected to be Missing at this point,
+	# because no report has been posted yet.
+	local pre_coverage_file="$work_dir/runtime-contract-coverage-pre-report.json"
+	local pre_code='' pre_identity='' pre_attestation=''
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		pre_code=$(curl --silent --show-error --noproxy '*' --max-time 10 \
+			-H 'Authorization: Bearer integration-operator-token' -o "$pre_coverage_file" -w '%{http_code}' \
+			"http://127.0.0.1:${public_local_port}/api/v1/nodes/${agent_node}/runtime-contract?vendor=nvidia" || true)
+		if [[ $pre_code == 200 ]]; then
+			pre_identity=$(jq -r '"\(.selection)/\(.profile_name)/\(.profile_uid)/\(.profile_generation)/\(.profile_digest)"' "$pre_coverage_file" 2>/dev/null || true)
+			[[ $pre_identity == "Exact/${profile_name}/${profile_uid}/${profile_generation}/${profile_digest}" ]] && break
+		fi
+		sleep 2
+	done
+	[[ $pre_code == 200 ]] || {
+		[[ -s $pre_coverage_file ]] && cat "$pre_coverage_file" >&2
+		die "runtime contract coverage endpoint returned ${pre_code:-?} while waiting for profile $profile_name to be selected, want 200"
+	}
+	[[ $pre_identity == "Exact/${profile_name}/${profile_uid}/${profile_generation}/${profile_digest}" ]] || {
+		jq . "$pre_coverage_file" >&2 || cat "$pre_coverage_file" >&2
+		die "profile $profile_name (uid=$profile_uid gen=$profile_generation) was never reported as the Exact selection for $agent_node within ${TIMEOUT_SECONDS}s: coverage was ${pre_identity:-?} (reasons: $(jq -c '.reasons // []' "$pre_coverage_file"))"
+	}
+	pre_attestation=$(jq -r '.attestation // ""' "$pre_coverage_file")
+	[[ $pre_attestation == Missing ]] || {
+		jq . "$pre_coverage_file" >&2
+		die "coverage for $agent_node before any report was posted has attestation ${pre_attestation:-?}, want Missing (a report from an earlier run or fixture is present)"
+	}
+	[[ $(jq -r '.node_uid // ""' "$pre_coverage_file") == "$agent_node_uid" ]] || die "pre-report coverage node_uid $(jq -r '.node_uid' "$pre_coverage_file") != $agent_node_uid"
+	note "controller selects profile $profile_name (uid=$profile_uid gen=$profile_generation) for $agent_node as Exact with attestation Missing; posting the synthetic report now"
+
+	# The report deliberately carries no node_uid: the controller stamps it from
+	# the Pod-bound agent identity and rejects any wire-supplied value.
+	report_file="$work_dir/runtime-contract-report.json"
+	cat >"$report_file" <<EOF
+{
+  "node": "${agent_node}",
+  "vendor": "nvidia",
+  "observed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "devices": [
+    {
+      "id": "GPU-e2e-00000000-0000-0000-0000-000000000000",
+      "kind": "physical",
+      "family": "gpu",
+      "model": "kind-synthetic-cpu-only"
+    }
+  ],
+  "driver_version": "${profile_driver}",
+  "runtime_version": "${profile_runtime}",
+  "topology_safety": "verified-unpartitioned",
+  "capabilities": [
+    {"action": "reset-device", "scopes": ["physical-device"]}
+  ],
+  "readiness": "ready",
+  "profile_digest": "${profile_digest}",
+  "profile_uid": "${profile_uid}",
+  "profile_generation": ${profile_generation},
+  "device_holders": []
+}
+EOF
+	report_code=$(curl "${valid_tls[@]}" -H "@$header_file" -H 'Content-Type: application/json' \
+		--data-binary "@$report_file" -o "$work_dir/runtime-contract-report-response" -w '%{http_code}' \
+		"${agent_base}/api/v1/agents/accelerators/report-v1")
+	[[ $report_code == 204 ]] || {
+		printf '%s\n' "$(<"$work_dir/runtime-contract-report-response")" >&2
+		die "synthetic accelerator report returned $report_code, want 204"
+	}
+
+	# The profile is already selected (proven above), so this wait only covers
+	# the report's own path into the store and the coverage read-back; it still
+	# gets the full per-wait budget rather than a fixed short window.
+	coverage_file="$work_dir/runtime-contract-coverage.json"
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	selection='' attestation='' depth='' coverage_code=''
+	while ((SECONDS < deadline)); do
+		coverage_code=$(curl --silent --show-error --noproxy '*' --max-time 10 \
+			-H 'Authorization: Bearer integration-operator-token' -o "$coverage_file" -w '%{http_code}' \
+			"http://127.0.0.1:${public_local_port}/api/v1/nodes/${agent_node}/runtime-contract?vendor=nvidia" || true)
+		if [[ $coverage_code == 200 ]]; then
+			selection=$(jq -r '.selection // ""' "$coverage_file")
+			attestation=$(jq -r '.attestation // ""' "$coverage_file")
+			depth=$(jq -r '.verification_depth // ""' "$coverage_file")
+			[[ $selection == Exact && $attestation == FreshCompatible && $depth == Full ]] && break
+		fi
+		sleep 2
+	done
+	[[ $coverage_code == 200 ]] || die "runtime contract coverage endpoint returned $coverage_code, want 200"
+	coverage_summary=$(jq -r '.summary // ""' "$coverage_file")
+	[[ $selection == Exact && $attestation == FreshCompatible && $depth == Full ]] || {
+		jq . "$coverage_file" >&2 || cat "$coverage_file" >&2
+		die "runtime contract coverage was ${selection:-?}/${attestation:-?}/${depth:-?} (reasons: $(jq -c '.reasons // []' "$coverage_file")), want Exact/FreshCompatible/Full"
+	}
+	cov_node=$(jq -r '.node_name // ""' "$coverage_file")
+	cov_node_uid=$(jq -r '.node_uid // ""' "$coverage_file")
+	cov_profile=$(jq -r '.profile_name // ""' "$coverage_file")
+	cov_uid=$(jq -r '.profile_uid // ""' "$coverage_file")
+	cov_generation=$(jq -r '.profile_generation // 0' "$coverage_file")
+	cov_digest=$(jq -r '.profile_digest // ""' "$coverage_file")
+	[[ $cov_node == "$agent_node" ]] || die "coverage node_name $cov_node != $agent_node"
+	[[ $cov_node_uid == "$agent_node_uid" ]] || die "coverage node_uid $cov_node_uid != current managed-agent node UID $agent_node_uid"
+	[[ $cov_profile == "$profile_name" ]] || die "coverage profile_name $cov_profile != $profile_name"
+	[[ $cov_uid == "$profile_uid" ]] || die "coverage profile_uid $cov_uid != $profile_uid"
+	[[ $cov_generation == "$profile_generation" ]] || die "coverage profile_generation $cov_generation != $profile_generation"
+	[[ $cov_digest == "$profile_digest" ]] || die "coverage profile_digest $cov_digest != $profile_digest"
+	[[ $(jq -r '.reasons // [] | length' "$coverage_file") == 0 ]] || die "Full coverage carried reasons: $(jq -c '.reasons' "$coverage_file")"
+
+	# Qualification lifecycle through the public operator API against the real
+	# controller and store, while the report/profile/label fixture is still
+	# live. min_duration is measured from the FIRST successful sample, so one
+	# observation can only ever be Observing; a second observation after the
+	# duration has elapsed is what proves ReadyForApproval.
+	local qual_base="http://127.0.0.1:${public_local_port}/api/v1/runtime-contract-qualifications"
+	local qual_min_duration_seconds=5
+	local qual_create_file qual_create_code qual_get_file qual_get_code qual_list_file qual_list_code
+	local qual_observe_file qual_observe_code qual_audit_file qual_audit_code qual_audit_actions
+	local qual_id qual_version qual_state qual_effective qual_ready qual_expires_at
+	local -a public_curl=(
+		--silent --show-error --noproxy '*' --max-time 10
+		-H 'Authorization: Bearer integration-operator-token'
+	)
+	qual_expires_at=$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+	qual_create_file="$work_dir/runtime-contract-qualification-create.json"
+	qual_create_code=$(curl "${public_curl[@]}" -H 'Content-Type: application/json' \
+		-H "Idempotency-Key: kind-integration-${RUN_ID}-runtime-contract-qualification-create" \
+		--data-binary "{\"actor\":\"harness\",\"nodes\":[\"${agent_node}\"],\"vendor\":\"nvidia\",\"requirements\":{\"min_samples\":1,\"min_duration\":\"${qual_min_duration_seconds}s\"},\"expires_at\":\"${qual_expires_at}\"}" \
+		-o "$qual_create_file" -w '%{http_code}' "$qual_base")
+	[[ $qual_create_code == 201 ]] || {
+		printf '%s\n' "$(<"$qual_create_file")" >&2
+		die "runtime contract qualification create returned $qual_create_code, want 201"
+	}
+	qual_id=$(jq -r '.id // ""' "$qual_create_file")
+	qual_version=$(jq -r '.resource_version // 0' "$qual_create_file")
+	[[ -n $qual_id ]] || die "runtime contract qualification create returned no id"
+	((qual_version > 0)) || die "runtime contract qualification $qual_id has resource_version $qual_version, want > 0"
+	qual_state=$(jq -r '.state // ""' "$qual_create_file")
+	qual_effective=$(jq -r '.effective_state // ""' "$qual_create_file")
+	qual_ready=$(jq -r '.ready_for_approval' "$qual_create_file")
+	[[ $qual_state == Observing && $qual_effective == Observing && $qual_ready == false ]] || {
+		jq . "$qual_create_file" >&2 || cat "$qual_create_file" >&2
+		die "created qualification $qual_id was ${qual_state:-?}/${qual_effective:-?}/ready=${qual_ready:-?}, want Observing/Observing/ready=false"
+	}
+	[[ $(jq -r '.successful_samples // 0' "$qual_create_file") == 0 && $(jq -r '.total_observations // 0' "$qual_create_file") == 0 ]] ||
+		die "created qualification $qual_id already carries samples: $(jq -c '{successful_samples, total_observations}' "$qual_create_file")"
+	[[ $(jq -r '.cohort | length' "$qual_create_file") == 1 ]] || die "qualification cohort is not exactly the selected managed-agent node: $(jq -c '.cohort' "$qual_create_file")"
+	[[ $(jq -r '.cohort[0].name' "$qual_create_file") == "$agent_node" ]] || die "qualification cohort node $(jq -r '.cohort[0].name' "$qual_create_file") != $agent_node"
+	[[ $(jq -r '.cohort[0].uid' "$qual_create_file") == "$agent_node_uid" ]] || die "qualification cohort uid $(jq -r '.cohort[0].uid' "$qual_create_file") != $agent_node_uid"
+	[[ $(jq -r '.profile.name' "$qual_create_file") == "$profile_name" ]] || die "qualification profile.name $(jq -r '.profile.name' "$qual_create_file") != $profile_name"
+	[[ $(jq -r '.profile.uid' "$qual_create_file") == "$profile_uid" ]] || die "qualification profile.uid $(jq -r '.profile.uid' "$qual_create_file") != $profile_uid"
+	[[ $(jq -r '.profile.generation' "$qual_create_file") == "$profile_generation" ]] || die "qualification profile.generation $(jq -r '.profile.generation' "$qual_create_file") != $profile_generation"
+	[[ $(jq -r '.profile.digest' "$qual_create_file") == "$profile_digest" ]] || die "qualification profile.digest $(jq -r '.profile.digest' "$qual_create_file") != $profile_digest"
+	[[ $(jq -r '.initial_coverage | length' "$qual_create_file") == 1 ]] || die "qualification initial_coverage is not one node: $(jq -c '.initial_coverage' "$qual_create_file")"
+	[[ $(jq -r '.initial_coverage[0] | "\(.node)/\(.node_uid)/\(.selection)/\(.attestation)/\(.verification_depth)"' "$qual_create_file") == "${agent_node}/${agent_node_uid}/Exact/FreshCompatible/Full" ]] || {
+		jq '.initial_coverage' "$qual_create_file" >&2
+		die "qualification $qual_id initial coverage is not Exact/FreshCompatible/Full for $agent_node"
+	}
+	[[ $(jq -r '.initial_coverage[0].profile.uid' "$qual_create_file") == "$profile_uid" ]] || die "qualification initial_coverage profile.uid != $profile_uid"
+	note "runtime contract qualification $qual_id created: Observing over $agent_node with initial Full coverage (resource_version=$qual_version)"
+
+	qual_get_file="$work_dir/runtime-contract-qualification-get.json"
+	qual_get_code=$(curl "${public_curl[@]}" -o "$qual_get_file" -w '%{http_code}' "${qual_base}/${qual_id}")
+	[[ $qual_get_code == 200 ]] || {
+		printf '%s\n' "$(<"$qual_get_file")" >&2
+		die "runtime contract qualification GET returned $qual_get_code, want 200"
+	}
+	[[ $(jq -r '.id' "$qual_get_file") == "$qual_id" ]] || die "qualification GET returned id $(jq -r '.id' "$qual_get_file"), want $qual_id"
+	[[ $(jq -r '"\(.state)/\(.effective_state)/\(.ready_for_approval)/\(.total_observations)"' "$qual_get_file") == "Observing/Observing/false/0" ]] || {
+		jq . "$qual_get_file" >&2
+		die "qualification $qual_id GET before sampling is not Observing with zero observations"
+	}
+	qual_list_file="$work_dir/runtime-contract-qualification-list.json"
+	qual_list_code=$(curl "${public_curl[@]}" -o "$qual_list_file" -w '%{http_code}' "$qual_base")
+	[[ $qual_list_code == 200 ]] || {
+		printf '%s\n' "$(<"$qual_list_file")" >&2
+		die "runtime contract qualification list returned $qual_list_code, want 200"
+	}
+	[[ $(jq -r --arg id "$qual_id" '[.items[]? | select(.id == $id)] | length' "$qual_list_file") == 1 ]] || {
+		jq -c '[.items[]? | {id, state}]' "$qual_list_file" >&2
+		die "qualification $qual_id is not listed exactly once by the public list endpoint"
+	}
+	[[ $(jq -r --arg id "$qual_id" '.items[] | select(.id == $id) | "\(.state)/\(.effective_state)/\(.ready_for_approval)"' "$qual_list_file") == "Observing/Observing/false" ]] ||
+		die "qualification $qual_id is listed but not Observing before sampling"
+
+	# observe_qualification posts one observation bound to the version last read
+	# and stores the response in qual_observe_file.
+	observe_qualification() {
+		local key_suffix=$1
+		qual_observe_file="$work_dir/runtime-contract-qualification-observe-${key_suffix}.json"
+		qual_observe_code=$(curl "${public_curl[@]}" -H 'Content-Type: application/json' \
+			-H "Idempotency-Key: kind-integration-${RUN_ID}-runtime-contract-qualification-observe-${key_suffix}" \
+			--data-binary "{\"actor\":\"harness\",\"resource_version\":${qual_version}}" \
+			-o "$qual_observe_file" -w '%{http_code}' "${qual_base}/${qual_id}/observe")
+		[[ $qual_observe_code == 200 ]] || {
+			printf '%s\n' "$(<"$qual_observe_file")" >&2
+			die "runtime contract qualification observe (${key_suffix}) returned $qual_observe_code, want 200"
+		}
+		qual_version=$(jq -r '.resource_version // 0' "$qual_observe_file")
+		[[ $(jq -r '.observations[-1].successful' "$qual_observe_file") == true ]] || {
+			jq '.observations[-1]' "$qual_observe_file" >&2
+			die "qualification $qual_id observation (${key_suffix}) was not a successful Full sample"
+		}
+	}
+
+	# First sample: the count requirement is met, the duration is not yet.
+	sleep "$qual_min_duration_seconds"
+	observe_qualification first
+	[[ $(jq -r '"\(.successful_samples)/\(.total_observations)/\(.state)/\(.effective_state)/\(.ready_for_approval)"' "$qual_observe_file") == "1/1/Observing/Observing/false" ]] || {
+		jq . "$qual_observe_file" >&2
+		die "qualification $qual_id after the first sample was $(jq -c '{successful_samples, total_observations, state, effective_state, ready_for_approval}' "$qual_observe_file"), want 1/1 and still Observing"
+	}
+	# Second sample after min_duration has elapsed since the first successful one.
+	sleep "$qual_min_duration_seconds"
+	observe_qualification second
+	qual_state=$(jq -r '.state // ""' "$qual_observe_file")
+	qual_effective=$(jq -r '.effective_state // ""' "$qual_observe_file")
+	qual_ready=$(jq -r '.ready_for_approval' "$qual_observe_file")
+	[[ $(jq -r '"\(.successful_samples)/\(.total_observations)"' "$qual_observe_file") == "2/2" && $qual_state == ReadyForApproval && $qual_effective == ReadyForApproval && $qual_ready == true ]] || {
+		jq . "$qual_observe_file" >&2
+		die "qualification $qual_id after the second sample was $(jq -c '{successful_samples, total_observations, state, effective_state, ready_for_approval}' "$qual_observe_file"), want 2/2 ReadyForApproval"
+	}
+	[[ $(jq -r '.ready_at // ""' "$qual_observe_file") != "" ]] || die "ReadyForApproval qualification $qual_id has no ready_at"
+	[[ $(jq -r '.cohort[0].uid' "$qual_observe_file") == "$agent_node_uid" && $(jq -r '.profile.uid' "$qual_observe_file") == "$profile_uid" ]] ||
+		die "qualification $qual_id frozen bindings changed across observations: $(jq -c '{cohort, profile}' "$qual_observe_file")"
+
+	qual_audit_file="$work_dir/runtime-contract-qualification-audit.json"
+	qual_audit_code=$(curl "${public_curl[@]}" -o "$qual_audit_file" -w '%{http_code}' \
+		"http://127.0.0.1:${public_local_port}/api/v1/audit-events?kind=runtime-contract-qualification&resource_id=${qual_id}&limit=50")
+	[[ $qual_audit_code == 200 ]] || {
+		printf '%s\n' "$(<"$qual_audit_file")" >&2
+		die "audit-events for qualification $qual_id returned $qual_audit_code, want 200"
+	}
+	qual_audit_actions=$(jq -r --arg id "$qual_id" '[.items[]? | select(.resource_id == $id) | .action] | join(",")' "$qual_audit_file")
+	[[ $qual_audit_actions == "create,observe,observe,ready" ]] || {
+		jq -c '[.items[]? | {action, actor, result, resource_id}]' "$qual_audit_file" >&2
+		die "audit actions for qualification $qual_id were '${qual_audit_actions}', want create,observe,observe,ready"
+	}
+	[[ $(jq -r '[.items[]? | select(.actor != "token:harness")] | length' "$qual_audit_file") == 0 ]] ||
+		die "qualification audit events carry an unexpected actor: $(jq -c '[.items[]?.actor]' "$qual_audit_file")"
+	[[ $(jq -r '[.items[]? | select(.action == "ready") | .result] | first // ""' "$qual_audit_file") == ReadyForApproval ]] ||
+		die "qualification ready audit event does not record ReadyForApproval: $(jq -c '[.items[]? | select(.action == "ready")]' "$qual_audit_file")"
+	note "runtime contract qualification $qual_id reached ReadyForApproval after 2 Full samples with audit create,observe,observe,ready"
+
+	# CLI coverage: the same live fixture (label, profile, synthetic report,
+	# public port-forward) is driven through the built kubeneuronctl binary.
+	# It creates a SECOND, separate qualification so the HTTP lifecycle above is
+	# neither reused nor weakened; with min_samples=1 the single CLI observation
+	# meets the count but, because min_duration is measured from that first
+	# successful sample, must correctly still be Observing.
+	local ctl_bin="$REPO_ROOT/bin/kubeneuronctl"
+	local ctl_actor=harness-cli ctl_min_duration_seconds=5
+	local ctl_coverage_file ctl_create_file ctl_list_file ctl_show_file ctl_observe_file ctl_audit_file ctl_stderr_file
+	local ctl_qual_id ctl_qual_version ctl_qual_expires_at ctl_observe_version ctl_audit_actions
+	local -a ctl=(
+		"$ctl_bin"
+		--server "http://127.0.0.1:${public_local_port}"
+		--token integration-operator-token
+	)
+	[[ -x $ctl_bin ]] || die "missing CLI binary bin/kubeneuronctl; run 'make build' first"
+
+	# run_ctl runs one bounded CLI invocation, writing stdout to $1 and stderr
+	# to a sibling file; a failure prints both and dies.
+	run_ctl() {
+		local out_file=$1
+		shift
+		ctl_stderr_file="${out_file%.json}.stderr"
+		if ! timeout 30s "${ctl[@]}" "$@" >"$out_file" 2>"$ctl_stderr_file"; then
+			printf 'kubeneuronctl %s failed (stdout):\n' "$*" >&2
+			cat "$out_file" >&2
+			printf 'kubeneuronctl %s failed (stderr):\n' "$*" >&2
+			cat "$ctl_stderr_file" >&2
+			die "kubeneuronctl $1 ${2:-} failed against the live public port-forward"
+		fi
+		jq -e 'type == "object"' "$out_file" >/dev/null 2>&1 || {
+			cat "$out_file" >&2
+			die "kubeneuronctl $1 ${2:-} did not print a JSON object"
+		}
+	}
+
+	ctl_coverage_file="$work_dir/runtime-contract-cli-coverage.json"
+	run_ctl "$ctl_coverage_file" runtime-contracts coverage "$agent_node" --vendor nvidia
+	[[ $(jq -r '"\(.node_name)/\(.selection)/\(.attestation)/\(.verification_depth)/\(.profile_name)"' "$ctl_coverage_file") == "${agent_node}/Exact/FreshCompatible/Full/${profile_name}" ]] || {
+		jq . "$ctl_coverage_file" >&2
+		die "CLI coverage for $agent_node was $(jq -c '{node_name, selection, attestation, verification_depth, profile_name, reasons}' "$ctl_coverage_file"), want Exact/FreshCompatible/Full with profile $profile_name"
+	}
+	[[ $(jq -r '.profile_uid // ""' "$ctl_coverage_file") == "$profile_uid" ]] || die "CLI coverage profile_uid $(jq -r '.profile_uid' "$ctl_coverage_file") != $profile_uid"
+	note "kubeneuronctl runtime-contracts coverage reported $agent_node as Exact/FreshCompatible/Full under $profile_name"
+
+	ctl_qual_expires_at=$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+	ctl_create_file="$work_dir/runtime-contract-cli-qualification-create.json"
+	run_ctl "$ctl_create_file" runtime-qualifications create \
+		--nodes "$agent_node" --vendor nvidia \
+		--min-samples 1 --min-duration "${ctl_min_duration_seconds}s" \
+		--expires-at "$ctl_qual_expires_at" --actor "$ctl_actor"
+	ctl_qual_id=$(jq -r '.id // ""' "$ctl_create_file")
+	ctl_qual_version=$(jq -r '.resource_version // 0' "$ctl_create_file")
+	[[ -n $ctl_qual_id ]] || die "CLI qualification create returned no id"
+	[[ $ctl_qual_id != "$qual_id" ]] || die "CLI qualification create returned the HTTP lifecycle qualification $qual_id instead of a new one"
+	((ctl_qual_version > 0)) || die "CLI qualification $ctl_qual_id has resource_version $ctl_qual_version, want > 0"
+	[[ $(jq -r '"\(.state)/\(.effective_state)/\(.ready_for_approval)/\(.successful_samples)/\(.total_observations)"' "$ctl_create_file") == "Observing/Observing/false/0/0" ]] || {
+		jq . "$ctl_create_file" >&2
+		die "CLI-created qualification $ctl_qual_id was $(jq -c '{state, effective_state, ready_for_approval, successful_samples, total_observations}' "$ctl_create_file"), want Observing with zero samples"
+	}
+	[[ $(jq -r '.requirements.min_samples' "$ctl_create_file") == 1 ]] || die "CLI qualification $ctl_qual_id requirements.min_samples $(jq -r '.requirements.min_samples' "$ctl_create_file") != 1"
+	[[ $(jq -r '.cohort | length' "$ctl_create_file") == 1 && $(jq -r '.cohort[0].name' "$ctl_create_file") == "$agent_node" && $(jq -r '.cohort[0].uid' "$ctl_create_file") == "$agent_node_uid" ]] ||
+		die "CLI qualification $ctl_qual_id cohort is not exactly $agent_node/$agent_node_uid: $(jq -c '.cohort' "$ctl_create_file")"
+	[[ $(jq -r '.profile.uid' "$ctl_create_file") == "$profile_uid" ]] || die "CLI qualification $ctl_qual_id profile.uid $(jq -r '.profile.uid' "$ctl_create_file") != $profile_uid"
+	note "kubeneuronctl runtime-qualifications create produced $ctl_qual_id: Observing over $agent_node (resource_version=$ctl_qual_version)"
+
+	ctl_list_file="$work_dir/runtime-contract-cli-qualification-list.json"
+	run_ctl "$ctl_list_file" runtime-qualifications list
+	[[ $(jq -r --arg id "$ctl_qual_id" '[.items[]? | select(.id == $id)] | length' "$ctl_list_file") == 1 ]] || {
+		jq -c '[.items[]? | {id, state}]' "$ctl_list_file" >&2
+		die "CLI qualification $ctl_qual_id is not listed exactly once by kubeneuronctl runtime-qualifications list"
+	}
+	[[ $(jq -r --arg id "$qual_id" '[.items[]? | select(.id == $id)] | length' "$ctl_list_file") == 1 ]] ||
+		die "kubeneuronctl runtime-qualifications list no longer shows the HTTP lifecycle qualification $qual_id"
+	ctl_show_file="$work_dir/runtime-contract-cli-qualification-show.json"
+	run_ctl "$ctl_show_file" runtime-qualifications show "$ctl_qual_id"
+	[[ $(jq -r '"\(.id)/\(.resource_version)/\(.state)/\(.effective_state)/\(.ready_for_approval)/\(.total_observations)"' "$ctl_show_file") == "${ctl_qual_id}/${ctl_qual_version}/Observing/Observing/false/0" ]] || {
+		jq . "$ctl_show_file" >&2
+		die "kubeneuronctl runtime-qualifications show $ctl_qual_id returned $(jq -c '{id, resource_version, state, effective_state, ready_for_approval, total_observations}' "$ctl_show_file"), want the Observing qualification at version $ctl_qual_version"
+	}
+
+	# One CLI observation bound to the version just shown. min_duration only
+	# starts at this first successful sample, so ReadyForApproval is impossible
+	# here and Observing with 1/1 samples is the correct outcome.
+	sleep "$ctl_min_duration_seconds"
+	ctl_observe_file="$work_dir/runtime-contract-cli-qualification-observe.json"
+	run_ctl "$ctl_observe_file" runtime-qualifications observe "$ctl_qual_id" \
+		--resource-version "$ctl_qual_version" --actor "$ctl_actor"
+	ctl_observe_version=$(jq -r '.resource_version // 0' "$ctl_observe_file")
+	[[ $(jq -r '.id' "$ctl_observe_file") == "$ctl_qual_id" ]] || die "CLI observe returned id $(jq -r '.id' "$ctl_observe_file"), want $ctl_qual_id"
+	((ctl_observe_version > ctl_qual_version)) || die "CLI observe left resource_version at $ctl_observe_version, want > $ctl_qual_version"
+	[[ $(jq -r '.observations | length' "$ctl_observe_file") == 1 && $(jq -r '.observations[0].successful' "$ctl_observe_file") == true ]] || {
+		jq '.observations' "$ctl_observe_file" >&2
+		die "CLI qualification $ctl_qual_id does not carry exactly one successful observation"
+	}
+	[[ $(jq -r '"\(.successful_samples)/\(.total_observations)/\(.state)/\(.effective_state)/\(.ready_for_approval)"' "$ctl_observe_file") == "1/1/Observing/Observing/false" ]] || {
+		jq . "$ctl_observe_file" >&2
+		die "CLI qualification $ctl_qual_id after one sample was $(jq -c '{successful_samples, total_observations, state, effective_state, ready_for_approval}' "$ctl_observe_file"), want 1/1 and still Observing"
+	}
+	[[ $(jq -r '.first_successful_sample_at // ""' "$ctl_observe_file") != "" ]] || die "CLI qualification $ctl_qual_id records no first_successful_sample_at after a successful sample"
+
+	ctl_audit_file="$work_dir/runtime-contract-cli-qualification-audit.json"
+	run_ctl "$ctl_audit_file" audit-events --kind runtime-contract-qualification --resource-id "$ctl_qual_id" --limit 50
+	ctl_audit_actions=$(jq -r --arg id "$ctl_qual_id" '[.items[]? | select(.resource_id == $id) | .action] | join(",")' "$ctl_audit_file")
+	[[ $ctl_audit_actions == "create,observe" ]] || {
+		jq -c '[.items[]? | {action, actor, result, resource_id}]' "$ctl_audit_file" >&2
+		die "audit actions for CLI qualification $ctl_qual_id were '${ctl_audit_actions}', want create,observe"
+	}
+	[[ $(jq -r --arg actor "token:${ctl_actor}" '[.items[]? | select(.actor != $actor)] | length' "$ctl_audit_file") == 0 ]] ||
+		die "CLI qualification audit events carry an actor other than token:${ctl_actor}: $(jq -c '[.items[]?.actor]' "$ctl_audit_file")"
+	note "kubeneuronctl runtime-qualifications observe recorded one Full sample on $ctl_qual_id (still Observing, audit create,observe by token:${ctl_actor})"
+
+	# exercise_candidate_runtime_contract_impact drives the v0.5 candidate
+	# runtime-contract impact through the real public API and the CLI, on the
+	# same live fixture: a CandidateConfiguration whose one profile carries the
+	# live profile's identity (name/uid/generation/digest) and selector is
+	# uploaded, previewed, and the preview's delta for the managed-agent node
+	# must say that a candidate profile can only ever be attested by fresh
+	# post-deploy evidence, so the After decision fails closed. Evidence only:
+	# nothing here deploys, applies, or promotes the candidate (no such route
+	# exists on this surface), and the live profile is untouched.
+	#
+	# A preview captures EVERY inventory node and refuses (incomplete
+	# inventory) when any capture is unusable. Only the managed-agent node
+	# holds a report, so each other kind node first posts a synthetic
+	# profile-less report from its own agent Pod identity; those nodes are
+	# uncovered by both the live and the candidate profile and stay
+	# observe-only. The target delta is then located by node name rather than
+	# assumed to be the only result.
+	exercise_candidate_runtime_contract_impact() {
+		local other_pod other_node other_token other_header other_report other_code
+		local candidate_file candidate_upload_file candidate_id candidate_state
+		local preview_file preview_id preview_delta_file preview_bucket
+		local impact_file impact_identity after_state after_allowed before_state
+		local stored_preview_file stored_code candidate_show_file
+		local entry reason
+		local -a all_agents=() other_agents=()
+
+		mapfile -t all_agents < <("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get pods \
+			-l "app.kubernetes.io/instance=${ROOT_NAME},app.kubernetes.io/component=agent" \
+			--field-selector=status.phase=Running \
+			-o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeName}{"\n"}{end}' |
+			awk '$2 != ""')
+		((${#all_agents[@]} > 0)) || die "no running managed agent Pods for the candidate impact preview"
+		for entry in "${all_agents[@]}"; do
+			other_pod=${entry%% *}
+			other_node=${entry#* }
+			other_token="$work_dir/candidate-impact-token-${other_node}"
+			other_header="$work_dir/candidate-impact-header-${other_node}"
+			"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create token "${ROOT_NAME}-agent" \
+				--audience="$agentTokenAudience" --duration=10m \
+				--bound-object-kind=Pod --bound-object-name="$other_pod" >"$other_token"
+			write_bearer_header "$other_token" "$other_header"
+			other_report="$work_dir/candidate-impact-report-${other_node}.json"
+			if [[ $other_node == "$agent_node" ]]; then
+				# The managed-agent node re-posts the SAME profile-bearing report
+				# with a fresh observed_at, so the live contract's max_report_age
+				# cannot lapse between the lifecycle above and the capture below.
+				jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.observed_at = $now' "$report_file" >"$other_report"
+			else
+				# No profile identity: nothing selects this node, so the report
+				# attests no contract. Still synthetic CPU-only evidence.
+				other_agents+=("$other_node")
+				cat >"$other_report" <<EOF
+{
+  "node": "${other_node}",
+  "vendor": "nvidia",
+  "observed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "devices": [],
+  "driver_version": "${profile_driver}",
+  "runtime_version": "${profile_runtime}",
+  "topology_safety": "verified-unpartitioned",
+  "capabilities": [],
+  "readiness": "ready",
+  "device_holders": []
+}
+EOF
+			fi
+			other_code=$(curl "${valid_tls[@]}" -H "@$other_header" -H 'Content-Type: application/json' \
+				--data-binary "@$other_report" -o "$work_dir/candidate-impact-report-response-${other_node}" -w '%{http_code}' \
+				"${agent_base}/api/v1/agents/accelerators/report-v1")
+			[[ $other_code == 204 ]] || {
+				printf '%s\n' "$(<"$work_dir/candidate-impact-report-response-${other_node}")" >&2
+				die "synthetic report for $other_node (pod $other_pod) returned $other_code, want 204"
+			}
+		done
+		note "candidate impact: refreshed the $agent_node report and posted synthetic profile-less reports from ${#other_agents[@]} other managed-agent node(s) so the preview can capture the whole inventory"
+
+		# The candidate is rendered from the live profile the controller is
+		# serving right now (identity captured above and re-read from the
+		# cluster object), never typed in by hand.
+		[[ $("$KUBECTL_BIN" get acceleratorruntimeprofile "$profile_name" -o jsonpath='{.metadata.uid}/{.metadata.generation}') == "${profile_uid}/${profile_generation}" ]] ||
+			die "live profile $profile_name identity changed under the candidate render: $("$KUBECTL_BIN" get acceleratorruntimeprofile "$profile_name" -o jsonpath='{.metadata.uid}/{.metadata.generation}') != ${profile_uid}/${profile_generation}"
+		candidate_file="$work_dir/candidate-runtime-contract.yaml"
+		cat >"$candidate_file" <<EOF
+apiVersion: kubeneuron.io/v1alpha1
+kind: CandidateConfiguration
+accelerator_profiles:
+  - name: ${profile_name}
+    node_selector:
+      ${profile_label}: "true"
+    vendor: nvidia
+    profile_digest: ${profile_digest}
+    driver_version: "${profile_driver}"
+    runtime_version: ${profile_runtime}
+    profile_uid: ${profile_uid}
+    profile_generation: ${profile_generation}
+    max_report_age: ${profile_max_age}
+    allowed_actions:
+      - action: reset-device
+        scopes: [physical-device]
+        require_verified_unpartitioned_topology: true
+EOF
+		candidate_upload_file="$work_dir/candidate-runtime-contract-upload.json"
+		run_ctl "$candidate_upload_file" candidates upload "$candidate_file" --actor "$ctl_actor"
+		candidate_id=$(jq -r '.id // ""' "$candidate_upload_file")
+		candidate_state=$(jq -r '.state // ""' "$candidate_upload_file")
+		[[ -n $candidate_id ]] || die "kubeneuronctl candidates upload returned no id"
+		[[ $candidate_state == uploaded ]] || die "candidate $candidate_id state is ${candidate_state:-?}, want uploaded"
+		[[ $(jq -r '.profiles | length' "$candidate_upload_file") == 1 ]] || die "candidate $candidate_id compiled $(jq -r '.profiles | length' "$candidate_upload_file") profiles, want 1"
+		# The candidate upload response serializes config.AcceleratorRuntimeProfile,
+		# which carries yaml tags only, so encoding/json emits Go field names.
+		[[ $(jq -r '.profiles[0] | "\(.Name)/\(.ProfileUID)/\(.ProfileGeneration)/\(.ProfileDigest)"' "$candidate_upload_file") == "${profile_name}/${profile_uid}/${profile_generation}/${profile_digest}" ]] || {
+			jq '.profiles' "$candidate_upload_file" >&2
+			die "candidate $candidate_id profile identity does not match the live profile ${profile_name}/${profile_uid}/${profile_generation}/${profile_digest}"
+		}
+		note "kubeneuronctl candidates upload produced $candidate_id carrying the live profile identity ($(jq -r '.normalized_digest' "$candidate_upload_file"))"
+
+		preview_file="$work_dir/candidate-runtime-contract-preview.json"
+		run_ctl "$preview_file" preview "$candidate_id" --actor "$ctl_actor"
+		preview_id=$(jq -r '.id // ""' "$preview_file")
+		[[ -n $preview_id ]] || die "kubeneuronctl preview returned no id"
+		[[ $(jq -r '.candidate_id' "$preview_file") == "$candidate_id" ]] || die "preview $preview_id is for candidate $(jq -r '.candidate_id' "$preview_file"), want $candidate_id"
+		[[ $(jq -r '.runtime_contract_impact_version // ""' "$preview_file") == candidate-runtime-contract-impact/v1 ]] ||
+			die "preview $preview_id runtime_contract_impact_version is $(jq -r '.runtime_contract_impact_version' "$preview_file"), want candidate-runtime-contract-impact/v1"
+		[[ $(jq -r '.runtime_contract_profile_change // ""' "$preview_file") == ProfileSetReplaced ]] ||
+			die "preview $preview_id runtime_contract_profile_change is $(jq -r '.runtime_contract_profile_change' "$preview_file"), want ProfileSetReplaced"
+
+		# Locate the managed-agent node's delta across all four buckets; the
+		# other kind nodes produce deltas of their own.
+		preview_delta_file="$work_dir/candidate-runtime-contract-preview-delta.json"
+		jq -c --arg node "$agent_node" '
+			[ {bucket: "newly_eligible", deltas: (.newly_eligible // [])},
+			  {bucket: "newly_blocked", deltas: (.newly_blocked // [])},
+			  {bucket: "changed_observed_only", deltas: (.changed_observed_only // [])},
+			  {bucket: "unchanged", deltas: (.unchanged // [])} ]
+			| map(.bucket as $b | .deltas[] | select(.node == $node) | {bucket: $b, delta: .})' "$preview_file" >"$preview_delta_file"
+		[[ $(jq -r 'length' "$preview_delta_file") == 1 ]] || {
+			jq -c '{newly_eligible: [.newly_eligible[]?.node], newly_blocked: [.newly_blocked[]?.node], changed_observed_only: [.changed_observed_only[]?.node], unchanged: [.unchanged[]?.node]}' "$preview_file" >&2
+			die "preview $preview_id carries $(jq -r 'length' "$preview_delta_file") deltas for $agent_node, want exactly one"
+		}
+		preview_bucket=$(jq -r '.[0].bucket' "$preview_delta_file")
+		before_state=$(jq -r '.[0].delta.before.state // ""' "$preview_delta_file")
+		after_state=$(jq -r '.[0].delta.after.state // ""' "$preview_delta_file")
+		after_allowed=$(jq -r '.[0].delta.after.allowed_actions // [] | length' "$preview_delta_file")
+		[[ $before_state == Eligible ]] || {
+			jq '.[0].delta.before' "$preview_delta_file" >&2
+			die "preview before-decision for $agent_node is ${before_state:-?}, want Eligible under the live Full contract"
+		}
+		[[ $after_state != Eligible && $after_state != "" && $after_allowed == 0 ]] || {
+			jq '.[0].delta.after' "$preview_delta_file" >&2
+			die "preview after-decision for $agent_node is ${after_state:-?} with $after_allowed allowed action(s), want fail-closed (not Eligible, no allowed actions)"
+		}
+		[[ $preview_bucket == newly_blocked && $(jq -r '.[0].delta.changed' "$preview_delta_file") == true ]] || {
+			jq '.[0]' "$preview_delta_file" >&2
+			die "preview delta for $agent_node landed in ${preview_bucket} (changed=$(jq -r '.[0].delta.changed' "$preview_delta_file")), want newly_blocked/changed"
+		}
+		impact_file="$work_dir/candidate-runtime-contract-impact.json"
+		jq '.[0].delta.runtime_contract_impact // empty' "$preview_delta_file" >"$impact_file"
+		[[ -s $impact_file ]] || die "preview delta for $agent_node carries no runtime_contract_impact"
+		impact_identity=$(jq -r '"\(.version)/\(.assessment)/\(.node)/\(.vendor)/\(.profile_change)/\(.static_selection)/\(.post_deploy_attestation)/\(.captured_report_usable_as_candidate_attestation)/\(.after_decision_evidence)"' "$impact_file")
+		[[ $impact_identity == "candidate-runtime-contract-impact/v1/PreDeployStatic/${agent_node}/nvidia/ProfileSetReplaced/Exact/FreshRequired/false/CandidateProfileWithoutReport" ]] || {
+			jq . "$impact_file" >&2
+			die "runtime contract impact for $agent_node was $impact_identity, want candidate-runtime-contract-impact/v1/PreDeployStatic/${agent_node}/nvidia/ProfileSetReplaced/Exact/FreshRequired/false/CandidateProfileWithoutReport"
+		}
+		[[ $(jq -r '"\(.candidate_profile_name)/\(.candidate_profile_uid)/\(.candidate_profile_generation)/\(.candidate_profile_digest)"' "$impact_file") == "${profile_name}/${profile_uid}/${profile_generation}/${profile_digest}" ]] || {
+			jq . "$impact_file" >&2
+			die "runtime contract impact candidate profile identity does not match ${profile_name}/${profile_uid}/${profile_generation}/${profile_digest}"
+		}
+		for reason in CandidateProfilesPresent CapturedReportPredatesCandidate; do
+			[[ $(jq -r --arg r "$reason" '[.reasons[]? | select(. == $r)] | length' "$impact_file") == 1 ]] ||
+				die "runtime contract impact reasons $(jq -c '.reasons' "$impact_file") lack $reason"
+		done
+		[[ $(jq -r '[.reasons[]? | select(. == "ProfileNotFound")] | length' "$impact_file") == 0 ]] ||
+			die "runtime contract impact for $agent_node reports ProfileNotFound although the candidate profile selects it: $(jq -c '.reasons' "$impact_file")"
+
+		# The preview is durable and re-readable through the public API, and
+		# the candidate is still merely uploaded: nothing was promoted.
+		stored_preview_file="$work_dir/candidate-runtime-contract-preview-stored.json"
+		stored_code=$(curl "${public_curl[@]}" -o "$stored_preview_file" -w '%{http_code}' \
+			"http://127.0.0.1:${public_local_port}/api/v1/previews/${preview_id}")
+		[[ $stored_code == 200 ]] || {
+			printf '%s\n' "$(<"$stored_preview_file")" >&2
+			die "GET /api/v1/previews/$preview_id returned $stored_code, want 200"
+		}
+		[[ $(jq -r --arg node "$agent_node" '[.newly_blocked[]? | select(.node == $node) | .runtime_contract_impact.post_deploy_attestation] | first // ""' "$stored_preview_file") == FreshRequired ]] ||
+			die "stored preview $preview_id no longer shows FreshRequired for $agent_node"
+		candidate_show_file="$work_dir/candidate-runtime-contract-show.json"
+		run_ctl "$candidate_show_file" candidates show "$candidate_id"
+		[[ $(jq -r '.state' "$candidate_show_file") == uploaded ]] || die "candidate $candidate_id is $(jq -r '.state' "$candidate_show_file") after preview, want still uploaded (preview must never promote)"
+		# The live contract is untouched by the preview: coverage is still
+		# Full under the live profile.
+		run_ctl "$ctl_coverage_file" runtime-contracts coverage "$agent_node" --vendor nvidia
+		[[ $(jq -r '"\(.selection)/\(.attestation)/\(.verification_depth)/\(.profile_uid)"' "$ctl_coverage_file") == "Exact/FreshCompatible/Full/${profile_uid}" ]] ||
+			die "live coverage for $agent_node changed after the candidate preview: $(jq -c '{selection, attestation, verification_depth, profile_uid, reasons}' "$ctl_coverage_file")"
+		note "candidate $candidate_id preview $preview_id: $agent_node newly_blocked with impact ProfileSetReplaced/Exact/FreshRequired/CandidateProfileWithoutReport (after=${after_state}, no allowed actions); candidate still uploaded, live coverage still Full"
+	}
+	exercise_candidate_runtime_contract_impact
+
+	kill "$port_forward_pid" >/dev/null 2>&1 || true
+	wait "$port_forward_pid" >/dev/null 2>&1 || true
+	port_forward_pid=
+
+	"$KUBECTL_BIN" delete acceleratorruntimeprofile "$profile_name" \
+		--ignore-not-found --wait=true --timeout=60s >/dev/null
+	"$KUBECTL_BIN" label node "$agent_node" "${profile_label}-" --overwrite >/dev/null
+	note "runtime contract lifecycle: profile $profile_name (uid=$profile_uid gen=$profile_generation) covered $agent_node as Exact/FreshCompatible/Full: $coverage_summary"
+	note "runtime contract evidence and qualification $qual_id were synthetic CPU-only evidence from a kind managed-agent node, not hardware; they prove controller/store wiring only"
 }
 
 # exercise_controller_restart_mid_playbook drives an approval-gated dry-run
@@ -2356,6 +3039,7 @@ note "acknowledged explicit-default reconcile left digest and Deployment generat
 wait_agent_log 'controller registration acknowledged'
 exercise_agent_bad_certificate_readiness
 exercise_agent_authentication
+exercise_runtime_contract_lifecycle
 wait_root_condition True RuntimeAvailable
 assert_runtime_ready
 exercise_controller_restart_mid_playbook

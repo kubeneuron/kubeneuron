@@ -9,6 +9,166 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+## [v0.5.0] - 2026-09-20
+
+The GPU Runtime Contract Lifecycle: versioned, read-only runtime contract
+coverage, a candidate runtime contract impact preview, and evidence-only
+runtime contract qualifications. All three are statements about evidence and
+grant no new execution authority: nothing in this release is read by
+admission, incidents, action dispatch, verification before resolve, or
+`GPUAutonomyPlan`, and there is no approve, promote, apply, enable, or delete
+route. The release adds no new CRD, RBAC rule, Helm value, or store migration
+(SQLite head stays 0023, PostgreSQL 0014). The kind integration harness now
+drives the coverage, qualification, and candidate-preview surfaces through the
+public API and `kubeneuronctl` against a real controller and store, using
+synthetic CPU-only accelerator evidence posted over the real agent identity;
+it proves the wiring, not the hardware. The full AWS hardware harness
+(`hack/hw-e2e.sh`) passed on a temporary EKS `g4dn.xlarge` cluster on
+2026-09-13 — dry-run ladder, threshold escalation, DCGM signal observation
+with the agent on the real driver and a version-compatible DCGM client/engine,
+recurrence verification, drain safety and a real drain, and a confined
+approved `ReplaceNode` — and its focused `up → deploy → test-destructive →
+teardown` sequence passed again on a fresh cluster on 2026-09-14. That
+harness exercises the shared agent/controller runtime and does not call the
+v0.5 routes or commands, so this release claims no GPU hardware qualification
+of the v0.5 surfaces. Security posture of the new surfaces is summarised in
+[docs/security-review-v0.5.0.md](docs/security-review-v0.5.0.md).
+
+### Added
+
+- A read-only, versioned (`runtime-contract-coverage/v1`) runtime contract
+  coverage surface: `GET /api/v1/nodes/{node}/runtime-contract?vendor=<v>`
+  for one node and `GET /api/v1/runtime-contracts/coverage?vendor=<v>` for a
+  stable node-name ordered fleet page (`limit` 1–500, opaque `cursor`,
+  optional `tenant`/`cluster` label filters), with the matching
+  `kubeneuronctl runtime-contracts coverage [node] --vendor <v>` command.
+  `vendor` is required because coverage is defined per (node, vendor) pair.
+  Each result classifies `selection` (`Exact`, `Uncovered`, `Ambiguous`,
+  `Invalid`), `attestation` (`FreshCompatible`, `Missing`, `Stale`,
+  `Mismatch`, `NotApplicable`), and `verification_depth` (`Full`, `Reduced`,
+  `Unavailable`) with stable reason codes in canonical order, the compiled
+  `config_digest`, the selected profile identity for `Exact` only, and the
+  observed agent heartbeat and report timestamps. It is a pure function of
+  live evidence, persists nothing, and is never read by admission, incidents,
+  action dispatch, verification before resolve, or `GPUAutonomyPlan`. A fleet
+  page fails as a whole when one node's coverage cannot be built rather than
+  omitting the row; a store without accelerator report retention answers
+  `503`, never an assessed-looking node.
+- An operator-visible, evidence-only runtime contract qualification surface:
+  `POST/GET /api/v1/runtime-contract-qualifications`,
+  `GET /api/v1/runtime-contract-qualifications/{id}`, and
+  `POST /api/v1/runtime-contract-qualifications/{id}/observe`, with the
+  matching `kubeneuronctl runtime-qualifications create|list|show|observe`
+  group. Mutations strict-decode their JSON, require an `Idempotency-Key`,
+  are fenced to the elected leader, and share the per-source operational
+  quotas; `min_duration` travels as a Go duration string. Every read adds
+  `evaluated_at`, `effective_state`, `expired`, `expiry_pending`, and
+  `ready_for_approval` computed from the clock without writing, so a
+  qualification stored as `ReadyForApproval` past its `expires_at` is never
+  presented as ready before an observation records `Expired`. There is
+  deliberately no approve, promote, apply, enable, or delete route.
+- Policy impact previews now carry an explicit, versioned
+  (`candidate-runtime-contract-impact/v1`) per-node `runtime_contract_impact`
+  in every REST preview response and in `kubeneuronctl preview` JSON, plus
+  preview-level `runtime_contract_impact_version` and
+  `runtime_contract_profile_change`. It is a pre-deploy static assessment
+  (`assessment: "PreDeployStatic"`) computed only from the candidate profile
+  set and the captured node name, labels, and vendor. It states
+  `profile_change` (`NoProfileChange` or `ProfileSetReplaced`),
+  `static_selection` (`NotEvaluated`, `Exact`, `Uncovered`, `Ambiguous`,
+  `Invalid`), the selected candidate profile identity for `Exact` only,
+  `post_deploy_attestation` (`FreshRequired`, `NotRequired`,
+  `NotApplicable`), `after_decision_evidence`, stable reason codes, and a
+  summary. `captured_report_usable_as_candidate_attestation` is always
+  `false`: the captured report contributes only its vendor identity to static
+  selection, while its attestation content, observation time, and the agent
+  heartbeat never prove a candidate. The fields are additive; older persisted
+  previews stay readable without them. No route or command deploys, applies,
+  promotes, or approves a candidate, and live admission, runtime contract
+  coverage, and qualifications are unchanged.
+
+### Changed
+
+- A preview no longer evaluates a candidate runtime profile against the
+  report captured before deployment. When a candidate profile statically
+  selects a node, the hypothetical `after` decision is built from the
+  candidate profile with the captured report withheld, so it fails closed
+  (`Unknown`, `EvidenceStale`) and can never read `Eligible` on pre-deploy
+  evidence, even when the candidate profile is identical to the live profile
+  in UID, digest, and versions. Such nodes now appear in `newly_blocked` with
+  `post_deploy_attestation: "FreshRequired"` instead of `unchanged`. An
+  `Uncovered`, `Ambiguous`, or `Invalid` candidate selection keeps the
+  observation-only no-profile fallback (`ObservedOnly`, no allowed actions)
+  and reports `NotApplicable`; an ambiguous candidate selection no longer
+  aborts the preview, it is reported per node.
+
+### Fixed
+
+- **Profile selection on a live Kubernetes cluster judged every node
+  unlabelled.** The store's node row is written by agent registration, which
+  never carries labels, so runtime contract coverage, decision snapshots, and
+  the candidate static selection evaluated `AcceleratorRuntimeProfile`
+  selectors against an empty label set: no profile could ever be `Exact` and
+  no qualification could ever be created on a real cluster, while unit tests
+  that seed labels straight into the store stayed green. The kind harness
+  exposed it. Labels are now read from the Kubernetes `Node` object through
+  the watch-maintained cache, as the blast-radius confinement check already
+  does. The path fails closed: a platform lookup error is answered as `503`
+  (unavailable) rather than as an `Uncovered` node, so a transient blip can
+  never be recorded as permanent drift by a qualification observation; a
+  deleted `Node` object selects no profile; a platform without label lookup
+  (bare metal, tests) keeps the stored labels.
+
+- Fleet readiness, fleet runtime contract coverage, and candidate preview now
+  validate the captured node inventory before sorting it: a nil or nameless
+  node entry is rejected as an incomplete inventory (`422`) instead of being
+  dereferenced by the sort comparator.
+
+- A policy-only candidate (no accelerator runtime profiles) was previewed as
+  if it replaced the profile set with nothing, turning every Eligible node
+  into `ObservedOnly`. The live snapshot profile and captured report are now
+  preserved for that decision under the candidate digest, and the runtime
+  contract impact says `NoProfileChange` with `post_deploy_attestation:
+  "NotRequired"`.
+
+- A `GPUAutonomyPlan` whose `guardrails.maintenance_windows` named a window
+  could never execute: the autonomy evaluator request asserted the window
+  requirement but not the elevated-authorization and disruption-budget grants
+  the shared evaluator demands for that path, so every canary was blocked with
+  `ApprovalMissing` even while a referenced window was open. Those grants are
+  now derived from the plan's digest-bound distinct role approvals, so an
+  approved plan is admitted only while a named window is currently open for
+  the node, and a plan without complete current approvals still answers
+  `ApprovalMissing`. Closed or unresolvable windows, change freeze, emergency
+  stop, budget exhaustion, stale evidence, and configuration drift block as
+  before.
+
+### Fixed — the hardware stand
+
+- **Teardown could not delete its own cluster stack after a `ReplaceNode`**
+  (`hack/hw-e2e.sh`). When the controller terminates the GPU node, the
+  VPC-CNI plugin's secondary interface for that instance (`aws-K8S-i-<id>`)
+  is detached and stays `available`; it pins the EKS cluster security group,
+  which pins the VPC, so `eksctl delete cluster` ends in `DELETE_FAILED` and
+  the sweep could only report the stack as a leftover. The full hardware run
+  of 2026-09-13 exposed it, and the cluster was cleaned by hand that day. The
+  sweep now scopes itself from the one CloudFormation stack that carries the
+  exact cluster name, refuses to touch anything while the EKS cluster still
+  exists, re-reads every candidate interface and security group and deletes
+  only those tagged for exactly this run, then retries the stack delete in at
+  most two passes; a refusal is logged and reported by the end-state
+  assertion, never a quiet leak. `make verify-hw-e2e-sweep`
+  (`hack/verify-hw-e2e-sweep.sh`, over the scripted `aws`/`eksctl` in
+  `hack/hw-e2e-fake-aws.py`) proves 14 safety scenarios deterministically
+  without AWS and is part of `make gates`. The 2026-09-14 focused run
+  (`up` → `deploy` → `test-destructive` → `teardown` on a fresh `g4dn.xlarge`
+  cluster) tore down with no manual network cleanup, and an independent
+  exact-scope audit found no cluster, active instances or stacks, tagged
+  volumes or VPC, recycle role, or temporary images left behind. That run did
+  not need the orphan-networking branch — AWS deleted the control-plane
+  stack directly — so its strict behaviour rests on the scenario verifier,
+  not on a live exercise.
+
 ## [v0.4.0] - 2026-09-07
 
 ### Added

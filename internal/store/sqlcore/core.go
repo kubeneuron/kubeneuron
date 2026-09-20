@@ -155,6 +155,42 @@ func (c *Core) WithTx(ctx context.Context, fn func(store.Tx) error) error {
 	return tx.Commit()
 }
 
+// WithOperationalTx runs fn over the shared Queries scoped to one
+// transaction, so an idempotency claim, a resource insert or version-guarded
+// update, and the hash-chained audit appends either all commit or all roll
+// back. The transaction-scoped Queries carry the dialect placeholder rebind
+// exactly like the standalone ones, and the audit head fence inside
+// Queries.AppendOperationalAudit keeps its meaning: a second append in the
+// same transaction chains onto the first (it reads the head row this
+// transaction advanced), and a rollback restores the head to the last
+// committed event so the chain never points at a discarded child. On
+// PostgreSQL a concurrent writer of the same head or resource row blocks on
+// the row lock and, once this transaction commits, sees the advanced version
+// and fails closed with ErrOperationalConflict instead of forking the chain.
+//
+// A single-connection engine (SQLite) serializes on the transaction, so fn
+// must issue every statement through the Tx it is given and never through the
+// store itself.
+func (c *Core) WithOperationalTx(ctx context.Context, fn func(store.OperationalTx) error) error {
+	if fn == nil {
+		return fmt.Errorf("operational transaction: callback is required")
+	}
+	tx, err := c.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin operational transaction: %w", err)
+	}
+	if err := fn(c.txQueries(tx)); err != nil {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			return fmt.Errorf("%w (rollback failed: %v)", err, rbErr)
+		}
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit operational transaction: %w", err)
+	}
+	return nil
+}
+
 // AppendOperationalAudit serializes one per-resource hash-chain append in a
 // transaction.  Operational resources are allowed on PostgreSQL HA stores;
 // a plain read-last-hash/insert sequence would let two writers fork the same
@@ -256,11 +292,14 @@ func (c *Core) Prune(ctx context.Context, dataRetention, auditRetention time.Dur
 			// Expired terminal summaries can be pruned without deleting their
 			// audit chain. Active plans/runs are deliberately excluded even if a
 			// buggy worker left an expiry in the past: reconcile must first make
-			// their terminal outcome visible to an operator.
+			// their terminal outcome visible to an operator. 'Invalidated' and
+			// 'Expired' are the terminal states of a runtime contract
+			// qualification; its 'Observing' and 'ReadyForApproval' rows stay
+			// until an Observe records their expiry.
 			if stats.OperationalResources, err = q.execCount(ctx, `
 					DELETE FROM operational_resources
 					WHERE expires_at IS NOT NULL AND expires_at < ?
-					  AND state IN ('captured','uploaded','revoked','complete','completed','blocked','cancelled','failed','timed_out','permitted','incident-created','accepted','simulation-only','RolledBack','Expired')`, cutoff); err != nil {
+					  AND state IN ('captured','uploaded','revoked','complete','completed','blocked','cancelled','failed','timed_out','permitted','incident-created','accepted','simulation-only','RolledBack','Expired','Invalidated')`, cutoff); err != nil {
 				return err
 			}
 			return nil

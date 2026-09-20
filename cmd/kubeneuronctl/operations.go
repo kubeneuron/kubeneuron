@@ -63,6 +63,80 @@ func cmdReadiness() *cobra.Command {
 	}
 }
 
+// cmdRuntimeContracts groups the read-only runtime contract views. Coverage
+// explains how well the configured accelerator runtime profiles cover a node
+// or the fleet for one vendor; it never changes what the controller admits.
+func cmdRuntimeContracts() *cobra.Command {
+	root := &cobra.Command{Use: "runtime-contracts", Short: "Inspect accelerator runtime contract coverage"}
+	coverage := &cobra.Command{
+		Use:   "coverage [node]",
+		Short: "Explain fleet or node runtime contract coverage for one vendor",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newClient(cmd)
+			if err != nil {
+				return err
+			}
+			vendor, _ := cmd.Flags().GetString("vendor")
+			vendor = strings.TrimSpace(vendor)
+			if vendor == "" {
+				return fmt.Errorf("--vendor is required")
+			}
+			query := url.Values{"vendor": []string{vendor}}
+			if len(args) == 1 {
+				var item any
+				path := "/api/v1/nodes/" + url.PathEscape(args[0]) + "/runtime-contract?" + query.Encode()
+				if err := client.do("GET", path, nil, &item); err != nil {
+					return err
+				}
+				return printOperationJSON(cmd, item)
+			}
+			for _, flag := range []string{"tenant", "cluster", "cursor"} {
+				if value, _ := cmd.Flags().GetString(flag); strings.TrimSpace(value) != "" {
+					query.Set(flag, value)
+				}
+			}
+			if limit, _ := cmd.Flags().GetInt("limit"); limit > 0 {
+				query.Set("limit", strconv.Itoa(limit))
+			}
+			var response struct {
+				Items []struct {
+					Node              string   `json:"node_name"`
+					Selection         string   `json:"selection"`
+					Attestation       string   `json:"attestation"`
+					VerificationDepth string   `json:"verification_depth"`
+					ProfileName       string   `json:"profile_name"`
+					Reasons           []string `json:"reasons"`
+				} `json:"items"`
+				NextCursor string `json:"next_cursor"`
+			}
+			if err := client.do("GET", "/api/v1/runtime-contracts/coverage?"+query.Encode(), nil, &response); err != nil {
+				return err
+			}
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
+			_, _ = fmt.Fprintln(w, "NODE\tSELECTION\tATTESTATION\tVERIFICATION\tPROFILE\tREASONS")
+			for _, item := range response.Items {
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", item.Node, item.Selection, item.Attestation, item.VerificationDepth, item.ProfileName, strings.Join(item.Reasons, ","))
+			}
+			if err := w.Flush(); err != nil {
+				return err
+			}
+			if response.NextCursor != "" {
+				// The table is the page; the cursor is how to ask for the next one.
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\nnext page: --cursor %s\n", response.NextCursor)
+			}
+			return nil
+		},
+	}
+	coverage.Flags().String("vendor", "", "accelerator vendor (nvidia, amd, intel, or google); required")
+	coverage.Flags().String("tenant", "", "optional tenant scope (kubeneuron.io/tenant node label)")
+	coverage.Flags().String("cluster", "", "optional cluster scope (kubeneuron.io/cluster node label)")
+	coverage.Flags().String("cursor", "", "opaque cursor from a previous fleet page")
+	coverage.Flags().Int("limit", 0, "maximum nodes per fleet page (1-500)")
+	root.AddCommand(coverage)
+	return root
+}
+
 func cmdCandidates() *cobra.Command {
 	root := &cobra.Command{Use: "candidates", Short: "Upload and inspect candidate configuration without applying it"}
 	upload := &cobra.Command{

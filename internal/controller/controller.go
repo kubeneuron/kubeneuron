@@ -303,6 +303,7 @@ func New(
 			CreateIncident:                  c.CreateIncidentFromSimulation,
 			GetIncident:                     c.store.GetIncident,
 			AutonomyMaintenanceWindowActive: c.autonomyMaintenanceWindowActive,
+			BuildRuntimeContractCoverage:    c.BuildRuntimeContractCoverage,
 		})
 	}
 	return c

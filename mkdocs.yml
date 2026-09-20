@@ -50,3 +50,4 @@ nav:
       - Metrics and alerts: reference-metrics.md
       - Capability matrix (per vendor): reference-capabilities.md
       - Design document: design.md
+      - Security review (v0.5.0): security-review-v0.5.0.md

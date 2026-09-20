@@ -26,6 +26,11 @@ const (
 	// ResourceAutonomyEffect is the durable, idempotent hand-off record that
 	// must exist before a hardware-qualified autonomy executor is called.
 	ResourceAutonomyEffect OperationalResourceKind = "autonomy-effect"
+	// ResourceRuntimeContractQualification is the durable, observation-only
+	// record of a fixed node cohort being watched for sustained Full runtime
+	// contract coverage. It is evidence for a later human decision and is
+	// never itself an admission, incident, action, or autonomy authority.
+	ResourceRuntimeContractQualification OperationalResourceKind = "runtime-contract-qualification"
 )
 
 // OperationalResource is the durable envelope around a versioned v0.4.0

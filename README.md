@@ -55,6 +55,30 @@ unit or integration fixtures. Existing destructive remediation remains behind
 its separate dry-run, confinement, approval, and evidence gates. Full history:
 [CHANGELOG.md](CHANGELOG.md).
 
+**Prepared for release (v0.5.0, not yet published):** the GPU Runtime
+Contract Lifecycle — a read-only, versioned runtime contract coverage view per
+node and vendor (`selection`, `attestation`, `verification_depth`, reason
+codes); a candidate preview that separates the static pre-deploy selection a
+candidate profile set would make from the fresh post-deploy attestation only a
+later report can supply; and a durable, fixed-cohort, evidence-only runtime
+contract qualification with no approve, promote, apply, or delete path. All
+three are statements about evidence, add no CRD, RBAC rule, or store
+migration, and are never read by admission, incidents, actions, or
+`GPUAutonomyPlan`. They are unit-tested, and the CPU-only kind integration
+harness drives them through the public API and CLI against a real controller
+and store using synthetic accelerator evidence; that proves the wiring, not
+the hardware. The full AWS hardware harness (`hack/hw-e2e.sh`) passed on a
+temporary EKS `g4dn.xlarge` cluster on 2026-09-13, and its focused
+`up → deploy → test-destructive → teardown` sequence passed again on a fresh
+cluster on 2026-09-14 with the teardown sweep completing on its own; that
+harness exercises the shared agent/controller runtime and does not call the
+v0.5 routes or commands, so v0.5.0 claims no GPU hardware qualification of its
+own surfaces. The manifests and chart in this tree pin v0.5.0, but the tag
+and the published images do not exist until the release is cut; see the
+[REST](docs/reference-api.md) and [CLI](docs/reference-cli.md) references,
+the [upgrade notes](docs/upgrade.md), and the
+[security review](docs/security-review-v0.5.0.md).
+
 **Start here:** [product tour](docs/product-tour.md) (screenshots + live
 demo) · [install](docs/install.md) · [one-pager](docs/one-pager.md) ·
 [docs site](docs/index.md)
@@ -86,7 +110,7 @@ The repository builds four custom binaries:
 | `kubeneuron-operator` | Watches KubeNeuron CRDs, validates and compiles their configuration, and reconciles the controller and agent Kubernetes workloads. | Released. SQLite or PostgreSQL store; `DryRun`/`Paused`/`Enabled`, where `Enabled` requires `spec.safety.destructiveExecution` (a non-empty node selector plus the exact acknowledgement) and arms only the named nodes. Issues and automatically renews the installation's operator-issued mTLS material and rolls the consumers on renewal. Alertmanager webhook authentication is mandatory; Paused also requires an API token. Emits Kubernetes Events; readiness follows informer-cache sync. |
 | `kubeneuron-controller` | Ingests Alertmanager and agent events and owns incident, policy, safety, and workflow execution. | Released. State walk, safety gates, approvals with verified actor identity, escalation, transactional audit, durable action queue with lease/boot-ID binding, authenticated operator REST API, embedded control panel. PostgreSQL HA with leader election; failover is proven not to duplicate an action. |
 | `kubeneuron-agent` | Runs on GPU nodes, watches kernel events, reports inventory/events, and executes queued actions. | Released. Registration and events use mTLS plus projected Pod-bound identity. `spec.agent.hostTooling` mounts the node's `nvidia-smi`/driver libraries into the distroless image — verified reading a real Tesla T4 — and arms `--require-real-driver`. Typed action contracts execute in dry-run unless a live controller serves arming for a node inside `destructiveExecution.nodeSelector`; agents outside that blast radius remain scheduled for detection but cannot execute destructive work. Host state (persistence mode, DCGM) is snapshotted crash-safe across restarts, and a hardware GPU reset is refused on evidence where the guest has no PCI reset. |
-| `kubeneuronctl` | Operator-facing CLI for status, incidents, approvals, manual remediation, and pause/resume. | All declared commands implemented against the operator REST API. |
+| `kubeneuronctl` | Operator-facing CLI for status, incidents, approvals, manual remediation, pause/resume, and the read-only v0.4/v0.5 operational views. | All declared commands implemented against the operator REST API. |
 
 VictoriaMetrics, vmalert, Alertmanager, Grafana, dcgm-exporter, and
 node_exporter are integrations rather than KubeNeuron binaries. The
@@ -153,7 +177,7 @@ v1.33.12; multi-node kind needs raised inotify limits
 (`fs.inotify.max_user_instances=512`, `max_user_watches=524288`). The harness
 builds static local images and creates a digest-pinned Kubernetes v1.33.12
 kind cluster with one control plane and two workers (`WORKER_NODES`
-configurable), runs the 53-case CEL admission matrix, and checks operator
+configurable), runs the 81-case CEL admission matrix, and checks operator
 readiness, all 11 ownership references, collision failure/non-adoption,
 recovery, least-privilege RBAC, durable registration-readiness loss/recovery,
 an acknowledged no-op reconciliation, and preservation of the unowned TLS
@@ -454,12 +478,14 @@ incident resolved through the verification quiet window — under the
 
 **Remaining, deliberately hardware-gated:** per-device *hardware* GPU
 reset on bare metal (a virtualized instance has no guest PCI reset, so the
-agent refuses it on evidence), live `dcgmi dmon` column-layout
-confirmation (the hardware E2E injects XIDs via kmsg, not DCGM), and
-step-time verification depth. The GPU-lab CI target now exists and has run
-green on live EKS, and the DCGM/nvidia-smi second detection source beside
-kmsg has shipped. That matrix in [PRODUCT_PLAN.md](PRODUCT_PLAN.md) still
-gates per-device reset; cloud node remediation no longer waits on it.
+agent refuses it on evidence) and step-time verification depth. The GPU-lab
+CI target now exists and has run green on live EKS — most recently the full
+harness on 2026-09-13 and the focused destructive sequence on 2026-09-14,
+both on temporary `g4dn.xlarge` clusters torn down to zero leftovers — and
+the DCGM/nvidia-smi second detection source beside kmsg has shipped and
+observed a DCGM signal on a real T4 with the agent on the real driver. That
+matrix in [PRODUCT_PLAN.md](PRODUCT_PLAN.md) still gates per-device reset;
+cloud node remediation no longer waits on it.
 
 **Later evaluations:** ClickHouse archival, Slurm, and ticketing
 integrations.

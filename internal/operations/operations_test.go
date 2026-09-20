@@ -116,8 +116,19 @@ accelerator_profiles:
 	if err != nil || replayed {
 		t.Fatalf("create preview = %#v replayed=%v err=%v", preview, replayed, err)
 	}
-	if preview.InventorySnapshotID == "" || len(preview.Unchanged) != 1 {
-		t.Fatalf("preview = %#v, want one deterministic unchanged delta", preview)
+	// The candidate profile is byte-for-byte the live profile, but it is not
+	// deployed. The captured pre-deploy report attests the live profile, not
+	// the candidate, so the hypothetical After answer must fail closed instead
+	// of reading as an unchanged Eligible node.
+	if preview.InventorySnapshotID == "" || len(preview.NewlyBlocked) != 1 || len(preview.Unchanged) != 0 {
+		t.Fatalf("preview = %#v, want one fail-closed newly-blocked delta", preview)
+	}
+	delta := preview.NewlyBlocked[0]
+	if delta.Before.State != decision.StateEligible || delta.After.State == decision.StateEligible || !delta.Changed {
+		t.Fatalf("identical candidate profile delta = %#v, want Eligible before and a non-Eligible after", delta)
+	}
+	if delta.RuntimeContractImpact == nil || delta.RuntimeContractImpact.PostDeployAttestation != RuntimeContractAttestationFreshRequired {
+		t.Fatalf("identical candidate profile impact = %#v, want FreshRequired", delta.RuntimeContractImpact)
 	}
 	againPreview, replayed, err := mgr.CreatePreview(context.Background(), "alice", candidate.ID, "preview-request")
 	if err != nil || !replayed || againPreview.ID != preview.ID {
@@ -614,14 +625,25 @@ func TestAutonomyPlanRejectsSimulationFromDifferentScope(t *testing.T) {
 }
 
 func TestAutonomyNamedMaintenanceWindowIsARequiredLiveGate(t *testing.T) {
-	mgr, st, _ := newOperationManager(t)
+	mgr, st, now := newOperationManager(t)
 	defer func() { _ = st.Close() }()
+	ctx := context.Background()
 	plan := &GPUAutonomyPlan{
+		ConfigDigest:   "sha256:live-config",
 		AllowedActions: []types.AcceleratorAction{types.AcceleratorActionResetDevice},
 		Guardrails:     AutonomyGuardrails{MaintenanceWindows: []string{"scheduled-maintenance"}},
+		Approvals:      AutonomyApprovalRequirements{RequiredRoles: []string{"platform", "safety"}, DistinctSubjects: true},
+		ApprovalRecords: []AutonomyApproval{
+			{Actor: "platform-person", Role: "platform", ConfigDigest: "sha256:live-config", ApprovedAt: now},
+			{Actor: "safety-person", Role: "safety", ConfigDigest: "sha256:live-config", ApprovedAt: now},
+		},
 	}
-	if _, _, err := mgr.autonomyDecisionRequest(context.Background(), plan, "gpu-a", "GPU-a"); !errors.Is(err, ErrUnavailable) {
+	if _, _, err := mgr.autonomyDecisionRequest(ctx, plan, "gpu-a", "GPU-a"); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("missing maintenance resolver = %v, want unavailable", err)
+	}
+	fullyGranted := func(request decision.Request) bool {
+		return request.MaintenanceRequired && request.AllowDuringMaintenance && request.ApprovalRequired &&
+			request.ApprovalGranted && request.ElevatedAuthorizationGranted && request.DisruptionBudgetApproved
 	}
 	mgr.autonomyMaintenanceWindowActive = func(_ context.Context, node string, refs []string) (bool, error) {
 		if node != "gpu-a" || len(refs) != 1 || refs[0] != "scheduled-maintenance" {
@@ -629,14 +651,142 @@ func TestAutonomyNamedMaintenanceWindowIsARequiredLiveGate(t *testing.T) {
 		}
 		return false, nil
 	}
-	request, active, err := mgr.autonomyDecisionRequest(context.Background(), plan, "gpu-a", "GPU-a")
-	if err != nil || active || !request.MaintenanceRequired || !request.AllowDuringMaintenance {
+	request, active, err := mgr.autonomyDecisionRequest(ctx, plan, "gpu-a", "GPU-a")
+	if err != nil || active || !fullyGranted(request) {
 		t.Fatalf("closed named window request = %#v active=%v err=%v", request, active, err)
 	}
+	closed := operationSnapshot(now, request)
+	closed.MaintenanceActive = active
+	if got := decision.Evaluate(closed); got.Permitted() || len(got.ReasonCodes) != 1 || got.ReasonCodes[0] != decision.ReasonMaintenanceWindowClosed {
+		t.Fatalf("closed named window decision = %#v, want MaintenanceWindowClosed", got)
+	}
+
 	mgr.autonomyMaintenanceWindowActive = func(context.Context, string, []string) (bool, error) { return true, nil }
-	request, active, err = mgr.autonomyDecisionRequest(context.Background(), plan, "gpu-a", "GPU-a")
-	if err != nil || !active || !request.MaintenanceRequired || !request.AllowDuringMaintenance {
+	request, active, err = mgr.autonomyDecisionRequest(ctx, plan, "gpu-a", "GPU-a")
+	if err != nil || !active || !fullyGranted(request) {
 		t.Fatalf("open named window request = %#v active=%v err=%v", request, active, err)
+	}
+	open := operationSnapshot(now, request)
+	open.MaintenanceActive = active
+	if got := decision.Evaluate(open); !got.Permitted() {
+		t.Fatalf("open named window decision = %#v, want eligible", got)
+	}
+
+	// The open window is necessary, never sufficient: the grants come from the
+	// plan's current digest-bound approvals, so a plan missing one required
+	// role must still be answered with ApprovalMissing.
+	partial := *plan
+	partial.ApprovalRecords = plan.ApprovalRecords[:1]
+	request, active, err = mgr.autonomyDecisionRequest(ctx, &partial, "gpu-a", "GPU-a")
+	if err != nil || !active || !request.MaintenanceRequired || request.ApprovalGranted ||
+		request.ElevatedAuthorizationGranted || request.DisruptionBudgetApproved {
+		t.Fatalf("partially approved request = %#v active=%v err=%v", request, active, err)
+	}
+	unapproved := operationSnapshot(now, request)
+	unapproved.MaintenanceActive = active
+	if got := decision.Evaluate(unapproved); got.Permitted() || len(got.ReasonCodes) != 1 || got.ReasonCodes[0] != decision.ReasonApprovalMissing {
+		t.Fatalf("partially approved decision = %#v, want ApprovalMissing", got)
+	}
+}
+
+func TestAutonomyNamedMaintenanceWindowAdmitsApprovedCanaryOnlyWhileOpen(t *testing.T) {
+	mgr, st, now := newOperationManager(t)
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	current := now
+	mgr.now = func() time.Time { return current }
+	mgr.listNodes = func(context.Context) ([]*types.Node, error) {
+		return []*types.Node{{Name: "gpu-a", Labels: map[string]string{"pool": "a100"}}}, nil
+	}
+	windowOpen := false
+	mgr.autonomyMaintenanceWindowActive = func(_ context.Context, node string, refs []string) (bool, error) {
+		if node != "gpu-a" || len(refs) != 1 || refs[0] != "scheduled-maintenance" {
+			t.Fatalf("maintenance resolver input = node %q refs %#v", node, refs)
+		}
+		return windowOpen, nil
+	}
+	simulation, _, err := mgr.CreateSimulation(ctx, "alice", SimulationRequest{
+		Node: "gpu-a", DeviceID: "GPU-a", Action: types.AcceleratorActionResetDevice,
+		Scope: types.AcceleratorScopePhysicalDevice, Class: types.ClassECCDBE,
+		Rationale: "qualify window-bound autonomy", IdempotencyKey: "window-simulation",
+	})
+	if err != nil || !simulation.Decision.Permitted() {
+		t.Fatalf("simulation = %#v err=%v", simulation, err)
+	}
+	plan, _, err := mgr.CreateAutonomyPlan(ctx, "author", AutonomyPlanRequest{
+		Selector: map[string]string{"pool": "a100"}, PolicyRef: "ecc-reset@sha256:policy", ProfileRef: "nvidia-a100#1",
+		AllowedActions: []types.AcceleratorAction{types.AcceleratorActionResetDevice},
+		Evidence:       AutonomyEvidenceRequirements{MaxAge: 5 * time.Minute, RequiredSources: []string{"agent"}},
+		Guardrails: AutonomyGuardrails{
+			MaintenanceWindows: []string{"scheduled-maintenance"},
+			MaxConcurrentNodes: 1, MaxActionsPerHour: 2, ErrorBudget: 0, NoActiveIncident: true,
+		},
+		Rollout:      AutonomyRolloutPolicy{CanaryNodes: 1, BakeDuration: time.Minute},
+		Approvals:    AutonomyApprovalRequirements{RequiredRoles: []string{"platform", "safety"}, DistinctSubjects: true},
+		SimulationID: simulation.ID, ExpiresAt: now.Add(time.Hour), IdempotencyKey: "window-plan",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.ApproveAutonomyPlan(ctx, "platform-person", plan.ID, "platform", plan.ResourceVersion); err != nil {
+		t.Fatalf("platform approval: %v", err)
+	}
+	plan, err = mgr.GetAutonomyPlan(ctx, plan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err = mgr.ApproveAutonomyPlan(ctx, "safety-person", plan.ID, "safety", plan.ResourceVersion)
+	if err != nil || plan.State != AutonomyCanary {
+		t.Fatalf("approved plan = %#v err=%v", plan, err)
+	}
+
+	// Approvals alone do not open the envelope: with every referenced window
+	// closed the canary is recorded as blocked and the plan pauses.
+	if err := mgr.ReconcileAutonomy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = mgr.GetAutonomyPlan(ctx, plan.ID)
+	if err != nil || plan.State != AutonomyPaused {
+		t.Fatalf("closed-window reconciliation = %#v err=%v", plan, err)
+	}
+	rollout, err := mgr.GetAutonomyRollout(ctx, plan.ID)
+	if err != nil || len(rollout.Observations) != 1 {
+		t.Fatalf("closed-window rollout = %#v err=%v", rollout, err)
+	}
+	blocked := rollout.Observations[0].Decision
+	if blocked.Permitted() || len(blocked.ReasonCodes) != 1 || blocked.ReasonCodes[0] != decision.ReasonMaintenanceWindowClosed {
+		t.Fatalf("closed-window observation = %#v, want MaintenanceWindowClosed", blocked)
+	}
+
+	// The same approved plan is admitted once a referenced window is open for
+	// the node, and the simulation-only canary proceeds through its bake.
+	plan, err = mgr.ResumeAutonomyPlan(ctx, "operator", plan.ID, "window is scheduled", plan.ResourceVersion)
+	if err != nil || plan.State != AutonomyCanary {
+		t.Fatalf("resumed plan = %#v err=%v", plan, err)
+	}
+	windowOpen = true
+	if err := mgr.ReconcileAutonomy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = mgr.GetAutonomyPlan(ctx, plan.ID)
+	if err != nil || plan.State != AutonomyBaking {
+		t.Fatalf("open-window reconciliation = %#v err=%v", plan, err)
+	}
+	rollout, err = mgr.GetAutonomyRollout(ctx, plan.ID)
+	if err != nil || len(rollout.Observations) != 2 {
+		t.Fatalf("open-window rollout = %#v err=%v", rollout, err)
+	}
+	admitted := rollout.Observations[1]
+	if !admitted.Decision.Permitted() || admitted.EffectState != "simulation-only" {
+		t.Fatalf("open-window observation = %#v, want permitted simulation-only canary", admitted)
+	}
+	current = current.Add(time.Minute)
+	if err := mgr.ReconcileAutonomy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = mgr.GetAutonomyPlan(ctx, plan.ID)
+	if err != nil || plan.State != AutonomyEnabled {
+		t.Fatalf("post-bake plan = %#v err=%v", plan, err)
 	}
 }
 
@@ -695,6 +845,116 @@ accelerator_profiles:
 	preview, replayed, err := mgr.CreatePreview(ctx, "alice", candidate.ID, "retry-after-evidence")
 	if err != nil || replayed || preview.ID == "" {
 		t.Fatalf("recovered preview = %#v replayed=%v err=%v", preview, replayed, err)
+	}
+}
+
+// newPreviewCandidate uploads a candidate that matches the operationSnapshot
+// profile so CreatePreview reaches inventory capture. The returned builder log
+// records every node CreatePreview asked BuildSnapshot about.
+func newPreviewCandidate(t *testing.T, mgr *Manager, now time.Time) (*CandidateConfiguration, *[]string) {
+	t.Helper()
+	content := []byte(`
+apiVersion: kubeneuron.io/v1alpha1
+kind: CandidateConfiguration
+accelerator_profiles:
+  - name: nvidia-a100
+    node_selector: {pool: a100}
+    vendor: nvidia
+    profile_digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    driver_version: "550.54.15"
+    runtime_version: dcgm-3.3.5
+    profile_uid: profile-uid
+    profile_generation: 1
+    max_report_age: 5m
+    allowed_actions:
+      - action: reset-device
+        scopes: [physical-device]
+        require_verified_unpartitioned_topology: true
+`)
+	candidate, _, err := mgr.CreateCandidate(context.Background(), "alice", CandidateUpload{Content: content, IdempotencyKey: "preview-candidate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	built := &[]string{}
+	mgr.buildSnapshot = func(_ context.Context, node string, request decision.Request) (decision.Snapshot, error) {
+		*built = append(*built, node)
+		snapshot := operationSnapshot(now, request)
+		snapshot.Node.Name, snapshot.Node.UID = node, "uid-"+node
+		snapshot.Report.Node, snapshot.Report.NodeUID = node, snapshot.Node.UID
+		return snapshot, nil
+	}
+	return candidate, built
+}
+
+func TestCreatePreviewRejectsIncompleteInventoryBeforeCaptureOrReservation(t *testing.T) {
+	// Each inventory places the defect where the sort comparator would have
+	// dereferenced it before validation: last, first, and between valid nodes.
+	for name, nodes := range map[string][]*types.Node{
+		"nil last":   {{Name: "gpu-a"}, nil},
+		"nil first":  {nil, {Name: "gpu-b"}, {Name: "gpu-a"}},
+		"blank name": {{Name: "gpu-b"}, {Name: "  "}, {Name: "gpu-a"}},
+		"empty name": {{Name: "gpu-b"}, {Name: ""}, {Name: "gpu-a"}},
+		"only nil":   {nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mgr, st, now := newOperationManager(t)
+			defer func() { _ = st.Close() }()
+			ctx := context.Background()
+			candidate, built := newPreviewCandidate(t, mgr, now)
+			mgr.listNodes = func(context.Context) ([]*types.Node, error) { return nodes, nil }
+
+			preview, replayed, err := mgr.CreatePreview(ctx, "alice", candidate.ID, "incomplete-inventory")
+			if !errors.Is(err, ErrIncompleteInventory) || preview != nil || replayed {
+				t.Fatalf("incomplete inventory = (%#v, %v, %v), want ErrIncompleteInventory and no preview", preview, replayed, err)
+			}
+			if len(*built) != 0 {
+				t.Fatalf("built snapshots for %v before rejecting the inventory; an incomplete inventory must not be evaluated at all", *built)
+			}
+			if _, lookupErr := st.GetOperationalIdempotency(ctx, types.ResourcePolicyImpactPreview, "alice", scopedIdempotencyKey("preview", "incomplete-inventory")); !errors.Is(lookupErr, store.ErrNotFound) {
+				t.Fatalf("idempotency lookup after rejection = %v, want ErrNotFound: the retry key must not be reserved", lookupErr)
+			}
+			previews, err := mgr.ListPreviews(ctx, OperationalListOptions{})
+			if err != nil || len(previews) != 0 {
+				t.Fatalf("durable previews after rejection = (%v, %v), want none", previews, err)
+			}
+
+			// The same key remains usable once the inventory is complete.
+			mgr.listNodes = func(context.Context) ([]*types.Node, error) {
+				return []*types.Node{{Name: "gpu-a", Labels: map[string]string{"pool": "a100"}}}, nil
+			}
+			preview, replayed, err = mgr.CreatePreview(ctx, "alice", candidate.ID, "incomplete-inventory")
+			if err != nil || replayed || preview == nil || preview.ID == "" {
+				t.Fatalf("recovered preview = (%#v, %v, %v)", preview, replayed, err)
+			}
+		})
+	}
+}
+
+func TestCreatePreviewDoesNotReorderListerInventory(t *testing.T) {
+	mgr, st, now := newOperationManager(t)
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	candidate, built := newPreviewCandidate(t, mgr, now)
+	nodes := []*types.Node{
+		{Name: "gpu-c", Labels: map[string]string{"pool": "a100"}},
+		{Name: "gpu-a", Labels: map[string]string{"pool": "a100"}},
+		{Name: "gpu-b", Labels: map[string]string{"pool": "a100"}},
+	}
+	mgr.listNodes = func(context.Context) ([]*types.Node, error) { return nodes, nil }
+
+	preview, replayed, err := mgr.CreatePreview(ctx, "alice", candidate.ID, "ordered-inventory")
+	if err != nil || replayed || preview == nil {
+		t.Fatalf("preview = (%#v, %v, %v)", preview, replayed, err)
+	}
+	if got := strings.Join(*built, ","); got != "gpu-a,gpu-b,gpu-c" {
+		t.Fatalf("preview captured nodes in order %q, want stable name order gpu-a,gpu-b,gpu-c", got)
+	}
+	if nodes[0].Name != "gpu-c" || nodes[1].Name != "gpu-a" || nodes[2].Name != "gpu-b" {
+		t.Fatalf("lister inventory was reordered in place: %v %v %v", nodes[0].Name, nodes[1].Name, nodes[2].Name)
+	}
+	total := len(preview.NewlyEligible) + len(preview.NewlyBlocked) + len(preview.ChangedObservedOnly) + len(preview.Unchanged)
+	if total != 3 {
+		t.Fatalf("preview covered %d nodes, want all 3: %#v", total, preview)
 	}
 }
 

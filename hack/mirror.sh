@@ -41,9 +41,13 @@ EXCLUDES=(
 	"blocker.md"
 	"main.md"
 	"main-codex.md"
-	# Private next-release product plan. Its roadmap and delivery decisions are
+	# Private release plans. Their roadmap and delivery decisions are
 	# intentionally kept in the private repository until separately published.
+	# They are excluded because they are private documents, not because of
+	# the release state of the version they describe: V0.5.0 stays excluded
+	# after the v0.5.0 tag exists, exactly as V0.4.0 did.
 	"V0.4.0_RELEASE_PLAN.md"
+	"V0.5.0_RELEASE_PLAN.md"
 	# NOT excluded, deliberately: PRODUCT_PLAN.md and
 	# PRODUCTION_READINESS_PLAN.md. They are published product roadmap
 	# documents — hack/verify-docs.sh lints them as such, and they have been in
@@ -78,7 +82,7 @@ note "syncing the tree"
 rsync_args=(-a --delete)
 # Honour .gitignore as well as the explicit list above.
 #
-# The explicit list names three documents and three directories. It cannot name
+# The explicit list names documents and directories. It cannot name
 # the working tree's debris, and rsync copied all of it: a 126 MB
 # kubeneuron-controller build output at the repository root rode into the
 # public checkout on every mirror. It was never COMMITTED, because the mirrored
@@ -172,7 +176,7 @@ done
 # should, and flagging it would train everyone to ignore this check.
 note "sweeping published prose for references to excluded documents"
 sweep=0
-for e in AGENT_SESSION_STATE.md TRANSFER_HANDOFF.md blocker.md main-codex.md V0.4.0_RELEASE_PLAN.md; do
+for e in AGENT_SESSION_STATE.md TRANSFER_HANDOFF.md blocker.md main-codex.md V0.4.0_RELEASE_PLAN.md V0.5.0_RELEASE_PLAN.md; do
 	if hits=$(git -C "$TARGET" grep -n --untracked -F -- "$e" -- '*.md' 2>/dev/null); then
 		echo "A PUBLISHED DOCUMENT REFERENCES $e, WHICH IS NOT PUBLISHED:" >&2
 		echo "$hits" >&2

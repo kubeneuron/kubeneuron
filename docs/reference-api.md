@@ -110,6 +110,18 @@ diagnostics and simulation, `60/min` for small lifecycle operations). A
 deployment may impose a stricter gateway policy. A quota response is `429`
 with `Retry-After`.
 
+Three surfaces below — runtime contract coverage, the candidate runtime
+contract impact inside previews, and runtime contract qualifications — form
+the **GPU Runtime Contract Lifecycle** scope of v0.5.0, which is prepared
+for release but not yet published. They are unit-tested and driven by the
+CPU-only kind integration harness against a real controller with synthetic
+accelerator evidence; no GPU hardware run has called them. A v0.4.0
+controller answers `404` on the new routes and
+its previews carry no `runtime_contract_impact`. All three are statements
+about evidence: none of them is read by admission, incidents, action dispatch,
+verification before resolve, or `GPUAutonomyPlan`, and none adds a CRD, RBAC
+rule, or store migration.
+
 ### Readiness and evidence
 
 | Route | Purpose |
@@ -123,6 +135,72 @@ Fleet readiness accepts `limit` (1–500), opaque `cursor`, `state`
 `tenant`, `cluster`, and `stale=true`. Tenant and cluster filters map to the
 node labels `kubeneuron.io/tenant` and `kubeneuron.io/cluster`; they are a
 filtering contract, not a substitute for Kubernetes RBAC on the API itself.
+
+### Runtime contract coverage (read-only, v0.5.0)
+
+| Route | Purpose |
+|---|---|
+| `GET /api/v1/nodes/{node}/runtime-contract?vendor=<v>` | one live `runtime-contract-coverage/v1` assessment of how the configured `AcceleratorRuntimeProfile` set covers this node for one vendor |
+| `GET /api/v1/runtime-contracts/coverage?vendor=<v>` | stable node-name ordered fleet page of the same assessment: `items`, `coverage_version`, optional opaque `next_cursor` |
+
+`vendor` (`nvidia`, `amd`, `intel`, or `google`) is required on both routes:
+coverage is defined per (node, vendor) pair and the fleet page never picks a
+vendor silently. The fleet route also accepts `limit` (1–500, default 100),
+the opaque `cursor` from a previous page, and the `tenant`/`cluster` label
+filters used by fleet readiness. Both routes require only the ordinary
+operator `get` authorization: no leader fencing, `Idempotency-Key`, or
+per-source, per-operation quota applies to them, because that quota guards
+mutations. A missing or unknown vendor, a bad `limit`, or an invalid
+cursor is `400`; an unknown node is `404`; an inventory entry without a name
+fails the whole fleet page with `422`; a controller whose store cannot retain
+accelerator reports, or whose node or report read fails, answers `503` rather
+than presenting a node as assessed. A fleet page also fails as a whole when
+any one node's coverage cannot be built; a row is never silently omitted.
+
+The result is a pure function of live evidence — evaluation time, node
+identity (name and UID), node labels, vendor, agent heartbeat, the latest
+retained (node, vendor) accelerator report, and the compiled profiles — and
+the same input always yields the same result. Nothing is persisted and
+nothing in admission changes.
+
+| Field | Values | Meaning |
+|---|---|---|
+| `selection` | `Exact`, `Uncovered`, `Ambiguous`, `Invalid` | how the configured profiles select this node and vendor: exactly one, none, more than one, or a profile/input that cannot be evaluated |
+| `attestation` | `FreshCompatible`, `Missing`, `Stale`, `Mismatch`, `NotApplicable` | whether the retained report attests the selected profile; `NotApplicable` whenever selection is not `Exact` |
+| `verification_depth` | `Full`, `Reduced`, `Unavailable` | how much of the runtime contract can be verified right now; an observation about evidence, never an authorization |
+| `profile_name`, `profile_uid`, `profile_generation`, `profile_digest` | | identity of the selected profile; present only when `selection` is `Exact` |
+| `config_digest`, `evaluated_at`, `node_name`, `node_uid`, `vendor` | | the compiled configuration and the exact node identity the report was matched against; `node_uid` is always present, even when blank |
+| `agent_last_seen`, `report_observed_at` | | the timestamps the assessment observed; omitted when zero |
+| `reasons`, `summary` | | stable codes in canonical order and a human rendering; a `Full` result has no reasons |
+
+Verification depth follows from the other two axes and the agent heartbeat.
+The heartbeat bound is the same five-minute evidence bound that verification
+before resolve uses; report freshness is the selected profile's
+`max_report_age`.
+
+- `Exact` selection, a `FreshCompatible` report, and a usable heartbeat is
+  `Full`.
+- `Exact` selection with a `FreshCompatible` report but a heartbeat that is
+  stale or in the future is `Unavailable`: the evidence contradicts itself,
+  so it is not downgraded to `Reduced`.
+- `Exact` selection without a fresh compatible report, or `Uncovered`
+  selection, is `Reduced` while the heartbeat is usable and `Unavailable`
+  otherwise. A missing report is ordinary evidence (`Missing`), not an error.
+- `Ambiguous` or `Invalid` selection is always `Unavailable`.
+
+Reason codes, in the order results list them: `EvaluationTimeMissing`,
+`NodeIdentityMissing`, `VendorInvalid`, `ProfileInvalid`, `ProfileOverlap`,
+`ProfileNotFound`, `ReportMissing`, `ReportInvalid`, `ReportNodeMismatch`,
+`ReportVendorMismatch`, `ReportProfileDigestMismatch`,
+`ReportProfileRevisionMismatch`, `ReportDriverVersionMismatch`,
+`ReportRuntimeVersionMismatch`, `ReportObservedInFuture`, `ReportStale`,
+`ReportNotReady`, `ReportRejected`, `AgentNeverSeen`,
+`AgentHeartbeatInFuture`, `AgentHeartbeatStale`. Attestation records every
+observable discrepancy rather than the first one, then defers to the
+profile's own `CheckReport` gate before reporting `FreshCompatible`. Node
+identity is compared with the same exact-equality rule as reset admission: a
+report from a previous Node object that reused the name does not attest the
+current node.
 
 ### Candidate configurations and policy impact
 
@@ -150,6 +228,57 @@ simulations, and autonomy plans) accept `limit`, opaque `cursor`, `state`,
 candidate digest, inventory snapshot ID, evaluator version, and per-node
 before/after reason/limit deltas; stale or incomplete inventory fails with
 `422` rather than returning a plausible partial change.
+
+#### Candidate runtime contract impact (pre-deploy, static, non-authorizing; v0.5.0)
+
+Every per-node delta in `newly_eligible`, `newly_blocked`,
+`changed_observed_only`, and `unchanged` carries a `runtime_contract_impact`
+object, and the preview carries `runtime_contract_impact_version`
+(`candidate-runtime-contract-impact/v1`) and `runtime_contract_profile_change`.
+Both are absent on previews persisted before this field existed, including
+every preview a v0.4.0 controller created. The impact is a pure function of
+the candidate profile set and the captured node name, labels, and vendor
+identity. That vendor identity is taken from the captured report, and it is
+the **only** thing the captured report contributes: the report's attestation
+content (profile digest and revision, driver and runtime versions,
+readiness), its observation time, and the agent heartbeat are not inputs and
+never prove a candidate. The impact never states that a candidate is
+deployed, attested, or qualified: `assessment` is always `PreDeployStatic`.
+It distinguishes two different things by design — the **static pre-deploy
+selection** the candidate profile set would make, which can be computed now,
+and the **fresh post-deploy attestation** only a report produced after
+deployment can supply, which cannot.
+
+| Field | Values | Meaning |
+|---|---|---|
+| `profile_change` | `NoProfileChange`, `ProfileSetReplaced` | whether the candidate contains any accelerator runtime profile |
+| `static_selection` | `NotEvaluated`, `Exact`, `Uncovered`, `Ambiguous`, `Invalid` | how the candidate profile set alone selects this node and vendor; `NotEvaluated` only for `NoProfileChange` |
+| `candidate_profile_name`, `candidate_profile_uid`, `candidate_profile_generation`, `candidate_profile_digest` | | identity of the selected candidate profile; present only when `static_selection` is `Exact` |
+| `post_deploy_attestation` | `FreshRequired`, `NotRequired`, `NotApplicable` | the attestation the node would need after deployment; a requirement, never a status |
+| `captured_report_usable_as_candidate_attestation` | always `false` | a report captured before deployment cannot attest a candidate profile, even when UID, digest, and versions match the live profile |
+| `after_decision_evidence` | `LiveProfileWithCapturedReport`, `CandidateProfileWithoutReport`, `NoProfileWithCapturedReport` | exactly which profile and report the hypothetical `after` decision was evaluated from |
+| `reasons`, `summary` | | stable codes in canonical order (`NoCandidateProfiles`, `CandidateProfilesPresent`, `VendorUnknown`, `ProfileInvalid`, `ProfileOverlap`, `ProfileNotFound`, `CapturedReportPredatesCandidate`) and a human rendering |
+
+The `after` decision follows the impact:
+
+- `NoProfileChange` (a policy-only candidate) keeps the live profile and the
+  captured report, so the policy-impact decision is the live decision under
+  the candidate digest. `post_deploy_attestation` is `NotRequired`.
+- `Exact` selection evaluates the candidate profile with the captured report
+  withheld. The `after` decision therefore fails closed (`Unknown` with
+  `EvidenceStale`) and can never be `Eligible` from pre-deploy evidence; a
+  candidate profile identical to the live profile still lands in
+  `newly_blocked` with `post_deploy_attestation: "FreshRequired"`. This is the
+  one case where an `Unknown` `after` answer is a deliberate candidate result
+  rather than a `422` incomplete inventory.
+- `Uncovered`, `Ambiguous`, or `Invalid` selection keeps the captured report
+  but no profile: the existing observation-only fallback, which reads
+  `ObservedOnly` and lists no allowed actions. `post_deploy_attestation` is
+  `NotApplicable`; the impact never claims `FreshCompatible` or `Full`.
+
+None of this touches live admission, runtime contract coverage, or
+qualifications, and there is no route that deploys, applies, promotes, or
+approves a candidate.
 
 ### Diagnostics, simulation, and incidents
 
@@ -219,6 +348,49 @@ touches a device. A production hardware effect requires an explicitly wired,
 hardware-qualified adapter that accepts the persisted deterministic effect ID
 as its idempotency key. The REST/CRD contract does not itself certify any
 driver/runtime combination.
+
+### Runtime contract qualifications (evidence only, v0.5.0)
+
+| Route | Purpose |
+|---|---|
+| `POST /api/v1/runtime-contract-qualifications` | freeze an explicit node cohort against its currently selected accelerator runtime profile and start observing it |
+| `GET /api/v1/runtime-contract-qualifications`, `GET /api/v1/runtime-contract-qualifications/{id}` | list/read qualifications with their frozen bindings, bounded observation history, and read-time effective state |
+| `POST /api/v1/runtime-contract-qualifications/{id}/observe` | re-read inventory and coverage for the frozen cohort and record one observation |
+
+Create strict-decodes `{"actor","nodes":[…],"vendor","tenant?","cluster?",
+"requirements":{"min_samples","min_duration"},"expires_at"}`. `min_duration`
+is a positive Go duration string (`30m`, `12h`); `expires_at` is RFC3339 and
+must leave at least five minutes after the earliest instant the qualification
+could become ready. The cohort is at most 32 nodes, every member must be
+`Exact` against the same profile and compiled configuration, and the tenant
+and cluster are derived from the controller-owned node labels, never copied
+from the request. Observe strict-decodes only `{"actor","resource_version?"}`;
+the controller captures all evidence itself. Both mutations require an
+`Idempotency-Key`, are fenced to the elected leader, and share the
+per-source quotas above (`20/min` create, `30/min` observe).
+
+Each observation re-runs the runtime contract coverage assessment above for
+every frozen member. A sample counts only when **every** node is `Exact`
+against the frozen profile, `FreshCompatible`, and `Full`; the initial
+coverage recorded at creation is not a sample. The qualification becomes
+`ReadyForApproval` once `successful_samples` reaches `min_samples` **and**
+`min_duration` has elapsed since the first successful sample. The lifecycle
+is `Observing` → `ReadyForApproval`, ending in `Invalidated`
+(any binding drift, or a non-Full observation after readiness) or `Expired`.
+`ReadyForApproval` is evidence a human may consider in a separate, later
+workflow: there is deliberately no approve, promote, apply, enable, or delete
+route, and nothing in admission, incidents, actions, or `GPUAutonomyPlan`
+reads a qualification.
+
+Expiry is decided by the wall clock but persisted only by an observation, so a
+qualification can be stored as `ReadyForApproval` after its window closed.
+Every read therefore adds `evaluated_at`, `effective_state`, `expired`,
+`expiry_pending`, and `ready_for_approval`, computed at read time without a
+write: past `expires_at` a stored `ReadyForApproval` reads
+`effective_state: "Expired"` and `ready_for_approval: false`, and
+`expiry_pending: true` says the next observation will record it. Read
+`ready_for_approval`, never `state`, to decide whether evidence is current.
+Responses present `requirements.min_duration` as a duration string.
 
 ### Audit explorer and backup
 

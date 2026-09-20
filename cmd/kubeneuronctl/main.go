@@ -20,6 +20,15 @@ import (
 var version = "dev"
 
 func main() {
+	if err := newRootCommand().Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+// newRootCommand assembles the full operator CLI. It is separate from main so
+// tests can assert which commands ship without executing any of them.
+func newRootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "kubeneuronctl",
 		Short:         "Operator CLI for KubeNeuron",
@@ -35,13 +44,10 @@ func main() {
 		cmdStatus(), cmdNodes(), cmdIncidents(), cmdReport(), cmdApprove(),
 		cmdReject(), cmdAcknowledge(), cmdResolve(), cmdRemediate(), cmdPause(), cmdResume(),
 		cmdPasswd(), cmdReadiness(), cmdCandidates(), cmdPreview(), cmdHealthCheck(),
-		cmdSimulate(), cmdAutonomy(), cmdAuditEvents(),
+		cmdSimulate(), cmdAutonomy(), cmdAuditEvents(), cmdRuntimeContracts(),
+		cmdRuntimeQualifications(),
 	)
-
-	if err := root.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
-	}
+	return root
 }
 
 func cmdPasswd() *cobra.Command {

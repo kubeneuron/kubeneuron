@@ -378,6 +378,15 @@ func (s *Server) registerOperatorRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/nodes/{node}/evidence", s.requireOperator(s.handleNodeEvidence))
 	mux.HandleFunc("GET /api/v1/nodes/{node}/health-checks", s.requireOperator(s.handleListNodeHealthChecks))
 	mux.HandleFunc("GET /api/v1/nodes/{node}/accelerators", s.requireOperator(s.handleAcceleratorReports))
+	mux.HandleFunc("GET /api/v1/nodes/{node}/runtime-contract", s.requireOperator(s.handleNodeRuntimeContract))
+	mux.HandleFunc("GET /api/v1/runtime-contracts/coverage", s.requireOperator(s.handleFleetRuntimeContractCoverage))
+	// Runtime contract qualifications are evidence-only: create, list, get,
+	// and observe. No approve/promote/delete/apply/enable route exists here
+	// on purpose; see runtime_contract_qualification.go.
+	mux.HandleFunc("POST /api/v1/runtime-contract-qualifications", s.requireOperationalMutation("runtime-contract-qualification", 20, s.handleCreateRuntimeContractQualification))
+	mux.HandleFunc("GET /api/v1/runtime-contract-qualifications", s.requireOperator(s.handleListRuntimeContractQualifications))
+	mux.HandleFunc("GET /api/v1/runtime-contract-qualifications/{id}", s.requireOperator(s.handleGetRuntimeContractQualification))
+	mux.HandleFunc("POST /api/v1/runtime-contract-qualifications/{id}/observe", s.requireOperationalMutation("runtime-contract-qualification-observe", 30, s.handleObserveRuntimeContractQualification))
 	mux.HandleFunc("POST /api/v1/candidates", s.requireOperationalMutation("candidate-upload", 20, s.handleCreateCandidate))
 	mux.HandleFunc("GET /api/v1/candidates", s.requireOperator(s.handleListCandidates))
 	mux.HandleFunc("GET /api/v1/candidates/{id}", s.requireOperator(s.handleGetCandidate))

@@ -87,6 +87,46 @@ func TestEvaluateFailsClosedForStopAndStaleEvidence(t *testing.T) {
 	}
 }
 
+// A MaintenanceRequired request is the extended-authorization path: it must be
+// inside an open window and carry both elevated authorization and an approved
+// disruption budget. Each gate fails closed independently of the others.
+func TestEvaluateMaintenanceRequiredNeedsOpenWindowAndExtendedGrants(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	base := testSnapshot(now)
+	base.MaintenanceActive = true
+	base.Request = Request{
+		Class: ActionAutonomous, AcceleratorAction: types.AcceleratorActionResetDevice,
+		Scope: types.AcceleratorScopePhysicalDevice, TargetDeviceID: "GPU-a",
+		ApprovalRequired: true, ApprovalGranted: true,
+		MaintenanceRequired: true, AllowDuringMaintenance: true,
+		ElevatedAuthorizationGranted: true, DisruptionBudgetApproved: true,
+	}
+	if got := Evaluate(base); !got.Permitted() || len(got.ReasonCodes) != 0 {
+		t.Fatalf("open named window with full grants = %#v, want eligible", got)
+	}
+	cases := []struct {
+		name   string
+		mutate func(*Snapshot)
+		want   ReasonCode
+	}{
+		{"window closed", func(s *Snapshot) { s.MaintenanceActive = false }, ReasonMaintenanceWindowClosed},
+		{"change freeze", func(s *Snapshot) { s.ChangeFreeze = true }, ReasonMaintenanceWindowClosed},
+		{"approval missing", func(s *Snapshot) { s.Request.ApprovalGranted = false }, ReasonApprovalMissing},
+		{"elevated authorization missing", func(s *Snapshot) { s.Request.ElevatedAuthorizationGranted = false }, ReasonApprovalMissing},
+		{"disruption budget missing", func(s *Snapshot) { s.Request.DisruptionBudgetApproved = false }, ReasonApprovalMissing},
+		{"autonomy budget exhausted", func(s *Snapshot) { s.AutonomyBudgetExhausted = true }, ReasonAutonomyBudgetExhausted},
+		{"emergency stop", func(s *Snapshot) { s.EmergencyStop = true }, ReasonEmergencyStopActive},
+	}
+	for _, tc := range cases {
+		snapshot := base
+		tc.mutate(&snapshot)
+		got := Evaluate(snapshot)
+		if got.Permitted() || got.State != StateBlocked || len(got.ReasonCodes) != 1 || got.ReasonCodes[0] != tc.want {
+			t.Fatalf("%s: result = %#v, want blocked with %s", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestEvaluateObservedOnlyWithoutProfile(t *testing.T) {
 	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 	snapshot := testSnapshot(now)

@@ -50,7 +50,7 @@ mode; scripts should prefer the version returned by `show`.
 | `kubeneuronctl readiness [node]` | fleet table or full node decision snapshot/evidence explanation |
 | `kubeneuronctl candidates upload <file> [--tenant … --cluster … --expires-at …]` | strict candidate upload; it never applies the file to Kubernetes |
 | `kubeneuronctl candidates list`, `show <id>`, `revoke <id> --reason …` | inspect or logically revoke retained candidate configurations |
-| `kubeneuronctl preview <candidate-id>` | capture inventory and create a deterministic policy-impact preview |
+| `kubeneuronctl preview <candidate-id>` | capture inventory and create a deterministic policy-impact preview. The JSON includes a per-node `runtime_contract_impact` (`assessment: "PreDeployStatic"`; v0.5.0) that states whether the candidate replaces the runtime profile set, how the candidate profiles statically select the node, and the post-deploy attestation requirement (`FreshRequired`, `NotRequired`, or `NotApplicable`). Static selection uses only the candidate profiles, the captured node name and labels, and the vendor identity recorded in the captured report; the report's attestation content, observation time, and the agent heartbeat never prove a candidate. A candidate profile that selects a node, even one identical to the live profile, therefore shows an `after` decision that fails closed with `FreshRequired`. A policy-only candidate reports `NoProfileChange` and keeps the live profile decision. The command has no apply, deploy, promote, or approve mode |
 | `kubeneuronctl health-check <node> --profile Passive|Quick|Extended --reason …` | request bounded diagnostics; Extended requires a Kubernetes-authenticated bearer identity in the verified `diagnostics-extended` and `disruption-budget-approver` groups plus a live maintenance window. The client never sends authorization grants. |
 | `kubeneuronctl health-check list`, `show <run-id>`, `cancel <run-id>` | inspect or cancel durable diagnostic work |
 | `kubeneuronctl simulate <node> --class … --rationale … [--action … --scope … --device-id …]` | create a no-side-effect frozen remediation graph |
@@ -60,6 +60,21 @@ mode; scripts should prefer the version returned by `show`.
 | `kubeneuronctl autonomy approve|pause|resume|rollback <plan-id> …` | role-bound approval and explicitly reasoned lifecycle transitions |
 | `kubeneuronctl autonomy rollout <plan-id>` | inspect canary, bake, expansion, decision, and effect observations |
 | `kubeneuronctl audit-events [--kind … --tenant … --cluster … --actor … --request-id … --cursor …]` | query the append-only v0.4 operational audit explorer; pass back its opaque cursor to continue a page |
+| `kubeneuronctl runtime-contracts coverage <node> --vendor <v>` | print one node's read-only `runtime-contract-coverage/v1` assessment as JSON: `selection`, `attestation`, `verification_depth`, the selected profile identity for `Exact`, reason codes, and the observed heartbeat/report timestamps. `--vendor` (`nvidia`, `amd`, `intel`, or `google`) is required. Nothing is written and nothing in admission changes (v0.5.0) |
+| `kubeneuronctl runtime-contracts coverage --vendor <v> [--tenant … --cluster … --limit … --cursor …]` | fleet coverage table (`NODE SELECTION ATTESTATION VERIFICATION PROFILE REASONS`) in stable node-name order, `--limit` 1–500; when a page continues, the command prints the `--cursor` value to pass back. The page fails as a whole if any node's coverage cannot be built, so a row is never silently missing. `coverage` is the only subcommand |
+| `kubeneuronctl runtime-qualifications create --nodes … --vendor … --min-samples … --min-duration … --expires-at … [--tenant … --cluster … --actor …]` | freeze an explicit node cohort against its runtime profile and start an evidence-only qualification; `--min-duration` is a Go duration, `--expires-at` is RFC3339 |
+| `kubeneuronctl runtime-qualifications list [--state … --tenant … --cluster … --since … --until … --cursor … --limit … --include-expired=…]`, `show <id>` | inspect qualifications as JSON; read `effective_state` and `ready_for_approval`, which are computed at read time, rather than the stored `state`, because a qualification past `expires_at` stays stored as `ReadyForApproval` until an observation records `Expired` |
+| `kubeneuronctl runtime-qualifications observe <id> [--resource-version … --actor …]` | record one fresh observation of the frozen cohort with idempotency/version fencing. There is no approve, promote, apply, enable, or delete subcommand: a ready qualification is evidence for a separate human decision, not authority |
+
+`runtime-contracts`, the `runtime_contract_impact` block in `preview` output,
+and `runtime-qualifications` are the v0.5.0 GPU Runtime Contract Lifecycle
+scope, prepared for release but not yet published. They are unit-tested and
+the CPU-only kind integration harness runs them against a real controller
+with synthetic accelerator evidence; no GPU hardware run has called them.
+Against a v0.4.0 controller
+the two new command groups fail with
+`404`, and `preview` JSON has no `runtime_contract_impact`. They are
+evidence-only views; none of them changes what the controller admits.
 
 The installed controller has no default hardware autonomy executor. A plan can
 therefore advance visibly through a `simulation-only` canary, but the CLI does

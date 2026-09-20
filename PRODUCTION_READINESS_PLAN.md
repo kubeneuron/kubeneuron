@@ -401,6 +401,18 @@ Phases 1–3 made concrete.
       leftovers. The run was driven locally via `hack/hw-e2e.sh`; the
       GitHub Actions `workflow_dispatch` path itself has not yet been
       exercised.
+      **LATEST GREEN RUNS 2026-09-13 / 2026-09-14** on temporary EKS
+      `g4dn.xlarge` clusters, again driven locally: the full harness
+      (`test-dryrun`, `test-threshold`, `test-dcgm` with the agent on the
+      real driver and a version-compatible DCGM client/engine,
+      `test-verify-recur`, `test-drain`, confined approved `ReplaceNode`)
+      passed on 2026-09-13 and exposed a teardown regression — orphaned
+      VPC-CNI interface and cluster security group after `ReplaceNode`
+      wedged the cluster stack — fixed in `6678334` and pinned by the
+      14-scenario `make verify-hw-e2e-sweep`. The focused
+      `up → deploy → test-destructive → teardown` sequence passed on a
+      fresh cluster on 2026-09-14 with automatic teardown and an
+      independent exact-scope AWS audit finding nothing left behind.
 - [ ] (M) [hw] NVML/DCGM event stream as a second detection source beside kmsg.
       **CODE LANDED 2026-08-01:** `internal/agent/gpuhealth/` polls DCGM's
       last-XID (`dcgmi dmon -e 230`, level-triggered) with an `nvidia-smi -q`

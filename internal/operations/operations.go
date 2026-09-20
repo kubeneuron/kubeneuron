@@ -86,6 +86,14 @@ type AutonomyMaintenanceWindowResolver func(context.Context, string, []string) (
 // wires a qualified adapter for its hardware and compensation model.
 type AutonomyEffectExecutor func(context.Context, AutonomyEffectRequest) (AutonomyEffectResult, error)
 
+// RuntimeContractCoverageBuilder assesses how well the configured runtime
+// contract covers one node and vendor from the controller's current evidence.
+// It is read-only: the manager never persists its result, and a builder must
+// not write. A node that has no retained report for the vendor is a Missing
+// attestation, not an error; an unavailable report store or a store read
+// failure is an error so it can never be mistaken for healthy coverage.
+type RuntimeContractCoverageBuilder func(context.Context, string, types.AcceleratorVendor) (config.RuntimeContractCoverage, error)
+
 // Manager owns only durable product resources.  The workflow store is also
 // the existing controller action queue, which lets quick/extended diagnostics
 // retain lease and emergency-stop semantics rather than inventing a second
@@ -99,6 +107,7 @@ type Manager struct {
 	getIncident                     IncidentReader
 	autonomyExecute                 AutonomyEffectExecutor
 	autonomyMaintenanceWindowActive AutonomyMaintenanceWindowResolver
+	buildRuntimeContractCoverage    RuntimeContractCoverageBuilder
 	// diagnosticMu serializes the check-and-admit portion of a diagnostic
 	// request in the elected controller. The durable queue remains the source
 	// of truth across restart; this narrow mutex closes the otherwise ordinary
@@ -118,6 +127,7 @@ type Options struct {
 	GetIncident                     IncidentReader
 	AutonomyEffectExecutor          AutonomyEffectExecutor
 	AutonomyMaintenanceWindowActive AutonomyMaintenanceWindowResolver
+	BuildRuntimeContractCoverage    RuntimeContractCoverageBuilder
 	Now                             func() time.Time
 }
 
@@ -135,6 +145,7 @@ func New(options Options) *Manager {
 		getIncident:                     options.GetIncident,
 		autonomyExecute:                 options.AutonomyEffectExecutor,
 		autonomyMaintenanceWindowActive: options.AutonomyMaintenanceWindowActive,
+		buildRuntimeContractCoverage:    options.BuildRuntimeContractCoverage,
 		now:                             now,
 	}
 }
@@ -292,12 +303,19 @@ func (m *Manager) FleetReadinessPage(ctx context.Context, filter ReadinessFilter
 	if err != nil {
 		return nil, "", err
 	}
-	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
-	out := make([]Readiness, 0, min(filter.Limit, len(nodes)))
+	// Every listed node is validated before the sort touches it: the sort
+	// comparator dereferences Name, so a nil or nameless entry must be rejected
+	// as an incomplete inventory rather than allowed to panic. Sorting a
+	// caller-owned copy keeps the lister's slice untouched.
 	for _, node := range nodes {
 		if node == nil || strings.TrimSpace(node.Name) == "" {
 			return nil, "", fmt.Errorf("%w: inventory contains a node without a name", ErrIncompleteInventory)
 		}
+	}
+	nodes = append([]*types.Node(nil), nodes...)
+	sort.SliceStable(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
+	out := make([]Readiness, 0, min(filter.Limit, len(nodes)))
+	for _, node := range nodes {
 		if filter.AfterNode != "" && node.Name <= filter.AfterNode {
 			continue
 		}
@@ -333,6 +351,110 @@ func (m *Manager) FleetReadinessPage(ctx context.Context, filter ReadinessFilter
 
 func readinessScopeMatches(node *types.Node, filter ReadinessFilter) bool {
 	return operationalNodeScopeMatches(node, filter.Tenant, filter.Cluster)
+}
+
+// RuntimeContractCoverageFilter is the fleet coverage explorer's stable,
+// read-only filter. Vendor is required: coverage is defined per (node,
+// vendor) pair and a fleet page must not silently pick one. Tenant and
+// cluster use the same conventional node labels as ReadinessFilter.
+type RuntimeContractCoverageFilter struct {
+	Vendor    types.AcceleratorVendor
+	Tenant    string
+	Cluster   string
+	Limit     int
+	AfterNode string
+}
+
+func (m *Manager) requireRuntimeContractCoverage() error {
+	if m == nil || m.buildRuntimeContractCoverage == nil {
+		return fmt.Errorf("%w: runtime contract coverage builder is unavailable", ErrUnavailable)
+	}
+	return nil
+}
+
+func validRuntimeContractVendor(vendor types.AcceleratorVendor) error {
+	if !vendor.Valid() {
+		return fmt.Errorf("vendor must be %s, %s, %s, or %s", types.AcceleratorVendorNVIDIA, types.AcceleratorVendorAMD, types.AcceleratorVendorIntel, types.AcceleratorVendorGoogle)
+	}
+	return nil
+}
+
+// NodeRuntimeContractCoverage assesses one current node and vendor without
+// persisting anything. It is an observation about evidence and never
+// authorizes an effect.
+func (m *Manager) NodeRuntimeContractCoverage(ctx context.Context, node string, vendor types.AcceleratorVendor) (*config.RuntimeContractCoverage, error) {
+	if err := m.requireRuntimeContractCoverage(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(node) == "" {
+		return nil, fmt.Errorf("node is required")
+	}
+	if err := validRuntimeContractVendor(vendor); err != nil {
+		return nil, err
+	}
+	coverage, err := m.buildRuntimeContractCoverage(ctx, node, vendor)
+	if err != nil {
+		return nil, err
+	}
+	return &coverage, nil
+}
+
+// FleetRuntimeContractCoveragePage assesses a stable name-ordered fleet page
+// for one vendor. It mirrors FleetReadinessPage: the final node name is the
+// internal resume cursor, and a node whose coverage cannot be built is an
+// error rather than a silently omitted (and therefore healthy-looking) row.
+func (m *Manager) FleetRuntimeContractCoveragePage(ctx context.Context, filter RuntimeContractCoverageFilter) ([]config.RuntimeContractCoverage, string, error) {
+	if err := m.requireRuntimeContractCoverage(); err != nil {
+		return nil, "", err
+	}
+	if m.listNodes == nil {
+		return nil, "", fmt.Errorf("%w: node inventory lister is unavailable", ErrUnavailable)
+	}
+	if err := validRuntimeContractVendor(filter.Vendor); err != nil {
+		return nil, "", err
+	}
+	if filter.Limit <= 0 {
+		filter.Limit = 100
+	}
+	if filter.Limit > 500 {
+		return nil, "", fmt.Errorf("runtime contract coverage limit exceeds 500")
+	}
+	nodes, err := m.listNodes(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	// Every listed node is validated before the sort touches it: the sort
+	// comparator dereferences Name, so a nil or nameless entry must be rejected
+	// as an incomplete inventory rather than allowed to panic. Sorting a
+	// caller-owned copy keeps the lister's slice untouched.
+	for _, node := range nodes {
+		if node == nil || strings.TrimSpace(node.Name) == "" {
+			return nil, "", fmt.Errorf("%w: inventory contains a node without a name", ErrIncompleteInventory)
+		}
+	}
+	nodes = append([]*types.Node(nil), nodes...)
+	sort.SliceStable(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
+	out := make([]config.RuntimeContractCoverage, 0, min(filter.Limit, len(nodes)))
+	for _, node := range nodes {
+		if filter.AfterNode != "" && node.Name <= filter.AfterNode {
+			continue
+		}
+		if !operationalNodeScopeMatches(node, filter.Tenant, filter.Cluster) {
+			continue
+		}
+		coverage, err := m.buildRuntimeContractCoverage(ctx, node.Name, filter.Vendor)
+		if err != nil {
+			return nil, "", fmt.Errorf("runtime contract coverage for node %q: %w", node.Name, err)
+		}
+		out = append(out, coverage)
+		if len(out) == filter.Limit+1 {
+			// The final item merely proves there is another page. Do not return
+			// it; the last returned name is the resume cursor.
+			out = out[:filter.Limit]
+			return out, out[len(out)-1].NodeName, nil
+		}
+	}
+	return out, "", nil
 }
 
 // operationalNodeScopeMatches is the common tenant/cluster boundary for
@@ -905,27 +1027,37 @@ func (m *Manager) RevokeCandidate(ctx context.Context, actor, id, reason, idempo
 // NodeDecisionDelta explains the before/after answer for one node in a policy
 // impact preview.  Both results include their own config digest and evidence
 // refs, so the diff can be exported/replayed without live controller logs.
+//
+// RuntimeContractImpact is the pre-deploy static runtime contract statement
+// for the node.  It is absent on previews persisted before the field existed.
 type NodeDecisionDelta struct {
-	Node    string          `json:"node"`
-	Before  decision.Result `json:"before"`
-	After   decision.Result `json:"after"`
-	Changed bool            `json:"changed"`
+	Node                  string                          `json:"node"`
+	Before                decision.Result                 `json:"before"`
+	After                 decision.Result                 `json:"after"`
+	Changed               bool                            `json:"changed"`
+	RuntimeContractImpact *CandidateRuntimeContractImpact `json:"runtime_contract_impact,omitempty"`
 }
 
+// PolicyImpactPreview is an immutable, replayable before/after answer for one
+// candidate against one frozen fleet inventory.  RuntimeContractImpactVersion
+// and RuntimeContractProfileChange were added later and are empty on older
+// persisted previews, whose per-node deltas then carry no impact statement.
 type PolicyImpactPreview struct {
-	ID                  string              `json:"id"`
-	ResourceVersion     int                 `json:"resource_version"`
-	CandidateID         string              `json:"candidate_id"`
-	CandidateDigest     string              `json:"candidate_digest"`
-	Tenant              string              `json:"tenant,omitempty"`
-	Cluster             string              `json:"cluster,omitempty"`
-	InventorySnapshotID string              `json:"inventory_snapshot_id"`
-	EvaluatorVersion    string              `json:"evaluator_version"`
-	CreatedAt           time.Time           `json:"created_at"`
-	NewlyEligible       []NodeDecisionDelta `json:"newly_eligible"`
-	NewlyBlocked        []NodeDecisionDelta `json:"newly_blocked"`
-	ChangedObservedOnly []NodeDecisionDelta `json:"changed_observed_only"`
-	Unchanged           []NodeDecisionDelta `json:"unchanged"`
+	ID                           string                       `json:"id"`
+	ResourceVersion              int                          `json:"resource_version"`
+	CandidateID                  string                       `json:"candidate_id"`
+	CandidateDigest              string                       `json:"candidate_digest"`
+	Tenant                       string                       `json:"tenant,omitempty"`
+	Cluster                      string                       `json:"cluster,omitempty"`
+	InventorySnapshotID          string                       `json:"inventory_snapshot_id"`
+	EvaluatorVersion             string                       `json:"evaluator_version"`
+	RuntimeContractImpactVersion string                       `json:"runtime_contract_impact_version,omitempty"`
+	RuntimeContractProfileChange RuntimeContractProfileChange `json:"runtime_contract_profile_change,omitempty"`
+	CreatedAt                    time.Time                    `json:"created_at"`
+	NewlyEligible                []NodeDecisionDelta          `json:"newly_eligible"`
+	NewlyBlocked                 []NodeDecisionDelta          `json:"newly_blocked"`
+	ChangedObservedOnly          []NodeDecisionDelta          `json:"changed_observed_only"`
+	Unchanged                    []NodeDecisionDelta          `json:"unchanged"`
 }
 
 type fleetSnapshot struct {
@@ -938,11 +1070,12 @@ type fleetSnapshot struct {
 }
 
 type capturedNode struct {
-	Node         string            `json:"node"`
-	Before       decision.Snapshot `json:"before"`
-	After        decision.Snapshot `json:"after"`
-	BeforeResult decision.Result   `json:"before_result"`
-	AfterResult  decision.Result   `json:"after_result"`
+	Node                  string                          `json:"node"`
+	Before                decision.Snapshot               `json:"before"`
+	After                 decision.Snapshot               `json:"after"`
+	BeforeResult          decision.Result                 `json:"before_result"`
+	AfterResult           decision.Result                 `json:"after_result"`
+	RuntimeContractImpact *CandidateRuntimeContractImpact `json:"runtime_contract_impact,omitempty"`
 }
 
 // CreatePreview evaluates a candidate against one frozen fleet input.  Any
@@ -977,18 +1110,32 @@ func (m *Manager) CreatePreview(ctx context.Context, actor, candidateID, idempot
 	if err != nil {
 		return nil, false, err
 	}
-	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
+	// Every listed node is validated before the sort touches it: the sort
+	// comparator dereferences Name, so a nil or nameless entry must be rejected
+	// as an incomplete inventory rather than allowed to panic. The rejection
+	// happens before any snapshot is built or the retry key is reserved, so the
+	// operator can retry once the inventory is complete. Sorting a caller-owned
+	// copy keeps the lister's slice untouched.
+	for _, node := range nodes {
+		if node == nil || strings.TrimSpace(node.Name) == "" {
+			return nil, false, fmt.Errorf("%w: inventory includes an unnamed node", ErrIncompleteInventory)
+		}
+	}
+	nodes = append([]*types.Node(nil), nodes...)
+	sort.SliceStable(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
 	captured := make([]capturedNode, 0, len(nodes))
 	preview := &PolicyImpactPreview{
 		ID: newID("preview"), ResourceVersion: 1, CandidateID: candidate.ID, CandidateDigest: candidate.NormalizedDigest,
 		Tenant: candidate.Tenant, Cluster: candidate.Cluster,
 		InventorySnapshotID: newID("inventory"), EvaluatorVersion: decision.EvaluatorVersion,
-		CreatedAt: m.now().UTC(),
+		RuntimeContractImpactVersion: CandidateRuntimeContractImpactVersion,
+		RuntimeContractProfileChange: RuntimeContractProfileChangeNone,
+		CreatedAt:                    m.now().UTC(),
+	}
+	if len(candidate.Profiles) > 0 {
+		preview.RuntimeContractProfileChange = RuntimeContractProfileChangeReplaced
 	}
 	for _, node := range nodes {
-		if node == nil || strings.TrimSpace(node.Name) == "" {
-			return nil, false, fmt.Errorf("%w: inventory includes an unnamed node", ErrIncompleteInventory)
-		}
 		if !operationalNodeScopeMatches(node, candidate.Tenant, candidate.Cluster) {
 			continue
 		}
@@ -1003,15 +1150,27 @@ func (m *Manager) CreatePreview(ctx context.Context, actor, candidateID, idempot
 		if incomplete(beforeResult) {
 			return nil, false, fmt.Errorf("%w: node %s: %s", ErrIncompleteInventory, node.Name, beforeResult.HumanSummary)
 		}
-		after, err := snapshotWithCandidate(before, candidate)
+		after, contract, err := snapshotWithCandidate(before, candidate)
 		if err != nil {
 			return nil, false, fmt.Errorf("candidate decision for node %s: %w", node.Name, err)
 		}
 		afterResult := m.evaluateDecision("preview", after)
-		if incomplete(afterResult) {
+		// An After answer of Unknown normally means the captured inventory is
+		// unusable. The one deliberate exception is a candidate profile that
+		// selects the node: its report is withheld by design, because no
+		// pre-deploy report can attest a profile that is not deployed, so the
+		// evaluator's fail-closed Unknown is the correct candidate answer and
+		// not an inventory defect.
+		if incomplete(afterResult) && contract.impact.AfterDecisionEvidence != RuntimeContractAfterEvidenceCandidateProfileNoReport {
 			return nil, false, fmt.Errorf("%w: candidate node %s: %s", ErrIncompleteInventory, node.Name, afterResult.HumanSummary)
 		}
-		delta := NodeDecisionDelta{Node: node.Name, Before: beforeResult, After: afterResult, Changed: !resultsEqual(beforeResult, afterResult)}
+		// Defense in depth: a candidate profile can only become Eligible from
+		// fresh post-deploy evidence, which a preview never has.
+		if contract.impact.ProfileChange == RuntimeContractProfileChangeReplaced && afterResult.State == decision.StateEligible {
+			return nil, false, fmt.Errorf("candidate decision for node %s: preview produced Eligible for an undeployed candidate profile", node.Name)
+		}
+		impact := contract.impact
+		delta := NodeDecisionDelta{Node: node.Name, Before: beforeResult, After: afterResult, Changed: !resultsEqual(beforeResult, afterResult), RuntimeContractImpact: &impact}
 		switch {
 		case beforeResult.State != decision.StateEligible && afterResult.State == decision.StateEligible:
 			preview.NewlyEligible = append(preview.NewlyEligible, delta)
@@ -1030,7 +1189,7 @@ func (m *Manager) CreatePreview(ctx context.Context, actor, candidateID, idempot
 				preview.Unchanged = append(preview.Unchanged, delta)
 			}
 		}
-		captured = append(captured, capturedNode{Node: node.Name, Before: before, After: after, BeforeResult: beforeResult, AfterResult: afterResult})
+		captured = append(captured, capturedNode{Node: node.Name, Before: before, After: after, BeforeResult: beforeResult, AfterResult: afterResult, RuntimeContractImpact: &impact})
 	}
 
 	inventory := fleetSnapshot{ID: preview.InventorySnapshotID, CandidateID: candidate.ID, Tenant: candidate.Tenant, Cluster: candidate.Cluster, CapturedAt: preview.CreatedAt, Decisions: captured}
@@ -1178,26 +1337,58 @@ func (m *Manager) LatestPreviewForCandidate(ctx context.Context, candidateID str
 	return latest, nil
 }
 
-func snapshotWithCandidate(before decision.Snapshot, candidate *CandidateConfiguration) (decision.Snapshot, error) {
+// snapshotWithCandidate builds the hypothetical After snapshot for one captured
+// node and returns the runtime contract statement that explains exactly which
+// profile and report it carries:
+//
+//   - A policy-only candidate is not a profile replacement.  The live profile
+//     and captured report stay in place so the policy-impact decision is the
+//     live decision under the candidate digest.
+//   - A candidate profile that selects the node is carried without the
+//     captured report.  A report produced before deployment cannot attest a
+//     profile that is not deployed, even if its UID, digest, and versions
+//     happen to match, so the evaluator fails closed on missing evidence
+//     rather than being handed pre-deploy evidence as candidate proof.
+//   - Uncovered, Ambiguous, or Invalid candidate selection keeps the captured
+//     report but no profile: the existing reduced-depth fallback that permits
+//     observation only and never turns into an action permission.
+func snapshotWithCandidate(before decision.Snapshot, candidate *CandidateConfiguration) (decision.Snapshot, candidateRuntimeContract, error) {
 	after, err := cloneSnapshot(before)
 	if err != nil {
-		return decision.Snapshot{}, err
+		return decision.Snapshot{}, candidateRuntimeContract{}, err
 	}
 	after.ConfigDigest = candidate.NormalizedDigest
-	if after.Report == nil || !after.Report.Vendor.Valid() {
+	contract := assessCandidateRuntimeContract(before, candidate)
+	switch contract.impact.AfterDecisionEvidence {
+	case RuntimeContractAfterEvidenceLiveProfileCapturedReport:
+		// Live profile and captured report are preserved verbatim.
+	case RuntimeContractAfterEvidenceCandidateProfileNoReport:
+		selected := *contract.profile
+		after.Profile = &selected
+		after.Report = nil
+		after.EvidenceRefs = withoutAcceleratorReportEvidence(after.EvidenceRefs)
+	default:
 		after.Profile = nil
-		return after, nil
 	}
-	profile, err := (config.Config{AcceleratorProfiles: candidate.Profiles}).ResolveAcceleratorRuntimeProfile(after.Node.Labels, after.Report.Vendor)
-	if errors.Is(err, config.ErrNoAcceleratorRuntimeProfile) {
-		after.Profile = nil
-		return after, nil
+	return after, contract, nil
+}
+
+// withoutAcceleratorReportEvidence drops accelerator report evidence refs a
+// live adapter captured alongside the report.  Once the report itself is
+// withheld from a candidate decision, its ref must not remain as an apparent
+// evidence source for that decision.
+func withoutAcceleratorReportEvidence(refs []decision.EvidenceRef) []decision.EvidenceRef {
+	if len(refs) == 0 {
+		return refs
 	}
-	if err != nil {
-		return decision.Snapshot{}, err
+	kept := make([]decision.EvidenceRef, 0, len(refs))
+	for _, ref := range refs {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(ref.Source)), "accelerator-report/") {
+			continue
+		}
+		kept = append(kept, ref)
 	}
-	after.Profile = profile
-	return after, nil
+	return kept
 }
 
 func cloneSnapshot(in decision.Snapshot) (decision.Snapshot, error) {

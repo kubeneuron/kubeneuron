@@ -345,3 +345,40 @@ type OperationalStore interface {
 	ListOperationalAudit(ctx context.Context, kind types.OperationalResourceKind, resourceID string, limit int) ([]*types.OperationalAuditEvent, error)
 	ListOperationalAuditEvents(ctx context.Context, filter types.OperationalAuditFilter) ([]*types.OperationalAuditEvent, error)
 }
+
+// OperationalTx is the transaction-scoped view of an OperationalStore. It
+// exposes exactly the statements a workflow needs to make one durable
+// mutation atomic: claim the request's idempotency key, create or
+// version-guard the resource, and append the audit event(s) that describe
+// the change. Every method has the same contract as its OperationalStore
+// counterpart (ErrOperationalConflict on a stale version or forked audit
+// chain, ErrNotFound for a missing row), but nothing done through the Tx is
+// visible to other readers until WithOperationalTx commits, and everything is
+// discarded together when it does not. Reads through the Tx see the Tx's own
+// uncommitted writes. fn must not retain the Tx or call back into the store.
+type OperationalTx interface {
+	GetOperationalResource(ctx context.Context, kind types.OperationalResourceKind, id string) (*types.OperationalResource, error)
+	CreateOperationalResource(ctx context.Context, resource *types.OperationalResource) error
+	UpdateOperationalResource(ctx context.Context, resource *types.OperationalResource, expectedVersion int) error
+	PutOperationalIdempotency(ctx context.Context, record *types.OperationalIdempotencyRecord) (*types.OperationalIdempotencyRecord, bool, error)
+	GetOperationalIdempotency(ctx context.Context, kind types.OperationalResourceKind, actor, key string) (*types.OperationalIdempotencyRecord, error)
+	AppendOperationalAudit(ctx context.Context, event *types.OperationalAuditEvent) error
+}
+
+// OperationalTransactionalStore is an OperationalStore that can also run a
+// group of operational writes as one transaction. It is a separate optional
+// capability so that an out-of-tree OperationalStore keeps working for the
+// v0.4 workflows that write their key, resource, and audit as separate
+// statements, while a workflow whose correctness depends on atomicity (the
+// runtime contract qualification) can require it and fail closed otherwise.
+//
+// WithOperationalTx runs fn over one transaction: when fn returns nil every
+// write made through the Tx commits together; when fn returns an error (or
+// the commit fails) none of them persist, including an idempotency key
+// claimed earlier in the same fn, so the key stays retryable. The error fn
+// returned is passed through unchanged so callers can match it with
+// errors.Is. Both SQL dialects provide this through the shared sqlcore engine.
+type OperationalTransactionalStore interface {
+	OperationalStore
+	WithOperationalTx(ctx context.Context, fn func(OperationalTx) error) error
+}

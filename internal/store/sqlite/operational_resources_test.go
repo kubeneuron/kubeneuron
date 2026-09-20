@@ -105,3 +105,81 @@ func TestOperationalResourcesAreVersionedIdempotentAndAuditable(t *testing.T) {
 		t.Fatalf("resources=%#v err=%v", resources, err)
 	}
 }
+
+// Data retention prunes only the terminal runtime contract qualification
+// summaries (Invalidated, Expired) whose expiry has passed the boundary. Live
+// rows past their expiry are kept until an Observe records the outcome, and
+// every audit chain survives the data prune untouched.
+func TestPruneRecognizesTerminalQualificationStatesAndKeepsAudit(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+
+	kind := types.ResourceRuntimeContractQualification
+	longAgo := time.Now().Add(-72 * time.Hour).UTC()
+	states := map[string]string{
+		"rcq-invalidated": "Invalidated",
+		"rcq-expired":     "Expired",
+		"rcq-observing":   "Observing",
+		"rcq-ready":       "ReadyForApproval",
+	}
+	for id, state := range states {
+		expires := longAgo
+		if err := s.CreateOperationalResource(ctx, &types.OperationalResource{
+			Kind: kind, ID: id, State: state, Tenant: "team-a", Cluster: "east", Actor: "alice",
+			Payload: []byte(`{"version":"runtime-contract-qualification/v1"}`), ExpiresAt: &expires,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		for _, action := range []string{"create", "observe"} {
+			if err := s.AppendOperationalAudit(ctx, &types.OperationalAuditEvent{
+				Kind: kind, ResourceID: id, Actor: "alice", Action: action, Time: longAgo, Result: state,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	stats, err := s.Prune(ctx, 24*time.Hour, 0)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if stats.OperationalResources != 2 {
+		t.Fatalf("pruned operational resources = %d, want 2 (Invalidated and Expired)", stats.OperationalResources)
+	}
+	if stats.OperationalAudit != 0 || stats.OperationalAuditHeads != 0 {
+		t.Fatalf("data prune touched audit: %+v", stats)
+	}
+	for id, state := range states {
+		_, getErr := s.GetOperationalResource(ctx, kind, id)
+		terminal := state == "Invalidated" || state == "Expired"
+		if terminal && !errors.Is(getErr, store.ErrNotFound) {
+			t.Fatalf("%s (%s) after prune: err=%v, want ErrNotFound", id, state, getErr)
+		}
+		if !terminal && getErr != nil {
+			t.Fatalf("%s (%s) after prune: err=%v, want the live row retained", id, state, getErr)
+		}
+		events, listErr := s.ListOperationalAudit(ctx, kind, id, 10)
+		if listErr != nil || len(events) != 2 || events[1].PrevHash != events[0].Hash {
+			t.Fatalf("%s audit chain after data prune = (%#v, %v), want both events intact", id, events, listErr)
+		}
+	}
+	// Audit retention only releases a chain whose summary is gone and whose
+	// newest event is older than the boundary; live chains are never cut.
+	stats, err = s.Prune(ctx, 0, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("audit Prune: %v", err)
+	}
+	if stats.OperationalAudit != 4 || stats.OperationalAuditHeads != 2 {
+		t.Fatalf("audit prune stats = %+v, want 4 events and 2 heads from the two pruned summaries", stats)
+	}
+	for _, id := range []string{"rcq-observing", "rcq-ready"} {
+		events, listErr := s.ListOperationalAudit(ctx, kind, id, 10)
+		if listErr != nil || len(events) != 2 {
+			t.Fatalf("%s audit chain after audit prune = (%d, %v), want retained with its live summary", id, len(events), listErr)
+		}
+	}
+}

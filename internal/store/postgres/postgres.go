@@ -43,6 +43,7 @@ var _ store.EventSink = (*Store)(nil)
 var _ store.EventOutbox = (*Store)(nil)
 var _ store.AcceleratorReportStore = (*Store)(nil)
 var _ store.OperationalStore = (*Store)(nil)
+var _ store.OperationalTransactionalStore = (*Store)(nil)
 
 // Open connects to PostgreSQL at dsn and applies pending migrations. The
 // caller owns DSN secrecy (pass it via file/secret, never argv).

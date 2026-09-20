@@ -2,7 +2,8 @@
 
 Status: **accepted target architecture**, actively maintained.
 
-Last updated: 2026-09-06 (v0.4.0)
+Last updated: 2026-09-20 (v0.5.0, prepared for release; claims last
+re-audited against v0.4.0)
 
 > This document is the architecture and its invariants (see §2.4): the seams,
 > the concurrency/lifecycle rules, and the reasoning behind them. It is kept

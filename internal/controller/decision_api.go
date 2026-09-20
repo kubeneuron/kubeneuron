@@ -30,6 +30,20 @@ func (c *Controller) BuildDecisionSnapshot(ctx context.Context, nodeName string,
 	if err != nil {
 		return decision.Snapshot{}, err
 	}
+	// Labels are read from the platform (see inventoryLabels): the store row
+	// comes from agent registration, which never carries them, so judging the
+	// destructive selector, the live profile selection, and — through the
+	// captured Node — a candidate's static selection against the row made
+	// every one of them "no match" on a live cluster. The snapshot must carry
+	// the labels the machine has right now, and a lookup failure is a failed
+	// capture rather than an unlabelled node.
+	labels, err := c.inventoryLabels(ctx, node)
+	if err != nil {
+		return decision.Snapshot{}, fmt.Errorf("decision snapshot: %w", err)
+	}
+	live := cloneNode(node)
+	live.Labels = labels
+	node = &live
 	now := time.Now().UTC()
 	rc := c.runtimeConfig(ctx)
 	snapshot := decision.Snapshot{

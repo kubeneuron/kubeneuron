@@ -58,6 +58,11 @@ Commands (the workflow runs them in this order):
   sweep              Assert ZERO leftovers for this run: cluster, non-terminated e2e EC2,
                      e2e CloudFormation stacks, orphaned e2e EBS volumes, and a
                      manually-created recycle IAM role. Deletes what it finds.
+                     When the exact cluster stack is DELETE_FAILED, clears the
+                     detached VPC-CNI ENIs of this run's terminated nodes and
+                     the exact EKS cluster security group inside that stack's
+                     own VPC BEFORE retrying the stack (at most twice); waits
+                     out a DELETE_IN_PROGRESS rather than racing it.
   reap               Out-of-band watchdog: force-delete any e2e cluster older
                      than MAX_LIFETIME_MINUTES. Meant for an INDEPENDENT cron
                      so a hung run cannot leak a cluster (PRODUCT_PLAN safety
@@ -1333,10 +1338,22 @@ cmd_sweep() {
 		--output text)
 	local stack
 	for stack in $stacks; do
+		# The exact cluster stack is handled on its own below, and last: the
+		# nodegroup stacks reference its security groups, so it can only go
+		# once they have, and it is the one stack that wedges.
+		[ "$stack" != "$(cluster_stack_name)" ] || continue
 		log "sweep: deleting leaked stack $stack"
 		aws cloudformation delete-stack --region "$AWS_REGION" --stack-name "$stack" || true
 		aws cloudformation wait stack-delete-complete --region "$AWS_REGION" --stack-name "$stack" || true
 	done
+	# The cluster stack's delete is exactly what wedges. Run a17 passed every
+	# phase, and its cluster stack then sat in DELETE_FAILED behind two things
+	# nothing in this file could see: the VPC-CNI ENI of the node ReplaceNode
+	# terminated, left detached and `available`, and after that the EKS cluster
+	# security group that ENI had pinned. Neither is a stack resource, so
+	# CloudFormation cannot delete them and cannot delete the VPC around them;
+	# both had to be removed by hand before the sweep could report clean.
+	sweep_wedged_cluster_stack
 
 	log "sweep: no orphaned e2e EBS volumes"
 	local volumes
@@ -1866,6 +1883,393 @@ delete_iam_role() {
 		aws iam delete-role-policy --role-name "$role" --policy-name "$policy" || true
 	done
 	aws iam delete-role --role-name "$role"
+}
+
+# ---------------------------------------------------------------------------
+# networking orphans that wedge the exact cluster stack
+#
+# Two resources outlive `eksctl delete cluster` after a ReplaceNode, and both
+# sit in the run's VPC without belonging to any CloudFormation stack, so the
+# stack delete fails on the VPC and the sweep can only report the stack as a
+# leftover. The VPC-CNI plugin allocates a secondary ENI per node, described
+# `aws-K8S-i-<instance>`; when the controller terminates that instance the ENI
+# is detached and stays `available`, which pins the EKS cluster security group
+# it carries, which pins the VPC. Observed on run a17 (2026-09-13), removed by
+# hand, and the sweep reported clean only after that.
+#
+# Everything below is scoped from the one CloudFormation stack that carries
+# the exact CLUSTER_NAME. The VPC is that stack's own `VPC` resource, verified
+# to be tagged for the exact cluster; the EKS cluster must already be gone;
+# every candidate is re-read individually and must match the exact cluster on
+# its own tags before it is deleted. A resource that fails any of those checks
+# is logged and left alone, and the end-state assertion then reports the stack
+# it keeps wedged — a refusal here is a loud failure, never a quiet leak.
+readonly CNI_ENI_DESCRIPTION_PREFIX="aws-K8S-i-"
+readonly CNI_ENI_CLUSTER_TAG="cluster.k8s.amazonaws.com/name"
+readonly CNI_ENI_INSTANCE_TAG="node.k8s.amazonaws.com/instance_id"
+readonly EKSCTL_CLUSTER_TAG="alpha.eksctl.io/cluster-name"
+readonly EKS_CLUSTER_SG_PREFIX="eks-cluster-sg-"
+
+cluster_stack_name() { printf 'eksctl-%s-cluster' "$CLUSTER_NAME"; }
+
+# cluster_stack_status prints the exact cluster stack's status, or nothing
+# when the stack no longer exists. describe-stacks by NAME resolves only live
+# stacks, so a DELETE_COMPLETE stack is "nothing" here, which is what we want.
+cluster_stack_status() {
+	aws cloudformation describe-stacks --region "$AWS_REGION" \
+		--stack-name "$(cluster_stack_name)" \
+		--query 'Stacks[0].StackStatus' --output text 2>/dev/null || true
+}
+
+# cluster_stack_gone is true for the statuses that mean there is nothing left
+# to delete: no stack, or a stack that finished deleting.
+cluster_stack_gone() {
+	[ -z "$1" ] || [ "$1" = "None" ] || [ "$1" = "DELETE_COMPLETE" ]
+}
+
+delete_cluster_stack() {
+	aws cloudformation delete-stack --region "$AWS_REGION" --stack-name "$(cluster_stack_name)" || true
+	wait_cluster_stack_delete
+}
+
+wait_cluster_stack_delete() {
+	aws cloudformation wait stack-delete-complete --region "$AWS_REGION" \
+		--stack-name "$(cluster_stack_name)" || true
+}
+
+# sweep_wedged_cluster_stack deletes the exact cluster stack, clearing the
+# orphans that wedge it BEFORE each retry rather than after a retry that is
+# known to fail: a cluster stack delete runs for minutes and, with the orphans
+# still in the VPC, ends in the same DELETE_FAILED it started from.
+#
+# Three starting states, handled in order:
+#   DELETE_IN_PROGRESS  another delete (eksctl's, the reaper's) is running.
+#                       Wait for it to settle; touching the VPC underneath a
+#                       running delete would be a race, and the settled status
+#                       decides what happens next.
+#   anything live       (CREATE_COMPLETE, ROLLBACK_COMPLETE, …) the stack was
+#                       never deleted. A plain delete first: the EKS cluster is
+#                       a resource of this stack and sweep_run_vpc refuses to
+#                       clear anything while it exists, so there is nothing to
+#                       clear before this delete.
+#   DELETE_FAILED       the known wedge. Clear the orphans, then retry.
+#
+# Bounded to two cleanup passes: the first clears the ENI, and the stack's own
+# security groups (which hold rules referencing the cluster group) go away
+# only once the stack retries, so the cluster group can need a second pass —
+# that is the sequence a17 showed, and it is the only reason there is a second
+# pass at all. Whatever is left after that, the end-state assertion reports.
+sweep_wedged_cluster_stack() {
+	local stack status vpc pass
+	stack=$(cluster_stack_name)
+	status=$(cluster_stack_status)
+	cluster_stack_gone "$status" && return 0
+	if [ "$status" = "DELETE_IN_PROGRESS" ]; then
+		log "sweep: $stack is DELETE_IN_PROGRESS; waiting for that delete to settle rather than racing it"
+		wait_cluster_stack_delete
+		status=$(cluster_stack_status)
+		cluster_stack_gone "$status" && return 0
+	fi
+	if [ "$status" != "DELETE_FAILED" ]; then
+		log "sweep: deleting leaked stack $stack ($status)"
+		delete_cluster_stack
+		status=$(cluster_stack_status)
+		cluster_stack_gone "$status" && return 0
+	fi
+	for pass in 1 2; do
+		if [ "$status" != "DELETE_FAILED" ]; then
+			log "sweep: $stack is $status; leaving it to the end-state assertion"
+			return 0
+		fi
+		log "sweep: $stack is DELETE_FAILED; clearing networking orphans in its VPC before retrying the delete (pass $pass of 2)"
+		if ! vpc=$(sweep_run_vpc); then
+			log "sweep: no exact VPC scope for $stack; leaving it to the end-state assertion"
+			return 0
+		fi
+		sweep_orphaned_cni_enis "$vpc"
+		sweep_orphaned_cluster_security_groups "$vpc"
+		log "sweep: retrying delete of $stack"
+		delete_cluster_stack
+		status=$(cluster_stack_status)
+		cluster_stack_gone "$status" && return 0
+	done
+	log "sweep: $stack is still $status after 2 passes; the end-state assertion reports it"
+}
+
+# record_complete is the guard on every jq record read below. Fields are
+# emitted one per line, an empty field as an empty line, and the record ends
+# with the literal `end`; it is complete only when exactly <n> fields precede
+# that sentinel. A tab-separated record read with IFS=$'\t' is NOT safe here:
+# bash treats tab as IFS whitespace, so consecutive tabs collapse and every
+# field after an empty one shifts left — which once moved an ENI's instance
+# tag into its cluster-tag slot and let a mismatched interface through.
+record_complete() { # <n> <field>...
+	local n=$1
+	shift
+	[ "$#" -eq $((n + 1)) ] && [ "${!#}" = "end" ]
+}
+
+# sweep_run_vpc prints the VPC id that the exact cluster stack owns, or
+# returns 1 having logged why the scope could not be established. It refuses
+# whenever the answer is not exactly one VPC that eksctl created for exactly
+# this cluster, and it refuses outright while the EKS cluster still exists —
+# a live cluster's ENIs and security groups are never ours to remove.
+sweep_run_vpc() {
+	local stack vpc tagged is_default
+	stack=$(cluster_stack_name)
+	if aws eks describe-cluster --region "$AWS_REGION" --name "$CLUSTER_NAME" \
+		--query 'cluster.name' --output text >/dev/null 2>&1; then
+		log "sweep: EKS cluster $CLUSTER_NAME still exists; refusing to clear networking orphans"
+		return 1
+	fi
+	vpc=$(aws cloudformation describe-stack-resources --region "$AWS_REGION" \
+		--stack-name "$stack" --logical-resource-id VPC \
+		--query "StackResources[?ResourceType=='AWS::EC2::VPC'].PhysicalResourceId" \
+		--output text 2>/dev/null | tr -s ' \t' '\n' | grep -v '^$' | grep -v '^None$' || true)
+	if [ -z "$vpc" ]; then
+		log "sweep: $stack has no VPC resource of its own; refusing to touch any VPC"
+		return 1
+	fi
+	if [ "$(printf '%s\n' "$vpc" | wc -l)" -ne 1 ]; then
+		log "sweep: $stack reports more than one VPC ($(printf '%s' "$vpc" | tr '\n' ' ')); refusing an ambiguous scope"
+		return 1
+	fi
+	case "$vpc" in
+	vpc-*) : ;;
+	*)
+		log "sweep: $stack VPC resource is '$vpc', not a VPC id; refusing"
+		return 1
+		;;
+	esac
+	# The stack said so; now the VPC itself must say so. eksctl stamps every
+	# stack resource with the cluster name, so a VPC that is not tagged for
+	# exactly this cluster is not one this run created.
+	tagged=$(aws ec2 describe-vpcs --region "$AWS_REGION" --vpc-ids "$vpc" \
+		--filters "Name=tag:${EKSCTL_CLUSTER_TAG},Values=${CLUSTER_NAME}" \
+		--query "Vpcs[].VpcId|join(',',@)" --output text 2>/dev/null || true)
+	if [ "$tagged" != "$vpc" ]; then
+		log "sweep: $vpc is not tagged ${EKSCTL_CLUSTER_TAG}=${CLUSTER_NAME}; refusing"
+		return 1
+	fi
+	is_default=$(aws ec2 describe-vpcs --region "$AWS_REGION" --vpc-ids "$vpc" \
+		--query 'Vpcs[0].IsDefault' --output text 2>/dev/null || true)
+	if [ "$is_default" != "False" ] && [ "$is_default" != "false" ]; then
+		log "sweep: $vpc is the account's default VPC (IsDefault=$is_default); refusing"
+		return 1
+	fi
+	printf '%s' "$vpc"
+}
+
+# sweep_orphaned_cni_enis deletes the detached VPC-CNI interfaces of this
+# run's terminated nodes, and nothing else. Candidates come from a scoped
+# query; each is then re-read on its own and must still be detached and
+# `available`, in the run VPC, not requester-managed, a plain `interface`
+# by InterfaceType (the a17 orphan was; an efa, trunk, or any other kind
+# is not something the CNI's secondary-ENI path allocates, whatever it is
+# described or tagged), described `aws-K8S-i-<instance>` by the CNI, and
+# tied to the exact run: the instance it names is terminated (or already
+# aged out of the API) and either that instance or the ENI itself is tagged
+# for exactly this cluster.
+readonly CNI_ENI_INTERFACE_TYPE="interface"
+sweep_orphaned_cni_enis() {
+	local vpc="$1" candidates eni doc fields
+	require_cmd jq
+	candidates=$(aws ec2 describe-network-interfaces --region "$AWS_REGION" \
+		--filters "Name=vpc-id,Values=${vpc}" "Name=status,Values=available" \
+		"Name=description,Values=${CNI_ENI_DESCRIPTION_PREFIX}*" \
+		--query 'NetworkInterfaces[].NetworkInterfaceId' --output text 2>/dev/null |
+		tr -s ' \t' '\n' | grep -v '^$' | grep -v '^None$' || true)
+	[ -n "$candidates" ] || return 0
+	for eni in $candidates; do
+		doc=$(aws ec2 describe-network-interfaces --region "$AWS_REGION" \
+			--network-interface-ids "$eni" --output json 2>/dev/null) || {
+			log "sweep: $eni disappeared before revalidation; skipping"
+			continue
+		}
+		mapfile -t fields < <(printf '%s' "$doc" | jq -r --arg cluster_tag "$CNI_ENI_CLUSTER_TAG" \
+			--arg instance_tag "$CNI_ENI_INSTANCE_TAG" '
+			.NetworkInterfaces // [] |
+			if length != 1 then "count=\(length)" else .[0] |
+				[ .VpcId // "", .Status // "", (if .Attachment == null then "detached" else "attached" end),
+				  ((.RequesterManaged // false) | tostring), .InterfaceType // "", .Description // "",
+				  (((.TagSet // []) | map(select(.Key == $cluster_tag)) | .[0].Value) // ""),
+				  (((.TagSet // []) | map(select(.Key == $instance_tag)) | .[0].Value) // ""),
+				  "end" ] | .[]
+			end' 2>/dev/null)
+		case "${fields[0]-}" in
+		count=*)
+			log "sweep: $eni resolved to ${fields[0]} interfaces, not one; leaving it"
+			continue
+			;;
+		esac
+		if ! record_complete 8 "${fields[@]}"; then
+			log "sweep: cannot parse the description of $eni; leaving it"
+			continue
+		fi
+		local eni_vpc status attachment requester interface_type description cluster_tag instance_tag
+		eni_vpc=${fields[0]} status=${fields[1]} attachment=${fields[2]} requester=${fields[3]}
+		interface_type=${fields[4]} description=${fields[5]} cluster_tag=${fields[6]} instance_tag=${fields[7]}
+		if [ "$eni_vpc" != "$vpc" ]; then
+			log "sweep: $eni is in $eni_vpc, not the run VPC $vpc; leaving it"
+			continue
+		fi
+		if [ "$status" != "available" ] || [ "$attachment" != "detached" ]; then
+			log "sweep: $eni is $status/$attachment on re-read, not a detached orphan; leaving it"
+			continue
+		fi
+		if [ "$requester" != "false" ]; then
+			log "sweep: $eni is requester-managed (an AWS service owns it); leaving it"
+			continue
+		fi
+		# The one kind the CNI allocates. An efa or trunk interface in the run
+		# VPC, however it is described or tagged, is not the a17 orphan and is
+		# not deleted on the strength of the identifiers that follow.
+		if [ "$interface_type" != "$CNI_ENI_INTERFACE_TYPE" ]; then
+			log "sweep: $eni has InterfaceType '${interface_type}', not '${CNI_ENI_INTERFACE_TYPE}'; leaving it"
+			continue
+		fi
+		# The CNI writes `aws-K8S-<instance id>`; the prefix ends in `i-`, so
+		# the remainder is the hexadecimal part of the id and nothing else.
+		local instance
+		instance="i-${description#"$CNI_ENI_DESCRIPTION_PREFIX"}"
+		case "$description" in
+		"$CNI_ENI_DESCRIPTION_PREFIX"[0-9a-f]*) : ;;
+		*)
+			log "sweep: $eni is described '$description', not a VPC-CNI interface; leaving it"
+			continue
+			;;
+		esac
+		if [ -n "$instance_tag" ] && [ "$instance_tag" != "$instance" ]; then
+			log "sweep: $eni names $instance but is tagged for $instance_tag; leaving it"
+			continue
+		fi
+		if ! cni_eni_instance_is_this_runs "$eni" "$instance" "$cluster_tag"; then
+			continue
+		fi
+		log "sweep: deleting orphaned VPC-CNI interface $eni ($description)"
+		aws ec2 delete-network-interface --region "$AWS_REGION" --network-interface-id "$eni" ||
+			log "sweep: could not delete $eni; the end-state assertion will report the stack"
+	done
+}
+
+# cni_eni_instance_is_this_runs decides whether the instance an ENI names is
+# a terminated node of exactly this run. Terminated instances leave the EC2
+# API after about an hour, and a reaper-driven sweep can arrive later than
+# that, so an instance that is gone is accepted only when the ENI's own
+# cluster tag names this cluster. An instance in any live state is refused
+# whatever it is tagged: an interface a running node just released is not an
+# orphan.
+cni_eni_instance_is_this_runs() {
+	local eni="$1" instance="$2" eni_cluster_tag="$3" doc state cluster_tag run_tag
+	doc=$(aws ec2 describe-instances --region "$AWS_REGION" --instance-ids "$instance" \
+		--output json 2>/dev/null) || doc='{"Reservations":[]}'
+	local fields
+	mapfile -t fields < <(printf '%s' "$doc" | jq -r --arg run_tag "$E2E_RUN_TAG" '
+		[ .Reservations[]?.Instances[]? ] |
+		if length == 0 then "absent" else .[0] |
+			[ .State.Name // "",
+			  (((.Tags // []) | map(select(.Key == "aws:eks:cluster-name")) | .[0].Value) // ""),
+			  (((.Tags // []) | map(select(.Key == $run_tag)) | .[0].Value) // ""),
+			  "end" ] | .[]
+		end' 2>/dev/null)
+	if [ "${fields[0]-}" = "absent" ]; then
+		if [ "$eni_cluster_tag" = "$CLUSTER_NAME" ]; then
+			return 0
+		fi
+		log "sweep: $eni names $instance, which no longer exists, and the interface is tagged '${eni_cluster_tag}' rather than ${CLUSTER_NAME}; leaving it"
+		return 1
+	fi
+	if ! record_complete 3 "${fields[@]}"; then
+		log "sweep: cannot parse instance $instance named by $eni; leaving it"
+		return 1
+	fi
+	state=${fields[0]} cluster_tag=${fields[1]} run_tag=${fields[2]}
+	if [ "$state" != "terminated" ]; then
+		log "sweep: $eni names $instance, which is $state, not terminated; leaving it"
+		return 1
+	fi
+	if [ "$cluster_tag" = "$CLUSTER_NAME" ] || [ "$run_tag" = "$CLUSTER_NAME" ] ||
+		[ "$eni_cluster_tag" = "$CLUSTER_NAME" ]; then
+		return 0
+	fi
+	log "sweep: $eni names terminated $instance, but neither it nor the interface is tagged for ${CLUSTER_NAME} (instance: aws:eks:cluster-name='${cluster_tag}' ${E2E_RUN_TAG}='${run_tag}'); leaving it"
+	return 1
+}
+
+# sweep_orphaned_cluster_security_groups deletes the EKS cluster security
+# group of exactly this cluster once nothing references it. EKS names it
+# eks-cluster-sg-<cluster>-<n> and tags it with aws:eks:cluster-name and
+# kubernetes.io/cluster/<cluster>=owned; every candidate is re-read and must
+# carry all three, be in the run VPC, not be the VPC's default group, and have
+# no network interface anywhere still attached to it. The stack's own groups
+# (tagged by eksctl, not EKS) are not candidates: the stack deletes those.
+sweep_orphaned_cluster_security_groups() {
+	local vpc="$1" candidates sg doc fields
+	require_cmd jq
+	candidates=$(aws ec2 describe-security-groups --region "$AWS_REGION" \
+		--filters "Name=vpc-id,Values=${vpc}" \
+		"Name=tag:aws:eks:cluster-name,Values=${CLUSTER_NAME}" \
+		"Name=group-name,Values=${EKS_CLUSTER_SG_PREFIX}${CLUSTER_NAME}-*" \
+		--query 'SecurityGroups[].GroupId' --output text 2>/dev/null |
+		tr -s ' \t' '\n' | grep -v '^$' | grep -v '^None$' || true)
+	[ -n "$candidates" ] || return 0
+	for sg in $candidates; do
+		doc=$(aws ec2 describe-security-groups --region "$AWS_REGION" \
+			--group-ids "$sg" --output json 2>/dev/null) || {
+			log "sweep: $sg disappeared before revalidation; skipping"
+			continue
+		}
+		mapfile -t fields < <(printf '%s' "$doc" | jq -r --arg owned_tag "kubernetes.io/cluster/${CLUSTER_NAME}" '
+			.SecurityGroups // [] |
+			if length != 1 then "count=\(length)" else .[0] |
+				[ .VpcId // "", .GroupName // "",
+				  (((.Tags // []) | map(select(.Key == "aws:eks:cluster-name")) | .[0].Value) // ""),
+				  (((.Tags // []) | map(select(.Key == $owned_tag)) | .[0].Value) // ""),
+				  "end" ] | .[]
+			end' 2>/dev/null)
+		case "${fields[0]-}" in
+		count=*)
+			log "sweep: $sg resolved to ${fields[0]} groups, not one; leaving it"
+			continue
+			;;
+		esac
+		if ! record_complete 4 "${fields[@]}"; then
+			log "sweep: cannot parse the description of $sg; leaving it"
+			continue
+		fi
+		local sg_vpc name cluster_tag owned_tag
+		sg_vpc=${fields[0]} name=${fields[1]} cluster_tag=${fields[2]} owned_tag=${fields[3]}
+		if [ "$sg_vpc" != "$vpc" ]; then
+			log "sweep: $sg is in $sg_vpc, not the run VPC $vpc; leaving it"
+			continue
+		fi
+		if [ "$name" = "default" ]; then
+			log "sweep: $sg is the VPC default group; leaving it"
+			continue
+		fi
+		case "$name" in
+		"${EKS_CLUSTER_SG_PREFIX}${CLUSTER_NAME}-"*) : ;;
+		*)
+			log "sweep: $sg is named '$name', not the EKS cluster group of ${CLUSTER_NAME}; leaving it"
+			continue
+			;;
+		esac
+		if [ "$cluster_tag" != "$CLUSTER_NAME" ] || [ "$owned_tag" != "owned" ]; then
+			log "sweep: $sg is tagged aws:eks:cluster-name='${cluster_tag}' kubernetes.io/cluster/${CLUSTER_NAME}='${owned_tag}'; not exactly this cluster's; leaving it"
+			continue
+		fi
+		local references
+		references=$(aws ec2 describe-network-interfaces --region "$AWS_REGION" \
+			--filters "Name=group-id,Values=${sg}" \
+			--query 'NetworkInterfaces[].NetworkInterfaceId|join(",",@)' --output text 2>/dev/null || true)
+		if [ -n "$references" ] && [ "$references" != "None" ]; then
+			log "sweep: $sg is still referenced by network interface(s) $references; leaving it"
+			continue
+		fi
+		log "sweep: deleting orphaned EKS cluster security group $sg ($name)"
+		aws ec2 delete-security-group --region "$AWS_REGION" --group-id "$sg" ||
+			log "sweep: could not delete $sg yet (a stack-owned rule may still reference it); the stack retry decides"
+	done
 }
 
 # _OPEN_INCIDENT is the incident a phase must not leave behind. Incidents

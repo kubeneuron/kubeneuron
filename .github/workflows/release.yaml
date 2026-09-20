@@ -229,22 +229,41 @@ jobs:
           retention-days: 1
 
 
-  # No tag ships without an upgrade from the release before it, rehearsed in
-  # the documented order on a real cluster. hack/kind-upgrade.sh has caught
-  # what neither unit tests nor the integration suite can see: a store
-  # migration that an existing installation cannot cross, and a CRD whose new
+  # No tag ships without an upgrade from the release before it AND a rollback
+  # to it, rehearsed in the documented order on a real cluster.
+  # hack/kind-upgrade-rollback.sh drives v0.4.0 -> HEAD -> v0.4.0 (images
+  # only) -> HEAD for BOTH workflow stores (SQLite PVC and a throwaway
+  # in-cluster PostgreSQL) side by side, with the v0.5 runtime contract
+  # qualification rows and their hash-chained audit as the durable evidence:
+  # the old binary must hide but keep them, and the re-upgrade must read them
+  # back byte-identical and extend the same chain. This shape of rehearsal has
+  # caught what neither unit tests nor the integration suite can see: a store
+  # migration an existing installation cannot cross, and a CRD whose new
   # fields the upgraded API does not actually serve.
+  #
+  # The baseline is the actual previous minor release, not a variable: the
+  # rollback assertions (runtime-contract routes 404 on the old binary, the
+  # v0.4 incident survives) are specific to what v0.4.0 shipped.
   upgrade-rehearsal:
     needs: [gates]
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Two v0.4.0 installations, a PostgreSQL pull, three HEAD image builds,
+    # two image-level rollbacks and two re-upgrades on a three-node kind
+    # cluster (one control-plane plus one dedicated labeled worker per store,
+    # because the agent's hostPath spool state must not be shared): well
+    # over the 45 minutes the single-store, upgrade-only rehearsal needed.
+    timeout-minutes: 75
     permissions:
       contents: read
       packages: read
     env:
-      BASELINE: ${{ vars.UPGRADE_BASELINE || 'v0.2.2' }}
+      BASELINE: v0.4.0
+      STORES: sqlite postgres
+      # The published release (its install manifest and images.txt) lives in
+      # the repository the tag is pushed to; the script also uses this to
+      # fetch the baseline tag if it must fall back to building from source.
       RELEASE_REPO: ${{ github.repository }}
-      CLUSTER_NAME: kubeneuron-upgrade-ci
+      CLUSTER_NAME: kubeneuron-upgrade-rollback-ci
       KIND_VERSION: v0.32.0
       KIND_SHA256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
       KUBECTL_VERSION: v1.33.12
@@ -279,15 +298,23 @@ jobs:
           chmod 0755 "$tools/kind" "$tools/kubectl"
           echo "$tools" >> "$GITHUB_PATH"
 
-      - name: Raise inotify limits for the multi-node cluster
+      # The kind cluster is one control-plane node plus one dedicated labeled
+      # worker per store (the agent's hostPath spool state must not be shared
+      # between installations). All three nodes are containers on this one
+      # runner and its kernel owns the inotify budget for every kubelet plus
+      # the operator, two controller/agent installations and a PostgreSQL Pod;
+      # the runner default is not sized for that many watches on one host.
+      - name: Raise inotify limits for the kind cluster
         run: |
           sudo sysctl fs.inotify.max_user_instances=512 \
             fs.inotify.max_user_watches=524288
 
-      - name: Rehearse the upgrade from the previous release
+      - name: Rehearse upgrade and rollback against v0.4.0 on both stores
         env:
+          # `gh release download` of the v0.4.0 install manifest and
+          # images.txt, and the GHCR login fallback for the baseline images.
           GH_TOKEN: ${{ github.token }}
-        run: bash hack/kind-upgrade.sh
+        run: bash hack/kind-upgrade-rollback.sh
 
   release:
     if: github.repository == 'kubeneuron/kubeneuron'

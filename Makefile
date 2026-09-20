@@ -18,7 +18,7 @@ GENERATED_PATHS := api/v1alpha1/zz_generated.deepcopy.go config/crd/bases deploy
 # The lock verify-generate serialises on. In .gitignore; created on first use.
 GENERATE_LOCK := .make-generate.lock
 
-.PHONY: all build test test-integration-kind kind-clean lint clean tidy generate verify-generate verify-generate-locked proto web docs docs-serve docker gates gates-full verify-docs verify-image mirror
+.PHONY: all build test test-integration-kind test-upgrade-rollback-kind kind-clean lint clean tidy generate verify-generate verify-generate-locked proto web docs docs-serve docker gates gates-full verify-docs verify-image verify-hw-e2e-sweep mirror
 
 all: build
 
@@ -57,8 +57,9 @@ gates:
 # gate failures nobody could explain — 3.2x headroom is not headroom here.
 	$(GO) test -race -timeout 30m ./...
 	$(MAKE) verify-docs
+	$(MAKE) verify-hw-e2e-sweep
 	@echo
-	@echo "gates: OK (generate, build, lint, race tests, docs)"
+	@echo "gates: OK (generate, build, lint, race tests, docs, hw-e2e sweep)"
 	@echo "note: the PostgreSQL conformance suite and the kind/image/release"
 	@echo "      gates are in 'make gates-full' — this tier proves the code,"
 	@echo "      not the artifact."
@@ -67,14 +68,23 @@ gates:
 gates-full: gates
 	$(MAKE) verify-image
 	$(MAKE) test-integration-kind
+	$(MAKE) test-upgrade-rollback-kind
 	@echo
-	@echo "gates-full: OK (code gates, published images, kind integration)"
+	@echo "gates-full: OK (code gates, published images, kind integration, upgrade/rollback rehearsal)"
 
 verify-docs:
 	bash hack/verify-docs.sh
 
 verify-image:
 	bash hack/verify-image.sh
+
+# The hardware sweep's networking cleanup, run against a scripted aws/eksctl
+# (hack/hw-e2e-fake-aws.py). No AWS, no cluster, a few seconds: it is the only
+# deterministic proof that the sweep removes exactly this run's orphaned VPC-CNI
+# interface and EKS cluster security group, and refuses everything else — a live
+# cluster's interface, another cluster's group, an ambient or default VPC.
+verify-hw-e2e-sweep:
+	bash hack/verify-hw-e2e-sweep.sh
 
 ## mirror: publish this tree to the public repository. See hack/mirror.sh.
 mirror:
@@ -191,6 +201,21 @@ test-integration-kind: build
 	KUBECONFIG_PATH="$(KIND_KUBECONFIG)" \
 	KIND_BIN="$(KIND)" KUBECTL_BIN="$(KUBECTL)" \
 	./hack/kind-integration.sh
+
+# The v0.4.0 -> HEAD -> v0.4.0 (images only) -> HEAD rehearsal from
+# docs/upgrade.md, on one disposable kind cluster, for BOTH stores at once
+# (SQLite PVC and a throwaway in-cluster PostgreSQL). It seeds a v0.4 incident,
+# drives a v0.5 runtime contract qualification to ReadyForApproval, rolls the
+# images back, proves the old binary hides but keeps the rows, re-upgrades,
+# and proves the rows and their hash-chained audit read back byte-identical
+# and still accept observations. CPU-only: synthetic accelerator evidence over
+# the real agent identity, no GPU claim. Pulls the published baseline images
+# from GHCR, so it is the one kind gate that is not offline. Deletes its
+# cluster on exit unless KEEP_CLUSTER=1. Docker group membership required
+# (sg docker -c 'make test-upgrade-rollback-kind').
+test-upgrade-rollback-kind:
+	KIND_BIN="$(KIND)" KUBECTL_BIN="$(KUBECTL)" \
+	./hack/kind-upgrade-rollback.sh
 
 kind-clean:
 	$(KIND) delete cluster --name "$(KIND_CLUSTER_NAME)"

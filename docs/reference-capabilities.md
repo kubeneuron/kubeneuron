@@ -99,13 +99,15 @@ transport, cursor, dedup and classification are hardware-proven; the claim "we
 catch a real GPU dying" rests on the XID text format, not on an observed
 failure.
 
-**Polled telemetry — not hardware-validated.** `internal/agent/gpuhealth` polls
-`dcgmi dmon -e 230` and falls back to `nvidia-smi -q`. Both parsers are driven
-entirely by hand-written fixtures (`internal/agent/gpuhealth/testdata/`) — the
-`nvidia-smi -q` fixture describes an A100 nobody has run. `dcgmi` is absent from
-the stock EKS NVIDIA AMI, so the DCGM path degraded to observed-only in every
-hardware run. `hack/hw-e2e.sh test-dcgm` exists for exactly this and has never
-executed.
+**Polled telemetry — hardware-validated (DCGM path).** `internal/agent/gpuhealth`
+polls `dcgmi dmon -e 230` and falls back to `nvidia-smi -q`. The DCGM path has
+executed on a real Tesla T4 (EKS `g4dn.xlarge`) with the agent on the real
+driver and a version-compatible DCGM client/engine: `hack/hw-e2e.sh test-dcgm`
+injects a DCGM field value and the `gpuhealth` source observed it, most
+recently in the full hardware run of 2026-09-13. *Scope limit:* the value is
+injected, not produced by a failing GPU, and the `nvidia-smi -q` fallback is
+still driven only by a hand-written fixture
+(`internal/agent/gpuhealth/testdata/`) describing an A100 nobody has run.
 
 **Metric-alert detection — not hardware-validated.** `configs/vmalert/gpu-rules.yaml`
 is written against `DCGM_FI_*` series and `internal/detect/alertmanager.go` maps

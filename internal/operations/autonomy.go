@@ -884,11 +884,21 @@ func (m *Manager) admitAutonomyTargets(ctx context.Context, plan *GPUAutonomyPla
 // "must be inside this approved window" gate; the resolver is mandatory when
 // a plan declares one so a missing controller integration cannot be read as an
 // open maintenance window.
+//
+// Every grant on the request is derived from the plan's digest-bound approval
+// records rather than asserted. The evaluator treats MaintenanceRequired as the
+// extended-authorization path and additionally demands elevated authorization
+// and an approved disruption budget; for a plan those are exactly the distinct
+// role approvals (verified TokenReview subjects) that reviewed the plan's
+// guardrail budget under the current config digest. Without them the evaluator
+// still answers ApprovalMissing, so a plan that lost or never had its
+// approvals cannot be admitted merely because a window is open.
 func (m *Manager) autonomyDecisionRequest(ctx context.Context, plan *GPUAutonomyPlan, node, targetDeviceID string) (decision.Request, bool, error) {
+	approved := allRolesApproved(plan)
 	request := decision.Request{
 		Class: decision.ActionAutonomous, AcceleratorAction: plan.AllowedActions[0],
 		Scope: scopeForAutonomyAction(plan.AllowedActions[0]), TargetDeviceID: targetDeviceID,
-		ApprovalRequired: true, ApprovalGranted: true,
+		ApprovalRequired: true, ApprovalGranted: approved,
 	}
 	if len(plan.Guardrails.MaintenanceWindows) == 0 {
 		return request, false, nil
@@ -902,6 +912,8 @@ func (m *Manager) autonomyDecisionRequest(ctx context.Context, plan *GPUAutonomy
 	}
 	request.MaintenanceRequired = true
 	request.AllowDuringMaintenance = true
+	request.ElevatedAuthorizationGranted = approved
+	request.DisruptionBudgetApproved = approved
 	return request, active, nil
 }
 

@@ -153,6 +153,44 @@ accelerator_profiles:
 	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"inventory_snapshot_id"`) {
 		t.Fatalf("candidate preview = %d %s", rec.Code, rec.Body.String())
 	}
+	// The uploaded profile is identical to the live one, yet it is not
+	// deployed: the REST preview must carry the pre-deploy runtime contract
+	// impact and must not present the candidate as attested by the old report.
+	var preview operations.PolicyImpactPreview
+	if err := json.Unmarshal(rec.Body.Bytes(), &preview); err != nil {
+		t.Fatal(err)
+	}
+	if preview.RuntimeContractImpactVersion != operations.CandidateRuntimeContractImpactVersion || preview.RuntimeContractProfileChange != operations.RuntimeContractProfileChangeReplaced {
+		t.Fatalf("preview header = %q %q", preview.RuntimeContractImpactVersion, preview.RuntimeContractProfileChange)
+	}
+	if len(preview.NewlyBlocked) != 1 || len(preview.NewlyEligible)+len(preview.Unchanged)+len(preview.ChangedObservedOnly) != 0 {
+		t.Fatalf("preview buckets = %#v, want one fail-closed newly-blocked node", preview)
+	}
+	impact := preview.NewlyBlocked[0].RuntimeContractImpact
+	if impact == nil || impact.Assessment != operations.RuntimeContractImpactPreDeployStatic || impact.StaticSelection != operations.RuntimeContractStaticSelectionExact ||
+		impact.PostDeployAttestation != operations.RuntimeContractAttestationFreshRequired || impact.CapturedReportUsableAsCandidateAttestation ||
+		impact.AfterDecisionEvidence != operations.RuntimeContractAfterEvidenceCandidateProfileNoReport || impact.CandidateProfileName != "nvidia-a100" {
+		t.Fatalf("preview runtime contract impact = %#v", impact)
+	}
+	if after := preview.NewlyBlocked[0].After; after.State == decision.StateEligible || len(after.AllowedActions) != 0 {
+		t.Fatalf("preview after decision = %#v, want fail-closed", after)
+	}
+	for _, field := range []string{`"runtime_contract_impact":{`, `"assessment":"PreDeployStatic"`, `"post_deploy_attestation":"FreshRequired"`, `"captured_report_usable_as_candidate_attestation":false`, `"runtime_contract_impact_version":"candidate-runtime-contract-impact/v1"`} {
+		if !strings.Contains(rec.Body.String(), field) {
+			t.Fatalf("preview JSON lacks %s: %s", field, rec.Body.String())
+		}
+	}
+	previewID := preview.ID
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, operatorRequest(http.MethodGet, "/api/v1/previews/"+previewID, "secret", ""))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"post_deploy_attestation":"FreshRequired"`) {
+		t.Fatalf("stored preview = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, operatorRequest(http.MethodGet, "/api/v1/candidates/"+candidate.ID+"/preview", "secret", ""))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"`+previewID+`"`) || !strings.Contains(rec.Body.String(), `"after_decision_evidence":"CandidateProfileWithoutReport"`) {
+		t.Fatalf("latest candidate preview = %d %s", rec.Code, rec.Body.String())
+	}
 
 	request = operatorRequest(http.MethodPost, "/api/v1/health-checks", "secret", `{"actor":"alice","node":"gpu-a","profile":"Passive","reason":"capture baseline"}`)
 	request.Header.Set("Idempotency-Key", "health-route")

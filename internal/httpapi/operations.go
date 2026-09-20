@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/decision"
 	"github.com/kubeneuron/kubeneuron/internal/operations"
 	"github.com/kubeneuron/kubeneuron/internal/store"
@@ -108,6 +109,92 @@ func (s *Server) handleNodeEvidence(w http.ResponseWriter, r *http.Request) {
 		"node": item.Node, "evidence_refs": item.Decision.EvidenceRefs,
 		"evidence_age": evidenceAge(item.Snapshot), "config_digest": item.Decision.ConfigDigest,
 	})
+}
+
+// runtimeContractVendor parses the required vendor query parameter shared by
+// the runtime contract routes. Coverage is defined per (node, vendor) pair,
+// so a missing vendor is a client error rather than a default.
+func runtimeContractVendor(r *http.Request) (types.AcceleratorVendor, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get("vendor"))
+	if raw == "" {
+		return "", errors.New("vendor is required")
+	}
+	vendor := types.AcceleratorVendor(raw)
+	if !vendor.Valid() {
+		return "", errors.New("vendor must be nvidia, amd, intel, or google")
+	}
+	return vendor, nil
+}
+
+// handleNodeRuntimeContract serves one live, read-only runtime contract
+// coverage assessment. It never writes and never changes what the controller
+// would admit; it only explains the evidence.
+func (s *Server) handleNodeRuntimeContract(w http.ResponseWriter, r *http.Request) {
+	manager := s.operationsManager(w)
+	if manager == nil {
+		return
+	}
+	vendor, err := runtimeContractVendor(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	item, err := manager.NodeRuntimeContractCoverage(r.Context(), r.PathValue("node"), vendor)
+	if err != nil {
+		operationsError(w, err)
+		return
+	}
+	writeJSON(w, item)
+}
+
+// handleFleetRuntimeContractCoverage serves a stable node-name ordered page
+// of coverage assessments for one vendor with the same opaque cursor scheme
+// as fleet readiness.
+func (s *Server) handleFleetRuntimeContractCoverage(w http.ResponseWriter, r *http.Request) {
+	manager := s.operationsManager(w)
+	if manager == nil {
+		return
+	}
+	filter, err := runtimeContractCoverageFilterFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	items, nextNode, err := manager.FleetRuntimeContractCoveragePage(r.Context(), filter)
+	if err != nil {
+		operationsError(w, err)
+		return
+	}
+	response := map[string]any{"items": items, "coverage_version": config.RuntimeContractCoverageVersion}
+	if nextNode != "" {
+		response["next_cursor"] = encodeReadinessCursor(nextNode)
+	}
+	writeJSON(w, response)
+}
+
+func runtimeContractCoverageFilterFromRequest(r *http.Request) (operations.RuntimeContractCoverageFilter, error) {
+	vendor, err := runtimeContractVendor(r)
+	if err != nil {
+		return operations.RuntimeContractCoverageFilter{}, err
+	}
+	limit, err := positiveLimit(r.URL.Query().Get("limit"))
+	if err != nil {
+		return operations.RuntimeContractCoverageFilter{}, err
+	}
+	filter := operations.RuntimeContractCoverageFilter{
+		Vendor:  vendor,
+		Tenant:  strings.TrimSpace(r.URL.Query().Get("tenant")),
+		Cluster: strings.TrimSpace(r.URL.Query().Get("cluster")),
+		Limit:   limit,
+	}
+	if raw := r.URL.Query().Get("cursor"); raw != "" {
+		node, ok := decodeReadinessCursor(raw)
+		if !ok {
+			return operations.RuntimeContractCoverageFilter{}, errors.New("cursor is invalid")
+		}
+		filter.AfterNode = node
+	}
+	return filter, nil
 }
 
 func evidenceAge(snapshot decision.Snapshot) string {
@@ -637,15 +724,11 @@ func readinessFilterFromRequest(r *http.Request) (operations.ReadinessFilter, er
 		filter.StaleOnly = value
 	}
 	if raw := r.URL.Query().Get("cursor"); raw != "" {
-		blob, decodeErr := base64.RawURLEncoding.DecodeString(raw)
-		if decodeErr != nil {
+		node, ok := decodeReadinessCursor(raw)
+		if !ok {
 			return operations.ReadinessFilter{}, errors.New("cursor is invalid")
 		}
-		var cursor readinessCursor
-		if decodeErr := json.Unmarshal(blob, &cursor); decodeErr != nil || strings.TrimSpace(cursor.Node) == "" {
-			return operations.ReadinessFilter{}, errors.New("cursor is invalid")
-		}
-		filter.AfterNode = cursor.Node
+		filter.AfterNode = node
 	}
 	return filter, nil
 }
@@ -653,6 +736,20 @@ func readinessFilterFromRequest(r *http.Request) (operations.ReadinessFilter, er
 func encodeReadinessCursor(node string) string {
 	blob, _ := json.Marshal(readinessCursor{Node: node})
 	return base64.RawURLEncoding.EncodeToString(blob)
+}
+
+// decodeReadinessCursor reverses encodeReadinessCursor. It is shared by every
+// node-name ordered fleet page so the opaque cursor format stays singular.
+func decodeReadinessCursor(raw string) (string, bool) {
+	blob, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return "", false
+	}
+	var cursor readinessCursor
+	if err := json.Unmarshal(blob, &cursor); err != nil || strings.TrimSpace(cursor.Node) == "" {
+		return "", false
+	}
+	return cursor.Node, true
 }
 
 func operationalListOptions(r *http.Request, includeExpiredDefault bool) (operations.OperationalListOptions, error) {

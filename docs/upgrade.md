@@ -92,6 +92,72 @@ simulations, and autonomy selection now enforce those labels as a scope
 boundary; a mismatched request is refused rather than falling back to an
 unscoped node.
 
+## v0.5.0 runtime contract lifecycle notes (prepared for release, not yet published)
+
+The GPU Runtime Contract Lifecycle — read-only runtime contract coverage, the
+candidate runtime contract impact inside policy impact previews, and
+evidence-only runtime contract qualifications — is the v0.5.0 scope. The
+manifests and chart in this tree pin v0.5.0; **the tag and published images
+do not exist until the release is cut**. This section describes the upgrade
+and rollback posture of that scope. The CPU-only kind integration harness
+drives the v0.5 routes and commands against a real controller and store with
+synthetic accelerator evidence, alongside the existing reconciliation, RBAC,
+mTLS, TLS rotation, backup/restore, restart, and cordon/uncordon scenarios.
+No GPU hardware run has called the v0.5 routes, and v0.5.0 claims no
+hardware qualification of its own surfaces.
+
+- **No schema migration.** The migration heads stay at SQLite 0023 and
+  PostgreSQL 0014. A qualification is a new kind
+  (`runtime-contract-qualification`) inside the existing operational
+  resource table, previews gain additive JSON fields, and coverage persists
+  nothing. The upgrade is images only. Take and verify the backup from
+  [Before any upgrade](#before-any-upgrade) anyway; that is standard
+  practice, not a sign that the store changes.
+- **No new CRD, RBAC rule, or Helm value.** The new read-only routes
+  (coverage, qualification list and get) reuse the existing operator `get`
+  authorization on the root `KubeNeuron` object and nothing else: no leader
+  fencing, idempotency key, or per-operation quota applies to them. The two
+  qualification mutations reuse the existing `update` authorization, leader
+  fencing, idempotency, and per-source quotas. The agent protocol and
+  capability token are unchanged, so agents need no coordinated rollout for
+  this scope.
+- **The prior binary does not understand the new surface.** A v0.4.0
+  controller answers `404` on `/api/v1/nodes/{node}/runtime-contract`,
+  `/api/v1/runtime-contracts/coverage`, and
+  `/api/v1/runtime-contract-qualifications*`, and `kubeneuronctl
+  runtime-contracts` / `runtime-qualifications` fail against it. It does not
+  know the qualification kind, its `ReadyForApproval`/`Invalidated`
+  lifecycle, or the `runtime_contract_impact` preview fields. During a
+  PostgreSQL HA rolling update readiness follows leader election, so the
+  Service sends every request to the elected leader: while that leader is
+  still the old binary, the new routes answer `404` for everyone, and they
+  appear only once an upgraded replica holds the lease. A not-yet-upgraded
+  Pod addressed directly answers `404` until the rollout completes.
+- **Images-only rollback is possible** because the schema did not change.
+  After rolling back, qualification rows become invisible: the old
+  controller does not serve them and cannot observe them, so no expiry is
+  recorded while it runs. The rows stay in the store and are served again
+  after a re-upgrade; the first observation after that records `Expired` if
+  the window has passed. The old retention sweep does not recognise the
+  `Invalidated` state, so such rows persist until the re-upgrade; rows
+  already recorded as `Expired` are subject to the ordinary data-retention
+  prune under both binaries once `expires_at` is older than the retention
+  window, exactly as other terminal v0.4 summaries are. Export the
+  active qualifications (`GET /api/v1/runtime-contract-qualifications`)
+  before rolling back if you need their evidence on record.
+- **Legacy candidate-preview semantics after rollback.** Preview payloads
+  are decoded without rejecting unknown fields, so an old controller reads
+  previews written with `runtime_contract_impact` and ignores the field.
+  But previews the old controller **creates** follow its own v0.4.0 rule:
+  it evaluates a candidate runtime profile against the report captured
+  before deployment, so a candidate profile identical to the live one can
+  read `Eligible`/`unchanged` there, and those previews carry no
+  `runtime_contract_impact`. Under the v0.5 scope the same candidate lands
+  in `newly_blocked` with `post_deploy_attestation: "FreshRequired"`,
+  because a pre-deploy report is never candidate attestation. Do not compare
+  previews across that boundary as if they used one rule; the presence or
+  absence of `runtime_contract_impact_version` tells you which rule applied.
+
 ## Upgrade order
 
 Always: **CRDs → operator → controller/agent images.**
@@ -161,6 +227,9 @@ versions longer than a rolling upgrade needs.
   `GPUAutonomyPlan` CRD may remain installed during a rollback; old
   controllers do not consume it. Pause or roll back every active v0.4 plan
   and preserve its audit export before restoring an older store snapshot.
+- **v0.5 runtime contract scope**: images only, no store restore needed;
+  see [the v0.5.0 notes](#v050-runtime-contract-lifecycle-notes-prepared-for-release-not-yet-published)
+  for what the old binary can and cannot see afterwards.
 
 ## Certificate material during upgrades
 
