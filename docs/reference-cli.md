@@ -68,7 +68,7 @@ mode; scripts should prefer the version returned by `show`.
 
 `runtime-contracts`, the `runtime_contract_impact` block in `preview` output,
 and `runtime-qualifications` are the v0.5.0 GPU Runtime Contract Lifecycle
-scope, prepared for release but not yet published. They are unit-tested and
+scope, released on 2026-09-20. They are unit-tested and
 the CPU-only kind integration harness runs them against a real controller
 with synthetic accelerator evidence; no GPU hardware run has called them.
 Against a v0.4.0 controller

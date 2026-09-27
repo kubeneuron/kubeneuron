@@ -92,15 +92,17 @@ simulations, and autonomy selection now enforce those labels as a scope
 boundary; a mismatched request is refused rather than falling back to an
 unscoped node.
 
-## v0.5.0 runtime contract lifecycle notes (prepared for release, not yet published)
+## v0.5.0 runtime contract lifecycle notes
 
 The GPU Runtime Contract Lifecycle — read-only runtime contract coverage, the
 candidate runtime contract impact inside policy impact previews, and
-evidence-only runtime contract qualifications — is the v0.5.0 scope. The
-manifests and chart in this tree pin v0.5.0; **the tag and published images
-do not exist until the release is cut**. This section describes the upgrade
-and rollback posture of that scope. The CPU-only kind integration harness
-drives the v0.5 routes and commands against a real controller and store with
+evidence-only runtime contract qualifications — is the v0.5.0 scope, released
+on 2026-09-20. The manifests and chart in this tree pin v0.5.0; its tag,
+published images, and release assets are available from the
+[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.5.0).
+This section describes the upgrade and rollback posture of that scope. The
+CPU-only kind integration harness drives the v0.5 routes and commands against
+a real controller and store with
 synthetic accelerator evidence, alongside the existing reconciliation, RBAC,
 mTLS, TLS rotation, backup/restore, restart, and cordon/uncordon scenarios.
 No GPU hardware run has called the v0.5 routes, and v0.5.0 claims no
@@ -228,7 +230,7 @@ versions longer than a rolling upgrade needs.
   controllers do not consume it. Pause or roll back every active v0.4 plan
   and preserve its audit export before restoring an older store snapshot.
 - **v0.5 runtime contract scope**: images only, no store restore needed;
-  see [the v0.5.0 notes](#v050-runtime-contract-lifecycle-notes-prepared-for-release-not-yet-published)
+  see [the v0.5.0 notes](#v050-runtime-contract-lifecycle-notes)
   for what the old binary can and cannot see afterwards.
 
 ## Certificate material during upgrades

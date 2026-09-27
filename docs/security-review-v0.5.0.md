@@ -1,8 +1,9 @@
 # Security review — v0.5.0 runtime contract lifecycle
 
-Status: prepared for the v0.5.0 release. This is a review of the surfaces the
-release adds, against the code in this tree; it is not a third-party audit and
-not a hardware qualification. Report anything that contradicts it through
+Status: completed for the published v0.5.0 release (2026-09-20). This is a
+review of the surfaces the release adds, against the code in this tree; it is
+not a third-party audit and not a hardware qualification. Report anything
+that contradicts it through
 [SECURITY.md](https://github.com/kubeneuron/kubeneuron/blob/main/SECURITY.md).
 
 ## Scope

@@ -112,8 +112,8 @@ with `Retry-After`.
 
 Three surfaces below — runtime contract coverage, the candidate runtime
 contract impact inside previews, and runtime contract qualifications — form
-the **GPU Runtime Contract Lifecycle** scope of v0.5.0, which is prepared
-for release but not yet published. They are unit-tested and driven by the
+the **GPU Runtime Contract Lifecycle** scope of v0.5.0, released on
+2026-09-20. They are unit-tested and driven by the
 CPU-only kind integration harness against a real controller with synthetic
 accelerator evidence; no GPU hardware run has called them. A v0.4.0
 controller answers `404` on the new routes and

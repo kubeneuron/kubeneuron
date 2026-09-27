@@ -55,7 +55,7 @@ unit or integration fixtures. Existing destructive remediation remains behind
 its separate dry-run, confinement, approval, and evidence gates. Full history:
 [CHANGELOG.md](CHANGELOG.md).
 
-**Prepared for release (v0.5.0, not yet published):** the GPU Runtime
+**Released (v0.5.0, 2026-09-20):** the GPU Runtime
 Contract Lifecycle — a read-only, versioned runtime contract coverage view per
 node and vendor (`selection`, `attestation`, `verification_depth`, reason
 codes); a candidate preview that separates the static pre-deploy selection a
@@ -73,10 +73,11 @@ temporary EKS `g4dn.xlarge` cluster on 2026-09-13, and its focused
 cluster on 2026-09-14 with the teardown sweep completing on its own; that
 harness exercises the shared agent/controller runtime and does not call the
 v0.5 routes or commands, so v0.5.0 claims no GPU hardware qualification of its
-own surfaces. The manifests and chart in this tree pin v0.5.0, but the tag
-and the published images do not exist until the release is cut; see the
-[REST](docs/reference-api.md) and [CLI](docs/reference-cli.md) references,
-the [upgrade notes](docs/upgrade.md), and the
+own surfaces. The manifests and chart in this tree pin v0.5.0; the tag,
+published images, and release assets are available from the
+[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.5.0).
+See also the [REST](docs/reference-api.md) and [CLI](docs/reference-cli.md)
+references, the [upgrade notes](docs/upgrade.md), and the
 [security review](docs/security-review-v0.5.0.md).
 
 **Start here:** [product tour](docs/product-tour.md) (screenshots + live
