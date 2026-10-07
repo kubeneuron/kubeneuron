@@ -13,6 +13,7 @@ import (
 
 	"log/slog"
 
+	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/controller"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
@@ -20,6 +21,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
+	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
 // runtimeConfigReloadInterval is how often the controller re-reads its mounted
@@ -156,6 +158,7 @@ func applyRuntimeConfigWithNodePauses(
 		QuiesceForbidden:    cfg.Safety.QuiesceForbidResetWhenPresent,
 		DestructiveSelector: cfg.Safety.DestructiveExecutionNodeSelector,
 		DegradedTaint:       degradedTaintPolicy(cfg.Safety.TaintDegradedNodes),
+		Checkpoint:          checkpointPolicy(cfg.Safety.CheckpointCoordination),
 		VerifyQuiet:         cfg.Safety.VerifyQuietWindow.Std(),
 		ApprovalTTL:         cfg.Approvals.TTL.Std(),
 	}); err != nil {
@@ -193,6 +196,24 @@ func degradedTaintPolicy(compiled *config.TaintDegradedNodes) controller.Degrade
 		return controller.DegradedTaintPolicy{}
 	}
 	return controller.DegradedTaintPolicy{Enabled: true, Effect: compiled.Effect}
+}
+
+// checkpointPolicy resolves the compiled checkpoint-coordination setting. An
+// absent key is off, which is the whole default: a controller loading a
+// configuration written before this feature existed must not start waiting
+// on workloads. The bounds were checked by config.Validate on the way in;
+// InstallRuntimeConfig rejects anything that slipped past it.
+func checkpointPolicy(compiled *config.CheckpointCoordination) checkpoint.Policy {
+	if compiled == nil || !compiled.Enabled {
+		return checkpoint.Policy{}
+	}
+	return checkpoint.Policy{
+		Enabled:     true,
+		DefaultWait: compiled.DefaultWait.Std(),
+		MaxWait:     compiled.MaxWait.Std(),
+		SkipClasses: append([]types.ProblemClass(nil), compiled.SkipClasses...),
+		Namespaces:  append([]string(nil), compiled.Namespaces...),
+	}
 }
 
 // watchRuntimeConfig re-applies the configuration whenever the mounted files

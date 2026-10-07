@@ -91,6 +91,128 @@ Two spellings that used to fail quietly now fail at load: a non-boolean value
 (`force: yes` read as "no" and you found out at 3am), and `force` on any action
 other than `Drain`, where it was validated and then silently ignored.
 
+### Checkpoint coordination before `Drain` and `EvictGPUWorkload`
+
+> Implemented on `main` for v0.6.0, which is prepared in source (this tree's
+> manifests and chart carry the v0.6.0 candidate pins) but not yet tagged or
+> published; the latest published release, v0.5.0, does not contain it.
+
+A training job that can checkpoint would rather be told than evicted. When the
+installation enables `spec.safety.checkpointCoordination`, the two disruption
+steps gain a bounded pre-phase: opted-in Pods on the node are told, through
+annotations on their own Pod, that a disruption is coming and by when, and the
+step waits for them to acknowledge or for the deadline, whichever is first. It
+is a property of the steps, not a playbook action: nothing changes in a
+playbook, and every existing `Drain`/`EvictGPUWorkload` gets it. The full
+design is in [checkpoint coordination](checkpoint-coordination-design.md).
+
+**The policy (installation-wide, default off).** The block must name the
+namespaces whose Pods may opt in; an enabled block without that allowlist is
+rejected by the CRD:
+
+```yaml
+spec:
+  safety:
+    checkpointCoordination:
+      enabled: true
+      namespaces: [ml-training, ml-research]   # explicit allowlist, required
+      defaultWait: 5m                          # for a Pod that requests nothing
+      maxWait: 15m                             # ceiling; at most 30m
+      skipClasses: [fell-off-bus, gpu-lost]    # the default: device already gone
+```
+
+**The workload opts in** with one annotation and may *request* a shorter
+wait. The request only ever shortens the policy: the wait granted is the
+request when present, parseable and positive, `defaultWait` otherwise, and
+never more than `maxWait`. `"True"` and `"yes"` are not opt-ins.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  namespace: ml-training
+  annotations:
+    kubeneuron.io/checkpoint: "true"
+    kubeneuron.io/checkpoint-max-wait: "8m"
+spec:
+  containers:
+    - name: trainer
+      image: registry.example.com/trainer:1.4.2
+      volumeMounts:
+        - name: podinfo
+          mountPath: /etc/podinfo
+          readOnly: true
+  volumes:
+    - name: podinfo
+      downwardAPI:
+        items:
+          - path: annotations
+            fieldRef:
+              fieldPath: metadata.annotations
+```
+
+**KubeNeuron requests** by patching five annotations onto that Pod, and the
+Downward API volume above delivers them to the container with **no RBAC at
+all**: the trainer polls `/etc/podinfo/annotations` for
+`kubeneuron.io/checkpoint-deadline-at` (an absolute RFC 3339 time),
+`kubeneuron.io/checkpoint-reason` (the problem class),
+`kubeneuron.io/checkpoint-next-action` (`platform.drain` or
+`platform.evict_gpu_workload`), `kubeneuron.io/checkpoint-incident`, and
+`kubeneuron.io/checkpoint-requested-at`. The kubelet refreshes the file on
+its sync loop, not instantly; budget for that when choosing a short
+`checkpoint-max-wait`.
+
+**The workload acknowledges** on one of two paths:
+
+- **Exit.** Write the checkpoint and terminate. The Pod reaching
+  `Succeeded`/`Failed`, being deleted, or disappearing is the
+  acknowledgement (counted as `exited`). No rights, no library.
+- **Patch** `kubeneuron.io/checkpoint-state: "complete:<incident>"` onto its
+  own Pod, where `<incident>` is exactly the value of
+  `kubeneuron.io/checkpoint-incident` it read from the request (counted as
+  `acknowledged`). This path requires the workload to **already hold
+  `patch` on its own Pod**, for example through a training operator's
+  ServiceAccount; KubeNeuron grants no such rights and never writes or
+  deletes this key. The acknowledgement is bound to the request: a plain
+  `complete`, a value naming another incident (for example one left over
+  from an earlier disruption of the same long-lived Pod), a different case or
+  surrounding whitespace is not an acknowledgement, and neither is
+  `in-progress`. There is no "extend". The same incident recognizes its
+  bound answer after a controller restart.
+
+  ```sh
+  # inside the container, after the checkpoint is durably written
+  INCIDENT=$(grep '^kubeneuron.io/checkpoint-incident=' /etc/podinfo/annotations | cut -d= -f2- | tr -d '"')
+  kubectl annotate pod "$POD_NAME" --overwrite \
+    "kubeneuron.io/checkpoint-state=complete:${INCIDENT}"
+  ```
+
+**What the wait cannot do.** The deadline is operator policy, stamped on the
+Pod as an absolute time so a controller restart resumes the same window. Each
+Pod gets its own deadline (its `checkpoint-max-wait` request or the policy
+default, never more than `maxWait`), the step waits until the latest of them,
+and every deadline is bounded also by the step's own `timeout` minus a
+reserve kept for the disruption itself: a `Drain` with a `timeout` shorter than
+`maxWait` waits less, and one too short to leave anything after the reserve
+does not wait at all. The reserve is kept whatever the platform does: the
+whole pre-phase, including the listing, the patches and its own audit rows,
+runs under its own deadline equal to that budget and borrows nothing from the
+step's remaining time, so a slow API cannot spend the time the disruption
+needs. The deadline stamped on a Pod is measured from the moment that window
+opened, before the listing, so a slow listing shortens what a Pod is promised
+rather than extending it past the window. When the deadline passes, or the
+budget runs out, the step disrupts exactly as before; a Pod still open when
+the budget ends before its own deadline is counted `unreachable` rather than
+`expired`. Neither is a failure and neither escalates.
+Pods that appear on the node after the step started are not asked. A `Drain`
+asks only the Pods it will evict: finished Pods, mirror and DaemonSet Pods,
+and (unless the step sets `force: "true"`) Pods without a controller are
+neither asked nor waited for, since the drain leaves them alone.
+`EvictGPUWorkload` asks every GPU-holding Pod. A `checkpoint-max-wait`
+shorter than a second is honored as written; the stamped deadline keeps the
+fraction. In `DryRun` nothing is patched and nothing waits; the audited
+output says how many Pods would have been asked.
+
 ## Why a GPU reset needs a quiesce step
 
 Draining the node is not enough to reset a GPU. NVIDIA's own components keep

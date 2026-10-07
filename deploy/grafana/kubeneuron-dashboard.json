@@ -776,6 +776,81 @@
           }
         }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkpoint requests by outcome (acknowledged before a drain or eviction = the feature working)",
+      "description": "One count per workload a checkpoint request went out to, by what it did: acknowledged (patched checkpoint-state: complete:<incident>, bound to the incident stamped on the Pod; a plain complete does not count), exited (terminated or gone, which also covers a crash), expired (its own stamped deadline passed unanswered), unreachable (could not be asked or read, or still open when the coordination budget ran out or the step was cancelled before its deadline). skipped counts disruption steps where no request went out at all: a skipped class, a platform without the capability, no opted-in workload, or a step budget too short to wait. acknowledged / (acknowledged + expired) is the share of coordinated disruptions where the job was told and said done before anything was killed.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 90
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(kubeneuron_checkpoint_requests_total[1h]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkpoint wait p50/p90 (what calibrates maxWait)",
+      "description": "Elapsed seconds from the moment a disruption step issued its checkpoint requests until each request's outcome settled. Includes near-zero observations for requests that settled on the first look (an immediate acknowledgement, a resumed window that had already expired), so it is not only time spent sleeping. A p90 far under spec.safety.checkpointCoordination.maxWait means the ceiling is more generous than jobs need; a cliff at the ceiling means jobs are being cut off before they finish checkpointing. Read beside checkpoint_wait in the deferred-steps panel, which counts the steps that actually paused.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 98
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(kubeneuron_checkpoint_wait_seconds_bucket[1h])))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.9, sum by (le) (rate(kubeneuron_checkpoint_wait_seconds_bucket[1h])))",
+          "legendFormat": "p90",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        },
+        {
+          "expr": "sum(increase(kubeneuron_checkpoint_wait_seconds_count[1h]))",
+          "legendFormat": "requests waited on (1h)",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ]
     }
   ]
 }

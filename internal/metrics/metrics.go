@@ -184,6 +184,42 @@ var (
 		Help: "Destructive steps that did not run, by the guard that stopped them.",
 	}, []string{"reason"})
 
+	// CheckpointRequests counts checkpoint coordination outcomes, one per
+	// workload a request went out to, plus one `skipped` per disruption step
+	// where no request went out at all. The label set is closed: use the
+	// checkpoint.Outcome constants (acknowledged, exited, expired, unreachable,
+	// skipped), never an ad-hoc string.
+	//
+	// acknowledged / (acknowledged + expired) is the number that proves the
+	// feature works: the share of coordinated disruptions where a job was told
+	// and said "done" before anything was killed. exited is kept separate
+	// because it also covers a job that simply crashed.
+	//
+	// No node, pod or incident label, for the reason given above
+	// WorkloadsEvicted: those sets are unbounded, and which workload was asked
+	// is recorded on the incident's audit trail.
+	CheckpointRequests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_checkpoint_requests_total",
+		Help: "Checkpoint coordination outcomes by workload (acknowledged, exited, expired, unreachable) or per step when nothing was requested (skipped).",
+	}, []string{"outcome"})
+
+	// CheckpointWaitSeconds observes, per workload with a request in force,
+	// the elapsed time from the request's durable requested-at on the object
+	// until its outcome settled. A request resumed after a controller restart
+	// measures its whole window, not only the resuming step's sleep. Every
+	// observation is bounded to [0, checkpoint.MaxWaitCeiling] by the
+	// controller (checkpoint.ObservedWait), so a stale or tampered
+	// requested-at can neither go negative nor exceed the top bucket. It is
+	// what calibrates the policy: a p90 far under maxWait means the ceiling is
+	// too generous, a cliff at the ceiling means jobs are being cut off.
+	CheckpointWaitSeconds = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name: "kubeneuron_checkpoint_wait_seconds",
+		Help: "Seconds from a checkpoint request's durable requested-at until its outcome settled, per workload.",
+		// 1s to 30m: an immediate acknowledgement at the bottom, the
+		// installation-wide maxWait ceiling (checkpoint.MaxWaitCeiling) at the top.
+		Buckets: []float64{1, 5, 15, 30, 60, 120, 300, 600, 900, 1800},
+	})
+
 	// RuntimeConfigInfo is an info metric identifying the loaded runtime
 	// configuration: exactly one series with the digest of the
 	// operator-compiled snapshot currently live in this process. Alert on it
@@ -355,6 +391,12 @@ const (
 	// held, not escalated, so this is genuinely a deferral: fail-closed on
 	// absent evidence is the single most common reason a reset does not run.
 	DeferAcceleratorEvidence = "accelerator_evidence"
+	// DeferCheckpointWait: a drain or GPU-workload eviction really waited for
+	// opted-in workloads to checkpoint before disrupting them. Counted once per
+	// disruption step, and only when a wait actually happened: a step whose
+	// requests all settled on the first look, or that made no request, did not
+	// defer anything.
+	DeferCheckpointWait = "checkpoint_wait"
 )
 
 // RecordCertBundleExpiry parses PEM material and records the earliest

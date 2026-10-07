@@ -1,14 +1,20 @@
 name: Release
 
 # Tag-driven release: gated on the full CI (build/vet/tests on both store
-# backends + the kind integration suite), then multi-arch images to GHCR
-# (cosign-keyless-signed, with SBOMs), a DIGEST-pinned single-file install
-# manifest, kubeneuronctl binaries, and one checksums file — assembled into a
-# published (non-draft) GitHub release whose notes carry the digest table.
+# backends + the kind integration suite), on the tagged source carrying the
+# tag's own version in every consumer-facing pin, and on the upgrade/rollback
+# rehearsal; only then multi-arch images to GHCR (cosign-keyless-signed, with
+# SBOMs), a DIGEST-pinned single-file install manifest, kubeneuronctl
+# binaries, and one checksums file — assembled into a DRAFT GitHub release
+# whose notes carry the digest table. The draft is verified the way a user
+# would consume it (release-verify) and only then promoted to a published
+# release (release-publish).
 #
 # A tag on a broken tree must ship nothing: every publishing job `needs` the
-# gates. Nothing here uses a stored secret — GHCR auth is GITHUB_TOKEN and
-# cosign signing is keyless via the job's OIDC identity token.
+# gates, and nothing public (an image push, a signature, a visible release)
+# happens before the independent source-metadata and upgrade-rehearsal checks
+# have passed. Nothing here uses a stored secret — GHCR auth is GITHUB_TOKEN
+# and cosign signing is keyless via the job's OIDC identity token.
 on:
   push:
     tags: ["v*"]
@@ -32,9 +38,102 @@ jobs:
       contents: read
     uses: ./.github/workflows/ci.yaml
 
+  # The tagged source must already SAY what the tag says. The manifest job
+  # used to sed the version into the chart and the kustomize base at release
+  # time, which meant the tree a user checks out at the tag and the artifacts
+  # the release ships could disagree and nothing would notice. Now a stale pin
+  # fails the run here, before any image is pushed, and the fix is a commit
+  # on the tree rather than a mutation in a runner. Nothing is modified: the
+  # job renders the Helm chart to a scratch file and reads the rest as YAML.
+  source-metadata:
+    if: github.repository == 'kubeneuron/kubeneuron'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render the Helm chart with its default values
+        shell: bash
+        run: |
+          set -euo pipefail
+          helm template kubeneuron deploy/helm/kubeneuron \
+            --namespace kube-neuron > "$RUNNER_TEMP/helm-out.yaml"
+
+      - name: Tagged source must carry the tag's version in every pin
+        shell: python
+        env:
+          VERSION: ${{ github.ref_name }}
+          HELM_OUT: ${{ runner.temp }}/helm-out.yaml
+        run: |
+          import os, re, sys, yaml
+
+          version = os.environ["VERSION"]
+          repo = os.environ["IMAGE_REPO"]
+          if not re.fullmatch(r"v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?", version):
+              sys.exit(f"tag {version!r} is not a vX.Y.Z[-pre] release tag")
+          failures = []
+
+          def expect(what, got, want):
+              if got != want:
+                  failures.append(f"{what}: have {got!r}, want {want!r}")
+
+          def load(path):
+              with open(path) as f:
+                  return yaml.safe_load(f)
+
+          def container_image(deployment, name):
+              for c in deployment["spec"]["template"]["spec"]["containers"]:
+                  if c["name"] == name:
+                      return c["image"]
+              return None
+
+          operator_image = f"{repo}/operator:{version}"
+          kust = load("config/default/operator_deployment.yaml")
+          expect("config/default operator image", container_image(kust, "operator"), operator_image)
+
+          chart = load("deploy/helm/kubeneuron/Chart.yaml")
+          # YAML parsing, not grep: `appVersion: "v0.6.0"` and `appVersion: v0.6.0`
+          # are the same value, and a quoted `version: "0.6.0"` is still a string.
+          expect("Chart.yaml version", str(chart.get("version")), version.removeprefix("v"))
+          expect("Chart.yaml appVersion", str(chart.get("appVersion")), version)
+
+          values = load("deploy/helm/kubeneuron/values.yaml")
+          expect("values.yaml image.repository", values.get("image", {}).get("repository"), f"{repo}/operator")
+          expect("values.yaml image.tag", str(values.get("image", {}).get("tag")), version)
+
+          with open(os.environ["HELM_OUT"]) as f:
+              helm_docs = [d for d in yaml.safe_load_all(f) if d]
+          helm_deps = [d for d in helm_docs if d.get("kind") == "Deployment"]
+          if len(helm_deps) != 1:
+              failures.append(f"rendered Helm chart has {len(helm_deps)} Deployments, want 1")
+          else:
+              expect("rendered Helm operator image", container_image(helm_deps[0], "operator"), operator_image)
+
+          sample = load("config/samples/kubeneuron_v1alpha1_kubeneuron.yaml")
+          expect("sample controller image", sample["spec"]["controller"]["image"], f"{repo}/controller:{version}")
+          expect("sample agent image", sample["spec"]["agent"]["image"], f"{repo}/agent:{version}")
+
+          heading = re.compile(r"^## \[" + re.escape(version) + r"\](\s|$)")
+          with open("CHANGELOG.md") as f:
+              if not any(heading.match(line) for line in f):
+                  failures.append(f"CHANGELOG.md has no '## [{version}]' heading")
+
+          if failures:
+              print("the tagged source does not describe this tag:", file=sys.stderr)
+              for item in failures:
+                  print(f"  - {item}", file=sys.stderr)
+              sys.exit(1)
+          print(f"source metadata matches {version}: kustomize, chart, values, rendered chart, sample, CHANGELOG")
+
   images:
     if: github.repository == 'kubeneuron/kubeneuron'
-    needs: [gates]
+    # Nothing public (push, signature, SBOM of a pushed image) until the two
+    # independent checks have passed alongside the gates. upgrade-rehearsal
+    # builds and tags its own HEAD images locally, so it does not depend on
+    # this job and there is no cycle.
+    needs: [gates, source-metadata, upgrade-rehearsal]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -172,21 +271,13 @@ jobs:
           grep -q "AGENT_DIGEST:-${agent_digest}" "dist/install-${version}.sh"
           bash -n "dist/install-${version}.sh"
           cp "dist/install-${version}.sh" dist/install.sh
-
-          # The Helm chart pins its own image tag, and it had gone stale by two
-          # minor releases: `helm install` without an explicit --set deployed
-          # last quarter's operator. A version typed into a file by hand rots;
-          # this is the same lesson as the installer digests above, in a file
-          # that is executable rather than descriptive.
-          sed -i -E "s|^(  tag: ).*|\1${version}|" deploy/helm/kubeneuron/values.yaml
-          # The kustomize base carries the same pin, and CI asserts the two
-          # deploy an identical Deployment — so they rot together or not at all.
-          sed -i -E "s|(image: ghcr.io/kubeneuron/kubeneuron/operator:).*|\1${version}|" \
-            config/default/operator_deployment.yaml
-          sed -i -E "s|^(version: ).*|\1${version#v}|; s|^(appVersion: ).*|\1\"${version}\"|" \
-            deploy/helm/kubeneuron/Chart.yaml
-          grep -q "tag: ${version}$" deploy/helm/kubeneuron/values.yaml
-          grep -q "appVersion: \"${version}\"" deploy/helm/kubeneuron/Chart.yaml
+          # The Helm chart and the kustomize base pin their own image tag, and
+          # this job used to sed the tag's version over them at release time.
+          # That hid stale pins instead of fixing them: the tree at the tag
+          # said one version while the runner's scratch copy said another.
+          # The source-metadata job now fails the run before any image push
+          # unless the tagged source already carries ${version} everywhere,
+          # so nothing here rewrites checked-out files.
 
       - uses: actions/upload-artifact@v4
         with:
@@ -231,23 +322,29 @@ jobs:
 
   # No tag ships without an upgrade from the release before it AND a rollback
   # to it, rehearsed in the documented order on a real cluster.
-  # hack/kind-upgrade-rollback.sh drives v0.4.0 -> HEAD -> v0.4.0 (images
+  # hack/kind-upgrade-rollback.sh drives v0.5.0 -> HEAD -> v0.5.0 (images
   # only) -> HEAD for BOTH workflow stores (SQLite PVC and a throwaway
   # in-cluster PostgreSQL) side by side, with the v0.5 runtime contract
   # qualification rows and their hash-chained audit as the durable evidence:
-  # the old binary must hide but keep them, and the re-upgrade must read them
-  # back byte-identical and extend the same chain. This shape of rehearsal has
-  # caught what neither unit tests nor the integration suite can see: a store
-  # migration an existing installation cannot cross, and a CRD whose new
-  # fields the upgraded API does not actually serve.
+  # the v0.5.0 binary must read them back byte-identical after the rollback,
+  # and the re-upgrade must read them back byte-identical and extend the same
+  # chain. On HEAD it also enables and disables the v0.6 checkpoint
+  # coordination policy and proves the managed controller ClusterRole holds
+  # pods patch only while enabled, with the policy off before any image
+  # rolls back. This shape of rehearsal has caught what neither unit tests
+  # nor the integration suite can see: a store migration an existing
+  # installation cannot cross, and a CRD whose new fields the upgraded API
+  # does not actually serve.
   #
   # The baseline is the actual previous minor release, not a variable: the
-  # rollback assertions (runtime-contract routes 404 on the old binary, the
-  # v0.4 incident survives) are specific to what v0.4.0 shipped.
+  # rollback assertions (the v0.5 runtime-contract routes keep serving on the
+  # old binary, the baseline incident survives, the role is read-only on
+  # pods) are specific to what v0.5.0 shipped.
   upgrade-rehearsal:
+    if: github.repository == 'kubeneuron/kubeneuron'
     needs: [gates]
     runs-on: ubuntu-24.04
-    # Two v0.4.0 installations, a PostgreSQL pull, three HEAD image builds,
+    # Two v0.5.0 installations, a PostgreSQL pull, three HEAD image builds,
     # two image-level rollbacks and two re-upgrades on a three-node kind
     # cluster (one control-plane plus one dedicated labeled worker per store,
     # because the agent's hostPath spool state must not be shared): well
@@ -257,7 +354,7 @@ jobs:
       contents: read
       packages: read
     env:
-      BASELINE: v0.4.0
+      BASELINE: v0.5.0
       STORES: sqlite postgres
       # The published release (its install manifest and images.txt) lives in
       # the repository the tag is pushed to; the script also uses this to
@@ -309,9 +406,9 @@ jobs:
           sudo sysctl fs.inotify.max_user_instances=512 \
             fs.inotify.max_user_watches=524288
 
-      - name: Rehearse upgrade and rollback against v0.4.0 on both stores
+      - name: Rehearse upgrade and rollback against v0.5.0 on both stores
         env:
-          # `gh release download` of the v0.4.0 install manifest and
+          # `gh release download` of the v0.5.0 install manifest and
           # images.txt, and the GHCR login fallback for the baseline images.
           GH_TOKEN: ${{ github.token }}
         run: bash hack/kind-upgrade-rollback.sh
@@ -324,6 +421,8 @@ jobs:
     permissions:
       contents: write
       id-token: write # cosign sign-blob of the checksums file
+    outputs:
+      release_id: ${{ steps.publish.outputs.id }}
     steps:
       # The notes derive the store migration heads from the tree, so this job
       # needs the source as well as the artifacts. Hardcoding them rotted the
@@ -388,11 +487,15 @@ jobs:
             echo "pending across the upgrade needs one re-approval."
           } > notes.md
 
-      - name: Create GitHub release
+      - name: Create the GitHub release as a draft
         id: publish
         uses: softprops/action-gh-release@v2
         with:
-          draft: false
+          # A draft is invisible to users and to releases/latest. It is
+          # promoted by release-publish only after release-verify has
+          # downloaded and checked the exact assets attached to it, so a
+          # release that fails its own verification is never published.
+          draft: true
           # A tag containing '-' is a prerelease (v0.2.2-rc.1): it must never
           # become releases/latest, which is what install.md's advertised
           # one-liner downloads.
@@ -402,10 +505,14 @@ jobs:
           files: dist/*
 
   # The only job that looks at the release the way a stranger does: it
-  # downloads the published assets and checks what install.md promises about
-  # them. Everything upstream verifies inputs; three release candidates each
-  # found a defect that only the finished artifact could show.
+  # downloads the assets and checks what install.md promises about them.
+  # Everything upstream verifies inputs; three release candidates each found a
+  # defect that only the finished artifact could show. The release is still a
+  # draft here: `gh release download` resolves a draft by tag for a token that
+  # can read the repository, so the check runs on the exact assets a user
+  # would get, before any user can get them.
   release-verify:
+    if: github.repository == 'kubeneuron/kubeneuron'
     needs: [release]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -414,7 +521,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: sigstore/cosign-installer@v3
-      - name: Verify the published release
+      - name: Verify the draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash hack/verify-release.sh "${GITHUB_REF_NAME}" "${GITHUB_REPOSITORY}"
+
+  # Promotion is the last step and the only one that makes the release
+  # visible. It touches exactly the draft the release job created (by id, not
+  # by tag lookup) and asserts the result is no longer a draft, so a failed
+  # or skipped verification leaves a draft a maintainer can inspect and
+  # delete, never a published release nobody checked.
+  release-publish:
+    if: github.repository == 'kubeneuron/kubeneuron'
+    needs: [release, release-verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the verified draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          [[ $RELEASE_ID =~ ^[0-9]+$ ]] || {
+            echo "release job produced no release id (got '${RELEASE_ID}')" >&2
+            exit 1
+          }
+          tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq .tag_name)"
+          [[ $tag == "$GITHUB_REF_NAME" ]] || {
+            echo "release ${RELEASE_ID} is for tag '${tag}', not '${GITHUB_REF_NAME}'" >&2
+            exit 1
+          }
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            --field draft=false --silent
+          draft="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq .draft)"
+          [[ $draft == false ]] || {
+            echo "release ${RELEASE_ID} is still a draft after promotion" >&2
+            exit 1
+          }
+          echo "published ${GITHUB_REPOSITORY}@${GITHUB_REF_NAME} (release ${RELEASE_ID})"

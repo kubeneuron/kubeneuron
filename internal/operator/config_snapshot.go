@@ -16,6 +16,7 @@ import (
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
 	"github.com/kubeneuron/kubeneuron/internal/action"
+	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
 	"github.com/kubeneuron/kubeneuron/internal/cloud"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
@@ -96,6 +97,10 @@ func CompileSnapshot(
 	if err != nil {
 		return nil, fmt.Errorf("spec.approvals.ttl: %w", err)
 	}
+	checkpoint, err := checkpointCoordination(installation.Spec.Safety.CheckpointCoordination)
+	if err != nil {
+		return nil, err
+	}
 
 	// Dry-run is the default and stays on for every mode except Enabled,
 	// which validateRuntimeSupport has already confined to the declared
@@ -113,6 +118,7 @@ func CompileSnapshot(
 			QuiesceForbidResetWhenPresent:    quiesceForbiddenHolders(installation.Spec.Safety.Quiesce),
 			DestructiveExecutionNodeSelector: destructiveNodeSelector(installation.Spec.Safety),
 			TaintDegradedNodes:               degradedNodeTaint(installation.Spec.Safety.TaintDegradedNodes),
+			CheckpointCoordination:           checkpoint,
 		},
 		Approvals: config.Approvals{
 			Channels: append([]string(nil), installation.Spec.Approvals.Channels...),
@@ -353,6 +359,85 @@ func degradedNodeTaint(spec *kubeneuronv1alpha1.TaintDegradedNodesSpec) *config.
 		return nil
 	}
 	return &config.TaintDegradedNodes{Enabled: true, Effect: string(spec.Effect)}
+}
+
+// checkpointCoordination compiles spec.safety.checkpointCoordination, emitting
+// the key ONLY for an installation that explicitly enabled it. An absent block
+// and an explicit enabled=false both compile to nothing at all, exactly like
+// the degraded taint: the snapshot digest of every installation that never
+// asked for coordination is unchanged, and switching it back off removes the
+// whole key.
+//
+// Everything an enabled block says is checked here, not left to the CRD: the
+// waits must be positive, defaultWait may not exceed maxWait, maxWait may not
+// exceed the ceiling, and the allowlist must name at least one namespace. The
+// controller's config.Validate repeats the same checks on the way in, so the
+// same policy is refused at every layer that could be reached first.
+//
+// skipClasses distinguishes absent from empty, as the CRD does: a nil list
+// (the apiserver normally fills it with the CRD default, so this is mostly the
+// path for objects that bypassed admission defaulting) becomes
+// checkpoint.DefaultSkipClasses, while an explicit list, including an explicit
+// empty one, is taken as written. The compiled key is always emitted, so the
+// controller sees the resolved list and never re-defaults it.
+func checkpointCoordination(spec *kubeneuronv1alpha1.CheckpointCoordinationSpec) (*config.CheckpointCoordination, error) {
+	if spec == nil || !spec.Enabled {
+		return nil, nil
+	}
+	defaultWait, err := configDuration(spec.DefaultWait, "5m")
+	if err != nil {
+		return nil, fmt.Errorf("spec.safety.checkpointCoordination.defaultWait: %w", err)
+	}
+	maxWait, err := configDuration(spec.MaxWait, "15m")
+	if err != nil {
+		return nil, fmt.Errorf("spec.safety.checkpointCoordination.maxWait: %w", err)
+	}
+	if maxWait > config.CheckpointMaxWaitCeiling {
+		return nil, fmt.Errorf("spec.safety.checkpointCoordination.maxWait %v exceeds the %v ceiling",
+			maxWait.Std(), config.CheckpointMaxWaitCeiling.Std())
+	}
+	if defaultWait > maxWait {
+		return nil, fmt.Errorf("spec.safety.checkpointCoordination.defaultWait %v exceeds maxWait %v",
+			defaultWait.Std(), maxWait.Std())
+	}
+	namespaces := normalizedStrings(spec.Namespaces)
+	if len(namespaces) == 0 {
+		return nil, fmt.Errorf("spec.safety.checkpointCoordination.namespaces must name the namespaces allowed to opt in; an enabled policy without an allowlist is rejected")
+	}
+	skip := []types.ProblemClass{}
+	if spec.SkipClasses == nil {
+		skip = checkpoint.DefaultSkipClasses()
+	}
+	for _, class := range normalizedStrings(spec.SkipClasses) {
+		skip = append(skip, types.ProblemClass(class))
+	}
+	return &config.CheckpointCoordination{
+		Enabled:     true,
+		DefaultWait: defaultWait,
+		MaxWait:     maxWait,
+		SkipClasses: skip,
+		Namespaces:  namespaces,
+	}, nil
+}
+
+// normalizedStrings trims, drops blanks, de-duplicates and sorts, so two
+// spellings of the same list compile to one digest.
+func normalizedStrings(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	var out []string
+	for _, item := range in {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, dup := seen[item]; dup {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // quiesceForbiddenHolders normalizes the declared process names, dropping blanks

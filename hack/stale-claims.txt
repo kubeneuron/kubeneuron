@@ -21,6 +21,10 @@ six CRDs
 unfinished (KubeNeuron )?runtime
 preview profile
 child-resource status is still
+# The source tree moved to the v0.6.0 candidate pins (unpublished); the
+# public docs must say "latest published release is v0.5.0", not that this
+# tree pins it.
+in this tree (still )?pins? v0\.5\.0
 
 # --- vendor support claims -------------------------------------------------
 # The second category in this file: claims that are not yet true. Shipping

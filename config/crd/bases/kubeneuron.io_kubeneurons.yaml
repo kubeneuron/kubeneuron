@@ -708,6 +708,80 @@ spec:
                   SafetySpec holds execution limits. ExecutionMode defaults to DryRun in the
                   operator, even when omitted from the CR.
                 properties:
+                  checkpointCoordination:
+                    description: |-
+                      CheckpointCoordination optionally warns opted-in workloads before a
+                      disruption and waits, for a bounded time, for them to checkpoint.
+
+                      Omitted means off. Waiting is a change to how every disruption step
+                      behaves, so it must never arrive by default with an upgrade.
+                    properties:
+                      defaultWait:
+                        default: 5m
+                        description: DefaultWait is granted to an opted-in workload
+                          that requests nothing.
+                        type: string
+                      enabled:
+                        default: false
+                        description: |-
+                          Enabled turns coordination on. Default false, and false is also what an
+                          absent block means: no disruption waits for anything until somebody
+                          asks it to.
+                        type: boolean
+                      maxWait:
+                        default: 15m
+                        description: |-
+                          MaxWait is the hard ceiling on any wait. A workload annotation can only
+                          shorten it, and the whole installation cannot raise it above 30m.
+                        type: string
+                      namespaces:
+                        description: |-
+                          Namespaces is the explicit allowlist of namespaces whose workloads may
+                          opt in. Required when enabled, so an untrusted tenant fleet is excluded
+                          without turning the feature off for the trusted one.
+                        items:
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        maxItems: 256
+                        type: array
+                        x-kubernetes-list-type: set
+                      skipClasses:
+                        default:
+                        - fell-off-bus
+                        - gpu-lost
+                        description: |-
+                          SkipClasses lists problem classes for which no coordination is
+                          attempted. This is correctness, not an optimization: when the device has
+                          fallen off the bus the job is already dead, and waiting to be polite to
+                          a process that cannot make progress only delays recovery.
+
+                          Omitted defaults to the device-dead classes, fell-off-bus and gpu-lost.
+                          An explicit list replaces the default rather than adding to it, and an
+                          explicit empty list means coordinate for every class.
+                        items:
+                          minLength: 1
+                          type: string
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-type: set
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'checkpointCoordination.enabled requires a non-empty
+                        namespaces allowlist: self-declaration is a trust decision
+                        and is never fleet-wide by default'
+                      rule: '!self.enabled || (has(self.namespaces) && self.namespaces.size()
+                        > 0)'
+                    - message: defaultWait must be a positive duration
+                      rule: '!has(self.defaultWait) || duration(self.defaultWait)
+                        > duration(''0s'')'
+                    - message: maxWait must be a positive duration of at most 30m
+                      rule: '!has(self.maxWait) || (duration(self.maxWait) > duration(''0s'')
+                        && duration(self.maxWait) <= duration(''30m''))'
+                    - message: defaultWait must not exceed maxWait
+                      rule: '!has(self.defaultWait) || !has(self.maxWait) || duration(self.defaultWait)
+                        <= duration(self.maxWait)'
                   destructiveExecution:
                     description: |-
                       DestructiveExecution is the only way to reach executionMode Enabled.

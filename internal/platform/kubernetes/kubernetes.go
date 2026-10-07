@@ -1720,7 +1720,9 @@ func (p *Platform) waitDrained(ctx context.Context, node string, opts platform.D
 	}
 }
 
-// NodeWorkloads lists pods on the node.
+// NodeWorkloads lists pods on the node, each with its live UID, a copy of its
+// annotations so the checkpoint protocol can decide about the exact instance
+// that was listed, and the drain exclusion Drain itself would apply to it.
 func (p *Platform) NodeWorkloads(ctx context.Context, node string) ([]platform.Workload, error) {
 	pods, err := p.nodePods(ctx, node)
 	if err != nil {
@@ -1729,13 +1731,29 @@ func (p *Platform) NodeWorkloads(ctx context.Context, node string) ([]platform.W
 	out := make([]platform.Workload, 0, len(pods))
 	for i := range pods {
 		out = append(out, platform.Workload{
-			Name:      pods[i].Name,
-			Namespace: pods[i].Namespace,
-			Kind:      "Pod",
-			UsesGPU:   podUsesGPU(&pods[i]),
+			Name:           pods[i].Name,
+			Namespace:      pods[i].Namespace,
+			Kind:           "Pod",
+			UsesGPU:        podUsesGPU(&pods[i]),
+			DrainExclusion: drainExclusion(&pods[i]),
+			UID:            string(pods[i].UID),
+			Annotations:    copyAnnotations(pods[i].Annotations),
 		})
 	}
 	return out, nil
+}
+
+// copyAnnotations returns a map sharing no memory with in, and nil for an
+// empty one so a pod without annotations reads the same as one with none.
+func copyAnnotations(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // EvictWorkload evicts a single pod (targeted restart, e.g. XID 94).
@@ -1833,20 +1851,28 @@ func unmanagedPod(pod *corev1.Pod) bool {
 }
 
 func skipDuringDrain(pod *corev1.Pod, force bool) bool {
+	return !drainExclusion(pod).Eligible(force)
+}
+
+// drainExclusion classifies a pod the way Drain decides whether to evict it,
+// and is what NodeWorkloads publishes so the checkpoint pre-phase asks exactly
+// the pods the drain will then evict. The force decision itself is
+// platform.DrainExclusion.Eligible, shared with the drain, not repeated here.
+func drainExclusion(pod *corev1.Pod) platform.DrainExclusion {
 	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
-		return true
+		return platform.DrainExclusionTerminal
 	}
 	if _, isMirror := pod.Annotations[corev1.MirrorPodAnnotationKey]; isMirror {
-		return true
+		return platform.DrainExclusionInfrastructure
 	}
 	ref := metav1.GetControllerOf(pod)
 	if ref != nil && ref.Kind == "DaemonSet" {
-		return true
+		return platform.DrainExclusionInfrastructure
 	}
-	if ref == nil && !force {
-		return true
+	if ref == nil {
+		return platform.DrainExclusionUnmanaged
 	}
-	return false
+	return platform.DrainEvictable
 }
 
 // Init containers are walked too, not only regular ones.

@@ -9,6 +9,128 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+## [v0.6.0] - 2026-10-07
+
+Checkpoint coordination, Phase 1. **Release status: prepared, not
+published.** The source defaults in this tree (the `config/default`
+operator image, the Helm chart `version`/`appVersion`/image tag, and the
+sample controller and agent images) are set to v0.6.0 so that the tag and
+source users consume what the tag describes; the public `v0.6.0` tag, images,
+install manifest, and release assets do **not** yet exist, and the latest
+published release remains v0.5.0. The feature has been exercised by unit
+tests, the full CPU-only kind integration suite (85 CEL checks and the smoke
+suite), and the dual-store (SQLite and PostgreSQL) upgrade/rollback
+rehearsal, including the no-rollout check described below; the current
+candidate — which carries later checkpoint safety fixes and the
+release-pipeline repairs below — passed those local full gates and the
+rehearsal on 2026-10-05. That evidence is CPU-only kind with synthetic
+accelerator data. On 2026-10-07 the same candidate also passed the full AWS
+hardware harness (`hack/hw-e2e.sh`, every phase from `preflight` through
+`test-destructive` and `teardown`) on a temporary EKS `g4dn.xlarge` /
+Tesla T4 cluster (GPU operator v25.3.4, DCGM 4.3.1), with the teardown
+sweep leaving no cloud resources behind; that run validates the shared
+agent/controller runtime and the existing harness against injected faults.
+It did not include an opted-in checkpointing Pod: no GPU hardware run and no
+real checkpointing workload has exercised the checkpoint coordination
+feature, and no such claim is made.
+
+### Added
+
+- `spec.safety.checkpointCoordination`, **default off**: an opt-in,
+  deadline-bounded coordination pre-phase on `Drain` and `EvictGPUWorkload`.
+  A Pod that carries `kubeneuron.io/checkpoint: "true"` in an allowlisted
+  namespace is told, through five `kubeneuron.io/checkpoint-*` annotations
+  patched onto its own Pod, that a disruption is coming and by when; the
+  step waits for it to acknowledge (exit, or patch
+  `kubeneuron.io/checkpoint-state: complete:<incident>`, bound to the
+  `checkpoint-incident` it read off its own Pod, with rights it already
+  holds; a plain `complete` or another incident's value is not an
+  acknowledgement) or for the deadline, then disrupts exactly as before. An enabled block
+  must name an explicit `namespaces` allowlist; `defaultWait` (5m) and
+  `maxWait` (15m, ceiling 30m) are policy, and a workload's
+  `checkpoint-max-wait` request can only shorten its own window: each Pod
+  is stamped with its own deadline, and the step waits until the latest one
+  in force. `skipClasses`
+  defaults to the device-dead classes (`fell-off-bus`, `gpu-lost`). The CRD,
+  the operator's snapshot compiler and the controller's runtime-config
+  install each refuse an unbounded or allowlist-less policy.
+  ([design and implementation record](docs/checkpoint-coordination-design.md))
+- Two metrics with closed label sets and one deferral reason:
+  `kubeneuron_checkpoint_requests_total{outcome}` (`acknowledged`, `exited`,
+  `expired`, `unreachable`, `skipped`; `unreachable` and `exited` include
+  workloads no request ever reached, and `unreachable` also covers a
+  workload still open when the coordination budget ran out or the step was
+  cancelled before its own stamped deadline), `kubeneuron_checkpoint_wait_seconds`
+  (per workload, elapsed from the durable `checkpoint-requested-at` on the
+  Pod to settlement, so a request resumed after a restart measures its whole
+  window rather than only the resuming step's sleep; it includes near-zero
+  observations for requests that settled on the first look), and
+  `kubeneuron_destructive_steps_deferred_total{reason="checkpoint_wait"}`
+  for steps that actually paused. Two dashboard panels.
+- Four server-side CEL admission cases for the block's bounds in the kind
+  integration harness (85 cases total).
+- `docs/security-review-v0.6.0.md`, a threat and RBAC review of the feature
+  ahead of the release.
+
+### Changed
+
+- **RBAC.** The static operator ClusterRole (`config/rbac/operator_role.yaml`
+  and the Helm chart) gains `patch` on core `pods`, unconditionally, so the
+  operator can delegate it. The managed controller ClusterRole carries
+  `patch` on `pods` **only while the policy is enabled**; an omitted or
+  disabled policy keeps exactly `get, list, watch`. The controller confines
+  the patch in code to the five request keys, on Pods in allowlisted
+  namespaces, on the incident's node, after re-checking the live Pod's UID,
+  through a JSON Patch whose `test` operations re-assert all of that.
+- `platform.Workload` carries the listed Pod's UID and a copy of its
+  annotations; the Kubernetes platform implements the optional
+  `WorkloadCheckpointer`, bare metal does not (counted `skipped`).
+- **Release pipeline.** The release workflow no longer rewrites the chart
+  and kustomize pins in the runner at release time; a `source-metadata` job
+  fails the run before any image is pushed unless the tagged source already
+  carries the tag's version in the kustomize operator image, the Helm
+  chart `version`/`appVersion`/image tag and its rendered Deployment, the
+  sample controller and agent images, and a CHANGELOG heading. Images are
+  pushed and signed only after that check and the upgrade/rollback
+  rehearsal both pass; the GitHub release is created as a draft, verified
+  as a draft by `hack/verify-release.sh`, and promoted to a published
+  release by a final job only after that verification passes.
+- **Upgrade rehearsal.** `hack/kind-upgrade-rollback.sh` now proves, rather
+  than states, that enabling and disabling `checkpointCoordination` rolls or
+  restarts no controller or agent Pod: it snapshots every managed Pod's UID
+  and container restart counts before the policy is touched and asserts
+  them unchanged after enable and again after disable. The 2026-09-29/30
+  rehearsal run predates this assertion; the 2026-10-05 rerun on the
+  current candidate checked it on SQLite and PostgreSQL.
+
+### Safety boundaries (what the feature cannot do)
+
+- A workload may influence how it is disrupted, never whether or how late:
+  the wait is once per step, bounded by policy and by the step's own timeout
+  minus a reserve for the disruption, and the deadline is stamped on the Pod
+  as an absolute time so a controller restart resumes or expires it rather
+  than granting a new one. Expiry is not a step failure and never escalates.
+  The reserve is kept by construction: the whole pre-phase, its audit rows
+  included, runs under a coordination context that ends with the budget and
+  borrows nothing from the step's remaining time (a row whose turn comes
+  after the budget is spent is dropped and logged); every stamped deadline
+  is measured from the moment that window opened, before the listing, so a
+  slow listing or patch can never promise a Pod time past the window.
+- No webhook, callback, exec, sidecar, or new workload credential. The
+  controller opens no connection to a workload.
+- Every failure on the path (patch, read, listing, conflict, cancellation)
+  is counted in the closed `checkpoint_requests_total` outcomes and
+  proceeds; coordination cannot block or fail a remediation. The audit rows
+  that describe it are attempted under the same bounded coordination
+  context, so a row whose turn comes after the budget is spent (including
+  the `skipped` row of a step with no budget at all) may be dropped and
+  logged; the metrics still record every outcome.
+- Coordination acts on the Pods listed when the step starts. It is a
+  bounded, best-effort courtesy, not a guarantee for Pods that appear after
+  discovery.
+- Phase 2 (advisory notice at approval park, `checkpoint-group` gang scope,
+  training-operator adapters) is not implemented.
+
 ## [v0.5.0] - 2026-09-20
 
 The GPU Runtime Contract Lifecycle: versioned, read-only runtime contract

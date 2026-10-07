@@ -448,10 +448,17 @@ func (c *Controller) executeStep(ctx context.Context, inc *types.Incident, step 
 	if (c.simulating(ctx, inc) || c.currentRuntimeDryRun()) &&
 		(!def.Compensating || !c.hasRecordedAcceleratorStackQuiesce(ctx, inc)) {
 		now := time.Now()
+		output := fmt.Sprintf("DRY-RUN: would execute %s on %s", step.Action, inc.Target.Node)
+		if def.Kind == action.KindPlatform {
+			// A simulated disruption step may add a read-only projection of what
+			// checkpoint coordination would have asked. It patches nothing, waits
+			// for nothing, and counts nothing; see checkpointDryRunProjection.
+			output += c.checkpointDryRunProjection(ctx, inc, def.Op, step)
+		}
 		return &types.ActionResult{
 			ActionID:   actionID(inc),
 			OK:         true,
-			Output:     fmt.Sprintf("DRY-RUN: would execute %s on %s", step.Action, inc.Target.Node),
+			Output:     output,
 			StartedAt:  now,
 			FinishedAt: now,
 		}, nil
@@ -507,6 +514,12 @@ func (c *Controller) executePlatformStep(ctx context.Context, inc *types.Inciden
 	}
 	node := inc.Target.Node
 	reason := cordonReason(inc)
+	// The checkpoint coordination pre-phase of the two disruption steps. It
+	// runs inside this step's own goroutine and budget, returns no error, and
+	// changes nothing about the disruption that follows: a workload that opted
+	// in is told and given a bounded deadline, then drained or evicted exactly
+	// as before. On a disabled policy (the default) it is a single boolean.
+	c.coordinateCheckpoint(ctx, inc, step, op)
 	switch op {
 	case "cordon":
 		if err := c.cordonForIncident(ctx, inc, node, reason); err != nil {
@@ -544,10 +557,7 @@ func (c *Controller) executePlatformStep(ctx context.Context, inc *types.Inciden
 			// Off by default, and stated per step, so evicting somebody's
 			// unmanaged work is a decision written down in a playbook rather
 			// than a default nobody chose.
-			// Validate rejects an unparseable value at load, so the error here
-			// is only reachable for an absent key: that is the default, and the
-			// default is off.
-			Force: func() bool { v, _ := strconv.ParseBool(step.Params["force"]); return v }(),
+			Force: drainForce(step),
 		})
 		if err != nil {
 			return nil, err
@@ -597,6 +607,20 @@ func (c *Controller) executePlatformStep(ctx context.Context, inc *types.Inciden
 	default:
 		return nil, fmt.Errorf("unknown platform action %q", op)
 	}
+}
+
+// drainForce reads a drain step's params.force. It is the one reading of that
+// key, shared by the drain itself and by the checkpoint pre-phase that
+// predicts what the drain will evict, so the two can never disagree.
+// Validate rejects an unparseable value at load, so the parse error here is
+// only reachable for an absent key: that is the default, and the default is
+// off.
+func drainForce(step *playbook.Step) bool {
+	if step == nil {
+		return false
+	}
+	v, _ := strconv.ParseBool(step.Params["force"])
+	return v
 }
 
 // cordonForIncident takes this incident's own hold on the node.

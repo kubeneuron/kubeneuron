@@ -61,9 +61,17 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch", "patch"]
+  # `patch` on pods exists so the operator can delegate it: the managed
+  # controller ClusterRole carries it only when
+  # spec.safety.checkpointCoordination is enabled, and RBAC escalation
+  # prevention means the operator must hold a verb before it can grant one.
+  # This static role cannot be conditional, so it holds the verb whether or
+  # not any installation currently asks for it. The operator itself never
+  # patches a Pod; the controller's use is confined in code to the
+  # kubeneuron.io/checkpoint-* request annotations on allowlisted namespaces.
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "patch"]
   - apiGroups: [""]
     resources: ["pods/eviction"]
     verbs: ["create"]

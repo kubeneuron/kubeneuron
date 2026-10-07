@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
@@ -134,6 +135,62 @@ func TestInstallRuntimeConfigIsAtomicAndZeroTimingsKeepCurrent(t *testing.T) {
 	}
 	if rc == rc2 {
 		t.Fatal("a mutation must install a NEW snapshot, never edit the old one")
+	}
+}
+
+// The checkpoint policy travels in the same immutable snapshot as every other
+// reloadable setting: an invalid enabled policy is refused whole and leaves the
+// previous generation in force, a disabled one is the zero value, and an
+// installed copy shares no memory with the caller.
+func TestInstallRuntimeConfigRejectsInvalidCheckpointPolicyAndCopiesValidOnes(t *testing.T) {
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	c := New(st, st, engine, nil, nil, nil, nil, &recordingNotifier{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	valid := checkpoint.Policy{
+		Enabled: true, DefaultWait: time.Minute, MaxWait: 2 * time.Minute,
+		Namespaces: []string{"training"}, SkipClasses: []types.ProblemClass{types.ClassFellOffBus},
+	}
+	if err := c.InstallRuntimeConfig(RuntimeConfig{Engine: engine, Checkpoint: valid}); err != nil {
+		t.Fatalf("a valid policy must install: %v", err)
+	}
+	valid.Namespaces[0] = "mutated"
+	valid.SkipClasses[0] = "mutated"
+	installed := c.runtimeConfig(context.Background()).Checkpoint
+	if !installed.Enabled || installed.Namespaces[0] != "training" || installed.SkipClasses[0] != types.ClassFellOffBus {
+		t.Fatalf("installed policy aliases caller memory or lost values: %+v", installed)
+	}
+
+	for name, bad := range map[string]checkpoint.Policy{
+		"no allowlist":      {Enabled: true, DefaultWait: time.Minute, MaxWait: 2 * time.Minute},
+		"default above max": {Enabled: true, DefaultWait: 3 * time.Minute, MaxWait: 2 * time.Minute, Namespaces: []string{"a"}},
+		"above ceiling":     {Enabled: true, DefaultWait: time.Minute, MaxWait: checkpoint.MaxWaitCeiling + 1, Namespaces: []string{"a"}},
+		"zero waits":        {Enabled: true, Namespaces: []string{"a"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := c.InstallRuntimeConfig(RuntimeConfig{Engine: engine, Checkpoint: bad}); err == nil {
+				t.Fatal("an invalid enabled checkpoint policy must be refused")
+			}
+			if got := c.runtimeConfig(context.Background()).Checkpoint; !got.Enabled || got.Namespaces[0] != "training" {
+				t.Fatalf("a refused install must leave the previous policy in force, got %+v", got)
+			}
+		})
+	}
+
+	// The zero value is disabled and always installs, whatever else is set.
+	if err := c.InstallRuntimeConfig(RuntimeConfig{Engine: engine}); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.runtimeConfig(context.Background()).Checkpoint; got.Enabled || got.Namespaces != nil {
+		t.Fatalf("a snapshot without a checkpoint policy must be disabled, got %+v", got)
 	}
 }
 

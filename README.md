@@ -73,9 +73,19 @@ temporary EKS `g4dn.xlarge` cluster on 2026-09-13, and its focused
 cluster on 2026-09-14 with the teardown sweep completing on its own; that
 harness exercises the shared agent/controller runtime and does not call the
 v0.5 routes or commands, so v0.5.0 claims no GPU hardware qualification of its
-own surfaces. The manifests and chart in this tree pin v0.5.0; the tag,
-published images, and release assets are available from the
+own surfaces. v0.5.0 is the latest **published** release; its tag, images,
+and release assets are available from the
 [GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.5.0).
+The manifests, Helm chart, and samples in this source tree carry the
+**v0.6.0 candidate** pins (checkpoint coordination, Phase 1; see
+[CHANGELOG.md](CHANGELOG.md)): that version is prepared in source but is not
+yet tagged or published, its images and release assets do not yet exist,
+and it claims no GPU hardware validation of the checkpoint feature (the
+candidate did pass the full AWS hardware harness on a temporary EKS
+`g4dn.xlarge` cluster on 2026-10-07, which exercised the shared runtime, not
+checkpoint coordination). Installing from this tree's
+defaults before the v0.6.0 release is published resolves images that are
+not there; install v0.5.0 from its release assets instead.
 See also the [REST](docs/reference-api.md) and [CLI](docs/reference-cli.md)
 references, the [upgrade notes](docs/upgrade.md), and the
 [security review](docs/security-review-v0.5.0.md).
@@ -178,7 +188,7 @@ v1.33.12; multi-node kind needs raised inotify limits
 (`fs.inotify.max_user_instances=512`, `max_user_watches=524288`). The harness
 builds static local images and creates a digest-pinned Kubernetes v1.33.12
 kind cluster with one control plane and two workers (`WORKER_NODES`
-configurable), runs the 81-case CEL admission matrix, and checks operator
+configurable), runs the 85-case CEL admission matrix, and checks operator
 readiness, all 11 ownership references, collision failure/non-adoption,
 recovery, least-privilege RBAC, durable registration-readiness loss/recovery,
 an acknowledged no-op reconciliation, and preservation of the unowned TLS

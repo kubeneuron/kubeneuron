@@ -358,6 +358,131 @@ or a dashboard data point as hardware qualification. Qualification, rollback
 compensation, and driver/runtime support are deployment-specific evidence that
 must be recorded by the adapter and its operating procedure.
 
+## Checkpoint coordination (opt-in, v0.6.0 scope, unreleased)
+
+> Implemented on `main`; the v0.6.0 candidate is prepared in source (this
+> tree's manifests, chart, and samples carry the v0.6.0 pins) but is not yet
+> tagged or published. The latest published release, v0.5.0, does not
+> contain it, and it has not been exercised on GPU hardware.
+
+`spec.safety.checkpointCoordination` lets opted-in Pods be told, and given a
+bounded deadline, before a `Drain` or `EvictGPUWorkload` step disrupts them.
+The workload protocol is in [playbook authoring](playbook-authoring.md); the
+design and its safety argument in
+[checkpoint coordination](checkpoint-coordination-design.md) and the
+[v0.6.0 security review](security-review-v0.6.0.md). This section is the
+operator's rollout guide.
+
+**What enabling it costs.** Two things, both visible:
+
+- The managed controller ClusterRole gains `patch` on core `pods`,
+  cluster-wide, because RBAC cannot narrow a patch to an annotation prefix or
+  a namespace list. The controller confines itself in code to the five
+  `kubeneuron.io/checkpoint-*` request keys, on Pods in the allowlisted
+  namespaces, on the incident's node, and only after re-checking the live
+  Pod's UID. Disabling the policy removes the verb on the next reconcile.
+- Every `Drain` and `EvictGPUWorkload` on a node with an eligible Pod may
+  now pause for up to `maxWait` (default 15m, ceiling 30m) before
+  disrupting, once per step. The wait also fits inside the step's own
+  `timeout` minus a reserve kept for the disruption, so it cannot make a step
+  time out; a step whose timeout leaves nothing after the reserve does not
+  wait at all.
+
+**Safe enablement.**
+
+1. Start in `DryRun`. A simulated disruption step reports, in its audited
+   output, how many Pods a real run would have asked — with no patch, no
+   wait, and no metric. That confirms the allowlist and the opt-in
+   annotations are where you think they are.
+2. Allowlist narrowly. `namespaces` is required and explicit; there is no
+   selector and no wildcard. Add the trusted training namespaces, not the
+   fleet. An enabled block without an allowlist is rejected by the CRD, the
+   operator, and the controller, and a rejected policy leaves the previous
+   configuration in force.
+3. Keep `skipClasses` at its default (`fell-off-bus`, `gpu-lost`) unless you
+   have a reason: when the device is already gone there is no job left to
+   warn, and waiting only delays recovery. An explicit list replaces the
+   default; an explicit empty list coordinates for every class.
+4. Set `maxWait` from your jobs' real checkpoint time, and let workloads
+   request less with `kubeneuron.io/checkpoint-max-wait`. A workload can
+   never request more.
+5. Confirm the RBAC change landed: the `<name>-controller` ClusterRole's
+   `pods` rule should read `get, list, watch, patch` after the reconcile.
+   Enabling the policy changes the compiled configuration digest; the
+   controller picks the new snapshot up from its mounted ConfigMap without a
+   restart, and refuses an invalid one while keeping the previous in force.
+
+**Observing it.** Two metrics and one deferral reason, all with bounded
+labels; see [metrics](reference-metrics.md) and the two panels in the shipped
+dashboard.
+
+- `kubeneuron_checkpoint_requests_total{outcome}`: `acknowledged`
+  (explicit `checkpoint-state: complete:<incident>`, bound to the
+  `checkpoint-incident` stamped on the Pod; a plain `complete` or an older
+  incident's value does not count), `exited` (terminated or gone,
+  which also covers a crash and a Pod gone before it could be asked),
+  `expired` (its own stamped deadline passed unanswered), `unreachable`
+  (could not be stamped or read, or still open when the coordination budget
+  ran out or the step was cancelled before its deadline, which includes
+  cases where no request ever reached the Pod), and `skipped` (one per
+  disruption step where no request went out: skipped class, no eligible Pod,
+  no budget, or a platform without the capability). `acknowledged /
+  (acknowledged + expired)` is the share of coordinated disruptions where the
+  job was told and said "done" in time.
+- `kubeneuron_checkpoint_wait_seconds`: elapsed time from each request's
+  durable `checkpoint-requested-at` on the Pod to its settlement. A request
+  resumed after a controller restart keeps its original request time, so the
+  observation is the whole window the Pod was given, not only the time the
+  resuming step slept; it includes near-zero observations for requests that
+  settled on the first look. Observations are bounded to 0..30m, so a stale
+  or tampered `checkpoint-requested-at` cannot push one past the histogram's
+  range. A p90 far under `maxWait` means
+  the ceiling is generous; a cliff at the ceiling means jobs are being cut
+  off.
+- `kubeneuron_destructive_steps_deferred_total{reason="checkpoint_wait"}`:
+  steps that really paused before disrupting.
+
+The incident's audit trail carries the record under the `system` actor:
+`checkpoint: requested N workload(s) …; deadline …`, `checkpoint: no request
+in force for …`, `checkpoint: skipped (…)`, and `checkpoint: complete after …:
+…; proceeding with platform.drain`. Rows name at most five Pods and count the
+rest. The rows are written under the same bounded coordination budget as the
+requests themselves, never under the step's remaining time: a row whose turn
+comes after the budget is spent (typically the `complete after` row of a wait
+that ran the budget out) is dropped and logged as `checkpoint audit append
+failed`, while the metrics still count every outcome. The `skipped (step
+budget … leaves nothing to wait with …)` row of a step too short to
+coordinate at all is attempted under an already-cancelled context for the
+same reason and may be missing from the trail; the `skipped` count is not.
+
+**Behavior and failure modes to expect.**
+
+- Expiry is not a step failure and never escalates. A job that never answers
+  costs one bounded wait, then is disrupted exactly as before.
+- A patch or read failure, a listing failure, or a bare-metal platform never
+  blocks the step: the workload is counted `unreachable` or the step
+  `skipped`, and the disruption proceeds within its own budget.
+- The deadline is stamped on the Pod as an absolute time. A controller
+  restart mid-wait resumes the same window or finds it expired; it never
+  grants a fresh one. A Pod that already carries a live request from another
+  incident is not re-stamped; its existing deadline is honored, capped to
+  this step's own.
+- Coordination acts on the Pods listed when the step starts. A Pod that
+  appears afterwards is not asked, and a Pod replaced during the window
+  (same name, new UID) is counted `exited` and its replacement is not
+  re-requested. It is a best-effort courtesy, not a guarantee.
+- The Downward API file refreshes on the kubelet's sync loop, not instantly;
+  very short waits may be consumed by that delay.
+
+**Disabling and rollback.** Set `enabled: false` or remove the block. The
+compiled configuration drops the policy, the controller stops waiting on the
+next config reload, and the operator removes `patch` from the controller's
+`pods` rule on the next reconcile. Request annotations already stamped on
+Pods are durable history: they are harmless, nothing reads them once the
+policy is off, and they need no cleanup. Disable the policy before rolling
+back to a release that does not understand it; see
+[upgrade](upgrade.md#v060-checkpoint-coordination-notes).
+
 ## PostgreSQL workflow store (HA installations)
 
 Setting `spec.workflowStore.type: Postgres` with a DSN Secret

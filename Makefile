@@ -202,13 +202,16 @@ test-integration-kind: build
 	KIND_BIN="$(KIND)" KUBECTL_BIN="$(KUBECTL)" \
 	./hack/kind-integration.sh
 
-# The v0.4.0 -> HEAD -> v0.4.0 (images only) -> HEAD rehearsal from
+# The v0.5.0 -> HEAD -> v0.5.0 (images only) -> HEAD rehearsal from
 # docs/upgrade.md, on one disposable kind cluster, for BOTH stores at once
-# (SQLite PVC and a throwaway in-cluster PostgreSQL). It seeds a v0.4 incident,
-# drives a v0.5 runtime contract qualification to ReadyForApproval, rolls the
-# images back, proves the old binary hides but keeps the rows, re-upgrades,
-# and proves the rows and their hash-chained audit read back byte-identical
-# and still accept observations. CPU-only: synthetic accelerator evidence over
+# (SQLite PVC and a throwaway in-cluster PostgreSQL). It seeds a baseline
+# incident, drives a v0.5 runtime contract qualification to ReadyForApproval
+# on HEAD, enables and disables the v0.6 checkpoint coordination policy and
+# proves the managed controller ClusterRole holds pods patch only while it is
+# enabled, rolls the images back with the policy off, proves the v0.5.0
+# binary reads the rows back byte-identical, re-upgrades, and proves the rows
+# and their hash-chained audit read back byte-identical and still accept
+# observations. CPU-only: synthetic accelerator evidence over
 # the real agent identity, no GPU claim. Pulls the published baseline images
 # from GHCR, so it is the one kind gate that is not offline. Deletes its
 # cluster on exit unless KEEP_CLUSTER=1. Docker group membership required

@@ -67,6 +67,66 @@ func TestControllerRBACTargetsManagedServiceAccount(t *testing.T) {
 	}
 }
 
+// TestControllerRBACPodPatchFollowsCheckpointPolicy pins the one privilege
+// checkpoint coordination costs: `patch` on core pods is held ONLY by an
+// installation that explicitly enabled spec.safety.checkpointCoordination. An
+// omitted block and an explicit enabled=false both keep the exact read-only
+// verbs, and nothing else about the role changes in either direction.
+func TestControllerRBACPodPatchFollowsCheckpointPolicy(t *testing.T) {
+	readOnly := []string{"get", "list", "watch"}
+	withPatch := []string{"get", "list", "watch", "patch"}
+	cases := []struct {
+		name   string
+		policy *kubeneuronv1alpha1.CheckpointCoordinationSpec
+		want   []string
+	}{
+		{name: "omitted", policy: nil, want: readOnly},
+		{name: "disabled", policy: &kubeneuronv1alpha1.CheckpointCoordinationSpec{Enabled: false, Namespaces: []string{"ml"}}, want: readOnly},
+		{name: "enabled", policy: &kubeneuronv1alpha1.CheckpointCoordinationSpec{Enabled: true, Namespaces: []string{"ml"}}, want: withPatch},
+	}
+	baseline := controllerClusterRole(testKubeNeuron())
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			installation := testKubeNeuron()
+			installation.Spec.Safety.CheckpointCoordination = tc.policy
+			role := controllerClusterRole(installation)
+			if len(role.Rules) != len(baseline.Rules) {
+				t.Fatalf("ClusterRole has %d rules, want %d: the pod rule changes verbs, never gains a sibling", len(role.Rules), len(baseline.Rules))
+			}
+			var podRules []rbacv1.PolicyRule
+			for _, rule := range role.Rules {
+				if containsString(rule.Resources, "pods") {
+					podRules = append(podRules, rule)
+				}
+			}
+			if len(podRules) != 1 {
+				t.Fatalf("controller ClusterRole has %d pod rules, want exactly 1: %#v", len(podRules), podRules)
+			}
+			if !reflect.DeepEqual(podRules[0].Verbs, tc.want) {
+				t.Fatalf("pod verbs = %v, want exactly %v", podRules[0].Verbs, tc.want)
+			}
+			if !reflect.DeepEqual(podRules[0].APIGroups, []string{""}) || !reflect.DeepEqual(podRules[0].Resources, []string{"pods"}) || len(podRules[0].ResourceNames) != 0 {
+				t.Fatalf("pod rule = %#v, want core pods with no resourceNames", podRules[0])
+			}
+			// Every other rule is byte-for-byte the disabled baseline.
+			for i, rule := range role.Rules {
+				if containsString(rule.Resources, "pods") {
+					continue
+				}
+				if !reflect.DeepEqual(rule, baseline.Rules[i]) {
+					t.Errorf("rule %d = %#v, want unchanged %#v", i, rule, baseline.Rules[i])
+				}
+			}
+			// The eviction subresource is untouched by the policy: it is granted
+			// under every policy and never gains a verb.
+			eviction := findRule(role.Rules, "", "pods/eviction")
+			if eviction == nil || !reflect.DeepEqual(eviction.Verbs, []string{"create"}) {
+				t.Fatalf("pods/eviction rule = %#v, want exactly create", eviction)
+			}
+		})
+	}
+}
+
 func TestAgentServiceAccountDisablesImplicitTokenMount(t *testing.T) {
 	account := agentServiceAccount(testKubeNeuron())
 	if account.AutomountServiceAccountToken == nil || *account.AutomountServiceAccountToken {
@@ -84,7 +144,17 @@ func TestOperatorRBACCanReconcilePVCAndDelegateControllerRole(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	required := append([]rbacv1.PolicyRule(nil), controllerClusterRole(testKubeNeuron()).Rules...)
+	// The operator must be able to grant everything the managed controller
+	// role can ever contain (RBAC escalation prevention: you cannot grant what
+	// you do not hold). The widest shape is the enabled checkpoint policy,
+	// whose pod rule carries `patch`, so the static role is checked against
+	// THAT, not against the default-off role: the static file cannot be
+	// conditional, and the operator holds the verb whether or not any
+	// installation currently asks for it.
+	enabled := testKubeNeuron()
+	enabled.Spec.Safety.CheckpointCoordination = &kubeneuronv1alpha1.CheckpointCoordinationSpec{Enabled: true, Namespaces: []string{"ml"}}
+	required := append([]rbacv1.PolicyRule(nil), controllerClusterRole(enabled).Rules...)
+	required = append(required, controllerClusterRole(testKubeNeuron()).Rules...)
 	required = append(required, rbacv1.PolicyRule{
 		APIGroups: []string{""},
 		Resources: []string{"persistentvolumeclaims"},
@@ -111,6 +181,55 @@ func TestOperatorRBACCanReconcilePVCAndDelegateControllerRole(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestHelmOperatorRoleMirrorsStaticRBAC mechanically checks the promise the
+// Helm template makes in its own comment: the chart's operator ClusterRole
+// rules are the rules of config/rbac/operator_role.yaml, in the same order.
+// The template's metadata carries Go-template expressions, so only the
+// ClusterRole document's `rules:` block — plain YAML by construction — is
+// parsed; this is deliberately not a Helm render and asserts nothing about
+// chart semantics beyond that block.
+func TestHelmOperatorRoleMirrorsStaticRBAC(t *testing.T) {
+	static, err := os.ReadFile("../../config/rbac/operator_role.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var operatorRole rbacv1.ClusterRole
+	if err := sigsyaml.Unmarshal(static, &operatorRole); err != nil {
+		t.Fatal(err)
+	}
+	helm, err := os.ReadFile("../../deploy/helm/kubeneuron/templates/rbac.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rulesBlock string
+	for _, doc := range strings.Split(string(helm), "\n---\n") {
+		if !strings.Contains(doc, "kind: ClusterRole\n") {
+			continue
+		}
+		idx := strings.Index(doc, "\nrules:\n")
+		if idx < 0 {
+			t.Fatalf("Helm operator ClusterRole document has no rules block:\n%s", doc)
+		}
+		rulesBlock = doc[idx+1:]
+		break
+	}
+	if rulesBlock == "" {
+		t.Fatal("no ClusterRole document found in the Helm RBAC template")
+	}
+	if strings.Contains(rulesBlock, "{{") {
+		t.Fatalf("Helm operator ClusterRole rules must be plain YAML to be checked against the static role:\n%s", rulesBlock)
+	}
+	var chart struct {
+		Rules []rbacv1.PolicyRule `json:"rules"`
+	}
+	if err := sigsyaml.UnmarshalStrict([]byte(rulesBlock), &chart); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(chart.Rules, operatorRole.Rules) {
+		t.Fatalf("deploy/helm/kubeneuron/templates/rbac.yaml operator ClusterRole rules differ from config/rbac/operator_role.yaml\nhelm:   %#v\nstatic: %#v", chart.Rules, operatorRole.Rules)
 	}
 }
 

@@ -35,7 +35,7 @@ var allDeferralReasons = []string{
 	metrics.DeferNotIdle, metrics.DeferDeviceHolders, metrics.DeferMaintenanceWindow,
 	metrics.DeferNodePaused, metrics.DeferConcurrencyCap, metrics.DeferPlaybookCooldown,
 	metrics.DeferUnarmedAgent, metrics.DeferConfinement, metrics.DeferRecycleNotViable,
-	metrics.DeferGlobalPause, metrics.DeferAcceleratorEvidence,
+	metrics.DeferGlobalPause, metrics.DeferAcceleratorEvidence, metrics.DeferCheckpointWait,
 }
 
 func snapshotDeferrals() map[string]float64 {

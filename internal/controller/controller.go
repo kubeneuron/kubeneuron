@@ -111,6 +111,14 @@ type Controller struct {
 	// cordonReported remembers which stuck cordons have been announced.
 	cordonReported cordonReportedKeys
 
+	// checkpointNow and checkpointPoll are the clock and the observation pace
+	// of the checkpoint coordination pre-phase (checkpoint.go). Both are nil /
+	// zero in production, meaning the wall clock and the default interval;
+	// tests set them so a bounded wait can be driven without sleeping through
+	// it.
+	checkpointNow  func() time.Time
+	checkpointPoll time.Duration
+
 	// operations owns the v0.4.0 durable product workflows.  It is nil only
 	// for legacy/out-of-tree stores that do not implement OperationalStore;
 	// their API surface fails closed instead of keeping workflow state in

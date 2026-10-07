@@ -10,7 +10,7 @@ usage() {
 	cat <<'EOF'
 Usage: hack/kind-integration.sh
 
-Creates a dedicated, digest-pinned kind cluster by default, runs the 81-case
+Creates a dedicated, digest-pinned kind cluster by default, runs the 85-case
 CEL admission matrix, installs locally built KubeNeuron images and the
 operator, and verifies mTLS/token node identity, readiness, ownership
 collisions, non-adoption, recovery, ordered certificate rotation/rollback, and
@@ -2915,7 +2915,7 @@ for crd in "${crd_names[@]}"; do
 		--timeout="${TIMEOUT_SECONDS}s" >/dev/null
 done
 
-note "running the 81-case CEL admission matrix"
+note "running the 85-case CEL admission matrix"
 CEL_ALLOW_CLUSTER_MUTATION=1 KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" bash "$CEL_SCRIPT"
 
 if ((BUILD_IMAGES)); then
@@ -3149,5 +3149,5 @@ if grep -Fq 'real NVML driver not wired yet; using fake driver (skeleton)' <<<"$
 	note "agent explicitly reports its fake NVML skeleton"
 fi
 
-	note "PASS: 81 CEL checks (including the destructive-execution admission gate and the GPUAutonomyPlan envelope rules), scoped RBAC, mTLS plus Pod/node identity rejection, authenticated public API and Alertmanager webhook, manual immutable/versioned routine TLS rotation, explicit dual-leaf emergency recovery, stale-state/plan rejection, failed-leaf and failed-contraction rollback, fresh registration proof, durable readiness loss/recovery, 11 owners, ownership collision/non-adoption/recovery, and acknowledged no-op reconciliation, plus a controller restart mid-playbook with durable approval state and no re-executed step, and a REAL cordon with the janitor's uncordon on an armed worker"
+	note "PASS: 85 CEL checks (including the destructive-execution admission gate, the checkpoint-coordination bounds, and the GPUAutonomyPlan envelope rules), scoped RBAC, mTLS plus Pod/node identity rejection, authenticated public API and Alertmanager webhook, manual immutable/versioned routine TLS rotation, explicit dual-leaf emergency recovery, stale-state/plan rejection, failed-leaf and failed-contraction rollback, fresh registration proof, durable readiness loss/recovery, 11 owners, ownership collision/non-adoption/recovery, and acknowledged no-op reconciliation, plus a controller restart mid-playbook with durable approval state and no re-executed step, and a REAL cordon with the janitor's uncordon on an armed worker"
 note "CPU-only boundary: this validates transport, the tested manual TLS-rotation and leaf-recovery contracts, and Kubernetes workload identity; it also proves operator-issued TLS reissuance for a deleted, operator-owned set; it does not validate expiry-driven renewal timing, emergency CA revocation, NVIDIA, NVML, DCGM, or GPU actions. Remediation is now partly covered: one destructive controller-side step (Cordon) and its janitor run for real against an armed node"

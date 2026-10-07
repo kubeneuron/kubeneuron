@@ -123,6 +123,22 @@ func agentServiceAccount(installation *kubeneuronv1alpha1.KubeNeuron) *corev1.Se
 	}
 }
 
+// controllerPodVerbs is the controller's grant on core pods. The read verbs
+// are what every installation needs to list a node's workloads. `patch` is
+// added ONLY when spec.safety.checkpointCoordination is enabled: it is the one
+// privilege the checkpoint protocol costs (the request annotations are patched
+// onto the workload's own Pod), RBAC cannot narrow a patch to an annotation
+// prefix or to an allowlist of namespaces, and so an installation that never
+// asked for coordination must not hold it. The in-code confinement of that
+// patch lives in internal/platform/kubernetes/checkpoint.go.
+func controllerPodVerbs(installation *kubeneuronv1alpha1.KubeNeuron) []string {
+	verbs := []string{"get", "list", "watch"}
+	if policy := installation.Spec.Safety.CheckpointCoordination; policy != nil && policy.Enabled {
+		verbs = append(verbs, "patch")
+	}
+	return verbs
+}
+
 func controllerClusterRole(installation *kubeneuronv1alpha1.KubeNeuron) *rbacv1.ClusterRole {
 	return &rbacv1.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{
@@ -131,7 +147,7 @@ func controllerClusterRole(installation *kubeneuronv1alpha1.KubeNeuron) *rbacv1.
 		},
 		Rules: []rbacv1.PolicyRule{
 			{APIGroups: []string{""}, Resources: []string{"nodes"}, Verbs: []string{"get", "list", "watch", "patch"}},
-			{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list", "watch"}},
+			{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: controllerPodVerbs(installation)},
 			{APIGroups: []string{""}, Resources: []string{"serviceaccounts"}, ResourceNames: []string{installation.Name + "-agent"}, Verbs: []string{"get"}},
 			{APIGroups: []string{""}, Resources: []string{"pods/eviction"}, Verbs: []string{"create"}},
 			{APIGroups: []string{"apps"}, Resources: []string{"daemonsets"}, ResourceNames: []string{installation.Name + "-agent", installation.Name + "-agent-detect"}, Verbs: []string{"get"}},

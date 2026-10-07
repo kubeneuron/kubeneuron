@@ -51,3 +51,4 @@ nav:
       - Capability matrix (per vendor): reference-capabilities.md
       - Design document: design.md
       - Security review (v0.5.0): security-review-v0.5.0.md
+      - Security review (v0.6.0, unreleased): security-review-v0.6.0.md

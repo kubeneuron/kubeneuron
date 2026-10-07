@@ -2,17 +2,24 @@
 # shellcheck disable=SC2016 # Single-quoted jq programs expand jq, not shell, variables.
 set -Eeuo pipefail
 
-# v0.4.0 -> HEAD -> v0.4.0 (images only) -> HEAD lifecycle rehearsal on kind,
+# v0.5.0 -> HEAD -> v0.5.0 (images only) -> HEAD lifecycle rehearsal on kind,
 # for BOTH workflow stores, with the v0.5 runtime contract qualification rows
-# and their hash-chained audit history as the durable evidence under test.
+# and their hash-chained audit history as the durable evidence under test,
+# and the v0.6 checkpoint coordination policy (new, default off) exercised
+# on HEAD and switched back off before the rollback, as docs/upgrade.md
+# "v0.6.0 checkpoint coordination notes" requires.
 #
-# One disposable kind cluster hosts two v0.4.0 installations side by side —
+# One disposable kind cluster hosts two v0.5.0 installations side by side —
 # `upgrade-sqlite` on the SQLite PVC store and `upgrade-postgres` on a
 # throwaway in-cluster PostgreSQL — under the one cluster-scoped operator, so
 # every step below is performed once for the operator and once per store:
 #
 #   1. install the released BASELINE (official install manifest and the
-#      digest-pinned images from images.txt), seed a v0.4 incident per store;
+#      digest-pinned images from images.txt), seed a baseline incident per
+#      store, and confirm the baseline already serves the v0.5 runtime
+#      contract routes (an empty qualification list, a coverage answer for
+#      the store's node): v0.5.0 shipped them, so nothing below may treat
+#      them as new;
 #   2. upgrade in the documented order (CRDs -> operator -> controller/agent
 #      images) to the locally built HEAD;
 #   3. drive the v0.5 runtime contract lifecycle per store through the public
@@ -20,15 +27,27 @@ set -Eeuo pipefail
 #      posts a synthetic report, coverage reads Exact/FreshCompatible/Full, a
 #      qualification is created and observed to ReadyForApproval, and its
 #      audit chain (create, observe, observe, ready) is snapshotted;
-#   4. roll the controller/agent images back to BASELINE (images only, no
-#      store restore — docs/upgrade.md "Rolling back") and prove the old
-#      binary serves 404 for every runtime-contract route, still serves the
-#      v0.4 incident, and still returns the qualification's audit rows
-#      through its own audit explorer (the rows are in the store, not gone);
-#   5. upgrade to HEAD again and prove the qualification reads back
-#      byte-identical (except the read-time evaluation clock), its audit
-#      chain is byte-identical, and a fresh observation extends that same
-#      chain (prev_hash links to the pre-rollback head) instead of forking.
+#   4. exercise the v0.6 checkpoint coordination policy per store: the
+#      managed `<root>-controller` ClusterRole holds exactly get,list,watch
+#      on core pods while the policy is absent; enabling a short policy
+#      allowlisting that store's own namespace advances the compiled config
+#      digest, goes live on the leader, and grants exactly
+#      get,list,watch,patch; disabling it again advances the digest once
+#      more, goes live, and returns the role to exactly get,list,watch
+#      before any image moves (the documented rollback order). Neither
+#      toggle may roll or restart a Pod: every controller and agent Pod's
+#      UID and container restart counts are snapshotted before the policy is
+#      touched and must be identical after enable and after disable;
+#   5. roll the controller/agent images back to BASELINE (images only, no
+#      store restore — docs/upgrade.md "Rolling back") and prove the v0.5.0
+#      binary still serves the baseline incident, reads the qualification
+#      back byte-identical (except the read-time evaluation clock), lists it
+#      exactly once, answers the coverage routes, returns the same audit
+#      chain, and that the role is still read-only on pods;
+#   6. upgrade to HEAD again and prove the qualification reads back
+#      byte-identical, its audit chain is byte-identical, and a fresh
+#      observation extends that same chain (prev_hash links to the
+#      pre-rollback head) instead of forking.
 #
 # Node layout. The agent DaemonSet runs with hostPID and owns host state under
 # hostPath /var/lib/kube-neuron (its spool), so two installations' agents on
@@ -36,7 +55,7 @@ set -Eeuo pipefail
 # agent crash-loops. The cluster therefore has one control-plane node plus one
 # dedicated worker PER STORE, labeled kubeneuron.io/upgrade-store=<store>;
 # every root object pins its agent there with spec.agent.nodeSelector (a
-# field the v0.4.0 baseline already honours), and that worker is the node
+# field the v0.5.0 baseline already honours), and that worker is the node
 # identity used for the profile, report, coverage, and qualification of that
 # store. The controllers carry no node constraint on kind (no GPU labels).
 #
@@ -50,7 +69,9 @@ set -Eeuo pipefail
 # if the current login predates it.
 #
 # Env:
-#   BASELINE          released tag to start from (default: v0.4.0)
+#   BASELINE          released tag to start from (default: v0.5.0; the
+#                     baseline must already serve the v0.5 runtime-contract
+#                     routes, which the seed step verifies)
 #   STORES            space-separated subset of "sqlite postgres" (default: both)
 #   CLUSTER_NAME      kind cluster (default: kubeneuron-upgrade-rollback;
 #                     created if absent, deleted on exit unless KEEP_CLUSTER=1)
@@ -59,7 +80,7 @@ set -Eeuo pipefail
 #   POSTGRES_IMAGE    throwaway database image (default: docker.io/library/postgres:16-alpine)
 #   KIND_BIN, KUBECTL_BIN, DOCKER_BIN, JQ_BIN  command paths
 
-BASELINE=${BASELINE:-v0.4.0}
+BASELINE=${BASELINE:-v0.5.0}
 RELEASE_REPO=${RELEASE_REPO:-kubeneuron/kubeneuron}
 LOAD_PLATFORM=${LOAD_PLATFORM:-linux/$(go env GOARCH 2>/dev/null || echo amd64)}
 CLUSTER_NAME=${CLUSTER_NAME:-kubeneuron-upgrade-rollback}
@@ -641,7 +662,120 @@ api_code() {
 }
 qual_url() { printf 'http://127.0.0.1:%s/api/v1/runtime-contract-qualifications' "$public_port"; }
 
-# --- baseline install and v0.4 seed ----------------------------------------------
+coverage_url() { printf 'http://127.0.0.1:%s/api/v1/nodes/%s/runtime-contract?vendor=nvidia' "$public_port" "$1"; }
+fleet_coverage_url() { printf 'http://127.0.0.1:%s/api/v1/runtime-contracts/coverage?vendor=nvidia' "$public_port"; }
+
+# --- checkpoint coordination (v0.6) helpers ------------------------------------------
+
+# controller_pod_verbs prints the managed <root>-controller ClusterRole's grant
+# on core pods as a sorted comma-joined verb list, or a diagnostic token when
+# the role does not have exactly one narrow rule for it. "Narrow" is judged
+# the way an RBAC reviewer would: any rule whose apiGroups reach the core
+# group ("" or "*") and whose resources reach pods ("pods" or "*") counts, so
+# a broadened rule (wildcards, pods bundled with other resources, or a second
+# pods rule) fails the exact-verb comparison instead of hiding behind it.
+controller_pod_verbs() {
+	local store=$1 role_json
+	role_json=$("$KUBECTL_BIN" get clusterrole "$(root_name "$store")-controller" -o json 2>/dev/null || true)
+	[[ -n $role_json ]] || {
+		printf 'ROLE_ABSENT'
+		return 0
+	}
+	printf '%s' "$role_json" | "$JQ_BIN" -r '
+		[.rules[]? | select(
+			any(.apiGroups[]?; . == "" or . == "*") and
+			any(.resources[]?; . == "pods" or . == "*"))] as $r |
+		if ($r | length) != 1 then "PODS_RULES=\($r | length)"
+		elif $r[0].apiGroups != [""] or $r[0].resources != ["pods"] then "BROADENED=\($r[0] | tojson)"
+		elif ($r[0].resourceNames // [] | length) != 0 then "RESOURCE_NAMES=\($r[0].resourceNames | tojson)"
+		elif any($r[0].verbs[]?; . == "*") then "WILDCARD_VERBS"
+		else ($r[0].verbs | sort | join(","))
+		end'
+}
+
+# assert_pod_verbs waits (bounded) until the managed controller role's core
+# pods grant is exactly $2 and dies with the actual shape otherwise. The
+# operator ensures the ClusterRole in the same reconcile pass that publishes
+# status.configDigest, so once wait_config_digest has returned the role is
+# already in its final shape; the bounded poll is defence against an
+# apiserver cache lag, not a substitute for the digest gate.
+assert_pod_verbs() {
+	local store=$1 want=$2 label=$3 deadline actual=''
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		actual=$(controller_pod_verbs "$store")
+		if [[ $actual == "$want" ]]; then
+			note "[$store] $label: ClusterRole $(root_name "$store")-controller grants exactly [$want] on core pods"
+			return 0
+		fi
+		sleep 2
+	done
+	"$KUBECTL_BIN" get clusterrole "$(root_name "$store")-controller" -o json 2>&1 | "$JQ_BIN" '.rules' >&2 || true
+	die "[$store] $label: ClusterRole $(root_name "$store")-controller grants '$actual' on core pods, want exactly [$want]"
+}
+
+# pod_identities prints one line per managed controller/agent Pod of the
+# store — "<component> <name> <uid> <restart counts>" — sorted, so two
+# snapshots compare with a plain string test. A Pod that was rolled has a new
+# name and UID; a Pod whose container was restarted in place has the same
+# UID and a higher restart count; a Pod that was added or removed changes the
+# line count. Any of those is a rollout the policy toggle must not cause.
+# Pods being deleted are included on purpose: a terminating Pod is a rollout
+# in progress, and a snapshot that skipped it would hide exactly that.
+pod_identities() {
+	local store=$1 root ns
+	root=$(root_name "$store")
+	ns=$(store_ns "$store")
+	"$KUBECTL_BIN" -n "$ns" get pods -l "app.kubernetes.io/instance=$root" -o json |
+		"$JQ_BIN" -r '
+			[.items[] | select(.metadata.labels["app.kubernetes.io/component"] == "controller" or
+				.metadata.labels["app.kubernetes.io/component"] == "agent")
+			| "\(.metadata.labels["app.kubernetes.io/component"]) \(.metadata.name) \(.metadata.uid) \([.status.containerStatuses[]? | .restartCount] | join(","))"]
+			| sort | .[]'
+}
+
+# assert_no_pod_rollout compares the live Pod identities of the store with
+# the snapshot in $2 (a pod_identities listing) and dies on any difference.
+# It runs only after wait_config_digest has proved the toggled policy is
+# compiled and live on the leader, so "unchanged" means the operator applied
+# the change in place (ConfigMap reload, ClusterRole edit) and not that the
+# rollout simply had not started yet. A short settle poll then re-reads the
+# snapshot a few times: a rollout that the digest gate raced ahead of would
+# surface as a terminating or replacement Pod within seconds, and a Pod
+# count that drifts during the poll fails the same way.
+assert_no_pod_rollout() {
+	local store=$1 before=$2 label=$3 now i
+	for i in 1 2 3; do
+		now=$(pod_identities "$store")
+		if [[ $now != "$before" ]]; then
+			{
+				echo "--- before"
+				printf '%s\n' "$before"
+				echo "--- after"
+				printf '%s\n' "$now"
+			} >&2
+			die "[$store] $label: a controller/agent Pod was rolled, restarted, added, or removed by the policy toggle (compare UIDs and restart counts above)"
+		fi
+		((i < 3)) && sleep 2
+	done
+	note "[$store] $label: every controller/agent Pod kept its UID and restart counts ($(printf '%s\n' "$before" | grep -c .) Pods)"
+}
+
+# set_checkpoint_policy patches spec.safety.checkpointCoordination on the
+# root object: enabled=true with the store's own namespace as the explicit
+# allowlist (the CRD refuses an enabled policy without one) and waits that
+# are short but legal (defaultWait <= maxWait <= 30m), or enabled=false with
+# the block left in place, which is one of the two documented rollback
+# spellings (docs/upgrade.md: "Set enabled: false (or remove the block)").
+set_checkpoint_policy() {
+	local store=$1 enabled=$2 patch
+	patch=$("$JQ_BIN" -cn --argjson enabled "$enabled" --arg ns "$(store_ns "$store")" \
+		'{spec: {safety: {checkpointCoordination: {enabled: $enabled, defaultWait: "10s", maxWait: "30s", namespaces: [$ns]}}}}')
+	"$KUBECTL_BIN" patch kubeneuron "$(root_name "$store")" --type=merge -p "$patch" >/dev/null ||
+		die "[$store] cannot patch checkpointCoordination.enabled=$enabled onto $(root_name "$store")"
+}
+
+# --- baseline install and v0.5 seed ----------------------------------------------
 
 for store in $STORES; do
 	install_store "$store"
@@ -652,7 +786,7 @@ done
 
 declare -A incident_id=() incident_audit=()
 for store in $STORES; do
-	note "[$store] seeding a v0.4 incident through the $BASELINE operator API"
+	note "[$store] seeding a baseline incident through the $BASELINE operator API"
 	start_port_forward "$store"
 	code=$(api_code "$store" /dev/null -H 'Content-Type: application/json' \
 		--data-binary '{"node":"upgrade-node","class":"upgrade-test","actor":"upgrade-harness"}' \
@@ -670,11 +804,29 @@ for store in $STORES; do
 	incident_id[$store]=$id
 	incident_audit[$store]=$(api "$store" "http://127.0.0.1:${public_port}/api/v1/incidents/${id}" | "$JQ_BIN" '.audit | length')
 	((incident_audit[$store] >= 1)) || die "[$store] seed incident has no audit trail"
-	# The v0.5 routes must NOT exist on the baseline; otherwise the 404s
-	# asserted after rollback would prove nothing about the rollback.
-	code=$(api_code "$store" /dev/null "$(qual_url)")
-	[[ $code == 404 ]] || die "[$store] baseline $BASELINE already serves runtime-contract-qualifications ($code); this rehearsal needs a pre-v0.5 baseline"
-	note "[$store] seeded incident $id with ${incident_audit[$store]} audit entries; baseline answers 404 on the v0.5 routes"
+	# The v0.5 runtime-contract routes are part of the baseline: v0.5.0 shipped
+	# them, so the rollback below must find them served, not hidden. Pin that
+	# here so a BASELINE older than v0.5.0 fails at once instead of turning
+	# the post-rollback assertions into a lie.
+	code=$(api_code "$store" "$work_dir/qual-list-baseline-$store.json" "$(qual_url)")
+	[[ $code == 200 ]] || die "[$store] baseline $BASELINE answered $code on runtime-contract-qualifications, want 200 (this rehearsal needs a v0.5.0 or later baseline)"
+	"$JQ_BIN" -e '(.items // []) | length == 0' "$work_dir/qual-list-baseline-$store.json" >/dev/null ||
+		die "[$store] baseline qualification list is not empty on a fresh store: $("$JQ_BIN" -c . "$work_dir/qual-list-baseline-$store.json")"
+	# The node route answers 404 until the agent has registered its node in
+	# the store, which can trail the agent Pod becoming Ready by a beat.
+	code=''
+	deadline=$((SECONDS + 60))
+	while ((SECONDS < deadline)); do
+		code=$(api_code "$store" "$work_dir/coverage-baseline-$store.json" "$(coverage_url "${store_node[$store]}")")
+		[[ $code == 200 ]] && break
+		sleep 2
+	done
+	[[ $code == 200 ]] || die "[$store] baseline $BASELINE answered $code on the node runtime-contract route for ${store_node[$store]}, want 200"
+	# No profile exists yet, so the baseline must report the node as
+	# uncovered rather than fabricate coverage.
+	"$JQ_BIN" -e '.verification_depth != "Full"' "$work_dir/coverage-baseline-$store.json" >/dev/null ||
+		die "[$store] baseline reports Full coverage without any profile: $("$JQ_BIN" -c . "$work_dir/coverage-baseline-$store.json")"
+	note "[$store] seeded incident $id with ${incident_audit[$store]} audit entries; baseline $BASELINE serves the v0.5 routes (empty qualification list, node not yet covered)"
 done
 stop_port_forward
 
@@ -716,11 +868,17 @@ upgrade_to_head() {
 
 rollback_images_to_baseline() {
 	# docs/upgrade.md "Rolling back — Images only": patch the root object back
-	# to the previous images; the store is untouched. The operator and CRDs are
-	# deliberately left at HEAD: v0.5 changed neither (config/, api/, and
-	# internal/operator are identical to the baseline tag), and an images-only
-	# rollback is exactly the rollback the release notes promise.
-	note "rollback: controller/agent images back to $BASELINE on every root object (store untouched)"
+	# to the previous images; the store is untouched (v0.6 adds no store
+	# migration). The operator and CRDs are deliberately left at HEAD even
+	# though v0.6 changes both (the CRD gains the checkpointCoordination block,
+	# the operator compiles it and conditionally grants pods patch): an
+	# images-only rollback is exactly the rollback the v0.6 notes promise, and
+	# the policy has already been disabled through the CR before this point,
+	# so the HEAD operator compiles no policy and the v0.5.0 controller reads
+	# a snapshot it fully understands. Rolling the operator back too is the
+	# separate "Operator/CRDs" path (re-apply the previous install manifest),
+	# not what this rehearsal claims.
+	note "rollback: controller/agent images back to $BASELINE on every root object (store, CRDs, operator untouched)"
 	local store
 	for store in $STORES; do
 		"$KUBECTL_BIN" patch kubeneuron "$(root_name "$store")" --type=merge -p "{
@@ -942,45 +1100,126 @@ EOF
 done
 stop_port_forward
 
+# --- v0.6 checkpoint coordination policy per store ----------------------------------------
+
+# The policy is exercised on HEAD and switched back off BEFORE any image
+# moves, which is the rollback order docs/upgrade.md prescribes. Every state
+# is judged only after the recompiled configuration is live on the leader
+# (wait_config_digest): a config change is supposed to roll no Pod, so a
+# Deployment or Ready check would pass trivially and prove nothing about the
+# policy — and "rolls no Pod" is itself asserted, not assumed: the Pod
+# identities (UID, restart counts) snapshotted before the first toggle must
+# be unchanged after enable and again after disable.
+declare -A digest_policy_off=() pods_policy_off=()
+for store in $STORES; do
+	root=$(root_name "$store")
+	ns=$(store_ns "$store")
+	note "[$store] v0.6 checkpoint coordination: default off, enable, disable, on root $root"
+	start_port_forward "$store"
+	# 1. Absent block: the upgrade alone must have granted nothing.
+	"$JQ_BIN" -e '.spec.safety.checkpointCoordination == null' <<<"$("$KUBECTL_BIN" get kubeneuron "$root" -o json)" >/dev/null ||
+		die "[$store] root $root carries a checkpointCoordination block before this rehearsal set one"
+	assert_pod_verbs "$store" "get,list,watch" "policy absent after upgrade"
+	digest_policy_off[$store]=$("$KUBECTL_BIN" get kubeneuron "$root" -o jsonpath='{.status.configDigest}')
+	[[ -n ${digest_policy_off[$store]} ]] || die "[$store] root $root has no compiled configDigest before the policy"
+	# The Pod identities the two toggles are judged against. wait_converged
+	# has just proved the upgrade rollout finished (every replica updated,
+	# nothing terminating), so this is a settled set, not a mid-rollout one.
+	pods_policy_off[$store]=$(pod_identities "$store")
+	[[ $(printf '%s\n' "${pods_policy_off[$store]}" | grep -c '^controller ') -ge 1 && $(printf '%s\n' "${pods_policy_off[$store]}" | grep -c '^agent ') -eq 1 ]] ||
+		die "[$store] unexpected managed Pod set before the policy: ${pods_policy_off[$store]:-none}"
+
+	# 2. The CRD's own guard: an enabled policy without an allowlist is refused
+	# by admission (server-side dry run, nothing persisted), so a fleet-wide
+	# self-declaration can never arrive by a typo.
+	rejected=$("$KUBECTL_BIN" patch kubeneuron "$root" --type=merge --dry-run=server \
+		-p '{"spec":{"safety":{"checkpointCoordination":{"enabled":true}}}}' 2>&1 || true)
+	grep -Fq 'non-empty namespaces allowlist' <<<"$rejected" ||
+		die "[$store] an enabled policy without namespaces was not refused by the CRD: ${rejected:-accepted}"
+
+	# 3. Enable with this installation's own namespace as the allowlist.
+	set_checkpoint_policy "$store" true
+	wait_config_digest "$store" "${digest_policy_off[$store]}" "checkpoint policy enabled"
+	digest_policy_on=$("$KUBECTL_BIN" get kubeneuron "$root" -o jsonpath='{.status.configDigest}')
+	root_json=$("$KUBECTL_BIN" get kubeneuron "$root" -o json)
+	"$JQ_BIN" -e --arg ns "$ns" '
+		.metadata.generation as $g |
+		.status.observedGeneration == $g and
+		any(.status.conditions[]?; .type == "ConfigurationValid" and .status == "True" and .observedGeneration == $g) and
+		.spec.safety.checkpointCoordination.enabled == true and
+		.spec.safety.checkpointCoordination.namespaces == [$ns]' <<<"$root_json" >/dev/null ||
+		die "[$store] root $root did not compile the enabled policy at its current generation: $("$JQ_BIN" -c '{generation: .metadata.generation, policy: .spec.safety.checkpointCoordination, status}' <<<"$root_json")"
+	assert_pod_verbs "$store" "get,list,patch,watch" "policy enabled"
+	assert_no_pod_rollout "$store" "${pods_policy_off[$store]}" "policy enabled"
+
+	# 4. Disable again: a new digest goes live, and the role returns to
+	# read-only before any image is rolled. An explicit enabled=false compiles
+	# to exactly what an absent block does (internal/operator/config_snapshot.go
+	# checkpointCoordination), so the digest must return to its pre-policy value.
+	set_checkpoint_policy "$store" false
+	wait_config_digest "$store" "$digest_policy_on" "checkpoint policy disabled"
+	digest_after=$("$KUBECTL_BIN" get kubeneuron "$root" -o jsonpath='{.status.configDigest}')
+	[[ $digest_after == "${digest_policy_off[$store]}" ]] ||
+		die "[$store] disabling the policy compiled digest $digest_after, want the pre-policy digest ${digest_policy_off[$store]} (an explicit enabled=false must compile like an absent block)"
+	assert_pod_verbs "$store" "get,list,watch" "policy disabled before rollback"
+	assert_no_pod_rollout "$store" "${pods_policy_off[$store]}" "policy disabled"
+	logs=$("$KUBECTL_BIN" -n "$ns" logs "pod/$(leader_pod "$store")" --tail=-1 2>&1)
+	if grep -Eiq 'panic|fatal' <<<"$logs"; then
+		die "[$store] controller logs contain a panic/fatal line after the checkpoint policy cycle"
+	fi
+	note "[$store] checkpoint policy cycle: role patch granted only while enabled (digests ${digest_policy_off[$store]} -> $digest_policy_on -> $digest_after), no Pod rolled or restarted by either toggle"
+done
+stop_port_forward
+
 # --- images-only rollback to baseline -----------------------------------------------------
 
 rollback_images_to_baseline
 
 for store in $STORES; do
 	start_port_forward "$store"
-	note "[$store] rolled back: asserting the $BASELINE binary hides but keeps the v0.5 rows"
-	for path in \
-		"/api/v1/runtime-contract-qualifications" \
-		"/api/v1/runtime-contract-qualifications/${qual_id[$store]}" \
-		"/api/v1/nodes/${store_node[$store]}/runtime-contract?vendor=nvidia" \
-		"/api/v1/runtime-contracts/coverage?vendor=nvidia"; do
-		code=$(api_code "$store" /dev/null "http://127.0.0.1:${public_port}${path}")
-		[[ $code == 404 ]] || die "[$store] rolled-back $BASELINE controller answered $code on $path, want 404"
+	note "[$store] rolled back: asserting the $BASELINE binary serves the v0.5 rows HEAD wrote, unchanged"
+	# v0.5.0 owns the runtime-contract surface, so the rolled-back binary must
+	# read the qualification HEAD wrote byte-identically (only the read-time
+	# evaluation clock may differ), list it exactly once, and answer both
+	# coverage routes. No mutation is attempted through the old binary: the
+	# re-upgrade below is what proves the chain still extends, and an observe
+	# here would legitimately change the snapshots it is compared against.
+	code=$(api_code "$store" "$work_dir/qual-rollback-$store.json" "$(qual_url)/${qual_id[$store]}")
+	[[ $code == 200 ]] || die "[$store] rolled-back $BASELINE controller answered $code on the qualification, want 200"
+	"$JQ_BIN" -S 'del(.evaluated_at)' "$work_dir/qual-rollback-$store.json" >"$work_dir/qual-rollback-$store.canonical.json"
+	cmp -s "$work_dir/qual-before-$store.canonical.json" "$work_dir/qual-rollback-$store.canonical.json" || {
+		diff "$work_dir/qual-before-$store.canonical.json" "$work_dir/qual-rollback-$store.canonical.json" >&2 || true
+		die "[$store] qualification ${qual_id[$store]} read through the $BASELINE binary differs from the pre-rollback read"
+	}
+	code=$(api_code "$store" "$work_dir/qual-list-rollback-$store.json" "$(qual_url)")
+	[[ $code == 200 ]] || die "[$store] rolled-back $BASELINE controller answered $code on the qualification list, want 200"
+	"$JQ_BIN" -e --arg id "${qual_id[$store]}" '[.items[]? | select(.id == $id)] | length == 1' "$work_dir/qual-list-rollback-$store.json" >/dev/null ||
+		die "[$store] qualification ${qual_id[$store]} is not listed exactly once by the $BASELINE binary"
+	for path in "$(coverage_url "${store_node[$store]}")" "$(fleet_coverage_url)"; do
+		code=$(api_code "$store" /dev/null "$path")
+		[[ $code == 200 ]] || die "[$store] rolled-back $BASELINE controller answered $code on ${path#*"${public_port}"}, want 200"
 	done
-	code=$(api_code "$store" /dev/null -X POST -H 'Content-Type: application/json' \
-		-H "Idempotency-Key: upgrade-rollback-${RUN_ID}-${store}-rollback-observe" \
-		--data-binary "{\"actor\":\"upgrade-harness\",\"resource_version\":${qual_version[$store]}}" \
-		"$(qual_url)/${qual_id[$store]}/observe")
-	[[ $code == 404 ]] || die "[$store] rolled-back controller accepted an observe ($code), want 404"
-	# The v0.4 incident is still served, with its audit intact.
+	# The baseline incident is still served, with its audit intact.
 	survived=$(api "$store" "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id[$store]}" |
 		"$JQ_BIN" --arg id "${incident_id[$store]}" --argjson n "${incident_audit[$store]}" '(.incident.id == $id) and ((.audit | length) >= $n)')
-	[[ $survived == true ]] || die "[$store] v0.4 incident ${incident_id[$store]} or its audit did not survive the rollback"
-	# The old binary's audit explorer filters by kind string without knowing
-	# the kind: the qualification's four hash-chained events are still in the
-	# store and byte-identical, which is the "rows remain" promise made
-	# concrete rather than inferred from a 404.
+	[[ $survived == true ]] || die "[$store] baseline incident ${incident_id[$store]} or its audit did not survive the rollback"
+	# The qualification's four hash-chained events are still in the store and
+	# byte-identical through the old binary's audit explorer.
 	audit_events "$store" "$work_dir/audit-rollback-$store.json"
 	"$JQ_BIN" -S '.items' "$work_dir/audit-rollback-$store.json" >"$work_dir/audit-rollback-$store.canonical.json"
 	cmp -s "$work_dir/audit-before-$store.canonical.json" "$work_dir/audit-rollback-$store.canonical.json" || {
 		diff "$work_dir/audit-before-$store.canonical.json" "$work_dir/audit-rollback-$store.canonical.json" >&2 || true
 		die "[$store] qualification audit chain read through the $BASELINE binary differs from the pre-rollback chain"
 	}
+	# The policy was disabled before the images moved, and the HEAD operator
+	# keeps reconciling: the v0.5.0 controller must be running under exactly
+	# the read-only pods grant it was built for.
+	assert_pod_verbs "$store" "get,list,watch" "after image rollback"
 	logs=$("$KUBECTL_BIN" -n "$(store_ns "$store")" logs "pod/$(leader_pod "$store")" --tail=-1 2>&1)
 	if grep -Eiq 'panic|fatal' <<<"$logs"; then
 		die "[$store] rolled-back controller logs contain a panic/fatal line"
 	fi
-	note "[$store] $BASELINE serves 404 on all four runtime-contract routes and the observe mutation, still serves incident ${incident_id[$store]}, and still returns the qualification's 4 audit events unchanged"
+	note "[$store] $BASELINE reads qualification ${qual_id[$store]} back byte-identical, lists it once, answers both coverage routes, still serves incident ${incident_id[$store]}, and returns its 4 audit events unchanged"
 done
 stop_port_forward
 
@@ -1012,7 +1251,7 @@ for store in $STORES; do
 	}
 	survived=$(api "$store" "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id[$store]}" |
 		"$JQ_BIN" --arg id "${incident_id[$store]}" '.incident.id == $id')
-	[[ $survived == true ]] || die "[$store] v0.4 incident ${incident_id[$store]} is gone after re-upgrade"
+	[[ $survived == true ]] || die "[$store] baseline incident ${incident_id[$store]} is gone after re-upgrade"
 
 	# Still usable, not just readable: a fresh report from the (new) agent Pod
 	# identity restores Full coverage, and one more observation extends the
@@ -1040,4 +1279,4 @@ if grep -Eiq 'forbidden|panic|fatal' <<<"$operator_logs"; then
 	die "operator logs contain an unexpected RBAC/fatal error"
 fi
 
-note "PASS: $BASELINE -> HEAD -> $BASELINE (images only) -> HEAD converged for: $STORES; runtime contract qualification rows and their hash-chained audit survived the cycle on every store (CPU-only kind, synthetic accelerator evidence, no hardware claim)"
+note "PASS: $BASELINE -> HEAD -> $BASELINE (images only) -> HEAD converged for: $STORES; runtime contract qualification rows and their hash-chained audit survived the cycle on every store, and the checkpoint coordination policy granted pods patch only while enabled, rolled or restarted no Pod when toggled, and was off before rollback (CPU-only kind, synthetic accelerator evidence, no hardware claim, no real checkpoint workload)"

@@ -6,10 +6,12 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -47,7 +49,40 @@ type Safety struct {
 	// configuration written before the feature existed cannot start marking
 	// nodes after an upgrade.
 	TaintDegradedNodes *TaintDegradedNodes `yaml:"taint_degraded_nodes,omitempty"`
+	// CheckpointCoordination is the compiled spec.safety.checkpointCoordination.
+	// A nil pointer is the whole of "off", for the same reason as the taint:
+	// the operator emits this key only when an installation explicitly enables
+	// coordination, so a configuration written before the feature existed can
+	// never make a disruption start waiting after an upgrade.
+	CheckpointCoordination *CheckpointCoordination `yaml:"checkpoint_coordination,omitempty"`
 }
+
+// CheckpointCoordination configures checkpoint-aware remediation. See the CRD
+// field of the same name. Zero waits and an absent skip list are defaulted in
+// Validate to the CRD defaults; every other invalid value is a rejected
+// configuration, never a silently longer wait.
+type CheckpointCoordination struct {
+	Enabled bool `yaml:"enabled"`
+	// DefaultWait is granted to an opted-in workload that requests nothing.
+	DefaultWait Duration `yaml:"default_wait"`
+	// MaxWait is the ceiling on any wait; never above CheckpointMaxWaitCeiling.
+	MaxWait Duration `yaml:"max_wait"`
+	// SkipClasses are problem classes for which no coordination is attempted.
+	// The key is never omitted on output, so an explicit empty list survives
+	// the operator-to-controller round trip: only an ABSENT key is filled with
+	// checkpoint.DefaultSkipClasses, and `skip_classes: []` means "skip none".
+	SkipClasses []types.ProblemClass `yaml:"skip_classes"`
+	// Namespaces is the explicit allowlist; required when Enabled.
+	Namespaces []string `yaml:"namespaces,omitempty"`
+}
+
+// Checkpoint coordination bounds. The defaults mirror the CRD defaults and
+// the ceiling is the installation-wide limit no configuration can raise.
+const (
+	CheckpointDefaultWait    = Duration(5 * time.Minute)
+	CheckpointDefaultMaxWait = Duration(15 * time.Minute)
+	CheckpointMaxWaitCeiling = Duration(30 * time.Minute)
+)
 
 // TaintDegradedNodes configures the kubeneuron.io/degraded taint. See the CRD
 // field of the same name.
@@ -147,6 +182,11 @@ func (c *Config) Validate() error {
 				t.Effect, TaintEffectPreferNoSchedule, TaintEffectNoSchedule)
 		}
 	}
+	if cc := c.Safety.CheckpointCoordination; cc != nil {
+		if err := cc.validate(); err != nil {
+			return err
+		}
+	}
 	if len(c.Policies) == 0 {
 		return fmt.Errorf("config: at least one policy is required")
 	}
@@ -167,6 +207,55 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: duplicate accelerator runtime profile %q", profile.Name)
 		}
 		seenProfiles[profile.Name] = struct{}{}
+	}
+	return nil
+}
+
+// validate applies the CRD defaults to zero waits and to an absent skip list,
+// and rejects everything else that could not be enforced as written. A
+// disabled block is left alone: none of it is read, and the operator never
+// emits one anyway.
+func (cc *CheckpointCoordination) validate() error {
+	if !cc.Enabled {
+		return nil
+	}
+	if cc.DefaultWait == 0 {
+		cc.DefaultWait = CheckpointDefaultWait
+	}
+	if cc.MaxWait == 0 {
+		cc.MaxWait = CheckpointDefaultMaxWait
+	}
+	if cc.SkipClasses == nil {
+		// Absent, not empty: a decoded `skip_classes: []` is a non-nil empty
+		// slice and is kept as the explicit "skip none" it says.
+		cc.SkipClasses = checkpoint.DefaultSkipClasses()
+	}
+	if cc.DefaultWait < 0 {
+		return fmt.Errorf("config: safety.checkpoint_coordination.default_wait must be positive, got %v", cc.DefaultWait.Std())
+	}
+	if cc.MaxWait < 0 {
+		return fmt.Errorf("config: safety.checkpoint_coordination.max_wait must be positive, got %v", cc.MaxWait.Std())
+	}
+	if cc.MaxWait > CheckpointMaxWaitCeiling {
+		return fmt.Errorf("config: safety.checkpoint_coordination.max_wait %v exceeds the %v ceiling",
+			cc.MaxWait.Std(), CheckpointMaxWaitCeiling.Std())
+	}
+	if cc.DefaultWait > cc.MaxWait {
+		return fmt.Errorf("config: safety.checkpoint_coordination.default_wait %v exceeds max_wait %v",
+			cc.DefaultWait.Std(), cc.MaxWait.Std())
+	}
+	if len(cc.Namespaces) == 0 {
+		return fmt.Errorf("config: safety.checkpoint_coordination.namespaces must name the allowed namespaces; an enabled policy without an allowlist is rejected")
+	}
+	for _, ns := range cc.Namespaces {
+		if strings.TrimSpace(ns) == "" {
+			return fmt.Errorf("config: safety.checkpoint_coordination.namespaces must not contain a blank entry")
+		}
+	}
+	for _, class := range cc.SkipClasses {
+		if strings.TrimSpace(string(class)) == "" {
+			return fmt.Errorf("config: safety.checkpoint_coordination.skip_classes must not contain a blank entry")
+		}
 	}
 	return nil
 }

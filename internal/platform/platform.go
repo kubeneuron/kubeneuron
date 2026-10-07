@@ -10,9 +10,11 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -57,6 +59,9 @@ type DrainOptions struct {
 }
 
 // Workload is a schedulable unit running on a node (a pod, a job, ...).
+//
+// It carries a map, so it is not comparable with ==; callers that need a key
+// use Namespace/Name (and UID where an object instance matters).
 type Workload struct {
 	Name      string
 	Namespace string
@@ -64,6 +69,74 @@ type Workload struct {
 	// UsesGPU marks workloads holding GPU resources (used by XID 94
 	// targeted restarts).
 	UsesGPU bool
+	// DrainExclusion says whether Drain leaves this workload alone, and why.
+	// The zero value is evictable. The platform that implements Drain fills
+	// it from the same rule its Drain applies, so a caller deciding what a
+	// drain will touch (checkpoint coordination) asks DrainEligible rather
+	// than repeating that rule.
+	DrainExclusion DrainExclusion
+	// UID identifies the exact object instance as listed. A restarted pod is a
+	// new object with a new UID: anything decided about this instance, such as
+	// a checkpoint request, must be re-checked against it and never inherited
+	// by its replacement. Empty on platforms that have no object identity.
+	UID string
+	// Annotations is a snapshot of the object's annotations at listing time,
+	// which is what the checkpoint protocol reads to learn whether a workload
+	// opted in and how long it asked for. It is a defensive copy: mutating it
+	// touches nothing the platform holds. Nil when the platform has none.
+	Annotations map[string]string
+}
+
+// DrainExclusion is the reason a Drain skips a workload. It is the
+// platform-neutral spelling of what `kubectl drain` decides per pod, carried
+// on the listing so the decision is made once, by the platform, and read by
+// everything that needs to know what a drain will and will not touch.
+type DrainExclusion string
+
+const (
+	// DrainEvictable is the zero value: Drain evicts this workload.
+	DrainEvictable DrainExclusion = ""
+	// DrainExclusionTerminal: the workload has already finished (for a pod:
+	// phase Succeeded or Failed). Nothing is left to evict.
+	DrainExclusionTerminal DrainExclusion = "terminal"
+	// DrainExclusionInfrastructure: the workload belongs to the node rather
+	// than to a tenant (for a pod: a mirror pod or a DaemonSet pod) and is
+	// never evicted, forced or not.
+	DrainExclusionInfrastructure DrainExclusion = "infrastructure"
+	// DrainExclusionUnmanaged: nothing would recreate the workload (for a
+	// pod: no controller). Drain leaves it alone unless DrainOptions.Force
+	// is set, in which case it is destroyed outright.
+	DrainExclusionUnmanaged DrainExclusion = "unmanaged"
+)
+
+// Eligible reports whether a Drain with the given force setting evicts a
+// workload carrying this exclusion. This is THE rule: a platform's Drain and
+// anything predicting it call this same function.
+func (e DrainExclusion) Eligible(force bool) bool {
+	switch e {
+	case DrainEvictable:
+		return true
+	case DrainExclusionUnmanaged:
+		return force
+	}
+	return false
+}
+
+// DrainEligible reports whether a Drain with the given force setting would
+// evict w. See DrainExclusion.Eligible.
+func (w Workload) DrainEligible(force bool) bool {
+	return w.DrainExclusion.Eligible(force)
+}
+
+// Checkpoint returns the checkpoint package's view of the workload. The two
+// types stay separate so that package never depends on this one.
+func (w Workload) Checkpoint() checkpoint.Workload {
+	return checkpoint.Workload{
+		Namespace:   w.Namespace,
+		Name:        w.Name,
+		UID:         w.UID,
+		Annotations: w.Annotations,
+	}
 }
 
 // Platform is the per-environment implementation of inventory and workload
@@ -434,6 +507,79 @@ type AcceleratorStackController interface {
 	// quiesced, and monitoring that stays off because a process died is the
 	// worst outcome available.
 	QuiescedNodes(ctx context.Context) ([]string, error)
+}
+
+// Checkpoint request outcomes. They are sentinels so a controller can classify
+// a failed request with errors.Is and stay bounded: none of them is ever a
+// reason to wait longer, only a reason to record why no request went out.
+var (
+	// ErrCheckpointScope: the live object is not the workload that was listed,
+	// or is outside the policy's scope — a namespace off the allowlist, a pod
+	// on another node, or a different UID (the listed pod was replaced). Nothing
+	// was written. The controller treats it as skipped or exited, never as
+	// acknowledged.
+	ErrCheckpointScope = errors.New("checkpoint: workload out of scope")
+	// ErrCheckpointWorkloadGone: the workload no longer exists. Nothing was
+	// written; the workload has, by the zero-RBAC path, already exited.
+	ErrCheckpointWorkloadGone = errors.New("checkpoint: workload no longer exists")
+	// ErrCheckpointForeignRequest: the workload carries a still-live request
+	// from ANOTHER incident. It is left in place — overwriting it would let two
+	// incidents keep re-stamping one job. The controller counts this workload
+	// under the deadline it already carries, or as unreachable, and does not
+	// grant a new window.
+	ErrCheckpointForeignRequest = errors.New("checkpoint: workload carries a live request from another incident")
+	// ErrCheckpointConflict: the object changed between the read and the
+	// write, so the guarded patch was rejected. Nothing was written. It is safe
+	// to retry ONCE against a fresh read; a controller that cannot must count
+	// the workload as unreachable and keep to its bounded wait.
+	ErrCheckpointConflict = errors.New("checkpoint: workload changed during request")
+)
+
+// WorkloadCheckpointer is implemented by platforms that can ask a workload to
+// checkpoint before a disruption and observe its answer. It is OPTIONAL: a
+// platform without it simply gets no coordination, counted as skipped. Bare
+// metal does not implement it.
+//
+// Both methods act on the LIVE object, never on a listing, and confine
+// themselves in code to what RBAC cannot express: the exact namespace
+// allowlist of the policy, the exact node the workload was listed on, and the
+// exact UID that was listed. A request writes only the operator-owned keys of
+// checkpoint.Request.Annotations; it never touches the workload-owned opt-in,
+// max-wait or state keys, nor anything outside the annotation prefix.
+type WorkloadCheckpointer interface {
+	// RequestCheckpoint stamps req on w, which the caller listed on node with
+	// NodeWorkloads. policy supplies the namespace allowlist; req.RequestedAt is
+	// the caller's clock and the only "now" the adapter uses.
+	//
+	// The request in force on the object is returned. It is req, except that a
+	// well-formed stamp of the SAME incident already on the object resolves the
+	// deadline to the earlier of the two (checkpoint.ResolveDeadline), so a
+	// controller restart resumes its window rather than granting a new one;
+	// when that resolution leaves the object already correct nothing is
+	// written.
+	//
+	// On error nothing has been written. The error wraps one of
+	// ErrCheckpointScope, ErrCheckpointWorkloadGone,
+	// ErrCheckpointForeignRequest or ErrCheckpointConflict when the adapter
+	// could classify it; any other error is a read or write failure to count
+	// as unreachable.
+	//
+	// With ErrCheckpointForeignRequest the returned request is the live
+	// foreign request as parsed off the object on THIS read, so the caller
+	// binds itself to the incident actually in force rather than to whatever
+	// an earlier listing showed. The error itself names the workload only and
+	// carries none of those values; the caller must treat the returned
+	// request as tenant-controlled data and never log or audit it. On every
+	// other error the returned request is the zero value.
+	RequestCheckpoint(ctx context.Context, policy checkpoint.Policy, node string, w Workload, req checkpoint.Request) (checkpoint.Request, error)
+
+	// ObserveCheckpoint reads the live workload for checkpoint.Classify. The
+	// observation is pure: a read failure sets Err; a missing object is not
+	// Found; a finished one is Terminal; an object with a different UID than w
+	// reports that UID and NO annotations, so a replacement can never be read
+	// as an acknowledgement. An object outside policy or node scope is an Err
+	// wrapping ErrCheckpointScope, never a readable answer.
+	ObserveCheckpoint(ctx context.Context, policy checkpoint.Policy, node string, w Workload) checkpoint.Observation
 }
 
 // Whether the device is actually free is deliberately not asked here. A

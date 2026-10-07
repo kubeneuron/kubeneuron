@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
@@ -53,6 +54,12 @@ type RuntimeConfig struct {
 	// field existed decodes to — the feature can only arrive by being asked
 	// for.
 	DegradedTaint DegradedTaintPolicy
+	// Checkpoint is the compiled spec.safety.checkpointCoordination. The zero
+	// value is disabled, for the same reason as DegradedTaint: a snapshot
+	// installed by any path that has not heard of the feature waits for
+	// nothing. It is read by the coordination pre-phase of the two disruption
+	// steps (checkpoint.go).
+	Checkpoint checkpoint.Policy
 	// SourceDigest identifies the operator-compiled snapshot these settings
 	// came from (the config-digest key the operator writes into the mounted
 	// ConfigMaps). Empty for file-based deployments with no operator. It is
@@ -134,6 +141,14 @@ func (c *Controller) InstallRuntimeConfigContext(ctx context.Context, rc Runtime
 			return fmt.Errorf("degraded-node taint effect %q is not %s or %s",
 				rc.DegradedTaint.Effect, config.TaintEffectPreferNoSchedule, config.TaintEffectNoSchedule)
 		}
+	}
+	// Same rule for the checkpoint policy: an enabled policy whose bounds do not
+	// hold — a wait above the ceiling, a default above the maximum, no
+	// allowlist — is refused whole, and the previous configuration stays in
+	// force. A wait that silently became longer than what was asked for is a
+	// remediation delayed by a configuration nobody wrote.
+	if err := rc.Checkpoint.Validate(); err != nil {
+		return err
 	}
 	// Claiming an action and changing a safety mode are one shared critical
 	// section. In particular, changing DryRun must not race a poll which saw a
@@ -240,6 +255,7 @@ func copyRuntimeConfig(rc *RuntimeConfig) *RuntimeConfig {
 		out.AcceleratorProfiles[i] = cloned
 	}
 	out.QuiesceForbidden = append([]string(nil), rc.QuiesceForbidden...)
+	out.Checkpoint = rc.Checkpoint.Clone()
 	if len(rc.DestructiveSelector) > 0 {
 		out.DestructiveSelector = make(map[string]string, len(rc.DestructiveSelector))
 		for k, v := range rc.DestructiveSelector {

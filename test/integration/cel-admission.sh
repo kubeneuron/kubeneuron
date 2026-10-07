@@ -290,6 +290,20 @@ check_root "destructive execution with a sloppy acknowledgement" \
 check_root "plain-http OIDC issuer" \
 	"issuerURL must be https" \
 	'.metadata.name="cel-auth-oidc-http" | .spec.auth={oidc: {issuerURL: "http://sso.example.com", clientID: "kn", clientSecretRef: {name: "oidc-client"}, redirectURL: "https://panel.example.com/cb"}}'
+# Checkpoint coordination is default-off and, when enabled, bounded by the
+# CRD before any controller sees it: an enabled block must name the namespaces
+# allowed to opt in, and the waits must be ordered and under the 30m ceiling.
+check_root "checkpoint coordination enabled without a namespaces allowlist" \
+	"checkpointCoordination.enabled requires a non-empty namespaces allowlist" \
+	'.metadata.name="cel-checkpoint-no-namespaces" | .spec.safety.checkpointCoordination={enabled: true}'
+check_root "checkpoint coordination defaultWait above maxWait" \
+	"defaultWait must not exceed maxWait" \
+	'.metadata.name="cel-checkpoint-default-over-max" | .spec.safety.checkpointCoordination={enabled: true, namespaces: ["ml-training"], defaultWait: "10m", maxWait: "5m"}'
+check_root "checkpoint coordination maxWait above the 30m ceiling" \
+	"maxWait must be a positive duration of at most 30m" \
+	'.metadata.name="cel-checkpoint-max-over-ceiling" | .spec.safety.checkpointCoordination={enabled: true, namespaces: ["ml-training"], defaultWait: "5m", maxWait: "45m"}'
+check_root "checkpoint coordination enabled with an allowlist and ordered waits" "" \
+	'.metadata.name="cel-checkpoint-enabled" | .spec.safety.checkpointCoordination={enabled: true, namespaces: ["ml-training", "ml-research"], defaultWait: "5m", maxWait: "15m"}'
 
 "$KUBECTL_BIN" patch kubeneuron "$FIXTURE_NAME" --type=merge \
 	-p '{"spec":{"workflowStore":{"sqlite":{"size":"6Gi"}}}}' >/dev/null
@@ -441,5 +455,5 @@ if "$KUBECTL_BIN" get kubeneuron "$FIXTURE_NAME" >/dev/null 2>&1; then
 fi
 pass "persisted CEL fixture cleaned up"
 
-((passed == 81)) || fail "internal check count is $passed, want 81"
+((passed == 85)) || fail "internal check count is $passed, want 85"
 log "admission matrix complete: $passed checks passed on server $server_version"

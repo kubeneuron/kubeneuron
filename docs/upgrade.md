@@ -97,9 +97,11 @@ unscoped node.
 The GPU Runtime Contract Lifecycle — read-only runtime contract coverage, the
 candidate runtime contract impact inside policy impact previews, and
 evidence-only runtime contract qualifications — is the v0.5.0 scope, released
-on 2026-09-20. The manifests and chart in this tree pin v0.5.0; its tag,
-published images, and release assets are available from the
+on 2026-09-20 and the latest published release; its tag, published images,
+and release assets are available from the
 [GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.5.0).
+(The manifests and chart in this source tree carry the unpublished v0.6.0
+candidate pins; see [the v0.6.0 notes](#v060-checkpoint-coordination-notes).)
 This section describes the upgrade and rollback posture of that scope. The
 CPU-only kind integration harness drives the v0.5 routes and commands against
 a real controller and store with
@@ -159,6 +161,83 @@ hardware qualification of its own surfaces.
   because a pre-deploy report is never candidate attestation. Do not compare
   previews across that boundary as if they used one rule; the presence or
   absence of `runtime_contract_impact_version` tells you which rule applied.
+
+## v0.6.0 checkpoint coordination notes
+
+> v0.6.0 is **prepared in source, not released**. The manifests, chart, and
+> samples in this source tree carry the v0.6.0 candidate pins, but the
+> `v0.6.0` tag, images, install manifest, and release assets do not yet
+> exist; the latest published release is v0.5.0, which does not contain
+> this feature. This section describes the upgrade and rollback posture of
+> the checkpoint coordination scope so that it is written down before the
+> release rather than after. Nothing here claims GPU hardware validation.
+
+The v0.6.0 scope is one opt-in feature: `spec.safety.checkpointCoordination`,
+which lets opted-in Pods be told and given a bounded deadline before a
+`Drain` or `EvictGPUWorkload` step disrupts them
+([design](checkpoint-coordination-design.md),
+[operations](operations.md#checkpoint-coordination-opt-in-v060-scope-unreleased)).
+
+- **Order: CRDs → operator → controller.** The CRD adds the optional
+  `checkpointCoordination` block with its CEL bounds; the operator compiles
+  it and, when enabled, grants the controller `patch` on Pods; the controller
+  is what reads the compiled policy and coordinates. Applying the block
+  before the CRD is upgraded is rejected as an unknown field; applying it
+  before the operator is upgraded compiles to nothing; enabling it before the
+  controller is upgraded grants a verb the old binary never uses. None of
+  those orders is harmful, but only the documented one makes the feature
+  take effect.
+- **Default off, backward compatible.** An installation that does not set
+  the block behaves exactly as before: the compiled snapshot digest is
+  unchanged, the controller pre-phase returns on a single boolean, and the
+  controller ClusterRole keeps exactly `get, list, watch` on Pods. Nothing
+  arrives by upgrade alone. No schema migration is involved.
+- **RBAC changes.** Static: the operator ClusterRole
+  (`config/rbac/operator_role.yaml`, mirrored by the Helm chart) gains
+  `patch` on core `pods`, unconditionally, because RBAC escalation prevention
+  means the operator must hold a verb before it can delegate it. The
+  operator never patches a Pod itself. Conditional: the managed
+  `<name>-controller` ClusterRole gains `patch` on `pods` only while the
+  policy is enabled, and loses it on the next reconcile after it is
+  disabled. Review the static change with whoever owns cluster RBAC before
+  the operator upgrade.
+- **Rollback.** Set `checkpointCoordination.enabled: false` (or remove the
+  block) **before or while** rolling back to a release that does not
+  understand it. An older operator ignores the unknown field and compiles no
+  policy, an older controller waits for nothing, and the older operator's
+  next reconcile rewrites the controller role's rules to its own read-only
+  shape, so a stale `enabled: true` is not dangerous. Disabling first is
+  still the clean order: it stops coordination through a path both binaries
+  understand, it keeps the stored object honest about what is in force, and
+  it avoids a window in which the CR says enabled while nothing enforces it.
+  Request annotations already stamped on
+  Pods (`kubeneuron.io/checkpoint-*`) are durable history: harmless, read by
+  nothing once the policy is off, and needing no cleanup. Images-only
+  rollback is sufficient; the store is untouched by this scope.
+- **Release rehearsal (run locally, pre-release).**
+  `hack/kind-upgrade-rollback.sh` (`make test-upgrade-rollback-kind`, and the
+  `upgrade-rehearsal` job of the release workflow) drives v0.5.0 → HEAD →
+  v0.5.0 (images only) → HEAD on one kind cluster for both workflow stores.
+  It was run as part of `make gates-full` on 2026-09-29/30 UTC against an
+  earlier local, unpublished v0.6.0 candidate and passed on both SQLite and
+  PostgreSQL. It seeded and read legacy API and data across the cycle,
+  the v0.5.0 binary read the qualification rows HEAD wrote back
+  byte-identically, and audit chains were preserved. For this scope it
+  enabled a short `checkpointCoordination` policy on HEAD with the
+  installation's own namespace as the allowlist and proved that the managed
+  `<name>-controller` ClusterRole has no `patch` on Pods by default, holds
+  exactly `get, list, patch, watch` only while the policy is enabled, and is
+  back to exactly `get, list, watch` after disabling it and before the images
+  are rolled back. The script now also asserts that neither toggle rolls or
+  restarts a Pod: it snapshots every managed controller and agent Pod's UID
+  and container restart counts before the policy is touched and requires
+  them unchanged after enable and again after disable. That assertion was
+  added after the 2026-09-29/30 run, which did not check it; the current
+  candidate must rerun the rehearsal before it is tagged, and that rerun is
+  the evidence for the claim. CPU-only, with synthetic accelerator evidence
+  and no real checkpointing workload; it proves the upgrade, RBAC, and
+  rollback wiring, not the protocol against a training job, and no real
+  Pod + Downward API scenario has been run.
 
 ## Upgrade order
 
@@ -232,6 +311,11 @@ versions longer than a rolling upgrade needs.
 - **v0.5 runtime contract scope**: images only, no store restore needed;
   see [the v0.5.0 notes](#v050-runtime-contract-lifecycle-notes)
   for what the old binary can and cannot see afterwards.
+- **v0.6 checkpoint coordination scope** (candidate in source, unreleased):
+  disable
+  `spec.safety.checkpointCoordination` first, then images only; see
+  [the v0.6.0 notes](#v060-checkpoint-coordination-notes). Stamped
+  `kubeneuron.io/checkpoint-*` annotations need no cleanup.
 
 ## Certificate material during upgrades
 

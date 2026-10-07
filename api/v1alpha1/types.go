@@ -271,6 +271,62 @@ type SafetySpec struct {
 	// cluster depends on, so this must never arrive by default with an
 	// upgrade.
 	TaintDegradedNodes *TaintDegradedNodesSpec `json:"taintDegradedNodes,omitempty"`
+	// CheckpointCoordination optionally warns opted-in workloads before a
+	// disruption and waits, for a bounded time, for them to checkpoint.
+	//
+	// Omitted means off. Waiting is a change to how every disruption step
+	// behaves, so it must never arrive by default with an upgrade.
+	CheckpointCoordination *CheckpointCoordinationSpec `json:"checkpointCoordination,omitempty"`
+}
+
+// CheckpointCoordinationSpec configures checkpoint-aware remediation
+// (docs/checkpoint-coordination-design.md): a workload that opts in with the
+// kubeneuron.io/checkpoint: "true" annotation is told, through annotations on
+// its own Pod, that a disruption is coming and by when, and the disruption
+// waits for it to acknowledge or for the deadline, whichever is first.
+//
+// The clock belongs to the operator. A workload may ask for less time than
+// defaultWait and never for more than maxWait, so the only power it gains is
+// to make its own disruption cleaner, never later.
+// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.namespaces) && self.namespaces.size() > 0)",message="checkpointCoordination.enabled requires a non-empty namespaces allowlist: self-declaration is a trust decision and is never fleet-wide by default"
+// +kubebuilder:validation:XValidation:rule="!has(self.defaultWait) || duration(self.defaultWait) > duration('0s')",message="defaultWait must be a positive duration"
+// +kubebuilder:validation:XValidation:rule="!has(self.maxWait) || (duration(self.maxWait) > duration('0s') && duration(self.maxWait) <= duration('30m'))",message="maxWait must be a positive duration of at most 30m"
+// +kubebuilder:validation:XValidation:rule="!has(self.defaultWait) || !has(self.maxWait) || duration(self.defaultWait) <= duration(self.maxWait)",message="defaultWait must not exceed maxWait"
+type CheckpointCoordinationSpec struct {
+	// Enabled turns coordination on. Default false, and false is also what an
+	// absent block means: no disruption waits for anything until somebody
+	// asks it to.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+	// DefaultWait is granted to an opted-in workload that requests nothing.
+	// +kubebuilder:default="5m"
+	DefaultWait string `json:"defaultWait,omitempty"`
+	// MaxWait is the hard ceiling on any wait. A workload annotation can only
+	// shorten it, and the whole installation cannot raise it above 30m.
+	// +kubebuilder:default="15m"
+	MaxWait string `json:"maxWait,omitempty"`
+	// SkipClasses lists problem classes for which no coordination is
+	// attempted. This is correctness, not an optimization: when the device has
+	// fallen off the bus the job is already dead, and waiting to be polite to
+	// a process that cannot make progress only delays recovery.
+	//
+	// Omitted defaults to the device-dead classes, fell-off-bus and gpu-lost.
+	// An explicit list replaces the default rather than adding to it, and an
+	// explicit empty list means coordinate for every class.
+	// +kubebuilder:default={"fell-off-bus","gpu-lost"}
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +listType=set
+	SkipClasses []string `json:"skipClasses,omitempty"`
+	// Namespaces is the explicit allowlist of namespaces whose workloads may
+	// opt in. Required when enabled, so an untrusted tenant fleet is excluded
+	// without turning the feature off for the trusted one.
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +listType=set
+	Namespaces []string `json:"namespaces,omitempty"`
 }
 
 // NodeTaintEffect is the scheduling effect of the degraded-node taint.

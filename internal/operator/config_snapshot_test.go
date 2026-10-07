@@ -2,6 +2,7 @@ package operator
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
+	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
 	"github.com/kubeneuron/kubeneuron/internal/cloud"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 )
@@ -329,6 +331,124 @@ func TestCompileSnapshotOmitsTheDegradedTaintUnlessEnabled(t *testing.T) {
 	if safety.TaintDegradedNodes == nil || !safety.TaintDegradedNodes.Enabled ||
 		safety.TaintDegradedNodes.Effect != config.TaintEffectPreferNoSchedule {
 		t.Fatalf("compiled taint = %+v, want the requested effect carried through", safety.TaintDegradedNodes)
+	}
+}
+
+// Checkpoint coordination reaches the controller only when an operator
+// explicitly asked for it. An omitted block and an explicit enabled=false must
+// both compile to nothing at all — and to the SAME digest as an installation
+// that never heard of the field — so no disruption starts waiting as a side
+// effect of an upgrade.
+func TestCompileSnapshotOmitsCheckpointCoordinationUnlessEnabled(t *testing.T) {
+	compile := func(t *testing.T, spec *kubeneuronv1alpha1.CheckpointCoordinationSpec) (*config.CheckpointCoordination, string, string) {
+		t.Helper()
+		installation := testKubeNeuron()
+		installation.Spec.Safety.CheckpointCoordination = spec
+		policies, playbooks := testPolicyFixture()
+		snapshot, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("CompileSnapshot() error = %v", err)
+		}
+		var compiled config.Config
+		if err := yaml.Unmarshal(snapshot.PoliciesYAML, &compiled); err != nil {
+			t.Fatalf("unmarshal compiled policies: %v", err)
+		}
+		return compiled.Safety.CheckpointCoordination, string(snapshot.PoliciesYAML), snapshot.Digest
+	}
+
+	cc, yamlText, baseline := compile(t, nil)
+	if cc != nil || strings.Contains(yamlText, "checkpoint_coordination") {
+		t.Fatalf("an omitted block must leave no trace in the snapshot:\n%s", yamlText)
+	}
+	cc, yamlText, disabledDigest := compile(t, &kubeneuronv1alpha1.CheckpointCoordinationSpec{
+		Enabled: false, MaxWait: "2h", Namespaces: []string{"training"},
+	})
+	if cc != nil || strings.Contains(yamlText, "checkpoint_coordination") {
+		t.Fatalf("enabled=false must not carry its settings through:\n%s", yamlText)
+	}
+	if disabledDigest != baseline {
+		t.Fatal("a disabled block must compile to the same digest as an absent one")
+	}
+
+	cc, _, enabledDigest := compile(t, &kubeneuronv1alpha1.CheckpointCoordinationSpec{
+		Enabled:     true,
+		Namespaces:  []string{" research ", "training", "research", ""},
+		SkipClasses: []string{"gpu-lost", "fell-off-bus", "gpu-lost"},
+	})
+	if cc == nil || !cc.Enabled {
+		t.Fatalf("compiled checkpoint policy = %+v, want enabled", cc)
+	}
+	if cc.DefaultWait != config.CheckpointDefaultWait || cc.MaxWait != config.CheckpointDefaultMaxWait {
+		t.Fatalf("waits = %v/%v, want the CRD defaults 5m/15m", cc.DefaultWait.Std(), cc.MaxWait.Std())
+	}
+	if got := strings.Join(cc.Namespaces, ","); got != "research,training" {
+		t.Fatalf("namespaces = %q, want trimmed, de-duplicated and sorted", got)
+	}
+	if len(cc.SkipClasses) != 2 || cc.SkipClasses[0] != "fell-off-bus" || cc.SkipClasses[1] != "gpu-lost" {
+		t.Fatalf("skip classes = %v, want de-duplicated and sorted", cc.SkipClasses)
+	}
+	if enabledDigest == baseline {
+		t.Fatal("an enabled policy must change the digest so the controller rolls")
+	}
+
+	cc, _, _ = compile(t, &kubeneuronv1alpha1.CheckpointCoordinationSpec{
+		Enabled: true, DefaultWait: "30s", MaxWait: "30m", Namespaces: []string{"a"},
+	})
+	if cc.DefaultWait.Std() != 30*time.Second || cc.MaxWait.Std() != 30*time.Minute {
+		t.Fatalf("explicit waits = %+v, want 30s/30m carried through", cc)
+	}
+
+	// An absent skipClasses compiles to the device-dead defaults; an explicit
+	// empty list is "coordinate for every class" and must survive the trip to
+	// the controller as an empty list, not vanish and be re-defaulted there.
+	cc, _, _ = compile(t, &kubeneuronv1alpha1.CheckpointCoordinationSpec{
+		Enabled: true, Namespaces: []string{"a"},
+	})
+	if !reflect.DeepEqual(cc.SkipClasses, checkpoint.DefaultSkipClasses()) {
+		t.Fatalf("absent skipClasses compiled to %v, want the defaults %v", cc.SkipClasses, checkpoint.DefaultSkipClasses())
+	}
+	cc, yamlText, _ = compile(t, &kubeneuronv1alpha1.CheckpointCoordinationSpec{
+		Enabled: true, Namespaces: []string{"a"}, SkipClasses: []string{},
+	})
+	if cc.SkipClasses == nil || len(cc.SkipClasses) != 0 {
+		t.Fatalf("explicit empty skipClasses compiled to %v, want an empty list", cc.SkipClasses)
+	}
+	if !strings.Contains(yamlText, "skip_classes: []") {
+		t.Fatalf("explicit empty skipClasses left no key in the snapshot:\n%s", yamlText)
+	}
+	cc, _, _ = compile(t, &kubeneuronv1alpha1.CheckpointCoordinationSpec{
+		Enabled: true, Namespaces: []string{"a"}, SkipClasses: []string{"ecc-dbe"},
+	})
+	if len(cc.SkipClasses) != 1 || cc.SkipClasses[0] != "ecc-dbe" {
+		t.Fatalf("explicit skipClasses = %v, want it to replace the default, not extend it", cc.SkipClasses)
+	}
+}
+
+func TestCompileSnapshotRejectsInvalidCheckpointCoordination(t *testing.T) {
+	for name, tc := range map[string]struct {
+		spec    kubeneuronv1alpha1.CheckpointCoordinationSpec
+		wantErr string
+	}{
+		"no namespaces":     {kubeneuronv1alpha1.CheckpointCoordinationSpec{Enabled: true}, "namespaces must name"},
+		"blank namespaces":  {kubeneuronv1alpha1.CheckpointCoordinationSpec{Enabled: true, Namespaces: []string{" ", ""}}, "namespaces must name"},
+		"malformed default": {kubeneuronv1alpha1.CheckpointCoordinationSpec{Enabled: true, Namespaces: []string{"a"}, DefaultWait: "soon"}, "checkpointCoordination.defaultWait"},
+		"malformed max":     {kubeneuronv1alpha1.CheckpointCoordinationSpec{Enabled: true, Namespaces: []string{"a"}, MaxWait: "5"}, "checkpointCoordination.maxWait"},
+		"zero default":      {kubeneuronv1alpha1.CheckpointCoordinationSpec{Enabled: true, Namespaces: []string{"a"}, DefaultWait: "0s"}, "must be positive"},
+		"negative max":      {kubeneuronv1alpha1.CheckpointCoordinationSpec{Enabled: true, Namespaces: []string{"a"}, MaxWait: "-1m"}, "must be positive"},
+		"max above ceiling": {kubeneuronv1alpha1.CheckpointCoordinationSpec{Enabled: true, Namespaces: []string{"a"}, MaxWait: "31m"}, "exceeds the 30m0s ceiling"},
+		"default above max": {kubeneuronv1alpha1.CheckpointCoordinationSpec{Enabled: true, Namespaces: []string{"a"}, DefaultWait: "20m"}, "defaultWait 20m0s exceeds maxWait 15m0s"},
+		"default above 30m": {kubeneuronv1alpha1.CheckpointCoordinationSpec{Enabled: true, Namespaces: []string{"a"}, DefaultWait: "1h", MaxWait: "30m"}, "exceeds maxWait"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			installation := testKubeNeuron()
+			spec := tc.spec
+			installation.Spec.Safety.CheckpointCoordination = &spec
+			policies, playbooks := testPolicyFixture()
+			_, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("CompileSnapshot() error = %v, want substring %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 
