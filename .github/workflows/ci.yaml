@@ -40,7 +40,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.13"
+          go-version: "1.26.9"
           cache: true
 
       - name: Verify generated code
@@ -83,7 +83,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.13"
+          go-version: "1.26.9"
           cache: true
 
       - name: Install pinned Kubernetes clients
@@ -177,13 +177,13 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.13"
+          go-version: "1.26.9"
           cache: true
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.5.0
+          version: v2.14.0
 
       - name: actionlint (workflow files stay valid)
         # From the module's own tool dependency, not @version: the fetch form
@@ -198,7 +198,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.13"
+          go-version: "1.26.9"
           cache: true
 
       - name: govulncheck

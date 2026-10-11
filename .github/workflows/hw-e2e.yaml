@@ -78,7 +78,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.13"
+          go-version: "1.26.9"
           cache: true
 
       - name: Assume the GPU-lab AWS role (OIDC)

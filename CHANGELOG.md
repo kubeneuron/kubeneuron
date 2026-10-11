@@ -9,6 +9,25 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+### Security
+
+- **Go 1.26.9, `golang.org/x/net` v0.60.0, `golang.org/x/text` v0.42.0.**
+  `govulncheck` v1.1.4 against the v0.6.0 source under Go 1.25.13 reports ten
+  standard-library advisories as reachable from shipped code (GO-2026-6603,
+  6605, 6607, 6608, 6609, 6610, 6611, 6612, 6613, 6617), five of them also in
+  `x/net` v0.56.0, plus GO-2026-6629 in `x/text` v0.40.0; the v0.6.0 binaries
+  and images were built with those versions. The `go` directive moves to
+  1.26.0 with `toolchain go1.26.9`, so a Go 1.25 install either downloads
+  1.26.9 (`GOTOOLCHAIN=auto`, the default) or refuses to build
+  (`GOTOOLCHAIN=local`) instead of silently producing a vulnerable binary;
+  `build/Dockerfile` and the eight `go-version` pins in the CI, release and
+  hardware workflows move with it. The CI golangci-lint pin moves from v2.5.0
+  to v2.14.0 because a linter built with Go 1.25 refuses a Go 1.26 module.
+  `x/net` v0.60.0 raises `x/crypto` v0.57.0, `x/mod` v0.41.0, `x/sync`
+  v0.23.0, `x/sys` v0.48.0, `x/term` v0.46.0 and `x/tools` v0.49.0 as its own
+  minimums; nothing else moved. `govulncheck` now reports zero reachable
+  advisories.
+
 ## [v0.6.0] - 2026-10-11
 
 Checkpoint coordination, Phase 1. **Release status: published 2026-10-11
