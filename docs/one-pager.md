@@ -65,8 +65,9 @@ even run, with DCGM/NVML corroboration as runtime evidence.
 
 ## Proof, not claims
 
-- Release artifacts are versioned with the chart and manifests (v0.6.0,
-  published 2026-10-11, is the latest published release).
+- Release artifacts are versioned with the chart and manifests (v0.6.1, the
+  security and toolchain patch released 2026-10-11, is the latest release;
+  checkpoint coordination itself arrived in v0.6.0 the same day).
   Verify the image digest and SBOM for the artifact you install; this document
   does not treat a tag as a hardware qualification claim.
 - The full ladder — kernel-injected XID 79 → cordon → drain → approval →

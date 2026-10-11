@@ -15,7 +15,7 @@ target design in code, tests, and documentation.
 
 ## Development setup
 
-Requirements: Go 1.25+, `make`, and Docker for the kind integration target
+Requirements: Go 1.26+, `make`, and Docker for the kind integration target
 and `make docker` image builds. Kubernetes API/operator work also needs `kubectl`; the
 checked-in integration target uses Docker, jq, kind v0.32.0, and kubectl
 v1.33.12 to create a digest-pinned Kubernetes v1.33.12 cluster. Kubernetes

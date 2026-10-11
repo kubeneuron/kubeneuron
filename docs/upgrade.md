@@ -100,8 +100,9 @@ evidence-only runtime contract qualifications — is the v0.5.0 scope, released
 on 2026-09-20; its tag, published images,
 and release assets are available from the
 [GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.5.0).
-(The manifests and chart in this source tree carry the v0.6.0 pins; see
-[the v0.6.0 notes](#v060-checkpoint-coordination-notes).)
+(The manifests and chart in this source tree carry the v0.6.1 pins; see
+[the v0.6.0 notes](#v060-checkpoint-coordination-notes) and
+[the v0.6.1 note](#v061-security-patch-notes).)
 This section describes the upgrade and rollback posture of that scope. The
 CPU-only kind integration harness drives the v0.5 routes and commands against
 a real controller and store with
@@ -164,16 +165,18 @@ hardware qualification of its own surfaces.
 
 ## v0.6.0 checkpoint coordination notes
 
-> v0.6.0 was **released on 2026-10-11 UTC** and is the latest published
-> release: the `v0.6.0` tag, images, install manifest, and release assets
-> are available from the
+> v0.6.0 was **released on 2026-10-11 UTC**: the `v0.6.0` tag, images,
+> install manifest, and release assets are available from the
 > [GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.6.0)
 > (15 assets, verified with `hack/verify-release.sh v0.6.0 kubeneuron/kubeneuron`:
-> asset set, checksums, digest pins, Cosign signature). The manifests,
-> chart, and samples in this source tree carry the v0.6.0 pins. Releases
-> before v0.6.0 do not contain this feature. This section describes the
-> upgrade and rollback posture of the checkpoint coordination scope.
-> Nothing here claims GPU hardware validation of the feature.
+> asset set, checksums, digest pins, Cosign signature). It has since been
+> superseded as the latest release by the v0.6.1 security and toolchain
+> patch (see [the v0.6.1 note](#v061-security-patch-notes)), which leaves
+> this feature unchanged; the manifests, chart, and samples in this source
+> tree carry the v0.6.1 pins. Releases before v0.6.0 do not contain this
+> feature. This section describes the upgrade and rollback posture of the
+> checkpoint coordination scope. Nothing here claims GPU hardware
+> validation of the feature.
 
 The v0.6.0 scope is one opt-in feature: `spec.safety.checkpointCoordination`,
 which lets opted-in Pods be told and given a bounded deadline before a
@@ -219,8 +222,10 @@ which lets opted-in Pods be told and given a bounded deadline before a
   rollback is sufficient; the store is untouched by this scope.
 - **Release rehearsal (run locally before the release).**
   `hack/kind-upgrade-rollback.sh` (`make test-upgrade-rollback-kind`, and the
-  `upgrade-rehearsal` job of the release workflow) drives v0.5.0 → HEAD →
-  v0.5.0 (images only) → HEAD on one kind cluster for both workflow stores.
+  `upgrade-rehearsal` job of the release workflow) drives the previous
+  published release → HEAD → that release (images only) → HEAD on one kind
+  cluster for both workflow stores; for v0.6.0 the baseline was v0.5.0 (for
+  v0.6.1 it is v0.6.0, see [the v0.6.1 note](#v061-security-patch-notes)).
   It was run as part of `make gates-full` on 2026-09-29/30 UTC against an
   earlier local, unpublished v0.6.0 candidate and passed on both SQLite and
   PostgreSQL. It seeded and read legacy API and data across the cycle,
@@ -297,6 +302,22 @@ rather than corrupting inventory. Complete the controller rollout before or
 together with the agent rollout inside one release; do not run mixed
 versions longer than a rolling upgrade needs.
 
+## v0.6.1 security patch notes
+
+v0.6.1, released 2026-10-11, is the latest release and a security and
+toolchain patch only: the binaries and images are rebuilt with Go 1.26.9
+and updated `golang.org/x/net` / `golang.org/x/text` (the advisories are
+listed in [CHANGELOG.md](../CHANGELOG.md)). It carries no CRD, RBAC, store
+schema, default, or feature change relative to v0.6.0, so the upgrade from
+v0.6.0 is images only, in the usual CRDs → operator → controller order, and
+rolling back to v0.6.0 is images only with no store restore. The release
+workflow's `upgrade-rehearsal` gate covers that path: it drives v0.6.0 →
+HEAD → v0.6.0 (images only) → HEAD on both workflow stores with v0.6.0 as
+the baseline (`hack/kind-upgrade-rollback.sh` defaults to the same
+baseline; the v0.6.0 release rehearsed against v0.5.0, as recorded above).
+Nothing in this patch adds GPU hardware validation; the v0.6.0 evidence
+above is the latest hardware evidence.
+
 ## Rolling back
 
 - **Images only** (no schema migration in between): patch the root object
@@ -315,6 +336,8 @@ versions longer than a rolling upgrade needs.
 - **v0.5 runtime contract scope**: images only, no store restore needed;
   see [the v0.5.0 notes](#v050-runtime-contract-lifecycle-notes)
   for what the old binary can and cannot see afterwards.
+- **v0.6.1 security patch**: images only, no store restore needed; see
+  [the v0.6.1 note](#v061-security-patch-notes).
 - **v0.6 checkpoint coordination scope** (released in v0.6.0): disable
   `spec.safety.checkpointCoordination` first, then images only; see
   [the v0.6.0 notes](#v060-checkpoint-coordination-notes). Stamped

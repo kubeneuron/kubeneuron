@@ -40,6 +40,16 @@ v0\.5\.0 is the latest (\*\*)?published
 pending (the )?v0\.6\.0( release)?
 v0\.6\.0 release, which has not happened
 before the v0\.6\.0 release is published
+# v0.6.1 (the Go 1.26.9 / x/net / x/text security patch) superseded v0.6.0 as
+# the latest release on 2026-10-11 and the pins moved with it. Narrow: "released
+# in v0.6.0", "introduced in v0.6.0" and "the v0.6.0 notes" (feature history)
+# stay legal; only "latest release" and "this tree's pins" claims are stale.
+v0\.6\.0 is the latest (\*\*)?(published )?(\*\*)?release
+latest (published )?release(,)? (is|remains) v0\.6\.0
+carry the v0\.6\.0 pins
+in this tree (still )?pins? v0\.6\.0
+# go.mod moved to `go 1.26.0` / `toolchain go1.26.9` with the v0.6.1 patch.
+Go 1\.25(\+| or newer)
 
 # --- vendor support claims -------------------------------------------------
 # The second category in this file: claims that are not yet true. Shipping

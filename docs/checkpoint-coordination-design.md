@@ -4,7 +4,8 @@ Status: **Phase 1 implemented and released in v0.6.0** (published
 2026-10-11 UTC;
 [GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.6.0),
 verified with `hack/verify-release.sh`). Design accepted 2026-08-05. The
-manifests, chart, and samples in this source tree carry the v0.6.0 pins.
+manifests, chart, and samples in this source tree carry the v0.6.1 pins (the
+security and toolchain patch to v0.6.0; the feature is unchanged by it).
 Nothing in this document is a claim that the feature has been exercised on
 GPU hardware: the release source passed the full AWS hardware harness on
 2026-10-07, but that harness drives the shared runtime against injected
