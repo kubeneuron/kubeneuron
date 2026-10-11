@@ -2,7 +2,7 @@
 
 Goal: watch a synthetic XID 79 travel signal → incident → escalation ladder
 → approval → verification → resolved, with every side effect a logged
-no-op, on any machine with Go 1.25+ (no GPU, no cluster).
+no-op, on any machine with Go 1.26+ (no GPU, no cluster).
 
 ## 1. Build and test
 

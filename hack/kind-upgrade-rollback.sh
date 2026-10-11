@@ -2,14 +2,14 @@
 # shellcheck disable=SC2016 # Single-quoted jq programs expand jq, not shell, variables.
 set -Eeuo pipefail
 
-# v0.5.0 -> HEAD -> v0.5.0 (images only) -> HEAD lifecycle rehearsal on kind,
+# v0.6.0 -> HEAD -> v0.6.0 (images only) -> HEAD lifecycle rehearsal on kind,
 # for BOTH workflow stores, with the v0.5 runtime contract qualification rows
 # and their hash-chained audit history as the durable evidence under test,
 # and the v0.6 checkpoint coordination policy (new, default off) exercised
 # on HEAD and switched back off before the rollback, as docs/upgrade.md
 # "v0.6.0 checkpoint coordination notes" requires.
 #
-# One disposable kind cluster hosts two v0.5.0 installations side by side —
+# One disposable kind cluster hosts two BASELINE installations side by side —
 # `upgrade-sqlite` on the SQLite PVC store and `upgrade-postgres` on a
 # throwaway in-cluster PostgreSQL — under the one cluster-scoped operator, so
 # every step below is performed once for the operator and once per store:
@@ -39,7 +39,7 @@ set -Eeuo pipefail
 #      UID and container restart counts are snapshotted before the policy is
 #      touched and must be identical after enable and after disable;
 #   5. roll the controller/agent images back to BASELINE (images only, no
-#      store restore — docs/upgrade.md "Rolling back") and prove the v0.5.0
+#      store restore — docs/upgrade.md "Rolling back") and prove the BASELINE
 #      binary still serves the baseline incident, reads the qualification
 #      back byte-identical (except the read-time evaluation clock), lists it
 #      exactly once, answers the coverage routes, returns the same audit
@@ -69,9 +69,10 @@ set -Eeuo pipefail
 # if the current login predates it.
 #
 # Env:
-#   BASELINE          released tag to start from (default: v0.5.0; the
-#                     baseline must already serve the v0.5 runtime-contract
-#                     routes, which the seed step verifies)
+#   BASELINE          released tag to start from (default: v0.6.0, the
+#                     previous published release; the baseline must already
+#                     serve the v0.5 runtime-contract routes, which the seed
+#                     step verifies, so v0.5.0 is the oldest accepted)
 #   STORES            space-separated subset of "sqlite postgres" (default: both)
 #   CLUSTER_NAME      kind cluster (default: kubeneuron-upgrade-rollback;
 #                     created if absent, deleted on exit unless KEEP_CLUSTER=1)
@@ -80,7 +81,7 @@ set -Eeuo pipefail
 #   POSTGRES_IMAGE    throwaway database image (default: docker.io/library/postgres:16-alpine)
 #   KIND_BIN, KUBECTL_BIN, DOCKER_BIN, JQ_BIN  command paths
 
-BASELINE=${BASELINE:-v0.5.0}
+BASELINE=${BASELINE:-v0.6.0}
 RELEASE_REPO=${RELEASE_REPO:-kubeneuron/kubeneuron}
 LOAD_PLATFORM=${LOAD_PLATFORM:-linux/$(go env GOARCH 2>/dev/null || echo amd64)}
 CLUSTER_NAME=${CLUSTER_NAME:-kubeneuron-upgrade-rollback}
@@ -874,7 +875,7 @@ rollback_images_to_baseline() {
 	# the operator compiles it and conditionally grants pods patch): an
 	# images-only rollback is exactly the rollback the v0.6 notes promise, and
 	# the policy has already been disabled through the CR before this point,
-	# so the HEAD operator compiles no policy and the v0.5.0 controller reads
+	# so the HEAD operator compiles no policy and the BASELINE controller reads
 	# a snapshot it fully understands. Rolling the operator back too is the
 	# separate "Operator/CRDs" path (re-apply the previous install manifest),
 	# not what this rehearsal claims.
@@ -1212,7 +1213,7 @@ for store in $STORES; do
 		die "[$store] qualification audit chain read through the $BASELINE binary differs from the pre-rollback chain"
 	}
 	# The policy was disabled before the images moved, and the HEAD operator
-	# keeps reconciling: the v0.5.0 controller must be running under exactly
+	# keeps reconciling: the BASELINE controller must be running under exactly
 	# the read-only pods grant it was built for.
 	assert_pod_verbs "$store" "get,list,watch" "after image rollback"
 	logs=$("$KUBECTL_BIN" -n "$(store_ns "$store")" logs "pod/$(leader_pod "$store")" --tail=-1 2>&1)

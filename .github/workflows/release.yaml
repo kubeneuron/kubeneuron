@@ -322,11 +322,11 @@ jobs:
 
   # No tag ships without an upgrade from the release before it AND a rollback
   # to it, rehearsed in the documented order on a real cluster.
-  # hack/kind-upgrade-rollback.sh drives v0.5.0 -> HEAD -> v0.5.0 (images
+  # hack/kind-upgrade-rollback.sh drives v0.6.0 -> HEAD -> v0.6.0 (images
   # only) -> HEAD for BOTH workflow stores (SQLite PVC and a throwaway
   # in-cluster PostgreSQL) side by side, with the v0.5 runtime contract
   # qualification rows and their hash-chained audit as the durable evidence:
-  # the v0.5.0 binary must read them back byte-identical after the rollback,
+  # the v0.6.0 binary must read them back byte-identical after the rollback,
   # and the re-upgrade must read them back byte-identical and extend the same
   # chain. On HEAD it also enables and disables the v0.6 checkpoint
   # coordination policy and proves the managed controller ClusterRole holds
@@ -336,15 +336,17 @@ jobs:
   # installation cannot cross, and a CRD whose new fields the upgraded API
   # does not actually serve.
   #
-  # The baseline is the actual previous minor release, not a variable: the
-  # rollback assertions (the v0.5 runtime-contract routes keep serving on the
-  # old binary, the baseline incident survives, the role is read-only on
-  # pods) are specific to what v0.5.0 shipped.
+  # The baseline is the actual previous published release, not a variable:
+  # v0.6.0 for the v0.6.1 security patch (the v0.6.0 tag itself rehearsed
+  # against v0.5.0). The rollback assertions (the v0.5 runtime-contract
+  # routes keep serving on the old binary, the baseline incident survives,
+  # the role is read-only on pods) need a baseline that already ships the
+  # v0.5 runtime contract, which the script's seed step verifies.
   upgrade-rehearsal:
     if: github.repository == 'kubeneuron/kubeneuron'
     needs: [gates]
     runs-on: ubuntu-24.04
-    # Two v0.5.0 installations, a PostgreSQL pull, three HEAD image builds,
+    # Two v0.6.0 installations, a PostgreSQL pull, three HEAD image builds,
     # two image-level rollbacks and two re-upgrades on a three-node kind
     # cluster (one control-plane plus one dedicated labeled worker per store,
     # because the agent's hostPath spool state must not be shared): well
@@ -354,7 +356,7 @@ jobs:
       contents: read
       packages: read
     env:
-      BASELINE: v0.5.0
+      BASELINE: v0.6.0
       STORES: sqlite postgres
       # The published release (its install manifest and images.txt) lives in
       # the repository the tag is pushed to; the script also uses this to
@@ -406,9 +408,9 @@ jobs:
           sudo sysctl fs.inotify.max_user_instances=512 \
             fs.inotify.max_user_watches=524288
 
-      - name: Rehearse upgrade and rollback against v0.5.0 on both stores
+      - name: Rehearse upgrade and rollback against v0.6.0 on both stores
         env:
-          # `gh release download` of the v0.5.0 install manifest and
+          # `gh release download` of the v0.6.0 install manifest and
           # images.txt, and the GHCR login fallback for the baseline images.
           GH_TOKEN: ${{ github.token }}
         run: bash hack/kind-upgrade-rollback.sh

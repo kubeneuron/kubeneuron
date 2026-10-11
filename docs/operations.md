@@ -360,11 +360,12 @@ must be recorded by the adapter and its operating procedure.
 
 ## Checkpoint coordination (opt-in, v0.6.0)
 
-> Released in v0.6.0 (published 2026-10-11 UTC; this tree's manifests,
-> chart, and samples carry the v0.6.0 pins). Releases before v0.6.0 do not
-> contain it. It has not been exercised on GPU hardware or by a real
-> checkpointing workload: the v0.6.0 hardware run exercised the shared
-> runtime, not this feature.
+> Released in v0.6.0 (published 2026-10-11 UTC); the v0.6.1 security and
+> toolchain patch released the same day leaves it unchanged, and this tree's
+> manifests, chart, and samples carry the v0.6.1 pins. Releases before
+> v0.6.0 do not contain it. It has not been exercised on GPU hardware or by
+> a real checkpointing workload: the v0.6.0 hardware run exercised the
+> shared runtime, not this feature.
 
 `spec.safety.checkpointCoordination` lets opted-in Pods be told, and given a
 bounded deadline, before a `Drain` or `EvictGPUWorkload` step disrupts them.

@@ -79,23 +79,32 @@ See also the [REST](docs/reference-api.md) and [CLI](docs/reference-cli.md)
 references, the [upgrade notes](docs/upgrade.md), and the
 [v0.5.0 security review](docs/security-review-v0.5.0.md).
 
-**Released (v0.6.0, 2026-10-11):** checkpoint coordination, Phase 1 — the
-opt-in `spec.safety.checkpointCoordination` block that tells opted-in Pods,
-with a bounded deadline, before a `Drain` or `EvictGPUWorkload` step disrupts
-them (see [CHANGELOG.md](CHANGELOG.md)). v0.6.0 is the latest **published**
-release: the `v0.6.0` tag, images, install manifest, and release assets are
-available from the
+**Latest release (v0.6.1, 2026-10-11):** a security and toolchain patch to
+v0.6.0 — Go 1.26.9 with updated `golang.org/x/net` and `golang.org/x/text`,
+closing the `govulncheck` advisories listed in [CHANGELOG.md](CHANGELOG.md).
+It changes no feature, CRD, RBAC rule, store schema, or default, and claims
+no GPU hardware validation of its own. The `v0.6.1` tag, images, install
+manifest, and release assets are available from the
+[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.6.1),
+and the manifests, Helm chart, and samples in this source tree carry the
+v0.6.1 pins, so installing from this tree's defaults resolves the released
+images.
+
+**Introduced in v0.6.0 (published 2026-10-11 UTC):** checkpoint
+coordination, Phase 1 — the opt-in `spec.safety.checkpointCoordination`
+block that tells opted-in Pods, with a bounded deadline, before a `Drain` or
+`EvictGPUWorkload` step disrupts them (see [CHANGELOG.md](CHANGELOG.md)). The
+`v0.6.0` tag, images, install manifest, and release assets remain available
+from the
 [GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.6.0),
-published 2026-10-11 UTC as a non-prerelease release with 15 assets and
-independently verified with `hack/verify-release.sh v0.6.0 kubeneuron/kubeneuron`
-(asset set, checksums, digest pins, and Cosign signature). The manifests,
-Helm chart, and samples in this source tree carry the v0.6.0 pins, so
-installing from this tree's defaults resolves the published images. v0.6.0
-claims no GPU hardware validation of the checkpoint feature: the release
-source passed the full AWS hardware harness on a temporary EKS `g4dn.xlarge`
-/ Tesla T4 cluster on 2026-10-07, which exercised the shared agent/controller
-runtime against injected faults and carried no opted-in checkpointing Pod.
-See the [design record](docs/checkpoint-coordination-design.md), the
+published as a non-prerelease release with 15 assets and independently
+verified with `hack/verify-release.sh v0.6.0 kubeneuron/kubeneuron` (asset
+set, checksums, digest pins, and Cosign signature). v0.6.0 claims no GPU
+hardware validation of the checkpoint feature: the release source passed the
+full AWS hardware harness on a temporary EKS `g4dn.xlarge` / Tesla T4 cluster
+on 2026-10-07, which exercised the shared agent/controller runtime against
+injected faults and carried no opted-in checkpointing Pod. See the
+[design record](docs/checkpoint-coordination-design.md), the
 [upgrade notes](docs/upgrade.md#v060-checkpoint-coordination-notes), and the
 [v0.6.0 security review](docs/security-review-v0.6.0.md).
 
@@ -171,7 +180,8 @@ The API is `v1alpha1` and may change without compatibility guarantees.
 
 ## Build and local checks
 
-Go 1.25 or newer is required.
+Go 1.26 or newer is required (the module sets `toolchain go1.26.9`; a Go 1.25
+install with the default `GOTOOLCHAIN=auto` downloads it).
 
 ```sh
 make build

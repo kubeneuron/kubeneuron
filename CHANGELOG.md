@@ -9,6 +9,25 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+## [v0.6.1] - 2026-10-11
+
+Security and toolchain patch to v0.6.0: Go 1.26.9 plus the `golang.org/x/net`
+and `golang.org/x/text` updates below, nothing else. No feature, CRD, RBAC,
+store migration, or default-behaviour change: checkpoint coordination and
+everything else ship exactly as released in v0.6.0 on 2026-10-11, rebuilt
+with the patched toolchain and dependencies. The source defaults (the
+`config/default` operator image, the Helm chart `version`/`appVersion`/image
+tag, and the sample controller and agent images) move to v0.6.1 so that the
+tag and source users consume what the tag describes. Upgrading from v0.6.0
+is images only; rolling back to v0.6.0 is images only, and the release
+workflow's `upgrade-rehearsal` gate rehearses exactly that on both stores:
+v0.6.0 → HEAD → v0.6.0 (images only) → HEAD, with v0.6.0 as the baseline
+in place of the v0.5.0 baseline the v0.6.0 release rehearsed against
+(`hack/kind-upgrade-rollback.sh` now defaults to v0.6.0 as well). This
+patch adds no GPU hardware validation: the v0.6.0 evidence below is the
+latest hardware evidence, and no run has exercised the v0.6.1 binaries on
+GPU hardware.
+
 ### Security
 
 - **Go 1.26.9, `golang.org/x/net` v0.60.0, `golang.org/x/text` v0.42.0.**
