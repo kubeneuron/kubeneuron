@@ -307,7 +307,7 @@ versions longer than a rolling upgrade needs.
 v0.6.1, released 2026-10-11, is the latest release and a security and
 toolchain patch only: the binaries and images are rebuilt with Go 1.26.9
 and updated `golang.org/x/net` / `golang.org/x/text` (the advisories are
-listed in [CHANGELOG.md](../CHANGELOG.md)). It carries no CRD, RBAC, store
+listed in [CHANGELOG.md](https://github.com/kubeneuron/kubeneuron/blob/main/CHANGELOG.md)). It carries no CRD, RBAC, store
 schema, default, or feature change relative to v0.6.0, so the upgrade from
 v0.6.0 is images only, in the usual CRDs → operator → controller order, and
 rolling back to v0.6.0 is images only with no store restore. The release
