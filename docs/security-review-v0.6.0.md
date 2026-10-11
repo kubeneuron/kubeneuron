@@ -1,14 +1,16 @@
 # Security review — v0.6.0 checkpoint coordination (Phase 1)
 
-Status: review of the checkpoint coordination Phase 1 implementation on
-`main`, **ahead of the v0.6.0 release, which has not happened**. It is a
-review of the code in this tree, not a third-party audit, and it is not a
-hardware qualification: the feature has been exercised by unit tests, by the
-full CPU-only kind integration suite (85 CEL checks and the smoke suite), and
-by the completed dual-store (SQLite and PostgreSQL) upgrade/rollback
-rehearsal, and by nothing on GPU hardware. The candidate tree did pass the
-full AWS hardware harness (`hack/hw-e2e.sh`) on a temporary EKS
-`g4dn.xlarge` cluster on 2026-10-07, but that harness exercises the shared
+Status: **completed for the published v0.6.0 release (2026-10-11).** The
+review was written against the checkpoint coordination Phase 1 code before
+the tag was cut; the `v0.6.0` tag carries that same code (the commits between
+the reviewed tree and the tag are documentation only). It is a review of the
+code in this repository, not a third-party audit, and it is not a hardware
+qualification: the feature has been exercised by unit tests, by the full
+CPU-only kind integration suite (85 CEL checks and the smoke suite), and by
+the completed dual-store (SQLite and PostgreSQL) upgrade/rollback rehearsal,
+and by nothing on GPU hardware. The release source did pass the full AWS
+hardware harness (`hack/hw-e2e.sh`) on a temporary EKS `g4dn.xlarge` /
+Tesla T4 cluster on 2026-10-07, but that harness exercises the shared
 agent/controller runtime against injected faults and carries no opted-in
 checkpointing Pod. No real Pod + Downward API checkpoint scenario has been
 run, and kubelet refresh latency is unmeasured.

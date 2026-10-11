@@ -97,11 +97,11 @@ unscoped node.
 The GPU Runtime Contract Lifecycle — read-only runtime contract coverage, the
 candidate runtime contract impact inside policy impact previews, and
 evidence-only runtime contract qualifications — is the v0.5.0 scope, released
-on 2026-09-20 and the latest published release; its tag, published images,
+on 2026-09-20; its tag, published images,
 and release assets are available from the
 [GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.5.0).
-(The manifests and chart in this source tree carry the unpublished v0.6.0
-candidate pins; see [the v0.6.0 notes](#v060-checkpoint-coordination-notes).)
+(The manifests and chart in this source tree carry the v0.6.0 pins; see
+[the v0.6.0 notes](#v060-checkpoint-coordination-notes).)
 This section describes the upgrade and rollback posture of that scope. The
 CPU-only kind integration harness drives the v0.5 routes and commands against
 a real controller and store with
@@ -164,19 +164,22 @@ hardware qualification of its own surfaces.
 
 ## v0.6.0 checkpoint coordination notes
 
-> v0.6.0 is **prepared in source, not released**. The manifests, chart, and
-> samples in this source tree carry the v0.6.0 candidate pins, but the
-> `v0.6.0` tag, images, install manifest, and release assets do not yet
-> exist; the latest published release is v0.5.0, which does not contain
-> this feature. This section describes the upgrade and rollback posture of
-> the checkpoint coordination scope so that it is written down before the
-> release rather than after. Nothing here claims GPU hardware validation.
+> v0.6.0 was **released on 2026-10-11 UTC** and is the latest published
+> release: the `v0.6.0` tag, images, install manifest, and release assets
+> are available from the
+> [GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.6.0)
+> (15 assets, verified with `hack/verify-release.sh v0.6.0 kubeneuron/kubeneuron`:
+> asset set, checksums, digest pins, Cosign signature). The manifests,
+> chart, and samples in this source tree carry the v0.6.0 pins. Releases
+> before v0.6.0 do not contain this feature. This section describes the
+> upgrade and rollback posture of the checkpoint coordination scope.
+> Nothing here claims GPU hardware validation of the feature.
 
 The v0.6.0 scope is one opt-in feature: `spec.safety.checkpointCoordination`,
 which lets opted-in Pods be told and given a bounded deadline before a
 `Drain` or `EvictGPUWorkload` step disrupts them
 ([design](checkpoint-coordination-design.md),
-[operations](operations.md#checkpoint-coordination-opt-in-v060-scope-unreleased)).
+[operations](operations.md#checkpoint-coordination-opt-in-v060)).
 
 - **Order: CRDs → operator → controller.** The CRD adds the optional
   `checkpointCoordination` block with its CEL bounds; the operator compiles
@@ -214,7 +217,7 @@ which lets opted-in Pods be told and given a bounded deadline before a
   Pods (`kubeneuron.io/checkpoint-*`) are durable history: harmless, read by
   nothing once the policy is off, and needing no cleanup. Images-only
   rollback is sufficient; the store is untouched by this scope.
-- **Release rehearsal (run locally, pre-release).**
+- **Release rehearsal (run locally before the release).**
   `hack/kind-upgrade-rollback.sh` (`make test-upgrade-rollback-kind`, and the
   `upgrade-rehearsal` job of the release workflow) drives v0.5.0 → HEAD →
   v0.5.0 (images only) → HEAD on one kind cluster for both workflow stores.
@@ -232,9 +235,10 @@ which lets opted-in Pods be told and given a bounded deadline before a
   restarts a Pod: it snapshots every managed controller and agent Pod's UID
   and container restart counts before the policy is touched and requires
   them unchanged after enable and again after disable. That assertion was
-  added after the 2026-09-29/30 run, which did not check it; the current
-  candidate must rerun the rehearsal before it is tagged, and that rerun is
-  the evidence for the claim. CPU-only, with synthetic accelerator evidence
+  added after the 2026-09-29/30 run, which did not check it; the rehearsal
+  was rerun on 2026-10-05 UTC on the source that became the v0.6.0 release
+  and passed on both stores, and that rerun is the evidence for the claim.
+  CPU-only, with synthetic accelerator evidence
   and no real checkpointing workload; it proves the upgrade, RBAC, and
   rollback wiring, not the protocol against a training job, and no real
   Pod + Downward API scenario has been run.
@@ -311,8 +315,7 @@ versions longer than a rolling upgrade needs.
 - **v0.5 runtime contract scope**: images only, no store restore needed;
   see [the v0.5.0 notes](#v050-runtime-contract-lifecycle-notes)
   for what the old binary can and cannot see afterwards.
-- **v0.6 checkpoint coordination scope** (candidate in source, unreleased):
-  disable
+- **v0.6 checkpoint coordination scope** (released in v0.6.0): disable
   `spec.safety.checkpointCoordination` first, then images only; see
   [the v0.6.0 notes](#v060-checkpoint-coordination-notes). Stamped
   `kubeneuron.io/checkpoint-*` annotations need no cleanup.

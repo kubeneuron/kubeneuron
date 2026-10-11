@@ -1,12 +1,14 @@
 # Checkpoint coordination — design and Phase 1 implementation record
 
-Status: **Phase 1 implemented on `main`; v0.6.0 candidate prepared in
-source, not released.** Design accepted 2026-08-05. The manifests, chart,
-and samples in this source tree carry the v0.6.0 candidate pins, but the
-`v0.6.0` tag, images, and release assets do not yet exist; the latest
-published release is v0.5.0, which does not contain this feature. Nothing in
-this document is a claim that v0.6.0 has been released or that the feature
-has been exercised on GPU hardware.
+Status: **Phase 1 implemented and released in v0.6.0** (published
+2026-10-11 UTC;
+[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.6.0),
+verified with `hack/verify-release.sh`). Design accepted 2026-08-05. The
+manifests, chart, and samples in this source tree carry the v0.6.0 pins.
+Nothing in this document is a claim that the feature has been exercised on
+GPU hardware: the release source passed the full AWS hardware harness on
+2026-10-07, but that harness drives the shared runtime against injected
+faults and carries no opted-in checkpointing Pod.
 Scope: §3.2 of the [definition plan](definition-plan.md).
 
 A training job that supports checkpointing would rather be **told** than
@@ -427,14 +429,15 @@ purging. The honest artifact is "N disruptions, M coordinated, p50 wait 42s".
 
 ## Phases
 
-**Phase 1 — the protocol, single-pod scope.** *Implemented on `main`;
-v0.6.0 candidate prepared in source, release pending.* Opt-in annotation,
+**Phase 1 — the protocol, single-pod scope.** *Released in v0.6.0
+(2026-10-11).* Opt-in annotation,
 request/acknowledge, bounded
 wait on `drain` and `evict_gpu_workload`, metrics, audit, dry-run visibility,
 conditional RBAC. Useful on its own: a single-pod trainer gets a clean
-checkpoint before a reboot. It has been exercised by unit tests and the
-CPU-only integration harness's CEL cases; it has **not** been exercised on GPU
-hardware, and no such claim is made.
+checkpoint before a reboot. It has been exercised by unit tests, the
+CPU-only integration harness's CEL cases, and the dual-store upgrade/rollback
+rehearsal; it has **not** been exercised on GPU hardware or by a real
+checkpointing workload, and no such claim is made.
 
 **Phase 2 — lead time and gangs.** *Future scope, not implemented.* An
 advisory notice at approval park (same annotations, `checkpoint-advisory:

@@ -93,9 +93,9 @@ other than `Drain`, where it was validated and then silently ignored.
 
 ### Checkpoint coordination before `Drain` and `EvictGPUWorkload`
 
-> Implemented on `main` for v0.6.0, which is prepared in source (this tree's
-> manifests and chart carry the v0.6.0 candidate pins) but not yet tagged or
-> published; the latest published release, v0.5.0, does not contain it.
+> Released in v0.6.0 (published 2026-10-11 UTC); releases before v0.6.0 do
+> not contain it. It has not been exercised on GPU hardware or by a real
+> checkpointing workload.
 
 A training job that can checkpoint would rather be told than evicted. When the
 installation enables `spec.safety.checkpointCoordination`, the two disruption

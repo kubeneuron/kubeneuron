@@ -21,10 +21,25 @@ six CRDs
 unfinished (KubeNeuron )?runtime
 preview profile
 child-resource status is still
-# The source tree moved to the v0.6.0 candidate pins (unpublished); the
-# public docs must say "latest published release is v0.5.0", not that this
-# tree pins it.
+# The source tree moved past v0.5.0 (the pins carry v0.6.0); no doc may say
+# this tree still pins the older release.
 in this tree (still )?pins? v0\.5\.0
+# v0.6.0 was published on 2026-10-11 UTC. While it was a candidate, the public
+# docs carried these spellings by design; after publication every one of them
+# is a stale status claim. They are narrow enough to leave history alone:
+# "an earlier, unpublished v0.6.0 candidate" (a past rehearsal) and "ahead of
+# the release" (when a review was written) stay legal.
+prepared in source
+not yet tagged or published
+v0\.6\.0 candidate pins
+(tag|images|assets)[^.]{0,80}do(es)? not yet exist
+v0\.6\.0 (scope|candidate), unreleased
+candidate in source, unreleased
+latest published release(,)? (is|remains) v0\.5\.0
+v0\.5\.0 is the latest (\*\*)?published
+pending (the )?v0\.6\.0( release)?
+v0\.6\.0 release, which has not happened
+before the v0\.6\.0 release is published
 
 # --- vendor support claims -------------------------------------------------
 # The second category in this file: claims that are not yet true. Shipping

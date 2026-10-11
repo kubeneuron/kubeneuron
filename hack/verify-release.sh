@@ -13,15 +13,44 @@
 # against the GitHub OIDC issuer, the image digest table is present and
 # digest-pinned, and the installer manifest references those same digests.
 #
-# Usage: hack/verify-release.sh <tag> [repo]
+# Usage: hack/verify-release.sh <tag> [repo [release-id]]
 #   hack/verify-release.sh v0.2.2
 #   hack/verify-release.sh v0.2.3-rc.1 kubeneuron/kubeneuron
+#   hack/verify-release.sh v0.6.0 kubeneuron/kubeneuron 405392108
+#
+# Without a release id the release is resolved by tag, which is what a user
+# does and only works once it is published. With one, the exact release with
+# that id is fetched through the authenticated API, which is the only way to
+# reach a DRAFT: GitHub does not resolve a draft by tag (the v0.6.0 run proved
+# it with `release not found`), and lists it only to a token with push access.
+# The id is bound to <tag> and must still be a draft before anything is
+# downloaded, so a wrong id fails instead of verifying some other release, and
+# an already-published release is refused rather than re-verified as if it
+# were still waiting to go out. Everything after the download is identical in
+# both modes.
 set -euo pipefail
 
-TAG=${1:?usage: verify-release.sh <tag> [owner/repo]}
+TAG=${1:?usage: verify-release.sh <tag> [owner/repo [release-id]]}
 REPO=${2:-${RELEASE_REPO:-kubeneuron/kubeneuron}}
+RELEASE_ID=${3:-}
 GH_BIN=${GH_BIN:-gh}
 fail=0
+
+# All three reach the shell, the API path, and file names. In CI they arrive
+# from job outputs and the event; locally from whoever typed them. Refuse
+# anything that is not the one shape each can legitimately have.
+[[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || {
+	echo "verify-release: tag '${TAG}' is not a vX.Y.Z[-pre] release tag" >&2
+	exit 2
+}
+[[ $REPO =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+	echo "verify-release: repo '${REPO}' is not owner/name" >&2
+	exit 2
+}
+if [[ -n $RELEASE_ID && ! $RELEASE_ID =~ ^[0-9]+$ ]]; then
+	echo "verify-release: release id '${RELEASE_ID}' is not numeric" >&2
+	exit 2
+fi
 # Whether the signature was actually verified. The summary line must not claim
 # it otherwise: a green "signature verified" on a machine with no cosign is the
 # kind of over-claim this whole script exists to catch elsewhere.
@@ -36,8 +65,60 @@ bad() {
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-note "downloading ${REPO}@${TAG}"
-"$GH_BIN" release download "$TAG" --repo "$REPO" --dir "$work" --clobber
+# Download the exact release with that id through the API. Only the tag is
+# accepted as proof the id is the right release; the asset list and each byte
+# downloaded come from the same release object, never from a tag lookup.
+download_by_id() {
+	local release="repos/${REPO}/releases/${RELEASE_ID}"
+	local meta got_tag got_draft id state name
+	# One read of the release object gives both facts this mode insists on:
+	# the id is the release for <tag>, and it is still a DRAFT. The id path
+	# exists to verify a release before anyone can get it; a release that is
+	# already published is past the point this check is meant to guard, so
+	# accepting one here would make a pass mean less than it claims.
+	meta=$("$GH_BIN" api "$release" --jq '"\(.tag_name)\t\(.draft)"') || {
+		echo "release ${RELEASE_ID} is not readable in ${REPO} (a draft is visible only to a token with push access)" >&2
+		return 1
+	}
+	IFS=$'\t' read -r got_tag got_draft <<<"$meta"
+	[[ $got_tag == "$TAG" ]] || {
+		echo "release ${RELEASE_ID} in ${REPO} is for tag '${got_tag}', not '${TAG}'" >&2
+		return 1
+	}
+	[[ $got_draft == true ]] || {
+		echo "release ${RELEASE_ID} in ${REPO} (${TAG}) is not a draft (draft=${got_draft}); this mode verifies a release BEFORE publication, so an already-published release is refused" >&2
+		return 1
+	}
+	local -a assets=()
+	mapfile -t assets < <("$GH_BIN" api "$release" --jq '.assets[] | "\(.id)\t\(.state)\t\(.name)"')
+	for entry in "${assets[@]}"; do
+		IFS=$'\t' read -r id state name <<<"$entry"
+		# The name becomes a path under $work. GitHub already restricts asset
+		# names, but the allow-list below is what this script trusts, not a
+		# remote's input validation.
+		[[ $id =~ ^[0-9]+$ && $name =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+			echo "release ${RELEASE_ID} has an asset with an unexpected id/name: '${id}' '${name}'" >&2
+			return 1
+		}
+		[[ $state == uploaded ]] || {
+			echo "asset ${name} is in state '${state}', not 'uploaded'; the release is not finished" >&2
+			return 1
+		}
+		"$GH_BIN" api -H 'Accept: application/octet-stream' \
+			"repos/${REPO}/releases/assets/${id}" >"$work/$name" || {
+			echo "downloading asset ${name} (id ${id}) failed" >&2
+			return 1
+		}
+	done
+}
+
+if [[ -n $RELEASE_ID ]]; then
+	note "downloading ${REPO}@${TAG} (release id ${RELEASE_ID}, by id: must be a draft)"
+	download_by_id
+else
+	note "downloading ${REPO}@${TAG}"
+	"$GH_BIN" release download "$TAG" --repo "$REPO" --dir "$work" --clobber
+fi
 ls -1 "$work"
 
 # --- the asset set is closed --------------------------------------------------

@@ -358,12 +358,13 @@ or a dashboard data point as hardware qualification. Qualification, rollback
 compensation, and driver/runtime support are deployment-specific evidence that
 must be recorded by the adapter and its operating procedure.
 
-## Checkpoint coordination (opt-in, v0.6.0 scope, unreleased)
+## Checkpoint coordination (opt-in, v0.6.0)
 
-> Implemented on `main`; the v0.6.0 candidate is prepared in source (this
-> tree's manifests, chart, and samples carry the v0.6.0 pins) but is not yet
-> tagged or published. The latest published release, v0.5.0, does not
-> contain it, and it has not been exercised on GPU hardware.
+> Released in v0.6.0 (published 2026-10-11 UTC; this tree's manifests,
+> chart, and samples carry the v0.6.0 pins). Releases before v0.6.0 do not
+> contain it. It has not been exercised on GPU hardware or by a real
+> checkpointing workload: the v0.6.0 hardware run exercised the shared
+> runtime, not this feature.
 
 `spec.safety.checkpointCoordination` lets opted-in Pods be told, and given a
 bounded deadline, before a `Drain` or `EvictGPUWorkload` step disrupts them.

@@ -17,7 +17,7 @@ Grading scale: **shipped** (in a released tag, exercised by tests),
 | vendor-neutral | **stated** | seams are vendor-agnostic; every shipping detection and action path is NVIDIA |
 | GPU fleet reliability control plane | **shipped** | — |
 | detects degradation | **partial** | kmsg XID + DCGM/nvidia-smi; DCGM path never validated on live hardware; no predictive signals |
-| protects workloads | **partial** | evict/cordon/drain/idle-check ship; no workload-aware scheduling feedback; checkpoint coordination Phase 1 is implemented on `main` but unreleased (pending v0.6.0) |
+| protects workloads | **partial** | evict/cordon/drain/idle-check ship; no workload-aware scheduling feedback; checkpoint coordination Phase 1 shipped in v0.6.0 (2026-10-11), not yet exercised on GPU hardware |
 | automates safe recovery | **shipped** | validated live on EKS, including a real destructive node replace |
 | measures recovered | **shipped (v0.2.2)** | metrics land this release; dashboard and periodic report do not exist yet |
 
@@ -113,8 +113,8 @@ maintenance window, concurrency cap, PDB block) — the count of times the
 system chose *not* to disrupt is the protection story, and right now it is
 invisible.
 
-**3.2 Checkpoint coordination** — Phase 1 **implemented on `main`, pending
-the v0.6.0 release**; Phase 2 (advisory notice at approval park, gang scope)
+**3.2 Checkpoint coordination** — Phase 1 **shipped in v0.6.0
+(2026-10-11)**; Phase 2 (advisory notice at approval park, gang scope)
 remains future. Before a drain or eviction, a training job that supports
 checkpointing would rather be told than evicted. The shipped shape is an
 opt-in Pod annotation, a request stamped as annotations on that same Pod
@@ -188,7 +188,7 @@ build this before real data exists to calibrate it.
 | **v0.2.2** | measure what we already do | §5 metrics (done), release-pipeline proof via rc tag, operational pack |
 | **v0.2.3** | prove and expose | 2.1 + 4.2 (one paid hardware run), 5.1 dashboard, 3.1 protection metrics, 5.2 report |
 | **v0.3.0** | vendor-neutral in fact | 1.1 + 1.2 + 1.4 (AMD detection, kernel parity, capability matrix), 2.3 catalog audit |
-| **v0.3.x** | protect harder | 3.3 scheduler feedback, 3.2 checkpoint coordination (design first; Phase 1 implemented on `main` for v0.6.0, unreleased) |
+| **v0.3.x** | protect harder | 3.3 scheduler feedback, 3.2 checkpoint coordination (design first; Phase 1 shipped in v0.6.0) |
 | **hardware-gated** | — | 4.1 bare-metal reset, 1.3 AMD actions, 4.3 MIG decision + hardware |
 
 The ordering is deliberate: **measure before extending** (you cannot tell

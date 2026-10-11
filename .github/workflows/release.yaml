@@ -508,23 +508,41 @@ jobs:
   # downloads the assets and checks what install.md promises about them.
   # Everything upstream verifies inputs; three release candidates each found a
   # defect that only the finished artifact could show. The release is still a
-  # draft here: `gh release download` resolves a draft by tag for a token that
-  # can read the repository, so the check runs on the exact assets a user
-  # would get, before any user can get them.
+  # draft here, and a draft cannot be reached by tag: the v0.6.0 run's
+  # `gh release download v0.6.0` answered `release not found`. So the script
+  # is handed the id of the draft the release job created and fetches exactly
+  # that release through the API, bound to this tag, so the check runs on the
+  # exact assets a user would get, before any user can get them.
   release-verify:
     if: github.repository == 'kubeneuron/kubeneuron'
     needs: [release]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: read
+      # write, not read, because GitHub shows a DRAFT release only to a token
+      # with push access; with `contents: read` the draft does not exist as
+      # far as the API is concerned. Nothing here writes: the script only
+      # GETs the release and its assets, and promotion stays in
+      # release-publish, which runs only if this job passes.
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: sigstore/cosign-installer@v3
       - name: Verify the draft release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash hack/verify-release.sh "${GITHUB_REF_NAME}" "${GITHUB_REPOSITORY}"
+          RELEASE_ID: ${{ needs.release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          # Same contract release-publish enforces: no id means the release
+          # job did not create the draft, and verifying by tag would at best
+          # find some OTHER release carrying this tag.
+          [[ $RELEASE_ID =~ ^[0-9]+$ ]] || {
+            echo "release job produced no release id (got '${RELEASE_ID}')" >&2
+            exit 1
+          }
+          bash hack/verify-release.sh "${GITHUB_REF_NAME}" "${GITHUB_REPOSITORY}" "${RELEASE_ID}"
 
   # Promotion is the last step and the only one that makes the release
   # visible. It touches exactly the draft the release job created (by id, not

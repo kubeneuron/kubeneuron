@@ -9,22 +9,26 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
-## [v0.6.0] - 2026-10-07
+## [v0.6.0] - 2026-10-11
 
-Checkpoint coordination, Phase 1. **Release status: prepared, not
-published.** The source defaults in this tree (the `config/default`
-operator image, the Helm chart `version`/`appVersion`/image tag, and the
-sample controller and agent images) are set to v0.6.0 so that the tag and
-source users consume what the tag describes; the public `v0.6.0` tag, images,
-install manifest, and release assets do **not** yet exist, and the latest
-published release remains v0.5.0. The feature has been exercised by unit
+Checkpoint coordination, Phase 1. **Release status: published 2026-10-11
+UTC** as a non-prerelease
+[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.6.0)
+with 15 assets (the `v0.6.0` tag was cut on 2026-10-07); the public release
+was independently verified with
+`hack/verify-release.sh v0.6.0 kubeneuron/kubeneuron`, which checked the
+asset set, checksums, digest pins, and Cosign signature. The source defaults
+(the `config/default` operator
+image, the Helm chart `version`/`appVersion`/image tag, and the sample
+controller and agent images) are set to v0.6.0 so that the tag and source
+users consume what the tag describes. The feature has been exercised by unit
 tests, the full CPU-only kind integration suite (85 CEL checks and the smoke
 suite), and the dual-store (SQLite and PostgreSQL) upgrade/rollback
-rehearsal, including the no-rollout check described below; the current
-candidate — which carries later checkpoint safety fixes and the
+rehearsal, including the no-rollout check described below; the release
+source — which carries later checkpoint safety fixes and the
 release-pipeline repairs below — passed those local full gates and the
 rehearsal on 2026-10-05. That evidence is CPU-only kind with synthetic
-accelerator data. On 2026-10-07 the same candidate also passed the full AWS
+accelerator data. On 2026-10-07 the same source also passed the full AWS
 hardware harness (`hack/hw-e2e.sh`, every phase from `preflight` through
 `test-destructive` and `teardown`) on a temporary EKS `g4dn.xlarge` /
 Tesla T4 cluster (GPU operator v25.3.4, DCGM 4.3.1), with the teardown
