@@ -1,0 +1,140 @@
+# Shadow-only GPU alerts: v0.7 M5.
+#
+# Every rule here is observation for humans. None of them reaches the
+# controller, opens an incident or triggers remediation, and this is enforced
+# at three levels that unit tests in internal/detect and internal/depprofile
+# pin:
+#
+#   1. Names. Alertmanager sends alertname =~ "Gpu.*|KubeNeuronAgentDown" to
+#      the controller webhook, so every alert here is named ShadowGpu*, never
+#      Gpu*.
+#   2. Routing. Every rule carries kubeneuron_shadow="true"; the Alertmanager
+#      config (deploy/kubernetes/dependencies/observability/vmalertmanager.yaml)
+#      routes that label to the human-default receiver before the webhook
+#      route is consulted.
+#   3. Code. No ShadowGpu* name is in detect.alertClassMap, so even a
+#      mis-routed shadow alert is dropped by SignalFromAlert (ok=false).
+#
+# The label is spelled kubeneuron_shadow: Prometheus label names are
+# [a-zA-Z_][a-zA-Z0-9_]*, so a Kubernetes-style spelling with dots or slashes
+# is invalid in rule labels, Alertmanager matchers and ALERTS{} selectors.
+#
+# Every expression reads only the canonical kubeneuron_gpu_* series or the
+# derived series recorded by configs/vmalert/gpu-recording-rules.yaml (M3);
+# none reads a dcgm-exporter series directly. Missing data stays missing:
+# there is no `or vector(0)`, `default` or `absent()`, so a GPU whose
+# exporter does not report an input simply has no shadow alert for it. That
+# is why there is no XID event rate, no recovery-action (1523), no GPU
+# presence or GPU missing and no telemetry-gap rule in v0.7: the project has
+# no recorded source for those, and a shadow rule must not invent one.
+#
+# Syntax is vmalert v1.147.0 (MetricsQL). Deployed mirror:
+# deploy/kubernetes/dependencies/observability/rules.yaml (VMRule
+# kubeneuron-gpu-shadow); the group there must stay identical to this one,
+# and shadow rules are never mixed into the controller-facing gpu-hardware,
+# gpu-thermal-power or gpu-liveness groups.
+
+groups:
+  - name: gpu-shadow
+    interval: 30s
+    rules:
+      # PCIe link trained narrower than its maximum width for 15m. Width is
+      # stable under load and at idle (unlike the generation, which many
+      # boards lower legitimately when idle), so a sustained ratio below 1 is
+      # a degraded or badly seated link, not a power-saving state.
+      - alert: ShadowGpuPcieLinkWidthDegraded
+        expr: kubeneuron_gpu_pcie_link_width_ratio < 1
+        for: 15m
+        labels:
+          kubeneuron_shadow: "true"
+          severity: info
+        annotations:
+          summary: "Shadow: PCIe link width degraded on {{ $labels.node }} GPU {{ $labels.gpu }} ({{ $labels.gpu_uuid }})"
+          description: "Shadow-only signal for human review; no remediation is triggered and no incident is opened. The PCIe link has run at {{ $value | humanizePercentage }} of its maximum width for 15m (kubeneuron_gpu_pcie_link_width_ratio < 1). Check seating, the slot and the host PCIe topology before acting."
+
+      # NVLink replay or recovery errors accumulating for 15m. These are
+      # link-level retraining events, distinct from the CRC flit storm the
+      # controller-facing GpuNvlinkCrcErrors rule acts on; the rate is
+      # recorded per error type, so the firing series names which one.
+      - alert: ShadowGpuNvlinkLinkDegraded
+        expr: kubeneuron_gpu_nvlink_errors_per_second{type=~"replay|recovery"} > 0
+        for: 15m
+        labels:
+          kubeneuron_shadow: "true"
+          severity: info
+        annotations:
+          summary: "Shadow: NVLink {{ $labels.type }} errors on {{ $labels.node }} GPU {{ $labels.gpu }} ({{ $labels.gpu_uuid }})"
+          description: "Shadow-only signal for human review; no remediation is triggered and no incident is opened. NVLink {{ $labels.type }} errors have accrued at {{ $value | humanize }}/s for 15m (kubeneuron_gpu_nvlink_errors_per_second{type=\"{{ $labels.type }}\"} > 0). Check cabling, the NVSwitch topology and peer GPUs before acting."
+
+      # Fail-slow: the experimental peer score (M3) is recorded only while the
+      # device's SM clock sits at least 15% below its gpu_model peer median,
+      # it is throttled, and the model has at least 3 peers. The alert
+      # restates that floor explicitly and asks for it to hold for 30m, so a
+      # transient dip never fires.
+      - alert: ShadowGpuFailSlow
+        expr: kubeneuron_gpu_fail_slow_score_ratio >= 0.15
+        for: 30m
+        labels:
+          kubeneuron_shadow: "true"
+          severity: info
+        annotations:
+          summary: "Shadow: fail-slow suspect {{ $labels.node }} GPU {{ $labels.gpu_uuid }} ({{ $labels.gpu_model }})"
+          description: "Shadow-only signal for human review; no remediation is triggered and no incident is opened. The SM clock has sat {{ $value | humanizePercentage }} below the median of its {{ $labels.gpu_model }} peers while throttled, for 30m (kubeneuron_gpu_fail_slow_score_ratio >= 0.15). The score is experimental: compare the device against its peers on the dashboards before concluding anything."
+
+      # Thermal headroom (reported margin, else slowdown threshold minus GPU
+      # temperature) at or below 5C for 15m: the GPU is about to throttle or
+      # already is. The controller-facing GpuTempCritical rule acts on an
+      # absolute temperature; this one watches the distance to the device's
+      # own slowdown point.
+      - alert: ShadowGpuThermalHeadroomLow
+        expr: kubeneuron_gpu_thermal_headroom_celsius <= 5
+        for: 15m
+        labels:
+          kubeneuron_shadow: "true"
+          severity: info
+        annotations:
+          summary: "Shadow: {{ $value }}C of thermal headroom on {{ $labels.node }} GPU {{ $labels.gpu }} ({{ $labels.gpu_uuid }})"
+          description: "Shadow-only signal for human review; no remediation is triggered and no incident is opened. The GPU has had at most 5C of headroom before its slowdown temperature for 15m (kubeneuron_gpu_thermal_headroom_celsius <= 5). Usually airflow, inlet temperature or a fan: inspect cooling; do not reset."
+
+      # Memory thermal headroom (maximum operating temperature minus memory
+      # temperature) at or below 5C for 15m. Absent on devices that report no
+      # memory temperature or limit, which is correct: no data, no alert.
+      - alert: ShadowGpuMemoryThermalHeadroomLow
+        expr: kubeneuron_gpu_memory_thermal_headroom_celsius <= 5
+        for: 15m
+        labels:
+          kubeneuron_shadow: "true"
+          severity: info
+        annotations:
+          summary: "Shadow: {{ $value }}C of memory thermal headroom on {{ $labels.node }} GPU {{ $labels.gpu }} ({{ $labels.gpu_uuid }})"
+          description: "Shadow-only signal for human review; no remediation is triggered and no incident is opened. The GPU memory has had at most 5C of headroom before its maximum operating temperature for 15m (kubeneuron_gpu_memory_thermal_headroom_celsius <= 5). Inspect cooling; do not reset."
+
+      # Memory beyond repair: the derived hard-fault components for a failed
+      # row remap (395) and unrepairable memory (1507). One series per
+      # component, never summed, so the firing alert names which flag is set.
+      # The controller-facing GpuRowRemapFailure already acts on 395; this
+      # shadow adds 1507, which no controller rule reads, and keeps both as
+      # observation only.
+      - alert: ShadowGpuMemoryBeyondRepair
+        expr: kubeneuron_gpu_memory_hard_fault_active{component=~"row_remap_failed|unrepairable"} == 1
+        for: 5m
+        labels:
+          kubeneuron_shadow: "true"
+          severity: info
+        annotations:
+          summary: "Shadow: memory beyond repair ({{ $labels.component }}) on {{ $labels.node }} GPU {{ $labels.gpu }} ({{ $labels.gpu_uuid }})"
+          description: "Shadow-only signal for human review; no remediation is triggered and no incident is opened. The GPU has reported {{ $labels.component }} for 5m (kubeneuron_gpu_memory_hard_fault_active{component=\"{{ $labels.component }}\"} == 1): row remapping or page retirement can no longer repair this memory. Evaluate for RMA; nothing here resets or drains anything."
+
+      # Row remap pending a GPU reset, read from the canonical series. This
+      # is the shadow twin of the controller-facing GpuRowRemapPending rule
+      # (which acts via reset-when-idle); it exists to show, in the same
+      # Alertmanager, what the canonical series sees, without any action.
+      - alert: ShadowGpuRowRemapPending
+        expr: kubeneuron_gpu_row_remap_pending == 1
+        for: 5m
+        labels:
+          kubeneuron_shadow: "true"
+          severity: info
+        annotations:
+          summary: "Shadow: row remap pending on {{ $labels.node }} GPU {{ $labels.gpu }} ({{ $labels.gpu_uuid }})"
+          description: "Shadow-only signal for human review; no remediation is triggered and no incident is opened. A row remap has been pending a GPU reset for 5m (kubeneuron_gpu_row_remap_pending == 1). The controller-facing GpuRowRemapPending rule, not this one, decides whether a reset is scheduled."

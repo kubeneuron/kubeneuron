@@ -45,10 +45,12 @@ EXCLUDES=(
 	# intentionally kept in the private repository until separately published.
 	# They are excluded because they are private documents, not because of
 	# the release state of the version they describe: V0.5.0 stays excluded
-	# after the v0.5.0 tag exists, exactly as V0.4.0 did.
+	# after the v0.5.0 tag exists, exactly as V0.4.0 did, and V0.7.0 is
+	# excluded from the day it is written, while it is still only a plan.
 	"V0.4.0_RELEASE_PLAN.md"
 	"V0.5.0_RELEASE_PLAN.md"
 	"V0.6.0_RELEASE_PLAN.md"
+	"V0.7.0_RELEASE_PLAN.md"
 	# NOT excluded, deliberately: PRODUCT_PLAN.md and
 	# PRODUCTION_READINESS_PLAN.md. They are published product roadmap
 	# documents — hack/verify-docs.sh lints them as such, and they have been in

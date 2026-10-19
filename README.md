@@ -358,9 +358,16 @@ failed contraction, `rollback-retirement` first restores overlap trust, after
 which the same leaf/trust rollback remains safe. Re-running a recorded phase
 performs the same convergence checks without repatching it. Rollback only
 requires material needed by that rollback, so an administrator can quarantine
-a failed or unused candidate. The helper never creates, changes, prints,
-owns, or deletes Secret data; inspect its exact arguments with
-`hack/tls-rotate.sh --help`.
+a failed or unused candidate. Each phase is recorded with a patch checked
+against the root `resourceVersion` the helper validated; the operator's own
+status writes advance that version, so a lost race is re-read and retried
+(bounded by `PATCH_CONFLICT_RETRIES`, default 5) only while `spec.tls` and
+every TLS transaction annotation are exactly as validated. A root that already
+carries precisely the planned result is accepted without a second write; any
+other concurrent change, such as a different transaction claiming the root, is
+refused with a drift diagnostic and nothing is written. The helper never
+creates, changes, prints, owns, or deletes Secret data; inspect its exact
+arguments with `hack/tls-rotate.sh --help`.
 
 [`hack/tls-emergency-recover.sh`](hack/tls-emergency-recover.sh) is the
 separate, explicit recovery path for an already-unready root caused by unusable
@@ -368,7 +375,9 @@ leaf material. It requires an approval flag and two distinct, immutable,
 unowned pre-provisioned leaf Secrets. It cryptographically checks them against
 the current CAs and installation identity, records their names and UIDs, keeps
 both CA references unchanged, and waits for controller/agent rollouts and
-`Ready=True`. It cannot repair an expired, revoked, or compromised CA and is
+`Ready=True`. Its single patch follows the same `resourceVersion` retry rule
+as the rotation helper and additionally refuses to retry once the root has
+become Ready. It cannot repair an expired, revoked, or compromised CA and is
 not an issuance or revocation protocol.
 
 These manual, dependency-free procedures cover the externally-issued path.
@@ -509,9 +518,11 @@ incident resolved through the verification quiet window — under the
 **Remaining, deliberately hardware-gated:** per-device *hardware* GPU
 reset on bare metal (a virtualized instance has no guest PCI reset, so the
 agent refuses it on evidence) and step-time verification depth. The GPU-lab
-CI target now exists and has run green on live EKS — most recently the full
-harness on 2026-09-13 and the focused destructive sequence on 2026-09-14,
-both on temporary `g4dn.xlarge` clusters torn down to zero leftovers — and
+CI target now exists and has run green on live EKS — most recently on
+2026-10-18, when the full harness in this source tree, including its
+`deploy-observability` and `test-observability` phases, passed every phase
+on a temporary `g4dn.xlarge` / Tesla T4 cluster torn down to zero leftovers
+(Tesla T4 only: nothing is claimed for A100/H100, MIG, or NVLink) — and
 the DCGM/nvidia-smi second detection source beside kmsg has shipped and
 observed a DCGM signal on a real T4 with the agent on the real driver. That
 matrix in [PRODUCT_PLAN.md](PRODUCT_PLAN.md) still gates per-device reset;

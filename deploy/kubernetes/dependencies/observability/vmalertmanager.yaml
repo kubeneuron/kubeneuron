@@ -30,6 +30,15 @@ spec:
       group_interval: 1m
       repeat_interval: 4h
       routes:
+        # Shadow-only GPU alerts (v0.7 M5, ShadowGpu* in VMRule
+        # kubeneuron-gpu-shadow) are observation for humans. This route is
+        # consulted before the controller webhook route and does not
+        # continue, so a shadow-labelled alert can never reach the webhook,
+        # whatever its name.
+        - receiver: human-default
+          continue: false
+          matchers:
+            - kubeneuron_shadow = "true"
         # GPU signal alerts (and the agent-down signal) feed the controller
         # webhook and become incidents. alertname must stay in the
         # controller's alertClassMap.

@@ -91,21 +91,120 @@ dcgmExporter:
     enabled: false
   config:
     # GPU Operator v26.3.3 creates this ConfigMap and points ClusterPolicy at
-    # its dcgm-metrics.csv key. Keep this list synchronized with the DCGM_*
-    # expressions in ../observability/rules.yaml.
+    # its dcgm-metrics.csv key. This is the KubeNeuron reliability profile:
+    # exactly the T0 (baseline) and T1 (reliability) fields of the GPU metric
+    # catalog (internal/gpucatalog, docs/reference-gpu-metrics.md) that carry a
+    # canonical kubeneuron_gpu_* mapping and are not deferred. The catalog test
+    # pins this list in both directions; edit the catalog and this file together.
+    #
+    # Series names are the ones the pinned dcgm-exporter (4.5.3-4.8.2) uses
+    # for each field id, which is the legacy DCGM name where DCGM 4.x renamed
+    # the field (the catalog records both names).
+    #
+    # Honesty about hardware: only the nine fields marked "v0.6.1" below were
+    # ever scraped by a recorded run of this project (Tesla T4, v0.6.0-era).
+    # Every other field is listed from NVIDIA documentation and has not been
+    # observed on any GPU by this project. The exporter is expected to skip a
+    # field the GPU does not report rather than fail; that expectation is
+    # checked by the hardware gate, not asserted here.
+    #
+    # Deliberately absent: DCGM_FI_DEV_XID_ERRORS (230, a sticky last-XID
+    # gauge with no canonical series; the agent reads it through dcgmi),
+    # DCGM_FI_DEV_GPU_RECOVERY_ACTION (1523, cataloged only), DCGM_FI_DEV_PSTATE
+    # (190, no canonical series), every profiling field except the PCIe byte
+    # rates (DCGM_FI_PROF_*, tier T2), and every vGPU field.
+    #
+    # The DCGM_* expressions in ../observability/rules.yaml read a subset of
+    # this list; listing a series here does not create a rule over it.
     name: kubeneuron-dcgm-metrics
     create: true
     data: |-
       # Format: DCGM FIELD, Prometheus metric type, help message
-      DCGM_FI_DEV_ECC_DBE_VOL_TOTAL, counter, Total volatile double-bit ECC errors.
-      DCGM_FI_DEV_ECC_DBE_AGG_TOTAL, counter, Total aggregate double-bit ECC errors.
-      DCGM_FI_DEV_ROW_REMAP_PENDING, gauge, Whether a row remap is pending.
-      DCGM_FI_DEV_ROW_REMAP_FAILURE, gauge, Whether row remapping has failed.
-      DCGM_FI_DEV_UNCORRECTABLE_REMAPPED_ROWS, counter, Uncorrectable remapped rows.
-      DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL, counter, Total NVLink flow-control CRC errors.
-      DCGM_FI_DEV_PCIE_REPLAY_COUNTER, counter, Total PCIe retries.
+      # --- T0 baseline: clocks (MHz as emitted; canonical hertz) ---
+      DCGM_FI_DEV_SM_CLOCK, gauge, Current SM clock in MHz.
+      DCGM_FI_DEV_MEM_CLOCK, gauge, Current memory clock in MHz.
+      DCGM_FI_DEV_MAX_SM_CLOCK, gauge, Maximum supported SM clock in MHz.
+      DCGM_FI_DEV_MAX_MEM_CLOCK, gauge, Maximum supported memory clock in MHz.
+      # --- T1 reliability: clock-event (throttle) reasons; v0.6.1 ---
       DCGM_FI_DEV_CLOCK_THROTTLE_REASONS, gauge, Active clock-throttle reason bitmask.
+      # --- T0 baseline: temperatures ---
+      # Memory temperature (140) and its limit (151): whether the Tesla T4
+      # reports a value is not established by any cited source (catalog: unknown).
+      DCGM_FI_DEV_MEMORY_TEMP, gauge, Memory temperature in degrees Celsius.
       DCGM_FI_DEV_GPU_TEMP, gauge, GPU temperature in degrees Celsius.
+      DCGM_FI_DEV_MEM_MAX_OP_TEMP, gauge, Maximum operating memory temperature in degrees Celsius.
+      DCGM_FI_DEV_GPU_TEMP_LIMIT, gauge, Thermal margin to the nearest slowdown threshold in degrees Celsius.
+      DCGM_FI_DEV_SLOWDOWN_TEMP, gauge, Slowdown temperature threshold in degrees Celsius.
+      DCGM_FI_DEV_SHUTDOWN_TEMP, gauge, Shutdown temperature threshold in degrees Celsius.
+      # --- T0 baseline: power and energy ---
+      DCGM_FI_DEV_POWER_USAGE, gauge, Board power draw in watts.
+      DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION, counter, Energy consumed since driver load in millijoules.
+      DCGM_FI_DEV_ENFORCED_POWER_LIMIT, gauge, Power limit currently enforced by the driver in watts.
+      # --- T1 reliability: PCIe replays; v0.6.1 ---
+      DCGM_FI_DEV_PCIE_REPLAY_COUNTER, counter, Total PCIe retries.
+      # --- T0 baseline: utilisation (percent as emitted; canonical ratio) ---
+      DCGM_FI_DEV_GPU_UTIL, gauge, GPU utilisation in percent.
+      DCGM_FI_DEV_MEM_COPY_UTIL, gauge, Memory copy-engine utilisation in percent.
+      # --- T0 baseline: PCIe link state ---
+      # In a cloud guest the reported generation and width depend on the
+      # passthrough configuration; they are read as reported, not asserted.
+      DCGM_FI_DEV_PCIE_MAX_LINK_GEN, gauge, Maximum supported PCIe link generation.
+      DCGM_FI_DEV_PCIE_MAX_LINK_WIDTH, gauge, Maximum supported PCIe link width in lanes.
+      DCGM_FI_DEV_PCIE_LINK_GEN, gauge, Current PCIe link generation.
+      DCGM_FI_DEV_PCIE_LINK_WIDTH, gauge, Current PCIe link width in lanes.
+      # --- T1 reliability: throttle (violation) time counters in nanoseconds ---
+      # All five map to kubeneuron_gpu_throttle_seconds_total{reason}. 242/243/245
+      # are unvalidated on every hardware this project has touched.
+      DCGM_FI_DEV_POWER_VIOLATION, counter, Cumulative time the GPU was power-capped in nanoseconds.
+      DCGM_FI_DEV_THERMAL_VIOLATION, counter, Cumulative time the GPU was thermally capped in nanoseconds.
+      DCGM_FI_DEV_SYNC_BOOST_VIOLATION, counter, Cumulative time the GPU was capped by a sync-boost constraint in nanoseconds.
+      DCGM_FI_DEV_BOARD_LIMIT_VIOLATION, counter, Cumulative time the GPU was capped by a board limit in nanoseconds.
+      DCGM_FI_DEV_RELIABILITY_VIOLATION, counter, Cumulative time the GPU was capped by a reliability constraint in nanoseconds.
+      # --- T0 baseline: framebuffer (MiB as emitted; canonical bytes) ---
+      DCGM_FI_DEV_FB_TOTAL, gauge, Framebuffer total in MiB.
+      DCGM_FI_DEV_FB_FREE, gauge, Framebuffer free in MiB.
+      DCGM_FI_DEV_FB_USED, gauge, Framebuffer used in MiB.
+      # --- T1 reliability: ECC (double-bit counters are v0.6.1) ---
+      DCGM_FI_DEV_ECC_SBE_VOL_TOTAL, counter, Total volatile single-bit ECC errors (corrected).
+      DCGM_FI_DEV_ECC_DBE_VOL_TOTAL, counter, Total volatile double-bit ECC errors.
+      DCGM_FI_DEV_ECC_SBE_AGG_TOTAL, counter, Total aggregate single-bit ECC errors (corrected).
+      DCGM_FI_DEV_ECC_DBE_AGG_TOTAL, counter, Total aggregate double-bit ECC errors.
+      # --- T1 reliability: retired pages (pre-Ampere page retirement) ---
+      # Present on Turing (Tesla T4); not applicable on Ampere and later where
+      # row remapping replaces page retirement.
+      DCGM_FI_DEV_RETIRED_SBE, counter, Pages retired for single-bit errors.
+      DCGM_FI_DEV_RETIRED_DBE, counter, Pages retired for double-bit errors.
+      DCGM_FI_DEV_RETIRED_PENDING, gauge, Whether a page retirement is pending a reset.
+      # --- T1 reliability: row remapping (Ampere and later); v0.6.1 except 394 ---
+      # Absent on Turing: the Tesla T4 has no row remapping, so these series do
+      # not exist on that hardware and its panels show No data.
+      DCGM_FI_DEV_UNCORRECTABLE_REMAPPED_ROWS, counter, Uncorrectable remapped rows.
+      DCGM_FI_DEV_CORRECTABLE_REMAPPED_ROWS, counter, Correctable remapped rows.
+      DCGM_FI_DEV_ROW_REMAP_FAILURE, gauge, Whether row remapping has failed.
+      DCGM_FI_DEV_ROW_REMAP_PENDING, gauge, Whether a row remap is pending.
+      # --- T1 reliability: NVLink error counters; 409 is v0.6.1 ---
+      # Absent on Turing: the Tesla T4 has no NVLink, so these series do not
+      # exist on that hardware. NVLink byte rates (1011/1012) are profiling
+      # fields (tier T2) and are deliberately not listed.
+      DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL, counter, Total NVLink flow-control CRC errors.
+      DCGM_FI_DEV_NVLINK_CRC_DATA_ERROR_COUNT_TOTAL, counter, Total NVLink data CRC errors.
+      DCGM_FI_DEV_NVLINK_REPLAY_ERROR_COUNT_TOTAL, counter, Total NVLink replay errors.
+      DCGM_FI_DEV_NVLINK_RECOVERY_ERROR_COUNT_TOTAL, counter, Total NVLink recovery errors.
+      # --- T0 baseline: PCIe byte rates (the only DCGM_FI_PROF_* fields admitted) ---
+      # NVIDIA documents these as interval-average bandwidth in bytes per second
+      # (a gauge); the stock default-counters.csv types them counter and leaves
+      # them commented out.
+      DCGM_FI_PROF_PCIE_TX_BYTES, gauge, PCIe transmit bandwidth averaged over the sample interval in bytes per second.
+      DCGM_FI_PROF_PCIE_RX_BYTES, gauge, PCIe receive bandwidth averaged over the sample interval in bytes per second.
+      # --- T1 reliability: memory beyond repair (DCGM 4.x) ---
+      # Which hardware reports this field is not established by any cited
+      # source (catalog: unknown on every column); listed so it is read when
+      # the GPU and DCGM build provide it. Field 1507 is
+      # DCGM_FI_DEV_MEMORY_UNREPAIRABLE in dcgm_fields.h, but the go-dcgm the
+      # pinned exporter is built against knows the id only by this _FLAG
+      # name, and one unknown name here terminates the whole exporter (the
+      # 2026-10-18 G4dn run served nothing). The catalog records both names.
+      DCGM_FI_DEV_MEMORY_UNREPAIRABLE_FLAG, gauge, Whether memory has unrepairable errors (1 = yes).
 
 migManager:
   enabled: true

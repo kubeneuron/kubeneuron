@@ -84,6 +84,153 @@ node is effectively suspended — the controller will not act without a live,
 acknowledged agent. Check the agent pod (`kubectl -n <ns> logs ds/<name>-agent`),
 its `/readyz`, and the mTLS material if it logs TLS errors.
 
+## Shadow-only GPU alerts (v0.7, route to humans, never to the controller)
+
+Every `ShadowGpu*` rule in `configs/vmalert/gpu-shadow-rules.yaml` (deployed
+as the `kubeneuron-gpu-shadow` VMRule, group `gpu-shadow`) is observation
+for people. None of them opens an incident, climbs a ladder or touches a
+node, and the isolation is pinned at three levels by unit tests: the names
+never start with `Gpu`, so the controller webhook route cannot match them;
+every rule carries `kubeneuron_shadow="true"`, which the shipped
+Alertmanager config routes to the `human-default` receiver before the
+webhook route is consulted; and no shadow name is in the controller's
+alert map, so a mis-routed one would be dropped as unknown. They all have
+`severity: info`. They read only the canonical and derived
+`kubeneuron_gpu_*` series the recording rules produce (see the
+[GPU metric catalog](reference-gpu-metrics.md)); a GPU whose exporter does
+not report an input has no shadow alert for it, and that silence is No
+data, not health. None of these rules has run against GPU hardware in this
+tree; the thresholds are starting defaults.
+
+There is no `runbook_url` on these rules yet; the entries below are keyed by
+alert name. Every entry begins with the same sentence because it is the
+property that matters most: nothing you see here is acted on by KubeNeuron.
+Investigation guidance is read-only on purpose. If a shadow alert convinces
+you a device needs a reset, drain or RMA, the path is the existing one: the
+controller-facing `Gpu*` rule for the same fault, or a human-opened
+incident through the controller (see `KubeNeuronIncidentExpired` below for
+the command), never an action taken by hand because an info-level shadow
+alert fired.
+
+Useful read-only starting points for all of them:
+
+- The **Fail-slow Radar** and **Health & Errors** dashboards
+  (`deploy/grafana/`) show the firing series next to its peers; the
+  **Remediation & Recovered Capacity** board has a "Shadow alerts (would have
+  fired)" panel reading `ALERTS{kubeneuron_shadow="true"}`.
+- `kubeneuronctl incidents --node <node>` tells you whether a
+  controller-facing rule or the agent has *also* seen something on the node.
+  A shadow alert with no incident is the expected state.
+- `kubectl -n gpu-operator logs ds/nvidia-dcgm-exporter --tail=200` shows
+  whether the exporter is reporting the inputs at all.
+
+### ShadowGpuPcieLinkWidthDegraded
+
+This rule does not trigger remediation and goes to humans. The PCIe link
+has trained narrower than its maximum width (`kubeneuron_gpu_pcie_link_width_ratio < 1`)
+for 15 minutes. Width, unlike generation, does not drop at idle on a
+healthy board, so a sustained ratio below 1 usually means a badly seated
+card or riser, a damaged slot, or a host topology that never offered the
+full width. Compare `kubeneuron_gpu_pcie_link_width{kind="max"}` and
+`{kind="current"}` for the device, check whether other GPUs on the same
+node show the same ratio (a host-level limit rather than a device fault),
+and look at `kubeneuron_gpu_pcie_replays_per_second` on the GPU Passport
+board. On a cloud VM the width is whatever the hypervisor passed through
+and may be below the physical maximum by design. Anything mechanical is a
+maintenance-window task; `GpuPcieReplayHigh` is the controller-facing rule
+for a replay storm.
+
+### ShadowGpuNvlinkLinkDegraded
+
+This rule does not trigger remediation and goes to humans. NVLink replay or
+recovery errors have accrued continuously for 15 minutes
+(`kubeneuron_gpu_nvlink_errors_per_second{type=~"replay|recovery"} > 0`);
+the `type` label on the firing series says which. These are link-level
+retraining events, distinct from the CRC flit storm the controller-facing
+`GpuNvlinkCrcErrors` rule acts on. Read the per-type rates for the device
+and its NVLink peers on the Health & Errors board; a pattern on both ends
+of a link points at cabling, the backplane or the NVSwitch, a single device
+points at the card. No hardware this project has run on has NVLink, so this
+series has never been observed by the project; absence on a Tesla T4 is
+correct.
+
+### ShadowGpuFailSlow
+
+This rule does not trigger remediation and goes to humans. The experimental
+peer score `kubeneuron_gpu_fail_slow_score_ratio` has been at or above
+0.15 for 30 minutes: the device's SM clock ratio has sat at least 15 % below
+the median of its `gpu_model` peers while it was throttled, and the model
+had at least three devices reporting. The score is recorded only when all
+three gates hold, so a device with no sample is unscored, not healthy; a
+peer group smaller than three (every single-GPU node) can never score. The
+formula is in the derived-signals table of the
+[GPU metric catalog](reference-gpu-metrics.md). It has not been validated
+on any peer group larger than one by this project, so treat it as a
+pointer, not a verdict: open the Fail-slow Radar board, compare the
+device's SM clock ratio and throttle share by reason against its peers,
+and check `kubeneuron_gpu_thermal_headroom_celsius` and
+`kubeneuron_gpu_power_ratio` on its GPU Passport. A thermal or power cause
+usually shows up as `ShadowGpuThermalHeadroomLow` or a `GpuThermalThrottle`
+incident on the same device; a device that is slow with headroom to spare
+is the one worth a closer look.
+
+### ShadowGpuThermalHeadroomLow
+
+This rule does not trigger remediation and goes to humans. The GPU has had
+at most 5 °C of headroom before its slowdown temperature for 15 minutes
+(`kubeneuron_gpu_thermal_headroom_celsius <= 5`); the headroom is the
+device's reported thermal margin, or the slowdown threshold minus the GPU
+temperature where no margin is reported. This is a facility signal: inlet
+temperature, airflow, a failed fan or dried thermal paste. Check whether
+neighbouring GPUs and nodes show the same trend on the Fleet Reliability
+Overview (a rack pattern is cooling; one device is a fan or paste), read
+`kubeneuron_gpu_throttle_share_ratio{reason="thermal"}` to see whether it
+is already throttling, and do not reset the GPU: heat is not cleared by a
+reset. The controller-facing `GpuThermalThrottle` and `GpuTempCritical`
+rules decide whether a node is drained for temperature.
+
+### ShadowGpuMemoryThermalHeadroomLow
+
+This rule does not trigger remediation and goes to humans. GPU memory has
+had at most 5 °C of headroom before its maximum operating temperature for
+15 minutes (`kubeneuron_gpu_memory_thermal_headroom_celsius <= 5`). Same
+causes and same reading as `ShadowGpuThermalHeadroomLow`, for the HBM or
+GDDR rather than the die. Whether the Tesla T4 reports a memory temperature
+or its limit at all has not been established, so on that hardware the series
+may simply be absent, which is No data and correct. Inspect cooling; do not
+reset.
+
+### ShadowGpuMemoryBeyondRepair
+
+This rule does not trigger remediation and goes to humans. The derived
+hard-fault component named by the `component` label has been set for 5
+minutes: `row_remap_failed` (DCGM field 395, a row remap that could not
+complete) or `unrepairable` (field 1507, the DCGM 4.x unrepairable-memory
+flag). Either means row remapping or page retirement can no longer repair
+the device's memory, and the honest disposition is RMA evaluation. For
+`row_remap_failed` the controller-facing `GpuRowRemapFailure` rule reads the
+same source and runs the `rma` playbook, so expect an incident alongside
+this alert; for `unrepairable` no controller rule reads field 1507, so this
+alert is the only signal and a person must decide. Read the device's ECC
+and remapped-row history on the Health & Errors and GPU Passport boards and
+`kubeneuronctl incidents --node <node>`. Field 1507 has not been observed
+on any GPU by this project.
+
+### ShadowGpuRowRemapPending
+
+This rule does not trigger remediation and goes to humans. A row remap has
+been pending a GPU reset for 5 minutes, read from the canonical
+`kubeneuron_gpu_row_remap_pending` series. It is the shadow twin of the
+controller-facing `GpuRowRemapPending` rule, which reads the same DCGM
+field (396) from the raw series and schedules `reset-when-idle`; this one
+exists to show, in the same Alertmanager, what the canonical series sees.
+Expect the controller-facing incident to be the one that acts. If this
+fires and `kubeneuronctl incidents --node <node>` shows nothing, the gap is
+worth understanding before anything else (a rule evaluation difference, an
+inhibited alert, a paused node), and the `GpuRowRemapPending` runbook above
+applies. Row remapping is Ampere and later; the series is absent on a
+Tesla T4.
+
 ## Self-monitoring alerts (route to humans)
 
 ### KubeNeuronControllerDown

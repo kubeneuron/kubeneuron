@@ -10,6 +10,13 @@ KUBECTL_BIN=${KUBECTL_BIN:-kubectl}
 JQ_BIN=${JQ_BIN:-jq}
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-240}
 KUBECONFIG_PATH=${KUBECONFIG_PATH:-${KUBECONFIG:-}}
+# The recovery patch is a resourceVersion compare-and-swap. The operator writes
+# root status on every reconcile and each status write advances resourceVersion,
+# so a patch built from the root read before the certificate checks can lose
+# that race ("the object has been modified"). The patch is then re-read and
+# retried at most this many times, and only while the TLS references and
+# transaction annotations are exactly what this run validated.
+PATCH_CONFLICT_RETRIES=${PATCH_CONFLICT_RETRIES:-5}
 
 root_name=
 recovery_id=
@@ -44,6 +51,12 @@ Secret. The server leaf must validate for
 leaf must validate under the current client CA and have exactly the current
 installation URI SAN. The script never creates, mutates, prints, or deletes
 Secret data. It cannot recover an expired, revoked, or compromised CA.
+
+The patch is checked against the root resourceVersion it validated. When a
+concurrent status write wins that race the script re-reads the root and
+retries up to PATCH_CONFLICT_RETRIES times (default 5), but only while the
+root is still unready and spec.tls plus every kubeneuron.io/tls-* annotation
+are unchanged; any other concurrent change is refused with a diagnostic.
 EOF
 }
 
@@ -110,13 +123,14 @@ for required in root_name recovery_id server_leaf_secret client_leaf_secret; do
 done
 ((approved == 1)) || die "--approve-emergency-leaf-recovery is required"
 [[ $TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]] || die "timeout-seconds must be a positive integer"
+[[ $PATCH_CONFLICT_RETRIES =~ ^[0-9]+$ ]] || die "PATCH_CONFLICT_RETRIES must be a non-negative integer"
 [[ $recovery_id =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || die "recovery-id is not a safe identifier"
 for name in "$root_name" "$server_leaf_secret" "$client_leaf_secret"; do
 	[[ $name =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]] || die "unsafe Kubernetes name: $name"
 done
 [[ $server_leaf_secret != "$client_leaf_secret" ]] || die "server and client candidate Secret names must differ"
 
-for command in "$KUBECTL_BIN" "$JQ_BIN" openssl base64 mktemp; do
+for command in "$KUBECTL_BIN" "$JQ_BIN" openssl base64 mktemp grep sed; do
 	command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
 done
 
@@ -147,12 +161,17 @@ done
 [[ $server_leaf_secret != "$current_server_leaf" ]] || die "server candidate is already the current leaf; use the normal readiness investigation instead"
 [[ $client_leaf_secret != "$current_client_leaf" ]] || die "client candidate is already the current leaf; use the normal readiness investigation instead"
 
+# Bind the generation before descending into the conditions: inside any() the
+# input is the condition, so a bare .metadata.generation there is null and the
+# Ready guard could never fire against a root whose conditions record their
+# observedGeneration (the operator's do).
 root_ready() {
 	local json=$1
 	$JQ_BIN -e '
-      .status.observedGeneration == .metadata.generation and
+      .metadata.generation as $generation |
+      .status.observedGeneration == $generation and
       any(.status.conditions[]?; .type == "Ready" and .status == "True" and
-        .reason == "RuntimeAvailable" and .observedGeneration == .metadata.generation)
+        .reason == "RuntimeAvailable" and .observedGeneration == $generation)
     ' <<<"$json" >/dev/null
 }
 
@@ -220,6 +239,40 @@ san_uris=$(openssl x509 -noout -ext subjectAltName -in "$tmp_dir/client.crt" 2>/
 	grep -o 'URI:[^,[:space:]]*' | sed 's/^URI://' || true)
 [[ $san_uris == "$client_uri" ]] || die "client candidate must have exactly installation URI SAN $client_uri"
 
+# tls_view projects a root onto the subset the recovery patch reasons about:
+# object identity, spec generation, every spec.tls reference (CA key
+# canonicalised), and every kubeneuron.io/tls-* transaction annotation, routine
+# or emergency. Status is deliberately absent: the operator's status writes are
+# the concurrent change a conflict retry exists to tolerate. Keys are sorted so
+# two views compare as strings.
+tls_view() {
+	$JQ_BIN -cS '
+	  {
+	    uid: .metadata.uid,
+	    generation: .metadata.generation,
+	    tls: ((.spec.tls // {}) | with_entries(
+	      if (.value | type) == "object" then .value += {key: (.value.key // "ca.crt")} else . end)),
+	    annotations: ((.metadata.annotations // {}) |
+	      with_entries(select(.key | startswith("kubeneuron.io/tls-"))))
+	  }'
+}
+
+# describe_view_drift prints every TLS-relevant difference between the root this
+# run validated and the root re-read after a patch conflict.
+describe_view_drift() {
+	local validated=$1 fresh=$2
+	printf 'tls-emergency-recover: KubeNeuron %s changed after validation:\n' "$root_name" >&2
+	$JQ_BIN -rn --argjson a "$validated" --argjson b "$fresh" '
+	  def drift(what; x; y):
+	    if x != y then "tls-emergency-recover:   \(what): validated \(x | tojson), now \(y | tojson)" else empty end;
+	  drift("metadata.uid (root recreated)"; $a.uid; $b.uid),
+	  drift("metadata.generation (spec changed)"; $a.generation; $b.generation),
+	  ((($a.tls | keys) + ($b.tls | keys)) | unique[] | drift("spec.tls.\(.)"; $a.tls[.]; $b.tls[.])),
+	  ((($a.annotations | keys) + ($b.annotations | keys)) | unique[] |
+	    drift("annotation \(.)"; $a.annotations[.]; $b.annotations[.]))
+	' >&2
+}
+
 recorded_id=$($JQ_BIN -r --arg key "$annotation_id" '.metadata.annotations[$key] // empty' <<<"$root_json")
 recorded_server=$($JQ_BIN -r --arg key "$annotation_server_leaf" '.metadata.annotations[$key] // empty' <<<"$root_json")
 recorded_server_uid=$($JQ_BIN -r --arg key "$annotation_server_leaf_uid" '.metadata.annotations[$key] // empty' <<<"$root_json")
@@ -244,9 +297,7 @@ else
 			die "recorded emergency recovery $recorded_id is still reconciling or its leaf references changed; rerun it with the same recovery id"
 		note "superseding completed emergency recovery $recorded_id after a new unready state"
 	fi
-	resource_version=$($JQ_BIN -r '.metadata.resourceVersion' <<<"$root_json")
-	patch=$($JQ_BIN -cn \
-		--arg rv "$resource_version" \
+	desired_patch=$($JQ_BIN -cn \
 		--arg id_key "$annotation_id" --arg id "$recovery_id" \
 		--arg server_key "$annotation_server_leaf" --arg server "$server_leaf_secret" \
 		--arg server_uid_key "$annotation_server_leaf_uid" --arg server_uid "$server_leaf_uid" \
@@ -255,7 +306,7 @@ else
 		--arg previous_server_key "$annotation_previous_server_leaf" --arg previous_server "$current_server_leaf" \
 		--arg previous_client_key "$annotation_previous_client_leaf" --arg previous_client "$current_client_leaf" '
       {
-        metadata: {resourceVersion: $rv, annotations: {
+        metadata: {annotations: {
           ($id_key): $id,
           ($server_key): $server, ($server_uid_key): $server_uid,
           ($client_key): $client, ($client_uid_key): $client_uid,
@@ -265,10 +316,59 @@ else
         spec: {tls: {serverSecretRef: {name: $server}, clientSecretRef: {name: $client}}}
       }
     ')
-	root_json=$(kubectl_run patch kubeneuron "$root_name" --type=merge -p "$patch" -o json)
-	target_generation=$($JQ_BIN -r '.metadata.generation' <<<"$root_json")
-	[[ $target_generation =~ ^[1-9][0-9]*$ ]] || die "emergency patch returned an invalid root generation"
-	note "emergency recovery $recovery_id recorded at root generation $target_generation"
+	validated_view=$(tls_view <<<"$root_json")
+	# The root as it must look if this exact patch has already landed: the
+	# validated root with the patch merged the way a JSON merge patch merges,
+	# without the generation the server assigns to that write.
+	expected_view=$($JQ_BIN -c --argjson patch "$desired_patch" '. * $patch' <<<"$root_json" |
+		tls_view | $JQ_BIN -cS 'del(.generation)')
+	conflicts=0
+	while :; do
+		resource_version=$($JQ_BIN -r '.metadata.resourceVersion // empty' <<<"$root_json")
+		[[ -n $resource_version ]] || die "KubeNeuron $root_name has no metadata.resourceVersion to compare against"
+		patch=$($JQ_BIN -c --arg rv "$resource_version" '.metadata.resourceVersion = $rv' <<<"$desired_patch")
+		if patched_json=$(kubectl_run patch kubeneuron "$root_name" --type=merge -p "$patch" -o json 2>"$tmp_dir/patch.stderr"); then
+			[[ ! -s $tmp_dir/patch.stderr ]] || cat "$tmp_dir/patch.stderr" >&2
+			root_json=$patched_json
+			target_generation=$($JQ_BIN -r '.metadata.generation' <<<"$root_json")
+			[[ $target_generation =~ ^[1-9][0-9]*$ ]] || die "emergency patch returned an invalid root generation"
+			if ((conflicts > 0)); then
+				note "emergency recovery $recovery_id recorded at root generation $target_generation after $conflicts conflict retry(ies)"
+			else
+				note "emergency recovery $recovery_id recorded at root generation $target_generation"
+			fi
+			break
+		fi
+		if ! grep -q -e '(Conflict)' -e 'the object has been modified' "$tmp_dir/patch.stderr"; then
+			cat "$tmp_dir/patch.stderr" >&2
+			die "emergency patch failed with a non-conflict error; nothing was retried"
+		fi
+		conflicts=$((conflicts + 1))
+		if ((conflicts > PATCH_CONFLICT_RETRIES)); then
+			cat "$tmp_dir/patch.stderr" >&2
+			die "emergency patch still conflicted after $PATCH_CONFLICT_RETRIES retry(ies); KubeNeuron $root_name resourceVersion kept moving, rerun with the same recovery id"
+		fi
+		note "emergency patch conflicted at resourceVersion $resource_version (retry $conflicts of $PATCH_CONFLICT_RETRIES); re-reading KubeNeuron $root_name"
+		fresh_json=$(kubectl_run get kubeneuron "$root_name" -o json) ||
+			die "could not re-read KubeNeuron $root_name after the patch conflict"
+		fresh_view=$(tls_view <<<"$fresh_json")
+		if [[ $($JQ_BIN -cS 'del(.generation)' <<<"$fresh_view") == "$expected_view" ]]; then
+			root_json=$fresh_json
+			target_generation=$($JQ_BIN -r '.metadata.generation' <<<"$root_json")
+			[[ $target_generation =~ ^[1-9][0-9]*$ ]] || die "re-read KubeNeuron $root_name has an invalid generation"
+			note "emergency recovery $recovery_id is already recorded exactly as planned at root generation $target_generation (a concurrent identical invocation won the patch); verifying rollout and readiness"
+			break
+		fi
+		if [[ $fresh_view != "$validated_view" ]]; then
+			describe_view_drift "$validated_view" "$fresh_view"
+			die "refusing to retry the emergency patch: KubeNeuron $root_name changed in a TLS-relevant way after validation; nothing was written, rerun so the current root is validated"
+		fi
+		if root_ready "$fresh_json"; then
+			die "refusing to retry the emergency patch: KubeNeuron $root_name became Ready at the validated generation; emergency recovery no longer applies, use the routine readiness investigation instead"
+		fi
+		root_json=$fresh_json
+		note "KubeNeuron $root_name re-read at resourceVersion $($JQ_BIN -r '.metadata.resourceVersion' <<<"$root_json") still unready with unchanged TLS references and transaction annotations; retrying the emergency patch"
+	done
 fi
 
 wait_workload_secret() {

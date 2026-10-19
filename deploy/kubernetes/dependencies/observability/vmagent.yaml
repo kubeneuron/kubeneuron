@@ -13,14 +13,38 @@ spec:
   selectAllByDefault: false
   scrapeInterval: 30s
   remoteWrite:
-    - url: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8428/api/v1/write
+    - url: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8429/api/v1/write
+  # `cluster` is deliberately NOT set here: no in-cluster metadata names the
+  # cluster, and a placeholder would be a fabricated label. A cluster
+  # administrator who runs more than one cluster into one store sets it as an
+  # external label on this resource (VictoriaMetrics operator field, applied
+  # to every series vmagent writes), for example:
+  #
+  #   externalLabels:
+  #     cluster: <your-cluster-name>
+  #
+  # or, after install, with the kubectl patch shown in ../README.md. Without
+  # it the label is absent, and no shipped rule or dashboard requires it.
   inlineScrapeConfig: |
+    # Scrape label contract for dcgm-exporter series (v0.7 M2). Every label
+    # below is observability only: it renames or copies what the exporter and
+    # the Kubernetes API already provide, and no shipped rule may require an
+    # optional label (node_pool, mig_profile, cluster) until the recording-rule
+    # phase declares otherwise. `driver` is intentionally absent; see
+    # ../README.md for the decision.
     - job_name: dcgm-exporter
       kubernetes_sd_configs:
         - role: endpoints
           namespaces:
             names:
               - gpu-operator
+          # Attach the node object's labels to every discovered endpoint as
+          # __meta_kubernetes_node_label_<name>, so node_pool can be derived
+          # below. vmagent v1.147.0 supports this for role endpoints; it
+          # requires read access to nodes, which the VictoriaMetrics operator's
+          # generated ClusterRole for this VMAgent grants (see ../README.md).
+          attach_metadata:
+            node: true
       relabel_configs:
         - action: keep
           source_labels: [__meta_kubernetes_service_name]
@@ -30,6 +54,44 @@ spec:
           regex: gpu-metrics
         - source_labels: [__meta_kubernetes_pod_node_name]
           target_label: node
+        # node_pool (optional): derived from a node label when one exists.
+        # Each rule matches only a non-empty value (regex `(.+)`), so a node
+        # without any of these labels gets no node_pool label at all, never an
+        # empty string. Later rules override earlier ones, so precedence is
+        # lowest first: the KubeNeuron fallback, then Karpenter, then GKE, and
+        # EKS wins when several are present.
+        - source_labels: [__meta_kubernetes_node_label_kubeneuron_io_node_pool]
+          regex: (.+)
+          target_label: node_pool
+        - source_labels: [__meta_kubernetes_node_label_karpenter_sh_nodepool]
+          regex: (.+)
+          target_label: node_pool
+        - source_labels: [__meta_kubernetes_node_label_cloud_google_com_gke_nodepool]
+          regex: (.+)
+          target_label: node_pool
+        - source_labels: [__meta_kubernetes_node_label_eks_amazonaws_com_nodegroup]
+          regex: (.+)
+          target_label: node_pool
+      metric_relabel_configs:
+        # The exporter stamps every series with UUID and modelName (and gpu,
+        # pci_bus_id, device, Hostname); the contract names are gpu_uuid and
+        # gpu_model. The originals are kept so existing rules and dashboards
+        # that read UUID keep working.
+        - source_labels: [UUID]
+          regex: (.+)
+          target_label: gpu_uuid
+        - source_labels: [modelName]
+          regex: (.+)
+          target_label: gpu_model
+        # mig_profile (optional): the exporter adds GPU_I_PROFILE only when
+        # MIG is enabled on the GPU; without MIG the label stays absent. Not
+        # validated on any hardware by this project (the Tesla T4 has no MIG).
+        - source_labels: [GPU_I_PROFILE]
+          regex: (.+)
+          target_label: mig_profile
+        # pod, namespace and container come from the exporter's Kubernetes
+        # mapping and are empty while no workload holds the GPU; they are
+        # passed through unchanged and no rule may require them.
     # KubeNeuron's own control plane: controller (:http /metrics) and agent
     # (:health /metrics) pods carry the operator-stamped labels below in
     # every installation namespace.

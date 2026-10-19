@@ -544,6 +544,155 @@ scrape_configs:
           credentials_file: /etc/vmagent/kubeneuron-token
 ```
 
+## GPU reliability telemetry: exporter profile and scrape labels (v0.7)
+
+v0.7 widens what the dependency profile *observes* and changes nothing about
+what KubeNeuron *does*: the exporter emits more DCGM series, vmagent stamps
+a few well-defined labels on them, recording rules normalise them into
+`kubeneuron_gpu_*` series, five Grafana boards read those, and a set of
+shadow-only alerts shows what *would* be worth a look. This is observability
+only. No detector threshold, playbook, controller-facing alert or controller
+path is added or altered by it, and nothing here starts a remediation. The
+agent's own GPU health path (`dcgmi dmon` on field 230 and `nvidia-smi`) is
+independent of the exporter profile. None of the v0.7 additions has run
+against GPU hardware in this tree: the gates the release plan requires for
+that have not been executed, and no document in this tree says otherwise.
+
+**The profile.** `deploy/kubernetes/dependencies/gpu-operator/values.yaml`
+(`dcgmExporter.config.data`) lists exactly the tier T0 and tier T1 fields of
+the [GPU metric catalog](reference-gpu-metrics.md) that have a canonical
+`kubeneuron_gpu_*` mapping and are not deferred, under the series names the
+pinned dcgm-exporter uses. A unit test pins the list to the catalog in both
+directions. The sticky last-XID gauge (230), the recovery-action field
+(1523), the P-state (190) and every profiling field except the PCIe byte
+rates are deliberately not listed. Only the nine series the v0.6.1 profile
+had were ever scraped by a recorded run of this project (on a Tesla T4);
+every added series is listed from NVIDIA documentation and has not been
+observed on any GPU by this project. Series documented as absent for a GPU
+model (NVLink and row remapping on a Tesla T4) are expected to be missing,
+not zero, and anything built on them later shows No data.
+
+**Rollout.** The profile is the default of the dependency directory, so a
+fresh install applies it. On an existing installation re-run the GPU
+Operator `helm upgrade` with the updated values, then restart the exporter
+DaemonSet so it re-reads the ConfigMap (dcgm-exporter reads its metrics
+list at start):
+
+```sh
+helm upgrade gpu-operator "$GPU_CHART" \
+  --namespace gpu-operator \
+  --values deploy/kubernetes/dependencies/gpu-operator/values.yaml \
+  --wait --timeout 30m
+kubectl rollout restart daemonset/nvidia-dcgm-exporter --namespace gpu-operator
+kubectl rollout status daemonset/nvidia-dcgm-exporter \
+  --namespace gpu-operator --timeout=15m
+```
+
+Confirm with a series the old profile lacked, such as
+`DCGM_FI_DEV_POWER_USAGE`, on the exporter's `/metrics` or in VMSingle.
+
+**Rollback.** Put the nine-series v0.6.1 list back into
+`dcgmExporter.config.data` (the dependency README carries it verbatim, and
+`git show v0.6.1:deploy/kubernetes/dependencies/gpu-operator/values.yaml`
+has the whole file) and run the same two commands. Every controller-facing
+alert rule (`Gpu*`) reads one of those nine series, so no incident-opening
+rule loses its input; no controller, agent or store state is involved. The
+canonical and derived `kubeneuron_gpu_*` series that were fed by the added
+fields stop being recorded (there is no `or vector(0)` anywhere, so they go
+absent, not to zero), the v0.7 dashboards show No data for those panels, and
+the shadow alerts built on them fall silent. That is the whole effect, and
+it reverses again with the forward rollout above. To remove the v0.7 rules
+as well, delete the `kubeneuron-gpu-recording` and `kubeneuron-gpu-shadow`
+VMRules; the controller-facing `kubeneuron-gpu` VMRule is a separate object
+and is untouched by either step.
+
+**Scrape labels.** The `dcgm-exporter` job in
+`deploy/kubernetes/dependencies/observability/vmagent.yaml` is the label
+contract, pinned by a unit test that evaluates the relabel rules:
+
+- `node` from the pod's node name; `gpu_uuid` and `gpu_model` copied from the
+  exporter's `UUID` and `modelName` (the originals are kept).
+- `node_pool` is **optional**: derived from a node label through
+  `attach_metadata: {node: true}`, in rising precedence
+  `kubeneuron.io/node-pool` (manual fallback), `karpenter.sh/nodepool`,
+  `cloud.google.com/gke-nodepool`, `eks.amazonaws.com/nodegroup` (wins).
+  Each rule matches only a non-empty value, so a node with none of these
+  labels gets no `node_pool` at all, never an empty string or `unknown`.
+- `mig_profile` is optional and copied from the exporter's `GPU_I_PROFILE`,
+  which exists only with MIG enabled; `pod`, `namespace` and `container`
+  come from the exporter and are empty while no workload holds the GPU.
+- `cluster` is **not set by default** and cannot be derived in-cluster. An
+  administrator who writes several clusters into one store stamps it as
+  `spec.externalLabels.cluster` on the VMAgent resource (a VictoriaMetrics
+  operator field, applied to every series vmagent writes):
+
+  ```sh
+  kubectl patch vmagent kubeneuron --namespace kubeneuron-monitoring \
+    --type merge \
+    -p '{"spec": {"externalLabels": {"cluster": "prod-eu-west-1"}}}'
+  ```
+
+- `driver` is **intentionally absent**. Neither candidate source, the GPU
+  Feature Discovery node label `nvidia.com/cuda.driver-version.full` nor a
+  `DCGM_FI_DRIVER_VERSION` label row in the exporter profile, has been
+  verified end to end by this project, and a placeholder would make false
+  peers. The dependency README records the decision.
+
+No shipped rule or dashboard may require an optional label; queries must
+work when `node_pool`, `mig_profile`, `cluster` or the workload labels are
+absent. The node metadata needs read-only access to `nodes`, which the
+VictoriaMetrics operator's generated ClusterRole for the VMAgent already
+grants; the dependency README documents the verification and the one
+configuration (a namespace-restricted operator) in which a minimal
+read-only ClusterRole must be added by hand.
+
+**Canonical and derived series, and what No data means.** The
+`kubeneuron-gpu-recording` VMRule (canonical file
+`configs/vmalert/gpu-recording-rules.yaml`) records one `kubeneuron_gpu_*`
+series per catalog row from its source series, with the catalog's unit
+factor and fixed labels, and a second set of derived signals on top of
+those: thermal and memory-thermal headroom, power ratio, throttle share by
+reason, clock ratio, memory-used ratio, ECC and retired-page rates, the
+per-component `kubeneuron_gpu_memory_hard_fault_active` family, PCIe
+replay rate and link width/generation ratios, NVLink error rates, recovered
+capacity hours and the experimental fail-slow peer score. Every formula is
+in the [GPU metric catalog](reference-gpu-metrics.md), verbatim, and a unit
+test pins the rules to the catalog in both directions. The one rule that
+matters operationally: **a missing input stays missing.** No rule uses
+`or vector(0)`, `default` or `absent()`, so a field the GPU does not report
+(row remapping and NVLink on a Tesla T4, memory temperature where the
+device has none) produces no canonical series, no derived series and no
+shadow alert. On the dashboards that is a grey No data panel, never a
+reassuring zero, and it is the expected state for those panels on such
+hardware. GPU presence (a device that exists but reports nothing) is
+deliberately not recorded, because it needs a kube-state-metrics series this
+profile does not install; the catalog says so.
+
+**Shadow-only alerts.** The `kubeneuron-gpu-shadow` VMRule (canonical file
+`configs/vmalert/gpu-shadow-rules.yaml`, group `gpu-shadow`) carries seven
+`ShadowGpu*` rules over the canonical and derived series: PCIe link width
+degraded, NVLink link degraded, fail-slow, thermal headroom low, memory
+thermal headroom low, memory beyond repair and row remap pending. They are
+observation for humans and nothing else. Three independent levels keep them
+away from the controller, and a unit test pins each: the names never start
+with `Gpu`, so the Alertmanager route that feeds the controller webhook
+(`alertname =~ "Gpu.*|KubeNeuronAgentDown"`) cannot match them; every rule
+carries the label `kubeneuron_shadow="true"`, and the shipped Alertmanager
+config routes that label to the `human-default` receiver in a route placed
+*before* the webhook route, with `continue: false`; and no `ShadowGpu*` name
+is in the controller's alert-to-class map, which is itself pinned to its
+pre-v0.7 content, so a shadow alert that somehow reached the webhook would
+be dropped as unknown. They carry `severity: info`. The Remediation &
+Recovered Capacity and Fail-slow Radar boards show them through vmalert's
+own `ALERTS{kubeneuron_shadow="true"}` series; the controller exports no
+shadow metric and keeps no shadow state. Each rule has an entry in the
+[runbooks](runbooks.md#shadow-only-gpu-alerts-v07-route-to-humans-never-to-the-controller),
+and each entry opens with the sentence that matters. To disable them, delete
+the `kubeneuron-gpu-shadow` VMRule; nothing else notices. The
+`human-default` receiver is a placeholder in the shipped profile: an empty
+receiver drops notifications, so wire it to a real channel before expecting
+to see a shadow alert anywhere but on the boards.
+
 ## NVIDIA host tooling in the agent DaemonSet
 
 The agent image is distroless and carries no NVIDIA userspace. On GPU nodes,
@@ -921,6 +1070,69 @@ suite is a separate, gated target that always destroys its cluster afterward.
 - **Driver script:** `hack/hw-e2e.sh` (all the heavy logic; the YAML is thin).
 - **Watchdog:** `.github/workflows/hw-e2e-reaper.yaml` runs `hack/hw-e2e.sh reap`
   on its own 30-minute schedule.
+- **Tooling pins:** the workflow installs `kubectl` at an exact version
+  whose minor equals the EKS control plane the script creates (`1.33`), and
+  verifies the download against a pinned SHA-256 before it is made
+  executable or put on `PATH`; a mismatch deletes the file and fails the
+  job. The earlier `v1.30.6` pin was three minors behind the API it drove.
+  `make verify-hw-e2e-observability` fails when the pin's minor drifts
+  from `K8S_VERSION`, when the version or digest differs from the reviewed
+  pair the verifier records (`v1.33.12`,
+  `fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e`, the
+  digest published upstream and compared against the binary at review),
+  including any other well-formed digest, or when the install step would
+  accept an unverified download. Moving kubectl is a reviewed change to the
+  workflow and the verifier together.
+- **GPU operator profile:** `up-finish` installs the checked-in v0.7
+  reliability profile (`deploy/kubernetes/dependencies/gpu-operator/values.yaml`,
+  chart `v26.3.3`) with `--values` plus the EKS-only overrides
+  `driver.enabled=false` and `dcgm.enabled=true`. A `GPU_OPERATOR_VERSION` that
+  differs from that pin, or a missing profile, is refused before Helm runs.
+- **`deploy-observability`:** installs the VictoriaMetrics half of the same
+  checked-in dependency profile on the ephemeral cluster, in the order
+  `deploy/kubernetes/dependencies/README.md` prescribes: the operator release
+  manifest (`v0.73.1`, `install-no-webhook`) is downloaded, compared against
+  the SHA-256 in `versions.lock.yaml` (the script repeats the pin and refuses
+  to run if the two disagree) and applied server-side only when it verifies;
+  then the five CRDs are waited on, the operator rolled out, and the
+  namespace, VMSingle (PVC `Bound` and rollout), VMAgent, VMAlertmanager,
+  VMAlert and the rules applied one at a time, each behind a bounded
+  readiness wait. The installation's webhook-token Secret is copied into
+  `kubeneuron-monitoring` under the name Alertmanager mounts, read back and
+  compared, before Alertmanager is applied, so the phase runs after
+  `deploy`. It then waits for a raw DCGM series and a canonical
+  recording-rule series to be queryable in VMSingle, and last patches the
+  `KubeNeuron` root's `External` endpoints from the installer's placeholders
+  to the profile's VMSingle and Alertmanager Services (after checking each
+  Service really serves the port the checked-in endpoint names) and waits
+  for the root to be Ready. A missing root, a lock that disagrees with the
+  script, a download that does not verify, or a Service on another port
+  stops the phase with the cause named; nothing is skipped. This phase has
+  not yet been run on hardware.
+- **`test-observability`:** read-only phase that checks the profile ConfigMap,
+  the dcgm-exporter rollout and its T0/T1 series (with `UUID`/`modelName`
+  labels), and, on the VictoriaMetrics stack `deploy-observability`
+  installed from `deploy/kubernetes/dependencies/observability`, three canonical
+  `kubeneuron_gpu_*` series for that GPU: each sample must carry non-empty
+  `node`, `gpu_uuid` and `gpu_model` labels equal to the exporter's own values,
+  `node_pool` must equal the node's `eks.amazonaws.com/nodegroup` label (a
+  managed GPU node without that label is reported as an EKS-label error; this
+  expectation is specific to the EKS phase, the scrape contract keeps
+  `node_pool` optional), and the MiB-to-bytes rule must hold. On g4dn/Tesla
+  T4 it also requires the signals the hardware cannot produce (row remap,
+  NVLink, the fail-slow peer score, MIG) to be absent from VMSingle, where any
+  sample, zero-valued or not, is reported as a finding. The VMSingle port is
+  read from the Service (the port named `http`, or the only declared port),
+  never assumed. Without the stack it fails with a prerequisite message
+  rather than passing vacuously. `make verify-hw-e2e-observability` checks
+  the wiring offline: the port resolution against a scripted `kubectl`, and
+  the whole `deploy-observability` phase against scripted
+  `aws`/`kubectl`/`curl` (workflow order, the operator pin equal to the lock,
+  no remote apply, the README's install order with bounded gates, the
+  fail-closed token copy, and refused lock drift, checksum mismatch, missing
+  root and port drift). Both phases are steps of the workflow, after
+  `deploy` and before every injection phase. Neither has yet been run on
+  hardware.
 
 ### When it runs
 
@@ -951,19 +1163,28 @@ separately.
    the distroless agent finds no `nvidia-smi`, falls back to the fake driver,
    and every NVIDIA assertion below would pass against a simulator running on
    real hardware.
-3. Injects a kernel **XID 79** into a GPU node's `/dev/kmsg` and asserts the
+3. Installs the **checked-in observability profile** (checksum-locked
+   VictoriaMetrics operator, then VMSingle, vmagent, Alertmanager with the
+   installation's webhook token, vmalert and the rules, each behind a bounded
+   readiness gate), waits until a raw DCGM series and a canonical
+   recording-rule series are queryable, and points the `KubeNeuron` root at
+   the profile's endpoints. Then runs the **read-only observability check**:
+   T0/T1 exporter series, the canonical label contract, the EKS `node_pool`,
+   the MiB-to-bytes rule and the Tesla T4 absences. Neither step has run on
+   hardware yet; both are new in the workflow.
+4. Injects a kernel **XID 79** into a GPU node's `/dev/kmsg` and asserts the
    incident walks cordon → drain → approval → dry-run reboot ladder, with the
    approver identity recorded in the audit trail — and that the controller
    itself reports `execution_mode: dry-run` while that step ran.
-4. Exercises the **DCGM detection source**: either an injected DCGM field
+5. Exercises the **DCGM detection source**: either an injected DCGM field
    raises a `gpuhealth` detection, or the fallback proves DCGM is the source
    actually serving the node and that the agent parses this build's `dmon`
    layout.
-5. Asserts a same-class **recurrence during `VERIFYING`** escalates rather than
+6. Asserts a same-class **recurrence during `VERIFYING`** escalates rather than
    letting the quiet window resolve the incident.
-6. Exercises the **threshold path**: XID 92 holds sub-threshold in `OBSERVING`
+7. Exercises the **threshold path**: XID 92 holds sub-threshold in `OBSERVING`
    and the third signal escalates.
-7. Flips to `executionMode: Enabled` under a confined
+8. Flips to `executionMode: Enabled` under a confined
    `spec.safety.destructiveExecution` block (node selector + the exact
    acknowledgement string), waits for the **controller** to report that mode
    and that confinement as live — not merely for the operator to stamp the root
@@ -1030,9 +1251,21 @@ down as proof:
 - **Stacks** include `DELETE_FAILED` in the status filter. That is the state a
   stack lands in when an orphaned ENI or in-use security group wedges the
   delete, i.e. the one state that means "stuck and costing money".
-- **Volumes** are looked up by `kubernetes.io/created-for/pvc/namespace`, which
-  is what the EBS CSI driver actually writes, as well as by the legacy
-  `KubernetesCluster` tag.
+- **Volumes** are looked up by this run's own identity only: `kubeneuron:e2e`
+  plus `kubeneuron:e2e-run=<cluster>`, which the harness stamps on the exact
+  EBS volume behind each of its two claims (the controller's SQLite claim and
+  the VMSingle claim) while the cluster is live, after walking PVC → PV → CSI
+  volume handle and cross-checking the EBS CSI driver's own `created-for`
+  tags; plus the legacy `KubernetesCluster=<cluster>` tag for older clusters.
+  The sweep never scopes volumes by PVC namespace or by the driver's
+  `created-for` tags: the driver writes nothing that names the cluster, so
+  that filter matched every cluster in the account using the same namespaces.
+  Teardown and a standalone sweep tag the claims once more before deleting a
+  still-live cluster, through the run's dedicated kubeconfig, and only after
+  that kubeconfig's API server is proven to be the EKS endpoint of exactly
+  this cluster; a claim that cannot be tied to the run (or a kubeconfig that
+  cannot be proven) is recorded as unproven, and the sweep then names it and
+  refuses to report clean instead of guessing.
 
 The reaper is the second line of defence: it force-deletes any
 `kubeneuron-e2e*` cluster whose `kubeneuron:e2e-expires-at` tag has passed, so a

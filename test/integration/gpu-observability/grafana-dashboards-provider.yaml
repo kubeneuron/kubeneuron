@@ -1,0 +1,15 @@
+# Grafana dashboard provisioning for the kind GPU observability fixture: a
+# file provider over the directory the harness fills with the five v0.7
+# boards from deploy/grafana (datasource placeholder bound, nothing else
+# changed). Provisioned boards are read-only in Grafana and cannot be
+# deleted from the UI.
+apiVersion: 1
+providers:
+  - name: kubeneuron-v0.7
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards/kubeneuron
+      foldersFromFilesStructure: false

@@ -1,0 +1,17 @@
+# Grafana datasource provisioning for the kind GPU observability fixture: the
+# fixture's vmsingle as a Prometheus-API datasource. Its uid is what the
+# harness substitutes for the ${DS_PROMETHEUS} placeholder every checked-in
+# board carries (the same binding the Grafana import dialog performs); the
+# harness's --verify mode fails if this uid and the one in
+# hack/kind-gpu-observability.sh drift apart.
+apiVersion: 1
+datasources:
+  - name: VictoriaMetrics (fixture vmsingle)
+    uid: kubeneuron-vmsingle
+    type: prometheus
+    access: proxy
+    url: http://vmsingle:8428
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 30s

@@ -62,6 +62,15 @@ jobs:
     # If the two ever meet, the watchdog force-deletes a cluster whose run is
     # still using it, and the run fails for a reason that looks like a product
     # defect. Two phases were added here, so 120 -> 150 keeps the same margin.
+    #
+    # deploy-observability and test-observability were added WITHOUT raising
+    # this. The margin is the point: teardown itself takes 10-15 minutes after
+    # the ceiling fires, and it must finish before the expires-at tag (stamped
+    # at `up`, +180) lets the reaper delete the cluster from under it. Both
+    # new phases are bounded (every wait in them is capped, a healthy stack
+    # is live in a few minutes) and they cost the ceiling nothing when green;
+    # if a run ever times out in them, the fix is a tighter wait, not a
+    # ceiling that meets the reaper.
     timeout-minutes: 150
     steps:
       - name: Confirm destructive manual runs
@@ -87,10 +96,27 @@ jobs:
           role-to-assume: ${{ secrets.AWS_GPU_LAB_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
+      # kubectl must sit within one minor of the EKS control plane
+      # (hack/hw-e2e.sh K8S_VERSION, 1.33): the old v1.30.6 pin was three
+      # minors behind, outside the supported client skew, and the harness
+      # relies on server-side apply, `kubectl wait --for=jsonpath`, CRD
+      # waits and rollout status against that API. The binary is also
+      # checksum-locked: the upstream URL is mutable in principle, and a
+      # client that differs from the reviewed one would run every kubectl
+      # of a paid run. The digest is the one published at
+      # dl.k8s.io/release/<version>/bin/linux/amd64/kubectl.sha256 and is
+      # verified BEFORE the file is made executable or put on PATH.
+      # hack/verify-hw-e2e-observability.sh fails when the pin's minor
+      # drifts from K8S_VERSION, when the version or digest differs from
+      # the reviewed pair it records (any other digest, well-formed or
+      # not), or when a download that does not match is not refused.
+      # Moving kubectl means re-reviewing the digest and changing the
+      # workflow and the verifier in the same commit.
       - name: Install eksctl and kubectl
         env:
           EKSCTL_VERSION: v0.199.0
-          KUBECTL_VERSION: v1.30.6
+          KUBECTL_VERSION: v1.33.12
+          KUBECTL_SHA256: fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
         run: |
           set -euo pipefail
           tools="$RUNNER_TEMP/hw-e2e-tools"
@@ -99,8 +125,14 @@ jobs:
             "https://github.com/eksctl-io/eksctl/releases/download/${EKSCTL_VERSION}/eksctl_Linux_amd64.tar.gz" \
             | tar -xz -C "$tools" eksctl
           curl --fail --location --retry 3 \
-            --output "$tools/kubectl" \
+            --output "$tools/kubectl.download" \
             "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          if ! printf '%s  %s\n' "$KUBECTL_SHA256" "$tools/kubectl.download" | sha256sum -c --status -; then
+            rm -f "$tools/kubectl.download"
+            echo "::error::kubectl ${KUBECTL_VERSION} download does not match the pinned SHA-256 ${KUBECTL_SHA256}; refusing to use an unverified client" >&2
+            exit 1
+          fi
+          mv "$tools/kubectl.download" "$tools/kubectl"
           chmod 0755 "$tools/eksctl" "$tools/kubectl"
           echo "$tools" >> "$GITHUB_PATH"
 
@@ -112,6 +144,25 @@ jobs:
 
       - name: Deploy KubeNeuron (build+push to ECR, operator install)
         run: hack/hw-e2e.sh deploy
+
+      # The checked-in dependency profile's VictoriaMetrics half: the
+      # checksum-locked operator manifest, then VMSingle, vmagent, Alertmanager
+      # (with the installation's webhook token copied in), vmalert and the
+      # rules, in dependency order with bounded readiness gates, and the
+      # KubeNeuron root repointed at the profile endpoints. After deploy
+      # because the token copy needs KubeNeuron to exist; before every
+      # injection phase so the ladder runs on an installation whose
+      # observability endpoints are real rather than install.sh placeholders.
+      - name: Install the pinned observability stack (VM operator, VMSingle, vmagent, Alertmanager, vmalert, rules)
+        run: hack/hw-e2e.sh deploy-observability
+
+      # Read-only. Before test-destructive by necessity: that phase terminates
+      # the only GPU node, after which there is no exporter to read. Without
+      # the step above this phase stops at its own VMSingle prerequisite —
+      # it was never in the workflow, so the canonical-series checks had
+      # never been reachable from CI.
+      - name: Observability profile (T0/T1 series, canonical rules, label contract, Tesla T4 absences)
+        run: hack/hw-e2e.sh test-observability
 
       - name: Dry-run ladder (XID 79 -> cordon -> drain -> approval)
         run: hack/hw-e2e.sh test-dryrun

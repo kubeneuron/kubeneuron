@@ -62,3 +62,13 @@ images:
   prometheusAlertmanager:
     repository: prom/alertmanager
     tag: v0.32.1
+  # Not installed by this profile: KubeNeuron ships dashboard JSON
+  # (deploy/grafana), not a Grafana. This pin exists for the kind GPU
+  # observability fixture (test/integration/gpu-observability/grafana.yaml),
+  # which provisions the checked-in boards into exactly this image. Tag and
+  # the multi-arch index digest as published on Docker Hub (2026-10-13; the
+  # latest 12.4 patch when pinned on 2026-10-17). Move both together.
+  grafana:
+    repository: grafana/grafana
+    tag: 12.4.13
+    digest: sha256:41bbc1b5e04416f81891806076db2a2ff60a5d4da5f78d36a88b033a8c199185

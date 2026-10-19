@@ -277,7 +277,12 @@ exact workload Secret reference, rollout, root generation/phase, and root
 readiness. A controller rollout is complete only after every managed agent's
 durable registration acknowledgment sequence advances from a baseline taken
 after the replacement is ready, avoiding cross-node clock comparisons.
-Recorded phases are resumable convergence checks.
+Recorded phases are resumable convergence checks. A phase patch is a
+`resourceVersion` compare-and-swap against the root the helper validated; when
+the operator's status write wins that race, the helper re-reads the root and
+retries (bounded, default five times) only if `spec.tls` and every TLS
+transaction annotation are unchanged, accepts a root that already carries
+exactly the planned result, and otherwise fails closed with a drift diagnostic.
 Ordered rollback works before contraction, while `rollback-retirement`
 restores overlap trust after a failed final contraction before leaf/trust
 rollback. Rollback validates only the remaining material it needs, and the

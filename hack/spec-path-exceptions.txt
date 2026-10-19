@@ -18,3 +18,11 @@ spec.template.spec.containers
 # against the client in the agent image — the check that stops the second
 # detection source degrading in silence.
 spec.containers
+
+# The VMAgent CRD of the VictoriaMetrics operator (dependency profile), not
+# KubeNeuron's. deploy/kubernetes/dependencies/README.md and
+# docs/operations.md show the administrator how to stamp a `cluster` label
+# on every scraped series through that resource's externalLabels field; the
+# matching kubectl patch body targets `vmagent/kubeneuron`, never a
+# KubeNeuron object.
+spec.externalLabels

@@ -37,7 +37,25 @@ Commands (the workflow runs them in this order):
                      (kubeconfig, IRSA role, StorageClass, GPU operator)
                      against the already-created cluster.
   deploy             Build+push images to ECR and install KubeNeuron (DryRun),
-                     wait Ready.
+                     wait Ready, then tie the controller's SQLite claim to
+                     this run: resolve PVC -> PV -> EBS volume, cross-check
+                     the CSI driver's own tags, and tag the exact volume with
+                     the run identity the sweep deletes by.
+  deploy-observability
+                     Install the checked-in dependency profile's
+                     VictoriaMetrics half (deploy/kubernetes/dependencies):
+                     the checksum-locked operator manifest (server-side
+                     apply, CRDs Established, operator rolled out), then
+                     namespace, VMSingle (PVC Bound, its EBS volume tied to
+                     this run exactly as deploy ties the controller's, then
+                     rollout), the webhook
+                     token copy, VMAgent, VMAlertmanager, VMAlert and the
+                     rules, each behind a bounded readiness wait; wait for a
+                     raw DCGM series and a canonical recording-rule series
+                     in VMSingle; then point the KubeNeuron root at the
+                     profile's VMSingle/Alertmanager endpoints and wait
+                     Ready. Needs deploy (the token) and up (the exporter).
+                     UNEXERCISED LIVE.
   test-dryrun        Inject XID 79 and assert cordon->drain->approval->dry-run
                      ladder with the approver identity in the audit.
   test-threshold     Inject XID 92 three times (past the agent's 2-minute
@@ -54,10 +72,31 @@ Commands (the workflow runs them in this order):
   test-destructive   Flip to executionMode=Enabled under a confined
                      destructiveExecution block and assert the ReplaceNode path
                      closes the incident as replaced.
-  teardown           eksctl delete cluster --force --wait, then sweep. Safe to re-run.
+  test-observability Read-only check of the v0.7 GPU reliability profile on
+                     EKS: the kubeneuron-dcgm-metrics ConfigMap carries the T0
+                     and T1 fields, nvidia-dcgm-exporter is rolled out and
+                     serves both tiers with UUID/modelName labels, and — on
+                     the stack deploy-observability installed (VMSingle; a
+                     missing stack is a stated prerequisite failure) —
+                     the canonical kubeneuron_gpu_* recording rules exist with
+                     the node/gpu_uuid/gpu_model contract labels, node_pool
+                     equals the EKS nodegroup label, memory_used equals raw
+                     FB_USED * 1048576, and on g4dn/Tesla T4 the signals the
+                     hardware cannot produce (row remap, NVLink, fail-slow,
+                     MIG) are ABSENT, not zero. Never mutates the cluster.
+                     UNEXERCISED LIVE.
+  teardown           Tie this run's claim volumes to the run while the cluster
+                     is still live (last chance), then eksctl delete cluster
+                     --force --wait, then sweep. Safe to re-run.
   sweep              Assert ZERO leftovers for this run: cluster, non-terminated e2e EC2,
-                     e2e CloudFormation stacks, orphaned e2e EBS volumes, and a
-                     manually-created recycle IAM role. Deletes what it finds.
+                     e2e CloudFormation stacks, EBS volumes tagged for exactly
+                     this run, and a manually-created recycle IAM role. Deletes
+                     what it finds. Volumes are deleted and audited by this
+                     run's own tag (and the legacy KubernetesCluster tag) and
+                     never by PVC namespace: a namespace is shared by every
+                     cluster in the account. A claim whose volume could not be
+                     tied to this run fails the sweep by name instead of being
+                     guessed at.
                      When the exact cluster stack is DELETE_FAILED, clears the
                      detached VPC-CNI ENIs of this run's terminated nodes and
                      the exact EKS cluster security group inside that stack's
@@ -66,7 +105,10 @@ Commands (the workflow runs them in this order):
   reap               Out-of-band watchdog: force-delete any e2e cluster older
                      than MAX_LIFETIME_MINUTES. Meant for an INDEPENDENT cron
                      so a hung run cannot leak a cluster (PRODUCT_PLAN safety
-                     rule 1). Never assumes this run's cluster.
+                     rule 1). Never assumes this run's cluster. Sweeps a
+                     reaped cluster's volumes by its run tag only; a run that
+                     hung before its claims were tagged leaves its volume for
+                     manual review rather than a namespace-wide guess.
 
 Configuration (environment variables):
   CLUSTER_NAME       ephemeral cluster name (default: kubeneuron-e2e-local).
@@ -76,7 +118,9 @@ Configuration (environment variables):
                      (required for deploy). Never hard-code the account id.
   GPU_INSTANCE_TYPE  GPU instance type (default: g4dn.xlarge).
   K8S_VERSION        EKS control-plane version (default: 1.33).
-  GPU_OPERATOR_VERSION  NVIDIA GPU operator chart version (default: v24.9.0).
+  GPU_OPERATOR_VERSION  NVIDIA GPU operator chart version (default: v26.3.3,
+                     the version pinned by the checked-in profile; any other
+                     value is refused before Helm runs).
   RECYCLE_ROLE_NAME  IAM role name that a live run may create for the
                      controller's scoped ec2:TerminateInstances IRSA. Swept on
                      teardown (default: <CLUSTER_NAME>-recycle). Do not reuse a
@@ -112,6 +156,76 @@ readonly DRAIN_XID=48
 # but it must map to THIS phase's class, which RECUR_XID does not.
 readonly DRAIN_RECUR_XID=13
 readonly E2E_RUN_TAG="kubeneuron:e2e-run"
+# Run-scoped EBS identity. The EBS CSI driver tags the volume behind a claim
+# with kubernetes.io/created-for/pvc/{name,namespace} and nothing that names
+# the CLUSTER, so "the volumes in kube-neuron and kubeneuron-monitoring" is
+# every cluster in the account that uses those namespaces. The sweep filtered
+# on exactly that once, and could have deleted another cluster's state. Now
+# each of the two claims this harness creates is resolved PVC -> PV -> EBS
+# volume id while its cluster is live, cross-checked against the
+# provisioner's own created-for tags, and stamped with E2E_RUN_TAG=CLUSTER_NAME
+# plus E2E_CLAIM_TAG=<namespace>/<pvc>; the sweep deletes and audits volumes
+# by that run identity and nothing wider (tag_run_volume, cmd_sweep).
+#
+# Two PV sources are accepted, each on its own explicit schema, and only
+# when exactly one of them is set: an ebs.csi.aws.com PV (.spec.csi, id in
+# volumeHandle) or a legacy in-tree PV (.spec.awsElasticBlockStore, id in
+# volumeID as vol-<hex> or aws://<zone>/vol-<hex>). A legacy PV names no
+# driver, so its volume must additionally carry LEGACY_CLUSTER_TAG=
+# CLUSTER_NAME exactly, on top of the same three created-for tags.
+readonly E2E_CLAIM_TAG="kubeneuron:e2e-claim"
+readonly EBS_CSI_DRIVER="ebs.csi.aws.com"
+readonly CSI_PV_NAME_TAG="kubernetes.io/created-for/pv/name"
+readonly CSI_PVC_NAME_TAG="kubernetes.io/created-for/pvc/name"
+readonly CSI_PVC_NAMESPACE_TAG="kubernetes.io/created-for/pvc/namespace"
+# The in-tree provisioner's cluster tag, the same literal the sweep's legacy
+# delete and audit filter on.
+readonly LEGACY_CLUSTER_TAG="KubernetesCluster"
+# The GPU operator install is the checked-in v0.7 reliability profile, not an
+# ad-hoc chart default. Both the values file and the chart version are pinned
+# in deploy/kubernetes/dependencies (versions.lock.yaml, values.yaml); the
+# harness repeats the version so a stale GPU_OPERATOR_VERSION cannot install a
+# chart the profile was never reviewed against. assert_gpu_operator_profile
+# refuses any mismatch BEFORE helm runs — no silent drift in either direction.
+readonly GPU_OPERATOR_PROFILE_REL="deploy/kubernetes/dependencies/gpu-operator/values.yaml"
+readonly GPU_OPERATOR_PINNED_VERSION="v26.3.3"
+# The ConfigMap the profile creates (values.yaml dcgmExporter.config.name) and
+# the two fields test-observability uses as witnesses for the T0 and T1 tiers.
+readonly DCGM_METRICS_CONFIGMAP="kubeneuron-dcgm-metrics"
+readonly GPU_OPERATOR_NAMESPACE="gpu-operator"
+readonly OBSERVABILITY_NAMESPACE="kubeneuron-monitoring"
+readonly OBS_T0_FIELD="DCGM_FI_DEV_POWER_USAGE"
+readonly OBS_T1_FIELD="DCGM_FI_DEV_ECC_SBE_VOL_TOTAL"
+# The raw series the deploy-observability pipeline wait looks for in VMSingle
+# and, before anything is installed, on the exporter itself; the canonical
+# kubeneuron_gpu_temperature_celsius rule records from it.
+readonly OBS_PIPELINE_FIELD="DCGM_FI_DEV_GPU_TEMP"
+# The VictoriaMetrics half of the same profile, installed by
+# deploy-observability. Version, release URL and manifest SHA-256 repeat
+# versions.lock.yaml on purpose: assert_observability_profile refuses to run
+# when the two disagree, so neither can move without the other, and the
+# download is verified against this pin before anything is applied.
+readonly DEPENDENCIES_LOCK_REL="deploy/kubernetes/dependencies/versions.lock.yaml"
+readonly OBSERVABILITY_PROFILE_REL="deploy/kubernetes/dependencies/observability"
+readonly VM_OPERATOR_VERSION="v0.73.1"
+readonly VM_OPERATOR_MANIFEST_URL="https://github.com/VictoriaMetrics/operator/releases/download/v0.73.1/install-no-webhook.yaml"
+readonly VM_OPERATOR_MANIFEST_SHA256="28f0ab848df7a00f9d46685cd2864024a0d998df4840bb9a1fce471dd4163628"
+readonly VM_OPERATOR_NAMESPACE="vm"
+readonly VM_OPERATOR_FIELD_MANAGER="kubeneuron-dependencies"
+# The in-cluster endpoints the profile generates (README, "What this profile
+# installs") and the KubeNeuron root is pointed at once the stack is live.
+# vmalert.yaml reads and notifies the same two URLs; the gate checks that.
+# VMSingle serves 8429: the VictoriaMetrics operator names the Service port
+# http and gives it the VMSingle default listen port, 8429, not the
+# victoria-metrics binary's standalone default 8428. The first G3 on EKS
+# (2026-10-18) observed exactly that and obs_assert_service_port stopped the
+# phase because this constant said 8428; the constant now records the
+# observed contract and the assertion keeps guarding it.
+readonly VMSINGLE_ENDPOINT="http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8429"
+readonly VMALERTMANAGER_ENDPOINT="http://vmalertmanager-kubeneuron.kubeneuron-monitoring.svc:9093"
+# The Secret vmalertmanager.yaml mounts for the controller webhook's bearer
+# token: a namespace-local copy of RUNTIME_NAMESPACE/<ROOT_NAME>-webhook-token.
+readonly ALERTMANAGER_WEBHOOK_TOKEN_SECRET="kubeneuron-alertmanager-webhook-token"
 
 CLUSTER_NAME="${CLUSTER_NAME:-kubeneuron-e2e-local}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
@@ -126,7 +240,11 @@ K8S_VERSION="${K8S_VERSION:-1.33}"
 # narrower nvidia-smi one. v24.9.x ships 3.3.x; v25.3.4 ships 4.3.1, which is
 # the same major as the client. assert_dcgm_versions_agree below enforces the
 # pairing rather than trusting this line to stay correct.
-GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION:-v25.3.4}"
+#
+# Since v0.7 the default is the profile's locked chart release
+# (GPU_OPERATOR_PINNED_VERSION); overriding it is refused by
+# assert_gpu_operator_profile so the stand always installs what is reviewed.
+GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION:-$GPU_OPERATOR_PINNED_VERSION}"
 RECYCLE_ROLE_NAME="${RECYCLE_ROLE_NAME:-${CLUSTER_NAME}-recycle}"
 MAX_LIFETIME_MINUTES="${MAX_LIFETIME_MINUTES:-180}"
 KEEP_CLUSTER="${KEEP_CLUSTER:-0}"
@@ -166,6 +284,24 @@ RECYCLE_ROLE_ARN="${RECYCLE_ROLE_ARN:-}"
 readonly OPERATOR_NAMESPACE=kube-neuron
 readonly RUNTIME_NAMESPACE=kube-neuron
 readonly ROOT_NAME=kubeneuron
+# The two PersistentVolumeClaims this harness creates: the operator's SQLite
+# state claim (deploy; the installation is Ready only once it is Bound, see
+# internal/operator/reconciler.go sqliteClaimReady) and the profile's VMSingle
+# claim (deploy-observability; the operator names it vmsingle-<VMSingle name>).
+# These two names, never a namespace-wide listing, are what tag_run_volume
+# resolves.
+readonly CONTROLLER_STATE_CLAIM="${ROOT_NAME}-controller-state"
+readonly VMSINGLE_CLAIM="vmsingle-${ROOT_NAME}"
+# Per-run records beside the kubeconfig and image tag, written by
+# tag_run_volume / claim_unproven and read by the sweep's end-state audit.
+# Every line starts with the cluster name so a record is never read for the
+# wrong run:
+#   run-volumes:      <cluster> <volume-id> <namespace>/<pvc>
+#   unproven-claims:  <cluster> <namespace>/<pvc> <reason...>
+# The tags ON the volumes are what the sweep deletes by; these files add only
+# to what it asserts, never to what it deletes.
+readonly RUN_VOLUMES_FILE="${E2E_STATE_DIR}/run-volumes"
+readonly UNPROVEN_CLAIMS_FILE="${E2E_STATE_DIR}/unproven-claims"
 # IMAGE_TAG must survive across invocations. deploy and teardown are separate
 # `hack/hw-e2e.sh <cmd>` processes — that is how the workflow runs them — so a
 # tag computed here was a FRESH timestamp in the sweep, and the ECR cleanup
@@ -221,6 +357,22 @@ assert_kube_target() {
 		die "cannot read server from kubeconfig context $context"
 	[ "$actual" = "$expected" ] ||
 		die "refusing kubectl against $context ($actual); expected EKS endpoint for $CLUSTER_NAME"
+}
+
+# assert_gpu_operator_profile is the pre-Helm gate for the GPU operator
+# install: the checked-in profile must exist, the requested chart version must
+# equal the harness pin, and the profile itself must agree with that pin (the
+# file repeats the chart's operator image version). Fails closed.
+GPU_OPERATOR_PROFILE="${REPO_ROOT}/${GPU_OPERATOR_PROFILE_REL}"
+assert_gpu_operator_profile() {
+	[ -f "$GPU_OPERATOR_PROFILE" ] ||
+		die "GPU operator profile not found: $GPU_OPERATOR_PROFILE_REL (run from a checkout)"
+	[ "$GPU_OPERATOR_VERSION" = "$GPU_OPERATOR_PINNED_VERSION" ] ||
+		die "GPU_OPERATOR_VERSION=$GPU_OPERATOR_VERSION differs from the checked-in pin $GPU_OPERATOR_PINNED_VERSION ($GPU_OPERATOR_PROFILE_REL, versions.lock.yaml); refusing to install an unreviewed chart"
+	grep -Eq "^[[:space:]]*version:[[:space:]]*${GPU_OPERATOR_PINNED_VERSION}[[:space:]]*$" "$GPU_OPERATOR_PROFILE" ||
+		die "$GPU_OPERATOR_PROFILE_REL does not pin version ${GPU_OPERATOR_PINNED_VERSION}; update GPU_OPERATOR_PINNED_VERSION in this script together with the profile"
+	grep -Eq "^[[:space:]]*name:[[:space:]]*${DCGM_METRICS_CONFIGMAP}[[:space:]]*$" "$GPU_OPERATOR_PROFILE" ||
+		die "$GPU_OPERATOR_PROFILE_REL does not create the ${DCGM_METRICS_CONFIGMAP} ConfigMap test-observability depends on"
 }
 
 # Keep every direct kubectl invocation in this script behind the endpoint
@@ -350,7 +502,8 @@ cmd_up_finish() {
 		-p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' ||
 		log "up: gp2 patch skipped (already default or absent)"
 
-	log "up: installing the NVIDIA GPU operator ($GPU_OPERATOR_VERSION)"
+	log "up: installing the NVIDIA GPU operator ($GPU_OPERATOR_VERSION) from $GPU_OPERATOR_PROFILE_REL"
+	assert_gpu_operator_profile
 	helm repo add nvidia https://helm.ngc.nvidia.com/nvidia >/dev/null 2>&1 || true
 	helm repo update nvidia >/dev/null
 	# The EKS NVIDIA AMI already carries the driver; let the operator manage the
@@ -363,9 +516,14 @@ cmd_up_finish() {
 	# agent's dcgmEndpoint resolves to nothing, runtime attestation stays
 	# degraded, and test-dcgm can only ever take its fallback branch — against a
 	# source that was never serving the node in the first place.
+	#
+	# --values is the reviewed reliability profile (field list, pinned images);
+	# the two --set lines are the EKS-only overrides on top of it, in that
+	# order so they win.
 	helm upgrade --install gpu-operator nvidia/gpu-operator \
-		--namespace gpu-operator --create-namespace \
+		--namespace "$GPU_OPERATOR_NAMESPACE" --create-namespace \
 		--version "$GPU_OPERATOR_VERSION" \
+		--values "$GPU_OPERATOR_PROFILE" \
 		--set driver.enabled=false \
 		--set dcgm.enabled=true \
 		--wait --timeout 15m
@@ -492,6 +650,11 @@ cmd_deploy() {
 	log "deploy: waiting for the operator and controller to be Ready"
 	kubectl -n "$OPERATOR_NAMESPACE" rollout status deployment/kubeneuron-operator --timeout=5m
 	wait_for_installation_ready
+	# Ready means the SQLite claim is Bound (the operator's runtimeReady checks
+	# exactly that), so its EBS volume exists now. Tie it to this run before
+	# anything after this point can stop the phase: a volume with no run
+	# identity is one the sweep is not allowed to find.
+	tag_run_volume "$RUNTIME_NAMESPACE" "$CONTROLLER_STATE_CLAIM"
 	assert_real_driver
 	log "deploy: KubeNeuron Ready"
 }
@@ -1255,6 +1418,665 @@ EOF
 	log "test-destructive: PASS (confined ReplaceNode terminated the node, approver audited, resolved)"
 }
 
+# ---------------------------------------------------------------------------
+# deploy-observability — install the dependency profile's VictoriaMetrics half.
+#
+# This is the stack test-observability reads. Until it existed in the harness
+# the phase could only ever stop at its own VMSingle prerequisite, so the
+# canonical-series checks were never reachable from the workflow.
+#
+# It runs AFTER deploy, not inside up-finish with the GPU operator, because of
+# one namespace-local object: the profile's VMAlertmanager mounts the
+# installation's webhook bearer token under ALERTMANAGER_WEBHOOK_TOKEN_SECRET,
+# which is a copy of the Secret deploy/install.sh generates in
+# RUNTIME_NAMESPACE. The copy needs KubeNeuron to exist, and an Alertmanager
+# applied before its Secret exists sits in ContainerCreating for the rest of
+# the run. The README's own order (dependencies healthy, KubeNeuron pointed
+# at them last) is kept for the part that matters: the root is repointed at
+# the profile endpoints only after the pipeline is proven live.
+#
+# Nothing is applied from a mutable remote. The operator manifest is
+# downloaded into the per-run state directory, checked against the SHA-256
+# this script repeats from versions.lock.yaml (and the repeat itself is
+# checked against the lock first), and only the verified file is applied —
+# server-side, because the operator's CRDs exceed the client-side annotation
+# limit. Every wait is bounded and every failure is a failure: a stack that
+# does not come up stops the run here, with the component named, rather than
+# letting a later phase pass against nothing.
+
+OBSERVABILITY_PROFILE="${REPO_ROOT}/${OBSERVABILITY_PROFILE_REL}"
+DEPENDENCIES_LOCK="${REPO_ROOT}/${DEPENDENCIES_LOCK_REL}"
+
+# lock_field <artifact> <key> — print one scalar from the lock's
+# artifacts.<artifact> block. awk, so the runner needs no YAML tool; the lock
+# is a flat two-level file by design (schemaVersion 1).
+lock_field() {
+	awk -v block="  $1:" -v key="$2" '
+		$0 == block { p = 1; next }
+		p && /^  [^ ]/ { p = 0 }
+		p { sub(/^[ \t]+/, ""); if (index($0, key ":") == 1) { sub("^" key ":[ \t]*", ""); print; exit } }
+	' "$DEPENDENCIES_LOCK"
+}
+
+# assert_observability_profile is the gate before any download or apply: the
+# lock must agree with this script's pins, every profile file must exist, and
+# the endpoints this phase hands to KubeNeuron must be the ones the profile
+# itself wires (vmalert reads VMSingle at the first and notifies the second).
+# A profile that moved either without this script moving with it would leave
+# the controller pointed at a name that resolves to nothing. Fails closed.
+assert_observability_profile() {
+	[ -f "$DEPENDENCIES_LOCK" ] ||
+		die "dependency lock not found: $DEPENDENCIES_LOCK_REL (run from a checkout)"
+	local locked
+	locked=$(lock_field victoriaMetricsOperatorManifest version)
+	[ "$locked" = "$VM_OPERATOR_VERSION" ] ||
+		die "$DEPENDENCIES_LOCK_REL pins VictoriaMetrics operator '${locked}' but this script pins ${VM_OPERATOR_VERSION}; update VM_OPERATOR_VERSION together with the lock"
+	locked=$(lock_field victoriaMetricsOperatorManifest url)
+	[ "$locked" = "$VM_OPERATOR_MANIFEST_URL" ] ||
+		die "$DEPENDENCIES_LOCK_REL locks manifest URL '${locked}' but this script would download ${VM_OPERATOR_MANIFEST_URL}; refusing an artifact the lock does not name"
+	locked=$(lock_field victoriaMetricsOperatorManifest sha256)
+	[ "$locked" = "$VM_OPERATOR_MANIFEST_SHA256" ] ||
+		die "$DEPENDENCIES_LOCK_REL locks manifest SHA-256 '${locked}' but this script expects ${VM_OPERATOR_MANIFEST_SHA256}; refusing to verify against a stale pin"
+	local f
+	for f in namespace vmsingle vmagent vmalertmanager vmalert rules; do
+		[ -f "$OBSERVABILITY_PROFILE/$f.yaml" ] ||
+			die "observability profile file missing: ${OBSERVABILITY_PROFILE_REL}/${f}.yaml (run from a checkout)"
+	done
+	grep -Eq "^[[:space:]]*url:[[:space:]]*${VMSINGLE_ENDPOINT}[[:space:]]*$" "$OBSERVABILITY_PROFILE/vmalert.yaml" ||
+		die "${OBSERVABILITY_PROFILE_REL}/vmalert.yaml does not read VMSingle at ${VMSINGLE_ENDPOINT}; update VMSINGLE_ENDPOINT together with the profile"
+	grep -Eq "^[[:space:]]*url:[[:space:]]*${VMALERTMANAGER_ENDPOINT}[[:space:]]*$" "$OBSERVABILITY_PROFILE/vmalert.yaml" ||
+		die "${OBSERVABILITY_PROFILE_REL}/vmalert.yaml does not notify ${VMALERTMANAGER_ENDPOINT}; update VMALERTMANAGER_ENDPOINT together with the profile"
+	grep -Eq "^[[:space:]]*-[[:space:]]*${ALERTMANAGER_WEBHOOK_TOKEN_SECRET}[[:space:]]*$" "$OBSERVABILITY_PROFILE/vmalertmanager.yaml" ||
+		die "${OBSERVABILITY_PROFILE_REL}/vmalertmanager.yaml does not mount Secret ${ALERTMANAGER_WEBHOOK_TOKEN_SECRET}; update ALERTMANAGER_WEBHOOK_TOKEN_SECRET together with the profile"
+}
+
+vm_operator_manifest_verified() {
+	printf '%s  %s\n' "$VM_OPERATOR_MANIFEST_SHA256" "$1" | sha256sum -c --status -
+}
+
+# fetch_vm_operator_manifest prints the path of the checksum-verified operator
+# manifest in the per-run state directory, downloading it when the copy there
+# is absent or does not verify. A download that does not match the lock is
+# deleted and the phase stops; it is never applied.
+fetch_vm_operator_manifest() {
+	local dest="${E2E_STATE_DIR}/vm-operator-${VM_OPERATOR_VERSION}-no-webhook.yaml"
+	mkdir -p "$E2E_STATE_DIR"
+	if [ ! -s "$dest" ] || ! vm_operator_manifest_verified "$dest"; then
+		rm -f "$dest"
+		log "deploy-observability: downloading the VictoriaMetrics operator manifest ${VM_OPERATOR_VERSION}"
+		curl -fsSL --max-time 120 --retry 3 -o "${dest}.download" "$VM_OPERATOR_MANIFEST_URL" ||
+			die "cannot download ${VM_OPERATOR_MANIFEST_URL}"
+		if ! vm_operator_manifest_verified "${dest}.download"; then
+			rm -f "${dest}.download"
+			die "VictoriaMetrics operator manifest from ${VM_OPERATOR_MANIFEST_URL} does not match the locked SHA-256 ${VM_OPERATOR_MANIFEST_SHA256} (${DEPENDENCIES_LOCK_REL}); refusing to apply an unverified manifest"
+		fi
+		mv "${dest}.download" "$dest"
+	fi
+	printf '%s\n' "$dest"
+}
+
+# obs_wait_rollout <deployment|statefulset>/<name> <seconds> — the operator
+# creates a CR's workload asynchronously, and rollout status on an object that
+# does not exist yet fails at once; wait for the object, then for the rollout.
+# Deployments go through kubectl rollout status. StatefulSets do not: the
+# VictoriaMetrics operator generates VMAlertmanager's StatefulSet with
+# updateStrategy OnDelete (it rotates the pods itself), and kubectl answers
+# "error: rollout status is only available for RollingUpdate strategy type"
+# — the 2026-10-18 G3 attempt died on that line with Alertmanager coming up
+# fine. A StatefulSet is instead polled on its status fields
+# (obs_statefulset_ready), with the strategy's own meaning of "rolled out",
+# and the timeout prints that status so the failure names what was missing.
+obs_wait_rollout() {
+	local target="$1" seconds="$2"
+	wait_for "$seconds" 'kubectl -n '"$OBSERVABILITY_NAMESPACE"' get '"$target"' >/dev/null'
+	case "$target" in
+	deployment/*)
+		kubectl -n "$OBSERVABILITY_NAMESPACE" rollout status "$target" --timeout="${seconds}s" ||
+			die "${OBSERVABILITY_NAMESPACE}/${target} did not roll out within ${seconds}s"
+		;;
+	statefulset/*)
+		(wait_for "$seconds" 'obs_statefulset_ready '"$target") ||
+			die "${OBSERVABILITY_NAMESPACE}/${target} did not roll out within ${seconds}s: $(obs_statefulset_status "$target")"
+		;;
+	*) die "obs_wait_rollout: ${target} is neither deployment/<name> nor statefulset/<name>" ;;
+	esac
+}
+
+# obs_statefulset_ready <statefulset/name> — true once the StatefulSet
+# controller has observed the current generation and every desired replica is
+# created and Ready, plus what the update strategy itself promises about the
+# revision the pods run:
+#   RollingUpdate — the controller rolls every pod to updateRevision, so the
+#     rollout is complete only when updatedReplicas equals spec.replicas
+#     (what kubectl rollout status waits for).
+#   OnDelete — the controller never rolls a pod; after a spec change it keeps
+#     the old-revision pods running and Ready until something else deletes
+#     them (the VictoriaMetrics operator decides if and when). updatedReplicas
+#     therefore stays below spec.replicas indefinitely while Alertmanager
+#     serves, and requiring it would make the harness wait the full bound for
+#     a healthy StatefulSet — the G3 blockage in a new shape. The pods' being
+#     Ready at the observed generation is the whole of what OnDelete promises,
+#     so that is what is required. currentRevision is likewise not compared
+#     with updateRevision under either strategy.
+#   anything else — not ready, ever (fail closed); the timeout message names
+#     the strategy as unsupported. An unset updateStrategy.type is the API
+#     server's RollingUpdate default.
+# A StatefulSet that asks for zero replicas is NOT ready: the harness is
+# waiting for Alertmanager to serve, and nothing-to-serve would otherwise pass
+# vacuously. Every count is compared with spec.replicas, so a status the
+# controller has not written yet reads as 0 of N, never as 0 of 0.
+obs_statefulset_ready() {
+	kubectl -n "$OBSERVABILITY_NAMESPACE" get "$1" -o json |
+		jq -e '(.spec.replicas // 1) as $want
+			| (.spec.updateStrategy.type // "RollingUpdate") as $strategy
+			| $want >= 1
+			and (.metadata.generation // 0) >= 1
+			and .status.observedGeneration == .metadata.generation
+			and (.status.replicas // 0) == $want
+			and (.status.readyReplicas // 0) == $want
+			and (if $strategy == "RollingUpdate" then (.status.updatedReplicas // 0) == $want
+				elif $strategy == "OnDelete" then true
+				else false end)' >/dev/null
+}
+
+# obs_statefulset_status <statefulset/name> — one line of the fields
+# obs_statefulset_ready decides on, for the timeout message. A strategy the
+# predicate does not understand is called out, since it alone makes the wait
+# unsatisfiable.
+obs_statefulset_status() {
+	kubectl -n "$OBSERVABILITY_NAMESPACE" get "$1" -o json 2>/dev/null |
+		jq -er '(.spec.updateStrategy.type // "RollingUpdate(default)") as $strategy
+			| "strategy=\($strategy) generation=\(.metadata.generation // "?") observedGeneration=\(.status.observedGeneration // "?") desired=\(.spec.replicas // "?") replicas=\(.status.replicas // 0) ready=\(.status.readyReplicas // 0) updated=\(.status.updatedReplicas // 0) currentRevision=\(.status.currentRevision // "?") updateRevision=\(.status.updateRevision // "?")"
+			+ (if $strategy == "RollingUpdate" or $strategy == "RollingUpdate(default)" or $strategy == "OnDelete" then ""
+				else " (unsupported updateStrategy: obs_statefulset_ready understands only RollingUpdate and OnDelete and never holds for \($strategy))" end)' 2>/dev/null ||
+		printf 'status unreadable'
+}
+
+# obs_assert_service_port <service> <endpoint-url> — the Service the operator
+# generated must listen where the checked-in endpoint says, read through the
+# same resolver test-observability uses (the port named http, or the only
+# port; anything else is refused there). Otherwise KubeNeuron would be handed
+# a URL whose host answers and whose port does not.
+obs_assert_service_port() {
+	local svc="$1" endpoint="$2" want got
+	want="${endpoint##*:}"
+	got=$(obs_service_http_port "$OBSERVABILITY_NAMESPACE" "$svc")
+	[ "$got" = "$want" ] ||
+		die "service ${OBSERVABILITY_NAMESPACE}/${svc} serves port ${got} but the checked-in endpoint ${endpoint} names ${want}; refusing to hand KubeNeuron an endpoint the Service does not answer on"
+}
+
+# copy_webhook_token copies the installation's Alertmanager webhook bearer
+# token into OBSERVABILITY_NAMESPACE under the name vmalertmanager.yaml
+# mounts. Secrets are namespace-local, so this is the one point where the two
+# halves of the profile meet. The root must reference the Secret install.sh
+# generated (no guessing which token Alertmanager should present), the token
+# travels through a pipe and never through an argument, and the copy is read
+# back and compared before Alertmanager is applied.
+copy_webhook_token() {
+	local src="${ROOT_NAME}-webhook-token" ref src_b64 dst_b64
+	ref=$(kubectl -n "$RUNTIME_NAMESPACE" get kubeneuron "$ROOT_NAME" \
+		-o jsonpath='{.spec.notifications.webhookToken.name}' 2>/dev/null) ||
+		die "KubeNeuron ${RUNTIME_NAMESPACE}/${ROOT_NAME} is not installed; run deploy before deploy-observability (Alertmanager presents the installation's webhook token, which does not exist yet)"
+	[ "$ref" = "$src" ] ||
+		die "KubeNeuron ${ROOT_NAME} references webhookToken '${ref}', expected ${src} (deploy/install.sh); refusing to guess which Secret Alertmanager should present"
+	src_b64=$(kubectl -n "$RUNTIME_NAMESPACE" get secret "$src" -o jsonpath='{.data.token}') ||
+		die "Secret ${RUNTIME_NAMESPACE}/${src} is absent although the root references it"
+	[ -n "$src_b64" ] ||
+		die "Secret ${RUNTIME_NAMESPACE}/${src} has no token key; the controller would refuse every webhook delivery"
+	kubectl -n "$RUNTIME_NAMESPACE" get secret "$src" -o json |
+		jq --arg name "$ALERTMANAGER_WEBHOOK_TOKEN_SECRET" --arg ns "$OBSERVABILITY_NAMESPACE" '{
+			apiVersion: "v1", kind: "Secret", type: (.type // "Opaque"),
+			metadata: {name: $name, namespace: $ns,
+				labels: {"app.kubernetes.io/part-of": "kube-neuron-dependencies"}},
+			data: {token: .data.token}}' |
+		kubectl apply -f - >/dev/null
+	dst_b64=$(kubectl -n "$OBSERVABILITY_NAMESPACE" get secret "$ALERTMANAGER_WEBHOOK_TOKEN_SECRET" -o jsonpath='{.data.token}') ||
+		die "Secret ${OBSERVABILITY_NAMESPACE}/${ALERTMANAGER_WEBHOOK_TOKEN_SECRET} is absent after the copy"
+	[ "$dst_b64" = "$src_b64" ] ||
+		die "Secret ${OBSERVABILITY_NAMESPACE}/${ALERTMANAGER_WEBHOOK_TOKEN_SECRET} does not carry the installation's token after the copy"
+}
+
+# obs_vm_has_samples <promql> — one bounded instant query against the
+# forwarded VMSingle at the current instant; true when a sample came back.
+obs_vm_has_samples() {
+	local n
+	_OBS_QUERY_TIME=$(date -u +%s)
+	n=$(obs_vm_query "$1" | jq 'length') || return 1
+	[ "${n:-0}" -ge 1 ]
+}
+
+# obs_exporter_diagnose — what the exporter is doing, for a failure message.
+# Pod phase, container state, and the last log lines of every exporter pod,
+# current and previous container. One CSV field name the pinned exporter does
+# not know terminates the whole exporter (the 2026-10-18 G4dn run: the
+# profile listed DCGM_FI_DEV_MEMORY_UNREPAIRABLE, the pinned go-dcgm spells
+# the id DCGM_FI_DEV_MEMORY_UNREPAIRABLE_FLAG, and the exporter served
+# nothing), and from the outside that looks exactly like a DaemonSet that is
+# slow to roll out: a Service with no ready endpoints. The reason is only in
+# the container's exit and its log, so both are printed. Nothing here is a
+# secret: the exporter mounts no credential and logs none. Every call is
+# bounded by the API request timeout, and none of them can fail the phase.
+obs_exporter_diagnose() {
+	{
+		echo "--- ${GPU_OPERATOR_NAMESPACE} pods app=nvidia-dcgm-exporter"
+		kubectl -n "$GPU_OPERATOR_NAMESPACE" get pods -l app=nvidia-dcgm-exporter --request-timeout=30s -o wide 2>&1 || true
+		kubectl -n "$GPU_OPERATOR_NAMESPACE" get pods -l app=nvidia-dcgm-exporter --request-timeout=30s \
+			-o jsonpath='{range .items[*]}{.metadata.name}: phase={.status.phase} restarts={.status.containerStatuses[*].restartCount} state={.status.containerStatuses[*].state} last={.status.containerStatuses[*].lastState}{"\n"}{end}' 2>&1 || true
+		echo "--- last 40 log lines per exporter container (previous container first, if any)"
+		kubectl -n "$GPU_OPERATOR_NAMESPACE" logs -l app=nvidia-dcgm-exporter --all-containers --prefix --previous --tail=40 --request-timeout=30s 2>&1 || true
+		kubectl -n "$GPU_OPERATOR_NAMESPACE" logs -l app=nvidia-dcgm-exporter --all-containers --prefix --tail=40 --request-timeout=30s 2>&1 || true
+		echo "--- field names the profile ConfigMap ${DCGM_METRICS_CONFIGMAP} lists"
+		kubectl -n "$GPU_OPERATOR_NAMESPACE" get configmap "$DCGM_METRICS_CONFIGMAP" --request-timeout=30s \
+			-o jsonpath='{.data.dcgm-metrics\.csv}' 2>&1 | grep -vE '^[[:space:]]*(#|$)' | cut -d, -f1 | tr -d ' ' | tr '\n' ' ' || true
+		echo
+	} >&2
+}
+
+# obs_exporter_has_endpoints — true when the exporter Service has at least
+# one ready address, which is what vmagent will scrape.
+obs_exporter_has_endpoints() {
+	kubectl -n "$GPU_OPERATOR_NAMESPACE" get endpoints nvidia-dcgm-exporter --request-timeout=30s \
+		-o jsonpath='{.subsets[*].addresses[*].ip}' | grep -q .
+}
+
+# obs_assert_exporter_live — the exporter half of the pipeline, proven before
+# the VictoriaMetrics half is installed. deploy-observability's pipeline wait
+# at the end can only say "no DCGM_FI_DEV_GPU_TEMP in VMSingle after 300s",
+# which on 2026-10-18 cost five minutes plus the whole stack install to learn
+# that the exporter had never served a byte. So: the DaemonSet rolled out,
+# the Service has ready endpoints, and /metrics, read through a bounded
+# port-forward on the port the Service declares (obs_service_http_port: the
+# operator names it gpu-metrics and it is the Service's only port; nothing
+# here hard-codes 9400), carries the raw GPU temperature sample the pipeline
+# wait and the canonical temperature rule both need. Each failure stops the
+# phase before anything is installed and prints obs_exporter_diagnose.
+obs_assert_exporter_live() {
+	log "deploy-observability: nvidia-dcgm-exporter rollout"
+	kubectl -n "$GPU_OPERATOR_NAMESPACE" rollout status daemonset/nvidia-dcgm-exporter --timeout=300s || {
+		obs_exporter_diagnose
+		die "nvidia-dcgm-exporter DaemonSet is not rolled out; nothing installed (vmagent would have no target). If the exporter container exits on start, check the profile ConfigMap ${DCGM_METRICS_CONFIGMAP} for a field name the pinned exporter does not know"
+	}
+	(wait_for 60 obs_exporter_has_endpoints) || {
+		obs_exporter_diagnose
+		die "Service ${GPU_OPERATOR_NAMESPACE}/nvidia-dcgm-exporter has no ready endpoints although the DaemonSet reports rolled out; nothing installed"
+	}
+
+	log "deploy-observability: reading the exporter's /metrics for ${OBS_PIPELINE_FIELD} through a bounded port-forward"
+	local port metrics served
+	port=$(obs_service_http_port "$GPU_OPERATOR_NAMESPACE" nvidia-dcgm-exporter)
+	obs_portforward "$GPU_OPERATOR_NAMESPACE" service/nvidia-dcgm-exporter "$port" 19400 /metrics
+	metrics=$(curl -fsS --max-time "$OBS_MAX_TIME" "http://127.0.0.1:19400/metrics") || {
+		obs_portforward_close
+		obs_exporter_diagnose
+		die "exporter /metrics did not answer within ${OBS_MAX_TIME}s on Service port ${port}; nothing installed"
+	}
+	obs_portforward_close
+	printf '%s\n' "$metrics" | grep -Eq "^${OBS_PIPELINE_FIELD}\{" || {
+		# The series names are only for the message; a body with no DCGM_
+		# series at all is the strongest form of this failure, and grep's
+		# "no match" status must not stop the function before it is said.
+		served=$(printf '%s\n' "$metrics" | { grep -oE '^DCGM_[A-Z0-9_]+' || true; } | sort -u | tr '\n' ' ')
+		obs_exporter_diagnose
+		die "exporter serves no ${OBS_PIPELINE_FIELD} sample (DCGM series served: ${served:-none}); the pipeline wait and the canonical temperature rule both need it, so nothing is installed. Check the profile ConfigMap ${DCGM_METRICS_CONFIGMAP} against the fields the pinned exporter knows"
+	}
+	log "deploy-observability: exporter OK (${OBS_PIPELINE_FIELD} served on Service port ${port})"
+}
+
+cmd_deploy_observability() {
+	guard_cluster_name
+	require_cmd kubectl
+	require_cmd aws
+	require_cmd curl
+	require_cmd jq
+	require_cmd sha256sum
+	assert_kube_target
+	assert_observability_profile
+
+	# Both prerequisites are checked before anything is installed, so a
+	# missing one costs nothing to undo: the token copy needs the root, and
+	# without the exporter Service vmagent has no target and VMSingle stays
+	# empty forever, which the pipeline wait below would report as its own
+	# failure 300 seconds later instead of as what it is.
+	kubectl -n "$RUNTIME_NAMESPACE" get kubeneuron "$ROOT_NAME" >/dev/null 2>&1 ||
+		die "KubeNeuron ${RUNTIME_NAMESPACE}/${ROOT_NAME} is not installed; run deploy before deploy-observability (Alertmanager presents the installation's webhook token, which does not exist yet)"
+	kubectl -n "$GPU_OPERATOR_NAMESPACE" get service nvidia-dcgm-exporter >/dev/null 2>&1 ||
+		die "no ${GPU_OPERATOR_NAMESPACE}/nvidia-dcgm-exporter Service; run up before deploy-observability (the profile's vmagent scrapes it and nothing else fills VMSingle)"
+	# A Service that exists but serves nothing is the same dead end.
+	obs_assert_exporter_live
+
+	local manifest
+	manifest=$(fetch_vm_operator_manifest)
+	log "deploy-observability: installing the VictoriaMetrics operator ${VM_OPERATOR_VERSION} (server-side apply of the verified manifest)"
+	kubectl apply --server-side --field-manager="$VM_OPERATOR_FIELD_MANAGER" -f "$manifest" >/dev/null
+	local crd
+	for crd in vmsingles vmagents vmalertmanagers vmalerts vmrules; do
+		kubectl wait --for=condition=Established --timeout=120s "crd/${crd}.operator.victoriametrics.com" >/dev/null ||
+			die "CRD ${crd}.operator.victoriametrics.com never became Established"
+	done
+	kubectl -n "$VM_OPERATOR_NAMESPACE" rollout status deployment/vm-operator --timeout=300s ||
+		die "deployment/vm-operator did not roll out in namespace ${VM_OPERATOR_NAMESPACE}"
+
+	log "deploy-observability: namespace and VMSingle"
+	kubectl apply -f "$OBSERVABILITY_PROFILE/namespace.yaml" >/dev/null
+	kubectl apply -f "$OBSERVABILITY_PROFILE/vmsingle.yaml" >/dev/null
+	# gp2 binds on first consumer, so the claim and the rollout land together;
+	# the claim is asserted on its own because a claim that never binds is the
+	# failure the EBS CSI prerequisite exists for, and it should name itself.
+	wait_for 300 'kubectl -n '"$OBSERVABILITY_NAMESPACE"' get pvc vmsingle-kubeneuron -o jsonpath="{.status.phase}" | grep -qx Bound'
+	# Bound means the 100Gi volume exists. Tie it to this run NOW, before the
+	# rollout wait or anything after it can stop the phase and leave the
+	# volume with no identity the sweep is allowed to delete by.
+	tag_run_volume "$OBSERVABILITY_NAMESPACE" "$VMSINGLE_CLAIM"
+	obs_wait_rollout deployment/vmsingle-kubeneuron 300
+	obs_assert_service_port vmsingle-kubeneuron "$VMSINGLE_ENDPOINT"
+
+	log "deploy-observability: copying the installation's webhook token for Alertmanager"
+	copy_webhook_token
+
+	log "deploy-observability: VMAgent"
+	kubectl apply -f "$OBSERVABILITY_PROFILE/vmagent.yaml" >/dev/null
+	obs_wait_rollout deployment/vmagent-kubeneuron 300
+
+	log "deploy-observability: VMAlertmanager"
+	kubectl apply -f "$OBSERVABILITY_PROFILE/vmalertmanager.yaml" >/dev/null
+	obs_wait_rollout statefulset/vmalertmanager-kubeneuron 300
+	obs_assert_service_port vmalertmanager-kubeneuron "$VMALERTMANAGER_ENDPOINT"
+
+	log "deploy-observability: VMAlert"
+	kubectl apply -f "$OBSERVABILITY_PROFILE/vmalert.yaml" >/dev/null
+	obs_wait_rollout deployment/vmalert-kubeneuron 300
+
+	log "deploy-observability: rules"
+	kubectl apply -f "$OBSERVABILITY_PROFILE/rules.yaml" >/dev/null
+	local rule
+	for rule in kubeneuron-gpu kubeneuron-gpu-recording; do
+		kubectl -n "$OBSERVABILITY_NAMESPACE" get vmrule "$rule" >/dev/null 2>&1 ||
+			die "VMRule ${rule} is absent after applying ${OBSERVABILITY_PROFILE_REL}/rules.yaml"
+	done
+
+	# Live, not merely rolled out. The README's health criterion is a DCGM
+	# series queryable in VMSingle (exporter -> vmagent -> VMSingle); the
+	# canonical series on top of it proves vmalert loaded the recording
+	# VMRule, evaluated it and wrote back. Both are polled at 30s intervals
+	# upstream, so the first samples take a minute or two; the wait is
+	# bounded and test-observability, which runs next, does not wait at all.
+	log "deploy-observability: waiting for the pipeline (exporter -> vmagent -> VMSingle -> vmalert recording rules)"
+	local vm_port
+	vm_port=$(obs_service_http_port "$OBSERVABILITY_NAMESPACE" vmsingle-kubeneuron)
+	obs_portforward "$OBSERVABILITY_NAMESPACE" service/vmsingle-kubeneuron "$vm_port" 18429 /health
+	wait_for 300 'obs_vm_has_samples "$OBS_PIPELINE_FIELD"'
+	wait_for 300 'obs_vm_has_samples "kubeneuron_gpu_temperature_celsius"'
+	obs_portforward_close
+
+	# Last, as the README orders it: the root's External endpoints become the
+	# profile's. install.sh writes placeholder hosts (vmsingle-unset,
+	# alertmanager-unset) because it also installs where no stack exists; the
+	# operator validates the endpoints and records the new generation as
+	# Ready, which is what is waited on and then read back.
+	log "deploy-observability: pointing KubeNeuron at the profile endpoints"
+	kubectl -n "$RUNTIME_NAMESPACE" patch kubeneuron "$ROOT_NAME" --type merge \
+		-p "$(jq -nc --arg vm "$VMSINGLE_ENDPOINT" --arg am "$VMALERTMANAGER_ENDPOINT" \
+			'{spec: {observability: {victoriaMetrics: {mode: "External", endpoint: $vm}, alertmanager: {mode: "External", endpoint: $am}}}}')" >/dev/null
+	wait_for_installation_ready
+	local got
+	got=$(kubectl -n "$RUNTIME_NAMESPACE" get kubeneuron "$ROOT_NAME" -o jsonpath='{.spec.observability.victoriaMetrics.endpoint}')
+	[ "$got" = "$VMSINGLE_ENDPOINT" ] ||
+		die "KubeNeuron ${ROOT_NAME} victoriaMetrics endpoint is '${got}' after the patch, expected ${VMSINGLE_ENDPOINT}"
+	got=$(kubectl -n "$RUNTIME_NAMESPACE" get kubeneuron "$ROOT_NAME" -o jsonpath='{.spec.observability.alertmanager.endpoint}')
+	[ "$got" = "$VMALERTMANAGER_ENDPOINT" ] ||
+		die "KubeNeuron ${ROOT_NAME} alertmanager endpoint is '${got}' after the patch, expected ${VMALERTMANAGER_ENDPOINT}"
+	log "deploy-observability: stack live; KubeNeuron reads VMSingle at ${VMSINGLE_ENDPOINT} and Alertmanager at ${VMALERTMANAGER_ENDPOINT}"
+}
+
+# ---------------------------------------------------------------------------
+# test-observability — v0.7 M6 read-only profile check.
+#
+# Nothing here mutates the cluster: it reads a ConfigMap, a DaemonSet rollout,
+# the exporter's /metrics through a bounded port-forward, and (only when the
+# stack is installed) VMSingle's query API through another. Every network call
+# is capped (OBS_MAX_TIME) for the same reason api() is: a port-forward whose
+# remote end died still accepts the connect and never answers.
+#
+# What it proves and what it does not: the profile's ConfigMap reached the
+# cluster, dcgm-exporter serves the T0 and T1 witness fields with the labels
+# the recording rules join on, and — if VMSingle is present — three canonical
+# series exist for this GPU carrying the M2 label contract (node, gpu_uuid,
+# gpu_model equal to the exporter's own values; node_pool equal to the EKS
+# nodegroup label on the node), the MiB->bytes rule is arithmetically right
+# for one GPU, and on g4dn/Tesla T4 the signals the hardware cannot produce
+# (row remap, NVLink, the fail-slow peer score, MIG) are absent from VMSingle
+# rather than present as zeros. It injects nothing, fires no alert, and does
+# not look at Grafana.
+
+OBS_MAX_TIME="${OBS_MAX_TIME:-20}"
+_OBS_PF_PID=""
+_OBS_LOCAL_PORT=""
+
+# obs_portforward <namespace> <target> <remote-port> <local-port> <probe-path>
+# Opens one bounded port-forward, recorded in _OBS_PF_PID so cleanup() and
+# obs_portforward_close can always kill it. Exactly one is open at a time.
+#
+# The forward is exec'd inside the background subshell so that $! IS the
+# kubectl process. Backgrounding the wrapper function instead forks a subshell
+# that runs kubectl as its child, and killing $! then kills only the subshell:
+# the real port-forward survives as an orphan holding the local port, which
+# the next phase's forward cannot bind, while its probe is answered by the
+# orphan — a check that passes against a tunnel nothing owns. The target
+# guard the wrapper would have run is run here explicitly, before the exec
+# (exec resolves an external binary, never the wrapper function).
+obs_portforward() {
+	local ns="$1" target="$2" remote="$3" local_port="$4" probe="$5"
+	obs_portforward_close
+	_OBS_LOCAL_PORT="$local_port"
+	(
+		assert_kube_target
+		exec kubectl --kubeconfig "$KUBECONFIG" -n "$ns" port-forward "$target" "${local_port}:${remote}"
+	) >/dev/null 2>&1 &
+	_OBS_PF_PID=$!
+	wait_for 60 'curl -fsS --max-time 5 -o /dev/null "http://127.0.0.1:'"$local_port"''"$probe"'"'
+}
+
+obs_portforward_close() {
+	if [ -n "$_OBS_PF_PID" ]; then
+		kill "$_OBS_PF_PID" 2>/dev/null || true
+		wait "$_OBS_PF_PID" 2>/dev/null || true
+		_OBS_PF_PID=""
+	fi
+}
+
+# obs_service_http_port <namespace> <service> — print the HTTP port of a
+# Service as Kubernetes declares it, so no caller hard-codes the VictoriaMetrics
+# default. The operator names VMSingle's port "http"; that name is preferred.
+# Documented fallback: a Service that declares exactly ONE port is that port,
+# named or not. Anything else (no "http" port and several ports) is ambiguous
+# and refused — guessing would forward to a port that accepts the connect and
+# never answers /health, which is the hang obs_portforward's wait_for exists to
+# bound, not to hide.
+obs_service_http_port() {
+	local ns="$1" svc="$2" ports port
+	ports=$(kubectl -n "$ns" get service "$svc" -o json 2>/dev/null |
+		jq -c '[.spec.ports[]? | {name: (.name // ""), port: .port}]') ||
+		die "cannot read service ${ns}/${svc} to resolve its HTTP port"
+	port=$(printf '%s' "$ports" | jq -r '
+		(map(select(.name == "http")) | .[0].port) //
+		(if length == 1 then .[0].port else empty end) // empty')
+	[ -n "$port" ] ||
+		die "service ${ns}/${svc} has no port named http and does not declare exactly one port (ports: ${ports}); refusing to guess"
+	printf '%s\n' "$port"
+}
+
+# obs_vm_query <promql> — instant query against the forwarded VMSingle,
+# printing the JSON result array. Bounded.
+obs_vm_query() {
+	curl -fsS --max-time "$OBS_MAX_TIME" -G \
+		--data-urlencode "query=$1" --data-urlencode "time=${_OBS_QUERY_TIME}" \
+		"http://127.0.0.1:${_OBS_LOCAL_PORT}/api/v1/query" | jq -c '.data.result'
+}
+_OBS_QUERY_TIME=""
+
+cmd_test_observability() {
+	guard_cluster_name
+	require_cmd kubectl
+	require_cmd aws
+	require_cmd curl
+	require_cmd jq
+	assert_kube_target
+
+	log "test-observability: profile ConfigMap ${GPU_OPERATOR_NAMESPACE}/${DCGM_METRICS_CONFIGMAP}"
+	local csv
+	csv=$(kubectl -n "$GPU_OPERATOR_NAMESPACE" get configmap "$DCGM_METRICS_CONFIGMAP" \
+		-o jsonpath='{.data.dcgm-metrics\.csv}') ||
+		die "ConfigMap ${DCGM_METRICS_CONFIGMAP} is absent: up-finish did not install the profile (--values ${GPU_OPERATOR_PROFILE_REL})"
+	local field
+	for field in "$OBS_T0_FIELD" "$OBS_T1_FIELD"; do
+		printf '%s\n' "$csv" | grep -Eq "^[[:space:]]*${field}[[:space:]]*," ||
+			die "ConfigMap ${DCGM_METRICS_CONFIGMAP} does not list ${field}; the cluster is not running the checked-in profile"
+	done
+
+	log "test-observability: nvidia-dcgm-exporter rollout"
+	kubectl -n "$GPU_OPERATOR_NAMESPACE" rollout status daemonset/nvidia-dcgm-exporter --timeout=300s ||
+		die "nvidia-dcgm-exporter DaemonSet is not rolled out"
+
+	log "test-observability: scraping the exporter through a bounded port-forward"
+	local metrics
+	obs_portforward "$GPU_OPERATOR_NAMESPACE" service/nvidia-dcgm-exporter 9400 19400 /metrics
+	metrics=$(curl -fsS --max-time "$OBS_MAX_TIME" "http://127.0.0.1:19400/metrics") ||
+		die "exporter /metrics did not answer within ${OBS_MAX_TIME}s"
+	obs_portforward_close
+
+	# Fail closed: both tiers must be present as real samples, and the labels
+	# the recording rules and dashboards key on must be on them. An exporter
+	# that silently skipped the ECC field on this GPU is a finding, not a pass.
+	local t0_line t1_line uuid
+	t0_line=$(printf '%s\n' "$metrics" | grep -E "^${OBS_T0_FIELD}\{" | head -n1) ||
+		die "exporter serves no ${OBS_T0_FIELD} sample (T0 tier absent)"
+	t1_line=$(printf '%s\n' "$metrics" | grep -E "^${OBS_T1_FIELD}\{" | head -n1) ||
+		die "exporter serves no ${OBS_T1_FIELD} sample (T1 tier absent)"
+	local line
+	for line in "$t0_line" "$t1_line"; do
+		printf '%s\n' "$line" | grep -Eq 'UUID="GPU-[0-9a-f-]+"' ||
+			die "exporter sample lacks the UUID label: $line"
+		printf '%s\n' "$line" | grep -Eq 'modelName="[^"]+"' ||
+			die "exporter sample lacks the modelName label: $line"
+	done
+	uuid=$(printf '%s\n' "$t0_line" | sed -nE 's/.*UUID="([^"]+)".*/\1/p')
+	local model
+	model=$(printf '%s\n' "$t0_line" | sed -nE 's/.*modelName="([^"]+)".*/\1/p')
+	log "test-observability: exporter OK (T0 ${OBS_T0_FIELD}, T1 ${OBS_T1_FIELD}, UUID ${uuid}, modelName ${model})"
+
+	# The EKS nodegroup label on the GPU node is what vmagent turns into
+	# node_pool (deploy/kubernetes/dependencies/observability/vmagent.yaml).
+	# This phase runs on an EKS managed node group by construction
+	# (assert_kube_target proved the endpoint), so the label is expected, and a
+	# managed node without it is an EKS-side finding, stated as such. This is
+	# an EKS-phase expectation only: the scrape contract itself keeps node_pool
+	# optional, and nothing outside this phase may require it.
+	local node node_pool
+	node=$(gpu_node)
+	[ -n "$node" ] || die "no node labelled role=gpu; cannot locate the GPU node for the label checks"
+	node_pool=$(kubectl get node "$node" -o jsonpath='{.metadata.labels.eks\.amazonaws\.com/nodegroup}')
+	[ -n "$node_pool" ] ||
+		die "EKS-label: managed GPU node ${node} carries no eks.amazonaws.com/nodegroup label; EKS stamps it on every managed node group member, so either this node is not from the managed node group this run created or EKS did not label it — node_pool cannot be derived"
+	log "test-observability: GPU node ${node} is in EKS nodegroup ${node_pool}"
+
+	# Canonical series are produced by the recording rules in
+	# deploy/kubernetes/dependencies/observability, evaluated by vmalert into
+	# VMSingle. That stack is an operator prerequisite, not something this phase
+	# installs; without it there is nothing to query and the check is a
+	# prerequisite failure, stated as such.
+	log "test-observability: canonical recording rules (requires the observability stack)"
+	kubectl -n "$OBSERVABILITY_NAMESPACE" get vmsingle kubeneuron >/dev/null 2>&1 ||
+		die "PREREQUISITE: VMSingle ${OBSERVABILITY_NAMESPACE}/kubeneuron is not installed. The canonical kubeneuron_gpu_* checks need the stack in deploy/kubernetes/dependencies/observability (VictoriaMetrics operator, VMSingle, vmagent, vmalert + rules.yaml), which hack/hw-e2e.sh deploy-observability installs. Exporter checks above PASSED; canonical checks NOT RUN."
+	kubectl -n "$OBSERVABILITY_NAMESPACE" get service vmsingle-kubeneuron >/dev/null 2>&1 ||
+		die "PREREQUISITE: VMSingle CR exists but service vmsingle-kubeneuron is absent (operator not reconciled?); canonical checks NOT RUN"
+
+	local vm_port
+	vm_port=$(obs_service_http_port "$OBSERVABILITY_NAMESPACE" vmsingle-kubeneuron)
+	log "test-observability: VMSingle service port ${vm_port} (resolved from the Service, not assumed)"
+	obs_portforward "$OBSERVABILITY_NAMESPACE" service/vmsingle-kubeneuron "$vm_port" 18429 /health
+	_OBS_QUERY_TIME=$(date -u +%s)
+	local series result n
+	for series in kubeneuron_gpu_temperature_celsius kubeneuron_gpu_power_watts kubeneuron_gpu_memory_used_bytes; do
+		result=$(obs_vm_query "${series}{UUID=\"${uuid}\"}")
+		n=$(printf '%s' "$result" | jq 'length')
+		[ "${n:-0}" -ge 1 ] ||
+			die "canonical series ${series} has no sample for UUID ${uuid} in VMSingle (vmalert rules not evaluated, or vmagent not scraping the exporter)"
+		# The M2 label contract on the selected sample: node, gpu_uuid and
+		# gpu_model must be present and non-empty, and the two renamed labels
+		# must equal what the exporter itself stamped (UUID, modelName) —
+		# vmagent copies them, it does not invent them. node_pool must equal
+		# the EKS nodegroup label read from the node above. Each is asserted
+		# separately so the failure names the label, not "a label".
+		local lbl
+		for lbl in node gpu_uuid gpu_model node_pool; do
+			printf '%s' "$result" | jq -e --arg l "$lbl" '.[0].metric[$l] // "" | length > 0' >/dev/null ||
+				die "canonical series ${series} sample for UUID ${uuid} lacks the ${lbl} label (labels: $(printf '%s' "$result" | jq -c '.[0].metric'))"
+		done
+		printf '%s' "$result" | jq -e --arg v "$node" '.[0].metric.node == $v' >/dev/null ||
+			die "canonical series ${series}: node=$(printf '%s' "$result" | jq -r '.[0].metric.node') but the GPU node is ${node}"
+		printf '%s' "$result" | jq -e --arg v "$uuid" '.[0].metric.gpu_uuid == $v' >/dev/null ||
+			die "canonical series ${series}: gpu_uuid=$(printf '%s' "$result" | jq -r '.[0].metric.gpu_uuid') but the exporter's UUID is ${uuid}"
+		printf '%s' "$result" | jq -e --arg v "$model" '.[0].metric.gpu_model == $v' >/dev/null ||
+			die "canonical series ${series}: gpu_model=$(printf '%s' "$result" | jq -r '.[0].metric.gpu_model') but the exporter's modelName is ${model}"
+		printf '%s' "$result" | jq -e --arg v "$node_pool" '.[0].metric.node_pool == $v' >/dev/null ||
+			die "canonical series ${series}: node_pool=$(printf '%s' "$result" | jq -r '.[0].metric.node_pool') but node ${node} carries eks.amazonaws.com/nodegroup=${node_pool}"
+	done
+	log "test-observability: label contract OK (node=${node}, gpu_uuid=${uuid}, gpu_model=${model}, node_pool=${node_pool})"
+
+	# Signals this hardware cannot produce must be ABSENT, not zero. Row
+	# remapping is Ampere and later, the T4 has no NVLink and no MIG, and the
+	# fail-slow score needs at least three devices of one gpu_model while this
+	# stand has one physical GPU. A sample with value 0 would mean the exporter
+	# emitted a field it does not have (and a rule then recorded a lie), so a
+	# `== 0` comparison is exactly the wrong evidence here: the only acceptable
+	# query result is the empty set, and any sample is printed as a finding.
+	# Scoped to this node so the check is about this stand's hardware.
+	case "$GPU_INSTANCE_TYPE" in
+	g4dn.*)
+		case "$model" in
+		*"Tesla T4"*) ;;
+		*) die "GPU_INSTANCE_TYPE=${GPU_INSTANCE_TYPE} is a g4dn but the exporter reports modelName=${model}, not a Tesla T4; the absence expectations below are written for the T4 and cannot be applied" ;;
+		esac
+		log "test-observability: g4dn/Tesla T4 — unavailable signals must be absent (row remap, NVLink, fail-slow, MIG)"
+		local absent_query unexpected
+		for absent_query in \
+			"kubeneuron_gpu_remapped_rows_total{node=\"${node}\"}" \
+			"kubeneuron_gpu_row_remap_failed{node=\"${node}\"}" \
+			"kubeneuron_gpu_row_remap_pending{node=\"${node}\"}" \
+			"kubeneuron_gpu_nvlink_errors_total{node=\"${node}\"}" \
+			"kubeneuron_gpu_nvlink_errors_per_second{node=\"${node}\"}" \
+			"kubeneuron_gpu_fail_slow_score_ratio{node=\"${node}\"}" \
+			"{node=\"${node}\",mig_profile!=\"\"}" \
+			"{node=\"${node}\",GPU_I_PROFILE!=\"\"}"; do
+			unexpected=$(obs_vm_query "$absent_query") ||
+				die "VMSingle did not answer the absence query ${absent_query} within ${OBS_MAX_TIME}s"
+			n=$(printf '%s' "$unexpected" | jq 'length')
+			[ "${n:-1}" -eq 0 ] ||
+				die "expected NO samples for ${absent_query} on a Tesla T4, found ${n}: $(printf '%s' "$unexpected" | jq -c '.[] | {metric, value}')"
+		done
+		log "test-observability: absence OK (no row-remap, NVLink, fail-slow or MIG samples for node ${node})"
+		;;
+	*)
+		log "test-observability: GPU_INSTANCE_TYPE=${GPU_INSTANCE_TYPE} is not g4dn; the Tesla T4 absence checks do not apply and were NOT run"
+		;;
+	esac
+
+	# memory_used must equal the raw MiB sample times 1048576 for the same GPU
+	# at the same instant. Both reads are instant queries at one shared
+	# timestamp; VMSingle serves the latest sample at or before it.
+	local raw canon expected
+	raw=$(obs_vm_query "DCGM_FI_DEV_FB_USED{UUID=\"${uuid}\"}" | jq -r '.[0].value[1] // empty')
+	canon=$(obs_vm_query "kubeneuron_gpu_memory_used_bytes{UUID=\"${uuid}\"}" | jq -r '.[0].value[1] // empty')
+	obs_portforward_close
+	[ -n "$raw" ] || die "no raw DCGM_FI_DEV_FB_USED sample for UUID ${uuid} in VMSingle"
+	[ -n "$canon" ] || die "no kubeneuron_gpu_memory_used_bytes sample for UUID ${uuid} in VMSingle"
+	expected=$(jq -n --arg r "$raw" '($r | tonumber) * 1048576')
+	jq -en --arg c "$canon" --arg e "$expected" '($c | tonumber) == ($e | tonumber)' >/dev/null ||
+		die "kubeneuron_gpu_memory_used_bytes=${canon} but DCGM_FI_DEV_FB_USED*1048576=${expected} for UUID ${uuid}"
+	log "test-observability: canonical OK (memory_used_bytes ${canon} = FB_USED ${raw} MiB * 1048576)"
+	log "test-observability: PASS"
+}
+
 cmd_teardown() {
 	guard_cluster_name
 	if [ "$KEEP_CLUSTER" = "1" ]; then
@@ -1262,6 +2084,13 @@ cmd_teardown() {
 		return 0
 	fi
 	require_cmd eksctl
+	require_cmd aws
+	# Last chance to tie the claim volumes to this run while the API server
+	# still answers; after the delete below only the tags remain to find
+	# them by, and a run that failed between a claim binding and its tagging
+	# point would otherwise leave a volume nothing is scoped to see.
+	log "teardown: tying this run's claim volumes to the run while the cluster is live"
+	tag_run_volumes_if_live
 	log "teardown: deleting cluster $CLUSTER_NAME"
 	# --force keeps deleting even if a nodegroup or the stack is unhealthy;
 	# a real run once left everything running because a plain delete errored.
@@ -1280,7 +2109,8 @@ cmd_sweep() {
 
 	log "sweep: cluster must be gone"
 	if eksctl get cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
-		log "sweep: cluster still present, retrying delete --force"
+		log "sweep: cluster still present; tying its claim volumes to the run, then retrying delete --force"
+		tag_run_volumes_if_live
 		eksctl delete cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --force --wait || true
 	fi
 
@@ -1355,35 +2185,35 @@ cmd_sweep() {
 	# both had to be removed by hand before the sweep could report clean.
 	sweep_wedged_cluster_stack
 
-	log "sweep: no orphaned e2e EBS volumes"
-	local volumes
+	log "sweep: no orphaned EBS volumes tagged for this run"
+	# ONLY volumes that carry this run's identity. The controller's SQLite
+	# claim and the VMSingle claim are tagged kubeneuron:e2e + E2E_RUN_TAG=
+	# CLUSTER_NAME by tag_run_volume while their cluster is live (deploy,
+	# deploy-observability, and once more at teardown), after the PVC -> PV ->
+	# EBS id chain (CSI handle, or a legacy in-tree volumeID plus the exact
+	# KubernetesCluster tag) and the provisioner's own created-for tags agreed
+	# on the exact volume.
+	#
+	# There is deliberately NO filter on kubernetes.io/created-for/pvc/namespace
+	# here or in the audit below. The EBS CSI driver writes nothing that names
+	# the cluster, so a filter on this stand's two namespaces matched every
+	# cluster in the account that uses them, and this sweep could have deleted
+	# another cluster's state. A volume this run cannot prove is its own is
+	# not its to delete, and not its to report either. KubernetesCluster is
+	# the legacy in-tree provisioner's tag and names the exact cluster, so it
+	# stays for older clusters.
+	local volumes cluster_volumes
 	volumes=$(aws ec2 describe-volumes --region "$AWS_REGION" \
 		--filters "Name=tag:kubeneuron:e2e,Values=true" \
 		"Name=tag:${E2E_RUN_TAG},Values=${CLUSTER_NAME}" "Name=status,Values=available" \
 		--query 'Volumes[].VolumeId' --output text)
-	# Also catch the controller's PVC volume — the 5Gi SQLite claim, which is
-	# the leak this check was written for after a real run left one behind.
-	#
-	# KubernetesCluster is the LEGACY in-tree provisioner's tag. EKS provisions
-	# through the EBS CSI driver, which does not write it; the tags it does
-	# write are CSIVolumeName and kubernetes.io/created-for/pvc/*. So the filter
-	# aimed at that volume could not match that volume. Query by what the CSI
-	# driver actually writes, and keep the legacy filter for older clusters.
-	local cluster_volumes csi_volumes
 	cluster_volumes=$(aws ec2 describe-volumes --region "$AWS_REGION" \
 		--filters "Name=tag:KubernetesCluster,Values=${CLUSTER_NAME}" "Name=status,Values=available" \
 		--query 'Volumes[].VolumeId' --output text)
-	csi_volumes=$(aws ec2 describe-volumes --region "$AWS_REGION" \
-		--filters "Name=tag:kubernetes.io/created-for/pvc/namespace,Values=${RUNTIME_NAMESPACE}" \
-		"Name=status,Values=available" \
-		--query 'Volumes[].VolumeId' --output text)
-	# Deduplicate. The three filters deliberately overlap — that is what makes
-	# them a safety net — so a volume matched by two of them was deleted twice,
-	# and the second delete's failure set the leak flag. The first real run
-	# ended with "sweep found leftovers it could not delete" on an account that
-	# was, in fact, clean.
+	# Deduplicate: the two filters may overlap, and a second delete's failure
+	# once flagged a leak on an account that was clean.
 	local vol
-	for vol in $(printf '%s %s %s' "$volumes" "$cluster_volumes" "$csi_volumes" |
+	for vol in $(printf '%s %s' "$volumes" "$cluster_volumes" |
 		tr -s ' \t' '\n' | grep -v '^$' | sort -u || true); do
 		log "sweep: deleting orphaned volume $vol"
 		aws ec2 delete-volume --region "$AWS_REGION" --volume-id "$vol" || true
@@ -1454,11 +2284,11 @@ cmd_sweep() {
 	# this check. Without the filter a SUCCESSFUL sweep reports the account
 	# unclean — the same false alarm this assertion replaced, reintroduced
 	# inside it.
+	#
+	# Run-scoped, like the deletions: the run tag, the legacy cluster tag, the
+	# volumes this run RECORDED when it tagged them, and the claims it could
+	# never tie to itself. No namespace filter (see the delete pass).
 	local volume_states="Name=status,Values=available,in-use,error"
-	add_remaining "volumes (csi)" "$(aws ec2 describe-volumes --region "$AWS_REGION" \
-		--filters "Name=tag:kubernetes.io/created-for/pvc/namespace,Values=${RUNTIME_NAMESPACE}" \
-		"$volume_states" \
-		--query "Volumes[].VolumeId|join(',',@)" --output text 2>/dev/null || true)"
 	add_remaining "volumes (run-tagged)" "$(aws ec2 describe-volumes --region "$AWS_REGION" \
 		--filters "Name=tag:kubeneuron:e2e,Values=true" \
 		"Name=tag:${E2E_RUN_TAG},Values=${CLUSTER_NAME}" "$volume_states" \
@@ -1466,6 +2296,16 @@ cmd_sweep() {
 	add_remaining "volumes (legacy tag)" "$(aws ec2 describe-volumes --region "$AWS_REGION" \
 		--filters "Name=tag:KubernetesCluster,Values=${CLUSTER_NAME}" "$volume_states" \
 		--query "Volumes[].VolumeId|join(',',@)" --output text 2>/dev/null || true)"
+	# A recorded volume that still exists and still carries the run tag is
+	# already in the run-tagged line; one that exists WITHOUT the tag is the
+	# case nothing else can see. Tags do not vanish on their own, so it is
+	# named on its own and deliberately not deleted: the identity that made it
+	# this run's to delete is gone, and a human decides.
+	add_remaining "volumes (recorded for this run, no longer run-tagged)" "$(recorded_volumes_untagged)"
+	# Claims whose volume this run could never tie to itself. Nothing in this
+	# sweep is scoped to find that volume, so the sweep cannot say the account
+	# is clean; it says this instead, and how to clear it.
+	add_remaining "claims never tied to this run (find the volume by hand, then remove ${UNPROVEN_CLAIMS_FILE})" "$(unproven_claims_for_run)"
 	add_remaining "recycle role" "$(aws iam get-role --role-name "$RECYCLE_ROLE_NAME" \
 		--query "Role.RoleName" --output text 2>/dev/null || true)"
 
@@ -1476,7 +2316,7 @@ cmd_sweep() {
 	# ECR is deliberately absent from the assertion and therefore from this
 	# line: the images are deleted best-effort and cost cents, and probing them
 	# would claim a verification this does not perform.
-	log "sweep: clean (verified against AWS: no cluster, EC2, stacks, volumes or recycle role; run images deleted best-effort)"
+	log "sweep: clean (verified against AWS: no cluster, EC2, stacks, run-tagged or recorded volumes, unproven claims or recycle role; run images deleted best-effort)"
 }
 
 # cmd_reap is the out-of-band watchdog. Run it from an INDEPENDENT schedule (a
@@ -1883,6 +2723,246 @@ delete_iam_role() {
 		aws iam delete-role-policy --role-name "$role" --policy-name "$policy" || true
 	done
 	aws iam delete-role --role-name "$role"
+}
+
+# ---------------------------------------------------------------------------
+# run-scoped EBS volumes
+#
+# claim_unproven <namespace>/<pvc> <reason> records that the volume behind one
+# of this harness's claims could not be tied to this run, and dies. The record
+# is the point: the sweep reads it and refuses to call the account clean, so a
+# claim whose volume was never proven is a loud failure at teardown rather
+# than an `available` volume nobody is scoped to see.
+claim_unproven() {
+	local claim="$1" reason="$2"
+	mkdir -p "$E2E_STATE_DIR"
+	printf '%s %s %s\n' "$CLUSTER_NAME" "$claim" "$reason" >>"$UNPROVEN_CLAIMS_FILE"
+	die "cannot tie the volume behind claim ${claim} to run ${CLUSTER_NAME}: ${reason}; recorded in ${UNPROVEN_CLAIMS_FILE}, and the sweep will refuse to report clean until that record is resolved by hand"
+}
+
+# volume_tag <describe-volumes JSON> <key> prints the first volume's value for
+# that tag key, or nothing.
+volume_tag() {
+	printf '%s' "$1" | jq -r --arg k "$2" '.Volumes[0].Tags[]? | select(.Key == $k) | .Value' | head -n1
+}
+
+# tag_run_volume <namespace> <pvc> proves which EBS volume backs ONE claim this
+# harness created and stamps it with this run's identity, so the sweep can
+# delete and audit it by that identity alone once the cluster is gone.
+#
+# Every link is checked and the chain fails closed: the claim must be Bound to
+# a PV whose claimRef names this claim by namespace, name AND uid; the PV must
+# set exactly one recognised EBS source, decided by what its spec SETS and
+# never by what it lacks: an ebs.csi.aws.com .spec.csi object with a vol-
+# handle, or a legacy in-tree .spec.awsElasticBlockStore object whose
+# volumeID is vol-<hex> or aws://<zone>/vol-<hex> (no other source, and not
+# both); the volume must exist in this region; a legacy volume must be tagged
+# LEGACY_CLUSTER_TAG=CLUSTER_NAME exactly; the provisioner's created-for tags
+# on it must name this PV and this claim; and it must not already carry
+# another run's tag. A volume that passes is tagged kubeneuron:e2e,
+# E2E_RUN_TAG=CLUSTER_NAME and E2E_CLAIM_TAG=<namespace>/<pvc>; the tags are
+# read back through the filter the sweep uses; the id is recorded. Anything
+# else is claim_unproven: recorded, then fatal. There is no fallback and no
+# `|| true` in here.
+tag_run_volume() {
+	local ns="$1" pvc="$2" claim="$1/$2"
+	local pvc_doc phase pvc_uid pv_name pv_doc source driver vol vol_id vol_doc have
+	log "run-volume: resolving the EBS volume behind claim ${claim}"
+	pvc_doc=$(kubectl -n "$ns" get pvc "$pvc" -o json 2>/dev/null) ||
+		claim_unproven "$claim" "the claim could not be read"
+	phase=$(printf '%s' "$pvc_doc" | jq -r '.status.phase // ""')
+	[ "$phase" = "Bound" ] || claim_unproven "$claim" "the claim is '${phase}', not Bound"
+	pvc_uid=$(printf '%s' "$pvc_doc" | jq -r '.metadata.uid // ""')
+	pv_name=$(printf '%s' "$pvc_doc" | jq -r '.spec.volumeName // ""')
+	if [ -z "$pvc_uid" ] || [ -z "$pv_name" ]; then
+		claim_unproven "$claim" "the claim has no uid or no volumeName"
+	fi
+	pv_doc=$(kubectl get pv "$pv_name" -o json 2>/dev/null) ||
+		claim_unproven "$claim" "its PersistentVolume ${pv_name} could not be read"
+	printf '%s' "$pv_doc" | jq -e --arg ns "$ns" --arg name "$pvc" --arg uid "$pvc_uid" \
+		'.spec.claimRef.namespace == $ns and .spec.claimRef.name == $name and .spec.claimRef.uid == $uid' >/dev/null ||
+		claim_unproven "$claim" "PersistentVolume ${pv_name} is claimed by $(printf '%s' "$pv_doc" | jq -r '"\(.spec.claimRef.namespace)/\(.spec.claimRef.name) uid \(.spec.claimRef.uid)"'), not by this claim"
+	# The source is whichever of the two EBS schemas the spec SETS (any
+	# non-null value counts as set, so a malformed one is still seen). None
+	# (nfs, hostPath, a stripped spec) or both is refused, not guessed; an
+	# absent .spec.csi on its own proves nothing.
+	source=$(printf '%s' "$pv_doc" | jq -r '[(if .spec.csi != null then "csi" else empty end),
+		(if .spec.awsElasticBlockStore != null then "awsElasticBlockStore" else empty end)] | join("+")')
+	case "$source" in
+	csi)
+		driver=$(printf '%s' "$pv_doc" | jq -r '(.spec.csi | objects | .driver | strings) // ""')
+		[ "$driver" = "$EBS_CSI_DRIVER" ] ||
+			claim_unproven "$claim" "PersistentVolume ${pv_name} is provisioned by '${driver}', not ${EBS_CSI_DRIVER}"
+		vol=$(printf '%s' "$pv_doc" | jq -r '(.spec.csi.volumeHandle | strings) // ""')
+		[[ "$vol" =~ ^vol-[0-9a-f]{8,17}$ ]] ||
+			claim_unproven "$claim" "PersistentVolume ${pv_name} has CSI volumeHandle '${vol}', not an EBS volume id"
+		;;
+	awsElasticBlockStore)
+		# Only the id captured by this anchored pattern is ever handed to aws:
+		# the in-tree form aws://<zone>/vol-<hex> (the zone may be empty) or a
+		# bare vol-<hex>. A non-object source yields '' and is refused here.
+		vol_id=$(printf '%s' "$pv_doc" | jq -r '(.spec.awsElasticBlockStore | objects | .volumeID | strings) // ""')
+		[[ "$vol_id" =~ ^(aws://[a-z0-9-]*/)?(vol-[0-9a-f]{8,17})$ ]] ||
+			claim_unproven "$claim" "PersistentVolume ${pv_name} has awsElasticBlockStore volumeID '${vol_id}', not an EBS volume id"
+		vol="${BASH_REMATCH[2]}"
+		;;
+	"")
+		claim_unproven "$claim" "PersistentVolume ${pv_name} has neither a csi nor an awsElasticBlockStore source; not a volume this harness can name"
+		;;
+	*)
+		claim_unproven "$claim" "PersistentVolume ${pv_name} has more than one volume source (${source}); refusing to pick one"
+		;;
+	esac
+	vol_doc=$(aws ec2 describe-volumes --region "$AWS_REGION" --volume-ids "$vol" --output json 2>/dev/null) ||
+		claim_unproven "$claim" "EBS volume ${vol} does not exist in ${AWS_REGION}"
+	[ "$(printf '%s' "$vol_doc" | jq -r '.Volumes | length')" = "1" ] ||
+		claim_unproven "$claim" "describe-volumes ${vol} did not return exactly one volume"
+	# A legacy PV names no driver and nothing in its spec names the cluster,
+	# so the in-tree provisioner's cluster tag must name THIS cluster exactly
+	# before the created-for tags are consulted.
+	if [ "$source" = awsElasticBlockStore ]; then
+		have=$(volume_tag "$vol_doc" "$LEGACY_CLUSTER_TAG")
+		[ "$have" = "$CLUSTER_NAME" ] ||
+			claim_unproven "$claim" "EBS volume ${vol} is tagged ${LEGACY_CLUSTER_TAG}='${have}', not ${CLUSTER_NAME}; a legacy in-tree volume must name this cluster"
+	fi
+	# The provisioner's own tags are an independent witness to the same chain,
+	# written when the volume was provisioned; they must agree with Kubernetes.
+	have=$(volume_tag "$vol_doc" "$CSI_PV_NAME_TAG")
+	[ "$have" = "$pv_name" ] ||
+		claim_unproven "$claim" "EBS volume ${vol} is tagged ${CSI_PV_NAME_TAG}='${have}', not ${pv_name}"
+	have=$(volume_tag "$vol_doc" "$CSI_PVC_NAME_TAG")
+	[ "$have" = "$pvc" ] ||
+		claim_unproven "$claim" "EBS volume ${vol} is tagged ${CSI_PVC_NAME_TAG}='${have}', not ${pvc}"
+	have=$(volume_tag "$vol_doc" "$CSI_PVC_NAMESPACE_TAG")
+	[ "$have" = "$ns" ] ||
+		claim_unproven "$claim" "EBS volume ${vol} is tagged ${CSI_PVC_NAMESPACE_TAG}='${have}', not ${ns}"
+	have=$(volume_tag "$vol_doc" "$E2E_RUN_TAG")
+	if [ -n "$have" ] && [ "$have" != "$CLUSTER_NAME" ]; then
+		claim_unproven "$claim" "EBS volume ${vol} is already tagged ${E2E_RUN_TAG}='${have}', another run's"
+	fi
+	aws ec2 create-tags --region "$AWS_REGION" --resources "$vol" \
+		--tags "Key=kubeneuron:e2e,Value=true" \
+		"Key=${E2E_RUN_TAG},Value=${CLUSTER_NAME}" \
+		"Key=${E2E_CLAIM_TAG},Value=${claim}" >/dev/null ||
+		claim_unproven "$claim" "create-tags on EBS volume ${vol} failed"
+	# Read back through the exact filter the sweep will use, not the call's
+	# exit status: a tag that did not land is a volume the sweep cannot see.
+	have=$(aws ec2 describe-volumes --region "$AWS_REGION" --volume-ids "$vol" \
+		--filters "Name=tag:kubeneuron:e2e,Values=true" \
+		"Name=tag:${E2E_RUN_TAG},Values=${CLUSTER_NAME}" \
+		"Name=tag:${E2E_CLAIM_TAG},Values=${claim}" \
+		--query 'Volumes[].VolumeId' --output text 2>/dev/null) ||
+		claim_unproven "$claim" "EBS volume ${vol} could not be read back after create-tags"
+	[ "$have" = "$vol" ] ||
+		claim_unproven "$claim" "EBS volume ${vol} does not carry the run tags after create-tags"
+	mkdir -p "$E2E_STATE_DIR"
+	if ! grep -qsxF "${CLUSTER_NAME} ${vol} ${claim}" "$RUN_VOLUMES_FILE"; then
+		printf '%s %s %s\n' "$CLUSTER_NAME" "$vol" "$claim" >>"$RUN_VOLUMES_FILE"
+	fi
+	if [ "$source" = awsElasticBlockStore ]; then
+		log "run-volume: PV ${pv_name} is a legacy in-tree awsElasticBlockStore volume; ${LEGACY_CLUSTER_TAG}=${CLUSTER_NAME} on ${vol} proves its cluster"
+	fi
+	log "run-volume: claim ${claim} is EBS volume ${vol} (PV ${pv_name}); tagged ${E2E_RUN_TAG}=${CLUSTER_NAME}"
+}
+
+# tag_run_volumes_if_live is the last chance to prove ownership while the API
+# server still answers: teardown and a standalone sweep call it before any
+# `eksctl delete cluster`. Each of the two known claims that exists is resolved
+# and tagged; one that does not exist (its phase never ran) is skipped by
+# name; one that exists and cannot be proven is recorded as unproven and
+# left, and the sweep then refuses to report clean. It never stops the
+# deletion that follows — the cluster is the cost, and goes either way — so
+# every step that can die runs in its own subshell, and this returns 0.
+#
+# The kubeconfig it reads the claims through, whether an earlier phase left
+# it or it is written here, is not trusted until assert_kube_target has
+# proven that its selected context's server is the endpoint EKS reports for
+# exactly CLUSTER_NAME. A context name is mutable and a file at the expected
+# path proves nothing: a stale or foreign kubeconfig would resolve another
+# cluster's claim to another cluster's volume and stamp THIS run's identity on
+# it, which is the sweep's licence to delete it. So the target is validated
+# once, explicitly, after the kubeconfig is obtained or reused and before any
+# claim is looked up or any volume tagged; a validation that does not hold
+# records every known claim as unproven (the sweep then refuses to report
+# clean) and returns without a single kubectl read or create-tags. The
+# kubectl wrapper repeats the same check on every call behind this, as
+# defence in depth, not as the gate.
+tag_run_volumes_if_live() {
+	local claims=("${RUNTIME_NAMESPACE}/${CONTROLLER_STATE_CLAIM}" "${OBSERVABILITY_NAMESPACE}/${VMSINGLE_CLAIM}")
+	local claim ns pvc out why
+	if ! aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+		log "run-volume: cluster $CLUSTER_NAME is not live; no claim can be resolved now (the sweep works from the tags already written)"
+		return 0
+	fi
+	if [ ! -s "$KUBECONFIG" ]; then
+		log "run-volume: no dedicated kubeconfig at $KUBECONFIG; writing one for the live cluster"
+		init_kubeconfig
+		if ! eksctl utils write-kubeconfig --cluster "$CLUSTER_NAME" --region "$AWS_REGION" \
+			--kubeconfig "$KUBECONFIG" >/dev/null 2>&1; then
+			for claim in "${claims[@]}"; do
+				(claim_unproven "$claim" "the live cluster's kubeconfig could not be written before deletion") || true
+			done
+			return 0
+		fi
+	fi
+	# Fail closed on the target before the first claim lookup: no kubectl
+	# read and no tag action happens on a context that is not proven to be
+	# this run's live cluster. assert_kube_target dies on any defect (empty
+	# kubeconfig, no current context, unreadable server, EKS endpoint
+	# unresolvable, server differing from the endpoint), so it runs in a
+	# subshell and its message becomes the reason on every claim's record.
+	if ! why=$( (assert_kube_target) 2>&1); then
+		why=$(printf '%s' "$why" | sed 's/^hw-e2e: //' | tr '\n' ' ')
+		log "run-volume: the dedicated kubeconfig at $KUBECONFIG is not proven to target the live cluster ${CLUSTER_NAME}; no claim is looked up and no volume is tagged on an unvalidated context (${why})"
+		for claim in "${claims[@]}"; do
+			(claim_unproven "$claim" "the dedicated kubeconfig was not proven to target the live cluster ${CLUSTER_NAME} before deletion: ${why}") || true
+		done
+		return 0
+	fi
+	for claim in "${claims[@]}"; do
+		ns=${claim%/*}
+		pvc=${claim#*/}
+		if out=$( (kubectl -n "$ns" get pvc "$pvc" -o name) 2>&1); then
+			(tag_run_volume "$ns" "$pvc") ||
+				log "run-volume: claim ${claim} could not be tied to this run; recorded as unproven, and the sweep will refuse to report clean"
+		elif printf '%s' "$out" | grep -q 'NotFound'; then
+			log "run-volume: claim ${claim} does not exist; nothing to tag"
+		else
+			(claim_unproven "$claim" "the claim could not be listed before deletion: $(printf '%s' "$out" | tr '\n' ' ')") || true
+		fi
+	done
+	return 0
+}
+
+# recorded_volumes_untagged prints, comma-joined, every volume RUN_VOLUMES_FILE
+# records for THIS cluster that still exists (any state but deleting) without
+# E2E_RUN_TAG=CLUSTER_NAME on it. Each is looked up by its own id and nothing
+# is deleted here.
+recorded_volumes_untagged() {
+	[ -s "$RUN_VOLUMES_FILE" ] || return 0
+	local cluster vol claim state tagged out=""
+	while read -r cluster vol claim; do
+		[ "$cluster" = "$CLUSTER_NAME" ] || continue
+		state=$(aws ec2 describe-volumes --region "$AWS_REGION" --volume-ids "$vol" \
+			--query 'Volumes[0].State' --output text 2>/dev/null || true)
+		case "$state" in "" | None | deleting | deleted) continue ;; esac
+		tagged=$(aws ec2 describe-volumes --region "$AWS_REGION" --volume-ids "$vol" \
+			--filters "Name=tag:${E2E_RUN_TAG},Values=${CLUSTER_NAME}" \
+			--query 'Volumes[].VolumeId' --output text 2>/dev/null || true)
+		if [ "$tagged" != "$vol" ]; then
+			log "sweep: recorded volume ${vol} (${claim}) still exists but no longer carries ${E2E_RUN_TAG}=${CLUSTER_NAME}; refusing to delete it"
+			out="${out:+$out,}${vol}"
+		fi
+	done <"$RUN_VOLUMES_FILE"
+	printf '%s' "$out"
+}
+
+# unproven_claims_for_run prints, ';'-joined, the unproven-claims records for
+# THIS cluster: "<namespace>/<pvc> <reason>" each.
+unproven_claims_for_run() {
+	[ -s "$UNPROVEN_CLAIMS_FILE" ] || return 0
+	awk -v c="$CLUSTER_NAME" '$1 == c { $1 = ""; sub(/^ /, ""); print }' "$UNPROVEN_CLAIMS_FILE" |
+		sort -u | paste -sd ';' -
 }
 
 # ---------------------------------------------------------------------------
@@ -2302,6 +3382,10 @@ cleanup() {
 	if [ -n "$_PF_PID" ]; then
 		kill "$_PF_PID" 2>/dev/null || true
 	fi
+	# test-observability's bounded port-forward (exporter or VMSingle): the
+	# same close helper the phase uses, so the child is waited on and reaped,
+	# not left as a zombie behind a kill the trap never checked.
+	obs_portforward_close
 	# A cancelled run must not leak the operator-image repoint loop on the
 	# runner (review F6): the EXIT trap fires on SIGTERM too under -E.
 	if [ -n "$_REPOINT_PID" ]; then
@@ -2322,12 +3406,14 @@ main() {
 	up) cmd_up "$@" ;;
 	up-finish) cmd_up_finish "$@" ;;
 	deploy) cmd_deploy "$@" ;;
+	deploy-observability) cmd_deploy_observability "$@" ;;
 	test-dryrun) cmd_test_dryrun "$@" ;;
 	test-threshold) cmd_test_threshold "$@" ;;
 	test-dcgm) cmd_test_dcgm "$@" ;;
 	test-verify-recur) cmd_test_verify_recur "$@" ;;
 	test-drain) cmd_test_drain "$@" ;;
 	test-destructive) cmd_test_destructive "$@" ;;
+	test-observability) cmd_test_observability "$@" ;;
 	teardown) cmd_teardown "$@" ;;
 	sweep) cmd_sweep "$@" ;;
 	reap) cmd_reap "$@" ;;
