@@ -50,6 +50,31 @@ carry the v0\.6\.0 pins
 in this tree (still )?pins? v0\.6\.0
 # go.mod moved to `go 1.26.0` / `toolchain go1.26.9` with the v0.6.1 patch.
 Go 1\.25(\+| or newer)
+# v0.7.0 was published on 2026-10-19 UTC and superseded v0.6.1 as the latest
+# release. While it was a candidate the public docs said "not tagged, not
+# published" by design; afterwards every one of these is a stale status
+# claim. Narrow, as for v0.6.0: "released in v0.6.1", "the v0.6.1 note" and
+# "introduced in v0.7.0" (history) stay legal, and so does "an earlier,
+# unpublished v0.7.0 candidate" (the word precedes the version); only
+# "latest release" claims about v0.6.1, "this tree's pins" claims about
+# v0.6.1, and "not tagged" / "not published" claims about v0.7.0 are
+# forbidden. The pins patterns mirror the v0.6.0 ones above; the two
+# "v0.6.1 ... is the latest release" spellings are the ones the upgrade
+# notes carried on 2026-10-19 (the [^.] span cannot cross another version
+# number, so "superseded v0.6.1; v0.7.0 is the latest release" stays
+# legal). The checker greps line by line, so a claim wrapped across a line
+# break (the one-pager's was) is outside its reach; fixing the text is the
+# remedy, these patterns only stop the one-line spellings from returning.
+Latest release \(v0\.6\.1
+v0\.6\.1 is the latest (\*\*)?(published )?(\*\*)?release
+v0\.6\.1[^.]{0,80}is the latest release
+superseded as the latest release by (the )?v0\.6\.1
+latest (published )?release(,)? (is|remains) v0\.6\.1
+carry the v0\.6\.1 pins
+in this tree (still )?pins? v0\.6\.1
+v0\.7\.0 is not (yet )?tagged
+v0\.7\.0[^.]{0,60}(not (yet )?(tagged|published)|untagged|unpublished)
+candidate prepared in source
 
 # --- v0.7 catalog vocabulary ------------------------------------------------
 # "Tier T4" is the metric catalog's control-plane tier; "Tesla T4" is the
@@ -65,8 +90,8 @@ Go 1\.25(\+| or newer)
 # that says a ShadowGpu rule opens an incident or triggers remediation is a
 # stale claim about authority the rules were built never to have.
 ShadowGpu[A-Za-z]*[^.]{0,60}(opens? an incident|triggers? (a )?remediation|feeds? the controller|reaches the controller webhook)
-# v0.7 code exists in source but no gate has run and nothing is released; the
-# derived series and shadow rules are no longer "read by nothing".
+# The v0.7 derived series and shadow rules shipped in v0.7.0; they are no
+# longer "read by nothing".
 (derived|canonical) series[^.]{0,40}read by nothing
 no alert does yet
 

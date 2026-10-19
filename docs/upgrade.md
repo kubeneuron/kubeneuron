@@ -100,9 +100,10 @@ evidence-only runtime contract qualifications — is the v0.5.0 scope, released
 on 2026-09-20; its tag, published images,
 and release assets are available from the
 [GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.5.0).
-(The manifests and chart in this source tree carry the v0.6.1 pins; see
-[the v0.6.0 notes](#v060-checkpoint-coordination-notes) and
-[the v0.6.1 note](#v061-security-patch-notes).)
+(The manifests and chart in this source tree carry the v0.7.0 pins; see
+[the v0.6.0 notes](#v060-checkpoint-coordination-notes),
+[the v0.6.1 note](#v061-security-patch-notes) and
+[the v0.7.0 notes](#v070-observability-notes).)
 This section describes the upgrade and rollback posture of that scope. The
 CPU-only kind integration harness drives the v0.5 routes and commands against
 a real controller and store with
@@ -170,11 +171,12 @@ hardware qualification of its own surfaces.
 > [GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.6.0)
 > (15 assets, verified with `hack/verify-release.sh v0.6.0 kubeneuron/kubeneuron`:
 > asset set, checksums, digest pins, Cosign signature). It has since been
-> superseded as the latest release by the v0.6.1 security and toolchain
-> patch (see [the v0.6.1 note](#v061-security-patch-notes)), which leaves
-> this feature unchanged; the manifests, chart, and samples in this source
-> tree carry the v0.6.1 pins. Releases before v0.6.0 do not contain this
-> feature. This section describes the upgrade and rollback posture of the
+> superseded as the latest release, first by the v0.6.1 security and
+> toolchain patch (see [the v0.6.1 note](#v061-security-patch-notes)) and
+> then by v0.7.0 (see [the v0.7.0 notes](#v070-observability-notes)); both
+> leave this feature unchanged, and the manifests, chart, and samples in
+> this source tree carry the v0.7.0 pins. Releases before v0.6.0 do not
+> contain this feature. This section describes the upgrade and rollback posture of the
 > checkpoint coordination scope. Nothing here claims GPU hardware
 > validation of the feature.
 
@@ -225,7 +227,8 @@ which lets opted-in Pods be told and given a bounded deadline before a
   `upgrade-rehearsal` job of the release workflow) drives the previous
   published release → HEAD → that release (images only) → HEAD on one kind
   cluster for both workflow stores; for v0.6.0 the baseline was v0.5.0 (for
-  v0.6.1 it is v0.6.0, see [the v0.6.1 note](#v061-security-patch-notes)).
+  v0.6.1 it is v0.6.0, see [the v0.6.1 note](#v061-security-patch-notes);
+  for v0.7.0 it is v0.6.1, see [the v0.7.0 notes](#v070-observability-notes)).
   It was run as part of `make gates-full` on 2026-09-29/30 UTC against an
   earlier local, unpublished v0.6.0 candidate and passed on both SQLite and
   PostgreSQL. It seeded and read legacy API and data across the cycle,
@@ -304,8 +307,10 @@ versions longer than a rolling upgrade needs.
 
 ## v0.6.1 security patch notes
 
-v0.6.1, released 2026-10-11, is the latest release and a security and
-toolchain patch only: the binaries and images are rebuilt with Go 1.26.9
+v0.6.1, released 2026-10-11, is a security and toolchain patch only (it was
+superseded as the latest release by v0.7.0 on 2026-10-19; see
+[the v0.7.0 notes](#v070-observability-notes)): the binaries and images are
+rebuilt with Go 1.26.9
 and updated `golang.org/x/net` / `golang.org/x/text` (the advisories are
 listed in [CHANGELOG.md](https://github.com/kubeneuron/kubeneuron/blob/main/CHANGELOG.md)). It carries no CRD, RBAC, store
 schema, default, or feature change relative to v0.6.0, so the upgrade from
@@ -315,8 +320,42 @@ workflow's `upgrade-rehearsal` gate covers that path: it drives v0.6.0 →
 HEAD → v0.6.0 (images only) → HEAD on both workflow stores with v0.6.0 as
 the baseline (`hack/kind-upgrade-rollback.sh` defaults to the same
 baseline; the v0.6.0 release rehearsed against v0.5.0, as recorded above).
-Nothing in this patch adds GPU hardware validation; the v0.6.0 evidence
-above is the latest hardware evidence.
+Nothing in this patch adds GPU hardware validation of its own.
+
+## v0.7.0 observability notes
+
+v0.7.0, released 2026-10-19 (the `v0.7.0` tag, images, install manifest,
+and release assets are available from the
+[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.7.0)),
+is the latest release. It adds the GPU fleet reliability observability
+layer described in
+[CHANGELOG.md](https://github.com/kubeneuron/kubeneuron/blob/main/CHANGELOG.md)
+and nothing else: no CRD, RBAC, store schema, default, action, playbook
+rung, or webhook path changes for any KubeNeuron component, and the
+controller, agent, and operator binaries carry no feature change. The
+manifests, chart, and samples in this source tree carry the v0.7.0 pins.
+
+- **Upgrade from v0.6.1.** KubeNeuron itself is images only, in the usual
+  CRDs → operator → controller order, with no migration. The observability
+  layer is applied separately and in this order: the GPU Operator exporter
+  profile (`helm upgrade gpu-operator ... -f values.yaml`), the VMAgent
+  scrape contract, the recording and shadow VMRules, the Alertmanager
+  route, and the Grafana JSON (see
+  [operations](operations.md) and the dependency profile README).
+- **Rehearsal.** The release workflow's `upgrade-rehearsal` gate and
+  `hack/kind-upgrade-rollback.sh` use v0.6.1 as the baseline for this
+  release and drive v0.6.1 → HEAD → v0.6.1 (images only) → HEAD on both
+  workflow stores; the gate ran green in the release workflow on the
+  `v0.7.0` tag.
+- **Rollback to v0.6.1.** Images only for KubeNeuron, no store restore;
+  restore the nine-series exporter list with the same `helm upgrade`,
+  delete the `kubeneuron-gpu-shadow` and `kubeneuron-gpu-recording`
+  VMRules, and restore the v0.6.1 Alertmanager config and VMAgent spec.
+  The v0.7 Grafana JSON is safe to leave in place.
+- **Hardware evidence.** The release source passed the full AWS hardware
+  harness, including its observability phases, on one Tesla T4 (EKS
+  g4dn.xlarge) on 2026-10-18 UTC. Nothing is claimed for any other GPU,
+  and this release adds no remediation path to qualify.
 
 ## Rolling back
 
@@ -338,6 +377,9 @@ above is the latest hardware evidence.
   for what the old binary can and cannot see afterwards.
 - **v0.6.1 security patch**: images only, no store restore needed; see
   [the v0.6.1 note](#v061-security-patch-notes).
+- **v0.7.0 observability layer**: images only for KubeNeuron plus removal
+  of the observability files; see
+  [the v0.7.0 notes](#v070-observability-notes).
 - **v0.6 checkpoint coordination scope** (released in v0.6.0): disable
   `spec.safety.checkpointCoordination` first, then images only; see
   [the v0.6.0 notes](#v060-checkpoint-coordination-notes). Stamped
