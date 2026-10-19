@@ -27,7 +27,13 @@ State file (FAKE_AWS_STATE) shape, tags as plain maps for readability:
              the document altogether.
   sgs:       {id: {vpc, name, tags, referenced_by?: [sg-id]}}
   instances: {id: {state, tags}}
-  volumes:   {id: {status, tags}}
+  volumes:   {id: {status, tags, tags_frozen?: bool}}
+             tags_frozen models a create-tags that returns 0 and lands
+             nothing, so the harness's read-back after tagging is exercised.
+
+eks describe-cluster reports the endpoint https://<name>.eks.fake, which the
+verifier's fake kubectl repeats as its server, so the harness's kube target
+guard passes for exactly the live run cluster and nothing else.
 """
 
 import fnmatch
@@ -136,9 +142,13 @@ def attr_values(doc, name):
         key = name[4:]
         tags = doc.get("TagSet", doc.get("Tags", []))
         return [t["Value"] for t in tags if t["Key"] == key]
+    if name == "status":
+        # Interfaces carry Status; volumes carry State, and the real API's
+        # `status` filter reads whichever the document has.
+        v = doc.get("Status", doc.get("State"))
+        return [] if v is None else [str(v)]
     simple = {
         "vpc-id": "VpcId",
-        "status": "Status",
         "description": "Description",
         "interface-type": "InterfaceType",
         "group-name": "GroupName",
@@ -291,8 +301,11 @@ def main(argv):
         name = opts.get("name", [""])[0]
         if name not in state["clusters"]:
             fail("ResourceNotFoundException: No cluster found for name: %s" % name)
+        endpoint = "https://%s.eks.fake" % name
         if glob["output"] == "json":
-            print(json.dumps({"cluster": {"name": name}}))
+            print(json.dumps({"cluster": {"name": name, "endpoint": endpoint}}))
+        elif "endpoint" in query:
+            print(endpoint)
         else:
             print(name)
         return 0
@@ -355,6 +368,23 @@ def main(argv):
 
     if service == "ec2" and op == "wait":
         # instance-terminated: terminate-instances above is synchronous here.
+        return 0
+
+    if service == "ec2" and op == "create-tags":
+        tags = {}
+        for t in opts.get("tags", []):
+            m = re.match(r"^Key=([^,]+),Value=(.*)$", t)
+            if not m:
+                unsupported(argv)
+            tags[m.group(1)] = m.group(2)
+        for rid in opts.get("resources", []):
+            table = next((k for k in ("volumes", "enis", "sgs", "vpcs", "instances") if rid in state.get(k, {})), None)
+            if table is None:
+                fail("InvalidID: The ID '%s' is not valid" % rid)
+            if state[table][rid].get("tags_frozen"):
+                continue
+            state[table][rid].setdefault("tags", {}).update(tags)
+        save(state)
         return 0
 
     if service == "ec2" and op == "delete-volume":

@@ -5,6 +5,17 @@ them on the public listener at `/metrics`; the agent on its health port
 (`:9402`) at `/metrics`. The dependency profile's vmagent scrapes both, plus
 the operator's controller-runtime metrics.
 
+This page lists the series the controller and agent processes *emit*. The
+`kubeneuron_gpu_*` series are different: they are recorded by vmalert from
+dcgm-exporter series under the dependency profile, not served by any
+KubeNeuron process, and their catalog (DCGM field, unit, factor, labels,
+derived formulas, no-data semantics and hardware-support cells) is the
+generated [GPU metric catalog](reference-gpu-metrics.md). v0.7 adds no
+series to this page: its control-plane tier (Tier T4 in the catalog) maps
+the existing `kubeneuron_incidents`, `kubeneuron_degraded_gpus`,
+`kubeneuron_degraded_gpu_seconds_total` and related series below without
+renaming them.
+
 ## Controller
 
 | Series | Type | Labels | Meaning |
@@ -139,3 +150,20 @@ Prometheus instead of the reference profile? Load
 — every rule links to its [runbook](runbooks.md) entry. GPU-signal alerts
 (`Gpu*`) live in the `gpu-*` groups and feed the controller webhook; unit
 tests pin the deployed rules to both canonical files.
+
+Two more VMRules ship with the dependency profile since v0.7, and neither
+feeds the controller. `kubeneuron-gpu-recording`
+([`configs/vmalert/gpu-recording-rules.yaml`](https://github.com/kubeneuron/kubeneuron/blob/main/configs/vmalert/gpu-recording-rules.yaml))
+holds only `record:` rules, the canonical and derived `kubeneuron_gpu_*`
+series of the catalog. `kubeneuron-gpu-shadow`
+([`configs/vmalert/gpu-shadow-rules.yaml`](https://github.com/kubeneuron/kubeneuron/blob/main/configs/vmalert/gpu-shadow-rules.yaml))
+holds the seven shadow-only alerts `ShadowGpuPcieLinkWidthDegraded`,
+`ShadowGpuNvlinkLinkDegraded`, `ShadowGpuFailSlow`,
+`ShadowGpuThermalHeadroomLow`, `ShadowGpuMemoryThermalHeadroomLow`,
+`ShadowGpuMemoryBeyondRepair` and `ShadowGpuRowRemapPending`. Each carries
+`kubeneuron_shadow="true"` and `severity: info`, is routed to the
+`human-default` receiver ahead of the webhook route, is absent from the
+controller's alert-to-class map, and has a
+[runbook](runbooks.md#shadow-only-gpu-alerts-v07-route-to-humans-never-to-the-controller)
+entry that opens by saying so. They trigger no remediation. None of them has
+been exercised on GPU hardware by this project.

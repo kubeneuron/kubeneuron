@@ -11,11 +11,11 @@ spec:
     tag: v1.147.0
     pullPolicy: IfNotPresent
   datasource:
-    url: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8428
+    url: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8429
   remoteRead:
-    url: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8428
+    url: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8429
   remoteWrite:
-    url: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8428
+    url: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8429
   notifier:
     url: http://vmalertmanager-kubeneuron.kubeneuron-monitoring.svc:9093
   evaluationInterval: 30s

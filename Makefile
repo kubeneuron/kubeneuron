@@ -14,11 +14,11 @@ IMAGE_TAG  ?= $(VERSION)
 IMAGE_TARGETS := operator controller agent kubeneuronctl
 # Dockerfile stage per published image name.
 image_stage = $(if $(filter kubeneuronctl,$(1)),cli,$(1))
-GENERATED_PATHS := api/v1alpha1/zz_generated.deepcopy.go config/crd/bases deploy/helm/kubeneuron/crds
+GENERATED_PATHS := api/v1alpha1/zz_generated.deepcopy.go config/crd/bases deploy/helm/kubeneuron/crds config/gpu-metrics docs/reference-gpu-metrics.md
 # The lock verify-generate serialises on. In .gitignore; created on first use.
 GENERATE_LOCK := .make-generate.lock
 
-.PHONY: all build test test-integration-kind test-upgrade-rollback-kind kind-clean lint clean tidy generate verify-generate verify-generate-locked proto web docs docs-serve docker gates gates-full verify-docs verify-image verify-hw-e2e-sweep mirror
+.PHONY: all build test test-integration-kind test-upgrade-rollback-kind kind-clean lint clean tidy generate verify-generate verify-generate-locked generate-gpucatalog verify-gpucatalog proto web docs docs-serve docker gates gates-full verify-docs verify-image verify-hw-e2e-sweep verify-hw-e2e-observability verify-tls-scripts mirror test-gpu-observability-kind verify-gpu-observability-fixture kind-gpu-observability-clean
 
 all: build
 
@@ -58,19 +58,36 @@ gates:
 	$(GO) test -race -timeout 30m ./...
 	$(MAKE) verify-docs
 	$(MAKE) verify-hw-e2e-sweep
+	$(MAKE) verify-hw-e2e-observability
+	$(MAKE) verify-tls-scripts
 	@echo
-	@echo "gates: OK (generate, build, lint, race tests, docs, hw-e2e sweep)"
+	@echo "gates: OK (generate, build, lint, race tests, docs, hw-e2e sweep, hw-e2e observability, TLS helpers)"
 	@echo "note: the PostgreSQL conformance suite and the kind/image/release"
 	@echo "      gates are in 'make gates-full' — this tier proves the code,"
 	@echo "      not the artifact."
 
 ## gates-full: gates plus everything that needs Docker or a cluster.
+# Order: the offline image check first, then the three disposable kind
+# clusters from cheapest to dearest. test-integration-kind is fully offline.
+# test-gpu-observability-kind is the v0.7 GPU observability fixture: its own
+# CPU-only kind cluster with a SYNTHETIC dcgm-exporter stand-in, scraped and
+# evaluated by the pinned VictoriaMetrics v1.147.0 pipeline, routed through
+# the shipped Alertmanager route tree into recorder sinks, and provisioned
+# into the pinned Grafana; it pulls those images from Docker Hub. It covers
+# the G2 rows for recording rules, label contract, missing data, fail-slow,
+# shadow routing and dashboard provisioning on fabricated series, never
+# hardware or G2 as a whole.
+# test-upgrade-rollback-kind pulls the published baseline images from GHCR
+# and is the slowest, so it goes last.
 gates-full: gates
 	$(MAKE) verify-image
 	$(MAKE) test-integration-kind
+	$(MAKE) test-gpu-observability-kind
 	$(MAKE) test-upgrade-rollback-kind
 	@echo
-	@echo "gates-full: OK (code gates, published images, kind integration, upgrade/rollback rehearsal)"
+	@echo "gates-full: OK (code gates, published images, kind integration, synthetic GPU observability fixture, upgrade/rollback rehearsal)"
+	@echo "note: the GPU observability fixture is a separate CPU-only kind validation"
+	@echo "      with fabricated DCGM series; it is not a hardware result and not G2."
 
 verify-docs:
 	bash hack/verify-docs.sh
@@ -85,6 +102,35 @@ verify-image:
 # cluster's interface, another cluster's group, an ambient or default VPC.
 verify-hw-e2e-sweep:
 	bash hack/verify-hw-e2e-sweep.sh
+
+# Offline check of the hardware harness's v0.7 GPU operator profile wiring
+# (pinned --values, v26.3.3 default, fail-closed pre-Helm gate), the
+# read-only test-observability phase (dispatch, target guard, bounded curl,
+# T0/T1 witness fields, node/gpu_uuid/gpu_model/node_pool label contract,
+# Tesla T4 absence checks, VMSingle port read from the Service, reaped EXIT
+# cleanup) and the deploy-observability phase that installs the stack it
+# reads (workflow order, VictoriaMetrics operator pin equal to
+# versions.lock.yaml, no remote apply, the README's install order behind
+# bounded gates, the fail-closed webhook-token copy, the swept VMSingle
+# claim; the REAL phase run against scripted aws/kubectl/curl refuses lock
+# drift, a checksum mismatch, a missing root and a Service port drift, and
+# applies everything in order on the green path), plus the workflow's own
+# kubectl pin (minor equal to the EKS K8S_VERSION, version and SHA-256
+# equal to the reviewed pair the verifier records, verified before
+# chmod/PATH; the install step is run against a scripted curl). No cluster,
+# seconds. It proves wiring, not hardware behaviour.
+verify-hw-e2e-observability:
+	bash hack/verify-hw-e2e-observability.sh
+
+# Offline regression coverage for the TLS helpers' optimistic-concurrency path
+# (hack/tls-rotate.sh, hack/tls-emergency-recover.sh) against a scripted kubectl
+# that enforces the resourceVersion compare-and-swap and injects a concurrent
+# writer: status-only conflicts are retried, exact already-applied state is
+# accepted, and every TLS-relevant drift (foreign transaction, UID lookalike,
+# spec change, root turned Ready mid-recovery) fails closed. A live kind run
+# lost this race once; no cluster, a few seconds.
+verify-tls-scripts:
+	bash hack/verify-tls-scripts.sh
 
 ## mirror: publish this tree to the public repository. See hack/mirror.sh.
 mirror:
@@ -158,6 +204,7 @@ generate:
 	$(GO) tool controller-gen object paths=./api/v1alpha1
 	$(GO) tool controller-gen crd:allowDangerousTypes=true paths=./api/v1alpha1 output:crd:artifacts:config=config/crd/bases
 	cp config/crd/bases/*.yaml deploy/helm/kubeneuron/crds/
+	$(MAKE) generate-gpucatalog
 
 # Serialised, because it REWRITES tracked files and then asserts they are
 # unchanged. Two of these on one working tree can in principle interleave one's
@@ -196,19 +243,34 @@ verify-generate-locked: generate
 		 git ls-files --others --exclude-standard -- $(GENERATED_PATHS) >&2; \
 		 exit 1)
 
+# --- GPU metric catalog -------------------------------------------------------
+#
+# internal/gpucatalog is the source of truth; config/gpu-metrics/ and
+# docs/reference-gpu-metrics.md are rendered from it. `make generate` runs
+# generate-gpucatalog and both artifacts are in GENERATED_PATHS, so the
+# standard verify-generate / gates path fails on catalog drift. The render is
+# a pure function of the Go tables, so verify-gpucatalog needs no lock: it
+# compares an in-memory render against the checked-in files and rewrites
+# nothing.
+generate-gpucatalog:
+	$(GO) run ./hack/gpucatalog
+
+verify-gpucatalog:
+	$(GO) run ./hack/gpucatalog -check
+
 test-integration-kind: build
 	CLUSTER_NAME="$(KIND_CLUSTER_NAME)" \
 	KUBECONFIG_PATH="$(KIND_KUBECONFIG)" \
 	KIND_BIN="$(KIND)" KUBECTL_BIN="$(KUBECTL)" \
 	./hack/kind-integration.sh
 
-# The v0.5.0 -> HEAD -> v0.5.0 (images only) -> HEAD rehearsal from
+# The v0.6.1 -> HEAD -> v0.6.1 (images only) -> HEAD rehearsal from
 # docs/upgrade.md, on one disposable kind cluster, for BOTH stores at once
 # (SQLite PVC and a throwaway in-cluster PostgreSQL). It seeds a baseline
 # incident, drives a v0.5 runtime contract qualification to ReadyForApproval
 # on HEAD, enables and disables the v0.6 checkpoint coordination policy and
 # proves the managed controller ClusterRole holds pods patch only while it is
-# enabled, rolls the images back with the policy off, proves the v0.5.0
+# enabled, rolls the images back with the policy off, proves the v0.6.1
 # binary reads the rows back byte-identical, re-upgrades, and proves the rows
 # and their hash-chained audit read back byte-identical and still accept
 # observations. CPU-only: synthetic accelerator evidence over
@@ -219,6 +281,49 @@ test-integration-kind: build
 test-upgrade-rollback-kind:
 	KIND_BIN="$(KIND)" KUBECTL_BIN="$(KUBECTL)" \
 	./hack/kind-upgrade-rollback.sh
+
+# v0.7 GPU observability fixture on its own disposable kind cluster
+# (kubeneuron-gpu-observability): a synthetic dcgm-exporter stand-in
+# (hack/dcgmfixture, CPU-only, no DCGM/NVML) scraped by vmagent with the
+# checked-in M2 relabeling into vmsingle; vmalert evaluating
+# configs/vmalert/gpu-recording-rules.yaml and gpu-shadow-rules.yaml
+# byte-for-byte; Alertmanager v0.32.1 running the route tree of the
+# checked-in VMAlertmanager verbatim (the integration-less human-default
+# receiver gets one test-only webhook) in front of two recorder sinks
+# (hack/alertsink), the controller one under the shipped receiver's own
+# Service name, namespace, port and token file; and Grafana (tag+digest from
+# versions.lock.yaml) provisioning the five deploy/grafana boards against a
+# vmsingle datasource. Asserts through the query API that the
+# canonical/derived series, units, node_pool/cluster presence, absent-not-zero
+# for omitted sources and the fail-slow peer score are wired as the catalog
+# promises; that ShadowGpuMemoryBeyondRepair fires on the synthetic
+# unrepairable device and is delivered to human-default only, with exactly
+# zero requests at the controller webhook sink (then API-injected probes
+# prove both sinks and the route order are live); and through the Grafana
+# API that every board is provisioned with its datasource bound and every
+# variable and panel query executes without a query error (a wiring check on
+# synthetic data, not panel semantics). G2 rows on fabricated series, not G2
+# and no evidence about real GPUs, a real pager or the controller. Pulls the
+# VictoriaMetrics, Alertmanager and Grafana images from Docker Hub. Deletes
+# its cluster on exit unless KEEP_CLUSTER=1. Docker group membership
+# required (sg docker -c 'make test-gpu-observability-kind').
+test-gpu-observability-kind:
+	KIND_BIN="$(KIND)" KUBECTL_BIN="$(KUBECTL)" GO_BIN="$(GO)" \
+	./hack/kind-gpu-observability.sh
+
+# Offline half of the above: bash -n, shellcheck, go vet/test of the fixture
+# exporter and recorder sink, pinned tag/digest checks against
+# versions.lock.yaml, scrape-config and Alertmanager-config extraction from
+# the checked-in VMAgent/VMAlertmanager (route tree, inhibit rules and
+# kubeneuron receiver must come back unchanged), shadow-rule and fixture-spec
+# drift checks, dashboard placeholder binding, Grafana provisioning
+# consistency, manifest rendering; amtool route tests when AMTOOL_BIN is
+# set. No cluster, no Docker, no network.
+verify-gpu-observability-fixture:
+	GO_BIN="$(GO)" ./hack/kind-gpu-observability.sh --verify
+
+kind-gpu-observability-clean:
+	$(KIND) delete cluster --name kubeneuron-gpu-observability
 
 kind-clean:
 	$(KIND) delete cluster --name "$(KIND_CLUSTER_NAME)"

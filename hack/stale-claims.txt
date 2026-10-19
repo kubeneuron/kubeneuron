@@ -51,6 +51,25 @@ in this tree (still )?pins? v0\.6\.0
 # go.mod moved to `go 1.26.0` / `toolchain go1.26.9` with the v0.6.1 patch.
 Go 1\.25(\+| or newer)
 
+# --- v0.7 catalog vocabulary ------------------------------------------------
+# "Tier T4" is the metric catalog's control-plane tier; "Tesla T4" is the
+# only GPU this project has run on. A lone "T4" next to catalog vocabulary
+# is ambiguous between the two and is forbidden in public prose (the
+# generated docs/reference-gpu-metrics.md spells both out). Narrow by
+# design: "a real T4", "EKS T4", "g4dn/T4" in hardware history stay legal,
+# because there the GPU is the only possible reading. ERE has no
+# look-behind, so the prefix class excludes a preceding "Tier " / "tier "
+# (ends in r) and "Tesla " (ends in a) by their last letter.
+(^|[^ra] |[^ ])T4 (control[- ]plane|tier|catalog|series|metrics?)\b
+# The v0.7 shadow alerts are observation for humans. Any public sentence
+# that says a ShadowGpu rule opens an incident or triggers remediation is a
+# stale claim about authority the rules were built never to have.
+ShadowGpu[A-Za-z]*[^.]{0,60}(opens? an incident|triggers? (a )?remediation|feeds? the controller|reaches the controller webhook)
+# v0.7 code exists in source but no gate has run and nothing is released; the
+# derived series and shadow rules are no longer "read by nothing".
+(derived|canonical) series[^.]{0,40}read by nothing
+no alert does yet
+
 # --- vendor support claims -------------------------------------------------
 # The second category in this file: claims that are not yet true. Shipping
 # detection and actions are NVIDIA-only (docs/reference-capabilities.md is the

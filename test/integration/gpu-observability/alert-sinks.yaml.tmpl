@@ -1,0 +1,127 @@
+# Recorder sinks (hack/alertsink) for the kind GPU observability fixture.
+# Rendered by the harness: __IMAGE__, __PIPELINE_NAMESPACE__ and, from the
+# shipped kubeneuron receiver's webhook URL, __CONTROLLER_NAMESPACE__,
+# __CONTROLLER_SERVICE__ and __CONTROLLER_PORT__.
+#
+# alert-sink-human stands in for whatever a human-facing receiver would
+# deliver to; it is the only delivery target the rendered human-default
+# receiver has. The controller sink is deployed under the Service name,
+# namespace and port of the real controller webhook, so the shipped
+# kubeneuron receiver (URL, bearer token file) is used exactly as checked in
+# and a mis-routed alert would land here, where it is counted. Neither sink
+# does anything with what it receives: no incident, no remediation.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alert-sink-human
+  namespace: __PIPELINE_NAMESPACE__
+  labels:
+    app.kubernetes.io/name: alert-sink-human
+    app.kubernetes.io/part-of: kubeneuron-gpu-observability-fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alert-sink-human
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alert-sink-human
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: alertsink
+          image: __IMAGE__
+          imagePullPolicy: Never
+          command: ["/alertsink"]
+          args:
+            - -listen=:8080
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alert-sink-human
+  namespace: __PIPELINE_NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: kubeneuron-gpu-observability-fixture
+spec:
+  selector:
+    app.kubernetes.io/name: alert-sink-human
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alert-sink-controller
+  namespace: __CONTROLLER_NAMESPACE__
+  labels:
+    app.kubernetes.io/name: alert-sink-controller
+    app.kubernetes.io/part-of: kubeneuron-gpu-observability-fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alert-sink-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alert-sink-controller
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: alertsink
+          image: __IMAGE__
+          imagePullPolicy: Never
+          command: ["/alertsink"]
+          args:
+            - -listen=:__CONTROLLER_PORT__
+          ports:
+            - name: http
+              containerPort: __CONTROLLER_PORT__
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+---
+# Same name, namespace and port as the real controller webhook target in the
+# shipped Alertmanager receiver, so that receiver needs no edit.
+apiVersion: v1
+kind: Service
+metadata:
+  name: __CONTROLLER_SERVICE__
+  namespace: __CONTROLLER_NAMESPACE__
+  labels:
+    app.kubernetes.io/part-of: kubeneuron-gpu-observability-fixture
+spec:
+  selector:
+    app.kubernetes.io/name: alert-sink-controller
+  ports:
+    - name: http
+      port: __CONTROLLER_PORT__
+      targetPort: http

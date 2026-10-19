@@ -9,6 +9,13 @@ KUBECTL_BIN=${KUBECTL_BIN:-kubectl}
 JQ_BIN=${JQ_BIN:-jq}
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-240}
 KUBECONFIG_PATH=${KUBECONFIG_PATH:-${KUBECONFIG:-}}
+# A phase patch is a resourceVersion compare-and-swap. The operator writes root
+# status on every reconcile and each status write advances resourceVersion, so
+# a patch built from a root read before the slow Secret validation can lose
+# that race ("the object has been modified"). apply_phase then re-reads the
+# root and retries at most this many times, and only while the TLS references
+# and transaction annotations are exactly what this run validated.
+PATCH_CONFLICT_RETRIES=${PATCH_CONFLICT_RETRIES:-5}
 
 direction=
 phase=
@@ -66,6 +73,12 @@ Server rotation maps CA changes to agents and leaf changes to the controller.
 Client rotation maps CA changes to the controller and leaf changes to agents.
 All three candidate Secrets must have unique names, immutable: true, and no
 ownerReferences. The script never deletes old or candidate Secrets.
+
+Each phase patch is checked against the root resourceVersion it validated.
+When a concurrent status write wins that race the helper re-reads the root
+and retries up to PATCH_CONFLICT_RETRIES times (default 5), but only while
+spec.tls and every kubeneuron.io/tls-* annotation are unchanged; any other
+concurrent change is refused with a diagnostic and the phase must be re-run.
 EOF
 }
 
@@ -182,6 +195,7 @@ for required in root_name rotation_id from_leaf_secret from_ca_secret new_leaf_s
 	[[ -n ${!required} ]] || die "missing required option for ${required//_/-}"
 done
 [[ $TIMEOUT_SECONDS =~ ^[1-9][0-9]*$ ]] || die "timeout-seconds must be a positive integer"
+[[ $PATCH_CONFLICT_RETRIES =~ ^[0-9]+$ ]] || die "PATCH_CONFLICT_RETRIES must be a non-negative integer"
 [[ $rotation_id =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || die "rotation-id is not a safe identifier"
 for value in "$root_name" "$from_leaf_secret" "$from_ca_secret" "$new_leaf_secret" "$overlap_ca_secret" "$final_ca_secret"; do
 	[[ $value =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]] || die "unsafe Kubernetes name: $value"
@@ -203,9 +217,14 @@ for role_and_name in \
 	secret_name_roles[$name]=$role
 done
 
-for command in "$KUBECTL_BIN" "$JQ_BIN" sed; do
+for command in "$KUBECTL_BIN" "$JQ_BIN" sed grep mktemp; do
 	command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
 done
+
+# kubectl's stderr from the phase patch is kept apart from its JSON output so
+# a conflict can be told from any other failure.
+patch_stderr=$(mktemp) || die "could not create a temporary file for patch diagnostics"
+trap 'rm -f "$patch_stderr"' EXIT
 
 kubectl_command=("$KUBECTL_BIN")
 if [[ -n $KUBECONFIG_PATH ]]; then
@@ -216,10 +235,6 @@ fi
 kubectl_run() {
 	"${kubectl_command[@]}" "$@"
 }
-
-root_json=$(kubectl_run get kubeneuron "$root_name" -o json)
-namespace=$($JQ_BIN -r '.spec.namespace // empty' <<<"$root_json")
-[[ -n $namespace ]] || die "KubeNeuron $root_name has no spec.namespace"
 
 if [[ $direction == server ]]; then
 	leaf_field=serverSecretRef
@@ -246,32 +261,41 @@ canonical_ca_key() {
 	fi
 }
 
-current_leaf=$($JQ_BIN -r --arg field "$leaf_field" '.spec.tls[$field].name // empty' <<<"$root_json")
-current_ca=$($JQ_BIN -r --arg field "$ca_field" '.spec.tls[$field].name // empty' <<<"$root_json")
-current_ca_key=$($JQ_BIN -r --arg field "$ca_field" '.spec.tls[$field].key // "ca.crt"' <<<"$root_json")
-current_ca_key=$(canonical_ca_key "$current_ca_key")
-active_id=$($JQ_BIN -r --arg key "$annotation_id" '.metadata.annotations[$key] // empty' <<<"$root_json")
-active_direction=$($JQ_BIN -r --arg key "$annotation_direction" '.metadata.annotations[$key] // empty' <<<"$root_json")
-active_phase=$($JQ_BIN -r --arg key "$annotation_phase" '.metadata.annotations[$key] // empty' <<<"$root_json")
-
 read_annotation() {
 	local key=$1
 	$JQ_BIN -r --arg key "$key" '.metadata.annotations[$key] // empty' <<<"$root_json"
 }
 
-recorded_from_leaf=$(read_annotation "$annotation_from_leaf")
-recorded_from_leaf_uid=$(read_annotation "$annotation_from_leaf_uid")
-recorded_from_ca=$(read_annotation "$annotation_from_ca")
-recorded_from_ca_key=$(read_annotation "$annotation_from_ca_key")
-recorded_from_ca_uid=$(read_annotation "$annotation_from_ca_uid")
-recorded_new_leaf=$(read_annotation "$annotation_new_leaf")
-recorded_new_leaf_uid=$(read_annotation "$annotation_new_leaf_uid")
-recorded_overlap_ca=$(read_annotation "$annotation_overlap_ca")
-recorded_overlap_ca_key=$(read_annotation "$annotation_overlap_ca_key")
-recorded_overlap_ca_uid=$(read_annotation "$annotation_overlap_ca_uid")
-recorded_final_ca=$(read_annotation "$annotation_final_ca")
-recorded_final_ca_key=$(read_annotation "$annotation_final_ca_key")
-recorded_final_ca_uid=$(read_annotation "$annotation_final_ca_uid")
+# load_root reads the root and derives every value the phase preconditions
+# check from that one snapshot. Every refresh goes through here so a precondition
+# can never be judged against an older read than the patch is built from.
+load_root() {
+	root_json=$(kubectl_run get kubeneuron "$root_name" -o json)
+	current_leaf=$($JQ_BIN -r --arg field "$leaf_field" '.spec.tls[$field].name // empty' <<<"$root_json")
+	current_ca=$($JQ_BIN -r --arg field "$ca_field" '.spec.tls[$field].name // empty' <<<"$root_json")
+	current_ca_key=$($JQ_BIN -r --arg field "$ca_field" '.spec.tls[$field].key // "ca.crt"' <<<"$root_json")
+	current_ca_key=$(canonical_ca_key "$current_ca_key")
+	active_id=$(read_annotation "$annotation_id")
+	active_direction=$(read_annotation "$annotation_direction")
+	active_phase=$(read_annotation "$annotation_phase")
+	recorded_from_leaf=$(read_annotation "$annotation_from_leaf")
+	recorded_from_leaf_uid=$(read_annotation "$annotation_from_leaf_uid")
+	recorded_from_ca=$(read_annotation "$annotation_from_ca")
+	recorded_from_ca_key=$(read_annotation "$annotation_from_ca_key")
+	recorded_from_ca_uid=$(read_annotation "$annotation_from_ca_uid")
+	recorded_new_leaf=$(read_annotation "$annotation_new_leaf")
+	recorded_new_leaf_uid=$(read_annotation "$annotation_new_leaf_uid")
+	recorded_overlap_ca=$(read_annotation "$annotation_overlap_ca")
+	recorded_overlap_ca_key=$(read_annotation "$annotation_overlap_ca_key")
+	recorded_overlap_ca_uid=$(read_annotation "$annotation_overlap_ca_uid")
+	recorded_final_ca=$(read_annotation "$annotation_final_ca")
+	recorded_final_ca_key=$(read_annotation "$annotation_final_ca_key")
+	recorded_final_ca_uid=$(read_annotation "$annotation_final_ca_uid")
+}
+
+load_root
+namespace=$($JQ_BIN -r '.spec.namespace // empty' <<<"$root_json")
+[[ -n $namespace ]] || die "KubeNeuron $root_name has no spec.namespace"
 
 secret_json() {
 	local name=$1
@@ -379,7 +403,7 @@ report_root_status() {
 require_stable_root() {
 	local deadline=$((SECONDS + TIMEOUT_SECONDS))
 	while ((SECONDS < deadline)); do
-		root_json=$(kubectl_run get kubeneuron "$root_name" -o json)
+		load_root
 		if root_ready "$root_json"; then
 			return
 		fi
@@ -408,14 +432,59 @@ ca_ref_json() {
 	fi
 }
 
+# rotation_view projects a root onto the subset a phase patch reasons about:
+# object identity, spec generation, every spec.tls reference (CA key
+# canonicalised), and every kubeneuron.io/tls-* transaction annotation, routine
+# or emergency. Status is deliberately absent: the operator's status writes are
+# the concurrent change a conflict retry exists to tolerate. Keys are sorted so
+# two views compare as strings.
+rotation_view() {
+	$JQ_BIN -cS '
+	  {
+	    uid: .metadata.uid,
+	    generation: .metadata.generation,
+	    tls: ((.spec.tls // {}) | with_entries(
+	      if (.value | type) == "object" then .value += {key: (.value.key // "ca.crt")} else . end)),
+	    annotations: ((.metadata.annotations // {}) |
+	      with_entries(select(.key | startswith("kubeneuron.io/tls-"))))
+	  }'
+}
+
+# describe_view_drift prints every TLS-relevant difference between the root this
+# run validated and the root re-read after a patch conflict.
+describe_view_drift() {
+	local validated=$1
+	local fresh=$2
+	printf 'tls-rotate: KubeNeuron %s changed after validation:\n' "$root_name" >&2
+	$JQ_BIN -rn --argjson a "$validated" --argjson b "$fresh" '
+	  def drift(what; x; y):
+	    if x != y then "tls-rotate:   \(what): validated \(x | tojson), now \(y | tojson)" else empty end;
+	  drift("metadata.uid (root recreated)"; $a.uid; $b.uid),
+	  drift("metadata.generation (spec changed)"; $a.generation; $b.generation),
+	  ((($a.tls | keys) + ($b.tls | keys)) | unique[] | drift("spec.tls.\(.)"; $a.tls[.]; $b.tls[.])),
+	  ((($a.annotations | keys) + ($b.annotations | keys)) | unique[] |
+	    drift("annotation \(.)"; $a.annotations[.]; $b.annotations[.]))
+	' >&2
+}
+
+# apply_phase records one phase with a resourceVersion-checked merge patch.
+# On a conflict it re-reads the root and continues in exactly one of three
+# ways: the re-read root is TLS-identical to the validated one (only status or
+# unrelated metadata moved), so the same patch is retried against the new
+# resourceVersion; the re-read root already carries precisely this patch's
+# result (a concurrent identical invocation won), so the phase is treated as
+# recorded and only the convergence checks run; or anything TLS-relevant
+# differs, and the phase fails closed without writing. Forward phases
+# (require_ready=1) additionally wait, within TIMEOUT_SECONDS, for the re-read
+# root to be Ready again before retrying, mirroring require_stable_root.
 apply_phase() {
 	local field=$1
 	local ref_json=$2
 	local recorded_phase=$3
-	local resource_version patch generation patched_json
-	resource_version=$($JQ_BIN -r '.metadata.resourceVersion' <<<"$root_json")
-	patch=$($JQ_BIN -cn \
-		--arg rv "$resource_version" \
+	local require_ready=$4
+	local desired_patch validated_view expected_view resource_version patch generation patched_json
+	local fresh_json fresh_view deadline conflicts=0
+	desired_patch=$($JQ_BIN -cn \
 		--arg id_key "$annotation_id" --arg id "$rotation_id" \
 		--arg direction_key "$annotation_direction" --arg direction "$direction" \
 		--arg phase_key "$annotation_phase" --arg phase "$recorded_phase" \
@@ -435,7 +504,6 @@ apply_phase() {
 		--arg field "$field" --argjson ref "$ref_json" '
       {
         metadata: {
-          resourceVersion: $rv,
           annotations: {
 	            ($id_key): $id,
 	            ($direction_key): $direction,
@@ -458,11 +526,70 @@ apply_phase() {
         spec: {tls: {($field): $ref}}
       }
     ')
-	patched_json=$(kubectl_run patch kubeneuron "$root_name" --type=merge -p "$patch" -o json)
-	generation=$($JQ_BIN -r '.metadata.generation' <<<"$patched_json")
-	[[ $generation =~ ^[1-9][0-9]*$ ]] || die "phase patch returned an invalid root generation"
-	target_root_generation=$generation
-	note "$direction rotation $rotation_id recorded phase $recorded_phase at generation $generation"
+	validated_view=$(rotation_view <<<"$root_json")
+	# The root as it must look if this exact patch has already landed: the
+	# validated root with the patch merged the way a JSON merge patch merges
+	# (objects recursively, so a {name} ref keeps an existing key), without the
+	# generation the server assigns to that write.
+	expected_view=$($JQ_BIN -c --argjson patch "$desired_patch" '. * $patch' <<<"$root_json" |
+		rotation_view | $JQ_BIN -cS 'del(.generation)')
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while :; do
+		resource_version=$($JQ_BIN -r '.metadata.resourceVersion // empty' <<<"$root_json")
+		[[ -n $resource_version ]] || die "KubeNeuron $root_name has no metadata.resourceVersion to compare against"
+		patch=$($JQ_BIN -c --arg rv "$resource_version" '.metadata.resourceVersion = $rv' <<<"$desired_patch")
+		if patched_json=$(kubectl_run patch kubeneuron "$root_name" --type=merge -p "$patch" -o json 2>"$patch_stderr"); then
+			[[ ! -s $patch_stderr ]] || cat "$patch_stderr" >&2
+			generation=$($JQ_BIN -r '.metadata.generation' <<<"$patched_json")
+			[[ $generation =~ ^[1-9][0-9]*$ ]] || die "phase patch returned an invalid root generation"
+			target_root_generation=$generation
+			root_json=$patched_json
+			if ((conflicts > 0)); then
+				note "$direction rotation $rotation_id recorded phase $recorded_phase at generation $generation after $conflicts conflict retry(ies)"
+			else
+				note "$direction rotation $rotation_id recorded phase $recorded_phase at generation $generation"
+			fi
+			return 0
+		fi
+		if ! grep -q -e '(Conflict)' -e 'the object has been modified' "$patch_stderr"; then
+			cat "$patch_stderr" >&2
+			die "phase $recorded_phase patch failed with a non-conflict error; nothing was retried"
+		fi
+		conflicts=$((conflicts + 1))
+		if ((conflicts > PATCH_CONFLICT_RETRIES)); then
+			cat "$patch_stderr" >&2
+			die "phase $recorded_phase patch still conflicted after $PATCH_CONFLICT_RETRIES retry(ies); KubeNeuron $root_name resourceVersion kept moving, re-run this phase"
+		fi
+		note "phase $recorded_phase patch conflicted at resourceVersion $resource_version (retry $conflicts of $PATCH_CONFLICT_RETRIES); re-reading KubeNeuron $root_name"
+		while :; do
+			fresh_json=$(kubectl_run get kubeneuron "$root_name" -o json) ||
+				die "could not re-read KubeNeuron $root_name after the patch conflict"
+			fresh_view=$(rotation_view <<<"$fresh_json")
+			if [[ $($JQ_BIN -cS 'del(.generation)' <<<"$fresh_view") == "$expected_view" ]]; then
+				generation=$($JQ_BIN -r '.metadata.generation' <<<"$fresh_json")
+				[[ $generation =~ ^[1-9][0-9]*$ ]] || die "re-read KubeNeuron $root_name has an invalid generation"
+				target_root_generation=$generation
+				root_json=$fresh_json
+				note "$direction rotation $rotation_id phase $recorded_phase is already recorded exactly as planned at generation $generation (a concurrent identical invocation won the patch); continuing with convergence checks only"
+				return 0
+			fi
+			if [[ $fresh_view != "$validated_view" ]]; then
+				describe_view_drift "$validated_view" "$fresh_view"
+				die "refusing to retry phase $recorded_phase: KubeNeuron $root_name changed in a TLS-relevant way after validation; nothing was written, re-run this phase so it is validated against the current root"
+			fi
+			if ((require_ready)) && ! root_ready "$fresh_json"; then
+				if ((SECONDS >= deadline)); then
+					report_root_status
+					die "refusing to retry phase $recorded_phase: KubeNeuron $root_name did not return to Ready before timeout after the patch conflict; nothing was written"
+				fi
+				sleep 2
+				continue
+			fi
+			root_json=$fresh_json
+			break
+		done
+		note "KubeNeuron $root_name re-read at resourceVersion $($JQ_BIN -r '.metadata.resourceVersion' <<<"$root_json") with unchanged TLS references and transaction annotations; retrying the phase patch"
+	done
 }
 
 root_has_bound_plan() {
@@ -759,7 +886,7 @@ expand-trust)
 	[[ $current_ca == "$from_ca_secret" && $current_ca_key == "$from_ca_key" ]] || \
 		die "current $ca_field is $current_ca:$current_ca_key, want $from_ca_secret:$from_ca_key"
 	load_initial_plan
-	apply_phase "$ca_field" "$(ca_ref_json "$overlap_ca_secret" "$overlap_ca_key")" TrustExpanded
+	apply_phase "$ca_field" "$(ca_ref_json "$overlap_ca_secret" "$overlap_ca_key")" TrustExpanded 1
 	wait_rollout_and_ready "$consumer_kind" "$consumer_name" "$ca_field" "$overlap_ca_secret" "$overlap_ca_key" TrustExpanded
 	;;
 activate-leaf)
@@ -778,7 +905,7 @@ activate-leaf)
 	[[ $current_leaf == "$from_leaf_secret" ]] || die "current $leaf_field is $current_leaf, want old leaf $from_leaf_secret"
 	[[ $current_ca == "$overlap_ca_secret" && $current_ca_key == "$overlap_ca_key" ]] || \
 		die "trust is not on the declared overlap CA Secret"
-	apply_phase "$leaf_field" "$($JQ_BIN -cn --arg name "$new_leaf_secret" '{name:$name}')" LeafActivated
+	apply_phase "$leaf_field" "$($JQ_BIN -cn --arg name "$new_leaf_secret" '{name:$name}')" LeafActivated 1
 	wait_rollout_and_ready "$producer_kind" "$producer_name" "$leaf_field" "$new_leaf_secret" '' LeafActivated
 	;;
 retire-old-trust)
@@ -799,7 +926,7 @@ retire-old-trust)
 	[[ $current_leaf == "$new_leaf_secret" ]] || die "new leaf is not active"
 	[[ $current_ca == "$overlap_ca_secret" && $current_ca_key == "$overlap_ca_key" ]] || \
 		die "trust is not on the declared overlap CA Secret"
-	apply_phase "$ca_field" "$(ca_ref_json "$final_ca_secret" "$final_ca_key")" OldTrustRetired
+	apply_phase "$ca_field" "$(ca_ref_json "$final_ca_secret" "$final_ca_key")" OldTrustRetired 1
 	wait_rollout_and_ready "$consumer_kind" "$consumer_name" "$ca_field" "$final_ca_secret" "$final_ca_key" OldTrustRetired
 	;;
 	rollback-retirement)
@@ -816,7 +943,7 @@ retire-old-trust)
 	[[ $current_leaf == "$new_leaf_secret" ]] || die "current leaf is not the declared new leaf"
 	[[ $current_ca == "$final_ca_secret" && $current_ca_key == "$final_ca_key" ]] || \
 		die "rollback-retirement requires the declared final CA reference"
-	apply_phase "$ca_field" "$(ca_ref_json "$overlap_ca_secret" "$overlap_ca_key")" LeafActivated
+	apply_phase "$ca_field" "$(ca_ref_json "$overlap_ca_secret" "$overlap_ca_key")" LeafActivated 0
 	wait_rollout_and_ready "$consumer_kind" "$consumer_name" "$ca_field" "$overlap_ca_secret" "$overlap_ca_key" LeafActivated
 	;;
 	rollback-leaf)
@@ -833,7 +960,7 @@ retire-old-trust)
 	[[ $current_leaf == "$new_leaf_secret" ]] || die "current leaf is not the declared new leaf"
 	[[ $current_ca == "$overlap_ca_secret" && $current_ca_key == "$overlap_ca_key" ]] || \
 		die "rollback-leaf is safe only while overlap trust remains active"
-	apply_phase "$leaf_field" "$($JQ_BIN -cn --arg name "$from_leaf_secret" '{name:$name}')" LeafRolledBack
+	apply_phase "$leaf_field" "$($JQ_BIN -cn --arg name "$from_leaf_secret" '{name:$name}')" LeafRolledBack 0
 	wait_rollout_and_ready "$producer_kind" "$producer_name" "$leaf_field" "$from_leaf_secret" '' LeafRolledBack
 	;;
 rollback-trust)
@@ -859,7 +986,7 @@ rollback-trust)
 		wait_rollout_and_ready "$producer_kind" "$producer_name" "$leaf_field" "$from_leaf_secret" '' LeafRolledBack
 	fi
 	require_uid "old CA" "$(require_ca_secret "$from_ca_secret" "$from_ca_key" false)" "$recorded_from_ca_uid"
-	apply_phase "$ca_field" "$(ca_ref_json "$from_ca_secret" "$from_ca_key")" RolledBack
+	apply_phase "$ca_field" "$(ca_ref_json "$from_ca_secret" "$from_ca_key")" RolledBack 0
 	wait_rollout_and_ready "$consumer_kind" "$consumer_name" "$ca_field" "$from_ca_secret" "$from_ca_key" RolledBack
 	;;
 esac

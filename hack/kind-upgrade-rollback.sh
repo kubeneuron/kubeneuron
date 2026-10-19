@@ -2,7 +2,7 @@
 # shellcheck disable=SC2016 # Single-quoted jq programs expand jq, not shell, variables.
 set -Eeuo pipefail
 
-# v0.6.0 -> HEAD -> v0.6.0 (images only) -> HEAD lifecycle rehearsal on kind,
+# v0.6.1 -> HEAD -> v0.6.1 (images only) -> HEAD lifecycle rehearsal on kind,
 # for BOTH workflow stores, with the v0.5 runtime contract qualification rows
 # and their hash-chained audit history as the durable evidence under test,
 # and the v0.6 checkpoint coordination policy (new, default off) exercised
@@ -69,7 +69,7 @@ set -Eeuo pipefail
 # if the current login predates it.
 #
 # Env:
-#   BASELINE          released tag to start from (default: v0.6.0, the
+#   BASELINE          released tag to start from (default: v0.6.1, the
 #                     previous published release; the baseline must already
 #                     serve the v0.5 runtime-contract routes, which the seed
 #                     step verifies, so v0.5.0 is the oldest accepted)
@@ -81,7 +81,7 @@ set -Eeuo pipefail
 #   POSTGRES_IMAGE    throwaway database image (default: docker.io/library/postgres:16-alpine)
 #   KIND_BIN, KUBECTL_BIN, DOCKER_BIN, JQ_BIN  command paths
 
-BASELINE=${BASELINE:-v0.6.0}
+BASELINE=${BASELINE:-v0.6.1}
 RELEASE_REPO=${RELEASE_REPO:-kubeneuron/kubeneuron}
 LOAD_PLATFORM=${LOAD_PLATFORM:-linux/$(go env GOARCH 2>/dev/null || echo amd64)}
 CLUSTER_NAME=${CLUSTER_NAME:-kubeneuron-upgrade-rollback}

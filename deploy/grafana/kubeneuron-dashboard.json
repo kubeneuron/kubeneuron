@@ -17,6 +17,13 @@
     {
       "type": "timeseries",
       "title": "GPU-hours degraded, cumulative by outcome (resolved = returned to service)",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
       "description": "Cumulative GPU-hours spent under an open incident since controller start, split by how each incident ended; the resolved series is capacity remediation brought back. Drawn from the counter directly because recoveries are sparse enough that increase() over a dashboard window frequently reports zero.",
       "gridPos": {
         "h": 8,
@@ -45,6 +52,13 @@
     {
       "type": "stat",
       "title": "Unattended recovery share (since controller start)",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
       "description": "Share of recovered incidents that never needed a human decision. Computed from the raw counters rather than increase() over the window: recoveries are sparse, and a counter series born inside the window shows no growth to increase(), which silently rendered this panel empty on exactly the fleets it matters for. Resets when the controller restarts; use kubeneuronctl report for a windowed figure computed from the incident store.",
       "gridPos": {
         "h": 8,
@@ -110,6 +124,13 @@
     {
       "type": "stat",
       "title": "Incidents needing a human",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
       "gridPos": {
         "h": 5,
         "w": 4,
@@ -143,6 +164,13 @@
     {
       "type": "stat",
       "title": "Awaiting approval",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
       "gridPos": {
         "h": 5,
         "w": 4,
@@ -176,6 +204,13 @@
     {
       "type": "stat",
       "title": "Active incidents",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
       "gridPos": {
         "h": 5,
         "w": 4,
@@ -226,6 +261,13 @@
     {
       "type": "stat",
       "title": "Gate denials (1h)",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
       "gridPos": {
         "h": 5,
         "w": 4,
@@ -260,6 +302,13 @@
     {
       "type": "timeseries",
       "title": "Incidents by state",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -292,6 +341,13 @@
     {
       "type": "timeseries",
       "title": "Incidents opened by class",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -309,6 +365,13 @@
     {
       "type": "timeseries",
       "title": "Playbook steps by outcome",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -579,6 +642,13 @@
     {
       "type": "timeseries",
       "title": "Reconcile pass latency (p50/p99) and action backlog",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -705,6 +775,13 @@
     {
       "type": "timeseries",
       "title": "Destructive steps deferred by a guard (what remediation deliberately did not cost)",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"

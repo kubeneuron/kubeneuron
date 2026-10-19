@@ -1,0 +1,126 @@
+# Synthetic dcgm-exporter stand-ins for hack/kind-gpu-observability.sh.
+# Rendered by the harness: __IMAGE__, __NODE_A__ (the node carrying the
+# node-pool labels) and __NODE_B__ (no node-pool label) are substituted.
+#
+# The Service name, namespace (gpu-operator) and port name (gpu-metrics) are
+# exactly what the shipped vmagent relabeling keeps, so discovery runs the
+# real contract. Two Deployments, pinned to one node each, so the same
+# scrape job sees a target with and without a node_pool source.
+#
+# Node A: seven Tesla T4 (gpu 6 slow, gpu 2 reporting unrepairable memory,
+# the ShadowGpuMemoryBeyondRepair input) + one slow NVIDIA A10G (gpu 7).
+# Node B: one healthy NVIDIA A10G. The A10G peer group therefore has two
+# devices, below the fail-slow rule's three-peer floor.
+apiVersion: v1
+kind: Service
+metadata:
+  name: nvidia-dcgm-exporter
+  labels:
+    app.kubernetes.io/part-of: kubeneuron-gpu-observability-fixture
+spec:
+  selector:
+    app.kubernetes.io/name: dcgm-fixture
+  ports:
+    - name: gpu-metrics
+      port: 9400
+      targetPort: gpu-metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dcgm-fixture-a
+  labels:
+    app.kubernetes.io/name: dcgm-fixture
+    app.kubernetes.io/part-of: kubeneuron-gpu-observability-fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dcgm-fixture
+      kubeneuron.io/fixture-node: a
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dcgm-fixture
+        kubeneuron.io/fixture-node: a
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: __NODE_A__
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dcgm-fixture
+          image: __IMAGE__
+          imagePullPolicy: Never
+          args:
+            - -listen=:9400
+            - -spec=Tesla T4:7:6:2;NVIDIA A10G:1:0
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: gpu-metrics
+              containerPort: 9400
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: gpu-metrics
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dcgm-fixture-b
+  labels:
+    app.kubernetes.io/name: dcgm-fixture
+    app.kubernetes.io/part-of: kubeneuron-gpu-observability-fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dcgm-fixture
+      kubeneuron.io/fixture-node: b
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dcgm-fixture
+        kubeneuron.io/fixture-node: b
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: __NODE_B__
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dcgm-fixture
+          image: __IMAGE__
+          imagePullPolicy: Never
+          args:
+            - -listen=:9400
+            - -spec=NVIDIA A10G:1:-
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: gpu-metrics
+              containerPort: 9400
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: gpu-metrics
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]

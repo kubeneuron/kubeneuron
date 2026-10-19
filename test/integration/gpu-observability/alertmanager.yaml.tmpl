@@ -1,0 +1,86 @@
+# Alertmanager for the kind GPU observability fixture. The configuration is
+# NOT written here: the harness renders it from spec.configRawYaml of the
+# checked-in deploy/kubernetes/dependencies/observability/vmalertmanager.yaml
+# with extract-alertmanager-config.py (route tree, inhibit rules and the
+# kubeneuron webhook receiver verbatim; the integration-less human-default
+# receiver gains one webhook to a local recorder) into the
+# `alertmanager-config` ConfigMap. The bearer-token Secret is mounted where
+# the shipped receiver's credentials_file expects it (__TOKEN_MOUNT_DIR__,
+# Secret __TOKEN_SECRET__), the same layout the VictoriaMetrics operator
+# produces for `spec.secrets`. Image tag: versions.lock.yaml
+# (prometheusAlertmanager).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: kubeneuron-gpu-observability-fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertmanager
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alertmanager
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: alertmanager
+          image: prom/alertmanager:v0.32.1
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config.file=/etc/alertmanager/alertmanager.yaml
+            - --storage.path=/alertmanager
+            - --web.listen-address=:9093
+            - --cluster.listen-address=
+          ports:
+            - name: http
+              containerPort: 9093
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            periodSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alertmanager
+              readOnly: true
+            - name: webhook-token
+              mountPath: __TOKEN_MOUNT_DIR__
+              readOnly: true
+            - name: storage
+              mountPath: /alertmanager
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: config
+          configMap:
+            name: alertmanager-config
+        - name: webhook-token
+          secret:
+            secretName: __TOKEN_SECRET__
+        - name: storage
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  labels:
+    app.kubernetes.io/part-of: kubeneuron-gpu-observability-fixture
+spec:
+  selector:
+    app.kubernetes.io/name: alertmanager
+  ports:
+    - name: http
+      port: 9093
+      targetPort: http

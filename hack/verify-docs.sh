@@ -11,6 +11,9 @@
 #    filesystem in BOTH directions — a vendor implementation that lands while
 #    the matrix still says seam-only is stale, and a matrix that claims shipped
 #    support with no implementation behind it is optimistic.
+# 4. Generated docs: docs/reference-gpu-metrics.md is rendered from
+#    internal/gpucatalog; a hand edit or a catalog change without
+#    `make generate-gpucatalog` is drift, and this gate must see it.
 set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -18,11 +21,35 @@ cd "$repo_root"
 
 fail=0
 
+# --- generated docs: the GPU metric catalog ---------------------------------
+# `make verify-gpucatalog` is the non-writing check (`go run ./hack/gpucatalog
+# -check`): it re-renders in memory and compares, never touches the tree.
+# This ran first in the plan's wording but not in this script; a deliberately
+# corrupted reference-gpu-metrics.md passed verify-docs, so the catalog
+# acceptance test was inert until this block existed. A missing Go toolchain
+# is a failure, not a skip — a check that silently passes when it cannot run
+# is the defect this file exists to prevent.
+go_bin=${GO:-}
+if [[ -z $go_bin ]]; then
+	if command -v go >/dev/null 2>&1; then
+		go_bin=go
+	elif [[ -x /usr/local/go/bin/go ]]; then
+		go_bin=/usr/local/go/bin/go
+	fi
+fi
+if [[ -z $go_bin ]]; then
+	echo "GENERATED CATALOG: no Go toolchain found (set GO=/path/to/go); cannot verify docs/reference-gpu-metrics.md against internal/gpucatalog" >&2
+	fail=1
+elif ! make -s verify-gpucatalog GO="$go_bin"; then
+	echo "GENERATED CATALOG STALE: docs/reference-gpu-metrics.md or config/gpu-metrics/ does not match internal/gpucatalog; run 'make generate-gpucatalog' (never edit the generated files by hand)" >&2
+	fail=1
+fi
+
 # --- forbidden claims -------------------------------------------------------
 # CHANGELOG records history; private operational checkpoints and release plans
 # never reach the public mirror.
 mapfile -t doc_files < <(git ls-files '*.md' |
-	grep -v -E '^(CHANGELOG\.md|AGENT_SESSION_STATE\.md|TRANSFER_HANDOFF\.md|blocker\.md|main\.md|main-codex\.md|V0\.4\.0_RELEASE_PLAN\.md|V0\.5\.0_RELEASE_PLAN\.md|V0\.6\.0_RELEASE_PLAN\.md)$')
+	grep -v -E '^(CHANGELOG\.md|AGENT_SESSION_STATE\.md|TRANSFER_HANDOFF\.md|blocker\.md|main\.md|main-codex\.md|V0\.4\.0_RELEASE_PLAN\.md|V0\.5\.0_RELEASE_PLAN\.md|V0\.6\.0_RELEASE_PLAN\.md|V0\.7\.0_RELEASE_PLAN\.md)$')
 while IFS= read -r pattern; do
 	[[ -z $pattern || $pattern == \#* ]] && continue
 	if hits=$(grep -nE -- "$pattern" "${doc_files[@]}" 2>/dev/null); then

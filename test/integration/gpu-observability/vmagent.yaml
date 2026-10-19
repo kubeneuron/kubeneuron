@@ -1,0 +1,101 @@
+# vmagent for the kind GPU observability fixture. The scrape configuration is
+# NOT written here: the harness extracts spec.inlineScrapeConfig (the M2
+# label contract) and spec.scrapeInterval verbatim from the checked-in
+# deploy/kubernetes/dependencies/observability/vmagent.yaml into the
+# `vmagent-scrape` ConfigMap, so the fixture runs the shipped relabeling, not
+# a copy of it. The RBAC below is the read-only discovery access the
+# VictoriaMetrics operator would generate for that VMAgent (endpoints, pods,
+# services and, for attach_metadata, nodes). Image tag: versions.lock.yaml
+# (victoriaMetricsAgent).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vmagent
+  labels:
+    app.kubernetes.io/part-of: kubeneuron-gpu-observability-fixture
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeneuron-gpu-observability-fixture-vmagent
+  labels:
+    app.kubernetes.io/part-of: kubeneuron-gpu-observability-fixture
+rules:
+  - apiGroups: [""]
+    resources: [nodes, pods, services, endpoints]
+    verbs: [get, list, watch]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubeneuron-gpu-observability-fixture-vmagent
+  labels:
+    app.kubernetes.io/part-of: kubeneuron-gpu-observability-fixture
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubeneuron-gpu-observability-fixture-vmagent
+subjects:
+  - kind: ServiceAccount
+    name: vmagent
+    namespace: __NAMESPACE__
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmagent
+  labels:
+    app.kubernetes.io/name: vmagent
+    app.kubernetes.io/part-of: kubeneuron-gpu-observability-fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vmagent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vmagent
+    spec:
+      serviceAccountName: vmagent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: vmagent
+          image: victoriametrics/vmagent:v1.147.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - -promscrape.config=/etc/vmagent/scrape.yaml
+            - -remoteWrite.url=http://vmsingle:8428/api/v1/write
+            - -remoteWrite.tmpDataPath=/tmp/vmagent
+            - -httpListenAddr=:8429
+          ports:
+            - name: http
+              containerPort: 8429
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+          volumeMounts:
+            - name: scrape
+              mountPath: /etc/vmagent
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: scrape
+          configMap:
+            name: vmagent-scrape
+        - name: tmp
+          emptyDir: {}

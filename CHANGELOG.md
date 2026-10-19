@@ -9,6 +9,656 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+## [v0.7.0]
+
+GPU fleet reliability observability, MVP: a canonical GPU metric catalog, a
+wider dcgm-exporter reliability profile, a scrape label contract, canonical
+and derived recording rules, five Grafana dashboards-as-code, and shadow-only
+alerts that go to humans and never to the controller. **Release status:
+candidate prepared in source, not tagged, not published.** The source
+defaults in this tree (the `config/default` operator image, the Helm chart
+`version`/`appVersion`/image tag, and the sample controller and agent images)
+are set to v0.7.0 so that the tag and source users consume what the tag
+describes; the public `v0.7.0` tag, images, install manifest, and release
+assets do **not** yet exist, and the latest published release remains
+v0.6.1 (the README says so by design until publication). **The hardware
+gate (G3) passed on 2026-10-18 UTC: the full `hack/hw-e2e.sh` workflow
+ran on an ephemeral EKS cluster (g4dn.xlarge / Tesla T4) from source
+`d06fcfa` (`d06fcfa81aa3a0eada6cdfefd425ee0929af0a12`, which contains the
+candidate `9104db5` and the harness corrections listed under "Fixed"),
+passed every phase including `deploy-observability` and
+`test-observability`, tore down cleanly, and an independent read-only
+audit keyed on the run's exact identity found zero leftovers. That run
+used the checked-in pinned GPU Operator chart v26.3.3, observed a DCGM
+client (`dcgmi`) 4.3.1 with a standalone DCGM host engine 4.5.2, and
+deployed the profile's checked-in dcgm-exporter pin
+`4.5.3-4.8.2-distroless` (a source pin; no image digest is recorded).
+The run identity (cluster name, account, instances, volumes, endpoints,
+GPU UUIDs) was used for the audit and is deliberately not disclosed. The
+local gate (G1) and the CPU-only kind gate (G2) commands are recorded on
+`9104db5`, and on `d06fcfa` itself `make gates-full` passed with exit 0
+on 2026-10-18 UTC (`gates`, `verify-image`, `test-integration-kind`,
+`test-gpu-observability-kind`, `test-upgrade-rollback-kind`): a CPU-only,
+synthetic kind validation of the same tree, not G3; no separate direct
+`make test-upgrade-rollback-kind` on `d06fcfa` is recorded. A passed G3
+is not release authorization: no tag, release, or publication has
+happened.**
+The history of that gate: the G1 and G2 commands first passed on the
+prior candidate `1cb32cb`; the first G3 attempt on 2026-10-18 ran from
+that prior source, reached `deploy-observability`, and stopped at the
+harness's VMSingle port-contract guard. On 2026-10-18 UTC, `make gates-full` and a separate
+`make test-upgrade-rollback-kind` passed on `1cb32cb` (kind v0.32.0,
+kubectl v1.33.12, Docker 29.8.0; every kind cluster deleted afterwards).
+Later the same day the full `hack/hw-e2e.sh` workflow ran once on AWS/EKS
+(g4dn.xlarge) from source `5131d24` (a docs commit on `1cb32cb`, same
+code): the VictoriaMetrics operator and VMSingle came up, and the
+`deploy-observability` phase refused to continue because the Service the
+operator generated serves VMSingle on port 8429 while the
+production-profile endpoints (the harness constant, the VMAlert and
+VMAgent URLs, the profile README, and the repository sample) named 8428;
+the kind GPU observability fixture and the fictional `vmsingle-unset`
+placeholder deliberately keep 8428. The guard stopped the phase before
+the webhook token was copied, before VMAgent/VMAlertmanager/VMAlert were
+installed, and before the installation was repointed, so no KubeNeuron
+root was ever handed a non-serving endpoint; `test-observability` and
+every later phase did not run. The run's cleanup completed: `teardown`
+and its sweep succeeded, an explicit second sweep succeeded, and an
+independent read-only audit afterwards found no EKS cluster, active EC2
+instance, eksctl stack, volume, recycle IAM role, or ECR image tag for
+the run. The fix (see "Fixed") moves
+the contract to 8429 and is a source change, so the tree after `1cb32cb`
+became a new candidate; that candidate is `9104db5`, and the G1 and G2
+commands were rerun on it on 2026-10-18 UTC with exit 0 (`make gates-full`
+and a separate `make test-upgrade-rollback-kind`; CPU-only and synthetic,
+details in the evidence section). A second G3 attempt from this branch
+stopped on the harness's `rollout status` wait for the operator's
+`OnDelete` StatefulSet (a harness defect, see "Fixed"), and the final G3
+run from `d06fcfa` then passed as stated above. Its `test-observability`
+phase asserts exactly this and nothing more: the real dcgm-exporter under
+v0.7's profile served `DCGM_FI_DEV_POWER_USAGE` (tier T0),
+`DCGM_FI_DEV_ECC_SBE_VOL_TOTAL` (tier T1) and `DCGM_FI_DEV_GPU_TEMP` on a
+real Tesla T4; the canonical `kubeneuron_gpu_temperature_celsius`,
+`kubeneuron_gpu_power_watts` and `kubeneuron_gpu_memory_used_bytes`
+series existed for that GPU with the `node`, `gpu_uuid`, `gpu_model` and
+`node_pool` label contract; `kubeneuron_gpu_memory_used_bytes` equalled
+`DCGM_FI_DEV_FB_USED` MiB × 2^20; and the row-remap, NVLink, MIG and
+fail-slow samples a Tesla T4 cannot produce were absent. It does not look
+at Grafana, fires no shadow alert, and does not prove every catalog
+field, rule or dashboard. The dry-run, DCGM, recurrence, threshold,
+drain, and confined `ReplaceNode` phases passed on that node. What that run does not show is listed under
+"Що пройдений G3 на g4dn **не доводить**": nothing for A100/H100, MIG,
+NVLink, row remapping, or fail-slow scoring. Passing G1, G2, and G3 is
+not release authorization; the tag is a separate decision.
+The evidence section below lists exactly what was run.
+
+This is a minor pre-1.0 release that adds an observability layer and no
+authority: no new action, playbook rung, webhook path, controller series,
+CRD field, store migration, gate, approval, confinement rule, or RBAC rule
+for any KubeNeuron component. The controller, agent, and operator binaries
+carry no feature change; the only non-test change under `internal/` is the
+new `internal/gpucatalog` package (the catalog source of truth and its
+generator) and the new `internal/depprofile` test package (a package doc
+and tests over the dependency profile files). Upgrading from v0.6.1
+is images only for KubeNeuron plus applying the new observability files;
+rolling back is images only plus the documented removal of those files (see
+"Upgrade and rollback" below).
+
+### Added
+
+- **Canonical GPU metric catalog.** `internal/gpucatalog` is the source of
+  truth; `make generate-gpucatalog` renders `config/gpu-metrics/catalog.yaml`
+  (machine-readable, catalog version v1.7.0) and the public
+  `docs/reference-gpu-metrics.md`, neither of which is edited by hand, and
+  `hack/verify-docs.sh` fails on drift. Entries are keyed by DCGM field id,
+  not name (DCGM 4.x renames fields; the pinned exporter still emits legacy
+  names, which the catalog keeps as aliases): 25 Tier T0 baseline fields,
+  25 Tier T1 reliability fields, and 22 Tier T4 control-plane series (the
+  existing `kubeneuron_*` series, mapped without renaming; no new Tier T4
+  series). Each field carries a source side (exporter series, raw unit,
+  profiled or not) and a canonical side (`kubeneuron_gpu_*` name with the
+  unit in the name, factor, fixed labels) plus a hardware-support cell per
+  GPU class (`validated` / `declared` / `not-applicable` / `unknown`); the
+  only `validated` cell is reading field 230 on a Tesla T4. Field 230
+  (`DCGM_FI_DEV_XID_ERRORS`) is a sticky last-XID gauge and gets no
+  canonical series; `kubeneuron_gpu_xid_errors_total` is reserved until a
+  real event source exists, and no rule reads 230 as a counter.
+- **dcgm-exporter reliability profile.** `dcgmExporter.config.data` in
+  `deploy/kubernetes/dependencies/gpu-operator/values.yaml` (pinned GPU
+  Operator chart v26.3.3) grows from the nine series v0.6.1 shipped to 47
+  DCGM fields: every catalog field in Tier T0 or T1 that has a canonical
+  series, including the five throttle-violation counters 240/241/242/243/245
+  and the PCIe byte rates 1009/1010. Fields 230 (sticky XID gauge), 1523
+  (`DCGM_FI_DEV_GPU_RECOVERY_ACTION`, cataloged only), 190, and every
+  profiling field (1002–1005, 1011/1012) stay out. Unit tests pin the
+  profile to the catalog in both directions and pin the exclusions; fields
+  absent on Turing are commented as such. The profile is the default of the
+  dependency profile; no new Helm value is introduced, and the agent's own
+  GPU health path (`dcgmi dmon`, `nvidia-smi -q`) is unchanged. Rollback is
+  the nine-series v0.6.1 list plus the same `helm upgrade`, documented in
+  `docs/operations.md` and the dependencies README.
+- **Scrape label contract.** The VMAgent scrape job for dcgm-exporter
+  copies `UUID` → `gpu_uuid` and `modelName` → `gpu_model` (originals kept),
+  attaches node metadata (read-only `nodes` access, granted by the
+  VictoriaMetrics operator's generated ClusterRole and pinned by a test) and
+  derives the optional `node_pool` from the first present of
+  `kubeneuron.io/node-pool`, `karpenter.sh/nodepool`,
+  `cloud.google.com/gke-nodepool`, `eks.amazonaws.com/nodegroup` (EKS wins;
+  a node without any gets no label, never an empty string), passes
+  `GPU_I_PROFILE` through as the optional `mig_profile`, and leaves
+  `cluster` to an administrator-set `externalLabels` entry (absent by
+  default). No `driver` label is produced: neither candidate source was
+  verified end to end by this project, the decision is recorded in the
+  dependencies README, and a test pins its absence. No shipped rule or
+  dashboard requires an optional label.
+- **Canonical and derived recording rules.**
+  `configs/vmalert/gpu-recording-rules.yaml` (72 rules; MetricsQL for the
+  pinned vmalert v1.147.0), mirrored as the VMRule `kubeneuron-gpu-recording`
+  in `deploy/kubernetes/dependencies/observability/rules.yaml`. Every
+  canonical series is one rule over its catalog source with the catalog's
+  factor and fixed labels, and a test checks catalog ↔ rules in both
+  directions (series, factor, labels). Derived signals, each with its
+  contract in the catalog: thermal headroom (153 with the 158−150 fallback),
+  memory thermal headroom, power ratio, throttle share per reason, clock
+  ratio, memory used ratio, ECC and retired-page and NVLink and PCIe-replay
+  rates, a memory hard-fault flag per component (uncorrectable ECC, row
+  remap, retired pages, unrepairable memory), PCIe link width and
+  generation ratios, and recovered capacity hours from the existing
+  `kubeneuron_degraded_gpu_seconds_total`. Missing data stays missing: no
+  rule uses `or vector(0)`, `default`, or `absent()`, and a grep test
+  enforces it.
+- **Fail-slow peer score, shadow-only and experimental.**
+  `kubeneuron_gpu_fail_slow_score_ratio` = 1 − (device SM clock ratio ÷
+  `median by (gpu_model)` SM clock ratio), recorded only when the score is
+  ≥ 0.15, the device's maximum throttle share over 5m is ≥ 0.05, and at
+  least three devices of that `gpu_model` report a clock ratio; otherwise
+  the series is absent. The peer group is `gpu_model` only. The robust
+  median+MAD score from the brief is **not** implemented, and no run on a
+  real peer group larger than one has happened.
+- **Five Grafana dashboards-as-code** in `deploy/grafana/`: Fleet
+  Reliability Overview (`fleet-overview.json`), Health & Errors
+  (`health-errors.json`), Fail-slow Radar (`fail-slow-radar.json`),
+  Remediation & Recovered Capacity (`remediation.json`), and GPU Passport
+  (`gpu-passport.json`), rendered from one spec in `internal/gpucatalog`.
+  Shared variables `cluster`, `node_pool`, `gpu_model`, `node`, `gpu_uuid`,
+  `namespace`, `pod`, all with "All" and tolerant of an absent label. GPU
+  state on the boards comes only from the existing Tier T4 series and
+  shadow alert state (`ALERTS{kubeneuron_shadow="true"}`); the XID panel
+  shows existing `xid-*` incident counts, not a DCGM-derived rate. The
+  existing `kubeneuron-dashboard.json` stays and links to the new boards.
+  `internal/metrics/dashboard_test.go` covers all six files: every
+  `kubeneuron_*` name exists in the catalog or the declared metrics, every
+  `DCGM_FI_*` name is in the profile, `ALERTS{...}` is selected only by the
+  shadow label or an explicit alertname, and no derived panel uses
+  `or vector(0)`.
+- **Shadow-only alerts.** Seven rules in the `gpu-shadow` group of
+  `configs/vmalert/gpu-shadow-rules.yaml`, mirrored as the VMRule
+  `kubeneuron-gpu-shadow`: `ShadowGpuPcieLinkWidthDegraded`,
+  `ShadowGpuNvlinkLinkDegraded`, `ShadowGpuFailSlow`,
+  `ShadowGpuThermalHeadroomLow`, `ShadowGpuMemoryThermalHeadroomLow`,
+  `ShadowGpuMemoryBeyondRepair` (395 and 1507 as separate `component`
+  values), and `ShadowGpuRowRemapPending`. Each carries
+  `kubeneuron_shadow: "true"` and `severity: info`. They are observation for
+  humans, isolated from the controller at three tested levels: the names
+  never start with `Gpu` (the webhook route matches `Gpu.*`), a new
+  Alertmanager route in `vmalertmanager.yaml` sends `kubeneuron_shadow="true"`
+  to `human-default` before the webhook route with `continue: false`, and
+  `alertClassMap` in `internal/detect` is unchanged (golden test; every
+  shadow name yields `ok=false` from `SignalFromAlert`). A lint test
+  requires every label name in rules, matchers, and dashboard expressions to
+  match `^[a-zA-Z_][a-zA-Z0-9_]*$` and forbids `kubeneuron.io/shadow`. "GPU
+  missing" and "Telemetry gap" from the brief are deferred (no recorded
+  source); XID-based rules and a 1523 rule are out of scope.
+- **Hardware harness for the observability layer (one live attempt,
+  stopped by its own port guard; see the release status above).**
+  `hack/hw-e2e.sh up-finish` now installs the pinned GPU Operator chart
+  v26.3.3 with the checked-in profile and refuses a different version or a
+  missing profile; a new `deploy-observability` phase installs the
+  checksum-locked VictoriaMetrics operator v0.73.1 and the profile stack in
+  the dependencies README's order and repoints the installation's external
+  endpoints; a new read-only `test-observability` phase checks the profile
+  ConfigMap, the exporter's `/metrics`, the canonical series and their
+  `node`/`gpu_uuid`/`gpu_model`/`node_pool` labels, the MiB→bytes
+  arithmetic, and the absence of row-remap, NVLink, MIG, and fail-slow
+  series on a Tesla T4. Both phases are steps of `hw-e2e.yaml` after
+  `deploy`; the workflow's kubectl is pinned to v1.33.12 by SHA-256.
+  `hack/verify-hw-e2e-observability.sh` (`make verify-hw-e2e-observability`,
+  in `make gates`) proves the wiring offline against scripted
+  aws/kubectl/helm/curl. `deploy-observability` has executed against an
+  EKS cluster once (2026-10-18) and stopped at its VMSingle port
+  assertion; `test-observability` has not executed against any cluster.
+- **Kind GPU observability fixture** (`make test-gpu-observability-kind`,
+  now part of `make gates-full`): `hack/kind-gpu-observability.sh` runs a
+  disposable CPU-only kind cluster where `hack/dcgmfixture`, a Go stand-in
+  for dcgm-exporter, serves synthetic `DCGM_FI_*` series for seven Tesla T4
+  devices (one slow) and two NVIDIA A10G devices; the pinned VictoriaMetrics
+  v1.147.0 pipeline evaluates the checked-in scrape contract and rule files
+  byte for byte, Alertmanager v0.32.1 runs the checked-in route tree with
+  recorder sinks (`hack/alertsink`) in place of the human receiver and under
+  the controller webhook's own Service name, and Grafana 12.4.13 (pinned by
+  tag and digest in `versions.lock.yaml`, fixture only) provisions the five
+  boards. `make verify-gpu-observability-fixture` is its offline half.
+- **Documentation.** `docs/operations.md` and the dependencies README
+  (profile, rollback, label contract, shadow routing, what "No data" means),
+  `docs/runbooks.md` (one entry per shadow rule, each opening with "This
+  rule does not trigger remediation and goes to humans.", pinned by
+  `internal/detect/shadow_runbook_test.go`), `docs/reference-capabilities.md`
+  (Table 3: after the final G3 run, the catalog, exporter-profile,
+  label-contract and recording-rule rows carry a defined "shipped,
+  hardware evidence limited" status whose notes name exactly what
+  `test-observability` observed on a Tesla T4; the Grafana boards,
+  shadow-only alerts and fail-slow score stay "shipped, not
+  hardware-validated"; AMD and Intel cells unchanged),
+  `docs/reference-metrics.md`, and
+  `docs/security-review-v0.7.0.md` (a source review of the exporter
+  ConfigMap, the read-only vmagent node metadata and its RBAC, and the
+  shadow-to-human routing; not an audit, not a hardware validation).
+  `hack/stale-claims.txt` forbids a lone "T4" beside catalog vocabulary
+  (the tier is "Tier T4", the GPU is "Tesla T4"), any claim that a
+  `ShadowGpu*` rule opens an incident or triggers remediation, and the
+  retired "read by nothing" wording.
+
+### Changed
+
+- The source defaults move from v0.6.1 to v0.7.0: the `config/default`
+  operator image, the Helm chart `version` 0.7.0 / `appVersion` v0.7.0 and
+  its default image tag, and the sample controller and agent images. Nothing
+  else in the chart or the kustomize base changes. The release workflow's
+  `source-metadata` job checks exactly these pins against the tag.
+- `make gates-full` runs the kind GPU observability fixture between
+  `test-integration-kind` and `test-upgrade-rollback-kind`.
+- `deploy/kubernetes/dependencies/versions.lock.yaml` gains the Grafana
+  12.4.13 tag and digest used by the fixture; the dependency profile itself
+  installs no Grafana.
+
+### Fixed
+
+- `hack/tls-rotate.sh` and `hack/tls-emergency-recover.sh` lost the
+  optimistic-concurrency race against the operator's own status writes (a
+  kind integration run failed with "the object has been modified" right
+  after a backup/restore cycle). A conflicted phase patch is now re-read and
+  retried, bounded by `PATCH_CONFLICT_RETRIES` (default 5), only while
+  `spec.tls` and every TLS transaction annotation are exactly as validated;
+  a root that already carries the planned result is accepted without a
+  write; any TLS-relevant drift fails closed with a diagnostic. The
+  emergency helper's "root is currently Ready" guard, which could never
+  fire, now works and additionally refuses to retry once the root has become
+  Ready. `hack/verify-tls-scripts.sh` (`make verify-tls-scripts`, in
+  `make gates`) drives both scripts against a scripted kubectl that
+  enforces the `resourceVersion` compare-and-swap.
+- The hardware workflow installed kubectl v1.30.6 unverified against an EKS
+  1.33 control plane; it now installs v1.33.12 and refuses a download whose
+  SHA-256 differs from the reviewed digest the offline verifier records.
+- The observability profile named the VMSingle endpoint on port 8428, the
+  standalone victoria-metrics default, but the VictoriaMetrics operator
+  gives the VMSingle Service port `http` its own default, 8429. The first
+  G3 attempt (2026-10-18, EKS) observed exactly that, and
+  `hack/hw-e2e.sh deploy-observability` refused to hand the installation
+  an endpoint the Service does not answer on. The checked-in contract is
+  now 8429 everywhere the operator-managed Service is meant:
+  `VMSINGLE_ENDPOINT` in `hack/hw-e2e.sh`, the VMAlert datasource /
+  remoteRead / remoteWrite URLs, the VMAgent remoteWrite URL, the
+  dependencies README table and example, and the repository sample. The
+  fail-closed Service-port assertion is unchanged;
+  `hack/verify-hw-e2e-observability.sh` now requires 8429 in the constant,
+  README, sample, and VMAgent, models the operator's Service on 8429 in
+  its green path, and replays the drift it caught (a Service on 8428)
+  requiring the refusal to name both ports. The kind GPU observability
+  fixture is untouched: its VMSingle explicitly listens on 8428 and is
+  not the operator-managed profile.
+- `hack/hw-e2e.sh deploy-observability` waited for the Alertmanager
+  StatefulSet with `kubectl rollout status`, which kubectl refuses for the
+  StatefulSet the VictoriaMetrics operator generates (`updateStrategy:
+  OnDelete`; the operator rotates the pods itself): `error: rollout status
+  is only available for RollingUpdate strategy type`. A G3 attempt on
+  2026-10-18 (EKS) stopped on exactly that line right after the
+  VMAlertmanager CR was applied; this is a harness incompatibility, not a
+  product, profile, or Alertmanager failure, and the entry records the
+  code correction only, no result of that attempt and no G3 pass. The wait
+  now dispatches on kind. Deployments still go through `rollout status`. A
+  StatefulSet is polled through the script's bounded `wait_for` on its
+  status fields: `observedGeneration` equal to the current `generation`,
+  at least one desired replica, every desired replica created and Ready,
+  plus what the update strategy itself promises about the revision the
+  pods run. Under `RollingUpdate` (named, or unset and therefore the API
+  server's default) the controller rolls every pod to `updateRevision`, so
+  `updatedReplicas` must also equal the desired count, as `rollout status`
+  waits for. Under `OnDelete` the controller never rolls a pod: after a
+  spec change it keeps the old-revision pods running and Ready until
+  something else deletes them, so `updatedReplicas` may stay at zero
+  indefinitely while Alertmanager serves; the wait therefore accepts fully
+  Ready old-revision pods there and does not require `updatedReplicas`
+  (requiring it would replay the G3 blockage as a full-bound timeout on a
+  healthy StatefulSet). `currentRevision` is not compared with
+  `updateRevision` under either strategy. Any other strategy is never
+  ready, and the timeout message names it as unsupported. Zero desired
+  replicas, an absent object, an unwritten status, or an unknown kind is
+  not ready, and the timeout message prints the observed status
+  (strategy, generations, desired/created/ready/updated counts,
+  revisions). `hack/verify-hw-e2e-observability.sh` now requires,
+  structurally, that `rollout status` appears once and only in the
+  Deployment arm and that the StatefulSet arm polls through `wait_for`
+  with no `sleep`; its scripted kubectl answers `rollout status` on a
+  StatefulSet with kubectl's own refusal (self-tested, and that self-test's
+  log is kept out of the scenario-wide "never ran rollout status"
+  assertion), so the green path replays the 2026-10-18 failure against the
+  old code; and the extracted wait is driven against fixtures: a ready
+  `OnDelete` object (with the stale `currentRevision` the controller
+  leaves behind), a Ready `OnDelete` object still on the old revision with
+  `updatedReplicas` 0, a ready `RollingUpdate` object, and a ready object
+  with the strategy unset pass, while the same old-revision shape under
+  `RollingUpdate` or with the strategy unset, an unsupported strategy,
+  zero desired replicas, a stale generation, an unready pod, an unwritten
+  status, an absent object, and an unknown kind fail with the status in
+  the message. Only `hack/hw-e2e.sh` and its offline verifier changed; no
+  product source, chart, rule, dashboard, or profile file did.
+- `hack/hw-e2e.sh sweep` found the controller's SQLite volume and the
+  VMSingle volume by `kubernetes.io/created-for/pvc/namespace`, in both its
+  delete pass and its end-state audit. The EBS CSI driver writes nothing on
+  a volume that names the cluster, so that filter matched every cluster in
+  the account using those namespaces, and one sweep could have deleted
+  another cluster's state; the filter had shipped since v0.3.0 and was
+  found reviewing the 2026-10-18 G3 teardown, which happened to audit
+  clean. Ownership is now proven per claim while the cluster is live:
+  `deploy` (once the installation is Ready) and `deploy-observability`
+  (once the VMSingle claim is Bound) resolve PVC → PV (claimRef namespace,
+  name and uid) → `ebs.csi.aws.com` volume handle → `describe-volumes` by
+  that id, require the driver's own `created-for` tags to agree and no
+  other run's tag to be present, then tag the exact volume
+  `kubeneuron:e2e`, `kubeneuron:e2e-run=<cluster>`,
+  `kubeneuron:e2e-claim=<namespace>/<pvc>`, read the tags back through the
+  sweep's own filter, and record the volume in the run's state dir; any
+  broken link records the claim as unproven and fails. `teardown` and a
+  standalone `sweep` repeat this for both claims before deleting a
+  still-live cluster, without stopping the deletion, and only after
+  `assert_kube_target` has proven that the dedicated kubeconfig (reused
+  from an earlier phase or written then) selects the EKS endpoint of
+  exactly this cluster; a kubeconfig that does not validate records every
+  known claim as unproven and neither reads a claim nor tags a volume. The
+  sweep deletes volumes by the run tag and the exact legacy
+  `KubernetesCluster` tag only, audits those plus the recorded volumes by
+  id, refuses to delete a recorded volume that lost its tag, and reports
+  any unproven claim with how to clear it instead of reporting clean;
+  there is no namespace filter anywhere. Stated limitation: a run reaped
+  before its claims were tagged leaves its volume for manual review, since
+  the reaper has no kubeconfig for the hung cluster and must not guess by
+  namespace. `hack/verify-hw-e2e-sweep.sh` carries a same-namespace,
+  same-claim-name stranger volume through every scenario untouched and
+  unqueried, checks every `describe-volumes` for scope by id, run tag or
+  exact cluster tag, resolves and tags a live cluster's claim before the
+  delete retry, refuses each link of the chain on its own, and drives the
+  kubeconfig target guard: a written or reused kubeconfig whose server is
+  another cluster's endpoint records both claims and makes no claim read
+  and no `create-tags`, while a reused kubeconfig that validates is used.
+  `hack/verify-hw-e2e-observability.sh` requires the VMSingle tagging
+  between the Bound wait and the rollout wait and asserts it in the green
+  path. Only `hack/hw-e2e.sh`, its fakes and verifiers, and this
+  documentation changed.
+
+### Evidence: what was run on this candidate, and what was not
+
+Everything below is unit-level, static, or synthetic on CPU-only kind
+nodes, except the hardware runs described first. The candidate on which
+the G1 and G2 commands are recorded is `9104db5` (2026-10-18 UTC; it
+contains the 8429 port-contract fix `4426324` and its offline verifier);
+the final hardware run's source is `d06fcfa`, which contains `9104db5`
+and on which `make gates-full` also passed (exit 0, 2026-10-18 UTC;
+recorded after the hardware run below).
+**Not run from either source: `mkdocs build` and the release workflow
+itself (no tag exists, so its `upgrade-rehearsal`, `source-metadata`, and
+`release-verify` jobs have not run).**
+
+The final hardware run (G3, passed): on 2026-10-18 UTC the full
+`hack/hw-e2e.sh` workflow ran on an ephemeral EKS cluster (g4dn.xlarge /
+Tesla T4) from source `d06fcfa`
+(`d06fcfa81aa3a0eada6cdfefd425ee0929af0a12`). Every phase passed:
+`preflight`, `up`, `deploy`, `deploy-observability`, `test-observability`,
+`test-dryrun`, `test-dcgm`, `test-verify-recur`, `test-threshold`,
+`test-drain`, `test-destructive`; `teardown` and `sweep` passed. An
+independent read-only audit keyed on the run's exact identity found zero
+clusters, zero non-terminated tagged instances, zero tagged EBS volumes,
+zero active CloudFormation stacks, no recycle role, and no test ECR tags.
+Observed on the real GPU by `test-observability` (these assertions and
+no others): the real dcgm-exporter served `DCGM_FI_DEV_POWER_USAGE`
+(tier T0), `DCGM_FI_DEV_ECC_SBE_VOL_TOTAL` (tier T1) and
+`DCGM_FI_DEV_GPU_TEMP`; the canonical `kubeneuron_gpu_temperature_celsius`,
+`kubeneuron_gpu_power_watts` and `kubeneuron_gpu_memory_used_bytes`
+series existed for the GPU with `node`, `gpu_uuid`, `gpu_model` and
+`node_pool` equal to the node, the exporter's own `UUID`/`modelName` and
+the EKS nodegroup label; `kubeneuron_gpu_memory_used_bytes` equalled
+`DCGM_FI_DEV_FB_USED` MiB × 2^20 at the same instant; and the row-remap,
+NVLink, MIG and fail-slow samples a Tesla T4 cannot produce were absent
+rather than zero. The phase does not look at Grafana, fires no shadow
+alert, and proves nothing about catalog fields, rules or dashboards
+beyond those named. The other phases exercised on that node: the dry-run
+ladder, DCGM detection, recurrence, the threshold path, the drain
+refusal outside confinement and a real drain, and a confined
+`ReplaceNode`. Versions: the checked-in pinned GPU Operator chart
+v26.3.3; DCGM client (`dcgmi`) 4.3.1 observed against a standalone DCGM
+host engine 4.5.2; the profile's checked-in dcgm-exporter pin
+`4.5.3-4.8.2-distroless` (a source pin; no image digest is recorded). The
+run identity is deliberately not disclosed. Hardware scope is Tesla T4 /
+g4dn only; the "не доводить" list below applies unchanged. Between
+`9104db5` and `d06fcfa`, besides the harness and its verifiers, the field
+1507 spelling change touched the exporter profile, the catalog, and the
+recording rules; the G1 and G2 commands are recorded on `9104db5`, and
+`make gates-full` passed on `d06fcfa` itself (next paragraph). M9 is
+closed on this record; the tag remains a separate decision, and nothing
+has been published.
+
+On `d06fcfa`, the final hardware run's source (2026-10-18 UTC):
+`make gates-full` completed with exit 0 — `gates`, `verify-image`,
+`test-integration-kind`, `test-gpu-observability-kind` (the kind fixture
+whose wait `d06fcfa` itself changed), and `test-upgrade-rollback-kind`.
+This is a CPU-only, synthetic kind validation of the tree the hardware
+run used; it is not G3 evidence and not release authorization. Only
+`make gates-full` is recorded on `d06fcfa`: no separate direct
+`make test-upgrade-rollback-kind` invocation is recorded for it (the
+rehearsal ran inside `gates-full`).
+
+The first hardware attempt (prior source): on 2026-10-18 the `hack/hw-e2e.sh`
+workflow ran on AWS/EKS (g4dn.xlarge) from source `5131d24` (same code as
+`1cb32cb`); its run identity is likewise not disclosed.
+`up` confirmed one real GPU
+node, the real agent driver (not the fake), and a compatible DCGM client
+4.3.1 against engine 4.5.2; the log recorded the pinned GPU Operator chart
+v26.3.3, while the exact dcgm-exporter image version was not captured. The
+run reached `deploy-observability`,
+installed the VictoriaMetrics operator and VMSingle, and stopped at the
+harness's own Service-port assertion (Service port 8429, production
+profile endpoint 8428; see "Fixed"). Nothing after that assertion ran: no
+token copy, no VMAgent/VMAlertmanager/VMAlert, no repoint of the
+installation, no `test-observability`, no injection phase. The outer run
+exited non-zero only because that guard stopped the phase; its cleanup
+completed: `teardown` and its sweep succeeded, then an explicit second
+sweep succeeded. An independent read-only audit after cleanup found zero
+exact-cluster EKS entries, active EC2 instances, non-deleted eksctl
+stacks, volumes for the run, recycle IAM role, and all three ECR image
+tags for the run gone. A clean teardown is not a G3 pass: the pass
+criteria (`test-observability`, the injection phases, the table rows)
+were never reached, and no G3 table row is closed by this run.
+The port fix that followed is a source change; the tree carrying it,
+`9104db5`, is the current candidate, and its G1 and G2 commands were
+rerun as recorded next.
+
+On the current candidate `9104db5` (2026-10-18 UTC, after the port fix;
+kind v0.32.0, kubectl v1.33.12, Docker 29.8.0):
+
+- `make gates-full` completed with exit 0: the code gates (`make gates`),
+  `verify-image`, the full CPU-only kind integration suite, the synthetic
+  GPU observability fixture, and the v0.6.1 → HEAD → v0.6.1 → HEAD
+  upgrade/rollback rehearsal on both the sqlite and the postgres store.
+- A separate, explicit `make test-upgrade-rollback-kind` also completed
+  with exit 0 on the same candidate and date: qualification rows and their
+  hash-chained audit survived the full images-only round trip, and the
+  checkpoint-policy RBAC granted `patch` only while the policy was enabled,
+  with no Pod roll or restart.
+- For the record, the first `make gates-full` attempt of this retest did
+  not complete: the rehearsal hit `etcdserver: request timed out` from the
+  kind cluster while creating the PostgreSQL baseline root. That attempt's
+  cleanup was clean and it was retried; it is neither a product regression
+  nor a passing run. The passing evidence is the subsequent standalone
+  rehearsal and the subsequent complete `make gates-full` above.
+- Not repeated as separate steps on `9104db5`: the `amtool` route cases,
+  `vmalert -dryRun`, the kustomize and `helm template` renders, and
+  `go test ./internal/depprofile/...` listed for `1cb32cb` below. `git diff
+  --stat 1cb32cb 9104db5` outside the two release documents touches only
+  the six port-fix files (`config/samples`, the dependencies README,
+  `vmagent.yaml`, `vmalert.yaml`, `hack/hw-e2e.sh`, and
+  `hack/verify-hw-e2e-observability.sh`); the rule files, dashboards, Helm
+  chart, kind fixture, and everything under `internal/` are identical.
+- This is CPU-only and synthetic evidence, as the fixture paragraph below
+  spells out: no GPU, DCGM, real dcgm-exporter, pager, or controller took
+  part. It is not G3 evidence, it does not close M9, and it is not
+  release, tag, or publish authorization.
+
+On the prior candidate commit `1cb32cb`, kept as history (the source
+changed afterwards; `9104db5` above is the revalidated candidate)
+(2026-10-18 UTC; kind v0.32.0, kubectl v1.33.12, Docker 29.8.0; after
+every run `kind get clusters` reported no clusters and the worktree was
+clean):
+
+- `make gates` passed: generation (`verify-generate`), build, lint, race
+  tests, docs (`verify-docs`), the offline hw-e2e sweep and observability
+  verifiers, and the TLS helper verifier.
+- `make gates-full` passed: `verify-image`, the full kind integration suite
+  (85 CEL cases plus the existing CPU-only safety and integration suite),
+  the synthetic GPU observability fixture, and the upgrade/rollback
+  rehearsal.
+- The synthetic fixture (`make test-gpu-observability-kind`) loaded the
+  shipped recording and shadow rule files and verified the label contract,
+  the MiB→bytes arithmetic, absent-not-zero for omitted sources, and the
+  fail-slow score on the seven-device versus two-device peer groups; a real
+  five-minute `ShadowGpuMemoryBeyondRepair` fired through vmalert and
+  Alertmanager to the `human-default` recorder with exactly zero requests
+  at the recorder deployed under the controller webhook's own Service name,
+  namespace, port, and token file; API-injected probes verified shadow →
+  human and plain `Gpu*` → the controller path with the bearer token;
+  Grafana provisioned all five boards, and 35 variable queries and 48 panel
+  expressions executed without a query error. This is CPU-only synthetic
+  evidence: no GPU, no DCGM, no real dcgm-exporter, no pager, and no
+  controller took part, so it is not a real GPU or Alertmanager-to-controller
+  result, and no controller incident or audit counter was observed.
+- `make test-upgrade-rollback-kind` was run once more on its own after
+  `gates-full`, with terminal capture, and passed: v0.6.1 → HEAD → v0.6.1
+  (images only) → HEAD on both the sqlite and the postgres store,
+  qualification and audit chains preserved across the cycle, the patch
+  RBAC present only while the checkpoint policy is enabled, and no Pod
+  restart.
+- `AMTOOL_BIN=/tmp/kubeneuron-tools/amtool ./hack/kind-gpu-observability.sh
+  --verify` passed (`amtool check-config` on the extracted Alertmanager
+  config plus all four `config routes test` cases); `vmalert -dryRun` on
+  both GPU rule files, the kustomize render of the observability profile,
+  the `helm template` render of the pinned GPU Operator chart with the
+  profile values, and `go test -count=1 ./internal/depprofile/...` passed.
+- Not re-run as separate steps on `1cb32cb`: `helm lint`/`helm template`
+  of the KubeNeuron chart ran on `020f019` the day before, and
+  `git diff --stat 020f019 1cb32cb` over `deploy/helm`, `config/`,
+  `configs/`, and `deploy/kubernetes` is empty. `git diff --stat 81b400d
+  1cb32cb` over `internal/controller`, `internal/decision`,
+  `internal/autonomy`, `internal/detect`, and `internal/agent` lists only
+  `shadow_isolation_test.go` and `shadow_runbook_test.go` (checked
+  2026-10-18).
+
+Earlier evidence on the trees this candidate was built from, kept as
+history:
+
+- On the M7 tree (2026-10-13): `go test -count=1 ./...` (including the
+  Helm render test of the exporter profile against the cached pinned chart
+  v26.3.3), `go run ./hack/gpucatalog -check`, `hack/verify-docs.sh`,
+  `vmalert -dryRun` on both new rule files (0 errors) and `amtool
+  check-config` on the checked-in Alertmanager config: syntax and
+  consistency checks, not behaviour.
+- On the integrated harness tree (2026-10-13): `make gates`, including the
+  offline hw-e2e verifiers; static checks of harness code, not a phase run.
+- Kind fixture runs, synthetic series on CPU-only nodes, not G2 and not a
+  hardware result: one full disposable run on 2026-10-13 (MiB→bytes
+  arithmetic, `gpu_uuid`/`gpu_model`/`node_pool`/`cluster` label behaviour,
+  omitted sources leaving canonical and derived series absent rather than
+  0, the thermal-headroom fallback, and only the deviated Tesla T4 of seven
+  receiving the fail-slow score while the two-device A10G group receives
+  none), and one full disposable run on 2026-10-17 (160 checks, exit 0,
+  cluster deleted) that additionally delivered a firing
+  `ShadowGpuMemoryBeyondRepair` through vmalert and Alertmanager to the
+  human sink with exactly zero requests at the controller-webhook sink, and
+  provisioned all five boards into Grafana with 35 variable queries and 48
+  panel expressions executing without a query error. The controller did
+  not take part; empty panels on synthetic data are expected and panel
+  semantics were not judged.
+- On the harness tree this candidate builds on (`a8aa71f`, 2026-10-17):
+  `bash -n`, `shellcheck`, `make verify-hw-e2e-observability`,
+  `make verify-hw-e2e-sweep`, `make verify-gpu-observability-fixture`,
+  `make verify-generate`, `hack/verify-docs.sh`, `git diff --check`.
+- On this release-preparation commit (2026-10-17): `go test -count=1 ./...`
+  (47 packages, including the Helm render test of the exporter profile
+  against the cached pinned chart v26.3.3), `make verify-generate`,
+  `hack/verify-docs.sh`, `helm lint` and `helm template` of the KubeNeuron
+  chart, `kubectl kustomize config/default`, a local replica of the release
+  workflow's `source-metadata` and CI chart-vs-kustomize checks against
+  `v0.7.0` (and shown to fail against a different version), and
+  `git diff --check`. These are the pin and consistency checks for this
+  commit, not G1.
+
+### Що пройдений G3 на g4dn **не доводить**
+
+The G3 gate passed on 2026-10-18 on a g4dn.xlarge / Tesla T4 node from
+source `d06fcfa` (see the evidence section). The list below is reproduced
+verbatim from the release plan so that this G3 pass on a g4dn.xlarge /
+Tesla T4 node cannot be read as more than it is:
+
+- **Не** доводить row-remap панелі/сигнали (Turing не має remapping).
+- **Не** доводить NVLink панелі/сигнали (Tesla T4 без NVLink).
+- **Не** доводить MIG labels.
+- **Не** доводить fail-slow score: один GPU → peer group 1 → серія
+  відсутня за правилом; показано лише, що серія **не** синтезується.
+- **Не** доводить thermal margin (153), memory temp (140/151), throttle
+  violations 242/243/245, 1507. Поле 1523 у релізі відсутнє — нічого
+  доводити.
+- **Не** доводить жодного XID rate — його немає у релізі.
+- **Не** доводить, що natural GPU fault виглядає так, як injected
+  (`dcgmi test --inject` ≠ реальний fault).
+- **Не** доводить GPU reset (неможливий у guest EC2).
+- **Не** доводить поведінку на A100/H100 чи при 10 000+ GPU (cardinality).
+- **Не** є hardware qualification жодного remediation path — v0.7.0 їх не
+  додає.
+
+Row remapping, NVLink, MIG, thermal margin, throttle violations
+242/243/245, the DCGM 4.x field 1507, and fail-slow scoring on a real peer
+group have not been checked on any hardware and are not claimed; they need
+an A100/H100-class node or bare metal, which this project does not have.
+Field 1523 is not part of the release.
+
+### Upgrade and rollback
+
+- **Upgrade from v0.6.1.** KubeNeuron itself is images only: no CRD, RBAC,
+  store, or default change, so the operator, controller, and agent move by
+  image tag with no migration. The observability layer is applied in this
+  order: the GPU Operator profile (`helm upgrade gpu-operator ... -f
+  values.yaml`), the VMAgent scrape contract (and `externalLabels.cluster`
+  if wanted), the recording and shadow VMRules, the Alertmanager route, and
+  the Grafana JSON. The release workflow's `upgrade-rehearsal` job and
+  `make test-upgrade-rollback-kind` are the rehearsal of the images-only
+  path, and for this release it begins at v0.6.1: the workflow's `BASELINE`
+  and the `hack/kind-upgrade-rollback.sh` default move from v0.6.0 to
+  v0.6.1, so the rehearsed cycle is v0.6.1 → HEAD → v0.6.1 (images only) →
+  HEAD on both workflow stores. The make target ran on the prior candidate
+  `1cb32cb` on 2026-10-18 (inside `make gates-full` and once more on its
+  own with terminal capture) and passed on both the sqlite and the
+  postgres store: qualification and audit chains preserved, the patch RBAC
+  present only while the checkpoint policy is enabled, no Pod restart. It
+  ran again on the current candidate `9104db5` the same day, after the
+  port fix (inside `make gates-full` and once more on its own), with the
+  same result, and on `d06fcfa`, the final hardware run's source, inside
+  `make gates-full` (exit 0, 2026-10-18 UTC; no separate direct
+  invocation on `d06fcfa` is recorded). The workflow's `upgrade-rehearsal`
+  job has not run, because no tag exists.
+- **Rollback to v0.6.1.** Images only for KubeNeuron; restore the
+  nine-series exporter list and run the same `helm upgrade`; delete the
+  `kubeneuron-gpu-shadow` and `kubeneuron-gpu-recording` VMRules; restore
+  the v0.6.1 Alertmanager config and VMAgent spec. The v0.7 Grafana JSON is
+  safe to leave in place (panels show No data). No store is involved. Every
+  step is a `kubectl apply` or `helm upgrade` of the previous file, with no
+  hand-edited state.
+
 ## [v0.6.1] - 2026-10-11
 
 Security and toolchain patch to v0.6.0: Go 1.26.9 plus the `golang.org/x/net`
