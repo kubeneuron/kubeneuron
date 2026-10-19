@@ -79,16 +79,36 @@ See also the [REST](docs/reference-api.md) and [CLI](docs/reference-cli.md)
 references, the [upgrade notes](docs/upgrade.md), and the
 [v0.5.0 security review](docs/security-review-v0.5.0.md).
 
-**Latest release (v0.6.1, 2026-10-11):** a security and toolchain patch to
+**Latest release (v0.7.0, 2026-10-19):** GPU fleet reliability
+observability, MVP — a canonical GPU metric catalog, a wider dcgm-exporter
+reliability profile, a scrape label contract, canonical and derived
+recording rules, five Grafana dashboards-as-code, and shadow-only alerts
+that go to humans and never to the controller (see
+[CHANGELOG.md](CHANGELOG.md)). It adds no action, playbook rung, webhook
+path, CRD field, store migration, or RBAC rule for any KubeNeuron
+component, and the controller, agent, and operator binaries carry no
+feature change. The `v0.7.0` tag, images, install manifest, and release
+assets are available from the
+[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.7.0),
+published 2026-10-19 UTC as a non-prerelease release with 15 assets and
+independently checked with `hack/verify-release.sh v0.7.0
+kubeneuron/kubeneuron` (asset set, checksums, and digest pins; that run did
+not check the Cosign signature because its machine had no `cosign`). The
+manifests, Helm chart, and samples in this source tree carry the v0.7.0
+pins, so installing from this tree's defaults resolves the released images.
+The release source passed the full AWS hardware harness, including its
+`deploy-observability` and `test-observability` phases, on a temporary EKS
+`g4dn.xlarge` / Tesla T4 cluster on 2026-10-18 UTC; nothing is claimed for
+A100/H100, MIG, NVLink, row remapping, or fail-slow scoring. See the
+[v0.7.0 security review](docs/security-review-v0.7.0.md).
+
+**Released in v0.6.1 (2026-10-11):** a security and toolchain patch to
 v0.6.0 — Go 1.26.9 with updated `golang.org/x/net` and `golang.org/x/text`,
 closing the `govulncheck` advisories listed in [CHANGELOG.md](CHANGELOG.md).
 It changes no feature, CRD, RBAC rule, store schema, or default, and claims
 no GPU hardware validation of its own. The `v0.6.1` tag, images, install
-manifest, and release assets are available from the
-[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.6.1),
-and the manifests, Helm chart, and samples in this source tree carry the
-v0.6.1 pins, so installing from this tree's defaults resolves the released
-images.
+manifest, and release assets remain available from the
+[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.6.1).
 
 **Introduced in v0.6.0 (published 2026-10-11 UTC):** checkpoint
 coordination, Phase 1 — the opt-in `spec.safety.checkpointCoordination`

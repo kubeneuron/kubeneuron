@@ -1,17 +1,19 @@
 # Security review — v0.7.0 GPU reliability observability (source review)
 
-Status: **source review of the v0.7 work in this tree, written ahead of the
-release.** v0.7.0 is not tagged, and the release plan's local, kind and
-hardware gates have not been run on this code. This document reviews the
-files as committed (the exporter profile, the scrape label contract, the
-recording and shadow rules and the Alertmanager route) and the unit tests
-that pin them. It is not a third-party audit and it is **not a hardware
-validation**: nothing reviewed here has executed against a GPU, a live
-dcgm-exporter or a live Alertmanager in this tree, and the review says
-nothing about how the exporter behaves with the wider field list on real
-hardware. The project's latest hardware evidence remains the v0.6.0-era
-Tesla T4 run, which predates every file reviewed here. Report anything that
-contradicts this page through
+Status: **source review, completed for the published v0.7.0 release
+(2026-10-19 UTC).** It reviews the files the `v0.7.0` tag ships (the
+exporter profile, the scrape label contract, the recording and shadow rules
+and the Alertmanager route) and the unit tests that pin them. v0.7.0 adds
+no controller code and no new controller authority, so the review covers
+exactly the three surfaces that touch a trust boundary: the exporter
+ConfigMap, the read-only vmagent RBAC, and the shadow-to-human alert
+routing. It is not a third-party audit and it is **not a hardware
+validation**: the release source passed the AWS hardware harness on one
+Tesla T4 (EKS `g4dn.xlarge`, 2026-10-18 UTC), which deployed the profile of
+§1 and the label contract of §2 on a real dcgm-exporter, fired no shadow
+alert, and did not exercise the routing of §3 against a live Alertmanager;
+nothing is claimed for any other GPU. Report anything that contradicts this
+page through
 [SECURITY.md](https://github.com/kubeneuron/kubeneuron/blob/main/SECURITY.md).
 
 ## Scope, and why it is short
@@ -68,11 +70,13 @@ or mounts it.
   (`dcgmi dmon -e 230`, `nvidia-smi -q`) does not read the exporter and is
   unaffected in both directions.
 - **Residual risk, stated.** Whether the pinned dcgm-exporter starts cleanly
-  with field ids the GPU does not implement is an assumption the hardware
-  gate is designed to check, not something this review can establish. An
-  exporter that failed to start would make `GpuExporterDown` fire for the
-  node, which is a controller-facing rule mapped to a driver-hang class; the
-  rollback above is the remedy, and that path is unchanged from v0.6.1.
+  with field ids the GPU does not implement is not something this review
+  can establish; the hardware run of 2026-10-18 showed it starting and
+  serving under this profile on a Tesla T4, and other GPUs are unverified.
+  An exporter that fails to start makes `GpuExporterDown` fire for the
+  node, which is a controller-facing rule mapped to a driver-hang class;
+  the rollback above is the remedy, and that path is unchanged from
+  v0.6.1.
 
 ## 2. vmagent reads node metadata, read-only, on RBAC KubeNeuron does not own
 
@@ -172,8 +176,10 @@ Further properties the review confirmed from the files:
 ## Limitations
 
 - This is a review of files and tests, by the project, not an audit by a
-  third party, and it has run nothing against hardware, a live
-  dcgm-exporter, a live VictoriaMetrics operator or a live Alertmanager.
+  third party; the review itself ran nothing against hardware or a live
+  component. The hardware run cited in the status covers §1 and §2 on a
+  Tesla T4 only; it is not evidence that a shadow alert is delivered to
+  `human-default` by a live Alertmanager.
   The routing test parses the shipped config and walks the route tree in
   Go; it is not `amtool config routes test` against a running Alertmanager.
   `amtool check-config` on the deployed Alertmanager config and
@@ -184,8 +190,8 @@ Further properties the review confirmed from the files:
 - The read-only `nodes` grant was verified by reading the pinned operator's
   source, not by inspecting a generated ClusterRole in a cluster.
 - The exporter's behaviour with field ids the GPU does not implement is
-  unverified, and so is the claim that the added series carry nothing
-  sensitive on hardware this project has not seen; both are limits of a
-  source review.
+  verified on a Tesla T4 only, and the claim that the added series carry
+  nothing sensitive on hardware this project has not seen is unverified;
+  both are limits of a source review.
 - Nothing here changes the conclusions of the earlier reviews; the
   authority-bearing surfaces of the product are as they describe.

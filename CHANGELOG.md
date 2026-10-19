@@ -9,20 +9,31 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
-## [v0.7.0]
+## [v0.7.0] - 2026-10-19
 
 GPU fleet reliability observability, MVP: a canonical GPU metric catalog, a
 wider dcgm-exporter reliability profile, a scrape label contract, canonical
 and derived recording rules, five Grafana dashboards-as-code, and shadow-only
 alerts that go to humans and never to the controller. **Release status:
-candidate prepared in source, not tagged, not published.** The source
-defaults in this tree (the `config/default` operator image, the Helm chart
-`version`/`appVersion`/image tag, and the sample controller and agent images)
-are set to v0.7.0 so that the tag and source users consume what the tag
-describes; the public `v0.7.0` tag, images, install manifest, and release
-assets do **not** yet exist, and the latest published release remains
-v0.6.1 (the README says so by design until publication). **The hardware
-gate (G3) passed on 2026-10-18 UTC: the full `hack/hw-e2e.sh` workflow
+published.** The `v0.7.0` tag was cut and the
+[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.7.0)
+was published on 2026-10-19 UTC as a non-prerelease release with 15
+assets. The release workflow run on the tag completed green end to end
+(`gates`, `source-metadata`, `upgrade-rehearsal`, `ctl`, `images`,
+`manifest`, `release`, `release-verify`, `release-publish`), and
+`hack/verify-release.sh v0.7.0 kubeneuron/kubeneuron` passed independently
+after publication (asset set closed, checksums complete and matching,
+images digest-pinned; that run did not check the Cosign signature because
+its machine had no `cosign`). The tagged tree is the final hardware run's
+source `d06fcfa` plus documentation-only commits (this entry, the README,
+and the capability matrix); every tracked public file in the tag matches
+that tree. The source defaults (the `config/default` operator image, the
+Helm chart `version`/`appVersion`/image tag, and the sample controller and
+agent images) carry v0.7.0, so source users consume what the tag
+describes. The gate record that follows was written while v0.7.0 was a
+candidate and is kept as history: where it says that no tag or publication
+had happened, that was true on 2026-10-18 and is superseded by this
+paragraph. **The hardware gate (G3) passed on 2026-10-18 UTC: the full `hack/hw-e2e.sh` workflow
 ran on an ephemeral EKS cluster (g4dn.xlarge / Tesla T4) from source
 `d06fcfa` (`d06fcfa81aa3a0eada6cdfefd425ee0929af0a12`, which contains the
 candidate `9104db5` and the harness corrections listed under "Fixed"),
@@ -41,8 +52,8 @@ on 2026-10-18 UTC (`gates`, `verify-image`, `test-integration-kind`,
 `test-gpu-observability-kind`, `test-upgrade-rollback-kind`): a CPU-only,
 synthetic kind validation of the same tree, not G3; no separate direct
 `make test-upgrade-rollback-kind` on `d06fcfa` is recorded. A passed G3
-is not release authorization: no tag, release, or publication has
-happened.**
+was not release authorization; the tag was a separate decision, taken on
+2026-10-19 (see the release status above).**
 The history of that gate: the G1 and G2 commands first passed on the
 prior candidate `1cb32cb`; the first G3 attempt on 2026-10-18 ran from
 that prior source, reached `deploy-observability`, and stopped at the
@@ -87,8 +98,9 @@ at Grafana, fires no shadow alert, and does not prove every catalog
 field, rule or dashboard. The dry-run, DCGM, recurrence, threshold,
 drain, and confined `ReplaceNode` phases passed on that node. What that run does not show is listed under
 "Що пройдений G3 на g4dn **не доводить**": nothing for A100/H100, MIG,
-NVLink, row remapping, or fail-slow scoring. Passing G1, G2, and G3 is
-not release authorization; the tag is a separate decision.
+NVLink, row remapping, or fail-slow scoring. Passing G1, G2, and G3 was
+not release authorization; the tag was a separate decision, taken on
+2026-10-19.
 The evidence section below lists exactly what was run.
 
 This is a minor pre-1.0 release that adds an observability layer and no
@@ -442,8 +454,8 @@ g4dn only; the "не доводить" list below applies unchanged. Between
 1507 spelling change touched the exporter profile, the catalog, and the
 recording rules; the G1 and G2 commands are recorded on `9104db5`, and
 `make gates-full` passed on `d06fcfa` itself (next paragraph). M9 is
-closed on this record; the tag remains a separate decision, and nothing
-has been published.
+closed on this record; the tag was a separate decision, taken on
+2026-10-19 (see the release status at the top of this entry).
 
 On `d06fcfa`, the final hardware run's source (2026-10-18 UTC):
 `make gates-full` completed with exit 0 — `gates`, `verify-image`,
@@ -650,7 +662,8 @@ Field 1523 is not part of the release.
   same result, and on `d06fcfa`, the final hardware run's source, inside
   `make gates-full` (exit 0, 2026-10-18 UTC; no separate direct
   invocation on `d06fcfa` is recorded). The workflow's `upgrade-rehearsal`
-  job has not run, because no tag exists.
+  job ran green on the `v0.7.0` tag on 2026-10-19 (see the release status
+  at the top of this entry).
 - **Rollback to v0.6.1.** Images only for KubeNeuron; restore the
   nine-series exporter list and run the same `helm upgrade`; delete the
   `kubeneuron-gpu-shadow` and `kubeneuron-gpu-recording` VMRules; restore
