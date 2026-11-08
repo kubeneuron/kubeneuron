@@ -79,7 +79,7 @@ See also the [REST](docs/reference-api.md) and [CLI](docs/reference-cli.md)
 references, the [upgrade notes](docs/upgrade.md), and the
 [v0.5.0 security review](docs/security-review-v0.5.0.md).
 
-**v0.8.0 candidate (source tree, 2026-11-05):** workload-safe GPU
+**Latest release (v0.8.0, 2026-11-08):** workload-safe GPU
 recovery — a read-only, fail-closed device topology classifier; an opt-in
 checkpoint *advisory* at approval park; an opt-in, digest-sealed *impact
 preview* of what a pending step would touch; opt-in bounded checkpoint
@@ -91,19 +91,26 @@ the topology classifier is **not** optional — it always runs, has no
 switch, and can refuse a device-scoped reset that v0.7.0 would have allowed
 (a shared or partitioned layout, a capacity that disagrees with the report,
 an unobserved resource source), so a tree with every block absent is v0.7.0
-with a narrower reset gate, never a wider one. The candidate adds no
+with a narrower reset gate, never a wider one. The release adds no
 remediation action, no device-scoped action on partitioned or shared GPUs,
 no write to Kueue, Ray or DRA objects, and no network path from the
 controller to any workload. Its evidence is unit tests, the offline kind
-gates, the CPU-only examples fixture and one hardware run of
+gates, the CPU-only examples fixture and hardware runs of
 `hack/hw-e2e.sh` (`test-impact`, `test-checkpoint`, `test-timeslice`,
-`test-destructive` on a single Tesla T4, 2026-11-05; the CHANGELOG entry
-records which gates passed on which source and what that run did not
-cover). What remains before a tag is the product decision (D0) and the
-security review's sign-off against the final candidate. Nothing here is a
-claim that any framework integrates with KubeNeuron.
+`test-destructive` on a single Tesla T4, 2026-11-05 and 2026-11-06; the
+CHANGELOG entry records which gates passed on which source and what those
+runs did not cover). The `v0.8.0` tag, images, install manifest, and
+release assets are available from the
+[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.8.0),
+published 2026-11-08 UTC as a non-prerelease release with 15 assets and
+independently checked with `hack/verify-release.sh v0.8.0
+kubeneuron/kubeneuron` (asset set, checksums, digest pins, and the Cosign
+signature). The product decision (D0) and the
+[v0.8.0 security review](docs/security-review-v0.8.0.md)'s sign-off
+preceded the tag. Nothing here is a claim that any framework integrates
+with KubeNeuron.
 
-**Latest release (v0.7.0, 2026-10-19):** GPU fleet reliability
+**Previous release (v0.7.0, 2026-10-19):** GPU fleet reliability
 observability, MVP — a canonical GPU metric catalog, a wider dcgm-exporter
 reliability profile, a scrape label contract, canonical and derived
 recording rules, five Grafana dashboards-as-code, and shadow-only alerts
@@ -119,10 +126,8 @@ independently checked with `hack/verify-release.sh v0.7.0
 kubeneuron/kubeneuron` (asset set, checksums, and digest pins; that run did
 not check the Cosign signature because its machine had no `cosign`). The
 manifests, Helm chart, and samples in this source tree carry the v0.8.0
-pins of the release candidate described under *v0.8.0 candidate* below; the
-v0.7.0 images remain the latest published ones and are what the
-`v0.7.0` tag's manifests install.
-The release source passed the full AWS hardware harness, including its
+pins; the v0.7.0 images are what the `v0.7.0` tag's manifests install.
+The v0.7.0 release source passed the full AWS hardware harness, including its
 `deploy-observability` and `test-observability` phases, on a temporary EKS
 `g4dn.xlarge` / Tesla T4 cluster on 2026-10-18 UTC; nothing is claimed for
 A100/H100, MIG, NVLink, row remapping, or fail-slow scoring. See the

@@ -12,7 +12,7 @@ rank 0 reads them and broadcasts one decision per step, because
 `ray.train.report` is a barrier every worker must reach the same number of
 times:
 
-- an **advisory** (the incident parked for approval; v0.8 development) makes
+- an **advisory** (the incident parked for approval; v0.8.0) makes
   the next iteration report a `ray.train.Checkpoint` and continue;
 - a **request** (`checkpoint-deadline-at` is on the Pod) makes it report one,
   write `kubeneuron.io/checkpoint-state: complete:<incident>` on its own Pod

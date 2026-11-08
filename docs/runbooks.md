@@ -231,7 +231,7 @@ inhibited alert, a paused node), and the `GpuRowRemapPending` runbook above
 applies. Row remapping is Ampere and later; the series is absent on a
 Tesla T4.
 
-## Workload-safe recovery alerts (v0.8 development, route to humans)
+## Workload-safe recovery alerts (v0.8.0, route to humans)
 
 Both rules read counters that exist only on an installation that opted into
 `spec.safety.impactPreview` or `spec.safety.checkpointCoordination.advisory`

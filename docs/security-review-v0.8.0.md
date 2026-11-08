@@ -1,8 +1,9 @@
 # Security review — v0.8.0 workload-safe GPU recovery (source review, signed off)
 
-Status: **complete against the v0.8.0 candidate source; signed off by
-the maintainer (@andriipetruk) on 2026-11-07 with the release decision
-(D0: GO), before the tag was created.** It reviews the diff this release makes to the controller, the
+Status: **complete against the v0.8.0 source, signed off by the
+maintainer (@andriipetruk) on 2026-11-07 with the release decision
+(D0: GO), before the tag was created; v0.8.0 was published on
+2026-11-08.** It reviews the diff this release makes to the controller, the
 operator-generated RBAC, the store and the API, and the unit, kind and lint
 checks that pin each claim below. It is a review of the code in this
 repository, not a third-party audit. Its evidence is the unit tests, the

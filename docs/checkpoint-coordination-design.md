@@ -4,10 +4,10 @@ Status: **Phase 1 implemented and released in v0.6.0** (published
 2026-10-11 UTC;
 [GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.6.0),
 verified with `hack/verify-release.sh`). Design accepted 2026-08-05. The
-manifests, chart, and samples in this source tree carry the v0.8.0 pins of
-the release candidate (v0.7.0 is the latest published release); the v0.6.1
+manifests, chart, and samples in this source tree carry the v0.8.0 pins
+(v0.8.0, published 2026-11-08, is the latest release); the v0.6.1
 security and toolchain patch and the v0.7.0 observability release leave
-Phase 1 unchanged, and the v0.8.0 candidate adds the opt-in advisory and
+Phase 1 unchanged, and v0.8.0 adds the opt-in advisory and
 group blocks described in the
 [workload-safe recovery design record](workload-safe-recovery-design.md).
 Nothing in this document is a claim that the feature has been exercised on
@@ -449,11 +449,11 @@ harness's CEL cases, the dual-store upgrade/rollback rehearsal and, on
 test-checkpoint`); it has **not** been exercised by a real checkpointing
 workload, and no such claim is made.
 
-**Phase 2 — lead time and gangs.** *Implemented on the v0.8.0 candidate as
-designed in the
+**Phase 2 — lead time and gangs.** *Implemented and released in v0.8.0
+(published 2026-11-08) as designed in the
 [workload-safe recovery design record](workload-safe-recovery-design.md),
 validated by the gates the CHANGELOG records (the gangs on CPU-only kind,
-the advisory also on one Tesla T4), not released.* An
+the advisory also on one Tesla T4).* An
 advisory notice at approval park (same annotations, `checkpoint-advisory:
 "true"`, no deadline, no wait — an incident parked in `AWAITING_APPROVAL` for
 six minutes is six minutes the job could have been checkpointing);

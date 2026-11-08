@@ -13,7 +13,7 @@ Pod runs:
   going, `SIGUSR2` checkpoints now and exits 75 (`EX_TEMPFAIL`), so the Job
   replaces the index instead of counting it complete.
 - **checkpoint-sidecar** (`../scripts/sidecar.sh`): polls the downward-API annotations
-  file. An **advisory** (the incident parked for approval; v0.8 development)
+  file. An **advisory** (the incident parked for approval; v0.8.0)
   becomes `SIGUSR1`. A **request** (`checkpoint-deadline-at` is on the Pod)
   becomes `SIGUSR2`; once the trainer has written its checkpoint and left,
   the sidecar exits too, and the Pod leaving is the acknowledgement.

@@ -75,6 +75,23 @@ in this tree (still )?pins? v0\.6\.1
 v0\.7\.0 is not (yet )?tagged
 v0\.7\.0[^.]{0,60}(not (yet )?(tagged|published)|untagged|unpublished)
 candidate prepared in source
+# v0.8.0 was published on 2026-11-08 UTC and superseded v0.7.0 as the latest
+# release. Same narrowing as above: "released in v0.7.0", "the v0.7.0 notes"
+# and "introduced in v0.8.0" stay legal; forbidden are "latest release"
+# claims about v0.7.0, "release candidate" pins claims about this tree, and
+# "not tagged" / "not published" / "not released" claims about v0.8.0 or
+# its surfaces. "What remains before a tag" was the README's pre-tag
+# sentence and may not return.
+Latest release \(v0\.7\.0
+v0\.7\.0 is the latest (\*\*)?(published )?(\*\*)?release
+v0\.7\.0[^.]{0,80}is the latest (published )?release
+latest (published )?release(,)? (is|remains) v0\.7\.0
+pins (of )?the (v0\.8\.0 )?release candidate
+v0\.8\.0 (release )?candidate(,|;| adds| as| and| source)
+v0\.8\.0 is not (yet )?(tagged|published|released)
+v0\.8\.0[^.]{0,60}(not (yet )?(tagged|published|released)|untagged|unpublished)
+Release status: candidate
+What remains before a tag
 
 # --- v0.7 catalog vocabulary ------------------------------------------------
 # "Tier T4" is the metric catalog's control-plane tier; "Tesla T4" is the

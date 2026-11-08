@@ -66,9 +66,10 @@ even run, with DCGM/NVML corroboration as runtime evidence.
 ## Proof, not claims
 
 - Release artifacts are versioned with the chart and manifests (the tree
-  pins the v0.8.0 release candidate; v0.7.0, the GPU reliability
-  observability release published 2026-10-19, is the latest published
-  release; checkpoint coordination itself arrived in v0.6.0 on 2026-10-11).
+  pins v0.8.0, the workload-safe GPU recovery release published 2026-11-08
+  and the latest published release; the GPU reliability observability
+  layer arrived in v0.7.0 on 2026-10-19 and checkpoint coordination in
+  v0.6.0 on 2026-10-11).
   Verify the image digest and SBOM for the artifact you install; this document
   does not treat a tag as a hardware qualification claim.
 - The full ladder — kernel-injected XID 79 → cordon → drain → approval →

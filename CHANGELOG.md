@@ -11,7 +11,7 @@ API is `v1alpha1`.
 
 Nothing yet.
 
-## [v0.8.0] - 2026-11-05 (candidate; the date becomes the tag date at release)
+## [v0.8.0] - 2026-11-08
 
 Workload-safe GPU recovery
 ([design record](docs/workload-safe-recovery-design.md)): a read-only,
@@ -21,11 +21,28 @@ read-only Kueue, KubeRay and batch Job context. The advisory, preview,
 groups and context readers are opt-in and off by default; the topology
 classifier always runs and can only narrow the existing reset gate, so a
 tree with every optional block absent behaves as v0.7.0 with a reset gate
-that refuses more, never less. **Release status: candidate.** The source defaults (the `config/default` operator
-image, the Helm chart `version`/`appVersion`/image tag, and the sample
-controller and agent images) carry v0.8.0 so that the tree, the gates and
-the tag describe one thing; no `v0.8.0` tag, image or release asset exists
-while this sentence stands, and v0.7.0 is the latest published release.
+that refuses more, never less. **Release status: published.** The
+`v0.8.0` tag was cut and the
+[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.8.0)
+was published on 2026-11-08 UTC as a non-prerelease release with 15
+assets. The release workflow run on the tag completed green end to end
+(`gates`, `source-metadata`, `upgrade-rehearsal`, `ctl`, `images`,
+`manifest`, `release`, `release-verify`, `release-publish`), and
+`hack/verify-release.sh v0.8.0 kubeneuron/kubeneuron` passed independently
+after publication (asset set closed, checksums complete and matching,
+images digest-pinned, Cosign signature verified with cosign v3.1.4). The
+tagged tree is the final candidate `7c5801e` — the source of the
+2026-11-06 gate reruns at the end of this record — plus the harness
+assertion `4587ca4`, documentation-only commits, the untracking of a
+build output committed by accident, and the go1.26.10 toolchain bump
+listed under *Changed*; a first tag attempt the same day failed
+`govulncheck` on that toolchain finding before publishing anything. The
+source defaults (the `config/default` operator image, the Helm chart
+`version`/`appVersion`/image tag, and the sample controller and agent
+images) carry v0.8.0, so source users consume what the tag describes. The
+gate record that follows was written while v0.8.0 was a candidate and is
+kept as history: where it says that no tag or publication existed, that
+was true when written and is superseded by this paragraph.
 **Gate record (2026-11-05 UTC; G1 and G2 on `7adbdfc`/`366d88d`, G3 on
 `38046bd` with the corrections it forced landing as `9aee794` and
 `b8f1e1f`, G1 and the kind integration gate again after them; then, after

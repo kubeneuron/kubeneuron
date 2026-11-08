@@ -100,11 +100,12 @@ evidence-only runtime contract qualifications — is the v0.5.0 scope, released
 on 2026-09-20; its tag, published images,
 and release assets are available from the
 [GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.5.0).
-(The manifests and chart in this source tree carry the v0.8.0 pins of the
-release candidate, v0.7.0 being the latest published release; see
+(The manifests and chart in this source tree carry the v0.8.0 pins, and
+v0.8.0, published 2026-11-08, is the latest release; see
 [the v0.6.0 notes](#v060-checkpoint-coordination-notes),
-[the v0.6.1 note](#v061-security-patch-notes) and
-[the v0.7.0 notes](#v070-observability-notes).)
+[the v0.6.1 note](#v061-security-patch-notes),
+[the v0.7.0 notes](#v070-observability-notes) and
+[the v0.8.0 notes](#v080-workload-safe-recovery-notes).)
 This section describes the upgrade and rollback posture of that scope. The
 CPU-only kind integration harness drives the v0.5 routes and commands against
 a real controller and store with
@@ -175,9 +176,11 @@ hardware qualification of its own surfaces.
 > superseded as the latest release, first by the v0.6.1 security and
 > toolchain patch (see [the v0.6.1 note](#v061-security-patch-notes)) and
 > then by v0.7.0 (see [the v0.7.0 notes](#v070-observability-notes)); both
-> leave this feature unchanged, and the manifests, chart, and samples in
-> this source tree carry the v0.8.0 pins of the release candidate (v0.7.0 is
-> the latest published release). Releases before v0.6.0 do not
+> leave this feature unchanged; v0.8.0 (published 2026-11-08, the latest
+> release; see [the v0.8.0 notes](#v080-workload-safe-recovery-notes)) adds
+> the opt-in advisory and group blocks on top of it, and the manifests,
+> chart, and samples in this source tree carry the v0.8.0 pins. Releases
+> before v0.6.0 do not
 > contain this feature. This section describes the upgrade and rollback posture of the
 > checkpoint coordination scope. Nothing here claims GPU hardware
 > validation of the feature.
@@ -255,8 +258,13 @@ which lets opted-in Pods be told and given a bounded deadline before a
 
 ## v0.8.0 workload-safe recovery notes
 
-> v0.8.0 is **not released**. This section describes the upgrade posture of
-> the development tree so it is written down before the release, not after.
+> v0.8.0 was released on 2026-11-08 UTC (the `v0.8.0` tag, images, install
+> manifest, and release assets are available from the
+> [GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.8.0),
+> verified with `hack/verify-release.sh v0.8.0 kubeneuron/kubeneuron`: asset
+> set, checksums, digest pins, Cosign signature) and is the latest release.
+> This section was written before the release and describes the posture the
+> release carries.
 
 - **Schema migration.** The migration heads move to SQLite 0025 and
   PostgreSQL 0016: a new `impact_previews` table, an
@@ -370,14 +378,15 @@ Nothing in this patch adds GPU hardware validation of its own.
 v0.7.0, released 2026-10-19 (the `v0.7.0` tag, images, install manifest,
 and release assets are available from the
 [GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.7.0)),
-is the latest release. It adds the GPU fleet reliability observability
+was superseded as the latest release by v0.8.0 on 2026-11-08 (see
+[the v0.8.0 notes](#v080-workload-safe-recovery-notes)). It adds the GPU
+fleet reliability observability
 layer described in
 [CHANGELOG.md](https://github.com/kubeneuron/kubeneuron/blob/main/CHANGELOG.md)
 and nothing else: no CRD, RBAC, store schema, default, action, playbook
 rung, or webhook path changes for any KubeNeuron component, and the
 controller, agent, and operator binaries carry no feature change. The
-manifests, chart, and samples in this source tree carry the v0.8.0 pins of
-the release candidate; v0.7.0 is the latest published release.
+manifests, chart, and samples in this source tree carry the v0.8.0 pins.
 
 - **Upgrade from v0.6.1.** KubeNeuron itself is images only, in the usual
   CRDs → operator → controller order, with no migration. The observability

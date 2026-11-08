@@ -213,7 +213,7 @@ shorter than a second is honored as written; the stamped deadline keeps the
 fraction. In `DryRun` nothing is patched and nothing waits; the audited
 output says how many Pods would have been asked.
 
-**Advisory at approval park (v0.8 development, default off).** With
+**Advisory at approval park (v0.8.0, default off).** With
 `checkpointCoordination.advisory.enabled: true`, the moment an incident parks
 for human approval with a `Drain` or `EvictGPUWorkload` still downstream in
 its playbook, every eligible Pod — the same eligibility as the request:
@@ -244,10 +244,11 @@ have until this time". Dry-run stamps nothing and audits how many Pods it
 would have advised. The advisory uses the same allowlist, Pod-identity
 confinement and `pods: patch` grant as the request and adds no RBAC; its
 `budget` (default 10s, at most 60s) bounds one round and never delays the
-approval. This surface is v0.8 development work: unit-tested, not released,
-and not exercised on GPU hardware.
+approval. This surface shipped in v0.8.0 (2026-11-08): unit-tested,
+exercised on CPU-only kind and on one Tesla T4 (`hack/hw-e2e.sh
+test-checkpoint`); its hardware evidence is limited to that device.
 
-**Checkpoint groups (v0.8 development, default off).** A Pod may declare
+**Checkpoint groups (v0.8.0, default off).** A Pod may declare
 `kubeneuron.io/checkpoint-group: "<name>"` (a DNS label, at most 63
 characters; anything else is ignored and shown as `group-invalid` in the
 impact preview). The group is every live Pod in the same namespace with the

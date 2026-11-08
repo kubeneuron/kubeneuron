@@ -62,14 +62,14 @@ Without a configured operator token the operator API is disabled entirely
 | `POST /api/v1/incidents` | manual remediation trigger; body `{"node","class","actor?","gpu_uuid?","gpu_index?"}` — `node` and `class` are required; `actor` only with the static token |
 | `POST /api/v1/incidents/{id}/approve` | approve the pending step; body `{"actor","reason?","park_epoch?","impact_digest?"}` |
 | `POST /api/v1/incidents/{id}/reject` | reject the pending step; body `{"actor","reason?","park_epoch?","impact_digest?"}` |
-| `GET /api/v1/incidents/{id}/impact-preview[?round=N]` | the newest `impact-preview/v1` document of one approval round (the current round by default) — what the pending step and the disruptions downstream of it would touch (v0.8 development, below) |
-| `POST /api/v1/incidents/{id}/impact-preview/recompute` | recompute the current round's preview; body `{"actor"}` and `Idempotency-Key` required; answers the new document (v0.8 development) |
+| `GET /api/v1/incidents/{id}/impact-preview[?round=N]` | the newest `impact-preview/v1` document of one approval round (the current round by default) — what the pending step and the disruptions downstream of it would touch (v0.8.0, below) |
+| `POST /api/v1/incidents/{id}/impact-preview/recompute` | recompute the current round's preview; body `{"actor"}` and `Idempotency-Key` required; answers the new document (v0.8.0) |
 | `POST /api/v1/incidents/{id}/acknowledge` | record operator custody without changing remediation state; body `{"actor","reason?","resource_version?"}` and `Idempotency-Key` required |
 | `POST /api/v1/incidents/{id}/resolve` | manually resolve; current v0.4 controllers require `{"actor","reason?","resource_version?"}` and `Idempotency-Key` |
 
 Decisions return `204 No Content`. `park_epoch` pins the decision to the
 approval round shown to the human; a decision against a superseded round
-is refused. `impact_digest` (v0.8 development) pins an approve to the impact
+is refused. `impact_digest` (v0.8.0) pins an approve to the impact
 preview the human read: an approve whose digest is not the round's current
 preview is refused with `409`, and under
 `spec.safety.impactPreview.requireForApproval` an approve without a digest,
@@ -137,7 +137,7 @@ rule, or store migration.
 |---|---|
 | `GET /api/v1/readiness` | stable node-name ordered fleet page with `items`, optional opaque `next_cursor`, and evaluator version |
 | `GET /api/v1/nodes/{node}/readiness` | one live explainability response: snapshot, typed decision, reason codes, limits, evidence references and effective digest; plus an additive `topology` object (the device topology classification below) when the controller classifies device topology |
-| `GET /api/v1/nodes/{node}/topology` | one live, read-only `topology-classification/v1` document: the node's device layout and whether device-scoped actions are eligible on it (v0.8 development) |
+| `GET /api/v1/nodes/{node}/topology` | one live, read-only `topology-classification/v1` document: the node's device layout and whether device-scoped actions are eligible on it (v0.8.0) |
 | `GET /api/v1/nodes/{node}/evidence` | redacted evidence-reference timeline for the current node decision |
 
 Fleet readiness accepts `limit` (1–500), opaque `cursor`, `state`
@@ -146,7 +146,7 @@ Fleet readiness accepts `limit` (1–500), opaque `cursor`, `state`
 node labels `kubeneuron.io/tenant` and `kubeneuron.io/cluster`; they are a
 filtering contract, not a substitute for Kubernetes RBAC on the API itself.
 
-### Device topology (read-only, v0.8 development)
+### Device topology (read-only, v0.8.0)
 
 `GET /api/v1/nodes/{node}/topology` classifies one node's device layout from
 the evidence the controller already holds and says whether a device-scoped
@@ -230,11 +230,14 @@ rendered as `not-observed` with the failed check as the reason (for example
 and add `DraObservationInvalid` to `reasons`; the raw observation is never
 rendered or digested.
 
-This surface is v0.8 development work. It is unit-tested; no GPU hardware
-run and no release has exercised it. A released controller has no such route
-and its readiness responses carry no `topology` field.
+This surface shipped in v0.8.0 (2026-11-08). It is unit-tested and was
+exercised on one Tesla T4 (`hack/hw-e2e.sh test-impact`, where every
+classification was `whole-device` refused with `ReportNotReady`, because a
+guest cannot reset the GPU); nothing is claimed for any other device.
+Controllers before v0.8.0 have no such route and their readiness responses
+carry no `topology` field.
 
-### Impact preview (v0.8 development)
+### Impact preview (v0.8.0)
 
 With `spec.safety.impactPreview.enabled`, every park and re-park for
 approval computes, under the policy `budget` (default 15s, at most 60s), a

@@ -20,7 +20,7 @@ reads them through the downward API:
 | the workload | `kubeneuron.io/checkpoint: "true"` | opts in (exact value) |
 | the workload | `kubeneuron.io/checkpoint-max-wait` | asks for a shorter wait; never a longer one |
 | the workload | `kubeneuron.io/checkpoint-group` | names its gang (a DNS label); peers in the same namespace get the same request |
-| KubeNeuron | `kubeneuron.io/checkpoint-advisory-*` | *advisory*: the incident parked for approval and a disruption may follow — checkpoint if you can; no deadline (v0.8 development) |
+| KubeNeuron | `kubeneuron.io/checkpoint-advisory-*` | *advisory*: the incident parked for approval and a disruption may follow — checkpoint if you can; no deadline (v0.8.0) |
 | KubeNeuron | `kubeneuron.io/checkpoint-requested-at`, `-deadline-at`, `-incident`, `-reason`, `-next-action` | *request*: checkpoint now; the disruption follows no later than the deadline — earlier once every asked workload has answered or left, and regardless of the answer |
 | the workload | `kubeneuron.io/checkpoint-state: complete:<incident>` | acknowledges when it stays alive (needs `patch` on its own Pod); a Pod that exits acknowledges by leaving |
 

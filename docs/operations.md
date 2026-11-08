@@ -362,9 +362,9 @@ must be recorded by the adapter and its operating procedure.
 
 > Released in v0.6.0 (published 2026-10-11 UTC); the v0.6.1 security and
 > toolchain patch released the same day and the v0.7.0 observability release
-> (2026-10-19) leave it unchanged, and this tree's manifests, chart, and
-> samples carry the v0.8.0 pins of the release candidate (v0.7.0 is the
-> latest published release). Releases before
+> (2026-10-19) leave it unchanged; v0.8.0 (published 2026-11-08, the latest
+> release) adds the opt-in advisory and group blocks on top of it, and this
+> tree's manifests, chart, and samples carry the v0.8.0 pins. Releases before
 > v0.6.0 do not contain it. The v0.6.0 hardware run exercised the shared
 > runtime, not this feature; the first hardware exercise of the protocol
 > itself was the v0.8.0 candidate's run on 2026-11-05 (`hack/hw-e2e.sh
@@ -394,7 +394,7 @@ operator's rollout guide.
   time out; a step whose timeout leaves nothing after the reserve does not
   wait at all.
 
-**Advisory at approval park (v0.8 development).** `advisory.enabled: true`
+**Advisory at approval park (v0.8.0).** `advisory.enabled: true`
 inside the block adds no verb and no wait: when an incident parks for
 approval with a disruption downstream, eligible Pods are stamped with the
 `kubeneuron.io/checkpoint-advisory-*` keys under their own `budget` (default
@@ -406,7 +406,7 @@ without its disruption withdraws the notice best effort
 protocol is in [playbook authoring](playbook-authoring.md). A released
 controller has no such field; this tree carries it as development work.
 
-**Checkpoint groups (v0.8 development).** `groups.enabled: true` inside the
+**Checkpoint groups (v0.8.0).** `groups.enabled: true` inside the
 block makes a disruption's request reach a member's peers (same namespace,
 same `kubeneuron.io/checkpoint-group`) with their own deadline from the same
 formula; `crossNode` (default off) decides whether peers on other nodes are
@@ -417,7 +417,7 @@ list per group in that namespace; no verb is added. Peer outcomes land in
 `checkpoint-group-request` row per group on the incident's audit trail.
 Start with `crossNode: false`.
 
-**Impact preview (v0.8 development).** `spec.safety.impactPreview.enabled:
+**Impact preview (v0.8.0).** `spec.safety.impactPreview.enabled:
 true` computes, at every park for approval, a durable record of what the
 pending step would touch (the [REST API reference](reference-api.md#impact-preview-v08-development)
 has the document), hands a three-line summary to the notification channels,
