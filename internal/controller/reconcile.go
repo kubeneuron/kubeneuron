@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
@@ -378,7 +379,26 @@ func (c *Controller) parkForApproval(ctx context.Context, inc *types.Incident, s
 	if from == types.StateAwaitingApproval {
 		c.log.Warn("re-parking for a fresh approval", "incident", inc.ID, "step", step.Name, "reason", note)
 	}
-	return c.notifier.RequestApproval(ctx, inc, step.Name)
+	// The round is committed. Two bounded things happen before this park
+	// returns: the advisory to the workloads (its own budget) and the impact
+	// preview (its own budget). The preview is gathered BEFORE the human is
+	// notified, deliberately, so the notification carries its summary and
+	// digest — that budget (impactPreview.budget, 15s by default) is the
+	// most the notification can be delayed by. The advisory runs beside it,
+	// not before it, and is waited for only after the notification is
+	// handed off, so it never adds to that delay; the park as a whole, and
+	// the reconcile pass it is part of, spends at most the longer of the two
+	// budgets here, never their sum.
+	var advised sync.WaitGroup
+	advised.Add(1)
+	go func() {
+		defer advised.Done()
+		c.adviseCheckpoint(ctx, inc)
+	}()
+	preview := c.previewImpact(ctx, inc, "computed at park")
+	err := notify.RequestApprovalWithContext(ctx, c.notifier, inc, step.Name, approvalContext(preview))
+	advised.Wait()
+	return err
 }
 
 // advanceAwaitingApproval resumes on the current approval round's decision
@@ -759,6 +779,24 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 	if err := playbook.Transition(inc, to); err != nil {
 		return err
 	}
+	// A round that ends anywhere but in its own step's execution — rejected,
+	// expired, resolved by hand, quarantined — ended without the disruption
+	// the advisory announced, so the notice is withdrawn, best effort, after
+	// the state change below commits.
+	// Only a COMMITTED change withdraws: playbook.Transition has already
+	// moved inc.State in memory, so the deferred check is on the transaction
+	// below, never on the field — a transition that lost its conflict check
+	// never happened, and the notice it would have ended still stands.
+	withdraw := from == types.StateAwaitingApproval && to != types.StateExecuting
+	round := inc.ApprovalEpoch
+	committed := false
+	if withdraw {
+		defer func() {
+			if committed {
+				c.withdrawCheckpointAdvisories(ctx, inc, round)
+			}
+		}()
+	}
 	now := time.Now()
 	// fence: the caller's snapshot of when the incident last changed shape.
 	// StateChangedAt is the WRITE-FENCE for every non-state field rewrite:
@@ -826,6 +864,7 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 		}
 		return err
 	}
+	committed = true
 	if from == types.StateExecuting {
 		// The incident just left EXECUTING. If a per-step slot was seeded for it
 		// on leadership acquisition, hand it back now: recovery either re-admits

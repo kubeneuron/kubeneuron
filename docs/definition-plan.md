@@ -16,10 +16,10 @@ Grading scale: **shipped** (in a released tag, exercised by tests),
 |---|---|---|
 | vendor-neutral | **stated** | seams are vendor-agnostic; every shipping detection and action path is NVIDIA |
 | GPU fleet reliability control plane | **shipped** | — |
-| detects degradation | **partial** | kmsg XID + DCGM/nvidia-smi; DCGM path never validated on live hardware; no predictive signals |
-| protects workloads | **partial** | evict/cordon/drain/idle-check ship; no workload-aware scheduling feedback; checkpoint coordination Phase 1 shipped in v0.6.0 (2026-10-11), not yet exercised on GPU hardware |
+| detects degradation | **partial** | kmsg XID + DCGM/nvidia-smi (as of 2026-09, when this row was written, the DCGM path had not been validated on live hardware; the v0.6.0 hardware run and the v0.7.0 observability release since changed that — see the capability matrix); no predictive signals |
+| protects workloads | **partial** | evict/cordon/drain/idle-check ship; no workload-aware scheduling feedback; checkpoint coordination Phase 1 shipped in v0.6.0 (2026-10-11), first exercised on GPU hardware by the v0.8.0 candidate's run (2026-11-05, one toy trainer on a Tesla T4) |
 | automates safe recovery | **shipped** | validated live on EKS, including a real destructive node replace |
-| measures recovered | **shipped (v0.2.2)** | metrics land this release; dashboard and periodic report do not exist yet |
+| measures recovered | **shipped (v0.2.2)** | metrics landed in v0.2.2 (when this row was written the dashboard and periodic report did not exist; the v0.7.0 observability release shipped the dashboard — see the capability matrix) |
 
 ---
 

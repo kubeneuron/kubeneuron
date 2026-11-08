@@ -18,6 +18,8 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/controller"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/httpapi"
+	"github.com/kubeneuron/kubeneuron/internal/impact"
+	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
@@ -159,6 +161,8 @@ func applyRuntimeConfigWithNodePauses(
 		DestructiveSelector: cfg.Safety.DestructiveExecutionNodeSelector,
 		DegradedTaint:       degradedTaintPolicy(cfg.Safety.TaintDegradedNodes),
 		Checkpoint:          checkpointPolicy(cfg.Safety.CheckpointCoordination),
+		Topology:            topologyPolicy(cfg.Safety.TopologyClassifier),
+		Impact:              impactPolicy(cfg.Safety.ImpactPreview),
 		VerifyQuiet:         cfg.Safety.VerifyQuietWindow.Std(),
 		ApprovalTTL:         cfg.Approvals.TTL.Std(),
 	}); err != nil {
@@ -207,13 +211,49 @@ func checkpointPolicy(compiled *config.CheckpointCoordination) checkpoint.Policy
 	if compiled == nil || !compiled.Enabled {
 		return checkpoint.Policy{}
 	}
-	return checkpoint.Policy{
+	policy := checkpoint.Policy{
 		Enabled:     true,
 		DefaultWait: compiled.DefaultWait.Std(),
 		MaxWait:     compiled.MaxWait.Std(),
 		SkipClasses: append([]types.ProblemClass(nil), compiled.SkipClasses...),
 		Namespaces:  append([]string(nil), compiled.Namespaces...),
 	}
+	if compiled.Advisory != nil && compiled.Advisory.Enabled {
+		policy.Advisory = checkpoint.AdvisoryPolicy{Enabled: true, Budget: compiled.Advisory.Budget.Std()}
+	}
+	if compiled.Groups != nil && compiled.Groups.Enabled {
+		policy.Groups = checkpoint.GroupPolicy{Enabled: true, MaxGroupSize: compiled.Groups.MaxGroupSize, CrossNode: compiled.Groups.CrossNode}
+	}
+	return policy
+}
+
+// impactPolicy resolves the compiled impact preview setting. An absent key is
+// off: a controller loading a configuration written before the feature
+// existed computes no preview and binds no approval to one.
+func impactPolicy(compiled *config.ImpactPreview) impact.Policy {
+	if compiled == nil || !compiled.Enabled {
+		return impact.Policy{}
+	}
+	return impact.Policy{
+		Enabled: true, Budget: compiled.Budget.Std(), MaxItems: compiled.MaxItems,
+		RequireForApproval: compiled.RequireForApproval,
+		Context: platform.ContextSelection{
+			BatchJobs: compiled.WorkloadContext.BatchJobs,
+			Kueue:     compiled.WorkloadContext.Kueue,
+			KubeRay:   compiled.WorkloadContext.KubeRay,
+		},
+	}
+}
+
+// topologyPolicy resolves the compiled topology classifier inputs. An absent
+// key is the default: the classifier runs on capacity, labels and the agent
+// report, and no Dynamic Resource Allocation object is ever read. Only an
+// explicitly enabled block turns the read-only DRA observation on.
+func topologyPolicy(compiled *config.TopologyClassifier) controller.TopologyPolicy {
+	if compiled == nil {
+		return controller.TopologyPolicy{}
+	}
+	return controller.TopologyPolicy{DRADiscovery: compiled.DRA.Enabled}
 }
 
 // watchRuntimeConfig re-applies the configuration whenever the mounted files

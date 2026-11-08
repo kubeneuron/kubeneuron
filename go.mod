@@ -2,7 +2,7 @@ module github.com/kubeneuron/kubeneuron
 
 go 1.26.0
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.43.3

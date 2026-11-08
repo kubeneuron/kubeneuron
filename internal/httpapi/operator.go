@@ -25,12 +25,30 @@ import (
 type OperatorBackend interface {
 	ListIncidents(ctx context.Context, states []string, node string, limit int) ([]*types.Incident, error)
 	IncidentDetail(ctx context.Context, id string) (*types.Incident, []*types.AuditEntry, error)
-	DecideApproval(ctx context.Context, id, actor, channel string, decision types.ApprovalDecision, expectedEpoch int, reason string) error
+	DecideApproval(ctx context.Context, id, actor, channel string, decision types.ApprovalDecision, expectedEpoch int, reason, impactDigest string) error
 	ResolveIncident(ctx context.Context, id, actor, reason string) error
 	Nodes(ctx context.Context) ([]*types.Node, error)
 	Node(ctx context.Context, name string) (*types.Node, error)
 	SetPaused(ctx context.Context, paused bool, actor string) error
 	Paused() bool
+}
+
+// ImpactPreviewBackend is the optional v0.8-development extension behind the
+// impact preview routes. Absent, the routes answer 503.
+type ImpactPreviewBackend interface {
+	// ImpactPreview returns the newest preview of one round (0 = the
+	// incident's current round); store.ErrNotFound when none exists.
+	ImpactPreview(ctx context.Context, id string, round int) (*types.ImpactPreview, error)
+	// RecomputeImpactPreview recomputes the current round's preview under the
+	// Idempotency-Key; replayed reports true.
+	RecomputeImpactPreview(ctx context.Context, id, actor, idempotencyKey string) (*types.ImpactPreview, bool, error)
+}
+
+// RoundDecisionBackend is the optional v0.8-development extension that lets
+// the incident detail show the decision recorded on the current round and
+// the impact digest that decision row persisted.
+type RoundDecisionBackend interface {
+	RoundDecision(ctx context.Context, id string, round int) (*types.Approval, error)
 }
 
 // IncidentAcknowledgementBackend is an optional v0.4.0 extension. Keeping it
@@ -368,6 +386,8 @@ func (s *Server) registerOperatorRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/incidents", s.requireOperatorMutation(s.handleManualIncident))
 	mux.HandleFunc("POST /api/v1/incidents/{id}/approve", s.requireOperatorMutation(s.handleDecision(types.ApprovalApproved)))
 	mux.HandleFunc("POST /api/v1/incidents/{id}/reject", s.requireOperatorMutation(s.handleDecision(types.ApprovalRejected)))
+	mux.HandleFunc("GET /api/v1/incidents/{id}/impact-preview", s.requireOperator(s.handleImpactPreview))
+	mux.HandleFunc("POST /api/v1/incidents/{id}/impact-preview/recompute", s.requireOperationalMutation("impact-recompute", 30, s.handleRecomputeImpactPreview))
 	mux.HandleFunc("POST /api/v1/incidents/{id}/acknowledge", s.requireOperatorMutation(s.handleAcknowledge))
 	mux.HandleFunc("POST /api/v1/incidents/{id}/resolve", s.requireOperatorMutation(s.handleResolve))
 	mux.HandleFunc("GET /api/v1/readiness", s.requireOperator(s.handleFleetReadiness))
@@ -379,6 +399,7 @@ func (s *Server) registerOperatorRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/nodes/{node}/health-checks", s.requireOperator(s.handleListNodeHealthChecks))
 	mux.HandleFunc("GET /api/v1/nodes/{node}/accelerators", s.requireOperator(s.handleAcceleratorReports))
 	mux.HandleFunc("GET /api/v1/nodes/{node}/runtime-contract", s.requireOperator(s.handleNodeRuntimeContract))
+	mux.HandleFunc("GET /api/v1/nodes/{node}/topology", s.requireOperator(s.handleNodeTopology))
 	mux.HandleFunc("GET /api/v1/runtime-contracts/coverage", s.requireOperator(s.handleFleetRuntimeContractCoverage))
 	// Runtime contract qualifications are evidence-only: create, list, get,
 	// and observe. No approve/promote/delete/apply/enable route exists here
@@ -495,10 +516,21 @@ func (s *Server) handleListIncidents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, incidents)
 }
 
-// IncidentDetail is the incident plus its full audit trail.
+// IncidentDetail is the incident plus its full audit trail. ImpactPreviewDigest
+// is the digest of the current round's newest impact preview when one
+// exists (v0.8 development); absent otherwise. ImpactPreviewUnavailable is
+// set when that preview could not be computed. Decision is the human
+// decision recorded on the current round, when there is one, and
+// DecisionImpactDigest the digest THAT row persisted ("" when the decision
+// was not bound to a preview): the two digests agree only when the human
+// decided on the preview that is still current.
 type IncidentDetail struct {
-	Incident *types.Incident     `json:"incident"`
-	Audit    []*types.AuditEntry `json:"audit"`
+	Incident                 *types.Incident     `json:"incident"`
+	Audit                    []*types.AuditEntry `json:"audit"`
+	ImpactPreviewDigest      string              `json:"impact_preview_digest,omitempty"`
+	ImpactPreviewUnavailable string              `json:"impact_preview_unavailable,omitempty"`
+	Decision                 string              `json:"decision,omitempty"`
+	DecisionImpactDigest     string              `json:"decision_impact_digest,omitempty"`
 }
 
 func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
@@ -507,7 +539,105 @@ func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "incident not found", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, IncidentDetail{Incident: inc, Audit: audit})
+	detail := IncidentDetail{Incident: inc, Audit: audit}
+	if backend, ok := s.operator.(ImpactPreviewBackend); ok && inc.ApprovalEpoch > 0 {
+		if preview, err := backend.ImpactPreview(r.Context(), inc.ID, inc.ApprovalEpoch); err == nil && preview != nil {
+			detail.ImpactPreviewDigest = preview.Digest
+			detail.ImpactPreviewUnavailable = preview.UnavailableReason
+		}
+	}
+	if backend, ok := s.operator.(RoundDecisionBackend); ok && inc.ApprovalEpoch > 0 {
+		if decision, err := backend.RoundDecision(r.Context(), inc.ID, inc.ApprovalEpoch); err == nil && decision != nil {
+			detail.Decision = string(decision.Decision)
+			detail.DecisionImpactDigest = decision.ImpactDigest
+		}
+	}
+	writeJSON(w, detail)
+}
+
+// handleImpactPreview serves the newest impact preview of one approval round
+// (?round=N; the incident's current round by default) as the stored
+// impact-preview/v1 document.
+func (s *Server) handleImpactPreview(w http.ResponseWriter, r *http.Request) {
+	backend, ok := s.operator.(ImpactPreviewBackend)
+	if !ok {
+		http.Error(w, "impact previews are unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	round := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("round")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			http.Error(w, "round must be a positive integer", http.StatusBadRequest)
+			return
+		}
+		round = n
+	}
+	preview, err := backend.ImpactPreview(r.Context(), r.PathValue("id"), round)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, "no impact preview for this round", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	writeImpactPreview(w, preview)
+}
+
+// handleRecomputeImpactPreview recomputes the current round's preview. It is
+// an operational mutation: operator token with update, leader fencing, a
+// per-source quota and a required Idempotency-Key.
+func (s *Server) handleRecomputeImpactPreview(w http.ResponseWriter, r *http.Request) {
+	backend, ok := s.operator.(ImpactPreviewBackend)
+	if !ok {
+		http.Error(w, "impact previews are unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	key, ok := operationalIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	var req DecisionRequest
+	if !decodeStrict(w, r, &req) {
+		return
+	}
+	actor, err := s.resolveActor(r, req.Actor)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	preview, replayed, err := backend.RecomputeImpactPreview(r.Context(), r.PathValue("id"), actor, key)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			http.Error(w, "incident not found", http.StatusNotFound)
+		case errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrOperationalConflict):
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		}
+		return
+	}
+	if replayed {
+		w.Header().Set("Idempotent-Replay", "true")
+	}
+	writeImpactPreview(w, preview)
+}
+
+// writeImpactPreview writes the stored document itself when there is one, so
+// the client reads exactly what was sealed, and the record envelope otherwise.
+func writeImpactPreview(w http.ResponseWriter, preview *types.ImpactPreview) {
+	if preview == nil {
+		http.Error(w, "no impact preview", http.StatusNotFound)
+		return
+	}
+	if len(preview.Payload) > 0 {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(preview.Payload)
+		return
+	}
+	writeJSON(w, preview)
 }
 
 // ManualIncidentRequest triggers a manual remediation signal.
@@ -566,6 +696,11 @@ type DecisionRequest struct {
 	// click can never be recorded against content the human never saw. Zero
 	// (older clients) keeps the bind-to-current behavior.
 	ParkEpoch int `json:"park_epoch,omitempty"`
+	// ImpactDigest is the digest of the impact preview the client DISPLAYED
+	// (v0.8 development). When set, an approve is refused if the round's
+	// current preview differs; when the policy requires it, an approve
+	// without it is refused. Empty keeps the bind-to-round behavior.
+	ImpactDigest string `json:"impact_digest,omitempty"`
 }
 
 func (s *Server) handleDecision(decision types.ApprovalDecision) http.HandlerFunc {
@@ -579,7 +714,7 @@ func (s *Server) handleDecision(decision types.ApprovalDecision) http.HandlerFun
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := s.operator.DecideApproval(r.Context(), r.PathValue("id"), actor, "api", decision, req.ParkEpoch, req.Reason); err != nil {
+		if err := s.operator.DecideApproval(r.Context(), r.PathValue("id"), actor, "api", decision, req.ParkEpoch, req.Reason, req.ImpactDigest); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}

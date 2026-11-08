@@ -11,6 +11,7 @@ import (
 
 	"github.com/kubeneuron/kubeneuron/internal/approval"
 	"github.com/kubeneuron/kubeneuron/internal/config"
+	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/store"
@@ -42,12 +43,31 @@ func (c *Controller) IncidentDetail(ctx context.Context, id string) (*types.Inci
 	return inc, trail, nil
 }
 
+// RoundDecision returns the human decision recorded on one approval round
+// (0 = the incident's current round), or store.ErrNotFound when the round
+// has none yet. It is what the incident detail shows beside the preview
+// digest: which digest the decision row itself persisted, not merely which
+// preview is newest.
+func (c *Controller) RoundDecision(ctx context.Context, id string, round int) (*types.Approval, error) {
+	if round <= 0 {
+		inc, err := c.store.GetIncident(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		round = inc.ApprovalEpoch
+	}
+	if round <= 0 {
+		return nil, store.ErrNotFound
+	}
+	return c.store.LatestApprovalDecision(ctx, id, round)
+}
+
 // DecideApproval records an authenticated human decision; the reconcile walk
 // picks it up on its next pass. The decision is bound to the identity of the
 // step that is current now — the one the human is approving — so a later
 // hot-swap or rewind that changes the action at this index is caught at resume
 // and the approval is not honored for an action the human never saw.
-func (c *Controller) DecideApproval(ctx context.Context, id, actor, channel string, decision types.ApprovalDecision, expectedEpoch int, reason string) error {
+func (c *Controller) DecideApproval(ctx context.Context, id, actor, channel string, decision types.ApprovalDecision, expectedEpoch int, reason, impactDigest string) error {
 	inc, err := c.store.GetIncident(ctx, id)
 	if err != nil {
 		return err
@@ -82,16 +102,28 @@ func (c *Controller) DecideApproval(ctx context.Context, id, actor, channel stri
 	if err != nil {
 		return fmt.Errorf("cannot record a decision for %s: its current approval round has no request record; wait for the controller to re-park it", id)
 	}
+	// The impact digest closes the same window for the preview that the
+	// epoch closes for the request: an approve may be bound to the exact
+	// preview the human read, and the policy may require it to be.
+	recordedDigest, binding, err := c.bindImpactDigest(ctx, inc, decision, impactDigest)
+	if err != nil {
+		return err
+	}
+	if expectedEpoch <= 0 && binding == "round" {
+		binding = "none"
+	}
 	step := approval.StepIdentity{
 		PlaybookName: request.PlaybookName,
 		StepName:     request.StepName,
 		StepAction:   request.StepAction,
 		StepHash:     request.StepHash,
 		ParkEpoch:    request.ParkEpoch,
+		ImpactDigest: recordedDigest,
 	}
 	if err := approval.New(c.store, c.runtimeConfig(ctx).ApprovalTTL).Decide(ctx, id, step, actor, channel, decision); err != nil {
 		return err
 	}
+	metrics.ApprovalsBound.WithLabelValues(binding).Inc()
 	// The decision moment itself belongs in the audit trail — with the
 	// human's stated reason, which the API and CLI accept and promise to
 	// record (review F2: it used to be silently dropped). The resume pass

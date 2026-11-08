@@ -250,6 +250,14 @@ func TestGeneratedKubeNeuronCRDCheckpointCoordinationIsOptInAllowlistedAndBounde
 			rule:    "!has(self.defaultWait) || !has(self.maxWait) || duration(self.defaultWait) <= duration(self.maxWait)",
 			message: "defaultWait must not exceed maxWait",
 		},
+		{
+			rule:    "!has(self.advisory) || !self.advisory.enabled || self.enabled",
+			message: "checkpointCoordination.advisory.enabled requires checkpointCoordination.enabled",
+		},
+		{
+			rule:    "!has(self.groups) || !self.groups.enabled || self.enabled",
+			message: "checkpointCoordination.groups.enabled requires checkpointCoordination.enabled",
+		},
 	} {
 		message, ok := rules[want.rule]
 		if !ok {
@@ -260,8 +268,50 @@ func TestGeneratedKubeNeuronCRDCheckpointCoordinationIsOptInAllowlistedAndBounde
 			t.Errorf("rule %q has message %q, want prefix %q", want.rule, message, want.message)
 		}
 	}
-	if len(rules) != 4 {
-		t.Errorf("checkpointCoordination has %d x-kubernetes-validations, want exactly the 4 documented rules: %v", len(rules), slices.Sorted(maps.Keys(rules)))
+	if len(rules) != 6 {
+		t.Errorf("checkpointCoordination has %d x-kubernetes-validations, want exactly the 6 documented rules: %v", len(rules), slices.Sorted(maps.Keys(rules)))
+	}
+
+	// The groups sub-block: optional, off by default, size 1..512 with 64
+	// as the default, crossNode false by default.
+	groups := schemaProperty(t, block, "groups")
+	if groups["type"] != "object" {
+		t.Fatalf("groups type = %v, want object", groups["type"])
+	}
+	if _, ok := groups["required"]; ok {
+		t.Errorf("groups must have no structurally required field, got required=%v", groups["required"])
+	}
+	for field, want := range map[string]any{"enabled": false, "maxGroupSize": float64(64), "crossNode": false} {
+		if got := schemaProperty(t, groups, field)["default"]; !reflect.DeepEqual(got, want) {
+			t.Errorf("groups.%s default = %#v, want %#v", field, got, want)
+		}
+	}
+	size := schemaProperty(t, groups, "maxGroupSize")
+	if !reflect.DeepEqual(size["minimum"], float64(1)) || !reflect.DeepEqual(size["maximum"], float64(512)) {
+		t.Errorf("maxGroupSize bounds = %v/%v, want 1/512", size["minimum"], size["maximum"])
+	}
+
+	// The advisory sub-block: optional, off by default, a 10s budget bounded
+	// to 60s by its own CEL rule, and no structurally required field.
+	advisory := schemaProperty(t, block, "advisory")
+	if advisory["type"] != "object" {
+		t.Fatalf("advisory type = %v, want object", advisory["type"])
+	}
+	if _, ok := advisory["required"]; ok {
+		t.Errorf("advisory must have no structurally required field, got required=%v", advisory["required"])
+	}
+	if got := schemaProperty(t, advisory, "enabled")["default"]; got != false {
+		t.Errorf("advisory.enabled default = %#v, want false", got)
+	}
+	if got := schemaProperty(t, advisory, "budget")["default"]; got != "10s" {
+		t.Errorf("advisory.budget default = %#v, want 10s", got)
+	}
+	advisoryRules := xValidations(t, advisory)
+	if message, ok := advisoryRules["!has(self.budget) || (duration(self.budget) > duration('0s') && duration(self.budget) <= duration('60s'))"]; !ok || !strings.HasPrefix(message, "advisory.budget must be a positive duration of at most 60s") {
+		t.Errorf("advisory is missing its budget rule; have %v", slices.Sorted(maps.Keys(advisoryRules)))
+	}
+	if len(advisoryRules) != 1 {
+		t.Errorf("advisory has %d x-kubernetes-validations, want 1", len(advisoryRules))
 	}
 }
 
@@ -318,4 +368,66 @@ func xValidations(t *testing.T, schema map[string]any) map[string]string {
 		out[rule] = message
 	}
 	return out
+}
+
+func TestGeneratedKubeNeuronCRDImpactPreviewIsOptInAndBounded(t *testing.T) {
+	data, err := os.ReadFile("../../config/crd/bases/kubeneuron.io_kubeneurons.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crd map[string]any
+	if err := sigyaml.Unmarshal(data, &crd); err != nil {
+		t.Fatalf("parse generated CRD: %v", err)
+	}
+	safety := schemaProperty(t, servedSchema(t, crd), "spec", "safety")
+	if required, _ := safety["required"].([]any); slices.Contains(required, any("impactPreview")) {
+		t.Fatal("spec.safety must not require impactPreview: an absent block is the default")
+	}
+	block := schemaProperty(t, safety, "impactPreview")
+	if block["type"] != "object" {
+		t.Fatalf("impactPreview type = %v, want object", block["type"])
+	}
+	if _, ok := block["required"]; ok {
+		t.Errorf("impactPreview must have no structurally required field, got required=%v", block["required"])
+	}
+	for field, want := range map[string]any{
+		"enabled":            false,
+		"budget":             "15s",
+		"maxItems":           float64(200),
+		"requireForApproval": false,
+	} {
+		if got := schemaProperty(t, block, field)["default"]; !reflect.DeepEqual(got, want) {
+			t.Errorf("impactPreview.%s default = %#v, want %#v", field, got, want)
+		}
+	}
+	items := schemaProperty(t, block, "maxItems")
+	if !reflect.DeepEqual(items["minimum"], float64(10)) || !reflect.DeepEqual(items["maximum"], float64(1000)) {
+		t.Errorf("maxItems bounds = %v/%v, want 10/1000", items["minimum"], items["maximum"])
+	}
+	rules := xValidations(t, block)
+	for _, want := range []struct{ rule, message string }{
+		{rule: "!has(self.requireForApproval) || !self.requireForApproval || self.enabled", message: "impactPreview.requireForApproval requires impactPreview.enabled"},
+		{rule: "!has(self.budget) || (duration(self.budget) > duration('0s') && duration(self.budget) <= duration('60s'))", message: "impactPreview.budget must be a positive duration of at most 60s"},
+	} {
+		message, ok := rules[want.rule]
+		if !ok {
+			t.Errorf("impactPreview is missing x-kubernetes-validation rule %q; have %v", want.rule, slices.Sorted(maps.Keys(rules)))
+			continue
+		}
+		if !strings.HasPrefix(message, want.message) {
+			t.Errorf("rule %q has message %q, want prefix %q", want.rule, message, want.message)
+		}
+	}
+	if len(rules) != 2 {
+		t.Errorf("impactPreview has %d x-kubernetes-validations, want 2", len(rules))
+	}
+	wc := schemaProperty(t, block, "workloadContext")
+	if _, ok := wc["required"]; ok {
+		t.Errorf("workloadContext must have no structurally required field")
+	}
+	for _, field := range []string{"batchJobs", "kueue", "kuberay"} {
+		if got := schemaProperty(t, wc, field)["default"]; got != false {
+			t.Errorf("workloadContext.%s default = %#v, want false", field, got)
+		}
+	}
 }

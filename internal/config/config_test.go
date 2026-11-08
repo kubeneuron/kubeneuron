@@ -194,3 +194,85 @@ func TestDurationRoundTrip(t *testing.T) {
 		t.Fatalf("MarshalYAML = %v, %v", out, err)
 	}
 }
+
+func TestCheckpointAdvisoryDefaultsBoundsAndRequiresCoordination(t *testing.T) {
+	cfg, err := Load(writeConfig(t, checkpointConfig(`{ enabled: true, namespaces: [training], advisory: { enabled: true } }`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adv := cfg.Safety.CheckpointCoordination.Advisory
+	if adv == nil || !adv.Enabled || adv.Budget != CheckpointAdvisoryDefaultBudget {
+		t.Fatalf("advisory = %+v, want enabled with the 10s default budget", adv)
+	}
+	for name, block := range map[string]string{
+		"budget above the ceiling":      `{ enabled: true, namespaces: [training], advisory: { enabled: true, budget: 61s } }`,
+		"negative budget":               `{ enabled: true, namespaces: [training], advisory: { enabled: true, budget: -1s } }`,
+		"advisory without coordination": `{ enabled: false, advisory: { enabled: true } }`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, checkpointConfig(block))); err == nil {
+				t.Fatalf("Load accepted %s", block)
+			}
+		})
+	}
+	// An advisory that is off inside a disabled block is not read at all.
+	cfg, err = Load(writeConfig(t, checkpointConfig(`{ enabled: false, advisory: { enabled: false, budget: 5m } }`)))
+	if err != nil {
+		t.Fatalf("a disabled advisory inside a disabled block must be ignored: %v", err)
+	}
+	if cfg.Safety.CheckpointCoordination.Advisory == nil || cfg.Safety.CheckpointCoordination.Advisory.Enabled {
+		t.Fatal("the block must be kept as written and stay off")
+	}
+}
+
+func impactConfig(block string) string {
+	return "safety:\n  impact_preview: " + block + "\npolicies:\n  - match: { class: x }\n    playbook: y"
+}
+
+func TestImpactPreviewDefaultsAndBounds(t *testing.T) {
+	cfg, err := Load(writeConfig(t, impactConfig(`{ enabled: true }`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ip := cfg.Safety.ImpactPreview
+	if ip == nil || !ip.Enabled || ip.Budget != ImpactPreviewDefaultBudget || ip.MaxItems != ImpactPreviewDefaultItems || ip.RequireForApproval {
+		t.Fatalf("impact preview = %+v, want enabled with the 15s/200 defaults", ip)
+	}
+	for name, block := range map[string]string{
+		"budget above the ceiling": `{ enabled: true, budget: 2m }`,
+		"too few items":            `{ enabled: true, max_items: 5 }`,
+		"too many items":           `{ enabled: true, max_items: 5000 }`,
+		"require without enabled":  `{ enabled: false, require_for_approval: true }`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, impactConfig(block))); err == nil {
+				t.Fatalf("Load accepted %s", block)
+			}
+		})
+	}
+	if _, err := Load(writeConfig(t, impactConfig(`{ enabled: false, budget: 5m, max_items: 9 }`))); err != nil {
+		t.Fatalf("a disabled block is not read: %v", err)
+	}
+}
+
+func TestCheckpointGroupsDefaultsBoundsAndRequiresCoordination(t *testing.T) {
+	cfg, err := Load(writeConfig(t, checkpointConfig(`{ enabled: true, namespaces: [training], groups: { enabled: true } }`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := cfg.Safety.CheckpointCoordination.Groups
+	if g == nil || !g.Enabled || g.MaxGroupSize != checkpoint.DefaultMaxGroupSize || g.CrossNode {
+		t.Fatalf("groups = %+v, want enabled, size 64, crossNode off", g)
+	}
+	for name, block := range map[string]string{
+		"size above the ceiling":      `{ enabled: true, namespaces: [training], groups: { enabled: true, max_group_size: 513 } }`,
+		"negative size":               `{ enabled: true, namespaces: [training], groups: { enabled: true, max_group_size: -1 } }`,
+		"groups without coordination": `{ enabled: false, groups: { enabled: true } }`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, checkpointConfig(block))); err == nil {
+				t.Fatalf("Load accepted %s", block)
+			}
+		})
+	}
+}

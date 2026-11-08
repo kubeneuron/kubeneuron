@@ -100,7 +100,8 @@ evidence-only runtime contract qualifications — is the v0.5.0 scope, released
 on 2026-09-20; its tag, published images,
 and release assets are available from the
 [GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.5.0).
-(The manifests and chart in this source tree carry the v0.7.0 pins; see
+(The manifests and chart in this source tree carry the v0.8.0 pins of the
+release candidate, v0.7.0 being the latest published release; see
 [the v0.6.0 notes](#v060-checkpoint-coordination-notes),
 [the v0.6.1 note](#v061-security-patch-notes) and
 [the v0.7.0 notes](#v070-observability-notes).)
@@ -175,7 +176,8 @@ hardware qualification of its own surfaces.
 > toolchain patch (see [the v0.6.1 note](#v061-security-patch-notes)) and
 > then by v0.7.0 (see [the v0.7.0 notes](#v070-observability-notes)); both
 > leave this feature unchanged, and the manifests, chart, and samples in
-> this source tree carry the v0.7.0 pins. Releases before v0.6.0 do not
+> this source tree carry the v0.8.0 pins of the release candidate (v0.7.0 is
+> the latest published release). Releases before v0.6.0 do not
 > contain this feature. This section describes the upgrade and rollback posture of the
 > checkpoint coordination scope. Nothing here claims GPU hardware
 > validation of the feature.
@@ -250,6 +252,47 @@ which lets opted-in Pods be told and given a bounded deadline before a
   and no real checkpointing workload; it proves the upgrade, RBAC, and
   rollback wiring, not the protocol against a training job, and no real
   Pod + Downward API scenario has been run.
+
+## v0.8.0 workload-safe recovery notes
+
+> v0.8.0 is **not released**. This section describes the upgrade posture of
+> the development tree so it is written down before the release, not after.
+
+- **Schema migration.** The migration heads move to SQLite 0025 and
+  PostgreSQL 0016: a new `impact_previews` table, an
+  `approvals.impact_digest` column and an
+  `operational_idempotency.result_digest` column, all additive. Migrations are
+  forward-only, so a v0.7.0 controller refuses to start on a v0.8 schema.
+  Take and verify the backup from [Before any upgrade](#before-any-upgrade);
+  for this release it is the rollback path, not a formality: rolling back is
+  **restore the pre-upgrade snapshot, then the v0.7.0 images**, never the
+  v0.7.0 binary on the v0.8 schema. `make test-upgrade-rollback-kind`
+  rehearses exactly that on both stores: the v0.7.0 binary refuses the
+  migrated store with the schema-version error, the documented restore
+  brings v0.7.0 back serving the pre-upgrade state (the rows written after
+  the snapshot are gone, which is what a restore means), and a second
+  upgrade migrates the restored store again. Pre-upgrade decision rows carry
+  an empty `impact_digest`, which reads as "no preview was shown", never as
+  a match.
+- **New optional policy blocks, all off by default.**
+  `spec.safety.checkpointCoordination.advisory` (inside an enabled
+  coordination block), `spec.safety.impactPreview`, and
+  `spec.safety.topologyClassifier.dra`. An installation that sets none of
+  them compiles to the same snapshot digest as before, and a controller
+  behaves as v0.7.0 does. Remove the new blocks before an image rollback so
+  the older operator does not refuse the object.
+- **No new verb for the advisory or the preview.** The advisory reuses the
+  conditional `pods: patch` grant of checkpoint coordination; the preview
+  reads what the controller already lists. The DRA opt-in adds
+  `resourceslices` get/list/watch only.
+- **Clients.** `kubeneuronctl approve --round --impact-digest <digest>`
+  sends `impact_digest` (the digest the notification shows); a v0.7.0
+  controller rejects the unknown field with `400`, so upgrade the controller
+  before the CLI when you use `--impact-digest`. `approve --round` without
+  the digest reads the round's preview and, when one is computed, prints it
+  and stops instead of approving; against a v0.7.0 controller (no preview
+  route) it approves unbound as before. The panel sends the digest only
+  when it displayed one.
 
 ## Upgrade order
 
@@ -333,7 +376,8 @@ layer described in
 and nothing else: no CRD, RBAC, store schema, default, action, playbook
 rung, or webhook path changes for any KubeNeuron component, and the
 controller, agent, and operator binaries carry no feature change. The
-manifests, chart, and samples in this source tree carry the v0.7.0 pins.
+manifests, chart, and samples in this source tree carry the v0.8.0 pins of
+the release candidate; v0.7.0 is the latest published release.
 
 - **Upgrade from v0.6.1.** KubeNeuron itself is images only, in the usual
   CRDs → operator → controller order, with no migration. The observability

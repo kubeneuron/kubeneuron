@@ -213,6 +213,63 @@ shorter than a second is honored as written; the stamped deadline keeps the
 fraction. In `DryRun` nothing is patched and nothing waits; the audited
 output says how many Pods would have been asked.
 
+**Advisory at approval park (v0.8 development, default off).** With
+`checkpointCoordination.advisory.enabled: true`, the moment an incident parks
+for human approval with a `Drain` or `EvictGPUWorkload` still downstream in
+its playbook, every eligible Pod — the same eligibility as the request:
+allowlisted namespace, opted in, not a skipped class, and one the disruption
+would actually touch — is stamped with a closed set of **advisory** keys,
+distinct from the request keys:
+
+```yaml
+kubeneuron.io/checkpoint-advisory:             "true"
+kubeneuron.io/checkpoint-advisory-at:          "2026-11-03T10:14:02Z"
+kubeneuron.io/checkpoint-advisory-incident:    "inc-8f2a"
+kubeneuron.io/checkpoint-advisory-round:       "3"              # the approval round
+kubeneuron.io/checkpoint-advisory-reason:      "ecc-dbe"
+kubeneuron.io/checkpoint-advisory-next-action: "platform.drain"
+```
+
+An advisory carries no deadline and starts no wait: it is the minutes a
+human takes to decide, handed to the job as lead time. The request with its
+deadline still arrives at the disruption step exactly as above. One stamp
+goes out per Pod per approval round (a re-park is a new round and a new
+stamp; a controller restart finds its own stamp and writes nothing). If the
+round ends without the disruption — rejected, expired, resolved by hand —
+the controller stamps `kubeneuron.io/checkpoint-advisory-withdrawn-at`, best
+effort; the advisory keys stay as the record of which round was advised, and
+no workload-owned key is ever removed. A trainer reading its own annotations
+should treat the advisory as "checkpoint if you can" and the request as "you
+have until this time". Dry-run stamps nothing and audits how many Pods it
+would have advised. The advisory uses the same allowlist, Pod-identity
+confinement and `pods: patch` grant as the request and adds no RBAC; its
+`budget` (default 10s, at most 60s) bounds one round and never delays the
+approval. This surface is v0.8 development work: unit-tested, not released,
+and not exercised on GPU hardware.
+
+**Checkpoint groups (v0.8 development, default off).** A Pod may declare
+`kubeneuron.io/checkpoint-group: "<name>"` (a DNS label, at most 63
+characters; anything else is ignored and shown as `group-invalid` in the
+impact preview). The group is every live Pod in the same namespace with the
+same value. With `checkpointCoordination.groups.enabled: true`, when a
+`Drain` or `EvictGPUWorkload` on a node coordinates with a member, the
+member's **peers** receive the same five request keys — the same incident,
+their own deadline from the same formula, from the same request time — and
+nothing else: disruption stays on the one node, peers are never evicted,
+their nodes are never cordoned, and the step waits for them no longer than
+the same bounded window (`min(maxWait, budget)`; a peer asking for less gets
+less, nothing a peer carries gets it more). Each member acknowledges for
+itself (`checkpoint-state: complete:<incident>`, or exit); there is no group
+leader and no aggregate state on any Pod. `groups.crossNode` is **off by
+default**: the group is then the members on the disrupted node, which is
+lead time for local ranks with zero new blast radius; `true` stamps peers on
+other nodes in allowlisted namespaces. A group above `groups.maxGroupSize`
+(default 64, at most 512) has its peers skipped — the step asks only the
+node's members, counts the skip, and the preview flags the group. There is
+no derivation of a group from an owner reference: the annotation is the
+whole contract, and the examples show a Job template and a Ray worker group
+setting it.
+
 ## Why a GPU reset needs a quiesce step
 
 Draining the node is not enough to reset a GPU. NVIDIA's own components keep

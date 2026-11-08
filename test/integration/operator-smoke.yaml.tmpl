@@ -44,6 +44,34 @@ spec:
     - name: cordon
       action: Cordon
 ---
+# Cordon behind an approval, then a real Drain: the v0.8 workload-safe
+# recovery phase parks here so the advisory, the impact preview and the
+# group request can be observed on real Pods before the drain evicts them.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: integration-smoke-workload-safe
+spec:
+  kubeNeuronRef: integration-smoke
+  target: Node
+  steps:
+    - name: cordon
+      action: Cordon
+      approval: Required
+    - name: drain
+      action: Drain
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: integration-workload-safe-policy
+spec:
+  kubeNeuronRef: integration-smoke
+  priority: 4
+  match:
+    class: integration-workload-safe-test
+  playbookRef: integration-smoke-workload-safe
+---
 apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:

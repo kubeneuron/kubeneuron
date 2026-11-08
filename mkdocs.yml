@@ -43,6 +43,7 @@ nav:
       - Making the definition true: definition-plan.md
       - MIG semantics decision: mig-decision.md
       - Checkpoint coordination design: checkpoint-coordination-design.md
+      - Workload-safe recovery design record (v0.8): workload-safe-recovery-design.md
       - Hardware E2E dispatch: hw-e2e-dispatch.md
   - Reference:
       - REST API: reference-api.md
@@ -53,3 +54,4 @@ nav:
       - Security review (v0.5.0): security-review-v0.5.0.md
       - Security review (v0.6.0): security-review-v0.6.0.md
       - Security review (v0.7.0, source review): security-review-v0.7.0.md
+      - Security review (v0.8.0, source review): security-review-v0.8.0.md

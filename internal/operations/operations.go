@@ -28,6 +28,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/decision"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/store"
+	"github.com/kubeneuron/kubeneuron/internal/topology"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -94,6 +95,14 @@ type AutonomyEffectExecutor func(context.Context, AutonomyEffectRequest) (Autono
 // failure is an error so it can never be mistaken for healthy coverage.
 type RuntimeContractCoverageBuilder func(context.Context, string, types.AcceleratorVendor) (config.RuntimeContractCoverage, error)
 
+// TopologyBuilder classifies one node's device topology (internal/topology)
+// from the controller's current evidence. Read-only: the manager never
+// persists its result and a builder must not write. Missing evidence is an
+// ordinary (refused) classification, not an error; a node unknown to the
+// inventory is store.ErrNotFound and an unavailable store is an error, so
+// "could not assess" is never presented as an assessed node.
+type TopologyBuilder func(context.Context, string) (topology.Classification, error)
+
 // Manager owns only durable product resources.  The workflow store is also
 // the existing controller action queue, which lets quick/extended diagnostics
 // retain lease and emergency-stop semantics rather than inventing a second
@@ -108,6 +117,7 @@ type Manager struct {
 	autonomyExecute                 AutonomyEffectExecutor
 	autonomyMaintenanceWindowActive AutonomyMaintenanceWindowResolver
 	buildRuntimeContractCoverage    RuntimeContractCoverageBuilder
+	buildTopology                   TopologyBuilder
 	// diagnosticMu serializes the check-and-admit portion of a diagnostic
 	// request in the elected controller. The durable queue remains the source
 	// of truth across restart; this narrow mutex closes the otherwise ordinary
@@ -128,6 +138,7 @@ type Options struct {
 	AutonomyEffectExecutor          AutonomyEffectExecutor
 	AutonomyMaintenanceWindowActive AutonomyMaintenanceWindowResolver
 	BuildRuntimeContractCoverage    RuntimeContractCoverageBuilder
+	BuildTopology                   TopologyBuilder
 	Now                             func() time.Time
 }
 
@@ -146,6 +157,7 @@ func New(options Options) *Manager {
 		autonomyExecute:                 options.AutonomyEffectExecutor,
 		autonomyMaintenanceWindowActive: options.AutonomyMaintenanceWindowActive,
 		buildRuntimeContractCoverage:    options.BuildRuntimeContractCoverage,
+		buildTopology:                   options.BuildTopology,
 		now:                             now,
 	}
 }
@@ -174,6 +186,11 @@ type Readiness struct {
 	Node     string            `json:"node"`
 	Snapshot decision.Snapshot `json:"snapshot"`
 	Decision decision.Result   `json:"decision"`
+	// Topology is the node's read-only device topology classification. It is
+	// present on a single-node readiness answer when the controller supplies
+	// a topology builder, and absent on fleet pages and older controllers.
+	// It explains; it never changes the Decision above.
+	Topology *topology.Classification `json:"topology,omitempty"`
 }
 
 // ReadinessFilter is the fleet explorer's stable, read-only filter. Tenant
@@ -235,6 +252,43 @@ func (m *Manager) NodeReadiness(ctx context.Context, node string) (*Readiness, e
 		return nil, err
 	}
 	return &Readiness{Node: node, Snapshot: snapshot, Decision: m.evaluateDecision("readiness", snapshot)}, nil
+}
+
+// NodeReadinessWithTopology is NodeReadiness plus the node's device topology
+// classification when a builder is wired. The single-node HTTP route uses it;
+// fleet pages deliberately do not, so a page stays one snapshot per node. A
+// failed classification is an error, never a silently absent field.
+func (m *Manager) NodeReadinessWithTopology(ctx context.Context, node string) (*Readiness, error) {
+	item, err := m.NodeReadiness(ctx, node)
+	if err != nil {
+		return nil, err
+	}
+	if m.buildTopology == nil {
+		return item, nil
+	}
+	classification, err := m.buildTopology(ctx, node)
+	if err != nil {
+		return nil, err
+	}
+	item.Topology = &classification
+	return item, nil
+}
+
+// NodeTopology classifies one current node's device topology without
+// persisting anything. It is an observation about evidence and never
+// authorizes an effect.
+func (m *Manager) NodeTopology(ctx context.Context, node string) (*topology.Classification, error) {
+	if m == nil || m.buildTopology == nil {
+		return nil, fmt.Errorf("%w: topology classifier is unavailable", ErrUnavailable)
+	}
+	if strings.TrimSpace(node) == "" {
+		return nil, fmt.Errorf("node is required")
+	}
+	classification, err := m.buildTopology(ctx, node)
+	if err != nil {
+		return nil, err
+	}
+	return &classification, nil
 }
 
 // evaluateDecision is the sole metrics seam around the pure evaluator. It

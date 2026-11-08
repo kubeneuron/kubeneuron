@@ -203,6 +203,53 @@ var (
 		Help: "Checkpoint coordination outcomes by workload (acknowledged, exited, expired, unreachable) or per step when nothing was requested (skipped).",
 	}, []string{"outcome"})
 
+	// CheckpointAdvisories counts advisory outcomes at approval park: one
+	// stamped/unreachable per eligible workload the round tried to notify,
+	// one withdrawn per notice withdrawn when the round ended without its
+	// disruption, and one skipped per round that sent nothing at all. The
+	// label set is closed (checkpoint.AdvisoryOutcomes) and carries no node,
+	// pod, namespace or incident; which Pods were notified is on the
+	// incident's audit trail.
+	CheckpointAdvisories = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_checkpoint_advisories_total",
+		Help: "Checkpoint advisory outcomes at approval park: stamped and unreachable per workload, withdrawn per notice, skipped per round that sent nothing.",
+	}, []string{"outcome"})
+
+	// CheckpointGroupRequests counts the outcomes of requests sent to group
+	// PEERS — members of a coordinated workload's checkpoint group that the
+	// disruption itself does not touch — with the Phase 1 outcome vocabulary
+	// plus skipped (a group too large, or peers beyond a node when crossNode
+	// is off, are not asked). Closed label set; no group label.
+	CheckpointGroupRequests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_checkpoint_group_requests_total",
+		Help: "Checkpoint requests to group peers by outcome (acknowledged, exited, expired, unreachable, skipped).",
+	}, []string{"outcome"})
+
+	// ImpactPreviews counts impact preview computations per approval round by
+	// result: computed, unavailable (the reason is on the record), or
+	// truncated (computed, with more workloads than it itemised). Closed
+	// label set; no incident or node label.
+	ImpactPreviews = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_impact_previews_total",
+		Help: "Impact preview computations at approval park by result (computed, unavailable, truncated).",
+	}, []string{"result"})
+
+	// ImpactPreviewSeconds observes how long one preview took to gather and
+	// render, bounded by the policy budget (at most 60s).
+	ImpactPreviewSeconds = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "kubeneuron_impact_preview_seconds",
+		Help:    "Seconds one impact preview took to gather and render.",
+		Buckets: []float64{0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15, 30, 60},
+	})
+
+	// ApprovalsBound counts recorded approval decisions by what the client
+	// bound them to: the round only, the round and the impact digest, or
+	// nothing (an older client). Closed label set.
+	ApprovalsBound = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_approvals_bound_total",
+		Help: "Approval decisions by binding (round, round_and_impact, none).",
+	}, []string{"binding"})
+
 	// CheckpointWaitSeconds observes, per workload with a request in force,
 	// the elapsed time from the request's durable requested-at on the object
 	// until its outcome settled. A request resumed after a controller restart
@@ -292,6 +339,18 @@ var (
 		Name: "kubeneuron_decision_compatibility_holds_total",
 		Help: "Live reset admissions the shared evaluator held while the compatibility gate remained authoritative, by disposition.",
 	}, []string{"state"})
+
+	// TopologyClassifications counts device topology classifications
+	// (internal/topology) by the topology found and whether device-scoped
+	// actions were eligible or refused. Both label sets are closed: topology
+	// is one of the six topology.Topology values and result is eligible or
+	// refused. Deliberately a counter with no node label rather than a
+	// per-node gauge — a fleet's node set is unbounded, and which node was
+	// classified how is answered by the readiness API, not by a series.
+	TopologyClassifications = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_topology_classifications_total",
+		Help: "Device topology classifications by topology (whole-device, mig, time-sliced, dra-managed, mixed, unknown) and result (eligible, refused).",
+	}, []string{"topology", "result"})
 
 	// ActionsPending is the durable action-queue depth (queued work agents
 	// have not yet completed).
@@ -397,6 +456,12 @@ const (
 	// requests all settled on the first look, or that made no request, did not
 	// defer anything.
 	DeferCheckpointWait = "checkpoint_wait"
+	// DeferTopologyUnqualified: the legacy reset evidence passed but the
+	// device topology classifier (internal/topology) refused the device-scoped
+	// reset — the node is MIG-partitioned, time-sliced, DRA-managed, mixed,
+	// or its topology could not be established. Narrowing only: nothing the
+	// classifier says ever lets a reset through that the legacy gate refused.
+	DeferTopologyUnqualified = "topology_unqualified"
 )
 
 // RecordCertBundleExpiry parses PEM material and records the earliest

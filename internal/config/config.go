@@ -55,6 +55,32 @@ type Safety struct {
 	// coordination, so a configuration written before the feature existed can
 	// never make a disruption start waiting after an upgrade.
 	CheckpointCoordination *CheckpointCoordination `yaml:"checkpoint_coordination,omitempty"`
+	// TopologyClassifier is the compiled spec.safety.topologyClassifier. The
+	// classifier itself (internal/topology) always runs and can only narrow
+	// the reset gate; this block carries only its opt-in inputs. A nil
+	// pointer is the whole of the default: no Dynamic Resource Allocation
+	// read is ever attempted by a controller whose configuration predates the
+	// field, and the operator emits the key only when discovery is enabled.
+	TopologyClassifier *TopologyClassifier `yaml:"topology_classifier,omitempty"`
+	// ImpactPreview is the compiled spec.safety.impactPreview. Absent is off.
+	ImpactPreview *ImpactPreview `yaml:"impact_preview,omitempty"`
+}
+
+// TopologyClassifier carries the opt-in inputs of the device topology
+// classifier. See the CRD field of the same name.
+type TopologyClassifier struct {
+	DRA TopologyClassifierDRA `yaml:"dra"`
+}
+
+// TopologyClassifierDRA switches the read-only resource.k8s.io/v1 observation
+// on. When Enabled the controller lists ResourceSlices for a node (get/list/
+// watch only, v1 only) and inspects the claim references of the Pods
+// scheduled on it (the core Pod list it already holds; ResourceClaim objects
+// are never read), and refuses device-scoped actions when either read is
+// unavailable; when false DRA is not consulted and the classification says
+// so. Off by default.
+type TopologyClassifierDRA struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // CheckpointCoordination configures checkpoint-aware remediation. See the CRD
@@ -74,6 +100,83 @@ type CheckpointCoordination struct {
 	SkipClasses []types.ProblemClass `yaml:"skip_classes"`
 	// Namespaces is the explicit allowlist; required when Enabled.
 	Namespaces []string `yaml:"namespaces,omitempty"`
+	// Advisory is the Phase 2 notice at approval park. Absent means off; the
+	// operator emits the key only when the advisory is enabled.
+	Advisory *CheckpointAdvisory `yaml:"advisory,omitempty"`
+	// Groups is the bounded gang coordination. Absent means off.
+	Groups *CheckpointGroups `yaml:"groups,omitempty"`
+}
+
+// CheckpointGroups configures group requests. See the CRD field
+// spec.safety.checkpointCoordination.groups.
+type CheckpointGroups struct {
+	Enabled      bool `yaml:"enabled"`
+	MaxGroupSize int  `yaml:"max_group_size"`
+	CrossNode    bool `yaml:"cross_node"`
+}
+
+// ImpactPreview configures the impact preview of approval rounds. See the
+// CRD field spec.safety.impactPreview. Absent means off; the operator emits
+// the key only when enabled.
+type ImpactPreview struct {
+	Enabled            bool     `yaml:"enabled"`
+	Budget             Duration `yaml:"budget"`
+	MaxItems           int      `yaml:"max_items"`
+	RequireForApproval bool     `yaml:"require_for_approval"`
+	// WorkloadContext selects the read-only resolvers; each key is off
+	// when absent.
+	WorkloadContext ImpactWorkloadContext `yaml:"workload_context"`
+}
+
+// ImpactWorkloadContext selects the read-only context resolvers.
+type ImpactWorkloadContext struct {
+	BatchJobs bool `yaml:"batch_jobs"`
+	Kueue     bool `yaml:"kueue"`
+	KubeRay   bool `yaml:"kuberay"`
+}
+
+// Impact preview bounds, mirroring the CRD.
+const (
+	ImpactPreviewDefaultBudget = Duration(15 * time.Second)
+	ImpactPreviewBudgetCeiling = Duration(60 * time.Second)
+	ImpactPreviewDefaultItems  = 200
+	ImpactPreviewMinItems      = 10
+	ImpactPreviewMaxItems      = 1000
+)
+
+// validate applies the defaults and rejects what could not be enforced.
+func (ip *ImpactPreview) validate() error {
+	if !ip.Enabled {
+		if ip.RequireForApproval {
+			return fmt.Errorf("config: safety.impact_preview.require_for_approval requires safety.impact_preview.enabled")
+		}
+		return nil
+	}
+	if ip.Budget == 0 {
+		ip.Budget = ImpactPreviewDefaultBudget
+	}
+	if ip.Budget < 0 {
+		return fmt.Errorf("config: safety.impact_preview.budget must be positive, got %v", ip.Budget.Std())
+	}
+	if ip.Budget > ImpactPreviewBudgetCeiling {
+		return fmt.Errorf("config: safety.impact_preview.budget %v exceeds the %v ceiling", ip.Budget.Std(), ImpactPreviewBudgetCeiling.Std())
+	}
+	if ip.MaxItems == 0 {
+		ip.MaxItems = ImpactPreviewDefaultItems
+	}
+	if ip.MaxItems < ImpactPreviewMinItems || ip.MaxItems > ImpactPreviewMaxItems {
+		return fmt.Errorf("config: safety.impact_preview.max_items must be between %d and %d, got %d", ImpactPreviewMinItems, ImpactPreviewMaxItems, ip.MaxItems)
+	}
+	return nil
+}
+
+// CheckpointAdvisory configures the advisory at approval park. See the CRD
+// field spec.safety.checkpointCoordination.advisory.
+type CheckpointAdvisory struct {
+	Enabled bool `yaml:"enabled"`
+	// Budget bounds one advisory round; zero is defaulted in validate to
+	// CheckpointAdvisoryDefaultBudget and it is never above the ceiling.
+	Budget Duration `yaml:"budget"`
 }
 
 // Checkpoint coordination bounds. The defaults mirror the CRD defaults and
@@ -82,6 +185,9 @@ const (
 	CheckpointDefaultWait    = Duration(5 * time.Minute)
 	CheckpointDefaultMaxWait = Duration(15 * time.Minute)
 	CheckpointMaxWaitCeiling = Duration(30 * time.Minute)
+
+	CheckpointAdvisoryDefaultBudget = Duration(10 * time.Second)
+	CheckpointAdvisoryBudgetCeiling = Duration(60 * time.Second)
 )
 
 // TaintDegradedNodes configures the kubeneuron.io/degraded taint. See the CRD
@@ -187,6 +293,11 @@ func (c *Config) Validate() error {
 			return err
 		}
 	}
+	if ip := c.Safety.ImpactPreview; ip != nil {
+		if err := ip.validate(); err != nil {
+			return err
+		}
+	}
 	if len(c.Policies) == 0 {
 		return fmt.Errorf("config: at least one policy is required")
 	}
@@ -217,7 +328,33 @@ func (c *Config) Validate() error {
 // emits one anyway.
 func (cc *CheckpointCoordination) validate() error {
 	if !cc.Enabled {
+		if cc.Advisory != nil && cc.Advisory.Enabled {
+			return fmt.Errorf("config: safety.checkpoint_coordination.advisory.enabled requires safety.checkpoint_coordination.enabled")
+		}
+		if cc.Groups != nil && cc.Groups.Enabled {
+			return fmt.Errorf("config: safety.checkpoint_coordination.groups.enabled requires safety.checkpoint_coordination.enabled")
+		}
 		return nil
+	}
+	if cc.Groups != nil && cc.Groups.Enabled {
+		if cc.Groups.MaxGroupSize == 0 {
+			cc.Groups.MaxGroupSize = checkpoint.DefaultMaxGroupSize
+		}
+		if cc.Groups.MaxGroupSize < 1 || cc.Groups.MaxGroupSize > checkpoint.MaxGroupSizeCeiling {
+			return fmt.Errorf("config: safety.checkpoint_coordination.groups.max_group_size must be between 1 and %d, got %d", checkpoint.MaxGroupSizeCeiling, cc.Groups.MaxGroupSize)
+		}
+	}
+	if cc.Advisory != nil && cc.Advisory.Enabled {
+		if cc.Advisory.Budget == 0 {
+			cc.Advisory.Budget = CheckpointAdvisoryDefaultBudget
+		}
+		if cc.Advisory.Budget < 0 {
+			return fmt.Errorf("config: safety.checkpoint_coordination.advisory.budget must be positive, got %v", cc.Advisory.Budget.Std())
+		}
+		if cc.Advisory.Budget > CheckpointAdvisoryBudgetCeiling {
+			return fmt.Errorf("config: safety.checkpoint_coordination.advisory.budget %v exceeds the %v ceiling",
+				cc.Advisory.Budget.Std(), CheckpointAdvisoryBudgetCeiling.Std())
+		}
 	}
 	if cc.DefaultWait == 0 {
 		cc.DefaultWait = CheckpointDefaultWait

@@ -101,6 +101,7 @@ func requireFailClosedCandidateProfile(t *testing.T, bucket string, delta NodeDe
 	impact := delta.RuntimeContractImpact
 	if impact == nil {
 		t.Fatal("candidate profile delta has no runtime contract impact")
+		return
 	}
 	want := CandidateRuntimeContractImpact{
 		Version: CandidateRuntimeContractImpactVersion, Assessment: RuntimeContractImpactPreDeployStatic,
@@ -196,6 +197,7 @@ func TestPreviewUncoveredAndAmbiguousCandidateSelectionNeverAuthorize(t *testing
 			impact := delta.RuntimeContractImpact
 			if impact == nil {
 				t.Fatal("no runtime contract impact")
+				return
 			}
 			want := CandidateRuntimeContractImpact{
 				Version: CandidateRuntimeContractImpactVersion, Assessment: RuntimeContractImpactPreDeployStatic,
@@ -285,6 +287,7 @@ spec:
 	impact := delta.RuntimeContractImpact
 	if impact == nil {
 		t.Fatal("policy-only delta has no runtime contract impact")
+		return
 	}
 	want := CandidateRuntimeContractImpact{
 		Version: CandidateRuntimeContractImpactVersion, Assessment: RuntimeContractImpactPreDeployStatic,

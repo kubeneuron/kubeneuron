@@ -15,8 +15,9 @@ as a named human, watch the ladder finish, hit the big red button.
 
 KubeNeuron is a vendor-neutral GPU fleet reliability control plane: it
 detects degradation, protects workloads, automates safe recovery, and
-measures recovered capacity. Detection ships NVIDIA-only today; the fault envelope
-and accelerator seam are vendor-agnostic by construction.
+measures recovered capacity. Kernel-log detection ships for NVIDIA (validated
+on hardware) and AMD (CPU-only evidence); the fault envelope and accelerator
+seam are vendor-agnostic by construction.
 
 Three components, all shipped as distroless images:
 

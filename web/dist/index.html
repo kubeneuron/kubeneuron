@@ -163,6 +163,10 @@ tr.selected td{background:#5b8cff14}
 .state.Eligible{color:var(--ok)}.state.ObservedOnly{color:var(--warn)}.state.Blocked,.state.Unknown{color:var(--bad)}
 .reason{display:inline-block;border:1px solid var(--line2);border-radius:99px;color:var(--dim);font: .66rem var(--mono);padding:.1rem .4rem;margin:.08rem}
 .small{font-size:.73rem}.nowrap{white-space:nowrap}
+.topo .reason{margin-left:.15rem}
+.notice{border:1px solid var(--warn);background:#f5b94a14;color:var(--warn);border-radius:9px;padding:.55rem .8rem;font-size:.78rem;margin:.2rem 0 .6rem;line-height:1.4}
+.notice .mono{color:#f0d7a0;word-break:break-word;display:block;margin-top:.25rem}
+.item2{color:var(--dimmer);font-size:.68rem;padding-left:.9rem;word-break:break-word}
 
 /* ============ drawer ============ */
 #drawer{
@@ -316,7 +320,7 @@ footer.lf{margin-top:1.4rem;color:var(--dimmer);font-size:.7rem;text-align:cente
     <section id="view-fleet" style="display:none">
       <div class="viewhead"><h1>Fleet</h1><span class="live">live</span></div>
       <table class="card"><thead><tr>
-        <th>Node</th><th>Platform</th><th>GPUs</th><th>Inventory</th><th>Paused</th><th>Agent last seen</th>
+        <th>Node</th><th>Platform</th><th>GPUs</th><th>Inventory</th><th>Topology</th><th>Paused</th><th>Agent last seen</th>
       </tr></thead><tbody id="nodeRows"></tbody></table>
     </section>
 
@@ -383,6 +387,9 @@ footer.lf{margin-top:1.4rem;color:var(--dimmer);font-size:.7rem;text-align:cente
   </div>
   <div class="dbody">
     <div class="kv" id="dMeta"></div>
+    <div class="sectiontitle" style="margin-top:.4rem">Impact <span class="dimmer small">— what the pending step would touch</span></div>
+    <div id="dImpactNotice" class="notice" style="display:none"></div>
+    <div id="dImpact"><span class="dimmer" style="font-size:.78rem">no impact preview for this round</span></div>
     <div class="sectiontitle" style="margin-top:.4rem">Playbook progress</div>
     <div class="ladder" id="dLadder"></div>
     <div class="sectiontitle">Audit trail — system of record</div>
@@ -410,7 +417,7 @@ async function api(path, method, body, extraHeaders){
   if(body){ opts.headers["Content-Type"]="application/json"; opts.body = JSON.stringify(body); }
   const resp = await fetch(path, opts);
   if(resp.status === 401){ showLogin(); throw new Error("unauthorized"); }
-  if(!resp.ok) throw new Error((await resp.text()).trim() || String(resp.status));
+  if(!resp.ok){ const err = new Error((await resp.text()).trim() || String(resp.status)); err.status = resp.status; throw err; }
   if(resp.status === 204) return null;
   return resp.json();
 }
@@ -488,14 +495,34 @@ function route(){
 window.addEventListener("hashchange", route);
 
 /* ---------- actions ---------- */
+/* impact previews, by incident id and round: the digest the drawer displayed
+   is what an approve binds to. */
+const impactSeen = {};
+/* A 409 on approve/reject means the round or the preview the operator read
+   is no longer what the server holds. The decision is never resubmitted:
+   the stale preview is dropped, the drawer reloads it, and this notice asks
+   the human to read it again and decide again. */
+let impactNotice = null; // {id, verb, text}
+function dropImpactSeen(id){ for(const k of Object.keys(impactSeen)) if(k.startsWith(id + "#")) delete impactSeen[k]; }
 async function decide(id, verb, round){
   try {
     const body = {actor: actor()};
     if(round > 0) body.park_epoch = round; // pin to the round the row displayed
+    const seen = impactSeen[id + "#" + round];
+    if(seen && seen.digest && !seen.unavailable) body.impact_digest = seen.digest; // and to the preview the human read
     await api(`/api/v1/incidents/${encodeURIComponent(id)}/${verb}`, "POST", body);
+    if(impactNotice && impactNotice.id === id) impactNotice = null;
     toast(`${verb} recorded for ${id.slice(0,34)}…`, verb === "reject" ? "bad" : "good");
     await tick();
-  } catch(e){ toast(e.message, "bad"); }
+  } catch(e){
+    if(e.status === 409){
+      dropImpactSeen(id);
+      impactNotice = {id, verb, text: e.message};
+      if(openIncident === id) await renderDrawer(); else await openDrawer(id);
+      return;
+    }
+    toast(e.message, "bad");
+  }
 }
 async function acknowledgeIncident(id, version){
   try {
@@ -601,6 +628,7 @@ function renderOverview(){
         <span class="hb ${fresh?"fresh":"stale"}" title="${fresh?"heartbeat fresh":"heartbeat stale"}"></span></div>
       <div class="gpugrid">${cells || '<span class="dimmer" style="font-size:.72rem">no GPUs reported</span>'}</div>
       <div class="meta"><span>${(n.gpus||[]).length} GPU</span><span>${esc(n.platform)}</span>${n.paused?'<span style="color:var(--warn)">paused</span>':''}</div>
+      ${topoSeen[n.name] && topoSeen[n.name].doc ? `<div class="meta" style="margin-top:.3rem">${topologyCell(n.name)}</div>` : ""}
     </div>`;
   }).join("") || `<div class="dimmer">no nodes registered yet</div>`;
   const events = incs.map(i => ({t: i.updated_at, id: i.id, state: i.state, cls: i.class, node: i.target.node}))
@@ -612,15 +640,41 @@ function renderOverview(){
       <span class="mono">${esc(e.cls)}</span><span class="dimmer">on</span><span class="mono">${esc(e.node)}</span>
     </div>`).join("") || `<div class="feeditem dimmer">no activity yet</div>`;
 }
+/* Node topology classification (read-only, GET /nodes/{node}/topology).
+   Fetched only while the Fleet view is on screen and cached per node for
+   60 s so the 5 s tick does not refetch; a 404/503/error renders as
+   "unclassified" rather than failing the table. */
+const topoSeen = {}; // node -> {at, doc|null, pending}
+const TOPO_TTL = 60000;
+function currentView(){ return location.hash.replace("#/","") || "overview"; }
+function ensureTopology(node){
+  const t = topoSeen[node];
+  if(t && (t.pending || Date.now() - t.at < TOPO_TTL)) return;
+  topoSeen[node] = {at: Date.now(), doc: t ? t.doc : null, pending: true};
+  api(`/api/v1/nodes/${encodeURIComponent(node)}/topology`)
+    .then(doc => { topoSeen[node] = {at: Date.now(), doc, pending: false}; })
+    .catch(() => { topoSeen[node] = {at: Date.now(), doc: null, pending: false}; })
+    .then(() => { const v = currentView(); if(v === "fleet") renderFleet(); else if(v === "overview") renderOverview(); });
+}
+function topologyCell(node){
+  const t = topoSeen[node];
+  if(!t || !t.doc) return `<span class="dimmer small">${t && t.pending ? "classifying…" : "unclassified"}</span>`;
+  const c = t.doc;
+  const pills = (c.reasons || []).map(code => `<span class="reason">${esc(code)}</span>`).join("");
+  const tone = c.device_actions === "eligible" ? "color:var(--ok)" : "color:var(--warn)";
+  return `<span class="topo" title="${esc(c.summary || "")}"><span class="mono small">${esc(c.topology || "unknown")}</span> <span class="small" style="${tone}">/ ${esc(c.device_actions || "unknown")}</span>${pills}</span>`;
+}
 function renderFleet(){
+  if(currentView() === "fleet") cache.nodes.forEach(n => ensureTopology(n.name));
   $("nodeRows").innerHTML = cache.nodes.map(n => {
     const fresh = heartbeatFresh(n.agent_last_seen);
     const models = [...new Set((n.gpus||[]).map(g => g.model))].join(", ");
     return `<tr><td class="mono">${esc(n.name)}</td><td>${esc(n.platform)}</td>
       <td>${(n.gpus||[]).length}</td><td class="dim">${esc(models || "—")}</td>
+      <td>${topologyCell(n.name)}</td>
       <td>${n.paused ? '<span class="pill AWAITING_APPROVAL">paused</span>' : '<span class="dimmer">no</span>'}</td>
       <td class="mono ${fresh?"dim":""}" style="${fresh?"":"color:var(--bad)"}">${n.agent_last_seen ? esc(n.agent_last_seen.replace("T"," ").slice(0,19)) : "never"}</td></tr>`;
-  }).join("") || `<tr><td colspan="6" class="dimmer">no nodes registered</td></tr>`;
+  }).join("") || `<tr><td colspan="7" class="dimmer">no nodes registered</td></tr>`;
 }
 
 /* ---------- v0.4 operations console ---------- */
@@ -789,9 +843,109 @@ async function openDrawer(id){
   await renderDrawer();
 }
 function closeDrawer(){
+  if(impactNotice && impactNotice.id === openIncident) impactNotice = null;
   openIncident = null;
   $("scrim").classList.remove("open"); $("drawer").classList.remove("open");
   renderIncidents();
+}
+function relAge(iso){
+  const ms = Date.now() - Date.parse(iso || "");
+  if(!Number.isFinite(ms)) return "";
+  const s = Math.max(0, Math.floor(ms/1000));
+  if(s < 60) return `${s}s ago`;
+  if(s < 3600) return `${Math.floor(s/60)}m ago`;
+  if(s < 86400) return `${Math.floor(s/3600)}h ago`;
+  return `${Math.floor(s/86400)}d ago`;
+}
+const IMPACT_ITEMS_DEFAULT = 12;
+const impactShowAll = {}; // incident#round -> true when the operator expanded the item list
+function toggleImpactItems(key){
+  impactShowAll[key] = !impactShowAll[key];
+  const seen = impactSeen[key];
+  if(seen && seen.inc) $("dImpact").innerHTML = renderImpact(seen.doc, seen.inc);
+}
+/* One dimmed line under a workload item: its owner chain and the key facts
+   of the resolved context (batch Job, Kueue, Ray). Absent facts are skipped. */
+function itemContext(it){
+  const parts = [];
+  if(it.owner_chain && it.owner_chain.length) parts.push("owners " + it.owner_chain.map(esc).join(" › "));
+  const c = it.context || {};
+  if(c.batch_job){
+    const j = c.batch_job, f = [`Job ${esc(j.name || "")}`];
+    if(j.completions != null) f.push(`completions ${esc(j.completions)}`);
+    if(j.parallelism != null) f.push(`parallelism ${esc(j.parallelism)}`);
+    if(j.indexed) f.push("indexed");
+    if(j.active != null) f.push(`active ${esc(j.active)}`);
+    parts.push(f.join(" · "));
+  }
+  if(c.kueue){
+    const q = c.kueue, f = [`Kueue ${esc(q.workload || "no workload")}`];
+    if(q.local_queue) f.push(`queue ${esc(q.local_queue)}`);
+    if(q.cluster_queue) f.push(`cluster queue ${esc(q.cluster_queue)}`);
+    if(q.active != null) f.push(q.active ? "active" : "inactive");
+    if(q.workload_lookup) f.push(`lookup ${esc(q.workload_lookup)}`);
+    parts.push(f.join(" · "));
+  }
+  if(c.ray){
+    const r = c.ray, f = [`Ray ${esc(r.cluster || "")}`];
+    if(r.node_type) f.push(esc(r.node_type));
+    if(r.group) f.push(`group ${esc(r.group)}`);
+    if(r.job || r.ray_job) f.push(`job ${esc(r.job || r.ray_job)}`);
+    parts.push(f.join(" · "));
+  }
+  return parts.length ? `<div class="item2">${parts.join(" — ")}</div>` : "";
+}
+function renderImpact(p, inc){
+  if(!p) return `<span class="dimmer" style="font-size:.78rem">no impact preview for round ${esc(String(inc.approval_epoch))} — the controller has none, or the route is not served</span>`;
+  if(p.unavailable){
+    return `<div class="kv"><div class="k">Unavailable</div><div><span class="pill NEEDS_HUMAN">${esc(p.unavailable.reason || "unknown")}</span>
+      <button class="btn" style="margin-left:.5rem" onclick="recomputeImpact('${esc(inc.id)}')">Recompute</button></div></div>`;
+  }
+  const key = inc.id + "#" + inc.approval_epoch;
+  const topo = p.node && p.node.topology ? `${esc(p.node.topology.topology)} / device actions ${esc(p.node.topology.device_actions)}` : "unclassified";
+  const w = p.workloads || {};
+  const inel = Object.entries(w.ineligible || {}).map(([k,v]) => `${esc(k)} ${v}`).join(", ") || "—";
+  // The on-node count is a lower bound and is never presented as the total.
+  const groups = (w.groups || []).map(g => {
+    const total = g.members_total_known ? `total ${g.members_total}` : `<span style="color:var(--warn)">total unknown</span>`;
+    const flags = [g.cross_node_requested ? "cross-node requested" : "", g.too_large ? "too large" : ""].filter(Boolean);
+    return `<span class="nowrap"><span class="mono">${esc(g.namespace)}/${esc(g.name)}</span> (${g.members_on_node} on node · ${total}${flags.length ? ", " + flags.join(", ") : ""})</span>`;
+  }).join(", ") || "—";
+  const warnings = (p.warnings || []).map(x => `<span class="reason">${esc(x)}</span>`).join("") || `<span class="dimmer">none</span>`;
+  const all = w.items || [];
+  const shown = impactShowAll[key] ? all : all.slice(0, IMPACT_ITEMS_DEFAULT);
+  const items = shown.map(it =>
+    `<div class="small"><span class="mono">${esc(it.namespace)}/${esc(it.name)}</span>${it.kind ? ` <span class="dimmer">${esc(it.kind)}</span>` : ""}${it.uses_gpu ? " · GPU" : ""} · ${it.checkpoint && it.checkpoint.eligible ? `<span style="color:var(--ok)">eligible for a checkpoint request ${esc(it.checkpoint.effective_wait || "")}</span>` : `<span class="dimmer">${esc((it.checkpoint && it.checkpoint.ineligibility) || "")}</span>`}${it.checkpoint && it.checkpoint.group ? ` <span class="dimmer">group ${esc(it.checkpoint.group)}</span>` : ""}</div>${itemContext(it)}`
+  ).join("") + (all.length > IMPACT_ITEMS_DEFAULT
+    ? `<div class="small" style="margin-top:.3rem"><button class="linkish" onclick="toggleImpactItems('${esc(key)}')">${impactShowAll[key] ? `show first ${IMPACT_ITEMS_DEFAULT}` : `… ${all.length - IMPACT_ITEMS_DEFAULT} more — show all ${all.length}`}</button></div>`
+    : "");
+  const age = p.computed_at ? `<span class="mono">${esc(String(p.computed_at).replace("T"," ").slice(0,19))}</span> <span class="dimmer">(${esc(relAge(p.computed_at))})</span>` : `<span class="dimmer">unknown</span>`;
+  return `<div class="kv">
+    <div class="k">Node</div><div><span class="mono">${esc(p.node && p.node.name || "")}</span> · ${topo}</div>
+    <div class="k">Pending</div><div><span class="mono">${esc(p.pending_step || "")}</span> → ${esc((p.downstream_disruptions || []).join(", ") || "no disruption downstream")}</div>
+    <div class="k">Workloads</div><div>${w.total || 0} total · ${w.gpu_holders || 0} GPU holders · ${w.namespaces || 0} namespaces · <span style="color:var(--ok)">${w.eligible_for_checkpoint || 0} eligible for a checkpoint request</span></div>
+    <div class="k">Ineligible</div><div class="small">${inel}</div>
+    <div class="k">Groups</div><div class="small">${groups}</div>
+    <div class="k">Warnings</div><div>${warnings}</div>
+    <div class="k">Computed</div><div class="small">${age}</div>
+    <div class="k">Digest</div><div class="mono small" style="word-break:break-all">${esc(p.digest || "")}${p.limits && p.limits.items_truncated ? ' <span class="dimmer">(items truncated)</span>' : ""}</div>
+  </div>${items}`;
+}
+async function recomputeImpact(id){
+  try {
+    await api(`/api/v1/incidents/${encodeURIComponent(id)}/impact-preview/recompute`, "POST", {actor: actor()}, {"Idempotency-Key": operationKey()});
+    dropImpactSeen(id);
+    toast("impact preview recomputed", "good"); await renderDrawer();
+  } catch(e){ toast(e.message, "bad"); }
+}
+/* The human decision on the current round and which preview it was bound
+   to: the decision row's digest matches the live preview only when the
+   operator decided on the preview that is still current. */
+function decisionBinding(d){
+  const verdict = `<span class="pill ${d.decision === "approved" ? "RESOLVED" : "NEEDS_HUMAN"}">${esc(d.decision)}</span>`;
+  if(!d.decision_impact_digest) return `${verdict} <span class="dimmer small">not bound to a preview</span>`;
+  if(d.impact_preview_digest && d.decision_impact_digest === d.impact_preview_digest) return `${verdict} <span class="small" style="color:var(--ok)">bound to the current preview</span>`;
+  return `${verdict} <span class="small" style="color:var(--warn)">bound to an earlier preview</span> <span class="mono small dimmer" style="word-break:break-all">${esc(d.decision_impact_digest)}</span>`;
 }
 async function renderDrawer(){
   if(!openIncident) return;
@@ -811,7 +965,32 @@ async function renderDrawer(){
     ["Mode", inc.dry_run ? "dry-run (no real side effects)" : "live"],
     ["Signals", String(inc.signals_seen)],
     ["Opened", `<span class="mono">${esc((inc.opened_at||"").replace("T"," ").slice(0,19))}</span>`],
-  ].map(([k,v]) => `<div class="k">${k}</div><div>${v}</div>`).join("");
+  ].concat(d.decision ? [["Decision", decisionBinding(d)]] : [])
+   .map(([k,v]) => `<div class="k">${k}</div><div>${v}</div>`).join("");
+
+  // A 409 from approve/reject left a notice for this incident: shown above
+  // the (reloaded) preview until the operator decides again or closes.
+  const notice = $("dImpactNotice");
+  if(impactNotice && impactNotice.id === inc.id){
+    notice.style.display = "block";
+    notice.innerHTML = `<b>${esc(impactNotice.verb || "decision")} not recorded.</b> The approval request or its impact preview changed since it was displayed. The preview below was reloaded from the controller — review it and click Approve or Reject again. Nothing was resubmitted.<span class="mono">${esc(impactNotice.text || "")}</span>`;
+  } else { notice.style.display = "none"; notice.innerHTML = ""; }
+
+  // Impact preview of the current approval round (v0.8 development). Cached
+  // per round so the 5s tick does not refetch it; a 404/503 is "none".
+  if(inc.state === "AWAITING_APPROVAL" && inc.approval_epoch > 0){
+    const key = inc.id + "#" + inc.approval_epoch;
+    if(!impactSeen[key] || (d.impact_preview_digest && impactSeen[key].digest !== d.impact_preview_digest)){
+      try {
+        const p = await api(`/api/v1/incidents/${encodeURIComponent(inc.id)}/impact-preview?round=${inc.approval_epoch}`);
+        impactSeen[key] = {digest: p.digest, unavailable: !!p.unavailable, doc: p};
+      } catch(e){ impactSeen[key] = {digest: "", unavailable: true, doc: null}; }
+    }
+    impactSeen[key].inc = inc; // lets the items toggle re-render without a refetch
+    $("dImpact").innerHTML = renderImpact(impactSeen[key].doc, inc);
+  } else {
+    $("dImpact").innerHTML = `<span class="dimmer" style="font-size:.78rem">no pending approval round</span>`;
+  }
 
   // Ladder from the audit: executed step names in order, current position.
   const steps = [];

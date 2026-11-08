@@ -1,0 +1,240 @@
+# A RayJob whose worker Pods opt into checkpoint coordination and form one
+# group named after the job. The Ray Train loop (train.py, below) polls its
+# own Pod's annotations through the downward API: an advisory makes the next
+# iteration write a checkpoint, a request makes it write one, acknowledge and
+# return.
+#
+# Ray does not read KubeNeuron's annotations itself; the script shows how
+# user code does. A Ray worker Pod does not exit when a training function
+# returns, so the worker acknowledges through the state annotation instead,
+# with a Role in its own namespace: that credential is the workload's, not
+# KubeNeuron's, and it is the only one in these examples.
+#
+# Requires KubeRay (https://docs.ray.io/en/latest/cluster/kubernetes/)
+# installed; CPU only. The Ray image is the tag and digest pinned in
+# deploy/kubernetes/dependencies/versions.lock.yaml.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ray-train-checkpoint
+  namespace: ml-training
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ray-train-checkpoint-acknowledge
+  namespace: ml-training
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ray-train-checkpoint-acknowledge
+  namespace: ml-training
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ray-train-checkpoint-acknowledge
+subjects:
+  - kind: ServiceAccount
+    name: ray-train-checkpoint
+    namespace: ml-training
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ray-train-checkpoint-example
+  namespace: ml-training
+data:
+  train.py: |
+    import json, os, ssl, tempfile, time, urllib.request
+    from ray import train
+    from ray.train import Checkpoint, FailureConfig, RunConfig, ScalingConfig
+    # Ray 2.5x+ ships Ray Train V2 by default: ray.train.RunConfig is the V2
+    # class and only the V2 trainer accepts it. Older Ray falls back to V1.
+    try:
+        from ray.train.v2.api.data_parallel_trainer import DataParallelTrainer
+        from ray.train.collective import broadcast_from_rank_zero
+    except ImportError:
+        from ray.train.data_parallel_trainer import DataParallelTrainer
+        broadcast_from_rank_zero = lambda data: data  # noqa: E731 - one worker, nothing to agree on
+
+    ANNOTATIONS = os.environ.get("ANNOTATIONS", "/etc/podinfo/annotations")
+    STATE_KEY = "kubeneuron.io/checkpoint-state"
+
+    def annotation(key):
+        # The downward API renders one key="value" line per annotation.
+        try:
+            with open(ANNOTATIONS) as f:
+                for line in f:
+                    k, _, v = line.rstrip("\n").partition("=")
+                    if k == key:
+                        return v.strip('"')
+        except FileNotFoundError:
+            pass
+        return ""
+
+    def acknowledge(incident):
+        # complete:<incident> on this Pod is the acknowledgement KubeNeuron reads.
+        sa = "/var/run/secrets/kubernetes.io/serviceaccount"
+        with open(f"{sa}/token") as f:
+            token = f.read()
+        with open(f"{sa}/namespace") as f:
+            namespace = f.read()
+        pod = os.environ["HOSTNAME"]
+        body = json.dumps({"metadata": {"annotations": {STATE_KEY: f"complete:{incident}"}}}).encode()
+        req = urllib.request.Request(
+            f"https://kubernetes.default.svc/api/v1/namespaces/{namespace}/pods/{pod}",
+            data=body, method="PATCH",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/merge-patch+json"})
+        urllib.request.urlopen(req, context=ssl.create_default_context(cafile=f"{sa}/ca.crt"), timeout=10).read()
+
+    def save(step):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "step"), "w") as f:
+                f.write(str(step))
+            train.report({"step": step}, checkpoint=Checkpoint.from_directory(d))
+
+    def train_loop(config):
+        step = 0
+        ckpt = train.get_checkpoint()
+        if ckpt:
+            with ckpt.as_directory() as d:
+                with open(os.path.join(d, "step")) as f:
+                    step = int(f.read())
+            print(f"resuming from step {step}")
+        advised = ""
+        rank = train.get_context().get_world_rank()
+        while step < config["steps"]:
+            step += 1
+            time.sleep(1)  # the "work"
+            # train.report is a barrier: every worker must call it the same
+            # number of times. KubeNeuron stamps every member of the group in
+            # one pass, but each Pod sees its own annotations a moment apart,
+            # so rank 0 reads them and broadcasts one decision per step; the
+            # broadcast is itself a barrier that keeps the workers in lockstep.
+            seen = None
+            if rank == 0:
+                req = annotation("kubeneuron.io/checkpoint-incident")
+                seen = {"advisory": annotation("kubeneuron.io/checkpoint-advisory-incident"),
+                        "request": req if req and annotation("kubeneuron.io/checkpoint-deadline-at") else ""}
+            seen = broadcast_from_rank_zero(seen)
+            if seen["request"]:
+                save(step)
+                acknowledge(seen["request"])  # each worker, on its own Pod
+                print(f"request for incident {seen['request']}: checkpointed at step {step} and acknowledged; stopping")
+                return
+            if seen["advisory"] and seen["advisory"] != advised:
+                advised = seen["advisory"]
+                save(step)
+                print(f"advisory for incident {advised}: checkpointed at step {step}, continuing")
+            elif step % config["every"] == 0:
+                save(step)
+
+    trainer = DataParallelTrainer(
+        train_loop,
+        # An hour of one-second steps: long enough for an operator to inject
+        # a fault, park, approve and request against a live run. Delete the
+        # RayJob to stop it earlier.
+        train_loop_config={"steps": 3600, "every": 30},
+        scaling_config=ScalingConfig(num_workers=2, use_gpu=False),
+        run_config=RunConfig(
+            name="checkpoint-example",
+            # Ray Train requires a storage path every worker can read and
+            # write: object storage or a shared filesystem in a real cluster.
+            # The example mounts one PersistentVolumeClaim into the head and
+            # the workers; with a ReadWriteOnce class that only works while
+            # they share a node, so use a ReadWriteMany class or an s3:// URI
+            # elsewhere.
+            storage_path=os.environ.get("RAY_STORAGE_PATH", "/mnt/ray-results"),
+            failure_config=FailureConfig(max_failures=3)),
+    )
+    trainer.fit()
+---
+# Checkpoint storage shared by the head and the workers. ReadWriteOnce binds
+# it to one node, which is enough for the kind run (every example Pod is
+# steered onto one node) and for a single-node cluster; a multi-node cluster
+# needs a ReadWriteMany class or an object-store RAY_STORAGE_PATH instead.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ray-train-checkpoint-results
+  namespace: ml-training
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: ray-train-checkpoint
+  namespace: ml-training
+spec:
+  entrypoint: python /scripts/train.py
+  shutdownAfterJobFinishes: true
+  rayClusterSpec:
+    rayVersion: "2.60.0"
+    headGroupSpec:
+      rayStartParams: {}
+      template:
+        spec:
+          containers:
+            - name: ray-head
+              image: rayproject/ray:2.60.0-py311-cpu@sha256:d6ae4070c94a894274fba564a80072dcf49d780d9035cba96696762e5e8e397f
+              env:
+                - { name: RAY_STORAGE_PATH, value: /mnt/ray-results }
+              resources:
+                requests: { cpu: 500m, memory: 1Gi }
+              volumeMounts:
+                - { name: scripts, mountPath: /scripts }
+                - { name: results, mountPath: /mnt/ray-results }
+          volumes:
+            - name: scripts
+              configMap:
+                name: ray-train-checkpoint-example
+            - name: results
+              persistentVolumeClaim:
+                claimName: ray-train-checkpoint-results
+    workerGroupSpecs:
+      - groupName: trainers
+        replicas: 2
+        minReplicas: 2
+        maxReplicas: 2
+        rayStartParams: {}
+        template:
+          metadata:
+            annotations:
+              kubeneuron.io/checkpoint: "true"
+              kubeneuron.io/checkpoint-max-wait: "3m"
+              kubeneuron.io/checkpoint-group: ray-train-checkpoint
+          spec:
+            serviceAccountName: ray-train-checkpoint
+            containers:
+              - name: ray-worker
+                image: rayproject/ray:2.60.0-py311-cpu@sha256:d6ae4070c94a894274fba564a80072dcf49d780d9035cba96696762e5e8e397f
+                env:
+                  - { name: ANNOTATIONS, value: /etc/podinfo/annotations }
+                resources:
+                  requests: { cpu: 500m, memory: 1Gi }
+                volumeMounts:
+                  - { name: podinfo, mountPath: /etc/podinfo, readOnly: true }
+                  - { name: scripts, mountPath: /scripts }
+                  - { name: results, mountPath: /mnt/ray-results }
+            volumes:
+              - name: podinfo
+                downwardAPI:
+                  items:
+                    - path: annotations
+                      fieldRef:
+                        fieldPath: metadata.annotations
+              - name: scripts
+                configMap:
+                  name: ray-train-checkpoint-example
+              - name: results
+                persistentVolumeClaim:
+                  claimName: ray-train-checkpoint-results

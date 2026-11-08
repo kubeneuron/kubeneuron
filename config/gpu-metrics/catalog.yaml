@@ -1560,6 +1560,51 @@ fields:
       unit: boolean
       factor: 1
     help: Which second-source GPU health probe (dcgm, nvidia-smi, none) served the last poll; 1 for the active source.
+  - key: kubeneuron:kubeneuron_approvals_bound_total
+    series: kubeneuron_approvals_bound_total
+    exporter_exposed: false
+    source: kubeneuron-controller
+    kind: counter
+    tier: T4
+    raw:
+      unit: count
+      factor: 1
+    canonical:
+      series: kubeneuron_approvals_bound_total
+      kind: counter
+      unit: count
+      factor: 1
+    help: Approval decisions by what the client bound them to (round, round_and_impact, none).
+  - key: kubeneuron:kubeneuron_checkpoint_advisories_total
+    series: kubeneuron_checkpoint_advisories_total
+    exporter_exposed: false
+    source: kubeneuron-controller
+    kind: counter
+    tier: T4
+    raw:
+      unit: count
+      factor: 1
+    canonical:
+      series: kubeneuron_checkpoint_advisories_total
+      kind: counter
+      unit: count
+      factor: 1
+    help: Checkpoint advisory outcomes at approval park (stamped, withdrawn, unreachable, skipped).
+  - key: kubeneuron:kubeneuron_checkpoint_group_requests_total
+    series: kubeneuron_checkpoint_group_requests_total
+    exporter_exposed: false
+    source: kubeneuron-controller
+    kind: counter
+    tier: T4
+    raw:
+      unit: count
+      factor: 1
+    canonical:
+      series: kubeneuron_checkpoint_group_requests_total
+      kind: counter
+      unit: count
+      factor: 1
+    help: Checkpoint requests to group peers by outcome (acknowledged, exited, expired, unreachable, skipped).
   - key: kubeneuron:kubeneuron_checkpoint_requests_total
     series: kubeneuron_checkpoint_requests_total
     exporter_exposed: false
@@ -1695,6 +1740,36 @@ fields:
       unit: count
       factor: 1
     help: Steps denied by the safety gate (pause, cooldown, concurrency, capability).
+  - key: kubeneuron:kubeneuron_impact_preview_seconds
+    series: kubeneuron_impact_preview_seconds
+    exporter_exposed: false
+    source: kubeneuron-controller
+    kind: histogram
+    tier: T4
+    raw:
+      unit: seconds
+      factor: 1
+    canonical:
+      series: kubeneuron_impact_preview_seconds
+      kind: histogram
+      unit: seconds
+      factor: 1
+    help: Seconds one impact preview took to gather and render.
+  - key: kubeneuron:kubeneuron_impact_previews_total
+    series: kubeneuron_impact_previews_total
+    exporter_exposed: false
+    source: kubeneuron-controller
+    kind: counter
+    tier: T4
+    raw:
+      unit: count
+      factor: 1
+    canonical:
+      series: kubeneuron_impact_previews_total
+      kind: counter
+      unit: count
+      factor: 1
+    help: Impact preview computations at approval park by result (computed, unavailable, truncated).
   - key: kubeneuron:kubeneuron_incident_duration_seconds
     series: kubeneuron_incident_duration_seconds
     exporter_exposed: false

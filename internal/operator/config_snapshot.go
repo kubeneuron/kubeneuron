@@ -101,6 +101,10 @@ func CompileSnapshot(
 	if err != nil {
 		return nil, err
 	}
+	impactPreview, err := impactPreview(installation.Spec.Safety.ImpactPreview)
+	if err != nil {
+		return nil, err
+	}
 
 	// Dry-run is the default and stays on for every mode except Enabled,
 	// which validateRuntimeSupport has already confined to the declared
@@ -119,6 +123,8 @@ func CompileSnapshot(
 			DestructiveExecutionNodeSelector: destructiveNodeSelector(installation.Spec.Safety),
 			TaintDegradedNodes:               degradedNodeTaint(installation.Spec.Safety.TaintDegradedNodes),
 			CheckpointCoordination:           checkpoint,
+			TopologyClassifier:               topologyClassifier(installation.Spec.Safety.TopologyClassifier),
+			ImpactPreview:                    impactPreview,
 		},
 		Approvals: config.Approvals{
 			Channels: append([]string(nil), installation.Spec.Approvals.Channels...),
@@ -411,13 +417,128 @@ func checkpointCoordination(spec *kubeneuronv1alpha1.CheckpointCoordinationSpec)
 	for _, class := range normalizedStrings(spec.SkipClasses) {
 		skip = append(skip, types.ProblemClass(class))
 	}
+	advisory, err := checkpointAdvisory(spec.Advisory)
+	if err != nil {
+		return nil, err
+	}
+	groups, err := checkpointGroups(spec.Groups)
+	if err != nil {
+		return nil, err
+	}
 	return &config.CheckpointCoordination{
 		Enabled:     true,
 		DefaultWait: defaultWait,
 		MaxWait:     maxWait,
 		SkipClasses: skip,
 		Namespaces:  namespaces,
+		Advisory:    advisory,
+		Groups:      groups,
 	}, nil
+}
+
+// checkpointGroups compiles spec.safety.checkpointCoordination.groups, emitted
+// only when enabled, with the size bound repeated from the CRD.
+func checkpointGroups(spec *kubeneuronv1alpha1.CheckpointGroupsSpec) (*config.CheckpointGroups, error) {
+	if spec == nil || !spec.Enabled {
+		return nil, nil
+	}
+	size := spec.MaxGroupSize
+	if size == 0 {
+		size = checkpoint.DefaultMaxGroupSize
+	}
+	if size < 1 || size > checkpoint.MaxGroupSizeCeiling {
+		return nil, fmt.Errorf("spec.safety.checkpointCoordination.groups.maxGroupSize %d is outside 1..%d", size, checkpoint.MaxGroupSizeCeiling)
+	}
+	return &config.CheckpointGroups{Enabled: true, MaxGroupSize: size, CrossNode: spec.CrossNode}, nil
+}
+
+// checkpointAdvisory compiles spec.safety.checkpointCoordination.advisory.
+// The key is emitted only when the advisory is enabled, so an absent block,
+// an empty block and an explicit enabled=false compile to the same digest as
+// a configuration written before the field existed. The caller has already
+// established that coordination itself is enabled; an advisory inside a
+// disabled block never reaches here because the whole block compiles to nil,
+// which is exactly the CEL rule's effect restated in the compiler.
+func checkpointAdvisory(spec *kubeneuronv1alpha1.CheckpointAdvisorySpec) (*config.CheckpointAdvisory, error) {
+	if spec == nil || !spec.Enabled {
+		return nil, nil
+	}
+	budget, err := configDuration(spec.Budget, "10s")
+	if err != nil {
+		return nil, fmt.Errorf("spec.safety.checkpointCoordination.advisory.budget: %w", err)
+	}
+	if budget > config.CheckpointAdvisoryBudgetCeiling {
+		return nil, fmt.Errorf("spec.safety.checkpointCoordination.advisory.budget %v exceeds the %v ceiling",
+			budget.Std(), config.CheckpointAdvisoryBudgetCeiling.Std())
+	}
+	return &config.CheckpointAdvisory{Enabled: true, Budget: budget}, nil
+}
+
+// impactPreview compiles spec.safety.impactPreview. The key is emitted only
+// when enabled, so an absent or disabled block compiles to the digest of a
+// configuration written before the field existed. The compiler repeats the
+// CEL rules: requireForApproval needs enabled, the budget is bounded, and
+// maxItems stays inside its range.
+func impactPreview(spec *kubeneuronv1alpha1.ImpactPreviewSpec) (*config.ImpactPreview, error) {
+	if spec == nil || !spec.Enabled {
+		if spec != nil && spec.RequireForApproval {
+			return nil, fmt.Errorf("spec.safety.impactPreview.requireForApproval requires impactPreview.enabled")
+		}
+		return nil, nil
+	}
+	budget, err := configDuration(spec.Budget, "15s")
+	if err != nil {
+		return nil, fmt.Errorf("spec.safety.impactPreview.budget: %w", err)
+	}
+	if budget > config.ImpactPreviewBudgetCeiling {
+		return nil, fmt.Errorf("spec.safety.impactPreview.budget %v exceeds the %v ceiling", budget.Std(), config.ImpactPreviewBudgetCeiling.Std())
+	}
+	maxItems := spec.MaxItems
+	if maxItems == 0 {
+		maxItems = config.ImpactPreviewDefaultItems
+	}
+	if maxItems < config.ImpactPreviewMinItems || maxItems > config.ImpactPreviewMaxItems {
+		return nil, fmt.Errorf("spec.safety.impactPreview.maxItems %d is outside %d..%d", maxItems, config.ImpactPreviewMinItems, config.ImpactPreviewMaxItems)
+	}
+	compiled := &config.ImpactPreview{Enabled: true, Budget: budget, MaxItems: maxItems, RequireForApproval: spec.RequireForApproval}
+	if wc := spec.WorkloadContext; wc != nil {
+		compiled.WorkloadContext = config.ImpactWorkloadContext{BatchJobs: wc.BatchJobs, Kueue: wc.Kueue, KubeRay: wc.KubeRay}
+	}
+	return compiled, nil
+}
+
+// impactContextSelection is the single predicate behind the compiled
+// workload-context keys AND the conditional read-only RBAC rules, so the
+// two can never disagree: a resolver is granted exactly while it is
+// compiled, which is exactly while the preview is enabled and the resolver
+// selected.
+func impactContextSelection(installation *kubeneuronv1alpha1.KubeNeuron) (batchJobs, kueue, kuberay bool) {
+	spec := installation.Spec.Safety.ImpactPreview
+	if spec == nil || !spec.Enabled || spec.WorkloadContext == nil {
+		return false, false, false
+	}
+	return spec.WorkloadContext.BatchJobs, spec.WorkloadContext.Kueue, spec.WorkloadContext.KubeRay
+}
+
+// topologyClassifier compiles spec.safety.topologyClassifier. The compiled
+// key is emitted ONLY when DRA discovery is enabled: the classifier itself
+// has no switch (it can only narrow the reset gate), so an absent block, an
+// empty block and an explicit dra.enabled=false all compile to the same
+// digest as a configuration written before the field existed, and no
+// controller starts reading resource.k8s.io without being asked.
+func topologyClassifier(spec *kubeneuronv1alpha1.TopologyClassifierSpec) *config.TopologyClassifier {
+	if spec == nil || spec.DRA == nil || !spec.DRA.Enabled {
+		return nil
+	}
+	return &config.TopologyClassifier{DRA: config.TopologyClassifierDRA{Enabled: true}}
+}
+
+// topologyDRADiscoveryEnabled reports whether the installation opted into the
+// read-only Dynamic Resource Allocation observation. It is the single
+// predicate behind both the compiled snapshot key and the conditional RBAC
+// rule, so the two can never disagree.
+func topologyDRADiscoveryEnabled(installation *kubeneuronv1alpha1.KubeNeuron) bool {
+	return topologyClassifier(installation.Spec.Safety.TopologyClassifier) != nil
 }
 
 // normalizedStrings trims, drops blanks, de-duplicates and sorts, so two

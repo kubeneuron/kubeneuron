@@ -518,6 +518,190 @@
     },
     {
       "id": 9,
+      "title": "Device topology classifications",
+      "type": "timeseries",
+      "description": "Device topology classifications (topology-classification/v1) by topology and whether device-scoped actions were eligible or refused. Every non-whole-device topology refuses; which node was classified how is on the node's readiness page, not in a series.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (topology, result) (rate(kubeneuron_topology_classifications_total{cluster=~\"$cluster\"}[5m]))",
+          "legendFormat": "{{topology}} {{result}}",
+          "instant": false,
+          "range": true,
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Checkpoint advisories and group peer requests",
+      "type": "timeseries",
+      "description": "Advisory notices stamped on opted-in Pods when an incident parked for approval with a drain or eviction still downstream, by outcome (stamped and unreachable per workload, withdrawn per notice, skipped per round that sent nothing), and checkpoint requests sent to group peers the disruption itself does not touch, by the Phase 1 outcome plus skipped. Which Pods were involved is on the incident's audit trail.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 29
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (outcome) (rate(kubeneuron_checkpoint_advisories_total{cluster=~\"$cluster\"}[5m]))",
+          "legendFormat": "advisory {{outcome}}",
+          "instant": false,
+          "range": true,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (outcome) (rate(kubeneuron_checkpoint_group_requests_total{cluster=~\"$cluster\"}[5m]))",
+          "legendFormat": "group peer {{outcome}}",
+          "instant": false,
+          "range": true,
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Impact previews and approval binding",
+      "type": "timeseries",
+      "description": "Impact previews computed at approval park by result, and approval decisions by what they were bound to (round, round_and_impact, none). An unavailable preview or a decision bound to nothing is worth a look.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 29
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (result) (rate(kubeneuron_impact_previews_total{cluster=~\"$cluster\"}[5m]))",
+          "legendFormat": "preview {{result}}",
+          "instant": false,
+          "range": true,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (binding) (rate(kubeneuron_approvals_bound_total{cluster=~\"$cluster\"}[5m]))",
+          "legendFormat": "approval {{binding}}",
+          "instant": false,
+          "range": true,
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Impact preview duration",
+      "type": "timeseries",
+      "description": "p50 and p90 of kubeneuron_impact_preview_seconds. A p90 near the policy budget means the listing or topology read is slow enough to start producing unavailable previews.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 37
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(kubeneuron_impact_preview_seconds_bucket{cluster=~\"$cluster\"}[5m])))",
+          "legendFormat": "p50",
+          "instant": false,
+          "range": true,
+          "format": "time_series"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "histogram_quantile(0.9, sum by (le) (rate(kubeneuron_impact_preview_seconds_bucket{cluster=~\"$cluster\"}[5m])))",
+          "legendFormat": "p90",
+          "instant": false,
+          "range": true,
+          "format": "time_series"
+        }
+      ]
+    },
+    {
+      "id": 13,
       "title": "Shadow alerts (would have fired)",
       "type": "table",
       "description": "vmalert ALERTS carrying kubeneuron_shadow=\"true\". These rules route to humans only and drive no remediation.",
@@ -529,7 +713,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 21
+        "y": 45
       },
       "fieldConfig": {
         "defaults": {

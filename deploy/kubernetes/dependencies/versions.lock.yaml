@@ -13,6 +13,18 @@ artifacts:
     url: https://github.com/VictoriaMetrics/operator/releases/download/v0.73.1/install-no-webhook.yaml
     sha256: 28f0ab848df7a00f9d46685cd2864024a0d998df4840bb9a1fce471dd4163628
 
+  # Pinned for hack/kind-workload-safe.sh (the v0.8 examples fixture): the
+  # Kueue release manifest and the KubeRay operator chart, by URL and sha256.
+  # Neither is a KubeNeuron dependency; the fixture only reads their objects.
+  kueueManifest:
+    version: v0.20.4
+    url: https://github.com/kubernetes-sigs/kueue/releases/download/v0.20.4/manifests.yaml
+    sha256: c6f68065d429240b57ade9568761a9e1cd5ea14ada2c7e9225430a0280a11823
+  kuberayOperatorChart:
+    version: 1.7.1
+    url: https://github.com/ray-project/kuberay-helm/releases/download/kuberay-operator-1.7.1/kuberay-operator-1.7.1.tgz
+    sha256: fd057c207a6be038f2fe1475abb87f43a8c091b77f1f563b4e8547a2404b5bc8
+
 charts:
   nvidiaGpuOperator:
     version: v26.3.3
@@ -72,3 +84,14 @@ images:
     repository: grafana/grafana
     tag: 12.4.13
     digest: sha256:41bbc1b5e04416f81891806076db2a2ff60a5d4da5f78d36a88b033a8c199185
+  # The CPU-only Ray image the examples/checkpoint/kuberay-ray-train RayJob
+  # runs, and hack/kind-workload-safe.sh pulls. Tag and the multi-arch index
+  # digest as published on Docker Hub (2026-11-05). Move both together with
+  # the RayJob's rayVersion.
+  rayCpu:
+    repository: rayproject/ray
+    tag: 2.60.0-py311-cpu
+    digest: sha256:d6ae4070c94a894274fba564a80072dcf49d780d9035cba96696762e5e8e397f
+  kueue:
+    repository: registry.k8s.io/kueue/kueue
+    tag: v0.20.4

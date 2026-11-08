@@ -55,7 +55,6 @@ Commands (the workflow runs them in this order):
                      in VMSingle; then point the KubeNeuron root at the
                      profile's VMSingle/Alertmanager endpoints and wait
                      Ready. Needs deploy (the token) and up (the exporter).
-                     UNEXERCISED LIVE.
   test-dryrun        Inject XID 79 and assert cordon->drain->approval->dry-run
                      ladder with the approver identity in the audit.
   test-threshold     Inject XID 92 three times (past the agent's 2-minute
@@ -63,15 +62,34 @@ Commands (the workflow runs them in this order):
                      holds in OBSERVING, the third crosses the policy threshold
                      and the observe-only ladder resolves.
   test-dcgm          Exercise the DCGM detection source via field injection
-                     (fallback: live dmon parse-clean check). UNEXERCISED LIVE.
+                     (fallback: live dmon parse-clean check).
   test-verify-recur  Re-inject during VERIFYING; assert recurrence escalates.
-                     UNEXERCISED LIVE.
   test-drain         Real drain over a real pod list: refuse a node carrying
                      a pod with no controller having evicted NOTHING, then
                      drain it for real once that pod is gone
   test-destructive   Flip to executionMode=Enabled under a confined
                      destructiveExecution block and assert the ReplaceNode path
                      closes the incident as replaced.
+  test-impact        v0.8: an opted-in GPU toy trainer on the real node, under
+                     an AcceleratorRuntimeProfile pinned to the node's own
+                     driver and DCGM client (the agent attests only while a
+                     profile selects it); inject, park for approval, assert the
+                     impact preview reads the node as whole-device/per-pod with
+                     one GPU holder (device actions eligible where the hardware
+                     can reset, refused with ReportNotReady on a cloud VM),
+                     refuse an approve without the digest, reject, assert the
+                     advisory is withdrawn. Read-only beyond the cordon.
+  test-checkpoint    v0.8: the same toy; park -> advisory stamped and the sidecar
+                     checkpoints -> approve bound to the preview digest -> request
+                     with a deadline -> the trainer checkpoints and exits ->
+                     audited exited, counters moved, the node really drained.
+                     The first opted-in Pod this project has ever disrupted on
+                     hardware.
+  test-timeslice     v0.8: switch the GPU Operator device plugin to time-slicing
+                     (replicas=2) on the Tesla T4, assert the classifier reads
+                     the node as time-sliced/refused/device-wide, switch it back
+                     and assert whole-device returns. No action is ever taken
+                     on the shared device.
   test-observability Read-only check of the v0.7 GPU reliability profile on
                      EKS: the kubeneuron-dcgm-metrics ConfigMap carries the T0
                      and T1 fields, nvidia-dcgm-exporter is rolled out and
@@ -84,7 +102,6 @@ Commands (the workflow runs them in this order):
                      FB_USED * 1048576, and on g4dn/Tesla T4 the signals the
                      hardware cannot produce (row remap, NVLink, fail-slow,
                      MIG) are ABSENT, not zero. Never mutates the cluster.
-                     UNEXERCISED LIVE.
   teardown           Tie this run's claim volumes to the run while the cluster
                      is still live (last chance), then eksctl delete cluster
                      --force --wait, then sweep. Safe to re-run.
@@ -155,6 +172,13 @@ readonly DRAIN_XID=48
 # reason RECUR_XID exists — a recurrence must not deduplicate into the first —
 # but it must map to THIS phase's class, which RECUR_XID does not.
 readonly DRAIN_RECUR_XID=13
+# v0.8 workload-safe phases. Two XIDs so the second phase's injection is not
+# swallowed by the agent's per-XID dedup window when it follows the first
+# within two minutes; both are mapped to the checkpoint-probe class by the
+# phase's own GPUSignalMapping, which overrides the catalog class the way the
+# drain phase's mapping does.
+readonly CHECKPOINT_XID=31
+readonly CHECKPOINT_RECUR_XID=43
 readonly E2E_RUN_TAG="kubeneuron:e2e-run"
 # Run-scoped EBS identity. The EBS CSI driver tags the volume behind a claim
 # with kubernetes.io/created-for/pvc/{name,namespace} and nothing that names
@@ -1829,6 +1853,643 @@ cmd_deploy_observability() {
 }
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# v0.8 workload-safe recovery phases (G3 rows test-impact, test-checkpoint,
+# test-timeslice of the release plan).
+#
+# One fixture serves the first two: a Job with ONE Pod that requests the Tesla
+# T4 (nvidia.com/gpu: 1), opts into checkpoint coordination, names a group,
+# and runs the toy trainer and the checkpoint sidecar from
+# examples/checkpoint/scripts off a downward-API annotations file — the plain
+# -job example with a GPU request, nothing else. The GPU is requested so the
+# preview and the eligibility see a GPU holder; the toy never touches it.
+#
+# The root is armed the way the kind gate arms it: Enabled under the e2e
+# confinement, coordination with the advisory and groups for the fixture
+# namespace, and a preview the approve must carry. Every patch is reverted
+# from the EXIT trap, including on a failed assertion.
+#
+# What a green run proves: the annotation protocol on ONE opted-in Pod that
+# holds a real GPU on one node. What it does not prove: anything about a
+# training framework, a multi-node gang (the stand has one GPU node), MIG,
+# DRA, or that the checkpoint the toy wrote is worth anything.
+
+readonly WS_NAMESPACE=e2e-checkpoint
+readonly WS_JOB=e2e-checkpoint-trainer
+readonly WS_CLASS=checkpoint-probe
+_WS_FIXTURE_NODE=""
+_WS_SAFETY_BEFORE=""
+# The agent attests this node's NVIDIA runtime only while an
+# AcceleratorRuntimeProfile selects it (-nvidia-controller-profile holds the
+# report back otherwise), and the topology classifier reads whole-device from
+# that attestation alone: no profile, no report, ReportMissing, refused. The
+# first v0.8 run on EKS (2026-11-05) stopped exactly there. The fixture
+# therefore pins a profile to the driver and DCGM client versions the agent
+# on the node actually answers with, selects the node, and waits until the
+# classifier reads whole-device before any v0.8 assertion. The profile is
+# removed with the fixture; nothing else on the stand selects the node.
+readonly WS_PROFILE="${ROOT_NAME}-e2e-runtime"
+readonly WS_PROFILE_LABEL="kubeneuron.io/e2e-runtime-profile"
+_WS_PROFILE_NODE=""
+# What "whole-device" looks like on this stand. The layout is one whole,
+# per-pod-attributable device either way; device actions are eligible only on
+# hardware that can reset. On a virtualized GPU node (every EC2 g4dn) the agent
+# degrades its report because the hypervisor withholds the PCI reset
+# (docs/operations.md, "GPU reset is impossible on most cloud VMs"), so the
+# classifier refuses device actions with exactly ReportNotReady while the
+# layout stands. Any other refusal is a finding, not this stand's shape.
+# "eligible" is accepted only as the classifier defines it — no reason at all
+# and a ready report — so a contradictory answer (eligible beside a degraded
+# report, or beside any reason) fails the phase instead of passing it.
+readonly WS_WHOLE_DEVICE_JQ='.topology == "whole-device" and .attribution == "per-pod" and ((.device_actions == "eligible" and .reasons == [] and .evidence.report_readiness == "ready") or (.device_actions == "refused" and .reasons == ["ReportNotReady"]))'
+
+node_is_whole_device() {
+	# node_is_whole_device <node>: the classifier reads the layout above.
+	node_topology "$1" | jq -e "$WS_WHOLE_DEVICE_JQ" >/dev/null 2>&1
+}
+
+runtime_profile_apply() {
+	# runtime_profile_apply <node>: pin the profile to the versions the agent
+	# on <node> answers with, select the node, wait for whole-device.
+	local node="$1" agent_pod driver client digest i
+	agent_pod=$(kubectl -n "$RUNTIME_NAMESPACE" get pods -l app.kubernetes.io/component=agent \
+		--field-selector "spec.nodeName=${node},status.phase=Running" -o jsonpath='{.items[0].metadata.name}')
+	[ -n "$agent_pod" ] || die "no running agent Pod on $node to attest its runtime"
+	# The same two probes the agent's own preflight runs: nvidia-smi for the
+	# driver (one value shared by every GPU, or the report is not ready) and
+	# the agent image's dcgmi for the client the profile pins (major.minor;
+	# RuntimeVersionSatisfies compares no deeper).
+	driver=$(kubectl -n "$RUNTIME_NAMESPACE" exec "$agent_pod" -- nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null |
+		awk '{ gsub(/[ \t\r]/, ""); if ($0 != "") print }' | sort -u)
+	if [ -z "$driver" ] || [ "$(printf '%s\n' "$driver" | wc -l)" != 1 ]; then
+		die "the agent on $node did not answer one driver version (got '${driver:-}')"
+	fi
+	client=$(kubectl -n "$RUNTIME_NAMESPACE" exec "$agent_pod" -- /usr/bin/dcgmi --version 2>/dev/null |
+		grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+	[ -n "$client" ] || die "the agent on $node did not answer a dcgmi client version"
+	digest="sha256:$(printf '%s' "${CLUSTER_NAME}/${WS_PROFILE}" | sha256sum | cut -c1-64)"
+	_WS_PROFILE_NODE="$node"
+	kubectl label node "$node" "${WS_PROFILE_LABEL}=true" --overwrite >/dev/null
+	kubectl apply -f - <<WSEOF
+apiVersion: kubeneuron.io/v1alpha1
+kind: AcceleratorRuntimeProfile
+metadata:
+  name: ${WS_PROFILE}
+  labels: {kubeneuron.io/hw-e2e: "true"}
+spec:
+  kubeNeuronRef: ${ROOT_NAME}
+  vendor: nvidia
+  nodeSelector:
+    matchLabels:
+      ${WS_PROFILE_LABEL}: "true"
+  profileDigest: ${digest}
+  driverVersion: "${driver}"
+  runtimeVersion: dcgm-${client%.*}
+  maxReportAge: 10m
+  allowedActions:
+    - action: reset-device
+      scopes: [physical-device]
+      requireVerifiedUnpartitionedTopology: true
+WSEOF
+	log "workload-safe fixture: profile ${WS_PROFILE} pins driver ${driver} and dcgm-${client%.*} for $node; waiting for the agent's attestation and whole-device"
+	# Not wait_for: on a miss the classifier's own document and the runtime
+	# contract coverage are the diagnosis, and wait_for dies before printing.
+	for ((i = 0; i < 300; i += 10)); do
+		if node_is_whole_device "$node"; then
+			break
+		fi
+		sleep 10
+	done
+	node_is_whole_device "$node" || {
+		node_topology "$node" | jq . >&2 || true
+		api GET "/api/v1/nodes/${node}/runtime-contract?vendor=nvidia" | jq . >&2 || true
+		die "the classifier never read $node as a whole device after ${WS_PROFILE} selected it"
+	}
+	local doc
+	doc=$(node_topology "$node")
+	log "workload-safe fixture: $node attested; $(jq -r .summary <<<"$doc")"
+	if [ "$(jq -r .device_actions <<<"$doc")" = refused ]; then
+		log "workload-safe fixture: device actions refused by the agent's own report: $(api GET "/api/v1/nodes/${node}/accelerators" |
+			jq -r '[.[] | select(.vendor == "nvidia") | .readiness_reasons[]?] | join("; ")')"
+	fi
+}
+
+runtime_profile_cleanup() {
+	[ -n "${_WS_PROFILE_NODE:-}" ] || return 0
+	kubectl delete acceleratorruntimeprofile "$WS_PROFILE" --ignore-not-found >/dev/null 2>&1 || true
+	kubectl label node "$_WS_PROFILE_NODE" "${WS_PROFILE_LABEL}-" >/dev/null 2>&1 || true
+	_WS_PROFILE_NODE=""
+}
+
+api_status() {
+	# api_status <method> <path> [body] -> HTTP status code; a 4xx is a result
+	# here, not a failure, which is why api() (curl -f) cannot be used.
+	local method="$1" path="$2" body="${3:-}"
+	_ensure_portforward
+	local base="http://127.0.0.1:${_API_LOCAL_PORT}"
+	if [ "$method" = POST ]; then
+		curl -sS --max-time "$API_MAX_TIME" -o /dev/null -w '%{http_code}' -X POST \
+			-H 'Content-Type: application/json' -H "Authorization: Bearer ${_API_TOKEN}" \
+			-H "Idempotency-Key: hw-e2e-$(date -u +%s%N)-$$-$RANDOM" \
+			--data "$body" "${base}${path}"
+	else
+		curl -sS --max-time "$API_MAX_TIME" -o /dev/null -w '%{http_code}' \
+			-H "Authorization: Bearer ${_API_TOKEN}" "${base}${path}"
+	fi
+}
+
+metric_value() {
+	# metric_value <series with labels> -> the sample, 0 when absent.
+	api GET /metrics | awk -v s="$1" '$1 == s { print $2; found = 1 } END { if (!found) print 0 }'
+}
+
+go_duration_seconds() {
+	# go_duration_seconds <Go duration like 1m6.5s|6s|2h0m0s> -> whole seconds.
+	printf '%s' "$1" | awk '{
+		s = 0; v = $0
+		while (match(v, /^[0-9.]+[hms]/)) {
+			n = substr(v, RSTART, RLENGTH - 1); u = substr(v, RLENGTH, 1)
+			if (u == "h") s += n * 3600; else if (u == "m") s += n * 60; else s += n
+			v = substr(v, RLENGTH + 1)
+		}
+		printf "%d", s
+	}'
+}
+
+ws_pod() {
+	kubectl -n "$WS_NAMESPACE" get pods -l "job-name=${WS_JOB}" --field-selector=status.phase=Running \
+		-o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true
+}
+
+ws_annotation() {
+	# ws_annotation <pod> <annotation>: the value, empty when absent. jq with
+	# the literal key, not jsonpath: a jsonpath key needs its dots escaped,
+	# and that backslash does not survive wait_for's eval of a condition
+	# (the first hardware run waited 180s on an annotation that was there).
+	kubectl -n "$WS_NAMESPACE" get pod "$1" -o json 2>/dev/null |
+		jq -r --arg k "$2" '.metadata.annotations[$k] // empty' 2>/dev/null || true
+}
+
+workload_safe_fixture_apply() {
+	local node="$1"
+	_WS_FIXTURE_NODE="$node"
+	_WS_SAFETY_BEFORE=$(kubectl -n "$RUNTIME_NAMESPACE" get kubeneuron "$ROOT_NAME" -o json | jq -c '.spec.safety // null')
+	log "workload-safe fixture: placing the opted-in GPU toy trainer on $node"
+	kubectl create namespace "$WS_NAMESPACE" --dry-run=client -o yaml |
+		kubectl label --local -f - kubeneuron.io/hw-e2e=true -o yaml | kubectl apply -f - >/dev/null
+	kubectl kustomize "${REPO_ROOT}/examples/checkpoint/scripts" | kubectl -n "$WS_NAMESPACE" apply -f - >/dev/null
+	kubectl apply -f - <<WSEOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${WS_JOB}
+  namespace: ${WS_NAMESPACE}
+  labels: {kubeneuron.io/hw-e2e: "true"}
+spec:
+  completions: 1
+  parallelism: 1
+  backoffLimit: 3
+  template:
+    metadata:
+      labels: {kubeneuron.io/hw-e2e: "true"}
+      annotations:
+        kubeneuron.io/checkpoint: "true"
+        kubeneuron.io/checkpoint-max-wait: "3m"
+        kubeneuron.io/checkpoint-group: e2e-run
+    spec:
+      restartPolicy: Never
+      shareProcessNamespace: true
+      terminationGracePeriodSeconds: 20
+      nodeSelector: {role: gpu}
+      tolerations: [{key: nvidia.com/gpu, operator: Exists}]
+      volumes:
+        - name: podinfo
+          downwardAPI:
+            items:
+              - path: annotations
+                fieldRef: {fieldPath: metadata.annotations}
+        - name: ckpt
+          emptyDir: {}
+        - name: scripts
+          configMap: {name: checkpoint-scripts, defaultMode: 0555}
+      containers:
+        - name: trainer
+          image: busybox:1.37
+          command: ["/bin/sh", "/scripts/trainer.sh"]
+          env:
+            - {name: CKPT_DIR, value: /ckpt}
+            - {name: STEPS, value: "3600"}
+          resources:
+            limits: {nvidia.com/gpu: 1}
+          volumeMounts:
+            - {name: ckpt, mountPath: /ckpt}
+            - {name: scripts, mountPath: /scripts}
+        - name: checkpoint-sidecar
+          image: busybox:1.37
+          command: ["/bin/sh", "/scripts/sidecar.sh"]
+          env:
+            - {name: ANNOTATIONS, value: /etc/podinfo/annotations}
+            - {name: CKPT_DIR, value: /ckpt}
+          volumeMounts:
+            - {name: podinfo, mountPath: /etc/podinfo, readOnly: true}
+            - {name: ckpt, mountPath: /ckpt}
+            - {name: scripts, mountPath: /scripts}
+WSEOF
+	wait_for 300 '[ -n "$(ws_pod)" ]'
+	[ "$(kubectl -n "$WS_NAMESPACE" get pod "$(ws_pod)" -o jsonpath='{.spec.nodeName}')" = "$node" ] ||
+		die "the toy trainer did not land on $node"
+
+	log "workload-safe fixture: arming $node under the e2e confinement with coordination, advisory, groups and a required preview"
+	kubectl -n "$RUNTIME_NAMESPACE" patch kubeneuron "$ROOT_NAME" --type merge -p "$(
+		cat <<WSEOF
+{"spec":{"safety":{"executionMode":"Enabled",
+   "destructiveExecution":{"nodeSelector":{"kubeneuron.io/e2e":"true"},"acknowledgement":"${XID_ACK}"},
+   "checkpointCoordination":{"enabled":true,"namespaces":["${WS_NAMESPACE}"],"defaultWait":"3m","maxWait":"5m",
+     "advisory":{"enabled":true,"budget":"10s"},"groups":{"enabled":true,"maxGroupSize":8,"crossNode":false}},
+   "impactPreview":{"enabled":true,"budget":"15s","maxItems":100,"requireForApproval":true,
+     "workloadContext":{"batchJobs":true}}}}}
+WSEOF
+	)"
+	kubectl apply -f - <<WSEOF
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: ${ROOT_NAME}-e2e-checkpoint
+  labels: {kubeneuron.io/hw-e2e: "true"}
+spec:
+  kubeNeuronRef: ${ROOT_NAME}
+  target: Node
+  steps:
+    - name: cordon
+      action: Cordon
+      approval: Required
+    - name: drain
+      action: Drain
+      timeout: 6m
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: ${ROOT_NAME}-e2e-checkpoint
+  labels: {kubeneuron.io/hw-e2e: "true"}
+spec:
+  kubeNeuronRef: ${ROOT_NAME}
+  priority: 6
+  match:
+    class: ${WS_CLASS}
+  playbookRef: ${ROOT_NAME}-e2e-checkpoint
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUSignalMapping
+metadata:
+  name: ${ROOT_NAME}-e2e-checkpoint-xid
+  labels: {kubeneuron.io/hw-e2e: "true"}
+spec:
+  kubeNeuronRef: ${ROOT_NAME}
+  source: xid
+  xidCodes: [${CHECKPOINT_XID}, ${CHECKPOINT_RECUR_XID}]
+  class: ${WS_CLASS}
+  severity: critical
+WSEOF
+	wait_for_configured_object gpuplaybook "${ROOT_NAME}-e2e-checkpoint"
+	wait_for_configured_object gpuremediationpolicy "${ROOT_NAME}-e2e-checkpoint"
+	wait_for_configured_object gpusignalmapping "${ROOT_NAME}-e2e-checkpoint-xid"
+	wait_for_installation_ready
+	# By digest: the controller must run THIS snapshot before the fault lands,
+	# or the incident parks under a policy with no advisory and no preview.
+	wait_for_controller_config
+	wait_for 300 'api GET /api/v1/runtime-config |
+		jq -e ".execution_mode==\"enabled\" and .confinement.\"kubeneuron.io/e2e\"==\"true\"" >/dev/null'
+	# The grant the advisory and the request need, on the managed role.
+	wait_for 180 '[ "$(kubectl auth can-i patch pods --as=system:serviceaccount:'"$RUNTIME_NAMESPACE"':'"$ROOT_NAME"'-controller)" = yes ]'
+	runtime_profile_apply "$node"
+}
+
+workload_safe_fixture_cleanup() {
+	runtime_profile_cleanup
+	[ -n "${_WS_FIXTURE_NODE:-}" ] || return 0
+	kubectl delete namespace "$WS_NAMESPACE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+	kubectl delete gpusignalmapping "${ROOT_NAME}-e2e-checkpoint-xid" --ignore-not-found >/dev/null 2>&1 || true
+	kubectl delete gpuremediationpolicy "${ROOT_NAME}-e2e-checkpoint" --ignore-not-found >/dev/null 2>&1 || true
+	kubectl delete gpuplaybook "${ROOT_NAME}-e2e-checkpoint" --ignore-not-found >/dev/null 2>&1 || true
+	if [ -n "${_WS_SAFETY_BEFORE:-}" ] && [ "$_WS_SAFETY_BEFORE" != null ]; then
+		kubectl -n "$RUNTIME_NAMESPACE" patch kubeneuron "$ROOT_NAME" --type json \
+			-p "[{\"op\":\"replace\",\"path\":\"/spec/safety\",\"value\":${_WS_SAFETY_BEFORE}}]" >/dev/null 2>&1 || true
+	else
+		kubectl -n "$RUNTIME_NAMESPACE" patch kubeneuron "$ROOT_NAME" --type merge \
+			-p '{"spec":{"safety":{"executionMode":"DryRun","destructiveExecution":null,"checkpointCoordination":null,"impactPreview":null}}}' >/dev/null 2>&1 || true
+	fi
+	kubectl uncordon "$_WS_FIXTURE_NODE" >/dev/null 2>&1 || true
+	_WS_FIXTURE_NODE=""
+	_WS_SAFETY_BEFORE=""
+}
+
+# open_checkpoint_incident <node> <xid>: inject and print the id of the
+# incident that opens. Printed, not assigned to _OPEN_INCIDENT: this runs
+# inside the caller's $(...), where an assignment dies with the subshell. The
+# caller records the id FIRST and only then waits for the park with
+# wait_parked, so an incident whose park never comes is still the one the
+# EXIT trap closes (the first version waited in here, and a park that timed
+# out left the id unprinted and the incident open for the next phase to
+# attach to).
+open_checkpoint_incident() {
+	local node="$1" xid="$2" incident
+	inject_xid "$node" "$xid" >&2
+	incident=$(wait_for_incident "$node" "$WS_CLASS")
+	[ -n "$incident" ] || die "no ${WS_CLASS} incident opened after XID $xid"
+	printf '%s' "$incident"
+}
+
+# wait_parked <incident>: until the ladder parks at the approval-gated cordon.
+wait_parked() {
+	wait_for "$CONFIRM_INCIDENT_TIMEOUT" \
+		'api GET "/api/v1/incidents/'"$1"'" | jq -e ".incident.state==\"AWAITING_APPROVAL\"" >/dev/null'
+}
+
+cmd_test_impact() {
+	guard_cluster_name
+	require_cmd kubectl
+	require_cmd jq
+	require_cmd curl
+	local node pod incident preview digest code
+	node=$(gpu_node)
+	assert_kube_target
+	workload_safe_fixture_apply "$node"
+	pod=$(ws_pod)
+
+	log "test-impact: injecting XID $CHECKPOINT_XID; the ladder must park at the approval-gated cordon"
+	incident=$(open_checkpoint_incident "$node" "$CHECKPOINT_XID")
+	_OPEN_INCIDENT="$incident"
+	wait_parked "$incident"
+	log "test-impact: incident $incident parked; reading the round-1 impact preview for the real node"
+	preview="${E2E_STATE_DIR}/impact-preview.json"
+	api GET "/api/v1/incidents/${incident}/impact-preview" >"$preview"
+	jq -e '.version == "impact-preview/v1" and .unavailable == null and .round == 1 and .pending_step == "cordon"
+		and (.downstream_disruptions | index("platform.drain") != null)' "$preview" >/dev/null ||
+		{ jq . "$preview" >&2; die "the preview is not a computed round-1 document parked at cordon"; }
+	# The classifier on a real Tesla T4: one whole device, attribution per
+	# Pod, device actions as WS_WHOLE_DEVICE_JQ says this stand can answer.
+	# This is the first time the classifier has read a node with a GPU.
+	jq -e "(.node.topology | ${WS_WHOLE_DEVICE_JQ}) and .devices.whole >= 1 and .devices.mig_instances == 0
+		and .devices.time_sliced_replicas == 0" "$preview" >/dev/null ||
+		{ jq .node "$preview" >&2; die "the real GPU node did not preview as a whole device with per-pod attribution"; }
+	jq -e --arg pod "$pod" --arg ns "$WS_NAMESPACE" --arg job "Job/${WS_JOB}" '
+		.workloads.gpu_holders >= 1 and .workloads.eligible_for_checkpoint == 1
+		and ([.workloads.items[] | select(.namespace == $ns and .name == $pod)] | length == 1)
+		and ([.workloads.items[] | select(.namespace == $ns and .name == $pod)][0] |
+			.uses_gpu == true and .checkpoint.opted_in == true and .checkpoint.eligible == true
+			and .checkpoint.group == "e2e-run" and (.owner_chain | index($job) != null)
+			and .context.batch_job.name == "'"$WS_JOB"'" and (.context.batch_job.indexed | type) == "boolean"
+			and (.context.batch_job.completions | type) == "number" and (.context.batch_job.active | type) == "number")
+		and ([.workloads.groups[] | select(.name == "e2e-run")] | length == 1)
+		and (.workloads.groups[] | select(.name == "e2e-run") | .members_total_known == true and .members_total >= .members_on_node)
+		and (.warnings | index("WorkloadContextNotResolved") == null)
+		and (.warnings | index("GroupTotalUnknown") == null)' "$preview" >/dev/null ||
+		{ jq .workloads "$preview" >&2; die "the preview did not list the opted-in GPU holder with its Job owner, the resolved batch Job context and a listed group"; }
+	digest=$(jq -r .digest "$preview")
+	case "$digest" in sha256:*) ;; *) die "preview digest is '$digest'" ;; esac
+	log "test-impact: preview digest $digest: $(jq -r .node.topology.summary "$preview"); 1 GPU holder eligible, owner Job/${WS_JOB}"
+
+	log "test-impact: an approve without the digest must be refused under requireForApproval"
+	code=$(api_status POST "/api/v1/incidents/${incident}/approve" '{"actor":"hw-e2e-approver","park_epoch":1}')
+	[ "$code" = 409 ] || die "approve without the digest returned $code, want 409"
+	code=$(api_status POST "/api/v1/incidents/${incident}/approve" '{"actor":"hw-e2e-approver","park_epoch":1,"impact_digest":"sha256:stale"}')
+	[ "$code" = 409 ] || die "approve with a stale digest returned $code, want 409"
+
+	log "test-impact: the advisory must be on the Pod; rejecting must withdraw it and keep the opt-in"
+	wait_for 180 '[ "$(ws_annotation '"$pod"' kubeneuron.io/checkpoint-advisory-incident)" = "'"$incident"'" ]'
+	[ -z "$(ws_annotation "$pod" 'kubeneuron.io/checkpoint-deadline-at')" ] ||
+		die "the advisory stamped a request deadline; an advisory promises nothing"
+	api POST "/api/v1/incidents/${incident}/reject" '{"actor":"hw-e2e-approver","park_epoch":1,"reason":"test-impact: preview asserted"}' >/dev/null
+	wait_for 180 'api GET "/api/v1/incidents/'"$incident"'" | jq -e ".incident.state==\"NEEDS_HUMAN\"" >/dev/null'
+	wait_for 180 '[ -n "$(ws_annotation '"$pod"' kubeneuron.io/checkpoint-advisory-withdrawn-at)" ]'
+	[ "$(ws_annotation "$pod" 'kubeneuron.io/checkpoint')" = true ] || die "the withdrawal touched the workload-owned opt-in"
+	[ "$(api GET "/api/v1/incidents/${incident}" | jq -r '.impact_preview_digest // empty')" = "$digest" ] ||
+		die "the incident detail does not carry the preview digest"
+	log "test-impact: PASS (real-node preview whole-device with one GPU holder; approve refused without the digest; rejection withdrew the advisory)"
+	log "test-impact: this proves the preview and the advisory on one opted-in Pod holding a Tesla T4; it is not a statement about any training framework, MIG, DRA or a multi-node gang"
+
+	close_incident "$incident" "test-impact asserted"
+	_OPEN_INCIDENT=""
+	kubectl uncordon "$node" >/dev/null 2>&1 || true
+	workload_safe_fixture_cleanup
+}
+
+cmd_test_checkpoint() {
+	guard_cluster_name
+	require_cmd kubectl
+	require_cmd jq
+	require_cmd curl
+	local node pod uid incident preview digest code adv_before req_before adv_after req_after
+	node=$(gpu_node)
+	assert_kube_target
+	workload_safe_fixture_apply "$node"
+	pod=$(ws_pod)
+	uid=$(kubectl -n "$WS_NAMESPACE" get pod "$pod" -o jsonpath='{.metadata.uid}')
+	adv_before=$(metric_value 'kubeneuron_checkpoint_advisories_total{outcome="stamped"}')
+	req_before=$(metric_value 'kubeneuron_checkpoint_requests_total{outcome="exited"}')
+
+	log "test-checkpoint: injecting XID $CHECKPOINT_RECUR_XID; the ladder must park at the approval-gated cordon"
+	incident=$(open_checkpoint_incident "$node" "$CHECKPOINT_RECUR_XID")
+	_OPEN_INCIDENT="$incident"
+	wait_parked "$incident"
+	log "test-checkpoint: incident $incident parked; the advisory must reach the Pod and the sidecar must act on it"
+	wait_for 180 '[ "$(ws_annotation '"$pod"' kubeneuron.io/checkpoint-advisory-incident)" = "'"$incident"'" ]'
+	[ "$(ws_annotation "$pod" 'kubeneuron.io/checkpoint-advisory-next-action')" = platform.drain ] ||
+		die "the advisory does not name platform.drain"
+	# The kubelet refreshes the downward-API file on its sync loop (about a
+	# minute); this is the first measurement of that latency on hardware, and
+	# it is logged, not asserted beyond the bound.
+	local t0=$SECONDS
+	wait_for 300 'kubectl -n '"$WS_NAMESPACE"' logs '"$pod"' -c checkpoint-sidecar --tail=-1 2>/dev/null |
+		grep -q "sidecar: advisory for incident '"$incident"' round 1 (next: platform.drain)"'
+	# The trainer checkpoints every 30 steps on its own; only a line that
+	# names the advisory as its cause proves the signal reached the loop.
+	wait_for 120 'kubectl -n '"$WS_NAMESPACE"' logs '"$pod"' -c trainer --tail=-1 2>/dev/null | grep -q "trainer: checkpoint at step [0-9]* (advisory)"'
+	log "test-checkpoint: the sidecar saw the advisory and the trainer took an advisory checkpoint about $((SECONDS - t0))s after the stamp was observed on the object"
+
+	preview="${E2E_STATE_DIR}/checkpoint-preview.json"
+	api GET "/api/v1/incidents/${incident}/impact-preview" >"$preview"
+	digest=$(jq -r .digest "$preview")
+	case "$digest" in sha256:*) ;; *) die "preview digest is '$digest'" ;; esac
+	if command -v go >/dev/null 2>&1; then
+		_ensure_portforward
+		log "test-checkpoint: kubeneuronctl approve --round 1 without the digest must print the preview and stop"
+		if (cd "$REPO_ROOT" && KUBENEURONCTL_TOKEN="$_API_TOKEN" go run ./cmd/kubeneuronctl \
+			--server "http://127.0.0.1:${_API_LOCAL_PORT}" approve "$incident" --round 1 --actor hw-e2e-approver) >&2; then
+			die "kubeneuronctl approve --round 1 approved without the digest the human read"
+		fi
+		wait_for 60 'api GET "/api/v1/incidents/'"$incident"'" | jq -e ".incident.state==\"AWAITING_APPROVAL\" and .decision == null" >/dev/null'
+		log "test-checkpoint: approving with kubeneuronctl --round 1 --impact-digest $digest, the command the notification suggests"
+		(cd "$REPO_ROOT" && KUBENEURONCTL_TOKEN="$_API_TOKEN" go run ./cmd/kubeneuronctl \
+			--server "http://127.0.0.1:${_API_LOCAL_PORT}" approve "$incident" --round 1 --actor hw-e2e-approver \
+			--impact-digest "$digest" --reason "test-checkpoint: approved with the preview digest") >&2 ||
+			die "kubeneuronctl approve --round 1 --impact-digest failed"
+	else
+		log "test-checkpoint: approving through the API, bound to $digest (no Go toolchain for kubeneuronctl here)"
+		code=$(api_status POST "/api/v1/incidents/${incident}/approve" \
+			"{\"actor\":\"hw-e2e-approver\",\"park_epoch\":1,\"impact_digest\":\"${digest}\"}")
+		[ "$code" = 204 ] || die "approve bound to the digest returned $code, want 204"
+	fi
+
+	log "test-checkpoint: the drain's request must reach the Pod with a deadline; the trainer must checkpoint and leave"
+	wait_for 180 '[ "$(ws_annotation '"$pod"' kubeneuron.io/checkpoint-incident)" = "'"$incident"'" ]'
+	local requested_at deadline_at
+	requested_at=$(ws_annotation "$pod" 'kubeneuron.io/checkpoint-requested-at')
+	deadline_at=$(ws_annotation "$pod" 'kubeneuron.io/checkpoint-deadline-at')
+	[ -n "$deadline_at" ] || die "the request carries no deadline"
+	# The deadline is the Pod's own grant: 3m asked, under the 5m policy max.
+	[ "$(( $(date -u -d "$deadline_at" +%s) - $(date -u -d "$requested_at" +%s) ))" -le 180 ] ||
+		die "the deadline $deadline_at is more than the 3m the Pod asked for after $requested_at"
+	wait_for 300 'kubectl -n '"$WS_NAMESPACE"' logs '"$pod"' -c checkpoint-sidecar --tail=-1 2>/dev/null |
+		grep -q "sidecar: request for incident '"$incident"', deadline '"$deadline_at"'"'
+	wait_for 120 'kubectl -n '"$WS_NAMESPACE"' logs '"$pod"' -c trainer --tail=-1 2>/dev/null | grep -q "trainer: checkpoint at step [0-9]* (request)"'
+	# Gone or terminal BEFORE the deadline: the toy exits 75 after its
+	# checkpoint, and that exit is the acknowledgement. The wall clock here is
+	# the proof; the audit row's "complete after" is checked below as well.
+	wait_for 300 'phase=$(kubectl -n '"$WS_NAMESPACE"' get pod '"$pod"' -o jsonpath="{.status.phase}" 2>/dev/null);
+		[ -z "$phase" ] || [ "$phase" = Failed ] || [ "$phase" = Succeeded ]'
+	[ "$(date -u +%s)" -le "$(( $(date -u -d "$deadline_at" +%s) + 10 ))" ] ||
+		die "the Pod left only after its deadline $deadline_at (now $(date -u +%FT%TZ)); the wait_for poll is 10s"
+	wait_for 600 'api GET "/api/v1/incidents/'"$incident"'" |
+		jq -e ".incident.state==\"VERIFYING\" or .incident.state==\"RESOLVED\"" >/dev/null'
+	# The approver signs the approval row and the cordon's step-start; the
+	# drain rows themselves are the controller's (actor system), and the row
+	# that matters is "drained <node>". A row with no result (open, evaluate)
+	# is null, and jq's test() refuses null: the first hardware run had the
+	# whole protocol in the audit and failed on exactly that.
+	api GET "/api/v1/incidents/${incident}" |
+		jq -e --arg ns "$WS_NAMESPACE" --arg pod "$pod" --arg node "$node" --arg inc "$incident" '
+			any(.audit[]; .action == "checkpoint-advisory" and ((.result // "") | test("round 1: advised 1 of [0-9]+ workload\\(s\\) " + $ns + "/" + $pod + " before platform.drain"))) and
+			any(.audit[]; .action == "impact-preview-computed") and
+			any(.audit[]; (.result // "") | test("checkpoint: complete after .*" + $ns + "/" + $pod + "=exited")) and
+			any(.audit[]; .action == "approval-approved" and .actor == "token:hw-e2e-approver") and
+			any(.audit[]; .action == "drain" and (.result // "") == "drained " + $node)' >/dev/null ||
+		{ api GET "/api/v1/incidents/${incident}" | jq -r '.audit[] | "\(.action)\t\(.actor)\t\(.result)"' >&2
+			die "the audit does not show the advisory naming the Pod, the preview, the Pod recorded as exited, the approval under the approver, and the node drained"; }
+	# The settled wait in the audit row is under the 3m grant: the controller
+	# did not wait out the window and the Pod did not leave after it.
+	local settled
+	settled=$(api GET "/api/v1/incidents/${incident}" | jq -r '[.audit[] | (.result // "") | capture("checkpoint: complete after (?<d>[0-9hms.]+)") | .d] | first // empty')
+	[ -n "$settled" ] || die "no checkpoint settle duration in the audit"
+	[ "$(go_duration_seconds "$settled")" -lt 180 ] || die "coordination settled after $settled, not under the Pod's 3m grant"
+	[ "$(kubectl get node "$node" -o jsonpath='{.spec.unschedulable}')" = true ] || die "$node is not cordoned after the approved drain"
+	[ "$(kubectl -n "$WS_NAMESPACE" get pod "$pod" -o jsonpath='{.metadata.uid}' 2>/dev/null)" != "$uid" ] ||
+		[ "$(kubectl -n "$WS_NAMESPACE" get pod "$pod" -o jsonpath='{.status.phase}')" = Failed ] ||
+		die "$pod neither left nor failed: the disruption never happened"
+	adv_after=$(metric_value 'kubeneuron_checkpoint_advisories_total{outcome="stamped"}')
+	req_after=$(metric_value 'kubeneuron_checkpoint_requests_total{outcome="exited"}')
+	awk -v a="$adv_before" -v b="$adv_after" 'BEGIN { exit !(b > a) }' || die "kubeneuron_checkpoint_advisories_total{stamped} did not move ($adv_before -> $adv_after)"
+	awk -v a="$req_before" -v b="$req_after" 'BEGIN { exit !(b > a) }' || die "kubeneuron_checkpoint_requests_total{exited} did not move ($req_before -> $req_after)"
+	# Two digests, both the one the human read: the round's current preview
+	# and the digest the approval ROW persisted (decision_impact_digest).
+	api GET "/api/v1/incidents/${incident}" | jq -e --arg d "$digest" '.impact_preview_digest == $d and .decision == "approved" and .decision_impact_digest == $d' >/dev/null ||
+		{ api GET "/api/v1/incidents/${incident}" | jq '{impact_preview_digest, decision, decision_impact_digest}' >&2
+			die "the approval row is not bound to the digest the human read ($digest)"; }
+	log "test-checkpoint: PASS (advisory stamped and taken by the trainer, approve refused without and bound with $digest on the decision row, request with a deadline, trainer checkpointed on the request and left before the deadline in $settled, audited exited, counters moved, $node drained)"
+	log "test-checkpoint: this proves the protocol on one opted-in Pod holding a Tesla T4 on one node; it measures acknowledged/exited, never saved progress, and says nothing about any training framework, MIG, DRA or a multi-node gang"
+
+	close_incident "$incident" "test-checkpoint asserted"
+	_OPEN_INCIDENT=""
+	workload_safe_fixture_cleanup
+}
+
+# --- test-timeslice -----------------------------------------------------------
+# GPU Operator's device plugin config: one ConfigMap in the operator
+# namespace, selected by ClusterPolicy.spec.devicePlugin.config. With
+# replicas=2 the plugin advertises nvidia.com/gpu: 2 on the one Tesla T4 and
+# GFD labels nvidia.com/gpu.replicas=2 and the sharing strategy, which is the
+# evidence the classifier reads. Reverting removes the selection and waits for
+# the advertisement to return to 1.
+readonly TS_CONFIGMAP=kubeneuron-e2e-time-slicing
+_TS_FIXTURE_NODE=""
+_TS_CONFIG_BEFORE=""
+
+timeslice_fixture_cleanup() {
+	[ -n "${_TS_FIXTURE_NODE:-}" ] || return 0
+	if [ -n "${_TS_CONFIG_BEFORE:-}" ] && [ "$_TS_CONFIG_BEFORE" != null ]; then
+		kubectl patch clusterpolicy cluster-policy --type json \
+			-p "[{\"op\":\"replace\",\"path\":\"/spec/devicePlugin/config\",\"value\":${_TS_CONFIG_BEFORE}}]" >/dev/null 2>&1 || true
+	else
+		kubectl patch clusterpolicy cluster-policy --type json \
+			-p '[{"op":"remove","path":"/spec/devicePlugin/config"}]' >/dev/null 2>&1 || true
+	fi
+	kubectl -n "$GPU_OPERATOR_NAMESPACE" delete configmap "$TS_CONFIGMAP" --ignore-not-found >/dev/null 2>&1 || true
+	_TS_FIXTURE_NODE=""
+	_TS_CONFIG_BEFORE=""
+}
+
+node_topology() {
+	# node_topology <node> -> the classifier's document for the node.
+	api GET "/api/v1/nodes/$1/topology"
+}
+
+cmd_test_timeslice() {
+	guard_cluster_name
+	require_cmd kubectl
+	require_cmd jq
+	require_cmd curl
+	local node doc
+	node=$(gpu_node)
+	assert_kube_target
+	kubectl get clusterpolicy cluster-policy >/dev/null || die "no ClusterPolicy cluster-policy; run up first"
+	runtime_profile_apply "$node"
+
+	log "test-timeslice: the classifier must read the untouched Tesla T4 node as whole-device / per-pod"
+	wait_for 300 'node_is_whole_device '"$node"
+	doc=$(node_topology "$node")
+	jq -e '.evidence.whole_devices == 1 and .evidence.shared_replicas == 0' <<<"$doc" >/dev/null ||
+		{ jq . <<<"$doc" >&2; die "the untouched node is not one whole device"; }
+	log "test-timeslice: $(jq -r .summary <<<"$doc") on the real node (inputs_digest $(jq -r '.inputs_digest // "n/a"' <<<"$doc"))"
+
+	_TS_FIXTURE_NODE="$node"
+	_TS_CONFIG_BEFORE=$(kubectl get clusterpolicy cluster-policy -o json | jq -c '.spec.devicePlugin.config // null')
+	log "test-timeslice: switching the device plugin to time-slicing, replicas=2, through ClusterPolicy"
+	kubectl -n "$GPU_OPERATOR_NAMESPACE" apply -f - <<WSEOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${TS_CONFIGMAP}
+  labels: {kubeneuron.io/hw-e2e: "true"}
+data:
+  any: |-
+    version: v1
+    sharing:
+      timeSlicing:
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 2
+WSEOF
+	kubectl patch clusterpolicy cluster-policy --type merge \
+		-p "{\"spec\":{\"devicePlugin\":{\"config\":{\"name\":\"${TS_CONFIGMAP}\",\"default\":\"any\"}}}}" >/dev/null
+	# The plugin and GFD restart with the new config; the node then advertises
+	# two replicas of the one device and carries the replicas label.
+	wait_for 900 '[ "$(kubectl get node '"$node"' -o jsonpath="{.status.capacity.nvidia\.com/gpu}")" = 2 ]'
+	wait_for 600 '[ "$(kubectl get node '"$node"' -o jsonpath="{.metadata.labels.nvidia\.com/gpu\.replicas}")" = 2 ]'
+	log "test-timeslice: the node advertises nvidia.com/gpu: 2 with nvidia.com/gpu.replicas=2; the classifier must refuse device actions"
+	wait_for 600 'node_topology '"$node"' | jq -e ".topology == \"time-sliced\" and .device_actions == \"refused\"" >/dev/null'
+	doc=$(node_topology "$node")
+	# Without renameByDefault the plugin advertises physical x replicas under
+	# nvidia.com/gpu itself (whole_devices 2, shared_replicas 0) and GFD says
+	# why (gpu.replicas=2, sharing-strategy=time-slicing); with renaming the
+	# replicas sit under nvidia.com/gpu.shared. The classifier reads both;
+	# the first hardware run asserted only the renamed shape and failed on a
+	# document that was right.
+	jq -e '.attribution == "device-wide" and (.reasons | index("TimeSliced") != null)
+		and .evidence.sharing_strategy_label == "time-slicing" and .evidence.gpu_replicas_label == "2"
+		and (.evidence.shared_replicas == 2 or .evidence.whole_devices == 2)' <<<"$doc" >/dev/null ||
+		{ jq . <<<"$doc" >&2; die "the time-sliced node is not refused with device-wide attribution, the TimeSliced reason and two advertised replicas"; }
+	log "test-timeslice: time-sliced / refused / device-wide on the real node (inputs_digest $(jq -r '.inputs_digest // "n/a"' <<<"$doc"))"
+
+	log "test-timeslice: reverting the device plugin config; whole-device must return"
+	timeslice_fixture_cleanup
+	wait_for 900 '[ "$(kubectl get node '"$node"' -o jsonpath="{.status.capacity.nvidia\.com/gpu}")" = 1 ]'
+	wait_for 600 'node_is_whole_device '"$node"
+	log "test-timeslice: PASS (whole-device -> time-sliced/refused -> whole-device on one Tesla T4; no action was taken on the shared device)"
+	log "test-timeslice: this proves the classifier reads a real time-sliced advertisement; it proves nothing about MIG (a Turing GPU cannot partition) or DRA"
+	runtime_profile_cleanup
+}
+
 # test-observability — v0.7 M6 read-only profile check.
 #
 # Nothing here mutates the cluster: it reads a ConfigMap, a DaemonSet rollout,
@@ -3375,13 +4036,20 @@ _OPEN_INCIDENT="${_OPEN_INCIDENT:-}"
 # is the smaller and more reliable fix.
 cleanup() {
 	drain_fixture_cleanup
+	workload_safe_fixture_cleanup
+	timeslice_fixture_cleanup
 	if [ -n "${_OPEN_INCIDENT:-}" ]; then
 		close_incident "$_OPEN_INCIDENT" "phase ended without closing its incident"
 		_OPEN_INCIDENT=""
 	fi
+	runtime_profile_cleanup
 	if [ -n "$_PF_PID" ]; then
 		kill "$_PF_PID" 2>/dev/null || true
 	fi
+	# api() is mostly called inside $(...) captures, where the _PF_PID it
+	# records dies with the subshell; the forward it opened does not. Every
+	# forward of this run names this run's kubeconfig, so that is the key.
+	pkill -f -- "--kubeconfig ${KUBECONFIG} .* port-forward service/${ROOT_NAME}-controller" 2>/dev/null || true
 	# test-observability's bounded port-forward (exporter or VMSingle): the
 	# same close helper the phase uses, so the child is waited on and reaped,
 	# not left as a zombie behind a kill the trap never checked.
@@ -3414,6 +4082,9 @@ main() {
 	test-drain) cmd_test_drain "$@" ;;
 	test-destructive) cmd_test_destructive "$@" ;;
 	test-observability) cmd_test_observability "$@" ;;
+	test-impact) cmd_test_impact "$@" ;;
+	test-checkpoint) cmd_test_checkpoint "$@" ;;
+	test-timeslice) cmd_test_timeslice "$@" ;;
 	teardown) cmd_teardown "$@" ;;
 	sweep) cmd_sweep "$@" ;;
 	reap) cmd_reap "$@" ;;

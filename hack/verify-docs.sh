@@ -49,7 +49,7 @@ fi
 # CHANGELOG records history; private operational checkpoints and release plans
 # never reach the public mirror.
 mapfile -t doc_files < <(git ls-files '*.md' |
-	grep -v -E '^(CHANGELOG\.md|AGENT_SESSION_STATE\.md|TRANSFER_HANDOFF\.md|blocker\.md|main\.md|main-codex\.md|V0\.4\.0_RELEASE_PLAN\.md|V0\.5\.0_RELEASE_PLAN\.md|V0\.6\.0_RELEASE_PLAN\.md|V0\.7\.0_RELEASE_PLAN\.md)$')
+	grep -v -E '^(CHANGELOG\.md|AGENT_SESSION_STATE\.md|TRANSFER_HANDOFF\.md|blocker\.md|main\.md|main-codex\.md|V0\.4\.0_RELEASE_PLAN\.md|V0\.5\.0_RELEASE_PLAN\.md|V0\.6\.0_RELEASE_PLAN\.md|V0\.7\.0_RELEASE_PLAN\.md|V0\.8\.0_RELEASE_PLAN\.md|docs/discovery-d0-record\.md|docs/pilot-p1-record\.md)$')
 while IFS= read -r pattern; do
 	[[ -z $pattern || $pattern == \#* ]] && continue
 	if hits=$(grep -nE -- "$pattern" "${doc_files[@]}" 2>/dev/null); then

@@ -65,14 +65,17 @@ even run, with DCGM/NVML corroboration as runtime evidence.
 
 ## Proof, not claims
 
-- Release artifacts are versioned with the chart and manifests (v0.7.0, the
-  GPU reliability observability release published 2026-10-19, is the latest
+- Release artifacts are versioned with the chart and manifests (the tree
+  pins the v0.8.0 release candidate; v0.7.0, the GPU reliability
+  observability release published 2026-10-19, is the latest published
   release; checkpoint coordination itself arrived in v0.6.0 on 2026-10-11).
   Verify the image digest and SBOM for the artifact you install; this document
   does not treat a tag as a hardware qualification claim.
 - The full ladder — kernel-injected XID 79 → cordon → drain → approval →
-  reboot → uncordon — validated end to end on a **real Tesla T4** on AWS
-  EKS, approver identity in the audit.
+  reboot → uncordon — walked end to end on a **real Tesla T4** on AWS EKS
+  with the reboot and uncordon rungs in **dry-run**, approver identity in
+  the audit; the real destructive step validated on that hardware is
+  `ReplaceNode`.
 - CI runs the store conformance suite against SQLite *and* PostgreSQL,
   a 63-case CRD admission matrix on a live API server, a
   controller-restart-mid-playbook scenario, and a release-to-HEAD

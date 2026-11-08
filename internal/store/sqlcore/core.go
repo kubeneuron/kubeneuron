@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -240,6 +241,7 @@ type PruneStats struct {
 	Incidents              int64
 	Audit                  int64
 	Approvals              int64
+	ImpactPreviews         int64
 	OperationalResources   int64
 	OperationalIdempotency int64
 	OperationalAudit       int64
@@ -318,6 +320,10 @@ func (c *Core) Prune(ctx context.Context, dataRetention, auditRetention time.Dur
 			var err error
 			if stats.Approvals, err = q.execCount(ctx,
 				`DELETE FROM approvals WHERE incident_id IN (`+terminalOld+`)`, cutoff); err != nil {
+				return err
+			}
+			if stats.ImpactPreviews, err = q.execCount(ctx,
+				`DELETE FROM impact_previews WHERE incident_id IN (`+terminalOld+`)`, cutoff); err != nil {
 				return err
 			}
 			if stats.Audit, err = q.execCount(ctx,
@@ -834,21 +840,21 @@ func (q *Queries) ExecutedStepResults(ctx context.Context, incidentIDs []string)
 
 func (q *Queries) RecordApproval(ctx context.Context, a *types.Approval) error {
 	_, err := q.db.ExecContext(ctx, `
-		INSERT INTO approvals (incident_id, step_name, decision, actor, channel, at, playbook_name, step_action, step_hash, park_epoch)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO approvals (incident_id, step_name, decision, actor, channel, at, playbook_name, step_action, step_hash, park_epoch, impact_digest)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		a.IncidentID, a.StepName, string(a.Decision), a.Actor, a.Channel, ts(a.At),
-		a.PlaybookName, a.StepAction, a.StepHash, a.ParkEpoch)
+		a.PlaybookName, a.StepAction, a.StepHash, a.ParkEpoch, a.ImpactDigest)
 	return err
 }
 
 func (q *Queries) LatestApproval(ctx context.Context, incidentID string) (*types.Approval, error) {
 	row := q.db.QueryRowContext(ctx, `
-		SELECT incident_id, step_name, decision, actor, channel, at, playbook_name, step_action, step_hash, park_epoch
+		SELECT incident_id, step_name, decision, actor, channel, at, playbook_name, step_action, step_hash, park_epoch, impact_digest
 		FROM approvals WHERE incident_id=? ORDER BY id DESC LIMIT 1`, incidentID)
 	var a types.Approval
 	var decision, at string
 	err := row.Scan(&a.IncidentID, &a.StepName, &decision, &a.Actor, &a.Channel, &at,
-		&a.PlaybookName, &a.StepAction, &a.StepHash, &a.ParkEpoch)
+		&a.PlaybookName, &a.StepAction, &a.StepHash, &a.ParkEpoch, &a.ImpactDigest)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
@@ -862,7 +868,7 @@ func (q *Queries) LatestApproval(ctx context.Context, incidentID string) (*types
 
 // approvalRoundSelect is shared by the two per-epoch approval reads.
 const approvalRoundSelect = `
-	SELECT incident_id, step_name, decision, actor, channel, at, playbook_name, step_action, step_hash, park_epoch
+	SELECT incident_id, step_name, decision, actor, channel, at, playbook_name, step_action, step_hash, park_epoch, impact_digest
 	FROM approvals WHERE incident_id=? AND park_epoch=?`
 
 // GetApprovalRequest returns the "requested" record of one approval round —
@@ -891,7 +897,7 @@ func scanApproval(row *sql.Row) (*types.Approval, error) {
 	var a types.Approval
 	var decision, at string
 	err := row.Scan(&a.IncidentID, &a.StepName, &decision, &a.Actor, &a.Channel, &at,
-		&a.PlaybookName, &a.StepAction, &a.StepHash, &a.ParkEpoch)
+		&a.PlaybookName, &a.StepAction, &a.StepHash, &a.ParkEpoch, &a.ImpactDigest)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
@@ -901,6 +907,96 @@ func scanApproval(row *sql.Row) (*types.Approval, error) {
 	a.Decision = types.ApprovalDecision(decision)
 	a.At = parseTS(at)
 	return &a, nil
+}
+
+// --- impact previews (v0.8 development) ---
+
+func (q *Queries) PutImpactPreview(ctx context.Context, p *types.ImpactPreview) error {
+	var payload any
+	if len(p.Payload) > 0 {
+		payload = string(p.Payload)
+	}
+	var unavailable any
+	if p.UnavailableReason != "" {
+		unavailable = p.UnavailableReason
+	}
+	_, err := q.db.ExecContext(ctx, `
+		INSERT INTO impact_previews (incident_id, epoch, computed_at, version, digest, payload, unavailable_reason)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		p.IncidentID, p.Epoch, ts(p.ComputedAt), p.Version, p.Digest, payload, unavailable)
+	if err != nil && isUniqueViolation(err) {
+		return store.ErrConflict
+	}
+	return err
+}
+
+// computed_at is TEXT holding RFC 3339 at nanosecond precision with the
+// trailing zeros trimmed, so its lexical order is NOT its time order
+// ("12:00:00Z" sorts after "12:00:00.5Z"). The rows of one round are few
+// (one per park plus one per recompute), so "newest" is decided here, on the
+// parsed time, with the insertion id as the tie-break — never by the engine
+// on the text.
+const impactPreviewSelect = `
+	SELECT id, incident_id, epoch, computed_at, version, digest, payload, unavailable_reason
+	FROM impact_previews WHERE incident_id=? AND epoch=?`
+
+func (q *Queries) LatestImpactPreview(ctx context.Context, incidentID string, epoch int) (*types.ImpactPreview, error) {
+	previews, err := q.ListImpactPreviews(ctx, incidentID, epoch)
+	if err != nil {
+		return nil, err
+	}
+	if len(previews) == 0 {
+		return nil, store.ErrNotFound
+	}
+	return previews[0], nil
+}
+
+func (q *Queries) ListImpactPreviews(ctx context.Context, incidentID string, epoch int) ([]*types.ImpactPreview, error) {
+	rows, err := q.db.QueryContext(ctx, impactPreviewSelect, incidentID, epoch)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	return scanImpactPreviews(rows)
+}
+
+type impactPreviewRow struct {
+	id      int64
+	preview *types.ImpactPreview
+}
+
+func scanImpactPreviews(rows *sql.Rows) ([]*types.ImpactPreview, error) {
+	var scanned []impactPreviewRow
+	for rows.Next() {
+		var p types.ImpactPreview
+		var id int64
+		var computedAt string
+		var payload, unavailable sql.NullString
+		if err := rows.Scan(&id, &p.IncidentID, &p.Epoch, &computedAt, &p.Version, &p.Digest, &payload, &unavailable); err != nil {
+			return nil, err
+		}
+		p.ComputedAt = parseTS(computedAt)
+		if payload.Valid && payload.String != "" {
+			p.Payload = json.RawMessage(payload.String)
+		}
+		p.UnavailableReason = unavailable.String
+		scanned = append(scanned, impactPreviewRow{id: id, preview: &p})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(scanned, func(i, j int) bool {
+		a, b := scanned[i], scanned[j]
+		if !a.preview.ComputedAt.Equal(b.preview.ComputedAt) {
+			return a.preview.ComputedAt.After(b.preview.ComputedAt)
+		}
+		return a.id > b.id
+	})
+	out := make([]*types.ImpactPreview, 0, len(scanned))
+	for _, r := range scanned {
+		out = append(out, r.preview)
+	}
+	return out, nil
 }
 
 // --- nodes ---
@@ -1943,4 +2039,18 @@ func repeat(s string, n int) string {
 		out += s
 	}
 	return out
+}
+
+// isUniqueViolation reports whether err is the engine's unique-constraint
+// failure: SQLite says "UNIQUE constraint failed", PostgreSQL raises SQLSTATE
+// 23505 ("duplicate key value violates unique constraint"). Matching the text
+// keeps sqlcore free of either driver's error type.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed") ||
+		strings.Contains(msg, "duplicate key value") ||
+		strings.Contains(msg, "23505")
 }

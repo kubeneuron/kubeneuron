@@ -277,6 +277,51 @@ type SafetySpec struct {
 	// Omitted means off. Waiting is a change to how every disruption step
 	// behaves, so it must never arrive by default with an upgrade.
 	CheckpointCoordination *CheckpointCoordinationSpec `json:"checkpointCoordination,omitempty"`
+	// TopologyClassifier tunes the read-only device topology classifier
+	// (whole-device, mig, time-sliced, dra-managed, mixed, unknown). The
+	// classifier always runs and can only add refusals to a device-scoped
+	// GPU reset; this block carries only its opt-in inputs.
+	//
+	// Omitted means: classify from node capacity, GPU Feature Discovery
+	// labels and the agent report, without reading Dynamic Resource
+	// Allocation objects.
+	TopologyClassifier *TopologyClassifierSpec `json:"topologyClassifier,omitempty"`
+	// ImpactPreview, when enabled, computes a durable impact-preview/v1 record
+	// for every approval round: the node and its device topology, the
+	// workloads the downstream disruption would touch and which of them can
+	// checkpoint, and the warnings a human should read before approving. It
+	// is advisory and cannot block an approve; with requireForApproval it
+	// binds the approve to the exact preview the human saw. Omitted means
+	// off. (v0.8 development)
+	ImpactPreview *ImpactPreviewSpec `json:"impactPreview,omitempty"`
+}
+
+// TopologyClassifierSpec configures the device topology classifier. There is
+// deliberately no switch to turn the classifier off: it is a safety
+// narrowing of the reset gate, and a configuration must not be able to widen
+// that gate.
+type TopologyClassifierSpec struct {
+	// DRA optionally lets the classifier read Dynamic Resource Allocation
+	// state. Omitted means off.
+	DRA *TopologyClassifierDRASpec `json:"dra,omitempty"`
+}
+
+// TopologyClassifierDRASpec is the opt-in read of resource.k8s.io/v1.
+type TopologyClassifierDRASpec struct {
+	// Enabled makes the controller list ResourceSlices (resource.k8s.io/v1,
+	// get/list/watch only, never any other version or verb) for a node when
+	// it classifies that node, and inspect the ResourceClaim references of
+	// the Pods scheduled on it through the core Pod list it already holds
+	// (ResourceClaim objects are never read). The managed controller
+	// ClusterRole gains only that read-only ResourceSlice rule while this is
+	// true. When the group/version is not served, either read fails, or a
+	// ResourceSlice is scoped by anything other than an explicit nodeName
+	// (nodeSelector, allNodes, perDeviceNodeSelection), the node is
+	// classified as unknown and device-scoped actions are refused; nothing
+	// is ever assumed. Default false, and false is also what an absent block
+	// means.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // CheckpointCoordinationSpec configures checkpoint-aware remediation
@@ -292,6 +337,8 @@ type SafetySpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.defaultWait) || duration(self.defaultWait) > duration('0s')",message="defaultWait must be a positive duration"
 // +kubebuilder:validation:XValidation:rule="!has(self.maxWait) || (duration(self.maxWait) > duration('0s') && duration(self.maxWait) <= duration('30m'))",message="maxWait must be a positive duration of at most 30m"
 // +kubebuilder:validation:XValidation:rule="!has(self.defaultWait) || !has(self.maxWait) || duration(self.defaultWait) <= duration(self.maxWait)",message="defaultWait must not exceed maxWait"
+// +kubebuilder:validation:XValidation:rule="!has(self.advisory) || !self.advisory.enabled || self.enabled",message="checkpointCoordination.advisory.enabled requires checkpointCoordination.enabled: an advisory is part of coordination, not a feature of its own"
+// +kubebuilder:validation:XValidation:rule="!has(self.groups) || !self.groups.enabled || self.enabled",message="checkpointCoordination.groups.enabled requires checkpointCoordination.enabled"
 type CheckpointCoordinationSpec struct {
 	// Enabled turns coordination on. Default false, and false is also what an
 	// absent block means: no disruption waits for anything until somebody
@@ -327,6 +374,103 @@ type CheckpointCoordinationSpec struct {
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +listType=set
 	Namespaces []string `json:"namespaces,omitempty"`
+	// Advisory, when enabled, stamps a deadline-free notice on every eligible
+	// opted-in Pod the moment its incident parks for human approval with a
+	// drain or GPU-workload eviction still downstream, so a job can start
+	// checkpointing during the minutes a human takes to decide instead of
+	// learning about the disruption only when it begins. It promises nothing
+	// and waits for nothing: the deadline-bearing request still arrives at
+	// the disruption step exactly as without it. Omitted means off. It needs
+	// enabled: true on this block; the advisory uses the same allowlist, the
+	// same Pod identity confinement and the same `pods: patch` grant, and
+	// adds no RBAC of its own.
+	Advisory *CheckpointAdvisorySpec `json:"advisory,omitempty"`
+	// Groups, when enabled, extends a request to the peers of a Pod that
+	// declares kubeneuron.io/checkpoint-group: the Pods in the same namespace
+	// with the same value get the same request with their own deadline from
+	// the same formula, and nothing else — disruption stays on the one node.
+	// Omitted means off. Needs enabled: true on this block.
+	Groups *CheckpointGroupsSpec `json:"groups,omitempty"`
+}
+
+// CheckpointGroupsSpec is the bounded gang coordination.
+type CheckpointGroupsSpec struct {
+	// Enabled turns group requests on. Default false.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+	// MaxGroupSize bounds a group. A larger group has its peers skipped: the
+	// step asks only the members on the disrupted node, counts the skip, and
+	// the impact preview says so. 1 to 512, default 64.
+	// +kubebuilder:default=64
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=512
+	MaxGroupSize int `json:"maxGroupSize,omitempty"`
+	// CrossNode stamps peers on other nodes too. Default false: the group is
+	// then the members on the disrupted node, which is lead time for local
+	// ranks with zero new blast radius.
+	// +kubebuilder:default=false
+	CrossNode bool `json:"crossNode,omitempty"`
+}
+
+// CheckpointAdvisorySpec is the Phase 2 advisory at approval park.
+// +kubebuilder:validation:XValidation:rule="!has(self.budget) || (duration(self.budget) > duration('0s') && duration(self.budget) <= duration('60s'))",message="advisory.budget must be a positive duration of at most 60s"
+type CheckpointAdvisorySpec struct {
+	// Enabled turns the advisory on. Default false.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+	// Budget bounds one advisory round end to end (listing the node's
+	// workloads and stamping each eligible one). The park is already
+	// committed when the round starts, so the budget delays no decision; a
+	// round that runs out of budget leaves the rest unstamped and counts them
+	// unreachable. At most 60s.
+	// +kubebuilder:default="10s"
+	Budget string `json:"budget,omitempty"`
+}
+
+// ImpactPreviewSpec configures the impact preview of approval rounds.
+// +kubebuilder:validation:XValidation:rule="!has(self.requireForApproval) || !self.requireForApproval || self.enabled",message="impactPreview.requireForApproval requires impactPreview.enabled"
+// +kubebuilder:validation:XValidation:rule="!has(self.budget) || (duration(self.budget) > duration('0s') && duration(self.budget) <= duration('60s'))",message="impactPreview.budget must be a positive duration of at most 60s"
+type ImpactPreviewSpec struct {
+	// Enabled turns the preview on. Default false.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+	// Budget bounds one preview computation (listing the node's workloads and
+	// classifying its topology). A computation that runs out of budget is
+	// recorded as unavailable with its reason. At most 60s.
+	// +kubebuilder:default="15s"
+	Budget string `json:"budget,omitempty"`
+	// MaxItems bounds how many workloads the preview itemises; the rest are
+	// counted and items_truncated is set. 10 to 1000.
+	// +kubebuilder:default=200
+	// +kubebuilder:validation:Minimum=10
+	// +kubebuilder:validation:Maximum=1000
+	MaxItems int `json:"maxItems,omitempty"`
+	// RequireForApproval refuses an approve that carries no impact_digest, or
+	// a digest that does not match the round's current preview, and refuses
+	// every approve while the round's preview is unavailable. Default false:
+	// the preview is advisory unless the operator makes it a condition.
+	// +kubebuilder:default=false
+	RequireForApproval bool `json:"requireForApproval,omitempty"`
+	// WorkloadContext selects read-only resolvers that add "whose Pod is
+	// this" to each itemised workload of the preview: the owning batch Job,
+	// the Kueue Workload admitting it, the KubeRay cluster and job. Each is
+	// off by default; enabling one grants the controller get/list/watch on
+	// that group and nothing else, and an absent CRD group is reported as
+	// not observed rather than failing the preview.
+	WorkloadContext *ImpactWorkloadContextSpec `json:"workloadContext,omitempty"`
+}
+
+// ImpactWorkloadContextSpec selects the read-only context resolvers.
+type ImpactWorkloadContextSpec struct {
+	// BatchJobs reads batch/v1 Jobs that own itemised Pods.
+	// +kubebuilder:default=false
+	BatchJobs bool `json:"batchJobs,omitempty"`
+	// Kueue reads kueue.x-k8s.io Workloads, LocalQueues and ClusterQueues.
+	// +kubebuilder:default=false
+	Kueue bool `json:"kueue,omitempty"`
+	// KubeRay reads ray.io RayClusters and RayJobs.
+	// +kubebuilder:default=false
+	KubeRay bool `json:"kuberay,omitempty"`
 }
 
 // NodeTaintEffect is the scheduling effect of the degraded-node taint.

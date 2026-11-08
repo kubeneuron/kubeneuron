@@ -29,7 +29,14 @@ web/node_modules/
 # Local env
 .env
 .env.local
+# `go build ./cmd/<name>` drops the binary at the repository root. One
+# (kubeneuronctl, 16 MB) was committed by accident in the v0.8 cycle; name
+# all of them so it cannot happen again.
+/kubeneuron-agent
 /kubeneuron-controller
+/kubeneuron-operator
+/kubeneuronctl
+/sentinel-operator
 
 # Agent worktrees and local session scratch
 .claude/

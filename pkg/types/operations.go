@@ -139,4 +139,10 @@ type OperationalIdempotencyRecord struct {
 	ResourceID    string                  `json:"resource_id"`
 	CreatedAt     time.Time               `json:"created_at"`
 	ExpiresAt     time.Time               `json:"expires_at"`
+	// ResultDigest identifies what the operation under this key produced,
+	// for operations whose replay must return that exact result rather
+	// than the resource's current state (an impact-preview recompute
+	// returns the preview THIS key computed). Empty when the operation
+	// records no result, and for rows written before the column existed.
+	ResultDigest string `json:"result_digest,omitempty"`
 }

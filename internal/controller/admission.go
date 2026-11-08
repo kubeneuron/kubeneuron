@@ -273,7 +273,13 @@ func (c *Controller) allowNVIDIAReset(ctx context.Context, inc *types.Incident, 
 		if err != nil {
 			return err
 		}
-		return checkNVIDIAResetEvidence(profile, &pin.report, nodeUID, target)
+		if err := checkNVIDIAResetEvidence(profile, &pin.report, nodeUID, target); err != nil {
+			return err
+		}
+		// The topology classifier runs AFTER the legacy test and only ever
+		// adds a refusal; the pinned report is the report it judges, so a
+		// quiesce cannot smuggle a partitioned or shared device past it.
+		return c.refuseUnqualifiedResetTopology(ctx, target, &pin.report)
 	}
 	_, _, _, err := c.acceleratorEvidenceForReset(ctx, target)
 	return err
@@ -330,6 +336,14 @@ func (c *Controller) acceleratorEvidenceForReset(ctx context.Context, target typ
 		return nil, "", nil, fmt.Errorf("load NVIDIA accelerator report: %w", err)
 	}
 	if err := checkNVIDIAResetEvidence(profile, report, nodeUID, target); err != nil {
+		return nil, "", nil, err
+	}
+	// Narrowing only: the device topology classifier is consulted after the
+	// legacy evidence passed and can refuse (MIG, time-slicing, DRA, unknown)
+	// but never admit. It applies to both callers of this function — the live
+	// reset admission and the quiesce step that pins evidence for it — so
+	// monitoring is never stood down for a reset the topology forbids.
+	if err := c.refuseUnqualifiedResetTopology(ctx, target, report); err != nil {
 		return nil, "", nil, err
 	}
 	return report, nodeUID, profile, nil

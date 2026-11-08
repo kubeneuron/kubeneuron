@@ -44,6 +44,7 @@ type asyncItem struct {
 type incidentApproval struct {
 	incident *types.Incident
 	stepName string
+	context  ApprovalContext
 }
 
 // NewAsync wraps inner; Start must be called to begin delivery.
@@ -87,7 +88,7 @@ func (a *Async) deliver(ctx context.Context, item asyncItem) {
 		if item.event != nil {
 			err = a.inner.Notify(sendCtx, *item.event)
 		} else if item.incident != nil {
-			err = a.inner.RequestApproval(sendCtx, item.incident.incident, item.incident.stepName)
+			err = RequestApprovalWithContext(sendCtx, a.inner, item.incident.incident, item.incident.stepName, item.incident.context)
 		}
 		cancel()
 		if err == nil {
@@ -131,9 +132,17 @@ func (a *Async) Notify(_ context.Context, ev NotifyEvent) error {
 
 // RequestApproval implements Notifier: enqueue and return. The incident is
 // deep-copied for the same reason as in Notify.
-func (a *Async) RequestApproval(_ context.Context, inc *types.Incident, stepName string) error {
+func (a *Async) RequestApproval(ctx context.Context, inc *types.Incident, stepName string) error {
+	return a.RequestApprovalWithContext(ctx, inc, stepName, ApprovalContext{})
+}
+
+var _ ContextualNotifier = (*Async)(nil)
+
+// RequestApprovalWithContext implements ContextualNotifier: the context rides
+// along in the queue item.
+func (a *Async) RequestApprovalWithContext(_ context.Context, inc *types.Incident, stepName string, ac ApprovalContext) error {
 	select {
-	case a.queue <- asyncItem{incident: &incidentApproval{incident: inc.Clone(), stepName: stepName}}:
+	case a.queue <- asyncItem{incident: &incidentApproval{incident: inc.Clone(), stepName: stepName, context: ac}}:
 	default:
 		metrics.NotificationsDropped.WithLabelValues("approval_request").Inc()
 		a.log.Warn("notification queue full, dropping approval request", "incident", incidentID(inc))

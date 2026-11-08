@@ -36,6 +36,7 @@ func TestCARotationIsItsOwnCondition(t *testing.T) {
 	if cond == nil {
 		t.Fatal("a CA that needs rotating produced no distinguishable condition; nothing else in " +
 			"the installation converges until it is fixed, and an operator has nothing to alert on")
+		return
 	}
 	if cond.Status != metav1.ConditionFalse || cond.Reason != "CARotationRequired" {
 		t.Fatalf("condition = %s/%s, want False/CARotationRequired", cond.Status, cond.Reason)

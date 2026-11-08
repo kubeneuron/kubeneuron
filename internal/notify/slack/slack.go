@@ -71,6 +71,29 @@ func (n *Notifier) RequestApproval(ctx context.Context, inc *types.Incident, ste
 	return n.post(ctx, text)
 }
 
+var _ notify.ContextualNotifier = (*Notifier)(nil)
+
+// RequestApprovalWithContext implements notify.ContextualNotifier: the impact
+// summary goes between the headline and the commands.
+func (n *Notifier) RequestApprovalWithContext(ctx context.Context, inc *types.Incident, stepName string, ac notify.ApprovalContext) error {
+	if inc == nil {
+		return fmt.Errorf("slack: approval request for step %q carries no incident", stepName)
+	}
+	if ac.ImpactSummary == "" {
+		return n.RequestApproval(ctx, inc, stepName)
+	}
+	// The approve carries the preview digest this message shows, so running
+	// it approves exactly this preview; a recompute in between is refused.
+	approve := fmt.Sprintf("kubeneuronctl approve %s --round %d", inc.ID, inc.ApprovalEpoch)
+	if ac.ImpactDigest != "" {
+		approve += " --impact-digest " + ac.ImpactDigest
+	}
+	text := fmt.Sprintf(
+		":raised_hand: KubeNeuron approval required: `%s` (round %d)\n*node:* %s   *class:* %s   *step:* %s\n%s\nDecide with:\n```%s\nkubeneuronctl reject %s --round %d```",
+		inc.ID, inc.ApprovalEpoch, inc.Target.Node, inc.Class, stepName, ac.ImpactSummary, approve, inc.ID, inc.ApprovalEpoch)
+	return n.post(ctx, text)
+}
+
 func (n *Notifier) post(ctx context.Context, text string) error {
 	payload, err := json.Marshal(map[string]string{"text": text})
 	if err != nil {

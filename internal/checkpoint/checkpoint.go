@@ -165,13 +165,24 @@ type Policy struct {
 	// opt in. Self-declaration is a trust decision, so it is never fleet-wide
 	// by default.
 	Namespaces []string
+	// Advisory is the Phase 2 notice at approval park (advisory.go). Its zero
+	// value is off, and it can only be on inside an enabled policy.
+	Advisory AdvisoryPolicy
+	// Groups is the bounded gang coordination (group.go). Same rule.
+	Groups GroupPolicy
 }
 
 // Validate rejects a policy that could not be enforced as written. A disabled
 // policy is always valid: nothing in it is read.
 func (p Policy) Validate() error {
 	if !p.Enabled {
-		return nil
+		// Nothing in a disabled policy is read — except that an advisory
+		// switched on inside it is a configuration that asks for the part
+		// without the whole, and is refused rather than silently ignored.
+		if err := p.Advisory.validate(false); err != nil {
+			return err
+		}
+		return p.Groups.validate(false)
 	}
 	if p.DefaultWait <= 0 {
 		return fmt.Errorf("checkpoint coordination: defaultWait must be positive, got %v", p.DefaultWait)
@@ -198,7 +209,10 @@ func (p Policy) Validate() error {
 			return fmt.Errorf("checkpoint coordination: skipClasses must not contain a blank entry")
 		}
 	}
-	return nil
+	if err := p.Advisory.validate(p.Enabled); err != nil {
+		return err
+	}
+	return p.Groups.validate(p.Enabled)
 }
 
 // Clone returns a policy that shares no memory with the receiver, sorted so

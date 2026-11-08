@@ -363,10 +363,13 @@ must be recorded by the adapter and its operating procedure.
 > Released in v0.6.0 (published 2026-10-11 UTC); the v0.6.1 security and
 > toolchain patch released the same day and the v0.7.0 observability release
 > (2026-10-19) leave it unchanged, and this tree's manifests, chart, and
-> samples carry the v0.7.0 pins. Releases before
-> v0.6.0 do not contain it. It has not been exercised on GPU hardware or by
-> a real checkpointing workload: the v0.6.0 hardware run exercised the
-> shared runtime, not this feature.
+> samples carry the v0.8.0 pins of the release candidate (v0.7.0 is the
+> latest published release). Releases before
+> v0.6.0 do not contain it. The v0.6.0 hardware run exercised the shared
+> runtime, not this feature; the first hardware exercise of the protocol
+> itself was the v0.8.0 candidate's run on 2026-11-05 (`hack/hw-e2e.sh
+> test-checkpoint`, one toy trainer holding a Tesla T4). It has not been
+> exercised by a real checkpointing workload.
 
 `spec.safety.checkpointCoordination` lets opted-in Pods be told, and given a
 bounded deadline, before a `Drain` or `EvictGPUWorkload` step disrupts them.
@@ -390,6 +393,60 @@ operator's rollout guide.
   `timeout` minus a reserve kept for the disruption, so it cannot make a step
   time out; a step whose timeout leaves nothing after the reserve does not
   wait at all.
+
+**Advisory at approval park (v0.8 development).** `advisory.enabled: true`
+inside the block adds no verb and no wait: when an incident parks for
+approval with a disruption downstream, eligible Pods are stamped with the
+`kubeneuron.io/checkpoint-advisory-*` keys under their own `budget` (default
+10s, ceiling 60s), the round's outcome is counted in
+`kubeneuron_checkpoint_advisories_total{outcome}` and audited as one
+`checkpoint-advisory` row naming up to five Pods, and a round that ends
+without its disruption withdraws the notice best effort
+(`checkpoint-advisory-withdraw`). In `DryRun` nothing is patched. The
+protocol is in [playbook authoring](playbook-authoring.md). A released
+controller has no such field; this tree carries it as development work.
+
+**Checkpoint groups (v0.8 development).** `groups.enabled: true` inside the
+block makes a disruption's request reach a member's peers (same namespace,
+same `kubeneuron.io/checkpoint-group`) with their own deadline from the same
+formula; `crossNode` (default off) decides whether peers on other nodes are
+asked at all, and `maxGroupSize` (default 64) bounds a group, above which
+its peers are skipped. The listing behind it is one paged, read-only Pod
+list per group in that namespace; no verb is added. Peer outcomes land in
+`kubeneuron_checkpoint_group_requests_total{outcome}` and one
+`checkpoint-group-request` row per group on the incident's audit trail.
+Start with `crossNode: false`.
+
+**Impact preview (v0.8 development).** `spec.safety.impactPreview.enabled:
+true` computes, at every park for approval, a durable record of what the
+pending step would touch (the [REST API reference](reference-api.md#impact-preview-v08-development)
+has the document), hands a three-line summary to the notification channels,
+and shows it in the panel's incident drawer and in
+`kubeneuronctl incidents impact`. It adds no verb: the listing it reads is
+the one the controller already holds. `requireForApproval: true` turns the
+preview from advice into a condition — an approve must carry the digest of
+the round's current preview, and an unavailable preview holds approval until
+`POST …/impact-preview/recompute` succeeds — so enable it only once the
+preview is reliably available on your fleet (watch
+`kubeneuron_impact_previews_total{result="unavailable"}` first). Rejecting is
+never held back. `workloadContext.{batchJobs,kueue,kuberay}` add "whose Pod
+is this" to the preview through read-only resolvers; each one selected
+costs exactly one get/list/watch rule on its group (`batch/jobs`,
+`kueue.x-k8s.io/{workloads,localqueues,clusterqueues}`,
+`ray.io/{rayclusters,rayjobs}`) on the managed controller ClusterRole, and
+nothing is ever written to those objects. A cluster without the CRD group
+reports the resolver as not observed. The store gains a table and two columns (SQLite 0025 /
+PostgreSQL 0016, see [upgrade notes](upgrade.md#v080-workload-safe-recovery-notes)).
+Two self-monitoring alerts cover the two courtesies that can silently miss
+their audience, `KubeNeuronImpactPreviewUnavailable` and
+`KubeNeuronCheckpointAdvisoryUnreachable` ([runbooks](runbooks.md#workload-safe-recovery-alerts-v08-development-route-to-humans)).
+The `examples/checkpoint/` directory holds three CPU-only toys — an Indexed
+Job, the same Job in a Kueue LocalQueue, a KubeRay Ray Train job — whose
+Pods read the advisory and the request off their own object and checkpoint;
+`make test-workload-safe-kind` drives them through a real installation and
+`make verify-workload-safe-examples` checks them offline. They demonstrate
+the protocol and are not evidence that any framework integrates with
+KubeNeuron.
 
 **Safe enablement.**
 
@@ -1132,8 +1189,9 @@ suite is a separate, gated target that always destroys its cluster afterward.
   no remote apply, the README's install order with bounded gates, the
   fail-closed token copy, and refused lock drift, checksum mismatch, missing
   root and port drift). Both phases are steps of the workflow, after
-  `deploy` and before every injection phase. Neither has yet been run on
-  hardware.
+  `deploy` and before every injection phase. Both ran on hardware for the
+  first time in the v0.8.0 candidate's G3 run (2026-11-05, EKS g4dn);
+  the CHANGELOG entry records the outcome.
 
 ### When it runs
 
@@ -1185,7 +1243,36 @@ separately.
    letting the quiet window resolve the incident.
 7. Exercises the **threshold path**: XID 92 holds sub-threshold in `OBSERVING`
    and the third signal escalates.
-8. Flips to `executionMode: Enabled` under a confined
+8. Three v0.8 workload-safe phases, on the one GPU node and before it is
+   terminated. Each first pins an `AcceleratorRuntimeProfile` to the driver
+   and DCGM client versions the agent on that node answers with, because the
+   agent attests its runtime only while a profile selects the node and the
+   classifier reads the device layout from that attestation; on g4dn the
+   layout is `whole-device` / `per-pod` with device actions `refused`
+   (`ReportNotReady`: the agent cannot stand behind a reset the hypervisor
+   withholds, see "GPU reset is impossible on most cloud VMs" above), and
+   the phases assert exactly that shape, with `eligible` accepted where the
+   hardware can reset. **`test-impact`** places an opted-in toy trainer that
+   holds the Tesla T4, parks a `checkpoint-probe` incident at an
+   approval-gated cordon and asserts the impact preview reads the node as
+   `whole-device` / `per-pod` with one GPU holder and its Job owner, that an
+   approve without the preview digest is refused, and that rejecting
+   withdraws the advisory. **`test-checkpoint`** drives the
+   same toy through the whole protocol: the advisory on the Pod and the
+   sidecar's reaction to it (logging the kubelet's Downward API latency, the
+   first time it is measured outside kind), an approve that
+   `kubeneuronctl approve --round 1` refuses without the digest and records
+   with `--impact-digest`, the request with its deadline,
+   the trainer's checkpoint and exit, the audit row recording the Pod as
+   `exited`, the counters moving, and a real drain of the node.
+   **`test-timeslice`** switches the GPU Operator device plugin to
+   time-slicing (`replicas: 2`) through the ClusterPolicy, asserts the
+   classifier refuses device actions on the now time-sliced node with
+   device-wide attribution, reverts the config and asserts `whole-device`
+   returns. All three measure acknowledgements and classifications, never
+   saved training progress, and say nothing about MIG, DRA, a multi-node gang
+   or any training framework.
+9. Flips to `executionMode: Enabled` under a confined
    `spec.safety.destructiveExecution` block (node selector + the exact
    acknowledgement string), waits for the **controller** to report that mode
    and that confinement as live — not merely for the operator to stamp the root

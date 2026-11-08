@@ -87,7 +87,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.9"
+          go-version: "1.26.10"
           cache: true
 
       - name: Assume the GPU-lab AWS role (OIDC)
@@ -179,6 +179,22 @@ jobs:
 
       - name: Threshold path (XID 92 sub-threshold hold, 3-signal escalation)
         run: hack/hw-e2e.sh test-threshold
+
+      # v0.8 workload-safe recovery, on the one GPU node, before it is
+      # terminated. test-impact and test-checkpoint place an opted-in toy
+      # trainer that holds the Tesla T4 and drive park -> preview -> advisory
+      # (-> digest-bound approve -> request -> exit -> real drain); the
+      # fixture restores the root's safety block and uncordons on exit.
+      # test-timeslice flips the device plugin to replicas=2 through
+      # ClusterPolicy and reverts it; the classifier is read-only throughout.
+      - name: Impact preview on the real node (whole-device, GPU holder, digest-bound approve refused without it)
+        run: hack/hw-e2e.sh test-impact
+
+      - name: Checkpoint coordination on an opted-in GPU Pod (advisory, digest-bound approve, request, exit, real drain)
+        run: hack/hw-e2e.sh test-checkpoint
+
+      - name: Topology classifier on a time-sliced Tesla T4 (replicas=2, refused, reverted)
+        run: hack/hw-e2e.sh test-timeslice
 
       - name: Confined destructive ReplaceNode (executionMode Enabled)
         run: hack/hw-e2e.sh test-destructive

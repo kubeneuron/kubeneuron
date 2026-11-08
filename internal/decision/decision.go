@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/config"
+	"github.com/kubeneuron/kubeneuron/internal/topology"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -63,6 +64,13 @@ const (
 	// distinct contract from ProfileMismatch: a valid new profile is still not
 	// authority to execute an old autonomy plan.
 	ReasonConfigurationChanged ReasonCode = "ConfigurationChanged"
+	// ReasonTopologyUnqualified says the captured device topology
+	// classification (internal/topology) refused device-scoped actions on the
+	// node: partitioned (MIG), shared (time-sliced), DRA-managed, mixed or
+	// unknown. It is only ever added for a physical-device reset request and
+	// only ever narrows: a snapshot without a classification is evaluated
+	// exactly as before.
+	ReasonTopologyUnqualified ReasonCode = "TopologyUnqualified"
 )
 
 // ActionClass tells the evaluator why a decision is being requested.  The
@@ -156,6 +164,13 @@ type Snapshot struct {
 	OwnershipConflict       bool `json:"ownership_conflict,omitempty"`
 	SelectorExcluded        bool `json:"selector_excluded,omitempty"`
 	AutonomyBudgetExhausted bool `json:"autonomy_budget_exhausted,omitempty"`
+
+	// Topology is the node's device topology classification, captured by the
+	// live adapter for physical-device reset requests. It can only refuse: a
+	// refused or absent-but-required classification blocks a device-scoped
+	// reset, and nothing in it ever makes an action eligible. Nil means the
+	// adapter did not capture one, which leaves the evaluation unchanged.
+	Topology *topology.Classification `json:"topology,omitempty"`
 
 	Limits Limits `json:"limits,omitempty"`
 }
@@ -288,7 +303,21 @@ func Evaluate(s Snapshot) Result {
 	if s.Request.TargetDeviceID != "" && !containsTargetDevice(*s.Report, s.Request.TargetDeviceID) {
 		return finalize(result, StateBlocked, []ReasonCode{ReasonCapabilityMissing}, s)
 	}
+	// The topology classification is consulted LAST and can only take away:
+	// every check above has already passed, and a refused classification
+	// turns that pass into a block. It is never consulted for a node-scoped
+	// action, which is how node-scoped rungs keep their v0.7 behaviour.
+	if deviceScopedReset(s.Request) && s.Topology != nil && !s.Topology.Eligible() {
+		return finalize(result, StateBlocked, []ReasonCode{ReasonTopologyUnqualified}, s)
+	}
 	return finalize(result, StateEligible, nil, s)
+}
+
+// deviceScopedReset reports whether a request asks for the one action the
+// topology classifier gates: a physical-device reset.
+func deviceScopedReset(request Request) bool {
+	return request.AcceleratorAction == types.AcceleratorActionResetDevice &&
+		request.Scope == types.AcceleratorScopePhysicalDevice
 }
 
 func finalize(result Result, state State, reasons []ReasonCode, s Snapshot) Result {
@@ -407,6 +436,7 @@ var reasonOrder = map[ReasonCode]int{
 	ReasonCapabilityMissing:       12,
 	ReasonEvidenceSourceMissing:   13,
 	ReasonConfigurationChanged:    14,
+	ReasonTopologyUnqualified:     15,
 }
 
 func canonicalReasons(in []ReasonCode) []ReasonCode {
@@ -451,6 +481,8 @@ func requiredActions(reasons []ReasonCode) []string {
 			out = append(out, "collect_required_approval")
 		case ReasonAutonomyBudgetExhausted:
 			out = append(out, "wait_for_autonomy_budget")
+		case ReasonTopologyUnqualified:
+			out = append(out, "review_device_topology")
 		}
 	}
 	return out

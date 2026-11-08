@@ -10,11 +10,13 @@ package platform
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
+	"github.com/kubeneuron/kubeneuron/internal/topology"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -85,6 +87,11 @@ type Workload struct {
 	// opted in and how long it asked for. It is a defensive copy: mutating it
 	// touches nothing the platform holds. Nil when the platform has none.
 	Annotations map[string]string
+	// Node is the node the workload was listed on, so a checkpoint request to
+	// a group peer on another node can be confined to that node. Empty on
+	// platforms without node identity; NodeWorkloads callers may assume the
+	// node they asked for.
+	Node string
 }
 
 // DrainExclusion is the reason a Drain skips a workload. It is the
@@ -479,6 +486,86 @@ type NodeLabeler interface {
 	NodeLabels(ctx context.Context, node string) (labels map[string]string, found bool, err error)
 }
 
+// NodeResourceObserver is implemented by platforms whose nodes advertise
+// devices as extended resources (Kubernetes status.capacity/allocatable). It
+// is a read-only input to the topology classifier (internal/topology): the
+// device-plugin advertisement is where MIG instances, time-sliced replicas
+// and whole GPUs are visible to the cluster, and the classifier refuses a
+// device-scoped action on anything it cannot read.
+//
+// A node that is not found is (zero, false, nil), like NodeLabeler. A
+// Kubernetes platform always answers with Source ResourceSourceNode. A
+// platform that has no device-plugin style advertisement at all (a bare-metal
+// inventory) must still implement this interface and answer
+// ResourceSourceNotApplicable explicitly: the controller fails closed and
+// records a platform WITHOUT the interface as unobserved, which refuses every
+// device-scoped action, so an absent interface can never be read as "no
+// partitions here".
+type NodeResourceObserver interface {
+	NodeResources(ctx context.Context, node string) (resources topology.Resources, found bool, err error)
+}
+
+// ContextSelection says which read-only context resolvers an installation
+// opted into (spec.safety.impactPreview.workloadContext).
+type ContextSelection struct {
+	BatchJobs bool
+	Kueue     bool
+	KubeRay   bool
+}
+
+// Names lists the selected resolvers by their policy names, in a stable
+// order.
+func (s ContextSelection) Names() []string {
+	var out []string
+	if s.BatchJobs {
+		out = append(out, "batchJobs")
+	}
+	if s.Kueue {
+		out = append(out, "kueue")
+	}
+	if s.KubeRay {
+		out = append(out, "kuberay")
+	}
+	return out
+}
+
+// Any reports whether any resolver is selected.
+func (s ContextSelection) Any() bool { return s.BatchJobs || s.Kueue || s.KubeRay }
+
+// WorkloadContext is what the resolvers found for one workload: the owner
+// chain, one JSON object per resolver that observed something, and a bounded
+// reason per resolver that could not observe (an absent CRD group, a refused
+// read, a timeout). Nothing in it is a claim about what the framework will
+// do; it only says whose Pod this is.
+type WorkloadContext struct {
+	OwnerChain  []string
+	Context     map[string]json.RawMessage
+	NotObserved map[string]string
+}
+
+// WorkloadContextResolver is the optional, strictly read-only capability
+// behind the impact preview's context (S5). An implementation reads only
+// get/list on the owning objects, never writes, bounds its own time, and
+// never fails: anything short of a read is NotObserved with a reason.
+type WorkloadContextResolver interface {
+	ResolveWorkloadContext(ctx context.Context, w Workload, which ContextSelection) WorkloadContext
+}
+
+// DRAObserver is implemented by platforms that can read Dynamic Resource
+// Allocation state for one node: the ResourceSlices published for it and
+// the ResourceClaim references carried by the Pods scheduled on it. The
+// observation is strictly read-only, is taken only when the installation
+// opted into it, and never fails: anything short of a successful read of
+// resource.k8s.io/v1 AND of the node's Pods is reported as
+// topology.DRANotObserved with a reason, which the classifier refuses; an
+// observed result must set PodsInspected or the classifier treats it as
+// invalid. ResourceClaim objects themselves are never read. An
+// implementation must bound its own time and must never block reconciliation
+// on an unavailable API.
+type DRAObserver interface {
+	ObserveDRA(ctx context.Context, node string) topology.DRAObservation
+}
+
 // AcceleratorStackController is implemented by platforms that can stop and
 // restart the vendor's own monitoring stack on one node.
 //
@@ -580,6 +667,37 @@ type WorkloadCheckpointer interface {
 	// as an acknowledgement. An object outside policy or node scope is an Err
 	// wrapping ErrCheckpointScope, never a readable answer.
 	ObserveCheckpoint(ctx context.Context, policy checkpoint.Policy, node string, w Workload) checkpoint.Observation
+
+	// AdviseCheckpoint stamps adv on w, which the caller listed on node, under
+	// the same confinement as RequestCheckpoint: policy allowlist, node, UID,
+	// and a guarded patch of the operator-owned advisory keys only. A
+	// well-formed advisory of the SAME incident and round already on the
+	// object means nothing is written; an advisory of another round or
+	// incident is overwritten, because the object carries at most one notice
+	// and the current round is the one that stands. Nothing is waited for.
+	//
+	// On error nothing has been written. The error wraps ErrCheckpointScope,
+	// ErrCheckpointWorkloadGone or ErrCheckpointConflict when the adapter
+	// could classify it; any other error is a read or write failure to count
+	// as unreachable.
+	AdviseCheckpoint(ctx context.Context, policy checkpoint.Policy, node string, w Workload, adv checkpoint.Advisory) error
+
+	// WithdrawAdvisory stamps the withdrawal key, at the given time, on an
+	// advisory of incidentID and round that is in force on w, under the same
+	// confinement. An object carrying no such advisory, or one already
+	// withdrawn, is left exactly as it is and reported withdrawn=false with a
+	// nil error: there was nothing to withdraw. The advisory keys are never
+	// removed, and no workload-owned key is ever touched.
+	WithdrawAdvisory(ctx context.Context, policy checkpoint.Policy, node string, w Workload, incidentID string, round int, at time.Time) (withdrawn bool, err error)
+
+	// ListGroupMembers lists the live workloads of one checkpoint group: the
+	// Pods in namespace carrying kubeneuron.io/checkpoint-group: group that
+	// are not finished or being deleted. The namespace must be on the
+	// policy allowlist (ErrCheckpointScope otherwise). The read is bounded:
+	// at most limit members are returned, and truncated reports that more
+	// may exist, which a caller treats as "too large". Each member carries
+	// its Node. Nothing is written.
+	ListGroupMembers(ctx context.Context, policy checkpoint.Policy, namespace, group string, limit int) (members []Workload, truncated bool, err error)
 }
 
 // Whether the device is actually free is deliberately not asked here. A

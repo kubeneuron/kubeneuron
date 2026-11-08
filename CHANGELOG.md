@@ -9,6 +9,417 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [v0.8.0] - 2026-11-05 (candidate; the date becomes the tag date at release)
+
+Workload-safe GPU recovery
+([design record](docs/workload-safe-recovery-design.md)): a read-only,
+fail-closed device topology classifier, a checkpoint advisory at approval
+park, a digest-sealed impact preview, bounded checkpoint groups, and
+read-only Kueue, KubeRay and batch Job context. The advisory, preview,
+groups and context readers are opt-in and off by default; the topology
+classifier always runs and can only narrow the existing reset gate, so a
+tree with every optional block absent behaves as v0.7.0 with a reset gate
+that refuses more, never less. **Release status: candidate.** The source defaults (the `config/default` operator
+image, the Helm chart `version`/`appVersion`/image tag, and the sample
+controller and agent images) carry v0.8.0 so that the tree, the gates and
+the tag describe one thing; no `v0.8.0` tag, image or release asset exists
+while this sentence stands, and v0.7.0 is the latest published release.
+**Gate record (2026-11-05 UTC; G1 and G2 on `7adbdfc`/`366d88d`, G3 on
+`38046bd` with the corrections it forced landing as `9aee794` and
+`b8f1e1f`, G1 and the kind integration gate again after them; then, after
+the review corrections of 2026-11-06, every gate again on the frozen
+candidate `7c5801e` — see the end of this record):**
+- G2, kind integration: `make test-integration-kind` on a fresh kind
+  v0.32.0 / Kubernetes v1.33.12 cluster passed (09:04–09:43 UTC): 99 CEL
+  admission checks, scoped RBAC, mTLS and identity rejection, TLS rotation
+  and recovery, the controller restart mid-playbook, the real cordon, and
+  the v0.8 workload-safe phases on real Pods (advisory at park and its
+  withdrawal, a durable impact preview the approve must carry, a Phase 1
+  request reaching a group peer on another node, a real drain after
+  acknowledgement, a dry-run park that patches nothing).
+- G2, examples fixture: `hack/kind-workload-safe.sh` passed against a real
+  installation (kind v0.32.0, Kueue v0.20.4, KubeRay 1.7.1, Ray 2.60.0) on
+  the same source: advisory on six opted-in Pods and none on the Ray head,
+  trainers checkpointing on the advisory, a preview with owner, Kueue and
+  Ray contexts, a digest-bound approve, the request on all six, the Job
+  Pods exiting and the Ray workers acknowledging, the node draining, and no
+  Kueue or Ray object gaining a KubeNeuron field manager. Seventeen runs
+  were needed; the fixes they forced are in the source (`1c9f64d`,
+  `5cd891f`, `7adbdfc`, `fd4716a`), and three of the failures were the
+  test host's disk, not the product.
+- G2, upgrade/rollback rehearsal: `make test-upgrade-rollback-kind` with
+  baseline v0.7.0 passed for SQLite and PostgreSQL on `366d88d` (10:18–10:39
+  UTC; that commit changes only the rehearsal script and its documentation
+  on top of `7adbdfc`). Its first run on this source failed on purpose and
+  usefully: the v0.7.0 binary refused the migrated store ("schema version 24
+  is newer than this binary's 23"; 15 vs 14 on PostgreSQL), so an
+  images-only rollback is impossible, as the upgrade notes already said.
+  The rehearsal now proves that refusal, performs the documented restore
+  (pre-upgrade snapshot from `GET /api/v1/backup` or `pg_dump`; operator
+  and controller to zero; the restore helper Pod or `psql`; operator
+  restarted), proves v0.7.0 serves the pre-upgrade state (the rows written
+  after the snapshot are gone), and re-upgrades, migrating the restored
+  store again and running the whole v0.5 lifecycle on it.
+- G1: `make gates` (generate, build, lint, race tests, docs, hw-e2e sweeps,
+  TLS helpers, workload-safe examples verifier with 28 mutation
+  self-checks) passed on `7adbdfc` (10:05–10:11 UTC) and again on
+  `366d88d` (10:40–10:42 UTC). The rest of `make gates-full` passed on
+  `366d88d` as well: `verify-image` (10:43–10:45 UTC; four targets built
+  from `build/Dockerfile`, entrypoints run, users as declared) and the
+  synthetic CPU-only GPU observability kind fixture (10:45–10:54 UTC; rule,
+  routing and provisioning wiring only, no DCGM or GPU evidence).
+  `hack/mirror.sh` against a scratch clone of the public repository staged
+  140 paths with the private plan and records absent. After the G3
+  corrections, `make gates` passed again on the tree that became `b8f1e1f`
+  (17:18–17:21 UTC) and `make test-integration-kind` passed again on a
+  fresh kind cluster on the source of `e8925bf` (17:41–18:20 UTC; the only
+  Go change since `7adbdfc` is the classifier correction in `9aee794`, and
+  the eight synthetic topology forms and the workload-safe phases read as
+  before, since the kind reports are `ready`). The examples fixture and the
+  rehearsal were not rerun; neither reads the changed path.
+- G3, the AWS hardware gate: the `hw-e2e.yaml` sequence of `hack/hw-e2e.sh`
+  ran on 2026-11-05 UTC, driven locally from this tree, on an ephemeral EKS
+  cluster (Kubernetes 1.33, one `g4dn.xlarge` / Tesla T4, driver
+  580.178.04, GPU Operator v26.3.3, DCGM client 4.3.1 against engine
+  4.5.2). `preflight`, `up` (15:34–15:52), `deploy`, `deploy-observability`,
+  `test-observability`, `test-dryrun`, `test-dcgm`, `test-verify-recur` and
+  `test-threshold` passed first time on `38046bd` (15:52–16:11). The three
+  v0.8 phases, run on hardware for the first time, failed on that source and
+  passed on the same cluster after three corrections, recorded as
+  `9aee794` (product) and `b8f1e1f` (harness): no `AcceleratorRuntimeProfile`
+  selected the node, so the agent never published its report and the
+  classifier read `ReportMissing` (the fixture now pins a profile to the
+  driver and DCGM client the node answers with); with a report, the
+  classifier read `unknown` because the agent degrades its report where the
+  hypervisor withholds the PCI reset and the classifier required a ready
+  report for the layout (the correction keeps layout and readiness apart;
+  the controller image was rebuilt from that source and rolled onto the
+  running installation before the reruns); and four harness defects on
+  paths kind never reaches (an annotation read whose jsonpath escape did not
+  survive `eval`, an audit assertion applying `test()` to null results and
+  seeking the approver on the drain rows, a time-slicing assertion that
+  expected the renamed `nvidia.com/gpu.shared` advertisement, and a failed
+  phase leaving its incident parked and its port-forward running). With
+  those: `test-impact` passed (17:01–17:05: a round-1 preview of the real
+  node as `whole-device` / `per-pod` / `refused` with `ReportNotReady`, one
+  GPU holder eligible with its Job owner and group, 409 without and with a
+  stale digest, the advisory stamped and withdrawn on rejection with the
+  opt-in untouched); `test-checkpoint` passed (17:10–17:13: the sidecar read
+  the advisory off the Downward API and the trainer checkpointed 4 s after
+  the stamp, `kubeneuronctl approve --round 1` (which at that commit still
+  fetched the preview and bound its digest itself; see the review
+  corrections below) approved, the request carried a 3 m deadline, the Pod exited 6 s later,
+  the audit recorded it `exited`, both counters moved, the node drained);
+  `test-timeslice` passed (17:13–17:15: `whole-device`, then `time-sliced` /
+  `refused` / `device-wide` with `TimeSliced` under the device plugin's
+  `replicas: 2`, then `whole-device` again after the revert); then
+  `test-destructive` passed (17:15–17:20, ReplaceNode terminated the GPU
+  node and closed the incident as replaced). `teardown` (17:20–17:39), the
+  harness's own `sweep` and `reap`, and an independent read-only audit of
+  the account afterwards found no cluster, instance, stack, volume (by the
+  run tag and by the legacy cluster tag), ENI, OIDC provider or recycle
+  role; the sweep deleted the run's ECR images and the rebuilt controller
+  image was deleted by hand. The run identity beyond the date is not
+  disclosed. Two limits of this evidence: on this hardware no classification
+  was ever `eligible` (a guest EC2 instance cannot reset its GPU), so the
+  `eligible` verdict remains CPU-only evidence; and the v0.8 phases passed
+  on reruns within one cluster after the corrections, not on a clean single
+  pass of the workflow, which the next G3 on a tagged source should show.
+- **Corrections after review (2026-11-06).** An independent review of the
+  candidate (code and logic, and product-line alignment, both by a second
+  model against `591982f`) found the defects below; each is fixed on the
+  candidate with a regression test, and the gates rerun after them are
+  recorded above this line when they pass.
+  - The advisory consulted only the incident's own `DryRun` stamp: an
+    incident opened under `Enabled` kept stamping workloads after the
+    installation was switched to `DryRun`. It now reads the live gate the
+    way step execution does (`effectiveDryRun`); withdrawal still only
+    touches a Pod carrying the incident's own stamp.
+  - A failed state transition (a lost conflict check) still withdrew the
+    round's advisory; only a committed transition withdraws now.
+  - `POST …/impact-preview/recompute` reserved its idempotency key before
+    computing, swallowed a store refusal and answered a replay with the
+    round's *newest* preview. It now computes, persists, then takes the
+    key with the result digest (`operational_idempotency.result_digest`,
+    SQLite 0025 / PostgreSQL 0016); a replay returns the preview that key
+    produced, and a refused write fails the request without consuming
+    the key.
+  - "Newest preview" was decided by the engine on the text of
+    `computed_at` (variable-width RFC 3339), where `…:00Z` sorts after
+    `…:00.5Z`; it is decided on the parsed time now.
+  - The audit row per checkpoint group was written under a fresh
+    two-second context, outside the coordination window and after it; the
+    group rows now live inside the window and the groups left when it
+    closes are skipped in one row.
+  - A withdrawal was recognised by the presence of any parseable
+    `withdrawn-at`, so a later round stamped over a withdrawn notice read
+    as withdrawn; a withdrawal now counts only when it is not older than
+    the stamp, and the withdrawal patch tests the advisory's incident and
+    round, so a newer stamp landing between read and write fails the
+    write instead of being withdrawn.
+  - `kubeneuronctl approve --round` fetched the current preview and bound
+    the approve to it, which approved a preview recomputed after the one
+    the human read. The notification's suggested command now carries
+    `--impact-digest`; without it, `approve --round` prints the preview
+    and stops. The incident detail carries `decision` and
+    `decision_impact_digest`, the digest the decision row persisted.
+  - The preview's `effective_wait` was the policy grant, not the grant the
+    downstream step would actually make (the policy grant bounded by that
+    step's coordination budget); an empty downstream op passed policy
+    eligibility (`no-disruption` now); and the Phase 1 request filtered
+    candidates with its own code rather than the shared
+    `checkpoint.Evaluate`.
+  - A group the controller could not list was shown with its on-node
+    count as the total; it is now `members_total_known: false` with the
+    `GroupTotalUnknown` warning.
+  - The Kueue resolver listed a namespace's Workloads unfiltered for a
+    queue-labelled Pod without a controller owner and took the first; the
+    batch Job resolver described a Job of the owner's name without
+    checking its UID. Both attribute nothing by name alone now
+    (`workload_lookup: no-owner`, `owner-replaced`).
+  - The park ran the advisory and the preview one after the other before
+    notifying the human (up to the sum of both budgets); the advisory now
+    runs beside the preview and is waited for after the notification is
+    handed off.
+  - `hack/hw-e2e.sh` accepted `device_actions: eligible` beside a degraded
+    report, any periodic trainer checkpoint as the advisory's effect, a
+    deadline merely present, the round's newest digest in place of the
+    decision row's, and lost the incident id when the park wait failed.
+    The predicate now requires an empty reason list and a ready report for
+    `eligible`; the trainer logs *why* it checkpointed (`(advisory)`,
+    `(request)`, `(periodic)`) and the phase asserts the cause; the Pod
+    must leave before its stamped deadline and the audit's settled wait
+    must be under the grant; the approval row's own digest is asserted;
+    and the incident id is recorded before any wait. The sidecar no longer
+    claims "checkpoint written" when the trainer left without the marker.
+  - **Gates after the corrections (2026-11-06 UTC, candidate `7c5801e`;
+    the one commit after it, `4587ca4`, changes a single `hack/hw-e2e.sh`
+    assertion and nothing the gates build).** G1: `make gates` passed on
+    the corrected tree (17:55–17:59) and on `7c5801e` (19:46–19:48). G2:
+    `make test-integration-kind` passed twice on `ecc0f4a` (17:59–18:39 on
+    a fresh kind cluster; 18:40–19:16 on the retained one, to keep the
+    installation for the fixture; 99 CEL checks and the v0.8 phases as
+    before); the examples fixture `hack/kind-workload-safe.sh` passed on
+    `7c5801e` (19:23–19:27: the six opted-in Pods, the trainers' advisory
+    checkpoints, the preview with contexts, the digest-bound approve, the
+    request, the exits and acknowledgements, the drain, no foreign field
+    manager, and the new Phase C — the `plain-job-pvc` overlay's
+    replacement Pod resumed from step 35, the step its predecessor
+    checkpointed on the claim; its first run was refused by the apiserver
+    on `maxFailedIndexes`, fixed as `7c5801e`); `make
+    test-upgrade-rollback-kind` with baseline v0.7.0 passed on `7c5801e`
+    (19:27–19:46: v0.7.0 refuses schema 25/16, the pre-upgrade snapshot
+    restores, the restored store re-migrates, for SQLite and PostgreSQL).
+    G3: the full `hw-e2e.yaml` sequence ran once more on an ephemeral EKS
+    cluster (Kubernetes 1.33, one `g4dn.xlarge` / Tesla T4, driver
+    580.178.04, GPU Operator v26.3.3), driven locally from `7c5801e`:
+    `preflight`, `up` (19:48–20:05), `deploy`, `deploy-observability`,
+    `test-observability`, `test-dryrun`, `test-dcgm`, `test-verify-recur`,
+    `test-threshold` (20:05–20:24), `test-checkpoint` (20:27–20:31: the
+    trainer's `(advisory)` checkpoint 4 s after the stamp, `kubeneuronctl
+    approve --round 1` printed the preview and stopped without the digest,
+    approved with `--impact-digest`, the request with a 3 m deadline, the
+    trainer's `(request)` checkpoint and exit before the deadline, settled
+    in 6.1 s, `decision_impact_digest` equal to the digest read, the node
+    drained), `test-timeslice` (20:31–20:33: `whole-device` /
+    `refused` / `ReportNotReady`, then `time-sliced` / `refused` /
+    `device-wide` under `replicas: 2`, then `whole-device` again) and
+    `test-destructive` (20:35–20:40, confined ReplaceNode) passed first
+    time. `test-impact` failed first time (20:24–20:27) on the strengthened
+    harness assertion itself — it required `batch_job.indexed == true` and
+    the fixture Job is NonIndexed; the preview was correct (the opted-in
+    GPU holder with `Job/e2e-checkpoint-trainer`, the resolved `batch_job`
+    context, group `e2e-run` with a known total, no warnings) — and passed
+    on the same cluster (20:33–20:35) with the assertion corrected as
+    `4587ca4`, before the destructive phase. `teardown` (20:40–20:55), the
+    harness's `sweep` and `reap`, and an independent read-only audit
+    afterwards found no cluster, stack, instance, volume, ENI, OIDC
+    provider, role or ECR image. The same two limits as on 2026-11-05
+    hold: no classification was `eligible` on this hardware, and the
+    `test-impact` phase passed on a rerun within the cluster.
+  - Documentation: the classifier is not "off by default" and a tree
+    without the optional blocks does not behave exactly as v0.7.0 (it
+    refuses more); "can checkpoint" is "eligible for a checkpoint
+    request"; the security review's rollback sentence described the
+    opposite of what the rehearsal proves; the status sentences of the
+    design records, the operations page, the one-pager's "validated end
+    to end" ladder (its reboot and uncordon rungs were dry-run), the
+    product tour's "NVIDIA-only" and the definition plan's 2026-09 rows
+    were stale; and the examples promised a resume the `emptyDir` toys
+    cannot deliver — the `plain-job-pvc` overlay now shows one, and the
+    kind fixture asserts the replacement Pod resumes from the checkpointed
+    step.
+This entry is updated in place at each gate and again when the tag is cut,
+the way the v0.7.0 entry was.
+
+v0.8.0 adds no remediation action, no device-scoped action on partitioned
+or shared GPUs, no write to Kueue, Ray or DRA objects, and no network path
+from the controller to any workload.
+
+**What a passed G3 on g4dn does not prove** (the release plan's list,
+carried here one for one):
+
+- It does **not** prove operation with real distributed training (a gang
+  across several GPU nodes): the bench has one GPU node.
+- It does **not** prove MIG classification or MIG blast radius.
+- It does **not** prove DRA (if the phase did not run, the record says it
+  did not run).
+- It does **not** prove integration with Kueue or KubeRay on GPUs.
+- It does **not** prove that lead time improves a training outcome: the
+  measure is `acknowledged / (acknowledged + expired)`, not saved progress.
+- It does **not** prove per-device reset (impossible in a guest EC2
+  instance) and nothing on A100/H100.
+- It is **not** a hardware qualification of any new remediation path —
+  v0.8 adds none.
+
+### Added
+
+- A read-only, fail-closed device topology classifier (`internal/topology`,
+  `GET /api/v1/nodes/{node}/topology`, `kubeneuronctl nodes topology`, the
+  `topology` object in single-node readiness, and the
+  `kubeneuron_topology_classifications_total{topology,result}` counter). It
+  classifies a node's device layout from the node object, GPU Feature
+  Discovery labels and the NVIDIA agent report into `whole-device`, `mig`,
+  `time-sliced`, `dra-managed`, `mixed` or `unknown`, with stable reason
+  codes; only `whole-device` is eligible for device-scoped actions, unknown
+  or contradictory input is refused, and the classifier can only narrow the
+  existing reset gate, never widen it. Readiness never decides the layout:
+  a whole device the agent attested but degraded (every virtualized GPU
+  node, where the hypervisor withholds the PCI reset) is reported as
+  `whole-device` / `per-pod` and refused with `ReportNotReady`, so a preview
+  on a cloud fleet still names the layout (observed on one EC2 g4dn
+  configuration; other virtualized platforms were not tested). The first hardware run of the
+  classifier (G3, 2026-11-05, EC2 g4dn) found it collapsing such nodes to
+  `unknown`; the correction is on the candidate and the hardware phases
+  assert the corrected shape. The optional
+  `spec.safety.topologyClassifier.dra.enabled` reads `resource.k8s.io/v1`
+  ResourceSlices (get/list/watch only) and is off by default.
+- `spec.safety.checkpointCoordination.advisory`, **default off**: when an
+  incident parks for human approval with a `Drain` or `EvictGPUWorkload`
+  still downstream, every eligible opted-in Pod is stamped with six
+  `kubeneuron.io/checkpoint-advisory-*` keys — no deadline, no wait — so a
+  job can checkpoint during the minutes a human takes to decide. One stamp
+  per Pod per approval round, idempotent across a controller restart; a
+  round that ends without its disruption withdraws the notice best effort
+  (`checkpoint-advisory-withdrawn-at`). Same allowlist, Pod-identity
+  confinement, guarded JSON Patch and `pods: patch` grant as the Phase 1
+  request; no new RBAC; nothing patched in `DryRun`. The CRD, the operator's
+  compiler and the controller's runtime config each refuse an advisory
+  outside an enabled coordination block or a `budget` above 60s.
+  `kubeneuron_checkpoint_advisories_total{outcome}` (`stamped`, `withdrawn`,
+  `unreachable`, `skipped`) and two audit actions (`checkpoint-advisory`,
+  `checkpoint-advisory-withdraw`).
+- `spec.safety.impactPreview`, **default off**: at every park and re-park
+  for approval the controller computes, under a bounded `budget`, a durable
+  `impact-preview/v1` record of what the pending step and the disruptions
+  downstream of it would touch — the node's topology classification, the
+  workloads on it and which are eligible for a checkpoint request (by
+  stable ineligibility code; eligibility is opt-in plus policy, never a
+  statement that a checkpoint works),
+  groups, device attribution, warnings — sealed with a `sha256:` digest, and
+  never an estimate of lost or saved progress. `GET
+  /api/v1/incidents/{id}/impact-preview[?round=N]`, `POST
+  …/impact-preview/recompute` (idempotent, audited), `impact_digest` on
+  approve/reject and `impact_preview_digest` on the incident detail,
+  `kubeneuronctl incidents impact` and `approve --impact-digest` (the
+  digest the notification shows; an approve with `--round` and no digest
+  prints the preview and stops), an Impact panel in the incident
+  drawer, and a three-line summary with the digest on every notification
+  channel. The preview is advisory; `requireForApproval: true` makes an
+  approve carry the current digest and holds approval while the preview is
+  unavailable. A reject is never held back. Store: `impact_previews` table
+  and `approvals.impact_digest` (SQLite 0024 / PostgreSQL 0015), and
+  `operational_idempotency.result_digest` so a replayed recompute answers
+  with the preview that key produced (SQLite 0025 / PostgreSQL 0016); all
+  additive, forward-only. Metrics `kubeneuron_impact_previews_total{result}`,
+  `kubeneuron_impact_preview_seconds`, `kubeneuron_approvals_bound_total{binding}`;
+  audit actions `impact-preview-computed`, `impact-preview-unavailable`,
+  `impact-preview-recompute`.
+- `spec.safety.checkpointCoordination.groups`, **default off**: bounded gang
+  coordination. A Pod declares `kubeneuron.io/checkpoint-group` (a DNS
+  label); when a drain or GPU-workload eviction coordinates with a member,
+  its peers in the same namespace receive the same request with their own
+  deadline from the same formula and the same request time — never later
+  than `min(maxWait, budget)` — and are waited for in the same bounded
+  window. Disruption stays node-local: peers are never evicted and their
+  nodes never cordoned. `crossNode` (default false) confines the group to
+  the disrupted node; `maxGroupSize` (default 64, at most 512) skips the
+  peers of a larger group. One paged, read-only Pod list per group; no new
+  verb. `kubeneuron_checkpoint_group_requests_total{outcome}`; one audit row
+  per group. The impact preview shows each group's on-node count and, when
+  the group listing succeeded, its total membership (`members_total_known`);
+  a group the controller could not list is shown with an unknown total and
+  the `GroupTotalUnknown` warning, never with the on-node count as its size.
+  Groups too large are flagged.
+- `spec.safety.impactPreview.workloadContext.{batchJobs,kueue,kuberay}`,
+  each **default off**: read-only context resolvers that add `owner_chain`
+  and a `context` object (the owning `batch/v1` Job; the Kueue Workload,
+  queue, ClusterQueue, priority and admission; the Ray cluster, node type,
+  group and job) to each itemised workload of the preview. Each selected
+  resolver grants the controller get/list/watch on its group and nothing
+  else; the operator and Helm roles hold the same read-only rules to
+  delegate them. A CRD group that is not served, a refused read or a
+  timeout is reported as not observed (`WorkloadContextNotResolved`), never
+  a failed preview. No write verb on batch, Kueue or Ray objects exists
+  anywhere, and nothing here is a claim that any framework integrates with
+  KubeNeuron.
+- One eligibility function (`internal/checkpoint.Evaluate`) shared by the
+  Phase 1 request, the advisory and the preview, with the Phase 1 codes
+  unchanged and `drain-excluded`, `not-gpu-holder`, `group-invalid`,
+  `group-too-large`, `budget-exhausted`, `platform-unsupported` added; the
+  `kubeneuron.io/checkpoint-group` annotation is parsed (DNS label) and
+  rendered in previews ahead of the group coordination milestone.
+- Three CPU-only checkpoint examples under `examples/checkpoint/` — an
+  Indexed Job with a trainer and a sidecar that read the advisory and the
+  request off their own Pod through the Downward API (`plain-job`), the same
+  Job admitted through a Kueue LocalQueue (`kueue-job`), and a KubeRay Ray
+  Train job whose workers checkpoint and acknowledge with the state key
+  through their own namespaced Role (`kuberay-ray-train`). Each README opens
+  with the sentence that it demonstrates the annotation protocol and is not
+  evidence that any framework integrates with KubeNeuron.
+  `hack/kind-workload-safe.sh` (`make test-workload-safe-kind`) drives all
+  three through a real installation, installing the Kueue release manifest
+  (v0.20.4) and the KubeRay operator chart (1.7.1) from the URL and SHA-256
+  pinned in `deploy/kubernetes/dependencies/versions.lock.yaml` and the Ray
+  image by tag and digest, and asserts the advisory, the preview with owner,
+  Kueue and Ray contexts, the digest-bound approve, the request, every
+  acknowledgement, and that no Kueue or Ray object gained a KubeNeuron field
+  manager; `--verify` (`make verify-workload-safe-examples`, part of
+  `make gates`) is its offline half and fails its own assertions on 28
+  deliberate defects. The offline kind gate gained a workload-safe phase on
+  bare Pods (advisory, preview, 409 without the digest, rejection and
+  withdrawal, a digest-bound approve, the group peer's request on the second
+  worker, a real drain, dry-run) and fourteen CEL admission cases for the
+  v0.8 blocks (99 in all).
+- Two self-monitoring alerts, `KubeNeuronImpactPreviewUnavailable` and
+  `KubeNeuronCheckpointAdvisoryUnreachable`, with runbook entries that a test
+  pins to the shipped rules and to the sentence that KubeNeuron does not
+  measure saved or lost training progress; Table 4 of the capability matrix
+  (each cell *shipped*, with its evidence named: *hardware evidence limited*
+  where the single-T4 run exercised it, *not hardware-validated* for the
+  rest); `hack/stale-claims.txt` patterns for the claims the release plan
+  forbids (a checkpoint or progress KubeNeuron "saved", a number of saved
+  or lost training GPU-hours, Kueue / KubeRay / Ray Train "integration" or
+  "support", MIG or DRA "supported"); the
+  [v0.8.0 security review draft](docs/security-review-v0.8.0.md); and
+  three non-goal tests — no role grants `pods/exec`, `pods/attach`,
+  `pods/portforward` or `pods/ephemeralcontainers` under any opt-in, the
+  dynamic client in the classifier and the resolvers only `Get`s and
+  `List`s, and a Pod carrying advisory, group and a stamped far-future
+  deadline receives exactly the Phase 1 grant.
+
+### Changed
+
+- Toolchain: `go.mod` `toolchain`, the build image, and every workflow
+  `go-version` move from go1.26.9 to go1.26.10, which fixes
+  [GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809) in `crypto/x509`.
+  The first `v0.8.0` tag (2026-11-08, on the public commit `64fd4f0`)
+  failed its release workflow in `gates / govulncheck` on exactly this
+  finding, before any image, signature or release asset was published; the
+  tag was recreated on the rebuilt tree. No Go source changed.
+
 ## [v0.7.0] - 2026-10-19
 
 GPU fleet reliability observability, MVP: a canonical GPU metric catalog, a

@@ -1202,3 +1202,182 @@ func TestCloudCapabilityGateRejectsWithoutCloud(t *testing.T) {
 		}
 	}
 }
+
+func TestCompileSnapshotEmitsCheckpointAdvisoryOnlyWhenEnabled(t *testing.T) {
+	compile := func(t *testing.T, spec *kubeneuronv1alpha1.CheckpointCoordinationSpec) (*config.CheckpointCoordination, string, error) {
+		t.Helper()
+		installation := testKubeNeuron()
+		installation.Spec.Safety.CheckpointCoordination = spec
+		policies, playbooks := testPolicyFixture()
+		snapshot, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
+		if err != nil {
+			return nil, "", err
+		}
+		var compiled config.Config
+		if err := yaml.Unmarshal(snapshot.PoliciesYAML, &compiled); err != nil {
+			t.Fatalf("unmarshal compiled policies: %v", err)
+		}
+		return compiled.Safety.CheckpointCoordination, snapshot.Digest, nil
+	}
+	base := &kubeneuronv1alpha1.CheckpointCoordinationSpec{Enabled: true, Namespaces: []string{"training"}}
+
+	cc, baseline, err := compile(t, base)
+	if err != nil || cc == nil || cc.Advisory != nil {
+		t.Fatalf("no advisory block: cc=%+v err=%v, want no advisory key", cc, err)
+	}
+	off := *base
+	off.Advisory = &kubeneuronv1alpha1.CheckpointAdvisorySpec{Enabled: false, Budget: "30s"}
+	cc, offDigest, err := compile(t, &off)
+	if err != nil || cc.Advisory != nil {
+		t.Fatalf("advisory enabled=false: cc=%+v err=%v, want no advisory key", cc, err)
+	}
+	if offDigest != baseline {
+		t.Fatal("a disabled advisory must compile to the same digest as an absent one")
+	}
+	on := *base
+	on.Advisory = &kubeneuronv1alpha1.CheckpointAdvisorySpec{Enabled: true}
+	cc, onDigest, err := compile(t, &on)
+	if err != nil || cc.Advisory == nil || !cc.Advisory.Enabled || cc.Advisory.Budget != config.CheckpointAdvisoryDefaultBudget {
+		t.Fatalf("advisory enabled: cc=%+v err=%v, want enabled with the 10s default", cc.Advisory, err)
+	}
+	if onDigest == baseline {
+		t.Fatal("an enabled advisory must change the digest")
+	}
+	over := *base
+	over.Advisory = &kubeneuronv1alpha1.CheckpointAdvisorySpec{Enabled: true, Budget: "2m"}
+	if _, _, err := compile(t, &over); err == nil {
+		t.Fatal("a budget above the 60s ceiling must be rejected by the compiler")
+	}
+	// The compiler, like the CEL rule, never carries an advisory out of a
+	// disabled block.
+	disabled := &kubeneuronv1alpha1.CheckpointCoordinationSpec{Enabled: false, Advisory: &kubeneuronv1alpha1.CheckpointAdvisorySpec{Enabled: true}}
+	cc, disabledDigest, err := compile(t, disabled)
+	if err != nil || cc != nil {
+		t.Fatalf("advisory inside a disabled block: cc=%+v err=%v, want nothing compiled", cc, err)
+	}
+	if _, absent, _ := compile(t, nil); disabledDigest != absent {
+		t.Fatal("a disabled block with an advisory must compile to the absent digest")
+	}
+}
+
+func TestCompileSnapshotEmitsImpactPreviewOnlyWhenEnabled(t *testing.T) {
+	compile := func(t *testing.T, spec *kubeneuronv1alpha1.ImpactPreviewSpec) (*config.ImpactPreview, string, error) {
+		t.Helper()
+		installation := testKubeNeuron()
+		installation.Spec.Safety.ImpactPreview = spec
+		policies, playbooks := testPolicyFixture()
+		snapshot, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
+		if err != nil {
+			return nil, "", err
+		}
+		var compiled config.Config
+		if err := yaml.Unmarshal(snapshot.PoliciesYAML, &compiled); err != nil {
+			t.Fatalf("unmarshal compiled policies: %v", err)
+		}
+		return compiled.Safety.ImpactPreview, snapshot.Digest, nil
+	}
+	ip, baseline, err := compile(t, nil)
+	if err != nil || ip != nil {
+		t.Fatalf("absent: ip=%+v err=%v", ip, err)
+	}
+	ip, offDigest, err := compile(t, &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: false, Budget: "30s", MaxItems: 50})
+	if err != nil || ip != nil || offDigest != baseline {
+		t.Fatalf("disabled must compile to the absent digest: ip=%+v err=%v same=%v", ip, err, offDigest == baseline)
+	}
+	ip, onDigest, err := compile(t, &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: true})
+	if err != nil || ip == nil || !ip.Enabled || ip.Budget != config.ImpactPreviewDefaultBudget || ip.MaxItems != config.ImpactPreviewDefaultItems || ip.RequireForApproval {
+		t.Fatalf("enabled: ip=%+v err=%v, want the defaults", ip, err)
+	}
+	if onDigest == baseline {
+		t.Fatal("an enabled preview must change the digest")
+	}
+	ip, _, err = compile(t, &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: true, Budget: "20s", MaxItems: 500, RequireForApproval: true})
+	if err != nil || ip.Budget.Std() != 20*time.Second || ip.MaxItems != 500 || !ip.RequireForApproval {
+		t.Fatalf("explicit: ip=%+v err=%v", ip, err)
+	}
+	for name, spec := range map[string]*kubeneuronv1alpha1.ImpactPreviewSpec{
+		"budget above the ceiling": {Enabled: true, Budget: "2m"},
+		"items out of range":       {Enabled: true, MaxItems: 5},
+		"require without enabled":  {Enabled: false, RequireForApproval: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := compile(t, spec); err == nil {
+				t.Fatalf("the compiler accepted %+v", spec)
+			}
+		})
+	}
+}
+
+func TestCompileSnapshotEmitsCheckpointGroupsOnlyWhenEnabled(t *testing.T) {
+	compile := func(t *testing.T, spec *kubeneuronv1alpha1.CheckpointCoordinationSpec) (*config.CheckpointCoordination, error) {
+		t.Helper()
+		installation := testKubeNeuron()
+		installation.Spec.Safety.CheckpointCoordination = spec
+		policies, playbooks := testPolicyFixture()
+		snapshot, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		var compiled config.Config
+		if err := yaml.Unmarshal(snapshot.PoliciesYAML, &compiled); err != nil {
+			t.Fatalf("unmarshal compiled policies: %v", err)
+		}
+		return compiled.Safety.CheckpointCoordination, nil
+	}
+	base := kubeneuronv1alpha1.CheckpointCoordinationSpec{Enabled: true, Namespaces: []string{"training"}}
+	off := base
+	off.Groups = &kubeneuronv1alpha1.CheckpointGroupsSpec{Enabled: false, MaxGroupSize: 9}
+	cc, err := compile(t, &off)
+	if err != nil || cc.Groups != nil {
+		t.Fatalf("groups off: cc.Groups=%+v err=%v", cc.Groups, err)
+	}
+	on := base
+	on.Groups = &kubeneuronv1alpha1.CheckpointGroupsSpec{Enabled: true}
+	cc, err = compile(t, &on)
+	if err != nil || cc.Groups == nil || !cc.Groups.Enabled || cc.Groups.MaxGroupSize != checkpoint.DefaultMaxGroupSize || cc.Groups.CrossNode {
+		t.Fatalf("groups on: cc.Groups=%+v err=%v, want the defaults", cc.Groups, err)
+	}
+	explicit := base
+	explicit.Groups = &kubeneuronv1alpha1.CheckpointGroupsSpec{Enabled: true, MaxGroupSize: 8, CrossNode: true}
+	cc, err = compile(t, &explicit)
+	if err != nil || cc.Groups.MaxGroupSize != 8 || !cc.Groups.CrossNode {
+		t.Fatalf("explicit: cc.Groups=%+v err=%v", cc.Groups, err)
+	}
+	over := base
+	over.Groups = &kubeneuronv1alpha1.CheckpointGroupsSpec{Enabled: true, MaxGroupSize: 600}
+	if _, err := compile(t, &over); err == nil {
+		t.Fatal("a group size above the ceiling must be rejected by the compiler")
+	}
+}
+
+func TestCompileSnapshotCarriesWorkloadContextOnlyWithThePreview(t *testing.T) {
+	compile := func(spec *kubeneuronv1alpha1.ImpactPreviewSpec) *config.ImpactPreview {
+		installation := testKubeNeuron()
+		installation.Spec.Safety.ImpactPreview = spec
+		policies, playbooks := testPolicyFixture()
+		snapshot, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("CompileSnapshot: %v", err)
+		}
+		var compiled config.Config
+		if err := yaml.Unmarshal(snapshot.PoliciesYAML, &compiled); err != nil {
+			t.Fatal(err)
+		}
+		return compiled.Safety.ImpactPreview
+	}
+	if ip := compile(&kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: false, WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{Kueue: true}}); ip != nil {
+		t.Fatalf("a disabled preview carried its context: %+v", ip)
+	}
+	ip := compile(&kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: true, WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{BatchJobs: true, KubeRay: true}})
+	if ip == nil || !ip.WorkloadContext.BatchJobs || ip.WorkloadContext.Kueue || !ip.WorkloadContext.KubeRay {
+		t.Fatalf("context = %+v", ip)
+	}
+	b, k, r := impactContextSelection(func() *kubeneuronv1alpha1.KubeNeuron {
+		i := testKubeNeuron()
+		i.Spec.Safety.ImpactPreview = &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: true, WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{Kueue: true}}
+		return i
+	}())
+	if b || !k || r {
+		t.Fatalf("selection = %v %v %v", b, k, r)
+	}
+}

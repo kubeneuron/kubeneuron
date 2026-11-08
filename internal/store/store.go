@@ -330,6 +330,22 @@ type AcceleratorReportStore interface {
 	ListAcceleratorReports(ctx context.Context, node string) ([]*types.AgentAcceleratorReport, error)
 }
 
+// ImpactPreviewStore persists the impact previews of approval rounds (v0.8
+// development). It is an optional extension for the same reason as the
+// others: a store without it means "no preview was retained", which the API
+// reports as unavailable rather than inventing one.
+type ImpactPreviewStore interface {
+	// PutImpactPreview appends one record. (incident, epoch, computed_at) is
+	// the key; a replay of the same triple is ErrConflict.
+	PutImpactPreview(ctx context.Context, preview *types.ImpactPreview) error
+	// LatestImpactPreview returns the newest record of one approval round by
+	// ComputedAt, or ErrNotFound when the round has none.
+	LatestImpactPreview(ctx context.Context, incidentID string, epoch int) (*types.ImpactPreview, error)
+	// ListImpactPreviews returns every record of one approval round, newest
+	// first.
+	ListImpactPreviews(ctx context.Context, incidentID string, epoch int) ([]*types.ImpactPreview, error)
+}
+
 // OperationalStore persists the durable product records introduced in v0.4.0.
 // It is intentionally an optional extension: existing controller-only Store
 // implementations remain safe and the API can fail closed when its durable

@@ -4,9 +4,12 @@ Status: **Phase 1 implemented and released in v0.6.0** (published
 2026-10-11 UTC;
 [GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.6.0),
 verified with `hack/verify-release.sh`). Design accepted 2026-08-05. The
-manifests, chart, and samples in this source tree carry the v0.7.0 pins; the
-v0.6.1 security and toolchain patch and the v0.7.0 observability release
-leave the feature unchanged.
+manifests, chart, and samples in this source tree carry the v0.8.0 pins of
+the release candidate (v0.7.0 is the latest published release); the v0.6.1
+security and toolchain patch and the v0.7.0 observability release leave
+Phase 1 unchanged, and the v0.8.0 candidate adds the opt-in advisory and
+group blocks described in the
+[workload-safe recovery design record](workload-safe-recovery-design.md).
 Nothing in this document is a claim that the feature has been exercised on
 GPU hardware: the release source passed the full AWS hardware harness on
 2026-10-07, but that harness drives the shared runtime against injected
@@ -372,9 +375,12 @@ kubeneuron_checkpoint_wait_seconds              # histogram, no labels
 kubeneuron_destructive_steps_deferred_total{reason="checkpoint_wait"}
 ```
 
-`acknowledged / (acknowledged + expired)` is the number that proves the feature
-works: the share of coordinated disruptions where a job was told and said
-"done" before anything was killed. `exited` is counted separately because it
+`acknowledged / (acknowledged + expired)` is the share of explicit answers
+that arrived in time among the workloads that stayed to answer: a useful
+operational number, not proof that the feature works — it leaves out the
+workloads that left (`exited`), those that could not be reached and those
+that were skipped, and it says nothing about whether the checkpoint that was
+written is complete or restorable; only the workload can measure that. `exited` is counted separately because it
 also covers a job that simply crashed and a job that was gone before it could
 be asked; `unreachable` covers a workload that could not be stamped or read
 at all, or that was still open when the coordination budget ran out or the
@@ -435,13 +441,19 @@ purging. The honest artifact is "N disruptions, M coordinated, p50 wait 42s".
 (2026-10-11).* Opt-in annotation,
 request/acknowledge, bounded
 wait on `drain` and `evict_gpu_workload`, metrics, audit, dry-run visibility,
-conditional RBAC. Useful on its own: a single-pod trainer gets a clean
-checkpoint before a reboot. It has been exercised by unit tests, the
-CPU-only integration harness's CEL cases, and the dual-store upgrade/rollback
-rehearsal; it has **not** been exercised on GPU hardware or by a real
-checkpointing workload, and no such claim is made.
+conditional RBAC. Useful on its own: a single-pod trainer gets a bounded
+opportunity to checkpoint before a reboot; whether it does is the
+trainer's. It has been exercised by unit tests, the CPU-only integration
+harness's CEL cases, the dual-store upgrade/rollback rehearsal and, on
+2026-11-05, one toy trainer holding a Tesla T4 on EKS (`hack/hw-e2e.sh
+test-checkpoint`); it has **not** been exercised by a real checkpointing
+workload, and no such claim is made.
 
-**Phase 2 — lead time and gangs.** *Future scope, not implemented.* An
+**Phase 2 — lead time and gangs.** *Implemented on the v0.8.0 candidate as
+designed in the
+[workload-safe recovery design record](workload-safe-recovery-design.md),
+validated by the gates the CHANGELOG records (the gangs on CPU-only kind,
+the advisory also on one Tesla T4), not released.* An
 advisory notice at approval park (same annotations, `checkpoint-advisory:
 "true"`, no deadline, no wait — an incident parked in `AWAITING_APPROVAL` for
 six minutes is six minutes the job could have been checkpointing);

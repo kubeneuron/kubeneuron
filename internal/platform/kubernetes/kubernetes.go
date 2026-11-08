@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	corev1listers "k8s.io/client-go/listers/core/v1"
@@ -230,6 +231,11 @@ var drainPollInterval = 5 * time.Second
 type Platform struct {
 	client   kubernetes.Interface
 	recycler platform.InstanceRecycler
+	// dynamic serves the one read that has no typed client at the pinned
+	// Kubernetes API version: the opt-in resource.k8s.io/v1 ResourceSlice
+	// observation (topology.go). Nil on a Platform built without New (tests),
+	// in which case the observation is reported as not performed.
+	dynamic dynamic.Interface
 	// nodeLister, once published by StartNodeCache after its informer syncs,
 	// serves ListNodes from the watch-maintained cache instead of a per-call
 	// apiserver List. Nil until synced (and always nil when the cache was
@@ -240,6 +246,8 @@ type Platform struct {
 var _ platform.Platform = (*Platform)(nil)
 var _ platform.NodePresence = (*Platform)(nil)
 var _ platform.NodeLabeler = (*Platform)(nil)
+var _ platform.NodeResourceObserver = (*Platform)(nil)
+var _ platform.DRAObserver = (*Platform)(nil)
 
 // New builds a Platform from an in-cluster config, falling back to the given
 // kubeconfig path (empty means default loading rules).
@@ -282,7 +290,11 @@ func New(kubeconfig string) (*Platform, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Platform{client: client}, nil
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &Platform{client: client, dynamic: dyn}, nil
 }
 
 // Name implements platform.Platform.
@@ -1738,6 +1750,7 @@ func (p *Platform) NodeWorkloads(ctx context.Context, node string) ([]platform.W
 			DrainExclusion: drainExclusion(&pods[i]),
 			UID:            string(pods[i].UID),
 			Annotations:    copyAnnotations(pods[i].Annotations),
+			Node:           pods[i].Spec.NodeName,
 		})
 	}
 	return out, nil

@@ -60,14 +60,23 @@ Without a configured operator token the operator API is disabled entirely
 | `GET /api/v1/incidents` | list; filters `?state=OPEN,EXECUTING&node=<node>&limit=<n>` |
 | `GET /api/v1/incidents/{id}` | detail including the audit trail |
 | `POST /api/v1/incidents` | manual remediation trigger; body `{"node","class","actor?","gpu_uuid?","gpu_index?"}` — `node` and `class` are required; `actor` only with the static token |
-| `POST /api/v1/incidents/{id}/approve` | approve the pending step; body `{"actor","reason?","park_epoch?"}` |
-| `POST /api/v1/incidents/{id}/reject` | reject the pending step; body `{"actor","reason?","park_epoch?"}` |
+| `POST /api/v1/incidents/{id}/approve` | approve the pending step; body `{"actor","reason?","park_epoch?","impact_digest?"}` |
+| `POST /api/v1/incidents/{id}/reject` | reject the pending step; body `{"actor","reason?","park_epoch?","impact_digest?"}` |
+| `GET /api/v1/incidents/{id}/impact-preview[?round=N]` | the newest `impact-preview/v1` document of one approval round (the current round by default) — what the pending step and the disruptions downstream of it would touch (v0.8 development, below) |
+| `POST /api/v1/incidents/{id}/impact-preview/recompute` | recompute the current round's preview; body `{"actor"}` and `Idempotency-Key` required; answers the new document (v0.8 development) |
 | `POST /api/v1/incidents/{id}/acknowledge` | record operator custody without changing remediation state; body `{"actor","reason?","resource_version?"}` and `Idempotency-Key` required |
 | `POST /api/v1/incidents/{id}/resolve` | manually resolve; current v0.4 controllers require `{"actor","reason?","resource_version?"}` and `Idempotency-Key` |
 
 Decisions return `204 No Content`. `park_epoch` pins the decision to the
 approval round shown to the human; a decision against a superseded round
-is refused. With a Kubernetes credential the audit
+is refused. `impact_digest` (v0.8 development) pins an approve to the impact
+preview the human read: an approve whose digest is not the round's current
+preview is refused with `409`, and under
+`spec.safety.impactPreview.requireForApproval` an approve without a digest,
+or while the round's preview is unavailable, is refused the same way. A
+reject is never held back by the preview. The detail response carries
+`impact_preview_digest` (and `impact_preview_unavailable` with its reason)
+for the current round when a preview exists. With a Kubernetes credential the audit
 actor is the authenticated principal and the body `actor` is ignored; with
 the static token the claim is recorded as `token:<actor>`.
 
@@ -127,7 +136,8 @@ rule, or store migration.
 | Route | Purpose |
 |---|---|
 | `GET /api/v1/readiness` | stable node-name ordered fleet page with `items`, optional opaque `next_cursor`, and evaluator version |
-| `GET /api/v1/nodes/{node}/readiness` | one live explainability response: snapshot, typed decision, reason codes, limits, evidence references and effective digest |
+| `GET /api/v1/nodes/{node}/readiness` | one live explainability response: snapshot, typed decision, reason codes, limits, evidence references and effective digest; plus an additive `topology` object (the device topology classification below) when the controller classifies device topology |
+| `GET /api/v1/nodes/{node}/topology` | one live, read-only `topology-classification/v1` document: the node's device layout and whether device-scoped actions are eligible on it (v0.8 development) |
 | `GET /api/v1/nodes/{node}/evidence` | redacted evidence-reference timeline for the current node decision |
 
 Fleet readiness accepts `limit` (1–500), opaque `cursor`, `state`
@@ -135,6 +145,156 @@ Fleet readiness accepts `limit` (1–500), opaque `cursor`, `state`
 `tenant`, `cluster`, and `stale=true`. Tenant and cluster filters map to the
 node labels `kubeneuron.io/tenant` and `kubeneuron.io/cluster`; they are a
 filtering contract, not a substitute for Kubernetes RBAC on the API itself.
+
+### Device topology (read-only, v0.8 development)
+
+`GET /api/v1/nodes/{node}/topology` classifies one node's device layout from
+the evidence the controller already holds and says whether a device-scoped
+action (a GPU reset) is eligible on it. The same document is embedded
+additively as `topology` in `GET /api/v1/nodes/{node}/readiness`; fleet
+readiness pages do not carry it. The only case in which the single-node
+readiness response omits the field is a controller with no classifier wired
+(older wiring); when a classifier is wired and its build fails, the whole
+readiness request fails with the error below rather than silently dropping
+`topology`. It explains; it never changes the readiness `decision` beside
+it. The route is a read behind the ordinary operator `get` authorization: no
+`Idempotency-Key`, leader fencing or per-source quota, nothing persisted,
+nothing in admission changed by asking. The classifier can only narrow: a
+reset the existing evidence gate refuses stays refused, and a `refused`
+classification holds a reset that gate would have admitted.
+
+An unknown node is `404`. A `503` is "could not assess", never a
+classification: the workflow store cannot retain accelerator reports (it
+does not implement the report store, checked before any read, so a known and
+an unknown node answer the same `503`), the node or report read fails, or
+`GET /api/v1/nodes/{node}/topology` has no classifier wired. A report store
+that simply holds no NVIDIA report for the node is not an error: that is
+ordinary evidence, classified `unknown`/`refused` with `ReportMissing`.
+
+The same classification is also captured into every decision snapshot built
+for a `reset-device` request with `physical-device` scope, whichever adapter
+asked for it: a `POST /api/v1/simulations` with that action and scope, and
+the shared-evaluator snapshot the live reset admission records (an incident
+or autonomy-executed reset) before the reset gate's own narrowing step. The
+snapshot carries it as `topology`, and a `refused` classification turns the
+decision `Blocked` with reason `TopologyUnqualified` and required action
+`review_device_topology`. It is consulted last and only narrows: it cannot
+unblock a decision that any other check blocked, and node-scoped resets,
+reboots, observe-class and diagnostic requests carry no classification and
+are evaluated exactly as before.
+
+| Field | Values | Meaning |
+|---|---|---|
+| `version` | `topology-classification/v1` | document version |
+| `topology` | `whole-device`, `mig`, `time-sliced`, `dra-managed`, `mixed`, `unknown` | the layout found; only `whole-device` can be eligible. `dra-managed` is DRA in use (a slice or a claim for the node) with no device-plugin facet beside it; DRA beside a whole-GPU, MIG or time-slicing advertisement is `mixed`, as is MIG beside time-slicing or beside a whole-GPU advertisement under any `mig.strategy` other than `single`. `unknown` is missing, implausible or contradictory input and is always refused. Readiness never decides the layout, only the verdict: a `whole-device` layout whose agent report is fresh, verified-unpartitioned and inventoried but not `ready` stays `whole-device` with `per-pod` attribution and is `refused` with exactly `ReportNotReady` — the agent established the layout and cannot stand behind a device action, which is what every virtualized GPU node looks like (the hypervisor withholds the PCI reset, so the agent degrades its report; measured on EC2 g4dn, see the operations guide) |
+| `device_actions` | `eligible`, `refused` | the verdict on device-scoped actions; `eligible` is exactly `whole-device` with no reasons, and `ReportNotReady` is the one reason that can stand beside a `whole-device` layout |
+| `attribution` | `per-pod`, `device-wide`, `unknown` | how a fault on a device maps to workloads; `device-wide` under time-slicing, where every pod on the GPU is hit |
+| `reasons` | stable codes in canonical order | `ReplicasLabelInvalid`, `MigStrategyLabelInvalid`, `MigPartitioned`, `TimeSliced`, `DraManaged`, `DraObservationInvalid`, `MixedTopology`, `ReportMissing`, `ReportStale`, `ReportNotReady`, `ReportNoPhysicalDevices`, `WholeDeviceCountMismatch`, `TopologyUnknown`; empty when eligible. `WholeDeviceCountMismatch` is a node whose `nvidia.com/gpu` advertisement counts a different number of devices than the fresh, ready, verified-unpartitioned report counts physical GPUs, with no partition, sharing or DRA facet beside it to explain the difference (the shape a time-slicing device plugin leaves on a node without GPU Feature Discovery labels: physical x replicas under the whole-GPU name and nothing else). It is refused as `unknown`; the cause is not inferred, so it is never reported as `TimeSliced` |
+| `evidence` | | the normalized inputs: `resource_source` says where the advertisement came from and is `node` (the node object's own `nvidia.com/gpu`, `nvidia.com/mig-*` and `nvidia.com/gpu.shared` capacity and allocatable, counted beside it), `not-applicable` (the platform explicitly says it has no device-plugin advertisement, so the agent report is the whole of the evidence) or empty (unobserved: no observer, an unreadable or absent node, or an observer answering without a known source; always refused); then the GPU Feature Discovery label values the classifier reads (trimmed and bounded, never raw), and the NVIDIA agent report's observation time, topology safety, readiness, physical device and partition counts and freshness |
+| `dra` | `state` is `disabled`, `not-observed` or `observed` | the Dynamic Resource Allocation observation, below |
+| `summary`, `observed_at`, `inputs_digest`, `node`, `node_uid` | | a human rendering, the evaluation time, and a SHA-256 over the canonical normalized inputs (not the time), so identical evidence shares a digest and any changed input changes it |
+
+DRA is opt-in through `spec.safety.topologyClassifier.dra.enabled` and off by
+default: `dra.state` is then `disabled`, DRA is not consulted, and the
+classification says so. When enabled the controller lists
+`resource.k8s.io/v1` ResourceSlices (that version only, list only, bounded to
+five seconds; beta versions are never consulted) and inspects the
+`resourceClaims` entries in the Pod spec of the Pods scheduled on the node
+through the core Pod list it already holds. No ResourceClaim object is ever read and nothing in
+the group is written, so the conditional RBAC grant is `resourceslices`
+get/list/watch alone. `observed` carries `api_version`, bounded
+`resource_slices` and `devices` counts for slices published for this node by
+`spec.nodeName`, `drivers` (the sorted list of distinct validated driver
+names across those slices, at most eight, not a count), `pods_inspected:
+true`, and `claim_pods`, `direct_claims` and `template_claims`; any slice or
+claim reference for the node classifies it `dra-managed` (or `mixed` beside
+a device-plugin facet). `not-observed` carries a short stable `reason` and
+is always refused, because the configuration says DRA may be in use and
+nothing proved otherwise. The reasons the Kubernetes platform currently
+emits include `api-unavailable` (the apiserver answered the v1 list with
+not-found, so it serves no DRA or only a beta version), `forbidden`,
+`timeout`, `list-failed`, `pods-forbidden`, `pods-list-failed`,
+`locality-unsupported` (a slice scoped by nodeSelector, allNodes or
+perDeviceNodeSelection, which this version does not evaluate),
+`locality-invalid`, `driver-invalid`, `malformed-object`,
+`malformed-claim-reference`, `bounds-exceeded`, and
+`dynamic-client-unavailable` or `platform-cannot-observe` for a controller
+that cannot read the group at all; the list is not a closed set and the
+reason is a bounded token, so read it as explanation rather than matching
+on it. The classifier also re-checks every observation it is handed: an
+`observed` answer from a version other than `resource.k8s.io/v1`, without
+`pods_inspected`, with counts out of bounds or not adding up, or with too
+many or invalid driver names, and a `disabled` answer carrying data, are
+rendered as `not-observed` with the failed check as the reason (for example
+`api-version-invalid`, `pods-not-inspected`, `slice-counts-inconsistent`)
+and add `DraObservationInvalid` to `reasons`; the raw observation is never
+rendered or digested.
+
+This surface is v0.8 development work. It is unit-tested; no GPU hardware
+run and no release has exercised it. A released controller has no such route
+and its readiness responses carry no `topology` field.
+
+### Impact preview (v0.8 development)
+
+With `spec.safety.impactPreview.enabled`, every park and re-park for
+approval computes, under the policy `budget` (default 15s, at most 60s), a
+durable `impact-preview/v1` record for `(incident, round)`: the node and its
+[device topology classification](#device-topology-read-only-v08-development),
+the pending step and the coordinating disruptions downstream of it
+(`platform.drain`, `platform.evict_gpu_workload`), the workloads on the node
+— `total`, `gpu_holders`, `namespaces`, `eligible_for_checkpoint`, and
+`ineligible` by stable code (`not-opted-in`, `namespace-not-allowed`,
+`drain-excluded`, `not-gpu-holder`, `class-skipped`, `policy-disabled`,
+`group-invalid`, `group-too-large`, `no-disruption` when no coordinating
+step lies downstream) — up to `maxItems` itemised workloads with their
+checkpoint verdict and effective wait (the wait the downstream step would
+actually grant: the policy grant bounded by that step's coordination
+budget), checkpoint groups (`members_on_node`, `members_total` with
+`members_total_known`: a group the controller could not list keeps the
+on-node count as a lower bound and is flagged, never shown as a total),
+device counts and attribution, the effective checkpoint policy, `limits`,
+`warnings` (`TimeSlicedAttributionDeviceWide`, `DeviceActionsRefused`,
+`ItemsTruncated`, `WorkloadContextNotResolved`, `GroupTooLarge`,
+`GroupTotalUnknown`), and either `unavailable:
+null` or `unavailable: {reason}` when it could not be computed
+(`WorkloadListingFailed`, `WorkloadListingTimeout`, `NoPendingStep`,
+`PayloadTooLarge`). `digest` is `sha256:` over the canonical document with an
+empty digest field; a recompute is a new record with a new digest, and the
+newest by `computed_at` is the round's current one. The preview counts only
+what it listed: it never estimates lost or saved training progress.
+
+Each itemised workload may carry `owner_chain` (its controller references
+as `Kind/name`) and a `context` object filled by the **read-only context
+resolvers** selected under `spec.safety.impactPreview.workloadContext`:
+`batch_job` (the owning `batch/v1` Job: `completions`, `parallelism`,
+`completion_mode`, `indexed`, `suspend`, `active`), `kueue` (the
+`kueue.x-k8s.io` Workload admitting it: `workload`, `local_queue`,
+`cluster_queue`, `priority`, `admitted_at`, `active`), and `ray` (the Pod's
+`ray.io` labels: `cluster`, `node_type`, `group`, `ray_job`, and whether the
+RayCluster object was found). A resolver answers one question — whose Pod
+this is — through get/list only; it never writes, and the controller role
+gains get/list/watch on that group exactly while the resolver is selected.
+A CRD group the cluster does not serve, a refused read or a timeout is
+reported as not observed, and the preview carries
+`WorkloadContextNotResolved` among its warnings rather than failing. The
+resolvers attribute nothing by name alone: a Job whose UID is not the Pod's
+owner UID (a Job re-created under the same name) is `owner-replaced`, not
+described; the Kueue Workload is looked up only by the Pod's controller
+owner UID, and a queue-labelled Pod with no controller owner names its
+queue with `workload_lookup: no-owner` rather than the namespace's first
+Workload. None of
+this is a claim that Kueue, KubeRay or any framework integrates with
+KubeNeuron.
+
+`GET …/impact-preview` is a read behind the operator `get` authorization;
+`404` is a round with no preview, `503` a controller or store that retains
+none. `POST …/impact-preview/recompute` is an operational mutation (operator
+`update`, leader fencing, a per-source quota, `Idempotency-Key`); a replay
+answers the same record with `Idempotent-Replay: true`. Both are audited on
+the incident (`impact-preview-computed`, `impact-preview-unavailable`,
+`impact-preview-recompute`). The notification channels carry a three-line
+summary and the digest beside the round. A released controller has no such
+routes and no `impact_digest` field; it rejects the field with `400`.
 
 ### Runtime contract coverage (read-only, v0.5.0)
 

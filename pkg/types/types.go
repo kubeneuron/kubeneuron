@@ -3,6 +3,7 @@
 package types
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -981,4 +982,27 @@ type Approval struct {
 	// epoch equals the incident's current one, so a decision can never be
 	// carried across a re-park.
 	ParkEpoch int `json:"park_epoch,omitempty"`
+	// ImpactDigest, on a decision row, is the digest of the impact preview
+	// the human was shown when they decided (v0.8 development). Empty when
+	// the client carried none. The controller refuses a decision whose digest
+	// does not match the round's current preview when the policy requires
+	// it; otherwise the digest is recorded as what was seen.
+	ImpactDigest string `json:"impact_digest,omitempty"`
+}
+
+// ImpactPreview is one durable impact-preview/v1 record of an approval round
+// (v0.8 development): what a human was shown about the node, its workloads
+// and the disruption downstream when the incident parked. A round may hold
+// several (a recompute appends; the newest by ComputedAt is the current one)
+// and the Digest identifies exactly which was seen. Payload is the canonical
+// JSON document; UnavailableReason is set, with an empty Payload, when the
+// preview could not be computed.
+type ImpactPreview struct {
+	IncidentID        string          `json:"incident_id"`
+	Epoch             int             `json:"epoch"`
+	ComputedAt        time.Time       `json:"computed_at"`
+	Version           string          `json:"version"`
+	Digest            string          `json:"digest"`
+	Payload           json.RawMessage `json:"payload,omitempty"`
+	UnavailableReason string          `json:"unavailable_reason,omitempty"`
 }

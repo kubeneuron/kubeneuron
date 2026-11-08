@@ -165,6 +165,19 @@ func TestBoundedWaitIsPerWorkload(t *testing.T) {
 	p := enabledPolicy()
 	short := optedIn("training", map[string]string{AnnotationMaxWait: "30s"})
 	silent := optedIn("training", nil)
+	// v0.8 keys on the same Pod: an advisory (controller-written, no
+	// deadline), a group (workload-written) and, as tampering, a far-future
+	// request deadline. None of them is an input to the grant.
+	decorated := optedIn("training", map[string]string{
+		AnnotationMaxWait:            "30s",
+		AnnotationAdvisory:           "true",
+		AnnotationAdvisoryIncident:   "inc-1",
+		AnnotationAdvisoryRound:      "1",
+		AnnotationAdvisoryNextAction: "platform.drain",
+		AnnotationGroup:              "run-1",
+		AnnotationDeadlineAt:         "2999-01-01T00:00:00Z",
+	})
+	stamped := optedIn("training", map[string]string{AnnotationDeadlineAt: "2999-01-01T00:00:00Z"})
 	for name, tc := range map[string]struct {
 		w      Workload
 		budget time.Duration
@@ -176,6 +189,8 @@ func TestBoundedWaitIsPerWorkload(t *testing.T) {
 		"request over budget":         {short, 10 * time.Second, 10 * time.Second},
 		"no budget known":             {silent, 0, 5 * time.Minute},
 		"negative budget means known": {short, -time.Minute, 30 * time.Second},
+		"advisory, group and a stamped deadline change nothing": {decorated, 10 * time.Minute, 30 * time.Second},
+		"a stamped far-future deadline cannot extend the default": {stamped, 10 * time.Minute, 5 * time.Minute},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := p.BoundedWait(tc.w, tc.budget); got != tc.want {

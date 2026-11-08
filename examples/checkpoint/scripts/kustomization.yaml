@@ -1,0 +1,12 @@
+# The toy trainer and the checkpoint sidecar, as one ConfigMap both Job
+# examples mount. A kustomization of its own because kustomize refuses files
+# outside the referencing directory.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+configMapGenerator:
+  - name: checkpoint-scripts
+    files:
+      - trainer.sh
+      - sidecar.sh
+generatorOptions:
+  disableNameSuffixHash: true

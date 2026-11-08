@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -135,7 +136,7 @@ func cmdStatus() *cobra.Command {
 }
 
 func cmdNodes() *cobra.Command {
-	return &cobra.Command{Use: "nodes", Short: "List nodes and their GPU state", RunE: func(cmd *cobra.Command, _ []string) error {
+	nodes := &cobra.Command{Use: "nodes", Short: "List nodes and their GPU state", RunE: func(cmd *cobra.Command, _ []string) error {
 		c, err := newClient(cmd)
 		if err != nil {
 			return err
@@ -155,6 +156,64 @@ func cmdNodes() *cobra.Command {
 		}
 		return w.Flush()
 	}}
+	nodes.AddCommand(cmdNodeTopology())
+	return nodes
+}
+
+// cmdNodeTopology prints one node's read-only device topology classification
+// (GET /api/v1/nodes/{node}/topology). It is the only `nodes` subcommand and
+// it is read-only: nothing here can approve, change or request anything.
+func cmdNodeTopology() *cobra.Command {
+	topologyCmd := &cobra.Command{
+		Use:   "topology <node>",
+		Short: "Explain a node's device topology (whole-device, mig, time-sliced, dra-managed, mixed, unknown) and whether device-scoped actions are eligible",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := newClient(cmd)
+			if err != nil {
+				return err
+			}
+			var item map[string]any
+			if err := c.do("GET", "/api/v1/nodes/"+url.PathEscape(args[0])+"/topology", nil, &item); err != nil {
+				return err
+			}
+			if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+				return printOperationJSON(cmd, item)
+			}
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
+			reasons := "-"
+			if list, ok := item["reasons"].([]any); ok && len(list) > 0 {
+				parts := make([]string, 0, len(list))
+				for _, reason := range list {
+					parts = append(parts, fmt.Sprint(reason))
+				}
+				reasons = strings.Join(parts, ",")
+			}
+			dra := "-"
+			if summary, ok := item["dra"].(map[string]any); ok {
+				dra = fmt.Sprint(summary["state"])
+				if reason, ok := summary["reason"].(string); ok && reason != "" {
+					dra += " (" + reason + ")"
+				}
+			}
+			for _, row := range [][2]string{
+				{"NODE", fmt.Sprint(item["node"])},
+				{"TOPOLOGY", fmt.Sprint(item["topology"])},
+				{"DEVICE ACTIONS", fmt.Sprint(item["device_actions"])},
+				{"ATTRIBUTION", fmt.Sprint(item["attribution"])},
+				{"REASONS", reasons},
+				{"DRA", dra},
+				{"OBSERVED AT", fmt.Sprint(item["observed_at"])},
+				{"INPUTS DIGEST", fmt.Sprint(item["inputs_digest"])},
+				{"VERSION", fmt.Sprint(item["version"])},
+			} {
+				_, _ = fmt.Fprintf(w, "%s\t%s\n", row[0], row[1])
+			}
+			return w.Flush()
+		},
+	}
+	topologyCmd.Flags().Bool("json", false, "print the full topology-classification/v1 document as JSON")
+	return topologyCmd
 }
 
 func cmdIncidents() *cobra.Command {
@@ -211,7 +270,101 @@ func cmdIncidents() *cobra.Command {
 		return w.Flush()
 	}}
 	c.AddCommand(show)
+	c.AddCommand(cmdIncidentImpact())
 	return c
+}
+
+// cmdIncidentImpact reads one approval round's impact preview: what the
+// pending step and the disruptions downstream of it would touch, and the
+// digest an approve may bind to (v0.8 development).
+func cmdIncidentImpact() *cobra.Command {
+	c := &cobra.Command{Use: "impact <incident-id>", Short: "Impact preview of the pending approval round", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		cl, err := newClient(cmd)
+		if err != nil {
+			return err
+		}
+		round, _ := cmd.Flags().GetInt("round")
+		var preview map[string]any
+		if err := cl.do("GET", impactPreviewPath(args[0], round), nil, &preview); err != nil {
+			return err
+		}
+		if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+			return printOperationJSON(cmd, preview)
+		}
+		printImpactPreview(cmd.OutOrStdout(), preview)
+		return nil
+	}}
+	c.Flags().Int("round", 0, "approval round (default: the incident's current round)")
+	c.Flags().Bool("json", false, "print the full impact-preview/v1 document")
+	return c
+}
+
+func impactPreviewPath(id string, round int) string {
+	path := "/api/v1/incidents/" + url.PathEscape(id) + "/impact-preview"
+	if round > 0 {
+		path += "?round=" + strconv.Itoa(round)
+	}
+	return path
+}
+
+// printImpactPreview renders the summary table: identity, node and topology,
+// the counts, groups, warnings, and the digest to approve with.
+func printImpactPreview(out io.Writer, p map[string]any) {
+	w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
+	get := func(path ...string) any {
+		var cur any = p
+		for _, key := range path {
+			m, ok := cur.(map[string]any)
+			if !ok {
+				return nil
+			}
+			cur = m[key]
+		}
+		return cur
+	}
+	str := func(v any) string {
+		switch t := v.(type) {
+		case nil:
+			return "—"
+		case float64:
+			return strconv.FormatFloat(t, 'f', -1, 64)
+		case bool:
+			return strconv.FormatBool(t)
+		case []any:
+			parts := make([]string, 0, len(t))
+			for _, item := range t {
+				parts = append(parts, fmt.Sprint(item))
+			}
+			if len(parts) == 0 {
+				return "—"
+			}
+			return strings.Join(parts, ", ")
+		default:
+			return fmt.Sprint(t)
+		}
+	}
+	rows := [][2]string{
+		{"INCIDENT", str(get("incident"))},
+		{"ROUND", str(get("round"))},
+		{"COMPUTED AT", str(get("computed_at"))},
+		{"DIGEST", str(get("digest"))},
+		{"NODE", str(get("node", "name"))},
+		{"TOPOLOGY", str(get("node", "topology", "topology")) + " / device actions " + str(get("node", "topology", "device_actions"))},
+		{"PENDING STEP", str(get("pending_step"))},
+		{"DOWNSTREAM", str(get("downstream_disruptions"))},
+		{"WORKLOADS", str(get("workloads", "total")) + " total, " + str(get("workloads", "gpu_holders")) + " GPU holders, " + str(get("workloads", "namespaces")) + " namespaces"},
+		{"CHECKPOINT", str(get("workloads", "eligible_for_checkpoint")) + " eligible; ineligible " + str(get("workloads", "ineligible"))},
+		{"GROUPS", str(get("workloads", "groups"))},
+		{"ATTRIBUTION", str(get("devices", "attribution"))},
+		{"WARNINGS", str(get("warnings"))},
+	}
+	if unavailable := get("unavailable"); unavailable != nil {
+		rows = append(rows, [2]string{"UNAVAILABLE", str(get("unavailable", "reason"))})
+	}
+	for _, row := range rows {
+		_, _ = fmt.Fprintf(w, "%s\t%s\n", row[0], row[1])
+	}
+	_ = w.Flush()
 }
 
 func decisionCommand(use, short, route string, withRound bool) *cobra.Command {
@@ -230,8 +383,34 @@ func decisionCommand(use, short, route string, withRound bool) *cobra.Command {
 			// the controller refuses it if a re-park has since replaced the
 			// request, instead of binding the click to content the human
 			// never saw. Omitted (0) keeps bind-to-current.
-			if round, _ := cmd.Flags().GetInt("round"); round > 0 {
+			round, _ := cmd.Flags().GetInt("round")
+			if round > 0 {
 				body["park_epoch"] = round
+			}
+			// The impact digest pins the decision to the preview the human
+			// read (v0.8 development). It is never taken from the server at
+			// approve time: an approve that fetched "the current preview"
+			// and bound to it would approve whatever is current — a preview
+			// another operator recomputed after this one was read — which is
+			// the substitution the digest exists to refuse. With --round and
+			// no --impact-digest, an approve reads the round's current
+			// preview, prints it and STOPS, naming the exact command to
+			// re-run; the notification's hint already carries the digest.
+			// A controller without the route (404) or a round without a
+			// computed preview sends the approve unbound, as before.
+			digest, _ := cmd.Flags().GetString("impact-digest")
+			if digest == "" && round > 0 && route == "/approve" {
+				var preview map[string]any
+				if err := cl.do("GET", impactPreviewPath(args[0], round), nil, &preview); err == nil {
+					if d, _ := preview["digest"].(string); d != "" && preview["unavailable"] == nil {
+						printImpactPreview(cmd.OutOrStdout(), preview)
+						return fmt.Errorf("round %d of %s has impact preview %s; read it above and approve exactly that with:\n  kubeneuronctl approve %s --round %d --impact-digest %s",
+							round, args[0], d, args[0], round, d)
+					}
+				}
+			}
+			if digest != "" {
+				body["impact_digest"] = digest
 			}
 		}
 		if err := cl.do("POST", "/api/v1/incidents/"+args[0]+route, body, nil); err != nil {
@@ -244,6 +423,7 @@ func decisionCommand(use, short, route string, withRound bool) *cobra.Command {
 	c.Flags().String("reason", "", "reason recorded in the audit trail")
 	if withRound {
 		c.Flags().Int("round", 0, "approval round from the notification; refused if the request changed since")
+		c.Flags().String("impact-digest", "", "digest of the impact preview that was read (from the notification or 'incidents impact'); with --round and a computed preview an approve without it prints the preview and stops")
 	}
 	return c
 }

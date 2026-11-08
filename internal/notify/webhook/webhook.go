@@ -27,6 +27,16 @@ type Payload struct {
 	Step     string          `json:"step,omitempty"`
 	Message  string          `json:"message,omitempty"`
 	Incident *types.Incident `json:"incident"`
+	// Impact is set on approval requests when an impact preview was computed
+	// (v0.8 development): its short summary and the digest to bind the
+	// decision to. Additive; absent when there is none.
+	Impact *ImpactContext `json:"impact,omitempty"`
+}
+
+// ImpactContext is the impact preview summary carried on an approval request.
+type ImpactContext struct {
+	Summary string `json:"summary"`
+	Digest  string `json:"digest"`
 }
 
 // Notifier posts each notification to URL. Token, when set, is sent as an
@@ -68,6 +78,24 @@ func (n *Notifier) RequestApproval(ctx context.Context, inc *types.Incident, ste
 		Message:  fmt.Sprintf("approve with: kubeneuronctl approve %s --round %d", inc.ID, inc.ApprovalEpoch),
 		Incident: inc,
 	})
+}
+
+var _ notify.ContextualNotifier = (*Notifier)(nil)
+
+// RequestApprovalWithContext implements notify.ContextualNotifier.
+func (n *Notifier) RequestApprovalWithContext(ctx context.Context, inc *types.Incident, stepName string, ac notify.ApprovalContext) error {
+	if inc == nil {
+		return fmt.Errorf("webhook: approval request for step %q carries no incident", stepName)
+	}
+	payload := Payload{
+		Version: 1, Kind: "approval_required", Step: stepName,
+		Message:  notify.ApproveHint(inc, ac),
+		Incident: inc,
+	}
+	if ac.ImpactSummary != "" {
+		payload.Impact = &ImpactContext{Summary: ac.ImpactSummary, Digest: ac.ImpactDigest}
+	}
+	return n.post(ctx, payload)
 }
 
 func (n *Notifier) post(ctx context.Context, payload Payload) error {

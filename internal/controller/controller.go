@@ -312,6 +312,7 @@ func New(
 			GetIncident:                     c.store.GetIncident,
 			AutonomyMaintenanceWindowActive: c.autonomyMaintenanceWindowActive,
 			BuildRuntimeContractCoverage:    c.BuildRuntimeContractCoverage,
+			BuildTopology:                   c.BuildTopologyClassification,
 		})
 	}
 	return c

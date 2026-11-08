@@ -2,12 +2,23 @@
 # shellcheck disable=SC2016 # Single-quoted jq programs expand jq, not shell, variables.
 set -Eeuo pipefail
 
-# v0.6.1 -> HEAD -> v0.6.1 (images only) -> HEAD lifecycle rehearsal on kind,
-# for BOTH workflow stores, with the v0.5 runtime contract qualification rows
-# and their hash-chained audit history as the durable evidence under test,
-# and the v0.6 checkpoint coordination policy (new, default off) exercised
-# on HEAD and switched back off before the rollback, as docs/upgrade.md
-# "v0.6.0 checkpoint coordination notes" requires.
+# v0.7.0 -> HEAD -> v0.7.0 (restore the pre-upgrade snapshot, then the
+# images) -> HEAD lifecycle rehearsal on kind, for BOTH workflow stores, with
+# the v0.5 runtime contract qualification rows and their hash-chained audit
+# history as the durable evidence under test, and the v0.6 checkpoint
+# coordination policy and the v0.8 workload-safe blocks (new, default off)
+# exercised on HEAD and switched back off before the rollback, as
+# docs/upgrade.md requires.
+#
+# v0.8 moves the schema heads (SQLite 0025, PostgreSQL 0016) and migrations
+# are forward-only, so the documented rollback is no longer images only: the
+# v0.7.0 binary REFUSES the v0.8 schema, and rolling back means restoring the
+# snapshot taken before the upgrade and then the v0.7.0 images. This
+# rehearsal proves both halves: first that the refusal happens and is clean
+# (the old binary exits with the schema-version error and touches nothing),
+# then that the documented restore brings v0.7.0 back serving the
+# pre-upgrade state, and that a second upgrade migrates the restored store
+# again and runs the whole v0.5 lifecycle on it.
 #
 # One disposable kind cluster hosts two BASELINE installations side by side —
 # `upgrade-sqlite` on the SQLite PVC store and `upgrade-postgres` on a
@@ -38,16 +49,21 @@ set -Eeuo pipefail
 #      toggle may roll or restart a Pod: every controller and agent Pod's
 #      UID and container restart counts are snapshotted before the policy is
 #      touched and must be identical after enable and after disable;
-#   5. roll the controller/agent images back to BASELINE (images only, no
-#      store restore — docs/upgrade.md "Rolling back") and prove the BASELINE
-#      binary still serves the baseline incident, reads the qualification
-#      back byte-identical (except the read-time evaluation clock), lists it
-#      exactly once, answers the coverage routes, returns the same audit
-#      chain, and that the role is still read-only on pods;
-#   6. upgrade to HEAD again and prove the qualification reads back
-#      byte-identical, its audit chain is byte-identical, and a fresh
-#      observation extends that same chain (prev_hash links to the
-#      pre-rollback head) instead of forking.
+#   5. roll the controller/agent images back to BASELINE with the policies
+#      off and prove the BASELINE binary refuses the migrated store with the
+#      schema-version error (docs/upgrade.md "v0.8.0 workload-safe recovery
+#      notes"); then perform the documented restore — operator to zero,
+#      controller to zero, the pre-upgrade snapshot copied back (the SQLite
+#      file through the restore helper Pod; the PostgreSQL dump through
+#      psql), operator back — and prove BASELINE serves the baseline
+#      incident with its audit, an empty qualification list (the rows HEAD
+#      wrote after the snapshot are gone, which is what a restore means),
+#      both coverage routes, and a read-only role on pods;
+#   6. upgrade to HEAD again on the restored store, prove the migration runs
+#      again (the baseline incident is still served, the list is still
+#      empty), drive the whole v0.5 lifecycle a second time to
+#      ReadyForApproval with a fresh four-event audit chain, and extend that
+#      chain with one more observation.
 #
 # Node layout. The agent DaemonSet runs with hostPID and owns host state under
 # hostPath /var/lib/kube-neuron (its spool), so two installations' agents on
@@ -69,7 +85,7 @@ set -Eeuo pipefail
 # if the current login predates it.
 #
 # Env:
-#   BASELINE          released tag to start from (default: v0.6.1, the
+#   BASELINE          released tag to start from (default: v0.7.0, the
 #                     previous published release; the baseline must already
 #                     serve the v0.5 runtime-contract routes, which the seed
 #                     step verifies, so v0.5.0 is the oldest accepted)
@@ -81,7 +97,7 @@ set -Eeuo pipefail
 #   POSTGRES_IMAGE    throwaway database image (default: docker.io/library/postgres:16-alpine)
 #   KIND_BIN, KUBECTL_BIN, DOCKER_BIN, JQ_BIN  command paths
 
-BASELINE=${BASELINE:-v0.6.1}
+BASELINE=${BASELINE:-v0.7.0}
 RELEASE_REPO=${RELEASE_REPO:-kubeneuron/kubeneuron}
 LOAD_PLATFORM=${LOAD_PLATFORM:-linux/$(go env GOARCH 2>/dev/null || echo amd64)}
 CLUSTER_NAME=${CLUSTER_NAME:-kubeneuron-upgrade-rollback}
@@ -90,6 +106,7 @@ POSTGRES_IMAGE=${POSTGRES_IMAGE:-docker.io/library/postgres:16-alpine}
 KIND_BIN=${KIND_BIN:-kind}
 KUBECTL_BIN=${KUBECTL_BIN:-kubectl}
 JQ_BIN=${JQ_BIN:-jq}
+PYTHON_BIN=${PYTHON_BIN:-python3} # verifies the SQLite snapshot opens (stdlib sqlite3 only)
 DOCKER_BIN=${DOCKER_BIN:-docker}
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-300}
 RUN_ID=${RUN_ID:-$(date -u +%Y%m%d%H%M%S)-$$}
@@ -173,7 +190,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for command in "$KIND_BIN" "$KUBECTL_BIN" "$JQ_BIN" "$DOCKER_BIN" curl openssl gh git sed grep; do
+for command in "$KIND_BIN" "$KUBECTL_BIN" "$JQ_BIN" "$DOCKER_BIN" "$PYTHON_BIN" curl openssl gh git sed grep; do
 	command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
 done
 if ! docker_version=$("$DOCKER_BIN" info --format '{{.ServerVersion}}' 2>&1); then
@@ -279,6 +296,12 @@ else
 	die "cluster $CLUSTER_NAME already exists; delete it or choose another CLUSTER_NAME (this rehearsal needs a fresh store)"
 fi
 export KUBECONFIG="$work_dir/kubeconfig"
+# Same kindnetd page-cache guard as hack/kind-integration.sh: kind's 50Mi
+# limit makes kindnetd refault its binary from disk once the cluster has
+# churned for a while, and etcd on a slow disk then loses its leader.
+"$KUBECTL_BIN" -n kube-system set resources daemonset/kindnet \
+	--limits=memory=256Mi --requests=memory=50Mi >/dev/null
+"$KUBECTL_BIN" -n kube-system rollout status daemonset/kindnet --timeout="${TIMEOUT_SECONDS}s" >/dev/null
 # Resolve each store's dedicated worker by label: exactly one node per store,
 # so the agent nodeSelector below can only ever land on that node.
 for store in $STORES; do
@@ -776,6 +799,28 @@ set_checkpoint_policy() {
 		die "[$store] cannot patch checkpointCoordination.enabled=$enabled onto $(root_name "$store")"
 }
 
+# --- store snapshots (docs/upgrade.md "Before any upgrade") ------------------------
+
+# snapshot_store takes the pre-upgrade backup the documented rollback restores:
+# the controller's online VACUUM INTO snapshot for SQLite (GET /api/v1/backup),
+# a plain pg_dump for PostgreSQL. Both are verified to open before the
+# upgrade starts, as the docs require. Needs the store's port-forward.
+snapshot_store() {
+	local store=$1 ns code
+	ns=$(store_ns "$store")
+	if [[ $store == sqlite ]]; then
+		code=$(api_code "$store" "$work_dir/snapshot-$store.db" "http://127.0.0.1:${public_port}/api/v1/backup")
+		[[ $code == 200 ]] || die "[$store] GET /api/v1/backup returned $code, want 200"
+		[[ "$("$PYTHON_BIN" -I -c 'import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute("pragma integrity_check").fetchone()[0])' "$work_dir/snapshot-$store.db")" == ok ]] ||
+			die "[$store] the pre-upgrade snapshot does not pass integrity_check"
+	else
+		"$KUBECTL_BIN" -n "$ns" exec deploy/postgres -- pg_dump -U kubeneuron -d kubeneuron --no-owner >"$work_dir/snapshot-$store.sql" ||
+			die "[$store] pg_dump of the pre-upgrade store failed"
+		grep -q 'CREATE TABLE' "$work_dir/snapshot-$store.sql" || die "[$store] the pre-upgrade dump holds no tables"
+	fi
+	note "[$store] pre-upgrade snapshot taken and verified ($(wc -c <"$work_dir/snapshot-$store".*) bytes)"
+}
+
 # --- baseline install and v0.5 seed ----------------------------------------------
 
 for store in $STORES; do
@@ -828,6 +873,7 @@ for store in $STORES; do
 	"$JQ_BIN" -e '.verification_depth != "Full"' "$work_dir/coverage-baseline-$store.json" >/dev/null ||
 		die "[$store] baseline reports Full coverage without any profile: $("$JQ_BIN" -c . "$work_dir/coverage-baseline-$store.json")"
 	note "[$store] seeded incident $id with ${incident_audit[$store]} audit entries; baseline $BASELINE serves the v0.5 routes (empty qualification list, node not yet covered)"
+	snapshot_store "$store"
 done
 stop_port_forward
 
@@ -868,18 +914,14 @@ upgrade_to_head() {
 }
 
 rollback_images_to_baseline() {
-	# docs/upgrade.md "Rolling back — Images only": patch the root object back
-	# to the previous images; the store is untouched (v0.6 adds no store
-	# migration). The operator and CRDs are deliberately left at HEAD even
-	# though v0.6 changes both (the CRD gains the checkpointCoordination block,
-	# the operator compiles it and conditionally grants pods patch): an
-	# images-only rollback is exactly the rollback the v0.6 notes promise, and
-	# the policy has already been disabled through the CR before this point,
-	# so the HEAD operator compiles no policy and the BASELINE controller reads
-	# a snapshot it fully understands. Rolling the operator back too is the
-	# separate "Operator/CRDs" path (re-apply the previous install manifest),
-	# not what this rehearsal claims.
-	note "rollback: controller/agent images back to $BASELINE on every root object (store, CRDs, operator untouched)"
+	# Patch every root object back to the previous images. The operator and
+	# CRDs stay at HEAD (the separate "Operator/CRDs" path re-applies the
+	# previous install manifest; not what this rehearsal claims), and every
+	# new policy block has already been switched off through the CR, so the
+	# HEAD operator compiles nothing the BASELINE controller does not know.
+	# What the BASELINE controller cannot cross is the store: v0.8 migrated it
+	# forward, and the old binary must refuse it rather than downgrade it.
+	note "rollback: controller/agent images back to $BASELINE on every root object (CRDs, operator untouched; the store still carries the v0.8 schema)"
 	local store
 	for store in $STORES; do
 		"$KUBECTL_BIN" patch kubeneuron "$(root_name "$store")" --type=merge -p "{
@@ -889,9 +931,82 @@ rollback_images_to_baseline() {
   }
 }" >/dev/null
 	done
-	for store in $STORES; do
-		wait_converged "$store" "rollback" "${BASELINE_REGISTRY}/controller:${BASELINE}" "${BASELINE_REGISTRY}/agent:${BASELINE}"
+}
+
+# wait_schema_refusal waits until a BASELINE controller Pod of the store has
+# logged the forward-only schema refusal. The Pod crash-loops, so the line
+# may sit in the current or the previous container log.
+wait_schema_refusal() {
+	local store=$1 root ns deadline pod line=''
+	root=$(root_name "$store")
+	ns=$(store_ns "$store")
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		for pod in $("$KUBECTL_BIN" -n "$ns" get pods -l "app.kubernetes.io/instance=$root,app.kubernetes.io/component=controller" 			-o jsonpath="{range .items[?(@.spec.containers[0].image=='${BASELINE_REGISTRY}/controller:${BASELINE}')]}{.metadata.name}{'\n'}{end}" 2>/dev/null); do
+			line=$({ "$KUBECTL_BIN" -n "$ns" logs "pod/$pod" --tail=200 2>/dev/null; "$KUBECTL_BIN" -n "$ns" logs "pod/$pod" --previous --tail=200 2>/dev/null; } |
+				grep -oE 'schema version [0-9]+ is newer than this binary'"'"'s [0-9]+[^"]*' | head -n 1 || true)
+			if [[ -n $line ]]; then
+				note "[$store] $BASELINE refuses the v0.8 store as documented: $line"
+				return 0
+			fi
+		done
+		sleep 3
 	done
+	"$KUBECTL_BIN" -n "$ns" get pods -o wide >&2 || true
+	die "[$store] no $BASELINE controller Pod logged the forward-only schema refusal within ${TIMEOUT_SECONDS}s"
+}
+
+# scale_operator <replicas> scales the shared operator and waits for its Pods
+# to match: the operator owns every controller Deployment's replica count,
+# so a restore must stop it first (docs/operations.md, restore step 0) and
+# restart it to bring the controllers back (step 4).
+scale_operator() {
+	local replicas=$1 selector deadline n
+	"$KUBECTL_BIN" -n "$OPERATOR_NS" scale deploy/kubeneuron-operator --replicas="$replicas" >/dev/null
+	selector=$("$KUBECTL_BIN" -n "$OPERATOR_NS" get deploy/kubeneuron-operator -o json |
+		"$JQ_BIN" -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		n=$("$KUBECTL_BIN" -n "$OPERATOR_NS" get pods -l "$selector" --field-selector=status.phase=Running -o name 2>/dev/null | grep -c . || true)
+		if ((replicas == 0)); then
+			(("$("$KUBECTL_BIN" -n "$OPERATOR_NS" get pods -l "$selector" -o name 2>/dev/null | grep -c . || true)" == 0)) && return 0
+		else
+			((n == replicas)) && return 0
+		fi
+		sleep 2
+	done
+	die "operator did not reach $replicas replica(s) within ${TIMEOUT_SECONDS}s"
+}
+
+# restore_store performs the documented restore of the pre-upgrade snapshot
+# with the operator already stopped: controller to zero, the snapshot copied
+# back, the controller left at zero for the operator to restore.
+restore_store() {
+	local store=$1 root ns helper
+	root=$(root_name "$store")
+	ns=$(store_ns "$store")
+	note "[$store] restore: controller to zero, then the pre-upgrade snapshot back into the store"
+	"$KUBECTL_BIN" -n "$ns" scale "deploy/${root}-controller" --replicas=0 >/dev/null
+	"$KUBECTL_BIN" -n "$ns" wait --for=delete pod -l "app.kubernetes.io/instance=$root,app.kubernetes.io/component=controller" --timeout="${TIMEOUT_SECONDS}s" >/dev/null 2>&1 || true
+	[[ "$("$KUBECTL_BIN" -n "$ns" get pods -l "app.kubernetes.io/instance=$root,app.kubernetes.io/component=controller" -o name | grep -c . || true)" == 0 ]] ||
+		die "[$store] controller Pods still present after scaling to zero"
+	if [[ $store == sqlite ]]; then
+		"$KUBECTL_BIN" -n "$ns" get pvc "${root}-controller-state" >/dev/null || die "[$store] PVC ${root}-controller-state not found"
+		helper="$work_dir/restore-helper-$store.yaml"
+		sed "s/claimName: kubeneuron-controller-state/claimName: ${root}-controller-state/" "$REPO_ROOT/deploy/kubernetes/backup/restore-helper.yaml" >"$helper"
+		grep -q "claimName: ${root}-controller-state" "$helper" || die "[$store] restore-helper.yaml no longer names the default claim; update the rehearsal"
+		"$KUBECTL_BIN" -n "$ns" apply -f "$helper" >/dev/null
+		"$KUBECTL_BIN" -n "$ns" wait --for=condition=Ready pod/kubeneuron-restore-helper --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+		"$KUBECTL_BIN" -n "$ns" cp "$work_dir/snapshot-$store.db" kubeneuron-restore-helper:/state/kubeneuron.db
+		"$KUBECTL_BIN" -n "$ns" exec kubeneuron-restore-helper -- sh -c 'rm -f /state/kubeneuron.db-wal /state/kubeneuron.db-shm && test -s /state/kubeneuron.db' ||
+			die "[$store] the restored file is missing or empty in the state volume"
+		"$KUBECTL_BIN" -n "$ns" delete pod kubeneuron-restore-helper --wait=true >/dev/null
+	else
+		"$KUBECTL_BIN" -n "$ns" exec deploy/postgres -- sh -c 'dropdb -U kubeneuron --if-exists --force kubeneuron && createdb -U kubeneuron kubeneuron' >/dev/null ||
+			die "[$store] could not recreate the database before the restore"
+		"$KUBECTL_BIN" -n "$ns" exec -i deploy/postgres -- psql -q -U kubeneuron -d kubeneuron -v ON_ERROR_STOP=1 <"$work_dir/snapshot-$store.sql" >/dev/null ||
+			die "[$store] psql restore of the pre-upgrade dump failed"
+	fi
 }
 
 upgrade_to_head "upgrade"
@@ -971,7 +1086,7 @@ declare -A qual_id=() qual_version=() profile_uid=() profile_generation=()
 observe() {
 	local store=$1 out=$2 key=$3 code
 	code=$(api_code "$store" "$out" -H 'Content-Type: application/json' \
-		-H "Idempotency-Key: upgrade-rollback-${RUN_ID}-${store}-observe-${key}" \
+		-H "Idempotency-Key: upgrade-rollback-${RUN_ID}-${store}-observe-${LIFECYCLE_PASS}-${key}" \
 		--data-binary "{\"actor\":\"upgrade-harness\",\"resource_version\":${qual_version[$store]}}" \
 		"$(qual_url)/${qual_id[$store]}/observe")
 	[[ $code == 200 ]] || {
@@ -995,6 +1110,15 @@ audit_events() {
 }
 audit_actions() { "$JQ_BIN" -r '[.items[]? | .action] | join(",")' "$1"; }
 
+# drive_v05_lifecycle <pass> runs the v0.5 runtime contract lifecycle on every
+# store through the public API, up to ReadyForApproval with a four-event audit
+# chain. The first pass creates the profile; the second (after the restore and
+# the re-upgrade) finds it still in the cluster, since the profile is a CR,
+# not a store row, and only drives the store-side rows again.
+LIFECYCLE_PASS=first
+drive_v05_lifecycle() {
+	LIFECYCLE_PASS=$1
+	local store root profile_name node node_uid digest_before coverage_file create_file expires_at code actions
 for store in $STORES; do
 	root=$(root_name "$store")
 	profile_name="${root}-profile"
@@ -1002,8 +1126,9 @@ for store in $STORES; do
 	node_uid=${store_node_uid[$store]}
 	# The profile selects on the same store label that pins the agent, so it
 	# covers exactly this store's dedicated worker and no other node.
-	note "[$store] v0.5 lifecycle: profile $profile_name selects $node via ${STORE_NODE_LABEL}=${store}"
+	note "[$store] v0.5 lifecycle ($LIFECYCLE_PASS pass): profile $profile_name selects $node via ${STORE_NODE_LABEL}=${store}"
 	start_port_forward "$store"
+	if [[ $LIFECYCLE_PASS == first ]]; then
 	digest_before=$("$KUBECTL_BIN" get kubeneuron "$root" -o jsonpath='{.status.configDigest}')
 	[[ -n $digest_before ]] || die "[$store] root $root has no compiled configDigest before the profile"
 	cat >"$work_dir/profile-$store.yaml" <<EOF
@@ -1035,6 +1160,11 @@ EOF
 	# wait until the recompiled digest is live on the leader before judging
 	# coverage (or creating a qualification) against a stale snapshot.
 	wait_config_digest "$store" "$digest_before" "profile applied"
+	else
+		[[ -n ${profile_uid[$store]} ]] || die "[$store] second pass without a profile from the first"
+		[[ "$("$KUBECTL_BIN" get acceleratorruntimeprofile "$profile_name" -o jsonpath='{.metadata.uid}')" == "${profile_uid[$store]}" ]] ||
+			die "[$store] profile $profile_name changed identity across the rollback cycle"
+	fi
 
 	post_report "$store" "${profile_uid[$store]}" "${profile_generation[$store]}"
 	coverage_file="$work_dir/coverage-$store.json"
@@ -1055,7 +1185,7 @@ EOF
 	# rollouts across two stores; the ceiling is 30 days.
 	expires_at=$(date -u -d '+12 hours' +%Y-%m-%dT%H:%M:%SZ)
 	code=$(api_code "$store" "$create_file" -H 'Content-Type: application/json' \
-		-H "Idempotency-Key: upgrade-rollback-${RUN_ID}-${store}-create" \
+		-H "Idempotency-Key: upgrade-rollback-${RUN_ID}-${store}-create-${LIFECYCLE_PASS}" \
 		--data-binary "{\"actor\":\"upgrade-harness\",\"nodes\":[\"${node}\"],\"vendor\":\"nvidia\",\"requirements\":{\"min_samples\":1,\"min_duration\":\"${QUAL_MIN_DURATION_SECONDS}s\"},\"expires_at\":\"${expires_at}\"}" \
 		"$(qual_url)")
 	[[ $code == 201 ]] || {
@@ -1100,6 +1230,8 @@ EOF
 	note "[$store] qualification ${qual_id[$store]} is ReadyForApproval at resource_version ${qual_version[$store]} with audit create,observe,observe,ready"
 done
 stop_port_forward
+}
+drive_v05_lifecycle first
 
 # --- v0.6 checkpoint coordination policy per store ----------------------------------------
 
@@ -1172,93 +1304,186 @@ for store in $STORES; do
 done
 stop_port_forward
 
-# --- images-only rollback to baseline -----------------------------------------------------
+# --- v0.8 workload-safe blocks per store ---------------------------------------------------
+
+# The v0.8 blocks (advisory and groups inside checkpointCoordination, the
+# impact preview with its three read-only context resolvers) are exercised on
+# HEAD the same way and switched off BEFORE any image moves — the order
+# docs/upgrade.md "v0.8.0 workload-safe recovery notes" prescribes. What is
+# judged: the upgrade alone granted nothing on batch, kueue.x-k8s.io or
+# ray.io; the CRD refuses the preview's requireForApproval without the
+# preview, and an advisory inside a disabled coordination block; enabling
+# everything compiles a new digest, grants exactly get/list/watch on the three
+# context groups beside the Phase 1 pods patch, and rolls no Pod; disabling
+# everything returns the digest to its pre-policy value and the role to its
+# pre-policy shape. The rows the preview would write need a parked incident
+# and are covered by the kind integration gate; here the question is only
+# whether the store and the role move back cleanly before the baseline binary
+# returns.
+controller_context_groups() {
+	local store=$1 role_json
+	role_json=$("$KUBECTL_BIN" get clusterrole "$(root_name "$store")-controller" -o json 2>/dev/null || true)
+	[[ -n $role_json ]] || { printf 'ROLE_ABSENT'; return 0; }
+	printf '%s' "$role_json" | "$JQ_BIN" -r '
+		[.rules[]? | select(any(.apiGroups[]?; . == "batch" or . == "kueue.x-k8s.io" or . == "ray.io"))
+		| "\(.apiGroups | join(","))=\(.resources | sort | join(","))[\(.verbs | sort | join(","))]"] | sort | join(";")'
+}
+assert_context_groups() {
+	local store=$1 want=$2 label=$3 deadline actual=''
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		actual=$(controller_context_groups "$store")
+		if [[ $actual == "$want" ]]; then
+			note "[$store] $label: ClusterRole $(root_name "$store")-controller context rules are exactly [${want:-none}]"
+			return 0
+		fi
+		sleep 2
+	done
+	die "[$store] $label: ClusterRole $(root_name "$store")-controller context rules are '$actual', want exactly [${want:-none}]"
+}
+readonly CONTEXT_RULES_ALL='batch=jobs[get,list,watch];kueue.x-k8s.io=clusterqueues,localqueues,workloads[get,list,watch];ray.io=rayclusters,rayjobs[get,list,watch]'
+set_workload_safe_policy() {
+	# set_workload_safe_policy <store> <true|false>: every v0.8 block at once,
+	# enabled=false left in place (the documented rollback spelling).
+	local store=$1 enabled=$2 patch
+	patch=$("$JQ_BIN" -cn --argjson enabled "$enabled" --arg ns "$(store_ns "$store")" '{spec: {safety: {
+		checkpointCoordination: {enabled: $enabled, defaultWait: "10s", maxWait: "30s", namespaces: [$ns],
+			advisory: {enabled: $enabled, budget: "5s"}, groups: {enabled: $enabled, maxGroupSize: 8, crossNode: false}},
+		impactPreview: {enabled: $enabled, budget: "10s", maxItems: 50, requireForApproval: $enabled,
+			workloadContext: {batchJobs: $enabled, kueue: $enabled, kuberay: $enabled}}}}}')
+	"$KUBECTL_BIN" patch kubeneuron "$(root_name "$store")" --type=merge -p "$patch" >/dev/null ||
+		die "[$store] cannot patch the v0.8 blocks (enabled=$enabled) onto $(root_name "$store")"
+}
+for store in $STORES; do
+	root=$(root_name "$store")
+	ns=$(store_ns "$store")
+	note "[$store] v0.8 workload-safe blocks: default off, enable, disable, on root $root"
+	start_port_forward "$store"
+	"$JQ_BIN" -e '.spec.safety.impactPreview == null and .spec.safety.checkpointCoordination.advisory == null and .spec.safety.checkpointCoordination.groups == null' \
+		<<<"$("$KUBECTL_BIN" get kubeneuron "$root" -o json)" >/dev/null ||
+		die "[$store] root $root carries a v0.8 block before this rehearsal set one"
+	assert_context_groups "$store" "" "v0.8 blocks absent after upgrade"
+	assert_pod_verbs "$store" "get,list,watch" "v0.8 blocks absent after upgrade"
+	# CEL guards, server-side dry run: nothing persisted.
+	rejected=$("$KUBECTL_BIN" patch kubeneuron "$root" --type=merge --dry-run=server \
+		-p '{"spec":{"safety":{"impactPreview":{"requireForApproval":true}}}}' 2>&1 || true)
+	grep -Fq 'requireForApproval requires impactPreview.enabled' <<<"$rejected" ||
+		die "[$store] requireForApproval without the preview was not refused by the CRD: ${rejected:-accepted}"
+	rejected=$("$KUBECTL_BIN" patch kubeneuron "$root" --type=merge --dry-run=server \
+		-p '{"spec":{"safety":{"checkpointCoordination":{"enabled":false,"advisory":{"enabled":true}}}}}' 2>&1 || true)
+	grep -Fq 'advisory.enabled requires checkpointCoordination.enabled' <<<"$rejected" ||
+		die "[$store] an advisory inside a disabled coordination block was not refused by the CRD: ${rejected:-accepted}"
+
+	set_workload_safe_policy "$store" true
+	wait_config_digest "$store" "${digest_policy_off[$store]}" "v0.8 blocks enabled"
+	digest_v08_on=$("$KUBECTL_BIN" get kubeneuron "$root" -o jsonpath='{.status.configDigest}')
+	root_json=$("$KUBECTL_BIN" get kubeneuron "$root" -o json)
+	"$JQ_BIN" -e '
+		.metadata.generation as $g |
+		.status.observedGeneration == $g and
+		any(.status.conditions[]?; .type == "ConfigurationValid" and .status == "True" and .observedGeneration == $g) and
+		.spec.safety.impactPreview.enabled == true and .spec.safety.impactPreview.requireForApproval == true and
+		.spec.safety.checkpointCoordination.advisory.enabled == true and .spec.safety.checkpointCoordination.groups.enabled == true' <<<"$root_json" >/dev/null ||
+		die "[$store] root $root did not compile the v0.8 blocks at its current generation: $("$JQ_BIN" -c '{generation: .metadata.generation, safety: .spec.safety, status}' <<<"$root_json")"
+	assert_pod_verbs "$store" "get,list,patch,watch" "v0.8 blocks enabled"
+	assert_context_groups "$store" "$CONTEXT_RULES_ALL" "v0.8 blocks enabled"
+	assert_no_pod_rollout "$store" "${pods_policy_off[$store]}" "v0.8 blocks enabled"
+	# The HEAD controller serves the v0.8 route on the seeded baseline incident:
+	# no preview was ever computed for it (it never parked under the policy),
+	# so the answer is a 404, not an error — the row shape is readable.
+	code=$(api_code "$store" /dev/null "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id[$store]}/impact-preview")
+	[[ $code == 404 ]] || die "[$store] impact-preview for the baseline incident returned $code, want 404 (no preview was ever computed for it)"
+
+	set_workload_safe_policy "$store" false
+	wait_config_digest "$store" "$digest_v08_on" "v0.8 blocks disabled"
+	digest_after=$("$KUBECTL_BIN" get kubeneuron "$root" -o jsonpath='{.status.configDigest}')
+	[[ $digest_after == "${digest_policy_off[$store]}" ]] ||
+		die "[$store] disabling the v0.8 blocks compiled digest $digest_after, want the pre-policy digest ${digest_policy_off[$store]} (explicit enabled=false must compile like absent blocks)"
+	assert_pod_verbs "$store" "get,list,watch" "v0.8 blocks disabled before rollback"
+	assert_context_groups "$store" "" "v0.8 blocks disabled before rollback"
+	assert_no_pod_rollout "$store" "${pods_policy_off[$store]}" "v0.8 blocks disabled"
+	logs=$("$KUBECTL_BIN" -n "$ns" logs "pod/$(leader_pod "$store")" --tail=-1 2>&1)
+	if grep -Eiq 'panic|fatal' <<<"$logs"; then
+		die "[$store] controller logs contain a panic/fatal line after the v0.8 cycle"
+	fi
+	note "[$store] v0.8 cycle: context rules and pods patch granted only while enabled (digests ${digest_policy_off[$store]} -> $digest_v08_on -> $digest_after), no Pod rolled or restarted by either toggle"
+done
+stop_port_forward
+
+# --- rollback to baseline: refusal, then the documented restore --------------------------
 
 rollback_images_to_baseline
+for store in $STORES; do
+	wait_schema_refusal "$store"
+done
+
+note "rollback: documented restore (docs/operations.md) — operator to zero, each controller to zero, the pre-upgrade snapshot back, operator restarted"
+scale_operator 0
+for store in $STORES; do
+	restore_store "$store"
+done
+scale_operator 1
+for store in $STORES; do
+	wait_converged "$store" "restore + rollback" "${BASELINE_REGISTRY}/controller:${BASELINE}" "${BASELINE_REGISTRY}/agent:${BASELINE}"
+done
 
 for store in $STORES; do
 	start_port_forward "$store"
-	note "[$store] rolled back: asserting the $BASELINE binary serves the v0.5 rows HEAD wrote, unchanged"
-	# v0.5.0 owns the runtime-contract surface, so the rolled-back binary must
-	# read the qualification HEAD wrote byte-identically (only the read-time
-	# evaluation clock may differ), list it exactly once, and answer both
-	# coverage routes. No mutation is attempted through the old binary: the
-	# re-upgrade below is what proves the chain still extends, and an observe
-	# here would legitimately change the snapshots it is compared against.
-	code=$(api_code "$store" "$work_dir/qual-rollback-$store.json" "$(qual_url)/${qual_id[$store]}")
-	[[ $code == 200 ]] || die "[$store] rolled-back $BASELINE controller answered $code on the qualification, want 200"
-	"$JQ_BIN" -S 'del(.evaluated_at)' "$work_dir/qual-rollback-$store.json" >"$work_dir/qual-rollback-$store.canonical.json"
-	cmp -s "$work_dir/qual-before-$store.canonical.json" "$work_dir/qual-rollback-$store.canonical.json" || {
-		diff "$work_dir/qual-before-$store.canonical.json" "$work_dir/qual-rollback-$store.canonical.json" >&2 || true
-		die "[$store] qualification ${qual_id[$store]} read through the $BASELINE binary differs from the pre-rollback read"
-	}
+	note "[$store] rolled back: asserting the $BASELINE binary serves the restored pre-upgrade state"
+	# The restore returns the store to the moment before the upgrade: the
+	# baseline incident with its audit is there, the qualification HEAD wrote
+	# afterwards is not. That loss is the documented price of the forward-only
+	# schema, and the rehearsal asserts it rather than hiding it.
+	survived=$(api "$store" "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id[$store]}" |
+		"$JQ_BIN" --arg id "${incident_id[$store]}" --argjson n "${incident_audit[$store]}" '(.incident.id == $id) and ((.audit | length) >= $n)')
+	[[ $survived == true ]] || die "[$store] baseline incident ${incident_id[$store]} or its audit did not survive the restore"
 	code=$(api_code "$store" "$work_dir/qual-list-rollback-$store.json" "$(qual_url)")
 	[[ $code == 200 ]] || die "[$store] rolled-back $BASELINE controller answered $code on the qualification list, want 200"
-	"$JQ_BIN" -e --arg id "${qual_id[$store]}" '[.items[]? | select(.id == $id)] | length == 1' "$work_dir/qual-list-rollback-$store.json" >/dev/null ||
-		die "[$store] qualification ${qual_id[$store]} is not listed exactly once by the $BASELINE binary"
+	"$JQ_BIN" -e '(.items // []) | length == 0' "$work_dir/qual-list-rollback-$store.json" >/dev/null ||
+		die "[$store] the restored store still lists qualifications; the restore did not return it to the pre-upgrade snapshot: $("$JQ_BIN" -c . "$work_dir/qual-list-rollback-$store.json")"
+	code=$(api_code "$store" /dev/null "$(qual_url)/${qual_id[$store]}")
+	[[ $code == 404 ]] || die "[$store] qualification ${qual_id[$store]} answered $code after the restore, want 404 (it postdates the snapshot)"
 	for path in "$(coverage_url "${store_node[$store]}")" "$(fleet_coverage_url)"; do
 		code=$(api_code "$store" /dev/null "$path")
 		[[ $code == 200 ]] || die "[$store] rolled-back $BASELINE controller answered $code on ${path#*"${public_port}"}, want 200"
 	done
-	# The baseline incident is still served, with its audit intact.
-	survived=$(api "$store" "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id[$store]}" |
-		"$JQ_BIN" --arg id "${incident_id[$store]}" --argjson n "${incident_audit[$store]}" '(.incident.id == $id) and ((.audit | length) >= $n)')
-	[[ $survived == true ]] || die "[$store] baseline incident ${incident_id[$store]} or its audit did not survive the rollback"
-	# The qualification's four hash-chained events are still in the store and
-	# byte-identical through the old binary's audit explorer.
-	audit_events "$store" "$work_dir/audit-rollback-$store.json"
-	"$JQ_BIN" -S '.items' "$work_dir/audit-rollback-$store.json" >"$work_dir/audit-rollback-$store.canonical.json"
-	cmp -s "$work_dir/audit-before-$store.canonical.json" "$work_dir/audit-rollback-$store.canonical.json" || {
-		diff "$work_dir/audit-before-$store.canonical.json" "$work_dir/audit-rollback-$store.canonical.json" >&2 || true
-		die "[$store] qualification audit chain read through the $BASELINE binary differs from the pre-rollback chain"
-	}
-	# The policy was disabled before the images moved, and the HEAD operator
-	# keeps reconciling: the BASELINE controller must be running under exactly
-	# the read-only pods grant it was built for.
-	assert_pod_verbs "$store" "get,list,watch" "after image rollback"
+	# The policies were disabled before the images moved, and the HEAD
+	# operator keeps reconciling: the BASELINE controller must be running
+	# under exactly the read-only pods grant it was built for.
+	assert_pod_verbs "$store" "get,list,watch" "after restore and image rollback"
 	logs=$("$KUBECTL_BIN" -n "$(store_ns "$store")" logs "pod/$(leader_pod "$store")" --tail=-1 2>&1)
 	if grep -Eiq 'panic|fatal' <<<"$logs"; then
-		die "[$store] rolled-back controller logs contain a panic/fatal line"
+		die "[$store] restored controller logs contain a panic/fatal line"
 	fi
-	note "[$store] $BASELINE reads qualification ${qual_id[$store]} back byte-identical, lists it once, answers both coverage routes, still serves incident ${incident_id[$store]}, and returns its 4 audit events unchanged"
+	note "[$store] $BASELINE serves incident ${incident_id[$store]} with its audit from the restored snapshot, lists no qualification (${qual_id[$store]} postdates it, 404), answers both coverage routes, read-only on pods"
 done
 stop_port_forward
 
-# --- re-upgrade to HEAD ------------------------------------------------------------------
+# --- re-upgrade to HEAD on the restored store ---------------------------------------------
 
 upgrade_to_head "re-upgrade"
 
 for store in $STORES; do
 	start_port_forward "$store"
-	note "[$store] re-upgraded: asserting the qualification and its audit chain are intact and still usable"
-	code=$(api_code "$store" "$work_dir/qual-after-$store.json" "$(qual_url)/${qual_id[$store]}")
-	[[ $code == 200 ]] || die "[$store] qualification GET after re-upgrade returned $code, want 200"
-	"$JQ_BIN" -S 'del(.evaluated_at)' "$work_dir/qual-after-$store.json" >"$work_dir/qual-after-$store.canonical.json"
-	cmp -s "$work_dir/qual-before-$store.canonical.json" "$work_dir/qual-after-$store.canonical.json" || {
-		diff "$work_dir/qual-before-$store.canonical.json" "$work_dir/qual-after-$store.canonical.json" >&2 || true
-		die "[$store] qualification ${qual_id[$store]} read back differently after the rollback cycle"
-	}
-	"$JQ_BIN" -e '.state == "ReadyForApproval" and .ready_for_approval == true and .successful_samples == 2' "$work_dir/qual-after-$store.json" >/dev/null ||
-		die "[$store] qualification is no longer ReadyForApproval with 2 samples after re-upgrade"
-	code=$(api_code "$store" "$work_dir/qual-list-after-$store.json" "$(qual_url)")
-	[[ $code == 200 ]] || die "[$store] qualification list after re-upgrade returned $code, want 200"
-	"$JQ_BIN" -e --arg id "${qual_id[$store]}" '[.items[]? | select(.id == $id)] | length == 1' "$work_dir/qual-list-after-$store.json" >/dev/null ||
-		die "[$store] qualification ${qual_id[$store]} is not listed exactly once after re-upgrade"
-	audit_events "$store" "$work_dir/audit-after-$store.json"
-	"$JQ_BIN" -S '.items' "$work_dir/audit-after-$store.json" >"$work_dir/audit-after-$store.canonical.json"
-	cmp -s "$work_dir/audit-before-$store.canonical.json" "$work_dir/audit-after-$store.canonical.json" || {
-		diff "$work_dir/audit-before-$store.canonical.json" "$work_dir/audit-after-$store.canonical.json" >&2 || true
-		die "[$store] qualification audit chain differs after the rollback cycle"
-	}
+	note "[$store] re-upgraded: the migration ran again on the restored store"
 	survived=$(api "$store" "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id[$store]}" |
 		"$JQ_BIN" --arg id "${incident_id[$store]}" '.incident.id == $id')
 	[[ $survived == true ]] || die "[$store] baseline incident ${incident_id[$store]} is gone after re-upgrade"
+	code=$(api_code "$store" "$work_dir/qual-list-after-$store.json" "$(qual_url)")
+	[[ $code == 200 ]] || die "[$store] qualification list after re-upgrade returned $code, want 200"
+	"$JQ_BIN" -e '(.items // []) | length == 0' "$work_dir/qual-list-after-$store.json" >/dev/null ||
+		die "[$store] qualification list is not empty right after the re-upgrade of the restored store"
+done
+stop_port_forward
 
-	# Still usable, not just readable: a fresh report from the (new) agent Pod
-	# identity restores Full coverage, and one more observation extends the
-	# SAME audit chain — its prev_hash is the pre-rollback head.
-	post_report "$store" "${profile_uid[$store]}" "${profile_generation[$store]}"
-	wait_full_coverage "$store" "$work_dir/coverage-after-$store.json" "post-re-upgrade"
+# The restored-then-migrated store is usable, not just readable: the whole
+# v0.5 lifecycle runs again (a fresh report from the new agent Pod identity,
+# Full coverage, a new qualification observed to ReadyForApproval with its own
+# four-event chain), and one more observation extends that chain.
+drive_v05_lifecycle second
+
+for store in $STORES; do
+	start_port_forward "$store"
 	observe "$store" "$work_dir/qual-observe3-$store.json" third
 	"$JQ_BIN" -e '.successful_samples == 3 and .total_observations == 3 and .state == "ReadyForApproval"' "$work_dir/qual-observe3-$store.json" >/dev/null ||
 		die "[$store] third observation: $("$JQ_BIN" -c '{successful_samples, total_observations, state}' "$work_dir/qual-observe3-$store.json"), want 3/3 ReadyForApproval"
@@ -1266,12 +1491,12 @@ for store in $STORES; do
 	actions=$(audit_actions "$work_dir/audit-final-$store.json")
 	[[ $actions == "create,observe,observe,ready,observe" ]] || die "[$store] final audit actions were '$actions', want create,observe,observe,ready,observe"
 	chained=$("$JQ_BIN" -r '(.items[3].hash == .items[4].prev_hash) and (.items[4].hash != .items[3].hash)' "$work_dir/audit-final-$store.json")
-	[[ $chained == true ]] || die "[$store] the post-re-upgrade observe event does not chain onto the pre-rollback audit head"
+	[[ $chained == true ]] || die "[$store] the fifth audit event does not chain onto the fourth"
 	logs=$("$KUBECTL_BIN" -n "$(store_ns "$store")" logs "pod/$(leader_pod "$store")" --tail=-1 2>&1)
 	if grep -Eiq 'panic|fatal' <<<"$logs"; then
 		die "[$store] re-upgraded controller logs contain a panic/fatal line"
 	fi
-	note "[$store] qualification ${qual_id[$store]} survived $BASELINE -> HEAD -> $BASELINE -> HEAD byte-identical, and its audit chain grew to 5 linked events"
+	note "[$store] the restored store migrated again and ran the full v0.5 lifecycle: qualification ${qual_id[$store]} ReadyForApproval with a 5-event linked audit chain"
 done
 stop_port_forward
 
@@ -1280,4 +1505,4 @@ if grep -Eiq 'forbidden|panic|fatal' <<<"$operator_logs"; then
 	die "operator logs contain an unexpected RBAC/fatal error"
 fi
 
-note "PASS: $BASELINE -> HEAD -> $BASELINE (images only) -> HEAD converged for: $STORES; runtime contract qualification rows and their hash-chained audit survived the cycle on every store, and the checkpoint coordination policy granted pods patch only while enabled, rolled or restarted no Pod when toggled, and was off before rollback (CPU-only kind, synthetic accelerator evidence, no hardware claim, no real checkpoint workload)"
+note "PASS: $BASELINE -> HEAD -> $BASELINE (refused the v0.8 schema as documented; restored the pre-upgrade snapshot, then the images) -> HEAD converged for: $STORES; the baseline incident and its audit survived the restore on every store, the v0.5 lifecycle ran to ReadyForApproval with a hash-chained audit both before the rollback and again on the restored, re-migrated store, the checkpoint coordination policy granted pods patch only while enabled, and the v0.8 blocks granted the three read-only context rules only while enabled; both rolled or restarted no Pod when toggled and were off before rollback (CPU-only kind, synthetic accelerator evidence, no hardware claim, no real checkpoint workload)"

@@ -716,6 +716,38 @@ spec:
                       Omitted means off. Waiting is a change to how every disruption step
                       behaves, so it must never arrive by default with an upgrade.
                     properties:
+                      advisory:
+                        description: |-
+                          Advisory, when enabled, stamps a deadline-free notice on every eligible
+                          opted-in Pod the moment its incident parks for human approval with a
+                          drain or GPU-workload eviction still downstream, so a job can start
+                          checkpointing during the minutes a human takes to decide instead of
+                          learning about the disruption only when it begins. It promises nothing
+                          and waits for nothing: the deadline-bearing request still arrives at
+                          the disruption step exactly as without it. Omitted means off. It needs
+                          enabled: true on this block; the advisory uses the same allowlist, the
+                          same Pod identity confinement and the same `pods: patch` grant, and
+                          adds no RBAC of its own.
+                        properties:
+                          budget:
+                            default: 10s
+                            description: |-
+                              Budget bounds one advisory round end to end (listing the node's
+                              workloads and stamping each eligible one). The park is already
+                              committed when the round starts, so the budget delays no decision; a
+                              round that runs out of budget leaves the rest unstamped and counts them
+                              unreachable. At most 60s.
+                            type: string
+                          enabled:
+                            default: false
+                            description: Enabled turns the advisory on. Default false.
+                            type: boolean
+                        type: object
+                        x-kubernetes-validations:
+                        - message: advisory.budget must be a positive duration of
+                            at most 60s
+                          rule: '!has(self.budget) || (duration(self.budget) > duration(''0s'')
+                            && duration(self.budget) <= duration(''60s''))'
                       defaultWait:
                         default: 5m
                         description: DefaultWait is granted to an opted-in workload
@@ -728,6 +760,36 @@ spec:
                           absent block means: no disruption waits for anything until somebody
                           asks it to.
                         type: boolean
+                      groups:
+                        description: |-
+                          Groups, when enabled, extends a request to the peers of a Pod that
+                          declares kubeneuron.io/checkpoint-group: the Pods in the same namespace
+                          with the same value get the same request with their own deadline from
+                          the same formula, and nothing else — disruption stays on the one node.
+                          Omitted means off. Needs enabled: true on this block.
+                        properties:
+                          crossNode:
+                            default: false
+                            description: |-
+                              CrossNode stamps peers on other nodes too. Default false: the group is
+                              then the members on the disrupted node, which is lead time for local
+                              ranks with zero new blast radius.
+                            type: boolean
+                          enabled:
+                            default: false
+                            description: Enabled turns group requests on. Default
+                              false.
+                            type: boolean
+                          maxGroupSize:
+                            default: 64
+                            description: |-
+                              MaxGroupSize bounds a group. A larger group has its peers skipped: the
+                              step asks only the members on the disrupted node, counts the skip, and
+                              the impact preview says so. 1 to 512, default 64.
+                            maximum: 512
+                            minimum: 1
+                            type: integer
+                        type: object
                       maxWait:
                         default: 15m
                         description: |-
@@ -782,6 +844,12 @@ spec:
                     - message: defaultWait must not exceed maxWait
                       rule: '!has(self.defaultWait) || !has(self.maxWait) || duration(self.defaultWait)
                         <= duration(self.maxWait)'
+                    - message: 'checkpointCoordination.advisory.enabled requires checkpointCoordination.enabled:
+                        an advisory is part of coordination, not a feature of its
+                        own'
+                      rule: '!has(self.advisory) || !self.advisory.enabled || self.enabled'
+                    - message: checkpointCoordination.groups.enabled requires checkpointCoordination.enabled
+                      rule: '!has(self.groups) || !self.groups.enabled || self.enabled'
                   destructiveExecution:
                     description: |-
                       DestructiveExecution is the only way to reach executionMode Enabled.
@@ -830,6 +898,76 @@ spec:
                   flapWindow:
                     default: 24h
                     type: string
+                  impactPreview:
+                    description: |-
+                      ImpactPreview, when enabled, computes a durable impact-preview/v1 record
+                      for every approval round: the node and its device topology, the
+                      workloads the downstream disruption would touch and which of them can
+                      checkpoint, and the warnings a human should read before approving. It
+                      is advisory and cannot block an approve; with requireForApproval it
+                      binds the approve to the exact preview the human saw. Omitted means
+                      off. (v0.8 development)
+                    properties:
+                      budget:
+                        default: 15s
+                        description: |-
+                          Budget bounds one preview computation (listing the node's workloads and
+                          classifying its topology). A computation that runs out of budget is
+                          recorded as unavailable with its reason. At most 60s.
+                        type: string
+                      enabled:
+                        default: false
+                        description: Enabled turns the preview on. Default false.
+                        type: boolean
+                      maxItems:
+                        default: 200
+                        description: |-
+                          MaxItems bounds how many workloads the preview itemises; the rest are
+                          counted and items_truncated is set. 10 to 1000.
+                        maximum: 1000
+                        minimum: 10
+                        type: integer
+                      requireForApproval:
+                        default: false
+                        description: |-
+                          RequireForApproval refuses an approve that carries no impact_digest, or
+                          a digest that does not match the round's current preview, and refuses
+                          every approve while the round's preview is unavailable. Default false:
+                          the preview is advisory unless the operator makes it a condition.
+                        type: boolean
+                      workloadContext:
+                        description: |-
+                          WorkloadContext selects read-only resolvers that add "whose Pod is
+                          this" to each itemised workload of the preview: the owning batch Job,
+                          the Kueue Workload admitting it, the KubeRay cluster and job. Each is
+                          off by default; enabling one grants the controller get/list/watch on
+                          that group and nothing else, and an absent CRD group is reported as
+                          not observed rather than failing the preview.
+                        properties:
+                          batchJobs:
+                            default: false
+                            description: BatchJobs reads batch/v1 Jobs that own itemised
+                              Pods.
+                            type: boolean
+                          kuberay:
+                            default: false
+                            description: KubeRay reads ray.io RayClusters and RayJobs.
+                            type: boolean
+                          kueue:
+                            default: false
+                            description: Kueue reads kueue.x-k8s.io Workloads, LocalQueues
+                              and ClusterQueues.
+                            type: boolean
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: impactPreview.requireForApproval requires impactPreview.enabled
+                      rule: '!has(self.requireForApproval) || !self.requireForApproval
+                        || self.enabled'
+                    - message: impactPreview.budget must be a positive duration of
+                        at most 60s
+                      rule: '!has(self.budget) || (duration(self.budget) > duration(''0s'')
+                        && duration(self.budget) <= duration(''60s''))'
                   maxConcurrentReboots:
                     default: 1
                     format: int32
@@ -897,6 +1035,40 @@ spec:
                           absent block means: KubeNeuron does not touch node scheduling until
                           somebody asks it to.
                         type: boolean
+                    type: object
+                  topologyClassifier:
+                    description: |-
+                      TopologyClassifier tunes the read-only device topology classifier
+                      (whole-device, mig, time-sliced, dra-managed, mixed, unknown). The
+                      classifier always runs and can only add refusals to a device-scoped
+                      GPU reset; this block carries only its opt-in inputs.
+
+                      Omitted means: classify from node capacity, GPU Feature Discovery
+                      labels and the agent report, without reading Dynamic Resource
+                      Allocation objects.
+                    properties:
+                      dra:
+                        description: |-
+                          DRA optionally lets the classifier read Dynamic Resource Allocation
+                          state. Omitted means off.
+                        properties:
+                          enabled:
+                            default: false
+                            description: |-
+                              Enabled makes the controller list ResourceSlices (resource.k8s.io/v1,
+                              get/list/watch only, never any other version or verb) for a node when
+                              it classifies that node, and inspect the ResourceClaim references of
+                              the Pods scheduled on it through the core Pod list it already holds
+                              (ResourceClaim objects are never read). The managed controller
+                              ClusterRole gains only that read-only ResourceSlice rule while this is
+                              true. When the group/version is not served, either read fails, or a
+                              ResourceSlice is scoped by anything other than an explicit nodeName
+                              (nodeSelector, allNodes, perDeviceNodeSelection), the node is
+                              classified as unknown and device-scoped actions are refused; nothing
+                              is ever assumed. Default false, and false is also what an absent block
+                              means.
+                            type: boolean
+                        type: object
                     type: object
                   verifyQuietWindow:
                     default: 10m

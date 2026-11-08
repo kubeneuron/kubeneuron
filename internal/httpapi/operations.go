@@ -87,7 +87,24 @@ func (s *Server) handleNodeReadiness(w http.ResponseWriter, r *http.Request) {
 	if manager == nil {
 		return
 	}
-	item, err := manager.NodeReadiness(r.Context(), r.PathValue("node"))
+	item, err := manager.NodeReadinessWithTopology(r.Context(), r.PathValue("node"))
+	if err != nil {
+		operationsError(w, err)
+		return
+	}
+	writeJSON(w, item)
+}
+
+// handleNodeTopology serves one live, read-only device topology
+// classification (topology-classification/v1). It is a GET on the existing
+// operator listener behind the same operator authorization as readiness; it
+// never writes and never changes what the controller admits.
+func (s *Server) handleNodeTopology(w http.ResponseWriter, r *http.Request) {
+	manager := s.operationsManager(w)
+	if manager == nil {
+		return
+	}
+	item, err := manager.NodeTopology(r.Context(), r.PathValue("node"))
 	if err != nil {
 		operationsError(w, err)
 		return

@@ -305,6 +305,7 @@ func TestDryRunFleetGetsSimulatedNumbers(t *testing.T) {
 	if sim == nil {
 		t.Fatal("a dry-run fleet got no simulated numbers; the pilot's whole evaluation " +
 			"period reports a blank table")
+		return
 	}
 	if sim.Incidents != 2 || sim.WouldRecover != 2 {
 		t.Fatalf("simulated = %+v, want 2 incidents both reaching RESOLVED", sim)
@@ -455,6 +456,7 @@ func TestSimulatedRecoverySeparatesTheClassesWithNoLadder(t *testing.T) {
 	sim := report.Simulated
 	if sim == nil {
 		t.Fatal("a dry-run fleet got no simulated numbers")
+		return
 	}
 	if sim.WouldRecover != 1 || sim.ObservedOnly != 1 {
 		t.Fatalf("simulated would-recover/observed-only = %d/%d, want 1/1: the class with no "+

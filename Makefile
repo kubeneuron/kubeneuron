@@ -18,7 +18,7 @@ GENERATED_PATHS := api/v1alpha1/zz_generated.deepcopy.go config/crd/bases deploy
 # The lock verify-generate serialises on. In .gitignore; created on first use.
 GENERATE_LOCK := .make-generate.lock
 
-.PHONY: all build test test-integration-kind test-upgrade-rollback-kind kind-clean lint clean tidy generate verify-generate verify-generate-locked generate-gpucatalog verify-gpucatalog proto web docs docs-serve docker gates gates-full verify-docs verify-image verify-hw-e2e-sweep verify-hw-e2e-observability verify-tls-scripts mirror test-gpu-observability-kind verify-gpu-observability-fixture kind-gpu-observability-clean
+.PHONY: all build test test-integration-kind test-upgrade-rollback-kind kind-clean lint clean tidy generate verify-generate verify-generate-locked generate-gpucatalog verify-gpucatalog proto web docs docs-serve docker gates gates-full verify-docs verify-image verify-hw-e2e-sweep verify-hw-e2e-observability verify-tls-scripts mirror test-gpu-observability-kind verify-gpu-observability-fixture kind-gpu-observability-clean test-workload-safe-kind verify-workload-safe-examples
 
 all: build
 
@@ -60,8 +60,9 @@ gates:
 	$(MAKE) verify-hw-e2e-sweep
 	$(MAKE) verify-hw-e2e-observability
 	$(MAKE) verify-tls-scripts
+	$(MAKE) verify-workload-safe-examples
 	@echo
-	@echo "gates: OK (generate, build, lint, race tests, docs, hw-e2e sweep, hw-e2e observability, TLS helpers)"
+	@echo "gates: OK (generate, build, lint, race tests, docs, hw-e2e sweep, hw-e2e observability, TLS helpers, workload-safe examples)"
 	@echo "note: the PostgreSQL conformance suite and the kind/image/release"
 	@echo "      gates are in 'make gates-full' — this tier proves the code,"
 	@echo "      not the artifact."
@@ -264,19 +265,24 @@ test-integration-kind: build
 	KIND_BIN="$(KIND)" KUBECTL_BIN="$(KUBECTL)" \
 	./hack/kind-integration.sh
 
-# The v0.6.1 -> HEAD -> v0.6.1 (images only) -> HEAD rehearsal from
-# docs/upgrade.md, on one disposable kind cluster, for BOTH stores at once
-# (SQLite PVC and a throwaway in-cluster PostgreSQL). It seeds a baseline
-# incident, drives a v0.5 runtime contract qualification to ReadyForApproval
-# on HEAD, enables and disables the v0.6 checkpoint coordination policy and
-# proves the managed controller ClusterRole holds pods patch only while it is
-# enabled, rolls the images back with the policy off, proves the v0.6.1
-# binary reads the rows back byte-identical, re-upgrades, and proves the rows
-# and their hash-chained audit read back byte-identical and still accept
-# observations. CPU-only: synthetic accelerator evidence over
-# the real agent identity, no GPU claim. Pulls the published baseline images
-# from GHCR, so it is the one kind gate that is not offline. Deletes its
-# cluster on exit unless KEEP_CLUSTER=1. Docker group membership required
+# The v0.7.0 -> HEAD -> v0.7.0 (restore the pre-upgrade snapshot, then the
+# images) -> HEAD rehearsal from docs/upgrade.md, on one disposable kind
+# cluster, for BOTH stores at once (SQLite PVC and a throwaway in-cluster
+# PostgreSQL). It takes and verifies the documented pre-upgrade snapshot
+# (GET /api/v1/backup; pg_dump), seeds a baseline incident, drives a v0.5
+# runtime contract qualification to ReadyForApproval on HEAD, enables and
+# disables the v0.6 checkpoint coordination policy and the v0.8 workload-safe
+# blocks and proves the managed controller ClusterRole holds pods patch and
+# the read-only context rules only while they are enabled, rolls the images
+# back with the policies off and proves the v0.7.0 binary REFUSES the
+# forward-only v0.8 schema, performs the documented restore (operator and
+# controller to zero, the snapshot back through the restore helper Pod or
+# psql, operator restarted) and proves v0.7.0 serves the pre-upgrade state,
+# then re-upgrades and runs the whole v0.5 lifecycle again on the restored,
+# re-migrated store. CPU-only: synthetic accelerator evidence over the real
+# agent identity, no GPU claim. Pulls the published baseline images from
+# GHCR, so it is the one kind gate that is not offline. Deletes its cluster
+# on exit unless KEEP_CLUSTER=1. Docker group membership required
 # (sg docker -c 'make test-upgrade-rollback-kind').
 test-upgrade-rollback-kind:
 	KIND_BIN="$(KIND)" KUBECTL_BIN="$(KUBECTL)" \
@@ -324,6 +330,27 @@ verify-gpu-observability-fixture:
 
 kind-gpu-observability-clean:
 	$(KIND) delete cluster --name kubeneuron-gpu-observability
+
+# v0.8 examples fixture: examples/checkpoint/{plain-job,kueue-job,
+# kuberay-ray-train} driven through a REAL KubeNeuron installation on an
+# existing cluster (the one `KEEP_CLUSTER=1 make test-integration-kind`
+# leaves behind fits the defaults), with the Kueue release manifest and the
+# KubeRay operator chart pinned in versions.lock.yaml installed when missing.
+# Asserts the advisory, the preview with owner/Kueue/Ray contexts, the
+# digest-bound approve, the request, every acknowledgement (Job Pods leave,
+# Ray workers write checkpoint-state) and that no Kueue or Ray object gained
+# a KubeNeuron field manager. CPU-only toys: not evidence that any framework
+# integrates with KubeNeuron, and no hardware claim. Pulls Kueue, KubeRay and
+# the Ray image, so it is not offline.
+test-workload-safe-kind:
+	KUBECTL_BIN="$(KUBECTL)" ./hack/kind-workload-safe.sh
+
+# Offline half of the above: bash -n/shellcheck, manifest rendering and
+# shape, lock pins, README disclaimers, the trainer and sidecar run locally
+# through an advisory and a request, and every preview/annotation/audit
+# assertion shown to fail on deliberate defects. No cluster, no network.
+verify-workload-safe-examples:
+	./hack/kind-workload-safe.sh --verify
 
 kind-clean:
 	$(KIND) delete cluster --name "$(KIND_CLUSTER_NAME)"

@@ -141,6 +141,14 @@ func (c *Controller) BuildDecisionSnapshot(ctx context.Context, nodeName string,
 	if selected == nil || !selected.Vendor.Valid() {
 		return snapshot, nil
 	}
+	if request.AcceleratorAction == types.AcceleratorActionResetDevice && request.Scope == types.AcceleratorScopePhysicalDevice {
+		// A device-scoped reset carries its topology classification so the
+		// shared evaluator refuses what the reset gate refuses. Captured only
+		// for that request shape: node-scoped and observe-class decisions are
+		// evaluated exactly as before.
+		classification := classifyTopology(c.topologySnapshot(ctx, node, node.Labels, selected, now))
+		snapshot.Topology = &classification
+	}
 	if strings.HasPrefix(selected.RuntimeVersion, "dcgm-") {
 		// The report's runtime version is accepted only after the agent's
 		// bounded local DCGM probe, so this label means a current DCGM-backed

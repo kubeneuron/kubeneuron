@@ -392,6 +392,7 @@ func TestIssuedAuthorityUsesTheDeclaredBundleKey(t *testing.T) {
 	secret := secretsByName(plan)["kubeneuron-agent-client-ca"]
 	if secret == nil {
 		t.Fatal("the client authority must be issued")
+		return
 	}
 	if len(secret.Data["clients.pem"]) == 0 {
 		t.Fatalf("data keys = %v, want the declared bundle key populated", mapKeys(secret.Data))

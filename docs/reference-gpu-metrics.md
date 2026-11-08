@@ -89,6 +89,9 @@ Existing `kubeneuron_*` series registered by internal/metrics; the catalog adds 
 | `kubeneuron_agent_detections_deduplicated_total` | kubeneuron-agent | counter | count | Detections suppressed by agent-side deduplication, by the source that was dropped. |
 | `kubeneuron_agent_detections_total` | kubeneuron-agent | counter | count | GPU fault detections observed by the agent, by detection source (kmsg, kmsg-amd, gpuhealth, amdhealth). |
 | `kubeneuron_agent_health_source` | kubeneuron-agent | gauge | boolean | Which second-source GPU health probe (dcgm, nvidia-smi, none) served the last poll; 1 for the active source. |
+| `kubeneuron_approvals_bound_total` | kubeneuron-controller | counter | count | Approval decisions by what the client bound them to (round, round_and_impact, none). |
+| `kubeneuron_checkpoint_advisories_total` | kubeneuron-controller | counter | count | Checkpoint advisory outcomes at approval park (stamped, withdrawn, unreachable, skipped). |
+| `kubeneuron_checkpoint_group_requests_total` | kubeneuron-controller | counter | count | Checkpoint requests to group peers by outcome (acknowledged, exited, expired, unreachable, skipped). |
 | `kubeneuron_checkpoint_requests_total` | kubeneuron-controller | counter | count | Checkpoint-coordination outcomes ahead of a drain or GPU-workload eviction, by outcome. |
 | `kubeneuron_checkpoint_wait_seconds` | kubeneuron-controller | histogram | seconds | Seconds a workload with a checkpoint request in force was given before its outcome settled. |
 | `kubeneuron_dead_lettered_total` | kubeneuron-controller | counter | count | Queued actions or agent events that exhausted their attempt budget, by queue. |
@@ -98,6 +101,8 @@ Existing `kubeneuron_*` series registered by internal/metrics; the catalog adds 
 | `kubeneuron_destructive_steps_deferred_total` | kubeneuron-controller | counter | count | Destructive playbook steps that did not run, by the guard that stopped them. |
 | `kubeneuron_escalations_total` | kubeneuron-controller | counter | count | Ladder escalations after step or verification failures. |
 | `kubeneuron_gate_denials_total` | kubeneuron-controller | counter | count | Steps denied by the safety gate (pause, cooldown, concurrency, capability). |
+| `kubeneuron_impact_preview_seconds` | kubeneuron-controller | histogram | seconds | Seconds one impact preview took to gather and render. |
+| `kubeneuron_impact_previews_total` | kubeneuron-controller | counter | count | Impact preview computations at approval park by result (computed, unavailable, truncated). |
 | `kubeneuron_incident_duration_seconds` | kubeneuron-controller | histogram | seconds | Open-to-halted wall time of incidents, by class and outcome. |
 | `kubeneuron_incidents` | kubeneuron-controller | gauge | count | Incidents currently in each state. Scrape-time collector; absent on a standby replica. |
 | `kubeneuron_incidents_opened_total` | kubeneuron-controller | counter | count | Incidents opened, by problem class. |

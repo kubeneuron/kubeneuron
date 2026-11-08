@@ -106,11 +106,71 @@ func (p *basePlatform) EvictWorkload(ctx context.Context, w platform.Workload) e
 // per-test scripts; the fake records what the controller asked for.
 type checkpointPlatform struct {
 	basePlatform
-	request func(w platform.Workload, req checkpoint.Request, attempt int) (checkpoint.Request, error)
-	observe func(w platform.Workload, pass int) checkpoint.Observation
+	request  func(w platform.Workload, req checkpoint.Request, attempt int) (checkpoint.Request, error)
+	observe  func(w platform.Workload, pass int) checkpoint.Observation
+	advise   func(w platform.Workload, adv checkpoint.Advisory) error
+	withdraw func(w platform.Workload, incidentID string, round int) (bool, error)
+	// groups scripts ListGroupMembers; without it, members is the cluster's
+	// group membership (every namespace), filtered by namespace and group.
+	groups  func(namespace, group string, limit int) ([]platform.Workload, bool, error)
+	members []platform.Workload
 
-	requests map[string]int
-	observes map[string]int
+	requests  map[string]int
+	observes  map[string]int
+	advised   []checkpoint.Advisory
+	withdrawn []string
+}
+
+func (p *checkpointPlatform) AdviseCheckpoint(ctx context.Context, _ checkpoint.Policy, node string, w platform.Workload, adv checkpoint.Advisory) error {
+	p.record(ctx, fmt.Sprintf("advise %s/%s@%s round %d", w.Namespace, w.Name, node, adv.Round))
+	if p.blocked(ctx, "advise") {
+		return fmt.Errorf("checkpoint advisory: stamping %s/%s: %w", w.Namespace, w.Name, ctx.Err())
+	}
+	if p.advise != nil {
+		if err := p.advise(w, adv); err != nil {
+			return err
+		}
+	}
+	p.mu.Lock()
+	p.advised = append(p.advised, adv)
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *checkpointPlatform) ListGroupMembers(ctx context.Context, _ checkpoint.Policy, namespace, group string, limit int) ([]platform.Workload, bool, error) {
+	p.record(ctx, fmt.Sprintf("group %s/%s limit %d", namespace, group, limit))
+	if p.blocked(ctx, "group") {
+		return nil, false, ctx.Err()
+	}
+	if p.groups != nil {
+		return p.groups(namespace, group, limit)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []platform.Workload
+	for _, w := range p.members {
+		if w.Namespace == namespace && w.Annotations[checkpoint.AnnotationGroup] == group {
+			if len(out) >= limit {
+				return out, true, nil
+			}
+			out = append(out, w)
+		}
+	}
+	return out, false, nil
+}
+
+func (p *checkpointPlatform) WithdrawAdvisory(ctx context.Context, _ checkpoint.Policy, node string, w platform.Workload, incidentID string, round int, _ time.Time) (bool, error) {
+	p.record(ctx, fmt.Sprintf("withdraw %s/%s@%s round %d", w.Namespace, w.Name, node, round))
+	if p.blocked(ctx, "withdraw") {
+		return false, fmt.Errorf("checkpoint advisory: stamping %s/%s: %w", w.Namespace, w.Name, ctx.Err())
+	}
+	if p.withdraw != nil {
+		return p.withdraw(w, incidentID, round)
+	}
+	p.mu.Lock()
+	p.withdrawn = append(p.withdrawn, w.Namespace+"/"+w.Name)
+	p.mu.Unlock()
+	return true, nil
 }
 
 func (p *checkpointPlatform) Name() string { return "checkpoint-test" }

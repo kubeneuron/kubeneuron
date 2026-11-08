@@ -400,8 +400,8 @@ func TestMigrateOperationalAuditScopeBackfillsExistingRows(t *testing.T) {
 	if err := s.sqlDB.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 23 {
-		t.Fatalf("schema version = %d, want 23", version)
+	if head := latestMigrationVersion(t); version != head {
+		t.Fatalf("schema version = %d, want the current head %d", version, head)
 	}
 	if err := s.sqlDB.QueryRow(`SELECT tenant, cluster FROM operational_audit WHERE resource_id='candidate-v22'`).Scan(&tenant, &cluster); err != nil {
 		t.Fatal(err)
@@ -814,4 +814,25 @@ func TestExecutedStepResultsSpansMoreIncidentsThanOneINClause(t *testing.T) {
 		t.Fatalf("got evidence for %d of %d incidents; the report would under-count recovery "+
 			"on exactly the fleets big enough to care", len(got), count)
 	}
+}
+
+// latestMigrationVersion is the highest embedded migration number: the head
+// a freshly opened database must reach whatever the baseline it started at.
+func latestMigrationVersion(t *testing.T) int {
+	t.Helper()
+	names, err := fs.Glob(migrationsFS, "migrations/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := 0
+	for _, name := range names {
+		v, err := migrationVersion(filepath.Base(name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v > head {
+			head = v
+		}
+	}
+	return head
 }

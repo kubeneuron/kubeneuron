@@ -75,6 +75,30 @@ rules:
   - apiGroups: [""]
     resources: ["pods/eviction"]
     verbs: ["create"]
+  # Read-only Dynamic Resource Allocation visibility, held so the operator can
+  # delegate it: the managed controller ClusterRole carries this rule only
+  # while spec.safety.topologyClassifier.dra.enabled is true. The operator
+  # itself never reads these objects; no write verb on resource.k8s.io exists
+  # anywhere in KubeNeuron, and this is the ONLY resource in the group either
+  # role can read: ResourceClaim use is seen through the Pod specs the core
+  # pods rule already covers.
+  - apiGroups: ["resource.k8s.io"]
+    resources: ["resourceslices"]
+    verbs: ["get", "list", "watch"]
+  # Read-only workload-context visibility for the impact preview, held so the
+  # operator can delegate it: the managed controller ClusterRole carries each
+  # rule only while spec.safety.impactPreview is enabled and that resolver is
+  # selected. The operator never reads these objects; no write verb on batch,
+  # kueue.x-k8s.io or ray.io exists anywhere in KubeNeuron.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["workloads", "localqueues", "clusterqueues"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["ray.io"]
+    resources: ["rayclusters", "rayjobs"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["authentication.k8s.io"]
     resources: ["tokenreviews"]
     verbs: ["create"]

@@ -286,6 +286,66 @@ you are ready for real remediation, confine it explicitly — see
 `spec.safety.destructiveExecution` (a non-empty node selector plus the exact
 acknowledgement string) and start with one canary node pool.
 
+## 10. Piloting workload-safe recovery (v0.8)
+
+The v0.8 surfaces — topology classification, the checkpoint advisory, the
+impact preview, groups and workload context — are built for one question:
+*what will this approval destroy, and can the workloads prepare?* They are
+piloted in this order, each step reversible by turning the block back off
+(the classifier has no switch; it only refuses more, never less):
+
+1. **Pin the runtime profile first.** The classifier and the preview read
+   the agent's report, and the agent publishes one only while an
+   `AcceleratorRuntimeProfile` selects the node (step 6). A node without one
+   previews as `ReportMissing`; on a cloud VM whose hypervisor withholds
+   the PCI reset the layout is still named and device actions are refused
+   with `ReportNotReady` — expected, not a fault.
+2. **Preview in DryRun.** Keep `executionMode: DryRun` and enable
+   `spec.safety.impactPreview` (`budget: 15s`, `maxItems: 200`,
+   `requireForApproval: false`). Open an incident the way step 7 does and
+   read `kubeneuronctl incidents impact <id>`: the node's layout, the
+   workloads a drain would touch, who is eligible for a checkpoint
+   request and why the rest are not. Watch
+   `kubeneuron_impact_previews_total{result="unavailable"}` for a week; a
+   fleet where it moves needs a larger budget or a smaller `maxItems`
+   before the next step.
+3. **Narrow the namespaces, then coordinate.** Enable
+   `spec.safety.checkpointCoordination` for one or two namespaces whose
+   owners have read [the examples](../examples/checkpoint/) and opted in
+   their Pods; add `advisory.enabled: true`. Still in DryRun, an advisory
+   round audits "would have advised N" and patches nothing; the preview
+   shows who would be asked.
+4. **Require the digest, then execute on confined nodes.** Set
+   `requireForApproval: true` once previews are reliably available, so
+   every approve is bound to what was read (the notification's command
+   carries the digest; `approve --round` without it prints the preview
+   and stops). Then follow step 9's confinement — `destructiveExecution`
+   with a canary node selector — and approve the first real drain from
+   the preview. The fault classes worth starting with are the ones whose
+   ladder drains before it reboots or replaces (`fell-off-bus`,
+   `ecc-dbe`); leave `groups` and `crossNode` off until the partner has
+   watched their own gang react to a single-node request.
+5. **Measure with honest denominators.** Report every coordination
+   outcome (`kubeneuron_checkpoint_requests_total{outcome}`:
+   acknowledged, exited, expired, unreachable, skipped) with its count,
+   preview availability and truncation, how many approvals were bound
+   (`kubeneuron_approvals_bound_total{binding}`), and the wait the
+   disruption actually added (`kubeneuron_checkpoint_wait_seconds`).
+   Whether the checkpoint a workload wrote is complete, and whether the
+   training resumed from it, is measured in the workload, by its owner;
+   KubeNeuron records that it was asked and that it answered or left,
+   nothing more. One kubelet latency observation (3–4 s on EKS) is a data
+   point, not an SLO.
+6. **Review the credentials with the tenant.** The controller patches
+   annotations on Pods cluster-wide while coordination is on (step 1 of
+   the [security review](security-review-v0.8.0.md)); a workload that
+   acknowledges by writing its state key needs `patch` on Pods in its
+   namespace, as the Ray example shows. Both are the tenant's to accept.
+7. **Rollback.** Turn the blocks off in the reverse order; the store
+   migration stays (forward-only), and a controller rollback to v0.7.0 is
+   the snapshot restore the [upgrade notes](upgrade.md#v080-workload-safe-recovery-notes)
+   describe.
+
 ## Before you page anyone
 
 - Backups: apply the CronJob in `deploy/kubernetes/backup/` and rehearse

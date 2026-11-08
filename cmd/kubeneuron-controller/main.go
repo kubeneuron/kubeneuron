@@ -359,7 +359,8 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 				} else if stats != (sqlcore.PruneStats{}) {
 					log.Info("store retention pass",
 						"events", stats.Events, "outbox", stats.Outbox, "actions", stats.Actions,
-						"incidents", stats.Incidents, "audit", stats.Audit, "approvals", stats.Approvals)
+						"incidents", stats.Incidents, "audit", stats.Audit, "approvals", stats.Approvals,
+						"impact_previews", stats.ImpactPreviews)
 				}
 				select {
 				case <-ctx.Done():

@@ -192,12 +192,12 @@ func (q *Queries) PutOperationalIdempotency(ctx context.Context, record *types.O
 	}
 	row := q.db.QueryRowContext(ctx, `
 		INSERT INTO operational_idempotency
-			(kind, actor, idempotency_key, request_digest, resource_id, created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+			(kind, actor, idempotency_key, request_digest, resource_id, created_at, expires_at, result_digest)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(kind, actor, idempotency_key) DO NOTHING
-		RETURNING kind, actor, idempotency_key, request_digest, resource_id, created_at, expires_at`,
+		RETURNING kind, actor, idempotency_key, request_digest, resource_id, created_at, expires_at, result_digest`,
 		string(record.Kind), record.Actor, record.Key, record.RequestDigest, record.ResourceID,
-		ts(record.CreatedAt), ts(record.ExpiresAt))
+		ts(record.CreatedAt), ts(record.ExpiresAt), record.ResultDigest)
 	inserted, err := scanOperationalIdempotency(row)
 	if err == nil {
 		return inserted, true, nil
@@ -214,7 +214,7 @@ func (q *Queries) PutOperationalIdempotency(ctx context.Context, record *types.O
 
 func (q *Queries) GetOperationalIdempotency(ctx context.Context, kind types.OperationalResourceKind, actor, key string) (*types.OperationalIdempotencyRecord, error) {
 	row := q.db.QueryRowContext(ctx, `
-		SELECT kind, actor, idempotency_key, request_digest, resource_id, created_at, expires_at
+		SELECT kind, actor, idempotency_key, request_digest, resource_id, created_at, expires_at, result_digest
 		FROM operational_idempotency WHERE kind=? AND actor=? AND idempotency_key=?`, string(kind), actor, key)
 	return scanOperationalIdempotency(row)
 }
@@ -465,7 +465,7 @@ func scanOperationalResource(row rowScanner) (*types.OperationalResource, error)
 func scanOperationalIdempotency(row rowScanner) (*types.OperationalIdempotencyRecord, error) {
 	record := &types.OperationalIdempotencyRecord{}
 	var kind, created, expires string
-	err := row.Scan(&kind, &record.Actor, &record.Key, &record.RequestDigest, &record.ResourceID, &created, &expires)
+	err := row.Scan(&kind, &record.Actor, &record.Key, &record.RequestDigest, &record.ResourceID, &created, &expires, &record.ResultDigest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}

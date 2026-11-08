@@ -153,6 +153,7 @@ func TestOperatorRBACCanReconcilePVCAndDelegateControllerRole(t *testing.T) {
 	// installation currently asks for it.
 	enabled := testKubeNeuron()
 	enabled.Spec.Safety.CheckpointCoordination = &kubeneuronv1alpha1.CheckpointCoordinationSpec{Enabled: true, Namespaces: []string{"ml"}}
+	enabled.Spec.Safety.TopologyClassifier = &kubeneuronv1alpha1.TopologyClassifierSpec{DRA: &kubeneuronv1alpha1.TopologyClassifierDRASpec{Enabled: true}}
 	required := append([]rbacv1.PolicyRule(nil), controllerClusterRole(enabled).Rules...)
 	required = append(required, controllerClusterRole(testKubeNeuron()).Rules...)
 	required = append(required, rbacv1.PolicyRule{

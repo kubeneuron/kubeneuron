@@ -15,6 +15,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
+	"github.com/kubeneuron/kubeneuron/internal/impact"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -60,6 +61,15 @@ type RuntimeConfig struct {
 	// nothing. It is read by the coordination pre-phase of the two disruption
 	// steps (checkpoint.go).
 	Checkpoint checkpoint.Policy
+	// Topology is the compiled spec.safety.topologyClassifier. The zero value
+	// is the default and means the classifier (internal/topology) runs on
+	// node capacity, labels and the agent report only; it cannot switch the
+	// classifier off, because the classifier only ever narrows the reset gate
+	// and a configuration must not be able to widen it.
+	Topology TopologyPolicy
+	// Impact is the compiled spec.safety.impactPreview. The zero value is
+	// off: no preview is computed and no approval is bound to one.
+	Impact impact.Policy
 	// SourceDigest identifies the operator-compiled snapshot these settings
 	// came from (the config-digest key the operator writes into the mounted
 	// ConfigMaps). Empty for file-based deployments with no operator. It is
@@ -92,6 +102,17 @@ type pinnedRuntimeConfigKey struct{}
 // config visibility without adding coherence (each advance is independent).
 func (c *Controller) pinRuntimeConfig(ctx context.Context) context.Context {
 	return context.WithValue(ctx, pinnedRuntimeConfigKey{}, c.runtime.Load())
+}
+
+// TopologyPolicy carries the opt-in inputs of the device topology
+// classifier. DRADiscovery true makes the controller take a read-only
+// Dynamic Resource Allocation observation for a node when it classifies it:
+// the node's resource.k8s.io/v1 ResourceSlices and the claim references of
+// the Pods scheduled on it (and refuse device-scoped actions when either
+// read is unavailable); false, the default, leaves DRA unconsulted and says
+// so in the classification.
+type TopologyPolicy struct {
+	DRADiscovery bool
 }
 
 // runtimeConfig returns the snapshot pinned in ctx when one is present —
@@ -149,6 +170,19 @@ func (c *Controller) InstallRuntimeConfigContext(ctx context.Context, rc Runtime
 	// remediation delayed by a configuration nobody wrote.
 	if err := rc.Checkpoint.Validate(); err != nil {
 		return err
+	}
+	// The impact preview's bounds are enforced the same way: an enabled
+	// policy with a budget outside (0, 60s] or an item bound outside its
+	// range is refused whole.
+	if rc.Impact.Enabled {
+		if rc.Impact.Budget <= 0 || rc.Impact.Budget > impact.BudgetCeiling {
+			return fmt.Errorf("impact preview: budget %v must be in (0, %v]", rc.Impact.Budget, impact.BudgetCeiling)
+		}
+		if rc.Impact.MaxItems < impact.MinMaxItems || rc.Impact.MaxItems > impact.MaxMaxItems {
+			return fmt.Errorf("impact preview: maxItems %d must be in [%d, %d]", rc.Impact.MaxItems, impact.MinMaxItems, impact.MaxMaxItems)
+		}
+	} else if rc.Impact.RequireForApproval {
+		return fmt.Errorf("impact preview: requireForApproval needs the preview enabled")
 	}
 	// Claiming an action and changing a safety mode are one shared critical
 	// section. In particular, changing DryRun must not race a poll which saw a

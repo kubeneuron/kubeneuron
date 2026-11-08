@@ -231,6 +231,61 @@ inhibited alert, a paused node), and the `GpuRowRemapPending` runbook above
 applies. Row remapping is Ampere and later; the series is absent on a
 Tesla T4.
 
+## Workload-safe recovery alerts (v0.8 development, route to humans)
+
+Both rules read counters that exist only on an installation that opted into
+`spec.safety.impactPreview` or `spec.safety.checkpointCoordination.advisory`
+([operations](operations.md#checkpoint-coordination-opt-in-v060)). They
+describe a courtesy that did not reach its audience, never a fault on a
+GPU: no remediation is slower, faster or different because they fired.
+KubeNeuron counts acknowledgements, exits and expiries; it does not
+measure saved or lost training progress, and no entry here does either.
+
+### KubeNeuronImpactPreviewUnavailable
+
+This rule does not trigger remediation and goes to humans. An incident
+parked for approval and the impact preview for that round could not be
+computed, so the approver was offered an incident without the counts they
+were promised. The `impact-preview-unavailable` audit row names the reason
+(`budget-exhausted`, `list-failed`, `topology-unavailable`, …).
+
+1. Find the round: `kubeneuronctl incidents --state AWAITING_APPROVAL`,
+   then `kubeneuronctl incidents impact <id>`; an unavailable preview
+   prints its reason instead of the counts.
+2. If `requireForApproval` is on, the approve is held until a recompute
+   succeeds; rejecting is never held. Recompute from the panel's incident
+   drawer or with `POST /api/v1/incidents/<id>/impact-preview/recompute`
+   (operator token, `Idempotency-Key`), read the new preview
+   (`kubeneuronctl incidents impact <id>`), then approve with its digest
+   (`kubeneuronctl approve <id> --round <n> --impact-digest <digest>`).
+3. A repeating `budget-exhausted` means the Pod listing or the topology read
+   is slower than `impactPreview.budget` on this fleet: raise the budget (at
+   most 60s) or lower `maxItems`. A repeating `list-failed` is RBAC or API
+   availability: check the managed controller ClusterRole still holds
+   `pods: list` and, for a context resolver, the read-only rule on its group.
+   Prevention: watch `kubeneuron_impact_previews_total{result="unavailable"}`
+   stay at zero for a while before turning `requireForApproval` on.
+
+### KubeNeuronCheckpointAdvisoryUnreachable
+
+This rule does not trigger remediation and goes to humans. Opted-in Pods on a
+node whose incident parked for approval could not be stamped with the
+`kubeneuron.io/checkpoint-advisory-*` keys. Nothing waited and nothing was
+blocked; those Pods were not warned ahead of the approval and will still
+receive the bounded request itself if the disruption is approved.
+
+1. Read the `checkpoint-advisory` audit row of the incident
+   (`kubeneuronctl incidents show <id>`): it names the Pods and the error.
+2. `forbidden` means the managed controller ClusterRole lost `pods: patch`,
+   which the operator grants only while `checkpointCoordination.enabled` is
+   true; check the root's status and the operator's logs for the compile
+   that removed it. A context deadline means `advisory.budget` (default
+   10s, ceiling 60s) is too short for the number of opted-in Pods on the
+   node.
+3. If this coincides with `KubeNeuronCheckpointExpired`-style outcomes on
+   the request itself (`kubeneuron_checkpoint_requests_total{outcome="unreachable"}`),
+   the cause is the same grant; fix the grant, not the budget.
+
 ## Self-monitoring alerts (route to humans)
 
 ### KubeNeuronControllerDown

@@ -30,7 +30,7 @@ func openTestStore(t *testing.T) *Store {
 	t.Cleanup(func() { _ = s.Close() })
 	// Isolated runs: truncate everything between tests.
 	for _, table := range []string{
-		"event_outbox", "events", "audit_log", "approvals", "actions",
+		"event_outbox", "events", "audit_log", "approvals", "impact_previews", "actions",
 		"accelerator_reports", "safety_state", "incidents", "nodes",
 	} {
 		if _, err := s.SQL.Exec("TRUNCATE TABLE " + table + " CASCADE"); err != nil {

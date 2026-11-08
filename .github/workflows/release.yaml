@@ -219,7 +219,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.9"
+          go-version: "1.26.10"
           cache: true
 
       - name: Build DIGEST-pinned single-file install manifest
@@ -297,7 +297,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.9"
+          go-version: "1.26.10"
           cache: true
 
       - name: Build kubeneuronctl binaries
@@ -322,19 +322,23 @@ jobs:
 
   # No tag ships without an upgrade from the release before it AND a rollback
   # to it, rehearsed in the documented order on a real cluster.
-  # hack/kind-upgrade-rollback.sh drives v0.6.1 -> HEAD -> v0.6.1 (images
-  # only) -> HEAD for BOTH workflow stores (SQLite PVC and a throwaway
-  # in-cluster PostgreSQL) side by side, with the v0.5 runtime contract
-  # qualification rows and their hash-chained audit as the durable evidence:
-  # the v0.6.1 binary must read them back byte-identical after the rollback,
-  # and the re-upgrade must read them back byte-identical and extend the same
-  # chain. On HEAD it also enables and disables the v0.6 checkpoint
-  # coordination policy and proves the managed controller ClusterRole holds
-  # pods patch only while enabled, with the policy off before any image
-  # rolls back. This shape of rehearsal has caught what neither unit tests
-  # nor the integration suite can see: a store migration an existing
-  # installation cannot cross, and a CRD whose new fields the upgraded API
-  # does not actually serve.
+  # hack/kind-upgrade-rollback.sh drives v0.7.0 -> HEAD -> v0.7.0 (restore
+  # the pre-upgrade snapshot, then the images) -> HEAD for BOTH workflow
+  # stores (SQLite PVC and a throwaway in-cluster PostgreSQL) side by side.
+  # v0.8 moves the schema heads and migrations are forward-only, so the
+  # rehearsal first proves the v0.7.0 binary refuses the migrated store with
+  # the schema-version error, then performs the restore docs/operations.md
+  # documents and proves v0.7.0 serves the pre-upgrade state (the baseline
+  # incident and its audit; the rows HEAD wrote after the snapshot are gone),
+  # then re-upgrades and runs the whole v0.5 runtime contract lifecycle again
+  # on the restored, re-migrated store. On HEAD it also enables and disables
+  # the v0.6 checkpoint coordination policy and the v0.8 workload-safe blocks
+  # and proves the managed controller ClusterRole holds pods patch and the
+  # read-only context rules only while enabled, with everything off before
+  # any image rolls back. This shape of rehearsal has caught what neither
+  # unit tests nor the integration suite can see: a store migration an
+  # existing installation cannot cross, and a CRD whose new fields the
+  # upgraded API does not actually serve.
   #
   # The baseline is the actual previous published release, not a variable:
   # v0.6.1 for v0.7.0 (the v0.6.1 security patch rehearsed against v0.6.0,
@@ -357,7 +361,7 @@ jobs:
       contents: read
       packages: read
     env:
-      BASELINE: v0.6.1
+      BASELINE: v0.7.0
       STORES: sqlite postgres
       # The published release (its install manifest and images.txt) lives in
       # the repository the tag is pushed to; the script also uses this to
@@ -373,7 +377,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.9"
+          go-version: "1.26.10"
           cache: true
 
       # Same shape as ci.yaml's kind job, including the checksums: a runner's

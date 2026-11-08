@@ -113,6 +113,7 @@ func TestPreciseSignalPromotesTheUnattributedIncidentItsKernelFaultOpened(t *tes
 	if promotion == nil {
 		t.Fatalf("the audit trail (%d entries) records no promotion: an incident silently changed which physical "+
 			"device it is about, and the trail is the only evidence an operator has", len(trail))
+		return
 	}
 	if !strings.Contains(promotion.Result, "GPU-abc") || !strings.Contains(promotion.Result, "0000:3b:00") {
 		t.Fatalf("the promotion audit entry reads %q, want it to name both the bus address it was opened with "+

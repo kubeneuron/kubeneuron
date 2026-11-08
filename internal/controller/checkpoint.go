@@ -118,17 +118,13 @@ func (c *Controller) checkpointCandidates(ctx context.Context, policy checkpoint
 		return nil, 0, err
 	}
 	for _, w := range workloads {
-		switch op {
-		case "evict_gpu_workload":
-			if !w.UsesGPU {
-				continue
-			}
-		case "drain":
-			if !w.DrainEligible(force) {
-				continue
-			}
-		}
-		if policy.Eligibility(w.Checkpoint(), inc.Class) != "" {
+		// The one eligibility function (S6): the request, the advisory and
+		// the preview all ask checkpoint.Evaluate, so no surface can name a
+		// workload another would not.
+		code := checkpoint.Evaluate(checkpoint.Candidate{
+			Workload: w.Checkpoint(), DrainEligible: w.DrainEligible(force), UsesGPU: w.UsesGPU,
+		}, policy, inc.Class, op)
+		if code != "" {
 			continue
 		}
 		candidates = append(candidates, w)
@@ -171,6 +167,13 @@ func (c *Controller) checkpointDryRunProjection(ctx context.Context, inc *types.
 // live request from another incident that this step elected to honor.
 type checkpointTracked struct {
 	workload platform.Workload
+	// node is the node the request was confined to: the incident's node for
+	// a candidate, the peer's own node for a group peer.
+	node string
+	// peer is true for a group peer: a workload the disruption itself does
+	// not touch, asked because a node-local member of its group was. Its
+	// outcome is counted on the group metric, not the step's.
+	peer bool
 	// incidentID is the incident of the request IN FORCE on the object: this
 	// step's own, or the other incident's when its live request was honored.
 	// An acknowledgement is bound to it (checkpoint.Acknowledges): the
@@ -342,7 +345,7 @@ func (c *Controller) coordinateCheckpoint(ctx context.Context, inc *types.Incide
 			DeadlineAt: requestedAt.Add(policy.BoundedWait(w.Checkpoint(), budget)),
 			Reason:     inc.Class, NextAction: nextAction,
 		}
-		tr, outcome := c.requestCheckpoint(coordCtx, checkpointer, policy, inc, w, req)
+		tr, outcome := c.requestCheckpoint(coordCtx, checkpointer, policy, inc, inc.Target.Node, w, req)
 		switch outcome {
 		case "":
 			tracked = append(tracked, tr)
@@ -354,6 +357,29 @@ func (c *Controller) coordinateCheckpoint(ctx context.Context, inc *types.Incide
 	}
 	if len(unrequested) > 0 {
 		c.auditCheckpoint(coordCtx, inc, step, "checkpoint: no request in force for "+checkpointJoin(unrequested))
+	}
+
+	// Group peers (group.go): the same request, their own deadline from the
+	// same formula and the same request time, confined to their own node.
+	// They are waited for in the loop below like any candidate, never
+	// evicted, and their outcomes are counted on the group metric.
+	for _, peer := range c.groupPeers(coordCtx, checkpointer, policy, inc, step, candidates) {
+		if coordCtx.Err() != nil {
+			metrics.CheckpointGroupRequests.WithLabelValues(string(checkpoint.OutcomeUnreachable)).Inc()
+			continue
+		}
+		req := checkpoint.Request{
+			IncidentID: inc.ID, RequestedAt: requestedAt,
+			DeadlineAt: peerDeadline(policy, peer, requestedAt, budget),
+			Reason:     inc.Class, NextAction: nextAction,
+		}
+		tr, outcome := c.requestCheckpoint(coordCtx, checkpointer, policy, inc, peer.Node, peer, req)
+		if outcome != "" {
+			metrics.CheckpointGroupRequests.WithLabelValues(string(outcome)).Inc()
+			continue
+		}
+		tr.peer = true
+		tracked = append(tracked, tr)
 	}
 	if len(tracked) == 0 {
 		return summary
@@ -391,7 +417,7 @@ func (c *Controller) coordinateCheckpoint(ctx context.Context, inc *types.Incide
 			if tr.done || coordCtx.Err() != nil {
 				continue
 			}
-			obs := checkpointer.ObserveCheckpoint(coordCtx, policy, inc.Target.Node, tr.workload)
+			obs := checkpointer.ObserveCheckpoint(coordCtx, policy, tr.node, tr.workload)
 			outcome := checkpoint.Classify(at, tr.inForce(), tr.workload.Checkpoint(), obs)
 			switch {
 			case outcome.Settled():
@@ -444,6 +470,11 @@ func (c *Controller) coordinateCheckpoint(ctx context.Context, inc *types.Incide
 			if !settledAt.Before(tr.deadline) && ctx.Err() == nil {
 				tr.outcome = checkpoint.OutcomeExpired
 			}
+		}
+		if tr.peer {
+			metrics.CheckpointGroupRequests.WithLabelValues(string(tr.outcome)).Inc()
+			lines = append(lines, "peer "+checkpointWorkloadID(tr.workload)+"="+string(tr.outcome))
+			continue
 		}
 		summary.counts[tr.outcome]++
 		metrics.CheckpointRequests.WithLabelValues(string(tr.outcome)).Inc()
@@ -523,13 +554,13 @@ func checkpointSleep(ctx context.Context, d time.Duration) bool {
 // with patch rights could have written, and the log names only the workload by
 // namespace/name and this step's own incident. The returned request is kept
 // as values compared and waited to, never formatted.
-func (c *Controller) requestCheckpoint(ctx context.Context, checkpointer platform.WorkloadCheckpointer, policy checkpoint.Policy, inc *types.Incident, w platform.Workload, req checkpoint.Request) (*checkpointTracked, checkpoint.Outcome) {
+func (c *Controller) requestCheckpoint(ctx context.Context, checkpointer platform.WorkloadCheckpointer, policy checkpoint.Policy, inc *types.Incident, node string, w platform.Workload, req checkpoint.Request) (*checkpointTracked, checkpoint.Outcome) {
 	var (
 		inForce checkpoint.Request
 		err     error
 	)
 	for attempt := 0; attempt < 2; attempt++ {
-		inForce, err = checkpointer.RequestCheckpoint(ctx, policy, inc.Target.Node, w, req)
+		inForce, err = checkpointer.RequestCheckpoint(ctx, policy, node, w, req)
 		if !errors.Is(err, platform.ErrCheckpointConflict) || ctx.Err() != nil {
 			// A conflict is retried once, but not after the coordination
 			// window closed: no call goes out on a spent context.
@@ -545,6 +576,7 @@ func (c *Controller) requestCheckpoint(ctx context.Context, checkpointer platfor
 		// value the stamp names, whichever of the two windows is in force.
 		return &checkpointTracked{
 			workload:    w,
+			node:        node,
 			incidentID:  inc.ID,
 			requestedAt: checkpoint.RequestStart(inForce.RequestedAt, req.RequestedAt),
 			deadline:    checkpointCapDeadline(inForce.DeadlineAt, req.DeadlineAt),
@@ -565,6 +597,7 @@ func (c *Controller) requestCheckpoint(ctx context.Context, checkpointer platfor
 			// on the object. The ID is compared, never written anywhere.
 			tr := &checkpointTracked{
 				workload:    w,
+				node:        node,
 				incidentID:  inForce.IncidentID,
 				foreign:     true,
 				requestedAt: checkpoint.RequestStart(inForce.RequestedAt, req.RequestedAt),

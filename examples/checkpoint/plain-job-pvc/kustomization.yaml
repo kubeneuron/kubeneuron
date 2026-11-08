@@ -1,0 +1,34 @@
+# plain-job with the checkpoint on a PersistentVolumeClaim: the shape a real
+# job needs, because an emptyDir dies with the Pod and a replacement then
+# starts from step 0. One index and one claim (a batch Job has no
+# volumeClaimTemplates; one claim per index is a StatefulSet's shape, or a
+# ReadWriteMany volume). Apply with: kubectl apply -k examples/checkpoint/plain-job-pvc
+# The cluster's default StorageClass provides the volume (kind: local-path).
+# A sibling of plain-job/, not a subdirectory: kustomize refuses an overlay
+# nested inside the base it reads.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ml-training
+resources:
+  - ../plain-job
+  - pvc.yaml
+patches:
+  - target:
+      kind: Job
+      name: plain-job-run
+    patch: |-
+      - op: replace
+        path: /spec/completions
+        value: 1
+      - op: replace
+        path: /spec/parallelism
+        value: 1
+      - op: replace
+        path: /spec/maxFailedIndexes
+        value: 1
+      - op: replace
+        path: /spec/template/spec/volumes/1
+        value:
+          name: ckpt
+          persistentVolumeClaim:
+            claimName: plain-job-ckpt

@@ -98,6 +98,24 @@ func (n *Notifier) RequestApproval(ctx context.Context, inc *types.Incident, ste
 	})
 }
 
+var _ notify.ContextualNotifier = (*Notifier)(nil)
+
+// RequestApprovalWithContext implements notify.ContextualNotifier: the impact
+// summary and digest ride in custom details, where the 1024-byte summary
+// limit does not cut them.
+func (n *Notifier) RequestApprovalWithContext(ctx context.Context, inc *types.Incident, stepName string, ac notify.ApprovalContext) error {
+	if inc == nil {
+		return fmt.Errorf("pagerduty: approval request for step %q carries no incident", stepName)
+	}
+	p := n.eventPayload(inc, "critical",
+		fmt.Sprintf("KubeNeuron approval required: step %s on %s — kubeneuronctl approve %s --round %d", stepName, inc.Target.Node, inc.ID, inc.ApprovalEpoch))
+	if ac.ImpactSummary != "" {
+		p.CustomDetails["impact"] = ac.ImpactSummary
+		p.CustomDetails["impact_digest"] = ac.ImpactDigest
+	}
+	return n.post(ctx, event{RoutingKey: n.RoutingKey, EventAction: "trigger", DedupKey: inc.ID, Payload: p})
+}
+
 func (n *Notifier) eventPayload(inc *types.Incident, severity, summary string) *payload {
 	if len(summary) > 1024 { // Events v2 summary limit
 		summary = summary[:1024]

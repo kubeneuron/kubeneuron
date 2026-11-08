@@ -28,7 +28,7 @@ func TestNVIDIAResetCapabilityGateRequiresProfileFreshReportAndExactDevice(t *te
 	if err := st.UpsertNode(ctx, &types.Node{Name: "node-a", UID: "node-uid-a", Labels: map[string]string{"accelerator": "nvidia-h100"}}); err != nil {
 		t.Fatal(err)
 	}
-	c := New(st, nil, nil, nil, nil, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c := New(st, nil, nil, nil, nil, wholeDeviceTopologyPlatform(), nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	target := types.Target{Node: "node-a", GPUUUID: "GPU-a"}
 	if err := c.allowNVIDIAReset(ctx, &types.Incident{ID: "inc-gate"}, target); !errors.Is(err, config.ErrNoAcceleratorRuntimeProfile) {
 		t.Fatalf("default-deny reset gate = %v, want ErrNoAcceleratorRuntimeProfile", err)

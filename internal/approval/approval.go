@@ -36,6 +36,9 @@ type StepIdentity struct {
 	StepAction   string
 	StepHash     string
 	ParkEpoch    int
+	// ImpactDigest is the impact preview the human was shown, when the
+	// client carried one and the controller accepted it (v0.8 development).
+	ImpactDigest string
 }
 
 // Decide records a decision for an incident's pending step. The caller
@@ -60,6 +63,7 @@ func (m *Manager) Decide(ctx context.Context, incidentID string, step StepIdenti
 		StepAction:   step.StepAction,
 		StepHash:     step.StepHash,
 		ParkEpoch:    step.ParkEpoch,
+		ImpactDigest: step.ImpactDigest,
 	})
 }
 

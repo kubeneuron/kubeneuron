@@ -80,7 +80,7 @@ func TestReParkOrphansThePreviousRoundsDecision(t *testing.T) {
 	ctx := context.Background()
 
 	// Approve round 1 through the real API.
-	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0, ""); err != nil {
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Before the walk resumes, the playbook hot-swaps: resume detects the
@@ -117,7 +117,7 @@ func TestReParkOrphansThePreviousRoundsDecision(t *testing.T) {
 		t.Fatalf("state=%s step=%d, want the incident still parked", still.State, still.StepIndex)
 	}
 	// Approving round 2 executes the step that round 2 asked about.
-	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0, ""); err != nil {
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	decision, err := st.LatestApprovalDecision(ctx, id, 2)
@@ -157,7 +157,7 @@ func TestPreEpochParkFailsClosedIntoAFreshRound(t *testing.T) {
 	}
 
 	// The decision API refuses: epoch 0 is not a verifiable round.
-	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0, ""); err == nil {
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0, "", ""); err == nil {
 		t.Fatal("a pre-epoch park must not accept a decision")
 	}
 	// Resume must NOT pair the stale approval with any epoch-0 request: it
@@ -192,11 +192,11 @@ func TestDecisionPinnedToDisplayedRoundRefusedAfterRePark(t *testing.T) {
 
 	// A decision pinned to the wrong round is refused even before any
 	// re-park: the client's view must match the current round exactly.
-	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 7, ""); err == nil {
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 7, "", ""); err == nil {
 		t.Fatal("a decision pinned to a round that never existed must be refused")
 	}
 	// Pinned to the current round: accepted.
-	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 1, ""); err != nil {
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 1, "", ""); err != nil {
 		t.Fatalf("decision pinned to the current round refused: %v", err)
 	}
 
@@ -223,7 +223,7 @@ func TestDecisionPinnedToDisplayedRoundRefusedAfterRePark(t *testing.T) {
 
 	// The click from the stale round-1 message must bounce with a re-read
 	// instruction, not bind to round 2.
-	if err := c.DecideApproval(ctx, id, "bob", "slack", types.ApprovalApproved, 1, ""); err == nil {
+	if err := c.DecideApproval(ctx, id, "bob", "slack", types.ApprovalApproved, 1, "", ""); err == nil {
 		t.Fatal("a round-1 click after the re-park into round 2 must be refused")
 	}
 	if _, err := st.LatestApprovalDecision(ctx, id, 2); !errors.Is(err, store.ErrNotFound) {
@@ -231,7 +231,7 @@ func TestDecisionPinnedToDisplayedRoundRefusedAfterRePark(t *testing.T) {
 	}
 	// A fresh read shows round 2; deciding it (pinned or legacy-unpinned)
 	// works.
-	if err := c.DecideApproval(ctx, id, "bob", "slack", types.ApprovalApproved, 2, ""); err != nil {
+	if err := c.DecideApproval(ctx, id, "bob", "slack", types.ApprovalApproved, 2, "", ""); err != nil {
 		t.Fatalf("decision pinned to the fresh round refused: %v", err)
 	}
 	decision, err := st.LatestApprovalDecision(ctx, id, 2)
@@ -245,7 +245,7 @@ func TestDecisionPinnedToDisplayedRoundRefusedAfterRePark(t *testing.T) {
 func TestDecisionReasonIsAudited(t *testing.T) {
 	c, st, id := approvalEpochFixture(t)
 	ctx := context.Background()
-	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalRejected, 1, "wrong node, hardware ticket filed"); err != nil {
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalRejected, 1, "wrong node, hardware ticket filed", ""); err != nil {
 		t.Fatal(err)
 	}
 	trail, err := st.AuditTrail(ctx, id)

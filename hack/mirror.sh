@@ -51,6 +51,12 @@ EXCLUDES=(
 	"V0.5.0_RELEASE_PLAN.md"
 	"V0.6.0_RELEASE_PLAN.md"
 	"V0.7.0_RELEASE_PLAN.md"
+	"V0.8.0_RELEASE_PLAN.md"
+	# Private v0.8 discovery and pilot records. Same rule as the plans: they
+	# are private working documents from the day they are written, and they
+	# are listed here before they exist so the first draft cannot leak.
+	"docs/discovery-d0-record.md"
+	"docs/pilot-p1-record.md"
 	# NOT excluded, deliberately: PRODUCT_PLAN.md and
 	# PRODUCTION_READINESS_PLAN.md. They are published product roadmap
 	# documents — hack/verify-docs.sh lints them as such, and they have been in
@@ -59,7 +65,15 @@ EXCLUDES=(
 	# Build output and local tooling.
 	"bin/"
 	".claude/"
-	".git/"
+	# No trailing slash, deliberately. An rsync pattern ending in "/" matches
+	# only a DIRECTORY, and in a linked git worktree .git is a regular file
+	# (a one-line "gitdir:" pointer). "`.git/`" let that file through, and
+	# rsync --delete replaced the target checkout's .git directory with it —
+	# the mirror's own git metadata, overwritten by the source's. A bare
+	# ".git" matches either form. excluded() below strips the slash before
+	# matching anyway, so the assertion is unchanged; the prose sweep skips
+	# this entry by name because it is not a document.
+	".git"
 )
 
 note() { printf '\n=== %s\n' "$*"; }
@@ -182,9 +196,11 @@ sweep=0
 # Derived from EXCLUDES, not retyped: the sweep once listed main-codex.md but
 # not main.md, so a published document could cite the local handoff notes by
 # name and pass. Every excluded DOCUMENT is swept; the directories (bin/,
-# .claude/, .git/) are not prose and are skipped.
+# .claude/) and .git are not prose and are skipped. .git is listed without
+# the trailing slash (see EXCLUDES) and must be skipped by name: a -F grep
+# for ".git" would hit every published mention of .gitignore and .github.
 for e in "${EXCLUDES[@]}"; do
-	[[ $e == */ ]] && continue
+	[[ $e == */ || $e == .git ]] && continue
 	if hits=$(git -C "$TARGET" grep -n --untracked -F -- "$e" -- '*.md' 2>/dev/null); then
 		echo "A PUBLISHED DOCUMENT REFERENCES $e, WHICH IS NOT PUBLISHED:" >&2
 		echo "$hits" >&2

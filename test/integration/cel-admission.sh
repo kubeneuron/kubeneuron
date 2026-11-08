@@ -304,6 +304,48 @@ check_root "checkpoint coordination maxWait above the 30m ceiling" \
 	'.metadata.name="cel-checkpoint-max-over-ceiling" | .spec.safety.checkpointCoordination={enabled: true, namespaces: ["ml-training"], defaultWait: "5m", maxWait: "45m"}'
 check_root "checkpoint coordination enabled with an allowlist and ordered waits" "" \
 	'.metadata.name="cel-checkpoint-enabled" | .spec.safety.checkpointCoordination={enabled: true, namespaces: ["ml-training", "ml-research"], defaultWait: "5m", maxWait: "15m"}'
+# v0.8 development blocks: each is optional and off; an advisory or a group
+# block needs coordination enabled, the budgets and sizes are bounded, and
+# requireForApproval needs the preview enabled — all refused by the CRD before
+# any controller sees them.
+check_root "checkpoint advisory enabled inside a disabled coordination block" \
+	"checkpointCoordination.advisory.enabled requires checkpointCoordination.enabled" \
+	'.metadata.name="cel-advisory-without-coordination" | .spec.safety.checkpointCoordination={enabled: false, advisory: {enabled: true}}'
+check_root "checkpoint advisory budget above the 60s ceiling" \
+	"advisory.budget must be a positive duration of at most 60s" \
+	'.metadata.name="cel-advisory-budget-over" | .spec.safety.checkpointCoordination={enabled: true, namespaces: ["ml-training"], advisory: {enabled: true, budget: "2m"}}'
+check_root "checkpoint advisory with a zero budget" \
+	"advisory.budget must be a positive duration of at most 60s" \
+	'.metadata.name="cel-advisory-budget-zero" | .spec.safety.checkpointCoordination={enabled: true, namespaces: ["ml-training"], advisory: {enabled: true, budget: "0s"}}'
+check_root "checkpoint advisory enabled inside an enabled coordination block" "" \
+	'.metadata.name="cel-advisory-enabled" | .spec.safety.checkpointCoordination={enabled: true, namespaces: ["ml-training"], advisory: {enabled: true, budget: "10s"}}'
+check_root "checkpoint groups enabled inside a disabled coordination block" \
+	"checkpointCoordination.groups.enabled requires checkpointCoordination.enabled" \
+	'.metadata.name="cel-groups-without-coordination" | .spec.safety.checkpointCoordination={enabled: false, groups: {enabled: true}}'
+check_root "checkpoint groups maxGroupSize above 512" \
+	"maxGroupSize" \
+	'.metadata.name="cel-groups-size-over" | .spec.safety.checkpointCoordination={enabled: true, namespaces: ["ml-training"], groups: {enabled: true, maxGroupSize: 600}}'
+check_root "checkpoint groups maxGroupSize of zero" \
+	"maxGroupSize" \
+	'.metadata.name="cel-groups-size-zero" | .spec.safety.checkpointCoordination={enabled: true, namespaces: ["ml-training"], groups: {enabled: true, maxGroupSize: 0}}'
+check_root "checkpoint groups enabled with crossNode inside an enabled coordination block" "" \
+	'.metadata.name="cel-groups-enabled" | .spec.safety.checkpointCoordination={enabled: true, namespaces: ["ml-training"], groups: {enabled: true, maxGroupSize: 8, crossNode: true}}'
+check_root "impact preview requireForApproval without the preview enabled" \
+	"impactPreview.requireForApproval requires impactPreview.enabled" \
+	'.metadata.name="cel-impact-require-without-enabled" | .spec.safety.impactPreview={enabled: false, requireForApproval: true}'
+check_root "impact preview budget above the 60s ceiling" \
+	"impactPreview.budget must be a positive duration of at most 60s" \
+	'.metadata.name="cel-impact-budget-over" | .spec.safety.impactPreview={enabled: true, budget: "90s"}'
+check_root "impact preview maxItems below 10" \
+	"maxItems" \
+	'.metadata.name="cel-impact-items-low" | .spec.safety.impactPreview={enabled: true, maxItems: 5}'
+check_root "impact preview maxItems above 1000" \
+	"maxItems" \
+	'.metadata.name="cel-impact-items-high" | .spec.safety.impactPreview={enabled: true, maxItems: 5000}'
+check_root "impact preview enabled with context resolvers" "" \
+	'.metadata.name="cel-impact-enabled" | .spec.safety.impactPreview={enabled: true, budget: "15s", maxItems: 200, requireForApproval: true, workloadContext: {batchJobs: true, kueue: true, kuberay: true}}'
+check_root "topology classifier DRA opt-in" "" \
+	'.metadata.name="cel-topology-dra" | .spec.safety.topologyClassifier={dra: {enabled: true}}'
 
 "$KUBECTL_BIN" patch kubeneuron "$FIXTURE_NAME" --type=merge \
 	-p '{"spec":{"workflowStore":{"sqlite":{"size":"6Gi"}}}}' >/dev/null
@@ -455,5 +497,5 @@ if "$KUBECTL_BIN" get kubeneuron "$FIXTURE_NAME" >/dev/null 2>&1; then
 fi
 pass "persisted CEL fixture cleaned up"
 
-((passed == 85)) || fail "internal check count is $passed, want 85"
+((passed == 99)) || fail "internal check count is $passed, want 99"
 log "admission matrix complete: $passed checks passed on server $server_version"

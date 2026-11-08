@@ -139,13 +139,55 @@ func controllerPodVerbs(installation *kubeneuronv1alpha1.KubeNeuron) []string {
 	return verbs
 }
 
+// controllerDRARules is the read-only Dynamic Resource Allocation grant the
+// topology classifier needs, present ONLY while
+// spec.safety.topologyClassifier.dra.enabled is true. It is get/list/watch on
+// resource.k8s.io resourceslices and nothing else: no claims, no other
+// version, no write verb. An installation that never asked for DRA discovery
+// holds no rule on the group at all.
+//
+// ResourceClaim use is deliberately NOT a grant here. The classifier detects
+// it from spec.resourceClaims of the Pods scheduled on the node, through the
+// core Pods get/list/watch the controller role always carries, so enabling
+// discovery costs exactly one read-only rule and the group's claim objects
+// are never readable by KubeNeuron.
+func controllerDRARules(installation *kubeneuronv1alpha1.KubeNeuron) []rbacv1.PolicyRule {
+	if !topologyDRADiscoveryEnabled(installation) {
+		return nil
+	}
+	return []rbacv1.PolicyRule{
+		{APIGroups: []string{"resource.k8s.io"}, Resources: []string{"resourceslices"}, Verbs: []string{"get", "list", "watch"}},
+	}
+}
+
+// controllerContextRules are the read-only grants behind the impact
+// preview's workload-context resolvers, each present ONLY while the preview
+// is enabled and that resolver selected. get/list/watch and nothing else:
+// no write verb exists anywhere in KubeNeuron for batch, Kueue or Ray
+// objects, and no claim is made that any of those frameworks integrates
+// with KubeNeuron — the resolver only says whose Pod a Pod is.
+func controllerContextRules(installation *kubeneuronv1alpha1.KubeNeuron) []rbacv1.PolicyRule {
+	batchJobs, kueue, kuberay := impactContextSelection(installation)
+	var rules []rbacv1.PolicyRule
+	if batchJobs {
+		rules = append(rules, rbacv1.PolicyRule{APIGroups: []string{"batch"}, Resources: []string{"jobs"}, Verbs: []string{"get", "list", "watch"}})
+	}
+	if kueue {
+		rules = append(rules, rbacv1.PolicyRule{APIGroups: []string{"kueue.x-k8s.io"}, Resources: []string{"workloads", "localqueues", "clusterqueues"}, Verbs: []string{"get", "list", "watch"}})
+	}
+	if kuberay {
+		rules = append(rules, rbacv1.PolicyRule{APIGroups: []string{"ray.io"}, Resources: []string{"rayclusters", "rayjobs"}, Verbs: []string{"get", "list", "watch"}})
+	}
+	return rules
+}
+
 func controllerClusterRole(installation *kubeneuronv1alpha1.KubeNeuron) *rbacv1.ClusterRole {
 	return &rbacv1.ClusterRole{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   installation.Name + "-controller",
 			Labels: resourceLabels(installation, "controller"),
 		},
-		Rules: []rbacv1.PolicyRule{
+		Rules: append([]rbacv1.PolicyRule{
 			{APIGroups: []string{""}, Resources: []string{"nodes"}, Verbs: []string{"get", "list", "watch", "patch"}},
 			{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: controllerPodVerbs(installation)},
 			{APIGroups: []string{""}, Resources: []string{"serviceaccounts"}, ResourceNames: []string{installation.Name + "-agent"}, Verbs: []string{"get"}},
@@ -159,7 +201,7 @@ func controllerClusterRole(installation *kubeneuronv1alpha1.KubeNeuron) *rbacv1.
 			// the exact Lease name; harmless for single-replica SQLite.
 			{APIGroups: []string{"coordination.k8s.io"}, Resources: []string{"leases"}, ResourceNames: []string{installation.Name + "-controller"}, Verbs: []string{"get", "update"}},
 			{APIGroups: []string{"coordination.k8s.io"}, Resources: []string{"leases"}, Verbs: []string{"create"}},
-		},
+		}, append(controllerDRARules(installation), controllerContextRules(installation)...)...),
 	}
 }
 

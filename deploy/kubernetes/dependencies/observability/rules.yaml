@@ -267,6 +267,26 @@ spec:
             runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronreconcileslow"
             summary: "Reconcile p99 is {{ $value }}s"
             description: "The walk is falling behind: approvals resume late and verification windows stretch. Check open-incident count and store latency."
+
+        - alert: KubeNeuronImpactPreviewUnavailable
+          expr: increase(kubeneuron_impact_previews_total{result="unavailable"}[30m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronimpactpreviewunavailable"
+            summary: "{{ $value }} impact preview(s) could not be computed in the last 30m"
+            description: "An incident parked for approval without the preview the approver was promised. Under impactPreview.requireForApproval the approve is held until a recompute succeeds; rejecting is never held. Check the controller's read access to the node's Pods and the preview budget."
+
+        - alert: KubeNeuronCheckpointAdvisoryUnreachable
+          expr: increase(kubeneuron_checkpoint_advisories_total{outcome="unreachable"}[30m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuroncheckpointadvisoryunreachable"
+            summary: "{{ $value }} opted-in Pod(s) could not be given the checkpoint advisory in the last 30m"
+            description: "The advisory could not be stamped: pods patch missing, the Pod unreadable, or the advisory budget spent. Nothing is delayed or blocked; those Pods were simply not warned ahead of the approval."
 ---
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMRule

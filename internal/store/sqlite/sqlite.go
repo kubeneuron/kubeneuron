@@ -40,6 +40,7 @@ var _ store.EventOutbox = (*Store)(nil)
 var _ store.AcceleratorReportStore = (*Store)(nil)
 var _ store.OperationalStore = (*Store)(nil)
 var _ store.OperationalTransactionalStore = (*Store)(nil)
+var _ store.ImpactPreviewStore = (*Store)(nil)
 
 // ts keeps package-internal tests readable; the canonical helper lives in
 // sqlcore.

@@ -114,3 +114,36 @@ no alert does yet
 # Vendor-support claims that go stale the moment a vendor adapter lands.
 [Ss]hipping detection is NVIDIA-only
 [Ss]hipping detection is NVIDIA[- ]only
+
+# --- v0.8 workload-safe recovery claims --------------------------------------
+# Second-category patterns (not yet true, and some never true), added with
+# the v0.8 feature flags per the release plan's claims rule. The protocol
+# records acknowledged/exited/expired/unreachable/skipped and nothing about a
+# checkpoint's content, so no public sentence may say a checkpoint or
+# training progress WAS saved, preserved or guaranteed by KubeNeuron, or put
+# a number on saved or lost training GPU-hours (the recovery report's
+# "degraded" and "recovered" GPU-hours are a different, measured quantity
+# and stay legal). Claim-shaped on purpose: the design record's "never says
+# checkpoint saved" and "does not estimate lost training GPU-hours" are
+# negations and must stay legal.
+checkpoints? (was|were|is|are|has been|have been|got) (saved|preserved|guaranteed|protected)
+(saves|preserves|guarantees|protects) (the |your |their |a )?(training |job |model )?(checkpoints?|progress)
+(training |job )?progress (is|was|has been|were|are) (saved|preserved|protected|guaranteed)
+[0-9][0-9.,]* (training )?GPU[- ]hours (saved|preserved|protected)
+(saved|preserved|protected) [0-9][0-9.,]* (training )?GPU[- ]hours
+# Kueue, KubeRay and Ray Train: the only legal shape before a pilot is
+# "read-only context from …, demonstrated in kind, not validated on a
+# production fleet". "Works with", "integrates with", "validated/tested on"
+# and "supported/integrated" are forbidden in that direction; "integrates
+# with KubeNeuron" in the examples' disclaimer names KubeNeuron, not a
+# framework, and stays legal.
+(works|integrates|integrated|validated|tested|proven|certified|qualified) (with|on|against) (Kueue|KubeRay|Ray Train|Ray)\b
+(Kueue|KubeRay|Ray Train)[^|.]{0,40}(is|are) (now |fully |officially )?(supported|integrated)
+(Kueue|KubeRay|Ray) (support|integration) (is|has) (shipped|landed|arrived|live)
+# MIG and DRA exist in v0.8 only as refusals the classifier renders from
+# read-only evidence. No device-scoped action on them ships, so none is
+# "supported".
+(MIG|DRA)[^|.]{0,30}(is|are) (now |fully )?supported
+supports? (MIG|DRA)\b
+MIG (remediation|reset|actions?)[^|.]{0,20}(is |are )?(now )?(supported|shipped|available)
+DRA[- ]managed (devices?|GPUs?)[^|.]{0,30}(remediat|reset)

@@ -1,0 +1,80 @@
+# An Indexed Job whose two Pods form one checkpoint group. Each Pod runs the
+# toy trainer and the sidecar from this directory (mounted from the ConfigMap
+# below), shares its process namespace so the sidecar can signal the trainer,
+# and reads KubeNeuron's annotations through the downward API.
+#
+# Apply with: kubectl apply -k examples/checkpoint/plain-job
+# The namespace must be on spec.safety.checkpointCoordination.namespaces.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ml-training
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: plain-job-run
+  namespace: ml-training
+spec:
+  completions: 2
+  parallelism: 2
+  completionMode: Indexed
+  # A Pod that leaves on the request is replaced for its index; exit 0 would
+  # complete the index instead. Whether the replacement RESUMES depends on
+  # where the checkpoint lives: this manifest uses an emptyDir, which dies
+  # with the Pod, so here the replacement starts from step 0. The
+  # ../plain-job-pvc overlay mounts a PersistentVolumeClaim instead and is
+  # the shape a real job needs; see the README.
+  backoffLimitPerIndex: 3
+  maxFailedIndexes: 2
+  template:
+    metadata:
+      annotations:
+        kubeneuron.io/checkpoint: "true"
+        kubeneuron.io/checkpoint-max-wait: "3m"
+        kubeneuron.io/checkpoint-group: plain-job-run
+    spec:
+      restartPolicy: Never
+      shareProcessNamespace: true
+      terminationGracePeriodSeconds: 20
+      volumes:
+        - name: podinfo
+          downwardAPI:
+            items:
+              - path: annotations
+                fieldRef:
+                  fieldPath: metadata.annotations
+        - name: ckpt
+          emptyDir: {} # lost with the Pod; ../plain-job-pvc replaces it with a claim
+        - name: scripts
+          configMap:
+            name: checkpoint-scripts
+            defaultMode: 0555
+      containers:
+        - name: trainer
+          image: busybox:1.37
+          command: ["/bin/sh", "/scripts/trainer.sh"]
+          env:
+            - name: CKPT_DIR
+              value: /ckpt
+            - name: STEPS
+              value: "3600"
+          volumeMounts:
+            - { name: ckpt, mountPath: /ckpt }
+            - { name: scripts, mountPath: /scripts }
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+        - name: checkpoint-sidecar
+          image: busybox:1.37
+          command: ["/bin/sh", "/scripts/sidecar.sh"]
+          env:
+            - name: ANNOTATIONS
+              value: /etc/podinfo/annotations
+            - name: CKPT_DIR
+              value: /ckpt
+          volumeMounts:
+            - { name: podinfo, mountPath: /etc/podinfo, readOnly: true }
+            - { name: ckpt, mountPath: /ckpt }
+            - { name: scripts, mountPath: /scripts }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
