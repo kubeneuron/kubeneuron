@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package controller
 
 // The checkpoint coordination pre-phase (checkpoint.go), driven through the

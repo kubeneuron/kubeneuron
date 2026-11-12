@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 # Performs one explicit phase of a routine KubeNeuron TLS rotation.
 # Candidate Secrets are external, immutable, and versioned; this script never
 # creates, mutates, prints, or deletes Secret data.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package aws recycles or replaces the EC2 instance behind a GPU node.
 //
 // It exists because a hardware GPU reset is impossible on a virtualized EC2
@@ -23,7 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
-	"github.com/kubeneuron/kubeneuron/internal/cloud"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
 // EC2API is the subset of the EC2 client this package uses. It is an interface

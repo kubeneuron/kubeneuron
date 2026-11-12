@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package agent wires the kubeneuron-agent: the kmsg kernel-fault watcher
 // (NVRM Xid and amdgpu families), the NVML driver, the polled second sources
 // (DCGM/nvidia-smi and amd-smi/rocm-smi), the local action executor, and the
@@ -29,7 +31,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kubeneuron/kubeneuron/internal/accelerator"
+	// Registers the built-in accelerator adapters.
+	_ "github.com/kubeneuron/kubeneuron/internal/accelerator/adapters"
 	"github.com/kubeneuron/kubeneuron/internal/accelerator/nvidia"
 	"github.com/kubeneuron/kubeneuron/internal/agent/actionjournal"
 	"github.com/kubeneuron/kubeneuron/internal/agent/amdhealth"
@@ -42,6 +45,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
+	"github.com/kubeneuron/kubeneuron/pkg/accelerator"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -433,21 +437,33 @@ func New(cfg Config, driver nvml.GPUDriver, log *slog.Logger) (*Agent, error) {
 			log.Warn("NVIDIA observation disabled: no real nvidia-smi runtime evidence")
 			return agent, nil
 		}
-		adapter, err := nvidia.New(nvidia.Config{
-			NodeName:          cfg.NodeName,
-			DriverVersion:     cfg.NVIDIAObservation.DriverVersion,
-			RuntimeVersion:    cfg.NVIDIAObservation.RuntimeVersion,
-			PartitionTopology: cfg.NVIDIAObservation.PartitionTopology,
+		// The adapter comes from the registry (internal/accelerator/adapters),
+		// so the agent depends on the adapter contract rather than on a
+		// constructor. Preflight is NVIDIA-specific and outside that contract;
+		// a registered adapter that does not provide it fails closed.
+		adapter, err := accelerator.Build(context.Background(), accelerator.VendorNVIDIA, accelerator.Config{
+			NodeName:       cfg.NodeName,
+			DriverVersion:  cfg.NVIDIAObservation.DriverVersion,
+			RuntimeVersion: cfg.NVIDIAObservation.RuntimeVersion,
+			Options: map[string]string{
+				nvidia.OptionPartitionTopology: string(cfg.NVIDIAObservation.PartitionTopology),
+			},
+			Host: driver,
 			Now: func() time.Time {
 				return agent.now()
 			},
-		}, driver)
+		})
 		if err != nil {
 			_ = releaseActionJournalLock(journalLock)
 			return nil, fmt.Errorf("configure NVIDIA observation: %w", err)
 		}
+		preflight, ok := adapter.(nvidiaPreflighter)
+		if !ok {
+			_ = releaseActionJournalLock(journalLock)
+			return nil, fmt.Errorf("configure NVIDIA observation: registered NVIDIA adapter does not provide preflight")
+		}
 		agent.nvidia = &nvidiaObservation{
-			preflight:                adapter,
+			preflight:                preflight,
 			runtimeProber:            dcgm.NewWithEndpoint(cfg.NVIDIAObservation.DCGMPath, cfg.NVIDIAObservation.DCGMEndpoint),
 			dcgmPath:                 cfg.NVIDIAObservation.DCGMPath,
 			driverVersion:            cfg.NVIDIAObservation.DriverVersion,

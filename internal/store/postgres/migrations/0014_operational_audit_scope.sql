@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0014 — preserve tenant/cluster scope in the global v0.4.0 audit explorer.
 
 ALTER TABLE operational_audit ADD COLUMN tenant TEXT NOT NULL DEFAULT '';

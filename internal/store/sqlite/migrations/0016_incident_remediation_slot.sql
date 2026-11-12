@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0016 — persist remediation-slot ownership on the incident row.
 --
 -- The safety gate's MaxConcurrentRemediations occupancy was rebuilt after a

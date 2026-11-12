@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 # mirror.sh — publish this development tree to the public repository.
 #
 # This procedure used to be a sequence of commands typed by hand. That was

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package v1alpha1 contains the Kubernetes API for KubeNeuron.
 //
 // The API owns desired configuration only. Incident execution, leases, and

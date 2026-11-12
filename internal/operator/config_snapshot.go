@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package operator compiles KubeNeuron custom resources into the immutable
 // runtime configuration consumed by the current controller during migration.
 package operator
@@ -17,10 +19,10 @@ import (
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
 	"github.com/kubeneuron/kubeneuron/internal/action"
 	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
-	"github.com/kubeneuron/kubeneuron/internal/cloud"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -235,7 +237,7 @@ func compileMaintenanceWindows(installationName string, maintenance []kubeneuron
 //
 // The capability axis is provider-side: the required primitive comes from the
 // action registry, and whether the provider has it comes from that provider's
-// own declaration (internal/cloud), queried by name without any credentials.
+// own declaration (pkg/cloud), queried by name without any credentials.
 // When NO provider is configured a cloud action can never run at all — there is
 // nothing that could ever perform it — so such a playbook is rejected here
 // rather than shipped to compile-clean and then fail closed mid-incident, after

@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0012 — durable v0.4.0 operational product resources.  Keep this schema in
 -- lockstep with SQLite 0021; sqlcore owns every query and both engines retain
 -- the same optimistic/resource/audit semantics.

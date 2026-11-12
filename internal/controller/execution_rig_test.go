@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package controller
 
 // Round-7 item 7.3: the assembled execution/recovery rig. The ingestion half

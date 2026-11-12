@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package agentrpc is the primary actuator: it dispatches actions to the
 // kubeneuron-agent on the target node through the durable store-backed work
 // queue. The agent polls for work over its existing authenticated mTLS

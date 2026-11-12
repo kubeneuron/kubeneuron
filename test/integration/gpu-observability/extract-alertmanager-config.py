@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 """Render the shipped Alertmanager configuration for the kind fixture.
 
 Reads spec.configRawYaml from the checked-in VMAlertmanager resource

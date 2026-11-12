@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0004 — persist agent-observed device holders per accelerator report
 -- (see the SQLite 0013 notes). The nil-vs-empty distinction is load-bearing:
 -- JSON 'null' means the agent did not look, '[]' means it looked and found

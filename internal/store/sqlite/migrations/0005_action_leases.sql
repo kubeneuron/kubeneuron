@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0005 — action delivery leases. A claimed action has an opaque token and a
 -- short expiry. This lets an agent result be accepted only from the current
 -- claimant and lets work be reclaimed after an agent/controller crash.

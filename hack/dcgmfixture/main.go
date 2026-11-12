@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Command dcgmfixture serves a synthetic dcgm-exporter /metrics endpoint for
 // the kind GPU observability fixture (hack/kind-gpu-observability.sh).
 //

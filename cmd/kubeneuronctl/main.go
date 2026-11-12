@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Command kubeneuronctl is the operator CLI for KubeNeuron.
 package main
 

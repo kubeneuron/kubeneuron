@@ -1,9 +1,11 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package main
 
 import (
 	"context"
 
-	"github.com/kubeneuron/kubeneuron/internal/cloud"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	// Blank import registers every cloud provider (aws today). Adding a cloud is
 	// a new provider package plus one import line in internal/cloud/providers.
 	_ "github.com/kubeneuron/kubeneuron/internal/cloud/providers"

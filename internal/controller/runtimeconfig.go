@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package controller
 
 // This file is the runtime-configuration seam: one immutable snapshot of

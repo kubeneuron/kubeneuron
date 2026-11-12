@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0010 — durable safety-gate state. Cooldowns and flap history previously
 -- lived only in controller memory, so a restart (crash, deploy, TLS
 -- rotation) reset exactly the protections most needed right after a crash.

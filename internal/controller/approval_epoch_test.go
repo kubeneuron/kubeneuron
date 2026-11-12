@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package controller
 
 // Round-8: the approval protocol is first-class rounds. Each park mints an

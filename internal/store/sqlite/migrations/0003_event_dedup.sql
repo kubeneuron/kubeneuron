@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0003 — deduplicate at-least-once agent event replays by capture-time ID.
 -- Empty IDs (events from agents predating the field) are exempt.
 

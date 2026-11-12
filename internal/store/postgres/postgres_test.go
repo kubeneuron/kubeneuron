@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package postgres
 
 // Conformance tests against a live PostgreSQL. They run when

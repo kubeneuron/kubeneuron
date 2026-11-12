@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package sqlcore is the dialect-shared implementation of the KubeNeuron
 // store: every query, lease, and outbox rule lives here exactly once, and
 // the SQLite and PostgreSQL packages supply only open/migrate/dialect glue.

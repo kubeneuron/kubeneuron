@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0007 — latest agent-reported accelerator runtime profile per node/vendor.
 --
 -- Reports are intentionally separate from the legacy nodes.gpus inventory:

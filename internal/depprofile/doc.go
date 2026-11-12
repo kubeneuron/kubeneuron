@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package depprofile holds the static tests for the external dependency
 // profile under deploy/kubernetes/dependencies: the dcgm-exporter
 // reliability profile in the GPU Operator values, the scrape label contract

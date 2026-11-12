@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package controller
 
 // §3.3 of docs/definition-plan.md: a node under an open incident should stop

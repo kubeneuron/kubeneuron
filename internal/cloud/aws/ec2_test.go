@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package aws
 
 import (
@@ -10,7 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
-	"github.com/kubeneuron/kubeneuron/internal/cloud"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
 // fakeEC2 scripts a sequence of DescribeInstances states so a recycle can be

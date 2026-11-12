@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package webhook posts incident notifications as JSON to any HTTP
 // endpoint — the integration point for chat systems, ticketing, or custom
 // automation that KubeNeuron does not know about. The payload is versioned

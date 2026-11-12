@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package decision contains KubeNeuron's side-effect-free decision and
 // evidence evaluator.  It deliberately depends only on immutable inputs: it
 // does not read a clock, Kubernetes, a database, or the controller's mutable

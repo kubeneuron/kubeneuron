@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package postgres
 
 // Regression tests for three STORE-layer defects, exercised against a live

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Command paneldemo runs a real controller in-process (the same wiring as
 // test/e2e) with a simulated fleet: four nodes register like agents and a
 // scenario driver emits XIDs over time. It exists for developing the

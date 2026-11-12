@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 # Fixture image for hack/kind-gpu-observability.sh. FROM scratch on purpose:
 # the only content is the two statically linked binaries the harness builds
 # on the host (hack/dcgmfixture, the synthetic exporter, and hack/alertsink,

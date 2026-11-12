@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package actuator abstracts HOW an action is executed on a node. The
 // primary actuator everywhere is the kubeneuron-agent RPC (identical on K8s
 // and bare metal); SSH and IPMI/Redfish are bare-metal fallbacks for when

@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0025 — the result an idempotent operation produced (v0.8 development).
 -- An operational idempotency record used to hold only the request digest
 -- and the resource it acted on, which is enough to detect a conflicting

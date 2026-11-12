@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package controller
 
 // System-level tests through the real wiring: HandleAgentEvent → durable

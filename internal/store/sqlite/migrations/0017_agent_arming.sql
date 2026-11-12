@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0017 — the tri-state destructive-arming fact a node's agent declares at
 -- registration. TEXT with '' = unknown, matching the explicit
 -- unknown-vs-observed precedent of holders_json: a row written before this

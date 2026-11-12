@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package agent
 
 import (
@@ -17,10 +19,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kubeneuron/kubeneuron/internal/accelerator"
 	"github.com/kubeneuron/kubeneuron/internal/accelerator/nvidia"
 	"github.com/kubeneuron/kubeneuron/internal/agent/actionjournal"
 	"github.com/kubeneuron/kubeneuron/internal/agent/nvml"
+	"github.com/kubeneuron/kubeneuron/pkg/accelerator"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 # verify-image.sh — assert the PUBLISHED image is the one the code assumes.
 #
 # Why this exists: for a long time the only image any automated suite ever ran
@@ -127,7 +129,8 @@ for target in operator controller agent cli; do
 	src=$("$DOCKER_BIN" inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "$image")
 	lic=$("$DOCKER_BIN" inspect --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}' "$image")
 	[[ $src == https://github.com/* ]] || bad "$image has no OCI source label (got '${src}')"
-	[[ $lic == Apache-2.0 ]] || bad "$image licence label is '${lic}', want Apache-2.0"
+	want_lic="LicenseRef-KubeNeuron AND Apache-2.0"
+	[[ $lic == "$want_lic" ]] || bad "$image licence label is '${lic}', want '${want_lic}'"
 done
 
 if ((fail)); then

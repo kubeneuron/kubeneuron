@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package actionjournal provides a small, crash-safe local write-ahead log
 // for agent actions. It records the intent before an action may start and the
 // outcome before that outcome is sent to the controller.

@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- Optimistic-concurrency guard for incidents. UpdateIncident bumps this
 -- monotonic counter and matches on its prior value, so a writer working from a
 -- stale snapshot (a step transition racing a concurrent signal ingest) can no

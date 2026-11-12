@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0024 — impact previews and the digest an approval binds to (v0.8
 -- development). An impact preview is what a human was shown about the node,
 -- its workloads and the disruption downstream when an incident parked for

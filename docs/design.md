@@ -390,7 +390,7 @@ and confinement all read the registry; none keeps a private copy of these
 facts. Adding an action is one registry record plus its executor — tests pin
 the CRD enum ↔ registry bijection and the exact destructive set.
 
-### 2.4b The cloud provider seam (`internal/cloud`)
+### 2.4b The cloud provider seam (`pkg/cloud`)
 
 Node-scope remediation on virtualized instances (where a PCI-level GPU reset
 is impossible — measured on EC2 g4dn) is a cloud concern behind a
@@ -460,7 +460,7 @@ is the more useful lesson: the seam was checked for what it withholds, never
 for what it strands.
 
 The seam itself is also positioned lower than the decisions that need it:
-`internal/accelerator` is consumed by the AGENT, which translates its model
+`pkg/accelerator` (formerly `internal/accelerator`) is consumed by the AGENT, which translates its model
 into wire structs, while the CONTROLLER — where every vendor-dependent
 decision is actually made — never imports it and answers `nvidia` at four
 call sites. A second vendor therefore needs a dispatch point invented, not

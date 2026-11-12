@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 """Turn the checked-in VMAgent custom resource into a plain vmagent
 -promscrape.config file for the kind GPU observability fixture.
 

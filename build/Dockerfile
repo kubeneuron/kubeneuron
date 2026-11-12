@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 # Production multi-target build for the four KubeNeuron binaries.
 # TARGETOS/TARGETARCH are set by buildx for multi-arch builds and default to
 # the native platform under the classic builder (empty GOOS/GOARCH).
@@ -15,6 +17,9 @@ ARG TARGETARCH
 ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
+# The adapter contract is its own module, wired in through a replace
+# directive; go mod download needs its go.mod before the full copy.
+COPY pkg/accelerator/go.mod pkg/accelerator/
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
@@ -33,14 +38,14 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 FROM gcr.io/distroless/static-debian12:nonroot AS operator
 LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron" \
       org.opencontainers.image.description="KubeNeuron operator" \
-      org.opencontainers.image.licenses="Apache-2.0"
+      org.opencontainers.image.licenses="LicenseRef-KubeNeuron AND Apache-2.0"
 COPY --from=build /out/kubeneuron-operator /kubeneuron-operator
 ENTRYPOINT ["/kubeneuron-operator"]
 
 FROM gcr.io/distroless/static-debian12:nonroot AS controller
 LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron" \
       org.opencontainers.image.description="KubeNeuron controller" \
-      org.opencontainers.image.licenses="Apache-2.0"
+      org.opencontainers.image.licenses="LicenseRef-KubeNeuron AND Apache-2.0"
 COPY --from=build /out/kubeneuron-controller /kubeneuron-controller
 ENTRYPOINT ["/kubeneuron-controller"]
 
@@ -96,7 +101,7 @@ RUN set -eux; \
 FROM gcr.io/distroless/base-debian12 AS agent
 LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron" \
       org.opencontainers.image.description="KubeNeuron node agent" \
-      org.opencontainers.image.licenses="Apache-2.0"
+      org.opencontainers.image.licenses="LicenseRef-KubeNeuron AND Apache-2.0"
 COPY --from=busybox /bin/busybox /bin/nsenter
 COPY --from=dcgm /dcgm/usr/bin/dcgmi /usr/bin/dcgmi
 COPY --from=dcgm /dcgm/usr/lib/ /usr/lib/
@@ -106,6 +111,6 @@ ENTRYPOINT ["/kubeneuron-agent"]
 FROM gcr.io/distroless/static-debian12:nonroot AS cli
 LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron" \
       org.opencontainers.image.description="kubeneuronctl CLI" \
-      org.opencontainers.image.licenses="Apache-2.0"
+      org.opencontainers.image.licenses="LicenseRef-KubeNeuron AND Apache-2.0"
 COPY --from=build /out/kubeneuronctl /kubeneuronctl
 ENTRYPOINT ["/kubeneuronctl"]

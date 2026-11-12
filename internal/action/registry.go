@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package action is the single declarative registry of remediation actions.
 //
 // Every fact about a remediation action used to be smeared across the CRD enum
@@ -53,7 +55,7 @@ const (
 // depends on, or empty for an action that touches no cloud instance. The
 // operator rejects a cloud action at compile time when the configured provider
 // does not declare the matching capability; the axis itself is provider-side
-// (see internal/cloud.Capabilities), so this only names which one is required.
+// (see pkg/cloud.Capabilities), so this only names which one is required.
 type CloudPrimitive string
 
 const (

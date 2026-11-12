@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package aws
 
 import (
@@ -5,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/kubeneuron/kubeneuron/internal/cloud"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
 // providerName is this provider's registry key and matches spec.cloud.provider.

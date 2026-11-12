@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package controller wires the kubeneuron-controller: signal ingestion,
 // incident lifecycle, playbook execution through safety gates, approvals,
 // and notifications. See docs/design.md for the full remediation flow.

@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0011 — server-side action protocol hardening for failover.
 --
 -- attempts counts how many leases the controller has issued for one action:

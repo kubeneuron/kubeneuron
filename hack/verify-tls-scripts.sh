@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 # verify-tls-scripts.sh — offline regression coverage for the optimistic
 # concurrency path of hack/tls-rotate.sh and hack/tls-emergency-recover.sh.
 #

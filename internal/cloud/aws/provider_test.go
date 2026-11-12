@@ -1,9 +1,11 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package aws
 
 import (
 	"testing"
 
-	"github.com/kubeneuron/kubeneuron/internal/cloud"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
 // TestInstanceIDFromProviderID exercises the aws:// providerID parsing that now

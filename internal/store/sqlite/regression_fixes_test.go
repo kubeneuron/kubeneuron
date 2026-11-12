@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package sqlite
 
 // Regression tests for three STORE-layer defects. On SQLite the single writer

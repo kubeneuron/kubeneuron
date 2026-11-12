@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package impact renders the impact preview of an approval round
 // (docs/workload-safe-recovery-design.md, S4): what a human is shown about
 // the node, its workloads and the disruption downstream before they approve

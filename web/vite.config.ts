@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Vite configuration for the KubeNeuron control panel (Phase 2).
 // The dev server proxies API calls to a locally running controller.
 import { defineConfig } from "vite";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package store persists controller state: incidents, the append-only audit
 // log, approvals, and node inventory. The default implementation is SQLite
 // (internal/store/sqlite); a Postgres implementation can slot in behind the
