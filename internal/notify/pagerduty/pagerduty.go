@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package pagerduty delivers incident notifications through the PagerDuty
 // Events API v2. Incidents map to PagerDuty alerts by a stable dedup key
 // (the KubeNeuron incident ID): lifecycle updates re-trigger the same

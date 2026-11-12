@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0013 — serialize each v0.4.0 audit hash chain across concurrent writers.
 
 CREATE TABLE IF NOT EXISTS operational_audit_heads (

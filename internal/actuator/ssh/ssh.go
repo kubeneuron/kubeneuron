@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package ssh is the bare-metal fallback actuator, used when the
 // kubeneuron-agent on a node is unreachable. It connects to Node.SSHAddr with
 // the controller's SSH key and runs a fixed, allow-listed set of commands —

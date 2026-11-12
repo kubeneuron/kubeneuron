@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- An incident about a device must know whose device it is.
 --
 -- Without this the reset preflight could not tell an AMD-attributed incident

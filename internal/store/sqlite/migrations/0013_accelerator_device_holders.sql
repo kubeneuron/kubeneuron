@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0013 — persist agent-observed device holders per accelerator report.
 --
 -- The controller's pre-disruption reset refusal (refuseInfeasibleReset) and

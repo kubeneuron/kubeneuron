@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0015 — persist the vendor-neutral fault envelope and PCI address through the
 -- durable event outbox.
 --

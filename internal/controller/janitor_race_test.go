@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package controller
 
 // Round-9: the janitors run concurrently with the walk (round 8), and the

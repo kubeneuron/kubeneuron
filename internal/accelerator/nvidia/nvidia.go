@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package nvidia adapts the NVIDIA agent driver to the vendor-neutral
 // accelerator contract. It intentionally works with the existing narrow
 // nvml.GPUDriver interface: that interface inventories physical GPUs and has
@@ -11,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kubeneuron/kubeneuron/internal/accelerator"
 	"github.com/kubeneuron/kubeneuron/internal/agent/nvml"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
+	"github.com/kubeneuron/kubeneuron/pkg/accelerator"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -200,6 +202,30 @@ func New(cfg Config, driver nvml.GPUDriver) (*Adapter, error) {
 		now = time.Now
 	}
 	return &Adapter{cfg: cfg, driver: driver, now: now}, nil
+}
+
+// OptionPartitionTopology is the accelerator.Config option that carries the
+// configured partition-safety result (see Config.PartitionTopology).
+const OptionPartitionTopology = "partitionTopology"
+
+// Factory builds a NVIDIA adapter through the accelerator registry. The agent
+// must pass its NVIDIA GPU driver as cfg.Host; any other Host fails closed.
+func Factory(_ context.Context, cfg accelerator.Config) (accelerator.Adapter, error) {
+	driver, ok := cfg.Host.(nvml.GPUDriver)
+	if !ok || driver == nil {
+		return nil, fmt.Errorf("nvidia adapter: host must provide an NVIDIA GPU driver")
+	}
+	adapter, err := New(Config{
+		NodeName:          cfg.NodeName,
+		DriverVersion:     cfg.DriverVersion,
+		RuntimeVersion:    cfg.RuntimeVersion,
+		PartitionTopology: PartitionTopology(cfg.Options[OptionPartitionTopology]),
+		Now:               cfg.Now,
+	}, driver)
+	if err != nil {
+		return nil, err
+	}
+	return adapter, nil
 }
 
 // Vendor identifies this adapter's runtime owner.

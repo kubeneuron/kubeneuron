@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0004 — durable controller->agent action queue. Agents poll for work over
 -- their authenticated channel and post results back; the deterministic
 -- action ID makes enqueue and execution idempotent across restarts.

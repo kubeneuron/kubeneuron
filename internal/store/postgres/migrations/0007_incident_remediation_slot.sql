@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0007 — persist remediation-slot ownership on the incident row (see the
 -- SQLite 0016 notes): the failover rebuild reads ownership instead of
 -- inferring it from state/step_index, which missed escalated incidents.

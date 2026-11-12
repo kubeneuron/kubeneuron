@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- See sqlite 0020: an incident opened by a kernel fault can name its device
 -- only by PCI address, and without that column the incident could neither be
 -- told apart from a sibling GPU's nor promoted onto the UUID a later, precise

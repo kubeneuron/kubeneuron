@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package web embeds the built control-panel SPA (web/dist) into the
 // controller binary. The repository's dependency-free console is checked in
 // under web/dist, so normal controller builds always carry the current panel.

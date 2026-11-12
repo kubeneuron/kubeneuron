@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 # shellcheck disable=SC2016 # Single-quoted jq programs expand jq, not shell, variables.
 set -Eeuo pipefail
 

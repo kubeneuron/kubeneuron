@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+
 # The checkpoint sidecar: reads KubeNeuron's annotations off this Pod through
 # the downward API and turns them into two signals to the trainer, which
 # shares the Pod's process namespace (shareProcessNamespace: true):

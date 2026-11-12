@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package platform abstracts where the GPU nodes live. A Platform answers
 // two questions: which nodes/GPUs exist (inventory), and how to move
 // workloads off a node (cordon/drain). Executing commands ON a node is a
@@ -409,7 +411,7 @@ type NodeTainter interface {
 }
 
 // InstanceRecycler drives the cloud instance behind a node. It is satisfied by
-// any cloud provider (internal/cloud) and injected into the platform, so the
+// any cloud provider (pkg/cloud) and injected into the platform, so the
 // platform stays free of any cloud SDK and of any provider's providerID scheme.
 //
 // The provider owns the node -> instance-ID mapping: each cloud writes its

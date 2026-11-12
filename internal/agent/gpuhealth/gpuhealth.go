@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package gpuhealth is a second GPU-fault detection source beside the kmsg
 // XID watcher. It periodically polls DCGM through the mounted dcgmi binary
 // (preferred) and falls back to nvidia-smi -q where dcgmi is absent — dcgmi is

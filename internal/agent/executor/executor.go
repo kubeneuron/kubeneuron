@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package executor runs controller-requested actions locally on the node
 // and enforces idempotency: action IDs are deterministic, and completed IDs
 // are cached so a controller retry after a crash re-returns the original

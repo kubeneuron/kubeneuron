@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package postgres is the production Store implementation for HA
 // controllers. All query, lease, and outbox logic lives in the shared
 // sqlcore engine; this package owns connection setup and migrations.

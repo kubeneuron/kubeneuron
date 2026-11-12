@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package operations implements the durable product workflows introduced by
 // v0.4.0: explainable readiness, candidate policy impact previews, bounded
 // diagnostics, and no-side-effect remediation simulations.

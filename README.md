@@ -597,4 +597,32 @@ behavior.
 
 ## License
 
-[Apache 2.0](LICENSE)
+KubeNeuron is source-available under the
+[KubeNeuron License, Version 1.0](Licenses/KUBENEURON_LICENSE), which covers
+the core code and all binaries and images. The API types, the adapter
+contract ([`pkg/accelerator`](pkg/accelerator) and [`pkg/cloud`](pkg/cloud)),
+CRDs, Helm chart, and documentation are under the
+[Apache License 2.0](Licenses/APACHE_LICENSE). [LICENSE](LICENSE) lists which
+paths each license covers. In short (the license text controls):
+
+- You may use KubeNeuron for free, including in production, inside your own
+  organization, and change it for your own internal use. Contractors and
+  managed-service partners may install, operate, and maintain it for you in
+  an environment you own or control.
+- You may pass on unmodified official releases, and charge for your own
+  installation, integration, operation, hardware, and support services.
+- A cloud, GPU-cloud, colocation, or hardware provider may use it for free to
+  run its own fleet, including capacity it sells or rents to customers, may
+  show those customers the health data it produces, and may let them
+  approve, defer, or schedule maintenance on the capacity they use.
+- Anyone, including hardware vendors with their own tools, may test and
+  certify their products with KubeNeuron, and may build, license, and ship
+  adapters, including KubeNeuron builds that add them.
+- Without a separate written agreement, you may not offer KubeNeuron as a
+  hosted or multi-tenant service, distribute a modified version, embed it in
+  a product or platform offered under your own name, resell it, copy its
+  code into a replacement product, or use it to train AI that recreates it.
+- Commits and releases up to and including tag v0.8.0 remain under the
+  Apache License, Version 2.0.
+
+Contributions require the [Contributor License Agreement](CLA.md).

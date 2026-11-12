@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package kmsg watches the kernel log (/dev/kmsg) for accelerator fault lines:
 // NVIDIA's NVRM Xid family and AMD's amdgpu families. This is the fast
 // detection path: a kernel-printed fault reaches the controller seconds after

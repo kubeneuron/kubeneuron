@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package cloud is the provider-neutral seam for node recycle/replace
 // remediation. It exists so no workflow, controller, or platform code ever
 // names a specific cloud: each Provider parses its own node providerID scheme,
@@ -11,6 +13,10 @@
 // The package imports only the standard library, so operator, controller, and
 // platform can all consume the seam without pulling any cloud SDK; the concrete
 // providers (and their SDKs) are linked only by the binaries that wire them.
+//
+// This package is part of the KubeNeuron adapter contract. It is licensed
+// under the Apache License, Version 2.0, so cloud and infrastructure providers
+// can implement, ship, and license their own providers on their own terms.
 package cloud
 
 import (

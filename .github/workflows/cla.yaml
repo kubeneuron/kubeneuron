@@ -1,0 +1,74 @@
+name: CLA
+
+# Blocks a pull request until every commit author has agreed to the
+# KubeNeuron Contributor License Agreement (CLA.md). Signatures are recorded
+# in signatures/cla.json on the cla-signatures branch, so the proof of
+# agreement stays in this repository.
+#
+# Security model (reviewed against the action source at the pinned commit):
+# - pull_request_target runs with this repository's token, also for pull
+#   requests from forks. This workflow therefore never checks
+#   out, builds, or runs code from a pull request, and has no `run:` steps,
+#   so no pull-request text is ever evaluated as a script.
+# - The action is pinned to a full commit SHA (v2.6.1), so a moved tag in the
+#   action's repository cannot change the code that runs with write access.
+# - Permissions are granted to the job only, and only these:
+#     contents: write       commit signatures to the cla-signatures branch.
+#                           main is protected by required status checks, and
+#                           v* tags by a ruleset, so this token cannot change
+#                           either.
+#     pull-requests: write  post and update the CLA comment on the PR.
+#     actions: read         look up this workflow's earlier runs. Write is
+#                           deliberately not granted: it would also allow
+#                           dispatching other workflows (hw-e2e).
+#   statuses is not granted: the action does not use the commit status API.
+# - No allowlist: the action matches allowlist entries against the git author
+#   name when a commit is not linked to a GitHub account, which anyone can
+#   set. Dependabot is skipped by the pull request's real author instead.
+# - Only the commit author's own comment counts as their signature. Every run
+#   re-reads the pull request's comments, so there is no issue_comment
+#   trigger: commenting alone never starts a run with write access. After a
+#   contributor signs, a maintainer re-runs the failed CLA check (or the
+#   contributor pushes a new commit) and the signature is recorded then.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+concurrency:
+  # Serialize runs per pull request; a run must never be cancelled, or the
+  # required check would be left without a result.
+  group: cla-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  cla:
+    name: CLA
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    steps:
+      - name: Check CLA signatures
+        # contributor-assistant/github-action v2.6.1
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-document: https://github.com/kubeneuron/kubeneuron/blob/main/CLA.md
+          path-to-signatures: signatures/cla.json
+          branch: cla-signatures
+          custom-pr-sign-comment: I have read the KubeNeuron Contributor License Agreement, version 1.0, and I agree to it.
+          custom-notsigned-prcomment: >-
+            Thank you for your contribution. Before we can merge it, please
+            read the [KubeNeuron Contributor License Agreement](https://github.com/kubeneuron/kubeneuron/blob/main/CLA.md)
+            and agree to it by adding the comment below to this pull request.
+            A maintainer then re-runs this check, or it runs again on your
+            next push. You keep ownership of your contribution.
+          custom-allsigned-prcomment: All contributors have agreed to the KubeNeuron CLA.
+          lock-pullrequest-aftermerge: false
+          suggest-recheck: false

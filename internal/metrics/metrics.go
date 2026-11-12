@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package metrics exposes the controller's Prometheus instrumentation. All
 // series carry the kubeneuron_ prefix; scraping is served on the public
 // listener at /metrics (no node secrets appear in label values).

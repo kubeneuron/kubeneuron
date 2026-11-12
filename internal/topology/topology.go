@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package topology classifies the accelerator device topology of one node
 // from a captured, immutable snapshot, and says whether a device-scoped
 // action (today: a physical NVIDIA GPU reset) may be considered on it.

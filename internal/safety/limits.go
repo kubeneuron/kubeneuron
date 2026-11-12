@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package safety enforces the cluster-wide guard rails every remediation
 // must pass before executing: concurrency limits, per-target cooldowns, flap
 // detection, and the global pause switch. All execution paths in the

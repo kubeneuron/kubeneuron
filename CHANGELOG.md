@@ -9,7 +9,54 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **License: KubeNeuron License, Version 1.0.** KubeNeuron moves from the
+  Apache License 2.0 to two licenses (see [LICENSE](LICENSE)): the
+  source-available [KubeNeuron License](Licenses/KUBENEURON_LICENSE) for the
+  core code, binaries, and images, and the Apache License 2.0 for the API
+  types, the adapter contract, CRDs, Helm chart, and documentation. The
+  KubeNeuron License governs every commit that contains the LICENSE file at
+  version 1.0 or later; the commit tagged v0.8.0, every earlier commit, and
+  releases v0.1.0 through v0.8.0 remain under the Apache License 2.0. In
+  short (the license text controls):
+
+  - You may use KubeNeuron for free, including in production, inside your own
+    organization, and change it for your own internal use. Contractors and
+    managed-service partners may install, operate, and maintain it for you in
+    an environment you own or control.
+  - You may pass on unmodified official releases, and charge for your own
+    installation, integration, operation, hardware, and support services.
+  - A cloud, GPU-cloud, colocation, or hardware provider may use it for free to
+    run its own fleet, including capacity it sells or rents to customers, may
+    show those customers the health data it produces, and may let them
+    approve, defer, or schedule maintenance on the capacity they use.
+  - Anyone, including hardware vendors with their own tools, may test and
+    certify their products with KubeNeuron, and may build, license, and ship
+    adapters, including KubeNeuron builds that add them.
+  - Without a separate written agreement, you may not offer KubeNeuron as a
+    hosted or multi-tenant service, distribute a modified version, embed it in
+    a product or platform offered under your own name, resell it, copy its
+    code into a replacement product, or use it to train AI that recreates it.
+  - Commits and releases up to and including tag v0.8.0 remain under the
+    Apache License, Version 2.0.
+
+  Contributions now require the [Contributor License Agreement](CLA.md),
+  checked by the `CLA` workflow. Every source file carries an
+  `SPDX-License-Identifier` header that matches the path rules in LICENSE.
+- **Adapter contract under Apache 2.0.** The accelerator adapter contract
+  moves from `internal/accelerator` to `pkg/accelerator`, now its own Go
+  module (standard library only, tagged `pkg/accelerator/vX.Y.Z`). The cloud
+  provider contract moves from `internal/cloud` to `pkg/cloud`. The NVIDIA and
+  AWS implementations stay in `internal/`.
+
+### Added
+
+- **Accelerator adapter registry.** `accelerator.Register`, `Build`,
+  `Registered`, and `Vendors`, modelled on the cloud provider registry.
+  Built-in adapters are listed in one registration file,
+  `internal/accelerator/adapters/adapters.go`, and the agent now obtains the
+  NVIDIA adapter through the registry.
 
 ## [v0.8.0] - 2026-11-08
 

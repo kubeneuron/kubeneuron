@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0002 — server-side action protocol hardening (see the SQLite 0011 notes).
 
 ALTER TABLE actions ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Command kubeneuron-agent runs on every GPU node: it watches the kernel log
 // and NVML for XID errors, pushes events to the controller, and executes
 // controller-requested local actions (GPU reset, diagnostics, reboot).

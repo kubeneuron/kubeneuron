@@ -1,0 +1,422 @@
+KubeNeuron License
+Version 1.0
+Last Modified: November 12, 2026
+
+These terms (the "License") are an agreement between Andrii Petruk
+("Licensor") and you ("You"). By downloading, installing, copying, accessing,
+or using the Software, You agree to this License. If You use the Software on
+behalf of an organization, You agree on its behalf and represent that You
+have authority to do so; in that case "You" includes that organization. If
+You do not agree, do not use the Software.
+
+Plain-language summary (for convenience only; the numbered sections below
+control):
+- You may use KubeNeuron for free, including in production, inside your own
+  organization, and change it for your own internal use. Contractors and
+  managed-service partners may install, operate, and maintain it for you in
+  an environment you own or control.
+- You may pass on unmodified official releases, and charge for your own
+  installation, integration, operation, hardware, and support services.
+- A cloud, GPU-cloud, colocation, or hardware provider may use it for free to
+  run its own fleet, including capacity it sells or rents to customers, may
+  show those customers the health data it produces, and may let them
+  approve, defer, or schedule maintenance on the capacity they use.
+- Anyone, including hardware vendors with their own tools, may test and
+  certify their products with KubeNeuron, and may build, license, and ship
+  adapters, including KubeNeuron builds that add them.
+- Without a separate written agreement, you may not offer KubeNeuron as a
+  hosted or multi-tenant service, distribute a modified version, embed it in
+  a product or platform offered under your own name, resell it, copy its
+  code into a replacement product, or use it to train AI that recreates it.
+- Commits and releases up to and including tag v0.8.0 remain under the
+  Apache License, Version 2.0.
+
+
+1. DEFINITIONS
+
+1.1 "Software" means the source code, object code, container images, Helm
+    charts, manifests, documentation, and other materials that Licensor makes
+    available and that are identified, by the LICENSE file or by a license
+    header, as governed by this License, including any updates Licensor
+    provides under this License.
+
+1.2 "Official Release" means the Software exactly as Licensor publishes it
+    through an Official Channel, without any change.
+
+1.3 "Official Channel" means the repository at
+    https://github.com/kubeneuron/kubeneuron (including its tagged releases
+    and release assets), the container registries and Helm repositories that
+    repository's documentation names as official, and any other channel
+    Licensor designates in writing.
+
+1.4 "Modified Version" means any work that modifies, adapts, translates, or
+    is otherwise derived from the Software, or that includes any portion of
+    the Software in a changed form, including any build of the Software from
+    source that has been changed. A Configuration and an Adapter are not
+    Modified Versions.
+
+1.5 "Configuration" means custom resources, policies, playbooks, rules,
+    values files, dashboards, alert definitions, and similar inputs that You
+    write to configure or operate the Software through its documented
+    interfaces, and software You write that interacts with the Software only
+    through its documented APIs, CLI, or custom resource definitions, in each
+    case without copying any portion of the Software other than the minimum
+    needed to call those interfaces.
+
+1.6 "Internal Use" means use by You and Your Affiliates, and by employees and
+    contractors (whether individuals or organizations) acting on Your or
+    their behalf, to operate Your or their own infrastructure and business,
+    including production use. A contractor that installs, operates, or
+    maintains the Software solely for You, in an environment that You own or
+    control, acts on Your behalf, and You are responsible for its compliance
+    with this License. Internal Use includes the infrastructure-provider use
+    described in Section 2.6.
+    Except as Section 2.6 permits, Internal Use does not include making the
+    Software, a Modified Version, or their functionality available to any
+    third party.
+
+1.7 "Affiliate" means any entity that controls, is controlled by, or is under
+    common control with You, where "control" means ownership of more than 50%
+    of the voting interests or the power to direct management.
+
+1.8 "Managed Service" means only:
+    (a) making the Software, a Modified Version, or a substantial part of
+        their functionality available to third parties as a hosted, managed,
+        multi-tenant, or software-as-a-service offering;
+    (b) operating the Software for a third party in an environment that the
+        third party does not own or control; or
+    (c) including the Software, a Modified Version, or a substantial part of
+        their functionality in a product or platform that You offer to third
+        parties under Your own name.
+    Operating the Software for a customer as its contractor under Section
+    1.6, installing an Official Release for a customer under Section 2.4,
+    and the infrastructure-provider use described in Section 2.6 are not
+    Managed Services.
+
+1.9 "Competing Product" means a product or service, offered to third
+    parties, whose primary purpose is to substitute for the Software as a
+    whole or for a material part of it. Accelerators, servers, firmware,
+    drivers, device plugins, operators, and management, health, or
+    remediation tools that a vendor provides for its own hardware are not
+    Competing Products merely because their functionality overlaps with the
+    Software. Owning, developing, or offering a Competing Product is not by
+    itself a breach of this License; Section 3.3 restricts only the use of the
+    Software to create one.
+
+1.10 "AI System" means any machine-learning model, large language model, or
+    other artificial-intelligence system, and any dataset, index, or
+    retrieval corpus prepared for one.
+
+1.11 "Contribution" means any work You submit to Licensor for inclusion in
+    the Software, such as a pull request, patch, or issue attachment.
+
+1.12 "Repository Copy" means a copy of the Software's source repository
+    created through the fork or clone functionality of the hosting service of
+    an Official Channel.
+
+1.13 "Adapter Contract" means the adapter contract identified in the
+    LICENSE file. The Adapter Contract is an Apache Component (Section 4.1).
+
+1.14 "Adapter" means software that implements the Adapter Contract to
+    integrate an accelerator, platform, cloud, or other provider with the
+    Software, either (a) compiled into the Software and enabled through
+    Registration Code, or (b) as a separate process that integrates with the
+    Software through an adapter protocol that the LICENSE file identifies as
+    documented. An Adapter contains no portion of the Software other than the
+    Adapter Contract and, for (a), its Registration Code.
+
+1.15 "Infrastructure Provider" means a person or entity that owns or operates
+    compute infrastructure and provides the capacity of that infrastructure
+    to its customers, for example as a public or GPU cloud, a bare-metal,
+    colocation, or hosting provider, or a managed Kubernetes or AI platform
+    running on infrastructure that it operates.
+
+1.16 "Registration Code" means additions to the registration file that the
+    LICENSE file names for that kind of Adapter, and to no other file, that
+    only import an Adapter and register it through the registration
+    functions of the Adapter Contract.
+
+
+2. LICENSE GRANTS
+
+Subject to Your compliance with this License, Licensor grants You a
+worldwide, royalty-free, non-exclusive, non-transferable license, without the
+right to sublicense except as stated in Sections 2.4 and 2.9, to:
+
+2.1 Use. Install, run, and use the Software for Internal Use.
+
+2.2 Internal modification. Create Modified Versions solely for Internal Use.
+    You may not distribute, publish, host, or otherwise make a Modified
+    Version available to any third party, except as a Contribution under
+    Section 2.5 or as an Adapter Build under Section 2.9.
+
+2.3 Configuration. Create, use, and distribute Configurations on any terms
+    You choose. Licensor claims no ownership of Your Configurations.
+
+2.4 Redistribution of Official Releases. Reproduce and distribute copies of
+    Official Releases, including by mirroring them into private registries
+    and offline or air-gapped environments, and by installing them for a
+    customer in that customer's own environment, provided that:
+    (a) each copy is unmodified and keeps all copyright, license, and
+        trademark notices;
+    (b) You provide each recipient with a copy of this License, and each
+        recipient receives the Software under this License directly from
+        Licensor;
+    (c) You do not charge any fee for the Software itself, although You may
+        charge for Your own services such as installation, integration,
+        operation, hardware, or support; and
+    (d) the distribution is not part of a Managed Service.
+
+2.5 Repository Copies and Contributions. Create and keep a Repository Copy
+    solely to read the source code and to prepare and submit Contributions to
+    Licensor through an Official Channel. You may not use a Repository Copy,
+    or any build made from it, for any other purpose, including distributing
+    it, publishing it outside that hosting service, building and providing
+    images or binaries to others, or operating it for any third party.
+    Nothing in this License limits rights that the hosting service's own
+    terms grant its users to view and fork public repositories on that
+    service; this License governs every other use of those copies.
+
+2.6 Infrastructure Providers. If You are an Infrastructure Provider, You may
+    use the Software, and Modified Versions created under Section 2.2, free
+    of charge to monitor, diagnose, remediate, and operate infrastructure
+    that You own or operate, including infrastructure whose capacity You
+    sell, rent, or lease to Your customers. As part of Your own products and
+    services, You may provide those customers with health status, incident
+    notices, maintenance and availability information, reports, and service
+    level data that the Software produces about the capacity they use, may
+    let those customers approve, defer, or schedule maintenance and
+    remediation actions on the capacity they use, and may charge for that
+    capacity and those services. This use is not a
+    Managed Service and not a resale of the Software, provided that You do
+    not:
+    (a) give customers the Software or a Modified Version to install or run
+        themselves, except unmodified Official Releases under Section 2.4 or
+        Adapter Builds under Section 2.9;
+    (b) offer the Software, or its functionality, as a product or service
+        that customers use to manage infrastructure that they control; or
+    (c) sell, license, or charge for the Software itself as a separate item.
+
+2.7 Interoperability. You may use the Software, alone or together with Your
+    own hardware, firmware, drivers, software, and services, including
+    Competing Products, to develop, test, validate, certify, benchmark, and
+    support interoperability with the Software, and You may publish the
+    results.
+
+2.8 Adapters. You may develop, use, reproduce, license, and distribute
+    Adapters on any terms You choose, including as open source or as part of
+    Your own products. Licensor claims no ownership of Your Adapters.
+
+2.9 Adapter Builds. You may build the Software from the unmodified source
+    code of an Official Release together with one or more Adapters and their
+    Registration Code (an "Adapter Build"), and use and distribute the
+    Adapter Build, provided that:
+    (a) the Software in it is unchanged except for Registration Code, and all
+        copyright, license, and trademark notices are kept;
+    (b) You provide each recipient with a copy of this License, and the
+        Software in the Adapter Build remains governed by this License for
+        each recipient;
+    (c) You identify the Adapter Build as Your build, for example "KubeNeuron
+        with the <Your name> adapter", and not as an Official Release;
+    (d) You do not charge any fee for the Software itself, although You may
+        charge for Your Adapters, hardware, and services; and
+    (e) the Adapter Build is not used to provide a Managed Service.
+
+
+3. RESTRICTIONS
+
+Except as expressly permitted in Section 2, or by a separate written
+agreement signed by Licensor, You may not, and may not allow any third party
+to:
+
+3.1 distribute, sell, lease, sublicense, publish, or otherwise make available
+    the Software or any Modified Version;
+
+3.2 provide the Software or any Modified Version as a Managed Service;
+
+3.3 copy, translate, or adapt any portion of the Software's source code into
+    a Competing Product, or otherwise use the Software's source code to
+    create a Competing Product; or rebrand, white-label, or resell the
+    Software. Using the Adapter Contract, using the Software's documented
+    interfaces, and the uses permitted by Sections 2.6 through 2.9 do not
+    breach this Section 3.3;
+
+3.4 use the Software, its source code, or its documentation, in whole or in
+    part, to train, fine-tune, evaluate, or distill an AI System, or as input
+    to an AI System, for the purpose or with the effect of producing software
+    that reproduces, reimplements, or substitutes for the Software or any
+    material part of it; or include the Software in any dataset made
+    available to third parties for training AI Systems. This Section 3.4 does
+    not restrict using AI tools to read, analyze, explain, debug, operate, or
+    improve the Software for Internal Use, to prepare Contributions, to build
+    Configurations or Adapters, or for the interoperability work permitted
+    by Section 2.7;
+
+3.5 remove, alter, or obscure any copyright, license, attribution, or
+    trademark notice in the Software;
+
+3.6 disable, circumvent, or interfere with any license key, feature gate, or
+    other technical measure that limits the use of the Software or its
+    features; or
+
+3.7 represent that a Modified Version, Configuration, product, or service is
+    provided, endorsed, or certified by Licensor when it is not.
+
+
+4. OPEN-SOURCE AND THIRD-PARTY COMPONENTS
+
+4.1 Portions of the Software are licensed under the Apache License, Version
+    2.0 (the "Apache Components"), as identified in the LICENSE file at the
+    root of the repository or in the license header of a file. Apache
+    Components are governed solely by the Apache License, Version 2.0, and
+    this License does not restrict any right that license grants. If this
+    License conflicts with the Apache License, Version 2.0 as to an Apache
+    Component, the Apache License controls for that component.
+
+4.2 The Software includes or depends on third-party components that are
+    licensed under their own terms, identified in the applicable LICENSE,
+    NOTICE, or module metadata. Those terms govern those components.
+
+4.3 This License governs every commit of the Software that contains the
+    LICENSE file at version 1.0 or later of this License, and every release
+    built from such a commit. The commit tagged v0.8.0, every earlier commit,
+    and every release built from them (v0.1.0 through v0.8.0) remain under
+    the Apache License, Version 2.0.
+
+
+5. CONTRIBUTIONS AND FEEDBACK
+
+5.1 Licensor accepts Contributions only under the KubeNeuron Contributor
+    License Agreement published in the repository (CLA.md). Licensor has no
+    obligation to accept or use any Contribution.
+
+5.2 If You give Licensor suggestions, ideas, or other feedback about the
+    Software, Licensor may use it for any purpose without obligation to You.
+
+
+6. PATENTS
+
+6.1 Licensor grants You a worldwide, royalty-free, non-exclusive license
+    under any patent claims that Licensor can license and that are
+    necessarily infringed by the Software as Licensor provides it, to
+    exercise the rights granted in Section 2.
+
+6.2 If You or Your Affiliate institutes patent litigation, including a
+    cross-claim or counterclaim, alleging that the Software infringes a
+    patent, all licenses granted to You under this License terminate on the
+    date that litigation is filed.
+
+
+7. TRADEMARKS
+
+7.1 This License grants no rights in the names, logos, or trademarks of
+    Licensor or of KubeNeuron (the "Marks"), except to accurately state that
+    You use or redistribute an unmodified Official Release, that Your
+    infrastructure or service uses KubeNeuron (Section 2.6), that Your
+    product or Adapter works with or is compatible with KubeNeuron, or to
+    identify an Adapter Build as Section 2.9(c) describes.
+
+7.2 You may not otherwise use the Marks for any Modified Version, Competing
+    Product, or Managed Service, or as part of the name of any product,
+    service, company, or domain, without Licensor's prior written approval.
+
+
+8. OWNERSHIP AND RESERVATION OF RIGHTS
+
+The Software is licensed, not sold. Licensor and its licensors keep all
+right, title, and interest in the Software and all Modified Versions to the
+extent they contain the Software. All rights not expressly granted in this
+License are reserved.
+
+
+9. TERMINATION
+
+9.1 This License and all rights granted under it terminate automatically if
+    You breach it. If the breach is Your first breach and can be cured,
+    Your rights are reinstated if You cure it within 30 days after Licensor
+    notifies You of it.
+
+9.2 On termination You must stop using the Software and all Modified
+    Versions, and delete all copies in Your possession or control.
+
+9.3 Sections 1, 3, 4, 5.2, 7.2, 8, 9.2, 9.3, and 10 through 14, and the
+    last sentences of Sections 2.3 and 2.8, survive termination.
+
+
+10. DISCLAIMER OF WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS, IMPLIED, OR STATUTORY, INCLUDING ANY WARRANTY OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, OR
+NON-INFRINGEMENT. THE SOFTWARE CAN TAKE AUTOMATED ACTIONS ON INFRASTRUCTURE,
+INCLUDING RESETTING, REBOOTING, DRAINING, OR REPLACING NODES AND DEVICES. YOU
+ARE SOLELY RESPONSIBLE FOR CONFIGURING, TESTING, AND APPROVING THOSE ACTIONS
+IN YOUR ENVIRONMENT AND FOR ANY RESULTING DOWNTIME, DATA LOSS, OR LOST WORK.
+LICENSOR HAS NO OBLIGATION TO PROVIDE SUPPORT, UPDATES, OR FIXES UNLESS
+AGREED IN A SEPARATE WRITTEN AGREEMENT.
+
+
+11. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, LICENSOR WILL NOT BE LIABLE FOR ANY
+INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY, OR PUNITIVE DAMAGES,
+OR FOR LOSS OF PROFITS, REVENUE, DATA, COMPUTE TIME, OR GOODWILL, ARISING OUT
+OF OR RELATING TO THIS LICENSE OR THE SOFTWARE, HOWEVER CAUSED AND UNDER ANY
+THEORY OF LIABILITY, EVEN IF ADVISED OF THEIR POSSIBILITY. LICENSOR'S TOTAL
+LIABILITY ARISING OUT OF OR RELATING TO THIS LICENSE OR THE SOFTWARE WILL NOT
+EXCEED ONE HUNDRED US DOLLARS (USD 100).
+
+
+12. INDEMNIFICATION
+
+You will defend, indemnify, and hold harmless Licensor from any third-party
+claim, and resulting losses and reasonable costs, arising from Your breach of
+this License, Your Modified Versions, or Your use of the Software in
+violation of applicable law.
+
+
+13. CHANGES TO THIS LICENSE
+
+Licensor may publish new versions of this License. Each version is identified
+by its version number and Last Modified date. Each commit of the Software, and
+each release built from it, is governed by the version of this License that
+the commit contains. A new version applies to You only for commits and
+releases that contain it, or when You accept it.
+
+
+14. GENERAL
+
+14.1 Governing law. This License is governed by the laws of the State of
+     California, United States of America, excluding its conflict-of-laws
+     rules. The United Nations Convention on Contracts for the International
+     Sale of Goods does not apply. The state and federal courts located in
+     San Francisco County, California have exclusive jurisdiction over any
+     dispute arising out of or relating to this License, and You consent to
+     their personal jurisdiction, except that Licensor may seek injunctive
+     relief in any court of competent jurisdiction.
+
+14.2 Export and sanctions. You will comply with all export control and
+     sanctions laws that apply to Your use and distribution of the Software.
+
+14.3 Assignment. You may not assign or transfer this License without
+     Licensor's prior written consent. Licensor may assign this License,
+     including to a legal entity that Licensor controls or that acquires the
+     Software.
+
+14.4 Severability. If any provision is held unenforceable, it will be
+     enforced to the maximum extent permissible, and the remaining provisions
+     remain in effect.
+
+14.5 No waiver. A failure to enforce any provision is not a waiver of it.
+
+14.6 Entire agreement. This License is the entire agreement between You and
+     Licensor about the Software, unless You and Licensor sign a separate
+     written agreement, which then controls to the extent it conflicts.
+
+
+15. COMMERCIAL LICENSES AND CONTACT
+
+To obtain rights beyond this License, including to provide a Managed Service,
+distribute a Modified Version, or embed the Software in a product, contact
+Licensor at hello@kubeneuron.com. Notices to Licensor under this License must
+be sent to that address.

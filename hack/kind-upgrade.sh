@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 set -euo pipefail
 
 # N-1 -> N upgrade scenario on kind, following docs/upgrade.md exactly:

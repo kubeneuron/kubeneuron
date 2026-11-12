@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package operator
 
 import (
@@ -13,8 +15,8 @@ import (
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
 	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
-	"github.com/kubeneuron/kubeneuron/internal/cloud"
 	"github.com/kubeneuron/kubeneuron/internal/config"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
 func testKubeNeuron() *kubeneuronv1alpha1.KubeNeuron {

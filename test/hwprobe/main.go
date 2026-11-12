@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Command hwprobe exercises the real nvidia-smi driver paths on a GPU host
 // and prints the observation as JSON. It is a hardware-qualification tool:
 // it runs exactly the parsing and preflight code the agent uses (DetectSMI,

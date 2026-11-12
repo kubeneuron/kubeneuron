@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- Bind an approval decision to the identity of the step it was made for, not
 -- just the incident. A playbook hot-swap or an incident rewind can change the
 -- action at the incident's current step index while a decision is pending; the

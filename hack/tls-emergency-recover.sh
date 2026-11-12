@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 # Recover an unavailable KubeNeuron installation by atomically replacing both
 # expired or otherwise unusable leaf references. This is deliberately not a
 # CA rotation, issuance mechanism, revocation mechanism, or Secret editor.

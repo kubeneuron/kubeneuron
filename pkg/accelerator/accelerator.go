@@ -1,7 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package accelerator contains the vendor-neutral contract between the
 // control plane and accelerator-specific adapters. It deliberately does not
 // replace the existing NVIDIA wire types yet: adapters translate this model
 // at the integration boundary.
+//
+// This package is the KubeNeuron adapter contract. It is licensed under the
+// Apache License, Version 2.0, so hardware vendors and other third parties
+// can implement, ship, and license their own adapters on their own terms.
 package accelerator
 
 import (

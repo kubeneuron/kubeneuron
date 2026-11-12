@@ -183,5 +183,18 @@ other sensitive values.
 
 ## License
 
-By contributing, you agree that your contributions are licensed under the
-[Apache 2.0 License](LICENSE).
+KubeNeuron is licensed under two licenses; see [LICENSE](LICENSE) for which
+paths each one covers. Most of the code is under the source-available
+[KubeNeuron License](Licenses/KUBENEURON_LICENSE). The API types, CRDs,
+Helm chart, and documentation are under the
+[Apache License 2.0](Licenses/APACHE_LICENSE).
+
+Every contributor must agree to the
+[KubeNeuron Contributor License Agreement](CLA.md) before their first pull
+request is merged. Add the comment shown at the end of that agreement to your
+pull request; the `CLA` check blocks the merge until you do. You keep
+ownership of your contribution.
+
+A fork made on GitHub is for preparing pull requests only. Under the
+KubeNeuron License you may not distribute, publish elsewhere, or run for
+others a modified version built from a fork.

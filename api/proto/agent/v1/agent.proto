@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Agent RPC contract: the controller calls the kubeneuron-agent on a node to
 // execute actions and check health. Transport is gRPC over mTLS.
 //

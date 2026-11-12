@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 package postgres
 
 // The terminal-state guards, run against a live PostgreSQL.

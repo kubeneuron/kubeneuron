@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Command simulator is a fake GPU node: it registers with the controller
 // like a real kubeneuron-agent and emits synthetic XID events on an interval,
 // cycling through the failure catalog. It makes the whole detection ->

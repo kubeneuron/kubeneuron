@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 """A scripted stand-in for the aws CLI, used only by hack/verify-hw-e2e-sweep.sh.
 
 It answers exactly the subset of calls `hack/hw-e2e.sh sweep` makes, from a

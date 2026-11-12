@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package notify delivers human-facing notifications: incident lifecycle
 // updates and approval requests. Implementations: slack (Block Kit buttons),
 // log (default/dev), generic webhook (Phase 2).

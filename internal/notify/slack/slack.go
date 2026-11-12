@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package slack notifies a Slack channel through an incoming webhook.
 // Messages are plain Block Kit sections; interactive Approve/Reject buttons
 // (which need a Slack app, a signing secret, and the interaction receiver)

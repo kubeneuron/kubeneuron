@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0018 — first-class approval rounds. Each park (and re-park) of an incident
 -- is one epoch: the incident carries its current epoch, and every approvals
 -- row (the request written at park, the decisions written by humans) is

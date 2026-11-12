@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package types contains the wire and domain types shared between the
 // controller, the agent, the CLI, and external integrations.
 package types

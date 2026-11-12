@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package kubernetes implements platform.Platform for Kubernetes clusters.
 // Inventory comes from watching Nodes that advertise a GPU extended resource
 // from a recognised vendor domain (see acceleratorDomains);

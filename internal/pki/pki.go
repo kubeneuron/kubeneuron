@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package pki issues and renews the mTLS material the controller and its agents
 // authenticate with.
 //

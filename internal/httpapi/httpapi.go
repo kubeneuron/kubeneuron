@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package httpapi exposes the controller's REST API: webhook receivers
 // (Alertmanager, Slack interactions), the agent event/registration
 // endpoints, and the operator/UI API (incidents, approvals, nodes, pause,

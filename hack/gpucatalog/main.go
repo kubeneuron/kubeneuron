@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Command gpucatalog renders the canonical GPU metric catalog
 // (internal/gpucatalog) into its checked-in artifacts, or verifies that the
 // checked-in artifacts are current.

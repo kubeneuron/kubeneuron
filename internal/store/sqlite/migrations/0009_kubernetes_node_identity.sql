@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0009 — bind runtime evidence to immutable Kubernetes Node identity.
 --
 -- Node names can be reused after delete/recreate. A current Pod-bound agent

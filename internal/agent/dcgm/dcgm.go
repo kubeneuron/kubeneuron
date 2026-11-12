@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package dcgm provides a deliberately narrow, bounded local DCGM version
 // probe. It does not run diagnostics or modify the host; it only supplies
 // attested runtime identity for the accelerator readiness contract.

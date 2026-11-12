@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package agentauth authenticates controller requests made by Kubernetes node
 // agents. A fleet mTLS certificate proves installation membership; a
 // Pod-bound ServiceAccount token supplies the exact Pod and node identity.

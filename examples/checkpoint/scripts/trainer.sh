@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+
 # A CPU-only stand-in for a training loop: one "step" every second, a
 # checkpoint every CHECKPOINT_EVERY steps, and two signals from the sidecar:
 #

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 # verify-docs.sh — mechanical guards against documentation rot.
 #
 # 1. Forbidden claims: every pattern in hack/stale-claims.txt is a status

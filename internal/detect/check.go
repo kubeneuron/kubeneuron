@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package detect normalizes raw observations — agent XID events and
 // Alertmanager alerts — into typed Signals that drive the incident state
 // machine. All detection policy (which XID codes matter, which alert names

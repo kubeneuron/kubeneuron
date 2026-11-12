@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 // Package sqlite is the default Store implementation, backed by SQLite in
 // WAL mode via the pure-Go modernc.org/sqlite driver (no cgo, single static
 // binary). All query, lease, and outbox logic lives in the shared sqlcore

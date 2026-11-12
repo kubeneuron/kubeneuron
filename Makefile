@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 GO        ?= go
 BIN_DIR   := bin
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -30,8 +32,14 @@ $(BINARIES): | $(BIN_DIR)
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
+# Nested modules (each has its own go.mod and is not matched by ./... from the
+# root). pkg/accelerator is the Apache-2.0 adapter contract, tagged
+# pkg/accelerator/vX.Y.Z.
+NESTED_MODULES := pkg/accelerator
+
 test:
 	$(GO) test ./...
+	@for m in $(NESTED_MODULES); do (cd $$m && $(GO) test ./...) || exit 1; done
 
 # --- gates -------------------------------------------------------------------
 #
@@ -56,6 +64,7 @@ gates:
 # passes on a quiet re-run. That is the signature of the two unreproducible
 # gate failures nobody could explain — 3.2x headroom is not headroom here.
 	$(GO) test -race -timeout 30m ./...
+	@for m in $(NESTED_MODULES); do (cd $$m && $(GO) test -race ./...) || exit 1; done
 	$(MAKE) verify-docs
 	$(MAKE) verify-hw-e2e-sweep
 	$(MAKE) verify-hw-e2e-observability
@@ -139,12 +148,15 @@ mirror:
 
 lint:
 	$(GO) vet ./...
+	python3 -I hack/verify-spdx.py
+	@for m in $(NESTED_MODULES); do (cd $$m && $(GO) vet ./... && $(GO) mod tidy -diff) || exit 1; done
 # An explicit if/else, not `command -v X && X || echo skipped`. The && chain
 # returns X's exit status into `|| echo`, so a real lint FAILURE printed
 # "not installed, skipped" and the gate passed — golangci-lint reported four
 # issues under a green `make lint`. Same fix applies to shellcheck below.
 	@if command -v golangci-lint >/dev/null 2>&1; then \
-		golangci-lint run ./...; \
+		golangci-lint run ./... && \
+		for m in $(NESTED_MODULES); do (cd $$m && golangci-lint run --config $(CURDIR)/.golangci.yml ./...) || exit 1; done; \
 	else \
 		echo "golangci-lint not installed, skipped"; \
 	fi
@@ -202,7 +214,7 @@ tidy:
 	$(GO) mod tidy
 
 generate:
-	$(GO) tool controller-gen object paths=./api/v1alpha1
+	$(GO) tool controller-gen object:headerFile=hack/boilerplate.go.txt paths=./api/v1alpha1
 	$(GO) tool controller-gen crd:allowDangerousTypes=true paths=./api/v1alpha1 output:crd:artifacts:config=config/crd/bases
 	cp config/crd/bases/*.yaml deploy/helm/kubeneuron/crds/
 	$(MAKE) generate-gpucatalog

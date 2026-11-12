@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 # verify-hw-e2e-sweep.sh — prove the hardware sweep's networking cleanup
 # without AWS.
 #

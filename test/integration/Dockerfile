@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 FROM scratch AS operator
 COPY bin/kubeneuron-operator /kubeneuron-operator
 USER 65532:65532

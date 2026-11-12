@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 -- 0009 — first-class approval rounds (see the SQLite 0018 notes): the
 -- incident carries its current park epoch and every approvals row is stamped
 -- with the epoch it belongs to. Pre-upgrade rows all default to epoch 0,

@@ -1,3 +1,4 @@
+{{/* SPDX-License-Identifier: Apache-2.0 */}}
 {{- define "kubeneuron.labels" -}}
 app.kubernetes.io/name: kube-neuron
 app.kubernetes.io/component: operator

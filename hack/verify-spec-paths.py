@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: LicenseRef-KubeNeuron
+
 """Every `spec.a.b.c` path a published doc names must exist in a generated CRD.
 
 An invented field is the most expensive kind of documentation defect: it reads
