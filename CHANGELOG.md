@@ -11,15 +11,18 @@ API is `v1alpha1`.
 
 ### Changed
 
-- **License: KubeNeuron License, Version 1.0.** KubeNeuron moves from the
+- **License: KubeNeuron License, Version 1.1.** KubeNeuron moves from the
   Apache License 2.0 to two licenses (see [LICENSE](LICENSE)): the
   source-available [KubeNeuron License](Licenses/KUBENEURON_LICENSE) for the
   core code, binaries, and images, and the Apache License 2.0 for the API
   types, the adapter contract, CRDs, Helm chart, and documentation. The
   KubeNeuron License governs every commit that contains the LICENSE file at
-  version 1.0 or later; the commit tagged v0.8.0, every earlier commit, and
-  releases v0.1.0 through v0.8.0 remain under the Apache License 2.0. In
-  short (the license text controls):
+  version 1.0 or later (Version 1.0 is the text in commit 811d80e; Version
+  1.1 lets an Adapter Build include an adapter from another Go module, with
+  the dependency, build, and packaging changes it strictly needs); the
+  commit tagged v0.8.0, every earlier commit, and releases v0.1.0 through
+  v0.8.0 remain under the Apache License 2.0. In short (the license text
+  controls):
 
   - You may use KubeNeuron for free, including in production, inside your own
     organization, and change it for your own internal use. Contractors and
@@ -33,7 +36,9 @@ API is `v1alpha1`.
     approve, defer, or schedule maintenance on the capacity they use.
   - Anyone, including hardware vendors with their own tools, may test and
     certify their products with KubeNeuron, and may build, license, and ship
-    adapters, including KubeNeuron builds that add them.
+    adapters, including KubeNeuron builds that add them, also from another Go
+    module, with only the dependency, build, and packaging changes those
+    adapters strictly need.
   - Without a separate written agreement, you may not offer KubeNeuron as a
     hosted or multi-tenant service, distribute a modified version, embed it in
     a product or platform offered under your own name, resell it, copy its
@@ -47,16 +52,29 @@ API is `v1alpha1`.
 - **Adapter contract under Apache 2.0.** The accelerator adapter contract
   moves from `internal/accelerator` to `pkg/accelerator`, now its own Go
   module (standard library only, tagged `pkg/accelerator/vX.Y.Z`). The cloud
-  provider contract moves from `internal/cloud` to `pkg/cloud`. The NVIDIA and
-  AWS implementations stay in `internal/`.
+  provider contract moves from `internal/cloud` to `pkg/cloud`, also its own
+  Go module (standard library only, tagged `pkg/cloud/vX.Y.Z`). The NVIDIA and
+  AWS implementations stay in `internal/`. Generated Go files take their SPDX
+  header from a per-licence template (`api/boilerplate.go.txt` for Apache
+  paths, `hack/boilerplate.go.txt` for KubeNeuron paths).
 
 ### Added
 
 - **Accelerator adapter registry.** `accelerator.Register`, `Build`,
   `Registered`, and `Vendors`, modelled on the cloud provider registry.
   Built-in adapters are listed in one registration file,
-  `internal/accelerator/adapters/adapters.go`, and the agent now obtains the
-  NVIDIA adapter through the registry.
+  `internal/accelerator/adapters/adapters.go`.
+- **The agent drives every enabled adapter.** The agent builds each
+  registered adapter whose vendor is enabled (`-adapter=<vendor>`, options
+  with `-adapter-option=<vendor>.<key>=<value>`; NVIDIA is still enabled by
+  `-nvidia-observation` with its existing settings). For each adapter it
+  posts one accelerator report per node and vendor from the adapter's
+  inventory, capabilities, and health checks, and sends its polled and
+  streamed detections as vendor-neutral fault events. NVIDIA preflight is
+  an optional extra interface: an adapter without it is observation-only
+  (its report is never ready and never declares a physical-device reset).
+  An adapter that fails to build fails closed for its own vendor only: it
+  posts a not-ready report and no longer stops the agent from starting.
 
 ## [v0.8.0] - 2026-11-08
 

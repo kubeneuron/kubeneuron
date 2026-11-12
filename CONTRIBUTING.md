@@ -62,6 +62,9 @@ make test-integration-kind           # also reachable directly
 ```
 
 `verify-release` runs after a tag is published, against the release itself.
+Before tagging a release, work through the
+[release checklist](docs/release-checklist.md), which includes tagging the
+`pkg/accelerator` and `pkg/cloud` adapter contract modules.
 The PostgreSQL conformance suite needs a running server:
 
 ```sh

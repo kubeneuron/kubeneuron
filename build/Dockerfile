@@ -17,9 +17,10 @@ ARG TARGETARCH
 ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
-# The adapter contract is its own module, wired in through a replace
-# directive; go mod download needs its go.mod before the full copy.
+# The adapter contract modules are wired in through replace directives;
+# go mod download needs their go.mod files before the full copy.
 COPY pkg/accelerator/go.mod pkg/accelerator/
+COPY pkg/cloud/go.mod pkg/cloud/
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \

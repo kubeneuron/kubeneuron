@@ -36,7 +36,6 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/accelerator/nvidia"
 	"github.com/kubeneuron/kubeneuron/internal/agent/actionjournal"
 	"github.com/kubeneuron/kubeneuron/internal/agent/amdhealth"
-	"github.com/kubeneuron/kubeneuron/internal/agent/dcgm"
 	"github.com/kubeneuron/kubeneuron/internal/agent/executor"
 	"github.com/kubeneuron/kubeneuron/internal/agent/gpuhealth"
 	"github.com/kubeneuron/kubeneuron/internal/agent/kmsg"
@@ -164,6 +163,14 @@ type Config struct {
 	// are retried independently and can never make this agent ready or execute
 	// a remediation action.
 	NVIDIAObservation NVIDIAObservationConfig
+	// Adapters enables registered accelerator adapters by vendor (see
+	// internal/accelerator/adapters). A vendor absent from this map, or
+	// present with Enabled false, is not built. NVIDIA is also enabled by
+	// NVIDIAObservation.Enabled, whose settings keep working unchanged; its
+	// Options are merged over the NVIDIA settings. Like NVIDIAObservation,
+	// adapters are observation-only and can never make this agent ready or
+	// execute an action.
+	Adapters map[accelerator.Vendor]AdapterConfig
 	// AMDDetection controls the optional AMD detection source. Like every
 	// other second source it is observation-only and can never execute an
 	// action.
@@ -224,6 +231,10 @@ type Agent struct {
 	client      *http.Client
 	log         *slog.Logger
 	nvidia      *nvidiaObservation
+	// adapters holds one entry per enabled, registered accelerator adapter,
+	// in registry order, including adapters that failed to build (which fail
+	// closed for their own vendor only).
+	adapters []*adapterRuntime
 
 	bootIDOnce sync.Once
 	bootID     string
@@ -428,51 +439,7 @@ func New(cfg Config, driver nvml.GPUDriver, log *slog.Logger) (*Agent, error) {
 				"thermal_critical_c", cfg.AMDDetection.ThermalCriticalC)
 		}
 	}
-	if cfg.NVIDIAObservation.Enabled {
-		// A configuration declaration cannot make the simulator or another
-		// vendor's GPUDriver into NVIDIA evidence. The command only constructs
-		// *nvml.SMI after finding nvidia-smi, and this concrete check keeps the
-		// same boundary for all programmatic callers.
-		if _, realSMI := driver.(*nvml.SMI); !realSMI {
-			log.Warn("NVIDIA observation disabled: no real nvidia-smi runtime evidence")
-			return agent, nil
-		}
-		// The adapter comes from the registry (internal/accelerator/adapters),
-		// so the agent depends on the adapter contract rather than on a
-		// constructor. Preflight is NVIDIA-specific and outside that contract;
-		// a registered adapter that does not provide it fails closed.
-		adapter, err := accelerator.Build(context.Background(), accelerator.VendorNVIDIA, accelerator.Config{
-			NodeName:       cfg.NodeName,
-			DriverVersion:  cfg.NVIDIAObservation.DriverVersion,
-			RuntimeVersion: cfg.NVIDIAObservation.RuntimeVersion,
-			Options: map[string]string{
-				nvidia.OptionPartitionTopology: string(cfg.NVIDIAObservation.PartitionTopology),
-			},
-			Host: driver,
-			Now: func() time.Time {
-				return agent.now()
-			},
-		})
-		if err != nil {
-			_ = releaseActionJournalLock(journalLock)
-			return nil, fmt.Errorf("configure NVIDIA observation: %w", err)
-		}
-		preflight, ok := adapter.(nvidiaPreflighter)
-		if !ok {
-			_ = releaseActionJournalLock(journalLock)
-			return nil, fmt.Errorf("configure NVIDIA observation: registered NVIDIA adapter does not provide preflight")
-		}
-		agent.nvidia = &nvidiaObservation{
-			preflight:                preflight,
-			runtimeProber:            dcgm.NewWithEndpoint(cfg.NVIDIAObservation.DCGMPath, cfg.NVIDIAObservation.DCGMEndpoint),
-			dcgmPath:                 cfg.NVIDIAObservation.DCGMPath,
-			driverVersion:            cfg.NVIDIAObservation.DriverVersion,
-			runtimeVersion:           cfg.NVIDIAObservation.RuntimeVersion,
-			profileDigest:            cfg.NVIDIAObservation.ProfileDigest,
-			useControllerProfile:     cfg.NVIDIAObservation.UseControllerProfile,
-			useObservedDriverVersion: true,
-		}
-	}
+	agent.buildAdapters(cfg, driver)
 	return agent, nil
 }
 
@@ -589,6 +556,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		a.log.Warn("initial registration failed, will retry", "err", err)
 	}
 	a.reportNVIDIA(ctx)
+	a.reportAdapters(ctx)
+	adapterEvents := a.watchAdapterDetections(ctx)
+	a.pollAdapterDetections(ctx)
 
 	events, err := a.watcher.Watch(ctx)
 	if err != nil {
@@ -671,6 +641,14 @@ func (a *Agent) Run(ctx context.Context) error {
 				continue
 			}
 			a.handleDetection(ctx, ev, "amdhealth")
+		case ev, ok := <-adapterEvents:
+			if !ok {
+				// Every adapter stream has ended. Polling continues on the tick.
+				adapterEvents = nil
+				a.log.Error("accelerator adapter detection streams stopped")
+				continue
+			}
+			a.handleDetection(ctx, ev.event, ev.source)
 		case <-retry.C:
 			if events == nil && ctx.Err() == nil {
 				if ch, err := a.watcher.Watch(ctx); err != nil {
@@ -684,6 +662,8 @@ func (a *Agent) Run(ctx context.Context) error {
 				a.log.Debug("registration heartbeat failed", "err", err)
 			}
 			a.reportNVIDIA(ctx)
+			a.reportAdapters(ctx)
+			a.pollAdapterDetections(ctx)
 			a.flushSpool(ctx)
 		}
 	}

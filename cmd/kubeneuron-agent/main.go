@@ -20,6 +20,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/agent"
 	"github.com/kubeneuron/kubeneuron/internal/agent/dcgm"
 	"github.com/kubeneuron/kubeneuron/internal/agent/nvml"
+	"github.com/kubeneuron/kubeneuron/pkg/accelerator"
 )
 
 var version = "dev"
@@ -128,7 +129,14 @@ func main() {
 			"retired-page count at or above which an AMD GPU is reported as OUT OF SPARE MEMORY (a replace-the-device condition) rather than as having retired a page successfully; 0 (default) never makes that claim, because the bad-page budget is SKU-specific",
 		)
 		showVersion = flag.Bool("version", false, "print version and exit")
+		adapters    = adapterFlags{}
 	)
+	flag.Func("adapter",
+		"enable the registered accelerator adapter for this vendor (repeatable, e.g. -adapter=amd); NVIDIA is also enabled by -nvidia-observation",
+		adapters.enable)
+	flag.Func("adapter-option",
+		"pass an option to an accelerator adapter as vendor.key=value (repeatable, e.g. -adapter-option=amd.tool=amd-smi)",
+		adapters.option)
 	flag.Parse()
 
 	if *showVersion {
@@ -202,6 +210,7 @@ func main() {
 			ProfileDigest:        *nvidiaProfileDigest,
 			UseControllerProfile: *nvidiaControllerProfile,
 		},
+		Adapters: adapters.config,
 		AMDDetection: agent.AMDDetectionConfig{
 			Enabled:                 *amdDetection,
 			AMDSMIPath:              *amdSMIPath,
@@ -225,6 +234,47 @@ func main() {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}
+}
+
+// adapterFlags collects -adapter and -adapter-option into the agent's
+// per-vendor adapter configuration.
+type adapterFlags struct {
+	config map[accelerator.Vendor]agent.AdapterConfig
+}
+
+func (f *adapterFlags) entry(vendor accelerator.Vendor) agent.AdapterConfig {
+	if f.config == nil {
+		f.config = map[accelerator.Vendor]agent.AdapterConfig{}
+	}
+	return f.config[vendor]
+}
+
+func (f *adapterFlags) enable(value string) error {
+	vendor := accelerator.Vendor(strings.TrimSpace(value))
+	if !vendor.Valid() {
+		return fmt.Errorf("adapter vendor must not be empty")
+	}
+	entry := f.entry(vendor)
+	entry.Enabled = true
+	f.config[vendor] = entry
+	return nil
+}
+
+func (f *adapterFlags) option(value string) error {
+	qualified, optionValue, ok := strings.Cut(value, "=")
+	vendorName, key, dotted := strings.Cut(qualified, ".")
+	vendor := accelerator.Vendor(strings.TrimSpace(vendorName))
+	key = strings.TrimSpace(key)
+	if !ok || !dotted || !vendor.Valid() || key == "" {
+		return fmt.Errorf("adapter option %q must be vendor.key=value", value)
+	}
+	entry := f.entry(vendor)
+	if entry.Options == nil {
+		entry.Options = map[string]string{}
+	}
+	entry.Options[key] = optionValue
+	f.config[vendor] = entry
+	return nil
 }
 
 func nvidiaPartitionTopologyValue(value string) nvidia.PartitionTopology {
