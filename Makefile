@@ -33,9 +33,9 @@ $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
 # Nested modules (each has its own go.mod and is not matched by ./... from the
-# root). pkg/accelerator is the Apache-2.0 adapter contract, tagged
-# pkg/accelerator/vX.Y.Z.
-NESTED_MODULES := pkg/accelerator
+# root). pkg/accelerator and pkg/cloud are the adapter contract,
+# tagged pkg/accelerator/vX.Y.Z and pkg/cloud/vX.Y.Z.
+NESTED_MODULES := pkg/accelerator pkg/cloud
 
 test:
 	$(GO) test ./...
