@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: Apache-2.0
+
 -- 0008 — bind accelerator reports to an exact runtime-profile revision.
 --
 -- A digest alone is insufficient for a Kubernetes-native acknowledgement:

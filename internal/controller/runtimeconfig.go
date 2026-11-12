@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package controller
 
 // This file is the runtime-configuration seam: one immutable snapshot of

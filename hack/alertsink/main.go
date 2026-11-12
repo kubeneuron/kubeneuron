@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Command alertsink is a deterministic webhook recorder for the kind GPU
 // observability fixture (hack/kind-gpu-observability.sh).
 //

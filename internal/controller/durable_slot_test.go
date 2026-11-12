@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package controller
 
 // Round-7 item A: remediation-slot ownership is the durable

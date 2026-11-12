@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: Apache-2.0
+
 -- 0001_init.sql — complete KubeNeuron schema, PostgreSQL dialect.
 --
 -- PostgreSQL deployments have no legacy databases to baseline, so this one

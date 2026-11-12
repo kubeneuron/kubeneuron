@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package controller
 
 // Round-7 item C: arming as data. The controller refuses an agent-destructive

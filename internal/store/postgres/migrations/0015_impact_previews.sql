@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: Apache-2.0
+
 -- 0015 — impact previews and the digest an approval binds to (v0.8
 -- development). Keep this schema in lockstep with SQLite 0024; see its notes.
 CREATE TABLE IF NOT EXISTS impact_previews (

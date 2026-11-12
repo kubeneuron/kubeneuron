@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package playbook defines the declarative remediation playbooks, the YAML
 // loader that reads them, and the incident state machine that executes them
 // step by step.

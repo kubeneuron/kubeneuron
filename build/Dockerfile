@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1
+# SPDX-License-Identifier: Apache-2.0
+
 # Production multi-target build for the four KubeNeuron binaries.
 # TARGETOS/TARGETARCH are set by buildx for multi-arch builds and default to
 # the native platform under the classic builder (empty GOOS/GOARCH).
@@ -15,6 +17,9 @@ ARG TARGETARCH
 ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
+# The adapter contract is its own module, wired in through a replace
+# directive; go mod download needs its go.mod before the full copy.
+COPY pkg/accelerator/go.mod pkg/accelerator/
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \

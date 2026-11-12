@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: Apache-2.0
+
 -- 0001_init.sql — initial KubeNeuron controller schema (SQLite dialect).
 
 CREATE TABLE IF NOT EXISTS incidents (

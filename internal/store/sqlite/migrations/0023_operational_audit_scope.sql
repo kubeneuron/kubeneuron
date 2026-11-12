@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: Apache-2.0
+
 -- 0023 — preserve tenant/cluster scope in the global v0.4.0 audit explorer.
 --
 -- A hash-chain event can outlive the resource summary it describes, so scope

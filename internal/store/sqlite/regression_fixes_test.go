@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package sqlite
 
 // Regression tests for three STORE-layer defects. On SQLite the single writer

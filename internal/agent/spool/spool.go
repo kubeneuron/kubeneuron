@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package spool is a bounded, file-backed retry queue for agent events. When
 // the controller is unreachable, events are appended (fsynced) and later
 // replayed in FIFO batches. Replay is at-least-once; the controller

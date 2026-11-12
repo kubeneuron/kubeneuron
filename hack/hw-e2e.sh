@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+
 # shellcheck disable=SC2016 # Single-quoted jq programs expand jq, not shell, variables.
 set -Eeuo pipefail
 

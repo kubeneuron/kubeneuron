@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package gpucatalog is the canonical, versioned catalog of the GPU
 // observability signals KubeNeuron knows about.
 //

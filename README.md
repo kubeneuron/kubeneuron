@@ -597,4 +597,5 @@ behavior.
 
 ## License
 
-[Apache 2.0](LICENSE)
+KubeNeuron is open source under the Apache License, Version 2.0. See
+[LICENSE](LICENSE).

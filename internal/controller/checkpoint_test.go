@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package controller
 
 // The checkpoint coordination pre-phase (checkpoint.go), driven through the

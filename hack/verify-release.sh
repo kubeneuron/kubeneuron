@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+
 # verify-release.sh — check a PUBLISHED release the way a stranger would.
 #
 # Everything else in this repository verifies inputs: the code, the manifests,

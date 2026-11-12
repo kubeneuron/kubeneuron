@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: Apache-2.0
+
 -- 0021 — durable v0.4.0 operational product resources.
 --
 -- Every resource body is normalized JSON behind a versioned envelope.  The

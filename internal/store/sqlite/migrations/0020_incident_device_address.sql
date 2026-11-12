@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: Apache-2.0
+
 -- An incident about a device must be able to name that device even when the
 -- device is too broken to name itself.
 --

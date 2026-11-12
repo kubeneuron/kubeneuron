@@ -9,7 +9,23 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **Adapter contract in `pkg/`.** The accelerator adapter contract
+  moves from `internal/accelerator` to `pkg/accelerator`, now its own Go
+  module (standard library only, tagged `pkg/accelerator/vX.Y.Z`). The cloud
+  provider contract moves from `internal/cloud` to `pkg/cloud`. The NVIDIA and
+  AWS implementations stay in `internal/`. Every source file carries an
+  `SPDX-License-Identifier: Apache-2.0` header, checked by
+  `hack/verify-spdx.py` in `make lint` and CI.
+
+### Added
+
+- **Accelerator adapter registry.** `accelerator.Register`, `Build`,
+  `Registered`, and `Vendors`, modelled on the cloud provider registry.
+  Built-in adapters are listed in one registration file,
+  `internal/accelerator/adapters/adapters.go`, and the agent now obtains the
+  NVIDIA adapter through the registry.
 
 ## [v0.8.0] - 2026-11-08
 

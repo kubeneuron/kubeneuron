@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package amdhealth is the AMD sibling of internal/agent/gpuhealth: a
 // polling, observation-only detection source that turns amd-smi (preferred) or
 // rocm-smi (fallback) output into the same vendor-neutral types.AgentEvent the

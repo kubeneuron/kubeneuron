@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package nvml wraps the NVIDIA Management Library behind a small interface
 // so the rest of the agent (and the test simulator) never touches NVML
 // directly.

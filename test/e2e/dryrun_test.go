@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package e2e drives the full dry-run remediation loop in-process: real
 // HTTP ingestion (webhook and authenticated agent routes), the real shipped
 // policies and playbooks, the real reconcile walk, the operator REST API,

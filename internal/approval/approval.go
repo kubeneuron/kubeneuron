@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package approval manages the human-approval workflow for risky playbook
 // steps: parking incidents in AWAITING_APPROVAL, recording decisions from
 // any channel (Slack, CLI, Web UI), and expiring stale requests.

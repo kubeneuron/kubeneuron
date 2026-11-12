@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package postgres
 
 // Conformance tests against a live PostgreSQL. They run when

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package postgres
 
 // Regression tests for three STORE-layer defects, exercised against a live

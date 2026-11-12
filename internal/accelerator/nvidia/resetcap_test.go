@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package nvidia
 
 import (
@@ -6,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kubeneuron/kubeneuron/internal/accelerator"
 	"github.com/kubeneuron/kubeneuron/internal/agent/nvml"
+	"github.com/kubeneuron/kubeneuron/pkg/accelerator"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 

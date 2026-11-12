@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Command gpucatalog renders the canonical GPU metric catalog
 // (internal/gpucatalog) into its checked-in artifacts, or verifies that the
 // checked-in artifacts are current.

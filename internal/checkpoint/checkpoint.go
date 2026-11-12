@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package checkpoint holds the pure policy core of checkpoint-aware
 // remediation (docs/checkpoint-coordination-design.md): the annotation
 // contract a workload uses to opt in, the operator policy that bounds how long

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+
 # verify-hw-e2e-observability.sh — prove the hardware harness's v0.7 GPU
 # operator profile wiring and test-observability phase without AWS.
 #

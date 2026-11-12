@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+
 # Performs one explicit phase of a routine KubeNeuron TLS rotation.
 # Candidate Secrets are external, immutable, and versioned; this script never
 # creates, mutates, prints, or deletes Secret data.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Command kubeneuron-operator runs the Kubernetes control plane for
 // KubeNeuron. It reconciles CRD configuration into runtime resources and
 // delegates storage-heavy dependencies to their dedicated operators.

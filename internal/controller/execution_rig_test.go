@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package controller
 
 // Round-7 item 7.3: the assembled execution/recovery rig. The ingestion half

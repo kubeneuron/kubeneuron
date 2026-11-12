@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package config loads and validates the controller configuration
 // (configs/policies.yaml): safety limits, approval settings, and the
 // signal-class → playbook policy bindings.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package pki issues and renews the mTLS material the controller and its agents
 // authenticate with.
 //

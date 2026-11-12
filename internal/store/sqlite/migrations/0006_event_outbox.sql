@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: Apache-2.0
+
 -- 0006 — durable event outbox. Event archival and pending workflow delivery
 -- are committed together by ArchiveAndEnqueueEvent. event_row_id is unique so
 -- one archived row can result in at most one workflow item.

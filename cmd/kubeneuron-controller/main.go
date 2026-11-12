@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Command kubeneuron-controller is the KubeNeuron control plane: it ingests
 // alerts and agent events, drives the incident state machine, and executes
 // remediation playbooks through the safety gates.

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+
 """Render the shipped Alertmanager configuration for the kind fixture.
 
 Reads spec.configRawYaml from the checked-in VMAlertmanager resource

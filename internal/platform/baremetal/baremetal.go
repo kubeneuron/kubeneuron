@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Package baremetal implements platform.Platform for nodes without an
 // orchestrator. Inventory comes from a static YAML file
 // (configs/inventory.yaml) merged with agent self-registrations; workload

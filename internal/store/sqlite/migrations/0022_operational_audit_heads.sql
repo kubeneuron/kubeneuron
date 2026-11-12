@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: Apache-2.0
+
 -- 0022 — serialize each v0.4.0 audit hash chain across concurrent writers.
 --
 -- operational_audit is append-only, but a SELECT-last-hash followed by an

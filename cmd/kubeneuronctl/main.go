@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Command kubeneuronctl is the operator CLI for KubeNeuron.
 package main
 

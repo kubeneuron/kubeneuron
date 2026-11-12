@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: Apache-2.0
+
 -- 0006 — persist the vendor-neutral fault envelope and PCI address through the
 -- durable event outbox (see the SQLite 0015 notes).
 --

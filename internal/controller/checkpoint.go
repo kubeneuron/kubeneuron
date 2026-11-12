@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package controller
 
 // This file is the checkpoint coordination PRE-PHASE of the two disruption

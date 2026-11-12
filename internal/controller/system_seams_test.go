@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package controller
 
 // System-level tests through the real wiring: HandleAgentEvent → durable
