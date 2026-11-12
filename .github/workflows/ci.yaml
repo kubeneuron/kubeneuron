@@ -52,15 +52,19 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Adapter contract module (pkg/accelerator)
-        # Its own go.mod, so the root ./... does not reach it. It must stay
-        # standard-library only and tidy.
-        working-directory: pkg/accelerator
+      - name: Adapter contract modules (pkg/accelerator, pkg/cloud)
+        # Each has its own go.mod, so the root ./... does not reach them. They
+        # must stay standard-library only and tidy.
         run: |
-          go vet ./...
-          go mod tidy -diff
-          test -z "$(go list -deps ./... | grep '\.' | grep -v '^github.com/kubeneuron/kubeneuron/pkg/accelerator')"
-          go test -race -count=1 ./...
+          for m in pkg/accelerator pkg/cloud; do
+            (
+              cd "$m"
+              go vet ./...
+              go mod tidy -diff
+              test -z "$(go list -deps ./... | grep '\.' | grep -v "^github.com/kubeneuron/kubeneuron/$m")"
+              go test -race -count=1 ./...
+            )
+          done
 
       - name: Test (both store backends)
         env:
@@ -195,11 +199,18 @@ jobs:
         with:
           version: v2.14.0
 
-      - name: golangci-lint (adapter contract module)
+      - name: golangci-lint (pkg/accelerator module)
         uses: golangci/golangci-lint-action@v8
         with:
           version: v2.14.0
           working-directory: pkg/accelerator
+          args: --config ${{ github.workspace }}/.golangci.yml
+
+      - name: golangci-lint (pkg/cloud module)
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.14.0
+          working-directory: pkg/cloud
           args: --config ${{ github.workspace }}/.golangci.yml
 
       - name: SPDX headers match LICENSE

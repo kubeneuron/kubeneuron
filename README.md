@@ -598,7 +598,7 @@ behavior.
 ## License
 
 KubeNeuron is source-available under the
-[KubeNeuron License, Version 1.0](Licenses/KUBENEURON_LICENSE), which covers
+[KubeNeuron License, Version 1.1](Licenses/KUBENEURON_LICENSE), which covers
 the core code and all binaries and images. The API types, the adapter
 contract ([`pkg/accelerator`](pkg/accelerator) and [`pkg/cloud`](pkg/cloud)),
 CRDs, Helm chart, and documentation are under the
@@ -617,7 +617,9 @@ paths each license covers. In short (the license text controls):
   approve, defer, or schedule maintenance on the capacity they use.
 - Anyone, including hardware vendors with their own tools, may test and
   certify their products with KubeNeuron, and may build, license, and ship
-  adapters, including KubeNeuron builds that add them.
+  adapters, including KubeNeuron builds that add them, also from another Go
+  module, with only the dependency, build, and packaging changes those
+  adapters strictly need.
 - Without a separate written agreement, you may not offer KubeNeuron as a
   hosted or multi-tenant service, distribute a modified version, embed it in
   a product or platform offered under your own name, resell it, copy its

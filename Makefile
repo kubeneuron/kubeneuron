@@ -33,9 +33,9 @@ $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
 # Nested modules (each has its own go.mod and is not matched by ./... from the
-# root). pkg/accelerator is the Apache-2.0 adapter contract, tagged
-# pkg/accelerator/vX.Y.Z.
-NESTED_MODULES := pkg/accelerator
+# root). pkg/accelerator and pkg/cloud are the Apache-2.0 adapter contract,
+# tagged pkg/accelerator/vX.Y.Z and pkg/cloud/vX.Y.Z.
+NESTED_MODULES := pkg/accelerator pkg/cloud
 
 test:
 	$(GO) test ./...
@@ -213,8 +213,17 @@ lint:
 tidy:
 	$(GO) mod tidy
 
+# Generated Go files carry the SPDX header of the licence that covers their
+# path (see LICENSE): api/boilerplate.go.txt (Apache-2.0) is only for
+# generators whose paths= are under an Apache path (api/, pkg/);
+# hack/boilerplate.go.txt (LicenseRef-KubeNeuron) is for everything else
+# (cmd/, internal/). hack/verify-spdx.py also checks generated files, so a
+# generator that stamps the wrong licence fails make lint and CI.
+BOILERPLATE_APACHE := api/boilerplate.go.txt
+BOILERPLATE_KUBENEURON := hack/boilerplate.go.txt
+
 generate:
-	$(GO) tool controller-gen object:headerFile=hack/boilerplate.go.txt paths=./api/v1alpha1
+	$(GO) tool controller-gen object:headerFile=$(BOILERPLATE_APACHE) paths=./api/v1alpha1
 	$(GO) tool controller-gen crd:allowDangerousTypes=true paths=./api/v1alpha1 output:crd:artifacts:config=config/crd/bases
 	cp config/crd/bases/*.yaml deploy/helm/kubeneuron/crds/
 	$(MAKE) generate-gpucatalog

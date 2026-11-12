@@ -1,5 +1,5 @@
 KubeNeuron License
-Version 1.0
+Version 1.1
 Last Modified: November 12, 2026
 
 These terms (the "License") are an agreement between Andrii Petruk
@@ -23,7 +23,9 @@ control):
   approve, defer, or schedule maintenance on the capacity they use.
 - Anyone, including hardware vendors with their own tools, may test and
   certify their products with KubeNeuron, and may build, license, and ship
-  adapters, including KubeNeuron builds that add them.
+  adapters, including KubeNeuron builds that add them, also from another Go
+  module, with only the dependency, build, and packaging changes those
+  adapters strictly need.
 - Without a separate written agreement, you may not offer KubeNeuron as a
   hosted or multi-tenant service, distribute a modified version, embed it in
   a product or platform offered under your own name, resell it, copy its
@@ -131,10 +133,16 @@ control):
     colocation, or hosting provider, or a managed Kubernetes or AI platform
     running on infrastructure that it operates.
 
-1.16 "Registration Code" means additions to the registration file that the
-    LICENSE file names for that kind of Adapter, and to no other file, that
-    only import an Adapter and register it through the registration
-    functions of the Adapter Contract.
+1.16 "Registration Code" means only:
+    (a) additions to the registration file that the LICENSE file names for
+        that kind of Adapter that only import an Adapter and register it
+        through the registration functions of the Adapter Contract; and
+    (b) changes to dependency manifests (such as go.mod, go.sum, and a
+        vendor directory) and to build and packaging files (such as
+        Dockerfiles and Helm values files), of the kinds the LICENSE file
+        names, that are strictly necessary to compile, package, and run the
+        Adapters in an Adapter Build, and nothing else.
+    No other change to the Software is Registration Code.
 
 
 2. LICENSE GRANTS
@@ -211,8 +219,10 @@ right to sublicense except as stated in Sections 2.4 and 2.9, to:
     code of an Official Release together with one or more Adapters and their
     Registration Code (an "Adapter Build"), and use and distribute the
     Adapter Build, provided that:
-    (a) the Software in it is unchanged except for Registration Code, and all
-        copyright, license, and trademark notices are kept;
+    (a) the Software in it is unchanged except for Registration Code,
+        including the dependency, build, and packaging changes that Section
+        1.16(b) permits, and all copyright, license, and trademark notices
+        are kept;
     (b) You provide each recipient with a copy of this License, and the
         Software in the Adapter Build remains governed by this License for
         each recipient;
