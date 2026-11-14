@@ -194,7 +194,7 @@ func TestQualificationCreateRejectsInvalidRequestsBeforeReservingKey(t *testing.
 		"no nodes":         {func(r *RuntimeContractQualificationRequest) { r.Nodes = nil }, "at least one node", nil},
 		"blank node":       {func(r *RuntimeContractQualificationRequest) { r.Nodes = []string{"gpu-a", " "} }, "must not be blank", nil},
 		"duplicate node":   {func(r *RuntimeContractQualificationRequest) { r.Nodes = []string{"gpu-a", " gpu-a"} }, "more than once", nil},
-		"invalid vendor":   {func(r *RuntimeContractQualificationRequest) { r.Vendor = "cuda" }, "vendor must be", nil},
+		"invalid vendor":   {func(r *RuntimeContractQualificationRequest) { r.Vendor = "CUDA" }, "vendor must be", nil},
 		"zero samples":     {func(r *RuntimeContractQualificationRequest) { r.Requirements.MinSamples = 0 }, "min_samples", nil},
 		"too many samples": {func(r *RuntimeContractQualificationRequest) { r.Requirements.MinSamples = maxQualificationSamples + 1 }, "min_samples", nil},
 		"zero duration":    {func(r *RuntimeContractQualificationRequest) { r.Requirements.MinDuration = 0 }, "min_duration", nil},

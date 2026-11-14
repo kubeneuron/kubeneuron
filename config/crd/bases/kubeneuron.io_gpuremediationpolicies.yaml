@@ -124,10 +124,12 @@ spec:
                       A signal that names NO vendor does not match a vendor-scoped policy. That
                       is deliberate: these ladders reset and reboot hardware, so acting on an
                       unconfirmed guess is the wrong direction to fail in.
-                    enum:
-                    - nvidia
-                    - amd
-                    - intel
+
+                      Any vendor id is accepted (lowercase letters, digits, and hyphens, at
+                      most 32 characters), so a policy can scope a ladder to the vendor of an
+                      accelerator adapter added after this API version.
+                    maxLength: 32
+                    pattern: ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$
                     type: string
                 required:
                 - class

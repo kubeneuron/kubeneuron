@@ -46,8 +46,10 @@ type AcceleratorRuntimeProfile struct {
 	// NodeSelector uses Kubernetes matchLabels semantics. It must be nonempty
 	// so a profile cannot silently cover every node in an installation.
 	NodeSelector map[string]string `yaml:"node_selector"`
-	// Vendor is deliberately NVIDIA-only in this first gate. Other vendors
-	// require an explicit contract and must not inherit NVIDIA permissions.
+	// Vendor is any well-formed vendor id. A profile for a vendor other than
+	// NVIDIA admits no action today: CheckReport requires a ready report, and
+	// only the NVIDIA preflight produces one. Other vendors never inherit
+	// NVIDIA permissions.
 	Vendor types.AcceleratorVendor `yaml:"vendor"`
 	// ProfileDigest pins the reviewed runtime/profile asset used by the agent.
 	// It must equal the agent report's profile_digest before any action can be
@@ -99,8 +101,8 @@ func (p AcceleratorRuntimeProfile) Validate() error {
 	if strings.TrimSpace(p.Name) != p.Name {
 		return fmt.Errorf("accelerator runtime profile %q: name must not have leading or trailing whitespace", p.Name)
 	}
-	if p.Vendor != types.AcceleratorVendorNVIDIA {
-		return fmt.Errorf("accelerator runtime profile %q: vendor must be %q until another vendor contract is implemented", p.Name, types.AcceleratorVendorNVIDIA)
+	if !p.Vendor.Valid() {
+		return fmt.Errorf("accelerator runtime profile %q: vendor %q is not a valid vendor id", p.Name, p.Vendor)
 	}
 	if len(p.NodeSelector) == 0 {
 		return fmt.Errorf("accelerator runtime profile %q: node_selector is required and cannot select every node", p.Name)

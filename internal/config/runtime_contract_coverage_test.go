@@ -375,7 +375,7 @@ func TestAssessRuntimeContractCoverage(t *testing.T) {
 		},
 		{
 			name:          "invalid vendor",
-			mutate:        func(in *RuntimeContractCoverageInput) { in.Vendor = "quantum" },
+			mutate:        func(in *RuntimeContractCoverageInput) { in.Vendor = "Quantum Inc" },
 			selection:     RuntimeContractSelectionInvalid,
 			attestation:   RuntimeContractAttestationNotApplicable,
 			depth:         RuntimeContractVerificationUnavailable,

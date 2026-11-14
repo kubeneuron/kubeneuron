@@ -88,3 +88,43 @@ func controllerAcceleratorReport() types.AgentAcceleratorReport {
 		ProfileDigest: "sha256:controller-test",
 	}
 }
+
+// A vendor outside the four built-in constants reports like any other: the
+// protocol is open to every well-formed vendor id, so an accelerator adapter
+// for a new vendor gets its report stored and served back.
+func TestAReportFromANewVendorIsStoredAndReturned(t *testing.T) {
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	c := New(st, nil, nil, nil, nil, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+	if err := st.UpsertNode(ctx, &types.Node{Name: "node-a"}); err != nil {
+		t.Fatal(err)
+	}
+	report := types.AgentAcceleratorReport{
+		Node: "node-a", NodeUID: "node-uid-a", Vendor: "acme",
+		ObservedAt:       time.Date(2026, time.November, 14, 9, 0, 0, 0, time.UTC),
+		DriverVersion:    "acme-drv-2.1",
+		TopologySafety:   types.AcceleratorTopologyUnknown,
+		Devices:          []types.AgentAcceleratorDevice{{ID: "acme-0", Kind: types.AcceleratorDevicePhysical, Family: types.AcceleratorFamilyGPU}},
+		Capabilities:     []types.AgentAcceleratorCapability{},
+		Readiness:        types.AcceleratorReadinessDegraded,
+		ReadinessReasons: []string{"observation only: the acme adapter provides no runtime preflight"},
+	}
+	if err := report.Validate(); err != nil {
+		t.Fatalf("an acme report must be valid: %v", err)
+	}
+	req := httptest.NewRequest("POST", types.AgentAcceleratorReportPath, nil)
+	if err := c.HandleAcceleratorReport(req, report); err != nil {
+		t.Fatalf("HandleAcceleratorReport(acme) = %v", err)
+	}
+	reports, err := c.AcceleratorReports(ctx, "node-a")
+	if err != nil || len(reports) != 1 {
+		t.Fatalf("AcceleratorReports() = %+v, %v", reports, err)
+	}
+	if got := reports[0]; got.Vendor != "acme" || len(got.Devices) != 1 || got.Devices[0].ID != "acme-0" || got.DriverVersion != "acme-drv-2.1" {
+		t.Fatalf("returned report = %+v", got)
+	}
+}

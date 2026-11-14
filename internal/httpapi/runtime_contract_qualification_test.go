@@ -405,7 +405,7 @@ func TestRuntimeContractQualificationStrictDecodeAndIdempotencyKey(t *testing.T)
 		{"create bad expiry", qualificationRoute, `{"actor":"alice","nodes":["gpu-b"],"vendor":"nvidia","requirements":{"min_samples":1,"min_duration":"1m"},"expires_at":"tomorrow"}`, "bad request"},
 		{"create missing expiry", qualificationRoute, `{"actor":"alice","nodes":["gpu-b"],"vendor":"nvidia","requirements":{"min_samples":1,"min_duration":"1m"}}`, "expiry is required"},
 		{"create zero samples", qualificationRoute, `{"actor":"alice","nodes":["gpu-b"],"vendor":"nvidia","requirements":{"min_samples":0,"min_duration":"1m"},"expires_at":"2026-09-05T12:20:00Z"}`, "min_samples"},
-		{"create bad vendor", qualificationRoute, `{"actor":"alice","nodes":["gpu-b"],"vendor":"cuda","requirements":{"min_samples":1,"min_duration":"1m"},"expires_at":"2026-09-05T12:20:00Z"}`, "vendor must be"},
+		{"create bad vendor", qualificationRoute, `{"actor":"alice","nodes":["gpu-b"],"vendor":"CUDA","requirements":{"min_samples":1,"min_duration":"1m"},"expires_at":"2026-09-05T12:20:00Z"}`, "vendor must be"},
 		{"create trailing json", qualificationRoute, qualificationCreateBody(`"gpu-b"`, "") + `{}`, "multiple JSON values"},
 		{"create missing actor", qualificationRoute, `{"nodes":["gpu-b"],"vendor":"nvidia","requirements":{"min_samples":1,"min_duration":"1m"},"expires_at":"2026-09-05T12:20:00Z"}`, "actor is required"},
 		{"observe unknown field", observe, `{"actor":"bob","successful":true}`, "unknown field"},

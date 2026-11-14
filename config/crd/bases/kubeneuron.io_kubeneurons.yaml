@@ -56,6 +56,116 @@ spec:
               agent:
                 description: AgentSpec configures the node agent managed by the operator.
                 properties:
+                  adapters:
+                    description: |-
+                      Adapters enables registered accelerator adapters in the agent, one
+                      entry per vendor. The operator renders one --adapter=<vendor> per entry
+                      and one --adapter-option=<vendor>.<key>=<value> per option, in vendor
+                      and key order. NVIDIA observation stays enabled as before whether or not
+                      it is listed; an "nvidia" entry only adds options.
+
+                      On a mixed fleet one agent DaemonSet runs on every accelerator node, so
+                      an adapter listed here also starts on nodes without its hardware. An
+                      adapter reports that case (accelerator.ErrNotPresent) and the agent
+                      skips that vendor on that node quietly.
+
+                      Adapters the operator was started with (--default-agent-adapters, the
+                      Helm value agentAdapters) are added to this list; an entry here replaces
+                      a default entry for the same vendor.
+                    items:
+                      description: AgentAdapterSpec enables one registered accelerator
+                        adapter.
+                      properties:
+                        hostTooling:
+                          description: |-
+                            HostTooling mounts this adapter's host binaries, libraries, and device
+                            nodes into the agent, for vendors whose tooling the agent image does not
+                            ship (for example amd-smi).
+                          properties:
+                            binDirs:
+                              description: |-
+                                BinDirs are host directories holding the vendor's tools. Each is
+                                mounted read-only at /host/adapters/<vendor>/bin/<i> and appended to
+                                the agent's PATH after the system directories, so a host tool never
+                                shadows one shipped in the agent image.
+                              items:
+                                maxLength: 4096
+                                type: string
+                                x-kubernetes-validations:
+                                - message: binDirs entries must be absolute host paths
+                                    without ':' or '..'
+                                  rule: self.startsWith('/') && !self.contains(':')
+                                    && !self.contains('..')
+                              maxItems: 4
+                              type: array
+                            devices:
+                              description: |-
+                                Devices are host device nodes the tools open, such as /dev/kfd. Each is
+                                mounted at the same path in the agent container. /dev/kmsg is always
+                                mounted and cannot be listed.
+                              items:
+                                maxLength: 256
+                                type: string
+                                x-kubernetes-validations:
+                                - message: devices entries must be device paths under
+                                    /dev/ without ':' or '..', other than /dev/kmsg
+                                  rule: self.startsWith('/dev/') && !self.contains(':')
+                                    && !self.contains('..') && self != '/dev/kmsg'
+                              maxItems: 16
+                              type: array
+                            libDirs:
+                              description: |-
+                                LibDirs are host directories holding the libraries those tools are
+                                linked against. Each is mounted read-only at
+                                /host/adapters/<vendor>/lib/<i> and appended to LD_LIBRARY_PATH. When
+                                spec.agent.hostTooling is unset, the first libDirs entry of the first
+                                adapter (in vendor order) is also mounted at /lib64, because the agent
+                                image has no ELF loader of its own: that directory must then contain
+                                the loader a dynamically linked tool needs.
+                              items:
+                                maxLength: 4096
+                                type: string
+                                x-kubernetes-validations:
+                                - message: libDirs entries must be absolute host paths
+                                    without ':' or '..'
+                                  rule: self.startsWith('/') && !self.contains(':')
+                                    && !self.contains('..')
+                              maxItems: 4
+                              type: array
+                          type: object
+                        options:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            Options is passed to the adapter factory. Keys are defined by each
+                            adapter: letters, digits, '.', '_', and '-', at most 63 characters.
+                            Values are at most 1024 characters.
+                          maxProperties: 32
+                          type: object
+                          x-kubernetes-validations:
+                          - message: option keys must be 1-63 letters, digits, '.',
+                              '_', or '-', starting with a letter or digit
+                            rule: self.all(k, k.matches('^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$'))
+                          - message: option values must be at most 1024 characters
+                            rule: self.all(k, self[k].size() <= 1024)
+                        vendor:
+                          description: |-
+                            Vendor is the adapter's vendor id: lowercase letters, digits, and
+                            hyphens, at most 32 characters. An adapter must be registered in the
+                            agent build for that vendor; an unregistered vendor fails closed with a
+                            not-ready report.
+                          maxLength: 32
+                          minLength: 1
+                          pattern: ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$
+                          type: string
+                      required:
+                      - vendor
+                      type: object
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - vendor
+                    x-kubernetes-list-type: map
                   hostTooling:
                     description: |-
                       HostTooling opts the agent DaemonSet into read-only host mounts of the

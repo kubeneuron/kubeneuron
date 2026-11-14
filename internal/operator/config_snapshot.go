@@ -651,6 +651,9 @@ func validateRuntimeSupport(s *kubeneuronv1alpha1.KubeNeuron) error {
 	if err := validateHostTooling(s.Spec.Agent.HostTooling); err != nil {
 		return err
 	}
+	if err := validateAgentAdapters("spec.agent.adapters", s.Spec.Agent.Adapters); err != nil {
+		return err
+	}
 	if webhookTokenRef(s) == nil {
 		return fmt.Errorf("spec.notifications.webhookToken is required: Alertmanager ingress must be authenticated")
 	}

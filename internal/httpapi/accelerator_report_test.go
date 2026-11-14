@@ -186,3 +186,49 @@ func acceleratorReportBody(t *testing.T, node string) string {
 	}
 	return string(body)
 }
+
+func TestAgentRoutesAcceptAnyWellFormedVendorAndRejectAMalformedOne(t *testing.T) {
+	withVendor := func(vendor string) string {
+		body := acceleratorReportBody(t, "node-a")
+		return strings.Replace(body, `"vendor":"nvidia"`, `"vendor":"`+vendor+`"`, 1)
+	}
+	for vendor, want := range map[string]int{
+		"acme": http.StatusNoContent, "aws-trainium": http.StatusNoContent,
+		"ACME": http.StatusBadRequest, "acme_corp": http.StatusBadRequest, "-acme": http.StatusBadRequest,
+		strings.Repeat("a", types.MaxAcceleratorVendorLength+1): http.StatusBadRequest,
+	} {
+		t.Run("report "+vendor, func(t *testing.T) {
+			backend := &acceleratorReportBackend{}
+			request := httptest.NewRequest(http.MethodPost, types.AgentAcceleratorReportPath, strings.NewReader(withVendor(vendor)))
+			response := httptest.NewRecorder()
+			authenticatedAgentRoutes(backend).ServeHTTP(response, request)
+			if response.Code != want {
+				t.Fatalf("status = %d, want %d; body = %q", response.Code, want, response.Body.String())
+			}
+			if want == http.StatusNoContent && (len(backend.reports) != 1 || string(backend.reports[0].Vendor) != vendor) {
+				t.Fatalf("reports = %+v, want the %s report", backend.reports, vendor)
+			}
+			if want != http.StatusNoContent && len(backend.reports) != 0 {
+				t.Fatal("a malformed vendor reached the backend")
+			}
+		})
+	}
+
+	event := func(vendor string) string {
+		return `{"node":"node-a","gpu_index":0,"timestamp":"2026-11-14T09:00:00Z","fault":{"vendor":"` + vendor + `","source":"adapter","code":"thermal"}}`
+	}
+	for vendor, want := range map[string]int{"acme": http.StatusAccepted, "Acme Corp": http.StatusBadRequest, "": http.StatusBadRequest} {
+		t.Run("event "+vendor, func(t *testing.T) {
+			backend := &registrationBackend{}
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/events", strings.NewReader(event(vendor)))
+			response := httptest.NewRecorder()
+			authenticatedAgentRoutes(backend).ServeHTTP(response, request)
+			if response.Code != want {
+				t.Fatalf("status = %d, want %d; body = %q", response.Code, want, response.Body.String())
+			}
+			if want == http.StatusBadRequest && response.Header().Get(types.AgentEventRejectedHeader) != "invalid-vendor" {
+				t.Fatalf("a malformed vendor must be marked as a poison event, headers = %v", response.Header())
+			}
+		})
+	}
+}

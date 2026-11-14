@@ -287,3 +287,21 @@ jobs:
           kc = kust_dep['spec']['template']['spec']['containers'][0]
           assert hc['args'] == kc['args'] and hc['image'] == kc['image'], 'Deployment diverges'
           print('chart matches kustomize manifests')
+
+      - name: Chart passes agentAdapters to the operator
+        shell: python
+        run: |
+          import json, subprocess, yaml
+          adapters = [{"vendor": "amd", "options": {"tool": "amd-smi: v2", "q": "it's"},
+                       "hostTooling": {"binDirs": ["/opt/rocm/bin"], "devices": ["/dev/kfd"]}}]
+          out = subprocess.run(
+              ['helm', 'template', 'kubeneuron', 'deploy/helm/kubeneuron', '--namespace', 'kube-neuron',
+               '--set-json', 'agentAdapters=' + json.dumps(adapters)],
+              check=True, capture_output=True, text=True).stdout
+          dep = next(d for d in yaml.safe_load_all(out) if d and d.get('kind') == 'Deployment')
+          args = dep['spec']['template']['spec']['containers'][0]['args']
+          flag = '--default-agent-adapters='
+          values = [a[len(flag):] for a in args if a.startswith(flag)]
+          assert len(values) == 1, args
+          assert json.loads(values[0]) == adapters, values[0]
+          print('chart renders agentAdapters as --default-agent-adapters')
