@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -85,8 +87,9 @@ var (
 	fakeAdapter              *fakeSecondVendorAdapter
 )
 
-// registerFakeAdapters registers the fake AMD adapter and an Intel adapter
-// whose build always fails. The registry is process-global, so this runs once.
+// registerFakeAdapters registers the fake AMD adapter, an Intel adapter whose
+// build always fails, and a Google adapter whose hardware is never present on
+// the node. The registry is process-global, so this runs once.
 func registerFakeAdapters() {
 	registerFakeAdaptersOnce.Do(func() {
 		accelerator.Register(accelerator.VendorAMD, func(_ context.Context, cfg accelerator.Config) (accelerator.Adapter, error) {
@@ -100,6 +103,9 @@ func registerFakeAdapters() {
 		})
 		accelerator.Register(accelerator.VendorIntel, func(context.Context, accelerator.Config) (accelerator.Adapter, error) {
 			return nil, errors.New("level zero runtime not found")
+		})
+		accelerator.Register(accelerator.VendorGoogle, func(context.Context, accelerator.Config) (accelerator.Adapter, error) {
+			return nil, fmt.Errorf("no /dev/accel* devices: %w", accelerator.ErrNotPresent)
 		})
 	})
 }
@@ -274,6 +280,78 @@ func TestAgentBuildsAndDrivesASecondVendorAdapter(t *testing.T) {
 	if got := captured.eventCount(); got != 2 {
 		t.Fatalf("events after streamed detection = %d, want 2", got)
 	}
+}
+
+func TestAgentSkipsAnAdapterWhoseHardwareIsNotPresent(t *testing.T) {
+	registerFakeAdapters()
+	captured := &capturedPosts{}
+	controller := httptest.NewServer(captured.handler(t))
+	defer controller.Close()
+
+	var logs strings.Builder
+	var logMu sync.Mutex
+	a, err := New(Config{
+		NodeName:               "gpu-node-1",
+		ControllerURL:          controller.URL,
+		AllowInsecureHTTP:      true,
+		SpoolPath:              t.TempDir() + "/spool.jsonl",
+		ActionJournalPath:      t.TempDir() + "/actions.jsonl",
+		HealthListenAddress:    "127.0.0.1:0",
+		RegistrationInterval:   10 * time.Second,
+		RegistrationStaleAfter: 30 * time.Second,
+		Adapters: map[accelerator.Vendor]AdapterConfig{
+			accelerator.VendorAMD:    {Enabled: true},
+			accelerator.VendorGoogle: {Enabled: true},
+		},
+	}, &nvml.Fake{}, slog.New(slog.NewTextHandler(lockedWriter{w: &logs, mu: &logMu}, nil)))
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+
+	for _, rt := range a.adapters {
+		if rt.vendor == accelerator.VendorGoogle {
+			t.Fatalf("a vendor that is not present must not be kept as a runtime: %+v", rt)
+		}
+	}
+	// Several ticks: the absent vendor never reports, never warns, and the
+	// present vendor keeps running.
+	for i := 0; i < 3; i++ {
+		a.reportAdapters(context.Background())
+		a.pollAdapterDetections(context.Background())
+	}
+	if _, ok := captured.report(types.AcceleratorVendorGoogle); ok {
+		t.Fatal("a vendor that is not present must post no accelerator report")
+	}
+	if _, ok := captured.report(types.AcceleratorVendorAMD); !ok {
+		t.Fatal("the present vendor stopped reporting")
+	}
+	// The repeated detection is deduplicated by the agent; one event shows
+	// the present vendor's detections still flow.
+	if got := captured.eventCount(); got != 1 {
+		t.Fatalf("present vendor detection events = %d, want 1", got)
+	}
+
+	logMu.Lock()
+	output := logs.String()
+	logMu.Unlock()
+	if n := strings.Count(output, "vendor=google"); n != 1 {
+		t.Fatalf("absent vendor logged %d lines, want exactly one start-up line:\n%s", n, output)
+	}
+	if !strings.Contains(output, "level=INFO msg=\"accelerator adapter skipped: vendor not present on this node\" vendor=google") {
+		t.Fatalf("absent vendor start-up line missing or not at info level:\n%s", output)
+	}
+}
+
+// lockedWriter serializes log writes from the agent's goroutines.
+type lockedWriter struct {
+	w  io.Writer
+	mu *sync.Mutex
+}
+
+func (l lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
 
 func containsReason(reasons []string, want string) bool {

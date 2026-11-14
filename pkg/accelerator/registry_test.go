@@ -5,6 +5,7 @@ package accelerator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -76,9 +77,10 @@ func TestRegisterPanicsOnProgrammingErrors(t *testing.T) {
 	withRegistry(t)
 	ok := func(context.Context, Config) (Adapter, error) { return stubAdapter{vendor: "acme"}, nil }
 	for name, register := range map[string]func(){
-		"empty vendor": func() { Register("", ok) },
-		"nil factory":  func() { Register("acme", nil) },
-		"duplicate":    func() { Register("dup", ok); Register("dup", ok) },
+		"empty vendor":     func() { Register("", ok) },
+		"malformed vendor": func() { Register("Acme Corp", ok) },
+		"nil factory":      func() { Register("acme", nil) },
+		"duplicate":        func() { Register("dup", ok); Register("dup", ok) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			defer func() {
@@ -88,5 +90,29 @@ func TestRegisterPanicsOnProgrammingErrors(t *testing.T) {
 			}()
 			register()
 		})
+	}
+}
+
+func TestVendorValidAcceptsAnyWellFormedID(t *testing.T) {
+	for _, vendor := range []Vendor{VendorNVIDIA, VendorAMD, VendorIntel, VendorGoogle, "aws-trainium", "acme", "a", "x9", Vendor(strings.Repeat("a", MaxVendorLength))} {
+		if !vendor.Valid() {
+			t.Errorf("Vendor(%q).Valid() = false, want true", vendor)
+		}
+	}
+	for _, vendor := range []Vendor{"", "AMD", "-amd", "amd-", "am d", "amd_x", "amd.x", "ämd", Vendor(strings.Repeat("a", MaxVendorLength+1))} {
+		if vendor.Valid() {
+			t.Errorf("Vendor(%q).Valid() = true, want false", vendor)
+		}
+	}
+}
+
+func TestBuildPassesErrNotPresentThrough(t *testing.T) {
+	withRegistry(t)
+	Register("acme", func(context.Context, Config) (Adapter, error) {
+		return nil, fmt.Errorf("no /dev/acme0: %w", ErrNotPresent)
+	})
+	_, err := Build(context.Background(), "acme", Config{NodeName: "gpu-1"})
+	if !errors.Is(err, ErrNotPresent) {
+		t.Fatalf("Build() error = %v, want ErrNotPresent", err)
 	}
 }

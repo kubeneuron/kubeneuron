@@ -567,6 +567,14 @@ func (s *Server) handleAgentEvent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "event claims both an XID and a neutral fault; exactly one identity may be set", http.StatusBadRequest)
 		return
 	}
+	// A fault envelope names its vendor, and that name reaches incident
+	// state, metric labels, and the audit trail. Only a well-formed id is
+	// taken; a malformed one is poison, not a retryable failure.
+	if ev.Fault != nil && !types.AcceleratorVendor(ev.Fault.Vendor).Valid() {
+		w.Header().Set(types.AgentEventRejectedHeader, "invalid-vendor")
+		http.Error(w, "event fault vendor is not a valid vendor id", http.StatusBadRequest)
+		return
+	}
 	if err := s.backend.HandleAgentEvent(r, ev); err != nil {
 		http.Error(w, "event persistence unavailable", http.StatusServiceUnavailable)
 		return

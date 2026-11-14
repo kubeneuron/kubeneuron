@@ -517,6 +517,93 @@ func TestVendorWithoutARuntimeAdapterVerifiesOnTheHeartbeat(t *testing.T) {
 		}
 	})
 
+	// A vendor outside this build's attested set can still run an
+	// accelerator adapter in the agent. Its observation-only report is the
+	// evidence when it exists: the device must be in it, and the report must
+	// not be not-ready. Without one, the heartbeat path above still applies.
+	observationReport := func(readiness types.AcceleratorReadiness, deviceID string) *types.AgentAcceleratorReport {
+		report := &types.AgentAcceleratorReport{
+			Node: "node-amd", NodeUID: "node-amd-uid", Vendor: "acme",
+			ObservedAt:       time.Now().UTC(),
+			TopologySafety:   types.AcceleratorTopologyUnknown,
+			Readiness:        readiness,
+			ReadinessReasons: []string{"observation only: the acme adapter provides no runtime preflight"},
+			Devices: []types.AgentAcceleratorDevice{{
+				ID: deviceID, Kind: types.AcceleratorDevicePhysical, Family: types.AcceleratorFamilyGPU,
+			}},
+			Capabilities: []types.AgentAcceleratorCapability{},
+		}
+		if err := report.Validate(); err != nil {
+			t.Fatalf("test report is invalid: %v", err)
+		}
+		return report
+	}
+	acmeIncident := func() *types.Incident {
+		inc := incident("acme")
+		inc.ID = "inc-acme"
+		return inc
+	}
+
+	t.Run("a vendor outside the attested set verifies against its report", func(t *testing.T) {
+		c, st, ctx := newFixture(t)
+		if err := st.UpsertAcceleratorReport(ctx, observationReport(types.AcceleratorReadinessDegraded, "GPU-amd-0")); err != nil {
+			t.Fatal(err)
+		}
+		inc := acmeIncident()
+		ok, note := c.verifyRuntimeEvidence(ctx, inc)
+		if !ok || !strings.Contains(note, "acme observation-only accelerator report") {
+			t.Fatalf("verifyRuntimeEvidence = %v, %q; want verified against the acme report", ok, note)
+		}
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.advance(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := st.GetIncident(ctx, inc.ID); got.State != types.StateResolved {
+			t.Fatalf("state = %s, want RESOLVED on the acme report", got.State)
+		}
+	})
+
+	t.Run("its report without the device fails closed", func(t *testing.T) {
+		c, st, ctx := newFixture(t)
+		if err := st.UpsertAcceleratorReport(ctx, observationReport(types.AcceleratorReadinessDegraded, "GPU-other")); err != nil {
+			t.Fatal(err)
+		}
+		inc := acmeIncident()
+		if ok, reason := c.verifyRuntimeEvidence(ctx, inc); ok || !strings.Contains(reason, "missing from the current acme inventory") {
+			t.Fatalf("verifyRuntimeEvidence = %v, %q; want a fail-closed missing device", ok, reason)
+		}
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.advance(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := st.GetIncident(ctx, inc.ID); got.State != types.StateNeedsHuman {
+			t.Fatalf("state = %s, want NEEDS_HUMAN when the report has lost the device", got.State)
+		}
+	})
+
+	t.Run("its not-ready report fails closed", func(t *testing.T) {
+		c, st, ctx := newFixture(t)
+		report := observationReport(types.AcceleratorReadinessNotReady, "GPU-amd-0")
+		report.ReadinessReasons = append(report.ReadinessReasons, "acme device GPU-amd-0 is unhealthy")
+		if err := st.UpsertAcceleratorReport(ctx, report); err != nil {
+			t.Fatal(err)
+		}
+		if ok, reason := c.verifyRuntimeEvidence(ctx, acmeIncident()); ok || !strings.Contains(reason, "is unhealthy") {
+			t.Fatalf("verifyRuntimeEvidence = %v, %q; want a fail-closed not-ready report", ok, reason)
+		}
+	})
+
+	t.Run("without its report the heartbeat path still applies", func(t *testing.T) {
+		c, _, ctx := newFixture(t)
+		if ok, note := c.verifyRuntimeEvidence(ctx, acmeIncident()); !ok || !strings.Contains(note, "no acme runtime adapter") {
+			t.Fatalf("verifyRuntimeEvidence = %v, %q; want the heartbeat path", ok, note)
+		}
+	})
+
 	// An incident that never learned its vendor keeps the conservative path.
 	t.Run("unknown vendor still fails closed", func(t *testing.T) {
 		c, st, ctx := newFixture(t)
@@ -788,6 +875,10 @@ func TestAttestedVendorsMatchTheAdapters(t *testing.T) {
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
+			continue
+		}
+		// adapters/ holds the registration file, not a vendor adapter.
+		if e.Name() == "adapters" {
 			continue
 		}
 		vendor := types.AcceleratorVendor(e.Name())

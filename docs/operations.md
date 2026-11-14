@@ -780,6 +780,72 @@ the node). Keep `hostTooling`
 unset on CPU-only node pools — use `nodeSelector` to split GPU and CPU
 installs if needed.
 
+## Accelerator adapters in the agent
+
+The agent builds every accelerator adapter that is registered in its image and
+enabled for the installation. NVIDIA observation is always on and needs no
+entry. Enable any other registered adapter, with its options and host tooling,
+in `spec.agent.adapters`:
+
+```yaml
+spec:
+  agent:
+    adapters:
+      - vendor: amd                # a vendor id: lowercase letters, digits, hyphens (max 32)
+        options:                   # passed to the adapter; keys are defined by the adapter
+          tool: amd-smi
+        hostTooling:               # optional: host tooling the agent image does not ship
+          binDirs: ["/opt/rocm/bin"]   # read-only at /host/adapters/amd/bin/<i>, appended to PATH
+          libDirs: ["/opt/rocm/lib"]   # read-only at /host/adapters/amd/lib/<i>, appended to LD_LIBRARY_PATH
+          devices: ["/dev/kfd"]        # character devices, mounted at the same path
+```
+
+The operator renders one `--adapter=<vendor>` agent argument per entry and one
+`--adapter-option=<vendor>.<key>=<value>` per option, in vendor and key order,
+so editing the list rolls the agent DaemonSet once and reordering it changes
+nothing. Each vendor may appear once; the API server and the operator both
+reject a duplicate, a malformed vendor id, an option key outside
+`[A-Za-z0-9._-]`, a relative or `..` path, a device outside `/dev/`, and
+`/dev/kmsg` (always mounted). Adapter tool directories come after the system
+directories on `PATH`, so a host binary never shadows one the agent image
+ships. When `spec.agent.hostTooling` is unset, the first `libDirs` entry of the
+first adapter (in vendor order) is also mounted at `/lib64`, for the same
+loader reason as the NVIDIA tooling below: it must then contain the dynamic
+loader its tools need. Adapter tooling does not arm `--require-real-driver`.
+
+**Mixed fleets.** One agent DaemonSet runs on every accelerator node, so an
+adapter enabled for the installation also starts on nodes without that
+vendor's hardware. An adapter reports that case by returning
+`accelerator.ErrNotPresent` from its factory, and the agent then skips the
+vendor on that node: one info line at start-up, no report, no detections, and
+no repeated warnings. An adapter that is registered but fails to build on a
+node that does have its hardware fails closed for that vendor only (a
+not-ready report), and an enabled vendor with no registered adapter does the
+same.
+
+**Defaults for every installation.** The operator also takes a list in the
+same shape from `--default-agent-adapters` (JSON), set by the Helm value
+`agentAdapters`:
+
+```yaml
+# values.yaml
+agentAdapters:
+  - vendor: amd
+    options:
+      tool: amd-smi
+```
+
+Those entries are added to every installation's `spec.agent.adapters`; an
+installation entry replaces the default for the same vendor. The operator
+refuses to start on an invalid default list.
+
+**What an adapter can and cannot do.** An adapter without the NVIDIA preflight
+is observation-only: its report is never `ready`, never declares a
+physical-device reset, and so no `AcceleratorRuntimeProfile` can admit an
+accelerator action for its vendor. Its report does name the devices it sees,
+and the controller uses it to verify that vendor's device-scoped incidents
+(see [reference capabilities](reference-capabilities.md)).
+
 ## DCGM runtime attestation (required for destructive actions)
 
 Before the controller admits a real reset or reboot, the node's agent must

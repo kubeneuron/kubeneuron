@@ -105,9 +105,18 @@ func (a *Agent) buildAdapters(cfg Config, driver nvml.GPUDriver) {
 			buildCfg.RuntimeVersion = cfg.NVIDIAObservation.RuntimeVersion
 			rt.nativeDetections = true
 		}
-		a.adapters = append(a.adapters, rt)
 
 		adapter, err := accelerator.Build(context.Background(), vendor, buildCfg)
+		if errors.Is(err, accelerator.ErrNotPresent) {
+			// A mixed fleet runs one agent DaemonSet on every accelerator
+			// node, so a vendor enabled for the fleet also starts here on
+			// nodes that have none of its hardware. That is not a failure:
+			// the vendor is skipped on this node with one line, and posts no
+			// report and no detections.
+			a.log.Info("accelerator adapter skipped: vendor not present on this node", "vendor", vendor, "reason", err)
+			continue
+		}
+		a.adapters = append(a.adapters, rt)
 		if err != nil {
 			rt.buildErr = err
 			a.log.Error("accelerator adapter failed to build; this vendor fails closed", "vendor", vendor, "err", err)
@@ -134,10 +143,6 @@ func (a *Agent) buildAdapters(cfg Config, driver nvml.GPUDriver) {
 				a.log.Warn("registered NVIDIA adapter provides no preflight; NVIDIA is observation-only")
 			}
 		}
-		if !types.AcceleratorVendor(vendor).Valid() {
-			a.log.Warn("accelerator adapter vendor is not in the report protocol; it sends detections but no accelerator report",
-				"vendor", vendor)
-		}
 		a.log.Info("accelerator adapter enabled", "vendor", vendor, "preflight", rt.preflight)
 	}
 	sort.SliceStable(a.adapters, func(i, j int) bool { return a.adapters[i].vendor < a.adapters[j].vendor })
@@ -149,7 +154,7 @@ func (a *Agent) buildAdapters(cfg Config, driver nvml.GPUDriver) {
 // logged and retried on the next tick.
 func (a *Agent) reportAdapters(ctx context.Context) {
 	for _, rt := range a.adapters {
-		if rt.preflight || !types.AcceleratorVendor(rt.vendor).Valid() {
+		if rt.preflight {
 			continue
 		}
 		report, err := a.adapterReport(ctx, rt)

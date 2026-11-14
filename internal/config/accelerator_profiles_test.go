@@ -44,7 +44,7 @@ func TestAcceleratorRuntimeProfileValidatesAndGatesNVIDIAReset(t *testing.T) {
 func TestAcceleratorRuntimeProfileRejectsUnsafeOrAmbiguousConfiguration(t *testing.T) {
 	for name, mutate := range map[string]func(*AcceleratorRuntimeProfile){
 		"empty selector":          func(p *AcceleratorRuntimeProfile) { p.NodeSelector = nil },
-		"wrong vendor":            func(p *AcceleratorRuntimeProfile) { p.Vendor = types.AcceleratorVendorAMD },
+		"malformed vendor":        func(p *AcceleratorRuntimeProfile) { p.Vendor = "AMD Instinct" },
 		"unreviewed digest":       func(p *AcceleratorRuntimeProfile) { p.ProfileDigest = "latest" },
 		"missing driver version":  func(p *AcceleratorRuntimeProfile) { p.DriverVersion = "" },
 		"missing runtime version": func(p *AcceleratorRuntimeProfile) { p.RuntimeVersion = "" },
@@ -72,6 +72,41 @@ func TestAcceleratorRuntimeProfileRejectsUnsafeOrAmbiguousConfiguration(t *testi
 				t.Fatal("Validate() error = nil, want rejection")
 			}
 		})
+	}
+}
+
+// A profile may name any vendor, but it only narrows: it admits an action
+// against a ready report, and an accelerator adapter without a preflight
+// reports "degraded" at best and never declares a physical reset. A profile
+// for another vendor therefore admits nothing, whatever it lists.
+func TestANonNVIDIAProfileAdmitsNoActionAgainstAnObservationOnlyReport(t *testing.T) {
+	now := time.Date(2026, time.November, 14, 12, 0, 0, 0, time.UTC)
+	profile := validNVIDIAProfile()
+	profile.Vendor = "acme"
+	profile.AllowedActions = append(profile.AllowedActions, AcceleratorActionPolicy{
+		Action: types.AcceleratorActionCollectDiagnostics, Scopes: []types.AcceleratorTargetScope{types.AcceleratorScopeNode},
+	})
+	if err := profile.Validate(); err != nil {
+		t.Fatalf("a well-formed vendor must be accepted: %v", err)
+	}
+	report := readyNVIDIAReport(now.Add(-time.Minute))
+	report.Vendor = "acme"
+	report.Readiness = types.AcceleratorReadinessDegraded
+	report.ReadinessReasons = []string{"observation only: the acme adapter provides no runtime preflight"}
+	report.TopologySafety = types.AcceleratorTopologyUnknown
+	report.Capabilities = []types.AgentAcceleratorCapability{{
+		Action: types.AcceleratorActionCollectDiagnostics, Scopes: []types.AcceleratorTargetScope{types.AcceleratorScopeNode},
+	}}
+	for _, check := range []struct {
+		action types.AcceleratorAction
+		scope  types.AcceleratorTargetScope
+	}{
+		{types.AcceleratorActionResetDevice, types.AcceleratorScopePhysicalDevice},
+		{types.AcceleratorActionCollectDiagnostics, types.AcceleratorScopeNode},
+	} {
+		if err := profile.CheckAction(now, report, check.action, check.scope); err == nil {
+			t.Fatalf("CheckAction(%s, %s) admitted an action on an observation-only report", check.action, check.scope)
+		}
 	}
 }
 

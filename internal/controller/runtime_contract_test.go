@@ -180,7 +180,7 @@ func TestBuildRuntimeContractCoverageErrorsSurface(t *testing.T) {
 	if _, err := c.BuildRuntimeContractCoverage(ctx, "ghost", types.AcceleratorVendorNVIDIA); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("unknown node error = %v, want ErrNotFound", err)
 	}
-	if _, err := c.BuildRuntimeContractCoverage(ctx, "node-a", "cuda"); err == nil || !strings.Contains(err.Error(), "unsupported vendor") {
+	if _, err := c.BuildRuntimeContractCoverage(ctx, "node-a", "CUDA"); err == nil || !strings.Contains(err.Error(), "unsupported vendor") {
 		t.Fatalf("invalid vendor error = %v", err)
 	}
 	if _, err := c.BuildRuntimeContractCoverage(ctx, " ", types.AcceleratorVendorNVIDIA); err == nil || !strings.Contains(err.Error(), "node is required") {

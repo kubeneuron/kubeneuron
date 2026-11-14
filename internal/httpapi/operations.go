@@ -130,6 +130,10 @@ func (s *Server) handleNodeEvidence(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// invalidVendorMessage is the client error for a malformed vendor id. Any
+// well-formed id is accepted; see types.AcceleratorVendor.Valid.
+const invalidVendorMessage = "vendor must be a vendor id: lowercase letters, digits, and hyphens, at most 32 characters"
+
 // runtimeContractVendor parses the required vendor query parameter shared by
 // the runtime contract routes. Coverage is defined per (node, vendor) pair,
 // so a missing vendor is a client error rather than a default.
@@ -140,7 +144,7 @@ func runtimeContractVendor(r *http.Request) (types.AcceleratorVendor, error) {
 	}
 	vendor := types.AcceleratorVendor(raw)
 	if !vendor.Valid() {
-		return "", errors.New("vendor must be nvidia, amd, intel, or google")
+		return "", errors.New(invalidVendorMessage)
 	}
 	return vendor, nil
 }
@@ -728,12 +732,8 @@ func readinessFilterFromRequest(r *http.Request) (operations.ReadinessFilter, er
 			return operations.ReadinessFilter{}, errors.New("state must be Eligible, ObservedOnly, Blocked, or Unknown")
 		}
 	}
-	if filter.Vendor != "" {
-		switch filter.Vendor {
-		case types.AcceleratorVendorNVIDIA, types.AcceleratorVendorAMD, types.AcceleratorVendorIntel:
-		default:
-			return operations.ReadinessFilter{}, errors.New("vendor must be nvidia, amd, or intel")
-		}
+	if filter.Vendor != "" && !filter.Vendor.Valid() {
+		return operations.ReadinessFilter{}, errors.New(invalidVendorMessage)
 	}
 	if raw := r.URL.Query().Get("stale"); raw != "" {
 		value, parseErr := strconv.ParseBool(raw)

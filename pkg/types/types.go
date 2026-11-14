@@ -225,8 +225,20 @@ type Signal struct {
 // answer now decides which remediation ladder runs. An NVIDIA reset ladder
 // selected for an AMD card is not a failed step, it is the wrong hammer on
 // somebody's hardware.
+//
+// Only an authenticated agent can name a vendor. Alertmanager annotations and
+// manual triggers also land in Evidence, and a "vendor" key there must not
+// choose the ladder or the verification depth of an incident, so for any
+// other source, and for a malformed id, the answer is "".
 func (s Signal) Vendor() AcceleratorVendor {
-	return AcceleratorVendor(s.Evidence["vendor"])
+	if s.Source != SourceAgentEvent {
+		return ""
+	}
+	vendor := AcceleratorVendor(s.Evidence["vendor"])
+	if !vendor.Valid() {
+		return ""
+	}
+	return vendor
 }
 
 // IncidentState is a state of the per-target incident state machine.
@@ -568,9 +580,11 @@ type FaultSignal struct {
 }
 
 // AcceleratorVendor identifies the runtime that owns the reported
-// accelerators. The first protocol supports the vendors represented by the
-// common accelerator contract. A new vendor requires an explicit protocol
-// change rather than being silently treated as executable.
+// accelerators. The protocol is open: any well-formed vendor id is accepted,
+// so a new accelerator adapter can report without a protocol change. Being
+// reportable never makes a vendor executable: physical reset still requires a
+// runtime preflight that only the NVIDIA path provides, and the controller
+// grants nothing to a vendor on the strength of its name.
 type AcceleratorVendor string
 
 const (
@@ -580,15 +594,32 @@ const (
 	AcceleratorVendorGoogle AcceleratorVendor = "google"
 )
 
-// Valid reports whether v is supported by this version of the agent report
-// protocol.
+// MaxAcceleratorVendorLength bounds a vendor id. Vendor reaches metric
+// labels, log fields, and the audit trail, so it is short and plain.
+const MaxAcceleratorVendorLength = 32
+
+// AcceleratorVendorPattern is the vendor id format, for CRD and API schemas.
+// It matches what Valid accepts.
+const AcceleratorVendorPattern = `^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`
+
+// Valid reports whether v is a well-formed vendor id: 1 to
+// MaxAcceleratorVendorLength lowercase ASCII letters, digits, and hyphens,
+// starting and ending with a letter or digit. It is the same rule as
+// accelerator.Vendor.Valid in the adapter contract.
 func (v AcceleratorVendor) Valid() bool {
-	switch v {
-	case AcceleratorVendorNVIDIA, AcceleratorVendorAMD, AcceleratorVendorIntel, AcceleratorVendorGoogle:
-		return true
-	default:
+	if len(v) == 0 || len(v) > MaxAcceleratorVendorLength {
 		return false
 	}
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '-' && i != 0 && i != len(v)-1:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // AcceleratorDeviceFamily is the broad device architecture. A physical or

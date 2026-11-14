@@ -252,7 +252,7 @@ func (f *adapterFlags) entry(vendor accelerator.Vendor) agent.AdapterConfig {
 func (f *adapterFlags) enable(value string) error {
 	vendor := accelerator.Vendor(strings.TrimSpace(value))
 	if !vendor.Valid() {
-		return fmt.Errorf("adapter vendor must not be empty")
+		return fmt.Errorf("adapter vendor %q is not a valid vendor id (lowercase letters, digits, and hyphens, at most %d characters)", value, accelerator.MaxVendorLength)
 	}
 	entry := f.entry(vendor)
 	entry.Enabled = true

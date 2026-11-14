@@ -351,7 +351,7 @@ func TestAVendorScopedPolicyDoesNotClaimAnotherVendorsSignal(t *testing.T) {
 	}
 
 	sig := func(vendor string) types.Signal {
-		s := types.Signal{Class: "ecc-dbe", Target: types.Target{Node: "n1", GPUUUID: "GPU-a"}}
+		s := types.Signal{Class: "ecc-dbe", Source: types.SourceAgentEvent, Target: types.Target{Node: "n1", GPUUUID: "GPU-a"}}
 		if vendor != "" {
 			s.Evidence = map[string]string{"vendor": vendor}
 		}

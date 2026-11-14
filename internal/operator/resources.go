@@ -796,7 +796,8 @@ func agentTolerations(installation *kubeneuronv1alpha1.KubeNeuron) []corev1.Tole
 func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot, tlsRevision ...string) *appsv1.DaemonSet {
 	labels := resourceLabels(installation, "agent")
 	privileged := true
-	toolingArgs, toolingEnv, toolingMounts, toolingVolumes := agentHostToolingWiring(installation.Spec.Agent.HostTooling)
+	toolingArgs, toolingEnv, toolingMounts, toolingVolumes := agentToolingWiring(installation.Spec.Agent)
+	toolingArgs = append(toolingArgs, agentAdapterArgs(installation.Spec.Agent.Adapters)...)
 	agentNodes := copyStringMap(installation.Spec.Agent.NodeSelector)
 	annotations := map[string]string{"kubeneuron.io/config-digest": snapshot.Digest}
 	if len(tlsRevision) != 0 && tlsRevision[0] != "" {

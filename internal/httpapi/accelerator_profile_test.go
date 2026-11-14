@@ -120,9 +120,9 @@ func TestAcceleratorObservationProfileRouteFailsClosed(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 		},
 		{
-			name:       "unknown vendor",
+			name:       "malformed vendor",
 			backend:    &acceleratorProfileBackend{},
-			path:       types.AgentAcceleratorProfilePath + "?vendor=unknown",
+			path:       types.AgentAcceleratorProfilePath + "?vendor=Unknown_Vendor",
 			wantStatus: http.StatusBadRequest,
 		},
 		{

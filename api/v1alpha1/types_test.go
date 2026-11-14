@@ -93,7 +93,7 @@ func TestGeneratedAcceleratorRuntimeProfileCRDIsFailClosed(t *testing.T) {
 	for _, want := range []string{
 		"kind: AcceleratorRuntimeProfile",
 		"plural: acceleratorruntimeprofiles",
-		"- nvidia",
+		"pattern: ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$",
 		"pattern: ^sha256:[a-f0-9]{64}$",
 		"format: duration",
 		"message: maxReportAge must be a positive duration",

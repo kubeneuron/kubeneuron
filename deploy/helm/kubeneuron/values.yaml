@@ -24,6 +24,27 @@ serviceAccount:
   # Name of the operator ServiceAccount the chart creates.
   name: kubeneuron-operator
 
+# Accelerator adapters the operator enables on the agents of every
+# KubeNeuron installation, in addition to that installation's own
+# spec.agent.adapters (an entry there replaces the one here for the same
+# vendor). Each entry has the spec.agent.adapters shape: vendor, options, and
+# optional hostTooling (binDirs, libDirs, devices). The adapter must be
+# registered in the agent image. NVIDIA observation is on either way.
+#
+# A vendor enabled here starts on every accelerator node of a mixed fleet; on
+# a node without that vendor's hardware the adapter reports "not present" and
+# the agent skips it quietly.
+#
+# agentAdapters:
+#   - vendor: amd
+#     options:
+#       tool: amd-smi
+#     hostTooling:
+#       binDirs: ["/opt/rocm/bin"]
+#       libDirs: ["/opt/rocm/lib"]
+#       devices: ["/dev/kfd"]
+agentAdapters: []
+
 nodeSelector: {}
 tolerations: []
 affinity: {}

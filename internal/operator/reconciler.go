@@ -55,6 +55,11 @@ type KubeNeuronReconciler struct {
 	// Recorder emits Kubernetes Events on the KubeNeuron object; nil (tests)
 	// disables event emission.
 	Recorder record.EventRecorder
+	// DefaultAgentAdapters are added to every installation's
+	// spec.agent.adapters (the operator's --default-agent-adapters, the Helm
+	// value agentAdapters). An installation entry replaces the default for
+	// the same vendor.
+	DefaultAgentAdapters []kubeneuronv1alpha1.AgentAdapterSpec
 }
 
 // event emits a Kubernetes Event when a recorder is wired.
@@ -85,6 +90,10 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, req.NamespacedName, &installation); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	// The operator's default adapters join the installation's own list in
+	// memory only: they are validated and rendered with it, and never
+	// written back (this reconciler writes status, not spec).
+	installation.Spec.Agent.Adapters = mergeAgentAdapters(r.DefaultAgentAdapters, installation.Spec.Agent.Adapters)
 
 	policies, playbooks, mappings, maintenance, nodeConfigs, acceleratorProfiles, err := r.configuration(ctx)
 	if err != nil {

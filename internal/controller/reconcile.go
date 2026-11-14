@@ -641,6 +641,14 @@ func (c *Controller) verifyRuntimeEvidence(ctx context.Context, inc *types.Incid
 		// reduction in verification depth and it is recorded as one, in the
 		// audit trail and in docs/reference-capabilities.md, rather than
 		// quietly presented as the same check.
+		//
+		// An accelerator adapter for the vendor may still be running in the
+		// agent. It has no preflight, so it cannot attest the runtime, but its
+		// observation-only report names the devices it sees and their health.
+		// When a current one exists, the incident is verified against it.
+		if ok, reason, found := c.verifyAgainstObservationReport(ctx, inc, vendor); found {
+			return ok, reason
+		}
 		c.logReducedVerificationOnce(inc, vendor)
 		return true, fmt.Sprintf("verified on the agent heartbeat: this build has no %s runtime adapter", vendor)
 	}
@@ -676,6 +684,38 @@ func (c *Controller) verifyRuntimeEvidence(ctx context.Context, inc *types.Incid
 		}
 	}
 	return false, fmt.Sprintf("GPU %s is missing from the current inventory", inc.Target.GPUUUID)
+}
+
+// verifyAgainstObservationReport verifies a device-scoped incident of a
+// vendor this build cannot attest against that vendor's observation-only
+// accelerator report, posted by an accelerator adapter in the agent.
+//
+// found is false when there is no current report for the (node, vendor): the
+// caller then keeps the heartbeat-only path. With a current report, the
+// resolution needs the report not to be not-ready (an observation-only
+// report is "degraded" at best, by design) and the target device to be in
+// its inventory as a physical GPU. The note names the depth: an inventory and
+// health observation, not an attested runtime.
+func (c *Controller) verifyAgainstObservationReport(ctx context.Context, inc *types.Incident, vendor types.AcceleratorVendor) (ok bool, reason string, found bool) {
+	reports, isReportStore := c.store.(store.AcceleratorReportStore)
+	if !isReportStore {
+		return false, "", false
+	}
+	report, err := reports.GetAcceleratorReport(ctx, inc.Target.Node, vendor)
+	if err != nil || report == nil || time.Since(report.ObservedAt) > verifyEvidenceMaxAge {
+		return false, "", false
+	}
+	if report.Readiness == types.AcceleratorReadinessNotReady {
+		return false, fmt.Sprintf("%s accelerator report is not ready: %s", vendor, strings.Join(report.ReadinessReasons, "; ")), true
+	}
+	for _, device := range report.Devices {
+		if device.ID == inc.Target.GPUUUID &&
+			device.Kind == types.AcceleratorDevicePhysical &&
+			device.Family == types.AcceleratorFamilyGPU {
+			return true, fmt.Sprintf("verified against the %s observation-only accelerator report (readiness %s): the device is present; the runtime is not attested", vendor, report.Readiness), true
+		}
+	}
+	return false, fmt.Sprintf("GPU %s is missing from the current %s inventory", inc.Target.GPUUUID, vendor), true
 }
 
 // verifyWithoutCurrentReport decides what a missing or stale accelerator

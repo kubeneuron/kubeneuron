@@ -215,6 +215,22 @@ evidence a node-scoped incident uses, and the controller logs that the depth
 was reduced. It resolves; it is simply attested less strongly, and that is
 stated rather than hidden.
 
+**An accelerator adapter's report raises that depth.** When the agent runs an
+accelerator adapter for such a vendor (`spec.agent.adapters`), the adapter
+posts an observation-only report for the node and vendor. The accelerator
+report protocol accepts any well-formed vendor id (lowercase letters, digits,
+and hyphens, at most 32 characters), so this works for vendors beyond the four
+built-in constants. When a current (at most five minutes old) report exists,
+the incident is verified against it instead of the heartbeat alone: the report
+must not be `not-ready`, and the target device must be in its inventory as a
+physical GPU. An observation-only report is `degraded` at best by design, and
+that is accepted; the resolve audit entry says the device was present and the
+runtime was not attested. With no current report the heartbeat path above
+still applies. Only an authenticated agent can name an incident's vendor:
+a `vendor` annotation on an Alertmanager alert, or on a manual trigger, is
+ignored, and an agent event whose fault names a malformed vendor id is
+rejected.
+
 Until v0.2.3 it did not resolve at all: the NVIDIA report was read
 unconditionally, so an AMD device-scoped incident held for the evidence
 deadline and then parked in `NEEDS_HUMAN` after the cordon and drain had
