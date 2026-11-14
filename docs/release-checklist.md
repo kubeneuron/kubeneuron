@@ -1,7 +1,10 @@
 # Release checklist
 
 Work through this list, in order, before pushing a `vX.Y.Z` release tag.
-Release tags (`refs/tags/v*`) can be created only by repository admins.
+Release tags (`refs/tags/v*`) and adapter contract module tags
+(`refs/tags/pkg/accelerator/v*`, `refs/tags/pkg/cloud/v*`) can be created,
+moved, or deleted only by repository admins (repository ruleset "release
+tags: admins only").
 
 ## 1. Gates
 
