@@ -71,6 +71,10 @@ API is `v1alpha1`.
   still admits no action: it needs a ready report, which only the NVIDIA
   preflight produces, and physical reset stays withheld from adapters without
   a preflight.
+- Toolchain: `go.mod` `toolchain`, the build image, and every workflow
+  `go-version` move from go1.26.10 to go1.26.11, which fixes
+  [GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859) in `net/http`.
+  `govulncheck` failed on it in CI for commit `dfbfe54`. No Go source changed.
 - **Only an authenticated agent names an incident's vendor.** A `vendor`
   annotation on an Alertmanager alert or a manual trigger is no longer read as
   the incident's vendor, and the controller rejects an agent event whose fault

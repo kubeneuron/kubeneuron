@@ -231,7 +231,7 @@ The API is `v1alpha1` and may change without compatibility guarantees.
 
 ## Build and local checks
 
-Go 1.26 or newer is required (the module sets `toolchain go1.26.10`; a Go 1.25
+Go 1.26 or newer is required (the module sets `toolchain go1.26.11`; a Go 1.25
 install with the default `GOTOOLCHAIN=auto` downloads it).
 
 ```sh
