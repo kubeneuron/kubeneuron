@@ -64,6 +64,12 @@ of the KubeNeuron License.
      internal/accelerator/adapters/adapters.go   accelerator adapters
      internal/cloud/providers/providers.go       cloud providers
 
+   There is one registration file per kind of Adapter, so that each binary
+   links only the Adapters it uses: the agent imports the accelerator file,
+   and the operator and controller import the cloud file. Registration Code
+   for an accelerator Adapter goes only in the first file, and for a cloud
+   provider only in the second.
+
    Dependency manifests and build and packaging files that Registration Code
    may also change (Section 1.16(b)), only as strictly necessary to compile,
    package, and run the Adapters in an Adapter Build, and in no other way:
