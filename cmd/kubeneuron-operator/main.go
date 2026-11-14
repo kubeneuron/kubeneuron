@@ -40,6 +40,9 @@ func main() {
 		leaderElect     = flag.Bool("leader-elect", true, "enable Kubernetes Lease leader election")
 		leaderNamespace = flag.String("leader-election-namespace", "", "namespace for the leader-election Lease (default: pod namespace)")
 		showVersion     = flag.Bool("version", false, "print version and exit")
+		defaultAdapters = flag.String("default-agent-adapters", "",
+			"JSON list of spec.agent.adapters entries added to every installation, e.g. "+
+				`'[{"vendor":"amd","options":{"tool":"amd-smi"}}]'; an installation entry replaces a default for the same vendor`)
 		// Production logging by default (JSON, info, sampled); development
 		// output remains reachable with --zap-devel.
 		logOptions = zap.Options{}
@@ -72,11 +75,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	agentAdapters, err := operator.ParseDefaultAgentAdapters(*defaultAdapters)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "parsing -default-agent-adapters:", err)
+		os.Exit(1)
+	}
 	if err := (&operator.KubeNeuronReconciler{
-		Client:    mgr.GetClient(),
-		APIReader: mgr.GetAPIReader(),
-		Scheme:    mgr.GetScheme(),
-		Recorder:  mgr.GetEventRecorderFor("kubeneuron-operator"),
+		Client:               mgr.GetClient(),
+		APIReader:            mgr.GetAPIReader(),
+		Scheme:               mgr.GetScheme(),
+		Recorder:             mgr.GetEventRecorderFor("kubeneuron-operator"),
+		DefaultAgentAdapters: agentAdapters,
 	}).SetupWithManager(mgr); err != nil {
 		fmt.Fprintln(os.Stderr, "registering reconciler:", err)
 		os.Exit(1)

@@ -29,9 +29,34 @@ const (
 	VendorGoogle Vendor = "google"
 )
 
-// Valid reports whether v can identify an adapter. It intentionally permits
-// vendors beyond the built-in constants for future adapters.
-func (v Vendor) Valid() bool { return strings.TrimSpace(string(v)) != "" }
+// MaxVendorLength bounds a vendor identifier. Vendors reach metric labels,
+// log fields, and the audit trail, so the identifier is short and plain.
+const MaxVendorLength = 32
+
+// Valid reports whether v is a well-formed vendor identifier: 1 to
+// MaxVendorLength lowercase ASCII letters, digits, and hyphens, starting and
+// ending with a letter or digit. Any vendor of that form is accepted, not
+// only the built-in constants, so an adapter can support a new vendor without
+// a change to this package.
+func (v Vendor) Valid() bool { return ValidVendorID(string(v)) }
+
+// ValidVendorID reports whether id is a well-formed vendor identifier, as
+// described on Vendor.Valid.
+func ValidVendorID(id string) bool {
+	if len(id) == 0 || len(id) > MaxVendorLength {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case c == '-' && i != 0 && i != len(id)-1:
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // Family identifies the broad accelerator architecture exposed by a device.
 type Family string

@@ -57,6 +57,24 @@ API is `v1alpha1`.
   AWS implementations stay in `internal/`. Generated Go files take their SPDX
   header from a per-licence template (`api/boilerplate.go.txt` for Apache
   paths, `hack/boilerplate.go.txt` for KubeNeuron paths).
+- **The accelerator report protocol accepts any well-formed vendor id**:
+  lowercase letters, digits, and hyphens, at most 32 characters
+  (`types.AcceleratorVendor.Valid`, and the same rule for
+  `accelerator.Vendor.Valid`, which previously accepted any non-blank string).
+  The four vendor constants stay. An adapter for a vendor outside them (AWS
+  Trainium is on the roadmap) now posts accelerator reports, and the
+  controller verifies that vendor's device-scoped incidents against a current
+  report instead of the heartbeat alone. The vendor lists in the
+  `GPURemediationPolicy` `match.vendor` enum, the `AcceleratorRuntimeProfile`
+  `vendor` enum, and the HTTP API readiness and runtime-contract filters are
+  replaced by the same format check. A profile for a vendor other than NVIDIA
+  still admits no action: it needs a ready report, which only the NVIDIA
+  preflight produces, and physical reset stays withheld from adapters without
+  a preflight.
+- **Only an authenticated agent names an incident's vendor.** A `vendor`
+  annotation on an Alertmanager alert or a manual trigger is no longer read as
+  the incident's vendor, and the controller rejects an agent event whose fault
+  names a malformed vendor id (as a poison event, `invalid-vendor`).
 
 ### Added
 
@@ -75,6 +93,23 @@ API is `v1alpha1`.
   (its report is never ready and never declares a physical-device reset).
   An adapter that fails to build fails closed for its own vendor only: it
   posts a not-ready report and no longer stops the agent from starting.
+- **`spec.agent.adapters` on the KubeNeuron CRD.** An installation enables
+  registered accelerator adapters without operator changes: a list of
+  `{vendor, options, hostTooling}`, one entry per vendor (duplicates and
+  malformed vendor ids are rejected by the API server and the operator). The
+  operator renders one `--adapter` per entry and one `--adapter-option` per
+  option, in a stable order; `--nvidia-observation` is unchanged. Each
+  adapter's `hostTooling` mounts its host binaries, libraries, and device
+  nodes (for example `amd-smi` and `/dev/kfd`) read-only under
+  `/host/adapters/<vendor>/`. The operator's new `--default-agent-adapters`
+  flag, set by the Helm value `agentAdapters`, adds the same entries to every
+  installation. See [operations](docs/operations.md#accelerator-adapters-in-the-agent).
+- **`accelerator.ErrNotPresent`.** An adapter factory returns it when the
+  node has none of its vendor's hardware or tooling. On a mixed fleet the
+  agent then skips that vendor on that node quietly: one info line at
+  start-up, no report, no warnings.
+- **Tests for the `pkg/cloud` registry** (registration, duplicates, lookup of
+  an unregistered provider), now that it is a public contract.
 
 ## [v0.8.0] - 2026-11-08
 

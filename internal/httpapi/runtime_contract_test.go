@@ -132,9 +132,9 @@ func TestRuntimeContractRoutesValidateVendor(t *testing.T) {
 	}{
 		{"/api/v1/nodes/gpu-a/runtime-contract", "vendor is required"},
 		{"/api/v1/nodes/gpu-a/runtime-contract?vendor=", "vendor is required"},
-		{"/api/v1/nodes/gpu-a/runtime-contract?vendor=cuda", "vendor must be nvidia, amd, intel, or google"},
+		{"/api/v1/nodes/gpu-a/runtime-contract?vendor=cuda_x", "vendor must be a vendor id"},
 		{"/api/v1/runtime-contracts/coverage", "vendor is required"},
-		{"/api/v1/runtime-contracts/coverage?vendor=NVIDIA", "vendor must be nvidia, amd, intel, or google"},
+		{"/api/v1/runtime-contracts/coverage?vendor=NVIDIA", "vendor must be a vendor id"},
 		{"/api/v1/runtime-contracts/coverage?vendor=nvidia&limit=0", "limit must be an integer between 1 and 500"},
 		{"/api/v1/runtime-contracts/coverage?vendor=nvidia&limit=501", "limit must be an integer between 1 and 500"},
 		{"/api/v1/runtime-contracts/coverage?vendor=nvidia&cursor=%21%21", "cursor is invalid"},

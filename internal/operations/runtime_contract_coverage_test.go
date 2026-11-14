@@ -112,7 +112,7 @@ func TestRuntimeContractCoverageValidation(t *testing.T) {
 	if _, err := mgr.NodeRuntimeContractCoverage(ctx, "gpu-a", types.AcceleratorVendor("nvidia ")); err == nil || !strings.Contains(err.Error(), "vendor must be") {
 		t.Fatalf("invalid vendor error = %v", err)
 	}
-	if _, _, err := mgr.FleetRuntimeContractCoveragePage(ctx, RuntimeContractCoverageFilter{Vendor: "cuda"}); err == nil || !strings.Contains(err.Error(), "vendor must be") {
+	if _, _, err := mgr.FleetRuntimeContractCoveragePage(ctx, RuntimeContractCoverageFilter{Vendor: "CUDA"}); err == nil || !strings.Contains(err.Error(), "vendor must be") {
 		t.Fatalf("fleet invalid vendor error = %v", err)
 	}
 	if _, _, err := mgr.FleetRuntimeContractCoveragePage(ctx, RuntimeContractCoverageFilter{Vendor: types.AcceleratorVendorNVIDIA, Limit: 501}); err == nil || !strings.Contains(err.Error(), "exceeds 500") {

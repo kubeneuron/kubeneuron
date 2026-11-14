@@ -4,6 +4,7 @@ package accelerator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -34,7 +35,19 @@ type Config struct {
 }
 
 // Factory builds an Adapter from construction Config.
+//
+// A factory returns an error wrapping ErrNotPresent when this node has no
+// hardware or host tooling for its vendor. That is not a failure: one agent
+// DaemonSet runs on every accelerator node of a mixed fleet, so an adapter
+// enabled for the fleet also starts on nodes of other vendors. Any other
+// error means the hardware is there and the adapter could not be built; the
+// vendor then fails closed on that node.
 type Factory func(ctx context.Context, cfg Config) (Adapter, error)
+
+// ErrNotPresent is returned (or wrapped) by a Factory when the node has none
+// of the vendor's hardware or tooling. The agent skips the vendor on that node
+// quietly: no report, no detections, and no repeated warnings.
+var ErrNotPresent = errors.New("accelerator: vendor hardware or tooling is not present on this node")
 
 var registry = map[Vendor]Factory{}
 
@@ -44,7 +57,7 @@ var registry = map[Vendor]Factory{}
 // a programming error and panics at startup.
 func Register(vendor Vendor, factory Factory) {
 	if !vendor.Valid() {
-		panic("accelerator: adapter vendor must not be empty")
+		panic(fmt.Sprintf("accelerator: adapter vendor %q is not a valid vendor identifier", vendor))
 	}
 	if factory == nil {
 		panic("accelerator: adapter factory must not be nil")

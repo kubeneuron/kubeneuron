@@ -430,7 +430,7 @@ func (m *Manager) requireRuntimeContractCoverage() error {
 
 func validRuntimeContractVendor(vendor types.AcceleratorVendor) error {
 	if !vendor.Valid() {
-		return fmt.Errorf("vendor must be %s, %s, %s, or %s", types.AcceleratorVendorNVIDIA, types.AcceleratorVendorAMD, types.AcceleratorVendorIntel, types.AcceleratorVendorGoogle)
+		return fmt.Errorf("vendor must be a vendor id: lowercase letters, digits, and hyphens, at most %d characters (got %q)", types.MaxAcceleratorVendorLength, vendor)
 	}
 	return nil
 }

@@ -3,6 +3,7 @@
 package types
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -17,8 +18,8 @@ func TestAgentAcceleratorReportValidateAcceptsSafeObservation(t *testing.T) {
 
 func TestAgentAcceleratorReportValidateFailsClosed(t *testing.T) {
 	for name, mutate := range map[string]func(*AgentAcceleratorReport){
-		"unknown vendor": func(report *AgentAcceleratorReport) {
-			report.Vendor = "unrecognized"
+		"malformed vendor": func(report *AgentAcceleratorReport) {
+			report.Vendor = "Not A Vendor"
 		},
 		"node UID whitespace": func(report *AgentAcceleratorReport) {
 			report.NodeUID = " node-uid "
@@ -95,5 +96,39 @@ func validAgentAcceleratorReport() AgentAcceleratorReport {
 		}},
 		Readiness:     AcceleratorReadinessReady,
 		ProfileDigest: "sha256:4c5bbf8f",
+	}
+}
+
+func TestAcceleratorVendorValidIsOpenButBounded(t *testing.T) {
+	for _, vendor := range []AcceleratorVendor{AcceleratorVendorNVIDIA, AcceleratorVendorAMD, AcceleratorVendorIntel, AcceleratorVendorGoogle, "acme", "aws-trainium", "x"} {
+		if !vendor.Valid() {
+			t.Errorf("%q.Valid() = false, want true", vendor)
+		}
+	}
+	for _, vendor := range []AcceleratorVendor{"", "NVIDIA", "nvidia ", "-amd", "amd-", "a_b", "a.b", AcceleratorVendor(strings.Repeat("a", MaxAcceleratorVendorLength+1))} {
+		if vendor.Valid() {
+			t.Errorf("%q.Valid() = true, want false", vendor)
+		}
+	}
+	pattern := regexp.MustCompile(AcceleratorVendorPattern)
+	for _, vendor := range []string{"acme", "aws-trainium", "x", "NVIDIA", "-amd", "a_b", strings.Repeat("a", 32), strings.Repeat("a", 33)} {
+		if pattern.MatchString(vendor) != AcceleratorVendor(vendor).Valid() {
+			t.Errorf("AcceleratorVendorPattern and Valid disagree on %q", vendor)
+		}
+	}
+}
+
+func TestOnlyAnAgentSignalNamesAVendor(t *testing.T) {
+	evidence := map[string]string{"vendor": "acme"}
+	if got := (Signal{Source: SourceAgentEvent, Evidence: evidence}).Vendor(); got != "acme" {
+		t.Fatalf("agent signal vendor = %q, want acme", got)
+	}
+	for _, source := range []SignalSource{SourceAlertmanager, SourceManual, ""} {
+		if got := (Signal{Source: source, Evidence: evidence}).Vendor(); got != "" {
+			t.Fatalf("%q signal vendor = %q: an alert annotation must not choose the vendor", source, got)
+		}
+	}
+	if got := (Signal{Source: SourceAgentEvent, Evidence: map[string]string{"vendor": "Not Valid"}}).Vendor(); got != "" {
+		t.Fatalf("malformed vendor = %q, want empty", got)
 	}
 }

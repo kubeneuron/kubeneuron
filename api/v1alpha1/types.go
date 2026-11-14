@@ -182,6 +182,79 @@ type AgentSpec struct {
 	// ContainerCreating — visible and loud, and the installation stays
 	// Ready=False until it is fixed.
 	HostTooling *HostToolingSpec `json:"hostTooling,omitempty"`
+	// Adapters enables registered accelerator adapters in the agent, one
+	// entry per vendor. The operator renders one --adapter=<vendor> per entry
+	// and one --adapter-option=<vendor>.<key>=<value> per option, in vendor
+	// and key order. NVIDIA observation stays enabled as before whether or not
+	// it is listed; an "nvidia" entry only adds options.
+	//
+	// On a mixed fleet one agent DaemonSet runs on every accelerator node, so
+	// an adapter listed here also starts on nodes without its hardware. An
+	// adapter reports that case (accelerator.ErrNotPresent) and the agent
+	// skips that vendor on that node quietly.
+	//
+	// Adapters the operator was started with (--default-agent-adapters, the
+	// Helm value agentAdapters) are added to this list; an entry here replaces
+	// a default entry for the same vendor.
+	// +kubebuilder:validation:MaxItems=8
+	// +listType=map
+	// +listMapKey=vendor
+	Adapters []AgentAdapterSpec `json:"adapters,omitempty"`
+}
+
+// AgentAdapterSpec enables one registered accelerator adapter.
+type AgentAdapterSpec struct {
+	// Vendor is the adapter's vendor id: lowercase letters, digits, and
+	// hyphens, at most 32 characters. An adapter must be registered in the
+	// agent build for that vendor; an unregistered vendor fails closed with a
+	// not-ready report.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`
+	Vendor string `json:"vendor"`
+	// Options is passed to the adapter factory. Keys are defined by each
+	// adapter: letters, digits, '.', '_', and '-', at most 63 characters.
+	// Values are at most 1024 characters.
+	// +kubebuilder:validation:MaxProperties=32
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$'))",message="option keys must be 1-63 letters, digits, '.', '_', or '-', starting with a letter or digit"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, self[k].size() <= 1024)",message="option values must be at most 1024 characters"
+	Options map[string]string `json:"options,omitempty"`
+	// HostTooling mounts this adapter's host binaries, libraries, and device
+	// nodes into the agent, for vendors whose tooling the agent image does not
+	// ship (for example amd-smi).
+	HostTooling *AdapterHostToolingSpec `json:"hostTooling,omitempty"`
+}
+
+// AdapterHostToolingSpec mounts one adapter's host tooling into the agent.
+// Directories are mounted read-only at fixed container paths under
+// /host/adapters/<vendor>/, so a node image cannot shadow agent binaries.
+type AdapterHostToolingSpec struct {
+	// BinDirs are host directories holding the vendor's tools. Each is
+	// mounted read-only at /host/adapters/<vendor>/bin/<i> and appended to
+	// the agent's PATH after the system directories, so a host tool never
+	// shadows one shipped in the agent image.
+	// +kubebuilder:validation:MaxItems=4
+	// +kubebuilder:validation:items:MaxLength=4096
+	// +kubebuilder:validation:items:XValidation:rule="self.startsWith('/') && !self.contains(':') && !self.contains('..')",message="binDirs entries must be absolute host paths without ':' or '..'"
+	BinDirs []string `json:"binDirs,omitempty"`
+	// LibDirs are host directories holding the libraries those tools are
+	// linked against. Each is mounted read-only at
+	// /host/adapters/<vendor>/lib/<i> and appended to LD_LIBRARY_PATH. When
+	// spec.agent.hostTooling is unset, the first libDirs entry of the first
+	// adapter (in vendor order) is also mounted at /lib64, because the agent
+	// image has no ELF loader of its own: that directory must then contain
+	// the loader a dynamically linked tool needs.
+	// +kubebuilder:validation:MaxItems=4
+	// +kubebuilder:validation:items:MaxLength=4096
+	// +kubebuilder:validation:items:XValidation:rule="self.startsWith('/') && !self.contains(':') && !self.contains('..')",message="libDirs entries must be absolute host paths without ':' or '..'"
+	LibDirs []string `json:"libDirs,omitempty"`
+	// Devices are host device nodes the tools open, such as /dev/kfd. Each is
+	// mounted at the same path in the agent container. /dev/kmsg is always
+	// mounted and cannot be listed.
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=256
+	// +kubebuilder:validation:items:XValidation:rule="self.startsWith('/dev/') && !self.contains(':') && !self.contains('..') && self != '/dev/kmsg'",message="devices entries must be device paths under /dev/ without ':' or '..', other than /dev/kmsg"
+	Devices []string `json:"devices,omitempty"`
 }
 
 // HostToolingSpec mounts NVIDIA userspace tooling from the node into the
@@ -830,7 +903,12 @@ type SignalMatch struct {
 	// A signal that names NO vendor does not match a vendor-scoped policy. That
 	// is deliberate: these ladders reset and reboot hardware, so acting on an
 	// unconfirmed guess is the wrong direction to fail in.
-	// +kubebuilder:validation:Enum=nvidia;amd;intel
+	//
+	// Any vendor id is accepted (lowercase letters, digits, and hyphens, at
+	// most 32 characters), so a policy can scope a ladder to the vendor of an
+	// accelerator adapter added after this API version.
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`
 	Vendor       string                `json:"vendor,omitempty"`
 	Source       string                `json:"source,omitempty"`
 	Severity     string                `json:"severity,omitempty"`
@@ -952,7 +1030,12 @@ type GPUPlaybookList struct {
 // non-XID analogue of an XID number, matching AgentEvent.Fault (vendor,
 // code) as emitted by e.g. the nvidia-smi/DCGM fallback source.
 type FaultCodeSelector struct {
+	// Vendor is a vendor id: lowercase letters, digits, and hyphens, at most
+	// 32 characters. Any vendor is accepted, including one served by an
+	// accelerator adapter added after this API version.
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`
 	Vendor string `json:"vendor"`
 	// +kubebuilder:validation:MinLength=1
 	Code string `json:"code"`
@@ -1105,10 +1188,17 @@ type GPUNodeConfigList struct {
 }
 
 // AcceleratorRuntimeVendor identifies the accelerator runtime contract a
-// profile governs. NVIDIA is intentionally the only admitted contract in this
-// API version: a later vendor must add its own explicit preflight and
-// remediation safety contract instead of inheriting NVIDIA permissions.
-// +kubebuilder:validation:Enum=nvidia
+// profile governs: a vendor id of lowercase letters, digits, and hyphens, at
+// most 32 characters.
+//
+// Any vendor id is admitted, but a profile only ever narrows. It admits an
+// action only against a fresh report whose readiness is "ready", and only the
+// NVIDIA preflight produces a ready report: an accelerator adapter without a
+// preflight reports at most "degraded" and never declares a physical reset.
+// A profile for any other vendor therefore admits no accelerator action until
+// that vendor ships its own preflight; it never inherits NVIDIA permissions.
+// +kubebuilder:validation:MaxLength=32
+// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`
 type AcceleratorRuntimeVendor string
 
 const (

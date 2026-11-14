@@ -29,6 +29,9 @@ spec:
             - --leader-election-namespace=$(POD_NAMESPACE)
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081
+            {{- with .Values.agentAdapters }}
+            - {{ printf "--default-agent-adapters=%s" (toJson .) | quote }}
+            {{- end }}
           env:
             - name: POD_NAMESPACE
               valueFrom:
