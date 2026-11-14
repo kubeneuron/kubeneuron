@@ -11,7 +11,7 @@
 # multi-arch image cross-compiles instead of emulating, and a plain local
 # build keeps working.
 ARG BUILDPLATFORM=linux/amd64
-FROM --platform=$BUILDPLATFORM golang:1.26.10 AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.11 AS build
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
