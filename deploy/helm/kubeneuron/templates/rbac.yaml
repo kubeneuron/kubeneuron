@@ -30,6 +30,8 @@ rules:
       - kubeneurons/status
       - gpuremediationpolicies/status
       - gpuplaybooks/status
+      - gpumaintenancewindows/status
+      - gpunodeconfigs/status
       - acceleratorruntimeprofiles/status
       - gpusignalmappings/status
       - gpuautonomyplans/status
@@ -52,6 +54,9 @@ rules:
   - apiGroups: ["apps"]
     resources: ["daemonsets", "deployments"]
     verbs: ["create", "get", "list", "update", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    verbs: ["delete"]
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
     verbs: ["create", "get", "list", "update", "watch"]

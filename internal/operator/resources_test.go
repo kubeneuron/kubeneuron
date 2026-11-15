@@ -5,6 +5,7 @@ package operator
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -182,6 +183,79 @@ func TestOperatorRBACCanReconcilePVCAndDelegateControllerRole(t *testing.T) {
 				if containsString(rule.Verbs, forbidden) || containsString(rule.Verbs, "*") {
 					t.Errorf("operator must not manage namespaces with %q: %#v", forbidden, rule)
 				}
+			}
+		}
+	}
+}
+
+// Every shipped CRD with a status subresource is reconciled by this operator.
+// Derive the list from the API manifests so a new status writer cannot silently
+// inherit a role that only covers yesterday's kinds. The Helm mirror test below
+// enforces the same rules for the chart.
+func TestOperatorRBACCoversCRDStatusesAndManagedWrites(t *testing.T) {
+	raw, err := os.ReadFile("../../config/rbac/operator_role.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var role rbacv1.ClusterRole
+	if err := sigsyaml.Unmarshal(raw, &role); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := filepath.Glob("../../config/crd/bases/*.yaml")
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("CRD manifests: %v (%d)", err, len(paths))
+	}
+	checked := 0
+	for _, path := range paths {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var crd struct {
+			Spec struct {
+				Group string `json:"group"`
+				Names struct {
+					Plural string `json:"plural"`
+				} `json:"names"`
+				Versions []struct {
+					Subresources map[string]any `json:"subresources"`
+				} `json:"versions"`
+			} `json:"spec"`
+		}
+		if err := sigsyaml.Unmarshal(raw, &crd); err != nil {
+			t.Fatal(err)
+		}
+		for _, version := range crd.Spec.Versions {
+			if _, ok := version.Subresources["status"]; !ok {
+				continue
+			}
+			checked++
+			want := rbacv1.PolicyRule{APIGroups: []string{crd.Spec.Group}, Resources: []string{crd.Spec.Names.Plural + "/status"}, Verbs: []string{"get", "patch", "update"}}
+			if !rulesCover(role.Rules, want) {
+				t.Errorf("operator cannot reconcile status in %s: %#v", path, want)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no CRD status subresources checked")
+	}
+	if !rulesCover(role.Rules, rbacv1.PolicyRule{APIGroups: []string{"apps"}, Resources: []string{"daemonsets"}, Verbs: []string{"delete"}}) {
+		t.Error("operator cannot remove its owned legacy detect DaemonSet")
+	}
+	// CreateOrUpdate for these resources is separate from delegated controller
+	// privileges. This catches missing operator writes even if the controller
+	// does not need the same permission.
+	for _, want := range []rbacv1.PolicyRule{
+		{APIGroups: []string{""}, Resources: []string{"configmaps", "secrets", "services", "serviceaccounts", "persistentvolumeclaims"}, Verbs: []string{"create", "get", "update"}},
+		{APIGroups: []string{"apps"}, Resources: []string{"deployments", "daemonsets"}, Verbs: []string{"create", "get", "update"}},
+		{APIGroups: []string{"policy"}, Resources: []string{"poddisruptionbudgets"}, Verbs: []string{"create", "get", "update"}},
+		{APIGroups: []string{"rbac.authorization.k8s.io"}, Resources: []string{"clusterroles", "clusterrolebindings"}, Verbs: []string{"create", "get", "update"}},
+	} {
+		for _, resource := range want.Resources {
+			single := want
+			single.Resources = []string{resource}
+			if !rulesCover(role.Rules, single) {
+				t.Errorf("operator cannot reconcile managed objects: %#v", single)
 			}
 		}
 	}

@@ -272,6 +272,8 @@ scale_operator() {
 }
 
 cleanup_fixtures() {
+	"$KUBECTL_BIN" delete gpunodeconfig "${ROOT_NAME}-status-node" --ignore-not-found >/dev/null 2>&1 || true
+	"$KUBECTL_BIN" delete gpumaintenancewindow "${ROOT_NAME}-status-window" --ignore-not-found >/dev/null 2>&1 || true
 	"$KUBECTL_BIN" delete kubeneuron "$ROOT_NAME" \
 		--ignore-not-found --wait=true --timeout=90s >/dev/null 2>&1 || true
 	"$KUBECTL_BIN" delete gpuremediationpolicy "$POLICY_NAME" "$RESTART_POLICY_NAME" \
@@ -542,6 +544,82 @@ assert_child_configuration_statuses() {
 	printf '%s\n' "$playbook_json" >&2
 	printf '%s\n' "$policy_json" >&2
 	die "timed out waiting for current compiled child-CR statuses"
+}
+
+# Exercise status writes with the real operator ServiceAccount, not a fake client.
+exercise_node_and_window_status_rbac() {
+	local resource verb node before after deadline child root_digest
+	for resource in kubeneurons gpuremediationpolicies gpuplaybooks gpumaintenancewindows gpunodeconfigs acceleratorruntimeprofiles gpusignalmappings gpuautonomyplans; do
+		for verb in patch update; do
+			[[ $("$KUBECTL_BIN" auth can-i "$verb" "${resource}.kubeneuron.io" --subresource=status \
+				--as="system:serviceaccount:${OPERATOR_NAMESPACE}:kubeneuron-operator") == yes ]] || \
+				die "operator cannot $verb $resource/status"
+		done
+	done
+	node=$("$KUBECTL_BIN" get nodes -o jsonpath='{.items[0].metadata.name}')
+	before=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get configmap "${ROOT_NAME}-runtime" -o json | "$JQ_BIN" -r '.data["config-digest"]')
+	"$KUBECTL_BIN" apply -f - <<EOF
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUNodeConfig
+metadata:
+  name: ${ROOT_NAME}-status-node
+spec:
+  kubeNeuronRef: ${ROOT_NAME}
+  nodeName: ${node}
+  paused: true
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUMaintenanceWindow
+metadata:
+  name: ${ROOT_NAME}-status-window
+spec:
+  kubeNeuronRef: ${ROOT_NAME}
+  nodeSelector:
+    matchLabels:
+      kubernetes.io/hostname: ${node}
+  startsAt: "$($JQ_BIN -nr 'now - 60 | todate')"
+  endsAt: "$($JQ_BIN -nr 'now + 3600 | todate')"
+  pauseAutomation: true
+EOF
+	for child in "gpunodeconfig/${ROOT_NAME}-status-node" "gpumaintenancewindow/${ROOT_NAME}-status-window"; do
+		"$KUBECTL_BIN" wait "$child" --for=condition=Ready --timeout="${TIMEOUT_SECONDS}s"
+		"$KUBECTL_BIN" get "$child" -o json | "$JQ_BIN" -e '
+          .metadata.generation as $generation |
+          .status.observedGeneration == $generation and
+          any(.status.conditions[]?; .type == "Ready" and .status == "True" and
+            .reason == "Compiled" and .observedGeneration == $generation)
+        ' >/dev/null || die "$child did not publish current compiled status"
+	done
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		after=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get configmap "${ROOT_NAME}-runtime" -o json)
+		if "$JQ_BIN" -e --arg before "$before" --arg node "$node" --arg window "${ROOT_NAME}-status-window" '
+          .data["config-digest"] != $before and
+          (.data["node-configs.yaml"] | contains($node) and contains("paused: true")) and
+          (.data["windows.yaml"] | contains($window))
+        ' <<<"$after" >/dev/null; then
+			root_digest=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.status.configDigest}')
+			[[ $root_digest == "$("$JQ_BIN" -r '.data["config-digest"]' <<<"$after")" ]] && break
+		fi
+		sleep 2
+	done
+	((SECONDS < deadline)) || die "node pause and maintenance window did not reach runtime snapshot"
+	wait_root_condition True RuntimeAvailable
+	assert_runtime_ready
+	note "operator status RBAC permits node pause and maintenance window reconciliation"
+
+	"$KUBECTL_BIN" delete gpunodeconfig "${ROOT_NAME}-status-node" --wait=true
+	"$KUBECTL_BIN" delete gpumaintenancewindow "${ROOT_NAME}-status-window" --wait=true
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		after=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get configmap "${ROOT_NAME}-runtime" -o json | "$JQ_BIN" -r '.data["config-digest"]')
+		root_digest=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.status.configDigest}')
+		[[ $after == "$before" && $root_digest == "$before" ]] && break
+		sleep 2
+	done
+	[[ $after == "$before" && $root_digest == "$before" ]] || die "runtime snapshot did not recover after status fixtures were removed"
+	wait_root_condition True RuntimeAvailable
+	assert_runtime_ready
 }
 
 assert_runtime_ready() {
@@ -3938,6 +4016,7 @@ wait_root_condition True RuntimeAvailable
 assert_runtime_ready
 assert_all_owners "$root_uid"
 assert_child_configuration_statuses
+exercise_node_and_window_status_rbac
 
 controller_subject="system:serviceaccount:${TARGET_NAMESPACE}:${ROOT_NAME}-controller"
 controller_tokenreview=$("$KUBECTL_BIN" auth can-i create tokenreviews.authentication.k8s.io \

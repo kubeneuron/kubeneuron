@@ -35,6 +35,13 @@ API is `v1alpha1`.
   does not know now stop the controller from starting; remove or correct them.
   Configuration compiled by the operator is unaffected.
 
+### Fixed
+
+- Grant the operator status permissions for maintenance windows and node
+  configurations in both installation manifests and Helm, so these resources
+  can reconcile and update the runtime configuration. Also allow deletion of
+  the operator-owned legacy detect DaemonSet during reconciliation.
+
 ### Changed
 
 - **DCGM is no longer bundled in the agent image.** Removed NVIDIA's packaged

@@ -27,6 +27,8 @@ rules:
       - kubeneurons/status
       - gpuremediationpolicies/status
       - gpuplaybooks/status
+      - gpumaintenancewindows/status
+      - gpunodeconfigs/status
       - acceleratorruntimeprofiles/status
       - gpusignalmappings/status
       - gpuautonomyplans/status
@@ -93,6 +95,12 @@ rules:
       - list
       - update
       - watch
+  - apiGroups:
+      - apps
+    resources:
+      - daemonsets
+    verbs:
+      - delete
   - apiGroups:
       - policy
     resources:
