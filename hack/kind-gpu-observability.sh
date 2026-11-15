@@ -868,9 +868,16 @@ run_cluster() {
 	KUBECONFIG_PATH="$work_dir/kubeconfig"
 	trap cleanup EXIT
 
+	# Match the container engine, which may differ from the shell host.
+	local fixture_arch
+	case $("$DOCKER_BIN" info --format '{{.Architecture}}') in
+	amd64|x86_64) fixture_arch=amd64 ;;
+	arm64|aarch64) fixture_arch=arm64 ;;
+	*) fail "unsupported container engine architecture for fixture" ;;
+	esac
 	note "building fixture image $FIXTURE_IMAGE (FROM scratch, host-built static exporter + recorder sink)"
-	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 "$GO_BIN" build -trimpath -ldflags='-s -w' -o "$work_dir/dcgmfixture" ./hack/dcgmfixture)
-	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 "$GO_BIN" build -trimpath -ldflags='-s -w' -o "$work_dir/alertsink" ./hack/alertsink)
+	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH="$fixture_arch" "$GO_BIN" build -trimpath -ldflags='-s -w' -o "$work_dir/dcgmfixture" ./hack/dcgmfixture)
+	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH="$fixture_arch" "$GO_BIN" build -trimpath -ldflags='-s -w' -o "$work_dir/alertsink" ./hack/alertsink)
 	mkdir -p "$work_dir/image"
 	cp "$work_dir/dcgmfixture" "$work_dir/alertsink" "$FIXTURE_DIR/Dockerfile" "$FIXTURE_DIR/Dockerfile.dockerignore" "$work_dir/image/"
 	"$DOCKER_BIN" build --quiet --pull=false -t "$FIXTURE_IMAGE" -f "$work_dir/image/Dockerfile" "$work_dir/image" >/dev/null

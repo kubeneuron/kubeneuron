@@ -18,6 +18,9 @@ API is `v1alpha1`.
   BusyBox is digest-pinned, and releases retain its corresponding sources,
   including linked uClibc-ng and build recipes, with the source offer.
 
+- CI now tests linux/arm64 with native race tests, kind integration, and
+  image verification alongside linux/amd64.
+
 - **Adapter contract in `pkg/`.** The accelerator adapter contract
   moves from `internal/accelerator` to `pkg/accelerator`, now its own Go
   module (standard library only, tagged `pkg/accelerator/vX.Y.Z`). The cloud

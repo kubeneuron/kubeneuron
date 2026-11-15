@@ -21,7 +21,18 @@ concurrency:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: build-and-test
+            runner: ubuntu-latest
+            arch: amd64
+          - name: build-and-test-arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     services:
       postgres:
         image: postgres:16-alpine
@@ -80,13 +91,31 @@ jobs:
 
   kind-integration:
     # Hosted runners: free and unlimited on public repositories.
-    runs-on: ubuntu-24.04
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: kind-integration
+            runner: ubuntu-24.04
+            arch: amd64
+            kind_sha256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
+            kubectl_sha256: fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
+          - name: kind-integration-arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+            kind_sha256: b92cd615e97585de8ddade28ed5cd7feb4248d717c233eea5b03c37298900f5d
+            kubectl_sha256: d1a1f7b86859108406e997430a59c95c72a77cc33cdc4faccd046407aff2cfac
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    # Checksums: kind release kind-linux-<arch>.sha256sum and
+    # dl.k8s.io/release/<version>/bin/linux/<arch>/kubectl.sha256.
     env:
       KIND_VERSION: v0.32.0
-      KIND_SHA256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
+      KIND_SHA256: ${{ matrix.kind_sha256 }}
       KUBECTL_VERSION: v1.33.12
-      KUBECTL_SHA256: fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
+      KUBECTL_SHA256: ${{ matrix.kubectl_sha256 }}
+      TOOL_ARCH: ${{ matrix.arch }}
       KIND_CLUSTER_NAME: kubeneuron-ci
     steps:
       - uses: actions/checkout@v4
@@ -107,16 +136,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(uname -m)" = x86_64
+          case "$TOOL_ARCH:$(uname -m)" in
+            amd64:x86_64|arm64:aarch64) ;;
+            *) echo "runner architecture does not match $TOOL_ARCH" >&2; exit 1 ;;
+          esac
           tools="$RUNNER_TEMP/kubeneuron-tools"
           mkdir -p "$tools"
           curl --fail --location --retry 3 \
             --output "$tools/kind" \
-            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${TOOL_ARCH}"
           printf '%s  %s\n' "$KIND_SHA256" "$tools/kind" | sha256sum --check -
           curl --fail --location --retry 3 \
             --output "$tools/kubectl" \
-            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TOOL_ARCH}/kubectl"
           printf '%s  %s\n' "$KUBECTL_SHA256" "$tools/kubectl" | sha256sum --check -
           chmod 0755 "$tools/kind" "$tools/kubectl"
           echo "$tools" >> "$GITHUB_PATH"
@@ -182,7 +214,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kind-integration-${{ github.run_id }}-${{ github.run_attempt }}
+          name: kind-integration-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.KIND_ARTIFACTS_DIR }}
           if-no-files-found: warn
           retention-days: 7
@@ -243,12 +275,25 @@ jobs:
     # tests the code; this tests the artifact — that the distroless image
     # starts, that the agent still carries the host tools it shells out to,
     # and that the classic-builder path `make docker` uses has not broken.
-    runs-on: ubuntu-latest
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: image
+            runner: ubuntu-latest
+            arch: amd64
+          - name: image-arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
       - name: Verify the published image
+        env:
+          DOCKER_DEFAULT_PLATFORM: linux/${{ matrix.arch }}
         run: bash hack/verify-image.sh ci
 
   docs:
