@@ -16,6 +16,10 @@ of the KubeNeuron License.
      web/        web UI
      configs/    (plural) bundled playbooks, policies, and alert rules. Not
                  the same directory as config/ in section 2.
+     docs/       documentation, except the directory listed in section 2.
+                 From version 1.2 on; documentation in commits and releases
+                 up to and including v0.8.0 and in earlier commits remains
+                 under the Apache License, Version 2.0, as section 4 states.
      build/, hack/, test/, and all other files not listed in section 2
 
 2. Apache License, Version 2.0 (open source)
@@ -28,7 +32,8 @@ of the KubeNeuron License.
      config/     (singular) custom resource definitions, RBAC, and sample
                  manifests. Not the same directory as configs/ in section 1.
      deploy/     Helm chart, Kubernetes manifests, and dashboards
-     docs/       documentation
+     docs/adapters/   documentation of the adapter contract and of any
+                 adapter protocol
      examples/   examples
 
    A file that carries its own SPDX-License-Identifier header is licensed as

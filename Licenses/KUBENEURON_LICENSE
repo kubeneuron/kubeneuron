@@ -40,7 +40,9 @@ control):
     charts, manifests, documentation, and other materials that Licensor makes
     available and that are identified, by the LICENSE file or by a license
     header, as governed by this License, including any updates Licensor
-    provides under this License.
+    provides under this License. Portions of the Software that the LICENSE
+    file identifies as Apache Components are part of the Software but are
+    governed by Section 4.1.
 
 1.2 "Official Release" means (a) a tagged release of the Software, or (b) a
     commit of the Software on the default branch of the repository named in

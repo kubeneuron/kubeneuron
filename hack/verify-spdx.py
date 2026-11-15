@@ -4,7 +4,7 @@
 """Every source file carries an SPDX-License-Identifier that matches LICENSE.
 
 The path rules mirror the root LICENSE file: api/, pkg/, config/, deploy/,
-docs/ and examples/ are Apache-2.0; everything else is LicenseRef-KubeNeuron.
+docs/adapters/ and examples/ are Apache-2.0; everything else is LicenseRef-KubeNeuron.
 A file whose header names the wrong license fails, as does a source file
 with no header. Generated files are checked like any other, and so are the
 generator header templates (api/boilerplate.go.txt, hack/boilerplate.go.txt),
@@ -16,7 +16,7 @@ Usage:
 """
 import os, re, subprocess, sys
 
-APACHE = ("api/", "pkg/", "config/", "deploy/", "docs/", "examples/")
+APACHE = ("api/", "pkg/", "config/", "deploy/", "docs/adapters/", "examples/")
 SKIP_PARTS = ("/testdata/", "/node_modules/", "vendor/")
 # Generator header templates. Each must carry the header of the licence that
 # covers its own path, so the Apache one cannot live under (or be used for)

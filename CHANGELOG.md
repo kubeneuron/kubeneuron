@@ -46,7 +46,10 @@ API is `v1alpha1`.
     a product or platform offered under your own name, resell it, copy its
     code into a replacement product, or use it to train AI that recreates it.
   - Commits and releases up to and including tag v0.8.0 remain under the
-    Apache License, Version 2.0.
+    Apache License, Version 2.0. From version 1.2, documentation is under the
+    KubeNeuron License; the API definitions, CRDs, Helm chart, dashboards,
+    examples, and the adapter contract and its documentation stay under
+    Apache-2.0.
 
   Contributions now require the [Contributor License Agreement](CLA.md),
   checked by the `CLA` workflow. Every source file carries an
@@ -57,6 +60,8 @@ API is `v1alpha1`.
   - Internal Use wording clarified for contractors.
   - History note for commit b4a7f73 and the drafts before commit b3eede4.
   - `config/` and `configs/` explicitly distinguished.
+  - Documentation moves under the KubeNeuron License, except `docs/adapters/`
+    (Apache-2.0). §1.1 now refers to §4.1 for the Apache Components.
 - Added third-party license and NOTICE inventory (generated) and stale checks;
   legal texts are bundled with binaries, CLI archives, and container images.
 - Added a reproducible adapter-contract v0.1.0 release checklist and

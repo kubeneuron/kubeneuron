@@ -600,8 +600,8 @@ behavior.
 KubeNeuron is source-available under the
 [KubeNeuron License, Version 1.2](Licenses/KUBENEURON_LICENSE), which covers
 the core code and all binaries and images. The API types, the adapter
-contract ([`pkg/accelerator`](pkg/accelerator) and [`pkg/cloud`](pkg/cloud)),
-CRDs, Helm chart, and documentation are under the
+contract ([`pkg/accelerator`](pkg/accelerator) and [`pkg/cloud`](pkg/cloud))
+and its documentation, CRDs, Helm chart, and examples are under the
 [Apache License 2.0](Licenses/APACHE_LICENSE). [LICENSE](LICENSE) lists which
 paths each license covers. In short (the license text controls):
 
@@ -626,6 +626,9 @@ paths each license covers. In short (the license text controls):
   a product or platform offered under your own name, resell it, copy its
   code into a replacement product, or use it to train AI that recreates it.
 - Commits and releases up to and including tag v0.8.0 remain under the
-  Apache License, Version 2.0.
+  Apache License, Version 2.0. From version 1.2, documentation is under the
+  KubeNeuron License; the API definitions, CRDs, Helm chart, dashboards,
+  examples, and the adapter contract and its documentation stay under
+  Apache-2.0.
 
 Contributions require the [Contributor License Agreement](CLA.md).

@@ -188,8 +188,9 @@ other sensitive values.
 
 KubeNeuron is licensed under two licenses; see [LICENSE](LICENSE) for which
 paths each one covers. Most of the code is under the source-available
-[KubeNeuron License](Licenses/KUBENEURON_LICENSE). The API types, CRDs,
-Helm chart, and documentation are under the
+[KubeNeuron License](Licenses/KUBENEURON_LICENSE), including the
+documentation except `docs/adapters/`. The API types, CRDs, Helm chart,
+examples, and the adapter contract documentation are under the
 [Apache License 2.0](Licenses/APACHE_LICENSE).
 
 Every contributor must agree to the
