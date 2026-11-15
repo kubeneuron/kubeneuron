@@ -11,6 +11,23 @@ API is `v1alpha1`.
 
 ### Security
 
+- **File playbooks can no longer restart or destroy a node without a human.**
+  The controller now refuses, at start and on reload, a playbook step with
+  `agent.reboot`, `platform.recycle_node` or `platform.replace_node` that does
+  not set `approval: required`, the rule the operator's compiler already
+  applied to CRD playbooks; at execution time such a step always parks for
+  approval, whatever the playbook text says. The shipped file ladders in
+  `configs/playbooks` now ask for approval at the same steps as the CRD pack:
+  the drain in `drain-and-reset`, `reboot`, `rma`, `fell-off-bus` and
+  `driver-reinstall`, the eviction in `workload-restart`, the reset in
+  `gpu-reset` and `reset-when-idle`, and the reboot in `driver-reinstall`
+  (previously unapproved). A test keeps the two sets in agreement.
+
+  **Upgrade note:** a hand-written file playbook with an unapproved reboot,
+  recycle or replace step now stops the controller from starting; add
+  `approval: required`. Installations that ran the shipped file ladders with
+  `dry_run: false` will now see approval requests where they did not before.
+
 - **Cookie-authenticated mutations must come from the panel's own origin.** A
   state-changing operator request authenticated by the session cookie, and
   `POST /api/v1/logout`, is refused with `403` when `Sec-Fetch-Site` is not

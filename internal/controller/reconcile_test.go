@@ -87,7 +87,11 @@ func walkFixture(t *testing.T, dryRun bool) (*Controller, *sqlite.Store, *record
 }
 
 // drive runs reconcile passes until the incident reaches want or attempts
-// run out, waiting for in-flight steps between passes.
+// run out, waiting for in-flight steps between passes. The shipped ladders
+// park for a human before every step that ends running work, so when the
+// caller is not waiting for the park itself, drive approves each round the
+// way an operator would; a test that is about the park asks for
+// StateAwaitingApproval and decides on its own.
 func drive(t *testing.T, c *Controller, st *sqlite.Store, id string, want types.IncidentState) *types.Incident {
 	t.Helper()
 	ctx := context.Background()
@@ -100,6 +104,11 @@ func drive(t *testing.T, c *Controller, st *sqlite.Store, id string, want types.
 		}
 		if inc.State == want {
 			return inc
+		}
+		if inc.State == types.StateAwaitingApproval {
+			if err := c.DecideApproval(ctx, id, "test-approver", "cli", types.ApprovalApproved, 0, "", ""); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	inc, _ := st.GetIncident(ctx, id)
@@ -517,5 +526,44 @@ func TestWalkUsesSignalCatalogOverrides(t *testing.T) {
 	}
 	if incidents[0].Playbook != "observe-suspect" {
 		t.Fatalf("playbook = %s, want observe-suspect via thermal policy", incidents[0].Playbook)
+	}
+}
+
+// Defence in depth for the file plane: even a playbook that reached the
+// engine without Validate (built in code, or by a future loader) cannot
+// reboot a node unattended, because NeedsApproval reads the registry.
+func TestWalkParksForcedApprovalActionWhateverThePlaybookSays(t *testing.T) {
+	st, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	books := map[string]*playbook.Playbook{
+		"unattended-reboot": {Name: "unattended-reboot", Target: "node", Steps: []playbook.Step{
+			{Name: "reboot", Action: "agent.reboot", Approval: "none"},
+			{Name: "verify", Action: "verify.node_health"},
+		}},
+	}
+	engine, err := playbook.NewEngine(books, []playbook.Policy{{Class: types.ClassFellOffBus, Playbook: "unattended-reboot"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := safety.NewGate(safety.Limits{MaxConcurrentRemediations: 4, MaxConcurrentReboots: 1, DryRun: true})
+	c := New(st, st, engine, gate, safety.NewFlapDetector(3, 24*time.Hour), nil, nil, &recordingNotifier{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	id := openIncidentFor(t, c, types.ClassFellOffBus)
+
+	inc := drive(t, c, st, id, types.StateAwaitingApproval)
+	if inc.StepIndex != 0 {
+		t.Fatalf("parked at step %d, want the reboot (step 0)", inc.StepIndex)
+	}
+	trail, err := st.AuditTrail(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range trail {
+		if e.Action == "reboot" && strings.Contains(e.Result, "DRY-RUN") {
+			t.Fatalf("the reboot ran before a human decided: %+v", e)
+		}
 	}
 }

@@ -3,6 +3,7 @@
 package playbook
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -473,5 +474,40 @@ func TestEveryPolicyLookupHonoursTheVendor(t *testing.T) {
 	// A vendor nobody scoped for still finds nothing rather than the first one.
 	if got, ok := e.SelectFor("ecc-dbe", types.AcceleratorVendorIntel); ok {
 		t.Fatalf("an Intel incident bound %q", got.Name)
+	}
+}
+
+// Reboot, recycle and replace restart or destroy the whole node: the CRD
+// compiler refuses them without approval, and so must the file plane.
+func TestForcedApprovalActionsMustRequireApproval(t *testing.T) {
+	for _, wire := range []string{"agent.reboot", "platform.recycle_node", "platform.replace_node"} {
+		for _, approval := range []string{"", "none"} {
+			p := &Playbook{Name: "p", Target: "node", Steps: []Step{{Name: "s", Action: wire, Approval: approval}}}
+			if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "approval: required") {
+				t.Errorf("%s with approval %q: Validate() = %v, want a rejection", wire, approval, err)
+			}
+			if !p.Steps[0].NeedsApproval() {
+				t.Errorf("%s with approval %q: NeedsApproval() = false; the registry forces it", wire, approval)
+			}
+		}
+		ok := &Playbook{Name: "p", Target: "node", Steps: []Step{{Name: "s", Action: wire, Approval: "required"}}}
+		if err := ok.Validate(); err != nil {
+			t.Errorf("%s with approval required: %v", wire, err)
+		}
+	}
+	// An action the registry does not force follows the playbook text.
+	if (Step{Name: "s", Action: "platform.drain"}).NeedsApproval() {
+		t.Error("an unforced action without approval must not need approval")
+	}
+}
+
+func TestLoadDirRejectsUnapprovedReboot(t *testing.T) {
+	dir := t.TempDir()
+	body := "name: bad\ntarget: node\nsteps:\n  - name: reboot\n    action: agent.reboot\n"
+	if err := os.WriteFile(filepath.Join(dir, "bad.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadDir(dir); err == nil {
+		t.Fatal("a playbook directory with an unapproved reboot loaded")
 	}
 }

@@ -1,5 +1,5 @@
 # Full node reboot — the escalation target when drain-and-reset fails.
-# Approval required. Reboot is guarded by boot-id comparison: the controller
+# The drain and the reboot each wait for a human. Reboot is guarded by boot-id comparison: the controller
 # re-issues it only when the node's boot ID is unchanged and the timeout has
 # passed.
 name: reboot
@@ -10,6 +10,7 @@ steps:
     action: platform.cordon
   - name: drain
     action: platform.drain
+    approval: required
     timeout: 30m
   - name: collect-bundle
     action: agent.collect_bundle

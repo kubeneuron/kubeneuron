@@ -149,6 +149,14 @@ func newHarness(t *testing.T) *harness {
 
 func (h *harness) postJSON(server, path string, v any, wantStatus int) {
 	h.t.Helper()
+	if status, body := h.post(server, path, v); status != wantStatus {
+		h.t.Fatalf("POST %s: status %d, want %d: %s", path, status, wantStatus, body)
+	}
+}
+
+// post sends v and returns the response status and body.
+func (h *harness) post(server, path string, v any) (int, string) {
+	h.t.Helper()
 	payload, err := json.Marshal(v)
 	if err != nil {
 		h.t.Fatal(err)
@@ -166,10 +174,8 @@ func (h *harness) postJSON(server, path string, v any, wantStatus int) {
 		h.t.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != wantStatus {
-		body, _ := io.ReadAll(resp.Body)
-		h.t.Fatalf("POST %s: status %d, want %d: %s", path, resp.StatusCode, wantStatus, body)
-	}
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
 }
 
 func (h *harness) getJSON(path string, out any) {
@@ -194,11 +200,14 @@ func (h *harness) getJSON(path string, out any) {
 }
 
 // waitForIncident polls the operator API until an incident for the node
-// reaches the wanted state.
+// reaches the wanted state. The shipped ladders park for a human before every
+// step that ends running work, so unless the caller is waiting for the park
+// itself, each park is approved over the REST API as an operator would.
 func (h *harness) waitForIncident(node string, want types.IncidentState) *types.Incident {
 	h.t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	var last *types.Incident
+	approved := map[string]int{}
 	for time.Now().Before(deadline) {
 		var incidents []*types.Incident
 		h.getJSON("/api/v1/incidents?node="+node, &incidents)
@@ -206,6 +215,21 @@ func (h *harness) waitForIncident(node string, want types.IncidentState) *types.
 			last = inc
 			if inc.State == want {
 				return inc
+			}
+			if inc.State == types.StateAwaitingApproval && want != types.StateAwaitingApproval {
+				// One decision per observed approval round. The list can lag a
+				// decision already made (by the test itself or by an earlier
+				// pass), so a 409 "not awaiting approval" means the round was
+				// decided and the incident moved on: keep polling.
+				if round, seen := approved[inc.ID]; !seen || round != inc.ApprovalEpoch {
+					approved[inc.ID] = inc.ApprovalEpoch
+					status, body := h.post(h.public.URL, "/api/v1/incidents/"+inc.ID+"/approve",
+						map[string]string{"actor": "e2e-operator"})
+					decided := status == http.StatusConflict && strings.Contains(body, "not awaiting approval")
+					if status != http.StatusNoContent && !decided {
+						h.t.Fatalf("approve %s round %d: status %d: %s", inc.ID, inc.ApprovalEpoch, status, body)
+					}
+				}
 			}
 		}
 		time.Sleep(10 * time.Millisecond)

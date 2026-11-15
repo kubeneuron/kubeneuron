@@ -1,6 +1,6 @@
 # XID 79 — GPU has fallen off the bus. A GPU reset cannot recover this
-# state, so the ladder skips straight to drain + reboot. The reboot step
-# requires human approval by default.
+# state, so the ladder skips straight to drain + reboot. The drain and the
+# reboot each wait for a human.
 name: fell-off-bus
 target: node
 cooldown: 6h
@@ -9,6 +9,7 @@ steps:
     action: platform.cordon
   - name: drain
     action: platform.drain
+    approval: required
     timeout: 30m
   - name: collect-bundle
     action: agent.collect_bundle

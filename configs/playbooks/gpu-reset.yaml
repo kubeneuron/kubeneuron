@@ -1,6 +1,6 @@
 # In-place GPU reset without draining the node (GSP errors and other
-# recoverable driver states). Requires the GPU to be idle; if the idle check
-# fails, escalation drains first.
+# recoverable driver states). Requires the GPU to be idle, and a human
+# approves the reset. If the idle check fails the controller stops for a human.
 name: gpu-reset
 target: gpu
 cooldown: 30m
@@ -10,6 +10,7 @@ steps:
     timeout: 2m
   - name: reset
     action: agent.gpu_reset
+    approval: required
     timeout: 5m
   - name: verify
     action: verify.gpu_health

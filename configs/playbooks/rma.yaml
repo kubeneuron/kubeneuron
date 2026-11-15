@@ -10,6 +10,7 @@ steps:
     action: platform.cordon
   - name: drain
     action: platform.drain
+    approval: required
     timeout: 60m
   - name: collect-bundle
     action: agent.collect_bundle

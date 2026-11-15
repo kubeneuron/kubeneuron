@@ -491,6 +491,49 @@ func TestReloadFailsClosedOnBadOrIncompletePolicies(t *testing.T) {
 	}
 }
 
+// The file plane enforces the same forced-approval rule as the CRD compiler,
+// on start and on reload: a playbook that reboots without approval is refused.
+func TestReloadRefusesPlaybookThatRebootsWithoutApproval(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	playbooks := filepath.Join(dir, "playbooks")
+	if err := os.MkdirAll(playbooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	book := func(approval string) {
+		t.Helper()
+		body := "name: reboot-now\ntarget: node\nsteps:\n  - name: reboot\n    action: agent.reboot\n" + approval
+		if err := os.WriteFile(filepath.Join(playbooks, "reboot-now.yaml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	policies := filepath.Join(dir, "runtime.yaml")
+	if err := os.WriteFile(policies, []byte("policies:\n  - match: {class: fell-off-bus}\n    playbook: reboot-now\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	gate := safety.NewGate(safety.Limits{MaxConcurrentRemediations: 2, DryRun: true})
+	ctrl := controller.New(st, nil, nil, gate, nil, nil, nil, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	api := httpapi.New(ctrl)
+	paths := runtimeConfigPaths{policies: policies, playbooks: playbooks}
+	logSink := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	book("    approval: required\n")
+	if err := applyRuntimeConfig(ctx, ctrl, api, paths, logSink); err != nil {
+		t.Fatalf("an approved reboot must load: %v", err)
+	}
+	book("")
+	err = applyRuntimeConfig(ctx, ctrl, api, paths, logSink)
+	if err == nil || !strings.Contains(err.Error(), "approval: required") {
+		t.Fatalf("reload of an unapproved reboot = %v, want a refusal", err)
+	}
+}
+
 func TestStandbyRuntimeReloadDoesNotWriteLeaderOwnedNodePauses(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

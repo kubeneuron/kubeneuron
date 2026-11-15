@@ -331,6 +331,14 @@ The operator rejects (fail-closed), among others:
 - policies referencing unknown playbooks, escalation to missing playbooks,
   duplicate playbook names, invalid durations.
 
+The controller applies the whole-node rule to file playbooks too (the
+`-playbooks` directory, read at start and on every reload): a step with
+`agent.reboot`, `platform.recycle_node` or `platform.replace_node` that does
+not say `approval: required` is refused, and the reload keeps the running
+configuration. The shipped file ladders in `configs/playbooks` ask a human at
+the same steps as the CRD pack in `config/policies`: at the first step that
+ends running work (drain, eviction or device reset), and at every reboot.
+
 ## A worked example
 
 ```yaml

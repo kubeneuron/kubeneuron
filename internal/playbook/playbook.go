@@ -44,8 +44,19 @@ type Step struct {
 	Params   map[string]string `yaml:"params,omitempty"`
 }
 
-// NeedsApproval reports whether the step requires human approval.
-func (s Step) NeedsApproval() bool { return s.Approval == "required" }
+// NeedsApproval reports whether the step requires human approval: when the
+// step says so, and always for an action the registry marks ForcesApproval
+// (reboot, recycle_node, replace_node), whatever the playbook text says.
+// Validate rejects such a step without `approval: required`; this is the
+// second line, so a playbook that reached the engine by another path still
+// cannot restart or destroy a node unattended.
+func (s Step) NeedsApproval() bool {
+	if s.Approval == "required" {
+		return true
+	}
+	def, ok := action.ByWire(s.Action)
+	return ok && def.ForcesApproval
+}
 
 // OnFailure describes escalation when the playbook fails.
 type OnFailure struct {
@@ -88,6 +99,14 @@ func (p *Playbook) Validate() error {
 		}
 		if s.Approval != "" && s.Approval != "none" && s.Approval != "required" {
 			return fmt.Errorf("playbook %q: step %q: approval must be \"none\" or \"required\"", p.Name, s.Name)
+		}
+		// The same rule the operator's compiler applies to CRD playbooks:
+		// an action that restarts or destroys the whole node cannot run
+		// without a human, so a file playbook that says otherwise is wrong
+		// and is rejected rather than silently upgraded.
+		if def, ok := action.ByWire(s.Action); ok && def.ForcesApproval && s.Approval != "required" {
+			return fmt.Errorf("playbook %q: step %q: action %q restarts or destroys the node and must set approval: required",
+				p.Name, s.Name, s.Action)
 		}
 		// Likewise a negative timeout: the step's deadline is already in the
 		// past when it is computed, so the step is cancelled before it does
