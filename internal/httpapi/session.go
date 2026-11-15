@@ -199,6 +199,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
+		// Signing a user out is a state change made with the cookie alone.
+		if status, reason := s.checkSessionMutation(r); status != 0 {
+			http.Error(w, reason, status)
+			return
+		}
 		s.sessions.revoke(cookie.Value)
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})

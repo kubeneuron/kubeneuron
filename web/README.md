@@ -29,11 +29,8 @@ in `sessionStorage` only). Surfaces:
    actions are eligible or refused, reason codes) fetched per node while
    the Fleet view is open.
 
-The static page itself is public; every API call it makes requires the
-operator token, and mutations record the actor in the audit log.
-
-**Target v2 (roadmap):** the React/TypeScript application described in
-[docs/design.md](../docs/design.md) §5 — viewer/operator/admin roles, OIDC,
-SSE live updates, metrics proxy, and validated configuration editing. When
-it lands, `make web` will build into `dist/` and this embedded pipeline
-stays unchanged.
+The static page itself is public. Every API call it makes is
+authenticated: with a session after password or OIDC sign-in, or with the
+operator token (see [authentication](../docs/reference-api.md)). Mutations
+record the verified actor in the audit log, and a mutation authenticated by
+the session cookie is accepted only from the panel's own origin.

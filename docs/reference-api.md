@@ -31,6 +31,16 @@ header: **password users** declared in `spec.auth.users`
 `GET /api/v1/auth/oidc/callback`). `GET /api/v1/session` returns the
 current session's identity; audit rows record the verified user.
 
+A state-changing request authenticated by the session cookie (every operator
+`POST` and `DELETE`, including `POST /api/v1/logout`) must come from the
+panel's own origin: a `Sec-Fetch-Site` other than `same-origin`, or an
+`Origin` (or, without one, `Referer`) whose host is not the host the request
+was sent to, is refused with `403`; a request with none of the three is
+refused too. Behind a reverse proxy the host is also matched against
+`X-Forwarded-Host` when proxy headers are trusted. Its body must be
+`application/json` (or a YAML type for a candidate upload), otherwise
+`415`. Bearer-token requests are not affected.
+
 Critical v0.4 operations additionally require Kubernetes TokenReview group
 membership. A browser session and the shared static token intentionally carry
 no such groups and cannot approve an autonomy plan or request Extended

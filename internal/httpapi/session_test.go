@@ -68,6 +68,7 @@ func TestPasswordLoginIssuesAuditedSession(t *testing.T) {
 	}
 	approve := httptest.NewRequest("POST", "/api/v1/incidents/inc-1/approve", strings.NewReader(`{"actor":"mallory"}`))
 	approve.Header.Set("Content-Type", "application/json")
+	approve.Header.Set("Origin", "http://example.com")
 	approve.AddCookie(cookie)
 	rec = httptest.NewRecorder()
 	handler2.ServeHTTP(rec, approve)
@@ -80,6 +81,7 @@ func TestPasswordLoginIssuesAuditedSession(t *testing.T) {
 
 	// Logout revokes the session.
 	out := httptest.NewRequest("POST", "/api/v1/logout", nil)
+	out.Header.Set("Origin", "http://example.com")
 	out.AddCookie(cookie)
 	rec = httptest.NewRecorder()
 	handler2.ServeHTTP(rec, out)

@@ -9,6 +9,19 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+### Security
+
+- **Cookie-authenticated mutations must come from the panel's own origin.** A
+  state-changing operator request authenticated by the session cookie, and
+  `POST /api/v1/logout`, is refused with `403` when `Sec-Fetch-Site` is not
+  `same-origin`, or when its `Origin` (or `Referer`) names another host,
+  including a sibling origin of the same site that `SameSite=Lax` does not
+  stop; a request with none of these headers is refused as well. Its body must
+  be `application/json` (a YAML type for a candidate upload), so a
+  `text/plain` or form body is refused with `415`. Bearer-token requests (CLI,
+  service accounts) are unchanged. Behind a reverse proxy, `X-Forwarded-Host`
+  counts as the request host when proxy headers are trusted.
+
 ### Changed
 
 - **DCGM is no longer bundled in the agent image.** Removed NVIDIA's packaged

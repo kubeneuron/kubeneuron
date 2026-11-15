@@ -246,6 +246,12 @@ func (s *Server) requireOperatorVerb(verb string, next http.HandlerFunc) http.Ha
 		source := remoteSource(r)
 		var identity OperatorIdentity
 		if fromSession, ok := s.sessionIdentity(r); ok {
+			if verb != "get" {
+				if status, reason := s.checkSessionMutation(r); status != 0 {
+					http.Error(w, reason, status)
+					return
+				}
+			}
 			next(w, r.WithContext(context.WithValue(r.Context(), operatorIdentityContextKey{}, fromSession)))
 			return
 		}
@@ -376,8 +382,14 @@ func bearerMatches(r *http.Request, token string) bool {
 	return subtle.ConstantTimeCompare([]byte(presented), []byte(token)) == 1
 }
 
+// routeMux is the part of *http.ServeMux the operator routes need. Tests
+// register onto a recorder through it to enumerate every operator route.
+type routeMux interface {
+	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
+}
+
 // registerOperatorRoutes wires the operator/UI API onto the public mux.
-func (s *Server) registerOperatorRoutes(mux *http.ServeMux) {
+func (s *Server) registerOperatorRoutes(mux routeMux) {
 	mux.HandleFunc("POST /api/v1/login", s.handleLogin)
 	mux.HandleFunc("POST /api/v1/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/v1/session", s.handleSession)
