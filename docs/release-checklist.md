@@ -12,46 +12,107 @@ tags: admins only").
 - [ ] The hardware GPU E2E run is green for the release commit (dispatch it,
       or confirm the latest weekly run is green). See
       [Hardware E2E dispatch](hw-e2e-dispatch.md).
-- [ ] CI is green on `main` at the release commit, including the `CLA` check.
+- [ ] CI is green on `main` at the release commit.
 
 ## 2. Adapter contract modules (required before the next release)
 
 `pkg/accelerator` and `pkg/cloud` are separate Go modules (the adapter
 contract). Until they are tagged, the root `go.mod` requires them at a
 placeholder version (`v0.0.0-00010101000000-000000000000`) through local
-`replace` directives. A `replace` is ignored outside this repository, so
-`go install github.com/kubeneuron/kubeneuron/cmd/...@vX.Y.Z` and any module
-that depends on the root module would fail to resolve the placeholder.
+`replace` directives. Consumers of the root module ignore its replacements
+and cannot resolve the placeholder. Versioned `go install` rejects the
+root module's local replacements outright.
 
-Before the first release that contains these modules:
+Before the first release that contains these modules (admin steps only;
+prepare and review the code first, then tag the merged commit):
 
-- [ ] Tag the modules on the release commit (or an earlier commit with the
-      same module contents), then push the tags:
+- [ ] Run `make verify-adapter-modules` and test each module standalone:
 
       ```sh
-      git tag pkg/accelerator/v0.1.0
-      git tag pkg/cloud/v0.1.0
+      (cd pkg/accelerator && GOWORK=off go test ./...)
+      (cd pkg/cloud && GOWORK=off go test ./...)
+      cmp pkg/accelerator/LICENSE LICENSE
+      cmp pkg/cloud/LICENSE LICENSE
+      ```
+
+      Each module must contain the full Apache-2.0 text in a file named
+      exactly `LICENSE` inside its module directory for pkg.go.dev. The dependency check covers tests as well as production
+      code, rejects root/sibling modules, and uses Go's stdlib classification.
+      It checks the current GOOS/GOARCH and build tags; run it for any new
+      platform-specific adapter contract code too.
+
+- [ ] On a clean, synced `main`, record the reviewed commit and create tags:
+
+      ```sh
+      git checkout main
+      git pull --ff-only origin main
+      test -z "$(git status --porcelain)"
+      module_commit=$(git rev-parse HEAD)
+      git tag -a pkg/accelerator/v0.1.0 "$module_commit" -m "Accelerator contract v0.1.0"
+      git tag -a pkg/cloud/v0.1.0 "$module_commit" -m "Cloud contract v0.1.0"
       git push origin pkg/accelerator/v0.1.0 pkg/cloud/v0.1.0
       ```
 
-- [ ] Require the real versions in the root module and commit the result:
+      Do not move an existing published tag. These tags precede the root
+      release: the root version update below is a separate commit.
+
+- [ ] Verify public resolution outside the checkout (so local replacements
+      cannot mask a broken publication):
+
+      ```sh
+      verify_dir=$(mktemp -d)
+      (
+        cd "$verify_dir"
+        GOWORK=off GOPROXY=https://proxy.golang.org go list -m github.com/kubeneuron/kubeneuron/pkg/accelerator@v0.1.0
+        GOWORK=off GOPROXY=https://proxy.golang.org go list -m github.com/kubeneuron/kubeneuron/pkg/cloud@v0.1.0
+      )
+      rmdir "$verify_dir"
+      ```
+
+      Both commands must print the module path and `v0.1.0`. If the proxy
+      has not indexed the tags yet, retry before proceeding. Visit
+      [accelerator v0.1.0](https://pkg.go.dev/github.com/kubeneuron/kubeneuron/pkg/accelerator@v0.1.0)
+      and [cloud v0.1.0](https://pkg.go.dev/github.com/kubeneuron/kubeneuron/pkg/cloud@v0.1.0),
+      request indexing if needed, and confirm the version, Apache-2.0 license,
+      and rendered package documentation.
+
+- [ ] In the root checkout, switch to real versions, **drop both replaces**,
+      and commit the resulting `go.mod` and `go.sum`:
 
       ```sh
       go mod edit \
         -require=github.com/kubeneuron/kubeneuron/pkg/accelerator@v0.1.0 \
-        -require=github.com/kubeneuron/kubeneuron/pkg/cloud@v0.1.0
-      go mod tidy
+        -require=github.com/kubeneuron/kubeneuron/pkg/cloud@v0.1.0 \
+        -dropreplace=github.com/kubeneuron/kubeneuron/pkg/accelerator \
+        -dropreplace=github.com/kubeneuron/kubeneuron/pkg/cloud
+      GOWORK=off go mod tidy
+      make gates
       ```
 
-      The `replace` directives may stay: they keep in-repository builds on
-      the local source, while external builds resolve the tagged versions.
+      Recommendation: drop replacements. Versioned `go install` rejects
+      modules containing these replacements, even when requires have real
+      versions. This also makes release builds consume the published contract.
+      For local contract development, use an untracked workspace instead:
+      `go work init . ./pkg/accelerator ./pkg/cloud` (or `go work use` if a
+      workspace already exists). Do not commit `go.work`/`go.work.sum`;
+      use `GOWORK=off` for release verification.
 
-- [ ] Confirm the modules resolve from the module proxy:
+- [ ] After committing the root version update, verify an isolated install
+      from its public commit before tagging the root release:
 
       ```sh
-      GOFLAGS=-mod=mod go list -m github.com/kubeneuron/kubeneuron/pkg/accelerator@v0.1.0
-      GOFLAGS=-mod=mod go list -m github.com/kubeneuron/kubeneuron/pkg/cloud@v0.1.0
+      release_commit=$(git rev-parse HEAD)
+      install_dir=$(mktemp -d)
+      (
+        cd "$install_dir"
+        GOWORK=off GOPROXY=https://proxy.golang.org GOBIN="$install_dir/bin" \
+          go install github.com/kubeneuron/kubeneuron/cmd/kubeneuronctl@"$release_commit"
+      )
       ```
+
+      This requires the reviewed commit to be public. Remove the temporary
+      install directory after checking the binary. Do not publish the root
+      release until resolution, install, and all release gates pass.
 
 On later releases, tag a new `pkg/accelerator/vX.Y.Z` or `pkg/cloud/vX.Y.Z`
 only when that module changed, and require it in the root `go.mod` before

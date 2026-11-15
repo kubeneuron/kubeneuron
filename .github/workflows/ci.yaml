@@ -59,12 +59,12 @@ jobs:
         # Each has its own go.mod, so the root ./... does not reach them. They
         # must stay standard-library only and tidy.
         run: |
+          make verify-adapter-modules
           for m in pkg/accelerator pkg/cloud; do
             (
               cd "$m"
               go vet ./...
               go mod tidy -diff
-              test -z "$(go list -deps ./... | grep '\.' | grep -v "^github.com/kubeneuron/kubeneuron/$m")"
               go test -race -count=1 ./...
             )
           done

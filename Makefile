@@ -150,6 +150,7 @@ mirror:
 lint: verify-licenses
 	$(GO) vet ./...
 	python3 -I hack/verify-spdx.py
+	$(MAKE) verify-adapter-modules
 	@for m in $(NESTED_MODULES); do (cd $$m && $(GO) vet ./... && $(GO) mod tidy -diff) || exit 1; done
 # An explicit if/else, not `command -v X && X || echo skipped`. The && chain
 # returns X's exit status into `|| echo`, so a real lint FAILURE printed
@@ -213,6 +214,11 @@ lint: verify-licenses
 
 tidy:
 	$(GO) mod tidy
+
+.PHONY: verify-adapter-modules
+verify-adapter-modules:
+	GO="$(GO)" python3 -I hack/verify-adapter-modules.py
+	GO="$(GO)" python3 -I hack/test-verify-adapter-modules.py
 
 generate:
 	$(GO) tool controller-gen object:headerFile=hack/boilerplate.go.txt paths=./api/v1alpha1
