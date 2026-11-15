@@ -171,6 +171,24 @@ func (m *Manager) requireResources() error {
 	return nil
 }
 
+// inTx runs fn over one operational transaction. Every mutation of an
+// operational record goes through it, so the request's idempotency key, the
+// resource change and its audit events commit together or not at all. A store
+// that cannot commit them atomically is refused rather than written
+// statement by statement: a key without its change replays as a success that
+// never happened, and a change without its audit event is unaccountable.
+// Inside fn every read and write goes through the Tx it is given.
+func (m *Manager) inTx(ctx context.Context, fn func(store.OperationalTx) error) error {
+	if err := m.requireResources(); err != nil {
+		return err
+	}
+	transactional, ok := m.resources.(store.OperationalTransactionalStore)
+	if !ok {
+		return fmt.Errorf("%w: operational store cannot commit operational writes atomically", ErrUnavailable)
+	}
+	return transactional.WithOperationalTx(ctx, fn)
+}
+
 func (m *Manager) requireSnapshots() error {
 	if err := m.requireResources(); err != nil {
 		return err
@@ -567,7 +585,7 @@ type DecisionSnapshot struct {
 	CreatedAt time.Time         `json:"created_at"`
 }
 
-func (m *Manager) captureDecision(ctx context.Context, actor string, snapshot decision.Snapshot, requestID string) (*DecisionSnapshot, error) {
+func (m *Manager) captureDecision(ctx context.Context, w store.OperationalTx, actor string, snapshot decision.Snapshot, requestID string) (*DecisionSnapshot, error) {
 	if err := m.requireResources(); err != nil {
 		return nil, err
 	}
@@ -595,14 +613,14 @@ func (m *Manager) captureDecision(ctx context.Context, actor string, snapshot de
 		// configured operational-data window forever.
 		expires = now
 	}
-	if err := m.resources.CreateOperationalResource(ctx, &types.OperationalResource{
+	if err := w.CreateOperationalResource(ctx, &types.OperationalResource{
 		Kind: types.ResourceDecisionSnapshot, ID: captured.ID, State: "captured", Actor: actor,
 		Tenant: tenant, Cluster: cluster, ConfigDigest: captured.Decision.ConfigDigest,
 		Payload: payload, CreatedAt: now, UpdatedAt: now, ExpiresAt: &expires,
 	}); err != nil {
 		return nil, err
 	}
-	if err := m.audit(ctx, types.ResourceDecisionSnapshot, captured.ID, actor, "capture", requestID, captured.ID, nil, captured.Decision.HumanSummary); err != nil {
+	if err := m.auditThrough(ctx, w, types.ResourceDecisionSnapshot, captured.ID, actor, "capture", requestID, captured.ID, nil, captured.Decision.HumanSummary); err != nil {
 		return nil, err
 	}
 	return captured, nil
@@ -761,18 +779,6 @@ func (m *Manager) CreateCandidate(ctx context.Context, actor string, upload Cand
 		Kind: types.ResourceCandidateConfiguration, Actor: actor, Key: scopedIdempotencyKey("upload", upload.IdempotencyKey),
 		RequestDigest: requestDigest, ResourceID: newID("candidate"),
 	}
-	claimed, created, err := m.resources.PutOperationalIdempotency(ctx, reservation)
-	if err != nil {
-		return nil, false, err
-	}
-	if !created {
-		if claimed.RequestDigest != requestDigest {
-			return nil, false, ErrIdempotencyConflict
-		}
-		candidate, err := m.getCandidate(ctx, claimed.ResourceID)
-		return candidate, true, err
-	}
-
 	candidate := &CandidateConfiguration{
 		ID: reservation.ResourceID, ResourceVersion: 1, State: "uploaded",
 		APIVersion:       bundle.APIVersion,
@@ -793,15 +799,33 @@ func (m *Manager) CreateCandidate(ctx context.Context, actor string, upload Cand
 	if err != nil {
 		return nil, false, err
 	}
-	if err := m.resources.CreateOperationalResource(ctx, &types.OperationalResource{
-		Kind: types.ResourceCandidateConfiguration, ID: candidate.ID, State: "uploaded", Actor: actor,
-		Tenant: candidate.Tenant, Cluster: candidate.Cluster, ConfigDigest: candidate.NormalizedDigest,
-		Payload: payload, CreatedAt: now, UpdatedAt: now, ExpiresAt: &expires, Version: candidate.ResourceVersion,
-	}); err != nil {
+	var replayed *CandidateConfiguration
+	err = m.inTx(ctx, func(w store.OperationalTx) error {
+		claimed, created, err := w.PutOperationalIdempotency(ctx, reservation)
+		if err != nil {
+			return err
+		}
+		if !created {
+			if claimed.RequestDigest != requestDigest {
+				return ErrIdempotencyConflict
+			}
+			replayed, err = m.getCandidateIn(ctx, w, claimed.ResourceID)
+			return err
+		}
+		if err := w.CreateOperationalResource(ctx, &types.OperationalResource{
+			Kind: types.ResourceCandidateConfiguration, ID: candidate.ID, State: "uploaded", Actor: actor,
+			Tenant: candidate.Tenant, Cluster: candidate.Cluster, ConfigDigest: candidate.NormalizedDigest,
+			Payload: payload, CreatedAt: now, UpdatedAt: now, ExpiresAt: &expires, Version: candidate.ResourceVersion,
+		}); err != nil {
+			return err
+		}
+		return m.auditThrough(ctx, w, types.ResourceCandidateConfiguration, candidate.ID, actor, "upload", upload.IdempotencyKey, "", map[string]string{"original_digest": digest, "normalized_digest": candidate.NormalizedDigest}, "validated")
+	})
+	if err != nil {
 		return nil, false, err
 	}
-	if err := m.audit(ctx, types.ResourceCandidateConfiguration, candidate.ID, actor, "upload", upload.IdempotencyKey, "", map[string]string{"original_digest": digest, "normalized_digest": candidate.NormalizedDigest}, "validated"); err != nil {
-		return nil, false, err
+	if replayed != nil {
+		return replayed, true, nil
 	}
 	return candidate, false, nil
 }
@@ -959,7 +983,11 @@ func compileCandidateRemediationPolicy(in candidateRemediationPolicyCR) (config.
 }
 
 func (m *Manager) getCandidate(ctx context.Context, id string) (*CandidateConfiguration, error) {
-	resource, err := m.resources.GetOperationalResource(ctx, types.ResourceCandidateConfiguration, id)
+	return m.getCandidateIn(ctx, m.resources, id)
+}
+
+func (m *Manager) getCandidateIn(ctx context.Context, w store.OperationalTx, id string) (*CandidateConfiguration, error) {
+	resource, err := w.GetOperationalResource(ctx, types.ResourceCandidateConfiguration, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1043,41 +1071,61 @@ func (m *Manager) RevokeCandidate(ctx context.Context, actor, id, reason, idempo
 	if resource.State != "uploaded" {
 		return nil, false, fmt.Errorf("%w: candidate %q is %s", ErrInvalidState, id, resource.State)
 	}
-	record, created, err := m.resources.PutOperationalIdempotency(ctx, &types.OperationalIdempotencyRecord{
-		Kind: types.ResourceCandidateConfiguration, Actor: actor, Key: storageKey,
-		RequestDigest: requestDigest, ResourceID: id,
+	var revoked, replayed *CandidateConfiguration
+	err = m.inTx(ctx, func(w store.OperationalTx) error {
+		record, created, err := w.PutOperationalIdempotency(ctx, &types.OperationalIdempotencyRecord{
+			Kind: types.ResourceCandidateConfiguration, Actor: actor, Key: storageKey,
+			RequestDigest: requestDigest, ResourceID: id,
+		})
+		if err != nil {
+			return err
+		}
+		if !created {
+			if record.RequestDigest != requestDigest || record.ResourceID != id {
+				return ErrIdempotencyConflict
+			}
+			replayed, err = m.getCandidateIn(ctx, w, id)
+			return err
+		}
+		// Re-read inside the transaction: the checks above ran before the key
+		// was claimed, and the change below must apply to this exact version.
+		resource, err := w.GetOperationalResource(ctx, types.ResourceCandidateConfiguration, id)
+		if err != nil {
+			return err
+		}
+		if expectedVersion > 0 && expectedVersion != resource.Version {
+			return store.ErrOperationalConflict
+		}
+		if resource.State != "uploaded" {
+			return fmt.Errorf("%w: candidate %q is %s", ErrInvalidState, id, resource.State)
+		}
+		var candidate CandidateConfiguration
+		if err := json.Unmarshal(resource.Payload, &candidate); err != nil {
+			return fmt.Errorf("candidate %q is corrupt: %w", id, err)
+		}
+		now := m.now().UTC()
+		candidate.State, candidate.RevokedAt, candidate.RevokedBy, candidate.RevocationReason = "revoked", &now, actor, reason
+		candidate.ResourceVersion = resource.Version + 1
+		payload, err := marshalPayload(candidate)
+		if err != nil {
+			return err
+		}
+		resource.State, resource.Actor, resource.Payload = candidate.State, actor, payload
+		resource.ExpiresAt = &now
+		if err := w.UpdateOperationalResource(ctx, resource, resource.Version); err != nil {
+			return err
+		}
+		candidate.ResourceVersion = resource.Version
+		revoked = &candidate
+		return m.auditThrough(ctx, w, types.ResourceCandidateConfiguration, id, actor, "revoke", idempotencyKey, "", map[string]string{"reason": reason}, "revoked")
 	})
 	if err != nil {
 		return nil, false, err
 	}
-	if !created {
-		if record.RequestDigest != requestDigest || record.ResourceID != id {
-			return nil, false, ErrIdempotencyConflict
-		}
-		candidate, err := m.getCandidate(ctx, id)
-		return candidate, true, err
+	if replayed != nil {
+		return replayed, true, nil
 	}
-	var candidate CandidateConfiguration
-	if err := json.Unmarshal(resource.Payload, &candidate); err != nil {
-		return nil, false, fmt.Errorf("candidate %q is corrupt: %w", id, err)
-	}
-	now := m.now().UTC()
-	candidate.State, candidate.RevokedAt, candidate.RevokedBy, candidate.RevocationReason = "revoked", &now, actor, reason
-	candidate.ResourceVersion = resource.Version + 1
-	payload, err := marshalPayload(candidate)
-	if err != nil {
-		return nil, false, err
-	}
-	resource.State, resource.Actor, resource.Payload = candidate.State, actor, payload
-	resource.ExpiresAt = &now
-	if err := m.resources.UpdateOperationalResource(ctx, resource, resource.Version); err != nil {
-		return nil, false, err
-	}
-	candidate.ResourceVersion = resource.Version
-	if err := m.audit(ctx, types.ResourceCandidateConfiguration, id, actor, "revoke", idempotencyKey, "", map[string]string{"reason": reason}, "revoked"); err != nil {
-		return nil, false, err
-	}
-	return &candidate, false, nil
+	return revoked, false, nil
 }
 
 // NodeDecisionDelta explains the before/after answer for one node in a policy
@@ -1275,42 +1323,53 @@ func (m *Manager) CreatePreview(ctx context.Context, actor, candidateID, idempot
 		Kind: types.ResourcePolicyImpactPreview, Actor: actor, Key: scopedIdempotencyKey("preview", idempotencyKey),
 		RequestDigest: requestDigest, ResourceID: preview.ID,
 	}
-	claimed, created, err := m.resources.PutOperationalIdempotency(ctx, reservation)
+	var previous *PolicyImpactPreview
+	err = m.inTx(ctx, func(w store.OperationalTx) error {
+		claimed, created, err := w.PutOperationalIdempotency(ctx, reservation)
+		if err != nil {
+			return err
+		}
+		if !created {
+			if claimed.RequestDigest != requestDigest {
+				return ErrIdempotencyConflict
+			}
+			previous, err = m.getPreviewIn(ctx, w, claimed.ResourceID)
+			return err
+		}
+		if err := w.CreateOperationalResource(ctx, &types.OperationalResource{
+			Kind: types.ResourceDecisionSnapshot, ID: inventory.ID, State: "captured", Actor: actor,
+			Tenant: candidate.Tenant, Cluster: candidate.Cluster, ConfigDigest: candidate.NormalizedDigest,
+			Payload: inventoryPayload, CreatedAt: preview.CreatedAt, UpdatedAt: preview.CreatedAt, ExpiresAt: &candidate.ExpiresAt,
+		}); err != nil {
+			return err
+		}
+		if err := w.CreateOperationalResource(ctx, &types.OperationalResource{
+			Kind: types.ResourcePolicyImpactPreview, ID: preview.ID, State: "complete", Actor: actor,
+			Tenant: candidate.Tenant, Cluster: candidate.Cluster, ConfigDigest: candidate.NormalizedDigest,
+			Payload: payload, CreatedAt: preview.CreatedAt, UpdatedAt: preview.CreatedAt, ExpiresAt: &candidate.ExpiresAt, Version: preview.ResourceVersion,
+		}); err != nil {
+			return err
+		}
+		if err := m.auditThrough(ctx, w, types.ResourceDecisionSnapshot, inventory.ID, actor, "capture-fleet", idempotencyKey, "", map[string]string{"candidate_id": candidate.ID}, "captured"); err != nil {
+			return err
+		}
+		return m.auditThrough(ctx, w, types.ResourcePolicyImpactPreview, preview.ID, actor, "preview", idempotencyKey, inventory.ID, map[string]string{"candidate_id": candidate.ID}, "complete")
+	})
 	if err != nil {
 		return nil, false, err
 	}
-	if !created {
-		if claimed.RequestDigest != requestDigest {
-			return nil, false, ErrIdempotencyConflict
-		}
-		previous, getErr := m.getPreview(ctx, claimed.ResourceID)
-		return previous, true, getErr
-	}
-	if err := m.resources.CreateOperationalResource(ctx, &types.OperationalResource{
-		Kind: types.ResourceDecisionSnapshot, ID: inventory.ID, State: "captured", Actor: actor,
-		Tenant: candidate.Tenant, Cluster: candidate.Cluster, ConfigDigest: candidate.NormalizedDigest,
-		Payload: inventoryPayload, CreatedAt: preview.CreatedAt, UpdatedAt: preview.CreatedAt, ExpiresAt: &candidate.ExpiresAt,
-	}); err != nil {
-		return nil, false, err
-	}
-	if err := m.resources.CreateOperationalResource(ctx, &types.OperationalResource{
-		Kind: types.ResourcePolicyImpactPreview, ID: preview.ID, State: "complete", Actor: actor,
-		Tenant: candidate.Tenant, Cluster: candidate.Cluster, ConfigDigest: candidate.NormalizedDigest,
-		Payload: payload, CreatedAt: preview.CreatedAt, UpdatedAt: preview.CreatedAt, ExpiresAt: &candidate.ExpiresAt, Version: preview.ResourceVersion,
-	}); err != nil {
-		return nil, false, err
-	}
-	if err := m.audit(ctx, types.ResourceDecisionSnapshot, inventory.ID, actor, "capture-fleet", idempotencyKey, "", map[string]string{"candidate_id": candidate.ID}, "captured"); err != nil {
-		return nil, false, err
-	}
-	if err := m.audit(ctx, types.ResourcePolicyImpactPreview, preview.ID, actor, "preview", idempotencyKey, inventory.ID, map[string]string{"candidate_id": candidate.ID}, "complete"); err != nil {
-		return nil, false, err
+	if previous != nil {
+		return previous, true, nil
 	}
 	return preview, false, nil
 }
 
 func (m *Manager) getPreview(ctx context.Context, id string) (*PolicyImpactPreview, error) {
-	resource, err := m.resources.GetOperationalResource(ctx, types.ResourcePolicyImpactPreview, id)
+	return m.getPreviewIn(ctx, m.resources, id)
+}
+
+func (m *Manager) getPreviewIn(ctx context.Context, w store.OperationalTx, id string) (*PolicyImpactPreview, error) {
+	resource, err := w.GetOperationalResource(ctx, types.ResourcePolicyImpactPreview, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1613,75 +1672,87 @@ func (m *Manager) CreateHealthCheck(ctx context.Context, actor string, request H
 			return nil, false, err
 		}
 	}
-	claimed, created, err := m.resources.PutOperationalIdempotency(ctx, reservation)
-	if err != nil {
-		return nil, false, err
-	}
-	if !created {
-		if claimed.RequestDigest != requestDigest {
-			return nil, false, ErrIdempotencyConflict
-		}
-		run, err := m.getHealthCheck(ctx, claimed.ResourceID)
-		return run, true, err
-	}
-
 	snapshot.Limits.Deadline = deadline
-	captured, err := m.captureDecision(ctx, actor, snapshot, request.IdempotencyKey)
-	if err != nil {
-		return nil, false, err
-	}
-	run := &HealthCheckRun{
-		ID: reservation.ResourceID, ResourceVersion: 1, Node: request.Node, DeviceID: request.DeviceID, Profile: request.Profile,
-		Reason: request.Reason, Actor: actor, Tenant: request.Tenant, Cluster: request.Cluster,
-		DecisionSnapshotID: captured.ID, Decision: captured.Decision,
-		Deadline: deadline, CreatedAt: now, UpdatedAt: now,
-	}
+	var run, replayed *HealthCheckRun
+	var resource *types.OperationalResource
 	var queuedAction *types.Action
-	if request.Profile == HealthCheckPassive {
-		run.State = "completed"
-		run.Outcome = "captured existing evidence without device work"
-		run.EvidenceDigest = evidenceDigest(captured.Snapshot)
-		completed := now
-		run.CompletedAt = &completed
-	} else {
-		if !captured.Decision.Permitted() {
-			run.State = "blocked"
-			run.Outcome = captured.Decision.HumanSummary
+	var capturedID string
+	// The key claim, the captured decision, the run and its audit event are one
+	// transaction. The diagnostic is queued only after they commit, so an agent
+	// can never claim work whose product record does not exist.
+	err = m.inTx(ctx, func(w store.OperationalTx) error {
+		claimed, created, err := w.PutOperationalIdempotency(ctx, reservation)
+		if err != nil {
+			return err
+		}
+		if !created {
+			if claimed.RequestDigest != requestDigest {
+				return ErrIdempotencyConflict
+			}
+			replayed, err = m.getHealthCheckIn(ctx, w, claimed.ResourceID)
+			return err
+		}
+		captured, err := m.captureDecision(ctx, w, actor, snapshot, request.IdempotencyKey)
+		if err != nil {
+			return err
+		}
+		capturedID = captured.ID
+		run = &HealthCheckRun{
+			ID: reservation.ResourceID, ResourceVersion: 1, Node: request.Node, DeviceID: request.DeviceID, Profile: request.Profile,
+			Reason: request.Reason, Actor: actor, Tenant: request.Tenant, Cluster: request.Cluster,
+			DecisionSnapshotID: captured.ID, Decision: captured.Decision,
+			Deadline: deadline, CreatedAt: now, UpdatedAt: now,
+		}
+		if request.Profile == HealthCheckPassive {
+			run.State = "completed"
+			run.Outcome = "captured existing evidence without device work"
+			run.EvidenceDigest = evidenceDigest(captured.Snapshot)
 			completed := now
 			run.CompletedAt = &completed
 		} else {
-			run.State = "queued"
-			run.ActionID = "healthcheck/" + run.ID
-			diagLevel := "1"
-			if request.Profile == HealthCheckExtended {
-				diagLevel = "2"
-			}
-			queuedAction = &types.Action{
-				ID: run.ActionID, Type: types.ActionRunDiag, Timeout: deadline.Sub(now),
-				Params: map[string]string{"diag_level": diagLevel, "health_check_id": run.ID, "device_id": request.DeviceID},
+			if !captured.Decision.Permitted() {
+				run.State = "blocked"
+				run.Outcome = captured.Decision.HumanSummary
+				completed := now
+				run.CompletedAt = &completed
+			} else {
+				run.State = "queued"
+				run.ActionID = "healthcheck/" + run.ID
+				diagLevel := "1"
+				if request.Profile == HealthCheckExtended {
+					diagLevel = "2"
+				}
+				queuedAction = &types.Action{
+					ID: run.ActionID, Type: types.ActionRunDiag, Timeout: deadline.Sub(now),
+					Params: map[string]string{"diag_level": diagLevel, "health_check_id": run.ID, "device_id": request.DeviceID},
+				}
 			}
 		}
-	}
-	payload, err := marshalPayload(run)
+		payload, err := marshalPayload(run)
+		if err != nil {
+			return err
+		}
+		resource = &types.OperationalResource{
+			Kind: types.ResourceHealthCheckRun, ID: run.ID, State: run.State, Actor: actor,
+			Tenant: request.Tenant, Cluster: request.Cluster, ConfigDigest: run.Decision.ConfigDigest,
+			Payload: payload, CreatedAt: now, UpdatedAt: now, ExpiresAt: &deadline, Version: run.ResourceVersion,
+		}
+		if err := w.CreateOperationalResource(ctx, resource); err != nil {
+			return err
+		}
+		return m.auditThrough(ctx, w, types.ResourceHealthCheckRun, run.ID, actor, "request", request.IdempotencyKey, captured.ID, map[string]string{"profile": string(run.Profile), "node": run.Node}, run.State)
+	})
 	if err != nil {
 		return nil, false, err
 	}
-	resource := &types.OperationalResource{
-		Kind: types.ResourceHealthCheckRun, ID: run.ID, State: run.State, Actor: actor,
-		Tenant: request.Tenant, Cluster: request.Cluster, ConfigDigest: run.Decision.ConfigDigest,
-		Payload: payload, CreatedAt: now, UpdatedAt: now, ExpiresAt: &deadline, Version: run.ResourceVersion,
-	}
-	if err := m.resources.CreateOperationalResource(ctx, resource); err != nil {
-		return nil, false, err
-	}
-	if err := m.audit(ctx, types.ResourceHealthCheckRun, run.ID, actor, "request", request.IdempotencyKey, captured.ID, map[string]string{"profile": string(run.Profile), "node": run.Node}, run.State); err != nil {
-		return nil, false, err
+	if replayed != nil {
+		return replayed, true, nil
 	}
 	if queuedAction != nil {
-		// Persist the product record and its audit intent before an agent can
-		// claim work. The earlier order enqueued first, which meant a storage
-		// failure could leave an untraceable diagnostic action running on a
-		// device. A queue failure now becomes a durable failed run instead.
+		// The queue is a different store, so it cannot join the transaction
+		// above. A queue failure becomes a durable failed run, recorded with its
+		// audit event in a second transaction; a retry of the key replays that
+		// failed run rather than queueing a second diagnostic.
 		if err := m.workflow.EnqueueAction(ctx, request.Node, *queuedAction); err != nil {
 			failedAt := m.now().UTC()
 			run.State = "failed"
@@ -1693,13 +1764,16 @@ func (m *Manager) CreateHealthCheck(ctx context.Context, actor string, request H
 				return nil, false, marshalErr
 			}
 			resource.State, resource.Payload = run.State, failedPayload
-			if updateErr := m.resources.UpdateOperationalResource(ctx, resource, resource.Version); updateErr != nil {
-				return nil, false, fmt.Errorf("queue health check: %w (and record failure: %v)", err, updateErr)
+			recordErr := m.inTx(ctx, func(w store.OperationalTx) error {
+				if err := w.UpdateOperationalResource(ctx, resource, resource.Version); err != nil {
+					return err
+				}
+				return m.auditThrough(ctx, w, types.ResourceHealthCheckRun, run.ID, "system", "queue-failed", request.IdempotencyKey, capturedID, nil, run.Outcome)
+			})
+			if recordErr != nil {
+				return nil, false, fmt.Errorf("queue health check: %w (and record failure: %v)", err, recordErr)
 			}
 			run.ResourceVersion = resource.Version
-			if auditErr := m.audit(ctx, types.ResourceHealthCheckRun, run.ID, "system", "queue-failed", request.IdempotencyKey, captured.ID, nil, run.Outcome); auditErr != nil {
-				return nil, false, fmt.Errorf("queue health check: %w (and audit failure: %v)", err, auditErr)
-			}
 			return run, false, fmt.Errorf("queue health check: %w", err)
 		}
 	}
@@ -1749,7 +1823,11 @@ func diagnosticDeadline(now time.Time, profile HealthCheckProfile, requested tim
 }
 
 func (m *Manager) getHealthCheck(ctx context.Context, id string) (*HealthCheckRun, error) {
-	resource, err := m.resources.GetOperationalResource(ctx, types.ResourceHealthCheckRun, id)
+	return m.getHealthCheckIn(ctx, m.resources, id)
+}
+
+func (m *Manager) getHealthCheckIn(ctx context.Context, w store.OperationalTx, id string) (*HealthCheckRun, error) {
+	resource, err := w.GetOperationalResource(ctx, types.ResourceHealthCheckRun, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1854,51 +1932,94 @@ func (m *Manager) ListHealthChecks(ctx context.Context, options OperationalListO
 // started on an agent already; that case remains running until its bounded
 // outcome is observed instead of falsely reporting a cancellation.
 func (m *Manager) CancelHealthCheck(ctx context.Context, actor, id string, expectedVersion int) (*HealthCheckRun, error) {
+	run, _, err := m.cancelHealthCheck(ctx, actor, id, expectedVersion, nil)
+	return run, err
+}
+
+// cancelHealthCheck tombstones the queued diagnostic, then records the
+// cancelled run and its audit event in one transaction, together with the
+// request's idempotency key when claim is set. The queue is a separate store,
+// so the tombstone comes first: it is the irreversible half, and it only
+// succeeds for an action no agent has claimed. If the transaction then fails,
+// a retry finds the action already cancelled and records the run.
+func (m *Manager) cancelHealthCheck(ctx context.Context, actor, id string, expectedVersion int, claim func(store.OperationalTx) (bool, error)) (*HealthCheckRun, bool, error) {
 	if err := m.requireResources(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	resource, err := m.resources.GetOperationalResource(ctx, types.ResourceHealthCheckRun, id)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if expectedVersion > 0 && expectedVersion != resource.Version {
-		return nil, store.ErrOperationalConflict
+		return nil, false, store.ErrOperationalConflict
 	}
 	var run HealthCheckRun
 	if err := json.Unmarshal(resource.Payload, &run); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if run.State != "queued" {
-		return nil, fmt.Errorf("%w: health check %q is %s", ErrInvalidState, id, run.State)
+		return nil, false, fmt.Errorf("%w: health check %q is %s", ErrInvalidState, id, run.State)
 	}
 	canceller, ok := m.workflow.(store.PendingActionCanceller)
 	if !ok {
-		return nil, fmt.Errorf("%w: queue does not support pending-action cancellation", ErrUnavailable)
+		return nil, false, fmt.Errorf("%w: queue does not support pending-action cancellation", ErrUnavailable)
 	}
 	cancelled, err := canceller.CancelPendingAction(ctx, run.ActionID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if !cancelled {
-		return nil, fmt.Errorf("%w: health check action is no longer pending", ErrInvalidState)
+		queued, getErr := m.workflow.GetAction(ctx, run.ActionID)
+		if getErr != nil || !queued.Cancelled {
+			return nil, false, fmt.Errorf("%w: health check action is no longer pending", ErrInvalidState)
+		}
+		// Cancelled by an earlier attempt whose record did not commit.
 	}
-	now := m.now().UTC()
-	run.State, run.Outcome, run.UpdatedAt = "cancelled", "cancelled by operator before agent claim", now
-	run.CompletedAt = &now
-	run.ResourceVersion = resource.Version + 1
-	payload, err := marshalPayload(run)
+	var result, replayed *HealthCheckRun
+	err = m.inTx(ctx, func(w store.OperationalTx) error {
+		if claim != nil {
+			replay, err := claim(w)
+			if err != nil {
+				return err
+			}
+			if replay {
+				replayed, err = m.getHealthCheckIn(ctx, w, id)
+				if err == nil && replayed.State != "cancelled" {
+					return fmt.Errorf("%w: prior health-check cancellation did not complete", ErrInvalidState)
+				}
+				return err
+			}
+		}
+		current, err := w.GetOperationalResource(ctx, types.ResourceHealthCheckRun, id)
+		if err != nil {
+			return err
+		}
+		if current.Version != resource.Version {
+			return store.ErrOperationalConflict
+		}
+		now := m.now().UTC()
+		run.State, run.Outcome, run.UpdatedAt = "cancelled", "cancelled by operator before agent claim", now
+		run.CompletedAt = &now
+		run.ResourceVersion = current.Version + 1
+		payload, err := marshalPayload(run)
+		if err != nil {
+			return err
+		}
+		current.State, current.Actor, current.Payload = run.State, actor, payload
+		if err := w.UpdateOperationalResource(ctx, current, current.Version); err != nil {
+			return err
+		}
+		run.ResourceVersion = current.Version
+		result = &run
+		return m.auditThrough(ctx, w, types.ResourceHealthCheckRun, id, actor, "cancel", "", run.DecisionSnapshotID, nil, run.Outcome)
+	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	resource.State, resource.Actor, resource.Payload = run.State, actor, payload
-	if err := m.resources.UpdateOperationalResource(ctx, resource, resource.Version); err != nil {
-		return nil, err
+	if replayed != nil {
+		return replayed, true, nil
 	}
-	run.ResourceVersion = resource.Version
-	if err := m.audit(ctx, types.ResourceHealthCheckRun, id, actor, "cancel", "", run.DecisionSnapshotID, nil, run.Outcome); err != nil {
-		return nil, err
-	}
-	return &run, nil
+	return result, false, nil
 }
 
 // CancelHealthCheckRequest is the public idempotent cancellation operation.
@@ -1952,27 +2073,18 @@ func (m *Manager) CancelHealthCheckRequest(ctx context.Context, actor, id, idemp
 	if _, ok := m.workflow.(store.PendingActionCanceller); !ok {
 		return nil, false, fmt.Errorf("%w: queue does not support pending-action cancellation", ErrUnavailable)
 	}
-	record, created, err := m.resources.PutOperationalIdempotency(ctx, &types.OperationalIdempotencyRecord{
-		Kind: types.ResourceHealthCheckRun, Actor: actor, Key: storageKey, RequestDigest: digest, ResourceID: id,
+	return m.cancelHealthCheck(ctx, actor, id, expectedVersion, func(w store.OperationalTx) (bool, error) {
+		record, created, err := w.PutOperationalIdempotency(ctx, &types.OperationalIdempotencyRecord{
+			Kind: types.ResourceHealthCheckRun, Actor: actor, Key: storageKey, RequestDigest: digest, ResourceID: id,
+		})
+		if err != nil {
+			return false, err
+		}
+		if !created && (record.RequestDigest != digest || record.ResourceID != id) {
+			return false, ErrIdempotencyConflict
+		}
+		return !created, nil
 	})
-	if err != nil {
-		return nil, false, err
-	}
-	if !created {
-		if record.RequestDigest != digest || record.ResourceID != id {
-			return nil, false, ErrIdempotencyConflict
-		}
-		run, getErr := m.getHealthCheck(ctx, id)
-		if getErr != nil {
-			return nil, false, getErr
-		}
-		if run.State != "cancelled" {
-			return nil, false, fmt.Errorf("%w: prior health-check cancellation did not complete", ErrInvalidState)
-		}
-		return run, true, nil
-	}
-	run, err := m.CancelHealthCheck(ctx, actor, id, expectedVersion)
-	return run, false, err
 }
 
 // ReconcileHealthChecks observes action completion, cancellation and timeout.
@@ -2028,16 +2140,19 @@ func (m *Manager) ReconcileHealthChecks(ctx context.Context) error {
 				return err
 			}
 			resource.State, resource.Payload = run.State, payload
-			if err := m.resources.UpdateOperationalResource(ctx, resource, resource.Version); err != nil {
+			err = m.inTx(ctx, func(w store.OperationalTx) error {
+				if err := w.UpdateOperationalResource(ctx, resource, resource.Version); err != nil {
+					return err
+				}
+				return m.auditThrough(ctx, w, types.ResourceHealthCheckRun, run.ID, "system", "complete", "", run.DecisionSnapshotID, nil, run.Outcome)
+			})
+			if err != nil {
 				if errors.Is(err, store.ErrOperationalConflict) {
 					continue
 				}
 				return err
 			}
 			run.ResourceVersion = resource.Version
-			if err := m.audit(ctx, types.ResourceHealthCheckRun, run.ID, "system", "complete", "", run.DecisionSnapshotID, nil, run.Outcome); err != nil {
-				return err
-			}
 		}
 		if len(resources) < filter.Limit {
 			return nil
@@ -2157,23 +2272,38 @@ func (m *Manager) CreateSimulation(ctx context.Context, actor string, request Si
 	if err := requireSnapshotScope(snapshot, request.Tenant, request.Cluster); err != nil {
 		return nil, false, err
 	}
-	claimed, created, err := m.resources.PutOperationalIdempotency(ctx, reservation)
-	if err != nil {
-		return nil, false, err
-	}
-	if !created {
-		if claimed.RequestDigest != digest {
-			return nil, false, ErrIdempotencyConflict
+	var simulation, replayed *RemediationSimulation
+	err = m.inTx(ctx, func(w store.OperationalTx) error {
+		claimed, created, err := w.PutOperationalIdempotency(ctx, reservation)
+		if err != nil {
+			return err
 		}
-		simulation, err := m.getSimulation(ctx, claimed.ResourceID)
-		return simulation, true, err
-	}
-	captured, err := m.captureDecision(ctx, actor, snapshot, request.IdempotencyKey)
+		if !created {
+			if claimed.RequestDigest != digest {
+				return ErrIdempotencyConflict
+			}
+			replayed, err = m.getSimulationIn(ctx, w, claimed.ResourceID)
+			return err
+		}
+		simulation, err = m.createSimulationIn(ctx, w, actor, request, reservation.ResourceID, snapshot)
+		return err
+	})
 	if err != nil {
 		return nil, false, err
+	}
+	if replayed != nil {
+		return replayed, true, nil
+	}
+	return simulation, false, nil
+}
+
+func (m *Manager) createSimulationIn(ctx context.Context, w store.OperationalTx, actor string, request SimulationRequest, id string, snapshot decision.Snapshot) (*RemediationSimulation, error) {
+	captured, err := m.captureDecision(ctx, w, actor, snapshot, request.IdempotencyKey)
+	if err != nil {
+		return nil, err
 	}
 	simulation := &RemediationSimulation{
-		ID: reservation.ResourceID, ResourceVersion: 1, Node: request.Node, DeviceID: request.DeviceID,
+		ID: id, ResourceVersion: 1, Node: request.Node, DeviceID: request.DeviceID,
 		Action: request.Action, Scope: request.Scope, Class: request.Class,
 		Severity: request.Severity, Rationale: request.Rationale, Actor: actor,
 		Tenant: strings.TrimSpace(request.Tenant), Cluster: strings.TrimSpace(request.Cluster), DecisionSnapshotID: captured.ID,
@@ -2181,23 +2311,23 @@ func (m *Manager) CreateSimulation(ctx context.Context, actor string, request Si
 	}
 	payload, err := marshalPayload(simulation)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	state := "permitted"
 	if !simulation.Decision.Permitted() {
 		state = "blocked"
 	}
-	if err := m.resources.CreateOperationalResource(ctx, &types.OperationalResource{
+	if err := w.CreateOperationalResource(ctx, &types.OperationalResource{
 		Kind: types.ResourceRemediationSimulation, ID: simulation.ID, State: state, Actor: actor,
 		Tenant: request.Tenant, Cluster: request.Cluster, ConfigDigest: simulation.Decision.ConfigDigest,
 		Payload: payload, CreatedAt: simulation.CreatedAt, UpdatedAt: simulation.CreatedAt, ExpiresAt: &captured.Decision.ExpiresAt, Version: simulation.ResourceVersion,
 	}); err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	if err := m.audit(ctx, types.ResourceRemediationSimulation, simulation.ID, actor, "simulate", request.IdempotencyKey, captured.ID, map[string]string{"node": request.Node}, state); err != nil {
-		return nil, false, err
+	if err := m.auditThrough(ctx, w, types.ResourceRemediationSimulation, simulation.ID, actor, "simulate", request.IdempotencyKey, captured.ID, map[string]string{"node": request.Node}, state); err != nil {
+		return nil, err
 	}
-	return simulation, false, nil
+	return simulation, nil
 }
 
 func simulationGraph(result decision.Result, request SimulationRequest) []SimulationStep {
@@ -2217,7 +2347,11 @@ func simulationGraph(result decision.Result, request SimulationRequest) []Simula
 }
 
 func (m *Manager) getSimulation(ctx context.Context, id string) (*RemediationSimulation, error) {
-	resource, err := m.resources.GetOperationalResource(ctx, types.ResourceRemediationSimulation, id)
+	return m.getSimulationIn(ctx, m.resources, id)
+}
+
+func (m *Manager) getSimulationIn(ctx context.Context, w store.OperationalTx, id string) (*RemediationSimulation, error) {
+	resource, err := w.GetOperationalResource(ctx, types.ResourceRemediationSimulation, id)
 	if err != nil {
 		return nil, err
 	}
@@ -2260,34 +2394,46 @@ func (m *Manager) ListSimulations(ctx context.Context, options OperationalListOp
 // live incident workflow.  It records the originating simulation and frozen
 // decision in immutable operational audit data before returning the incident.
 func (m *Manager) CreateIncidentFromSimulation(ctx context.Context, actor, simulationID, rationale string, expectedVersion int) (*types.Incident, error) {
+	incident, _, err := m.createIncidentFromSimulation(ctx, actor, simulationID, rationale, expectedVersion, nil)
+	return incident, err
+}
+
+// createIncidentFromSimulation opens the incident, then links it to the
+// simulation and appends the audit event in one transaction, together with
+// the request's idempotency key when claim is set. The incident lives in the
+// workflow store and cannot join that transaction; opening it is idempotent
+// (the controller returns the open incident for the same target and class), so
+// a retry after a failed link finds the same incident and links it.
+func (m *Manager) createIncidentFromSimulation(ctx context.Context, actor, simulationID, rationale string, expectedVersion int, claim func(store.OperationalTx) (bool, error)) (*types.Incident, bool, error) {
 	if err := m.requireResources(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if m.createIncident == nil {
-		return nil, fmt.Errorf("%w: incident creator is unavailable", ErrUnavailable)
+		return nil, false, fmt.Errorf("%w: incident creator is unavailable", ErrUnavailable)
 	}
 	resource, err := m.resources.GetOperationalResource(ctx, types.ResourceRemediationSimulation, simulationID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if expectedVersion > 0 && expectedVersion != resource.Version {
-		return nil, store.ErrOperationalConflict
+		return nil, false, store.ErrOperationalConflict
 	}
 	var simulation RemediationSimulation
 	if err := json.Unmarshal(resource.Payload, &simulation); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if simulation.IncidentID != "" {
 		if m.getIncident != nil {
-			return m.getIncident(ctx, simulation.IncidentID)
+			incident, err := m.getIncident(ctx, simulation.IncidentID)
+			return incident, false, err
 		}
-		return nil, fmt.Errorf("%w: simulation already created incident %s", ErrInvalidState, simulation.IncidentID)
+		return nil, false, fmt.Errorf("%w: simulation already created incident %s", ErrInvalidState, simulation.IncidentID)
 	}
 	if !simulation.Decision.Permitted() {
-		return nil, fmt.Errorf("%w: simulation is blocked: %s", ErrInvalidState, simulation.Decision.HumanSummary)
+		return nil, false, fmt.Errorf("%w: simulation is blocked: %s", ErrInvalidState, simulation.Decision.HumanSummary)
 	}
 	if strings.TrimSpace(rationale) == "" {
-		return nil, fmt.Errorf("incident rationale is required")
+		return nil, false, fmt.Errorf("incident rationale is required")
 	}
 	incident, err := m.createIncident(ctx, types.Signal{
 		Target: types.Target{Node: simulation.Node, GPUUUID: simulation.DeviceID}, Class: simulation.Class,
@@ -2295,23 +2441,43 @@ func (m *Manager) CreateIncidentFromSimulation(ctx context.Context, actor, simul
 		Evidence: map[string]string{"actor": actor, "trigger": "simulation", "simulation_id": simulation.ID, "rationale": rationale},
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	simulation.IncidentID = incident.ID
-	simulation.ResourceVersion = resource.Version + 1
-	payload, err := marshalPayload(simulation)
+	replay := false
+	err = m.inTx(ctx, func(w store.OperationalTx) error {
+		if claim != nil {
+			replayed, err := claim(w)
+			if err != nil {
+				return err
+			}
+			if replayed {
+				replay = true
+				return nil
+			}
+		}
+		current, err := w.GetOperationalResource(ctx, types.ResourceRemediationSimulation, simulationID)
+		if err != nil {
+			return err
+		}
+		if current.Version != resource.Version {
+			return store.ErrOperationalConflict
+		}
+		simulation.IncidentID = incident.ID
+		simulation.ResourceVersion = current.Version + 1
+		payload, err := marshalPayload(simulation)
+		if err != nil {
+			return err
+		}
+		current.State, current.Actor, current.Payload = "incident-created", actor, payload
+		if err := w.UpdateOperationalResource(ctx, current, current.Version); err != nil {
+			return err
+		}
+		return m.auditThrough(ctx, w, types.ResourceRemediationSimulation, simulation.ID, actor, "create-incident", "", simulation.DecisionSnapshotID, map[string]string{"incident_id": incident.ID, "rationale": rationale}, "created")
+	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	resource.State, resource.Actor, resource.Payload = "incident-created", actor, payload
-	if err := m.resources.UpdateOperationalResource(ctx, resource, resource.Version); err != nil {
-		return nil, err
-	}
-	simulation.ResourceVersion = resource.Version
-	if err := m.audit(ctx, types.ResourceRemediationSimulation, simulation.ID, actor, "create-incident", "", simulation.DecisionSnapshotID, map[string]string{"incident_id": incident.ID, "rationale": rationale}, "created"); err != nil {
-		return nil, err
-	}
-	return incident, nil
+	return incident, replay, nil
 }
 
 // CreateIncidentFromSimulationRequest makes the simulation bridge safe under
@@ -2375,28 +2541,18 @@ func (m *Manager) CreateIncidentFromSimulationRequest(ctx context.Context, actor
 	if !simulation.Decision.Permitted() {
 		return nil, false, fmt.Errorf("%w: simulation is blocked: %s", ErrInvalidState, simulation.Decision.HumanSummary)
 	}
-	record, created, err := m.resources.PutOperationalIdempotency(ctx, &types.OperationalIdempotencyRecord{
-		Kind: types.ResourceRemediationSimulation, Actor: actor, Key: storageKey, RequestDigest: digest, ResourceID: simulationID,
+	return m.createIncidentFromSimulation(ctx, actor, simulationID, rationale, expectedVersion, func(w store.OperationalTx) (bool, error) {
+		record, created, err := w.PutOperationalIdempotency(ctx, &types.OperationalIdempotencyRecord{
+			Kind: types.ResourceRemediationSimulation, Actor: actor, Key: storageKey, RequestDigest: digest, ResourceID: simulationID,
+		})
+		if err != nil {
+			return false, err
+		}
+		if !created && (record.RequestDigest != digest || record.ResourceID != simulationID) {
+			return false, ErrIdempotencyConflict
+		}
+		return !created, nil
 	})
-	if err != nil {
-		return nil, false, err
-	}
-	if !created {
-		if record.RequestDigest != digest || record.ResourceID != simulationID {
-			return nil, false, ErrIdempotencyConflict
-		}
-		stored, getErr := m.getSimulation(ctx, simulationID)
-		if getErr != nil {
-			return nil, false, getErr
-		}
-		if stored.IncidentID == "" || m.getIncident == nil {
-			return nil, false, fmt.Errorf("%w: original simulation-to-incident request did not complete", ErrInvalidState)
-		}
-		incident, getErr := m.getIncident(ctx, stored.IncidentID)
-		return incident, true, getErr
-	}
-	incident, err := m.CreateIncidentFromSimulation(ctx, actor, simulationID, rationale, expectedVersion)
-	return incident, false, err
 }
 
 // ListAuditEvents exposes append-only operational events to the API/console.
@@ -2406,13 +2562,6 @@ func (m *Manager) ListAuditEvents(ctx context.Context, filter types.OperationalA
 		return nil, err
 	}
 	return m.resources.ListOperationalAuditEvents(ctx, filter)
-}
-
-func (m *Manager) audit(ctx context.Context, kind types.OperationalResourceKind, resourceID, actor, action, requestID, decisionID string, params map[string]string, result string) error {
-	return m.resources.AppendOperationalAudit(ctx, &types.OperationalAuditEvent{
-		Kind: kind, ResourceID: resourceID, Time: m.now().UTC(), Actor: actor, Action: action,
-		RequestID: requestID, DecisionID: decisionID, Params: params, Result: result,
-	})
 }
 
 func newID(prefix string) string { return prefix + "-" + uuid.NewString() }

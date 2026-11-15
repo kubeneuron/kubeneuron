@@ -283,17 +283,6 @@ func (m *Manager) CreateAutonomyPlan(ctx context.Context, actor string, request 
 		Kind: types.ResourceAutonomyPlan, Actor: actor, Key: scopedIdempotencyKey("create", request.IdempotencyKey),
 		RequestDigest: requestDigest, ResourceID: newID("autonomy"),
 	}
-	claimed, created, err := m.resources.PutOperationalIdempotency(ctx, reservation)
-	if err != nil {
-		return nil, false, err
-	}
-	if !created {
-		if claimed.RequestDigest != requestDigest {
-			return nil, false, ErrIdempotencyConflict
-		}
-		plan, err := m.getAutonomyPlan(ctx, claimed.ResourceID)
-		return plan, true, err
-	}
 	plan := &GPUAutonomyPlan{
 		ID: reservation.ResourceID, ResourceVersion: 1, State: AutonomyDraft, Selector: copySelector(request.Selector),
 		PolicyRef: request.PolicyRef, ProfileRef: request.ProfileRef, AllowedActions: sortedActions(request.AllowedActions),
@@ -320,15 +309,35 @@ func (m *Manager) CreateAutonomyPlan(ctx context.Context, actor string, request 
 	if err != nil {
 		return nil, false, err
 	}
-	if err := m.resources.CreateOperationalResource(ctx, &types.OperationalResource{
-		Kind: types.ResourceAutonomyPlan, ID: plan.ID, State: string(plan.State), Actor: actor,
-		Tenant: plan.Tenant, Cluster: plan.Cluster, ConfigDigest: plan.ConfigDigest, Payload: payload,
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: &plan.ExpiresAt, Version: plan.ResourceVersion,
-	}); err != nil {
+	// The key claim, the plan and its audit event are one transaction: a
+	// failed insert or audit append leaves no key for a retry to replay.
+	var replayed *GPUAutonomyPlan
+	err = m.inTx(ctx, func(w store.OperationalTx) error {
+		claimed, created, err := w.PutOperationalIdempotency(ctx, reservation)
+		if err != nil {
+			return err
+		}
+		if !created {
+			if claimed.RequestDigest != requestDigest {
+				return ErrIdempotencyConflict
+			}
+			_, replayed, err = m.loadAutonomyPlan(ctx, w, claimed.ResourceID)
+			return err
+		}
+		if err := w.CreateOperationalResource(ctx, &types.OperationalResource{
+			Kind: types.ResourceAutonomyPlan, ID: plan.ID, State: string(plan.State), Actor: actor,
+			Tenant: plan.Tenant, Cluster: plan.Cluster, ConfigDigest: plan.ConfigDigest, Payload: payload,
+			CreatedAt: now, UpdatedAt: now, ExpiresAt: &plan.ExpiresAt, Version: plan.ResourceVersion,
+		}); err != nil {
+			return err
+		}
+		return m.auditThrough(ctx, w, types.ResourceAutonomyPlan, plan.ID, actor, "create", request.IdempotencyKey, plan.SimulationID, nil, string(plan.State))
+	})
+	if err != nil {
 		return nil, false, err
 	}
-	if err := m.audit(ctx, types.ResourceAutonomyPlan, plan.ID, actor, "create", request.IdempotencyKey, plan.SimulationID, nil, string(plan.State)); err != nil {
-		return nil, false, err
+	if replayed != nil {
+		return replayed, true, nil
 	}
 	return plan, false, nil
 }
@@ -337,10 +346,13 @@ func (m *Manager) CreateAutonomyPlan(ctx context.Context, actor string, request 
 // cannot skip directly to approval: the simulation's immutable config digest
 // becomes the approval binding.
 func (m *Manager) AttachSimulation(ctx context.Context, actor, planID, simulationID string, expectedVersion int) (*GPUAutonomyPlan, error) {
-	if err := m.requireResources(); err != nil {
-		return nil, err
-	}
-	resource, plan, err := m.loadAutonomyPlan(ctx, planID)
+	return m.planInTx(ctx, func(w store.OperationalTx) (*GPUAutonomyPlan, error) {
+		return m.attachSimulation(ctx, w, actor, planID, simulationID, expectedVersion)
+	})
+}
+
+func (m *Manager) attachSimulation(ctx context.Context, w store.OperationalTx, actor, planID, simulationID string, expectedVersion int) (*GPUAutonomyPlan, error) {
+	resource, plan, err := m.loadAutonomyPlan(ctx, w, planID)
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +362,7 @@ func (m *Manager) AttachSimulation(ctx context.Context, actor, planID, simulatio
 	if plan.State != AutonomyDraft {
 		return nil, fmt.Errorf("%w: plan %q is %s", ErrInvalidState, planID, plan.State)
 	}
-	simulation, err := m.getSimulation(ctx, simulationID)
+	simulation, err := m.getSimulationIn(ctx, w, simulationID)
 	if err != nil {
 		return nil, err
 	}
@@ -359,10 +371,10 @@ func (m *Manager) AttachSimulation(ctx context.Context, actor, planID, simulatio
 	}
 	plan.TargetDeviceID = strings.TrimSpace(simulation.DeviceID)
 	plan.State, plan.SimulationID, plan.ConfigDigest, plan.UpdatedAt = AutonomySimulated, simulation.ID, simulation.Decision.ConfigDigest, m.now().UTC()
-	if err := m.saveAutonomyPlan(ctx, resource, plan, actor); err != nil {
+	if err := m.saveAutonomyPlan(ctx, w, resource, plan, actor); err != nil {
 		return nil, err
 	}
-	if err := m.audit(ctx, types.ResourceAutonomyPlan, plan.ID, actor, "attach-simulation", "", simulation.ID, nil, "simulated"); err != nil {
+	if err := m.auditThrough(ctx, w, types.ResourceAutonomyPlan, plan.ID, actor, "attach-simulation", "", simulation.ID, nil, "simulated"); err != nil {
 		return nil, err
 	}
 	return plan, nil
@@ -372,21 +384,23 @@ func (m *Manager) AttachSimulation(ctx context.Context, actor, planID, simulatio
 // AttachSimulation. The plain method remains useful to the CRD reconciler,
 // which already has Kubernetes resource-version retry semantics.
 func (m *Manager) AttachSimulationRequest(ctx context.Context, actor, planID, simulationID string, mutation AutonomyMutation) (*GPUAutonomyPlan, bool, error) {
-	if replay, plan, err := m.reserveAutonomyMutation(ctx, actor, planID, "attach-simulation", mutation, map[string]string{"simulation_id": simulationID}); err != nil || replay {
-		return plan, replay, err
-	}
-	plan, err := m.AttachSimulation(ctx, actor, planID, simulationID, mutation.ExpectedVersion)
-	return plan, false, err
+	return m.autonomyRequest(ctx, actor, planID, "attach-simulation", mutation, map[string]string{"simulation_id": simulationID},
+		func(w store.OperationalTx) (*GPUAutonomyPlan, error) {
+			return m.attachSimulation(ctx, w, actor, planID, simulationID, mutation.ExpectedVersion)
+		})
 }
 
 // ApproveAutonomyPlan records one role-bound approval.  A subject may never
 // satisfy two roles when distinctSubjects is set, and every approval carries
 // the exact immutable simulation/config digest it reviewed.
 func (m *Manager) ApproveAutonomyPlan(ctx context.Context, actor, planID, role string, expectedVersion int) (*GPUAutonomyPlan, error) {
-	if err := m.requireResources(); err != nil {
-		return nil, err
-	}
-	resource, plan, err := m.loadAutonomyPlan(ctx, planID)
+	return m.planInTx(ctx, func(w store.OperationalTx) (*GPUAutonomyPlan, error) {
+		return m.approveAutonomyPlan(ctx, w, actor, planID, role, expectedVersion)
+	})
+}
+
+func (m *Manager) approveAutonomyPlan(ctx context.Context, w store.OperationalTx, actor, planID, role string, expectedVersion int) (*GPUAutonomyPlan, error) {
+	resource, plan, err := m.loadAutonomyPlan(ctx, w, planID)
 	if err != nil {
 		return nil, err
 	}
@@ -414,16 +428,16 @@ func (m *Manager) ApproveAutonomyPlan(ctx context.Context, actor, planID, role s
 	plan.State, plan.UpdatedAt = AutonomyAwaitingApproval, m.now().UTC()
 	if allRolesApproved(plan) {
 		plan.State = AutonomyCanary
-		rollout, err := m.createAutonomyRollout(ctx, actor, plan)
+		rollout, err := m.createAutonomyRollout(ctx, w, actor, plan)
 		if err != nil {
 			return nil, err
 		}
 		plan.RolloutID = rollout.ID
 	}
-	if err := m.saveAutonomyPlan(ctx, resource, plan, actor); err != nil {
+	if err := m.saveAutonomyPlan(ctx, w, resource, plan, actor); err != nil {
 		return nil, err
 	}
-	if err := m.audit(ctx, types.ResourceAutonomyPlan, plan.ID, actor, "approve", "", plan.SimulationID, map[string]string{"role": role}, string(plan.State)); err != nil {
+	if err := m.auditThrough(ctx, w, types.ResourceAutonomyPlan, plan.ID, actor, "approve", "", plan.SimulationID, map[string]string{"role": role}, string(plan.State)); err != nil {
 		return nil, err
 	}
 	return plan, nil
@@ -433,35 +447,36 @@ func (m *Manager) ApproveAutonomyPlan(ctx context.Context, actor, planID, role s
 // successful click returns the plan instead of recording a second approval or
 // advancing a rollout twice.
 func (m *Manager) ApproveAutonomyPlanRequest(ctx context.Context, actor, planID, role string, mutation AutonomyMutation) (*GPUAutonomyPlan, bool, error) {
-	if replay, plan, err := m.reserveAutonomyMutation(ctx, actor, planID, "approve", mutation, map[string]string{"role": role}); err != nil || replay {
-		return plan, replay, err
-	}
-	plan, err := m.ApproveAutonomyPlan(ctx, actor, planID, role, mutation.ExpectedVersion)
-	return plan, false, err
+	return m.autonomyRequest(ctx, actor, planID, "approve", mutation, map[string]string{"role": role},
+		func(w store.OperationalTx) (*GPUAutonomyPlan, error) {
+			return m.approveAutonomyPlan(ctx, w, actor, planID, role, mutation.ExpectedVersion)
+		})
 }
 
 func (m *Manager) PauseAutonomyPlan(ctx context.Context, actor, planID, reason string, expectedVersion int) (*GPUAutonomyPlan, error) {
-	return m.transitionAutonomyPlan(ctx, actor, planID, AutonomyPaused, reason, expectedVersion)
+	return m.planInTx(ctx, func(w store.OperationalTx) (*GPUAutonomyPlan, error) {
+		return m.transitionAutonomyPlan(ctx, w, actor, planID, AutonomyPaused, reason, expectedVersion)
+	})
 }
 
 func (m *Manager) PauseAutonomyPlanRequest(ctx context.Context, actor, planID, reason string, mutation AutonomyMutation) (*GPUAutonomyPlan, bool, error) {
-	if replay, plan, err := m.reserveAutonomyMutation(ctx, actor, planID, "pause", mutation, map[string]string{"reason": reason}); err != nil || replay {
-		return plan, replay, err
-	}
-	plan, err := m.PauseAutonomyPlan(ctx, actor, planID, reason, mutation.ExpectedVersion)
-	return plan, false, err
+	return m.autonomyRequest(ctx, actor, planID, "pause", mutation, map[string]string{"reason": reason},
+		func(w store.OperationalTx) (*GPUAutonomyPlan, error) {
+			return m.transitionAutonomyPlan(ctx, w, actor, planID, AutonomyPaused, reason, mutation.ExpectedVersion)
+		})
 }
 
 func (m *Manager) RollbackAutonomyPlan(ctx context.Context, actor, planID, reason string, expectedVersion int) (*GPUAutonomyPlan, error) {
-	return m.transitionAutonomyPlan(ctx, actor, planID, AutonomyRolledBack, reason, expectedVersion)
+	return m.planInTx(ctx, func(w store.OperationalTx) (*GPUAutonomyPlan, error) {
+		return m.transitionAutonomyPlan(ctx, w, actor, planID, AutonomyRolledBack, reason, expectedVersion)
+	})
 }
 
 func (m *Manager) RollbackAutonomyPlanRequest(ctx context.Context, actor, planID, reason string, mutation AutonomyMutation) (*GPUAutonomyPlan, bool, error) {
-	if replay, plan, err := m.reserveAutonomyMutation(ctx, actor, planID, "rollback", mutation, map[string]string{"reason": reason}); err != nil || replay {
-		return plan, replay, err
-	}
-	plan, err := m.RollbackAutonomyPlan(ctx, actor, planID, reason, mutation.ExpectedVersion)
-	return plan, false, err
+	return m.autonomyRequest(ctx, actor, planID, "rollback", mutation, map[string]string{"reason": reason},
+		func(w store.OperationalTx) (*GPUAutonomyPlan, error) {
+			return m.transitionAutonomyPlan(ctx, w, actor, planID, AutonomyRolledBack, reason, mutation.ExpectedVersion)
+		})
 }
 
 // ResumeAutonomyPlan is intentionally narrow: a paused plan returns to a
@@ -469,7 +484,13 @@ func (m *Manager) RollbackAutonomyPlanRequest(ctx context.Context, actor, planID
 // before any future effect and preserves the original distinct approvals only
 // while their bound config digest is unchanged and the plan has not expired.
 func (m *Manager) ResumeAutonomyPlan(ctx context.Context, actor, planID, reason string, expectedVersion int) (*GPUAutonomyPlan, error) {
-	resource, plan, err := m.loadAutonomyPlan(ctx, planID)
+	return m.planInTx(ctx, func(w store.OperationalTx) (*GPUAutonomyPlan, error) {
+		return m.resumeAutonomyPlan(ctx, w, actor, planID, reason, expectedVersion)
+	})
+}
+
+func (m *Manager) resumeAutonomyPlan(ctx context.Context, w store.OperationalTx, actor, planID, reason string, expectedVersion int) (*GPUAutonomyPlan, error) {
+	resource, plan, err := m.loadAutonomyPlan(ctx, w, planID)
 	if err != nil {
 		return nil, err
 	}
@@ -489,33 +510,29 @@ func (m *Manager) ResumeAutonomyPlan(ctx context.Context, actor, planID, reason 
 		return nil, fmt.Errorf("resume reason is required")
 	}
 	plan.State, plan.UpdatedAt = AutonomyCanary, m.now().UTC()
-	if err := m.saveAutonomyPlan(ctx, resource, plan, actor); err != nil {
+	if err := m.saveAutonomyPlan(ctx, w, resource, plan, actor); err != nil {
 		return nil, err
 	}
 	if plan.RolloutID != "" {
-		if err := m.updateAutonomyRollout(ctx, plan.RolloutID, AutonomyCanary, "resumed: "+reason, nil); err != nil {
+		if err := m.updateAutonomyRollout(ctx, w, plan.RolloutID, AutonomyCanary, "resumed: "+reason, nil); err != nil {
 			return nil, err
 		}
 	}
-	if err := m.audit(ctx, types.ResourceAutonomyPlan, plan.ID, actor, "resume", "", plan.SimulationID, map[string]string{"reason": reason}, string(plan.State)); err != nil {
+	if err := m.auditThrough(ctx, w, types.ResourceAutonomyPlan, plan.ID, actor, "resume", "", plan.SimulationID, map[string]string{"reason": reason}, string(plan.State)); err != nil {
 		return nil, err
 	}
 	return plan, nil
 }
 
 func (m *Manager) ResumeAutonomyPlanRequest(ctx context.Context, actor, planID, reason string, mutation AutonomyMutation) (*GPUAutonomyPlan, bool, error) {
-	if replay, plan, err := m.reserveAutonomyMutation(ctx, actor, planID, "resume", mutation, map[string]string{"reason": reason}); err != nil || replay {
-		return plan, replay, err
-	}
-	plan, err := m.ResumeAutonomyPlan(ctx, actor, planID, reason, mutation.ExpectedVersion)
-	return plan, false, err
+	return m.autonomyRequest(ctx, actor, planID, "resume", mutation, map[string]string{"reason": reason},
+		func(w store.OperationalTx) (*GPUAutonomyPlan, error) {
+			return m.resumeAutonomyPlan(ctx, w, actor, planID, reason, mutation.ExpectedVersion)
+		})
 }
 
-func (m *Manager) transitionAutonomyPlan(ctx context.Context, actor, planID string, target AutonomyPlanState, reason string, expectedVersion int) (*GPUAutonomyPlan, error) {
-	if err := m.requireResources(); err != nil {
-		return nil, err
-	}
-	resource, plan, err := m.loadAutonomyPlan(ctx, planID)
+func (m *Manager) transitionAutonomyPlan(ctx context.Context, w store.OperationalTx, actor, planID string, target AutonomyPlanState, reason string, expectedVersion int) (*GPUAutonomyPlan, error) {
+	resource, plan, err := m.loadAutonomyPlan(ctx, w, planID)
 	if err != nil {
 		return nil, err
 	}
@@ -529,13 +546,18 @@ func (m *Manager) transitionAutonomyPlan(ctx context.Context, actor, planID stri
 		return nil, fmt.Errorf("%s reason is required", strings.ToLower(string(target)))
 	}
 	plan.State, plan.UpdatedAt = target, m.now().UTC()
-	if err := m.saveAutonomyPlan(ctx, resource, plan, actor); err != nil {
+	if err := m.saveAutonomyPlan(ctx, w, resource, plan, actor); err != nil {
 		return nil, err
 	}
 	if plan.RolloutID != "" {
-		_ = m.updateAutonomyRollout(ctx, plan.RolloutID, target, reason, nil)
+		// The rollout follows the plan in the same transaction. A rollout row
+		// that is gone does not block a pause or rollback; any other failure
+		// does, so the plan and its rollout never disagree.
+		if err := m.updateAutonomyRollout(ctx, w, plan.RolloutID, target, reason, nil); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
 	}
-	if err := m.audit(ctx, types.ResourceAutonomyPlan, plan.ID, actor, strings.ToLower(string(target)), "", plan.SimulationID, map[string]string{"reason": reason}, string(target)); err != nil {
+	if err := m.auditThrough(ctx, w, types.ResourceAutonomyPlan, plan.ID, actor, strings.ToLower(string(target)), "", plan.SimulationID, map[string]string{"reason": reason}, string(target)); err != nil {
 		return nil, err
 	}
 	return plan, nil
@@ -545,7 +567,7 @@ func (m *Manager) GetAutonomyPlan(ctx context.Context, id string) (*GPUAutonomyP
 	if err := m.requireResources(); err != nil {
 		return nil, err
 	}
-	_, plan, err := m.loadAutonomyPlan(ctx, id)
+	_, plan, err := m.loadAutonomyPlan(ctx, m.resources, id)
 	return plan, err
 }
 
@@ -560,7 +582,7 @@ func (m *Manager) GetAutonomyRollout(ctx context.Context, planID string) (*Auton
 	if err != nil {
 		return nil, err
 	}
-	return m.getAutonomyRollout(ctx, plan.RolloutID)
+	return m.getAutonomyRollout(ctx, m.resources, plan.RolloutID)
 }
 
 func (m *Manager) ListAutonomyPlans(ctx context.Context, limit int) ([]*GPUAutonomyPlan, error) {
@@ -610,7 +632,7 @@ func (m *Manager) ReconcileAutonomy(ctx context.Context) error {
 				continue
 			}
 			if !plan.ExpiresAt.After(m.now()) {
-				if _, err := m.transitionAutonomyPlan(ctx, "system", plan.ID, AutonomyExpired, "plan expiry elapsed", plan.ResourceVersion); err != nil && !errors.Is(err, store.ErrOperationalConflict) {
+				if _, err := m.transitionAutonomyPlanTx(ctx, "system", plan.ID, AutonomyExpired, "plan expiry elapsed", plan.ResourceVersion); err != nil && !errors.Is(err, store.ErrOperationalConflict) {
 					return err
 				}
 				continue
@@ -622,20 +644,20 @@ func (m *Manager) ReconcileAutonomy(ctx context.Context) error {
 			case AutonomyCanary:
 				if err := m.admitAutonomyCanary(ctx, plan); err != nil {
 					target, reason := AutonomyPaused, err.Error()
-					if rollout, rolloutErr := m.getAutonomyRollout(ctx, plan.RolloutID); rolloutErr == nil && rollout.Failures > plan.Guardrails.ErrorBudget {
+					if rollout, rolloutErr := m.getAutonomyRollout(ctx, m.resources, plan.RolloutID); rolloutErr == nil && rollout.Failures > plan.Guardrails.ErrorBudget {
 						target, reason = AutonomyRolledBack, "canary exceeded error budget: "+err.Error()
 					}
-					if _, transitionErr := m.transitionAutonomyPlan(ctx, "system", plan.ID, target, reason, plan.ResourceVersion); transitionErr != nil && !errors.Is(transitionErr, store.ErrOperationalConflict) {
+					if _, transitionErr := m.transitionAutonomyPlanTx(ctx, "system", plan.ID, target, reason, plan.ResourceVersion); transitionErr != nil && !errors.Is(transitionErr, store.ErrOperationalConflict) {
 						return transitionErr
 					}
 				}
 			case AutonomyBaking:
-				rollout, err := m.getAutonomyRollout(ctx, plan.RolloutID)
+				rollout, err := m.getAutonomyRollout(ctx, m.resources, plan.RolloutID)
 				if err != nil {
 					return err
 				}
 				if rollout.Failures > plan.Guardrails.ErrorBudget {
-					if _, err := m.transitionAutonomyPlan(ctx, "system", plan.ID, AutonomyRolledBack, "canary exceeded error budget", plan.ResourceVersion); err != nil && !errors.Is(err, store.ErrOperationalConflict) {
+					if _, err := m.transitionAutonomyPlanTx(ctx, "system", plan.ID, AutonomyRolledBack, "canary exceeded error budget", plan.ResourceVersion); err != nil && !errors.Is(err, store.ErrOperationalConflict) {
 						return err
 					}
 					continue
@@ -644,7 +666,7 @@ func (m *Manager) ReconcileAutonomy(ctx context.Context) error {
 					if rollout.BakeMeasuredAt == nil {
 						measurements, failures, measureErr := m.measureAutonomyBake(ctx, plan, rollout)
 						if measureErr != nil {
-							if _, transitionErr := m.transitionAutonomyPlan(ctx, "system", plan.ID, AutonomyPaused, "bake measurement unavailable: "+measureErr.Error(), plan.ResourceVersion); transitionErr != nil && !errors.Is(transitionErr, store.ErrOperationalConflict) {
+							if _, transitionErr := m.transitionAutonomyPlanTx(ctx, "system", plan.ID, AutonomyPaused, "bake measurement unavailable: "+measureErr.Error(), plan.ResourceVersion); transitionErr != nil && !errors.Is(transitionErr, store.ErrOperationalConflict) {
 								return transitionErr
 							}
 							continue
@@ -653,12 +675,12 @@ func (m *Manager) ReconcileAutonomy(ctx context.Context) error {
 						rollout.BakeMeasurements = append(rollout.BakeMeasurements, measurements...)
 						rollout.Failures += failures
 						rollout.BakeMeasuredAt, rollout.UpdatedAt = &measuredAt, measuredAt
-						if err := m.saveAutonomyRollout(ctx, rollout); err != nil {
+						if err := m.saveAutonomyRollout(ctx, m.resources, rollout); err != nil {
 							return err
 						}
 					}
 					if rollout.Failures > plan.Guardrails.ErrorBudget {
-						if _, err := m.transitionAutonomyPlan(ctx, "system", plan.ID, AutonomyRolledBack, "bake measurements exceeded error budget", plan.ResourceVersion); err != nil && !errors.Is(err, store.ErrOperationalConflict) {
+						if _, err := m.transitionAutonomyPlanTx(ctx, "system", plan.ID, AutonomyRolledBack, "bake measurements exceeded error budget", plan.ResourceVersion); err != nil && !errors.Is(err, store.ErrOperationalConflict) {
 							return err
 						}
 						continue
@@ -667,7 +689,7 @@ func (m *Manager) ReconcileAutonomy(ctx context.Context) error {
 					if _, pending := nextAutonomyExpansionTarget(plan, rollout); pending {
 						target = AutonomyExpanding
 					}
-					if err := m.moveAutonomyPlan(ctx, plan, target, "bake completed"); err != nil && !errors.Is(err, store.ErrOperationalConflict) {
+					if err := m.moveAutonomyPlanTx(ctx, plan, target, "bake completed"); err != nil && !errors.Is(err, store.ErrOperationalConflict) {
 						return err
 					}
 				}
@@ -721,10 +743,10 @@ func (m *Manager) admitAutonomyCanary(ctx context.Context, plan *GPUAutonomyPlan
 	rollout.CanaryNodes = append([]string(nil), selected...)
 	rollout.BakeEffectIDs = latestAutonomyEffectIDs(rollout.Observations, len(selected))
 	rollout.State, rollout.BakeStartedAt, rollout.BakeMeasuredAt, rollout.UpdatedAt = AutonomyBaking, &now, nil, now
-	if err := m.saveAutonomyRollout(ctx, rollout); err != nil {
+	if err := m.saveAutonomyRollout(ctx, m.resources, rollout); err != nil {
 		return err
 	}
-	return m.moveAutonomyPlan(ctx, plan, AutonomyBaking, "all canary gates satisfied")
+	return m.moveAutonomyPlanTx(ctx, plan, AutonomyBaking, "all canary gates satisfied")
 }
 
 // admitAutonomyExpansion takes exactly one bounded expansion batch.  Each
@@ -734,13 +756,13 @@ func (m *Manager) admitAutonomyExpansion(ctx context.Context, plan *GPUAutonomyP
 	if m.listNodes == nil {
 		return fmt.Errorf("node inventory lister is unavailable")
 	}
-	rollout, err := m.getAutonomyRollout(ctx, plan.RolloutID)
+	rollout, err := m.getAutonomyRollout(ctx, m.resources, plan.RolloutID)
 	if err != nil {
 		return err
 	}
 	target, pending := nextAutonomyExpansionTarget(plan, rollout)
 	if !pending {
-		return m.moveAutonomyPlan(ctx, plan, AutonomyEnabled, "all bounded expansion steps completed")
+		return m.moveAutonomyPlanTx(ctx, plan, AutonomyEnabled, "all bounded expansion steps completed")
 	}
 	nodes, err := m.listNodes(ctx)
 	if err != nil {
@@ -770,7 +792,7 @@ func (m *Manager) admitAutonomyExpansion(ctx context.Context, plan *GPUAutonomyP
 	sort.Strings(available)
 	need := target - len(used)
 	if need <= 0 {
-		return m.moveAutonomyPlan(ctx, plan, AutonomyBaking, "expansion target already recorded; starting bake")
+		return m.moveAutonomyPlanTx(ctx, plan, AutonomyBaking, "expansion target already recorded; starting bake")
 	}
 	if len(available) < need {
 		return fmt.Errorf("expansion requires %d additional selector nodes, found %d", need, len(available))
@@ -790,17 +812,17 @@ func (m *Manager) admitAutonomyExpansion(ctx context.Context, plan *GPUAutonomyP
 	rollout.ExpandedNodes = append(rollout.ExpandedNodes, selected...)
 	rollout.BakeEffectIDs = latestAutonomyEffectIDs(rollout.Observations, len(selected))
 	rollout.State, rollout.BakeStartedAt, rollout.BakeMeasuredAt, rollout.UpdatedAt = AutonomyBaking, &now, nil, now
-	if err := m.saveAutonomyRollout(ctx, rollout); err != nil {
+	if err := m.saveAutonomyRollout(ctx, m.resources, rollout); err != nil {
 		return err
 	}
-	return m.moveAutonomyPlan(ctx, plan, AutonomyBaking, fmt.Sprintf("expanded to %d selected nodes; starting bake", len(rollout.CanaryNodes)+len(rollout.ExpandedNodes)))
+	return m.moveAutonomyPlanTx(ctx, plan, AutonomyBaking, fmt.Sprintf("expanded to %d selected nodes; starting bake", len(rollout.CanaryNodes)+len(rollout.ExpandedNodes)))
 }
 
 // admitAutonomyTargets re-evaluates and records every target immediately
 // before an effect. It is shared by canary and expansion paths specifically to
 // prevent a safer first batch from drifting into a weaker second-batch gate.
 func (m *Manager) admitAutonomyTargets(ctx context.Context, plan *GPUAutonomyPlan, selected []string) (*AutonomyRollout, error) {
-	rollout, err := m.getAutonomyRollout(ctx, plan.RolloutID)
+	rollout, err := m.getAutonomyRollout(ctx, m.resources, plan.RolloutID)
 	if err != nil {
 		return nil, err
 	}
@@ -827,7 +849,7 @@ func (m *Manager) admitAutonomyTargets(ctx context.Context, plan *GPUAutonomyPla
 		if err != nil {
 			return nil, err
 		}
-		captured, err := m.captureDecision(ctx, "system", snapshot, "")
+		captured, err := m.captureDecision(ctx, m.resources, "system", snapshot, "")
 		if err != nil {
 			return nil, err
 		}
@@ -836,7 +858,7 @@ func (m *Manager) admitAutonomyTargets(ctx context.Context, plan *GPUAutonomyPla
 			observations = append(observations, observation)
 			rollout.Observations = append(rollout.Observations, observations...)
 			rollout.UpdatedAt = now
-			_ = m.saveAutonomyRollout(ctx, rollout)
+			_ = m.saveAutonomyRollout(ctx, m.resources, rollout)
 			return nil, fmt.Errorf("autonomy node %s is %s", node, captured.Decision.HumanSummary)
 		}
 		if m.autonomyExecute == nil {
@@ -856,7 +878,7 @@ func (m *Manager) admitAutonomyTargets(ctx context.Context, plan *GPUAutonomyPla
 		}
 		rollout.ActionsThisHour++
 		rollout.UpdatedAt = m.now().UTC()
-		if err := m.saveAutonomyRollout(ctx, rollout); err != nil {
+		if err := m.saveAutonomyRollout(ctx, m.resources, rollout); err != nil {
 			return nil, err
 		}
 		effect, executeErr := m.executeAutonomyEffect(ctx, plan, rollout, captured)
@@ -869,7 +891,7 @@ func (m *Manager) admitAutonomyTargets(ctx context.Context, plan *GPUAutonomyPla
 			rollout.Failures++
 			rollout.Observations = append(rollout.Observations, observations...)
 			rollout.UpdatedAt = now
-			_ = m.saveAutonomyRollout(ctx, rollout)
+			_ = m.saveAutonomyRollout(ctx, m.resources, rollout)
 			if executeErr != nil {
 				return nil, fmt.Errorf("autonomy effect for node %s: %w", node, executeErr)
 			}
@@ -998,7 +1020,7 @@ func (m *Manager) measureAutonomyBake(ctx context.Context, plan *GPUAutonomyPlan
 		if err != nil {
 			return nil, 0, err
 		}
-		captured, err := m.captureDecision(ctx, "system", snapshot, "")
+		captured, err := m.captureDecision(ctx, m.resources, "system", snapshot, "")
 		if err != nil {
 			return nil, 0, fmt.Errorf("capture bake measurement for node %s: %w", observation.Node, err)
 		}
@@ -1089,16 +1111,23 @@ func (m *Manager) executeAutonomyEffect(ctx context.Context, plan *GPUAutonomyPl
 			Kind: types.ResourceAutonomyEffect, ID: id, State: effect.State, Actor: "system", Tenant: plan.Tenant, Cluster: plan.Cluster, ConfigDigest: plan.ConfigDigest,
 			Payload: payload, CreatedAt: now, UpdatedAt: now, ExpiresAt: &retentionExpiry, Version: effect.ResourceVersion,
 		}
-		if createErr := m.resources.CreateOperationalResource(ctx, resource); createErr != nil {
-			if !errors.Is(createErr, store.ErrOperationalConflict) {
-				return effect, createErr
+		// The admission record and its audit event are one transaction. A
+		// concurrent reconciler that admitted the same deterministic effect ID
+		// first makes the insert conflict; that effect is then read back.
+		admitErr := m.inTx(ctx, func(w store.OperationalTx) error {
+			if err := w.CreateOperationalResource(ctx, resource); err != nil {
+				return err
+			}
+			return m.auditThrough(ctx, w, types.ResourceAutonomyEffect, id, "system", "admit-effect", "", captured.ID, map[string]string{"plan_id": plan.ID, "node": effect.Node}, "admitted")
+		})
+		if admitErr != nil {
+			if !errors.Is(admitErr, store.ErrOperationalConflict) {
+				return effect, admitErr
 			}
 			resource, effect, err = m.loadAutonomyEffect(ctx, id)
 			if err != nil {
 				return nil, err
 			}
-		} else if auditErr := m.audit(ctx, types.ResourceAutonomyEffect, id, "system", "admit-effect", "", captured.ID, map[string]string{"plan_id": plan.ID, "node": effect.Node}, "admitted"); auditErr != nil {
-			return effect, auditErr
 		} else {
 			err = nil
 		}
@@ -1131,25 +1160,27 @@ func (m *Manager) executeAutonomyEffect(ctx context.Context, plan *GPUAutonomyPl
 	// an uncertain dispatch rather than retrying a potentially live effect.
 	now := m.now().UTC()
 	effect.State, effect.DispatchStartedAt, effect.UpdatedAt = "executing", &now, now
-	if saveErr := m.saveAutonomyEffect(ctx, resource, effect); saveErr != nil {
-		return effect, saveErr
-	}
-	if auditErr := m.audit(ctx, types.ResourceAutonomyEffect, effect.ID, "system", "dispatch-effect", "", effect.DecisionSnapshotID, nil, "executing"); auditErr != nil {
-		return effect, auditErr
+	if claimErr := m.inTx(ctx, func(w store.OperationalTx) error {
+		if err := m.saveAutonomyEffect(ctx, w, resource, effect); err != nil {
+			return err
+		}
+		return m.auditThrough(ctx, w, types.ResourceAutonomyEffect, effect.ID, "system", "dispatch-effect", "", effect.DecisionSnapshotID, nil, "executing")
+	}); claimErr != nil {
+		return effect, claimErr
 	}
 	// The durable admission record is created before this last fence so any
 	// executor sees an idempotency key.  A pause/rollback/config revision that
 	// won the race before this check means no hardware call is made; record the
 	// reason rather than leaving an apparently runnable admission behind.
 	if err := m.ensureAutonomyEffectEnvelope(ctx, plan); err != nil {
-		if blockErr := m.blockAutonomyEffect(ctx, resource, effect, err.Error()); blockErr != nil {
+		if blockErr := m.blockAutonomyEffectTx(ctx, resource, effect, err.Error()); blockErr != nil {
 			return effect, blockErr
 		}
 		return effect, err
 	}
 	if !effect.Deadline.After(m.now()) {
 		err := fmt.Errorf("%w: autonomy effect %q decision evidence has expired", ErrInvalidState, effect.ID)
-		if blockErr := m.blockAutonomyEffect(ctx, resource, effect, err.Error()); blockErr != nil {
+		if blockErr := m.blockAutonomyEffectTx(ctx, resource, effect, err.Error()); blockErr != nil {
 			return effect, blockErr
 		}
 		return effect, err
@@ -1181,15 +1212,20 @@ func (m *Manager) executeAutonomyEffect(ctx context.Context, plan *GPUAutonomyPl
 		}
 		effect.Summary, effect.Reference, effect.UpdatedAt = result.Summary, result.Reference, now
 	}
-	if saveErr := m.saveAutonomyEffect(ctx, resource, effect); saveErr != nil {
-		return effect, saveErr
-	}
 	resultState := effect.State
 	if executeErr != nil {
 		resultState = "failed"
 	}
-	if auditErr := m.audit(ctx, types.ResourceAutonomyEffect, effect.ID, "system", "execute-effect", "", effect.DecisionSnapshotID, nil, resultState); auditErr != nil {
-		return effect, auditErr
+	// The outcome and its audit event are one transaction. If it fails the
+	// effect stays "executing", which the next pass treats as an uncertain
+	// dispatch and stops on, never as a reason to run it again.
+	if recordErr := m.inTx(ctx, func(w store.OperationalTx) error {
+		if err := m.saveAutonomyEffect(ctx, w, resource, effect); err != nil {
+			return err
+		}
+		return m.auditThrough(ctx, w, types.ResourceAutonomyEffect, effect.ID, "system", "execute-effect", "", effect.DecisionSnapshotID, nil, resultState)
+	}); recordErr != nil {
+		return effect, recordErr
 	}
 	return effect, executeErr
 }
@@ -1224,6 +1260,26 @@ func (m *Manager) ensureAutonomyEffectEnvelope(ctx context.Context, expected *GP
 	return nil
 }
 
+// transitionAutonomyPlanTx, moveAutonomyPlanTx and blockAutonomyEffectTx
+// are the reconciler's store-only transitions, each one transaction.
+func (m *Manager) transitionAutonomyPlanTx(ctx context.Context, actor, planID string, target AutonomyPlanState, reason string, expectedVersion int) (*GPUAutonomyPlan, error) {
+	return m.planInTx(ctx, func(w store.OperationalTx) (*GPUAutonomyPlan, error) {
+		return m.transitionAutonomyPlan(ctx, w, actor, planID, target, reason, expectedVersion)
+	})
+}
+
+func (m *Manager) moveAutonomyPlanTx(ctx context.Context, expected *GPUAutonomyPlan, state AutonomyPlanState, reason string) error {
+	return m.inTx(ctx, func(w store.OperationalTx) error {
+		return m.moveAutonomyPlan(ctx, w, expected, state, reason)
+	})
+}
+
+func (m *Manager) blockAutonomyEffectTx(ctx context.Context, resource *types.OperationalResource, effect *AutonomyEffectRecord, reason string) error {
+	return m.inTx(ctx, func(w store.OperationalTx) error {
+		return m.blockAutonomyEffect(ctx, w, resource, effect, reason)
+	})
+}
+
 func (m *Manager) loadAutonomyEffect(ctx context.Context, id string) (*types.OperationalResource, *AutonomyEffectRecord, error) {
 	resource, err := m.resources.GetOperationalResource(ctx, types.ResourceAutonomyEffect, id)
 	if err != nil {
@@ -1237,34 +1293,34 @@ func (m *Manager) loadAutonomyEffect(ctx context.Context, id string) (*types.Ope
 	return resource, &effect, nil
 }
 
-func (m *Manager) saveAutonomyEffect(ctx context.Context, resource *types.OperationalResource, effect *AutonomyEffectRecord) error {
+func (m *Manager) saveAutonomyEffect(ctx context.Context, w store.OperationalTx, resource *types.OperationalResource, effect *AutonomyEffectRecord) error {
 	effect.ResourceVersion = resource.Version + 1
 	payload, err := marshalPayload(effect)
 	if err != nil {
 		return err
 	}
 	resource.State, resource.Payload, resource.ConfigDigest = effect.State, payload, effect.ConfigDigest
-	if err := m.resources.UpdateOperationalResource(ctx, resource, resource.Version); err != nil {
+	if err := w.UpdateOperationalResource(ctx, resource, resource.Version); err != nil {
 		return err
 	}
 	effect.ResourceVersion = resource.Version
 	return nil
 }
 
-func (m *Manager) blockAutonomyEffect(ctx context.Context, resource *types.OperationalResource, effect *AutonomyEffectRecord, reason string) error {
+func (m *Manager) blockAutonomyEffect(ctx context.Context, w store.OperationalTx, resource *types.OperationalResource, effect *AutonomyEffectRecord, reason string) error {
 	now := m.now().UTC()
 	effect.State, effect.Summary, effect.UpdatedAt = "blocked", reason, now
-	if err := m.saveAutonomyEffect(ctx, resource, effect); err != nil {
+	if err := m.saveAutonomyEffect(ctx, w, resource, effect); err != nil {
 		return err
 	}
-	return m.audit(ctx, types.ResourceAutonomyEffect, effect.ID, "system", "block-effect", "", effect.DecisionSnapshotID, nil, reason)
+	return m.auditThrough(ctx, w, types.ResourceAutonomyEffect, effect.ID, "system", "block-effect", "", effect.DecisionSnapshotID, nil, reason)
 }
 
-func (m *Manager) moveAutonomyPlan(ctx context.Context, expected *GPUAutonomyPlan, state AutonomyPlanState, reason string) error {
+func (m *Manager) moveAutonomyPlan(ctx context.Context, w store.OperationalTx, expected *GPUAutonomyPlan, state AutonomyPlanState, reason string) error {
 	if expected == nil {
 		return fmt.Errorf("%w: autonomy plan is unavailable", ErrInvalidState)
 	}
-	resource, plan, err := m.loadAutonomyPlan(ctx, expected.ID)
+	resource, plan, err := m.loadAutonomyPlan(ctx, w, expected.ID)
 	if err != nil {
 		return err
 	}
@@ -1275,18 +1331,18 @@ func (m *Manager) moveAutonomyPlan(ctx context.Context, expected *GPUAutonomyPla
 		return store.ErrOperationalConflict
 	}
 	plan.State, plan.UpdatedAt = state, m.now().UTC()
-	if err := m.saveAutonomyPlan(ctx, resource, plan, "system"); err != nil {
+	if err := m.saveAutonomyPlan(ctx, w, resource, plan, "system"); err != nil {
 		return err
 	}
 	if plan.RolloutID != "" {
-		if err := m.updateAutonomyRollout(ctx, plan.RolloutID, state, reason, nil); err != nil {
+		if err := m.updateAutonomyRollout(ctx, w, plan.RolloutID, state, reason, nil); err != nil {
 			return err
 		}
 	}
-	return m.audit(ctx, types.ResourceAutonomyPlan, expected.ID, "system", "reconcile", "", plan.SimulationID, map[string]string{"reason": reason}, string(state))
+	return m.auditThrough(ctx, w, types.ResourceAutonomyPlan, expected.ID, "system", "reconcile", "", plan.SimulationID, map[string]string{"reason": reason}, string(state))
 }
 
-func (m *Manager) createAutonomyRollout(ctx context.Context, actor string, plan *GPUAutonomyPlan) (*AutonomyRollout, error) {
+func (m *Manager) createAutonomyRollout(ctx context.Context, w store.OperationalTx, actor string, plan *GPUAutonomyPlan) (*AutonomyRollout, error) {
 	now := m.now().UTC()
 	executionMode := "simulation-only"
 	if m.autonomyExecute != nil {
@@ -1297,21 +1353,21 @@ func (m *Manager) createAutonomyRollout(ctx context.Context, actor string, plan 
 	if err != nil {
 		return nil, err
 	}
-	if err := m.resources.CreateOperationalResource(ctx, &types.OperationalResource{
+	if err := w.CreateOperationalResource(ctx, &types.OperationalResource{
 		Kind: types.ResourceAutonomyRollout, ID: rollout.ID, State: string(rollout.State), Actor: actor,
 		Tenant: plan.Tenant, Cluster: plan.Cluster, ConfigDigest: plan.ConfigDigest,
 		Payload: payload, CreatedAt: now, UpdatedAt: now, ExpiresAt: &plan.ExpiresAt, Version: rollout.ResourceVersion,
 	}); err != nil {
 		return nil, err
 	}
-	if err := m.audit(ctx, types.ResourceAutonomyRollout, rollout.ID, actor, "create", "", plan.SimulationID, map[string]string{"plan_id": plan.ID}, string(rollout.State)); err != nil {
+	if err := m.auditThrough(ctx, w, types.ResourceAutonomyRollout, rollout.ID, actor, "create", "", plan.SimulationID, map[string]string{"plan_id": plan.ID}, string(rollout.State)); err != nil {
 		return nil, err
 	}
 	return rollout, nil
 }
 
-func (m *Manager) loadAutonomyPlan(ctx context.Context, id string) (*types.OperationalResource, *GPUAutonomyPlan, error) {
-	resource, err := m.resources.GetOperationalResource(ctx, types.ResourceAutonomyPlan, id)
+func (m *Manager) loadAutonomyPlan(ctx context.Context, w store.OperationalTx, id string) (*types.OperationalResource, *GPUAutonomyPlan, error) {
+	resource, err := w.GetOperationalResource(ctx, types.ResourceAutonomyPlan, id)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1324,11 +1380,11 @@ func (m *Manager) loadAutonomyPlan(ctx context.Context, id string) (*types.Opera
 }
 
 func (m *Manager) getAutonomyPlan(ctx context.Context, id string) (*GPUAutonomyPlan, error) {
-	_, plan, err := m.loadAutonomyPlan(ctx, id)
+	_, plan, err := m.loadAutonomyPlan(ctx, m.resources, id)
 	return plan, err
 }
 
-func (m *Manager) saveAutonomyPlan(ctx context.Context, resource *types.OperationalResource, plan *GPUAutonomyPlan, actor string) error {
+func (m *Manager) saveAutonomyPlan(ctx context.Context, w store.OperationalTx, resource *types.OperationalResource, plan *GPUAutonomyPlan, actor string) error {
 	// Persist the version the caller will see after this transition in the
 	// payload too. It makes optimistic-concurrency usable from REST/CLI without
 	// exposing the store envelope as a second competing representation.
@@ -1338,18 +1394,18 @@ func (m *Manager) saveAutonomyPlan(ctx context.Context, resource *types.Operatio
 		return err
 	}
 	resource.State, resource.Actor, resource.ConfigDigest, resource.Payload = string(plan.State), actor, plan.ConfigDigest, payload
-	if err := m.resources.UpdateOperationalResource(ctx, resource, resource.Version); err != nil {
+	if err := w.UpdateOperationalResource(ctx, resource, resource.Version); err != nil {
 		return err
 	}
 	plan.ResourceVersion = resource.Version
 	return nil
 }
 
-func (m *Manager) getAutonomyRollout(ctx context.Context, id string) (*AutonomyRollout, error) {
+func (m *Manager) getAutonomyRollout(ctx context.Context, w store.OperationalTx, id string) (*AutonomyRollout, error) {
 	if id == "" {
 		return nil, fmt.Errorf("autonomy rollout is missing")
 	}
-	resource, err := m.resources.GetOperationalResource(ctx, types.ResourceAutonomyRollout, id)
+	resource, err := w.GetOperationalResource(ctx, types.ResourceAutonomyRollout, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1361,8 +1417,8 @@ func (m *Manager) getAutonomyRollout(ctx context.Context, id string) (*AutonomyR
 	return &rollout, nil
 }
 
-func (m *Manager) saveAutonomyRollout(ctx context.Context, rollout *AutonomyRollout) error {
-	resource, err := m.resources.GetOperationalResource(ctx, types.ResourceAutonomyRollout, rollout.ID)
+func (m *Manager) saveAutonomyRollout(ctx context.Context, w store.OperationalTx, rollout *AutonomyRollout) error {
+	resource, err := w.GetOperationalResource(ctx, types.ResourceAutonomyRollout, rollout.ID)
 	if err != nil {
 		return err
 	}
@@ -1375,15 +1431,15 @@ func (m *Manager) saveAutonomyRollout(ctx context.Context, rollout *AutonomyRoll
 		return err
 	}
 	resource.State, resource.Payload = string(rollout.State), payload
-	if err := m.resources.UpdateOperationalResource(ctx, resource, resource.Version); err != nil {
+	if err := w.UpdateOperationalResource(ctx, resource, resource.Version); err != nil {
 		return err
 	}
 	rollout.ResourceVersion = resource.Version
 	return nil
 }
 
-func (m *Manager) updateAutonomyRollout(ctx context.Context, id string, state AutonomyPlanState, reason string, observations []AutonomyObservation) error {
-	rollout, err := m.getAutonomyRollout(ctx, id)
+func (m *Manager) updateAutonomyRollout(ctx context.Context, w store.OperationalTx, id string, state AutonomyPlanState, reason string, observations []AutonomyObservation) error {
+	rollout, err := m.getAutonomyRollout(ctx, w, id)
 	if err != nil {
 		return err
 	}
@@ -1391,20 +1447,19 @@ func (m *Manager) updateAutonomyRollout(ctx context.Context, id string, state Au
 	if observations != nil {
 		rollout.Observations = observations
 	}
-	return m.saveAutonomyRollout(ctx, rollout)
+	return m.saveAutonomyRollout(ctx, w, rollout)
 }
 
-// reserveAutonomyMutation claims an idempotency key before a lifecycle write.
-// The resource ID remains the plan ID, so a replay can always return the
-// current durable plan without inventing a second mutable object. Callers
-// validate their operation immediately after this reservation; the request
-// digest includes all state-changing arguments and the observed version.
-func (m *Manager) reserveAutonomyMutation(ctx context.Context, actor, planID, action string, mutation AutonomyMutation, params map[string]string) (bool, *GPUAutonomyPlan, error) {
-	if err := m.requireResources(); err != nil {
-		return false, nil, err
-	}
+// autonomyRequest runs one idempotent lifecycle mutation of a plan. The key
+// claim, the plan change, any rollout change and the audit event commit in one
+// transaction: a mutation that fails leaves no key behind, so a retry with the
+// same key executes for real, and a replay can only ever return the result of
+// a call that committed. The resource ID is the plan ID, so a replay returns
+// the current durable plan. The request digest includes every state-changing
+// argument and the observed version.
+func (m *Manager) autonomyRequest(ctx context.Context, actor, planID, action string, mutation AutonomyMutation, params map[string]string, apply func(store.OperationalTx) (*GPUAutonomyPlan, error)) (*GPUAutonomyPlan, bool, error) {
 	if strings.TrimSpace(actor) == "" || strings.TrimSpace(planID) == "" || strings.TrimSpace(mutation.IdempotencyKey) == "" {
-		return false, nil, fmt.Errorf("actor, plan ID, and idempotency key are required")
+		return nil, false, fmt.Errorf("actor, plan ID, and idempotency key are required")
 	}
 	digest := digestJSON(struct {
 		PlanID          string            `json:"plan_id"`
@@ -1412,41 +1467,46 @@ func (m *Manager) reserveAutonomyMutation(ctx context.Context, actor, planID, ac
 		ExpectedVersion int               `json:"expected_version"`
 		Params          map[string]string `json:"params"`
 	}{PlanID: planID, Action: action, ExpectedVersion: mutation.ExpectedVersion, Params: params})
-	storageKey := scopedIdempotencyKey(action, mutation.IdempotencyKey)
-	if existing, lookupErr := m.resources.GetOperationalIdempotency(ctx, types.ResourceAutonomyPlan, actor, storageKey); lookupErr == nil {
-		if existing.RequestDigest != digest || existing.ResourceID != planID {
-			return false, nil, ErrIdempotencyConflict
+	var plan *GPUAutonomyPlan
+	replay := false
+	err := m.inTx(ctx, func(w store.OperationalTx) error {
+		record, created, err := w.PutOperationalIdempotency(ctx, &types.OperationalIdempotencyRecord{
+			Kind: types.ResourceAutonomyPlan, Actor: actor, Key: scopedIdempotencyKey(action, mutation.IdempotencyKey),
+			RequestDigest: digest, ResourceID: planID,
+		})
+		if err != nil {
+			return err
 		}
-		plan, getErr := m.getAutonomyPlan(ctx, planID)
-		return true, plan, getErr
-	} else if !errors.Is(lookupErr, store.ErrNotFound) {
-		return false, nil, lookupErr
-	}
-	// A stale browser resource_version or unknown plan is a normal validation
-	// failure. Verify it before reserving a key so the user can reread and
-	// retry the intended lifecycle operation with that same key.
-	current, err := m.getAutonomyPlan(ctx, planID)
-	if err != nil {
-		return false, nil, err
-	}
-	if mutation.ExpectedVersion > 0 && mutation.ExpectedVersion != current.ResourceVersion {
-		return false, nil, store.ErrOperationalConflict
-	}
-	record, created, err := m.resources.PutOperationalIdempotency(ctx, &types.OperationalIdempotencyRecord{
-		Kind: types.ResourceAutonomyPlan, Actor: actor, Key: storageKey,
-		RequestDigest: digest, ResourceID: planID,
+		if !created {
+			if record.RequestDigest != digest || record.ResourceID != planID {
+				return ErrIdempotencyConflict
+			}
+			replay = true
+			_, plan, err = m.loadAutonomyPlan(ctx, w, planID)
+			return err
+		}
+		plan, err = apply(w)
+		return err
 	})
 	if err != nil {
-		return false, nil, err
+		return nil, false, err
 	}
-	if created {
-		return false, nil, nil
+	return plan, replay, nil
+}
+
+// planInTx runs a non-idempotent plan mutation (the CRD reconciler's path,
+// which retries on Kubernetes resource versions) as one transaction.
+func (m *Manager) planInTx(ctx context.Context, apply func(store.OperationalTx) (*GPUAutonomyPlan, error)) (*GPUAutonomyPlan, error) {
+	var plan *GPUAutonomyPlan
+	err := m.inTx(ctx, func(w store.OperationalTx) error {
+		var err error
+		plan, err = apply(w)
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
-	if record.RequestDigest != digest || record.ResourceID != planID {
-		return false, nil, ErrIdempotencyConflict
-	}
-	plan, err := m.getAutonomyPlan(ctx, planID)
-	return true, plan, err
+	return plan, nil
 }
 
 func validateAutonomyRequest(request AutonomyPlanRequest, now time.Time) error {

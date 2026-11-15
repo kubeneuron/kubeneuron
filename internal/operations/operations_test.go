@@ -321,7 +321,7 @@ func TestAutonomyPlanRequiresDistinctApprovalsAndReevaluatesCanary(t *testing.T)
 	if err != nil {
 		t.Fatalf("pause plan: %v", err)
 	}
-	if err := mgr.moveAutonomyPlan(ctx, &staleBaking, AutonomyEnabled, "stale bake completion"); !errors.Is(err, store.ErrOperationalConflict) {
+	if err := mgr.moveAutonomyPlanTx(ctx, &staleBaking, AutonomyEnabled, "stale bake completion"); !errors.Is(err, store.ErrOperationalConflict) {
 		t.Fatalf("stale transition after pause = %v, want optimistic conflict", err)
 	}
 	current, err := mgr.GetAutonomyPlan(ctx, plan.ID)
@@ -337,7 +337,7 @@ func TestAutonomyPlanRequiresDistinctApprovalsAndReevaluatesCanary(t *testing.T)
 	if err != nil {
 		t.Fatalf("rollback plan: %v", err)
 	}
-	if err := mgr.moveAutonomyPlan(ctx, &staleCanary, AutonomyBaking, "stale canary completion"); !errors.Is(err, store.ErrOperationalConflict) {
+	if err := mgr.moveAutonomyPlanTx(ctx, &staleCanary, AutonomyBaking, "stale canary completion"); !errors.Is(err, store.ErrOperationalConflict) {
 		t.Fatalf("stale transition after rollback = %v, want optimistic conflict", err)
 	}
 	if rolledBack.State != AutonomyRolledBack {
@@ -1059,7 +1059,7 @@ func TestAutonomyDefaultExpiryRetryAndEffectDispatchClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	captured, err := mgr.captureDecision(ctx, "system", operationSnapshot(current, decision.Request{
+	captured, err := mgr.captureDecision(ctx, mgr.resources, "system", operationSnapshot(current, decision.Request{
 		Class: decision.ActionAutonomous, AcceleratorAction: types.AcceleratorActionResetDevice,
 		Scope: types.AcceleratorScopePhysicalDevice, TargetDeviceID: "GPU-a", ApprovalRequired: true, ApprovalGranted: true,
 	}), "dispatch-capture")

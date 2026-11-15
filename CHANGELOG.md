@@ -77,6 +77,19 @@ API is `v1alpha1`.
   started and is reported as not executed. A device reset, reboot, host
   service change or script is also refused when the deadline passes during
   its preflight, so a stalled check cannot be followed by a late side effect.
+- **Operational mutations are atomic.** Every mutation of an operational record
+  (candidate upload and revocation, policy preview, health-check request and
+  cancellation, simulation, simulation-to-incident, and every autonomy plan
+  lifecycle step: create, attach simulation, approve, pause, rollback, resume)
+  now claims its idempotency key, changes the record and appends its audit
+  event in one transaction, as runtime-contract qualifications already did. A
+  failed mutation leaves no key behind, so a retry with the same key executes
+  for real instead of answering as a replay of a change that never happened
+  (an emergency pause or rollback could be reported as applied when it was
+  not), and a change can no longer commit without its audit event. The
+  reconciler's store-only transitions (plan moves, effect admission, dispatch
+  claim, outcome and block, health-check completion) are one transaction
+  each. A store that cannot commit atomically is refused for these writes.
 
 ### Changed
 

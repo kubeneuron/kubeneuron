@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ type faultyQualificationStore struct {
 	failUpdate   error
 	failAuditAt  int // 1-based index of the audit append within one transaction that fails; 0 disables
 	failAuditErr error
+	mu           sync.Mutex // concurrent callers append transactions
 	transactions [][]string
 }
 
@@ -42,7 +44,9 @@ func (f *faultyQualificationStore) WithOperationalTx(ctx context.Context, fn fun
 	err := f.OperationalTransactionalStore.WithOperationalTx(ctx, func(tx store.OperationalTx) error {
 		return fn(&faultyQualificationTx{OperationalTx: tx, parent: f, calls: &calls})
 	})
+	f.mu.Lock()
 	f.transactions = append(f.transactions, calls)
+	f.mu.Unlock()
 	return err
 }
 
