@@ -52,9 +52,9 @@ control):
 
 1.3 "Official Channel" means the repository at
     https://github.com/kubeneuron/kubeneuron (including its default branch,
-    its tagged releases, and its release assets), the container registries and Helm repositories that
-    repository's documentation names as official, and any other channel
-    Licensor designates in writing.
+    its tagged releases, and its release assets), the container registries
+    and Helm repositories that repository's documentation names as official,
+    and any other channel Licensor designates in writing.
 
 1.4 "Modified Version" means any work that modifies, adapts, translates, or
     is otherwise derived from the Software, or that includes any portion of
