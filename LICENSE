@@ -17,9 +17,10 @@ of the KubeNeuron License.
      configs/    (plural) bundled playbooks, policies, and alert rules. Not
                  the same directory as config/ in section 2.
      docs/       documentation, except the directory listed in section 2.
-                 From version 1.2 on; documentation in commits and releases
-                 up to and including v0.8.0 and in earlier commits remains
-                 under the Apache License, Version 2.0, as section 4 states.
+                 Documentation in commits that contain this LICENSE file at
+                 version 1.0 or 1.1 remains under the Apache License,
+                 Version 2.0, as those versions state; documentation in
+                 later commits is under the KubeNeuron License.
      build/, hack/, test/, and all other files not listed in section 2
 
 2. Apache License, Version 2.0 (open source)

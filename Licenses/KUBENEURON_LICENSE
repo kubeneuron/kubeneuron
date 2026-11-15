@@ -15,8 +15,9 @@ control):
   organization, and change it for your own internal use. Contractors and
   managed-service partners may install, operate, and maintain it for you in
   an environment you own or control.
-- You may pass on unmodified official releases, and charge for your own
-  installation, integration, operation, hardware, and support services.
+- You may pass on unmodified official releases, including through package
+  mirrors and module proxies, and charge for your own installation,
+  integration, operation, hardware, and support services.
 - A cloud, GPU-cloud, colocation, or hardware provider may use it for free to
   run its own fleet, including capacity it sells or rents to customers, may
   show those customers the health data it produces, and may let them
@@ -31,7 +32,10 @@ control):
   a product or platform offered under your own name, resell it, copy its
   code into a replacement product, or use it to train AI that recreates it.
 - Commits and releases up to and including tag v0.8.0 remain under the
-  Apache License, Version 2.0.
+  Apache License, Version 2.0. From version 1.2, documentation is under the
+  KubeNeuron License; the API definitions, CRDs, Helm chart, dashboards,
+  examples, and the adapter contract and its documentation stay under
+  Apache-2.0.
 
 
 1. DEFINITIONS
@@ -384,7 +388,7 @@ License are reserved.
 9.2 On termination You must stop using the Software and all Modified
     Versions, and delete all copies in Your possession or control.
 
-9.3 Sections 1, 3, 4, 5.2, 7.2, 8, 9.2, 9.3, and 10 through 14, and the
+9.3 Sections 1, 3, 4, 5.2, 7.2, 8, 9.1(d), 9.2, 9.3, and 10 through 14, and the
     last sentences of Sections 2.3 and 2.8, survive termination.
 
 
