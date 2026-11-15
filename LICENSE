@@ -47,18 +47,20 @@ of the KubeNeuron License.
 
 4. Effective date
 
-   The KubeNeuron License governs every commit that contains this LICENSE
-   file at version 1.0 or later, and every release built from such a commit.
-   The commit tagged v0.8.0, every earlier commit, and releases v0.1.0
-   through v0.8.0 remain under the Apache License, Version 2.0. The commit
-   b4a7f7343ffa80fedf4179139d016a6775b454da, which contains only
-   documentation and precedes the first commit that contains this License,
-   also remains under the Apache License, Version 2.0. Any text of this
-   License, and any version number of it, that appeared in a commit before
-   commit b3eede42ac76ff71d5b9aabc3e217e3ccf2604af (the squashed history of
-   main) was a draft. It was not offered as terms and is not binding. Only
-   the text of this License as it appears in commit
-   b3eede42ac76ff71d5b9aabc3e217e3ccf2604af and later commits is binding.
+   The KubeNeuron License governs every commit that contains this LICENSE file
+   at version 1.0 or later, and every release built from such a commit. The
+   commit tagged v0.8.0, every earlier commit, and releases v0.1.0 through
+   v0.8.0 remain under the Apache License, Version 2.0. The commit
+   b4a7f7343ffa80fedf4179139d016a6775b454da, which contains only documentation
+   and precedes the first commit that contains this License, also remains
+   under the Apache License, Version 2.0. Any text of this License, and any
+   version number of it, that appeared in a commit that is not commit
+   b3eede42ac76ff71d5b9aabc3e217e3ccf2604af or a later commit on the default
+   branch of the repository at https://github.com/kubeneuron/kubeneuron was a
+   draft or a superseded copy. It was not offered as terms and is not binding.
+   Only the text of this License as it appears in commit
+   b3eede42ac76ff71d5b9aabc3e217e3ccf2604af and later commits on that branch
+   is binding.
 
 5. Adapter contract
 
