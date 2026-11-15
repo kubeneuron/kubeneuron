@@ -3996,6 +3996,12 @@ actual_operator_image=$("$KUBECTL_BIN" -n "$OPERATOR_NAMESPACE" get \
 	die "operator Deployment uses $actual_operator_image, want $OPERATOR_IMAGE"
 assert_operator_rbac
 
+# Run the installer lifecycle before the smoke agents: agents share a node-local
+# state directory and two installations must not compete for it.
+INSTALL_TEST_NAME="${ROOT_NAME}-retention" KUBECTL_BIN="$KUBECTL_BIN" \
+    CONTROLLER_IMAGE="$CONTROLLER_IMAGE" AGENT_IMAGE="$AGENT_IMAGE" \
+    bash "$REPO_ROOT/hack/test-install-retention.sh"
+
 smoke_manifest="$work_dir/operator-smoke.yaml"
 sed -e "s|@CONTROLLER_IMAGE@|$CONTROLLER_IMAGE|g" \
 	-e "s|@AGENT_IMAGE@|$AGENT_IMAGE|g" \

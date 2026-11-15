@@ -289,9 +289,24 @@ controller Service — no `pods/exec` RBAC and nothing extra in the distroless
 image. The kind integration suite rehearses the full backup→wipe→restore
 cycle on every run, so the procedure above is exercised, not just written.
 
-**Retention:** the PVC is owned by the root `KubeNeuron`; deleting the root
-garbage-collects the claim, and the StorageClass reclaim policy then
-decides whether data survives. Use `Retain` for production. The claim can
+**Retention:** `deploy/install.sh --uninstall --name NAME --namespace NS`
+retains the SQLite PVC and its incidents/audit data by default. The installer
+requests retention with the current root's name and UID on the PVC and waits
+for the operator to remove its owner reference before deleting the root. If
+an older or unavailable operator cannot acknowledge retention, uninstall stops
+without deleting the root. Retry after upgrading or restoring the operator.
+Reinstall with the same name, namespace and storage settings to adopt the
+retained volume; unrelated or unmarked volumes are not adopted.
+
+To also delete SQLite state, use `--uninstall --delete-data`. The installer
+names the PVC and asks you to type the installation name before it changes
+anything. For unattended execution add `--yes`. This removes the PVC; physical
+volume disposal follows the StorageClass reclaim policy. External PostgreSQL
+and its data are never deleted by the installer.
+
+Directly deleting a root with `kubectl delete` still garbage-collects its owned
+PVC. Deleting the runtime namespace also deletes retained PVCs. Use backups
+and a `Retain` reclaim policy for production. The claim can
 grow (`workflowStore.sqlite.size`) but never shrink. High-volume operational
 tables (events, outbox, completed actions) are pruned hourly with a 90-day
 default (`-store-retention`). v0.4 candidate, preview, health-check,

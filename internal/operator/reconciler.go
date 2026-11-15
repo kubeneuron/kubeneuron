@@ -35,6 +35,10 @@ import (
 
 const (
 	reconcileRetry = 30 * time.Second
+	// An uninstall request is pinned to both the name and UID of the root.
+	// Keep it on the PVC after orphaning so a stale reconcile cannot reattach it.
+	retainedForNameAnnotation = "kubeneuron.io/retain-state-for"
+	retainedForUIDAnnotation  = "kubeneuron.io/retain-state-uid"
 	// pkiCheckInterval is how often a settled installation re-examines its TLS
 	// material. Certificates are renewed with a third of their life remaining —
 	// 30 days on a 90-day certificate — so checking twice a day is frequent
@@ -989,8 +993,26 @@ func (r *KubeNeuronReconciler) ensureService(ctx context.Context, installation *
 func (r *KubeNeuronReconciler) ensurePersistentVolumeClaim(ctx context.Context, installation *kubeneuronv1alpha1.KubeNeuron, wanted *corev1.PersistentVolumeClaim) error {
 	actual := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: wanted.Name, Namespace: wanted.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, actual, func() error {
-		if err := ensureControlledBy(installation, actual, "PersistentVolumeClaim"); err != nil {
-			return err
+		if actual.DeletionTimestamp != nil {
+			return fmt.Errorf("PVC %s is being deleted; cannot retain or adopt its state", actual.Name)
+		}
+		retainedName := actual.Annotations[retainedForNameAnnotation]
+		retainedUID := actual.Annotations[retainedForUIDAnnotation]
+		retained := retainedName == installation.Name && retainedUID != ""
+		// Only a deliberately retained, completely orphaned claim may be
+		// adopted by a replacement root of the same name. Other existing
+		// volumes still require the ordinary ownership check.
+		if !retained || len(actual.OwnerReferences) != 0 {
+			if err := ensureControlledBy(installation, actual, "PersistentVolumeClaim"); err != nil {
+				return err
+			}
+		}
+		if retained && retainedUID == string(installation.UID) {
+			if len(actual.OwnerReferences) > 1 {
+				return fmt.Errorf("refusing to retain PVC %s with additional owners", actual.Name)
+			}
+			actual.OwnerReferences = nil
+			return nil
 		}
 		actual.Labels = copyStringMap(wanted.Labels)
 		if actual.ResourceVersion == "" {
@@ -1013,6 +1035,8 @@ func (r *KubeNeuronReconciler) ensurePersistentVolumeClaim(ctx context.Context, 
 			}
 			actual.Annotations[storageClassIntentAnnotation] = wantedIntent
 		}
+		delete(actual.Annotations, retainedForNameAnnotation)
+		delete(actual.Annotations, retainedForUIDAnnotation)
 		return setOwner(r.Scheme, installation, actual)
 	})
 	return err

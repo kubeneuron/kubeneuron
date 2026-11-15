@@ -29,7 +29,9 @@ set -euo pipefail
 #                        empty string skips password sign-in)
 #   --controller-image I / --agent-image I
 #                        image overrides (air-gapped / development)
-#   --uninstall          remove the installation created by this script
+#   --uninstall          remove the installation, retaining SQLite state
+#   --delete-data        also remove SQLite state (confirmation required)
+#   --yes                confirm --uninstall --delete-data non-interactively
 #
 # Requirements: kubectl (>=1.29 server), openssl. For --version: gh.
 # For the panel password hash: htpasswd, or a kubeneuronctl binary.
@@ -40,6 +42,8 @@ VERSION=""
 MANIFEST=""
 ADMIN_USER="admin"
 UNINSTALL=0
+DELETE_DATA=0
+ASSUME_YES=0
 CONTROLLER_IMAGE=""
 AGENT_IMAGE=""
 
@@ -58,7 +62,9 @@ Flags:
   --manifest FILE        pre-downloaded install manifest
   --admin USER           panel username to create   (default: admin; "" skips)
   --controller-image I / --agent-image I   image overrides (air-gapped/dev)
-  --uninstall            remove what this script created
+  --uninstall            remove this installation; retain SQLite state by default
+  --delete-data          with --uninstall: also delete the SQLite PVC and audit data
+  --yes                  confirm --delete-data without an interactive prompt
 USAGE
 }
 
@@ -72,6 +78,8 @@ while (($#)); do
 	--controller-image) CONTROLLER_IMAGE=$2; shift 2 ;;
 	--agent-image) AGENT_IMAGE=$2; shift 2 ;;
 	--uninstall) UNINSTALL=1; shift ;;
+	--delete-data) DELETE_DATA=1; shift ;;
+	--yes) ASSUME_YES=1; shift ;;
 	-h|--help) usage; exit 0 ;;
 	*) echo "unknown flag: $1" >&2; exit 2 ;;
 	esac
@@ -79,6 +87,11 @@ done
 
 say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
+
+((DELETE_DATA == 0 || UNINSTALL == 1)) || die "--delete-data requires --uninstall"
+((ASSUME_YES == 0 || DELETE_DATA == 1)) || die "--yes requires --uninstall --delete-data"
+[[ $NAME =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#NAME} -le 63 ]] || die "invalid installation name"
+[[ $NS =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#NS} -le 63 ]] || die "invalid namespace"
 
 command -v kubectl >/dev/null || die "kubectl is required"
 command -v openssl >/dev/null || die "openssl is required"
@@ -121,14 +134,67 @@ fetch_manifest() { # $1=version $2=dest
 }
 
 if ((UNINSTALL)); then
+	claim="$NAME-controller-state"
+	root_uid=$(kubectl get kubeneuron "$NAME" --ignore-not-found -o jsonpath='{.metadata.uid}')
+	if [[ -n $root_uid ]]; then
+		actual_ns=$(kubectl get kubeneuron "$NAME" -o jsonpath='{.spec.namespace}')
+		[[ $actual_ns == "$NS" ]] || die "installation is in namespace $actual_ns; pass --namespace $actual_ns"
+		[[ -z $(kubectl get kubeneuron "$NAME" -o jsonpath='{.metadata.deletionTimestamp}') ]] || die "root is already being deleted; retention cannot be guaranteed"
+	fi
+	claim_uid=$(kubectl -n "$NS" get pvc "$claim" --ignore-not-found -o jsonpath='{.metadata.uid}')
+	if [[ -n $claim_uid ]]; then
+		[[ -z $(kubectl -n "$NS" get pvc "$claim" -o jsonpath='{.metadata.deletionTimestamp}') ]] || die "PVC is already being deleted; retention cannot be guaranteed"
+		owners=$(kubectl -n "$NS" get pvc "$claim" -o jsonpath='{.metadata.ownerReferences[*].uid}')
+		retained_name=$(kubectl -n "$NS" get pvc "$claim" -o go-template='{{index .metadata.annotations "kubeneuron.io/retain-state-for"}}')
+		[[ ( -n $root_uid && $owners == "$root_uid" ) || ( -z $owners && $retained_name == "$NAME" ) ]] || die "PVC $NS/$claim is not owned by or retained for this installation"
+	fi
+	if ((DELETE_DATA)); then
+		say "PERMANENT DATA REMOVAL: SQLite PVC $NS/$claim, including incidents and audit history. External PostgreSQL is not deleted."
+		if ((ASSUME_YES == 0)); then
+			[[ -t 0 ]] || die "use --yes to confirm --delete-data in non-interactive execution"
+			read -r -p "Type '$NAME' to confirm: " confirmation
+			[[ $confirmation == "$NAME" ]] || die "data deletion cancelled"
+		fi
+	elif [[ -n $root_uid && -n $claim_uid ]]; then
+		# The operator observes this UID-bound request, removes its owner, and
+		# keeps the marker. A stale reconcile therefore cannot reattach the PVC.
+		kubectl -n "$NS" annotate pvc "$claim" \
+			"kubeneuron.io/retain-state-for=$NAME" "kubeneuron.io/retain-state-uid=$root_uid" --overwrite >/dev/null
+		deadline=$((SECONDS + 120))
+		while ((SECONDS < deadline)); do
+			owners=$(kubectl -n "$NS" get pvc "$claim" -o jsonpath='{.metadata.ownerReferences[*].uid}')
+			[[ -z $owners ]] && break
+			sleep 2
+		done
+		[[ -z $owners ]] || die "operator did not acknowledge state retention; installation NOT removed. Upgrade the operator or inspect its logs."
+	fi
 	say "removing KubeNeuron installation '$NAME' (namespace $NS)"
 	kubectl delete kubeneuron "$NAME" --ignore-not-found --wait=true --timeout=120s
-	kubectl delete gpuplaybooks,gpuremediationpolicies -l kubeneuron.io/installed-by=install-sh --ignore-not-found
+	# Include legacy objects without the new installation label, but never
+	# delete one unless its actual reference names this installation.
+	for resource in gpuplaybooks gpuremediationpolicies; do
+		objects=$(
+			for selector in "kubeneuron.io/installed-by=install-sh,kubeneuron.io/installation=$NAME" "kubeneuron.io/installed-by=install-sh,!kubeneuron.io/installation"; do
+				kubectl get "$resource" -l "$selector" \
+					-o go-template='{{range .items}}{{.metadata.name}}{{"\t"}}{{.spec.kubeNeuronRef}}{{"\n"}}{{end}}'
+			done
+		)
+		while IFS=$'\t' read -r object reference; do
+			[[ -n $object && $reference == "$NAME" ]] || continue
+			kubectl delete "$resource" "$object" --ignore-not-found
+		done <<<"$objects"
+	done
 	kubectl -n "$NS" delete secret \
 		"$NAME-operator-api-token" "$NAME-webhook-token" "$NAME-panel-users" \
 		"$NAME-controller-tls" "$NAME-controller-server-ca" \
 		"$NAME-agent-tls" "$NAME-agent-client-ca" --ignore-not-found
-	say "left in place: the operator, CRDs, namespace '$NS', and any PVC"
+	if ((DELETE_DATA)); then
+		kubectl -n "$NS" delete pvc "$claim" --ignore-not-found --wait=true --timeout=120s
+		say "deleted SQLite PVC $NS/$claim; physical volume disposal follows its reclaim policy"
+	else
+		say "retained SQLite PVC $NS/$claim and its data (if present); reinstall with the same name, namespace and storage settings"
+	fi
+	say "left in place: the operator, CRDs, namespace '$NS', and any external database"
 	say "remove the operator too with: kubectl delete -f <install manifest>"
 	exit 0
 fi
@@ -261,7 +327,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPUPlaybook
 metadata:
   name: $NAME-observe
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   target: GPU
@@ -274,7 +340,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPUPlaybook
 metadata:
   name: $NAME-workload-restart
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   target: GPU
@@ -295,7 +361,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPUPlaybook
 metadata:
   name: $NAME-reset-when-idle
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   target: GPU
@@ -320,7 +386,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPUPlaybook
 metadata:
   name: $NAME-gpu-reset
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   target: GPU
@@ -345,7 +411,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPUPlaybook
 metadata:
   name: $NAME-drain-and-reset
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   target: GPU
@@ -375,7 +441,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPUPlaybook
 metadata:
   name: $NAME-reboot
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   target: Node
@@ -408,7 +474,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPUPlaybook
 metadata:
   name: $NAME-rma
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   target: Node
@@ -435,7 +501,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $NAME-xid-app
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   priority: 900
@@ -449,7 +515,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $NAME-ecc-sbe-rate
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   priority: 900
@@ -463,7 +529,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $NAME-thermal
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   priority: 900
@@ -474,7 +540,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $NAME-power
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   priority: 900
@@ -485,7 +551,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $NAME-pcie
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   priority: 900
@@ -496,7 +562,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $NAME-agent-down
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   priority: 900
@@ -507,7 +573,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $NAME-ecc-contained
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   priority: 900
@@ -518,7 +584,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $NAME-row-remap-ok
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   priority: 900
@@ -529,7 +595,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $NAME-gsp-error
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   priority: 900
@@ -540,7 +606,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $NAME-driver-hang
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   priority: 900
@@ -551,7 +617,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $NAME-ecc-dbe
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   priority: 900
@@ -562,7 +628,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $NAME-nvlink
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   priority: 900
@@ -573,7 +639,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $NAME-fell-off-bus
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   priority: 900
@@ -584,7 +650,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $NAME-gpu-lost
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   priority: 900
@@ -595,7 +661,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $NAME-row-remap-failure
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   priority: 900
@@ -606,7 +672,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $NAME-row-remap-budget
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/policy-pack: baseline}
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
   kubeNeuronRef: $NAME
   priority: 900

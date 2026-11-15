@@ -9,6 +9,15 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Installer uninstall retains SQLite state and audit history by default, waits
+  for operator acknowledgment, and permits reuse on reinstall. Deleting state
+  requires `--delete-data` with confirmation (or `--yes`). Uninstall only removes
+  policy/playbook objects that reference its own installation, including legacy
+  objects without the new installation label. Upgrade the operator before using
+  the new retention-aware installer; otherwise uninstall stops before deletion.
+
 ### Security
 
 - **File playbooks can no longer restart or destroy a node without a human.**

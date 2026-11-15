@@ -34,7 +34,9 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
     a readiness wait — then prints your sign-in credentials. It does not
     generate TLS material; the operator issues that itself. It is the fastest path to a working
     DryRun installation; return to this page for production TLS,
-    notifications, and real playbooks. `--uninstall` reverts it.
+    notifications, and real playbooks. `--uninstall` removes the installation while retaining SQLite state;
+    `--uninstall --delete-data` explicitly removes that state after confirmation.
+    Reinstall with the same name, namespace and storage settings to reuse it.
 
     The one-liner:
     ```sh
