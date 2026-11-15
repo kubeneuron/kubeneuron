@@ -11,15 +11,16 @@ API is `v1alpha1`.
 
 ### Changed
 
-- **License: KubeNeuron License, Version 1.1.** KubeNeuron moves from the
+- **License: KubeNeuron License, Version 1.2.** KubeNeuron moves from the
   Apache License 2.0 to two licenses (see [LICENSE](LICENSE)): the
   source-available [KubeNeuron License](Licenses/KUBENEURON_LICENSE) for the
   core code, binaries, and images, and the Apache License 2.0 for the API
   types, the adapter contract, CRDs, Helm chart, and documentation. The
   KubeNeuron License governs every commit that contains the LICENSE file at
-  version 1.0 or later (Version 1.0 is the text in commit 811d80e; Version
+  version 1.0 or later (Version 1.0 is the text in commit b3eede4; Version
   1.1 lets an Adapter Build include an adapter from another Go module, with
-  the dependency, build, and packaging changes it strictly needs); the
+  the dependency, build, and packaging changes it strictly needs; Version
+  1.2 is described below); the
   commit tagged v0.8.0, every earlier commit, and releases v0.1.0 through
   v0.8.0 remain under the Apache License 2.0. In short (the license text
   controls):
@@ -28,8 +29,9 @@ API is `v1alpha1`.
     organization, and change it for your own internal use. Contractors and
     managed-service partners may install, operate, and maintain it for you in
     an environment you own or control.
-  - You may pass on unmodified official releases, and charge for your own
-    installation, integration, operation, hardware, and support services.
+  - You may pass on unmodified official releases, including through package
+    mirrors and module proxies, and charge for your own installation,
+    integration, operation, hardware, and support services.
   - A cloud, GPU-cloud, colocation, or hardware provider may use it for free to
     run its own fleet, including capacity it sells or rents to customers, may
     show those customers the health data it produces, and may let them
@@ -49,6 +51,16 @@ API is `v1alpha1`.
   Contributions now require the [Contributor License Agreement](CLA.md),
   checked by the `CLA` workflow. Every source file carries an
   `SPDX-License-Identifier` header that matches the path rules in LICENSE.
+- **License 1.2.**
+  - "Official Release" now also covers commits on the default branch.
+  - Package mirrors and module proxies are explicitly allowed.
+  - Internal Use wording clarified for contractors.
+  - History note for commit b4a7f73 and the drafts before commit b3eede4.
+  - `config/` and `configs/` explicitly distinguished.
+- Added third-party license and NOTICE inventory (generated) and stale checks;
+  legal texts are bundled with binaries, CLI archives, and container images.
+- Added a reproducible adapter-contract v0.1.0 release checklist and
+  stdlib-only dependency verification, including test dependencies.
 - **Adapter contract under Apache 2.0.** The accelerator adapter contract
   moves from `internal/accelerator` to `pkg/accelerator`, now its own Go
   module (standard library only, tagged `pkg/accelerator/vX.Y.Z`). The cloud
@@ -74,7 +86,7 @@ API is `v1alpha1`.
 - Toolchain: `go.mod` `toolchain`, the build image, and every workflow
   `go-version` move from go1.26.10 to go1.26.11, which fixes
   [GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859) in `net/http`.
-  `govulncheck` failed on it in CI for commit `dfbfe54`. No Go source changed.
+  `govulncheck` failed on it in CI for commit `2bc8e19`. No Go source changed.
 - **Only an authenticated agent names an incident's vendor.** A `vendor`
   annotation on an Alertmanager alert or a manual trigger is no longer read as
   the incident's vendor, and the controller rejects an agent event whose fault

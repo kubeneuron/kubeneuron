@@ -1,11 +1,11 @@
-KubeNeuron is made available under two licenses. This file is at version 1.1
+KubeNeuron is made available under two licenses. This file is at version 1.2
 of the KubeNeuron License.
 
 1. KubeNeuron License (source-available)
 
    Except as listed in section 2, the Software in this repository, including
    all binaries, container images, and release assets built from it, is
-   licensed under the KubeNeuron License, Version 1.1. See
+   licensed under the KubeNeuron License, Version 1.2. See
    Licenses/KUBENEURON_LICENSE. SPDX identifier: LicenseRef-KubeNeuron.
 
    This covers, among others:
@@ -14,7 +14,8 @@ of the KubeNeuron License.
      internal/   detection, decision, playbook, safety, actuator, the NVIDIA
                  and AWS adapters, and other core logic
      web/        web UI
-     configs/    bundled playbooks, policies, and alert rules
+     configs/    (plural) bundled playbooks, policies, and alert rules. Not
+                 the same directory as config/ in section 2.
      build/, hack/, test/, and all other files not listed in section 2
 
 2. Apache License, Version 2.0 (open source)
@@ -24,7 +25,8 @@ of the KubeNeuron License.
 
      api/        API definitions and protobuf schemas
      pkg/        public Go packages, including the adapter contract below
-     config/     custom resource definitions, RBAC, and sample manifests
+     config/     (singular) custom resource definitions, RBAC, and sample
+                 manifests. Not the same directory as configs/ in section 1.
      deploy/     Helm chart, Kubernetes manifests, and dashboards
      docs/       documentation
      examples/   examples
@@ -42,7 +44,15 @@ of the KubeNeuron License.
    The KubeNeuron License governs every commit that contains this LICENSE
    file at version 1.0 or later, and every release built from such a commit.
    The commit tagged v0.8.0, every earlier commit, and releases v0.1.0
-   through v0.8.0 remain under the Apache License, Version 2.0.
+   through v0.8.0 remain under the Apache License, Version 2.0. The commit
+   b4a7f7343ffa80fedf4179139d016a6775b454da, which contains only
+   documentation and precedes the first commit that contains this License,
+   also remains under the Apache License, Version 2.0. Any text of this
+   License, and any version number of it, that appeared in a commit before
+   commit b3eede42ac76ff71d5b9aabc3e217e3ccf2604af (the squashed history of
+   main) was a draft. It was not offered as terms and is not binding. Only
+   the text of this License as it appears in commit
+   b3eede42ac76ff71d5b9aabc3e217e3ccf2604af and later commits is binding.
 
 5. Adapter contract
 

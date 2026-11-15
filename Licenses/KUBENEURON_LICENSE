@@ -1,6 +1,6 @@
 KubeNeuron License
-Version 1.1
-Last Modified: November 12, 2026
+Version 1.2
+Last Modified: November 14, 2026
 
 These terms (the "License") are an agreement between Andrii Petruk
 ("Licensor") and you ("You"). By downloading, installing, copying, accessing,
@@ -42,12 +42,15 @@ control):
     header, as governed by this License, including any updates Licensor
     provides under this License.
 
-1.2 "Official Release" means the Software exactly as Licensor publishes it
-    through an Official Channel, without any change.
+1.2 "Official Release" means (a) a tagged release of the Software, or (b) a
+    commit of the Software on the default branch of the repository named in
+    Section 1.3, in each case exactly as Licensor publishes it through an
+    Official Channel, without any change, and only if it is governed by this
+    License under Section 4.3.
 
 1.3 "Official Channel" means the repository at
-    https://github.com/kubeneuron/kubeneuron (including its tagged releases
-    and release assets), the container registries and Helm repositories that
+    https://github.com/kubeneuron/kubeneuron (including its default branch,
+    its tagged releases, and its release assets), the container registries and Helm repositories that
     repository's documentation names as official, and any other channel
     Licensor designates in writing.
 
@@ -66,9 +69,11 @@ control):
     needed to call those interfaces.
 
 1.6 "Internal Use" means use by You and Your Affiliates, and by employees and
-    contractors (whether individuals or organizations) acting on Your or
-    their behalf, to operate Your or their own infrastructure and business,
-    including production use. A contractor that installs, operates, or
+    contractors (whether individuals or organizations) acting on behalf of
+    You or Your Affiliates, to operate the infrastructure and business of You
+    and Your Affiliates, including production use. A contractor that uses the
+    Software to operate its own infrastructure and business needs its own
+    license under this License. A contractor that installs, operates, or
     maintains the Software solely for You, in an environment that You own or
     control, acts on Your behalf, and You are responsible for its compliance
     with this License. Internal Use includes the infrastructure-provider use
@@ -163,17 +168,24 @@ right to sublicense except as stated in Sections 2.4 and 2.9, to:
 
 2.4 Redistribution of Official Releases. Reproduce and distribute copies of
     Official Releases, including by mirroring them into private registries
-    and offline or air-gapped environments, and by installing them for a
-    customer in that customer's own environment, provided that:
+    and offline or air-gapped environments, by package mirrors, caches, and
+    module proxies (for example proxy.golang.org) that serve unmodified
+    Official Releases on request, and by installing them for a customer in
+    that customer's own environment, provided that:
     (a) each copy is unmodified and keeps all copyright, license, and
         trademark notices;
-    (b) You provide each recipient with a copy of this License, and each
+    (b) You provide each recipient with a copy of this License (for a package
+        mirror, cache, or module proxy it is enough that the License text
+        stays in each copy, as it does in a module archive), and each
         recipient receives the Software under this License directly from
         Licensor;
     (c) You do not charge any fee for the Software itself, although You may
         charge for Your own services such as installation, integration,
         operation, hardware, or support; and
     (d) the distribution is not part of a Managed Service.
+    Operating a package mirror, cache, or module proxy for this purpose does
+    not require a separate agreement with Licensor and is not a Managed
+    Service.
 
 2.5 Repository Copies and Contributions. Create and keep a Repository Copy
     solely to read the source code and to prepare and submit Contributions to
@@ -291,7 +303,15 @@ to:
     LICENSE file at version 1.0 or later of this License, and every release
     built from such a commit. The commit tagged v0.8.0, every earlier commit,
     and every release built from them (v0.1.0 through v0.8.0) remain under
-    the Apache License, Version 2.0.
+    the Apache License, Version 2.0. The commit
+    b4a7f7343ffa80fedf4179139d016a6775b454da, which contains only
+    documentation and precedes the first commit that contains this License,
+    also remains under the Apache License, Version 2.0. Any text of this
+    License, and any version number of it, that appeared in a commit before
+    commit b3eede42ac76ff71d5b9aabc3e217e3ccf2604af (the squashed history of
+    main) was a draft. It was not offered as terms and is not binding. Only
+    the text of this License as it appears in commit
+    b3eede42ac76ff71d5b9aabc3e217e3ccf2604af and later commits is binding.
 
 
 5. CONTRIBUTIONS AND FEEDBACK
