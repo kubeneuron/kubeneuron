@@ -6,7 +6,7 @@
 # Why this exists: for a long time the only image any automated suite ever ran
 # was test/integration/Dockerfile — the host-built binaries dropped into FROM
 # scratch. The shipped image is a different artifact: distroless rather than
-# empty, carrying two host tools the agent shells out to, running as a
+# empty, carrying the nsenter host tool the agent shells out to, running as a
 # different user. Every divergence between them is invisible to the tests and
 # visible to whoever runs the release, which is how `Reboot` reached live
 # hardware and exited 127 for want of nsenter.
@@ -60,9 +60,9 @@ done
 
 # --- the host tools the agent shells out to -----------------------------------
 # nsenter: Reboot asks the host's init, reachable only through PID 1's
-# namespaces. dcgmi: with the GPU Operator installed the host has no dcgmi at
-# all, so the agent carries its own or its runtime attestation stays degraded.
-note "the agent carries the host tools it shells out to"
+# namespaces. DCGM must be supplied explicitly by the operator; NVIDIA's
+# packaged client and libraries cannot be redistributed in our image.
+note "the agent carries nsenter and excludes packaged DCGM"
 agent_image="kubeneuron-agent:${TAG}"
 
 # Assert on the image FILESYSTEM, never on a command's output.
@@ -96,18 +96,22 @@ image_contains() {
 }
 image_contains "$agent_image" /bin/nsenter ||
 	bad "$agent_image has no /bin/nsenter; the Reboot action will exit 127 on a real node"
-for path in busybox/LICENSE busybox/VERSION busybox/SOURCE busybox/OFFER SOURCES libgcc-s1/copyright; do
+for path in busybox/LICENSE busybox/VERSION busybox/SOURCE busybox/OFFER busybox/sources.lock.json busybox/UCLIBC-LICENSE SOURCES; do
     image_contains "$agent_image" "/licenses/native/$path" ||
         bad "$agent_image lacks /licenses/native/$path"
 done
-image_contains "$agent_image" /usr/bin/dcgmi ||
-	bad "$agent_image has no /usr/bin/dcgmi; the agent's runtime attestation stays degraded"
-if out=$("$DOCKER_BIN" run --rm --entrypoint /usr/bin/dcgmi "$agent_image" --version 2>&1); then
-	grep -qE 'version: *[0-9]' <<<"$out" ||
-		bad "$agent_image dcgmi --version printed '$out' with no version"
-else
-	bad "$agent_image has no working /usr/bin/dcgmi: $out"
+# Export failures must fail this negative check too, never count as absence.
+cid=$("$DOCKER_BIN" create "$agent_image")
+listing=$(mktemp)
+if ! "$DOCKER_BIN" export "$cid" >"$listing.tar"; then
+    bad "could not export $agent_image to check excluded native components"
+elif ! tar -tf "$listing.tar" >"$listing"; then
+    bad "could not list $agent_image to check excluded native components"
+elif grep -Eq '(^|/)(dcgmi|libdcgm[^/]*|libgcc_s[^/]*|datacenter-gpu-manager[^/]*|libgcc-s1|dcgm)(/|$)' "$listing"; then
+    bad "$agent_image contains excluded DCGM/libgcc components or legal files"
 fi
+rm -f "$listing" "$listing.tar"
+"$DOCKER_BIN" rm -f "$cid" >/dev/null
 
 # Legal files must be present even in images without a shell.
 note "each image carries third-party legal files"

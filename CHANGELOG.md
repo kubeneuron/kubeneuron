@@ -11,6 +11,13 @@ API is `v1alpha1`.
 
 ### Changed
 
+- **DCGM is no longer bundled in the agent image.** Removed NVIDIA's packaged
+  `dcgmi`, its libraries and added `libgcc_s` dependency after license review.
+  The agent uses the narrower `nvidia-smi` health source unless a working client
+  is supplied; missing runtime attestation keeps destructive actions blocked.
+  BusyBox is digest-pinned, and releases retain its corresponding sources,
+  including linked uClibc-ng and build recipes, with the source offer.
+
 - **Adapter contract in `pkg/`.** The accelerator adapter contract
   moves from `internal/accelerator` to `pkg/accelerator`, now its own Go
   module (standard library only, tagged `pkg/accelerator/vX.Y.Z`). The cloud

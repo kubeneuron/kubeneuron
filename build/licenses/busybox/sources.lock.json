@@ -1,0 +1,81 @@
+{
+  "image": "busybox:1.38.0-uclibc@sha256:b2e35951f72501f6a99f1bf45bcfe6d4795be08c518c2f97d0ed2fe776958a3b",
+  "version": "1.38.0",
+  "resources": [
+    {
+      "name": "busybox-1.38.0.tar.bz2",
+      "url": "https://busybox.net/downloads/busybox-1.38.0.tar.bz2",
+      "sha256": "34f9ea6ff8636f2c9241153b9114eefa9e65674a45318ae1ef95bb5f31c53bb2"
+    },
+    {
+      "name": "buildroot-2026.08.1.tar.xz",
+      "url": "https://buildroot.org/downloads/buildroot-2026.08.1.tar.xz",
+      "sha256": "34fb7bea8a213ffde39cc02e61703391560f26e0850f03138c722d0b09880f2b"
+    },
+    {
+      "name": "uClibc-ng-1.0.59.tar.xz",
+      "url": "https://sources.buildroot.net/uclibc/uClibc-ng-1.0.59.tar.xz",
+      "sha256": "86c6f15971bfb14156850f2e36906dac5a69df7b3e688216d1aea09d2db54174"
+    },
+    {
+      "name": "docker-library/amd64/latest/uclibc/Dockerfile.builder",
+      "url": "https://raw.githubusercontent.com/docker-library/busybox/dec58942832433fa853dead124714cb80c730571/latest/uclibc/Dockerfile.builder",
+      "sha256": "0c39ca84e87b955b1cf184c944aa9625ac76d71607ef3d4b387b308a05bc572e"
+    },
+    {
+      "name": "docker-library/amd64/latest/uclibc/Dockerfile",
+      "url": "https://raw.githubusercontent.com/docker-library/busybox/dec58942832433fa853dead124714cb80c730571/latest/uclibc/Dockerfile",
+      "sha256": "f05d4f11721b9133469a61f431dc5e54b90788f73958b21bfa76318a90dbc4d4"
+    },
+    {
+      "name": "docker-library/amd64/build.sh",
+      "url": "https://raw.githubusercontent.com/docker-library/busybox/dec58942832433fa853dead124714cb80c730571/build.sh",
+      "sha256": "a68f37211c4510b3ffe0eba353e1fa99e4e3a5903fe891ac2d4df69cb6761a4b"
+    },
+    {
+      "name": "docker-library/amd64/.patches/no-cbq.patch",
+      "url": "https://raw.githubusercontent.com/docker-library/busybox/dec58942832433fa853dead124714cb80c730571/.patches/no-cbq.patch",
+      "sha256": "8451446ee0c7128f3eaca0322f113dadc11d1c05f616f6543a77908648f50785"
+    },
+    {
+      "name": "docker-library/amd64/LICENSE",
+      "url": "https://raw.githubusercontent.com/docker-library/busybox/dec58942832433fa853dead124714cb80c730571/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "name": "docker-library/arm64/latest/uclibc/Dockerfile.builder",
+      "url": "https://raw.githubusercontent.com/docker-library/busybox/578cd07c6e8f1ff1e591f8cc70d172126f1ed24e/latest/uclibc/Dockerfile.builder",
+      "sha256": "e0b54d8ce154250388783742cd2acdd9864f1b1cdb75f5d95a8a90350111c49b"
+    },
+    {
+      "name": "docker-library/arm64/latest/uclibc/Dockerfile",
+      "url": "https://raw.githubusercontent.com/docker-library/busybox/578cd07c6e8f1ff1e591f8cc70d172126f1ed24e/latest/uclibc/Dockerfile",
+      "sha256": "f05d4f11721b9133469a61f431dc5e54b90788f73958b21bfa76318a90dbc4d4"
+    },
+    {
+      "name": "docker-library/arm64/build.sh",
+      "url": "https://raw.githubusercontent.com/docker-library/busybox/578cd07c6e8f1ff1e591f8cc70d172126f1ed24e/build.sh",
+      "sha256": "a68f37211c4510b3ffe0eba353e1fa99e4e3a5903fe891ac2d4df69cb6761a4b"
+    },
+    {
+      "name": "docker-library/arm64/.patches/no-cbq.patch",
+      "url": "https://raw.githubusercontent.com/docker-library/busybox/578cd07c6e8f1ff1e591f8cc70d172126f1ed24e/.patches/no-cbq.patch",
+      "sha256": "8451446ee0c7128f3eaca0322f113dadc11d1c05f616f6543a77908648f50785"
+    },
+    {
+      "name": "docker-library/arm64/LICENSE",
+      "url": "https://raw.githubusercontent.com/docker-library/busybox/578cd07c6e8f1ff1e591f8cc70d172126f1ed24e/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    }
+  ],
+  "platforms": {
+    "amd64": {
+      "manifest": "sha256:34f1b740c4a652898813f9656071acb6ab393bc85feb3a0bab2ec445c5ded2b9",
+      "source_revision": "dec58942832433fa853dead124714cb80c730571"
+    },
+    "arm64": {
+      "manifest": "sha256:746a43a820eeb8d98a6ecc31cadd067249d3b76c86d148b337545691a08bfbe9",
+      "source_revision": "578cd07c6e8f1ff1e591f8cc70d172126f1ed24e"
+    }
+  }
+}

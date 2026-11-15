@@ -60,56 +60,17 @@ ENTRYPOINT ["/kubeneuron-controller"]
 # through PID 1's namespaces — a distroless image has no way to get there, so
 # the Reboot action failed with exit 127 on real hardware. busybox is static
 # (uclibc), so it needs no loader in an image that has none.
-FROM busybox:uclibc AS busybox
+FROM busybox:1.38.0-uclibc@sha256:b2e35951f72501f6a99f1bf45bcfe6d4795be08c518c2f97d0ed2fe776958a3b AS busybox
 # Record the version of the actual binary being shipped, for each architecture.
 RUN busybox --help > /busybox.help 2>&1 \
  && head -n 1 /busybox.help > /busybox.VERSION \
- && grep -Eq '^BusyBox v[0-9]+\.[0-9]+\.[0-9]+' /busybox.VERSION \
+ && grep -Eq '^BusyBox v1\.38\.0 ' /busybox.VERSION \
  && version=$(sed -n 's/^BusyBox v\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' /busybox.VERSION) \
  && printf 'Upstream source: https://busybox.net/downloads/busybox-%s.tar.bz2\nSee OFFER for corresponding source requests.\n' "$version" > /busybox.SOURCE \
  && rm /busybox.help
 
-# The DCGM client. With the NVIDIA GPU Operator installed, dcgmi lives inside
-# NVIDIA's own container and is absent from the node, so mounting host binaries
-# cannot find it and the agent's runtime attestation stays degraded. The client
-# is small (one shared library) and speaks to whichever host engine
-# --nvidia-dcgm-endpoint names, so the agent carries its own.
-#
-# The version is pinned: it is what the agent attests as the DCGM runtime, so it
-# must not drift silently between builds.
-#
-# It must also be NO NEWER than the host engine it will talk to. DCGM tolerates
-# an engine newer than the client and not the reverse: a 4.6 client against a
-# 4.3 engine connects, lists the GPU, and then fails every field read with
-# "Return -20: The requested function was not found". Measured on a real T4,
-# not inferred — and the previous pin of 4.6.1 was newer than the engine in
-# EVERY NVIDIA GPU Operator release: v25.3 ships 4.3.1, v25.10 ships 4.4.x,
-# v26.3 ships 4.5.2. The bundled client could therefore not speak to the engine
-# in the deployment the documentation recommends, on any version, and the agent
-# silently served the narrower nvidia-smi source instead.
-#
-# So pin to the OLDEST engine we support rather than the newest client
-# available: 4.3.1 works against 4.3.1 and everything above it.
-FROM debian:12-slim AS dcgm
-ARG TARGETARCH
-ARG DCGM_VERSION=4.3.1-1
-RUN set -eux; \
-    apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates; \
-    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
-    case "$arch" in \
-      amd64) repo=x86_64; pkgarch=amd64 ;; \
-      arm64) repo=sbsa;   pkgarch=arm64 ;; \
-      *) echo "unsupported architecture $arch for the DCGM client" >&2; exit 1 ;; \
-    esac; \
-    url="https://developer.download.nvidia.com/compute/cuda/repos/debian12/${repo}/datacenter-gpu-manager-4-core_${DCGM_VERSION}_${pkgarch}.deb"; \
-    curl -fsSL "$url" -o /tmp/dcgm.deb; \
-    dpkg-deb -x /tmp/dcgm.deb /dcgm; \
-    test -x /dcgm/usr/bin/dcgmi; \
-    # distroless/base carries glibc but not libgcc_s, which dcgmi links against.
-    cp -a /lib/*-linux-gnu*/libgcc_s.so.1 /dcgm/usr/lib/; \
-    mkdir -p /dcgm/usr/share/doc/libgcc-s1; \
-    cp /usr/share/doc/libgcc-s1/copyright /dcgm/usr/share/doc/libgcc-s1/
-
+# DCGM from NVIDIA packages is not redistributable in this image. Operators
+# may explicitly supply a compatible client through hostTooling.dcgmiPath.
 FROM gcr.io/distroless/base-debian12 AS agent
 LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron" \
       org.opencontainers.image.description="KubeNeuron node agent" \
@@ -119,9 +80,6 @@ COPY build/licenses/busybox/ /licenses/native/busybox/
 COPY --from=busybox /busybox.VERSION /licenses/native/busybox/VERSION
 COPY --from=busybox /busybox.SOURCE /licenses/native/busybox/SOURCE
 COPY build/licenses/native-SOURCES /licenses/native/SOURCES
-COPY --from=dcgm /dcgm/usr/bin/dcgmi /usr/bin/dcgmi
-COPY --from=dcgm /dcgm/usr/lib/ /usr/lib/
-COPY --from=dcgm /dcgm/usr/share/doc/ /licenses/native/
 COPY --from=build /out/kubeneuron-agent /kubeneuron-agent
 COPY NOTICE THIRD_PARTY_LICENSES LICENSE /licenses/
 ENTRYPOINT ["/kubeneuron-agent"]

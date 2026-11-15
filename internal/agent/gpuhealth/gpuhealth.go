@@ -204,6 +204,9 @@ func New(nodeName, dcgmPath, dcgmEndpoint, nvidiaSMIPath string) *Watcher {
 // returns an error: an unusable source degrades to an empty, observed-only
 // stream rather than failing the agent's detection wiring.
 func (w *Watcher) Watch(ctx context.Context) (<-chan types.AgentEvent, error) {
+	if w.DCGMPath == "" && w.Logger != nil {
+		w.Logger.Info("DCGM client absent or disabled; using nvidia-smi health source when available")
+	}
 	if w.run == nil {
 		w.run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 			return exec.CommandContext(ctx, name, args...).CombinedOutput()

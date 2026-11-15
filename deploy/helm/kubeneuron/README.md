@@ -15,6 +15,13 @@ The chart's manifests mirror `config/default` + `config/rbac` (a repo test
 pins the RBAC rules together); `kubectl apply -k config/default` remains the
 kustomize-native equivalent.
 
+## DCGM client
+
+DCGM is not bundled in the agent image. The agent uses the narrower
+`nvidia-smi` health source unless a working `dcgmi` client is provided.
+Without DCGM runtime attestation, accelerator readiness stays degraded and
+destructive actions remain blocked. Client delivery is managed separately.
+
 ## CRDs and upgrades
 
 CRDs live in `crds/`: Helm installs them on first install but **never

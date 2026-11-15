@@ -861,11 +861,12 @@ exporter embeds a private one that nothing else can reach. Enable it:
 helm upgrade --install gpu-operator nvidia/gpu-operator -n gpu-operator   --set dcgm.enabled=true
 ```
 
-**The client ships with the agent.** With the GPU Operator installed, `dcgmi`
-lives inside NVIDIA's own container and is *not* on the node — verified
-directly on a live cluster — so mounting host binaries cannot find it and
-attestation stays degraded. The agent image therefore carries its own pinned
-DCGM client, and uses it by default.
+**Supply the client explicitly.** The agent image does not redistribute
+NVIDIA's packaged `dcgmi` or its libraries. With the GPU Operator installed,
+`dcgmi` lives inside NVIDIA's container and is not automatically available on
+the node. Client delivery is managed separately. Without a working client,
+the agent uses the narrower `nvidia-smi` source, runtime attestation stays
+`degraded`, and destructive actions remain blocked.
 
 **If you already installed DCGM on your nodes**, that client is *not* picked up
 automatically, even though `hostTooling.binDir` comes first on the agent's PATH
@@ -921,14 +922,14 @@ a statement about someone else's GPU.
     `dcgmi --version` answers from the local binary and never contacts the
     engine, and DCGM exposes no way to ask the engine for its build. A newer
     client serving an older engine is normal with the GPU Operator. So an
-    `AcceleratorRuntimeProfile`'s `runtimeVersion` pins the client the agent
-    image ships; the engine is attested separately, by a live connection whose
+    `AcceleratorRuntimeProfile`'s `runtimeVersion` pins the client explicitly supplied
+    to the agent; the engine is attested separately, by a live connection whose
     GPU count must match the independent `nvidia-smi` inventory. Both must hold
     before a report becomes `ready`.
 
     Matching is on major and minor, not the patch level: `dcgm-4.6` and
     `dcgm-4.6.1` both accept an attested `dcgm-4.6.2`. Otherwise every bump of
-    the bundled client would degrade each fleet still pinning the previous
+    the supplied client would degrade each fleet still pinning the previous
     patch — an outage caused by a release rather than by anything on the nodes.
     A newer *minor* is still refused, because a profile names the runtime it was
     reviewed against.

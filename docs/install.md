@@ -4,6 +4,13 @@ The operator-managed path is the only supported authenticated deployment
 shape. It requires Kubernetes **1.29+** (the CRDs use quantity CEL
 functions); the integration harness pins and tests v1.33.
 
+## DCGM client
+
+DCGM is not bundled in the agent image. The agent uses the narrower
+`nvidia-smi` health source unless a working `dcgmi` client is provided.
+Without DCGM runtime attestation, accelerator readiness stays degraded and
+destructive actions remain blocked. Client delivery is managed separately.
+
 ## 0. Dependencies (separately owned)
 
 KubeNeuron never creates its observability stack. Install and verify the

@@ -75,7 +75,7 @@ func main() {
 		nvidiaDCGMPath = flag.String(
 			"nvidia-dcgmi",
 			dcgm.BundledClientPath,
-			"dcgmi binary used for bounded local DCGM runtime attestation. Defaults to the client shipped in the agent image so the attested version is the same on every node; point it at a host client only if you intend that client's version to be what the runtime profile pins.",
+			"dcgmi binary used for bounded local DCGM runtime attestation. The client is not bundled; defaults to /usr/bin/dcgmi. The supplied client version is what the runtime profile pins.",
 		)
 		nvidiaDCGMEndpoint = flag.String(
 			"nvidia-dcgm-endpoint",

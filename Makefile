@@ -104,6 +104,7 @@ verify-docs:
 	bash hack/verify-docs.sh
 
 verify-image:
+	python3 -I hack/test_verify_image.py
 	bash hack/verify-image.sh
 
 # The hardware sweep's networking cleanup, run against a scripted aws/eksctl
@@ -405,5 +406,6 @@ licenses:
 	GO=$(GO) python3 -I hack/third-party-licenses.py
 
 verify-licenses:
+	python3 -I hack/test_native_sources.py
 	python3 -I hack/test_third_party_licenses.py
 	GO=$(GO) python3 -I hack/third-party-licenses.py --check

@@ -346,6 +346,40 @@ func TestNewDisablesAbsentBinaries(t *testing.T) {
 	}
 }
 
+// Exercise constructor detection as well as polling: a missing client is
+// disabled before the first poll, and nvidia-smi still produces health events.
+func TestAbsentDCGMUsesNVIDIASMIAndLogsOnce(t *testing.T) {
+	w := New("gpu-node", filepath.Join(t.TempDir(), "missing-dcgmi"), "", "/bin/sh")
+	if w.DCGMPath != "" || w.NVIDIASMIPath == "" {
+		t.Fatalf("unexpected detected sources: dcgm=%q smi=%q", w.DCGMPath, w.NVIDIASMIPath)
+	}
+	var logs strings.Builder
+	w.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	w.run = func(_ context.Context, path string, args ...string) ([]byte, error) {
+		if path != w.NVIDIASMIPath || isDCGM(args) {
+			t.Errorf("unexpected probe: %s %v", path, args)
+		}
+		return []byte(readFixture(t, "nvidia-smi-q-faults.txt")), nil
+	}
+	w.seen = map[string]uint64{"smi-ecc-0": 0, "smi-remap-1": 0}
+	w.baselined = map[string]bool{"smi-ecc-0": true, "smi-remap-1": true}
+	if events := w.poll(context.Background()); len(events) == 0 {
+		t.Fatal("missing dcgmi must still allow nvidia-smi health events")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ch, err := w.Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch {
+	}
+	w.poll(context.Background())
+	if count := strings.Count(logs.String(), "DCGM client absent or disabled"); count != 1 {
+		t.Fatalf("absence log count = %d, want 1; logs: %s", count, logs.String())
+	}
+}
+
 func TestResolveGPUFillsUUIDForDCGMPath(t *testing.T) {
 	w := &Watcher{
 		NodeName: "gpu-node",
