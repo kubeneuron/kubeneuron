@@ -150,8 +150,7 @@ kubectl -n <ns> get secret <name>-webhook-token -o yaml \
   | sed 's/namespace: <ns>/namespace: kubeneuron-monitoring/' | kubectl apply -f -
 ```
 
-New to this? [docs/pilot-checklist.md](pilot-checklist.md) walks the whole
-path from a green install to a first incident visible in the panel. Reference the API Secret from
+Reference the API Secret from
 `spec.notifications.operatorAPIToken` to enable `kubeneuronctl`, the web
 panel, and `http_sd`; it is mandatory when `executionMode: Paused` so an
 authenticated operator can resume the gate. Slack is optional and is

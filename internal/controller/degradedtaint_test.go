@@ -2,7 +2,7 @@
 
 package controller
 
-// §3.3 of docs/definition-plan.md: a node under an open incident should stop
+// A node under an open incident should stop
 // attracting new GPU work before anything cordons it. The property these tests
 // exist to hold is not "the taint gets applied" — it is that the taint can
 // never outlive the incident that placed it, including when the process that

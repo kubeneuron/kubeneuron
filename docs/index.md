@@ -17,8 +17,7 @@ drain-and-reset → reboot → driver remediation → hardware escalation.
     exact acknowledgement), enforced at admission, compilation, controller
     dispatch, and the agent executor. The confined destructive path has been
     validated on a live EKS GPU cluster; per-device GPU reset remains
-    hardware-gated and needs bare metal to validate. See the
-    [roadmap](https://github.com/kubeneuron/kubeneuron/blob/main/ROADMAP.md).
+    hardware-gated and needs bare metal to validate.
 
 ## Why KubeNeuron
 

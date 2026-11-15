@@ -350,8 +350,7 @@ func TestRealFleetHasNoSimulatedSection(t *testing.T) {
 // an approval round either, because nothing ever asked anybody, so it was also
 // counted as recovered WITHOUT A HUMAN. An installation that had bound one
 // class out of twenty therefore reported near-total unattended recovery, and
-// docs/pilot-checklist.md tells the operator to take that number to whoever
-// pays for the fleet.
+// an operator takes that number to whoever pays for the fleet.
 func TestAnIncidentNothingActedOnIsNotRecoveredCapacity(t *testing.T) {
 	to := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 	from := to.Add(-24 * time.Hour)

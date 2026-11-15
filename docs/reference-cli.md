@@ -93,9 +93,8 @@ came back without waking anybody. `--since` accepts `24h`, `7d`, `4w`
 
 ### On a dry-run fleet
 
-Dry-run is the shipped default, and the [pilot
-checklist](pilot-checklist.md) tells you to stay in it until you have watched
-the system decide. Every number above is zero for that whole period, by
+Dry-run is the shipped default; stay in it until you have watched the system
+decide. Every number above is zero for that whole period, by
 construction: dry-run executes nothing, so it recovers nothing, and counting
 its synthetic successes as recovered capacity would make the one number this
 report exists to be trusted on the one that lies out of the box.

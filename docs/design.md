@@ -10,8 +10,7 @@ re-audited against v0.5.0)
 > in sync with the code — the stale-status freeze notice that used to sit
 > here is gone because the claims below were re-audited against v0.5.0. For
 > the release-by-release capability surface, `README.md` and `CHANGELOG.md`
-> remain the quickest references; `PRODUCTION_READINESS_PLAN.md` tracks
-> status-by-item.
+> remain the quickest references.
 
 KubeNeuron monitors NVIDIA GPU clusters for hardware and driver failures and
 drives a configurable, audited escalation ladder. Kubernetes and bare metal are

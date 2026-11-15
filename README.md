@@ -76,8 +76,7 @@ v0.5 routes or commands, so v0.5.0 claims no GPU hardware qualification of its
 own surfaces. Its tag, images, and release assets remain available from the
 [v0.5.0 GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.5.0).
 See also the [REST](docs/reference-api.md) and [CLI](docs/reference-cli.md)
-references, the [upgrade notes](docs/upgrade.md), and the
-[v0.5.0 security review](docs/security-review-v0.5.0.md).
+references and the [upgrade notes](docs/upgrade.md).
 
 **Latest release (v0.8.0, 2026-11-08):** workload-safe GPU
 recovery — a read-only, fail-closed device topology classifier; an opt-in
@@ -105,8 +104,7 @@ release assets are available from the
 published 2026-11-08 UTC as a non-prerelease release with 15 assets and
 independently checked with `hack/verify-release.sh v0.8.0
 kubeneuron/kubeneuron` (asset set, checksums, digest pins, and the Cosign
-signature). The product decision (D0) and the
-[v0.8.0 security review](docs/security-review-v0.8.0.md)'s sign-off
+signature). The product decision (D0) and the security review sign-off
 preceded the tag. Nothing here is a claim that any framework integrates
 with KubeNeuron.
 
@@ -130,8 +128,7 @@ pins; the v0.7.0 images are what the `v0.7.0` tag's manifests install.
 The v0.7.0 release source passed the full AWS hardware harness, including its
 `deploy-observability` and `test-observability` phases, on a temporary EKS
 `g4dn.xlarge` / Tesla T4 cluster on 2026-10-18 UTC; nothing is claimed for
-A100/H100, MIG, NVLink, row remapping, or fail-slow scoring. See the
-[v0.7.0 security review](docs/security-review-v0.7.0.md).
+A100/H100, MIG, NVLink, row remapping, or fail-slow scoring.
 
 **Released in v0.6.1 (2026-10-11):** a security and toolchain patch to
 v0.6.0 — Go 1.26.9 with updated `golang.org/x/net` and `golang.org/x/text`,
@@ -155,13 +152,11 @@ hardware validation of the checkpoint feature: the release source passed the
 full AWS hardware harness on a temporary EKS `g4dn.xlarge` / Tesla T4 cluster
 on 2026-10-07, which exercised the shared agent/controller runtime against
 injected faults and carried no opted-in checkpointing Pod. See the
-[design record](docs/checkpoint-coordination-design.md), the
-[upgrade notes](docs/upgrade.md#v060-checkpoint-coordination-notes), and the
-[v0.6.0 security review](docs/security-review-v0.6.0.md).
+[design record](docs/checkpoint-coordination-design.md) and the
+[upgrade notes](docs/upgrade.md#v060-checkpoint-coordination-notes).
 
 **Start here:** [product tour](docs/product-tour.md) (screenshots + live
-demo) · [install](docs/install.md) · [one-pager](docs/one-pager.md) ·
-[docs site](docs/index.md)
+demo) · [install](docs/install.md) · [docs site](docs/index.md)
 
 ## Architecture
 
@@ -503,9 +498,8 @@ difference is large enough that it belongs before the install command rather
 than in a footnote. NVIDIA on AWS is validated end to end; NVIDIA elsewhere
 tops out at a reboot rung that has never executed on hardware; AMD detects,
 protects and closes incidents but arms nothing and resets nothing; Intel is a
-seam with no implementation behind it. The table is in
-[the pilot checklist](docs/pilot-checklist.md#0-is-your-fleet-a-good-fit), and
-[the capability matrix](docs/reference-capabilities.md) states every cell of
+seam with no implementation behind it.
+[The capability matrix](docs/reference-capabilities.md) states every cell of
 it against the code, with `hack/verify-docs.sh` failing the build when the two
 disagree.
 
@@ -526,8 +520,6 @@ disagree.
 
 ## Product tour
 
-[docs/one-pager.md](docs/one-pager.md) is the one-page pitch: problem,
-differentiators, proof points.
 [docs/product-tour.md](docs/product-tour.md) walks the whole workflow with
 screenshots and a recorded demo captured on a live EKS cluster with a real
 Tesla T4: a kernel-injected XID 79 opens an incident, the playbook ladder
@@ -536,9 +528,7 @@ every transition.
 
 ## Roadmap
 
-The execution plan with per-item status is
-[PRODUCTION_READINESS_PLAN.md](PRODUCTION_READINESS_PLAN.md)
-(ROADMAP.md is its historical predecessor). Current status:
+Current status:
 
 **Done and released (v0.1.0):** the complete DryRun control plane —
 incident workflow, agent action dispatch with lease/boot-ID protocol,
@@ -576,7 +566,7 @@ on a temporary `g4dn.xlarge` / Tesla T4 cluster torn down to zero leftovers
 (Tesla T4 only: nothing is claimed for A100/H100, MIG, or NVLink) — and
 the DCGM/nvidia-smi second detection source beside kmsg has shipped and
 observed a DCGM signal on a real T4 with the agent on the real driver. That
-matrix in [PRODUCT_PLAN.md](PRODUCT_PLAN.md) still gates per-device reset;
+matrix still gates per-device reset;
 cloud node remediation no longer waits on it.
 
 **Later evaluations:** ClickHouse archival, Slurm, and ticketing

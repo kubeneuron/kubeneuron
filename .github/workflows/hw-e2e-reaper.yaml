@@ -1,7 +1,7 @@
 name: Hardware GPU E2E reaper
 
-# Out-of-band watchdog for the Hardware GPU E2E target (PRODUCT_PLAN safety
-# rule 1: a max-lifetime guard that force-deletes the cluster even if the
+# Out-of-band watchdog for the Hardware GPU E2E target (safety rule: a
+# max-lifetime guard that force-deletes the cluster even if the
 # owning job hangs). It runs on its OWN frequent schedule, independent of the
 # hw-e2e.yaml run it protects, so a wedged runner cannot leak a paid cluster.
 #

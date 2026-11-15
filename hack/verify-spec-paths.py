@@ -74,7 +74,7 @@ for doc in sorted(set(docs)):
 # --- the same question, asked of the JSON an operator actually copies --------
 #
 # The dotted-prose check above cannot see a patch body, and a patch body is the
-# form readers paste into a terminal. docs/pilot-checklist.md carried
+# form readers paste into a terminal. A published doc once carried
 #
 #     -p '{"spec": {"agent": {"hostTooling": {"enabled": true}}}}'
 #

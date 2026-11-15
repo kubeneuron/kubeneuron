@@ -13,7 +13,7 @@ reader would assume, the note says so.
 
 | Status | Means |
 |---|---|
-| **shipped & hardware-validated** | The code path exists, is tested, **and has executed against real accelerator hardware of that vendor** with recorded evidence (a hardware run in `CHANGELOG.md` / `PRODUCTION_READINESS_PLAN.md`, or a captured fixture). |
+| **shipped & hardware-validated** | The code path exists, is tested, **and has executed against real accelerator hardware of that vendor** with recorded evidence (a hardware run in `CHANGELOG.md`, or a captured fixture). |
 | **shipped, not hardware-validated** | The code path exists and is exercised by unit tests against fixtures. It has never run against that vendor's hardware. Fixtures are written by humans; they prove the parser, not the world. |
 | **shipped, hardware evidence limited** | The code path exists, is tested, **and a stated part of it has executed against real hardware** in a run recorded in `CHANGELOG.md`, but the recorded assertions cover only a subset of what the row claims. The cell's note names the run's source commit, the GPU, exactly what was observed, and what was not. This is not *hardware-validated*: everything the note does not list keeps the standing of the row above. |
 | **seam only (no implementation)** | The interface, type, registry entry, or config surface accepts the vendor, and nothing implements it. An operator enabling it gets nothing — see the *silent no-op* warnings below for the two places where "nothing" is worse than an error. |
@@ -22,7 +22,7 @@ reader would assume, the note says so.
 Two rules govern edits to this page:
 
 1. A cell may be promoted to *hardware-validated* only against a run recorded
-   in the repository — `CHANGELOG.md`, `PRODUCTION_READINESS_PLAN.md`, a
+   in the repository — `CHANGELOG.md`, a
    captured fixture, or a measured finding written into the code it came from.
    The same holds for *hardware evidence limited*: its note must point at the
    recorded run and list the assertions that run actually made.
@@ -153,8 +153,7 @@ multi-node gang cannot be promoted on the hardware this project can rent. The re
 remediation action, no device-scoped action on partitioned or shared GPUs,
 no write to Kueue, Ray or DRA objects, and no network path from the
 controller to any workload; the [design record](workload-safe-recovery-design.md)
-carries the argument and the [v0.8.0 security review draft](security-review-v0.8.0.md)
-the diff.
+carries the argument.
 
 | Capability | Status | Notes |
 | --- | --- | --- |

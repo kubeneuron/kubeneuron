@@ -63,7 +63,7 @@ Go 1\.25(\+| or newer)
 # notes carried on 2026-10-19 (the [^.] span cannot cross another version
 # number, so "superseded v0.6.1; v0.7.0 is the latest release" stays
 # legal). The checker greps line by line, so a claim wrapped across a line
-# break (the one-pager's was) is outside its reach; fixing the text is the
+# break is outside its reach; fixing the text is the
 # remedy, these patterns only stop the one-line spellings from returning.
 Latest release \(v0\.6\.1
 v0\.6\.1 is the latest (\*\*)?(published )?(\*\*)?release

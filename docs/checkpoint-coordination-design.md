@@ -14,7 +14,6 @@ Nothing in this document is a claim that the feature has been exercised on
 GPU hardware: the release source passed the full AWS hardware harness on
 2026-10-07, but that harness drives the shared runtime against injected
 faults and carries no opted-in checkpointing Pod.
-Scope: §3.2 of the [definition plan](definition-plan.md).
 
 A training job that supports checkpointing would rather be **told** than
 evicted. Without coordination KubeNeuron evicts: `platform.drain` calls the
@@ -363,9 +362,6 @@ The rule: **a workload may influence how it dies, never whether.**
   with no budget at all — may be dropped and logged. The closed
   `checkpoint_requests_total` outcomes still count every case, and the
   disruption proceeds regardless.
-
-Details, threat by threat, are in the
-[v0.6.0 security review](security-review-v0.6.0.md).
 
 ## Observability — the metric that proves it worked
 

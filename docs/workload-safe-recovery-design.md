@@ -11,8 +11,7 @@ which evidence, is stated by each surface's reference page and by the
 capability matrix with the gate, SHA and date that proved it. This page
 records the decisions, not the evidence.
 
-Scope: §3.2 of the [definition plan](definition-plan.md) ("protect harder"),
-the "Phases" section of the
+Scope: the "Phases" section of the
 [checkpoint coordination design](checkpoint-coordination-design.md) (Phase 2:
 advisory at approval park, gang scope, documented adapters), the
 [MIG semantics decision](mig-decision.md) (blast radius named in the approval),

@@ -59,11 +59,18 @@ EXCLUDES=(
 	# are listed here before they exist so the first draft cannot leak.
 	"docs/discovery-d0-record.md"
 	"docs/pilot-p1-record.md"
-	# NOT excluded, deliberately: PRODUCT_PLAN.md and
-	# PRODUCTION_READINESS_PLAN.md. They are published product roadmap
-	# documents — hack/verify-docs.sh lints them as such, and they have been in
-	# the public repository since before this script existed. Excluding them
-	# here would silently delete two published files on the next mirror.
+	# Product plans, the pitch, pilot and definition plans, and the security
+	# reviews. Private working documents, retired from the public repository.
+	"PRODUCT_PLAN.md"
+	"PRODUCTION_READINESS_PLAN.md"
+	"ROADMAP.md"
+	"docs/one-pager.md"
+	"docs/pilot-checklist.md"
+	"docs/definition-plan.md"
+	"docs/security-review-v0.5.0.md"
+	"docs/security-review-v0.6.0.md"
+	"docs/security-review-v0.7.0.md"
+	"docs/security-review-v0.8.0.md"
 	# Build output and local tooling.
 	"bin/"
 	".claude/"

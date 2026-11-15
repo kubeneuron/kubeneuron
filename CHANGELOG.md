@@ -493,7 +493,7 @@ carried here one for one):
   forbids (a checkpoint or progress KubeNeuron "saved", a number of saved
   or lost training GPU-hours, Kueue / KubeRay / Ray Train "integration" or
   "support", MIG or DRA "supported"); the
-  [v0.8.0 security review draft](docs/security-review-v0.8.0.md); and
+  v0.8.0 security review draft; and
   three non-goal tests — no role grants `pods/exec`, `pods/attach`,
   `pods/portforward` or `pods/ephemeralcontainers` under any opt-in, the
   dynamic client in the classifier and the resolvers only `Get`s and
@@ -1360,7 +1360,7 @@ teardown` sequence passed again on a fresh cluster on 2026-09-14. That
 harness exercises the shared agent/controller runtime and does not call the
 v0.5 routes or commands, so this release claims no GPU hardware qualification
 of the v0.5 surfaces. Security posture of the new surfaces is summarised in
-[docs/security-review-v0.5.0.md](docs/security-review-v0.5.0.md).
+docs/security-review-v0.5.0.md.
 
 ### Added
 

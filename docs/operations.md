@@ -375,8 +375,7 @@ must be recorded by the adapter and its operating procedure.
 bounded deadline, before a `Drain` or `EvictGPUWorkload` step disrupts them.
 The workload protocol is in [playbook authoring](playbook-authoring.md); the
 design and its safety argument in
-[checkpoint coordination](checkpoint-coordination-design.md) and the
-[v0.6.0 security review](security-review-v0.6.0.md). This section is the
+[checkpoint coordination](checkpoint-coordination-design.md). This section is the
 operator's rollout guide.
 
 **What enabling it costs.** Two things, both visible:

@@ -2,7 +2,7 @@
 
 package controller
 
-// §3.1 of docs/definition-plan.md: the system protects workloads constantly and
+// The system protects workloads constantly and
 // none of it was countable. These tests assert the counters move on the REAL
 // refusal paths — one per guard, driven through the same functions the walk
 // calls — and, just as importantly, that an execution which disrupts nothing

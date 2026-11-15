@@ -123,8 +123,8 @@ Commands (the workflow runs them in this order):
                      out a DELETE_IN_PROGRESS rather than racing it.
   reap               Out-of-band watchdog: force-delete any e2e cluster older
                      than MAX_LIFETIME_MINUTES. Meant for an INDEPENDENT cron
-                     so a hung run cannot leak a cluster (PRODUCT_PLAN safety
-                     rule 1). Never assumes this run's cluster. Sweeps a
+                     so a hung run cannot leak a cluster (max-lifetime
+                     safety rule). Never assumes this run's cluster. Sweeps a
                      reaped cluster's volumes by its run tag only; a run that
                      hung before its claims were tagged leaves its volume for
                      manual review rather than a namespace-wide guess.

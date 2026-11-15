@@ -45,4 +45,3 @@ configuration are deployment-specific; see [operations.md](operations.md).
 - [design.md](design.md) — architecture and implementation boundaries.
 - [operations.md](operations.md) — tokens, pausing, backup/restore, metrics.
 - [xid-catalog.md](xid-catalog.md) — why each XID maps to its playbook.
-- `ROADMAP.md` — what exists, what does not, and in which order it lands.

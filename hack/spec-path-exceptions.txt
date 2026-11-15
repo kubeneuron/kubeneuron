@@ -13,7 +13,7 @@ spec.reliability.targets
 # a KubeNeuron field.
 spec.template.spec.containers
 
-# A POD's spec, not KubeNeuron's. docs/pilot-checklist.md reads the DCGM
+# A POD's spec, not KubeNeuron's. The documented check reads the DCGM
 # engine's image out of the gpu-operator DaemonSet to compare its version
 # against the client in the agent image — the check that stops the second
 # detection source degrading in silence.

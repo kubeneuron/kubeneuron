@@ -26,11 +26,9 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Getting started:
-      - Why KubeNeuron (one-pager): one-pager.md
       - Product tour (screenshots & demo): product-tour.md
       - Quickstart (dry-run demo): quickstart.md
       - Production install: install.md
-      - Pilot checklist: pilot-checklist.md
   - Operating:
       - Operations guide: operations.md
       - Alert runbooks: runbooks.md
@@ -40,7 +38,6 @@ nav:
       - Playbook authoring: playbook-authoring.md
       - XID catalog: xid-catalog.md
   - Roadmap:
-      - Making the definition true: definition-plan.md
       - MIG semantics decision: mig-decision.md
       - Checkpoint coordination design: checkpoint-coordination-design.md
       - Workload-safe recovery design record (v0.8): workload-safe-recovery-design.md
@@ -52,7 +49,3 @@ nav:
       - Metrics and alerts: reference-metrics.md
       - Capability matrix (per vendor): reference-capabilities.md
       - Design document: design.md
-      - Security review (v0.5.0): security-review-v0.5.0.md
-      - Security review (v0.6.0): security-review-v0.6.0.md
-      - Security review (v0.7.0, source review): security-review-v0.7.0.md
-      - Security review (v0.8.0, source review): security-review-v0.8.0.md
