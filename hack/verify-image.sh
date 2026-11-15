@@ -11,7 +11,7 @@
 # visible to whoever runs the release, which is how `Reboot` reached live
 # hardware and exited 127 for want of nsenter.
 #
-# So this builds the real build/Dockerfile with the CLASSIC builder — the same
+# So this builds the real build/Dockerfile with BuildKit — the same
 # path `make docker` takes, which has broken on its own before — and then
 # asserts the properties that a Go test cannot see because they are properties
 # of the image, not of the code.
@@ -32,7 +32,7 @@ bad() {
 	fail=1
 }
 
-note "building every published target from build/Dockerfile (classic builder)"
+note "building every published target from build/Dockerfile (BuildKit)"
 for target in operator controller agent cli; do
 	echo "--- $target"
 	"$DOCKER_BIN" build --target "$target" --tag "kubeneuron-${target}:${TAG}" \

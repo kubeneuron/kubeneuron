@@ -2,15 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Production multi-target build for the four KubeNeuron binaries.
-# TARGETOS/TARGETARCH are set by buildx for multi-arch builds and default to
-# the native platform under the classic builder (empty GOOS/GOARCH).
-# BUILDPLATFORM is a buildx built-in, but `make docker` uses the classic
-# builder, where it expands to an empty string and the build dies parsing
-# the platform. Declaring it before FROM gives the classic builder a
-# default while buildx still supplies the real value — so the released
-# multi-arch image cross-compiles instead of emulating, and a plain local
-# build keeps working.
-ARG BUILDPLATFORM=linux/amd64
+# BuildKit supplies BUILDPLATFORM and TARGETOS/TARGETARCH automatically.
+# Keep the compiler native to the builder and cross-compile the target binaries.
+# Do not declare a global BUILDPLATFORM default: it overrides BuildKit's value
+# and can force an amd64 compiler image on an arm64 runner.
 FROM --platform=$BUILDPLATFORM golang:1.26.11 AS build
 ARG TARGETOS
 ARG TARGETARCH
