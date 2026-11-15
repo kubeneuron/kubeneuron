@@ -386,3 +386,30 @@ func TestJournalActionLimitCompactsInsteadOfWedging(t *testing.T) {
 		t.Fatal("live backlog at the limit must still be rejected")
 	}
 }
+
+// An action the agent refused to start has a known outcome without ever
+// running.
+func TestReceivedActionCanRecordAKnownOutcomeWithoutRunning(t *testing.T) {
+	path := t.TempDir() + "/actions.jsonl"
+	j, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	action := types.Action{ID: "refused", Type: types.ActionIdleCheck}
+	if _, err := j.RecordReceived(action); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	result := types.ActionResult{ActionID: "refused", OK: false, Error: "not executed: lease too short", StartedAt: now, FinishedAt: now}
+	if _, err := j.RecordOutcome("refused", result); err != nil {
+		t.Fatalf("received -> outcome known: %v", err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("replaying a received -> known journal: %v", err)
+	}
+	entry, ok := reopened.Get("refused")
+	if !ok || entry.State != StateOutcomeKnown || entry.Result == nil || entry.Result.Error != result.Error {
+		t.Fatalf("replayed entry = %#v", entry)
+	}
+}

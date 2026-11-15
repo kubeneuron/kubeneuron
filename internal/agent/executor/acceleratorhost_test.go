@@ -83,24 +83,34 @@ func TestQuiesceHostStopsPersistenceThroughTheHostNamespaces(t *testing.T) {
 
 func TestQuiesceHostFailsWithTheRemainingHoldersNamed(t *testing.T) {
 	run := &scripted{outputs: []string{"active", ""}}
-	d := &hostDriver{holdingDriver: &holdingDriver{Fake: &nvml.Fake{}, holders: []nvml.DeviceHolder{
+	holding := &holdingDriver{Fake: &nvml.Fake{}, holders: []nvml.DeviceHolder{
 		{PID: 11567, Command: "nvidia-device-p", Device: "/dev/nvidia0"},
-	}}, mode: true}
+	}}
+	d := &hostDriver{holdingDriver: holding, mode: true}
 	e := hostExecutor(t, d, run)
 
-	res := &types.ActionResult{}
-	// A zero timeout means the deadline has already passed, so the wait ends
-	// immediately with whatever still holds the device.
+	// The action's time runs out during the holder wait, after the daemon was
+	// stopped: the first listing ends the context, so the outcome does not
+	// depend on how fast the runner reaches the side effect.
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	defer cancel()
+	holding.onList = cancel
+
+	res := &types.ActionResult{}
 	err := e.quiesceAcceleratorHost(ctx, types.Action{
 		ID: "q2", Type: types.ActionQuiesceAcceleratorHost, Params: map[string]string{"gpu_index": "0", "host_state_key": "node-a"},
 	}, res)
 	if err == nil {
 		t.Fatal("a device still held must fail the quiesce")
 	}
-	if !strings.Contains(err.Error(), "nvidia-device-p(11567)") {
-		t.Fatalf("err = %v, want the holder named", err)
+	if !strings.Contains(err.Error(), "nvidia-device-p(11567)") || !strings.Contains(res.Output, "nvidia-device-p(11567)") {
+		t.Fatalf("err = %v, output %q: want the holder named", err, res.Output)
+	}
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrDeadlineBeforeSideEffect) {
+		t.Fatalf("err = %v: want the expiry as the cause of an executed failure, not a refusal", err)
+	}
+	if len(run.calls) != 2 || !strings.HasSuffix(run.calls[1], "systemctl stop nvidia-persistenced") {
+		t.Fatalf("calls = %v, want the daemon stopped before the wait", run.calls)
 	}
 }
 

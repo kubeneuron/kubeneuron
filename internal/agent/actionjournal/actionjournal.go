@@ -453,7 +453,10 @@ func (j *Journal) transition(actionID string, next State, result *types.ActionRe
 func allowedTransition(current, next State) bool {
 	switch current {
 	case StateReceived:
-		return next == StateRunning || next == StateOutcomeUnknown
+		// Received -> OutcomeKnown records an action the agent refused to
+		// start (its lease left too little time): nothing ran, so the outcome
+		// is known without a running marker. Replay already accepts it.
+		return next == StateRunning || next == StateOutcomeUnknown || next == StateOutcomeKnown
 	case StateRunning:
 		return next == StateOutcomeKnown || next == StateOutcomeUnknown
 	case StateOutcomeKnown, StateOutcomeUnknown:

@@ -1203,13 +1203,34 @@ func (a *Agent) processJournaledAction(ctx context.Context, entry actionjournal.
 // have reached a device or host side effect before returning.
 func (a *Agent) executeQueuedAction(ctx context.Context, claimed claimedAction) bool {
 	action := claimed.action
+	// The lease is what authorizes this execution, and it is not renewed:
+	// once it expires the controller may lease the action again, here or
+	// after a restart. So the work must end before the lease does, leaving
+	// AgentResultGrace to report the result while the lease still accepts it.
+	deadline := executionDeadline(claimed.leaseExpiresAt)
+	if reason := refuseShortLease(action, time.Until(deadline)); reason != "" {
+		a.log.Warn("not starting queued action: its lease leaves too little time", "action", action.ID, "type", action.Type, "reason", reason)
+		now := time.Now().UTC()
+		result := types.ActionResult{
+			ActionID: action.ID, OK: false, StartedAt: now, FinishedAt: now,
+			Error: "not executed: " + reason,
+		}
+		entry, err := a.journal.RecordOutcome(action.ID, result)
+		if err != nil {
+			a.log.Error("cannot record refused action outcome", "action", action.ID, "err", err)
+			return false
+		}
+		return a.reportJournaledAction(ctx, claimed, entry, result)
+	}
 	if _, err := a.journal.MarkRunning(action.ID); err != nil {
 		a.log.Error("cannot record queued action as running", "action", action.ID, "type", action.Type, "err", err)
 		return false
 	}
 
-	a.log.Info("executing queued action", "action", action.ID, "type", action.Type)
-	result, err := a.executor.Execute(ctx, action)
+	a.log.Info("executing queued action", "action", action.ID, "type", action.Type, "deadline", deadline)
+	execCtx, cancel := context.WithDeadline(ctx, deadline)
+	result, err := a.executor.Execute(execCtx, action)
+	cancel()
 	if err != nil {
 		a.log.Warn("queued action failed", "action", action.ID, "type", action.Type, "err", err)
 	}
@@ -1259,6 +1280,37 @@ func (a *Agent) reportJournaledAction(ctx context.Context, claimed claimedAction
 		return false
 	}
 	return true
+}
+
+// minExecutionWindow is the least time an action may start with. Below it
+// there is no room for even a probe to finish inside the lease.
+const minExecutionWindow = 10 * time.Second
+
+// leaseSlack absorbs the delay between the controller granting a lease and the
+// agent starting the action, so a freshly leased action still gets its full
+// timeout.
+const leaseSlack = 10 * time.Second
+
+// executionDeadline is the moment the work must stop: the lease expiry minus
+// the grace the controller allows for reporting the result.
+func executionDeadline(leaseExpiresAt time.Time) time.Time {
+	return leaseExpiresAt.Add(-types.AgentResultGrace)
+}
+
+// refuseShortLease returns why an action must not start with remaining time
+// left before its execution deadline, or "" when it may. Every action needs
+// minExecutionWindow; a destructive one also needs its whole timeout, because
+// cutting a reset or a reboot short leaves the device in an unknown state.
+// A fresh lease always covers the timeout; what this refuses is an action
+// recovered after a restart, or claimed late, with most of its lease gone.
+func refuseShortLease(a types.Action, remaining time.Duration) string {
+	if remaining < minExecutionWindow {
+		return fmt.Sprintf("lease leaves %s, less than the %s minimum", remaining.Truncate(time.Millisecond), minExecutionWindow)
+	}
+	if executor.IsDestructive(a.Type) && a.Timeout > 0 && remaining+leaseSlack < a.Timeout {
+		return fmt.Sprintf("lease leaves %s, less than the %s timeout of a destructive action", remaining.Truncate(time.Millisecond), a.Timeout)
+	}
+	return ""
 }
 
 func claimStillValid(entry actionjournal.Entry, now time.Time) bool {

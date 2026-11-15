@@ -67,6 +67,16 @@ API is `v1alpha1`.
   configurations in both installation manifests and Helm, so these resources
   can reconcile and update the runtime configuration. Also allow deletion of
   the operator-owned legacy detect DaemonSet during reconciliation.
+- **An agent action can no longer run past its lease.** The lease that
+  authorizes an action is not renewed, so once it expires the controller may
+  hand the action out again. The agent now runs the action under a deadline
+  at the lease expiry minus the result-reporting grace, instead of the
+  action's full timeout from the moment it starts. An action whose lease
+  leaves less than 10 seconds, or a destructive action whose lease no longer
+  covers its timeout (typically one recovered after an agent restart), is not
+  started and is reported as not executed. A device reset, reboot, host
+  service change or script is also refused when the deadline passes during
+  its preflight, so a stalled check cannot be followed by a late side effect.
 
 ### Changed
 

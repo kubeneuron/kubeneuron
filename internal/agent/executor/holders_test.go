@@ -19,9 +19,15 @@ type holdingDriver struct {
 	holders []nvml.DeviceHolder
 	err     error
 	reset   int
+	// onList, when set, runs on every holder listing (tests use it to end a
+	// wait at a known point instead of on the wall clock).
+	onList func()
 }
 
 func (d *holdingDriver) DeviceHolders(int) ([]nvml.DeviceHolder, error) {
+	if d.onList != nil {
+		d.onList()
+	}
 	return d.holders, d.err
 }
 

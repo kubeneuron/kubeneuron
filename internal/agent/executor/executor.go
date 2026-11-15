@@ -316,6 +316,25 @@ func (e *Executor) allowDestructiveAction(action types.ActionType) error {
 	return nil
 }
 
+// IsDestructive reports whether the action crosses the agent's destructive
+// boundary (device reset, reboot, host stack changes, scripts).
+func IsDestructive(action types.ActionType) bool { return isDestructive(action) }
+
+// ErrDeadlineBeforeSideEffect is returned when an action's deadline (its own
+// timeout, or the lease that authorizes it) has passed before a side effect
+// was dispatched. Nothing was done: the outcome is known.
+var ErrDeadlineBeforeSideEffect = errors.New("not executed: the action's deadline passed before the side effect")
+
+// beforeSideEffect is the last check before a device or host side effect. A
+// preflight that stalled past the deadline must not be followed by a late
+// reset or reboot that the lease no longer covers.
+func beforeSideEffect(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %v", ErrDeadlineBeforeSideEffect, err)
+	}
+	return nil
+}
+
 func isDestructive(action types.ActionType) bool {
 	switch action {
 	case types.ActionGPUReset,
@@ -441,6 +460,9 @@ type gpuUUIDResetter interface {
 // before the reset still cannot move it onto a healthy neighbor. Drivers with
 // no UUID reset fall back to the index.
 func (e *Executor) resetGPU(ctx context.Context, uuid string, index int) error {
+	if err := beforeSideEffect(ctx); err != nil {
+		return err
+	}
 	if r, ok := e.driver.(gpuUUIDResetter); ok {
 		return r.ResetGPUByUUID(ctx, uuid)
 	}
@@ -614,6 +636,9 @@ func (e *Executor) reboot(ctx context.Context, a types.Action, res *types.Action
 	if len(command) == 0 {
 		return fmt.Errorf("reboot: no reboot command is configured")
 	}
+	if err := beforeSideEffect(ctx); err != nil {
+		return err
+	}
 	out, err := e.run(ctx, command[0], command[1:]...)
 	if err != nil {
 		res.Output = truncateOutput(out)
@@ -688,6 +713,9 @@ func (e *Executor) runAllowListedScript(ctx context.Context, name string, a type
 	}
 	if info.IsDir() || info.Mode()&0o111 == 0 {
 		return fmt.Errorf("%s: %s is not an executable script", a.Type, path)
+	}
+	if err := beforeSideEffect(ctx); err != nil {
+		return err
 	}
 	out, err := e.run(ctx, path)
 	res.Output = truncateOutput(out)

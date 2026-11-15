@@ -77,6 +77,9 @@ func (e *Executor) quiesceAcceleratorHost(ctx context.Context, a types.Action, r
 	// workload anywhere. Stop the daemon first: disabling the mode while its
 	// daemon runs leaves the handle in place.
 	if serviceActive {
+		if err := beforeSideEffect(ctx); err != nil {
+			return fmt.Errorf("quiesce_accelerator_host: %w", err)
+		}
 		if out, err := e.runHostCommand(ctx, "systemctl", "stop", persistenceDaemonUnit); err != nil {
 			res.Output = truncateOutput(out)
 			return fmt.Errorf("quiesce_accelerator_host: stopping %s: %w", persistenceDaemonUnit, err)
@@ -92,9 +95,16 @@ func (e *Executor) quiesceAcceleratorHost(ctx context.Context, a types.Action, r
 		return fmt.Errorf("quiesce_accelerator_host: %w", err)
 	}
 	if len(holders) != 0 {
+		// The side effects above already ran, so this is a known failure, not a
+		// refusal: name what still holds the device, which is what the operator
+		// needs, and carry the deadline as the cause when that ended the wait.
 		res.Output = truncateOutput([]byte(nvml.FormatHolders(holders)))
-		return fmt.Errorf("quiesce_accelerator_host: GPU %d is still held by %d process(es): %s",
+		failure := fmt.Errorf("quiesce_accelerator_host: GPU %d is still held by %d process(es): %s",
 			index, len(holders), nvml.FormatHolders(holders))
+		if cause := ctx.Err(); cause != nil {
+			return fmt.Errorf("%w (the wait for release ended: %w)", failure, cause)
+		}
+		return failure
 	}
 	res.Output = fmt.Sprintf("GPU %d released; host persistence state quiesced", index)
 	return nil
@@ -131,6 +141,9 @@ func (e *Executor) restoreAcceleratorHost(ctx context.Context, a types.Action, r
 		}
 	}
 	if state.ServiceWasActive {
+		if err := beforeSideEffect(ctx); err != nil {
+			return fmt.Errorf("restore_accelerator_host: %w", err)
+		}
 		if out, err := e.runHostCommand(ctx, "systemctl", "start", persistenceDaemonUnit); err != nil {
 			res.Output = truncateOutput(out)
 			return fmt.Errorf("restore_accelerator_host: starting %s: %w", persistenceDaemonUnit, err)
