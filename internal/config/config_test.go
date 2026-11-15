@@ -278,3 +278,91 @@ func TestCheckpointGroupsDefaultsBoundsAndRequiresCoordination(t *testing.T) {
 		})
 	}
 }
+
+const minimalPolicy = `
+policies:
+  - match: { class: ecc-dbe }
+    playbook: drain-and-reset
+`
+
+func TestDryRunFailsClosed(t *testing.T) {
+	cases := []struct {
+		name    string
+		safety  string
+		want    bool
+		wantErr string
+	}{
+		{name: "key absent", safety: "", want: true},
+		{name: "safety block without the key", safety: "safety:\n  max_concurrent_reboots: 1\n", want: true},
+		{name: "explicit true", safety: "safety:\n  dry_run: true\n", want: true},
+		{name: "explicit false", safety: "safety:\n  dry_run: false\n", want: false},
+		{name: "misspelt camelCase", safety: "safety:\n  dryRun: true\n", wantErr: "dryRun"},
+		{name: "misspelt top level", safety: "dry_run: true\n", wantErr: "dry_run"},
+		{name: "unknown key elsewhere", safety: "approvals:\n  tll: 1h\n", wantErr: "tll"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Load(writeConfig(t, tc.safety+minimalPolicy))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Load() error = %v, want an error naming %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Safety.DryRun != tc.want {
+				t.Fatalf("DryRun = %v, want %v", c.Safety.DryRun, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsSecondDocument(t *testing.T) {
+	if _, err := Load(writeConfig(t, minimalPolicy+"---\nsafety:\n  dry_run: false\n")); err == nil {
+		t.Fatal("a second YAML document must be rejected, not ignored")
+	}
+}
+
+func TestFlapAndDurationsDefaultOrReject(t *testing.T) {
+	c, err := Load(writeConfig(t, minimalPolicy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Safety.Flap.Count != DefaultFlapCount || c.Safety.Flap.Window != DefaultFlapWindow {
+		t.Fatalf("flap defaults = %d/%v, want %d/%v", c.Safety.Flap.Count, c.Safety.Flap.Window.Std(),
+			DefaultFlapCount, DefaultFlapWindow.Std())
+	}
+	for _, bad := range []string{
+		"safety:\n  flap:\n    count: -1\n",
+		"safety:\n  flap:\n    window: -1h\n",
+		"approvals:\n  ttl: -1h\n",
+		"safety:\n  verify_quiet_window: -1m\n",
+	} {
+		if _, err := Load(writeConfig(t, bad+minimalPolicy)); err == nil {
+			t.Errorf("Load(%q) accepted a negative safety setting", bad)
+		}
+	}
+}
+
+func TestSideFilesRejectUnknownKeys(t *testing.T) {
+	if _, err := LoadWindowsFromBytes([]byte("windows:\n  - name: w\n    pauseAutomaton: true\n")); err == nil || !strings.Contains(err.Error(), "pauseAutomaton") {
+		t.Errorf("windows: unknown key not rejected: %v", err)
+	}
+	if _, err := LoadNodeConfigsFromBytes([]byte("nodes:\n  - node: n1\n    pasued: true\n")); err == nil || !strings.Contains(err.Error(), "pasued") {
+		t.Errorf("node configs: unknown key not rejected: %v", err)
+	}
+	if _, err := LoadSignalOverridesFromBytes([]byte("overides: []\n")); err == nil || !strings.Contains(err.Error(), "overides") {
+		t.Errorf("signal overrides: unknown key not rejected: %v", err)
+	}
+	for name, load := range map[string]func([]byte) error{
+		"windows":      func(b []byte) error { _, err := LoadWindowsFromBytes(b); return err },
+		"node configs": func(b []byte) error { _, err := LoadNodeConfigsFromBytes(b); return err },
+		"overrides":    func(b []byte) error { _, err := LoadSignalOverridesFromBytes(b); return err },
+	} {
+		if err := load(nil); err != nil {
+			t.Errorf("%s: an empty document must stay an empty set, got %v", name, err)
+		}
+	}
+}

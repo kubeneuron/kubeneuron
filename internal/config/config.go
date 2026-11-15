@@ -6,7 +6,10 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -27,6 +30,9 @@ type Config struct {
 
 // Safety mirrors internal/safety.Limits plus flap settings.
 type Safety struct {
+	// DryRun is true unless the file says `dry_run: false`. Load seeds it
+	// before decoding, so a file that omits the key cannot enable execution;
+	// a misspelt key is rejected by strict decoding.
 	DryRun                    bool     `yaml:"dry_run"`
 	MaxConcurrentRemediations int      `yaml:"max_concurrent_remediations"`
 	MaxConcurrentReboots      int      `yaml:"max_concurrent_reboots"`
@@ -209,6 +215,13 @@ const (
 	TaintEffectNoSchedule       = "NoSchedule"
 )
 
+// Flap defaults, mirroring the CRD defaults (spec.safety.flapCount and
+// spec.safety.flapWindow).
+const (
+	DefaultFlapCount  = 3
+	DefaultFlapWindow = Duration(24 * time.Hour)
+)
+
 // Flap configures flap detection.
 type Flap struct {
 	Count  int      `yaml:"count"`
@@ -255,14 +268,38 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	var c Config
-	if err := yaml.Unmarshal(data, &c); err != nil {
+	// Seeded, not zero: an absent dry_run stays true.
+	c := Config{Safety: Safety{DryRun: true}}
+	if err := decodeStrict(data, &c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := c.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &c, nil
+}
+
+// decodeStrict decodes one YAML document into out and rejects keys that out
+// does not declare, so a misspelt safety key is an error instead of a silent
+// default. An empty document decodes to out unchanged; a second document is
+// an error.
+func decodeStrict(data []byte, out any) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(out); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("unexpected second YAML document")
+	}
+	return nil
 }
 
 // Validate checks configuration invariants and applies defaults.
@@ -275,6 +312,23 @@ func (c *Config) Validate() error {
 	}
 	if c.Approvals.TTL == 0 {
 		c.Approvals.TTL = Duration(12 * time.Hour)
+	}
+	if c.Approvals.TTL < 0 {
+		return fmt.Errorf("config: approvals.ttl must be positive, got %v", c.Approvals.TTL.Std())
+	}
+	// Zero flap settings would switch flap detection off and keep remediating
+	// a node that recovers and fails again; absent means the CRD defaults.
+	if c.Safety.Flap.Count == 0 {
+		c.Safety.Flap.Count = DefaultFlapCount
+	}
+	if c.Safety.Flap.Window == 0 {
+		c.Safety.Flap.Window = DefaultFlapWindow
+	}
+	if c.Safety.Flap.Count < 0 || c.Safety.Flap.Window < 0 {
+		return fmt.Errorf("config: safety.flap.count and safety.flap.window must be positive")
+	}
+	if c.Safety.VerifyQuietWindow < 0 {
+		return fmt.Errorf("config: safety.verify_quiet_window must be positive, got %v", c.Safety.VerifyQuietWindow.Std())
 	}
 	if t := c.Safety.TaintDegradedNodes; t != nil {
 		switch t.Effect {

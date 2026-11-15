@@ -431,6 +431,66 @@ func TestReloadAppliesExecutionMode(t *testing.T) {
 	}
 }
 
+// A reload that cannot be read strictly changes nothing, and a reload whose
+// file omits dry_run goes to dry-run, never to execution.
+func TestReloadFailsClosedOnBadOrIncompletePolicies(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	playbooks := filepath.Join(dir, "playbooks")
+	if err := os.MkdirAll(playbooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(playbooks, "observe.yaml"),
+		[]byte("name: observe\ntarget: gpu\nsteps:\n  - name: observe\n    action: notify.observe\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	policies := filepath.Join(dir, "runtime.yaml")
+	write := func(safety string) {
+		t.Helper()
+		body := "policies:\n  - match: {class: gsp-error}\n    playbook: observe\n" + safety
+		if err := os.WriteFile(policies, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	gate := safety.NewGate(safety.Limits{MaxConcurrentRemediations: 2, DryRun: true})
+	ctrl := controller.New(st, nil, nil, gate, nil, nil, nil, nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	api := httpapi.New(ctrl)
+	paths := runtimeConfigPaths{policies: policies, playbooks: playbooks}
+	logSink := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	write("safety:\n  dry_run: false\n")
+	if err := applyRuntimeConfig(ctx, ctrl, api, paths, logSink); err != nil {
+		t.Fatal(err)
+	}
+	if gate.DryRun() {
+		t.Fatal("explicit dry_run: false did not enable execution")
+	}
+
+	// A misspelt key is rejected and the running configuration is kept.
+	write("safety:\n  dryRun: true\n  dry_run: false\n")
+	if err := applyRuntimeConfig(ctx, ctrl, api, paths, logSink); err == nil {
+		t.Fatal("a policies file with an unknown key was applied")
+	}
+	if gate.DryRun() {
+		t.Fatal("a rejected reload changed the running execution mode")
+	}
+
+	// A file that omits the key is dry-run.
+	write("safety:\n  max_concurrent_remediations: 2\n")
+	if err := applyRuntimeConfig(ctx, ctrl, api, paths, logSink); err != nil {
+		t.Fatal(err)
+	}
+	if !gate.DryRun() {
+		t.Fatal("a policies file without dry_run enabled execution")
+	}
+}
+
 func TestStandbyRuntimeReloadDoesNotWriteLeaderOwnedNodePauses(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

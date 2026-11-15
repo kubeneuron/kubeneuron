@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -112,7 +110,7 @@ func LoadSignalOverrides(path string) ([]SignalOverride, error) {
 // LoadSignalOverridesFromBytes parses and validates an overrides document.
 func LoadSignalOverridesFromBytes(data []byte) ([]SignalOverride, error) {
 	var f overridesFile
-	if err := yaml.Unmarshal(data, &f); err != nil {
+	if err := decodeStrict(data, &f); err != nil {
 		return nil, err
 	}
 	for _, o := range f.Overrides {
@@ -143,7 +141,7 @@ func LoadNodeConfigs(path string) ([]NodeConfig, error) {
 // LoadNodeConfigsFromBytes parses and validates a node-configs document.
 func LoadNodeConfigsFromBytes(data []byte) ([]NodeConfig, error) {
 	var f nodeConfigsFile
-	if err := yaml.Unmarshal(data, &f); err != nil {
+	if err := decodeStrict(data, &f); err != nil {
 		return nil, err
 	}
 	for _, n := range f.Nodes {

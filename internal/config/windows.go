@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // MaintenanceWindow pauses automation for matching nodes during a bounded
@@ -75,7 +73,7 @@ func LoadWindows(path string) ([]MaintenanceWindow, error) {
 // LoadWindowsFromBytes parses and validates a windows document.
 func LoadWindowsFromBytes(data []byte) ([]MaintenanceWindow, error) {
 	var f windowsFile
-	if err := yaml.Unmarshal(data, &f); err != nil {
+	if err := decodeStrict(data, &f); err != nil {
 		return nil, err
 	}
 	for _, w := range f.Windows {

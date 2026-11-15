@@ -21,6 +21,19 @@ API is `v1alpha1`.
   `text/plain` or form body is refused with `415`. Bearer-token requests (CLI,
   service accounts) are unchanged. Behind a reverse proxy, `X-Forwarded-Host`
   counts as the request host when proxy headers are trusted.
+- **The controller configuration fails closed.** A policies file that omits
+  `safety.dry_run` now runs in dry-run; live execution needs an explicit
+  `dry_run: false`. The policies file and the maintenance-window, signal-mapping
+  and node-config files are decoded strictly: an unknown key (for example a
+  misspelt `dryRun`) or a second YAML document is an error at start-up, and a
+  reload that hits one is refused and keeps the running configuration. Absent
+  flap settings take the CRD defaults (3 in 24h) instead of switching flap
+  detection off, and a negative approval TTL, flap setting or verify quiet
+  window is rejected.
+
+  **Upgrade note:** hand-written configuration files with keys the controller
+  does not know now stop the controller from starting; remove or correct them.
+  Configuration compiled by the operator is unaffected.
 
 ### Changed
 
