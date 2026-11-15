@@ -60,6 +60,11 @@ API is `v1alpha1`.
   - Internal Use wording clarified for contractors.
   - History note for commit b4a7f73 and the drafts before commit b3eede4.
   - `config/` and `configs/` explicitly distinguished.
+  - Termination (§9.1): immediate for hosting, distribution of changes,
+    copying, AI training, key circumvention, and willful breach; 30 days
+    after a written notice to cure any other breach, with production use
+    continuing; a third notice within 12 months removes the cure right;
+    termination applies only to the breaching party.
   - Documentation moves under the KubeNeuron License, except `docs/adapters/`
     (Apache-2.0). §1.1 now refers to §4.1 for the Apache Components.
 - Added third-party license and NOTICE inventory (generated) and stale checks;

@@ -363,10 +363,23 @@ License are reserved.
 
 9. TERMINATION
 
-9.1 This License and all rights granted under it terminate automatically if
-    You breach it. If the breach is Your first breach and can be cured,
-    Your rights are reinstated if You cure it within 30 days after Licensor
-    notifies You of it.
+9.1 (a) This License and all rights granted under it terminate
+        automatically, without a cure period, if You (i) breach Section 3.1,
+        3.2, 3.3, 3.4, 3.6, or 14.2, (ii) willfully breach any other
+        provision, or (iii) are subject to Section 6.2.
+    (b) For any other breach, Licensor may notify You in writing,
+        identifying the breach and the provision breached. Your rights
+        terminate 30 days after the notice unless You cure the breach within
+        that period, in which case Your rights are reinstated as if no
+        termination had occurred. During the cure period You may continue
+        Internal Use in production.
+    (c) If Licensor has given You notice under (b) twice within any 12-month
+        period, any further breach during that period terminates Your rights
+        under (a), without a cure period.
+    (d) Termination applies only to You. It does not terminate the license
+        of any other person that received the Software in compliance with
+        this License, and it does not release You from liability for earlier
+        breach.
 
 9.2 On termination You must stop using the Software and all Modified
     Versions, and delete all copies in Your possession or control.
