@@ -96,6 +96,10 @@ image_contains() {
 }
 image_contains "$agent_image" /bin/nsenter ||
 	bad "$agent_image has no /bin/nsenter; the Reboot action will exit 127 on a real node"
+for path in busybox/LICENSE busybox/VERSION busybox/SOURCE busybox/OFFER SOURCES libgcc-s1/copyright; do
+    image_contains "$agent_image" "/licenses/native/$path" ||
+        bad "$agent_image lacks /licenses/native/$path"
+done
 image_contains "$agent_image" /usr/bin/dcgmi ||
 	bad "$agent_image has no /usr/bin/dcgmi; the agent's runtime attestation stays degraded"
 if out=$("$DOCKER_BIN" run --rm --entrypoint /usr/bin/dcgmi "$agent_image" --version 2>&1); then
@@ -104,6 +108,15 @@ if out=$("$DOCKER_BIN" run --rm --entrypoint /usr/bin/dcgmi "$agent_image" --ver
 else
 	bad "$agent_image has no working /usr/bin/dcgmi: $out"
 fi
+
+# Legal files must be present even in images without a shell.
+note "each image carries third-party legal files"
+for target in operator controller agent cli; do
+    image="kubeneuron-${target}:${TAG}"
+    for path in NOTICE THIRD_PARTY_LICENSES LICENSE; do
+        image_contains "$image" "/licenses/$path" || bad "$image lacks /licenses/$path"
+    done
+done
 
 # --- the user each image runs as ----------------------------------------------
 # The agent runs privileged with hostPID and must read /dev/kmsg, so it is

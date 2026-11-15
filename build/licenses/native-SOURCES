@@ -1,0 +1,13 @@
+Native third-party components remain under their respective licenses.
+
+BusyBox: see busybox/VERSION, busybox/SOURCE, busybox/LICENSE and busybox/OFFER.
+
+libgcc_s.so.1: Debian libgcc-s1 from the Debian 12 build stage.
+The Debian copyright and GCC runtime exception are in libgcc-s1/copyright.
+Debian GCC 12 source packages, including Debian build rules and patches:
+https://sources.debian.org/src/gcc-12/
+https://deb.debian.org/debian/pool/main/g/gcc-12/
+Source requests should identify the KubeNeuron image digest.
+
+DCGM: the package's supplied copyright/license files are retained alongside
+these files. Redistribution review is tracked separately before publication.

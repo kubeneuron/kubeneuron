@@ -25,6 +25,7 @@ GENERATE_LOCK := .make-generate.lock
 all: build
 
 build: $(BINARIES)
+	cp NOTICE THIRD_PARTY_LICENSES LICENSE $(BIN_DIR)/
 
 $(BINARIES): | $(BIN_DIR)
 	CGO_ENABLED=0 $(GO) build -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/$@ ./cmd/$@
@@ -146,7 +147,7 @@ verify-tls-scripts:
 mirror:
 	bash hack/mirror.sh
 
-lint:
+lint: verify-licenses
 	$(GO) vet ./...
 	python3 -I hack/verify-spdx.py
 	@for m in $(NESTED_MODULES); do (cd $$m && $(GO) vet ./... && $(GO) mod tidy -diff) || exit 1; done
@@ -391,3 +392,12 @@ docs-serve:
 
 clean:
 	rm -rf $(BIN_DIR)
+
+# Collector v1 is maintained in-tree; no network-installed tooling.
+.PHONY: licenses verify-licenses
+licenses:
+	GO=$(GO) python3 -I hack/third-party-licenses.py
+
+verify-licenses:
+	python3 -I hack/test_third_party_licenses.py
+	GO=$(GO) python3 -I hack/third-party-licenses.py --check

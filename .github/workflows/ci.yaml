@@ -46,6 +46,9 @@ jobs:
       - name: Verify generated code
         run: make verify-generate
 
+      - name: Third-party licenses are current
+        run: make verify-licenses
+
       - name: Build
         run: make build
 

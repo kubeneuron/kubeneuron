@@ -598,4 +598,6 @@ behavior.
 ## License
 
 KubeNeuron is open source under the Apache License, Version 2.0. See
-[LICENSE](LICENSE).
+[LICENSE](LICENSE) and [NOTICE](NOTICE); third-party components are listed in
+THIRD_PARTY_LICENSES. "KubeNeuron" and its logo are trademarks of Andrii Petruk;
+see [TRADEMARKS.md](TRADEMARKS.md).

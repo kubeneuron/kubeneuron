@@ -311,6 +311,9 @@ jobs:
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
               go build -trimpath -ldflags "-s -w -X main.version=${version}" \
               -o "dist/kubeneuronctl-${version}-${goos}-${goarch}" ./cmd/kubeneuronctl
+            bundle="kubeneuronctl-${version}-${goos}-${goarch}"
+            tar -czf "dist/${bundle}.tar.gz" -C dist "$bundle" -C "$GITHUB_WORKSPACE" NOTICE THIRD_PARTY_LICENSES LICENSE
+            rm "dist/$bundle"
           done
 
       - uses: actions/upload-artifact@v4

@@ -1,0 +1,21 @@
+Written offer for corresponding source under GNU GPL version 2, section 3(b)
+
+Andrii Petruk offers to provide any third party with a complete machine-readable
+copy of the corresponding source code for the BusyBox binary distributed in
+this KubeNeuron image, under the terms of GNU GPL version 2. This includes the
+scripts and configuration used to control compilation and installation, and
+source for covered linked components as required by that license.
+
+This offer is valid for at least three years after the last distribution by
+Andrii Petruk of a KubeNeuron image containing this binary. The charge, if any,
+will be no more than the cost of physically performing source distribution.
+
+To request the corresponding source, contact hello@kubeneuron.com and identify
+the KubeNeuron image digest and the BusyBox version recorded in VERSION.
+
+The GPL version 2 text is in LICENSE. Upstream source archives are at
+https://busybox.net/downloads/ ; SOURCE identifies the upstream tarball for the
+version shipped in this image. These links supplement this written offer;
+they do not replace the offer to provide the complete corresponding source.
+
+BusyBox and other third-party components remain under their own licenses.

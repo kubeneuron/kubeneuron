@@ -41,6 +41,7 @@ LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron"
       org.opencontainers.image.description="KubeNeuron operator" \
       org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /out/kubeneuron-operator /kubeneuron-operator
+COPY NOTICE THIRD_PARTY_LICENSES LICENSE /licenses/
 ENTRYPOINT ["/kubeneuron-operator"]
 
 FROM gcr.io/distroless/static-debian12:nonroot AS controller
@@ -48,6 +49,7 @@ LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron"
       org.opencontainers.image.description="KubeNeuron controller" \
       org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /out/kubeneuron-controller /kubeneuron-controller
+COPY NOTICE THIRD_PARTY_LICENSES LICENSE /licenses/
 ENTRYPOINT ["/kubeneuron-controller"]
 
 # The agent runs privileged with hostPID in the managed DaemonSet and must
@@ -59,6 +61,13 @@ ENTRYPOINT ["/kubeneuron-controller"]
 # the Reboot action failed with exit 127 on real hardware. busybox is static
 # (uclibc), so it needs no loader in an image that has none.
 FROM busybox:uclibc AS busybox
+# Record the version of the actual binary being shipped, for each architecture.
+RUN busybox --help > /busybox.help 2>&1 \
+ && head -n 1 /busybox.help > /busybox.VERSION \
+ && grep -Eq '^BusyBox v[0-9]+\.[0-9]+\.[0-9]+' /busybox.VERSION \
+ && version=$(sed -n 's/^BusyBox v\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' /busybox.VERSION) \
+ && printf 'Upstream source: https://busybox.net/downloads/busybox-%s.tar.bz2\nSee OFFER for corresponding source requests.\n' "$version" > /busybox.SOURCE \
+ && rm /busybox.help
 
 # The DCGM client. With the NVIDIA GPU Operator installed, dcgmi lives inside
 # NVIDIA's own container and is absent from the node, so mounting host binaries
@@ -97,16 +106,24 @@ RUN set -eux; \
     dpkg-deb -x /tmp/dcgm.deb /dcgm; \
     test -x /dcgm/usr/bin/dcgmi; \
     # distroless/base carries glibc but not libgcc_s, which dcgmi links against.
-    cp -a /lib/*-linux-gnu*/libgcc_s.so.1 /dcgm/usr/lib/
+    cp -a /lib/*-linux-gnu*/libgcc_s.so.1 /dcgm/usr/lib/; \
+    mkdir -p /dcgm/usr/share/doc/libgcc-s1; \
+    cp /usr/share/doc/libgcc-s1/copyright /dcgm/usr/share/doc/libgcc-s1/
 
 FROM gcr.io/distroless/base-debian12 AS agent
 LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron" \
       org.opencontainers.image.description="KubeNeuron node agent" \
       org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=busybox /bin/busybox /bin/nsenter
+COPY build/licenses/busybox/ /licenses/native/busybox/
+COPY --from=busybox /busybox.VERSION /licenses/native/busybox/VERSION
+COPY --from=busybox /busybox.SOURCE /licenses/native/busybox/SOURCE
+COPY build/licenses/native-SOURCES /licenses/native/SOURCES
 COPY --from=dcgm /dcgm/usr/bin/dcgmi /usr/bin/dcgmi
 COPY --from=dcgm /dcgm/usr/lib/ /usr/lib/
+COPY --from=dcgm /dcgm/usr/share/doc/ /licenses/native/
 COPY --from=build /out/kubeneuron-agent /kubeneuron-agent
+COPY NOTICE THIRD_PARTY_LICENSES LICENSE /licenses/
 ENTRYPOINT ["/kubeneuron-agent"]
 
 FROM gcr.io/distroless/static-debian12:nonroot AS cli
@@ -114,4 +131,5 @@ LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron"
       org.opencontainers.image.description="kubeneuronctl CLI" \
       org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /out/kubeneuronctl /kubeneuronctl
+COPY NOTICE THIRD_PARTY_LICENSES LICENSE /licenses/
 ENTRYPOINT ["/kubeneuronctl"]
