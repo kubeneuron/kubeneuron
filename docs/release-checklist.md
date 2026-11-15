@@ -60,6 +60,9 @@ tagging the release.
 
 ## 3. Tag and verify
 
+- [ ] The release commit is on `main`. LICENSE section 4 makes binding only
+      the license text in commits on the default branch, so do not tag a
+      release from a separate release branch.
 - [ ] Push the `vX.Y.Z` tag; the release workflow builds, signs, and
       publishes a draft, verifies it, and publishes it.
 - [ ] Run `bash hack/verify-release.sh vX.Y.Z kubeneuron/kubeneuron` against
