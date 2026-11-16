@@ -87,7 +87,9 @@ API is `v1alpha1`.
   identity and a guarded provider mutation contract. Missing or incomplete
   identity blocks execution; the controller no longer resolves a replacement
   target from the current node name at dispatch. Providers without the repair
-  evidence contract remain unavailable for these actions.
+  evidence contract remain unavailable for these actions. Eligibility is checked
+  again before step admission and after checkpoint coordination, before cloud
+  disruption. A refusal holds the current step instead of escalating.
 
 - **File playbooks can no longer restart or destroy a node without a human.**
   The controller now refuses, at start and on reload, a playbook step with

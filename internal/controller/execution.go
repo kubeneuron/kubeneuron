@@ -74,6 +74,12 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 		return nil
 	}
 	ctx, _ = c.pinSimulate(ctx, inc)
+	if !c.simulating(ctx, inc) {
+		if err := c.requireCloudRecovery(ctx, inc, step); err != nil {
+			c.log.Info("cloud recovery held before step admission", "incident", inc.ID, "reason", err.Error())
+			return nil
+		}
+	}
 	def, known := action.ByWire(step.Action)
 	switch reason, res := c.destructiveStepConfinement(ctx, inc, step); res {
 	case confinementOutOfScope:
@@ -226,6 +232,12 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 	output := ""
 	if result != nil {
 		output = result.Output
+	}
+	if errors.Is(err, errCloudRecoveryUnavailable) {
+		if holdErr := c.transition(ctx, inc, types.StateEvaluating, "system", step.Name, err.Error(), step.Params); holdErr != nil {
+			c.log.Error("cloud recovery hold transition failed", "incident", inc.ID, "err", holdErr)
+		}
+		return
 	}
 	if err != nil {
 		metrics.StepsExecuted.WithLabelValues("failed").Inc()
@@ -530,6 +542,12 @@ func (c *Controller) executePlatformStep(ctx context.Context, inc *types.Inciden
 	// in is told and given a bounded deadline, then drained or evicted exactly
 	// as before. On a disabled policy (the default) it is a single boolean.
 	c.coordinateCheckpoint(ctx, inc, step, op)
+	// Checkpoint coordination can wait long enough for native repair or a node
+	// replacement. Re-read evidence after that wait, before any disruption.
+	if err := c.requireCloudRecovery(ctx, inc, step); err != nil {
+		return nil, err
+	}
+
 	switch op {
 	case "cordon":
 		if err := c.cordonForIncident(ctx, inc, node, reason); err != nil {

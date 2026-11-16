@@ -4,7 +4,12 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
+	"github.com/kubeneuron/kubeneuron/internal/platform"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -21,5 +26,89 @@ func TestCloudEligibilityDoesNotAuthorizeMissingOrForeignPin(t *testing.T) {
 	v, err = c.cloudRecoveryEligibility(context.Background(), inc)
 	if err == nil || v.ReplaceAllowed || v.RecycleAllowed {
 		t.Fatalf("foreign pin: verdict=%+v err=%v", v, err)
+	}
+}
+
+type checkpointRepairPlatform struct {
+	checkpointPlatform
+	active bool
+}
+
+func (p *checkpointRepairPlatform) CloudNode(context.Context, string) (cloud.NodeRef, error) {
+	return cloud.NodeRef{}, nil
+}
+func (p *checkpointRepairPlatform) RecoveryEligibility(_ context.Context, pin cloud.NodeIdentity) (cloud.RecoveryEligibility, error) {
+	return cloud.RecoveryEligibility{Identity: pin, ReplaceAllowed: !p.active, Reason: "native repair became active"}, nil
+}
+func (p *checkpointRepairPlatform) ReplacePinnedNode(context.Context, cloud.NodeIdentity) error {
+	return nil
+}
+func (p *checkpointRepairPlatform) RecyclePinnedNode(context.Context, cloud.NodeIdentity) error {
+	return nil
+}
+
+func TestCloudRepairStartingDuringCheckpointPreventsDrain(t *testing.T) {
+	p := &checkpointRepairPlatform{}
+	p.workloads = []platform.Workload{optedIn("trainer", true)}
+	c, inc, clock := checkpointFixture(t, p, enabledPolicy())
+	inc.CloudIdentity = recycleTestPin()
+	inc.CloudIdentity.Node = inc.Target.Node
+	if err := c.requireCloudRecovery(context.Background(), inc, drainStep()); err != nil {
+		t.Fatal(err)
+	}
+	p.observe = func(w platform.Workload, pass int) checkpoint.Observation {
+		p.active = true
+		return stampedAck(w, fixtureIncidentID, clock.Now().Add(time.Minute))
+	}
+	_, err := c.executePlatformStep(context.Background(), inc, "drain", drainStep())
+	if !errors.Is(err, errCloudRecoveryUnavailable) {
+		t.Fatalf("wanted refusal after checkpoint, got %v", err)
+	}
+	for _, call := range p.Calls() {
+		if strings.HasPrefix(call, "drain ") {
+			t.Fatalf("drain executed after repair began: %v", p.Calls())
+		}
+	}
+	if !p.active {
+		t.Fatal("checkpoint observation did not run")
+	}
+}
+
+func TestCloudRefusalHoldsStepWithoutEscalation(t *testing.T) {
+	p := &checkpointRepairPlatform{active: true}
+	c, inc, _ := checkpointFixture(t, p, checkpoint.Policy{})
+	inc.CloudIdentity = recycleTestPin()
+	inc.CloudIdentity.Node = inc.Target.Node
+	inc.State = types.StateExecuting
+	if err := c.store.UpdateIncident(context.Background(), inc); err != nil {
+		t.Fatal(err)
+	}
+	book, index := inc.Playbook, inc.StepIndex
+	c.runStep(context.Background(), c.runtimeConfig(context.Background()).Engine, inc, drainStep())
+	got, err := c.store.GetIncident(context.Background(), inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != types.StateEvaluating || got.Playbook != book || got.StepIndex != index {
+		t.Fatalf("refusal changed ladder or advanced step: %+v", got)
+	}
+	for _, call := range p.Calls() {
+		if strings.HasPrefix(call, "drain ") {
+			t.Fatal("refusal reached drain")
+		}
+	}
+}
+
+func TestCloudRefusalPreventsStepAdmission(t *testing.T) {
+	p := &checkpointRepairPlatform{active: true}
+	c, inc, _ := checkpointFixture(t, p, checkpoint.Policy{})
+	inc.CloudIdentity = recycleTestPin()
+	inc.CloudIdentity.Node = inc.Target.Node
+	before := inc.State
+	if err := c.startStep(context.Background(), inc, drainStep(), "test"); err != nil {
+		t.Fatal(err)
+	}
+	if inc.State != before || len(p.Calls()) != 0 {
+		t.Fatalf("unavailable step admitted: state=%s calls=%v", inc.State, p.Calls())
 	}
 }

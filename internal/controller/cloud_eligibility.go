@@ -4,9 +4,11 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/kubeneuron/kubeneuron/internal/platform"
+	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -33,4 +35,27 @@ func (c *Controller) cloudRecoveryEligibility(ctx context.Context, inc *types.In
 		return v, nil
 	}
 	return guard.RecoveryEligibility(ctx, v.Identity)
+}
+
+// A refusal at the final boundary must hold the same step, never escalate.
+var errCloudRecoveryUnavailable = errors.New("cloud recovery unavailable")
+
+func (c *Controller) requireCloudRecovery(ctx context.Context, inc *types.Incident, step *playbook.Step) error {
+	switch step.Action {
+	case "platform.cordon", "platform.drain", "platform.evict_gpu_workload", "platform.recycle_node", "platform.replace_node":
+	default:
+		return nil // Observation and compensating cleanup must remain possible.
+	}
+	direct := step.Action == "platform.recycle_node" || step.Action == "platform.replace_node"
+	if !direct && inc.CloudIdentity == nil && !c.cloudRecoveryLadder(ctx, inc.Playbook) {
+		return nil
+	}
+	v, err := c.cloudRecoveryEligibility(ctx, inc)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %v", errCloudRecoveryUnavailable, v.Reason, err)
+	}
+	if !v.ReplaceAllowed || (step.Action == "platform.recycle_node" && !v.RecycleAllowed) {
+		return fmt.Errorf("%w: %s", errCloudRecoveryUnavailable, v.Reason)
+	}
+	return nil
 }
