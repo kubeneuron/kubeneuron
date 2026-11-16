@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
+	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"strings"
 	"testing"
@@ -105,9 +106,11 @@ func TestCloudRefusalPreventsStepAdmission(t *testing.T) {
 	inc.CloudIdentity = recycleTestPin()
 	inc.CloudIdentity.Node = inc.Target.Node
 	before := inc.State
+	beforeDeferrals := snapshotDeferrals()
 	if err := c.startStep(context.Background(), inc, drainStep(), "test"); err != nil {
 		t.Fatal(err)
 	}
+	assertDeferred(t, beforeDeferrals, metrics.DeferRecoveryUnavailable)
 	if inc.State != before || len(p.Calls()) != 0 {
 		t.Fatalf("unavailable step admitted: state=%s calls=%v", inc.State, p.Calls())
 	}

@@ -76,7 +76,11 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 	ctx, _ = c.pinSimulate(ctx, inc)
 	if !c.simulating(ctx, inc) {
 		if err := c.requireCloudRecovery(ctx, inc, step); err != nil {
-			c.log.Info("cloud recovery held before step admission", "incident", inc.ID, "reason", err.Error())
+			c.deferStep(inc, step, metrics.DeferRecoveryUnavailable)
+			key := fmt.Sprintf("cloud-admission-hold/%s/%s/%d/%s", inc.ID, step.Name, inc.StepIndex, err.Error())
+			if c.logOnce.first(key) {
+				c.log.Info("cloud recovery held before step admission", "incident", inc.ID, "step", step.Name, "reason", err.Error())
+			}
 			return nil
 		}
 	}

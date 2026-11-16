@@ -409,6 +409,9 @@ var (
 // be alerted on, and the value of this series is completeness — a missing
 // path makes it lie by omission.
 const (
+	// DeferRecoveryUnavailable: cloud identity, repair evidence or capability
+	// does not permit disruption, independently of authorization mode.
+	DeferRecoveryUnavailable = "recovery_unavailable"
 	// DeferNotIdle: an idle guard (agent.idle_check / agent.wait_idle) refused
 	// because the device was still in use, so the destructive rung it guards
 	// never ran. Counted only when the agent said so in
