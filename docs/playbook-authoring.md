@@ -453,18 +453,21 @@ approval does not lift them:
 
 Automatic mode is never enabled by default, by the installer or by a sample.
 To enable it, copy the commented example, fill in the pools, limits and your
-name, and keep the acknowledgement text as it is:
+name, and keep the acknowledgement text as it is. It belongs on a cloud ladder
+(cordon, drain and replacement through the cloud API):
 
 ```yaml
 apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
-metadata: { name: ecc-dbe }
+metadata: { name: fell-off-bus-cloud }
 spec:
   kubeNeuronRef: fleet
   priority: 10
-  match: { class: ecc-dbe }
-  playbookRef: drain-and-reset
-  mode: Approval            # state the mode explicitly
+  match: { class: fell-off-bus }
+  playbookRef: cloud-replace  # a cloud ladder: cordon, drain, replace through the cloud API
+  mode: Approval              # state the mode explicitly
+  # Automatic mode never runs node-level actions (GPU reset, reboot, driver
+  # operations); those always wait for a person.
   # mode: Automatic
   # automatic:
   #   nodeSelector: { node.kubernetes.io/instance-type: p4d.24xlarge }
@@ -480,6 +483,9 @@ spec:
   # replacement: { strategy: AddFirst }
   # recycle: { enabled: false }
 ```
+
+Automatic mode never runs node-level actions (GPU reset, reboot, driver
+operations); those always wait for a person.
 
 ## Authoring guidelines
 

@@ -7,6 +7,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -221,7 +222,10 @@ func TestAutomaticLimitsHoldTheStep(t *testing.T) {
 		c, st, _ := autoFixture(t, recoverymode.Automatic, settings, 8)
 		busy := openOn(t, c, "n1")
 		setNodePaused(t, st, "n1", true) // keeps the first recovery open
-		if err := c.appendAudit(context.Background(), mustIncident(t, st, busy), "policy:"+autoPolicy, "cordon", "running"); err != nil {
+		if err := st.AppendAudit(context.Background(), &types.AuditEntry{
+			IncidentID: busy, Time: time.Now(), FromState: types.StateEvaluating, ToState: types.StateExecuting,
+			Actor: "policy:" + autoPolicy, Action: "cordon", Result: "step-start: platform.cordon",
+		}); err != nil {
 			t.Fatal(err)
 		}
 		id := openOn(t, c, "n2")
@@ -559,5 +563,116 @@ func TestAutomaticNeverAuthorisesNodeLevelActions(t *testing.T) {
 	}
 	if got := mustIncident(t, st, id); got.State == types.StateExecuting {
 		t.Fatal("a policy actor started a node-level action")
+	}
+}
+
+// Two incidents ready in the same reconcile pass under maxConcurrentNodes: 1:
+// exactly one starts. startStep records the policy actor on the EXECUTING
+// transition before the walk reaches the next incident.
+func TestConcurrencyLimitHoldsWithinOneReconcilePass(t *testing.T) {
+	settings := autoSettings()
+	settings.MaxConcurrentNodes = 1
+	settings.MaxUnhealthyPercent = 100
+	c, st, _ := autoFixture(t, recoverymode.Automatic, settings, 8)
+	book := &playbook.Playbook{Name: "slow", Target: "node", Steps: []playbook.Step{
+		{Name: "drain", Action: "platform.drain", Approval: "required"},
+	}}
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{"slow": book}, []playbook.Policy{{
+		Name: autoPolicy, Class: types.ClassFellOffBus, Playbook: "slow", Mode: recoverymode.Automatic, Automatic: settings,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetEngine(engine)
+	ctx := context.Background()
+	for _, node := range []string{"n1", "n2"} {
+		if err := c.ingest(ctx, signal(types.ClassFellOffBus, node, "GPU-"+node)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Bring both to EVALUATING without letting either start, then one pass.
+	for i := 0; i < 5; i++ {
+		setNodePaused(t, st, "n1", true)
+		setNodePaused(t, st, "n2", true)
+		c.reconcile(ctx)
+	}
+	setNodePaused(t, st, "n1", false)
+	setNodePaused(t, st, "n2", false)
+	c.reconcile(ctx)
+	started := 0
+	incidents, err := st.ListIncidents(ctx, store.IncidentFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, inc := range incidents {
+		if authorised, _ := c.authorisedBy(ctx, inc.ID, "policy:"+autoPolicy, time.Time{}); authorised {
+			started++
+		}
+	}
+	if started != 1 {
+		t.Fatalf("%d incidents started under maxConcurrentNodes 1 in one pass, want exactly 1", started)
+	}
+	// The held one says why, once.
+	for _, inc := range incidents {
+		trail, _ := st.AuditTrail(ctx, inc.ID)
+		held := 0
+		for _, e := range trail {
+			if e.Action == "recovery-held" {
+				held++
+			}
+		}
+		if authorised, _ := c.authorisedBy(ctx, inc.ID, "policy:"+autoPolicy, time.Time{}); !authorised {
+			c.reconcile(ctx)
+			trail, _ = st.AuditTrail(ctx, inc.ID)
+			again := 0
+			for _, e := range trail {
+				if e.Action == "recovery-held" {
+					again++
+				}
+			}
+			if held != 1 || again != 1 {
+				t.Fatalf("recovery-held rows = %d then %d, want one row naming the limit, not one per tick", held, again)
+			}
+		}
+	}
+}
+
+type unreadablePlatform struct{ *recyclePlatform }
+
+func (*unreadablePlatform) NodeReady(context.Context, string) (bool, error) {
+	return false, errors.New("apiserver unavailable")
+}
+
+// The breaker never reads an unreadable pool as healthy.
+func TestUnreadableReadinessHoldsTheStep(t *testing.T) {
+	c, st, _ := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
+	c.platform = &unreadablePlatform{&recyclePlatform{configured: true}}
+	id := openOn(t, c, "n1")
+	inc := step(t, c, st, id, 20)
+	if inc.State != types.StateEvaluating || !strings.Contains(parkReason(t, st, id), "readiness of pool node") {
+		t.Fatalf("state=%s audit=%s, want the step held with the read error named", inc.State, parkReason(t, st, id))
+	}
+}
+
+// Only a policy-started step counts towards the limits; other rows by the
+// policy actor (the authorisation note, anything else) do not.
+func TestAuthorisedByCountsOnlyPolicyStartedSteps(t *testing.T) {
+	c, st, _ := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
+	id := openOn(t, c, "n1")
+	ctx := context.Background()
+	actor := "policy:" + autoPolicy
+	if err := st.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: time.Now(),
+		FromState: types.StateEvaluating, ToState: types.StateEvaluating, Actor: actor, Action: "note"}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := c.authorisedBy(ctx, id, actor, time.Time{}); ok {
+		t.Fatal("a non-transition row by the policy actor counted as a started step")
+	}
+	if err := st.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: time.Now(),
+		FromState: types.StateEvaluating, ToState: types.StateExecuting, Actor: actor, Action: "drain"}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := c.authorisedBy(ctx, id, actor, time.Time{}); !ok {
+		t.Fatal("a step started by the policy did not count")
 	}
 }

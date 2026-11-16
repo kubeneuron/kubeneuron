@@ -78,7 +78,7 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 	// live automatic policy its actor names (#31, #56): defence in depth for
 	// every path that reaches here.
 	if reason := c.stepUnavailable(ctx, inc, step); reason != "" {
-		c.deferStep(inc, step, metrics.DeferAutomaticLimit)
+		c.deferStep(inc, step, metrics.DeferRecoveryUnavailable)
 		c.logOnceStepUnavailable(inc, step, reason)
 		return nil
 	}

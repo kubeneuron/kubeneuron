@@ -126,7 +126,13 @@ func (c *Controller) authorizeByPolicy(ctx context.Context, inc *types.Incident,
 			if unhealthy[name] {
 				continue
 			}
-			if ready, err := readiness.NodeReady(ctx, name); err == nil && !ready {
+			ready, err := readiness.NodeReady(ctx, name)
+			if err != nil {
+				// An unreadable pool looks like a shared cause, which is
+				// exactly what the breaker exists for: never read it as healthy.
+				return policyHold, fmt.Sprintf("the readiness of pool node %s cannot be read (%v)", name, err)
+			}
+			if !ready {
 				unhealthy[name] = true
 			}
 		}
@@ -189,25 +195,23 @@ func (c *Controller) authorizeByPolicy(ctx context.Context, inc *types.Incident,
 
 // openIncidents lists the incidents automation is still working on.
 func (c *Controller) openIncidents(ctx context.Context) ([]*types.Incident, error) {
-	all, err := c.store.ListIncidents(ctx, store.IncidentFilter{States: []types.IncidentState{
+	return c.store.ListIncidents(ctx, store.IncidentFilter{States: []types.IncidentState{
 		types.StateOpen, types.StateObserving, types.StateEvaluating,
 		types.StateAwaitingApproval, types.StateExecuting, types.StateVerifying,
 	}})
-	if err != nil {
-		return nil, err
-	}
-	return all, nil
 }
 
-// authorisedBy reports whether a step of the incident ran under actor at or
-// after since.
+// authorisedBy reports whether a step of the incident was started under actor
+// at or after since: an entry into EXECUTING by that actor. Other rows the
+// policy writes (a held step, the authorisation note) do not count, or a held
+// incident would itself use up the limit that holds it.
 func (c *Controller) authorisedBy(ctx context.Context, incidentID, actor string, since time.Time) (bool, error) {
 	trail, err := c.store.AuditTrail(ctx, incidentID)
 	if err != nil {
 		return false, err
 	}
 	for _, e := range trail {
-		if e.Actor == actor && !e.Time.Before(since) {
+		if e.Actor == actor && e.ToState == types.StateExecuting && e.FromState != types.StateExecuting && !e.Time.Before(since) {
 			return true, nil
 		}
 	}
@@ -336,4 +340,17 @@ const nodeLevelAlphaReason = "node-level actions are alpha (not validated on rea
 func nodeLevelAction(step *playbook.Step) bool {
 	def, ok := action.ByWire(step.Action)
 	return ok && def.Kind == action.KindAgent && def.AgentDestructive
+}
+
+// logOnceStepHeld records why an automatic policy holds a step (a limit, the
+// cool-down, a pool that cannot be read): one log line and one audit row per
+// incident, step and reason, not one per tick.
+func (c *Controller) logOnceStepHeld(inc *types.Incident, step *playbook.Step, pol playbook.Policy, reason string) {
+	if !c.logOnce.first("step-held/" + inc.ID + "/" + step.Name + "/" + reason) {
+		return
+	}
+	c.log.Info("automatic policy holds the step", "incident", inc.ID, "policy", pol.Name, "step", step.Name, "reason", reason)
+	if err := c.appendAudit(context.Background(), inc, "system", "recovery-held", step.Name+" held by policy "+pol.Name+": "+reason); err != nil {
+		c.log.Error("recovery-held audit append failed", "incident", inc.ID, "err", err)
+	}
 }

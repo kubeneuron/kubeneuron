@@ -59,7 +59,10 @@ renaming them.
 (an idle guard found the device busy), `device_holders` (processes hold the GPU
 that KubeNeuron cannot release), `maintenance_window`, `node_paused` (a
 GPUNodeConfig pause), `global_pause` (the fleet-wide switch), `concurrency_cap`,
-`playbook_cooldown`, `unarmed_agent`, `confinement` (outside the declared
+`playbook_cooldown`, `automatic_limit` (an automatic policy's concurrency
+limit, cool-down or unreadable pool holds the step), `recovery_unavailable`
+(the policy's replacement strategy or recycle setting does not allow the step,
+in any mode), `unarmed_agent`, `confinement` (outside the declared
 destructiveExecution blast radius), `recycle_not_viable`,
 `accelerator_evidence` (a reset held for missing or stale runtime evidence),
 `checkpoint_wait` (a drain or GPU-workload eviction really paused for

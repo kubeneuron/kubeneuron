@@ -24,7 +24,7 @@ func (c *Controller) authorizeAndStartStep(ctx context.Context, inc *types.Incid
 		return c.resumeAwaitingApproval(ctx, inc)
 	}
 	if reason := c.stepUnavailable(ctx, inc, step); reason != "" {
-		c.deferStep(inc, step, metrics.DeferAutomaticLimit)
+		c.deferStep(inc, step, metrics.DeferRecoveryUnavailable)
 		c.logOnceStepUnavailable(inc, step, reason)
 		return nil
 	}
@@ -48,7 +48,7 @@ func (c *Controller) authorizeAndStartStep(ctx context.Context, inc *types.Incid
 			return nil
 		case policyHold:
 			c.deferStep(inc, step, metrics.DeferAutomaticLimit)
-			c.log.Info("automatic policy holds the step", "incident", inc.ID, "policy", pol.Name, "step", step.Name, "reason", reason)
+			c.logOnceStepHeld(inc, step, pol, reason)
 			return nil
 		default:
 			return c.parkForApproval(ctx, inc, step,
