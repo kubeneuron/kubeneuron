@@ -20,12 +20,14 @@ API is `v1alpha1`.
 
 ### Security
 
-- **No GPL or LGPL component in the agent image.** The agent's `nsenter`
-  (the one host tool it needs, to reach the host's init through PID 1's
-  namespaces) is now toybox's (0BSD), built in `build/Dockerfile` from a
-  checksum-pinned source as a single static binary against musl (MIT),
-  natively for amd64 and arm64. BusyBox and uClibc-ng are gone from the image,
-  and with them the per-release BusyBox source archive. `make verify-image`
+- **The agent image no longer ships BusyBox.** Its `nsenter` helper is
+  toybox (0BSD), statically linked against musl (MIT). The Debian base image
+  still provides glibc (LGPL) as before. `nsenter` (the one host tool the
+  agent needs, to reach the host's init through PID 1's namespaces) is built
+  in `build/Dockerfile` from a checksum-pinned source as a single static
+  binary, natively for amd64 and arm64; the per-release BusyBox source archive
+  is gone with it, and the agent image's licence label reads
+  `Apache-2.0 AND 0BSD AND MIT`. `make verify-image`
   fails on any BusyBox or uClibc file and runs the real
   `nsenter -t 1 -m -u -i -n -p --` in the built image. The source archives of
   the BusyBox-based releases up to v0.8.0 stay retained (release checklist).

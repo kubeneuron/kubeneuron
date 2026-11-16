@@ -54,10 +54,11 @@ ENTRYPOINT ["/kubeneuron-controller"]
 # node means asking the host's init, and the host's init is only reachable
 # through PID 1's namespaces — a distroless image has no way to get there.
 #
-# nsenter is toybox's (0BSD), built here from a checksum-pinned source as a
-# single static binary against musl (MIT), so the image carries no GPL or
-# LGPL component and needs no loader for it. The stage runs on the target
-# platform, so each architecture compiles natively.
+# The agent image no longer ships BusyBox. Its nsenter helper is toybox
+# (0BSD), statically linked against musl (MIT). The Debian base image still
+# provides glibc (LGPL) as before. nsenter is built here from a checksum-pinned
+# source as a single static binary, so it needs no loader; the stage runs on
+# the target platform, so each architecture compiles natively.
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS nsenter
 ARG TOYBOX_VERSION=0.8.13
 ARG TOYBOX_SHA256=9d4c124d7d731a2db399f6278baa2b42c2e3511f610c6ad30cc3f1a52581334b
@@ -90,7 +91,7 @@ RUN cd "toybox-${TOYBOX_VERSION}" \
 FROM gcr.io/distroless/base-debian12 AS agent
 LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron" \
       org.opencontainers.image.description="KubeNeuron node agent" \
-      org.opencontainers.image.licenses="Apache-2.0"
+      org.opencontainers.image.licenses="Apache-2.0 AND 0BSD AND MIT"
 COPY --from=nsenter /out/nsenter /bin/nsenter
 COPY --from=nsenter /out/licenses/ /licenses/native/
 COPY build/licenses/native-SOURCES /licenses/native/SOURCES

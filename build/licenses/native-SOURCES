@@ -5,3 +5,4 @@ It is built from the checksum-pinned source named in toybox/SOURCE as one
 static binary.
 musl (MIT), statically linked into nsenter: see musl/VERSION, musl/SOURCE and
 musl/COPYRIGHT.
+Compiler support code (libgcc), if linked: GPL-3.0-or-later WITH GCC-exception-3.1.

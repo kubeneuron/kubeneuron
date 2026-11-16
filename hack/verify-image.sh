@@ -100,6 +100,19 @@ for path in toybox/LICENSE toybox/VERSION toybox/SOURCE musl/COPYRIGHT musl/VERS
     image_contains "$agent_image" "/licenses/native/$path" ||
         bad "$agent_image lacks /licenses/native/$path"
 done
+# The licence texts must be the real ones, not empty files from a wrong path.
+license_starts_with() {
+	local image=$1 path=$2 want=$3 cid got
+	cid=$("$DOCKER_BIN" create "$image") || return 1
+	got=$("$DOCKER_BIN" cp "$cid:$path" - 2>/dev/null | tar -xOf - 2>/dev/null | head -n 1) || true
+	"$DOCKER_BIN" rm -f "$cid" >/dev/null 2>&1 || true
+	[[ -n $got && $got == *"$want"* ]]
+}
+license_starts_with "$agent_image" /licenses/native/toybox/LICENSE "by Rob Landley" ||
+	bad "$agent_image /licenses/native/toybox/LICENSE is empty or not the toybox licence"
+license_starts_with "$agent_image" /licenses/native/musl/COPYRIGHT "musl as a whole is licensed under the following standard MIT license" ||
+	bad "$agent_image /licenses/native/musl/COPYRIGHT is empty or not the musl copyright"
+
 # nsenter must actually enter PID 1's namespaces with the exact flags the
 # agent uses (internal/agent/executor), not merely be present.
 note "the agent's nsenter enters PID 1's namespaces"
@@ -118,7 +131,7 @@ elif ! tar -tf "$listing.tar" >"$listing"; then
 elif grep -Eq '(^|/)(dcgmi|libdcgm[^/]*|libgcc_s[^/]*|datacenter-gpu-manager[^/]*|libgcc-s1|dcgm)(/|$)' "$listing"; then
     bad "$agent_image contains excluded DCGM/libgcc components or legal files"
 elif grep -Eiq '(^|/)([^/]*busybox[^/]*|[^/]*uclibc[^/]*|OFFER)(/|$)' "$listing"; then
-    bad "$agent_image contains BusyBox/uClibc components or their GPL/LGPL legal files"
+    bad "$agent_image contains BusyBox/uClibc components or their legal files"
 fi
 rm -f "$listing" "$listing.tar"
 "$DOCKER_BIN" rm -f "$cid" >/dev/null
@@ -157,6 +170,7 @@ for target in operator controller agent cli; do
 	lic=$("$DOCKER_BIN" inspect --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}' "$image")
 	[[ $src == https://github.com/* ]] || bad "$image has no OCI source label (got '${src}')"
 	want_lic="Apache-2.0"
+	[[ $target == agent ]] && want_lic="Apache-2.0 AND 0BSD AND MIT"
 	[[ $lic == "$want_lic" ]] || bad "$image licence label is '${lic}', want '${want_lic}'"
 done
 
