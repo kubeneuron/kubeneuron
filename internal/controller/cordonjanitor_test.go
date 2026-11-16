@@ -899,3 +899,72 @@ func TestSupersededCordonOwnerSurvivesNewIncidentCompletion(t *testing.T) {
 		t.Fatalf("new completion released previous hold: owners=%v uncordoned=%v", p.owners, p.uncordoned)
 	}
 }
+
+func TestVanishedCloudNodeRequiresRecoveryEvidence(t *testing.T) {
+	for _, wire := range []string{"platform.recycle_node", "platform.replace_node"} {
+		for _, history := range []string{"", auditStepStartResult(wire), auditExecutingResult(wire), auditStepOutcomeResult(wire, false, true), auditStepOutcomeResult(wire, false, false)} {
+			t.Run(fmt.Sprintf("%s/history=%v", wire, history), func(t *testing.T) {
+				c, st := stackTestController(t, &janitorPlatform{})
+				ctx := context.Background()
+				book := &playbook.Playbook{Name: "cloud", Steps: []playbook.Step{{Name: "repair", Action: wire}}}
+				if history != "" {
+					book.Steps = []playbook.Step{{Name: "observe", Action: "notify.observe"}}
+				}
+				engine, err := playbook.NewEngine(map[string]*playbook.Playbook{"cloud": book}, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c.SetEngine(engine)
+				inc := &types.Incident{ID: "cloud-gone", Playbook: "cloud", Target: types.Target{Node: "deleted"}, State: types.StateVerifying}
+				if err := st.CreateIncident(ctx, inc); err != nil {
+					t.Fatal(err)
+				}
+				if history != "" {
+					if err := st.AppendAudit(ctx, &types.AuditEntry{IncidentID: inc.ID, Action: "repair", Result: history}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				c.resolveIncidentsOnVanishedNodes(ctx)
+				got, err := st.GetIncident(ctx, inc.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.State != types.StateVerifying {
+					t.Fatalf("state=%s, want pending verification", got.State)
+				}
+			})
+		}
+	}
+}
+
+type unavailableRecoveryAuditStore struct{ store.Store }
+
+func (s unavailableRecoveryAuditStore) AuditTrail(context.Context, string) ([]*types.AuditEntry, error) {
+	return nil, errors.New("audit unavailable")
+}
+
+func TestVanishedNodeCannotResolveWithMissingRecoveryHistory(t *testing.T) {
+	for _, missing := range []string{"playbook", "audit"} {
+		t.Run(missing, func(t *testing.T) {
+			c, st := stackTestController(t, &janitorPlatform{})
+			ctx := context.Background()
+			inc := &types.Incident{ID: "missing-history", Target: types.Target{Node: "deleted"}, State: types.StateVerifying}
+			if missing == "playbook" {
+				inc.Playbook = "removed-cloud-pack"
+			} else {
+				c.store = unavailableRecoveryAuditStore{Store: st}
+			}
+			if err := st.CreateIncident(ctx, inc); err != nil {
+				t.Fatal(err)
+			}
+			c.resolveIncidentsOnVanishedNodes(ctx)
+			got, err := st.GetIncident(ctx, inc.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.State != types.StateVerifying {
+				t.Fatalf("state=%s, want pending verification", got.State)
+			}
+		})
+	}
+}

@@ -178,15 +178,9 @@ func (c *Controller) markCordonHeld(ctx context.Context, janitor platform.Cordon
 	}
 }
 
-// resolveIncidentsOnVanishedNodes closes incidents whose node no longer exists.
-//
-// A node autoscaler can replace a node mid-playbook. The cordon now carries
-// karpenter.sh/do-not-disrupt so that is far less likely, but a node can still
-// go away — a spot reclaim, a manual delete, a node group roll — and the
-// incident left behind targets hardware that no longer exists. It can never
-// progress: its agent is gone, and its evidence is bound to a node UID nothing
-// will ever match again. Closing it with that stated is the honest end;
-// leaving it to age out as an approval timeout says nothing true.
+// resolveIncidentsOnVanishedNodes closes non-cloud incidents whose node no
+// longer exists. Cloud recovery must instead verify the replacement: losing
+// the old node alone says nothing about restored accelerator capacity.
 func (c *Controller) resolveIncidentsOnVanishedNodes(ctx context.Context) {
 	presence, ok := c.platform.(platform.NodePresence)
 	if !ok {
@@ -225,6 +219,12 @@ func (c *Controller) resolveIncidentsOnVanishedNodes(ctx context.Context) {
 			continue
 		}
 		if exists {
+			continue
+		}
+		if pending, err := c.cloudRecoveryNeedsConfirmation(ctx, inc); err != nil || pending {
+			// Deletion is not proof of a ready replacement. Leave the incident
+			// to recovery verification, including when history cannot be read.
+			c.log.Info("node disappeared; awaiting cloud recovery confirmation", "incident", inc.ID, "err", err)
 			continue
 		}
 		message := fmt.Sprintf("node %s no longer exists; the incident cannot be remediated and is closed as replaced", inc.Target.Node)
@@ -357,4 +357,45 @@ func (c *Controller) forgetCordonReported(node, incidentID string) {
 	c.cordonReported.mu.Lock()
 	defer c.cordonReported.mu.Unlock()
 	delete(c.cordonReported.seen, node+"/"+incidentID)
+}
+
+// cloudRecoveryNeedsConfirmation prevents janitor cleanup from standing in for
+// recovery verification. A durable start is enough to require confirmation:
+// a controller crash may leave the cloud request's outcome unknown. Historical
+// audit records keep this protection when a playbook is changed or removed.
+func (c *Controller) cloudRecoveryNeedsConfirmation(ctx context.Context, inc *types.Incident) (bool, error) {
+	if inc.Playbook != "" {
+		engine := c.runtimeConfig(ctx).Engine
+		if engine == nil {
+			return true, nil
+		}
+		book, ok := engine.Playbook(inc.Playbook)
+		if !ok {
+			return true, nil
+		}
+		for _, step := range book.Steps {
+			if cloudRecoveryAction(step.Action) {
+				return true, nil
+			}
+		}
+	}
+	trail, err := c.store.AuditTrail(ctx, inc.ID)
+	if err != nil {
+		return true, err
+	}
+	for _, entry := range trail {
+		for _, wire := range []string{"platform.recycle_node", "platform.replace_node"} {
+			if entry.Result == auditStepStartResult(wire) ||
+				entry.Result == auditExecutingResult(wire) ||
+				entry.Result == auditStepOutcomeResult(wire, false, true) ||
+				entry.Result == auditStepOutcomeResult(wire, false, false) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func cloudRecoveryAction(wire string) bool {
+	return wire == "platform.recycle_node" || wire == "platform.replace_node"
 }

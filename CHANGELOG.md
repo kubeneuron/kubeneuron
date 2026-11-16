@@ -15,6 +15,9 @@ API is `v1alpha1`.
   source non-blocking, so cancelling the watcher wakes a reader parked on an
   empty FIFO on darwin as it already did on Linux; the FIFO test now passes
   on both.
+- Cloud recovery incidents are no longer resolved merely because the old node
+  disappears. Cleanup preserves pending verification across playbook reloads
+  using durable cloud-step history, and holds when that history is unavailable.
 
 - Installer uninstall retains SQLite state and audit history by default, waits
   for operator acknowledgment, and permits reuse on reinstall. Deleting state
