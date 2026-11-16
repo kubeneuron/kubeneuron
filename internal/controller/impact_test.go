@@ -191,7 +191,7 @@ func TestApprovalBindsToTheImpactDigestWhenRequired(t *testing.T) {
 	if err := c.DecideApproval(ctx, inc.ID, "alice", "cli", types.ApprovalApproved, fresh.ApprovalEpoch, "", again.Digest); err != nil {
 		t.Fatalf("approve with the current digest: %v", err)
 	}
-	decision, err := c.store.LatestApprovalDecision(ctx, inc.ID, fresh.ApprovalEpoch)
+	decision, err := c.store.FirstApprovalDecision(ctx, inc.ID, fresh.ApprovalEpoch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestApprovalWithoutRequirementRecordsWhatWasSeen(t *testing.T) {
 	if err := c.DecideApproval(ctx, inc.ID, "alice", "cli", types.ApprovalApproved, fresh.ApprovalEpoch, "", rec.Digest); err != nil {
 		t.Fatal(err)
 	}
-	decision, _ := c.store.LatestApprovalDecision(ctx, inc.ID, fresh.ApprovalEpoch)
+	decision, _ := c.store.FirstApprovalDecision(ctx, inc.ID, fresh.ApprovalEpoch)
 	if decision.ImpactDigest != rec.Digest {
 		t.Fatalf("recorded digest = %q", decision.ImpactDigest)
 	}
@@ -264,7 +264,7 @@ func TestImpactPreviewOffIsSilent(t *testing.T) {
 	if err := c.DecideApproval(ctx, inc.ID, "alice", "cli", types.ApprovalApproved, fresh.ApprovalEpoch, "", "sha256:ignored"); err != nil {
 		t.Fatal(err)
 	}
-	decision, _ := c.store.LatestApprovalDecision(ctx, inc.ID, fresh.ApprovalEpoch)
+	decision, _ := c.store.FirstApprovalDecision(ctx, inc.ID, fresh.ApprovalEpoch)
 	if decision.ImpactDigest != "" {
 		t.Fatalf("recorded digest = %q, want none when the preview is off", decision.ImpactDigest)
 	}

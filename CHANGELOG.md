@@ -20,6 +20,15 @@ API is `v1alpha1`.
 
 ### Security
 
+- **Pause and approval decisions now hold in every case.** An approved step
+  no longer starts while its node is paused: the pause is checked before every
+  step, including one resumed from approval, and the approval stays recorded
+  until the pause is lifted. If the pause state cannot be read, the incident
+  holds instead of running. The first decision of an approval round is final:
+  a second approve or reject is refused with `409`, and a later approve can
+  never override a reject. A request older than the approval TTL can no longer
+  be decided, and a decision recorded after the expiry is ignored.
+
 - **File playbooks can no longer restart or destroy a node without a human.**
   The controller now refuses, at start and on reload, a playbook step with
   `agent.reboot`, `platform.recycle_node` or `platform.replace_node` that does

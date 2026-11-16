@@ -106,7 +106,7 @@ func TestReParkOrphansThePreviousRoundsDecision(t *testing.T) {
 		t.Fatalf("after mismatch: state=%s epoch=%d, want a re-park into epoch 2", inc.State, inc.ApprovalEpoch)
 	}
 	// Round 1's approval must be invisible to round 2.
-	if _, err := st.LatestApprovalDecision(ctx, id, inc.ApprovalEpoch); !errors.Is(err, store.ErrNotFound) {
+	if _, err := st.FirstApprovalDecision(ctx, id, inc.ApprovalEpoch); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("round 2 decision lookup = %v, want ErrNotFound — the stale approval is orphaned", err)
 	}
 	// And the walk must NOT execute anything on further passes.
@@ -122,7 +122,7 @@ func TestReParkOrphansThePreviousRoundsDecision(t *testing.T) {
 	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0, "", ""); err != nil {
 		t.Fatal(err)
 	}
-	decision, err := st.LatestApprovalDecision(ctx, id, 2)
+	decision, err := st.FirstApprovalDecision(ctx, id, 2)
 	if err != nil || decision.StepAction != "platform.replace_node" {
 		t.Fatalf("round-2 decision = %+v, %v; want it bound to the round-2 request", decision, err)
 	}
@@ -228,7 +228,7 @@ func TestDecisionPinnedToDisplayedRoundRefusedAfterRePark(t *testing.T) {
 	if err := c.DecideApproval(ctx, id, "bob", "slack", types.ApprovalApproved, 1, "", ""); err == nil {
 		t.Fatal("a round-1 click after the re-park into round 2 must be refused")
 	}
-	if _, err := st.LatestApprovalDecision(ctx, id, 2); !errors.Is(err, store.ErrNotFound) {
+	if _, err := st.FirstApprovalDecision(ctx, id, 2); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("round 2 must have no decision after the refused stale click, got err=%v", err)
 	}
 	// A fresh read shows round 2; deciding it (pinned or legacy-unpinned)
@@ -236,7 +236,7 @@ func TestDecisionPinnedToDisplayedRoundRefusedAfterRePark(t *testing.T) {
 	if err := c.DecideApproval(ctx, id, "bob", "slack", types.ApprovalApproved, 2, "", ""); err != nil {
 		t.Fatalf("decision pinned to the fresh round refused: %v", err)
 	}
-	decision, err := st.LatestApprovalDecision(ctx, id, 2)
+	decision, err := st.FirstApprovalDecision(ctx, id, 2)
 	if err != nil || decision.StepAction != "platform.replace_node" {
 		t.Fatalf("round-2 decision = %+v, %v; want it bound to round 2's request", decision, err)
 	}

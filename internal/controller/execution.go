@@ -65,6 +65,14 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 	// and allowed. Deciding the mode once, above both reads, closes the half of
 	// that window this function owns: a step cannot be waved through as a
 	// simulation and then executed for real by the same call.
+	// The per-node pause holds before EVERY step, whatever path reached here:
+	// the evaluating walk checks it too, but an approved step resumed from
+	// AWAITING_APPROVAL did not. Holding keeps the approval recorded; the
+	// step starts on the first tick after the pause is lifted.
+	if c.pauseHolds(ctx, inc) {
+		c.deferStep(inc, step, metrics.DeferNodePaused)
+		return nil
+	}
 	ctx, _ = c.pinSimulate(ctx, inc)
 	def, known := action.ByWire(step.Action)
 	switch reason, res := c.destructiveStepConfinement(ctx, inc, step); res {

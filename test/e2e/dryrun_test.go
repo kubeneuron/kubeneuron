@@ -220,12 +220,15 @@ func (h *harness) waitForIncident(node string, want types.IncidentState) *types.
 				// One decision per observed approval round. The list can lag a
 				// decision already made (by the test itself or by an earlier
 				// pass), so a 409 "not awaiting approval" means the round was
-				// decided and the incident moved on: keep polling.
+				// decided and the incident moved on, and "already decided" means
+				// it was decided and the walk has not resumed it yet: either way,
+				// keep polling.
 				if round, seen := approved[inc.ID]; !seen || round != inc.ApprovalEpoch {
 					approved[inc.ID] = inc.ApprovalEpoch
 					status, body := h.post(h.public.URL, "/api/v1/incidents/"+inc.ID+"/approve",
 						map[string]string{"actor": "e2e-operator"})
-					decided := status == http.StatusConflict && strings.Contains(body, "not awaiting approval")
+					decided := status == http.StatusConflict &&
+						(strings.Contains(body, "not awaiting approval") || strings.Contains(body, "already decided"))
 					if status != http.StatusNoContent && !decided {
 						h.t.Fatalf("approve %s round %d: status %d: %s", inc.ID, inc.ApprovalEpoch, status, body)
 					}

@@ -884,13 +884,15 @@ func (q *Queries) GetApprovalRequest(ctx context.Context, incidentID string, epo
 	return scanApproval(row)
 }
 
-// LatestApprovalDecision returns the newest human decision belonging to one
-// approval round, or ErrNotFound while the round is undecided. A decision
-// recorded for an earlier epoch is invisible here by construction — that is
-// the whole point: a re-park mints a new epoch and orphans stale decisions.
-func (q *Queries) LatestApprovalDecision(ctx context.Context, incidentID string, epoch int) (*types.Approval, error) {
+// FirstApprovalDecision returns the first human decision belonging to one
+// approval round, or ErrNotFound while the round is undecided. The first
+// decision of a round is final: a later row (two clicks racing past the
+// Decide check) never overrides it, so a reject cannot be turned into an
+// approve. A decision recorded for an earlier epoch is invisible here by
+// construction — a re-park mints a new epoch and orphans stale decisions.
+func (q *Queries) FirstApprovalDecision(ctx context.Context, incidentID string, epoch int) (*types.Approval, error) {
 	row := q.db.QueryRowContext(ctx,
-		approvalRoundSelect+` AND decision<>? ORDER BY id DESC LIMIT 1`,
+		approvalRoundSelect+` AND decision<>? ORDER BY id ASC LIMIT 1`,
 		incidentID, epoch, string(types.ApprovalRequested))
 	return scanApproval(row)
 }

@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -226,6 +227,24 @@ func (c *Controller) nodePaused(ctx context.Context, name string) (bool, error) 
 		return false, err
 	}
 	return n.Paused, nil
+}
+
+// pauseHolds reports whether the incident's node must not advance: it is
+// paused, or its pause state cannot be read. The second is deliberate — a
+// store error is not evidence that the operator's pause was lifted, so the
+// walk holds and retries on the next tick (fail closed). A node that is not
+// in the inventory at all has no pause to honor.
+func (c *Controller) pauseHolds(ctx context.Context, inc *types.Incident) bool {
+	paused, err := c.nodePaused(ctx, inc.Target.Node)
+	if errors.Is(err, store.ErrNotFound) {
+		return false
+	}
+	if err != nil {
+		c.log.Warn("cannot read the node's pause state; holding the incident",
+			"incident", inc.ID, "node", inc.Target.Node, "err", err)
+		return true
+	}
+	return paused
 }
 
 // nodeFor loads inventory for actuation, falling back to a name-only node

@@ -101,7 +101,7 @@ func TestApprovalRecordsImpactDigestSQLite(t *testing.T) {
 	if request.ImpactDigest != "" {
 		t.Fatalf("request digest = %q, want empty", request.ImpactDigest)
 	}
-	decision, err := s.LatestApprovalDecision(ctx, "inc-digest", 1)
+	decision, err := s.FirstApprovalDecision(ctx, "inc-digest", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestMigrateImpactPreviewsFromPreviousHead(t *testing.T) {
 		t.Fatalf("opening v23 database: %v", err)
 	}
 	defer func() { _ = s.Close() }()
-	decision, err := s.LatestApprovalDecision(context.Background(), "inc-v23", 1)
+	decision, err := s.FirstApprovalDecision(context.Background(), "inc-v23", 1)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,6 +7,7 @@ package approval
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -46,6 +47,11 @@ type StepIdentity struct {
 // Decide records a decision for an incident's pending step. The caller
 // (HTTP API) has already authenticated the actor and resolved the identity of
 // the step being approved.
+//
+// A round takes one decision: once it is decided, a second approve or reject
+// is refused rather than recorded, so a reject can never be overridden by a
+// later approve. A request older than the TTL is refused too — it is expired
+// even if the reconcile walk has not moved it to EXPIRED yet.
 func (m *Manager) Decide(ctx context.Context, incidentID string, step StepIdentity, actor, channel string, decision types.ApprovalDecision) error {
 	inc, err := m.store.GetIncident(ctx, incidentID)
 	if err != nil {
@@ -54,13 +60,25 @@ func (m *Manager) Decide(ctx context.Context, incidentID string, step StepIdenti
 	if inc.State != types.StateAwaitingApproval {
 		return fmt.Errorf("incident %s is in state %s, not awaiting approval", incidentID, inc.State)
 	}
+	now := time.Now()
+	if m.expiredAt(inc, now) {
+		return fmt.Errorf("the approval request for %s expired (older than %s); it is not awaiting approval any more", incidentID, m.ttl)
+	}
+	prior, err := m.store.FirstApprovalDecision(ctx, incidentID, step.ParkEpoch)
+	switch {
+	case err == nil:
+		return fmt.Errorf("approval round %d of %s is already decided (%s by %s); the first decision is final",
+			step.ParkEpoch, incidentID, prior.Decision, prior.Actor)
+	case !errors.Is(err, store.ErrNotFound):
+		return err
+	}
 	return m.store.RecordApproval(ctx, &types.Approval{
 		IncidentID:   incidentID,
 		StepName:     step.StepName,
 		Decision:     decision,
 		Actor:        actor,
 		Channel:      channel,
-		At:           time.Now(),
+		At:           now,
 		PlaybookName: step.PlaybookName,
 		StepAction:   step.StepAction,
 		StepHash:     step.StepHash,
@@ -75,5 +93,16 @@ func (m *Manager) Decide(ctx context.Context, incidentID string, step StepIdenti
 // AWAITING_APPROVAL — not UpdatedAt, which every attached duplicate signal
 // bumps and which would let a signal storm postpone expiry indefinitely.
 func (m *Manager) Expired(inc *types.Incident) bool {
-	return inc.State == types.StateAwaitingApproval && time.Since(inc.StateChangedAt) > m.ttl
+	return m.expiredAt(inc, time.Now())
+}
+
+func (m *Manager) expiredAt(inc *types.Incident, now time.Time) bool {
+	return inc.State == types.StateAwaitingApproval && m.ttl > 0 && now.Sub(inc.StateChangedAt) > m.ttl
+}
+
+// DecidedInTime reports whether a decision was made while its request was
+// still live: at or before StateChangedAt + ttl. A decision recorded after
+// that (a click racing the expiry) must not be honored.
+func DecidedInTime(inc *types.Incident, decision *types.Approval, ttl time.Duration) bool {
+	return ttl <= 0 || !decision.At.After(inc.StateChangedAt.Add(ttl))
 }

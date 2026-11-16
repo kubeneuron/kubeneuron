@@ -56,7 +56,7 @@ func TestImpactPreviewsAreDurablePerRound(t *testing.T) {
 	if err := s.RecordApproval(ctx, &types.Approval{IncidentID: "inc-impact", StepName: "reboot", Decision: types.ApprovalApproved, Actor: "alice", Channel: "api", At: now, ParkEpoch: 1, ImpactDigest: "sha256:b"}); err != nil {
 		t.Fatal(err)
 	}
-	decision, err := s.LatestApprovalDecision(ctx, "inc-impact", 1)
+	decision, err := s.FirstApprovalDecision(ctx, "inc-impact", 1)
 	if err != nil {
 		t.Fatal(err)
 	}

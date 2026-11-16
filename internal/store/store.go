@@ -157,17 +157,18 @@ type Store interface {
 	//
 	// Deprecated for protocol decisions: it ignores approval rounds, which is
 	// exactly the bug class the round-scoped queries below retired. Use
-	// GetApprovalRequest/LatestApprovalDecision with the incident's
+	// GetApprovalRequest/FirstApprovalDecision with the incident's
 	// ApprovalEpoch; this remains only as a raw inspection read (tests, UI).
 	LatestApproval(ctx context.Context, incidentID string) (*types.Approval, error)
 	// GetApprovalRequest returns the "requested" record of one approval round
 	// (park epoch) — what the human was asked. ErrNotFound: no record; a
 	// decision must not be honored for such a round.
 	GetApprovalRequest(ctx context.Context, incidentID string, epoch int) (*types.Approval, error)
-	// LatestApprovalDecision returns the newest human decision of one round,
-	// or ErrNotFound while the round is undecided. Decisions of earlier
+	// FirstApprovalDecision returns the first human decision of one round,
+	// or ErrNotFound while the round is undecided. The first decision is
+	// final; later rows of the same round are ignored. Decisions of earlier
 	// epochs are invisible by construction.
-	LatestApprovalDecision(ctx context.Context, incidentID string, epoch int) (*types.Approval, error)
+	FirstApprovalDecision(ctx context.Context, incidentID string, epoch int) (*types.Approval, error)
 
 	// Action queue (controller -> agent dispatch). EnqueueAction is
 	// idempotent on Action.ID; the owning incident is Action.IncidentID

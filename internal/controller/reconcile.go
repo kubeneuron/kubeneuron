@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/approval"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
@@ -217,7 +218,7 @@ func (c *Controller) advanceObserving(ctx context.Context, inc *types.Incident) 
 // advanceEvaluating picks the next step and either parks the incident for
 // approval or reserves a safety slot and starts execution.
 func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident) error {
-	if paused, err := c.nodePaused(ctx, inc.Target.Node); err == nil && paused {
+	if c.pauseHolds(ctx, inc) {
 		c.deferPlaybook(ctx, inc, metrics.DeferNodePaused)
 		return nil // per-node pause: hold position, retry next tick
 	}
@@ -422,9 +423,17 @@ func (c *Controller) advanceAwaitingApproval(ctx context.Context, inc *types.Inc
 		return c.parkForApproval(ctx, inc, step,
 			"re-parking: this park predates approval rounds; a fresh approval is required")
 	}
-	decision, err := c.store.LatestApprovalDecision(ctx, inc.ID, inc.ApprovalEpoch)
+	decision, err := c.store.FirstApprovalDecision(ctx, inc.ID, inc.ApprovalEpoch)
 	if err != nil && err != store.ErrNotFound {
 		return err
+	}
+	ttl := c.runtimeConfig(ctx).ApprovalTTL
+	if decision != nil && !approval.DecidedInTime(inc, decision, ttl) {
+		// Recorded after the request had expired (a click racing the walk):
+		// not honored. The round expires below as if undecided.
+		c.log.Warn("ignoring an approval decision made after the request expired",
+			"incident", inc.ID, "round", inc.ApprovalEpoch, "actor", decision.Actor, "decided_at", decision.At)
+		decision = nil
 	}
 	if decision != nil {
 		step, done, err := c.runtimeConfig(ctx).Engine.NextStep(inc)
@@ -469,9 +478,9 @@ func (c *Controller) advanceAwaitingApproval(ctx context.Context, inc *types.Inc
 			})
 		}
 	}
-	if time.Since(inc.StateChangedAt) > c.runtimeConfig(ctx).ApprovalTTL {
+	if time.Since(inc.StateChangedAt) > ttl {
 		if err := c.transition(ctx, inc, types.StateExpired, "system", "approval-ttl",
-			fmt.Sprintf("no decision within %s", c.runtimeConfig(ctx).ApprovalTTL), nil); err != nil {
+			fmt.Sprintf("no decision within %s", ttl), nil); err != nil {
 			return err
 		}
 		return c.notifier.Notify(ctx, notify.NotifyEvent{

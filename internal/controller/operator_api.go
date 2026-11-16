@@ -61,7 +61,7 @@ func (c *Controller) RoundDecision(ctx context.Context, id string, round int) (*
 	if round <= 0 {
 		return nil, store.ErrNotFound
 	}
-	return c.store.LatestApprovalDecision(ctx, id, round)
+	return c.store.FirstApprovalDecision(ctx, id, round)
 }
 
 // DecideApproval records an authenticated human decision; the reconcile walk
