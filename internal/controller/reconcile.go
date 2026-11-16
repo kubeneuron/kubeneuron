@@ -318,10 +318,7 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 		c.deferStep(inc, step, metrics.DeferUnarmedAgent)
 		return c.escalate(ctx, inc, reason)
 	}
-	if step.NeedsApproval() {
-		return c.parkForApproval(ctx, inc, step, "step requires human approval")
-	}
-	return c.startStep(ctx, inc, step, "system")
+	return c.authorizeAndStartStep(ctx, inc, step)
 }
 
 // parkForApproval parks (or re-parks) the incident for a human decision as
@@ -409,6 +406,15 @@ func (c *Controller) parkForApproval(ctx context.Context, inc *types.Incident, s
 // ApprovalEpoch: decisions of earlier epochs are invisible by construction,
 // so no timestamp ordering against StateChangedAt is needed to ignore them.
 func (c *Controller) advanceAwaitingApproval(ctx context.Context, inc *types.Incident) error {
+	step, done, err := c.runtimeConfig(ctx).Engine.NextStep(inc)
+	if err != nil || done {
+		return c.quarantine(ctx, inc, "parked step no longer exists")
+	}
+	return c.authorizeAndStartStep(ctx, inc, step)
+}
+
+// resumeAwaitingApproval validates the durable decision before calling startStep.
+func (c *Controller) resumeAwaitingApproval(ctx context.Context, inc *types.Incident) error {
 	if inc.ApprovalEpoch == 0 {
 		// Epoch 0 is the pre-upgrade population, not a round: every legacy
 		// row — requests AND orphaned decisions from any number of old parks
