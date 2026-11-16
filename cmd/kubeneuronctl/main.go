@@ -265,6 +265,9 @@ func cmdIncidents() *cobra.Command {
 		if recovery := types.RecoveryAvailabilityFromAudit(detail.Audit); recovery != nil {
 			_, _ = fmt.Fprintf(out, "recovery:  %s [%s] (assessed %s)\nreason:    %s\n", recovery.Status, recovery.Source, recovery.ObservedAt.Format(time.RFC3339), recovery.Reason)
 		}
+		for _, line := range authorisations(detail.Audit) {
+			_, _ = fmt.Fprintln(out, line)
+		}
 		_, _ = fmt.Fprintln(out, "\naudit trail:")
 		w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
 		_, _ = fmt.Fprintln(w, "TIME\tFROM\tTO\tACTOR\tACTION\tRESULT")
@@ -559,4 +562,22 @@ func cmdResume() *cobra.Command {
 	}}
 	c.Flags().String("actor", "", "audited actor (default: $USER)")
 	return c
+}
+
+// authorisations says who let each executed step run: a person's approval or
+// an automatic policy. A step started by the controller on its own (one that
+// needs no approval) is not listed.
+func authorisations(trail []*types.AuditEntry) []string {
+	var lines []string
+	for _, e := range trail {
+		if e.ToState != types.StateExecuting || e.FromState == types.StateExecuting || e.Actor == "" || e.Actor == "system" {
+			continue
+		}
+		if name, ok := strings.CutPrefix(e.Actor, "policy:"); ok {
+			lines = append(lines, fmt.Sprintf("step %-12s authorised by policy %s", e.Action, name))
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("step %-12s approved by %s", e.Action, e.Actor))
+	}
+	return lines
 }

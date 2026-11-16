@@ -3144,6 +3144,9 @@ spec:
   match:
     class: fell-off-bus
   playbookRef: ${ROOT_NAME}-e2e-fell-off-bus
+  mode: Approval
+  # RemoveFirst until add-first replacement exists (#57).
+  replacement: {strategy: RemoveFirst}
 ---
 apiVersion: kubeneuron.io/v1alpha1
 kind: GPUSignalMapping

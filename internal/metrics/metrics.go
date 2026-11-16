@@ -427,6 +427,9 @@ const (
 	DeferMaintenanceWindow = "maintenance_window"
 	// DeferNodePaused: the node is paused by a GPUNodeConfig.
 	DeferNodePaused = "node_paused"
+	// DeferAutomaticLimit: an automatic policy's limit (concurrency or
+	// cool-down) holds the step for now.
+	DeferAutomaticLimit = "automatic_limit"
 	// DeferConcurrencyCap: MaxConcurrentRemediations or MaxConcurrentReboots is
 	// full — the guard that stops a fleet-wide fault from draining half the
 	// cluster at once.

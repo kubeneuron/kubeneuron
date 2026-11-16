@@ -381,6 +381,104 @@ spec:
   priority: 10
   match: { class: ecc-dbe }
   playbookRef: drain-and-reset
+  mode: Approval
+```
+
+## Recovery modes
+
+Each `GPURemediationPolicy` says who authorises a step that stops work for the
+incidents it matches (`spec.mode`):
+
+| Mode | What happens |
+|---|---|
+| `DryRun` | Every step is simulated and audited; nothing executes. |
+| `Approval` (default) | Each step that stops work waits for a named person. |
+| `Automatic` | The same steps run without a person, within `spec.automatic`. |
+
+The installation-wide `spec.safety.executionMode` still applies on top: under
+`DryRun` nothing executes whatever the policy says.
+
+> **Warning.** Automatic mode acts without asking. For the node pools and fault classes you list here, KubeNeuron drains the node and restarts or replaces it through your cloud provider's API as soon as the conditions of your policy are met. Workloads on that node are stopped. A replacement instance may not be available, and the cloud provider bills instances according to its own terms. When replacement adds a node first, two instances run and are billed until the old one is removed, and your quota must allow the extra instance. You are responsible for the policy you set here and for its effect on your workloads. Start in dry-run, then in approval mode, before enabling automatic mode.
+
+An automatic policy is an approval given in advance, not the absence of one.
+Every step it starts is audited with the actor `policy:<name>`, the policy's
+generation, and who it declares enabled automatic mode and when
+(`enabledBy`, `enabledAt`). KubeNeuron records these as declared and cannot
+verify them; the Kubernetes API audit log shows who actually changed the
+policy. `kubeneuronctl incident show` lists, per executed step, whether a
+person approved it or a policy authorised it, and `kubectl get gpolicy` shows
+each policy's mode and its effective mode (`DryRun` while the installation is
+not `Enabled`).
+`spec.automatic` must name the node pools (`nodeSelector`, never empty) and
+carries the limits:
+
+- `maxConcurrentNodes` (and optionally `maxConcurrentNodesPerPool` with
+  `poolLabel`): nodes the policy recovers at once. A reached limit holds the
+  step until it clears.
+- `nodeCooldown`: minimum time between two automatic recoveries of one node.
+- `checkpointWait`: the longest wait for a job's checkpoint before a disruption
+  (needs `spec.safety.checkpointCoordination`).
+- `maxUnhealthyPercent` and `minUnhealthyNodes` (default 2): the circuit
+  breaker. When more than this share of a pool's nodes (selected by
+  `poolLabel`) have an open incident or are not Ready, and at least
+  `minUnhealthyNodes` of them, the step goes to a person. The breaker stays
+  tripped for that revision of the policy; a person returns it to automatic by
+  changing the policy.
+- Per-node pause and maintenance windows hold automatic steps exactly as they
+  hold every other step.
+
+A step goes to a person (approval) when the node is outside the policy's pools,
+when the circuit breaker trips, or when the step runs a command on the node
+itself (GPU reset, reboot, driver reload or reinstall, scripts): node-level
+actions are alpha, not validated on real hardware, and no automatic policy can
+authorise them. A pool the cloud provider has not confirmed
+can be recovered without its own repair interfering is different: recovery is
+unavailable there in every mode, the step is held, and no approval is asked.
+Switching a policy back to `Approval` parks the next step of incidents already
+in progress.
+
+Two more fields apply to the steps a policy runs, in every mode; a person's
+approval does not lift them:
+
+- `replacement.strategy`: `AddFirst` (default) brings up the new node and
+  waits until it is ready with its accelerators before the old one is drained
+  and removed; `RemoveFirst` removes the old node first and is used only when
+  named. Until the provider supports add-first, a replace step under
+  `AddFirst` is held as unavailable and no approval is asked; it is never done
+  the other way. A policy that needs node replacement today names
+  `RemoveFirst` explicitly.
+- `recycle.enabled` (default false): the optional restart through the cloud API.
+  Without it, a recycle step is held as unavailable.
+  A restart through the cloud API drains the node before it is tried, so it can interrupt the workload before a prepared replacement is ready; the add-first guarantee does not cover it.
+
+Automatic mode is never enabled by default, by the installer or by a sample.
+To enable it, copy the commented example, fill in the pools, limits and your
+name, and keep the acknowledgement text as it is:
+
+```yaml
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata: { name: ecc-dbe }
+spec:
+  kubeNeuronRef: fleet
+  priority: 10
+  match: { class: ecc-dbe }
+  playbookRef: drain-and-reset
+  mode: Approval            # state the mode explicitly
+  # mode: Automatic
+  # automatic:
+  #   nodeSelector: { node.kubernetes.io/instance-type: p4d.24xlarge }
+  #   poolLabel: eks.amazonaws.com/nodegroup
+  #   maxConcurrentNodes: 1
+  #   nodeCooldown: 6h
+  #   checkpointWait: 10m
+  #   maxUnhealthyPercent: 25
+  #   minUnhealthyNodes: 2
+  #   enabledBy: you@example.com
+  #   enabledAt: "2026-11-15T09:00:00Z"
+  #   acknowledgement: "I understand that automatic mode drains and replaces nodes without asking"
+  # replacement: { strategy: AddFirst }
+  # recycle: { enabled: false }
 ```
 
 ## Authoring guidelines

@@ -45,6 +45,21 @@ serviceAccount:
 #       devices: ["/dev/kfd"]
 agentAdapters: []
 
+# Recovery modes are set per GPURemediationPolicy (spec.mode: DryRun, Approval
+# or Automatic); this chart never creates a policy and never enables automatic
+# mode. See docs/playbook-authoring.md, "Recovery modes".
+#
+# WARNING: Automatic mode acts without asking. For the node pools and fault
+# classes you list here, KubeNeuron drains the node and restarts or replaces
+# it through your cloud provider's API as soon as the conditions of your
+# policy are met. Workloads on that node are stopped. A replacement instance
+# may not be available, and the cloud provider bills instances according to
+# its own terms. When replacement adds a node first, two instances run and
+# are billed until the old one is removed, and your quota must allow the
+# extra instance. You are responsible for the policy you set here and for
+# its effect on your workloads. Start in dry-run, then in approval mode,
+# before enabling automatic mode.
+
 nodeSelector: {}
 tolerations: []
 affinity: {}

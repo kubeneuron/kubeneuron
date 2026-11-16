@@ -5,6 +5,7 @@ package playbook
 import (
 	"fmt"
 
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -18,6 +19,14 @@ type Policy struct {
 	Playbook string
 	// Params can override playbook defaults, e.g. observe thresholds.
 	Params map[string]string
+	// Name, Mode and Automatic say who authorises this policy's steps; see
+	// config.Policy.
+	Name      string
+	Mode      recoverymode.Mode
+	Automatic *recoverymode.Settings
+	// ReplacementStrategy and RecycleEnabled: see config.Policy.
+	ReplacementStrategy recoverymode.Strategy
+	RecycleEnabled      bool
 }
 
 // Engine selects playbooks for signals and yields the next step for an

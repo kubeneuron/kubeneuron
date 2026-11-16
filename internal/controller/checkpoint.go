@@ -255,6 +255,11 @@ func (c *Controller) coordinateCheckpoint(ctx context.Context, inc *types.Incide
 	if !policy.Enabled {
 		return summary
 	}
+	// An automatic policy states how long it waits for a checkpoint before it
+	// disrupts: no workload request stretches that (#56).
+	if pol, ok := c.automaticPolicyFor(ctx, inc); ok {
+		policy = capCheckpointWait(policy, pol.Automatic.CheckpointWait)
+	}
 	skip := func(ctx context.Context, why string) checkpointSummary {
 		summary.counts[checkpoint.OutcomeSkipped]++
 		metrics.CheckpointRequests.WithLabelValues(string(checkpoint.OutcomeSkipped)).Inc()
@@ -664,4 +669,19 @@ func (c *Controller) auditCheckpoint(ctx context.Context, inc *types.Incident, s
 	if err := c.appendAudit(ctx, inc, "system", step.Name, result); err != nil {
 		c.log.Error("checkpoint audit append failed", "incident", inc.ID, "step", step.Name, "err", err)
 	}
+}
+
+// capCheckpointWait bounds the coordination wait by an automatic policy's
+// checkpoint_wait; zero leaves the installation's policy as it is.
+func capCheckpointWait(policy checkpoint.Policy, limit time.Duration) checkpoint.Policy {
+	if limit <= 0 {
+		return policy
+	}
+	if policy.MaxWait > limit {
+		policy.MaxWait = limit
+	}
+	if policy.DefaultWait > policy.MaxWait {
+		policy.DefaultWait = policy.MaxWait
+	}
+	return policy
 }

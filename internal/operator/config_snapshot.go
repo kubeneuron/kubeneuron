@@ -22,6 +22,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -985,13 +986,26 @@ func compilePolicies(
 		if _, ok := books[policy.Spec.PlaybookRef]; !ok {
 			return nil, fmt.Errorf("policy %q references missing playbook %q", policy.Name, policy.Spec.PlaybookRef)
 		}
+		mode, automatic, err := compileRecoveryMode(policy)
+		if err != nil {
+			return nil, err
+		}
+		if automatic != nil && automatic.CheckpointWait > 0 &&
+			(installation.Spec.Safety.CheckpointCoordination == nil || !installation.Spec.Safety.CheckpointCoordination.Enabled) {
+			return nil, fmt.Errorf("policy %q: spec.automatic.checkpointWait needs spec.safety.checkpointCoordination enabled", policy.Name)
+		}
 		result = append(result, config.Policy{
+			Name: policy.Name,
 			Match: config.Match{
 				Class:  types.ProblemClass(policy.Spec.Match.Class),
 				Vendor: types.AcceleratorVendor(policy.Spec.Match.Vendor),
 			},
-			Playbook: policy.Spec.PlaybookRef,
-			Params:   copyStringMap(policy.Spec.Parameters),
+			Playbook:    policy.Spec.PlaybookRef,
+			Params:      copyStringMap(policy.Spec.Parameters),
+			Mode:        mode,
+			Automatic:   automatic,
+			Replacement: config.Replacement{Strategy: compileStrategy(policy.Spec.Replacement)},
+			Recycle:     config.Recycle{Enabled: policy.Spec.Recycle != nil && policy.Spec.Recycle.Enabled},
 		})
 	}
 	if len(result) == 0 {
@@ -1337,4 +1351,85 @@ func compileNodeConfigs(installationName string, nodeConfigs []kubeneuronv1alpha
 		return nil, fmt.Errorf("marshal node configs: %w", err)
 	}
 	return data, nil
+}
+
+// compileRecoveryMode compiles spec.mode and spec.automatic. The CRD admits
+// the same rules; the compiler applies them again so a policy written before
+// the schema (or with validation off) cannot mean more than it says.
+func compileRecoveryMode(policy *kubeneuronv1alpha1.GPURemediationPolicy) (recoverymode.Mode, *recoverymode.Settings, error) {
+	var mode recoverymode.Mode
+	switch policy.Spec.Mode {
+	case "":
+		mode = recoverymode.Unset
+	case "DryRun":
+		mode = recoverymode.DryRun
+	case "Approval":
+		mode = recoverymode.Approval
+	case "Automatic":
+		mode = recoverymode.Automatic
+	default:
+		return "", nil, fmt.Errorf("policy %q: unknown spec.mode %q", policy.Name, policy.Spec.Mode)
+	}
+	var settings *recoverymode.Settings
+	if auto := policy.Spec.Automatic; auto != nil {
+		checkpointWait := time.Duration(0)
+		if auto.CheckpointWait != "" {
+			d, err := time.ParseDuration(auto.CheckpointWait)
+			if err != nil {
+				return "", nil, fmt.Errorf("policy %q: spec.automatic.checkpointWait: %w", policy.Name, err)
+			}
+			checkpointWait = d
+		}
+		cooldown, err := time.ParseDuration(auto.NodeCooldown)
+		if err != nil {
+			return "", nil, fmt.Errorf("policy %q: spec.automatic.nodeCooldown: %w", policy.Name, err)
+		}
+		settings = &recoverymode.Settings{
+			NodeSelector:              copyStringMap(auto.NodeSelector),
+			PoolLabel:                 auto.PoolLabel,
+			MaxConcurrentNodes:        int(auto.MaxConcurrentNodes),
+			MaxConcurrentNodesPerPool: int(auto.MaxConcurrentNodesPerPool),
+			CheckpointWait:            checkpointWait,
+			NodeCooldown:              cooldown,
+			MaxUnhealthyPercent:       int(auto.MaxUnhealthyPercent),
+			MinUnhealthyNodes:         int(auto.MinUnhealthyNodes),
+			Generation:                policy.Generation,
+			EnabledBy:                 auto.EnabledBy,
+			EnabledAt:                 auto.EnabledAt.UTC(),
+			Acknowledgement:           auto.Acknowledgement,
+		}
+	}
+	if err := recoverymode.Validate(mode, settings); err != nil {
+		return "", nil, fmt.Errorf("policy %q: %w", policy.Name, err)
+	}
+	return mode, settings, nil
+}
+
+// policyModeName is the CRD spelling of a compiled mode, for status.
+func policyModeName(mode recoverymode.Mode) string {
+	switch mode.Effective() {
+	case recoverymode.DryRun:
+		return "DryRun"
+	case recoverymode.Automatic:
+		return "Automatic"
+	default:
+		return "Approval"
+	}
+}
+
+// compileStrategy maps the CRD spelling to the runtime strategy.
+func compileStrategy(spec *kubeneuronv1alpha1.ReplacementSpec) recoverymode.Strategy {
+	if spec != nil && spec.Strategy == "RemoveFirst" {
+		return recoverymode.RemoveFirst
+	}
+	return recoverymode.AddFirst
+}
+
+// effectivePolicyMode is what a policy's incidents actually get: dry-run while
+// the installation is not Enabled, whatever the policy's own mode.
+func effectivePolicyMode(installation *kubeneuronv1alpha1.KubeNeuron, mode recoverymode.Mode) string {
+	if effectiveExecutionMode(installation.Spec.Safety) != kubeneuronv1alpha1.ExecutionModeEnabled {
+		return "DryRun"
+	}
+	return policyModeName(mode)
 }

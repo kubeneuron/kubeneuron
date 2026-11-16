@@ -1010,11 +1010,16 @@ async function renderDrawer(){
   }).join("") || `<span class="dimmer" style="font-size:.78rem">no steps executed yet</span>`;
 
   $("dTl").innerHTML = d.audit.map(e => {
-    const human = e.actor && e.actor !== "system";
+    const byPolicy = (e.actor || "").startsWith("policy:");
+    const human = e.actor && e.actor !== "system" && !byPolicy;
+    // Who let a step run: a person's approval or an automatic policy (#56).
+    const started = e.to_state === "EXECUTING" && e.from_state !== "EXECUTING";
+    const who = byPolicy ? (started ? "authorised by policy " : "policy ") + e.actor.slice(7)
+      : (human && started ? "approved by " + e.actor : e.actor);
     return `<div class="ev${human ? " human":""}">
       <div class="l1"><span class="t">${esc((e.time||"").replace("T"," ").slice(0,19))}</span>
         <span class="tr">${esc(e.from_state)} → ${esc(e.to_state)}</span>
-        <span class="who">${esc(e.actor)}</span><span class="dim">${esc(e.action || "")}</span></div>
+        <span class="who">${esc(who)}</span><span class="dim">${esc(e.action || "")}</span></div>
       ${e.result ? `<div class="res">${esc(e.result)}</div>` : ""}
     </div>`;
   }).join("");

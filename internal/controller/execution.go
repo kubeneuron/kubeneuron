@@ -74,6 +74,17 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 		c.deferStep(inc, step, metrics.DeferNodePaused)
 		return nil
 	}
+	// A step that needs approval starts only under a person's decision or the
+	// live automatic policy its actor names (#31, #56): defence in depth for
+	// every path that reaches here.
+	if reason := c.stepUnavailable(ctx, inc, step); reason != "" {
+		c.deferStep(inc, step, metrics.DeferAutomaticLimit)
+		c.logOnceStepUnavailable(inc, step, reason)
+		return nil
+	}
+	if refusal := c.policyAuthorisationRefusal(ctx, inc, step, actor); refusal != "" {
+		return c.parkForApproval(ctx, inc, step, "not starting the step: "+refusal)
+	}
 	ctx, _ = c.pinSimulate(ctx, inc)
 	if !c.simulating(ctx, inc) {
 		if err := c.requireCloudRecovery(ctx, inc, step); err != nil {

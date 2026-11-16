@@ -25,6 +25,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/operations"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
@@ -52,6 +53,10 @@ type Controller struct {
 	// goroutine, so the reconcile tick never double-drives them.
 	inFlightMu sync.Mutex
 	inFlight   map[string]bool
+
+	// automaticEligibility is the cloud provider's answer to "may automatic
+	// recovery act on this node's pool" (#55); nil means no (fail closed).
+	automaticEligibility AutomaticEligibility
 
 	// logOnce suppresses repeated explanations of conditions that persist.
 	//
@@ -804,6 +809,11 @@ func (c *Controller) openIncidentTx(ctx context.Context, tx store.Tx, sig types.
 	if engine := c.runtimeConfig(ctx).Engine; engine != nil {
 		if book, ok := engine.Select(sig); ok {
 			inc.Playbook = book.Name
+		}
+		// A policy in dry-run mode simulates its incidents for life, like the
+		// installation-wide dry-run: stamped at open, never lifted later.
+		if pol, ok := engine.PolicyFor(sig.Class, sig.Vendor()); ok && pol.Mode == recoverymode.DryRun {
+			inc.DryRun = true
 		}
 	}
 	if err := tx.CreateIncident(ctx, inc); err != nil {

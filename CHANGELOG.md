@@ -9,6 +9,39 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+### Added
+
+- **Recovery modes per policy: dry-run, approval and automatic.**
+  `GPURemediationPolicy.spec.mode` selects who authorises a step that stops
+  work: `DryRun` simulates the policy's incidents, `Approval` (the default for
+  a policy without a mode, unchanged behaviour) waits for a named person, and
+  `Automatic` runs the steps without a person within `spec.automatic`. An
+  automatic policy must name its node pools and carries its limits (nodes at
+  once, per pool, per-node cool-down, checkpoint wait, and a circuit breaker
+  with an absolute floor that hands steps to a person when too much of a pool
+  is unhealthy and stays tripped until the policy changes), who it declares
+  enabled it and when, and the acknowledgement "I understand that automatic
+  mode drains and replaces nodes without asking". `spec.replacement.strategy`
+  (`AddFirst` by default, `RemoveFirst` only when named) and
+  `spec.recycle.enabled` (off by default) bound how a node is replaced, in
+  every mode: a replace step under `AddFirst` is held until the provider
+  supports it, and a recycle step runs only when enabled.
+  Every automatic step is audited as `policy:<name>` with the declared
+  enabler, the policy generation and the time; `kubeneuronctl incident show`
+  lists who approved or which policy authorised each executed step, and
+  `kubectl get gpolicy` shows the mode and the effective mode. A step needing
+  approval still cannot start without a person's decision or the live
+  automatic policy, and a pool the provider has not confirmed is unavailable
+  in every mode. Node-level actions (GPU reset, reboot, driver reload or
+  reinstall, scripts) are alpha and are never authorised by an automatic
+  policy; they always wait for a person. Automatic mode is never enabled by default, by the installer
+  or by a sample.
+
+  **Upgrade note:** a policy whose playbook replaces or restarts a node
+  through the cloud API holds that step until it names
+  `replacement.strategy: RemoveFirst` (until add-first replacement exists) or
+  `recycle.enabled: true`.
+
 ### Fixed
 
 - **kmsg watcher cancellation on macOS.** The kernel-log reader opens its

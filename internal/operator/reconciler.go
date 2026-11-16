@@ -832,6 +832,8 @@ func (r *KubeNeuronReconciler) updateGPURemediationPolicyStatus(
 	if validationErr != nil {
 		policy.Status.ResolvedPlaybook = ""
 		policy.Status.Digest = ""
+		policy.Status.Mode = ""
+		policy.Status.EffectiveMode = ""
 		meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
 			Status:             metav1.ConditionFalse,
@@ -851,6 +853,8 @@ func (r *KubeNeuronReconciler) updateGPURemediationPolicyStatus(
 		}
 		policy.Status.ResolvedPlaybook = policy.Spec.PlaybookRef
 		policy.Status.Digest = sha256Hex(data)
+		policy.Status.Mode = policyModeName(compiled[0].Mode)
+		policy.Status.EffectiveMode = effectivePolicyMode(installation, compiled[0].Mode)
 		meta.SetStatusCondition(&policy.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
 			Status:             metav1.ConditionTrue,

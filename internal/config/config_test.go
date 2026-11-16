@@ -396,3 +396,41 @@ func TestLiveConfigMustNameTheBlastRadius(t *testing.T) {
 		})
 	}
 }
+
+func TestAutomaticPolicyConfig(t *testing.T) {
+	const automatic = `
+policies:
+  - name: auto-dbe
+    match: { class: ecc-dbe }
+    playbook: drain-and-reset
+    mode: automatic
+    automatic:
+      node_selector: { pool: train }
+      max_concurrent_nodes: 1
+      node_cooldown: 6h
+      max_unhealthy_percent: 25
+      enabled_by: alice
+      enabled_at: 2026-11-15T09:00:00Z
+      acknowledgement: "I understand that automatic mode drains and replaces nodes without asking"
+`
+	c, err := Load(writeConfig(t, automatic))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := c.Policies[0]; p.Mode != "automatic" || p.Automatic == nil || p.Automatic.NodeCooldown != 6*time.Hour {
+		t.Fatalf("policy = %+v", p)
+	}
+	for name, tc := range map[string]struct{ from, to, want string }{
+		"empty selector":       {"node_selector: { pool: train }", "node_selector: {}", "node_selector must name"},
+		"no name":              {"name: auto-dbe", "name: \"\"", "needs a name"},
+		"checkpoint wait, off": {"max_concurrent_nodes: 1", "max_concurrent_nodes: 1\n      checkpoint_wait: 10m", "checkpoint coordination"},
+		"unknown key":          {"max_concurrent_nodes: 1", "max_concurrent_node: 1", "max_concurrent_node"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(writeConfig(t, strings.Replace(automatic, tc.from, tc.to, 1)))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Load() = %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+}

@@ -920,6 +920,7 @@ type SignalMatch struct {
 // rejected at admission so a policy cannot silently mean less than it says
 // (the compiler applies the same fail-closed rule).
 // +kubebuilder:validation:XValidation:rule="!has(self.match.source) && !has(self.match.severity) && !has(self.match.nodeSelector)",message="match fields source/severity/nodeSelector are not supported by the current runtime"
+// +kubebuilder:validation:XValidation:rule="(has(self.mode) && self.mode == 'Automatic') == has(self.automatic)",message="spec.automatic is required with mode Automatic and not allowed with any other mode"
 type GPURemediationPolicySpec struct {
 	// +kubebuilder:validation:MinLength=1
 	KubeNeuronRef string      `json:"kubeNeuronRef"`
@@ -928,6 +929,105 @@ type GPURemediationPolicySpec struct {
 	// +kubebuilder:validation:MinLength=1
 	PlaybookRef string            `json:"playbookRef"`
 	Parameters  map[string]string `json:"parameters,omitempty"`
+	// Mode says who authorises a step that stops work for the incidents this
+	// policy matches. DryRun simulates every step. Approval (the default)
+	// waits for a named person before each such step. Automatic runs them
+	// without a person, within spec.automatic. The installation-wide
+	// spec.safety.executionMode still applies: under DryRun nothing executes.
+	// +kubebuilder:validation:Enum=DryRun;Approval;Automatic
+	// +optional
+	Mode string `json:"mode,omitempty"`
+	// Automatic is the advance approval of an Automatic policy.
+	//
+	// Automatic mode acts without asking. For the node pools and fault classes
+	// you list here, KubeNeuron drains the node and restarts or replaces it
+	// through your cloud provider's API as soon as the conditions of your
+	// policy are met. Workloads on that node are stopped. A replacement
+	// instance may not be available, and the cloud provider bills instances
+	// according to its own terms. When replacement adds a node first, two
+	// instances run and are billed until the old one is removed, and your
+	// quota must allow the extra instance. You are responsible for the policy
+	// you set here and for its effect on your workloads. Start in dry-run,
+	// then in approval mode, before enabling automatic mode.
+	// +optional
+	Automatic *AutomaticRecoverySpec `json:"automatic,omitempty"`
+	// Replacement says how a node is replaced. AddFirst (the default) brings
+	// up the new node and waits until it is ready with its accelerators before
+	// the old one is drained and removed; RemoveFirst removes the old node
+	// first and is used only when named here.
+	// +optional
+	Replacement *ReplacementSpec `json:"replacement,omitempty"`
+	// Recycle enables the optional restart through the cloud API before
+	// replacement; off by default.
+	//
+	// A restart through the cloud API drains the node before it is tried, so it
+	// can interrupt the workload before a prepared replacement is ready; the
+	// add-first guarantee does not cover it.
+	// +optional
+	Recycle *RecycleSpec `json:"recycle,omitempty"`
+}
+
+// ReplacementSpec selects the replacement strategy.
+type ReplacementSpec struct {
+	// +kubebuilder:validation:Enum=AddFirst;RemoveFirst
+	// +kubebuilder:default=AddFirst
+	Strategy string `json:"strategy,omitempty"`
+}
+
+// RecycleSpec enables the restart through the cloud API.
+type RecycleSpec struct {
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// AutomaticRecoverySpec bounds where and how much an Automatic policy may
+// recover without a person, and records who enabled it.
+// +kubebuilder:validation:XValidation:rule="!has(self.maxConcurrentNodesPerPool) || self.maxConcurrentNodesPerPool <= self.maxConcurrentNodes",message="maxConcurrentNodesPerPool must not exceed maxConcurrentNodes"
+type AutomaticRecoverySpec struct {
+	// NodeSelector names the node pools by label. It must not be empty: an
+	// absent selector never means "every node".
+	// +kubebuilder:validation:MinProperties=1
+	NodeSelector map[string]string `json:"nodeSelector"`
+	// PoolLabel is the node label that identifies a pool, for the per-pool
+	// limit and the circuit breaker. Empty treats all selected nodes as one
+	// pool.
+	// +optional
+	PoolLabel string `json:"poolLabel,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	MaxConcurrentNodes int32 `json:"maxConcurrentNodes"`
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxConcurrentNodesPerPool int32 `json:"maxConcurrentNodesPerPool,omitempty"`
+	// CheckpointWait is how long a step that stops work waits for the job's
+	// checkpoint before it proceeds.
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
+	// +optional
+	CheckpointWait string `json:"checkpointWait,omitempty"`
+	// NodeCooldown is the minimum time between two automatic recoveries of one
+	// node.
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
+	NodeCooldown string `json:"nodeCooldown"`
+	// MaxUnhealthyPercent is the circuit breaker: when more than this share of
+	// a pool's nodes have an open incident or are not Ready, the policy falls
+	// back to approval and stays there until the policy is changed.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	MaxUnhealthyPercent int32 `json:"maxUnhealthyPercent"`
+	// MinUnhealthyNodes is the breaker's absolute floor: it never trips on
+	// fewer unhealthy nodes than this (default 2).
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MinUnhealthyNodes int32 `json:"minUnhealthyNodes,omitempty"`
+	// EnabledBy and EnabledAt declare who enabled automatic mode and when.
+	// KubeNeuron records them as declared and cannot verify them; the
+	// Kubernetes API audit log shows who actually changed this object.
+	// +kubebuilder:validation:MinLength=1
+	EnabledBy string      `json:"enabledBy"`
+	EnabledAt metav1.Time `json:"enabledAt"`
+	// Acknowledgement must read exactly "I understand that automatic mode
+	// drains and replaces nodes without asking".
+	// +kubebuilder:validation:Enum="I understand that automatic mode drains and replaces nodes without asking"
+	Acknowledgement string `json:"acknowledgement"`
 }
 
 // GPURemediationPolicyStatus records validation and reference resolution.
@@ -938,11 +1038,20 @@ type GPURemediationPolicyStatus struct {
 	Conditions       []metav1.Condition `json:"conditions,omitempty"`
 	ResolvedPlaybook string             `json:"resolvedPlaybook,omitempty"`
 	Digest           string             `json:"digest,omitempty"`
+	// Mode is the policy's recovery mode: DryRun, Approval or Automatic.
+	Mode string `json:"mode,omitempty"`
+	// EffectiveMode is what actually happens: DryRun while the installation's
+	// spec.safety.executionMode is not Enabled, whatever Mode says.
+	EffectiveMode string `json:"effectiveMode,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=gpolicy
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Class",type=string,JSONPath=`.spec.match.class`
+// +kubebuilder:printcolumn:name="Playbook",type=string,JSONPath=`.spec.playbookRef`
+// +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.status.mode`
+// +kubebuilder:printcolumn:name="Effective",type=string,JSONPath=`.status.effectiveMode`
 
 // GPURemediationPolicy selects a playbook for a normalized problem class.
 type GPURemediationPolicy struct {

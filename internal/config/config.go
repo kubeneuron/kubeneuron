@@ -17,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -246,9 +247,32 @@ type Approvals struct {
 // first match wins; a vendor-specific match takes precedence over an unscoped
 // fallback for that vendor.
 type Policy struct {
+	// Name identifies the policy in audit records ("authorised by policy X").
+	// The operator compiles the GPURemediationPolicy name.
+	Name     string            `yaml:"name,omitempty"`
 	Match    Match             `yaml:"match"`
 	Playbook string            `yaml:"playbook"`
 	Params   map[string]string `yaml:"params,omitempty"`
+	// Mode is who authorises a step that stops work: dry-run, approval
+	// (the default when absent) or automatic. Automatic requires Automatic.
+	Mode      recoverymode.Mode      `yaml:"mode,omitempty"`
+	Automatic *recoverymode.Settings `yaml:"automatic,omitempty"`
+	// Replacement and Recycle say how a node is replaced and whether the
+	// optional restart through the cloud API may be tried first.
+	Replacement Replacement `yaml:"replacement,omitempty"`
+	Recycle     Recycle     `yaml:"recycle,omitempty"`
+}
+
+// Replacement is a policy's replacement strategy: add-first (default) or
+// remove-first (only when named).
+type Replacement struct {
+	Strategy recoverymode.Strategy `yaml:"strategy,omitempty"`
+}
+
+// Recycle enables the optional restart through the cloud API before
+// replacement. Off by default.
+type Recycle struct {
+	Enabled bool `yaml:"enabled,omitempty"`
 }
 
 // Match selects signals a policy applies to.
@@ -371,6 +395,18 @@ func (c *Config) Validate() error {
 		}
 		if p.Playbook == "" {
 			return fmt.Errorf("config: policy %d (class %s): playbook is required", i, p.Match.Class)
+		}
+		if err := recoverymode.ValidateStrategy(p.Replacement.Strategy); err != nil {
+			return fmt.Errorf("config: policy %d (class %s): %w", i, p.Match.Class, err)
+		}
+		if err := recoverymode.Validate(p.Mode, p.Automatic); err != nil {
+			return fmt.Errorf("config: policy %d (class %s): %w", i, p.Match.Class, err)
+		}
+		if p.Mode == recoverymode.Automatic && strings.TrimSpace(p.Name) == "" {
+			return fmt.Errorf("config: policy %d (class %s): an automatic policy needs a name for its audit records", i, p.Match.Class)
+		}
+		if p.Automatic != nil && p.Automatic.CheckpointWait > 0 && c.Safety.CheckpointCoordination == nil {
+			return fmt.Errorf("config: policy %d (class %s): automatic.checkpoint_wait needs checkpoint coordination enabled (safety.checkpoint_coordination)", i, p.Match.Class)
 		}
 	}
 	seenProfiles := make(map[string]struct{}, len(c.AcceleratorProfiles))

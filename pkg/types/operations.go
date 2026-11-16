@@ -28,6 +28,9 @@ const (
 	// ResourceAutonomyEffect is the durable, idempotent hand-off record that
 	// must exist before a hardware-qualified autonomy executor is called.
 	ResourceAutonomyEffect OperationalResourceKind = "autonomy-effect"
+	// ResourceRecoveryPolicy records automatic-policy events that must
+	// outlive a restart, such as a tripped circuit breaker (#56).
+	ResourceRecoveryPolicy OperationalResourceKind = "recovery-policy"
 	// ResourceRuntimeContractQualification is the durable, observation-only
 	// record of a fixed node cohort being watched for sustained Full runtime
 	// contract coverage. It is evidence for a later human decision and is
