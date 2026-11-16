@@ -387,6 +387,7 @@ func managedObjectReady(installation *kubeneuronv1alpha1.KubeNeuron, object clie
 func (r *KubeNeuronReconciler) updateStatus(ctx context.Context, installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot, validationErr error, runtimeReady bool, runtimeMessage string) error {
 	before := installation.DeepCopy()
 	installation.Status.ObservedGeneration = installation.Generation
+	meta.SetStatusCondition(&installation.Status.Conditions, cloudRecoveryCondition(installation))
 	if validationErr != nil {
 		meta.SetStatusCondition(&installation.Status.Conditions, metav1.Condition{
 			Type:               "ConfigurationValid",
@@ -1242,3 +1243,21 @@ func (r *KubeNeuronReconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 var _ reconcile.Reconciler = (*KubeNeuronReconciler)(nil)
+
+// The operator can establish configuration presence, not live per-node repair
+// policy, identity, permissions or replacement capacity. Never turn configured
+// credentials into an affirmative recovery capability claim.
+func cloudRecoveryCondition(installation *kubeneuronv1alpha1.KubeNeuron) metav1.Condition {
+	condition := metav1.Condition{
+		Type: "CloudRecoveryAvailable", Status: metav1.ConditionUnknown,
+		Reason:             "EligibilityNotEstablished",
+		Message:            "cloud provider configured; per-node identity, permissions, repair policy and replacement strategy must pass runtime eligibility checks",
+		ObservedGeneration: installation.Generation, LastTransitionTime: metav1.Now(),
+	}
+	if installation.Spec.Cloud == nil || installation.Spec.Cloud.Provider == "" {
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = "ProviderNotConfigured"
+		condition.Message = "cloud recovery unavailable: spec.cloud.provider is not configured; detection and incident reporting remain enabled"
+	}
+	return condition
+}

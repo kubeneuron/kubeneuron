@@ -935,8 +935,7 @@ func TestCompileSnapshotRequiresApprovalForCloudActions(t *testing.T) {
 // controller executes.
 func TestCompileSnapshotRecycleNodeCompiles(t *testing.T) {
 	installation := testKubeNeuron()
-	// A cloud action needs a capable provider to compile: with none configured
-	// the playbook is now rejected (see TestCloudCapabilityGateRejectsWithoutCloud).
+	// Use a declared capable provider while testing action approval rules.
 	installation.Spec.Cloud = &kubeneuronv1alpha1.CloudSpec{Provider: fauxFullCloud}
 	playbooks := []kubeneuronv1alpha1.GPUPlaybook{{
 		ObjectMeta: metav1.ObjectMeta{Name: "recycle"},
@@ -1186,12 +1185,9 @@ func TestCompileSnapshotRejectsNegativePlaybookCooldown(t *testing.T) {
 	}
 }
 
-// TestCloudCapabilityGateRejectsWithoutCloud confirms a cloud-action playbook is
-// rejected at compile time when NO provider is configured: nothing can ever
-// perform a RecycleNode/ReplaceNode with no spec.cloud, so the gap must be
-// caught here rather than surfacing mid-incident at the runtime fail-closed
-// check (after cordon+drain+approval).
-func TestCloudCapabilityGateRejectsWithoutCloud(t *testing.T) {
+// Missing provider configuration must not disable detection by rejecting the
+// entire snapshot. Execution eligibility is checked before the first cordon.
+func TestCloudPackCompilesWithoutProviderForObservation(t *testing.T) {
 	for _, act := range []kubeneuronv1alpha1.PlaybookAction{
 		kubeneuronv1alpha1.ActionRecycleNode,
 		kubeneuronv1alpha1.ActionReplaceNode,
@@ -1199,8 +1195,8 @@ func TestCloudCapabilityGateRejectsWithoutCloud(t *testing.T) {
 		_, policies, playbooks := cloudPlaybookInstallation(fauxFullCloud, act)
 		installation := testKubeNeuron() // no spec.cloud
 		_, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
-		if err == nil || !strings.Contains(err.Error(), "spec.cloud is not configured") {
-			t.Fatalf("%s with no cloud configured must fail compile, got %v", act, err)
+		if err != nil {
+			t.Fatalf("%s with no provider must preserve the observation snapshot: %v", act, err)
 		}
 	}
 }

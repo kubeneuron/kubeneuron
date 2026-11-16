@@ -238,11 +238,10 @@ func compileMaintenanceWindows(installationName string, maintenance []kubeneuron
 // The capability axis is provider-side: the required primitive comes from the
 // action registry, and whether the provider has it comes from that provider's
 // own declaration (pkg/cloud), queried by name without any credentials.
-// When NO provider is configured a cloud action can never run at all — there is
-// nothing that could ever perform it — so such a playbook is rejected here
-// rather than shipped to compile-clean and then fail closed mid-incident, after
-// a cordon+drain+approval, at the runtime check. An unregistered provider name
-// also fails closed here.
+// Without a configured provider, keep the snapshot usable for detection and
+// incident reporting. The controller's cloud eligibility gate holds before
+// cordon/drain and exposes recovery as unavailable. A named but unknown or
+// incapable provider remains a configuration error.
 func validateCloudCapabilities(installation *kubeneuronv1alpha1.KubeNeuron, playbooks []kubeneuronv1alpha1.GPUPlaybook) error {
 	cloudSpec := installation.Spec.Cloud
 	providerConfigured := cloudSpec != nil && cloudSpec.Provider != ""
@@ -262,7 +261,7 @@ func validateCloudCapabilities(installation *kubeneuronv1alpha1.KubeNeuron, play
 				continue
 			}
 			if !providerConfigured {
-				return fmt.Errorf("playbook %q step %q: action %s is a cloud operation but spec.cloud is not configured; no provider can ever perform it, so the playbook is rejected", pb.Name, step.Name, step.Action)
+				continue
 			}
 			if !known {
 				return fmt.Errorf("playbook %q step %q: action %s needs cloud provider %q, which is not a known provider", pb.Name, step.Name, step.Action, cloudSpec.Provider)

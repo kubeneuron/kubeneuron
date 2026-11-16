@@ -397,3 +397,15 @@ spec:
    cooldown shorter than your typical recurrence just burns rungs.
 5. **Test in dry-run**: `kubeneuronctl remediate <node> --class <class>`
    drives the exact ladder as audited no-ops.
+
+### Cloud recovery availability
+
+Cloud playbooks can be installed before `spec.cloud.provider` is configured:
+this keeps detection and incident reporting available. The installation then
+reports `CloudRecoveryAvailable=False`, reason `ProviderNotConfigured`.
+Configuring a provider changes this condition to `Unknown`, not `True`: the
+controller must still verify each incident's pinned node identity, permissions,
+repair policy and replacement strategy before it can cordon or drain. A human
+approval cannot override missing provider eligibility. Incident details show
+the last recorded provider and policy assessments, including their timestamps;
+these assessments are not promises of replacement capacity or recovery success.
