@@ -69,6 +69,8 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	// locked so outbox workers claim distinct events in parallel. SQLite leaves
 	// this empty and relies on its single writer connection.
 	s.SkipLocked = " FOR UPDATE SKIP LOCKED"
+	// One action claim per node at a time (A8): see sqlcore.Core.NodeLock.
+	s.NodeLock = "SELECT pg_advisory_xact_lock(hashtext(?))"
 	if err := s.migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err

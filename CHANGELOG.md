@@ -34,6 +34,16 @@ API is `v1alpha1`.
   explicit all-nodes entry). A file playbook with an unknown key no longer
   loads; fix the key. Operator-managed installations are unaffected.
 
+- **PostgreSQL: one live lease per node, and two related races closed.**
+  Two agents' claims for one node that picked different actions (a plain
+  claim and the restorative claim, for example) could both win on
+  PostgreSQL, because the "no lease is held on this node" check read the
+  statement's snapshot. Claims for one node now run one at a time under a
+  transaction-scoped advisory lock. Two first accelerator reports for a node
+  arriving at once no longer fail with a duplicate-key error; the newer one
+  wins. An idempotency key whose previous use has expired now starts a new
+  request instead of replaying the old result. SQLite behaviour is unchanged.
+
 - **Pause and approval decisions now hold in every case.** An approved step
   no longer starts while its node is paused: the pause is checked before every
   step, including one resumed from approval, and the approval stays recorded

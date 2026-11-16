@@ -71,6 +71,15 @@ type Core struct {
 	// lease per node" invariant requires every claimer to converge on the same
 	// row rather than fan out to sibling actions of the same node.
 	SkipLocked string
+	// NodeLock is the dialect's per-node lock taken, inside one transaction,
+	// before an action claim: "SELECT pg_advisory_xact_lock(hashtext(?))" on
+	// PostgreSQL, empty on SQLite (whose single writer connection already
+	// serializes claimers). Under READ COMMITTED the claim's "no lease is held
+	// on this node" check reads the statement's snapshot, so two claimers that
+	// pick different rows of one node (the restorative claim and the plain
+	// claim) both saw no lease and both won. Serializing claims per node makes
+	// the second one see the first one's committed lease.
+	NodeLock string
 }
 
 // MaxActionAttempts caps how many leases one action may be issued before it is
@@ -1118,6 +1127,20 @@ func scanNode(r rowScanner) (*types.Node, error) {
 // --- accelerator runtime reports ---
 
 func (c *Core) UpsertAcceleratorReport(ctx context.Context, report *types.AgentAcceleratorReport) error {
+	// Two first reports for one node can both read "no row" and both insert;
+	// the loser's insert is a unique violation, not a failure of the report
+	// (A28). Running the upsert again reads the winner's row and applies the
+	// ordinary newer-wins rule to it.
+	for attempt := 1; ; attempt++ {
+		err := c.upsertAcceleratorReportOnce(ctx, report)
+		if attempt < 3 && isUniqueViolation(err) {
+			continue
+		}
+		return err
+	}
+}
+
+func (c *Core) upsertAcceleratorReportOnce(ctx context.Context, report *types.AgentAcceleratorReport) error {
 	if report == nil {
 		return fmt.Errorf("upsert accelerator report: report is required")
 	}
@@ -1371,6 +1394,31 @@ func (c *Core) claimNextAction(ctx context.Context, node, bootID string, leaseDu
 	if leaseDuration <= 0 {
 		return nil, fmt.Errorf("claim action: lease duration must be positive")
 	}
+	if c.NodeLock == "" {
+		return c.claimNextActionOn(ctx, c.db, node, bootID, leaseDuration, onlyType)
+	}
+	tx, err := c.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("claim action: begin: %w", err)
+	}
+	w := c.wrap(tx)
+	if _, err := w.ExecContext(ctx, c.NodeLock, node); err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("claim action: lock node %s: %w", node, err)
+	}
+	claimed, err := c.claimNextActionOn(ctx, w, node, bootID, leaseDuration, onlyType)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	// Nothing to claim still commits: the dead-lettering above is work done.
+	if cerr := tx.Commit(); cerr != nil {
+		return nil, fmt.Errorf("claim action: commit: %w", cerr)
+	}
+	return claimed, err
+}
+
+func (c *Core) claimNextActionOn(ctx context.Context, db DBTX, node, bootID string, leaseDuration time.Duration, onlyType types.ActionType) (*types.QueuedAction, error) {
 	token, err := newLeaseToken()
 	if err != nil {
 		return nil, fmt.Errorf("claim action: generate lease token: %w", err)
@@ -1410,7 +1458,7 @@ func (c *Core) claimNextAction(ctx context.Context, node, bootID string, leaseDu
 		deadLetterArgs = append(deadLetterArgs, string(onlyType))
 	}
 	deadLetterArgs = append(deadLetterArgs, MaxActionAttempts, nowNS)
-	if res, err := c.db.ExecContext(ctx, `
+	if res, err := db.ExecContext(ctx, `
 		UPDATE actions
 		SET state='dead', lease_token='', lease_expires_at_ns=0, updated_at=?
 		WHERE node=?`+deadLetterTypeFilter+` AND attempts>=?
@@ -1442,7 +1490,7 @@ func (c *Core) claimNextAction(ctx context.Context, node, bootID string, leaseDu
 		claimArgs = append(claimArgs, string(onlyType))
 	}
 	claimArgs = append(claimArgs, nowNS, MaxActionAttempts, nowNS, nowNS)
-	row := c.db.QueryRowContext(ctx, `
+	row := db.QueryRowContext(ctx, `
 		UPDATE actions
 		SET state='leased', lease_token=?,
 		    lease_expires_at_ns=? + (CASE WHEN timeout_ns > ? THEN timeout_ns ELSE ? END) + ?,

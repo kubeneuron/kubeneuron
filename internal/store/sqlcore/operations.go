@@ -211,7 +211,37 @@ func (q *Queries) PutOperationalIdempotency(ctx context.Context, record *types.O
 	if err != nil {
 		return nil, false, err
 	}
-	return existing, false, nil
+	if existing.ExpiresAt.After(now) {
+		return existing, false, nil
+	}
+	// The key's previous use has expired (A28): this is a new request, not a
+	// replay of the old one. The expired row is removed only if it is still the
+	// one read here, so two callers reclaiming it at once cannot both win;
+	// the loser replays the winner's fresh claim.
+	if _, err := q.db.ExecContext(ctx, `
+		DELETE FROM operational_idempotency
+		WHERE kind=? AND actor=? AND idempotency_key=? AND expires_at=?`,
+		string(record.Kind), record.Actor, record.Key, ts(existing.ExpiresAt)); err != nil {
+		return nil, false, fmt.Errorf("reclaim expired idempotency key: %w", err)
+	}
+	row = q.db.QueryRowContext(ctx, `
+		INSERT INTO operational_idempotency
+			(kind, actor, idempotency_key, request_digest, resource_id, created_at, expires_at, result_digest)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(kind, actor, idempotency_key) DO NOTHING
+		RETURNING kind, actor, idempotency_key, request_digest, resource_id, created_at, expires_at, result_digest`,
+		string(record.Kind), record.Actor, record.Key, record.RequestDigest, record.ResourceID,
+		ts(record.CreatedAt), ts(record.ExpiresAt), record.ResultDigest)
+	if inserted, err := scanOperationalIdempotency(row); err == nil {
+		return inserted, true, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return nil, false, err
+	}
+	current, err := q.GetOperationalIdempotency(ctx, record.Kind, record.Actor, record.Key)
+	if err != nil {
+		return nil, false, err
+	}
+	return current, false, nil
 }
 
 func (q *Queries) GetOperationalIdempotency(ctx context.Context, kind types.OperationalResourceKind, actor, key string) (*types.OperationalIdempotencyRecord, error) {
