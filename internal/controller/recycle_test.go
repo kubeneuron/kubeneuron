@@ -39,6 +39,24 @@ func (p *recyclePlatform) ReplaceNode(_ context.Context, node string) error {
 	return nil
 }
 
+func (p *recyclePlatform) CloudNode(context.Context, string) (cloud.NodeRef, error) {
+	return cloud.NodeRef{Identity: *recycleTestPin()}, nil
+}
+func (p *recyclePlatform) RecoveryEligibility(context.Context, cloud.NodeIdentity) (cloud.RecoveryEligibility, error) {
+	return cloud.RecoveryEligibility{ReplaceAllowed: true, RecycleAllowed: true}, nil
+}
+func (p *recyclePlatform) RecyclePinnedNode(_ context.Context, pin cloud.NodeIdentity) error {
+	p.recycled = pin.InstanceID
+	return nil
+}
+func (p *recyclePlatform) ReplacePinnedNode(_ context.Context, pin cloud.NodeIdentity) error {
+	p.replaced = pin.InstanceID
+	return nil
+}
+func recycleTestPin() *cloud.NodeIdentity {
+	return &cloud.NodeIdentity{Node: "node-a", NodeUID: "uid-a", ProviderID: "aws:///zone/i-old", InstanceID: "i-old", BootID: "boot-a"}
+}
+
 func recycleController(t *testing.T, p *recyclePlatform) *Controller {
 	t.Helper()
 	return New(nil, nil, nil, nil, nil, p, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -47,20 +65,20 @@ func recycleController(t *testing.T, p *recyclePlatform) *Controller {
 func TestRecycleNodeStepCallsThePlatform(t *testing.T) {
 	p := &recyclePlatform{configured: true, nodeReady: true}
 	c := recycleController(t, p)
-	inc := &types.Incident{ID: "i", Target: types.Target{Node: "node-a"}}
+	inc := &types.Incident{ID: "i", Target: types.Target{Node: "node-a"}, CloudIdentity: recycleTestPin()}
 
 	if _, err := c.recycleNodeStep(context.Background(), inc, false); err != nil {
 		t.Fatal(err)
 	}
-	if p.recycled != "node-a" {
-		t.Fatalf("recycled %q, want node-a", p.recycled)
+	if p.recycled != "i-old" {
+		t.Fatalf("recycled %q, want pinned i-old", p.recycled)
 	}
 
 	if _, err := c.recycleNodeStep(context.Background(), inc, true); err != nil {
 		t.Fatal(err)
 	}
-	if p.replaced != "node-a" {
-		t.Fatalf("replaced %q, want node-a", p.replaced)
+	if p.replaced != "i-old" {
+		t.Fatalf("replaced %q, want pinned i-old", p.replaced)
 	}
 }
 
@@ -68,7 +86,7 @@ func TestRecycleNodeStepCallsThePlatform(t *testing.T) {
 // recycled when no cloud provider can actually restart it.
 func TestRecycleNodeFailsClosedWithoutCloudProvider(t *testing.T) {
 	c := recycleController(t, &recyclePlatform{configured: false})
-	inc := &types.Incident{ID: "i", Target: types.Target{Node: "node-a"}}
+	inc := &types.Incident{ID: "i", Target: types.Target{Node: "node-a"}, CloudIdentity: recycleTestPin()}
 	if _, err := c.recycleNodeStep(context.Background(), inc, false); err == nil {
 		t.Fatal("recycle must fail closed when no cloud provider is configured")
 	}
@@ -81,13 +99,13 @@ func TestRecycleNodeFailsClosedWithoutCloudProvider(t *testing.T) {
 func TestRecycleWaitsForNodeToRejoin(t *testing.T) {
 	p := &recyclePlatform{configured: true, nodeReady: false}
 	c := recycleController(t, p)
-	inc := &types.Incident{ID: "i", Target: types.Target{Node: "node-a"}}
+	inc := &types.Incident{ID: "i", Target: types.Target{Node: "node-a"}, CloudIdentity: recycleTestPin()}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // deadline already passed: the node never becomes Ready
 	if _, err := c.recycleNodeStep(ctx, inc, false); err == nil {
 		t.Fatal("recycle must not report success while the node has not rejoined")
 	}
-	if p.recycled != "node-a" {
+	if p.recycled != "i-old" {
 		t.Fatal("the instance should still have been recycled before the wait")
 	}
 }
@@ -97,7 +115,7 @@ func TestRecycleWaitsForNodeToRejoin(t *testing.T) {
 func TestReplaceDoesNotWaitForNode(t *testing.T) {
 	p := &recyclePlatform{configured: true, nodeReady: false}
 	c := recycleController(t, p)
-	inc := &types.Incident{ID: "i", Target: types.Target{Node: "node-a"}}
+	inc := &types.Incident{ID: "i", Target: types.Target{Node: "node-a"}, CloudIdentity: recycleTestPin()}
 	if _, err := c.recycleNodeStep(context.Background(), inc, true); err != nil {
 		t.Fatalf("replace must not block on node readiness: %v", err)
 	}
@@ -172,4 +190,20 @@ func TestUnrecyclableNodeEscalatesBeforeApprovalIsRequested(t *testing.T) {
 			t.Fatalf("state = %s, want AWAITING_APPROVAL (a blip is not a verdict; RecycleNode re-checks)", inc.State)
 		}
 	})
+}
+
+func TestCloudMutationRejectsMissingOrForeignPin(t *testing.T) {
+	for _, replace := range []bool{false, true} {
+		for _, pin := range []*cloud.NodeIdentity{nil, {}, {Node: "other", NodeUID: "u", ProviderID: "p", InstanceID: "i", BootID: "b"}} {
+			p := &recyclePlatform{configured: true, nodeReady: true}
+			c := recycleController(t, p)
+			inc := &types.Incident{Target: types.Target{Node: "node-a"}, CloudIdentity: pin}
+			if _, err := c.recycleNodeStep(context.Background(), inc, replace); err == nil {
+				t.Fatal("invalid pin admitted")
+			}
+			if p.recycled != "" || p.replaced != "" {
+				t.Fatal("invalid pin reached cloud mutation")
+			}
+		}
+	}
 }

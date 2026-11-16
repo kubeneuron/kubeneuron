@@ -34,16 +34,30 @@ func (c *Controller) recycleNodeStep(ctx context.Context, inc *types.Incident, r
 		return nil, fmt.Errorf("platform.%s_node: no cloud provider is configured for %q; a virtualized GPU node needs one to stand in for a hardware reset",
 			verb, c.platform.Name())
 	}
+	guard, ok := c.platform.(platform.GuardedNodeRecycler)
+	if !ok {
+		return nil, fmt.Errorf("cloud recovery unavailable: platform has no guarded mutation contract")
+	}
+	if inc.CloudIdentity == nil {
+		return nil, fmt.Errorf("cloud recovery unavailable: incident has no pinned cloud identity")
+	}
+	pin := *inc.CloudIdentity
+	if err := pin.Validate(); err != nil {
+		return nil, fmt.Errorf("cloud recovery unavailable: %w", err)
+	}
+	if pin.Node != inc.Target.Node {
+		return nil, fmt.Errorf("cloud recovery unavailable: incident target differs from pinned node")
+	}
 	node := inc.Target.Node
 	if replace {
-		if err := recycler.ReplaceNode(ctx, node); err != nil {
+		if err := guard.ReplacePinnedNode(ctx, pin); err != nil {
 			return nil, fmt.Errorf("platform.replace_node: %w", err)
 		}
 		// The node is on its way out. The vanished-node reconciler closes the
 		// incident as replaced once the Node object disappears.
 		return okResult(inc, "terminated the instance behind "+node+"; the autoscaler will replace it"), nil
 	}
-	if err := recycler.RecycleNode(ctx, node); err != nil {
+	if err := guard.RecyclePinnedNode(ctx, pin); err != nil {
 		return nil, fmt.Errorf("platform.recycle_node: %w", err)
 	}
 	// The instance is powered on, but the node has not rejoined yet: the OS,

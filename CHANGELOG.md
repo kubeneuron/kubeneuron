@@ -83,6 +83,12 @@ API is `v1alpha1`.
   never override a reject. A request older than the approval TTL can no longer
   be decided, and a decision recorded after the expiry is ignored.
 
+- Cloud recycle and replace execution now require the incident's pinned node
+  identity and a guarded provider mutation contract. Missing or incomplete
+  identity blocks execution; the controller no longer resolves a replacement
+  target from the current node name at dispatch. Providers without the repair
+  evidence contract remain unavailable for these actions.
+
 - **File playbooks can no longer restart or destroy a node without a human.**
   The controller now refuses, at start and on reload, a playbook step with
   `agent.reboot`, `platform.recycle_node` or `platform.replace_node` that does
