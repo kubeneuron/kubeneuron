@@ -120,6 +120,7 @@ func TestConfigAcceleratorRuntimeProfilesDefaultDenyAndAmbiguity(t *testing.T) {
 	second := validNVIDIAProfile()
 	second.Name = "nvidia-a100-secondary"
 	config := Config{
+		Safety:              Safety{DryRun: true},
 		Policies:            []Policy{{Match: Match{Class: types.ClassECCDBE}, Playbook: "drain-and-reset"}},
 		AcceleratorProfiles: []AcceleratorRuntimeProfile{first, second},
 	}

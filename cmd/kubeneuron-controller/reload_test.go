@@ -391,7 +391,8 @@ func TestReloadAppliesExecutionMode(t *testing.T) {
 		t.Helper()
 		body := fmt.Sprintf(
 			"policies:\n  - match: {class: gsp-error}\n    playbook: observe\n"+
-				"safety:\n  dry_run: %t\n  max_concurrent_remediations: %d\n",
+				"safety:\n  dry_run: %t\n  max_concurrent_remediations: %d\n"+
+				"  destructive_execution_node_selector: {pool: gpu-a}\n",
 			dryRun, remediations)
 		if err := os.WriteFile(policies, []byte(body), 0o644); err != nil {
 			t.Fatal(err)
@@ -464,7 +465,7 @@ func TestReloadFailsClosedOnBadOrIncompletePolicies(t *testing.T) {
 	paths := runtimeConfigPaths{policies: policies, playbooks: playbooks}
 	logSink := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	write("safety:\n  dry_run: false\n")
+	write("safety:\n  dry_run: false\n  destructive_execution_node_selector: {pool: gpu-a}\n")
 	if err := applyRuntimeConfig(ctx, ctrl, api, paths, logSink); err != nil {
 		t.Fatal(err)
 	}
@@ -473,12 +474,27 @@ func TestReloadFailsClosedOnBadOrIncompletePolicies(t *testing.T) {
 	}
 
 	// A misspelt key is rejected and the running configuration is kept.
-	write("safety:\n  dryRun: true\n  dry_run: false\n")
+	write("safety:\n  dryRun: true\n  dry_run: false\n  destructive_execution_node_selector: {pool: gpu-a}\n")
 	if err := applyRuntimeConfig(ctx, ctrl, api, paths, logSink); err == nil {
 		t.Fatal("a policies file with an unknown key was applied")
 	}
 	if gate.DryRun() {
 		t.Fatal("a rejected reload changed the running execution mode")
+	}
+
+	// Live with no selector is refused; the running (live, confined)
+	// configuration is kept rather than widened to every node.
+	write("safety:\n  dry_run: false\n")
+	err = applyRuntimeConfig(ctx, ctrl, api, paths, logSink)
+	if err == nil || !strings.Contains(err.Error(), "destructive_execution_node_selector is empty") {
+		t.Fatalf("reload of a live config without a selector = %v, want a refusal", err)
+	}
+	if gate.DryRun() {
+		t.Fatal("a rejected reload changed the running execution mode")
+	}
+	write("safety:\n  dry_run: false\n  destructive_execution_all_nodes: true\n")
+	if err := applyRuntimeConfig(ctx, ctrl, api, paths, logSink); err != nil {
+		t.Fatalf("an explicit all-nodes entry must load: %v", err)
 	}
 
 	// A file that omits the key is dry-run.
@@ -531,6 +547,12 @@ func TestReloadRefusesPlaybookThatRebootsWithoutApproval(t *testing.T) {
 	err = applyRuntimeConfig(ctx, ctrl, api, paths, logSink)
 	if err == nil || !strings.Contains(err.Error(), "approval: required") {
 		t.Fatalf("reload of an unapproved reboot = %v, want a refusal", err)
+	}
+	// A misspelt key is an error, not a silent "no approval" (#43).
+	book("    approve: required\n")
+	err = applyRuntimeConfig(ctx, ctrl, api, paths, logSink)
+	if err == nil || !strings.Contains(err.Error(), "field approve not found") {
+		t.Fatalf("reload of a playbook with a misspelt key = %v, want a refusal naming it", err)
 	}
 }
 

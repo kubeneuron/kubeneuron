@@ -295,7 +295,7 @@ func TestDryRunFailsClosed(t *testing.T) {
 		{name: "key absent", safety: "", want: true},
 		{name: "safety block without the key", safety: "safety:\n  max_concurrent_reboots: 1\n", want: true},
 		{name: "explicit true", safety: "safety:\n  dry_run: true\n", want: true},
-		{name: "explicit false", safety: "safety:\n  dry_run: false\n", want: false},
+		{name: "explicit false", safety: "safety:\n  dry_run: false\n  destructive_execution_node_selector: {pool: gpu-a}\n", want: false},
 		{name: "misspelt camelCase", safety: "safety:\n  dryRun: true\n", wantErr: "dryRun"},
 		{name: "misspelt top level", safety: "dry_run: true\n", wantErr: "dry_run"},
 		{name: "unknown key elsewhere", safety: "approvals:\n  tll: 1h\n", wantErr: "tll"},
@@ -364,5 +364,35 @@ func TestSideFilesRejectUnknownKeys(t *testing.T) {
 		if err := load(nil); err != nil {
 			t.Errorf("%s: an empty document must stay an empty set, got %v", name, err)
 		}
+	}
+}
+
+// Audit #22 follow-up (#43): a live file config must say where destructive
+// steps may run; an absent selector is never read as "every node".
+func TestLiveConfigMustNameTheBlastRadius(t *testing.T) {
+	cases := []struct {
+		name, safety, wantErr string
+	}{
+		{name: "live, no selector", safety: "safety:\n  dry_run: false\n", wantErr: "destructive_execution_node_selector is empty"},
+		{name: "live, empty selector", safety: "safety:\n  dry_run: false\n  destructive_execution_node_selector: {}\n", wantErr: "destructive_execution_node_selector is empty"},
+		{name: "live, named nodes", safety: "safety:\n  dry_run: false\n  destructive_execution_node_selector: {pool: gpu-a}\n"},
+		{name: "live, explicit all nodes", safety: "safety:\n  dry_run: false\n  destructive_execution_all_nodes: true\n"},
+		{name: "both selector and all nodes", safety: "safety:\n  dry_run: false\n  destructive_execution_all_nodes: true\n  destructive_execution_node_selector: {pool: gpu-a}\n", wantErr: "not both"},
+		{name: "dry-run, no selector", safety: "safety:\n  dry_run: true\n"},
+		{name: "default dry-run, no selector", safety: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeConfig(t, tc.safety+minimalPolicy))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Load() = %v, want accepted", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Load() = %v, want an error containing %q", err, tc.wantErr)
+			}
+		})
 	}
 }

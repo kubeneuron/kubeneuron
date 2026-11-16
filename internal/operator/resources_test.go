@@ -20,6 +20,7 @@ import (
 	sigsyaml "sigs.k8s.io/yaml"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
+	"github.com/kubeneuron/kubeneuron/internal/config"
 )
 
 func TestControllerRBACTargetsManagedServiceAccount(t *testing.T) {
@@ -1189,6 +1190,19 @@ func TestEnabledRequiresDeclaredDestructiveNodes(t *testing.T) {
 	}
 	if !strings.Contains(string(snapshot.PoliciesYAML), "dry_run: false") {
 		t.Fatalf("compiled safety did not leave dry-run:\n%s", snapshot.PoliciesYAML)
+	}
+	// The controller refuses a live file config without a blast radius (#43);
+	// the operator's compiled snapshot must always carry one and load.
+	path := filepath.Join(t.TempDir(), "policies.yaml")
+	if err := os.WriteFile(path, snapshot.PoliciesYAML, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("the controller rejects the operator's live snapshot: %v", err)
+	}
+	if loaded.Safety.DryRun || loaded.Safety.DestructiveExecutionNodeSelector["kubeneuron.io/destructive"] != "true" || loaded.Safety.DestructiveExecutionAllNodes {
+		t.Fatalf("compiled safety = %+v, want live and confined to the declared selector", loaded.Safety)
 	}
 }
 

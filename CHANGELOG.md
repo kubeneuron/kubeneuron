@@ -20,6 +20,20 @@ API is `v1alpha1`.
 
 ### Security
 
+- **A live file configuration must name the nodes destructive steps may run
+  on, and file playbooks are decoded strictly.** With `dry_run: false`, an
+  empty `destructive_execution_node_selector` used to mean "every node"; the
+  controller now refuses to start with it, and a reload is rejected with the
+  running configuration kept. Allowing every node takes an explicit
+  `destructive_execution_all_nodes: true`. File playbooks now reject unknown
+  keys and extra YAML documents, so a misspelt `approve: required` is an error
+  instead of a step without approval.
+
+  **Upgrade note:** a hand-written file config with `dry_run: false` and no
+  selector stops the controller from starting; add the selector (or the
+  explicit all-nodes entry). A file playbook with an unknown key no longer
+  loads; fix the key. Operator-managed installations are unaffected.
+
 - **Pause and approval decisions now hold in every case.** An approved step
   no longer starts while its node is paused: the pause is checked before every
   step, including one resumed from approval, and the approval stays recorded

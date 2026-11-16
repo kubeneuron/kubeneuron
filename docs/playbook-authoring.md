@@ -339,6 +339,17 @@ configuration. The shipped file ladders in `configs/playbooks` ask a human at
 the same steps as the CRD pack in `config/policies`: at the first step that
 ends running work (drain, eviction or device reset), and at every reboot.
 
+File playbooks are decoded strictly: an unknown or misspelt key (for example
+`approve: required`) and a second YAML document in one file are errors at
+start and on reload, never silently ignored.
+
+A file configuration with `dry_run: false` must also say where destructive
+steps may run: either `destructive_execution_node_selector` with the node
+labels, or `destructive_execution_all_nodes: true` to allow every node. A live
+configuration with neither is refused at start, and a reload keeps the
+running configuration. The operator always compiles the selector from
+`spec.safety.destructiveExecution.nodeSelector`.
+
 ## A worked example
 
 ```yaml

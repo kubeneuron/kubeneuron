@@ -48,9 +48,14 @@ type Safety struct {
 	// radius: on an Enabled install the controller must confine its own
 	// destructive platform steps (cordon, drain, evict, recycle/replace) to
 	// nodes whose labels match this selector, exactly as the agent DaemonSet is
-	// already confined. Empty means no confinement is configured (every
-	// non-Enabled install is globally dry-run, so nothing executes anyway).
+	// already confined. With dry_run: false it must name the nodes: an empty
+	// selector is rejected unless DestructiveExecutionAllNodes says, in so many
+	// words, that every node is in scope. The operator always compiles a
+	// non-empty selector for an Enabled install.
 	DestructiveExecutionNodeSelector map[string]string `yaml:"destructive_execution_node_selector,omitempty"`
+	// DestructiveExecutionAllNodes is the explicit "every node" entry for a
+	// hand-written file config. An absent selector is never read as "all".
+	DestructiveExecutionAllNodes bool `yaml:"destructive_execution_all_nodes,omitempty"`
 	// TaintDegradedNodes is the compiled spec.safety.taintDegradedNodes. A nil
 	// pointer is the whole of "off": the operator emits this key only when an
 	// installation explicitly enables the taint, so a controller reading a
@@ -304,6 +309,9 @@ func decodeStrict(data []byte, out any) error {
 
 // Validate checks configuration invariants and applies defaults.
 func (c *Config) Validate() error {
+	if err := c.Safety.validateBlastRadius(); err != nil {
+		return err
+	}
 	if c.Safety.MaxConcurrentRemediations <= 0 {
 		c.Safety.MaxConcurrentRemediations = 2
 	}
@@ -479,3 +487,17 @@ func (d Duration) MarshalYAML() (any, error) { return time.Duration(d).String(),
 
 // Std returns the standard-library duration.
 func (d Duration) Std() time.Duration { return time.Duration(d) }
+
+// validateBlastRadius fails closed on a live configuration that does not say
+// where destructive steps may run. An empty selector used to mean "no
+// confinement", so a file with dry_run: false and no selector armed every
+// node in the cluster.
+func (s Safety) validateBlastRadius() error {
+	if s.DestructiveExecutionAllNodes && len(s.DestructiveExecutionNodeSelector) > 0 {
+		return fmt.Errorf("safety: set either destructive_execution_node_selector or destructive_execution_all_nodes, not both")
+	}
+	if !s.DryRun && len(s.DestructiveExecutionNodeSelector) == 0 && !s.DestructiveExecutionAllNodes {
+		return fmt.Errorf("safety: dry_run is false but destructive_execution_node_selector is empty; name the nodes destructive steps may run on, or set destructive_execution_all_nodes: true to allow every node")
+	}
+	return nil
+}

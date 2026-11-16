@@ -3,7 +3,10 @@
 package playbook
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -17,13 +20,35 @@ func LoadFile(path string) (*Playbook, error) {
 		return nil, err
 	}
 	var p Playbook
-	if err := yaml.Unmarshal(data, &p); err != nil {
+	if err := decodeStrict(data, &p); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := p.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &p, nil
+}
+
+// decodeStrict decodes exactly one YAML document and rejects unknown keys, so
+// a misspelt key such as `approve: required` is an error instead of silently
+// meaning "no approval".
+func decodeStrict(data []byte, out any) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(out); err != nil {
+		if errors.Is(err, io.EOF) {
+			return fmt.Errorf("empty playbook file")
+		}
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("unexpected second YAML document")
+	}
+	return nil
 }
 
 // LoadDir reads every *.yaml/*.yml playbook in a directory and returns them
