@@ -43,8 +43,8 @@ func (p *recyclePlatform) ReplaceNode(_ context.Context, node string) error {
 func (p *recyclePlatform) CloudNode(context.Context, string) (cloud.NodeRef, error) {
 	return cloud.NodeRef{Identity: *recycleTestPin()}, nil
 }
-func (p *recyclePlatform) RecoveryEligibility(context.Context, cloud.NodeIdentity) (cloud.RecoveryEligibility, error) {
-	return cloud.RecoveryEligibility{ReplaceAllowed: true, RecycleAllowed: true}, nil
+func (p *recyclePlatform) RecoveryEligibility(_ context.Context, pin cloud.NodeIdentity) (cloud.RecoveryEligibility, error) {
+	return cloud.RecoveryEligibility{Identity: pin, Mode: cloud.RepairOff, ReplaceAllowed: p.checkErr == nil, RecycleAllowed: p.checkErr == nil}, p.checkErr
 }
 func (p *recyclePlatform) RecyclePinnedNode(_ context.Context, pin cloud.NodeIdentity) error {
 	p.recycled = pin.InstanceID
@@ -178,7 +178,7 @@ func TestUnrecyclableNodeEscalatesBeforeApprovalIsRequested(t *testing.T) {
 			nil, p, nil, notifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		ctx := context.Background()
 		inc := &types.Incident{
-			ID: "inc-recycle", Target: types.Target{Node: "node-a"},
+			ID: "inc-recycle", Target: types.Target{Node: "node-a"}, CloudIdentity: recycleTestPin(),
 			Class: types.ClassFellOffBus, State: types.StateEvaluating,
 			Playbook: "recycle", OpenedAt: time.Now(), UpdatedAt: time.Now(), StateChangedAt: time.Now(),
 		}
@@ -213,10 +213,10 @@ func TestUnrecyclableNodeEscalatesBeforeApprovalIsRequested(t *testing.T) {
 			t.Fatalf("approvals requested = %d, want 1", len(notifier.approvals))
 		}
 	})
-	t.Run("transient lookup failure still parks", func(t *testing.T) {
+	t.Run("transient lookup failure holds without approval", func(t *testing.T) {
 		inc, _ := run(t, errors.New("aws: describing i-1: throttled"))
-		if inc.State != types.StateAwaitingApproval {
-			t.Fatalf("state = %s, want AWAITING_APPROVAL (a blip is not a verdict; RecycleNode re-checks)", inc.State)
+		if inc.State != types.StateEvaluating {
+			t.Fatalf("state = %s, want EVALUATING while provider eligibility is unknown", inc.State)
 		}
 	})
 }

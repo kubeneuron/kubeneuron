@@ -627,6 +627,12 @@ func (c *Controller) verifyEvidenceDeadline(ctx context.Context) time.Duration {
 // it returns ok=true with a note naming that depth, so the caller can record
 // it beside the resolution rather than presenting it as the full check.
 func (c *Controller) verifyRuntimeEvidence(ctx context.Context, inc *types.Incident) (bool, string) {
+	// A heartbeat from the old target (or a same-name replacement) is not
+	// cloud recovery proof. Until the lifecycle adapter supplies correlated
+	// identity and fresh inventory, keep the result explicitly unverified.
+	if pending, err := c.cloudRecoveryNeedsConfirmation(ctx, inc); err != nil || pending {
+		return false, "cloud recovery awaits correlated identity and fresh accelerator inventory"
+	}
 	node, err := c.store.GetNode(ctx, inc.Target.Node)
 	if err != nil || node == nil {
 		return false, "node is not registered"

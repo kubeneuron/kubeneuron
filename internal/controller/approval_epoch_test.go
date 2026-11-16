@@ -45,6 +45,7 @@ func approvalEpochFixture(t *testing.T) (*Controller, *sqlite.Store, string) {
 		Class: types.ClassFellOffBus, State: types.StateEvaluating, Playbook: "pb",
 		OpenedAt: time.Now(), UpdatedAt: time.Now(), StateChangedAt: time.Now(),
 	}
+	allowCloudApprovalFixture(c, inc)
 	if err := st.CreateIncident(ctx, inc); err != nil {
 		t.Fatal(err)
 	}

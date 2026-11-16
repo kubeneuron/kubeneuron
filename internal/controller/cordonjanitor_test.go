@@ -968,3 +968,21 @@ func TestVanishedNodeCannotResolveWithMissingRecoveryHistory(t *testing.T) {
 		})
 	}
 }
+
+func TestCloudRecoveryCannotResolveFromOldHeartbeat(t *testing.T) {
+	c, st := stackTestController(t, &janitorPlatform{})
+	ctx := context.Background()
+	inc := &types.Incident{ID: "old-heartbeat", Target: types.Target{Node: "node-a"}, State: types.StateVerifying}
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertNode(ctx, &types.Node{Name: "node-a", AgentLastSeen: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendAudit(ctx, &types.AuditEntry{IncidentID: inc.ID, Result: auditStepOutcomeResult("platform.replace_node", false, true)}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, reason := c.verifyRuntimeEvidence(ctx, inc); ok || reason == "" {
+		t.Fatalf("ok=%v reason=%q", ok, reason)
+	}
+}

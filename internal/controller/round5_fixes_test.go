@@ -263,6 +263,7 @@ func TestApprovalBindsToTheStepShownAtRequestTime(t *testing.T) {
 		UpdatedAt:      time.Now(),
 		StateChangedAt: time.Now(),
 	}
+	allowCloudApprovalFixture(c, inc)
 	if err := st.CreateIncident(ctx, inc); err != nil {
 		t.Fatal(err)
 	}

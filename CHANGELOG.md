@@ -15,6 +15,11 @@ API is `v1alpha1`.
   source non-blocking, so cancelling the watcher wakes a reader parked on an
   empty FIFO on darwin as it already did on Linux; the FIFO test now passes
   on both.
+- Cloud recovery checks provider eligibility before requesting approval or
+  starting a ladder. Missing identity or repair evidence holds execution;
+  incident details and the CLI show the last recorded eligibility assessment.
+  Cloud verification does not treat an old-node heartbeat as replacement proof.
+
 - Cloud recovery incidents are no longer resolved merely because the old node
   disappears. Cleanup preserves pending verification across playbook reloads
   using durable cloud-step history, and holds when that history is unavailable.

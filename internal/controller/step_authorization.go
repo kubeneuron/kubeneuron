@@ -14,6 +14,9 @@ import (
 // checks. Policy authorization can extend this boundary without changing the
 // recovery ladder or treating a parked state as proof of consent.
 func (c *Controller) authorizeAndStartStep(ctx context.Context, inc *types.Incident, step *playbook.Step) error {
+	if held, err := c.holdUnavailableCloudRecovery(ctx, inc, step); held || err != nil {
+		return err
+	}
 	if inc.State == types.StateAwaitingApproval {
 		return c.resumeAwaitingApproval(ctx, inc)
 	}

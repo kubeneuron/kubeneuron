@@ -539,12 +539,13 @@ func (s *Server) handleListIncidents(w http.ResponseWriter, r *http.Request) {
 // was not bound to a preview): the two digests agree only when the human
 // decided on the preview that is still current.
 type IncidentDetail struct {
-	Incident                 *types.Incident     `json:"incident"`
-	Audit                    []*types.AuditEntry `json:"audit"`
-	ImpactPreviewDigest      string              `json:"impact_preview_digest,omitempty"`
-	ImpactPreviewUnavailable string              `json:"impact_preview_unavailable,omitempty"`
-	Decision                 string              `json:"decision,omitempty"`
-	DecisionImpactDigest     string              `json:"decision_impact_digest,omitempty"`
+	RecoveryAvailability     *types.RecoveryAvailability `json:"recovery_availability,omitempty"`
+	Incident                 *types.Incident             `json:"incident"`
+	Audit                    []*types.AuditEntry         `json:"audit"`
+	ImpactPreviewDigest      string                      `json:"impact_preview_digest,omitempty"`
+	ImpactPreviewUnavailable string                      `json:"impact_preview_unavailable,omitempty"`
+	Decision                 string                      `json:"decision,omitempty"`
+	DecisionImpactDigest     string                      `json:"decision_impact_digest,omitempty"`
 }
 
 func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
@@ -553,7 +554,7 @@ func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "incident not found", http.StatusNotFound)
 		return
 	}
-	detail := IncidentDetail{Incident: inc, Audit: audit}
+	detail := IncidentDetail{Incident: inc, Audit: audit, RecoveryAvailability: types.RecoveryAvailabilityFromAudit(audit)}
 	if backend, ok := s.operator.(ImpactPreviewBackend); ok && inc.ApprovalEpoch > 0 {
 		if preview, err := backend.ImpactPreview(r.Context(), inc.ID, inc.ApprovalEpoch); err == nil && preview != nil {
 			detail.ImpactPreviewDigest = preview.Digest
