@@ -96,7 +96,13 @@ func (n *Notifier) RequestApprovalWithContext(ctx context.Context, inc *types.In
 	return n.post(ctx, text)
 }
 
+// post delivers text. Its error never carries the webhook URL: the URL is
+// the credential (notify.RedactError).
 func (n *Notifier) post(ctx context.Context, text string) error {
+	return notify.RedactError(n.send(ctx, text), n.WebhookURL)
+}
+
+func (n *Notifier) send(ctx context.Context, text string) error {
 	payload, err := json.Marshal(map[string]string{"text": text})
 	if err != nil {
 		return err

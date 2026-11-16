@@ -148,7 +148,13 @@ func (n *Notifier) eventPayload(inc *types.Incident, severity, summary string) *
 	}
 }
 
+// post delivers ev. Its error never carries the routing key or the path
+// and query of a custom endpoint (notify.RedactError).
 func (n *Notifier) post(ctx context.Context, ev event) error {
+	return notify.RedactError(n.send(ctx, ev), n.Endpoint, n.RoutingKey)
+}
+
+func (n *Notifier) send(ctx context.Context, ev event) error {
 	body, err := json.Marshal(ev)
 	if err != nil {
 		return fmt.Errorf("pagerduty: encode event: %w", err)

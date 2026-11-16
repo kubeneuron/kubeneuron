@@ -96,6 +96,9 @@ func (a *Async) deliver(ctx context.Context, item asyncItem) {
 		if err == nil {
 			return
 		}
+		// The bundled notifiers already redact; an inner notifier written
+		// elsewhere may not, and this line repeats on every retry.
+		err = RedactError(err)
 		if attempt == asyncMaxAttempts || ctx.Err() != nil {
 			break
 		}

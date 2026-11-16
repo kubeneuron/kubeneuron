@@ -100,7 +100,13 @@ func (n *Notifier) RequestApprovalWithContext(ctx context.Context, inc *types.In
 	return n.post(ctx, payload)
 }
 
+// post delivers payload. Its error never carries the endpoint URL or the
+// token: either may be the credential (notify.RedactError).
 func (n *Notifier) post(ctx context.Context, payload Payload) error {
+	return notify.RedactError(n.send(ctx, payload), n.URL, n.Token)
+}
+
+func (n *Notifier) send(ctx context.Context, payload Payload) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("webhook: encode payload: %w", err)

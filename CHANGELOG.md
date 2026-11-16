@@ -37,6 +37,14 @@ API is `v1alpha1`.
   `approval: required`. Installations that ran the shipped file ladders with
   `dry_run: false` will now see approval requests where they did not before.
 
+- **Notification delivery errors no longer carry the endpoint secret.** A
+  failed Slack, webhook or PagerDuty delivery used to log the full endpoint
+  URL on every retry and in the dead-letter record, and for Slack that URL is
+  the credential. Errors now keep only the scheme and host; path, query,
+  userinfo, the webhook bearer token and the PagerDuty routing key are
+  removed. The asynchronous delivery worker redacts again before it logs, for
+  notifiers that do not do it themselves.
+
 - **Cookie-authenticated mutations must come from the panel's own origin.** A
   state-changing operator request authenticated by the session cookie, and
   `POST /api/v1/logout`, is refused with `403` when `Sec-Fetch-Site` is not
