@@ -1,0 +1,20 @@
+# Cloud-only remove-first ladder, explicitly opt-in until add-first (#57).
+# Removing the old instance does not prove replacement capacity exists.
+# Bind only with replacement.strategy: RemoveFirst and a qualified fault/pool.
+# Provider eligibility is checked before cordon and before disruptive actions.
+name: cloud-replace
+target: node
+cooldown: 6h
+steps:
+  - name: cordon
+    action: platform.cordon
+  - name: drain
+    action: platform.drain
+    approval: required
+    timeout: 30m
+  - name: replace
+    action: platform.replace_node
+    approval: required
+    timeout: 20m
+# Cloud verification requires correlated replacement evidence. Termination or
+# disappearance alone never resolves the incident. Do not uncordon here.
