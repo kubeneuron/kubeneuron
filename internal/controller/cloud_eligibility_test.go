@@ -112,3 +112,48 @@ func TestCloudRefusalPreventsStepAdmission(t *testing.T) {
 		t.Fatalf("unavailable step admitted: state=%s calls=%v", inc.State, p.Calls())
 	}
 }
+
+type countingCloudObserver struct {
+	recyclePlatform
+	reads int
+}
+
+func (p *countingCloudObserver) CloudNode(_ context.Context, node string) (cloud.NodeRef, error) {
+	p.reads++
+	pin := *recycleTestPin()
+	pin.Node = node
+	return cloud.NodeRef{Identity: pin}, nil
+}
+func TestRepeatedSignalsCaptureCloudIdentityOnlyOnce(t *testing.T) {
+	c, st := newIngestTestController(t)
+	p := &countingCloudObserver{}
+	c.platform = p
+	ctx := context.Background()
+	sig := signal(types.ClassFellOffBus, "n1", "GPU-1")
+	for range 5 {
+		if err := c.ingest(ctx, sig); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if p.reads != 1 {
+		t.Fatalf("live identity reads=%d, want 1", p.reads)
+	}
+	inc, err := st.GetOpenIncident(ctx, sig.Target, sig.Class)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inc.CloudIdentity == nil || inc.CloudIdentity.InstanceID != "i-old" || inc.SignalSeen != 5 {
+		t.Fatalf("incident=%+v", inc)
+	}
+	// Legacy incidents are not backfilled by later signals.
+	inc.CloudIdentity = nil
+	if err := st.UpdateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ingest(ctx, sig); err != nil {
+		t.Fatal(err)
+	}
+	if p.reads != 1 {
+		t.Fatal("legacy incident triggered an identity lookup")
+	}
+}

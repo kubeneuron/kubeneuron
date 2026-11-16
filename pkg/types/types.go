@@ -277,18 +277,15 @@ func (s IncidentState) Halted() bool {
 // Incident is one open problem on one target. At most one non-terminal
 // incident exists per (Target, Class); correlated signals attach to it.
 type Incident struct {
-	// CloudIdentity is the original target pinned when the incident opens.
-	// Nil on legacy/unidentified incidents; never infer authorization from it.
-	CloudIdentity *cloud.NodeIdentity `json:"cloud_identity,omitempty"`
-	ID            string              `json:"id"`
-	Target        Target              `json:"target"`
-	Class         ProblemClass        `json:"class"`
-	State         IncidentState       `json:"state"`
-	Playbook      string              `json:"playbook,omitempty"`
-	StepIndex     int                 `json:"step_index"`
-	Attempt       int                 `json:"attempt"`
-	DryRun        bool                `json:"dry_run"`
-	SignalSeen    int                 `json:"signals_seen"`
+	ID         string        `json:"id"`
+	Target     Target        `json:"target"`
+	Class      ProblemClass  `json:"class"`
+	State      IncidentState `json:"state"`
+	Playbook   string        `json:"playbook,omitempty"`
+	StepIndex  int           `json:"step_index"`
+	Attempt    int           `json:"attempt"`
+	DryRun     bool          `json:"dry_run"`
+	SignalSeen int           `json:"signals_seen"`
 	// Vendor is the accelerator vendor the originating fault named, empty
 	// when the signal did not say (every XID, every alert, and every row
 	// that predates the column). It exists so a preflight can tell an
@@ -322,6 +319,9 @@ type Incident struct {
 	// operations (acknowledge and resolve) rather than asking API clients to
 	// infer concurrency from a timestamp.
 	Version int `json:"resource_version"`
+	// CloudIdentity is the original target pinned when the incident opens.
+	// Nil on legacy/unidentified incidents; never infer authorization from it.
+	CloudIdentity *cloud.NodeIdentity `json:"cloud_identity,omitempty"`
 }
 
 // Clone returns a deep copy. Use it whenever an incident crosses a goroutine
@@ -332,6 +332,10 @@ func (i *Incident) Clone() *Incident {
 		return nil
 	}
 	c := *i
+	if i.CloudIdentity != nil {
+		pin := *i.CloudIdentity
+		c.CloudIdentity = &pin
+	}
 	if i.ResolvedAt != nil {
 		t := *i.ResolvedAt
 		c.ResolvedAt = &t

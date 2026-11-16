@@ -664,7 +664,7 @@ func (c *Controller) CompleteAction(r *http.Request, node, actionID, leaseToken 
 // Its incident and audit mutations share a transaction even for direct signal
 // sources, matching the durable outbox path below.
 func (c *Controller) ingest(ctx context.Context, sig types.Signal) error {
-	identity := c.captureCloudIdentity(ctx, sig.Target.Node)
+	identity := c.captureCloudIdentity(ctx, sig)
 	var outcome ingestOutcome
 	if err := c.store.WithTx(ctx, func(tx store.Tx) error {
 		var err error
@@ -680,7 +680,7 @@ func (c *Controller) ingest(ctx context.Context, sig types.Signal) error {
 // incident/audit mutation. A crash can therefore leave either both changes
 // committed or neither; a reclaimed item can never increase SignalSeen twice.
 func (c *Controller) ingestClaimedEvent(ctx context.Context, claimed *store.ClaimedEvent, sig types.Signal) error {
-	identity := c.captureCloudIdentity(ctx, sig.Target.Node)
+	identity := c.captureCloudIdentity(ctx, sig)
 	var outcome ingestOutcome
 	if err := c.eventOutbox.ProcessClaimedEvent(ctx, claimed.OutboxID, claimed.LeaseToken, func(tx store.Tx) error {
 		var err error
@@ -869,14 +869,20 @@ func orNone(s string) string {
 // remain available during API outages; missing evidence leaves the incident
 // unpinned and therefore ineligible for cloud mutation. Later signals never
 // overwrite a pin or silently backfill a legacy incident after approval.
-func (c *Controller) captureCloudIdentity(ctx context.Context, node string) *cloud.NodeIdentity {
+func (c *Controller) captureCloudIdentity(ctx context.Context, sig types.Signal) *cloud.NodeIdentity {
+	// Only a new incident needs a snapshot. The transaction checks again: a
+	// concurrent opener makes this read redundant, while a concurrent closure
+	// can leave a new incident unpinned (safe refusal, never silent re-pinning).
+	if _, err := c.store.GetOpenIncident(ctx, sig.Target, sig.Class); !errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
 	observer, ok := c.platform.(platform.CloudNodeObserver)
 	if !ok {
 		return nil
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	ref, err := observer.CloudNode(readCtx, node)
+	ref, err := observer.CloudNode(readCtx, sig.Target.Node)
 	if err != nil {
 		return nil
 	}
