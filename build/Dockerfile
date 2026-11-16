@@ -50,19 +50,40 @@ ENTRYPOINT ["/kubeneuron-controller"]
 # The agent runs privileged with hostPID in the managed DaemonSet and must
 # read /dev/kmsg, so it stays root; the runtime pod spec is the authority.
 #
-# busybox supplies one binary the agent cannot do without: nsenter. Rebooting
-# the node means asking the host's init, and the host's init is only reachable
-# through PID 1's namespaces — a distroless image has no way to get there, so
-# the Reboot action failed with exit 127 on real hardware. busybox is static
-# (uclibc), so it needs no loader in an image that has none.
-FROM busybox:1.38.0-uclibc@sha256:b2e35951f72501f6a99f1bf45bcfe6d4795be08c518c2f97d0ed2fe776958a3b AS busybox
-# Record the version of the actual binary being shipped, for each architecture.
-RUN busybox --help > /busybox.help 2>&1 \
- && head -n 1 /busybox.help > /busybox.VERSION \
- && grep -Eq '^BusyBox v1\.38\.0 ' /busybox.VERSION \
- && version=$(sed -n 's/^BusyBox v\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' /busybox.VERSION) \
- && printf 'Upstream source: https://busybox.net/downloads/busybox-%s.tar.bz2\nSee OFFER for corresponding source requests.\n' "$version" > /busybox.SOURCE \
- && rm /busybox.help
+# The agent needs one host tool it cannot do without: nsenter. Rebooting the
+# node means asking the host's init, and the host's init is only reachable
+# through PID 1's namespaces — a distroless image has no way to get there.
+#
+# nsenter is toybox's (0BSD), built here from a checksum-pinned source as a
+# single static binary against musl (MIT), so the image carries no GPL or
+# LGPL component and needs no loader for it. The stage runs on the target
+# platform, so each architecture compiles natively.
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS nsenter
+ARG TOYBOX_VERSION=0.8.13
+ARG TOYBOX_SHA256=9d4c124d7d731a2db399f6278baa2b42c2e3511f610c6ad30cc3f1a52581334b
+ARG MUSL_VERSION=1.2.5
+ARG MUSL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
+RUN apk add --no-cache bash build-base curl linux-headers
+WORKDIR /src
+RUN curl -fsSLo toybox.tar.gz "https://landley.net/toybox/downloads/toybox-${TOYBOX_VERSION}.tar.gz" \
+ && echo "${TOYBOX_SHA256}  toybox.tar.gz" | sha256sum -c - \
+ && curl -fsSLo musl.tar.gz "https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz" \
+ && echo "${MUSL_SHA256}  musl.tar.gz" | sha256sum -c - \
+ && apk list -I musl | grep -q "^musl-${MUSL_VERSION}-" \
+ && tar xzf toybox.tar.gz && tar xzf musl.tar.gz "musl-${MUSL_VERSION}/COPYRIGHT"
+# Alpine's fortify headers do not compile toybox; the fortification is a
+# build-time hardening of this one small binary, not a licence matter.
+RUN cd "toybox-${TOYBOX_VERSION}" \
+ && LDFLAGS=--static CFLAGS="-Os -U_FORTIFY_SOURCE" bash scripts/single.sh nsenter \
+ && ! readelf -l nsenter | grep -q INTERP \
+ && mkdir -p /out/licenses/toybox /out/licenses/musl \
+ && install -m 0755 nsenter /out/nsenter \
+ && cp LICENSE /out/licenses/toybox/LICENSE \
+ && cp "/src/musl-${MUSL_VERSION}/COPYRIGHT" /out/licenses/musl/COPYRIGHT \
+ && printf 'toybox %s\n' "${TOYBOX_VERSION}" > /out/licenses/toybox/VERSION \
+ && printf 'https://landley.net/toybox/downloads/toybox-%s.tar.gz\nsha256 %s\n' "${TOYBOX_VERSION}" "${TOYBOX_SHA256}" > /out/licenses/toybox/SOURCE \
+ && printf 'musl %s (statically linked into nsenter)\n' "${MUSL_VERSION}" > /out/licenses/musl/VERSION \
+ && printf 'https://musl.libc.org/releases/musl-%s.tar.gz\nsha256 %s\n' "${MUSL_VERSION}" "${MUSL_SHA256}" > /out/licenses/musl/SOURCE
 
 # DCGM from NVIDIA packages is not redistributable in this image. Operators
 # may explicitly supply a compatible client through hostTooling.dcgmiPath.
@@ -70,10 +91,8 @@ FROM gcr.io/distroless/base-debian12 AS agent
 LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron" \
       org.opencontainers.image.description="KubeNeuron node agent" \
       org.opencontainers.image.licenses="Apache-2.0"
-COPY --from=busybox /bin/busybox /bin/nsenter
-COPY build/licenses/busybox/ /licenses/native/busybox/
-COPY --from=busybox /busybox.VERSION /licenses/native/busybox/VERSION
-COPY --from=busybox /busybox.SOURCE /licenses/native/busybox/SOURCE
+COPY --from=nsenter /out/nsenter /bin/nsenter
+COPY --from=nsenter /out/licenses/ /licenses/native/
 COPY build/licenses/native-SOURCES /licenses/native/SOURCES
 COPY --from=build /out/kubeneuron-agent /kubeneuron-agent
 COPY NOTICE THIRD_PARTY_LICENSES LICENSE /licenses/

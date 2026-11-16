@@ -131,7 +131,7 @@ note "asset allow-list"
 shopt -s nullglob
 for f in "$work"/*; do
 	case "$(basename "$f")" in
-	kubeneuronctl-* | native-sources-busybox-*.tar.gz | sbom-* | images.txt | install.sh | install-*.sh | \
+	kubeneuronctl-* | sbom-* | images.txt | install.sh | install-*.sh | \
 		kubeneuron-install-*.yaml | checksums-*.txt | checksums-*.txt.sig | checksums-*.txt.pem) ;;
 	*) bad "unexpected asset published to users: $(basename "$f")" ;;
 	esac
@@ -171,7 +171,6 @@ require_one() {
 		bad "no ${what} in the release (${pattern}); every check that reads it silently did nothing"
 }
 require_one "kubeneuronctl archive" "$work/kubeneuronctl-*"
-require_one "BusyBox source archive" "$work/native-sources-busybox-*.tar.gz"
 require_one "SBOM" "$work/sbom-*"
 require_one "image digest table" "$work/images.txt"
 require_one "install manifest" "$work/kubeneuron-install-*.yaml"

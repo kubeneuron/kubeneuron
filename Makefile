@@ -406,6 +406,5 @@ licenses:
 	GO=$(GO) python3 -I hack/third-party-licenses.py
 
 verify-licenses:
-	python3 -I hack/test_native_sources.py
 	python3 -I hack/test_third_party_licenses.py
 	GO=$(GO) python3 -I hack/third-party-licenses.py --check

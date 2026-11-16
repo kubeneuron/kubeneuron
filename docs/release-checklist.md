@@ -127,27 +127,15 @@ tagging the release.
 
 ## Native component source retention
 
-Before publishing an image, run `python3 -I hack/bundle-native-sources.py
---output dist/native-sources-busybox-1.38.0.tar.gz` (on one line). The source
-lock in `build/licenses/busybox/sources.lock.json` must match the Dockerfile
-image digest. It records the BusyBox source, linked uClibc source, Buildroot
-and the per-architecture upstream build recipes and patches, with SHA-256
-checksums. Changing the image requires reviewing and updating that lock.
+The one native component KubeNeuron builds into the agent image is toybox
+`nsenter` (0BSD), built from a checksum-pinned source and statically linked
+against musl (MIT); its licence texts and source locations ship in
+`/licenses/native/`. Neither licence asks for corresponding source, so
+releases carry no native source archive. The distroless base image's Debian
+packages keep their own licences.
 
-The release workflow publishes this archive as a permanent release asset,
-covered by the release checksum/signature. The one-day Actions artifact is
-only a transport copy. Confirm the published archive can be downloaded and
-retain an owner-controlled backup before distributing images. Keep both
-copies for at least three years after the last distribution of any image
-containing this BusyBox binary; do not delete them when retiring a release.
-Record the last distribution date in the private release records. Review the
-complete corresponding-source contents, including linked-library obligations,
-when changing the build. An upstream download link alone is not fulfillment
-of the written offer in the image.
-
-The agent must not contain NVIDIA's packaged `dcgmi`, its DCGM libraries, or
-its added `libgcc_s` dependency. Package license review did not permit their
-redistribution; retaining license files does not grant that permission.
-`make verify-image` checks that DCGM binaries and their copied legal files
-are absent. Users must supply their own compatible client explicitly through
-`hostTooling.dcgmiPath` when DCGM runtime attestation is required.
+Agent images up to v0.8.0 contained BusyBox (GPL-2.0) and uClibc-ng
+(LGPL-2.1). Keep the `native-sources-busybox-*.tar.gz` assets of those
+releases, and an owner-controlled backup of them, for at least three years
+after the last distribution of any of those images, even after the images are
+withdrawn. Record the last distribution date in the private release records.

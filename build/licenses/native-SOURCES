@@ -1,6 +1,7 @@
 Native third-party components remain under their respective licenses.
 
-BusyBox: see busybox/VERSION, busybox/SOURCE, busybox/LICENSE and busybox/OFFER.
-The image digest and source/build inputs are recorded in busybox/sources.lock.json.
-The statically linked uClibc-ng license is in busybox/UCLIBC-LICENSE.
-KubeNeuron releases retain a native-sources-busybox-1.38.0.tar.gz source asset.
+toybox nsenter (0BSD): see toybox/VERSION, toybox/SOURCE and toybox/LICENSE.
+It is built from the checksum-pinned source named in toybox/SOURCE as one
+static binary.
+musl (MIT), statically linked into nsenter: see musl/VERSION, musl/SOURCE and
+musl/COPYRIGHT.

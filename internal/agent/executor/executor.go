@@ -64,8 +64,8 @@ func defaultRebootCommand() []string {
 	return []string{nsenterPath, "-t", "1", "-m", "-u", "-i", "-n", "-p", "--", "systemctl", "reboot"}
 }
 
-// nsenterPath is the static nsenter shipped in the agent image. It is busybox
-// installed under the applet's own name, so argv[0] selects nsenter.
+// nsenterPath is the static nsenter shipped in the agent image: toybox's
+// nsenter, built from source as a single static binary (build/Dockerfile).
 const nsenterPath = "/bin/nsenter"
 
 // Options controls capabilities that must never be enabled implicitly.

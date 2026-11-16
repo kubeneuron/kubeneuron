@@ -96,10 +96,18 @@ image_contains() {
 }
 image_contains "$agent_image" /bin/nsenter ||
 	bad "$agent_image has no /bin/nsenter; the Reboot action will exit 127 on a real node"
-for path in busybox/LICENSE busybox/VERSION busybox/SOURCE busybox/OFFER busybox/sources.lock.json busybox/UCLIBC-LICENSE SOURCES; do
+for path in toybox/LICENSE toybox/VERSION toybox/SOURCE musl/COPYRIGHT musl/VERSION musl/SOURCE SOURCES; do
     image_contains "$agent_image" "/licenses/native/$path" ||
         bad "$agent_image lacks /licenses/native/$path"
 done
+# nsenter must actually enter PID 1's namespaces with the exact flags the
+# agent uses (internal/agent/executor), not merely be present.
+note "the agent's nsenter enters PID 1's namespaces"
+if ! out=$("$DOCKER_BIN" run --rm --privileged --pid=host --entrypoint /bin/nsenter "$agent_image" \
+	-t 1 -m -u -i -n -p -- true 2>&1); then
+	bad "$agent_image nsenter -t 1 -m -u -i -n -p -- true failed: $out"
+fi
+
 # Export failures must fail this negative check too, never count as absence.
 cid=$("$DOCKER_BIN" create "$agent_image")
 listing=$(mktemp)
@@ -109,6 +117,8 @@ elif ! tar -tf "$listing.tar" >"$listing"; then
     bad "could not list $agent_image to check excluded native components"
 elif grep -Eq '(^|/)(dcgmi|libdcgm[^/]*|libgcc_s[^/]*|datacenter-gpu-manager[^/]*|libgcc-s1|dcgm)(/|$)' "$listing"; then
     bad "$agent_image contains excluded DCGM/libgcc components or legal files"
+elif grep -Eiq '(^|/)([^/]*busybox[^/]*|[^/]*uclibc[^/]*|OFFER)(/|$)' "$listing"; then
+    bad "$agent_image contains BusyBox/uClibc components or their GPL/LGPL legal files"
 fi
 rm -f "$listing" "$listing.tar"
 "$DOCKER_BIN" rm -f "$cid" >/dev/null

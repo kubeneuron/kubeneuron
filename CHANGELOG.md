@@ -20,6 +20,16 @@ API is `v1alpha1`.
 
 ### Security
 
+- **No GPL or LGPL component in the agent image.** The agent's `nsenter`
+  (the one host tool it needs, to reach the host's init through PID 1's
+  namespaces) is now toybox's (0BSD), built in `build/Dockerfile` from a
+  checksum-pinned source as a single static binary against musl (MIT),
+  natively for amd64 and arm64. BusyBox and uClibc-ng are gone from the image,
+  and with them the per-release BusyBox source archive. `make verify-image`
+  fails on any BusyBox or uClibc file and runs the real
+  `nsenter -t 1 -m -u -i -n -p --` in the built image. The source archives of
+  the BusyBox-based releases up to v0.8.0 stay retained (release checklist).
+
 - **A live file configuration must name the nodes destructive steps may run
   on, and file playbooks are decoded strictly.** With `dry_run: false`, an
   empty `destructive_execution_node_selector` used to mean "every node"; the

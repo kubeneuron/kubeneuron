@@ -45,7 +45,17 @@ bad() { echo "IMAGE CHECK FAILED: $*" >&2; fail=1; }
 ''' + GATE + '\nexit "$fail"'], env=env, capture_output=True, text=True)
 
     def test_clean_image_passes(self):
-        self.assertEqual(self.run_gate(['bin/nsenter', 'licenses/native/busybox/LICENSE']).returncode, 0)
+        self.assertEqual(self.run_gate(['bin/nsenter', 'licenses/native/toybox/LICENSE',
+                                        'licenses/native/musl/COPYRIGHT']).returncode, 0)
+
+    def test_gpl_components_fail(self):
+        for path in ['bin/busybox', 'licenses/native/busybox/LICENSE',
+                     'licenses/native/busybox/UCLIBC-LICENSE', 'licenses/native/busybox/OFFER',
+                     'lib/libuClibc-1.0.so']:
+            with self.subTest(path=path):
+                result = self.run_gate([path])
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('BusyBox/uClibc', result.stderr)
 
     def test_forbidden_components_fail_in_any_directory(self):
         for path in ['usr/bin/dcgmi', 'usr/lib/aarch64-linux-gnu/libdcgm.so.4',
