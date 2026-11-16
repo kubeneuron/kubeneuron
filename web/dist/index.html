@@ -965,7 +965,7 @@ async function renderDrawer(){
     ["Playbook", `${esc(inc.playbook || "—")} <span class="dimmer">step ${inc.step_index}, attempt ${inc.attempt}</span>`],
     ["Mode", inc.dry_run ? "dry-run (no real side effects)" : "live"],
     ["Recovery eligibility", d.recovery_availability
-      ? `${esc(d.recovery_availability.status)} <span class="dimmer">(last assessed ${esc(d.recovery_availability.observed_at || "unknown")})</span><br>${esc(d.recovery_availability.reason || "")}<br><span class="dimmer">Assessment only; execution checks still apply.</span>`
+      ? `${esc(d.recovery_availability.status)} [${esc(d.recovery_availability.source || "unknown")}] <span class="dimmer">(last assessed ${esc(d.recovery_availability.observed_at || "unknown")})</span><br>${esc(d.recovery_availability.reason || "")}<br><span class="dimmer">Assessment only; execution checks still apply.</span>`
       : '<span class="dimmer">unknown — no recorded assessment</span>'],
     ["Signals", String(inc.signals_seen)],
     ["Opened", `<span class="mono">${esc((inc.opened_at||"").replace("T"," ").slice(0,19))}</span>`],

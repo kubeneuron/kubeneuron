@@ -7,6 +7,7 @@ import "time"
 // RecoveryAvailability is the last recorded eligibility assessment, not a
 // current authorization or evidence that recovery succeeded.
 type RecoveryAvailability struct {
+	Source     string    `json:"source"`
 	Status     string    `json:"status"`
 	Reason     string    `json:"reason"`
 	ObservedAt time.Time `json:"observed_at"`
@@ -15,21 +16,36 @@ type RecoveryAvailability struct {
 // RecoveryAvailabilityFromAudit projects persisted assessments in audit order.
 // No assessment is unknown; it must never be rendered as available.
 func RecoveryAvailabilityFromAudit(trail []*AuditEntry) *RecoveryAvailability {
+	seen := map[string]bool{}
+	var eligible *RecoveryAvailability
 	for i := len(trail) - 1; i >= 0; i-- {
 		e := trail[i]
 		if e == nil {
 			continue
 		}
-		status := ""
+		source, status := "", ""
 		switch e.Action {
+		case "provider-recovery-unavailable":
+			source, status = "provider", "unavailable"
+		case "provider-recovery-available":
+			source, status = "provider", "eligible"
 		case "recovery-unavailable":
-			status = "unavailable"
+			source, status = "policy", "unavailable"
 		case "recovery-available":
-			status = "eligible"
+			source, status = "policy", "eligible"
 		}
-		if status != "" {
-			return &RecoveryAvailability{Status: status, Reason: e.Result, ObservedAt: e.Time}
+		if source == "" || seen[source] {
+			continue
+		}
+		seen[source] = true
+		assessment := &RecoveryAvailability{Source: source, Status: status, Reason: e.Result, ObservedAt: e.Time}
+		// A satisfied condition cannot clear another condition's denial.
+		if status == "unavailable" {
+			return assessment
+		}
+		if eligible == nil {
+			eligible = assessment
 		}
 	}
-	return nil
+	return eligible
 }

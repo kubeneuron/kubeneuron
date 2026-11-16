@@ -36,21 +36,21 @@ func (c *Controller) holdUnavailableCloudRecovery(ctx context.Context, inc *type
 	}
 	var last *types.AuditEntry
 	for i := len(trail) - 1; i >= 0; i-- {
-		if trail[i].Action == "recovery-unavailable" || trail[i].Action == "recovery-available" {
+		if trail[i].Action == "provider-recovery-unavailable" || trail[i].Action == "provider-recovery-available" {
 			last = trail[i]
 			break
 		}
 	}
 	if allowed {
-		if last != nil && last.Action == "recovery-unavailable" {
-			if err := c.appendAudit(ctx, inc, "system", "recovery-available", "provider eligibility restored for the pinned identity; step authorization still required"); err != nil {
+		if last != nil && last.Action == "provider-recovery-unavailable" {
+			if err := c.appendAudit(ctx, inc, "system", "provider-recovery-available", "provider eligibility restored for the pinned identity; step authorization still required"); err != nil {
 				return true, err
 			}
 		}
 		return false, nil
 	}
-	if last != nil && last.Action == "recovery-unavailable" && last.Result == reason {
+	if last != nil && last.Action == "provider-recovery-unavailable" && last.Result == reason {
 		return true, nil
 	}
-	return true, c.appendAudit(ctx, inc, "system", "recovery-unavailable", reason)
+	return true, c.appendAudit(ctx, inc, "system", "provider-recovery-unavailable", reason)
 }

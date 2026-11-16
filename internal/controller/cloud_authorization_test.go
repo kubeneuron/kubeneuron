@@ -44,7 +44,7 @@ func TestCloudAuthorizationHoldsBeforeCordonAndApprovalResume(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(trail) != 1 || trail[0].Action != "recovery-unavailable" || trail[0].Result == "" {
+			if len(trail) != 1 || trail[0].Action != "provider-recovery-unavailable" || trail[0].Result == "" {
 				t.Fatalf("audit=%+v", trail)
 			}
 		})
@@ -106,7 +106,7 @@ func TestCloudEligibilityRestoredOnlyForPinnedIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(trail) != 3 || trail[0].Action != "recovery-unavailable" || trail[1].Action != "recovery-available" || trail[2].Action != "recovery-unavailable" {
+	if len(trail) != 3 || trail[0].Action != "provider-recovery-unavailable" || trail[1].Action != "provider-recovery-available" || trail[2].Action != "provider-recovery-unavailable" {
 		t.Fatalf("audit=%+v", trail)
 	}
 }

@@ -263,7 +263,7 @@ func cmdIncidents() *cobra.Command {
 			inc.Playbook, inc.StepIndex, inc.Attempt, inc.DryRun, inc.SignalSeen,
 			inc.OpenedAt.Format(time.RFC3339))
 		if recovery := types.RecoveryAvailabilityFromAudit(detail.Audit); recovery != nil {
-			_, _ = fmt.Fprintf(out, "recovery:  %s (assessed %s)\nreason:    %s\n", recovery.Status, recovery.ObservedAt.Format(time.RFC3339), recovery.Reason)
+			_, _ = fmt.Fprintf(out, "recovery:  %s [%s] (assessed %s)\nreason:    %s\n", recovery.Status, recovery.Source, recovery.ObservedAt.Format(time.RFC3339), recovery.Reason)
 		}
 		_, _ = fmt.Fprintln(out, "\naudit trail:")
 		w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
