@@ -27,6 +27,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
 	"github.com/kubeneuron/kubeneuron/internal/store"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -663,10 +664,11 @@ func (c *Controller) CompleteAction(r *http.Request, node, actionID, leaseToken 
 // Its incident and audit mutations share a transaction even for direct signal
 // sources, matching the durable outbox path below.
 func (c *Controller) ingest(ctx context.Context, sig types.Signal) error {
+	identity := c.captureCloudIdentity(ctx, sig.Target.Node)
 	var outcome ingestOutcome
 	if err := c.store.WithTx(ctx, func(tx store.Tx) error {
 		var err error
-		outcome, err = c.ingestTx(ctx, tx, sig)
+		outcome, err = c.ingestTx(ctx, tx, sig, identity)
 		return err
 	}); err != nil {
 		return err
@@ -678,10 +680,11 @@ func (c *Controller) ingest(ctx context.Context, sig types.Signal) error {
 // incident/audit mutation. A crash can therefore leave either both changes
 // committed or neither; a reclaimed item can never increase SignalSeen twice.
 func (c *Controller) ingestClaimedEvent(ctx context.Context, claimed *store.ClaimedEvent, sig types.Signal) error {
+	identity := c.captureCloudIdentity(ctx, sig.Target.Node)
 	var outcome ingestOutcome
 	if err := c.eventOutbox.ProcessClaimedEvent(ctx, claimed.OutboxID, claimed.LeaseToken, func(tx store.Tx) error {
 		var err error
-		outcome, err = c.ingestTx(ctx, tx, sig)
+		outcome, err = c.ingestTx(ctx, tx, sig, identity)
 		return err
 	}); err != nil {
 		return err
@@ -692,11 +695,11 @@ func (c *Controller) ingestClaimedEvent(ctx context.Context, claimed *store.Clai
 // ingestTx performs the durable incident mutation for one signal. It does not
 // notify or update metrics: those effects happen only after the transaction
 // commits, so an outbox retry has no duplicated incident accounting.
-func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal) (ingestOutcome, error) {
+func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal, identity *cloud.NodeIdentity) (ingestOutcome, error) {
 	inc, err := tx.GetOpenIncident(ctx, sig.Target, sig.Class)
 	switch {
 	case err == store.ErrNotFound:
-		opened, err := c.openIncidentTx(ctx, tx, sig)
+		opened, err := c.openIncidentTx(ctx, tx, sig, identity)
 		return ingestOutcome{opened: opened}, err
 	case err != nil:
 		return ingestOutcome{}, err
@@ -771,7 +774,7 @@ type ingestOutcome struct {
 	opened *types.Incident
 }
 
-func (c *Controller) openIncidentTx(ctx context.Context, tx store.Tx, sig types.Signal) (*types.Incident, error) {
+func (c *Controller) openIncidentTx(ctx context.Context, tx store.Tx, sig types.Signal, identity *cloud.NodeIdentity) (*types.Incident, error) {
 	now := time.Now()
 	dryRun := true
 	if limits := c.runtimeConfig(ctx).SafetyLimits; limits != nil {
@@ -779,6 +782,7 @@ func (c *Controller) openIncidentTx(ctx context.Context, tx store.Tx, sig types.
 	}
 	inc := &types.Incident{
 		ID:             incidentID(sig, now),
+		CloudIdentity:  identity,
 		Target:         sig.Target,
 		Class:          sig.Class,
 		State:          types.StateOpen,
@@ -859,4 +863,25 @@ func orNone(s string) string {
 		return "none (observe only)"
 	}
 	return s
+}
+
+// captureCloudIdentity runs before the database transaction. Detection must
+// remain available during API outages; missing evidence leaves the incident
+// unpinned and therefore ineligible for cloud mutation. Later signals never
+// overwrite a pin or silently backfill a legacy incident after approval.
+func (c *Controller) captureCloudIdentity(ctx context.Context, node string) *cloud.NodeIdentity {
+	observer, ok := c.platform.(platform.CloudNodeObserver)
+	if !ok {
+		return nil
+	}
+	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	ref, err := observer.CloudNode(readCtx, node)
+	if err != nil {
+		return nil
+	}
+	if err := ref.Identity.Validate(); err != nil {
+		return nil
+	}
+	return &ref.Identity
 }

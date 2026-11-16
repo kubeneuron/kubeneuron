@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
 const (
@@ -275,15 +277,18 @@ func (s IncidentState) Halted() bool {
 // Incident is one open problem on one target. At most one non-terminal
 // incident exists per (Target, Class); correlated signals attach to it.
 type Incident struct {
-	ID         string        `json:"id"`
-	Target     Target        `json:"target"`
-	Class      ProblemClass  `json:"class"`
-	State      IncidentState `json:"state"`
-	Playbook   string        `json:"playbook,omitempty"`
-	StepIndex  int           `json:"step_index"`
-	Attempt    int           `json:"attempt"`
-	DryRun     bool          `json:"dry_run"`
-	SignalSeen int           `json:"signals_seen"`
+	// CloudIdentity is the original target pinned when the incident opens.
+	// Nil on legacy/unidentified incidents; never infer authorization from it.
+	CloudIdentity *cloud.NodeIdentity `json:"cloud_identity,omitempty"`
+	ID            string              `json:"id"`
+	Target        Target              `json:"target"`
+	Class         ProblemClass        `json:"class"`
+	State         IncidentState       `json:"state"`
+	Playbook      string              `json:"playbook,omitempty"`
+	StepIndex     int                 `json:"step_index"`
+	Attempt       int                 `json:"attempt"`
+	DryRun        bool                `json:"dry_run"`
+	SignalSeen    int                 `json:"signals_seen"`
 	// Vendor is the accelerator vendor the originating fault named, empty
 	// when the signal did not say (every XID, every alert, and every row
 	// that predates the column). It exists so a preflight can tell an

@@ -407,20 +407,24 @@ func (q *Queries) execCount(ctx context.Context, query string, args ...any) (int
 // --- incidents ---
 
 func (q *Queries) CreateIncident(ctx context.Context, inc *types.Incident) error {
+	identity, err := json.Marshal(inc.CloudIdentity)
+	if err != nil {
+		return err
+	}
 	stateChanged := inc.StateChangedAt
 	if stateChanged.IsZero() {
 		stateChanged = inc.OpenedAt
 	}
-	_, err := q.db.ExecContext(ctx, `
+	_, err = q.db.ExecContext(ctx, `
 		INSERT INTO incidents (id, node, gpu_uuid, gpu_index, pci_addr, class, state, playbook,
 		                       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
-		                       vendor, opened_at, updated_at, state_changed_at, version)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		                       vendor, opened_at, updated_at, state_changed_at, version, cloud_identity)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		inc.ID, inc.Target.Node, inc.Target.GPUUUID, inc.Target.GPUIndex,
 		types.NormalizePCIAddress(inc.Target.PCIAddr),
 		string(inc.Class), string(inc.State), inc.Playbook,
 		inc.StepIndex, inc.Attempt, b2i(inc.DryRun), inc.SignalSeen, b2i(inc.RemediationSlotHeld), inc.ApprovalEpoch,
-		string(inc.Vendor), ts(inc.OpenedAt), ts(inc.UpdatedAt), ts(stateChanged), inc.Version)
+		string(inc.Vendor), ts(inc.OpenedAt), ts(inc.UpdatedAt), ts(stateChanged), inc.Version, string(identity))
 	return err
 }
 
@@ -431,6 +435,10 @@ func (q *Queries) CreateIncident(ctx context.Context, inc *types.Incident) error
 // when it exists with a newer version. On success inc.Version is advanced to the
 // value just persisted so the caller can keep writing without re-reading.
 func (q *Queries) UpdateIncident(ctx context.Context, inc *types.Incident) error {
+	identity, err := json.Marshal(inc.CloudIdentity)
+	if err != nil {
+		return err
+	}
 	var resolved any
 	if inc.ResolvedAt != nil {
 		resolved = ts(*inc.ResolvedAt)
@@ -438,11 +446,11 @@ func (q *Queries) UpdateIncident(ctx context.Context, inc *types.Incident) error
 	res, err := q.db.ExecContext(ctx, `
 		UPDATE incidents SET state=?, playbook=?, step_index=?, attempt=?, dry_run=?,
 		                     signals_seen=?, remediation_slot_held=?, approval_epoch=?, vendor=?, updated_at=?, state_changed_at=?, resolved_at=?,
-		                     version=version+1
+		                     version=version+1, cloud_identity=?
 		WHERE id=? AND version=?`,
 		string(inc.State), inc.Playbook, inc.StepIndex, inc.Attempt, b2i(inc.DryRun),
 		inc.SignalSeen, b2i(inc.RemediationSlotHeld), inc.ApprovalEpoch, string(inc.Vendor),
-		ts(inc.UpdatedAt), ts(inc.StateChangedAt), resolved, inc.ID, inc.Version)
+		ts(inc.UpdatedAt), ts(inc.StateChangedAt), resolved, string(identity), inc.ID, inc.Version)
 	if err != nil {
 		return err
 	}
@@ -715,24 +723,27 @@ func (q *Queries) CountIncidentsByState(ctx context.Context) (map[types.Incident
 const incidentSelect = `
 	SELECT id, node, gpu_uuid, gpu_index, pci_addr, class, state, playbook,
 	       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
-	       vendor, opened_at, updated_at, state_changed_at, resolved_at, version
+	       vendor, opened_at, updated_at, state_changed_at, resolved_at, version, cloud_identity
 	FROM incidents`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
 func scanIncident(r rowScanner) (*types.Incident, error) {
 	var inc types.Incident
-	var class, state, vendor, opened, updated, stateChanged string
+	var class, state, vendor, opened, updated, stateChanged, identity string
 	var dryRun, slotHeld int
 	var resolved sql.NullString
 	err := r.Scan(&inc.ID, &inc.Target.Node, &inc.Target.GPUUUID, &inc.Target.GPUIndex,
 		&inc.Target.PCIAddr, &class, &state, &inc.Playbook, &inc.StepIndex, &inc.Attempt, &dryRun,
-		&inc.SignalSeen, &slotHeld, &inc.ApprovalEpoch, &vendor, &opened, &updated, &stateChanged, &resolved, &inc.Version)
+		&inc.SignalSeen, &slotHeld, &inc.ApprovalEpoch, &vendor, &opened, &updated, &stateChanged, &resolved, &inc.Version, &identity)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
 	if err != nil {
 		return nil, err
+	}
+	if err := json.Unmarshal([]byte(identity), &inc.CloudIdentity); err != nil {
+		return nil, fmt.Errorf("decode incident cloud identity: %w", err)
 	}
 	inc.Class = types.ProblemClass(class)
 	inc.State = types.IncidentState(state)

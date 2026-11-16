@@ -19,8 +19,24 @@ import (
 
 	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
 	"github.com/kubeneuron/kubeneuron/internal/topology"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
+
+// CloudNodeObserver reads a live Kubernetes/cloud identity for incident pins.
+// Missing identity is an error, never permission to target the current node.
+type CloudNodeObserver interface {
+	CloudNode(context.Context, string) (cloud.NodeRef, error)
+}
+
+// GuardedNodeRecycler never resolves a mutation target from a name alone.
+// Eligibility is advisory; each mutation repeats the checks against its pin.
+type GuardedNodeRecycler interface {
+	CloudNodeObserver
+	RecoveryEligibility(context.Context, cloud.NodeIdentity) (cloud.RecoveryEligibility, error)
+	RecyclePinnedNode(context.Context, cloud.NodeIdentity) error
+	ReplacePinnedNode(context.Context, cloud.NodeIdentity) error
+}
 
 // NodeEventType describes an inventory change.
 type NodeEventType string
