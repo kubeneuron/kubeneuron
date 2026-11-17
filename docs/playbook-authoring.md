@@ -449,7 +449,7 @@ approval does not lift them:
   `RemoveFirst` explicitly.
 - `recycle.enabled` (default false): the optional restart through the cloud API.
   Without it, a recycle step is skipped: it is not attempted and not counted
-  as failed, and the ladder continues with its next step or its
+  as failed, it does not use up the escalation cap, and the ladder continues with its next step or its
   `on_failure.escalate_to` playbook (the audit trail records
   `recycle skipped: …`). A recycle the cloud provider does not allow for the
   node is skipped the same way. A skip is not a recovery: when nothing follows
@@ -459,7 +459,8 @@ approval does not lift them:
 Both are checked before the first disruptive step, together with the cloud
 provider's eligibility. When no recovery step on the incident's path (its
 playbook and the playbooks it escalates to) can run under the policy — for
-example a replace under `AddFirst` with no enabled recycle — the incident is
+a replace under `AddFirst`, even after an enabled recycle the replace would
+back up, or a recycle-only path without `recycle.enabled` — the incident is
 held before the cordon: the node is not cordoned or drained for a recovery
 that cannot follow, and no approval is asked. Once the policy changes, the
 hold lifts and the audit trail records `recovery-available`.

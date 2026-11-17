@@ -86,22 +86,14 @@ func (c *Controller) policyRecoveryPreflight(ctx context.Context, inc *types.Inc
 		}
 	case "platform.cordon", "platform.drain", "platform.evict_gpu_workload":
 		path := c.cloudRecoveryPath(ctx, inc.Playbook)
-		if !path.recycle && !path.replace {
-			return "", "" // not a cloud recovery ladder
-		}
-		recycle := path.recycle && pol.RecycleEnabled
-		replace := path.replace && !addFirst
-		if !recycle && !replace {
-			var why string
-			switch {
-			case path.replace && path.recycle:
-				why = addFirstUnavailable + ", and " + recycleNotEnabled
-			case path.replace:
-				why = addFirstUnavailable
-			default:
-				why = recycleNotEnabled
-			}
-			return "recovery unavailable: no cloud recovery step on this path can run (" + why + "); the node is not cordoned or drained", ""
+		switch {
+		case path.replace && addFirst:
+			// Even with a recycle enabled before it: the recycle may fail and
+			// the replace it falls back to could not run, so nothing on the
+			// path may disrupt the node until the policy names remove-first.
+			return "recovery unavailable: " + addFirstUnavailable + "; the node is not cordoned or drained", ""
+		case path.recycle && !path.replace && !pol.RecycleEnabled:
+			return "recovery unavailable: " + recycleNotEnabled + ", and the path has no replace step; the node is not cordoned or drained", ""
 		}
 	}
 	return "", ""
@@ -126,8 +118,10 @@ func (c *Controller) holdOrSkipByPolicy(ctx context.Context, inc *types.Incident
 }
 
 // skipRecycle moves past a recycle step that is not applicable: to the next
-// step of the playbook, or to its escalation playbook. A skip alone never
-// leads to VERIFYING: nothing was done to recover the node.
+// step of the playbook, or to its escalation playbook. A skip is neither a
+// failure nor an escalation (no escalation metric, no recovery attempt
+// spent), and alone it never leads to VERIFYING: nothing was done to recover
+// the node.
 func (c *Controller) skipRecycle(ctx context.Context, inc *types.Incident, step *playbook.Step, reason string) error {
 	if inc.State != types.StateEvaluating {
 		// A parked step keeps its approval round; it is held until the round
@@ -149,17 +143,17 @@ func (c *Controller) skipRecycle(ctx context.Context, inc *types.Incident, step 
 		c.logOnceStepUnavailable(inc, step, "recovery unavailable: "+reason+"; the playbook has no step or escalation after it")
 		return nil
 	}
-	if inc.Attempt >= maxEscalationAttempts {
-		return c.quarantine(ctx, inc, fmt.Sprintf("recycle skipped: %s; escalation cap reached (%d attempts)", reason, inc.Attempt))
-	}
-	previous := inc.Playbook
+previous := inc.Playbook
 	inc.Playbook = next.Name
 	inc.StepIndex = 0
-	// Bumped like an escalation so a ladder whose escalations keep skipping
-	// still reaches the cap, and so the new rung's action IDs are fresh.
+	// Attempt is the action-ID nonce (see actionID): bumped so the new
+	// rung's steps get fresh IDs and do not replay the previous rung's
+	// results. It is not a failed attempt: escalate discounts skips from the
+	// cap, and skipping cannot loop, because escalation chains are acyclic
+	// (rejected at load) and each skip moves one playbook further along.
 	inc.Attempt++
 	return c.transition(ctx, inc, types.StateEvaluating, "system", "recycle-skipped",
-		fmt.Sprintf("recycle skipped: %s; continuing with %s (from %s)", reason, next.Name, previous), nil)
+		fmt.Sprintf("recycle skipped: %s; continuing with %s (from %s)", reason, next.Name, previous), map[string]string{"rung": "escalation"})
 }
 
 // lastPolicyAssessment returns the last policy-scope assessment of the
@@ -223,4 +217,21 @@ func (c *Controller) recordRecoveryAvailable(ctx context.Context, inc *types.Inc
 	}
 	c.policyAssessed[inc.ID] = ""
 	return nil
+}
+
+// recoveryAttempts is inc.Attempt less the bumps made by skipped recycles,
+// which are not recovery attempts. It reads the trail, so callers use it only
+// once Attempt reaches the cap.
+func (c *Controller) recoveryAttempts(ctx context.Context, inc *types.Incident) (int, error) {
+	trail, err := c.store.AuditTrail(ctx, inc.ID)
+	if err != nil {
+		return 0, err
+	}
+	attempts := inc.Attempt
+	for _, e := range trail {
+		if e.Action == "recycle-skipped" && e.Params["rung"] == "escalation" {
+			attempts--
+		}
+	}
+	return attempts, nil
 }

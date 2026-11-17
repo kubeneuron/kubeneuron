@@ -106,6 +106,29 @@ func TestNoUsableRecoveryHoldsBeforeCordon(t *testing.T) {
 	}
 }
 
+func TestAddFirstHoldsBeforeCordonEvenWithRecycleEnabled(t *testing.T) {
+	c, st, _ := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
+	// The recycle could run, but a failed recycle falls back to a replace
+	// that cannot: the drain must not happen for it.
+	c.SetEngine(ladderEngine(t, recoverymode.Automatic, "", true,
+		cordonDrainThen("cloud-recycle", "platform.recycle_node", "cloud-replace"),
+		cordonDrainThen("cloud-replace", "platform.replace_node", "")))
+	id := openOn(t, c, "n1")
+	inc := step(t, c, st, id, 30)
+	entries := trail(t, st, id)
+	if inc.State != types.StateEvaluating || inc.StepIndex != 0 || inc.Playbook != "cloud-recycle" {
+		t.Fatalf("state=%s step=%d playbook=%s, want the cordon held%s", inc.State, inc.StepIndex, inc.Playbook, dump(entries))
+	}
+	for _, e := range entries {
+		if e.ToState == types.StateExecuting {
+			t.Fatalf("a step started with an add-first replace on the path%s", dump(entries))
+		}
+	}
+	if !strings.Contains(dump(entries), "add-first") {
+		t.Fatalf("want the add-first reason%s", dump(entries))
+	}
+}
+
 func TestRecycleOnlyPathWithoutRecycleEnabledHoldsBeforeCordon(t *testing.T) {
 	c, st, _ := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
 	c.SetEngine(ladderEngine(t, recoverymode.Automatic, recoverymode.RemoveFirst, false, cordonDrainThen("cloud-recycle", "platform.recycle_node", "")))
@@ -142,6 +165,20 @@ func TestSkippedRecycleContinuesWithTheEscalation(t *testing.T) {
 	}
 	if skipped < 0 {
 		t.Fatalf("no recycle-skipped row%s", dump(entries))
+	}
+	// Not an escalation and not a spent recovery attempt.
+	for _, e := range entries {
+		if e.Action == "escalate" {
+			t.Fatalf("a skip was recorded as an escalation%s", dump(entries))
+		}
+	}
+	if n, err := c.recoveryAttempts(context.Background(), inc); err != nil || n != 0 {
+		t.Fatalf("recovery attempts=%d err=%v, want 0: a skip spends none", n, err)
+	}
+	atCap := *inc
+	atCap.Attempt = maxEscalationAttempts
+	if c.capReached(context.Background(), &atCap) {
+		t.Fatal("the skip counted against the escalation cap")
 	}
 	// A skip is not a recovery: nothing between the drain and the skip
 	// reaches VERIFYING.

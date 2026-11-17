@@ -28,8 +28,10 @@ API is `v1alpha1`.
   supports it, and a recycle the policy does not enable, or the provider does
   not allow, is skipped (`recycle skipped: …` in the audit trail) and the
   ladder continues with its next step or escalation. Both are checked before
-  the first disruptive step: when nothing on the path can run, the node is
-  not cordoned or drained. Automatic policies authorise only cloud recovery
+  the first disruptive step: a replace under `AddFirst` anywhere on the path
+  (with its escalations), or a recycle-only path without `recycle.enabled`,
+  holds the incident before the node is cordoned or drained. A skip is not a
+  failure and does not count against the escalation cap. Automatic policies authorise only cloud recovery
   ladders.
   Every automatic step is audited as `policy:<name>` with the declared
   enabler, the policy generation and the time; `kubeneuronctl incident show`
