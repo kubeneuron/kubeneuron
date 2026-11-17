@@ -22,7 +22,8 @@ API is `v1alpha1`.
   optional `Authorization` header Secret. `ObservabilityGrafanaReady`
   reports it. The legacy board's "Controller up" and "Agents down" panels
   also work on the OTLP path, which has no `up`.
-- Documented agent privileges, operational data retention, monitoring destinations and the project security contact.
+- **Data and privacy page.** Documents agent privileges, operational data
+  retention, monitoring destinations and the project security contact.
 
 - **Recording rules with the Managed store.** A Managed store comes with a
   vmalert that evaluates `configs/vmalert/gpu-recording-rules.yaml` into

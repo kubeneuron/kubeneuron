@@ -7,7 +7,7 @@ Please do **not** open a public issue for security problems.
 Report vulnerabilities privately via
 [GitHub Security Advisories](https://github.com/kubeneuron/kubeneuron/security/advisories/new)
 or by email to <security@kubeneuron.com> with the subject prefix
-`[kube-neuron security]`.
+`[kubeneuron security]`.
 
 Include a description of the issue, reproduction steps, the affected
 component (operator, controller, agent, CLI, deployment manifests), and any

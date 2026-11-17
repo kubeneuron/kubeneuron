@@ -65,18 +65,18 @@ resource name (`isAcceleratorResource` in
 partitions), so they need no vendor package and belong on this side of the
 line — validated on NVIDIA hardware, exercised by unit tests for the rest.
 
-These actions use platform APIs. AMD fault detection is experimental and has
-fixture coverage. Validation on AMD hardware is still outstanding. Intel
-requires a manually opened incident or a configured supported alert source.
+These actions use platform APIs. Experimental AMD detection reads ring
+timeouts, uncorrectable ECC errors, page retirement and PCIe errors from
+the amdgpu kernel log. The agent also reads health data from available
+AMD SMI tools. Synthetic tests cover both paths. AMD hardware validation
+is still outstanding. Intel requires a manually opened incident or a
+configured supported alert source.
 
-Historically, an
-installation from `deploy/install.sh` bound exactly ONE problem class, so on a
-default install none of these rungs could be reached by a detected fault
-either. The baseline pack in `config/policies` (applied by `install.sh`, and
-`kubectl apply -k config/policies` otherwise) binds every class the detectors
-emit; `internal/operator/policy_pack_test.go` fails the build if a class stops
-being covered. That changes what is REACHABLE, not what is validated — every
-evidence statement below still describes the same runs.
+Earlier installations bound a single problem class. The baseline pack in
+`config/policies`, applied by `deploy/install.sh` or directly with
+`kubectl apply -k config/policies`, binds the classes emitted by the
+detectors. The policy-pack test checks these bindings. The table below
+records the separate evidence for each action.
 
 | Capability | Status | Notes |
 |---|---|---|
