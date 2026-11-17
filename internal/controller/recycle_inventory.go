@@ -88,5 +88,8 @@ func (c *Controller) verifyRecycledInventory(ctx context.Context, inc *types.Inc
 	if err != nil || !recycleInventoryMatches(report, *pin, inc.Target.GPUUUID, completed, time.Now()) {
 		return false, "awaiting fresh accelerator inventory and driver health from the verified boot"
 	}
+	if report.Readiness == types.AcceleratorReadinessDegraded {
+		return true, "accelerator inventory and driver probe observed after verified recycle; DCGM not present, device health not checked"
+	}
 	return true, "fresh accelerator inventory and driver health observed after verified recycle"
 }

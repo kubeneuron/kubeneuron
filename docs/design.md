@@ -604,6 +604,7 @@ Our own guarded recycle may update the pin only after the same Node and instance
 return Ready with a new boot. The verified operation result, new pin, and audit
 are committed atomically with a stale-state check. This proves a new boot, not
 accelerator recovery: fresh inventory and health verification are still needed.
+For an incident without a GPU UUID, one observed physical GPU can satisfy the inventory check. A node can therefore pass with fewer GPUs than before the restart because the incident does not retain a pre-restart device count.
 If the controller crashes before saving the result, it does not infer ownership
 of a later boot change.
 

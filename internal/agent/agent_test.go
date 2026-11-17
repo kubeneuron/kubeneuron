@@ -1166,7 +1166,13 @@ func TestNVIDIAAcceleratorReportUnknownTopologyDoesNotDeclareReset(t *testing.T)
 
 func TestNVIDIAReportPostsDriverHealthWithoutDCGM(t *testing.T) {
 	captured := &capturedPosts{}
-	server := httptest.NewServer(captured.handler(t))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(types.AgentAcceleratorObservationProfile{Vendor: types.AcceleratorVendorNVIDIA, ProfileDigest: "sha256:" + strings.Repeat("b", 64), ProfileUID: "profile", ProfileGeneration: 1, RuntimeVersion: "gpu-operator-v24.9.2"})
+			return
+		}
+		captured.handler(t)(w, r)
+	}))
 	defer server.Close()
 	clock := &testClock{now: time.Now().UTC()}
 	a := newTestAgent(t, server.URL, clock, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -1177,12 +1183,21 @@ func TestNVIDIAReportPostsDriverHealthWithoutDCGM(t *testing.T) {
 		Target: accelerator.Target{NodeName: a.cfg.NodeName, Vendor: accelerator.VendorNVIDIA, Scope: accelerator.ScopeNode},
 		Status: accelerator.HealthHealthy, CheckedAt: clock.Now(),
 	}
-	a.nvidia = &nvidiaObservation{preflight: staticNVIDIAPreflight{report: snapshot}}
+	a.nvidia = &nvidiaObservation{useControllerProfile: true, preflight: staticNVIDIAPreflight{report: snapshot}}
 	a.reportNVIDIA(context.Background())
 	report, ok := captured.report(types.AcceleratorVendorNVIDIA)
 	if !ok || report.Readiness != types.AcceleratorReadinessDegraded || len(report.Devices) != 1 ||
 		report.Devices[0].DriverHealthyAt == nil || !report.Devices[0].DriverHealthyAt.Equal(snapshot.NodeHealth.CheckedAt) {
 		t.Fatalf("posted inventory = %+v", report)
+	}
+
+	snapshot.Reasons = []string{"additional inventory fault"}
+	a.nvidia.preflight = staticNVIDIAPreflight{report: snapshot}
+	a.reportNVIDIA(context.Background())
+	captured.mu.Lock()
+	defer captured.mu.Unlock()
+	if len(captured.reports) != 2 || captured.reports[1].Readiness != types.AcceleratorReadinessDegraded || captured.reports[1].Devices[0].DriverHealthyAt != nil {
+		t.Fatalf("mixed degradation reports = %+v", captured.reports)
 	}
 }
 

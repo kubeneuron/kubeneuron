@@ -1532,17 +1532,6 @@ func (a *Agent) nvidiaAcceleratorReportWithProfile(ctx context.Context, profile 
 	if err != nil {
 		return types.AgentAcceleratorReport{}, err
 	}
-	health := snapshot.NodeHealth
-	target := accelerator.Target{NodeName: a.cfg.NodeName, Vendor: accelerator.VendorNVIDIA, Scope: accelerator.ScopeNode}
-	if _, realDriver := a.driver.(*nvml.SMI); realDriver && health.Target == target && health.Status == accelerator.HealthHealthy &&
-		!health.CheckedAt.IsZero() && !snapshot.Inventory.ObservedAt.IsZero() && snapshot.Inventory.NodeName == target.NodeName &&
-		snapshot.Inventory.Vendor == target.Vendor && (snapshot.Readiness == nvidia.PreflightEligible || snapshot.Readiness == nvidia.PreflightObservedOnly) {
-		for i := range devices {
-			if devices[i].Kind == types.AcceleratorDevicePhysical && devices[i].Family == types.AcceleratorFamilyGPU {
-				devices[i].DriverHealthyAt = &health.CheckedAt
-			}
-		}
-	}
 	capabilities, err := reportCapabilities(snapshot.Capabilities)
 	if err != nil {
 		return types.AgentAcceleratorReport{}, err
@@ -1554,13 +1543,17 @@ func (a *Agent) nvidiaAcceleratorReportWithProfile(ctx context.Context, profile 
 	}
 	runtimeVersion := a.nvidia.runtimeVersion
 	runtimeAttested := false
+	cleanPreflight := snapshot.Readiness == nvidia.PreflightEligible && len(snapshot.Reasons) == 0
+	dcgmUnavailable := a.nvidia.runtimeProber == nil
 	if a.nvidia.runtimeProber != nil {
 		version, probeErr := a.nvidia.runtimeProber.Version(preflightCtx)
 		if probeErr != nil {
+			dcgmUnavailable = true
 			snapshot.Reasons = append(snapshot.Reasons, fmt.Sprintf("DCGM runtime version probe failed: %v", probeErr))
 		} else {
 			gpuCount, discoveryErr := a.nvidia.runtimeProber.GPUCount(preflightCtx)
 			if discoveryErr != nil {
+				dcgmUnavailable = true
 				snapshot.Reasons = append(snapshot.Reasons, fmt.Sprintf("DCGM discovery probe failed: %v", discoveryErr))
 			} else if gpuCount != len(snapshot.Inventory.Devices) {
 				snapshot.Reasons = append(snapshot.Reasons,
@@ -1591,7 +1584,21 @@ func (a *Agent) nvidiaAcceleratorReportWithProfile(ctx context.Context, profile 
 	case nvidia.PreflightEligible:
 		// The wire protocol makes versions a prerequisite for ready. Do not
 		// turn a successful health probe into an unverifiable runtime profile.
-		if strings.TrimSpace(report.DriverVersion) == "" || strings.TrimSpace(report.RuntimeVersion) == "" || strings.TrimSpace(profile.RuntimeVersion) == "" {
+		if cleanPreflight && dcgmUnavailable && strings.TrimSpace(report.DriverVersion) != "" && strings.TrimSpace(profile.RuntimeVersion) != "" {
+			report.Readiness = types.AcceleratorReadinessDegraded
+			report.ReadinessReasons = append(report.ReadinessReasons, "DCGM runtime attestation unavailable")
+			health := snapshot.NodeHealth
+			target := accelerator.Target{NodeName: a.cfg.NodeName, Vendor: accelerator.VendorNVIDIA, Scope: accelerator.ScopeNode}
+			if _, realDriver := a.driver.(*nvml.SMI); realDriver && health.Target == target && health.Status == accelerator.HealthHealthy &&
+				!health.CheckedAt.IsZero() && !snapshot.Inventory.ObservedAt.IsZero() && snapshot.Inventory.NodeName == target.NodeName &&
+				snapshot.Inventory.Vendor == target.Vendor {
+				for i := range devices {
+					if devices[i].Kind == types.AcceleratorDevicePhysical && devices[i].Family == types.AcceleratorFamilyGPU {
+						devices[i].DriverHealthyAt = &health.CheckedAt
+					}
+				}
+			}
+		} else if strings.TrimSpace(report.DriverVersion) == "" || strings.TrimSpace(report.RuntimeVersion) == "" || strings.TrimSpace(profile.RuntimeVersion) == "" {
 			report.Readiness = types.AcceleratorReadinessDegraded
 			report.ReadinessReasons = append(report.ReadinessReasons,
 				"NVIDIA runtime profile is missing driver_version or runtime_version")

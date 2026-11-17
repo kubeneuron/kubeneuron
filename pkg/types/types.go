@@ -664,9 +664,6 @@ func (k AcceleratorDeviceKind) valid() bool {
 // vendor runtime. ID is a UUID or provider identity, never a transient
 // ordinal. A partition references a physical device in the same report.
 type AgentAcceleratorDevice struct {
-	// DriverHealthyAt records a healthy node driver probe in the same
-	// observation that enumerated this physical GPU.
-	DriverHealthyAt  *time.Time              `json:"driver_healthy_at,omitempty"`
 	ID               string                  `json:"id"`
 	Kind             AcceleratorDeviceKind   `json:"kind"`
 	Family           AcceleratorDeviceFamily `json:"family"`
@@ -674,6 +671,9 @@ type AgentAcceleratorDevice struct {
 	ParentID         string                  `json:"parent_id,omitempty"`
 	PartitionProfile string                  `json:"partition_profile,omitempty"`
 	Attributes       map[string]string       `json:"attributes,omitempty"`
+	// DriverHealthyAt records a healthy node driver probe in the same
+	// observation that enumerated this physical GPU.
+	DriverHealthyAt *time.Time `json:"driver_healthy_at,omitempty"`
 }
 
 // AcceleratorTopologySafety is the agent's explicit statement about whether
@@ -771,9 +771,9 @@ type AgentAcceleratorReport struct {
 	// NodeUID is server-stamped from the Pod-bound agent identity. Agents send
 	// no value; persistence and controller gates use it to reject evidence from
 	// a prior Kubernetes Node object that reused the same name.
+	NodeUID string `json:"node_uid,omitempty"`
 	// BootID is agent-reported, not server-attested. Empty legacy reports cannot prove cloud recovery.
 	BootID           string                       `json:"boot_id,omitempty"`
-	NodeUID          string                       `json:"node_uid,omitempty"`
 	Vendor           AcceleratorVendor            `json:"vendor"`
 	ObservedAt       time.Time                    `json:"observed_at"`
 	Devices          []AgentAcceleratorDevice     `json:"devices"`

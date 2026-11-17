@@ -5,6 +5,7 @@ import (
 	"context"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,11 +41,8 @@ func TestRecycleInventoryMatches(t *testing.T) {
 }
 
 func TestRecycleVerificationAfterControllerRestart(t *testing.T) {
-	for _, replacing := range []bool{false, true} {
-		name := "verified-recycle"
-		if replacing {
-			name = "subsequent-replacement"
-		}
+	for _, name := range []string{"verified-recycle", "subsequent-replacement", "mixed-degradation"} {
+		replacing := name == "subsequent-replacement"
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			p := &autoCloudPlatform{}
@@ -82,7 +80,11 @@ func TestRecycleVerificationAfterControllerRestart(t *testing.T) {
 			report.Readiness = types.AcceleratorReadinessDegraded
 			report.ReadinessReasons = []string{"DCGM unavailable"}
 			report.RuntimeVersion = ""
-			report.Devices[0].DriverHealthyAt = &now
+			if name == "mixed-degradation" {
+				report.ReadinessReasons = append(report.ReadinessReasons, "additional inventory fault")
+			} else {
+				report.Devices[0].DriverHealthyAt = &now
+			}
 			report.BootID = ref.Identity.BootID
 			report.NodeUID = ref.Identity.NodeUID
 			if err := st.UpsertAcceleratorReport(ctx, &report); err != nil {
@@ -102,8 +104,14 @@ func TestRecycleVerificationAfterControllerRestart(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := types.StateResolved
-			if replacing {
+			if replacing || name == "mixed-degradation" {
 				want = types.StateVerifying
+			}
+			if want == types.StateResolved {
+				trail, err := st.AuditTrail(ctx, inc.ID)
+				if err != nil || len(trail) == 0 || !strings.Contains(trail[len(trail)-1].Result, "DCGM not present, device health not checked") {
+					t.Fatalf("missing verification depth in resolution audit: %v, %v", trail, err)
+				}
 			}
 			if got.State != want {
 				t.Fatalf("got %s, want %s", got.State, want)
