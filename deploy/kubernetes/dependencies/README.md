@@ -1,5 +1,7 @@
 # KubeNeuron external dependency profile
 
+The manifests in this directory install third-party software that is not part of KubeNeuron, including the NVIDIA GPU Operator and the NVIDIA driver, container toolkit and DCGM exporter images, VictoriaMetrics, Node Feature Discovery and others. Each is provided by its own vendor under its own licence terms; some, such as the NVIDIA driver, are proprietary. Your cluster pulls these images directly from the vendors' registries, and by installing them you accept their terms. KubeNeuron does not redistribute them.
+
 This directory is a version-pinned reference profile for the upstream
 components that supply GPU telemetry, metric storage, rule evaluation, and
 alert delivery to KubeNeuron. It is a convenience, not a dependency: bring

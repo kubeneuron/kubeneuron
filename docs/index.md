@@ -46,3 +46,5 @@ drain-and-reset → reboot → driver remediation → hardware escalation.
 | Understand why each XID maps where it does | [XID catalog](xid-catalog.md) |
 | Know exactly what ships for my vendor | [Capability matrix](reference-capabilities.md) |
 | Understand the architecture and its honest limits | [Design](design.md) |
+
+See [Data and privacy](data-and-privacy.md) for agent privileges, stored data and outbound connections.

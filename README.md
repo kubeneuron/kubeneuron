@@ -572,6 +572,10 @@ cloud node remediation no longer waits on it.
 **Later evaluations:** ClickHouse archival, Slurm, and ticketing
 integrations.
 
+## Security
+
+Report vulnerabilities using the [security policy](SECURITY.md). Review [Data and privacy](docs/data-and-privacy.md) for agent privileges, network connections and data retention.
+
 ## Community
 
 Questions, incident stories, and "is this a KubeNeuron problem or a driver
@@ -591,3 +595,5 @@ KubeNeuron is open source under the Apache License, Version 2.0. See
 [LICENSE](LICENSE) and [NOTICE](NOTICE); third-party components are listed in
 THIRD_PARTY_LICENSES. "KubeNeuron" and its logo are trademarks of Andrii Petruk;
 see [TRADEMARKS.md](TRADEMARKS.md).
+
+KubeNeuron is an independent project. It is not affiliated with, sponsored by, or endorsed by NVIDIA, AMD, Intel, Amazon Web Services, Google, Microsoft, Grafana Labs, VictoriaMetrics, the OpenTelemetry project, or the Kubernetes project. All product names and trademarks are the property of their respective owners and are used only to describe compatibility.

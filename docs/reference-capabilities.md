@@ -65,16 +65,11 @@ resource name (`isAcceleratorResource` in
 partitions), so they need no vendor package and belong on this side of the
 line — validated on NVIDIA hardware, exercised by unit tests for the rest.
 
-These paths never touch a vendor's driver. They are listed because half the
-escalation ladder lives here, and because "shipped for AMD" in this table is a
-weaker claim than it looks: **an action nothing can trigger is unreachable.**
-No AMD or Intel fault is detected today, so no AMD or Intel incident opens, so
-none of these rungs is ever climbed on those nodes unless a human opens the
-incident by hand (`POST /api/v1/incidents`) or authors alert rules for a
-non-NVIDIA exporter.
+These actions use platform APIs. AMD fault detection is experimental and has
+fixture coverage. Validation on AMD hardware is still outstanding. Intel
+requires a manually opened incident or a configured supported alert source.
 
-The same sentence used to apply to NVIDIA for a different reason, and it is
-worth recording because it made every cell below weaker than it reads: an
+Historically, an
 installation from `deploy/install.sh` bound exactly ONE problem class, so on a
 default install none of these rungs could be reached by a detected fault
 either. The baseline pack in `config/policies` (applied by `install.sh`, and
