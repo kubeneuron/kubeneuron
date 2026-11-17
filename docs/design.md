@@ -572,8 +572,8 @@ currently executable:
 | Remap pending/failure/budget | hardware | reset when idle or hardware escalation |
 | Thermal/power events | facility | observe or drain; do not blindly reset the GPU |
 | NVLink CRC / PCIe replay storms | link | observe, drain/reset, or ticket by policy |
-| Exporter down / GPU count low / driver timeout | liveness | node triage ladder |
-| Agent heartbeat stale | meta | notify and suppress unverifiable automated actions |
+| Exporter down | liveness | observe only: recorded and notified, never acted on |
+| Agent heartbeat stale | meta | observe only: recorded and notified, never acted on |
 
 ## 4. Remediation design
 

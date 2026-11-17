@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,7 @@ import (
 	sigsyaml "sigs.k8s.io/yaml"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
+	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/inventory"
 )
 
@@ -962,22 +964,38 @@ func TestSettledRequeue(t *testing.T) {
 	}
 }
 
-func TestManagedRulesAreRecordingOnly(t *testing.T) {
-	kn := managedObservability(testKubeNeuron())
-	var file struct {
-		Groups []struct {
-			Name  string           `json:"name"`
-			Rules []map[string]any `json:"rules"`
-		} `json:"groups"`
-	}
-	if err := sigsyaml.Unmarshal([]byte(rulesConfigMap(kn).Data[rulesKey]), &file); err != nil {
+type ruleFile struct {
+	Groups []struct {
+		Name  string           `json:"name"`
+		Rules []map[string]any `json:"rules"`
+	} `json:"groups"`
+}
+
+func readRepoFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile("../../" + path)
+	if err != nil {
 		t.Fatal(err)
 	}
+	return string(data)
+}
+
+func parseRuleFile(t *testing.T, data string) ruleFile {
+	t.Helper()
+	var file ruleFile
+	if err := sigsyaml.Unmarshal([]byte(data), &file); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
+func TestManagedRulesAreRecordingOnly(t *testing.T) {
+	kn := managedObservability(testKubeNeuron())
 	records := 0
-	for _, group := range file.Groups {
+	for _, group := range parseRuleFile(t, rulesConfigMap(kn).Data[rulesKey]).Groups {
 		for _, rule := range group.Rules {
 			if _, ok := rule["alert"]; ok {
-				t.Errorf("group %s has an alerting rule %v; the managed evaluator has no notifier", group.Name, rule["alert"])
+				t.Errorf("group %s of %s has an alerting rule %v", group.Name, rulesKey, rule["alert"])
 			}
 			if _, ok := rule["record"]; ok {
 				records++
@@ -988,20 +1006,14 @@ func TestManagedRulesAreRecordingOnly(t *testing.T) {
 		t.Fatal("no recording rules")
 	}
 
-	deployment := rulesDeployment(kn, DefaultMetricsRulesImage, "d")
+	deployment := rulesDeployment(kn, DefaultMetricsRulesImage, "d", false)
 	args := strings.Join(deployment.Spec.Template.Spec.Containers[0].Args, " ")
 	store := "http://fleet-metrics-store.kube-neuron-system.svc:8428"
-	if !strings.Contains(args, "-datasource.url="+store) || !strings.Contains(args, "-remoteWrite.url="+store) || strings.Contains(args, "notifier") {
-		t.Errorf("vmalert args = %s, want our store only and no notifier", args)
+	if !strings.Contains(args, "-datasource.url="+store) || !strings.Contains(args, "-remoteWrite.url="+store) {
+		t.Errorf("vmalert args = %s, want our store", args)
 	}
 	if spec := deployment.Spec.Template.Spec; spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
 		t.Error("vmalert mounts a service account token")
-	}
-
-	policy := rulesNetworkPolicy(kn)
-	if len(policy.Spec.Ingress) != 0 || len(policy.Spec.Egress) != 2 ||
-		policy.Spec.Egress[1].To[0].PodSelector.MatchLabels["app.kubernetes.io/component"] != storeComponent {
-		t.Errorf("rules NetworkPolicy = %#v, want no ingress and egress to DNS and the store", policy.Spec)
 	}
 	admitted := false
 	for _, peer := range storeNetworkPolicy(kn).Spec.Ingress[0].From {
@@ -1011,6 +1023,131 @@ func TestManagedRulesAreRecordingOnly(t *testing.T) {
 	}
 	if !admitted {
 		t.Error("the store does not admit the rules evaluator")
+	}
+}
+
+// The managed alerting rules are exactly the faults that reach KubeNeuron on
+// NVIDIA only as metric alerts, with the dependency profile's names, `for`
+// and severity, in plain PromQL, aggregated so no workload label survives.
+func TestManagedAlertingRules(t *testing.T) {
+	kn := managedObservability(testKubeNeuron())
+	want := map[string]bool{
+		"GpuRemappedRowsHigh": true, "GpuPcieReplayHigh": true, "GpuThermalThrottle": true,
+		"GpuTempCritical": true, "GpuPowerBrake": true, "GpuExporterDown": true, "KubeNeuronAgentDown": true,
+	}
+	profile := map[string]map[string]any{}
+	for _, group := range parseRuleFile(t, readRepoFile(t, "configs/vmalert/gpu-rules.yaml")).Groups {
+		for _, rule := range group.Rules {
+			if name, ok := rule["alert"].(string); ok {
+				profile[name] = rule
+			}
+		}
+	}
+	known := map[string]bool{}
+	for _, name := range detect.KnownAlertNames() {
+		known[name] = true
+	}
+	got := map[string]bool{}
+	for _, group := range parseRuleFile(t, rulesConfigMap(kn).Data[alertingKey]).Groups {
+		for _, rule := range group.Rules {
+			if _, ok := rule["record"]; ok {
+				t.Errorf("group %s of %s has a recording rule", group.Name, alertingKey)
+			}
+			name, _ := rule["alert"].(string)
+			got[name] = true
+			if !want[name] {
+				t.Errorf("unexpected alert %q", name)
+			}
+			if !known[name] {
+				t.Errorf("alert %q is not in the controller's alertClassMap", name)
+			}
+			expr, _ := rule["expr"].(string)
+			if strings.Contains(expr, "bitmap_") {
+				t.Errorf("alert %q uses a MetricsQL-only function: %s", name, expr)
+			}
+			if !strings.Contains(expr, "max by (") {
+				t.Errorf("alert %q does not aggregate, so workload labels would reach the alert: %s", name, expr)
+			}
+			for _, label := range []string{"pod", "namespace", "container", "pod_uid"} {
+				if regexp.MustCompile(`by \([^)]*\b` + label + `\b`).MatchString(expr) {
+					t.Errorf("alert %q keeps the workload label %s", name, label)
+				}
+			}
+			source := profile[name]
+			if source == nil {
+				t.Errorf("alert %q is not in gpu-rules.yaml", name)
+				continue
+			}
+			if fmt.Sprint(rule["for"]) != fmt.Sprint(source["for"]) ||
+				fmt.Sprint(rule["labels"]) != fmt.Sprint(source["labels"]) {
+				t.Errorf("alert %q: for %v labels %v, the dependency profile has for %v labels %v",
+					name, rule["for"], rule["labels"], source["for"], source["labels"])
+			}
+		}
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("alert %q is missing", name)
+		}
+	}
+
+	deployment := rulesDeployment(kn, DefaultMetricsRulesImage, "d", false)
+	args := strings.Join(deployment.Spec.Template.Spec.Containers[0].Args, " ")
+	for _, arg := range []string{
+		"-rule=/etc/vmalert/alerting-rules.yaml",
+		"-notifier.url=http://fleet-controller.kube-neuron-system.svc:8080/api/v1/webhooks/vmalert",
+		"-notifier.bearerTokenFile=/etc/vmalert-notifier/token/token",
+	} {
+		if !strings.Contains(args, arg) {
+			t.Errorf("vmalert args = %s, want %s", args, arg)
+		}
+	}
+	if strings.Contains(args, "tlsCAFile") || strings.Contains(args, "bearerToken=") {
+		t.Errorf("vmalert args = %s", args)
+	}
+	tokenMounted := false
+	for _, volume := range deployment.Spec.Template.Spec.Volumes {
+		if volume.Secret != nil && volume.Secret.SecretName == webhookTokenRef(kn).Name {
+			tokenMounted = true
+		}
+	}
+	if !tokenMounted {
+		t.Error("the webhook token Secret is not mounted")
+	}
+
+	policy := rulesNetworkPolicy(kn)
+	if len(policy.Spec.Ingress) != 0 || len(policy.Spec.Egress) != 3 ||
+		policy.Spec.Egress[1].To[0].PodSelector.MatchLabels["app.kubernetes.io/component"] != storeComponent ||
+		policy.Spec.Egress[2].To[0].PodSelector.MatchLabels["app.kubernetes.io/component"] != "controller" ||
+		policy.Spec.Egress[2].Ports[0].Port.IntValue() != controllerPort {
+		t.Errorf("rules NetworkPolicy = %#v, want no ingress and egress to DNS, the store and the controller", policy.Spec)
+	}
+
+	// Behind the controller's own TLS the notifier speaks https and, when
+	// the Secret has one, verifies with its ca.crt.
+	kn.Spec.TLS.PublicServerSecretRef = &kubeneuronv1alpha1.SecretReference{Name: "public-tls"}
+	args = strings.Join(rulesDeployment(kn, DefaultMetricsRulesImage, "d", true).Spec.Template.Spec.Containers[0].Args, " ")
+	if !strings.Contains(args, "-notifier.url=https://fleet-controller.") || !strings.Contains(args, "-notifier.tlsCAFile=/etc/vmalert-notifier/ca/ca.crt") {
+		t.Errorf("vmalert args behind TLS = %s", args)
+	}
+}
+
+func TestAlertDetectionCondition(t *testing.T) {
+	kn := managedObservability(testKubeNeuron())
+	if c := alertDetection(kn, &metav1.Condition{Status: metav1.ConditionTrue}); c.Status != metav1.ConditionTrue {
+		t.Errorf("managed store, rules ready: %+v", c)
+	}
+	if c := alertDetection(kn, notReady("NotReady", "x")); c.Status != metav1.ConditionFalse {
+		t.Errorf("managed store, rules not ready: %+v", c)
+	}
+	kn.Spec.Observability.Store = &kubeneuronv1alpha1.MetricsStoreSpec{OTLPEndpointSpec: kubeneuronv1alpha1.OTLPEndpointSpec{Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: "http://vm:8428/opentelemetry"}}
+	if c := alertDetection(kn, nil); c.Status != metav1.ConditionFalse || c.Reason != "ExternalStore" ||
+		!strings.Contains(c.Message, "point them at the controller webhook") {
+		t.Errorf("external store: %+v", c)
+	}
+	kn.Spec.Observability.Store = nil
+	if c := alertDetection(kn, nil); c != nil {
+		t.Errorf("disabled store: %+v", c)
 	}
 }
 

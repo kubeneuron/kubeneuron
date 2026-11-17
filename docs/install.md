@@ -60,15 +60,43 @@ operator; see [Metrics path](#metrics-path-specobservability).
   behind a NetworkPolicy that admits only the collector and the recording
   rules evaluator; where NetworkPolicy is not enforced, the store is
   reachable inside the cluster without authentication.
-- **The Managed store comes with its recording rules.** A vmalert
+- **The Managed store comes with its rules.** A vmalert
   (`<name>-metrics-rules`) evaluates
   `configs/vmalert/gpu-recording-rules.yaml` against the store and writes
-  the `kubeneuron_gpu_*` series the dashboards read back into it; it holds
-  no alerting rules, sends no notifications and reaches nothing but the
-  store. `ObservabilityRulesReady` reports it. **With an External store the
+  the `kubeneuron_gpu_*` series the dashboards read back into it.
+  `ObservabilityRulesReady` reports it. **With an External store the
   recording rules are yours to run**: load that file into the rule
   evaluator of your Prometheus or VictoriaMetrics, or the GPU dashboards
   stay empty.
+- **The Managed store detects the faults that reach KubeNeuron on NVIDIA
+  only as metric alerts.** The same vmalert evaluates
+  `configs/vmalert/gpu-alert-rules.yaml` and sends what fires to the
+  controller (`/api/v1/webhooks/vmalert`, the Alertmanager API v2 body),
+  with the webhook token from `notifications.webhookToken` as a bearer
+  header read from a file, never in the URL; no Alertmanager is installed.
+  The six classes, with the thresholds of the dependency profile:
+
+  | Class | Alert | Fires when |
+  |---|---|---|
+  | `thermal` | `GpuThermalThrottle`, `GpuTempCritical` | HW slowdown or thermal throttle for 10m; temperature above 88 °C for 5m |
+  | `power` | `GpuPowerBrake` | HW power brake for 10m |
+  | `row-remap-budget` | `GpuRemappedRowsHigh` | 8 or more uncorrectable remapped rows for 10m |
+  | `pcie` | `GpuPcieReplayHigh` | more than 1000 PCIe replays in an hour |
+  | `exporter-down` | `GpuExporterDown` | dcgm-exporter `up` is 0, or the node's GPU series stopped arriving, for 5m |
+  | `agent-down` | `KubeNeuronAgentDown` | the node's agent series stopped arriving, for 3m |
+
+  **`exporter-down` and `agent-down` never start an action**: they say
+  that data stopped arriving, not that a GPU failed, so the controller only
+  records and notifies them, in every mode and whatever policy binds them.
+  The alert expressions aggregate to the node and GPU, so the workload
+  labels never reach an alert, also with `keepWorkloadLabels: true`.
+  vmalert reaches nothing but the store and the controller's port 8080;
+  with `tls.publicServerSecretRef` it speaks https and verifies the
+  controller with that Secret's `ca.crt` (or the system roots without
+  one). `AlertDetectionConfigured` is `True` once vmalert is available.
+  **With an External store the alert rules are yours to run** against your
+  store, pointed at the controller webhook; until then
+  `AlertDetectionConfigured` is `False` with reason `ExternalStore`.
 - The collector's NetworkPolicy admits OTLP from the installation's
   controller and agents and from the operator. For an external store it
   allows egress to the store's port on any address, since a NetworkPolicy

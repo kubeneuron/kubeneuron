@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/action"
+	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
@@ -50,6 +51,11 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 	// that is the normal in-flight-action contract.  executeStep has a second,
 	// last-mile dry-run check for a goroutine that was admitted but has not yet
 	// reached its side effect.
+	// The last stop for an observe-only class: the state walk never brings
+	// one here, so reaching it means a path that walk does not know about.
+	if reason, ok := detect.ObserveOnly(inc.Class); ok && !strings.HasPrefix(step.Action, "notify.") {
+		return c.quarantine(ctx, inc, "step "+step.Name+" refused: "+reason)
+	}
 	c.runtimeMu.RLock()
 	defer c.runtimeMu.RUnlock()
 	if c.runtimeConfig(ctx) != c.runtime.Load() {

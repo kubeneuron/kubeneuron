@@ -48,11 +48,28 @@ var alertClassMap = map[string]types.ProblemClass{
 	"GpuPowerBrake":            types.ClassPower,
 	"GpuNvlinkCrcErrors":       types.ClassNVLink,
 	"GpuPcieReplayHigh":        types.ClassPCIe,
-	"GpuExporterDown":          types.ClassDriverHang,
+	"GpuExporterDown":          types.ClassExporterDown,
 	"KubeNeuronAgentDown":      types.ClassAgentDown,
 	// GpuLost/GpuDriverHang/GpuDcgmDiagFailed return together with the agent
 	// series that back them; classes ClassGPULost/ClassDriverHang/
 	// ClassDiagFailure stay reachable through the XID paths meanwhile.
+}
+
+// observeOnlyClasses report that data stopped arriving, not that an
+// accelerator failed. The controller only records and notifies them, in every
+// mode and whatever policy binds them: every rung above observe would act on a
+// node whose state is unknown, and for agent-down through the very agent that
+// stopped answering.
+var observeOnlyClasses = map[types.ProblemClass]string{
+	types.ClassAgentDown:    "no data from the node: the agent stopped reporting",
+	types.ClassExporterDown: "no GPU metrics from the node: the metrics exporter stopped reporting",
+}
+
+// ObserveOnly reports whether class never starts recovery, and the one
+// sentence that says why.
+func ObserveOnly(class types.ProblemClass) (string, bool) {
+	reason, ok := observeOnlyClasses[class]
+	return reason, ok
 }
 
 // AlertClasses returns every problem class the metric-alert path can produce.

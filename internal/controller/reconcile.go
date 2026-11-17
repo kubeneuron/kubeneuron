@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/approval"
+	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
@@ -145,6 +146,9 @@ func (c *Controller) advanceOpen(ctx context.Context, inc *types.Incident) error
 	if c.flap != nil && c.flap.RecordReopen(inc.Target, inc.Class) {
 		return c.quarantine(ctx, inc, "flap threshold reached: automation stopped")
 	}
+	if reason, ok := detect.ObserveOnly(inc.Class); ok {
+		return c.transition(ctx, inc, types.StateObserving, "system", "observe-only", reason, nil)
+	}
 	book, hasBook := c.runtimeConfig(ctx).Engine.Playbook(inc.Playbook)
 	if !hasBook || isObservePlaybook(book) {
 		return c.transition(ctx, inc, types.StateObserving, "system", "observe", "", nil)
@@ -186,7 +190,8 @@ func (c *Controller) advanceObserving(ctx context.Context, inc *types.Incident) 
 		}
 	}
 	threshold, window := c.observePolicy(ctx, inc.Class, inc.Vendor)
-	if threshold > 0 && inc.SignalSeen >= threshold {
+	_, observeOnly := detect.ObserveOnly(inc.Class)
+	if threshold > 0 && inc.SignalSeen >= threshold && !observeOnly {
 		// Only escalate to EVALUATING when a playbook is actually bound to act on.
 		// A threshold-crossed class with no bound playbook (a CRD-compiled policy
 		// set that omits the class) would otherwise livelock: advanceEvaluating
@@ -227,6 +232,11 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 		c.log.Debug("maintenance window active, holding incident",
 			"incident", inc.ID, "node", inc.Target.Node, "window", window)
 		return nil
+	}
+	// Whatever brought an observe-only class here (an incident that opened
+	// before this build, a hand-made binding), no step runs for it.
+	if reason, ok := detect.ObserveOnly(inc.Class); ok {
+		return c.transition(ctx, inc, types.StateObserving, "system", "observe-only", reason, nil)
 	}
 	book, ok := c.runtimeConfig(ctx).Engine.Playbook(inc.Playbook)
 	if !ok {

@@ -145,6 +145,20 @@ spec:
   match: {class: agent-down}
   playbookRef: kubeneuron-observe
 ---
+# The GPU metrics exporter on the node stopped reporting. That is a gap in
+# monitoring, not evidence that a GPU failed, and the controller never runs a
+# step for it whatever this binding says; the binding records and notifies.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-exporter-down
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: exporter-down}
+  playbookRef: kubeneuron-observe
+---
 # XID 94 — contained ECC error (A100+). Containment means exactly one
 # workload's context was corrupted and the rest of the device is sound, so the
 # surgical response IS the correct one: evict that workload, keep the GPU
@@ -194,15 +208,12 @@ spec:
   match: {class: gsp-error}
   playbookRef: kubeneuron-gpu-reset
 ---
-# Driver hang: nvidia-smi timeout, a dead exporter, an amdgpu ring timeout.
+# Driver hang: an amdgpu ring timeout (a dead exporter is exporter-down).
 #
-# NOT drain-and-reset, which is what the file-based configs/policies.yaml
-# binds. The most common emitter of this class is GpuExporterDown — a
-# MONITORING outage — and answering a monitoring outage by draining a node full
-# of training jobs is a worse failure than the one being reported. The in-place
-# reset ladder starts with an idle check, so a hung driver on a busy device
-# stops for a human instead, and only a genuinely idle device is reset.
-# Escalation still reaches the drain when the reset does not clear it.
+# NOT drain-and-reset. The in-place reset ladder starts with an idle check, so
+# a hung driver on a busy device stops for a human instead, and only a
+# genuinely idle device is reset. Escalation still reaches the drain when the
+# reset does not clear it.
 apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:

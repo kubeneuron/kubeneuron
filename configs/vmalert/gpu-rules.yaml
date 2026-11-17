@@ -122,7 +122,7 @@ groups:
         annotations:
           runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpuexporterdown"
           summary: "dcgm-exporter down on {{ $labels.node }}"
-          description: "No GPU metrics for 5m — driver hang or node failure. Playbook: drain-and-reset via node triage."
+          description: "No GPU metrics for 5m: a monitoring gap, not a GPU fault. KubeNeuron records it and runs no step; check the exporter and the node."
 
       # GpuLost, GpuDriverHang, and GpuDcgmDiagFailed were removed: they
       # referenced agent series that were never exported. They return with

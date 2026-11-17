@@ -10,8 +10,10 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -20,9 +22,10 @@ import (
 )
 
 // A Managed store comes with a vmalert that evaluates the GPU recording
-// rules into it, so the dashboards' kubeneuron_gpu_* series exist. It has no
-// alerting rules and no notifier: it reads from and writes to that store
-// only. Apache-2.0, referenced by digest and pulled from its publisher;
+// rules into it, so the dashboards' kubeneuron_gpu_* series exist, and the
+// alerting rules for the faults that reach KubeNeuron on NVIDIA only as
+// metric alerts. Its one notifier is the controller, with the webhook token
+// as a bearer header; it reaches nothing else but that store. Apache-2.0, referenced by digest and pulled from its publisher;
 // --metrics-rules-image overrides it for a mirror.
 const DefaultMetricsRulesImage = "victoriametrics/vmalert:v1.147.0@sha256:45ea994098b77d56904f3d5d7cb2771effad9ddefb1d07d4ffa0c1da4c3e4c5c"
 
@@ -30,8 +33,15 @@ const (
 	rulesComponent      = "metrics-rules"
 	rulesPort           = 8880
 	rulesKey            = "recording-rules.yaml"
+	alertingKey         = "alerting-rules.yaml"
 	rulesMountPath      = "/etc/vmalert"
 	rulesReadyCondition = "ObservabilityRulesReady"
+	// alertDetectionCondition says whether metric alerts reach the controller.
+	alertDetectionCondition = "AlertDetectionConfigured"
+	// vmalertWebhookPath is the notifier base; vmalert appends /api/v2/alerts.
+	vmalertWebhookPath = "/api/v1/webhooks/vmalert"
+	notifierTokenDir   = "/etc/vmalert-notifier/token"
+	notifierCADir      = "/etc/vmalert-notifier/ca"
 )
 
 func rulesName(installation *kubeneuronv1alpha1.KubeNeuron) string {
@@ -48,11 +58,24 @@ func (r *KubeNeuronReconciler) metricsRulesImage() string {
 func rulesConfigMap(installation *kubeneuronv1alpha1.KubeNeuron) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: rulesName(installation), Namespace: installation.Spec.Namespace, Labels: resourceLabels(installation, rulesComponent)},
-		Data:       map[string]string{rulesKey: vmalertrules.Recording},
+		Data:       map[string]string{rulesKey: vmalertrules.Recording, alertingKey: vmalertrules.Alerting},
 	}
 }
 
-func rulesDeployment(installation *kubeneuronv1alpha1.KubeNeuron, image, rulesDigest string) *appsv1.Deployment {
+// notifierURL is the controller's vmalert webhook, over TLS when the
+// controller's public listener serves it.
+func notifierURL(installation *kubeneuronv1alpha1.KubeNeuron) string {
+	scheme := "http://"
+	if installation.Spec.TLS.PublicServerSecretRef != nil {
+		scheme = "https://"
+	}
+	return scheme + installation.Name + "-controller." + installation.Spec.Namespace + ".svc:" +
+		strconv.Itoa(controllerPort) + vmalertWebhookPath
+}
+
+// rulesDeployment runs vmalert. notifierCA mounts the ca.crt of the
+// controller's public TLS Secret, when it has one, to verify the controller.
+func rulesDeployment(installation *kubeneuronv1alpha1.KubeNeuron, image, rulesDigest string, notifierCA bool) *appsv1.Deployment {
 	labels := resourceLabels(installation, rulesComponent)
 	store := serviceURL(installation, storeName(installation), storePort)
 	container := corev1.Container{
@@ -62,8 +85,11 @@ func rulesDeployment(installation *kubeneuronv1alpha1.KubeNeuron, image, rulesDi
 		Args: []string{
 			"-httpListenAddr=:" + strconv.Itoa(rulesPort),
 			"-rule=" + rulesMountPath + "/" + rulesKey,
+			"-rule=" + rulesMountPath + "/" + alertingKey,
 			"-datasource.url=" + store,
 			"-remoteWrite.url=" + store,
+			"-notifier.url=" + notifierURL(installation),
+			"-notifier.bearerTokenFile=" + notifierTokenDir + "/token",
 		},
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m"), corev1.ResourceMemory: resource.MustParse("64Mi")},
@@ -75,7 +101,35 @@ func rulesDeployment(installation *kubeneuronv1alpha1.KubeNeuron, image, rulesDi
 		SecurityContext:          restrictedContainerSecurity(),
 		TerminationMessagePath:   corev1.TerminationMessagePathDefault,
 		TerminationMessagePolicy: corev1.TerminationMessageReadFile,
-		VolumeMounts:             []corev1.VolumeMount{{Name: "rules", MountPath: rulesMountPath, ReadOnly: true}},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "rules", MountPath: rulesMountPath, ReadOnly: true},
+			{Name: "notifier-token", MountPath: notifierTokenDir, ReadOnly: true},
+		},
+	}
+	volumes := []corev1.Volume{
+		{Name: "rules", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: rulesName(installation)},
+			DefaultMode:          ptr.To(corev1.ConfigMapVolumeSourceDefaultMode),
+		}}},
+	}
+	// The token is mandatory on every installation; it is the same Secret
+	// the controller checks the bearer against, read from a file so it is
+	// neither in the URL nor in vmalert's flags.
+	if ref := webhookTokenRef(installation); ref != nil {
+		volumes = append(volumes, corev1.Volume{Name: "notifier-token", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName:  ref.Name,
+			DefaultMode: ptr.To(int32(defaultSecretMode)),
+			Items:       []corev1.KeyToPath{{Key: tokenSecretKey(ref), Path: "token"}},
+		}}})
+	}
+	if ref := installation.Spec.TLS.PublicServerSecretRef; ref != nil && notifierCA {
+		container.Args = append(container.Args, "-notifier.tlsCAFile="+notifierCADir+"/ca.crt")
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{Name: "notifier-ca", MountPath: notifierCADir, ReadOnly: true})
+		volumes = append(volumes, corev1.Volume{Name: "notifier-ca", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName:  ref.Name,
+			DefaultMode: ptr.To(int32(defaultSecretMode)),
+			Items:       []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
+		}}})
 	}
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: rulesName(installation), Namespace: installation.Spec.Namespace, Labels: labels},
@@ -97,17 +151,15 @@ func rulesDeployment(installation *kubeneuronv1alpha1.KubeNeuron, image, rulesDi
 					SecurityContext:               restrictedPodSecurity(),
 					SchedulerName:                 corev1.DefaultSchedulerName,
 					Containers:                    []corev1.Container{container},
-					Volumes: []corev1.Volume{{Name: "rules", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{Name: rulesName(installation)},
-						DefaultMode:          ptr.To(corev1.ConfigMapVolumeSourceDefaultMode),
-					}}}},
+					Volumes:                       volumes,
 				},
 			},
 		},
 	}
 }
 
-// rulesNetworkPolicy admits nothing and lets vmalert reach DNS and the store.
+// rulesNetworkPolicy admits nothing and lets vmalert reach DNS, the store
+// and the controller's public port.
 func rulesNetworkPolicy(installation *kubeneuronv1alpha1.KubeNeuron) *networkingv1.NetworkPolicy {
 	labels := resourceLabels(installation, rulesComponent)
 	return &networkingv1.NetworkPolicy{
@@ -118,6 +170,9 @@ func rulesNetworkPolicy(installation *kubeneuronv1alpha1.KubeNeuron) *networking
 			Egress: []networkingv1.NetworkPolicyEgressRule{dnsEgress(), {
 				To:    []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{MatchLabels: resourceLabels(installation, storeComponent)}}},
 				Ports: []networkingv1.NetworkPolicyPort{tcpPort(storePort)},
+			}, {
+				To:    []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{MatchLabels: resourceLabels(installation, "controller")}}},
+				Ports: []networkingv1.NetworkPolicyPort{tcpPort(controllerPort)},
 			}},
 		},
 	}
@@ -134,8 +189,12 @@ func (r *KubeNeuronReconciler) ensureRules(ctx context.Context, installation *ku
 	if err := r.ensureNetworkPolicy(ctx, installation, rulesNetworkPolicy(installation)); err != nil {
 		return fmt.Errorf("reconcile metrics rules NetworkPolicy: %w", err)
 	}
-	digest := sha256Hex([]byte(configMap.Data[rulesKey]))
-	if err := r.ensureDeployment(ctx, installation, rulesDeployment(installation, r.metricsRulesImage(), digest)); err != nil {
+	notifierCA, err := r.publicServerHasCA(ctx, installation)
+	if err != nil {
+		return err
+	}
+	digest := sha256Hex([]byte(configMap.Data[rulesKey] + "\x00" + configMap.Data[alertingKey]))
+	if err := r.ensureDeployment(ctx, installation, rulesDeployment(installation, r.metricsRulesImage(), digest, notifierCA)); err != nil {
 		return fmt.Errorf("reconcile metrics rules Deployment: %w", err)
 	}
 	return nil
@@ -149,4 +208,42 @@ func (r *KubeNeuronReconciler) removeRules(ctx context.Context, installation *ku
 		}
 	}
 	return nil
+}
+
+// publicServerHasCA reports whether the controller's public TLS Secret
+// carries a ca.crt for vmalert to verify the controller with. Without one
+// vmalert trusts the system roots.
+func (r *KubeNeuronReconciler) publicServerHasCA(ctx context.Context, installation *kubeneuronv1alpha1.KubeNeuron) (bool, error) {
+	ref := installation.Spec.TLS.PublicServerSecretRef
+	if ref == nil {
+		return false, nil
+	}
+	var secret corev1.Secret
+	err := r.Get(ctx, types.NamespacedName{Name: ref.Name, Namespace: installation.Spec.Namespace}, &secret)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read the controller's public TLS Secret: %w", err)
+	}
+	return len(secret.Data["ca.crt"]) > 0, nil
+}
+
+// alertDetection says whether metric alerts reach the controller: with the
+// Managed store when vmalert with the alerting rules is available; with an
+// External store they are the user's to run and point at the webhook.
+func alertDetection(installation *kubeneuronv1alpha1.KubeNeuron, rules *metav1.Condition) *metav1.Condition {
+	switch storeMode(installation) {
+	case kubeneuronv1alpha1.IntegrationModeManaged:
+		if rules == nil || rules.Status != metav1.ConditionTrue {
+			return notReady("RulesNotReady", "alert-based detection waits for the metrics rules evaluator")
+		}
+		return &metav1.Condition{Status: metav1.ConditionTrue, Reason: "ManagedRules",
+			Message: "the managed vmalert evaluates the alerting rules and sends them to the controller"}
+	case kubeneuronv1alpha1.IntegrationModeExternal:
+		return notReady("ExternalStore",
+			"alert-based detection is not configured: run the alert rules against your store and point them at the controller webhook")
+	default:
+		return nil
+	}
 }
