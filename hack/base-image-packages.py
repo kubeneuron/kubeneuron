@@ -20,6 +20,7 @@ in REVIEWED stops the generator: a new base-image package needs a review.
 """
 import argparse
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -45,9 +46,30 @@ def pinned_bases():
     return sorted(set(BASE.findall(DOCKERFILE.read_text())))
 
 
+def platform_image(image, arch):
+    """image pinned to the manifest of one platform instead of the index.
+
+    The classic Docker image store keeps one platform per digest: creating a
+    container from the index digest for amd64 and then for arm64 fails with
+    "cannot overwrite digest". The per-platform manifest digest is unique to
+    its architecture, so each platform is its own image in every store.
+    """
+    name, _, digest = image.partition('@')
+    index = json.loads(subprocess.check_output(
+        [DOCKER, 'buildx', 'imagetools', 'inspect', '--raw', image], text=True))
+    if 'manifests' not in index:
+        sys.exit(f'{image}: expected a multi-platform index')
+    for manifest in index['manifests']:
+        platform = manifest.get('platform', {})
+        if platform.get('os') == 'linux' and platform.get('architecture') == arch:
+            return f"{name}@{manifest['digest']}"
+    sys.exit(f'{image}: index {digest} has no linux/{arch} manifest')
+
+
 def image_files(image, arch):
     """dpkg status entries and copyright files of one platform of an image."""
-    cid = subprocess.check_output([DOCKER, 'create', '--platform', f'linux/{arch}', image, '/x'], text=True).strip()
+    cid = subprocess.check_output(
+        [DOCKER, 'create', '--platform', f'linux/{arch}', platform_image(image, arch), '/x'], text=True).strip()
     try:
         raw = subprocess.check_output([DOCKER, 'export', cid])
     finally:
