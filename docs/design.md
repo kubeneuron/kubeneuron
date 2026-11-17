@@ -611,6 +611,11 @@ of a later boot change.
 A superseded incident's cordon is retained with its owner and held evidence.
 A subsequent incident can add its own owner; completing it does not release the
 old held owner. Release of that retained hold requires explicit intervention.
+After checking the node identity, health, and all remaining incident owners, an
+operator must release the retained cordon manually through Kubernetes, using
+`kubectl uncordon <node-name>`. Do not do this while another incident or operator
+still requires the node to remain cordoned. This is an operator decision, not an
+automatic recovery outcome.
 An initially external cordon is never converted into permission to uncordon.
 
 Any active state may fail closed to `NEEDS_HUMAN`. The controller's periodic
