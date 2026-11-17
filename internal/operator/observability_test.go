@@ -266,9 +266,34 @@ func TestValidateObservability(t *testing.T) {
 			kn.Spec.Observability.Store.Endpoint = "http://vm.example:8428/opentelemetry"
 			kn.Spec.Observability.Collector.DCGMExporter = &kubeneuronv1alpha1.DCGMExporterScrapeSpec{}
 		},
-		"managed grafana": func(kn *kubeneuronv1alpha1.KubeNeuron) {
+		"grafana datasource with a managed store": func(kn *kubeneuronv1alpha1.KubeNeuron) {
+			kn.Spec.Observability.Grafana = &kubeneuronv1alpha1.GrafanaSpec{Mode: kubeneuronv1alpha1.IntegrationModeManaged,
+				Datasource: &kubeneuronv1alpha1.GrafanaDatasourceSpec{URL: "http://vm.example:8428"}}
+		},
+		"managed grafana with an external store and no datasource": func(kn *kubeneuronv1alpha1.KubeNeuron) {
+			kn.Spec.Observability.Store.Mode = kubeneuronv1alpha1.IntegrationModeExternal
+			kn.Spec.Observability.Store.Endpoint = "http://vm.example:8428/opentelemetry"
 			kn.Spec.Observability.Grafana = &kubeneuronv1alpha1.GrafanaSpec{Mode: kubeneuronv1alpha1.IntegrationModeManaged}
 		},
+		"managed grafana without a store": func(kn *kubeneuronv1alpha1.KubeNeuron) {
+			kn.Spec.Observability.Store = nil
+			kn.Spec.Observability.Grafana = &kubeneuronv1alpha1.GrafanaSpec{Mode: kubeneuronv1alpha1.IntegrationModeManaged}
+		},
+		"credentials in the grafana datasource": func(kn *kubeneuronv1alpha1.KubeNeuron) {
+			kn.Spec.Observability.Store.Mode = kubeneuronv1alpha1.IntegrationModeExternal
+			kn.Spec.Observability.Store.Endpoint = "http://vm.example:8428/opentelemetry"
+			kn.Spec.Observability.Grafana = &kubeneuronv1alpha1.GrafanaSpec{Mode: kubeneuronv1alpha1.IntegrationModeManaged,
+				Datasource: &kubeneuronv1alpha1.GrafanaDatasourceSpec{URL: "http://u:p@vm.example:8428"}}
+		},
+		"datasource on an external grafana": func(kn *kubeneuronv1alpha1.KubeNeuron) {
+			kn.Spec.Observability.Grafana = &kubeneuronv1alpha1.GrafanaSpec{Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: "http://g.example",
+				Datasource: &kubeneuronv1alpha1.GrafanaDatasourceSpec{URL: "http://vm.example:8428"}}
+		},
+	}
+	withGrafana := managedObservability(testKubeNeuron())
+	withGrafana.Spec.Observability.Grafana = &kubeneuronv1alpha1.GrafanaSpec{Mode: kubeneuronv1alpha1.IntegrationModeManaged}
+	if err := validateObservability(withGrafana); err != nil {
+		t.Fatalf("managed grafana on the managed store: %v", err)
 	}
 	if err := validateObservability(managedObservability(testKubeNeuron())); err != nil {
 		t.Fatalf("managed collector and store: %v", err)
@@ -308,7 +333,7 @@ func TestDefaultObservabilityImagesMatchTheLock(t *testing.T) {
 	if err := sigsyaml.Unmarshal(data, &lock); err != nil {
 		t.Fatal(err)
 	}
-	for key, value := range map[string]string{"otelCollectorK8s": DefaultCollectorImage, "victoriaMetricsSingle": DefaultMetricsStoreImage, "victoriaMetricsAlert": DefaultMetricsRulesImage} {
+	for key, value := range map[string]string{"otelCollectorK8s": DefaultCollectorImage, "victoriaMetricsSingle": DefaultMetricsStoreImage, "victoriaMetricsAlert": DefaultMetricsRulesImage, "grafana": DefaultGrafanaImage} {
 		pin := lock.Images[key]
 		if pin.Digest == "" {
 			t.Errorf("lock %s has no digest", key)
@@ -985,5 +1010,212 @@ func TestManagedRulesAreRecordingOnly(t *testing.T) {
 	}
 	if !admitted {
 		t.Error("the store does not admit the rules evaluator")
+	}
+}
+
+func managedGrafana(kn *kubeneuronv1alpha1.KubeNeuron) *kubeneuronv1alpha1.KubeNeuron {
+	kn = managedObservability(kn)
+	kn.Spec.Observability.Grafana = &kubeneuronv1alpha1.GrafanaSpec{Mode: kubeneuronv1alpha1.IntegrationModeManaged}
+	return kn
+}
+
+func TestManagedGrafana(t *testing.T) {
+	ctx := context.Background()
+	kn := managedGrafana(testKubeNeuron())
+	fakeClient, reconciler := reconcileObservabilityFixture(t, kn)
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: "fleet"}}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	ns := kn.Spec.Namespace
+	for _, check := range []struct {
+		name   string
+		object client.Object
+	}{
+		{"fleet-grafana", &appsv1.Deployment{}},
+		{"fleet-grafana", &corev1.Service{}},
+		{"fleet-grafana", &corev1.ConfigMap{}},
+		{"fleet-grafana", &corev1.ServiceAccount{}},
+		{"fleet-grafana", &networkingv1.NetworkPolicy{}},
+		{"fleet-grafana-dashboards", &corev1.ConfigMap{}},
+		{"fleet-grafana-admin", &corev1.Secret{}},
+	} {
+		if err := fakeClient.Get(ctx, types.NamespacedName{Name: check.name, Namespace: ns}, check.object); err != nil {
+			t.Errorf("%T %s: %v", check.object, check.name, err)
+		}
+	}
+
+	// The admin password: random, owned by the installation, never rewritten.
+	var admin corev1.Secret
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-grafana-admin", Namespace: ns}, &admin); err != nil {
+		t.Fatal(err)
+	}
+	password := string(admin.Data[grafanaAdminPasswordKey])
+	if len(password) < 32 || string(admin.Data[grafanaAdminUserKey]) != "admin" {
+		t.Errorf("admin Secret = user %q, password of %d characters", admin.Data[grafanaAdminUserKey], len(password))
+	}
+	if !metav1.IsControlledBy(&admin, kn) {
+		t.Error("the admin Secret does not belong to the installation, so it would outlive it")
+	}
+	admin.Data[grafanaAdminPasswordKey] = []byte("chosen-by-the-user")
+	if err := fakeClient.Update(ctx, &admin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-grafana-admin", Namespace: ns}, &admin); err != nil {
+		t.Fatal(err)
+	}
+	if string(admin.Data[grafanaAdminPasswordKey]) != "chosen-by-the-user" {
+		t.Error("reconcile overwrote the admin password the user set")
+	}
+
+	var deployment appsv1.Deployment
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-grafana", Namespace: ns}, &deployment); err != nil {
+		t.Fatal(err)
+	}
+	pod := deployment.Spec.Template.Spec
+	container := pod.Containers[0]
+	if container.Image != DefaultGrafanaImage || !strings.Contains(container.Image, "@sha256:") {
+		t.Errorf("image = %s", container.Image)
+	}
+	if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+		t.Error("grafana mounts a service account token")
+	}
+	want := map[string]string{
+		"GF_AUTH_ANONYMOUS_ENABLED": "false", "GF_USERS_ALLOW_SIGN_UP": "false",
+		"GF_ANALYTICS_REPORTING_ENABLED": "false", "GF_ANALYTICS_CHECK_FOR_UPDATES": "false",
+		"GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES": "false", "GF_ANALYTICS_FEEDBACK_LINKS_ENABLED": "false",
+		"GF_PLUGINS_PREINSTALL_DISABLED": "true", "GF_PLUGINS_PLUGIN_ADMIN_ENABLED": "false",
+		"GF_PLUGINS_PUBLIC_KEY_RETRIEVAL_DISABLED": "true", "GF_NEWS_NEWS_FEED_ENABLED": "false",
+		"GF_SECURITY_DISABLE_GRAVATAR": "true", "GF_SNAPSHOTS_EXTERNAL_ENABLED": "false",
+		"GF_PUBLIC_DASHBOARDS_ENABLED": "false",
+	}
+	for name, value := range want {
+		if e, i := envValue(container.Env, name); i < 0 || e.Value != value {
+			t.Errorf("%s = %q, want %q", name, e.Value, value)
+		}
+	}
+	if e, _ := envValue(container.Env, "GF_SECURITY_ADMIN_PASSWORD"); e.ValueFrom == nil || e.ValueFrom.SecretKeyRef.Name != "fleet-grafana-admin" {
+		t.Errorf("admin password env = %#v, want it from the Secret", e)
+	}
+	for _, v := range pod.Volumes {
+		if v.Name == "data" && v.EmptyDir == nil {
+			t.Error("grafana data is not an emptyDir")
+		}
+	}
+
+	// Provisioning: the managed store as datasource, files win over the UI.
+	var provisioning corev1.ConfigMap
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-grafana", Namespace: ns}, &provisioning); err != nil {
+		t.Fatal(err)
+	}
+	if ds := provisioning.Data["datasources.yaml"]; !strings.Contains(ds, "url: http://fleet-metrics-store.kube-neuron-system.svc:8428") ||
+		!strings.Contains(ds, "uid: "+grafanaDatasourceUID) || strings.Contains(ds, "secureJsonData") {
+		t.Errorf("datasources.yaml = %s", ds)
+	}
+	if !strings.Contains(provisioning.Data["dashboards.yaml"], "allowUiUpdates: false") {
+		t.Errorf("dashboards.yaml = %s", provisioning.Data["dashboards.yaml"])
+	}
+	var boards corev1.ConfigMap
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-grafana-dashboards", Namespace: ns}, &boards); err != nil {
+		t.Fatal(err)
+	}
+	if len(boards.Data) != 6 {
+		t.Errorf("%d dashboards, want 6", len(boards.Data))
+	}
+	for name, board := range boards.Data {
+		if strings.Contains(board, "${DS_PROMETHEUS}") || !strings.Contains(board, grafanaDatasourceUID) {
+			t.Errorf("%s is not bound to the datasource", name)
+		}
+	}
+
+	var policy networkingv1.NetworkPolicy
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-grafana", Namespace: ns}, &policy); err != nil {
+		t.Fatal(err)
+	}
+	ingress := policy.Spec.Ingress
+	if len(ingress) != 1 || len(ingress[0].From) != 1 || ingress[0].From[0].NamespaceSelector != nil || ingress[0].From[0].PodSelector == nil ||
+		len(policy.Spec.Egress) != 2 || policy.Spec.Egress[1].To[0].PodSelector.MatchLabels["app.kubernetes.io/component"] != storeComponent {
+		t.Errorf("grafana NetworkPolicy = %#v, want ingress from this namespace only and egress to DNS and the store", policy.Spec)
+	}
+	admitted := false
+	for _, peer := range storeNetworkPolicy(kn).Spec.Ingress[0].From {
+		if peer.PodSelector.MatchLabels["app.kubernetes.io/component"] == grafanaComponent {
+			admitted = true
+		}
+	}
+	if !admitted {
+		t.Error("the store does not admit grafana")
+	}
+
+	var got kubeneuronv1alpha1.KubeNeuron
+	if err := fakeClient.Get(ctx, request.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	if c := meta.FindStatusCondition(got.Status.Conditions, grafanaReadyCondition); c == nil || c.Status != metav1.ConditionFalse {
+		t.Errorf("grafana condition before it is available = %#v", c)
+	}
+
+	// Disabled: the workload goes; the admin Secret stays for garbage
+	// collection with the installation.
+	got.Spec.Observability.Grafana = nil
+	if err := fakeClient.Update(ctx, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct {
+		name   string
+		object client.Object
+	}{
+		{"fleet-grafana", &appsv1.Deployment{}},
+		{"fleet-grafana-dashboards", &corev1.ConfigMap{}},
+	} {
+		if err := fakeClient.Get(ctx, types.NamespacedName{Name: check.name, Namespace: ns}, check.object); !apierrors.IsNotFound(err) {
+			t.Errorf("%T %s after disable: %v, want NotFound", check.object, check.name, err)
+		}
+	}
+	if err := fakeClient.Get(ctx, request.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	if c := meta.FindStatusCondition(got.Status.Conditions, grafanaReadyCondition); c != nil {
+		t.Errorf("disabled grafana still has a condition: %#v", c)
+	}
+}
+
+func TestManagedGrafanaOnAnExternalStore(t *testing.T) {
+	kn := managedGrafana(testKubeNeuron())
+	kn.Spec.Observability.Store = &kubeneuronv1alpha1.MetricsStoreSpec{OTLPEndpointSpec: kubeneuronv1alpha1.OTLPEndpointSpec{
+		Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: "http://vm.example:8428/opentelemetry",
+	}}
+	kn.Spec.Observability.Grafana.Datasource = &kubeneuronv1alpha1.GrafanaDatasourceSpec{
+		URL:                    "https://query.example:9443",
+		AuthorizationSecretRef: &kubeneuronv1alpha1.SecretReference{Name: "query-auth", Key: "header"},
+	}
+	if err := validateObservability(kn); err != nil {
+		t.Fatal(err)
+	}
+	provisioning, err := grafanaProvisioning(kn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ds := provisioning.Data["datasources.yaml"]
+	if !strings.Contains(ds, "url: https://query.example:9443") || !strings.Contains(ds, "httpHeaderName1: Authorization") ||
+		!strings.Contains(ds, "httpHeaderValue1: ${"+grafanaAuthorizationEnv+"}") {
+		t.Errorf("datasources.yaml = %s", ds)
+	}
+	container := grafanaDeployment(kn, DefaultGrafanaImage, "d").Spec.Template.Spec.Containers[0]
+	if e, _ := envValue(container.Env, grafanaAuthorizationEnv); e.ValueFrom == nil || e.ValueFrom.SecretKeyRef.Name != "query-auth" || e.ValueFrom.SecretKeyRef.Key != "header" {
+		t.Errorf("authorization env = %#v", e)
+	}
+	policy, err := grafanaNetworkPolicy(kn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last := policy.Spec.Egress[len(policy.Spec.Egress)-1]; len(last.To) != 0 || last.Ports[0].Port.IntValue() != 9443 {
+		t.Errorf("egress = %#v, want the datasource port", policy.Spec.Egress)
 	}
 }

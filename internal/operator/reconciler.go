@@ -74,6 +74,8 @@ type KubeNeuronReconciler struct {
 	CollectorImage    string
 	MetricsStoreImage string
 	MetricsRulesImage string
+	// GrafanaImage runs a Managed Grafana; empty means DefaultGrafanaImage.
+	GrafanaImage string
 	// OperatorNamespace is where the operator runs; the collector's
 	// NetworkPolicy admits the operator's pods from there. Empty admits
 	// them from any namespace.

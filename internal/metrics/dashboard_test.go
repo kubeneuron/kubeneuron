@@ -361,6 +361,12 @@ func TestDashboardQueriesUseRealLabels(t *testing.T) {
 		"instance": true, "job": true, "namespace": true, "pod": true,
 		"container": true, "cluster": true, "le": true,
 	}
+	// Resource attributes the OTLP path attaches to every series in place
+	// of job and instance; MetricsQL and Prometheus 3 take them quoted.
+	for _, l := range []string{"service.name", "service.instance.id", "k8s.node.name", "kubeneuron.installation"} {
+		infra[l] = true
+		infra[`"`+l+`"`] = true
+	}
 	for _, v := range gpucatalog.DashboardVariables {
 		infra[v] = true
 	}

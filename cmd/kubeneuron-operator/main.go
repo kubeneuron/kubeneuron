@@ -54,6 +54,8 @@ func main() {
 			"image of a Managed spec.observability.store; pin by digest, e.g. a mirror of the default")
 		metricsRulesImage = flag.String("metrics-rules-image", operator.DefaultMetricsRulesImage,
 			"image of the recording rules evaluator (vmalert) that comes with a Managed store; pin by digest")
+		grafanaImage = flag.String("grafana-image", operator.DefaultGrafanaImage,
+			"image of a Managed spec.observability.grafana: the official open-source Grafana, unmodified; pin by digest, e.g. a mirror of the default")
 		// Production logging by default (JSON, info, sampled); development
 		// output remains reachable with --zap-devel.
 		logOptions = zap.Options{}
@@ -101,6 +103,7 @@ func main() {
 		CollectorImage:       *collectorImage,
 		MetricsStoreImage:    *metricsStoreImage,
 		MetricsRulesImage:    *metricsRulesImage,
+		GrafanaImage:         *grafanaImage,
 		// The chart sets POD_NAMESPACE; the collector admits the operator's
 		// own telemetry from that namespace only.
 		OperatorNamespace: os.Getenv("POD_NAMESPACE"),

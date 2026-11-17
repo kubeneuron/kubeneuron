@@ -29,6 +29,7 @@ operator; see [Metrics path](#metrics-path-specobservability).
 |---|---|---|---|
 | `collector` | the operator runs an OpenTelemetry Collector (`otel/opentelemetry-collector-k8s`) as `<name>-otel-collector`; the controller and agents export OTLP/HTTP to it | the controller and agents export to `endpoint` | nothing is exported |
 | `store` | the operator runs single-node VictoriaMetrics as `<name>-metrics-store` on a PersistentVolumeClaim, and vmalert as `<name>-metrics-rules` for its recording rules | the collector exports to `endpoint` | the collector drops what it receives |
+| `grafana` | the operator runs Grafana as `<name>-grafana` with the store as its datasource and the dashboards provisioned | your own Grafana at `endpoint`; load `deploy/grafana/*.json` into it | no Grafana |
 
 - **An external store must accept OTLP over HTTP**: VictoriaMetrics
   (`http://<host>:8428/opentelemetry`) or Prometheus started with
@@ -42,8 +43,8 @@ operator; see [Metrics path](#metrics-path-specobservability).
   Secret key in the installation namespace whose value is the whole
   `Authorization` header, for example `Bearer <token>`.
 - **An external collector with a Managed store is rejected**: the external
-  collector decides where metrics go. With an external collector an external
-  store only names the data source for a Managed Grafana.
+  collector decides where metrics go. With an external collector the
+  store's `endpoint` is not used.
 - **The Managed store has no backup.** Its claim (`storage.size`, default
   `20Gi`; `storage.storageClassName`; `retention`, default `30d`) survives a
   switch to External or Disabled and the deletion of the installation: the
@@ -105,11 +106,42 @@ operator; see [Metrics path](#metrics-path-specobservability).
 - The collector's NetworkPolicy lets it reach only the exporter pods on
   that port (by the node's address for a host-network exporter); a
   NetworkPolicy in the exporter's namespace must admit it as well.
-- The three images (collector, store, vmalert) are pinned by digest in the
-  operator (override with `--otel-collector-image`, `--metrics-store-image`
-  and `--metrics-rules-image`, for a mirror) and in
+- The four images (collector, store, vmalert, Grafana) are pinned by digest
+  in the operator (override with `--otel-collector-image`,
+  `--metrics-store-image`, `--metrics-rules-image` and `--grafana-image`,
+  for a mirror) and in
   `deploy/kubernetes/dependencies/versions.lock.yaml`; they are pulled from
   their publishers, not redistributed by KubeNeuron.
+- **A Managed Grafana installs Grafana (AGPL-3.0), unmodified, pulled from
+  Docker Hub (`grafana/grafana`).** It needs a Managed or External store and shows
+  the six boards from `deploy/grafana` with the store as a read-only
+  datasource. With an External store set `grafana.datasource.url` to the
+  store's query address (`http://<host>:8428` for VictoriaMetrics,
+  `http://<host>:9090` for Prometheus) and, if it needs one,
+  `grafana.datasource.authorizationSecretRef` to a Secret key holding the
+  whole `Authorization` header; Grafana sends it as a header, never in the
+  URL. `ObservabilityGrafanaReady` reports the Deployment.
+- **It is reachable only from inside the installation namespace**: a
+  ClusterIP Service behind a NetworkPolicy that admits port 3000 from that
+  namespace alone. With a Managed store Grafana reaches nothing but DNS
+  and the store; with an External store, egress is open on the datasource
+  port to any address, because the store's address cannot be named in the
+  policy.
+  Open it with
+  `kubectl port-forward svc/<name>-grafana 3000:3000 -n <namespace>` and
+  sign in as `admin` with the password from
+  `kubectl get secret <name>-grafana-admin -n <namespace> -o jsonpath='{.data.admin-password}' | base64 -d`.
+- **Anonymous access, sign-up, snapshots, public dashboards, the plugin
+  catalogue, usage reporting and update checks are off.** Boards edited in
+  the UI are not kept: Grafana runs on an emptyDir and the provisioned
+  boards win on restart.
+- **The admin account stays in the cluster.** The operator generates the
+  password once into the Secret `<name>-grafana-admin`, which belongs to the
+  installation and is deleted with it; switching Grafana to Disabled
+  removes Grafana but keeps the Secret until then. A password you put in
+  the Secret yourself is not overwritten; restart the Deployment
+  (`kubectl rollout restart deployment/<name>-grafana -n <namespace>`) to
+  apply it.
 - `spec.observability.victoriaMetrics` is deprecated and is not a metrics
   destination: the collector never sends to it, and `ObservabilityStoreReady`
   says so until `store` is set. Set together with `store`, the installation

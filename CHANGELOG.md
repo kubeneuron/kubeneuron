@@ -11,6 +11,18 @@ API is `v1alpha1`.
 
 ### Added
 
+- **Managed Grafana.** `spec.observability.grafana.mode: Managed` runs the
+  official Grafana image (AGPL-3.0, unmodified, pinned by digest) with the
+  store as a read-only datasource and the six dashboards provisioned,
+  behind a NetworkPolicy that admits only the installation namespace, with
+  anonymous access, sign-up, snapshots, public dashboards, the plugin
+  catalogue and usage reporting off. The admin password is generated once
+  into `<name>-grafana-admin`, which is deleted with the installation. With
+  an External store `grafana.datasource` names the query address and an
+  optional `Authorization` header Secret. `ObservabilityGrafanaReady`
+  reports it. The legacy board's "Controller up" and "Agents down" panels
+  also work on the OTLP path, which has no `up`.
+
 - **Recording rules with the Managed store.** A Managed store comes with a
   vmalert that evaluates `configs/vmalert/gpu-recording-rules.yaml` into
   it, recording rules only, no notifier, reaching only the store; the

@@ -124,6 +124,22 @@ func (r *KubeNeuronReconciler) reconcileObservability(ctx context.Context, insta
 			observabilityCondition{collectorReadyCondition, externalOrDisabled(collectorMode(installation), "collector")},
 			observabilityCondition{gpuMetricsCondition, nil})
 	}
+	// Grafana last: it reads the store the steps above set up.
+	if grafanaMode(installation) == kubeneuronv1alpha1.IntegrationModeManaged {
+		if err := r.ensureGrafana(ctx, installation); err != nil {
+			return nil, err
+		}
+		condition, err := r.deploymentCondition(ctx, installation, grafanaName(installation), "grafana")
+		if err != nil {
+			return nil, err
+		}
+		conditions = append(conditions, observabilityCondition{grafanaReadyCondition, condition})
+	} else {
+		if err := r.removeGrafana(ctx, installation); err != nil {
+			return nil, err
+		}
+		conditions = append(conditions, observabilityCondition{grafanaReadyCondition, nil})
+	}
 	return conditions, nil
 }
 

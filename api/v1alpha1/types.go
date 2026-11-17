@@ -759,6 +759,9 @@ type DependencySpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.alertmanager.secretRef)",message="alertmanager secretRef is not supported"
 // +kubebuilder:validation:XValidation:rule="!has(self.victoriaMetrics) || !has(self.store)",message="victoriaMetrics is deprecated and replaced by store; set only store"
 // +kubebuilder:validation:XValidation:rule="!has(self.collector) || self.collector.mode != 'External' || !has(self.store) || self.store.mode != 'Managed'",message="an external collector routes metrics itself: store cannot be Managed"
+// +kubebuilder:validation:XValidation:rule="!has(self.grafana) || self.grafana.mode != 'Managed' || (has(self.store) && self.store.mode != 'Disabled')",message="a Managed grafana needs a Managed or External store to read"
+// +kubebuilder:validation:XValidation:rule="!has(self.grafana) || !has(self.grafana.datasource) || (has(self.store) && self.store.mode == 'External')",message="grafana.datasource applies only to an External store; a Managed store is the datasource itself"
+// +kubebuilder:validation:XValidation:rule="!has(self.grafana) || self.grafana.mode != 'Managed' || !has(self.store) || self.store.mode != 'External' || has(self.grafana.datasource)",message="a Managed grafana with an External store requires grafana.datasource.url"
 type ObservabilitySpec struct {
 	// VictoriaMetrics is deprecated: use store. It names a query address,
 	// not an OTLP destination, so the collector never sends to it; with no
@@ -781,8 +784,10 @@ type ObservabilitySpec struct {
 	// Managed Grafana reads.
 	// +optional
 	Store *MetricsStoreSpec `json:"store,omitempty"`
-	// Grafana is reserved: the field validates, and only Disabled or
-	// External are accepted until the managed Grafana is available.
+	// Grafana shows the dashboards. Managed runs the official, unmodified
+	// Grafana image (AGPL-3.0) with the store as its datasource and the
+	// KubeNeuron dashboards provisioned; External is the user's own Grafana,
+	// which loads the dashboard files itself.
 	// +optional
 	Grafana *GrafanaSpec `json:"grafana,omitempty"`
 }
@@ -890,14 +895,39 @@ type StoreStorageSpec struct {
 	Ephemeral bool `json:"ephemeral,omitempty"`
 }
 
-// GrafanaSpec is reserved for the managed Grafana.
+// GrafanaSpec configures the Grafana that shows the dashboards.
 // +kubebuilder:validation:XValidation:rule="self.mode != 'External' || (has(self.endpoint) && self.endpoint.size() > 0)",message="External requires an endpoint"
+// +kubebuilder:validation:XValidation:rule="self.mode == 'Managed' || (!has(self.datasource) && !has(self.resources))",message="datasource and resources apply only to a Managed grafana"
 type GrafanaSpec struct {
 	// +kubebuilder:validation:Enum=Managed;External;Disabled
 	Mode IntegrationMode `json:"mode"`
+	// Endpoint is the address of the user's own Grafana (External).
 	// +kubebuilder:validation:MaxLength=2048
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
+	// Datasource is where a Managed Grafana queries an External store. The
+	// store's endpoint is where metrics are written, which is not always
+	// where they are read, so it is named separately.
+	// +optional
+	Datasource *GrafanaDatasourceSpec `json:"datasource,omitempty"`
+	// Resources of the managed Grafana container.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// GrafanaDatasourceSpec is a Prometheus-compatible query address.
+// +kubebuilder:validation:XValidation:rule="!self.url.contains('@')",message="credentials must not be part of the url; use authorizationSecretRef"
+type GrafanaDatasourceSpec struct {
+	// URL is the Prometheus query API base: for VictoriaMetrics
+	// http://<host>:8428, for Prometheus http://<host>:9090.
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^https?://\S+$`
+	URL string `json:"url"`
+	// AuthorizationSecretRef selects a key of a Secret in the installation
+	// namespace whose value is the HTTP Authorization header Grafana sends
+	// to the store. The operator never reads it.
+	// +optional
+	AuthorizationSecretRef *SecretReference `json:"authorizationSecretRef,omitempty"`
 }
 
 // ArchiveSpec describes the optional raw-event archive. It must never be used
