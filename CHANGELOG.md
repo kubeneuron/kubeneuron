@@ -291,6 +291,15 @@ API is `v1alpha1`.
 
 ### Changed
 
+- **AWS node recovery is observation-only.** The registered AWS provider
+  disables both recycle and replace until action-specific IAM permission
+  checks are available. To inspect native repair for an EKS managed
+  nodegroup, the controller role needs `eks:DescribeNodegroup`,
+  `eks:ListUpdates`, `eks:DescribeUpdate`,
+  `autoscaling:DescribeAutoScalingInstances`,
+  `autoscaling:DescribeAutoScalingGroups`,
+  `autoscaling:DescribeScalingActivities` and `ec2:DescribeInstanceStatus`.
+
 - **DCGM is no longer bundled in the agent image.** Removed NVIDIA's packaged
   `dcgmi`, its libraries and added `libgcc_s` dependency after license review.
   The agent uses the narrower `nvidia-smi` health source unless a working client
