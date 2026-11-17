@@ -88,12 +88,16 @@ operator; see [Metrics path](#metrics-path-specobservability).
   **`exporter-down` and `agent-down` never start an action**: they say
   that data stopped arriving, not that a GPU failed, so the controller only
   records and notifies them, in every mode and whatever policy binds them.
+  A node removed by a scale-down or replaced under the same name opens
+  neither, though its series stay "seen in the last hour" for a while.
   The alert expressions aggregate to the node and GPU, so the workload
   labels never reach an alert, also with `keepWorkloadLabels: true`.
   vmalert reaches nothing but the store and the controller's port 8080;
   with `tls.publicServerSecretRef` it speaks https and verifies the
-  controller with that Secret's `ca.crt` (or the system roots without
-  one). `AlertDetectionConfigured` is `True` once vmalert is available.
+  controller with that Secret's `ca.crt`. Without a `ca.crt` there,
+  `AlertDetectionConfigured` is `False` with reason
+  `NotifierCAUnavailable`: add the CA that signed `tls.crt` under that key.
+  Otherwise it is `True` once vmalert is available.
   **With an External store the alert rules are yours to run** against your
   store, pointed at the controller webhook. `AlertDetectionConfigured` is
   `False` with reason `ExternalStore` until the controller accepts the first

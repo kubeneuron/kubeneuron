@@ -409,6 +409,26 @@ func (p *Platform) NodeLabels(ctx context.Context, node string) (map[string]stri
 	return n.Labels, true, nil
 }
 
+// NodeUID implements platform.NodeIdentity from the Node object itself, not
+// the GPU-filtered inventory.
+func (p *Platform) NodeUID(ctx context.Context, node string) (string, bool, error) {
+	if lp := p.nodeLister.Load(); lp != nil {
+		if n, err := (*lp).Get(node); err == nil {
+			return string(n.UID), true, nil
+		} else if apierrors.IsNotFound(err) {
+			return "", false, nil
+		}
+	}
+	n, err := p.client.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return string(n.UID), true, nil
+}
+
 // WatchNodes streams GPU node inventory changes.
 func (p *Platform) WatchNodes(ctx context.Context) (<-chan platform.NodeEvent, error) {
 	w, err := p.client.CoreV1().Nodes().Watch(ctx, metav1.ListOptions{})

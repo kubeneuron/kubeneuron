@@ -114,7 +114,8 @@ API is `v1alpha1`.
   both metric paths), bound to observe in every shipped pack. The
   controller never runs a step for `exporter-down` or `agent-down`, in any
   mode and whatever policy binds them, and says so in the incident, the CLI
-  and the panel.
+  and the panel. Neither opens an incident for a node that is no longer in
+  Kubernetes or was replaced under the same name.
   `driver-hang` remains the class of an amdgpu ring timeout.
 
 - **kmsg watcher cancellation on macOS.** The kernel-log reader opens its

@@ -18,6 +18,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/notify"
+	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -1158,4 +1159,36 @@ func firstNonBlank(ss ...string) string {
 		}
 	}
 	return ""
+}
+
+// observeOnlyNodeGone reports whether an observe-only signal names a node
+// that is no longer there: no Kubernetes Node of that name, or one with a
+// different UID than the node the controller knows. A liveness alert built
+// from "seen in the last hour but not now" fires for a node removed by a
+// scale-down or a replacement; that is not a loss of visibility. When the
+// platform cannot tell, the signal opens its incident: it never starts a
+// step.
+func (c *Controller) observeOnlyNodeGone(ctx context.Context, sig types.Signal) bool {
+	if _, ok := detect.ObserveOnly(sig.Class); !ok {
+		return false
+	}
+	identity, ok := c.platform.(platform.NodeIdentity)
+	if !ok {
+		return false
+	}
+	uid, found, err := identity.NodeUID(ctx, sig.Target.Node)
+	if err != nil {
+		c.log.Warn("could not read the node for an observe-only signal", "class", sig.Class, "node", sig.Target.Node, "err", err)
+		return false
+	}
+	if !found {
+		c.log.Info("ignoring an observe-only signal for a node that no longer exists", "class", sig.Class, "node", sig.Target.Node)
+		return true
+	}
+	known, err := c.store.GetNode(ctx, sig.Target.Node)
+	if err == nil && known.UID != "" && uid != "" && known.UID != uid {
+		c.log.Info("ignoring an observe-only signal for a replaced node", "class", sig.Class, "node", sig.Target.Node)
+		return true
+	}
+	return false
 }
