@@ -8,6 +8,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
+	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"strings"
 	"testing"
 	"time"
@@ -233,5 +234,32 @@ func TestVerifiedRecycleRepinPersistsAndRejectsStaleResult(t *testing.T) {
 	requireAudit(t, auditResults(t, c, saved), "pin updated after verified recycle")
 	if err := c.repinAfterRecycle(ctx, stale, result); err == nil {
 		t.Fatal("stale result overwrote current pin")
+	}
+}
+
+// A changed cloud target is decided before authorization: an approval step
+// that nobody authorised is superseded, not parked for a person to approve
+// recovery of a node that is no longer the one that failed.
+func TestConfirmedCloudMismatchSupersedesBeforeAuthorization(t *testing.T) {
+	p := &changedCloudPlatform{observationErr: cloud.ErrIdentityChanged}
+	c, inc, _ := checkpointFixture(t, p, checkpoint.Policy{})
+	inc.CloudIdentity = recycleTestPin()
+	inc.CloudIdentity.Node = inc.Target.Node
+	if err := c.store.UpdateIncident(context.Background(), inc); err != nil {
+		t.Fatal(err)
+	}
+	step := &playbook.Step{Name: "drain", Action: "platform.drain", Approval: "required"}
+	if err := c.startStep(context.Background(), inc, step, "system"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.store.GetIncident(context.Background(), inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != types.StateSuperseded {
+		t.Fatalf("state=%s, want SUPERSEDED before any approval question", got.State)
+	}
+	if p.recycled != "" || p.replaced != "" {
+		t.Fatal("mismatch reached cloud mutation")
 	}
 }
