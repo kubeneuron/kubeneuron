@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -22,6 +23,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/agent"
 	"github.com/kubeneuron/kubeneuron/internal/agent/dcgm"
 	"github.com/kubeneuron/kubeneuron/internal/agent/nvml"
+	"github.com/kubeneuron/kubeneuron/internal/inventory"
 	"github.com/kubeneuron/kubeneuron/internal/telemetry"
 	"github.com/kubeneuron/kubeneuron/pkg/accelerator"
 )
@@ -165,7 +167,7 @@ func main() {
 		// success for ResetGPU and would turn missing tooling into a silent
 		// lie. Crash-looping here is the honest failure mode.
 		log.Error("nvidia-smi not found and -require-real-driver is set; refusing to start with the fake driver")
-		os.Exit(1)
+		os.Exit(inventory.ExitSMIMissing)
 	default:
 		log.Warn("nvidia-smi not found; using fake GPU driver (no real GPU telemetry or actions)")
 		driver = &nvml.Fake{}
@@ -226,6 +228,9 @@ func main() {
 	}, driver, log)
 	if err != nil {
 		log.Error("fatal", "err", err)
+		if *requireRealDriver && errors.Is(err, agent.ErrDriverInitialization) {
+			os.Exit(inventory.ExitDriverUnavailable)
+		}
 		os.Exit(1)
 	}
 
@@ -244,6 +249,9 @@ func main() {
 	_ = stopTelemetry(context.Background())
 	if err != nil {
 		log.Error("fatal", "err", err)
+		if *requireRealDriver && errors.Is(err, agent.ErrDriverInitialization) {
+			os.Exit(inventory.ExitDriverUnavailable)
+		}
 		os.Exit(1)
 	}
 }

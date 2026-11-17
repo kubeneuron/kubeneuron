@@ -1,47 +1,63 @@
-# KubeNeuron quickstart — dry-run demo in ~15 minutes
+# First run on Kubernetes
 
-Goal: watch a synthetic XID 79 travel signal → incident → escalation ladder
-→ approval → verification → resolved, with every side effect a logged
-no-op, on any machine with Go 1.26+ (no GPU, no cluster).
+## Install in DryRun mode
 
-## 1. Build and test
-
-```sh
-git clone <this repo> && cd kube-neuron
-make build && make test
-```
-
-## 2. Run the automated end-to-end demo
-
-The fastest way to see the whole loop is the E2E suite, which drives real
-HTTP against the real controller:
+KubeNeuron can reboot and replace nodes. The installer selects DryRun by
+default. The cluster operator is responsible for enabling execution and
+reviewing the policies that can act on workloads.
 
 ```sh
-go test ./test/e2e/ -v -run TestDryRunLadderWithApproval
+curl -fsSL https://github.com/kubeneuron/kubeneuron/releases/latest/download/install.sh | bash -s -- --version latest
 ```
 
-Read the test: it posts an agent event for XID 79 ("GPU has fallen off the
-bus"), waits for the incident to park in `AWAITING_APPROVAL` on the reboot
-step, approves it via `POST /api/v1/incidents/{id}/approve`, and asserts
-the full dry-run audit trail down to `RESOLVED`.
+Use a Kubernetes 1.29+ cluster with a default StorageClass. The installer
+prints the port-forward command and credentials. Run that port-forward in a
+separate terminal. In your working terminal set `SERVER=http://127.0.0.1:8080`
+and supply the printed API token through `KUBENEURONCTL_TOKEN` in the
+environment. Use the matching release of `kubeneuronctl`.
 
-## 3. Run the controller interactively
+## Check GPU visibility
 
-The controller currently supports Kubernetes deployments only. Its agent API
-authenticates Kubernetes workload identity, so `-platform baremetal` exits
-before opening listeners rather than presenting a runnable-but-unsafe setup.
-For a local ingestion demonstration, use the E2E suite above; for a cluster,
-use the operator-managed installation in the README.
+```sh
+kubeneuronctl --server "$SERVER" status
+kubeneuronctl --server "$SERVER" nodes
+kubectl get kubeneuron kubeneuron -o yaml
+```
 
-## 4. Operate an installed controller
+The installer selects host tooling for x86-64 GPU nodes labelled
+`nvidia.com/gpu.present=true` when they all report Amazon Linux 2023 with
+host drivers, or Ubuntu with the GPU Operator driver deployment label.
+These labels identify a likely filesystem layout. Successful inventory
+requires working driver libraries and `nvidia-smi` on the selected nodes.
+Use `--profile host-al2023` or `--profile gpu-operator-ubuntu` to select
+one of these layouts explicitly. With mixed or unidentified layouts,
+auto-detection leaves host tooling unset. Use `--profile none` to skip
+host mounts deliberately.
 
-After the Kubernetes installation is reachable, use `kubeneuronctl` with the
-operator token and public controller address to list incidents, approve a
-pending step, or invoke the global pause. The exact token retrieval and TLS
-configuration are deployment-specific; see [operations.md](operations.md).
+A `GPUVisibility` reason of `SMIMissing` means the agent could not find the
+executable in the mounted binary directory. For `DriverUnavailable`, check
+the host driver and its libraries. `NoGPUResource` means fresh reports
+contain zero GPUs and Kubernetes advertises no accelerator resource.
+When node-level actions are enabled, `ResetAvailable` requires a fresh matching DCGM reset attestation. A node
+can report GPU inventory while reset is unavailable.
 
-## 5. What to read next
+Compare agent inventory with the GPU resources advertised by the node's
+device plugin. For driver paths and DCGM client requirements, see
+[NVIDIA host tooling](operations.md#nvidia-host-tooling-in-the-agent-daemonset).
 
-- [design.md](design.md) — architecture and implementation boundaries.
-- [operations.md](operations.md) — tokens, pausing, backup/restore, metrics.
-- [xid-catalog.md](xid-catalog.md) — why each XID maps to its playbook.
+## Open a first dry-run incident
+
+Use a fresh DryRun installation. These commands submit a synthetic XID
+application fault for the fictitious node `quickstart-demo`, find its
+incident, and show its policy-selected playbook and audit trail. The
+installer binds this class to the observe playbook.
+
+<!-- first-run-recipe -->
+```sh
+kubeneuronctl --server "$SERVER" remediate quickstart-demo --class xid-app
+incident=$(kubeneuronctl --server "$SERVER" incidents | awk '$3 == "xid-app" && $4 == "quickstart-demo" && !id {id=$1} END {print id}')
+kubeneuronctl --server "$SERVER" incidents show "$incident"
+```
+
+Look for `dry-run:   true` and the installation's observe playbook.
+For the local Go walkthrough, see the [developer demo](developer-demo.md).

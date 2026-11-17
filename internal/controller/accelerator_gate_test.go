@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -1048,5 +1049,95 @@ func TestPinnedResetStillChecksNodeIdentityLive(t *testing.T) {
 	if err := c.allowNVIDIAReset(ctx, inc, inc.Target); err == nil {
 		t.Fatal("a reset pinned against the previous node object was admitted on its " +
 			"replacement; the identity check compared the pin to itself")
+	}
+}
+
+func TestInventorySummaryRequiresFreshInventoryAndResetEvidence(t *testing.T) {
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := t.Context()
+	c := New(st, nil, nil, nil, nil, wholeDeviceTopologyPlatform(), nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	profile := testNVIDIAResetProfile()
+	if err := c.SetAcceleratorRuntimeProfiles([]config.AcceleratorRuntimeProfile{profile}); err != nil {
+		t.Fatal(err)
+	}
+	n := &types.Node{Name: "node-a", UID: "node-uid-a", AgentLastSeen: time.Now(), GPUs: []types.GPUInfo{{UUID: "GPU-a"}}}
+	if err := st.UpsertAgentRegistration(ctx, n); err != nil {
+		t.Fatal(err)
+	}
+	check := func(nodes, gpus int, confirmed bool) {
+		t.Helper()
+		got, err := c.InventorySummary(ctx)
+		if err != nil || got.ReportingNodes != nodes || got.GPUs != gpus || got.ResetConfirmed != confirmed {
+			t.Fatalf("inventory: %+v err=%v, want %d %d %t", got, err, nodes, gpus, confirmed)
+		}
+	}
+	check(1, 1, false)
+	report := readyNVIDIAResetReport(time.Now().UTC(), profile.ProfileDigest)
+	if err := st.UpsertAcceleratorReport(ctx, &report); err != nil {
+		t.Fatal(err)
+	}
+	check(1, 1, true)
+	n.AgentLastSeen = time.Now().Add(-time.Hour)
+	if err := st.UpsertAgentRegistration(ctx, n); err != nil {
+		t.Fatal(err)
+	}
+	check(0, 0, false)
+}
+
+type fleetSummaryStore struct {
+	*storesqlite.Store
+	nodes                      []*types.Node
+	nodeQueries, reportQueries int
+}
+
+func (s *fleetSummaryStore) ListNodes(context.Context) ([]*types.Node, error) {
+	s.nodeQueries++
+	return s.nodes, nil
+}
+
+func (s *fleetSummaryStore) ListAcceleratorReports(_ context.Context, node string) ([]*types.AgentAcceleratorReport, error) {
+	s.reportQueries++
+	if node != "" {
+		return nil, errors.New("unexpected per-node query")
+	}
+	return nil, nil
+}
+
+type fleetSummaryPlatform struct {
+	*topoObservingPlatform
+	nodes []types.Node
+}
+
+func (p *fleetSummaryPlatform) ListNodes(context.Context) ([]types.Node, error) {
+	return p.nodes, nil
+}
+
+func TestInventorySummaryQueryCountIndependentOfFleetSize(t *testing.T) {
+	for _, size := range []int{1, 500} {
+		st, err := storesqlite.Open(":memory:")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		s := &fleetSummaryStore{Store: st}
+		p := &fleetSummaryPlatform{topoObservingPlatform: wholeDeviceTopologyPlatform()}
+		for i := 0; i < size; i++ {
+			name := fmt.Sprintf("node-%d", i)
+			n := types.Node{Name: name, UID: name, Labels: map[string]string{"accelerator": "nvidia-h100"}, AgentLastSeen: time.Now(), GPUs: []types.GPUInfo{{UUID: "GPU-a"}}}
+			p.nodes = append(p.nodes, n)
+			s.nodes = append(s.nodes, &n)
+		}
+		c := New(s, nil, nil, nil, nil, p, nil, nil, slog.Default())
+		if err := c.SetAcceleratorRuntimeProfiles([]config.AcceleratorRuntimeProfile{testNVIDIAResetProfile()}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := c.InventorySummary(t.Context())
+		if err != nil || got.ReportingNodes != size || got.ResetConfirmed || s.nodeQueries != 1 || s.reportQueries != 1 {
+			t.Fatalf("fleet %d: nodes=%d reset=%t queries=%d+%d err=%v", size, got.ReportingNodes, got.ResetConfirmed, s.nodeQueries, s.reportQueries, err)
+		}
 	}
 }

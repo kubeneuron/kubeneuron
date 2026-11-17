@@ -412,6 +412,9 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 		addAsync(pagerduty.New(key))
 	}
 	ctrl := controller.New(st, st, engine, gate, flap, plat, act, notifier, log)
+	if kubePlatform != nil && agentServer.InstallationUID != "" {
+		ctrl.ConfigureInventoryDiagnostics(kubePlatform.Client(), agentServer.Namespace, agentServer.InstallationName, agentServer.InstallationUID)
+	}
 	api := httpapi.New(ctrl)
 	// Install the leader fence before either listener starts.  A standby may be
 	// addressed directly even though it is unready, so readiness alone cannot
@@ -643,6 +646,12 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 		stop()
 	}()
 
+	publishInventory := func(ctx context.Context) {
+		if kubePlatform != nil && agentServer.InstallationUID != "" {
+			ctrl.PublishInventory(ctx, kubePlatform.Client().CoreV1().ConfigMaps(agentServer.Namespace), agentServer.InstallationName, agentServer.InstallationUID)
+		}
+	}
+
 	if election.enabled {
 		if kubePlatform == nil {
 			return fmt.Errorf("leader election requires the kubernetes platform")
@@ -697,6 +706,7 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 						return
 					}
 					leading.Store(true)
+					go publishInventory(leadCtx)
 					go watchNodeConfigPauses(leadCtx, ctrl, paths.nodeConfigs, log)
 					log.Info("leadership acquired; starting the remediation walk")
 					if err := ctrl.Run(leadCtx); err != nil {
@@ -722,6 +732,7 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 			},
 		})
 	} else {
+		go publishInventory(ctx)
 		if err := ctrl.Run(ctx); err != nil {
 			return err
 		}

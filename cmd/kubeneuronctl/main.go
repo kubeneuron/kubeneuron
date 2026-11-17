@@ -17,6 +17,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
 
+	"github.com/kubeneuron/kubeneuron/internal/inventory"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -133,6 +134,33 @@ func cmdStatus() *cobra.Command {
 				_, _ = fmt.Fprintf(out, "  %-18s %d\n", state, n)
 			}
 		}
+		var data map[string]string
+		if err := c.do("GET", "/api/v1/inventory-summary", nil, &data); err != nil {
+			_, _ = fmt.Fprintln(out, "GPU inventory unknown: controller summary unavailable")
+			return nil
+		}
+		s, err := inventory.Parse(data, time.Now())
+		if err != nil {
+			return err
+		}
+		switch {
+		case s.Diagnostic != "":
+			_, _ = fmt.Fprintln(out, "GPU inventory:", inventory.DiagnosticMessage(s.Diagnostic))
+		case s.ReportingNodes == 0:
+			_, _ = fmt.Fprintf(out, "GPU inventory unknown: no fresh agent reports (%d nodes advertise accelerator resources)\n", s.AdvertisedNodes)
+		case s.GPUs == 0 && s.AdvertisedNodes == 0:
+			_, _ = fmt.Fprintln(out, "GPU inventory: agents report zero GPUs and no node advertises an accelerator resource")
+		case s.GPUs == 0:
+			_, _ = fmt.Fprintln(out, "GPU inventory: agents report zero GPUs; check host tooling, driver and nvidia-smi")
+		default:
+			_, _ = fmt.Fprintf(out, "GPU inventory: %d GPUs across %d reporting nodes\n", s.GPUs, s.ReportingNodes)
+		}
+		if !s.ResetConfirmed {
+			_, _ = fmt.Fprintln(out, "Reset unconfirmed: no fresh DCGM reset attestation. See docs/quickstart.md#check-gpu-visibility.")
+		} else {
+			_, _ = fmt.Fprintln(out, "Reset attested on at least one GPU")
+		}
+
 		return nil
 	}}
 }

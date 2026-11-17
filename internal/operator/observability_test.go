@@ -26,6 +26,7 @@ import (
 	sigsyaml "sigs.k8s.io/yaml"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
+	"github.com/kubeneuron/kubeneuron/internal/inventory"
 )
 
 func managedObservability(kn *kubeneuronv1alpha1.KubeNeuron) *kubeneuronv1alpha1.KubeNeuron {
@@ -956,8 +957,8 @@ func TestSettledRequeue(t *testing.T) {
 		t.Errorf("scraping requeue = %v", got)
 	}
 	kn.Spec.Observability.Collector.DCGMExporter = &kubeneuronv1alpha1.DCGMExporterScrapeSpec{Scrape: ptr.To(false)}
-	if got := settledRequeue(kn); got != pkiCheckInterval {
-		t.Errorf("requeue without scraping = %v, want %v", got, pkiCheckInterval)
+	if got := settledRequeue(kn); got != 3*inventory.Interval {
+		t.Errorf("requeue without scraping = %v, want %v", got, 3*inventory.Interval)
 	}
 }
 
