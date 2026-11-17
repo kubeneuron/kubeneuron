@@ -63,6 +63,23 @@ operator; see [Metrics path](#metrics-path-specobservability).
   controller and agents and from the operator. For an external store it
   allows egress to the store's port on any address, since a NetworkPolicy
   cannot name a host.
+- **GPU metrics from the dcgm-exporter already in the cluster.** A Managed
+  collector scrapes dcgm-exporter, for example the one GPU Operator
+  installs; KubeNeuron never installs dcgm-exporter. The operator looks for
+  the Service `collector.dcgmExporter.serviceName` (default
+  `nvidia-dcgm-exporter`) in `collector.dcgmExporter.namespace` (default:
+  every namespace), and scrapes the running pods behind its `gpu-metrics`
+  port every 30 seconds. The pods are looked up again every two minutes.
+  Series carry `node`, `gpu_uuid` and `gpu_model`, plus `node_pool` and
+  `mig_profile` where they exist, the same labels as the dependency
+  profile's vmagent job. **The `pod`, `namespace` and `container` labels that
+  dcgm-exporter adds for the workload holding a GPU are dropped before
+  anything is stored**; `keepWorkloadLabels: true` keeps them, and then the
+  store holds the names of your workloads. `ObservabilityGPUMetricsReady`
+  reports what is scraped, or `NotFound` when there is no dcgm-exporter;
+  `dcgmExporter.scrape: false` turns scraping off. The collector's
+  NetworkPolicy lets it reach only the exporter pods, on that port; a
+  NetworkPolicy in the exporter's namespace must admit it as well.
 - Both images are pinned by digest in the operator (override with
   `--otel-collector-image` and `--metrics-store-image`, for a mirror) and in
   `deploy/kubernetes/dependencies/versions.lock.yaml`; they are pulled from

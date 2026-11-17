@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -128,7 +129,7 @@ func decodeCollectorConfig(t *testing.T, kn *kubeneuronv1alpha1.KubeNeuron) map[
 func TestCollectorConfigExportsToTheStore(t *testing.T) {
 	kn := managedObservability(testKubeNeuron())
 	config := decodeCollectorConfig(t, kn)
-	exporter := config["exporters"].(map[string]any)["otlphttp/store"].(map[string]any)
+	exporter := config["exporters"].(map[string]any)["otlp_http/store"].(map[string]any)
 	if exporter["endpoint"] != "http://fleet-metrics-store.kube-neuron-system.svc:8428/opentelemetry" {
 		t.Errorf("managed store endpoint = %v", exporter["endpoint"])
 	}
@@ -146,7 +147,7 @@ func TestCollectorConfigExportsToTheStore(t *testing.T) {
 		AuthorizationSecretRef: &kubeneuronv1alpha1.SecretReference{Name: "store", Key: "authorization"},
 	}}
 	config = decodeCollectorConfig(t, kn)
-	exporter = config["exporters"].(map[string]any)["otlphttp/store"].(map[string]any)
+	exporter = config["exporters"].(map[string]any)["otlp_http/store"].(map[string]any)
 	if exporter["endpoint"] != "https://prometheus.example/api/v1/otlp" {
 		t.Errorf("external store endpoint = %v", exporter["endpoint"])
 	}
@@ -162,7 +163,7 @@ func TestCollectorConfigExportsToTheStore(t *testing.T) {
 	kn.Spec.Observability.Store = nil
 	kn.Spec.Observability.VictoriaMetrics = &kubeneuronv1alpha1.DependencySpec{Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: "http://vm.example:8428"}
 	config = decodeCollectorConfig(t, kn)
-	if exporters := config["exporters"].(map[string]any); exporters["otlphttp/store"] != nil || exporters["nop"] == nil {
+	if exporters := config["exporters"].(map[string]any); exporters["otlp_http/store"] != nil || exporters["nop"] == nil {
 		t.Errorf("victoriaMetrics alone: exporters = %v, want nop only", exporters)
 	}
 
@@ -175,7 +176,7 @@ func TestCollectorConfigExportsToTheStore(t *testing.T) {
 
 func TestCollectorNetworkPolicy(t *testing.T) {
 	kn := managedObservability(testKubeNeuron())
-	policy, err := collectorNetworkPolicy(kn, "kubeneuron-operator-ns")
+	policy, err := collectorNetworkPolicy(kn, "kubeneuron-operator-ns", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +206,7 @@ func TestCollectorNetworkPolicy(t *testing.T) {
 	kn.Spec.Observability.Store = &kubeneuronv1alpha1.MetricsStoreSpec{OTLPEndpointSpec: kubeneuronv1alpha1.OTLPEndpointSpec{
 		Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: "https://store.example/opentelemetry",
 	}}
-	policy, err = collectorNetworkPolicy(kn, "")
+	policy, err = collectorNetworkPolicy(kn, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,6 +256,13 @@ func TestValidateObservability(t *testing.T) {
 			kn.Spec.Observability.Store.Mode = kubeneuronv1alpha1.IntegrationModeExternal
 			kn.Spec.Observability.Store.Endpoint = "https://store.example"
 			kn.Spec.Observability.Store.Managed = &kubeneuronv1alpha1.ManagedStoreSpec{}
+		},
+		"dcgmExporter on an external collector": func(kn *kubeneuronv1alpha1.KubeNeuron) {
+			kn.Spec.Observability.Collector.Mode = kubeneuronv1alpha1.IntegrationModeExternal
+			kn.Spec.Observability.Collector.Endpoint = "http://otel.example:4318"
+			kn.Spec.Observability.Store.Mode = kubeneuronv1alpha1.IntegrationModeExternal
+			kn.Spec.Observability.Store.Endpoint = "http://vm.example:8428/opentelemetry"
+			kn.Spec.Observability.Collector.DCGMExporter = &kubeneuronv1alpha1.DCGMExporterScrapeSpec{}
 		},
 		"managed grafana": func(kn *kubeneuronv1alpha1.KubeNeuron) {
 			kn.Spec.Observability.Grafana = &kubeneuronv1alpha1.GrafanaSpec{Mode: kubeneuronv1alpha1.IntegrationModeManaged}
@@ -331,7 +339,7 @@ func observeConfiguration(installation string) (*kubeneuronv1alpha1.GPUPlaybook,
 	return playbook, policy
 }
 
-func reconcileObservabilityFixture(t *testing.T, kn *kubeneuronv1alpha1.KubeNeuron) (client.Client, *KubeNeuronReconciler) {
+func reconcileObservabilityFixture(t *testing.T, kn *kubeneuronv1alpha1.KubeNeuron, extra ...client.Object) (client.Client, *KubeNeuronReconciler) {
 	t.Helper()
 	scheme := newOperatorScheme(t)
 	kn.UID = types.UID("fleet-uid")
@@ -341,7 +349,10 @@ func reconcileObservabilityFixture(t *testing.T, kn *kubeneuronv1alpha1.KubeNeur
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&kubeneuronv1alpha1.KubeNeuron{}, &kubeneuronv1alpha1.GPUPlaybook{}, &kubeneuronv1alpha1.GPURemediationPolicy{}, &appsv1.Deployment{}, &appsv1.DaemonSet{}).
-		WithObjects(kn, namespace, playbook, policy).
+		WithObjects(append([]client.Object{kn, namespace, playbook, policy}, extra...)...).
+		// The API server answers a metadata.name field selector itself; the
+		// fake client needs it as an index.
+		WithIndex(&corev1.Service{}, "metadata.name", func(o client.Object) []string { return []string{o.GetName()} }).
 		Build()
 	return fakeClient, &KubeNeuronReconciler{Client: fakeClient, Scheme: scheme, OperatorNamespace: "kubeneuron-operator"}
 }
@@ -554,5 +565,172 @@ func TestDeprecatedVictoriaMetricsIsNotADestination(t *testing.T) {
 	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != "DeprecatedVictoriaMetrics" ||
 		c.Message != "victoriaMetrics is deprecated and is not used as the metrics destination; set spec.observability.store" {
 		t.Errorf("store condition = %#v", c)
+	}
+}
+
+func dcgmFixtureObjects(namespace string, nodePool string) []client.Object {
+	selector := map[string]string{"app": "nvidia-dcgm-exporter"}
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "nvidia-dcgm-exporter", Namespace: namespace},
+		Spec: corev1.ServiceSpec{
+			Selector: selector,
+			Ports:    []corev1.ServicePort{{Name: "gpu-metrics", Port: 9400, TargetPort: intstr.FromString("metrics")}},
+		},
+	}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "gpu-a", Labels: map[string]string{
+		"kubeneuron.io/node-pool": "fallback", "eks.amazonaws.com/nodegroup": nodePool,
+	}}}
+	pod := func(name, ip string, phase corev1.PodPhase) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: selector},
+			Spec: corev1.PodSpec{NodeName: "gpu-a", Containers: []corev1.Container{{
+				Name: "exporter", Ports: []corev1.ContainerPort{{Name: "metrics", ContainerPort: 9400}},
+			}}},
+			Status: corev1.PodStatus{Phase: phase, PodIP: ip},
+		}
+	}
+	other := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "something-else", Namespace: namespace},
+		Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "x"}, Ports: []corev1.ServicePort{{Name: "gpu-metrics", Port: 1}}}}
+	return []client.Object{service, node, pod("dcgm-1", "10.0.0.7", corev1.PodRunning), pod("dcgm-2", "", corev1.PodPending), other}
+}
+
+func TestDCGMExporterDiscoveryAndScrape(t *testing.T) {
+	ctx := context.Background()
+	kn := managedObservability(testKubeNeuron())
+	fakeClient, reconciler := reconcileObservabilityFixture(t, kn, dcgmFixtureObjects("gpu-operator", "gpu-ng")...)
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: "fleet"}}
+	result, err := reconciler.Reconcile(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RequeueAfter == 0 || result.RequeueAfter > dcgmRediscoveryPeriod {
+		t.Errorf("requeue = %v, want at most %v while scraping", result.RequeueAfter, dcgmRediscoveryPeriod)
+	}
+	var targets corev1.ConfigMap
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-otel-collector-targets", Namespace: kn.Spec.Namespace}, &targets); err != nil {
+		t.Fatal(err)
+	}
+	if want := `[{"targets":["10.0.0.7:9400"],"labels":{"node":"gpu-a","node_pool":"gpu-ng"}}]`; targets.Data[dcgmTargetsKey] != want {
+		t.Errorf("targets = %s, want %s (the running pod only, EKS node group winning)", targets.Data[dcgmTargetsKey], want)
+	}
+
+	config := decodeCollectorConfig(t, kn)
+	receiver := config["receivers"].(map[string]any)["prometheus/dcgm-exporter"].(map[string]any)
+	scrape := receiver["config"].(map[string]any)["scrape_configs"].([]any)[0].(map[string]any)
+	relabel := scrape["metric_relabel_configs"].([]any)
+	last := relabel[len(relabel)-1].(map[string]any)
+	if last["action"] != "labeldrop" || last["regex"] != dcgmWorkloadLabelRegex {
+		t.Errorf("workload labels are not dropped by default: %v", relabel)
+	}
+	receivers := config["service"].(map[string]any)["pipelines"].(map[string]any)["metrics"].(map[string]any)["receivers"].([]any)
+	if len(receivers) != 2 || receivers[1] != "prometheus/dcgm-exporter" {
+		t.Errorf("pipeline receivers = %v", receivers)
+	}
+
+	var collector appsv1.Deployment
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-otel-collector", Namespace: kn.Spec.Namespace}, &collector); err != nil {
+		t.Fatal(err)
+	}
+	if v := findVolume(collector.Spec.Template.Spec.Volumes, "targets"); v == nil || v.ConfigMap.Name != "fleet-otel-collector-targets" {
+		t.Errorf("targets volume = %#v", v)
+	}
+	if mounts := collector.Spec.Template.Spec.Containers[0].VolumeMounts; mounts[len(mounts)-1].SubPath != "" {
+		t.Error("targets mounted by subPath would never refresh")
+	}
+
+	var policy networkingv1.NetworkPolicy
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-otel-collector", Namespace: kn.Spec.Namespace}, &policy); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, rule := range policy.Spec.Egress {
+		for _, peer := range rule.To {
+			if peer.NamespaceSelector != nil && peer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] == "gpu-operator" &&
+				peer.PodSelector.MatchLabels["app"] == "nvidia-dcgm-exporter" && rule.Ports[0].Port.String() == "metrics" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no egress to the exporter pods on their metrics port: %#v", policy.Spec.Egress)
+	}
+
+	var got kubeneuronv1alpha1.KubeNeuron
+	if err := fakeClient.Get(ctx, request.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	if c := meta.FindStatusCondition(got.Status.Conditions, gpuMetricsCondition); c == nil || c.Status != metav1.ConditionTrue || c.Reason != "Scraping" ||
+		c.Message != "scraping 1 dcgm-exporter pods behind gpu-operator/nvidia-dcgm-exporter" {
+		t.Errorf("GPU metrics condition = %#v", c)
+	}
+
+	// Kept on request.
+	got.Spec.Observability.Collector.DCGMExporter = &kubeneuronv1alpha1.DCGMExporterScrapeSpec{KeepWorkloadLabels: true}
+	config = decodeCollectorConfig(t, &got)
+	scrape = config["receivers"].(map[string]any)["prometheus/dcgm-exporter"].(map[string]any)["config"].(map[string]any)["scrape_configs"].([]any)[0].(map[string]any)
+	for _, r := range scrape["metric_relabel_configs"].([]any) {
+		if r.(map[string]any)["action"] == "labeldrop" {
+			t.Error("keepWorkloadLabels still drops the workload labels")
+		}
+	}
+
+	// Scraping off: no receiver, no targets, no condition.
+	got.Spec.Observability.Collector.DCGMExporter = &kubeneuronv1alpha1.DCGMExporterScrapeSpec{Scrape: ptr.To(false)}
+	if err := fakeClient.Update(ctx, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-otel-collector-targets", Namespace: kn.Spec.Namespace}, &corev1.ConfigMap{}); !apierrors.IsNotFound(err) {
+		t.Errorf("targets ConfigMap with scraping off: %v, want NotFound", err)
+	}
+	if _, ok := decodeCollectorConfig(t, &got)["receivers"].(map[string]any)["prometheus/dcgm-exporter"]; ok {
+		t.Error("scraping off still has the receiver")
+	}
+	if err := fakeClient.Get(ctx, request.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	if c := meta.FindStatusCondition(got.Status.Conditions, gpuMetricsCondition); c != nil {
+		t.Errorf("scraping off still has a condition: %#v", c)
+	}
+}
+
+func TestNoDCGMExporterIsAConditionNotAnError(t *testing.T) {
+	ctx := context.Background()
+	kn := managedObservability(testKubeNeuron())
+	fakeClient, reconciler := reconcileObservabilityFixture(t, kn)
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: "fleet"}}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatalf("Reconcile() error = %v, want none without dcgm-exporter", err)
+	}
+	var got kubeneuronv1alpha1.KubeNeuron
+	if err := fakeClient.Get(ctx, request.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	c := meta.FindStatusCondition(got.Status.Conditions, gpuMetricsCondition)
+	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != "NotFound" || !strings.HasPrefix(c.Message, "no dcgm-exporter found") {
+		t.Errorf("condition = %#v", c)
+	}
+	var targets corev1.ConfigMap
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-otel-collector-targets", Namespace: kn.Spec.Namespace}, &targets); err != nil || targets.Data[dcgmTargetsKey] != "[]" {
+		t.Errorf("targets = %v (%v), want an empty list for the collector to read", targets.Data, err)
+	}
+}
+
+func TestDCGMExporterNamespaceIsHonoured(t *testing.T) {
+	ctx := context.Background()
+	kn := managedObservability(testKubeNeuron())
+	kn.Spec.Observability.Collector.DCGMExporter = &kubeneuronv1alpha1.DCGMExporterScrapeSpec{Namespace: "elsewhere"}
+	fakeClient, reconciler := reconcileObservabilityFixture(t, kn, dcgmFixtureObjects("gpu-operator", "ng")...)
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "fleet"}}); err != nil {
+		t.Fatal(err)
+	}
+	var got kubeneuronv1alpha1.KubeNeuron
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet"}, &got); err != nil {
+		t.Fatal(err)
+	}
+	if c := meta.FindStatusCondition(got.Status.Conditions, gpuMetricsCondition); c == nil || c.Reason != "NotFound" || !strings.Contains(c.Message, "in namespace elsewhere") {
+		t.Errorf("condition = %#v, want NotFound in the configured namespace", c)
 	}
 }

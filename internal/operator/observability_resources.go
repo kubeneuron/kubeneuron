@@ -99,18 +99,18 @@ func collectorConfig(installation *kubeneuronv1alpha1.KubeNeuron) (string, error
 	pipelineExporters := []string{}
 	switch storeMode(installation) {
 	case kubeneuronv1alpha1.IntegrationModeManaged:
-		exporters["otlphttp/store"] = map[string]any{
+		exporters["otlp_http/store"] = map[string]any{
 			"endpoint": serviceURL(installation, storeName(installation), storePort) + "/opentelemetry",
 		}
-		pipelineExporters = append(pipelineExporters, "otlphttp/store")
+		pipelineExporters = append(pipelineExporters, "otlp_http/store")
 	case kubeneuronv1alpha1.IntegrationModeExternal:
 		store := effectiveStore(installation)
 		exporter := map[string]any{"endpoint": store.Endpoint}
 		if store.AuthorizationSecretRef != nil {
 			exporter["headers"] = map[string]any{"Authorization": "${env:" + storeAuthorizationEnv + "}"}
 		}
-		exporters["otlphttp/store"] = exporter
-		pipelineExporters = append(pipelineExporters, "otlphttp/store")
+		exporters["otlp_http/store"] = exporter
+		pipelineExporters = append(pipelineExporters, "otlp_http/store")
 	default:
 		// No store: received metrics are dropped rather than refused, so
 		// the components do not log export failures for a choice the user
@@ -118,15 +118,21 @@ func collectorConfig(installation *kubeneuronv1alpha1.KubeNeuron) (string, error
 		exporters["nop"] = map[string]any{}
 		pipelineExporters = append(pipelineExporters, "nop")
 	}
+	receivers := map[string]any{
+		"otlp": map[string]any{"protocols": map[string]any{
+			"http": map[string]any{"endpoint": "0.0.0.0:" + strconv.Itoa(collectorOTLPPort)},
+		}},
+	}
+	pipelineReceivers := []string{"otlp"}
+	if dcgmScrapeEnabled(installation) {
+		receivers["prometheus/dcgm-exporter"] = dcgmScrapeReceiver(installation)
+		pipelineReceivers = append(pipelineReceivers, "prometheus/dcgm-exporter")
+	}
 	config := map[string]any{
 		"extensions": map[string]any{
 			"health_check": map[string]any{"endpoint": "0.0.0.0:" + strconv.Itoa(collectorHealth)},
 		},
-		"receivers": map[string]any{
-			"otlp": map[string]any{"protocols": map[string]any{
-				"http": map[string]any{"endpoint": "0.0.0.0:" + strconv.Itoa(collectorOTLPPort)},
-			}},
-		},
+		"receivers": receivers,
 		"processors": map[string]any{
 			// Percentages of the container memory limit, which is always set.
 			"memory_limiter": map[string]any{"check_interval": "1s", "limit_percentage": 80, "spike_limit_percentage": 25},
@@ -137,7 +143,7 @@ func collectorConfig(installation *kubeneuronv1alpha1.KubeNeuron) (string, error
 			"extensions": []string{"health_check"},
 			"pipelines": map[string]any{
 				"metrics": map[string]any{
-					"receivers":  []string{"otlp"},
+					"receivers":  pipelineReceivers,
 					"processors": []string{"memory_limiter", "batch"},
 					"exporters":  pipelineExporters,
 				},
@@ -236,6 +242,25 @@ func collectorDeployment(installation *kubeneuronv1alpha1.KubeNeuron, image, con
 		TerminationMessagePolicy: corev1.TerminationMessageReadFile,
 		VolumeMounts:             []corev1.VolumeMount{{Name: "config", MountPath: "/etc/otelcol", ReadOnly: true}},
 	}
+	volumes := []corev1.Volume{{
+		Name: "config",
+		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: collectorName(installation)},
+			DefaultMode:          ptr.To(int32(defaultConfigMapMode)),
+		}},
+	}}
+	if dcgmScrapeEnabled(installation) {
+		// Mounted whole, not by subPath, so the kubelet refreshes the file
+		// when the operator rewrites the targets.
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{Name: "targets", MountPath: dcgmTargetsMountPath, ReadOnly: true})
+		volumes = append(volumes, corev1.Volume{
+			Name: "targets",
+			VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: dcgmTargetsName(installation)},
+				DefaultMode:          ptr.To(int32(defaultConfigMapMode)),
+			}},
+		})
+	}
 	if store := effectiveStore(installation); storeMode(installation) == kubeneuronv1alpha1.IntegrationModeExternal && store.AuthorizationSecretRef != nil {
 		ref := store.AuthorizationSecretRef
 		container.Env = append(container.Env, corev1.EnvVar{Name: storeAuthorizationEnv, ValueFrom: &corev1.EnvVarSource{
@@ -268,13 +293,7 @@ func collectorDeployment(installation *kubeneuronv1alpha1.KubeNeuron, image, con
 					SecurityContext:               restrictedPodSecurity(),
 					SchedulerName:                 corev1.DefaultSchedulerName,
 					Containers:                    []corev1.Container{container},
-					Volumes: []corev1.Volume{{
-						Name: "config",
-						VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-							LocalObjectReference: corev1.LocalObjectReference{Name: collectorName(installation)},
-							DefaultMode:          ptr.To(int32(defaultConfigMapMode)),
-						}},
-					}},
+					Volumes:                       volumes,
 				},
 			},
 		},
@@ -333,9 +352,24 @@ func operatorPeer(operatorNamespace string) networkingv1.NetworkPolicyPeer {
 // controller and agents and from the operator, and lets the collector reach
 // DNS and the store. An external store's address cannot be named in a
 // NetworkPolicy, so its port is open to any destination.
-func collectorNetworkPolicy(installation *kubeneuronv1alpha1.KubeNeuron, operatorNamespace string) (*networkingv1.NetworkPolicy, error) {
+//
+// The collector may also reach the dcgm-exporter pods it scrapes, on their
+// metrics port only.
+func collectorNetworkPolicy(installation *kubeneuronv1alpha1.KubeNeuron, operatorNamespace string, dcgm *dcgmDiscovery) (*networkingv1.NetworkPolicy, error) {
 	labels := resourceLabels(installation, collectorComponent)
 	egress := []networkingv1.NetworkPolicyEgressRule{dnsEgress()}
+	if dcgm != nil {
+		for _, service := range dcgm.Services {
+			port := service.Port
+			egress = append(egress, networkingv1.NetworkPolicyEgressRule{
+				To: []networkingv1.NetworkPolicyPeer{{
+					NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": service.Namespace}},
+					PodSelector:       &metav1.LabelSelector{MatchLabels: copyStringMap(service.Selector)},
+				}},
+				Ports: []networkingv1.NetworkPolicyPort{{Protocol: ptr.To(corev1.ProtocolTCP), Port: &port}},
+			})
+		}
+	}
 	switch storeMode(installation) {
 	case kubeneuronv1alpha1.IntegrationModeManaged:
 		egress = append(egress, networkingv1.NetworkPolicyEgressRule{

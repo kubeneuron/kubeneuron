@@ -229,6 +229,11 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 	// changes when material gets closer to being unusable. A settled
 	// installation therefore still has to wake up and look, or renewal would
 	// never fire and the whole point of issuing the material would be lost.
+	if dcgmScrapeEnabled(&installation) {
+		// Nothing tells the operator that dcgm-exporter pods came or went:
+		// look again, so the collector's targets follow the GPU nodes.
+		return ctrl.Result{RequeueAfter: dcgmRediscoveryPeriod}, nil
+	}
 	return ctrl.Result{RequeueAfter: pkiCheckInterval}, nil
 }
 

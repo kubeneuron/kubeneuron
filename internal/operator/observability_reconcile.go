@@ -88,7 +88,8 @@ func (r *KubeNeuronReconciler) reconcileObservability(ctx context.Context, insta
 	}
 	switch collectorMode(installation) {
 	case kubeneuronv1alpha1.IntegrationModeManaged:
-		if err := r.ensureCollector(ctx, installation); err != nil {
+		dcgm, err := r.ensureCollector(ctx, installation)
+		if err != nil {
 			return nil, err
 		}
 		condition, err := r.deploymentCondition(ctx, installation, collectorName(installation), "collector")
@@ -96,11 +97,18 @@ func (r *KubeNeuronReconciler) reconcileObservability(ctx context.Context, insta
 			return nil, err
 		}
 		conditions = append(conditions, observabilityCondition{collectorReadyCondition, condition})
+		var gpu *metav1.Condition
+		if dcgmScrapeEnabled(installation) {
+			gpu = gpuMetricsStatus(installation, dcgm)
+		}
+		conditions = append(conditions, observabilityCondition{gpuMetricsCondition, gpu})
 	default:
 		if err := r.removeCollector(ctx, installation); err != nil {
 			return nil, err
 		}
-		conditions = append(conditions, observabilityCondition{collectorReadyCondition, externalOrDisabled(collectorMode(installation), "collector")})
+		conditions = append(conditions,
+			observabilityCondition{collectorReadyCondition, externalOrDisabled(collectorMode(installation), "collector")},
+			observabilityCondition{gpuMetricsCondition, nil})
 	}
 	return conditions, nil
 }
@@ -119,33 +127,51 @@ func externalOrDisabled(mode kubeneuronv1alpha1.IntegrationMode, what string) *m
 	}
 }
 
-func (r *KubeNeuronReconciler) ensureCollector(ctx context.Context, installation *kubeneuronv1alpha1.KubeNeuron) error {
+// ensureCollector runs the managed collector and returns the dcgm-exporter
+// it was set to scrape, nil when scraping is off.
+func (r *KubeNeuronReconciler) ensureCollector(ctx context.Context, installation *kubeneuronv1alpha1.KubeNeuron) (*dcgmDiscovery, error) {
+	var dcgm *dcgmDiscovery
+	if dcgmScrapeEnabled(installation) {
+		var err error
+		if dcgm, err = r.discoverDCGMExporter(ctx, installation); err != nil {
+			return nil, err
+		}
+		targets, err := dcgmTargetsConfigMap(installation, dcgm)
+		if err != nil {
+			return nil, err
+		}
+		if err := r.ensureConfigMap(ctx, installation, targets); err != nil {
+			return nil, fmt.Errorf("reconcile collector targets ConfigMap: %w", err)
+		}
+	} else if err := r.removeOwned(ctx, installation, &corev1.ConfigMap{}, dcgmTargetsName(installation)); err != nil {
+		return nil, fmt.Errorf("remove collector targets ConfigMap: %w", err)
+	}
 	configMap, err := collectorConfigMap(installation)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := r.ensureConfigMap(ctx, installation, configMap); err != nil {
-		return fmt.Errorf("reconcile collector ConfigMap: %w", err)
+		return nil, fmt.Errorf("reconcile collector ConfigMap: %w", err)
 	}
 	if err := r.ensureServiceAccount(ctx, installation, observabilityServiceAccount(installation, collectorName(installation), collectorComponent)); err != nil {
-		return fmt.Errorf("reconcile collector ServiceAccount: %w", err)
+		return nil, fmt.Errorf("reconcile collector ServiceAccount: %w", err)
 	}
-	policy, err := collectorNetworkPolicy(installation, r.OperatorNamespace)
+	policy, err := collectorNetworkPolicy(installation, r.OperatorNamespace, dcgm)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := r.ensureNetworkPolicy(ctx, installation, policy); err != nil {
-		return fmt.Errorf("reconcile collector NetworkPolicy: %w", err)
+		return nil, fmt.Errorf("reconcile collector NetworkPolicy: %w", err)
 	}
 	if err := r.ensureService(ctx, installation, collectorService(installation)); err != nil {
-		return fmt.Errorf("reconcile collector Service: %w", err)
+		return nil, fmt.Errorf("reconcile collector Service: %w", err)
 	}
 	// The digest rolls the collector when its configuration changes.
 	digest := sha256Hex([]byte(configMap.Data["config.yaml"]))
 	if err := r.ensureDeployment(ctx, installation, collectorDeployment(installation, r.collectorImage(), digest)); err != nil {
-		return fmt.Errorf("reconcile collector Deployment: %w", err)
+		return nil, fmt.Errorf("reconcile collector Deployment: %w", err)
 	}
-	return nil
+	return dcgm, nil
 }
 
 func (r *KubeNeuronReconciler) removeCollector(ctx context.Context, installation *kubeneuronv1alpha1.KubeNeuron) error {
@@ -154,6 +180,9 @@ func (r *KubeNeuronReconciler) removeCollector(ctx context.Context, installation
 		if err := r.removeOwned(ctx, installation, object, name); err != nil {
 			return fmt.Errorf("remove collector: %w", err)
 		}
+	}
+	if err := r.removeOwned(ctx, installation, &corev1.ConfigMap{}, dcgmTargetsName(installation)); err != nil {
+		return fmt.Errorf("remove collector: %w", err)
 	}
 	return nil
 }

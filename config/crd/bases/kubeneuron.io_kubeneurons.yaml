@@ -789,6 +789,37 @@ spec:
                         required:
                         - name
                         type: object
+                      dcgmExporter:
+                        description: |-
+                          DCGMExporter has the managed collector scrape the dcgm-exporter that
+                          already runs in the cluster, for example the one GPU Operator
+                          installs. KubeNeuron never installs dcgm-exporter.
+                        properties:
+                          keepWorkloadLabels:
+                            description: |-
+                              KeepWorkloadLabels keeps the pod, namespace and container labels
+                              dcgm-exporter adds for the workload that holds a GPU. Default false:
+                              they are dropped before anything is stored, so the store holds no
+                              names of the user's workloads.
+                            type: boolean
+                          namespace:
+                            description: Namespace of the Service. Empty searches
+                              every namespace.
+                            maxLength: 63
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          scrape:
+                            description: Scrape turns scraping on or off. Default
+                              true.
+                            type: boolean
+                          serviceName:
+                            description: |-
+                              ServiceName is the dcgm-exporter Service. Default
+                              nvidia-dcgm-exporter, the name GPU Operator uses.
+                            maxLength: 63
+                            pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                        type: object
                       endpoint:
                         description: |-
                           Endpoint is the OTLP/HTTP base URL; the sender appends /v1/metrics.
@@ -879,6 +910,8 @@ spec:
                     x-kubernetes-validations:
                     - message: resources apply only to a Managed collector
                       rule: self.mode == 'Managed' || !has(self.resources)
+                    - message: dcgmExporter applies only to a Managed collector
+                      rule: self.mode == 'Managed' || !has(self.dcgmExporter)
                     - message: External requires an endpoint
                       rule: self.mode != 'External' || (has(self.endpoint) && self.endpoint.size()
                         > 0)

@@ -98,6 +98,9 @@ func validateObservability(s *kubeneuronv1alpha1.KubeNeuron) error {
 		if obs.Collector.Resources != nil && obs.Collector.Mode != kubeneuronv1alpha1.IntegrationModeManaged {
 			return fmt.Errorf("spec.observability.collector.resources apply only to a Managed collector")
 		}
+		if obs.Collector.DCGMExporter != nil && obs.Collector.Mode != kubeneuronv1alpha1.IntegrationModeManaged {
+			return fmt.Errorf("spec.observability.collector.dcgmExporter applies only to a Managed collector")
+		}
 	}
 	if obs.Store != nil {
 		if err := validateOTLPEndpoint("spec.observability.store", s.Spec.Namespace, obs.Store.OTLPEndpointSpec); err != nil {

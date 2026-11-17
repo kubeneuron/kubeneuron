@@ -814,12 +814,43 @@ type OTLPEndpointSpec struct {
 
 // CollectorSpec configures the OpenTelemetry Collector.
 // +kubebuilder:validation:XValidation:rule="self.mode == 'Managed' || !has(self.resources)",message="resources apply only to a Managed collector"
+// +kubebuilder:validation:XValidation:rule="self.mode == 'Managed' || !has(self.dcgmExporter)",message="dcgmExporter applies only to a Managed collector"
 type CollectorSpec struct {
 	OTLPEndpointSpec `json:",inline"`
 	// Resources of the managed collector container. The memory limit also
 	// sizes the collector's memory_limiter.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+	// DCGMExporter has the managed collector scrape the dcgm-exporter that
+	// already runs in the cluster, for example the one GPU Operator
+	// installs. KubeNeuron never installs dcgm-exporter.
+	// +optional
+	DCGMExporter *DCGMExporterScrapeSpec `json:"dcgmExporter,omitempty"`
+}
+
+// DCGMExporterScrapeSpec selects the dcgm-exporter the managed collector
+// scrapes: the pods behind a Service, on its port named gpu-metrics.
+type DCGMExporterScrapeSpec struct {
+	// Scrape turns scraping on or off. Default true.
+	// +optional
+	Scrape *bool `json:"scrape,omitempty"`
+	// ServiceName is the dcgm-exporter Service. Default
+	// nvidia-dcgm-exporter, the name GPU Operator uses.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z]([-a-z0-9]*[a-z0-9])?$`
+	// +optional
+	ServiceName string `json:"serviceName,omitempty"`
+	// Namespace of the Service. Empty searches every namespace.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+	// KeepWorkloadLabels keeps the pod, namespace and container labels
+	// dcgm-exporter adds for the workload that holds a GPU. Default false:
+	// they are dropped before anything is stored, so the store holds no
+	// names of the user's workloads.
+	// +optional
+	KeepWorkloadLabels bool `json:"keepWorkloadLabels,omitempty"`
 }
 
 // MetricsStoreSpec configures the metrics backend.
