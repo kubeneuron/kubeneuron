@@ -1544,6 +1544,8 @@ func (a *Agent) nvidiaAcceleratorReportWithProfile(ctx context.Context, profile 
 	runtimeVersion := a.nvidia.runtimeVersion
 	runtimeAttested := false
 	cleanPreflight := snapshot.Readiness == nvidia.PreflightEligible && len(snapshot.Reasons) == 0
+	// With no prober configured, even a configured runtime version supplies
+	// no DCGM attestation. A real driver probe can still establish liveness.
 	dcgmUnavailable := a.nvidia.runtimeProber == nil
 	if a.nvidia.runtimeProber != nil {
 		version, probeErr := a.nvidia.runtimeProber.Version(preflightCtx)
@@ -1586,7 +1588,7 @@ func (a *Agent) nvidiaAcceleratorReportWithProfile(ctx context.Context, profile 
 		// turn a successful health probe into an unverifiable runtime profile.
 		if cleanPreflight && dcgmUnavailable && strings.TrimSpace(report.DriverVersion) != "" && strings.TrimSpace(profile.RuntimeVersion) != "" {
 			report.Readiness = types.AcceleratorReadinessDegraded
-			report.ReadinessReasons = append(report.ReadinessReasons, "DCGM runtime attestation unavailable")
+			report.ReadinessReasons = append(report.ReadinessReasons, "NVIDIA runtime is not attested by matching local DCGM version and discovery probes", "DCGM runtime attestation unavailable")
 			health := snapshot.NodeHealth
 			target := accelerator.Target{NodeName: a.cfg.NodeName, Vendor: accelerator.VendorNVIDIA, Scope: accelerator.ScopeNode}
 			if _, realDriver := a.driver.(*nvml.SMI); realDriver && health.Target == target && health.Status == accelerator.HealthHealthy &&
