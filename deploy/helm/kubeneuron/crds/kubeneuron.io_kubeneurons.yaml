@@ -769,17 +769,11 @@ spec:
                       Collector in the installation namespace; External points the
                       components at the user's own collector; Disabled turns export off.
                     properties:
-                      endpoint:
-                        description: Endpoint is the base URL (http or https) of the
-                          user's endpoint.
-                        maxLength: 2048
-                        pattern: ^https?://[^\s]+$
-                        type: string
-                      headersSecretRef:
+                      authorizationSecretRef:
                         description: |-
-                          HeadersSecretRef selects a key of a Secret in the installation
-                          namespace whose value is the request headers, for example
-                          "Authorization=Bearer <token>". The operator never reads it: the
+                          AuthorizationSecretRef selects a key of a Secret in the installation
+                          namespace whose value is the HTTP Authorization header, for example
+                          "Bearer <token>" or "Basic <base64>". The operator never reads it: the
                           value reaches the sender as an environment variable.
                         properties:
                           key:
@@ -795,6 +789,15 @@ spec:
                         required:
                         - name
                         type: object
+                      endpoint:
+                        description: |-
+                          Endpoint is the OTLP/HTTP base URL; the sender appends /v1/metrics.
+                          For VictoriaMetrics: http://<host>:8428/opentelemetry. For Prometheus
+                          with its OTLP receiver: http://<host>:9090/api/v1/otlp. For a
+                          collector: http://<host>:4318.
+                        maxLength: 2048
+                        pattern: ^https?://\S+$
+                        type: string
                       mode:
                         allOf:
                         - enum:
@@ -879,10 +882,10 @@ spec:
                     - message: External requires an endpoint
                       rule: self.mode != 'External' || (has(self.endpoint) && self.endpoint.size()
                         > 0)
-                    - message: endpoint and headersSecretRef apply only to External
-                      rule: self.mode == 'External' || (!has(self.endpoint) && !has(self.headersSecretRef))
+                    - message: endpoint and authorizationSecretRef apply only to External
+                      rule: self.mode == 'External' || (!has(self.endpoint) && !has(self.authorizationSecretRef))
                     - message: credentials must not be part of the endpoint URL; use
-                        headersSecretRef
+                        authorizationSecretRef
                       rule: '!has(self.endpoint) || !self.endpoint.contains(''@'')'
                   grafana:
                     description: |-
@@ -923,17 +926,11 @@ spec:
                       KubeNeuron: an External store then only names the datasource a
                       Managed Grafana reads.
                     properties:
-                      endpoint:
-                        description: Endpoint is the base URL (http or https) of the
-                          user's endpoint.
-                        maxLength: 2048
-                        pattern: ^https?://[^\s]+$
-                        type: string
-                      headersSecretRef:
+                      authorizationSecretRef:
                         description: |-
-                          HeadersSecretRef selects a key of a Secret in the installation
-                          namespace whose value is the request headers, for example
-                          "Authorization=Bearer <token>". The operator never reads it: the
+                          AuthorizationSecretRef selects a key of a Secret in the installation
+                          namespace whose value is the HTTP Authorization header, for example
+                          "Bearer <token>" or "Basic <base64>". The operator never reads it: the
                           value reaches the sender as an environment variable.
                         properties:
                           key:
@@ -949,6 +946,15 @@ spec:
                         required:
                         - name
                         type: object
+                      endpoint:
+                        description: |-
+                          Endpoint is the OTLP/HTTP base URL; the sender appends /v1/metrics.
+                          For VictoriaMetrics: http://<host>:8428/opentelemetry. For Prometheus
+                          with its OTLP receiver: http://<host>:9090/api/v1/otlp. For a
+                          collector: http://<host>:4318.
+                        maxLength: 2048
+                        pattern: ^https?://\S+$
+                        type: string
                       managed:
                         description: |-
                           ManagedStoreSpec configures the managed single-node VictoriaMetrics.
@@ -1061,10 +1067,10 @@ spec:
                     - message: External requires an endpoint
                       rule: self.mode != 'External' || (has(self.endpoint) && self.endpoint.size()
                         > 0)
-                    - message: endpoint and headersSecretRef apply only to External
-                      rule: self.mode == 'External' || (!has(self.endpoint) && !has(self.headersSecretRef))
+                    - message: endpoint and authorizationSecretRef apply only to External
+                      rule: self.mode == 'External' || (!has(self.endpoint) && !has(self.authorizationSecretRef))
                     - message: credentials must not be part of the endpoint URL; use
-                        headersSecretRef
+                        authorizationSecretRef
                       rule: '!has(self.endpoint) || !self.endpoint.contains(''@'')'
                   victoriaMetrics:
                     description: |-

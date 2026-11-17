@@ -13,10 +13,58 @@ destructive actions remain blocked. Client delivery is managed separately.
 
 ## 0. Dependencies (separately owned)
 
-KubeNeuron never creates its observability stack. Install and verify the
-version-pinned dependency profile first — GPU Operator (supplies
-dcgm-exporter) and the VictoriaMetrics operator — following
+Install and verify the version-pinned dependency profile first — GPU
+Operator (supplies dcgm-exporter) and the VictoriaMetrics operator —
+following
 [`deploy/kubernetes/dependencies/`](https://github.com/kubeneuron/kubeneuron/tree/main/deploy/kubernetes/dependencies).
+The metrics path of KubeNeuron's own components can instead be run by the
+operator; see [Metrics path](#metrics-path-specobservability).
+
+### Metrics path (`spec.observability`)
+
+`spec.observability.collector` and `spec.observability.store` each take
+`mode: Managed | External | Disabled`; a block left out is `Disabled`.
+
+| | Managed | External | Disabled |
+|---|---|---|---|
+| `collector` | the operator runs an OpenTelemetry Collector (`otel/opentelemetry-collector-k8s`) as `<name>-otel-collector`; the controller and agents export OTLP/HTTP to it | the controller and agents export to `endpoint` | nothing is exported |
+| `store` | the operator runs single-node VictoriaMetrics as `<name>-metrics-store` on a PersistentVolumeClaim | the collector exports to `endpoint` | the collector drops what it receives |
+
+- **An external store must accept OTLP over HTTP**: VictoriaMetrics
+  (`http://<host>:8428/opentelemetry`) or Prometheus started with
+  `--web.enable-otlp-receiver` (`http://<host>:9090/api/v1/otlp`). Prometheus
+  remote-write is not supported. Each series carries the resource attributes
+  `k8s.namespace.name`, `kubeneuron.installation` and `k8s.node.name` (no
+  names of your pods, jobs or namespaces); VictoriaMetrics stores them as
+  labels, Prometheus only those listed in
+  `otlp.promote_resource_attributes`.
+- **Credentials never go in the URL.** `authorizationSecretRef` names a
+  Secret key in the installation namespace whose value is the whole
+  `Authorization` header, for example `Bearer <token>`.
+- **An external collector with a Managed store is rejected**: the external
+  collector decides where metrics go. With an external collector an external
+  store only names the data source for a Managed Grafana.
+- **The Managed store has no backup.** Its claim (`storage.size`, default
+  `20Gi`; `storage.storageClassName`; `retention`, default `30d`) survives a
+  switch to External or Disabled and is removed with the installation. Until
+  the claim is Bound, `ObservabilityStoreReady` is `False` with reason
+  `StoragePending`. `storage.ephemeral: true` uses an emptyDir instead and
+  loses the data with the pod.
+- **The Managed store has no authentication.** It is a ClusterIP Service
+  behind a NetworkPolicy that admits only the collector; where NetworkPolicy
+  is not enforced, the store is reachable inside the cluster without
+  authentication.
+- The collector's NetworkPolicy admits OTLP from the installation's
+  controller and agents and from the operator. For an external store it
+  allows egress to the store's port on any address, since a NetworkPolicy
+  cannot name a host.
+- Both images are pinned by digest in the operator (override with
+  `--otel-collector-image` and `--metrics-store-image`, for a mirror) and in
+  `deploy/kubernetes/dependencies/versions.lock.yaml`; they are pulled from
+  their publishers, not redistributed by KubeNeuron.
+- `spec.observability.victoriaMetrics` is deprecated: set alone, it is read
+  as an External store; set together with `store`, the installation is
+  rejected.
 
 ## 1. CRDs and operator
 

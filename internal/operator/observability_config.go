@@ -5,6 +5,7 @@ package operator
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -137,8 +138,8 @@ func validateObservability(s *kubeneuronv1alpha1.KubeNeuron) error {
 func validateOTLPEndpoint(field, namespace string, spec kubeneuronv1alpha1.OTLPEndpointSpec) error {
 	switch spec.Mode {
 	case kubeneuronv1alpha1.IntegrationModeManaged, kubeneuronv1alpha1.IntegrationModeDisabled:
-		if spec.Endpoint != "" || spec.HeadersSecretRef != nil {
-			return fmt.Errorf("%s: endpoint and headersSecretRef apply only to External", field)
+		if spec.Endpoint != "" || spec.AuthorizationSecretRef != nil {
+			return fmt.Errorf("%s: endpoint and authorizationSecretRef apply only to External", field)
 		}
 		return nil
 	case kubeneuronv1alpha1.IntegrationModeExternal:
@@ -150,15 +151,37 @@ func validateOTLPEndpoint(field, namespace string, spec kubeneuronv1alpha1.OTLPE
 		return fmt.Errorf("%s.endpoint must be an http or https URL", field)
 	}
 	if endpoint.User != nil {
-		return fmt.Errorf("%s.endpoint must not carry credentials; use headersSecretRef", field)
+		return fmt.Errorf("%s.endpoint must not carry credentials; use authorizationSecretRef", field)
 	}
-	if ref := spec.HeadersSecretRef; ref != nil {
+	if _, err := endpointPort(spec.Endpoint); err != nil {
+		return fmt.Errorf("%s.endpoint: %w", field, err)
+	}
+	if ref := spec.AuthorizationSecretRef; ref != nil {
 		if ref.Key == "" {
-			return fmt.Errorf("%s.headersSecretRef.key is required", field)
+			return fmt.Errorf("%s.authorizationSecretRef.key is required", field)
 		}
 		if ref.Namespace != "" && ref.Namespace != namespace {
-			return fmt.Errorf("%s.headersSecretRef must be in the installation namespace %q", field, namespace)
+			return fmt.Errorf("%s.authorizationSecretRef must be in the installation namespace %q", field, namespace)
 		}
 	}
 	return nil
+}
+
+// endpointPort is the TCP port an endpoint URL connects to.
+func endpointPort(endpoint string) (int32, error) {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return 0, err
+	}
+	if p := parsed.Port(); p != "" {
+		port, err := strconv.ParseUint(p, 10, 16)
+		if err != nil || port == 0 {
+			return 0, fmt.Errorf("invalid port %q", p)
+		}
+		return int32(port), nil
+	}
+	if parsed.Scheme == "https" {
+		return 443, nil
+	}
+	return 80, nil
 }

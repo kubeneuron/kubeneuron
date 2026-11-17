@@ -62,9 +62,19 @@ images:
   victoriaMetricsOperator:
     repository: docker.io/victoriametrics/operator
     tag: v0.73.1
+  # The digest is the image a Managed spec.observability.store runs
+  # (operator.DefaultMetricsStoreImage); referenced, not redistributed.
   victoriaMetricsSingle:
     repository: victoriametrics/victoria-metrics
     tag: v1.147.0
+    digest: sha256:40ea45a6d14b6ad9f2f1fff597309d456ff9885d77d8d1da5fd559b251db9987
+  # The image a Managed spec.observability.collector runs
+  # (operator.DefaultCollectorImage); referenced, not redistributed.
+  # Apache-2.0. Move tag and digest together.
+  otelCollectorK8s:
+    repository: otel/opentelemetry-collector-k8s
+    tag: 0.165.0
+    digest: sha256:ce55d0a38923c83120e4ba613fbdf446786652d2ce9f29d1cd7879e5d869829f
   victoriaMetricsAgent:
     repository: victoriametrics/vmagent
     tag: v1.147.0

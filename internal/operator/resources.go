@@ -633,6 +633,7 @@ func controllerDeployment(installation *kubeneuronv1alpha1.KubeNeuron, snapshot 
 	default:
 		return nil, fmt.Errorf("unsupported workflow store %q", installation.Spec.WorkflowStore.Type)
 	}
+	container.Env = append(container.Env, telemetryEnv(installation)...)
 
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -864,13 +865,13 @@ func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snaps
 							"--nvidia-observation",
 							"--nvidia-controller-profile",
 						}, toolingArgs...),
-						Env: append([]corev1.EnvVar{{
+						Env: append(append([]corev1.EnvVar{{
 							Name: "NODE_NAME",
 							ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
 								APIVersion: "v1",
 								FieldPath:  "spec.nodeName",
 							}},
-						}}, toolingEnv...),
+						}}, toolingEnv...), telemetryEnv(installation)...),
 						SecurityContext:          &corev1.SecurityContext{Privileged: &privileged},
 						Ports:                    []corev1.ContainerPort{{Name: "health", ContainerPort: agentPort, Protocol: corev1.ProtocolTCP}},
 						ReadinessProbe:           defaultReadinessHTTPProbe("/readyz", "health"),

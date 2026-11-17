@@ -17,6 +17,7 @@ import (
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -47,6 +48,10 @@ func main() {
 		defaultAdapters = flag.String("default-agent-adapters", "",
 			"JSON list of spec.agent.adapters entries added to every installation, e.g. "+
 				`'[{"vendor":"amd","options":{"tool":"amd-smi"}}]'; an installation entry replaces a default for the same vendor`)
+		collectorImage = flag.String("otel-collector-image", operator.DefaultCollectorImage,
+			"image of a Managed spec.observability.collector; pin by digest, e.g. a mirror of the default")
+		metricsStoreImage = flag.String("metrics-store-image", operator.DefaultMetricsStoreImage,
+			"image of a Managed spec.observability.store; pin by digest, e.g. a mirror of the default")
 		// Production logging by default (JSON, info, sampled); development
 		// output remains reachable with --zap-devel.
 		logOptions = zap.Options{}
@@ -64,6 +69,7 @@ func main() {
 	utilruntime.Must(corev1.AddToScheme(scheme))
 	utilruntime.Must(policyv1.AddToScheme(scheme))
 	utilruntime.Must(rbacv1.AddToScheme(scheme))
+	utilruntime.Must(networkingv1.AddToScheme(scheme))
 	utilruntime.Must(kubeneuronv1alpha1.AddToScheme(scheme))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -90,6 +96,11 @@ func main() {
 		Scheme:               mgr.GetScheme(),
 		Recorder:             mgr.GetEventRecorderFor("kubeneuron-operator"),
 		DefaultAgentAdapters: agentAdapters,
+		CollectorImage:       *collectorImage,
+		MetricsStoreImage:    *metricsStoreImage,
+		// The chart sets POD_NAMESPACE; the collector admits the operator's
+		// own telemetry from that namespace only.
+		OperatorNamespace: os.Getenv("POD_NAMESPACE"),
 	}).SetupWithManager(mgr); err != nil {
 		fmt.Fprintln(os.Stderr, "registering reconciler:", err)
 		os.Exit(1)

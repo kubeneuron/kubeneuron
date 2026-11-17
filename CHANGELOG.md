@@ -11,6 +11,18 @@ API is `v1alpha1`.
 
 ### Added
 
+- **Managed metrics path.** `spec.observability.collector` and
+  `spec.observability.store` take `Managed`, `External` or `Disabled` (the
+  default when left out). Managed, the operator runs an OpenTelemetry
+  Collector and a single-node VictoriaMetrics on a PersistentVolumeClaim,
+  both pinned by digest and behind NetworkPolicies, and reports
+  `ObservabilityCollectorReady` and `ObservabilityStoreReady`; the
+  controller and agents export OTLP with the node name as a resource
+  attribute. External endpoints take their `Authorization` header from a
+  Secret. `spec.observability.victoriaMetrics` is deprecated in favour of
+  `store`. The operator now needs NetworkPolicy access and delete on the
+  Deployments, Services, ConfigMaps and ServiceAccounts it owns.
+
 - **Recovery modes per policy: dry-run, approval and automatic.**
   `GPURemediationPolicy.spec.mode` selects who authorises a step that stops
   work: `DryRun` simulates the policy's incidents, `Approval` (the default for

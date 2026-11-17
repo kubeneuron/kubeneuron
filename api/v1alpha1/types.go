@@ -787,25 +787,28 @@ type ObservabilitySpec struct {
 }
 
 // OTLPEndpointSpec is a Managed, External or Disabled OTLP/HTTP endpoint.
-// Credentials are never part of the URL: they come from a Secret holding
-// headers in the OTEL_EXPORTER_OTLP_HEADERS form (key=value,key2=value2).
+// Credentials are never part of the URL: they come from a Secret holding the
+// HTTP Authorization header value.
 // +kubebuilder:validation:XValidation:rule="self.mode != 'External' || (has(self.endpoint) && self.endpoint.size() > 0)",message="External requires an endpoint"
-// +kubebuilder:validation:XValidation:rule="self.mode == 'External' || (!has(self.endpoint) && !has(self.headersSecretRef))",message="endpoint and headersSecretRef apply only to External"
-// +kubebuilder:validation:XValidation:rule="!has(self.endpoint) || !self.endpoint.contains('@')",message="credentials must not be part of the endpoint URL; use headersSecretRef"
+// +kubebuilder:validation:XValidation:rule="self.mode == 'External' || (!has(self.endpoint) && !has(self.authorizationSecretRef))",message="endpoint and authorizationSecretRef apply only to External"
+// +kubebuilder:validation:XValidation:rule="!has(self.endpoint) || !self.endpoint.contains('@')",message="credentials must not be part of the endpoint URL; use authorizationSecretRef"
 type OTLPEndpointSpec struct {
 	// +kubebuilder:validation:Enum=Managed;External;Disabled
 	Mode IntegrationMode `json:"mode"`
-	// Endpoint is the base URL (http or https) of the user's endpoint.
+	// Endpoint is the OTLP/HTTP base URL; the sender appends /v1/metrics.
+	// For VictoriaMetrics: http://<host>:8428/opentelemetry. For Prometheus
+	// with its OTLP receiver: http://<host>:9090/api/v1/otlp. For a
+	// collector: http://<host>:4318.
 	// +kubebuilder:validation:MaxLength=2048
-	// +kubebuilder:validation:Pattern=`^https?://[^\s]+$`
+	// +kubebuilder:validation:Pattern=`^https?://\S+$`
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
-	// HeadersSecretRef selects a key of a Secret in the installation
-	// namespace whose value is the request headers, for example
-	// "Authorization=Bearer <token>". The operator never reads it: the
+	// AuthorizationSecretRef selects a key of a Secret in the installation
+	// namespace whose value is the HTTP Authorization header, for example
+	// "Bearer <token>" or "Basic <base64>". The operator never reads it: the
 	// value reaches the sender as an environment variable.
 	// +optional
-	HeadersSecretRef *SecretReference `json:"headersSecretRef,omitempty"`
+	AuthorizationSecretRef *SecretReference `json:"authorizationSecretRef,omitempty"`
 }
 
 // CollectorSpec configures the OpenTelemetry Collector.

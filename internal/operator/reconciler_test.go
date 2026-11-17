@@ -12,6 +12,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -1074,6 +1075,7 @@ func newOperatorScheme(t *testing.T) *runtime.Scheme {
 		appsv1.AddToScheme,
 		policyv1.AddToScheme,
 		rbacv1.AddToScheme,
+		networkingv1.AddToScheme,
 		kubeneuronv1alpha1.AddToScheme,
 	} {
 		if err := add(scheme); err != nil {

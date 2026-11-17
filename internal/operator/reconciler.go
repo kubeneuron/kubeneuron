@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -49,9 +50,11 @@ const (
 )
 
 // KubeNeuronReconciler owns the managed runtime objects for a root
-// KubeNeuron resource. It intentionally does not create VictoriaMetrics,
-// ClickHouse, or PostgreSQL deployments: their dedicated upstream operators
-// own lifecycle, storage, backups, and upgrades.
+// KubeNeuron resource. It does not create ClickHouse or PostgreSQL: their
+// dedicated upstream operators own lifecycle, storage, backups and upgrades.
+// The metrics path is the exception, on request: spec.observability can ask
+// for a Managed OpenTelemetry Collector and a Managed single-node
+// VictoriaMetrics store, which this reconciler runs without backups.
 type KubeNeuronReconciler struct {
 	client.Client
 	APIReader client.Reader
@@ -64,6 +67,14 @@ type KubeNeuronReconciler struct {
 	// value agentAdapters). An installation entry replaces the default for
 	// the same vendor.
 	DefaultAgentAdapters []kubeneuronv1alpha1.AgentAdapterSpec
+	// CollectorImage and MetricsStoreImage run a Managed collector and
+	// store; empty means DefaultCollectorImage and DefaultMetricsStoreImage.
+	CollectorImage    string
+	MetricsStoreImage string
+	// OperatorNamespace is where the operator runs; the collector's
+	// NetworkPolicy admits the operator's pods from there. Empty admits
+	// them from any namespace.
+	OperatorNamespace string
 }
 
 // event emits a Kubernetes Event when a recorder is wired.
@@ -199,12 +210,16 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.ensurePDB(ctx, &installation, controllerPDB(&installation)); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile controller PodDisruptionBudget: %w", err))
 	}
+	observability, err := r.reconcileObservability(ctx, &installation)
+	if err != nil {
+		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile observability: %w", err))
+	}
 
 	ready, readinessMessage, err := r.runtimeReady(ctx, &installation)
 	if err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("check runtime readiness: %w", err))
 	}
-	if err := r.updateStatus(ctx, &installation, snapshot, nil, ready, readinessMessage); err != nil {
+	if err := r.updateStatus(ctx, &installation, snapshot, nil, ready, readinessMessage, observability...); err != nil {
 		return ctrl.Result{}, err
 	}
 	if !ready {
@@ -384,7 +399,7 @@ func managedObjectReady(installation *kubeneuronv1alpha1.KubeNeuron, object clie
 	return true, ""
 }
 
-func (r *KubeNeuronReconciler) updateStatus(ctx context.Context, installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot, validationErr error, runtimeReady bool, runtimeMessage string) error {
+func (r *KubeNeuronReconciler) updateStatus(ctx context.Context, installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot, validationErr error, runtimeReady bool, runtimeMessage string, observability ...observabilityCondition) error {
 	before := installation.DeepCopy()
 	installation.Status.ObservedGeneration = installation.Generation
 	meta.SetStatusCondition(&installation.Status.Conditions, cloudRecoveryCondition(installation))
@@ -436,6 +451,7 @@ func (r *KubeNeuronReconciler) updateStatus(ctx context.Context, installation *k
 			status = metav1.ConditionTrue
 			reason = "RuntimeAvailable"
 		}
+		applyObservabilityConditions(installation, observability)
 		meta.SetStatusCondition(&installation.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
 			Status:             status,
@@ -1237,6 +1253,7 @@ func (r *KubeNeuronReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&appsv1.DaemonSet{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Watches(&kubeneuronv1alpha1.GPURemediationPolicy{}, handler.EnqueueRequestsFromMapFunc(r.mapConfigurationToKubeNeuron)).
 		Watches(&kubeneuronv1alpha1.GPUPlaybook{}, handler.EnqueueRequestsFromMapFunc(r.mapConfigurationToKubeNeuron)).
 		Watches(&kubeneuronv1alpha1.GPUSignalMapping{}, handler.EnqueueRequestsFromMapFunc(r.mapConfigurationToKubeNeuron)).
