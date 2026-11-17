@@ -1,4 +1,4 @@
-# Cloud-only remove-first ladder, explicitly opt-in until add-first (#57).
+# Cloud-only remove-first ladder, explicitly opt-in until add-first is available.
 # Removing the old instance does not prove replacement capacity exists.
 # Bind only with replacement.strategy: RemoveFirst and a qualified fault/pool.
 # Provider eligibility is checked before cordon and before disruptive actions.
