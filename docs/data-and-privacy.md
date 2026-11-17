@@ -1,5 +1,7 @@
 # Data and privacy
 
+KubeNeuron sends no usage data, metrics or reports to its authors and does not check for updates. Data leaves your cluster only through the connections listed below: destinations you configure, the Kubernetes and cloud APIs the software needs to run, and image pulls from the publishers' registries.
+
 ## Agent privileges
 
 The installed agent runs privileged and shares the host PID namespace, including in dry-run mode. It reads host kernel fault messages and uses host namespaces and tools for configured diagnostics and node actions. Dry-run controls remediation execution. It does not change the agent pod's permissions.
@@ -14,6 +16,7 @@ Managed Grafana keeps its administrator account in your cluster. The installatio
 
 ## Connections
 
+- The installer runs on your workstation. It downloads the install manifest from GitHub Releases and, with `--version latest`, asks the GitHub API for the newest release. Installed components do not check for updates.
 - The agent sends observations to the configured controller. When a DCGM client is available it can contact the DCGM host engine. Host tools and scripts you supply may make their own connections.
 - Cluster components access the Kubernetes API. The controller connects to the configured database, OIDC provider and notification destinations. Slack, PagerDuty and webhook recipients receive incident details. The web panel loads no third-party scripts, fonts or analytics. OIDC sign-in redirects the browser to your identity provider.
 - With the AWS provider enabled, cloud operations use the EC2 API. The AWS SDK may contact STS, instance metadata or container credential endpoints for authentication.
