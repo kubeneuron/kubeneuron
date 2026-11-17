@@ -31,7 +31,7 @@ func testKubeNeuron() *kubeneuronv1alpha1.KubeNeuron {
 				SQLite: &kubeneuronv1alpha1.SQLiteStoreSpec{Size: defaultSQLiteStorageSize},
 			},
 			Observability: kubeneuronv1alpha1.ObservabilitySpec{
-				VictoriaMetrics: kubeneuronv1alpha1.DependencySpec{Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: "http://vm.example"},
+				VictoriaMetrics: &kubeneuronv1alpha1.DependencySpec{Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: "http://vm.example"},
 				Alertmanager:    kubeneuronv1alpha1.DependencySpec{Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: "http://am.example"},
 			},
 			Notifications: &kubeneuronv1alpha1.NotificationsSpec{
@@ -582,7 +582,7 @@ func TestValidateInstallationDependencyContract(t *testing.T) {
 		{
 			name: "managed victoria metrics",
 			mutate: func(installation *kubeneuronv1alpha1.KubeNeuron) {
-				installation.Spec.Observability.VictoriaMetrics = kubeneuronv1alpha1.DependencySpec{
+				installation.Spec.Observability.VictoriaMetrics = &kubeneuronv1alpha1.DependencySpec{
 					Mode: kubeneuronv1alpha1.IntegrationModeManaged,
 				}
 			},

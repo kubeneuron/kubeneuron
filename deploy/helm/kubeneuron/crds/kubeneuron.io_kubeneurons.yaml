@@ -712,9 +712,13 @@ spec:
                 type: object
               observability:
                 description: |-
-                  ObservabilitySpec describes metrics and alerting dependencies.
-                  The preview runtime accepts only explicit external endpoints. Managed
-                  discovery and credential wiring remain reserved until implemented.
+                  ObservabilitySpec describes where KubeNeuron's metrics go and the
+                  alerting dependency.
+
+                  collector, store and grafana are each Managed (the operator runs it),
+                  External (the user's own) or Disabled. A field left out is Disabled, so an
+                  upgrade never deploys anything on its own; the chart and the samples write
+                  Managed for new installations.
                 properties:
                   alertmanager:
                     description: |-
@@ -758,10 +762,314 @@ spec:
                         > 0)
                     - message: Disabled dependencies cannot set endpoint or secretRef
                       rule: self.mode != 'Disabled' || (!has(self.endpoint) && !has(self.secretRef))
+                  collector:
+                    description: |-
+                      Collector receives OTLP over HTTP from the controller, the agents and
+                      the operator, and sends it to the store. Managed runs an OpenTelemetry
+                      Collector in the installation namespace; External points the
+                      components at the user's own collector; Disabled turns export off.
+                    properties:
+                      endpoint:
+                        description: Endpoint is the base URL (http or https) of the
+                          user's endpoint.
+                        maxLength: 2048
+                        pattern: ^https?://[^\s]+$
+                        type: string
+                      headersSecretRef:
+                        description: |-
+                          HeadersSecretRef selects a key of a Secret in the installation
+                          namespace whose value is the request headers, for example
+                          "Authorization=Bearer <token>". The operator never reads it: the
+                          value reaches the sender as an environment variable.
+                        properties:
+                          key:
+                            maxLength: 253
+                            type: string
+                          name:
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          namespace:
+                            maxLength: 63
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      mode:
+                        allOf:
+                        - enum:
+                          - External
+                          - Managed
+                          - Disabled
+                        - enum:
+                          - Managed
+                          - External
+                          - Disabled
+                        description: |-
+                          IntegrationMode describes whether a dependency is supplied by the cluster
+                          or managed by its dedicated upstream operator.
+                        type: string
+                      resources:
+                        description: |-
+                          Resources of the managed collector container. The memory limit also
+                          sizes the collector's memory_limiter.
+                        properties:
+                          claims:
+                            description: |-
+                              Claims lists the names of resources, defined in spec.resourceClaims,
+                              that are used by this container.
+
+                              This is an alpha field and requires enabling the
+                              DynamicResourceAllocation feature gate.
+
+                              This field is immutable. It can only be set for containers.
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name must match the name of one entry in pod.spec.resourceClaims of
+                                    the Pod where this field is used. It makes that resource available
+                                    inside a container.
+                                  type: string
+                                request:
+                                  description: |-
+                                    Request is the name chosen for a request in the referenced claim.
+                                    If empty, everything from the claim is made available, otherwise
+                                    only the result of this request.
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Limits describes the maximum amount of compute resources allowed.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Requests describes the minimum amount of compute resources required.
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                        type: object
+                    required:
+                    - mode
+                    type: object
+                    x-kubernetes-validations:
+                    - message: resources apply only to a Managed collector
+                      rule: self.mode == 'Managed' || !has(self.resources)
+                    - message: External requires an endpoint
+                      rule: self.mode != 'External' || (has(self.endpoint) && self.endpoint.size()
+                        > 0)
+                    - message: endpoint and headersSecretRef apply only to External
+                      rule: self.mode == 'External' || (!has(self.endpoint) && !has(self.headersSecretRef))
+                    - message: credentials must not be part of the endpoint URL; use
+                        headersSecretRef
+                      rule: '!has(self.endpoint) || !self.endpoint.contains(''@'')'
+                  grafana:
+                    description: |-
+                      Grafana is reserved: the field validates, and only Disabled or
+                      External are accepted until the managed Grafana is available.
+                    properties:
+                      endpoint:
+                        maxLength: 2048
+                        type: string
+                      mode:
+                        allOf:
+                        - enum:
+                          - External
+                          - Managed
+                          - Disabled
+                        - enum:
+                          - Managed
+                          - External
+                          - Disabled
+                        description: |-
+                          IntegrationMode describes whether a dependency is supplied by the cluster
+                          or managed by its dedicated upstream operator.
+                        type: string
+                    required:
+                    - mode
+                    type: object
+                    x-kubernetes-validations:
+                    - message: External requires an endpoint
+                      rule: self.mode != 'External' || (has(self.endpoint) && self.endpoint.size()
+                        > 0)
+                  store:
+                    description: |-
+                      Store is the one metrics backend. Managed runs a single-node
+                      VictoriaMetrics with a PersistentVolumeClaim; External is the user's
+                      VictoriaMetrics or Prometheus, which must accept OTLP over HTTP
+                      (Prometheus with its OTLP receiver enabled; remote write is not
+                      supported). With an External collector the store is not written by
+                      KubeNeuron: an External store then only names the datasource a
+                      Managed Grafana reads.
+                    properties:
+                      endpoint:
+                        description: Endpoint is the base URL (http or https) of the
+                          user's endpoint.
+                        maxLength: 2048
+                        pattern: ^https?://[^\s]+$
+                        type: string
+                      headersSecretRef:
+                        description: |-
+                          HeadersSecretRef selects a key of a Secret in the installation
+                          namespace whose value is the request headers, for example
+                          "Authorization=Bearer <token>". The operator never reads it: the
+                          value reaches the sender as an environment variable.
+                        properties:
+                          key:
+                            maxLength: 253
+                            type: string
+                          name:
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          namespace:
+                            maxLength: 63
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      managed:
+                        description: |-
+                          ManagedStoreSpec configures the managed single-node VictoriaMetrics.
+                          KubeNeuron does not back it up.
+                        properties:
+                          resources:
+                            description: ResourceRequirements describes the compute
+                              resource requirements.
+                            properties:
+                              claims:
+                                description: |-
+                                  Claims lists the names of resources, defined in spec.resourceClaims,
+                                  that are used by this container.
+
+                                  This is an alpha field and requires enabling the
+                                  DynamicResourceAllocation feature gate.
+
+                                  This field is immutable. It can only be set for containers.
+                                items:
+                                  description: ResourceClaim references one entry
+                                    in PodSpec.ResourceClaims.
+                                  properties:
+                                    name:
+                                      description: |-
+                                        Name must match the name of one entry in pod.spec.resourceClaims of
+                                        the Pod where this field is used. It makes that resource available
+                                        inside a container.
+                                      type: string
+                                    request:
+                                      description: |-
+                                        Request is the name chosen for a request in the referenced claim.
+                                        If empty, everything from the claim is made available, otherwise
+                                        only the result of this request.
+                                      type: string
+                                  required:
+                                  - name
+                                  type: object
+                                type: array
+                                x-kubernetes-list-map-keys:
+                                - name
+                                x-kubernetes-list-type: map
+                              limits:
+                                additionalProperties:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                description: |-
+                                  Limits describes the maximum amount of compute resources allowed.
+                                  More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                                type: object
+                              requests:
+                                additionalProperties:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                description: |-
+                                  Requests describes the minimum amount of compute resources required.
+                                  If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                                  otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                                  More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                                type: object
+                            type: object
+                          retention:
+                            default: 30d
+                            description: Retention is the VictoriaMetrics -retentionPeriod,
+                              for example 30d.
+                            pattern: ^[0-9]+[hdwy]?$
+                            type: string
+                          storage:
+                            description: |-
+                              StoreStorageSpec is the managed store's volume. The claim outlives the
+                              managed store: switching to External or Disabled leaves it in place.
+                            properties:
+                              ephemeral:
+                                description: |-
+                                  Ephemeral uses an emptyDir instead of a claim: every restart of the
+                                  store loses its data. Only for trials.
+                                type: boolean
+                              size:
+                                default: 20Gi
+                                type: string
+                              storageClassName:
+                                type: string
+                            type: object
+                        type: object
+                      mode:
+                        allOf:
+                        - enum:
+                          - External
+                          - Managed
+                          - Disabled
+                        - enum:
+                          - Managed
+                          - External
+                          - Disabled
+                        description: |-
+                          IntegrationMode describes whether a dependency is supplied by the cluster
+                          or managed by its dedicated upstream operator.
+                        type: string
+                    required:
+                    - mode
+                    type: object
+                    x-kubernetes-validations:
+                    - message: managed applies only to a Managed store
+                      rule: self.mode == 'Managed' || !has(self.managed)
+                    - message: External requires an endpoint
+                      rule: self.mode != 'External' || (has(self.endpoint) && self.endpoint.size()
+                        > 0)
+                    - message: endpoint and headersSecretRef apply only to External
+                      rule: self.mode == 'External' || (!has(self.endpoint) && !has(self.headersSecretRef))
+                    - message: credentials must not be part of the endpoint URL; use
+                        headersSecretRef
+                      rule: '!has(self.endpoint) || !self.endpoint.contains(''@'')'
                   victoriaMetrics:
                     description: |-
-                      DependencySpec describes a dependency managed by its own upstream operator
-                      or supplied as an existing endpoint.
+                      VictoriaMetrics is deprecated: use store. Set alone, it is read as
+                      store mode External with the same endpoint.
                     properties:
                       endpoint:
                         type: string
@@ -802,17 +1110,24 @@ spec:
                       rule: self.mode != 'Disabled' || (!has(self.endpoint) && !has(self.secretRef))
                 required:
                 - alertmanager
-                - victoriaMetrics
                 type: object
                 x-kubernetes-validations:
                 - message: victoriaMetrics currently supports only External mode
-                  rule: self.victoriaMetrics.mode == 'External'
+                  rule: '!has(self.victoriaMetrics) || self.victoriaMetrics.mode ==
+                    ''External'''
                 - message: alertmanager currently supports only External mode
                   rule: self.alertmanager.mode == 'External'
                 - message: victoriaMetrics secretRef is not supported
-                  rule: '!has(self.victoriaMetrics.secretRef)'
+                  rule: '!has(self.victoriaMetrics) || !has(self.victoriaMetrics.secretRef)'
                 - message: alertmanager secretRef is not supported
                   rule: '!has(self.alertmanager.secretRef)'
+                - message: victoriaMetrics is deprecated and replaced by store; set
+                    only store
+                  rule: '!has(self.victoriaMetrics) || !has(self.store)'
+                - message: 'an external collector routes metrics itself: store cannot
+                    be Managed'
+                  rule: '!has(self.collector) || self.collector.mode != ''External''
+                    || !has(self.store) || self.store.mode != ''Managed'''
               safety:
                 description: |-
                   SafetySpec holds execution limits. ExecutionMode defaults to DryRun in the

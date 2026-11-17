@@ -746,16 +746,122 @@ type DependencySpec struct {
 	SecretRef *SecretReference `json:"secretRef,omitempty"`
 }
 
-// ObservabilitySpec describes metrics and alerting dependencies.
-// The preview runtime accepts only explicit external endpoints. Managed
-// discovery and credential wiring remain reserved until implemented.
-// +kubebuilder:validation:XValidation:rule="self.victoriaMetrics.mode == 'External'",message="victoriaMetrics currently supports only External mode"
+// ObservabilitySpec describes where KubeNeuron's metrics go and the
+// alerting dependency.
+//
+// collector, store and grafana are each Managed (the operator runs it),
+// External (the user's own) or Disabled. A field left out is Disabled, so an
+// upgrade never deploys anything on its own; the chart and the samples write
+// Managed for new installations.
+// +kubebuilder:validation:XValidation:rule="!has(self.victoriaMetrics) || self.victoriaMetrics.mode == 'External'",message="victoriaMetrics currently supports only External mode"
 // +kubebuilder:validation:XValidation:rule="self.alertmanager.mode == 'External'",message="alertmanager currently supports only External mode"
-// +kubebuilder:validation:XValidation:rule="!has(self.victoriaMetrics.secretRef)",message="victoriaMetrics secretRef is not supported"
+// +kubebuilder:validation:XValidation:rule="!has(self.victoriaMetrics) || !has(self.victoriaMetrics.secretRef)",message="victoriaMetrics secretRef is not supported"
 // +kubebuilder:validation:XValidation:rule="!has(self.alertmanager.secretRef)",message="alertmanager secretRef is not supported"
+// +kubebuilder:validation:XValidation:rule="!has(self.victoriaMetrics) || !has(self.store)",message="victoriaMetrics is deprecated and replaced by store; set only store"
+// +kubebuilder:validation:XValidation:rule="!has(self.collector) || self.collector.mode != 'External' || !has(self.store) || self.store.mode != 'Managed'",message="an external collector routes metrics itself: store cannot be Managed"
 type ObservabilitySpec struct {
-	VictoriaMetrics DependencySpec `json:"victoriaMetrics"`
-	Alertmanager    DependencySpec `json:"alertmanager"`
+	// VictoriaMetrics is deprecated: use store. Set alone, it is read as
+	// store mode External with the same endpoint.
+	// +optional
+	VictoriaMetrics *DependencySpec `json:"victoriaMetrics,omitempty"`
+	Alertmanager    DependencySpec  `json:"alertmanager"`
+	// Collector receives OTLP over HTTP from the controller, the agents and
+	// the operator, and sends it to the store. Managed runs an OpenTelemetry
+	// Collector in the installation namespace; External points the
+	// components at the user's own collector; Disabled turns export off.
+	// +optional
+	Collector *CollectorSpec `json:"collector,omitempty"`
+	// Store is the one metrics backend. Managed runs a single-node
+	// VictoriaMetrics with a PersistentVolumeClaim; External is the user's
+	// VictoriaMetrics or Prometheus, which must accept OTLP over HTTP
+	// (Prometheus with its OTLP receiver enabled; remote write is not
+	// supported). With an External collector the store is not written by
+	// KubeNeuron: an External store then only names the datasource a
+	// Managed Grafana reads.
+	// +optional
+	Store *MetricsStoreSpec `json:"store,omitempty"`
+	// Grafana is reserved: the field validates, and only Disabled or
+	// External are accepted until the managed Grafana is available.
+	// +optional
+	Grafana *GrafanaSpec `json:"grafana,omitempty"`
+}
+
+// OTLPEndpointSpec is a Managed, External or Disabled OTLP/HTTP endpoint.
+// Credentials are never part of the URL: they come from a Secret holding
+// headers in the OTEL_EXPORTER_OTLP_HEADERS form (key=value,key2=value2).
+// +kubebuilder:validation:XValidation:rule="self.mode != 'External' || (has(self.endpoint) && self.endpoint.size() > 0)",message="External requires an endpoint"
+// +kubebuilder:validation:XValidation:rule="self.mode == 'External' || (!has(self.endpoint) && !has(self.headersSecretRef))",message="endpoint and headersSecretRef apply only to External"
+// +kubebuilder:validation:XValidation:rule="!has(self.endpoint) || !self.endpoint.contains('@')",message="credentials must not be part of the endpoint URL; use headersSecretRef"
+type OTLPEndpointSpec struct {
+	// +kubebuilder:validation:Enum=Managed;External;Disabled
+	Mode IntegrationMode `json:"mode"`
+	// Endpoint is the base URL (http or https) of the user's endpoint.
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^https?://[^\s]+$`
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+	// HeadersSecretRef selects a key of a Secret in the installation
+	// namespace whose value is the request headers, for example
+	// "Authorization=Bearer <token>". The operator never reads it: the
+	// value reaches the sender as an environment variable.
+	// +optional
+	HeadersSecretRef *SecretReference `json:"headersSecretRef,omitempty"`
+}
+
+// CollectorSpec configures the OpenTelemetry Collector.
+// +kubebuilder:validation:XValidation:rule="self.mode == 'Managed' || !has(self.resources)",message="resources apply only to a Managed collector"
+type CollectorSpec struct {
+	OTLPEndpointSpec `json:",inline"`
+	// Resources of the managed collector container. The memory limit also
+	// sizes the collector's memory_limiter.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// MetricsStoreSpec configures the metrics backend.
+// +kubebuilder:validation:XValidation:rule="self.mode == 'Managed' || !has(self.managed)",message="managed applies only to a Managed store"
+type MetricsStoreSpec struct {
+	OTLPEndpointSpec `json:",inline"`
+	// +optional
+	Managed *ManagedStoreSpec `json:"managed,omitempty"`
+}
+
+// ManagedStoreSpec configures the managed single-node VictoriaMetrics.
+// KubeNeuron does not back it up.
+type ManagedStoreSpec struct {
+	// +optional
+	Storage StoreStorageSpec `json:"storage,omitempty"`
+	// Retention is the VictoriaMetrics -retentionPeriod, for example 30d.
+	// +kubebuilder:validation:Pattern=`^[0-9]+[hdwy]?$`
+	// +kubebuilder:default="30d"
+	// +optional
+	Retention string `json:"retention,omitempty"`
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// StoreStorageSpec is the managed store's volume. The claim outlives the
+// managed store: switching to External or Disabled leaves it in place.
+type StoreStorageSpec struct {
+	// +kubebuilder:default="20Gi"
+	// +optional
+	Size string `json:"size,omitempty"`
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
+	// Ephemeral uses an emptyDir instead of a claim: every restart of the
+	// store loses its data. Only for trials.
+	// +optional
+	Ephemeral bool `json:"ephemeral,omitempty"`
+}
+
+// GrafanaSpec is reserved for the managed Grafana.
+// +kubebuilder:validation:XValidation:rule="self.mode != 'External' || (has(self.endpoint) && self.endpoint.size() > 0)",message="External requires an endpoint"
+type GrafanaSpec struct {
+	// +kubebuilder:validation:Enum=Managed;External;Disabled
+	Mode IntegrationMode `json:"mode"`
+	// +kubebuilder:validation:MaxLength=2048
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // ArchiveSpec describes the optional raw-event archive. It must never be used

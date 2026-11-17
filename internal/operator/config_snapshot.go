@@ -689,7 +689,7 @@ func validateRuntimeSupport(s *kubeneuronv1alpha1.KubeNeuron) error {
 	if err := validateTLS(s); err != nil {
 		return err
 	}
-	if err := validateDependency("victoriaMetrics", s.Spec.Observability.VictoriaMetrics); err != nil {
+	if err := validateObservability(s); err != nil {
 		return err
 	}
 	if err := validateDependency("alertmanager", s.Spec.Observability.Alertmanager); err != nil {
