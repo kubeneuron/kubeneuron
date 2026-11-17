@@ -448,12 +448,18 @@ approval does not lift them:
   the other way. A policy that needs node replacement today names
   `RemoveFirst` explicitly.
 - `recycle.enabled` (default false): the optional restart through the cloud API.
-  Without it, a recycle step is skipped: it is not attempted and not counted
-  as failed, it does not use up the escalation cap, and the ladder continues with its next step or its
-  `on_failure.escalate_to` playbook (the audit trail records
-  `recycle skipped: …`). A recycle the cloud provider does not allow for the
-  node is skipped the same way. A skip is not a recovery: when nothing follows
-  it, the step is held as unavailable, never verified.
+  Without it, a recycle is skipped as not applicable: it is not attempted, not
+  counted as failed or as an escalation, and does not use up the escalation
+  cap. A rung that recovers only by recycling is skipped before it starts
+  (before its cordon), and the incident continues with the first rung on its
+  `on_failure.escalate_to` path that does not; a recycle followed by a replace
+  in the same rung moves on to the next step. The audit trail records
+  `recycle skipped: …`. A recycle the cloud provider does not allow for the
+  node is skipped the same way. When the escalation path ends or returns to a
+  rung already passed, the incident is held as unavailable before the cordon.
+  A recycle the provider stops allowing after its rung has started, with no
+  replace after it in the rung, fails the rung: that is an ordinary
+  escalation. A skip is not a recovery and never leads to verification.
   A restart through the cloud API drains the node before it is tried, so it can interrupt the workload before a prepared replacement is ready; the add-first guarantee does not cover it.
 
 Both are checked before the first disruptive step, together with the cloud

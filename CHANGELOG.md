@@ -31,7 +31,8 @@ API is `v1alpha1`.
   the first disruptive step: a replace under `AddFirst` anywhere on the path
   (with its escalations), or a recycle-only path without `recycle.enabled`,
   holds the incident before the node is cordoned or drained. A skip is not a
-  failure and does not count against the escalation cap. Automatic policies authorise only cloud recovery
+  failure or an escalation and does not count against the escalation cap; a
+  recycle-only rung is skipped before its cordon. Automatic policies authorise only cloud recovery
   ladders.
   Every automatic step is audited as `policy:<name>` with the declared
   enabler, the policy generation and the time; `kubeneuronctl incident show`

@@ -19,7 +19,13 @@ import (
 func (c *Controller) authorizeAndStartStep(ctx context.Context, inc *types.Incident, step *playbook.Step) error {
 	// Provider first, so a changed target is superseded whatever the policy
 	// says; then the policy's recovery settings. Both before any approval.
-	held, skip, err := c.holdUnavailableCloudRecovery(ctx, inc, step)
+	// Before a recycle-only rung starts, the provider is asked about its
+	// recycle: a refused recycle skips the rung before its cordon.
+	assess := step
+	if recycle := c.rungRecycle(ctx, inc); recycle != nil {
+		assess = recycle
+	}
+	held, skip, err := c.holdUnavailableCloudRecovery(ctx, inc, assess)
 	if held || err != nil {
 		return err
 	}

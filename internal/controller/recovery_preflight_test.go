@@ -148,7 +148,7 @@ func TestSkippedRecycleContinuesWithTheEscalation(t *testing.T) {
 	id := openOn(t, c, "n1")
 	inc := step(t, c, st, id, 100)
 	entries := trail(t, st, id)
-	if inc.State != types.StateResolved || inc.Playbook != "cloud-replace" || inc.Attempt != 1 {
+	if inc.State != types.StateResolved || inc.Playbook != "cloud-replace" || inc.Attempt != 0 {
 		t.Fatalf("state=%s playbook=%s attempt=%d, want resolved by the escalation%s", inc.State, inc.Playbook, inc.Attempt, dump(entries))
 	}
 	skipped := -1
@@ -172,13 +172,11 @@ func TestSkippedRecycleContinuesWithTheEscalation(t *testing.T) {
 			t.Fatalf("a skip was recorded as an escalation%s", dump(entries))
 		}
 	}
-	if n, err := c.recoveryAttempts(context.Background(), inc); err != nil || n != 0 {
-		t.Fatalf("recovery attempts=%d err=%v, want 0: a skip spends none", n, err)
-	}
-	atCap := *inc
-	atCap.Attempt = maxEscalationAttempts
-	if c.capReached(context.Background(), &atCap) {
-		t.Fatal("the skip counted against the escalation cap")
+	// Before the rung started: nothing of cloud-recycle ran.
+	for _, e := range entries[:skipped] {
+		if e.ToState == types.StateExecuting {
+			t.Fatalf("cloud-recycle started before it was skipped%s", dump(entries))
+		}
 	}
 	// A skip is not a recovery: nothing between the drain and the skip
 	// reaches VERIFYING.
@@ -187,20 +185,47 @@ func TestSkippedRecycleContinuesWithTheEscalation(t *testing.T) {
 	}
 }
 
-func TestSkippedRecycleWithNothingAfterItHolds(t *testing.T) {
+func TestSkippedRecycleWithNothingAfterItHoldsBeforeCordon(t *testing.T) {
 	c, st, _ := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
-	// Recycle is the last step and there is no escalation. The policy allows
-	// it, so the cordon and drain run; the provider then refuses the restart.
+	// Recycle-only, no escalation. The policy allows the recycle; the
+	// provider refuses it, which is known before the cordon.
 	c.SetEngine(ladderEngine(t, recoverymode.Automatic, recoverymode.RemoveFirst, true, cordonDrainThen("cloud-recycle", "platform.recycle_node", "")))
 	c.platform = &autoCloudPlatform{recycleRefused: true}
 	id := openOn(t, c, "n1")
-	inc := step(t, c, st, id, 60)
+	inc := step(t, c, st, id, 30)
 	entries := trail(t, st, id)
-	if inc.State == types.StateVerifying || inc.State == types.StateResolved {
-		t.Fatalf("state=%s: a skip alone must never verify or resolve%s", inc.State, dump(entries))
+	assertHeldBeforeCordon(t, inc, entries, "does not allow a restart")
+}
+
+func TestRecycleSkipAlongACycleHoldsWithoutSpendingAttempts(t *testing.T) {
+	c, st, _ := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
+	// A -> B -> A, both recycle-only; the provider refuses the recycle.
+	engine := ladderEngine(t, recoverymode.Automatic, recoverymode.RemoveFirst, true,
+		cordonDrainThen("a", "platform.recycle_node", "b"),
+		cordonDrainThen("b", "platform.recycle_node", "a"))
+	c.SetEngine(engine)
+	c.platform = &autoCloudPlatform{recycleRefused: true}
+	id := openOn(t, c, "n1")
+	inc := step(t, c, st, id, 30)
+	entries := trail(t, st, id)
+	assertHeldBeforeCordon(t, inc, entries, "the escalation path returns to a")
+	if inc.Playbook != "a" {
+		t.Fatalf("playbook=%s, want it left on a%s", inc.Playbook, dump(entries))
 	}
-	if !strings.Contains(dump(entries), "does not allow a restart") {
-		t.Fatalf("want the provider's refusal recorded%s", dump(entries))
+}
+
+func assertHeldBeforeCordon(t *testing.T, inc *types.Incident, entries []*types.AuditEntry, reason string) {
+	t.Helper()
+	if inc.State != types.StateEvaluating || inc.StepIndex != 0 || inc.Attempt != 0 {
+		t.Fatalf("state=%s step=%d attempt=%d, want held at step 0 with no attempt spent%s", inc.State, inc.StepIndex, inc.Attempt, dump(entries))
+	}
+	for _, e := range entries {
+		if e.ToState == types.StateExecuting || e.Action == "escalate" || e.Action == "recycle-skipped" {
+			t.Fatalf("want nothing started, escalated or moved%s", dump(entries))
+		}
+	}
+	if !strings.Contains(dump(entries), reason) {
+		t.Fatalf("want %q in the trail%s", reason, dump(entries))
 	}
 }
 
@@ -222,5 +247,33 @@ func TestProviderRefusedRecycleIsSkipped(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("want a recycle-skipped row naming the provider%s", dump(entries))
+	}
+}
+
+func TestRecycleRefusedAfterTheRungStartedEscalates(t *testing.T) {
+	c, st, _ := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
+	c.SetEngine(ladderEngine(t, recoverymode.Automatic, recoverymode.RemoveFirst, true,
+		cordonDrainThen("cloud-recycle", "platform.recycle_node", "cloud-replace"),
+		cordonDrainThen("cloud-replace", "platform.replace_node", "")))
+	provider := &autoCloudPlatform{}
+	c.platform = provider
+	id := openOn(t, c, "n1")
+	ctx := context.Background()
+	for i := 0; i < 100; i++ {
+		inc := mustIncident(t, st, id)
+		if inc.StepIndex == 2 && inc.State == types.StateEvaluating {
+			break
+		}
+		c.reconcile(ctx)
+	}
+	if inc := mustIncident(t, st, id); inc.StepIndex != 2 || inc.Playbook != "cloud-recycle" {
+		t.Fatalf("step=%d playbook=%s, want cloud-recycle waiting at its recycle%s", inc.StepIndex, inc.Playbook, dump(trail(t, st, id)))
+	}
+	// The provider changes its answer after the cordon and drain ran.
+	provider.recycleRefused = true
+	inc := step(t, c, st, id, 100)
+	entries := trail(t, st, id)
+	if inc.Playbook != "cloud-replace" || inc.Attempt != 1 || !strings.Contains(dump(entries), "recycle not applicable after the rung started") {
+		t.Fatalf("playbook=%s attempt=%d, want a counted escalation to cloud-replace%s", inc.Playbook, inc.Attempt, dump(entries))
 	}
 }

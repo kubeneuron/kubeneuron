@@ -95,6 +95,9 @@ func (c *Controller) policyRecoveryPreflight(ctx context.Context, inc *types.Inc
 		case path.recycle && !path.replace && !pol.RecycleEnabled:
 			return "recovery unavailable: " + recycleNotEnabled + ", and the path has no replace step; the node is not cordoned or drained", ""
 		}
+		if !pol.RecycleEnabled && c.rungRecycle(ctx, inc) != nil {
+			return "", recycleNotEnabled
+		}
 	}
 	return "", ""
 }
@@ -117,43 +120,114 @@ func (c *Controller) holdOrSkipByPolicy(ctx context.Context, inc *types.Incident
 	return false, nil
 }
 
-// skipRecycle moves past a recycle step that is not applicable: to the next
-// step of the playbook, or to its escalation playbook. A skip is neither a
-// failure nor an escalation (no escalation metric, no recovery attempt
-// spent), and alone it never leads to VERIFYING: nothing was done to recover
-// the node.
+// recycleOnly reports whether a playbook recovers only by recycling: it has a
+// recycle step and no replace step.
+func recycleOnly(book *playbook.Playbook) bool {
+	recycle := false
+	for _, step := range book.Steps {
+		switch step.Action {
+		case "platform.replace_node":
+			return false
+		case "platform.recycle_node":
+			recycle = true
+		}
+	}
+	return recycle
+}
+
+// replaceAfter reports whether the playbook has a replace step after index.
+func replaceAfter(book *playbook.Playbook, index int) bool {
+	for _, step := range book.Steps[index+1:] {
+		if step.Action == "platform.replace_node" {
+			return true
+		}
+	}
+	return false
+}
+
+// skipRecycle moves past a recycle that is not applicable. It is not a
+// failure and not an escalation: Attempt is unchanged, no escalation is
+// counted and nothing is spent against the cap. Two places allow it:
+//
+//   - Before a rung starts (step 0, nothing of it has run) when the rung
+//     recovers only by recycling: the incident moves to the first rung on
+//     its escalation path that does not. Nothing at this Attempt has run, so
+//     the new rung's action IDs (incident, step, attempt) are fresh. The path
+//     is walked once with a visited set; a cycle, or a path that ends, holds.
+//   - Within a rung, to the next step, when a replace follows in the same
+//     rung. Step indexes only grow, so the IDs stay fresh.
+//
+// A recycle that becomes inapplicable after its rung has started, with no
+// replace after it in the rung, means the rung cannot complete: that is an
+// escalation like any failed step. A skip alone never leads to VERIFYING.
 func (c *Controller) skipRecycle(ctx context.Context, inc *types.Incident, step *playbook.Step, reason string) error {
 	if inc.State != types.StateEvaluating {
 		// A parked step keeps its approval round; it is held until the round
 		// ends. Moving past it from AWAITING_APPROVAL is not a legal edge.
-		c.deferStep(inc, step, metrics.DeferRecoveryUnavailable)
-		c.logOnceStepUnavailable(inc, step, "recovery unavailable: "+reason)
-		return nil
+		return c.holdRecycle(inc, step, reason)
 	}
 	engine := c.runtimeConfig(ctx).Engine
 	book, ok := engine.Playbook(inc.Playbook)
-	if ok && inc.StepIndex+1 < len(book.Steps) {
+	if !ok {
+		return c.holdRecycle(inc, step, reason)
+	}
+	if inc.StepIndex == 0 && recycleOnly(book) {
+		seen := map[string]bool{inc.Playbook: true}
+		name := inc.Playbook
+		for {
+			next, ok := engine.Escalation(name)
+			if !ok {
+				return c.holdRecycle(inc, step, reason+"; no rung on the escalation path can run")
+			}
+			if seen[next.Name] {
+				return c.holdRecycle(inc, step, reason+"; the escalation path returns to "+next.Name+" without a rung that can run")
+			}
+			seen[next.Name] = true
+			name = next.Name
+			if !recycleOnly(next) {
+				break
+			}
+		}
+		previous := inc.Playbook
+		inc.Playbook = name
+		return c.transition(ctx, inc, types.StateEvaluating, "system", "recycle-skipped",
+			fmt.Sprintf("recycle skipped: %s; continuing with %s (from %s)", reason, name, previous), nil)
+	}
+	if step.Action == "platform.recycle_node" && replaceAfter(book, inc.StepIndex) {
 		inc.StepIndex++
 		return c.transition(ctx, inc, types.StateEvaluating, "system", "recycle-skipped",
 			fmt.Sprintf("recycle skipped: %s; continuing with step %s of %s", reason, book.Steps[inc.StepIndex].Name, inc.Playbook), nil)
 	}
-	next, ok := engine.Escalation(inc.Playbook)
-	if !ok {
-		c.deferStep(inc, step, metrics.DeferRecoveryUnavailable)
-		c.logOnceStepUnavailable(inc, step, "recovery unavailable: "+reason+"; the playbook has no step or escalation after it")
+	return c.escalate(ctx, inc, "recycle not applicable after the rung started: "+reason)
+}
+
+func (c *Controller) holdRecycle(inc *types.Incident, step *playbook.Step, reason string) error {
+	c.deferStep(inc, step, metrics.DeferRecoveryUnavailable)
+	c.logOnceStepUnavailable(inc, step, "recovery unavailable: "+reason)
+	return nil
+}
+
+// rungRecycle returns the recycle step to assess before a recycle-only rung
+// starts, or nil: the provider's answer for the recycle decides whether the
+// rung runs at all, before its cordon.
+func (c *Controller) rungRecycle(ctx context.Context, inc *types.Incident) *playbook.Step {
+	if inc.StepIndex != 0 || inc.State != types.StateEvaluating {
 		return nil
 	}
-previous := inc.Playbook
-	inc.Playbook = next.Name
-	inc.StepIndex = 0
-	// Attempt is the action-ID nonce (see actionID): bumped so the new
-	// rung's steps get fresh IDs and do not replay the previous rung's
-	// results. It is not a failed attempt: escalate discounts skips from the
-	// cap, and skipping cannot loop, because escalation chains are acyclic
-	// (rejected at load) and each skip moves one playbook further along.
-	inc.Attempt++
-	return c.transition(ctx, inc, types.StateEvaluating, "system", "recycle-skipped",
-		fmt.Sprintf("recycle skipped: %s; continuing with %s (from %s)", reason, next.Name, previous), map[string]string{"rung": "escalation"})
+	engine := c.runtimeConfig(ctx).Engine
+	if engine == nil {
+		return nil
+	}
+	book, ok := engine.Playbook(inc.Playbook)
+	if !ok || !recycleOnly(book) {
+		return nil
+	}
+	for i := range book.Steps {
+		if book.Steps[i].Action == "platform.recycle_node" {
+			return &book.Steps[i]
+		}
+	}
+	return nil
 }
 
 // lastPolicyAssessment returns the last policy-scope assessment of the
@@ -219,19 +293,3 @@ func (c *Controller) recordRecoveryAvailable(ctx context.Context, inc *types.Inc
 	return nil
 }
 
-// recoveryAttempts is inc.Attempt less the bumps made by skipped recycles,
-// which are not recovery attempts. It reads the trail, so callers use it only
-// once Attempt reaches the cap.
-func (c *Controller) recoveryAttempts(ctx context.Context, inc *types.Incident) (int, error) {
-	trail, err := c.store.AuditTrail(ctx, inc.ID)
-	if err != nil {
-		return 0, err
-	}
-	attempts := inc.Attempt
-	for _, e := range trail {
-		if e.Action == "recycle-skipped" && e.Params["rung"] == "escalation" {
-			attempts--
-		}
-	}
-	return attempts, nil
-}

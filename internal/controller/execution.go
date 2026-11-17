@@ -796,7 +796,7 @@ func (c *Controller) executeAgentStep(ctx context.Context, inc *types.Incident, 
 // quarantines it when the ladder is exhausted.
 func (c *Controller) escalate(ctx context.Context, inc *types.Incident, reason string) error {
 	c.cancelPendingActions(ctx, inc)
-	if inc.Attempt >= maxEscalationAttempts && c.capReached(ctx, inc) {
+	if inc.Attempt >= maxEscalationAttempts {
 		// The ladder has climbed as far as it is allowed to on its own. Fail
 		// closed to a human instead of continuing to drive destructive rungs.
 		return c.quarantine(ctx, inc,
@@ -820,19 +820,6 @@ func (c *Controller) escalate(ctx context.Context, inc *types.Incident, reason s
 		Kind: notify.EventActionTaken, Incident: inc,
 		Message: fmt.Sprintf("escalated to playbook %s: %s", next.Name, reason),
 	})
-}
-
-// capReached reports whether the escalation cap is reached once skipped
-// recycles, which are not recovery attempts, are discounted. An unreadable
-// trail counts as reached: failing closed hands the incident to a person.
-func (c *Controller) capReached(ctx context.Context, inc *types.Incident) bool {
-	attempts, err := c.recoveryAttempts(ctx, inc)
-	if err != nil {
-		c.log.Warn("cannot read the audit trail to count recovery attempts; stopping at the cap",
-			"incident", inc.ID, "err", err)
-		return true
-	}
-	return attempts >= maxEscalationAttempts
 }
 
 // cancelPendingActions tombstones the incident's undelivered queue entries
