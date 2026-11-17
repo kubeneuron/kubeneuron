@@ -78,9 +78,13 @@ images:
   victoriaMetricsAgent:
     repository: victoriametrics/vmagent
     tag: v1.147.0
+  # The digest is the image of the recording rules evaluator a Managed
+  # spec.observability.store comes with (operator.DefaultMetricsRulesImage);
+  # referenced, not redistributed. Apache-2.0. Move tag and digest together.
   victoriaMetricsAlert:
     repository: victoriametrics/vmalert
     tag: v1.147.0
+    digest: sha256:45ea994098b77d56904f3d5d7cb2771effad9ddefb1d07d4ffa0c1da4c3e4c5c
   prometheusAlertmanager:
     repository: prom/alertmanager
     tag: v0.32.1

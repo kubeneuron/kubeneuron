@@ -28,7 +28,7 @@ operator; see [Metrics path](#metrics-path-specobservability).
 | | Managed | External | Disabled |
 |---|---|---|---|
 | `collector` | the operator runs an OpenTelemetry Collector (`otel/opentelemetry-collector-k8s`) as `<name>-otel-collector`; the controller and agents export OTLP/HTTP to it | the controller and agents export to `endpoint` | nothing is exported |
-| `store` | the operator runs single-node VictoriaMetrics as `<name>-metrics-store` on a PersistentVolumeClaim | the collector exports to `endpoint` | the collector drops what it receives |
+| `store` | the operator runs single-node VictoriaMetrics as `<name>-metrics-store` on a PersistentVolumeClaim, and vmalert as `<name>-metrics-rules` for its recording rules | the collector exports to `endpoint` | the collector drops what it receives |
 
 - **An external store must accept OTLP over HTTP**: VictoriaMetrics
   (`http://<host>:8428/opentelemetry`) or Prometheus started with
@@ -56,9 +56,18 @@ operator; see [Metrics path](#metrics-path-specobservability).
   `StoragePending`. `storage.ephemeral: true` uses an emptyDir instead and
   loses the data with the pod.
 - **The Managed store has no authentication.** It is a ClusterIP Service
-  behind a NetworkPolicy that admits only the collector; where NetworkPolicy
-  is not enforced, the store is reachable inside the cluster without
-  authentication.
+  behind a NetworkPolicy that admits only the collector and the recording
+  rules evaluator; where NetworkPolicy is not enforced, the store is
+  reachable inside the cluster without authentication.
+- **The Managed store comes with its recording rules.** A vmalert
+  (`<name>-metrics-rules`) evaluates
+  `configs/vmalert/gpu-recording-rules.yaml` against the store and writes
+  the `kubeneuron_gpu_*` series the dashboards read back into it; it holds
+  no alerting rules, sends no notifications and reaches nothing but the
+  store. `ObservabilityRulesReady` reports it. **With an External store the
+  recording rules are yours to run**: load that file into the rule
+  evaluator of your Prometheus or VictoriaMetrics, or the GPU dashboards
+  stay empty.
 - The collector's NetworkPolicy admits OTLP from the installation's
   controller and agents and from the operator. For an external store it
   allows egress to the store's port on any address, since a NetworkPolicy
@@ -96,8 +105,9 @@ operator; see [Metrics path](#metrics-path-specobservability).
 - The collector's NetworkPolicy lets it reach only the exporter pods on
   that port (by the node's address for a host-network exporter); a
   NetworkPolicy in the exporter's namespace must admit it as well.
-- Both images are pinned by digest in the operator (override with
-  `--otel-collector-image` and `--metrics-store-image`, for a mirror) and in
+- The three images (collector, store, vmalert) are pinned by digest in the
+  operator (override with `--otel-collector-image`, `--metrics-store-image`
+  and `--metrics-rules-image`, for a mirror) and in
   `deploy/kubernetes/dependencies/versions.lock.yaml`; they are pulled from
   their publishers, not redistributed by KubeNeuron.
 - `spec.observability.victoriaMetrics` is deprecated and is not a metrics

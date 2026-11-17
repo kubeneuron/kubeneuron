@@ -52,6 +52,8 @@ func main() {
 			"image of a Managed spec.observability.collector; pin by digest, e.g. a mirror of the default")
 		metricsStoreImage = flag.String("metrics-store-image", operator.DefaultMetricsStoreImage,
 			"image of a Managed spec.observability.store; pin by digest, e.g. a mirror of the default")
+		metricsRulesImage = flag.String("metrics-rules-image", operator.DefaultMetricsRulesImage,
+			"image of the recording rules evaluator (vmalert) that comes with a Managed store; pin by digest")
 		// Production logging by default (JSON, info, sampled); development
 		// output remains reachable with --zap-devel.
 		logOptions = zap.Options{}
@@ -98,6 +100,7 @@ func main() {
 		DefaultAgentAdapters: agentAdapters,
 		CollectorImage:       *collectorImage,
 		MetricsStoreImage:    *metricsStoreImage,
+		MetricsRulesImage:    *metricsRulesImage,
 		// The chart sets POD_NAMESPACE; the collector admits the operator's
 		// own telemetry from that namespace only.
 		OperatorNamespace: os.Getenv("POD_NAMESPACE"),

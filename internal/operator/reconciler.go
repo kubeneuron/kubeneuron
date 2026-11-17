@@ -67,10 +67,13 @@ type KubeNeuronReconciler struct {
 	// value agentAdapters). An installation entry replaces the default for
 	// the same vendor.
 	DefaultAgentAdapters []kubeneuronv1alpha1.AgentAdapterSpec
-	// CollectorImage and MetricsStoreImage run a Managed collector and
-	// store; empty means DefaultCollectorImage and DefaultMetricsStoreImage.
+	// CollectorImage, MetricsStoreImage and MetricsRulesImage run a Managed
+	// collector, store and the store's recording rules evaluator; empty
+	// means DefaultCollectorImage, DefaultMetricsStoreImage and
+	// DefaultMetricsRulesImage.
 	CollectorImage    string
 	MetricsStoreImage string
+	MetricsRulesImage string
 	// OperatorNamespace is where the operator runs; the collector's
 	// NetworkPolicy admits the operator's pods from there. Empty admits
 	// them from any namespace.

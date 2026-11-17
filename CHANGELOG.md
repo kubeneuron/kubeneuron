@@ -11,6 +11,13 @@ API is `v1alpha1`.
 
 ### Added
 
+- **Recording rules with the Managed store.** A Managed store comes with a
+  vmalert that evaluates `configs/vmalert/gpu-recording-rules.yaml` into
+  it, recording rules only, no notifier, reaching only the store; the
+  dashboards' `kubeneuron_gpu_*` series exist without a separate rule
+  setup. `ObservabilityRulesReady` reports it. With an External store the
+  rules are the user's to load.
+
 - **GPU metrics from the existing dcgm-exporter.** A Managed collector
   scrapes the dcgm-exporter already in the cluster (the GPU Operator
   Service `nvidia-dcgm-exporter` by default, configurable in

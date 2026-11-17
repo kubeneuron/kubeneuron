@@ -398,7 +398,8 @@ func collectorNetworkPolicy(installation *kubeneuronv1alpha1.KubeNeuron, operato
 	}, nil
 }
 
-// storeNetworkPolicy admits the collector only and allows no egress.
+// storeNetworkPolicy admits the collector, which writes, and the recording
+// rules evaluator, which reads and writes; it allows no egress.
 func storeNetworkPolicy(installation *kubeneuronv1alpha1.KubeNeuron) *networkingv1.NetworkPolicy {
 	labels := resourceLabels(installation, storeComponent)
 	return &networkingv1.NetworkPolicy{
@@ -407,7 +408,10 @@ func storeNetworkPolicy(installation *kubeneuronv1alpha1.KubeNeuron) *networking
 			PodSelector: metav1.LabelSelector{MatchLabels: labels},
 			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
 			Ingress: []networkingv1.NetworkPolicyIngressRule{{
-				From:  []networkingv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{MatchLabels: resourceLabels(installation, collectorComponent)}}},
+				From: []networkingv1.NetworkPolicyPeer{
+					{PodSelector: &metav1.LabelSelector{MatchLabels: resourceLabels(installation, collectorComponent)}},
+					{PodSelector: &metav1.LabelSelector{MatchLabels: resourceLabels(installation, rulesComponent)}},
+				},
 				Ports: []networkingv1.NetworkPolicyPort{tcpPort(storePort)},
 			}},
 		},

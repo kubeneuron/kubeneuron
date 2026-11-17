@@ -308,7 +308,7 @@ func TestDefaultObservabilityImagesMatchTheLock(t *testing.T) {
 	if err := sigsyaml.Unmarshal(data, &lock); err != nil {
 		t.Fatal(err)
 	}
-	for key, value := range map[string]string{"otelCollectorK8s": DefaultCollectorImage, "victoriaMetricsSingle": DefaultMetricsStoreImage} {
+	for key, value := range map[string]string{"otelCollectorK8s": DefaultCollectorImage, "victoriaMetricsSingle": DefaultMetricsStoreImage, "victoriaMetricsAlert": DefaultMetricsRulesImage} {
 		pin := lock.Images[key]
 		if pin.Digest == "" {
 			t.Errorf("lock %s has no digest", key)
@@ -381,6 +381,10 @@ func TestReconcileManagedObservabilityAndSwitchAway(t *testing.T) {
 		{"fleet-metrics-store", &corev1.ServiceAccount{}},
 		{"fleet-metrics-store", &corev1.PersistentVolumeClaim{}},
 		{"fleet-metrics-store", &networkingv1.NetworkPolicy{}},
+		{"fleet-metrics-rules", &appsv1.Deployment{}},
+		{"fleet-metrics-rules", &corev1.ConfigMap{}},
+		{"fleet-metrics-rules", &corev1.ServiceAccount{}},
+		{"fleet-metrics-rules", &networkingv1.NetworkPolicy{}},
 	} {
 		if err := fakeClient.Get(ctx, types.NamespacedName{Name: check.name, Namespace: ns}, check.object); err != nil {
 			t.Errorf("%T %s: %v", check.object, check.name, err)
@@ -407,6 +411,9 @@ func TestReconcileManagedObservabilityAndSwitchAway(t *testing.T) {
 	if c := meta.FindStatusCondition(kn.Status.Conditions, collectorReadyCondition); c == nil || c.Status != metav1.ConditionFalse {
 		t.Errorf("collector condition before it is available = %#v", c)
 	}
+	if c := meta.FindStatusCondition(kn.Status.Conditions, rulesReadyCondition); c == nil || c.Status != metav1.ConditionFalse {
+		t.Errorf("rules condition before it is available = %#v", c)
+	}
 
 	// Managed -> External store: the workload goes, the data stays.
 	kn.Spec.Observability.Store = &kubeneuronv1alpha1.MetricsStoreSpec{OTLPEndpointSpec: kubeneuronv1alpha1.OTLPEndpointSpec{
@@ -424,6 +431,11 @@ func TestReconcileManagedObservabilityAndSwitchAway(t *testing.T) {
 			t.Errorf("%T fleet-metrics-store after switch: err = %v, want NotFound", object, err)
 		}
 	}
+	for _, object := range []client.Object{&appsv1.Deployment{}, &corev1.ConfigMap{}, &corev1.ServiceAccount{}, &networkingv1.NetworkPolicy{}} {
+		if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-metrics-rules", Namespace: ns}, object); !apierrors.IsNotFound(err) {
+			t.Errorf("%T fleet-metrics-rules after switch: err = %v, want NotFound", object, err)
+		}
+	}
 	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-metrics-store", Namespace: ns}, &corev1.PersistentVolumeClaim{}); err != nil {
 		t.Errorf("the store's claim must survive a switch away from Managed: %v", err)
 	}
@@ -432,6 +444,9 @@ func TestReconcileManagedObservabilityAndSwitchAway(t *testing.T) {
 	}
 	if c := meta.FindStatusCondition(kn.Status.Conditions, storeReadyCondition); c == nil || c.Reason != "External" {
 		t.Errorf("external store condition = %#v", c)
+	}
+	if c := meta.FindStatusCondition(kn.Status.Conditions, rulesReadyCondition); c != nil {
+		t.Errorf("an external store still has a rules condition: %#v", c)
 	}
 
 	// Disabled collector: its objects go and its condition is removed.
@@ -918,5 +933,57 @@ func TestSettledRequeue(t *testing.T) {
 	kn.Spec.Observability.Collector.DCGMExporter = &kubeneuronv1alpha1.DCGMExporterScrapeSpec{Scrape: ptr.To(false)}
 	if got := settledRequeue(kn); got != pkiCheckInterval {
 		t.Errorf("requeue without scraping = %v, want %v", got, pkiCheckInterval)
+	}
+}
+
+func TestManagedRulesAreRecordingOnly(t *testing.T) {
+	kn := managedObservability(testKubeNeuron())
+	var file struct {
+		Groups []struct {
+			Name  string           `json:"name"`
+			Rules []map[string]any `json:"rules"`
+		} `json:"groups"`
+	}
+	if err := sigsyaml.Unmarshal([]byte(rulesConfigMap(kn).Data[rulesKey]), &file); err != nil {
+		t.Fatal(err)
+	}
+	records := 0
+	for _, group := range file.Groups {
+		for _, rule := range group.Rules {
+			if _, ok := rule["alert"]; ok {
+				t.Errorf("group %s has an alerting rule %v; the managed evaluator has no notifier", group.Name, rule["alert"])
+			}
+			if _, ok := rule["record"]; ok {
+				records++
+			}
+		}
+	}
+	if records == 0 {
+		t.Fatal("no recording rules")
+	}
+
+	deployment := rulesDeployment(kn, DefaultMetricsRulesImage, "d")
+	args := strings.Join(deployment.Spec.Template.Spec.Containers[0].Args, " ")
+	store := "http://fleet-metrics-store.kube-neuron-system.svc:8428"
+	if !strings.Contains(args, "-datasource.url="+store) || !strings.Contains(args, "-remoteWrite.url="+store) || strings.Contains(args, "notifier") {
+		t.Errorf("vmalert args = %s, want our store only and no notifier", args)
+	}
+	if spec := deployment.Spec.Template.Spec; spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
+		t.Error("vmalert mounts a service account token")
+	}
+
+	policy := rulesNetworkPolicy(kn)
+	if len(policy.Spec.Ingress) != 0 || len(policy.Spec.Egress) != 2 ||
+		policy.Spec.Egress[1].To[0].PodSelector.MatchLabels["app.kubernetes.io/component"] != storeComponent {
+		t.Errorf("rules NetworkPolicy = %#v, want no ingress and egress to DNS and the store", policy.Spec)
+	}
+	admitted := false
+	for _, peer := range storeNetworkPolicy(kn).Spec.Ingress[0].From {
+		if peer.PodSelector.MatchLabels["app.kubernetes.io/component"] == rulesComponent {
+			admitted = true
+		}
+	}
+	if !admitted {
+		t.Error("the store does not admit the rules evaluator")
 	}
 }
