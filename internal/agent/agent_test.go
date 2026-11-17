@@ -1164,6 +1164,28 @@ func TestNVIDIAAcceleratorReportUnknownTopologyDoesNotDeclareReset(t *testing.T)
 	}
 }
 
+func TestNVIDIAReportPostsDriverHealthWithoutDCGM(t *testing.T) {
+	captured := &capturedPosts{}
+	server := httptest.NewServer(captured.handler(t))
+	defer server.Close()
+	clock := &testClock{now: time.Now().UTC()}
+	a := newTestAgent(t, server.URL, clock, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a.driver = &nvml.SMI{}
+	snapshot := eligibleNVIDIAPreflight(clock.Now())
+	snapshot.Inventory.NodeName = a.cfg.NodeName
+	snapshot.NodeHealth = accelerator.HealthReport{
+		Target: accelerator.Target{NodeName: a.cfg.NodeName, Vendor: accelerator.VendorNVIDIA, Scope: accelerator.ScopeNode},
+		Status: accelerator.HealthHealthy, CheckedAt: clock.Now(),
+	}
+	a.nvidia = &nvidiaObservation{preflight: staticNVIDIAPreflight{report: snapshot}}
+	a.reportNVIDIA(context.Background())
+	report, ok := captured.report(types.AcceleratorVendorNVIDIA)
+	if !ok || report.Readiness != types.AcceleratorReadinessDegraded || len(report.Devices) != 1 ||
+		report.Devices[0].DriverHealthyAt == nil || !report.Devices[0].DriverHealthyAt.Equal(snapshot.NodeHealth.CheckedAt) {
+		t.Fatalf("posted inventory = %+v", report)
+	}
+}
+
 func TestNVIDIAReportPostFailureRetriesWithoutChangingReadiness(t *testing.T) {
 	var reportPosts atomic.Int32
 	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

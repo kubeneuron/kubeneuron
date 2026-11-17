@@ -18,13 +18,20 @@ func recycleInventoryMatches(report *types.AgentAcceleratorReport, pin cloud.Nod
 	if report == nil || pin.Validate() != nil || completed.IsZero() ||
 		report.Node != pin.Node || report.NodeUID != pin.NodeUID || report.BootID != pin.BootID ||
 		!report.ObservedAt.After(completed) || report.ObservedAt.After(now) ||
-		now.Sub(report.ObservedAt) > verifyEvidenceMaxAge || report.Readiness != types.AcceleratorReadinessReady {
+		now.Sub(report.ObservedAt) > verifyEvidenceMaxAge {
 		return false
 	}
 	for _, device := range report.Devices {
 		if device.ID != "" && (gpu == "" || gpu == device.ID) &&
 			device.Kind == types.AcceleratorDevicePhysical && device.Family == types.AcceleratorFamilyGPU {
-			return true
+			if report.Readiness == types.AcceleratorReadinessReady {
+				return true
+			}
+			at := device.DriverHealthyAt
+			if report.Vendor == types.AcceleratorVendorNVIDIA && report.Readiness == types.AcceleratorReadinessDegraded &&
+				at != nil && at.After(completed) && !at.After(now) && now.Sub(*at) <= verifyEvidenceMaxAge {
+				return true
+			}
 		}
 	}
 	return false
@@ -79,7 +86,7 @@ func (c *Controller) verifyRecycledInventory(ctx context.Context, inc *types.Inc
 	}
 	report, err := reports.GetAcceleratorReport(ctx, pin.Node, vendor)
 	if err != nil || !recycleInventoryMatches(report, *pin, inc.Target.GPUUUID, completed, time.Now()) {
-		return false, "awaiting fresh ready accelerator inventory from the verified boot"
+		return false, "awaiting fresh accelerator inventory and driver health from the verified boot"
 	}
-	return true, "fresh ready accelerator inventory observed after verified recycle"
+	return true, "fresh accelerator inventory and driver health observed after verified recycle"
 }

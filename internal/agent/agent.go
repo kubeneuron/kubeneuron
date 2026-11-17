@@ -1532,6 +1532,17 @@ func (a *Agent) nvidiaAcceleratorReportWithProfile(ctx context.Context, profile 
 	if err != nil {
 		return types.AgentAcceleratorReport{}, err
 	}
+	health := snapshot.NodeHealth
+	target := accelerator.Target{NodeName: a.cfg.NodeName, Vendor: accelerator.VendorNVIDIA, Scope: accelerator.ScopeNode}
+	if _, realDriver := a.driver.(*nvml.SMI); realDriver && health.Target == target && health.Status == accelerator.HealthHealthy &&
+		!health.CheckedAt.IsZero() && !snapshot.Inventory.ObservedAt.IsZero() && snapshot.Inventory.NodeName == target.NodeName &&
+		snapshot.Inventory.Vendor == target.Vendor && (snapshot.Readiness == nvidia.PreflightEligible || snapshot.Readiness == nvidia.PreflightObservedOnly) {
+		for i := range devices {
+			if devices[i].Kind == types.AcceleratorDevicePhysical && devices[i].Family == types.AcceleratorFamilyGPU {
+				devices[i].DriverHealthyAt = &health.CheckedAt
+			}
+		}
+	}
 	capabilities, err := reportCapabilities(snapshot.Capabilities)
 	if err != nil {
 		return types.AgentAcceleratorReport{}, err

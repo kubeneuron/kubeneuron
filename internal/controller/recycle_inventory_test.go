@@ -79,6 +79,10 @@ func TestRecycleVerificationAfterControllerRestart(t *testing.T) {
 				}
 			}
 			report := readyNVIDIAResetReport(now, "profile")
+			report.Readiness = types.AcceleratorReadinessDegraded
+			report.ReadinessReasons = []string{"DCGM unavailable"}
+			report.RuntimeVersion = ""
+			report.Devices[0].DriverHealthyAt = &now
 			report.BootID = ref.Identity.BootID
 			report.NodeUID = ref.Identity.NodeUID
 			if err := st.UpsertAcceleratorReport(ctx, &report); err != nil {
@@ -103,6 +107,30 @@ func TestRecycleVerificationAfterControllerRestart(t *testing.T) {
 			}
 			if got.State != want {
 				t.Fatalf("got %s, want %s", got.State, want)
+			}
+		})
+	}
+}
+
+func TestDegradedInventoryRequiresFreshDriverHealth(t *testing.T) {
+	now := time.Now().UTC()
+	completed := now.Add(-time.Minute)
+	future := now.Add(time.Minute)
+	pin := cloud.NodeIdentity{Node: "node-a", NodeUID: "uid", ProviderID: "p", InstanceID: "i", BootID: "new"}
+	report := readyNVIDIAResetReport(now, "profile")
+	report.NodeUID, report.BootID = pin.NodeUID, pin.BootID
+	report.Readiness = types.AcceleratorReadinessDegraded
+	for _, tc := range []struct {
+		name   string
+		health *time.Time
+		want   bool
+	}{
+		{"missing", nil, false}, {"prior boot", &completed, false}, {"future", &future, false}, {"current", &now, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report.Devices[0].DriverHealthyAt = tc.health
+			if got := recycleInventoryMatches(&report, pin, report.Devices[0].ID, completed, now); got != tc.want {
+				t.Fatalf("matches = %t, want %t", got, tc.want)
 			}
 		})
 	}

@@ -664,6 +664,9 @@ func (k AcceleratorDeviceKind) valid() bool {
 // vendor runtime. ID is a UUID or provider identity, never a transient
 // ordinal. A partition references a physical device in the same report.
 type AgentAcceleratorDevice struct {
+	// DriverHealthyAt records a healthy node driver probe in the same
+	// observation that enumerated this physical GPU.
+	DriverHealthyAt  *time.Time              `json:"driver_healthy_at,omitempty"`
 	ID               string                  `json:"id"`
 	Kind             AcceleratorDeviceKind   `json:"kind"`
 	Family           AcceleratorDeviceFamily `json:"family"`
