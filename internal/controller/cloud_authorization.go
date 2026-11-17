@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
@@ -17,6 +18,14 @@ func (c *Controller) holdUnavailableCloudRecovery(ctx context.Context, inc *type
 		return false, nil
 	}
 	verdict, err := c.cloudRecoveryEligibility(ctx, inc)
+	if errors.Is(err, cloud.ErrIdentityChanged) {
+		return true, c.supersedeCloudTarget(ctx, inc, err)
+	}
+	if err == nil && inc.CloudIdentity != nil {
+		if mismatch := inc.CloudIdentity.Match(verdict.Identity); errors.Is(mismatch, cloud.ErrIdentityChanged) {
+			return true, c.supersedeCloudTarget(ctx, inc, mismatch)
+		}
+	}
 	allowed := err == nil && verdict.ReplaceAllowed && (verdict.Mode == cloud.RepairOff || verdict.Mode == cloud.RepairVeto)
 	if step.Action == "platform.recycle_node" {
 		allowed = allowed && verdict.RecycleAllowed
