@@ -17,6 +17,7 @@ func testAcceleratorReport(node string, vendor types.AcceleratorVendor, observed
 	return &types.AgentAcceleratorReport{
 		Node:           node,
 		NodeUID:        "node-uid-" + node,
+		BootID:         "boot-" + node,
 		Vendor:         vendor,
 		ObservedAt:     observedAt.UTC(),
 		DriverVersion:  "550.54.15",

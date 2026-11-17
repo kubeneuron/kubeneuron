@@ -1168,6 +1168,12 @@ func TestNVIDIAReportPostFailureRetriesWithoutChangingReadiness(t *testing.T) {
 	var reportPosts atomic.Int32
 	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == types.AgentAcceleratorReportPath {
+			var report types.AgentAcceleratorReport
+			if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+				t.Errorf("decode report: %v", err)
+			} else if report.BootID != "test-current-boot" {
+				t.Errorf("report BootID = %q, want current boot", report.BootID)
+			}
 			reportPosts.Add(1)
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
@@ -1178,6 +1184,8 @@ func TestNVIDIAReportPostFailureRetriesWithoutChangingReadiness(t *testing.T) {
 
 	clock := &testClock{now: time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)}
 	a := newTestAgent(t, controller.URL, clock, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a.bootIDOnce.Do(func() {})
+	a.bootID = "test-current-boot"
 	a.nvidia = &nvidiaObservation{
 		preflight:      staticNVIDIAPreflight{report: eligibleNVIDIAPreflight(clock.Now())},
 		driverVersion:  "550.54.15",

@@ -162,6 +162,7 @@ func (a *Agent) reportAdapters(ctx context.Context) {
 			a.log.Warn("accelerator adapter report failed; will retry", "vendor", rt.vendor, "err", err)
 			continue
 		}
+		report.BootID = a.currentBootID()
 		if err := a.postExpectStatus(ctx, types.AgentAcceleratorReportPath, report, http.StatusNoContent); err != nil {
 			a.log.Warn("accelerator adapter report post failed; will retry", "vendor", rt.vendor, "err", err)
 		}

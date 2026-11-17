@@ -768,6 +768,8 @@ type AgentAcceleratorReport struct {
 	// NodeUID is server-stamped from the Pod-bound agent identity. Agents send
 	// no value; persistence and controller gates use it to reject evidence from
 	// a prior Kubernetes Node object that reused the same name.
+	// BootID is agent-reported, not server-attested. Empty legacy reports cannot prove cloud recovery.
+	BootID           string                       `json:"boot_id,omitempty"`
 	NodeUID          string                       `json:"node_uid,omitempty"`
 	Vendor           AcceleratorVendor            `json:"vendor"`
 	ObservedAt       time.Time                    `json:"observed_at"`
@@ -872,6 +874,9 @@ func (r AgentAcceleratorReport) Validate() error {
 	}
 	if strings.TrimSpace(r.Node) != r.Node {
 		return fmt.Errorf("accelerator report: node must not have leading or trailing whitespace")
+	}
+	if r.BootID != "" && (strings.TrimSpace(r.BootID) != r.BootID || len(r.BootID) > 128) {
+		return fmt.Errorf("boot_id must be a trimmed identity of at most 128 bytes")
 	}
 	if r.NodeUID != "" && (strings.TrimSpace(r.NodeUID) == "" || strings.TrimSpace(r.NodeUID) != r.NodeUID) {
 		return fmt.Errorf("accelerator report: node UID must not have leading or trailing whitespace")

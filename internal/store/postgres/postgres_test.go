@@ -238,7 +238,7 @@ func TestAcceleratorReportStalenessAndSafetyState(t *testing.T) {
 	now := time.Now()
 
 	report := &types.AgentAcceleratorReport{
-		Node: "node-a", NodeUID: "uid-a", Vendor: types.AcceleratorVendorNVIDIA,
+		Node: "node-a", NodeUID: "uid-a", BootID: "boot-a", Vendor: types.AcceleratorVendorNVIDIA,
 		ObservedAt: now, TopologySafety: types.AcceleratorTopologyVerifiedUnpartitioned,
 		Readiness:      types.AcceleratorReadinessReady,
 		DriverVersion:  "580.159.03",
@@ -256,7 +256,7 @@ func TestAcceleratorReportStalenessAndSafetyState(t *testing.T) {
 		t.Fatalf("out-of-order report = %v, want ErrStaleAcceleratorReport", err)
 	}
 	got, err := s.GetAcceleratorReport(ctx, "node-a", types.AcceleratorVendorNVIDIA)
-	if err != nil || got.Readiness != types.AcceleratorReadinessReady || len(got.Devices) != 1 {
+	if err != nil || got.BootID != "boot-a" || got.Readiness != types.AcceleratorReadinessReady || len(got.Devices) != 1 {
 		t.Fatalf("GetAcceleratorReport = %+v, %v", got, err)
 	}
 

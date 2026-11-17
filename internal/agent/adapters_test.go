@@ -211,12 +211,13 @@ func TestAgentBuildsAndDrivesASecondVendorAdapter(t *testing.T) {
 	}
 
 	// Inventory, capabilities, and health flow into one report per vendor.
+	a.bootID = "adapter-test-boot"
 	a.reportAdapters(context.Background())
 	amd, ok := captured.report(types.AcceleratorVendorAMD)
 	if !ok {
 		t.Fatal("no AMD accelerator report posted")
 	}
-	if amd.Node != "gpu-node-1" || len(amd.Devices) != 2 || amd.Devices[0].ID != "amd-gpu-0" {
+	if amd.BootID != "adapter-test-boot" || amd.Node != "gpu-node-1" || len(amd.Devices) != 2 || amd.Devices[0].ID != "amd-gpu-0" {
 		t.Fatalf("AMD report does not carry the adapter inventory: %+v", amd)
 	}
 	if amd.Readiness != types.AcceleratorReadinessDegraded || amd.DriverVersion != "6.10.5" {

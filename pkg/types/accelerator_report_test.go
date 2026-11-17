@@ -18,6 +18,8 @@ func TestAgentAcceleratorReportValidateAcceptsSafeObservation(t *testing.T) {
 
 func TestAgentAcceleratorReportValidateFailsClosed(t *testing.T) {
 	for name, mutate := range map[string]func(*AgentAcceleratorReport){
+		"boot whitespace": func(report *AgentAcceleratorReport) { report.BootID = " boot " },
+		"boot too long":   func(report *AgentAcceleratorReport) { report.BootID = strings.Repeat("x", 129) },
 		"malformed vendor": func(report *AgentAcceleratorReport) {
 			report.Vendor = "Not A Vendor"
 		},

@@ -1477,6 +1477,7 @@ func (a *Agent) reportNVIDIA(ctx context.Context) {
 		a.log.Warn("NVIDIA accelerator preflight report failed; will retry", "err", err)
 		return
 	}
+	report.BootID = a.currentBootID()
 	if err := a.postExpectStatus(ctx, types.AgentAcceleratorReportPath, report, http.StatusNoContent); err != nil {
 		a.log.Warn("NVIDIA accelerator report post failed; will retry", "err", err)
 	}

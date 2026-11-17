@@ -1176,17 +1176,17 @@ func (c *Core) upsertAcceleratorReportOnce(ctx context.Context, report *types.Ag
 
 	var current acceleratorReportPayload
 	err = c.wrap(tx).QueryRowContext(ctx, acceleratorReportPayloadSelect+` WHERE node=? AND vendor=?`, report.Node, string(report.Vendor)).Scan(
-		&current.ObservedAtNS, &current.NodeUID, &current.ProfileDigest, &current.ProfileUID, &current.ProfileGeneration, &current.Readiness,
+		&current.ObservedAtNS, &current.NodeUID, &current.BootID, &current.ProfileDigest, &current.ProfileUID, &current.ProfileGeneration, &current.Readiness,
 		&current.ReasonsJSON, &current.DevicesJSON, &current.DriverVersion,
 		&current.RuntimeVersion, &current.TopologySafety, &current.CapabilitiesJSON, &current.HoldersJSON)
 	switch {
 	case err == sql.ErrNoRows:
 		if _, err := c.wrap(tx).ExecContext(ctx, `
 			INSERT INTO accelerator_reports (
-				node, vendor, node_uid, observed_at_ns, profile_digest, profile_uid, profile_generation, readiness, reasons_json,
+				node, vendor, node_uid, boot_id, observed_at_ns, profile_digest, profile_uid, profile_generation, readiness, reasons_json,
 				devices_json, driver_version, runtime_version, topology_safety, capabilities_json, holders_json
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			report.Node, string(report.Vendor), payload.NodeUID, payload.ObservedAtNS, payload.ProfileDigest, payload.ProfileUID, payload.ProfileGeneration,
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			report.Node, string(report.Vendor), payload.NodeUID, payload.BootID, payload.ObservedAtNS, payload.ProfileDigest, payload.ProfileUID, payload.ProfileGeneration,
 			payload.Readiness, payload.ReasonsJSON, payload.DevicesJSON,
 			payload.DriverVersion, payload.RuntimeVersion, payload.TopologySafety,
 			payload.CapabilitiesJSON, payload.HoldersJSON); err != nil {
@@ -1206,11 +1206,11 @@ func (c *Core) upsertAcceleratorReportOnce(ctx context.Context, report *types.Ag
 		// newer writer win even if this transaction read an earlier snapshot.
 		res, err := c.wrap(tx).ExecContext(ctx, `
 			UPDATE accelerator_reports SET
-				node_uid=?, observed_at_ns=?, profile_digest=?, profile_uid=?, profile_generation=?, readiness=?, reasons_json=?,
+				node_uid=?, boot_id=?, observed_at_ns=?, profile_digest=?, profile_uid=?, profile_generation=?, readiness=?, reasons_json=?,
 				devices_json=?, driver_version=?, runtime_version=?, topology_safety=?,
 				capabilities_json=?, holders_json=?
 			WHERE node=? AND vendor=? AND observed_at_ns < ?`,
-			payload.NodeUID, payload.ObservedAtNS, payload.ProfileDigest, payload.ProfileUID, payload.ProfileGeneration, payload.Readiness,
+			payload.NodeUID, payload.BootID, payload.ObservedAtNS, payload.ProfileDigest, payload.ProfileUID, payload.ProfileGeneration, payload.Readiness,
 			payload.ReasonsJSON, payload.DevicesJSON, payload.DriverVersion,
 			payload.RuntimeVersion, payload.TopologySafety, payload.CapabilitiesJSON, payload.HoldersJSON,
 			report.Node, string(report.Vendor), payload.ObservedAtNS)
@@ -1260,18 +1260,19 @@ func (q *Queries) ListAcceleratorReports(ctx context.Context, node string) ([]*t
 }
 
 const acceleratorReportSelect = `
-	SELECT node, vendor, node_uid, observed_at_ns, profile_digest, profile_uid, profile_generation, readiness, reasons_json,
+	SELECT node, vendor, node_uid, boot_id, observed_at_ns, profile_digest, profile_uid, profile_generation, readiness, reasons_json,
 	       devices_json, driver_version, runtime_version, topology_safety, capabilities_json, holders_json
 	FROM accelerator_reports`
 
 const acceleratorReportPayloadSelect = `
-	SELECT observed_at_ns, node_uid, profile_digest, profile_uid, profile_generation, readiness, reasons_json, devices_json,
+	SELECT observed_at_ns, node_uid, boot_id, profile_digest, profile_uid, profile_generation, readiness, reasons_json, devices_json,
 	       driver_version, runtime_version, topology_safety, capabilities_json, holders_json
 	FROM accelerator_reports`
 
 type acceleratorReportPayload struct {
 	ObservedAtNS      int64
 	NodeUID           string
+	BootID            string
 	ProfileDigest     string
 	ProfileUID        string
 	ProfileGeneration int64
@@ -1316,6 +1317,7 @@ func marshalAcceleratorReport(report *types.AgentAcceleratorReport) (accelerator
 	return acceleratorReportPayload{
 		ObservedAtNS:      report.ObservedAt.UnixNano(),
 		NodeUID:           report.NodeUID,
+		BootID:            report.BootID,
 		ProfileDigest:     report.ProfileDigest,
 		ProfileUID:        report.ProfileUID,
 		ProfileGeneration: report.ProfileGeneration,
@@ -1336,7 +1338,7 @@ func scanAcceleratorReport(r rowScanner) (*types.AgentAcceleratorReport, error) 
 	var observedAtNS int64
 	var reasons, devices, capabilities, holders string
 	var readiness, topologySafety string
-	err := r.Scan(&report.Node, &vendor, &report.NodeUID, &observedAtNS, &report.ProfileDigest, &report.ProfileUID, &report.ProfileGeneration,
+	err := r.Scan(&report.Node, &vendor, &report.NodeUID, &report.BootID, &observedAtNS, &report.ProfileDigest, &report.ProfileUID, &report.ProfileGeneration,
 		&readiness, &reasons, &devices, &report.DriverVersion,
 		&report.RuntimeVersion, &topologySafety, &capabilities, &holders)
 	if err == sql.ErrNoRows {

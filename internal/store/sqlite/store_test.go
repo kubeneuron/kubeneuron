@@ -317,6 +317,9 @@ func TestMigrateExistingAcceleratorReportDatabaseAddsIdentityColumns(t *testing.
 	if _, err := raw.Exec(`INSERT INTO schema_version (version, applied_at) VALUES (7, '2026-07-24T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := raw.Exec(`INSERT INTO accelerator_reports(node, vendor, observed_at_ns, readiness, topology_safety) VALUES ('legacy-node', 'nvidia', 1, 'ready', 'unknown')`); err != nil {
+		t.Fatal(err)
+	}
 	if err := raw.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -334,6 +337,10 @@ func TestMigrateExistingAcceleratorReportDatabaseAddsIdentityColumns(t *testing.
 		if present != 1 {
 			t.Fatalf("%s column missing after v7 upgrade", column)
 		}
+	}
+	var bootID string
+	if err := s.sqlDB.QueryRow(`SELECT boot_id FROM accelerator_reports WHERE node='legacy-node'`).Scan(&bootID); err != nil || bootID != "" {
+		t.Fatalf("legacy report boot after upgrade = %q, %v", bootID, err)
 	}
 	var nodeUIDColumn int
 	if err := s.sqlDB.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('nodes') WHERE name='node_uid'`).Scan(&nodeUIDColumn); err != nil {
