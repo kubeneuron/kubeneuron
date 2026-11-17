@@ -6,7 +6,7 @@
 # Keep the compiler native to the builder and cross-compile the target binaries.
 # Do not declare a global BUILDPLATFORM default: it overrides BuildKit's value
 # and can force an amd64 compiler image on an arm64 runner.
-FROM --platform=$BUILDPLATFORM golang:1.26.11 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.3 AS build
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
