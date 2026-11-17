@@ -1,3 +1,5 @@
+-- SPDX-License-Identifier: Apache-2.0
+
 -- Target changes are terminal without claiming recovery.
 DROP INDEX IF EXISTS idx_incidents_open_attributed;
 DROP INDEX IF EXISTS idx_incidents_open_unattributed;
