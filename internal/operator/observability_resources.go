@@ -150,9 +150,9 @@ func collectorConfig(installation *kubeneuronv1alpha1.KubeNeuron) (string, error
 		"extensions": map[string]any{
 			"health_check": map[string]any{"endpoint": "0.0.0.0:" + strconv.Itoa(collectorHealth)},
 		},
-		"receivers": receivers,
+		"receivers":  receivers,
 		"processors": processors,
-		"exporters": exporters,
+		"exporters":  exporters,
 		"service": map[string]any{
 			"extensions": []string{"health_check"},
 			"pipelines":  pipelines,

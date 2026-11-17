@@ -29,13 +29,13 @@ import (
 // to a file the collector watches, so the collector needs no Kubernetes API
 // access and does not restart when exporter pods come and go.
 const (
-	defaultDCGMService     = "nvidia-dcgm-exporter"
-	dcgmPortName           = "gpu-metrics"
-	gpuMetricsCondition    = "ObservabilityGPUMetricsReady"
-	dcgmTargetsKey         = "dcgm-exporter.json"
-	dcgmTargetsMountPath   = "/etc/otelcol-targets"
-	dcgmScrapeInterval     = "30s"
-	dcgmScrapeTimeout      = "10s"
+	defaultDCGMService   = "nvidia-dcgm-exporter"
+	dcgmPortName         = "gpu-metrics"
+	gpuMetricsCondition  = "ObservabilityGPUMetricsReady"
+	dcgmTargetsKey       = "dcgm-exporter.json"
+	dcgmTargetsMountPath = "/etc/otelcol-targets"
+	dcgmScrapeInterval   = "30s"
+	dcgmScrapeTimeout    = "10s"
 	// dcgmSampleLimit fails a scrape that returns more samples than this,
 	// so a broken exporter cannot flood the store. Eight GPUs with MIG and
 	// the full profiling field set stay well under it.
