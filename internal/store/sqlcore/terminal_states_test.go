@@ -18,7 +18,7 @@ func TestTerminalIncidentStatesMatchesHalted(t *testing.T) {
 	all := []types.IncidentState{
 		types.StateOpen, types.StateObserving, types.StateEvaluating,
 		types.StateAwaitingApproval, types.StateExecuting, types.StateVerifying,
-		types.StateNeedsHuman, types.StateResolved, types.StateExpired,
+		types.StateNeedsHuman, types.StateResolved, types.StateExpired, types.StateSuperseded,
 	}
 	inSQL := func(s types.IncidentState) bool {
 		return strings.Contains(terminalIncidentStates, "'"+string(s)+"'")

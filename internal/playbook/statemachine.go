@@ -30,16 +30,17 @@ import (
 // Any state may move to NEEDS_HUMAN (safety stop) and NEEDS_HUMAN may only be
 // resolved manually.
 var validTransitions = map[types.IncidentState][]types.IncidentState{
-	types.StateOpen:             {types.StateObserving, types.StateEvaluating, types.StateNeedsHuman, types.StateResolved},
-	types.StateObserving:        {types.StateEvaluating, types.StateNeedsHuman, types.StateResolved},
-	types.StateEvaluating:       {types.StateEvaluating, types.StateExecuting, types.StateAwaitingApproval, types.StateObserving, types.StateNeedsHuman, types.StateResolved},
-	types.StateAwaitingApproval: {types.StateExecuting, types.StateNeedsHuman, types.StateExpired, types.StateResolved},
-	types.StateExecuting:        {types.StateVerifying, types.StateNeedsHuman, types.StateEvaluating},
-	types.StateVerifying:        {types.StateResolved, types.StateEvaluating, types.StateNeedsHuman},
-	types.StateNeedsHuman:       {types.StateResolved, types.StateEvaluating},
+	types.StateOpen:             {types.StateSuperseded, types.StateObserving, types.StateEvaluating, types.StateNeedsHuman, types.StateResolved},
+	types.StateObserving:        {types.StateSuperseded, types.StateEvaluating, types.StateNeedsHuman, types.StateResolved},
+	types.StateEvaluating:       {types.StateSuperseded, types.StateEvaluating, types.StateExecuting, types.StateAwaitingApproval, types.StateObserving, types.StateNeedsHuman, types.StateResolved},
+	types.StateAwaitingApproval: {types.StateSuperseded, types.StateExecuting, types.StateNeedsHuman, types.StateExpired, types.StateResolved},
+	types.StateExecuting:        {types.StateSuperseded, types.StateVerifying, types.StateNeedsHuman, types.StateEvaluating},
+	types.StateVerifying:        {types.StateSuperseded, types.StateResolved, types.StateEvaluating, types.StateNeedsHuman},
+	types.StateNeedsHuman:       {types.StateSuperseded, types.StateResolved, types.StateEvaluating},
 	// Terminal states have no outgoing transitions.
-	types.StateResolved: {},
-	types.StateExpired:  {},
+	types.StateResolved:   {},
+	types.StateExpired:    {},
+	types.StateSuperseded: {},
 }
 
 // CanTransition reports whether moving from -> to is a legal state machine

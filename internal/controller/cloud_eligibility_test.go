@@ -160,3 +160,78 @@ func TestRepeatedSignalsCaptureCloudIdentityOnlyOnce(t *testing.T) {
 		t.Fatal("legacy incident triggered an identity lookup")
 	}
 }
+
+type changedCloudPlatform struct {
+	recyclePlatform
+	observationErr error
+}
+
+func (p *changedCloudPlatform) RecoveryEligibility(context.Context, cloud.NodeIdentity) (cloud.RecoveryEligibility, error) {
+	return cloud.RecoveryEligibility{Reason: "identity observation"}, p.observationErr
+}
+func TestConfirmedCloudMismatchSupersedesButReadErrorHolds(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		err      error
+		terminal bool
+	}{
+		{"confirmed reboot", cloud.ErrIdentityChanged, true},
+		{"unavailable read", errors.New("node read failed"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &changedCloudPlatform{observationErr: tc.err}
+			c, inc, _ := checkpointFixture(t, p, checkpoint.Policy{})
+			inc.CloudIdentity = recycleTestPin()
+			inc.CloudIdentity.Node = inc.Target.Node
+			before := inc.State
+			if err := c.store.UpdateIncident(context.Background(), inc); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.startStep(context.Background(), inc, drainStep(), "test"); err != nil {
+				t.Fatal(err)
+			}
+			got, err := c.store.GetIncident(context.Background(), inc.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.terminal {
+				if got.State != types.StateSuperseded || got.ResolvedAt != nil {
+					t.Fatalf("false recovery: %+v", got)
+				}
+				requireAudit(t, auditResults(t, c, got), "recovery unverified")
+			} else if got.State != before {
+				t.Fatalf("read error closed incident: %s", got.State)
+			}
+			if p.recycled != "" || p.replaced != "" {
+				t.Fatal("mismatch reached cloud mutation")
+			}
+		})
+	}
+}
+
+func TestVerifiedRecycleRepinPersistsAndRejectsStaleResult(t *testing.T) {
+	ctx := context.Background()
+	c, inc, _ := checkpointFixture(t, &changedCloudPlatform{}, checkpoint.Policy{})
+	inc.CloudIdentity = recycleTestPin()
+	inc.CloudIdentity.Node = inc.Target.Node
+	if err := c.store.UpdateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	stale := inc.Clone()
+	result := cloud.RecycleResult{Before: *inc.CloudIdentity, After: *inc.CloudIdentity, CompletedAt: time.Now()}
+	result.After.BootID = "verified-new-boot"
+	if err := c.repinAfterRecycle(ctx, inc, result); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := c.store.GetIncident(ctx, inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *saved.CloudIdentity != result.After {
+		t.Fatalf("pin not persisted: %+v", saved.CloudIdentity)
+	}
+	requireAudit(t, auditResults(t, c, saved), "pin updated after verified recycle")
+	if err := c.repinAfterRecycle(ctx, stale, result); err == nil {
+		t.Fatal("stale result overwrote current pin")
+	}
+}

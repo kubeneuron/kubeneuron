@@ -112,6 +112,7 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 	_, _ = fmt.Fprintf(w, "closed, nothing done\t%d of %d\t%s\t(%s degraded)\n",
 		r.ObservedOnly, r.Incidents, share(float64(r.ObservedOnly), float64(r.Incidents)),
 		gpuHours(r.ObservedOnlyGPUHours))
+	_, _ = fmt.Fprintf(w, "target changed, recovery unverified\t%d\t(%s degraded)\n", r.Superseded, gpuHours(r.SupersededGPUHours))
 	_, _ = fmt.Fprintf(w, "MTTR (recovered, n=%d)\tp50 %s\tp90 %s\tmean %s\n",
 		r.MTTR.Samples, seconds(r.MTTR.P50Seconds), seconds(r.MTTR.P90Seconds), seconds(r.MTTR.MeanSeconds))
 	if err := w.Flush(); err != nil {

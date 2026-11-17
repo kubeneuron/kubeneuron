@@ -724,3 +724,9 @@ type WorkloadCheckpointer interface {
 // different labels than the GPU Operator's, so the controller believed the
 // stack had settled while the plugin still held the GPU. The node itself can
 // read its own process table, so the agent answers that question instead.
+
+// VerifiedNodeRecycler returns operation-scoped evidence; a name-only Ready
+// lookup cannot authorize changing an incident's pinned boot identity.
+type VerifiedNodeRecycler interface {
+	RecyclePinnedNodeVerified(context.Context, cloud.NodeIdentity) (cloud.RecycleResult, error)
+}

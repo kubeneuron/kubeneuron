@@ -256,11 +256,12 @@ const (
 	StateNeedsHuman       IncidentState = "NEEDS_HUMAN"
 	StateResolved         IncidentState = "RESOLVED"
 	StateExpired          IncidentState = "EXPIRED"
+	StateSuperseded       IncidentState = "SUPERSEDED"
 )
 
 // Terminal reports whether the state ends the incident lifecycle.
 func (s IncidentState) Terminal() bool {
-	return s == StateResolved || s == StateExpired
+	return s == StateResolved || s == StateExpired || s == StateSuperseded
 }
 
 // Halted reports whether automated remediation has ended for the state: the

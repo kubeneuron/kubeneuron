@@ -106,7 +106,7 @@ const MaxEventAttempts = 8
 // This SQL literal must stay in lockstep with types.IncidentState.Halted —
 // the single definition of "automation has ended" — and a test pins the two
 // together so a new state cannot silently join only one of them.
-const terminalIncidentStates = `('RESOLVED','EXPIRED','NEEDS_HUMAN')`
+const terminalIncidentStates = `('RESOLVED','EXPIRED','SUPERSEDED','NEEDS_HUMAN')`
 
 // NewCore wires a Core over db. rebind may be nil for engines that accept
 // '?' placeholders natively; checkpoint may be nil for engines that need no
@@ -325,7 +325,7 @@ func (c *Core) Prune(ctx context.Context, dataRetention, auditRetention time.Dur
 	if auditRetention > 0 {
 		cutoff := ts(now.Add(-auditRetention))
 		const terminalOld = `SELECT id FROM incidents
-			WHERE state IN ('RESOLVED','EXPIRED') AND updated_at < ?`
+			WHERE state IN ('RESOLVED','EXPIRED','SUPERSEDED') AND updated_at < ?`
 		err := c.WithTx(ctx, func(tx store.Tx) error {
 			q := tx.(*Queries)
 			var err error
@@ -357,7 +357,7 @@ func (c *Core) Prune(ctx context.Context, dataRetention, auditRetention time.Dur
 			}
 			stats.Actions += prunedActions
 			if stats.Incidents, err = q.execCount(ctx,
-				`DELETE FROM incidents WHERE state IN ('RESOLVED','EXPIRED') AND updated_at < ?`, cutoff); err != nil {
+				`DELETE FROM incidents WHERE state IN ('RESOLVED','EXPIRED','SUPERSEDED') AND updated_at < ?`, cutoff); err != nil {
 				return err
 			}
 			// Never cut the middle out of a hash chain. A whole operational
@@ -483,7 +483,7 @@ func (q *Queries) GetIncident(ctx context.Context, id string) (*types.Incident, 
 // unattributed device incidents), and QueryRow would then pick an arbitrary
 // one — so which incident a signal joined could differ between two identical
 // calls. Oldest-first makes it the incident that has been waiting longest.
-const openIncidentTail = ` AND state NOT IN ('RESOLVED','EXPIRED') ORDER BY opened_at LIMIT 1`
+const openIncidentTail = ` AND state NOT IN ('RESOLVED','EXPIRED','SUPERSEDED') ORDER BY opened_at LIMIT 1`
 
 // GetOpenIncident finds the non-terminal incident a signal belongs to, or
 // ErrNotFound.
@@ -616,7 +616,7 @@ func (q *Queries) PromoteIncidentTarget(ctx context.Context, inc *types.Incident
 	res, err := q.db.ExecContext(ctx, `
 		UPDATE incidents SET gpu_uuid=?, gpu_index=?, updated_at=?, version=version+1
 		WHERE id=? AND version=? AND gpu_uuid='' AND pci_addr=?
-		  AND state NOT IN ('RESOLVED','EXPIRED')`,
+		  AND state NOT IN ('RESOLVED','EXPIRED','SUPERSEDED')`,
 		to.GPUUUID, to.GPUIndex, ts(now), inc.ID, inc.Version, matchedPCI)
 	if err != nil {
 		return err
@@ -670,7 +670,7 @@ func (q *Queries) ListIncidents(ctx context.Context, f store.IncidentFilter) ([]
 		// NULLIF covers pre-0002 rows whose state_changed_at is the empty
 		// string: an unknown end time falls back to updated_at rather than
 		// sorting before every cutoff and dropping the row.
-		qs += ` AND (state NOT IN ('RESOLVED','EXPIRED')
+		qs += ` AND (state NOT IN ('RESOLVED','EXPIRED','SUPERSEDED')
 			OR COALESCE(NULLIF(resolved_at, ''), NULLIF(state_changed_at, ''), updated_at) >= ?)`
 		args = append(args, ts(f.ActiveSince.Add(-time.Second)))
 	}

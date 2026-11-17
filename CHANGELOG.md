@@ -50,6 +50,13 @@ API is `v1alpha1`.
   `nsenter -t 1 -m -u -i -n -p --` in the built image. The source archives of
   the BusyBox-based releases up to v0.8.0 stay retained (release checklist).
 
+- Cloud identity changes terminate the old incident as SUPERSEDED without
+  claiming recovery. Open-incident indexes permit fresh signals to create a new
+  incident; retained cordon ownership is preserved. Guarded recycle verifies a
+  new Ready boot of the pinned target and atomically records its updated pin and
+  audit before further cloud actions. GPU-hours reports separate superseded
+  targets from recovered capacity.
+
 - **A live file configuration must name the nodes destructive steps may run
   on, and file playbooks are decoded strictly.** With `dry_run: false`, an
   empty `destructive_execution_node_selector` used to mean "every node"; the

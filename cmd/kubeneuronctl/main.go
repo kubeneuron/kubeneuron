@@ -127,7 +127,7 @@ func cmdStatus() *cobra.Command {
 		for _, state := range []types.IncidentState{
 			types.StateOpen, types.StateObserving, types.StateEvaluating,
 			types.StateAwaitingApproval, types.StateExecuting, types.StateVerifying,
-			types.StateNeedsHuman, types.StateResolved, types.StateExpired,
+			types.StateNeedsHuman, types.StateResolved, types.StateExpired, types.StateSuperseded,
 		} {
 			if n := byState[state]; n > 0 {
 				_, _ = fmt.Fprintf(out, "  %-18s %d\n", state, n)

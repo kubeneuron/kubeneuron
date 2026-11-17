@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
@@ -95,4 +96,39 @@ func (p *Platform) RecyclePinnedNode(ctx context.Context, pin cloud.NodeIdentity
 		return fmt.Errorf("cloud recycle unavailable: %s", v.Reason)
 	}
 	return p.recycler.Recycle(ctx, pin.InstanceID)
+}
+
+// RecyclePinnedNodeVerified keeps post-operation observation inside the guarded
+// operation. A successful provider call alone does not prove a new kubelet boot.
+func (p *Platform) RecyclePinnedNodeVerified(ctx context.Context, pin cloud.NodeIdentity) (cloud.RecycleResult, error) {
+	result := cloud.RecycleResult{Before: pin}
+	if _, bounded := ctx.Deadline(); !bounded {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 20*time.Minute)
+		defer cancel()
+	}
+	if err := p.RecyclePinnedNode(ctx, pin); err != nil {
+		return result, err
+	}
+	for {
+		ref, err := p.CloudNode(ctx, pin.Node)
+		if err == nil {
+			sameBoot := ref.Identity
+			sameBoot.BootID = pin.BootID
+			if err := pin.Match(sameBoot); err != nil {
+				return result, err
+			}
+			if ref.Ready && ref.Identity.BootID != pin.BootID {
+				result.After, result.CompletedAt = ref.Identity, time.Now()
+				return result, result.Validate(pin)
+			}
+		}
+		timer := time.NewTimer(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return result, fmt.Errorf("recycled instance has no verified new Ready boot: %w", ctx.Err())
+		case <-timer.C:
+		}
+	}
 }

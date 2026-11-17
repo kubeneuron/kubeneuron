@@ -590,3 +590,15 @@ func TestAPCIOnlyIncidentIsChargedOneDevice(t *testing.T) {
 		t.Errorf("unknown inventory charged %d (assumed=%v), want 1 and flagged", got, assumed)
 	}
 }
+
+func TestSupersededReportNeverCountsRecovery(t *testing.T) {
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	inc := incident("changed", types.ClassECCDBE, "node", "gpu", types.StateSuperseded, start, start.Add(time.Hour))
+	r := aggregateRecovery([]*types.Incident{inc}, nil, map[string]bool{"changed": true}, start, start.Add(2*time.Hour))
+	if r.Superseded != 1 || r.SupersededGPUHours != 1 || r.Recovered != 0 || r.ObservedOnly != 0 || r.MTTR.Samples != 0 || len(r.Open) != 0 {
+		t.Fatalf("changed target counted incorrectly: %+v", r)
+	}
+	if len(r.Classes) != 1 || r.Classes[0].Superseded != 1 || r.Classes[0].SupersededGPUHours != 1 {
+		t.Fatalf("class accounting: %+v", r.Classes)
+	}
+}

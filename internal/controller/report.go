@@ -331,8 +331,13 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 		acc.row.DegradedGPUHours += hours
 
 		switch {
+		case inc.State == types.StateSuperseded:
+			report.Superseded++
+			report.SupersededGPUHours += hours
+			acc.row.Superseded++
+			acc.row.SupersededGPUHours += hours
 		case inc.State != types.StateResolved:
-			// Not closed: neither recovered nor observed-only yet.
+			// Neither recovered nor observed-only.
 		case !remediated[inc.ID]:
 			// RESOLVED, but nothing was ever executed against the fleet. The
 			// degraded hours above are real and stay in the total; the recovery
@@ -375,12 +380,14 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 	report.DegradedGPUHours = roundHours(report.DegradedGPUHours)
 	report.RecoveredGPUHours = roundHours(report.RecoveredGPUHours)
 	report.ObservedOnlyGPUHours = roundHours(report.ObservedOnlyGPUHours)
+	report.SupersededGPUHours = roundHours(report.SupersededGPUHours)
 	report.MTTR = summarizeLatency(mttrSamples)
 	report.Classes = make([]types.RecoveryClassReport, 0, len(classes))
 	for _, acc := range classes {
 		acc.row.DegradedGPUHours = roundHours(acc.row.DegradedGPUHours)
 		acc.row.RecoveredGPUHours = roundHours(acc.row.RecoveredGPUHours)
 		acc.row.ObservedOnlyGPUHours = roundHours(acc.row.ObservedOnlyGPUHours)
+		acc.row.SupersededGPUHours = roundHours(acc.row.SupersededGPUHours)
 		acc.row.MTTR = summarizeLatency(acc.durations)
 		report.Classes = append(report.Classes, acc.row)
 	}

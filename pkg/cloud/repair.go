@@ -4,9 +4,14 @@ package cloud
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
+
+// ErrIdentityChanged requires two complete identities. Missing evidence must
+// not be mistaken for proof that the target has changed.
+var ErrIdentityChanged = errors.New("cloud node identity changed; fresh verification is required")
 
 // NodeIdentity pins an incident to one Kubernetes object, instance and boot.
 // Empty fields are not wildcards. A caller must not replace a missing snapshot
@@ -37,7 +42,7 @@ func (n NodeIdentity) Match(current NodeIdentity) error {
 		return fmt.Errorf("current identity: %w", err)
 	}
 	if n != current {
-		return fmt.Errorf("cloud node identity changed; fresh verification is required")
+		return ErrIdentityChanged
 	}
 	return nil
 }
@@ -104,4 +109,31 @@ type RecoveryEligibility struct {
 	Reason         string       `json:"reason"`
 	RecycleAllowed bool         `json:"recycle_allowed"`
 	ReplaceAllowed bool         `json:"replace_allowed"`
+}
+
+// RecycleResult is evidence returned by a guarded recycle operation after the
+// same Node and instance rejoin with a new boot. It is not recovery evidence
+// for the accelerator or workload.
+type RecycleResult struct {
+	Before      NodeIdentity
+	After       NodeIdentity
+	CompletedAt time.Time
+}
+
+func (r RecycleResult) Validate(pin NodeIdentity) error {
+	if err := pin.Match(r.Before); err != nil {
+		return err
+	}
+	if err := r.After.Validate(); err != nil {
+		return err
+	}
+	sameBoot := r.After
+	sameBoot.BootID = pin.BootID
+	if err := pin.Match(sameBoot); err != nil {
+		return err
+	}
+	if r.After.BootID == pin.BootID || r.CompletedAt.IsZero() {
+		return fmt.Errorf("recycle completion requires a new boot and completion time")
+	}
+	return nil
 }

@@ -100,7 +100,7 @@ textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px #5b8cff21}
 .pill.OBSERVING,.pill.VERIFYING{color:var(--warn);border-color:#8a6a1c}
 .pill.AWAITING_APPROVAL{color:var(--warn);border-color:var(--warn);background:#f5b94a12;animation:glow 2s ease-in-out infinite}
 @keyframes glow{0%,100%{box-shadow:0 0 0 0 #f5b94a00}50%{box-shadow:0 0 11px 0 #f5b94a30}}
-.pill.NEEDS_HUMAN,.pill.EXPIRED{color:var(--bad);border-color:var(--bad);background:#f0705f12}
+.pill.NEEDS_HUMAN,.pill.EXPIRED,.pill.SUPERSEDED{color:var(--bad);border-color:var(--bad);background:#f0705f12}
 .pill.RESOLVED{color:var(--ok);border-color:#1d7a54}
 
 /* ============ overview ============ */
@@ -556,7 +556,7 @@ function toast(msg, cls){
 }
 
 /* ---------- rendering ---------- */
-const ACTIVE = s => !["RESOLVED","EXPIRED"].includes(s);
+const ACTIVE = s => !["RESOLVED","EXPIRED","SUPERSEDED"].includes(s);
 const FILTERS = [
   ["active","Active", i => ACTIVE(i.state)],
   ["approval","Awaiting approval", i => i.state === "AWAITING_APPROVAL"],

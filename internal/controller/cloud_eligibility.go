@@ -52,10 +52,20 @@ func (c *Controller) requireCloudRecovery(ctx context.Context, inc *types.Incide
 	}
 	v, err := c.cloudRecoveryEligibility(ctx, inc)
 	if err != nil {
-		return fmt.Errorf("%w: %s: %v", errCloudRecoveryUnavailable, v.Reason, err)
+		return fmt.Errorf("%w: %s: %w", errCloudRecoveryUnavailable, v.Reason, err)
 	}
 	if !v.ReplaceAllowed || (step.Action == "platform.recycle_node" && !v.RecycleAllowed) {
 		return fmt.Errorf("%w: %s", errCloudRecoveryUnavailable, v.Reason)
 	}
 	return nil
+}
+
+// supersedeCloudTarget closes only a positively identified changed target. It
+// deliberately does not uncordon: a same-UID reboot retains the existing hold.
+func (c *Controller) supersedeCloudTarget(ctx context.Context, inc *types.Incident, err error) error {
+	if !errors.Is(err, cloud.ErrIdentityChanged) {
+		return err
+	}
+	return c.transition(ctx, inc, types.StateSuperseded, "system", "cloud-target-changed",
+		"target identity changed; recovery unverified; any existing cordon is retained for a same-UID node", nil)
 }

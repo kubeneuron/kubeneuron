@@ -310,12 +310,10 @@ func TestApprovalDoesNotExecuteHotSwappedStep(t *testing.T) {
 // replaced it) held the incident in EXECUTING until the controller restarted. The
 // wait must fall back to a default bound and fail the step instead.
 func TestRecycleWaitIsBoundedWithoutStepTimeout(t *testing.T) {
-	origTimeout, origPoll := defaultRecycleWaitTimeout, recycleReadyPollInterval
+	origTimeout := defaultRecycleWaitTimeout
 	defaultRecycleWaitTimeout = 30 * time.Millisecond
-	recycleReadyPollInterval = 5 * time.Millisecond
 	t.Cleanup(func() {
 		defaultRecycleWaitTimeout = origTimeout
-		recycleReadyPollInterval = origPoll
 	})
 
 	p := &recyclePlatform{configured: true, nodeReady: false} // never becomes Ready

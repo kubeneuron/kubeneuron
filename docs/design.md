@@ -593,6 +593,25 @@ signal -> OPEN -> EVALUATING -> EXECUTING -> VERIFYING -> RESOLVED
             +-> OBSERVING -- threshold --> EVALUATING
 ```
 
+A confirmed live change of the pinned Node UID, provider/instance identity, or
+boot ends the old incident as `SUPERSEDED` ("target changed; recovery
+unverified"). This terminal state permits a new signal to open a fresh incident.
+Missing Nodes, incomplete evidence, and read errors remain holds, not proof of
+a changed target. Superseded incidents have a separate count and degraded
+GPU-hours category in the report; they never count as recovered or enter MTTR.
+
+Our own guarded recycle may update the pin only after the same Node and instance
+return Ready with a new boot. The verified operation result, new pin, and audit
+are committed atomically with a stale-state check. This proves a new boot, not
+accelerator recovery: fresh inventory and health verification are still needed.
+If the controller crashes before saving the result, it does not infer ownership
+of a later boot change.
+
+A superseded incident's cordon is retained with its owner and held evidence.
+A subsequent incident can add its own owner; completing it does not release the
+old held owner. Release of that retained hold requires explicit intervention.
+An initially external cordon is never converted into permission to uncordon.
+
 Any active state may fail closed to `NEEDS_HUMAN`. The controller's periodic
 reconciler performs this walk (see `internal/controller/reconcile.go`), with
 long-running steps in per-incident goroutines and orphaned-execution recovery
@@ -722,7 +741,7 @@ operator-accepted controller stores. PostgreSQL is the HA choice: the DSN
 comes from a mounted Secret, the controller Deployment is stateless, and the
 store backend passes the same conformance suite as SQLite (see §2.5 for the
 honest scope of what that parity does and does not prove). Migration heads
-travel in lockstep (sqlite 0026 / postgres 0017, including the incident cloud identity snapshot).
+travel in lockstep (sqlite 0027 / postgres 0018, including the incident cloud identity snapshot).
 
 The operator provisions a `ReadWriteOnce` claim for SQLite, defaulting to
 `5Gi`. Reconciliation preserves API-selected/bound fields, permits only

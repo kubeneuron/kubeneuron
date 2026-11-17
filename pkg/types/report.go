@@ -27,6 +27,9 @@ import "time"
 //   - GPU-hours are degraded-GPU-hours, not lost-GPU-hours: a degraded GPU may
 //     still have been serving traffic.
 type RecoveryReport struct {
+	// Superseded is a changed target, never a verified recovery.
+	Superseded         int     `json:"superseded"`
+	SupersededGPUHours float64 `json:"superseded_gpu_hours"`
 	// From and To bound the window the numbers cover, as resolved by the
 	// controller's clock (the same clock that stamped the incident rows).
 	From time.Time `json:"from"`
@@ -144,11 +147,13 @@ type RecoveryLatency struct {
 
 // RecoveryClassReport is one problem class's contribution to the window.
 type RecoveryClassReport struct {
-	Class             ProblemClass `json:"class"`
-	Incidents         int          `json:"incidents"`
-	DegradedGPUHours  float64      `json:"degraded_gpu_hours"`
-	RecoveredGPUHours float64      `json:"recovered_gpu_hours"`
-	Recovered         int          `json:"recovered"`
+	Superseded         int          `json:"superseded"`
+	SupersededGPUHours float64      `json:"superseded_gpu_hours"`
+	Class              ProblemClass `json:"class"`
+	Incidents          int          `json:"incidents"`
+	DegradedGPUHours   float64      `json:"degraded_gpu_hours"`
+	RecoveredGPUHours  float64      `json:"recovered_gpu_hours"`
+	Recovered          int          `json:"recovered"`
 	// ObservedOnly and ObservedOnlyGPUHours are this class's share of the
 	// report-level buckets of the same name. Per class is where they are most
 	// useful: a class whose whole column is observed-only is a class with no

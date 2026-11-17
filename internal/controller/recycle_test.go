@@ -24,6 +24,7 @@ type recyclePlatform struct {
 	configured         bool
 	nodeReady          bool
 	recycled, replaced string
+	replacedBoot       string
 	checkErr           error
 }
 
@@ -49,8 +50,19 @@ func (p *recyclePlatform) RecyclePinnedNode(_ context.Context, pin cloud.NodeIde
 	p.recycled = pin.InstanceID
 	return nil
 }
+func (p *recyclePlatform) RecyclePinnedNodeVerified(ctx context.Context, pin cloud.NodeIdentity) (cloud.RecycleResult, error) {
+	p.recycled = pin.InstanceID
+	if !p.nodeReady {
+		<-ctx.Done()
+		return cloud.RecycleResult{}, ctx.Err()
+	}
+	after := pin
+	after.BootID = "boot-after-recycle"
+	return cloud.RecycleResult{Before: pin, After: after, CompletedAt: time.Now()}, nil
+}
 func (p *recyclePlatform) ReplacePinnedNode(_ context.Context, pin cloud.NodeIdentity) error {
 	p.replaced = pin.InstanceID
+	p.replacedBoot = pin.BootID
 	return nil
 }
 func recycleTestPin() *cloud.NodeIdentity {
@@ -65,8 +77,17 @@ func recycleController(t *testing.T, p *recyclePlatform) *Controller {
 func TestRecycleNodeStepCallsThePlatform(t *testing.T) {
 	p := &recyclePlatform{configured: true, nodeReady: true}
 	c := recycleController(t, p)
-	inc := &types.Incident{ID: "i", Target: types.Target{Node: "node-a"}, CloudIdentity: recycleTestPin()}
+	st, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	c.store = st
+	inc := &types.Incident{ID: "i", Target: types.Target{Node: "node-a"}, CloudIdentity: recycleTestPin(), State: types.StateExecuting, OpenedAt: time.Now(), StateChangedAt: time.Now()}
 
+	if err := st.CreateIncident(context.Background(), inc); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := c.recycleNodeStep(context.Background(), inc, false); err != nil {
 		t.Fatal(err)
 	}
@@ -74,10 +95,18 @@ func TestRecycleNodeStepCallsThePlatform(t *testing.T) {
 		t.Fatalf("recycled %q, want pinned i-old", p.recycled)
 	}
 
+	saved, err := st.GetIncident(context.Background(), inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.CloudIdentity.BootID != "boot-after-recycle" {
+		t.Fatal("new boot not persisted")
+	}
+	inc = saved
 	if _, err := c.recycleNodeStep(context.Background(), inc, true); err != nil {
 		t.Fatal(err)
 	}
-	if p.replaced != "i-old" {
+	if p.replaced != "i-old" || p.replacedBoot != "boot-after-recycle" {
 		t.Fatalf("replaced %q, want pinned i-old", p.replaced)
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -76,6 +77,10 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 	ctx, _ = c.pinSimulate(ctx, inc)
 	if !c.simulating(ctx, inc) {
 		if err := c.requireCloudRecovery(ctx, inc, step); err != nil {
+			if errors.Is(err, cloud.ErrIdentityChanged) {
+				return c.supersedeCloudTarget(ctx, inc, err)
+			}
+
 			c.deferStep(inc, step, metrics.DeferRecoveryUnavailable)
 			key := fmt.Sprintf("cloud-admission-hold/%s/%s/%d/%s", inc.ID, step.Name, inc.StepIndex, err.Error())
 			if c.logOnce.first(key) {
@@ -236,6 +241,12 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 	output := ""
 	if result != nil {
 		output = result.Output
+	}
+	if errors.Is(err, cloud.ErrIdentityChanged) {
+		if closeErr := c.supersedeCloudTarget(ctx, inc, err); closeErr != nil {
+			c.log.Error("cloud target supersede failed", "incident", inc.ID, "err", closeErr)
+		}
+		return
 	}
 	if errors.Is(err, errCloudRecoveryUnavailable) {
 		if holdErr := c.transition(ctx, inc, types.StateEvaluating, "system", step.Name, err.Error(), step.Params); holdErr != nil {

@@ -867,3 +867,35 @@ func TestCordonJanitorInterfaceIsSatisfied(t *testing.T) {
 	var _ platform.CordonJanitor = (*janitorPlatform)(nil)
 	var _ platform.CordonJanitor = (*kubernetesplatform.Platform)(nil)
 }
+
+func TestSupersededCordonOwnerSurvivesNewIncidentCompletion(t *testing.T) {
+	p := &ownedPlatform{}
+	c, st := stackTestController(t, p)
+	ctx := context.Background()
+	old := sharedCordonIncident("superseded", types.ClassECCDBE)
+	old.State = types.StateSuperseded
+	next := sharedCordonIncident("new-target-check", types.ClassECCDBE)
+	for _, inc := range []*types.Incident{old, next} {
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.UpdateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.CordonForOwner(ctx, "node-a", inc.ID, cordonReason(inc)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.reconcileCordonedNodes(ctx)
+	if !slices.Contains(p.heldOwners["node-a"], old.ID) {
+		t.Fatal("old cordon lost its held evidence")
+	}
+	next.State = types.StateResolved
+	if err := st.UpdateIncident(ctx, next); err != nil {
+		t.Fatal(err)
+	}
+	c.reconcileCordonedNodes(ctx)
+	if !slices.Contains(p.owners["node-a"], old.ID) || slices.Contains(p.owners["node-a"], next.ID) || len(p.uncordoned) != 0 {
+		t.Fatalf("new completion released previous hold: owners=%v uncordoned=%v", p.owners, p.uncordoned)
+	}
+}

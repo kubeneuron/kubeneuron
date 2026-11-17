@@ -53,68 +53,29 @@ func (c *Controller) recycleNodeStep(ctx context.Context, inc *types.Incident, r
 		if err := guard.ReplacePinnedNode(ctx, pin); err != nil {
 			return nil, fmt.Errorf("platform.replace_node: %w", err)
 		}
-		// The node is on its way out. The vanished-node reconciler closes the
-		// incident as replaced once the Node object disappears.
+		// Termination is not proof of replacement or accelerator recovery.
 		return okResult(inc, "terminated the instance behind "+node+"; the autoscaler will replace it"), nil
 	}
-	if err := guard.RecyclePinnedNode(ctx, pin); err != nil {
-		return nil, fmt.Errorf("platform.recycle_node: %w", err)
+
+	verified, ok := c.platform.(platform.VerifiedNodeRecycler)
+	if !ok {
+		return nil, fmt.Errorf("cloud recovery unavailable: platform has no verified recycle result contract")
 	}
-	// The instance is powered on, but the node has not rejoined yet: the OS,
-	// kubelet and agent take minutes more. Wait for the node to be Ready before
-	// reporting success, or the next step (verify) fires on a stale heartbeat.
-	// Measured live: without this, verify failed the moment recycle returned.
-	//
-	// Bound the wait. A recycle_node step with no timeout hands waitNodeReady an
-	// unbounded context, so a node that never rejoins (e.g. a managed node group
-	// that replaced it instead) would hold the incident in EXECUTING until the
-	// controller restarts. When the step carries no deadline, apply a default so
-	// the wait fails the step instead of spinning forever; the failure escalates
-	// (to ReplaceNode, per the message below).
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, defaultRecycleWaitTimeout)
 		defer cancel()
 	}
-	if err := c.waitNodeReady(ctx, node); err != nil {
-		return nil, fmt.Errorf("platform.recycle_node: instance restarted but %w", err)
+	result, err := verified.RecyclePinnedNodeVerified(ctx, pin)
+	if err != nil {
+		return nil, fmt.Errorf("platform.recycle_node: %w", err)
 	}
-	return okResult(inc, "recycled the instance behind "+node+" (stop/start); the GPU passthrough was reinitialized and the node rejoined"), nil
+	if err := c.repinAfterRecycle(ctx, inc, result); err != nil {
+		return nil, fmt.Errorf("persisting verified recycle identity: %w", err)
+	}
+	return okResult(inc, "recycled the pinned instance behind "+node+"; new Ready boot verified; accelerator recovery remains unverified"), nil
+
 }
 
-// waitNodeReady polls until the node's Ready condition is True or the context
-// deadline (the step timeout) passes. On a self-managed node a recycle keeps
-// the node, so it comes back; on a managed node group it does not — the ASG
-// replaces it — and this times out, which is the honest signal that RecycleNode
-// was the wrong action there and ReplaceNode should have been used.
-func (c *Controller) waitNodeReady(ctx context.Context, node string) error {
-	checker, ok := c.platform.(platform.NodeRecycler)
-	if !ok {
-		return nil
-	}
-	for {
-		ready, err := checker.NodeReady(ctx, node)
-		if err == nil && ready {
-			return nil
-		}
-		timer := time.NewTimer(recycleReadyPollInterval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return fmt.Errorf("node %s did not become Ready in time (on a managed node group use ReplaceNode, not RecycleNode): %w", node, ctx.Err())
-		case <-timer.C:
-		}
-	}
-}
-
-// recycleReadyPollInterval paces the wait for a recycled node to rejoin.
-// A var (not const) only so tests can shorten it.
-var recycleReadyPollInterval = 10 * time.Second
-
-// defaultRecycleWaitTimeout bounds waitNodeReady when the recycle_node step
-// declares no timeout of its own, so the incident can never hold EXECUTING
-// forever on a node that never comes back. Generous enough for an OS+kubelet
-// reboot to complete, short enough that a node that will never rejoin fails the
-// step and escalates within a bounded time. A var (not const) only so tests can
-// shorten it.
+// defaultRecycleWaitTimeout bounds verified recycle when the step has no timeout.
 var defaultRecycleWaitTimeout = 20 * time.Minute

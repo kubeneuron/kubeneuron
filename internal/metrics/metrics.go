@@ -504,7 +504,7 @@ func Handler() http.Handler { return promhttp.Handler() }
 var incidentStates = []types.IncidentState{
 	types.StateOpen, types.StateObserving, types.StateEvaluating,
 	types.StateAwaitingApproval, types.StateExecuting, types.StateVerifying,
-	types.StateNeedsHuman, types.StateResolved, types.StateExpired,
+	types.StateNeedsHuman, types.StateResolved, types.StateExpired, types.StateSuperseded,
 }
 
 // stateCollector exports kubeneuron_incidents{state} from a count function
