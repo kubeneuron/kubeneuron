@@ -21,8 +21,9 @@ API is `v1alpha1`.
   controller and agents export OTLP with the node name as a resource
   attribute. External endpoints take their `Authorization` header from a
   Secret. `spec.observability.victoriaMetrics` is deprecated in favour of
-  `store` and is not used as a metrics destination. The operator now needs NetworkPolicy access and delete on the
-  Deployments, Services, ConfigMaps and ServiceAccounts it owns.
+  `store` and is not used as a metrics destination. The operator now needs
+  NetworkPolicy access and delete on the Deployments, Services, ConfigMaps
+  and ServiceAccounts it owns.
 
 - **Recovery modes per policy: dry-run, approval and automatic.**
   `GPURemediationPolicy.spec.mode` selects who authorises a step that stops

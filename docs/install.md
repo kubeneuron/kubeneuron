@@ -47,8 +47,12 @@ operator; see [Metrics path](#metrics-path-specobservability).
 - **The Managed store has no backup.** Its claim (`storage.size`, default
   `20Gi`; `storage.storageClassName`; `retention`, default `30d`) survives a
   switch to External or Disabled and the deletion of the installation: the
-  operator never deletes it; delete it by hand. Until
-  the claim is Bound, `ObservabilityStoreReady` is `False` with reason
+  operator never deletes it; delete it by hand. After the installation is
+  deleted, the claim still holds up to 30 days of metrics (the configured
+  `retention`), including node names. To erase them:
+  `kubectl delete pvc <name>-metrics-store -n <namespace>`, where `<name>` is
+  the KubeNeuron resource and `<namespace>` its `spec.namespace`. Until the
+  claim is Bound, `ObservabilityStoreReady` is `False` with reason
   `StoragePending`. `storage.ephemeral: true` uses an emptyDir instead and
   loses the data with the pod.
 - **The Managed store has no authentication.** It is a ClusterIP Service
