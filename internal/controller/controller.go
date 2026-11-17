@@ -682,6 +682,9 @@ func (c *Controller) CompleteAction(r *http.Request, node, actionID, leaseToken 
 // Its incident and audit mutations share a transaction even for direct signal
 // sources, matching the durable outbox path below.
 func (c *Controller) ingest(ctx context.Context, sig types.Signal) error {
+	if c.observeOnlyNodeGone(ctx, sig) {
+		return nil
+	}
 	identity := c.captureCloudIdentity(ctx, sig)
 	var outcome ingestOutcome
 	if err := c.store.WithTx(ctx, func(tx store.Tx) error {

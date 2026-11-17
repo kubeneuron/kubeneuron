@@ -486,6 +486,12 @@ type NodePresence interface {
 	NodeExists(ctx context.Context, node string) (bool, error)
 }
 
+// NodeIdentity is implemented by platforms that can read the UID of one
+// exact node object. A node that is not found is ("", false, nil).
+type NodeIdentity interface {
+	NodeUID(ctx context.Context, node string) (uid string, found bool, err error)
+}
+
 // NodeLabeler is implemented by platforms that can read one exact node's
 // labels WITHOUT going through the GPU-filtered inventory.
 //

@@ -1130,28 +1130,58 @@ func TestManagedAlertingRules(t *testing.T) {
 	if !strings.Contains(args, "-notifier.url=https://fleet-controller.") || !strings.Contains(args, "-notifier.tlsCAFile=/etc/vmalert-notifier/ca/ca.crt") {
 		t.Errorf("vmalert args behind TLS = %s", args)
 	}
+
+	// The token, its mount and its volume come together, and without the
+	// token vmalert has no notifier.
+	kn.Spec.Notifications.WebhookToken = nil
+	deployment = rulesDeployment(kn, DefaultMetricsRulesImage, "d", true)
+	container := deployment.Spec.Template.Spec.Containers[0]
+	if args := strings.Join(container.Args, " "); strings.Contains(args, "-notifier.") {
+		t.Errorf("vmalert args without a webhook token = %s", args)
+	}
+	if len(container.VolumeMounts) != 1 || len(deployment.Spec.Template.Spec.Volumes) != 1 {
+		t.Errorf("without a webhook token: mounts %+v, volumes %+v, want the rules only", container.VolumeMounts, deployment.Spec.Template.Spec.Volumes)
+	}
 }
 
 func TestAlertDetectionCondition(t *testing.T) {
 	kn := managedObservability(testKubeNeuron())
-	if c := alertDetection(kn, &metav1.Condition{Status: metav1.ConditionTrue}, nil); c.Status != metav1.ConditionTrue {
+	ready := &metav1.Condition{Status: metav1.ConditionTrue}
+	if c := alertDetection(kn, ready, false, nil); c.Status != metav1.ConditionTrue {
 		t.Errorf("managed store, rules ready: %+v", c)
 	}
-	if c := alertDetection(kn, notReady("NotReady", "x"), nil); c.Status != metav1.ConditionFalse {
+	if c := alertDetection(kn, notReady("NotReady", "x"), false, nil); c.Status != metav1.ConditionFalse {
 		t.Errorf("managed store, rules not ready: %+v", c)
 	}
+	// Behind the controller's TLS without a ca.crt, vmalert would trust the
+	// system roots and every delivery would fail quietly.
+	kn.Spec.TLS.PublicServerSecretRef = &kubeneuronv1alpha1.SecretReference{Name: "public-tls"}
+	if c := alertDetection(kn, ready, false, nil); c.Status != metav1.ConditionFalse || c.Reason != "NotifierCAUnavailable" ||
+		!strings.Contains(c.Message, "Secret public-tls under the key ca.crt") {
+		t.Errorf("managed store, TLS without ca.crt: %+v", c)
+	}
+	if c := alertDetection(kn, ready, true, nil); c.Status != metav1.ConditionTrue {
+		t.Errorf("managed store, TLS with ca.crt: %+v", c)
+	}
+	kn.Spec.TLS.PublicServerSecretRef = nil
+	token := kn.Spec.Notifications.WebhookToken
+	kn.Spec.Notifications.WebhookToken = nil
+	if c := alertDetection(kn, ready, false, nil); c.Status != metav1.ConditionFalse || c.Reason != "NotifierTokenUnavailable" {
+		t.Errorf("managed store without a webhook token: %+v", c)
+	}
+	kn.Spec.Notifications.WebhookToken = token
 	kn.Spec.Observability.Store = &kubeneuronv1alpha1.MetricsStoreSpec{OTLPEndpointSpec: kubeneuronv1alpha1.OTLPEndpointSpec{Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: "http://vm:8428/opentelemetry"}}
-	if c := alertDetection(kn, nil, nil); c.Status != metav1.ConditionFalse || c.Reason != "ExternalStore" ||
+	if c := alertDetection(kn, nil, false, nil); c.Status != metav1.ConditionFalse || c.Reason != "ExternalStore" ||
 		!strings.Contains(c.Message, "point them at the controller webhook") {
 		t.Errorf("external store: %+v", c)
 	}
 	at := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
-	if c := alertDetection(kn, nil, &at); c.Status != metav1.ConditionTrue || c.Reason != "AlertReceived" ||
+	if c := alertDetection(kn, nil, false, &at); c.Status != metav1.ConditionTrue || c.Reason != "AlertReceived" ||
 		!strings.Contains(c.Message, "2026-11-17T10:00:00Z") {
 		t.Errorf("external store after the first alert: %+v", c)
 	}
 	kn.Spec.Observability.Store = nil
-	if c := alertDetection(kn, nil, nil); c != nil {
+	if c := alertDetection(kn, nil, false, nil); c != nil {
 		t.Errorf("disabled store: %+v", c)
 	}
 }
