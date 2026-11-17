@@ -1924,9 +1924,11 @@ func drainExclusion(pod *corev1.Pod) platform.DrainExclusion {
 func podUsesGPU(pod *corev1.Pod) bool {
 	for _, containers := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
 		for i := range containers {
-			for name := range containers[i].Resources.Limits {
-				if isAcceleratorResource(name) {
-					return true
+			for _, resources := range []corev1.ResourceList{containers[i].Resources.Requests, containers[i].Resources.Limits} {
+				for name, quantity := range resources {
+					if quantity.Sign() > 0 && isAcceleratorResource(name) {
+						return true
+					}
 				}
 			}
 		}

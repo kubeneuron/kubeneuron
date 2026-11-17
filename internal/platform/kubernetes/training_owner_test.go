@@ -6,11 +6,13 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
 )
 
@@ -57,5 +59,20 @@ func TestTrainingOwnerResolvesJobSetAndRayJob(t *testing.T) {
 				t.Fatalf("chain=%v owner=%v reason=%q", chain, owner, reason)
 			}
 		})
+	}
+}
+
+func TestTrainingWorkersIncludesUnmanagedAcceleratorRequests(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "training", Name: "worker", UID: "pod-uid"}, Spec: corev1.PodSpec{NodeName: "node", Containers: []corev1.Container{{Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}}}}}
+	finished := pod.DeepCopy()
+	finished.Name = "finished"
+	finished.Status.Phase = corev1.PodSucceeded
+	zero := pod.DeepCopy()
+	zero.Name = "zero"
+	zero.Spec.Containers[0].Resources.Requests["nvidia.com/gpu"] = resource.MustParse("0")
+	p := &Platform{client: fake.NewSimpleClientset(pod, finished, zero)}
+	workers, err := p.TrainingWorkers(t.Context(), "node")
+	if err != nil || len(workers) != 1 || workers[0].PodUID != "pod-uid" || workers[0].OwnerUnknownReason != contextReasonNoOwner {
+		t.Fatalf("workers=%+v err=%v", workers, err)
 	}
 }

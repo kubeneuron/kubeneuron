@@ -4,11 +4,14 @@ package kubernetes
 
 import (
 	"context"
+	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
 // trainingOwner follows the controller of a worker and, for JobSet or
@@ -55,4 +58,32 @@ func (p *Platform) trainingOwner(ctx context.Context, pod *corev1.Pod) ([]metav1
 		}
 	}
 	return refs, nil, contextReasonNoOwner
+}
+
+// TrainingWorkers snapshots allocated workers before remediation changes the node.
+func (p *Platform) TrainingWorkers(ctx context.Context, node string) ([]types.TrainingWorker, error) {
+	pods, err := p.nodePods(ctx, node)
+	if err != nil {
+		return nil, err
+	}
+	workers := make([]types.TrainingWorker, 0)
+	for i := range pods {
+		pod := &pods[i]
+		if pod.Spec.NodeName != node || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed || !podUsesGPU(pod) {
+			continue
+		}
+		chain, _, reason := p.trainingOwner(ctx, pod)
+		owners := make([]types.TrainingOwner, 0, len(chain))
+		for _, ref := range chain {
+			owners = append(owners, types.TrainingOwner{APIVersion: ref.APIVersion, Kind: ref.Kind, Name: ref.Name, UID: string(ref.UID)})
+		}
+		workers = append(workers, types.TrainingWorker{Namespace: pod.Namespace, Pod: pod.Name, PodUID: string(pod.UID), Owners: owners, OwnerUnknownReason: reason})
+	}
+	sort.Slice(workers, func(i, j int) bool {
+		if workers[i].Namespace != workers[j].Namespace {
+			return workers[i].Namespace < workers[j].Namespace
+		}
+		return workers[i].Pod < workers[j].Pod
+	})
+	return workers, nil
 }
