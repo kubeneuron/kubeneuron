@@ -22,8 +22,10 @@ import (
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/eks"
 
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
@@ -49,6 +51,15 @@ type Recycler struct {
 // ec2:StopInstances/StartInstances/TerminateInstances/DescribeInstances on the
 // cluster's own instances.
 func New(ctx context.Context, region string) (*Recycler, error) {
+	provider, err := newManagedProvider(ctx, cloud.Config{Region: region})
+	if err != nil {
+		return nil, err
+	}
+	return provider.Recycler, nil
+}
+
+func newManagedProvider(ctx context.Context, options cloud.Config) (*managedProvider, error) {
+	region := options.Region
 	var opts []func(*awsconfig.LoadOptions) error
 	if region != "" {
 		opts = append(opts, awsconfig.WithRegion(region))
@@ -60,7 +71,8 @@ func New(ctx context.Context, region string) (*Recycler, error) {
 	if cfg.Region == "" {
 		return nil, fmt.Errorf("aws: no region configured; set AWS_REGION or the node's region label")
 	}
-	return &Recycler{api: ec2.NewFromConfig(cfg), pollInterval: 10 * time.Second}, nil
+	client := ec2.NewFromConfig(cfg)
+	return &managedProvider{Recycler: &Recycler{api: client, pollInterval: 10 * time.Second}, repairReader: &repairReader{cluster: options.Options["cluster"], nodegroup: options.Options["nodegroup"], eks: eks.NewFromConfig(cfg), scaling: autoscaling.NewFromConfig(cfg), ec2: client}}, nil
 }
 
 // NewWithAPI builds a Recycler over an explicit client, for tests.

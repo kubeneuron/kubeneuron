@@ -20,9 +20,19 @@ var capabilities = cloud.Capabilities{ReinitializeInPlace: true, Replace: true}
 // Recycler is the AWS cloud.Provider.
 var _ cloud.Provider = (*Recycler)(nil)
 
+type managedProvider struct {
+	*Recycler
+	*repairReader
+}
+
+var _ cloud.RepairAwareProvider = (*managedProvider)(nil)
+
+// Read-side observations cannot authorize a mutation until action-specific IAM checks exist.
+func (*managedProvider) Capabilities() cloud.Capabilities { return cloud.Capabilities{} }
+
 func init() {
 	cloud.Register(providerName, capabilities, func(ctx context.Context, cfg cloud.Config) (cloud.Provider, error) {
-		r, err := New(ctx, cfg.Region)
+		r, err := newManagedProvider(ctx, cfg)
 		if err != nil {
 			return nil, err
 		}

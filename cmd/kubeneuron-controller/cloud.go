@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"os"
 
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	// Blank import registers every cloud provider (aws today). Adding a cloud is
@@ -16,7 +17,11 @@ import (
 // instance behind a node, by name, from the registry. An unsupported provider
 // fails closed with a clear message rather than silently disabling recycling.
 func newInstanceRecycler(ctx context.Context, provider, region string) (platform.InstanceRecycler, error) {
-	p, err := cloud.Build(ctx, provider, cloud.Config{Region: region})
+	cfg := cloud.Config{Region: region}
+	if provider == "aws" {
+		cfg.Options = map[string]string{"cluster": os.Getenv("KUBENEURON_EKS_CLUSTER"), "nodegroup": os.Getenv("KUBENEURON_EKS_NODEGROUP")}
+	}
+	p, err := cloud.Build(ctx, provider, cfg)
 	if err != nil {
 		return nil, err
 	}

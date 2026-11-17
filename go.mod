@@ -7,7 +7,9 @@ toolchain go1.26.11
 require (
 	github.com/aws/aws-sdk-go-v2 v1.48.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.34
+	github.com/aws/aws-sdk-go-v2/service/autoscaling v1.82.0
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.318.1
+	github.com/aws/aws-sdk-go-v2/service/eks v1.105.6
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
@@ -33,8 +35,6 @@ require (
 )
 
 require (
-	github.com/aws/aws-sdk-go-v2/service/autoscaling v1.82.0 // indirect
-	github.com/aws/aws-sdk-go-v2/service/eks v1.105.6 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-openapi/swag/cmdutils v0.28.0 // indirect
