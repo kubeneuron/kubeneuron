@@ -170,6 +170,9 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.ensureConfigMap(ctx, &installation, playbooksConfigMap(&installation, snapshot)); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile playbooks ConfigMap: %w", err))
 	}
+	if err := r.ensureInventorySummary(ctx, &installation); err != nil {
+		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile inventory summary: %w", err))
+	}
 	if err := r.ensureServiceAccount(ctx, &installation, controllerServiceAccount(&installation)); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile controller ServiceAccount: %w", err))
 	}
@@ -1262,6 +1265,8 @@ func (r *KubeNeuronReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
+		Owns(&rbacv1.Role{}).
+		Owns(&rbacv1.RoleBinding{}).
 		Owns(&rbacv1.ClusterRole{}).
 		Owns(&rbacv1.ClusterRoleBinding{}).
 		Owns(&appsv1.Deployment{}).
