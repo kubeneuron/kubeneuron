@@ -147,6 +147,12 @@ To update a pin:
   sources each image ships as `/licenses/BASE-IMAGE-PACKAGES`). `make lint`
   fails while the record names other digests; `make verify-image` fails while
   its content is stale.
+- Base-image sources, at every release: download the Debian source packages
+  (`.dsc` and the archives it lists, from the snapshot.debian.org links in
+  `build/licenses/base-image-packages.txt`) of the GPL and LGPL packages in the
+  image (base-files, netbase, ca-certificates, glibc) and keep them in the
+  release's private archive for three years. They back the source offer in
+  `/licenses/BASE-IMAGE-PACKAGES`; do not attach them to the GitHub release.
 
 Linters are pinned so a local `make lint` and CI agree: golangci-lint
 v2.14.0 (CI `golangci-lint-action` `version:`), shellcheck v0.11.0 (CI installs

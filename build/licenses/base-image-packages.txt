@@ -5,7 +5,7 @@ in the image). Sources: https://sources.debian.org/src/<source>/<version>/;
 older versions remain available at https://snapshot.debian.org/.
 We do not modify these packages. Their source code is available at the locations
 below; on request to hello@kubeneuron.com we will provide the source for the
-versions listed.
+versions listed, for three years after the release that contains this file.
 
 == gcr.io/distroless/base-debian12@sha256:fabbf1c0c357a3d42550111351daed089b20a2c954df13ee2fcff60602515e84
 -- linux/amd64

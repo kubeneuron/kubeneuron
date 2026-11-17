@@ -86,7 +86,7 @@ def generate():
              'older versions remain available at https://snapshot.debian.org/.',
              'We do not modify these packages. Their source code is available at the locations',
              'below; on request to hello@kubeneuron.com we will provide the source for the',
-             'versions listed.',
+             'versions listed, for three years after the release that contains this file.',
              '']
     for image in pinned_bases():
         lines.append(f'== {image}')
