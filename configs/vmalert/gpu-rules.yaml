@@ -118,7 +118,7 @@ groups:
         expr: up{job="dcgm-exporter"} == 0
         for: 5m
         labels:
-          severity: critical
+          severity: warning
         annotations:
           runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpuexporterdown"
           summary: "dcgm-exporter down on {{ $labels.node }}"

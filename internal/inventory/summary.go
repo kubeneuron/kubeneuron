@@ -3,12 +3,21 @@ package inventory
 
 import (
 	"errors"
+	"slices"
 	"strconv"
 	"time"
 )
 
 const Interval = time.Minute
 const Suffix = "-inventory-summary"
+
+// FirstAlertAcceptedAt is the summary key the controller sets once, when it
+// first accepts a metric alert. It is not part of the inventory schema, so
+// republishing the inventory keeps it.
+const FirstAlertAcceptedAt = "firstAlertAcceptedAt"
+
+// schemaKeys are the keys Data may write; Merge replaces exactly these.
+var schemaKeys = []string{"advertisedNodes", "schemaVersion", "observedAt", "reportingNodes", "gpuCount", "resetConfirmed", "diagnostic", "lastReportAt"}
 
 const (
 	ExitSMIMissing        = 78
@@ -54,6 +63,25 @@ func (s Summary) Data() map[string]string {
 		data["lastReportAt"] = s.LastReportAt.UTC().Format(time.RFC3339Nano)
 	}
 	return data
+}
+
+// Merge returns existing with the inventory keys replaced by s: a stale
+// optional key is dropped and every key outside the schema is kept.
+func Merge(existing map[string]string, s Summary) map[string]string {
+	data := s.Data()
+	for k, v := range existing {
+		if !slices.Contains(schemaKeys, k) {
+			data[k] = v
+		}
+	}
+	return data
+}
+
+// FirstAlert returns when the controller first accepted a metric alert, if
+// it has.
+func FirstAlert(data map[string]string) (time.Time, bool) {
+	at, err := time.Parse(time.RFC3339Nano, data[FirstAlertAcceptedAt])
+	return at, err == nil && !at.IsZero()
 }
 
 func Parse(data map[string]string, now time.Time) (Summary, error) {

@@ -163,3 +163,54 @@ func TestIncidentDetailSaysObserveOnly(t *testing.T) {
 		}
 	}
 }
+
+type recordingBackend struct {
+	registrationBackend
+	recorded int
+}
+
+func (b *recordingBackend) RecordAlertAccepted(context.Context) error {
+	b.recorded++
+	return nil
+}
+
+func TestFirstAlertRecordedOnlyAfterAcceptance(t *testing.T) {
+	backend := &recordingBackend{}
+	s := New(backend)
+	s.SetWebhookToken("hook")
+	handler := s.Routes()
+	post := func(path, body string) int {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, operatorRequest("POST", path, "hook", body))
+		return rec.Code
+	}
+
+	// Nothing accepted: unknown or resolved alerts, a refused token, a
+	// failed commit.
+	if code := post(vmalertPath, vmalertBody(t,
+		vmalertAlert("SomethingElse", "n1", time.Now().Add(time.Hour), nil),
+		vmalertAlert("GpuPowerBrake", "n1", time.Now().Add(-time.Minute), nil))); code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, operatorRequest("POST", vmalertPath, "wrong", vmalertBody(t, vmalertAlert("GpuTempCritical", "n1", time.Time{}, nil))))
+	backend.signalErr = context.DeadlineExceeded
+	if code := post(vmalertPath, vmalertBody(t, vmalertAlert("GpuTempCritical", "n1", time.Time{}, nil))); code != http.StatusServiceUnavailable {
+		t.Fatalf("failed commit: status %d", code)
+	}
+	if backend.recorded != 0 {
+		t.Fatalf("recorded a first alert %d times before any was accepted", backend.recorded)
+	}
+
+	backend.signalErr = nil
+	if code := post(vmalertPath, vmalertBody(t, vmalertAlert("GpuTempCritical", "n1", time.Time{}, nil))); code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	webhook := `{"alerts":[{"status":"firing","labels":{"alertname":"GpuTempCritical","node":"n1"}}]}`
+	if code := post("/api/v1/webhooks/alertmanager", webhook); code != http.StatusAccepted {
+		t.Fatalf("webhook status %d", code)
+	}
+	if backend.recorded != 2 {
+		t.Fatalf("recorded = %d, want one call per accepted batch on both paths", backend.recorded)
+	}
+}

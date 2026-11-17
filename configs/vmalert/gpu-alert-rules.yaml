@@ -79,7 +79,7 @@ groups:
           )
         for: 5m
         labels:
-          severity: critical
+          severity: warning
         annotations:
           summary: "dcgm-exporter down on {{ $labels.node }}"
           description: "No GPU metrics for 5m: a monitoring gap, not a GPU fault. KubeNeuron records it and runs no step; check the exporter and the node."

@@ -1134,20 +1134,59 @@ func TestManagedAlertingRules(t *testing.T) {
 
 func TestAlertDetectionCondition(t *testing.T) {
 	kn := managedObservability(testKubeNeuron())
-	if c := alertDetection(kn, &metav1.Condition{Status: metav1.ConditionTrue}); c.Status != metav1.ConditionTrue {
+	if c := alertDetection(kn, &metav1.Condition{Status: metav1.ConditionTrue}, nil); c.Status != metav1.ConditionTrue {
 		t.Errorf("managed store, rules ready: %+v", c)
 	}
-	if c := alertDetection(kn, notReady("NotReady", "x")); c.Status != metav1.ConditionFalse {
+	if c := alertDetection(kn, notReady("NotReady", "x"), nil); c.Status != metav1.ConditionFalse {
 		t.Errorf("managed store, rules not ready: %+v", c)
 	}
 	kn.Spec.Observability.Store = &kubeneuronv1alpha1.MetricsStoreSpec{OTLPEndpointSpec: kubeneuronv1alpha1.OTLPEndpointSpec{Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: "http://vm:8428/opentelemetry"}}
-	if c := alertDetection(kn, nil); c.Status != metav1.ConditionFalse || c.Reason != "ExternalStore" ||
+	if c := alertDetection(kn, nil, nil); c.Status != metav1.ConditionFalse || c.Reason != "ExternalStore" ||
 		!strings.Contains(c.Message, "point them at the controller webhook") {
 		t.Errorf("external store: %+v", c)
 	}
+	at := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
+	if c := alertDetection(kn, nil, &at); c.Status != metav1.ConditionTrue || c.Reason != "AlertReceived" ||
+		!strings.Contains(c.Message, "2026-11-17T10:00:00Z") {
+		t.Errorf("external store after the first alert: %+v", c)
+	}
 	kn.Spec.Observability.Store = nil
-	if c := alertDetection(kn, nil); c != nil {
+	if c := alertDetection(kn, nil, nil); c != nil {
 		t.Errorf("disabled store: %+v", c)
+	}
+}
+
+func TestFirstAlertAcceptedReadsTheOwnedSummary(t *testing.T) {
+	ctx := t.Context()
+	scheme := newOperatorScheme(t)
+	root := testKubeNeuron()
+	root.UID = "installation-a"
+	r := &KubeNeuronReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Scheme: scheme}
+	if r.firstAlertAccepted(ctx, root) != nil {
+		t.Fatal("first alert without a summary")
+	}
+	if err := r.ensureInventorySummary(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	if r.firstAlertAccepted(ctx, root) != nil {
+		t.Fatal("first alert in an empty summary")
+	}
+	var cm corev1.ConfigMap
+	key := client.ObjectKey{Namespace: root.Spec.Namespace, Name: root.Name + inventory.Suffix}
+	if err := r.Get(ctx, key, &cm); err != nil {
+		t.Fatal(err)
+	}
+	cm.Data = map[string]string{inventory.FirstAlertAcceptedAt: "2026-11-17T10:00:00Z"}
+	if err := r.Update(ctx, &cm); err != nil {
+		t.Fatal(err)
+	}
+	if at := r.firstAlertAccepted(ctx, root); at == nil || !at.Equal(time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)) {
+		t.Fatalf("first alert = %v", at)
+	}
+	other := root.DeepCopy()
+	other.UID = "installation-b"
+	if r.firstAlertAccepted(ctx, other) != nil {
+		t.Fatal("read the first alert from another installation's summary")
 	}
 }
 

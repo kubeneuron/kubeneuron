@@ -101,6 +101,12 @@ type DurableSignalBackend interface {
 	IngestSignal(ctx context.Context, sig types.Signal) error
 }
 
+// AlertAcceptanceRecorder notes that the controller accepted a metric
+// alert, so the operator can report that alerts reach it.
+type AlertAcceptanceRecorder interface {
+	RecordAlertAccepted(ctx context.Context) error
+}
+
 // AcceleratorReportBackend is the narrow optional extension for the
 // versioned accelerator-preflight report. It intentionally remains separate
 // while the controller/store integration lands: a controller that has not
@@ -535,6 +541,7 @@ func (s *Server) authorizeWebhook(w http.ResponseWriter, r *http.Request) bool {
 // ingestAlerts maps and persists firing alerts. It writes the response and
 // returns false when persistence is unavailable.
 func (s *Server) ingestAlerts(w http.ResponseWriter, r *http.Request, alerts []detect.Alert) bool {
+	accepted := false
 	for _, alert := range alerts {
 		sig, ok := s.catalog.Load().SignalFromAlert(alert)
 		if !ok {
@@ -555,11 +562,19 @@ func (s *Server) ingestAlerts(w http.ResponseWriter, r *http.Request, alerts []d
 				http.Error(w, "signal persistence unavailable", http.StatusServiceUnavailable)
 				return false
 			}
+			accepted = true
 			continue
 		}
 		// Compatibility fallback for a Backend that predates durable webhook
 		// intake. The production controller implements DurableSignalBackend.
 		s.backend.HandleSignal(r, sig)
+	}
+	if recorder, ok := s.backend.(AlertAcceptanceRecorder); ok && accepted {
+		// The alert is already committed: a failed record only delays the
+		// operator's condition until the next accepted alert.
+		if err := recorder.RecordAlertAccepted(r.Context()); err != nil {
+			slog.Warn("could not record the first accepted alert", "err", err)
+		}
 	}
 	return true
 }

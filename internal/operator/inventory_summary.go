@@ -85,7 +85,9 @@ func (r *KubeNeuronReconciler) setInventoryConditions(ctx context.Context, root 
 	case err != nil || !metav1.IsControlledBy(&cm, root):
 		unknown("SummaryUnavailable", "Could not read an installation-owned inventory summary.")
 		return
-	case len(cm.Data) == 0:
+	case cm.Data["schemaVersion"] == "":
+		// Empty, or holding only keys outside the inventory schema such as
+		// the first accepted alert.
 		unknown("AwaitingController", "Controller has not reported yet.")
 		return
 	}
