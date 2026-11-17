@@ -3,6 +3,7 @@
 package operator
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -120,11 +121,31 @@ func validateObservability(s *kubeneuronv1alpha1.KubeNeuron) error {
 	}
 	if g := obs.Grafana; g != nil {
 		switch g.Mode {
-		case kubeneuronv1alpha1.IntegrationModeDisabled, kubeneuronv1alpha1.IntegrationModeExternal:
-		case kubeneuronv1alpha1.IntegrationModeManaged:
-			return fmt.Errorf("spec.observability.grafana mode Managed is not available yet; use Disabled or External")
+		case kubeneuronv1alpha1.IntegrationModeDisabled, kubeneuronv1alpha1.IntegrationModeExternal, kubeneuronv1alpha1.IntegrationModeManaged:
 		default:
 			return fmt.Errorf("spec.observability.grafana has unsupported mode %q", g.Mode)
+		}
+		if g.Mode != kubeneuronv1alpha1.IntegrationModeManaged && (g.Datasource != nil || g.Resources != nil) {
+			return fmt.Errorf("spec.observability.grafana.datasource and resources apply only to a Managed grafana")
+		}
+		if g.Mode == kubeneuronv1alpha1.IntegrationModeManaged {
+			switch storeMode(s) {
+			case kubeneuronv1alpha1.IntegrationModeManaged:
+				if g.Datasource != nil {
+					return fmt.Errorf("spec.observability.grafana.datasource applies only to an External store; a Managed store is the datasource itself")
+				}
+			case kubeneuronv1alpha1.IntegrationModeExternal:
+				if g.Datasource == nil {
+					return fmt.Errorf("spec.observability.grafana: a Managed grafana with an External store requires datasource.url")
+				}
+				if err := validateOTLPEndpoint("spec.observability.grafana.datasource", s.Spec.Namespace, kubeneuronv1alpha1.OTLPEndpointSpec{
+					Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: g.Datasource.URL, AuthorizationSecretRef: g.Datasource.AuthorizationSecretRef,
+				}); err != nil {
+					return errors.New(strings.Replace(err.Error(), "datasource.endpoint", "datasource.url", 1))
+				}
+			default:
+				return fmt.Errorf("spec.observability.grafana: a Managed grafana needs a Managed or External store to read")
+			}
 		}
 	}
 	return nil

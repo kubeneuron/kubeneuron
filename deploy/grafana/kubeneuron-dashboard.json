@@ -430,7 +430,7 @@
       },
       "targets": [
         {
-          "expr": "min(up{job=\"kubeneuron-controller\"})",
+          "expr": "min(up{job=\"kubeneuron-controller\"}) or ((time() - max(timestamp(kubeneuron_reconcile_seconds_count{\"service.name\"=\"kubeneuron-controller\"}))) < bool 120) or on() vector(0)",
           "legendFormat": "controller"
         }
       ],
@@ -463,7 +463,7 @@
       },
       "targets": [
         {
-          "expr": "count(up{job=\"kubeneuron-agent\"} == 0) OR on() vector(0)",
+          "expr": "count(up{job=\"kubeneuron-agent\"} == 0) or count((time() - max by (\"k8s.node.name\") (max_over_time(timestamp(kubeneuron_agent_spool_depth{\"service.name\"=\"kubeneuron-agent\"})[1h:1m]))) > 120) OR on() vector(0)",
           "legendFormat": "agents down"
         }
       ],
