@@ -65,20 +65,34 @@ operator; see [Metrics path](#metrics-path-specobservability).
   cannot name a host.
 - **GPU metrics from the dcgm-exporter already in the cluster.** A Managed
   collector scrapes dcgm-exporter, for example the one GPU Operator
-  installs; KubeNeuron never installs dcgm-exporter. The operator looks for
-  the Service `collector.dcgmExporter.serviceName` (default
-  `nvidia-dcgm-exporter`) in `collector.dcgmExporter.namespace` (default:
-  every namespace), and scrapes the running pods behind its `gpu-metrics`
-  port every 30 seconds. The pods are looked up again every two minutes.
-  Series carry `node`, `gpu_uuid` and `gpu_model`, plus `node_pool` and
-  `mig_profile` where they exist, the same labels as the dependency
-  profile's vmagent job. **The `pod`, `namespace` and `container` labels that
-  dcgm-exporter adds for the workload holding a GPU are dropped before
-  anything is stored**; `keepWorkloadLabels: true` keeps them, and then the
-  store holds the names of your workloads. `ObservabilityGPUMetricsReady`
-  reports what is scraped, or `NotFound` when there is no dcgm-exporter;
-  `dcgmExporter.scrape: false` turns scraping off. The collector's
-  NetworkPolicy lets it reach only the exporter pods, on that port; a
+  installs. **KubeNeuron does not install dcgm-exporter**; without one there
+  are no GPU metrics. The operator looks for the Service
+  `collector.dcgmExporter.serviceName` (default `nvidia-dcgm-exporter`) in
+  `collector.dcgmExporter.namespace`; with no namespace it takes every
+  match in the cluster. It scrapes the Ready pods behind the Service's
+  `gpu-metrics` port (job `dcgm-exporter`, every 30 seconds, 10-second
+  timeout, at most 5000 samples a pod per scrape); a host-network exporter
+  is scraped on its node's address.
+- **Target updates are not immediate.** The pods are looked up again every
+  two minutes and written to a ConfigMap the collector reads without
+  restarting; the kubelet takes up to another minute or two to refresh the
+  mounted file, and the collector rereads it every minute. A new GPU node
+  is scraped within about five minutes.
+- Series carry `node`, `gpu_uuid`, `gpu_model` and `kubeneuron.installation`,
+  plus `node_pool` and `mig_profile` where they exist, the same labels as
+  the dependency profile's vmagent job. **The `pod`, `namespace`,
+  `container` and `pod_uid` labels that dcgm-exporter adds for the workload
+  holding a GPU are dropped before anything is stored**;
+  `keepWorkloadLabels: true` keeps them, and then the store holds the names
+  of your workloads. Any other label you enable in dcgm-exporter itself is
+  stored as the exporter sends it; KubeNeuron does not filter it.
+- `ObservabilityGPUMetricsReady` reports what is scraped, `NotFound` when
+  there is no such Service and `NoReadyPods` when it has no Ready pods.
+  `dcgmExporter.scrape: false` turns scraping off. **If you already scrape
+  dcgm-exporter into the store you point KubeNeuron at, set
+  `scrape: false`**, or every GPU series is stored twice.
+- The collector's NetworkPolicy lets it reach only the exporter pods on
+  that port (by the node's address for a host-network exporter); a
   NetworkPolicy in the exporter's namespace must admit it as well.
 - Both images are pinned by digest in the operator (override with
   `--otel-collector-image` and `--metrics-store-image`, for a mirror) and in

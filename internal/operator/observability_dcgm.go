@@ -12,12 +12,14 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
@@ -34,8 +36,14 @@ const (
 	dcgmTargetsKey         = "dcgm-exporter.json"
 	dcgmTargetsMountPath   = "/etc/otelcol-targets"
 	dcgmScrapeInterval     = "30s"
-	dcgmRediscoveryPeriod  = 2 * time.Minute
-	dcgmWorkloadLabelRegex = "pod|namespace|container|exported_pod|exported_namespace|exported_container"
+	dcgmScrapeTimeout      = "10s"
+	// dcgmSampleLimit fails a scrape that returns more samples than this,
+	// so a broken exporter cannot flood the store. Eight GPUs with MIG and
+	// the full profiling field set stay well under it.
+	dcgmSampleLimit       = 5000
+	dcgmRediscoveryPeriod = 2 * time.Minute
+	// The labels dcgm-exporter adds for the workload holding a GPU.
+	dcgmWorkloadLabelRegex = "pod|namespace|container|pod_uid|exported_pod|exported_namespace|exported_container|exported_pod_uid"
 )
 
 // nodePoolLabels derive node_pool, lowest precedence first: the same order
@@ -93,6 +101,11 @@ type dcgmTarget struct {
 	Address  string
 	Node     string
 	NodePool string
+	// HostNetwork targets are the node's address: a NetworkPolicy reaches
+	// them by IP block, not by pod selector.
+	HostNetwork bool
+	IP          string
+	Port        int32
 }
 
 type dcgmDiscovery struct {
@@ -157,7 +170,7 @@ func (r *KubeNeuronReconciler) discoverDCGMExporter(ctx context.Context, install
 		}
 		for j := range pods.Items {
 			pod := &pods.Items[j]
-			if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" || pod.DeletionTimestamp != nil {
+			if !podReady(pod) {
 				continue
 			}
 			number, ok := resolvePodPort(pod, port)
@@ -173,15 +186,32 @@ func (r *KubeNeuronReconciler) discoverDCGMExporter(ctx context.Context, install
 				nodes[pod.Spec.NodeName] = pool
 			}
 			found.Targets = append(found.Targets, dcgmTarget{
-				Address:  joinHostPort(pod.Status.PodIP, number),
-				Node:     pod.Spec.NodeName,
-				NodePool: pool,
+				Address:     joinHostPort(pod.Status.PodIP, number),
+				Node:        pod.Spec.NodeName,
+				NodePool:    pool,
+				HostNetwork: pod.Spec.HostNetwork,
+				IP:          pod.Status.PodIP,
+				Port:        number,
 			})
 		}
 		sort.Slice(found.Targets, func(a, b int) bool { return found.Targets[a].Address < found.Targets[b].Address })
 		discovery.Services = append(discovery.Services, found)
 	}
 	return discovery, nil
+}
+
+// podReady: only a Ready pod with an address is a target; a terminating
+// pod is not.
+func podReady(pod *corev1.Pod) bool {
+	if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" {
+		return false
+	}
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 func joinHostPort(ip string, port int32) string {
@@ -239,7 +269,9 @@ func (r *KubeNeuronReconciler) nodePool(ctx context.Context, name string) (strin
 }
 
 // dcgmTargetsFile renders the discovered pods as Prometheus file_sd groups,
-// labelled node and, when the node has one, node_pool.
+// labelled node and, when the node has one, node_pool. The order is fixed
+// (services by namespace, targets by address), so an unchanged fleet
+// rewrites nothing.
 func dcgmTargetsFile(discovery *dcgmDiscovery) (string, error) {
 	type group struct {
 		Targets []string          `json:"targets"`
@@ -296,6 +328,8 @@ func dcgmScrapeReceiver(installation *kubeneuronv1alpha1.KubeNeuron) map[string]
 	return map[string]any{"config": map[string]any{"scrape_configs": []any{map[string]any{
 		"job_name":        "dcgm-exporter",
 		"scrape_interval": dcgmScrapeInterval,
+		"scrape_timeout":  dcgmScrapeTimeout,
+		"sample_limit":    dcgmSampleLimit,
 		"file_sd_configs": []any{map[string]any{
 			"files":            []string{dcgmTargetsMountPath + "/" + dcgmTargetsKey},
 			"refresh_interval": "1m",
@@ -319,11 +353,76 @@ func gpuMetricsStatus(installation *kubeneuronv1alpha1.KubeNeuron, discovery *dc
 		names = append(names, s.Namespace+"/"+s.Name)
 	}
 	if discovery.targets() == 0 {
-		return notReady("NoTargets", "dcgm-exporter Service "+strings.Join(names, ", ")+" has no running pods")
+		return notReady("NoReadyPods", "dcgm-exporter Service "+strings.Join(names, ", ")+" has no Ready pods")
 	}
 	return &metav1.Condition{
 		Status:  metav1.ConditionTrue,
 		Reason:  "Scraping",
-		Message: fmt.Sprintf("scraping %d dcgm-exporter pods behind %s", discovery.targets(), strings.Join(names, ", ")),
+		Message: fmt.Sprintf("scraping %d Ready dcgm-exporter pods behind %s", discovery.targets(), strings.Join(names, ", ")),
 	}
+}
+
+// dcgmResourceProcessor stamps the scraped series with the installation, the
+// same resource attribute the components' own metrics carry, so one filter
+// selects both.
+func dcgmResourceProcessor(installation *kubeneuronv1alpha1.KubeNeuron) map[string]any {
+	return map[string]any{"attributes": []any{map[string]any{
+		"key": "kubeneuron.installation", "value": installation.Name, "action": "upsert",
+	}}}
+}
+
+// dcgmEgress lets the collector reach the exporter pods it scrapes and
+// nothing else: by namespace and pod selector on the pod network, and by
+// the node's address for a host-network exporter, which no pod selector
+// matches.
+func dcgmEgress(dcgm *dcgmDiscovery) []networkingv1.NetworkPolicyEgressRule {
+	if dcgm == nil {
+		return nil
+	}
+	var rules []networkingv1.NetworkPolicyEgressRule
+	for _, service := range dcgm.Services {
+		podNetwork := false
+		hostPorts := map[int32][]string{}
+		for _, t := range service.Targets {
+			if t.HostNetwork {
+				hostPorts[t.Port] = append(hostPorts[t.Port], t.IP)
+			} else {
+				podNetwork = true
+			}
+		}
+		if podNetwork {
+			port := service.Port
+			rules = append(rules, networkingv1.NetworkPolicyEgressRule{
+				To: []networkingv1.NetworkPolicyPeer{{
+					NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": service.Namespace}},
+					PodSelector:       &metav1.LabelSelector{MatchLabels: copyStringMap(service.Selector)},
+				}},
+				Ports: []networkingv1.NetworkPolicyPort{{Protocol: ptr.To(corev1.ProtocolTCP), Port: &port}},
+			})
+		}
+		ports := make([]int32, 0, len(hostPorts))
+		for p := range hostPorts {
+			ports = append(ports, p)
+		}
+		sort.Slice(ports, func(i, j int) bool { return ports[i] < ports[j] })
+		for _, p := range ports {
+			ips := hostPorts[p]
+			sort.Strings(ips)
+			var peers []networkingv1.NetworkPolicyPeer
+			seen := map[string]bool{}
+			for _, ip := range ips {
+				cidr := ip + "/32"
+				if strings.Contains(ip, ":") {
+					cidr = ip + "/128"
+				}
+				if seen[cidr] {
+					continue
+				}
+				seen[cidr] = true
+				peers = append(peers, networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: cidr}})
+			}
+			rules = append(rules, networkingv1.NetworkPolicyEgressRule{To: peers, Ports: []networkingv1.NetworkPolicyPort{tcpPort(p)}})
+		}
+	}
+	return rules
 }

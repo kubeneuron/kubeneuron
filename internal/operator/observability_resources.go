@@ -123,31 +123,39 @@ func collectorConfig(installation *kubeneuronv1alpha1.KubeNeuron) (string, error
 			"http": map[string]any{"endpoint": "0.0.0.0:" + strconv.Itoa(collectorOTLPPort)},
 		}},
 	}
-	pipelineReceivers := []string{"otlp"}
+	processors := map[string]any{
+		// Percentages of the container memory limit, which is always set.
+		"memory_limiter": map[string]any{"check_interval": "1s", "limit_percentage": 80, "spike_limit_percentage": 25},
+		"batch":          map[string]any{},
+	}
+	pipelines := map[string]any{
+		"metrics": map[string]any{
+			"receivers":  []string{"otlp"},
+			"processors": []string{"memory_limiter", "batch"},
+			"exporters":  pipelineExporters,
+		},
+	}
 	if dcgmScrapeEnabled(installation) {
+		// A pipeline of its own, so only the scraped series get the
+		// installation attribute; the components set theirs themselves.
 		receivers["prometheus/dcgm-exporter"] = dcgmScrapeReceiver(installation)
-		pipelineReceivers = append(pipelineReceivers, "prometheus/dcgm-exporter")
+		processors["resource/dcgm-exporter"] = dcgmResourceProcessor(installation)
+		pipelines["metrics/dcgm-exporter"] = map[string]any{
+			"receivers":  []string{"prometheus/dcgm-exporter"},
+			"processors": []string{"memory_limiter", "resource/dcgm-exporter", "batch"},
+			"exporters":  pipelineExporters,
+		}
 	}
 	config := map[string]any{
 		"extensions": map[string]any{
 			"health_check": map[string]any{"endpoint": "0.0.0.0:" + strconv.Itoa(collectorHealth)},
 		},
 		"receivers": receivers,
-		"processors": map[string]any{
-			// Percentages of the container memory limit, which is always set.
-			"memory_limiter": map[string]any{"check_interval": "1s", "limit_percentage": 80, "spike_limit_percentage": 25},
-			"batch":          map[string]any{},
-		},
+		"processors": processors,
 		"exporters": exporters,
 		"service": map[string]any{
 			"extensions": []string{"health_check"},
-			"pipelines": map[string]any{
-				"metrics": map[string]any{
-					"receivers":  pipelineReceivers,
-					"processors": []string{"memory_limiter", "batch"},
-					"exporters":  pipelineExporters,
-				},
-			},
+			"pipelines":  pipelines,
 			// The collector's own telemetry stays inside the pod.
 			"telemetry": map[string]any{"metrics": map[string]any{"level": "none"}},
 		},
@@ -358,18 +366,7 @@ func operatorPeer(operatorNamespace string) networkingv1.NetworkPolicyPeer {
 func collectorNetworkPolicy(installation *kubeneuronv1alpha1.KubeNeuron, operatorNamespace string, dcgm *dcgmDiscovery) (*networkingv1.NetworkPolicy, error) {
 	labels := resourceLabels(installation, collectorComponent)
 	egress := []networkingv1.NetworkPolicyEgressRule{dnsEgress()}
-	if dcgm != nil {
-		for _, service := range dcgm.Services {
-			port := service.Port
-			egress = append(egress, networkingv1.NetworkPolicyEgressRule{
-				To: []networkingv1.NetworkPolicyPeer{{
-					NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": service.Namespace}},
-					PodSelector:       &metav1.LabelSelector{MatchLabels: copyStringMap(service.Selector)},
-				}},
-				Ports: []networkingv1.NetworkPolicyPort{{Protocol: ptr.To(corev1.ProtocolTCP), Port: &port}},
-			})
-		}
-	}
+	egress = append(egress, dcgmEgress(dcgm)...)
 	switch storeMode(installation) {
 	case kubeneuronv1alpha1.IntegrationModeManaged:
 		egress = append(egress, networkingv1.NetworkPolicyEgressRule{

@@ -831,7 +831,8 @@ type CollectorSpec struct {
 // DCGMExporterScrapeSpec selects the dcgm-exporter the managed collector
 // scrapes: the pods behind a Service, on its port named gpu-metrics.
 type DCGMExporterScrapeSpec struct {
-	// Scrape turns scraping on or off. Default true.
+	// Scrape turns scraping on or off. Default true. Turn it off when the
+	// store already receives dcgm-exporter metrics from another scraper.
 	// +optional
 	Scrape *bool `json:"scrape,omitempty"`
 	// ServiceName is the dcgm-exporter Service. Default
@@ -845,7 +846,7 @@ type DCGMExporterScrapeSpec struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
-	// KeepWorkloadLabels keeps the pod, namespace and container labels
+	// KeepWorkloadLabels keeps the pod, namespace, container and pod_uid labels
 	// dcgm-exporter adds for the workload that holds a GPU. Default false:
 	// they are dropped before anything is stored, so the store holds no
 	// names of the user's workloads.

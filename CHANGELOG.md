@@ -15,9 +15,9 @@ API is `v1alpha1`.
   scrapes the dcgm-exporter already in the cluster (the GPU Operator
   Service `nvidia-dcgm-exporter` by default, configurable in
   `spec.observability.collector.dcgmExporter`) and reports
-  `ObservabilityGPUMetricsReady`. The workload labels `pod`, `namespace` and
-  `container` are dropped unless `keepWorkloadLabels` is set. KubeNeuron
-  does not install dcgm-exporter.
+  `ObservabilityGPUMetricsReady`. The workload labels `pod`, `namespace`,
+  `container` and `pod_uid` are dropped unless `keepWorkloadLabels` is set.
+  KubeNeuron does not install dcgm-exporter.
 
 - **Managed metrics path.** `spec.observability.collector` and
   `spec.observability.store` take `Managed`, `External` or `Disabled` (the

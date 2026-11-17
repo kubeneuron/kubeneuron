@@ -4,9 +4,11 @@ package operator
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -580,18 +582,36 @@ func dcgmFixtureObjects(namespace string, nodePool string) []client.Object {
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "gpu-a", Labels: map[string]string{
 		"kubeneuron.io/node-pool": "fallback", "eks.amazonaws.com/nodegroup": nodePool,
 	}}}
-	pod := func(name, ip string, phase corev1.PodPhase) *corev1.Pod {
-		return &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: selector},
-			Spec: corev1.PodSpec{NodeName: "gpu-a", Containers: []corev1.Container{{
-				Name: "exporter", Ports: []corev1.ContainerPort{{Name: "metrics", ContainerPort: 9400}},
-			}}},
-			Status: corev1.PodStatus{Phase: phase, PodIP: ip},
-		}
-	}
 	other := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "something-else", Namespace: namespace},
 		Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "x"}, Ports: []corev1.ServicePort{{Name: "gpu-metrics", Port: 1}}}}
-	return []client.Object{service, node, pod("dcgm-1", "10.0.0.7", corev1.PodRunning), pod("dcgm-2", "", corev1.PodPending), other}
+	terminating := dcgmPod(namespace, "dcgm-4", "10.0.0.9", true)
+	terminating.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	terminating.Finalizers = []string{"test/keep"}
+	return []client.Object{service, node, other,
+		dcgmPod(namespace, "dcgm-1", "10.0.0.7", true),
+		dcgmPod(namespace, "dcgm-2", "", false),
+		dcgmPod(namespace, "dcgm-3", "10.0.0.8", false),
+		terminating,
+	}
+}
+
+// dcgmPod is an exporter pod on node gpu-a, Running, Ready or not.
+func dcgmPod(namespace, name, ip string, ready bool) *corev1.Pod {
+	status := corev1.ConditionFalse
+	if ready {
+		status = corev1.ConditionTrue
+	}
+	phase := corev1.PodRunning
+	if ip == "" {
+		phase = corev1.PodPending
+	}
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: map[string]string{"app": "nvidia-dcgm-exporter"}},
+		Spec: corev1.PodSpec{NodeName: "gpu-a", Containers: []corev1.Container{{
+			Name: "exporter", Ports: []corev1.ContainerPort{{Name: "metrics", ContainerPort: 9400}},
+		}}},
+		Status: corev1.PodStatus{Phase: phase, PodIP: ip, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: status}}},
+	}
 }
 
 func TestDCGMExporterDiscoveryAndScrape(t *testing.T) {
@@ -611,7 +631,7 @@ func TestDCGMExporterDiscoveryAndScrape(t *testing.T) {
 		t.Fatal(err)
 	}
 	if want := `[{"targets":["10.0.0.7:9400"],"labels":{"node":"gpu-a","node_pool":"gpu-ng"}}]`; targets.Data[dcgmTargetsKey] != want {
-		t.Errorf("targets = %s, want %s (the running pod only, EKS node group winning)", targets.Data[dcgmTargetsKey], want)
+		t.Errorf("targets = %s, want %s (the Ready pod only, EKS node group winning)", targets.Data[dcgmTargetsKey], want)
 	}
 
 	config := decodeCollectorConfig(t, kn)
@@ -619,12 +639,26 @@ func TestDCGMExporterDiscoveryAndScrape(t *testing.T) {
 	scrape := receiver["config"].(map[string]any)["scrape_configs"].([]any)[0].(map[string]any)
 	relabel := scrape["metric_relabel_configs"].([]any)
 	last := relabel[len(relabel)-1].(map[string]any)
-	if last["action"] != "labeldrop" || last["regex"] != dcgmWorkloadLabelRegex {
+	if last["action"] != "labeldrop" || last["regex"] != dcgmWorkloadLabelRegex || !strings.Contains(dcgmWorkloadLabelRegex, "|pod_uid|") {
 		t.Errorf("workload labels are not dropped by default: %v", relabel)
 	}
-	receivers := config["service"].(map[string]any)["pipelines"].(map[string]any)["metrics"].(map[string]any)["receivers"].([]any)
-	if len(receivers) != 2 || receivers[1] != "prometheus/dcgm-exporter" {
-		t.Errorf("pipeline receivers = %v", receivers)
+	if scrape["job_name"] != "dcgm-exporter" || scrape["scrape_interval"] != "30s" || scrape["scrape_timeout"] != "10s" || scrape["sample_limit"] != float64(dcgmSampleLimit) {
+		t.Errorf("scrape config = %v", scrape)
+	}
+	pipelines := config["service"].(map[string]any)["pipelines"].(map[string]any)
+	if receivers := pipelines["metrics"].(map[string]any)["receivers"].([]any); len(receivers) != 1 || receivers[0] != "otlp" {
+		t.Errorf("components pipeline receivers = %v", receivers)
+	}
+	scraped := pipelines["metrics/dcgm-exporter"].(map[string]any)
+	if receivers := scraped["receivers"].([]any); len(receivers) != 1 || receivers[0] != "prometheus/dcgm-exporter" {
+		t.Errorf("dcgm pipeline receivers = %v", receivers)
+	}
+	if processors := fmt.Sprint(scraped["processors"]); processors != "[memory_limiter resource/dcgm-exporter batch]" {
+		t.Errorf("dcgm pipeline processors = %s", processors)
+	}
+	stamp := config["processors"].(map[string]any)["resource/dcgm-exporter"].(map[string]any)["attributes"].([]any)[0].(map[string]any)
+	if stamp["key"] != "kubeneuron.installation" || stamp["value"] != "fleet" || stamp["action"] != "upsert" {
+		t.Errorf("installation attribute = %v", stamp)
 	}
 
 	var collector appsv1.Deployment
@@ -660,7 +694,7 @@ func TestDCGMExporterDiscoveryAndScrape(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c := meta.FindStatusCondition(got.Status.Conditions, gpuMetricsCondition); c == nil || c.Status != metav1.ConditionTrue || c.Reason != "Scraping" ||
-		c.Message != "scraping 1 dcgm-exporter pods behind gpu-operator/nvidia-dcgm-exporter" {
+		c.Message != "scraping 1 Ready dcgm-exporter pods behind gpu-operator/nvidia-dcgm-exporter" {
 		t.Errorf("GPU metrics condition = %#v", c)
 	}
 
@@ -732,5 +766,146 @@ func TestDCGMExporterNamespaceIsHonoured(t *testing.T) {
 	}
 	if c := meta.FindStatusCondition(got.Status.Conditions, gpuMetricsCondition); c == nil || c.Reason != "NotFound" || !strings.Contains(c.Message, "in namespace elsewhere") {
 		t.Errorf("condition = %#v, want NotFound in the configured namespace", c)
+	}
+}
+
+func TestDCGMExporterWithoutReadyPods(t *testing.T) {
+	ctx := context.Background()
+	kn := managedObservability(testKubeNeuron())
+	objects := dcgmFixtureObjects("gpu-operator", "ng")
+	kept := objects[:0]
+	for _, o := range objects {
+		if o.GetName() != "dcgm-1" {
+			kept = append(kept, o)
+		}
+	}
+	fakeClient, reconciler := reconcileObservabilityFixture(t, kn, kept...)
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "fleet"}}); err != nil {
+		t.Fatal(err)
+	}
+	var got kubeneuronv1alpha1.KubeNeuron
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet"}, &got); err != nil {
+		t.Fatal(err)
+	}
+	if c := meta.FindStatusCondition(got.Status.Conditions, gpuMetricsCondition); c == nil || c.Status != metav1.ConditionFalse || c.Reason != "NoReadyPods" {
+		t.Errorf("condition = %#v, want NoReadyPods while the Service exists", c)
+	}
+}
+
+func TestDCGMExporterOnTheHostNetwork(t *testing.T) {
+	ctx := context.Background()
+	kn := managedObservability(testKubeNeuron())
+	objects := dcgmFixtureObjects("gpu-operator", "ng")
+	for _, o := range objects {
+		if pod, ok := o.(*corev1.Pod); ok && pod.Name == "dcgm-1" {
+			pod.Spec.HostNetwork = true
+			pod.Status.PodIP = "192.168.1.20"
+		}
+	}
+	fakeClient, reconciler := reconcileObservabilityFixture(t, kn, objects...)
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "fleet"}}); err != nil {
+		t.Fatal(err)
+	}
+	var targets corev1.ConfigMap
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-otel-collector-targets", Namespace: kn.Spec.Namespace}, &targets); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(targets.Data[dcgmTargetsKey], `"192.168.1.20:9400"`) {
+		t.Errorf("targets = %s, want the node address", targets.Data[dcgmTargetsKey])
+	}
+	var policy networkingv1.NetworkPolicy
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-otel-collector", Namespace: kn.Spec.Namespace}, &policy); err != nil {
+		t.Fatal(err)
+	}
+	var byIP, bySelector bool
+	for _, rule := range policy.Spec.Egress {
+		for _, peer := range rule.To {
+			if peer.IPBlock != nil && peer.IPBlock.CIDR == "192.168.1.20/32" && rule.Ports[0].Port.IntValue() == 9400 {
+				byIP = true
+			}
+			if peer.PodSelector != nil && peer.PodSelector.MatchLabels["app"] == "nvidia-dcgm-exporter" {
+				bySelector = true
+			}
+		}
+	}
+	if !byIP || bySelector {
+		t.Errorf("egress = %#v, want the node address on 9400 and no pod selector, which matches no host-network pod", policy.Spec.Egress)
+	}
+}
+
+func TestDCGMExporterInSeveralNamespaces(t *testing.T) {
+	ctx := context.Background()
+	kn := managedObservability(testKubeNeuron())
+	objects := dcgmFixtureObjects("z-gpu", "ng")
+	for _, o := range dcgmFixtureObjects("a-gpu", "ng") {
+		if _, ok := o.(*corev1.Node); ok {
+			continue
+		}
+		if pod, ok := o.(*corev1.Pod); ok && pod.Name == "dcgm-3" {
+			pod.Status.Conditions[0].Status = corev1.ConditionTrue
+		}
+		objects = append(objects, o)
+	}
+	fakeClient, reconciler := reconcileObservabilityFixture(t, kn, objects...)
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "fleet"}}); err != nil {
+		t.Fatal(err)
+	}
+	var got kubeneuronv1alpha1.KubeNeuron
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet"}, &got); err != nil {
+		t.Fatal(err)
+	}
+	if c := meta.FindStatusCondition(got.Status.Conditions, gpuMetricsCondition); c == nil || c.Status != metav1.ConditionTrue ||
+		c.Message != "scraping 3 Ready dcgm-exporter pods behind a-gpu/nvidia-dcgm-exporter, z-gpu/nvidia-dcgm-exporter" {
+		t.Errorf("condition = %#v", c)
+	}
+	var targets corev1.ConfigMap
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-otel-collector-targets", Namespace: kn.Spec.Namespace}, &targets); err != nil {
+		t.Fatal(err)
+	}
+	first := targets.Data[dcgmTargetsKey]
+	if strings.Index(first, "10.0.0.7") > strings.Index(first, "10.0.0.8") {
+		t.Errorf("targets out of order: %s", first)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "fleet"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-otel-collector-targets", Namespace: kn.Spec.Namespace}, &targets); err != nil {
+		t.Fatal(err)
+	}
+	if targets.Data[dcgmTargetsKey] != first {
+		t.Errorf("targets changed with nothing changed: %s, then %s", first, targets.Data[dcgmTargetsKey])
+	}
+}
+
+func TestDCGMTargetChangesDoNotRestartTheCollector(t *testing.T) {
+	ctx := context.Background()
+	kn := managedObservability(testKubeNeuron())
+	fakeClient, reconciler := reconcileObservabilityFixture(t, kn, dcgmFixtureObjects("gpu-operator", "ng")...)
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: "fleet"}}
+	digest := func() string {
+		t.Helper()
+		if _, err := reconciler.Reconcile(ctx, request); err != nil {
+			t.Fatal(err)
+		}
+		var collector appsv1.Deployment
+		if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-otel-collector", Namespace: kn.Spec.Namespace}, &collector); err != nil {
+			t.Fatal(err)
+		}
+		return collector.Spec.Template.Annotations["kubeneuron.io/config-digest"]
+	}
+	before := digest()
+	if err := fakeClient.Create(ctx, dcgmPod("gpu-operator", "dcgm-5", "10.0.0.10", true)); err != nil {
+		t.Fatal(err)
+	}
+	after := digest()
+	var targets corev1.ConfigMap
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-otel-collector-targets", Namespace: kn.Spec.Namespace}, &targets); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(targets.Data[dcgmTargetsKey], "10.0.0.10") {
+		t.Fatalf("new pod not a target: %s", targets.Data[dcgmTargetsKey])
+	}
+	if before == "" || before != after {
+		t.Errorf("config digest %q -> %q: a new target must not restart the collector", before, after)
 	}
 }
