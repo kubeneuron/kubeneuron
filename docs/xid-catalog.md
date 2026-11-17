@@ -52,8 +52,8 @@ See `configs/vmalert/gpu-rules.yaml`:
   Draining protects workloads, but resetting the GPU fixes nothing — these
   route to observe/ticket, not to the reset ladder.
 - **NVLink CRC, PCIe replay storms** — link degradation trends.
-- **Exporter down / GPU count below inventory / nvidia-smi timeout** —
-  liveness triage: distinguishes driver hang (reset ladder) from node death
-  (reboot) from a fell-off-bus GPU (count mismatch).
-- **Agent heartbeat stale** — meta-signal: automation on that node is
-  suppressed because post-action verification is impossible.
+- **Exporter down** (`exporter-down`): a monitoring gap, not a fault. The
+  controller records and notifies it and never runs a step for it.
+- **Agent heartbeat stale** (`agent-down`): no data from the node. Recorded
+  and notified, never acted on: every rung above observe would run through
+  the agent that stopped answering.

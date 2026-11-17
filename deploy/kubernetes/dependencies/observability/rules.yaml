@@ -128,7 +128,7 @@ spec:
           annotations:
             runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpuexporterdown"
             summary: "dcgm-exporter down on {{ $labels.node }}"
-            description: "No GPU metrics for 5m — driver hang or node failure. Playbook: drain-and-reset via node triage."
+            description: "No GPU metrics for 5m: a monitoring gap, not a GPU fault. KubeNeuron records it and runs no step; check the exporter and the node."
 
         - alert: KubeNeuronAgentDown
           expr: up{job="kubeneuron-agent"} == 0

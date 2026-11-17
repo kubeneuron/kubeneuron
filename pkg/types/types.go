@@ -183,10 +183,11 @@ const (
 	ClassThermal         ProblemClass = "thermal"           // thermal throttle / critical temp
 	ClassPower           ProblemClass = "power"             // power brake / PSU issues
 	ClassPCIe            ProblemClass = "pcie"              // PCIe replay storms
-	ClassDriverHang      ProblemClass = "driver-hang"       // nvidia-smi timeout, exporter dead
+	ClassDriverHang      ProblemClass = "driver-hang"       // nvidia-smi timeout, amdgpu ring timeout
 	ClassGPULost         ProblemClass = "gpu-lost"          // GPU count below inventory
 	ClassDiagFailure     ProblemClass = "diag-failure"      // dcgmi diag failed
 	ClassAgentDown       ProblemClass = "agent-down"        // kubeneuron-agent heartbeat stale
+	ClassExporterDown    ProblemClass = "exporter-down"     // GPU metrics exporter stopped reporting
 )
 
 // Severity of a signal.

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/inventory"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/operations"
@@ -548,6 +549,8 @@ type IncidentDetail struct {
 	ImpactPreviewUnavailable string                      `json:"impact_preview_unavailable,omitempty"`
 	Decision                 string                      `json:"decision,omitempty"`
 	DecisionImpactDigest     string                      `json:"decision_impact_digest,omitempty"`
+	// ObserveOnly says, for a class that never starts recovery, why.
+	ObserveOnly string `json:"observe_only,omitempty"`
 }
 
 func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
@@ -557,6 +560,9 @@ func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail := IncidentDetail{Incident: inc, Audit: audit, RecoveryAvailability: types.RecoveryAvailabilityFromAudit(audit)}
+	if reason, ok := detect.ObserveOnly(inc.Class); ok {
+		detail.ObserveOnly = reason + "; no recovery step runs"
+	}
 	if backend, ok := s.operator.(ImpactPreviewBackend); ok && inc.ApprovalEpoch > 0 {
 		if preview, err := backend.ImpactPreview(r.Context(), inc.ID, inc.ApprovalEpoch); err == nil && preview != nil {
 			detail.ImpactPreviewDigest = preview.Digest

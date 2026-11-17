@@ -307,6 +307,7 @@ func (s *Server) requestIsSecure(r *http.Request) bool {
 // are deliberately not listed:
 //
 //	POST   /api/v1/webhooks/alertmanager   Alertmanager webhook (slow path)
+//	POST   /api/v1/webhooks/vmalert/api/v2/alerts  vmalert notifier (Alertmanager API v2 body)
 //	GET    /api/v1/nodes                   fleet state
 //	GET    /api/v1/nodes/{node}            node detail
 //	GET    /api/v1/incidents               list (filter: ?state=)
@@ -325,6 +326,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.Handle("POST /api/v1/webhooks/alertmanager", s.requireLeader(http.HandlerFunc(s.handleAlertmanager)))
+	mux.Handle("POST /api/v1/webhooks/vmalert/api/v2/alerts", s.requireLeader(http.HandlerFunc(s.handleVMAlert)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -444,31 +446,7 @@ func (s *Server) handleRegistrationCapabilityV2(w http.ResponseWriter, _ *http.R
 // insecure development mode. A firing alert can drive cordon/drain, so an
 // unauthenticated webhook is a remediation-driven denial-of-service vector.
 func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
-	switch token := s.currentWebhookToken(); {
-	case token != "":
-		if !bearerMatches(r, token) {
-			source := remoteSource(r)
-			if s.authLimiter.blocked(source) {
-				http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
-				return
-			}
-			s.authLimiter.record(source)
-			metrics.AuthFailures.WithLabelValues("webhook").Inc()
-			slog.Warn("webhook authentication failed", "remote", source)
-			w.Header().Set("WWW-Authenticate", `Bearer realm="kubeneuron-webhook"`)
-			http.Error(w, "webhook authentication failed", http.StatusUnauthorized)
-			return
-		}
-	case s.webhookInsecureAllowed:
-		// Explicit development opt-in: run unauthenticated. Never reached in a
-		// production install, which mandates spec.notifications.webhookToken.
-	default:
-		// Fail CLOSED. Without a token anyone with network reach could POST a
-		// firing critical alert for an arbitrary node and drive remediation.
-		metrics.AuthFailures.WithLabelValues("webhook").Inc()
-		slog.Warn("rejecting Alertmanager webhook: no webhook token configured", "remote", remoteSource(r))
-		w.Header().Set("WWW-Authenticate", `Bearer realm="kubeneuron-webhook"`)
-		http.Error(w, "webhook authentication is not configured", http.StatusUnauthorized)
+	if !s.authorizeWebhook(w, r) {
 		return
 	}
 	var payload detect.AlertmanagerWebhook
@@ -482,7 +460,82 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 		writeJSONDecodeError(w, "bad payload", err)
 		return
 	}
-	for _, alert := range payload.Alerts {
+	if !s.ingestAlerts(w, r, payload.Alerts) {
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// handleVMAlert takes what vmalert sends a notifier: the Alertmanager API
+// v2 body, a bare list of alerts with no status field. vmalert appends
+// /api/v2/alerts to its -notifier.url, so the route carries that suffix
+// under the webhook prefix. An alert is firing until its endsAt has
+// passed; a resolved one is ignored, as on the webhook path.
+func (s *Server) handleVMAlert(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeWebhook(w, r) {
+		return
+	}
+	var posted []detect.Alert
+	r.Body = http.MaxBytesReader(w, r.Body, maxAlertmanagerBytes)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(&posted); err != nil {
+		writeJSONDecodeError(w, "bad payload", err)
+		return
+	}
+	if err := ensureJSONEOF(dec); err != nil {
+		writeJSONDecodeError(w, "bad payload", err)
+		return
+	}
+	now := time.Now()
+	for i := range posted {
+		posted[i].Status = "resolved"
+		if posted[i].EndsAt.IsZero() || posted[i].EndsAt.After(now) {
+			posted[i].Status = "firing"
+		}
+	}
+	if !s.ingestAlerts(w, r, posted) {
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// authorizeWebhook checks the webhook bearer token, failing closed when none
+// is configured. It writes the response and returns false on refusal.
+func (s *Server) authorizeWebhook(w http.ResponseWriter, r *http.Request) bool {
+	switch token := s.currentWebhookToken(); {
+	case token != "":
+		if !bearerMatches(r, token) {
+			source := remoteSource(r)
+			if s.authLimiter.blocked(source) {
+				http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
+				return false
+			}
+			s.authLimiter.record(source)
+			metrics.AuthFailures.WithLabelValues("webhook").Inc()
+			slog.Warn("webhook authentication failed", "remote", source)
+			w.Header().Set("WWW-Authenticate", `Bearer realm="kubeneuron-webhook"`)
+			http.Error(w, "webhook authentication failed", http.StatusUnauthorized)
+			return false
+		}
+	case s.webhookInsecureAllowed:
+		// Explicit development opt-in: run unauthenticated. Never reached in a
+		// production install, which mandates spec.notifications.webhookToken.
+	default:
+		// Fail CLOSED. Without a token anyone with network reach could POST a
+		// firing critical alert for an arbitrary node and drive remediation.
+		metrics.AuthFailures.WithLabelValues("webhook").Inc()
+		slog.Warn("rejecting Alertmanager webhook: no webhook token configured", "remote", remoteSource(r))
+		w.Header().Set("WWW-Authenticate", `Bearer realm="kubeneuron-webhook"`)
+		http.Error(w, "webhook authentication is not configured", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+// ingestAlerts maps and persists firing alerts. It writes the response and
+// returns false when persistence is unavailable.
+func (s *Server) ingestAlerts(w http.ResponseWriter, r *http.Request, alerts []detect.Alert) bool {
+	for _, alert := range alerts {
 		sig, ok := s.catalog.Load().SignalFromAlert(alert)
 		if !ok {
 			continue
@@ -500,7 +553,7 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 		if durable, ok := s.backend.(DurableSignalBackend); ok {
 			if err := durable.IngestSignal(r.Context(), sig); err != nil {
 				http.Error(w, "signal persistence unavailable", http.StatusServiceUnavailable)
-				return
+				return false
 			}
 			continue
 		}
@@ -508,7 +561,7 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 		// intake. The production controller implements DurableSignalBackend.
 		s.backend.HandleSignal(r, sig)
 	}
-	w.WriteHeader(http.StatusAccepted)
+	return true
 }
 
 // alertTargetKnown reports whether the node an alert targets exists in the

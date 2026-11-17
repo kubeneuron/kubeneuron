@@ -72,16 +72,20 @@ Check the power side; not remediable from software.
 
 ### GpuExporterDown
 
-dcgm-exporter on the node stopped answering scrapes for 5m: driver hang,
-exporter crash, or node failure. Per-GPU alerts from this node are inhibited
-while this fires. Check the exporter pod, then `nvidia-smi` responsiveness
-on the node; a hung driver follows the drain → reset → reboot ladder.
+dcgm-exporter on the node stopped answering scrapes for 5m, or its series
+stopped arriving: an exporter crash, a hung driver or a dead node. The
+incident is `exporter-down`, and the controller only records and notifies
+it: no data is not evidence of a GPU fault, so no step runs, in any mode and
+whatever policy binds the class. Per-GPU alerts from this node are inhibited
+while this fires (dependency profile). Check the exporter pod, then
+`nvidia-smi` responsiveness on the node.
 
 ### KubeNeuronAgentDown
 
-The KubeNeuron agent on the node is unreachable (3m). Automation for this
-node is effectively suspended — the controller will not act without a live,
-acknowledged agent. Check the agent pod (`kubectl -n <ns> logs ds/<name>-agent`),
+The KubeNeuron agent on the node is unreachable (3m), or on the Managed
+metrics path its series stopped arriving. The incident is `agent-down`
+("no data from the node"), and the controller only records and notifies it:
+no step runs, in any mode and whatever policy binds the class. Check the agent pod (`kubectl -n <ns> logs ds/<name>-agent`),
 its `/readyz`, and the mTLS material if it logs TLS errors.
 
 ## Shadow-only GPU alerts (v0.7, route to humans, never to the controller)

@@ -11,6 +11,15 @@ API is `v1alpha1`.
 
 ### Added
 
+- **Metric-alert detection with the Managed store.** The managed vmalert
+  also evaluates `configs/vmalert/gpu-alert-rules.yaml` and sends what
+  fires to the controller's new `/api/v1/webhooks/vmalert` endpoint (the
+  Alertmanager API v2 body, the webhook bearer token): thermal, power,
+  remapped-row budget, PCIe replays, a dead dcgm-exporter and a silent
+  agent open incidents without an Alertmanager. The rules are plain PromQL
+  and aggregate away the workload labels. `AlertDetectionConfigured`
+  reports whether metric alerts reach the controller.
+
 - **Managed Grafana.** `spec.observability.grafana.mode: Managed` runs the
   official Grafana image (AGPL-3.0, unmodified, pinned by digest) with the
   store as a read-only datasource and the six dashboards provisioned,
@@ -27,9 +36,8 @@ API is `v1alpha1`.
 
 - **Recording rules with the Managed store.** A Managed store comes with a
   vmalert that evaluates `configs/vmalert/gpu-recording-rules.yaml` into
-  it, recording rules only, no notifier, reaching only the store; the
-  dashboards' `kubeneuron_gpu_*` series exist without a separate rule
-  setup. `ObservabilityRulesReady` reports it. With an External store the
+  it; the dashboards' `kubeneuron_gpu_*` series exist without a separate
+  rule setup. `ObservabilityRulesReady` reports it. With an External store the
   rules are the user's to load.
 
 - **GPU metrics from the existing dcgm-exporter.** A Managed collector
@@ -94,6 +102,16 @@ API is `v1alpha1`.
   `recycle.enabled: true`.
 
 ### Fixed
+
+- **A dead GPU exporter no longer starts recovery (behaviour change of the
+  dependency profile).** `GpuExporterDown` used to open a `driver-hang`
+  incident, which the baseline pack bound to the in-place reset ladder, so
+  a stopped dcgm-exporter on a node with an idle GPU could end in a reset
+  and, by escalation, a drain. It now opens `exporter-down`, a monitoring
+  gap, bound to observe in every shipped pack. The controller never runs a
+  step for `exporter-down` or `agent-down`, in any mode and whatever policy
+  binds them, and says so in the incident, the CLI and the panel.
+  `driver-hang` remains the class of an amdgpu ring timeout.
 
 - **kmsg watcher cancellation on macOS.** The kernel-log reader opens its
   source non-blocking, so cancelling the watcher wakes a reader parked on an

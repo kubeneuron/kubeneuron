@@ -278,8 +278,9 @@ func cmdIncidents() *cobra.Command {
 			return err
 		}
 		var detail struct {
-			Incident *types.Incident     `json:"incident"`
-			Audit    []*types.AuditEntry `json:"audit"`
+			Incident    *types.Incident     `json:"incident"`
+			Audit       []*types.AuditEntry `json:"audit"`
+			ObserveOnly string              `json:"observe_only"`
 		}
 		if err := cl.do("GET", "/api/v1/incidents/"+args[0], nil, &detail); err != nil {
 			return err
@@ -290,6 +291,9 @@ func cmdIncidents() *cobra.Command {
 			inc.ID, inc.State, inc.Class, inc.Target.Node, inc.Target.GPUUUID,
 			inc.Playbook, inc.StepIndex, inc.Attempt, inc.DryRun, inc.SignalSeen,
 			inc.OpenedAt.Format(time.RFC3339))
+		if detail.ObserveOnly != "" {
+			_, _ = fmt.Fprintf(out, "observe:   %s\n", detail.ObserveOnly)
+		}
 		if recovery := types.RecoveryAvailabilityFromAudit(detail.Audit); recovery != nil {
 			_, _ = fmt.Fprintf(out, "recovery:  %s [%s] (assessed %s)\nreason:    %s\n", recovery.Status, recovery.Source, recovery.ObservedAt.Format(time.RFC3339), recovery.Reason)
 		}

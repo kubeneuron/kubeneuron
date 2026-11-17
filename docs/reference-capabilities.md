@@ -42,7 +42,7 @@ tooling, kernel-log format, or Kubernetes resource names.
 |---|---|---|---|
 | Kernel-log fault detection (`/dev/kmsg`) | shipped & hardware-validated — `internal/agent/kmsg/watcher.go` | shipped, not hardware-validated — `internal/agent/kmsg/amdgpu.go` | seam only (no implementation) |
 | Polled telemetry fault detection (DCGM / vendor SMI) | shipped & hardware-validated — `internal/agent/gpuhealth/gpuhealth.go` | shipped, not hardware-validated — `internal/agent/amdhealth/amdhealth.go` (fixtures are synthetic: the amd-smi JSON schema is reconstructed, not captured) | seam only (no implementation) |
-| Metric-alert fault detection (vmalert → Alertmanager) | shipped, not hardware-validated — `configs/vmalert/gpu-rules.yaml`, `internal/detect/alertmanager.go` | seam only (no implementation) | seam only (no implementation) |
+| Metric-alert fault detection (vmalert → Alertmanager, or the managed vmalert → controller) | shipped, not hardware-validated — `configs/vmalert/gpu-rules.yaml`, `configs/vmalert/gpu-alert-rules.yaml`, `internal/detect/alertmanager.go` | seam only (no implementation) | seam only (no implementation) |
 | XID catalog (vendor-native fault encoding) | shipped & hardware-validated — `internal/detect/xid.go` | not applicable | not applicable |
 | Neutral fault catalog (`(vendor, code)` → class) | shipped, not hardware-validated — `internal/detect/fault.go` (9 NVIDIA rows; coverage pinned by `fault_coverage_test.go`) | shipped, not hardware-validated — `internal/detect/fault.go` (9 AMD rows; coverage pinned by `fault_coverage_test.go`) | seam only (no implementation) |
 | Accelerator inventory and runtime attestation | shipped & hardware-validated — `internal/agent/nvml/smi.go`, `internal/accelerator/nvidia/nvidia.go` | seam only (no implementation) | seam only (no implementation) |
@@ -184,7 +184,13 @@ still driven only by a hand-written fixture
 **Metric-alert detection — not hardware-validated.** `configs/vmalert/gpu-rules.yaml`
 is written against `DCGM_FI_*` series and `internal/detect/alertmanager.go` maps
 rule names to problem classes; a unit test cross-checks rules against the map.
-No hardware run has fired an alert through vmalert into the webhook.
+With the Managed store, `configs/vmalert/gpu-alert-rules.yaml` (thermal, power,
+remapped-row budget, PCIe replays, exporter down, agent down) goes from the
+managed vmalert straight to the controller's `/api/v1/webhooks/vmalert`; the
+rules were evaluated by vmalert v1.147.0 against VictoriaMetrics fed over OTLP
+from a fake exporter, and a captured notifier body is replayed in a unit test.
+`exporter-down` and `agent-down` are observe only. No hardware run has fired an
+alert through vmalert into the controller.
 
 **XID catalog — hardware-validated.** `internal/detect/xid.go` classified
 kernel-log XIDs 79 and 92 read off a live node into `ClassFellOffBus` and

@@ -1,0 +1,98 @@
+# Alerting rules the managed vmalert evaluates against the Managed store and
+# sends to the controller. They cover the faults that reach KubeNeuron on
+# NVIDIA only as metric alerts (the agent's kernel-log path sees the rest):
+# thermal, power, remapped-row budget, PCIe replays, a dead dcgm-exporter
+# and a silent agent.
+#
+# Names, thresholds and `for` are those of gpu-rules.yaml, so both paths
+# open the same incidents; names must stay in internal/detect/alertmanager.go
+# (alertClassMap). Differences from gpu-rules.yaml:
+#   - plain PromQL only: the throttle bits are tested with floor and modulo,
+#     not bitmap_and;
+#   - every expression aggregates to (node, gpu, UUID) or to node, so the
+#     workload labels pod, namespace, container and pod_uid never reach an
+#     alert, also with collector.dcgmExporter.keepWorkloadLabels;
+#   - the OTLP path has no up for the agent and drops a target that is not
+#     Ready, so liveness is "series seen in the last hour but not in the
+#     last two minutes".
+
+groups:
+  - name: gpu-hardware-alerts
+    interval: 30s
+    rules:
+      - alert: GpuRemappedRowsHigh
+        expr: max by (node, gpu, UUID) (DCGM_FI_DEV_UNCORRECTABLE_REMAPPED_ROWS) >= 8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Remapped-row budget nearly exhausted on {{ $labels.node }} GPU {{ $labels.gpu }}"
+          description: "Uncorrectable remapped rows >= 8 (bank exhaustion proxy). Evaluate for RMA."
+      - alert: GpuPcieReplayHigh
+        expr: max by (node, gpu, UUID) (increase(DCGM_FI_DEV_PCIE_REPLAY_COUNTER[1h])) > 1000
+        labels:
+          severity: warning
+        annotations:
+          summary: "PCIe replay storm on {{ $labels.node }} GPU {{ $labels.gpu }}"
+          description: "High PCIe replay rate: reseat/RMA candidate; observe first."
+      # Throttle reasons 0x68: HW slowdown (8), SW thermal (32), HW thermal (64).
+      - alert: GpuThermalThrottle
+        expr: >-
+          max by (node, gpu, UUID) (
+            floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 8) % 2
+            + floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 32) % 2
+            + floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 64) % 2
+          ) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Thermal throttling on {{ $labels.node }} GPU {{ $labels.gpu }}"
+          description: "HW slowdown/thermal throttle for 10m. Usually a facility issue: do not reset."
+      - alert: GpuTempCritical
+        expr: max by (node, gpu, UUID) (DCGM_FI_DEV_GPU_TEMP) > 88
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical GPU temperature on {{ $labels.node }} GPU {{ $labels.gpu }} ({{ $value }}C)"
+          description: "Sustained temperature above 88C. Investigate cooling."
+      # Throttle reason 0x80: HW power brake.
+      - alert: GpuPowerBrake
+        expr: max by (node, gpu, UUID) (floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 128) % 2) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "HW power brake on {{ $labels.node }} GPU {{ $labels.gpu }}"
+          description: "External power brake asserted for 10m: facility/PSU issue."
+
+  - name: gpu-liveness-alerts
+    interval: 30s
+    rules:
+      - alert: GpuExporterDown
+        expr: >-
+          max by (node) (up{"service.name"="dcgm-exporter"}) == 0
+          or (
+            max by (node) (present_over_time(DCGM_FI_DEV_GPU_TEMP[1h]))
+            unless max by (node) (present_over_time(DCGM_FI_DEV_GPU_TEMP[2m]))
+          )
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "dcgm-exporter down on {{ $labels.node }}"
+          description: "No GPU metrics for 5m: a monitoring gap, not a GPU fault. KubeNeuron records it and runs no step; check the exporter and the node."
+      - alert: KubeNeuronAgentDown
+        expr: >-
+          label_replace(
+            max by ("k8s.node.name") (present_over_time(kubeneuron_agent_spool_depth{"service.name"="kubeneuron-agent"}[1h]))
+            unless max by ("k8s.node.name") (present_over_time(kubeneuron_agent_spool_depth{"service.name"="kubeneuron-agent"}[2m])),
+            "node", "$1", "k8s.node.name", "(.+)"
+          )
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "kubeneuron-agent down on {{ $labels.node }}"
+          description: "No data from the node's agent for 5m: KubeNeuron records it and runs no step on that node."

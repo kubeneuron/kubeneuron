@@ -231,7 +231,9 @@ func TestSignalFromAlertReturnsFalseForEveryShadowAlert(t *testing.T) {
 // Golden list: alertClassMap exactly as it stood before M5 (v0.6.1). M5 adds
 // shadow rules, routing and tests, and nothing else; any entry added here,
 // removed or re-classed is a change to what the controller acts on and is
-// out of M5's scope by definition.
+// out of M5's scope by definition. The one deliberate change since:
+// GpuExporterDown left driver-hang for exporter-down, a monitoring gap that
+// never starts recovery.
 func TestAlertClassMapGoldenPreM5(t *testing.T) {
 	golden := map[string]types.ProblemClass{
 		"GpuDoubleBitEccVolatile":  types.ClassECCDBE,
@@ -244,7 +246,7 @@ func TestAlertClassMapGoldenPreM5(t *testing.T) {
 		"GpuPowerBrake":            types.ClassPower,
 		"GpuNvlinkCrcErrors":       types.ClassNVLink,
 		"GpuPcieReplayHigh":        types.ClassPCIe,
-		"GpuExporterDown":          types.ClassDriverHang,
+		"GpuExporterDown":          types.ClassExporterDown,
 		"KubeNeuronAgentDown":      types.ClassAgentDown,
 	}
 	if reflect.DeepEqual(alertClassMap, golden) {

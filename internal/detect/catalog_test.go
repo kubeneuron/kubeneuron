@@ -91,7 +91,7 @@ func TestCatalogAlertOverride(t *testing.T) {
 		Status: "firing",
 		Labels: map[string]string{"alertname": "GpuExporterDown", "node": "n1"},
 	})
-	if !ok || sig.Class != types.ClassDriverHang {
+	if !ok || sig.Class != types.ClassExporterDown {
 		t.Fatalf("built-in alert fallback = %+v, %v", sig, ok)
 	}
 }

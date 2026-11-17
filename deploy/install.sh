@@ -610,6 +610,17 @@ spec:
 apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
+  name: $NAME-exporter-down
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: exporter-down}
+  playbookRef: $NAME-observe
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
   name: $NAME-ecc-contained
   labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
 spec:
