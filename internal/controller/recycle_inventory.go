@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: Apache-2.0
+package controller
+
+import (
+	"context"
+	"time"
+
+	"github.com/kubeneuron/kubeneuron/internal/platform"
+	"github.com/kubeneuron/kubeneuron/internal/store"
+
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
+	"github.com/kubeneuron/kubeneuron/pkg/types"
+)
+
+// recycleInventoryMatches checks the agent's observation against the pin
+// persisted after a verified reboot. The API supplies the report's node UID.
+func recycleInventoryMatches(report *types.AgentAcceleratorReport, pin cloud.NodeIdentity, gpu string, completed, now time.Time) bool {
+	if report == nil || pin.Validate() != nil || completed.IsZero() ||
+		report.Node != pin.Node || report.NodeUID != pin.NodeUID || report.BootID != pin.BootID ||
+		!report.ObservedAt.After(completed) || report.ObservedAt.After(now) ||
+		now.Sub(report.ObservedAt) > verifyEvidenceMaxAge || report.Readiness != types.AcceleratorReadinessReady {
+		return false
+	}
+	for _, device := range report.Devices {
+		if device.ID != "" && (gpu == "" || gpu == device.ID) &&
+			device.Kind == types.AcceleratorDevicePhysical && device.Family == types.AcceleratorFamilyGPU {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Controller) verifyRecycledInventory(ctx context.Context, inc *types.Incident) (bool, string) {
+	pin := inc.CloudIdentity
+	if pin == nil || pin.Validate() != nil || pin.Node != inc.Target.Node {
+		return false, "cloud recovery awaits a verified target identity"
+	}
+	trail, err := c.store.AuditTrail(ctx, inc.ID)
+	if err != nil {
+		return false, "cloud recovery history is unavailable"
+	}
+	var completed time.Time
+	for _, entry := range trail {
+		if entry.DryRun {
+			continue
+		}
+		const replace = "platform.replace_node"
+		switch entry.Result {
+		case auditStepStartResult(replace), auditExecutingResult(replace), auditStepOutcomeResult(replace, false, true), auditStepOutcomeResult(replace, false, false):
+			return false, "replacement awaits correlated accelerator inventory"
+		case auditStepStartResult("platform.recycle_node"):
+			completed = time.Time{}
+		}
+		if entry.Action == "cloud-pin-updated" && entry.Actor == "system" && entry.Params["instance_id"] == pin.InstanceID &&
+			entry.Params["boot_id"] == pin.BootID && entry.Params["previous_boot_id"] != "" && entry.Params["previous_boot_id"] != pin.BootID {
+			completed = entry.Time
+		}
+	}
+	if completed.IsZero() {
+		return false, "cloud recovery awaits a verified recycle"
+	}
+	observer, ok := c.platform.(platform.CloudNodeObserver)
+	if !ok {
+		return false, "current cloud identity is unavailable"
+	}
+	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	ref, err := observer.CloudNode(readCtx, pin.Node)
+	if err != nil || pin.Match(ref.Identity) != nil {
+		return false, "current cloud identity could not be confirmed"
+	}
+	reports, ok := c.store.(store.AcceleratorReportStore)
+	if !ok {
+		return false, "accelerator report store is unavailable"
+	}
+	vendor := inc.Vendor
+	if !vendor.Valid() {
+		vendor = types.AcceleratorVendorNVIDIA
+	}
+	report, err := reports.GetAcceleratorReport(ctx, pin.Node, vendor)
+	if err != nil || !recycleInventoryMatches(report, *pin, inc.Target.GPUUUID, completed, time.Now()) {
+		return false, "awaiting fresh ready accelerator inventory from the verified boot"
+	}
+	return true, "fresh ready accelerator inventory observed after verified recycle"
+}
