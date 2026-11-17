@@ -384,6 +384,90 @@ if [[ $PROFILE != none ]]; then
       libDirs: [$driver_libs]"
 fi
 say "NVIDIA host tooling profile: $PROFILE (see docs/quickstart.md)"
+||||||| parent of 07829b5 (installer: render the cloud pack for a named installation)
+# Render the standalone installer copy of config/cloud-policies for this installation.
+render_cloud_pack() {
+  cat <<EOF
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: $NAME-observe
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: $NAME
+  target: Node
+  steps:
+    - name: observe
+      action: Observe
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: $NAME-cloud-replace
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: $NAME
+  target: Node
+  cooldown: 6h
+  steps:
+    - name: cordon
+      action: Cordon
+    - name: drain
+      action: Drain
+      approval: Required
+      timeout: 30m
+    - name: replace
+      action: ReplaceNode
+      approval: Required
+      timeout: 20m
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: $NAME-cloud-recycle
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: $NAME
+  target: Node
+  cooldown: 6h
+  steps:
+    - name: cordon
+      action: Cordon
+    - name: drain
+      action: Drain
+      approval: Required
+      timeout: 30m
+    - name: recycle
+      action: RecycleNode
+      approval: Required
+      timeout: 20m
+  onFailure:
+    playbookRef: $NAME-cloud-replace
+EOF
+  local class ladder
+  for class in xid-app ecc-sbe-rate thermal power pcie agent-down exporter-down ecc-contained row-remap-ok gsp-error driver-hang row-remap-failure row-remap-budget ecc-dbe nvlink fell-off-bus gpu-lost; do
+    case $class in
+      ecc-dbe|nvlink|fell-off-bus|gpu-lost) ladder=$NAME-cloud-replace ;;
+      *) ladder=$NAME-observe ;;
+    esac
+    cat <<EOF
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-cloud-$class
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  mode: Approval
+  match: {class: $class}
+  playbookRef: $ladder
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+EOF
+  done
+}
 
 # The baseline policy pack: one binding for every problem class the shipped
 # detectors can emit.
