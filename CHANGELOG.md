@@ -45,6 +45,18 @@ API is `v1alpha1`.
   must have every commit signed off by its author (DCO), checked by
   `hack/verify-dco.sh` in its own workflow, documentation-only pull requests
   included.
+- **Licence gate in CI.** The licences of all Go dependencies are checked in
+  CI. `make verify-licenses` (part of `make lint`) now records the SPDX
+  identifiers that each Go dependency's legal files match in
+  `third-party-inventory.json`, detected from the licence text itself, and
+  fails, naming the module, unless every one is on the allowlist (Apache-2.0,
+  BSD-2-Clause, BSD-3-Clause, MIT, ISC, 0BSD, Zlib, BSL-1.0, and the Go patent
+  grant beside BSD-3-Clause). GPL, LGPL, AGPL, MPL, proprietary or
+  unrecognised text stops the build, and so does a module with no licence
+  text at all; the one reviewed exception is `modernc.org/memory`'s logo
+  attribution file, bound to its exact content. The base images and the
+  `nsenter` we build into the agent image are not covered by this gate. The
+  Helm chart now declares `artifacthub.io/license: Apache-2.0`.
 
 - **The agent image no longer ships BusyBox.** Its `nsenter` helper is
   toybox (0BSD), statically linked against musl (MIT). The Debian base image

@@ -11,3 +11,5 @@ home: https://github.com/kubeneuron/kubeneuron
 sources:
   - https://github.com/kubeneuron/kubeneuron
 kubeVersion: ">=1.29.0-0"
+annotations:
+  artifacthub.io/license: Apache-2.0

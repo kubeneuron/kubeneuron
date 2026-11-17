@@ -3,10 +3,15 @@
 """Dependency legal-file collector v1 (stdlib only, no unpinned tool downloads).
 
 Collect the union of production dependencies for every supported OS/architecture.
-Preserve upstream legal files verbatim, including nested vendored notices. This is
-an inventory, not a legal compatibility determination. Review UNKNOWN entries.
+Preserve upstream legal files verbatim, including nested vendored notices, and
+record the SPDX identifiers each legal file's text matches. The licence gate
+fails unless every identifier of every module is on ALLOWED (or the file is a
+reviewed EXCEPTION): GPL/LGPL/AGPL/MPL/proprietary/UNKNOWN stop the build.
+Detection is by the licence text itself, so a file that matches no known text
+is UNKNOWN, never assumed permissive.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,7 +23,70 @@ ROOT = Path(__file__).resolve().parents[1]
 COMMANDS = [f'./cmd/{name}' for name in (
     'kubeneuron-operator', 'kubeneuron-controller', 'kubeneuron-agent', 'kubeneuronctl')]
 PLATFORMS = ('linux/amd64', 'linux/arm64', 'darwin/amd64', 'darwin/arm64')
+# Licences a dependency may carry. The Go patent grant is allowed only beside
+# BSD-3-Clause, the licence it accompanies in the Go repositories.
+ALLOWED = {'Apache-2.0', 'BSD-2-Clause', 'BSD-3-Clause', 'MIT', 'ISC', '0BSD', 'Zlib', 'BSL-1.0'}
+PATENT_GRANT = 'Go-patent-grant'
+# Reviewed exceptions: (module path, legal file) -> (sha256 of the reviewed
+# content, why it is allowed). Bound to the content: if the file changes in a
+# later version of the module, the gate fails again and asks for a review.
+EXCEPTIONS = {
+    ('modernc.org/memory', 'LICENSE-LOGO'): (
+        '5ae5bee3072a841376451b48d8cfcec7188e10543926d5870828d36c8a750dc5',
+        'attribution pointer for a logo image that is not compiled or shipped'),
+}
+# (SPDX id, predicate over whitespace-normalised text). A file may match more
+# than one: dual-licensed files record every licence they grant.
+SIGNATURES = [
+    ('Apache-2.0', lambda t: 'Apache License' in t and 'Version 2.0' in t),
+    ('MIT', lambda t: 'Permission is hereby granted, free of charge, to any person obtaining a copy' in t),
+    ('BSD-3-Clause', lambda t: 'Redistribution and use in source and binary forms' in t and re.search(
+        r'(Neither the name|names? of (its|the) contributors|name of the copyright holder).{0,200}(endorse|promote)', t, re.I)),
+    ('BSD-2-Clause', lambda t: 'Redistribution and use in source and binary forms' in t and not re.search(
+        r'(endorse|promote) products', t, re.I)),
+    ('ISC', lambda t: re.search(r'Permission to use, copy, modify, and(/or)? distribute this software for any purpose with or without fee '
+                                r'is hereby granted, provided that the above copyright notice and this permission notice appear in all copies', t)),
+    ('0BSD', lambda t: re.search(r'Permission to use, copy, modify, and(/or)? distribute this software for any purpose with or without fee '
+                                 r'is hereby granted\.', t)),
+    ('Zlib', lambda t: "This software is provided 'as-is', without any express or implied warranty" in t
+     and 'Permission is granted to anyone to use this software for any purpose' in t),
+    ('BSL-1.0', lambda t: 'Boost Software License' in t),
+    ('MPL-2.0', lambda t: 'Mozilla Public License' in t),
+    ('GPL-family', lambda t: re.search(r'GNU (AFFERO |LESSER |LIBRARY )?GENERAL PUBLIC LICENSE', t, re.I)),
+    ('CC', lambda t: re.search(r'Creative Commons', t, re.I)),
+    (PATENT_GRANT, lambda t: 'Additional IP Rights Grant (Patents)' in t),
+]
 LEGAL = re.compile(r'^(licen[cs]e|copying|notice|copyright|patents)([-_][^.]+)?(\.(txt|md|rst|html|libyaml|bsd|mit|apache|gpl))?$', re.I)
+
+
+def classify(text):
+    """SPDX identifiers whose licence text appears in text; ['UNKNOWN'] if none."""
+    normalised = ' '.join(text.split())
+    found = sorted({spdx for spdx, matches in SIGNATURES if matches(normalised)})
+    return found or ['UNKNOWN']
+
+
+def problems(module, licenses, digests=None):
+    """Why a module's licences fail the gate; empty when they pass. digests
+    maps a legal file to the sha256 of its content, for the exceptions."""
+    path = module.split('@')[0]
+    found, issues = set(), []
+    for name, ids in licenses.items():
+        exception = EXCEPTIONS.get((path, name))
+        if exception and (digests or {}).get(name) == exception[0]:
+            continue
+        if exception:
+            issues.append(f'{name} changed since its licence exception was reviewed')
+        found.update(ids)
+    if not found:
+        # Only NOTICE files, or only a reviewed exception: there is no licence
+        # text at all, which is worse than an unknown one.
+        issues.append('no licence text found')
+    for spdx in sorted(found - ALLOWED - {PATENT_GRANT}):
+        issues.append(f'{spdx} is not an allowed licence')
+    if PATENT_GRANT in found and 'BSD-3-Clause' not in found:
+        issues.append('Go patent grant without the BSD-3-Clause licence it accompanies')
+    return issues
 
 
 def go(*args, env=None):
@@ -64,27 +132,21 @@ def generate():
                                    for part in p.relative_to(directory).parts))
         if not files:
             raise RuntimeError(f'No legal files for {identity}')
-        texts = []
+        licenses, digests = {}, {}
         for path in files:
             data = path.read_text(encoding='utf-8')
-            label = f'{identity}/{path.relative_to(directory)}'
+            name = str(path.relative_to(directory))
+            label = f'{identity}/{name}'
             chunks.append(f'\n===== {label} =====\n{data}\n')
-            texts.append(data)
             if path.name.lower().startswith('notice'):
+                # Attribution, not a grant: kept verbatim, not classified.
                 notices.append(f'\n===== {label} =====\n{data}\n')
-        combined = '\n'.join(texts)
-        known = any(marker in combined for marker in (
-            'Apache License', 'Redistribution and use in source and binary forms',
-            'Permission is hereby granted, free of charge', 'Mozilla Public License',
-            'Permission to use, copy, modify, and distribute',
-            'Permission to use, copy, modify, and/or distribute', 'PUBLIC DOMAIN'))
-        flags = []
-        if re.search(r'GNU (?:AFFERO |LESSER |LIBRARY )?GENERAL PUBLIC LICENSE', combined, re.I):
-            flags.append('GPL-family text: review required')
-        if not known:
-            flags.append('UNKNOWN: review required')
+            else:
+                licenses[name] = classify(data)
+                digests[name] = hashlib.sha256(data.encode('utf-8')).hexdigest()
+        spdx = sorted({i for ids in licenses.values() for i in ids})
         inventory.append({'module': identity, 'files': [str(p.relative_to(directory)) for p in files],
-                          'review': flags})
+                          'spdx': spdx, 'licenses': licenses, 'review': problems(identity, licenses, digests)})
     return {'THIRD_PARTY_LICENSES': ''.join(chunks), 'NOTICE': ''.join(notices),
             'third-party-inventory.json': json.dumps(inventory, indent=2) + '\n'}
 
@@ -94,7 +156,12 @@ def main():
     parser.add_argument('--check', action='store_true')
     args = parser.parse_args()
     stale = []
-    for name, content in generate().items():
+    outputs = generate()
+    blocked = [f"{entry['module']}: {'; '.join(entry['review'])}"
+               for entry in json.loads(outputs.get('third-party-inventory.json', '[]')) if entry['review']]
+    if blocked:
+        sys.exit('Licence gate: dependencies with licences outside the allowlist:\n  ' + '\n  '.join(blocked))
+    for name, content in outputs.items():
         path = ROOT / name
         if args.check:
             if not path.exists() or path.read_text() != content:

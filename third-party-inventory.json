@@ -5,6 +5,18 @@
       "LICENSE",
       "PATENTS"
     ],
+    "spdx": [
+      "BSD-3-Clause",
+      "Go-patent-grant"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "PATENTS": [
+        "Go-patent-grant"
+      ]
+    },
     "review": []
   },
   {
@@ -12,6 +24,14 @@
     "files": [
       "LICENSE.txt"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -19,6 +39,14 @@
     "files": [
       "LICENSE.txt"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -26,6 +54,14 @@
     "files": [
       "LICENSE.txt"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -33,6 +69,14 @@
     "files": [
       "LICENSE.txt"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -40,6 +84,14 @@
     "files": [
       "LICENSE.txt"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -47,6 +99,14 @@
     "files": [
       "LICENSE.txt"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -54,6 +114,14 @@
     "files": [
       "LICENSE.txt"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -61,6 +129,14 @@
     "files": [
       "LICENSE.txt"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -68,6 +144,14 @@
     "files": [
       "LICENSE.txt"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -75,6 +159,14 @@
     "files": [
       "LICENSE.txt"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -82,6 +174,14 @@
     "files": [
       "LICENSE.txt"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -89,6 +189,14 @@
     "files": [
       "LICENSE.txt"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -96,6 +204,14 @@
     "files": [
       "LICENSE.txt"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -105,6 +221,18 @@
       "NOTICE.txt",
       "internal/sync/singleflight/LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0",
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ],
+      "internal/sync/singleflight/LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -115,6 +243,21 @@
       "internal/sync/singleflight/LICENSE",
       "transport/http/protocol/internal/json/internal/stdlib/LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0",
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ],
+      "internal/sync/singleflight/LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "transport/http/protocol/internal/json/internal/stdlib/LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -122,6 +265,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -129,6 +280,14 @@
     "files": [
       "LICENSE.txt"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -137,6 +296,14 @@
       "LICENSE",
       "NOTICE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -144,6 +311,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "ISC"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "ISC"
+      ]
+    },
     "review": []
   },
   {
@@ -151,6 +326,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -158,6 +341,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -165,6 +356,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -172,6 +371,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -179,6 +386,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -187,6 +402,18 @@
       "LICENSE",
       "json/LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0",
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ],
+      "json/LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -194,6 +421,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -201,6 +436,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -208,6 +451,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -215,6 +466,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -222,6 +481,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -229,6 +496,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -236,6 +511,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -243,6 +526,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -250,6 +541,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -257,6 +556,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -264,6 +571,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -271,6 +586,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -278,6 +601,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -285,6 +616,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -292,6 +631,14 @@
     "files": [
       "license.md"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "license.md": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -299,6 +646,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -306,6 +661,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -313,6 +676,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -320,6 +691,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -327,6 +706,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -334,6 +721,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -341,6 +736,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -348,6 +751,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -355,6 +766,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -362,6 +781,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "BSD-2-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-2-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -371,6 +798,18 @@
       "NOTICE",
       "internal/github.com/golang/gddo/LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0",
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ],
+      "internal/github.com/golang/gddo/LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -379,6 +818,14 @@
       "LICENSE",
       "NOTICE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -387,6 +834,14 @@
       "LICENSE",
       "NOTICE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -395,6 +850,14 @@
       "LICENSE",
       "NOTICE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -402,6 +865,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -409,6 +880,14 @@
     "files": [
       "LICENSE.txt"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -416,6 +895,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -423,6 +910,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -430,6 +925,14 @@
     "files": [
       "LICENSE.txt"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -437,6 +940,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -445,6 +956,18 @@
       "LICENSE",
       "PATENTS"
     ],
+    "spdx": [
+      "BSD-3-Clause",
+      "Go-patent-grant"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "PATENTS": [
+        "Go-patent-grant"
+      ]
+    },
     "review": []
   },
   {
@@ -453,6 +976,18 @@
       "LICENSE",
       "PATENTS"
     ],
+    "spdx": [
+      "BSD-3-Clause",
+      "Go-patent-grant"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "PATENTS": [
+        "Go-patent-grant"
+      ]
+    },
     "review": []
   },
   {
@@ -460,6 +995,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -468,6 +1011,18 @@
       "LICENSE",
       "PATENTS"
     ],
+    "spdx": [
+      "BSD-3-Clause",
+      "Go-patent-grant"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "PATENTS": [
+        "Go-patent-grant"
+      ]
+    },
     "review": []
   },
   {
@@ -476,6 +1031,18 @@
       "LICENSE",
       "PATENTS"
     ],
+    "spdx": [
+      "BSD-3-Clause",
+      "Go-patent-grant"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "PATENTS": [
+        "Go-patent-grant"
+      ]
+    },
     "review": []
   },
   {
@@ -484,6 +1051,18 @@
       "LICENSE",
       "PATENTS"
     ],
+    "spdx": [
+      "BSD-3-Clause",
+      "Go-patent-grant"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "PATENTS": [
+        "Go-patent-grant"
+      ]
+    },
     "review": []
   },
   {
@@ -492,6 +1071,18 @@
       "LICENSE",
       "PATENTS"
     ],
+    "spdx": [
+      "BSD-3-Clause",
+      "Go-patent-grant"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "PATENTS": [
+        "Go-patent-grant"
+      ]
+    },
     "review": []
   },
   {
@@ -500,6 +1091,18 @@
       "LICENSE",
       "PATENTS"
     ],
+    "spdx": [
+      "BSD-3-Clause",
+      "Go-patent-grant"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "PATENTS": [
+        "Go-patent-grant"
+      ]
+    },
     "review": []
   },
   {
@@ -507,6 +1110,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -515,6 +1126,18 @@
       "LICENSE",
       "PATENTS"
     ],
+    "spdx": [
+      "BSD-3-Clause",
+      "Go-patent-grant"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "PATENTS": [
+        "Go-patent-grant"
+      ]
+    },
     "review": []
   },
   {
@@ -522,6 +1145,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -529,6 +1160,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -537,6 +1176,16 @@
       "LICENSE",
       "NOTICE"
     ],
+    "spdx": [
+      "Apache-2.0",
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0",
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -544,6 +1193,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -551,6 +1208,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -560,6 +1225,22 @@
       "third_party/forked/golang/LICENSE",
       "third_party/forked/golang/PATENTS"
     ],
+    "spdx": [
+      "Apache-2.0",
+      "BSD-3-Clause",
+      "Go-patent-grant"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ],
+      "third_party/forked/golang/LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "third_party/forked/golang/PATENTS": [
+        "Go-patent-grant"
+      ]
+    },
     "review": []
   },
   {
@@ -569,6 +1250,22 @@
       "third_party/forked/golang/LICENSE",
       "third_party/forked/golang/PATENTS"
     ],
+    "spdx": [
+      "Apache-2.0",
+      "BSD-3-Clause",
+      "Go-patent-grant"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ],
+      "third_party/forked/golang/LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "third_party/forked/golang/PATENTS": [
+        "Go-patent-grant"
+      ]
+    },
     "review": []
   },
   {
@@ -576,6 +1273,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -589,6 +1294,34 @@
       "pkg/validation/strfmt/LICENSE",
       "pkg/validation/validate/LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0",
+      "BSD-3-Clause",
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ],
+      "pkg/internal/third_party/go-json-experiment/json/LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "pkg/internal/third_party/govalidator/LICENSE": [
+        "MIT"
+      ],
+      "pkg/validation/errors/LICENSE": [
+        "Apache-2.0"
+      ],
+      "pkg/validation/spec/LICENSE": [
+        "Apache-2.0"
+      ],
+      "pkg/validation/strfmt/LICENSE": [
+        "Apache-2.0"
+      ],
+      "pkg/validation/validate/LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -602,6 +1335,34 @@
       "third_party/forked/golang/LICENSE",
       "third_party/forked/golang/PATENTS"
     ],
+    "spdx": [
+      "Apache-2.0",
+      "BSD-3-Clause",
+      "Go-patent-grant"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ],
+      "inotify/LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "inotify/PATENTS": [
+        "Go-patent-grant"
+      ],
+      "internal/third_party/forked/golang/LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "internal/third_party/forked/golang/PATENTS": [
+        "Go-patent-grant"
+      ],
+      "third_party/forked/golang/LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "third_party/forked/golang/PATENTS": [
+        "Go-patent-grant"
+      ]
+    },
     "review": []
   },
   {
@@ -610,6 +1371,19 @@
       "LICENSE",
       "LICENSE-3RD-PARTY.md"
     ],
+    "spdx": [
+      "BSD-3-Clause",
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "LICENSE-3RD-PARTY.md": [
+        "BSD-3-Clause",
+        "MIT"
+      ]
+    },
     "review": []
   },
   {
@@ -618,6 +1392,17 @@
       "LICENSE",
       "mersenne/LICENSE"
     ],
+    "spdx": [
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "mersenne/LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -628,6 +1413,24 @@
       "LICENSE-LOGO",
       "LICENSE-MMAP-GO"
     ],
+    "spdx": [
+      "BSD-3-Clause",
+      "UNKNOWN"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "LICENSE-GO": [
+        "BSD-3-Clause"
+      ],
+      "LICENSE-LOGO": [
+        "UNKNOWN"
+      ],
+      "LICENSE-MMAP-GO": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -635,6 +1438,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -642,6 +1453,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -649,6 +1468,16 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0",
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0",
+        "BSD-3-Clause"
+      ]
+    },
     "review": []
   },
   {
@@ -657,6 +1486,14 @@
       "LICENSE",
       "NOTICE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -664,6 +1501,14 @@
     "files": [
       "LICENSE"
     ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
     "review": []
   },
   {
@@ -676,6 +1521,28 @@
       "goyaml.v3/LICENSE",
       "goyaml.v3/NOTICE"
     ],
+    "spdx": [
+      "Apache-2.0",
+      "BSD-3-Clause",
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0",
+        "BSD-3-Clause",
+        "MIT"
+      ],
+      "goyaml.v2/LICENSE": [
+        "Apache-2.0"
+      ],
+      "goyaml.v2/LICENSE.libyaml": [
+        "MIT"
+      ],
+      "goyaml.v3/LICENSE": [
+        "Apache-2.0",
+        "MIT"
+      ]
+    },
     "review": []
   }
 ]
