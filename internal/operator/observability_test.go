@@ -680,13 +680,13 @@ func TestDCGMExporterDiscoveryAndScrape(t *testing.T) {
 	for _, rule := range policy.Spec.Egress {
 		for _, peer := range rule.To {
 			if peer.NamespaceSelector != nil && peer.NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] == "gpu-operator" &&
-				peer.PodSelector.MatchLabels["app"] == "nvidia-dcgm-exporter" && rule.Ports[0].Port.String() == "metrics" {
+				peer.PodSelector.MatchLabels["app"] == "nvidia-dcgm-exporter" && len(rule.Ports) == 1 && rule.Ports[0].Port.Type == intstr.Int && rule.Ports[0].Port.IntValue() == 9400 {
 				found = true
 			}
 		}
 	}
 	if !found {
-		t.Errorf("no egress to the exporter pods on their metrics port: %#v", policy.Spec.Egress)
+		t.Errorf("no egress to the exporter pods on their metrics port by number: %#v", policy.Spec.Egress)
 	}
 
 	var got kubeneuronv1alpha1.KubeNeuron
@@ -907,5 +907,16 @@ func TestDCGMTargetChangesDoNotRestartTheCollector(t *testing.T) {
 	}
 	if before == "" || before != after {
 		t.Errorf("config digest %q -> %q: a new target must not restart the collector", before, after)
+	}
+}
+
+func TestSettledRequeue(t *testing.T) {
+	kn := managedObservability(testKubeNeuron())
+	if got := settledRequeue(kn); got != min(dcgmRediscoveryPeriod, pkiCheckInterval) {
+		t.Errorf("scraping requeue = %v", got)
+	}
+	kn.Spec.Observability.Collector.DCGMExporter = &kubeneuronv1alpha1.DCGMExporterScrapeSpec{Scrape: ptr.To(false)}
+	if got := settledRequeue(kn); got != pkiCheckInterval {
+		t.Errorf("requeue without scraping = %v, want %v", got, pkiCheckInterval)
 	}
 }

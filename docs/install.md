@@ -72,7 +72,9 @@ operator; see [Metrics path](#metrics-path-specobservability).
   match in the cluster. It scrapes the Ready pods behind the Service's
   `gpu-metrics` port (job `dcgm-exporter`, every 30 seconds, 10-second
   timeout, at most 5000 samples a pod per scrape); a host-network exporter
-  is scraped on its node's address.
+  is scraped on its node's address. The series travel over OTLP, so in the
+  store `job` arrives as `service.name="dcgm-exporter"` and `instance` as
+  `service.instance.id`; write your own rules against those.
 - **Target updates are not immediate.** The pods are looked up again every
   two minutes and written to a ConfigMap the collector reads without
   restarting; the kubelet takes up to another minute or two to refresh the

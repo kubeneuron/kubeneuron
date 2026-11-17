@@ -19,7 +19,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
@@ -155,7 +154,7 @@ func (r *KubeNeuronReconciler) discoverDCGMExporter(ctx context.Context, install
 	sort.Slice(services, func(i, j int) bool { return services[i].Namespace < services[j].Namespace })
 
 	discovery := &dcgmDiscovery{}
-	nodes := map[string]string{}
+	var nodes map[string]string
 	for i := range services {
 		service := &services[i]
 		port, ok := gpuMetricsPort(service)
@@ -177,14 +176,13 @@ func (r *KubeNeuronReconciler) discoverDCGMExporter(ctx context.Context, install
 			if !ok {
 				continue
 			}
-			pool, seen := nodes[pod.Spec.NodeName]
-			if !seen {
+			if nodes == nil {
 				var err error
-				if pool, err = r.nodePool(ctx, pod.Spec.NodeName); err != nil {
+				if nodes, err = r.nodePools(ctx); err != nil {
 					return nil, err
 				}
-				nodes[pod.Spec.NodeName] = pool
 			}
+			pool := nodes[pod.Spec.NodeName]
 			found.Targets = append(found.Targets, dcgmTarget{
 				Address:     joinHostPort(pod.Status.PodIP, number),
 				Node:        pod.Spec.NodeName,
@@ -248,24 +246,26 @@ func resolvePodPort(pod *corev1.Pod, port intstr.IntOrString) (int32, bool) {
 	return 0, false
 }
 
-func (r *KubeNeuronReconciler) nodePool(ctx context.Context, name string) (string, error) {
-	if name == "" {
-		return "", nil
+// nodePools maps every node that has one to its pool. The operator keeps no
+// Node cache, so this is one List per discovery, of metadata only, and only
+// once there is a target to label.
+func (r *KubeNeuronReconciler) nodePools(ctx context.Context) (map[string]string, error) {
+	var list metav1.PartialObjectMetadataList
+	list.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("NodeList"))
+	if err := r.reader().List(ctx, &list); err != nil {
+		return nil, fmt.Errorf("list nodes: %w", err)
 	}
-	var node corev1.Node
-	if err := r.reader().Get(ctx, types.NamespacedName{Name: name}, &node); err != nil {
-		if apierrors.IsNotFound(err) {
-			return "", nil
+	pools := make(map[string]string, len(list.Items))
+	for _, node := range list.Items {
+		pool := ""
+		for _, key := range nodePoolLabels {
+			if value := node.Labels[key]; value != "" {
+				pool = value
+			}
 		}
-		return "", fmt.Errorf("get node %s: %w", name, err)
+		pools[node.Name] = pool
 	}
-	pool := ""
-	for _, key := range nodePoolLabels {
-		if value := node.Labels[key]; value != "" {
-			pool = value
-		}
-	}
-	return pool, nil
+	return pools, nil
 }
 
 // dcgmTargetsFile renders the discovered pods as Prometheus file_sd groups,
@@ -381,23 +381,33 @@ func dcgmEgress(dcgm *dcgmDiscovery) []networkingv1.NetworkPolicyEgressRule {
 	}
 	var rules []networkingv1.NetworkPolicyEgressRule
 	for _, service := range dcgm.Services {
-		podNetwork := false
+		// Ports by number, resolved on each pod: not every CNI honours a
+		// named port in an egress rule.
+		podPorts := map[int32]bool{}
 		hostPorts := map[int32][]string{}
 		for _, t := range service.Targets {
 			if t.HostNetwork {
 				hostPorts[t.Port] = append(hostPorts[t.Port], t.IP)
 			} else {
-				podNetwork = true
+				podPorts[t.Port] = true
 			}
 		}
-		if podNetwork {
-			port := service.Port
+		if len(podPorts) > 0 {
+			numbers := make([]int32, 0, len(podPorts))
+			for p := range podPorts {
+				numbers = append(numbers, p)
+			}
+			sort.Slice(numbers, func(i, j int) bool { return numbers[i] < numbers[j] })
+			ports := make([]networkingv1.NetworkPolicyPort, 0, len(numbers))
+			for _, p := range numbers {
+				ports = append(ports, tcpPort(p))
+			}
 			rules = append(rules, networkingv1.NetworkPolicyEgressRule{
 				To: []networkingv1.NetworkPolicyPeer{{
 					NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": service.Namespace}},
 					PodSelector:       &metav1.LabelSelector{MatchLabels: copyStringMap(service.Selector)},
 				}},
-				Ports: []networkingv1.NetworkPolicyPort{{Protocol: ptr.To(corev1.ProtocolTCP), Port: &port}},
+				Ports: ports,
 			})
 		}
 		ports := make([]int32, 0, len(hostPorts))
