@@ -160,7 +160,7 @@ func TestUnrecyclableNodeEscalatesBeforeApprovalIsRequested(t *testing.T) {
 		Name: "recycle", Target: "node",
 		Steps: []playbook.Step{{Name: "recycle", Action: "platform.recycle_node", Approval: "required"}},
 	}
-	// The policy enables the restart through the cloud API (#56: off by
+	// The policy enables the restart through the cloud API (off by
 	// default).
 	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{"recycle": book}, []playbook.Policy{
 		{Class: types.ClassFellOffBus, Playbook: "recycle", RecycleEnabled: true},

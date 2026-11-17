@@ -2,7 +2,7 @@
 
 package controller
 
-// #56: the policy's recovery settings are checked where the provider's
+// The policy's recovery settings are checked where the provider's
 // eligibility is, before the first disruptive step; a recycle the policy or
 // the provider does not allow is skipped, not held and not failed.
 
@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
@@ -276,4 +277,66 @@ func TestRecycleRefusedAfterTheRungStartedEscalates(t *testing.T) {
 	if inc.Playbook != "cloud-replace" || inc.Attempt != 1 || !strings.Contains(dump(entries), "recycle not applicable after the rung started") {
 		t.Fatalf("playbook=%s attempt=%d, want a counted escalation to cloud-replace%s", inc.Playbook, inc.Attempt, dump(entries))
 	}
+}
+
+func TestStartedRungIsEscalatedNotSkipped(t *testing.T) {
+	for _, record := range []string{"stored action result", "audited step start"} {
+		t.Run(record, func(t *testing.T) {
+			c, st, _ := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
+			c.SetEngine(ladderEngine(t, recoverymode.Automatic, recoverymode.RemoveFirst, true,
+				cordonDrainThen("cloud-recycle", "platform.recycle_node", "cloud-replace"),
+				cordonDrainThen("cloud-replace", "platform.replace_node", "")))
+			c.platform = &autoCloudPlatform{recycleRefused: true}
+			id := openOn(t, c, "n1")
+			ctx := context.Background()
+			// Step 0 of this rung already ran at Attempt 0 (a resume after a
+			// restart, say), though the incident is back at step 0.
+			cached := actionID(&types.Incident{ID: id, StepIndex: 0, Attempt: 0})
+			switch record {
+			case "stored action result":
+				if err := st.EnqueueAction(ctx, "n1", types.Action{ID: cached, IncidentID: id, Type: "cordon"}); err != nil {
+					t.Fatal(err)
+				}
+				if err := st.CompleteAction(ctx, cached, types.ActionResult{ActionID: cached, OK: true}); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				if err := st.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: time.Now(), FromState: types.StateEvaluating,
+					ToState: types.StateExecuting, Actor: "system", Action: "cordon"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runUntil(t, c, st, id, func(inc *types.Incident) bool { return inc.Playbook == "cloud-replace" || inc.State.Halted() })
+			inc := mustIncident(t, st, id)
+			entries := trail(t, st, id)
+			if inc.Playbook != "cloud-replace" || inc.Attempt != 1 {
+				t.Fatalf("playbook=%s attempt=%d, want an escalation with a new attempt%s", inc.Playbook, inc.Attempt, dump(entries))
+			}
+			escalated := false
+			for _, e := range entries {
+				if e.Action == "recycle-skipped" {
+					t.Fatalf("a started rung was skipped%s", dump(entries))
+				}
+				escalated = escalated || e.Action == "escalate" && strings.Contains(e.Result, "recycle not applicable after the rung started")
+			}
+			if !escalated {
+				t.Fatalf("want an escalate row naming the started rung%s", dump(entries))
+			}
+			if fresh := actionID(&types.Incident{ID: id, StepIndex: 0, Attempt: inc.Attempt}); fresh == cached {
+				t.Fatalf("step 0 of cloud-replace reuses the cached action ID %s", cached)
+			}
+		})
+	}
+}
+
+// runUntil reconciles until done holds for the stored incident.
+func runUntil(t *testing.T, c *Controller, st *sqlite.Store, id string, done func(*types.Incident) bool) {
+	t.Helper()
+	for i := 0; i < 100; i++ {
+		if done(mustIncident(t, st, id)) {
+			return
+		}
+		c.reconcile(context.Background())
+	}
+	t.Fatalf("condition not reached%s", dump(trail(t, st, id)))
 }

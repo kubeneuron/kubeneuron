@@ -256,7 +256,7 @@ func (c *Controller) coordinateCheckpoint(ctx context.Context, inc *types.Incide
 		return summary
 	}
 	// An automatic policy states how long it waits for a checkpoint before it
-	// disrupts: no workload request stretches that (#56).
+	// disrupts: no workload request stretches that.
 	if pol, ok := c.automaticPolicyFor(ctx, inc); ok {
 		policy = capCheckpointWait(policy, pol.Automatic.CheckpointWait)
 	}

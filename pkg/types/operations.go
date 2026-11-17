@@ -29,7 +29,7 @@ const (
 	// must exist before a hardware-qualified autonomy executor is called.
 	ResourceAutonomyEffect OperationalResourceKind = "autonomy-effect"
 	// ResourceRecoveryPolicy records automatic-policy events that must
-	// outlive a restart, such as a tripped circuit breaker (#56).
+	// outlive a restart, such as a tripped circuit breaker.
 	ResourceRecoveryPolicy OperationalResourceKind = "recovery-policy"
 	// ResourceRuntimeContractQualification is the durable, observation-only
 	// record of a fixed node cohort being watched for sustained Full runtime

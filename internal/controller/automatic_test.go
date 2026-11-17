@@ -2,7 +2,7 @@
 
 package controller
 
-// #56: recovery modes. An automatic policy is an approval given in advance;
+// Recovery modes. An automatic policy is an approval given in advance;
 // its limits hold a step, and anything it does not cover goes to a person.
 
 import (

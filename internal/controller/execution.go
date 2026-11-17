@@ -90,7 +90,7 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 		}
 	}
 	// A step that needs approval starts only under a person's decision or the
-	// live automatic policy its actor names (#31, #56): defence in depth for
+	// live automatic policy its actor names: defence in depth for
 	// every path that reaches here. A changed cloud target is decided first:
 	// the incident is superseded whatever the policy would have said.
 	// A step the policy would skip is not started either: skipping is the

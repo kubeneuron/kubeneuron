@@ -4,11 +4,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
+	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -172,6 +174,18 @@ func (c *Controller) skipRecycle(ctx context.Context, inc *types.Incident, step 
 		return c.holdRecycle(inc, step, reason)
 	}
 	if inc.StepIndex == 0 && recycleOnly(book) {
+		// StepIndex 0 is not proof that nothing of the rung ran at this
+		// Attempt (a failed step 0, a resume after a restart). The rung is
+		// skipped only when the record shows it did not start.
+		started, err := c.rungStarted(ctx, inc, book)
+		if err != nil {
+			c.log.Warn("cannot tell whether the rung started; holding the recycle skip",
+				"incident", inc.ID, "err", err)
+			return c.holdRecycle(inc, step, reason+"; whether the rung already started cannot be read")
+		}
+		if started {
+			return c.escalate(ctx, inc, "recycle not applicable after the rung started: "+reason)
+		}
 		seen := map[string]bool{inc.Playbook: true}
 		name := inc.Playbook
 		for {
@@ -199,6 +213,38 @@ func (c *Controller) skipRecycle(ctx context.Context, inc *types.Incident, step 
 			fmt.Sprintf("recycle skipped: %s; continuing with step %s of %s", reason, book.Steps[inc.StepIndex].Name, inc.Playbook), nil)
 	}
 	return c.escalate(ctx, inc, "recycle not applicable after the rung started: "+reason)
+}
+
+// rungStarted reports whether any step of the incident's current rung has
+// started or has a result at the current Attempt: an action stored under
+// one of the rung's action IDs, or a step start or outcome in the audit
+// trail since the row that bound the rung (opening, escalation or skip).
+func (c *Controller) rungStarted(ctx context.Context, inc *types.Incident, book *playbook.Playbook) (bool, error) {
+	for i := range book.Steps {
+		probe := types.Incident{ID: inc.ID, StepIndex: i, Attempt: inc.Attempt}
+		_, err := c.store.GetAction(ctx, actionID(&probe))
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return false, err
+		}
+	}
+	trail, err := c.store.AuditTrail(ctx, inc.ID)
+	if err != nil {
+		return false, err
+	}
+	for i := len(trail) - 1; i >= 0; i-- {
+		e := trail[i]
+		switch e.Action {
+		case "open", "escalate", "recycle-skipped":
+			return false, nil
+		}
+		if e.ToState == types.StateExecuting || e.FromState == types.StateExecuting || e.ToState == types.StateVerifying {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (c *Controller) holdRecycle(inc *types.Incident, step *playbook.Step, reason string) error {
@@ -292,4 +338,3 @@ func (c *Controller) recordRecoveryAvailable(ctx context.Context, inc *types.Inc
 	c.policyAssessed[inc.ID] = ""
 	return nil
 }
-

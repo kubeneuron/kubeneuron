@@ -1012,7 +1012,7 @@ async function renderDrawer(){
   $("dTl").innerHTML = d.audit.map(e => {
     const byPolicy = (e.actor || "").startsWith("policy:");
     const human = e.actor && e.actor !== "system" && !byPolicy;
-    // Who let a step run: a person's approval or an automatic policy (#56).
+    // Who let a step run: a person's approval or an automatic policy.
     const started = e.to_state === "EXECUTING" && e.from_state !== "EXECUTING";
     const who = byPolicy ? (started ? "authorised by policy " : "policy ") + e.actor.slice(7)
       : (human && started ? "approved by " + e.actor : e.actor);

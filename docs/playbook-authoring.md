@@ -405,7 +405,8 @@ Every step it starts is audited with the actor `policy:<name>`, the policy's
 generation, and who it declares enabled automatic mode and when
 (`enabledBy`, `enabledAt`). KubeNeuron records these as declared and cannot
 verify them; the Kubernetes API audit log shows who actually changed the
-policy. `kubeneuronctl incident show` lists, per executed step, whether a
+policy. Any identifier your organisation uses is enough; it is stored in the
+policy and in the audit trail. `kubeneuronctl incident show` lists, per executed step, whether a
 person approved it or a policy authorised it, and `kubectl get gpolicy` shows
 each policy's mode and its effective mode (`DryRun` while the installation is
 not `Enabled`).
@@ -459,7 +460,7 @@ approval does not lift them:
   rung already passed, the incident is held as unavailable before the cordon.
   A recycle the provider stops allowing after its rung has started, with no
   replace after it in the rung, fails the rung: that is an ordinary
-  escalation. A skip is not a recovery and never leads to verification.
+  escalation, and it spends an attempt. A skip is not a recovery and never leads to verification.
   A restart through the cloud API drains the node before it is tried, so it can interrupt the workload before a prepared replacement is ready; the add-first guarantee does not cover it.
 
 Both are checked before the first disruptive step, together with the cloud
@@ -501,15 +502,12 @@ spec:
   #   checkpointWait: 10m
   #   maxUnhealthyPercent: 25
   #   minUnhealthyNodes: 2
-  #   enabledBy: you@example.com
+  #   enabledBy: "Jane Doe, platform team"
   #   enabledAt: "2026-11-15T09:00:00Z"
   #   acknowledgement: "I understand that automatic mode drains and replaces nodes without asking"
   # replacement: { strategy: AddFirst }
   # recycle: { enabled: false }
 ```
-
-Automatic mode never runs node-level actions (GPU reset, reboot, driver
-operations); those always wait for a person.
 
 ## Authoring guidelines
 
