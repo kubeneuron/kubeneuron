@@ -760,8 +760,9 @@ type DependencySpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.victoriaMetrics) || !has(self.store)",message="victoriaMetrics is deprecated and replaced by store; set only store"
 // +kubebuilder:validation:XValidation:rule="!has(self.collector) || self.collector.mode != 'External' || !has(self.store) || self.store.mode != 'Managed'",message="an external collector routes metrics itself: store cannot be Managed"
 type ObservabilitySpec struct {
-	// VictoriaMetrics is deprecated: use store. Set alone, it is read as
-	// store mode External with the same endpoint.
+	// VictoriaMetrics is deprecated: use store. It names a query address,
+	// not an OTLP destination, so the collector never sends to it; with no
+	// store the collector drops what it receives.
 	// +optional
 	VictoriaMetrics *DependencySpec `json:"victoriaMetrics,omitempty"`
 	Alertmanager    DependencySpec  `json:"alertmanager"`

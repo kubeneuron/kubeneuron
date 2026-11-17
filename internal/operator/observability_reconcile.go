@@ -79,7 +79,12 @@ func (r *KubeNeuronReconciler) reconcileObservability(ctx context.Context, insta
 		if err := r.removeStore(ctx, installation); err != nil {
 			return nil, err
 		}
-		conditions = append(conditions, observabilityCondition{storeReadyCondition, externalOrDisabled(storeMode(installation), "metrics store")})
+		condition := externalOrDisabled(storeMode(installation), "metrics store")
+		if condition == nil && installation.Spec.Observability.VictoriaMetrics != nil {
+			condition = notReady("DeprecatedVictoriaMetrics",
+				"victoriaMetrics is deprecated and is not used as the metrics destination; set spec.observability.store")
+		}
+		conditions = append(conditions, observabilityCondition{storeReadyCondition, condition})
 	}
 	switch collectorMode(installation) {
 	case kubeneuronv1alpha1.IntegrationModeManaged:
@@ -179,8 +184,7 @@ func (r *KubeNeuronReconciler) ensureStore(ctx context.Context, installation *ku
 }
 
 // removeStore removes the store's workload when it is no longer Managed.
-// Its PersistentVolumeClaim stays: the data outlives a mode switch, and is
-// removed with the installation or by hand.
+// Its PersistentVolumeClaim stays: the operator never deletes it.
 func (r *KubeNeuronReconciler) removeStore(ctx context.Context, installation *kubeneuronv1alpha1.KubeNeuron) error {
 	name := storeName(installation)
 	for _, object := range []client.Object{&appsv1.Deployment{}, &corev1.Service{}, &networkingv1.NetworkPolicy{}, &corev1.ServiceAccount{}} {
@@ -222,21 +226,42 @@ func (r *KubeNeuronReconciler) ensureNetworkPolicy(ctx context.Context, installa
 }
 
 // ensureStoreClaim creates the store's claim and afterwards only grows it:
-// access mode, volume mode and storage class are fixed at creation.
+// access mode, volume mode and storage class are fixed at creation. The
+// claim has no owner reference, so neither garbage collection nor the
+// operator ever deletes the metrics: it outlives the installation and is
+// removed by hand. It is recognised as this installation's by its labels.
 func (r *KubeNeuronReconciler) ensureStoreClaim(ctx context.Context, installation *kubeneuronv1alpha1.KubeNeuron, wanted *corev1.PersistentVolumeClaim) error {
 	actual := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: wanted.Name, Namespace: wanted.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, actual, func() error {
 		if actual.DeletionTimestamp != nil {
 			return fmt.Errorf("PersistentVolumeClaim %s is being deleted", actual.Name)
 		}
-		if err := ensureControlledBy(installation, actual, "PersistentVolumeClaim"); err != nil {
-			return err
-		}
-		actual.Labels = copyStringMap(wanted.Labels)
 		if actual.ResourceVersion == "" {
+			actual.Labels = copyStringMap(wanted.Labels)
 			actual.Spec = *wanted.Spec.DeepCopy()
-			return setOwner(r.Scheme, installation, actual)
+			return nil
 		}
+		for key, value := range wanted.Labels {
+			if actual.Labels[key] != value {
+				return fmt.Errorf("PersistentVolumeClaim %s/%s already exists and is not this installation's metrics store claim (label %s)",
+					actual.Namespace, actual.Name, key)
+			}
+		}
+		// Claims made before the store stopped being owned carry this
+		// installation's owner reference; drop it so deleting the
+		// installation does not delete the metrics. Any other owner is
+		// someone else's claim.
+		var owners []metav1.OwnerReference
+		for _, ref := range actual.OwnerReferences {
+			if ref.UID == installation.UID {
+				continue
+			}
+			owners = append(owners, ref)
+		}
+		if len(owners) != 0 {
+			return fmt.Errorf("PersistentVolumeClaim %s/%s has owners other than this installation; refusing to adopt it", actual.Namespace, actual.Name)
+		}
+		actual.OwnerReferences = nil
 		if wanted.Spec.StorageClassName != nil &&
 			(actual.Spec.StorageClassName == nil || *actual.Spec.StorageClassName != *wanted.Spec.StorageClassName) {
 			return fmt.Errorf("spec.observability.store.managed.storage.storageClassName cannot change on the existing claim %s", actual.Name)
@@ -253,7 +278,7 @@ func (r *KubeNeuronReconciler) ensureStoreClaim(ctx context.Context, installatio
 			}
 			actual.Spec.Resources.Requests[corev1.ResourceStorage] = size
 		}
-		return setOwner(r.Scheme, installation, actual)
+		return nil
 	})
 	return err
 }

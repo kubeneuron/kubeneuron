@@ -1074,8 +1074,9 @@ spec:
                       rule: '!has(self.endpoint) || !self.endpoint.contains(''@'')'
                   victoriaMetrics:
                     description: |-
-                      VictoriaMetrics is deprecated: use store. Set alone, it is read as
-                      store mode External with the same endpoint.
+                      VictoriaMetrics is deprecated: use store. It names a query address,
+                      not an OTLP destination, so the collector never sends to it; with no
+                      store the collector drops what it receives.
                     properties:
                       endpoint:
                         type: string

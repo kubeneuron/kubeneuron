@@ -38,19 +38,11 @@ func collectorMode(installation *kubeneuronv1alpha1.KubeNeuron) kubeneuronv1alph
 	return kubeneuronv1alpha1.IntegrationModeDisabled
 }
 
-// effectiveStore is spec.observability.store, or the deprecated
-// victoriaMetrics block read as an External store.
+// effectiveStore is spec.observability.store. The deprecated
+// victoriaMetrics block is a query address, not an OTLP destination, and is
+// never written to.
 func effectiveStore(installation *kubeneuronv1alpha1.KubeNeuron) *kubeneuronv1alpha1.MetricsStoreSpec {
-	obs := installation.Spec.Observability
-	if obs.Store != nil {
-		return obs.Store
-	}
-	if vm := obs.VictoriaMetrics; vm != nil {
-		return &kubeneuronv1alpha1.MetricsStoreSpec{OTLPEndpointSpec: kubeneuronv1alpha1.OTLPEndpointSpec{
-			Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: vm.Endpoint,
-		}}
-	}
-	return nil
+	return installation.Spec.Observability.Store
 }
 
 func storeMode(installation *kubeneuronv1alpha1.KubeNeuron) kubeneuronv1alpha1.IntegrationMode {

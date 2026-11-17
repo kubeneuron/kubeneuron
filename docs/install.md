@@ -46,7 +46,8 @@ operator; see [Metrics path](#metrics-path-specobservability).
   store only names the data source for a Managed Grafana.
 - **The Managed store has no backup.** Its claim (`storage.size`, default
   `20Gi`; `storage.storageClassName`; `retention`, default `30d`) survives a
-  switch to External or Disabled and is removed with the installation. Until
+  switch to External or Disabled and the deletion of the installation: the
+  operator never deletes it; delete it by hand. Until
   the claim is Bound, `ObservabilityStoreReady` is `False` with reason
   `StoragePending`. `storage.ephemeral: true` uses an emptyDir instead and
   loses the data with the pod.
@@ -62,9 +63,10 @@ operator; see [Metrics path](#metrics-path-specobservability).
   `--otel-collector-image` and `--metrics-store-image`, for a mirror) and in
   `deploy/kubernetes/dependencies/versions.lock.yaml`; they are pulled from
   their publishers, not redistributed by KubeNeuron.
-- `spec.observability.victoriaMetrics` is deprecated: set alone, it is read
-  as an External store; set together with `store`, the installation is
-  rejected.
+- `spec.observability.victoriaMetrics` is deprecated and is not a metrics
+  destination: the collector never sends to it, and `ObservabilityStoreReady`
+  says so until `store` is set. Set together with `store`, the installation
+  is rejected.
 
 ## 1. CRDs and operator
 

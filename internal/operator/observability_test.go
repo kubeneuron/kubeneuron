@@ -12,9 +12,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -156,12 +158,12 @@ func TestCollectorConfigExportsToTheStore(t *testing.T) {
 		t.Errorf("collector reads the store authorization from the Secret: %#v", e)
 	}
 
-	// A deprecated victoriaMetrics block alone is an external store.
+	// A deprecated victoriaMetrics block is a query address: never written to.
 	kn.Spec.Observability.Store = nil
-	kn.Spec.Observability.VictoriaMetrics = &kubeneuronv1alpha1.DependencySpec{Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: "http://vm.example:8428/opentelemetry"}
+	kn.Spec.Observability.VictoriaMetrics = &kubeneuronv1alpha1.DependencySpec{Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: "http://vm.example:8428"}
 	config = decodeCollectorConfig(t, kn)
-	if e := config["exporters"].(map[string]any)["otlphttp/store"].(map[string]any)["endpoint"]; e != "http://vm.example:8428/opentelemetry" {
-		t.Errorf("victoriaMetrics as store endpoint = %v", e)
+	if exporters := config["exporters"].(map[string]any); exporters["otlphttp/store"] != nil || exporters["nop"] == nil {
+		t.Errorf("victoriaMetrics alone: exporters = %v, want nop only", exporters)
 	}
 
 	kn.Spec.Observability.VictoriaMetrics = nil
@@ -452,5 +454,105 @@ func TestReconcileLeavesAnUnownedCollectorAlone(t *testing.T) {
 	}
 	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(foreign), &appsv1.Deployment{}); err != nil {
 		t.Errorf("the unowned Deployment was removed: %v", err)
+	}
+}
+
+func storeClaim(t *testing.T, c client.Client) *corev1.PersistentVolumeClaim {
+	t.Helper()
+	var claim corev1.PersistentVolumeClaim
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "fleet-metrics-store", Namespace: "kube-neuron-system"}, &claim); err != nil {
+		t.Fatalf("store claim: %v", err)
+	}
+	return &claim
+}
+
+func TestStoreClaimHasNoOwnerAndOutlivesTheStore(t *testing.T) {
+	ctx := context.Background()
+	fakeClient, reconciler := reconcileObservabilityFixture(t, managedObservability(testKubeNeuron()))
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: "fleet"}}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	claim := storeClaim(t, fakeClient)
+	if len(claim.OwnerReferences) != 0 {
+		t.Fatalf("store claim owners = %v, want none: garbage collection would delete the metrics with the installation", claim.OwnerReferences)
+	}
+
+	// A claim from an earlier build carries our owner reference: dropped.
+	var kn kubeneuronv1alpha1.KubeNeuron
+	if err := fakeClient.Get(ctx, request.NamespacedName, &kn); err != nil {
+		t.Fatal(err)
+	}
+	claim.OwnerReferences = []metav1.OwnerReference{{APIVersion: "kubeneuron.io/v1alpha1", Kind: "KubeNeuron", Name: kn.Name, UID: kn.UID, Controller: ptr.To(true)}}
+	if err := fakeClient.Update(ctx, claim); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if owners := storeClaim(t, fakeClient).OwnerReferences; len(owners) != 0 {
+		t.Fatalf("owner reference not removed: %v", owners)
+	}
+
+	// Disabled: the store goes, the claim stays and still has no owner.
+	kn.Spec.Observability.Store = nil
+	kn.Spec.Observability.Collector = nil
+	if err := fakeClient.Update(ctx, &kn); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if owners := storeClaim(t, fakeClient).OwnerReferences; len(owners) != 0 {
+		t.Fatalf("claim after disable has owners %v", owners)
+	}
+}
+
+func TestStoreRefusesAForeignClaim(t *testing.T) {
+	ctx := context.Background()
+	kn := managedObservability(testKubeNeuron())
+	fakeClient, reconciler := reconcileObservabilityFixture(t, kn)
+	foreign := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "fleet-metrics-store", Namespace: kn.Spec.Namespace, Labels: map[string]string{"app": "other"}},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources:   corev1.VolumeResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")}},
+		},
+	}
+	if err := fakeClient.Create(ctx, foreign); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "fleet"}}); err == nil {
+		t.Fatal("Reconcile() = nil, want a refusal to adopt a claim that is not this installation's")
+	}
+	if got := storeClaim(t, fakeClient); got.Labels["app"] != "other" || len(got.OwnerReferences) != 0 {
+		t.Errorf("the foreign claim was changed: %#v", got.ObjectMeta)
+	}
+}
+
+func TestDeprecatedVictoriaMetricsIsNotADestination(t *testing.T) {
+	ctx := context.Background()
+	kn := testKubeNeuron() // victoriaMetrics set, no store
+	kn.Spec.Observability.Collector = &kubeneuronv1alpha1.CollectorSpec{OTLPEndpointSpec: kubeneuronv1alpha1.OTLPEndpointSpec{Mode: kubeneuronv1alpha1.IntegrationModeManaged}}
+	fakeClient, reconciler := reconcileObservabilityFixture(t, kn)
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: "fleet"}}
+	if _, err := reconciler.Reconcile(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	var config corev1.ConfigMap
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: "fleet-otel-collector", Namespace: kn.Spec.Namespace}, &config); err != nil {
+		t.Fatal(err)
+	}
+	if data := config.Data["config.yaml"]; strings.Contains(data, "vm.example") || !strings.Contains(data, "nop") {
+		t.Errorf("collector config sends to the deprecated query address:\n%s", data)
+	}
+	var got kubeneuronv1alpha1.KubeNeuron
+	if err := fakeClient.Get(ctx, request.NamespacedName, &got); err != nil {
+		t.Fatal(err)
+	}
+	c := meta.FindStatusCondition(got.Status.Conditions, storeReadyCondition)
+	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != "DeprecatedVictoriaMetrics" ||
+		c.Message != "victoriaMetrics is deprecated and is not used as the metrics destination; set spec.observability.store" {
+		t.Errorf("store condition = %#v", c)
 	}
 }
