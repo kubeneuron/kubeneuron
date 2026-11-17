@@ -30,6 +30,7 @@ nav:
       - Quickstart (dry-run demo): quickstart.md
       - Production install: install.md
   - Operating:
+      - Data and privacy: data-and-privacy.md
       - Operations guide: operations.md
       - Alert runbooks: runbooks.md
       - Upgrades and rollback: upgrade.md
