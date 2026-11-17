@@ -84,7 +84,7 @@ func checkGroupActivities(ctx context.Context, client activityReader, group stri
 			switch a.StatusCode {
 			case at.ScalingActivityStatusCodeSuccessful, at.ScalingActivityStatusCodeCancelled, at.ScalingActivityStatusCodeFailed:
 			default:
-				return errors.New("Auto Scaling group has an unfinished or unknown activity")
+				return errors.New("unfinished or unknown Auto Scaling group activity")
 			}
 		}
 		token := sdk.ToString(out.NextToken)
