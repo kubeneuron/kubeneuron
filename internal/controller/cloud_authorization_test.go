@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
+	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"testing"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -58,9 +60,11 @@ type changingEligibilityPlatform struct {
 	platform.GuardedNodeRecycler
 	verdict cloud.RecoveryEligibility
 	err     error
+	calls   int
 }
 
 func (p *changingEligibilityPlatform) RecoveryEligibility(context.Context, cloud.NodeIdentity) (cloud.RecoveryEligibility, error) {
+	p.calls++
 	return p.verdict, p.err
 }
 func TestCloudEligibilityRestoredOnlyForPinnedIdentity(t *testing.T) {
@@ -90,6 +94,7 @@ func TestCloudEligibilityRestoredOnlyForPinnedIdentity(t *testing.T) {
 	p.err = errors.New("temporary read failure")
 	check(true)
 	p.err = nil
+	c.cloudAssessments[inc.ID].at = time.Now().Add(-time.Minute)
 	p.verdict = cloud.RecoveryEligibility{Identity: pin, Mode: cloud.RepairOff, ReplaceAllowed: true}
 	check(false)
 	check(false)
@@ -170,5 +175,49 @@ func TestCloudAuthorizationSupersedesOnlyConfirmedMismatch(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+type countedCloudAuditStore struct {
+	store.Store
+	reads int
+}
+
+func (s *countedCloudAuditStore) AuditTrail(ctx context.Context, id string) ([]*types.AuditEntry, error) {
+	s.reads++
+	return s.Store.AuditTrail(ctx, id)
+}
+func TestCloudWaitingAssessmentCacheDoesNotCacheExecutionGate(t *testing.T) {
+	pin := cloud.NodeIdentity{Node: "node-a", NodeUID: "uid", ProviderID: "aws:///zone/i-1", InstanceID: "i-1", BootID: "boot"}
+	p := &changingEligibilityPlatform{verdict: cloud.RecoveryEligibility{Identity: pin, Mode: cloud.RepairOff, ReplaceAllowed: true}}
+	c, st := stackTestController(t, p)
+	ctx := context.Background()
+	counted := &countedCloudAuditStore{Store: st}
+	c.store = counted
+	inc := &types.Incident{ID: "cached", State: types.StateAwaitingApproval, Target: types.Target{Node: pin.Node}, CloudIdentity: &pin}
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	step := &playbook.Step{Action: "platform.replace_node"}
+	for range 6 {
+		held, err := c.holdUnavailableCloudRecovery(ctx, inc, step)
+		if held || err != nil {
+			t.Fatalf("held=%v err=%v", held, err)
+		}
+	}
+	if p.calls != 1 || counted.reads != 1 {
+		t.Fatalf("calls=%d audit=%d", p.calls, counted.reads)
+	}
+	p.verdict.Mode = cloud.RepairUnknown
+	if err := c.requireCloudRecovery(ctx, inc, step); err == nil {
+		t.Fatal("cached eligibility bypassed fresh gate")
+	}
+	c.cloudAssessments[inc.ID].at = time.Now().Add(-time.Minute)
+	held, err := c.holdUnavailableCloudRecovery(ctx, inc, step)
+	if !held || err != nil {
+		t.Fatalf("held=%v err=%v", held, err)
+	}
+	if p.calls != 3 || counted.reads != 1 {
+		t.Fatalf("calls=%d audit=%d", p.calls, counted.reads)
 	}
 }

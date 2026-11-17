@@ -114,6 +114,9 @@ type Controller struct {
 	// cordonReported remembers which stuck cordons have been announced.
 	cordonReported cordonReportedKeys
 
+	cloudAssessmentMu sync.Mutex
+	cloudAssessments  map[string]*cloudAssessment
+
 	// checkpointNow and checkpointPoll are the clock and the observation pace
 	// of the checkpoint coordination pre-phase (checkpoint.go). Both are nil /
 	// zero in production, meaning the wall clock and the default interval;
