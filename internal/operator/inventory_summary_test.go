@@ -82,6 +82,7 @@ func TestInventoryConditionsRejectStaleMalformedAndMissingEvidence(t *testing.T)
 		}
 	}
 	check(nil, "AwaitingController")
+	check(map[string]string{inventory.FirstAlertAcceptedAt: time.Now().UTC().Format(time.RFC3339Nano)}, "AwaitingController")
 	check(map[string]string{"schemaVersion": "99"}, "InvalidSummary")
 	check(inventory.Summary{ObservedAt: time.Now().Add(-4 * inventory.Interval)}.Data(), "StaleSummary")
 	check(inventory.Summary{ObservedAt: time.Now(), AdvertisedNodes: 1}.Data(), "AwaitingGPUAgents")

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -19,6 +20,7 @@ import (
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
 	vmalertrules "github.com/kubeneuron/kubeneuron/configs/vmalert"
+	"github.com/kubeneuron/kubeneuron/internal/inventory"
 )
 
 // A Managed store comes with a vmalert that evaluates the GPU recording
@@ -229,10 +231,27 @@ func (r *KubeNeuronReconciler) publicServerHasCA(ctx context.Context, installati
 	return len(secret.Data["ca.crt"]) > 0, nil
 }
 
+// firstAlertAccepted reads when the controller first accepted a metric
+// alert from the installation's inventory summary. It returns nil until then,
+// and when the summary cannot be read or is not the installation's.
+func (r *KubeNeuronReconciler) firstAlertAccepted(ctx context.Context, installation *kubeneuronv1alpha1.KubeNeuron) *time.Time {
+	var cm corev1.ConfigMap
+	key := client.ObjectKey{Namespace: installation.Spec.Namespace, Name: installation.Name + inventory.Suffix}
+	if err := r.Get(ctx, key, &cm); err != nil || !metav1.IsControlledBy(&cm, installation) {
+		return nil
+	}
+	at, ok := inventory.FirstAlert(cm.Data)
+	if !ok {
+		return nil
+	}
+	return &at
+}
+
 // alertDetection says whether metric alerts reach the controller: with the
 // Managed store when vmalert with the alerting rules is available; with an
-// External store they are the user's to run and point at the webhook.
-func alertDetection(installation *kubeneuronv1alpha1.KubeNeuron, rules *metav1.Condition) *metav1.Condition {
+// External store they are the user's to run and point at the webhook, and
+// the condition turns True once the controller has accepted one.
+func alertDetection(installation *kubeneuronv1alpha1.KubeNeuron, rules *metav1.Condition, firstAlert *time.Time) *metav1.Condition {
 	switch storeMode(installation) {
 	case kubeneuronv1alpha1.IntegrationModeManaged:
 		if rules == nil || rules.Status != metav1.ConditionTrue {
@@ -241,6 +260,10 @@ func alertDetection(installation *kubeneuronv1alpha1.KubeNeuron, rules *metav1.C
 		return &metav1.Condition{Status: metav1.ConditionTrue, Reason: "ManagedRules",
 			Message: "the managed vmalert evaluates the alerting rules and sends them to the controller"}
 	case kubeneuronv1alpha1.IntegrationModeExternal:
+		if firstAlert != nil {
+			return &metav1.Condition{Status: metav1.ConditionTrue, Reason: "AlertReceived",
+				Message: "the controller accepted its first metric alert at " + firstAlert.UTC().Format(time.RFC3339)}
+		}
 		return notReady("ExternalStore",
 			"alert-based detection is not configured: run the alert rules against your store and point them at the controller webhook")
 	default:

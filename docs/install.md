@@ -95,8 +95,9 @@ operator; see [Metrics path](#metrics-path-specobservability).
   controller with that Secret's `ca.crt` (or the system roots without
   one). `AlertDetectionConfigured` is `True` once vmalert is available.
   **With an External store the alert rules are yours to run** against your
-  store, pointed at the controller webhook; until then
-  `AlertDetectionConfigured` is `False` with reason `ExternalStore`.
+  store, pointed at the controller webhook. `AlertDetectionConfigured` is
+  `False` with reason `ExternalStore` until the controller accepts the first
+  alert, then `True` with reason `AlertReceived` and the time it arrived.
 - The collector's NetworkPolicy admits OTLP from the installation's
   controller and agents and from the operator. For an external store it
   allows egress to the store's port on any address, since a NetworkPolicy

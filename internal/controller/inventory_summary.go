@@ -144,7 +144,7 @@ func (c *Controller) publishInventory(ctx context.Context, maps typedcore.Config
 			return nil
 		}
 	}
-	cm.Data = s.Data()
+	cm.Data = inventory.Merge(cm.Data, s)
 	_, err = maps.Update(ctx, cm, metav1.UpdateOptions{})
 	return err
 }

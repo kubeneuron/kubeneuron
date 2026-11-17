@@ -84,7 +84,7 @@ func (r *KubeNeuronReconciler) reconcileObservability(ctx context.Context, insta
 		}
 		conditions = append(conditions,
 			observabilityCondition{rulesReadyCondition, rules},
-			observabilityCondition{alertDetectionCondition, alertDetection(installation, rules)})
+			observabilityCondition{alertDetectionCondition, alertDetection(installation, rules, nil)})
 	default:
 		// The recording rules come with the Managed store only; for another
 		// store they are the user's to run.
@@ -93,7 +93,7 @@ func (r *KubeNeuronReconciler) reconcileObservability(ctx context.Context, insta
 		}
 		conditions = append(conditions,
 			observabilityCondition{rulesReadyCondition, nil},
-			observabilityCondition{alertDetectionCondition, alertDetection(installation, nil)})
+			observabilityCondition{alertDetectionCondition, alertDetection(installation, nil, r.firstAlertAccepted(ctx, installation))})
 		if err := r.removeStore(ctx, installation); err != nil {
 			return nil, err
 		}

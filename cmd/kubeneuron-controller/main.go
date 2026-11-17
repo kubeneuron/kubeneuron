@@ -414,6 +414,7 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	ctrl := controller.New(st, st, engine, gate, flap, plat, act, notifier, log)
 	if kubePlatform != nil && agentServer.InstallationUID != "" {
 		ctrl.ConfigureInventoryDiagnostics(kubePlatform.Client(), agentServer.Namespace, agentServer.InstallationName, agentServer.InstallationUID)
+		ctrl.ConfigureFirstAlertRecord(kubePlatform.Client().CoreV1().ConfigMaps(agentServer.Namespace), agentServer.InstallationName, agentServer.InstallationUID)
 	}
 	api := httpapi.New(ctrl)
 	// Install the leader fence before either listener starts.  A standby may be
