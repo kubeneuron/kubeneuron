@@ -242,6 +242,18 @@ API is `v1alpha1`.
 
 ### Added
 
+- **OTLP metrics export from the controller, agent and operator.** Each
+  process can push the series it serves on `/metrics` to an OpenTelemetry
+  Collector over OTLP (gRPC or HTTP/protobuf), through the Prometheus bridge
+  from the same registry, so names and labels are identical and nothing is
+  counted twice. Off unless `OTEL_EXPORTER_OTLP_ENDPOINT` (or the
+  metrics-specific variable) is set; the standard `OTEL_*` variables
+  configure it. A failed export is dropped and counted in
+  `kubeneuron_telemetry_export_failures_total`, never blocks the process, and
+  the final flush at shutdown is bounded to 5 s. A test fails the build if a
+  metric label could carry a person's identity, a credential, a URL or a
+  workload name (namespace, pod, job).
+
 - **Accelerator adapter registry.** `accelerator.Register`, `Build`,
   `Registered`, and `Vendors`, modelled on the cloud provider registry.
   Built-in adapters are listed in one registration file,

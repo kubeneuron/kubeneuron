@@ -9,10 +9,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
 
+	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -22,6 +24,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
@@ -29,6 +32,7 @@ import (
 	// playbook against a provider's declared capabilities at compile time.
 	_ "github.com/kubeneuron/kubeneuron/internal/cloud/providers"
 	"github.com/kubeneuron/kubeneuron/internal/operator"
+	"github.com/kubeneuron/kubeneuron/internal/telemetry"
 )
 
 var version = "dev"
@@ -117,7 +121,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	ctx := ctrl.SetupSignalHandler()
+	stopTelemetry := telemetry.Start(ctx, telemetry.Options{
+		ServiceName: "kubeneuron-operator",
+		Version:     version,
+		Gatherer:    ctrlmetrics.Registry,
+		Registerer:  ctrlmetrics.Registry,
+		Log:         slog.New(logr.ToSlogHandler(ctrl.Log.WithName("telemetry"))),
+	})
+	err = mgr.Start(ctx)
+	_ = stopTelemetry(context.Background())
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "running manager:", err)
 		os.Exit(1)
 	}

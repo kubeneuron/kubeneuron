@@ -16,10 +16,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/kubeneuron/kubeneuron/internal/accelerator/nvidia"
 	"github.com/kubeneuron/kubeneuron/internal/agent"
 	"github.com/kubeneuron/kubeneuron/internal/agent/dcgm"
 	"github.com/kubeneuron/kubeneuron/internal/agent/nvml"
+	"github.com/kubeneuron/kubeneuron/internal/telemetry"
 	"github.com/kubeneuron/kubeneuron/pkg/accelerator"
 )
 
@@ -230,7 +233,16 @@ func main() {
 	defer stop()
 
 	log.Info("kubeneuron-agent starting", "version", version, "controller", *controllerURL)
-	if err := a.Run(ctx); err != nil {
+	stopTelemetry := telemetry.Start(ctx, telemetry.Options{
+		ServiceName: "kubeneuron-agent",
+		Version:     version,
+		Gatherer:    prometheus.DefaultGatherer,
+		Registerer:  prometheus.DefaultRegisterer,
+		Log:         log,
+	})
+	err = a.Run(ctx)
+	_ = stopTelemetry(context.Background())
+	if err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}

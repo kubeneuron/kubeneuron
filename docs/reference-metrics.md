@@ -146,6 +146,43 @@ does charge parked incidents.
 
 Both processes also export the standard Go runtime and process collectors.
 
+## OTLP export
+
+The controller, agent and operator can also push their metrics to an
+OpenTelemetry Collector over OTLP. The OpenTelemetry Prometheus bridge reads
+the same registry that serves `/metrics`, so each series arrives under its
+`kubeneuron_*` name with the same labels and the same values; there is one
+set of instruments, not two. Feed one backend from either OTLP or a scrape of
+`/metrics`, not both, or every series is stored twice.
+
+Export is off until an endpoint is set. The standard variables configure it:
+
+| Variable | Effect |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Collector address; setting either turns export on |
+| `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` | `grpc` (default) or `http/protobuf` |
+| `OTEL_EXPORTER_OTLP_INSECURE`, `_CERTIFICATE`, `_HEADERS`, `_TIMEOUT` | transport, as in the OpenTelemetry specification |
+| `OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_METRIC_EXPORT_TIMEOUT` | milliseconds; defaults 30000 and 10000 |
+| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | resource; `service.name` defaults to `kubeneuron-controller`, `kubeneuron-agent` or `kubeneuron-operator` |
+| `OTEL_SDK_DISABLED=true`, `OTEL_METRICS_EXPORTER=none` | turn export off |
+
+Telemetry never holds a process up. An unsupported value (another exporter or
+protocol) is logged and the process runs without export. At most one batch is
+in flight, bounded by the export timeout; a batch that fails is dropped
+(series are cumulative, so the next one carries current values) and counted:
+
+| Series | Type | Meaning |
+|---|---|---|
+| `kubeneuron_telemetry_export_failures_total` | counter | OTLP exports that failed and were dropped; present only while export is on |
+
+At shutdown the last batch is flushed for at most 5 seconds. Detection and
+recovery do not depend on telemetry: with the Collector down they work as
+before.
+
+No metric label carries a person's identity, a credential, an endpoint URL or
+the name of a user's workload (namespace, pod, training job); a test over
+every declared and gathered label enforces it.
+
 ## Shipped alerts
 
 The dependency profile's `kubeneuron-self` VMRule group covers:

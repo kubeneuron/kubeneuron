@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
@@ -45,6 +46,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/store/postgres"
 	"github.com/kubeneuron/kubeneuron/internal/store/sqlcore"
 	"github.com/kubeneuron/kubeneuron/internal/store/sqlite"
+	"github.com/kubeneuron/kubeneuron/internal/telemetry"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 	"github.com/kubeneuron/kubeneuron/web"
 )
@@ -423,6 +425,14 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	}
 	go watchRuntimeConfig(ctx, ctrl, api, paths, log, !election.enabled)
 	api.SetMetricsHandler(metrics.Handler())
+	stopTelemetry := telemetry.Start(ctx, telemetry.Options{
+		ServiceName: "kubeneuron-controller",
+		Version:     version,
+		Gatherer:    prometheus.DefaultGatherer,
+		Registerer:  prometheus.DefaultRegisterer,
+		Log:         log,
+	})
+	defer func() { _ = stopTelemetry(context.Background()) }()
 	// When the public listener serves plain HTTP it is expected to sit behind a
 	// TLS-terminating load balancer, so honor X-Forwarded-Proto to mark panel
 	// cookies Secure. When it terminates TLS itself, r.TLS already answers that.
