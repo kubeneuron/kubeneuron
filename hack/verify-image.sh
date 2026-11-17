@@ -140,10 +140,14 @@ rm -f "$listing" "$listing.tar"
 note "each image carries third-party legal files"
 for target in operator controller agent cli; do
     image="kubeneuron-${target}:${TAG}"
-    for path in NOTICE THIRD_PARTY_LICENSES LICENSE; do
+    for path in NOTICE THIRD_PARTY_LICENSES LICENSE BASE-IMAGE-PACKAGES; do
         image_contains "$image" "/licenses/$path" || bad "$image lacks /licenses/$path"
     done
 done
+
+# The base-image package record must describe the base images actually pinned.
+note "the base-image package record matches the pinned base images"
+python3 -I hack/base-image-packages.py --check || bad "build/licenses/base-image-packages.txt is stale for the pinned base images"
 
 # --- the user each image runs as ----------------------------------------------
 # The agent runs privileged with hostPID and must read /dev/kmsg, so it is

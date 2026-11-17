@@ -278,6 +278,23 @@ jobs:
         # job for a reason that has nothing to do with the change under test.
         run: go tool actionlint
 
+  dco:
+    # Every commit of a pull request carries its author's Signed-off-by
+    # (Developer Certificate of Origin, decided m994). Pushes to main and
+    # release reuse are not pull requests and are not checked here.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Every commit is signed off by its author
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash hack/verify-dco.sh "$BASE_SHA" "$HEAD_SHA"
+
   govulncheck:
     runs-on: ubuntu-latest
     steps:

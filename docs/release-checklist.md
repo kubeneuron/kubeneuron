@@ -141,6 +141,12 @@ To update a pin:
   the version comment together.
 - Image: `docker buildx imagetools inspect NAME:TAG` and copy the index
   `Digest:`; keep the tag in front of the digest so the version stays readable.
+- Distroless base image: after changing its digest, run
+  `python3 -I hack/base-image-packages.py` and commit
+  `build/licenses/base-image-packages.txt` (the packages, licences and Debian
+  sources each image ships as `/licenses/BASE-IMAGE-PACKAGES`). `make lint`
+  fails while the record names other digests; `make verify-image` fails while
+  its content is stale.
 
 Linters are pinned so a local `make lint` and CI agree: golangci-lint
 v2.14.0 (CI `golangci-lint-action` `version:`), shellcheck v0.11.0 (CI installs

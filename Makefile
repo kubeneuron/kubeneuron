@@ -173,6 +173,7 @@ lint: verify-licenses
 # other half of the unreproducible-failure signature.
 	$(GO) tool actionlint
 	bash hack/verify-pins.sh
+	python3 -I hack/base-image-packages.py --check-digests
 # actionlint's shellcheck reaches `run:` blocks only. Everything load-bearing in
 # hack/ is a standalone script it never sees — the mirror, the release check,
 # the image check, the hardware stand — and those are exactly the scripts whose

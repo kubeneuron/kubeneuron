@@ -6,3 +6,6 @@ static binary.
 musl (MIT), statically linked into nsenter: see musl/VERSION, musl/SOURCE and
 musl/COPYRIGHT.
 Compiler support code (libgcc), if linked: GPL-3.0-or-later WITH GCC-exception-3.1.
+The distroless base image provides Debian packages (glibc under LGPL among
+them) under their own licences: see /licenses/BASE-IMAGE-PACKAGES for the
+packages, versions, licences and Debian source locations.

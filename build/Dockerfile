@@ -37,6 +37,7 @@ LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron"
       org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /out/kubeneuron-operator /kubeneuron-operator
 COPY NOTICE THIRD_PARTY_LICENSES LICENSE /licenses/
+COPY build/licenses/base-image-packages.txt /licenses/BASE-IMAGE-PACKAGES
 ENTRYPOINT ["/kubeneuron-operator"]
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS controller
@@ -45,6 +46,7 @@ LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron"
       org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /out/kubeneuron-controller /kubeneuron-controller
 COPY NOTICE THIRD_PARTY_LICENSES LICENSE /licenses/
+COPY build/licenses/base-image-packages.txt /licenses/BASE-IMAGE-PACKAGES
 ENTRYPOINT ["/kubeneuron-controller"]
 
 # The agent runs privileged with hostPID in the managed DaemonSet and must
@@ -97,6 +99,7 @@ COPY --from=nsenter /out/licenses/ /licenses/native/
 COPY build/licenses/native-SOURCES /licenses/native/SOURCES
 COPY --from=build /out/kubeneuron-agent /kubeneuron-agent
 COPY NOTICE THIRD_PARTY_LICENSES LICENSE /licenses/
+COPY build/licenses/base-image-packages.txt /licenses/BASE-IMAGE-PACKAGES
 ENTRYPOINT ["/kubeneuron-agent"]
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS cli
@@ -105,4 +108,5 @@ LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron"
       org.opencontainers.image.licenses="Apache-2.0"
 COPY --from=build /out/kubeneuronctl /kubeneuronctl
 COPY NOTICE THIRD_PARTY_LICENSES LICENSE /licenses/
+COPY build/licenses/base-image-packages.txt /licenses/BASE-IMAGE-PACKAGES
 ENTRYPOINT ["/kubeneuronctl"]
