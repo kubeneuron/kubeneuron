@@ -39,7 +39,7 @@ func (p *checkpointRepairPlatform) CloudNode(context.Context, string) (cloud.Nod
 	return cloud.NodeRef{}, nil
 }
 func (p *checkpointRepairPlatform) RecoveryEligibility(_ context.Context, pin cloud.NodeIdentity) (cloud.RecoveryEligibility, error) {
-	return cloud.RecoveryEligibility{Identity: pin, ReplaceAllowed: !p.active, Reason: "native repair became active"}, nil
+	return cloud.RecoveryEligibility{Identity: pin, Mode: cloud.RepairOff, ReplaceAllowed: !p.active, Reason: "native repair became active"}, nil
 }
 func (p *checkpointRepairPlatform) ReplacePinnedNode(context.Context, cloud.NodeIdentity) error {
 	return nil

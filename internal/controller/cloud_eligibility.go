@@ -54,7 +54,7 @@ func (c *Controller) requireCloudRecovery(ctx context.Context, inc *types.Incide
 	if err != nil {
 		return fmt.Errorf("%w: %s: %w", errCloudRecoveryUnavailable, v.Reason, err)
 	}
-	if !v.ReplaceAllowed || (step.Action == "platform.recycle_node" && !v.RecycleAllowed) {
+	if !cloudRecoveryAllowed(v, step.Action) {
 		return fmt.Errorf("%w: %s", errCloudRecoveryUnavailable, v.Reason)
 	}
 	return nil
@@ -68,4 +68,9 @@ func (c *Controller) supersedeCloudTarget(ctx context.Context, inc *types.Incide
 	}
 	return c.transition(ctx, inc, types.StateSuperseded, "system", "cloud-target-changed",
 		"target identity changed; recovery unverified; any existing cordon is retained for a same-UID node", nil)
+}
+
+// cloudRecoveryAllowed is shared by the waiting assessment and the fresh gate.
+func cloudRecoveryAllowed(v cloud.RecoveryEligibility, action string) bool {
+	return v.ReplaceAllowed && (v.Mode == cloud.RepairOff || v.Mode == cloud.RepairVeto) && (action != "platform.recycle_node" || v.RecycleAllowed)
 }
