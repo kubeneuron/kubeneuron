@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/inventory"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/operations"
 	"github.com/kubeneuron/kubeneuron/internal/store"
@@ -406,6 +407,7 @@ func (s *Server) registerOperatorRoutes(mux routeMux) {
 	mux.HandleFunc("POST /api/v1/incidents/{id}/resolve", s.requireOperatorMutation(s.handleResolve))
 	mux.HandleFunc("GET /api/v1/readiness", s.requireOperator(s.handleFleetReadiness))
 	mux.HandleFunc("GET /api/v1/audit-events", s.requireOperator(s.handleListOperationalAuditEvents))
+	mux.HandleFunc("GET /api/v1/inventory-summary", s.requireOperator(s.handleInventorySummary))
 	mux.HandleFunc("GET /api/v1/nodes", s.requireOperator(s.handleListNodes))
 	mux.HandleFunc("GET /api/v1/nodes/{node}", s.requireOperator(s.handleGetNode))
 	mux.HandleFunc("GET /api/v1/nodes/{node}/readiness", s.requireOperator(s.handleNodeReadiness))
@@ -1010,4 +1012,20 @@ func (s *Server) handleRuntimeConfig(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, info)
+}
+
+func (s *Server) handleInventorySummary(w http.ResponseWriter, r *http.Request) {
+	provider, ok := s.operator.(interface {
+		InventorySummary(context.Context) (inventory.Summary, error)
+	})
+	if !ok {
+		http.Error(w, "inventory unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	summary, err := provider.InventorySummary(r.Context())
+	if err != nil {
+		http.Error(w, "inventory unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, summary.Data())
 }

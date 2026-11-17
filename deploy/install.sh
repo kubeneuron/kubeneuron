@@ -41,6 +41,7 @@ NS=kube-neuron
 VERSION=""
 MANIFEST=""
 ADMIN_USER="admin"
+PROFILE=auto
 UNINSTALL=0
 DELETE_DATA=0
 ASSUME_YES=0
@@ -60,6 +61,7 @@ Flags:
   --namespace NS         runtime namespace          (default: kube-neuron)
   --version vX.Y.Z|latest  released install manifest (public curl, gh fallback)
   --manifest FILE        pre-downloaded install manifest
+  --profile PROFILE      auto (default), host-al2023, gpu-operator-ubuntu, or none
   --admin USER           panel username to create   (default: admin; "" skips)
   --controller-image I / --agent-image I   image overrides (air-gapped/dev)
   --uninstall            remove this installation; retain SQLite state by default
@@ -74,6 +76,7 @@ while (($#)); do
 	--namespace) NS=$2; shift 2 ;;
 	--version) VERSION=$2; shift 2 ;;
 	--manifest) MANIFEST=$2; shift 2 ;;
+	--profile) PROFILE=${2:?missing profile}; shift 2 ;;
 	--admin) ADMIN_USER=$2; shift 2 ;;
 	--controller-image) CONTROLLER_IMAGE=$2; shift 2 ;;
 	--agent-image) AGENT_IMAGE=$2; shift 2 ;;
@@ -92,6 +95,11 @@ die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 ((ASSUME_YES == 0 || DELETE_DATA == 1)) || die "--yes requires --uninstall --delete-data"
 [[ $NAME =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#NAME} -le 63 ]] || die "invalid installation name"
 [[ $NS =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#NS} -le 63 ]] || die "invalid namespace"
+
+case $PROFILE in
+auto|host-al2023|gpu-operator-ubuntu|none) ;;
+*) die "unknown --profile $PROFILE (see --help)" ;;
+esac
 
 command -v kubectl >/dev/null || die "kubectl is required"
 command -v openssl >/dev/null || die "openssl is required"
@@ -295,6 +303,36 @@ fi
 [[ -n $CONTROLLER_IMAGE ]] && controller_image=$CONTROLLER_IMAGE
 [[ -n $AGENT_IMAGE ]] && agent_image=$AGENT_IMAGE
 [[ -n $controller_image && -n $agent_image ]] || die "could not resolve component images"
+
+# The agent has a single set of host paths for its entire DaemonSet. Only
+# auto-select a layout when every GPU-labelled node matches that profile.
+gpu_selector='nvidia.com/gpu.present=true'
+if [[ $PROFILE == auto ]]; then
+    PROFILE=none
+    if gpu_nodes=$(kubectl get nodes -l "$gpu_selector" -o 'go-template={{range .items}}{{.status.nodeInfo.architecture}}|{{.status.nodeInfo.osImage}}|{{index .metadata.labels "nvidia.com/gpu.deploy.driver"}}{{"\n"}}{{end}}') && [[ -n $gpu_nodes ]]; then
+        if ! grep -Evq '^amd64\|Amazon Linux 2023[^|]*\|(false|<no value>)$' <<<"$gpu_nodes"; then
+            PROFILE=host-al2023
+        elif ! grep -Evq '^amd64\|Ubuntu [^|]*\|true$' <<<"$gpu_nodes"; then
+            PROFILE=gpu-operator-ubuntu
+        fi
+    fi
+fi
+agent_profile_yaml=''
+if [[ $PROFILE != none ]]; then
+    driver_bin=/usr/bin
+    driver_libs=/usr/lib64
+    if [[ $PROFILE == gpu-operator-ubuntu ]]; then
+        driver_bin=/run/nvidia/driver/usr/bin
+        driver_libs='/usr/lib/x86_64-linux-gnu, /run/nvidia/driver/usr/lib/x86_64-linux-gnu'
+    fi
+    agent_profile_yaml="    nodeSelector:
+      nvidia.com/gpu.present: \"true\"
+      kubernetes.io/arch: amd64
+    hostTooling:
+      binDir: $driver_bin
+      libDirs: [$driver_libs]"
+fi
+say "NVIDIA host tooling profile: $PROFILE (see docs/quickstart.md)"
 
 # The baseline policy pack: one binding for every problem class the shipped
 # detectors can emit.
@@ -691,6 +729,7 @@ spec:
     image: $controller_image
   agent:
     image: $agent_image
+$agent_profile_yaml
     tolerations:
       - operator: Exists
 $auth_block
@@ -759,8 +798,8 @@ cat <<EOF
   Mode          DryRun — detection, workflows, approvals, audit; no node is touched.
 
   Next steps    bind real playbooks/policies (docs/playbook-authoring.md),
-                point Alertmanager at the webhook, add spec.agent.hostTooling
-                on GPU node pools, review docs/install.md for production TLS.
+                point Alertmanager at the webhook, and follow docs/quickstart.md
+                to check GPU visibility and open a dry-run incident.
   TLS note      this script generated a self-signed 90-day PKI to get you
                 running; for production follow docs/install.md §3 or
                 deploy/cert-manager/.

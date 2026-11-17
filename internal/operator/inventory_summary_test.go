@@ -2,8 +2,11 @@
 package operator
 
 import (
+	"github.com/kubeneuron/kubeneuron/internal/inventory"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"reflect"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -47,5 +50,44 @@ func TestInventorySummaryPreservesReportAndScopesWriter(t *testing.T) {
 	}
 	if binding.RoleRef.Kind != "Role" || binding.RoleRef.Name != key.Name || !reflect.DeepEqual(binding.Subjects, []rbacv1.Subject{{Kind: "ServiceAccount", Namespace: key.Namespace, Name: root.Name + "-controller"}}) {
 		t.Fatalf("unexpected summary role binding: %+v %+v", binding.RoleRef, binding.Subjects)
+	}
+}
+
+func TestInventoryConditionsRejectStaleMalformedAndMissingEvidence(t *testing.T) {
+	root := testKubeNeuron()
+	root.UID = "installation-a"
+	scheme := newOperatorScheme(t)
+	r := &KubeNeuronReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Scheme: scheme}
+	ctx := t.Context()
+	if err := r.ensureInventorySummary(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	key := client.ObjectKey{Namespace: root.Spec.Namespace, Name: root.Name + inventory.Suffix}
+	check := func(data map[string]string, reason string) {
+		t.Helper()
+		var cm corev1.ConfigMap
+		if err := r.Get(ctx, key, &cm); err != nil {
+			t.Fatal(err)
+		}
+		cm.Data = data
+		if err := r.Update(ctx, &cm); err != nil {
+			t.Fatal(err)
+		}
+		r.setInventoryConditions(ctx, root, true)
+		for _, kind := range []string{"GPUVisibility", "ResetAvailable"} {
+			c := meta.FindStatusCondition(root.Status.Conditions, kind)
+			if c == nil || c.Status != metav1.ConditionUnknown || c.Reason != reason {
+				t.Fatalf("%s: %+v, want Unknown/%s", kind, c, reason)
+			}
+		}
+	}
+	check(nil, "AwaitingController")
+	check(map[string]string{"schemaVersion": "99"}, "InvalidSummary")
+	check(inventory.Summary{ObservedAt: time.Now().Add(-4 * inventory.Interval)}.Data(), "StaleSummary")
+	check(inventory.Summary{ObservedAt: time.Now(), AdvertisedNodes: 1}.Data(), "AwaitingGPUAgents")
+	check(inventory.Summary{ObservedAt: time.Now(), Diagnostic: "SMIMissing"}.Data(), "SMIMissing")
+	r.setInventoryConditions(ctx, root, false)
+	if meta.FindStatusCondition(root.Status.Conditions, "ResetAvailable") != nil || meta.FindStatusCondition(root.Status.Conditions, "GPUVisibility") == nil {
+		t.Fatal("disabling node actions should remove only ResetAvailable")
 	}
 }

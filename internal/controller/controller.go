@@ -138,6 +138,9 @@ type Controller struct {
 	// their API surface fails closed instead of keeping workflow state in
 	// process memory.
 	operations *operations.Manager
+
+	inventoryWake       chan struct{}
+	inventoryDiagnostic func(context.Context) (string, error)
 }
 
 // SetSignalCatalog installs the declarative signal-override catalog.
@@ -298,6 +301,7 @@ func New(
 		log:           log,
 		signals:       make(chan types.Signal, 256),
 		eventWake:     make(chan struct{}, 1),
+		inventoryWake: make(chan struct{}, 1),
 		eventWorkerID: fmt.Sprintf("controller-%d", time.Now().UnixNano()),
 		inFlight:      map[string]bool{},
 		// Sized well past any real fleet's distinct (condition, node) pairs, so
@@ -564,6 +568,7 @@ func (c *Controller) RegisterNode(r *http.Request, registration types.AgentRegis
 		c.log.Error("node registration failed", "err", err, "node", n.Name)
 		return types.AgentArmingUnknown, err
 	}
+	c.notifyInventory()
 	return c.servedArming(r.Context(), registration.Name), nil
 }
 
@@ -607,6 +612,7 @@ func (c *Controller) HandleAcceleratorReport(r *http.Request, report types.Agent
 		}
 		return err
 	}
+	c.notifyInventory()
 	c.log.Debug("accelerator report persisted", "node", report.Node, "vendor", report.Vendor,
 		"readiness", report.Readiness, "observed_at", report.ObservedAt)
 	return nil

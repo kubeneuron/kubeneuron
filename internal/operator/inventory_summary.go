@@ -3,6 +3,13 @@ package operator
 
 import (
 	"context"
+	"fmt"
+	"time"
+
+	"github.com/kubeneuron/kubeneuron/internal/inventory"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	api "github.com/kubeneuron/kubeneuron/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
@@ -12,7 +19,7 @@ import (
 )
 
 func (r *KubeNeuronReconciler) ensureInventorySummary(ctx context.Context, installation *api.KubeNeuron) error {
-	meta := metav1.ObjectMeta{Name: installation.Name + "-inventory-summary", Namespace: installation.Spec.Namespace}
+	meta := metav1.ObjectMeta{Name: installation.Name + inventory.Suffix, Namespace: installation.Spec.Namespace}
 	cm := &corev1.ConfigMap{ObjectMeta: meta}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
 		if err := ensureControlledBy(installation, cm, "ConfigMap"); err != nil {
@@ -48,4 +55,69 @@ func (r *KubeNeuronReconciler) ensureInventorySummary(ctx context.Context, insta
 		return setOwner(r.Scheme, installation, binding)
 	})
 	return err
+}
+
+func (r *KubeNeuronReconciler) setInventoryConditions(ctx context.Context, root *api.KubeNeuron, nodeActionsEnabled bool) {
+	if !nodeActionsEnabled {
+		apimeta.RemoveStatusCondition(&root.Status.Conditions, "ResetAvailable")
+	}
+	var cm corev1.ConfigMap
+	key := client.ObjectKey{Namespace: root.Spec.Namespace, Name: root.Name + inventory.Suffix}
+	err := r.Get(ctx, key, &cm)
+	now := time.Now()
+	record := func(kind string, status metav1.ConditionStatus, reason, message string) {
+		if kind == "ResetAvailable" && !nodeActionsEnabled {
+			return
+		}
+		apimeta.SetStatusCondition(&root.Status.Conditions, metav1.Condition{
+			Type: kind, Status: status, Reason: reason, Message: message + " See docs/quickstart.md#check-gpu-visibility.",
+			ObservedGeneration: root.Generation,
+		})
+	}
+	unknown := func(reason, message string) {
+		record("GPUVisibility", metav1.ConditionUnknown, reason, message)
+		record("ResetAvailable", metav1.ConditionUnknown, reason, message)
+	}
+	switch {
+	case apierrors.IsNotFound(err):
+		unknown("AwaitingController", "Controller has not reported yet.")
+		return
+	case err != nil || !metav1.IsControlledBy(&cm, root):
+		unknown("SummaryUnavailable", "Could not read an installation-owned inventory summary.")
+		return
+	case len(cm.Data) == 0:
+		unknown("AwaitingController", "Controller has not reported yet.")
+		return
+	}
+	s, err := inventory.Parse(cm.Data, now)
+	switch {
+	case err != nil:
+		unknown("InvalidSummary", "Controller inventory summary is invalid.")
+	case now.Sub(s.ObservedAt) > 3*inventory.Interval:
+		unknown("StaleSummary", "Controller inventory summary is stale.")
+	case s.ReportingNodes == 0 && s.Diagnostic != "":
+		unknown(s.Diagnostic, inventory.DiagnosticMessage(s.Diagnostic))
+	case s.ReportingNodes == 0 && s.AdvertisedNodes > 0:
+		unknown("AwaitingGPUAgents", "Kubernetes advertises accelerator resources, but no agent has a fresh report.")
+	case s.ReportingNodes == 0:
+		unknown("NoFreshAgentReport", "No fresh agent inventory report is available.")
+	default:
+		switch {
+		case s.GPUs > 0:
+			record("GPUVisibility", metav1.ConditionTrue, "InventoryReported", fmt.Sprintf("Agents on %d nodes report %d GPUs.", s.ReportingNodes, s.GPUs))
+		case s.AdvertisedNodes == 0:
+			record("GPUVisibility", metav1.ConditionFalse, "NoGPUResource", "Agents report zero GPUs and no Kubernetes node advertises an accelerator resource.")
+		case s.Diagnostic != "":
+			record("GPUVisibility", metav1.ConditionFalse, s.Diagnostic, inventory.DiagnosticMessage(s.Diagnostic))
+		case root.Spec.Agent.HostTooling == nil:
+			record("GPUVisibility", metav1.ConditionFalse, "HostToolingNotConfigured", "Agents report zero GPUs and NVIDIA host tooling is unset.")
+		default:
+			record("GPUVisibility", metav1.ConditionFalse, "NoGPUsReported", "Agents report zero GPUs. Check the driver and nvidia-smi on the selected nodes.")
+		}
+		if s.ResetConfirmed {
+			record("ResetAvailable", metav1.ConditionTrue, "ResetAttested", "At least one NVIDIA GPU has a fresh reset attestation.")
+		} else {
+			record("ResetAvailable", metav1.ConditionFalse, "ResetNotAttested", "No NVIDIA GPU has a fresh reset attestation. Check the DCGM client and runtime profile.")
+		}
+	}
 }

@@ -56,16 +56,21 @@ api() { curl --silent --show-error --fail --noproxy '*' --connect-timeout 5 --ma
 install
 claim_uid=$("$KUBECTL_BIN" -n "$namespace" get pvc "$name-controller-state" -o jsonpath='{.metadata.uid}')
 connect_api
-node=$("$KUBECTL_BIN" get nodes -o jsonpath='{.items[0].metadata.name}')
-api -H 'Content-Type: application/json' --data-binary "{\"node\":\"$node\",\"class\":\"ecc-sbe\",\"actor\":\"retention-test\"}" "http://127.0.0.1:$port/api/v1/incidents" >/dev/null
-incident=''
-deadline=$((SECONDS+60))
-while ((SECONDS<deadline)); do
-	incident=$(api "http://127.0.0.1:$port/api/v1/incidents" | jq -r '.[0].id // empty')
-	[[ -n $incident ]] && break
-	sleep 2
-done
-[[ -n $incident ]] || fail "no durable incident was created"
+"$KUBECTL_BIN" wait "kubeneuron/$name" --for='jsonpath={.status.conditions[?(@.type=="GPUVisibility")].reason}=NoGPUResource' --timeout=180s
+[[ -z $("$KUBECTL_BIN" get kubeneuron "$name" -o 'jsonpath={.status.conditions[?(@.type=="ResetAvailable")].type}') ]] || fail "reset condition present with node actions disabled"
+# Run the user-facing recipe against the installation this test just created.
+# Extract its fenced block so changes to the published commands run in CI.
+recipe="$work/first-run.sh"
+awk '/^<!-- first-run-recipe -->$/ {found=1; next} found && /^```sh$/ {copy=1; next} copy && /^```$/ {exit} copy {print}' \
+    "$REPO_ROOT/docs/quickstart.md" >"$recipe"
+[[ -s $recipe ]] || fail "first-run recipe missing"
+export PATH="$REPO_ROOT/bin:$PATH"
+SERVER="http://127.0.0.1:$port" KUBENEURONCTL_TOKEN="$(sed 's/^Authorization: Bearer //' "$work/header")" \
+    bash -eu -o pipefail "$recipe" >"$work/first-run.out"
+grep -Eq '^dry-run: +true$' "$work/first-run.out" || fail "first-run incident was not dry-run"
+grep -Fq "$name-observe (step " "$work/first-run.out" || fail "first-run incident lacks observe playbook"
+incident=$(awk '$1 == "id:" {print $2}' "$work/first-run.out")
+[[ -n $incident ]] || fail "first-run incident lacks ID"
 # Legacy objects lack the new installation label. Foreign and mislabeled
 # objects both carry the old global label; neither may be deleted.
 for suffix in legacy other mislabeled; do

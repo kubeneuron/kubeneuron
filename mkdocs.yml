@@ -27,7 +27,8 @@ nav:
   - Home: index.md
   - Getting started:
       - Product tour (screenshots & demo): product-tour.md
-      - Quickstart (dry-run demo): quickstart.md
+      - First run on Kubernetes: quickstart.md
+      - From-source dry-run demo: developer-demo.md
       - Production install: install.md
   - Operating:
       - Data and privacy: data-and-privacy.md

@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
+	"github.com/kubeneuron/kubeneuron/internal/inventory"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 )
 
@@ -240,13 +241,13 @@ func settledRequeue(installation *kubeneuronv1alpha1.KubeNeuron) time.Duration {
 	// Nothing tells the operator that dcgm-exporter pods came or went: look
 	// again, so the collector's targets follow the GPU nodes.
 	if dcgmScrapeEnabled(installation) {
-		return min(dcgmRediscoveryPeriod, pkiCheckInterval)
+		return min(dcgmRediscoveryPeriod, pkiCheckInterval, 3*inventory.Interval)
 	}
 	// Certificate expiry is a deadline, not an event: nothing in the cluster
 	// changes when material gets closer to being unusable. A settled
 	// installation therefore still has to wake up and look, or renewal would
 	// never fire and the whole point of issuing the material would be lost.
-	return pkiCheckInterval
+	return min(pkiCheckInterval, 3*inventory.Interval)
 }
 
 func (r *KubeNeuronReconciler) configuration(ctx context.Context) (
@@ -419,6 +420,7 @@ func managedObjectReady(installation *kubeneuronv1alpha1.KubeNeuron, object clie
 func (r *KubeNeuronReconciler) updateStatus(ctx context.Context, installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot, validationErr error, runtimeReady bool, runtimeMessage string, observability ...observabilityCondition) error {
 	before := installation.DeepCopy()
 	installation.Status.ObservedGeneration = installation.Generation
+	r.setInventoryConditions(ctx, installation, false) // Node-level actions are disabled by default.
 	meta.SetStatusCondition(&installation.Status.Conditions, cloudRecoveryCondition(installation))
 	if validationErr != nil {
 		meta.SetStatusCondition(&installation.Status.Conditions, metav1.Condition{

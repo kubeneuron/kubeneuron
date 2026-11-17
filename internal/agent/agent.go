@@ -539,10 +539,12 @@ func controllerHTTPClient(cfg Config) (*http.Client, error) {
 	return client, nil
 }
 
+var ErrDriverInitialization = errors.New("nvml init")
+
 // Run starts the agent loops and blocks until ctx is done.
 func (a *Agent) Run(ctx context.Context) error {
 	if err := a.driver.Init(); err != nil {
-		return fmt.Errorf("nvml init: %w", err)
+		return fmt.Errorf("%w: %w", ErrDriverInitialization, err)
 	}
 	defer func() { _ = a.driver.Shutdown() }()
 
