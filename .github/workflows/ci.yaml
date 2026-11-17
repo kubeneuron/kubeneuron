@@ -47,9 +47,9 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26.11"
           cache: true
@@ -118,7 +118,7 @@ jobs:
       TOOL_ARCH: ${{ matrix.arch }}
       KIND_CLUSTER_NAME: kubeneuron-ci
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The runner context is not available in job-level env — an expression
       # there invalidates the whole workflow file ("No jobs were run").
@@ -127,7 +127,7 @@ jobs:
           echo "KIND_KUBECONFIG=$RUNNER_TEMP/kubeneuron-ci.kubeconfig" >> "$GITHUB_ENV"
           echo "KIND_ARTIFACTS_DIR=$RUNNER_TEMP/kubeneuron-kind-artifacts" >> "$GITHUB_ENV"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26.11"
           cache: true
@@ -212,7 +212,7 @@ jobs:
 
       - name: Upload kind diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kind-integration-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.KIND_ARTIFACTS_DIR }}
@@ -222,27 +222,27 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26.11"
           cache: true
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           version: v2.14.0
 
       - name: golangci-lint (pkg/accelerator module)
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           version: v2.14.0
           working-directory: pkg/accelerator
           args: --config ${{ github.workspace }}/.golangci.yml
 
       - name: golangci-lint (pkg/cloud module)
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           version: v2.14.0
           working-directory: pkg/cloud
@@ -260,9 +260,9 @@ jobs:
   govulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.26.11"
           cache: true
@@ -289,7 +289,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Verify the compiler stage is native
         env:
@@ -308,9 +308,9 @@ jobs:
   docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -322,7 +322,7 @@ jobs:
   helm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Lint and template the chart
         run: |
