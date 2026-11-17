@@ -171,3 +171,27 @@ func TestNodeMissingFromInventoryIsNotHeld(t *testing.T) {
 		t.Fatalf("precondition: GetNode = %v, want ErrNotFound", err)
 	}
 }
+
+func TestMissingParkedStepPreservesDecisionAndTTLOrder(t *testing.T) {
+	c, st, id := approvalEpochFixture(t)
+	ctx := context.Background()
+	inc := incidentState(t, st, id)
+	inc.Playbook = "removed"
+	if err := st.UpdateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.advanceAwaitingApproval(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	if got := incidentState(t, st, id); got.State != types.StateAwaitingApproval {
+		t.Fatalf("state=%s", got.State)
+	}
+	backdatePark(t, c, st, id)
+	inc = incidentState(t, st, id)
+	if err := c.advanceAwaitingApproval(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	if got := incidentState(t, st, id); got.State != types.StateExpired {
+		t.Fatalf("state=%s", got.State)
+	}
+}

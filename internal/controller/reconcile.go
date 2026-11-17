@@ -408,7 +408,7 @@ func (c *Controller) parkForApproval(ctx context.Context, inc *types.Incident, s
 func (c *Controller) advanceAwaitingApproval(ctx context.Context, inc *types.Incident) error {
 	step, done, err := c.runtimeConfig(ctx).Engine.NextStep(inc)
 	if err != nil || done {
-		return c.quarantine(ctx, inc, "parked step no longer exists")
+		return c.resumeAwaitingApproval(ctx, inc)
 	}
 	return c.authorizeAndStartStep(ctx, inc, step)
 }
