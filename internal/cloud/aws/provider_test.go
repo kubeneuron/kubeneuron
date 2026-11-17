@@ -49,3 +49,17 @@ func TestProviderRegisteredWithCapabilities(t *testing.T) {
 		t.Fatalf("Capabilities() = %+v, want %+v", r.Capabilities(), caps)
 	}
 }
+
+func TestAWSFactoryBuildsObservationOnlyProvider(t *testing.T) {
+	p, err := cloud.Build(t.Context(), providerName, cloud.Config{Region: "us-east-1", Options: map[string]string{"cluster": "training", "nodegroup": "gpu"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, ok := p.(*managedProvider)
+	if !ok || r.cluster != "training" || r.nodegroup != "gpu" {
+		t.Fatal("missing configured EKS reader")
+	}
+	if caps := p.Capabilities(); caps.Replace || caps.ReinitializeInPlace {
+		t.Fatal("read-only observation authorized mutation")
+	}
+}

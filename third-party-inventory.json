@@ -65,7 +65,7 @@
     "review": []
   },
   {
-    "module": "github.com/aws/aws-sdk-go-v2/internal/configsources@v1.4.34",
+    "module": "github.com/aws/aws-sdk-go-v2/internal/configsources@v1.5.12",
     "files": [
       "LICENSE.txt"
     ],
@@ -80,7 +80,7 @@
     "review": []
   },
   {
-    "module": "github.com/aws/aws-sdk-go-v2/internal/endpoints/v2@v2.7.34",
+    "module": "github.com/aws/aws-sdk-go-v2/internal/endpoints/v2@v2.8.12",
     "files": [
       "LICENSE.txt"
     ],
@@ -110,7 +110,37 @@
     "review": []
   },
   {
+    "module": "github.com/aws/aws-sdk-go-v2/service/autoscaling@v1.82.0",
+    "files": [
+      "LICENSE.txt"
+    ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
+    "review": []
+  },
+  {
     "module": "github.com/aws/aws-sdk-go-v2/service/ec2@v1.318.1",
+    "files": [
+      "LICENSE.txt"
+    ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
+    "review": []
+  },
+  {
+    "module": "github.com/aws/aws-sdk-go-v2/service/eks@v1.105.6",
     "files": [
       "LICENSE.txt"
     ],
@@ -215,7 +245,7 @@
     "review": []
   },
   {
-    "module": "github.com/aws/aws-sdk-go-v2@v1.43.3",
+    "module": "github.com/aws/aws-sdk-go-v2@v1.48.0",
     "files": [
       "LICENSE.txt",
       "NOTICE.txt",
@@ -236,7 +266,7 @@
     "review": []
   },
   {
-    "module": "github.com/aws/smithy-go@v1.27.6",
+    "module": "github.com/aws/smithy-go@v1.28.9",
     "files": [
       "LICENSE",
       "NOTICE",

@@ -87,7 +87,7 @@ type Config struct {
 	// e.g. AWS_REGION for AWS).
 	Region string
 	// Options carries provider-specific settings for providers that need more
-	// than a region. It is empty for AWS.
+	// than a region. AWS accepts cluster and nodegroup for EKS repair observations.
 	Options map[string]string
 }
 
