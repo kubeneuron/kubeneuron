@@ -366,16 +366,13 @@ func (c *Controller) forgetCordonReported(node, incidentID string) {
 func (c *Controller) cloudRecoveryNeedsConfirmation(ctx context.Context, inc *types.Incident) (bool, error) {
 	if inc.Playbook != "" {
 		engine := c.runtimeConfig(ctx).Engine
-		if engine == nil {
-			return true, nil
-		}
-		book, ok := engine.Playbook(inc.Playbook)
-		if !ok {
-			return true, nil
-		}
-		for _, step := range book.Steps {
-			if cloudRecoveryAction(step.Action) {
-				return true, nil
+		if engine != nil {
+			if book, ok := engine.Playbook(inc.Playbook); ok {
+				for _, step := range book.Steps {
+					if cloudRecoveryAction(step.Action) {
+						return true, nil
+					}
+				}
 			}
 		}
 	}

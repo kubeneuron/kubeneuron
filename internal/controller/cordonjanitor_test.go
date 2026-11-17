@@ -945,12 +945,12 @@ func (s unavailableRecoveryAuditStore) AuditTrail(context.Context, string) ([]*t
 }
 
 func TestVanishedNodeCannotResolveWithMissingRecoveryHistory(t *testing.T) {
-	for _, missing := range []string{"playbook", "audit"} {
+	for _, missing := range []string{"playbook", "audit", "non-cloud-playbook"} {
 		t.Run(missing, func(t *testing.T) {
 			c, st := stackTestController(t, &janitorPlatform{})
 			ctx := context.Background()
 			inc := &types.Incident{ID: "missing-history", Target: types.Target{Node: "deleted"}, State: types.StateVerifying}
-			if missing == "playbook" {
+			if missing != "audit" {
 				inc.Playbook = "removed-cloud-pack"
 			} else {
 				c.store = unavailableRecoveryAuditStore{Store: st}
@@ -958,12 +958,21 @@ func TestVanishedNodeCannotResolveWithMissingRecoveryHistory(t *testing.T) {
 			if err := st.CreateIncident(ctx, inc); err != nil {
 				t.Fatal(err)
 			}
+			if missing == "playbook" {
+				if err := st.AppendAudit(ctx, &types.AuditEntry{IncidentID: inc.ID, Action: "repair", Result: auditStepStartResult("platform.replace_node")}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			c.resolveIncidentsOnVanishedNodes(ctx)
 			got, err := st.GetIncident(ctx, inc.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.State != types.StateVerifying {
+			want := types.StateVerifying
+			if missing == "non-cloud-playbook" {
+				want = types.StateResolved
+			}
+			if got.State != want {
 				t.Fatalf("state=%s, want pending verification", got.State)
 			}
 		})
