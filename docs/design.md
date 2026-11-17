@@ -623,6 +623,25 @@ reconciler performs this walk (see `internal/controller/reconcile.go`), with
 long-running steps in per-incident goroutines and orphaned-execution recovery
 after controller restarts.
 
+
+#### AWS managed nodegroup observations
+
+Set `KUBENEURON_EKS_CLUSTER` and `KUBENEURON_EKS_NODEGROUP` on the
+controller to inspect an explicitly named EKS managed nodegroup. The reader
+uses EKS DescribeNodegroup, ListUpdates and DescribeUpdate, Auto Scaling
+DescribeAutoScalingInstances, DescribeAutoScalingGroups and
+DescribeScalingActivities, and EC2 DescribeInstanceStatus. Its AWS identity
+needs read access to these operations. Missing access or incomplete evidence
+holds recovery.
+
+The reader checks the pinned instance's group membership, native repair
+setting, scaling activities and scheduled EC2 events. It requires a running
+instance and a 30-minute settling period after nodegroup changes, then reads
+the policy and membership again. A repair started before native repair was
+disabled could outlast that window. AWS mutation remains disabled pending
+action-specific permission checks. These observations are not validated
+against a live EKS cluster.
+
 ### 4.2 Target escalation ladder
 
 YAML and CRD playbooks describe the following target rungs:
