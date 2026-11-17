@@ -48,16 +48,15 @@ func (c *Controller) authorizeAndStartStep(ctx context.Context, inc *types.Incid
 		verdict, reason := c.authorizeByPolicy(ctx, inc, step, pol)
 		switch verdict {
 		case policyRun:
-			if err := c.startStep(ctx, inc, step, policyActor(pol.Name)); err != nil {
-				return err
-			}
-			if inc.State == types.StateExecuting {
+			// Recorded once the step has started and before its goroutine
+			// runs, so every step the policy started names the policy, however
+			// fast the step finishes.
+			return c.startStepThen(ctx, inc, step, policyActor(pol.Name), func() {
 				if err := c.appendAudit(ctx, inc, policyActor(pol.Name), "policy-authorised",
 					policyAuthorisationNote(pol, time.Now())+": "+step.Name); err != nil {
 					c.log.Error("policy authorisation audit append failed", "incident", inc.ID, "err", err)
 				}
-			}
-			return nil
+			})
 		case policyHold:
 			c.deferStep(inc, step, metrics.DeferAutomaticLimit)
 			c.logOnceStepHeld(inc, step, pol, reason)

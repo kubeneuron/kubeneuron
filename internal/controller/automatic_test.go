@@ -178,6 +178,37 @@ func TestAutomaticPolicyRunsTheLadderAndRecordsThePolicy(t *testing.T) {
 	}
 }
 
+// A step the policy starts names the policy in the trail however fast it
+// finishes: the authorisation row is written before the step can run, never
+// read back from the incident afterwards.
+func TestEveryPolicyStartedStepIsRecordedAsAuthorised(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		c, st, _ := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
+		id := openOn(t, c, "n1")
+		if inc := step(t, c, st, id, 200); inc.State != types.StateResolved {
+			t.Fatalf("run %d: state=%s, want RESOLVED", i, inc.State)
+		}
+		trail, err := st.AuditTrail(context.Background(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		started, authorised := 0, 0
+		for _, e := range trail {
+			if e.Actor != "policy:"+autoPolicy {
+				continue
+			}
+			if e.Action == "policy-authorised" {
+				authorised++
+			} else if e.ToState == types.StateExecuting {
+				started++
+			}
+		}
+		if started == 0 || authorised != started {
+			t.Fatalf("run %d: %d steps started by the policy, %d authorisation rows; want one each", i, started, authorised)
+		}
+	}
+}
+
 func TestApprovalModeStillParks(t *testing.T) {
 	c, st, _ := autoFixture(t, recoverymode.Approval, nil, 4)
 	if inc := step(t, c, st, openOn(t, c, "n1"), 50); inc.State != types.StateAwaitingApproval {

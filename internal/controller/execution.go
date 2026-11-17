@@ -31,6 +31,14 @@ import (
 // startStep reserves a gate slot, moves the incident to EXECUTING, and runs
 // the step in its own goroutine.
 func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *playbook.Step, actor string) error {
+	return c.startStepThen(ctx, inc, step, actor, nil)
+}
+
+// startStepThen is startStep with started, which runs once the step has
+// durably entered EXECUTING and before its goroutine exists: the last point
+// at which the caller may still read or write inc. After startStepThen
+// returns, the step goroutine owns inc.
+func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, step *playbook.Step, actor string, started func()) error {
 	// A reload is a writer; admission is a reader.  Holding the read lock until
 	// the step has acquired its gate slot and durably entered EXECUTING gives the
 	// reload a linearization point: when a DryRun reload returns, every later
@@ -225,6 +233,9 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 			c.gate.ReleaseRemediation(inc.Target)
 		}
 		return err
+	}
+	if started != nil {
+		started()
 	}
 	c.setInFlight(inc.ID, true)
 	// The step goroutine pins the engine that ADMITTED the step: it may run
