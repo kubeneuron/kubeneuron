@@ -79,7 +79,7 @@ func TestCloudEligibilityRestoredOnlyForPinnedIdentity(t *testing.T) {
 	step := &playbook.Step{Action: "platform.replace_node"}
 	check := func(want bool) {
 		t.Helper()
-		held, err := c.holdUnavailableCloudRecovery(ctx, inc, step)
+		held, _, err := c.holdUnavailableCloudRecovery(ctx, inc, step)
 		if err != nil || held != want {
 			t.Fatalf("held=%v err=%v", held, err)
 		}
@@ -200,7 +200,7 @@ func TestCloudWaitingAssessmentCacheDoesNotCacheExecutionGate(t *testing.T) {
 	}
 	step := &playbook.Step{Action: "platform.replace_node"}
 	for range 6 {
-		held, err := c.holdUnavailableCloudRecovery(ctx, inc, step)
+		held, _, err := c.holdUnavailableCloudRecovery(ctx, inc, step)
 		if held || err != nil {
 			t.Fatalf("held=%v err=%v", held, err)
 		}
@@ -213,7 +213,7 @@ func TestCloudWaitingAssessmentCacheDoesNotCacheExecutionGate(t *testing.T) {
 		t.Fatal("cached eligibility bypassed fresh gate")
 	}
 	c.cloudAssessments[inc.ID].at = time.Now().Add(-time.Minute)
-	held, err := c.holdUnavailableCloudRecovery(ctx, inc, step)
+	held, _, err := c.holdUnavailableCloudRecovery(ctx, inc, step)
 	if !held || err != nil {
 		t.Fatalf("held=%v err=%v", held, err)
 	}

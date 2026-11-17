@@ -14,9 +14,11 @@ import (
 
 // holdUnavailableCloudRecovery runs before either human or policy authorization.
 // An approval cannot supply missing provider capabilities or repair evidence.
-func (c *Controller) holdUnavailableCloudRecovery(ctx context.Context, inc *types.Incident, step *playbook.Step) (bool, error) {
+// skip is set for a recycle step the provider does not allow on a node it
+// would still let us replace: the recycle is not applicable, not unavailable.
+func (c *Controller) holdUnavailableCloudRecovery(ctx context.Context, inc *types.Incident, step *playbook.Step) (held bool, skip string, err error) {
 	if !c.cloudRecoveryLadder(ctx, inc.Playbook) && !cloudRecoveryAction(step.Action) {
-		return false, nil
+		return false, "", nil
 	}
 	// This cache only paces waiting assessments. requireCloudRecovery always
 	// queries the provider again immediately before a disruptive action.
@@ -38,19 +40,19 @@ func (c *Controller) holdUnavailableCloudRecovery(ctx context.Context, inc *type
 	entry := c.cloudAssessments[inc.ID]
 	waiting := inc.State == types.StateEvaluating || inc.State == types.StateAwaitingApproval
 	if entry != nil && entry.key == key && waiting && now.Sub(entry.at) < time.Minute {
-		return entry.held, nil
+		return entry.held, entry.skip, nil
 	}
 	if entry == nil {
 		entry = &cloudAssessment{}
 	}
-	held, err := c.assessUnavailableCloudRecovery(ctx, inc, step, entry)
+	held, skip, err = c.assessUnavailableCloudRecovery(ctx, inc, step, entry)
 	if err == nil && waiting && inc.State == key.state {
-		entry.key, entry.at, entry.held = key, now, held
+		entry.key, entry.at, entry.held, entry.skip = key, now, held, skip
 		c.cloudAssessments[inc.ID] = entry
 	} else {
 		delete(c.cloudAssessments, inc.ID)
 	}
-	return held, err
+	return held, skip, err
 }
 
 type cloudAssessmentKey struct {
@@ -63,21 +65,32 @@ type cloudAssessment struct {
 	key         cloudAssessmentKey
 	at          time.Time
 	held        bool
+	skip        string
 	auditLoaded bool
 	last        *types.AuditEntry
 }
 
-func (c *Controller) assessUnavailableCloudRecovery(ctx context.Context, inc *types.Incident, step *playbook.Step, entry *cloudAssessment) (bool, error) {
+func (c *Controller) assessUnavailableCloudRecovery(ctx context.Context, inc *types.Incident, step *playbook.Step, entry *cloudAssessment) (bool, string, error) {
 	verdict, err := c.cloudRecoveryEligibility(ctx, inc)
 	if errors.Is(err, cloud.ErrIdentityChanged) {
-		return true, c.supersedeCloudTarget(ctx, inc, err)
+		return true, "", c.supersedeCloudTarget(ctx, inc, err)
 	}
 	if err == nil && inc.CloudIdentity != nil {
 		if mismatch := inc.CloudIdentity.Match(verdict.Identity); errors.Is(mismatch, cloud.ErrIdentityChanged) {
-			return true, c.supersedeCloudTarget(ctx, inc, mismatch)
+			return true, "", c.supersedeCloudTarget(ctx, inc, mismatch)
 		}
 	}
-	allowed := err == nil && cloudRecoveryAllowed(verdict, step.Action)
+	// A recycle the provider refuses on a node it would let us replace is
+	// skipped, not held: the replacement path stays open.
+	action, skip := step.Action, ""
+	if action == "platform.recycle_node" && err == nil && !verdict.RecycleAllowed {
+		action = "platform.replace_node"
+		skip = "the cloud provider does not allow a restart through its API for this node"
+		if verdict.Reason != "" {
+			skip += " (" + verdict.Reason + ")"
+		}
+	}
+	allowed := err == nil && cloudRecoveryAllowed(verdict, action)
 
 	reason := verdict.Reason
 	if allowed && (inc.CloudIdentity == nil || inc.CloudIdentity.Match(verdict.Identity) != nil) {
@@ -91,7 +104,7 @@ func (c *Controller) assessUnavailableCloudRecovery(ctx context.Context, inc *ty
 	if !entry.auditLoaded {
 		trail, readErr := c.store.AuditTrail(ctx, inc.ID)
 		if readErr != nil {
-			return true, readErr
+			return true, "", readErr
 		}
 		for i := len(trail) - 1; i >= 0; i-- {
 			if trail[i].Action == "provider-recovery-unavailable" || trail[i].Action == "provider-recovery-available" {
@@ -105,18 +118,18 @@ func (c *Controller) assessUnavailableCloudRecovery(ctx context.Context, inc *ty
 	if allowed {
 		if last != nil && last.Action == "provider-recovery-unavailable" {
 			if err := c.appendAudit(ctx, inc, "system", "provider-recovery-available", "provider eligibility restored for the pinned identity; step authorization still required"); err != nil {
-				return true, err
+				return true, "", err
 			}
 			entry.last = &types.AuditEntry{Action: "provider-recovery-available"}
 		}
-		return false, nil
+		return false, skip, nil
 	}
 	if last != nil && last.Action == "provider-recovery-unavailable" && last.Result == reason {
-		return true, nil
+		return true, "", nil
 	}
 	if err := c.appendAudit(ctx, inc, "system", "provider-recovery-unavailable", reason); err != nil {
-		return true, err
+		return true, "", err
 	}
 	entry.last = &types.AuditEntry{Action: "provider-recovery-unavailable", Result: reason}
-	return true, nil
+	return true, "", nil
 }

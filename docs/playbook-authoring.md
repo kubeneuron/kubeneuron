@@ -448,8 +448,25 @@ approval does not lift them:
   the other way. A policy that needs node replacement today names
   `RemoveFirst` explicitly.
 - `recycle.enabled` (default false): the optional restart through the cloud API.
-  Without it, a recycle step is held as unavailable.
+  Without it, a recycle step is skipped: it is not attempted and not counted
+  as failed, and the ladder continues with its next step or its
+  `on_failure.escalate_to` playbook (the audit trail records
+  `recycle skipped: …`). A recycle the cloud provider does not allow for the
+  node is skipped the same way. A skip is not a recovery: when nothing follows
+  it, the step is held as unavailable, never verified.
   A restart through the cloud API drains the node before it is tried, so it can interrupt the workload before a prepared replacement is ready; the add-first guarantee does not cover it.
+
+Both are checked before the first disruptive step, together with the cloud
+provider's eligibility. When no recovery step on the incident's path (its
+playbook and the playbooks it escalates to) can run under the policy — for
+example a replace under `AddFirst` with no enabled recycle — the incident is
+held before the cordon: the node is not cordoned or drained for a recovery
+that cannot follow, and no approval is asked. Once the policy changes, the
+hold lifts and the audit trail records `recovery-available`.
+
+An automatic policy authorises only cloud recovery ladders: playbooks with a
+recycle or replace step through the cloud API on their path. On any other
+playbook the step is parked for a person.
 
 Automatic mode is never enabled by default, by the installer or by a sample.
 To enable it, copy the commented example, fill in the pools, limits and your

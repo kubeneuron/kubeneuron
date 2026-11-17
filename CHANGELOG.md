@@ -25,7 +25,12 @@ API is `v1alpha1`.
   (`AddFirst` by default, `RemoveFirst` only when named) and
   `spec.recycle.enabled` (off by default) bound how a node is replaced, in
   every mode: a replace step under `AddFirst` is held until the provider
-  supports it, and a recycle step runs only when enabled.
+  supports it, and a recycle the policy does not enable, or the provider does
+  not allow, is skipped (`recycle skipped: …` in the audit trail) and the
+  ladder continues with its next step or escalation. Both are checked before
+  the first disruptive step: when nothing on the path can run, the node is
+  not cordoned or drained. Automatic policies authorise only cloud recovery
+  ladders.
   Every automatic step is audited as `policy:<name>` with the declared
   enabler, the policy generation and the time; `kubeneuronctl incident show`
   lists who approved or which policy authorised each executed step, and
@@ -38,7 +43,7 @@ API is `v1alpha1`.
   or by a sample.
 
   **Upgrade note:** a policy whose playbook replaces or restarts a node
-  through the cloud API holds that step until it names
+  through the cloud API holds that incident before the cordon until it names
   `replacement.strategy: RemoveFirst` (until add-first replacement exists) or
   `recycle.enabled: true`.
 

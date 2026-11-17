@@ -93,9 +93,11 @@ func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *p
 	// live automatic policy its actor names (#31, #56): defence in depth for
 	// every path that reaches here. A changed cloud target is decided first:
 	// the incident is superseded whatever the policy would have said.
-	if reason := c.stepUnavailable(ctx, inc, step); reason != "" {
+	// A step the policy would skip is not started either: skipping is the
+	// boundary's move, here it holds.
+	if hold, skip := c.policyRecoveryPreflight(ctx, inc, step); hold != "" || skip != "" {
 		c.deferStep(inc, step, metrics.DeferRecoveryUnavailable)
-		c.logOnceStepUnavailable(inc, step, reason)
+		c.logOnceStepUnavailable(inc, step, firstNonBlank(hold, "recovery unavailable: "+skip))
 		return nil
 	}
 	if refusal := c.policyAuthorisationRefusal(ctx, inc, step, actor); refusal != "" {

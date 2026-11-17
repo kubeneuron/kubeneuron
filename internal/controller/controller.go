@@ -54,9 +54,12 @@ type Controller struct {
 	inFlightMu sync.Mutex
 	inFlight   map[string]bool
 
-	// automaticEligibility is the cloud provider's answer to "may automatic
-	// recovery act on this node's pool" (#55); nil means no (fail closed).
-	automaticEligibility AutomaticEligibility
+	// policyAssessed remembers, per incident, the last policy-scope
+	// assessment in the audit trail: the denial text, or "" once recovery is
+	// available again. Absent means not loaded yet. It keeps those rows
+	// exact without reading the trail on every tick.
+	policyAssessedMu sync.Mutex
+	policyAssessed   map[string]string
 
 	// logOnce suppresses repeated explanations of conditions that persist.
 	//

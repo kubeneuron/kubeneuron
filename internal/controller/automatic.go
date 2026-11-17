@@ -30,19 +30,6 @@ const policyActorPrefix = "policy:"
 
 func policyActor(name string) string { return policyActorPrefix + name }
 
-// AutomaticEligibility answers whether recovery may act on a node's pool at
-// all: false for pools where the cloud's own repair cannot be held
-// (observe-only) or is unknown, with the reason. The cloud provider supplies
-// it (#55). It is an availability question, not a permission: a pool that is
-// not eligible is held, never handed to a person, because a person's approval
-// cannot make the action safe there. Without a provider answer, automatic
-// recovery is unavailable everywhere (fail closed). The provider gate in
-// authorizeAndStartStep (#52/#55) supersedes this hook on integration.
-type AutomaticEligibility func(ctx context.Context, node string) (ok bool, reason string)
-
-// SetAutomaticEligibility installs the provider's pool eligibility check.
-func (c *Controller) SetAutomaticEligibility(f AutomaticEligibility) { c.automaticEligibility = f }
-
 type policyVerdict int
 
 const (
@@ -83,11 +70,12 @@ func (c *Controller) authorizeByPolicy(ctx context.Context, inc *types.Incident,
 	if !auto.SelectsNode(labels) {
 		return policyPark, "the node is outside the policy's node pools"
 	}
-	if c.automaticEligibility == nil {
-		return policyHold, "recovery unavailable: the cloud provider has not confirmed this pool can be recovered without the cloud's own repair interfering"
-	}
-	if ok, reason := c.automaticEligibility(ctx, inc.Target.Node); !ok {
-		return policyHold, "recovery unavailable on this pool: " + reason
+	// The provider's eligibility for the pinned node has already been
+	// established at the boundary, before this is asked, but only on a cloud
+	// recovery ladder. Anywhere else nothing confirms that the cloud's own
+	// repair will not act on the same node, so a person decides.
+	if !c.cloudRecoveryLadder(ctx, inc.Playbook) {
+		return policyPark, "automatic policies authorise only cloud recovery ladders, whose eligibility the cloud provider confirms"
 	}
 	if tripped, err := c.breakerTripped(ctx, pol); err != nil {
 		return policyPark, fmt.Sprintf("the circuit breaker state cannot be read (%v)", err)
@@ -292,39 +280,14 @@ func (c *Controller) breakerTripped(ctx context.Context, pol playbook.Policy) (b
 	return false, nil
 }
 
-// stepUnavailable applies the policy's replacement strategy and recycle
-// setting to a step, in every mode: a replace step under AddFirst waits for
-// the provider capability (#57) rather than replacing another way, and a
-// restart through the cloud API runs only when the policy enables it. A
-// person's approval does not lift either: they are what the policy allows,
-// not a missing permission. An incident with no policy gets the defaults.
-// It returns "" when the step may proceed.
-func (c *Controller) stepUnavailable(ctx context.Context, inc *types.Incident, step *playbook.Step) string {
-	var pol playbook.Policy
-	if engine := c.runtimeConfig(ctx).Engine; engine != nil {
-		pol, _ = engine.PolicyFor(inc.Class, inc.Vendor)
-	}
-	switch step.Action {
-	case "platform.replace_node":
-		if pol.ReplacementStrategy.Effective() == recoverymode.AddFirst {
-			return "recovery unavailable: add-first replacement is not available from the cloud provider yet, and the policy does not name remove-first"
-		}
-	case "platform.recycle_node":
-		if !pol.RecycleEnabled {
-			return "recovery unavailable: the policy does not enable the restart through the cloud API (recycle.enabled)"
-		}
-	}
-	return ""
-}
-
 // logOnceStepUnavailable records why a step is held as unavailable: one log
-// line and one audit row per incident and step, not one per tick.
+// line per incident, step and reason, and an audit row whenever the denial
+// differs from the last policy-scope assessment, not one per tick.
 func (c *Controller) logOnceStepUnavailable(inc *types.Incident, step *playbook.Step, reason string) {
-	if !c.logOnce.first("step-unavailable/" + inc.ID + "/" + step.Name + "/" + reason) {
-		return
+	if c.logOnce.first("step-unavailable/" + inc.ID + "/" + step.Name + "/" + reason) {
+		c.log.Warn("step held: recovery unavailable", "incident", inc.ID, "step", step.Name, "reason", reason)
 	}
-	c.log.Warn("step held: recovery unavailable", "incident", inc.ID, "step", step.Name, "reason", reason)
-	if err := c.appendAudit(context.Background(), inc, "system", "recovery-unavailable", step.Name+": "+reason); err != nil {
+	if err := c.recordRecoveryDenied(context.Background(), inc, step.Name+": "+reason); err != nil {
 		c.log.Error("recovery-unavailable audit append failed", "incident", inc.ID, "err", err)
 	}
 }

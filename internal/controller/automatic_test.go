@@ -15,11 +15,13 @@ import (
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
+	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/internal/store/sqlite"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -38,32 +40,48 @@ func autoSettings() *recoverymode.Settings {
 	}
 }
 
+// modeEngine: a cloud recovery ladder (automatic policies authorise only
+// those) whose replacement names remove-first, so the whole ladder can run
+// today, under a policy in the given mode.
 func modeEngine(t *testing.T, mode recoverymode.Mode, settings *recoverymode.Settings) *playbook.Engine {
 	t.Helper()
-	books, err := playbook.LoadDir("../../configs/playbooks")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The playbook's own cool-down would hide the policy's node cool-down,
-	// and its reboot is a node-level alpha action an automatic policy may not
-	// authorise: the fixture ladder recovers through the platform only.
-	book := books["fell-off-bus"]
-	book.Cooldown = 0
-	var steps []playbook.Step
-	for _, s := range book.Steps {
-		if s.Action != "agent.reboot" {
-			steps = append(steps, s)
-		}
-	}
-	book.Steps = steps
-	engine, err := playbook.NewEngine(books, []playbook.Policy{
-		{Name: autoPolicy, Class: types.ClassFellOffBus, Playbook: "fell-off-bus", Mode: mode, Automatic: settings},
-	})
+	book := &playbook.Playbook{Name: "cloud-replace", Target: "node", Steps: []playbook.Step{
+		{Name: "cordon", Action: "platform.cordon"},
+		{Name: "drain", Action: "platform.drain", Approval: "required"},
+		{Name: "replace", Action: "platform.replace_node", Approval: "required"},
+	}}
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{"cloud-replace": book}, []playbook.Policy{{
+		Name: autoPolicy, Class: types.ClassFellOffBus, Playbook: "cloud-replace", Mode: mode, Automatic: settings,
+		ReplacementStrategy: recoverymode.RemoveFirst,
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return engine
 }
+
+// autoCloudPlatform pins every node and answers eligibility for the pin.
+// Only the methods below may be called: the fixture gate is dry-run, so no
+// step reaches the platform for real.
+type autoCloudPlatform struct {
+	platform.Platform
+	ineligible     string // non-empty: the provider's reason recovery is unavailable
+	recycleRefused bool
+}
+
+func (p *autoCloudPlatform) Name() string { return "auto-cloud-test" }
+func (p *autoCloudPlatform) CloudNode(_ context.Context, node string) (cloud.NodeRef, error) {
+	return cloud.NodeRef{Identity: cloud.NodeIdentity{Node: node, NodeUID: "uid-" + node,
+		ProviderID: "aws:///zone/i-" + node, InstanceID: "i-" + node, BootID: "boot-" + node}}, nil
+}
+func (p *autoCloudPlatform) RecoveryEligibility(_ context.Context, pin cloud.NodeIdentity) (cloud.RecoveryEligibility, error) {
+	return cloud.RecoveryEligibility{Identity: pin, Mode: cloud.RepairOff, ReplaceAllowed: p.ineligible == "",
+		RecycleAllowed: p.ineligible == "" && !p.recycleRefused, Reason: p.ineligible}, nil
+}
+func (p *autoCloudPlatform) RecyclePinnedNode(context.Context, cloud.NodeIdentity) error { return nil }
+func (p *autoCloudPlatform) ReplacePinnedNode(context.Context, cloud.NodeIdentity) error { return nil }
+func (p *autoCloudPlatform) NodeReady(context.Context, string) (bool, error)             { return true, nil }
+func (p *autoCloudPlatform) ListNodes(context.Context) ([]types.Node, error)             { return nil, nil }
 
 // autoFixture: a dry-run gate (steps simulate, so the whole ladder can run),
 // a policy in the given mode, and pool nodes n1..nN labelled pool=train.
@@ -82,9 +100,8 @@ func autoFixture(t *testing.T, mode recoverymode.Mode, settings *recoverymode.Se
 	}
 	gate := safety.NewGate(safety.Limits{MaxConcurrentRemediations: 8, MaxConcurrentReboots: 8, DryRun: true})
 	notifier := &recordingNotifier{}
-	c := New(st, st, modeEngine(t, mode, settings), gate, safety.NewFlapDetector(100, time.Hour), nil, nil, notifier,
+	c := New(st, st, modeEngine(t, mode, settings), gate, safety.NewFlapDetector(100, time.Hour), &autoCloudPlatform{}, nil, notifier,
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
-	c.SetAutomaticEligibility(func(context.Context, string) (bool, string) { return true, "" })
 	c.SetTimings(time.Millisecond, 0) // tiny verification quiet window
 	return c, st, notifier
 }
@@ -309,7 +326,7 @@ func TestStartStepRefusesAnUnauthorisedApprovalStep(t *testing.T) {
 	if err := st.UpdateIncident(context.Background(), inc); err != nil {
 		t.Fatal(err)
 	}
-	book, _ := c.runtimeConfig(context.Background()).Engine.Playbook("fell-off-bus")
+	book, _ := c.runtimeConfig(context.Background()).Engine.Playbook("cloud-replace")
 	var gated *playbook.Step
 	for i := range book.Steps {
 		if book.Steps[i].NeedsApproval() {
@@ -348,20 +365,34 @@ func TestCheckpointWaitIsCappedByTheAutomaticPolicy(t *testing.T) {
 // A pool the provider has not confirmed is unavailable, not a question for a
 // person: the step is held and no approval is asked.
 func TestIneligiblePoolHoldsInsteadOfAskingAPerson(t *testing.T) {
-	for name, eligibility := range map[string]AutomaticEligibility{
-		"no provider answer": nil,
-		"observe-only pool":  func(context.Context, string) (bool, string) { return false, "EKS Auto Mode repairs nodes on its own" },
-	} {
-		t.Run(name, func(t *testing.T) {
-			c, st, notifier := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
-			c.SetAutomaticEligibility(eligibility)
-			if inc := step(t, c, st, openOn(t, c, "n1"), 20); inc.State != types.StateEvaluating {
-				t.Fatalf("state=%s, want the step held", inc.State)
-			}
-			if len(notifier.approvals) != 0 {
-				t.Fatalf("approval requested %v on an ineligible pool", notifier.approvals)
-			}
-		})
+	c, st, notifier := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
+	c.platform = &autoCloudPlatform{ineligible: "EKS Auto Mode repairs nodes on its own"}
+	if inc := step(t, c, st, openOn(t, c, "n1"), 20); inc.State != types.StateEvaluating {
+		t.Fatalf("state=%s, want the step held", inc.State)
+	}
+	if len(notifier.approvals) != 0 {
+		t.Fatalf("approval requested %v on an ineligible pool", notifier.approvals)
+	}
+}
+
+// Outside a cloud recovery ladder nothing confirms that the cloud's own
+// repair will not act on the node: a person decides.
+func TestAutomaticParksOutsideACloudLadder(t *testing.T) {
+	c, st, _ := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
+	book := &playbook.Playbook{Name: "platform-only", Target: "node", Steps: []playbook.Step{
+		{Name: "cordon", Action: "platform.cordon"},
+		{Name: "drain", Action: "platform.drain", Approval: "required"},
+	}}
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{"platform-only": book}, []playbook.Policy{{
+		Name: autoPolicy, Class: types.ClassFellOffBus, Playbook: "platform-only", Mode: recoverymode.Automatic, Automatic: autoSettings(),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetEngine(engine)
+	id := openOn(t, c, "n1")
+	if inc := step(t, c, st, id, 50); inc.State != types.StateAwaitingApproval || !strings.Contains(parkReason(t, st, id), "only cloud recovery ladders") {
+		t.Fatalf("state=%s audit=%s, want a park naming the cloud ladder rule", inc.State, parkReason(t, st, id))
 	}
 }
 
@@ -459,8 +490,8 @@ func TestReplacementStrategyAndRecycleUnderAutomatic(t *testing.T) {
 			t.Fatalf("audit %v, want the replace authorised by the policy", results)
 		}
 	})
-	t.Run("recycle without recycle.enabled is held, not offered to a person", func(t *testing.T) {
-		c, st, _ := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
+	t.Run("recycle without recycle.enabled is skipped: not attempted, not offered to a person", func(t *testing.T) {
+		c, st, notifier := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
 		engine := replaceEngine(t, recoverymode.RemoveFirst, true)
 		pol, _ := engine.PolicyFor(types.ClassFellOffBus, "")
 		pol.RecycleEnabled = false
@@ -471,8 +502,16 @@ func TestReplacementStrategyAndRecycleUnderAutomatic(t *testing.T) {
 		}
 		c.SetEngine(disabled)
 		id := openOn(t, c, "n1")
-		if inc := step(t, c, st, id, 50); inc.State != types.StateEvaluating || !strings.Contains(parkReason(t, st, id), "recovery unavailable: the policy does not enable the restart") {
-			t.Fatalf("state=%s audit=%s, want the recycle held as unavailable", inc.State, parkReason(t, st, id))
+		step(t, c, st, id, 100)
+		audit := parkReason(t, st, id)
+		if !strings.Contains(audit, "recycle skipped: the policy does not enable the restart") || !strings.Contains(audit, "continuing with step replace") {
+			t.Fatalf("audit=%s, want the recycle skipped and the ladder continuing", audit)
+		}
+		if strings.Contains(audit, "platform.recycle_node") || len(notifier.approvals) != 0 {
+			t.Fatalf("audit=%s approvals=%v: a skipped recycle must not start or ask anyone", audit, notifier.approvals)
+		}
+		if !strings.Contains(audit, ": replace") {
+			t.Fatalf("audit=%s, want the replace authorised after the skip", audit)
 		}
 	})
 }
@@ -576,9 +615,11 @@ func TestConcurrencyLimitHoldsWithinOneReconcilePass(t *testing.T) {
 	c, st, _ := autoFixture(t, recoverymode.Automatic, settings, 8)
 	book := &playbook.Playbook{Name: "slow", Target: "node", Steps: []playbook.Step{
 		{Name: "drain", Action: "platform.drain", Approval: "required"},
+		{Name: "replace", Action: "platform.replace_node", Approval: "required"},
 	}}
 	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{"slow": book}, []playbook.Policy{{
 		Name: autoPolicy, Class: types.ClassFellOffBus, Playbook: "slow", Mode: recoverymode.Automatic, Automatic: settings,
+		ReplacementStrategy: recoverymode.RemoveFirst,
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -637,7 +678,7 @@ func TestConcurrencyLimitHoldsWithinOneReconcilePass(t *testing.T) {
 	}
 }
 
-type unreadablePlatform struct{ *recyclePlatform }
+type unreadablePlatform struct{ *autoCloudPlatform }
 
 func (*unreadablePlatform) NodeReady(context.Context, string) (bool, error) {
 	return false, errors.New("apiserver unavailable")
@@ -646,7 +687,7 @@ func (*unreadablePlatform) NodeReady(context.Context, string) (bool, error) {
 // The breaker never reads an unreadable pool as healthy.
 func TestUnreadableReadinessHoldsTheStep(t *testing.T) {
 	c, st, _ := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
-	c.platform = &unreadablePlatform{&recyclePlatform{configured: true}}
+	c.platform = &unreadablePlatform{&autoCloudPlatform{}}
 	id := openOn(t, c, "n1")
 	inc := step(t, c, st, id, 20)
 	if inc.State != types.StateEvaluating || !strings.Contains(parkReason(t, st, id), "readiness of pool node") {

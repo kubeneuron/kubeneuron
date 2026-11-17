@@ -17,16 +17,22 @@ import (
 // checks. Policy authorization can extend this boundary without changing the
 // recovery ladder or treating a parked state as proof of consent.
 func (c *Controller) authorizeAndStartStep(ctx context.Context, inc *types.Incident, step *playbook.Step) error {
-	if held, err := c.holdUnavailableCloudRecovery(ctx, inc, step); held || err != nil {
+	// Provider first, so a changed target is superseded whatever the policy
+	// says; then the policy's recovery settings. Both before any approval.
+	held, skip, err := c.holdUnavailableCloudRecovery(ctx, inc, step)
+	if held || err != nil {
 		return err
 	}
+	if skip != "" {
+		return c.skipRecycle(ctx, inc, step, skip)
+	}
+	// A parked round resumes under its own checks: startStep applies the
+	// policy's recovery settings again before anything runs.
 	if inc.State == types.StateAwaitingApproval {
 		return c.resumeAwaitingApproval(ctx, inc)
 	}
-	if reason := c.stepUnavailable(ctx, inc, step); reason != "" {
-		c.deferStep(inc, step, metrics.DeferRecoveryUnavailable)
-		c.logOnceStepUnavailable(inc, step, reason)
-		return nil
+	if handled, err := c.holdOrSkipByPolicy(ctx, inc, step); handled || err != nil {
+		return err
 	}
 	if step.NeedsApproval() {
 		pol, automatic := c.automaticPolicyFor(ctx, inc)
