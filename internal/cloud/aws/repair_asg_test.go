@@ -4,6 +4,7 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 
@@ -48,6 +49,48 @@ func TestConfirmedGroup(t *testing.T) {
 			got, err := confirmedGroup(t.Context(), membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{group}}}, "i-pinned", []string{tc.backedGroup})
 			if (err == nil) != tc.ok || (tc.ok && got != "workers") {
 				t.Fatalf("confirmedGroup returned %q, %v", got, err)
+			}
+		})
+	}
+}
+
+type activityPages struct {
+	t       *testing.T
+	outcome string
+	calls   int
+}
+
+func (p *activityPages) DescribeScalingActivities(_ context.Context, in *autoscaling.DescribeScalingActivitiesInput, _ ...func(*autoscaling.Options)) (*autoscaling.DescribeScalingActivitiesOutput, error) {
+	p.t.Helper()
+	p.calls++
+	if sdk.ToString(in.AutoScalingGroupName) != "workers" {
+		p.t.Fatal("wrong group")
+	}
+	if p.calls == 1 {
+		return &autoscaling.DescribeScalingActivitiesOutput{NextToken: sdk.String("next")}, nil
+	}
+	if p.calls != 2 || sdk.ToString(in.NextToken) != "next" {
+		p.t.Fatal("unexpected pagination")
+	}
+	switch p.outcome {
+	case "denied":
+		return nil, errors.New("AccessDenied")
+	case "repeated":
+		return &autoscaling.DescribeScalingActivitiesOutput{NextToken: sdk.String("next")}, nil
+	case "in progress":
+		return &autoscaling.DescribeScalingActivitiesOutput{Activities: []at.Activity{{AutoScalingGroupName: in.AutoScalingGroupName, StatusCode: at.ScalingActivityStatusCodeInProgress}}}, nil
+	default:
+		return &autoscaling.DescribeScalingActivitiesOutput{}, nil
+	}
+}
+
+func TestCheckGroupActivitiesReadsSecondPage(t *testing.T) {
+	for _, outcome := range []string{"clear", "denied", "repeated", "in progress"} {
+		t.Run(outcome, func(t *testing.T) {
+			p := &activityPages{t: t, outcome: outcome}
+			err := checkGroupActivities(t.Context(), p, "workers")
+			if (err == nil) != (outcome == "clear") || p.calls != 2 {
+				t.Fatalf("pages=%d err=%v", p.calls, err)
 			}
 		})
 	}
