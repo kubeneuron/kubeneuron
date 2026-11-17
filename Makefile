@@ -172,6 +172,7 @@ lint: verify-licenses
 # cache or a proxy hiccup fails the whole gate and a retry passes. That is the
 # other half of the unreproducible-failure signature.
 	$(GO) tool actionlint
+	bash hack/verify-pins.sh
 # actionlint's shellcheck reaches `run:` blocks only. Everything load-bearing in
 # hack/ is a standalone script it never sees — the mirror, the release check,
 # the image check, the hardware stand — and those are exactly the scripts whose

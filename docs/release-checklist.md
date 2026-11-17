@@ -125,6 +125,35 @@ tagging the release.
 - [ ] Run `bash hack/verify-release.sh vX.Y.Z kubeneuron/kubeneuron` against
       the published release.
 
+## Pinned inputs and tool versions
+
+Every external build and test input is immutable: GitHub Actions by full commit
+SHA (the version in a trailing comment), container images by multi-arch
+digest (`name:tag@sha256:...`). `make lint` and CI run `hack/verify-pins.sh`,
+which fails on an unpinned `uses:` or an image tag without a digest in
+`.github/workflows/`, `build/Dockerfile` and `hack/*.sh`.
+
+To update a pin:
+
+- Action: resolve the tag to its commit
+  (`gh api repos/OWNER/REPO/git/ref/tags/vX.Y.Z`, then the tag object's commit
+  if it is an annotated tag), read the release notes, and replace the SHA and
+  the version comment together.
+- Image: `docker buildx imagetools inspect NAME:TAG` and copy the index
+  `Digest:`; keep the tag in front of the digest so the version stays readable.
+
+Linters are pinned so a local `make lint` and CI agree: golangci-lint
+v2.14.0 (CI `golangci-lint-action` `version:`), shellcheck v0.11.0 (CI installs
+that release by checksum; actionlint uses it too).
+
+Release verification (`hack/verify-release.sh`) requires cosign: it verifies
+the checksum file's signature and every image digest in `images.txt` against
+the release workflow identity
+`https://github.com/kubeneuron/kubeneuron/.github/workflows/release.yaml@refs/tags/<tag>`.
+Images are built with `--provenance=false` (buildx attestation manifests break
+`kind load docker-image`); the cosign signatures and per-image SBOMs are the
+supply-chain evidence, and the release makes no provenance claim.
+
 ## Native component source retention
 
 The one native component KubeNeuron builds into the agent image is toybox

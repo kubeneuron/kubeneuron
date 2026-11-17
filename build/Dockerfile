@@ -6,7 +6,7 @@
 # Keep the compiler native to the builder and cross-compile the target binaries.
 # Do not declare a global BUILDPLATFORM default: it overrides BuildKit's value
 # and can force an amd64 compiler image on an arm64 runner.
-FROM --platform=$BUILDPLATFORM golang:1.26.11 AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.11@sha256:4165ee6bf3b7811fd7b40373290405c83d0167dcb87ee5f29c427cdcef45ff8f AS build
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
@@ -31,7 +31,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags "-s -w -X main.version=$VERSION" \
       -o /out/kubeneuronctl ./cmd/kubeneuronctl
 
-FROM gcr.io/distroless/static-debian12:nonroot AS operator
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS operator
 LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron" \
       org.opencontainers.image.description="KubeNeuron operator" \
       org.opencontainers.image.licenses="Apache-2.0"
@@ -39,7 +39,7 @@ COPY --from=build /out/kubeneuron-operator /kubeneuron-operator
 COPY NOTICE THIRD_PARTY_LICENSES LICENSE /licenses/
 ENTRYPOINT ["/kubeneuron-operator"]
 
-FROM gcr.io/distroless/static-debian12:nonroot AS controller
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS controller
 LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron" \
       org.opencontainers.image.description="KubeNeuron controller" \
       org.opencontainers.image.licenses="Apache-2.0"
@@ -88,7 +88,7 @@ RUN cd "toybox-${TOYBOX_VERSION}" \
 
 # DCGM from NVIDIA packages is not redistributable in this image. Operators
 # may explicitly supply a compatible client through hostTooling.dcgmiPath.
-FROM gcr.io/distroless/base-debian12 AS agent
+FROM gcr.io/distroless/base-debian12@sha256:fabbf1c0c357a3d42550111351daed089b20a2c954df13ee2fcff60602515e84 AS agent
 LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron" \
       org.opencontainers.image.description="KubeNeuron node agent" \
       org.opencontainers.image.licenses="Apache-2.0 AND 0BSD AND MIT"
@@ -99,7 +99,7 @@ COPY --from=build /out/kubeneuron-agent /kubeneuron-agent
 COPY NOTICE THIRD_PARTY_LICENSES LICENSE /licenses/
 ENTRYPOINT ["/kubeneuron-agent"]
 
-FROM gcr.io/distroless/static-debian12:nonroot AS cli
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS cli
 LABEL org.opencontainers.image.source="https://github.com/kubeneuron/kubeneuron" \
       org.opencontainers.image.description="kubeneuronctl CLI" \
       org.opencontainers.image.licenses="Apache-2.0"

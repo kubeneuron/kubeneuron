@@ -11,6 +11,11 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- **kmsg watcher cancellation on macOS.** The kernel-log reader opens its
+  source non-blocking, so cancelling the watcher wakes a reader parked on an
+  empty FIFO on darwin as it already did on Linux; the FIFO test now passes
+  on both.
+
 - Installer uninstall retains SQLite state and audit history by default, waits
   for operator acknowledgment, and permits reuse on reinstall. Deleting state
   requires `--delete-data` with confirmation (or `--yes`). Uninstall only removes
@@ -19,6 +24,19 @@ API is `v1alpha1`.
   the new retention-aware installer; otherwise uninstall stops before deletion.
 
 ### Security
+
+- **Supply chain: signatures checked, inputs pinned.** `hack/verify-release.sh`
+  now requires cosign and verifies the checksum file's signature and every
+  image digest in `images.txt` against the exact release-workflow identity
+  for the tag (`.github/workflows/release.yaml@refs/tags/<tag>`), instead of
+  any identity under the repository and instead of passing with "signature not
+  checked" when cosign was missing. Every GitHub Action is pinned to a full
+  commit SHA, and the Go builder, distroless bases, CI service and hw-e2e
+  helper images to multi-arch digests; `hack/verify-pins.sh` (in `make lint`
+  and CI) fails on an unpinned action or image tag. CI now runs shellcheck
+  v0.11.0 (pinned by checksum) over `hack/*.sh`, matching local `make lint`.
+  Images stay built without buildx provenance attestations, as before; no
+  provenance is claimed.
 
 - **The agent image no longer ships BusyBox.** Its `nsenter` helper is
   toybox (0BSD), statically linked against musl (MIT). The Debian base image

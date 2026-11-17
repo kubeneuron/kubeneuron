@@ -205,7 +205,12 @@ func parseSeq(line string) (uint64, bool) {
 // Reading /dev/kmsg requires CAP_SYSLOG (the agent runs privileged /
 // hostPID on Kubernetes, root via systemd on bare metal).
 func (w *Watcher) Watch(ctx context.Context) (<-chan Event, error) {
-	f, err := os.Open(w.Path)
+	// O_NONBLOCK puts the descriptor in Go's poller, so closing the file on
+	// cancellation wakes a reader parked on an empty /dev/kmsg or FIFO. A
+	// blocking descriptor is woken by Close on Linux but not on darwin, where
+	// the reader stayed parked forever (audit #24, C5). Reads still wait for
+	// data: the poller parks them instead of the kernel.
+	f, err := os.OpenFile(w.Path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, fmt.Errorf("kmsg: %w", err)
 	}

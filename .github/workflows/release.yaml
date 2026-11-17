@@ -52,7 +52,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Render the Helm chart with its default values
         shell: bash
@@ -143,20 +143,20 @@ jobs:
     outputs:
       digests: ${{ steps.build.outputs.digests }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
 
-      - uses: anchore/sbom-action/download-syft@v0
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         id: syft
 
       - name: Build, push, sign, and SBOM the images
@@ -201,7 +201,7 @@ jobs:
           digests="${digests%,}}"
           echo "digests=${digests}" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: images-dist
           path: dist/
@@ -215,9 +215,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26.11"
           cache: true
@@ -279,7 +279,7 @@ jobs:
           # unless the tagged source already carries ${version} everywhere,
           # so nothing here rewrites checked-out files.
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: manifest-dist
           path: dist/
@@ -293,9 +293,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26.11"
           cache: true
@@ -316,7 +316,7 @@ jobs:
             rm "dist/$bundle"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ctl-dist
           path: dist/
@@ -376,9 +376,9 @@ jobs:
       KUBECTL_VERSION: v1.33.12
       KUBECTL_SHA256: fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26.11"
           cache: true
@@ -438,9 +438,9 @@ jobs:
       # needs the source as well as the artifacts. Hardcoding them rotted the
       # moment a migration landed, which is exactly the class of drift the
       # docs lint exists to catch — and the lint cannot see workflow YAML.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           # ONLY this workflow's own build artifacts. Without the pattern
           # this pulls every artifact in the run — including the kind gate's
@@ -449,7 +449,7 @@ jobs:
           pattern: "*-dist"
           path: collected
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
 
       - name: Assemble dist, checksums, and digest table
         shell: bash
@@ -481,8 +481,12 @@ jobs:
             cat dist/images.txt
             echo '```'
             echo
-            echo "Install manifest and installer pin these digests; verify any"
-            echo "image with \`cosign verify\` against the GitHub OIDC issuer."
+            echo "Install manifest and installer pin these digests. Verify any image with:"
+            echo
+            echo '```'
+            echo "cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  --certificate-identity https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yaml@refs/tags/${GITHUB_REF_NAME} <image@digest>"
+            echo '```' 
             echo
             head_of() {
               local f head=""
@@ -499,7 +503,7 @@ jobs:
 
       - name: Create the GitHub release as a draft
         id: publish
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           # A draft is invisible to users and to releases/latest. It is
           # promoted by release-publish only after release-verify has
@@ -536,8 +540,8 @@ jobs:
       # release-publish, which runs only if this job passes.
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: sigstore/cosign-installer@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
       - name: Verify the draft release
         shell: bash
         env:

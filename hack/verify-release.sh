@@ -11,9 +11,11 @@
 #
 # So this downloads the release and asserts what install.md promises about it:
 # the asset set is exactly the four kinds, the checksum file covers every one
-# of them and matches, the cosign signature over that checksum file verifies
-# against the GitHub OIDC issuer, the image digest table is present and
-# digest-pinned, and the installer manifest references those same digests.
+# of them and matches, the cosign signature over that checksum file and over
+# every image digest verifies against this repository's release workflow at
+# this tag (GitHub OIDC), the image digest table is present and digest-pinned,
+# and the installer manifest references those same digests. cosign is
+# required: a release whose signatures were not checked is not verified.
 #
 # Usage: hack/verify-release.sh <tag> [repo [release-id]]
 #   hack/verify-release.sh v0.2.2
@@ -53,10 +55,11 @@ if [[ -n $RELEASE_ID && ! $RELEASE_ID =~ ^[0-9]+$ ]]; then
 	echo "verify-release: release id '${RELEASE_ID}' is not numeric" >&2
 	exit 2
 fi
-# Whether the signature was actually verified. The summary line must not claim
-# it otherwise: a green "signature verified" on a machine with no cosign is the
-# kind of over-claim this whole script exists to catch elsewhere.
-signature_checked=1
+# The one identity a release signature may carry: the release workflow of this
+# repository, run for this tag. A regexp over the repository prefix accepted
+# any workflow of the repository on any ref (audit #24, C3).
+signer_identity="https://github.com/${REPO}/.github/workflows/release.yaml@refs/tags/${TAG}"
+signer_issuer=https://token.actions.githubusercontent.com
 
 note() { printf '\n=== %s\n' "$*"; }
 bad() {
@@ -206,21 +209,18 @@ fi
 # covers everything the file covers, which is why the coverage check above is
 # load-bearing rather than pedantic.
 note "cosign signature"
-if command -v cosign >/dev/null 2>&1; then
-	if [[ -r "$sums.sig" && -r "$sums.pem" ]]; then
-		cosign verify-blob \
-			--certificate "$sums.pem" \
-			--signature "$sums.sig" \
-			--certificate-identity-regexp "^https://github.com/${REPO}/" \
-			--certificate-oidc-issuer https://token.actions.githubusercontent.com \
-			"$sums" >/dev/null 2>&1 ||
-			bad "the cosign signature over checksums-${TAG}.txt does not verify against ${REPO}'s GitHub OIDC identity"
-	else
-		bad "checksums-${TAG}.txt is published without a .sig/.pem pair"
-	fi
+if ! command -v cosign >/dev/null 2>&1; then
+	bad "cosign is required: signatures cannot be skipped, install cosign and run again"
+elif [[ -r "$sums.sig" && -r "$sums.pem" ]]; then
+	cosign verify-blob \
+		--certificate "$sums.pem" \
+		--signature "$sums.sig" \
+		--certificate-identity "$signer_identity" \
+		--certificate-oidc-issuer "$signer_issuer" \
+		"$sums" >/dev/null 2>&1 ||
+		bad "the cosign signature over checksums-${TAG}.txt does not verify against ${signer_identity}"
 else
-	signature_checked=0
-	echo "cosign not installed; skipping signature verification (install it to make this check real)" >&2
+	bad "checksums-${TAG}.txt is published without a .sig/.pem pair"
 fi
 
 # --- images are digest-pinned -------------------------------------------------
@@ -229,11 +229,25 @@ images="$work/images.txt"
 if [[ ! -r $images ]]; then
 	bad "no images.txt: nothing states which images this release is"
 else
+	signed=0
 	while IFS= read -r line; do
 		[[ -z $line ]] && continue
-		grep -qE '@sha256:[a-f0-9]{64}$' <<<"$line" ||
+		if ! grep -qE '@sha256:[a-f0-9]{64}$' <<<"$line"; then
 			bad "images.txt entry is not digest-pinned: ${line}"
+			continue
+		fi
+		# Each image digest carries its own signature (release.yaml signs every
+		# pushed digest); the checksum file's signature does not cover them.
+		if command -v cosign >/dev/null 2>&1; then
+			if cosign verify --certificate-identity "$signer_identity" \
+				--certificate-oidc-issuer "$signer_issuer" "$line" </dev/null >/dev/null 2>&1; then
+				signed=$((signed + 1))
+			else
+				bad "the image ${line} has no cosign signature from ${signer_identity}"
+			fi
+		fi
 	done <"$images"
+	((signed > 0)) || bad "no image in images.txt was verified as signed"
 	# What a user actually applies must name those same digests, and each
 	# artifact carries a different part of the install:
 	#
@@ -275,10 +289,5 @@ if ((fail)); then
 	exit 1
 fi
 echo
-summary="asset set closed, checksums complete and matching, images digest-pinned"
-if ((signature_checked)); then
-	summary="${summary}, signature verified"
-else
-	summary="${summary}; SIGNATURE NOT CHECKED (cosign absent)"
-fi
+summary="asset set closed, checksums complete and matching, images digest-pinned, checksum and image signatures verified against ${signer_identity}"
 echo "verify-release: OK (${REPO}@${TAG}: ${summary})"

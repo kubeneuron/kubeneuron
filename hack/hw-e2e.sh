@@ -1196,7 +1196,7 @@ spec:
       terminationGracePeriodSeconds: 5
       containers:
         - name: sleep
-          image: busybox:1.36
+          image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
           command: ["sh", "-c", "sleep 3600"]
 EOF
 	# A bare pod: no controller, so nothing would recreate it elsewhere. This is
@@ -1215,7 +1215,7 @@ spec:
   terminationGracePeriodSeconds: 5
   containers:
     - name: sleep
-      image: busybox:1.36
+      image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
       command: ["sh", "-c", "sleep 3600"]
 EOF
 	wait_for 180 'kubectl -n default get pod e2e-bare -o jsonpath="{.status.phase}" | grep -q Running'
@@ -2076,7 +2076,7 @@ spec:
           configMap: {name: checkpoint-scripts, defaultMode: 0555}
       containers:
         - name: trainer
-          image: busybox:1.37
+          image: busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
           command: ["/bin/sh", "/scripts/trainer.sh"]
           env:
             - {name: CKPT_DIR, value: /ckpt}
@@ -2087,7 +2087,7 @@ spec:
             - {name: ckpt, mountPath: /ckpt}
             - {name: scripts, mountPath: /scripts}
         - name: checkpoint-sidecar
-          image: busybox:1.37
+          image: busybox:1.37@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
           command: ["/bin/sh", "/scripts/sidecar.sh"]
           env:
             - {name: ANNOTATIONS, value: /etc/podinfo/annotations}
@@ -3039,7 +3039,7 @@ cmd_reap() {
 agent_health_source() {
 	local ip="$1" out
 	out=$(kubectl -n "$RUNTIME_NAMESPACE" run "kn-src-$RANDOM" --rm -i --restart=Never \
-		--image=curlimages/curl:8.10.1 --quiet -- \
+		--image=curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b --quiet -- \
 		curl -fsS --max-time 10 "http://${ip}:9402/metrics" 2>/dev/null |
 		grep -E '^kubeneuron_agent_health_source\{source="[a-z-]+"\} 1$' |
 		sed -E 's/.*source="([a-z-]+)".*/\1/' | head -1 || true)
@@ -3049,7 +3049,7 @@ agent_health_source() {
 gpuhealth_detections() {
 	local ip="$1" out
 	out=$(kubectl -n "$RUNTIME_NAMESPACE" run "kn-metrics-$RANDOM" --rm -i --restart=Never \
-		--image=curlimages/curl:8.10.1 --quiet -- \
+		--image=curlimages/curl:8.10.1@sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b --quiet -- \
 		curl -fsS --max-time 10 "http://${ip}:9402/metrics" 2>/dev/null |
 		grep -E 'kubeneuron_agent_detections_total\{[^}]*source="gpuhealth"' |
 		grep -oE '[0-9]+$' | head -1 || true)
@@ -3239,7 +3239,7 @@ spec:
   serviceAccountName: ${ROOT_NAME}-controller
   containers:
     - name: sts
-      image: public.ecr.aws/aws-cli/aws-cli:2.17.62
+      image: public.ecr.aws/aws-cli/aws-cli:2.17.62@sha256:183d4bb76169d35c12ba99e3384b605fee9a72fcb7ff1eeaa857fc27aa8fc713
       command: ["sh", "-ec", "aws sts get-caller-identity --query Arn --output text"]
 EOF
 	kubectl -n "$RUNTIME_NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded \
@@ -3271,7 +3271,7 @@ inject_xid() {
 	esac
 	local line="NVRM: Xid (PCI:0000:00:1e): ${xid}, pid=0, hardware E2E synthetic fault."
 	kubectl debug "node/$node" --profile=sysadmin -q \
-		--image=busybox:1.36 -- \
+		--image=busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 -- \
 		sh -c "printf '%s\n' '$line' > /dev/kmsg"
 }
 

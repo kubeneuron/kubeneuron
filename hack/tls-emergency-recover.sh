@@ -208,7 +208,7 @@ client_leaf_uid=$(require_candidate "$client_leaf_secret")
 
 tmp_dir=$(mktemp -d)
 umask 077
-# shellcheck disable=SC2317 # Invoked through the EXIT trap below.
+# shellcheck disable=SC2317,SC2329 # Invoked through the EXIT trap below (SC2329 is the shellcheck 0.11 code).
 cleanup() {
 	rm -rf "$tmp_dir"
 }
