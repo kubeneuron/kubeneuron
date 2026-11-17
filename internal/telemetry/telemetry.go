@@ -30,7 +30,6 @@ import (
 	prometheusbridge "go.opentelemetry.io/contrib/bridges/prometheus"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -38,6 +37,8 @@ import (
 )
 
 const (
+	// Protocol is the only OTLP transport the components speak.
+	Protocol = "http/protobuf"
 	// DefaultInterval applies when OTEL_METRIC_EXPORT_INTERVAL is unset.
 	DefaultInterval = 30 * time.Second
 	// DefaultTimeout applies when OTEL_METRIC_EXPORT_TIMEOUT is unset; it
@@ -87,7 +88,7 @@ func Start(ctx context.Context, o Options) Shutdown {
 	if o.Getenv == nil {
 		o.Getenv = os.Getenv
 	}
-	enabled, protocol, err := configured(o.Getenv)
+	enabled, err := configured(o.Getenv)
 	if err != nil {
 		o.Log.Warn("OTLP metrics export disabled: invalid configuration", "err", err)
 		return noop
@@ -95,46 +96,45 @@ func Start(ctx context.Context, o Options) Shutdown {
 	if !enabled {
 		return noop
 	}
-	shutdown, err := start(ctx, o, protocol)
+	shutdown, err := start(ctx, o)
 	if err != nil {
 		o.Log.Warn("OTLP metrics export disabled: could not start", "err", err)
 		return noop
 	}
-	o.Log.Info("OTLP metrics export enabled", "protocol", protocol)
+	o.Log.Info("OTLP metrics export enabled", "protocol", Protocol)
 	return shutdown
 }
 
-// configured reports whether export is enabled and over which protocol.
-func configured(getenv func(string) string) (bool, string, error) {
+// configured reports whether export is enabled.
+func configured(getenv func(string) string) (bool, error) {
 	if strings.EqualFold(strings.TrimSpace(getenv("OTEL_SDK_DISABLED")), "true") {
-		return false, "", nil
+		return false, nil
 	}
 	switch exporter := strings.TrimSpace(getenv("OTEL_METRICS_EXPORTER")); exporter {
 	case "", "otlp":
 	case "none":
-		return false, "", nil
+		return false, nil
 	default:
-		return false, "", fmt.Errorf("OTEL_METRICS_EXPORTER=%q: only otlp and none are supported", exporter)
+		return false, fmt.Errorf("OTEL_METRICS_EXPORTER=%q: only otlp and none are supported", exporter)
 	}
 	if strings.TrimSpace(getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")) == "" &&
 		strings.TrimSpace(getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) == "" {
-		return false, "", nil
+		return false, nil
 	}
 	protocol := strings.TrimSpace(getenv("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"))
 	if protocol == "" {
 		protocol = strings.TrimSpace(getenv("OTEL_EXPORTER_OTLP_PROTOCOL"))
 	}
-	switch protocol {
-	case "":
-		protocol = "grpc"
-	case "grpc", "http/protobuf":
-	default:
-		return false, "", fmt.Errorf("OTLP protocol %q: only grpc and http/protobuf are supported", protocol)
+	// One transport is simpler to test and document, and the Collector we
+	// deploy listens on it. Unset means ours; any other value is refused
+	// rather than silently replaced.
+	if protocol != "" && protocol != Protocol {
+		return false, fmt.Errorf("OTLP protocol %q is not supported (supported: %s)", protocol, Protocol)
 	}
-	return true, protocol, nil
+	return true, nil
 }
 
-func start(ctx context.Context, o Options, protocol string) (Shutdown, error) {
+func start(ctx context.Context, o Options) (Shutdown, error) {
 	if o.Gatherer == nil || o.Registerer == nil {
 		return nil, errors.New("telemetry: Gatherer and Registerer are required")
 	}
@@ -153,15 +153,9 @@ func start(ctx context.Context, o Options, protocol string) (Shutdown, error) {
 		return nil, fmt.Errorf("telemetry resource: %w", err)
 	}
 
-	// The exporters read the remaining OTEL_EXPORTER_OTLP_* variables
-	// themselves: endpoint, headers, certificates, insecure, timeout.
-	var exp sdkmetric.Exporter
-	switch protocol {
-	case "grpc":
-		exp, err = otlpmetricgrpc.New(ctx)
-	default:
-		exp, err = otlpmetrichttp.New(ctx)
-	}
+	// The exporter reads the remaining OTEL_EXPORTER_OTLP_* variables itself:
+	// endpoint, headers, certificates, insecure, timeout.
+	exp, err := otlpmetrichttp.New(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("OTLP exporter: %w", err)
 	}

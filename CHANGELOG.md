@@ -244,7 +244,7 @@ API is `v1alpha1`.
 
 - **OTLP metrics export from the controller, agent and operator.** Each
   process can push the series it serves on `/metrics` to an OpenTelemetry
-  Collector over OTLP (gRPC or HTTP/protobuf), through the Prometheus bridge
+  Collector over OTLP/HTTP (protobuf), through the Prometheus bridge
   from the same registry, so names and labels are identical and nothing is
   counted twice. Off unless `OTEL_EXPORTER_OTLP_ENDPOINT` (or the
   metrics-specific variable) is set; the standard `OTEL_*` variables

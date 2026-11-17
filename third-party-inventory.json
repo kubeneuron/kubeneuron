@@ -1139,23 +1139,6 @@
     "review": []
   },
   {
-    "module": "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc@v1.47.0",
-    "files": [
-      "LICENSE"
-    ],
-    "spdx": [
-      "Apache-2.0",
-      "BSD-3-Clause"
-    ],
-    "licenses": {
-      "LICENSE": [
-        "Apache-2.0",
-        "BSD-3-Clause"
-      ]
-    },
-    "review": []
-  },
-  {
     "module": "go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp@v1.47.0",
     "files": [
       "LICENSE"

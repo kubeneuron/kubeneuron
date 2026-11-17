@@ -160,11 +160,15 @@ Export is off until an endpoint is set. The standard variables configure it:
 | Variable | Effect |
 |---|---|
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Collector address; setting either turns export on |
-| `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` | `grpc` (default) or `http/protobuf` |
-| `OTEL_EXPORTER_OTLP_INSECURE`, `_CERTIFICATE`, `_HEADERS`, `_TIMEOUT` | transport, as in the OpenTelemetry specification |
+| `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` | unset or `http/protobuf`, the only transport (port 4318 on a Collector); `grpc` is refused |
+| `OTEL_EXPORTER_OTLP_HEADERS`, `_CERTIFICATE`, `_CLIENT_CERTIFICATE`, `_CLIENT_KEY`, `_TIMEOUT` | transport, as in the OpenTelemetry specification |
 | `OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_METRIC_EXPORT_TIMEOUT` | milliseconds; defaults 30000 and 10000 |
 | `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | resource; `service.name` defaults to `kubeneuron-controller`, `kubeneuron-agent` or `kubeneuron-operator` |
 | `OTEL_SDK_DISABLED=true`, `OTEL_METRICS_EXPORTER=none` | turn export off |
+
+Pass credentials for the Collector in `OTEL_EXPORTER_OTLP_HEADERS` (for
+example `Authorization=Bearer ...`), never in the endpoint URL: an export
+error is logged with the URL it was sent to.
 
 Telemetry never holds a process up. An unsupported value (another exporter or
 protocol) is logged and the process runs without export. At most one batch is

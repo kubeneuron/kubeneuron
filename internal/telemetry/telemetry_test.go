@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,13 +17,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	colmetrics "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
-	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 )
 
-// receiver collects OTLP export requests.
+// receiver collects OTLP/HTTP export requests.
 type receiver struct {
-	colmetrics.UnimplementedMetricsServiceServer
 	mu   sync.Mutex
 	reqs []*colmetrics.ExportMetricsServiceRequest
 	got  chan struct{}
@@ -30,9 +29,23 @@ type receiver struct {
 
 func newReceiver() *receiver { return &receiver{got: make(chan struct{}, 64)} }
 
-func (r *receiver) Export(_ context.Context, req *colmetrics.ExportMetricsServiceRequest) (*colmetrics.ExportMetricsServiceResponse, error) {
-	r.add(req)
-	return &colmetrics.ExportMetricsServiceResponse{}, nil
+// serve starts an OTLP/HTTP receiver and returns its base URL.
+func (r *receiver) serve(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, _ := io.ReadAll(req.Body)
+		msg := &colmetrics.ExportMetricsServiceRequest{}
+		if req.URL.Path != "/v1/metrics" || proto.Unmarshal(body, msg) != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		r.add(msg)
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		out, _ := proto.Marshal(&colmetrics.ExportMetricsServiceResponse{})
+		_, _ = w.Write(out)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
 }
 
 func (r *receiver) add(req *colmetrics.ExportMetricsServiceRequest) {
@@ -118,25 +131,29 @@ func TestOffWithoutEndpoint(t *testing.T) {
 
 func TestConfiguration(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		env      map[string]string
-		enabled  bool
-		protocol string
-		invalid  bool
+		name    string
+		env     map[string]string
+		enabled bool
+		invalid bool
 	}{
 		{name: "no endpoint", env: map[string]string{}},
-		{name: "endpoint", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c:4317"}, enabled: true, protocol: "grpc"},
-		{name: "metrics endpoint", env: map[string]string{"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://c:4318/v1/metrics", "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf"}, enabled: true, protocol: "http/protobuf"},
-		{name: "metrics protocol wins", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c", "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "grpc"}, enabled: true, protocol: "grpc"},
+		{name: "endpoint", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c:4318"}, enabled: true},
+		{name: "metrics endpoint", env: map[string]string{"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://c:4318/v1/metrics"}, enabled: true},
+		{name: "explicit http/protobuf", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c", "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf"}, enabled: true},
 		{name: "sdk disabled", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c", "OTEL_SDK_DISABLED": "TRUE"}},
 		{name: "exporter none", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c", "OTEL_METRICS_EXPORTER": "none"}},
 		{name: "exporter prometheus", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c", "OTEL_METRICS_EXPORTER": "prometheus"}, invalid: true},
-		{name: "http/json", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c", "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json"}, invalid: true},
+		{name: "grpc refused", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c", "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc"}, invalid: true},
+		{name: "metrics grpc refused", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c", "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "grpc"}, invalid: true},
+		{name: "http/json refused", env: map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": "http://c", "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json"}, invalid: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			enabled, protocol, err := configured(func(k string) string { return tc.env[k] })
-			if (err != nil) != tc.invalid || enabled != tc.enabled || protocol != tc.protocol {
-				t.Fatalf("configured = %v %q %v, want %v %q invalid=%v", enabled, protocol, err, tc.enabled, tc.protocol, tc.invalid)
+			enabled, err := configured(func(k string) string { return tc.env[k] })
+			if (err != nil) != tc.invalid || enabled != tc.enabled {
+				t.Fatalf("configured = %v %v, want %v invalid=%v", enabled, err, tc.enabled, tc.invalid)
+			}
+			if tc.invalid && tc.env["OTEL_EXPORTER_OTLP_PROTOCOL"] != "" && !strings.Contains(err.Error(), "supported: http/protobuf") {
+				t.Fatalf("error %q does not name the supported protocol", err)
 			}
 		})
 	}
@@ -155,18 +172,9 @@ func TestInvalidConfigurationRunsWithoutExport(t *testing.T) {
 	}
 }
 
-func TestGRPCExportCarriesRegistrySeries(t *testing.T) {
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := grpc.NewServer()
+func TestExportCarriesRegistrySeries(t *testing.T) {
 	rcv := newReceiver()
-	colmetrics.RegisterMetricsServiceServer(srv, rcv)
-	go func() { _ = srv.Serve(lis) }()
-	defer srv.Stop()
-
-	fastExport(t, "http://"+lis.Addr().String())
+	fastExport(t, rcv.serve(t))
 	t.Setenv("OTEL_RESOURCE_ATTRIBUTES", "k8s.cluster.name=c1,k8s.namespace.name=kubeneuron-system")
 	reg := testRegistry()
 	stop := Start(context.Background(), Options{ServiceName: "kubeneuron-test", Version: "v9", Gatherer: reg, Registerer: reg})
@@ -196,49 +204,14 @@ func TestGRPCExportCarriesRegistrySeries(t *testing.T) {
 }
 
 func TestServiceNameFromEnvironmentOverrides(t *testing.T) {
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := grpc.NewServer()
 	rcv := newReceiver()
-	colmetrics.RegisterMetricsServiceServer(srv, rcv)
-	go func() { _ = srv.Serve(lis) }()
-	defer srv.Stop()
-
-	fastExport(t, "http://"+lis.Addr().String())
+	fastExport(t, rcv.serve(t))
 	t.Setenv("OTEL_SERVICE_NAME", "renamed")
 	reg := testRegistry()
 	stop := Start(context.Background(), Options{ServiceName: "kubeneuron-test", Gatherer: reg, Registerer: reg})
 	defer func() { _ = stop(context.Background()) }()
 	if res, _ := exported(rcv.wait(t)); res["service.name"] != "renamed" {
 		t.Fatalf("service.name = %q, want OTEL_SERVICE_NAME", res["service.name"])
-	}
-}
-
-func TestHTTPProtobufExport(t *testing.T) {
-	rcv := newReceiver()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		req := &colmetrics.ExportMetricsServiceRequest{}
-		if r.URL.Path != "/v1/metrics" || proto.Unmarshal(body, req) != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		rcv.add(req)
-		w.Header().Set("Content-Type", "application/x-protobuf")
-		out, _ := proto.Marshal(&colmetrics.ExportMetricsServiceResponse{})
-		_, _ = w.Write(out)
-	}))
-	defer srv.Close()
-
-	fastExport(t, srv.URL)
-	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
-	reg := testRegistry()
-	stop := Start(context.Background(), Options{ServiceName: "kubeneuron-test", Gatherer: reg, Registerer: reg})
-	defer func() { _ = stop(context.Background()) }()
-	if _, metrics := exported(rcv.wait(t)); metrics["kubeneuron_signals_total"] == nil {
-		t.Fatalf("kubeneuron_signals_total missing over http/protobuf; got %v", keys(metrics))
 	}
 }
 
