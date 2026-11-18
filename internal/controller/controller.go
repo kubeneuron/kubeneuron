@@ -64,6 +64,9 @@ type Controller struct {
 	policyAssessedMu sync.Mutex
 	policyAssessed   map[string]string
 
+	// interruptions remembers the interruption notices already recorded.
+	interruptions interruptionState
+
 	// logOnce suppresses repeated explanations of conditions that persist.
 	//
 	// Keyed strings, ONE map, and bounded — because the keys include node
@@ -410,6 +413,7 @@ func (c *Controller) runJanitors(ctx context.Context) {
 		c.reconcileCordonedNodes(passCtx)
 		c.reconcileDegradedTaints(passCtx)
 		c.resolveIncidentsOnVanishedNodes(passCtx)
+		c.pollInterruptions(passCtx)
 		select {
 		case <-ctx.Done():
 			return

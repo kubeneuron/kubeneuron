@@ -23,6 +23,21 @@ API is `v1alpha1`.
   `kubeneuron_incident_evidence_total`; an unread signal is `unknown`, never
   healthy. Evidence never starts or authorises a step.
 
+- **Announced cloud interruptions (experimental, not validated against a live
+  EKS, AKS or GKE cluster).** KubeNeuron reads interruption signals on nodes
+  (GKE maintenance taint and label, the AKS `VMEventScheduled` condition, the
+  AWS Node Termination Handler taints) and opens a `cloud-interruption`
+  incident. Its playbook asks the node's opted-in jobs to checkpoint before
+  the deadline the cloud announced (`CheckpointWarning`, no approval, not held
+  by the breaker, limits or cooldowns) and then cordons the node (approval in
+  `Approval` mode). It never drains or replaces the node. The steps start
+  within `spec.interruption.lead` (default `10m`) of the deadline; a
+  `rebalance` hint is only recorded. A spot notice is about two minutes on
+  AWS and shorter elsewhere, so a checkpoint is asked for, not guaranteed.
+  The cloud pack adds the playbook and its policy. New metric
+  `kubeneuron_cloud_interruptions_total`. See
+  [Announced cloud interruptions](docs/cloud-interruptions.md).
+
 - **Add-first replacement contract.** A cloud provider can now prepare a
   replacement node before the affected node is cordoned
   (`cloud.SuccessorProvider`, `Capabilities.AddFirst`). Under

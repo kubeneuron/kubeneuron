@@ -483,11 +483,27 @@ spec:
       timeout: 20m
   onFailure:
     playbookRef: $NAME-cloud-replace
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: $NAME-cloud-interruption
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: $NAME
+  target: Node
+  steps:
+    - name: checkpoint-warning
+      action: CheckpointWarning
+    - name: cordon
+      action: Cordon
+      approval: Required
 EOF
   local class ladder
-  for class in xid-app ecc-sbe-rate thermal power pcie agent-down exporter-down ecc-contained row-remap-ok gsp-error driver-hang row-remap-failure row-remap-budget ecc-dbe nvlink fell-off-bus gpu-lost; do
+  for class in xid-app ecc-sbe-rate thermal power pcie agent-down exporter-down ecc-contained row-remap-ok gsp-error driver-hang row-remap-failure row-remap-budget ecc-dbe nvlink fell-off-bus gpu-lost cloud-interruption; do
     case $class in
       ecc-dbe|nvlink|fell-off-bus|gpu-lost) ladder=$NAME-cloud-replace ;;
+      cloud-interruption) ladder=$NAME-cloud-interruption ;;
       *) ladder=$NAME-observe ;;
     esac
     cat <<EOF
@@ -503,9 +519,12 @@ spec:
   mode: Approval
   match: {class: $class}
   playbookRef: $ladder
-  replacement: {strategy: AddFirst}
-  recycle: {enabled: false}
 EOF
+    if [[ $class == cloud-interruption ]]; then
+      echo "  interruption: {lead: 10m}"
+    else
+      printf '  replacement: {strategy: AddFirst}\n  recycle: {enabled: false}\n'
+    fi
   done
 }
 

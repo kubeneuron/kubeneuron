@@ -240,3 +240,16 @@ spec:
   playbookRef: kubeneuron-cloud-observe
   replacement: {strategy: AddFirst}
   recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-cloud-interruption
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: cloud-interruption}
+  playbookRef: kubeneuron-cloud-interruption
+  interruption: {lead: 10m}

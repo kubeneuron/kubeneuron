@@ -21,6 +21,11 @@ func (c *Controller) authorizeAndStartStep(ctx context.Context, inc *types.Incid
 	// says; then the policy's recovery settings. Both before any approval.
 	// Before a recycle-only rung starts, the provider is asked about its
 	// recycle: a refused recycle skips the rung before its cordon.
+	// A cloud-interruption step waits for its deadline to come within the
+	// policy's lead, and its cordon for the node to be free of other work.
+	if held, err := c.holdInterruptionStep(ctx, inc, step); held || err != nil {
+		return err
+	}
 	assess := step
 	if recycle := c.rungRecycle(ctx, inc); recycle != nil {
 		assess = recycle

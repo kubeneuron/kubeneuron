@@ -222,6 +222,14 @@ var (
 		Name: "kubeneuron_checkpoint_requests_total",
 		Help: "Checkpoint coordination outcomes by workload (acknowledged, exited, expired, unreachable) or per step when nothing was requested (skipped).",
 	}, []string{"outcome"})
+	// CloudInterruptions counts interruptions the cloud announced and what
+	// came of the checkpoint warning: announced, warned, no-jobs, not-asked,
+	// checkpointed-in-time, missed, withdrawn. Pool and instance type stay out
+	// of the labels.
+	CloudInterruptions = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_cloud_interruptions_total",
+		Help: "Cloud interruption notices by provider and kind, and the outcome of the checkpoint warning.",
+	}, []string{"provider", "kind", "outcome"})
 
 	// CheckpointAdvisories counts advisory outcomes at approval park: one
 	// stamped/unreachable per eligible workload the round tried to notify,

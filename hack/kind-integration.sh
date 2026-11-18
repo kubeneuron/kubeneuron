@@ -2887,6 +2887,77 @@ exercise_incident_evidence() {
 	note "incident evidence: PASS"
 }
 
+# exercise_cloud_interruption: the AWS Node Termination Handler's spot taint
+# on a worker must open a cloud-interruption incident that records the notice,
+# and removing the taint must close it as withdrawn. The fixture binds no
+# policy to the class, so nothing is asked or cordoned.
+exercise_cloud_interruption() {
+	note "exercising an announced cloud interruption read from a node taint"
+	local pf_log="$work_dir/interruption-port-forward.log"
+	local pf_pid='' public_port='' target_node deadline id='' state='' detail=''
+	local taint=aws-node-termination-handler/spot-itn
+	target_node=$("$KUBECTL_BIN" get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[0].metadata.name}')
+	[[ -n $target_node ]] || die "no worker node for the interruption scenario"
+
+	local restore_done=0
+	restore_interruption() {
+		((restore_done)) && return 0
+		restore_done=1
+		if [[ -n $pf_pid ]]; then kill "$pf_pid" >/dev/null 2>&1 || true; fi
+		"$KUBECTL_BIN" taint node "$target_node" "${taint}-" >/dev/null 2>&1 || true
+	}
+	trap restore_interruption RETURN
+
+	: >"$pf_log"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+		"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
+	pf_pid=$!
+	deadline=$((SECONDS + 30))
+	while ((SECONDS < deadline)); do
+		public_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$pf_log")
+		[[ -n $public_port ]] && break
+		sleep 1
+	done
+	[[ -n $public_port ]] || die "interruption-phase port-forward allocated no local port"
+	interruption_api() {
+		curl --silent --show-error --noproxy '*' --max-time 10 \
+			-H 'Authorization: Bearer integration-operator-token' "$@"
+	}
+
+	"$KUBECTL_BIN" taint node "$target_node" "${taint}=kind-event-1:NoSchedule" >/dev/null
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		id=$(interruption_api "http://127.0.0.1:${public_port}/api/v1/incidents?node=${target_node}" |
+			"$JQ_BIN" -r '[(. // [])[] | select(.class == "cloud-interruption")][0].id // empty')
+		if [[ -n $id ]]; then
+			detail=$(interruption_api "http://127.0.0.1:${public_port}/api/v1/incidents/${id}")
+			"$JQ_BIN" -e '.audit | any(.action == "interruption")' >/dev/null <<<"$detail" && break
+		fi
+		sleep 2
+	done
+	[[ -n $id ]] || die "the spot taint on $target_node opened no cloud-interruption incident"
+	"$JQ_BIN" -e '
+		(.audit | any(.action == "interruption" and (.result | contains("spot-reclaim")) and
+			(.result | contains("aws-node-termination-handler:taint/spot-itn")))) and
+		(.audit | any(.action == "interruption-warned") | not)' >/dev/null <<<"$detail" || {
+		"$JQ_BIN" -c '{id: .incident.id, class: .incident.class, state: .incident.state, audit: [.audit[] | {action, result}]}' <<<"$detail" >&2 || true
+		die "the cloud-interruption incident does not record the notice, or warned without a policy"
+	}
+	note "a spot taint opened incident $id and recorded the notice"
+
+	"$KUBECTL_BIN" taint node "$target_node" "${taint}-" >/dev/null
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		state=$(interruption_api "http://127.0.0.1:${public_port}/api/v1/incidents/${id}" | "$JQ_BIN" -r '.incident.state // empty')
+		[[ $state == RESOLVED ]] && break
+		sleep 2
+	done
+	[[ $state == RESOLVED ]] || die "incident $id is $state after the taint was removed, want RESOLVED"
+	[[ -z $("$KUBECTL_BIN" get node "$target_node" -o jsonpath='{.spec.unschedulable}') ]] ||
+		die "$target_node is cordoned after an interruption without a policy"
+	note "cloud interruption: PASS"
+}
+
 exercise_real_cordon_and_uncordon() {
 	note "exercising REAL cordon and the janitor's uncordon on one worker"
 	local pf_log="$work_dir/cordon-port-forward.log"
@@ -4288,6 +4359,7 @@ wait_root_condition True RuntimeAvailable
 assert_runtime_ready
 exercise_controller_restart_mid_playbook
 exercise_incident_evidence
+exercise_cloud_interruption
 exercise_real_cordon_and_uncordon
 exercise_workload_safe_recovery
 exercise_backup_restore

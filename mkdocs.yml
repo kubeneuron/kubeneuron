@@ -37,6 +37,7 @@ nav:
       - Operations guide: operations.md
       - Replacing GPU nodes on AKS (experimental): cloud-azure.md
       - Replacing GPU nodes on GKE (experimental): cloud-gcp.md
+      - Announced cloud interruptions (experimental): cloud-interruptions.md
       - Alert runbooks: runbooks.md
       - Upgrades and rollback: upgrade.md
       - Troubleshooting: troubleshooting.md

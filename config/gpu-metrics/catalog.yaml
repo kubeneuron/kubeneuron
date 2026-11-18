@@ -1635,6 +1635,21 @@ fields:
       unit: seconds
       factor: 1
     help: Seconds a workload with a checkpoint request in force was given before its outcome settled.
+  - key: kubeneuron:kubeneuron_cloud_interruptions_total
+    series: kubeneuron_cloud_interruptions_total
+    exporter_exposed: false
+    source: kubeneuron-controller
+    kind: counter
+    tier: T4
+    raw:
+      unit: count
+      factor: 1
+    canonical:
+      series: kubeneuron_cloud_interruptions_total
+      kind: counter
+      unit: count
+      factor: 1
+    help: Cloud interruption notices by provider and kind, and the outcome of the checkpoint warning.
   - key: kubeneuron:kubeneuron_dead_lettered_total
     series: kubeneuron_dead_lettered_total
     exporter_exposed: false

@@ -73,8 +73,10 @@ func (c *Controller) authorizeByPolicy(ctx context.Context, inc *types.Incident,
 	// The provider's eligibility for the pinned node has already been
 	// established at the boundary, before this is asked, but only on a cloud
 	// recovery ladder. Anywhere else nothing confirms that the cloud's own
-	// repair will not act on the same node, so a person decides.
-	if !c.cloudRecoveryLadder(ctx, inc.Playbook) {
+	// repair will not act on the same node, so a person decides. The one
+	// other step a policy may authorise is the cordon of a cloud-interruption
+	// incident: the cloud itself announced that it will take the node.
+	if !c.cloudRecoveryLadder(ctx, inc.Playbook) && !interruptionCordon(inc, step) {
 		return policyPark, "automatic policies authorise only cloud recovery ladders, whose eligibility the cloud provider confirms"
 	}
 	replaces := c.cloudRecoveryPath(ctx, inc.Playbook).replace
@@ -309,6 +311,12 @@ const nodeLevelAlphaReason = "node-level actions are alpha (not validated on rea
 
 // nodeLevelAction reports whether the step runs a destructive command on the
 // node through the agent.
+// interruptionCordon reports whether step is the cordon of a
+// cloud-interruption incident.
+func interruptionCordon(inc *types.Incident, step *playbook.Step) bool {
+	return inc.Class == types.ClassCloudInterruption && step.Action == "platform.cordon"
+}
+
 func nodeLevelAction(step *playbook.Step) bool {
 	def, ok := action.ByWire(step.Action)
 	return ok && def.Kind == action.KindAgent && def.AgentDestructive

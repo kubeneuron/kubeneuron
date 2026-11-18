@@ -56,3 +56,23 @@ spec:
       timeout: 20m
   onFailure:
     playbookRef: kubeneuron-cloud-replace
+---
+# Announced cloud interruptions (spot reclaim, scheduled maintenance). Asks
+# the node's opted-in jobs to checkpoint before the deadline the cloud
+# announced, then cordons the node. It never drains or replaces: the cloud
+# takes the instance. The warning needs no approval; the cordon does, unless
+# an Automatic policy authorises it.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: kubeneuron-cloud-interruption
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  target: Node
+  steps:
+    - name: checkpoint-warning
+      action: CheckpointWarning
+    - name: cordon
+      action: Cordon
+      approval: Required

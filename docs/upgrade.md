@@ -318,6 +318,18 @@ which lets opted-in Pods be told and given a bounded deadline before a
   an audit row; it reads the node and the pods on it with the access the
   controller already has.
 
+## Unreleased: announced cloud interruptions
+
+The cloud pack gains the `cloud-interruption` playbook and its policy (see
+[Announced cloud interruptions](cloud-interruptions.md)). An installer rerun
+on an existing installation keeps the policy objects it finds and does not
+create new ones; it reports the two as missing. Until you create them, a
+`cloud-interruption` incident is only observed: no job is asked and no node
+is cordoned. To opt in, create the `GPUPlaybook` and the
+`GPURemediationPolicy` for `cloud-interruption` from
+`config/cloud-policies/`, with your installation's name in
+`metadata.name`, `spec.kubeNeuronRef` and `spec.playbookRef`.
+
 ## Upgrade order
 
 Always: **CRDs → operator → controller/agent images.**

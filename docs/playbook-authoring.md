@@ -50,6 +50,7 @@ not, because no cloud VM tested so far permits one (see below).
 | `IdleCheck` / `WaitIdle` | GPU idleness probes | the action journal persists intent and outcome across agent restarts |
 | `VerifyGPUHealth` / `VerifyNodeHealth` | health probes | agent heartbeat freshness is exercised; DCGM verification is roadmap |
 | `OpenTicket` | notification with quarantine note | intended end of the ladder (RMA) |
+| `CheckpointWarning` | asks opted-in jobs to checkpoint before the deadline the cloud announced | meant for a `cloud-interruption` playbook, beside `Cordon`; needs no approval; see [Announced cloud interruptions](cloud-interruptions.md) |
 
 `DriverReload`/`DriverReinstall`/`RunScript` are reserved for a future
 host-provisioned scripts directory. They must use fixed names (or a strictly
@@ -392,7 +393,7 @@ incidents it matches (`spec.mode`):
 | Mode | What happens |
 |---|---|
 | `DryRun` | Every step is simulated and audited; nothing executes. |
-| `Approval` (default) | Each step that stops work waits for a named person. |
+| `Approval` (default) | Each step that stops work waits for a named person. A `CheckpointWarning` runs without approval. |
 | `Automatic` | The same steps run without a person, within `spec.automatic`. |
 
 The installation-wide `spec.safety.executionMode` still applies on top: under
@@ -410,6 +411,10 @@ policy and in the audit trail. `kubeneuronctl incident show` lists, per executed
 person approved it or a policy authorised it, and `kubectl get gpolicy` shows
 each policy's mode and its effective mode (`DryRun` while the installation is
 not `Enabled`).
+For the `cloud-interruption` class, `spec.interruption.lead` (default `10m`,
+from `1m` to `60m`) is how long before the announced deadline the warning and
+the cordon start; see [Announced cloud interruptions](cloud-interruptions.md).
+
 `spec.automatic` must name the node pools (`nodeSelector`, never empty) and
 carries the limits:
 

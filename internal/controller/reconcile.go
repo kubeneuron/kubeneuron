@@ -567,6 +567,12 @@ func requestMismatch(request *types.Approval, playbookName string, step *playboo
 // contains the target device. Missing evidence never auto-resolves: it
 // holds, and after the evidence deadline it fails closed to NEEDS_HUMAN.
 func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) error {
+	// A cloud interruption is not repaired: the incident stays open, and the
+	// node cordoned, until the cloud takes the node or withdraws the notice.
+	// A further notice is recorded, not a failed remediation.
+	if inc.Class == types.ClassCloudInterruption {
+		return nil
+	}
 	if inc.UpdatedAt.After(inc.StateChangedAt) {
 		return c.escalate(ctx, inc, "verification failed: signal recurred during quiet window")
 	}

@@ -744,7 +744,7 @@
           }
         }
       ],
-      "description": "Pods with no controller that a drain was told to evict anyway. Nothing recreates these \u2014 they are typically a `kubectl run` or the debug shell somebody left open on the node that is failing. Any sustained rate here means a playbook has params.force set on a rung that should not have it."
+      "description": "Pods with no controller that a drain was told to evict anyway. Nothing recreates these — they are typically a `kubectl run` or the debug shell somebody left open on the node that is failing. Any sustained rate here means a playbook has params.force set on a rung that should not have it."
     },
     {
       "type": "timeseries",
@@ -770,7 +770,7 @@
           }
         }
       ],
-      "description": "A cordoned node whose KubeNeuron owner annotation cannot be parsed is dropped from the janitor's listing on purpose \u2014 releasing a cordon we cannot reason about would be worse. But then nothing releases it either: kubectl shows an ordinary cordon, the incident row ages out, and there is no owner left to ask. Any non-zero value here is GPU capacity out of the fleet that no incident explains. Usually a hand-edited annotation."
+      "description": "A cordoned node whose KubeNeuron owner annotation cannot be parsed is dropped from the janitor's listing on purpose — releasing a cordon we cannot reason about would be worse. But then nothing releases it either: kubectl shows an ordinary cordon, the incident row ages out, and there is no owner left to ask. Any non-zero value here is GPU capacity out of the fleet that no incident explains. Usually a hand-edited annotation."
     },
     {
       "type": "timeseries",
@@ -922,6 +922,32 @@
           "expr": "sum(increase(kubeneuron_checkpoint_wait_seconds_count[1h]))",
           "legendFormat": "requests waited on (1h)",
           "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cloud interruptions by provider, kind and outcome (warned / checkpointed-in-time = jobs told before the cloud took the node)",
+      "description": "One count per interruption notice the cloud announced (announced) and per checkpoint warning: warned (opted-in jobs were asked to checkpoint before the announced deadline), no-jobs (no opted-in job on the node), not-asked (checkpoint coordination off, unsupported, or the jobs could not be listed), missed (the deadline left no time, or a warned job did not answer by it), checkpointed-in-time (every warned job reported a checkpoint or finished by the deadline), withdrawn (the cloud no longer announces it). The warning asks; it does not guarantee a checkpoint.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 98
+      },
+      "targets": [
+        {
+          "expr": "sum by (provider, kind, outcome) (rate(kubeneuron_cloud_interruptions_total[1h]))",
+          "legendFormat": "{{provider}} {{kind}} {{outcome}}",
+          "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"

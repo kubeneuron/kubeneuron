@@ -819,6 +819,7 @@ var Fields = []Field{
 	cp("kubeneuron_checkpoint_group_requests_total", SourceController, KindCounter, UnitCount, "Checkpoint requests to group peers by outcome (acknowledged, exited, expired, unreachable, skipped)."),
 	cp("kubeneuron_checkpoint_requests_total", SourceController, KindCounter, UnitCount, "Checkpoint-coordination outcomes ahead of a drain or GPU-workload eviction, by outcome."),
 	cp("kubeneuron_checkpoint_wait_seconds", SourceController, KindHistogram, UnitSeconds, "Seconds a workload with a checkpoint request in force was given before its outcome settled."),
+	cp("kubeneuron_cloud_interruptions_total", SourceController, KindCounter, UnitCount, "Cloud interruption notices by provider and kind, and the outcome of the checkpoint warning."),
 	cp("kubeneuron_dead_lettered_total", SourceController, KindCounter, UnitCount, "Queued actions or agent events that exhausted their attempt budget, by queue."),
 	cp("kubeneuron_decision_stale_evidence_total", SourceController, KindCounter, UnitCount, "Decisions held for stale or missing evidence, by adapter and reason."),
 	cp("kubeneuron_degraded_gpu_seconds_total", SourceController, KindCounter, UnitSeconds, "GPU-seconds charged when an incident reached a terminal state, by class and outcome; the resolved share is capacity returned to service."),

@@ -62,7 +62,8 @@ func TestFromNodeKeys(t *testing.T) {
 	spot := func(v string) Node {
 		return Node{Taints: []Taint{{Key: "aws-node-termination-handler/spot-itn", Value: v}}}
 	}
-	if key(spot("e1")) != key(spot("e1")) || key(spot("e1")) == key(spot("e2")) {
+	first, again := key(spot("e1")), key(spot("e1"))
+	if first != again || first == key(spot("e2")) {
 		t.Fatal("taint value does not key the notice")
 	}
 	gke := func(v string) Node {

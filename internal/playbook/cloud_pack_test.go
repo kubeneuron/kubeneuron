@@ -14,13 +14,13 @@ func TestCloudPackCannotEscalateToHostActions(t *testing.T) {
 	if err := ValidateEscalationGraph(books); err != nil {
 		t.Fatal(err)
 	}
-	if len(books) != 2 {
+	if len(books) != 3 {
 		t.Fatalf("cloud ladders=%d", len(books))
 	}
 	for name, book := range books {
 		for _, step := range book.Steps {
 			switch step.Action {
-			case "platform.cordon":
+			case "platform.cordon", "platform.checkpoint_warning":
 			case "platform.drain", "platform.recycle_node", "platform.replace_node":
 				if !step.NeedsApproval() {
 					t.Fatalf("%s/%s interrupts workloads without an authorization boundary", name, step.Name)

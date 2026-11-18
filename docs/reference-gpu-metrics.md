@@ -94,6 +94,7 @@ Existing `kubeneuron_*` series registered by internal/metrics; the catalog adds 
 | `kubeneuron_checkpoint_group_requests_total` | kubeneuron-controller | counter | count | Checkpoint requests to group peers by outcome (acknowledged, exited, expired, unreachable, skipped). |
 | `kubeneuron_checkpoint_requests_total` | kubeneuron-controller | counter | count | Checkpoint-coordination outcomes ahead of a drain or GPU-workload eviction, by outcome. |
 | `kubeneuron_checkpoint_wait_seconds` | kubeneuron-controller | histogram | seconds | Seconds a workload with a checkpoint request in force was given before its outcome settled. |
+| `kubeneuron_cloud_interruptions_total` | kubeneuron-controller | counter | count | Cloud interruption notices by provider and kind, and the outcome of the checkpoint warning. |
 | `kubeneuron_dead_lettered_total` | kubeneuron-controller | counter | count | Queued actions or agent events that exhausted their attempt budget, by queue. |
 | `kubeneuron_decision_stale_evidence_total` | kubeneuron-controller | counter | count | Decisions held for stale or missing evidence, by adapter and reason. |
 | `kubeneuron_degraded_gpu_seconds_total` | kubeneuron-controller | counter | seconds | GPU-seconds charged when an incident reached a terminal state, by class and outcome; the resolved share is capacity returned to service. |

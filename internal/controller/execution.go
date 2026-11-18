@@ -186,6 +186,15 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 			"accelerator reset evidence still unavailable past the evidence deadline: "+err.Error())
 	}
 	action := gateAction(step)
+	// A checkpoint warning only asks the node's jobs to save their state
+	// before the cloud stops the instance: a mass interruption must reach every
+	// node, so the breaker, the limits and the cooldowns do not apply. Only a
+	// global pause holds it. It takes no remediation slot.
+	warning := step.Action == playbook.CheckpointWarningAction
+	if warning && c.gate.Paused() {
+		c.deferStep(inc, step, metrics.DeferGlobalPause)
+		return nil
+	}
 	// The first admitted step acquires the target's remediation slot, held from
 	// here until the incident halts; later steps of the same remediation pass
 	// only the per-step checks. Acquiring per step and releasing between steps
@@ -197,7 +206,9 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 	// whose StepIndex resets to 0 mid-remediation).
 	alreadyHeld := inc.RemediationSlotHeld
 	var admit error
-	if alreadyHeld {
+	if warning {
+		alreadyHeld = true // nothing to acquire, nothing to release
+	} else if alreadyHeld {
 		admit = c.gate.AllowHeld(inc.Target, action)
 	} else {
 		admit = c.gate.Allow(inc.Target, action)
@@ -231,6 +242,9 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 	// recovery report reads that outcome rather than this start record.
 	if err := c.transition(ctx, inc, types.StateExecuting, actor, step.Name,
 		auditStepStartResult(step.Action), step.Params); err != nil {
+		if warning {
+			return err
+		}
 		c.gate.StepDone(inc.Target, action, 0)
 		if !alreadyHeld {
 			// The transition never committed, so the bit was never persisted;
@@ -252,7 +266,9 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 	engine := c.runtimeConfig(ctx).Engine
 	go func() {
 		defer c.setInFlight(inc.ID, false)
-		defer c.gate.StepDone(inc.Target, action, 0)
+		if !warning {
+			defer c.gate.StepDone(inc.Target, action, 0)
+		}
 		c.runStep(ctx, engine, inc, step)
 	}()
 	return nil
@@ -524,6 +540,14 @@ func (c *Controller) executeStep(ctx context.Context, inc *types.Incident, step 
 		(!def.Compensating || !c.hasRecordedAcceleratorStackQuiesce(ctx, inc)) {
 		now := time.Now()
 		output := fmt.Sprintf("DRY-RUN: would execute %s on %s", step.Action, inc.Target.Node)
+		switch step.Action {
+		case playbook.CheckpointWarningAction:
+			output = "DRY-RUN: would warn the workloads on " + inc.Target.Node + " to checkpoint before the deadline the cloud announced"
+		case "platform.cordon":
+			if inc.Class == types.ClassCloudInterruption {
+				output = "DRY-RUN: would cordon " + inc.Target.Node + " before the interruption the cloud announced"
+			}
+		}
 		if prepares {
 			output += ". " + successorApprovalNote(inc)
 		}
@@ -589,6 +613,9 @@ func effectiveStepTimeout(step *playbook.Step) time.Duration {
 func (c *Controller) executePlatformStep(ctx context.Context, inc *types.Incident, op string, step *playbook.Step) (*types.ActionResult, error) {
 	if c.platform == nil {
 		return nil, fmt.Errorf("platform.%s: no platform configured", op)
+	}
+	if op == "checkpoint_warning" {
+		return c.warnCheckpoint(ctx, inc)
 	}
 	node := inc.Target.Node
 	reason := cordonReason(inc)
