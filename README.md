@@ -491,7 +491,8 @@ resolution, and the pause/resume control path are implemented. The current EKS, 
 - [`config/samples/`](config/samples/) — development custom-resource examples.
 - [Cloud recovery policies](config/cloud-policies/) are the default for a fresh
   installation. The [node-level policies](config/policies/) require an explicit
-  `--policy-pack bare-metal-alpha` selection (Alpha, not validated on real hardware).
+  `--policy-pack bare-metal-alpha` selection and operator permission. See [Bare metal (alpha)](docs/bare-metal.md)
+  for both settings. Alpha, not validated on real hardware.
 - [`configs/policies.yaml`](configs/policies.yaml) and
   [`configs/playbooks/`](configs/playbooks/) — current file-based controller
   input used by local and bare-metal development.
