@@ -17,3 +17,21 @@ func TestGroupAffectedJobsPreservesUnknownWorkers(t *testing.T) {
 		t.Fatal("missing and empty observations must remain distinct")
 	}
 }
+
+func TestTrainingRecoveryReportSnapshot(t *testing.T) {
+	checkpoint, last, resumed := int64(100), int64(120), int64(105)
+	var snapshot TrainingRecoverySnapshot
+	snapshot.RecordCheckpointSteps(&checkpoint, &last, &resumed)
+	if *snapshot.StepsAfterCheckpoint != 20 || *snapshot.ConfirmedRepeatedSteps != 5 {
+		t.Fatal(snapshot)
+	}
+	resumed = 150
+	snapshot.RecordCheckpointSteps(&checkpoint, &last, &resumed)
+	if *snapshot.ConfirmedRepeatedSteps != 20 {
+		t.Fatal(snapshot)
+	}
+	snapshot.RecordCheckpointSteps(&checkpoint, &last, nil)
+	if snapshot.ConfirmedRepeatedSteps != nil || *snapshot.StepsAfterCheckpoint != 20 {
+		t.Fatal(snapshot)
+	}
+}

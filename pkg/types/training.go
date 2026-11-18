@@ -2,6 +2,8 @@
 
 package types
 
+import "time"
+
 // TrainingOwner identifies one controller in the observed worker's namespace.
 type TrainingOwner struct {
 	APIVersion string `json:"apiVersion"`
@@ -24,9 +26,10 @@ type TrainingWorker struct {
 // AffectedJob groups the workers of a verified controller in one namespace.
 // An unresolved worker has its own entry and retains the reported owner chain.
 type AffectedJob struct {
-	Namespace string           `json:"namespace"`
-	Owner     *TrainingOwner   `json:"owner,omitempty"`
-	Workers   []TrainingWorker `json:"workers"`
+	Recovery  TrainingRecoverySnapshot `json:"recovery"`
+	Namespace string                   `json:"namespace"`
+	Owner     *TrainingOwner           `json:"owner,omitempty"`
+	Workers   []TrainingWorker         `json:"workers"`
 }
 
 func GroupAffectedJobs(workers []TrainingWorker) []AffectedJob {
@@ -53,4 +56,31 @@ func GroupAffectedJobs(workers []TrainingWorker) []AffectedJob {
 		jobs = append(jobs, job)
 	}
 	return jobs
+}
+
+// TrainingRecoverySnapshot carries independently established observations.
+// Nil values encode unknown, including for incidents that predate the contract.
+type TrainingRecoverySnapshot struct {
+	InfrastructureReadyAt          *time.Time `json:"infrastructureReadyAt"`
+	ProgressConfirmedAt            *time.Time `json:"progressConfirmedAt"`
+	CheckpointAgeAtDecisionSeconds *int64     `json:"checkpointAgeAtDecisionSeconds"`
+	StepsAfterCheckpoint           *int64     `json:"stepsAfterCheckpoint"`
+	ConfirmedRepeatedSteps         *int64     `json:"confirmedRepeatedSteps"`
+}
+
+// RecordCheckpointSteps takes a verified pre-fault checkpoint and last step
+// on the same scale. resumedStep is supplied only for subsequent progress of
+// the current attempt after it confirms loading that exact checkpoint.
+func (s *TrainingRecoverySnapshot) RecordCheckpointSteps(checkpoint, last, resumedStep *int64) {
+	s.StepsAfterCheckpoint = nil
+	s.ConfirmedRepeatedSteps = nil
+	if checkpoint == nil || last == nil || *checkpoint < 0 || *last < *checkpoint {
+		return
+	}
+	gap := *last - *checkpoint
+	s.StepsAfterCheckpoint = &gap
+	if resumedStep != nil && *resumedStep > *checkpoint {
+		repeated := min(*resumedStep, *last) - *checkpoint
+		s.ConfirmedRepeatedSteps = &repeated
+	}
 }
