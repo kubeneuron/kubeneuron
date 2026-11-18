@@ -569,6 +569,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	adapterEvents := a.watchAdapterDetections(ctx)
 	a.pollAdapterDetections(ctx)
 
+	metrics.SetXIDSourceUnavailable("nvidia-dcgm", "xid-field-unavailable", 1)
 	events, err := a.watcher.Watch(ctx)
 	reportKernelSourceAvailability(err == nil)
 	if err != nil {
@@ -688,6 +689,7 @@ func reportKernelSourceAvailability(available bool) {
 	if available {
 		unavailable = 0
 	}
+	metrics.SetXIDSourceUnavailable("nvidia-kmsg", "kernel-log-unavailable", unavailable)
 	for _, class := range []types.ProblemClass{types.ClassDriverHang, types.ClassPCIe} {
 		metrics.AgentSignalSourceUnavailable.WithLabelValues("amd-kmsg", string(class), "kernel-log-unavailable").Set(unavailable)
 	}

@@ -276,7 +276,13 @@ func (w *Watcher) poll(ctx context.Context) []types.AgentEvent {
 	)
 	source := "none"
 	if w.DCGMPath != "" {
-		if cs, err := w.pollDCGM(ctx); err != nil {
+		cs, readable, err := w.pollDCGM(ctx)
+		unavailable := 1.0
+		if readable {
+			unavailable = 0
+		}
+		metrics.SetXIDSourceUnavailable("nvidia-dcgm", "xid-field-unavailable", unavailable)
+		if err != nil {
 			// WARN once, not Debug every tick.
 			//
 			// This was Debug, and the agent runs at Info, so the deeper of the
@@ -482,7 +488,7 @@ func (w *Watcher) persistState(snapshot map[string]uint64) {
 	}
 }
 
-func (w *Watcher) pollDCGM(ctx context.Context) ([]candidate, error) {
+func (w *Watcher) pollDCGM(ctx context.Context) ([]candidate, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	args := []string{"dmon"}
@@ -494,11 +500,11 @@ func (w *Watcher) pollDCGM(ctx context.Context) ([]candidate, error) {
 	args = append(args, "-e", dcgmXIDFieldID, "-c", "1")
 	out, err := w.run(ctx, w.DCGMPath, args...)
 	if err != nil {
-		return nil, fmt.Errorf("dcgmi dmon: %w (output: %s)", err, firstLine(out))
+		return nil, false, fmt.Errorf("dcgmi dmon: %w (output: %s)", err, firstLine(out))
 	}
-	candidates, unreadable, err := parseDCGMXID(string(out))
+	candidates, unreadable, rows, err := parseDCGMXID(string(out))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if unreadable > 0 {
 		w.mu.Lock()
@@ -511,7 +517,7 @@ func (w *Watcher) pollDCGM(ctx context.Context) ([]candidate, error) {
 				"unreadable_rows", unreadable, "first_line", firstLine(out))
 		}
 	}
-	return candidates, nil
+	return candidates, rows > 0 && unreadable == 0, nil
 }
 
 // dcgmRowRe matches a dmon data row: "GPU <index> <value>". The value column is
@@ -531,9 +537,9 @@ var dcgmRowRe = regexp.MustCompile(`^GPU\s+(\d+)\s+(\S+)`)
 //
 // Silence is still the behaviour for the FAULT path — an unreadable line must
 // never become a fault. It is only the reporting that changes.
-func parseDCGMXID(out string) ([]candidate, int, error) {
+func parseDCGMXID(out string) ([]candidate, int, int, error) {
 	var candidates []candidate
-	unreadable := 0
+	unreadable, rows := 0, 0
 	for _, line := range strings.Split(out, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
@@ -560,6 +566,7 @@ func parseDCGMXID(out string) ([]candidate, int, error) {
 		}
 		value := strings.TrimSpace(m[2])
 		if strings.EqualFold(value, "N/A") {
+			rows++
 			// The engine has recorded no XID for this GPU. A health report,
 			// not an unreadable line.
 			continue
@@ -569,6 +576,7 @@ func parseDCGMXID(out string) ([]candidate, int, error) {
 			unreadable++
 			continue
 		}
+		rows++
 		if xid <= 0 {
 			continue
 		}
@@ -581,7 +589,7 @@ func parseDCGMXID(out string) ([]candidate, int, error) {
 			level: true,
 		})
 	}
-	return candidates, unreadable, nil
+	return candidates, unreadable, rows, nil
 }
 
 func (w *Watcher) pollSMI(ctx context.Context) ([]candidate, error) {

@@ -5,6 +5,8 @@ package metrics
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
 // Agent-side metrics, served from the agent's health listener. The shared
@@ -87,3 +89,14 @@ var (
 		Help: "Detections suppressed by agent-side deduplication, labeled by the source that was dropped.",
 	}, []string{"source"})
 )
+
+// SetXIDSourceUnavailable tracks each numeric-XID input separately so a
+// working kernel reader does not mask an unavailable DCGM field or vice versa.
+func SetXIDSourceUnavailable(source, reason string, unavailable float64) {
+	for _, class := range []types.ProblemClass{
+		types.ClassXIDApp, types.ClassECCDBE, types.ClassECCSBERate, types.ClassECCContained,
+		types.ClassFellOffBus, types.ClassGSPError, types.ClassNVLink, types.ClassRowRemapFailure, types.ClassRowRemapOK,
+	} {
+		AgentSignalSourceUnavailable.WithLabelValues(source, string(class), reason).Set(unavailable)
+	}
+}

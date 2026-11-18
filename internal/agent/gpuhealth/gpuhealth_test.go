@@ -40,7 +40,7 @@ func isDCGM(args []string) bool {
 }
 
 func TestParseDCGMXIDSkipsHealthyAndNA(t *testing.T) {
-	got, unreadable, err := parseDCGMXID(readFixture(t, "dcgmi-dmon-xid.txt"))
+	got, unreadable, _, err := parseDCGMXID(readFixture(t, "dcgmi-dmon-xid.txt"))
 	if err != nil {
 		t.Fatalf("parseDCGMXID: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestParseDCGMXIDSkipsHealthyAndNA(t *testing.T) {
 func TestParseDCGMXIDCountsAnUnreadableLayout(t *testing.T) {
 	// A plausible future layout: a device column that is no longer "GPU <n>".
 	future := "# Entity  XID\nDEV 0    N/A\nDEV 1    79\n"
-	got, unreadable, err := parseDCGMXID(future)
+	got, unreadable, _, err := parseDCGMXID(future)
 	if err != nil {
 		t.Fatalf("parseDCGMXID: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestParseDCGMXIDCountsAnUnreadableLayout(t *testing.T) {
 
 	// A row whose value column is not a number is unreadable too; "N/A" is not
 	// (it is the engine saying this GPU has recorded no XID).
-	_, unreadable, err = parseDCGMXID("GPU 0 N/A\nGPU 1 ERR!\n")
+	_, unreadable, _, err = parseDCGMXID("GPU 0 N/A\nGPU 1 ERR!\n")
 	if err != nil {
 		t.Fatalf("parseDCGMXID: %v", err)
 	}
@@ -461,5 +461,22 @@ func TestHealthSourceIsPublished(t *testing.T) {
 	w.poll(context.Background())
 	if got := active(); got != "none" {
 		t.Fatalf("active source = %q, want none", got)
+	}
+}
+
+func TestXIDSourceAvailabilityTracksFieldRead(t *testing.T) {
+	w := &Watcher{DCGMPath: "dcgmi"}
+	for _, tc := range []struct {
+		output      string
+		unavailable float64
+	}{
+		{"#Entity XIDERRORS", 1}, {"GPU 0 0", 0}, {"GPU 0 ERR!", 1}, {"GPU 0 79", 0},
+	} {
+		w.run = func(context.Context, string, ...string) ([]byte, error) { return []byte(tc.output), nil }
+		w.poll(context.Background())
+		got := testutil.ToFloat64(metrics.AgentSignalSourceUnavailable.WithLabelValues("nvidia-dcgm", "fell-off-bus", "xid-field-unavailable"))
+		if got != tc.unavailable {
+			t.Errorf("%q unavailable = %v, want %v", tc.output, got, tc.unavailable)
+		}
 	}
 }
