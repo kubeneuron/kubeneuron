@@ -64,6 +64,8 @@ ENTRYPOINT ["/kubeneuron-controller"]
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS nsenter
 ARG TOYBOX_VERSION=0.8.13
 ARG TOYBOX_SHA256=9d4c124d7d731a2db399f6278baa2b42c2e3511f610c6ad30cc3f1a52581334b
+# The GitHub tag and release tarballs for 0.8.13 have identical contents
+# (601 entries checked, including modes and link targets) but different digests.
 ARG TOYBOX_GITHUB_SHA256=fa84ca399c2a88c3d841db943052911355b817f8151cd6bfb9e0b12541e4828c
 ARG MUSL_VERSION=1.2.5
 ARG MUSL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
