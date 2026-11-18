@@ -219,11 +219,15 @@ func restrictedContainerSecurity() *corev1.SecurityContext {
 
 func restrictedPodSecurity() *corev1.PodSecurityContext {
 	return &corev1.PodSecurityContext{
-		RunAsNonRoot:   ptr.To(true),
-		RunAsUser:      ptr.To(int64(65532)),
-		RunAsGroup:     ptr.To(int64(65532)),
-		FSGroup:        ptr.To(int64(65532)),
-		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+		RunAsNonRoot: ptr.To(true),
+		RunAsUser:    ptr.To(int64(65532)),
+		RunAsGroup:   ptr.To(int64(65532)),
+		FSGroup:      ptr.To(int64(65532)),
+		// Relabel a volume only when its root is not ours yet: the store's
+		// claim holds 30 days of files, and a full chown on every start
+		// would delay it.
+		FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
+		SeccompProfile:      &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
 }
 

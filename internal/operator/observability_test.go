@@ -232,6 +232,13 @@ func TestStoreDeploymentStorage(t *testing.T) {
 	if args := strings.Join(deployment.Spec.Template.Spec.Containers[0].Args, " "); !strings.Contains(args, "-retentionPeriod=30d") {
 		t.Errorf("args = %s", args)
 	}
+	// The store writes its claim as 65532; CSI volumes (EBS and friends)
+	// mount root-owned, and kind's local-path storage hides it.
+	sc := deployment.Spec.Template.Spec.SecurityContext
+	if sc == nil || sc.RunAsUser == nil || *sc.RunAsUser != 65532 || sc.FSGroup == nil || *sc.FSGroup != 65532 ||
+		sc.FSGroupChangePolicy == nil || *sc.FSGroupChangePolicy != corev1.FSGroupChangeOnRootMismatch {
+		t.Errorf("store pod SecurityContext = %+v, want 65532 with fsGroup 65532, changed on root mismatch only", sc)
+	}
 	kn.Spec.Observability.Store.Managed = &kubeneuronv1alpha1.ManagedStoreSpec{Storage: kubeneuronv1alpha1.StoreStorageSpec{Ephemeral: true}}
 	deployment = storeDeployment(kn, DefaultMetricsStoreImage)
 	if v := deployment.Spec.Template.Spec.Volumes[0]; v.EmptyDir == nil {

@@ -8,6 +8,8 @@ KIND      ?= kind
 KUBECTL   ?= kubectl
 KIND_CLUSTER_NAME ?= kubeneuron-integration
 KIND_KUBECONFIG   ?= /tmp/$(KIND_CLUSTER_NAME).kubeconfig
+# test-integration-kind suites: all, main, or installer (hack/kind-integration.sh)
+INTEGRATION_SUITE ?= all
 
 BINARIES := kubeneuron-operator kubeneuron-controller kubeneuron-agent kubeneuronctl
 
@@ -288,6 +290,7 @@ test-integration-kind: build
 	CLUSTER_NAME="$(KIND_CLUSTER_NAME)" \
 	KUBECONFIG_PATH="$(KIND_KUBECONFIG)" \
 	KIND_BIN="$(KIND)" KUBECTL_BIN="$(KUBECTL)" \
+	INTEGRATION_SUITE="$(INTEGRATION_SUITE)" \
 	./hack/kind-integration.sh
 
 # The v0.7.0 -> HEAD -> v0.7.0 (restore the pre-upgrade snapshot, then the

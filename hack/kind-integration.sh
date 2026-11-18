@@ -99,6 +99,13 @@ REUSE_CLUSTER=${REUSE_CLUSTER:-0}
 KEEP_CLUSTER=${KEEP_CLUSTER:-0}
 KEEP_RESOURCES=${KEEP_RESOURCES:-0}
 BUILD_IMAGES=${BUILD_IMAGES:-1}
+# main: everything but the installer suite; installer: only that suite (after
+# the shared cluster, CRD and operator setup); all: both, one after the other.
+INTEGRATION_SUITE=${INTEGRATION_SUITE:-all}
+case $INTEGRATION_SUITE in
+main | installer | all) ;;
+*) echo "integration: INTEGRATION_SUITE must be main, installer or all" >&2; exit 2 ;;
+esac
 WORKER_NODES=${WORKER_NODES:-2}
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-240}
 RUN_ID=${RUN_ID:-$(date -u +%Y%m%d%H%M%S)-$$}
@@ -3996,11 +4003,23 @@ actual_operator_image=$("$KUBECTL_BIN" -n "$OPERATOR_NAMESPACE" get \
 	die "operator Deployment uses $actual_operator_image, want $OPERATOR_IMAGE"
 assert_operator_rbac
 
-# Run the installer lifecycle before the smoke agents: agents share a node-local
-# state directory and two installations must not compete for it.
-INSTALL_TEST_NAME="${ROOT_NAME}-retention" KUBECTL_BIN="$KUBECTL_BIN" \
-    CONTROLLER_IMAGE="$CONTROLLER_IMAGE" AGENT_IMAGE="$AGENT_IMAGE" \
-    bash "$REPO_ROOT/hack/test-install-retention.sh"
+# The installer suite: its lifecycle and the Managed metrics path it writes,
+# on the same cluster setup, then stop. CI runs it as its own job beside the
+# rest, which the two would push past the job's time limit.
+if [[ $INTEGRATION_SUITE != main ]]; then
+	INSTALL_TEST_NAME="${ROOT_NAME}-retention" KUBECTL_BIN="$KUBECTL_BIN" \
+		CONTROLLER_IMAGE="$CONTROLLER_IMAGE" AGENT_IMAGE="$AGENT_IMAGE" \
+		bash "$REPO_ROOT/hack/test-install-retention.sh"
+	# One installation at a time: agents share a node-local state directory.
+	MANAGED_TEST_NAME="${ROOT_NAME}-managed" KUBECTL_BIN="$KUBECTL_BIN" \
+		KIND_BIN="$KIND_BIN" DOCKER_BIN="$DOCKER_BIN" JQ_BIN="$JQ_BIN" CLUSTER_NAME="$CLUSTER_NAME" \
+		CONTROLLER_IMAGE="$CONTROLLER_IMAGE" AGENT_IMAGE="$AGENT_IMAGE" \
+		bash "$REPO_ROOT/hack/test-managed-observability.sh"
+	if [[ $INTEGRATION_SUITE == installer ]]; then
+		note "PASS (installer suite): installer retention and re-run, and the Managed metrics path on synthetic DCGM input"
+		exit 0
+	fi
+fi
 
 smoke_manifest="$work_dir/operator-smoke.yaml"
 sed -e "s|@CONTROLLER_IMAGE@|$CONTROLLER_IMAGE|g" \

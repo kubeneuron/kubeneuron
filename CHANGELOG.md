@@ -45,6 +45,18 @@ API is `v1alpha1`.
   store it turns `True` when the controller accepts the first alert, which
   it records as `firstAlertAcceptedAt` in the inventory summary.
 
+- **A kind smoke of the Managed metrics path.** The new
+  `kind-integration-installer` CI job installs with the installer's
+  defaults on synthetic DCGM input (CPU-only, no GPU) and checks that every
+  Observability condition is `True`, the store runs with fsGroup 65532 on
+  its claim, every dashboard series the components export reaches the
+  store, no stored GPU series keeps a workload label, and vmalert's
+  thermal-throttle alert reaches the controller while no liveness alert
+  fires. Series that appear only on an event (incidents, steps, approvals)
+  are listed, not required. The Managed pods now relabel a volume only
+  when its root's group differs, so a large store starts without a full
+  ownership pass.
+
 - **Managed Grafana.** `spec.observability.grafana.mode: Managed` runs the
   official Grafana image (AGPL-3.0, unmodified, pinned by digest) with the
   store as a read-only datasource and the six dashboards provisioned,
