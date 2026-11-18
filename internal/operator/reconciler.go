@@ -156,19 +156,26 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, req.NamespacedName, &installation); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	denied := installation.Spec.Safety.NodeLevelActions && !r.AllowNodeLevelActions
+	denied := !installation.Spec.Safety.NodeLevelActions || !r.AllowNodeLevelActions
 	if denied {
-		const message = "The installation requests node-level actions, but the operator requires --allow-node-level-actions."
+		reason := "InstallationOptInRequired"
+		message := "Node-level actions require spec.safety.nodeLevelActions on this installation."
+		if installation.Spec.Safety.NodeLevelActions {
+			reason = "OperatorPermissionRequired"
+			message = "The installation requests node-level actions, but the operator requires --allow-node-level-actions."
+		}
 		before := installation.DeepCopy()
 		changed := meta.SetStatusCondition(&installation.Status.Conditions, metav1.Condition{
-			Type: "NodeLevelActionsAllowed", Status: metav1.ConditionFalse, Reason: "OperatorPermissionRequired",
+			Type: "NodeLevelActionsAllowed", Status: metav1.ConditionFalse, Reason: reason,
 			Message: message, ObservedGeneration: installation.Generation,
 		})
 		if changed {
 			if err := r.Status().Patch(ctx, &installation, client.MergeFrom(before)); err != nil {
 				return ctrl.Result{}, err
 			}
-			r.event(&installation, corev1.EventTypeWarning, "OperatorPermissionRequired", message)
+			if installation.Spec.Safety.NodeLevelActions {
+				r.event(&installation, corev1.EventTypeWarning, reason, message)
+			}
 		}
 		installation.Spec.Safety.NodeLevelActions = false
 	} else if meta.FindStatusCondition(installation.Status.Conditions, "NodeLevelActionsAllowed") != nil {

@@ -468,3 +468,9 @@ value `operator.allowNodeLevelActions=true` and set `spec.safety.nodeLevelAction
 in each installation that requires them. With operator permission disabled, a
 request in the CR produces an `OperatorPermissionRequired` warning and affected
 playbooks run only their observation fallback.
+
+For CR-managed installations, existing node-level playbooks fall back to
+observation until both permissions are enabled. A missing installation opt-in
+appears as `InstallationOptInRequired`. In file-based mode, the controller
+rejects a node-level playbook at startup when `safety.node_level_actions` is
+disabled. Enable the setting or remove those playbooks before restarting.

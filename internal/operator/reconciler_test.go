@@ -1187,8 +1187,20 @@ func TestReconcileOperatorPermissionForReboot(t *testing.T) {
 		WithObjects(root, book, &policies[0], ns).Build()
 	r := &KubeNeuronReconciler{Client: c, Scheme: scheme}
 	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(root)}
-	for _, allowed := range []bool{false, true, false} {
-		r.AllowNodeLevelActions = allowed
+	for _, tc := range []struct {
+		operator, installation bool
+		reason                 string
+	}{{false, true, "OperatorPermissionRequired"}, {true, true, ""}, {true, false, "InstallationOptInRequired"}, {false, false, "InstallationOptInRequired"}} {
+		var requested kubeneuronv1alpha1.KubeNeuron
+		if err := c.Get(ctx, req.NamespacedName, &requested); err != nil {
+			t.Fatal(err)
+		}
+		requested.Spec.Safety.NodeLevelActions = tc.installation
+		if err := c.Update(ctx, &requested); err != nil {
+			t.Fatal(err)
+		}
+		allowed := tc.operator && tc.installation
+		r.AllowNodeLevelActions = tc.operator
 		if _, err := r.Reconcile(ctx, req); err != nil {
 			t.Fatal(err)
 		}
@@ -1197,7 +1209,7 @@ func TestReconcileOperatorPermissionForReboot(t *testing.T) {
 			t.Fatal(err)
 		}
 		denial := meta.FindStatusCondition(current.Status.Conditions, "NodeLevelActionsAllowed")
-		if !current.Spec.Safety.NodeLevelActions || (denial != nil) == allowed || (denial != nil && denial.Reason != "OperatorPermissionRequired") {
+		if current.Spec.Safety.NodeLevelActions != tc.installation || (denial != nil) == allowed || (denial != nil && denial.Reason != tc.reason) {
 			t.Fatalf("operator permission %v: unexpected installation status %#v", allowed, denial)
 		}
 		var agents appsv1.DaemonSet
