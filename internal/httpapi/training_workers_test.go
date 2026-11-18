@@ -34,7 +34,7 @@ func TestIncidentDetailDistinguishesUnavailableAndEmptyJobMap(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatal(err)
 		}
-		if rec.Code != 200 || string(body["affectedJobs"]) != tc.want || len(body["observe_only"]) == 0 {
+		if rec.Code != 200 || string(body["affected_jobs"]) != tc.want || len(body["observe_only"]) == 0 {
 			t.Fatalf("unexpected detail %s", rec.Body)
 		}
 	}

@@ -6,7 +6,7 @@ import "time"
 
 // TrainingOwner identifies one controller in the observed worker's namespace.
 type TrainingOwner struct {
-	APIVersion string `json:"apiVersion"`
+	APIVersion string `json:"api_version"`
 	Kind       string `json:"kind"`
 	Name       string `json:"name"`
 	UID        string `json:"uid"`
@@ -15,15 +15,15 @@ type TrainingOwner struct {
 // TrainingWorker records the pod even when its owning job cannot be verified.
 type TrainingWorker struct {
 	Source             string          `json:"source,omitempty"`
-	ObservedAt         *time.Time      `json:"observedAt,omitempty"`
-	WorkerRecreation   string          `json:"workerRecreation"`
-	CompletionIndex    *int64          `json:"completionIndex,omitempty"`
-	ControllerState    string          `json:"controllerState"`
+	ObservedAt         *time.Time      `json:"observed_at,omitempty"`
+	WorkerRecreation   string          `json:"worker_recreation"`
+	CompletionIndex    *int64          `json:"completion_index,omitempty"`
+	ControllerState    string          `json:"controller_state"`
 	Namespace          string          `json:"namespace"`
 	Pod                string          `json:"pod"`
-	PodUID             string          `json:"podUID"`
+	PodUID             string          `json:"pod_uid"`
 	Owners             []TrainingOwner `json:"owners"`
-	OwnerUnknownReason string          `json:"ownerUnknownReason,omitempty"`
+	OwnerUnknownReason string          `json:"owner_unknown_reason,omitempty"`
 }
 
 // AffectedJob groups the workers of a verified controller in one namespace.
@@ -64,11 +64,11 @@ func GroupAffectedJobs(workers []TrainingWorker) []AffectedJob {
 // TrainingRecoverySnapshot carries independently established observations.
 // Nil values encode unknown, including for incidents that predate the contract.
 type TrainingRecoverySnapshot struct {
-	InfrastructureReadyAt          *time.Time `json:"infrastructureReadyAt"`
-	ProgressConfirmedAt            *time.Time `json:"progressConfirmedAt"`
-	CheckpointAgeAtDecisionSeconds *int64     `json:"checkpointAgeAtDecisionSeconds"`
-	StepsAfterCheckpoint           *int64     `json:"stepsAfterCheckpoint"`
-	ConfirmedRepeatedSteps         *int64     `json:"confirmedRepeatedSteps"`
+	InfrastructureReadyAt          *time.Time `json:"infrastructure_ready_at"`
+	ProgressConfirmedAt            *time.Time `json:"progress_confirmed_at"`
+	CheckpointAgeAtDecisionSeconds *int64     `json:"checkpoint_age_at_decision_seconds"`
+	StepsAfterCheckpoint           *int64     `json:"steps_after_checkpoint"`
+	ConfirmedRepeatedSteps         *int64     `json:"confirmed_repeated_steps"`
 }
 
 // RecordCheckpointSteps takes a verified pre-fault checkpoint and last step

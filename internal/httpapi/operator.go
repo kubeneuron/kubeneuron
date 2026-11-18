@@ -542,7 +542,8 @@ func (s *Server) handleListIncidents(w http.ResponseWriter, r *http.Request) {
 // was not bound to a preview): the two digests agree only when the human
 // decided on the preview that is still current.
 type IncidentDetail struct {
-	AffectedJobs             []types.AffectedJob         `json:"affectedJobs"`
+	AffectedJobsUnavailable  string                      `json:"affected_jobs_unavailable,omitempty"`
+	AffectedJobs             []types.AffectedJob         `json:"affected_jobs"`
 	RecoveryAvailability     *types.RecoveryAvailability `json:"recovery_availability,omitempty"`
 	Incident                 *types.Incident             `json:"incident"`
 	Audit                    []*types.AuditEntry         `json:"audit"`
@@ -569,8 +570,8 @@ func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
 	}); ok {
 		workers, err := reader.IncidentTrainingWorkers(r.Context(), inc.ID)
 		if err != nil {
-			http.Error(w, "training worker snapshot unavailable", http.StatusServiceUnavailable)
-			return
+			detail.AffectedJobsUnavailable = "SnapshotReadFailed"
+			workers = nil
 		}
 		detail.AffectedJobs = types.GroupAffectedJobs(workers)
 		readyAt := types.VerifiedInfrastructureTime(audit)

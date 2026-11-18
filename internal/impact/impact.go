@@ -77,11 +77,12 @@ type Policy struct {
 // Input is the snapshot Compute renders. The controller fills it under the
 // round's budget; Compute itself does no I/O.
 type Input struct {
-	TrainingWorkers []types.TrainingWorker
-	IncidentID      string
-	Round           int
-	ComputedAt      time.Time
-	Node            string
+	AffectedJobsUnavailable string
+	TrainingWorkers         []types.TrainingWorker
+	IncidentID              string
+	Round                   int
+	ComputedAt              time.Time
+	Node                    string
 	// Topology is the node's classification, or nil when none could be built
 	// (TopologyUnavailable is then a warning, not an unavailable preview:
 	// the workloads are still worth showing).
@@ -133,12 +134,13 @@ type GroupPolicy struct {
 
 // Preview is the impact-preview/v1 document.
 type Preview struct {
-	AffectedJobs []types.AffectedJob `json:"affectedJobs"`
-	Version      string              `json:"version"`
-	Incident     string              `json:"incident"`
-	Round        int                 `json:"round"`
-	ComputedAt   time.Time           `json:"computed_at"`
-	Digest       string              `json:"digest"`
+	AffectedJobsUnavailable string              `json:"affected_jobs_unavailable,omitempty"`
+	AffectedJobs            []types.AffectedJob `json:"affected_jobs"`
+	Version                 string              `json:"version"`
+	Incident                string              `json:"incident"`
+	Round                   int                 `json:"round"`
+	ComputedAt              time.Time           `json:"computed_at"`
+	Digest                  string              `json:"digest"`
 
 	Node                  NodeView         `json:"node"`
 	PendingStep           string           `json:"pending_step"`
@@ -241,8 +243,9 @@ func Compute(in Input) Preview {
 		maxItems = DefaultMaxItems
 	}
 	p := Preview{
-		AffectedJobs: types.GroupAffectedJobs(in.TrainingWorkers),
-		Version:      Version, Incident: in.IncidentID, Round: in.Round, ComputedAt: in.ComputedAt.UTC(),
+		AffectedJobsUnavailable: in.AffectedJobsUnavailable,
+		AffectedJobs:            types.GroupAffectedJobs(in.TrainingWorkers),
+		Version:                 Version, Incident: in.IncidentID, Round: in.Round, ComputedAt: in.ComputedAt.UTC(),
 		Node:                  NodeView{Name: in.Node, Topology: in.Topology},
 		PendingStep:           in.PendingStep,
 		DownstreamDisruptions: append([]string{}, in.Downstream...),

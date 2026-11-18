@@ -56,7 +56,10 @@ func (p *Platform) trainingOwner(ctx context.Context, pod *corev1.Pod) ([]metav1
 		}
 		previousKind = parent.Kind
 		parent = metav1.GetControllerOf(obj)
-		if parent == nil && previousKind != "RayCluster" {
+		if parent == nil && previousKind == "RayCluster" {
+			return refs, nil, "raycluster-without-rayjob"
+		}
+		if parent == nil {
 			return refs, obj, ""
 		}
 	}
