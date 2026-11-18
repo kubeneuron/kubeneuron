@@ -68,6 +68,13 @@ func TestObserveSuccessor(t *testing.T) {
 	}
 
 	g.DesiredCapacity = sdk.Int32(1)
+	original := g
+	original.Instances = g.Instances[:1]
+	p.scaling = observedASG{membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{original}}}, pages}
+	terminator.calls = 0
+	if err := p.releaseCreatedSuccessor(t.Context(), got); err != nil || terminator.calls != 0 {
+		t.Fatalf("already released: err=%v calls=%d", err, terminator.calls)
+	}
 	g.Instances = g.Instances[1:]
 	p.scaling = observedASG{membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{g}}}, pages}
 	terminator.calls = 0

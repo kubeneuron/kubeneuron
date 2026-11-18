@@ -61,6 +61,15 @@ func (p *managedProvider) ReplaceWithSuccessor(ctx context.Context, s cloud.Succ
 
 // releaseCreatedSuccessor removes the extra instance when the handoff is abandoned.
 func (p *managedProvider) releaseCreatedSuccessor(ctx context.Context, s cloud.Successor) error {
+	if s.Phase == cloud.SuccessorCreated {
+		group, err := p.successorGroup(ctx, s)
+		if err != nil {
+			return err
+		}
+		if settledMembership(s, group, strings.Split(s.State["members"], ",")) {
+			return nil
+		}
+	}
 	if err := p.confirmCreatedSuccessor(ctx, s); err != nil {
 		return err
 	}
@@ -91,19 +100,27 @@ func (p *managedProvider) confirmCreatedSuccessor(ctx context.Context, s cloud.S
 // replacementSettled recognizes the exact post-decrement membership after restart.
 func replacementSettled(s cloud.Successor, g at.AutoScalingGroup) bool {
 	zone := s.State["zone"]
-	if zone == "" || !slices.Equal(g.AvailabilityZones, []string{zone}) || sdk.ToString(g.AutoScalingGroupName) != s.Pool || s.State["asg_arn"] == "" || sdk.ToString(g.AutoScalingGroupARN) != s.State["asg_arn"] || g.DesiredCapacity == nil || strconv.Itoa(int(*g.DesiredCapacity)) != s.State["before"] {
-		return false
-	}
 	newID, ok := strings.CutPrefix(s.ProviderID, "aws:///"+zone+"/")
 	if !ok || newID == "" || newID == s.Instance {
 		return false
 	}
 	expected := strings.Split(s.State["members"], ",")
 	old := slices.Index(expected, s.Instance)
-	if old < 0 || slices.Contains(expected, newID) || len(expected) != int(*g.DesiredCapacity) {
+	if old < 0 || slices.Contains(expected, newID) {
 		return false
 	}
 	expected[old] = newID
+	return settledMembership(s, g, expected)
+}
+
+func settledMembership(s cloud.Successor, g at.AutoScalingGroup, expected []string) bool {
+	zone := s.State["zone"]
+	if zone == "" || !slices.Equal(g.AvailabilityZones, []string{zone}) || sdk.ToString(g.AutoScalingGroupName) != s.Pool || s.State["asg_arn"] == "" || sdk.ToString(g.AutoScalingGroupARN) != s.State["asg_arn"] || g.DesiredCapacity == nil || strconv.Itoa(int(*g.DesiredCapacity)) != s.State["before"] {
+		return false
+	}
+	if len(expected) != int(*g.DesiredCapacity) || !slices.Contains(strings.Split(s.State["members"], ","), s.Instance) || s.Instance == "" {
+		return false
+	}
 	actual := make([]string, 0, len(g.Instances))
 	for _, member := range g.Instances {
 		if member.LifecycleState != at.LifecycleStateInService || sdk.ToString(member.AvailabilityZone) != zone {
