@@ -35,11 +35,20 @@ func (p *inventoryPlatform) NodeInventory(context.Context) ([]types.Node, error)
 	return append([]types.Node(nil), p.nodes...), p.err
 }
 
-// inventoryWrites counts the Kubernetes inventory writes.
+// inventoryWrites counts the Kubernetes inventory writes and the node
+// listings.
 type inventoryWrites struct {
 	store.Store
 	mu     sync.Mutex
 	writes int
+	lists  int
+}
+
+func (s *inventoryWrites) ListNodes(ctx context.Context) ([]*types.Node, error) {
+	s.mu.Lock()
+	s.lists++
+	s.mu.Unlock()
+	return s.Store.ListNodes(ctx)
 }
 
 func (s *inventoryWrites) UpsertKubernetesInventory(ctx context.Context, n *types.Node) error {
@@ -155,6 +164,49 @@ func TestInventoryRemovesAVanishedNode(t *testing.T) {
 		if _, err := st.GetNode(ctx, name); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
+	}
+}
+
+// The store is listed for vanished nodes only when the set of Node names
+// changed, and once again after a new term as leader.
+func TestInventorySweepsOnlyWhenNodesComeOrGo(t *testing.T) {
+	c, st, plat := inventoryFixture(t)
+	ctx := context.Background()
+	plat.nodes = []types.Node{{Name: "tpu-1", Devices: tpuDevices}, {Name: "tpu-2", Devices: tpuDevices}}
+	c.syncAcceleratorInventory(ctx)
+	c.syncAcceleratorInventory(ctx)
+	if st.lists != 1 {
+		t.Fatalf("listed %d times for an unchanged set of nodes, want 1", st.lists)
+	}
+	plat.nodes = []types.Node{{Name: "tpu-2", Devices: tpuDevices}}
+	c.syncAcceleratorInventory(ctx)
+	if st.lists != 2 {
+		t.Fatalf("listed %d times after a node went, want 2", st.lists)
+	}
+	c.inventory.reset()
+	c.syncAcceleratorInventory(ctx)
+	if st.lists != 3 {
+		t.Fatalf("listed %d times after a new term, want 3", st.lists)
+	}
+}
+
+// A new UID under the same name is another machine: the devices the old one
+// lost are not carried over.
+func TestInventoryNewMachineDoesNotInheritDevices(t *testing.T) {
+	c, st, plat := inventoryFixture(t)
+	ctx := context.Background()
+	plat.nodes = []types.Node{{Name: "tpu-1", UID: "old", Devices: tpuDevices}}
+	c.syncAcceleratorInventory(ctx)
+	gpus := []types.DeviceCount{{Resource: "nvidia.com/gpu", Capacity: 8, Allocatable: 8, Unit: types.DeviceUnitGPU}}
+	plat.nodes = []types.Node{{Name: "tpu-1", UID: "new", Devices: gpus}}
+	c.syncAcceleratorInventory(ctx)
+
+	got, err := st.GetNode(ctx, "tpu-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Devices, gpus) {
+		t.Fatalf("devices %+v, want only the new machine's %+v", got.Devices, gpus)
 	}
 }
 

@@ -372,6 +372,9 @@ func (c *Controller) Run(ctx context.Context) error {
 	// Drain once before waiting for new input so a restart resumes events that
 	// were archived before the previous controller process died.
 	c.drainEventOutbox(ctx)
+	// The store may have changed under another leader: record and sweep the
+	// node inventory afresh.
+	c.inventory.reset()
 	// Janitors run on their own goroutine, NOT the walk thread. They are
 	// idempotent reconcilers that talk only to the store and the platform, and
 	// they can legitimately block on slow externals (an unresponsive agent's

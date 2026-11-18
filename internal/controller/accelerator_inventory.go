@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
+	"strings"
 	"sync"
 
 	"github.com/kubeneuron/kubeneuron/internal/platform"
@@ -14,10 +16,13 @@ import (
 )
 
 // inventorySync remembers the Node objects last recorded, so an unchanged
-// node is not written on every pass.
+// node is not written on every pass, and the names the last complete sweep
+// for vanished nodes saw, so the store is only listed when a Node came or
+// went.
 type inventorySync struct {
 	mu      sync.Mutex
 	written map[string]string
+	swept   *string
 }
 
 // syncAcceleratorInventory records the nodes that advertise accelerator
@@ -65,7 +70,9 @@ func (c *Controller) syncAcceleratorInventory(ctx context.Context) {
 			continue
 		}
 		record := *n
-		if existing != nil && existing.InventorySource == types.InventoryKubernetes {
+		if existing != nil && existing.InventorySource == types.InventoryKubernetes && existing.UID == n.UID {
+			// A new UID is a new machine under the same name: the devices of
+			// the old one are not its devices.
 			record.Devices = keepLostDevices(n.Devices, existing.Devices)
 		}
 		if len(record.Devices) == 0 {
@@ -82,7 +89,13 @@ func (c *Controller) syncAcceleratorInventory(ctx context.Context) {
 		seen[n.Name] = digest
 	}
 	c.inventory.keep(seen)
-	c.removeVanishedInventory(ctx, present)
+	names := inventoryNames(present)
+	if c.inventory.sweptFor(names) {
+		return
+	}
+	if c.removeVanishedInventory(ctx, present) {
+		c.inventory.markSwept(names)
+	}
 }
 
 // keepLostDevices is the node's devices now, plus every device resource it
@@ -109,25 +122,38 @@ func keepLostDevices(now, before []types.DeviceCount) []types.DeviceCount {
 
 // removeVanishedInventory deletes the rows read from Kubernetes whose Node
 // object was not in the read: the node is gone, and its row must not stay in
-// a pool or a report. Rows an agent registered are not touched.
-func (c *Controller) removeVanishedInventory(ctx context.Context, present map[string]bool) {
+// a pool or a report. Rows an agent registered are not touched. It reports
+// whether every vanished row was removed.
+func (c *Controller) removeVanishedInventory(ctx context.Context, present map[string]bool) bool {
 	rows, err := c.store.ListNodes(ctx)
 	if err != nil {
 		if c.logOnce.first("inventory-list/" + err.Error()) {
 			c.log.Warn("could not list the node inventory", "err", err)
 		}
-		return
+		return false
 	}
+	complete := true
 	for _, row := range rows {
 		if row.InventorySource != types.InventoryKubernetes || !row.AgentLastSeen.IsZero() || present[row.Name] {
 			continue
 		}
 		if err := c.store.DeleteKubernetesInventory(ctx, row.Name); err != nil {
+			complete = false
 			if c.logOnce.first("inventory-delete/" + row.Name + "/" + err.Error()) {
 				c.log.Warn("could not remove a vanished node's inventory", "node", row.Name, "err", err)
 			}
 		}
 	}
+	return complete
+}
+
+func inventoryNames(present map[string]bool) string {
+	names := make([]string, 0, len(present))
+	for name := range present {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return strings.Join(names, "\x00")
 }
 
 func inventoryDigest(n *types.Node) string {
@@ -150,4 +176,26 @@ func (s *inventorySync) keep(written map[string]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.written = written
+}
+
+// sweptFor reports whether the last complete sweep saw these same names.
+func (s *inventorySync) sweptFor(names string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.swept != nil && *s.swept == names
+}
+
+func (s *inventorySync) markSwept(names string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.swept = &names
+}
+
+// reset forgets everything, so a new term as leader writes and sweeps once
+// from what the cluster and the store hold now.
+func (s *inventorySync) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.written = nil
+	s.swept = nil
 }
