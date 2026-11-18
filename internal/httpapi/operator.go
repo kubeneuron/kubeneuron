@@ -573,6 +573,10 @@ func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		detail.AffectedJobs = types.GroupAffectedJobs(workers)
+		readyAt := types.VerifiedInfrastructureTime(audit)
+		for i := range detail.AffectedJobs {
+			detail.AffectedJobs[i].Recovery.InfrastructureReadyAt = readyAt
+		}
 	}
 
 	if backend, ok := s.operator.(ImpactPreviewBackend); ok && inc.ApprovalEpoch > 0 {

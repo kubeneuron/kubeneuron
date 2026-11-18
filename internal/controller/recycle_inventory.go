@@ -12,6 +12,9 @@ import (
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
+const recycleDriverProbeEvidence = "accelerator inventory and driver probe observed after verified recycle; DCGM not present, device health not checked"
+const recycleInventoryEvidence = "fresh accelerator inventory and driver health observed after verified recycle"
+
 // recycleInventoryMatches checks the agent's observation against the pin
 // persisted after a verified reboot. The API supplies the report's node UID.
 func recycleInventoryMatches(report *types.AgentAcceleratorReport, pin cloud.NodeIdentity, gpu string, completed, now time.Time) bool {
@@ -89,7 +92,7 @@ func (c *Controller) verifyRecycledInventory(ctx context.Context, inc *types.Inc
 		return false, "awaiting fresh accelerator inventory and driver health from the verified boot"
 	}
 	if report.Readiness == types.AcceleratorReadinessDegraded {
-		return true, "accelerator inventory and driver probe observed after verified recycle; DCGM not present, device health not checked"
+		return true, recycleDriverProbeEvidence
 	}
-	return true, "fresh accelerator inventory and driver health observed after verified recycle"
+	return true, recycleInventoryEvidence
 }

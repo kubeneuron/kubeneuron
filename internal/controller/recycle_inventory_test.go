@@ -113,6 +113,13 @@ func TestRecycleVerificationAfterControllerRestart(t *testing.T) {
 					t.Fatalf("missing verification depth in resolution audit: %v, %v", trail, err)
 				}
 			}
+			trail, err := st.AuditTrail(ctx, inc.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ready := types.VerifiedInfrastructureTime(trail); (ready != nil) != (want == types.StateResolved) {
+				t.Fatalf("verified infrastructure time = %v, state = %s", ready, want)
+			}
 			if got.State != want {
 				t.Fatalf("got %s, want %s", got.State, want)
 			}

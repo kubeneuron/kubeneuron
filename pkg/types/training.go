@@ -84,3 +84,15 @@ func (s *TrainingRecoverySnapshot) RecordCheckpointSteps(checkpoint, last, resum
 		s.ConfirmedRepeatedSteps = &repeated
 	}
 }
+
+// VerifiedInfrastructureTime reads the durable evidence recorded when the
+// controller accepted post-recycle inventory from the verified boot.
+func VerifiedInfrastructureTime(trail []*AuditEntry) *time.Time {
+	for _, entry := range trail {
+		if entry != nil && !entry.DryRun && entry.Actor == "system" && entry.Action == "resolve" && entry.FromState == StateVerifying && entry.ToState == StateResolved && entry.Params["infrastructure_evidence"] == "verified_recycle_inventory" && !entry.Time.IsZero() {
+			t := entry.Time
+			return &t
+		}
+	}
+	return nil
+}
