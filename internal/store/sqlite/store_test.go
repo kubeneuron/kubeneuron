@@ -937,3 +937,54 @@ func TestConcurrentNodeRemediationClaims(t *testing.T) {
 		t.Fatalf("unexpected owners: %q and %q", first.owner, second.owner)
 	}
 }
+
+func TestFollowerRemembersReleasedOwnerAfterRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workflow.db")
+	open := func() *Store {
+		s, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = s.Close() })
+		return s
+	}
+	s := open()
+	ctx := t.Context()
+	claim := func(id string) string {
+		var owner string
+		if err := s.WithTx(ctx, func(tx store.Tx) error {
+			var err error
+			owner, err = tx.ClaimNodeRemediation(ctx, "node-a", "uid-a", id)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return owner
+	}
+	for _, id := range []string{"owner", "follower"} {
+		inc := testIncident(id, time.Now())
+		if id == "owner" {
+			inc.Target.GPUUUID = ""
+		}
+		if err := s.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		if got := claim(id); got != "owner" {
+			t.Fatalf("initial owner for %s = %q", id, got)
+		}
+	}
+	if _, err := s.sqlDB.ExecContext(ctx, "DELETE FROM node_remediation_owners WHERE incident_id='owner'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = open()
+	if got := claim("follower"); got != "owner" {
+		t.Fatalf("owner after restart = %q", got)
+	}
+	var count int
+	if err := s.sqlDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM node_remediation_owners").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("active claims = %d, error = %v", count, err)
+	}
+}
