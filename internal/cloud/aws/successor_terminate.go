@@ -40,6 +40,25 @@ func terminatePinned(ctx context.Context, client instanceTerminator, instance st
 // ReplaceWithSuccessor revalidates the persisted successor before removing the
 // old instance. The caller has completed its workload handoff before this call.
 func (p *managedProvider) ReplaceWithSuccessor(ctx context.Context, s cloud.Successor) error {
+	if err := p.confirmCreatedSuccessor(ctx, s); err != nil {
+		return err
+	}
+	return terminatePinned(ctx, p.terminator, s.Instance)
+}
+
+// releaseCreatedSuccessor removes the extra instance when the handoff is abandoned.
+func (p *managedProvider) releaseCreatedSuccessor(ctx context.Context, s cloud.Successor) error {
+	if err := p.confirmCreatedSuccessor(ctx, s); err != nil {
+		return err
+	}
+	id, err := p.InstanceID(s.ProviderID)
+	if err != nil || id == s.Instance {
+		return fmt.Errorf("%w: invalid successor identity for release", cloud.ErrNeedsOperator)
+	}
+	return terminatePinned(ctx, p.terminator, id)
+}
+
+func (p *managedProvider) confirmCreatedSuccessor(ctx context.Context, s cloud.Successor) error {
 	if s.Phase != cloud.SuccessorCreated || s.Instance == "" || s.ProviderID == "" {
 		return fmt.Errorf("%w: replacement requires a pinned instance and a created successor", cloud.ErrNeedsOperator)
 	}
@@ -53,5 +72,5 @@ func (p *managedProvider) ReplaceWithSuccessor(ctx context.Context, s cloud.Succ
 	if current.Phase != cloud.SuccessorCreated || current.ProviderID != s.ProviderID {
 		return fmt.Errorf("%w: current ASG launch does not confirm the persisted successor", cloud.ErrNeedsOperator)
 	}
-	return terminatePinned(ctx, p.terminator, s.Instance)
+	return nil
 }

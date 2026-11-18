@@ -32,7 +32,7 @@ func TestObserveSuccessor(t *testing.T) {
 	}
 	update.Status = et.UpdateStatusSuccessful
 	g := at.AutoScalingGroup{AutoScalingGroupName: &s.Pool, AutoScalingGroupARN: sdk.String("arn"), DesiredCapacity: sdk.Int32(2), AvailabilityZones: []string{"az"}}
-	for _, id := range []string{"i-old", "i-new"} {
+	for _, id := range []string{"i-old", "i-abcd"} {
 		g.Instances = append(g.Instances, at.Instance{InstanceId: sdk.String(id), AvailabilityZone: sdk.String("az"), LifecycleState: at.LifecycleStateInService})
 	}
 	pages := launchActivityPages{"": {}}
@@ -41,13 +41,13 @@ func TestObserveSuccessor(t *testing.T) {
 	if !errors.Is(err, cloud.ErrNeedsOperator) || got.ProviderID != "" {
 		t.Fatalf("missing launch: %+v %v", got, err)
 	}
-	pages[""].Activities = []at.Activity{{AutoScalingGroupName: &s.Pool, AutoScalingGroupARN: sdk.String("arn"), StartTime: &now, Description: sdk.String("Launching a new EC2 instance: i-new"), Cause: sdk.String("changing the desired capacity from 1 to 2."), StatusCode: at.ScalingActivityStatusCodeSuccessful}}
+	pages[""].Activities = []at.Activity{{AutoScalingGroupName: &s.Pool, AutoScalingGroupARN: sdk.String("arn"), StartTime: &now, Description: sdk.String("Launching a new EC2 instance: i-abcd"), Cause: sdk.String("changing the desired capacity from 1 to 2."), StatusCode: at.ScalingActivityStatusCodeSuccessful}}
 	got, err = p.PrepareSuccessor(t.Context(), s)
-	if err != nil || got.Phase != cloud.SuccessorCreated || got.ProviderID != "aws:///az/i-new" {
+	if err != nil || got.Phase != cloud.SuccessorCreated || got.ProviderID != "aws:///az/i-abcd" {
 		t.Fatalf("created: %+v %v", got, err)
 	}
 
-	terminator := &terminateFixture{t: t, out: &autoscaling.TerminateInstanceInAutoScalingGroupOutput{Activity: &at.Activity{ActivityId: sdk.String("terminate-old")}}}
+	terminator := &terminateFixture{t: t, expectedID: "i-old", out: &autoscaling.TerminateInstanceInAutoScalingGroupOutput{Activity: &at.Activity{ActivityId: sdk.String("terminate-old")}}}
 	p.terminator = terminator
 	foreign := got
 	foreign.ProviderID = "aws:///az/i-other"
@@ -56,5 +56,14 @@ func TestObserveSuccessor(t *testing.T) {
 	}
 	if err := p.ReplaceWithSuccessor(t.Context(), got); err != nil || terminator.calls != 1 {
 		t.Fatalf("confirmed successor: err=%v calls=%d", err, terminator.calls)
+	}
+
+	terminator.calls = 0
+	terminator.expectedID = "i-abcd"
+	if err := p.releaseCreatedSuccessor(t.Context(), foreign); !errors.Is(err, cloud.ErrNeedsOperator) || terminator.calls != 0 {
+		t.Fatalf("foreign release: %v calls=%d", err, terminator.calls)
+	}
+	if err := p.releaseCreatedSuccessor(t.Context(), got); err != nil || terminator.calls != 1 {
+		t.Fatalf("confirmed release: %v calls=%d", err, terminator.calls)
 	}
 }

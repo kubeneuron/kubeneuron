@@ -15,10 +15,11 @@ import (
 )
 
 type terminateFixture struct {
-	t     *testing.T
-	calls int
-	out   *autoscaling.TerminateInstanceInAutoScalingGroupOutput
-	err   error
+	t          *testing.T
+	calls      int
+	expectedID string
+	out        *autoscaling.TerminateInstanceInAutoScalingGroupOutput
+	err        error
 }
 
 func (f *terminateFixture) TerminateInstanceInAutoScalingGroup(_ context.Context, in *autoscaling.TerminateInstanceInAutoScalingGroupInput, options ...func(*autoscaling.Options)) (*autoscaling.TerminateInstanceInAutoScalingGroupOutput, error) {
@@ -27,7 +28,7 @@ func (f *terminateFixture) TerminateInstanceInAutoScalingGroup(_ context.Context
 	for _, apply := range options {
 		apply(&cfg)
 	}
-	if sdk.ToString(in.InstanceId) != "i-old" || !sdk.ToBool(in.ShouldDecrementDesiredCapacity) || cfg.Retryer == nil || cfg.Retryer.MaxAttempts() != 1 {
+	if sdk.ToString(in.InstanceId) != f.expectedID || !sdk.ToBool(in.ShouldDecrementDesiredCapacity) || cfg.Retryer == nil || cfg.Retryer.MaxAttempts() != 1 {
 		f.t.Fatalf("unexpected termination request or retry policy")
 	}
 	return f.out, f.err
@@ -43,7 +44,7 @@ func TestTerminatePinned(t *testing.T) {
 		{"no activity", nil, nil, false}, {"lost response", nil, errors.New("connection closed"), false}, {"denied", nil, &smithy.GenericAPIError{Code: "AccessDenied"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client := &terminateFixture{t: t, out: tc.out, err: tc.err}
+			client := &terminateFixture{t: t, expectedID: "i-old", out: tc.out, err: tc.err}
 			err := terminatePinned(t.Context(), client, "i-old")
 			if client.calls != 1 || tc.ok && err != nil || !tc.ok && !errors.Is(err, cloud.ErrNeedsOperator) {
 				t.Fatalf("calls=%d err=%v", client.calls, err)
