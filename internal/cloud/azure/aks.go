@@ -74,6 +74,23 @@ type sdkAPI struct {
 	pollFrequency                        time.Duration
 }
 
+// unavailableAPI stands in for the Azure SDK when the controller has no
+// credential: every call fails with why.
+type unavailableAPI struct{ err error }
+
+func (u unavailableAPI) NodeResourceGroup(context.Context) (string, error) { return "", u.err }
+func (u unavailableAPI) Pool(context.Context, string) (pool, error)        { return pool{}, u.err }
+func (u unavailableAPI) Machines(context.Context, string) ([]machine, error) {
+	return nil, u.err
+}
+func (u unavailableAPI) WritePool(context.Context, string, pool, int32, map[string]string) error {
+	return u.err
+}
+func (u unavailableAPI) DeleteMachines(context.Context, string, []string) error { return u.err }
+func (u unavailableAPI) Permissions(context.Context, string) ([]permission, error) {
+	return nil, u.err
+}
+
 // permissionsAPIVersion is the Microsoft.Authorization version of
 // Permissions - List For Resource.
 const permissionsAPIVersion = "2022-04-01"
@@ -83,7 +100,7 @@ func newSDKAPI(s settings) (*sdkAPI, error) {
 	// so no credential can sit in the KubeNeuron resource or its Secrets.
 	cred, err := azidentity.NewWorkloadIdentityCredential(nil)
 	if err != nil {
-		return nil, fmt.Errorf("azure: workload identity: %w", err)
+		return nil, fmt.Errorf("azure: workload identity unavailable (is the AKS workload identity webhook enabled for the controller pod?): %w", err)
 	}
 	opts := &arm.ClientOptions{}
 	factory, err := aks.NewClientFactory(s.subscription, cred, opts)
@@ -191,12 +208,12 @@ func (a *sdkAPI) DeleteMachines(ctx context.Context, poolName string, names []st
 func (a *sdkAPI) Permissions(ctx context.Context, scope string) ([]permission, error) {
 	url := a.endpoint + strings.TrimSuffix(scope, "/") + "/providers/Microsoft.Authorization/permissions"
 	var all []permission
-	for url != "" {
+	for first := true; url != ""; first = false {
 		req, err := runtime.NewRequest(ctx, http.MethodGet, url)
 		if err != nil {
 			return nil, err
 		}
-		if len(all) == 0 {
+		if first {
 			q := req.Raw().URL.Query()
 			q.Set("api-version", permissionsAPIVersion)
 			req.Raw().URL.RawQuery = q.Encode()
@@ -217,6 +234,11 @@ func (a *sdkAPI) Permissions(ctx context.Context, scope string) ([]permission, e
 			return nil, err
 		}
 		all = append(all, page.Value...)
+		// The next page goes out with the bearer token, so follow it only on
+		// the Resource Manager endpoint the first request went to.
+		if page.NextLink != "" && !strings.HasPrefix(page.NextLink, a.endpoint+"/") {
+			return nil, fmt.Errorf("permissions list points its next page off %s", a.endpoint)
+		}
 		url = page.NextLink
 	}
 	return all, nil

@@ -657,7 +657,11 @@ missing successor fails as `ErrReplacementCapacity` with nothing deleted. An
 autoscaled pool keeps its size. It reports `not-ready-only`: AKS auto-repair
 cannot be turned off and acts on NotReady nodes, so recovery needs a Ready
 node, fully read node events with no `aks-auto-repair` event in the last hour,
-and a settled pool.
+and a settled pool. That check runs once before the step: between the
+scale-up, which takes minutes, and `deleteMachines` within the same call it is
+not repeated, so a node that turns NotReady in that window can be under
+auto-repair while it is deleted. Preparing the successor as its own phase
+before the cordon closes this.
 
 Open questions for a live AKS run: whether `deleteMachines` lowers the pool's
 count (if it does not, the provider stops with "needs an operator" and never

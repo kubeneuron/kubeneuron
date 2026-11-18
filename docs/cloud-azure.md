@@ -40,6 +40,11 @@ AKS:
   replacement and never grows the pool twice. A pool left a node larger, or
   a tag left behind, is reported as needing an operator and is never shrunk
   automatically: shrinking would delete a node AKS chooses.
+- The ready-and-no-auto-repair check runs before the step starts, not again
+  between growing the pool and deleting the machine. Growing a pool takes
+  minutes; if the node turns NotReady in that time, AKS auto-repair can act
+  on it while KubeNeuron deletes it. This closes once preparing the new node
+  becomes a phase of its own, checked before the cordon.
 - Each write to the pool carries its version (`If-Match`), so it never
   overwrites a change made after KubeNeuron read the pool.
 - A node is recognized only if it is a machine of an agent pool of the
@@ -67,7 +72,9 @@ cluster.
    controller's ServiceAccount (`<installation>-controller` in the
    installation namespace) through
    [Azure Workload Identity](https://learn.microsoft.com/azure/aks/workload-identity-overview).
-   The cluster needs the OIDC issuer and workload identity enabled.
+   The cluster needs the OIDC issuer and workload identity enabled. Without
+   them the controller still runs, but refuses every replacement and names
+   the missing workload identity as the reason.
 2. Create a custom role with exactly these actions and assign it to the
    identity, scoped to the AKS cluster resource:
 
@@ -111,6 +118,47 @@ cluster.
    namespace, where Kubernetes records node events, and only for the Azure
    provider. The controller reads the source, reason and time of the node's
    events, never their message.
+
+## When a pool needs an operator
+
+KubeNeuron stops and reports "needs an operator" rather than guess. The
+`kubeneuron-replacing` tag on the pool has the form `<machine>:<count>`: the
+machine being replaced and the pool's node count before it was grown. While
+the tag is there, KubeNeuron starts no other replacement in that pool. Remove
+it only after the pool is in the state you want; a tag removed earlier lets
+the next replacement grow the pool again.
+
+Read the pool first:
+
+```sh
+az aks nodepool show -g <cluster-resource-group> --cluster-name <cluster> -n <pool> \
+  --query "{state: provisioningState, count: count, autoscaler: enableAutoScaling, tags: tags}"
+```
+
+- **The pool failed while grown** (`state Failed`): the scale-up did not
+  finish. The count is the grown one and the tag is set; the old machine was
+  not deleted. Fix the cause the pool's error names (quota, capacity), then
+  bring the pool back to `Succeeded` at the size you want, either the grown
+  size or the `<count>` from the tag:
+  `az aks nodepool scale -g <cluster-resource-group> --cluster-name <cluster> -n <pool> --node-count <count>`.
+  Scaling down lets AKS choose which node goes.
+- **The pool did not return to its size** after the machine was deleted: the
+  old machine is gone but the count is not `<count>`. Check which nodes the
+  pool now runs (`kubectl get nodes -l agentpool=<pool>`) and scale it to the
+  size you want, as above.
+- **The pool became autoscaled** while it carried the tag: the cluster
+  autoscaler now owns the size. Check whether the machine in the tag still
+  exists (`az aks machine list -g <cluster-resource-group> --cluster-name <cluster> --nodepool-name <pool> -o table`)
+  and leave the size to the autoscaler.
+
+Then remove the tag. `--tags` replaces all of the pool's tags, so repeat any
+others the pool has, or pass `""` when it has none:
+
+```sh
+az aks nodepool update -g <cluster-resource-group> --cluster-name <cluster> -n <pool> --tags team=ml
+```
+
+Run the KubeNeuron step again afterwards if the node still needs replacing.
 
 ## Limits of the checks
 

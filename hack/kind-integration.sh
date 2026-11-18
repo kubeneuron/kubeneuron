@@ -793,6 +793,73 @@ assert_operator_rbac() {
 	note "operator Lease, Event, namespace, and child-status RBAC is minimal and correctly scoped"
 }
 
+# wait_node_events_rules waits for the operator's node-events Role in "default"
+# to carry the given rules, as compact JSON.
+wait_node_events_rules() {
+	local want=$1
+	local role="${ROOT_NAME}-controller-node-events"
+	local deadline=$((SECONDS + TIMEOUT_SECONDS))
+	local actual=
+	while ((SECONDS < deadline)); do
+		actual=$("$KUBECTL_BIN" -n default get role "$role" -o json 2>/dev/null |
+			"$JQ_BIN" -c '.rules // []' 2>/dev/null || true)
+		[[ $actual == "$want" ]] && return 0
+		sleep 2
+	done
+	die "Role default/$role rules = ${actual:-missing}, want $want"
+}
+
+# exercise_azure_cloud_wiring switches the installation to the Azure provider
+# and back on a real API server: the operator grants the controller node-event
+# reads in "default" only while Azure is set, and the controller keeps running
+# on a cluster without workload identity instead of restarting in a loop.
+exercise_azure_cloud_wiring() {
+	local controller_subject="system:serviceaccount:${TARGET_NAMESPACE}:${ROOT_NAME}-controller"
+	local selector="app.kubernetes.io/instance=${ROOT_NAME},app.kubernetes.io/component=controller"
+	local generation pods_json reason
+	note "switching the installation to the Azure provider"
+	"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=merge -p '{"spec":{"cloud":{"provider":"azure","azure":{
+		"subscriptionID":"00000000-0000-0000-0000-000000000001","resourceGroup":"kind","clusterName":"kind",
+		"clientID":"00000000-0000-0000-0000-000000000002"}}}}' >/dev/null
+	generation=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')
+	wait_observed_generation "$generation"
+	wait_node_events_rules '[{"apiGroups":[""],"resources":["events"],"verbs":["list"]}]'
+	[[ $("$KUBECTL_BIN" -n default get rolebinding "${ROOT_NAME}-controller-node-events" \
+		-o jsonpath='{.subjects[0].namespace}/{.subjects[0].name}') == "${TARGET_NAMESPACE}/${ROOT_NAME}-controller" ]] || \
+		die "node-events RoleBinding does not bind the managed controller"
+	[[ $("$KUBECTL_BIN" -n default auth can-i list events --as="$controller_subject" 2>/dev/null || true) == yes ]] || \
+		die "Azure controller cannot list node events in default"
+	[[ $("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" auth can-i list events --as="$controller_subject" 2>/dev/null || true) == no ]] || \
+		die "Azure controller can list events outside default"
+	reason=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" \
+		-o jsonpath='{.status.conditions[?(@.type=="CloudRecoveryAvailable")].reason}')
+	[[ $reason == NotReadyOnlyRepair ]] || die "CloudRecoveryAvailable reason = ${reason:-empty}, want NotReadyOnlyRepair"
+
+	# kind has no workload identity webhook, so the controller starts with no
+	# Azure credential: it must come up and stay up.
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status deployment/"${ROOT_NAME}-controller" \
+		--timeout="${TIMEOUT_SECONDS}s" >/dev/null || die "controller did not roll out with the Azure provider"
+	wait_root_condition True RuntimeAvailable
+	pods_json=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get pods -l "$selector" -o json)
+	"$JQ_BIN" -e '
+      [.items[] | select(.metadata.deletionTimestamp == null)] as $pods |
+      ($pods | length) > 0 and
+      all($pods[]; all(.status.containerStatuses[]?; .restartCount == 0 and .state.running != null))
+    ' <<<"$pods_json" >/dev/null || die "controller restarted with the Azure provider and no workload identity"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" logs deployment/"${ROOT_NAME}-controller" --tail=-1 2>/dev/null |
+		grep -Fq '"provider":"azure"' || die "controller did not enable the Azure provider"
+	note "Azure provider: node-event Role granted in default only, controller up without workload identity"
+
+	"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=json -p '[{"op":"remove","path":"/spec/cloud"}]' >/dev/null
+	generation=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')
+	wait_observed_generation "$generation"
+	wait_node_events_rules '[]'
+	[[ $("$KUBECTL_BIN" -n default auth can-i list events --as="$controller_subject" 2>/dev/null || true) == no ]] || \
+		die "controller kept node-event reads after leaving Azure"
+	wait_root_condition True RuntimeAvailable
+	note "leaving Azure emptied the node-event Role"
+}
+
 generate_tls_fixtures() {
 	local installation_uid=$1
 	local pki_dir="$work_dir/pki"
@@ -4045,6 +4112,7 @@ assert_runtime_ready
 assert_all_owners "$root_uid"
 assert_child_configuration_statuses
 exercise_node_and_window_status_rbac
+exercise_azure_cloud_wiring
 
 controller_subject="system:serviceaccount:${TARGET_NAMESPACE}:${ROOT_NAME}-controller"
 controller_tokenreview=$("$KUBECTL_BIN" auth can-i create tokenreviews.authentication.k8s.io \

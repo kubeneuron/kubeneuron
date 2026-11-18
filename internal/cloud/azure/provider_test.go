@@ -142,3 +142,23 @@ func TestCapacityCodesReadInnerErrors(t *testing.T) {
 		t.Fatal("only an ARM response carries an error code")
 	}
 }
+
+func TestFactoryWithoutWorkloadIdentityRefusesEachCall(t *testing.T) {
+	for _, env := range []string{"AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE", "AZURE_AUTHORITY_HOST"} {
+		t.Setenv(env, "")
+	}
+	p, err := cloud.Build(t.Context(), providerName, cloud.Config{Options: map[string]string{
+		OptionSubscription: testSub, OptionResourceGroup: testRG, OptionCluster: testCluster,
+	}})
+	if err != nil {
+		t.Fatalf("Build without a workload identity = %v, want a provider that refuses calls", err)
+	}
+	ra := p.(cloud.RepairAwareProvider)
+	err = ra.CheckReplacePermission(t.Context(), testInstance(0))
+	if err == nil || !strings.Contains(err.Error(), "workload identity") {
+		t.Fatalf("CheckReplacePermission = %v, want the missing workload identity named", err)
+	}
+	if err := p.Replace(t.Context(), testInstance(0)); err == nil || errors.Is(err, cloud.ErrReplacementCapacity) {
+		t.Fatalf("Replace = %v, want a plain refusal", err)
+	}
+}

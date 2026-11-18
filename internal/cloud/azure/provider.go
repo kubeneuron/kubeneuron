@@ -72,7 +72,10 @@ func init() {
 		}
 		api, err := newSDKAPI(s)
 		if err != nil {
-			return nil, err
+			// Without a workload identity the controller still runs: every
+			// cloud call fails with the cause, so each recovery is refused
+			// with a reason instead of the controller restarting in a loop.
+			return &Provider{settings: s, api: unavailableAPI{err}}, nil
 		}
 		return &Provider{settings: s, api: api}, nil
 	})
