@@ -7,6 +7,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"time"
 
 	sdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
@@ -62,12 +63,14 @@ type activityReader interface {
 	DescribeScalingActivities(context.Context, *autoscaling.DescribeScalingActivitiesInput, ...func(*autoscaling.Options)) (*autoscaling.DescribeScalingActivitiesOutput, error)
 }
 
-// Check every page because the API does not filter by terminal status.
+// Auto Scaling returns the newest activities first. Stop after a full page
+// of terminal activities whose completion times precede the lookback window.
 func checkGroupActivities(ctx context.Context, client activityReader, group string) error {
 	if group == "" {
 		return errors.New("missing Auto Scaling group")
 	}
 	in := &autoscaling.DescribeScalingActivitiesInput{AutoScalingGroupName: sdk.String(group)}
+	cutoff := time.Now().Add(-24 * time.Hour)
 	seen := map[string]bool{}
 	for {
 		out, err := client.DescribeScalingActivities(ctx, in)
@@ -77,12 +80,16 @@ func checkGroupActivities(ctx context.Context, client activityReader, group stri
 		if out == nil {
 			return errors.New("missing Auto Scaling activity response")
 		}
+		oldPage := len(out.Activities) > 0
 		for _, a := range out.Activities {
 			if sdk.ToString(a.AutoScalingGroupName) != group {
 				return errors.New("unconfirmed activity scope")
 			}
 			switch a.StatusCode {
 			case at.ScalingActivityStatusCodeSuccessful, at.ScalingActivityStatusCodeCancelled, at.ScalingActivityStatusCodeFailed:
+				if a.EndTime == nil || a.EndTime.IsZero() || !a.EndTime.Before(cutoff) {
+					oldPage = false
+				}
 			default:
 				return errors.New("unfinished or unknown Auto Scaling group activity")
 			}
@@ -93,6 +100,9 @@ func checkGroupActivities(ctx context.Context, client activityReader, group stri
 		}
 		if seen[token] {
 			return errors.New("incomplete Auto Scaling activity pagination")
+		}
+		if oldPage {
+			return nil
 		}
 		seen[token] = true
 		in.NextToken = out.NextToken
