@@ -25,6 +25,8 @@ what the node reports, not a diagnosis by KubeNeuron.
   profile's conditions, and a device label with a value the profile does not
   know. Unknown is never healthy: it neither confirms a fault nor clears one,
   and `kubeneuron_accelerator_health_nodes` counts it apart from healthy nodes.
+  A condition the profile reads but does not act on (see below) is no signal
+  of the profile either.
 - While an incident is open, the same signal adds nothing to it. The signal
   is reported again only when the incident was closed with the fault still
   present, or when the incident is verifying a recovery and the node still
@@ -61,16 +63,28 @@ on real hardware.
 | `aws-neuron` | `aws.amazon.com/neuron` (or the older `aws.amazon.com/neurondevice`) | condition `NeuronHealth` of the Neuron node problem detector | `True` | not named | `accelerator-fault` |
 | `aws-neuron` | same | condition `AcceleratedHardwareReady` of the EKS node monitoring agent | `False` | not named | `accelerator-fault` |
 | `nvidia` | `nvidia.com/gpu` | condition `AcceleratedHardwareReady` of the EKS node monitoring agent | `False` | not named | by reason: `NvidiaDoubleBitError` → `ecc-dbe`, `NvidiaNVLinkError` → `nvlink`, `NvidiaXID<code>Error` → the class of that XID, any other reason → `accelerator-fault` |
-| `nvidia` | same | conditions `GPUMissing`, `NVLinkDown` and `GPUECCError` of the AKS Node Problem Detector | `True` | not named | `gpu-lost`, `nvlink`, `accelerator-fault` |
+| `nvidia` | same | conditions `GPUMissing` and `NVLinkDown` of the AKS Node Problem Detector | `True` | not named | `gpu-lost`, `nvlink` |
 | `google-tpu` | `google.com/tpu` | GKE writes no TPU condition; only the allocatable count below | | | |
 | every profile | its resource | allocatable below capacity, for five minutes | | not named | `accelerator-unallocatable` |
 
-Not read in this version: conditions whose names a public document does not
-confirm; the AKS `XIDError` condition, whose reason does not carry the XID
-code, so an application XID would be counted against the node; and the AKS
-conditions on the NVIDIA device plugin and DCGM services, which describe
-software, not a device. Kubernetes events, DRA ResourceSlice device taints and
-cloud monitoring APIs are not read either.
+### Read, not acted on
+
+These AKS Node Problem Detector conditions are read and never open an
+incident. A node on which one is `True` is counted as `ignored` in
+`kubeneuron_accelerator_health_nodes` (in addition to its other state), so
+the signal is not silent.
+
+| Condition | Why it is not acted on |
+|---|---|
+| `XIDError` | It does not say which XID. An application XID is not a fault of the node. |
+| `GPUECCError` | The check counts corrected and uncorrected errors alike. A corrected error is no reason to take the node. |
+| `GPUClockThrottling` | Throttling slows the device. It is not a device fault. |
+| `UnhealthyNvidiaDevicePlugin` | A stopped device plugin is software, not a device. The allocatable count shows what it costs. |
+| `UnhealthyNvidiaDCGMServices` | A stopped DCGM service is monitoring software, not a device. |
+
+Not read at all: conditions whose names a public document does not confirm,
+Kubernetes events, DRA ResourceSlice device taints and cloud monitoring
+APIs.
 
 ## When KubeNeuron only observes
 

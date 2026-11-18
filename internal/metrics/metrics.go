@@ -386,7 +386,7 @@ var (
 	// bounded set.
 	AcceleratorHealthNodes = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "kubeneuron_accelerator_health_nodes",
-		Help: "Accelerator nodes by health source, profile and state (healthy, fault, unknown). Unknown is a node without a fresh signal, never a healthy one.",
+		Help: "Accelerator nodes by health source, profile and state (healthy, fault, unknown). Unknown is a node without a fresh signal, never a healthy one. Ignored counts, in addition, the nodes reporting a problem on a signal that is read and not acted on.",
 	}, []string{"source", "profile", "state"})
 
 	// ActionsPending is the durable action-queue depth (queued work agents

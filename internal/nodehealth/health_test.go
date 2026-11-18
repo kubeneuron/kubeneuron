@@ -53,7 +53,6 @@ func TestConditionsMapToClasses(t *testing.T) {
 		{"nvidia eks dcgm", "nvidia.com/gpu", cond("AcceleratedHardwareReady", "False", "DCGMHealthCode42"), "nvidia", types.ClassAcceleratorFault},
 		{"nvidia aks missing", "nvidia.com/gpu", cond("GPUMissing", "True", ""), "nvidia", types.ClassGPULost},
 		{"nvidia aks nvlink", "nvidia.com/gpu", cond("NVLinkDown", "True", ""), "nvidia", types.ClassNVLink},
-		{"nvidia aks ecc", "nvidia.com/gpu", cond("GPUECCError", "True", ""), "nvidia", types.ClassAcceleratorFault},
 		{"amd npd", "amd.com/gpu", cond("AMDGPUProblem", "True", ""), "amd-instinct", types.ClassAcceleratorFault},
 		{"amd npd down", "amd.com/gpu", cond("AMDGPUIsDown", "True", ""), "amd-instinct", types.ClassAcceleratorFault},
 	}
@@ -69,6 +68,32 @@ func TestConditionsMapToClasses(t *testing.T) {
 			}
 			if o.Reason != tc.cond.Reason || !o.Since.Equal(tc.cond.LastTransitionTime) || o.Reads != confirmReads {
 				t.Fatalf("evidence %+v", o)
+			}
+		})
+	}
+}
+
+// Signals read and not acted on are reported as ignored, never as a fault,
+// and they are not a signal of the profile: a node with only them is unknown.
+func TestIgnoredSignalsAreSeenNotActedOn(t *testing.T) {
+	for _, name := range []string{"XIDError", "GPUECCError", "GPUClockThrottling", "UnhealthyNvidiaDevicePlugin", "UnhealthyNvidiaDCGMServices"} {
+		t.Run(name, func(t *testing.T) {
+			h := Evaluate(snapshot("nvidia.com/gpu", cond(name, "True", "")))
+			o := find(t, h, "condition:"+name)
+			if o.State != StateIgnored || o.Class != "" || o.Why == "" {
+				t.Fatalf("got %+v", o)
+			}
+			if h.State != StateUnknown {
+				t.Fatalf("node %s, want unknown: an ignored signal is no signal of the profile", h.State)
+			}
+			healthy := Evaluate(snapshot("nvidia.com/gpu", cond(name, "False", ""), cond("GPUMissing", "False", "")))
+			if healthy.State != StateHealthy {
+				t.Fatalf("got %+v", healthy)
+			}
+			for _, o := range healthy.Observations {
+				if o.State == StateIgnored {
+					t.Fatalf("a healthy ignored condition is reported: %+v", o)
+				}
 			}
 		})
 	}

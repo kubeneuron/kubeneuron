@@ -230,10 +230,18 @@ func (c *Controller) countNodeHealth(source string, nodes []nodehealth.NodeHealt
 	for _, n := range nodes {
 		for _, p := range n.Profiles {
 			counts[[2]string{p, string(profileState(n, p))}]++
+			// A node reporting a signal that is read and not acted on is
+			// counted as ignored as well, so the signal is not silent.
+			for _, o := range n.Observations {
+				if o.Profile == p && o.State == nodehealth.StateIgnored {
+					counts[[2]string{p, string(nodehealth.StateIgnored)}]++
+					break
+				}
+			}
 		}
 	}
 	for _, p := range nodehealth.Profiles {
-		for _, s := range []nodehealth.State{nodehealth.StateHealthy, nodehealth.StateFault, nodehealth.StateUnknown} {
+		for _, s := range []nodehealth.State{nodehealth.StateHealthy, nodehealth.StateFault, nodehealth.StateUnknown, nodehealth.StateIgnored} {
 			metrics.AcceleratorHealthNodes.WithLabelValues(source, p.Name, string(s)).Set(counts[[2]string{p.Name, string(s)}])
 		}
 	}

@@ -33,6 +33,9 @@ const (
 	StateHealthy State = "healthy"
 	StateFault   State = "fault"
 	StateUnknown State = "unknown"
+	// StateIgnored: the node reports a problem on a signal that is read but
+	// not acted on, because it does not say enough to blame the node.
+	StateIgnored State = "ignored"
 )
 
 const (
@@ -82,7 +85,8 @@ type NodeHealth struct {
 	// Profiles are the names of the profiles that apply to the node.
 	Profiles []string
 	// State is fault when any rule reports a fault, otherwise unknown when
-	// any profile has no fresh signal, otherwise healthy.
+	// any profile has no fresh signal, otherwise healthy. An ignored signal
+	// does not change it.
 	State        State
 	Observations []Observation
 	// OtherRepairers are the components the Node shows are repairing it on
@@ -96,11 +100,16 @@ type NodeHealth struct {
 // conditionRule reads one Node condition. A condition at faultStatus is a
 // fault, classified from its reason; at the other of True/False it is
 // healthy; at any other status it is unknown.
+//
+// A rule with ignored set is read and never acted on: at faultStatus the
+// node is reported as ignored, with that reason, and nothing else follows.
+// It does not count as a signal of the profile.
 type conditionRule struct {
 	id          string
 	condition   string
 	faultStatus string
 	classify    func(reason string) types.ProblemClass
+	ignored     string
 }
 
 // labelRule reads the labels whose key matches pattern; the first capture
@@ -159,10 +168,23 @@ var Profiles = []Profile{
 		conditions: []conditionRule{
 			// The EKS node monitoring agent.
 			{id: "eks-node-monitoring", condition: "AcceleratedHardwareReady", faultStatus: "False", classify: eksNVIDIAReason},
-			// The AKS Node Problem Detector GPU checks.
+			// The AKS Node Problem Detector GPU checks,
+			// https://learn.microsoft.com/en-us/azure/aks/gpu-health-monitoring
+			// and https://learn.microsoft.com/en-us/azure/aks/node-problem-detector
+			// (2026-11-10). True is a problem, the Node Problem Detector's
+			// convention.
 			{id: "aks-npd-gpu-missing", condition: "GPUMissing", faultStatus: "True", classify: always(types.ClassGPULost)},
 			{id: "aks-npd-nvlink-down", condition: "NVLinkDown", faultStatus: "True", classify: always(types.ClassNVLink)},
-			{id: "aks-npd-gpu-ecc", condition: "GPUECCError", faultStatus: "True", classify: fault},
+			{id: "aks-npd-xid", condition: "XIDError", faultStatus: "True",
+				ignored: "the condition does not say which XID; an application XID is not a fault of the node"},
+			{id: "aks-npd-gpu-ecc", condition: "GPUECCError", faultStatus: "True",
+				ignored: "the check counts corrected and uncorrected errors alike; a corrected error is no reason to take the node"},
+			{id: "aks-npd-clock-throttling", condition: "GPUClockThrottling", faultStatus: "True",
+				ignored: "throttling slows the device; it is not a device fault"},
+			{id: "aks-npd-device-plugin", condition: "UnhealthyNvidiaDevicePlugin", faultStatus: "True",
+				ignored: "a stopped device plugin is software, not a device; the allocatable count shows what it costs"},
+			{id: "aks-npd-dcgm-services", condition: "UnhealthyNvidiaDCGMServices", faultStatus: "True",
+				ignored: "a stopped DCGM service is monitoring software, not a device"},
 		},
 	},
 	{
@@ -262,6 +284,13 @@ func (p Profile) evaluate(snap types.NodeHealthSnapshot, devices []types.DeviceC
 		if !ok {
 			continue
 		}
+		if rule.ignored != "" {
+			if cond.Status == rule.faultStatus {
+				out = append(out, Observation{Profile: p.Name, Rule: rule.id, State: StateIgnored, Key: "condition:" + cond.Type,
+					Reason: cond.Reason, Since: cond.LastTransitionTime, Why: rule.ignored})
+			}
+			continue
+		}
 		read = true
 		out = append(out, p.readCondition(rule, cond, snap.ReadAt))
 	}
@@ -289,7 +318,9 @@ func (p Profile) evaluate(snap types.NodeHealthSnapshot, devices []types.DeviceC
 	if !read && len(p.conditions) > 0 {
 		names := make([]string, 0, len(p.conditions))
 		for _, rule := range p.conditions {
-			names = append(names, rule.condition)
+			if rule.ignored == "" {
+				names = append(names, rule.condition)
+			}
 		}
 		out = append(out, Observation{Profile: p.Name, Rule: "conditions", State: StateUnknown, Key: "conditions",
 			Why: "the node reports none of the conditions " + strings.Join(uniq(names), ", ")})

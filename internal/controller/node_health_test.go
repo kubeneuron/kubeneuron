@@ -216,6 +216,27 @@ func TestNodeHealthReportsAgainOnlyWhenUnresolved(t *testing.T) {
 	}
 }
 
+// A signal read and not acted on opens nothing and is counted.
+func TestNodeHealthIgnoredSignalOpensNothing(t *testing.T) {
+	c, st, plat, clock := healthFixture(t)
+	ctx := context.Background()
+	node := types.NodeHealthSnapshot{Node: "trn-1",
+		Devices: []types.DeviceCount{{Resource: "nvidia.com/gpu", Capacity: 8, Allocatable: 8}},
+		Conditions: []types.NodeHealthCondition{{Type: "GPUECCError", Status: "True",
+			LastHeartbeatTime: clock.Now(), LastTransitionTime: clock.Now()}}}
+	plat.set(node)
+	for range 3 {
+		c.pollNodeHealth(ctx)
+		clock.Advance(10 * time.Second)
+	}
+	if inc := openHealthIncident(t, st, types.ClassAcceleratorFault); inc != nil {
+		t.Fatalf("an ignored signal opened an incident: %+v", inc)
+	}
+	if got := testutil.ToFloat64(metrics.AcceleratorHealthNodes.WithLabelValues("kubernetes-node", "nvidia", "ignored")); got != 1 {
+		t.Fatalf("ignored nodes %v, want 1", got)
+	}
+}
+
 func TestNodeHealthReadFailureChangesNothing(t *testing.T) {
 	c, st, plat, clock := healthFixture(t)
 	ctx := context.Background()
