@@ -66,4 +66,15 @@ func TestObserveSuccessor(t *testing.T) {
 	if err := p.releaseCreatedSuccessor(t.Context(), got); err != nil || terminator.calls != 1 {
 		t.Fatalf("confirmed release: %v calls=%d", err, terminator.calls)
 	}
+
+	g.DesiredCapacity = sdk.Int32(1)
+	g.Instances = g.Instances[1:]
+	p.scaling = observedASG{membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{g}}}, pages}
+	terminator.calls = 0
+	if err := p.ReplaceWithSuccessor(t.Context(), got); err != nil || terminator.calls != 0 {
+		t.Fatalf("completed replacement replay: err=%v calls=%d", err, terminator.calls)
+	}
+	if err := p.ReplaceWithSuccessor(t.Context(), foreign); !errors.Is(err, cloud.ErrNeedsOperator) || terminator.calls != 0 {
+		t.Fatalf("unexpected final membership: err=%v calls=%d", err, terminator.calls)
+	}
 }

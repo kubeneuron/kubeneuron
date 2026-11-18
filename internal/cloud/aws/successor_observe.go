@@ -8,6 +8,7 @@ import (
 
 	sdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+	at "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
@@ -18,22 +19,11 @@ func (p *managedProvider) observeSuccessor(ctx context.Context, s cloud.Successo
 	if err != nil || !complete {
 		return s, err
 	}
-	group := s.State["nodegroup"]
-	ng, err := p.eks.DescribeNodegroup(ctx, &eks.DescribeNodegroupInput{ClusterName: &p.cluster, NodegroupName: &group})
+	group, err := p.successorGroup(ctx, s)
 	if err != nil {
 		return s, err
 	}
-	if ng == nil || ng.Nodegroup == nil || s.State["nodegroup_arn"] == "" || sdk.ToString(ng.Nodegroup.NodegroupArn) != s.State["nodegroup_arn"] || ng.Nodegroup.Resources == nil || len(ng.Nodegroup.Resources.AutoScalingGroups) != 1 || sdk.ToString(ng.Nodegroup.Resources.AutoScalingGroups[0].Name) != s.Pool || s.Pool == "" {
-		return s, fmt.Errorf("%w: EKS no longer confirms the planned nodegroup and backing ASG", cloud.ErrNeedsOperator)
-	}
-	groups, err := p.scaling.DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{AutoScalingGroupNames: []string{s.Pool}, IncludeInstances: sdk.Bool(true)})
-	if err != nil {
-		return s, err
-	}
-	if groups == nil || len(groups.AutoScalingGroups) != 1 || sdk.ToString(groups.NextToken) != "" {
-		return s, fmt.Errorf("%w: incomplete ASG response", cloud.ErrNeedsOperator)
-	}
-	candidate, err := successorCandidate(s, groups.AutoScalingGroups[0])
+	candidate, err := successorCandidate(s, group)
 	if err != nil {
 		return s, err
 	}
@@ -62,4 +52,26 @@ func (p *managedProvider) PrepareSuccessor(ctx context.Context, s cloud.Successo
 	default:
 		return s, fmt.Errorf("%w: unknown EKS successor phase %q", cloud.ErrNeedsOperator, s.Phase)
 	}
+}
+
+func (p *managedProvider) successorGroup(ctx context.Context, s cloud.Successor) (at.AutoScalingGroup, error) {
+	if s.State["cluster"] != p.cluster || p.cluster == "" {
+		return at.AutoScalingGroup{}, fmt.Errorf("%w: EKS cluster changed", cloud.ErrNeedsOperator)
+	}
+	group := s.State["nodegroup"]
+	ng, err := p.eks.DescribeNodegroup(ctx, &eks.DescribeNodegroupInput{ClusterName: &p.cluster, NodegroupName: &group})
+	if err != nil {
+		return at.AutoScalingGroup{}, err
+	}
+	if ng == nil || ng.Nodegroup == nil || s.State["nodegroup_arn"] == "" || sdk.ToString(ng.Nodegroup.NodegroupArn) != s.State["nodegroup_arn"] || ng.Nodegroup.Resources == nil || len(ng.Nodegroup.Resources.AutoScalingGroups) != 1 || sdk.ToString(ng.Nodegroup.Resources.AutoScalingGroups[0].Name) != s.Pool || s.Pool == "" {
+		return at.AutoScalingGroup{}, fmt.Errorf("%w: EKS no longer confirms the planned nodegroup and backing ASG", cloud.ErrNeedsOperator)
+	}
+	groups, err := p.scaling.DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{AutoScalingGroupNames: []string{s.Pool}, IncludeInstances: sdk.Bool(true)})
+	if err != nil {
+		return at.AutoScalingGroup{}, err
+	}
+	if groups == nil || len(groups.AutoScalingGroups) != 1 || sdk.ToString(groups.NextToken) != "" {
+		return at.AutoScalingGroup{}, fmt.Errorf("%w: incomplete ASG response", cloud.ErrNeedsOperator)
+	}
+	return groups.AutoScalingGroups[0], nil
 }

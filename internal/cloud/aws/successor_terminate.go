@@ -6,6 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	at "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
+	"slices"
+	"strconv"
+	"strings"
 
 	sdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
@@ -40,6 +44,15 @@ func terminatePinned(ctx context.Context, client instanceTerminator, instance st
 // ReplaceWithSuccessor revalidates the persisted successor before removing the
 // old instance. The caller has completed its workload handoff before this call.
 func (p *managedProvider) ReplaceWithSuccessor(ctx context.Context, s cloud.Successor) error {
+	if s.Phase == cloud.SuccessorCreated {
+		group, err := p.successorGroup(ctx, s)
+		if err != nil {
+			return err
+		}
+		if replacementSettled(s, group) {
+			return nil
+		}
+	}
 	if err := p.confirmCreatedSuccessor(ctx, s); err != nil {
 		return err
 	}
@@ -73,4 +86,32 @@ func (p *managedProvider) confirmCreatedSuccessor(ctx context.Context, s cloud.S
 		return fmt.Errorf("%w: current ASG launch does not confirm the persisted successor", cloud.ErrNeedsOperator)
 	}
 	return nil
+}
+
+// replacementSettled recognizes the exact post-decrement membership after restart.
+func replacementSettled(s cloud.Successor, g at.AutoScalingGroup) bool {
+	zone := s.State["zone"]
+	if zone == "" || !slices.Equal(g.AvailabilityZones, []string{zone}) || sdk.ToString(g.AutoScalingGroupName) != s.Pool || s.State["asg_arn"] == "" || sdk.ToString(g.AutoScalingGroupARN) != s.State["asg_arn"] || g.DesiredCapacity == nil || strconv.Itoa(int(*g.DesiredCapacity)) != s.State["before"] {
+		return false
+	}
+	newID, ok := strings.CutPrefix(s.ProviderID, "aws:///"+zone+"/")
+	if !ok || newID == "" || newID == s.Instance {
+		return false
+	}
+	expected := strings.Split(s.State["members"], ",")
+	old := slices.Index(expected, s.Instance)
+	if old < 0 || slices.Contains(expected, newID) || len(expected) != int(*g.DesiredCapacity) {
+		return false
+	}
+	expected[old] = newID
+	actual := make([]string, 0, len(g.Instances))
+	for _, member := range g.Instances {
+		if member.LifecycleState != at.LifecycleStateInService || sdk.ToString(member.AvailabilityZone) != zone {
+			return false
+		}
+		actual = append(actual, sdk.ToString(member.InstanceId))
+	}
+	slices.Sort(actual)
+	slices.Sort(expected)
+	return slices.Equal(actual, expected)
 }
