@@ -2841,14 +2841,25 @@ exercise_incident_evidence() {
 	"$KUBECTL_BIN" -n "$ns" wait pod/fake-device-plugin --for=jsonpath='{.status.phase}'=Running --timeout=120s >/dev/null ||
 		die "fake device plugin pod did not start"
 
+	"$KUBECTL_BIN" -n "$ns" apply -f - >/dev/null <<-JSON
+		{"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"training-worker"},
+		 "spec":{"template":{"spec":{"nodeName":"$target_node","restartPolicy":"Never",
+		  "containers":[{"name":"worker","image":"$pause_image","resources":{"limits":{"nvidia.com/gpu":"1"}}}]}}}}
+	JSON
+	local worker training_port installation_uid service_dns="${ROOT_NAME}-controller.${TARGET_NAMESPACE}.svc"
+	"$KUBECTL_BIN" -n "$ns" wait pod -l job-name=training-worker --for=create --timeout=60s
+	"$KUBECTL_BIN" -n "$ns" wait pod -l job-name=training-worker --for=condition=Ready --timeout=120s
+	worker=$("$KUBECTL_BIN" -n "$ns" get pods -l job-name=training-worker -o jsonpath='{.items[0].metadata.name}')
+
 	: >"$pf_log"
 	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
-		"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
+		"service/${ROOT_NAME}-controller" ":${controllerPort}" ":8444" >"$pf_log" 2>&1 &
 	pf_pid=$!
 	deadline=$((SECONDS + 30))
 	while ((SECONDS < deadline)); do
 		public_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$pf_log")
-		[[ -n $public_port ]] && break
+		training_port=$(awk '/^Forwarding from 127[.]0[.]0[.]1:/ && $NF == 8444 {split($3,a,":"); print a[2]}' "$pf_log")
+		[[ -n $public_port && -n $training_port ]] && break
 		sleep 1
 	done
 	[[ -n $public_port ]] || die "evidence-phase port-forward allocated no local port"
@@ -2881,6 +2892,20 @@ exercise_incident_evidence() {
 	}
 
 	open_and_read "$target_node" gpu-lost
+	local job_uid
+	job_uid=$("$KUBECTL_BIN" -n "$ns" get job training-worker -o jsonpath='{.metadata.uid}')
+	"$JQ_BIN" -e --arg uid "$job_uid" 'any(.affected_jobs[]?; .owner.uid == $uid)' <<<"$detail" >/dev/null ||
+		die "incident did not capture the training Job UID"
+	installation_uid=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.uid}')
+	"$KUBECTL_BIN" -n "$ns" create token default --audience="kubeneuron.io/training-report/$installation_uid" \
+		--duration=10m --bound-object-kind=Pod --bound-object-name="$worker" >"$work_dir/worker-token"
+	write_bearer_header "$work_dir/worker-token" "$work_dir/worker-header"
+	code=$(curl --silent --show-error --noproxy '*' --max-time 10 --cacert "$work_dir/pki/server-ca.crt" \
+		--resolve "${service_dns}:${training_port}:127.0.0.1" -H "@$work_dir/worker-header" \
+		-H 'Content-Type: application/json' --data '{"kind":"progress","step":1}' \
+		-o /dev/null -w '%{http_code}' "https://${service_dns}:${training_port}/v1/training/reports")
+	[[ $code == 204 ]] || die "verified worker progress returned $code, want 204"
+
 	"$JQ_BIN" -e '
 		.evidence.vendor_software.state == "degraded" and
 		(.evidence.vendor_software.resources | any(.name == "nvidia.com/gpu" and .capacity == 2)) and
