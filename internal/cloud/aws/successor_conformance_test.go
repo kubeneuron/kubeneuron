@@ -95,3 +95,29 @@ func newSuccessorLab(t *testing.T) (cloud.SuccessorProvider, cloudtest.Successor
 func TestEKSSuccessorConformance(t *testing.T) {
 	cloudtest.SuccessorConformance(t, cloudtest.SuccessorCase{Instance: "i-pinned", New: newSuccessorLab})
 }
+
+// A lost response can precede visibility in either control plane. The
+// controller has already persisted RequestedAt when it sends the request.
+func TestReleaseAfterLostAnswerWithStaleCloudReads(t *testing.T) {
+	provider, simulated := newSuccessorLab(t)
+	f := simulated.(*successorLab)
+	plan, err := provider.PrepareSuccessor(t.Context(), cloud.Successor{Instance: "i-pinned", Operation: "stale-reads"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.RequestedAt = time.Now().UTC()
+	f.HoldNextRequest()
+	f.LoseNextAnswer()
+	if _, err := provider.PrepareSuccessor(t.Context(), plan); err == nil {
+		t.Fatal("expected lost response")
+	}
+	// ASG still serves its old snapshot. EKS ListUpdates on groupHistory
+	// likewise returns no IDs, even though the request has been accepted.
+	f.membershipFixture.group.AutoScalingGroups[0].DesiredCapacity = sdk.Int32(1)
+	if err := provider.ReleaseSuccessor(t.Context(), plan); !errors.Is(err, cloud.ErrNeedsOperator) {
+		t.Fatalf("release: %v", err)
+	}
+	if f.Requests() != 1 || f.terminateFixture.calls != 0 {
+		t.Fatalf("requests=%d terminations=%d", f.Requests(), f.terminateFixture.calls)
+	}
+}
