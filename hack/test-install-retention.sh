@@ -55,6 +55,28 @@ connect_api() {
 api() { curl --silent --show-error --fail --noproxy '*' --connect-timeout 5 --max-time 30 -H "@$work/header" "$@"; }
 install
 claim_uid=$("$KUBECTL_BIN" -n "$namespace" get pvc "$name-controller-state" -o jsonpath='{.metadata.uid}')
+# The installer writes the Managed stack; the operator makes the metrics
+# store's claim, which outlives the installation.
+[[ $("$KUBECTL_BIN" get kubeneuron "$name" -o jsonpath='{.spec.observability.store.mode}') == Managed ]] || fail "installer did not write a Managed store"
+"$KUBECTL_BIN" -n "$namespace" wait --for=create "pvc/$name-metrics-store" --timeout=120s >/dev/null || fail "operator made no metrics store claim"
+metrics_uid=$("$KUBECTL_BIN" -n "$namespace" get pvc "$name-metrics-store" -o jsonpath='{.metadata.uid}')
+# Another installation's store in the same namespace: never touched.
+"$KUBECTL_BIN" apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: $name-b-metrics-store
+  namespace: $namespace
+  labels:
+    app.kubernetes.io/name: kube-neuron
+    app.kubernetes.io/instance: $name-b
+    app.kubernetes.io/component: metrics-store
+    app.kubernetes.io/managed-by: kubeneuron-operator
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 1Gi}}
+YAML
+other_metrics_uid=$("$KUBECTL_BIN" -n "$namespace" get pvc "$name-b-metrics-store" -o jsonpath='{.metadata.uid}')
 connect_api
 "$KUBECTL_BIN" wait "kubeneuron/$name" --for='jsonpath={.status.conditions[?(@.type=="GPUVisibility")].reason}=NoGPUResource' --timeout=180s
 [[ -z $("$KUBECTL_BIN" get kubeneuron "$name" -o 'jsonpath={.status.conditions[?(@.type=="ResetAvailable")].type}') ]] || fail "reset condition present with node actions disabled"
@@ -93,8 +115,10 @@ done
 # Deletion must be confirmed BEFORE touching root, PVC or other objects.
 if uninstall --delete-data </dev/null >"$work/refused.log" 2>&1; then fail "unconfirmed data deletion succeeded"; fi
 "$KUBECTL_BIN" get kubeneuron "$name" >/dev/null
-uninstall
+uninstall >"$work/uninstall.log"
 [[ $("$KUBECTL_BIN" -n "$namespace" get pvc "$name-controller-state" -o jsonpath='{.metadata.uid}') == "$claim_uid" ]] || fail "PVC identity changed on uninstall"
+[[ $("$KUBECTL_BIN" -n "$namespace" get pvc "$name-metrics-store" -o jsonpath='{.metadata.uid}') == "$metrics_uid" ]] || fail "uninstall without --delete-data removed the metrics claim"
+grep -Fq "kubectl delete pvc $name-metrics-store -n $namespace" "$work/uninstall.log" || fail "uninstall did not say how to erase the retained metrics"
 [[ -z $("$KUBECTL_BIN" -n "$namespace" get pvc "$name-controller-state" -o jsonpath='{.metadata.ownerReferences[*].uid}') ]] || fail "retained PVC is still owned"
 "$KUBECTL_BIN" get gpuplaybook "$name-other" "$name-mislabeled" >/dev/null
 [[ -z $("$KUBECTL_BIN" get gpuplaybook "$name-legacy" --ignore-not-found -o name) ]] || fail "own legacy playbook survived"
@@ -104,5 +128,7 @@ connect_api
 api "http://127.0.0.1:$port/api/v1/incidents/$incident" | jq -e --arg id "$incident" '.incident.id == $id and (.audit | length) > 0' >/dev/null || fail "reinstall lost incident or audit history"
 uninstall --delete-data --yes
 [[ -z $("$KUBECTL_BIN" -n "$namespace" get pvc "$name-controller-state" --ignore-not-found -o name) ]] || fail "explicit delete left PVC"
+[[ -z $("$KUBECTL_BIN" -n "$namespace" get pvc "$name-metrics-store" --ignore-not-found -o name) ]] || fail "explicit delete left the metrics claim"
+[[ $("$KUBECTL_BIN" -n "$namespace" get pvc "$name-b-metrics-store" -o jsonpath='{.metadata.uid}') == "$other_metrics_uid" ]] || fail "explicit delete touched another installation's metrics claim"
 "$KUBECTL_BIN" get gpuplaybook "$name-other" "$name-mislabeled" >/dev/null
-echo 'installer retention PASS: confirmation, state/PVC identity, reinstall, legacy scoping, foreign resources and explicit deletion'
+echo 'installer retention PASS: confirmation, state/PVC identity, reinstall, legacy scoping, foreign resources, metrics claim scoping and explicit deletion'

@@ -20,7 +20,7 @@ Managed Grafana keeps its administrator account in your cluster. The installatio
 - The agent sends observations to the configured controller. When a DCGM client is available it can contact the DCGM host engine. Host tools and scripts you supply may make their own connections.
 - Cluster components access the Kubernetes API. The controller connects to the configured database, OIDC provider and notification destinations. Slack, PagerDuty and webhook recipients receive incident details. The web panel loads no third-party scripts, fonts or analytics. OIDC sign-in redirects the browser to your identity provider.
 - With the AWS provider enabled, cloud operations use the EC2 API. The AWS SDK may contact STS, instance metadata or container credential endpoints for authentication.
-- With managed monitoring, the OpenTelemetry Collector, VictoriaMetrics and vmalert exchange metrics inside the cluster. External telemetry destinations require your configuration. The audit log stays in the configured controller database.
+- With managed monitoring, the OpenTelemetry Collector, VictoriaMetrics and vmalert exchange metrics inside the cluster, and vmalert sends metric alerts to the controller; the alerts carry node and GPU identifiers, not workload names. External telemetry destinations require your configuration. The audit log stays in the configured controller database.
 - Managed Grafana queries the configured metrics store. By default, usage reporting, update checks, Gravatar and external snapshot sharing are disabled. The installation references the unmodified Grafana OSS image (AGPL-3.0) from its publisher.
 - Your cluster pulls unmodified images from their publishers. The managed monitoring stack references OpenTelemetry Collector, open VictoriaMetrics and vmalert (Apache-2.0). It can scrape an existing dcgm-exporter. The NVIDIA driver and dcgm-exporter are used under their vendors' terms when present. The optional external dependency manifests have their own installation and licence information.
 
@@ -28,6 +28,6 @@ Managed Grafana keeps its administrator account in your cluster. The installatio
 
 Uninstall retains the controller's state by default. See the [installation guide](install.md) for the explicit state deletion option. Manage an external PostgreSQL database or external metrics store through its own retention and deletion controls.
 
-The operator never deletes the managed metrics volume. After uninstall it can still contain metrics and node names. To erase the volume, run `kubectl delete pvc <name>-metrics-store -n <namespace>`, substituting the KubeNeuron resource name and its configured namespace. Underlying disk disposal follows the volume's reclaim policy.
+The operator never deletes the managed metrics volume. `deploy/install.sh --uninstall --delete-data` deletes it together with the controller's state; a plain uninstall keeps it, and it can still contain metrics and node names. To erase the volume, run `kubectl delete pvc <name>-metrics-store -n <namespace>`, substituting the KubeNeuron resource name and its configured namespace. Underlying disk disposal follows the volume's reclaim policy.
 
 Your team controls access and retention. Handle user identities in approval and audit records according to the requirements that apply in your environment.

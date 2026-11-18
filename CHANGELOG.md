@@ -11,6 +11,18 @@ API is `v1alpha1`.
 
 ### Added
 
+- **The installer runs the metrics path.** `deploy/install.sh` writes
+  `spec.observability` with the Collector, the metrics store and Grafana
+  `Managed`; `--observability disabled` leaves them off. `--uninstall`
+  keeps the metrics store's claim and prints how to erase it;
+  `--uninstall --delete-data` deletes it too, only when it is labelled as
+  this installation's. An installation without these blocks, including one
+  upgraded from an earlier release, stays `Disabled` until you add them or
+  re-run the installer. The sample runs the Managed stack. A new
+  [Observability](docs/observability.md) page describes what each part
+  promises, the combinations (an External Collector with the Managed store
+  is not offered) and what happens when telemetry is lost.
+
 - **Metric-alert detection with the Managed store.** The managed vmalert
   also evaluates `configs/vmalert/gpu-alert-rules.yaml` and sends what
   fires to the controller's new `/api/v1/webhooks/vmalert` endpoint (the

@@ -300,9 +300,11 @@ retained volume; unrelated or unmarked volumes are not adopted.
 
 To also delete SQLite state, use `--uninstall --delete-data`. The installer
 names the PVC and asks you to type the installation name before it changes
-anything. For unattended execution add `--yes`. This removes the PVC; physical
-volume disposal follows the StorageClass reclaim policy. External PostgreSQL
-and its data are never deleted by the installer.
+anything. For unattended execution add `--yes`. This removes the PVC, and the
+Managed metrics store's claim `NAME-metrics-store` when it is labelled as this
+installation's; physical volume disposal follows the StorageClass reclaim
+policy. External PostgreSQL, an External metrics store and their data are
+never deleted by the installer.
 
 Directly deleting a root with `kubectl delete` still garbage-collects its owned
 PVC. Deleting the runtime namespace also deletes retained PVCs. Use backups

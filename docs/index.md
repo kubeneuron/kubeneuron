@@ -28,9 +28,9 @@ drain-and-reset → reboot → driver remediation → hardware escalation.
   windows, per-node pauses, and a transactional audit trail for every
   transition.
 - **Two detection paths** — kernel-log XIDs seconds after they happen
-  (agent fast path) and metric-based alerting through
-  vmalert → Alertmanager (slow path), converging on one incident per
-  (target, class).
+  (agent fast path) and metric alerts from vmalert, sent straight to the
+  controller by the Managed store or through your Alertmanager (slow
+  path), converging on one incident per (target, class).
 - **No new trust surface for actions** — agents poll a durable work queue
   over their existing mTLS + Pod-token channel; nodes run no listener and
   hold no server certificate.

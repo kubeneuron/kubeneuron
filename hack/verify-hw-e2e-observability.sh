@@ -477,7 +477,9 @@ grep -Eq "endpoint: ${am_ep}$" deploy/kubernetes/dependencies/README.md || bad "
 # constant that the profile merely agrees with.
 [ "${vmsingle_ep##*:}" = 8429 ] || bad "VMSINGLE_ENDPOINT names port ${vmsingle_ep##*:}; the operator-managed VMSingle Service serves 8429"
 grep -Eq "^\| VictoriaMetrics \| \`${vmsingle_ep}\` \|$" deploy/kubernetes/dependencies/README.md || bad "README's endpoint table does not list $vmsingle_ep"
-grep -Eq "^[[:space:]]*endpoint: ${vmsingle_ep}$" config/samples/kubeneuron_v1alpha1_kubeneuron.yaml || bad "the repository sample does not use $vmsingle_ep"
+# The sample runs the Managed stack and shows the dependency profile's store
+# in a comment.
+grep -Eq "^[[:space:]]*#[[:space:]]*endpoint: ${vmsingle_ep}$" config/samples/kubeneuron_v1alpha1_kubeneuron.yaml || bad "the repository sample does not show $vmsingle_ep"
 grep -Eq "^[[:space:]]*- url: ${vmsingle_ep}/api/v1/write$" "$profile_dir/vmagent.yaml" || bad "vmagent.yaml does not remote-write to $vmsingle_ep"
 
 note "static: nothing is applied from a mutable remote"

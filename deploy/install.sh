@@ -29,8 +29,13 @@ set -euo pipefail
 #                        empty string skips password sign-in)
 #   --controller-image I / --agent-image I
 #                        image overrides (air-gapped / development)
+#   --observability managed|disabled
+#                        managed (default): the operator runs a Collector, a
+#                        metrics store, its alert rules and Grafana in the
+#                        namespace; disabled: none of them
 #   --uninstall          remove the installation, retaining SQLite state
-#   --delete-data        also remove SQLite state (confirmation required)
+#   --delete-data        also remove SQLite state and the Managed metrics
+#                        store's claim (confirmation required)
 #   --yes                confirm --uninstall --delete-data non-interactively
 #
 # Requirements: kubectl (>=1.29 server), openssl. For --version: gh.
@@ -45,6 +50,7 @@ PROFILE=auto
 UNINSTALL=0
 DELETE_DATA=0
 ASSUME_YES=0
+OBSERVABILITY=managed
 CONTROLLER_IMAGE=""
 AGENT_IMAGE=""
 
@@ -64,8 +70,11 @@ Flags:
   --profile PROFILE      auto (default), host-al2023, gpu-operator-ubuntu, or none
   --admin USER           panel username to create   (default: admin; "" skips)
   --controller-image I / --agent-image I   image overrides (air-gapped/dev)
-  --uninstall            remove this installation; retain SQLite state by default
-  --delete-data          with --uninstall: also delete the SQLite PVC and audit data
+  --observability MODE   managed (default): Collector, metrics store, alert rules
+                         and Grafana in the namespace; disabled: none of them
+  --uninstall            remove this installation; retain SQLite state and metrics by default
+  --delete-data          with --uninstall: also delete the SQLite PVC with the audit
+                         data and the Managed metrics store's PVC
   --yes                  confirm --delete-data without an interactive prompt
 USAGE
 }
@@ -80,6 +89,7 @@ while (($#)); do
 	--admin) ADMIN_USER=$2; shift 2 ;;
 	--controller-image) CONTROLLER_IMAGE=$2; shift 2 ;;
 	--agent-image) AGENT_IMAGE=$2; shift 2 ;;
+	--observability) OBSERVABILITY=${2:?missing observability mode}; shift 2 ;;
 	--uninstall) UNINSTALL=1; shift ;;
 	--delete-data) DELETE_DATA=1; shift ;;
 	--yes) ASSUME_YES=1; shift ;;
@@ -95,6 +105,11 @@ die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 ((ASSUME_YES == 0 || DELETE_DATA == 1)) || die "--yes requires --uninstall --delete-data"
 [[ $NAME =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#NAME} -le 63 ]] || die "invalid installation name"
 [[ $NS =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#NS} -le 63 ]] || die "invalid namespace"
+
+case $OBSERVABILITY in
+managed|disabled) ;;
+*) die "unknown --observability $OBSERVABILITY (managed or disabled; for your own Collector or store see docs/observability.md)" ;;
+esac
 
 case $PROFILE in
 auto|host-al2023|gpu-operator-ubuntu|none) ;;
@@ -143,6 +158,15 @@ fetch_manifest() { # $1=version $2=dest
 
 if ((UNINSTALL)); then
 	claim="$NAME-controller-state"
+	# The Managed metrics store's claim outlives the installation (the
+	# operator never deletes it). Only a claim labelled as this
+	# installation's store is ever touched; an External store is not ours.
+	metrics_claim="$NAME-metrics-store"
+	metrics_uid=""
+	metrics_labels=$(kubectl -n "$NS" get pvc "$metrics_claim" --ignore-not-found -o jsonpath='{.metadata.uid}{"/"}{.metadata.labels.app\.kubernetes\.io/instance}{"/"}{.metadata.labels.app\.kubernetes\.io/component}{"/"}{.metadata.labels.app\.kubernetes\.io/managed-by}')
+	if [[ $metrics_labels == */"$NAME"/metrics-store/kubeneuron-operator ]]; then
+		metrics_uid=${metrics_labels%%/*}
+	fi
 	root_uid=$(kubectl get kubeneuron "$NAME" --ignore-not-found -o jsonpath='{.metadata.uid}')
 	if [[ -n $root_uid ]]; then
 		actual_ns=$(kubectl get kubeneuron "$NAME" -o jsonpath='{.spec.namespace}')
@@ -158,6 +182,7 @@ if ((UNINSTALL)); then
 	fi
 	if ((DELETE_DATA)); then
 		say "PERMANENT DATA REMOVAL: SQLite PVC $NS/$claim, including incidents and audit history. External PostgreSQL is not deleted."
+		[[ -z $metrics_uid ]] || say "PERMANENT DATA REMOVAL: metrics store PVC $NS/$metrics_claim. An External metrics store is not deleted."
 		if ((ASSUME_YES == 0)); then
 			[[ -t 0 ]] || die "use --yes to confirm --delete-data in non-interactive execution"
 			read -r -p "Type '$NAME' to confirm: " confirmation
@@ -199,8 +224,16 @@ if ((UNINSTALL)); then
 	if ((DELETE_DATA)); then
 		kubectl -n "$NS" delete pvc "$claim" --ignore-not-found --wait=true --timeout=120s
 		say "deleted SQLite PVC $NS/$claim; physical volume disposal follows its reclaim policy"
+		if [[ -n $metrics_uid ]]; then
+			# Only the claim checked above: one recreated since is left alone.
+			if [[ $(kubectl -n "$NS" get pvc "$metrics_claim" --ignore-not-found -o jsonpath='{.metadata.uid}') == "$metrics_uid" ]]; then
+				kubectl -n "$NS" delete pvc "$metrics_claim" --ignore-not-found --wait=true --timeout=120s
+				say "deleted metrics store PVC $NS/$metrics_claim"
+			fi
+		fi
 	else
 		say "retained SQLite PVC $NS/$claim and its data (if present); reinstall with the same name, namespace and storage settings"
+		[[ -z $metrics_uid ]] || say "retained metrics store PVC $NS/$metrics_claim: up to 30 days of metrics, including node names. Erase them with: kubectl delete pvc $metrics_claim -n $NS"
 	fi
 	say "left in place: the operator, CRDs, namespace '$NS', and any external database"
 	say "remove the operator too with: kubectl delete -f <install manifest>"
@@ -213,7 +246,7 @@ say "preflight"
 server_minor=$(kubectl version -o json 2>/dev/null | sed -n 's/.*"minor": *"\([0-9]*\).*/\1/p' | head -1)
 [[ -n $server_minor && $server_minor -ge 29 ]] || die "Kubernetes 1.29+ required (server minor: ${server_minor:-unknown})"
 if ! kubectl get storageclass -o json | grep -q '"storageclass.kubernetes.io/is-default-class": *"true"'; then
-	echo "  WARNING: no default StorageClass — the SQLite store PVC will stay Pending until one exists" >&2
+	echo "  WARNING: no default StorageClass — the SQLite and metrics store PVCs will stay Pending until one exists" >&2
 fi
 
 say "installing CRDs and the operator"
@@ -729,6 +762,16 @@ spec:
   playbookRef: $NAME-rma
 EOF
 
+# Managed: the operator runs the Collector, the metrics store with its alert
+# rules, and Grafana. Detection from the agents and recovery never depend on
+# them. Your own Collector or store: set spec.observability by hand
+# (docs/observability.md).
+observability_mode=Managed
+if [[ $OBSERVABILITY == disabled ]]; then
+	observability_mode=Disabled
+	echo "  WARNING: --observability disabled: no metrics store, no dashboards, and no detection of the faults that reach KubeNeuron only as metric alerts (docs/observability.md)" >&2
+fi
+
 kubectl apply -f - >/dev/null <<EOF
 apiVersion: kubeneuron.io/v1alpha1
 kind: KubeNeuron
@@ -756,7 +799,9 @@ $auth_block
     sqlite:
       size: 5Gi
   observability:
-    victoriaMetrics: {mode: External, endpoint: "http://vmsingle-unset.$NS.svc:8428"}
+    collector: {mode: $observability_mode}
+    store: {mode: $observability_mode}
+    grafana: {mode: $observability_mode}
     alertmanager: {mode: External, endpoint: "http://alertmanager-unset.$NS.svc:9093"}
   tls:
     issuer: Operator
@@ -807,10 +852,23 @@ cat <<EOF
   API token     $api_token
                 (automation/CLI: kubeneuronctl --server http://127.0.0.1:8080 --token ...)
   Mode          DryRun — detection, workflows, approvals, audit; no node is touched.
+EOF
+if [[ $observability_mode == Managed ]]; then
+	cat <<EOF
+  Dashboards    kubectl -n $NS port-forward service/$NAME-grafana 3000:3000
+                → http://127.0.0.1:3000 (user admin; password:
+                kubectl -n $NS get secret $NAME-grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d)
+  Metrics       the store, Grafana and metric-alert detection start in the
+                background; their state is in the conditions
+                ObservabilityStoreReady and AlertDetectionConfigured:
+                kubectl get kubeneuron $NAME -o jsonpath='{.status.conditions}'
+EOF
+fi
+cat <<EOF
 
-  Next steps    bind real playbooks/policies (docs/playbook-authoring.md),
-                point Alertmanager at the webhook, and follow docs/quickstart.md
-                to check GPU visibility and open a dry-run incident.
+  Next steps    bind real playbooks/policies (docs/playbook-authoring.md)
+                and follow docs/quickstart.md to check GPU visibility and
+                open a dry-run incident.
   TLS note      this script generated a self-signed 90-day PKI to get you
                 running; for production follow docs/install.md §3 or
                 deploy/cert-manager/.

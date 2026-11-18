@@ -196,8 +196,11 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
     a readiness wait — then prints your sign-in credentials. It does not
     generate TLS material; the operator issues that itself. It is the fastest path to a working
     DryRun installation; return to this page for production TLS,
-    notifications, and real playbooks. `--uninstall` removes the installation while retaining SQLite state;
-    `--uninstall --delete-data` explicitly removes that state after confirmation.
+    notifications, and real playbooks. It writes the whole metrics path as
+    `Managed` (see [Observability](observability.md));
+    `--observability disabled` leaves it off. `--uninstall` removes the
+    installation while retaining SQLite state and the metrics store's claim;
+    `--uninstall --delete-data` explicitly removes both after confirmation.
     Reinstall with the same name, namespace and storage settings to reuse it.
 
     The one-liner:

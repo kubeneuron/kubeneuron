@@ -66,11 +66,21 @@ spec:
   #     region: us-east-1
   #     iamRoleARN: arn:aws:iam::123456789012:role/kubeneuron-recycle
   observability:
-    victoriaMetrics:
-      # Installed separately by deploy/kubernetes/dependencies; KubeNeuron
-      # declares but never owns this upstream-managed service.
-      mode: External
-      endpoint: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8429
+    # The operator runs the Collector, the metrics store with its alert rules,
+    # and Grafana with the dashboards (docs/observability.md).
+    collector: {mode: Managed}
+    store: {mode: Managed}
+    grafana: {mode: Managed}
+    # With the dependency profile instead (deploy/kubernetes/dependencies runs
+    # its own vmagent, VMSingle and Alertmanager), keep the collector off and
+    # let a Managed Grafana read that store:
+    # collector: {mode: Disabled}
+    # store:
+    #   mode: External
+    #   endpoint: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8429
+    # grafana:
+    #   mode: Managed
+    #   datasource: {url: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8429}
     alertmanager:
       mode: External
       endpoint: http://vmalertmanager-kubeneuron.kubeneuron-monitoring.svc:9093

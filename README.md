@@ -478,9 +478,10 @@ completed safety case:
   agents on the named nodes, so the blast radius is declared, not global;
 - the API accepts `SQLite` (single controller) and `Postgres` (two replicas
   with Lease-based leader election and readiness that follows leadership);
-- observability currently accepts only credential-free `External` endpoints;
-  `Managed` discovery/readiness and ClickHouse archival are rejected until
-  their runtime paths exist;
+- the metrics path (`spec.observability`) is `Managed` (Collector, metrics
+  store with its rules, Grafana), `External` or `Disabled`; an External
+  Collector with the Managed store is not offered (docs/observability.md);
+- ClickHouse archival is rejected until its runtime path exists;
 - CRD playbooks accept a closed set of typed actions rather than arbitrary
   shell commands;
 - credentials are represented by Secret references, not inline values.

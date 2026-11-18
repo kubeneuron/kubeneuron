@@ -32,6 +32,7 @@ nav:
       - Production install: install.md
   - Operating:
       - Data and privacy: data-and-privacy.md
+      - Observability: observability.md
       - Operations guide: operations.md
       - Alert runbooks: runbooks.md
       - Upgrades and rollback: upgrade.md
