@@ -691,7 +691,7 @@ func reportKernelSourceAvailability(available bool) {
 	}
 	metrics.SetXIDSourceUnavailable("nvidia-kmsg", "kernel-log-unavailable", unavailable)
 	for _, class := range []types.ProblemClass{types.ClassDriverHang, types.ClassPCIe} {
-		metrics.AgentSignalSourceUnavailable.WithLabelValues("amd-kmsg", string(class), "kernel-log-unavailable").Set(unavailable)
+		metrics.SetSignalSourceUnavailable("amd-kmsg", class, "kernel-log-unavailable", unavailable)
 	}
 }
 

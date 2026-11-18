@@ -3,6 +3,10 @@
 package metrics
 
 import (
+	"sort"
+	"sync"
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
@@ -97,6 +101,46 @@ func SetXIDSourceUnavailable(source, reason string, unavailable float64) {
 		types.ClassXIDApp, types.ClassECCDBE, types.ClassECCSBERate, types.ClassECCContained,
 		types.ClassFellOffBus, types.ClassGSPError, types.ClassNVLink, types.ClassRowRemapFailure, types.ClassRowRemapOK,
 	} {
-		AgentSignalSourceUnavailable.WithLabelValues(source, string(class), reason).Set(unavailable)
+		SetSignalSourceUnavailable(source, class, reason, unavailable)
 	}
+}
+
+type sourceClass struct {
+	source string
+	class  types.ProblemClass
+}
+
+var agentSourceState = struct {
+	sync.RWMutex
+	rows map[sourceClass]types.AgentSignalSource
+}{rows: make(map[sourceClass]types.AgentSignalSource)}
+
+// SetSignalSourceUnavailable records the observation shared by heartbeat reports and metrics.
+func SetSignalSourceUnavailable(source string, class types.ProblemClass, reason string, unavailable float64) {
+	agentSourceState.Lock()
+	defer agentSourceState.Unlock()
+	AgentSignalSourceUnavailable.WithLabelValues(source, string(class), reason).Set(unavailable)
+	row := types.AgentSignalSource{Source: source, Class: class, Available: unavailable == 0, ReadAt: time.Now().UTC()}
+	if !row.Available {
+		row.Reason = reason
+	}
+	agentSourceState.rows[sourceClass{source, class}] = row
+}
+
+// AgentSignalSources snapshots observations without refreshing their timestamps.
+func AgentSignalSources(node string) []types.AgentSignalSource {
+	agentSourceState.RLock()
+	defer agentSourceState.RUnlock()
+	rows := make([]types.AgentSignalSource, 0, len(agentSourceState.rows))
+	for _, row := range agentSourceState.rows {
+		row.Node = node
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Source == rows[j].Source {
+			return rows[i].Class < rows[j].Class
+		}
+		return rows[i].Source < rows[j].Source
+	})
+	return rows
 }
