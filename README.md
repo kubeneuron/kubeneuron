@@ -544,12 +544,12 @@ self-managed nodes, driven controller-side through IRSA.
 **Remaining, deliberately hardware-gated:** per-device *hardware* GPU
 reset on bare metal (a virtualized instance has no guest PCI reset, so the
 agent refuses it on evidence) and step-time verification depth. The GPU-lab
-CI target now exists and has run green on live EKS — most recently on
-2026-10-18, when the full harness in this source tree, including its
-`deploy-observability` and `test-observability` phases, passed every phase
-on a temporary `g4dn.xlarge` / Tesla T4 cluster torn down to zero leftovers
-(Tesla T4 only: nothing is claimed for A100/H100, MIG, or NVLink) — and
-the DCGM/nvidia-smi second detection source beside kmsg has shipped and
+CI run on 2026-10-18 passed all phases of the harness used at the time,
+including `deploy-observability` and `test-observability`, on a temporary
+EKS `g4dn.xlarge` cluster with a Tesla T4. The cluster was removed after
+the run. Coverage was limited to the T4 and excluded MIG and NVLink.
+That run did not exercise the current EKS managed-nodegroup replacement path.
+The DCGM/nvidia-smi second detection source beside kmsg has shipped and
 observed a DCGM signal on a real T4 with the agent on the real driver. That
 matrix still gates per-device reset;
 cloud node remediation no longer waits on it.
