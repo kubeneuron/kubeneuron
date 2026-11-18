@@ -35,6 +35,7 @@ nav:
       - Data and privacy: data-and-privacy.md
       - Observability: observability.md
       - Operations guide: operations.md
+      - Add-first replacement on EKS (experimental): cloud-aws.md
       - Replacing GPU nodes on AKS (experimental): cloud-azure.md
       - Replacing GPU nodes on GKE (experimental): cloud-gcp.md
       - Announced cloud interruptions (experimental): cloud-interruptions.md
