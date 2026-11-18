@@ -14,14 +14,15 @@ import (
 )
 
 type lostUpdateResponse struct {
-	t      *testing.T
-	tokens map[string]bool
+	t              *testing.T
+	tokens         map[string]bool
+	cluster, group string
 }
 
 func (f *lostUpdateResponse) UpdateNodegroupConfig(_ context.Context, in *eks.UpdateNodegroupConfigInput, _ ...func(*eks.Options)) (*eks.UpdateNodegroupConfigOutput, error) {
 	f.t.Helper()
 	cfg := in.ScalingConfig
-	if sdk.ToString(in.ClusterName) != "cluster" || sdk.ToString(in.NodegroupName) != "workers" || cfg == nil || sdk.ToInt32(cfg.DesiredSize) != 3 || cfg.MinSize != nil || cfg.MaxSize != nil {
+	if sdk.ToString(in.ClusterName) != f.cluster || sdk.ToString(in.NodegroupName) != f.group || cfg == nil || sdk.ToInt32(cfg.DesiredSize) != 3 || cfg.MinSize != nil || cfg.MaxSize != nil {
 		f.t.Fatalf("unexpected scaling request: %+v", in)
 	}
 	token := sdk.ToString(in.ClientRequestToken)
@@ -36,7 +37,7 @@ func (f *lostUpdateResponse) UpdateNodegroupConfig(_ context.Context, in *eks.Up
 }
 
 func TestRequestSuccessorReplaysLostResponse(t *testing.T) {
-	client := &lostUpdateResponse{t: t, tokens: map[string]bool{}}
+	client := &lostUpdateResponse{t: t, tokens: map[string]bool{}, cluster: "cluster", group: "workers"}
 	plan := cloud.Successor{Operation: "op", Phase: cloud.SuccessorPlanned, State: map[string]string{"cluster": "cluster", "before": "2", "nodegroup": "workers"}}
 	if _, err := requestSuccessor(t.Context(), client, "different-cluster", plan); !errors.Is(err, cloud.ErrNeedsOperator) || len(client.tokens) != 0 {
 		t.Fatalf("cluster mismatch: %v", err)

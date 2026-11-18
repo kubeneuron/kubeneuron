@@ -91,6 +91,19 @@ func TestVerifySuccessorBaseline(t *testing.T) {
 	if err = p.verifySuccessorBaseline(t.Context(), plan); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("accepted request before membership changes", func(t *testing.T) {
+		client := &lostUpdateResponse{t: t, tokens: map[string]bool{}, cluster: "training", group: "gpu"}
+		first := managedProvider{repairReader: p.repairReader, updater: client}
+		if got, err := first.PrepareSuccessor(t.Context(), plan); err == nil || got.Phase != cloud.SuccessorPlanned {
+			t.Fatalf("lost response: %+v, %v", got, err)
+		}
+		restarted := managedProvider{repairReader: p.repairReader, updater: client}
+		got, err := restarted.PrepareSuccessor(t.Context(), plan)
+		if err != nil || got.Phase != cloud.SuccessorRequested || got.State["update"] != "update-id" || len(client.tokens) != 1 {
+			t.Fatalf("retry after restart: %+v, %v", got, err)
+		}
+	})
+
 	for _, change := range []string{"asg replaced", "peer replaced", "nodegroup replaced", "headroom lost"} {
 		t.Run(change, func(t *testing.T) {
 			g := group
