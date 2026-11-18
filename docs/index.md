@@ -15,7 +15,7 @@ drain-and-reset → reboot → driver remediation → hardware escalation.
     supported but off by default: it must be confined by
     `spec.safety.destructiveExecution` (a non-empty node selector plus an
     exact acknowledgement), enforced at admission, compilation, controller
-    dispatch, and the agent executor. See the [live cloud evidence table](reference-capabilities.md#live-cloud-evidence) for coverage by provider, execution mode and accelerator.
+    dispatch, and the agent executor. The current EKS, AKS and GKE replacement paths have not yet been validated on a live cluster; start in DryRun. See the [live cloud evidence table](reference-capabilities.md#live-cloud-evidence) for what was tested and how.
 
 ## Why KubeNeuron
 

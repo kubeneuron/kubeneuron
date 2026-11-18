@@ -482,7 +482,7 @@ completed safety case:
 - credentials are represented by Secret references, not inline values.
 
 Approval delivery (Slack, generic webhook, PagerDuty), verification before
-resolution, and the pause/resume control path are implemented. See the [live cloud evidence table](docs/reference-capabilities.md#live-cloud-evidence) for test coverage by provider and the scope of historical GPU runs.
+resolution, and the pause/resume control path are implemented. The current EKS, AKS and GKE replacement paths have not yet been validated on a live cluster; start in DryRun. See the [live cloud evidence table](docs/reference-capabilities.md#live-cloud-evidence) for what was tested and how.
 
 ## Configuration sources
 
