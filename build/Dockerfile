@@ -6,7 +6,7 @@
 # Keep the compiler native to the builder and cross-compile the target binaries.
 # Do not declare a global BUILDPLATFORM default: it overrides BuildKit's value
 # and can force an amd64 compiler image on an arm64 runner.
-FROM --platform=$BUILDPLATFORM golang:1.26.11@sha256:4165ee6bf3b7811fd7b40373290405c83d0167dcb87ee5f29c427cdcef45ff8f AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:e519d3b0a5b285e5aa53ab9eef02bc6bbb9cb04608389b743a136a9ce75f0d1e AS build
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
@@ -61,7 +61,7 @@ ENTRYPOINT ["/kubeneuron-controller"]
 # provides glibc (LGPL) as before. nsenter is built here from a checksum-pinned
 # source as a single static binary, so it needs no loader; the stage runs on
 # the target platform, so each architecture compiles natively.
-FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS nsenter
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS nsenter
 ARG TOYBOX_VERSION=0.8.13
 ARG TOYBOX_SHA256=9d4c124d7d731a2db399f6278baa2b42c2e3511f610c6ad30cc3f1a52581334b
 # The GitHub tag and release tarballs for 0.8.13 have identical contents
