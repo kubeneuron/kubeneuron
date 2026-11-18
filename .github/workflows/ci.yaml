@@ -272,6 +272,9 @@ jobs:
       - name: Inputs pinned (actions by commit SHA, images by digest)
         run: bash hack/verify-pins.sh
 
+      - name: Compare installer cloud pack with the shipped manifests
+        run: make test-cloud-pack-render
+
       - name: Alert rule unit tests (vmalert-tool, pinned by digest)
         run: make test-alert-rules
 

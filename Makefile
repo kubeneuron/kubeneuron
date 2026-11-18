@@ -413,3 +413,7 @@ licenses:
 verify-licenses:
 	python3 -I hack/test_third_party_licenses.py
 	GO=$(GO) python3 -I hack/third-party-licenses.py --check
+
+.PHONY: test-cloud-pack-render
+test-cloud-pack-render:
+	bash hack/test-cloud-pack-render.sh
