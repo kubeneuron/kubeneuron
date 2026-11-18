@@ -247,6 +247,7 @@ func TestDecisionPinnedToDisplayedRoundRefusedAfterRePark(t *testing.T) {
 // lands in the audit trail at decide time, not only at resume.
 func TestDecisionReasonIsAudited(t *testing.T) {
 	c, st, id := approvalEpochFixture(t)
+	c.platform = diskPressureNode{}
 	ctx := context.Background()
 	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalRejected, 1, "wrong node, hardware ticket filed", ""); err != nil {
 		t.Fatal(err)
@@ -257,7 +258,7 @@ func TestDecisionReasonIsAudited(t *testing.T) {
 	}
 	found := false
 	for _, e := range trail {
-		if e.Action == "approval-rejected" && e.Actor == "alice" && e.Result == "wrong node, hardware ticket filed" {
+		if e.Action == "approval-rejected" && e.Actor == "alice" && e.Params["node_conditions"] != "" && e.Result == "wrong node, hardware ticket filed" {
 			found = true
 		}
 	}

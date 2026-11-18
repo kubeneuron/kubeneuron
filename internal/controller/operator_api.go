@@ -122,6 +122,7 @@ func (c *Controller) DecideApproval(ctx context.Context, id, actor, channel stri
 		ParkEpoch:    request.ParkEpoch,
 		ImpactDigest: recordedDigest,
 	}
+	params := c.decisionNodeContext(ctx, inc.Target.Node, nil)
 	if err := approval.New(c.store, c.runtimeConfig(ctx).ApprovalTTL).Decide(ctx, id, step, actor, channel, decision); err != nil {
 		return err
 	}
@@ -130,9 +131,11 @@ func (c *Controller) DecideApproval(ctx context.Context, id, actor, channel stri
 	// human's stated reason, which the API and CLI accept and promise to
 	// record (review F2: it used to be silently dropped). The resume pass
 	// later audits the resulting transition separately.
-	if err := c.appendAudit(ctx, inc, actor,
-		"approval-"+string(decision),
-		firstNonBlank(reason, fmt.Sprintf("round %d %s via %s", inc.ApprovalEpoch, decision, channel))); err != nil {
+	if err := c.store.AppendAudit(ctx, &types.AuditEntry{
+		IncidentID: inc.ID, Time: time.Now(), FromState: inc.State, ToState: inc.State,
+		Actor: actor, Action: "approval-" + string(decision), Params: params, DryRun: inc.DryRun,
+		Result: firstNonBlank(reason, fmt.Sprintf("round %d %s via %s", inc.ApprovalEpoch, decision, channel)),
+	}); err != nil {
 		c.log.Error("decision audit append failed", "incident", id, "err", err)
 	}
 	return nil
