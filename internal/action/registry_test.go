@@ -225,3 +225,14 @@ func TestAgentDestructiveActionSet(t *testing.T) {
 		}
 	}
 }
+
+func TestNodeLevelAccessIsExplicit(t *testing.T) {
+	for _, d := range Definitions() {
+		if d.NodeLevelAccess != NodeLevelRequired && d.NodeLevelAccess != NodeLevelNotRequired {
+			t.Errorf("%s has no node-level access classification", d.Wire)
+		}
+		if d.Kind == KindAgent && d.NodeLevelAccess != NodeLevelRequired {
+			t.Errorf("%s must require node-level access", d.Wire)
+		}
+	}
+}

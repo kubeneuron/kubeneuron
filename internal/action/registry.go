@@ -68,6 +68,14 @@ const (
 	CloudPrimitiveReplace CloudPrimitive = "replace"
 )
 
+// NodeLevelAccess declares whether an action needs the bare-metal opt-in.
+type NodeLevelAccess uint8
+
+const (
+	NodeLevelNotRequired NodeLevelAccess = iota + 1
+	NodeLevelRequired
+)
+
 // Definition is the complete, single-source description of one remediation
 // action.
 type Definition struct {
@@ -85,7 +93,8 @@ type Definition struct {
 	Op   string
 	// Scope is the failure-domain scope the compiler uses to decide node
 	// scheduling effects. Meaningful only for CRD-compiled actions.
-	Scope Scope
+	Scope           Scope
+	NodeLevelAccess NodeLevelAccess
 	// ForcesApproval marks whole-node actions that restart or destroy the
 	// instance: the compiler rejects them unless the step declares approval
 	// Required, regardless of execution mode.
@@ -146,35 +155,35 @@ func (d Definition) GateAction() types.ActionType {
 // definitions is the registry. Order is stable and mirrors the CRD enum order,
 // with the three runtime-only actions last.
 var definitions = []Definition{
-	{PlaybookAction: kubeneuronv1alpha1.ActionObserve, Wire: "notify.observe", Kind: KindNotify, Op: "observe", Scope: ScopeGPU},
-	{PlaybookAction: kubeneuronv1alpha1.ActionCordon, Wire: "platform.cordon", Kind: KindPlatform, Op: "cordon", Scope: ScopeNode, Destructive: true},
-	{PlaybookAction: kubeneuronv1alpha1.ActionDrain, Wire: "platform.drain", Kind: KindPlatform, Op: "drain", Scope: ScopeNode, Destructive: true},
-	{PlaybookAction: kubeneuronv1alpha1.ActionUncordon, Wire: "platform.uncordon", Kind: KindPlatform, Op: "uncordon", Scope: ScopeNode},
-	{PlaybookAction: kubeneuronv1alpha1.ActionEvictGPUWorkload, Wire: "platform.evict_gpu_workload", Kind: KindPlatform, Op: "evict_gpu_workload", Scope: ScopeGPU, Destructive: true},
-	{PlaybookAction: kubeneuronv1alpha1.ActionIdleCheck, Wire: "agent.idle_check", Kind: KindAgent, Op: "idle_check", Scope: ScopeGPU, IdleGuard: true},
-	{PlaybookAction: kubeneuronv1alpha1.ActionWaitIdle, Wire: "agent.wait_idle", Kind: KindAgent, Op: "wait_idle", Scope: ScopeGPU, IdleGuard: true},
+	{PlaybookAction: kubeneuronv1alpha1.ActionObserve, Wire: "notify.observe", Kind: KindNotify, Op: "observe", NodeLevelAccess: NodeLevelNotRequired, Scope: ScopeGPU},
+	{PlaybookAction: kubeneuronv1alpha1.ActionCordon, Wire: "platform.cordon", Kind: KindPlatform, Op: "cordon", NodeLevelAccess: NodeLevelNotRequired, Scope: ScopeNode, Destructive: true},
+	{PlaybookAction: kubeneuronv1alpha1.ActionDrain, Wire: "platform.drain", Kind: KindPlatform, Op: "drain", NodeLevelAccess: NodeLevelNotRequired, Scope: ScopeNode, Destructive: true},
+	{PlaybookAction: kubeneuronv1alpha1.ActionUncordon, Wire: "platform.uncordon", Kind: KindPlatform, Op: "uncordon", NodeLevelAccess: NodeLevelNotRequired, Scope: ScopeNode},
+	{PlaybookAction: kubeneuronv1alpha1.ActionEvictGPUWorkload, Wire: "platform.evict_gpu_workload", Kind: KindPlatform, Op: "evict_gpu_workload", NodeLevelAccess: NodeLevelNotRequired, Scope: ScopeGPU, Destructive: true},
+	{PlaybookAction: kubeneuronv1alpha1.ActionIdleCheck, Wire: "agent.idle_check", Kind: KindAgent, Op: "idle_check", NodeLevelAccess: NodeLevelRequired, Scope: ScopeGPU, IdleGuard: true},
+	{PlaybookAction: kubeneuronv1alpha1.ActionWaitIdle, Wire: "agent.wait_idle", Kind: KindAgent, Op: "wait_idle", NodeLevelAccess: NodeLevelRequired, Scope: ScopeGPU, IdleGuard: true},
 	// Quiescing stands down DCGM and the device plugin on the node — it degrades
 	// the node's monitoring and scheduling exactly like a drain degrades its
 	// workloads, so it must stay inside the destructiveExecution blast radius.
-	{PlaybookAction: kubeneuronv1alpha1.ActionQuiesceAcceleratorStack, Wire: "platform.quiesce_accelerator_stack", Kind: KindPlatform, Op: "quiesce_accelerator_stack", Scope: ScopeNode, Destructive: true, AgentDestructive: true},
-	{PlaybookAction: kubeneuronv1alpha1.ActionRestoreAcceleratorStack, Wire: "platform.restore_accelerator_stack", Kind: KindPlatform, Op: "restore_accelerator_stack", Scope: ScopeNode, Compensating: true},
-	{PlaybookAction: kubeneuronv1alpha1.ActionGPUReset, Wire: "agent.gpu_reset", Kind: KindAgent, Op: "gpu_reset", Scope: ScopeGPU, AgentDestructive: true, CapabilityGate: CapabilityNVIDIAReset, Vendor: types.AcceleratorVendorNVIDIA},
-	{PlaybookAction: kubeneuronv1alpha1.ActionCollectBundle, Wire: "agent.collect_bundle", Kind: KindAgent, Op: "collect_bundle", Scope: ScopeNode},
-	{PlaybookAction: kubeneuronv1alpha1.ActionReboot, Wire: "agent.reboot", Kind: KindAgent, Op: "reboot", Scope: ScopeNode, ForcesApproval: true, AgentDestructive: true},
-	{PlaybookAction: kubeneuronv1alpha1.ActionRecycleNode, Wire: "platform.recycle_node", Kind: KindPlatform, Op: "recycle_node", Scope: ScopeNode, ForcesApproval: true, CloudPrimitive: CloudPrimitiveReinitializeInPlace, Destructive: true},
-	{PlaybookAction: kubeneuronv1alpha1.ActionReplaceNode, Wire: "platform.replace_node", Kind: KindPlatform, Op: "replace_node", Scope: ScopeNode, ForcesApproval: true, CloudPrimitive: CloudPrimitiveReplace, Destructive: true},
-	{PlaybookAction: kubeneuronv1alpha1.ActionRunDiag, Wire: "agent.run_diag", Kind: KindAgent, Op: "run_diag", Scope: ScopeNode},
-	{PlaybookAction: kubeneuronv1alpha1.ActionVerifyGPUHealth, Wire: "verify.gpu_health", Kind: KindVerify, Op: "gpu_health", Scope: ScopeGPU},
-	{PlaybookAction: kubeneuronv1alpha1.ActionVerifyNodeHealth, Wire: "verify.node_health", Kind: KindVerify, Op: "node_health", Scope: ScopeNode},
-	{PlaybookAction: kubeneuronv1alpha1.ActionOpenTicket, Wire: "notify.ticket", Kind: KindNotify, Op: "ticket", Scope: ScopeNode},
+	{PlaybookAction: kubeneuronv1alpha1.ActionQuiesceAcceleratorStack, Wire: "platform.quiesce_accelerator_stack", Kind: KindPlatform, Op: "quiesce_accelerator_stack", NodeLevelAccess: NodeLevelRequired, Scope: ScopeNode, Destructive: true, AgentDestructive: true},
+	{PlaybookAction: kubeneuronv1alpha1.ActionRestoreAcceleratorStack, Wire: "platform.restore_accelerator_stack", Kind: KindPlatform, Op: "restore_accelerator_stack", NodeLevelAccess: NodeLevelRequired, Scope: ScopeNode, Compensating: true},
+	{PlaybookAction: kubeneuronv1alpha1.ActionGPUReset, Wire: "agent.gpu_reset", Kind: KindAgent, Op: "gpu_reset", NodeLevelAccess: NodeLevelRequired, Scope: ScopeGPU, AgentDestructive: true, CapabilityGate: CapabilityNVIDIAReset, Vendor: types.AcceleratorVendorNVIDIA},
+	{PlaybookAction: kubeneuronv1alpha1.ActionCollectBundle, Wire: "agent.collect_bundle", Kind: KindAgent, Op: "collect_bundle", NodeLevelAccess: NodeLevelRequired, Scope: ScopeNode},
+	{PlaybookAction: kubeneuronv1alpha1.ActionReboot, Wire: "agent.reboot", Kind: KindAgent, Op: "reboot", NodeLevelAccess: NodeLevelRequired, Scope: ScopeNode, ForcesApproval: true, AgentDestructive: true},
+	{PlaybookAction: kubeneuronv1alpha1.ActionRecycleNode, Wire: "platform.recycle_node", Kind: KindPlatform, Op: "recycle_node", NodeLevelAccess: NodeLevelNotRequired, Scope: ScopeNode, ForcesApproval: true, CloudPrimitive: CloudPrimitiveReinitializeInPlace, Destructive: true},
+	{PlaybookAction: kubeneuronv1alpha1.ActionReplaceNode, Wire: "platform.replace_node", Kind: KindPlatform, Op: "replace_node", NodeLevelAccess: NodeLevelNotRequired, Scope: ScopeNode, ForcesApproval: true, CloudPrimitive: CloudPrimitiveReplace, Destructive: true},
+	{PlaybookAction: kubeneuronv1alpha1.ActionRunDiag, Wire: "agent.run_diag", Kind: KindAgent, Op: "run_diag", NodeLevelAccess: NodeLevelRequired, Scope: ScopeNode},
+	{PlaybookAction: kubeneuronv1alpha1.ActionVerifyGPUHealth, Wire: "verify.gpu_health", Kind: KindVerify, Op: "gpu_health", NodeLevelAccess: NodeLevelNotRequired, Scope: ScopeGPU},
+	{PlaybookAction: kubeneuronv1alpha1.ActionVerifyNodeHealth, Wire: "verify.node_health", Kind: KindVerify, Op: "node_health", NodeLevelAccess: NodeLevelNotRequired, Scope: ScopeNode},
+	{PlaybookAction: kubeneuronv1alpha1.ActionOpenTicket, Wire: "notify.ticket", Kind: KindNotify, Op: "ticket", NodeLevelAccess: NodeLevelNotRequired, Scope: ScopeNode},
 
 	// Runtime-only actions: reachable from a hand-authored playbook YAML but not
 	// from the closed CRD enum, so they carry no PlaybookAction spelling. Their
 	// Scope is never consulted (they never flow through the compiler) but is set
 	// to node for consistency.
-	{Wire: "agent.driver_reload", Kind: KindAgent, Op: "driver_reload", Scope: ScopeNode, AgentDestructive: true},
-	{Wire: "agent.driver_reinstall", Kind: KindAgent, Op: "driver_reinstall", Scope: ScopeNode, AgentDestructive: true},
-	{Wire: "agent.run_script", Kind: KindAgent, Op: "run_script", Scope: ScopeNode, AgentDestructive: true},
+	{Wire: "agent.driver_reload", Kind: KindAgent, Op: "driver_reload", NodeLevelAccess: NodeLevelRequired, Scope: ScopeNode, AgentDestructive: true},
+	{Wire: "agent.driver_reinstall", Kind: KindAgent, Op: "driver_reinstall", NodeLevelAccess: NodeLevelRequired, Scope: ScopeNode, AgentDestructive: true},
+	{Wire: "agent.run_script", Kind: KindAgent, Op: "run_script", NodeLevelAccess: NodeLevelRequired, Scope: ScopeNode, AgentDestructive: true},
 }
 
 var (
