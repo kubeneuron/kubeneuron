@@ -69,7 +69,7 @@ on real hardware.
 | `aws-neuron` | same | condition `AcceleratedHardwareReady` of the [EKS node monitoring agent](https://docs.aws.amazon.com/eks/latest/userguide/node-health-nma.html) | `False` with reason `NeuronDMAError`, `NeuronHBMUncorrectableError`, `NeuronNCUncorrectableError` or `NeuronSRAMUncorrectableError` | not named | `accelerator-fault` |
 | `nvidia` | `nvidia.com/gpu` | condition `AcceleratedHardwareReady` of the [EKS node monitoring agent](https://docs.aws.amazon.com/eks/latest/userguide/node-health-nma.html) | `False` | not named | by reason: `NvidiaDoubleBitError` → `ecc-dbe`, `NvidiaNVLinkError` → `nvlink`, `NvidiaXID<code>Error` for an XID the agent's table lists → the class of that XID |
 | `nvidia` | same | conditions `GPUMissing` and `NVLinkDown` of the AKS Node Problem Detector | `True` | not named | `gpu-lost`, `nvlink` |
-| `google-tpu` | `google.com/tpu` | GKE writes no TPU condition; only the allocatable count below | | | |
+| `google-tpu` | `google.com/tpu` | GKE writes no TPU condition; only the allocatable count below, and, when turned on, [Google Cloud Monitoring](#tpu-health-from-google-cloud-monitoring-opt-in) | | | |
 | every profile | its resource | allocatable below capacity, for five minutes | | not named | `accelerator-unallocatable` |
 
 A condition at its fault status with any other reason is unknown, with the
@@ -94,7 +94,53 @@ the signal is not silent.
 
 Not read at all: conditions whose names a public document does not confirm,
 Kubernetes events, DRA ResourceSlice device taints and cloud monitoring
-APIs.
+APIs other than the opt-in read below.
+
+## TPU health from Google Cloud Monitoring (opt-in)
+
+GKE writes no TPU condition to the Node. With
+`spec.cloud.gcp.tpuInfraHealth.enabled: true`, the controller also reads the
+Cloud Monitoring metric `compute.googleapis.com/instance/tpu/infra_health`
+for the instances of the cluster's TPU nodes, as a second source of the
+`google-tpu` profile. It is off by default.
+
+The metric is a Google Cloud Beta (pre-GA) feature: Google may change or
+withdraw it and gives it no SLA. This read is experimental and not validated
+against a live GKE cluster; whether Google writes this metric for GKE nodes
+is not confirmed. The values are those of Google's
+[TPU health page](https://docs.cloud.google.com/tpu/docs/troubleshooting/tpu-health)
+and [metric list](https://docs.cloud.google.com/monitoring/api/metrics_gcp_c)
+(2026-11-18).
+
+- **What is read.** Once a minute, one list per project of the TPU nodes'
+  provider IDs, for the last 15 minutes. A series is matched to a node by the
+  instance's zone and name. Nothing is asked of Cloud Monitoring while the
+  cluster has no TPU node. The metric names no chip: a fault is the node's.
+- **Fault.** `UNHEALTHY` with category `BAD_TPU_CHIP` or `BAD_SC_CHIP` on two
+  consecutive samples (two samples, not two reads of one) opens
+  `accelerator-fault` on the node. The incident records the source
+  (`cloud-monitoring`), the rule `gcp-infra-health`, the category and when
+  the run of samples began.
+- **Read, not acted on.** `DEGRADED` (reason `degraded`: performance, not a
+  fault) and `UNHEALTHY` with `NETWORKING_ISSUE` (reason `networking-issue`:
+  it does not place the fault on this node) open nothing and are counted as
+  `ignored` in `kubeneuron_accelerator_health_nodes`.
+- **Unknown, never healthy.** No sample for the instance, a newest sample
+  more than 10 minutes old (the metric is sampled every 60 seconds and
+  visible up to 420 seconds later), a failed read (`permission-denied`,
+  `api-error`), an answer longer than 20 pages, two statuses at one sample
+  time, `UNKNOWN`, any other status, and `UNHEALTHY` with no category or one
+  not listed here. Unknown neither confirms a pending fault nor clears it;
+  only a fresh `HEALTHY` sample does. A sample older than the Node belongs to
+  an earlier instance of the same name and is not read.
+- **Reads** are counted in `kubeneuron_cloud_health_reads_total` by outcome.
+  A failed read leaves the TPU nodes unknown and holds no step on other
+  nodes. After a failed read the controller waits longer before the next one,
+  up to five minutes.
+- **Cost and permission.** Cloud Monitoring API read calls are billed to the
+  project owner at Google Cloud rates. The controller needs
+  `monitoring.timeSeries.list` in those projects; see
+  [Replacing GPU nodes on GKE](cloud-gcp.md#setup).
 
 ## When KubeNeuron only observes
 
@@ -108,10 +154,12 @@ APIs.
   `other_repairer: unknown`. Automatic mode acts only on the runtime profiles
   listed in `qualifiedProfiles`: listing a profile there means the operator has
   confirmed that no other repairer acts on those nodes.
-- **Before the first read.** Until the Nodes have been read once since this
+- **Before the first read.** Until every health source (the Nodes, and
+  Cloud Monitoring when it is turned on) has been read once since this
   controller became leader, KubeNeuron cannot tell whether another repairer
   is acting on a node, so it holds every such step on every node and records
-  why. A failed read does not count.
+  why. A failed read of the Nodes does not count. A new leader asks Cloud
+  Monitoring again rather than use what an earlier term read.
 - **Multi-host TPU slices.** A node whose `cloud.google.com/gke-tpu-topology`
   holds more chips than the node is one host of a slice. Its incident names the
   slice's node pool, and KubeNeuron never recycles or replaces one host alone:
@@ -121,4 +169,6 @@ APIs.
 
 That each component writes these signals on these nodes, with these names and
 reasons, and how long after a fault it writes them. None of the profiles has
-run on hardware.
+run on hardware. For Cloud Monitoring: whether Google writes
+`infra_health` for the instances of GKE TPU nodes, with these labels, and how
+long after a fault.

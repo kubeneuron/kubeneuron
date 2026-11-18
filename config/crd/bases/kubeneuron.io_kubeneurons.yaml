@@ -570,6 +570,19 @@ spec:
                           of the cluster.
                         pattern: ^[a-z][-a-z0-9]{4,28}[a-z0-9]$
                         type: string
+                      tpuInfraHealth:
+                        description: |-
+                          TPUInfraHealth reads the health of the TPU nodes' instances from
+                          Google Cloud Monitoring (compute.googleapis.com/instance/tpu/infra_health,
+                          a Google Cloud Beta metric). Off unless set. Experimental, not
+                          validated against a live GKE cluster.
+                        properties:
+                          enabled:
+                            description: Enabled turns the read on.
+                            type: boolean
+                        required:
+                        - enabled
+                        type: object
                     required:
                     - clusterName
                     - location

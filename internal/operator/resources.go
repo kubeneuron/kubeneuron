@@ -464,6 +464,9 @@ func controllerDeployment(installation *kubeneuronv1alpha1.KubeNeuron, snapshot 
 			corev1.EnvVar{Name: "KUBENEURON_GKE_LOCATION", Value: cloud.GCP.Location},
 			corev1.EnvVar{Name: "KUBENEURON_GKE_CLUSTER", Value: cloud.GCP.ClusterName},
 		)
+		if h := cloud.GCP.TPUInfraHealth; h != nil && h.Enabled {
+			container.Env = append(container.Env, corev1.EnvVar{Name: "KUBENEURON_GKE_TPU_INFRA_HEALTH", Value: "true"})
+		}
 	}
 	if installation.Spec.TLS.PublicServerSecretRef != nil {
 		// Probes must speak the listener's protocol once it serves TLS.

@@ -38,6 +38,8 @@ func newInstanceRecycler(ctx context.Context, provider, region string) (platform
 			gcp.OptionProject:  os.Getenv("KUBENEURON_GKE_PROJECT"),
 			gcp.OptionLocation: os.Getenv("KUBENEURON_GKE_LOCATION"),
 			gcp.OptionCluster:  os.Getenv("KUBENEURON_GKE_CLUSTER"),
+
+			gcp.OptionTPUInfraHealth: os.Getenv("KUBENEURON_GKE_TPU_INFRA_HEALTH"),
 		}
 	}
 	p, err := cloud.Build(ctx, provider, cfg)

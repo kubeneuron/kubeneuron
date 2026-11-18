@@ -28,6 +28,21 @@ API is `v1alpha1`.
   Accelerator nodes without kubeneuron-agent are now in the inventory, read
   from Kubernetes, with their labels and device counts.
 
+- **TPU health from Google Cloud Monitoring (experimental, opt-in).** With
+  `spec.cloud.gcp.tpuInfraHealth.enabled`, the controller reads the Cloud
+  Monitoring metric `compute.googleapis.com/instance/tpu/infra_health` for
+  the instances of the cluster's TPU nodes, once a minute, as a second source
+  of the `google-tpu` profile. `BAD_TPU_CHIP` or `BAD_SC_CHIP` on two
+  consecutive samples opens `accelerator-fault`; `DEGRADED` and
+  `NETWORKING_ISSUE` are counted as `ignored`; no sample, a stale sample or a
+  failed read is `unknown`. Needs `monitoring.timeSeries.list`; off by
+  default, and nothing is asked while the cluster has no TPU node
+  (`kubeneuron_cloud_health_reads_total`). The metric is a Google Cloud Beta
+  (pre-GA) feature that Google may change or withdraw. Not validated against
+  a live GKE cluster; whether Google writes it for GKE nodes is not
+  confirmed. Cloud Monitoring API read calls are billed to the project owner
+  at Google Cloud rates.
+
 - **Incident evidence.** Every incident now records, from the Kubernetes API
   only, an estimate of where the fault is (`this-node`, `shared` when the
   same class opens on several nodes within 10 minutes, grouped by incident

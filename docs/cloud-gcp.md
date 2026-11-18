@@ -164,6 +164,17 @@ the VM), the incident records it and no recovery step starts.
           clusterName: training
     ```
 
+4. Optionally, to read TPU health from Google Cloud Monitoring
+   ([what is read](accelerator-health.md#tpu-health-from-google-cloud-monitoring-opt-in);
+   experimental, the metric is a Google Cloud Beta feature), set
+   `tpuInfraHealth: {enabled: true}` under `gcp`, and grant the controller's
+   principal, in each project of the TPU nodes, a custom role with the one
+   permission `monitoring.timeSeries.list`. `roles/monitoring.viewer` also
+   works, but it is wider: it gives read access to every metric of the
+   project. Without the permission the TPU nodes stay unknown and nothing
+   opens. Cloud Monitoring API read calls are billed to the project owner at
+   Google Cloud rates.
+
 ## When a pool needs an operator
 
 KubeNeuron stops and reports "needs an operator" rather than guess. The

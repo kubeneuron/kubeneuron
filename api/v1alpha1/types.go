@@ -65,6 +65,20 @@ type GCPCloudSpec struct {
 	// ClusterName is the name of the GKE cluster.
 	// +kubebuilder:validation:Pattern=`^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$`
 	ClusterName string `json:"clusterName"`
+	// TPUInfraHealth reads the health of the TPU nodes' instances from
+	// Google Cloud Monitoring (compute.googleapis.com/instance/tpu/infra_health,
+	// a Google Cloud Beta metric). Off unless set. Experimental, not
+	// validated against a live GKE cluster.
+	// +optional
+	TPUInfraHealth *TPUInfraHealthSpec `json:"tpuInfraHealth,omitempty"`
+}
+
+// TPUInfraHealthSpec turns on the TPU health read from Google Cloud
+// Monitoring. The controller needs the monitoring.timeSeries.list permission
+// in the projects of its TPU nodes.
+type TPUInfraHealthSpec struct {
+	// Enabled turns the read on.
+	Enabled bool `json:"enabled"`
 }
 
 // AzureCloudSpec names the AKS cluster whose agent pools replace GPU nodes.

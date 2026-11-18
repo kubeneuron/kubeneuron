@@ -31,6 +31,22 @@ func TestControllerGCPWiring(t *testing.T) {
 			t.Fatalf("%s = %q, want %q", name, env[name], want)
 		}
 	}
+	if _, ok := env["KUBENEURON_GKE_TPU_INFRA_HEALTH"]; ok {
+		t.Fatal("the TPU health read is on without spec.cloud.gcp.tpuInfraHealth")
+	}
+	installation.Spec.Cloud.GCP.TPUInfraHealth = &kubeneuronv1alpha1.TPUInfraHealthSpec{Enabled: true}
+	on, err := controllerDeployment(installation, &Snapshot{Digest: "d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range on.Spec.Template.Spec.Containers[0].Env {
+		found = found || e.Name == "KUBENEURON_GKE_TPU_INFRA_HEALTH" && e.Value == "true"
+	}
+	if !found {
+		t.Fatal("spec.cloud.gcp.tpuInfraHealth.enabled does not turn the read on")
+	}
+	installation.Spec.Cloud.GCP.TPUInfraHealth = nil
 	if !containsString(deployment.Spec.Template.Spec.Containers[0].Args, "--cloud-provider=gcp") {
 		t.Fatalf("controller args miss the provider")
 	}
