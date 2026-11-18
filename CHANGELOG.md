@@ -445,6 +445,11 @@ API is `v1alpha1`.
 
 ### Changed
 
+- `kubeneuron_incidents_recovered_total` now requires an audited live
+  remediation followed by verified resolution. Dashboards and alerts using
+  this counter may show fewer recoveries after upgrade because manual and
+  observe-only closures are excluded.
+
 - **Automatic replacement now needs `automatic.qualifiedProfiles`.** A
   policy in Automatic mode replaces a node without approval only when the
   node's accelerator runtime profile is listed in

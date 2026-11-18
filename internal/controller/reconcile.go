@@ -1004,8 +1004,7 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 // to DryRun mid-ladder simulates every remaining step while still carrying
 // DryRun=false — and charging it here would report exactly the GPU-hours the
 // paragraph above refuses to report, to an operator who had just pressed stop.
-// kubeneuronctl report reaches the same conclusion from the audit trail; this
-// is the same rule applied where that trail is not available.
+// For a live resolution the counter also checks the stored action evidence.
 func (c *Controller) recordRecoveryOutcome(ctx context.Context, inc *types.Incident, to types.IncidentState) {
 	if inc.OpenedAt.IsZero() || c.effectiveDryRun(ctx, inc) {
 		return

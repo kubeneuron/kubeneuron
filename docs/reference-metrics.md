@@ -38,7 +38,7 @@ The panel and CLI compute period estimates from the incident store. See [how the
 | `kubeneuron_stack_restore_failures_total` | counter | — | failed accelerator-stack restores by the janitor — a growing rate means a node's GPU monitoring is staying down |
 | `kubeneuron_runtime_config_info` | gauge | `digest` | identity of the loaded runtime configuration (always 1); a digest lagging `KubeNeuron.status.configDigest` is a rollout that never landed |
 | `kubeneuron_incident_duration_seconds` | histogram | `class`, `outcome` | open-to-halted wall time — MTTR, split by how the incident ended |
-| `kubeneuron_incidents_recovered_total` | counter | `class`, `unattended` | incidents that reached RESOLVED; `unattended="true"` never needed a human decision. Dry-run incidents are excluded — dry-run executes nothing, so it recovers nothing. **Looser than `kubeneuronctl report`:** see the note below |
+| `kubeneuron_incidents_recovered_total` | counter | `class`, `unattended` | incidents with an audited live remediation and a verified resolution; `unattended="true"` means no approval round was opened |
 | `kubeneuron_degraded_gpu_seconds_total` | counter | `class`, `outcome` | GPU-seconds charged when an incident reached a terminal state; divide by 3600 for degraded GPU-hours. The resolved share includes manual closures and observe-only incidents. Use the recovery report for GPU-hours attributed to verified remediation. Recorded once per incident, on its terminal transition only, and never for dry-run — so an incident parked in `NEEDS_HUMAN` contributes **nothing here** until somebody closes it |
 | `kubeneuron_degraded_gpus` | gauge | `class`, `owner` | accelerators under a non-terminal incident right now. `owner="human"` is the `NEEDS_HUMAN` population — capacity that stays lost until a person acts — and is exactly what the counter above cannot show. Node-scoped incidents expand to the node's GPU count |
 | `kubeneuron_workloads_evicted_total` | counter | `reason` | GPU workloads moved off a node ahead of a destructive step, by problem class — what remediation cost. No `node` label by design: this control plane replaces nodes, so node names are an unbounded set and a per-node series would grow for the life of the process. Per-node detail lives in the incident record and audit trail |
@@ -94,24 +94,17 @@ escalating, because every rung above the guard is more destructive than the one
 it just stopped — expect `kubeneuron_incidents_recovered_total` not to move for
 these and `NEEDS_HUMAN` to gain one.
 
-`kubeneuron_incidents_recovered_total` and `kubeneuron_degraded_gpu_seconds_total`
-count an incident that reached RESOLVED **whether or not anything was executed
-for it**. A problem class with no policy bound to it opens an incident,
-observes, and quiet-resolves, and both series read that as a recovery — so on
-an installation with coverage gaps they are the optimistic pair. `kubeneuronctl
-report` and `GET /api/v1/report/recovery` are stricter: they read the audit
-trail for a transition into `EXECUTING` and put a close with no remediation
-step in a separate `nothing done` bucket. Both series are charged once, on the
-terminal transition, where that audit read is not available; the report is
-computed from the store afterwards, where it is. When the two disagree, the
-report is the number to quote and the difference is your coverage gap.
+The controller increments `kubeneuron_incidents_recovered_total` when the
+audit trail records a live remediation and the controller resolves the
+incident from VERIFYING. Manual closures, observe-only incidents, and
+simulated actions are excluded. If the audit read fails, the controller
+logs the error and skips the increment. The recovery report reads the
+stored evidence when requested.
 
-Both do agree about execution MODE, which is a different question and the more
-dangerous one. Neither charges an incident whose steps were simulated, and both
-decide that from the mode live at the time rather than the one recorded when
-the incident opened — so an installation switched to `DryRun` to stop a
-remediation does not go on reporting recovered capacity from the ladders that
-then simulated to a close.
+`kubeneuron_degraded_gpu_seconds_total` measures time spent degraded.
+A live incident closed manually or after observation still contributes
+degraded time under `outcome="resolved"`. DryRun contributes to neither
+counter.
 
 The two recovery series answer different questions and must be read together.
 The counter is what FINISHED: closed incidents, charged once, so a park and
