@@ -475,6 +475,30 @@ EOF
   done
 }
 
+# Compare only pack-owned fields. kubectl serializes spec maps in key order.
+report_cloud_pack_changes() {
+  local dir="$work/cloud-pack-review" file ref expected observed version
+  mkdir -p "$dir"
+  render_cloud_pack | awk -v dir="$dir" '
+    BEGIN { n=1 }
+    /^---$/ { close(path); n++; next }
+    { path=dir "/" n ".yaml"; print >path }
+  '
+  for file in "$dir"/*.yaml; do
+    ref=$(kubectl create --dry-run=client -f "$file" -o name)
+    observed=$(kubectl get "$ref" --ignore-not-found -o jsonpath='{.spec}')
+    if [[ -z $observed ]]; then
+      say "Missing $ref (pack version 1); preserving deletion."
+      continue
+    fi
+    expected=$(kubectl create --dry-run=client -f "$file" -o jsonpath='{.spec}')
+    version=$(kubectl get "$ref" -o jsonpath='{.metadata.labels.kubeneuron\.io/policy-pack-version}')
+    if [[ $expected != "$observed" || $version != 1 ]]; then
+      say "Preserving changed $ref (installed label: ${version:-missing}; bundled version: 1)."
+    fi
+  done
+}
+
 # The baseline policy pack: one binding for every problem class the shipped
 # detectors can emit.
 #
@@ -502,7 +526,13 @@ EOF
 # are the design. See config/policies/playbooks.yaml for the reasoning per
 # ladder and config/policies/policies.yaml for the reasoning per class.
 root=$(kubectl get kubeneuron "$NAME" --ignore-not-found -o name)
+pack_label=""
 if [[ -n $root ]]; then
+  selected=$(kubectl get "$root" -o jsonpath='{.metadata.labels.kubeneuron\.io/policy-pack}')
+  if [[ $selected == cloud ]]; then
+    pack_label="  labels: {kubeneuron.io/policy-pack: cloud}"
+    report_cloud_pack_changes
+  fi
   # Existing installations may have edited or intentionally removed any binding.
   # A normal installer rerun must preserve those choices, including an empty pack.
   [[ -z $REQUESTED_PACK ]] || say "Existing installation: preserving its policy objects; --policy-pack selects policies on first install."
@@ -513,6 +543,7 @@ else
   bindings=$(kubectl get gpuplaybooks,gpuremediationpolicies -o "jsonpath={range .items[?(@.spec.kubeNeuronRef==\"$NAME\")]}{.metadata.name}{' '}{end}")
   [[ -z $bindings ]] || die "Existing recovery objects for $NAME: $bindings. Resolve ownership before installing a pack."
   if [[ ${REQUESTED_PACK:-cloud} == cloud ]]; then
+    pack_label="  labels: {kubeneuron.io/policy-pack: cloud}"
     render_cloud_pack > "$work/cloud-pack.yaml"
     kubectl create --dry-run=server -f "$work/cloud-pack.yaml" >/dev/null
     kubectl create -f "$work/cloud-pack.yaml" >/dev/null
@@ -931,6 +962,7 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: KubeNeuron
 metadata:
   name: $NAME
+$pack_label
 spec:
   namespace: $NS
   controller:
