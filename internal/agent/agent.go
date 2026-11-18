@@ -151,6 +151,8 @@ type Config struct {
 	// labels. Every action still passes the controller's safety, capability,
 	// and approval gates; this is the node-local boundary.
 	EnableDestructiveActions bool
+	// NodeLevelActions permits queued host actions, independently of destructive arming.
+	NodeLevelActions bool
 	// HealthListenAddress is the address serving /livez and /readyz.
 	HealthListenAddress string
 	// RegistrationInterval controls durable registration retries/heartbeats.
@@ -1210,8 +1212,12 @@ func (a *Agent) executeQueuedAction(ctx context.Context, claimed claimedAction) 
 	// after a restart. So the work must end before the lease does, leaving
 	// AgentResultGrace to report the result while the lease still accepts it.
 	deadline := executionDeadline(claimed.leaseExpiresAt)
-	if reason := refuseShortLease(action, time.Until(deadline)); reason != "" {
-		a.log.Warn("not starting queued action: its lease leaves too little time", "action", action.ID, "type", action.Type, "reason", reason)
+	reason := refuseShortLease(action, time.Until(deadline))
+	if !a.cfg.NodeLevelActions {
+		reason = "node-level recovery is disabled"
+	}
+	if reason != "" {
+		a.log.Warn("not starting queued action", "action", action.ID, "type", action.Type, "reason", reason)
 		now := time.Now().UTC()
 		result := types.ActionResult{
 			ActionID: action.ID, OK: false, StartedAt: now, FinishedAt: now,

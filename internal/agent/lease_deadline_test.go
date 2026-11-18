@@ -89,6 +89,7 @@ func TestRecoveredDestructiveActionWithShortLeaseIsNotStarted(t *testing.T) {
 		Params: map[string]string{"gpu_index": "0", "gpu_uuid": "GPU-test"}}
 	a, driver, posted := leaseHarness(t, action, time.Now().Add(types.AgentResultGrace+30*time.Second))
 
+	a.cfg.NodeLevelActions = true
 	a.recoverQueuedActions(context.Background())
 
 	if driver.resets.Load() != 0 || driver.probes.Load() != 0 {
@@ -108,6 +109,7 @@ func TestActionWithLessThanTheMinimumWindowIsNotStarted(t *testing.T) {
 	action := types.Action{ID: "act-idle", Type: types.ActionIdleCheck, Params: map[string]string{"gpu_index": "0"}}
 	a, driver, posted := leaseHarness(t, action, time.Now().Add(types.AgentResultGrace+2*time.Second))
 
+	a.cfg.NodeLevelActions = true
 	a.recoverQueuedActions(context.Background())
 
 	if driver.probes.Load() != 0 {
@@ -126,6 +128,7 @@ func TestExecutionContextEndsBeforeTheLease(t *testing.T) {
 		Params: map[string]string{"gpu_index": "0"}}
 	a, driver, posted := leaseHarness(t, action, lease)
 
+	a.cfg.NodeLevelActions = true
 	a.recoverQueuedActions(context.Background())
 
 	if driver.probes.Load() != 1 {
@@ -140,5 +143,14 @@ func TestExecutionContextEndsBeforeTheLease(t *testing.T) {
 	}
 	if !posted.OK {
 		t.Fatalf("posted = %+v, want the successful result reported inside the lease", posted)
+	}
+}
+
+func TestRecoveredActionRefusedWhenNodeLevelActionsDisabled(t *testing.T) {
+	action := types.Action{ID: "disabled", Type: types.ActionIdleCheck, Params: map[string]string{"gpu_index": "0"}}
+	a, driver, posted := leaseHarness(t, action, time.Now().Add(5*time.Minute))
+	a.recoverQueuedActions(context.Background())
+	if driver.probes.Load() != 0 || posted.ActionID != action.ID || posted.OK || !strings.Contains(posted.Error, "node-level recovery is disabled") {
+		t.Fatalf("probes = %d, posted = %+v", driver.probes.Load(), posted)
 	}
 }

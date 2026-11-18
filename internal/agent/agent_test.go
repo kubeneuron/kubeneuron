@@ -721,6 +721,7 @@ func TestRunQueuedActionExecutesAndPostsResult(t *testing.T) {
 
 	clock := &testClock{now: time.Date(2026, 7, 14, 1, 2, 3, 0, time.UTC)}
 	a := newTestAgent(t, controller.URL, clock, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a.cfg.NodeLevelActions = true
 
 	ctx := context.Background()
 	if !a.runQueuedAction(ctx) {
@@ -772,6 +773,7 @@ func TestRunQueuedActionPostsFailureResults(t *testing.T) {
 
 	clock := &testClock{now: time.Date(2026, 7, 14, 1, 2, 3, 0, time.UTC)}
 	a := newTestAgent(t, controller.URL, clock, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a.cfg.NodeLevelActions = true
 
 	if !a.runQueuedAction(context.Background()) {
 		t.Fatal("failed action must still be processed and reported")
@@ -828,6 +830,7 @@ func TestRunQueuedActionRetriesDurableResultWithoutReexecution(t *testing.T) {
 			ControllerURL:     controller.URL,
 			AllowInsecureHTTP: true,
 			SpoolPath:         t.TempDir() + "/spool.jsonl",
+			NodeLevelActions:  true,
 			ActionJournalPath: actionJournalPath,
 		}, driver, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		if err != nil {

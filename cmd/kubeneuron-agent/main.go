@@ -61,6 +61,7 @@ func main() {
 		fakeGPU           = flag.Bool("fake-gpu", false, "use the fake GPU driver (dev/simulator)")
 		requireRealDriver = flag.Bool("require-real-driver", false, "refuse to start when nvidia-smi is unavailable instead of falling back to the fake driver; set on every managed GPU node")
 		nvidiaSMIPath     = flag.String("nvidia-smi", "", "nvidia-smi binary path (default: nvidia-smi from PATH)")
+		nodeLevelActions  = flag.Bool("enable-node-level-actions", false, "allow agent recovery actions subject to existing safety checks. Alpha, not validated on real hardware.")
 		enableDestructive = flag.Bool("enable-destructive-actions", false, "permit reset/reboot/driver/script actions on this node; requires a real driver and remains subject to every controller gate")
 		nvidiaObservation = flag.Bool(
 			"nvidia-observation",
@@ -172,6 +173,9 @@ func main() {
 		log.Warn("nvidia-smi not found; using fake GPU driver (no real GPU telemetry or actions)")
 		driver = &nvml.Fake{}
 	}
+	if *nodeLevelActions {
+		log.Warn("Node-level recovery enabled. Alpha, not validated on real hardware.")
+	}
 	if *enableDestructive {
 		if _, realSMI := driver.(*nvml.SMI); !realSMI {
 			// Destructive actions against the fake driver would report
@@ -202,6 +206,7 @@ func main() {
 		ScriptsDir:               *scriptsDir,
 		RebootCommand:            strings.Fields(*rebootCommand),
 		EnableDestructiveActions: *enableDestructive,
+		NodeLevelActions:         *nodeLevelActions,
 		HealthListenAddress:      *healthListen,
 		RegistrationInterval:     *registrationInterval,
 		RegistrationStaleAfter:   *registrationStaleAfter,
