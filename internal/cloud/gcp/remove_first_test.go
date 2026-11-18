@@ -268,3 +268,42 @@ func TestRemoveFirstRefusesAPoolChangedBeforeTheDelete(t *testing.T) {
 		t.Fatalf("autoscaling on: %v, calls %q", err, f.calls)
 	}
 }
+
+// A delete Compute Engine accepted, whose member is still listed as it was,
+// is the plan's own: it is resent with the same request ID, not handed to an
+// operator, and the pool is set back once.
+func TestRemoveFirstAcceptedDeleteNotShownYet(t *testing.T) {
+	f := newFakeGKE(3)
+	plan := step(t, f, planRemoveFirst(t, f), cloud.RemoveFirstDeleting)
+	f.acceptDelete = true
+	next, err := testProvider(f).ContinueRemoveFirst(t.Context(), plan)
+	if err == nil || errors.Is(err, cloud.ErrNeedsOperator) || f.groups[0].target != 2 {
+		t.Fatalf("accepted delete: %+v, %v, target %d", next, err, f.groups[0].target)
+	}
+	next = step(t, f, next, cloud.RemoveFirstDeleting)
+	next = step(t, f, next, cloud.RemoveFirstResizing)
+	step(t, f, next, cloud.RemoveFirstDone)
+	if f.groups[0].target != 3 || strings.Count(strings.Join(f.calls, "\n"), "setSize") != 1 {
+		t.Fatalf("calls %q target %d", f.calls, f.groups[0].target)
+	}
+}
+
+// A plan whose state names a group the pool does not have, or a pool with
+// no groups, is refused or handed over, never a panic.
+func TestRemoveFirstMalformedPlanOrPool(t *testing.T) {
+	f := newFakeGKE(3)
+	plan := step(t, f, planRemoveFirst(t, f), cloud.RemoveFirstDeleting)
+	bad := plan
+	bad.State = withState(plan.State, stateGroup, "projects/ml-project/zones/us-central1-a/instanceGroupManagers/other")
+	if _, err := testProvider(f).ContinueRemoveFirst(t.Context(), bad); !errors.Is(err, cloud.ErrNeedsOperator) || len(f.calls) != 0 {
+		t.Fatalf("unknown group: %v, calls %q", err, f.calls)
+	}
+	empty := &fakeGKE{labels: f.labels}
+	p := testProvider(empty)
+	if err := p.unequalZones(t.Context(), nodePool{Name: testPool}); !errors.Is(err, cloud.ErrRemoveFirstUnavailable) {
+		t.Fatalf("no groups: %v", err)
+	}
+	if _, err := p.ContinueRemoveFirst(t.Context(), plan); err == nil {
+		t.Fatal("a pool without groups continued the plan")
+	}
+}

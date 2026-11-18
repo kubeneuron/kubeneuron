@@ -93,6 +93,9 @@ type Tx interface {
 	// can re-read the current row (and its optimistic version) inside the same
 	// transaction as the mutation it is about to apply.
 	GetIncident(ctx context.Context, id string) (*types.Incident, error)
+	// ListIncidents reads through the transaction, so a check of other rows
+	// and the write it guards commit together.
+	ListIncidents(ctx context.Context, f IncidentFilter) ([]*types.Incident, error)
 	CreateIncident(ctx context.Context, inc *types.Incident) error
 	// UpdateIncident persists inc guarded by its optimistic version. It returns
 	// ErrConflict when the stored row has a newer version than inc.Version, and

@@ -43,6 +43,9 @@ func (p *Provider) unequalZones(ctx context.Context, pl nodePool) error {
 	if err != nil {
 		return err
 	}
+	if len(sizes) == 0 {
+		return fmt.Errorf("%w: node pool %s lists no instance groups", cloud.ErrRemoveFirstUnavailable, pl.Name)
+	}
 	for _, n := range sizes {
 		if n != sizes[0] {
 			return fmt.Errorf("%w: node pool %s has zones of different sizes (%s); GKE sets one node count for every zone, so its size could not be set back",
@@ -101,6 +104,9 @@ func (p *Provider) PlanRemoveFirst(ctx context.Context, instanceID, operation st
 	}
 	if !stable {
 		return plan, fmt.Errorf("gcp: node pool %s is still changing; waiting", t.pool.Name)
+	}
+	if len(sizes) == 0 {
+		return plan, fmt.Errorf("%w: node pool %s lists no instance groups", cloud.ErrRemoveFirstUnavailable, t.pool.Name)
 	}
 	groups := make([]string, 0, len(t.pool.Groups))
 	for _, g := range t.pool.Groups {
@@ -165,6 +171,10 @@ func (p *Provider) ContinueRemoveFirst(ctx context.Context, plan cloud.RemoveFir
 	if strings.Join(groups, ",") != plan.State[stateGroups] {
 		return plan, refuse("the zones of node pool %s changed since the plan", pl.Name)
 	}
+	zone := slices.Index(pl.Groups, g)
+	if zone < 0 {
+		return plan, refuse("instance group %s of the plan is not in node pool %s", g.name, pl.Name)
+	}
 	if pl.Autoscaling || c.Autopilot {
 		return plan, refuse("node pool %s is no longer fixed-size", pl.Name)
 	}
@@ -183,7 +193,9 @@ func (p *Provider) ContinueRemoveFirst(ctx context.Context, plan cloud.RemoveFir
 	if err != nil {
 		return plan, err
 	}
-	zone := slices.Index(pl.Groups, g)
+	if len(sizes) != len(pl.Groups) {
+		return plan, fmt.Errorf("gcp: node pool %s: read %d zone sizes for %d groups", pl.Name, len(sizes), len(pl.Groups))
+	}
 	m, present := memberNamed(members, old.name)
 	switch {
 	case !started:
@@ -204,8 +216,10 @@ func (p *Provider) ContinueRemoveFirst(ctx context.Context, plan cloud.RemoveFir
 	case present && plan.Phase == cloud.RemoveFirstResizing:
 		return plan, refuse("instance %s is back in node pool %s", old.name, pl.Name)
 	case present:
-		for _, n := range sizes {
-			if n != int32(before) {
+		// The zone at one below is the plan's own delete, accepted and not
+		// yet shown on the member: resent, it is the same delete.
+		for i, n := range sizes {
+			if n != int32(before) && (i != zone || n != int32(before)-1) {
 				return plan, refuse("node pool %s changed before the delete (zones at %s, planned %d each)", pl.Name, joinSizes(sizes), before)
 			}
 		}

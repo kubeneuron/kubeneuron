@@ -23,9 +23,10 @@ import (
 // there, and after a restart, the reconcile pass finishes it from the record
 // alone. One plan is open per pool at a time.
 
-// removeFirstDeadline is how long an open plan may go on before it is left
-// for an operator, with the command that sets the size back.
-const removeFirstDeadline = time.Hour
+// removeFirstDeadline is how long an open plan may go on past the delete,
+// with errors or without progress, before it is left for an operator with
+// the command that sets the size back.
+var removeFirstDeadline = time.Hour
 
 // errPoolPlanOpen is another incident's plan still open on the same pool.
 var errPoolPlanOpen = errors.New("another remove-first replacement is open on the node pool")
@@ -102,22 +103,29 @@ func (c *Controller) pause(ctx context.Context) bool {
 
 // claimRemoveFirst records a new plan on the incident, unless another
 // incident has a plan open on the same pool: two plans would each restore a
-// size the other changed.
+// size the other changed. The check is made in the transaction that writes
+// the plan; only the leader writes plans, and the lock keeps its own
+// replace steps from checking at the same time.
 func (c *Controller) claimRemoveFirst(ctx context.Context, inc *types.Incident, plan cloud.RemoveFirstPlan) error {
 	c.removeFirstPools.Lock()
 	defer c.removeFirstPools.Unlock()
-	open, err := c.store.ListIncidents(ctx, store.IncidentFilter{OpenRemoveFirst: true})
+	rec := &types.RemoveFirstRecord{RemoveFirstPlan: plan}
+	return c.saveRemoveFirst(ctx, inc, rec, "remove-first-planned",
+		fmt.Sprintf("planned operation %s: delete the instance, then set node pool %s back to its size", plan.Operation, plan.Pool))
+}
+
+// poolPlanOpen is another incident's open plan on the pool of rec, read in tx.
+func poolPlanOpen(ctx context.Context, tx store.Tx, inc *types.Incident, rec *types.RemoveFirstRecord) error {
+	open, err := tx.ListIncidents(ctx, store.IncidentFilter{OpenRemoveFirst: true})
 	if err != nil {
 		return err
 	}
 	for _, other := range open {
-		if other.ID != inc.ID && other.RemoveFirst.Pool == plan.Pool && providerOf(other) == providerOf(inc) {
-			return fmt.Errorf("%w: incident %s is still setting node pool %s back to its size (operation %s); waiting", errPoolPlanOpen, other.ID, plan.Pool, other.RemoveFirst.Operation)
+		if other.ID != inc.ID && other.RemoveFirst.Pool == rec.Pool && providerOf(other) == providerOf(inc) {
+			return fmt.Errorf("%w: incident %s is still setting node pool %s back to its size (operation %s); waiting", errPoolPlanOpen, other.ID, rec.Pool, other.RemoveFirst.Operation)
 		}
 	}
-	rec := &types.RemoveFirstRecord{RemoveFirstPlan: plan}
-	return c.saveRemoveFirst(ctx, inc, rec, "remove-first-planned",
-		fmt.Sprintf("planned operation %s: delete the instance, then set node pool %s back to its size", plan.Operation, plan.Pool))
+	return nil
 }
 
 // continueRemoveFirst moves the incident's open plan on by one step and
@@ -147,17 +155,22 @@ func (c *Controller) continueRemoveFirst(ctx context.Context, inc *types.Inciden
 		}
 		return err
 	case err != nil:
-		if rec.Phase != cloud.RemoveFirstPlanned && time.Since(rec.PlannedAt) > removeFirstDeadline {
-			why := fmt.Sprintf("not finished within %s (%v); to set the size back: %s", removeFirstDeadline, err, rec.Restore)
-			if eerr := c.endRemoveFirst(ctx, inc, types.RemoveFirstNeedsOperator, why); eerr != nil {
-				return errors.Join(err, eerr)
-			}
-		}
-		return err
+		return errors.Join(err, c.removeFirstOverdue(ctx, inc, inc.RemoveFirst, err.Error()))
 	case next.Phase == cloud.RemoveFirstDone:
 		return c.endRemoveFirst(ctx, inc, types.RemoveFirstRestored, "")
 	}
-	return nil
+	return c.removeFirstOverdue(ctx, inc, inc.RemoveFirst, "no progress")
+}
+
+// removeFirstOverdue ends a plan past the delete that is still open after
+// removeFirstDeadline, for an operator. A plan at planned changed nothing
+// and is left to its step.
+func (c *Controller) removeFirstOverdue(ctx context.Context, inc *types.Incident, rec *types.RemoveFirstRecord, last string) error {
+	if !rec.Open() || rec.Phase == cloud.RemoveFirstPlanned || time.Since(rec.PlannedAt) <= removeFirstDeadline {
+		return nil
+	}
+	return c.endRemoveFirst(ctx, inc, types.RemoveFirstNeedsOperator,
+		fmt.Sprintf("not finished within %s (last: %s, phase %s); to set the size back: %s", removeFirstDeadline, last, rec.Phase, rec.Restore))
 }
 
 // saveRemoveFirst persists rec on the incident with one audit row, and keeps
@@ -172,6 +185,11 @@ func (c *Controller) saveRemoveFirst(ctx context.Context, inc *types.Incident, r
 		}
 		if fresh.RemoveFirst.Open() && fresh.RemoveFirst.Operation != rec.Operation {
 			return store.ErrConflict
+		}
+		if rec.Open() && !fresh.RemoveFirst.Open() {
+			if err := poolPlanOpen(ctx, tx, fresh, rec); err != nil {
+				return err
+			}
 		}
 		fresh.RemoveFirst = rec.Clone()
 		fresh.UpdatedAt = now
@@ -237,6 +255,10 @@ func (c *Controller) sweepRemoveFirst(ctx context.Context) {
 			continue
 		}
 		if inc.CloudIdentity == nil {
+			if err := c.endRemoveFirst(ctx, inc, types.RemoveFirstNeedsOperator,
+				"the incident has no pinned cloud identity to continue the plan with; to set the size back: "+inc.RemoveFirst.Restore); err != nil {
+				c.log.Error("recording a remove-first plan for an operator failed", "incident", inc.ID, "err", err)
+			}
 			continue
 		}
 		sctx, cancel := context.WithTimeout(ctx, successorSweepTimeout)

@@ -330,3 +330,70 @@ func TestRemoveFirstOnePlanPerPool(t *testing.T) {
 		t.Fatalf("second plan %+v size %d", inc.RemoveFirst, p.size)
 	}
 }
+
+// A plan that stops making progress past the delete, with no error (another
+// GKE operation that never ends, a delete that never finishes), is left for
+// an operator at the deadline, with the command.
+func TestRemoveFirstDeadlineWithoutProgress(t *testing.T) {
+	defer func(d time.Duration) { removeFirstDeadline = d }(removeFirstDeadline)
+	removeFirstDeadline = 50 * time.Millisecond
+	p := newPlannedPlatform()
+	p.holdResize = true
+	c, st := plannedFixture(t, p)
+	id := openOn(t, c, "n1")
+	inc := waitSettled(t, c, st, id, planEnded)
+	if inc.RemoveFirst.Outcome != types.RemoveFirstNeedsOperator || !strings.Contains(inc.RemoveFirst.Reason, "no progress") ||
+		!strings.Contains(inc.RemoveFirst.Reason, "resize gpu --num-nodes 4") {
+		t.Fatalf("plan %+v", inc.RemoveFirst)
+	}
+}
+
+// An open plan the reconcile pass cannot continue, for want of the pinned
+// identity, is left for an operator, not skipped for good.
+func TestRemoveFirstSweepWithoutIdentity(t *testing.T) {
+	p := newPlannedPlatform()
+	c, st := plannedFixture(t, p)
+	ctx := context.Background()
+	now := time.Now()
+	inc := &types.Incident{ID: "rf-orphan", Target: types.Target{Node: "n3"}, Class: types.ClassFellOffBus, State: types.StateResolved,
+		OpenedAt: now, UpdatedAt: now, StateChangedAt: now,
+		RemoveFirst: &types.RemoveFirstRecord{RemoveFirstPlan: cloud.RemoveFirstPlan{Operation: "rf-orphan-a1", Instance: "i-3", Pool: "gpu",
+			Phase: cloud.RemoveFirstDeleting, PlannedAt: now, Restore: "resize gpu --num-nodes 4"}}}
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	c.sweepRemoveFirst(ctx)
+	got := mustIncident(t, st, inc.ID)
+	if got.RemoveFirst.Outcome != types.RemoveFirstNeedsOperator || !strings.Contains(got.RemoveFirst.Reason, "resize gpu --num-nodes 4") {
+		t.Fatalf("plan %+v", got.RemoveFirst)
+	}
+}
+
+// The check for an open plan on the pool is made in the transaction that
+// writes the plan: a plan the in-process lock never saw (one a previous
+// leader wrote) still keeps a second one out.
+func TestRemoveFirstPoolCheckInTheTransaction(t *testing.T) {
+	p := newPlannedPlatform()
+	c, st := plannedFixture(t, p)
+	ctx := context.Background()
+	now := time.Now()
+	other := &types.Incident{ID: "rf-other", Target: types.Target{Node: "n3"}, Class: types.ClassFellOffBus, State: types.StateExecuting,
+		OpenedAt: now, UpdatedAt: now, StateChangedAt: now,
+		RemoveFirst: &types.RemoveFirstRecord{RemoveFirstPlan: cloud.RemoveFirstPlan{Operation: "rf-other-a1", Instance: "i-3", Pool: "gpu",
+			Phase: cloud.RemoveFirstResizing, PlannedAt: now}}}
+	mine := &types.Incident{ID: "rf-mine", Target: types.Target{Node: "n1"}, Class: types.ClassFellOffBus, State: types.StateExecuting,
+		OpenedAt: now, UpdatedAt: now, StateChangedAt: now}
+	for _, inc := range []*types.Incident{other, mine} {
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := c.saveRemoveFirst(ctx, mine, &types.RemoveFirstRecord{RemoveFirstPlan: cloud.RemoveFirstPlan{Operation: "rf-mine-a1", Pool: "gpu",
+		Phase: cloud.RemoveFirstPlanned, PlannedAt: now}}, "remove-first-planned", "")
+	if !errors.Is(err, errPoolPlanOpen) {
+		t.Fatalf("saved a second open plan on the pool: %v", err)
+	}
+	if got := mustIncident(t, st, mine.ID); got.RemoveFirst != nil {
+		t.Fatalf("plan written: %+v", got.RemoveFirst)
+	}
+}

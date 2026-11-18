@@ -64,9 +64,13 @@ type fakeGKE struct {
 	hold, held, lose bool
 	// loseDelete applies the next delete and fails its answer; slowDelete
 	// leaves the next one running (the member DELETING) and fails its answer.
-	loseDelete, slowDelete bool
-	requests               int
-	deleted                []string
+	// acceptDelete shrinks the group for the next delete but leaves the
+	// member listed as it was, and fails the answer; a resend of the same
+	// request ID finishes it. requestIDs are the deletes Compute Engine ran.
+	loseDelete, slowDelete, acceptDelete bool
+	requestIDs                           map[string]bool
+	requests                             int
+	deleted                              []string
 	// now is GKE's clock: the start time of new operations.
 	now time.Time
 
@@ -210,7 +214,22 @@ func (f *fakeGKE) DeleteInstances(_ context.Context, ref groupRef, names []strin
 	if err != nil {
 		return err
 	}
+	if f.requestIDs == nil {
+		f.requestIDs = map[string]bool{}
+	}
+	resent := f.requestIDs[requestID]
+	f.requestIDs[requestID] = true
 	for _, n := range names {
+		if resent {
+			g.members = slices.DeleteFunc(g.members, func(m member) bool { return m.Name == n })
+			f.deleted = append(f.deleted, n)
+			continue
+		}
+		if f.acceptDelete {
+			f.acceptDelete = false
+			g.target--
+			return errors.New("context deadline exceeded")
+		}
 		i := slices.IndexFunc(g.members, func(m member) bool { return m.Name == n })
 		if i < 0 {
 			return fmt.Errorf("instance %s is not a member", n)

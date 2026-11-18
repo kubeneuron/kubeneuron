@@ -102,7 +102,7 @@ Experimental, not validated against a live GKE cluster. On a fixed-size
 pool, deleting a node's instance leaves the pool one node short until its
 size is set back, which takes a second call. KubeNeuron keeps a plan of the
 replacement on the incident, so a controller that stops between the two
-calls, or a call whose answer is lost, still ends with the pool at its size:
+calls, or a call whose answer is lost, still ends with the size set back, or with the plan as needs-operator and the command to run:
 
 1. **Planned.** KubeNeuron reads the pool: the node count of every zone,
    which must be the same in all of them. The plan, with that count, is
@@ -119,6 +119,7 @@ calls, or a call whose answer is lost, still ends with the pool at its size:
    node's zone is below it, every other zone is at it, and no other GKE
    operation runs on the pool. The count is absolute, so a resent resize is
    the same resize, and no zone is ever lowered.
+   Setting the size back asks Google Cloud for a new instance; it does not guarantee one. If the zone has no capacity or quota for the machine type, the pool stays a node short until Google Cloud can create it. Add-first avoids deleting a node before its replacement exists.
 4. **Done.** The plan ends when every zone is back at its count.
 
 The replace step ends once the instance is gone; the controller finishes the
@@ -126,7 +127,7 @@ resize on its own, also after a restart or a change of leader, from what the
 plan recorded. A plan that stopped before the delete changed nothing and is
 made again. If the pool changed in a way KubeNeuron cannot set back safely
 (its zones now differ in size, it was put under the autoscaler, its zones
-changed), or the plan has not finished within an hour, the plan ends as
+changed), or the plan has not finished within an hour, also while nothing fails, the plan ends as
 needs-operator, nothing more is changed, and the incident's audit trail
 records the reason with the command that sets the size back, for example:
 
