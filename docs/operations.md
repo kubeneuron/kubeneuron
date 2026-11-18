@@ -1035,9 +1035,7 @@ Required` on them, exactly as for `Reboot`. Both are driven by the controller,
 never the agent — the agent dies the moment its instance stops and could never
 issue the Start that follows.
 
-Enable it with a provider-scoped `spec.cloud` block. The provider selects which
-per-provider block applies; the provider-specific settings live inside it, so a
-future cloud adds its own block rather than widening a shared top level:
+For EKS managed nodegroups, configure the controller's AWS region and cluster:
 
 ```yaml
 spec:
@@ -1045,31 +1043,27 @@ spec:
     provider: aws
     aws:
       region: us-east-1
-      # Set as the eks.amazonaws.com/role-arn annotation on the controller
-      # ServiceAccount, so IRSA grants the EC2 permissions below. Omit only if
-      # the role is attached to the controller some other way.
-      iamRoleARN: arn:aws:iam::123456789012:role/kubeneuron-recycle
+      clusterName: training
+      iamRoleARN: arn:aws:iam::123456789012:role/kubeneuron-recovery
 ```
 
-The `iamRoleARN` must grant an IRSA role scoped to the cluster's own instances:
+The operator uses `iamRoleARN` for the controller ServiceAccount's IRSA
+annotation. Omit it if the controller obtains its AWS role another way.
+Grant the controller role these read permissions for native repair checks:
 
-```json
-{
-  "Effect": "Allow",
-  "Action": ["ec2:StopInstances", "ec2:StartInstances",
-             "ec2:TerminateInstances", "ec2:DescribeInstances"],
-  "Resource": "*",
-  "Condition": {"StringEquals": {"aws:ResourceTag/kubernetes.io/cluster/<cluster>": "owned"}}
-}
-```
+- `eks:DescribeNodegroup`, `eks:ListUpdates`, `eks:DescribeUpdate`
+- `autoscaling:DescribeAutoScalingInstances`, `autoscaling:DescribeAutoScalingGroups`,
+  `autoscaling:DescribeScalingActivities`
+- `ec2:DescribeInstanceStatus`
 
-Each provider declares which primitives it can perform safely: AWS advertises
-both recycle (stop/start) and replace (terminate). If a playbook uses a cloud
-action the configured provider does not declare — a `RecycleNode` under a
-provider whose only restart is a soft reboot, say — the operator **rejects the
-installation at compile time** with a clear message, rather than the controller
-discovering the gap mid-incident. A provider new to KubeNeuron is a new package
-plus one registry line; no workflow or controller code changes to add it.
+For replacement, grant `ec2:TerminateInstances` scoped to the intended cluster
+instances. The controller probes this permission with an EC2 DryRun for the
+pinned instance and checks it again before termination. Replacement on EKS
+has yet to be validated on a live cluster. Start in KubeNeuron's `DryRun` mode.
+
+The operator accepts AWS playbooks containing recycle or replace. At runtime,
+EKS managed nodegroups support only terminate-first replacement. Stop/start
+recycle is disabled because the Auto Scaling group can replace a stopped node.
 
 Without a cloud provider configured at all, a `RecycleNode`/`ReplaceNode` step
 fails closed with a clear message rather than reporting a node recycled that was
@@ -1083,8 +1077,7 @@ steps:
   - {name: cordon,  action: Cordon}
   - {name: drain,   action: Drain, timeout: "10m"}
   - {name: replace, action: ReplaceNode, approval: Required, timeout: "10m"}
-# no verify/uncordon: the terminated node's incident closes as replaced, and
-# the ASG's new node attests through the normal pipeline on its own.
+# The ASG launches a successor after termination. Its readiness is unconfirmed.
 ```
 
 Only on a fleet whose nodes are *not* under an autoscaler does recycle-first make

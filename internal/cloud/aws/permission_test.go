@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	sdk "github.com/aws/aws-sdk-go-v2/aws"
@@ -46,6 +47,16 @@ func TestReplacePermission(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &permissionEC2{t: t, response: tc.response}
 			err := NewWithAPI(f).CheckReplacePermission(t.Context(), tc.id)
+			var apiErr smithy.APIError
+			if !tc.allowed && errors.As(tc.response, &apiErr) {
+				want := "EC2 TerminateInstances DryRun failed"
+				if apiErr.ErrorCode() == "UnauthorizedOperation" {
+					want = "ec2:TerminateInstances denied"
+				}
+				if !errors.Is(err, tc.response) || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), apiErr.ErrorCode()) {
+					t.Fatalf("expected diagnostic %q with AWS cause, got %v", want, err)
+				}
+			}
 			if (err == nil) != tc.allowed || f.calls != tc.calls {
 				t.Fatalf("permission err=%v calls=%d", err, f.calls)
 			}

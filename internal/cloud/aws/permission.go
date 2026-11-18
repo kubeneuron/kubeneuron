@@ -5,6 +5,7 @@ package aws
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	sdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -19,8 +20,16 @@ func (r *Recycler) CheckReplacePermission(ctx context.Context, id string) error 
 	}
 	_, err := r.api.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: []string{id}, DryRun: sdk.Bool(true)})
 	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "DryRunOperation" {
-		return nil
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "DryRunOperation":
+			return nil
+		case "UnauthorizedOperation":
+			return fmt.Errorf("ec2:TerminateInstances denied for %s: %w", id, err)
+		}
 	}
-	return errors.New("EC2 terminate permission unconfirmed")
+	if err != nil {
+		return fmt.Errorf("EC2 TerminateInstances DryRun failed for %s: %w", id, err)
+	}
+	return errors.New("EC2 TerminateInstances DryRun returned no authorization result")
 }

@@ -347,6 +347,8 @@ API is `v1alpha1`.
   permission probe for `ec2:TerminateInstances` on the pinned instance.
   Replacement on EKS has not yet been validated against a live cluster.
   Start in `DryRun` mode.
+  Replacement calls `TerminateInstances` first. The Auto Scaling group then
+  launches a successor. Adding a node before termination is not yet supported.
   Stop/start recycle stays disabled for managed groups. To inspect native repair for an EKS managed
   nodegroup, the controller role needs `eks:DescribeNodegroup`,
   `eks:ListUpdates`, `eks:DescribeUpdate`,

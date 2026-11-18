@@ -15,6 +15,8 @@ const providerName = "aws"
 
 // capabilities declares what EC2 can do: stop/start reinitializes the instance
 // in place (RecycleNode) and terminate hands it to the autoscaler (ReplaceNode).
+// The operator uses these provider-wide capabilities to compile playbooks.
+// The runtime managedProvider narrows them to replacement for EKS managed nodes.
 var capabilities = cloud.Capabilities{ReinitializeInPlace: true, Replace: true}
 
 // Recycler is the AWS cloud.Provider.

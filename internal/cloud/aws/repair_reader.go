@@ -79,7 +79,7 @@ func (r *repairReader) RepairPolicy(ctx context.Context, ref cloud.NodeRef) (clo
 	if *ng.NodeRepairConfig.Enabled {
 		return cloud.RepairPolicy{Mode: cloud.RepairOn, Reason: "EKS native node repair enabled"}, nil
 	}
-	return cloud.RepairPolicy{Mode: cloud.RepairOff, Reason: "EKS native node repair disabled"}, nil
+	return cloud.RepairPolicy{Mode: cloud.RepairOff, Reason: "EKS native node repair disabled; stop/start recycle unavailable in a managed nodegroup"}, nil
 }
 
 func (r *repairReader) OpenRepair(ctx context.Context, ref cloud.NodeRef) (cloud.RepairObservation, error) {
