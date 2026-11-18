@@ -2905,6 +2905,25 @@ exercise_incident_evidence() {
 		-H 'Content-Type: application/json' --data '{"kind":"progress","step":1}' \
 		-o /dev/null -w '%{http_code}' "https://${service_dns}:${training_port}/v1/training/reports")
 	[[ $code == 204 ]] || die "verified worker progress returned $code, want 204"
+	local snapshot="$work_dir/training-report.db" pod_uid incident_id
+	pod_uid=$("$KUBECTL_BIN" -n "$ns" get pod "$worker" -o jsonpath='{.metadata.uid}')
+	incident_id=$("$JQ_BIN" -er '.incident.id' <<<"$detail")
+	evidence_api --fail "http://127.0.0.1:${public_port}/api/v1/backup" -o "$snapshot"
+	python3 - "$snapshot" "$incident_id" "$job_uid" "$pod_uid" <<-'PYTHON'
+		import sqlite3
+		import sys
+		from pathlib import Path
+
+		with sqlite3.connect(Path(sys.argv[1]).as_uri() + "?mode=ro", uri=True) as db:
+		    row = db.execute(
+		        "SELECT step FROM training_progress WHERE incident_id=? AND job_uid=? AND pod_uid=?",
+		        sys.argv[2:],
+		    ).fetchone()
+		if row != (1,):
+		    raise SystemExit(f"expected persisted worker step 1, got {row}")
+	PYTHON
+	note "verified worker step 1 in the SQLite snapshot for the captured incident, Job and pod"
+
 
 	"$JQ_BIN" -e '
 		.evidence.vendor_software.state == "degraded" and
