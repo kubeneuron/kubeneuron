@@ -141,3 +141,26 @@ func TestAutomaticReplacementCondition(t *testing.T) {
 		t.Fatal("an Approval policy kept the condition")
 	}
 }
+
+func TestAutomaticPolicyChecksEscalatedActions(t *testing.T) {
+	policies, _ := testPolicyFixture()
+	policy := &policies[0]
+	policy.Spec.Mode, policy.Spec.Automatic = "Automatic", automaticSpec()
+	root := policy.Spec.PlaybookRef
+	books := map[string]*playbook.Playbook{
+		root:       {Name: root, Steps: []playbook.Step{{Action: "notify.observe"}}, OnFailure: playbook.OnFailure{EscalateTo: "fallback"}},
+		"fallback": {Name: "fallback", Steps: []playbook.Step{{Action: "platform.replace_node", Approval: "required"}}},
+	}
+	installation := testKubeNeuron()
+	installation.Labels = map[string]string{"kubeneuron.io/policy-pack": "bare-metal-alpha"}
+	if _, err := compilePolicies(installation, policies, books); err != nil {
+		t.Fatalf("cloud replacement escalation: %v", err)
+	}
+	for _, hostAction := range []string{"agent.reboot", "agent.gpu_reset", "agent.run_diag", "platform.quiesce_accelerator_stack", "platform.restore_accelerator_stack"} {
+		books["fallback"].Steps[0].Action = hostAction
+		_, err := compilePolicies(installation, policies, books)
+		if err == nil || !strings.Contains(err.Error(), hostAction) || !strings.Contains(err.Error(), "fallback") {
+			t.Errorf("escalation to %s: got %v, want error naming action and fallback", hostAction, err)
+		}
+	}
+}
