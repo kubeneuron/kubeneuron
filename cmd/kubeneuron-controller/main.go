@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
@@ -30,6 +31,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/actuator"
 	"github.com/kubeneuron/kubeneuron/internal/actuator/agentrpc"
 	"github.com/kubeneuron/kubeneuron/internal/agentauth"
+	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/controller"
 	"github.com/kubeneuron/kubeneuron/internal/httpapi"
@@ -54,16 +56,17 @@ import (
 var version = "dev"
 
 type agentServerConfig struct {
-	ListenAddr       string
-	TLSCertFile      string
-	TLSKeyFile       string
-	ClientCAFile     string
-	TokenAudience    string
-	Namespace        string
-	ServiceAccount   string
-	DaemonSet        string
-	InstallationName string
-	InstallationUID  string
+	TrainingListenAddr string
+	ListenAddr         string
+	TLSCertFile        string
+	TLSKeyFile         string
+	ClientCAFile       string
+	TokenAudience      string
+	Namespace          string
+	ServiceAccount     string
+	DaemonSet          string
+	InstallationName   string
+	InstallationUID    string
 }
 
 const (
@@ -78,6 +81,7 @@ func main() {
 		listenAddr             = flag.String("listen", ":8080", "webhook, health, and public API listen address")
 		publicTLSCert          = flag.String("public-tls-cert", "", "serving certificate for the public listener; empty serves plain HTTP")
 		publicTLSKey           = flag.String("public-tls-key", "", "serving private key for the public listener")
+		trainingListen         = flag.String("training-report-listen", "", "HTTPS training report listen address; empty disables the endpoint")
 		agentListen            = flag.String("agent-listen", ":8443", "mTLS agent API listen address")
 		agentTLSCert           = flag.String("agent-tls-cert", "", "controller serving certificate for the agent API")
 		agentTLSKey            = flag.String("agent-tls-key", "", "controller serving private key for the agent API")
@@ -131,16 +135,17 @@ func main() {
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	agentServer := agentServerConfig{
-		ListenAddr:       *agentListen,
-		TLSCertFile:      *agentTLSCert,
-		TLSKeyFile:       *agentTLSKey,
-		ClientCAFile:     *agentClientCA,
-		TokenAudience:    *agentAudience,
-		Namespace:        *agentNamespace,
-		ServiceAccount:   *agentServiceAccount,
-		DaemonSet:        *agentDaemonSet,
-		InstallationName: *installationName,
-		InstallationUID:  *installationUID,
+		ListenAddr:         *agentListen,
+		TrainingListenAddr: *trainingListen,
+		TLSCertFile:        *agentTLSCert,
+		TLSKeyFile:         *agentTLSKey,
+		ClientCAFile:       *agentClientCA,
+		TokenAudience:      *agentAudience,
+		Namespace:          *agentNamespace,
+		ServiceAccount:     *agentServiceAccount,
+		DaemonSet:          *agentDaemonSet,
+		InstallationName:   *installationName,
+		InstallationUID:    *installationUID,
 	}
 	if err := run(log, *listenAddr, agentServer, runtimeConfigPaths{
 		policies:    *configPath,
@@ -620,10 +625,36 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 		MaxHeaderBytes:    serverMaxHeaders,
 		TLSConfig:         agentTLSConfig,
 	}
+	var trainingServer *http.Server
+	if addr := agentServer.TrainingListenAddr; addr != "" {
+		if addr == listenAddr || addr == agentServer.ListenAddr || agentServer.InstallationUID == "" {
+			return fmt.Errorf("training reports require a separate listen address and an installation UID")
+		}
+		receiver := &checkpoint.TrainingReceiver{
+			Authenticate: func(r *http.Request) (*corev1.Pod, error) {
+				return agentauth.TrainingReportPod(r, kubePlatform.Client(), agentServer.InstallationUID)
+			},
+			Monitored: ctrl.TrainingNodeMonitored,
+			Owner:     kubePlatform.TrainingReportOwner,
+			Record:    ctrl.RecordTrainingReport,
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/training/reports", func(w http.ResponseWriter, r *http.Request) {
+			if !leading.Load() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			receiver.ServeHTTP(w, r)
+		})
+		trainingServer = &http.Server{Addr: addr, Handler: mux, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13}, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: serverReadTimeout, WriteTimeout: serverWriteTimeout, IdleTimeout: serverIdleTimeout, MaxHeaderBytes: serverMaxHeaders}
+	}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		if trainingServer != nil {
+			_ = trainingServer.Shutdown(shutdownCtx)
+		}
 		_ = publicServer.Shutdown(shutdownCtx)
 		_ = secureAgentServer.Shutdown(shutdownCtx)
 	}()
@@ -633,7 +664,13 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 		"platform", plat.Name(), "dry_run", gate.DryRun(),
 		"playbooks", len(books), "policies", len(policies))
 
-	serverErr := make(chan error, 2)
+	serverErr := make(chan error, 3)
+	if trainingServer != nil {
+		go func() {
+			serverErr <- serve("training HTTPS", trainingServer.ListenAndServeTLS(agentServer.TLSCertFile, agentServer.TLSKeyFile))
+			stop()
+		}()
+	}
 	go func() {
 		if publicTLSCert != "" {
 			serverErr <- serve("public HTTPS", publicServer.ListenAndServeTLS(publicTLSCert, publicTLSKey))
