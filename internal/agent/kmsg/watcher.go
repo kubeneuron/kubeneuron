@@ -178,6 +178,10 @@ type Watcher struct {
 	refusalLogged map[string]bool
 }
 
+// emptyReadRetry is how soon a read that found no data on a descriptor
+// outside Go's poller is tried again.
+const emptyReadRetry = 20 * time.Millisecond
+
 // NewWatcher builds a watcher for /dev/kmsg.
 func NewWatcher() *Watcher { return &Watcher{Path: "/dev/kmsg"} }
 
@@ -261,8 +265,22 @@ func (w *Watcher) Watch(ctx context.Context) (<-chan Event, error) {
 		defer closeFile()
 
 		r := bufio.NewReader(f)
+		var partial string
 		for {
 			line, err := r.ReadString('\n')
+			if errors.Is(err, syscall.EAGAIN) {
+				// darwin keeps FIFOs out of Go's poller, so a read on the
+				// empty non-blocking FIFO returns EAGAIN instead of parking.
+				// Keep the partial line and read again shortly.
+				partial += line
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(emptyReadRetry):
+				}
+				continue
+			}
+			line, partial = partial+line, ""
 			if len(line) > 0 {
 				seq, hasSeq := parseSeq(line)
 				skip := haveCursor && hasSeq && seq <= resumeSeq

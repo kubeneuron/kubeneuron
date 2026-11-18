@@ -141,6 +141,47 @@ func TestWatchStreamsXIDEventsFromAFIFO(t *testing.T) {
 	}
 }
 
+// TestWatchWaitsOnAnEmptyFIFO starts reading before anything is written, and
+// splits a line across two writes: the watcher must wait for the rest of the
+// line rather than end the stream or parse half of it.
+func TestWatchWaitsOnAnEmptyFIFO(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kmsg")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	writer, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events, err := (&Watcher{Path: path}).Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := writer.WriteString("6,1000,100;NVRM: Xid (PCI:0000:3b:00): 7"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := writer.WriteString("9, pid=1234, GPU has fallen off the bus.\n"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case ev, open := <-events:
+		if !open {
+			t.Fatal("the stream ended on an empty FIFO")
+		}
+		if ev.XID != 79 {
+			t.Fatalf("XID = %d, want 79 from the whole line", ev.XID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no event after the line was completed")
+	}
+}
+
 func TestWatchSeeksToTailOfRegularFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "kmsg")
 	historical := "6,1,1;NVRM: Xid (PCI:0000:3b:00): 79, pid=1, historical line\n"
