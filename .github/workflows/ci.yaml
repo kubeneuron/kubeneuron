@@ -384,6 +384,17 @@ jobs:
           assert hc['args'] == kc['args'] and hc['image'] == kc['image'], 'Deployment diverges'
           print('chart matches kustomize manifests')
 
+      - name: Chart enables node-level actions only on opt-in
+        shell: python
+        run: |
+          import subprocess, yaml
+          flag = '--allow-node-level-actions'
+          for overrides, expected in [([], []), (['--set', 'operator.allowNodeLevelActions=true'], [flag + '=true'])]:
+              rendered = subprocess.check_output(['helm', 'template', 'kubeneuron', 'deploy/helm/kubeneuron', *overrides])
+              deployment = next(d for d in yaml.safe_load_all(rendered) if d and d['kind'] == 'Deployment')
+              args = deployment['spec']['template']['spec']['containers'][0]['args']
+              assert [arg for arg in args if arg.split('=')[0] == flag] == expected, args
+
       - name: Chart passes agentAdapters to the operator
         shell: python
         run: |

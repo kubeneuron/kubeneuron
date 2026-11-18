@@ -25,11 +25,13 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
-            - --allow-node-level-actions={{ .Values.operator.allowNodeLevelActions }}
             - --leader-elect=true
             - --leader-election-namespace=$(POD_NAMESPACE)
             - --metrics-bind-address=:8080
             - --health-probe-bind-address=:8081
+            {{- if .Values.operator.allowNodeLevelActions }}
+            - --allow-node-level-actions=true
+            {{- end }}
             {{- with .Values.agentAdapters }}
             - {{ printf "--default-agent-adapters=%s" (toJson .) | quote }}
             {{- end }}
