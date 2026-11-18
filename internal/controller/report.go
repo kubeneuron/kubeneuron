@@ -132,6 +132,28 @@ func (c *Controller) RecoveryReport(ctx context.Context, window time.Duration) (
 		if err != nil {
 			return nil, err
 		}
+		var drainAt time.Time
+		for _, e := range trail {
+			if e == nil {
+				continue
+			}
+			if e.ToState == types.StateOpen && e.FromState != e.ToState {
+				drainAt = time.Time{}
+			}
+			if !e.DryRun && e.ToState == types.StateExecuting && e.FromState != e.ToState &&
+				(e.Result == auditStepStartResult("platform.drain") || e.Result == auditExecutingResult("platform.drain")) {
+				drainAt = e.Time
+			}
+		}
+		var receipts map[string]time.Time
+		if reader, ok := c.store.(interface {
+			TrainingCheckpointsAt(context.Context, string, time.Time) (map[string]time.Time, error)
+		}); ok && !drainAt.IsZero() {
+			receipts, err = reader.TrainingCheckpointsAt(ctx, row.ID, drainAt)
+			if err != nil {
+				return nil, err
+			}
+		}
 		ready := types.VerifiedInfrastructureTime(trail)
 		var confirmed map[string]time.Time
 		if ready != nil {
@@ -145,6 +167,10 @@ func (c *Controller) RecoveryReport(ctx context.Context, window time.Duration) (
 				continue
 			}
 			entry := types.JobRecoveryTiming{Namespace: job.Namespace, Owner: *job.Owner}
+			if received, ok := receipts[job.Owner.UID]; ok {
+				age := drainAt.Sub(received).Seconds()
+				entry.CheckpointAgeAtDrainSeconds = &age
+			}
 			if ready != nil && !ready.Before(opened[row.ID]) {
 				elapsed := ready.Sub(opened[row.ID]).Seconds()
 				entry.InfrastructureReadySeconds = &elapsed

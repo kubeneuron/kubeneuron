@@ -23,10 +23,11 @@ type RecoveryIncident struct {
 
 // JobRecoveryTiming measures seconds from the incident opening to each observed result.
 type JobRecoveryTiming struct {
-	Namespace                  string        `json:"namespace"`
-	Owner                      TrainingOwner `json:"owner"`
-	InfrastructureReadySeconds *float64      `json:"infrastructure_ready_seconds,omitempty"`
-	ProgressConfirmedSeconds   *float64      `json:"progress_confirmed_seconds,omitempty"`
+	CheckpointAgeAtDrainSeconds *float64      `json:"checkpoint_age_at_drain_seconds,omitempty"`
+	Namespace                   string        `json:"namespace"`
+	Owner                       TrainingOwner `json:"owner"`
+	InfrastructureReadySeconds  *float64      `json:"infrastructure_ready_seconds,omitempty"`
+	ProgressConfirmedSeconds    *float64      `json:"progress_confirmed_seconds,omitempty"`
 }
 
 // RecoveryReport answers the question a capacity owner asks about a window:

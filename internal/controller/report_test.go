@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -715,5 +717,41 @@ func TestReportCapsIncidentDetailsPerMode(t *testing.T) {
 		if len(details) != 200 || details[0].DegradedGPUHours != 201 || details[199].DegradedGPUHours != 2 {
 			t.Fatal("expected the top 200 incidents by degraded GPU-hours")
 		}
+	}
+}
+
+func TestReportCheckpointAgeAtDrain(t *testing.T) {
+	ctx := t.Context()
+	c, st, _ := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
+	id := "job-report"
+	opened := time.Now().UTC().Add(-time.Minute)
+	inc := &types.Incident{ID: id, State: types.StateEvaluating, Class: types.ClassFellOffBus, Target: types.Target{Node: "n1"}, OpenedAt: opened, UpdatedAt: opened}
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	workers := []types.TrainingWorker{{Namespace: "ml", Owners: []types.TrainingOwner{{UID: "job"}}}}
+	if err := st.SaveTrainingWorkers(ctx, id, workers); err != nil {
+		t.Fatal(err)
+	}
+	drain := time.Now().UTC().Add(-time.Second)
+	for i, ts := range []time.Time{drain.Add(-30 * time.Second), drain.Add(time.Second)} {
+		r := checkpoint.TrainingReport{Kind: "checkpoint", CheckpointID: fmt.Sprintf("epoch%d", i)}
+		if err := st.SaveTrainingReport(ctx, id, "job", "pod", r, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: drain, FromState: types.StateEvaluating, ToState: types.StateExecuting, Actor: "policy:test", Result: auditStepStartResult("platform.drain")}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := c.RecoveryReport(ctx, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.IncidentDetails) != 1 || len(report.IncidentDetails[0].Jobs) != 1 {
+		t.Fatalf("missing job: %+v", report.IncidentDetails)
+	}
+	job := report.IncidentDetails[0].Jobs[0]
+	if job.CheckpointAgeAtDrainSeconds == nil || *job.CheckpointAgeAtDrainSeconds != 30 || job.InfrastructureReadySeconds != nil || job.ProgressConfirmedSeconds != nil {
+		t.Fatalf("unexpected timings: %+v", job)
 	}
 }
