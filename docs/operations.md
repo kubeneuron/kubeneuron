@@ -1072,6 +1072,13 @@ goes through the AKS agent pool API and recycle is not available; see
 [Replacing GPU nodes on AKS](cloud-azure.md) for setup, the minimal role and
 what the step deletes.
 
+On GKE (experimental, not validated against a live GKE cluster; start in
+DryRun), replacement deletes the node's instance from its node pool's managed
+instance group and sets a fixed-size pool's size back through GKE; recycle is
+not available, and Autopilot clusters are observe-only. See
+[Replacing GPU nodes on GKE](cloud-gcp.md) for setup, the roles and what the
+step deletes.
+
 Without a cloud provider configured at all, a `RecycleNode`/`ReplaceNode` step
 fails closed with a clear message rather than reporting a node recycled that was
 never touched.

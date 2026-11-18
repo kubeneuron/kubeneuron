@@ -542,13 +542,37 @@ spec:
                     - resourceGroup
                     - subscriptionID
                     type: object
+                  gcp:
+                    description: GCP carries the GKE configuration. Required when
+                      provider is gcp.
+                    properties:
+                      clusterName:
+                        description: ClusterName is the name of the GKE cluster.
+                        pattern: ^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$
+                        type: string
+                      location:
+                        description: Location is the cluster's region or zone (e.g.
+                          us-central1).
+                        pattern: ^[a-z]+-[a-z]+[0-9]+(-[a-z])?$
+                        type: string
+                      project:
+                        description: Project is the ID of the Google Cloud project
+                          of the cluster.
+                        pattern: ^[a-z][-a-z0-9]{4,28}[a-z0-9]$
+                        type: string
+                    required:
+                    - clusterName
+                    - location
+                    - project
+                    type: object
                   provider:
                     description: |-
-                      Provider is the cloud backing the nodes: "aws" (EC2 and EKS) or "azure"
-                      (AKS, experimental).
+                      Provider is the cloud backing the nodes: "aws" (EC2 and EKS), "azure"
+                      (AKS, experimental) or "gcp" (GKE, experimental).
                     enum:
                     - aws
                     - azure
+                    - gcp
                     type: string
                 required:
                 - provider
@@ -558,6 +582,8 @@ spec:
                   rule: self.provider != 'aws' || has(self.aws)
                 - message: spec.cloud.azure is required when provider is azure
                   rule: self.provider != 'azure' || has(self.azure)
+                - message: spec.cloud.gcp is required when provider is gcp
+                  rule: self.provider != 'gcp' || has(self.gcp)
               controller:
                 description: ComponentSpec configures a managed controller component.
                 properties:

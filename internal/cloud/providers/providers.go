@@ -11,4 +11,5 @@ package providers
 import (
 	_ "github.com/kubeneuron/kubeneuron/internal/cloud/aws"
 	_ "github.com/kubeneuron/kubeneuron/internal/cloud/azure"
+	_ "github.com/kubeneuron/kubeneuron/internal/cloud/gcp"
 )

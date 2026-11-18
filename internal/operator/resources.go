@@ -455,6 +455,13 @@ func controllerDeployment(installation *kubeneuronv1alpha1.KubeNeuron, snapshot 
 			corev1.EnvVar{Name: "KUBENEURON_AKS_CLUSTER", Value: azure.ClusterName},
 		)
 	}
+	if cloud := installation.Spec.Cloud; cloud != nil && cloud.Provider == "gcp" && cloud.GCP != nil {
+		container.Env = append(container.Env,
+			corev1.EnvVar{Name: "KUBENEURON_GKE_PROJECT", Value: cloud.GCP.Project},
+			corev1.EnvVar{Name: "KUBENEURON_GKE_LOCATION", Value: cloud.GCP.Location},
+			corev1.EnvVar{Name: "KUBENEURON_GKE_CLUSTER", Value: cloud.GCP.ClusterName},
+		)
+	}
 	if installation.Spec.TLS.PublicServerSecretRef != nil {
 		// Probes must speak the listener's protocol once it serves TLS.
 		container.ReadinessProbe.HTTPGet.Scheme = corev1.URISchemeHTTPS

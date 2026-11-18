@@ -171,7 +171,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 
-===== google.golang.org/grpc@v1.83.2/NOTICE.txt =====
+===== google.golang.org/grpc@v1.84.0/NOTICE.txt =====
 Copyright 2014 gRPC authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");

@@ -23,7 +23,9 @@ API is `v1alpha1`.
   audit trail and `kubeneuronctl incident show`; the overlap is measured by
   `kubeneuron_replacement_overlap_seconds`. The Azure provider implements
   it for fixed-size AKS node pools (experimental, not validated against a
-  live AKS cluster); elsewhere `AddFirst` still holds before
+  live AKS cluster), and the GCP provider for fixed-size GKE Standard node
+  pools in one zone (experimental, not validated against a live GKE cluster;
+  start in DryRun); elsewhere `AddFirst` still holds before
   the cordon, and `RemoveFirst` is unchanged. See [Add-first replacement](docs/playbook-authoring.md#add-first-replacement).
 
 - **Azure provider for AKS (experimental, not validated on AKS).**
@@ -39,6 +41,22 @@ API is `v1alpha1`.
   for this provider only, and itself now holds `list` there to grant it.
   See [Replacing GPU nodes on AKS](docs/cloud-azure.md) for the minimal
   role and what the step deletes.
+
+- **GCP provider for GKE (experimental, not validated against a live GKE
+  cluster; start in DryRun).** `spec.cloud.provider: gcp` with
+  `spec.cloud.gcp` (project, location, cluster) replaces a GPU node on GKE
+  Standard by deleting its instance from the node pool's managed instance
+  group, a Compute Engine call GKE does not document for node pools. A
+  fixed-size pool's size is set back through GKE; an autoscaled pool keeps
+  its size. Add-first grows a fixed-size pool in one zone by one through GKE
+  and deletes only named instances; a pool is never shrunk through GKE.
+  Recycle is not available. On pools with auto-repair, recovery runs only on
+  Ready nodes with no auto-repair or other GKE operation running on the pool
+  or cluster; Autopilot clusters are observe-only. Host maintenance is
+  recorded and starts no step. Authentication is Application Default
+  Credentials, on GKE Workload Identity Federation, only. See
+  [Replacing GPU nodes on GKE](docs/cloud-gcp.md) for the roles and what the
+  step deletes.
 
 - **Cloud contract for a repair that cannot be turned off.** A provider can
   report `not-ready-only`: its cloud repairs only NotReady nodes, so

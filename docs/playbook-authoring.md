@@ -447,7 +447,9 @@ approval does not lift them:
   named. Where the node's provider or pool cannot prepare a replacement
   first, a replace step under `AddFirst` is held as unavailable and no
   approval is asked; it is never done the other way. Add-first is available
-  on fixed-size AKS node pools; on other providers and pools, a policy that
+  on fixed-size AKS node pools and on fixed-size GKE Standard node pools in one
+  zone (both experimental; on GKE, not validated against a live GKE cluster;
+  start in DryRun); on other providers and pools, a policy that
   needs node replacement names `RemoveFirst` explicitly. See [Add-first replacement](#add-first-replacement).
 - `replacement.successorTimeout` (default `30m`, from `5m` to `2h`): how long
   the prepared replacement may take to become ready under `AddFirst`.

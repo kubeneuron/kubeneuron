@@ -37,15 +37,34 @@ const (
 // nothing here is cloud-specific except which block the provider selects.
 // +kubebuilder:validation:XValidation:rule="self.provider != 'aws' || has(self.aws)",message="spec.cloud.aws is required when provider is aws"
 // +kubebuilder:validation:XValidation:rule="self.provider != 'azure' || has(self.azure)",message="spec.cloud.azure is required when provider is azure"
+// +kubebuilder:validation:XValidation:rule="self.provider != 'gcp' || has(self.gcp)",message="spec.cloud.gcp is required when provider is gcp"
 type CloudSpec struct {
-	// Provider is the cloud backing the nodes: "aws" (EC2 and EKS) or "azure"
-	// (AKS, experimental).
-	// +kubebuilder:validation:Enum=aws;azure
+	// Provider is the cloud backing the nodes: "aws" (EC2 and EKS), "azure"
+	// (AKS, experimental) or "gcp" (GKE, experimental).
+	// +kubebuilder:validation:Enum=aws;azure;gcp
 	Provider string `json:"provider"`
 	// AWS carries the AWS-specific configuration. Required when provider is aws.
 	AWS *AWSCloudSpec `json:"aws,omitempty"`
 	// Azure carries the AKS configuration. Required when provider is azure.
 	Azure *AzureCloudSpec `json:"azure,omitempty"`
+	// GCP carries the GKE configuration. Required when provider is gcp.
+	GCP *GCPCloudSpec `json:"gcp,omitempty"`
+}
+
+// GCPCloudSpec names the GKE cluster whose node pools replace GPU nodes. The
+// controller authenticates with Application Default Credentials only, which
+// on GKE are its Workload Identity Federation token: no key is read from here
+// or anywhere else.
+type GCPCloudSpec struct {
+	// Project is the ID of the Google Cloud project of the cluster.
+	// +kubebuilder:validation:Pattern=`^[a-z][-a-z0-9]{4,28}[a-z0-9]$`
+	Project string `json:"project"`
+	// Location is the cluster's region or zone (e.g. us-central1).
+	// +kubebuilder:validation:Pattern=`^[a-z]+-[a-z]+[0-9]+(-[a-z])?$`
+	Location string `json:"location"`
+	// ClusterName is the name of the GKE cluster.
+	// +kubebuilder:validation:Pattern=`^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$`
+	ClusterName string `json:"clusterName"`
 }
 
 // AzureCloudSpec names the AKS cluster whose agent pools replace GPU nodes.

@@ -117,7 +117,7 @@ func main() {
 		leaderElectionNS       = flag.String("leader-election-namespace", os.Getenv("POD_NAMESPACE"), "namespace for the leader-election Lease (default: POD_NAMESPACE)")
 		leaderElectionName     = flag.String("leader-election-name", "", "Lease name (default: <installation-name>-controller)")
 		platformName           = flag.String("platform", "kubernetes", "platform: kubernetes")
-		cloudProvider          = flag.String("cloud-provider", "", "cloud provider for node recycle/replace: empty (disabled) | aws. AWS needs an IRSA role with ec2:Stop/Start/Terminate/DescribeInstances.")
+		cloudProvider          = flag.String("cloud-provider", "", "cloud provider for node recycle/replace: empty (disabled) | aws | azure | gcp. AWS needs an IRSA role with ec2:Stop/Start/Terminate/DescribeInstances.")
 		cloudRegion            = flag.String("cloud-region", os.Getenv("AWS_REGION"), "cloud region for the provider (default: AWS_REGION)")
 		kubeconfig             = flag.String("kubeconfig", "", "kubeconfig path (out-of-cluster)")
 		showVersion            = flag.Bool("version", false, "print version and exit")

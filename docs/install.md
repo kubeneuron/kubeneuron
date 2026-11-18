@@ -18,7 +18,9 @@ cloud-recycle playbook. The recycle ladder additionally requires
 `spec.recycle.enabled: true` and escalates to replacement. The default
 replacement strategy is `AddFirst`, which needs a provider that can prepare
 a replacement first: today, Azure on a fixed-size AKS node pool
-(experimental, not validated against a live AKS cluster). Elsewhere,
+(experimental, not validated against a live AKS cluster) and GCP on a
+fixed-size GKE Standard node pool in one zone (experimental, not validated
+against a live GKE cluster; start in DryRun). Elsewhere,
 an incident whose ladder includes replacement stays in `EVALUATING` before cordon. Its
 audit records `recovery-unavailable` and explains that the provider lacks
 add-first and the policy has not selected remove-first. See
