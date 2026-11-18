@@ -602,13 +602,17 @@ func degradedInterval(inc *types.Incident, now time.Time) (start, end time.Time)
 
 // affectedGPUCount is how many accelerators an incident covers — the same
 // rule recordRecoveryOutcome applies, so the report and the Prometheus
-// counter cannot disagree about what a GPU-hour is: one for a GPU-scoped
-// incident, the node's registered inventory for a node-scoped one. Unknown
+// counter cannot disagree about what a GPU-hour is: the GPUs recorded when
+// it opened; without that record, one for a GPU-scoped incident, the node's
+// registered inventory for a node-scoped one. Unknown
 // inventory counts as one and is reported as an assumption, because
 // undercounting is the honest failure direction for a capacity number.
 func affectedGPUCount(inc *types.Incident, gpusPerNode map[string]int) (gpus int, assumed bool) {
 	// The same rule as affectedGPUs, asked of the same predicate, because these
 	// two numbers are supposed to agree and drifted apart once already.
+	if n, ok := recordedGPUs(inc); ok {
+		return n, false
+	}
 	if inc.Target.IsDeviceScoped() {
 		return 1, false
 	}

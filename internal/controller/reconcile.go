@@ -1091,8 +1091,9 @@ func (c *Controller) DegradedGPUs(ctx context.Context) (map[metrics.DegradedKey]
 	return out, nil
 }
 
-// affectedGPUs is how many GPUs the incident covered — none on a node whose
-// accelerators are TPU chips or AWS Neuron devices: one for a
+// affectedGPUs is how many GPUs the incident covered: the GPUs it recorded
+// when it opened, the count its report rows use. Without that record, none
+// on a node whose accelerators are TPU chips or AWS Neuron devices: one for a
 // DEVICE-scoped incident (a UUID or a bus address names one card), the node's
 // whole inventory for a node-scoped one.
 // Unknown inventory counts as one — undercounting is the honest failure
@@ -1107,8 +1108,8 @@ func (c *Controller) DegradedGPUs(ctx context.Context) (map[metrics.DegradedKey]
 func (c *Controller) affectedGPUs(ctx context.Context, inc *types.Incident) int {
 	// GPUs only: an incident that recorded TPU chips or AWS Neuron devices
 	// is no GPU.
-	if len(inc.Accelerators) > 0 && !coversGPU(inc, nil) {
-		return 0
+	if n, ok := recordedGPUs(inc); ok {
+		return n
 	}
 	// One device, whether or not we know its UUID. A bus address names a card
 	// as precisely as a UUID does for this purpose — see IsDeviceScoped.

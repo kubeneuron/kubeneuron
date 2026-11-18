@@ -334,6 +334,13 @@ API is `v1alpha1`.
   or AWS Neuron devices is no longer charged there as one GPU; the new
   per-resource fields count it in its own unit.
 
+- The recovery report's GPU-hour fields and
+  `kubeneuron_degraded_gpu_seconds_total` count a node-scoped incident with
+  the GPUs it recorded when it opened, not the node's inventory when the
+  report or the metric is read, so they agree with `accelerator_groups` after
+  a node's inventory changes. Incidents opened before the record existed are
+  counted from the inventory as before.
+
 - **Re-running the installer no longer replaces what an installation
   has.** `deploy/install.sh` on an existing installation used to generate a
   new operator API token, webhook token and panel password and re-apply the

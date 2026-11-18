@@ -78,6 +78,22 @@ func agentGPUResource(vendor types.AcceleratorVendor, gpus []types.GPUInfo) stri
 	return resource
 }
 
+// recordedGPUs is how many GPUs an incident recorded when it opened, the
+// same count its rows per resource use; false when it recorded nothing, and
+// the inventory now is all there is.
+func recordedGPUs(inc *types.Incident) (int, bool) {
+	if len(inc.Accelerators) == 0 {
+		return 0, false
+	}
+	n := 0
+	for _, a := range inc.Accelerators {
+		if a.Unit == types.DeviceUnitGPU && a.Count > 0 {
+			n += int(a.Count)
+		}
+	}
+	return n, true
+}
+
 // coversGPU reports whether an incident belongs in the report's GPU-hour
 // fields, which count nvidia.com/gpu and amd.com/gpu only. An incident whose
 // recorded devices are none of them does not; one with no record is judged

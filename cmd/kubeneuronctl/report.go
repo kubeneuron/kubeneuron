@@ -270,7 +270,7 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		if len(sim.Groups) > 0 || sim.DeviceCountUnknown != nil {
 			_, _ = fmt.Fprintln(out)
 		}
-		if err := printAcceleratorHours(out, sim.AcceleratorHours, "  "); err != nil {
+		if err := printAcceleratorTable(out, sim.AcceleratorHours, "  ", "WOULD RECOVER", "WOULD SAVE (ESTIMATE)", "would recover"); err != nil {
 			return err
 		}
 		if estimate := sim.WouldHaveSaved; estimate != nil && simGPUs {
@@ -354,13 +354,19 @@ func reportDuration(row types.RecoveryIncident) string {
 // node-hours of incidents whose device count is unknown, and the total cost
 // estimate when every resource shown has a rate.
 func printAcceleratorHours(out io.Writer, h types.AcceleratorHours, indent string) error {
+	return printAcceleratorTable(out, h, indent, "RECOVERED", "SAVED (ESTIMATE)", "recovered")
+}
+
+// printAcceleratorTable is printAcceleratorHours with the words of what
+// happened: a simulation says what would have.
+func printAcceleratorTable(out io.Writer, h types.AcceleratorHours, indent, recoveredTitle, savedTitle, recoveredRow string) error {
 	if len(h.Groups) == 0 && h.DeviceCountUnknown == nil {
 		return nil
 	}
 	w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
 	for _, g := range h.Groups {
 		_, _ = fmt.Fprintf(w, "%s%s — %s\n", indent, acceleratorGroupTitle(g.Group), g.Unit)
-		_, _ = fmt.Fprintf(w, "%s  RESOURCE\tINCIDENTS\tDEGRADED\tRECOVERED\tSAVED (ESTIMATE)\tCOST EQUIVALENT (ESTIMATE)\n", indent)
+		_, _ = fmt.Fprintf(w, "%s  RESOURCE\tINCIDENTS\tDEGRADED\t%s\t%s\tCOST EQUIVALENT (ESTIMATE)\n", indent, recoveredTitle, savedTitle)
 		for _, r := range g.Resources {
 			saved, cost := "Manual recovery baseline not set", "-"
 			if e := r.SavedEstimate; e != nil {
@@ -378,7 +384,7 @@ func printAcceleratorHours(out io.Writer, h types.AcceleratorHours, indent strin
 		_, _ = fmt.Fprintf(w, "%sDevice count unknown — node-hours\n", indent)
 		_, _ = fmt.Fprintf(w, "%s  degraded\t%s\t(%s; no device count was recorded, so no device-hours and no cost)\n",
 			indent, gpuHours(u.DegradedNodeHours), incidents(u.Incidents))
-		_, _ = fmt.Fprintf(w, "%s  recovered\t%s\n", indent, gpuHours(u.RecoveredNodeHours))
+		_, _ = fmt.Fprintf(w, "%s  %s\t%s\n", indent, recoveredRow, gpuHours(u.RecoveredNodeHours))
 	}
 	if err := w.Flush(); err != nil {
 		return err

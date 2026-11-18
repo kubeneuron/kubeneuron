@@ -146,7 +146,10 @@ incidents, and carries no cost.
 
 The GPU-hour numbers above (`degraded_gpu_hours`, `recovered_gpu_hours`,
 `savings_estimate` and the rest) count `nvidia.com/gpu` and `amd.com/gpu` only:
-GPU only; use `accelerator_groups` for the other accelerators.
+GPU only; use `accelerator_groups` for the other accelerators. They count an
+incident with the GPUs it recorded when it opened, the same count as
+`accelerator_groups`; only an incident with no record is counted from the
+node's inventory when the report is read.
 
 In the text of `kubeneuronctl report`, the GPU-hour lines (recovered, saved,
 degraded, per class, per incident and in the simulated block) are printed only

@@ -33,8 +33,8 @@ INCIDENT  NODE      VENDOR   STATE     SIMULATED DECISION TIME
 inc-3     tpu-node  unknown  RESOLVED  30m0s
 
   TPU — TPU chip-hours
-    RESOURCE        INCIDENTS  DEGRADED  RECOVERED  SAVED (ESTIMATE)                        COST EQUIVALENT (ESTIMATE)
-    google.com/tpu  1          12.0      6.0        3.0 TPU chip-hours, manual baseline 4h  rate not set
+    RESOURCE        INCIDENTS  DEGRADED  WOULD RECOVER  WOULD SAVE (ESTIMATE)                   COST EQUIVALENT (ESTIMATE)
+    google.com/tpu  1          12.0      6.0            3.0 TPU chip-hours, manual baseline 4h  rate not set
 
 
 These are decisions, not repairs: every one of them reached RESOLVED against a

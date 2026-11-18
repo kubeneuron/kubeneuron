@@ -179,3 +179,26 @@ func TestIncidentRecordsItsDevicesAndIsNoGPU(t *testing.T) {
 		t.Fatalf("a TPU incident charged %d GPUs", n)
 	}
 }
+
+// An incident that recorded 8 GPUs on a node that has 4 when the report is
+// read counts 8 everywhere: in its row, the GPU-hour fields and its class.
+func TestRecoveryReportGPUHoursFromTheRecord(t *testing.T) {
+	to := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	nv := withDevices(incident("nv", types.ClassFellOffBus, "gpu-1", "", types.StateResolved, at(to, -10), at(to, -9)), "nvidia.com/gpu", types.DeviceUnitGPU, 8)
+	incidents := []*types.Incident{nv}
+	inv := reportInventory{gpusPerNode: map[string]int{"gpu-1": 4}, nodes: map[string]*types.Node{}}
+	r := aggregateRecoveryOf(incidents, inv, allRemediated(incidents), to.Add(-24*time.Hour), to, 4*time.Hour)
+	row := resourceRow(t, r.AcceleratorHours, "gpu", "nvidia.com/gpu")
+	if row.RecoveredHours != 8 || row.SavedEstimate == nil || row.SavedEstimate.Hours != 24 {
+		t.Fatalf("row %+v saved %+v", row, row.SavedEstimate)
+	}
+	if r.RecoveredGPUHours != 8 || r.DegradedGPUHours != 8 || r.SavingsEstimate == nil || r.SavingsEstimate.GPUHoursSaved != 24 || r.AssumedSingleGPU != 0 {
+		t.Fatalf("gpu-hours recovered %v degraded %v saved %+v", r.RecoveredGPUHours, r.DegradedGPUHours, r.SavingsEstimate)
+	}
+	if len(r.Classes) != 1 || r.Classes[0].DegradedGPUHours != 8 || r.Classes[0].RecoveredGPUHours != 8 {
+		t.Fatalf("classes %+v", r.Classes)
+	}
+	if len(r.IncidentDetails) != 1 || r.IncidentDetails[0].DegradedGPUHours != 8 {
+		t.Fatalf("details %+v", r.IncidentDetails)
+	}
+}
