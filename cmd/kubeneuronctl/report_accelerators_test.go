@@ -61,3 +61,14 @@ func TestReportAcceleratorHoursGolden(t *testing.T) {
 		t.Fatalf("output differs from %s:\n%s", golden, out.String())
 	}
 }
+
+func TestBaselineAndIncidentsText(t *testing.T) {
+	for v, want := range map[float64]string{14400: "4h", 5400: "1h30m", 1800: "30m", 45: "45s", 3661: "1h1m1s", 0: "-"} {
+		if got := baseline(v); got != want {
+			t.Errorf("baseline(%v) = %q, want %q", v, got, want)
+		}
+	}
+	if incidents(1) != "1 incident" || incidents(2) != "2 incidents" {
+		t.Fatal(incidents(1), incidents(2))
+	}
+}

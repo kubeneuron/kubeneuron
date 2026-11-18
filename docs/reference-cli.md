@@ -159,6 +159,10 @@ recoveryCostRates:
     aws.amazon.com/neuron: "1.50"
 ```
 
+The rates in this example are placeholders. A rate is your own figure for what
+a device-hour costs you; KubeNeuron does not read prices or bills from the
+cloud, and the result is not an invoice or a forecast of one.
+
 There are no default rates. A resource without a rate shows its hours and
 "rate not set". The rate and the manual baseline are shown beside every cost,
 which is always an estimate. A total cost is shown only when every resource

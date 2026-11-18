@@ -288,7 +288,7 @@ func printAcceleratorHours(out io.Writer, h types.AcceleratorHours, indent strin
 		for _, r := range g.Resources {
 			saved, cost := "Manual recovery baseline not set", "-"
 			if e := r.SavedEstimate; e != nil {
-				saved = fmt.Sprintf("%s %s, manual baseline %s", gpuHours(e.Hours), g.Unit, seconds(e.ManualBaselineSeconds))
+				saved = fmt.Sprintf("%s %s, manual baseline %s", gpuHours(e.Hours), g.Unit, baseline(e.ManualBaselineSeconds))
 				cost = "rate not set"
 				if c := e.Cost; c != nil {
 					cost = fmt.Sprintf("%s %s at %s %s per %s", money(c.Amount), c.Currency, money(c.RatePerHour), c.Currency, strings.TrimSuffix(g.Unit, "s"))
@@ -300,8 +300,8 @@ func printAcceleratorHours(out io.Writer, h types.AcceleratorHours, indent strin
 	}
 	if u := h.DeviceCountUnknown; u != nil {
 		_, _ = fmt.Fprintf(w, "%sDevice count unknown — node-hours\n", indent)
-		_, _ = fmt.Fprintf(w, "%s  degraded\t%s\t(%d incident(s); no device count was recorded, so no device-hours and no cost)\n",
-			indent, gpuHours(u.DegradedNodeHours), u.Incidents)
+		_, _ = fmt.Fprintf(w, "%s  degraded\t%s\t(%s; no device count was recorded, so no device-hours and no cost)\n",
+			indent, gpuHours(u.DegradedNodeHours), incidents(u.Incidents))
 		_, _ = fmt.Fprintf(w, "%s  recovered\t%s\n", indent, gpuHours(u.RecoveredNodeHours))
 	}
 	if err := w.Flush(); err != nil {
@@ -336,6 +336,26 @@ func acceleratorGroupTitle(group string) string {
 func money(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) }
 
 func gpuHours(v float64) string { return strconv.FormatFloat(v, 'f', 1, 64) }
+
+// baseline is a manual baseline without its zero minutes and seconds: 4h, not
+// 4h0m0s.
+func baseline(v float64) string {
+	s := seconds(v)
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
+}
+
+func incidents(n int) string {
+	if n == 1 {
+		return "1 incident"
+	}
+	return fmt.Sprintf("%d incidents", n)
+}
 
 func seconds(v float64) string {
 	if v <= 0 {
