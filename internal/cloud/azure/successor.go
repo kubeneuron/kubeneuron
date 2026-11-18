@@ -158,14 +158,19 @@ func (p *Provider) requestSuccessor(ctx context.Context, s cloud.Successor, t ta
 // exactly one machine that was not there at the plan.
 func settleSuccessor(s cloud.Successor, t target, machines []machine, pl pool, before int32) (cloud.Successor, error) {
 	switch {
-	case strings.EqualFold(pl.ProvisioningState, "Failed"):
-		return s, fmt.Errorf("azure: agent pool %s failed while grown for operation %s (state Failed): %w", t.pool, s.Operation, cloud.ErrNeedsOperator)
-	case !strings.EqualFold(pl.ProvisioningState, "Succeeded"):
+	case !strings.EqualFold(pl.ProvisioningState, "Succeeded") && !strings.EqualFold(pl.ProvisioningState, "Failed"):
 		return s, nil // still scaling
 	}
 	added, err := addedMachines(s, machines)
 	if err != nil {
 		return s, err
+	}
+	if strings.EqualFold(pl.ProvisioningState, "Failed") {
+		if len(added) == 0 {
+			// No machine came: the release can put the pool back.
+			return s, fmt.Errorf("azure: agent pool %s failed to add a node for operation %s: %w", t.pool, s.Operation, cloud.ErrReplacementCapacity)
+		}
+		return s, fmt.Errorf("azure: agent pool %s failed while grown for operation %s (state Failed): %w", t.pool, s.Operation, cloud.ErrNeedsOperator)
 	}
 	if pl.Count != before+1 || len(added) != 1 {
 		return s, fmt.Errorf("azure: agent pool %s settled at size %d with %d new machines for operation %s, not one at %d: %w",
@@ -186,10 +191,13 @@ func (p *Provider) ReleaseSuccessor(ctx context.Context, s cloud.Successor) erro
 		return fmt.Errorf("azure: agent pool %s: %w: %w", t.pool, cloud.ErrNeedsOperator, err)
 	}
 	if op != operationToken(s.Operation) {
-		if s.Phase == cloud.SuccessorCreated {
+		if s.Phase == cloud.SuccessorPlanned {
+			return nil // the tag goes with the new size: nothing reached AKS
+		}
+		if untouched, err := asPlanned(s, machines, pl); err != nil || !untouched {
 			return fmt.Errorf("azure: agent pool %s no longer carries the %s tag of operation %s: %w", t.pool, successorTag, s.Operation, cloud.ErrNeedsOperator)
 		}
-		return nil // the tag goes with the new size: nothing reached AKS
+		return nil // released before: the pool is as planned
 	}
 	if !strings.EqualFold(pl.ProvisioningState, "Succeeded") && !strings.EqualFold(pl.ProvisioningState, "Failed") {
 		return fmt.Errorf("azure: agent pool %s is still scaling for operation %s (state %q): %w", t.pool, s.Operation, pl.ProvisioningState, cloud.ErrNeedsOperator)
@@ -197,6 +205,11 @@ func (p *Provider) ReleaseSuccessor(ctx context.Context, s cloud.Successor) erro
 	added, err := addedMachines(s, machines)
 	if err != nil {
 		return err
+	}
+	if len(added) == 0 && pl.Count == before && strings.EqualFold(pl.ProvisioningState, "Succeeded") {
+		// The successor is gone and the pool is at its size: only the tag of
+		// an earlier release is left.
+		return p.closeSuccessor(ctx, t.pool, s.Operation, before)
 	}
 	if s.Phase == cloud.SuccessorCreated {
 		successor, ok := machineByProviderID(machines, s.ProviderID)
@@ -270,6 +283,16 @@ func (p *Provider) closeSuccessor(ctx context.Context, name, operation string, b
 		return fmt.Errorf("azure: operation %s is done; clearing the %s tag of agent pool %s failed: %w", operation, successorTag, name, err)
 	}
 	return nil
+}
+
+// asPlanned reports whether the pool has settled exactly as it was planned:
+// its size and machines.
+func asPlanned(s cloud.Successor, machines []machine, pl pool) (bool, error) {
+	before, members, err := plannedPool(s)
+	if err != nil {
+		return false, err
+	}
+	return strings.EqualFold(pl.ProvisioningState, "Succeeded") && pl.Count == before && sameMembers(machineNames(machines), members), nil
 }
 
 func plannedPool(s cloud.Successor) (int32, []string, error) {

@@ -183,3 +183,64 @@ func TestAddFirstAndRemoveFirstShareThePool(t *testing.T) {
 		t.Fatalf("remove-first during an add-first operation = %v, calls %q", err, f.calls)
 	}
 }
+
+// A requested operation whose tag is gone reached AKS: unless the pool is
+// exactly as planned, that needs an operator, not a quiet "nothing to do".
+func TestAddFirstReleaseWithoutItsTagNeedsAnOperator(t *testing.T) {
+	f := newFakeAKS(3)
+	p := testProvider(f)
+	s := prepare(t, p, prepare(t, p, newOperation(), cloud.SuccessorPlanned), cloud.SuccessorRequested)
+	delete(f.tags, successorTag)
+	f.calls = nil
+	if err := p.ReleaseSuccessor(t.Context(), s); !errors.Is(err, cloud.ErrNeedsOperator) || len(f.calls) != 0 {
+		t.Fatalf("release = %v, calls %q; want needs-operator and no change", err, f.calls)
+	}
+}
+
+// A release that deleted the successor but failed to drop the tag finishes
+// on the next call.
+func TestAddFirstReleaseFinishesAfterTheTagWriteFailed(t *testing.T) {
+	f := newFakeAKS(3)
+	p := testProvider(f)
+	s := prepare(t, p, prepare(t, p, prepare(t, p, newOperation(), cloud.SuccessorPlanned), cloud.SuccessorRequested), cloud.SuccessorCreated)
+	if err := f.DeleteMachines(t.Context(), testPool, []string{testMachine(3).Name}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ReleaseSuccessor(t.Context(), s); err != nil {
+		t.Fatalf("release after the delete: %v", err)
+	}
+	if _, tagged := f.tags[successorTag]; tagged || f.count != 3 {
+		t.Fatalf("count=%d tags=%v", f.count, f.tags)
+	}
+	if err := p.ReleaseSuccessor(t.Context(), s); err != nil {
+		t.Fatalf("release once closed: %v", err)
+	}
+}
+
+// A pool that failed without adding a machine is a capacity failure the
+// release undoes; one that failed with a new machine needs an operator.
+func TestAddFirstFailedPoolWithoutANewMachineIsCapacity(t *testing.T) {
+	f := newFakeAKS(3)
+	p := testProvider(f)
+	s := prepare(t, p, newOperation(), cloud.SuccessorPlanned)
+	f.HoldNextRequest()
+	s = prepare(t, p, s, cloud.SuccessorRequested)
+	f.state = "Failed"
+	if _, err := p.PrepareSuccessor(t.Context(), s); !errors.Is(err, cloud.ErrReplacementCapacity) {
+		t.Fatalf("settle = %v, want capacity", err)
+	}
+	if err := p.ReleaseSuccessor(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+	if _, tagged := f.tags[successorTag]; tagged || f.count != 3 {
+		t.Fatalf("count=%d tags=%v after the release", f.count, f.tags)
+	}
+
+	f = newFakeAKS(3)
+	p = testProvider(f)
+	s = prepare(t, p, prepare(t, p, newOperation(), cloud.SuccessorPlanned), cloud.SuccessorRequested)
+	f.state = "Failed"
+	if _, err := p.PrepareSuccessor(t.Context(), s); !errors.Is(err, cloud.ErrNeedsOperator) {
+		t.Fatalf("settle with a new machine = %v, want needs-operator", err)
+	}
+}

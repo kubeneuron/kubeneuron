@@ -3,6 +3,7 @@
 package kubernetes
 
 import (
+	"strings"
 	"context"
 	"fmt"
 
@@ -85,7 +86,9 @@ func (p *Platform) SuccessorNode(ctx context.Context, providerID string) (platfo
 	}
 	var found *corev1.Node
 	for _, n := range nodes {
-		if n.Spec.ProviderID != providerID {
+		// Clouds differ from Kubernetes in case: Azure resource groups, for
+		// one, are case-insensitive and spelled differently in each.
+		if !strings.EqualFold(n.Spec.ProviderID, providerID) {
 			continue
 		}
 		if found != nil {

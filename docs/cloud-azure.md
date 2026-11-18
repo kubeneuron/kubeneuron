@@ -83,6 +83,11 @@ and the successor is kept.
 Add-first and remove-first replacements never run in the same pool at the
 same time.
 
+If the pool changes between the plan and the request, for instance while the
+step waits a long time for approval, KubeNeuron does not grow it: the step
+ends as add-first unavailable, and the replacement is planned again on the
+next attempt.
+
 ### AKS node auto-repair
 
 AKS node auto-repair cannot be turned off. It acts on nodes that are
