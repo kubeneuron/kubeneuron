@@ -105,9 +105,12 @@ multiplied by its affected GPU count. A degraded GPU may still serve work.
 **Time to recover** shows the median full duration from open to resolution for
 incidents that completed in the window with audit evidence of a remediation
 step. Observations that close without a remediation contribute degraded time.
-**GPU-hours saved (estimate)** sums
-`max(0, manual baseline hours − incident duration hours) × affected GPUs`
-over qualifying recoveries with a known GPU count. The baseline is the
+**GPU-hours saved (estimate)** counts the time from verified resolution until
+the incident's opening time plus the manual baseline, for each affected GPU
+with a known count. A resolution at or after that deadline contributes zero.
+Overlapping intervals on the same GPU count once, including overlaps between
+node-wide and device incidents. DryRun uses the same calculation separately.
+The baseline is the
 team's estimate of manual recovery time. Set `spec.manualRecoveryBaseline`
 on the installation or `manual_recovery_baseline` in controller file
 configuration using a duration such as `4h`. There is no default. The report

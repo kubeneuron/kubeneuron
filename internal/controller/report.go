@@ -297,6 +297,7 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 	classes := map[types.ProblemClass]*classAccum{}
 	var mttrSamples []float64
 	recovered := map[string][]gpuBoundary{}
+	saved := map[string][]gpuBoundary{}
 
 	for _, inc := range incidents {
 		if inc != nil && inc.DryRun != wantDryRun {
@@ -377,8 +378,8 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 			// the window cannot account for.
 			if !end.Before(from) && !end.After(to) {
 				duration := end.Sub(start)
-				if report.SavingsEstimate != nil && !assumed {
-					report.SavingsEstimate.GPUHoursSaved += max(0, (baseline-duration).Hours()) * float64(gpus)
+				if report.SavingsEstimate != nil && !assumed && baseline > duration {
+					saved[inc.Target.Node] = append(saved[inc.Target.Node], gpuBoundary{end, device, gpus}, gpuBoundary{start.Add(baseline), device, -gpus})
 				}
 				seconds := duration.Seconds()
 				detail.RecoverySeconds = &seconds
@@ -402,6 +403,9 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 
 	report.DegradedGPUHours = roundHours(report.DegradedGPUHours)
 	report.RecoveredGPUHours = roundHours(distinctGPUHours(recovered))
+	if report.SavingsEstimate != nil {
+		report.SavingsEstimate.GPUHoursSaved = roundHours(distinctGPUHours(saved))
+	}
 	report.ObservedOnlyGPUHours = roundHours(report.ObservedOnlyGPUHours)
 	report.SupersededGPUHours = roundHours(report.SupersededGPUHours)
 	report.MTTR = summarizeLatency(mttrSamples)

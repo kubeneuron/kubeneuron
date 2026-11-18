@@ -671,3 +671,27 @@ func TestRecoveredHoursSeparateRecurrenceFromOverlap(t *testing.T) {
 		t.Fatalf("got %v GPU-hours across %d recovered incidents, want 4 across 3", got.RecoveredGPUHours, got.Recovered)
 	}
 }
+
+func TestSavingsEstimateDeduplicatesIntervals(t *testing.T) {
+	from := time.Unix(1000, 0)
+	for _, tc := range []struct {
+		name, secondDevice string
+		want               float64
+	}{
+		{"same device across classes", "GPU-1", 3},
+		{"node and device", "", 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := incident("first", types.ClassECCDBE, "node", "GPU-1", types.StateResolved, from, at(from, 1))
+			second := incident("second", "thermal", "node", tc.secondDevice, types.StateResolved, from, at(from, 1))
+			dryFirst, drySecond := *first, *second
+			dryFirst.ID, dryFirst.DryRun = "dry-first", true
+			drySecond.ID, drySecond.DryRun = "dry-second", true
+			rows := []*types.Incident{first, second, &dryFirst, &drySecond}
+			report := aggregateRecovery(rows, map[string]int{"node": 2}, allRemediated(rows), from, at(from, 8), 4*time.Hour)
+			if report.SavingsEstimate.GPUHoursSaved != tc.want || report.Simulated.WouldHaveSaved.GPUHoursSaved != tc.want {
+				t.Fatalf("live %v, simulated %v, want %v each", report.SavingsEstimate.GPUHoursSaved, report.Simulated.WouldHaveSaved.GPUHoursSaved, tc.want)
+			}
+		})
+	}
+}
