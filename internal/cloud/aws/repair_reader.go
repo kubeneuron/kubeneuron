@@ -13,6 +13,8 @@ import (
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
+const eksNodegroupLabel = "eks.amazonaws.com/nodegroup"
+
 type nodegroupReader interface {
 	updateReader
 	DescribeNodegroup(context.Context, *eks.DescribeNodegroupInput, ...func(*eks.Options)) (*eks.DescribeNodegroupOutput, error)
@@ -25,10 +27,10 @@ type scalingReader interface {
 // repairReader has only read clients. Execution is enabled separately once
 // action-specific authorization has been checked.
 type repairReader struct {
-	cluster, nodegroup string
-	eks                nodegroupReader
-	scaling            scalingReader
-	ec2                instanceStatusReader
+	cluster string
+	eks     nodegroupReader
+	scaling scalingReader
+	ec2     instanceStatusReader
 }
 
 func (r *repairReader) managedGroup(ctx context.Context, ref cloud.NodeRef) (*et.Nodegroup, string, error) {
@@ -39,10 +41,11 @@ func (r *repairReader) managedGroup(ctx context.Context, ref cloud.NodeRef) (*et
 	if err != nil || id != ref.Identity.InstanceID {
 		return nil, "", errors.New("pinned EC2 identity is inconsistent")
 	}
-	if r.cluster == "" || r.nodegroup == "" {
-		return nil, "", errors.New("explicit EKS cluster and nodegroup required")
+	nodegroup := ref.Labels[eksNodegroupLabel]
+	if r.cluster == "" || nodegroup == "" {
+		return nil, "", errors.New("EKS cluster name and nodegroup label required")
 	}
-	out, err := r.eks.DescribeNodegroup(ctx, &eks.DescribeNodegroupInput{ClusterName: &r.cluster, NodegroupName: &r.nodegroup})
+	out, err := r.eks.DescribeNodegroup(ctx, &eks.DescribeNodegroupInput{ClusterName: &r.cluster, NodegroupName: &nodegroup})
 	if err != nil {
 		return nil, "", err
 	}
@@ -50,7 +53,7 @@ func (r *repairReader) managedGroup(ctx context.Context, ref cloud.NodeRef) (*et
 		return nil, "", errors.New("missing EKS nodegroup")
 	}
 	ng := out.Nodegroup
-	if sdk.ToString(ng.ClusterName) != r.cluster || sdk.ToString(ng.NodegroupName) != r.nodegroup || ng.Status != et.NodegroupStatusActive {
+	if sdk.ToString(ng.ClusterName) != r.cluster || sdk.ToString(ng.NodegroupName) != nodegroup || ng.Status != et.NodegroupStatusActive {
 		return nil, "", errors.New("active EKS nodegroup identity is unconfirmed")
 	}
 	if ng.Resources == nil || ng.NodeRepairConfig == nil || ng.NodeRepairConfig.Enabled == nil {
@@ -87,7 +90,7 @@ func (r *repairReader) OpenRepair(ctx context.Context, ref cloud.NodeRef) (cloud
 	if *ng.NodeRepairConfig.Enabled {
 		return cloud.RepairObservation{Reason: "EKS native node repair enabled"}, nil
 	}
-	if err = checkUpdateHistory(ctx, r.eks, r.cluster, r.nodegroup, ng.ModifiedAt, time.Now()); err != nil {
+	if err = checkUpdateHistory(ctx, r.eks, r.cluster, sdk.ToString(ng.NodegroupName), ng.ModifiedAt, time.Now()); err != nil {
 		return cloud.RepairObservation{}, err
 	}
 	if err = checkGroupActivities(ctx, r.scaling, group); err != nil {

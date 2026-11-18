@@ -51,12 +51,12 @@ func TestProviderRegisteredWithCapabilities(t *testing.T) {
 }
 
 func TestAWSFactoryBuildsObservationOnlyProvider(t *testing.T) {
-	p, err := cloud.Build(t.Context(), providerName, cloud.Config{Region: "us-east-1", Options: map[string]string{"cluster": "training", "nodegroup": "gpu"}})
+	p, err := cloud.Build(t.Context(), providerName, cloud.Config{Region: "us-east-1", Options: map[string]string{"cluster": "training"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	r, ok := p.(*managedProvider)
-	if !ok || r.cluster != "training" || r.nodegroup != "gpu" {
+	if !ok || r.cluster != "training" {
 		t.Fatal("missing configured EKS reader")
 	}
 	if caps := p.Capabilities(); caps.Replace || caps.ReinitializeInPlace {

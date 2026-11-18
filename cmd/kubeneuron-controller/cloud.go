@@ -19,7 +19,7 @@ import (
 func newInstanceRecycler(ctx context.Context, provider, region string) (platform.InstanceRecycler, error) {
 	cfg := cloud.Config{Region: region}
 	if provider == "aws" {
-		cfg.Options = map[string]string{"cluster": os.Getenv("KUBENEURON_EKS_CLUSTER"), "nodegroup": os.Getenv("KUBENEURON_EKS_NODEGROUP")}
+		cfg.Options = map[string]string{"cluster": os.Getenv("KUBENEURON_EKS_CLUSTER")}
 	}
 	p, err := cloud.Build(ctx, provider, cfg)
 	if err != nil {

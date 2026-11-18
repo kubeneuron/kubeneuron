@@ -59,12 +59,21 @@ func TestOpenRepairRechecksManagedNodegroup(t *testing.T) {
 			history := &groupHistory{group: group, flip: tc.flip}
 			asg := at.AutoScalingGroup{AutoScalingGroupName: sdk.String("workers"), Instances: []at.Instance{{InstanceId: sdk.String("i-pinned"), HealthStatus: sdk.String("Healthy"), LifecycleState: at.LifecycleStateInService}}}
 			status := ct.InstanceStatus{InstanceId: sdk.String("i-pinned"), InstanceState: &ct.InstanceState{Name: ct.InstanceStateNameRunning}}
-			r := repairReader{cluster: "training", nodegroup: "gpu", eks: history, scaling: quietASG{membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{asg}}}}, ec2: statusFixture{t, &ec2.DescribeInstanceStatusOutput{InstanceStatuses: []ct.InstanceStatus{status}}}}
-			ref := cloud.NodeRef{Identity: cloud.NodeIdentity{Node: "n", NodeUID: "uid", BootID: "boot", InstanceID: "i-pinned", ProviderID: "aws:///az/i-pinned"}}
+			r := repairReader{cluster: "training", eks: history, scaling: quietASG{membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{asg}}}}, ec2: statusFixture{t, &ec2.DescribeInstanceStatusOutput{InstanceStatuses: []ct.InstanceStatus{status}}}}
+			ref := cloud.NodeRef{Labels: map[string]string{eksNodegroupLabel: "gpu"}, Identity: cloud.NodeIdentity{Node: "n", NodeUID: "uid", BootID: "boot", InstanceID: "i-pinned", ProviderID: "aws:///az/i-pinned"}}
 			obs, err := r.OpenRepair(t.Context(), ref)
 			if (err != nil) != (tc.enabled == nil) || obs.Known != tc.known || history.reads != tc.reads {
 				t.Fatalf("observation %+v, error %v, reads %d", obs, err, history.reads)
 			}
 		})
+	}
+}
+
+func TestNodegroupDiscoveryRequiresNodeLabel(t *testing.T) {
+	r := repairReader{cluster: "training"}
+	ref := cloud.NodeRef{Identity: cloud.NodeIdentity{Node: "n", NodeUID: "uid", BootID: "boot", InstanceID: "i-pinned", ProviderID: "aws:///az/i-pinned"}}
+	policy, err := r.RepairPolicy(t.Context(), ref)
+	if err == nil || policy.Mode != cloud.RepairUnknown {
+		t.Fatalf("missing label: policy %+v, error %v", policy, err)
 	}
 }

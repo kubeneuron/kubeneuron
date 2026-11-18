@@ -626,8 +626,9 @@ after controller restarts.
 
 #### AWS managed nodegroup observations
 
-Set `KUBENEURON_EKS_CLUSTER` and `KUBENEURON_EKS_NODEGROUP` on the
-controller to inspect an explicitly named EKS managed nodegroup. The reader
+Set `KUBENEURON_EKS_CLUSTER` on the controller. Each node supplies its
+`eks.amazonaws.com/nodegroup` label for discovery. The reader verifies the
+pinned instance belongs to a backing Auto Scaling group before using the policy. It
 uses EKS DescribeNodegroup, ListUpdates and DescribeUpdate, Auto Scaling
 DescribeAutoScalingInstances, DescribeAutoScalingGroups and
 DescribeScalingActivities, and EC2 DescribeInstanceStatus. Its AWS identity

@@ -72,7 +72,7 @@ func newManagedProvider(ctx context.Context, options cloud.Config) (*managedProv
 		return nil, fmt.Errorf("aws: no region configured; set AWS_REGION or the node's region label")
 	}
 	client := ec2.NewFromConfig(cfg)
-	return &managedProvider{Recycler: &Recycler{api: client, pollInterval: 10 * time.Second}, repairReader: &repairReader{cluster: options.Options["cluster"], nodegroup: options.Options["nodegroup"], eks: eks.NewFromConfig(cfg), scaling: autoscaling.NewFromConfig(cfg), ec2: client}}, nil
+	return &managedProvider{Recycler: &Recycler{api: client, pollInterval: 10 * time.Second}, repairReader: &repairReader{cluster: options.Options["cluster"], eks: eks.NewFromConfig(cfg), scaling: autoscaling.NewFromConfig(cfg), ec2: client}}, nil
 }
 
 // NewWithAPI builds a Recycler over an explicit client, for tests.
