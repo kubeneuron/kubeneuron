@@ -346,11 +346,46 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 			owner, err = tx.ClaimNodeRemediation(ctx, inc.Target.Node, inc.CloudIdentity.NodeUID, inc.ID)
 			return err
 		})
-		if err != nil || owner != inc.ID {
+		if err != nil {
 			return err
+		}
+		if owner != inc.ID {
+			return c.verifyAfterOwnersReplacement(ctx, inc, owner)
 		}
 	}
 	return c.authorizeAndStartStep(ctx, inc, step)
+}
+
+// verifyAfterOwnersReplacement lets the follower begin its own quiet window
+// only after the pinned owner's live replacement passed inventory verification.
+func (c *Controller) verifyAfterOwnersReplacement(ctx context.Context, inc *types.Incident, ownerID string) error {
+	owner, err := c.store.GetIncident(ctx, ownerID)
+	if err != nil {
+		return err
+	}
+	if owner.State != types.StateResolved || owner.DryRun || owner.CloudIdentity == nil ||
+		inc.CloudIdentity == nil || *inc.CloudIdentity != *owner.CloudIdentity {
+		return nil
+	}
+	entries, err := c.store.AuditTrail(ctx, ownerID)
+	if err != nil {
+		return err
+	}
+	replaced := false
+	for _, entry := range entries {
+		if entry.DryRun {
+			continue
+		}
+		if entry.Result == auditStepOutcomeResult("platform.replace_node", false, true) {
+			replaced = true
+		}
+		if replaced && entry.FromState == types.StateVerifying && entry.ToState == types.StateResolved &&
+			entry.Action == "resolve" && entry.Params["infrastructure_evidence"] == "verified_recycle_inventory" {
+			return c.transition(ctx, inc, types.StateVerifying, "system", "verify-owner-replacement",
+				"checking this incident after the owning incident verified replacement", map[string]string{"owner_id": ownerID})
+		}
+	}
+	return nil
 }
 
 // parkForApproval parks (or re-parks) the incident for a human decision as

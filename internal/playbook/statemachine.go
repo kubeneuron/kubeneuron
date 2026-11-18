@@ -32,7 +32,7 @@ import (
 var validTransitions = map[types.IncidentState][]types.IncidentState{
 	types.StateOpen:             {types.StateSuperseded, types.StateObserving, types.StateEvaluating, types.StateNeedsHuman, types.StateResolved},
 	types.StateObserving:        {types.StateSuperseded, types.StateEvaluating, types.StateNeedsHuman, types.StateResolved},
-	types.StateEvaluating:       {types.StateSuperseded, types.StateEvaluating, types.StateExecuting, types.StateAwaitingApproval, types.StateObserving, types.StateNeedsHuman, types.StateResolved},
+	types.StateEvaluating:       {types.StateSuperseded, types.StateVerifying, types.StateEvaluating, types.StateExecuting, types.StateAwaitingApproval, types.StateObserving, types.StateNeedsHuman, types.StateResolved},
 	types.StateAwaitingApproval: {types.StateSuperseded, types.StateExecuting, types.StateNeedsHuman, types.StateExpired, types.StateResolved},
 	types.StateExecuting:        {types.StateSuperseded, types.StateVerifying, types.StateNeedsHuman, types.StateEvaluating},
 	types.StateVerifying:        {types.StateSuperseded, types.StateResolved, types.StateEvaluating, types.StateNeedsHuman},

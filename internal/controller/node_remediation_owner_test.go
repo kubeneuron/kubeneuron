@@ -57,12 +57,26 @@ func TestRepairFollowerDoesNotCordonOrRequestApproval(t *testing.T) {
 	if got := len(notifier.approvals); got != 2 {
 		t.Errorf("approval requests %d, want the owner's drain and replace", got)
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if owners := p.cordoned["n1"]; len(owners) != 1 || owners[0] != first.ID {
-		t.Errorf("cordon owners %v, want only %s", owners, first.ID)
+	checkCalls := func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if owners := p.cordoned["n1"]; len(owners) != 1 || owners[0] != first.ID {
+			t.Errorf("cordon owners %v, want only %s", owners, first.ID)
+		}
+		if len(p.drained) != 1 || len(p.plain) != 1 {
+			t.Errorf("drains %v replacements %v, want one each", p.drained, p.plain)
+		}
 	}
-	if len(p.drained) != 1 || len(p.plain) != 1 {
-		t.Errorf("drains %v replacements %v, want one each", p.drained, p.plain)
+	checkCalls()
+	owner, err := st.GetIncident(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
+	// Supply the same inventory evidence that live cloud verification records.
+	if err := c.transition(ctx, owner, types.StateResolved, "system", "resolve", "verified",
+		map[string]string{"infrastructure_evidence": "verified_recycle_inventory"}); err != nil {
+		t.Fatal(err)
+	}
+	waitSettled(t, c, st, follower.ID, func(i *types.Incident) bool { return i.State == types.StateVerifying })
+	checkCalls()
 }
