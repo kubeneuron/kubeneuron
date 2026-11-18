@@ -55,3 +55,21 @@ func TestInfrastructureTimeRequiresLiveVerification(t *testing.T) {
 		t.Fatal("missing verified recovery time")
 	}
 }
+
+func TestInfrastructureTimeAfterReopen(t *testing.T) {
+	first := &AuditEntry{Actor: "system", Action: "resolve", FromState: StateVerifying, ToState: StateResolved, Time: time.Now(), Params: map[string]string{"infrastructure_evidence": "verified_recycle_inventory"}}
+	trail := []*AuditEntry{first, {FromState: StateResolved, ToState: StateOpen}}
+	if VerifiedInfrastructureTime(trail) != nil {
+		t.Fatal("reopened incident inherited previous infrastructure readiness")
+	}
+	manual := &AuditEntry{Actor: "operator", Action: "close", FromState: StateOpen, ToState: StateResolved}
+	if VerifiedInfrastructureTime(append(trail, manual)) != nil {
+		t.Fatal("manual closure inherited previous verification")
+	}
+	second := *first
+	second.Time = first.Time.Add(time.Hour)
+	trail = append(trail, &second, &AuditEntry{FromState: StateResolved, ToState: StateResolved, Action: "note"})
+	if at := VerifiedInfrastructureTime(trail); at == nil || !at.Equal(second.Time) {
+		t.Fatalf("latest verified recovery time = %v", at)
+	}
+}
