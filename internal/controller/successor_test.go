@@ -46,6 +46,7 @@ type successorPlatform struct {
 	// 0 once the operation is planned. prepareErrs / nodeErrs: transient
 	// failures of the next requested-phase polls and successor node reads.
 	oldGPUs               int64
+	oldNoResource         bool
 	dropAfterPlan         bool
 	plans                 int
 	prepareErrs, nodeErrs int
@@ -150,6 +151,9 @@ func (p *successorPlatform) NodeResources(_ context.Context, node string) (topol
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	n := p.oldGPUs
+	if p.oldNoResource {
+		return topology.Resources{}, true, nil
+	}
 	return topology.Resources{Capacity: map[string]int64{topology.ResourceWholeGPU: n}, Allocatable: map[string]int64{topology.ResourceWholeGPU: n}}, true, nil
 }
 
@@ -621,5 +625,30 @@ func TestAddFirstHoldsWithNothingToCompareAgainst(t *testing.T) {
 	}
 	if !auditHas(entries, "recovery-unavailable", "advertises no accelerator resources") {
 		t.Fatalf("the hold does not say why%s", dump(entries))
+	}
+}
+
+func TestAddFirstNeedsAllocatableDevicesWhenOnlyTheAgentCountIsKnown(t *testing.T) {
+	p := newSuccessorPlatform()
+	p.oldNoResource = true
+	p.successorAllocatable = 0
+	c, st, _ := successorFixture(t, recoverymode.Automatic, p, "")
+	old := &types.Node{Name: "n1", AgentLastSeen: time.Now()}
+	for i := range 8 {
+		old.GPUs = append(old.GPUs, types.GPUInfo{UUID: fmt.Sprintf("GPU-old-%d", i), Index: i})
+	}
+	if err := st.UpsertAgentRegistration(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	registerSuccessorAgent(t, st, 8)
+	id := openOn(t, c, "n1")
+	inc := waitSettled(t, c, st, id, func(inc *types.Incident) bool {
+		return inc.Successor != nil && inc.Successor.Reason != "" || inc.State.Halted()
+	})
+	if s := inc.Successor; len(s.Expected) != 0 || s.ExpectedGPUs != 8 || !strings.Contains(s.Reason, "0 allocatable accelerator resources") {
+		t.Fatalf("successor = %+v, want a successor with nothing allocatable refused%s", s, dump(trail(t, st, id)))
+	}
+	if p.cordonedNode("n1") || inc.Successor.ReadyAt != nil {
+		t.Fatal("a successor with only agent inventory was accepted")
 	}
 }

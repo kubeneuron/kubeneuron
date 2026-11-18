@@ -485,6 +485,17 @@ func (c *Controller) successorNotReady(ctx context.Context, inc *types.Incident,
 			return fmt.Sprintf("node %s has %d allocatable %s, fewer than the %d of %s", node.Name, node.Allocatable[name], name, count, pin.Node)
 		}
 	}
+	if len(rec.Expected) == 0 {
+		// Only the agent's count is on record: the successor must still make
+		// that many devices allocatable, under whatever resource name.
+		var allocatable int64
+		for _, n := range node.Allocatable {
+			allocatable += max(n, 0)
+		}
+		if allocatable < int64(rec.ExpectedGPUs) {
+			return fmt.Sprintf("node %s has %d allocatable accelerator resources, fewer than the %d accelerators the agent of %s reported", node.Name, allocatable, rec.ExpectedGPUs, pin.Node)
+		}
+	}
 	registered, err := c.store.GetNode(ctx, node.Name)
 	if err != nil || registered == nil {
 		return fmt.Sprintf("no agent has registered node %s yet", node.Name)
