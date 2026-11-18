@@ -9,11 +9,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"time"
+	"k8s.io/client-go/util/flowcontrol"
 )
 
 func TestTrainingReceiverLimitsEachPod(t *testing.T) {
@@ -79,5 +80,24 @@ func TestTrainingReceiverAuthorizesBeforeRecording(t *testing.T) {
 				t.Fatalf("writes %d, want %d", writes, wantWrites)
 			}
 		})
+	}
+}
+
+func TestTrainingReceiverLimitsBeforeAuthentication(t *testing.T) {
+	calls := 0
+	h := TrainingReceiver{Authenticate: func(*http.Request) (*corev1.Pod, error) {
+		calls++
+		return nil, errors.New("invalid credentials")
+	}}
+	h.authOnce.Do(func() { h.authBudget = flowcontrol.NewTokenBucketRateLimiter(0, 1) })
+	for _, want := range []int{http.StatusUnauthorized, http.StatusTooManyRequests} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/training/reports", nil))
+		if w.Code != want {
+			t.Fatalf("status %d, want %d", w.Code, want)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("authentication called %d times", calls)
 	}
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/util/flowcontrol"
 )
 
 type TrainingReceiver struct {
@@ -17,6 +18,9 @@ type TrainingReceiver struct {
 	Monitored    func(context.Context, string) bool
 	Owner        func(context.Context, *corev1.Pod) (types.TrainingOwner, bool)
 	Record       func(context.Context, *corev1.Pod, types.TrainingOwner, TrainingReport, time.Time) error
+
+	authOnce   sync.Once
+	authBudget flowcontrol.RateLimiter
 
 	mu     sync.Mutex
 	window time.Time
@@ -41,6 +45,13 @@ func (h *TrainingReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	// All senders share this budget before any Kubernetes identity lookup.
+	h.authOnce.Do(func() { h.authBudget = flowcontrol.NewTokenBucketRateLimiter(20, 40) })
+	if !h.authBudget.TryAccept() {
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
 		return
 	}
 	pod, err := h.Authenticate(r)
