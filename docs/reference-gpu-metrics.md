@@ -89,6 +89,7 @@ Existing `kubeneuron_*` series registered by internal/metrics; the catalog adds 
 | `kubeneuron_agent_detections_deduplicated_total` | kubeneuron-agent | counter | count | Detections suppressed by agent-side deduplication, by the source that was dropped. |
 | `kubeneuron_agent_detections_total` | kubeneuron-agent | counter | count | GPU fault detections observed by the agent, by detection source (kmsg, kmsg-amd, gpuhealth, amdhealth). |
 | `kubeneuron_agent_health_source` | kubeneuron-agent | gauge | boolean | Which second-source GPU health probe (dcgm, nvidia-smi, none) served the last poll; 1 for the active source. |
+| `kubeneuron_agent_signal_source_unavailable` | kubeneuron-agent | gauge | boolean | Whether an agent observation source is unavailable for the fault class and reason. Zero describes source access only. |
 | `kubeneuron_approvals_bound_total` | kubeneuron-controller | counter | count | Approval decisions by what the client bound them to (round, round_and_impact, none). |
 | `kubeneuron_checkpoint_advisories_total` | kubeneuron-controller | counter | count | Checkpoint advisory outcomes at approval park (stamped, withdrawn, unreachable, skipped). |
 | `kubeneuron_checkpoint_group_requests_total` | kubeneuron-controller | counter | count | Checkpoint requests to group peers by outcome (acknowledged, exited, expired, unreachable, skipped). |

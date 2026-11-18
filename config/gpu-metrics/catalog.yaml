@@ -1560,6 +1560,21 @@ fields:
       unit: boolean
       factor: 1
     help: Which second-source GPU health probe (dcgm, nvidia-smi, none) served the last poll; 1 for the active source.
+  - key: kubeneuron:kubeneuron_agent_signal_source_unavailable
+    series: kubeneuron_agent_signal_source_unavailable
+    exporter_exposed: false
+    source: kubeneuron-agent
+    kind: gauge
+    tier: T4
+    raw:
+      unit: boolean
+      factor: 1
+    canonical:
+      series: kubeneuron_agent_signal_source_unavailable
+      kind: gauge
+      unit: boolean
+      factor: 1
+    help: Whether an agent observation source is unavailable for the fault class and reason. Zero describes source access only.
   - key: kubeneuron:kubeneuron_approvals_bound_total
     series: kubeneuron_approvals_bound_total
     exporter_exposed: false

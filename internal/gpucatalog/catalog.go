@@ -813,6 +813,7 @@ var Fields = []Field{
 	cp("kubeneuron_agent_detections_deduplicated_total", SourceAgent, KindCounter, UnitCount, "Detections suppressed by agent-side deduplication, by the source that was dropped."),
 	cp("kubeneuron_agent_detections_total", SourceAgent, KindCounter, UnitCount, "GPU fault detections observed by the agent, by detection source (kmsg, kmsg-amd, gpuhealth, amdhealth)."),
 	cp("kubeneuron_agent_health_source", SourceAgent, KindGauge, UnitBool, "Which second-source GPU health probe (dcgm, nvidia-smi, none) served the last poll; 1 for the active source."),
+	cp("kubeneuron_agent_signal_source_unavailable", SourceAgent, KindGauge, UnitBool, "Whether an agent observation source is unavailable for the fault class and reason. Zero describes source access only."),
 	cp("kubeneuron_approvals_bound_total", SourceController, KindCounter, UnitCount, "Approval decisions by what the client bound them to (round, round_and_impact, none)."),
 	cp("kubeneuron_checkpoint_advisories_total", SourceController, KindCounter, UnitCount, "Checkpoint advisory outcomes at approval park (stamped, withdrawn, unreachable, skipped)."),
 	cp("kubeneuron_checkpoint_group_requests_total", SourceController, KindCounter, UnitCount, "Checkpoint requests to group peers by outcome (acknowledged, exited, expired, unreachable, skipped)."),

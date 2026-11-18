@@ -57,6 +57,13 @@ var (
 		Help: "GPU fault detections observed by the agent, labeled by detection source.",
 	}, []string{"source"})
 
+	// AgentSignalSourceUnavailable describes access to an observation source.
+	// A zero says nothing about whether the device itself is healthy.
+	AgentSignalSourceUnavailable = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kubeneuron_agent_signal_source_unavailable",
+		Help: "Whether an agent observation source is unavailable for this fault class.",
+	}, []string{"source", "class", "reason"})
+
 	// AgentHealthSource reports which second-source health probe actually
 	// served the most recent poll: "dcgm", "nvidia-smi", or "none". Exactly
 	// one label value is 1 at a time.

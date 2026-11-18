@@ -570,6 +570,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.pollAdapterDetections(ctx)
 
 	events, err := a.watcher.Watch(ctx)
+	reportKernelSourceAvailability(err == nil)
 	if err != nil {
 		// Non-fatal: the retry tick below keeps reopening the watcher.
 		a.log.Error("kmsg watcher unavailable, will retry", "err", err)
@@ -620,6 +621,7 @@ func (a *Agent) Run(ctx context.Context) error {
 				// Watcher died; the retry tick reopens it. Detection must
 				// never silently stay dark until an agent restart.
 				events = nil
+				reportKernelSourceAvailability(false)
 				a.log.Error("kmsg watcher stopped, will reopen")
 				continue
 			}
@@ -665,6 +667,7 @@ func (a *Agent) Run(ctx context.Context) error {
 				} else {
 					a.log.Info("kmsg watcher reopened")
 					events = ch
+					reportKernelSourceAvailability(true)
 				}
 			}
 			if err := a.register(ctx); err != nil {
@@ -675,6 +678,18 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.pollAdapterDetections(ctx)
 			a.flushSpool(ctx)
 		}
+	}
+}
+
+// reportKernelSourceAvailability exposes the loss of AMD kernel fault evidence
+// even on installations where the optional SMI poller is disabled.
+func reportKernelSourceAvailability(available bool) {
+	unavailable := 1.0
+	if available {
+		unavailable = 0
+	}
+	for _, class := range []types.ProblemClass{types.ClassDriverHang, types.ClassPCIe} {
+		metrics.AgentSignalSourceUnavailable.WithLabelValues("amd-kmsg", string(class), "kernel-log-unavailable").Set(unavailable)
 	}
 }
 
