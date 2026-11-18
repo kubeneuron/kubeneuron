@@ -144,6 +144,9 @@ func (c *Controller) advance(ctx context.Context, inc *types.Incident) error {
 // advanceOpen routes a fresh incident to OBSERVING (observe-first classes)
 // or EVALUATING, quarantining flapping targets first.
 func (c *Controller) advanceOpen(ctx context.Context, inc *types.Incident) error {
+	if err := c.captureTrainingWorkers(ctx, inc); err != nil {
+		return err
+	}
 	if c.flap != nil && c.flap.RecordReopen(inc.Target, inc.Class) {
 		return c.quarantine(ctx, inc, "flap threshold reached: automation stopped")
 	}

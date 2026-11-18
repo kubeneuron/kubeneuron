@@ -542,6 +542,7 @@ func (s *Server) handleListIncidents(w http.ResponseWriter, r *http.Request) {
 // was not bound to a preview): the two digests agree only when the human
 // decided on the preview that is still current.
 type IncidentDetail struct {
+	AffectedJobs             []types.AffectedJob         `json:"affectedJobs"`
 	RecoveryAvailability     *types.RecoveryAvailability `json:"recovery_availability,omitempty"`
 	Incident                 *types.Incident             `json:"incident"`
 	Audit                    []*types.AuditEntry         `json:"audit"`
@@ -563,6 +564,17 @@ func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
 	if reason, ok := detect.ObserveOnly(inc.Class); ok {
 		detail.ObserveOnly = reason + "; no recovery step runs"
 	}
+	if reader, ok := s.operator.(interface {
+		IncidentTrainingWorkers(context.Context, string) ([]types.TrainingWorker, error)
+	}); ok {
+		workers, err := reader.IncidentTrainingWorkers(r.Context(), inc.ID)
+		if err != nil {
+			http.Error(w, "training worker snapshot unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		detail.AffectedJobs = types.GroupAffectedJobs(workers)
+	}
+
 	if backend, ok := s.operator.(ImpactPreviewBackend); ok && inc.ApprovalEpoch > 0 {
 		if preview, err := backend.ImpactPreview(r.Context(), inc.ID, inc.ApprovalEpoch); err == nil && preview != nil {
 			detail.ImpactPreviewDigest = preview.Digest
