@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/action"
 	"github.com/kubeneuron/kubeneuron/internal/approval"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
@@ -333,6 +334,21 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 	} else if verdict == armingRefuse {
 		c.deferStep(inc, step, metrics.DeferUnarmedAgent)
 		return c.escalate(ctx, inc, reason)
+	}
+	// Serialize disruptive repair steps against the incarnation pinned at open.
+	// The notice-only ladder uses its own cordon ownership accounting.
+	def, registered := action.ByWire(step.Action)
+	if registered && def.Scope == action.ScopeNode && (def.Destructive || def.AgentDestructive) &&
+		inc.CloudIdentity != nil && inc.Class != types.ClassCloudInterruption && !c.simulating(ctx, inc) {
+		var owner string
+		err := c.store.WithTx(ctx, func(tx store.Tx) error {
+			var err error
+			owner, err = tx.ClaimNodeRemediation(ctx, inc.Target.Node, inc.CloudIdentity.NodeUID, inc.ID)
+			return err
+		})
+		if err != nil || owner != inc.ID {
+			return err
+		}
 	}
 	return c.authorizeAndStartStep(ctx, inc, step)
 }
