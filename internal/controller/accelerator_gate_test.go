@@ -182,7 +182,7 @@ func TestNVIDIAResetCapabilityPreconditionHoldsInsteadOfEscalating(t *testing.T)
 		// test below.
 		StateChangedAt: time.Now(),
 	}
-	if err := c.startStep(context.Background(), inc, &playbook.Step{Name: "reset", Action: "agent.gpu_reset"}, "system"); err != nil {
+	if err := c.startStep(context.Background(), inc, &playbook.Step{Name: "reset", Action: "agent.gpu_reset"}, "test-approver"); err != nil {
 		t.Fatalf("startStep() error = %v", err)
 	}
 	if inc.State != types.StateEvaluating || c.isInFlight(inc.ID) {
@@ -936,7 +936,7 @@ func TestAcceleratorEvidenceHoldEndsAtTheDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := c.startStep(ctx, inc, &playbook.Step{Name: "reset", Action: "agent.gpu_reset"}, "system"); err != nil {
+	if err := c.startStep(ctx, inc, &playbook.Step{Name: "reset", Action: "agent.gpu_reset"}, "test-approver"); err != nil {
 		t.Fatalf("startStep() error = %v", err)
 	}
 

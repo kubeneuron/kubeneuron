@@ -189,7 +189,7 @@ func TestGlobalPauseStillStartsCompensatingStackRestore(t *testing.T) {
 	step := &book.Steps[0]
 	ctx = c.pinRuntimeConfig(ctx)
 	ctx, _ = c.pinSimulate(ctx, inc)
-	if err := c.startStep(ctx, inc, step, "system"); err != nil {
+	if err := c.startStep(ctx, inc, step, "test-approver"); err != nil {
 		t.Fatalf("start compensating restore while paused: %v", err)
 	}
 
@@ -260,7 +260,7 @@ func TestGlobalPauseDoesNotStartForeignCompensatingStackRestore(t *testing.T) {
 	c.gate.Pause()
 	ctx = c.pinRuntimeConfig(ctx)
 	ctx, _ = c.pinSimulate(ctx, inc)
-	if err := c.startStep(ctx, inc, &book.Steps[0], "system"); err != nil {
+	if err := c.startStep(ctx, inc, &book.Steps[0], "test-approver"); err != nil {
 		t.Fatalf("start foreign restore while paused: %v", err)
 	}
 

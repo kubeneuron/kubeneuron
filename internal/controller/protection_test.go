@@ -267,7 +267,7 @@ func TestMissingAcceleratorEvidenceIsCountedAsProtection(t *testing.T) {
 	}}
 	c, _, inc := protectionFixture(t, book, nil, nil, nil)
 	before := snapshotDeferrals()
-	if err := c.startStep(context.Background(), inc, &book.Steps[0], "system"); err != nil {
+	if err := c.startStep(context.Background(), inc, &book.Steps[0], "test-approver"); err != nil {
 		t.Fatal(err)
 	}
 	assertDeferred(t, before, metrics.DeferAcceleratorEvidence)
