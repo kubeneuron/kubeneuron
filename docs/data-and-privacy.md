@@ -16,6 +16,8 @@ For each incident KubeNeuron also records evidence read from the Kubernetes API 
 
 For an incident opened from an [accelerator health profile](accelerator-health.md), KubeNeuron records the profile, the rule, the Node condition type, the condition's reason, and when the condition last changed. It does not read or store condition messages. This is deleted with the incident.
 
+When the training report endpoint is enabled, a job can report three facts to the controller: a checkpoint (an opaque identifier and an optional step), a resume from a checkpoint, and progress (a step number). The controller accepts a report only from a pod that belongs to that job, identified by its Kubernetes service account token. It stores the facts with the incident, uses its own receive time, and does not log checkpoint identifiers or add them to metric labels. Checkpoint identifiers are limited to 128 characters and cannot be URLs or paths; do not put storage locations, credentials or personal data in them. The endpoint is off by default and reports stay inside the cluster.
+
 Incidents, approvals, actions, operational state and the audit trail live in SQLite on a volume in your cluster by default. If you configure PostgreSQL, they live at the database address you supply. Approval and audit records identify the person who approved, rejected or triggered an action. Password sign-in accounts use a Kubernetes Secret. For automatic mode, the policy and audit trail record the identifier declared in `enabledBy`. KubeNeuron excludes that identifier from metric labels, logs and telemetry exports.
 
 The managed metrics store keeps metrics in your cluster for 30 days by default. You can change its retention period. GPU series identify nodes and GPU UUIDs. The managed Collector drops standard workload labels for pod, namespace, container and pod UID before storage unless you enable `keepWorkloadLabels`. Additional labels you enable in dcgm-exporter are stored as sent.
@@ -24,6 +26,7 @@ Managed Grafana keeps its administrator account in your cluster. The installatio
 
 ## Connections
 
+- With the training report endpoint enabled, job pods send reports to the controller over HTTPS inside the cluster. The controller validates their tokens with the Kubernetes TokenReview API.
 - The installer runs on your workstation. It downloads the install manifest from GitHub Releases and, with `--version latest`, asks the GitHub API for the newest release. Installed components do not check for updates.
 - The agent sends observations to the configured controller. When a DCGM client is available it can contact the DCGM host engine. Host tools and scripts you supply may make their own connections.
 - Cluster components access the Kubernetes API. The controller connects to the configured database, OIDC provider and notification destinations. Slack, PagerDuty and webhook recipients receive incident details. The web panel loads no third-party scripts, fonts or analytics. OIDC sign-in redirects the browser to your identity provider.
