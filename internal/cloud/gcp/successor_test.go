@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 
@@ -290,5 +291,81 @@ func TestAddFirstReleaseWaitsForARunningResize(t *testing.T) {
 	f.calls = nil
 	if err := p.ReleaseSuccessor(t.Context(), s); !errors.Is(err, cloud.ErrNeedsOperator) || len(f.calls) != 0 {
 		t.Fatalf("release = %v, calls %q; want needs-operator and no change", err, f.calls)
+	}
+}
+
+// A zone out of GPUs keeps retrying the new member while GKE's resize is
+// not done: the release still deletes that member by name and needs no
+// operator.
+func TestAddFirstReleaseAfterAStockoutDeletesTheMember(t *testing.T) {
+	f := newFakeGKE(3)
+	f.createErrors = []string{"ZONE_RESOURCE_POOL_EXHAUSTED"}
+	p := testProvider(f)
+	s := prepare(t, p, prepare(t, p, newOperation(), cloud.SuccessorPlanned), cloud.SuccessorRequested)
+	for i := range f.ops {
+		f.ops[i].Status = "RUNNING"
+	}
+	if _, err := p.PrepareSuccessor(t.Context(), s); !errors.Is(err, cloud.ErrReplacementCapacity) {
+		t.Fatalf("settle = %v, want capacity", err)
+	}
+	f.calls = nil
+	if err := p.ReleaseSuccessor(t.Context(), s); err != nil {
+		t.Fatalf("release = %v", err)
+	}
+	if !slices.Equal(f.calls, []string{"delete " + testZone + " " + testName(testZone, 3)}) || f.groups[0].target != 3 {
+		t.Fatalf("calls=%q target=%d", f.calls, f.groups[0].target)
+	}
+}
+
+// A resize someone made while the step waited for approval is not taken for
+// the operation's own: the request is refused and nothing more is changed.
+func TestAddFirstDoesNotTakeAResizeMadeBeforeTheRequest(t *testing.T) {
+	f := newFakeGKE(3)
+	p := testProvider(f)
+	planned := prepare(t, p, newOperation(), cloud.SuccessorPlanned)
+	// A person grows the pool by one; the request goes out an hour later.
+	if _, err := f.SetPoolSize(t.Context(), testPool, 4); err != nil {
+		t.Fatal(err)
+	}
+	planned.RequestedAt = f.now.Add(time.Hour)
+	f.calls = nil
+	if _, err := p.PrepareSuccessor(t.Context(), planned); !errors.Is(err, cloud.ErrAddFirstUnavailable) || len(f.calls) != 0 {
+		t.Fatalf("request = %v, calls %q", err, f.calls)
+	}
+	if err := p.ReleaseSuccessor(t.Context(), planned); err != nil || len(f.calls) != 0 {
+		t.Fatalf("release = %v, calls %q", err, f.calls)
+	}
+}
+
+// A resize after the request time that did not grow the pool by exactly one
+// is not the operation's either.
+func TestAddFirstDoesNotTakeAResizeOfAnotherSize(t *testing.T) {
+	f := newFakeGKE(3)
+	p := testProvider(f)
+	planned := prepare(t, p, newOperation(), cloud.SuccessorPlanned)
+	planned.RequestedAt = f.now
+	if _, err := f.SetPoolSize(t.Context(), testPool, 5); err != nil {
+		t.Fatal(err)
+	}
+	f.calls = nil
+	if _, err := p.PrepareSuccessor(t.Context(), planned); !errors.Is(err, cloud.ErrAddFirstUnavailable) || len(f.calls) != 0 {
+		t.Fatalf("request = %v, calls %q", err, f.calls)
+	}
+}
+
+// The operation's own resize, whose answer was lost, is found with the
+// request time set.
+func TestAddFirstFindsItsLostResizeAfterTheRequestTime(t *testing.T) {
+	f := newFakeGKE(3)
+	p := testProvider(f)
+	planned := prepare(t, p, newOperation(), cloud.SuccessorPlanned)
+	planned.RequestedAt = f.now.Add(30 * time.Second) // GKE's clock is behind
+	f.LoseNextAnswer()
+	if _, err := p.PrepareSuccessor(t.Context(), planned); err == nil {
+		t.Fatal("a lost answer was reported as success")
+	}
+	s := prepare(t, p, planned, cloud.SuccessorRequested)
+	if f.requests != 1 || s.State[stateOperation] == "" {
+		t.Fatalf("requests=%d state=%v", f.requests, s.State)
 	}
 }

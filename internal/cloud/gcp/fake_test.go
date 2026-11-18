@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 const (
@@ -63,6 +64,8 @@ type fakeGKE struct {
 	hold, held, lose bool
 	requests         int
 	deleted          []string
+	// now is GKE's clock: the start time of new operations.
+	now time.Time
 
 	calls []string
 }
@@ -71,7 +74,7 @@ func newFakeGKE(n int, zones ...string) *fakeGKE {
 	if len(zones) == 0 {
 		zones = []string{testZone}
 	}
-	f := &fakeGKE{autoRepair: true, labels: map[string]string{labelCluster: testCluster, labelNodePool: testPool}, permissions: fixedPoolPermissions}
+	f := &fakeGKE{now: time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC), autoRepair: true, labels: map[string]string{labelCluster: testCluster, labelNodePool: testPool}, permissions: fixedPoolPermissions}
 	for _, z := range zones {
 		g := &fakeGroup{ref: groupRef{project: testProject, zone: z, name: "gke-training-gpu-" + z[len(z)-1:] + "-grp"}, target: int32(n), stable: true}
 		g.grow(int32(n), nil)
@@ -138,7 +141,7 @@ func poolLink(pool string) string {
 }
 
 func (f *fakeGKE) addOp(typ, status, target string) *operation {
-	f.ops = append(f.ops, operation{Name: fmt.Sprintf("operation-%d", len(f.ops)+1), Type: typ, Status: status, Target: target})
+	f.ops = append(f.ops, operation{Name: fmt.Sprintf("operation-%d", len(f.ops)+1), Type: typ, Status: status, Target: target, Start: f.now})
 	return &f.ops[len(f.ops)-1]
 }
 

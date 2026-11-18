@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/googleapis/gax-go/v2/apierror"
+	"google.golang.org/api/googleapi"
+
 	"github.com/kubeneuron/kubeneuron/internal/cloud/cloudtest"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
@@ -178,13 +181,37 @@ func TestCheckReplacePermissionNamesWhatIsMissing(t *testing.T) {
 	}
 }
 
-// A multi-zone pool whose zones differ in size is refused before the node is
-// cordoned.
-func TestCheckReplacePermissionRefusesUnevenZones(t *testing.T) {
+// A fixed-size pool across zones has no replacement path, and says so before
+// the node is cordoned; an autoscaled one across zones has.
+func TestCheckReplacePermissionRefusesAFixedMultiZonePool(t *testing.T) {
 	f := newFakeGKE(2, testZone, "us-central1-b")
-	f.groups[1].target = 3
-	if err := testProvider(f).CheckReplacePermission(t.Context(), testInstance(0)); err == nil || !strings.Contains(err.Error(), "differ in size") {
+	if err := testProvider(f).CheckReplacePermission(t.Context(), testInstance(0)); !errors.Is(err, errFixedPoolRemoveFirst) {
 		t.Fatalf("err = %v", err)
+	}
+	f.autoscaling = true
+	if err := testProvider(f).CheckReplacePermission(t.Context(), testInstance(0)); err != nil {
+		t.Fatalf("autoscaled: %v", err)
+	}
+}
+
+// An auto-repair is active unless its target is another pool of this cluster
+// or another cluster: one naming a node or an instance alone counts.
+func TestOpenRepairCountsAnAutoRepairItCannotPlaceElsewhere(t *testing.T) {
+	cluster := strings.TrimSuffix(poolLink(testPool), "/nodePools/"+testPool)
+	for target, active := range map[string]bool{
+		"https://compute.googleapis.com/compute/v1/projects/ml-project/zones/us-central1-a/instances/" + testName(testZone, 0): true,
+		"projects/ml-project/zones/us-central1-a/instances/x":                                                                  true,
+		"":                                    true,
+		cluster + "/nodePools/system":         false,
+		cluster + "/nodePools/system/node/n1": false,
+		strings.Replace(cluster, "/clusters/"+testCluster, "/clusters/other", 1): false,
+	} {
+		f := newFakeGKE(2)
+		f.addOp(opAutoRepair, "RUNNING", target)
+		obs, err := testProvider(f).OpenRepair(t.Context(), testRef(1))
+		if err != nil || obs.Active != active {
+			t.Fatalf("target %q: %+v, %v; want active=%t", target, obs, err, active)
+		}
 	}
 }
 
@@ -197,5 +224,25 @@ func TestFactoryWithoutCredentialsRefusesWithTheCause(t *testing.T) {
 	}
 	if err := p.Replace(t.Context(), testInstance(0)); err == nil || !strings.Contains(err.Error(), "Application Default Credentials") {
 		t.Fatalf("Replace = %v, want the missing credentials named", err)
+	}
+}
+
+func TestCapacityErrorIsNotARateLimit(t *testing.T) {
+	wrap := func(code int, reason string) error {
+		err, _ := apierror.FromError(&googleapi.Error{Code: code, Errors: []googleapi.ErrorItem{{Reason: reason}}})
+		return err
+	}
+	for err, want := range map[error]bool{
+		wrap(429, "rateLimitExceeded"):            false,
+		wrap(429, "RATE_LIMIT_EXCEEDED"):          false,
+		wrap(429, ""):                             false,
+		wrap(403, "quotaExceeded"):                true,
+		wrap(429, "QUOTA_EXCEEDED"):               true,
+		wrap(503, "ZONE_RESOURCE_POOL_EXHAUSTED"): true,
+		errors.New("quota"):                       false,
+	} {
+		if got := capacityError(err); got != want {
+			t.Fatalf("capacityError(%v) = %t, want %t", err, got, want)
+		}
 	}
 }

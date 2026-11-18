@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	compute "cloud.google.com/go/compute/apiv1"
 	"cloud.google.com/go/compute/apiv1/computepb"
@@ -18,6 +19,7 @@ import (
 	"cloud.google.com/go/iam/apiv1/iampb"
 	resourcemanager "cloud.google.com/go/resourcemanager/apiv3"
 	"github.com/googleapis/gax-go/v2/apierror"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
 )
@@ -96,8 +98,10 @@ type vm struct {
 // target link; Error the code and message of a failed one.
 type operation struct {
 	Name, Type, Status, Target string
-	ErrorCode                  codes.Code
-	Error                      string
+	// Start is when GKE started the operation; zero if it did not say.
+	Start     time.Time
+	ErrorCode codes.Code
+	Error     string
 }
 
 const (
@@ -267,6 +271,9 @@ func (a *sdkAPI) Members(ctx context.Context, g groupRef) ([]member, error) {
 
 func toOperation(op *containerpb.Operation) operation {
 	o := operation{Name: op.GetName(), Type: op.GetOperationType().String(), Status: op.GetStatus().String(), Target: op.GetTargetLink()}
+	if t, err := time.Parse(time.RFC3339Nano, op.GetStartTime()); err == nil {
+		o.Start = t
+	}
 	if e := op.GetError(); e != nil && e.GetCode() != 0 {
 		o.ErrorCode, o.Error = codes.Code(e.GetCode()), e.GetMessage()
 	}
@@ -342,11 +349,29 @@ var capacityCodes = []string{
 func capacityCode(code string) bool { return slices.Contains(capacityCodes, code) }
 
 // capacityError is a GKE or Compute Engine call refused for quota or
-// capacity. A rate limit is neither: it is retried.
+// capacity. A rate limit, which the same status codes report, is neither: it
+// is an ordinary error, retried.
 func capacityError(err error) bool {
 	var ae *apierror.APIError
-	if !errors.As(err, &ae) || strings.Contains(ae.Reason(), "RATE_LIMIT") {
+	if !errors.As(err, &ae) {
 		return false
 	}
-	return ae.GRPCStatus().Code() == codes.ResourceExhausted || ae.HTTPCode() == http.StatusTooManyRequests || capacityCode(ae.Reason())
+	reasons := []string{ae.Reason()}
+	var ge *googleapi.Error
+	if errors.As(err, &ge) {
+		for _, item := range ge.Errors {
+			reasons = append(reasons, item.Reason)
+		}
+	}
+	capacity := false
+	for _, r := range reasons {
+		norm := strings.ToUpper(strings.ReplaceAll(r, "_", ""))
+		switch {
+		case strings.Contains(norm, "RATELIMIT"):
+			return false
+		case strings.Contains(norm, "QUOTA"), strings.Contains(norm, "RESOURCEPOOLEXHAUSTED"), strings.Contains(norm, "STOCKOUT"):
+			capacity = true
+		}
+	}
+	return capacity
 }

@@ -693,18 +693,19 @@ The GCP provider replaces a node on GKE Standard by deleting its instance
 from the node pool's managed instance group (`deleteInstances`, a Compute
 Engine call GKE does not document for node pools), with a request ID derived
 from the operation. Sizes change only through GKE `nodePools.setSize`, and
-only upward: a fixed-size pool is set back after a remove-first delete, and
-add-first grows a single-zone pool by one. No marker is written into Google
+only upward, when add-first grows a fixed-size single-zone pool by one.
+Remove-first runs only on autoscaled pools: setting a fixed-size pool back
+after a delete would be a second, unrecorded call. No marker is written into Google
 Cloud: the plan records the pool's members and its resize operations, and a
-lost answer is recognised as the one resize the plan had not seen. It reports
+lost answer is recognised as the one resize the plan had not seen, started
+after the request time and growing the pool by exactly one. It reports
 `not-ready-only` where auto-repair is on, which GKE documents for NotReady,
 no-status and full-boot-disk nodes only, and refuses while any auto-repair or
 other GKE operation is running on the pool or cluster. Autopilot reports
 `on` and is observe-only. Host maintenance holds recovery.
 
 Open questions for a live GKE run: whether GKE accepts a member deleted from a
-node pool's group without restoring it; per-zone `setSize` on multi-zone
-pools; when a new member is listed and its capacity error codes; the
+node pool's group without restoring it; when a new member is listed and its capacity error codes; the
 operation `targetLink` forms.
 
 #### AWS managed nodegroup observations

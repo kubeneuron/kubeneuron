@@ -1074,8 +1074,9 @@ what the step deletes.
 
 On GKE (experimental, not validated against a live GKE cluster; start in
 DryRun), replacement deletes the node's instance from its node pool's managed
-instance group and sets a fixed-size pool's size back through GKE; recycle is
-not available, and Autopilot clusters are observe-only. See
+instance group: remove-first only on autoscaled pools, add-first on
+fixed-size pools in one zone. Recycle is not available, and Autopilot
+clusters are observe-only. See
 [Replacing GPU nodes on GKE](cloud-gcp.md) for setup, the roles and what the
 step deletes.
 

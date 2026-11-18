@@ -17,8 +17,9 @@ import (
 // maintenance.
 const maintenanceLabel = "cloud.google.com/active-node-maintenance"
 
-// basePermissions are what Replace and add-first read and call on an
-// autoscaled pool; fixedPoolPermissions add setting the pool's size.
+// basePermissions are what a replacement reads and calls on an autoscaled
+// pool; fixedPoolPermissions add setting the pool's size, which add-first
+// needs.
 var (
 	basePermissions = []string{
 		"container.clusters.get",
@@ -117,20 +118,34 @@ func (p *Provider) onPool(op operation, pool string) bool {
 	return strings.HasSuffix(op.Target, path) || strings.Contains(op.Target, path+"/")
 }
 
-// onCluster reports whether an operation targets the cluster itself.
-func (p *Provider) onCluster(op operation) bool {
-	return strings.HasSuffix(op.Target, "/clusters/"+p.cluster)
-}
-
-// repairing finds a node auto-repair that is not done, of the pool or of the
-// whole cluster: GKE may run several at once and names one node of many.
+// repairing finds a node auto-repair that is not done and cannot be put on
+// another pool of this cluster or on another cluster: GKE may run several at
+// once, names one node of many, and may name a node or instance alone.
 func (p *Provider) repairing(ops []operation, pool string) (operation, bool) {
 	for _, op := range ops {
-		if op.Type == opAutoRepair && op.Status != opDone && (p.onPool(op, pool) || p.onCluster(op)) {
+		if op.Type == opAutoRepair && op.Status != opDone && !p.elsewhere(op, pool) {
 			return op, true
 		}
 	}
 	return operation{}, false
+}
+
+// elsewhere reports whether an operation's target is another cluster, or
+// another node pool of this one.
+func (p *Provider) elsewhere(op operation, pool string) bool {
+	_, rest, ok := strings.Cut(op.Target, "/clusters/")
+	if !ok {
+		return false
+	}
+	name, rest, _ := strings.Cut(rest, "/")
+	if name != p.cluster {
+		return true
+	}
+	if after, ok := strings.CutPrefix(rest, "nodePools/"); ok {
+		other, _, _ := strings.Cut(after, "/")
+		return other != pool
+	}
+	return false
 }
 
 // running finds any operation on the pool that is not done.
@@ -161,9 +176,11 @@ func (p *Provider) CheckReplacePermission(ctx context.Context, instanceID string
 	want := fixedPoolPermissions
 	if t.pool.Autoscaling {
 		want = basePermissions
-	} else if _, err := p.zoneSize(ctx, t.pool); err != nil {
-		// Shown before the node is cordoned, not after it is drained.
-		return err
+	} else if len(t.pool.Groups) != 1 {
+		// Neither path is open, so say so before the node is cordoned: a
+		// fixed-size pool is replaced only by adding first, which grows every
+		// zone of a multi-zone pool at once.
+		return fmt.Errorf("gcp: node pool %s is fixed-size and spans %d zones: %w, which needs a pool in one zone", t.pool.Name, len(t.pool.Groups), errFixedPoolRemoveFirst)
 	}
 	held, err := p.api.Permissions(ctx, want)
 	if err != nil {

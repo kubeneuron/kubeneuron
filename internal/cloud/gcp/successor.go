@@ -4,10 +4,12 @@ package gcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc/codes"
 
@@ -111,7 +113,11 @@ func (p *Provider) requestSuccessor(ctx context.Context, s cloud.Successor) (clo
 	if err != nil {
 		return s, fmt.Errorf("gcp: listing GKE operations: %w", err)
 	}
-	if mine, err := p.ownResize(s, ops); err != nil || mine != "" {
+	gr, err := p.api.Group(ctx, g)
+	if err != nil {
+		return s, fmt.Errorf("gcp: reading instance group %s: %w", g.name, err)
+	}
+	if mine, err := p.ownResize(s, ops, gr.TargetSize); err != nil || mine != "" {
 		if err != nil {
 			return s, err
 		}
@@ -131,10 +137,6 @@ func (p *Provider) requestSuccessor(ctx context.Context, s cloud.Successor) (clo
 	before, planned, err := plannedPool(s)
 	if err != nil {
 		return s, err
-	}
-	gr, err := p.api.Group(ctx, g)
-	if err != nil {
-		return s, fmt.Errorf("gcp: reading instance group %s: %w", g.name, err)
 	}
 	if gr.TargetSize != before || !slices.Equal(memberNames(members), planned) {
 		return s, fmt.Errorf("%w: node pool %s changed since the successor was planned (%d members at size %d, planned %d at %d)",
@@ -199,47 +201,52 @@ func (p *Provider) ReleaseSuccessor(ctx context.Context, s cloud.Successor) erro
 	if err != nil {
 		return err
 	}
+	gr, err := p.api.Group(ctx, g)
+	if err != nil {
+		return fmt.Errorf("gcp: reading instance group %s: %w", g.name, err)
+	}
 	ops, err := p.api.Operations(ctx)
 	if err != nil {
 		return fmt.Errorf("gcp: listing GKE operations: %w", err)
 	}
-	mine := s.State[stateOperation]
-	if mine == "" {
-		if mine, err = p.ownResize(s, ops); err != nil {
-			return err
-		}
+	mine, err := p.ownResize(s, ops, gr.TargetSize)
+	if errors.Is(err, cloud.ErrAddFirstUnavailable) {
+		return nil // the pool was resized, but not by this operation
+	}
+	if err != nil {
+		return err
 	}
 	if mine == "" {
 		return nil // nothing of this operation reached GKE
-	}
-	if op, err := p.api.Operation(ctx, mine); err != nil || op.Status != opDone {
-		return fmt.Errorf("gcp: GKE operation %s that grew node pool %s is not known to be done: %w", mine, pl.Name, cloud.ErrNeedsOperator)
 	}
 	added, err := addedMembers(s, members)
 	if err != nil {
 		return err
 	}
-	gr, err := p.api.Group(ctx, g)
-	if err != nil {
-		return fmt.Errorf("gcp: reading instance group %s: %w", g.name, err)
-	}
 	switch len(added) {
 	case 0:
-		if int(gr.TargetSize) != len(members) {
-			return fmt.Errorf("gcp: instance group %s is at size %d with %d members; a member may still come: %w", g.name, gr.TargetSize, len(members), cloud.ErrNeedsOperator)
-		}
-		return nil // no member came, or an earlier release deleted it
 	case 1:
+		// The operation's one new member goes, whether it runs or is still
+		// being created (a zone out of GPUs keeps retrying): deleting it by
+		// name takes the pool back to its size.
+		if s.Phase == cloud.SuccessorCreated && g.instance(added[0].Name).providerID() != s.ProviderID {
+			return fmt.Errorf("gcp: node pool %s does not hold just the successor %s of operation %s: %w", pl.Name, s.ProviderID, s.Operation, cloud.ErrNeedsOperator)
+		}
+		if err := p.api.DeleteInstances(ctx, g, []string{added[0].Name}, requestID("release", s.Operation, added[0].Name)); err != nil {
+			return fmt.Errorf("gcp: deleting successor %s from node pool %s: the result is unknown: %w: %w", added[0].Name, pl.Name, cloud.ErrNeedsOperator, err)
+		}
+		return nil
 	default:
 		return fmt.Errorf("gcp: node pool %s has %d members that were not there at the plan of operation %s: %w", pl.Name, len(added), s.Operation, cloud.ErrNeedsOperator)
 	}
-	if s.Phase == cloud.SuccessorCreated && g.instance(added[0].Name).providerID() != s.ProviderID {
-		return fmt.Errorf("gcp: node pool %s does not hold just the successor %s of operation %s: %w", pl.Name, s.ProviderID, s.Operation, cloud.ErrNeedsOperator)
+	// No new member: undone already, or the request may still bring one.
+	if op, err := p.api.Operation(ctx, mine); err != nil || op.Status != opDone {
+		return fmt.Errorf("gcp: GKE operation %s that grew node pool %s is not known to be done, and no new member is listed yet: %w", mine, pl.Name, cloud.ErrNeedsOperator)
 	}
-	if err := p.api.DeleteInstances(ctx, g, []string{added[0].Name}, requestID("release", s.Operation, added[0].Name)); err != nil {
-		return fmt.Errorf("gcp: deleting successor %s from node pool %s: the result is unknown: %w: %w", added[0].Name, pl.Name, cloud.ErrNeedsOperator, err)
+	if int(gr.TargetSize) != len(members) {
+		return fmt.Errorf("gcp: instance group %s is at size %d with %d members; a member may still come: %w", g.name, gr.TargetSize, len(members), cloud.ErrNeedsOperator)
 	}
-	return nil
+	return nil // no member came, or an earlier release deleted it
 }
 
 // ReplaceWithSuccessor deletes the pinned instance once its successor of the
@@ -308,25 +315,40 @@ func (p *Provider) resizes(ops []operation, pool string) []string {
 
 // ownResize finds the resize this operation's request started: one the plan
 // had not seen. More than one cannot be told apart.
-func (p *Provider) ownResize(s cloud.Successor, ops []operation) (string, error) {
+func (p *Provider) ownResize(s cloud.Successor, ops []operation, targetSize int32) (string, error) {
 	if s.State[stateOperation] != "" {
 		return s.State[stateOperation], nil
 	}
+	before, _, err := plannedPool(s)
+	if err != nil {
+		return "", err
+	}
 	seen := strings.Split(s.State[stateSeen], ",")
-	var fresh []string
-	for _, name := range p.resizes(ops, s.Pool) {
-		if !slices.Contains(seen, name) {
-			fresh = append(fresh, name)
+	var fresh []operation
+	for _, op := range ops {
+		if op.Type == opSetSize && p.onPool(op, s.Pool) && !slices.Contains(seen, op.Name) {
+			fresh = append(fresh, op)
 		}
 	}
 	if len(fresh) > 1 {
 		return "", fmt.Errorf("gcp: node pool %s was resized %d times since the plan of operation %s: %w", s.Pool, len(fresh), s.Operation, cloud.ErrNeedsOperator)
 	}
-	if len(fresh) == 1 {
-		return fresh[0], nil
+	if len(fresh) == 0 {
+		return "", nil
 	}
-	return "", nil
+	op := fresh[0]
+	// Ours only if it started after the request went out (the caller records
+	// the time first; a minute for the clocks) and grew the pool by one. A
+	// resize someone made while the step waited for approval is not.
+	early := !s.RequestedAt.IsZero() && (op.Start.IsZero() || op.Start.Before(s.RequestedAt.Add(-clockSkew)))
+	if early || targetSize != before+1 {
+		return "", fmt.Errorf("%w: node pool %s was resized (GKE operation %s) since the successor was planned", cloud.ErrAddFirstUnavailable, s.Pool, op.Name)
+	}
+	return op.Name, nil
 }
+
+// clockSkew is how far the controller's clock may be from GKE's.
+const clockSkew = time.Minute
 
 func plannedPool(s cloud.Successor) (int32, []string, error) {
 	n, err := strconv.ParseInt(s.State[stateSize], 10, 32)
