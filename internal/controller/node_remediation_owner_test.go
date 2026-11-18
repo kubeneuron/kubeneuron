@@ -42,12 +42,27 @@ func TestRepairFollowerDoesNotCordonOrRequestApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	step(t, c, st, follower.ID, 20)
+	if got := len(notifier.approvals); got != 1 {
+		t.Errorf("approval requests %d, want only the owner's drain request", got)
+	}
+	waitSettled(t, c, st, first.ID, func(i *types.Incident) bool {
+		if i.State == types.StateAwaitingApproval {
+			if err := c.DecideApproval(ctx, i.ID, "alice", "test", types.ApprovalApproved, i.ApprovalEpoch, "", ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return i.State == types.StateVerifying
+	})
+	step(t, c, st, follower.ID, 20)
+	if got := len(notifier.approvals); got != 2 {
+		t.Errorf("approval requests %d, want the owner's drain and replace", got)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if owners := p.cordoned["n1"]; len(owners) != 1 || owners[0] != first.ID {
 		t.Errorf("cordon owners %v, want only %s", owners, first.ID)
 	}
-	if got := len(notifier.approvals); got != 1 {
-		t.Errorf("approval requests %d, want only the owner's drain request", got)
+	if len(p.drained) != 1 || len(p.plain) != 1 {
+		t.Errorf("drains %v replacements %v, want one each", p.drained, p.plain)
 	}
 }
