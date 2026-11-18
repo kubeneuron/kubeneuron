@@ -615,7 +615,7 @@ func (r *KubeNeuronReconciler) updateChildConfigurationStatuses(
 	var books map[string]*playbook.Playbook
 	if validationErr == nil {
 		var err error
-		books, err = compilePlaybookIndex(installation.Name, playbooks)
+		books, err = compilePlaybookIndex(installation, playbooks)
 		if err != nil {
 			return fmt.Errorf("rebuild compiled playbook index for status: %w", err)
 		}

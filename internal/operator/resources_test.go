@@ -577,6 +577,7 @@ func TestDefaultImagePullPolicyMatchesKubernetesDefaulting(t *testing.T) {
 
 func TestAgentDaemonSetReportsRegistrationReadiness(t *testing.T) {
 	installation := testKubeNeuron()
+	installation.Spec.Safety.NodeLevelActions = false
 	installation.Spec.TLS.ServerCASecretRef.Key = "servers.pem"
 	agents := agentDaemonSet(installation, &Snapshot{Digest: "abc123"})
 	if len(agents.Spec.Template.Spec.Containers) != 1 {

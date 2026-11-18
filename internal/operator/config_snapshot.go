@@ -72,7 +72,7 @@ func CompileSnapshot(
 		acceleratorProfiles = acceleratorProfileSets[0]
 	}
 
-	books, err := compilePlaybookIndex(installation.Name, playbooks)
+	books, err := compilePlaybookIndex(installation, playbooks)
 	if err != nil {
 		return nil, err
 	}
@@ -961,6 +961,11 @@ func effectivePositive(value int32, defaultValue int) int {
 	return int(value)
 }
 
+func nodeLevelAction(wire string) bool {
+	def, _ := action.ByWire(wire)
+	return def.Kind == action.KindAgent || wire == "platform.quiesce_accelerator_stack" || wire == "platform.restore_accelerator_stack"
+}
+
 func compilePolicies(
 	installation *kubeneuronv1alpha1.KubeNeuron,
 	policies []kubeneuronv1alpha1.GPURemediationPolicy,
@@ -1004,8 +1009,7 @@ func compilePolicies(
 			// compilePlaybookIndex has already verified that escalation paths are acyclic.
 			for book := books[policy.Spec.PlaybookRef]; book != nil; book = books[book.OnFailure.EscalateTo] {
 				for _, step := range book.Steps {
-					def, _ := action.ByWire(step.Action)
-					if def.Kind == action.KindAgent || step.Action == "platform.quiesce_accelerator_stack" || step.Action == "platform.restore_accelerator_stack" {
+					if nodeLevelAction(step.Action) {
 						return nil, fmt.Errorf("policy %q: Automatic mode cannot use node-level action %q in playbook %q; use Approval mode", policy.Name, step.Action, book.Name)
 					}
 				}
@@ -1043,16 +1047,23 @@ func compilePolicies(
 // and validates their escalation graph. Keeping this as the one compilation
 // path lets child-CR status expose exactly the same effective playbook that
 // the runtime snapshot receives.
-func compilePlaybookIndex(installationName string, playbooks []kubeneuronv1alpha1.GPUPlaybook) (map[string]*playbook.Playbook, error) {
+func compilePlaybookIndex(installation *kubeneuronv1alpha1.KubeNeuron, playbooks []kubeneuronv1alpha1.GPUPlaybook) (map[string]*playbook.Playbook, error) {
 	books := make(map[string]*playbook.Playbook, len(playbooks))
 	for i := range playbooks {
 		candidate := &playbooks[i]
-		if candidate.Spec.KubeNeuronRef != installationName {
+		if candidate.Spec.KubeNeuronRef != installation.Name {
 			continue
 		}
 		book, err := compilePlaybook(candidate)
 		if err != nil {
 			return nil, err
+		}
+		if !installation.Spec.Safety.NodeLevelActions {
+			for _, step := range book.Steps {
+				if nodeLevelAction(step.Action) {
+					return nil, fmt.Errorf("playbook %q uses %q while spec.safety.nodeLevelActions is disabled", book.Name, step.Action)
+				}
+			}
 		}
 		if _, exists := books[book.Name]; exists {
 			return nil, fmt.Errorf("duplicate playbook %q", book.Name)

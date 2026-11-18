@@ -23,6 +23,7 @@ func testKubeNeuron() *kubeneuronv1alpha1.KubeNeuron {
 	return &kubeneuronv1alpha1.KubeNeuron{
 		ObjectMeta: metav1.ObjectMeta{Name: "fleet", UID: "installation-uid"},
 		Spec: kubeneuronv1alpha1.KubeNeuronSpec{
+			Safety:     kubeneuronv1alpha1.SafetySpec{NodeLevelActions: true}, // paired with the GPU reset fixture
 			Namespace:  "kube-neuron-system",
 			Controller: kubeneuronv1alpha1.ComponentSpec{Image: "example/controller:v1"},
 			Agent:      kubeneuronv1alpha1.AgentSpec{Image: "example/agent:v1"},
@@ -1406,5 +1407,15 @@ func TestCompileSnapshotManualRecoveryBaseline(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDisabledNodeLevelActionsRejectResetPlaybook(t *testing.T) {
+	installation := testKubeNeuron()
+	installation.Spec.Safety.NodeLevelActions = false
+	_, books := testPolicyFixture()
+	_, err := compilePlaybookIndex(installation, books)
+	if err == nil || !strings.Contains(err.Error(), "spec.safety.nodeLevelActions is disabled") {
+		t.Fatalf("expected disabled node-level action error, got %v", err)
 	}
 }
