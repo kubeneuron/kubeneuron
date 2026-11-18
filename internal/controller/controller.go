@@ -852,6 +852,16 @@ func (c *Controller) afterSignalCommitted(ctx context.Context, sig types.Signal,
 	if opened == nil {
 		return nil
 	}
+	// The signal and open audit are durable before the Kubernetes lookup.
+	if params := c.decisionNodeContext(ctx, opened.Target.Node, nil); params != nil {
+		err := c.store.AppendAudit(ctx, &types.AuditEntry{
+			IncidentID: opened.ID, Time: time.Now(), Actor: "system", Action: "node-context",
+			FromState: types.StateOpen, ToState: types.StateOpen, Params: params, DryRun: opened.DryRun,
+		})
+		if err != nil {
+			c.log.Warn("could not record opening node conditions", "incident", opened.ID)
+		}
+	}
 	metrics.IncidentsOpened.WithLabelValues(string(opened.Class)).Inc()
 	return c.notify(ctx, notify.NotifyEvent{
 		Kind: notify.EventOpened, Incident: opened,

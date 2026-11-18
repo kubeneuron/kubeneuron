@@ -562,7 +562,8 @@ type IncidentDetail struct {
 func latestNodeConditions(audit []*types.AuditEntry) (*types.NodeConditionSnapshot, string) {
 	for i := len(audit) - 1; i >= 0; i-- {
 		entry := audit[i]
-		if entry == nil {
+		// The open record contains signal-supplied evidence, not a controller observation.
+		if entry == nil || entry.Action == "open" {
 			continue
 		}
 		if reason := entry.Params["node_conditions_unavailable"]; reason != "" {
