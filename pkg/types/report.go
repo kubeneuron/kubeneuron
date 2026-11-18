@@ -12,12 +12,21 @@ type SavingsEstimate struct {
 
 // RecoveryIncident is one incident's contribution to the selected period.
 type RecoveryIncident struct {
-	ID               string            `json:"id"`
-	Node             string            `json:"node"`
-	Vendor           AcceleratorVendor `json:"vendor,omitempty"`
-	State            IncidentState     `json:"state"`
-	DegradedGPUHours float64           `json:"degraded_gpu_hours"`
-	RecoverySeconds  *float64          `json:"recovery_seconds,omitempty"`
+	Jobs             []JobRecoveryTiming `json:"jobs,omitempty"`
+	ID               string              `json:"id"`
+	Node             string              `json:"node"`
+	Vendor           AcceleratorVendor   `json:"vendor,omitempty"`
+	State            IncidentState       `json:"state"`
+	DegradedGPUHours float64             `json:"degraded_gpu_hours"`
+	RecoverySeconds  *float64            `json:"recovery_seconds,omitempty"`
+}
+
+// JobRecoveryTiming measures seconds from the incident opening to each observed result.
+type JobRecoveryTiming struct {
+	Namespace                  string        `json:"namespace"`
+	Owner                      TrainingOwner `json:"owner"`
+	InfrastructureReadySeconds *float64      `json:"infrastructure_ready_seconds,omitempty"`
+	ProgressConfirmedSeconds   *float64      `json:"progress_confirmed_seconds,omitempty"`
 }
 
 // RecoveryReport answers the question a capacity owner asks about a window:

@@ -112,7 +112,51 @@ func (c *Controller) RecoveryReport(ctx context.Context, window time.Duration) (
 			remediated[inc.ID] = remediationOutcome(executed[inc.ID], inc.DryRun)
 		}
 	}
-	return aggregateRecovery(incidents, gpusPerNode, remediated, from, to, c.runtimeConfig(ctx).ManualRecoveryBaseline), nil
+	report := aggregateRecovery(incidents, gpusPerNode, remediated, from, to, c.runtimeConfig(ctx).ManualRecoveryBaseline)
+	opened := make(map[string]time.Time, len(incidents))
+	for _, inc := range incidents {
+		if inc != nil {
+			opened[inc.ID] = inc.OpenedAt
+		}
+	}
+	for i := range report.IncidentDetails {
+		row := &report.IncidentDetails[i]
+		workers, err := c.IncidentTrainingWorkers(ctx, row.ID)
+		if err != nil {
+			return nil, err
+		}
+		if len(workers) == 0 {
+			continue
+		}
+		trail, err := c.store.AuditTrail(ctx, row.ID)
+		if err != nil {
+			return nil, err
+		}
+		ready := types.VerifiedInfrastructureTime(trail)
+		var confirmed map[string]time.Time
+		if ready != nil {
+			confirmed, err = c.TrainingConfirmations(ctx, row.ID, *ready)
+			if err != nil {
+				return nil, err
+			}
+		}
+		for _, job := range types.GroupAffectedJobs(workers) {
+			if job.Owner == nil {
+				continue
+			}
+			entry := types.JobRecoveryTiming{Namespace: job.Namespace, Owner: *job.Owner}
+			if ready != nil && !ready.Before(opened[row.ID]) {
+				elapsed := ready.Sub(opened[row.ID]).Seconds()
+				entry.InfrastructureReadySeconds = &elapsed
+				if at := confirmed[job.Owner.UID]; at.After(*ready) {
+					elapsed := at.Sub(opened[row.ID]).Seconds()
+					entry.ProgressConfirmedSeconds = &elapsed
+				}
+			}
+			row.Jobs = append(row.Jobs, entry)
+		}
+	}
+	return report, nil
 }
 
 // auditExecutingResult is the historical result format written by releases
