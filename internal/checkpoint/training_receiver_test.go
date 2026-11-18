@@ -5,6 +5,7 @@ package checkpoint
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -114,18 +115,20 @@ func TestTrainingReceiverLimitsConcurrentAuthentication(t *testing.T) {
 		<-release
 		return nil, errors.New("invalid token")
 	}}
-	request := func() int {
+	request := func(i int) int {
 		w := httptest.NewRecorder()
-		h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/training/reports", nil))
+		r := httptest.NewRequest(http.MethodPost, "/v1/training/reports", nil)
+		r.RemoteAddr = fmt.Sprintf("192.0.2.%d:1234", i+1)
+		h.ServeHTTP(w, r)
 		return w.Code
 	}
-	for range 32 {
-		go func() { finished <- request() }()
+	for i := range 32 {
+		go func() { finished <- request(i) }()
 	}
 	for range 32 {
 		<-entered
 	}
-	if code := request(); code != http.StatusTooManyRequests {
+	if code := request(32); code != http.StatusTooManyRequests {
 		t.Errorf("overflow status %d", code)
 	}
 	close(release)
@@ -134,7 +137,30 @@ func TestTrainingReceiverLimitsConcurrentAuthentication(t *testing.T) {
 			t.Errorf("authentication status %d", code)
 		}
 	}
-	if code := request(); code != http.StatusUnauthorized {
+	if code := request(32); code != http.StatusUnauthorized {
 		t.Fatalf("released slot status %d", code)
+	}
+}
+
+func TestTrainingReceiverLimitsNoisySender(t *testing.T) {
+	calls := 0
+	h := TrainingReceiver{Authenticate: func(*http.Request) (*corev1.Pod, error) { calls++; return nil, errors.New("invalid token") }}
+	check := func(addr string, want int) {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		r.RemoteAddr = addr
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("%s: status %d, want %d", addr, w.Code, want)
+		}
+	}
+	for i := range 10 {
+		check(fmt.Sprintf("192.0.2.1:%d", 1234+i), http.StatusUnauthorized)
+	}
+	check("192.0.2.1:9999", http.StatusTooManyRequests)
+	check("192.0.2.2:9999", http.StatusUnauthorized)
+	if calls != 11 {
+		t.Fatalf("authentication calls %d", calls)
 	}
 }

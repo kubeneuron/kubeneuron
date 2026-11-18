@@ -5,6 +5,7 @@ package checkpoint
 import (
 	"context"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -19,6 +20,9 @@ type TrainingReceiver struct {
 	Owner        func(context.Context, *corev1.Pod) (types.TrainingOwner, bool)
 	Record       func(context.Context, *corev1.Pod, types.TrainingOwner, TrainingReport, time.Time) error
 
+	senderMu   sync.Mutex
+	senders    map[netip.Addr]*senderBudget
+	lastSweep  time.Time
 	authOnce   sync.Once
 	authBudget flowcontrol.RateLimiter
 	authSlots  chan struct{}
@@ -26,6 +30,42 @@ type TrainingReceiver struct {
 	mu     sync.Mutex
 	window time.Time
 	counts map[string]int
+}
+
+type senderBudget struct {
+	limiter  flowcontrol.RateLimiter
+	lastSeen time.Time
+}
+
+func (h *TrainingReceiver) allowSender(remote string, now time.Time) bool {
+	peer, err := netip.ParseAddrPort(remote)
+	if err != nil {
+		return false
+	}
+	addr := peer.Addr().Unmap()
+	h.senderMu.Lock()
+	defer h.senderMu.Unlock()
+	if h.senders == nil {
+		h.senders = make(map[netip.Addr]*senderBudget)
+	}
+	if now.Sub(h.lastSweep) >= time.Minute {
+		for ip, budget := range h.senders {
+			if now.Sub(budget.lastSeen) >= time.Minute {
+				delete(h.senders, ip)
+			}
+		}
+		h.lastSweep = now
+	}
+	budget := h.senders[addr]
+	if budget == nil {
+		if len(h.senders) >= 16384 {
+			return false
+		}
+		budget = &senderBudget{limiter: flowcontrol.NewTokenBucketRateLimiter(5, 10)}
+		h.senders[addr] = budget
+	}
+	budget.lastSeen = now
+	return budget.limiter.TryAccept()
 }
 
 func (h *TrainingReceiver) allow(uid string, now time.Time) bool {
@@ -50,10 +90,10 @@ func (h *TrainingReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// All senders share this budget before any Kubernetes identity lookup.
 	h.authOnce.Do(func() {
-		h.authBudget = flowcontrol.NewTokenBucketRateLimiter(100, 100)
+		h.authBudget = flowcontrol.NewTokenBucketRateLimiter(100, 200)
 		h.authSlots = make(chan struct{}, 32)
 	})
-	if !h.authBudget.TryAccept() {
+	if !h.allowSender(r.RemoteAddr, time.Now()) || !h.authBudget.TryAccept() {
 		w.Header().Set("Retry-After", "1")
 		w.WriteHeader(http.StatusTooManyRequests)
 		return
