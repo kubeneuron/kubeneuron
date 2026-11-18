@@ -13,6 +13,7 @@ import (
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
+	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
 func automaticSpec() *kubeneuronv1alpha1.AutomaticRecoverySpec {
@@ -162,6 +163,19 @@ func TestAutomaticPolicyChecksEscalatedActions(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), hostAction) || !strings.Contains(err.Error(), "fallback") {
 			t.Errorf("escalation to %s: got %v, want error naming action and fallback", hostAction, err)
 		}
+	}
+}
+
+func TestCompileRejectsInterruptionPolicyThatDrains(t *testing.T) {
+	policies, _ := testPolicyFixture()
+	policies[0].Spec.Match.Class = string(types.ClassCloudInterruption)
+	books := map[string]*playbook.Playbook{"gpu-reset": {Name: "gpu-reset", Steps: []playbook.Step{{Action: "platform.drain", Approval: "required"}}}}
+	if _, err := compilePolicies(testKubeNeuron(), policies, books); err == nil || !strings.Contains(err.Error(), "platform.drain") {
+		t.Fatalf("interruption policy with a drain: got %v", err)
+	}
+	books["gpu-reset"].Steps = []playbook.Step{{Action: playbook.CheckpointWarningAction}, {Action: "platform.cordon", Approval: "required"}}
+	if _, err := compilePolicies(testKubeNeuron(), policies, books); err != nil {
+		t.Fatalf("interruption policy that warns and cordons: %v", err)
 	}
 }
 

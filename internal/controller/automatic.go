@@ -313,14 +313,15 @@ func (c *Controller) logOnceStepUnavailable(inc *types.Incident, step *playbook.
 // person's approval can.
 const nodeLevelAlphaReason = "node-level actions are alpha (not validated on real hardware) and need a person's approval; automatic policies cannot authorise them"
 
-// nodeLevelAction reports whether the step runs a destructive command on the
-// node through the agent.
 // interruptionCordon reports whether step is the cordon of a
-// cloud-interruption incident.
+// cloud-interruption incident. Policy validation confines that class to the
+// checkpoint warning and the cordon.
 func interruptionCordon(inc *types.Incident, step *playbook.Step) bool {
 	return inc.Class == types.ClassCloudInterruption && step.Action == "platform.cordon"
 }
 
+// nodeLevelAction reports whether the step runs a destructive command on the
+// node through the agent.
 func nodeLevelAction(step *playbook.Step) bool {
 	def, ok := action.ByWire(step.Action)
 	return ok && def.Kind == action.KindAgent && def.AgentDestructive

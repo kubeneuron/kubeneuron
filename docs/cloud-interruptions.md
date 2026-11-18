@@ -72,7 +72,10 @@ others.
 2. **Cordon**. The node takes no new pods.
 
 KubeNeuron never drains or replaces the node for an interruption: the cloud
-takes the instance, and the node group's own scaling replaces it.
+takes the instance, and the node group's own scaling replaces it. A
+`cloud-interruption` policy whose playbook, or a playbook it escalates to,
+has any step other than these two is rejected when the policies load, in
+every mode.
 
 | Mode | Checkpoint warning | Cordon |
 |---|---|---|

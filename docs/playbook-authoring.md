@@ -50,7 +50,7 @@ not, because no cloud VM tested so far permits one (see below).
 | `IdleCheck` / `WaitIdle` | GPU idleness probes | the action journal persists intent and outcome across agent restarts |
 | `VerifyGPUHealth` / `VerifyNodeHealth` | health probes | agent heartbeat freshness is exercised; DCGM verification is roadmap |
 | `OpenTicket` | notification with quarantine note | intended end of the ladder (RMA) |
-| `CheckpointWarning` | asks opted-in jobs to checkpoint before the deadline the cloud announced | meant for a `cloud-interruption` playbook, beside `Cordon`; needs no approval; see [Announced cloud interruptions](cloud-interruptions.md) |
+| `CheckpointWarning` | asks opted-in jobs to checkpoint before the deadline the cloud announced | only in a `cloud-interruption` policy's playbook, beside `Cordon`; a policy of another class that reaches it is rejected; needs no approval; see [Announced cloud interruptions](cloud-interruptions.md) |
 
 `DriverReload`/`DriverReinstall`/`RunScript` are reserved for a future
 host-provisioned scripts directory. They must use fixed names (or a strictly

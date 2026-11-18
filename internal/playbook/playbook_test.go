@@ -524,6 +524,31 @@ func TestEngineRejectsAutomaticHostEscalation(t *testing.T) {
 	}
 }
 
+// A cloud-interruption policy only warns and cordons, in every mode and
+// along its whole escalation path; the warning belongs to no other class.
+func TestEngineConfinesInterruptionPolicies(t *testing.T) {
+	books := map[string]*Playbook{
+		"interruption": {Steps: []Step{{Action: CheckpointWarningAction}, {Action: "platform.cordon", Approval: "required"}}},
+		"escalating":   {Steps: []Step{{Action: CheckpointWarningAction}}, OnFailure: OnFailure{EscalateTo: "drain"}},
+		"drain":        {Steps: []Step{{Action: "platform.drain", Approval: "required"}}},
+	}
+	for _, mode := range []recoverymode.Mode{recoverymode.DryRun, recoverymode.Approval, recoverymode.Automatic} {
+		if _, err := NewEngine(books, []Policy{{Class: types.ClassCloudInterruption, Playbook: "interruption", Mode: mode}}); err != nil {
+			t.Errorf("%s: warn and cordon refused: %v", mode, err)
+		}
+		for _, root := range []string{"escalating", "drain"} {
+			_, err := NewEngine(books, []Policy{{Class: types.ClassCloudInterruption, Playbook: root, Mode: mode}})
+			if err == nil || !strings.Contains(err.Error(), "platform.drain") {
+				t.Errorf("%s: interruption policy reaching a drain from %s: got %v", mode, root, err)
+			}
+		}
+		_, err := NewEngine(books, []Policy{{Class: types.ClassFellOffBus, Playbook: "interruption", Mode: mode}})
+		if err == nil || !strings.Contains(err.Error(), CheckpointWarningAction) {
+			t.Errorf("%s: checkpoint warning bound to a fault class: got %v", mode, err)
+		}
+	}
+}
+
 func TestNodeLevelActionsAlwaysNeedHumanApproval(t *testing.T) {
 	for _, wire := range []string{"agent.gpu_reset", "agent.run_diag", "agent.reboot", "platform.quiesce_accelerator_stack", "platform.restore_accelerator_stack"} {
 		if !(Step{Action: wire, Approval: "none"}).NeedsApproval() {

@@ -1002,7 +1002,7 @@ func compilePolicies(
 		if err != nil {
 			return nil, err
 		}
-		if err := playbook.ValidatePolicyActions(mode, policy.Spec.PlaybookRef, books); err != nil {
+		if err := playbook.ValidatePolicyActions(types.ProblemClass(policy.Spec.Match.Class), mode, policy.Spec.PlaybookRef, books); err != nil {
 			return nil, fmt.Errorf("policy %q: %w", policy.Name, err)
 		}
 		if automatic != nil && automatic.CheckpointWait > 0 &&

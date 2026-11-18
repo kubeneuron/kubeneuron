@@ -49,7 +49,7 @@ func NewEngine(books map[string]*Playbook, policies []Policy) (*Engine, error) {
 		if _, ok := books[pol.Playbook]; !ok {
 			return nil, fmt.Errorf("policy for class %q references unknown playbook %q", pol.Class, pol.Playbook)
 		}
-		if err := ValidatePolicyActions(pol.Mode, pol.Playbook, books); err != nil {
+		if err := ValidatePolicyActions(pol.Class, pol.Mode, pol.Playbook, books); err != nil {
 			return nil, fmt.Errorf("policy for class %q: %w", pol.Class, err)
 		}
 	}
@@ -144,11 +144,13 @@ func (e *Engine) Playbook(name string) (*Playbook, bool) {
 	return p, ok
 }
 
-// ValidatePolicyActions checks the reachable steps of a validated escalation graph.
-func ValidatePolicyActions(mode recoverymode.Mode, root string, books map[string]*Playbook) error {
-	if mode != recoverymode.Automatic {
-		return nil
-	}
+// ValidatePolicyActions checks the reachable steps of a validated escalation
+// graph. In every mode, a cloud-interruption policy may only warn jobs and
+// cordon the node: the cloud takes the instance, so anything that drains,
+// resets or replaces it is not a response to the notice. The checkpoint
+// warning belongs to that class only. In Automatic mode no step may be a
+// node-level action.
+func ValidatePolicyActions(class types.ProblemClass, mode recoverymode.Mode, root string, books map[string]*Playbook) error {
 	seen := make(map[string]bool)
 	for name := root; name != ""; name = books[name].OnFailure.EscalateTo {
 		if seen[name] {
@@ -159,7 +161,14 @@ func ValidatePolicyActions(mode recoverymode.Mode, root string, books map[string
 			return fmt.Errorf("unknown playbook %q in escalation path", name)
 		}
 		for _, step := range books[name].Steps {
-			if IsNodeLevelAction(step.Action) {
+			interruption := step.Action == CheckpointWarningAction || step.Action == "platform.cordon"
+			if class == types.ClassCloudInterruption && !interruption {
+				return fmt.Errorf("a %s policy can only warn jobs and cordon the node, not %q in playbook %q", class, step.Action, name)
+			}
+			if class != types.ClassCloudInterruption && step.Action == CheckpointWarningAction {
+				return fmt.Errorf("action %q in playbook %q belongs to %s policies only", step.Action, name, types.ClassCloudInterruption)
+			}
+			if mode == recoverymode.Automatic && IsNodeLevelAction(step.Action) {
 				return fmt.Errorf("policy in Automatic mode cannot use node-level action %q in playbook %q; use Approval mode", step.Action, name)
 			}
 		}
