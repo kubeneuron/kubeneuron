@@ -461,16 +461,16 @@ planned rotation, finish the rotation first — `hack/tls-rotate.sh` phases
 record exact root generations and will refuse to continue across an
 unexpected generation change.
 
-### Bare-metal alpha recovery
+## Bare-metal alpha recovery
 
-For existing bare-metal installations that use node-level actions, set the Helm
+After upgrading, existing bare-metal installations switch to observation until
+both node-level permissions are enabled. To resume node-level actions, set the Helm
 value `operator.allowNodeLevelActions=true` and set `spec.safety.nodeLevelActions: true`
 in each installation that requires them. With operator permission disabled, a
 request in the CR produces an `OperatorPermissionRequired` warning and affected
 playbooks run only their observation fallback.
 
-For CR-managed installations, existing node-level playbooks fall back to
-observation until both permissions are enabled. A missing installation opt-in
+A missing installation opt-in
 appears as `InstallationOptInRequired`. In file-based mode, the controller
 rejects a node-level playbook at startup when `safety.node_level_actions` is
 disabled. Enable the setting or remove those playbooks before restarting.

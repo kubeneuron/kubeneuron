@@ -18,7 +18,9 @@ each installation that needs node-level recovery. The installer sets this field
 when creating a fresh installation with the bare-metal pack. Both permissions
 default to false. If the CR requests actions while the operator switch is off,
 the CR reports `OperatorPermissionRequired` and the affected playbooks fall
-back to observation.
+back to observation. If the installation omits or disables
+`spec.safety.nodeLevelActions`, the condition reports
+`InstallationOptInRequired`.
 
 Start in `DryRun` to inspect the proposed steps. For live node-level
 recovery use an approval policy. An Automatic policy that reaches an agent

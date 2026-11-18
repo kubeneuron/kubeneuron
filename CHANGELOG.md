@@ -450,6 +450,8 @@ API is `v1alpha1`.
   this counter may show fewer recoveries after upgrade because manual and
   observe-only closures are excluded.
 
+- Existing bare-metal installations switch to observation on upgrade until the
+  operator and the installation both enable alpha node-level actions.
 - **Automatic replacement now needs `automatic.qualifiedProfiles`.** A
   policy in Automatic mode replaces a node without approval only when the
   node's accelerator runtime profile is listed in
