@@ -1208,6 +1208,14 @@ func TestReconcileOperatorPermissionForReboot(t *testing.T) {
 		if err := c.Get(ctx, req.NamespacedName, &current); err != nil {
 			t.Fatal(err)
 		}
+		kernelLog := meta.FindStatusCondition(current.Status.Conditions, "KernelLogSource")
+		wantKernelLog := metav1.ConditionFalse
+		if allowed {
+			wantKernelLog = metav1.ConditionUnknown
+		}
+		if kernelLog == nil || kernelLog.Status != wantKernelLog || kernelLog.ObservedGeneration != current.Generation {
+			t.Fatalf("permission %v: kernel log condition = %+v", allowed, kernelLog)
+		}
 		denial := meta.FindStatusCondition(current.Status.Conditions, "NodeLevelActionsAllowed")
 		if current.Spec.Safety.NodeLevelActions != tc.installation || (denial != nil) == allowed || (denial != nil && denial.Reason != tc.reason) {
 			t.Fatalf("operator permission %v: unexpected installation status %#v", allowed, denial)

@@ -503,6 +503,17 @@ func (r *KubeNeuronReconciler) updateStatus(ctx context.Context, installation *k
 	installation.Status.ObservedGeneration = installation.Generation
 	r.setInventoryConditions(ctx, installation, installation.Spec.Safety.NodeLevelActions)
 	meta.SetStatusCondition(&installation.Status.Conditions, cloudRecoveryCondition(installation))
+	kernelLog := metav1.Condition{
+		Type: "KernelLogSource", ObservedGeneration: installation.Generation,
+		Status: metav1.ConditionFalse, Reason: "KernelLogNotMounted",
+		Message: "The agent has no host kernel log. NVIDIA XID codes are unavailable unless DCGM field 230 is readable. AMD kernel ring timeouts and PCIe errors are unavailable.",
+	}
+	if installation.Spec.Safety.NodeLevelActions {
+		kernelLog.Status = metav1.ConditionUnknown
+		kernelLog.Reason = "KernelLogAccessUnverified"
+		kernelLog.Message = "The agent mounts /dev/kmsg. The operator has no confirmation that the agent can read it."
+	}
+	meta.SetStatusCondition(&installation.Status.Conditions, kernelLog)
 	if validationErr != nil {
 		meta.SetStatusCondition(&installation.Status.Conditions, metav1.Condition{
 			Type:               "ConfigurationValid",
