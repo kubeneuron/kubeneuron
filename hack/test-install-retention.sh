@@ -31,7 +31,7 @@ install() {
 	# CRDs/operator are installed by the parent harness. Reapplying only its
 	# namespace avoids replacing its candidate Deployment with a release tag.
 	bash "$REPO_ROOT/deploy/install.sh" --name "$name" --namespace "$namespace" \
-		--manifest "$REPO_ROOT/config/default/namespace.yaml" --admin '' \
+		--manifest "${installer_manifest:-$REPO_ROOT/config/default/namespace.yaml}" "$@" --admin '' \
 		--controller-image "$CONTROLLER_IMAGE" --agent-image "$AGENT_IMAGE" >"$work/install.log" 2>&1 || {
 		# Installer log contains generated credentials: do not print it.
 		"$KUBECTL_BIN" get kubeneuron "$name" -o jsonpath='{.status.conditions}' >&2 || true
@@ -72,6 +72,14 @@ grep -Fq "Conflicting recovery object GPURemediationPolicy/$name-cloud-xid-app" 
 "$KUBECTL_BIN" label gpuremediationpolicy "$name-cloud-xid-app" kubeneuron.io/installed-by=install-sh "kubeneuron.io/installation=$name" kubeneuron.io/policy-pack=cloud >/dev/null
 install
 [[ $("$KUBECTL_BIN" get gpuremediationpolicy "$name-cloud-xid-app" -o jsonpath='{.spec.priority}') == 891 ]] || fail "resume overwrote the existing policy"
+operator_args() {
+ "$KUBECTL_BIN" -n kube-neuron get deployment kubeneuron-operator -o json |
+  jq -r '.spec.template.spec.containers[] | select(.name == "operator") | .args[]'
+}
+cloud_args=$(operator_args)
+if grep -Eq '^--allow-node-level-actions(=true)?$' <<<"$cloud_args"; then
+ fail "fresh cloud install enabled node-level actions"
+fi
 claim_uid=$("$KUBECTL_BIN" -n "$namespace" get pvc "$name-controller-state" -o jsonpath='{.metadata.uid}')
 token_versions() { "$KUBECTL_BIN" -n "$namespace" get secret "$name-operator-api-token" "$name-webhook-token" -o jsonpath='{.items[*].metadata.resourceVersion}'; }
 tokens=$(token_versions)
@@ -196,4 +204,25 @@ uninstall --delete-data --yes
 [[ -z $("$KUBECTL_BIN" -n "$namespace" get pvc "$name-metrics-store" --ignore-not-found -o name) ]] || fail "explicit delete left the metrics claim"
 [[ $("$KUBECTL_BIN" -n "$namespace" get pvc "$name-b-metrics-store" -o jsonpath='{.metadata.uid}') == "$other_metrics_uid" ]] || fail "explicit delete touched another installation's metrics claim"
 "$KUBECTL_BIN" get gpuplaybook "$name-other" "$name-mislabeled" >/dev/null
+# Reapply the candidate Deployment with an explicit false flag. A rerun must
+# preserve the administrator's effective permission across that manifest apply.
+installer_manifest="$work/operator.json"
+"$KUBECTL_BIN" -n kube-neuron get deployment kubeneuron-operator -o json |
+ jq '{apiVersion,kind,metadata:{name:.metadata.name,namespace:.metadata.namespace},spec}
+     | (.spec.template.spec.containers[] | select(.name=="operator").args) += ["--allow-node-level-actions=false"]' >"$installer_manifest"
+install --policy-pack bare-metal-alpha
+assert_alpha_allowed() {
+ local args
+ args=$(operator_args)
+ [[ $(grep '^--allow-node-level-actions' <<<"$args" | tail -1) == --allow-node-level-actions=true ]] || fail "bare-metal operator permission lost"
+ "$KUBECTL_BIN" get kubeneuron "$name" -o json |
+  jq -e '.spec.safety.nodeLevelActions == true and
+         ([.status.conditions[]? | select(.type == "NodeLevelActionsAllowed" and .status == "False")] | length == 0)' >/dev/null || fail "bare-metal installation permission denied"
+}
+assert_alpha_allowed
+install
+assert_alpha_allowed
+uninstall --delete-data --yes
+"$KUBECTL_BIN" apply -f "$installer_manifest" >/dev/null
+"$KUBECTL_BIN" -n kube-neuron rollout status deployment/kubeneuron-operator --timeout=180s >/dev/null
 echo 'installer retention PASS: confirmation, state/PVC identity, reinstall, legacy scoping, foreign resources, metrics claim scoping and explicit deletion'
