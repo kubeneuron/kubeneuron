@@ -162,7 +162,11 @@ Dynamic Resource Allocation drivers set on the devices they publish, as one
 more source (`dra`) of the profiles. It is off by default. Device taints
 are a Kubernetes beta feature in 1.36 (feature gate `DRADeviceTaints`, on by
 default there); Kubernetes and the drivers may still change them. This read
-is experimental and has not run against a driver on hardware.
+is experimental and has not run against a driver on hardware. Checked
+against a Kubernetes 1.36.4 API server in kind (`hack/kind-dra-health.sh`):
+a ResourceSlice written by hand, with no driver running, keeps a device
+taint in `resource.k8s.io/v1` with `timeAdded` set, and the read takes it as
+a fault. The incident path is covered by unit tests only.
 
 - **What is read.** Once per controller pass, one list of the v1
   ResourceSlices. Only a slice whose `spec.nodeName` names an existing Node
