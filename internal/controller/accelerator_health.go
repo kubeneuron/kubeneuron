@@ -36,6 +36,7 @@ var agentSourceToken = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 func (c *Controller) AcceleratorHealth(ctx context.Context, node string) types.AcceleratorHealthView {
 	sources := c.healthSources()
 	want := func(n string) bool { return node == "" || n == node }
+	profilesByNode := map[string][]string{}
 	var rows []types.AcceleratorHealthRow
 
 	c.health.mu.Lock()
@@ -60,6 +61,7 @@ func (c *Controller) AcceleratorHealth(ctx context.Context, node string) types.A
 				continue
 			}
 
+			profilesByNode[h.Node] = append(profilesByNode[h.Node], h.Profiles...)
 			rows = append(rows, healthRows(name, h, readAt)...)
 		}
 		if name != draHealthSourceName {
@@ -89,12 +91,20 @@ func (c *Controller) AcceleratorHealth(ctx context.Context, node string) types.A
 		read = c.agentSignalSources
 	}
 	sourcesFromAgents := read(node)
-	if node != "" {
-		rows = append(rows, agentHealthRows(node, sourcesFromAgents, slices.ContainsFunc(rows, func(r types.AcceleratorHealthRow) bool { return r.Node == node && r.Profile != "" }))...)
-	} else {
-		for _, s := range sourcesFromAgents {
-			rows = append(rows, agentHealthRows(s.Node, []types.AgentSignalSource{s}, false)...)
+	for _, source := range sourcesFromAgents {
+		profiles := profilesByNode[source.Node]
+		if len(profiles) > 0 {
+			if strings.HasPrefix(source.Source, "nvidia-") && !slices.Contains(profiles, "nvidia") {
+				continue
+			}
+			if source.Source == "amd-kmsg" && !slices.Contains(profiles, "amd-instinct") {
+				continue
+			}
 		}
+		rows = append(rows, agentHealthRows(source.Node, []types.AgentSignalSource{source}, false)...)
+	}
+	if node != "" && len(sourcesFromAgents) == 0 {
+		rows = append(rows, agentHealthRows(node, nil, true)...)
 	}
 
 	slices.SortFunc(rows, func(a, b types.AcceleratorHealthRow) int {

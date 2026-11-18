@@ -124,9 +124,9 @@ type pendingHealth struct {
 // healthSignals is the confirmation state of every source's fault signals,
 // and the last read of each node.
 type healthSignals struct {
+	mu           sync.Mutex
 	agentReports map[string]agentSourceSnapshot
 	agentPruneAt time.Time
-	mu           sync.Mutex
 	pending      map[string]*pendingHealth
 	latest       map[string]nodehealth.NodeHealth
 	// read are the sources read successfully in this leadership term, and

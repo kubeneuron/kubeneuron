@@ -91,7 +91,7 @@ func TestAcceleratorHealthNodeFilterAndOrder(t *testing.T) {
 	if len(view.Rows) != 3 || view.Rows[0].Source != agentHealthSource || view.Rows[1].Node != "trn-1" || view.Rows[2].Node != "trn-1" {
 		t.Fatalf("filtered rows %+v", view.Rows)
 	}
-	if view = c.AcceleratorHealth(ctx, "trn"); len(view.Rows) != 0 || view.Rows == nil {
+	if view = c.AcceleratorHealth(ctx, "trn"); len(view.Rows) != 1 || view.Rows[0].Source != agentHealthSource || view.Rows[0].Node != "trn" {
 		t.Fatalf("a prefix matched: %+v", view.Rows)
 	}
 }
@@ -170,10 +170,9 @@ func TestAcceleratorHealthKeepsSourceTextOut(t *testing.T) {
 // with its reason, one it can is available, never healthy; an agent that
 // lists none gives no data. A reason not in the form of a code is dropped.
 func TestAcceleratorHealthAgentSources(t *testing.T) {
-	c, _, plat, clock := healthFixture(t)
+	c, _, _, clock := healthFixture(t)
 	ctx := context.Background()
-	plat.set(neuronNode(clock, "False", "NeuronHealthy"))
-	c.pollNodeHealth(ctx)
+
 	if rows := healthRowsOf(c.AcceleratorHealth(ctx, "trn-1"), agentHealthSource); len(rows) != 1 || rows[0].State != "unknown" {
 		t.Fatalf("agent rows before first report %+v", rows)
 	}
