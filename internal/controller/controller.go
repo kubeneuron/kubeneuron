@@ -862,6 +862,7 @@ func (c *Controller) afterSignalCommitted(ctx context.Context, sig types.Signal,
 			c.log.Warn("could not record opening node conditions", "incident", opened.ID, "err", err)
 		}
 	}
+	c.recordEvidence(ctx, opened)
 	metrics.IncidentsOpened.WithLabelValues(string(opened.Class)).Inc()
 	return c.notify(ctx, notify.NotifyEvent{
 		Kind: notify.EventOpened, Incident: opened,

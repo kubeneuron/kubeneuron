@@ -11,6 +11,18 @@ API is `v1alpha1`.
 
 ### Added
 
+- **Incident evidence.** Every incident now records, from the Kubernetes API
+  only, where the fault most likely is (`this-node`, `shared` when the same
+  class opens on several nodes within 10 minutes, grouped under the earliest
+  incident, or `unknown`) with the rule per class, the vendor software state
+  on the node (accelerator resource allocatable against capacity, device
+  plugin and GPU Operator component pods) and whether the node advertises its
+  high-performance network resource. A lost GPU while the device plugin is
+  down is shown as a software state, not a hardware fault. Shown in the
+  incident detail (`evidence`), `kubeneuronctl incident show`, the panel and
+  `kubeneuron_incident_evidence_total`; an unread signal is `unknown`, never
+  healthy. Evidence never starts or authorises a step.
+
 - **Add-first replacement contract.** A cloud provider can now prepare a
   replacement node before the affected node is cordoned
   (`cloud.SuccessorProvider`, `Capabilities.AddFirst`). Under
@@ -426,6 +438,13 @@ API is `v1alpha1`.
   each. A store that cannot commit atomically is refused for these writes.
 
 ### Changed
+
+- **Automatic mode needs a qualified pair** (breaking for automatic
+  policies). An automatic policy recovers a node only when the policy's
+  class and the node's accelerator runtime profile form a pair it declares
+  in `spec.automatic.qualifiedProfiles`. A policy without the list, or a node
+  on no listed profile, sends the step to a person with the reason. Add the
+  profiles your automatic policies cover before upgrading.
 
 - **AWS checks replacement permissions.** Replacement requires a successful
   permission probe for `ec2:TerminateInstances` on the pinned instance.

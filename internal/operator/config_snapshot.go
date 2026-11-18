@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -1399,6 +1400,7 @@ func compileRecoveryMode(policy *kubeneuronv1alpha1.GPURemediationPolicy) (recov
 			NodeCooldown:              cooldown,
 			MaxUnhealthyPercent:       int(auto.MaxUnhealthyPercent),
 			MinUnhealthyNodes:         int(auto.MinUnhealthyNodes),
+			QualifiedProfiles:         slices.Clone(auto.QualifiedProfiles),
 			Generation:                policy.Generation,
 			EnabledBy:                 auto.EnabledBy,
 			EnabledAt:                 auto.EnabledAt.UTC(),

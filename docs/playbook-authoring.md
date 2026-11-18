@@ -425,6 +425,14 @@ carries the limits:
   `minUnhealthyNodes` of them, the step goes to a person. The breaker stays
   tripped for that revision of the policy; a person returns it to automatic by
   changing the policy.
+- `qualifiedProfiles`: the accelerator runtime profiles
+  (`spec.acceleratorProfiles` names) on which this policy's class is
+  qualified for automatic recovery. The policy's class with each listed
+  profile is a qualified pair. A node whose labels select no listed profile,
+  or an empty list, is never recovered automatically: the step goes to a
+  person and the reason names the pair. Incident
+  [evidence](reference-api.md#incident-evidence) (fault location, vendor
+  software, network resource) never qualifies a pair.
 - Per-node pause and maintenance windows hold automatic steps exactly as they
   hold every other step.
 
@@ -513,6 +521,7 @@ spec:
   #   checkpointWait: 10m
   #   maxUnhealthyPercent: 25
   #   minUnhealthyNodes: 2
+  #   qualifiedProfiles: [p4d-h100]   # fell-off-bus is qualified on this node profile
   #   enabledBy: "Jane Doe, platform team"
   #   enabledAt: "2026-11-15T09:00:00Z"
   #   acknowledgement: "I understand that automatic mode drains and replaces nodes without asking"

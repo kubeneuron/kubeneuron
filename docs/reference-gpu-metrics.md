@@ -104,6 +104,7 @@ Existing `kubeneuron_*` series registered by internal/metrics; the catalog adds 
 | `kubeneuron_impact_preview_seconds` | kubeneuron-controller | histogram | seconds | Seconds one impact preview took to gather and render. |
 | `kubeneuron_impact_previews_total` | kubeneuron-controller | counter | count | Impact preview computations at approval park by result (computed, unavailable, truncated). |
 | `kubeneuron_incident_duration_seconds` | kubeneuron-controller | histogram | seconds | Open-to-halted wall time of incidents, by class and outcome. |
+| `kubeneuron_incident_evidence_total` | kubeneuron-controller | counter | count | Incidents opened, by problem class, fault location, vendor software state and network resource state; an unread signal counts as unknown. |
 | `kubeneuron_incidents` | kubeneuron-controller | gauge | count | Incidents currently in each state. Scrape-time collector; absent on a standby replica. |
 | `kubeneuron_incidents_opened_total` | kubeneuron-controller | counter | count | Incidents opened, by problem class. |
 | `kubeneuron_incidents_recovered_total` | kubeneuron-controller | counter | count | Incidents that reached RESOLVED, by class and whether a human was needed; dry-run incidents excluded. |

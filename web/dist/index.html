@@ -959,6 +959,27 @@ function nodeConditionsSummary(detail){
   const warning = notReady ? '<strong class="pill NEEDS_HUMAN">Node NotReady</strong><br>' : "";
   return `${warning}${values}<br><span class="dimmer">Observed ${esc(snapshot.observed_at)}</span>`;
 }
+/* Evidence rows: fault location, vendor software and network resource. A
+   missing block or row reads unknown, never healthy. */
+function evidenceState(state){
+  const cls = state === "ok" || state === "present" ? "RESOLVED" : state === "unknown" || !state ? "OBSERVING" : "NEEDS_HUMAN";
+  return `<span class="pill ${cls}">${esc(state || "unknown")}</span>`;
+}
+function evidenceRows(d){
+  const ev = d.evidence;
+  if(!ev) return [["Fault location", `${evidenceState("unknown")} <span class="dimmer">no evidence recorded</span>`]];
+  const loc = ev.fault_location || {};
+  const res = list => (list || []).map(r => `<span class="mono small">${esc(r.name)}</span> ${esc(String(r.allocatable))} of ${esc(String(r.capacity))} allocatable`).join("<br>");
+  const comps = list => (list || []).map(c => `<span class="mono small">${esc(c.name)}</span> ${esc(c.state)} <span class="dimmer small">${esc(c.pod || "")}</span>`).join("<br>");
+  const reason = r => r ? `<br><span class="dimmer">${esc(r)}</span>` : "";
+  const sw = ev.vendor_software || {}, net = ev.network_resource || {};
+  const group = loc.group ? `<br>group <span class="mono small">${esc(loc.group)}</span> <span class="dimmer small">${esc((loc.members || []).join(", "))}</span>` : "";
+  return [
+    ["Fault location", `${evidenceState(loc.location === "this-node" ? "this node" : loc.location)} ${esc(loc.rule || "")}${group}${(loc.evidence || []).map(e => `<br><span class="dimmer small">${esc(e)}</span>`).join("")}`],
+    ["Vendor software", `${evidenceState(sw.state)}${reason(sw.reason)}<br>${res(sw.resources)}<br>${comps(sw.components)}`],
+    ["Network resource", `${evidenceState(net.state)}${reason(net.reason)}<br>${res(net.resources)}${net.plugin ? "<br>" + comps([net.plugin]) : ""}`],
+  ];
+}
 async function renderDrawer(){
   if(!openIncident) return;
   let d;
@@ -973,10 +994,11 @@ async function renderDrawer(){
     ["Class", `<span class="mono">${esc(inc.class)}</span>`],
     ["Node", `<span class="mono">${esc(inc.target.node)}</span>`],
     ["Node conditions", nodeConditionsSummary(d)],
+  ].concat(evidenceRows(d)).concat([
     ["GPU", inc.target.gpu_uuid ? `<span class="mono">${esc(inc.target.gpu_uuid)}</span>` : '<span class="dimmer">node-level</span>'],
     ["Playbook", `${esc(inc.playbook || "—")} <span class="dimmer">step ${inc.step_index}, attempt ${inc.attempt}</span>`],
     ["Mode", inc.dry_run ? "dry-run (no real side effects)" : "live"],
-  ].concat(d.observe_only ? [["Observe only", esc(d.observe_only)]] : []).concat([
+  ]).concat(d.observe_only ? [["Observe only", esc(d.observe_only)]] : []).concat([
     ["Recovery eligibility", d.recovery_availability
       ? `${esc(d.recovery_availability.status)} [${esc(d.recovery_availability.source || "unknown")}] <span class="dimmer">(last assessed ${esc(d.recovery_availability.observed_at || "unknown")})</span><br>${esc(d.recovery_availability.reason || "")}<br><span class="dimmer">Assessment only; execution checks still apply.</span>`
       : '<span class="dimmer">unknown — no recorded assessment</span>'],

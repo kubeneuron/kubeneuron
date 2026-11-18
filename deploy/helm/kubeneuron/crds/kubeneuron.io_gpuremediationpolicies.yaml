@@ -142,6 +142,17 @@ spec:
                       limit and the circuit breaker. Empty treats all selected nodes as one
                       pool.
                     type: string
+                  qualifiedProfiles:
+                    description: |-
+                      QualifiedProfiles names the accelerator runtime profiles on which this
+                      policy's problem class is qualified for automatic recovery. Together with
+                      the policy's class each one is a qualified pair. A node matching no
+                      listed profile, or an empty list, is never recovered automatically: the
+                      step waits for approval.
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
                 required:
                 - acknowledgement
                 - enabledAt

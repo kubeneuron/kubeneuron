@@ -1785,6 +1785,21 @@ fields:
       unit: seconds
       factor: 1
     help: Open-to-halted wall time of incidents, by class and outcome.
+  - key: kubeneuron:kubeneuron_incident_evidence_total
+    series: kubeneuron_incident_evidence_total
+    exporter_exposed: false
+    source: kubeneuron-controller
+    kind: counter
+    tier: T4
+    raw:
+      unit: count
+      factor: 1
+    canonical:
+      series: kubeneuron_incident_evidence_total
+      kind: counter
+      unit: count
+      factor: 1
+    help: Incidents opened, by problem class, fault location, vendor software state and network resource state; an unread signal counts as unknown.
   - key: kubeneuron:kubeneuron_incidents
     series: kubeneuron_incidents
     exporter_exposed: false

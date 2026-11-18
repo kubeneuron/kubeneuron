@@ -9,6 +9,7 @@ package recoverymode
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -135,6 +136,11 @@ type Settings struct {
 	// MinUnhealthyNodes is the breaker's absolute floor (zero means
 	// DefaultMinUnhealthyNodes).
 	MinUnhealthyNodes int `yaml:"min_unhealthy_nodes,omitempty" json:"minUnhealthyNodes,omitempty"`
+	// QualifiedProfiles are the accelerator runtime profiles on which the
+	// policy's class is qualified for automatic recovery: each, with the
+	// class, is a qualified pair. A node on no listed profile is recovered
+	// only with approval.
+	QualifiedProfiles []string `yaml:"qualified_profiles,omitempty" json:"qualifiedProfiles,omitempty"`
 	// EnabledBy and EnabledAt are what the policy declares about who switched
 	// automatic mode on and when. KubeNeuron cannot verify them; the
 	// Kubernetes API audit log records who actually changed the object.
@@ -147,6 +153,11 @@ type Settings struct {
 	Generation int64 `yaml:"generation,omitempty" json:"generation,omitempty"`
 	// Acknowledgement must read exactly Acknowledgement.
 	Acknowledgement string `yaml:"acknowledgement" json:"acknowledgement"`
+}
+
+// Qualifies reports whether profile is one of the qualified profiles.
+func (a *Settings) Qualifies(profile string) bool {
+	return profile != "" && slices.Contains(a.QualifiedProfiles, profile)
 }
 
 // MinUnhealthy is the effective breaker floor.

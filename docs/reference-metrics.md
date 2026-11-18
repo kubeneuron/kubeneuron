@@ -25,6 +25,7 @@ renaming them.
 | `kubeneuron_signals_dropped_total` | counter | — | signals lost to ingest-queue overflow |
 | `kubeneuron_events_duplicate_total` | counter | — | agent-event replays rejected by capture ID |
 | `kubeneuron_incidents_opened_total` | counter | `class` | incidents opened |
+| `kubeneuron_incident_evidence_total` | counter | `class`, `location` (`this-node`, `shared`, `unknown`), `software` (`ok`, `degraded`, `unknown`), `network` (`present`, `missing`, `unknown`) | incidents opened, by the [evidence](reference-api.md#incident-evidence) recorded for them; a signal that could not be read counts as `unknown`, never as healthy |
 | `kubeneuron_steps_total` | counter | `outcome` (`ok`, `failed`, `dry_run`) | playbook steps executed |
 | `kubeneuron_actions_pending` | gauge | — | agent actions dispatched and not yet claimed; sustained non-zero means an unreachable or unregistered agent |
 | `kubeneuron_reconcile_seconds` | histogram | — | reconcile-walk duration; p99 above a few seconds delays approvals and verification |

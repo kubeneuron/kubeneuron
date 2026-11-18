@@ -77,6 +77,9 @@ func (c *Controller) authorizeByPolicy(ctx context.Context, inc *types.Incident,
 	if !c.cloudRecoveryLadder(ctx, inc.Playbook) {
 		return policyPark, "automatic policies authorise only cloud recovery ladders, whose eligibility the cloud provider confirms"
 	}
+	if reason := c.unqualifiedPair(ctx, inc, auto, labels); reason != "" {
+		return policyPark, reason
+	}
 	if tripped, err := c.breakerTripped(ctx, pol); err != nil {
 		return policyPark, fmt.Sprintf("the circuit breaker state cannot be read (%v)", err)
 	} else if tripped {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
+	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
@@ -27,6 +28,9 @@ import (
 
 const autoPolicy = "auto-fell-off-bus"
 
+// autoProfile is the node profile the fixture's policy qualifies.
+const autoProfile = "train-h100"
+
 func autoSettings() *recoverymode.Settings {
 	return &recoverymode.Settings{
 		NodeSelector:        map[string]string{"pool": "train"},
@@ -34,6 +38,7 @@ func autoSettings() *recoverymode.Settings {
 		MaxConcurrentNodes:  2,
 		NodeCooldown:        time.Hour,
 		MaxUnhealthyPercent: 50,
+		QualifiedProfiles:   []string{autoProfile},
 		EnabledBy:           "alice",
 		EnabledAt:           time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC),
 		Acknowledgement:     recoverymode.Acknowledgement,
@@ -103,6 +108,11 @@ func autoFixture(t *testing.T, mode recoverymode.Mode, settings *recoverymode.Se
 	c := New(st, st, modeEngine(t, mode, settings), gate, safety.NewFlapDetector(100, time.Hour), &autoCloudPlatform{}, nil, notifier,
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	c.SetTimings(time.Millisecond, 0) // tiny verification quiet window
+	profile := testNVIDIAResetProfile()
+	profile.Name, profile.NodeSelector = autoProfile, map[string]string{"pool": "train"}
+	if err := c.SetAcceleratorRuntimeProfiles([]config.AcceleratorRuntimeProfile{profile}); err != nil {
+		t.Fatal(err)
+	}
 	return c, st, notifier
 }
 

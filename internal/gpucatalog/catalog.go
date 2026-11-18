@@ -829,6 +829,7 @@ var Fields = []Field{
 	cp("kubeneuron_impact_preview_seconds", SourceController, KindHistogram, UnitSeconds, "Seconds one impact preview took to gather and render."),
 	cp("kubeneuron_impact_previews_total", SourceController, KindCounter, UnitCount, "Impact preview computations at approval park by result (computed, unavailable, truncated)."),
 	cp("kubeneuron_incident_duration_seconds", SourceController, KindHistogram, UnitSeconds, "Open-to-halted wall time of incidents, by class and outcome."),
+	cp("kubeneuron_incident_evidence_total", SourceController, KindCounter, UnitCount, "Incidents opened, by problem class, fault location, vendor software state and network resource state; an unread signal counts as unknown."),
 	cp("kubeneuron_incidents", SourceController, KindGauge, UnitCount, "Incidents currently in each state. Scrape-time collector; absent on a standby replica."),
 	cp("kubeneuron_incidents_opened_total", SourceController, KindCounter, UnitCount, "Incidents opened, by problem class."),
 	cp("kubeneuron_incidents_recovered_total", SourceController, KindCounter, UnitCount, "Incidents that reached RESOLVED, by class and whether a human was needed; dry-run incidents excluded."),

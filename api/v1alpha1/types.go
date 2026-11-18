@@ -1265,6 +1265,14 @@ type AutomaticRecoverySpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	MinUnhealthyNodes int32 `json:"minUnhealthyNodes,omitempty"`
+	// QualifiedProfiles names the accelerator runtime profiles on which this
+	// policy's problem class is qualified for automatic recovery. Together with
+	// the policy's class each one is a qualified pair. A node matching no
+	// listed profile, or an empty list, is never recovered automatically: the
+	// step waits for approval.
+	// +listType=set
+	// +optional
+	QualifiedProfiles []string `json:"qualifiedProfiles,omitempty"`
 	// EnabledBy and EnabledAt declare who enabled automatic mode and when.
 	// KubeNeuron records them as declared and cannot verify them; the
 	// Kubernetes API audit log shows who actually changed this object.

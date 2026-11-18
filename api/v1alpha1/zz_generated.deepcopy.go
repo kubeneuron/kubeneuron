@@ -325,6 +325,11 @@ func (in *AutomaticRecoverySpec) DeepCopyInto(out *AutomaticRecoverySpec) {
 			(*out)[key] = val
 		}
 	}
+	if in.QualifiedProfiles != nil {
+		in, out := &in.QualifiedProfiles, &out.QualifiedProfiles
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	in.EnabledAt.DeepCopyInto(&out.EnabledAt)
 }
 

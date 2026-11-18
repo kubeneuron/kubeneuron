@@ -2781,6 +2781,100 @@ exercise_backup_restore() {
 #
 # The installation is switched to Enabled with confinement naming exactly one
 # worker, and switched back afterwards regardless of outcome.
+# exercise_incident_evidence: a worker advertising two GPUs of which one is
+# allocatable, with a fake device plugin pod on it, must give an incident
+# whose evidence reads the software state from the API: degraded, the device
+# plugin running, and a lost GPU placed as unknown rather than on the
+# hardware. Then, with no plugin pod and no resource, nothing reads ok.
+exercise_incident_evidence() {
+	note "exercising incident evidence against a fake device plugin pod"
+	local pf_log="$work_dir/evidence-port-forward.log"
+	local pf_pid='' public_port='' target_node pause_image ns=kubeneuron-evidence deadline detail='' code
+	target_node=$("$KUBECTL_BIN" get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[0].metadata.name}')
+	[[ -n $target_node ]] || die "no worker node for the evidence scenario"
+	pause_image=$("$DOCKER_BIN" exec "$target_node" crictl images -o json 2>/dev/null |
+		"$JQ_BIN" -r '[.images[].repoTags[]? | select(test("/pause:"))][0] // empty')
+	[[ -n $pause_image ]] || die "no pause image on $target_node for the fake device plugin"
+
+	local restore_done=0
+	restore_evidence() {
+		((restore_done)) && return 0
+		restore_done=1
+		if [[ -n $pf_pid ]]; then kill "$pf_pid" >/dev/null 2>&1 || true; fi
+		"$KUBECTL_BIN" delete namespace "$ns" --wait=false >/dev/null 2>&1 || true
+		patch_node_status_resources "$target_node" - nvidia.com/gpu || true
+	}
+	trap restore_evidence RETURN
+
+	patch_node_status_resources "$target_node" 2 nvidia.com/gpu
+	"$KUBECTL_BIN" patch node "$target_node" --subresource=status --type=json \
+		-p '[{"op":"add","path":"/status/allocatable/nvidia.com~1gpu","value":"1"}]' >/dev/null
+	"$KUBECTL_BIN" create namespace "$ns" >/dev/null
+	"$KUBECTL_BIN" -n "$ns" apply -f - >/dev/null <<-JSON
+		{"apiVersion":"v1","kind":"Pod","metadata":{"name":"fake-device-plugin","labels":{"app":"nvidia-device-plugin-daemonset"}},
+		 "spec":{"nodeName":"$target_node","tolerations":[{"operator":"Exists"}],
+		  "containers":[{"name":"pause","image":"$pause_image","imagePullPolicy":"IfNotPresent"}]}}
+	JSON
+	"$KUBECTL_BIN" -n "$ns" wait pod/fake-device-plugin --for=condition=Ready --timeout=120s >/dev/null ||
+		die "fake device plugin pod did not become Ready"
+
+	: >"$pf_log"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+		"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
+	pf_pid=$!
+	deadline=$((SECONDS + 30))
+	while ((SECONDS < deadline)); do
+		public_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$pf_log")
+		[[ -n $public_port ]] && break
+		sleep 1
+	done
+	[[ -n $public_port ]] || die "evidence-phase port-forward allocated no local port"
+	evidence_api() {
+		curl --silent --show-error --noproxy '*' --max-time 10 \
+			-H 'Authorization: Bearer integration-operator-token' "$@"
+	}
+	open_and_read() {
+		local node=$1 class=$2 id=''
+		code=$(evidence_api -H 'Content-Type: application/json' \
+			--data-binary "{\"node\":\"${node}\",\"class\":\"${class}\",\"actor\":\"harness\"}" \
+			-o /dev/null -w '%{http_code}' "http://127.0.0.1:${public_port}/api/v1/incidents")
+		[[ $code == 202 ]] || die "evidence incident returned $code, want 202"
+		deadline=$((SECONDS + TIMEOUT_SECONDS))
+		while ((SECONDS < deadline)); do
+			id=$(evidence_api "http://127.0.0.1:${public_port}/api/v1/incidents?node=${node}" |
+				"$JQ_BIN" -r --arg class "$class" '[.[] | select(.class == $class)][0].id // empty')
+			if [[ -n $id ]]; then
+				detail=$(evidence_api "http://127.0.0.1:${public_port}/api/v1/incidents/${id}")
+				"$JQ_BIN" -e '.evidence.observed_at' >/dev/null <<<"$detail" && return 0
+			fi
+			sleep 2
+		done
+		die "incident $class on $node recorded no evidence"
+	}
+
+	open_and_read "$target_node" gpu-lost
+	"$JQ_BIN" -e '
+		.evidence.vendor_software.state == "degraded" and
+		(.evidence.vendor_software.resources | any(.name == "nvidia.com/gpu" and .capacity == 2 and .allocatable == 1)) and
+		(.evidence.vendor_software.components | any(.name == "device-plugin" and .state == "running" and (.pod | endswith("/fake-device-plugin")))) and
+		.evidence.fault_location.location == "unknown" and
+		.evidence.network_resource.state == "unknown" and
+		(.audit | any(.action == "evidence"))' >/dev/null <<<"$detail" ||
+		die "gpu-lost evidence does not show the degraded software state"
+	note "a lost GPU with one device unallocatable is shown as software, location unknown"
+
+	# Without the plugin pod or the resource, nothing may read as healthy.
+	"$KUBECTL_BIN" -n "$ns" delete pod fake-device-plugin --wait=true >/dev/null
+	patch_node_status_resources "$target_node" - nvidia.com/gpu
+	open_and_read "$target_node" ecc-dbe
+	"$JQ_BIN" -e '
+		.evidence.vendor_software.state != "ok" and
+		.evidence.network_resource.state == "unknown" and
+		.evidence.fault_location.location == "this-node"' >/dev/null <<<"$detail" ||
+		die "evidence read a node without a device plugin as healthy"
+	note "incident evidence: PASS"
+}
+
 exercise_real_cordon_and_uncordon() {
 	note "exercising REAL cordon and the janitor's uncordon on one worker"
 	local pf_log="$work_dir/cordon-port-forward.log"
@@ -4161,6 +4255,7 @@ exercise_runtime_contract_lifecycle
 wait_root_condition True RuntimeAvailable
 assert_runtime_ready
 exercise_controller_restart_mid_playbook
+exercise_incident_evidence
 exercise_real_cordon_and_uncordon
 exercise_workload_safe_recovery
 exercise_backup_restore

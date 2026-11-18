@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package controller
+
+import (
+	"context"
+	"encoding/json"
+	"time"
+
+	"github.com/kubeneuron/kubeneuron/internal/evidence"
+	"github.com/kubeneuron/kubeneuron/internal/metrics"
+	"github.com/kubeneuron/kubeneuron/pkg/types"
+)
+
+// EvidenceAction is the audit action of an evidence row.
+const EvidenceAction = "evidence"
+
+type nodeEvidenceReader interface {
+	NodeEvidence(context.Context, string) (*evidence.Node, error)
+}
+
+// recordEvidence reads the opened incident's node and the other open
+// incidents, and records the evidence block in the audit trail. When the
+// incident joins a shared group, every other member gets a row with the new
+// fault location too. It runs after the open is durable and only records: no step
+// reads it to start or authorise anything.
+func (c *Controller) recordEvidence(ctx context.Context, opened *types.Incident) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	var node *evidence.Node
+	if reader, ok := c.platform.(nodeEvidenceReader); ok && opened.Target.Node != "" {
+		if n, err := reader.NodeEvidence(ctx, opened.Target.Node); err == nil {
+			node = n
+		}
+	}
+	peers, err := c.evidencePeers(ctx)
+	if err != nil {
+		c.log.Warn("could not read open incidents for the fault location", "incident", opened.ID)
+	}
+	ev := evidence.Build(opened, node, peers, time.Now())
+	if err != nil {
+		ev.Location = types.LocationEvidence{Location: types.LocationUnknown, Rule: "the other open incidents could not be read"}
+	}
+	c.appendEvidence(ctx, opened, ev)
+	metrics.IncidentEvidence.WithLabelValues(string(opened.Class), string(ev.Location.Location), string(ev.Software.State), string(ev.Network.State)).Inc()
+	if ev.Location.Location != types.LocationShared {
+		return
+	}
+	for _, id := range ev.Location.Members {
+		if id == opened.ID {
+			continue
+		}
+		peer, err := c.store.GetIncident(ctx, id)
+		if err != nil {
+			continue
+		}
+		if data, err := json.Marshal(ev.Location); err == nil {
+			c.appendEvidenceRow(ctx, peer, map[string]string{"fault_location": string(data)})
+		}
+	}
+}
+
+func (c *Controller) appendEvidence(ctx context.Context, inc *types.Incident, ev types.IncidentEvidence) {
+	if data, err := json.Marshal(ev); err == nil {
+		c.appendEvidenceRow(ctx, inc, map[string]string{"incident_evidence": string(data)})
+	}
+}
+
+// appendEvidenceRow records an evidence row: the whole block at open, or only
+// the fault location when a later incident regroups this one.
+func (c *Controller) appendEvidenceRow(ctx context.Context, inc *types.Incident, params map[string]string) {
+	if err := c.store.AppendAudit(ctx, &types.AuditEntry{
+		IncidentID: inc.ID, Time: time.Now(), Actor: "system", Action: EvidenceAction,
+		FromState: inc.State, ToState: inc.State, Params: params, DryRun: inc.DryRun,
+	}); err != nil {
+		c.log.Warn("could not record incident evidence", "incident", inc.ID)
+	}
+}
+
+func (c *Controller) evidencePeers(ctx context.Context) ([]evidence.Peer, error) {
+	open, err := c.openIncidents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	peers := make([]evidence.Peer, 0, len(open))
+	for _, inc := range open {
+		peers = append(peers, evidence.Peer{ID: inc.ID, Node: inc.Target.Node, Class: inc.Class, OpenedAt: inc.OpenedAt})
+	}
+	return peers, nil
+}

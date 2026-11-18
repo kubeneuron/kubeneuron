@@ -280,6 +280,7 @@ func cmdIncidents() *cobra.Command {
 		var detail struct {
 			Incident                  *types.Incident              `json:"incident"`
 			Audit                     []*types.AuditEntry          `json:"audit"`
+			Evidence                  *types.IncidentEvidence      `json:"evidence"`
 			NodeConditions            *types.NodeConditionSnapshot `json:"node_conditions"`
 			NodeConditionsUnavailable string                       `json:"node_conditions_unavailable"`
 			ObserveOnly               string                       `json:"observe_only"`
@@ -308,6 +309,7 @@ func cmdIncidents() *cobra.Command {
 		} else if detail.NodeConditionsUnavailable != "" {
 			_, _ = fmt.Fprintf(out, "Node conditions unavailable (%s)\n", detail.NodeConditionsUnavailable)
 		}
+		printEvidence(out, detail.Evidence)
 		if detail.ObserveOnly != "" {
 			_, _ = fmt.Fprintf(out, "observe:   %s\n", detail.ObserveOnly)
 		}
@@ -660,4 +662,42 @@ func successorLines(s *types.SuccessorRecord, now time.Time) []string {
 		lines = append(lines, "why:       "+s.Reason)
 	}
 	return lines
+}
+
+// printEvidence prints the evidence block of an incident. No block is
+// printed as unknown: a missing observation is never shown as healthy.
+func printEvidence(out io.Writer, ev *types.IncidentEvidence) {
+	if ev == nil {
+		_, _ = fmt.Fprintln(out, "fault:     unknown (no evidence recorded)")
+		return
+	}
+	loc := ev.Location
+	_, _ = fmt.Fprintf(out, "fault:     %s (%s)\n", loc.Location, loc.Rule)
+	if loc.Group != "" {
+		_, _ = fmt.Fprintf(out, "group:     %s (%s)\n", loc.Group, strings.Join(loc.Members, ", "))
+	}
+	for _, line := range loc.Evidence {
+		_, _ = fmt.Fprintf(out, "  %s\n", line)
+	}
+	_, _ = fmt.Fprintf(out, "software:  %s%s\n", ev.Software.State, reasonSuffix(ev.Software.Reason))
+	for _, r := range ev.Software.Resources {
+		_, _ = fmt.Fprintf(out, "  %s: %d of %d allocatable\n", r.Name, r.Allocatable, r.Capacity)
+	}
+	for _, comp := range ev.Software.Components {
+		_, _ = fmt.Fprintf(out, "  %s: %s %s\n", comp.Name, comp.State, comp.Pod)
+	}
+	_, _ = fmt.Fprintf(out, "network:   %s%s\n", ev.Network.State, reasonSuffix(ev.Network.Reason))
+	for _, r := range ev.Network.Resources {
+		_, _ = fmt.Fprintf(out, "  %s: %d of %d allocatable\n", r.Name, r.Allocatable, r.Capacity)
+	}
+	if p := ev.Network.Plugin; p != nil {
+		_, _ = fmt.Fprintf(out, "  %s: %s %s\n", p.Name, p.State, p.Pod)
+	}
+}
+
+func reasonSuffix(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	return " (" + reason + ")"
 }

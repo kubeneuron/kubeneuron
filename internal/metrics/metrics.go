@@ -43,6 +43,14 @@ var (
 		Help: "Incidents opened, by problem class.",
 	}, []string{"class"})
 
+	// IncidentEvidence counts opened incidents by the evidence recorded for
+	// them: fault location, vendor software state and network resource. A
+	// signal that could not be read counts as unknown, never as ok.
+	IncidentEvidence = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_incident_evidence_total",
+		Help: "Incidents opened, by problem class, fault location, vendor software state and network resource state.",
+	}, []string{"class", "location", "software", "network"})
+
 	// StepsExecuted counts playbook step outcomes.
 	StepsExecuted = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "kubeneuron_steps_total",
