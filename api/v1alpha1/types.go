@@ -1962,7 +1962,15 @@ type RecoveryCostRates struct {
 	// PerDeviceHour maps an accelerator resource (nvidia.com/gpu, amd.com/gpu,
 	// google.com/tpu, aws.amazon.com/neuron) to the cost of one device-hour
 	// of it, a decimal such as "2.50".
+	// +kubebuilder:validation:MinProperties=1
 	// +kubebuilder:validation:MaxProperties=16
-	// +kubebuilder:validation:XValidation:rule="self.all(k, self[k].matches('^[0-9]{1,9}([.][0-9]{1,4})?$'))",message="each rate must be a decimal such as 2.50"
-	PerDeviceHour map[string]string `json:"perDeviceHour"`
+	PerDeviceHour map[string]DeviceHourRate `json:"perDeviceHour"`
 }
+
+// A pattern on the value rather than a CEL rule over the map: the apiserver
+// prices a rule over every entry of a map past its cost budget.
+
+// DeviceHourRate is the cost of one device-hour, a decimal such as "2.50".
+// +kubebuilder:validation:MaxLength=14
+// +kubebuilder:validation:Pattern=`^[0-9]{1,9}([.][0-9]{1,4})?$`
+type DeviceHourRate string

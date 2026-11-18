@@ -151,7 +151,7 @@ func CompileSnapshot(
 	if rates := installation.Spec.RecoveryCostRates; rates != nil {
 		cfg.RecoveryCostRates = &config.CostRates{Currency: rates.Currency, PerDeviceHour: map[string]float64{}}
 		for resource, value := range rates.PerDeviceHour {
-			rate, err := strconv.ParseFloat(value, 64)
+			rate, err := strconv.ParseFloat(string(value), 64)
 			if err != nil {
 				return nil, fmt.Errorf("recoveryCostRates.perDeviceHour[%q]: %w", resource, err)
 			}

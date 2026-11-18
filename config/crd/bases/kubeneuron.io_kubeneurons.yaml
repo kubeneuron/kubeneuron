@@ -1400,16 +1400,18 @@ spec:
                     type: string
                   perDeviceHour:
                     additionalProperties:
+                      description: DeviceHourRate is the cost of one device-hour,
+                        a decimal such as "2.50".
+                      maxLength: 14
+                      pattern: ^[0-9]{1,9}([.][0-9]{1,4})?$
                       type: string
                     description: |-
                       PerDeviceHour maps an accelerator resource (nvidia.com/gpu, amd.com/gpu,
                       google.com/tpu, aws.amazon.com/neuron) to the cost of one device-hour
                       of it, a decimal such as "2.50".
                     maxProperties: 16
+                    minProperties: 1
                     type: object
-                    x-kubernetes-validations:
-                    - message: each rate must be a decimal such as 2.50
-                      rule: self.all(k, self[k].matches('^[0-9]{1,9}([.][0-9]{1,4})?$'))
                 required:
                 - currency
                 - perDeviceHour

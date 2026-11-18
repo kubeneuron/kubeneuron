@@ -1874,7 +1874,7 @@ func (in *RecoveryCostRates) DeepCopyInto(out *RecoveryCostRates) {
 	*out = *in
 	if in.PerDeviceHour != nil {
 		in, out := &in.PerDeviceHour, &out.PerDeviceHour
-		*out = make(map[string]string, len(*in))
+		*out = make(map[string]DeviceHourRate, len(*in))
 		for key, val := range *in {
 			(*out)[key] = val
 		}

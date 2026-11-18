@@ -18,7 +18,7 @@ API is `v1alpha1`.
   records when it opens; never summed across resources. Incidents with no
   recorded count are node-hours apart. `spec.recoveryCostRates` shows the
   saved hours as an estimated cost per resource; there are no default rates.
-  Migrations sqlite 0037 / postgres 0028.
+  Migrations sqlite 0036 / postgres 0027.
 - **Accelerator health view (experimental).** `kubeneuronctl health` and
   `GET /api/v1/accelerator-health` show what the leader last read from every
   accelerator health source, per node, source, rule and device, with the
