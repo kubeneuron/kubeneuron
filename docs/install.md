@@ -4,6 +4,27 @@ The operator-managed path is the only supported authenticated deployment
 shape. It requires Kubernetes **1.29+** (the CRDs use quantity CEL
 functions); the integration harness pins and tests v1.33.
 
+## Recovery policies installed by the script
+
+On a fresh installation, `deploy/install.sh` selects `--policy-pack cloud`
+and sets the installation's execution mode to `DryRun`. The default policies
+use `Approval`. Four classes select the replacement playbook:
+`fell-off-bus`, `gpu-lost`, `ecc-dbe` and `nvlink`. The other bundled
+bindings select observation.
+
+To choose a ladder for one class, edit its `GPURemediationPolicy`.
+Set `spec.playbookRef` to the installation's observe, cloud-replace or
+cloud-recycle playbook. The recycle ladder additionally requires
+`spec.recycle.enabled: true` and escalates to replacement. The default
+replacement strategy is `AddFirst`. While add-first is unavailable, a path
+that includes replacement waits before cordon. Check the installation's
+`CloudRecoveryAvailable` condition for provider configuration and the
+incident for the eligibility decision on its node.
+
+A repeat install preserves edited policies and reports missing cloud pack
+objects. On a fresh installation, `--policy-pack bare-metal-alpha` explicitly
+selects the node-level pack (Alpha, not validated on real hardware).
+
 ## DCGM client
 
 DCGM is not bundled in the agent image. The agent uses the narrower
