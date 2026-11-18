@@ -2894,6 +2894,15 @@ exercise_incident_evidence() {
 	open_and_read "$target_node" gpu-lost
 	local job_uid
 	job_uid=$("$KUBECTL_BIN" -n "$ns" get job training-worker -o jsonpath='{.metadata.uid}')
+	# Opening evidence is available before the first reconcile captures workers.
+	local incident_id
+	incident_id=$("$JQ_BIN" -er '.incident.id' <<<"$detail")
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		detail=$(evidence_api "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}")
+		"$JQ_BIN" -e '.affected_jobs != null' <<<"$detail" >/dev/null && break
+		sleep 1
+	done
 	"$JQ_BIN" -e --arg uid "$job_uid" 'any(.affected_jobs[]?; .owner.uid == $uid)' <<<"$detail" >/dev/null ||
 		die "incident did not capture the training Job UID"
 	installation_uid=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.uid}')
@@ -2905,9 +2914,8 @@ exercise_incident_evidence() {
 		-H 'Content-Type: application/json' --data '{"kind":"progress","step":1}' \
 		-o /dev/null -w '%{http_code}' "https://${service_dns}:${training_port}/v1/training/reports")
 	[[ $code == 204 ]] || die "verified worker progress returned $code, want 204"
-	local snapshot="$work_dir/training-report.db" pod_uid incident_id
+	local snapshot="$work_dir/training-report.db" pod_uid
 	pod_uid=$("$KUBECTL_BIN" -n "$ns" get pod "$worker" -o jsonpath='{.metadata.uid}')
-	incident_id=$("$JQ_BIN" -er '.incident.id' <<<"$detail")
 	evidence_api --fail "http://127.0.0.1:${public_port}/api/v1/backup" -o "$snapshot"
 	python3 - "$snapshot" "$incident_id" "$job_uid" "$pod_uid" <<-'PYTHON'
 		import sqlite3
