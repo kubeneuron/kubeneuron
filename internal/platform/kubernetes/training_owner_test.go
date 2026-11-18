@@ -124,3 +124,26 @@ func TestRecreationDependsOnObservedOwner(t *testing.T) {
 		t.Fatal("suspended Job marked capable")
 	}
 }
+
+func TestStandaloneRayClusterOwner(t *testing.T) {
+	cluster := unstructuredObject(rayClusters, "RayCluster", "training", "standalone", nil)
+	cluster.SetUID("cluster-uid")
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "training", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(cluster, rayClusters.GroupVersion().WithKind("RayCluster"))}}}
+	p := &Platform{dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), cluster)}
+	chain, owner, reason := p.trainingOwner(t.Context(), pod)
+	if len(chain) != 1 || owner != nil || reason != "raycluster-without-rayjob" {
+		t.Fatalf("chain=%v owner=%v reason=%q", chain, owner, reason)
+	}
+}
+
+func TestPodUsesGPURequestOnlyAndZeroLimit(t *testing.T) {
+	resources := corev1.ResourceRequirements{Requests: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}
+	pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Resources: resources}}}}
+	if !podUsesGPU(pod) {
+		t.Fatal("request-only GPU missed")
+	}
+	pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("0")}}
+	if podUsesGPU(pod) {
+		t.Fatal("zero GPU limit counted")
+	}
+}
