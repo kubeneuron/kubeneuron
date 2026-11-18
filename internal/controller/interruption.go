@@ -32,18 +32,21 @@ const (
 	// interruptionOutcomeAction records how the warned workloads answered by
 	// the deadline.
 	interruptionOutcomeAction = "interruption-outcome"
+	// interruptionEndedAction closes an incident whose notice is gone from a
+	// node that is still there.
+	interruptionEndedAction = "interruption-ended"
 )
 
 const (
-	// interruptionUnknownDeadline is the deadline assumed for a notice that
-	// carries no time: the signal says the interruption is under way or
-	// imminent, and the shortest notice a cloud gives a spot instance is about
-	// two minutes.
-	interruptionUnknownDeadline = 90 * time.Second
 	// interruptionMargin is kept between the deadline a workload is given and
 	// the cloud's, so a checkpoint finished at its deadline is written before
 	// the instance stops.
 	interruptionMargin = 30 * time.Second
+	// interruptionOverdue is how long after its deadline a cloud-interruption
+	// incident may wait for the cloud. A node that is still there with the
+	// notice still on it is handed to a person, cordon kept: the signal may
+	// be stuck.
+	interruptionOverdue = time.Hour
 )
 
 // interruptionReader is the platform side: the interruptions announced on
@@ -59,6 +62,9 @@ type interruptionReader interface {
 type interruptionState struct {
 	mu   sync.Mutex
 	keys map[string]bool
+	// settled are the open incidents whose warning outcome is recorded, or
+	// whose warning asked nobody, so their trail is not read again.
+	settled map[string]bool
 }
 
 // interruptionNotice is a recorded notice, as the audit row keeps it.
@@ -77,7 +83,7 @@ func (n interruptionNotice) due() time.Time {
 	if !n.Deadline.IsZero() {
 		return n.Deadline
 	}
-	return n.SeenAt.Add(interruptionUnknownDeadline)
+	return n.SeenAt.Add(interruption.AssumedNotice(n.Source))
 }
 
 // provider names the cloud of a notice's source, for the metric.
@@ -111,7 +117,16 @@ func (c *Controller) pollInterruptions(ctx context.Context) {
 	recorded := map[string]bool{}
 	for _, n := range notices {
 		if _, err := c.store.GetNode(ctx, n.Node); err != nil {
-			// Not a node KubeNeuron manages.
+			if !errors.Is(err, store.ErrNotFound) {
+				// The store could not say: the notice stays in force, so
+				// the node's incident is not closed on a failed read.
+				current[n.Node] = true
+				recorded[n.Key] = c.interruptions.seen(n.Key)
+				if c.logOnce.first("interruption-node/" + n.Node + "/" + err.Error()) {
+					c.log.Warn("could not read the node of an announced interruption", "node", n.Node, "err", err)
+				}
+			}
+			// Otherwise not a node KubeNeuron manages.
 			continue
 		}
 		current[n.Node] = true
@@ -129,8 +144,29 @@ func (c *Controller) pollInterruptions(ctx context.Context) {
 		recorded[n.Key] = true
 	}
 	c.interruptions.keep(recorded)
-	c.withdrawInterruptions(ctx, current)
-	c.observeInterruptionWarnings(ctx)
+	incidents, err := c.openInterruptionIncidents(ctx)
+	if err != nil {
+		c.log.Warn("could not list the open cloud-interruption incidents", "err", err)
+		return
+	}
+	c.endInterruptions(ctx, incidents, current)
+	c.observeInterruptionWarnings(ctx, incidents)
+}
+
+// openInterruptionIncidents are the open cloud-interruption incidents, read
+// once per pass.
+func (c *Controller) openInterruptionIncidents(ctx context.Context) ([]*types.Incident, error) {
+	all, err := c.store.ListIncidents(ctx, store.IncidentFilter{States: openStates})
+	if err != nil {
+		return nil, err
+	}
+	var out []*types.Incident
+	for _, inc := range all {
+		if inc.Class == types.ClassCloudInterruption {
+			out = append(out, inc)
+		}
+	}
+	return out, nil
 }
 
 func (s *interruptionState) seen(key string) bool {
@@ -145,6 +181,26 @@ func (s *interruptionState) keep(keys map[string]bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.keys = keys
+}
+
+func (s *interruptionState) isSettled(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.settled[id]
+}
+
+// settle remembers that incident id's warning needs no more reading. open
+// are the open incidents; any other remembered one is forgotten.
+func (s *interruptionState) settle(id string, open []*types.Incident) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := map[string]bool{}
+	for _, inc := range open {
+		if s.settled[inc.ID] || inc.ID == id {
+			next[inc.ID] = true
+		}
+	}
+	s.settled = next
 }
 
 // recordInterruption opens the node's cloud-interruption incident, or finds
@@ -172,7 +228,7 @@ func (c *Controller) recordInterruption(ctx context.Context, n interruption.Noti
 			return nil
 		}
 	}
-	notice := interruptionNotice{Kind: n.Kind, Deadline: n.Deadline, Source: n.Source, Key: n.Key, SeenAt: time.Now().UTC()}
+	notice := interruptionNotice{Kind: n.Kind, Deadline: n.Deadline, Source: n.Source, Key: n.Key, SeenAt: c.checkpointNowFunc()().UTC()}
 	data, err := json.Marshal(notice)
 	if err != nil {
 		return err
@@ -339,6 +395,12 @@ func (c *Controller) warnCheckpoint(ctx context.Context, inc *types.Incident) (*
 	}
 	now := c.checkpointNowFunc()()
 	deadline := notice.due().Add(-interruptionMargin)
+	if notice.Deadline.IsZero() && !deadline.After(now) {
+		// The notice gives no time and the assumed one leaves no room for
+		// the margin: the workloads are asked at once, against the cloud's
+		// assumed deadline itself, rather than not at all.
+		deadline = notice.due()
+	}
 	outcome := func(label, text string) (*types.ActionResult, error) {
 		metrics.CloudInterruptions.WithLabelValues(notice.provider(), string(notice.Kind), label).Inc()
 		c.recordWarning(ctx, inc, notice, now, deadline, 0, text)
@@ -376,8 +438,12 @@ func (c *Controller) warnCheckpoint(ctx context.Context, inc *types.Incident) (*
 		}
 	}
 	metrics.CloudInterruptions.WithLabelValues(notice.provider(), string(notice.Kind), "warned").Inc()
-	text := fmt.Sprintf("asked %d of %d workload(s) %s to checkpoint before %s, %s ahead of the cloud's deadline",
-		asked, len(candidates), checkpointJoin(names), deadline.UTC().Format(time.RFC3339), interruptionMargin)
+	ahead := "at the cloud's assumed deadline"
+	if margin := notice.due().Sub(deadline); margin > 0 {
+		ahead = margin.String() + " ahead of the cloud's deadline"
+	}
+	text := fmt.Sprintf("asked %d of %d workload(s) %s to checkpoint before %s, %s",
+		asked, len(candidates), checkpointJoin(names), deadline.UTC().Format(time.RFC3339), ahead)
 	c.recordWarning(ctx, inc, notice, now, deadline, asked, text)
 	return okResult(inc, text), nil
 }
@@ -407,28 +473,42 @@ func (c *Controller) recordWarning(ctx context.Context, inc *types.Incident, n i
 
 // observeInterruptionWarnings reads, for each warning whose outcome is not
 // recorded yet, how the asked workloads answered. The outcome is recorded once
-// every one has answered, or at the deadline.
-func (c *Controller) observeInterruptionWarnings(ctx context.Context) {
+// every one has answered, or at the deadline. incidents are the pass's open
+// cloud-interruption incidents.
+func (c *Controller) observeInterruptionWarnings(ctx context.Context, incidents []*types.Incident) {
 	checkpointer, ok := c.platform.(platform.WorkloadCheckpointer)
 	if !ok {
 		return
 	}
-	incidents, err := c.store.ListIncidents(ctx, store.IncidentFilter{States: openStates})
-	if err != nil {
-		return
-	}
 	policy := c.runtimeConfig(ctx).Checkpoint
 	for _, inc := range incidents {
-		if inc.Class != types.ClassCloudInterruption {
+		if c.interruptions.isSettled(inc.ID) {
 			continue
 		}
-		warning, done, err := c.pendingWarning(ctx, inc)
-		if err != nil || done || warning.Asked == 0 {
+		warning, found, done, err := c.pendingWarning(ctx, inc)
+		if err != nil || !found {
+			continue
+		}
+		if done || warning.Asked == 0 {
+			c.interruptions.settle(inc.ID, incidents)
 			continue
 		}
 		now := c.checkpointNowFunc()()
+		provider := interruptionNotice{Source: warning.Source}.provider()
 		workloads, err := c.platform.NodeWorkloads(ctx, inc.Target.Node)
-		if err != nil && now.Before(warning.DeadlineAt) {
+		if err != nil {
+			if now.Before(warning.DeadlineAt) {
+				continue
+			}
+			// Nothing is said of workloads that were not read.
+			metrics.CloudInterruptions.WithLabelValues(provider, string(warning.Kind), "unknown").Inc()
+			text := fmt.Sprintf("the workloads on %s could not be read at the deadline %s; how the %d asked workload(s) answered is unknown",
+				inc.Target.Node, warning.DeadlineAt.UTC().Format(time.RFC3339), warning.Asked)
+			if err := c.appendAudit(ctx, inc, "system", interruptionOutcomeAction, text); err != nil {
+				c.log.Warn("could not record the checkpoint warning outcome", "incident", inc.ID, "err", err)
+				continue
+			}
+			c.interruptions.settle(inc.ID, incidents)
 			continue
 		}
 		inForce := checkpoint.Request{IncidentID: inc.ID, DeadlineAt: warning.DeadlineAt}
@@ -454,20 +534,22 @@ func (c *Controller) observeInterruptionWarnings(ctx context.Context) {
 		if answered < warning.Asked {
 			label = "missed"
 		}
-		metrics.CloudInterruptions.WithLabelValues(interruptionNotice{Source: warning.Source}.provider(), string(warning.Kind), label).Inc()
+		metrics.CloudInterruptions.WithLabelValues(provider, string(warning.Kind), label).Inc()
 		text := fmt.Sprintf("%d of %d asked workload(s) reported a checkpoint or finished before %s", answered, warning.Asked, warning.DeadlineAt.UTC().Format(time.RFC3339))
 		if err := c.appendAudit(ctx, inc, "system", interruptionOutcomeAction, text); err != nil {
 			c.log.Warn("could not record the checkpoint warning outcome", "incident", inc.ID, "err", err)
+			continue
 		}
+		c.interruptions.settle(inc.ID, incidents)
 	}
 }
 
-// pendingWarning is the incident's last warning and whether its outcome is
-// already recorded.
-func (c *Controller) pendingWarning(ctx context.Context, inc *types.Incident) (interruptionWarning, bool, error) {
+// pendingWarning is the incident's last warning, whether one was sent, and
+// whether its outcome is already recorded.
+func (c *Controller) pendingWarning(ctx context.Context, inc *types.Incident) (interruptionWarning, bool, bool, error) {
 	trail, err := c.store.AuditTrail(ctx, inc.ID)
 	if err != nil {
-		return interruptionWarning{}, false, err
+		return interruptionWarning{}, false, false, err
 	}
 	var w interruptionWarning
 	found, done := false, false
@@ -481,23 +563,19 @@ func (c *Controller) pendingWarning(ctx context.Context, inc *types.Incident) (i
 			done = true
 		}
 	}
-	if !found {
-		return w, true, nil
-	}
-	return w, done, nil
+	return w, found, done, nil
 }
 
-// withdrawInterruptions closes the cloud-interruption incidents of nodes that
-// no longer carry any notice: the maintenance was cancelled or the hint
-// passed. Only the incident's own cordon is released. A node that is gone is
-// closed by the vanished-node janitor instead.
-func (c *Controller) withdrawInterruptions(ctx context.Context, current map[string]bool) {
-	incidents, err := c.store.ListIncidents(ctx, store.IncidentFilter{States: openStates})
-	if err != nil {
-		return
-	}
+// endInterruptions closes the cloud-interruption incidents of nodes that no
+// longer carry any notice and are still there. KubeNeuron cannot tell a
+// cancelled notice from maintenance completed in place (a reboot, a frozen
+// VM, a VM restarted under the same Node), so the incident ends without
+// saying which. Only the incident's own cordon is released. A node that is
+// gone is closed by the vanished-node janitor instead. incidents are the
+// pass's open cloud-interruption incidents.
+func (c *Controller) endInterruptions(ctx context.Context, incidents []*types.Incident, current map[string]bool) {
 	for _, inc := range incidents {
-		if inc.Class != types.ClassCloudInterruption || current[inc.Target.Node] || c.isInFlight(inc.ID) {
+		if current[inc.Target.Node] || c.isInFlight(inc.ID) {
 			continue
 		}
 		if presence, ok := c.platform.(platform.NodePresence); ok {
@@ -508,26 +586,51 @@ func (c *Controller) withdrawInterruptions(ctx context.Context, current map[stri
 			}
 		}
 		if _, _, err := c.platform.ReleaseCordonOwners(ctx, inc.Target.Node, []string{inc.ID}); err != nil {
-			c.log.Warn("could not release a withdrawn interruption's cordon", "incident", inc.ID, "err", err)
+			c.log.Warn("could not release an ended interruption's cordon", "incident", inc.ID, "err", err)
 			continue
 		}
 		if inc.State == types.StateExecuting {
-			if err := c.transition(ctx, inc, types.StateEvaluating, "system", "interruption-withdrawn",
-				"the announced interruption was withdrawn while a step was orphaned", nil); err != nil {
+			if err := c.transition(ctx, inc, types.StateEvaluating, "system", interruptionEndedAction,
+				"the announced interruption ended while a step was orphaned", nil); err != nil {
 				continue
 			}
 		}
-		message := "the cloud no longer announces an interruption of " + inc.Target.Node + "; the incident is closed as withdrawn"
-		if err := c.transition(ctx, inc, types.StateResolved, "system", "interruption-withdrawn", message, nil); err != nil {
+		message := "the notice is no longer present on " + inc.Target.Node + ": cancelled or completed; the incident is closed as ended"
+		if err := c.transition(ctx, inc, types.StateResolved, "system", interruptionEndedAction, message, nil); err != nil {
 			if !errors.Is(err, store.ErrConflict) {
-				c.log.Warn("closing a withdrawn interruption failed", "incident", inc.ID, "err", err)
+				c.log.Warn("closing an ended interruption failed", "incident", inc.ID, "err", err)
 			}
 			continue
 		}
 		for _, n := range mustNotices(c.interruptionNotices(ctx, inc)) {
-			metrics.CloudInterruptions.WithLabelValues(n.provider(), string(n.Kind), "withdrawn").Inc()
+			metrics.CloudInterruptions.WithLabelValues(n.provider(), string(n.Kind), "ended").Inc()
 		}
 	}
+}
+
+// overdueInterruption hands a VERIFYING cloud-interruption incident to a
+// person when the cloud has not taken the node an hour after the deadline
+// although the node is there and the notice is still on it: the signal may be
+// stuck, and the cordon is kept rather than released on a guess. It reports
+// whether the incident was handed over.
+func (c *Controller) overdueInterruption(ctx context.Context, inc *types.Incident) (bool, error) {
+	notices, err := c.interruptionNotices(ctx, inc)
+	if err != nil {
+		return false, err
+	}
+	notice, ok := urgentNotice(notices)
+	if !ok || time.Now().Before(notice.due().Add(interruptionOverdue)) {
+		return false, nil
+	}
+	if presence, ok := c.platform.(platform.NodePresence); ok {
+		// A node that is gone, or cannot be read, is the janitors' to close.
+		if exists, err := presence.NodeExists(ctx, inc.Target.Node); err != nil || !exists {
+			return false, nil
+		}
+	}
+	reason := fmt.Sprintf("the cloud announced %s for %s, but %s after the deadline %s the node is still there and the notice is still on it; the signal may be stuck, and the cordon is kept",
+		notice.Kind, inc.Target.Node, interruptionOverdue, notice.due().UTC().Format(time.RFC3339))
+	return true, c.quarantine(ctx, inc, reason)
 }
 
 func mustNotices(n []interruptionNotice, err error) []interruptionNotice {

@@ -32,8 +32,11 @@ API is `v1alpha1`.
   by the breaker, limits or cooldowns) and then cordons the node (approval in
   `Approval` mode). It never drains or replaces the node. The steps start
   within `spec.interruption.lead` (default `10m`) of the deadline; a
-  `rebalance` hint is only recorded. A spot notice is about two minutes on
-  AWS and shorter elsewhere, so a checkpoint is asked for, not guaranteed.
+  `rebalance` hint is only recorded. The incident ends when the node is gone
+  or its notice is no longer present; a notice still present an hour after
+  its deadline goes to a person with the cordon kept. A spot notice is about
+  two minutes on AWS and shorter elsewhere, so a checkpoint is asked for, not
+  guaranteed.
   The cloud pack adds the playbook and its policy. New metric
   `kubeneuron_cloud_interruptions_total`. See
   [Announced cloud interruptions](docs/cloud-interruptions.md).

@@ -73,3 +73,17 @@ func TestFromNodeKeys(t *testing.T) {
 		t.Fatal("a rescheduled maintenance is the same notice")
 	}
 }
+
+func TestAssumedNoticeIsTheSourcesShortestDocumentedNotice(t *testing.T) {
+	for source, want := range map[string]time.Duration{
+		SourceNTHSpot:             2 * time.Minute,
+		SourceAKSScheduledEvent:   30 * time.Second,
+		SourceGKEMaintenanceTaint: 30 * time.Second,
+		SourceNTHScheduled:        30 * time.Second,
+		"unknown:source":          30 * time.Second,
+	} {
+		if got := AssumedNotice(source); got != want {
+			t.Errorf("%s: %s, want %s", source, got, want)
+		}
+	}
+}

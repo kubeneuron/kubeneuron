@@ -224,7 +224,7 @@ var (
 	}, []string{"outcome"})
 	// CloudInterruptions counts interruptions the cloud announced and what
 	// came of the checkpoint warning: announced, warned, no-jobs, not-asked,
-	// checkpointed-in-time, missed, withdrawn. Pool and instance type stay out
+	// checkpointed-in-time, missed, unknown, ended. Pool and instance type stay out
 	// of the labels.
 	CloudInterruptions = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "kubeneuron_cloud_interruptions_total",

@@ -2889,7 +2889,7 @@ exercise_incident_evidence() {
 
 # exercise_cloud_interruption: the AWS Node Termination Handler's spot taint
 # on a worker must open a cloud-interruption incident that records the notice,
-# and removing the taint must close it as withdrawn. The fixture binds no
+# and removing the taint must close it as ended. The fixture binds no
 # policy to the class, so nothing is asked or cordoned.
 exercise_cloud_interruption() {
 	note "exercising an announced cloud interruption read from a node taint"

@@ -8,6 +8,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -436,7 +437,7 @@ func TestInterruptionOnANodeWithAnotherIncident(t *testing.T) {
 	}
 }
 
-func TestInterruptionWithdrawnClosesAndReleasesOnlyItsCordon(t *testing.T) {
+func TestInterruptionEndedClosesAndReleasesOnlyItsCordon(t *testing.T) {
 	c, st, plat, _ := interruptionFixture(t, interruptionEngine(t, recoverymode.Automatic, autoSettings()), liveLimits(), 1)
 	ctx := context.Background()
 	plat.announce(spotNotice("n1", time.Time{}))
@@ -451,7 +452,10 @@ func TestInterruptionWithdrawnClosesAndReleasesOnlyItsCordon(t *testing.T) {
 		t.Fatal(err)
 	}
 	if inc.State != types.StateResolved {
-		t.Fatalf("state %s, want resolved as withdrawn", inc.State)
+		t.Fatalf("state %s, want resolved as ended", inc.State)
+	}
+	if actions, results := trailActions(t, st, id); count(actions, interruptionEndedAction) != 1 || !containsText(results, "cancelled or completed") {
+		t.Fatalf("not closed as ended:\n%v\n%v", actions, results)
 	}
 	if len(plat.released) != 1 || plat.released[0] != "n1/"+id {
 		t.Fatalf("released %v, want only the incident's own cordon", plat.released)
@@ -492,7 +496,7 @@ func TestInterruptionGoneNodeResolves(t *testing.T) {
 	plat.announce()
 	c.pollInterruptions(ctx)
 	if inc, _ := st.GetIncident(ctx, id); inc.State.Halted() {
-		t.Fatalf("a gone node's incident was closed as withdrawn: %s", inc.State)
+		t.Fatalf("a gone node's incident was closed as ended: %s", inc.State)
 	}
 	c.resolveIncidentsOnVanishedNodes(ctx)
 	if inc, _ := st.GetIncident(ctx, id); inc.State != types.StateResolved {
@@ -554,5 +558,165 @@ func TestInterruptionWithoutAPolicyIsOnlyObserved(t *testing.T) {
 	}
 	if inc.State != types.StateObserving && !inc.State.Halted() {
 		t.Fatalf("state %s, want observed only", inc.State)
+	}
+}
+
+// countingStore counts the reads of a poll pass and can fail node reads.
+type countingStore struct {
+	store.Store
+	mu         sync.Mutex
+	getNodeErr error
+	lists      int
+	trails     int
+}
+
+func (s *countingStore) GetNode(ctx context.Context, name string) (*types.Node, error) {
+	s.mu.Lock()
+	err := s.getNodeErr
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return s.Store.GetNode(ctx, name)
+}
+
+func (s *countingStore) ListIncidents(ctx context.Context, f store.IncidentFilter) ([]*types.Incident, error) {
+	s.mu.Lock()
+	s.lists++
+	s.mu.Unlock()
+	return s.Store.ListIncidents(ctx, f)
+}
+
+func (s *countingStore) AuditTrail(ctx context.Context, id string) ([]*types.AuditEntry, error) {
+	s.mu.Lock()
+	s.trails++
+	s.mu.Unlock()
+	return s.Store.AuditTrail(ctx, id)
+}
+
+func (s *countingStore) reads() (lists, trails int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lists, trails = s.lists, s.trails
+	s.lists, s.trails = 0, 0
+	return lists, trails
+}
+
+// A node the store cannot read keeps its notice in force: a database error
+// must not read as "the notice is gone" and close the incident.
+func TestInterruptionStoreErrorKeepsTheIncident(t *testing.T) {
+	c, st, plat, _ := interruptionFixture(t, interruptionEngine(t, recoverymode.Automatic, autoSettings()), liveLimits(), 1)
+	ctx := context.Background()
+	plat.announce(spotNotice("n1", time.Time{}))
+	c.pollInterruptions(ctx)
+	id := interruptionIncident(t, st, "n1").ID
+	settle(t, c, st, id)
+
+	cs := &countingStore{Store: st, getNodeErr: errors.New("database is locked")}
+	c.store = cs
+	c.pollInterruptions(ctx)
+	if inc, _ := st.GetIncident(ctx, id); inc.State.Halted() {
+		t.Fatalf("a failed node read closed the incident: %s", inc.State)
+	}
+	if len(plat.released) != 0 {
+		t.Fatalf("a failed node read released the cordon: %v", plat.released)
+	}
+}
+
+func TestInterruptionUnreadableWorkloadsAtTheDeadlineAreUnknown(t *testing.T) {
+	c, st, plat, clock := interruptionFixture(t, interruptionEngine(t, recoverymode.Approval, nil), liveLimits(), 1)
+	ctx := context.Background()
+	plat.announce(spotNotice("n1", time.Time{}))
+	c.pollInterruptions(ctx)
+	id := interruptionIncident(t, st, "n1").ID
+	settle(t, c, st, id)
+
+	plat.listErr = errors.New("apiserver unavailable")
+	c.pollInterruptions(ctx)
+	if _, results := trailActions(t, st, id); containsText(results, "could not be read") {
+		t.Fatalf("outcome recorded before the deadline: %v", results)
+	}
+	clock.Advance(5 * time.Minute)
+	c.pollInterruptions(ctx)
+	c.pollInterruptions(ctx)
+	actions, results := trailActions(t, st, id)
+	if count(actions, interruptionOutcomeAction) != 1 || !containsText(results, "could not be read at the deadline") {
+		t.Fatalf("want one unknown outcome:\n%v\n%v", actions, results)
+	}
+	if containsText(results, "0 of 1 asked") {
+		t.Fatalf("unread workloads reported as missed: %v", results)
+	}
+}
+
+// A notice the cloud has not acted on an hour past its deadline, on a node
+// still there, goes to a person with the cordon kept.
+func TestInterruptionOverdueGoesToAPerson(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ago  time.Duration
+		want types.IncidentState
+	}{
+		{"an hour past the deadline", 2 * time.Hour, types.StateNeedsHuman},
+		{"shortly past the deadline", 10 * time.Minute, types.StateVerifying},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, st, plat, _ := interruptionFixture(t, interruptionEngine(t, recoverymode.Automatic, autoSettings()), liveLimits(), 1)
+			plat.announce(spotNotice("n1", time.Now().Add(-tc.ago)))
+			c.pollInterruptions(context.Background())
+			inc := settle(t, c, st, interruptionIncident(t, st, "n1").ID)
+			if inc.State != tc.want {
+				t.Fatalf("state %s, want %s", inc.State, tc.want)
+			}
+			if len(plat.cordoned()) != 1 || len(plat.released) != 0 {
+				t.Fatalf("cordons %v, released %v; want the cordon kept", plat.cordoned(), plat.released)
+			}
+			if tc.want == types.StateNeedsHuman {
+				if _, results := trailActions(t, st, inc.ID); !containsText(results, "the signal may be stuck") {
+					t.Fatalf("no reason recorded: %v", results)
+				}
+			}
+		})
+	}
+}
+
+// A notice without a time whose assumed notice is no longer than the margin
+// is still sent, against the cloud's assumed deadline.
+func TestInterruptionImminentNoticeIsAskedAtTheCloudsDeadline(t *testing.T) {
+	c, st, plat, _ := interruptionFixture(t, interruptionEngine(t, recoverymode.Approval, nil), liveLimits(), 1)
+	plat.announce(interruption.Notice{Node: "n1", Interruption: cloud.Interruption{
+		Kind: cloud.InterruptionScheduledMaintenance, Source: interruption.SourceAKSScheduledEvent,
+		Key: interruption.SourceAKSScheduledEvent + "/n1/t",
+	}})
+	c.pollInterruptions(context.Background())
+	inc := settle(t, c, st, interruptionIncident(t, st, "n1").ID)
+	if plat.requests["trainer"] != 1 {
+		t.Fatalf("the job was asked %d times, want once", plat.requests["trainer"])
+	}
+	if _, results := trailActions(t, st, inc.ID); !containsText(results, "at the cloud's assumed deadline") {
+		t.Fatalf("no warning against the assumed deadline: %v", results)
+	}
+}
+
+// A pass lists the open incidents once, and stops reading the trail of an
+// incident whose warning outcome is recorded.
+func TestInterruptionPassReadsTheIncidentsOnce(t *testing.T) {
+	c, st, plat, clock := interruptionFixture(t, interruptionEngine(t, recoverymode.Approval, nil), liveLimits(), 1)
+	ctx := context.Background()
+	plat.announce(spotNotice("n1", time.Time{}))
+	c.pollInterruptions(ctx)
+	id := interruptionIncident(t, st, "n1").ID
+	settle(t, c, st, id)
+	plat.observe = func(w platform.Workload, _ int) checkpoint.Observation {
+		return stampedAck(w, id, clock.Now().Add(time.Minute))
+	}
+	cs := &countingStore{Store: st}
+	c.store = cs
+	c.pollInterruptions(ctx)
+	if lists, _ := cs.reads(); lists != 1 {
+		t.Fatalf("a pass listed the incidents %d times, want once", lists)
+	}
+	c.pollInterruptions(ctx)
+	if lists, trails := cs.reads(); lists != 1 || trails != 0 {
+		t.Fatalf("a settled pass listed %d times and read %d trails, want 1 and 0", lists, trails)
 	}
 }

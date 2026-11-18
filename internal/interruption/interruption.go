@@ -67,6 +67,33 @@ var taintSignals = map[string]struct {
 	"aws-node-termination-handler/scheduled-maintenance":    {cloud.InterruptionScheduledMaintenance, SourceNTHScheduled},
 }
 
+// assumedNotice is how long after it is first read a notice without a time is
+// assumed to take the node, per source. The AWS spot notice comes two
+// minutes before the instance stops, and the Node Termination Handler taints
+// on receipt. Azure gives a preempted VM at least 30 seconds, and the AKS
+// condition does not say which event is scheduled. GKE documents no time
+// between its taint and the termination; its default pod grace period is 30
+// seconds. The handler's scheduled-maintenance taint comes with an immediate
+// drain.
+var assumedNotice = map[string]time.Duration{
+	SourceNTHSpot:             2 * time.Minute,
+	SourceAKSScheduledEvent:   30 * time.Second,
+	SourceGKEMaintenanceTaint: 30 * time.Second,
+	SourceNTHScheduled:        30 * time.Second,
+}
+
+// defaultAssumedNotice is assumed for a source not in assumedNotice.
+const defaultAssumedNotice = 30 * time.Second
+
+// AssumedNotice is how long after it is first read a notice from source that
+// carries no time is assumed to take the node.
+func AssumedNotice(source string) time.Duration {
+	if d, ok := assumedNotice[source]; ok {
+		return d
+	}
+	return defaultAssumedNotice
+}
+
 const (
 	gkeMaintenanceTimeLabel = "cloud.google.com/scheduled-maintenance-time"
 	aksScheduledCondition   = "VMEventScheduled"
