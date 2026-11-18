@@ -41,6 +41,11 @@ func requestSuccessor(ctx context.Context, client nodegroupUpdater, cluster stri
 	if out == nil || out.Update == nil || sdk.ToString(out.Update.Id) == "" {
 		return s, fmt.Errorf("EKS returned no scaling update ID")
 	}
+	// Direct SuccessorProvider callers may omit the controller's write-ahead
+	// timestamp. A replay must use the accepted update's original time.
+	if s.RequestedAt.IsZero() && out.Update.CreatedAt != nil {
+		s.RequestedAt = out.Update.CreatedAt.UTC()
+	}
 	s.State = maps.Clone(s.State)
 	s.State["update"] = *out.Update.Id
 	s.Phase = cloud.SuccessorRequested

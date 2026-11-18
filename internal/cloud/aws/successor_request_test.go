@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	sdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
@@ -33,7 +34,7 @@ func (f *lostUpdateResponse) UpdateNodegroupConfig(_ context.Context, in *eks.Up
 		f.tokens[token] = true
 		return nil, errors.New("response lost")
 	}
-	return &eks.UpdateNodegroupConfigOutput{Update: &et.Update{Id: sdk.String("update-id")}}, nil
+	return &eks.UpdateNodegroupConfigOutput{Update: &et.Update{Id: sdk.String("update-id"), CreatedAt: sdk.Time(time.Unix(1000, 0))}}, nil
 }
 
 func TestRequestSuccessorReplaysLostResponse(t *testing.T) {
@@ -49,6 +50,15 @@ func TestRequestSuccessorReplaysLostResponse(t *testing.T) {
 	if err != nil || got.Phase != cloud.SuccessorRequested || got.State["update"] != "update-id" || len(client.tokens) != 1 || plan.State["update"] != "" {
 		t.Fatalf("replay: %+v %v", got, err)
 	}
+	if !got.RequestedAt.Equal(time.Unix(1000, 0)) {
+		t.Fatalf("activity window starts at %v", got.RequestedAt)
+	}
+	plan.RequestedAt = time.Unix(990, 0)
+	got, err = requestSuccessor(t.Context(), client, "cluster", plan)
+	if err != nil || !got.RequestedAt.Equal(plan.RequestedAt) {
+		t.Fatalf("lost persisted request time: %+v %v", got, err)
+	}
+
 }
 
 type scalingUpdateFixture struct {
