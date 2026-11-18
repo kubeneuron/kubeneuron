@@ -13,6 +13,7 @@ import (
 
 	sdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+	et "github.com/aws/aws-sdk-go-v2/service/eks/types"
 	"github.com/aws/smithy-go"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
@@ -131,4 +132,37 @@ func settledMembership(s cloud.Successor, g at.AutoScalingGroup, expected []stri
 	slices.Sort(actual)
 	slices.Sort(expected)
 	return slices.Equal(actual, expected)
+}
+
+// releaseRequestedSuccessor reconciles a recorded scale-up before cleanup.
+// Until the update has finished, unchanged membership cannot settle the request.
+func (p *managedProvider) releaseRequestedSuccessor(ctx context.Context, s cloud.Successor) error {
+	update, err := p.recordedScalingUpdate(ctx, s)
+	if err != nil {
+		return err
+	}
+	switch update.Status {
+	case et.UpdateStatusInProgress:
+		return fmt.Errorf("EKS scaling update %s is still in progress", s.State["update"])
+	case et.UpdateStatusSuccessful, et.UpdateStatusFailed:
+	default:
+		return fmt.Errorf("%w: cannot release after EKS update status %q", cloud.ErrNeedsOperator, update.Status)
+	}
+	group, err := p.successorGroup(ctx, s)
+	if err != nil {
+		return err
+	}
+	if settledMembership(s, group, strings.Split(s.State["members"], ",")) {
+		return nil
+	}
+	if update.Status == et.UpdateStatusSuccessful {
+		created, err := p.observeSuccessor(ctx, s)
+		if err != nil {
+			return err
+		}
+		if created.Phase == cloud.SuccessorCreated {
+			return p.releaseCreatedSuccessor(ctx, created)
+		}
+	}
+	return fmt.Errorf("%w: scaling update ended without a confirmed successor or restored group", cloud.ErrNeedsOperator)
 }

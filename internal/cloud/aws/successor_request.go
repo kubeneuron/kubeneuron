@@ -50,29 +50,37 @@ func requestSuccessor(ctx context.Context, client nodegroupUpdater, cluster stri
 // scalingUpdateComplete checks the update whose ID was returned for this
 // operation. Even a successful update does not identify an EC2 instance.
 func (p *managedProvider) scalingUpdateComplete(ctx context.Context, s cloud.Successor) (bool, error) {
-	id, group := s.State["update"], s.State["nodegroup"]
-	if s.Phase != cloud.SuccessorRequested || id == "" || group == "" || p.cluster == "" || p.cluster != s.State["cluster"] {
-		return false, fmt.Errorf("%w: incomplete EKS update identity", cloud.ErrNeedsOperator)
-	}
-	out, err := p.eks.DescribeUpdate(ctx, &eks.DescribeUpdateInput{Name: &p.cluster, NodegroupName: &group, UpdateId: &id})
+	update, err := p.recordedScalingUpdate(ctx, s)
 	if err != nil {
 		return false, err
 	}
-	if out == nil || out.Update == nil || sdk.ToString(out.Update.Id) != id {
-		return false, fmt.Errorf("%w: EKS did not confirm the recorded update ID", cloud.ErrNeedsOperator)
-	}
-	switch out.Update.Status {
+	switch update.Status {
 	case et.UpdateStatusInProgress:
 		return false, nil
 	case et.UpdateStatusSuccessful:
 		return true, nil
 	case et.UpdateStatusFailed:
-		for _, detail := range out.Update.Errors {
+		for _, detail := range update.Errors {
 			switch detail.ErrorCode {
 			case et.ErrorCodeEniLimitReached, et.ErrorCodeIpNotAvailable, et.ErrorCodeInsufficientFreeAddresses:
-				return false, fmt.Errorf("%w: EKS update %s: %s", cloud.ErrReplacementCapacity, id, detail.ErrorCode)
+				return false, fmt.Errorf("%w: EKS update %s: %s", cloud.ErrReplacementCapacity, s.State["update"], detail.ErrorCode)
 			}
 		}
 	}
-	return false, fmt.Errorf("%w: EKS update %s has status %q", cloud.ErrNeedsOperator, id, out.Update.Status)
+	return false, fmt.Errorf("%w: EKS update %s has status %q", cloud.ErrNeedsOperator, s.State["update"], update.Status)
+}
+
+func (p *managedProvider) recordedScalingUpdate(ctx context.Context, s cloud.Successor) (*et.Update, error) {
+	id, group := s.State["update"], s.State["nodegroup"]
+	if s.Phase != cloud.SuccessorRequested || id == "" || group == "" || p.cluster == "" || p.cluster != s.State["cluster"] {
+		return nil, fmt.Errorf("%w: incomplete EKS update identity", cloud.ErrNeedsOperator)
+	}
+	out, err := p.eks.DescribeUpdate(ctx, &eks.DescribeUpdateInput{Name: &p.cluster, NodegroupName: &group, UpdateId: &id})
+	if err != nil {
+		return nil, err
+	}
+	if out == nil || out.Update == nil || sdk.ToString(out.Update.Id) != id {
+		return nil, fmt.Errorf("%w: EKS did not confirm the recorded update ID", cloud.ErrNeedsOperator)
+	}
+	return out.Update, nil
 }

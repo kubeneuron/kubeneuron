@@ -75,6 +75,16 @@ func TestObserveSuccessor(t *testing.T) {
 	if err := p.releaseCreatedSuccessor(t.Context(), got); err != nil || terminator.calls != 0 {
 		t.Fatalf("already released: err=%v calls=%d", err, terminator.calls)
 	}
+	update.Status = et.UpdateStatusInProgress
+	if err := p.releaseRequestedSuccessor(t.Context(), s); err == nil || errors.Is(err, cloud.ErrNeedsOperator) {
+		t.Fatalf("in-flight release: %v", err)
+	}
+	for _, status := range []et.UpdateStatus{et.UpdateStatusFailed, et.UpdateStatusSuccessful} {
+		update.Status = status
+		if err := p.releaseRequestedSuccessor(t.Context(), s); err != nil || terminator.calls != 0 {
+			t.Fatalf("restored group after %s: err=%v calls=%d", status, err, terminator.calls)
+		}
+	}
 	g.Instances = g.Instances[1:]
 	p.scaling = observedASG{membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{g}}}, pages}
 	terminator.calls = 0
