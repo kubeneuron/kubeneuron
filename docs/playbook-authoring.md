@@ -563,6 +563,25 @@ pool is one node larger. KubeNeuron never evicts work to clean up. The same
 release runs when the incident is resolved, rejected or abandoned during the
 overlap. While the old node is gone, a replacement is never removed.
 
+**Restarts and later approvals.** Under `Approval`, a controller restart
+while the replacement is prepared returns the step to a new approval round.
+The replacement already requested keeps coming up, but nothing is drained
+without the new approval, and if the replacement is still not ready after
+`replacement.successorTimeout` it is released as above. A replacement that
+is ready stays, and is billed, while the incident waits for the approval of
+its next step, until the incident ends.
+
+**Transient errors.** A failed cloud or cluster call while the replacement
+comes up is recorded (`successor-retrying`) and retried until
+`replacement.successorTimeout`; it does not fail the step, since the request
+may already have been accepted.
+
+**What the replacement must offer** is recorded when the operation is
+planned: each accelerator resource of the old node, at the larger of what
+the node advertises and what its agent last reported. A device that has
+fallen off the bus therefore still counts. A node with no accelerators on
+record is held as unavailable before anything is requested.
+
 **No capacity.** If the pool has no capacity or quota for one more node, the
 operation ends as `capacity-denied` and the old node is not cordoned or
 drained.

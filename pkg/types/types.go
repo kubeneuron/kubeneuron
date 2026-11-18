@@ -349,6 +349,13 @@ type SuccessorRecord struct {
 	Node string `json:"node,omitempty"`
 	// NodeUID is that node's UID; the agent registration must match it.
 	NodeUID string `json:"node_uid,omitempty"`
+	// Expected is what the successor must offer, taken from the replaced node
+	// when the operation was planned: each of its accelerator resources, at
+	// the larger of the node's capacity and its agent's last count.
+	Expected map[string]int64 `json:"expected,omitempty"`
+	// ExpectedGPUs is how many accelerators the replaced node's agent last
+	// reported; the successor's agent must report at least as many.
+	ExpectedGPUs int `json:"expected_gpus,omitempty"`
 	// ReadyAt is when the successor was accepted: Ready, schedulable, and its
 	// accelerators allocatable and reported by an agent registered after the
 	// request. Two nodes run from here.
@@ -373,6 +380,12 @@ func (s *SuccessorRecord) Clone() *SuccessorRecord {
 		c.State = make(map[string]string, len(s.State))
 		for k, v := range s.State {
 			c.State[k] = v
+		}
+	}
+	if s.Expected != nil {
+		c.Expected = make(map[string]int64, len(s.Expected))
+		for k, v := range s.Expected {
+			c.Expected[k] = v
 		}
 	}
 	if s.ReadyAt != nil {

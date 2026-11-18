@@ -34,6 +34,10 @@ import (
 // defaultSuccessorPoll is how often a waiting successor is looked at again.
 const defaultSuccessorPoll = 15 * time.Second
 
+// successorSweepTimeout bounds the cloud and cluster calls that release one
+// abandoned successor from the reconcile pass.
+const successorSweepTimeout = 2 * time.Minute
+
 // addFirstCheckTTL bounds how long one provider answer about add-first is
 // reused across reconcile passes.
 const addFirstCheckTTL = time.Minute
@@ -155,6 +159,9 @@ func (c *Controller) addFirstAvailable(ctx context.Context, inc *types.Incident)
 	if s := inc.Successor; s.Open() && s.Operation == successorOperation(inc) && s.Phase != "" {
 		return nil // already under way; the provider settles it from here
 	}
+	if _, _, err := c.expectedAccelerators(ctx, inc); err != nil {
+		return err
+	}
 	key := successorOperation(inc)
 	c.addFirst.mu.Lock()
 	entry, cached := c.addFirst.entries[key]
@@ -211,6 +218,10 @@ func (c *Controller) planSuccessor(ctx context.Context, inc *types.Incident) err
 	if !ok || inc.CloudIdentity == nil {
 		return fmt.Errorf("%w: the platform cannot prepare a successor", cloud.ErrAddFirstUnavailable)
 	}
+	expected, gpus, err := c.expectedAccelerators(ctx, inc)
+	if err != nil {
+		return err
+	}
 	pin := *inc.CloudIdentity
 	planned, err := plat.PrepareSuccessor(ctx, pin, cloud.Successor{Operation: successorOperation(inc), Instance: pin.InstanceID})
 	if err != nil {
@@ -219,9 +230,57 @@ func (c *Controller) planSuccessor(ctx context.Context, inc *types.Incident) err
 	if planned.Phase != cloud.SuccessorPlanned || planned.Operation != successorOperation(inc) || planned.Instance != pin.InstanceID {
 		return fmt.Errorf("the provider returned phase %q for operation %q when asked to plan", planned.Phase, planned.Operation)
 	}
-	rec := &types.SuccessorRecord{Successor: planned}
+	rec := &types.SuccessorRecord{Successor: planned, Expected: expected, ExpectedGPUs: gpus}
 	return c.saveSuccessor(ctx, inc, rec, "successor-planned",
 		fmt.Sprintf("operation %s: a successor of %s is planned in pool %s", planned.Operation, inc.Target.Node, planned.Pool))
+}
+
+// expectedAccelerators is what a successor of the incident's node must offer:
+// each accelerator resource of the node at the larger of its capacity and
+// allocatable count, and the number of accelerators its agent last reported.
+// A node with a single accelerator resource takes the agent's count for it
+// when that is larger, as after a device fell off the bus and the device
+// plugin stopped counting it. With nothing to compare against, add-first is
+// unavailable: no successor could be accepted.
+func (c *Controller) expectedAccelerators(ctx context.Context, inc *types.Incident) (map[string]int64, int, error) {
+	node := inc.Target.Node
+	observer, ok := c.platform.(platform.NodeResourceObserver)
+	if !ok {
+		return nil, 0, fmt.Errorf("%w: the platform cannot read node resources", cloud.ErrAddFirstUnavailable)
+	}
+	res, found, err := observer.NodeResources(ctx, node)
+	if err != nil {
+		return nil, 0, fmt.Errorf("reading the resources of %s: %w", node, err)
+	}
+	if !found {
+		return nil, 0, fmt.Errorf("%w: node %s is not in the cluster", cloud.ErrAddFirstUnavailable, node)
+	}
+	gpus := 0
+	if registered, err := c.store.GetNode(ctx, node); err == nil && registered != nil {
+		gpus = len(registered.GPUs)
+	}
+	seen := map[string]int64{}
+	for _, counts := range []map[string]int64{res.Capacity, res.Allocatable} {
+		for name, n := range counts {
+			seen[name] = max(seen[name], n)
+		}
+	}
+	if len(seen) == 1 {
+		for name := range seen {
+			seen[name] = max(seen[name], int64(gpus))
+		}
+	}
+	expected := map[string]int64{}
+	for name, n := range seen {
+		if n > 0 {
+			expected[name] = n
+		}
+	}
+	if len(expected) == 0 && gpus == 0 {
+		return nil, 0, fmt.Errorf("%w: %s advertises no accelerator resources and its agent reported none, so no replacement could be checked against it",
+			cloud.ErrAddFirstUnavailable, node)
+	}
+	return expected, gpus, nil
 }
 
 // saveSuccessor persists rec on the incident with one audit row, and keeps
@@ -289,7 +348,20 @@ func (c *Controller) awaitSuccessor(ctx context.Context, inc *types.Incident) er
 			return fmt.Errorf("add-first replacement: %s; %s was not cordoned or drained (%s)", why, inc.Target.Node, inc.Successor.Reason)
 		}
 		if err := c.advanceSuccessor(ctx, inc, plat, pin, rec); err != nil {
-			return err
+			if successorStops(ctx, err) {
+				return err
+			}
+			// A failed cloud or cluster read is retried until the timeout:
+			// the request may already have been accepted.
+			c.log.Warn("add-first replacement: a step of the successor operation failed; retrying",
+				"incident", inc.ID, "operation", rec.Operation, "err", err)
+			if reason := "retrying after: " + err.Error(); inc.Successor.Open() && inc.Successor.Reason != reason {
+				retry := inc.Successor.Clone()
+				retry.Reason = reason
+				if serr := c.saveSuccessor(ctx, inc, retry, "successor-retrying", fmt.Sprintf("operation %s: %s", rec.Operation, reason)); serr != nil {
+					c.log.Warn("recording a successor retry failed", "incident", inc.ID, "err", serr)
+				}
+			}
 		}
 		if successorReady(inc) {
 			return nil
@@ -300,6 +372,15 @@ func (c *Controller) awaitSuccessor(ctx context.Context, inc *types.Incident) er
 		case <-time.After(c.successorPollInterval()):
 		}
 	}
+}
+
+// successorStops reports whether err ends the wait for a successor rather
+// than being retried on the next poll.
+func successorStops(ctx context.Context, err error) bool {
+	return ctx.Err() != nil ||
+		errors.Is(err, cloud.ErrReplacementCapacity) ||
+		errors.Is(err, cloud.ErrNeedsOperator) ||
+		errors.Is(err, cloud.ErrAddFirstUnavailable)
 }
 
 // advanceSuccessor takes one step of the operation and records it.
@@ -396,26 +477,13 @@ func (c *Controller) successorNotReady(ctx context.Context, inc *types.Incident,
 	case node.Unschedulable:
 		return fmt.Sprintf("node %s is not schedulable", node.Name)
 	}
-	observer, ok := c.platform.(platform.NodeResourceObserver)
-	if !ok {
-		return "the platform cannot read node resources"
+	if len(rec.Expected) == 0 && rec.ExpectedGPUs == 0 {
+		return fmt.Sprintf("no accelerators of %s were recorded to compare against", pin.Node)
 	}
-	old, found, err := observer.NodeResources(ctx, pin.Node)
-	if err != nil || !found {
-		return fmt.Sprintf("the resources of %s could not be read", pin.Node)
-	}
-	wanted := 0
-	for name, count := range old.Capacity {
-		if count <= 0 {
-			continue
-		}
-		wanted++
+	for name, count := range rec.Expected {
 		if node.Allocatable[name] < count {
 			return fmt.Sprintf("node %s has %d allocatable %s, fewer than the %d of %s", node.Name, node.Allocatable[name], name, count, pin.Node)
 		}
-	}
-	if wanted == 0 {
-		return fmt.Sprintf("%s advertises no accelerator resources to compare against", pin.Node)
 	}
 	registered, err := c.store.GetNode(ctx, node.Name)
 	if err != nil || registered == nil {
@@ -423,6 +491,9 @@ func (c *Controller) successorNotReady(ctx context.Context, inc *types.Incident,
 	}
 	if registered.UID != node.UID || !registered.AgentLastSeen.After(rec.RequestedAt) || len(registered.GPUs) == 0 {
 		return fmt.Sprintf("the agent on %s has not reported its accelerators since the request", node.Name)
+	}
+	if len(registered.GPUs) < rec.ExpectedGPUs {
+		return fmt.Sprintf("the agent on %s reports %d accelerators, fewer than the %d of %s", node.Name, len(registered.GPUs), rec.ExpectedGPUs, pin.Node)
 	}
 	return ""
 }
@@ -554,22 +625,30 @@ func (c *Controller) sweepSuccessors(ctx context.Context) {
 		if why == "" {
 			continue
 		}
-		if presence, ok := c.platform.(platform.NodePresence); ok && inc.CloudIdentity != nil {
-			exists, err := presence.NodeExists(ctx, inc.CloudIdentity.Node)
-			if err != nil {
-				continue
-			}
-			if !exists {
-				if err := c.endSuccessor(ctx, inc, types.SuccessorHandedOver,
-					why+"; the node it was to replace is gone, so the successor is kept"); err != nil {
-					c.log.Error("recording a kept successor failed", "incident", inc.ID, "err", err)
-				}
-				continue
-			}
+		c.sweepSuccessor(ctx, inc, why)
+	}
+}
+
+// sweepSuccessor releases one abandoned successor within a bounded time, so a
+// cloud API that does not answer cannot stall the reconcile pass.
+func (c *Controller) sweepSuccessor(ctx context.Context, inc *types.Incident, why string) {
+	ctx, cancel := context.WithTimeout(ctx, successorSweepTimeout)
+	defer cancel()
+	if presence, ok := c.platform.(platform.NodePresence); ok && inc.CloudIdentity != nil {
+		exists, err := presence.NodeExists(ctx, inc.CloudIdentity.Node)
+		if err != nil {
+			return
 		}
-		if err := c.releaseSuccessor(ctx, inc, why); err != nil {
-			c.log.Warn("removing an abandoned successor failed; retrying", "incident", inc.ID, "operation", inc.Successor.Operation, "err", err)
+		if !exists {
+			if err := c.endSuccessor(ctx, inc, types.SuccessorHandedOver,
+				why+"; the node it was to replace is gone, so the successor is kept"); err != nil {
+				c.log.Error("recording a kept successor failed", "incident", inc.ID, "err", err)
+			}
+			return
 		}
+	}
+	if err := c.releaseSuccessor(ctx, inc, why); err != nil {
+		c.log.Warn("removing an abandoned successor failed; retrying", "incident", inc.ID, "operation", inc.Successor.Operation, "err", err)
 	}
 }
 

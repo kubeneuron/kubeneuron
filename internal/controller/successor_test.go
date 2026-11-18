@@ -42,6 +42,13 @@ type successorPlatform struct {
 	successorAllocatable int64
 	successorWorkload    bool
 	releaseErr           error
+	// oldGPUs is what the replaced node advertises; dropAfterPlan sets it to
+	// 0 once the operation is planned. prepareErrs / nodeErrs: transient
+	// failures of the next requested-phase polls and successor node reads.
+	oldGPUs               int64
+	dropAfterPlan         bool
+	plans                 int
+	prepareErrs, nodeErrs int
 
 	created    time.Time
 	cordoned   map[string][]string
@@ -52,7 +59,7 @@ type successorPlatform struct {
 }
 
 func newSuccessorPlatform() *successorPlatform {
-	return &successorPlatform{nodeReady: true, successorAllocatable: 8, cordoned: map[string][]string{}}
+	return &successorPlatform{nodeReady: true, successorAllocatable: 8, oldGPUs: 8, cordoned: map[string][]string{}}
 }
 
 func (p *successorPlatform) CloudRecyclingConfigured() bool                 { return true }
@@ -69,8 +76,12 @@ func (p *successorPlatform) PrepareSuccessor(_ context.Context, pin cloud.NodeId
 	defer p.mu.Unlock()
 	switch s.Phase {
 	case "":
+		p.plans++
 		s.Phase, s.Pool = cloud.SuccessorPlanned, "train"
 		s.State = map[string]string{"members": "4"}
+		if p.dropAfterPlan {
+			p.oldGPUs = 0
+		}
 	case cloud.SuccessorPlanned:
 		p.requests++
 		if p.capacity {
@@ -78,6 +89,10 @@ func (p *successorPlatform) PrepareSuccessor(_ context.Context, pin cloud.NodeId
 		}
 		s.Phase = cloud.SuccessorRequested
 	case cloud.SuccessorRequested:
+		if p.prepareErrs > 0 {
+			p.prepareErrs--
+			return s, errors.New("the cloud API timed out")
+		}
 		if p.ambiguous {
 			return s, fmt.Errorf("two new instances in pool train: %w", cloud.ErrNeedsOperator)
 		}
@@ -95,6 +110,10 @@ func (p *successorPlatform) SuccessorNode(_ context.Context, providerID string) 
 	defer p.mu.Unlock()
 	if providerID == "" || p.created.IsZero() {
 		return platform.SuccessorNode{}, nil
+	}
+	if p.nodeErrs > 0 {
+		p.nodeErrs--
+		return platform.SuccessorNode{}, errors.New("the node list timed out")
 	}
 	return platform.SuccessorNode{Found: true, Name: successorNodeName, UID: "uid-" + successorNodeName,
 		CreatedAt: p.created, Ready: p.nodeReady, Allocatable: map[string]int64{topology.ResourceWholeGPU: p.successorAllocatable}}, nil
@@ -128,7 +147,10 @@ func (p *successorPlatform) ReplacePinnedNode(_ context.Context, pin cloud.NodeI
 }
 
 func (p *successorPlatform) NodeResources(_ context.Context, node string) (topology.Resources, bool, error) {
-	return topology.Resources{Capacity: map[string]int64{topology.ResourceWholeGPU: 8}, Allocatable: map[string]int64{topology.ResourceWholeGPU: 8}}, true, nil
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := p.oldGPUs
+	return topology.Resources{Capacity: map[string]int64{topology.ResourceWholeGPU: n}, Allocatable: map[string]int64{topology.ResourceWholeGPU: n}}, true, nil
 }
 
 func (p *successorPlatform) NodeExists(context.Context, string) (bool, error) { return true, nil }
@@ -528,5 +550,76 @@ func TestAddFirstDryRunCreatesNothingAndSaysWhatWouldBeAdded(t *testing.T) {
 	}
 	if !auditHas(entries, "replace", "DRY-RUN") {
 		t.Fatalf("the replacement was not simulated%s", dump(entries))
+	}
+}
+
+func TestAddFirstRetriesTransientCloudErrors(t *testing.T) {
+	p := newSuccessorPlatform()
+	p.prepareErrs, p.nodeErrs = 2, 1
+	c, st, _ := successorFixture(t, recoverymode.Automatic, p, "")
+	registerSuccessorAgent(t, st, 8)
+	id := openOn(t, c, "n1")
+	inc := waitSettled(t, c, st, id, func(inc *types.Incident) bool { return inc.State.Halted() || inc.State == types.StateVerifying })
+	entries := trail(t, st, id)
+	requests, _, replaced, plain, _ := p.counts()
+	if requests != 1 || replaced != 1 || plain != 0 || inc.Successor.Outcome != types.SuccessorReplaced {
+		t.Fatalf("requests=%d replaced=%d plain=%d successor=%+v, want one request and a replacement after the retries%s",
+			requests, replaced, plain, inc.Successor, dump(entries))
+	}
+	if !auditHas(entries, "successor-retrying", "timed out") {
+		t.Fatalf("the retries are not recorded%s", dump(entries))
+	}
+}
+
+func TestAddFirstComparesAgainstTheNodeAsPlanned(t *testing.T) {
+	// The device plugin stops counting the lost devices after the plan.
+	p := newSuccessorPlatform()
+	p.dropAfterPlan = true
+	c, st, _ := successorFixture(t, recoverymode.Automatic, p, "")
+	registerSuccessorAgent(t, st, 8)
+	id := openOn(t, c, "n1")
+	inc := waitSettled(t, c, st, id, func(inc *types.Incident) bool { return inc.State.Halted() || inc.State == types.StateVerifying })
+	if _, _, replaced, _, _ := p.counts(); replaced != 1 || inc.Successor.Expected[topology.ResourceWholeGPU] != 8 {
+		t.Fatalf("replaced=%d successor=%+v, want a replacement checked against the 8 GPUs planned%s", replaced, inc.Successor, dump(trail(t, st, id)))
+	}
+}
+
+func TestAddFirstTakesTheAgentCountWhenTheNodeAdvertisesNone(t *testing.T) {
+	p := newSuccessorPlatform()
+	p.oldGPUs = 0
+	p.successorAllocatable = 4
+	c, st, _ := successorFixture(t, recoverymode.Automatic, p, "")
+	old := &types.Node{Name: "n1", AgentLastSeen: time.Now()}
+	for i := range 8 {
+		old.GPUs = append(old.GPUs, types.GPUInfo{UUID: fmt.Sprintf("GPU-old-%d", i), Index: i})
+	}
+	if err := st.UpsertAgentRegistration(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	registerSuccessorAgent(t, st, 8)
+	id := openOn(t, c, "n1")
+	inc := waitSettled(t, c, st, id, func(inc *types.Incident) bool {
+		return inc.Successor != nil && inc.Successor.Reason != "" || inc.State.Halted()
+	})
+	if s := inc.Successor; s.Expected[topology.ResourceWholeGPU] != 8 || s.ExpectedGPUs != 8 || !strings.Contains(s.Reason, "fewer than the 8") {
+		t.Fatalf("successor = %+v, want 8 GPUs expected from the agent and a 4-GPU successor refused%s", s, dump(trail(t, st, id)))
+	}
+	if p.cordonedNode("n1") {
+		t.Fatal("the node was cordoned for a smaller successor")
+	}
+}
+
+func TestAddFirstHoldsWithNothingToCompareAgainst(t *testing.T) {
+	p := newSuccessorPlatform()
+	p.oldGPUs = 0
+	c, st, _ := successorFixture(t, recoverymode.Automatic, p, "")
+	id := openOn(t, c, "n1")
+	inc := step(t, c, st, id, 20)
+	entries := trail(t, st, id)
+	if inc.State != types.StateEvaluating || inc.Successor != nil || p.plans != 0 || p.requests != 0 {
+		t.Fatalf("state=%s successor=%+v plans=%d requests=%d, want held before any plan%s", inc.State, inc.Successor, p.plans, p.requests, dump(entries))
+	}
+	if !auditHas(entries, "recovery-unavailable", "advertises no accelerator resources") {
+		t.Fatalf("the hold does not say why%s", dump(entries))
 	}
 }
