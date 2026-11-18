@@ -848,7 +848,7 @@ func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snaps
 	privileged := true
 	toolingArgs, toolingEnv, toolingMounts, toolingVolumes := agentToolingWiring(installation.Spec.Agent)
 	toolingArgs = append(toolingArgs, agentAdapterArgs(installation.Spec.Agent.Adapters)...)
-	if installation.Labels["kubeneuron.io/policy-pack"] == "bare-metal-alpha" {
+	if installation.Spec.Safety.NodeLevelActions {
 		toolingArgs = append(toolingArgs, "--enable-node-level-actions")
 	}
 	agentNodes := copyStringMap(installation.Spec.Agent.NodeSelector)

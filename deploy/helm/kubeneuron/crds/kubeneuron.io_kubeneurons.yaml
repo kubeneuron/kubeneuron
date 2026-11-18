@@ -1639,6 +1639,12 @@ spec:
                     format: int32
                     minimum: 1
                     type: integer
+                  nodeLevelActions:
+                    description: |-
+                      NodeLevelActions enables agent recovery actions on this installation.
+                      Alpha, not validated on real hardware. Defaults to false.
+                      Existing destructive-action and approval checks still apply.
+                    type: boolean
                   quiesce:
                     description: |-
                       Quiesce tunes how the vendor's own components are stood down before a

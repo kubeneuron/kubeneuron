@@ -559,6 +559,7 @@ create_pack() {
 # are the design. See config/policies/playbooks.yaml for the reasoning per
 # ladder and config/policies/policies.yaml for the reasoning per class.
 root=$(kubectl get kubeneuron "$NAME" --ignore-not-found -o name)
+node_level_actions=false
 pack_label=""
 if [[ -n $root ]]; then
   selected=$(kubectl get "$root" -o jsonpath='{.metadata.labels.kubeneuron\.io/policy-pack}')
@@ -579,6 +580,7 @@ else
     create_pack "$work/cloud-pack.yaml" cloud
     say "Cloud recovery supports observation and dry-run. Live replacement requires a configured provider with add-first support."
   else
+    node_level_actions=true
     pack_label="  labels: {kubeneuron.io/policy-pack: bare-metal-alpha}"
     say "Node-level recovery: Alpha, not validated on real hardware."
     cat > "$work/bare-metal-pack.yaml" <<EOF
@@ -1004,6 +1006,7 @@ $agent_profile_yaml
       - operator: Exists
 $auth_block
   safety:
+    nodeLevelActions: $node_level_actions
     executionMode: DryRun
   notifications:
     operatorAPIToken:

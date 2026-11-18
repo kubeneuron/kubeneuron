@@ -373,6 +373,11 @@ type HostToolingSpec struct {
 // SafetySpec holds execution limits. ExecutionMode defaults to DryRun in the
 // operator, even when omitted from the CR.
 type SafetySpec struct {
+	// NodeLevelActions enables agent recovery actions on this installation.
+	// Alpha, not validated on real hardware. Defaults to false.
+	// Existing destructive-action and approval checks still apply.
+	NodeLevelActions bool `json:"nodeLevelActions,omitempty"`
+
 	// +kubebuilder:default=DryRun
 	ExecutionMode ExecutionMode `json:"executionMode,omitempty"`
 	// +kubebuilder:validation:Minimum=1

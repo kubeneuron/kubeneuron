@@ -152,7 +152,7 @@ func TestAutomaticPolicyChecksEscalatedActions(t *testing.T) {
 		"fallback": {Name: "fallback", Steps: []playbook.Step{{Action: "platform.replace_node", Approval: "required"}}},
 	}
 	installation := testKubeNeuron()
-	installation.Labels = map[string]string{"kubeneuron.io/policy-pack": "bare-metal-alpha"}
+	installation.Spec.Safety.NodeLevelActions = true
 	if _, err := compilePolicies(installation, policies, books); err != nil {
 		t.Fatalf("cloud replacement escalation: %v", err)
 	}

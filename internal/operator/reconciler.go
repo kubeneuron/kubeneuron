@@ -424,7 +424,7 @@ func managedObjectReady(installation *kubeneuronv1alpha1.KubeNeuron, object clie
 func (r *KubeNeuronReconciler) updateStatus(ctx context.Context, installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot, validationErr error, runtimeReady bool, runtimeMessage string, observability ...observabilityCondition) error {
 	before := installation.DeepCopy()
 	installation.Status.ObservedGeneration = installation.Generation
-	r.setInventoryConditions(ctx, installation, installation.Labels["kubeneuron.io/policy-pack"] == "bare-metal-alpha")
+	r.setInventoryConditions(ctx, installation, installation.Spec.Safety.NodeLevelActions)
 	meta.SetStatusCondition(&installation.Status.Conditions, cloudRecoveryCondition(installation))
 	if validationErr != nil {
 		meta.SetStatusCondition(&installation.Status.Conditions, metav1.Condition{
