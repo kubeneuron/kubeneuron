@@ -72,12 +72,12 @@ func (p *Platform) TrainingWorkers(ctx context.Context, node string) ([]types.Tr
 		if pod.Spec.NodeName != node || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed || !podUsesGPU(pod) {
 			continue
 		}
-		chain, _, reason := p.trainingOwner(ctx, pod)
+		chain, owner, reason := p.trainingOwner(ctx, pod)
 		owners := make([]types.TrainingOwner, 0, len(chain))
 		for _, ref := range chain {
 			owners = append(owners, types.TrainingOwner{APIVersion: ref.APIVersion, Kind: ref.Kind, Name: ref.Name, UID: string(ref.UID)})
 		}
-		workers = append(workers, types.TrainingWorker{Namespace: pod.Namespace, Pod: pod.Name, PodUID: string(pod.UID), Owners: owners, OwnerUnknownReason: reason})
+		workers = append(workers, types.TrainingWorker{Namespace: pod.Namespace, Pod: pod.Name, PodUID: string(pod.UID), Owners: owners, ControllerState: trainingControllerState(owner), OwnerUnknownReason: reason})
 	}
 	sort.Slice(workers, func(i, j int) bool {
 		if workers[i].Namespace != workers[j].Namespace {
@@ -86,4 +86,43 @@ func (p *Platform) TrainingWorkers(ctx context.Context, node string) ([]types.Tr
 		return workers[i].Pod < workers[j].Pod
 	})
 	return workers, nil
+}
+
+// trainingControllerState exposes only status values defined by the known
+// controller. A running controller does not establish application progress.
+func trainingControllerState(owner *unstructured.Unstructured) string {
+	if owner == nil {
+		return "Unknown"
+	}
+	if owner.GetKind() == "RayJob" {
+		status, _, _ := unstructured.NestedString(owner.Object, "status", "jobStatus")
+		switch status {
+		case "PENDING", "RUNNING", "STOPPED", "SUCCEEDED", "FAILED":
+			return status
+		}
+		return "Unknown"
+	}
+	conditions, _, _ := unstructured.NestedSlice(owner.Object, "status", "conditions")
+	active := map[string]bool{}
+	for _, raw := range conditions {
+		condition, ok := raw.(map[string]any)
+		if !ok || condition["status"] != "True" {
+			continue
+		}
+		if typ, ok := condition["type"].(string); ok {
+			active[typ] = true
+		}
+	}
+	for _, state := range []string{"Failed", "Complete", "Completed", "Suspended", "StartupPolicyCompleted"} {
+		if active[state] {
+			return state
+		}
+	}
+	if owner.GetKind() == "Job" {
+		n, _, _ := unstructured.NestedInt64(owner.Object, "status", "active")
+		if n > 0 {
+			return "Active"
+		}
+	}
+	return "Unknown"
 }

@@ -76,3 +76,20 @@ func TestTrainingWorkersIncludesUnmanagedAcceleratorRequests(t *testing.T) {
 		t.Fatalf("workers=%+v err=%v", workers, err)
 	}
 }
+
+func TestTrainingControllerState(t *testing.T) {
+	job := unstructuredObject(batchJobs, "Job", "training", "job", nil)
+	job.Object["status"] = map[string]any{"active": int64(1)}
+	if got := trainingControllerState(job); got != "Active" {
+		t.Fatal(got)
+	}
+	job.Object["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Failed", "status": "False"}}}
+	if got := trainingControllerState(job); got != "Unknown" {
+		t.Fatal(got)
+	}
+	ray := unstructuredObject(rayJobs, "RayJob", "training", "ray", nil)
+	ray.Object["status"] = map[string]any{"jobStatus": "RUNNING"}
+	if got := trainingControllerState(ray); got != "RUNNING" {
+		t.Fatal(got)
+	}
+}

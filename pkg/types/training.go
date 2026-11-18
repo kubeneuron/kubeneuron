@@ -12,6 +12,7 @@ type TrainingOwner struct {
 
 // TrainingWorker records the pod even when its owning job cannot be verified.
 type TrainingWorker struct {
+	ControllerState    string          `json:"controllerState"`
 	Namespace          string          `json:"namespace"`
 	Pod                string          `json:"pod"`
 	PodUID             string          `json:"podUID"`
