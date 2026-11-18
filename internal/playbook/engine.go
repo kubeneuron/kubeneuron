@@ -29,6 +29,8 @@ type Policy struct {
 	ReplacementStrategy recoverymode.Strategy
 	SuccessorTimeout    time.Duration
 	RecycleEnabled      bool
+	// InterruptionLead: see config.Interruption.
+	InterruptionLead time.Duration
 }
 
 // Engine selects playbooks for signals and yields the next step for an

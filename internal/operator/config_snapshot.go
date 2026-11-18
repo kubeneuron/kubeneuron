@@ -22,6 +22,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
+	"github.com/kubeneuron/kubeneuron/internal/interruption"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
@@ -1012,18 +1013,23 @@ func compilePolicies(
 		if err != nil {
 			return nil, fmt.Errorf("policy %q: %w", policy.Name, err)
 		}
+		lead, err := compileInterruption(policy.Spec.Interruption)
+		if err != nil {
+			return nil, fmt.Errorf("policy %q: %w", policy.Name, err)
+		}
 		result = append(result, config.Policy{
 			Name: policy.Name,
 			Match: config.Match{
 				Class:  types.ProblemClass(policy.Spec.Match.Class),
 				Vendor: types.AcceleratorVendor(policy.Spec.Match.Vendor),
 			},
-			Playbook:    policy.Spec.PlaybookRef,
-			Params:      copyStringMap(policy.Spec.Parameters),
-			Mode:        mode,
-			Automatic:   automatic,
-			Replacement: replacement,
-			Recycle:     config.Recycle{Enabled: policy.Spec.Recycle != nil && policy.Spec.Recycle.Enabled},
+			Playbook:     policy.Spec.PlaybookRef,
+			Params:       copyStringMap(policy.Spec.Parameters),
+			Mode:         mode,
+			Automatic:    automatic,
+			Replacement:  replacement,
+			Recycle:      config.Recycle{Enabled: policy.Spec.Recycle != nil && policy.Spec.Recycle.Enabled},
+			Interruption: lead,
 		})
 	}
 	if len(result) == 0 {
@@ -1458,6 +1464,21 @@ func compileReplacement(spec *kubeneuronv1alpha1.ReplacementSpec) (config.Replac
 	}
 	out.SuccessorTimeout = d
 	return out, nil
+}
+
+// compileInterruption maps the CRD interruption timing to the runtime one.
+func compileInterruption(spec *kubeneuronv1alpha1.InterruptionSpec) (config.Interruption, error) {
+	if spec == nil || spec.Lead == "" {
+		return config.Interruption{}, nil
+	}
+	d, err := time.ParseDuration(spec.Lead)
+	if err != nil {
+		return config.Interruption{}, fmt.Errorf("interruption.lead: %w", err)
+	}
+	if err := interruption.ValidateLead(d); err != nil {
+		return config.Interruption{}, err
+	}
+	return config.Interruption{Lead: d}, nil
 }
 
 // compileStrategy maps the CRD spelling to the runtime strategy.

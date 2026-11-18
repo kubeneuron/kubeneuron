@@ -17,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
+	"github.com/kubeneuron/kubeneuron/internal/interruption"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -263,6 +264,15 @@ type Policy struct {
 	// optional restart through the cloud API may be tried first.
 	Replacement Replacement `yaml:"replacement,omitempty"`
 	Recycle     Recycle     `yaml:"recycle,omitempty"`
+	// Interruption applies to a cloud-interruption policy only.
+	Interruption Interruption `yaml:"interruption,omitempty"`
+}
+
+// Interruption is how a cloud-interruption policy times its steps.
+type Interruption struct {
+	// Lead is how long before the cloud's deadline the steps start; zero is
+	// the default (interruption.DefaultLead).
+	Lead time.Duration `yaml:"lead,omitempty"`
 }
 
 // Replacement is a policy's replacement strategy: add-first (default) or
@@ -411,6 +421,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: policy %d (class %s): %w", i, p.Match.Class, err)
 		}
 		if err := recoverymode.Validate(p.Mode, p.Automatic); err != nil {
+			return fmt.Errorf("config: policy %d (class %s): %w", i, p.Match.Class, err)
+		}
+		if err := interruption.ValidateLead(p.Interruption.Lead); err != nil {
 			return fmt.Errorf("config: policy %d (class %s): %w", i, p.Match.Class, err)
 		}
 		if p.Mode == recoverymode.Automatic && strings.TrimSpace(p.Name) == "" {

@@ -89,6 +89,7 @@ spec:
                       - VerifyGPUHealth
                       - VerifyNodeHealth
                       - OpenTicket
+                      - CheckpointWarning
                       type: string
                     approval:
                       description: ApprovalRequirement controls whether a step requires

@@ -188,6 +188,10 @@ const (
 	ClassDiagFailure     ProblemClass = "diag-failure"      // dcgmi diag failed
 	ClassAgentDown       ProblemClass = "agent-down"        // kubeneuron-agent heartbeat stale
 	ClassExporterDown    ProblemClass = "exporter-down"     // GPU metrics exporter stopped reporting
+	// ClassCloudInterruption: the cloud announced it will take or disturb the
+	// node (spot reclaim, rebalance hint, maintenance). It is not a fault of
+	// the node and never enters a recovery ladder.
+	ClassCloudInterruption ProblemClass = "cloud-interruption"
 )
 
 // Severity of a signal.
@@ -206,6 +210,7 @@ const (
 	SourceAgentEvent   SignalSource = "agent-event"  // fast path: agent kmsg/NVML watcher
 	SourceAlertmanager SignalSource = "alertmanager" // slow path: vmalert -> Alertmanager webhook
 	SourceManual       SignalSource = "manual"       // operator-triggered via API/CLI
+	SourceCloudNotice  SignalSource = "cloud-notice" // an interruption the cloud announced
 )
 
 // Signal is a normalized observation about a target. Both Alertmanager

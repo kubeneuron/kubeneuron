@@ -136,7 +136,7 @@ const (
 
 // PlaybookAction is deliberately closed. Arbitrary commands must never be
 // admitted through a configuration CRD.
-// +kubebuilder:validation:Enum=Observe;Cordon;Drain;Uncordon;EvictGPUWorkload;IdleCheck;WaitIdle;QuiesceAcceleratorStack;RestoreAcceleratorStack;GPUReset;CollectBundle;Reboot;RecycleNode;ReplaceNode;RunDiag;VerifyGPUHealth;VerifyNodeHealth;OpenTicket
+// +kubebuilder:validation:Enum=Observe;Cordon;Drain;Uncordon;EvictGPUWorkload;IdleCheck;WaitIdle;QuiesceAcceleratorStack;RestoreAcceleratorStack;GPUReset;CollectBundle;Reboot;RecycleNode;ReplaceNode;RunDiag;VerifyGPUHealth;VerifyNodeHealth;OpenTicket;CheckpointWarning
 type PlaybookAction string
 
 const (
@@ -171,6 +171,11 @@ const (
 	ActionVerifyGPUHealth  PlaybookAction = "VerifyGPUHealth"
 	ActionVerifyNodeHealth PlaybookAction = "VerifyNodeHealth"
 	ActionOpenTicket       PlaybookAction = "OpenTicket"
+	// ActionCheckpointWarning asks the workloads on a node the cloud announced
+	// it will take to checkpoint before the cloud's deadline. It changes
+	// nothing in the cluster but the request annotations, and is allowed only
+	// in a cloud-interruption playbook.
+	ActionCheckpointWarning PlaybookAction = "CheckpointWarning"
 )
 
 // ApprovalRequirement controls whether a step requires an operator decision.
@@ -1216,6 +1221,21 @@ type GPURemediationPolicySpec struct {
 	// add-first guarantee does not cover it.
 	// +optional
 	Recycle *RecycleSpec `json:"recycle,omitempty"`
+	// Interruption times the steps of a policy for class cloud-interruption.
+	// +optional
+	Interruption *InterruptionSpec `json:"interruption,omitempty"`
+}
+
+// InterruptionSpec times a cloud-interruption policy.
+// +kubebuilder:validation:XValidation:rule="!has(self.lead) || (duration(self.lead) >= duration('1m') && duration(self.lead) <= duration('60m'))",message="lead must be between 1m and 60m"
+type InterruptionSpec struct {
+	// Lead is how long before the deadline the cloud announced the checkpoint
+	// warning and the cordon start. A notice further away only opens the
+	// incident and notifies.
+	// +kubebuilder:default="10m"
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$`
+	// +optional
+	Lead string `json:"lead,omitempty"`
 }
 
 // ReplacementSpec selects the replacement strategy.

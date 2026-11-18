@@ -166,6 +166,22 @@ spec:
                 - message: maxConcurrentNodesPerPool must not exceed maxConcurrentNodes
                   rule: '!has(self.maxConcurrentNodesPerPool) || self.maxConcurrentNodesPerPool
                     <= self.maxConcurrentNodes'
+              interruption:
+                description: Interruption times the steps of a policy for class cloud-interruption.
+                properties:
+                  lead:
+                    default: 10m
+                    description: |-
+                      Lead is how long before the deadline the cloud announced the checkpoint
+                      warning and the cordon start. A notice further away only opens the
+                      incident and notifies.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: lead must be between 1m and 60m
+                  rule: '!has(self.lead) || (duration(self.lead) >= duration(''1m'')
+                    && duration(self.lead) <= duration(''60m''))'
               kubeNeuronRef:
                 minLength: 1
                 type: string

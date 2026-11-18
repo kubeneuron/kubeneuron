@@ -176,6 +176,7 @@ var definitions = []Definition{
 	{PlaybookAction: kubeneuronv1alpha1.ActionVerifyGPUHealth, Wire: "verify.gpu_health", Kind: KindVerify, Op: "gpu_health", NodeLevelAccess: NodeLevelNotRequired, Scope: ScopeGPU},
 	{PlaybookAction: kubeneuronv1alpha1.ActionVerifyNodeHealth, Wire: "verify.node_health", Kind: KindVerify, Op: "node_health", NodeLevelAccess: NodeLevelNotRequired, Scope: ScopeNode},
 	{PlaybookAction: kubeneuronv1alpha1.ActionOpenTicket, Wire: "notify.ticket", Kind: KindNotify, Op: "ticket", NodeLevelAccess: NodeLevelNotRequired, Scope: ScopeNode},
+	{PlaybookAction: kubeneuronv1alpha1.ActionCheckpointWarning, Wire: "platform.checkpoint_warning", Kind: KindPlatform, Op: "checkpoint_warning", NodeLevelAccess: NodeLevelNotRequired, Scope: ScopeNode},
 
 	// Runtime-only actions: reachable from a hand-authored playbook YAML but not
 	// from the closed CRD enum, so they carry no PlaybookAction spelling. Their

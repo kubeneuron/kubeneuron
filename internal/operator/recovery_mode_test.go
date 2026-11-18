@@ -164,3 +164,22 @@ func TestAutomaticPolicyChecksEscalatedActions(t *testing.T) {
 		}
 	}
 }
+
+func TestCompileInterruptionLead(t *testing.T) {
+	policies, _ := testPolicyFixture()
+	books := map[string]*playbook.Playbook{"gpu-reset": {Name: "gpu-reset"}}
+	compiled, err := compilePolicies(testKubeNeuron(), policies, books)
+	if err != nil || compiled[0].Interruption.Lead != 0 {
+		t.Fatalf("default = %+v %v, want the default lead", compiled[0].Interruption, err)
+	}
+	policies[0].Spec.Interruption = &kubeneuronv1alpha1.InterruptionSpec{Lead: "15m"}
+	if compiled, err = compilePolicies(testKubeNeuron(), policies, books); err != nil || compiled[0].Interruption.Lead != 15*time.Minute {
+		t.Fatalf("explicit = %+v %v", compiled[0].Interruption, err)
+	}
+	for _, lead := range []string{"30s", "2h", "soon"} {
+		policies[0].Spec.Interruption.Lead = lead
+		if _, err := compilePolicies(testKubeNeuron(), policies, books); err == nil {
+			t.Errorf("lead %s compiled", lead)
+		}
+	}
+}
