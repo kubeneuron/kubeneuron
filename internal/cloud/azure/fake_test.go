@@ -48,15 +48,15 @@ type fakeAKS struct {
 	machines    []machine
 	next        int
 
-	growErr        error
-	growsMachine   bool
+	growErr      error
+	growsMachine bool
 	// hold leaves the next growth scaling, with no machine, until Deliver;
 	// lose applies the next growth and fails its answer.
 	hold, held, lose bool
 	requests         int
 	deleteErr        error
-	shrinkOnDelete bool
-	permissions    []permission
+	shrinkOnDelete   bool
+	permissions      []permission
 
 	calls []string
 }
