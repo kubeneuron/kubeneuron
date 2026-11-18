@@ -4,6 +4,7 @@ package aws
 
 import (
 	"errors"
+	"maps"
 	"testing"
 
 	sdk "github.com/aws/aws-sdk-go-v2/aws"
@@ -28,6 +29,14 @@ func TestSuccessorCandidate(t *testing.T) {
 			g := at.AutoScalingGroup{AutoScalingGroupName: sdk.String(s.Pool), AutoScalingGroupARN: sdk.String("asg-1"), DesiredCapacity: sdk.Int32(3), AvailabilityZones: []string{"zone-a"}}
 			for _, id := range tc.ids {
 				g.Instances = append(g.Instances, at.Instance{InstanceId: sdk.String(id), AvailabilityZone: sdk.String("zone-a"), LifecycleState: at.LifecycleStateInService})
+			}
+			if tc.want != "" {
+				damaged := s
+				damaged.State = maps.Clone(s.State)
+				damaged.State["members"] += ",i-old"
+				if _, err := successorCandidate(damaged, g); !errors.Is(err, cloud.ErrNeedsOperator) {
+					t.Fatalf("duplicate member in saved plan: %v", err)
+				}
 			}
 			got, err := successorCandidate(s, g)
 			if got != tc.want || (tc.want == "" && !errors.Is(err, cloud.ErrNeedsOperator)) || (tc.want != "" && err != nil) {

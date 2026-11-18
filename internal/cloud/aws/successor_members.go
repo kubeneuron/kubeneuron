@@ -22,9 +22,12 @@ func successorCandidate(s cloud.Successor, group at.AutoScalingGroup) (string, e
 	}
 	old := map[string]bool{}
 	for _, id := range strings.Split(s.State["members"], ",") {
+		if id == "" || old[id] {
+			return "", fmt.Errorf("%w: invalid saved ASG membership", cloud.ErrNeedsOperator)
+		}
 		old[id] = true
 	}
-	if old[""] || !old[s.Instance] || int64(len(old)) != before || int64(len(group.Instances)) != before+1 {
+	if !old[s.Instance] || int64(len(old)) != before || int64(len(group.Instances)) != before+1 {
 		return "", fmt.Errorf("%w: incomplete ASG membership", cloud.ErrNeedsOperator)
 	}
 	var candidate string
