@@ -78,6 +78,26 @@ func TestSoftwareRecordsComponents(t *testing.T) {
 	}
 }
 
+// GKE runs its own device plugin and driver installer, labelled k8s-app.
+func TestSoftwareRecognisesGKEComponents(t *testing.T) {
+	n := &Node{
+		Capacity:    map[string]int64{"nvidia.com/gpu": 1},
+		Allocatable: map[string]int64{"nvidia.com/gpu": 1},
+		Pods: []Pod{
+			{Labels: map[string]string{"k8s-app": "nvidia-gpu-device-plugin"}, Running: true, Ready: true},
+			{Labels: map[string]string{"k8s-app": "nvidia-driver-installer"}, Running: true, Ready: true},
+		},
+	}
+	got := Software(n)
+	if got.State != types.EvidenceOK || len(got.Components) != 2 {
+		t.Fatalf("GKE node: %+v", got)
+	}
+	n.Pods[0].Ready = false
+	if got := Software(n); got.State != types.EvidenceDegraded {
+		t.Fatalf("GKE device plugin not ready: %+v", got)
+	}
+}
+
 func TestNetworkStates(t *testing.T) {
 	for name, tc := range map[string]struct {
 		mutate func(*Node)

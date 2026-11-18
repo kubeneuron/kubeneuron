@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/kubeneuron/kubeneuron/internal/evidence"
 	"io"
 	"log/slog"
 	"net/http"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/detect"
+	"github.com/kubeneuron/kubeneuron/internal/evidence"
 	"github.com/kubeneuron/kubeneuron/internal/inventory"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/operations"

@@ -43,15 +43,17 @@ var acceleratorResources = []string{
 	"gpu.intel.com/",
 }
 
-// softwareComponents are the NVIDIA GPU Operator's component pods and the
-// standalone device plugins of the other vendors. Only the device plugin is
-// required: the driver and the toolkit may come with the node image, and the
-// others do not decide whether a pod can see the device.
+// softwareComponents are the NVIDIA GPU Operator's component pods, the
+// device plugin and driver installer GKE manages (k8s-app
+// nvidia-gpu-device-plugin and nvidia-driver-installer in kube-system), and
+// the standalone device plugins of the other vendors. Only the device plugin
+// is required: the driver and the toolkit may come with the node image, and
+// the others do not decide whether a pod can see the device.
 var softwareComponents = []Component{
-	{Name: "driver", Values: []string{"nvidia-driver-daemonset"}},
+	{Name: "driver", Values: []string{"nvidia-driver-daemonset", "nvidia-driver-installer"}},
 	{Name: "container-toolkit", Values: []string{"nvidia-container-toolkit-daemonset"}},
 	{Name: "device-plugin", Required: true, Values: []string{
-		"nvidia-device-plugin-daemonset", "nvidia-device-plugin", "nvidia-device-plugin-ds",
+		"nvidia-device-plugin-daemonset", "nvidia-device-plugin", "nvidia-device-plugin-ds", "nvidia-gpu-device-plugin",
 		"amdgpu-dp-ds", "amdgpu-device-plugin", "neuron-device-plugin-ds", "neuron-device-plugin",
 		"intel-gpu-plugin",
 	}},

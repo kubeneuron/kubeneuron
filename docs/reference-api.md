@@ -131,6 +131,18 @@ is `unknown`. Network is `present` when the resource is allocatable, `missing`
 when its capacity shows but none is allocatable or its plugin runs without
 it, and otherwise `unknown`: a node with neither may have no such network.
 
+A device plugin pod is recognised by its `app`, `name`, `k8s-app` or
+`app.kubernetes.io/name` label:
+
+| Cluster | Device plugin | Recognised label values |
+| --- | --- | --- |
+| EKS | NVIDIA device plugin (Helm chart or GPU Operator), AWS Neuron device plugin | `nvidia-device-plugin`, `nvidia-device-plugin-daemonset`; `neuron-device-plugin`, `neuron-device-plugin-ds` |
+| AKS | NVIDIA device plugin DaemonSet from the AKS GPU guide, GPU Operator, AMD GPU device plugin | `nvidia-device-plugin-ds`, `nvidia-device-plugin-daemonset`; `amdgpu-device-plugin`, `amdgpu-dp-ds` |
+| GKE | GKE-managed NVIDIA device plugin and driver installer in `kube-system`, or GPU Operator | `nvidia-gpu-device-plugin` (driver: `nvidia-driver-installer`); `nvidia-device-plugin-daemonset` |
+| Any | Intel GPU device plugin | `intel-gpu-plugin` |
+
+A node whose device plugin carries none of these values reads `unknown`.
+
 Evidence is shown in `kubeneuronctl incident show`, the panel and
 `kubeneuron_incident_evidence_total`, and never starts or authorises a step.
 A missing observation reads `unknown`, never healthy. An automatic policy

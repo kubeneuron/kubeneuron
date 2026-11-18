@@ -12,6 +12,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/evidence"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/internal/store/sqlite"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -191,6 +192,52 @@ func TestAutomaticReplacementNeedsTheFaultOnThisNode(t *testing.T) {
 			c.appendEvidenceRow(context.Background(), inc, map[string]string{"fault_location": string(data)})
 			if inc := step(t, c, st, id, 50); inc.State != types.StateAwaitingApproval || !strings.Contains(parkReason(t, st, id), "the fault location is "+string(loc)) {
 				t.Fatalf("state=%s audit=%s, want a park naming the location", inc.State, parkReason(t, st, id))
+			}
+		})
+	}
+}
+
+// An automatic add-first policy that parks on an unqualified pair or on a
+// fault not located on this node asks the pool for nothing: no billed
+// successor exists before a person decides.
+func TestParkedAutomaticAddFirstRequestsNoSuccessor(t *testing.T) {
+	for name, park := range map[string]func(t *testing.T, c *Controller, st *sqlite.Store, id string){
+		"unqualified pair": nil,
+		"shared fault": func(t *testing.T, c *Controller, st *sqlite.Store, id string) {
+			inc, err := st.GetIncident(context.Background(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, _ := json.Marshal(types.LocationEvidence{Location: types.LocationShared, Rule: "test rule"})
+			c.appendEvidenceRow(context.Background(), inc, map[string]string{"fault_location": string(data)})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newSuccessorPlatform()
+			c, st, _ := successorFixture(t, recoverymode.Automatic, p, "")
+			registerSuccessorAgent(t, st, 8)
+			if park == nil {
+				// A pool node the qualified profile does not select.
+				profile := c.runtimeConfig(context.Background()).AcceleratorProfiles[0]
+				profile.NodeSelector = map[string]string{"pool": "train", "profiled": "true"}
+				c.mutateRuntimeConfig(func(rc *RuntimeConfig) { rc.AcceleratorProfiles[0] = profile })
+			}
+			id := openOn(t, c, "n1")
+			if park != nil {
+				park(t, c, st, id)
+			}
+			inc := step(t, c, st, id, 50)
+			if inc.State != types.StateAwaitingApproval {
+				t.Fatalf("state=%s audit=%s, want a park", inc.State, parkReason(t, st, id))
+			}
+			// Let the reconciler run on while the incident waits.
+			step(t, c, st, id, 20)
+			requests, _, replaced, plain, drained := p.counts()
+			if requests != 0 || replaced != 0 || plain != 0 || drained != 0 {
+				t.Fatalf("requests=%d replaced=%d plain=%d drained=%d before a person decided", requests, replaced, plain, drained)
+			}
+			if s := mustIncident(t, st, id).Successor; s != nil && s.Phase != cloud.SuccessorPlanned {
+				t.Fatalf("successor %+v, want at most a plan that changes nothing", s)
 			}
 		})
 	}

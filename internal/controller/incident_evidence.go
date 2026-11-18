@@ -29,13 +29,16 @@ func (c *Controller) recordEvidence(ctx context.Context, opened *types.Incident)
 	defer cancel()
 	var node *evidence.Node
 	if reader, ok := c.platform.(nodeEvidenceReader); ok && opened.Target.Node != "" {
-		if n, err := reader.NodeEvidence(ctx, opened.Target.Node); err == nil {
-			node = n
+		n, err := reader.NodeEvidence(ctx, opened.Target.Node)
+		if err != nil {
+			// The evidence reads unknown; the reason is for the operator.
+			c.log.Warn("could not read the node for incident evidence", "incident", opened.ID, "node", opened.Target.Node, "err", err)
 		}
+		node = n
 	}
 	peers, err := c.evidencePeers(ctx, opened)
 	if err != nil {
-		c.log.Warn("could not read open incidents for the fault location", "incident", opened.ID)
+		c.log.Warn("could not read open incidents for the fault location", "incident", opened.ID, "err", err)
 	}
 	ev := evidence.Build(opened, node, peers, time.Now())
 	if err != nil {
@@ -52,6 +55,7 @@ func (c *Controller) recordEvidence(ctx context.Context, opened *types.Incident)
 		}
 		peer, err := c.store.GetIncident(ctx, id)
 		if err != nil {
+			c.log.Warn("could not regroup an incident by fault location", "incident", id, "group", ev.Location.Group, "err", err)
 			continue
 		}
 		if data, err := json.Marshal(ev.Location); err == nil {
@@ -73,7 +77,7 @@ func (c *Controller) appendEvidenceRow(ctx context.Context, inc *types.Incident,
 		IncidentID: inc.ID, Time: time.Now(), Actor: "system", Action: EvidenceAction,
 		FromState: inc.State, ToState: inc.State, Params: params, DryRun: inc.DryRun,
 	}); err != nil {
-		c.log.Warn("could not record incident evidence", "incident", inc.ID)
+		c.log.Warn("could not record incident evidence", "incident", inc.ID, "err", err)
 	}
 }
 

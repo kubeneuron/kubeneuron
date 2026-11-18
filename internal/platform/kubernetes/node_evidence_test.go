@@ -23,7 +23,7 @@ func TestNodeEvidenceReadsResourcesAndPods(t *testing.T) {
 		Allocatable: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("7"), "vpc.amazonaws.com/efa": resource.MustParse("4")},
 	}}
 	ready := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dp", Namespace: "gpu-operator", Labels: map[string]string{"app": "nvidia-device-plugin-daemonset"}},
-		Spec: corev1.PodSpec{NodeName: "worker"},
+		Spec:   corev1.PodSpec{NodeName: "worker"},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}
 	client := fake.NewSimpleClientset(node, ready)
 	p := &Platform{client: client}

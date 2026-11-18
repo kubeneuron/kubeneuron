@@ -302,6 +302,22 @@ which lets opted-in Pods be told and given a bounded deadline before a
   route) it approves unbound as before. The panel sends the digest only
   when it displayed one.
 
+## Unreleased: automatic replacement notes
+
+- **Automatic replacement needs qualified profiles.** After the upgrade an
+  `Automatic` policy replaces a node on its own only when the node's
+  accelerator runtime profile is listed in `automatic.qualifiedProfiles` and
+  the incident's fault location is `this-node`. An existing Automatic policy
+  has no such list, so its replacement steps wait for approval until you add
+  one; the earlier steps (cordon) still run as before, and the incident says
+  why it waits. Check the policy's `AutomaticReplacement` condition: `False`
+  with reason `NoQualifiedProfiles` means the list is empty. Listing a
+  profile is the operator's decision; KubeNeuron does not verify the
+  hardware or software behind it.
+- **No schema migration and no new permission.** The incident evidence is
+  an audit row; it reads the node and the pods on it with the access the
+  controller already has.
+
 ## Upgrade order
 
 Always: **CRDs → operator → controller/agent images.**
