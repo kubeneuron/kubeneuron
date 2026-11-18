@@ -4,6 +4,8 @@ package gcp
 
 import (
 	"errors"
+
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"strings"
 	"testing"
 )
@@ -52,6 +54,22 @@ func TestReplaceRefusesWithoutAChange(t *testing.T) {
 		f := autoscaled(2, testZone, "us-central1-b")
 		setup(f)
 		if err := testProvider(f).Replace(t.Context(), testInstance(0)); err == nil || len(f.calls) != 0 {
+			t.Fatalf("%s: %v, calls %q", name, err, f.calls)
+		}
+	}
+}
+
+// Remove-first is refused before the cordon exactly where Replace refuses it.
+func TestCheckRemoveFirst(t *testing.T) {
+	if err := testProvider(autoscaled(3)).CheckRemoveFirst(t.Context(), testInstance(1)); err != nil {
+		t.Fatalf("autoscaled pool: %v", err)
+	}
+	for name, f := range map[string]*fakeGKE{
+		"fixed":     newFakeGKE(3),
+		"autopilot": func() *fakeGKE { f := autoscaled(3); f.autopilot = true; return f }(),
+	} {
+		err := testProvider(f).CheckRemoveFirst(t.Context(), testInstance(1))
+		if !errors.Is(err, cloud.ErrRemoveFirstUnavailable) || len(f.calls) != 0 {
 			t.Fatalf("%s: %v, calls %q", name, err, f.calls)
 		}
 	}

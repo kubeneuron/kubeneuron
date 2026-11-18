@@ -40,6 +40,22 @@ func (p *Platform) AddFirstAvailable(ctx context.Context, pin cloud.NodeIdentity
 	return provider.CheckAddFirst(ctx, pin.InstanceID)
 }
 
+var _ platform.RemoveFirstChecker = (*Platform)(nil)
+
+// RemoveFirstAvailable asks a provider that implements
+// cloud.RemoveFirstChecker; any other provider allows remove-first wherever
+// it allows Replace.
+func (p *Platform) RemoveFirstAvailable(ctx context.Context, pin cloud.NodeIdentity) error {
+	checker, ok := p.recycler.(cloud.RemoveFirstChecker)
+	if !ok {
+		return nil
+	}
+	if err := pin.Validate(); err != nil {
+		return err
+	}
+	return checker.CheckRemoveFirst(ctx, pin.InstanceID)
+}
+
 func (p *Platform) PrepareSuccessor(ctx context.Context, pin cloud.NodeIdentity, s cloud.Successor) (cloud.Successor, error) {
 	if p.recycler == nil {
 		return s, fmt.Errorf("%w: no cloud provider is configured", cloud.ErrAddFirstUnavailable)

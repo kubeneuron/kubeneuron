@@ -47,7 +47,8 @@ API is `v1alpha1`.
   `spec.cloud.gcp` (project, location, cluster) replaces a GPU node on GKE
   Standard by deleting its instance from the node pool's managed instance
   group, a Compute Engine call GKE does not document for node pools.
-  Remove-first is available only on autoscaled pools, which keep their size.
+  Remove-first is available only on autoscaled pools, which keep their size;
+  on any other pool it is refused before the node is cordoned.
   A fixed-size pool is replaced only by adding first: add-first grows a
   fixed-size pool in one zone by one through GKE and deletes only named
   instances; a pool is never shrunk through GKE. A fixed-size pool across
@@ -67,7 +68,9 @@ API is `v1alpha1`.
   named sources (reason and time, never the message; a failed or
   truncated read counts as unknown). A replacement that finds no capacity
   for a successor before deleting anything fails as "replacement capacity
-  unavailable". AWS behaviour is unchanged.
+  unavailable". A provider can refuse remove-first for a node
+  (`cloud.RemoveFirstChecker`); the controller asks before the cordon and
+  holds the step with the reason. AWS behaviour is unchanged.
 
 - **Cloud recovery pack on first install.** New installations use cloud policies
   in DryRun. Node-level policies require `--policy-pack bare-metal-alpha`

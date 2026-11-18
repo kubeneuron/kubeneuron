@@ -14,6 +14,22 @@ import (
 // wrapping error says which.
 var ErrAddFirstUnavailable = errors.New("add-first replacement is not available for this node")
 
+// ErrRemoveFirstUnavailable is wrapped by a provider that cannot replace a
+// node by removing it first, with the reason.
+var ErrRemoveFirstUnavailable = errors.New("remove-first replacement is not available for this node")
+
+// RemoveFirstChecker is implemented by a provider whose pools may refuse a
+// remove-first replacement. The controller asks it before the node is
+// cordoned, so a refusal never leaves a drained node without a replacement.
+// A provider that does not implement it is taken to allow remove-first
+// wherever it allows Replace.
+type RemoveFirstChecker interface {
+	// CheckRemoveFirst is nil, or an error wrapping
+	// ErrRemoveFirstUnavailable with the reason. Any other error is a
+	// transient lookup failure.
+	CheckRemoveFirst(ctx context.Context, instanceID string) error
+}
+
 // ErrNeedsOperator marks a successor operation the provider will not settle on
 // its own: what the pool did cannot be tied to this operation, or undoing it
 // would remove something it did not create. Nothing more is changed

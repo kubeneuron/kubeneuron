@@ -184,6 +184,48 @@ func (c *Controller) addFirstAvailable(ctx context.Context, inc *types.Incident)
 	return err
 }
 
+// removeFirstHold is why a remove-first replacement must wait before the
+// node is disrupted, or "". The provider's answer is reused for a minute per
+// attempt, as for add-first.
+func (c *Controller) removeFirstHold(ctx context.Context, inc *types.Incident, step *playbook.Step) string {
+	plat, ok := c.platform.(platform.RemoveFirstChecker)
+	if !ok || inc.CloudIdentity == nil {
+		return ""
+	}
+	key := successorOperation(inc)
+	c.removeFirst.mu.Lock()
+	entry, cached := c.removeFirst.entries[key]
+	c.removeFirst.mu.Unlock()
+	err := entry.err
+	if !cached || time.Since(entry.at) >= addFirstCheckTTL {
+		err = plat.RemoveFirstAvailable(ctx, *inc.CloudIdentity)
+		c.removeFirst.mu.Lock()
+		if c.removeFirst.entries == nil {
+			c.removeFirst.entries = map[string]addFirstCheck{}
+		}
+		for k, e := range c.removeFirst.entries {
+			if time.Since(e.at) >= addFirstCheckTTL {
+				delete(c.removeFirst.entries, k)
+			}
+		}
+		c.removeFirst.entries[key] = addFirstCheck{at: time.Now(), err: err}
+		c.removeFirst.mu.Unlock()
+	}
+	if err == nil {
+		return ""
+	}
+	// Normally this answers before the cordon; a pool that changed since is
+	// refused at the replacement, which removes nothing.
+	suffix := "; the node is not cordoned or drained"
+	if step.Action == "platform.replace_node" {
+		suffix = "; nothing is removed"
+	}
+	if errors.Is(err, cloud.ErrRemoveFirstUnavailable) {
+		return "recovery unavailable: " + err.Error() + suffix
+	}
+	return "recovery unavailable: whether the node can be replaced by removing it first could not be read: " + err.Error() + suffix
+}
+
 // stepNeedsApproval is step.NeedsApproval, and also true for the step that
 // prepares a successor: the successor is a billed instance, so it is started
 // only under a person's approval or an automatic policy, within the policy's

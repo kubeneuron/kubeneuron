@@ -83,6 +83,8 @@ func (c *Controller) policyRecoveryPreflight(ctx context.Context, inc *types.Inc
 			if hold := c.addFirstHold(ctx, inc, step); hold != "" {
 				return hold, ""
 			}
+		} else if hold := c.removeFirstHold(ctx, inc, step); hold != "" {
+			return hold, ""
 		}
 	case "platform.recycle_node":
 		if !pol.RecycleEnabled {
@@ -98,6 +100,12 @@ func (c *Controller) policyRecoveryPreflight(ctx context.Context, inc *types.Inc
 			// policy names remove-first. Only a rung that replaces the node
 			// itself prepares a successor.
 			if hold := c.addFirstHold(ctx, inc, step); hold != "" {
+				return hold, ""
+			}
+		case path.replace:
+			// The same for remove-first: a provider that cannot replace this
+			// node by removing it first says so before the node is disrupted.
+			if hold := c.removeFirstHold(ctx, inc, step); hold != "" {
 				return hold, ""
 			}
 		case path.recycle && !path.replace && !pol.RecycleEnabled:

@@ -430,7 +430,11 @@ resolution, a new attempt — is released: a successor running only DaemonSet
 pods is removed; anything else, and any pool change the provider cannot
 attribute (`ErrNeedsOperator`), is handed to an operator and never changed
 again automatically. A provider without the contract keeps today's
-behaviour: `AddFirst` holds, `RemoveFirst` is unchanged.
+behaviour: `AddFirst` holds, `RemoveFirst` is unchanged. Its mirror,
+`cloud.RemoveFirstChecker`, is optional too: a provider whose pools may
+refuse remove-first (GKE, for a fixed-size pool or Autopilot) answers
+`CheckRemoveFirst` before the cordon, and the controller holds the step
+with the reason; nothing is cordoned or drained.
 
 ### 2.4c The fault envelope (`AgentEvent.Fault`)
 

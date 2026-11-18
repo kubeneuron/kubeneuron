@@ -59,6 +59,7 @@ type Controller struct {
 	// available again. Absent means not loaded yet. It keeps those rows
 	// exact without reading the trail on every tick.
 	addFirst         addFirstChecks
+	removeFirst      addFirstChecks
 	successorPoll    time.Duration // zero: defaultSuccessorPoll
 	policyAssessedMu sync.Mutex
 	policyAssessed   map[string]string

@@ -52,6 +52,9 @@ type successorPlatform struct {
 	plans                 int
 	prepareErrs, nodeErrs int
 
+	// removeFirstRefusal: RemoveFirstAvailable's answer.
+	removeFirstRefusal error
+
 	created    time.Time
 	cordoned   map[string][]string
 	drained    []string
@@ -71,6 +74,10 @@ func (p *successorPlatform) ReplaceNode(context.Context, string) error      { re
 
 func (p *successorPlatform) AddFirstAvailable(context.Context, cloud.NodeIdentity) error {
 	return p.unavailable
+}
+
+func (p *successorPlatform) RemoveFirstAvailable(context.Context, cloud.NodeIdentity) error {
+	return p.removeFirstRefusal
 }
 
 func (p *successorPlatform) PrepareSuccessor(_ context.Context, pin cloud.NodeIdentity, s cloud.Successor) (cloud.Successor, error) {
@@ -445,6 +452,26 @@ func TestRemoveFirstStillReplacesDirectly(t *testing.T) {
 	inc := waitSettled(t, c, st, id, func(inc *types.Incident) bool { return inc.State.Halted() || inc.State == types.StateVerifying })
 	if requests, _, replaced, plain, _ := p.counts(); requests != 0 || replaced != 0 || plain != 1 || inc.Successor != nil {
 		t.Fatalf("requests=%d replaced=%d plain=%d successor=%+v, want a direct remove-first replacement", requests, replaced, plain, inc.Successor)
+	}
+}
+
+// A provider that cannot replace the node remove-first says so before the
+// cordon: the node is never drained for a replacement that cannot run.
+func TestRemoveFirstRefusedHoldsBeforeTheCordon(t *testing.T) {
+	p := newSuccessorPlatform()
+	p.removeFirstRefusal = fmt.Errorf("%w: node pool gpu is fixed-size", cloud.ErrRemoveFirstUnavailable)
+	c, st, _ := successorFixture(t, recoverymode.Automatic, p, recoverymode.RemoveFirst)
+	id := openOn(t, c, "n1")
+	inc := step(t, c, st, id, 20)
+	entries := trail(t, st, id)
+	if inc.State != types.StateEvaluating || inc.StepIndex != 0 || p.cordonedNode("n1") {
+		t.Fatalf("state=%s step=%d cordoned=%v, want held before the cordon%s", inc.State, inc.StepIndex, p.cordonedNode("n1"), dump(entries))
+	}
+	if !auditHas(entries, "recovery-unavailable", "fixed-size") || !auditHas(entries, "recovery-unavailable", "not cordoned or drained") {
+		t.Fatalf("the hold does not carry the provider's reason%s", dump(entries))
+	}
+	if _, _, replaced, plain, drained := p.counts(); replaced != 0 || plain != 0 || drained != 0 {
+		t.Fatalf("replaced=%d plain=%d drained=%d, want nothing", replaced, plain, drained)
 	}
 }
 

@@ -741,6 +741,15 @@ type VerifiedNodeRecycler interface {
 // brought up in the node's pool before the node is drained, and the node is
 // removed only once the successor has taken over. Every mutation repeats the
 // guard against the pin, as GuardedNodeRecycler does.
+// RemoveFirstChecker answers, before a node is disrupted, whether its pool can
+// be replaced by removing the node first.
+type RemoveFirstChecker interface {
+	// RemoveFirstAvailable is nil when the pinned node can be replaced
+	// remove-first, or an error wrapping cloud.ErrRemoveFirstUnavailable with
+	// why.
+	RemoveFirstAvailable(ctx context.Context, pin cloud.NodeIdentity) error
+}
+
 type SuccessorNodeRecycler interface {
 	// AddFirstAvailable is nil when the pinned node's pool can prepare a
 	// successor, or an error wrapping cloud.ErrAddFirstUnavailable with why.

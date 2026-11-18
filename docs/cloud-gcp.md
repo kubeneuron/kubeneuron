@@ -41,8 +41,8 @@ GKE documents no restart of a single node, so on GKE:
   GKE does neither; KubeNeuron deletes the node's instance from the pool's
   instance group and the autoscaler decides whether a new one comes.
 - A **fixed-size pool** is replaced only by adding first: under
-  `RemoveFirst` the step is refused before anything is deleted, with the
-  reason "a fixed-size GKE node pool is replaced only by adding first".
+  `RemoveFirst` recovery is unavailable before the node is cordoned, with
+  the reason "a fixed-size GKE node pool is replaced only by adding first".
   Setting such a pool back to its size would take a second call after the
   delete, and a stop between the two would leave the pool a node short with
   nothing to show it. A **fixed-size pool across several zones** therefore

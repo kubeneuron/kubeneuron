@@ -8,6 +8,8 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
 // requestNamespace scopes the request IDs this provider derives: a resent
@@ -26,6 +28,28 @@ func requestID(parts ...string) string {
 // size would have to be set back in a second call, and nothing records that
 // the first one was made.
 var errFixedPoolRemoveFirst = errors.New("a fixed-size GKE node pool is replaced only by adding first")
+
+var _ cloud.RemoveFirstChecker = (*Provider)(nil)
+
+// CheckRemoveFirst refuses, before the node is cordoned, the pools Replace
+// refuses: a fixed-size pool, and Autopilot. A node already gone is no
+// refusal: Replace finds the replacement finished.
+func (p *Provider) CheckRemoveFirst(ctx context.Context, instanceID string) error {
+	t, c, err := p.resolve(ctx, instanceID)
+	if errors.Is(err, errGone) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if c.Autopilot {
+		return fmt.Errorf("%w: GKE Autopilot manages its nodes; KubeNeuron only observes them", cloud.ErrRemoveFirstUnavailable)
+	}
+	if !t.pool.Autoscaling {
+		return fmt.Errorf("%w: node pool %s: %v", cloud.ErrRemoveFirstUnavailable, t.pool.Name, errFixedPoolRemoveFirst)
+	}
+	return nil
+}
 
 // Replace deletes the node's instance from its node pool's managed instance
 // group, on a pool under the cluster autoscaler only: the autoscaler decides
