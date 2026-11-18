@@ -36,12 +36,46 @@ const (
 // future provider adds its own block rather than widening a shared top level:
 // nothing here is cloud-specific except which block the provider selects.
 // +kubebuilder:validation:XValidation:rule="self.provider != 'aws' || has(self.aws)",message="spec.cloud.aws is required when provider is aws"
+// +kubebuilder:validation:XValidation:rule="self.provider != 'azure' || has(self.azure)",message="spec.cloud.azure is required when provider is azure"
 type CloudSpec struct {
-	// Provider is the cloud backing the nodes. Only "aws" is implemented.
-	// +kubebuilder:validation:Enum=aws
+	// Provider is the cloud backing the nodes: "aws" (EC2 and EKS) or "azure"
+	// (AKS, experimental).
+	// +kubebuilder:validation:Enum=aws;azure
 	Provider string `json:"provider"`
 	// AWS carries the AWS-specific configuration. Required when provider is aws.
 	AWS *AWSCloudSpec `json:"aws,omitempty"`
+	// Azure carries the AKS configuration. Required when provider is azure.
+	Azure *AzureCloudSpec `json:"azure,omitempty"`
+}
+
+// AzureCloudSpec names the AKS cluster whose agent pools replace GPU nodes.
+// The controller authenticates with Azure Workload Identity only: no secret
+// is read from here or anywhere else.
+type AzureCloudSpec struct {
+	// SubscriptionID is the Azure subscription of the AKS cluster.
+	// +kubebuilder:validation:Pattern=`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`
+	SubscriptionID string `json:"subscriptionID"`
+	// ResourceGroup is the resource group of the AKS cluster resource (not
+	// its node resource group).
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=90
+	// +kubebuilder:validation:Pattern=`^[-\w\._\(\)]+$`
+	ResourceGroup string `json:"resourceGroup"`
+	// ClusterName is the name of the AKS cluster.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9]$|^[a-zA-Z0-9][-_a-zA-Z0-9]{0,61}[a-zA-Z0-9]$`
+	ClusterName string `json:"clusterName"`
+	// ClientID is the client ID of the managed identity federated with the
+	// controller ServiceAccount; it is set as that ServiceAccount's
+	// azure.workload.identity/client-id annotation. It is an identifier, not a
+	// credential.
+	// +kubebuilder:validation:Pattern=`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`
+	ClientID string `json:"clientID"`
+	// TenantID is the Microsoft Entra tenant of that identity, when it is not
+	// the cluster's own.
+	// +kubebuilder:validation:Pattern=`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`
+	TenantID string `json:"tenantID,omitempty"`
 }
 
 // AWSCloudSpec configures the AWS EC2 backing for node recycle/replace.

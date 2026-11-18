@@ -11,6 +11,20 @@ API is `v1alpha1`.
 
 ### Added
 
+- **Azure provider for AKS (experimental, not validated on AKS).**
+  `spec.cloud.provider: azure` with `spec.cloud.azure` (subscription,
+  resource group, cluster, the workload identity's client ID) replaces a
+  GPU node by deleting its machine through the AKS agent pool API. A
+  fixed-size pool is first grown by one, and the old machine is deleted
+  only once AKS lists the new one, so missing quota or capacity fails
+  before anything is deleted. An autoscaled pool keeps its size. Recycle
+  is not available on AKS. Recovery runs only on Ready nodes with no
+  recent AKS auto-repair event. Authentication is Azure Workload Identity
+  only. The operator grants the controller `list` on events in `default`
+  for this provider only, and itself now holds `list` there to grant it.
+  See [Replacing GPU nodes on AKS](docs/cloud-azure.md) for the minimal
+  role and what the step deletes.
+
 - **Cloud contract for a repair that cannot be turned off.** A provider can
   report `not-ready-only`: its cloud repairs only NotReady nodes, so
   recovery proceeds only while the node is Ready, before and after the

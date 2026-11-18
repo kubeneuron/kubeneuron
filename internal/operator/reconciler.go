@@ -186,6 +186,9 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.ensureClusterRoleBinding(ctx, &installation, controllerClusterRoleBinding(&installation)); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile controller ClusterRoleBinding: %w", err))
 	}
+	if err := r.ensureNodeEventsAccess(ctx, &installation); err != nil {
+		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile controller node-event access: %w", err))
+	}
 	if err := r.ensureService(ctx, &installation, controllerService(&installation)); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile controller Service: %w", err))
 	}
@@ -1300,6 +1303,11 @@ func cloudRecoveryCondition(installation *kubeneuronv1alpha1.KubeNeuron) metav1.
 		condition.Status = metav1.ConditionFalse
 		condition.Reason = "ProviderNotConfigured"
 		condition.Message = "cloud recovery unavailable: spec.cloud.provider is not configured; detection and incident reporting remain enabled"
+	}
+	if installation.Spec.Cloud != nil && installation.Spec.Cloud.Provider == "azure" {
+		// AKS auto-repair cannot be turned off; say which mode that leaves.
+		condition.Reason = "NotReadyOnlyRepair"
+		condition.Message = "experimental, not validated on AKS: AKS node auto-repair is always on and acts on NotReady nodes, so cloud recovery runs only on nodes that stay Ready with no recent auto-repair event; each node must still pass runtime eligibility checks"
 	}
 	if installation.Labels["kubeneuron.io/policy-pack"] == "cloud" {
 		condition.Message += ". The default cloud pack supports observation and dry-run; live replacement requires an eligible provider with add-first support."

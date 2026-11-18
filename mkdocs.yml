@@ -34,6 +34,7 @@ nav:
       - Data and privacy: data-and-privacy.md
       - Observability: observability.md
       - Operations guide: operations.md
+      - Replacing GPU nodes on AKS (experimental): cloud-azure.md
       - Alert runbooks: runbooks.md
       - Upgrades and rollback: upgrade.md
       - Troubleshooting: troubleshooting.md

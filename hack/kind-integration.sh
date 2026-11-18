@@ -772,6 +772,9 @@ assert_operator_rbac() {
 		assert_can_i yes "$verb" events default
 		assert_can_i no "$verb" events "$TARGET_NAMESPACE"
 	done
+	# list only where node events live, to grant it to an Azure controller.
+	assert_can_i yes list events default
+	assert_can_i no list events "$TARGET_NAMESPACE"
 	assert_can_i yes get namespaces
 	assert_can_i no list namespaces
 	assert_can_i no watch namespaces

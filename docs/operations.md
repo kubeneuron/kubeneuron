@@ -1067,6 +1067,11 @@ The operator accepts AWS playbooks containing recycle or replace. At runtime,
 EKS managed nodegroups support only terminate-first replacement. Stop/start
 recycle is disabled because the Auto Scaling group can replace a stopped node.
 
+On AKS (experimental, not validated against a live AKS cluster), replacement
+goes through the AKS agent pool API and recycle is not available; see
+[Replacing GPU nodes on AKS](cloud-azure.md) for setup, the minimal role and
+what the step deletes.
+
 Without a cloud provider configured at all, a `RecycleNode`/`ReplaceNode` step
 fails closed with a clear message rather than reporting a node recycled that was
 never touched.

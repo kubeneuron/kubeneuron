@@ -20,6 +20,81 @@
     "review": []
   },
   {
+    "module": "github.com/Azure/azure-sdk-for-go/sdk/azcore@v1.24.0",
+    "files": [
+      "LICENSE.txt"
+    ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "MIT"
+      ]
+    },
+    "review": []
+  },
+  {
+    "module": "github.com/Azure/azure-sdk-for-go/sdk/azidentity@v1.15.0",
+    "files": [
+      "LICENSE.txt"
+    ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "MIT"
+      ]
+    },
+    "review": []
+  },
+  {
+    "module": "github.com/Azure/azure-sdk-for-go/sdk/internal@v1.13.0",
+    "files": [
+      "LICENSE.txt"
+    ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "MIT"
+      ]
+    },
+    "review": []
+  },
+  {
+    "module": "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/containerservice/armcontainerservice/v9@v9.8.0",
+    "files": [
+      "LICENSE.txt"
+    ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "MIT"
+      ]
+    },
+    "review": []
+  },
+  {
+    "module": "github.com/AzureAD/microsoft-authentication-library-for-go@v1.10.1",
+    "files": [
+      "LICENSE"
+    ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "MIT"
+      ]
+    },
+    "review": []
+  },
+  {
     "module": "github.com/aws/aws-sdk-go-v2/config@v1.32.34",
     "files": [
       "LICENSE.txt"
@@ -734,6 +809,21 @@
     "review": []
   },
   {
+    "module": "github.com/golang-jwt/jwt/v5@v5.3.1",
+    "files": [
+      "LICENSE"
+    ],
+    "spdx": [
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "MIT"
+      ]
+    },
+    "review": []
+  },
+  {
     "module": "github.com/google/btree@v1.1.3",
     "files": [
       "LICENSE"
@@ -918,6 +1008,21 @@
     "review": []
   },
   {
+    "module": "github.com/kylelemons/godebug@v1.1.0",
+    "files": [
+      "LICENSE"
+    ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0"
+      ]
+    },
+    "review": []
+  },
+  {
     "module": "github.com/mattn/go-isatty@v0.0.20",
     "files": [
       "LICENSE"
@@ -988,6 +1093,21 @@
     "licenses": {
       "LICENSE": [
         "MIT"
+      ]
+    },
+    "review": []
+  },
+  {
+    "module": "github.com/pkg/browser@v0.0.0-20240102092130-5ac0b6a4141c",
+    "files": [
+      "LICENSE"
+    ],
+    "spdx": [
+      "BSD-2-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-2-Clause"
       ]
     },
     "review": []
@@ -1333,7 +1453,7 @@
     "review": []
   },
   {
-    "module": "go.yaml.in/yaml/v3@v3.0.5",
+    "module": "go.yaml.in/yaml/v3@v3.0.6",
     "files": [
       "LICENSE",
       "NOTICE"
@@ -1351,7 +1471,7 @@
     "review": []
   },
   {
-    "module": "golang.org/x/crypto@v0.57.0",
+    "module": "golang.org/x/crypto@v0.58.0",
     "files": [
       "LICENSE",
       "PATENTS"
@@ -1371,7 +1491,7 @@
     "review": []
   },
   {
-    "module": "golang.org/x/net@v0.60.0",
+    "module": "golang.org/x/net@v0.62.0",
     "files": [
       "LICENSE",
       "PATENTS"
@@ -1406,7 +1526,7 @@
     "review": []
   },
   {
-    "module": "golang.org/x/sync@v0.23.0",
+    "module": "golang.org/x/sync@v0.24.0",
     "files": [
       "LICENSE",
       "PATENTS"
@@ -1426,7 +1546,7 @@
     "review": []
   },
   {
-    "module": "golang.org/x/sys@v0.48.0",
+    "module": "golang.org/x/sys@v0.49.0",
     "files": [
       "LICENSE",
       "PATENTS"
@@ -1446,7 +1566,7 @@
     "review": []
   },
   {
-    "module": "golang.org/x/term@v0.46.0",
+    "module": "golang.org/x/term@v0.47.0",
     "files": [
       "LICENSE",
       "PATENTS"
@@ -1466,7 +1586,7 @@
     "review": []
   },
   {
-    "module": "golang.org/x/text@v0.42.0",
+    "module": "golang.org/x/text@v0.43.0",
     "files": [
       "LICENSE",
       "PATENTS"

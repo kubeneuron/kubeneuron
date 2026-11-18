@@ -2,6 +2,9 @@
 # namespace (client-go records an event in the involved object's namespace,
 # and a cluster-scoped object has none). Scoping the grant to exactly that
 # namespace keeps the operator unable to write events anywhere else.
+# list is there for one grant only: on Azure the operator gives the controller
+# list on node events, which live here, and RBAC lets it grant only what it
+# holds.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -18,3 +21,4 @@ rules:
     verbs:
       - create
       - patch
+      - list

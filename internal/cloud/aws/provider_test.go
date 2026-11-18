@@ -5,6 +5,7 @@ package aws
 import (
 	"testing"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/cloudtest"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
@@ -62,4 +63,15 @@ func TestAWSFactoryBuildsReplacementProvider(t *testing.T) {
 	if caps := p.Capabilities(); !caps.Replace || caps.ReinitializeInPlace {
 		t.Fatal("unexpected managed nodegroup capabilities")
 	}
+}
+
+func TestAWSConformance(t *testing.T) {
+	p, err := cloud.Build(t.Context(), providerName, cloud.Config{Region: "us-east-1", Options: map[string]string{"cluster": "training"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cloudtest.Conformance(t, cloudtest.Case{
+		Provider: p, ProviderID: "aws:///us-east-1a/i-0abc", Instance: "i-0abc",
+		Foreign: []string{"azure:///subscriptions/s/resourceGroups/r/providers/Microsoft.Compute/virtualMachineScaleSets/v/virtualMachines/0", "aws:///us-east-1a/not-an-instance"},
+	})
 }

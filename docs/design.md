@@ -646,6 +646,26 @@ A replacement that cannot get a successor instance before anything is
 deleted (a quota, an allocation failure) fails with its own reason,
 "replacement capacity unavailable", never as success.
 
+#### AKS agent pools (experimental)
+
+The Azure provider replaces a node by deleting its machine through the AKS
+agent pool API; there is no supported single-node restart, so it declares no
+recycle. On a fixed-size pool it first grows the pool by one under an
+`If-Match` write that also tags the pool with the replacement, and deletes
+the old machine only once AKS lists the new one and the pool has settled; a
+missing successor fails as `ErrReplacementCapacity` with nothing deleted. An
+autoscaled pool keeps its size. It reports `not-ready-only`: AKS auto-repair
+cannot be turned off and acts on NotReady nodes, so recovery needs a Ready
+node, fully read node events with no `aks-auto-repair` event in the last hour,
+and a settled pool.
+
+Open questions for a live AKS run: whether `deleteMachines` lowers the pool's
+count (if it does not, the provider stops with "needs an operator" and never
+shrinks the pool); whether a listed machine is a node ready for work, as the
+stable Machines API carries no machine state; the auto-repair event source and
+its behaviour on Ready nodes; and the error codes of quota and capacity
+failures.
+
 #### AWS managed nodegroup observations
 
 Set `spec.cloud.aws.clusterName` on the KubeNeuron resource. Each node supplies its

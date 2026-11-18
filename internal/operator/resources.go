@@ -4,6 +4,7 @@ package operator
 
 import (
 	"fmt"
+	"maps"
 	"path/filepath"
 	"strings"
 
@@ -91,6 +92,14 @@ func controllerServiceAccount(installation *kubeneuronv1alpha1.KubeNeuron) *core
 	if cloud := installation.Spec.Cloud; cloud != nil && cloud.Provider == "aws" && cloud.AWS != nil && cloud.AWS.IAMRoleARN != "" {
 		annotations = map[string]string{"eks.amazonaws.com/role-arn": cloud.AWS.IAMRoleARN}
 	}
+	// Azure Workload Identity federates this ServiceAccount with the managed
+	// identity named here; the webhook projects a token, and no secret exists.
+	if azure := azureCloud(installation); azure != nil {
+		annotations = map[string]string{"azure.workload.identity/client-id": azure.ClientID}
+		if azure.TenantID != "" {
+			annotations["azure.workload.identity/tenant-id"] = azure.TenantID
+		}
+	}
 	return &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        installation.Name + "-controller",
@@ -112,6 +121,25 @@ func cloudRegion(cloud *kubeneuronv1alpha1.CloudSpec) string {
 		}
 	}
 	return ""
+}
+
+// controllerPodLabels are the controller pod's labels: the selector's, plus
+// the label that has Azure Workload Identity project the federated token.
+func controllerPodLabels(installation *kubeneuronv1alpha1.KubeNeuron, selector map[string]string) map[string]string {
+	if azureCloud(installation) == nil {
+		return selector
+	}
+	labels := maps.Clone(selector)
+	labels["azure.workload.identity/use"] = "true"
+	return labels
+}
+
+// azureCloud is the AKS block of an installation that selects Azure.
+func azureCloud(installation *kubeneuronv1alpha1.KubeNeuron) *kubeneuronv1alpha1.AzureCloudSpec {
+	if cloud := installation.Spec.Cloud; cloud != nil && cloud.Provider == "azure" {
+		return cloud.Azure
+	}
+	return nil
 }
 
 func agentServiceAccount(installation *kubeneuronv1alpha1.KubeNeuron) *corev1.ServiceAccount {
@@ -420,6 +448,13 @@ func controllerDeployment(installation *kubeneuronv1alpha1.KubeNeuron, snapshot 
 	if cloud := installation.Spec.Cloud; cloud != nil && cloud.Provider == "aws" && cloud.AWS != nil && cloud.AWS.ClusterName != "" {
 		container.Env = append(container.Env, corev1.EnvVar{Name: "KUBENEURON_EKS_CLUSTER", Value: cloud.AWS.ClusterName})
 	}
+	if azure := azureCloud(installation); azure != nil {
+		container.Env = append(container.Env,
+			corev1.EnvVar{Name: "KUBENEURON_AKS_SUBSCRIPTION_ID", Value: azure.SubscriptionID},
+			corev1.EnvVar{Name: "KUBENEURON_AKS_RESOURCE_GROUP", Value: azure.ResourceGroup},
+			corev1.EnvVar{Name: "KUBENEURON_AKS_CLUSTER", Value: azure.ClusterName},
+		)
+	}
 	if installation.Spec.TLS.PublicServerSecretRef != nil {
 		// Probes must speak the listener's protocol once it serves TLS.
 		container.ReadinessProbe.HTTPGet.Scheme = corev1.URISchemeHTTPS
@@ -664,7 +699,7 @@ func controllerDeployment(installation *kubeneuronv1alpha1.KubeNeuron, snapshot 
 				// never become Ready to retire the old one, and the stale-config
 				// leader would serve forever. The digest stays on the Deployment
 				// object for observability.
-				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: controllerPodAnnotations(annotations)},
+				ObjectMeta: metav1.ObjectMeta{Labels: controllerPodLabels(installation, labels), Annotations: controllerPodAnnotations(annotations)},
 				Spec: corev1.PodSpec{
 					ServiceAccountName:            installation.Name + "-controller",
 					DeprecatedServiceAccount:      installation.Name + "-controller",
