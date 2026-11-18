@@ -1000,6 +1000,17 @@ func compilePolicies(
 		if err != nil {
 			return nil, err
 		}
+		if mode == recoverymode.Automatic {
+			// compilePlaybookIndex has already verified that escalation paths are acyclic.
+			for book := books[policy.Spec.PlaybookRef]; book != nil; book = books[book.OnFailure.EscalateTo] {
+				for _, step := range book.Steps {
+					def, _ := action.ByWire(step.Action)
+					if def.Kind == action.KindAgent || step.Action == "platform.quiesce_accelerator_stack" || step.Action == "platform.restore_accelerator_stack" {
+						return nil, fmt.Errorf("policy %q: Automatic mode cannot use node-level action %q in playbook %q; use Approval mode", policy.Name, step.Action, book.Name)
+					}
+				}
+			}
+		}
 		if automatic != nil && automatic.CheckpointWait > 0 &&
 			(installation.Spec.Safety.CheckpointCoordination == nil || !installation.Spec.Safety.CheckpointCoordination.Enabled) {
 			return nil, fmt.Errorf("policy %q: spec.automatic.checkpointWait needs spec.safety.checkpointCoordination enabled", policy.Name)
