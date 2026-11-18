@@ -1216,6 +1216,32 @@ func TestReconcileOperatorPermissionForReboot(t *testing.T) {
 		if err := c.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: root.Name + "-agent"}, &agents); err != nil {
 			t.Fatal(err)
 		}
+		pod := agents.Spec.Template.Spec
+		security := pod.Containers[0].SecurityContext
+		if pod.HostPID != allowed || pod.HostNetwork || pod.HostIPC || security.Privileged == nil || *security.Privileged != allowed {
+			t.Fatalf("permission %v: unexpected namespace or privilege settings", allowed)
+		}
+		if !allowed {
+			if security.AllowPrivilegeEscalation == nil || *security.AllowPrivilegeEscalation ||
+				security.ReadOnlyRootFilesystem == nil || !*security.ReadOnlyRootFilesystem ||
+				security.SeccompProfile == nil || security.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault ||
+				security.Capabilities == nil || len(security.Capabilities.Add) != 0 ||
+				len(security.Capabilities.Drop) != 1 || security.Capabilities.Drop[0] != "ALL" {
+				t.Fatalf("unexpected observation security context: %+v", security)
+			}
+			stateVolumes := 0
+			for _, v := range pod.Volumes {
+				if v.HostPath != nil {
+					if v.Name != "state" || v.HostPath.Path != "/var/lib/kube-neuron" {
+						t.Fatalf("unexpected host volume %s: %s", v.Name, v.HostPath.Path)
+					}
+					stateVolumes++
+				}
+			}
+			if stateVolumes != 1 {
+				t.Fatalf("expected one persistent state volume, got %d", stateVolumes)
+			}
+		}
 		if got := strings.Contains(strings.Join(agents.Spec.Template.Spec.Containers[0].Args, " "), "--enable-node-level-actions"); got != allowed {
 			t.Fatalf("operator permission %v: agent enabled = %v", allowed, got)
 		}

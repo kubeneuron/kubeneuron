@@ -861,10 +861,31 @@ func agentTolerations(installation *kubeneuronv1alpha1.KubeNeuron) []corev1.Tole
 
 func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot, tlsRevision ...string) *appsv1.DaemonSet {
 	labels := resourceLabels(installation, "agent")
-	privileged := true
-	toolingArgs, toolingEnv, toolingMounts, toolingVolumes := agentToolingWiring(installation.Spec.Agent)
+	nodeActions := installation.Spec.Safety.NodeLevelActions
+	security := &corev1.SecurityContext{Privileged: ptr.To(nodeActions)}
+	agent := installation.Spec.Agent.DeepCopy()
+	if !nodeActions {
+		security.AllowPrivilegeEscalation = ptr.To(false)
+		security.ReadOnlyRootFilesystem = ptr.To(true)
+		security.Capabilities = &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}
+		security.SeccompProfile = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}
+		agent.HostTooling = nil
+		for _, adapter := range agent.Adapters {
+			if adapter.HostTooling != nil {
+				adapter.HostTooling.Devices = nil
+			}
+		}
+	}
+	toolingArgs, toolingEnv, toolingMounts, toolingVolumes := agentToolingWiring(*agent)
+	if !nodeActions && installation.Spec.Agent.HostTooling != nil {
+		if endpoint := strings.TrimSpace(installation.Spec.Agent.HostTooling.DCGMEndpoint); endpoint != "" {
+			toolingArgs = append(toolingArgs, "--nvidia-dcgm-endpoint="+endpoint)
+		}
+	}
 	toolingArgs = append(toolingArgs, agentAdapterArgs(installation.Spec.Agent.Adapters)...)
-	if installation.Spec.Safety.NodeLevelActions {
+	if nodeActions {
+		toolingMounts = append(toolingMounts, corev1.VolumeMount{Name: "kmsg", MountPath: "/dev/kmsg", ReadOnly: true})
+		toolingVolumes = append(toolingVolumes, hostPathVolume("kmsg", "/dev/kmsg", corev1.HostPathUnset))
 		toolingArgs = append(toolingArgs, "--enable-node-level-actions")
 	}
 	agentNodes := copyStringMap(installation.Spec.Agent.NodeSelector)
@@ -912,7 +933,7 @@ func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snaps
 					DNSPolicy:                     corev1.DNSClusterFirst,
 					SecurityContext:               &corev1.PodSecurityContext{},
 					SchedulerName:                 corev1.DefaultSchedulerName,
-					HostPID:                       true,
+					HostPID:                       nodeActions,
 					NodeSelector:                  agentNodes,
 					Tolerations:                   agentTolerations(installation),
 					Containers: []corev1.Container{{
@@ -940,14 +961,13 @@ func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snaps
 								FieldPath:  "spec.nodeName",
 							}},
 						}}, toolingEnv...), telemetryEnv(installation)...),
-						SecurityContext:          &corev1.SecurityContext{Privileged: &privileged},
+						SecurityContext:          security,
 						Ports:                    []corev1.ContainerPort{{Name: "health", ContainerPort: agentPort, Protocol: corev1.ProtocolTCP}},
 						ReadinessProbe:           defaultReadinessHTTPProbe("/readyz", "health"),
 						LivenessProbe:            defaultHTTPProbe("/livez", "health"),
 						TerminationMessagePath:   corev1.TerminationMessagePathDefault,
 						TerminationMessagePolicy: corev1.TerminationMessageReadFile,
 						VolumeMounts: append([]corev1.VolumeMount{
-							{Name: "kmsg", MountPath: "/dev/kmsg", ReadOnly: true},
 							{Name: "state", MountPath: "/var/lib/kube-neuron"},
 							{Name: "client-tls", MountPath: "/var/run/secrets/kube-neuron/client-tls", ReadOnly: true},
 							{Name: "server-ca", MountPath: "/var/run/secrets/kube-neuron/server-ca", ReadOnly: true},
@@ -955,7 +975,6 @@ func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snaps
 						}, toolingMounts...),
 					}},
 					Volumes: append([]corev1.Volume{
-						{Name: "kmsg", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev/kmsg", Type: hostPathType(corev1.HostPathUnset)}}},
 						{Name: "state", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/kube-neuron", Type: hostPathType(corev1.HostPathDirectoryOrCreate)}}},
 						{
 							Name: "client-tls",
