@@ -158,7 +158,7 @@ func ValidatePolicyActions(mode recoverymode.Mode, root string, books map[string
 		}
 		for _, step := range books[name].Steps {
 			if IsNodeLevelAction(step.Action) {
-				return fmt.Errorf("Automatic mode cannot use node-level action %q in playbook %q; use Approval mode", step.Action, name)
+				return fmt.Errorf("policy in Automatic mode cannot use node-level action %q in playbook %q; use Approval mode", step.Action, name)
 			}
 		}
 	}
