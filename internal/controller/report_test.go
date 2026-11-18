@@ -213,8 +213,8 @@ func TestAggregateRecoveryRanksClassesAndListsOpenIncidents(t *testing.T) {
 	}
 	report := aggregateRecovery(incidents, inventory, allRemediated(incidents), from, to, 0)
 
-	if report.DegradedGPUHours != 47 || report.RecoveredGPUHours != 34 {
-		t.Fatalf("degraded/recovered = %v/%v GPU-hours, want 47/34", report.DegradedGPUHours, report.RecoveredGPUHours)
+	if report.DegradedGPUHours != 47 || report.RecoveredGPUHours != 32 {
+		t.Fatalf("degraded/recovered = %v/%v GPU-hours, want 47/32", report.DegradedGPUHours, report.RecoveredGPUHours)
 	}
 	if report.Recovered != 2 || report.RecoveredUnattended != 1 {
 		t.Fatalf("recovered/unattended = %d/%d, want 2/1", report.Recovered, report.RecoveredUnattended)
@@ -656,5 +656,18 @@ func TestReportIncidentDetailsSeparateOutcomes(t *testing.T) {
 	}
 	if report.IncidentDetails[1].RecoverySeconds != nil || report.Simulated.IncidentDetails[0].ID != "dry" {
 		t.Fatal("incorrect outcome attribution")
+	}
+}
+
+func TestRecoveredHoursSeparateRecurrenceFromOverlap(t *testing.T) {
+	from := time.Unix(0, 0)
+	rows := []*types.Incident{
+		incident("first", "ecc-dbe", "node", "GPU-1", types.StateResolved, from, at(from, 2)),
+		incident("second-class", "thermal", "node", "GPU-1", types.StateResolved, at(from, 1), at(from, 3)),
+		incident("recurrence", "ecc-dbe", "node", "GPU-1", types.StateResolved, at(from, 5), at(from, 6)),
+	}
+	got := aggregateRecovery(rows, nil, allRemediated(rows), from, at(from, 7), 0)
+	if got.RecoveredGPUHours != 4 || got.Recovered != 3 {
+		t.Fatalf("got %v GPU-hours across %d recovered incidents, want 4 across 3", got.RecoveredGPUHours, got.Recovered)
 	}
 }

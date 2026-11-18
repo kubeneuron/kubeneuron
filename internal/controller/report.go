@@ -296,6 +296,7 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 	}
 	classes := map[types.ProblemClass]*classAccum{}
 	var mttrSamples []float64
+	recovered := map[string][]gpuBoundary{}
 
 	for _, inc := range incidents {
 		if inc != nil && inc.DryRun != wantDryRun {
@@ -360,7 +361,11 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 			acc.row.ObservedOnlyGPUHours += hours
 		default:
 			report.Recovered++
-			report.RecoveredGPUHours += hours
+			device := inc.Target.GPUUUID
+			if device == "" && inc.Target.PCIAddr != "" {
+				device = "pci:" + inc.Target.PCIAddr
+			}
+			recovered[inc.Target.Node] = append(recovered[inc.Target.Node], gpuBoundary{overlapStart, device, gpus}, gpuBoundary{overlapEnd, device, -gpus})
 			acc.row.Recovered++
 			acc.row.RecoveredGPUHours += hours
 			if inc.ApprovalEpoch == 0 {
@@ -396,7 +401,7 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 	}
 
 	report.DegradedGPUHours = roundHours(report.DegradedGPUHours)
-	report.RecoveredGPUHours = roundHours(report.RecoveredGPUHours)
+	report.RecoveredGPUHours = roundHours(distinctGPUHours(recovered))
 	report.ObservedOnlyGPUHours = roundHours(report.ObservedOnlyGPUHours)
 	report.SupersededGPUHours = roundHours(report.SupersededGPUHours)
 	report.MTTR = summarizeLatency(mttrSamples)
@@ -529,4 +534,44 @@ func earlierOf(a, b time.Time) time.Time {
 		return a
 	}
 	return b
+}
+
+// Sweep each node independently. A node-wide interval covers its device
+// intervals, and concurrent faults on one device cover that device once.
+type gpuBoundary struct {
+	at    time.Time
+	gpu   string
+	delta int
+}
+
+func distinctGPUHours(nodes map[string][]gpuBoundary) float64 {
+	var hours float64
+	for _, events := range nodes {
+		sort.Slice(events, func(i, j int) bool { return events[i].at.Before(events[j].at) })
+		active := map[string]int{}
+		nodeIntervals, nodeGPUs := 0, 0
+		last := events[0].at
+		for _, event := range events {
+			count := len(active)
+			if nodeIntervals > 0 {
+				count = max(count, nodeGPUs)
+			}
+			hours += event.at.Sub(last).Hours() * float64(count)
+			last = event.at
+			if event.gpu == "" {
+				if event.delta > 0 {
+					nodeIntervals++
+					nodeGPUs = event.delta
+				} else {
+					nodeIntervals--
+				}
+				continue
+			}
+			active[event.gpu] += event.delta
+			if active[event.gpu] == 0 {
+				delete(active, event.gpu)
+			}
+		}
+	}
+	return hours
 }
