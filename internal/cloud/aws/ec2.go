@@ -74,7 +74,8 @@ func newManagedProvider(ctx context.Context, options cloud.Config) (*managedProv
 	}
 	client := ec2.NewFromConfig(cfg)
 	eksClient := eks.NewFromConfig(cfg)
-	provider := &managedProvider{updater: eksClient, Recycler: &Recycler{api: client, pollInterval: 10 * time.Second}, repairReader: &repairReader{cluster: options.Options["cluster"], eks: eksClient, scaling: autoscaling.NewFromConfig(cfg), ec2: client}}
+	scalingClient := autoscaling.NewFromConfig(cfg)
+	provider := &managedProvider{updater: eksClient, terminator: scalingClient, Recycler: &Recycler{api: client, pollInterval: 10 * time.Second}, repairReader: &repairReader{cluster: options.Options["cluster"], eks: eksClient, scaling: scalingClient, ec2: client}}
 	if url := options.Options[OptionInterruptionQueue]; url != "" {
 		provider.queue = newInterruptionQueue(sqs.NewFromConfig(cfg), url)
 	}

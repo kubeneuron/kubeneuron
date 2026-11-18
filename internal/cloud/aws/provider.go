@@ -23,7 +23,8 @@ var capabilities = cloud.Capabilities{ReinitializeInPlace: true, Replace: true}
 var _ cloud.Provider = (*Recycler)(nil)
 
 type managedProvider struct {
-	updater nodegroupUpdater
+	updater    nodegroupUpdater
+	terminator instanceTerminator
 	*Recycler
 	*repairReader
 	// queue is the interruption queue, when one is configured.

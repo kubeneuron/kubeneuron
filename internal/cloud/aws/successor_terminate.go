@@ -36,3 +36,22 @@ func terminatePinned(ctx context.Context, client instanceTerminator, instance st
 	}
 	return nil
 }
+
+// ReplaceWithSuccessor revalidates the persisted successor before removing the
+// old instance. The caller has completed its workload handoff before this call.
+func (p *managedProvider) ReplaceWithSuccessor(ctx context.Context, s cloud.Successor) error {
+	if s.Phase != cloud.SuccessorCreated || s.Instance == "" || s.ProviderID == "" {
+		return fmt.Errorf("%w: replacement requires a pinned instance and a created successor", cloud.ErrNeedsOperator)
+	}
+	requested := s
+	requested.Phase = cloud.SuccessorRequested
+	requested.ProviderID = ""
+	current, err := p.observeSuccessor(ctx, requested)
+	if err != nil {
+		return err
+	}
+	if current.Phase != cloud.SuccessorCreated || current.ProviderID != s.ProviderID {
+		return fmt.Errorf("%w: current ASG launch does not confirm the persisted successor", cloud.ErrNeedsOperator)
+	}
+	return terminatePinned(ctx, p.terminator, s.Instance)
+}

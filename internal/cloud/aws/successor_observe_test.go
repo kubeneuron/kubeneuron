@@ -46,4 +46,15 @@ func TestObserveSuccessor(t *testing.T) {
 	if err != nil || got.Phase != cloud.SuccessorCreated || got.ProviderID != "aws:///az/i-new" {
 		t.Fatalf("created: %+v %v", got, err)
 	}
+
+	terminator := &terminateFixture{t: t, out: &autoscaling.TerminateInstanceInAutoScalingGroupOutput{Activity: &at.Activity{ActivityId: sdk.String("terminate-old")}}}
+	p.terminator = terminator
+	foreign := got
+	foreign.ProviderID = "aws:///az/i-other"
+	if err := p.ReplaceWithSuccessor(t.Context(), foreign); !errors.Is(err, cloud.ErrNeedsOperator) || terminator.calls != 0 {
+		t.Fatalf("foreign successor: err=%v calls=%d", err, terminator.calls)
+	}
+	if err := p.ReplaceWithSuccessor(t.Context(), got); err != nil || terminator.calls != 1 {
+		t.Fatalf("confirmed successor: err=%v calls=%d", err, terminator.calls)
+	}
 }
