@@ -11,12 +11,24 @@ reader would assume, the note says so.
 
 ## Live cloud evidence
 
-The 2026-08-05 run recorded in the v0.2.1 changelog used an EKS
-`g4dn.xlarge` with a Tesla T4 in `kubeneuron-e2e10`. An injected fault
-exercised cordon, drain and EC2 instance termination. The recorded evidence
-ends at termination. It does not establish that replacement capacity became
-ready or that a training job resumed. The current EKS, AKS and GKE replacement
-paths each await validation on a live cluster.
+The kind tests run on CPU-only Kubernetes nodes without GPUs or cloud API calls.
+Each live-cloud entry applies only to the path and run shown.
+
+| Path | Unit tests or simulated provider | kind (CPU only) | Live cloud |
+|---|---|---|---|
+| EKS managed nodegroup replacement (remove-first) | AWS provider and contract tests | Controller approval, cordon and drain only | No for the current path. On 2026-08-05, the v0.2.1 run on EKS `g4dn.xlarge` / Tesla T4 reached EC2 termination after an injected fault. Replacement readiness and resumed training were not verified. |
+| AKS restart and replacement, including add-first on fixed-size pools | Simulated AKS API and provider contract tests | No | No |
+| GKE Standard replacement (remove-first on autoscaled pools, add-first on fixed-size single-zone pools) | Simulated GKE and Compute Engine APIs. Autopilot is observation-only. | No | No |
+| DryRun and Approval modes | Controller policy tests | DryRun leaves pods unchanged. Approval exercises drain after approval. | No for the current modes |
+| Automatic mode | Controller policy tests | No dedicated Automatic execution scenario | No |
+| Managed monitoring (Collector, metrics store, Grafana and alert delivery to controller) | Operator and rule tests | Synthetic DCGM input through the Managed stack | No for the current stack |
+| NVIDIA fault detection | Agent parser fixtures | Synthetic DCGM input exercises metric alerts | Yes for injected kernel XIDs: 2026-08-05, v0.2.1, EKS `g4dn.xlarge` / Tesla T4 (`kubeneuron-e2e10`). |
+| AMD fault detection | Synthetic amdgpu kernel logs and AMD SMI / ROCm SMI polling fixtures | No | No |
+| Node conditions in incident context | Controller and API tests | Installer suite checks conditions in incident detail and audit | No |
+
+The 2026-10-18 hardware harness used v0.7.0 release source (`d06fcfa`) on EKS
+`g4dn.xlarge` / Tesla T4. Its observability phases predate the current Managed
+stack, and the run did not exercise current EKS managed-nodegroup replacement.
 
 ## How to read a cell
 
@@ -91,7 +103,7 @@ The table below records the evidence for each action.
 | Cordon / drain | shipped & hardware-validated | `internal/platform/kubernetes/kubernetes.go`. Both executed for real on the EKS node in the confined destructive phase (`Cordon → Drain → ReplaceNode`, `hack/hw-e2e.sh`). Vendor-blind: eviction is a pod operation. The PDB-blocked retry loop is fixture-tested only — no hardware run has had an eviction refused by a budget. |
 | Uncordon | shipped, not hardware-validated | Same file. Every hardware run either ended in a dry-run ladder or terminated the node, so the real uncordon (and the cordon janitor's recovery path) has not executed on hardware. |
 | Node reboot | shipped, not hardware-validated | `internal/agent/executor/executor.go`. See the note below — this cell surprises people. |
-| Cloud node replacement | Current EKS, AKS and GKE implementations await live validation. | The historical EKS/T4 run confirmed termination. See [live cloud evidence](#live-cloud-evidence). |
+| Cloud node replacement | See [live cloud evidence](#live-cloud-evidence) for provider-specific test coverage. | Historical and current paths are listed separately there. |
 | Cloud node recycle (stop/start in place) | shipped, not hardware-validated (AWS only) | Same files. The AWS provider refuses autoscaling-group members (`cloud.ErrRecycleNotViable`), and every hardware node so far has been an ASG member, so the successful path has never run. |
 
 ## Table 3 — GPU reliability observability (v0.7, NVIDIA / DCGM only)

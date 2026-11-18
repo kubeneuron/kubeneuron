@@ -124,10 +124,6 @@ kubeneuron/kubeneuron` (asset set, checksums, and digest pins; that run did
 not check the Cosign signature because its machine had no `cosign`). The
 manifests, Helm chart, and samples in this source tree carry the v0.8.0
 pins; the v0.7.0 images are what the `v0.7.0` tag's manifests install.
-The v0.7.0 release source passed the full AWS hardware harness, including its
-`deploy-observability` and `test-observability` phases, on a temporary EKS
-`g4dn.xlarge` / Tesla T4 cluster on 2026-10-18 UTC; nothing is claimed for
-A100/H100, MIG, NVLink, row remapping, or fail-slow scoring.
 
 **Released in v0.6.1 (2026-10-11):** a security and toolchain patch to
 v0.6.0 — Go 1.26.9 with updated `golang.org/x/net` and `golang.org/x/text`,
@@ -486,12 +482,7 @@ completed safety case:
 - credentials are represented by Secret references, not inline values.
 
 Approval delivery (Slack, generic webhook, PagerDuty), verification before
-resolution, and the pause/resume control path are implemented. The historical EKS/T4 test recorded in v0.2.1 exercised an injected fault,
-cordon, drain and EC2 instance termination. Replacement-node readiness and
-resumed training were not verified. The current EKS, AKS and GKE replacement
-paths each await validation on a live cluster. Start in DryRun.
-See the [capability matrix](docs/reference-capabilities.md#live-cloud-evidence)
-for the run and its scope.
+resolution, and the pause/resume control path are implemented. See the [live cloud evidence table](docs/reference-capabilities.md#live-cloud-evidence) for test coverage by provider and the scope of historical GPU runs.
 
 ## Configuration sources
 
@@ -543,16 +534,7 @@ self-managed nodes, driven controller-side through IRSA.
 
 **Remaining, deliberately hardware-gated:** per-device *hardware* GPU
 reset on bare metal (a virtualized instance has no guest PCI reset, so the
-agent refuses it on evidence) and step-time verification depth. The GPU-lab
-CI run on 2026-10-18 passed all phases of the harness used at the time,
-including `deploy-observability` and `test-observability`, on a temporary
-EKS `g4dn.xlarge` cluster with a Tesla T4. The cluster was removed after
-the run. Coverage was limited to the T4 and excluded MIG and NVLink.
-That run did not exercise the current EKS managed-nodegroup replacement path.
-The DCGM/nvidia-smi second detection source beside kmsg has shipped and
-observed a DCGM signal on a real T4 with the agent on the real driver. That
-matrix still gates per-device reset;
-cloud node remediation no longer waits on it.
+agent refuses it on evidence) and step-time verification depth.
 
 **Later evaluations:** ClickHouse archival, Slurm, and ticketing
 integrations.
