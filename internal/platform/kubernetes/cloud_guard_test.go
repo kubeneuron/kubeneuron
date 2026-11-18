@@ -150,3 +150,53 @@ func TestVerifiedRecycleRequiresNewBootOfPinnedTarget(t *testing.T) {
 		})
 	}
 }
+
+// A provider whose own repair acts on NotReady nodes is eligible only while
+// the node is Ready, on both reads around the provider queries.
+func TestNotReadyOnlyReplacementRequiresReadyNode(t *testing.T) {
+	for _, scenario := range []string{"ready", "not-ready", "not-ready-during-query", "repair-active"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			status := corev1.ConditionTrue
+			if scenario == "not-ready" {
+				status = corev1.ConditionFalse
+			}
+			n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker", UID: "uid-old"}, Spec: corev1.NodeSpec{ProviderID: "cloud:///zone/i-old"}, Status: corev1.NodeStatus{
+				NodeInfo:   corev1.NodeSystemInfo{BootID: "boot-old"},
+				Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: status}},
+			}}
+			client := fake.NewSimpleClientset(n)
+			rec := &repairRecycler{mode: cloud.RepairNotReadyOnly, repair: cloud.RepairObservation{Known: true}}
+			switch scenario {
+			case "repair-active":
+				rec.repair.Active = true
+			case "not-ready-during-query":
+				rec.afterQuery = func() {
+					n.Status.Conditions[0].Status = corev1.ConditionFalse
+					if _, err := client.CoreV1().Nodes().UpdateStatus(ctx, n, metav1.UpdateOptions{}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			p := &Platform{client: client, recycler: rec}
+			ref, err := p.CloudNode(ctx, n.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v, _ := p.RecoveryEligibility(ctx, ref.Identity)
+			if v.Mode != cloud.RepairNotReadyOnly {
+				t.Fatalf("mode = %q, want it reported as the provider's", v.Mode)
+			}
+			err = p.ReplacePinnedNode(ctx, ref.Identity)
+			if scenario == "ready" {
+				if err != nil || rec.replaced != "i-old" {
+					t.Fatalf("replace=%s err=%v", rec.replaced, err)
+				}
+				return
+			}
+			if err == nil || rec.replaced != "" {
+				t.Fatalf("unsafe replacement=%s err=%v", rec.replaced, err)
+			}
+		})
+	}
+}

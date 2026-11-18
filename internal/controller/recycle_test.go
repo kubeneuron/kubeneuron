@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 
 // recyclePlatform is a platform that can recycle/replace, and records the calls.
 type recyclePlatform struct {
+	replaceErr error
 	stackPlatform
 	configured         bool
 	nodeReady          bool
@@ -61,6 +63,9 @@ func (p *recyclePlatform) RecyclePinnedNodeVerified(ctx context.Context, pin clo
 	return cloud.RecycleResult{Before: pin, After: after, CompletedAt: time.Now()}, nil
 }
 func (p *recyclePlatform) ReplacePinnedNode(_ context.Context, pin cloud.NodeIdentity) error {
+	if p.replaceErr != nil {
+		return p.replaceErr
+	}
 	p.replaced = pin.InstanceID
 	p.replacedBoot = pin.BootID
 	return nil
@@ -147,6 +152,32 @@ func TestReplaceDoesNotWaitForNode(t *testing.T) {
 	inc := &types.Incident{ID: "i", Target: types.Target{Node: "node-a"}, CloudIdentity: recycleTestPin()}
 	if _, err := c.recycleNodeStep(context.Background(), inc, true); err != nil {
 		t.Fatalf("replace must not block on node readiness: %v", err)
+	}
+}
+
+// A replacement with no capacity for a successor is its own failure, never a
+// generic one and never success.
+func TestReplaceReportsMissingCapacity(t *testing.T) {
+	p := &recyclePlatform{configured: true, replaceErr: fmt.Errorf("growing pool: %w", cloud.ErrReplacementCapacity)}
+	c := recycleController(t, p)
+	inc := &types.Incident{ID: "i", Target: types.Target{Node: "node-a"}, CloudIdentity: recycleTestPin()}
+	_, err := c.recycleNodeStep(context.Background(), inc, true)
+	if !errors.Is(err, cloud.ErrReplacementCapacity) || !strings.Contains(err.Error(), "replacement capacity unavailable") {
+		t.Fatalf("err = %v, want the capacity reason", err)
+	}
+}
+
+func TestNotReadyOnlyModeAllowsCloudRecovery(t *testing.T) {
+	v := cloud.RecoveryEligibility{Mode: cloud.RepairNotReadyOnly, ReplaceAllowed: true}
+	if !cloudRecoveryAllowed(v, "platform.replace_node") {
+		t.Fatal("an eligible not-ready-only verdict must allow replacement")
+	}
+	if cloudRecoveryAllowed(v, "platform.recycle_node") {
+		t.Fatal("a verdict without recycle must not allow recycle")
+	}
+	v.Mode = cloud.RepairOn
+	if cloudRecoveryAllowed(v, "platform.replace_node") {
+		t.Fatal("native repair on must not allow replacement")
 	}
 }
 

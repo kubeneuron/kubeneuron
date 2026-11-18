@@ -54,6 +54,32 @@ type NodeRef struct {
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Ready       bool              `json:"ready"`
+	// Events are the node's recent events from the sources its provider names
+	// (NodeEventsAware), within NodeEventWindow; source, reason and time only.
+	// They prove a repair is under way, never that none is.
+	Events []NodeEvent `json:"events,omitempty"`
+	// EventsKnown is false when the events could not be read in full (a denied
+	// or failed list, a truncated one): no events is then not "none happened".
+	EventsKnown bool `json:"events_known"`
+}
+
+// NodeEvent is one Kubernetes event about a node, without its message: a
+// message can name pods. A zero Time is an event whose recorder set no time;
+// treat it as recent.
+type NodeEvent struct {
+	Source string    `json:"source"`
+	Reason string    `json:"reason"`
+	Time   time.Time `json:"time"`
+}
+
+// NodeEventWindow bounds how far back NodeRef.Events reaches.
+const NodeEventWindow = time.Hour
+
+// NodeEventsAware is implemented by a provider that judges native repair from
+// node events. The platform reads events only for the sources it names, so a
+// provider that needs none costs no event access.
+type NodeEventsAware interface {
+	NodeEventSources() []string
 }
 
 type RepairMode string
@@ -63,6 +89,9 @@ const (
 	RepairOff     RepairMode = "off"
 	RepairOn      RepairMode = "on"
 	RepairVeto    RepairMode = "per-node-veto"
+	// RepairNotReadyOnly: native repair cannot be turned off but acts only on a
+	// NotReady node, so recovery is allowed only while the node stays Ready.
+	RepairNotReadyOnly RepairMode = "not-ready-only"
 )
 
 // RepairEvidence records the source and observation time of a verdict, not

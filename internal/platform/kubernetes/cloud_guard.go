@@ -40,7 +40,15 @@ func (p *Platform) RecoveryEligibility(ctx context.Context, pin cloud.NodeIdenti
 		return v, err
 	}
 	v.Mode, v.Reason = policy.Mode, policy.Reason
-	if policy.Mode != cloud.RepairOff {
+	switch policy.Mode {
+	case cloud.RepairOff:
+	case cloud.RepairNotReadyOnly:
+		// The cloud's own repair may act on a NotReady node at any time.
+		if !ref.Ready {
+			v.Reason = "node is NotReady; the cloud's own repair may act on it"
+			return v, nil
+		}
+	default:
 		return v, nil
 	}
 	repair, err := provider.OpenRepair(ctx, ref)
@@ -77,6 +85,10 @@ func (p *Platform) RecoveryEligibility(ctx context.Context, pin cloud.NodeIdenti
 		v.ReplaceAllowed, v.RecycleAllowed = false, false
 		v.Reason = "node identity changed during eligibility check"
 		return v, err
+	}
+	if policy.Mode == cloud.RepairNotReadyOnly && !current.Ready {
+		v.ReplaceAllowed, v.RecycleAllowed = false, false
+		v.Reason = "node became NotReady during eligibility check; the cloud's own repair may act on it"
 	}
 	return v, nil
 }

@@ -11,6 +11,15 @@ API is `v1alpha1`.
 
 ### Added
 
+- **Cloud contract for a repair that cannot be turned off.** A provider can
+  report `not-ready-only`: its cloud repairs only NotReady nodes, so
+  recovery proceeds only while the node is Ready, before and after the
+  provider's checks. A provider can ask for the node's recent events from
+  named sources (reason and time, never the message; a failed or
+  truncated read counts as unknown). A replacement that finds no capacity
+  for a successor before deleting anything fails as "replacement capacity
+  unavailable". AWS behaviour is unchanged.
+
 - **Cloud recovery pack on first install.** New installations use cloud policies
   in DryRun. Node-level policies require `--policy-pack bare-metal-alpha`
   (Alpha, not validated on real hardware). Repeat installs preserve existing policies.

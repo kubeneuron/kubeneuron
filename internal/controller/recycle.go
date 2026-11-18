@@ -4,10 +4,12 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/platform"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -51,6 +53,9 @@ func (c *Controller) recycleNodeStep(ctx context.Context, inc *types.Incident, r
 	node := inc.Target.Node
 	if replace {
 		if err := guard.ReplacePinnedNode(ctx, pin); err != nil {
+			if errors.Is(err, cloud.ErrReplacementCapacity) {
+				return nil, fmt.Errorf("platform.replace_node: replacement capacity unavailable: %w", err)
+			}
 			return nil, fmt.Errorf("platform.replace_node: %w", err)
 		}
 		// Termination is not proof of replacement or accelerator recovery.

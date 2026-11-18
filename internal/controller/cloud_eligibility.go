@@ -72,5 +72,5 @@ func (c *Controller) supersedeCloudTarget(ctx context.Context, inc *types.Incide
 
 // cloudRecoveryAllowed is shared by the waiting assessment and the fresh gate.
 func cloudRecoveryAllowed(v cloud.RecoveryEligibility, action string) bool {
-	return v.ReplaceAllowed && (v.Mode == cloud.RepairOff || v.Mode == cloud.RepairVeto) && (action != "platform.recycle_node" || v.RecycleAllowed)
+	return v.ReplaceAllowed && (v.Mode == cloud.RepairOff || v.Mode == cloud.RepairVeto || v.Mode == cloud.RepairNotReadyOnly) && (action != "platform.recycle_node" || v.RecycleAllowed)
 }

@@ -624,6 +624,28 @@ long-running steps in per-incident goroutines and orphaned-execution recovery
 after controller restarts.
 
 
+#### Native repair modes
+
+A provider reports how its cloud's own node repair stands for the pinned
+node, and recovery proceeds only in two of its modes. In `off` the cloud
+does not repair the node itself. In `not-ready-only` the cloud's repair
+cannot be turned off but acts only on a NotReady node: recovery is allowed
+while the node is Ready on both reads around the provider's checks, the
+provider sees no repair under way and its permission check passes. In
+`on`, `per-node-veto` without evidence of an effective veto, or `unknown`,
+recovery holds.
+
+A provider that judges repair from node events names their sources; the
+platform then reads the node's events from the `default` namespace, keeps
+those sources' reason and time from the last hour (and any event with no
+time at all, as possibly recent) and never their message.
+A denied, failed or truncated read leaves the events unknown, not empty.
+An event proves a repair is under way, never that none is.
+
+A replacement that cannot get a successor instance before anything is
+deleted (a quota, an allocation failure) fails with its own reason,
+"replacement capacity unavailable", never as success.
+
 #### AWS managed nodegroup observations
 
 Set `spec.cloud.aws.clusterName` on the KubeNeuron resource. Each node supplies its

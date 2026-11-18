@@ -35,6 +35,12 @@ import (
 // Replace now) from a transient lookup failure (retry).
 var ErrRecycleNotViable = errors.New("recycle is not viable for this instance")
 
+// ErrReplacementCapacity marks a replacement that could not get a successor
+// instance — a quota, an allocation failure, a size the region cannot give —
+// before anything was deleted. It is never success, and callers report it as
+// its own reason.
+var ErrReplacementCapacity = errors.New("no capacity for a replacement instance; nothing was deleted")
+
 // Capabilities declares which node-remediation primitives a provider can
 // perform safely. A provider that lacks a primitive must declare it false so
 // the operator rejects a playbook that would depend on it, rather than the

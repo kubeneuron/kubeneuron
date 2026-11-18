@@ -6,10 +6,13 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 )
 
 // CloudNode takes all fields from one live Node read, not an inventory cache.
@@ -37,5 +40,60 @@ func (p *Platform) CloudNode(ctx context.Context, name string) (cloud.NodeRef, e
 			ref.Ready = condition.Status == corev1.ConditionTrue
 		}
 	}
+	if aware, ok := p.recycler.(cloud.NodeEventsAware); ok {
+		ref.Events, ref.EventsKnown = p.nodeEvents(ctx, n.Name, aware.NodeEventSources())
+	}
 	return ref, nil
+}
+
+// nodeEventLimit bounds one read of a node's events; a node with more is a
+// truncated read, so its events are not known.
+const nodeEventLimit = 500
+
+// nodeEventNamespace is where Kubernetes records events about nodes.
+const nodeEventNamespace = "default"
+
+// nodeEvents reads a node's recent events from the named sources. Any failure
+// or a truncated list makes them unknown, never empty-and-known.
+func (p *Platform) nodeEvents(ctx context.Context, node string, sources []string) ([]cloud.NodeEvent, bool) {
+	if len(sources) == 0 {
+		return nil, false
+	}
+	selector := fields.Set{"involvedObject.kind": "Node", "involvedObject.name": node}.AsSelector().String()
+	list, err := p.client.CoreV1().Events(nodeEventNamespace).List(ctx, metav1.ListOptions{FieldSelector: selector, Limit: nodeEventLimit})
+	if err != nil || list.Continue != "" {
+		return nil, false
+	}
+	since := time.Now().Add(-cloud.NodeEventWindow)
+	var out []cloud.NodeEvent
+	for _, e := range list.Items {
+		source := e.Source.Component
+		if !slices.Contains(sources, source) {
+			source = e.ReportingController
+		}
+		if !slices.Contains(sources, source) {
+			continue
+		}
+		// An event with no time at all is kept: it may be recent.
+		if at := eventTime(e); at.IsZero() || at.After(since) {
+			out = append(out, cloud.NodeEvent{Source: source, Reason: e.Reason, Time: at})
+		}
+	}
+	return out, true
+}
+
+// eventTime is when an event last happened, from whichever of its times the
+// recorder filled.
+func eventTime(e corev1.Event) time.Time {
+	at := e.LastTimestamp.Time
+	if e.Series != nil && e.Series.LastObservedTime.After(at) {
+		at = e.Series.LastObservedTime.Time
+	}
+	if e.EventTime.After(at) {
+		at = e.EventTime.Time
+	}
+	if e.FirstTimestamp.After(at) {
+		at = e.FirstTimestamp.Time
+	}
+	return at
 }
