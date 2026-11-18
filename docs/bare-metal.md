@@ -25,3 +25,26 @@ bare-metal GPU reset, host reboot and driver recovery have yet to be validated.
 The historical EKS hardware run used a synthetic fault to exercise cordon,
 drain and EC2 instance termination. That run ended at termination. See the
 [capability reference](reference-capabilities.md) for evidence by action.
+
+## Known issues
+
+- **Uncertain action outcomes.** After dispatch, a single error reading the
+  action record can fail the step and trigger its configured escalation.
+  The agent may already have reset the GPU or rebooted the node. Check the
+  node and action record before approving a further intervention. After a
+  controller restart, re-evaluating an interrupted step also leaves its
+  existing queued action in place.
+- **Reset checks.** The controller checks the last reported device holders
+  without checking the age of that observation. The agent still performs
+  its local preflight. When node labels or accelerator evidence are missing,
+  the controller measures the grace period from the incident's last state
+  transition. A late first hold can therefore reach quarantine immediately.
+- **Diagnostics.** A health check can show `timed_out` while its diagnostic
+  action is still leased to the agent. Check the action outcome before
+  starting another diagnostic. The `run_diag` command uses the pinned
+  DCGM client path and omits the host-engine endpoint configured for
+  observation. A successful `verify.gpu_health` step checks actuator
+  health; confirming physical recovery requires separate GPU evidence.
+- **Deployment limits.** The SSH actuator is a stub. The Kubernetes agent
+  runs privileged and shares the host PID namespace even when node-level
+  actions are disabled. See [Data and privacy](data-and-privacy.md).
