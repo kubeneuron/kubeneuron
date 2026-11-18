@@ -51,7 +51,7 @@ type Step struct {
 // second line, so a playbook that reached the engine by another path still
 // cannot restart or destroy a node unattended.
 func (s Step) NeedsApproval() bool {
-	if s.Approval == "required" {
+	if s.Approval == "required" || IsNodeLevelAction(s.Action) {
 		return true
 	}
 	def, ok := action.ByWire(s.Action)

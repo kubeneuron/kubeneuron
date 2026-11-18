@@ -523,3 +523,11 @@ func TestEngineRejectsAutomaticHostEscalation(t *testing.T) {
 		t.Fatalf("expected automatic escalation refusal, got %v", err)
 	}
 }
+
+func TestNodeLevelActionsAlwaysNeedHumanApproval(t *testing.T) {
+	for _, wire := range []string{"agent.gpu_reset", "agent.run_diag", "agent.reboot", "platform.quiesce_accelerator_stack", "platform.restore_accelerator_stack"} {
+		if !(Step{Action: wire, Approval: "none"}).NeedsApproval() {
+			t.Errorf("%s did not require approval", wire)
+		}
+	}
+}
