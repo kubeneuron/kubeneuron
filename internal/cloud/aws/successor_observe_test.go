@@ -79,11 +79,22 @@ func TestObserveSuccessor(t *testing.T) {
 
 	terminator.calls = 0
 	terminator.expectedID = "i-abcd"
-	if err := p.releaseCreatedSuccessor(t.Context(), foreign); !errors.Is(err, cloud.ErrNeedsOperator) || terminator.calls != 0 {
+	if err := p.ReleaseSuccessor(t.Context(), foreign); !errors.Is(err, cloud.ErrNeedsOperator) || terminator.calls != 0 {
 		t.Fatalf("foreign release: %v calls=%d", err, terminator.calls)
 	}
-	if err := p.releaseCreatedSuccessor(t.Context(), got); err != nil || terminator.calls != 1 {
+	if err := p.ReleaseSuccessor(t.Context(), got); err != nil || terminator.calls != 1 {
 		t.Fatalf("confirmed release: %v calls=%d", err, terminator.calls)
+	}
+
+	terminator.calls = 0
+	if err := p.ReleaseSuccessor(t.Context(), s); err != nil || terminator.calls != 1 {
+		t.Fatalf("release before candidate ID persisted: err=%v calls=%d", err, terminator.calls)
+	}
+	planned := s
+	planned.Phase = cloud.SuccessorPlanned
+	terminator.calls = 0
+	if err := p.ReleaseSuccessor(t.Context(), planned); !errors.Is(err, cloud.ErrNeedsOperator) || terminator.calls != 0 {
+		t.Fatalf("release without a persisted update ID: err=%v calls=%d", err, terminator.calls)
 	}
 
 	g.DesiredCapacity = sdk.Int32(1)
@@ -91,16 +102,16 @@ func TestObserveSuccessor(t *testing.T) {
 	original.Instances = g.Instances[:1]
 	p.scaling = observedASG{membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{original}}}, pages}
 	terminator.calls = 0
-	if err := p.releaseCreatedSuccessor(t.Context(), got); err != nil || terminator.calls != 0 {
+	if err := p.ReleaseSuccessor(t.Context(), got); err != nil || terminator.calls != 0 {
 		t.Fatalf("already released: err=%v calls=%d", err, terminator.calls)
 	}
 	update.Status = et.UpdateStatusInProgress
-	if err := p.releaseRequestedSuccessor(t.Context(), s); err == nil || errors.Is(err, cloud.ErrNeedsOperator) {
+	if err := p.ReleaseSuccessor(t.Context(), s); err == nil || errors.Is(err, cloud.ErrNeedsOperator) {
 		t.Fatalf("in-flight release: %v", err)
 	}
 	for _, status := range []et.UpdateStatus{et.UpdateStatusFailed, et.UpdateStatusSuccessful} {
 		update.Status = status
-		if err := p.releaseRequestedSuccessor(t.Context(), s); err != nil || terminator.calls != 0 {
+		if err := p.ReleaseSuccessor(t.Context(), s); err != nil || terminator.calls != 0 {
 			t.Fatalf("restored group after %s: err=%v calls=%d", status, err, terminator.calls)
 		}
 	}

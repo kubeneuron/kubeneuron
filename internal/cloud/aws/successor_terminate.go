@@ -60,6 +60,20 @@ func (p *managedProvider) ReplaceWithSuccessor(ctx context.Context, s cloud.Succ
 	return terminatePinned(ctx, p.terminator, s.Instance)
 }
 
+// ReleaseSuccessor reconciles an abandoned replacement from its persisted phase.
+func (p *managedProvider) ReleaseSuccessor(ctx context.Context, s cloud.Successor) error {
+	switch s.Phase {
+	case cloud.SuccessorRequested:
+		return p.releaseRequestedSuccessor(ctx, s)
+	case cloud.SuccessorCreated:
+		return p.releaseCreatedSuccessor(ctx, s)
+	case cloud.SuccessorPlanned:
+		return fmt.Errorf("%w: a scale-up may have reached EKS before its update ID was saved; inspect the nodegroup and ASG", cloud.ErrNeedsOperator)
+	default:
+		return fmt.Errorf("%w: unknown EKS successor phase %q", cloud.ErrNeedsOperator, s.Phase)
+	}
+}
+
 // releaseCreatedSuccessor removes the extra instance when the handoff is abandoned.
 func (p *managedProvider) releaseCreatedSuccessor(ctx context.Context, s cloud.Successor) error {
 	if s.Phase == cloud.SuccessorCreated {
