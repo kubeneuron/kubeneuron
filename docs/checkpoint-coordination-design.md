@@ -72,8 +72,8 @@ channel both parties have; use it.
 
 **Agent execs into the container to signal the process.** Rejected: `pods/exec`
 into arbitrary namespaces is the largest privilege escalation available in a
-cluster, and it would put it in a DaemonSet that already runs privileged with
-hostPID. No.
+cluster, and it would put it in a DaemonSet that runs privileged with
+hostPID whenever node-level actions are permitted. No.
 
 **A CRD (`GPUWorkloadProfile`) selecting workloads by label.** Better trust
 hygiene — only a cluster admin can create one — but it requires an admin to

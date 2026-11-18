@@ -1181,9 +1181,9 @@ onFailure: {escalateTo: replace-node}   # ReplaceNode as the next rung
 
 The agent image is distroless and its own PID namespace is not the host's, so a
 plain `systemctl reboot` exits 127. The `Reboot` action instead enters PID 1's
-namespaces (`nsenter`, shipped in the agent image) and asks the host's init. The
-managed DaemonSet already runs privileged with `hostPID`, which is what makes
-this reachable.
+namespaces (`nsenter`, shipped in the agent image) and asks the host's init. When both the operator and the installation permit node-level
+actions, the managed DaemonSet runs privileged with `hostPID`, which makes this
+reachable. With the default permissions, `Reboot` is unavailable.
 
 When destructive actions are armed, the agent probes this mechanism at startup
 and logs the result. A node that cannot reboot says so then — not after an

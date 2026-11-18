@@ -4,7 +4,7 @@ KubeNeuron sends no usage data, metrics or reports to its authors and does not c
 
 ## Agent privileges
 
-With the default permissions, the agent runs without privilege or host PID access and drops all Linux capabilities. It keeps its spool, cursors and journal on one writable hostPath, `/var/lib/kube-neuron`, so the Pod Security `baseline` profile is not met. Explicitly configured host tooling can also mount read-only binary and library directories. The agent can poll a configured external DCGM hostengine without reading the host kernel log.
+With the default permissions, the agent runs without privilege or host PID access and drops all Linux capabilities. It keeps its spool, cursors and journal on one writable hostPath, `/var/lib/kube-neuron`, so the Pod Security `baseline` profile is not met. Explicitly configured host tooling can also mount read-only binary and library directories. The agent reports its node, signal source, fault class, availability, reason code and observation time to the controller. Reports are held in memory and expire from the health view two minutes after receipt. The controller does not persist them. The agent can poll a configured external DCGM hostengine without reading the host kernel log.
 
 The agent runs privileged and shares the host PID namespace only when both the operator and installation permit node-level actions. This also applies in DryRun, which controls execution of recovery steps.
 

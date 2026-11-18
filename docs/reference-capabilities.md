@@ -13,7 +13,7 @@ reader would assume, the note says so.
 
 | Source | What the agent can observe |
 |---|---|
-| NVIDIA DCGM hostengine | Field 230 reports the most recent numeric XID. Repeated identical XIDs between polls may be missed, so an `xid-app` threshold may never be reached. The shipped exporter profile omits field 230. Without a readable kernel log or a reachable DCGM hostengine, numeric XIDs are unavailable. |
+| NVIDIA DCGM hostengine | Field 230 reports the most recent numeric XID. Repeated identical XIDs between polls may be missed, so an `xid-app` threshold may never be reached. The shipped exporter profile omits field 230. Without a readable kernel log or a reachable DCGM hostengine, numeric XIDs are unavailable. A CPU-only test uses a DCGM fixture to verify that an XID reaches the controller and opens an incident. |
 | NVIDIA SMI | When available, successive samples can show a rise in volatile uncorrectable ECC errors or a transition to row-remap failure. Neither reading supplies a numeric XID. |
 | AMD kernel log | Without kernel log access, kernel ring timeouts (`driver-hang`) and kernel PCIe errors (`pcie`) are unavailable. |
 | AMD SMI | ECC and page retirement remain observable when the SMI tooling and devices are accessible. |
