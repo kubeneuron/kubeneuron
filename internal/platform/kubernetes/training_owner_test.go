@@ -147,3 +147,25 @@ func TestPodUsesGPURequestOnlyAndZeroLimit(t *testing.T) {
 		t.Fatal("zero GPU limit counted")
 	}
 }
+
+func TestTrainingReportOwnerRequiresAllocatedWorkerAndVerifiedJob(t *testing.T) {
+	job := unstructuredObject(batchJobs, "Job", "training", "trainer", nil)
+	job.SetUID("job-uid")
+	p := &Platform{dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), job)}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "training", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(job, batchJobs.GroupVersion().WithKind("Job"))}}, Spec: corev1.PodSpec{NodeName: "worker"}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+	if _, ok := p.TrainingReportOwner(t.Context(), pod); ok {
+		t.Fatal("accepted CPU-only pod")
+	}
+	pod.Spec.Containers = []corev1.Container{{Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}}}
+	if owner, ok := p.TrainingReportOwner(t.Context(), pod); !ok || owner.UID != "job-uid" {
+		t.Fatal("verified job missing", owner)
+	}
+	pod.OwnerReferences[0].UID = "previous-job"
+	if _, ok := p.TrainingReportOwner(t.Context(), pod); ok {
+		t.Fatal("accepted replaced owner")
+	}
+	pod.OwnerReferences = nil
+	if _, ok := p.TrainingReportOwner(t.Context(), pod); ok {
+		t.Fatal("accepted unowned worker")
+	}
+}

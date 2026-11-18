@@ -185,3 +185,17 @@ func workerRecreation(owner *unstructured.Unstructured, state string, standalone
 	}
 	return "Unknown"
 }
+
+// TrainingReportOwner resolves the report target from the live pod returned by
+// TokenReview authentication. The receiver separately checks node registration.
+func (p *Platform) TrainingReportOwner(ctx context.Context, pod *corev1.Pod) (types.TrainingOwner, bool) {
+	if pod == nil || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning || pod.Spec.NodeName == "" || !podUsesGPU(pod) {
+		return types.TrainingOwner{}, false
+	}
+	refs, owner, reason := p.trainingOwner(ctx, pod)
+	if reason != "" || owner == nil || owner.GetDeletionTimestamp() != nil || len(refs) == 0 {
+		return types.TrainingOwner{}, false
+	}
+	ref := refs[len(refs)-1]
+	return types.TrainingOwner{APIVersion: ref.APIVersion, Kind: ref.Kind, Name: ref.Name, UID: string(ref.UID)}, true
+}
