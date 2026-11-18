@@ -401,7 +401,7 @@ metadata:
   labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
 spec:
   kubeNeuronRef: $NAME
-  target: Node
+  target: GPU
   steps:
     - name: observe
       action: Observe

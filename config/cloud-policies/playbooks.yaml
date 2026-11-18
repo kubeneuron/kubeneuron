@@ -6,7 +6,7 @@ metadata:
   labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
 spec:
   kubeNeuronRef: kubeneuron
-  target: Node
+  target: GPU
   steps:
     - name: observe
       action: Observe
