@@ -49,3 +49,41 @@ func TestRequestSuccessorReplaysLostResponse(t *testing.T) {
 		t.Fatalf("replay: %+v %v", got, err)
 	}
 }
+
+type scalingUpdateFixture struct {
+	groupHistory
+	out *eks.DescribeUpdateOutput
+}
+
+func (f scalingUpdateFixture) DescribeUpdate(_ context.Context, in *eks.DescribeUpdateInput, _ ...func(*eks.Options)) (*eks.DescribeUpdateOutput, error) {
+	if sdk.ToString(in.Name) != "training" || sdk.ToString(in.NodegroupName) != "gpu" || sdk.ToString(in.UpdateId) != "update-1" {
+		return nil, errors.New("unexpected EKS lookup")
+	}
+	return f.out, nil
+}
+func TestScalingUpdateComplete(t *testing.T) {
+	s := cloud.Successor{Phase: cloud.SuccessorRequested, State: map[string]string{"cluster": "training", "nodegroup": "gpu", "update": "update-1"}}
+	for _, tc := range []struct {
+		name, id string
+		status   et.UpdateStatus
+		code     et.ErrorCode
+		complete bool
+		wantErr  error
+	}{
+		{"pending", "update-1", et.UpdateStatusInProgress, "", false, nil},
+		{"success", "update-1", et.UpdateStatusSuccessful, "", true, nil},
+		{"foreign success", "other", et.UpdateStatusSuccessful, "", false, cloud.ErrNeedsOperator},
+		{"cancelled", "update-1", et.UpdateStatusCancelled, "", false, cloud.ErrNeedsOperator},
+		{"capacity", "update-1", et.UpdateStatusFailed, et.ErrorCodeInsufficientFreeAddresses, false, cloud.ErrReplacementCapacity},
+		{"creation failure", "update-1", et.UpdateStatusFailed, et.ErrorCodeNodeCreationFailure, false, cloud.ErrNeedsOperator},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			update := et.Update{Id: sdk.String(tc.id), Status: tc.status, Errors: []et.ErrorDetail{{ErrorCode: tc.code}}}
+			p := managedProvider{repairReader: &repairReader{cluster: "training", eks: &scalingUpdateFixture{out: &eks.DescribeUpdateOutput{Update: &update}}}}
+			done, err := p.scalingUpdateComplete(t.Context(), s)
+			if done != tc.complete || !errors.Is(err, tc.wantErr) {
+				t.Fatalf("complete=%t err=%v", done, err)
+			}
+		})
+	}
+}
