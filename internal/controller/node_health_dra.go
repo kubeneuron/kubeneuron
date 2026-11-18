@@ -22,7 +22,7 @@ type HealthPolicy struct {
 }
 
 // draHealthReader is a platform that reads the devices DRA drivers publish
-// for the nodes, with their taints.
+// for the nodes, with their taints: one snapshot for every existing Node.
 type draHealthReader interface {
 	DRAHealth(ctx context.Context) ([]types.NodeHealthSnapshot, error)
 }
@@ -31,8 +31,9 @@ const draHealthSourceName = "dra"
 
 // draHealthSource reads the device taints of the DRA drivers. A device
 // without a taint gives no observation. A device with a pending fault that
-// is no longer published, or a read that cannot be made, is unknown: the
-// fault is held, never cleared by what is not there.
+// its existing Node no longer publishes, or a read that cannot be made, is
+// unknown: the fault is held, never cleared by what is not there. A Node
+// that is gone, as a replaced node ends, takes its pending faults with it.
 type draHealthSource struct {
 	reader draHealthReader
 	c      *Controller
@@ -57,9 +58,11 @@ func (s draHealthSource) read(ctx context.Context) ([]nodehealth.NodeHealth, err
 	metrics.DRAHealthReads.WithLabelValues(outcome).Inc()
 	nodes := map[string]*nodehealth.NodeHealth{}
 	var order []string
+	exists := map[string]bool{}
 	published := map[string]bool{}
 	counts := map[[2]string]float64{}
 	for _, snap := range snaps {
+		exists[snap.Node] = true
 		h, states := nodehealth.EvaluateDRA(snap)
 		for _, d := range snap.DRADevices {
 			published[snap.Node+"/"+nodehealth.DRADeviceKey(d)] = true
@@ -72,7 +75,8 @@ func (s draHealthSource) read(ctx context.Context) ([]nodehealth.NodeHealth, err
 			order = append(order, snap.Node)
 		}
 	}
-	// A pending fault of a device not published in this read is held.
+	// A pending fault of a device its existing Node did not publish in this
+	// read is held; that of a Node that is gone is not.
 	s.c.health.mu.Lock()
 	var held []string
 	for key := range s.c.health.pending {
@@ -92,7 +96,7 @@ func (s draHealthSource) read(ctx context.Context) ([]nodehealth.NodeHealth, err
 		if i := strings.Index(device, "="); i >= 0 {
 			device = device[:i]
 		}
-		if published[node+"/"+device] {
+		if published[node+"/"+device] || err == nil && !exists[node] {
 			continue
 		}
 		h := nodes[node]

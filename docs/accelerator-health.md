@@ -166,7 +166,8 @@ is experimental and has not run against a driver on hardware. Checked
 against a Kubernetes 1.36.4 API server in kind (`hack/kind-dra-health.sh`):
 a ResourceSlice written by hand, with no driver running, keeps a device
 taint in `resource.k8s.io/v1` with `timeAdded` set, and the read takes it as
-a fault. The incident path is covered by unit tests only.
+a fault. The incident path is covered by unit tests only. That script is
+run by hand; CI does not run it.
 
 - **What is read.** Once per controller pass, one list of the v1
   ResourceSlices. Only a slice whose `spec.nodeName` names an existing Node
@@ -208,8 +209,9 @@ a fault. The incident path is covered by unit tests only.
   it is a number or a value listed above.
 - **Clearing and holding.** A pending fault clears only when the same
   device (driver, pool, device name) is published again without it. A
-  device that is no longer published, or a read that fails, is unknown and
-  holds the fault.
+  device its Node no longer publishes, or a read that fails, is unknown and
+  holds the fault. A Node that no longer exists, as at the end of its
+  replacement, holds nothing: its pending faults are dropped.
 - **Reads** are counted in `kubeneuron_dra_health_reads_total` by outcome.
   A cluster that serves no `resource.k8s.io/v1` ResourceSlices (before
   Kubernetes 1.34, or a beta version only) reads as `api-unavailable`;

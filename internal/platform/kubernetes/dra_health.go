@@ -27,7 +27,9 @@ const (
 )
 
 // DRAHealth reads, from the resource.k8s.io/v1 ResourceSlices, the devices
-// each existing Node publishes and their taints. Only a slice with an
+// each existing Node publishes and their taints. Every existing Node has a
+// snapshot, with no devices if it publishes none, so the caller can tell a
+// device no longer published from a Node that is gone. Only a slice with an
 // explicit spec.nodeName naming a Node that exists is read; a slice scoped
 // any other way, or malformed, is skipped. Nothing but the driver, pool,
 // device name, uuid attribute and taints is taken from a slice. The caller
@@ -79,11 +81,9 @@ func (p *Platform) DRAHealth(ctx context.Context) ([]types.NodeHealthSnapshot, e
 		}
 		snap.DRADevices = append(snap.DRADevices, devices...)
 	}
-	var out []types.NodeHealthSnapshot
+	out := make([]types.NodeHealthSnapshot, 0, len(byNode))
 	for _, snap := range byNode {
-		if len(snap.DRADevices) > 0 {
-			out = append(out, *snap)
-		}
+		out = append(out, *snap)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Node < out[j].Node })
 	return out, nil
