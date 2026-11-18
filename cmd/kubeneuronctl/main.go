@@ -296,15 +296,15 @@ func cmdIncidents() *cobra.Command {
 		if snap := detail.NodeConditions; snap != nil {
 			for _, condition := range snap.Conditions {
 				if condition.Type == "Ready" && condition.Status == "False" {
-					fmt.Fprintln(out, "Node NotReady")
+					_, _ = fmt.Fprintln(out, "Node NotReady")
 				}
 			}
-			fmt.Fprintf(out, "Node conditions observed %s\n", snap.ObservedAt.Format(time.RFC3339))
+			_, _ = fmt.Fprintf(out, "Node conditions observed %s\n", snap.ObservedAt.Format(time.RFC3339))
 			for _, condition := range snap.Conditions {
-				fmt.Fprintf(out, "  %s: %s\n", condition.Type, condition.Status)
+				_, _ = fmt.Fprintf(out, "  %s: %s\n", condition.Type, condition.Status)
 			}
 		} else if detail.NodeConditionsUnavailable != "" {
-			fmt.Fprintf(out, "Node conditions unavailable (%s)\n", detail.NodeConditionsUnavailable)
+			_, _ = fmt.Fprintf(out, "Node conditions unavailable (%s)\n", detail.NodeConditionsUnavailable)
 		}
 		if detail.ObserveOnly != "" {
 			_, _ = fmt.Fprintf(out, "observe:   %s\n", detail.ObserveOnly)
