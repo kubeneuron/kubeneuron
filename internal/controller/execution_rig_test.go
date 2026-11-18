@@ -155,6 +155,14 @@ func waitForIncident(t *testing.T, st *sqlite.Store, id string, ok func(*types.I
 	}
 }
 
+func approveRigStep(t *testing.T, ctx context.Context, c *Controller, id string) {
+	t.Helper()
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	c.reconcile(ctx)
+}
+
 // Dispatch → real durable claim → real completion → post-step advance: the
 // whole chain through one process, no fakes.
 func TestRigDispatchClaimCompleteAdvance(t *testing.T) {
@@ -170,6 +178,7 @@ func TestRigDispatchClaimCompleteAdvance(t *testing.T) {
 	agent.serve(t)
 
 	c.reconcile(ctx)
+	approveRigStep(t, ctx, c, inc.ID)
 
 	got := waitForIncident(t, st, inc.ID, func(i *types.Incident) bool {
 		return i.State == types.StateVerifying
@@ -205,6 +214,7 @@ func TestRigControllerDeathMidStepReattachesNotDuplicates(t *testing.T) {
 	// (cancel its step context so the goroutine exits without a result).
 	stepCtx, kill := context.WithCancel(ctx)
 	c.reconcile(stepCtx)
+	approveRigStep(t, stepCtx, c, inc.ID)
 	waitForIncident(t, st, inc.ID, func(i *types.Incident) bool {
 		return i.State == types.StateExecuting
 	})
@@ -234,10 +244,9 @@ func TestRigControllerDeathMidStepReattachesNotDuplicates(t *testing.T) {
 	agent.serve(t)
 
 	// Recovery pass moves EXECUTING -> EVALUATING; the next pass re-dispatches.
-	for range 3 {
-		c2.reconcile(ctx)
-		time.Sleep(20 * time.Millisecond)
-	}
+	c2.reconcile(ctx)
+	c2.reconcile(ctx)
+	approveRigStep(t, ctx, c2, inc.ID)
 	waitForIncident(t, st, inc.ID, func(i *types.Incident) bool {
 		return i.State == types.StateVerifying
 	})
@@ -265,6 +274,7 @@ func TestRigEscalationCancelsPendingActionBeforeClaim(t *testing.T) {
 
 	// Dispatch with no agent serving: the action sits pending.
 	c.reconcile(ctx)
+	approveRigStep(t, ctx, c, inc.ID)
 	waitForIncident(t, st, inc.ID, func(i *types.Incident) bool {
 		return i.State == types.StateExecuting
 	})
@@ -352,6 +362,7 @@ func TestRigLeaseExpiryRebindsToTheNewBoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.reconcile(ctx)
+	approveRigStep(t, ctx, c, inc.ID)
 	waitForIncident(t, st, inc.ID, func(i *types.Incident) bool {
 		return i.State == types.StateExecuting
 	})
