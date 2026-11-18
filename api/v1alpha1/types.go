@@ -376,6 +376,8 @@ type SafetySpec struct {
 	// NodeLevelActions enables agent recovery actions on this installation.
 	// Alpha, not validated on real hardware. Defaults to false.
 	// Existing destructive-action and approval checks still apply.
+	// +optional
+	// +kubebuilder:default=false
 	NodeLevelActions bool `json:"nodeLevelActions,omitempty"`
 
 	// +kubebuilder:default=DryRun

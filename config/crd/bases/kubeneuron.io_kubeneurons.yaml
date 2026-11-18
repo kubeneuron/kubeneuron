@@ -1640,6 +1640,7 @@ spec:
                     minimum: 1
                     type: integer
                   nodeLevelActions:
+                    default: false
                     description: |-
                       NodeLevelActions enables agent recovery actions on this installation.
                       Alpha, not validated on real hardware. Defaults to false.

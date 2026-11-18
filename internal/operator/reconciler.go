@@ -59,12 +59,13 @@ const (
 // VictoriaMetrics store, which this reconciler runs without backups.
 type KubeNeuronReconciler struct {
 	client.Client
-	AllowNodeLevelActions bool
-	APIReader             client.Reader
-	Scheme                *runtime.Scheme
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
 	// Recorder emits Kubernetes Events on the KubeNeuron object; nil (tests)
 	// disables event emission.
 	Recorder record.EventRecorder
+	// AllowNodeLevelActions permits installations to opt into alpha node-level actions.
+	AllowNodeLevelActions bool
 	// DefaultAgentAdapters are added to every installation's
 	// spec.agent.adapters (the operator's --default-agent-adapters, the Helm
 	// value agentAdapters). An installation entry replaces the default for

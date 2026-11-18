@@ -40,12 +40,12 @@ var version = "dev"
 
 func main() {
 	var (
-		allowNodeLevelActions = flag.Bool("allow-node-level-actions", false, "permit installations to opt into alpha node-level actions")
 		metricsAddr           = flag.String("metrics-bind-address", ":8080", "address for Prometheus metrics")
 		probeAddr             = flag.String("health-probe-bind-address", ":8081", "address for health probes")
 		leaderElect           = flag.Bool("leader-elect", true, "enable Kubernetes Lease leader election")
 		leaderNamespace       = flag.String("leader-election-namespace", "", "namespace for the leader-election Lease (default: pod namespace)")
 		showVersion           = flag.Bool("version", false, "print version and exit")
+		allowNodeLevelActions = flag.Bool("allow-node-level-actions", false, "permit installations to opt into alpha node-level actions")
 		defaultAdapters       = flag.String("default-agent-adapters", "",
 			"JSON list of spec.agent.adapters entries added to every installation, e.g. "+
 				`'[{"vendor":"amd","options":{"tool":"amd-smi"}}]'; an installation entry replaces a default for the same vendor`)
@@ -96,11 +96,11 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&operator.KubeNeuronReconciler{
-		AllowNodeLevelActions: *allowNodeLevelActions,
 		Client:                mgr.GetClient(),
 		APIReader:             mgr.GetAPIReader(),
 		Scheme:                mgr.GetScheme(),
 		Recorder:              mgr.GetEventRecorderFor("kubeneuron-operator"),
+		AllowNodeLevelActions: *allowNodeLevelActions,
 		DefaultAgentAdapters:  agentAdapters,
 		CollectorImage:        *collectorImage,
 		MetricsStoreImage:     *metricsStoreImage,
