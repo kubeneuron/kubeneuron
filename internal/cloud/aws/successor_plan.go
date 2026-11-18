@@ -4,7 +4,9 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -108,4 +110,20 @@ func (p *managedProvider) readSuccessorPlan(ctx context.Context, s cloud.Success
 		plan.State["nodegroup_arn"] = nodegroupARN
 	}
 	return plan, err
+}
+
+// verifySuccessorBaseline checks the persisted plan before a fresh scaling request.
+// A caller recovering an outstanding update must reconcile that update separately.
+func (p *managedProvider) verifySuccessorBaseline(ctx context.Context, saved cloud.Successor) error {
+	current, err := p.readSuccessorPlan(ctx, saved)
+	if errors.Is(err, cloud.ErrAddFirstUnavailable) {
+		return fmt.Errorf("%w: cannot confirm persisted EKS scaling plan: %v", cloud.ErrNeedsOperator, err)
+	}
+	if err != nil {
+		return err
+	}
+	if saved.Phase != cloud.SuccessorPlanned || saved.Pool != current.Pool || !maps.Equal(saved.State, current.State) {
+		return fmt.Errorf("%w: EKS nodegroup identity, zone, desired size or ASG membership changed since planning", cloud.ErrNeedsOperator)
+	}
+	return nil
 }

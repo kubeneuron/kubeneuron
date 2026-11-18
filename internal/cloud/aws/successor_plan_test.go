@@ -70,3 +70,45 @@ func TestCheckAddFirstRequiresEKSBackingGroup(t *testing.T) {
 		})
 	}
 }
+
+func TestVerifySuccessorBaseline(t *testing.T) {
+	member := func(id string) at.Instance {
+		return at.Instance{InstanceId: sdk.String(id), AvailabilityZone: sdk.String("zone-a"), LifecycleState: at.LifecycleStateInService}
+	}
+	group := at.AutoScalingGroup{
+		AutoScalingGroupName: sdk.String("workers"), AutoScalingGroupARN: sdk.String("asg-1"),
+		DesiredCapacity: sdk.Int32(2), MaxSize: sdk.Int32(3), AvailabilityZones: []string{"zone-a"},
+		Instances: []at.Instance{member("i-pinned"), member("i-peer")},
+		Tags:      []at.TagDescription{{Key: sdk.String("eks:nodegroup-name"), Value: sdk.String("gpu")}},
+	}
+	out := &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{group}}
+	eksReader := &groupHistory{group: et.Nodegroup{NodegroupArn: sdk.String("ng-1"), ClusterName: sdk.String("training"), NodegroupName: sdk.String("gpu"), Status: et.NodegroupStatusActive, Resources: &et.NodegroupResources{AutoScalingGroups: []et.AutoScalingGroup{{Name: sdk.String("workers")}}}}}
+	p := managedProvider{repairReader: &repairReader{cluster: "training", eks: eksReader, scaling: quietASG{membershipFixture{t, out}}}}
+	plan, err := p.readSuccessorPlan(t.Context(), cloud.Successor{Operation: "op", Instance: "i-pinned"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.verifySuccessorBaseline(t.Context(), plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []string{"asg replaced", "peer replaced", "nodegroup replaced", "headroom lost"} {
+		t.Run(change, func(t *testing.T) {
+			g := group
+			eksReader.group.NodegroupArn = sdk.String("ng-1")
+			switch change {
+			case "asg replaced":
+				g.AutoScalingGroupARN = sdk.String("asg-2")
+			case "peer replaced":
+				g.Instances = []at.Instance{member("i-pinned"), member("i-other")}
+			case "nodegroup replaced":
+				eksReader.group.NodegroupArn = sdk.String("ng-2")
+			case "headroom lost":
+				g.MaxSize = sdk.Int32(2)
+			}
+			out.AutoScalingGroups[0] = g
+			if err := p.verifySuccessorBaseline(t.Context(), plan); !errors.Is(err, cloud.ErrNeedsOperator) {
+				t.Fatalf("got %v", err)
+			}
+		})
+	}
+}
