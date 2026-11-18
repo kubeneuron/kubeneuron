@@ -1587,10 +1587,22 @@ func TestCheckpointBudgetExpiryEndsTheWaitAsUnreachable(t *testing.T) {
 		return checkpoint.Observation{Found: true, UID: w.UID, Annotations: w.Annotations}
 	}
 	plat.seen = func(ctx context.Context, call string) {
-		if strings.HasPrefix(call, "observe") && ctx.Err() != nil {
+		if !strings.HasPrefix(call, "observe") {
+			return
+		}
+		if ctx.Err() != nil {
 			mu.Lock()
 			readAfterBudget++
 			mu.Unlock()
+			return
+		}
+		// A read that starts in the second half of the budget outlives it:
+		// the budget then ends while the read is in flight, never between the
+		// coordinator's last look at its context and the next read. With a
+		// 1ms poll, letting the deadline land between that look and the call
+		// made a correct coordinator fail this test on a busy runner.
+		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < budget/2 {
+			<-ctx.Done()
 		}
 	}
 	var drainCtx context.Context
