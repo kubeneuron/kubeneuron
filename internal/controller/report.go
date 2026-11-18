@@ -98,7 +98,7 @@ func (c *Controller) RecoveryReport(ctx context.Context, window time.Duration) (
 			resolved = append(resolved, inc.ID)
 		}
 	}
-	executed, err := c.store.ExecutedStepResults(ctx, resolved)
+	executed, err := c.store.VerifiedStepResults(ctx, resolved)
 	if err != nil {
 		// Fail loud. Without the audit there is no way to tell a repair from an
 		// incident that merely aged out quietly, and the difference is the whole

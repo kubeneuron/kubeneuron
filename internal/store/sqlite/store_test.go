@@ -776,6 +776,13 @@ func TestExecutedStepResultsReadsRemediationEvidence(t *testing.T) {
 		}
 	}
 
+	audit("acted", types.StateVerifying, types.StateResolved, "resolve", "healthy")
+	audit("outcome", types.StateNeedsHuman, types.StateResolved, "manual-resolve", "closed by operator")
+	verified, err := s.VerifiedStepResults(ctx, []string{"acted", "outcome", "observed"})
+	if err != nil || len(verified) != 1 || !hasResult(verified["acted"], "executing platform.cordon") {
+		t.Fatalf("verified results = %v, %v; want only the verified incident", verified, err)
+	}
+
 	// An empty request is a legitimate report over a quiet window, not a query
 	// with a dangling IN clause.
 	empty, err := s.ExecutedStepResults(ctx, nil)

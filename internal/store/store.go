@@ -152,6 +152,7 @@ type Store interface {
 	// with an empty slice, so "nothing ran" and "not asked about" stay
 	// distinguishable at the call site.
 	ExecutedStepResults(ctx context.Context, incidentIDs []string) (map[string][]string, error)
+	VerifiedStepResults(ctx context.Context, incidentIDs []string) (map[string][]string, error)
 
 	// Approvals
 	RecordApproval(ctx context.Context, a *types.Approval) error

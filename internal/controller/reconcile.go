@@ -1024,7 +1024,7 @@ func (c *Controller) recordRecoveryOutcome(ctx context.Context, inc *types.Incid
 		if inc.ApprovalEpoch == 0 {
 			unattended = "true"
 		}
-		executed, err := c.store.ExecutedStepResults(ctx, []string{inc.ID})
+		executed, err := c.store.VerifiedStepResults(ctx, []string{inc.ID})
 		if err != nil {
 			c.log.Warn("reading recovery counter evidence", "incident", inc.ID, "error", err)
 		} else if remediationOutcome(executed[inc.ID], false) {

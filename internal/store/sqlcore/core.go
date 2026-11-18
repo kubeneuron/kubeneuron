@@ -829,6 +829,23 @@ const executedStepResultsChunk = 500
 
 // ExecutedStepResults implements store.Store.
 func (q *Queries) ExecutedStepResults(ctx context.Context, incidentIDs []string) (map[string][]string, error) {
+	return q.executedStepResults(ctx, incidentIDs, "")
+}
+
+// VerifiedStepResults restricts action evidence to incidents whose latest
+// resolution was the controller's verification transition.
+func (q *Queries) VerifiedStepResults(ctx context.Context, incidentIDs []string) (map[string][]string, error) {
+	return q.executedStepResults(ctx, incidentIDs, ` AND (
+		SELECT CASE WHEN terminal.actor = 'system' AND terminal.from_state = 'VERIFYING'
+		                AND terminal.action = 'resolve' THEN 1 ELSE 0 END
+		FROM audit_log terminal
+		WHERE terminal.incident_id = audit_log.incident_id
+		  AND terminal.to_state = 'RESOLVED' AND terminal.from_state <> 'RESOLVED'
+		ORDER BY terminal.id DESC LIMIT 1
+	) = 1`)
+}
+
+func (q *Queries) executedStepResults(ctx context.Context, incidentIDs []string, resolutionFilter string) (map[string][]string, error) {
 	out := make(map[string][]string, len(incidentIDs))
 	for start := 0; start < len(incidentIDs); start += executedStepResultsChunk {
 		end := min(start+executedStepResultsChunk, len(incidentIDs))
@@ -853,7 +870,7 @@ func (q *Queries) ExecutedStepResults(ctx context.Context, incidentIDs []string)
 				result LIKE 'step-outcome: %'
 				OR (to_state='EXECUTING' AND from_state <> 'EXECUTING'
 					AND result NOT LIKE 'step-start: %')
-			  )`, args...)
+			  )`+resolutionFilter, args...)
 		if err != nil {
 			return nil, err
 		}
