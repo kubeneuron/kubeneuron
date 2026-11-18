@@ -64,3 +64,38 @@ func TestKubernetesInventoryKeepsAPause(t *testing.T) {
 		t.Fatalf("row = %+v", got)
 	}
 }
+
+// Only a row read from Kubernetes, unpaused and without an agent, is
+// removed when its Node is gone.
+func TestDeleteKubernetesInventoryKeepsOtherRows(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	gpu := []types.DeviceCount{{Resource: "nvidia.com/gpu", Capacity: 8, Allocatable: 8, Unit: types.DeviceUnitGPU}}
+	for _, name := range []string{"gone", "agent", "paused"} {
+		if err := st.UpsertKubernetesInventory(ctx, &types.Node{Name: name, Labels: map[string]string{"pool": "a"}, Devices: gpu}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := st.GetNode(ctx, "gone"); err != nil || got.Labels["pool"] != "a" {
+		t.Fatalf("labels not recorded: %+v, %v", got, err)
+	}
+	if err := st.UpsertAgentRegistration(ctx, &types.Node{Name: "agent", AgentLastSeen: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ApplyNodeConfigPauses(ctx, []string{"paused"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"gone", "agent", "paused"} {
+		if err := st.DeleteKubernetesInventory(ctx, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.GetNode(ctx, "gone"); err == nil {
+		t.Fatal("the vanished node's row is still there")
+	}
+	for _, name := range []string{"agent", "paused"} {
+		if _, err := st.GetNode(ctx, name); err != nil {
+			t.Fatalf("%s was removed: %v", name, err)
+		}
+	}
+}

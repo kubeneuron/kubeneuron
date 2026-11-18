@@ -1110,14 +1110,25 @@ func (q *Queries) UpsertKubernetesInventory(ctx context.Context, n *types.Node) 
 	if n.Devices == nil {
 		devices = []byte("[]")
 	}
+	labels, _ := json.Marshal(n.Labels)
+	if n.Labels == nil {
+		labels = []byte("{}")
+	}
 	_, err := q.db.ExecContext(ctx, `
-		INSERT INTO nodes (name, node_uid, platform, devices, inventory_source)
-		VALUES (?, ?, 'kubernetes', ?, 'kubernetes')
+		INSERT INTO nodes (name, node_uid, platform, labels, devices, inventory_source)
+		VALUES (?, ?, 'kubernetes', ?, ?, 'kubernetes')
 		ON CONFLICT(name) DO UPDATE SET
 			node_uid=CASE WHEN excluded.node_uid<>'' THEN excluded.node_uid ELSE nodes.node_uid END,
-			devices=excluded.devices, inventory_source='kubernetes'
+			labels=excluded.labels, devices=excluded.devices, inventory_source='kubernetes'
 		WHERE nodes.agent_last_seen IS NULL`,
-		n.Name, n.UID, string(devices))
+		n.Name, n.UID, string(labels), string(devices))
+	return err
+}
+
+func (q *Queries) DeleteKubernetesInventory(ctx context.Context, name string) error {
+	_, err := q.db.ExecContext(ctx, `
+		DELETE FROM nodes
+		WHERE name=? AND inventory_source='kubernetes' AND agent_last_seen IS NULL AND paused=0`, name)
 	return err
 }
 

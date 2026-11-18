@@ -486,12 +486,13 @@ type NodePresence interface {
 	NodeExists(ctx context.Context, node string) (bool, error)
 }
 
-// AcceleratorInventory is implemented by platforms that can list, from the
-// node objects themselves, the nodes advertising whole accelerator devices,
-// so a node without kubeneuron-agent is still known. Each node carries Name,
-// UID and Devices.
+// AcceleratorInventory is implemented by platforms that can list the node
+// objects themselves, so a node without kubeneuron-agent is still known.
+// NodeInventory returns every node, with Name, UID, Labels and the whole
+// accelerator devices it advertises (none for a node that advertises none):
+// a node missing from a successful read is gone.
 type AcceleratorInventory interface {
-	AcceleratorNodes(ctx context.Context) ([]types.Node, error)
+	NodeInventory(ctx context.Context) ([]types.Node, error)
 }
 
 // NodeIdentity is implemented by platforms that can read the UID of one

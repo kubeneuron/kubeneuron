@@ -23,11 +23,19 @@ var inventoryResources = map[corev1.ResourceName]types.DeviceUnit{
 	"aws.amazon.com/neuron": types.DeviceUnitAWSDevice,
 }
 
-// AcceleratorNodes implements platform.AcceleratorInventory: every Node that
-// advertises a whole accelerator device, with its UID and the capacity and
-// allocatable count of each such resource. It reads the synced node cache,
+const (
+	neuronResource = corev1.ResourceName("aws.amazon.com/neuron")
+	// neuronDeviceResource is the name Neuron device plugins before release
+	// 2.20 gave aws.amazon.com/neuron. It is counted only when the current
+	// name is absent, so one device is never counted twice.
+	neuronDeviceResource = corev1.ResourceName("aws.amazon.com/neurondevice")
+)
+
+// NodeInventory implements platform.AcceleratorInventory: every Node, with
+// its UID, labels and the capacity and allocatable count of each whole
+// accelerator device resource it advertises. It reads the synced node cache,
 // or the API server while the cache is not synced or holds no node.
-func (p *Platform) AcceleratorNodes(ctx context.Context) ([]types.Node, error) {
+func (p *Platform) NodeInventory(ctx context.Context) ([]types.Node, error) {
 	var nodes []*corev1.Node
 	if lp := p.nodeLister.Load(); lp != nil {
 		if cached, err := (*lp).List(labels.Everything()); err == nil {
@@ -43,11 +51,9 @@ func (p *Platform) AcceleratorNodes(ctx context.Context) ([]types.Node, error) {
 			nodes = append(nodes, &list.Items[i])
 		}
 	}
-	var out []types.Node
+	out := make([]types.Node, 0, len(nodes))
 	for _, n := range nodes {
-		if devices := nodeDevices(n); len(devices) > 0 {
-			out = append(out, types.Node{Name: n.Name, UID: string(n.UID), Devices: devices})
-		}
+		out = append(out, types.Node{Name: n.Name, UID: string(n.UID), Labels: n.Labels, Devices: nodeDevices(n)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
@@ -55,10 +61,10 @@ func (p *Platform) AcceleratorNodes(ctx context.Context) ([]types.Node, error) {
 
 func nodeDevices(n *corev1.Node) []types.DeviceCount {
 	var out []types.DeviceCount
-	for name, unit := range inventoryResources {
+	add := func(name corev1.ResourceName, unit types.DeviceUnit) bool {
 		capacity, ok := n.Status.Capacity[name]
 		if !ok || capacity.Value() <= 0 {
-			continue
+			return false
 		}
 		var allocatable int64
 		if q, ok := n.Status.Allocatable[name]; ok {
@@ -67,6 +73,12 @@ func nodeDevices(n *corev1.Node) []types.DeviceCount {
 		out = append(out, types.DeviceCount{
 			Resource: string(name), Capacity: capacity.Value(), Allocatable: allocatable, Unit: unit,
 		})
+		return true
+	}
+	for name, unit := range inventoryResources {
+		if !add(name, unit) && name == neuronResource {
+			add(neuronDeviceResource, unit)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Resource < out[j].Resource })
 	return out

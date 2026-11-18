@@ -231,6 +231,10 @@ type Store interface {
 	// node whose agent has registered is left untouched: the agent is the
 	// source of truth.
 	UpsertKubernetesInventory(ctx context.Context, n *types.Node) error
+	// DeleteKubernetesInventory removes the row of a node read from
+	// Kubernetes whose Node object is gone. A row an agent registered, or
+	// one a pause config holds, is kept.
+	DeleteKubernetesInventory(ctx context.Context, name string) error
 	GetNode(ctx context.Context, name string) (*types.Node, error)
 	ListNodes(ctx context.Context) ([]*types.Node, error)
 	// ApplyNodeConfigPauses makes the given set the complete list of paused
