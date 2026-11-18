@@ -68,9 +68,9 @@ ARG MUSL_VERSION=1.2.5
 ARG MUSL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
 RUN apk add --no-cache bash build-base curl linux-headers
 WORKDIR /src
-RUN curl -fsSLo toybox.tar.gz "https://landley.net/toybox/downloads/toybox-${TOYBOX_VERSION}.tar.gz" \
+RUN curl --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 300 -fsSLo toybox.tar.gz "https://landley.net/toybox/downloads/toybox-${TOYBOX_VERSION}.tar.gz" \
  && echo "${TOYBOX_SHA256}  toybox.tar.gz" | sha256sum -c - \
- && curl -fsSLo musl.tar.gz "https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz" \
+ && curl --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 300 -fsSLo musl.tar.gz "https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz" \
  && echo "${MUSL_SHA256}  musl.tar.gz" | sha256sum -c - \
  && apk list -I musl | grep -q "^musl-${MUSL_VERSION}-" \
  && tar xzf toybox.tar.gz && tar xzf musl.tar.gz "musl-${MUSL_VERSION}/COPYRIGHT"
