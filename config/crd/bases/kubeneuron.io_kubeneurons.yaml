@@ -1909,6 +1909,10 @@ spec:
                 - message: TLS key-pair Secret references cannot select one key
                   rule: '!has(self.serverSecretRef.key) && !has(self.clientSecretRef.key)
                     && (!has(self.publicServerSecretRef) || !has(self.publicServerSecretRef.key))'
+              trainingReports:
+                description: TrainingReports enables the in-cluster HTTPS endpoint
+                  for authenticated worker reports.
+                type: boolean
               workflowStore:
                 description: |-
                   WorkflowStoreSpec describes the authoritative store for workflow state.

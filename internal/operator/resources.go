@@ -26,6 +26,7 @@ import (
 
 const (
 	controllerPort               = 8080
+	trainingReportPort           = 8444
 	agentIngressPort             = 8443
 	agentPort                    = 9402
 	agentTokenAudience           = "kubeneuron-controller"
@@ -260,7 +261,7 @@ func controllerClusterRoleBinding(installation *kubeneuronv1alpha1.KubeNeuron) *
 
 func controllerService(installation *kubeneuronv1alpha1.KubeNeuron) *corev1.Service {
 	labels := resourceLabels(installation, "controller")
-	return &corev1.Service{
+	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      installation.Name + "-controller",
 			Namespace: installation.Spec.Namespace,
@@ -284,6 +285,10 @@ func controllerService(installation *kubeneuronv1alpha1.KubeNeuron) *corev1.Serv
 			},
 		},
 	}
+	if installation.Spec.TrainingReports {
+		service.Spec.Ports = append(service.Spec.Ports, corev1.ServicePort{Name: "training-https", Protocol: corev1.ProtocolTCP, Port: trainingReportPort, TargetPort: intstr.FromString("training-https")})
+	}
+	return service
 }
 
 func sqliteStorageQuantity(store kubeneuronv1alpha1.WorkflowStoreSpec) (resource.Quantity, error) {
@@ -444,6 +449,10 @@ func controllerDeployment(installation *kubeneuronv1alpha1.KubeNeuron, snapshot 
 			{Name: "server-tls", MountPath: "/var/run/secrets/kube-neuron/server-tls", ReadOnly: true},
 			{Name: "client-ca", MountPath: "/var/run/secrets/kube-neuron/client-ca", ReadOnly: true},
 		},
+	}
+	if installation.Spec.TrainingReports {
+		args = append(args, fmt.Sprintf("--training-report-listen=:%d", trainingReportPort))
+		container.Ports = append(container.Ports, corev1.ContainerPort{Name: "training-https", ContainerPort: trainingReportPort, Protocol: corev1.ProtocolTCP})
 	}
 	if cloud := installation.Spec.Cloud; cloud != nil && cloud.Provider == "aws" && cloud.AWS != nil && cloud.AWS.ClusterName != "" {
 		container.Env = append(container.Env, corev1.EnvVar{Name: "KUBENEURON_EKS_CLUSTER", Value: cloud.AWS.ClusterName})

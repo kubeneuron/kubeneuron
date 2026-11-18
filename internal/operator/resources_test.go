@@ -1307,3 +1307,36 @@ func TestControllerNoCloudByDefault(t *testing.T) {
 		t.Fatal("no IRSA annotation without spec.cloud")
 	}
 }
+
+func TestTrainingReportPortOptIn(t *testing.T) {
+	installation := testKubeNeuron()
+	for _, enabled := range []bool{false, true, false} {
+		installation.Spec.TrainingReports = enabled
+		deployment, err := controllerDeployment(installation, &Snapshot{Digest: "config"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		container := deployment.Spec.Template.Spec.Containers[0]
+		listens := false
+		for _, arg := range container.Args {
+			if arg == "--training-report-listen=:8444" {
+				listens = true
+			}
+		}
+		exposed := false
+		for _, port := range container.Ports {
+			if port.Name == "training-https" && port.ContainerPort == 8444 {
+				exposed = true
+			}
+		}
+		routed := false
+		for _, port := range controllerService(installation).Spec.Ports {
+			if port.Port == 8444 && port.TargetPort == intstr.FromString("training-https") {
+				routed = true
+			}
+		}
+		if listens != enabled || exposed != enabled || routed != enabled {
+			t.Fatalf("enabled=%v listens=%v containerPort=%v servicePort=%v", enabled, listens, exposed, routed)
+		}
+	}
+}

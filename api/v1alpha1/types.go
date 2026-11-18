@@ -1117,6 +1117,8 @@ type KubeNeuronSpec struct {
 	Approvals     ApprovalSpec       `json:"approvals,omitempty"`
 	Notifications *NotificationsSpec `json:"notifications,omitempty"`
 	WorkflowStore WorkflowStoreSpec  `json:"workflowStore"`
+	// TrainingReports enables the in-cluster HTTPS endpoint for authenticated worker reports.
+	TrainingReports bool `json:"trainingReports,omitempty"`
 	// Cloud enables node recycle/replace remediation against the cloud provider
 	// behind the nodes. Leave empty to disable it; a RecycleNode/ReplaceNode
 	// step then fails closed rather than silently succeeding.
