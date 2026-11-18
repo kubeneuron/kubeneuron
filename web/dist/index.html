@@ -685,6 +685,11 @@ function renderFleet(){
 }
 
 /* ---------- v0.4 operations console ---------- */
+function recoveryActionLabel(action){
+  const hostAction = typeof action === "string" && (action.startsWith("agent.") ||
+    action === "platform.quiesce_accelerator_stack" || action === "platform.restore_accelerator_stack");
+  return hostAction ? action + " (Alpha, not validated on real hardware.)" : action;
+}
 function statePill(state){ return `<span class="pill ${esc(state)}">${esc(state || "—")}</span>`; }
 function reasons(result){
   const codes = (result && result.reason_codes) || [];
@@ -724,7 +729,7 @@ async function loadReadiness(){
 function renderOperations(){
   $("candidateRows").innerHTML = (cache.candidates||[]).map(candidate => `<tr><td class="mono">${esc(candidate.id)}</td><td>${statePill(candidate.state)}</td><td class="mono small" title="${esc(candidate.normalized_digest)}">${esc((candidate.normalized_digest||"—").slice(0,20))}</td><td class="mono small">${esc((candidate.expires_at||"—").replace("T"," ").slice(0,19))}</td><td>${esc(candidate.actor||"—")}</td><td style="text-align:right"><button class="btn" onclick="showPreview('${esc(candidate.id)}')">Show preview</button>${candidate.state==="uploaded" ? ` <button class="btn" onclick="createPreview('${esc(candidate.id)}')">Preview</button> <button class="btn danger" onclick="revokeCandidate('${esc(candidate.id)}',${Number(candidate.resource_version)||0})">Revoke</button>` : ' <span class="dimmer">retained for audit</span>'}</td></tr>`).join("") || `<tr><td colspan="6" class="dimmer">no candidate uploads yet</td></tr>`;
   $("healthRows").innerHTML = (cache.healthChecks||[]).map(run => `<tr><td class="mono">${esc(run.id)}</td><td class="mono">${esc(run.node)}</td><td>${esc(run.profile)}</td><td>${statePill(run.state)}</td><td class="small dim">${esc(run.outcome||"queued")}${run.state==="queued" ? ` <button class="btn" onclick="cancelHealthCheck('${esc(run.id)}',${Number(run.resource_version)||0})">Cancel</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="dimmer">no health checks yet</td></tr>`;
-  $("simulationRows").innerHTML = (cache.simulations||[]).map(sim => `<tr><td class="mono">${esc(sim.id)}</td><td class="mono">${esc(sim.node)}</td><td>${statePill((sim.decision||{}).state)}</td><td class="small">${esc((sim.steps||[]).map(step=>step.action).join(" → ") || "—")}</td><td class="mono">${esc(sim.incident_id||"—")}${!sim.incident_id && sim.decision && sim.decision.state==="Eligible" ? ` <button class="btn" onclick="createIncidentFromSimulation('${esc(sim.id)}',${Number(sim.resource_version)||0})">Create incident</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="dimmer">no simulations yet</td></tr>`;
+  $("simulationRows").innerHTML = (cache.simulations||[]).map(sim => `<tr><td class="mono">${esc(sim.id)}</td><td class="mono">${esc(sim.node)}</td><td>${statePill((sim.decision||{}).state)}</td><td class="small">${esc((sim.steps||[]).map(step=>recoveryActionLabel(step.action)).join(" → ") || "—")}</td><td class="mono">${esc(sim.incident_id||"—")}${!sim.incident_id && sim.decision && sim.decision.state==="Eligible" ? ` <button class="btn" onclick="createIncidentFromSimulation('${esc(sim.id)}',${Number(sim.resource_version)||0})">Create incident</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="5" class="dimmer">no simulations yet</td></tr>`;
 }
 async function loadOperations(){
   try {
@@ -1097,7 +1102,7 @@ async function renderDrawer(){
   const uniq = [...new Set(steps)];
   $("dLadder").innerHTML = uniq.map((name, i) => {
     const last = i === uniq.length - 1 && ACTIVE(inc.state);
-    return `<span class="step ${last ? "now" : "done"}">${last ? "◌" : "✓"} ${esc(name)}</span>`;
+    return `<span class="step ${last ? "now" : "done"}">${last ? "◌" : "✓"} ${esc(recoveryActionLabel(name))}</span>`;
   }).join("") || `<span class="dimmer" style="font-size:.78rem">no steps executed yet</span>`;
 
   $("dTl").innerHTML = d.audit.map(e => {
@@ -1110,7 +1115,7 @@ async function renderDrawer(){
     return `<div class="ev${human ? " human":""}">
       <div class="l1"><span class="t">${esc((e.time||"").replace("T"," ").slice(0,19))}</span>
         <span class="tr">${esc(e.from_state)} → ${esc(e.to_state)}</span>
-        <span class="who">${esc(who)}</span><span class="dim">${esc(e.action || "")}</span></div>
+        <span class="who">${esc(who)}</span><span class="dim">${esc(recoveryActionLabel(e.action) || "")}</span></div>
       ${e.result ? `<div class="res">${esc(e.result)}</div>` : ""}
     </div>`;
   }).join("");
