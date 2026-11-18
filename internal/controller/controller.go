@@ -47,7 +47,10 @@ type Controller struct {
 	droppedSignals atomic.Uint64
 	eventOutbox    store.EventOutbox
 	eventWake      chan struct{}
-	eventWorkerID  string
+	// interruptionWake runs the interruption pass at once when the cloud's
+	// interruption queue delivers a notice.
+	interruptionWake chan struct{}
+	eventWorkerID    string
 
 	// inFlight tracks incidents whose current step is executing in its own
 	// goroutine, so the reconcile tick never double-drives them.
@@ -298,19 +301,20 @@ func New(
 		limits = gate.Limits()
 	}
 	c := &Controller{
-		store:         st,
-		sink:          sink,
-		gate:          gate,
-		flap:          flap,
-		platform:      plat,
-		actuator:      act,
-		notifier:      notifier,
-		log:           log,
-		signals:       make(chan types.Signal, 256),
-		eventWake:     make(chan struct{}, 1),
-		inventoryWake: make(chan struct{}, 1),
-		eventWorkerID: fmt.Sprintf("controller-%d", time.Now().UnixNano()),
-		inFlight:      map[string]bool{},
+		store:            st,
+		sink:             sink,
+		gate:             gate,
+		flap:             flap,
+		platform:         plat,
+		actuator:         act,
+		notifier:         notifier,
+		log:              log,
+		signals:          make(chan types.Signal, 256),
+		eventWake:        make(chan struct{}, 1),
+		interruptionWake: make(chan struct{}, 1),
+		inventoryWake:    make(chan struct{}, 1),
+		eventWorkerID:    fmt.Sprintf("controller-%d", time.Now().UnixNano()),
+		inFlight:         map[string]bool{},
 		// Sized well past any real fleet's distinct (condition, node) pairs, so
 		// eviction is a backstop rather than something a normal install meets.
 		logOnce:         newLogOnce(4096),
@@ -376,6 +380,9 @@ func (c *Controller) Run(ctx context.Context) error {
 	// is guarded by optimistic versioning, so a racing update degrades to one
 	// side's ErrConflict and a retry next tick.
 	go c.runJanitors(ctx)
+	if q, ok := c.platform.(cloudInterruptionQueue); ok && q.CloudInterruptionQueueConfigured() {
+		go c.receiveCloudInterruptions(ctx, q)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -414,10 +421,18 @@ func (c *Controller) runJanitors(ctx context.Context) {
 		c.reconcileDegradedTaints(passCtx)
 		c.resolveIncidentsOnVanishedNodes(passCtx)
 		c.pollInterruptions(passCtx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-tick.C:
+	wait:
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				break wait
+			case <-c.interruptionWake:
+				// A notice from the cloud's queue: the deadline may be two
+				// minutes away, so it is not left for the next pass.
+				c.pollInterruptions(c.pinRuntimeConfig(ctx))
+			}
 		}
 	}
 }

@@ -111,6 +111,14 @@ type AWSCloudSpec struct {
 	// controller ServiceAccount so IRSA grants ec2:Stop/Start/Terminate/
 	// DescribeInstances. Required unless the role is attached another way.
 	IAMRoleARN string `json:"iamRoleARN,omitempty"`
+	// InterruptionQueueURL is an SQS queue that EventBridge delivers the
+	// account's EC2 spot interruption, rebalance and instance state-change
+	// events and AWS Health scheduled changes to. The controller reads it and
+	// deletes the messages it has read; the queue must be dedicated to this
+	// installation. Empty reads no queue. Experimental.
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^https://sqs\.[a-z0-9-]+\.amazonaws\.com(\.cn)?/[0-9]{12}/[A-Za-z0-9_-]{1,80}$`
+	InterruptionQueueURL string `json:"interruptionQueueURL,omitempty"`
 }
 
 // TLSIssuer names who fills in an installation's TLS Secrets.

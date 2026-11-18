@@ -9,6 +9,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	// Blank import registers every cloud provider. Adding a cloud is a new
 	// provider package plus one import line in internal/cloud/providers.
+	"github.com/kubeneuron/kubeneuron/internal/cloud/aws"
 	"github.com/kubeneuron/kubeneuron/internal/cloud/azure"
 	"github.com/kubeneuron/kubeneuron/internal/cloud/gcp"
 	_ "github.com/kubeneuron/kubeneuron/internal/cloud/providers"
@@ -22,7 +23,10 @@ func newInstanceRecycler(ctx context.Context, provider, region string) (platform
 	cfg := cloud.Config{Region: region}
 	switch provider {
 	case "aws":
-		cfg.Options = map[string]string{"cluster": os.Getenv("KUBENEURON_EKS_CLUSTER")}
+		cfg.Options = map[string]string{
+			"cluster":                   os.Getenv("KUBENEURON_EKS_CLUSTER"),
+			aws.OptionInterruptionQueue: os.Getenv("KUBENEURON_AWS_INTERRUPTION_QUEUE_URL"),
+		}
 	case "azure":
 		cfg.Options = map[string]string{
 			azure.OptionSubscription:  os.Getenv("KUBENEURON_AKS_SUBSCRIPTION_ID"),

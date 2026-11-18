@@ -19,8 +19,10 @@ checkpoint in well under a minute will usually not finish one.
 
 ## What KubeNeuron reads
 
-KubeNeuron reads only signals that a provider or its documented tooling puts
-on the Node object. It calls no instance metadata endpoint.
+KubeNeuron reads signals that a provider or its documented tooling puts on
+the Node object and, on AWS when configured, an
+[event queue](#the-aws-interruption-queue). It calls no instance metadata
+endpoint.
 
 | Cloud | Signal on the node | Set by | Kind | Deadline |
 |---|---|---|---|---|
@@ -31,9 +33,9 @@ on the Node object. It calls no instance metadata endpoint.
 | EKS | taint `aws-node-termination-handler/rebalance-recommendation` | AWS Node Termination Handler with `--taint-node` | `rebalance` | none |
 | EKS | taint `aws-node-termination-handler/scheduled-maintenance` | AWS Node Termination Handler with `--taint-node` | `scheduled-maintenance` | none given; assumed 30 seconds |
 
-EKS managed node groups set no signal of their own. On EKS, install the AWS
-Node Termination Handler in its IMDS mode with `--taint-node`, or wait for the
-queue-based reader. KubeNeuron does not install, copy or configure the
+EKS managed node groups set no signal of their own. On EKS, configure the
+[AWS interruption queue](#the-aws-interruption-queue), or install the AWS
+Node Termination Handler in its IMDS mode with `--taint-node`. KubeNeuron does not install, copy or configure the
 handler. GKE sets no documented node signal for spot reclaim; a GKE spot
 node is not covered.
 
@@ -55,6 +57,79 @@ assumption where the source documents none:
 
 When the assumed time leaves no room for the 30-second margin, the jobs are
 still asked, with the assumed deadline itself.
+
+## The AWS interruption queue
+
+This is experimental: it is not validated against live AWS events. The event
+formats are parsed from the examples in the AWS documentation, read on
+2026-11-18.
+
+Amazon EventBridge can deliver the account's EC2 interruption events to an
+Amazon SQS queue. KubeNeuron reads that queue when
+`spec.cloud.aws.interruptionQueueURL` is set; it is off by default.
+
+```yaml
+spec:
+  cloud:
+    provider: aws
+    aws:
+      region: us-east-1
+      clusterName: training
+      interruptionQueueURL: https://sqs.us-east-1.amazonaws.com/123456789012/kubeneuron-interruptions
+```
+
+Set up, in the controller's region:
+
+- A standard SQS queue, **dedicated to this KubeNeuron installation**.
+  KubeNeuron deletes the messages it reads, including those about instances
+  that are not nodes of this cluster. Do not point it at a queue the AWS Node
+  Termination Handler, Karpenter or another installation reads: they would
+  lose those messages, and KubeNeuron would lose theirs.
+- A queue policy that allows `sqs:SendMessage` to the principal
+  `events.amazonaws.com`.
+- EventBridge rules that send these events to the queue (the same rules the
+  AWS Node Termination Handler documents for its queue mode):
+
+  | Event source | Detail type | Kind | Deadline |
+  |---|---|---|---|
+  | `aws.ec2` | `EC2 Spot Instance Interruption Warning` | `spot-reclaim` | the event's `time` plus 2 minutes (assumed) |
+  | `aws.ec2` | `EC2 Instance Rebalance Recommendation` | `rebalance` | none |
+  | `aws.health` | `AWS Health Event`, service `EC2`, category `scheduledChange` | `scheduled-maintenance` | the event's `startTime` |
+  | `aws.ec2` | `EC2 Instance State-change Notification` | see below | |
+
+- For the controller's role, `sqs:ReceiveMessage` and `sqs:DeleteMessage` on
+  this queue only.
+
+The spot event documents no deadline: AWS sends it two minutes before the
+instance is interrupted. KubeNeuron assumes the event's `time` plus two
+minutes; the real deadline may be earlier.
+
+An instance state change opens no incident. `running` after a notice says
+the instance is back, and closes the incident as ended; the other states are
+left to the node's removal. A state change for an instance with no open
+notice is deleted without a record.
+
+How a message is handled:
+
+- A notice is acknowledged, and its message deleted, only after the notice is
+  written to the incident. A message whose notice could not be written comes
+  back after five minutes (the visibility timeout used) and is recognised by
+  its event ID, or for AWS Health by the event ARN and instance.
+- A notice for an instance that is not a node of this cluster is deleted and
+  counted as `outcome="foreign"`; it opens nothing.
+- A message that is not one of the events above, or cannot be read, is
+  deleted and counted as `kind="unknown"`, `outcome="unrecognised"`.
+
+The controller that leads long-polls the queue (20 seconds per request) and
+records a notice as soon as it arrives. The checkpoint warning then starts on
+the next reconcile, within 10 seconds by default. With EventBridge's own
+delivery time, expect the warning some seconds to tens of seconds after the
+event; AWS states no delivery time.
+
+The only change KubeNeuron makes in AWS for this is deleting the messages it
+has read from this queue. The long poll runs without pause while the
+controller leads; the SQS requests are billed to the account owner at AWS
+rates.
 
 ## What happens
 
@@ -121,8 +196,10 @@ incident is running.
 
 - The node is deleted: the incident is resolved as replaced.
 - The notice is no longer present and the node is still there: the
-  incident is closed as ended, and only the cordon this incident placed is
-  removed. KubeNeuron cannot tell a cancelled notice from maintenance that was
+  incident is closed as ended. A notice from the AWS queue is delivered once,
+  so its absence does not close the incident; it is closed as ended when AWS
+  Health reports the event `closed` or the instance is `running` again. In
+  either case only the cordon this incident placed is removed. KubeNeuron cannot tell a cancelled notice from maintenance that was
   completed in place (a reboot, a frozen VM, a VM restarted under the same
   node), so it does not say which.
 - The node and the notice are both still there an hour after the deadline:
@@ -132,7 +209,11 @@ incident is running.
 ## What is recorded
 
 The incident records the kind, the deadline and the source of each notice.
-It does not record the cloud's message text. The node is not counted
+It does not record the cloud's message text. From the AWS queue, KubeNeuron
+reads the event's source, detail type, ID and time, the instance ID and state,
+and for AWS Health the event ARN, service, category, `startTime`,
+`statusCode` and the affected instance IDs. The message body, the Health
+`eventDescription` and the account ID are not stored or logged. The node is not counted
 as degraded: the incident is left out of `kubeneuron_degraded_gpus`,
 `kubeneuron_degraded_gpu_seconds_total` and
 `kubeneuron_incidents_recovered_total`, and `kubeneuronctl report` counts

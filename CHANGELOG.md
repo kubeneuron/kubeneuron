@@ -43,6 +43,20 @@ API is `v1alpha1`.
   `kubeneuron_cloud_interruptions_total`. See
   [Announced cloud interruptions](docs/cloud-interruptions.md).
 
+- **AWS interruption queue (experimental, not validated against live AWS
+  events).** With `spec.cloud.aws.interruptionQueueURL` set, the controller
+  long-polls an SQS queue that EventBridge fills with the EC2 spot
+  interruption warning, rebalance recommendation and instance state-change
+  events and AWS Health scheduled changes, parsed from the AWS documentation
+  examples (2026-11-18). A message is deleted only after its notice is
+  written to the incident; an event for an instance outside the cluster is
+  deleted and counted as `foreign`. The queue must be dedicated to one
+  installation. A spot deadline is assumed to be the event's time plus two
+  minutes. A queued notice ends the incident only when AWS Health closes the
+  event or the instance runs again. Off by default; needs
+  `sqs:ReceiveMessage` and `sqs:DeleteMessage` on the queue. See
+  [The AWS interruption queue](docs/cloud-interruptions.md#the-aws-interruption-queue).
+
 - **Add-first replacement contract.** A cloud provider can now prepare a
   replacement node before the affected node is cordoned
   (`cloud.SuccessorProvider`, `Capabilities.AddFirst`). Under

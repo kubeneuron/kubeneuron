@@ -1058,6 +1058,10 @@ Grant the controller role these read permissions for native repair checks:
   `autoscaling:DescribeScalingActivities`
 - `ec2:DescribeInstanceStatus`
 
+To read [announced interruptions from an SQS queue](cloud-interruptions.md#the-aws-interruption-queue),
+set `interruptionQueueURL` and grant `sqs:ReceiveMessage` and
+`sqs:DeleteMessage` on that queue only.
+
 For replacement, grant `ec2:TerminateInstances` scoped to the intended cluster
 instances. The controller probes this permission with an EC2 DryRun for the
 pinned instance and checks it again before termination. Replacement on EKS

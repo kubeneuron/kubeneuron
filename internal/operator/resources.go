@@ -448,6 +448,9 @@ func controllerDeployment(installation *kubeneuronv1alpha1.KubeNeuron, snapshot 
 	if cloud := installation.Spec.Cloud; cloud != nil && cloud.Provider == "aws" && cloud.AWS != nil && cloud.AWS.ClusterName != "" {
 		container.Env = append(container.Env, corev1.EnvVar{Name: "KUBENEURON_EKS_CLUSTER", Value: cloud.AWS.ClusterName})
 	}
+	if cloud := installation.Spec.Cloud; cloud != nil && cloud.Provider == "aws" && cloud.AWS != nil && cloud.AWS.InterruptionQueueURL != "" {
+		container.Env = append(container.Env, corev1.EnvVar{Name: "KUBENEURON_AWS_INTERRUPTION_QUEUE_URL", Value: cloud.AWS.InterruptionQueueURL})
+	}
 	if azure := azureCloud(installation); azure != nil {
 		container.Env = append(container.Env,
 			corev1.EnvVar{Name: "KUBENEURON_AKS_SUBSCRIPTION_ID", Value: azure.SubscriptionID},

@@ -7,8 +7,6 @@ import (
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/kubeneuron/kubeneuron/internal/interruption"
 )
@@ -19,20 +17,9 @@ import (
 // is read, not only those advertising an accelerator: a node under host
 // maintenance may already have lost its device plugin.
 func (p *Platform) NodeInterruptions(ctx context.Context) ([]interruption.Notice, error) {
-	var nodes []*corev1.Node
-	if lp := p.nodeLister.Load(); lp != nil {
-		if cached, err := (*lp).List(labels.Everything()); err == nil {
-			nodes = cached
-		}
-	}
-	if nodes == nil {
-		list, err := p.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return nil, err
-		}
-		for i := range list.Items {
-			nodes = append(nodes, &list.Items[i])
-		}
+	nodes, err := p.interruptionNodes(ctx)
+	if err != nil {
+		return nil, err
 	}
 	var out []interruption.Notice
 	for _, n := range nodes {

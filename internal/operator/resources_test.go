@@ -1266,6 +1266,31 @@ func TestControllerCloudWiring(t *testing.T) {
 	}
 }
 
+// The interruption queue reaches the controller only when it is set.
+func TestControllerInterruptionQueueWiring(t *testing.T) {
+	const url = "https://sqs.us-east-1.amazonaws.com/123456789012/kubeneuron-interruptions"
+	queueEnv := func(aws *kubeneuronv1alpha1.AWSCloudSpec) string {
+		installation := testKubeNeuron()
+		installation.Spec.Cloud = &kubeneuronv1alpha1.CloudSpec{Provider: "aws", AWS: aws}
+		deployment, err := controllerDeployment(installation, &Snapshot{Digest: "d"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, env := range deployment.Spec.Template.Spec.Containers[0].Env {
+			if env.Name == "KUBENEURON_AWS_INTERRUPTION_QUEUE_URL" {
+				return env.Value
+			}
+		}
+		return ""
+	}
+	if got := queueEnv(&kubeneuronv1alpha1.AWSCloudSpec{ClusterName: "training", InterruptionQueueURL: url}); got != url {
+		t.Fatalf("queue env = %q, want %q", got, url)
+	}
+	if got := queueEnv(&kubeneuronv1alpha1.AWSCloudSpec{ClusterName: "training"}); got != "" {
+		t.Fatalf("queue env without a queue = %q, want none", got)
+	}
+}
+
 // With no cloud configured the flags and annotation must be absent — recycling
 // stays off and fails closed at execution.
 func TestControllerNoCloudByDefault(t *testing.T) {
