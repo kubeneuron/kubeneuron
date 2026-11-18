@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/kubeneuron/kubeneuron/internal/evidence"
 	"io"
 	"log/slog"
 	"net/http"
@@ -584,36 +585,6 @@ func latestNodeConditions(audit []*types.AuditEntry) (*types.NodeConditionSnapsh
 	return nil, ""
 }
 
-// latestEvidence returns the last evidence block of the trail, with the fault
-// location of a later regrouping row. A row that does not decode is skipped:
-// the earlier block stands, and nothing is invented in its place.
-func latestEvidence(audit []*types.AuditEntry) *types.IncidentEvidence {
-	var out *types.IncidentEvidence
-	var location *types.LocationEvidence
-	for i := len(audit) - 1; i >= 0 && out == nil; i-- {
-		entry := audit[i]
-		if entry == nil || entry.Action != "evidence" {
-			continue
-		}
-		if raw, ok := entry.Params["fault_location"]; ok && location == nil {
-			var loc types.LocationEvidence
-			if json.Unmarshal([]byte(raw), &loc) == nil && loc.Location != "" {
-				location = &loc
-			}
-		}
-		if raw, ok := entry.Params["incident_evidence"]; ok {
-			var ev types.IncidentEvidence
-			if json.Unmarshal([]byte(raw), &ev) == nil && !ev.ObservedAt.IsZero() {
-				out = &ev
-			}
-		}
-	}
-	if out != nil && location != nil {
-		out.Location = *location
-	}
-	return out
-}
-
 func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
 	inc, audit, err := s.operator.IncidentDetail(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -622,7 +593,7 @@ func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	detail := IncidentDetail{Incident: inc, Audit: audit, RecoveryAvailability: types.RecoveryAvailabilityFromAudit(audit)}
 	detail.NodeConditions, detail.NodeConditionsUnavailable = latestNodeConditions(audit)
-	detail.Evidence = latestEvidence(audit)
+	detail.Evidence = evidence.Latest(audit)
 	if reason, ok := detect.ObserveOnly(inc.Class); ok {
 		detail.ObserveOnly = reason + "; no recovery step runs"
 	}

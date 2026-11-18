@@ -256,6 +256,7 @@ func successorFixtureTimeout(t *testing.T, mode recoverymode.Mode, p *successorP
 		ReplacementStrategy: strategy, SuccessorTimeout: timeout}
 	if mode == recoverymode.Automatic {
 		pol.Automatic = autoSettings()
+		qualifyAutoProfile(t, c)
 	}
 	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{book.Name: book}, []playbook.Policy{pol})
 	if err != nil {
@@ -553,6 +554,7 @@ func TestAddFirstRestartContinuesTheSameOperation(t *testing.T) {
 		t.Fatal(err)
 	}
 	restarted.SetEngine(c.runtimeConfig(context.Background()).Engine)
+	qualifyAutoProfile(t, restarted)
 	restarted.SetTimings(time.Millisecond, 0)
 	restarted.successorPoll = time.Millisecond
 	registerSuccessorAgent(t, st, 8)
@@ -574,6 +576,7 @@ func TestAddFirstDryRunCreatesNothingAndSaysWhatWouldBeAdded(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.SetEngine(engine)
+	qualifyAutoProfile(t, c)
 	id := openOn(t, c, "n1")
 	inc := waitSettled(t, c, st, id, func(inc *types.Incident) bool { return inc.State.Halted() || inc.State == types.StateVerifying })
 	entries := trail(t, st, id)

@@ -48,9 +48,11 @@ type IncidentEvidence struct {
 	Network    NetworkEvidence  `json:"network_resource"`
 }
 
-// LocationEvidence is the fault location with the rule and evidence that led
-// to it. Group is the earliest incident of the same class in the window when
-// the location is shared; Members are the incidents grouped with it.
+// LocationEvidence is the fault location, an estimate by rule and not a
+// diagnosis, with the rule and the evidence that led to it. For a shared
+// location, Group is the incident that started the group, fixed once set,
+// and Members the incidents of the group within the window. Only node names,
+// the class and incident IDs are recorded.
 type LocationEvidence struct {
 	Location FaultLocation `json:"location"`
 	Rule     string        `json:"rule"`
@@ -87,9 +89,9 @@ type ResourceObservation struct {
 	Allocatable int64  `json:"allocatable"`
 }
 
-// ComponentObservation is one vendor component pod on the node.
+// ComponentObservation is the state of one vendor component's pod on the
+// node. The pod's name is not recorded.
 type ComponentObservation struct {
 	Name  string `json:"name"`
-	Pod   string `json:"pod,omitempty"`
 	State string `json:"state"`
 }

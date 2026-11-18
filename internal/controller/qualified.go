@@ -7,12 +7,31 @@ import (
 	"fmt"
 
 	"github.com/kubeneuron/kubeneuron/internal/config"
+	"github.com/kubeneuron/kubeneuron/internal/evidence"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
-// unqualifiedPair says why an automatic policy may not recover this incident
-// on its own: its class, with the node's accelerator runtime profile, is not
+// unlocatedFault says why the recorded evidence does not let an automatic
+// policy replace the node, or "": only a fault located on this node does. A
+// shared or unknown location, or none recorded, waits for a person.
+func (c *Controller) unlocatedFault(ctx context.Context, inc *types.Incident) string {
+	trail, err := c.store.AuditTrail(ctx, inc.ID)
+	if err != nil {
+		return fmt.Sprintf("the incident's evidence cannot be read (%v)", err)
+	}
+	ev := evidence.Latest(trail)
+	if ev == nil {
+		return "automatic replacement needs the fault located on this node; no evidence is recorded"
+	}
+	if ev.Location.Location != types.LocationThisNode {
+		return fmt.Sprintf("automatic replacement needs the fault located on this node; the fault location is %s (rule: %s)", ev.Location.Location, ev.Location.Rule)
+	}
+	return ""
+}
+
+// unqualifiedPair says why an automatic policy may not replace this
+// incident's node on its own: its class, with the node's accelerator runtime profile, is not
 // a pair the policy declares qualified. Empty means qualified. Only the
 // policy's declaration qualifies a pair; the evidence block never does.
 func (c *Controller) unqualifiedPair(ctx context.Context, inc *types.Incident, auto *recoverymode.Settings, labels map[string]string) string {

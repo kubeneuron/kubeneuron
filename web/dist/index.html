@@ -970,12 +970,12 @@ function evidenceRows(d){
   if(!ev) return [["Fault location", `${evidenceState("unknown")} <span class="dimmer">no evidence recorded</span>`]];
   const loc = ev.fault_location || {};
   const res = list => (list || []).map(r => `<span class="mono small">${esc(r.name)}</span> ${esc(String(r.allocatable))} of ${esc(String(r.capacity))} allocatable`).join("<br>");
-  const comps = list => (list || []).map(c => `<span class="mono small">${esc(c.name)}</span> ${esc(c.state)} <span class="dimmer small">${esc(c.pod || "")}</span>`).join("<br>");
+  const comps = list => (list || []).map(c => `<span class="mono small">${esc(c.name)}</span> ${esc(c.state)}`).join("<br>");
   const reason = r => r ? `<br><span class="dimmer">${esc(r)}</span>` : "";
   const sw = ev.vendor_software || {}, net = ev.network_resource || {};
-  const group = loc.group ? `<br>group <span class="mono small">${esc(loc.group)}</span> <span class="dimmer small">${esc((loc.members || []).join(", "))}</span>` : "";
+  const group = loc.group ? `<br>group <span class="mono small">${esc(loc.group)}</span> <span class="dimmer small">incidents: ${esc((loc.members || []).join(", "))}</span>` : "";
   return [
-    ["Fault location", `${evidenceState(loc.location === "this-node" ? "this node" : loc.location)} ${esc(loc.rule || "")}${group}${(loc.evidence || []).map(e => `<br><span class="dimmer small">${esc(e)}</span>`).join("")}`],
+    ["Fault location", `${evidenceState(loc.location === "this-node" ? "this node" : loc.location)} <span class="dimmer">rule:</span> ${esc(loc.rule || "")}${group}${(loc.evidence || []).map(e => `<br><span class="dimmer small">${esc(e)}</span>`).join("")}`],
     ["Vendor software", `${evidenceState(sw.state)}${reason(sw.reason)}<br>${res(sw.resources)}<br>${comps(sw.components)}`],
     ["Network resource", `${evidenceState(net.state)}${reason(net.reason)}<br>${res(net.resources)}${net.plugin ? "<br>" + comps([net.plugin]) : ""}`],
   ];

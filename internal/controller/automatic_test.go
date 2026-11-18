@@ -108,12 +108,19 @@ func autoFixture(t *testing.T, mode recoverymode.Mode, settings *recoverymode.Se
 	c := New(st, st, modeEngine(t, mode, settings), gate, safety.NewFlapDetector(100, time.Hour), &autoCloudPlatform{}, nil, notifier,
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	c.SetTimings(time.Millisecond, 0) // tiny verification quiet window
+	qualifyAutoProfile(t, c)
+	return c, st, notifier
+}
+
+// qualifyAutoProfile installs the profile the fixture policy qualifies, on
+// every pool node.
+func qualifyAutoProfile(t *testing.T, c *Controller) {
+	t.Helper()
 	profile := testNVIDIAResetProfile()
 	profile.Name, profile.NodeSelector = autoProfile, map[string]string{"pool": "train"}
 	if err := c.SetAcceleratorRuntimeProfiles([]config.AcceleratorRuntimeProfile{profile}); err != nil {
 		t.Fatal(err)
 	}
-	return c, st, notifier
 }
 
 func nodeName(i int) string { return "n" + string(rune('0'+i)) }
@@ -671,6 +678,15 @@ func TestConcurrencyLimitHoldsWithinOneReconcilePass(t *testing.T) {
 		if err := c.ingest(ctx, signal(types.ClassFellOffBus, node, "GPU-"+node)); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// Two nodes with the same class at once read as shared; this test is
+	// about the limit, so place each fault on its node.
+	opened, err := st.ListIncidents(ctx, store.IncidentFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, inc := range opened {
+		c.appendEvidenceRow(ctx, inc, map[string]string{"fault_location": `{"location":"this-node","rule":"test"}`})
 	}
 	// Bring both to EVALUATING without letting either start, then one pass.
 	for i := 0; i < 5; i++ {

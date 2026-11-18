@@ -2856,7 +2856,8 @@ exercise_incident_evidence() {
 	"$JQ_BIN" -e '
 		.evidence.vendor_software.state == "degraded" and
 		(.evidence.vendor_software.resources | any(.name == "nvidia.com/gpu" and .capacity == 2 and .allocatable == 1)) and
-		(.evidence.vendor_software.components | any(.name == "device-plugin" and .state == "running" and (.pod | endswith("/fake-device-plugin")))) and
+		(.evidence.vendor_software.components | any(.name == "device-plugin" and .state == "running")) and
+		(.evidence | tostring | contains("fake-device-plugin") | not) and
 		.evidence.fault_location.location == "unknown" and
 		.evidence.network_resource.state == "unknown" and
 		(.audit | any(.action == "evidence"))' >/dev/null <<<"$detail" ||

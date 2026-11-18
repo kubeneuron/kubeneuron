@@ -13,7 +13,7 @@ import (
 )
 
 // EvidenceAction is the audit action of an evidence row.
-const EvidenceAction = "evidence"
+const EvidenceAction = evidence.AuditAction
 
 type nodeEvidenceReader interface {
 	NodeEvidence(context.Context, string) (*evidence.Node, error)
@@ -33,7 +33,7 @@ func (c *Controller) recordEvidence(ctx context.Context, opened *types.Incident)
 			node = n
 		}
 	}
-	peers, err := c.evidencePeers(ctx)
+	peers, err := c.evidencePeers(ctx, opened)
 	if err != nil {
 		c.log.Warn("could not read open incidents for the fault location", "incident", opened.ID)
 	}
@@ -77,14 +77,28 @@ func (c *Controller) appendEvidenceRow(ctx context.Context, inc *types.Incident,
 	}
 }
 
-func (c *Controller) evidencePeers(ctx context.Context) ([]evidence.Peer, error) {
+// evidencePeers are the other open incidents of the opened one's class
+// within the window, each with the group it already belongs to.
+func (c *Controller) evidencePeers(ctx context.Context, opened *types.Incident) ([]evidence.Peer, error) {
 	open, err := c.openIncidents(ctx)
 	if err != nil {
 		return nil, err
 	}
-	peers := make([]evidence.Peer, 0, len(open))
+	var peers []evidence.Peer
 	for _, inc := range open {
-		peers = append(peers, evidence.Peer{ID: inc.ID, Node: inc.Target.Node, Class: inc.Class, OpenedAt: inc.OpenedAt})
+		if inc.ID == opened.ID || inc.Class != opened.Class {
+			continue
+		}
+		if d := inc.OpenedAt.Sub(opened.OpenedAt); d > evidence.Window || d < -evidence.Window {
+			continue
+		}
+		peer := evidence.Peer{ID: inc.ID, Node: inc.Target.Node, Class: inc.Class, OpenedAt: inc.OpenedAt}
+		if trail, err := c.store.AuditTrail(ctx, inc.ID); err == nil {
+			if ev := evidence.Latest(trail); ev != nil {
+				peer.Group = ev.Location.Group
+			}
+		}
+		peers = append(peers, peer)
 	}
 	return peers, nil
 }

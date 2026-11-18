@@ -77,7 +77,8 @@ func (c *Controller) authorizeByPolicy(ctx context.Context, inc *types.Incident,
 	if !c.cloudRecoveryLadder(ctx, inc.Playbook) {
 		return policyPark, "automatic policies authorise only cloud recovery ladders, whose eligibility the cloud provider confirms"
 	}
-	if reason := c.unqualifiedPair(ctx, inc, auto, labels); reason != "" {
+	replaces := c.cloudRecoveryPath(ctx, inc.Playbook).replace
+	if reason := c.unqualifiedPair(ctx, inc, auto, labels); replaces && reason != "" {
 		return policyPark, reason
 	}
 	if tripped, err := c.breakerTripped(ctx, pol); err != nil {
@@ -180,6 +181,11 @@ func (c *Controller) authorizeByPolicy(ctx context.Context, inc *types.Incident,
 		if authorised {
 			return policyHold, fmt.Sprintf("the node was recovered by this policy less than %s ago", auto.NodeCooldown)
 		}
+	}
+	// Last, so the limits and the breaker above still answer first: a
+	// replacement needs the fault located on this node.
+	if reason := c.unlocatedFault(ctx, inc); replaces && reason != "" {
+		return policyPark, reason
 	}
 	return policyRun, ""
 }

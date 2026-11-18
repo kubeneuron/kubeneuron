@@ -12,8 +12,8 @@ import (
 
 var t0 = time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 
-func pod(name, app string, running, ready bool) Pod {
-	return Pod{Name: name, Namespace: "gpu-operator", Labels: map[string]string{"app": app}, Running: running, Ready: ready}
+func pod(app string, running, ready bool) Pod {
+	return Pod{Labels: map[string]string{"app": app}, Running: running, Ready: ready}
 }
 
 func healthyNode() *Node {
@@ -21,10 +21,10 @@ func healthyNode() *Node {
 		Capacity:    map[string]int64{"nvidia.com/gpu": 8, "cpu": 96, "vpc.amazonaws.com/efa": 32},
 		Allocatable: map[string]int64{"nvidia.com/gpu": 8, "cpu": 94, "vpc.amazonaws.com/efa": 32},
 		Pods: []Pod{
-			pod("driver-x", "nvidia-driver-daemonset", true, true),
-			pod("plugin-x", "nvidia-device-plugin-daemonset", true, true),
-			pod("dcgm-exporter-x", "nvidia-dcgm-exporter", true, true),
-			{Name: "efa-x", Namespace: "kube-system", Labels: map[string]string{"name": "aws-efa-k8s-device-plugin"}, Running: true, Ready: true},
+			pod("nvidia-driver-daemonset", true, true),
+			pod("nvidia-device-plugin-daemonset", true, true),
+			pod("nvidia-dcgm-exporter", true, true),
+			{Labels: map[string]string{"name": "aws-efa-k8s-device-plugin"}, Running: true, Ready: true},
 		},
 	}
 }
@@ -37,8 +37,8 @@ func TestSoftwareStates(t *testing.T) {
 		"healthy": {func(*Node) {}, types.EvidenceOK},
 		// The device is there but pods cannot be given all of it: software.
 		"allocatable below capacity": {func(n *Node) { n.Allocatable["nvidia.com/gpu"] = 6 }, types.EvidenceDegraded},
-		"device plugin not ready":    {func(n *Node) { n.Pods[1] = pod("plugin-x", "nvidia-device-plugin-daemonset", true, false) }, types.EvidenceDegraded},
-		"driver pending":             {func(n *Node) { n.Pods[0] = pod("driver-x", "nvidia-driver-daemonset", false, false) }, types.EvidenceDegraded},
+		"device plugin not ready":    {func(n *Node) { n.Pods[1] = pod("nvidia-device-plugin-daemonset", true, false) }, types.EvidenceDegraded},
+		"driver pending":             {func(n *Node) { n.Pods[0] = pod("nvidia-driver-daemonset", false, false) }, types.EvidenceDegraded},
 		"no accelerator resource":    {func(n *Node) { delete(n.Capacity, "nvidia.com/gpu") }, types.EvidenceDegraded},
 		// Missing signals are unknown, never ok.
 		"no device plugin pod": {func(n *Node) { n.Pods = n.Pods[:1] }, types.EvidenceUnknown},
@@ -69,7 +69,7 @@ func TestSoftwareRecordsComponents(t *testing.T) {
 		t.Fatalf("components %+v", got.Components)
 	}
 	for _, c := range got.Components {
-		if want[c.Name] != c.State || c.Pod == "" {
+		if want[c.Name] != c.State || c.Name == "" {
 			t.Errorf("component %+v", c)
 		}
 	}
@@ -157,8 +157,15 @@ func TestLocateGroupsTheSameClassOnSeveralNodes(t *testing.T) {
 	if len(got.Members) != 3 || got.Members[0] != "i2" || got.Members[1] != "i1" || got.Members[2] != "i3" {
 		t.Fatalf("members %v", got.Members)
 	}
-	if len(got.Evidence) != 1 || got.Evidence[0] != "nodes: n1, n2, n3" {
-		t.Fatalf("evidence %v", got.Evidence)
+	if len(got.Evidence) != 1 || got.Evidence[0] != "nodes: n1, n2, n3" || got.Rule != "shared: 3 nodes, same class, within 10 min" {
+		t.Fatalf("evidence %v rule %q", got.Evidence, got.Rule)
+	}
+	// Once set the group stays, even after its first incident closed: a
+	// later member joins the group a member already names.
+	later := Locate("i5", types.ClassFellOffBus, "n5", t0.Add(4*time.Minute),
+		[]Peer{{ID: "i3", Node: "n3", Class: types.ClassFellOffBus, OpenedAt: t0.Add(2 * time.Minute), Group: "i2"}}, types.SoftwareEvidence{})
+	if later.Group != "i2" || len(later.Members) != 2 {
+		t.Fatalf("later member: %+v", later)
 	}
 	// Every member names the same group.
 	again := Locate("i3", types.ClassFellOffBus, "n3", t0.Add(2*time.Minute), append(peers, Peer{ID: "i1", Node: "n1", Class: types.ClassFellOffBus, OpenedAt: t0}), types.SoftwareEvidence{})

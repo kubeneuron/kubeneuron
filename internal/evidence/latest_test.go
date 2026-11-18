@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-package httpapi
+package evidence
 
 import (
 	"testing"
@@ -15,25 +15,25 @@ func TestLatestEvidence(t *testing.T) {
 		{Action: "evidence", Params: map[string]string{"incident_evidence": block}},
 	}
 	// The open row carries the signal's evidence and is never read as ours.
-	if ev := latestEvidence(trail[:1]); ev != nil {
+	if ev := Latest(trail[:1]); ev != nil {
 		t.Fatalf("open row read: %+v", ev)
 	}
-	ev := latestEvidence(trail)
+	ev := Latest(trail)
 	if ev == nil || ev.Location.Location != types.LocationThisNode || ev.Software.State != types.EvidenceOK {
 		t.Fatalf("%+v", ev)
 	}
 	// A later regrouping replaces only the location.
 	trail = append(trail, &types.AuditEntry{Action: "evidence", Params: map[string]string{"fault_location": `{"location":"shared","group":"g","members":["g","i"]}`}})
-	ev = latestEvidence(trail)
+	ev = Latest(trail)
 	if ev.Location.Location != types.LocationShared || ev.Location.Group != "g" || ev.Software.State != types.EvidenceOK {
 		t.Fatalf("regrouped %+v", ev)
 	}
 	// A broken later block leaves the earlier one standing.
 	trail = append(trail, &types.AuditEntry{Action: "evidence", Params: map[string]string{"incident_evidence": "broken"}})
-	if ev := latestEvidence(trail); ev == nil || ev.Software.State != types.EvidenceOK {
+	if ev := Latest(trail); ev == nil || ev.Software.State != types.EvidenceOK {
 		t.Fatalf("broken block: %+v", ev)
 	}
-	if ev := latestEvidence(nil); ev != nil {
+	if ev := Latest(nil); ev != nil {
 		t.Fatal("no rows produced evidence")
 	}
 }

@@ -99,18 +99,20 @@ the audit trail. The incident detail returns the latest one as `evidence`:
 
 | Field | Values | Meaning |
 |---|---|---|
-| `fault_location.location` | `this-node`, `shared`, `unknown` | where the fault most likely is |
-| `fault_location.rule`, `.evidence` | text | the rule that placed it, and what it saw |
-| `fault_location.group`, `.members` | incident IDs | for `shared`: the earliest incident of the group, and every incident in it |
+| `fault_location.location` | `this-node`, `shared`, `unknown` | an estimate by rule of where the fault is, not a diagnosis |
+| `fault_location.rule`, `.evidence` | text | the rule that placed it (for example "evidence points to this node: …" or "shared: 3 nodes, same class, within 10 min"), and the node names it saw |
+| `fault_location.group`, `.members` | incident IDs | for `shared`: the incident that started the group, fixed once set, and the incidents of the group within the window |
 | `vendor_software.state` | `ok`, `degraded`, `unknown` | the accelerator resource the node advertises against what is allocatable, and the vendor's component pods on the node |
-| `vendor_software.resources[]`, `.components[]` | `name`, `capacity`, `allocatable`; `name`, `pod`, `state` (`running`, `not-ready`, `missing`) | the observations behind the state |
+| `vendor_software.resources[]`, `.components[]` | `name`, `capacity`, `allocatable`; `name`, `state` (`running`, `not-ready`, `missing`) | the observations behind the state; pod names are not recorded |
 | `network_resource.state` | `present`, `missing`, `unknown` | whether the node advertises its high-performance network resource (`vpc.amazonaws.com/efa`, `rdma/*`), with its device plugin pod in `.plugin`; not a fabric diagnosis |
 
 Fault location, per class:
 
 - the same class on another node within 10 minutes: `shared`. The incidents
-  stay separate, one per node, and each names the same group; the earlier
-  ones get a later row with the new location;
+  stay separate, one per node, and each names the same group: the group a
+  member already belongs to, else the earliest incident, and it does not
+  change when that incident closes. The earlier members get a later row with
+  the new location;
 - a device fault the node's accelerator reports (ECC, row remapping, NVLink,
   fell off the bus, GSP, thermal, power, PCIe, driver hang, diagnostic
   failure): `this-node`;
@@ -131,10 +133,10 @@ it, and otherwise `unknown`: a node with neither may have no such network.
 
 Evidence is shown in `kubeneuronctl incident show`, the panel and
 `kubeneuron_incident_evidence_total`, and never starts or authorises a step.
-A missing observation reads `unknown`, never healthy. Automatic recovery is
-allowed only for a pair of the policy's class and a node profile the policy
-declares qualified (`spec.automatic.qualifiedProfiles`); see
-[automatic mode](playbook-authoring.md).
+A missing observation reads `unknown`, never healthy. An automatic policy
+replaces a node without approval only when the fault location is
+`this-node` and the node's profile is listed in
+`spec.automatic.qualifiedProfiles`; see [automatic mode](playbook-authoring.md).
 
 ## Fleet
 

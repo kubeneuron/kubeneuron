@@ -672,9 +672,9 @@ func printEvidence(out io.Writer, ev *types.IncidentEvidence) {
 		return
 	}
 	loc := ev.Location
-	_, _ = fmt.Fprintf(out, "fault:     %s (%s)\n", loc.Location, loc.Rule)
+	_, _ = fmt.Fprintf(out, "fault:     %s; rule: %s\n", loc.Location, loc.Rule)
 	if loc.Group != "" {
-		_, _ = fmt.Fprintf(out, "group:     %s (%s)\n", loc.Group, strings.Join(loc.Members, ", "))
+		_, _ = fmt.Fprintf(out, "group:     %s; incidents: %s\n", loc.Group, strings.Join(loc.Members, ", "))
 	}
 	for _, line := range loc.Evidence {
 		_, _ = fmt.Fprintf(out, "  %s\n", line)
@@ -684,14 +684,14 @@ func printEvidence(out io.Writer, ev *types.IncidentEvidence) {
 		_, _ = fmt.Fprintf(out, "  %s: %d of %d allocatable\n", r.Name, r.Allocatable, r.Capacity)
 	}
 	for _, comp := range ev.Software.Components {
-		_, _ = fmt.Fprintf(out, "  %s: %s %s\n", comp.Name, comp.State, comp.Pod)
+		_, _ = fmt.Fprintf(out, "  %s: %s\n", comp.Name, comp.State)
 	}
 	_, _ = fmt.Fprintf(out, "network:   %s%s\n", ev.Network.State, reasonSuffix(ev.Network.Reason))
 	for _, r := range ev.Network.Resources {
 		_, _ = fmt.Fprintf(out, "  %s: %d of %d allocatable\n", r.Name, r.Allocatable, r.Capacity)
 	}
 	if p := ev.Network.Plugin; p != nil {
-		_, _ = fmt.Fprintf(out, "  %s: %s %s\n", p.Name, p.State, p.Pod)
+		_, _ = fmt.Fprintf(out, "  %s: %s\n", p.Name, p.State)
 	}
 }
 

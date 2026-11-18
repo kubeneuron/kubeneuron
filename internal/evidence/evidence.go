@@ -7,6 +7,7 @@
 package evidence
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
@@ -70,10 +71,10 @@ var (
 	}}
 )
 
-// Pod is what the evidence needs of one pod on the node.
+// Pod is what the evidence needs of one pod on the node: its labels and
+// state, never its name.
 type Pod struct {
-	Name, Namespace string
-	Labels          map[string]string
+	Labels map[string]string
 	// Running is phase Running; Ready is the Ready condition True.
 	Running, Ready bool
 }
@@ -113,7 +114,7 @@ func Software(n *Node) types.SoftwareEvidence {
 		}
 		out.Components = append(out.Components, obs)
 		if obs.State != types.ComponentRunning {
-			out.State, out.Reason = worse(out.State, out.Reason, types.EvidenceDegraded, fmt.Sprintf("%s pod %s is %s", c.Name, obs.Pod, obs.State))
+			out.State, out.Reason = worse(out.State, out.Reason, types.EvidenceDegraded, fmt.Sprintf("the %s pod is %s", c.Name, obs.State))
 		}
 	}
 	if len(out.Resources) == 0 {
@@ -160,12 +161,14 @@ func Network(n *Node) types.NetworkEvidence {
 	return out
 }
 
-// Peer is another open incident considered for grouping.
+// Peer is another open incident considered for grouping. Group is the group
+// it already belongs to, if any.
 type Peer struct {
 	ID       string
 	Node     string
 	Class    types.ProblemClass
 	OpenedAt time.Time
+	Group    string
 }
 
 // deviceClasses are faults the node's own accelerator reports about itself.
@@ -188,8 +191,9 @@ var unknownClasses = map[types.ProblemClass]string{
 // the other open incidents and the node's software state. The rule, per
 // class:
 //
-//   - the same class on another node within Window: shared, grouped under the
-//     earliest incident;
+//   - the same class on another node within Window: shared. The group is the
+//     one a member already belongs to, else the earliest incident; once set
+//     it does not change, even when that incident closes;
 //   - a device fault (ECC, row remap, NVLink, fell off the bus, GSP, thermal,
 //     power, PCIe, driver hang, diagnostic failure): this node;
 //   - a lost GPU: this node only while the vendor software is ok, since a
@@ -216,6 +220,13 @@ func Locate(id string, class types.ProblemClass, node string, at time.Time, peer
 			}
 			return group[i].ID < group[j].ID
 		})
+		id := group[0].ID
+		for _, p := range group {
+			if p.Group != "" {
+				id = p.Group
+				break
+			}
+		}
 		members := make([]string, 0, len(group))
 		names := make([]string, 0, len(nodes))
 		for _, p := range group {
@@ -227,19 +238,19 @@ func Locate(id string, class types.ProblemClass, node string, at time.Time, peer
 		slices.Sort(names)
 		return types.LocationEvidence{
 			Location: types.LocationShared,
-			Rule:     fmt.Sprintf("the same class on %d nodes within %s", len(nodes), Window),
+			Rule:     fmt.Sprintf("shared: %d nodes, same class, within %d min", len(nodes), int(Window.Minutes())),
 			Evidence: []string{"nodes: " + strings.Join(names, ", ")},
-			Group:    group[0].ID,
+			Group:    id,
 			Members:  members,
 		}
 	}
 	switch {
 	case deviceClasses[class]:
-		return types.LocationEvidence{Location: types.LocationThisNode, Rule: "a device fault the node's accelerator reported, on this node only"}
+		return types.LocationEvidence{Location: types.LocationThisNode, Rule: "evidence points to this node: its accelerator reported a device fault, and no other node the same class"}
 	case class == types.ClassGPULost && software.State == types.EvidenceOK:
-		return types.LocationEvidence{Location: types.LocationThisNode, Rule: "fewer devices than the inventory while the vendor software runs, on this node only"}
+		return types.LocationEvidence{Location: types.LocationThisNode, Rule: "evidence points to this node: fewer devices than the inventory while the vendor software is ok, and no other node the same class"}
 	case class == types.ClassGPULost:
-		return types.LocationEvidence{Location: types.LocationUnknown, Rule: "fewer devices than the inventory, but the vendor software is " + string(software.State),
+		return types.LocationEvidence{Location: types.LocationUnknown, Rule: "fewer devices than the inventory while the vendor software is " + string(software.State) + "; pods may not see a device that is there",
 			Evidence: nonEmpty(software.Reason)}
 	}
 	if why, ok := unknownClasses[class]; ok {
@@ -296,7 +307,7 @@ func component(pods []Pod, c Component) (types.ComponentObservation, bool) {
 			state = types.ComponentRunning
 		}
 		if !found || state == types.ComponentRunning {
-			out.Pod, out.State = pod.Namespace+"/"+pod.Name, state
+			out.State = state
 		}
 		found = true
 	}
@@ -327,4 +338,38 @@ func nonEmpty(s string) []string {
 		return nil
 	}
 	return []string{s}
+}
+
+// AuditAction is the audit action of an evidence row.
+const AuditAction = "evidence"
+
+// Latest returns the last evidence block of an audit trail, with the fault
+// location of a later regrouping row. A row that does not decode is skipped:
+// the earlier block stands, and nothing is invented in its place. Nil when
+// none was recorded.
+func Latest(audit []*types.AuditEntry) *types.IncidentEvidence {
+	var out *types.IncidentEvidence
+	var location *types.LocationEvidence
+	for i := len(audit) - 1; i >= 0 && out == nil; i-- {
+		entry := audit[i]
+		if entry == nil || entry.Action != AuditAction {
+			continue
+		}
+		if raw, ok := entry.Params["fault_location"]; ok && location == nil {
+			var loc types.LocationEvidence
+			if json.Unmarshal([]byte(raw), &loc) == nil && loc.Location != "" {
+				location = &loc
+			}
+		}
+		if raw, ok := entry.Params["incident_evidence"]; ok {
+			var ev types.IncidentEvidence
+			if json.Unmarshal([]byte(raw), &ev) == nil && !ev.ObservedAt.IsZero() {
+				out = &ev
+			}
+		}
+	}
+	if out != nil && location != nil {
+		out.Location = *location
+	}
+	return out
 }

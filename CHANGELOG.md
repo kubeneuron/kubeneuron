@@ -12,9 +12,9 @@ API is `v1alpha1`.
 ### Added
 
 - **Incident evidence.** Every incident now records, from the Kubernetes API
-  only, where the fault most likely is (`this-node`, `shared` when the same
-  class opens on several nodes within 10 minutes, grouped under the earliest
-  incident, or `unknown`) with the rule per class, the vendor software state
+  only, an estimate of where the fault is (`this-node`, `shared` when the
+  same class opens on several nodes within 10 minutes, grouped by incident
+  ID, or `unknown`) with the rule that placed it, the vendor software state
   on the node (accelerator resource allocatable against capacity, device
   plugin and GPU Operator component pods) and whether the node advertises its
   high-performance network resource. A lost GPU while the device plugin is
@@ -439,12 +439,14 @@ API is `v1alpha1`.
 
 ### Changed
 
-- **Automatic mode needs a qualified pair** (breaking for automatic
-  policies). An automatic policy recovers a node only when the policy's
-  class and the node's accelerator runtime profile form a pair it declares
-  in `spec.automatic.qualifiedProfiles`. A policy without the list, or a node
-  on no listed profile, sends the step to a person with the reason. Add the
-  profiles your automatic policies cover before upgrading.
+- **Automatic replacement now needs `automatic.qualifiedProfiles`.** A
+  policy in Automatic mode replaces a node without approval only when the
+  node's accelerator runtime profile is listed in
+  `automatic.qualifiedProfiles` and the fault is located on that node. With
+  an empty list, an unlisted or unknown profile, or a fault that is shared or
+  cannot be located, the replacement waits for approval and the incident
+  states the reason. Existing Automatic policies stop replacing nodes on
+  their own until profiles are listed.
 
 - **AWS checks replacement permissions.** Replacement requires a successful
   permission probe for `ec2:TerminateInstances` on the pinned instance.

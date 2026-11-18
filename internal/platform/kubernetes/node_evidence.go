@@ -37,8 +37,7 @@ func (p *Platform) NodeEvidence(ctx context.Context, name string) (*evidence.Nod
 			}
 		}
 		out.Pods = append(out.Pods, evidence.Pod{
-			Name: pod.Name, Namespace: pod.Namespace, Labels: pod.Labels,
-			Running: pod.Status.Phase == corev1.PodRunning, Ready: ready,
+			Labels: pod.Labels, Running: pod.Status.Phase == corev1.PodRunning, Ready: ready,
 		})
 	}
 	return out, nil

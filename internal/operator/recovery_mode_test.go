@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
@@ -116,5 +117,27 @@ func TestCompileReplacementAndRecycle(t *testing.T) {
 	compiled, err = compilePolicies(testKubeNeuron(), policies, books)
 	if err != nil || compiled[0].Replacement.Strategy != recoverymode.RemoveFirst || !compiled[0].Recycle.Enabled {
 		t.Fatalf("explicit = %+v %v", compiled[0], err)
+	}
+}
+
+// An Automatic policy shows at once whether it can replace a node without
+// approval; other modes carry no such condition.
+func TestAutomaticReplacementCondition(t *testing.T) {
+	policy := &kubeneuronv1alpha1.GPURemediationPolicy{}
+	policy.Spec.Automatic = automaticSpec()
+	setAutomaticReplacementCondition(policy, recoverymode.Automatic)
+	c := meta.FindStatusCondition(policy.Status.Conditions, "AutomaticReplacement")
+	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != "NoQualifiedProfiles" {
+		t.Fatalf("empty list: %+v", c)
+	}
+	policy.Spec.Automatic.QualifiedProfiles = []string{"p4d-h100"}
+	setAutomaticReplacementCondition(policy, recoverymode.Automatic)
+	c = meta.FindStatusCondition(policy.Status.Conditions, "AutomaticReplacement")
+	if c == nil || c.Status != metav1.ConditionTrue || !strings.Contains(c.Message, "p4d-h100") {
+		t.Fatalf("listed: %+v", c)
+	}
+	setAutomaticReplacementCondition(policy, recoverymode.Approval)
+	if meta.FindStatusCondition(policy.Status.Conditions, "AutomaticReplacement") != nil {
+		t.Fatal("an Approval policy kept the condition")
 	}
 }

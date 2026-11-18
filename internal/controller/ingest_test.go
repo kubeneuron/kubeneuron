@@ -81,8 +81,8 @@ func TestIngestOpensIncidentWithPlaybookAndAudit(t *testing.T) {
 		t.Fatalf("incident = %+v, want OPEN with fell-off-bus playbook in dry-run", inc)
 	}
 	trail, err := st.AuditTrail(ctx, inc.ID)
-	if err != nil || len(trail) != 1 || trail[0].Action != "open" {
-		t.Fatalf("audit trail = %+v, %v; want one open entry", trail, err)
+	if err != nil || len(trail) != 2 || trail[0].Action != "open" || trail[1].Action != EvidenceAction {
+		t.Fatalf("audit trail = %+v, %v; want the open entry and the evidence", trail, err)
 	}
 }
 

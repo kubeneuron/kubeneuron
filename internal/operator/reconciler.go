@@ -33,6 +33,7 @@ import (
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
 	"github.com/kubeneuron/kubeneuron/internal/inventory"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 )
 
 const (
@@ -901,6 +902,7 @@ func (r *KubeNeuronReconciler) updateGPURemediationPolicyStatus(
 			ObservedGeneration: policy.Generation,
 			LastTransitionTime: metav1.Now(),
 		})
+		setAutomaticReplacementCondition(policy, compiled[0].Mode)
 	}
 	if reflect.DeepEqual(before.Status, policy.Status) {
 		return nil
@@ -1317,4 +1319,30 @@ func cloudRecoveryCondition(installation *kubeneuronv1alpha1.KubeNeuron) metav1.
 		condition.Message += ". The default cloud pack supports observation and dry-run; live replacement requires an eligible provider with add-first support."
 	}
 	return condition
+}
+
+// setAutomaticReplacementCondition shows on an Automatic policy, before any
+// incident, whether it can replace a node without approval at all: only on
+// nodes of the profiles it lists, and only when the fault is located on the
+// node. Other modes carry no such condition.
+func setAutomaticReplacementCondition(policy *kubeneuronv1alpha1.GPURemediationPolicy, mode recoverymode.Mode) {
+	const conditionType = "AutomaticReplacement"
+	if mode.Effective() != recoverymode.Automatic || policy.Spec.Automatic == nil {
+		meta.RemoveStatusCondition(&policy.Status.Conditions, conditionType)
+		return
+	}
+	condition := metav1.Condition{
+		Type:               conditionType,
+		Status:             metav1.ConditionFalse,
+		Reason:             "NoQualifiedProfiles",
+		Message:            "spec.automatic.qualifiedProfiles lists no node profile: every replacement waits for approval",
+		ObservedGeneration: policy.Generation,
+		LastTransitionTime: metav1.Now(),
+	}
+	if profiles := policy.Spec.Automatic.QualifiedProfiles; len(profiles) > 0 {
+		condition.Status, condition.Reason = metav1.ConditionTrue, "QualifiedProfilesListed"
+		condition.Message = "replaces without approval only nodes of the listed profiles (" + strings.Join(profiles, ", ") +
+			") when the fault is located on the node; anything else waits for approval"
+	}
+	meta.SetStatusCondition(&policy.Status.Conditions, condition)
 }

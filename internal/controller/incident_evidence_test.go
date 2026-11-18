@@ -64,7 +64,7 @@ func healthyEvidenceNode() *evidence.Node {
 	return &evidence.Node{
 		Capacity:    map[string]int64{"nvidia.com/gpu": 8},
 		Allocatable: map[string]int64{"nvidia.com/gpu": 8},
-		Pods:        []evidence.Pod{{Name: "dp", Namespace: "gpu-operator", Labels: map[string]string{"app": "nvidia-device-plugin-daemonset"}, Running: true, Ready: true}},
+		Pods:        []evidence.Pod{{Labels: map[string]string{"app": "nvidia-device-plugin-daemonset"}, Running: true, Ready: true}},
 	}
 }
 
@@ -173,5 +173,25 @@ func TestNonHardwareCausesNeverStartTheLadder(t *testing.T) {
 		if _, ok := engine.PolicyFor(class, ""); ok {
 			t.Errorf("%s selected a policy", class)
 		}
+	}
+}
+
+// Automatic replacement needs the fault located on this node: a shared or
+// unknown location waits for a person, whatever the pair.
+func TestAutomaticReplacementNeedsTheFaultOnThisNode(t *testing.T) {
+	for _, loc := range []types.FaultLocation{types.LocationShared, types.LocationUnknown} {
+		t.Run(string(loc), func(t *testing.T) {
+			c, st, _ := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
+			id := openOn(t, c, "n1")
+			inc, err := st.GetIncident(context.Background(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, _ := json.Marshal(types.LocationEvidence{Location: loc, Rule: "test rule"})
+			c.appendEvidenceRow(context.Background(), inc, map[string]string{"fault_location": string(data)})
+			if inc := step(t, c, st, id, 50); inc.State != types.StateAwaitingApproval || !strings.Contains(parkReason(t, st, id), "the fault location is "+string(loc)) {
+				t.Fatalf("state=%s audit=%s, want a park naming the location", inc.State, parkReason(t, st, id))
+			}
+		})
 	}
 }
