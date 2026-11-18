@@ -113,6 +113,10 @@ func (c *Controller) previewImpactDurable(ctx context.Context, inc *types.Incide
 		return c.storeImpact(roundCtx, inc, impact.Unavailable(in, reason, "list workloads on "+inc.Target.Node), trigger, started)
 	}
 	in.Workloads = workloads
+	in.TrainingWorkers, err = c.IncidentTrainingWorkers(roundCtx, inc.ID)
+	if err != nil {
+		return c.storeImpact(roundCtx, inc, impact.Unavailable(in, impact.UnavailableListingFailed, "read incident training worker snapshot"), trigger, started)
+	}
 	if cp := in.Checkpoint; cp.Groups.Enabled {
 		in.Groups = &impact.GroupPolicy{MaxGroupSize: cp.Groups.MaxGroupSize, CrossNode: cp.Groups.CrossNode}
 		in.GroupTotals, in.GroupTruncated = c.previewGroupTotals(roundCtx, cp, workloads)
