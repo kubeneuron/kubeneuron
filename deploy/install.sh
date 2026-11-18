@@ -43,6 +43,7 @@ set -euo pipefail
 # For the panel password hash: htpasswd, or a kubeneuronctl binary.
 
 NAME=kubeneuron
+REQUESTED_PACK=""
 NS=kube-neuron
 VERSION=""
 MANIFEST=""
@@ -65,6 +66,7 @@ KubeNeuron one-command installer.
 
 Flags:
   --name NAME            root object name           (default: kubeneuron)
+  --policy-pack PACK     cloud (new installation default) or bare-metal-alpha
   --namespace NS         runtime namespace          (default: kube-neuron)
   --version vX.Y.Z|latest  released install manifest (public curl, gh fallback)
   --manifest FILE        pre-downloaded install manifest
@@ -83,6 +85,7 @@ USAGE
 
 while (($#)); do
 	case $1 in
+	--policy-pack) REQUESTED_PACK=${2:?missing policy pack}; shift 2 ;;
 	--name) NAME=$2; shift 2 ;;
 	--namespace) NS=$2; shift 2 ;;
 	--version) VERSION=$2; shift 2 ;;
@@ -116,6 +119,10 @@ esac
 case $PROFILE in
 auto|host-al2023|gpu-operator-ubuntu|none) ;;
 *) die "unknown --profile $PROFILE (see --help)" ;;
+esac
+case $REQUESTED_PACK in
+""|cloud|bare-metal-alpha) ;;
+*) die "--policy-pack must be cloud or bare-metal-alpha" ;;
 esac
 
 command -v kubectl >/dev/null || die "kubectl is required"
@@ -384,7 +391,6 @@ if [[ $PROFILE != none ]]; then
       libDirs: [$driver_libs]"
 fi
 say "NVIDIA host tooling profile: $PROFILE (see docs/quickstart.md)"
-||||||| parent of 07829b5 (installer: render the cloud pack for a named installation)
 # Render the standalone installer copy of config/cloud-policies for this installation.
 render_cloud_pack() {
   cat <<EOF
@@ -495,7 +501,25 @@ EOF
 # away from DryRun, which is the point: dry-run is a phase, the approval gates
 # are the design. See config/policies/playbooks.yaml for the reasoning per
 # ladder and config/policies/policies.yaml for the reasoning per class.
-kubectl apply -f - >/dev/null <<EOF
+root=$(kubectl get kubeneuron "$NAME" --ignore-not-found -o name)
+if [[ -n $root ]]; then
+  # Existing installations may have edited or intentionally removed any binding.
+  # A normal installer rerun must preserve those choices, including an empty pack.
+  [[ -z $REQUESTED_PACK ]] || say "Existing installation: preserving its policy objects; --policy-pack selects policies on first install."
+  say "Preserving recovery policies for existing installation $NAME."
+else
+  # A root may be absent after an interrupted install or a manual uninstall.
+  # Check spec.kubeNeuronRef even for objects without installer labels.
+  bindings=$(kubectl get gpuplaybooks,gpuremediationpolicies -o "jsonpath={range .items[?(@.spec.kubeNeuronRef==\"$NAME\")]}{.metadata.name}{' '}{end}")
+  [[ -z $bindings ]] || die "Existing recovery objects for $NAME: $bindings. Resolve ownership before installing a pack."
+  if [[ ${REQUESTED_PACK:-cloud} == cloud ]]; then
+    render_cloud_pack > "$work/cloud-pack.yaml"
+    kubectl create --dry-run=server -f "$work/cloud-pack.yaml" >/dev/null
+    kubectl create -f "$work/cloud-pack.yaml" >/dev/null
+    say "Cloud recovery supports observation and dry-run. Live replacement requires a configured provider with add-first support."
+  else
+    say "Node-level recovery: Alpha, not validated on real hardware."
+    cat > "$work/bare-metal-pack.yaml" <<EOF
 apiVersion: kubeneuron.io/v1alpha1
 kind: GPUPlaybook
 metadata:
@@ -863,6 +887,10 @@ spec:
   match: {class: row-remap-budget}
   playbookRef: $NAME-rma
 EOF
+    kubectl create --dry-run=server -f "$work/bare-metal-pack.yaml" >/dev/null
+    kubectl create -f "$work/bare-metal-pack.yaml" >/dev/null
+  fi
+fi
 
 # Managed: the operator runs the Collector, the metrics store with its alert
 # rules, and Grafana. Detection from the agents and recovery never depend on
