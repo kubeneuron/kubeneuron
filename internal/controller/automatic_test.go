@@ -783,3 +783,44 @@ func TestAuthorisedByCountsOnlyPolicyStartedSteps(t *testing.T) {
 		t.Fatal("a step started by the policy did not count")
 	}
 }
+
+func TestAutomaticDrainCheckpointAge(t *testing.T) {
+	for _, tc := range []struct {
+		name                               string
+		age                                time.Duration
+		report, allowUnknown, wantApproval bool
+	}{
+		{name: "at boundary", age: time.Minute, report: true},
+		{name: "stale despite unknown permission", age: time.Minute + time.Nanosecond, report: true, allowUnknown: true, wantApproval: true},
+		{name: "absent", wantApproval: true},
+		{name: "absent explicitly allowed", allowUnknown: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			settings := autoSettings()
+			settings.MaxCheckpointAgeMinutes = 1
+			settings.AllowUnknownCheckpoint = tc.allowUnknown
+			c, st, _ := autoFixture(t, recoverymode.Automatic, settings, 4)
+			now := time.Now().UTC()
+			c.checkpointNow = func() time.Time { return now }
+			id := openOn(t, c, "n1")
+			workers := []types.TrainingWorker{{Namespace: "training", PodUID: "pod", Owners: []types.TrainingOwner{{UID: "job"}}}}
+			if err := st.SaveTrainingWorkers(t.Context(), id, workers); err != nil {
+				t.Fatal(err)
+			}
+			if tc.report {
+				r := checkpoint.TrainingReport{Kind: "checkpoint", CheckpointID: "epoch1"}
+				if err := st.SaveTrainingReport(t.Context(), id, "job", "pod", r, now.Add(-tc.age)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			inc := step(t, c, st, id, 200)
+			want := types.StateResolved
+			if tc.wantApproval {
+				want = types.StateAwaitingApproval
+			}
+			if inc.State != want {
+				t.Fatalf("state=%s want %s", inc.State, want)
+			}
+		})
+	}
+}
