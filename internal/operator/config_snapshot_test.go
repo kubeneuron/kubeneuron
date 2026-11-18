@@ -1401,7 +1401,7 @@ func TestCompileSnapshotManualRecoveryBaseline(t *testing.T) {
 					t.Fatal(err)
 				}
 			default:
-				if err == nil || !(strings.Contains(err.Error(), "manualRecoveryBaseline") || strings.Contains(err.Error(), "manual_recovery_baseline")) {
+				if err == nil || (!strings.Contains(err.Error(), "manualRecoveryBaseline") && !strings.Contains(err.Error(), "manual_recovery_baseline")) {
 					t.Fatalf("expected a baseline error, got %v", err)
 				}
 			}
