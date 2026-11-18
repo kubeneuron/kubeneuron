@@ -26,7 +26,7 @@ func TestObserveSuccessor(t *testing.T) {
 	update := &et.Update{Id: sdk.String("update-1"), Status: et.UpdateStatusInProgress}
 	eksReader := &scalingUpdateFixture{out: &eks.DescribeUpdateOutput{Update: update}, groupHistory: groupHistory{group: et.Nodegroup{NodegroupArn: sdk.String("ng"), Resources: &et.NodegroupResources{AutoScalingGroups: []et.AutoScalingGroup{{Name: &s.Pool}}}}}}
 	p := managedProvider{repairReader: &repairReader{cluster: "training", eks: eksReader}}
-	got, err := p.observeSuccessor(t.Context(), s)
+	got, err := p.PrepareSuccessor(t.Context(), s)
 	if err != nil || got.Phase != cloud.SuccessorRequested {
 		t.Fatalf("pending: %+v %v", got, err)
 	}
@@ -37,12 +37,12 @@ func TestObserveSuccessor(t *testing.T) {
 	}
 	pages := launchActivityPages{"": {}}
 	p.scaling = observedASG{membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{g}}}, pages}
-	got, err = p.observeSuccessor(t.Context(), s)
+	got, err = p.PrepareSuccessor(t.Context(), s)
 	if !errors.Is(err, cloud.ErrNeedsOperator) || got.ProviderID != "" {
 		t.Fatalf("missing launch: %+v %v", got, err)
 	}
 	pages[""].Activities = []at.Activity{{AutoScalingGroupName: &s.Pool, AutoScalingGroupARN: sdk.String("arn"), StartTime: &now, Description: sdk.String("Launching a new EC2 instance: i-new"), Cause: sdk.String("changing the desired capacity from 1 to 2."), StatusCode: at.ScalingActivityStatusCodeSuccessful}}
-	got, err = p.observeSuccessor(t.Context(), s)
+	got, err = p.PrepareSuccessor(t.Context(), s)
 	if err != nil || got.Phase != cloud.SuccessorCreated || got.ProviderID != "aws:///az/i-new" {
 		t.Fatalf("created: %+v %v", got, err)
 	}

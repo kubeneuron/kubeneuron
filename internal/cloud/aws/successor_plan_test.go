@@ -59,7 +59,7 @@ func TestCheckAddFirstRequiresEKSBackingGroup(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				plan, err := p.readSuccessorPlan(t.Context(), cloud.Successor{Instance: "i-pinned", Operation: "op"})
+				plan, err := p.PrepareSuccessor(t.Context(), cloud.Successor{Instance: "i-pinned", Operation: "op"})
 				if err != nil || plan.State["asg_arn"] != "asg-arn" || plan.State["nodegroup_arn"] != "group-arn" || plan.State["cluster"] != "training" {
 					t.Fatalf("resource identities: %+v, %v", plan, err)
 				}
@@ -84,7 +84,7 @@ func TestVerifySuccessorBaseline(t *testing.T) {
 	out := &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{group}}
 	eksReader := &groupHistory{group: et.Nodegroup{NodegroupArn: sdk.String("ng-1"), ClusterName: sdk.String("training"), NodegroupName: sdk.String("gpu"), Status: et.NodegroupStatusActive, Resources: &et.NodegroupResources{AutoScalingGroups: []et.AutoScalingGroup{{Name: sdk.String("workers")}}}}}
 	p := managedProvider{repairReader: &repairReader{cluster: "training", eks: eksReader, scaling: quietASG{membershipFixture{t, out}}}}
-	plan, err := p.readSuccessorPlan(t.Context(), cloud.Successor{Operation: "op", Instance: "i-pinned"})
+	plan, err := p.PrepareSuccessor(t.Context(), cloud.Successor{Operation: "op", Instance: "i-pinned"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestVerifySuccessorBaseline(t *testing.T) {
 				g.MaxSize = sdk.Int32(2)
 			}
 			out.AutoScalingGroups[0] = g
-			if err := p.verifySuccessorBaseline(t.Context(), plan); !errors.Is(err, cloud.ErrNeedsOperator) {
+			if _, err := p.PrepareSuccessor(t.Context(), plan); !errors.Is(err, cloud.ErrNeedsOperator) {
 				t.Fatalf("got %v", err)
 			}
 		})

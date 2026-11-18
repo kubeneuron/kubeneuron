@@ -44,3 +44,22 @@ func (p *managedProvider) observeSuccessor(ctx context.Context, s cloud.Successo
 	s.Phase = cloud.SuccessorCreated
 	return s, nil
 }
+
+// PrepareSuccessor advances one persisted phase of the EKS add-first operation.
+func (p *managedProvider) PrepareSuccessor(ctx context.Context, s cloud.Successor) (cloud.Successor, error) {
+	switch s.Phase {
+	case "":
+		return p.readSuccessorPlan(ctx, s)
+	case cloud.SuccessorPlanned:
+		if err := p.verifySuccessorBaseline(ctx, s); err != nil {
+			return s, err
+		}
+		return requestSuccessor(ctx, p.updater, p.cluster, s)
+	case cloud.SuccessorRequested:
+		return p.observeSuccessor(ctx, s)
+	case cloud.SuccessorCreated:
+		return s, nil
+	default:
+		return s, fmt.Errorf("%w: unknown EKS successor phase %q", cloud.ErrNeedsOperator, s.Phase)
+	}
+}

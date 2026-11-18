@@ -73,7 +73,8 @@ func newManagedProvider(ctx context.Context, options cloud.Config) (*managedProv
 		return nil, fmt.Errorf("aws: no region configured; set AWS_REGION or the node's region label")
 	}
 	client := ec2.NewFromConfig(cfg)
-	provider := &managedProvider{Recycler: &Recycler{api: client, pollInterval: 10 * time.Second}, repairReader: &repairReader{cluster: options.Options["cluster"], eks: eks.NewFromConfig(cfg), scaling: autoscaling.NewFromConfig(cfg), ec2: client}}
+	eksClient := eks.NewFromConfig(cfg)
+	provider := &managedProvider{updater: eksClient, Recycler: &Recycler{api: client, pollInterval: 10 * time.Second}, repairReader: &repairReader{cluster: options.Options["cluster"], eks: eksClient, scaling: autoscaling.NewFromConfig(cfg), ec2: client}}
 	if url := options.Options[OptionInterruptionQueue]; url != "" {
 		provider.queue = newInterruptionQueue(sqs.NewFromConfig(cfg), url)
 	}
