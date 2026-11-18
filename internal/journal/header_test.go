@@ -25,3 +25,23 @@ func TestReadHeader(t *testing.T) {
 		}
 	}
 }
+
+func FuzzReadHeader(f *testing.F) {
+	header := make([]byte, 208)
+	copy(header, "LPKSHHRH")
+	binary.LittleEndian.PutUint64(header[88:], uint64(len(header)))
+	f.Add(header, int64(len(header)))
+	f.Add([]byte("LPKSHHRH"), int64(8))
+	f.Fuzz(func(t *testing.T, data []byte, fileSize int64) {
+		tail, err := readHeader(bytes.NewReader(data), fileSize)
+		if err != nil {
+			return
+		}
+		if len(data) < 208 || fileSize < 208 {
+			t.Fatal("accepted a truncated fixed header")
+		}
+		if tail != 0 && (tail%8 != 0 || tail < 208 || tail > uint64(fileSize)-16) {
+			t.Fatalf("tail offset %d cannot address an object in %d bytes", tail, fileSize)
+		}
+	})
+}
