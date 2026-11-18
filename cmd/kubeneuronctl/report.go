@@ -101,6 +101,7 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		_, err := fmt.Fprintln(out, "No incidents in this window.")
 		return err
 	}
+	_, _ = fmt.Fprintf(out, "Recovered GPU-hours: %s\n", gpuHours(r.RecoveredGPUHours))
 	_, _ = fmt.Fprintf(out, "incidents: %d in window, %d still open\n\n", r.Incidents, len(r.Open))
 
 	if estimate := r.SavingsEstimate; estimate != nil {
@@ -110,15 +111,13 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 	}
 	w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintf(w, "degraded GPU-hours\t%s\n", gpuHours(r.DegradedGPUHours))
-	_, _ = fmt.Fprintf(w, "degraded GPU-hours in remediated incidents\t%s\t%s of degraded\n",
-		gpuHours(r.RecoveredGPUHours), share(r.RecoveredGPUHours, r.DegradedGPUHours))
 	_, _ = fmt.Fprintf(w, "incidents recovered\t%d of %d\t%s\n",
 		r.Recovered, r.Incidents, share(float64(r.Recovered), float64(r.Incidents)))
 	_, _ = fmt.Fprintf(w, "  without a human\t%d of %d\t%s of recovered\n",
 		r.RecoveredUnattended, r.Recovered, share(float64(r.RecoveredUnattended), float64(r.Recovered)))
 	// Printed directly under "recovered" on purpose: this is the number that
 	// used to be inside it, and the pair only makes sense read together.
-	_, _ = fmt.Fprintf(w, "closed, nothing done\t%d of %d\t%s\t(%s degraded)\n",
+	_, _ = fmt.Fprintf(w, "closed without verified recovery\t%d of %d\t%s\t(%s degraded)\n",
 		r.ObservedOnly, r.Incidents, share(float64(r.ObservedOnly), float64(r.Incidents)),
 		gpuHours(r.ObservedOnlyGPUHours))
 	_, _ = fmt.Fprintf(w, "target changed, recovery unverified\t%d\t(%s degraded)\n", r.Superseded, gpuHours(r.SupersededGPUHours))
@@ -164,14 +163,9 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 	// wrong reading, and a capacity report that has to be interpreted is a
 	// report that will be misquoted.
 	_, _ = fmt.Fprint(out, "\nlegend:\n"+
-		"  recovered     = the incident reached RESOLVED *and* a remediation step executed.\n"+
-		"                  NEEDS_HUMAN and EXPIRED do not count, and an incident parked for\n"+
-		"                  a human keeps accruing degraded time.\n"+
-		"  nothing done  = reached RESOLVED with no remediation step ever executed — the\n"+
-		"                  incident was observed and closed. Usually a problem class with no\n"+
-		"                  policy bound to it: it does not error, it does not alert, and it\n"+
-		"                  is not recovered capacity. Check `kubectl get gpuremediationpolicy`\n"+
-		"                  against the classes your detectors emit.\n"+
+		"  recovered     = an audited remediation followed by a verified resolution.\n"+
+		"                  Overlapping recovery intervals on one GPU count once in the fleet total.\n"+
+		"  unverified    = closed without that evidence, including observation and manual closure.\n"+
 		"  unattended    = recovered without ever asking for an approval (no human decision).\n"+
 		"  GPU-hours     = degraded GPU-time clipped to the window, not lost GPU-time:\n"+
 		"                  a degraded GPU may still have been serving.\n"+
@@ -201,7 +195,7 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 			"  would recover         %d (%d without asking a human)\n"+
 			"  no ladder to run      %d   ← closed with no policy bound to the class\n"+
 			"  degraded GPU-hours    %s   ← real: the hardware was degraded this long\n"+
-			"  degraded GPU-hours in simulated remediations  %s\n"+
+			"  GPU-hours that would have been returned (estimate)  %s (assumes recovery at simulated resolution)\n"+
 			"  ladder decision time  p50 %s  p90 %s\n",
 			sim.Incidents,
 			sim.WouldRecover, sim.WouldRecoverUnattended,

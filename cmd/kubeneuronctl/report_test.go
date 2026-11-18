@@ -73,7 +73,7 @@ func TestReportTextOutputStatesWhatItCounts(t *testing.T) {
 	}
 	for _, want := range []string{
 		"degraded GPU-hours", "47.0",
-		"degraded GPU-hours in remediated incidents", "34.0", "72.3%", // 34/47
+		"Recovered GPU-hours: 34.0",
 		"incidents recovered", "2 of 4", "50.0%",
 		"without a human", "1 of 2",
 		"p50 2h0m0s", "p90 4h0m0s",
@@ -82,10 +82,10 @@ func TestReportTextOutputStatesWhatItCounts(t *testing.T) {
 		// "recovered" counted — and, since an incident can now reach RESOLVED
 		// without anything having been done to the fleet, what it did NOT
 		// count is just as load-bearing.
-		"recovered     = the incident reached RESOLVED *and* a remediation step executed",
-		"nothing done  = reached RESOLVED with no remediation step ever executed",
+		"recovered     = an audited remediation followed by a verified resolution",
+		"unverified    = closed without that evidence",
 		"unattended    = recovered without ever asking for an approval",
-		"closed, nothing done",
+		"closed without verified recovery",
 		// The inventory undercount is disclosed rather than hidden.
 		"were charged 1 GPU each",
 	} {
