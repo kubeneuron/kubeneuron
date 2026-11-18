@@ -47,6 +47,7 @@ nav:
       - XID catalog: xid-catalog.md
   - Roadmap:
       - MIG semantics decision: mig-decision.md
+      - Training reports: training-reports.md
       - Checkpoint coordination design: checkpoint-coordination-design.md
       - Workload-safe recovery design record (v0.8): workload-safe-recovery-design.md
       - Hardware E2E dispatch: hw-e2e-dispatch.md
