@@ -64,16 +64,29 @@ ENTRYPOINT ["/kubeneuron-controller"]
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS nsenter
 ARG TOYBOX_VERSION=0.8.13
 ARG TOYBOX_SHA256=9d4c124d7d731a2db399f6278baa2b42c2e3511f610c6ad30cc3f1a52581334b
+ARG TOYBOX_GITHUB_SHA256=fa84ca399c2a88c3d841db943052911355b817f8151cd6bfb9e0b12541e4828c
 ARG MUSL_VERSION=1.2.5
 ARG MUSL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
 RUN apk add --no-cache bash build-base curl linux-headers
 WORKDIR /src
-RUN curl --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 300 -fsSLo toybox.tar.gz "https://landley.net/toybox/downloads/toybox-${TOYBOX_VERSION}.tar.gz" \
- && echo "${TOYBOX_SHA256}  toybox.tar.gz" | sha256sum -c - \
- && curl --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 300 -fsSLo musl.tar.gz "https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz" \
- && echo "${MUSL_SHA256}  musl.tar.gz" | sha256sum -c - \
- && apk list -I musl | grep -q "^musl-${MUSL_VERSION}-" \
- && tar xzf toybox.tar.gz && tar xzf musl.tar.gz "musl-${MUSL_VERSION}/COPYRIGHT"
+RUN <<'SH'
+set -eu
+fetch() {
+    archive=$1
+    url=$2
+    digest=$3
+    curl --retry 2 --retry-all-errors --retry-delay 2 --connect-timeout 15 --max-time 120 -fsSLo "$archive" "$url" &&
+        echo "$digest  $archive" | sha256sum -c - &&
+        printf '%s\nsha256 %s\n' "$url" "$digest" > "$archive.source"
+}
+fetch toybox.tar.gz "https://codeload.github.com/landley/toybox/tar.gz/refs/tags/${TOYBOX_VERSION}" "$TOYBOX_GITHUB_SHA256" ||
+    fetch toybox.tar.gz "https://landley.net/toybox/downloads/toybox-${TOYBOX_VERSION}.tar.gz" "$TOYBOX_SHA256"
+fetch musl.tar.gz "https://distfiles.alpinelinux.org/distfiles/v3.20/musl-${MUSL_VERSION}.tar.gz" "$MUSL_SHA256" ||
+    fetch musl.tar.gz "https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz" "$MUSL_SHA256"
+apk list -I musl | grep -q "^musl-${MUSL_VERSION}-"
+tar xzf toybox.tar.gz
+tar xzf musl.tar.gz "musl-${MUSL_VERSION}/COPYRIGHT"
+SH
 # Alpine's fortify headers do not compile toybox; the fortification is a
 # build-time hardening of this one small binary, not a licence matter.
 RUN cd "toybox-${TOYBOX_VERSION}" \
@@ -84,9 +97,9 @@ RUN cd "toybox-${TOYBOX_VERSION}" \
  && cp LICENSE /out/licenses/toybox/LICENSE \
  && cp "/src/musl-${MUSL_VERSION}/COPYRIGHT" /out/licenses/musl/COPYRIGHT \
  && printf 'toybox %s\n' "${TOYBOX_VERSION}" > /out/licenses/toybox/VERSION \
- && printf 'https://landley.net/toybox/downloads/toybox-%s.tar.gz\nsha256 %s\n' "${TOYBOX_VERSION}" "${TOYBOX_SHA256}" > /out/licenses/toybox/SOURCE \
+ && cp /src/toybox.tar.gz.source /out/licenses/toybox/SOURCE \
  && printf 'musl %s (statically linked into nsenter)\n' "${MUSL_VERSION}" > /out/licenses/musl/VERSION \
- && printf 'https://musl.libc.org/releases/musl-%s.tar.gz\nsha256 %s\n' "${MUSL_VERSION}" "${MUSL_SHA256}" > /out/licenses/musl/SOURCE
+ && cp /src/musl.tar.gz.source /out/licenses/musl/SOURCE
 
 # DCGM from NVIDIA packages is not redistributable in this image. Operators
 # may explicitly supply a compatible client through hostTooling.dcgmiPath.
