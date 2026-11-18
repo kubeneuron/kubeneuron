@@ -94,6 +94,12 @@ incident. An empty window displays “No incidents in this window.”
 
 ### How we count
 
+**Recovered GPU-hours** sums the degraded GPU-hours of incidents that ended
+with an audited remediation step followed by a verified resolution. Overlapping
+intervals on one GPU count once. Manual closures and observe-only incidents
+are excluded. It measures degraded time that ended in a verified recovery, not
+capacity confirmed to be serving work again.
+
 **Degraded GPU-hours** sums each incident's time within the selected window
 multiplied by its affected GPU count. A degraded GPU may still serve work.
 **Time to recover** shows the median full duration from open to resolution for
