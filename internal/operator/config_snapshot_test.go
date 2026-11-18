@@ -1387,3 +1387,24 @@ func TestCompileSnapshotCarriesWorkloadContextOnlyWithThePreview(t *testing.T) {
 		t.Fatalf("selection = %v %v %v", b, k, r)
 	}
 }
+
+func TestCompileSnapshotManualRecoveryBaseline(t *testing.T) {
+	policies, playbooks := testPolicyFixture()
+	for _, value := range []string{"bad", "0s", "-1h", "720h1ms", "", "1ms", "720h"} {
+		t.Run(value, func(t *testing.T) {
+			installation := testKubeNeuron()
+			installation.Spec.ManualRecoveryBaseline = value
+			_, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
+			switch value {
+			case "", "1ms", "720h":
+				if err != nil {
+					t.Fatal(err)
+				}
+			default:
+				if err == nil || !(strings.Contains(err.Error(), "manualRecoveryBaseline") || strings.Contains(err.Error(), "manual_recovery_baseline")) {
+					t.Fatalf("expected a baseline error, got %v", err)
+				}
+			}
+		})
+	}
+}

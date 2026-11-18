@@ -1063,9 +1063,11 @@ type TLSSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.safety) || self.safety.executionMode != 'Paused' || (has(self.notifications) && has(self.notifications.operatorAPIToken))",message="notifications.operatorAPIToken is required for Paused mode so the gate can be resumed through the authenticated API"
 // +kubebuilder:validation:XValidation:rule="!has(self.auth) || ((!has(self.auth.users) || !has(self.auth.users.namespace)) && (!has(self.auth.oidc) || !has(self.auth.oidc.clientSecretRef.namespace)))",message="auth Secret references must omit namespace and use spec.namespace"
 // +kubebuilder:validation:XValidation:rule="!has(self.notifications) || ((!has(self.notifications.slack) || !has(self.notifications.slack.namespace)) && (!has(self.notifications.operatorAPIToken) || !has(self.notifications.operatorAPIToken.namespace)) && (!has(self.notifications.webhookToken) || !has(self.notifications.webhookToken.namespace)) && (!has(self.notifications.webhook) || !has(self.notifications.webhook.namespace)) && (!has(self.notifications.pagerduty) || !has(self.notifications.pagerduty.namespace)))",message="notification Secret references must omit namespace and use spec.namespace"
+// +kubebuilder:validation:XValidation:rule="!has(self.manualRecoveryBaseline) || (duration(self.manualRecoveryBaseline) > duration('0s') && duration(self.manualRecoveryBaseline) <= duration('720h'))",message="manualRecoveryBaseline must be a positive duration of at most 720h"
 type KubeNeuronSpec struct {
 	// ManualRecoveryBaseline is the operator's usual manual recovery time.
 	// Omit it to suppress GPU-hours saved estimates.
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$`
 	// +optional
 	ManualRecoveryBaseline string `json:"manualRecoveryBaseline,omitempty"`
 	// Namespace is immutable because moving an installation would otherwise

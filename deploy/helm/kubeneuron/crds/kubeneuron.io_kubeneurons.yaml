@@ -675,6 +675,7 @@ spec:
                 description: |-
                   ManualRecoveryBaseline is the operator's usual manual recovery time.
                   Omit it to suppress GPU-hours saved estimates.
+                pattern: ^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$
                 type: string
               namespace:
                 description: |-
@@ -1988,6 +1989,10 @@ spec:
                 || !has(self.notifications.webhookToken.namespace)) && (!has(self.notifications.webhook)
                 || !has(self.notifications.webhook.namespace)) && (!has(self.notifications.pagerduty)
                 || !has(self.notifications.pagerduty.namespace)))'
+            - message: manualRecoveryBaseline must be a positive duration of at most
+                720h
+              rule: '!has(self.manualRecoveryBaseline) || (duration(self.manualRecoveryBaseline)
+                > duration(''0s'') && duration(self.manualRecoveryBaseline) <= duration(''720h''))'
           status:
             description: KubeNeuronStatus summarizes the operator's observed desired
               state.

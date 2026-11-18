@@ -337,8 +337,8 @@ func decodeStrict(data []byte, out any) error {
 
 // Validate checks configuration invariants and applies defaults.
 func (c *Config) Validate() error {
-	if c.ManualRecoveryBaseline != nil && *c.ManualRecoveryBaseline <= 0 {
-		return errors.New("manual_recovery_baseline must be positive")
+	if c.ManualRecoveryBaseline != nil && (*c.ManualRecoveryBaseline <= 0 || time.Duration(*c.ManualRecoveryBaseline) > 30*24*time.Hour) {
+		return errors.New("manual_recovery_baseline must be a positive duration of at most 720h")
 	}
 	if err := c.Safety.validateBlastRadius(); err != nil {
 		return err
