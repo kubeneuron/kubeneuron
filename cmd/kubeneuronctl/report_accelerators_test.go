@@ -6,7 +6,11 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -47,9 +51,14 @@ func TestReportAcceleratorHoursGolden(t *testing.T) {
 	if err := printAcceleratorHours(&out, h, ""); err != nil {
 		t.Fatal(err)
 	}
-	golden := filepath.Join("testdata", "report_accelerators.golden")
+	checkGolden(t, "report_accelerators.golden", out.Bytes())
+}
+
+func checkGolden(t *testing.T, name string, got []byte) {
+	t.Helper()
+	golden := filepath.Join("testdata", name)
 	if os.Getenv("KUBENEURON_UPDATE_GOLDEN") == "1" {
-		if err := os.WriteFile(golden, out.Bytes(), 0o644); err != nil {
+		if err := os.WriteFile(golden, got, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -57,8 +66,8 @@ func TestReportAcceleratorHoursGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(out.Bytes(), want) {
-		t.Fatalf("output differs from %s:\n%s", golden, out.String())
+	if !bytes.Equal(got, want) {
+		t.Fatalf("output differs from %s:\n%s", golden, got)
 	}
 }
 
@@ -70,5 +79,62 @@ func TestBaselineAndIncidentsText(t *testing.T) {
 	}
 	if incidents(1) != "1 incident" || incidents(2) != "2 incidents" {
 		t.Fatal(incidents(1), incidents(2))
+	}
+}
+
+// The whole report: GPU-hour lines only for a window of one GPU resource;
+// any other window has its hours per resource and nowhere else.
+func TestRecoveryReportTextGolden(t *testing.T) {
+	to := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	baseline := 4 * 3600.0
+	p50 := 1800.0
+	resource := func(name string, degraded float64) types.AcceleratorResourceReport {
+		return types.AcceleratorResourceReport{Resource: name, Incidents: 1, DegradedHours: degraded, RecoveredHours: degraded / 2,
+			SavedEstimate: &types.AcceleratorSavedEstimate{Hours: 1, ManualBaselineSeconds: baseline}}
+	}
+	gpu := func(rs ...types.AcceleratorResourceReport) types.AcceleratorGroupReport {
+		return types.AcceleratorGroupReport{Group: types.AcceleratorGroupGPU, Unit: "GPU-hours", Resources: rs}
+	}
+	report := func(h types.AcceleratorHours, n int) *types.RecoveryReport {
+		return &types.RecoveryReport{
+			From: to.Add(-168 * time.Hour), To: to, Incidents: n, Recovered: 1, RecoveredUnattended: 1, ObservedOnly: 1,
+			DegradedGPUHours: 20, RecoveredGPUHours: 8, ObservedOnlyGPUHours: 2, Superseded: 0,
+			MTTR:             types.RecoveryLatency{Samples: 1, P50Seconds: p50, P90Seconds: p50, MeanSeconds: p50},
+			SavingsEstimate:  &types.SavingsEstimate{GPUHoursSaved: 3, ManualBaselineSeconds: baseline},
+			IncidentDetails:  []types.RecoveryIncident{{ID: "inc-1", Node: "node-a", Vendor: "nvidia", State: types.IncidentState("RESOLVED"), DegradedGPUHours: 8, RecoverySeconds: &p50}},
+			Classes:          []types.RecoveryClassReport{{Class: "xid-79", Incidents: n, DegradedGPUHours: 20, RecoveredGPUHours: 8, ObservedOnly: 1, RecoveredUnattended: 1, MTTR: types.RecoveryLatency{P50Seconds: p50, P90Seconds: p50}}},
+			Open:             []types.RecoveryOpenIncident{{ID: "inc-2", Class: "xid-79", Node: "node-b", State: types.IncidentState("OPEN"), OpenedAt: to.Add(-2 * time.Hour), DegradedGPUHours: 2}},
+			AcceleratorHours: h,
+		}
+	}
+	tpuOnly := types.AcceleratorHours{Groups: []types.AcceleratorGroupReport{{Group: types.AcceleratorGroupTPU, Unit: "TPU chip-hours",
+		Resources: []types.AcceleratorResourceReport{resource("google.com/tpu", 12)}}}}
+	dryRun := &types.RecoveryReport{From: to.Add(-168 * time.Hour), To: to, DryRunExcluded: 1, Classes: []types.RecoveryClassReport{}, Open: []types.RecoveryOpenIncident{},
+		Simulated: &types.SimulatedRecovery{Incidents: 1, WouldRecover: 1, DegradedGPUHours: 12, WouldRecoverGPUHours: 6,
+			MTTR:             types.RecoveryLatency{P50Seconds: p50, P90Seconds: p50},
+			WouldHaveSaved:   &types.SavingsEstimate{GPUHoursSaved: 3, ManualBaselineSeconds: baseline},
+			IncidentDetails:  []types.RecoveryIncident{{ID: "inc-3", Node: "tpu-node", State: types.IncidentState("RESOLVED"), DegradedGPUHours: 12, RecoverySeconds: &p50}},
+			AcceleratorHours: tpuOnly}}
+	for _, tc := range []struct {
+		name string
+		r    *types.RecoveryReport
+	}{
+		{"mixed", report(types.AcceleratorHours{Groups: []types.AcceleratorGroupReport{gpu(resource("amd.com/gpu", 8), resource("nvidia.com/gpu", 12))}}, 2)},
+		{"node_hours", report(types.AcceleratorHours{DeviceCountUnknown: &types.DeviceCountUnknown{Incidents: 2, DegradedNodeHours: 6, RecoveredNodeHours: 4}}, 2)},
+		{"tpu_dry_run", dryRun},
+		{"nvidia", report(types.AcceleratorHours{Groups: []types.AcceleratorGroupReport{gpu(resource("nvidia.com/gpu", 20))}}, 2)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&out)
+			if err := printRecoveryReport(cmd, tc.r, "168h"); err != nil {
+				t.Fatal(err)
+			}
+			if tc.name != "nvidia" && strings.Contains(out.String(), "GPU-hours:") || strings.Contains(out.String(), "GPU-HOURS") && tc.name != "nvidia" {
+				t.Errorf("GPU-hour lines outside the table:\n%s", out.String())
+			}
+			checkGolden(t, "report_text_"+tc.name+".golden", out.Bytes())
+		})
 	}
 }

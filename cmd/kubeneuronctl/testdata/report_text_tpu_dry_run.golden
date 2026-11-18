@@ -1,0 +1,42 @@
+window:    2026-11-11T12:00:00Z .. 2026-11-18T12:00:00Z (168h)
+incidents: 0 in window, 0 still open
+
+incidents recovered                  0 of 0  n/a
+  without a human                    0 of 0  n/a of recovered
+closed without verified recovery     0 of 0  n/a
+target changed, recovery unverified  0
+Time to recover (n=0)                p50 -  p90 -  mean -
+
+legend:
+  recovered     = an audited remediation followed by a verified resolution.
+                  Overlapping recovery intervals on one device count once.
+  unverified    = closed without that evidence, including observation and manual closure.
+  unattended    = recovered without ever asking for an approval (no human decision).
+  hours         = degraded device-time per resource in its own unit, clipped to the
+                  window, not lost time: a degraded device may still have been serving.
+                  The devices recorded when the incident opened; node-hours where
+                  no device count was recorded.
+  MTTR          = full open-to-resolved time of incidents that RECOVERED in the
+                  window; an incident nothing repaired contributes no repair time.
+
+note: 1 incident(s) excluded because their installation was in dry-run.
+Dry-run executes nothing, so it recovers nothing; these are not counted as capacity
+returned to service. Switch to executionMode: Enabled (confined) to measure real recovery.
+
+SIMULATED — what dry-run WOULD have done (nothing was executed)
+  incidents             1
+  would recover         1 (0 without asking a human)
+  no ladder to run      0   ← closed with no policy bound to the class
+  ladder decision time  p50 30m0s  p90 30m0s
+
+INCIDENT  NODE      VENDOR   STATE     SIMULATED DECISION TIME
+inc-3     tpu-node  unknown  RESOLVED  30m0s
+
+  TPU — TPU chip-hours
+    RESOURCE        INCIDENTS  DEGRADED  RECOVERED  SAVED (ESTIMATE)                        COST EQUIVALENT (ESTIMATE)
+    google.com/tpu  1          12.0      6.0        1.0 TPU chip-hours, manual baseline 4h  rate not set
+
+
+These are decisions, not repairs: every one of them reached RESOLVED against a
+synthetic success, so they measure what the policy would have chosen — which is
+what a dry-run pilot is for — and not what came back.

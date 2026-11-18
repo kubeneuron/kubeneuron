@@ -148,6 +148,12 @@ The GPU-hour numbers above (`degraded_gpu_hours`, `recovered_gpu_hours`,
 `savings_estimate` and the rest) count `nvidia.com/gpu` and `amd.com/gpu` only:
 GPU only; use `accelerator_groups` for the other accelerators.
 
+In the text of `kubeneuronctl report`, the GPU-hour lines (recovered, saved,
+degraded, per class, per incident and in the simulated block) are printed only
+for a window whose incidents are all of one GPU resource with a recorded
+device count. For any other window, hours are shown only in the table per
+resource and in the node-hours block; the other lines show counts and times.
+
 **Cost equivalent (estimate).** Set `spec.recoveryCostRates` to show the saved
 hours of a resource as a cost:
 

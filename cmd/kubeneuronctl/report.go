@@ -105,9 +105,10 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		}
 		return err
 	}
-	// The GPU-hour lines count GPUs only; a fleet with none shows its own
-	// units below instead.
-	gpus := len(r.Groups) == 0 || r.Groups[0].Group == types.AcceleratorGroupGPU
+	// The GPU-hour lines count GPUs only, and add resources together: they
+	// are printed only for a window of one GPU resource. Any other window has
+	// its hours in the table per resource and nowhere else.
+	gpus := gpuHoursText(r.Incidents, r.AcceleratorHours)
 	if gpus {
 		_, _ = fmt.Fprintf(out, "Recovered GPU-hours: %s\n", gpuHours(r.RecoveredGPUHours))
 	}
@@ -119,7 +120,7 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 	if estimate := r.SavingsEstimate; !gpus {
 		// The saved hours of each resource are in its row above.
 	} else if estimate != nil {
-		_, _ = fmt.Fprintf(out, "GPU-hours saved (estimate): %s (manual baseline %s)\n", gpuHours(estimate.GPUHoursSaved), seconds(estimate.ManualBaselineSeconds))
+		_, _ = fmt.Fprintf(out, "GPU-hours saved (estimate): %s (manual baseline %s)\n", gpuHours(estimate.GPUHoursSaved), baseline(estimate.ManualBaselineSeconds))
 	} else {
 		_, _ = fmt.Fprintln(out, "Set spec.manualRecoveryBaseline to estimate GPU-hours saved.")
 	}
@@ -133,20 +134,37 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		r.RecoveredUnattended, r.Recovered, share(float64(r.RecoveredUnattended), float64(r.Recovered)))
 	// Printed directly under "recovered" on purpose: this is the number that
 	// used to be inside it, and the pair only makes sense read together.
-	_, _ = fmt.Fprintf(w, "closed without verified recovery\t%d of %d\t%s\t(%s degraded)\n",
-		r.ObservedOnly, r.Incidents, share(float64(r.ObservedOnly), float64(r.Incidents)),
-		gpuHours(r.ObservedOnlyGPUHours))
-	_, _ = fmt.Fprintf(w, "target changed, recovery unverified\t%d\t(%s degraded)\n", r.Superseded, gpuHours(r.SupersededGPUHours))
+	if gpus {
+		_, _ = fmt.Fprintf(w, "closed without verified recovery\t%d of %d\t%s\t(%s degraded)\n",
+			r.ObservedOnly, r.Incidents, share(float64(r.ObservedOnly), float64(r.Incidents)),
+			gpuHours(r.ObservedOnlyGPUHours))
+		_, _ = fmt.Fprintf(w, "target changed, recovery unverified\t%d\t(%s degraded)\n", r.Superseded, gpuHours(r.SupersededGPUHours))
+	} else {
+		_, _ = fmt.Fprintf(w, "closed without verified recovery\t%d of %d\t%s\n",
+			r.ObservedOnly, r.Incidents, share(float64(r.ObservedOnly), float64(r.Incidents)))
+		_, _ = fmt.Fprintf(w, "target changed, recovery unverified\t%d\n", r.Superseded)
+	}
 	_, _ = fmt.Fprintf(w, "Time to recover (n=%d)\tp50 %s\tp90 %s\tmean %s\n",
 		r.MTTR.Samples, seconds(r.MTTR.P50Seconds), seconds(r.MTTR.P90Seconds), seconds(r.MTTR.MeanSeconds))
 	if err := w.Flush(); err != nil {
 		return err
 	}
 
-	if err := printReportIncidents(cmd, r.IncidentDetails, r.Incidents, "TIME TO RECOVER"); err != nil {
+	if err := printReportIncidents(cmd, r.IncidentDetails, r.Incidents, "TIME TO RECOVER", gpus); err != nil {
 		return err
 	}
-	if len(r.Classes) > 0 {
+	if len(r.Classes) > 0 && !gpus {
+		_, _ = fmt.Fprintln(out, "\nproblem classes:")
+		w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
+		_, _ = fmt.Fprintln(w, "CLASS\tINCIDENTS\tNOTHING DONE\tUNATTENDED\tMTTR P50\tMTTR P90")
+		for _, class := range r.Classes {
+			_, _ = fmt.Fprintf(w, "%s\t%d\t%d\t%d\t%s\t%s\n", class.Class, class.Incidents, class.ObservedOnly,
+				class.RecoveredUnattended, seconds(class.MTTR.P50Seconds), seconds(class.MTTR.P90Seconds))
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	} else if len(r.Classes) > 0 {
 		_, _ = fmt.Fprintln(out, "\ntop problem classes by degraded GPU-hours:")
 		w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
 		_, _ = fmt.Fprintln(w, "CLASS\tINCIDENTS\tDEGRADED\tDEGRADED IN REMEDIATED INCIDENTS\tNOTHING DONE\tUNATTENDED\tMTTR P50\tMTTR P90")
@@ -161,7 +179,18 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		}
 	}
 
-	if len(r.Open) > 0 {
+	if len(r.Open) > 0 && !gpus {
+		_, _ = fmt.Fprintf(out, "\nstill open (%d), oldest first:\n", len(r.Open))
+		w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
+		_, _ = fmt.Fprintln(w, "ID\tSTATE\tCLASS\tNODE\tAGE")
+		for _, inc := range r.Open {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+				inc.ID, inc.State, inc.Class, inc.Node, r.To.Sub(inc.OpenedAt).Round(time.Second))
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	} else if len(r.Open) > 0 {
 		_, _ = fmt.Fprintf(out, "\nstill open (%d), oldest first:\n", len(r.Open))
 		w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
 		_, _ = fmt.Fprintln(w, "ID\tSTATE\tCLASS\tNODE\tGPU\tAGE\tDEGRADED")
@@ -178,18 +207,32 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 	// The legend is not decoration: every one of these numbers has a plausible
 	// wrong reading, and a capacity report that has to be interpreted is a
 	// report that will be misquoted.
-	_, _ = fmt.Fprint(out, "\nlegend:\n"+
-		"  recovered     = an audited remediation followed by a verified resolution.\n"+
-		"                  Overlapping recovery intervals on one GPU count once in the fleet total.\n"+
-		"  unverified    = closed without that evidence, including observation and manual closure.\n"+
-		"  unattended    = recovered without ever asking for an approval (no human decision).\n"+
-		"  GPU-hours     = degraded GPU-time clipped to the window, not lost GPU-time:\n"+
-		"                  a degraded GPU may still have been serving.\n"+
-		"                  1 GPU for a GPU-scoped incident, the node's registered inventory\n"+
-		"                  for a node-scoped one.\n"+
-		"  MTTR          = full open-to-resolved time of incidents that RECOVERED in the\n"+
-		"                  window; an incident nothing repaired contributes no repair time.\n")
-	if r.AssumedSingleGPU > 0 {
+	if !gpus {
+		_, _ = fmt.Fprint(out, "\nlegend:\n"+
+			"  recovered     = an audited remediation followed by a verified resolution.\n"+
+			"                  Overlapping recovery intervals on one device count once.\n"+
+			"  unverified    = closed without that evidence, including observation and manual closure.\n"+
+			"  unattended    = recovered without ever asking for an approval (no human decision).\n"+
+			"  hours         = degraded device-time per resource in its own unit, clipped to the\n"+
+			"                  window, not lost time: a degraded device may still have been serving.\n"+
+			"                  The devices recorded when the incident opened; node-hours where\n"+
+			"                  no device count was recorded.\n"+
+			"  MTTR          = full open-to-resolved time of incidents that RECOVERED in the\n"+
+			"                  window; an incident nothing repaired contributes no repair time.\n")
+	} else {
+		_, _ = fmt.Fprint(out, "\nlegend:\n"+
+			"  recovered     = an audited remediation followed by a verified resolution.\n"+
+			"                  Overlapping recovery intervals on one GPU count once in the fleet total.\n"+
+			"  unverified    = closed without that evidence, including observation and manual closure.\n"+
+			"  unattended    = recovered without ever asking for an approval (no human decision).\n"+
+			"  GPU-hours     = degraded GPU-time clipped to the window, not lost GPU-time:\n"+
+			"                  a degraded GPU may still have been serving.\n"+
+			"                  1 GPU for a GPU-scoped incident, the node's registered inventory\n"+
+			"                  for a node-scoped one.\n"+
+			"  MTTR          = full open-to-resolved time of incidents that RECOVERED in the\n"+
+			"                  window; an incident nothing repaired contributes no repair time.\n")
+	}
+	if r.AssumedSingleGPU > 0 && gpus {
 		_, _ = fmt.Fprintf(out, "\nnote: %d node-scoped incident(s) hit nodes with no registered GPU inventory\n"+
 			"and were charged 1 GPU each — the real degraded GPU-hours are higher.\n", r.AssumedSingleGPU)
 	}
@@ -207,27 +250,31 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		// Printed AFTER the note above and under its own heading, never
 		// interleaved with the real numbers. A reader skimming must not be
 		// able to carry one of these away as a measurement.
+		simGPUs := gpuHoursText(sim.Incidents, sim.AcceleratorHours)
 		_, _ = fmt.Fprintf(out, "\nSIMULATED — what dry-run WOULD have done (nothing was executed)\n"+
 			"  incidents             %d\n"+
 			"  would recover         %d (%d without asking a human)\n"+
-			"  no ladder to run      %d   ← closed with no policy bound to the class\n"+
-			"  degraded GPU-hours    %s   ← real: the hardware was degraded this long\n"+
-			"  GPU-hours that would have been returned (estimate)  %s (assumes recovery at simulated resolution)\n"+
-			"  ladder decision time  p50 %s  p90 %s\n",
+			"  no ladder to run      %d   ← closed with no policy bound to the class\n",
 			sim.Incidents,
 			sim.WouldRecover, sim.WouldRecoverUnattended,
-			sim.ObservedOnly,
-			gpuHours(sim.DegradedGPUHours),
-			gpuHours(sim.WouldRecoverGPUHours),
-			seconds(sim.MTTR.P50Seconds), seconds(sim.MTTR.P90Seconds))
-		if err := printReportIncidents(cmd, sim.IncidentDetails, sim.Incidents, "SIMULATED DECISION TIME"); err != nil {
+			sim.ObservedOnly)
+		if simGPUs {
+			_, _ = fmt.Fprintf(out, "  degraded GPU-hours    %s   ← real: the hardware was degraded this long\n"+
+				"  GPU-hours that would have been returned (estimate)  %s (assumes recovery at simulated resolution)\n",
+				gpuHours(sim.DegradedGPUHours), gpuHours(sim.WouldRecoverGPUHours))
+		}
+		_, _ = fmt.Fprintf(out, "  ladder decision time  p50 %s  p90 %s\n", seconds(sim.MTTR.P50Seconds), seconds(sim.MTTR.P90Seconds))
+		if err := printReportIncidents(cmd, sim.IncidentDetails, sim.Incidents, "SIMULATED DECISION TIME", simGPUs); err != nil {
 			return err
+		}
+		if len(sim.Groups) > 0 || sim.DeviceCountUnknown != nil {
+			_, _ = fmt.Fprintln(out)
 		}
 		if err := printAcceleratorHours(out, sim.AcceleratorHours, "  "); err != nil {
 			return err
 		}
-		if estimate := sim.WouldHaveSaved; estimate != nil {
-			_, _ = fmt.Fprintf(out, "  GPU-hours that would have been saved (estimate): %s (manual baseline %s; assumes simulated decision time equals recovery time)\n", gpuHours(estimate.GPUHoursSaved), seconds(estimate.ManualBaselineSeconds))
+		if estimate := sim.WouldHaveSaved; estimate != nil && simGPUs {
+			_, _ = fmt.Fprintf(out, "  GPU-hours that would have been saved (estimate): %s (manual baseline %s; assumes simulated decision time equals recovery time)\n", gpuHours(estimate.GPUHoursSaved), baseline(estimate.ManualBaselineSeconds))
 		}
 		if sim.AnnouncedInterruptions > 0 {
 			_, _ = fmt.Fprintf(out, "  %d dry-run interruption(s) announced by the cloud are left out: the nodes were not degraded.\n", sim.AnnouncedInterruptions)
@@ -250,27 +297,56 @@ func printAnnouncedInterruptions(cmd *cobra.Command, n int) {
 		"not degraded, and nothing was recovered.\n", n)
 }
 
-func printReportIncidents(cmd *cobra.Command, rows []types.RecoveryIncident, total int, timeLabel string) error {
+// gpuHoursText reports whether a section prints the GPU-hour lines: only
+// for incidents of one GPU resource, or from a controller that does not count
+// per resource.
+func gpuHoursText(incidents int, h types.AcceleratorHours) bool {
+	if incidents == 0 || h.DeviceCountUnknown != nil {
+		return false
+	}
+	if len(h.Groups) == 0 {
+		return true
+	}
+	return len(h.Groups) == 1 && h.Groups[0].Group == types.AcceleratorGroupGPU && len(h.Groups[0].Resources) == 1
+}
+
+func printReportIncidents(cmd *cobra.Command, rows []types.RecoveryIncident, total int, timeLabel string, gpus bool) error {
 	if len(rows) == 0 {
 		return nil
 	}
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
+	if !gpus {
+		if len(rows) < total {
+			_, _ = fmt.Fprintf(w, "\nShowing %d of %d incidents\n", len(rows), total)
+		}
+		_, _ = fmt.Fprintf(w, "\nINCIDENT\tNODE\tVENDOR\tSTATE\t%s\n", timeLabel)
+		for _, row := range rows {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", row.ID, row.Node, reportVendor(row), row.State, reportDuration(row))
+		}
+		return w.Flush()
+	}
 	if len(rows) < total {
 		_, _ = fmt.Fprintf(w, "\nShowing %d of %d incidents (highest degraded GPU-hours)\n", len(rows), total)
 	}
 	_, _ = fmt.Fprintf(w, "\nINCIDENT\tNODE\tVENDOR\tSTATE\tDEGRADED GPU-HOURS\t%s\n", timeLabel)
 	for _, row := range rows {
-		vendor := string(row.Vendor)
-		if vendor == "" {
-			vendor = "unknown"
-		}
-		duration := "—"
-		if row.RecoverySeconds != nil {
-			duration = (time.Duration(*row.RecoverySeconds * float64(time.Second))).Round(time.Second).String()
-		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", row.ID, row.Node, vendor, row.State, gpuHours(row.DegradedGPUHours), duration)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", row.ID, row.Node, reportVendor(row), row.State, gpuHours(row.DegradedGPUHours), reportDuration(row))
 	}
 	return w.Flush()
+}
+
+func reportVendor(row types.RecoveryIncident) string {
+	if row.Vendor == "" {
+		return "unknown"
+	}
+	return string(row.Vendor)
+}
+
+func reportDuration(row types.RecoveryIncident) string {
+	if row.RecoverySeconds == nil {
+		return "—"
+	}
+	return (time.Duration(*row.RecoverySeconds * float64(time.Second))).Round(time.Second).String()
 }
 
 // printAcceleratorHours prints the window per accelerator resource, one
