@@ -24,6 +24,11 @@ API is `v1alpha1`.
   in DryRun. Node-level policies require `--policy-pack bare-metal-alpha`
   (Alpha, not validated on real hardware). Repeat installs preserve existing policies.
 
+- **Affected training jobs.** Incident details and approval previews show the
+  accelerator workers observed on the node, grouped by verified Job, JobSet
+  or RayJob. Workers with unknown owners remain visible. The incident retains
+  its original map after the pods disappear.
+
 - **The installer runs the metrics path.** `deploy/install.sh` writes
   `spec.observability` with the Collector, the metrics store and Grafana
   `Managed` for a new installation, after naming the third-party

@@ -170,11 +170,7 @@ func controllerDRARules(installation *kubeneuronv1alpha1.KubeNeuron) []rbacv1.Po
 // with KubeNeuron — the resolver only says whose Pod a Pod is.
 func controllerContextRules(installation *kubeneuronv1alpha1.KubeNeuron) []rbacv1.PolicyRule {
 	batchJobs, kueue, kuberay := impactContextSelection(installation)
-	rules := []rbacv1.PolicyRule{
-		{APIGroups: []string{"batch"}, Resources: []string{"jobs"}, Verbs: []string{"get"}},
-		{APIGroups: []string{"jobset.x-k8s.io"}, Resources: []string{"jobsets"}, Verbs: []string{"get"}},
-		{APIGroups: []string{"ray.io"}, Resources: []string{"rayclusters", "rayjobs"}, Verbs: []string{"get"}},
-	}
+	var rules []rbacv1.PolicyRule
 	if batchJobs {
 		rules = append(rules, rbacv1.PolicyRule{APIGroups: []string{"batch"}, Resources: []string{"jobs"}, Verbs: []string{"get", "list", "watch"}})
 	}
@@ -207,6 +203,10 @@ func controllerClusterRole(installation *kubeneuronv1alpha1.KubeNeuron) *rbacv1.
 			// the exact Lease name; harmless for single-replica SQLite.
 			{APIGroups: []string{"coordination.k8s.io"}, Resources: []string{"leases"}, ResourceNames: []string{installation.Name + "-controller"}, Verbs: []string{"get", "update"}},
 			{APIGroups: []string{"coordination.k8s.io"}, Resources: []string{"leases"}, Verbs: []string{"create"}},
+			// Follow controller owner references for the incident job map.
+			{APIGroups: []string{"batch"}, Resources: []string{"jobs"}, Verbs: []string{"get"}},
+			{APIGroups: []string{"jobset.x-k8s.io"}, Resources: []string{"jobsets"}, Verbs: []string{"get"}},
+			{APIGroups: []string{"ray.io"}, Resources: []string{"rayclusters", "rayjobs"}, Verbs: []string{"get"}},
 		}, append(controllerDRARules(installation), controllerContextRules(installation)...)...),
 	}
 }

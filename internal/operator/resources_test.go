@@ -29,8 +29,8 @@ func TestControllerRBACTargetsManagedServiceAccount(t *testing.T) {
 	if role.Name != "fleet-controller" {
 		t.Fatalf("ClusterRole name = %q, want fleet-controller", role.Name)
 	}
-	if len(role.Rules) != 9 {
-		t.Fatalf("ClusterRole has %d rules, want 9", len(role.Rules))
+	if len(role.Rules) != 12 {
+		t.Fatalf("ClusterRole has %d rules, want 12", len(role.Rules))
 	}
 	if !rulesCover(role.Rules, rbacv1.PolicyRule{
 		APIGroups: []string{"authentication.k8s.io"}, Resources: []string{"tokenreviews"}, Verbs: []string{"create"},
