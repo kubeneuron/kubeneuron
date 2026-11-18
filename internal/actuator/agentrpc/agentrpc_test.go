@@ -137,3 +137,18 @@ func TestHealthyRequiresFreshHeartbeat(t *testing.T) {
 		t.Fatal("stale heartbeat must be unhealthy")
 	}
 }
+
+// A node read from Kubernetes has no agent: an agent step on it is refused
+// before anything is queued.
+func TestHealthyRefusesANodeWithoutAnAgent(t *testing.T) {
+	st := openStore(t)
+	ctx := context.Background()
+	if err := st.UpsertKubernetesInventory(ctx, &types.Node{Name: "k1", Devices: []types.DeviceCount{
+		{Resource: "google.com/tpu", Capacity: 4, Allocatable: 4, Unit: types.DeviceUnitTPUChip},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := New(st, 90*time.Second).Healthy(ctx, types.Node{Name: "k1"}); err == nil {
+		t.Fatal("a node without an agent must be unhealthy")
+	}
+}

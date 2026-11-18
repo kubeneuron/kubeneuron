@@ -79,6 +79,8 @@ type Controller struct {
 	// kubeneuron_workloads_evicted_total. Losing a suppression entry costs one
 	// repeated log line; the alternative costs memory forever.
 	logOnce *lru
+	// inventory is what the Kubernetes inventory sync last wrote.
+	inventory inventorySync
 
 	// armingHoldSince records when each incident FIRST hit the
 	// arming-in-flight hold (in scope, agent freshly unarmed). The
@@ -416,6 +418,7 @@ func (c *Controller) runJanitors(ctx context.Context) {
 		// the walk pins one per advance: a pass must never observe mixed
 		// generations across its loop.
 		passCtx := c.pinRuntimeConfig(ctx)
+		c.syncAcceleratorInventory(passCtx)
 		c.restoreAbandonedAcceleratorStacks(passCtx)
 		c.reconcileCordonedNodes(passCtx)
 		c.reconcileDegradedTaints(passCtx)

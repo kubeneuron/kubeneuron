@@ -226,6 +226,11 @@ type Store interface {
 	// UpsertAgentRegistration persists only agent-owned inventory fields. On an
 	// existing node it must preserve controller-managed inventory and state.
 	UpsertAgentRegistration(ctx context.Context, n *types.Node) error
+	// UpsertKubernetesInventory records a node read from its Kubernetes Node
+	// object: its UID and Devices, with InventoryKubernetes as the source. A
+	// node whose agent has registered is left untouched: the agent is the
+	// source of truth.
+	UpsertKubernetesInventory(ctx context.Context, n *types.Node) error
 	GetNode(ctx context.Context, name string) (*types.Node, error)
 	ListNodes(ctx context.Context) ([]*types.Node, error)
 	// ApplyNodeConfigPauses makes the given set the complete list of paused

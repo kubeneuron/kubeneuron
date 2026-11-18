@@ -581,7 +581,43 @@ type Node struct {
 	// old to report it, or one talking to this controller through the v1
 	// registration protocol.
 	AgentArming AgentArming `json:"agent_arming,omitempty"`
+	// InventorySource is where the row comes from: InventoryAgent once
+	// kubeneuron-agent registered, InventoryKubernetes for a node read from
+	// its Kubernetes Node object because no agent registered. Empty is a row
+	// from before the field, or one a pause config created.
+	InventorySource string `json:"inventory_source,omitempty"`
+	// Devices are the whole accelerator devices the Kubernetes Node
+	// advertises, recorded for a node without an agent. Where the agent runs,
+	// its GPUs are the source of truth and Devices is empty.
+	Devices []DeviceCount `json:"devices,omitempty"`
 }
+
+// Inventory sources of a node row.
+const (
+	InventoryAgent      = "agent"
+	InventoryKubernetes = "kubernetes"
+)
+
+// DeviceCount is one accelerator resource a Kubernetes Node advertises.
+type DeviceCount struct {
+	// Resource is the extended resource name, e.g. google.com/tpu.
+	Resource    string `json:"resource"`
+	Capacity    int64  `json:"capacity"`
+	Allocatable int64  `json:"allocatable"`
+	// Unit is what one count of Resource is: a GPU, a TPU chip, or an AWS
+	// accelerator device. Counts of different units are never summed.
+	Unit DeviceUnit `json:"unit"`
+}
+
+// DeviceUnit names what one count of an accelerator resource is.
+type DeviceUnit string
+
+const (
+	DeviceUnitGPU     DeviceUnit = "gpu"
+	DeviceUnitTPUChip DeviceUnit = "tpu-chip"
+	// DeviceUnitAWSDevice is one device of aws.amazon.com/neuron.
+	DeviceUnitAWSDevice DeviceUnit = "aws-device"
+)
 
 // AgentArming is the destructive-arming state a node's agent declares at
 // registration. Empty is UNKNOWN and must never be treated as a declared

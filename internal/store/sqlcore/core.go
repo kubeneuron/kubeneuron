@@ -1090,15 +1090,34 @@ func (q *Queries) UpsertAgentRegistration(ctx context.Context, n *types.Node) er
 	// registration is the agent's authoritative self-snapshot, and preserving
 	// a stale 'armed' across an agent downgrade or pod replacement would be a
 	// stale-authority bug. '' (unknown) overwrites too, by design.
+	// The agent takes over a node first read from Kubernetes: its devices
+	// were the Node object's view and are dropped.
 	_, err := q.db.ExecContext(ctx, `
-		INSERT INTO nodes (name, node_uid, platform, gpus, boot_id, agent_last_seen, agent_arming)
-		VALUES (?, ?, 'agent', ?, ?, ?, ?)
+		INSERT INTO nodes (name, node_uid, platform, gpus, boot_id, agent_last_seen, agent_arming, inventory_source)
+		VALUES (?, ?, 'agent', ?, ?, ?, ?, 'agent')
 		ON CONFLICT(name) DO UPDATE SET
 			node_uid=CASE WHEN excluded.node_uid<>'' THEN excluded.node_uid ELSE nodes.node_uid END,
 			gpus=excluded.gpus, boot_id=excluded.boot_id,
 			agent_last_seen=excluded.agent_last_seen,
-			agent_arming=excluded.agent_arming`,
+			agent_arming=excluded.agent_arming,
+			inventory_source='agent', devices='[]'`,
 		n.Name, n.UID, string(gpus), n.BootID, lastSeen, string(n.AgentArming))
+	return err
+}
+
+func (q *Queries) UpsertKubernetesInventory(ctx context.Context, n *types.Node) error {
+	devices, _ := json.Marshal(n.Devices)
+	if n.Devices == nil {
+		devices = []byte("[]")
+	}
+	_, err := q.db.ExecContext(ctx, `
+		INSERT INTO nodes (name, node_uid, platform, devices, inventory_source)
+		VALUES (?, ?, 'kubernetes', ?, 'kubernetes')
+		ON CONFLICT(name) DO UPDATE SET
+			node_uid=CASE WHEN excluded.node_uid<>'' THEN excluded.node_uid ELSE nodes.node_uid END,
+			devices=excluded.devices, inventory_source='kubernetes'
+		WHERE nodes.agent_last_seen IS NULL`,
+		n.Name, n.UID, string(devices))
 	return err
 }
 
@@ -1144,15 +1163,17 @@ func (q *Queries) ListNodes(ctx context.Context) ([]*types.Node, error) {
 }
 
 const nodeSelect = `
-	SELECT name, node_uid, platform, labels, ssh_addr, bmc_addr, gpus, boot_id, paused, agent_last_seen, agent_arming
+	SELECT name, node_uid, platform, labels, ssh_addr, bmc_addr, gpus, boot_id, paused, agent_last_seen, agent_arming,
+		inventory_source, devices
 	FROM nodes`
 
 func scanNode(r rowScanner) (*types.Node, error) {
 	var n types.Node
-	var labels, gpus, arming string
+	var labels, gpus, arming, devices string
 	var paused int
 	var lastSeen sql.NullString
-	err := r.Scan(&n.Name, &n.UID, &n.Platform, &labels, &n.SSHAddr, &n.BMCAddr, &gpus, &n.BootID, &paused, &lastSeen, &arming)
+	err := r.Scan(&n.Name, &n.UID, &n.Platform, &labels, &n.SSHAddr, &n.BMCAddr, &gpus, &n.BootID, &paused, &lastSeen, &arming,
+		&n.InventorySource, &devices)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
@@ -1163,6 +1184,7 @@ func scanNode(r rowScanner) (*types.Node, error) {
 	n.AgentArming = types.AgentArming(arming)
 	_ = json.Unmarshal([]byte(labels), &n.Labels)
 	_ = json.Unmarshal([]byte(gpus), &n.GPUs)
+	_ = json.Unmarshal([]byte(devices), &n.Devices)
 	if lastSeen.Valid {
 		n.AgentLastSeen = parseTS(lastSeen.String)
 	}
