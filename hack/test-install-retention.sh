@@ -148,7 +148,10 @@ ready=$("$KUBECTL_BIN" get node "$node" -o jsonpath='{.status.conditions[?(@.typ
  until ((SECONDS >= deadline)); do
    id=$("${ctl[@]}" incidents | awk -v node="$node" '$3=="xid-app" && $4==node {print $1; exit}')
    if [[ -n $id ]] && api "http://127.0.0.1:$port/api/v1/incidents/$id" |
-     jq -e --arg uid "$node_uid" --arg ready "$ready" '.node_conditions | .node_uid == $uid and (.conditions | any(.type == "Ready" and .status == $ready))' >/dev/null; then
+     jq -e --arg uid "$node_uid" --arg ready "$ready" '
+       def matches_node: .node_uid == $uid and (.conditions | any(.type == "Ready" and .status == $ready));
+       (.node_conditions | matches_node) and
+       (.audit | any(.action == "node-context" and (.params.node_conditions | fromjson | matches_node)))' >/dev/null; then
      exit 0
    fi
    sleep 2
