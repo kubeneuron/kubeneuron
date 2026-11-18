@@ -50,3 +50,48 @@ func TestTrainingReportsBoundToIncident(t *testing.T) {
 	}
 	checkCounts(0, 0)
 }
+
+func TestTrainingConfirmationAfterSecondRecovery(t *testing.T) {
+	s := openTestStore(t)
+	ctx := t.Context()
+	const id = "twice"
+	if err := s.CreateIncident(ctx, testIncident(id)); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC()
+	transition := func(from, to types.IncidentState, action string, at time.Time) {
+		t.Helper()
+		entry := &types.AuditEntry{IncidentID: id, Actor: "system", Action: action, Time: at, FromState: from, ToState: to}
+		if action == "resolve" {
+			entry.Params = map[string]string{"infrastructure_evidence": "verified_recycle_inventory"}
+		}
+		if err := s.AppendAudit(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	progress := func(step int64, received time.Time) {
+		t.Helper()
+		if err := s.SaveTrainingProgress(ctx, id, "job", "pod", step, received); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertConfirmed := func(ready, want time.Time) {
+		t.Helper()
+		got, err := s.TrainingConfirmations(ctx, id, ready)
+		if err != nil || !got["job"].Equal(want) {
+			t.Fatalf("ready=%s confirmed=%v want=%v err=%v", ready, got["job"], want, err)
+		}
+	}
+	transition(types.StateVerifying, types.StateResolved, "resolve", base)
+	progress(1, base.Add(time.Minute))
+	assertConfirmed(base, base.Add(time.Minute))
+	transition(types.StateResolved, types.StateOpen, "reopen", base.Add(2*time.Minute))
+	progress(2, base.Add(3*time.Minute))
+	next := base.Add(5 * time.Minute)
+	transition(types.StateVerifying, types.StateResolved, "resolve", next)
+	progress(2, next.Add(time.Minute))
+	assertConfirmed(next, time.Time{})
+	progress(3, next.Add(2*time.Minute))
+	progress(4, next.Add(3*time.Minute))
+	assertConfirmed(next, next.Add(2*time.Minute))
+}
