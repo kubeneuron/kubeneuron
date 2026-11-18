@@ -4,6 +4,12 @@ package types
 
 import "time"
 
+// SavingsEstimate compares observed duration with the configured manual baseline.
+type SavingsEstimate struct {
+	ManualBaselineSeconds float64 `json:"manual_baseline_seconds"`
+	GPUHoursSaved         float64 `json:"gpu_hours_saved"`
+}
+
 // RecoveryReport answers the question a capacity owner asks about a window:
 // how much accelerator capacity was degraded, how much of it came back, and
 // how much came back without waking anybody. It is the wire shape of
@@ -27,6 +33,7 @@ import "time"
 //   - GPU-hours are degraded-GPU-hours, not lost-GPU-hours: a degraded GPU may
 //     still have been serving traffic.
 type RecoveryReport struct {
+	SavingsEstimate *SavingsEstimate `json:"savings_estimate,omitempty"`
 	// Superseded is a changed target, never a verified recovery.
 	Superseded         int     `json:"superseded"`
 	SupersededGPUHours float64 `json:"superseded_gpu_hours"`
@@ -108,7 +115,8 @@ type RecoveryReport struct {
 // what the policy decided, which is exactly what a pilot is evaluating and is
 // all this can honestly support.
 type SimulatedRecovery struct {
-	Incidents int `json:"incidents"`
+	WouldHaveSaved *SavingsEstimate `json:"would_have_saved_estimate,omitempty"`
+	Incidents      int              `json:"incidents"`
 	// WouldRecover counts dry-run incidents that reached RESOLVED, i.e. the
 	// ladder ran to completion without needing a human.
 	WouldRecover int `json:"would_recover"`

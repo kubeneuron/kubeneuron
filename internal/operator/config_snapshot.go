@@ -137,6 +137,13 @@ func CompileSnapshot(
 		Policies:            compiledPolicies,
 		AcceleratorProfiles: compiledAcceleratorProfiles,
 	}
+	if value := installation.Spec.ManualRecoveryBaseline; value != "" {
+		d, err := configDuration(value, "")
+		if err != nil {
+			return nil, fmt.Errorf("manualRecoveryBaseline: %w", err)
+		}
+		cfg.ManualRecoveryBaseline = &d
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("compiled policies: %w", err)
 	}

@@ -107,10 +107,12 @@ func (c *Controller) RecoveryReport(ctx context.Context, window time.Duration) (
 		return nil, fmt.Errorf("reading remediation evidence from the audit trail: %w", err)
 	}
 	remediated := make(map[string]bool, len(executed))
-	for id, results := range executed {
-		remediated[id] = remediationExecuted(results)
+	for _, inc := range incidents {
+		if inc != nil && inc.State == types.StateResolved {
+			remediated[inc.ID] = remediationOutcome(executed[inc.ID], inc.DryRun)
+		}
 	}
-	return aggregateRecovery(incidents, gpusPerNode, remediated, from, to), nil
+	return aggregateRecovery(incidents, gpusPerNode, remediated, from, to, c.runtimeConfig(ctx).ManualRecoveryBaseline), nil
 }
 
 // auditExecutingResult is the historical result format written by releases
@@ -187,7 +189,7 @@ func auditStepOutcomeResult(wireAction string, simulated, known bool) string {
 // reporting capacity as recovered without a success acknowledgement would be
 // an unsupported claim. Simulated outcomes do not count either, however the
 // incident was stamped when it opened.
-func remediationExecuted(results []string) bool {
+func remediationOutcome(results []string, simulated bool) bool {
 	for _, result := range results {
 		if outcome, ok := strings.CutPrefix(result, auditStepOutcomePrefix); ok {
 			result = outcome
@@ -195,10 +197,14 @@ func remediationExecuted(results []string) bool {
 		if strings.HasPrefix(result, "unknown ") {
 			continue
 		}
-		if strings.HasPrefix(result, auditSimulatingPrefix) {
+		if simulated != strings.HasPrefix(result, auditSimulatingPrefix) {
 			continue
 		}
-		wire, formatted := strings.CutPrefix(result, auditExecutingPrefix)
+		prefix := auditExecutingPrefix
+		if simulated {
+			prefix = auditSimulatingPrefix
+		}
+		wire, formatted := strings.CutPrefix(result, prefix)
 		if !formatted {
 			return true
 		}
@@ -245,8 +251,8 @@ func remediationExecuted(results []string) bool {
 //
 // remediated answers "did a remediation step run" per incident ID; an ID
 // absent from it did not.
-func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, remediated map[string]bool, from, to time.Time) *types.RecoveryReport {
-	report := aggregateRecoverySubset(incidents, gpusPerNode, remediated, from, to, false)
+func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, remediated map[string]bool, from, to time.Time, baseline time.Duration) *types.RecoveryReport {
+	report := aggregateRecoverySubset(incidents, gpusPerNode, remediated, from, to, false, baseline)
 	// The simulated view answers the question a pilot actually has. The
 	// checklist tells them to stay in dry-run until they have watched the
 	// system decide, and for that whole period the real report is empty by
@@ -254,8 +260,9 @@ func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, 
 	// us", the answer was a blank table. Same arithmetic, same incidents,
 	// labelled as a simulation and never folded into the headline.
 	if report.DryRunExcluded > 0 {
-		sim := aggregateRecoverySubset(incidents, gpusPerNode, remediated, from, to, true)
+		sim := aggregateRecoverySubset(incidents, gpusPerNode, remediated, from, to, true, baseline)
 		report.Simulated = &types.SimulatedRecovery{
+			WouldHaveSaved:         sim.SavingsEstimate,
 			Incidents:              sim.Incidents,
 			WouldRecover:           sim.Recovered,
 			WouldRecoverUnattended: sim.RecoveredUnattended,
@@ -270,7 +277,7 @@ func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, 
 
 // aggregateRecoverySubset is the arithmetic, over either the real incidents or
 // the dry-run ones.
-func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string]int, remediated map[string]bool, from, to time.Time, wantDryRun bool) *types.RecoveryReport {
+func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string]int, remediated map[string]bool, from, to time.Time, wantDryRun bool, baseline time.Duration) *types.RecoveryReport {
 	report := &types.RecoveryReport{
 		From: from, To: to,
 		// Both slices are initialised so an empty report marshals as [] and
@@ -278,6 +285,9 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 		// case the quiet fleet, which is the normal one.
 		Classes: make([]types.RecoveryClassReport, 0),
 		Open:    make([]types.RecoveryOpenIncident, 0),
+	}
+	if baseline > 0 {
+		report.SavingsEstimate = &types.SavingsEstimate{ManualBaselineSeconds: baseline.Seconds()}
 	}
 	type classAccum struct {
 		row       types.RecoveryClassReport
@@ -359,7 +369,11 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 			// recovery time; one that completed later would report a duration
 			// the window cannot account for.
 			if !end.Before(from) && !end.After(to) {
-				seconds := end.Sub(start).Seconds()
+				duration := end.Sub(start)
+				if report.SavingsEstimate != nil && !assumed {
+					report.SavingsEstimate.GPUHoursSaved += max(0, (baseline-duration).Hours()) * float64(gpus)
+				}
+				seconds := duration.Seconds()
 				mttrSamples = append(mttrSamples, seconds)
 				acc.durations = append(acc.durations, seconds)
 			}

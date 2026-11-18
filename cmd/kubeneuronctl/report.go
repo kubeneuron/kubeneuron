@@ -103,6 +103,11 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 	}
 	_, _ = fmt.Fprintf(out, "incidents: %d in window, %d still open\n\n", r.Incidents, len(r.Open))
 
+	if estimate := r.SavingsEstimate; estimate != nil {
+		_, _ = fmt.Fprintf(out, "GPU-hours saved (estimate): %s (manual baseline %s)\n", gpuHours(estimate.GPUHoursSaved), seconds(estimate.ManualBaselineSeconds))
+	} else {
+		_, _ = fmt.Fprintln(out, "Set spec.manualRecoveryBaseline to estimate GPU-hours saved.")
+	}
 	w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintf(w, "degraded GPU-hours\t%s\n", gpuHours(r.DegradedGPUHours))
 	_, _ = fmt.Fprintf(w, "recovered GPU-hours\t%s\t%s of degraded\n",
@@ -201,6 +206,9 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 			gpuHours(sim.DegradedGPUHours),
 			gpuHours(sim.WouldRecoverGPUHours),
 			seconds(sim.MTTR.P50Seconds), seconds(sim.MTTR.P90Seconds))
+		if estimate := sim.WouldHaveSaved; estimate != nil {
+			_, _ = fmt.Fprintf(out, "  GPU-hours that would have been saved (estimate): %s (manual baseline %s; assumes simulated decision time equals recovery time)\n", gpuHours(estimate.GPUHoursSaved), seconds(estimate.ManualBaselineSeconds))
+		}
 		_, _ = fmt.Fprint(out, "\nThese are decisions, not repairs: every one of them reached RESOLVED against a\n"+
 			"synthetic success, so they measure what the policy would have chosen — which is\n"+
 			"what a dry-run pilot is for — and not what came back.\n")

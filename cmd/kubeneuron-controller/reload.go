@@ -21,8 +21,8 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/httpapi"
 	"github.com/kubeneuron/kubeneuron/internal/impact"
-	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
+	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -152,21 +152,26 @@ func applyRuntimeConfigWithNodePauses(
 		MaxConcurrentReboots:      cfg.Safety.MaxConcurrentReboots,
 		DryRun:                    cfg.Safety.DryRun,
 	}
+	var baseline time.Duration
+	if cfg.ManualRecoveryBaseline != nil {
+		baseline = cfg.ManualRecoveryBaseline.Std()
+	}
 	if err := ctrl.InstallRuntimeConfigContext(ctx, controller.RuntimeConfig{
-		SafetyLimits:        &limits,
-		Engine:              engine,
-		Catalog:             catalog,
-		SourceDigest:        sourceDigest,
-		Windows:             windows,
-		AcceleratorProfiles: cfg.AcceleratorProfiles,
-		QuiesceForbidden:    cfg.Safety.QuiesceForbidResetWhenPresent,
-		DestructiveSelector: cfg.Safety.DestructiveExecutionNodeSelector,
-		DegradedTaint:       degradedTaintPolicy(cfg.Safety.TaintDegradedNodes),
-		Checkpoint:          checkpointPolicy(cfg.Safety.CheckpointCoordination),
-		Topology:            topologyPolicy(cfg.Safety.TopologyClassifier),
-		Impact:              impactPolicy(cfg.Safety.ImpactPreview),
-		VerifyQuiet:         cfg.Safety.VerifyQuietWindow.Std(),
-		ApprovalTTL:         cfg.Approvals.TTL.Std(),
+		ManualRecoveryBaseline: baseline,
+		SafetyLimits:           &limits,
+		Engine:                 engine,
+		Catalog:                catalog,
+		SourceDigest:           sourceDigest,
+		Windows:                windows,
+		AcceleratorProfiles:    cfg.AcceleratorProfiles,
+		QuiesceForbidden:       cfg.Safety.QuiesceForbidResetWhenPresent,
+		DestructiveSelector:    cfg.Safety.DestructiveExecutionNodeSelector,
+		DegradedTaint:          degradedTaintPolicy(cfg.Safety.TaintDegradedNodes),
+		Checkpoint:             checkpointPolicy(cfg.Safety.CheckpointCoordination),
+		Topology:               topologyPolicy(cfg.Safety.TopologyClassifier),
+		Impact:                 impactPolicy(cfg.Safety.ImpactPreview),
+		VerifyQuiet:            cfg.Safety.VerifyQuietWindow.Std(),
+		ApprovalTTL:            cfg.Approvals.TTL.Std(),
 	}); err != nil {
 		// Validation above makes this unreachable; retain the guard if validation
 		// rules ever become stateful in a future controller version.

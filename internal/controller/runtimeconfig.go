@@ -81,8 +81,9 @@ type RuntimeConfig struct {
 	// VerifyQuiet and ApprovalTTL are always > 0 (defaulted at seed;
 	// InstallRuntimeConfig treats zero as keep-current, matching the
 	// SetTimings contract).
-	VerifyQuiet time.Duration
-	ApprovalTTL time.Duration
+	ManualRecoveryBaseline time.Duration
+	VerifyQuiet            time.Duration
+	ApprovalTTL            time.Duration
 }
 
 // DegradedTaintPolicy is the resolved degraded-node taint setting. Effect is

@@ -23,10 +23,11 @@ import (
 
 // Config is the root controller configuration.
 type Config struct {
-	Safety              Safety                      `yaml:"safety"`
-	Approvals           Approvals                   `yaml:"approvals"`
-	Policies            []Policy                    `yaml:"policies"`
-	AcceleratorProfiles []AcceleratorRuntimeProfile `yaml:"accelerator_profiles,omitempty"`
+	ManualRecoveryBaseline *Duration                   `yaml:"manual_recovery_baseline,omitempty"`
+	Safety                 Safety                      `yaml:"safety"`
+	Approvals              Approvals                   `yaml:"approvals"`
+	Policies               []Policy                    `yaml:"policies"`
+	AcceleratorProfiles    []AcceleratorRuntimeProfile `yaml:"accelerator_profiles,omitempty"`
 }
 
 // Safety mirrors internal/safety.Limits plus flap settings.
@@ -336,6 +337,9 @@ func decodeStrict(data []byte, out any) error {
 
 // Validate checks configuration invariants and applies defaults.
 func (c *Config) Validate() error {
+	if c.ManualRecoveryBaseline != nil && *c.ManualRecoveryBaseline <= 0 {
+		return errors.New("manual_recovery_baseline must be positive")
+	}
 	if err := c.Safety.validateBlastRadius(); err != nil {
 		return err
 	}

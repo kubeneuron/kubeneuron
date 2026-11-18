@@ -671,6 +671,11 @@ spec:
                 required:
                 - image
                 type: object
+              manualRecoveryBaseline:
+                description: |-
+                  ManualRecoveryBaseline is the operator's usual manual recovery time.
+                  Omit it to suppress GPU-hours saved estimates.
+                type: string
               namespace:
                 description: |-
                   Namespace is immutable because moving an installation would otherwise

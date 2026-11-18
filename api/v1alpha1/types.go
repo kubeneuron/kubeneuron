@@ -1064,6 +1064,10 @@ type TLSSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.auth) || ((!has(self.auth.users) || !has(self.auth.users.namespace)) && (!has(self.auth.oidc) || !has(self.auth.oidc.clientSecretRef.namespace)))",message="auth Secret references must omit namespace and use spec.namespace"
 // +kubebuilder:validation:XValidation:rule="!has(self.notifications) || ((!has(self.notifications.slack) || !has(self.notifications.slack.namespace)) && (!has(self.notifications.operatorAPIToken) || !has(self.notifications.operatorAPIToken.namespace)) && (!has(self.notifications.webhookToken) || !has(self.notifications.webhookToken.namespace)) && (!has(self.notifications.webhook) || !has(self.notifications.webhook.namespace)) && (!has(self.notifications.pagerduty) || !has(self.notifications.pagerduty.namespace)))",message="notification Secret references must omit namespace and use spec.namespace"
 type KubeNeuronSpec struct {
+	// ManualRecoveryBaseline is the operator's usual manual recovery time.
+	// Omit it to suppress GPU-hours saved estimates.
+	// +optional
+	ManualRecoveryBaseline string `json:"manualRecoveryBaseline,omitempty"`
 	// Namespace is immutable because moving an installation would otherwise
 	// leave the old namespace's runtime resources active.
 	// +kubebuilder:validation:MinLength=1

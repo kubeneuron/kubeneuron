@@ -164,7 +164,7 @@ func TestAggregateRecovery(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := aggregateRecovery(tc.incidents, inventory, allRemediated(tc.incidents), from, to)
+			got := aggregateRecovery(tc.incidents, inventory, allRemediated(tc.incidents), from, to, 0)
 			if got.Incidents != tc.want.Incidents {
 				t.Errorf("incidents = %d, want %d", got.Incidents, tc.want.Incidents)
 			}
@@ -211,7 +211,7 @@ func TestAggregateRecoveryRanksClassesAndListsOpenIncidents(t *testing.T) {
 		// 1 GPU x 12h = 12 GPU-hours, parked for a human since hour 11.
 		incident("parked", "ecc-dbe", "node-8gpu", "GPU-4", types.StateNeedsHuman, at(to, -12), at(to, -11)),
 	}
-	report := aggregateRecovery(incidents, inventory, allRemediated(incidents), from, to)
+	report := aggregateRecovery(incidents, inventory, allRemediated(incidents), from, to, 0)
 
 	if report.DegradedGPUHours != 47 || report.RecoveredGPUHours != 34 {
 		t.Fatalf("degraded/recovered = %v/%v GPU-hours, want 47/34", report.DegradedGPUHours, report.RecoveredGPUHours)
@@ -254,7 +254,7 @@ func TestAggregateRecoveryClampsBackwardsAndFutureStamps(t *testing.T) {
 	// A resolved_at before opened_at (clock step, hand-edited row) must never
 	// subtract capacity loss from the fleet total.
 	backwards := incident("backwards", "ecc-dbe", "n1", "GPU-1", types.StateResolved, at(to, -2), at(to, -3))
-	report := aggregateRecovery([]*types.Incident{backwards}, nil, allRemediated([]*types.Incident{backwards}), from, to)
+	report := aggregateRecovery([]*types.Incident{backwards}, nil, allRemediated([]*types.Incident{backwards}), from, to, 0)
 	if report.Incidents != 0 || report.DegradedGPUHours != 0 {
 		t.Fatalf("backwards incident produced %+v, want an empty report", report)
 	}
@@ -262,7 +262,7 @@ func TestAggregateRecoveryClampsBackwardsAndFutureStamps(t *testing.T) {
 	// An incident opened after the window end contributes nothing rather than
 	// a negative overlap.
 	future := incident("future", "ecc-dbe", "n1", "GPU-1", types.StateExecuting, at(to, 1), at(to, 1))
-	report = aggregateRecovery([]*types.Incident{future}, nil, allRemediated([]*types.Incident{future}), from, to)
+	report = aggregateRecovery([]*types.Incident{future}, nil, allRemediated([]*types.Incident{future}), from, to, 0)
 	if report.Incidents != 0 {
 		t.Fatalf("future incident produced %+v, want an empty report", report)
 	}
@@ -292,7 +292,7 @@ func TestDryRunFleetGetsSimulatedNumbers(t *testing.T) {
 		inc("a", true, 0), // dry-run, unattended
 		inc("b", true, 1), // dry-run, needed an approval
 	}
-	report := aggregateRecovery(incidents, map[string]int{"n1": 1}, allRemediated(incidents), from, to)
+	report := aggregateRecovery(incidents, map[string]int{"n1": 1}, allRemediated(incidents), from, to, 0)
 
 	// The headline stays honest: nothing was executed, so nothing recovered.
 	if report.Incidents != 0 || report.RecoveredGPUHours != 0 {
@@ -331,7 +331,7 @@ func TestRealFleetHasNoSimulatedSection(t *testing.T) {
 		ID: "real", Target: types.Target{Node: "n1", GPUUUID: "GPU-1"},
 		Class: types.ClassECCDBE, State: types.StateResolved,
 		OpenedAt: now.Add(-2 * time.Hour), UpdatedAt: r, StateChangedAt: r, ResolvedAt: &r,
-	}}, map[string]int{"n1": 1}, map[string]bool{"real": true}, now.Add(-24*time.Hour), now)
+	}}, map[string]int{"n1": 1}, map[string]bool{"real": true}, now.Add(-24*time.Hour), now, 0)
 
 	if report.Simulated != nil {
 		t.Fatalf("a fleet with no dry-run incidents got a simulated section: %+v", report.Simulated)
@@ -362,7 +362,7 @@ func TestAnIncidentNothingActedOnIsNotRecoveredCapacity(t *testing.T) {
 		map[string]int{"n1": 8},
 		// Only the first has an EXECUTING row in its audit trail.
 		map[string]bool{"repaired": true},
-		from, to)
+		from, to, 0)
 
 	if report.Recovered != 1 || report.RecoveredUnattended != 1 {
 		t.Fatalf("recovered/unattended = %d/%d, want 1/1: an incident with no policy bound to "+
@@ -400,34 +400,34 @@ func TestAnIncidentNothingActedOnIsNotRecoveredCapacity(t *testing.T) {
 // anything execute" test would call it recovered capacity, which is a claim
 // about a GPU made by a step whose entire effect was to write a line.
 func TestObserveOnlyLadderIsNotAWheelOfRecovery(t *testing.T) {
-	if remediationExecuted([]string{auditExecutingResult("notify.observe")}) {
+	if liveRemediation([]string{auditExecutingResult("notify.observe")}) {
 		t.Fatal("a ladder whose only executed step was a notification counted as a repair")
 	}
-	if remediationExecuted([]string{auditExecutingResult("notify.ticket")}) {
+	if liveRemediation([]string{auditExecutingResult("notify.ticket")}) {
 		t.Fatal("opening a ticket is how a playbook asks a human to act; it is not the act")
 	}
 	// config/samples ships exactly this ladder — Observe then VerifyGPUHealth —
 	// and it is the shape that slips past a naive "did any step run" test.
 	// Reading health back is not repairing anything.
-	if remediationExecuted([]string{
+	if liveRemediation([]string{
 		auditExecutingResult("notify.observe"),
 		auditExecutingResult("verify.gpu_health"),
 	}) {
 		t.Fatal("a ladder that observed and then checked health returned no capacity to service")
 	}
-	if !remediationExecuted([]string{
+	if !liveRemediation([]string{
 		auditExecutingResult("notify.observe"),
 		auditExecutingResult("platform.cordon"),
 	}) {
 		t.Fatal("a ladder that notified and then cordoned did act on the fleet")
 	}
-	if remediationExecuted(nil) {
+	if liveRemediation(nil) {
 		t.Fatal("an incident with no EXECUTING audit row at all had no step to run")
 	}
 	// A row an older controller wrote carries no recognisable action. Calling
 	// that observation would rewrite an existing installation's whole history
 	// into "nothing was ever done", which is the louder lie of the two.
-	if !remediationExecuted([]string{"reset complete"}) {
+	if !liveRemediation([]string{"reset complete"}) {
 		t.Fatal("an unrecognised EXECUTING row must be read as 'a step ran, we cannot say which'")
 	}
 }
@@ -452,7 +452,7 @@ func TestSimulatedRecoverySeparatesTheClassesWithNoLadder(t *testing.T) {
 		[]*types.Incident{inc("bound", types.ClassECCDBE), inc("unbound", types.ClassPower)},
 		map[string]int{"n1": 1},
 		map[string]bool{"bound": true},
-		from, to)
+		from, to, 0)
 
 	sim := report.Simulated
 	if sim == nil {
@@ -544,7 +544,7 @@ func TestSimulatedStepsAreNotRemediation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := remediationExecuted(tc.results); got != tc.want {
+			if got := liveRemediation(tc.results); got != tc.want {
 				t.Fatalf("remediationExecuted = %v, want %v — %s", got, tc.want, tc.why)
 			}
 		})
@@ -594,11 +594,45 @@ func TestAPCIOnlyIncidentIsChargedOneDevice(t *testing.T) {
 func TestSupersededReportNeverCountsRecovery(t *testing.T) {
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	inc := incident("changed", types.ClassECCDBE, "node", "gpu", types.StateSuperseded, start, start.Add(time.Hour))
-	r := aggregateRecovery([]*types.Incident{inc}, nil, map[string]bool{"changed": true}, start, start.Add(2*time.Hour))
+	r := aggregateRecovery([]*types.Incident{inc}, nil, map[string]bool{"changed": true}, start, start.Add(2*time.Hour), 0)
 	if r.Superseded != 1 || r.SupersededGPUHours != 1 || r.Recovered != 0 || r.ObservedOnly != 0 || r.MTTR.Samples != 0 || len(r.Open) != 0 {
 		t.Fatalf("changed target counted incorrectly: %+v", r)
 	}
 	if len(r.Classes) != 1 || r.Classes[0].Superseded != 1 || r.Classes[0].SupersededGPUHours != 1 {
 		t.Fatalf("class accounting: %+v", r.Classes)
+	}
+}
+
+func liveRemediation(results []string) bool { return remediationOutcome(results, false) }
+
+func TestSavingsEstimateUsesManualBaseline(t *testing.T) {
+	from := time.Unix(1000, 0)
+	to := from.Add(24 * time.Hour)
+	for _, tc := range []struct {
+		duration time.Duration
+		want     float64
+	}{{time.Hour, 6}, {2 * time.Hour, 4}, {5 * time.Hour, 0}} {
+		live := incident("live", types.ClassECCDBE, "node", "", types.StateResolved, from, from.Add(tc.duration))
+		dry := *live
+		dry.ID, dry.DryRun = "dry", true
+		incidents := []*types.Incident{live, &dry}
+		run := func(baseline time.Duration) *types.RecoveryReport {
+			return aggregateRecovery(incidents, map[string]int{"node": 2}, allRemediated(incidents), from, to, baseline)
+		}
+		r := run(4 * time.Hour)
+		if r.DegradedGPUHours != 2*tc.duration.Hours() || r.SavingsEstimate.GPUHoursSaved != tc.want || r.Simulated.WouldHaveSaved.GPUHoursSaved != tc.want || r.SavingsEstimate.ManualBaselineSeconds != 14400 {
+			t.Fatalf("duration %s: %+v, simulated %+v", tc.duration, r.SavingsEstimate, r.Simulated.WouldHaveSaved)
+		}
+		r = run(0)
+		if r.SavingsEstimate != nil || r.Simulated.WouldHaveSaved != nil {
+			t.Fatal("estimate without baseline")
+		}
+	}
+}
+
+func TestDryRunAuditFeedsOnlySimulation(t *testing.T) {
+	results := []string{auditStepOutcomeResult("platform.drain", true, true)}
+	if !remediationOutcome(results, true) || remediationOutcome(results, false) {
+		t.Fatal("simulated drain must contribute only to simulated recoveries")
 	}
 }
