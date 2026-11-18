@@ -13,6 +13,11 @@ This is experimental. Each profile's signal names are taken from vendor
 documentation on 2026-11-18 and are not validated on real hardware. A signal is
 what the node reports, not a diagnosis by KubeNeuron.
 
+Vendor and product names (AMD Instinct, AWS Neuron, Trainium, NVIDIA, Google
+TPU, Karpenter) identify the components whose signals are read. KubeNeuron is
+not affiliated with, endorsed by or certified by these vendors, and is
+unrelated to the AWS Neuron SDK.
+
 ## How a signal becomes an incident
 
 - A profile applies to a node that advertises its device resource.

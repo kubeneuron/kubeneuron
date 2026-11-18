@@ -2958,6 +2958,92 @@ exercise_cloud_interruption() {
 	note "cloud interruption: PASS"
 }
 
+exercise_accelerator_health() {
+	note "exercising an accelerator health profile against a fake Neuron condition"
+	local pf_log="$work_dir/health-port-forward.log"
+	local pf_pid='' public_port='' target_node deadline id='' detail='' now code
+	target_node=$("$KUBECTL_BIN" get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[0].metadata.name}')
+	[[ -n $target_node ]] || die "no worker node for the accelerator health scenario"
+
+	# remove_health_condition removes the synthetic NeuronHealth condition by
+	# its index, read right before the patch; absent is a no-op.
+	remove_health_condition() {
+		local index
+		index=$("$KUBECTL_BIN" get node "$target_node" -o json |
+			"$JQ_BIN" -r '[.status.conditions // [] | to_entries[] | select(.value.type == "NeuronHealth") | .key][0] // empty')
+		[[ -n $index ]] || return 0
+		"$KUBECTL_BIN" patch node "$target_node" --subresource=status --type=json \
+			-p "[{\"op\":\"remove\",\"path\":\"/status/conditions/${index}\"}]" >/dev/null
+	}
+	local restore_done=0
+	restore_health() {
+		((restore_done)) && return 0
+		restore_done=1
+		if [[ -n $pf_pid ]]; then kill "$pf_pid" >/dev/null 2>&1 || true; fi
+		remove_health_condition || true
+		patch_node_status_resources "$target_node" - aws.amazon.com/neuron || true
+	}
+	trap restore_health RETURN
+
+	# A Trainium device and the condition the Neuron node problem detector
+	# writes for an uncorrectable HBM error. The kubelet keeps both: it owns
+	# neither the extended resource nor the condition type.
+	patch_node_status_resources "$target_node" 1 aws.amazon.com/neuron
+	now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	"$KUBECTL_BIN" patch node "$target_node" --subresource=status --type=json -p "[{\"op\":\"add\",\"path\":\"/status/conditions/-\",\"value\":
+		{\"type\":\"NeuronHealth\",\"status\":\"True\",\"reason\":\"NeuronHasError_HBM_UNCORRECTABLE_ERROR\",
+		 \"message\":\"kind-integration free text\",\"lastHeartbeatTime\":\"$now\",\"lastTransitionTime\":\"$now\"}}]" >/dev/null
+
+	: >"$pf_log"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+		"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
+	pf_pid=$!
+	deadline=$((SECONDS + 30))
+	while ((SECONDS < deadline)); do
+		public_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$pf_log")
+		[[ -n $public_port ]] && break
+		sleep 1
+	done
+	[[ -n $public_port ]] || die "health-phase port-forward allocated no local port"
+	health_api() {
+		curl --silent --show-error --noproxy '*' --max-time 10 \
+			-H 'Authorization: Bearer integration-operator-token' "$@"
+	}
+
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		id=$(health_api "http://127.0.0.1:${public_port}/api/v1/incidents?node=${target_node}" |
+			"$JQ_BIN" -r '[(. // [])[] | select(.class == "accelerator-fault")][0].id // empty')
+		[[ -n $id ]] && break
+		sleep 2
+	done
+	[[ -n $id ]] || die "the NeuronHealth condition opened no accelerator-fault incident on $target_node"
+	detail=$(health_api "http://127.0.0.1:${public_port}/api/v1/incidents/${id}")
+	"$JQ_BIN" -e '
+		(.audit[0].params as $p |
+			$p.health_source == "kubernetes-node" and $p.profile == "aws-neuron" and $p.rule == "neuron-npd" and
+			$p.reason == "NeuronHasError_HBM_UNCORRECTABLE_ERROR" and $p.signal == "condition:NeuronHealth=True") and
+		(tostring | contains("kind-integration free text") | not)' >/dev/null <<<"$detail" || {
+		"$JQ_BIN" -c '{id, class, audit: .audit[0]}' <<<"$detail" >&2 || true
+		die "the accelerator-fault incident does not carry the profile evidence, or carries the condition message"
+	}
+	note "a NeuronHealth condition opened accelerator-fault with the profile evidence and without the message"
+
+	# The signal goes away, then the incident is closed: nothing reopens it.
+	remove_health_condition
+	sleep 25
+	code=$(health_api -X POST -H 'Content-Type: application/json' \
+		-H "Idempotency-Key: kind-integration-${RUN_ID}-health-resolve" \
+		--data-binary '{"actor":"harness","reason":"accelerator health phase complete"}' \
+		-o /dev/null -w '%{http_code}' "http://127.0.0.1:${public_port}/api/v1/incidents/${id}/resolve")
+	[[ $code == 200 || $code == 204 || $code == 202 ]] || die "resolving the accelerator-fault incident returned $code"
+	sleep 25
+	[[ -z $(health_api "http://127.0.0.1:${public_port}/api/v1/incidents?node=${target_node}" |
+		"$JQ_BIN" -r '[(. // [])[] | select(.class == "accelerator-fault" and .state != "RESOLVED")][0].id // empty') ]] ||
+		die "an accelerator-fault incident reopened after the condition was removed"
+	note "accelerator health: PASS"
+}
+
 exercise_real_cordon_and_uncordon() {
 	note "exercising REAL cordon and the janitor's uncordon on one worker"
 	local pf_log="$work_dir/cordon-port-forward.log"
@@ -4360,6 +4446,7 @@ assert_runtime_ready
 exercise_controller_restart_mid_playbook
 exercise_incident_evidence
 exercise_cloud_interruption
+exercise_accelerator_health
 exercise_real_cordon_and_uncordon
 exercise_workload_safe_recovery
 exercise_backup_restore
