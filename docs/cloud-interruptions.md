@@ -161,6 +161,10 @@ takes the instance, and the node group's own scaling replaces it. A
 `cloud-interruption` policy whose playbook, or a playbook it escalates to,
 has any step other than these two is rejected when the policies load, in
 every mode.
+On an accelerator node that another repairer is already taking, such as a
+node with the `karpenter.sh/disrupted` taint, the cordon is held and recorded
+(see [Accelerator health](accelerator-health.md#when-kubeneuron-only-observes));
+the checkpoint warning is still sent.
 
 | Mode | Checkpoint warning | Cordon |
 |---|---|---|

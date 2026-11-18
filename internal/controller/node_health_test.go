@@ -264,7 +264,10 @@ func TestNodeHealthRefusesRecoveryItCannotOwn(t *testing.T) {
 	tpu := types.NodeHealthSnapshot{Node: "tpu-1",
 		Devices: []types.DeviceCount{{Resource: "google.com/tpu", Capacity: 4, Allocatable: 4}},
 		Labels:  map[string]string{"cloud.google.com/gke-tpu-topology": "4x4", "cloud.google.com/gke-nodepool": "v5e-pool"}}
-	plat.set(amd, tpu, neuronNode(clock, "False", ""))
+	spot := types.NodeHealthSnapshot{Node: "spot-1",
+		Devices: []types.DeviceCount{{Resource: "nvidia.com/gpu", Capacity: 8, Allocatable: 8}},
+		Taints:  []types.NodeTaint{{Key: "karpenter.sh/disrupted", Effect: "NoSchedule"}}}
+	plat.set(amd, tpu, spot, neuronNode(clock, "False", ""))
 	c.pollNodeHealth(ctx)
 
 	step := func(action string) *playbook.Step { return &playbook.Step{Name: "s", Action: action} }
@@ -277,6 +280,15 @@ func TestNodeHealthRefusesRecoveryItCannotOwn(t *testing.T) {
 	}
 	if got := refused("mi-1", "platform.cordon"); !strings.Contains(got, "another repairer is acting on the node (amd-gpu-operator)") {
 		t.Fatalf("cordon under the AMD operator's repair: %q", got)
+	}
+	// The cordon of an announced interruption takes the same check: on a
+	// node Karpenter is already disrupting, KubeNeuron only warns.
+	interruption := &types.Incident{ID: "n", Class: types.ClassCloudInterruption, Target: types.Target{Node: "spot-1"}}
+	if err := c.requireCloudRecovery(ctx, interruption, step("platform.cordon")); err == nil || !strings.Contains(err.Error(), "(karpenter)") {
+		t.Fatalf("interruption cordon on a node Karpenter disrupts: %v", err)
+	}
+	if err := c.requireCloudRecovery(ctx, interruption, step(playbook.CheckpointWarningAction)); err != nil {
+		t.Fatalf("checkpoint warning on a node Karpenter disrupts: %v", err)
 	}
 	if got := refused("tpu-1", "platform.replace_node"); !strings.Contains(got, "multi-host TPU slice in node pool v5e-pool") {
 		t.Fatalf("replacing one host of a slice: %q", got)
