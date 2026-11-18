@@ -72,30 +72,29 @@ func TestReadCountersAndComponents(t *testing.T) {
 }
 
 func TestReadRefusesWhatItDoesNotUnderstand(t *testing.T) {
-	for name, setup := range map[string]func(root string){
-		"not a number": func(root string) { writeFile(t, hw(root, 0, "mem_ecc_uncorrected"), "lots of text from the node") },
-		"too long": func(root string) {
-			writeFile(t, hw(root, 0, "health_status/unhealthy_components"), strings.Repeat("hbm,", 2000))
-		},
-		"too many devices": func(root string) {
-			for i := 0; i <= maxDevices; i++ {
-				if err := os.MkdirAll(filepath.Join(root, "neuron"+strconv.Itoa(i)), 0o755); err != nil {
-					t.Fatal(err)
-				}
-			}
-		},
+	// A device's file it does not understand: that device, with a reason.
+	for name, content := range map[string]struct{ file, text string }{
+		"not a number": {"mem_ecc_uncorrected", "lots of text from the node"},
+		"too long":     {"health_status/unhealthy_components", strings.Repeat("hbm,", 2000)},
 	} {
 		root := t.TempDir()
-		setup(root)
-		_, present, err := Read(root)
-		var re *ReadError
-		if !present || !errors.As(err, &re) {
-			t.Fatalf("%s: present %v err %v", name, present, err)
+		writeFile(t, hw(root, 0, content.file), content.text)
+		devices, present, err := Read(root)
+		if err != nil || !present || len(devices) != 1 || devices[0].Err != ReasonUnexpectedValue || devices[0].Counters != nil {
+			t.Fatalf("%s: devices %+v present %v err %v", name, devices, present, err)
 		}
-		// The reason is from the closed list; the node's text is not in it.
-		if strings.Contains(err.Error(), "lots of text") {
-			t.Fatalf("%s: the error repeats the node's text: %v", name, err)
+	}
+	// A tree it does not understand: the whole read, with a reason.
+	root := t.TempDir()
+	for i := 0; i <= maxDevices; i++ {
+		if err := os.MkdirAll(filepath.Join(root, "neuron"+strconv.Itoa(i)), 0o755); err != nil {
+			t.Fatal(err)
 		}
+	}
+	_, present, err := Read(root)
+	var re *ReadError
+	if !present || !errors.As(err, &re) || re.Reason != ReasonTooManyDevices {
+		t.Fatalf("too many devices: present %v err %v", present, err)
 	}
 }
 
@@ -108,10 +107,9 @@ func TestReadPermissionDenied(t *testing.T) {
 	if err := os.Chmod(hw(root, 0, "mem_ecc_uncorrected"), 0); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := Read(root)
-	var re *ReadError
-	if !errors.As(err, &re) || re.Reason != ReasonPermissionDenied {
-		t.Fatalf("err %v", err)
+	devices, _, err := Read(root)
+	if err != nil || len(devices) != 1 || devices[0].Err != ReasonPermissionDenied {
+		t.Fatalf("devices %+v err %v", devices, err)
 	}
 }
 
@@ -127,10 +125,11 @@ func device(index int, counters map[Counter]uint64, components ...string) Device
 	return d
 }
 
+// observe is one read delivered: Observe, then Commit.
 func observe(t *testing.T, tr *Tracker, devices ...Device) []Finding {
 	t.Helper()
-	findings, err := tr.Observe(devices)
-	if err != nil {
+	findings := tr.Observe(devices)
+	if err := tr.Commit(); err != nil {
 		t.Fatal(err)
 	}
 	return findings
@@ -209,36 +208,57 @@ func TestTrackerBaselineAcrossRestarts(t *testing.T) {
 	}
 }
 
-// A component is a fault after two reads in a row, once, and cleared by a
-// read of the same device without it; a driver without health_status says
-// nothing about it.
-func TestTrackerComponents(t *testing.T) {
-	tr, _ := NewTracker("", "")
-	if got := observe(t, tr, device(0, nil, "hbm")); len(got) != 0 {
-		t.Fatalf("one read %+v", got)
+// A finding not committed is found again by the next agent: delivery is at
+// least once.
+func TestTrackerFindsAgainWhatWasNotCommitted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "neuron-sysfs.json")
+	tr, _ := NewTracker(path, "boot-1")
+	observe(t, tr, device(0, map[Counter]uint64{MemECCUncorrected: 2}))
+	if got := tr.Observe([]Device{device(0, map[Counter]uint64{MemECCUncorrected: 3})}); len(got) != 1 || got[0].Kind != KindFault {
+		t.Fatalf("rise %+v", got)
 	}
-	got := observe(t, tr, device(0, nil, "hbm"))
-	if !reflect.DeepEqual(got, []Finding{{Device: 0, Class: ClassUnhealthyComponent, Kind: KindFault, Component: "hbm"}}) {
-		t.Fatalf("two reads %+v", got)
+	// The agent stops before Commit.
+	tr, err := NewTracker(path, "boot-1")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := observe(t, tr, device(0, nil, "hbm")); len(got) != 0 {
-		t.Fatalf("a third read %+v", got)
+	if got := observe(t, tr, device(0, map[Counter]uint64{MemECCUncorrected: 3})); len(got) != 1 || got[0].Kind != KindFault || got[0].Increase != 1 {
+		t.Fatalf("after a crash before Commit %+v", got)
 	}
-	// No health_status in this read: nothing changes.
-	if got := observe(t, tr, device(0, nil)); len(got) != 0 {
-		t.Fatalf("no health_status %+v", got)
+}
+
+// A device that cannot be read hides neither the others nor itself, and
+// keeps its baselines; one gone from the tree is said once, after a restart
+// too.
+func TestTrackerDeviceErrorsAndAbsence(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, hw(root, 0, "mem_ecc_uncorrected"), "1")
+	writeFile(t, hw(root, 1, "mem_ecc_uncorrected"), "not a number")
+	devices, present, err := Read(root)
+	if err != nil || !present || len(devices) != 2 || devices[0].Err != "" || devices[1].Err != ReasonUnexpectedValue {
+		t.Fatalf("devices %+v present %v err %v", devices, present, err)
 	}
-	// Another device's read clears nothing here.
-	if got := observe(t, tr, device(1, nil, "")); len(got) != 0 {
-		t.Fatalf("another device %+v", got)
+
+	path := filepath.Join(t.TempDir(), "neuron-sysfs.json")
+	tr, _ := NewTracker(path, "boot-1")
+	observe(t, tr, device(0, map[Counter]uint64{MemECCUncorrected: 1}), device(1, map[Counter]uint64{MemECCUncorrected: 4}))
+	// Device 1 cannot be read: no finding for it, and its baseline stays.
+	if got := observe(t, tr, device(0, map[Counter]uint64{MemECCUncorrected: 2}), Device{Index: 1, Err: ReasonReadError}); len(got) != 1 || got[0].Device != 0 || got[0].Kind != KindFault {
+		t.Fatalf("one device failing %+v", got)
 	}
-	got = observe(t, tr, device(0, nil, ""))
-	if !reflect.DeepEqual(got, []Finding{{Device: 0, Class: ClassUnhealthyComponent, Kind: KindCleared, Component: "hbm"}}) {
-		t.Fatalf("cleared %+v", got)
+	if got := observe(t, tr, device(0, map[Counter]uint64{MemECCUncorrected: 2}), device(1, map[Counter]uint64{MemECCUncorrected: 5})); len(got) != 1 || got[0].Device != 1 || got[0].Increase != 1 {
+		t.Fatalf("read again %+v", got)
 	}
-	// A component seen once and gone again is nothing.
-	observe(t, tr, device(0, nil, "sram"))
-	if got := observe(t, tr, device(0, nil, "")); len(got) != 0 {
-		t.Fatalf("seen once %+v", got)
+	want := []Finding{{Device: 1, Class: ClassDeviceAbsent, Kind: KindObservation}}
+	if got := observe(t, tr, device(0, map[Counter]uint64{MemECCUncorrected: 2})); !reflect.DeepEqual(got, want) {
+		t.Fatalf("gone %+v", got)
+	}
+	if got := observe(t, tr, device(0, map[Counter]uint64{MemECCUncorrected: 2})); len(got) != 0 {
+		t.Fatalf("still gone %+v", got)
+	}
+	// After a restart the baselines say which devices there were.
+	tr, _ = NewTracker(path, "boot-1")
+	if got := observe(t, tr, device(0, map[Counter]uint64{MemECCUncorrected: 2})); !reflect.DeepEqual(got, want) {
+		t.Fatalf("gone, after a restart %+v", got)
 	}
 }

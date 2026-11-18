@@ -92,6 +92,9 @@ type Device struct {
 	// the driver has no health_status.
 	Components    []string
 	HasComponents bool
+	// Err is why this device could not be read; its counters and
+	// components are then not known. The other devices are read anyway.
+	Err Reason
 }
 
 // Reason is why the source could not be read, from a closed list.
@@ -116,7 +119,8 @@ func (e *ReadError) Unwrap() error { return e.Err }
 // Read reads every device under root. present is false when root does not
 // exist: a node with no Neuron driver has no such source, which is neither a
 // fault nor an unavailable source. A *ReadError says why a present tree could
-// not be read.
+// not be read at all; a device that cannot be read is returned with its Err,
+// beside the devices that could.
 func Read(root string) (devices []Device, present bool, err error) {
 	entries, err := os.ReadDir(root)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -135,7 +139,11 @@ func Read(root string) (devices []Device, present bool, err error) {
 		}
 		d, err := readDevice(filepath.Join(root, e.Name()), index)
 		if err != nil {
-			return nil, true, err
+			d = Device{Index: index, Err: ReasonReadError}
+			var re *ReadError
+			if errors.As(err, &re) {
+				d.Err = re.Reason
+			}
 		}
 		devices = append(devices, d)
 	}

@@ -21,8 +21,9 @@ const (
 	ClassSRAMECCUncorrectable Class = "sram-ecc-uncorrectable"
 	// ClassHBMECCRepairable is an observation, not a diagnosis: the device
 	// can repair these.
-	ClassHBMECCRepairable   Class = "hbm-ecc-repairable"
-	ClassUnhealthyComponent Class = "unhealthy-component"
+	ClassHBMECCRepairable Class = "hbm-ecc-repairable"
+	// ClassDeviceAbsent is a device that was in the tree and is no longer.
+	ClassDeviceAbsent Class = "device-absent"
 )
 
 // Kind is what a finding asks of the controller.
@@ -32,21 +33,16 @@ const (
 	// KindFault is a fault of the device.
 	KindFault Kind = "fault"
 	// KindObservation is recorded and acted on by nothing: a repairable
-	// error, or a counter that was not zero when there was no baseline to
-	// tell when it rose.
+	// error, a counter that was not zero when there was no baseline to tell
+	// when it rose, a device gone from the tree.
 	KindObservation Kind = "observation"
-	// KindCleared is a component fault the device no longer reports.
-	KindCleared Kind = "cleared"
 )
 
-// Finding is one thing a read found on one device.
+// Finding is one change a read found on one device.
 type Finding struct {
 	Device int
 	Class  Class
 	Kind   Kind
-	// Component is the failing component of an unhealthy-component finding:
-	// a name from the closed list or UnknownComponent.
-	Component string
 	// Increase is how much an error counter rose; PresentAtStart marks a
 	// counter that was not zero when there was no baseline.
 	Increase       uint64
@@ -65,25 +61,26 @@ var faultCounters = []struct {
 	{MemECCRepairableUncorrected, ClassHBMECCRepairable, KindObservation},
 }
 
-// componentReads is how many reads in a row must report a component before
-// it is a fault: a state, unlike a counter, can be read in passing.
-const componentReads = 2
-
-// Tracker turns reads into findings. Its counter baselines outlive the
-// agent: they are kept in a file in the agent's state directory, bound to
-// the boot they were taken in, so an error that happened while the agent was
-// down is still a rise when it comes back.
+// Tracker turns the counters of each read into findings. Its baselines
+// outlive the agent: they are kept in a file in the agent's state directory,
+// bound to the boot they were taken in, so an error that happened while the
+// agent was down is still a rise when it comes back.
+//
+// The component list is a state, not a counter: the caller reports each
+// device's components as read, and whoever keeps the device's health turns
+// that into a fault or its clearing.
 type Tracker struct {
 	path   string
 	bootID string
-	// baseline is the last value per device and counter; known is false
-	// until a baseline exists, from the file or from a first read.
+	// baseline is the committed last value per device and counter; known is
+	// false until a baseline was committed, or loaded from the file.
 	baseline map[string]uint64
 	known    bool
-	// componentSeen counts the reads in a row that reported a component;
-	// faulted marks a component reported as a fault and not yet cleared.
-	componentSeen map[string]int
-	faulted       map[string]bool
+	// pending is what Commit makes the baseline.
+	pending map[string]uint64
+	// present is the devices of the last read, from the baselines after a
+	// restart, so one that is gone is said once.
+	present map[int]bool
 }
 
 const stateVersion = 1
@@ -99,8 +96,7 @@ type stateFile struct {
 // an unreadable one is returned as an error beside a usable tracker, so the
 // caller can say so and carry on.
 func NewTracker(path, bootID string) (*Tracker, error) {
-	t := &Tracker{path: path, bootID: bootID, baseline: map[string]uint64{},
-		componentSeen: map[string]int{}, faulted: map[string]bool{}}
+	t := &Tracker{path: path, bootID: bootID, baseline: map[string]uint64{}, present: map[int]bool{}}
 	if path == "" || bootID == "" {
 		return t, nil
 	}
@@ -122,6 +118,11 @@ func NewTracker(path, bootID string) (*Tracker, error) {
 	}
 	for k, v := range sf.Baseline {
 		t.baseline[k] = v
+		if device, _, ok := strings.Cut(k, "/"); ok {
+			if n, err := strconv.Atoi(device); err == nil {
+				t.present[n] = true
+			}
+		}
 	}
 	t.known = true
 	return t, nil
@@ -130,13 +131,21 @@ func NewTracker(path, bootID string) (*Tracker, error) {
 func counterKey(device int, c Counter) string { return strconv.Itoa(device) + "/" + string(c) }
 
 // Observe takes one read and returns its findings, ordered by device, then
-// class. It saves the new baselines before it returns them: a finding the
-// caller loses is not found again, an error saving them is returned beside
-// the findings.
-func (t *Tracker) Observe(devices []Device) ([]Finding, error) {
+// class. It writes nothing: the caller calls Commit once the findings are
+// delivered, so a crash in between finds them again rather than losing them.
+// A device that could not be read keeps its baselines.
+func (t *Tracker) Observe(devices []Device) []Finding {
 	var out []Finding
-	changed := false
+	t.pending = make(map[string]uint64, len(t.baseline))
+	for k, v := range t.baseline {
+		t.pending[k] = v
+	}
+	seen := map[int]bool{}
 	for _, d := range devices {
+		seen[d.Index] = true
+		if d.Err != "" {
+			continue
+		}
 		for _, fc := range faultCounters {
 			v, ok := d.Counters[fc.counter]
 			if !ok {
@@ -155,65 +164,31 @@ func (t *Tracker) Observe(devices []Device) ([]Finding, error) {
 			}
 			// A value below the baseline is a reset or a cleared counter: it
 			// is the new baseline, with no finding.
-			if !had || v != base {
-				t.baseline[key] = v
-				changed = true
-			}
+			t.pending[key] = v
 		}
-		out = append(out, t.components(d)...)
 	}
-	if !t.known {
-		t.known = true
-		changed = true
+	for device := range t.present {
+		if !seen[device] {
+			out = append(out, Finding{Device: device, Class: ClassDeviceAbsent, Kind: KindObservation})
+		}
 	}
+	t.present = seen
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Device != out[j].Device {
 			return out[i].Device < out[j].Device
 		}
 		return out[i].Class < out[j].Class
 	})
-	if !changed {
-		return out, nil
-	}
-	return out, t.save()
+	return out
 }
 
-// components is the component findings of one device: a fault after
-// componentReads reads in a row, cleared by a read of the same device that
-// no longer reports it. A device without health_status says nothing.
-func (t *Tracker) components(d Device) []Finding {
-	if !d.HasComponents {
+// Commit makes the last Observe's values the baselines and saves them.
+func (t *Tracker) Commit() error {
+	if t.pending == nil {
 		return nil
 	}
-	var out []Finding
-	reported := map[string]bool{}
-	for _, name := range d.Components {
-		reported[name] = true
-		key := strconv.Itoa(d.Index) + "/" + name
-		t.componentSeen[key]++
-		if t.componentSeen[key] >= componentReads && !t.faulted[key] {
-			t.faulted[key] = true
-			out = append(out, Finding{Device: d.Index, Class: ClassUnhealthyComponent, Kind: KindFault, Component: name})
-		}
-	}
-	prefix := strconv.Itoa(d.Index) + "/"
-	keys := make([]string, 0, len(t.componentSeen))
-	for key := range t.componentSeen {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		name, ok := strings.CutPrefix(key, prefix)
-		if !ok || reported[name] {
-			continue
-		}
-		delete(t.componentSeen, key)
-		if t.faulted[key] {
-			delete(t.faulted, key)
-			out = append(out, Finding{Device: d.Index, Class: ClassUnhealthyComponent, Kind: KindCleared, Component: name})
-		}
-	}
-	return out
+	t.baseline, t.pending, t.known = t.pending, nil, true
+	return t.save()
 }
 
 // save writes the baselines with a temporary file, fsync and rename, so a
