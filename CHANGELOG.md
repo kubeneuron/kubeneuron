@@ -12,14 +12,15 @@ API is `v1alpha1`.
 ### Added
 
 - **Accelerator health from Kubernetes nodes (experimental).** The controller
-  reads the conditions, labels and allocatable device counts that vendor and
+  reads the conditions and allocatable device counts that vendor and
   cloud components write to the Node of an accelerator node, through built-in
   profiles (`amd-instinct`, `aws-neuron`, `nvidia`, `google-tpu`), and opens
   an incident when a signal reports a fault on two consecutive reads, or, for
   fewer allocatable devices than capacity, for five minutes. New classes
   `accelerator-fault` and `accelerator-unallocatable`, bound in the shipped
   packs. A stale, unknown or missing signal is `unknown`, never healthy
-  (`kubeneuron_accelerator_health_nodes`). Condition messages are not read.
+  (`kubeneuron_accelerator_health_nodes`), and so is a condition with a
+  reason its source does not document. Condition messages are not read.
   A node another repairer is acting on (`amd-gpu-unhealthy`,
   `karpenter.sh/disrupted`) is only observed, and one host of a multi-host
   TPU slice is never recycled or replaced alone. Signal names are taken from

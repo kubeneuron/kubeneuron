@@ -60,6 +60,16 @@ type healthSignals struct {
 	mu      sync.Mutex
 	pending map[string]*pendingHealth
 	latest  map[string]nodehealth.NodeHealth
+	// read are the sources read successfully in this leadership term.
+	read map[string]bool
+}
+
+// reset forgets what was read: a new leadership term starts with nothing
+// known about the nodes.
+func (h *healthSignals) reset() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pending, h.latest, h.read = nil, nil, nil
 }
 
 func (c *Controller) healthSources() []healthSource {
@@ -96,6 +106,10 @@ func (c *Controller) observeHealth(ctx context.Context, source string, nodes []n
 	if c.health.pending == nil {
 		c.health.pending = map[string]*pendingHealth{}
 	}
+	if c.health.read == nil {
+		c.health.read = map[string]bool{}
+	}
+	c.health.read[source] = true
 	latest := map[string]nodehealth.NodeHealth{}
 	for node, h := range c.health.latest {
 		if !strings.HasPrefix(node, prefix) {
@@ -151,14 +165,41 @@ func (c *Controller) observeHealth(ctx context.Context, source string, nodes []n
 
 	c.countNodeHealth(source, nodes)
 	for _, r := range reports {
-		if r.again && !c.healthStillUnresolved(ctx, r.node.Node, r.obs.Class) {
+		sig := healthSignal(source, r.node, r.obs, now)
+		device, err := c.openDeviceIncident(ctx, r.node.Node, r.obs.Class)
+		if err != nil {
+			// Retried on the next read.
+			if c.logOnce.first("health-incidents/" + r.node.Node + "/" + err.Error()) {
+				c.log.Warn("could not read the open incidents of a node", "node", r.node.Node, "err", err)
+			}
 			continue
 		}
-		if err := c.IngestSignal(ctx, healthSignal(source, r.node, r.obs, now)); err != nil {
+		switch {
+		case device != nil:
+			// The agent already opened this fault for one device of the
+			// node: the node's report is evidence of it, not a second
+			// incident. Reported again only while it verifies a recovery.
+			if r.again && device.State != types.StateVerifying {
+				continue
+			}
+			sig.Target = device.Target
+		case r.again && !c.healthStillUnresolved(ctx, r.node.Node, r.obs.Class):
+			continue
+		}
+		if err := c.IngestSignal(ctx, sig); err != nil {
 			if c.logOnce.first("health-ingest/" + r.key + "/" + err.Error()) {
 				c.log.Warn("could not record an accelerator health signal", "node", r.node.Node, "rule", r.obs.Rule, "err", err)
 			}
 			continue
+		}
+		if device != nil && !r.again {
+			if err := c.store.AppendAudit(ctx, &types.AuditEntry{
+				IncidentID: device.ID, Time: now, FromState: device.State, ToState: device.State,
+				Actor: "system", Action: "node-health-signal", Params: sig.Evidence, DryRun: device.DryRun,
+				Result: "the node reports the same fault (" + r.obs.Rule + ", " + r.obs.Key + "); recorded on this incident instead of opening another",
+			}); err != nil && c.logOnce.first("health-evidence/"+r.key+"/"+err.Error()) {
+				c.log.Warn("could not record an accelerator health signal on the device incident", "incident", device.ID, "err", err)
+			}
 		}
 		c.health.mu.Lock()
 		if p := c.health.pending[r.key]; p != nil {
@@ -166,6 +207,21 @@ func (c *Controller) observeHealth(ctx context.Context, source string, nodes []n
 		}
 		c.health.mu.Unlock()
 	}
+}
+
+// openDeviceIncident is the open incident of class on one device of node,
+// when there is one.
+func (c *Controller) openDeviceIncident(ctx context.Context, node string, class types.ProblemClass) (*types.Incident, error) {
+	open, err := c.store.ListIncidents(ctx, store.IncidentFilter{Node: node, States: openStates})
+	if err != nil {
+		return nil, err
+	}
+	for _, inc := range open {
+		if inc.Class == class && inc.Target.Node == node && inc.Target.IsDeviceScoped() {
+			return inc, nil
+		}
+	}
+	return nil, nil
 }
 
 // healthStillUnresolved reports whether a signal already reported, and
@@ -266,10 +322,18 @@ func profileState(n nodehealth.NodeHealth, profile string) nodehealth.State {
 // healthRecoveryRefusal is why no step that takes the node out of service
 // may run on it, from the last health read: another component is already
 // repairing the node, or the node is one host of a multi-host TPU slice,
-// which is recovered as a whole or not at all.
+// which is recovered as a whole or not at all. Until every health source has
+// been read once in this leadership term, neither is known, and that is a
+// refusal too.
 func (c *Controller) healthRecoveryRefusal(node, action string) string {
+	sources := c.healthSources()
 	c.health.mu.Lock()
 	defer c.health.mu.Unlock()
+	for _, src := range sources {
+		if !c.health.read[src.name()] {
+			return "accelerator health from " + src.name() + " has not been read since this controller became leader: whether another repairer is acting on the node is not known yet"
+		}
+	}
 	var repairers []string
 	slice := ""
 	for _, h := range c.health.latest {

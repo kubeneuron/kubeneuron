@@ -2991,7 +2991,7 @@ exercise_accelerator_health() {
 	patch_node_status_resources "$target_node" 1 aws.amazon.com/neuron
 	now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 	"$KUBECTL_BIN" patch node "$target_node" --subresource=status --type=json -p "[{\"op\":\"add\",\"path\":\"/status/conditions/-\",\"value\":
-		{\"type\":\"NeuronHealth\",\"status\":\"True\",\"reason\":\"NeuronHasError_HBM_UNCORRECTABLE_ERROR\",
+		{\"type\":\"NeuronHealth\",\"status\":\"True\",\"reason\":\"NeuronHasError_DMA_ERROR\",
 		 \"message\":\"kind-integration free text\",\"lastHeartbeatTime\":\"$now\",\"lastTransitionTime\":\"$now\"}}]" >/dev/null
 
 	: >"$pf_log"
@@ -3022,7 +3022,7 @@ exercise_accelerator_health() {
 	"$JQ_BIN" -e '
 		(.audit[0].params as $p |
 			$p.health_source == "kubernetes-node" and $p.profile == "aws-neuron" and $p.rule == "neuron-npd" and
-			$p.reason == "NeuronHasError_HBM_UNCORRECTABLE_ERROR" and $p.signal == "condition:NeuronHealth=True") and
+			$p.reason == "NeuronHasError_DMA_ERROR" and $p.signal == "condition:NeuronHealth=True") and
 		(tostring | contains("kind-integration free text") | not)' >/dev/null <<<"$detail" || {
 		"$JQ_BIN" -c '{id, class, audit: .audit[0]}' <<<"$detail" >&2 || true
 		die "the accelerator-fault incident does not carry the profile evidence, or carries the condition message"

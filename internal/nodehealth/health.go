@@ -98,8 +98,10 @@ type NodeHealth struct {
 }
 
 // conditionRule reads one Node condition. A condition at faultStatus is a
-// fault, classified from its reason; at the other of True/False it is
-// healthy; at any other status it is unknown.
+// fault when its source documents the reason, classified from it; with a
+// reason the source does not document it is unknown, since an undocumented
+// reason may be software as well. At the other of True/False it is healthy;
+// at any other status it is unknown.
 //
 // A rule with ignored set is read and never acted on: at faultStatus the
 // node is reported as ignored, with that reason, and nothing else follows.
@@ -108,18 +110,17 @@ type conditionRule struct {
 	id          string
 	condition   string
 	faultStatus string
-	classify    func(reason string) types.ProblemClass
+	reasons     func(reason string) verdict
 	ignored     string
 }
 
-// labelRule reads the labels whose key matches pattern; the first capture
-// group, when there is one, is the device index. A value that is neither a
-// fault nor healthy is unknown.
-type labelRule struct {
-	id      string
-	pattern *regexp.Regexp
-	fault   map[string]bool
-	healthy map[string]bool
+// verdict is what a condition at its fault status says, given its reason.
+type verdict struct {
+	class types.ProblemClass
+	// ignored, when set, says why the reason is read and not acted on.
+	ignored string
+	// known is false for a reason the source does not document.
+	known bool
 }
 
 // Profile is one accelerator family's signals.
@@ -129,52 +130,69 @@ type Profile struct {
 	// advertising one of them is read with it.
 	Resources  []string
 	conditions []conditionRule
-	labels     []labelRule
 }
 
 // Profiles is the built-in table. Signal names are taken from vendor
 // documentation on 2026-11-18 and are not validated on real hardware. Only
-// names a public document confirms are listed.
+// names a public document confirms are listed, each with its source.
 var Profiles = []Profile{
 	{
 		Name:      "amd-instinct",
 		Resources: []string{"amd.com/gpu"},
-		labels: []labelRule{{
-			// AMD Device Metrics Exporter: a label per unhealthy GPU.
-			id:      "device-metrics-exporter",
-			pattern: regexp.MustCompile(`^metricsexporter\.amd\.com\.gpu\.(\d+)\.state$`),
-			fault:   map[string]bool{"unhealthy": true},
-			healthy: map[string]bool{"healthy": true},
-		}},
 		conditions: []conditionRule{
-			// AMD's Node Problem Detector integration.
-			{id: "npd-amdgpu-problem", condition: "AMDGPUProblem", faultStatus: "True", classify: fault},
-			{id: "npd-amdgpu-down", condition: "AMDGPUIsDown", faultStatus: "True", classify: fault},
+			// AMD GPU Operator, Node Problem Detector integration: the
+			// condition AMDGPUProblem is False while healthy and True with
+			// the reason AMDGPUIsDown when the amdgpuhealth check reports a
+			// problem.
+			// https://instinct.docs.amd.com/projects/gpu-operator/en/latest/npd/node-problem-detector.html
+			// (2026-11-18)
+			{id: "npd-amdgpu-problem", condition: "AMDGPUProblem", faultStatus: "True",
+				reasons: documented(map[string]types.ProblemClass{"AMDGPUIsDown": types.ClassAcceleratorFault})},
 		},
 	},
 	{
 		Name:      "aws-neuron",
 		Resources: []string{"aws.amazon.com/neuron", "aws.amazon.com/neurondevice"},
 		conditions: []conditionRule{
-			// The Neuron node problem detector in monitor-only mode.
-			{id: "neuron-npd", condition: "NeuronHealth", faultStatus: "True", classify: fault},
-			// The EKS node monitoring agent.
-			{id: "eks-node-monitoring", condition: "AcceleratedHardwareReady", faultStatus: "False", classify: fault},
+			// The Neuron node problem detector in monitor-only mode: the
+			// condition NeuronHealth is True on an unrecoverable error. The
+			// only reason a public document shows is NeuronHasError_DMA_ERROR.
+			// https://aws.amazon.com/blogs/machine-learning/node-problem-detection-and-recovery-for-aws-neuron-nodes-within-amazon-eks-clusters
+			// and https://awsdocs-neuron.readthedocs-hosted.com/en/latest/deploy/infrastructure/problem-detector.html
+			// (2026-11-18)
+			{id: "neuron-npd", condition: "NeuronHealth", faultStatus: "True",
+				reasons: documented(map[string]types.ProblemClass{"NeuronHasError_DMA_ERROR": types.ClassAcceleratorFault})},
+			// The EKS node monitoring agent: AcceleratedHardwareReady is
+			// False with one of the Neuron reasons its table lists, all with
+			// the repair action Replace.
+			// https://docs.aws.amazon.com/eks/latest/userguide/node-health-nma.html
+			// (2026-11-18)
+			{id: "eks-node-monitoring", condition: "AcceleratedHardwareReady", faultStatus: "False",
+				reasons: documented(map[string]types.ProblemClass{
+					"NeuronDMAError":               types.ClassAcceleratorFault,
+					"NeuronHBMUncorrectableError":  types.ClassAcceleratorFault,
+					"NeuronNCUncorrectableError":   types.ClassAcceleratorFault,
+					"NeuronSRAMUncorrectableError": types.ClassAcceleratorFault,
+				})},
 		},
 	},
 	{
 		Name:      "nvidia",
 		Resources: []string{"nvidia.com/gpu"},
 		conditions: []conditionRule{
-			// The EKS node monitoring agent.
-			{id: "eks-node-monitoring", condition: "AcceleratedHardwareReady", faultStatus: "False", classify: eksNVIDIAReason},
+			// The EKS node monitoring agent: the NVIDIA reasons of severity
+			// Condition its table lists, under AcceleratedHardwareReady=False.
+			// https://docs.aws.amazon.com/eks/latest/userguide/node-health-nma.html
+			// (2026-11-18)
+			{id: "eks-node-monitoring", condition: "AcceleratedHardwareReady", faultStatus: "False", reasons: eksNVIDIAReason},
 			// The AKS Node Problem Detector GPU checks,
 			// https://learn.microsoft.com/en-us/azure/aks/gpu-health-monitoring
 			// and https://learn.microsoft.com/en-us/azure/aks/node-problem-detector
 			// (2026-11-10). True is a problem, the Node Problem Detector's
-			// convention.
-			{id: "aks-npd-gpu-missing", condition: "GPUMissing", faultStatus: "True", classify: always(types.ClassGPULost)},
-			{id: "aks-npd-nvlink-down", condition: "NVLinkDown", faultStatus: "True", classify: always(types.ClassNVLink)},
+			// convention. The documents list no reasons: each condition
+			// names one fault by its type.
+			{id: "aks-npd-gpu-missing", condition: "GPUMissing", faultStatus: "True", reasons: anyReason(types.ClassGPULost)},
+			{id: "aks-npd-nvlink-down", condition: "NVLinkDown", faultStatus: "True", reasons: anyReason(types.ClassNVLink)},
 			{id: "aks-npd-xid", condition: "XIDError", faultStatus: "True",
 				ignored: "the condition does not say which XID; an application XID is not a fault of the node"},
 			{id: "aks-npd-gpu-ecc", condition: "GPUECCError", faultStatus: "True",
@@ -209,31 +227,57 @@ func Classes() []types.ProblemClass {
 	return out
 }
 
-func fault(string) types.ProblemClass { return types.ClassAcceleratorFault }
-
-func always(class types.ProblemClass) func(string) types.ProblemClass {
-	return func(string) types.ProblemClass { return class }
+// documented reads only the reasons in classes; any other is unknown.
+func documented(classes map[string]types.ProblemClass) func(string) verdict {
+	return func(reason string) verdict {
+		class, ok := classes[reason]
+		return verdict{class: class, known: ok}
+	}
 }
 
-var eksXIDReason = regexp.MustCompile(`^NvidiaXID(\d+)Error$`)
+// anyReason is for a condition whose type alone names the fault and whose
+// source lists no reasons.
+func anyReason(class types.ProblemClass) func(string) verdict {
+	return func(string) verdict { return verdict{class: class, known: true} }
+}
 
-// eksNVIDIAReason maps the EKS node monitoring agent's NVIDIA reasons to the
-// class the same fault has when the agent reads it.
-func eksNVIDIAReason(reason string) types.ProblemClass {
+var (
+	eksXIDReason  = regexp.MustCompile(`^NvidiaXID(\d+)Error$`)
+	eksDCGMReason = regexp.MustCompile(`^(DCGMDiagnosticFailure|DCGMError|DCGMHealthCode\d+)$`)
+)
+
+// eksXIDCodes are the XIDs the EKS node monitoring agent's table lists as
+// NvidiaXID<code>Error.
+var eksXIDCodes = map[int]bool{
+	46: true, 48: true, 54: true, 62: true, 63: true, 64: true, 74: true, 79: true, 95: true, 109: true, 110: true,
+	119: true, 120: true, 136: true, 140: true, 142: true, 143: true, 151: true, 155: true, 156: true, 158: true,
+}
+
+// eksNVIDIAReason maps the EKS node monitoring agent's documented NVIDIA
+// reasons to the class the same fault has when the agent reads it. DCGM's
+// own reasons are read and not acted on: the table gives them no repair.
+func eksNVIDIAReason(reason string) verdict {
 	switch reason {
 	case "NvidiaDoubleBitError":
-		return types.ClassECCDBE
+		return verdict{class: types.ClassECCDBE, known: true}
 	case "NvidiaNVLinkError":
-		return types.ClassNVLink
+		return verdict{class: types.ClassNVLink, known: true}
 	}
-	if m := eksXIDReason.FindStringSubmatch(reason); m != nil {
-		if code, err := strconv.Atoi(m[1]); err == nil {
-			if info, ok := detect.ClassifyXID(code); ok {
-				return info.Class
-			}
-		}
+	if eksDCGMReason.MatchString(reason) {
+		return verdict{known: true, ignored: "DCGM reports its own failure or a diagnostic result; the EKS documentation gives it no repair action"}
 	}
-	return types.ClassAcceleratorFault
+	m := eksXIDReason.FindStringSubmatch(reason)
+	if m == nil {
+		return verdict{}
+	}
+	code, err := strconv.Atoi(m[1])
+	if err != nil || !eksXIDCodes[code] {
+		return verdict{}
+	}
+	if info, ok := detect.ClassifyXID(code); ok {
+		return verdict{class: info.Class, known: true}
+	}
+	return verdict{class: types.ClassAcceleratorFault, known: true}
 }
 
 // Evaluate reads one Node with every profile that applies to it.
@@ -294,27 +338,6 @@ func (p Profile) evaluate(snap types.NodeHealthSnapshot, devices []types.DeviceC
 		read = true
 		out = append(out, p.readCondition(rule, cond, snap.ReadAt))
 	}
-	for _, rule := range p.labels {
-		for key, value := range snap.Labels {
-			m := rule.pattern.FindStringSubmatch(key)
-			if m == nil {
-				continue
-			}
-			o := Observation{Profile: p.Name, Rule: rule.id, Key: "label:" + key, Reason: value, Reads: confirmReads}
-			if len(m) > 1 {
-				o.Device = m[1]
-			}
-			switch {
-			case rule.fault[value]:
-				o.State, o.Class = StateFault, types.ClassAcceleratorFault
-			case rule.healthy[value]:
-				o.State = StateHealthy
-			default:
-				o.State, o.Why = StateUnknown, fmt.Sprintf("the node reports the device state as %q", value)
-			}
-			out = append(out, o)
-		}
-	}
 	if !read && len(p.conditions) > 0 {
 		names := make([]string, 0, len(p.conditions))
 		for _, rule := range p.conditions {
@@ -353,8 +376,17 @@ func (p Profile) readCondition(rule conditionRule, cond types.NodeHealthConditio
 		o.Why = fmt.Sprintf("the condition %s is stale: heartbeat %s old, more than %s",
 			cond.Type, readAt.Sub(cond.LastHeartbeatTime).Truncate(time.Second), conditionFreshness)
 	case cond.Status == rule.faultStatus:
-		o.State, o.Class = StateFault, rule.classify(cond.Reason)
-		o.Key += "=" + cond.Status
+		v := rule.reasons(cond.Reason)
+		switch {
+		case !v.known:
+			o.State = StateUnknown
+			o.Why = fmt.Sprintf("reason %q of the condition %s is not in profile table %s", cond.Reason, cond.Type, Version)
+		case v.ignored != "":
+			o.State, o.Why = StateIgnored, v.ignored
+		default:
+			o.State, o.Class = StateFault, v.class
+			o.Key += "=" + cond.Status
+		}
 	case cond.Status == healthyStatus:
 		o.State = StateHealthy
 	default:
@@ -373,7 +405,13 @@ func findCondition(conds []types.NodeHealthCondition, name string) (types.NodeHe
 }
 
 // repairerTaints are taints a component that repairs nodes on its own puts on
-// a node it is acting on.
+// a node it is acting on:
+//   - amd-gpu-unhealthy, the AMD GPU Operator's default remediation taint,
+//     https://instinct.docs.amd.com/projects/gpu-operator/en/latest/autoremediation/auto-remediation.html
+//   - karpenter.sh/disrupted, Karpenter's taint on a node it disrupts,
+//     https://karpenter.sh/docs/concepts/disruption/
+//
+// (2026-11-18)
 var repairerTaints = map[string]string{
 	"amd-gpu-unhealthy":      "amd-gpu-operator",
 	"karpenter.sh/disrupted": "karpenter",

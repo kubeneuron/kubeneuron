@@ -377,6 +377,7 @@ func (c *Controller) Run(ctx context.Context) error {
 	// The store may have changed under another leader: record and sweep the
 	// node inventory afresh.
 	c.inventory.reset()
+	c.health.reset()
 	// Janitors run on their own goroutine, NOT the walk thread. They are
 	// idempotent reconcilers that talk only to the store and the platform, and
 	// they can legitimately block on slow externals (an unresponsive agent's

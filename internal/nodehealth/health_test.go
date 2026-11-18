@@ -44,17 +44,15 @@ func TestConditionsMapToClasses(t *testing.T) {
 		profile        string
 		class          types.ProblemClass
 	}{
-		{"neuron npd", "aws.amazon.com/neuron", cond("NeuronHealth", "True", "NeuronHasError_HBM_UNCORRECTABLE_ERROR"), "aws-neuron", types.ClassAcceleratorFault},
+		{"neuron npd", "aws.amazon.com/neuron", cond("NeuronHealth", "True", "NeuronHasError_DMA_ERROR"), "aws-neuron", types.ClassAcceleratorFault},
 		{"neuron eks", "aws.amazon.com/neuron", cond("AcceleratedHardwareReady", "False", "NeuronHBMUncorrectableError"), "aws-neuron", types.ClassAcceleratorFault},
 		{"nvidia eks dbe", "nvidia.com/gpu", cond("AcceleratedHardwareReady", "False", "NvidiaDoubleBitError"), "nvidia", types.ClassECCDBE},
 		{"nvidia eks nvlink", "nvidia.com/gpu", cond("AcceleratedHardwareReady", "False", "NvidiaNVLinkError"), "nvidia", types.ClassNVLink},
 		{"nvidia eks xid 79", "nvidia.com/gpu", cond("AcceleratedHardwareReady", "False", "NvidiaXID79Error"), "nvidia", types.ClassFellOffBus},
-		{"nvidia eks app xid", "nvidia.com/gpu", cond("AcceleratedHardwareReady", "False", "NvidiaXID13Error"), "nvidia", types.ClassXIDApp},
-		{"nvidia eks dcgm", "nvidia.com/gpu", cond("AcceleratedHardwareReady", "False", "DCGMHealthCode42"), "nvidia", types.ClassAcceleratorFault},
+		{"nvidia eks xid 48", "nvidia.com/gpu", cond("AcceleratedHardwareReady", "False", "NvidiaXID48Error"), "nvidia", types.ClassECCDBE},
 		{"nvidia aks missing", "nvidia.com/gpu", cond("GPUMissing", "True", ""), "nvidia", types.ClassGPULost},
 		{"nvidia aks nvlink", "nvidia.com/gpu", cond("NVLinkDown", "True", ""), "nvidia", types.ClassNVLink},
-		{"amd npd", "amd.com/gpu", cond("AMDGPUProblem", "True", ""), "amd-instinct", types.ClassAcceleratorFault},
-		{"amd npd down", "amd.com/gpu", cond("AMDGPUIsDown", "True", ""), "amd-instinct", types.ClassAcceleratorFault},
+		{"amd npd", "amd.com/gpu", cond("AMDGPUProblem", "True", "AMDGPUIsDown"), "amd-instinct", types.ClassAcceleratorFault},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -137,19 +135,36 @@ func TestNoFreshSignalIsUnknown(t *testing.T) {
 	}
 }
 
-func TestAMDLabelNamesTheDevice(t *testing.T) {
-	snap := snapshot("amd.com/gpu", cond("AMDGPUProblem", "False", ""))
-	snap.Labels = map[string]string{
-		"metricsexporter.amd.com.gpu.3.state": "unhealthy",
-		"metricsexporter.amd.com.gpu.5.state": "unknown",
+// A reason its source does not document is unknown, not a fault: it may be
+// software, and a fault this node owns would let a policy replace it.
+func TestUndocumentedReasonIsUnknown(t *testing.T) {
+	cases := []struct{ name, resource, kind, status, reason string }{
+		{"eks nvidia", "nvidia.com/gpu", "AcceleratedHardwareReady", "False", "NvidiaDriverRestarted"},
+		{"eks nvidia unlisted xid", "nvidia.com/gpu", "AcceleratedHardwareReady", "False", "NvidiaXID13Error"},
+		{"eks neuron", "aws.amazon.com/neuron", "AcceleratedHardwareReady", "False", "NeuronRuntimeRestarted"},
+		{"neuron npd", "aws.amazon.com/neuron", "NeuronHealth", "True", "NeuronHasError_HBM_UNCORRECTABLE_ERROR"},
+		{"amd npd", "amd.com/gpu", "AMDGPUProblem", "True", "AMDGPUXgmi"},
 	}
-	h := Evaluate(snap)
-	o := find(t, h, "label:metricsexporter.amd.com.gpu.3.state")
-	if o.State != StateFault || o.Device != "3" || o.Class != types.ClassAcceleratorFault {
-		t.Fatalf("got %+v", o)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := Evaluate(snapshot(tc.resource, cond(tc.kind, tc.status, tc.reason)))
+			o := find(t, h, "condition:"+tc.kind)
+			want := `reason "` + tc.reason + `" of the condition ` + tc.kind + ` is not in profile table ` + Version
+			if o.State != StateUnknown || o.Class != "" || h.State != StateUnknown || o.Why != want {
+				t.Fatalf("got %+v (node %s), want unknown: %s", o, h.State, want)
+			}
+		})
 	}
-	if o := find(t, h, "label:metricsexporter.amd.com.gpu.5.state"); o.State != StateUnknown || o.Device != "5" {
-		t.Fatalf("got %+v", o)
+}
+
+// The EKS agent's DCGM reasons are documented and given no repair: read,
+// not acted on.
+func TestEKSDCGMReasonIsIgnored(t *testing.T) {
+	for _, reason := range []string{"DCGMDiagnosticFailure", "DCGMError", "DCGMHealthCode42"} {
+		h := Evaluate(snapshot("nvidia.com/gpu", cond("AcceleratedHardwareReady", "False", reason)))
+		if o := find(t, h, "condition:AcceleratedHardwareReady"); o.State != StateIgnored || o.Class != "" || o.Why == "" {
+			t.Fatalf("%s: got %+v", reason, o)
+		}
 	}
 }
 

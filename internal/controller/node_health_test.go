@@ -64,7 +64,7 @@ func neuronNode(clock *fakeClock, status, reason string) types.NodeHealthSnapsho
 	}
 }
 
-const neuronHBM = "NeuronHasError_HBM_UNCORRECTABLE_ERROR"
+const neuronDMA = "NeuronHasError_DMA_ERROR"
 
 func openHealthIncident(t *testing.T, st store.Store, class types.ProblemClass) *types.Incident {
 	t.Helper()
@@ -81,7 +81,7 @@ func openHealthIncident(t *testing.T, st store.Store, class types.ProblemClass) 
 func TestNodeHealthFaultOpensAnIncidentWithItsEvidence(t *testing.T) {
 	c, st, plat, clock := healthFixture(t)
 	ctx := context.Background()
-	plat.set(neuronNode(clock, "True", neuronHBM))
+	plat.set(neuronNode(clock, "True", neuronDMA))
 	c.pollNodeHealth(ctx)
 	if inc := openHealthIncident(t, st, types.ClassAcceleratorFault); inc != nil {
 		t.Fatalf("one read opened an incident: %+v", inc)
@@ -99,7 +99,7 @@ func TestNodeHealthFaultOpensAnIncidentWithItsEvidence(t *testing.T) {
 	got := trail[0].Params
 	want := map[string]string{
 		"health_source": "kubernetes-node", "profile": "aws-neuron", "profile_version": "v1",
-		"rule": "neuron-npd", "signal": "condition:NeuronHealth=True", "reason": neuronHBM,
+		"rule": "neuron-npd", "signal": "condition:NeuronHealth=True", "reason": neuronDMA,
 		"since": "2026-11-18T11:00:00Z", "other_repairer": "unknown",
 	}
 	for k, v := range want {
@@ -114,7 +114,7 @@ func TestNodeHealthFlapOpensNothing(t *testing.T) {
 	c, st, plat, clock := healthFixture(t)
 	ctx := context.Background()
 	for range 3 {
-		plat.set(neuronNode(clock, "True", neuronHBM))
+		plat.set(neuronNode(clock, "True", neuronDMA))
 		c.pollNodeHealth(ctx)
 		clock.Advance(10 * time.Second)
 		plat.set(neuronNode(clock, "False", ""))
@@ -130,10 +130,10 @@ func TestNodeHealthFlapOpensNothing(t *testing.T) {
 func TestNodeHealthStaleSignalIsHeld(t *testing.T) {
 	c, st, plat, clock := healthFixture(t)
 	ctx := context.Background()
-	plat.set(neuronNode(clock, "True", neuronHBM))
+	plat.set(neuronNode(clock, "True", neuronDMA))
 	c.pollNodeHealth(ctx)
 
-	stale := neuronNode(clock, "True", neuronHBM)
+	stale := neuronNode(clock, "True", neuronDMA)
 	clock.Advance(20 * time.Minute)
 	plat.set(stale)
 	c.pollNodeHealth(ctx)
@@ -149,7 +149,7 @@ func TestNodeHealthStaleSignalIsHeld(t *testing.T) {
 	}
 
 	// Fresh again: the read before the stale ones still counts.
-	plat.set(neuronNode(clock, "True", neuronHBM))
+	plat.set(neuronNode(clock, "True", neuronDMA))
 	c.pollNodeHealth(ctx)
 	if inc := openHealthIncident(t, st, types.ClassAcceleratorFault); inc == nil {
 		t.Fatal("the fault was forgotten while its signal was stale")
@@ -187,7 +187,7 @@ func TestNodeHealthUnallocatableIsHeldFiveMinutes(t *testing.T) {
 func TestNodeHealthReportsAgainOnlyWhenUnresolved(t *testing.T) {
 	c, st, plat, clock := healthFixture(t)
 	ctx := context.Background()
-	plat.set(neuronNode(clock, "True", neuronHBM))
+	plat.set(neuronNode(clock, "True", neuronDMA))
 	for range 5 {
 		c.pollNodeHealth(ctx)
 		clock.Advance(10 * time.Second)
@@ -240,7 +240,7 @@ func TestNodeHealthIgnoredSignalOpensNothing(t *testing.T) {
 func TestNodeHealthReadFailureChangesNothing(t *testing.T) {
 	c, st, plat, clock := healthFixture(t)
 	ctx := context.Background()
-	plat.set(neuronNode(clock, "True", neuronHBM))
+	plat.set(neuronNode(clock, "True", neuronDMA))
 	c.pollNodeHealth(ctx)
 	plat.err = errors.New("apiserver unavailable")
 	c.pollNodeHealth(ctx)
@@ -268,9 +268,24 @@ func TestNodeHealthRefusesRecoveryItCannotOwn(t *testing.T) {
 		Devices: []types.DeviceCount{{Resource: "nvidia.com/gpu", Capacity: 8, Allocatable: 8}},
 		Taints:  []types.NodeTaint{{Key: "karpenter.sh/disrupted", Effect: "NoSchedule"}}}
 	plat.set(amd, tpu, spot, neuronNode(clock, "False", ""))
+	step := func(action string) *playbook.Step { return &playbook.Step{Name: "s", Action: action} }
+	// Before the first read of this leadership term nothing is known about
+	// another repairer: every step that takes a node is held. A failed read
+	// does not count as one.
+	unread := func(when string) {
+		t.Helper()
+		err := c.requireCloudRecovery(ctx, &types.Incident{ID: "i", Target: types.Target{Node: "spot-1"}}, step("platform.cordon"))
+		if err == nil || !strings.Contains(err.Error(), "has not been read since this controller became leader") {
+			t.Fatalf("cordon %s: %v", when, err)
+		}
+	}
+	unread("before the first read")
+	plat.err = errors.New("apiserver unavailable")
+	c.pollNodeHealth(ctx)
+	unread("after a failed read")
+	plat.err = nil
 	c.pollNodeHealth(ctx)
 
-	step := func(action string) *playbook.Step { return &playbook.Step{Name: "s", Action: action} }
 	refused := func(node, action string) string {
 		err := c.requireCloudRecovery(ctx, &types.Incident{ID: "i", Target: types.Target{Node: node}}, step(action))
 		if err == nil {
@@ -298,5 +313,55 @@ func TestNodeHealthRefusesRecoveryItCannotOwn(t *testing.T) {
 	}
 	if got := c.healthRecoveryRefusal("trn-1", "platform.replace_node"); got != "" {
 		t.Fatalf("a node with no other repairer is refused: %q", got)
+	}
+	c.health.reset()
+	unread("in a new leadership term")
+}
+
+// On EKS with the agent, the same double-bit error reaches KubeNeuron twice:
+// from the agent, for one GPU, and from the node monitoring agent's
+// condition, for the node. The node's report is recorded on the GPU's
+// incident; no second incident opens.
+func TestNodeHealthJoinsTheAgentsDeviceIncident(t *testing.T) {
+	c, st, plat, clock := healthFixture(t)
+	ctx := context.Background()
+	gpu := types.Target{Node: "gpu-1", GPUUUID: "GPU-abc", GPUIndex: 2}
+	now := clock.Now()
+	if err := st.CreateIncident(ctx, &types.Incident{ID: "agent-dbe", Class: types.ClassECCDBE, Target: gpu,
+		State: types.StateObserving, SignalSeen: 1, OpenedAt: now, UpdatedAt: now, StateChangedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	plat.set(types.NodeHealthSnapshot{Node: "gpu-1",
+		Devices: []types.DeviceCount{{Resource: "nvidia.com/gpu", Capacity: 8, Allocatable: 8}},
+		Conditions: []types.NodeHealthCondition{{Type: "AcceleratedHardwareReady", Status: "False", Reason: "NvidiaDoubleBitError",
+			LastHeartbeatTime: now.Add(-time.Minute), LastTransitionTime: now.Add(-time.Hour)}}})
+	for range 3 {
+		c.pollNodeHealth(ctx)
+	}
+	if _, err := st.GetOpenIncident(ctx, types.Target{Node: "gpu-1"}, types.ClassECCDBE); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("a second, node-wide ecc-dbe incident opened: %v", err)
+	}
+	inc, err := st.GetIncident(ctx, "agent-dbe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inc.SignalSeen != 2 {
+		t.Fatalf("signal seen %d, want the node's report counted once", inc.SignalSeen)
+	}
+	trail, err := st.AuditTrail(ctx, "agent-dbe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var joined int
+	for _, e := range trail {
+		if e.Action == "node-health-signal" {
+			joined++
+			if e.Params["rule"] != "eks-node-monitoring" || e.Params["reason"] != "NvidiaDoubleBitError" {
+				t.Fatalf("evidence %+v", e.Params)
+			}
+		}
+	}
+	if joined != 1 {
+		t.Fatalf("node report recorded %d times on the device incident, want once: %+v", joined, trail)
 	}
 }
