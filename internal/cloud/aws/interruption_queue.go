@@ -288,14 +288,14 @@ func parseInterruptionEvent(body string) ([]cloud.Interruption, string) {
 			return nil, outcomeUnrecognised
 		}
 		return []cloud.Interruption{{InstanceID: d.InstanceID, Kind: cloud.InterruptionSpotReclaim,
-			Deadline: ev.Time.Add(spotNotice).UTC(), Source: SourceQueueSpot, Key: key, Once: true}}, ""
+			Deadline: ev.Time.Add(spotNotice).UTC(), Source: SourceQueueSpot, Key: key, At: ev.Time.UTC(), Once: true}}, ""
 	case ev.Source == "aws.ec2" && ev.DetailType == "EC2 Instance Rebalance Recommendation":
 		d, ok := ec2Detail(ev)
 		if !ok {
 			return nil, outcomeUnrecognised
 		}
 		return []cloud.Interruption{{InstanceID: d.InstanceID, Kind: cloud.InterruptionRebalance,
-			Source: SourceQueueRebalance, Key: key, Once: true}}, ""
+			Source: SourceQueueRebalance, Key: key, At: ev.Time.UTC(), Once: true}}, ""
 	case ev.Source == "aws.ec2" && ev.DetailType == "EC2 Instance State-change Notification":
 		d, ok := ec2Detail(ev)
 		if !ok || d.State == "" {
@@ -304,7 +304,7 @@ func parseInterruptionEvent(body string) ([]cloud.Interruption, string) {
 		if d.State != "running" {
 			return nil, ""
 		}
-		return []cloud.Interruption{{InstanceID: d.InstanceID, Source: SourceQueueState, Key: key, Once: true, Ended: true}}, ""
+		return []cloud.Interruption{{InstanceID: d.InstanceID, Source: SourceQueueState, Key: key, At: ev.Time.UTC(), Once: true, Ended: true}}, ""
 	case ev.Source == "aws.health" && ev.DetailType == "AWS Health Event":
 		return healthNotices(ev)
 	}
@@ -349,7 +349,7 @@ func healthNotices(ev interruptionEvent) ([]cloud.Interruption, string) {
 		}
 		out = append(out, cloud.Interruption{InstanceID: id, Kind: cloud.InterruptionScheduledMaintenance,
 			Deadline: deadline, Source: SourceQueueHealth, Key: "aws-eventbridge:" + d.EventArn + "/" + id,
-			Once: true, Ended: ended})
+			At: ev.Time.UTC(), Once: true, Ended: ended})
 	}
 	if len(out) == 0 {
 		return nil, outcomeUnrecognised

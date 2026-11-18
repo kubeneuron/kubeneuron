@@ -104,10 +104,18 @@ The spot event documents no deadline: AWS sends it two minutes before the
 instance is interrupted. KubeNeuron assumes the event's `time` plus two
 minutes; the real deadline may be earlier.
 
-An instance state change opens no incident. `running` after a notice says
-the instance is back, and closes the incident as ended; the other states are
-left to the node's removal. A state change for an instance with no open
-notice is deleted without a record.
+An instance state change opens no incident. `running` says the instance is
+back: it ends the instance's maintenance notices that AWS sent before it.
+The queue does not keep order, so an older `running` ends nothing newer, and
+it never ends a spot reclaim or a rebalance hint: those end when the node is
+removed. The other states are left to the node's removal. A state change
+that ends no notice is deleted without a record.
+
+An AWS Health update of an event already read is the same notice. When it
+moves `startTime`, the new deadline replaces the recorded one, and the
+incident's steps and its hand-over to a person follow the new time; a
+warning already sent is not sent again. `statusCode: closed` ends that
+event's notice only.
 
 How a message is handled:
 
@@ -116,7 +124,9 @@ How a message is handled:
   back after five minutes (the visibility timeout used) and is recognised by
   its event ID, or for AWS Health by the event ARN and instance.
 - A notice for an instance that is not a node of this cluster is deleted and
-  counted as `outcome="foreign"`; it opens nothing.
+  counted as `outcome="foreign"`; it opens nothing. This includes an
+  instance that has not joined the cluster as a node yet, such as one that
+  receives a rebalance recommendation in its first minute.
 - A message that is not one of the events above, or cannot be read, is
   deleted and counted as `kind="unknown"`, `outcome="unrecognised"`.
 
@@ -197,9 +207,11 @@ incident is running.
 - The node is deleted: the incident is resolved as replaced.
 - The notice is no longer present and the node is still there: the
   incident is closed as ended. A notice from the AWS queue is delivered once,
-  so its absence does not close the incident; it is closed as ended when AWS
-  Health reports the event `closed` or the instance is `running` again. In
-  either case only the cordon this incident placed is removed. KubeNeuron cannot tell a cancelled notice from maintenance that was
+  so its absence does not close the incident. It is closed as ended once
+  each of its queued notices is over: an AWS Health event `closed`, a
+  maintenance notice followed by `running`, or a rebalance hint that no
+  notice taking the node followed within an hour. In every case only the
+  cordon this incident placed is removed. KubeNeuron cannot tell a cancelled notice from maintenance that was
   completed in place (a reboot, a frozen VM, a VM restarted under the same
   node), so it does not say which.
 - The node and the notice are both still there an hour after the deadline:
@@ -213,7 +225,7 @@ It does not record the cloud's message text. From the AWS queue, KubeNeuron
 reads the event's source, detail type, ID and time, the instance ID and state,
 and for AWS Health the event ARN, service, category, `startTime`,
 `statusCode` and the affected instance IDs. The message body, the Health
-`eventDescription` and the account ID are not stored or logged. The node is not counted
+`eventDescription` and the event's account ID are not stored or logged. The node is not counted
 as degraded: the incident is left out of `kubeneuron_degraded_gpus`,
 `kubeneuron_degraded_gpu_seconds_total` and
 `kubeneuron_incidents_recovered_total`, and `kubeneuronctl report` counts

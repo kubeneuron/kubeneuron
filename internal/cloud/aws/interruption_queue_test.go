@@ -113,6 +113,7 @@ func healthEvent(id, status string, entities ...string) string {
 func TestParseInterruptionEvents(t *testing.T) {
 	const arn = "aws-eventbridge:arn:aws:health:us-east-1::event/EC2/AWS_EC2_INSTANCE_RETIREMENT_SCHEDULED/AWS_EC2_INSTANCE_RETIREMENT_SCHEDULED_1/"
 	start := time.Date(2026, 11, 25, 15, 10, 9, 0, time.UTC)
+	sent := time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
 		name    string
 		body    string
@@ -120,16 +121,16 @@ func TestParseInterruptionEvents(t *testing.T) {
 		outcome string
 	}{
 		{"spot", spotEvent("e1", "i-0a"), []cloud.Interruption{{InstanceID: "i-0a", Kind: cloud.InterruptionSpotReclaim,
-			Deadline: time.Date(2026, 11, 18, 10, 2, 0, 0, time.UTC), Source: SourceQueueSpot, Key: "aws-eventbridge:e1", Once: true}}, ""},
+			Deadline: time.Date(2026, 11, 18, 10, 2, 0, 0, time.UTC), Source: SourceQueueSpot, Key: "aws-eventbridge:e1", At: sent, Once: true}}, ""},
 		{"rebalance", rebalanceEvent("e2", "i-0a"), []cloud.Interruption{{InstanceID: "i-0a", Kind: cloud.InterruptionRebalance,
-			Source: SourceQueueRebalance, Key: "aws-eventbridge:e2", Once: true}}, ""},
+			Source: SourceQueueRebalance, Key: "aws-eventbridge:e2", At: sent, Once: true}}, ""},
 		{"health by ARN and by ID", healthEvent("e3", "upcoming", "arn:aws:ec2:us-east-1:123456789012:instance/i-0a", "i-0b"), []cloud.Interruption{
-			{InstanceID: "i-0a", Kind: cloud.InterruptionScheduledMaintenance, Deadline: start, Source: SourceQueueHealth, Key: arn + "i-0a", Once: true},
-			{InstanceID: "i-0b", Kind: cloud.InterruptionScheduledMaintenance, Deadline: start, Source: SourceQueueHealth, Key: arn + "i-0b", Once: true}}, ""},
+			{InstanceID: "i-0a", Kind: cloud.InterruptionScheduledMaintenance, Deadline: start, Source: SourceQueueHealth, Key: arn + "i-0a", At: sent, Once: true},
+			{InstanceID: "i-0b", Kind: cloud.InterruptionScheduledMaintenance, Deadline: start, Source: SourceQueueHealth, Key: arn + "i-0b", At: sent, Once: true}}, ""},
 		{"health closed", healthEvent("e4", "closed", "i-0a"), []cloud.Interruption{
-			{InstanceID: "i-0a", Kind: cloud.InterruptionScheduledMaintenance, Deadline: start, Source: SourceQueueHealth, Key: arn + "i-0a", Once: true, Ended: true}}, ""},
+			{InstanceID: "i-0a", Kind: cloud.InterruptionScheduledMaintenance, Deadline: start, Source: SourceQueueHealth, Key: arn + "i-0a", At: sent, Once: true, Ended: true}}, ""},
 		{"running again", stateEvent("e5", "i-0a", "running"), []cloud.Interruption{
-			{InstanceID: "i-0a", Source: SourceQueueState, Key: "aws-eventbridge:e5", Once: true, Ended: true}}, ""},
+			{InstanceID: "i-0a", Source: SourceQueueState, Key: "aws-eventbridge:e5", At: sent.Add(5 * time.Minute), Once: true, Ended: true}}, ""},
 		{"stopping is the janitor's", stateEvent("e6", "i-0a", "stopping"), nil, ""},
 		{"not JSON", "hello", nil, outcomeUnrecognised},
 		{"another event", `{"id":"e7","source":"aws.autoscaling","detail-type":"EC2 Instance Launch Successful","detail":{}}`, nil, outcomeUnrecognised},

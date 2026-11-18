@@ -57,9 +57,14 @@ type Interruption struct {
 	// as long as it is in force, as an event queue does: its absence from a
 	// later read says nothing about the interruption.
 	Once bool `json:"once,omitempty"`
-	// Ended is set when the source reports that the instance's interruption
-	// is over: the maintenance finished, or the instance is running again.
-	// Kind may then be empty.
+	// At is when the cloud sent the notice, when the source says; a queue
+	// may deliver notices out of order.
+	At time.Time `json:"at,omitempty"`
+	// Ended is set when the source reports that an interruption is over.
+	// With a Kind it ends the notice of the same Key (the maintenance
+	// event closed). Without one it says the instance is running again,
+	// which ends the instance's maintenance notices sent before At, never a
+	// spot reclaim or a rebalance hint.
 	Ended bool `json:"ended,omitempty"`
 }
 

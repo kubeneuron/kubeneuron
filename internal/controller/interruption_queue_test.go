@@ -77,6 +77,13 @@ func (p *queuePlatform) wasAcked(key string) bool {
 	return slices.Contains(p.acked, key)
 }
 
+// pending reports whether a notice with key is still on the queue.
+func (p *queuePlatform) pending(key string) bool {
+	p.qmu.Lock()
+	defer p.qmu.Unlock()
+	return slices.ContainsFunc(p.queued, func(n interruption.Notice) bool { return n.Key == key })
+}
+
 func queuedSpot(node string) interruption.Notice {
 	return interruption.Notice{Node: node, Interruption: cloud.Interruption{
 		InstanceID: "i-" + node, Kind: cloud.InterruptionSpotReclaim, Deadline: time.Now().Add(2 * time.Minute),
@@ -84,10 +91,21 @@ func queuedSpot(node string) interruption.Notice {
 	}}
 }
 
-func queuedRunning(node string) interruption.Notice {
+// queuedRunning reports the instance running again at at.
+func queuedRunning(node string, at time.Time) interruption.Notice {
 	return interruption.Notice{Node: node, Interruption: cloud.Interruption{
 		InstanceID: "i-" + node, Source: "aws-eventbridge:ec2/instance-state-change",
-		Key: "aws-eventbridge:running-" + node, Once: true, Ended: true,
+		Key: "aws-eventbridge:running-" + node + "-" + at.Format(time.RFC3339Nano), At: at, Once: true, Ended: true,
+	}}
+}
+
+// queuedHealth is an AWS Health scheduled change for the node's instance,
+// sent at at; closed is the event's closing update.
+func queuedHealth(node, event string, at, start time.Time, closed bool) interruption.Notice {
+	return interruption.Notice{Node: node, Interruption: cloud.Interruption{
+		InstanceID: "i-" + node, Kind: cloud.InterruptionScheduledMaintenance, Deadline: start,
+		Source: "aws-eventbridge:health/ec2-scheduled-change", Key: "aws-eventbridge:" + event + "/i-" + node,
+		At: at, Once: true, Ended: closed,
 	}}
 }
 
@@ -159,27 +177,39 @@ func TestQueuedNoticeDoesNotEndWhenNoLongerRead(t *testing.T) {
 	}
 }
 
-// The queue's report that the instance is running again closes the incident
-// as ended, releases its cordon, and is acknowledged.
-func TestQueuedEndClosesTheIncident(t *testing.T) {
-	c, st, plat := queueFixture(t)
-	ctx := context.Background()
-	plat.deliver(queuedSpot("n1"))
-	c.pollInterruptions(ctx)
-	id := interruptionIncident(t, st, "n1").ID
+// openQueued records the notices and returns the node's incident.
+func openQueued(t *testing.T, c *Controller, st *sqlite.Store, plat *queuePlatform, n ...interruption.Notice) string {
+	t.Helper()
+	plat.deliver(n...)
+	c.pollInterruptions(context.Background())
+	id := interruptionIncident(t, st, n[0].Node).ID
 	settle(t, c, st, id)
+	return id
+}
 
-	end := queuedRunning("n1")
-	plat.deliver(end)
-	c.pollInterruptions(ctx)
-	inc, err := st.GetIncident(ctx, id)
+func queuedIncidentState(t *testing.T, st *sqlite.Store, id string) types.IncidentState {
+	t.Helper()
+	inc, err := st.GetIncident(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inc.State != types.StateResolved {
-		t.Fatalf("state %s, want resolved as ended", inc.State)
+	return inc.State
+}
+
+// The instance running again after a maintenance notice closes the incident
+// as ended, releases its cordon, and is acknowledged.
+func TestQueuedRunningEndsAnEarlierMaintenanceNotice(t *testing.T) {
+	c, st, plat := queueFixture(t)
+	now := time.Now()
+	id := openQueued(t, c, st, plat, queuedHealth("n1", "A", now.Add(-time.Hour), now.Add(time.Minute), false))
+
+	end := queuedRunning("n1", now)
+	plat.deliver(end)
+	c.pollInterruptions(context.Background())
+	if got := queuedIncidentState(t, st, id); got != types.StateResolved {
+		t.Fatalf("state %s, want resolved as ended", got)
 	}
-	if _, results := trailActions(t, st, id); !containsText(results, "the cloud reported that the interruption of n1 is over") {
+	if _, results := trailActions(t, st, id); !containsText(results, "the cloud reported each announced interruption of n1 over") {
 		t.Fatalf("not closed on the cloud's report: %v", results)
 	}
 	if len(plat.released) != 1 || plat.released[0] != "n1/"+id {
@@ -190,27 +220,144 @@ func TestQueuedEndClosesTheIncident(t *testing.T) {
 	}
 }
 
-// An end report whose incident could not be closed is not acknowledged, so
-// it is read again.
-func TestQueuedEndIsKeptWhenTheIncidentCannotClose(t *testing.T) {
+// A queue does not keep order: a running report older than the notice ends
+// nothing, and is acknowledged.
+func TestQueuedRunningOlderThanTheNoticeEndsNothing(t *testing.T) {
+	c, st, plat := queueFixture(t)
+	now := time.Now()
+	id := openQueued(t, c, st, plat, queuedHealth("n1", "A", now, now.Add(time.Minute), false))
+
+	end := queuedRunning("n1", now.Add(-time.Minute))
+	plat.deliver(end)
+	c.pollInterruptions(context.Background())
+	if got := queuedIncidentState(t, st, id); got.Halted() {
+		t.Fatalf("an older running report closed the incident: %s", got)
+	}
+	if !plat.wasAcked(end.Key) {
+		t.Fatal("an end report that matched nothing was not acknowledged")
+	}
+}
+
+// A spot reclaim ends with the node, never with a running report.
+func TestQueuedRunningDoesNotEndASpotNotice(t *testing.T) {
+	c, st, plat := queueFixture(t)
+	spot := queuedSpot("n1")
+	spot.At = time.Now().Add(-time.Minute)
+	id := openQueued(t, c, st, plat, spot)
+
+	plat.deliver(queuedRunning("n1", time.Now()))
+	c.pollInterruptions(context.Background())
+	if got := queuedIncidentState(t, st, id); got.Halted() {
+		t.Fatalf("a running report closed a spot reclaim: %s", got)
+	}
+}
+
+// AWS Health closing event A ends A only; the incident stays open while B is
+// in force, and closes when B is closed too.
+func TestQueuedHealthClosedEndsOnlyItsEvent(t *testing.T) {
+	c, st, plat := queueFixture(t)
+	now := time.Now()
+	start := now.Add(time.Minute)
+	id := openQueued(t, c, st, plat, queuedHealth("n1", "A", now, start, false), queuedHealth("n1", "B", now, start, false))
+
+	plat.deliver(queuedHealth("n1", "A", now.Add(time.Minute), start, true))
+	c.pollInterruptions(context.Background())
+	if got := queuedIncidentState(t, st, id); got.Halted() {
+		t.Fatalf("closing event A closed the incident while B is in force: %s", got)
+	}
+	plat.deliver(queuedHealth("n1", "B", now.Add(time.Minute), start, true))
+	c.pollInterruptions(context.Background())
+	if got := queuedIncidentState(t, st, id); got != types.StateResolved {
+		t.Fatalf("state %s, want resolved once both events closed", got)
+	}
+}
+
+// An end report whose record could not be written is not acknowledged, so
+// it is read again. Once written, it is acknowledged even if the incident
+// cannot close yet: the incident closes on a later pass from its trail.
+func TestQueuedEndIsAcknowledgedOnceWritten(t *testing.T) {
 	c, st, plat := queueFixture(t)
 	ctx := context.Background()
-	plat.deliver(queuedSpot("n1"))
-	c.pollInterruptions(ctx)
-	id := interruptionIncident(t, st, "n1").ID
-	settle(t, c, st, id)
+	now := time.Now()
+	id := openQueued(t, c, st, plat, queuedHealth("n1", "A", now, now.Add(time.Minute), false))
 
-	end := queuedRunning("n1")
+	end := queuedHealth("n1", "A", now.Add(time.Minute), now.Add(time.Minute), true)
 	plat.deliver(end)
+	failing := &auditFailingStore{Store: st, fail: true}
+	c.store = failing
+	c.pollInterruptions(ctx)
+	if !plat.pending(end.Key) {
+		t.Fatal("an end report that could not be written was acknowledged")
+	}
+
+	failing.fail = false
 	plat.existsErr = errors.New("apiserver unavailable")
 	c.pollInterruptions(ctx)
-	if plat.wasAcked(end.Key) {
-		t.Fatal("an end report was acknowledged although the incident stayed open")
+	if plat.pending(end.Key) {
+		t.Fatal("a written end report was not acknowledged")
+	}
+	if got := queuedIncidentState(t, st, id); got.Halted() {
+		t.Fatalf("closed although the node could not be read: %s", got)
 	}
 	plat.existsErr = nil
 	c.pollInterruptions(ctx)
-	if inc, _ := st.GetIncident(ctx, id); inc.State != types.StateResolved || !plat.wasAcked(end.Key) {
-		t.Fatalf("state %s, acknowledged %v; want resolved and acknowledged", inc.State, plat.acked)
+	if got := queuedIncidentState(t, st, id); got != types.StateResolved {
+		t.Fatalf("state %s, want resolved from the trail", got)
+	}
+}
+
+// AWS Health moving a maintenance window updates the recorded deadline, and
+// the incident's timing follows the new one; the signal is not counted again.
+func TestQueuedHealthMovedDeadlineIsRecorded(t *testing.T) {
+	c, st, plat := queueFixture(t)
+	ctx := context.Background()
+	now := time.Now()
+	first := queuedHealth("n1", "A", now, now.Add(48*time.Hour), false)
+	plat.deliver(first)
+	c.pollInterruptions(ctx)
+	inc := interruptionIncident(t, st, "n1")
+
+	moved := queuedHealth("n1", "A", now.Add(time.Minute), now.Add(72*time.Hour), false)
+	plat.deliver(moved)
+	c.pollInterruptions(ctx)
+	notices, err := c.interruptionNotices(ctx, inc)
+	if err != nil || len(notices) != 1 || !notices[0].Deadline.Equal(moved.Deadline) {
+		t.Fatalf("notices %+v, %v; want one with the moved deadline", notices, err)
+	}
+	if got, ok := urgentNotice(notices); !ok || !got.due().Equal(moved.Deadline) {
+		t.Fatalf("timed by %+v, want the moved deadline", got)
+	}
+	if _, results := trailActions(t, st, inc.ID); !containsText(results, "the cloud moved the deadline") {
+		t.Fatalf("move not recorded: %v", results)
+	}
+	after, _ := st.GetIncident(ctx, inc.ID)
+	if after.SignalSeen != inc.SignalSeen {
+		t.Fatalf("signal counted again: %d, was %d", after.SignalSeen, inc.SignalSeen)
+	}
+	if plat.pending(moved.Key) {
+		t.Fatal("the update was not acknowledged")
+	}
+}
+
+// A rebalance hint from the queue that no notice taking the node follows
+// closes after an hour; it holds no cordon.
+func TestQueuedRebalanceAloneClosesAfterAnHour(t *testing.T) {
+	c, st, plat := queueFixture(t)
+	ctx := context.Background()
+	hint := queuedSpot("n1")
+	hint.Kind, hint.Deadline, hint.Key = cloud.InterruptionRebalance, time.Time{}, "aws-eventbridge:rebalance-n1"
+	plat.deliver(hint)
+	c.pollInterruptions(ctx)
+	id := interruptionIncident(t, st, "n1").ID
+	c.pollInterruptions(ctx)
+	if got := queuedIncidentState(t, st, id); got.Halted() {
+		t.Fatalf("a fresh rebalance hint closed: %s", got)
+	}
+	clock := &fakeClock{now: time.Now().Add(interruptionOverdue + time.Minute)}
+	c.checkpointNow = clock.Now
+	c.pollInterruptions(ctx)
+	if got := queuedIncidentState(t, st, id); got != types.StateResolved {
+		t.Fatalf("state %s, want resolved an hour after the hint", got)
 	}
 }
 
@@ -219,7 +366,7 @@ func TestQueuedEndIsKeptWhenTheIncidentCannotClose(t *testing.T) {
 func TestQueuedNoticesThatNeedNothingAreAcknowledged(t *testing.T) {
 	c, st, plat := queueFixture(t)
 	ctx := context.Background()
-	end, elsewhere := queuedRunning("n1"), queuedSpot("elsewhere")
+	end, elsewhere := queuedRunning("n1", time.Now()), queuedSpot("elsewhere")
 	plat.deliver(end, elsewhere)
 	c.pollInterruptions(ctx)
 	if incidents, _ := st.ListIncidents(ctx, store.IncidentFilter{}); len(incidents) != 0 {
