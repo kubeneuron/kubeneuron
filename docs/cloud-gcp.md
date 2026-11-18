@@ -36,18 +36,16 @@ GKE documents no restart of a single node, so on GKE:
   autoscaler, or one that spans several zones, add-first is unavailable and
   the incident is held before the cordon, with the reason: GKE sets a size in
   every zone of a pool at once.
-- `RemoveFirst` is available only on a pool under the **cluster
-  autoscaler**. The playbook has already cordoned and drained the node, since
-  GKE does neither; KubeNeuron deletes the node's instance from the pool's
-  instance group and the autoscaler decides whether a new one comes.
-- A **fixed-size pool** is replaced only by adding first: under
-  `RemoveFirst` recovery is unavailable before the node is cordoned, with
-  the reason "a fixed-size GKE node pool is replaced only by adding first".
-  Setting such a pool back to its size would take a second call after the
-  delete, and a stop between the two would leave the pool a node short with
-  nothing to show it. A **fixed-size pool across several zones** therefore
-  has no replacement path in this release: recovery is unavailable, with the
-  reason, before the node is cordoned.
+- Under `RemoveFirst`, on a pool under the **cluster autoscaler**, the
+  playbook has already cordoned and drained the node, since GKE does
+  neither; KubeNeuron deletes the node's instance from the pool's instance
+  group and the autoscaler decides whether a new one comes.
+- Under `RemoveFirst`, on a **fixed-size pool**, KubeNeuron deletes the
+  instance and then sets the pool back to its size through a recorded plan;
+  see [Remove-first on a fixed-size pool](#remove-first-on-a-fixed-size-pool).
+  A fixed-size pool across several zones is replaced this way only while
+  every zone has the same size; otherwise recovery is unavailable before the
+  node is cordoned, with the reason.
 - KubeNeuron never lowers a pool's size through GKE: GKE would choose which
   node goes. Only a named instance is ever deleted.
 - No replacement starts while the pool has a GKE operation running (an
@@ -98,6 +96,44 @@ step waits a long time for approval, KubeNeuron does not grow it: the step
 ends as add-first unavailable, and the replacement is planned again on the
 next attempt.
 
+### Remove-first on a fixed-size pool
+
+Experimental, not validated against a live GKE cluster. On a fixed-size
+pool, deleting a node's instance leaves the pool one node short until its
+size is set back, which takes a second call. KubeNeuron keeps a plan of the
+replacement on the incident, so a controller that stops between the two
+calls, or a call whose answer is lost, still ends with the pool at its size:
+
+1. **Planned.** KubeNeuron reads the pool: the node count of every zone,
+   which must be the same in all of them. The plan, with that count, is
+   recorded on the incident before anything is changed. No plan starts while
+   the pool has a GKE operation running, and only one plan is open per pool:
+   a second incident on the same pool waits in its replace step until the
+   first one has set the pool back.
+2. **Deleting.** KubeNeuron checks the node and the pool once more, records
+   that the delete is about to be sent, and deletes the instance by name. A
+   resent delete carries the same request ID, so Compute Engine runs it
+   once.
+3. **Resizing.** Once the instance is gone, KubeNeuron sets the pool's node
+   count back to the planned count through GKE (`setSize`), only while the
+   node's zone is below it, every other zone is at it, and no other GKE
+   operation runs on the pool. The count is absolute, so a resent resize is
+   the same resize, and no zone is ever lowered.
+4. **Done.** The plan ends when every zone is back at its count.
+
+The replace step ends once the instance is gone; the controller finishes the
+resize on its own, also after a restart or a change of leader, from what the
+plan recorded. A plan that stopped before the delete changed nothing and is
+made again. If the pool changed in a way KubeNeuron cannot set back safely
+(its zones now differ in size, it was put under the autoscaler, its zones
+changed), or the plan has not finished within an hour, the plan ends as
+needs-operator, nothing more is changed, and the incident's audit trail
+records the reason with the command that sets the size back, for example:
+
+```sh
+gcloud container clusters resize <cluster> --node-pool <pool> --num-nodes <count> --location <location> --project <project>
+```
+
 ### GKE node auto-repair and host maintenance
 
 On GKE Standard, node auto-repair acts on a node that is NotReady, reports no
@@ -133,7 +169,7 @@ the VM), the incident records it and no recovery step starts.
     title: KubeNeuron GKE node replacement
     includedPermissions:
       - container.clusters.get
-      - container.clusters.update        # grow a fixed-size pool (add-first)
+      - container.clusters.update        # set a fixed-size pool's size (add-first, remove-first)
       - container.operations.list
       - container.operations.get
       - compute.instances.get
@@ -150,7 +186,7 @@ the VM), the incident records it and no recovery step starts.
 
     If KubeNeuron only replaces nodes of pools under the cluster autoscaler,
     leave out `container.clusters.update`: those pools' sizes are never set.
-    Add-first, and so any fixed-size pool, needs it.
+    Any fixed-size pool needs it, with either strategy.
 
 3. Configure the KubeNeuron resource:
 

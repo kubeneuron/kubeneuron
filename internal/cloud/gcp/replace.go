@@ -24,16 +24,19 @@ func requestID(parts ...string) string {
 	return uuid.NewSHA1(requestNamespace, []byte(key)).String()
 }
 
-// errFixedPoolRemoveFirst refuses remove-first on a fixed-size pool: its
-// size would have to be set back in a second call, and nothing records that
-// the first one was made.
-var errFixedPoolRemoveFirst = errors.New("a fixed-size GKE node pool is replaced only by adding first")
+// errFixedPoolRemoveFirst refuses Replace on a fixed-size pool: its size
+// would have to be set back in a second call, and Replace records nothing of
+// the first one. Such a pool is replaced through a plan the controller keeps
+// (PlanRemoveFirst), or by adding first.
+var errFixedPoolRemoveFirst = errors.New("a fixed-size GKE node pool is replaced remove-first only through a recorded plan")
 
 var _ cloud.RemoveFirstChecker = (*Provider)(nil)
 
-// CheckRemoveFirst refuses, before the node is cordoned, the pools Replace
-// refuses: a fixed-size pool, and Autopilot. A node already gone is no
-// refusal: Replace finds the replacement finished.
+// CheckRemoveFirst refuses, before the node is cordoned, the pools no
+// remove-first replacement can serve: Autopilot, and a fixed-size pool whose
+// zones differ in size. A fixed-size pool is served by PlanRemoveFirst, an
+// autoscaled one by Replace. A node already gone is no refusal: Replace finds
+// the replacement finished.
 func (p *Provider) CheckRemoveFirst(ctx context.Context, instanceID string) error {
 	t, c, err := p.resolve(ctx, instanceID)
 	if errors.Is(err, errGone) {
@@ -46,7 +49,7 @@ func (p *Provider) CheckRemoveFirst(ctx context.Context, instanceID string) erro
 		return fmt.Errorf("%w: GKE Autopilot manages its nodes; KubeNeuron only observes them", cloud.ErrRemoveFirstUnavailable)
 	}
 	if !t.pool.Autoscaling {
-		return fmt.Errorf("%w: node pool %s: %v", cloud.ErrRemoveFirstUnavailable, t.pool.Name, errFixedPoolRemoveFirst)
+		return p.unequalZones(ctx, t.pool)
 	}
 	return nil
 }
@@ -55,7 +58,8 @@ func (p *Provider) CheckRemoveFirst(ctx context.Context, instanceID string) erro
 // group, on a pool under the cluster autoscaler only: the autoscaler decides
 // whether another comes. The controller has already cordoned and drained the
 // node: GKE does neither. A fixed-size pool is replaced only by adding first
-// (ReplaceWithSuccessor), and Replace refuses it before any change. An
+// (ReplaceWithSuccessor) or through a plan (PlanRemoveFirst), and Replace
+// refuses it before any change. An
 // instance already gone is a finished replacement.
 func (p *Provider) Replace(ctx context.Context, instanceID string) error {
 	t, c, err := p.resolve(ctx, instanceID)

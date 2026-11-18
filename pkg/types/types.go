@@ -341,6 +341,51 @@ type Incident struct {
 	// drained (add-first replacement), from the moment it is planned. Nil
 	// when the incident never prepared one.
 	Successor *SuccessorRecord `json:"successor,omitempty"`
+	// RemoveFirst is the planned remove-first replacement of the target, from
+	// the moment it is planned, on a pool whose size the controller sets back
+	// after the delete. Nil when the incident never planned one.
+	RemoveFirst *RemoveFirstRecord `json:"remove_first,omitempty"`
+}
+
+// Remove-first outcomes. An empty outcome is a plan still open: the instance
+// may be deleted and the pool's size not yet set back.
+const (
+	RemoveFirstRestored      = "restored"       // the instance was deleted and the pool set back to its size
+	RemoveFirstNotStarted    = "not-started"    // refused or abandoned before the delete
+	RemoveFirstNeedsOperator = "needs-operator" // left for a person, with the reason and the command
+)
+
+// RemoveFirstRecord is the incident's durable record of a planned
+// remove-first replacement.
+type RemoveFirstRecord struct {
+	cloud.RemoveFirstPlan
+	// EndedAt is when the plan closed with Outcome.
+	EndedAt *time.Time `json:"ended_at,omitempty"`
+	Outcome string     `json:"outcome,omitempty"`
+	// Reason is why it ended that way.
+	Reason string `json:"reason,omitempty"`
+}
+
+// Open reports whether the plan has not ended yet.
+func (r *RemoveFirstRecord) Open() bool { return r != nil && r.Outcome == "" }
+
+// Clone returns a deep copy.
+func (r *RemoveFirstRecord) Clone() *RemoveFirstRecord {
+	if r == nil {
+		return nil
+	}
+	c := *r
+	if r.State != nil {
+		c.State = make(map[string]string, len(r.State))
+		for k, v := range r.State {
+			c.State[k] = v
+		}
+	}
+	if r.EndedAt != nil {
+		t := *r.EndedAt
+		c.EndedAt = &t
+	}
+	return &c
 }
 
 // Successor outcomes. An empty outcome is an operation still open: the
@@ -425,6 +470,7 @@ func (i *Incident) Clone() *Incident {
 		c.CloudIdentity = &pin
 	}
 	c.Successor = i.Successor.Clone()
+	c.RemoveFirst = i.RemoveFirst.Clone()
 	if i.ResolvedAt != nil {
 		t := *i.ResolvedAt
 		c.ResolvedAt = &t

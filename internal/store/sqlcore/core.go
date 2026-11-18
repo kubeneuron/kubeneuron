@@ -415,6 +415,10 @@ func (q *Queries) CreateIncident(ctx context.Context, inc *types.Incident) error
 	if err != nil {
 		return err
 	}
+	removeFirst, err := json.Marshal(inc.RemoveFirst)
+	if err != nil {
+		return err
+	}
 	stateChanged := inc.StateChangedAt
 	if stateChanged.IsZero() {
 		stateChanged = inc.OpenedAt
@@ -423,14 +427,14 @@ func (q *Queries) CreateIncident(ctx context.Context, inc *types.Incident) error
 		INSERT INTO incidents (id, node, gpu_uuid, gpu_index, pci_addr, class, state, playbook,
 		                       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
 		                       vendor, opened_at, updated_at, state_changed_at, version, cloud_identity,
-		                       successor, successor_open)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		                       successor, successor_open, remove_first, remove_first_open)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		inc.ID, inc.Target.Node, inc.Target.GPUUUID, inc.Target.GPUIndex,
 		types.NormalizePCIAddress(inc.Target.PCIAddr),
 		string(inc.Class), string(inc.State), inc.Playbook,
 		inc.StepIndex, inc.Attempt, b2i(inc.DryRun), inc.SignalSeen, b2i(inc.RemediationSlotHeld), inc.ApprovalEpoch,
 		string(inc.Vendor), ts(inc.OpenedAt), ts(inc.UpdatedAt), ts(stateChanged), inc.Version, string(identity),
-		string(successor), b2i(inc.Successor.Open()))
+		string(successor), b2i(inc.Successor.Open()), string(removeFirst), b2i(inc.RemoveFirst.Open()))
 	return err
 }
 
@@ -449,6 +453,10 @@ func (q *Queries) UpdateIncident(ctx context.Context, inc *types.Incident) error
 	if err != nil {
 		return err
 	}
+	removeFirst, err := json.Marshal(inc.RemoveFirst)
+	if err != nil {
+		return err
+	}
 	var resolved any
 	if inc.ResolvedAt != nil {
 		resolved = ts(*inc.ResolvedAt)
@@ -456,12 +464,13 @@ func (q *Queries) UpdateIncident(ctx context.Context, inc *types.Incident) error
 	res, err := q.db.ExecContext(ctx, `
 		UPDATE incidents SET state=?, playbook=?, step_index=?, attempt=?, dry_run=?,
 		                     signals_seen=?, remediation_slot_held=?, approval_epoch=?, vendor=?, updated_at=?, state_changed_at=?, resolved_at=?,
-		                     version=version+1, cloud_identity=?, successor=?, successor_open=?
+		                     version=version+1, cloud_identity=?, successor=?, successor_open=?,
+		                     remove_first=?, remove_first_open=?
 		WHERE id=? AND version=?`,
 		string(inc.State), inc.Playbook, inc.StepIndex, inc.Attempt, b2i(inc.DryRun),
 		inc.SignalSeen, b2i(inc.RemediationSlotHeld), inc.ApprovalEpoch, string(inc.Vendor),
 		ts(inc.UpdatedAt), ts(inc.StateChangedAt), resolved, string(identity),
-		string(successor), b2i(inc.Successor.Open()), inc.ID, inc.Version)
+		string(successor), b2i(inc.Successor.Open()), string(removeFirst), b2i(inc.RemoveFirst.Open()), inc.ID, inc.Version)
 	if err != nil {
 		return err
 	}
@@ -670,6 +679,9 @@ func (q *Queries) ListIncidents(ctx context.Context, f store.IncidentFilter) ([]
 	if f.OpenSuccessor {
 		qs += ` AND successor_open=1`
 	}
+	if f.OpenRemoveFirst {
+		qs += ` AND remove_first_open=1`
+	}
 	if !f.ActiveSince.IsZero() {
 		// A terminal incident ends at resolved_at (RESOLVED) or at the
 		// transition that terminated it (EXPIRED, which sets no resolved_at);
@@ -737,19 +749,20 @@ func (q *Queries) CountIncidentsByState(ctx context.Context) (map[types.Incident
 const incidentSelect = `
 	SELECT id, node, gpu_uuid, gpu_index, pci_addr, class, state, playbook,
 	       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
-	       vendor, opened_at, updated_at, state_changed_at, resolved_at, version, cloud_identity, successor
+	       vendor, opened_at, updated_at, state_changed_at, resolved_at, version, cloud_identity, successor,
+	       remove_first
 	FROM incidents`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
 func scanIncident(r rowScanner) (*types.Incident, error) {
 	var inc types.Incident
-	var class, state, vendor, opened, updated, stateChanged, identity, successor string
+	var class, state, vendor, opened, updated, stateChanged, identity, successor, removeFirst string
 	var dryRun, slotHeld int
 	var resolved sql.NullString
 	err := r.Scan(&inc.ID, &inc.Target.Node, &inc.Target.GPUUUID, &inc.Target.GPUIndex,
 		&inc.Target.PCIAddr, &class, &state, &inc.Playbook, &inc.StepIndex, &inc.Attempt, &dryRun,
-		&inc.SignalSeen, &slotHeld, &inc.ApprovalEpoch, &vendor, &opened, &updated, &stateChanged, &resolved, &inc.Version, &identity, &successor)
+		&inc.SignalSeen, &slotHeld, &inc.ApprovalEpoch, &vendor, &opened, &updated, &stateChanged, &resolved, &inc.Version, &identity, &successor, &removeFirst)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
@@ -761,6 +774,9 @@ func scanIncident(r rowScanner) (*types.Incident, error) {
 	}
 	if err := json.Unmarshal([]byte(successor), &inc.Successor); err != nil {
 		return nil, fmt.Errorf("decode incident successor: %w", err)
+	}
+	if err := json.Unmarshal([]byte(removeFirst), &inc.RemoveFirst); err != nil {
+		return nil, fmt.Errorf("decode incident remove-first plan: %w", err)
 	}
 	inc.Class = types.ProblemClass(class)
 	inc.State = types.IncidentState(state)

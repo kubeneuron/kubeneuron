@@ -19,7 +19,7 @@ const maintenanceLabel = "cloud.google.com/active-node-maintenance"
 
 // basePermissions are what a replacement reads and calls on an autoscaled
 // pool; fixedPoolPermissions add setting the pool's size, which add-first
-// needs.
+// and a planned remove-first need.
 var (
 	basePermissions = []string{
 		"container.clusters.get",
@@ -176,11 +176,11 @@ func (p *Provider) CheckReplacePermission(ctx context.Context, instanceID string
 	want := fixedPoolPermissions
 	if t.pool.Autoscaling {
 		want = basePermissions
-	} else if len(t.pool.Groups) != 1 {
-		// Neither path is open, so say so before the node is cordoned: a
-		// fixed-size pool is replaced only by adding first, which grows every
-		// zone of a multi-zone pool at once.
-		return fmt.Errorf("gcp: node pool %s is fixed-size and spans %d zones: %w, which needs a pool in one zone", t.pool.Name, len(t.pool.Groups), errFixedPoolRemoveFirst)
+	} else if err := p.unequalZones(ctx, t.pool); err != nil {
+		// No path is open, so say so before the node is cordoned: adding
+		// first grows every zone at once, and a planned remove-first could
+		// not set the size of one zone back.
+		return err
 	}
 	held, err := p.api.Permissions(ctx, want)
 	if err != nil {

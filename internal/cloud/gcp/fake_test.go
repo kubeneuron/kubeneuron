@@ -62,8 +62,11 @@ type fakeGKE struct {
 	// hold leaves the next resize running, with no new member, until
 	// Deliver; lose applies the next resize and fails its answer.
 	hold, held, lose bool
-	requests         int
-	deleted          []string
+	// loseDelete applies the next delete and fails its answer; slowDelete
+	// leaves the next one running (the member DELETING) and fails its answer.
+	loseDelete, slowDelete bool
+	requests               int
+	deleted                []string
 	// now is GKE's clock: the start time of new operations.
 	now time.Time
 
@@ -212,11 +215,34 @@ func (f *fakeGKE) DeleteInstances(_ context.Context, ref groupRef, names []strin
 		if i < 0 {
 			return fmt.Errorf("instance %s is not a member", n)
 		}
+		if f.slowDelete {
+			f.slowDelete = false
+			g.members[i].Action = "DELETING"
+			g.target--
+			return errors.New("context deadline exceeded")
+		}
 		g.members = slices.Delete(g.members, i, i+1)
 		g.target--
 		f.deleted = append(f.deleted, n)
 	}
+	if f.loseDelete {
+		f.loseDelete = false
+		return errors.New("context deadline exceeded")
+	}
 	return nil
+}
+
+// finishDeletes ends the deletes left running by slowDelete.
+func (f *fakeGKE) finishDeletes() {
+	for _, g := range f.groups {
+		g.members = slices.DeleteFunc(g.members, func(m member) bool {
+			if m.Action == "DELETING" {
+				f.deleted = append(f.deleted, m.Name)
+				return true
+			}
+			return false
+		})
+	}
 }
 
 func (f *fakeGKE) Permissions(_ context.Context, want []string) ([]string, error) {

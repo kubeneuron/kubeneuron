@@ -145,12 +145,16 @@ API is `v1alpha1`.
   `spec.cloud.gcp` (project, location, cluster) replaces a GPU node on GKE
   Standard by deleting its instance from the node pool's managed instance
   group, a Compute Engine call GKE does not document for node pools.
-  Remove-first is available only on autoscaled pools, which keep their size;
-  on any other pool it is refused before the node is cordoned.
-  A fixed-size pool is replaced only by adding first: add-first grows a
-  fixed-size pool in one zone by one through GKE and deletes only named
-  instances; a pool is never shrunk through GKE. A fixed-size pool across
-  zones has no replacement path yet.
+  Remove-first on an autoscaled pool deletes the instance and leaves the
+  size to the autoscaler. On a fixed-size pool, add-first grows a pool in
+  one zone by one through GKE and deletes only named instances; a pool is
+  never shrunk through GKE. Remove-first on a fixed-size pool, also across
+  zones of equal size, deletes the instance and sets the pool back to its
+  size through a plan recorded on the incident: after a restart the
+  controller finishes it from the record, one plan is open per pool, no zone
+  is ever lowered, and a pool it cannot set back safely ends as
+  needs-operator with the `gcloud container clusters resize` command. New
+  incident columns (SQLite migration 0035, PostgreSQL 0026).
   Recycle is not available. On pools with auto-repair, recovery runs only on
   Ready nodes with no auto-repair or other GKE operation running on the pool
   or cluster; Autopilot clusters are observe-only. Host maintenance is

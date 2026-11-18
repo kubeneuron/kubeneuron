@@ -63,6 +63,9 @@ type IncidentFilter struct {
 	// OpenSuccessor keeps only incidents whose add-first successor operation
 	// has not ended.
 	OpenSuccessor bool
+	// OpenRemoveFirst keeps only incidents whose planned remove-first
+	// replacement has not ended.
+	OpenRemoveFirst bool
 	// ActiveSince keeps incidents whose lifetime reaches into [ActiveSince,
 	// now): everything not lifecycle-terminal is kept regardless of when it
 	// opened, and a terminal incident is kept when it ended at or after the

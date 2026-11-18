@@ -79,6 +79,7 @@ func (c *Controller) reconcile(ctx context.Context) {
 		metrics.ReconcileSeconds.Observe(time.Since(start).Seconds())
 	}(time.Now())
 	c.sweepSuccessors(ctx)
+	c.sweepRemoveFirst(ctx)
 	incidents, err := c.store.ListIncidents(ctx, store.IncidentFilter{
 		States: []types.IncidentState{
 			types.StateOpen, types.StateObserving, types.StateEvaluating,

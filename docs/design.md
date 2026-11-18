@@ -432,9 +432,14 @@ attribute (`ErrNeedsOperator`), is handed to an operator and never changed
 again automatically. A provider without the contract keeps today's
 behaviour: `AddFirst` holds, `RemoveFirst` is unchanged. Its mirror,
 `cloud.RemoveFirstChecker`, is optional too: a provider whose pools may
-refuse remove-first (GKE, for a fixed-size pool or Autopilot) answers
-`CheckRemoveFirst` before the cordon, and the controller holds the step
-with the reason; nothing is cordoned or drained.
+refuse remove-first (GKE, for Autopilot or a fixed-size pool of unequal
+zones) answers `CheckRemoveFirst` before the cordon, and the controller
+holds the step with the reason; nothing is cordoned or drained. A provider
+whose pool must have its size set back after the delete implements
+`cloud.PlannedRemoveFirstProvider`: the controller records the plan on the
+incident (`remove_first`) before the first call, again before the delete,
+and after every step, and the reconcile pass finishes an open plan from the
+record alone, one per pool.
 
 ### 2.4c The fault envelope (`AgentEvent.Fault`)
 
@@ -858,7 +863,7 @@ operator-accepted controller stores. PostgreSQL is the HA choice: the DSN
 comes from a mounted Secret, the controller Deployment is stateless, and the
 store backend passes the same conformance suite as SQLite (see §2.5 for the
 honest scope of what that parity does and does not prove). Migration heads
-travel in lockstep (sqlite 0034 / postgres 0025, including node inventory source and incident-linked training progress and checkpoint reports).
+travel in lockstep (sqlite 0035 / postgres 0026, including node inventory source, incident-linked training progress and checkpoint reports, and the remove-first plan of an incident).
 
 The operator provisions a `ReadWriteOnce` claim for SQLite, defaulting to
 `5Gi`. Reconciliation preserves API-selected/bound fields, permits only

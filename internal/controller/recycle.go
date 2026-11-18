@@ -57,6 +57,11 @@ func (c *Controller) recycleNodeStep(ctx context.Context, inc *types.Incident, r
 		return c.replaceWithSuccessor(ctx, inc, pin)
 	}
 	if replace {
+		if planned, ok := c.platform.(platform.PlannedRemoveFirstRecycler); ok {
+			if res, handled, err := c.replaceRemoveFirst(ctx, inc, planned, pin); handled {
+				return res, err
+			}
+		}
 		if err := guard.ReplacePinnedNode(ctx, pin); err != nil {
 			if errors.Is(err, cloud.ErrReplacementCapacity) {
 				return nil, fmt.Errorf("platform.replace_node: replacement capacity unavailable: %w", err)

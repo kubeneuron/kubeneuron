@@ -774,6 +774,20 @@ type RemoveFirstChecker interface {
 	RemoveFirstAvailable(ctx context.Context, pin cloud.NodeIdentity) error
 }
 
+// PlannedRemoveFirstRecycler replaces a pinned node by removing it first on a
+// pool whose size must be set back afterwards, through a plan the caller
+// persists (see cloud.PlannedRemoveFirstProvider).
+type PlannedRemoveFirstRecycler interface {
+	// PlanRemoveFirst plans the replacement while the pinned node is
+	// eligible for it; it changes nothing. A provider or pool that needs no
+	// plan wraps cloud.ErrRemoveFirstUnplanned: the caller uses
+	// ReplacePinnedNode.
+	PlanRemoveFirst(ctx context.Context, pin cloud.NodeIdentity, operation string) (cloud.RemoveFirstPlan, error)
+	// ContinueRemoveFirst moves the plan on by one step. From planned, the
+	// step that commits to the delete, it repeats the guard against the pin.
+	ContinueRemoveFirst(ctx context.Context, pin cloud.NodeIdentity, plan cloud.RemoveFirstPlan) (cloud.RemoveFirstPlan, error)
+}
+
 // SuccessorNodeRecycler replaces a pinned node by adding first: a successor is
 // brought up in the node's pool before the node is drained, and the node is
 // removed only once the successor has taken over. Every mutation repeats the

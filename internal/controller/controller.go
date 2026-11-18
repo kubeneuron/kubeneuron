@@ -62,8 +62,11 @@ type Controller struct {
 	// assessment in the audit trail: the denial text, or "" once recovery is
 	// available again. Absent means not loaded yet. It keeps those rows
 	// exact without reading the trail on every tick.
-	addFirst         addFirstChecks
-	removeFirst      addFirstChecks
+	addFirst    addFirstChecks
+	removeFirst addFirstChecks
+	// removeFirstPools serializes the check for an open plan on a pool with
+	// the write of a new one.
+	removeFirstPools sync.Mutex
 	successorPoll    time.Duration // zero: defaultSuccessorPoll
 	policyAssessedMu sync.Mutex
 	policyAssessed   map[string]string

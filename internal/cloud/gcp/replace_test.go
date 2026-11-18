@@ -34,8 +34,9 @@ func TestReplaceOnAnAutoscaledPoolOnlyDeletes(t *testing.T) {
 	}
 }
 
-// A fixed-size pool is never replaced remove-first: no call records that its
-// size was lowered, so a lost second call would leave it short for good.
+// Replace never deletes from a fixed-size pool: it records nothing of the
+// delete, so a lost second call would leave the pool short for good. Such a
+// pool goes through PlanRemoveFirst.
 func TestReplaceRefusesAFixedSizePool(t *testing.T) {
 	f := newFakeGKE(3)
 	if err := testProvider(f).Replace(t.Context(), testInstance(1)); !errors.Is(err, errFixedPoolRemoveFirst) || len(f.calls) != 0 {
@@ -59,14 +60,18 @@ func TestReplaceRefusesWithoutAChange(t *testing.T) {
 	}
 }
 
-// Remove-first is refused before the cordon exactly where Replace refuses it.
+// Remove-first is refused before the cordon where neither Replace nor a
+// planned remove-first can serve the pool.
 func TestCheckRemoveFirst(t *testing.T) {
 	if err := testProvider(autoscaled(3)).CheckRemoveFirst(t.Context(), testInstance(1)); err != nil {
 		t.Fatalf("autoscaled pool: %v", err)
 	}
+	if err := testProvider(newFakeGKE(3)).CheckRemoveFirst(t.Context(), testInstance(1)); err != nil {
+		t.Fatalf("fixed pool: %v", err)
+	}
 	for name, f := range map[string]*fakeGKE{
-		"fixed":     newFakeGKE(3),
-		"autopilot": func() *fakeGKE { f := autoscaled(3); f.autopilot = true; return f }(),
+		"unequal zones": func() *fakeGKE { f := newFakeGKE(2, testZone, "us-central1-b"); f.groups[1].target = 3; return f }(),
+		"autopilot":     func() *fakeGKE { f := autoscaled(3); f.autopilot = true; return f }(),
 	} {
 		err := testProvider(f).CheckRemoveFirst(t.Context(), testInstance(1))
 		if !errors.Is(err, cloud.ErrRemoveFirstUnavailable) || len(f.calls) != 0 {

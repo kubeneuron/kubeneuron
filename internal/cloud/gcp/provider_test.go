@@ -181,12 +181,17 @@ func TestCheckReplacePermissionNamesWhatIsMissing(t *testing.T) {
 	}
 }
 
-// A fixed-size pool across zones has no replacement path, and says so before
-// the node is cordoned; an autoscaled one across zones has.
-func TestCheckReplacePermissionRefusesAFixedMultiZonePool(t *testing.T) {
+// A fixed-size pool across zones of different sizes has no replacement
+// path, and says so before the node is cordoned; one of equal zones, or an
+// autoscaled one, has.
+func TestCheckReplacePermissionRefusesUnequalFixedZones(t *testing.T) {
 	f := newFakeGKE(2, testZone, "us-central1-b")
-	if err := testProvider(f).CheckReplacePermission(t.Context(), testInstance(0)); !errors.Is(err, errFixedPoolRemoveFirst) {
-		t.Fatalf("err = %v", err)
+	if err := testProvider(f).CheckReplacePermission(t.Context(), testInstance(0)); err != nil {
+		t.Fatalf("equal zones: %v", err)
+	}
+	f.groups[1].target = 3
+	if err := testProvider(f).CheckReplacePermission(t.Context(), testInstance(0)); !errors.Is(err, cloud.ErrRemoveFirstUnavailable) {
+		t.Fatalf("unequal zones: %v", err)
 	}
 	f.autoscaling = true
 	if err := testProvider(f).CheckReplacePermission(t.Context(), testInstance(0)); err != nil {
