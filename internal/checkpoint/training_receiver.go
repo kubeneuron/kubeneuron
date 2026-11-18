@@ -21,6 +21,7 @@ type TrainingReceiver struct {
 
 	authOnce   sync.Once
 	authBudget flowcontrol.RateLimiter
+	authSlots  chan struct{}
 
 	mu     sync.Mutex
 	window time.Time
@@ -48,13 +49,24 @@ func (h *TrainingReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// All senders share this budget before any Kubernetes identity lookup.
-	h.authOnce.Do(func() { h.authBudget = flowcontrol.NewTokenBucketRateLimiter(20, 40) })
+	h.authOnce.Do(func() {
+		h.authBudget = flowcontrol.NewTokenBucketRateLimiter(100, 100)
+		h.authSlots = make(chan struct{}, 32)
+	})
 	if !h.authBudget.TryAccept() {
 		w.Header().Set("Retry-After", "1")
 		w.WriteHeader(http.StatusTooManyRequests)
 		return
 	}
+	select {
+	case h.authSlots <- struct{}{}:
+	default:
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	}
 	pod, err := h.Authenticate(r)
+	<-h.authSlots
 	if err != nil || pod == nil || pod.UID == "" {
 		w.WriteHeader(http.StatusUnauthorized)
 		return

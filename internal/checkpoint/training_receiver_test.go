@@ -89,7 +89,10 @@ func TestTrainingReceiverLimitsBeforeAuthentication(t *testing.T) {
 		calls++
 		return nil, errors.New("invalid credentials")
 	}}
-	h.authOnce.Do(func() { h.authBudget = flowcontrol.NewTokenBucketRateLimiter(0, 1) })
+	h.authOnce.Do(func() {
+		h.authBudget = flowcontrol.NewTokenBucketRateLimiter(0, 1)
+		h.authSlots = make(chan struct{}, 32)
+	})
 	for _, want := range []int{http.StatusUnauthorized, http.StatusTooManyRequests} {
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/training/reports", nil))
@@ -99,5 +102,39 @@ func TestTrainingReceiverLimitsBeforeAuthentication(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("authentication called %d times", calls)
+	}
+}
+
+func TestTrainingReceiverLimitsConcurrentAuthentication(t *testing.T) {
+	entered := make(chan struct{}, 32)
+	release := make(chan struct{})
+	finished := make(chan int, 32)
+	h := TrainingReceiver{Authenticate: func(*http.Request) (*corev1.Pod, error) {
+		entered <- struct{}{}
+		<-release
+		return nil, errors.New("invalid token")
+	}}
+	request := func() int {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/training/reports", nil))
+		return w.Code
+	}
+	for range 32 {
+		go func() { finished <- request() }()
+	}
+	for range 32 {
+		<-entered
+	}
+	if code := request(); code != http.StatusTooManyRequests {
+		t.Errorf("overflow status %d", code)
+	}
+	close(release)
+	for range 32 {
+		if code := <-finished; code != http.StatusUnauthorized {
+			t.Errorf("authentication status %d", code)
+		}
+	}
+	if code := request(); code != http.StatusUnauthorized {
+		t.Fatalf("released slot status %d", code)
 	}
 }
