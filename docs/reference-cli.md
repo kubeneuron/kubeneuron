@@ -121,6 +121,52 @@ shows the configured baseline beside the estimate. Where a node's GPU count
 is missing, the report flags its one-GPU assumption for degraded time and
 omits that incident from the savings calculation.
 
+### Per accelerator resource
+
+The report also counts the window per accelerator resource, each in its own
+unit: **GPU-hours** for `nvidia.com/gpu` and `amd.com/gpu` (one row each, never
+added together), **TPU chip-hours** for `google.com/tpu`, and **AWS Neuron
+device-hours** for `aws.amazon.com/neuron`. AWS Neuron devices are the
+accelerators (AWS Trainium and AWS Inferentia) that the `aws.amazon.com/neuron`
+resource counts. KubeNeuron is not affiliated with AWS and is unrelated to the
+AWS Neuron SDK. Hours of different resources are never added up, in the
+report, the API or the panel. A resource with no incident in the window is not
+shown.
+
+Each row has degraded, recovered and saved (estimate) hours, counted with the
+rules above; overlapping intervals count once within the resource. The device
+count is the one the incident recorded when it opened, from the node's
+inventory at that moment: the agent's GPUs where it registered, otherwise the
+devices the Kubernetes Node advertises, and one device for a device-scoped
+incident. TPU chip-hours count chips, not nodes or slices. An incident whose
+count was not recorded (one opened before this was recorded, a node whose
+devices are not known, a TPU node that lists no chips) is not guessed: it is
+counted apart as **node-hours (device count unknown)**, with the number of
+incidents, and carries no cost.
+
+The GPU-hour numbers above (`degraded_gpu_hours`, `recovered_gpu_hours`,
+`savings_estimate` and the rest) count `nvidia.com/gpu` and `amd.com/gpu` only:
+GPU only; use `accelerator_groups` for the other accelerators.
+
+**Cost equivalent (estimate).** Set `spec.recoveryCostRates` to show the saved
+hours of a resource as a cost:
+
+```yaml
+recoveryCostRates:
+  currency: USD
+  perDeviceHour:
+    nvidia.com/gpu: "4.00"
+    aws.amazon.com/neuron: "1.50"
+```
+
+There are no default rates. A resource without a rate shows its hours and
+"rate not set". The rate and the manual baseline are shown beside every cost,
+which is always an estimate. A total cost is shown only when every resource
+shown has a rate; otherwise the report names the resources without one.
+Without a manual baseline there is no saved estimate and no cost: the report
+says "Manual recovery baseline not set". The baseline is one for the
+installation, not one per resource.
+
 DryRun appears separately. The “would have been saved” estimate assumes the
 simulated decision time would equal the actual recovery time. Neither this
 estimate nor a completed infrastructure remediation establishes that a

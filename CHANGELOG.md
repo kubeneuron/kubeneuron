@@ -11,6 +11,14 @@ API is `v1alpha1`.
 
 ### Added
 
+- **Recovery report per accelerator resource.** The report, its API and
+  `kubeneuronctl report` count the window per accelerator resource, each in
+  its own unit: GPU-hours for `nvidia.com/gpu` and `amd.com/gpu` apart, TPU
+  chip-hours, AWS Neuron device-hours, from the device count each incident
+  records when it opens; never summed across resources. Incidents with no
+  recorded count are node-hours apart. `spec.recoveryCostRates` shows the
+  saved hours as an estimated cost per resource; there are no default rates.
+  Migrations sqlite 0037 / postgres 0028.
 - **Accelerator health view (experimental).** `kubeneuronctl health` and
   `GET /api/v1/accelerator-health` show what the leader last read from every
   accelerator health source, per node, source, rule and device, with the
@@ -320,6 +328,11 @@ API is `v1alpha1`.
   `recycle.enabled: true`.
 
 ### Fixed
+
+- The recovery report's GPU-hour fields and `kubeneuron_degraded_gpu_seconds_total`
+  count GPUs only (`nvidia.com/gpu`, `amd.com/gpu`): an incident on TPU chips
+  or AWS Neuron devices is no longer charged there as one GPU; the new
+  per-resource fields count it in its own unit.
 
 - **Re-running the installer no longer replaces what an installation
   has.** `deploy/install.sh` on an existing installation used to generate a

@@ -25,6 +25,7 @@ import (
 // Config is the root controller configuration.
 type Config struct {
 	ManualRecoveryBaseline *Duration                   `yaml:"manual_recovery_baseline,omitempty"`
+	RecoveryCostRates      *CostRates                  `yaml:"recovery_cost_rates,omitempty"`
 	Safety                 Safety                      `yaml:"safety"`
 	Approvals              Approvals                   `yaml:"approvals"`
 	Policies               []Policy                    `yaml:"policies"`
@@ -366,6 +367,9 @@ func decodeStrict(data []byte, out any) error {
 func (c *Config) Validate() error {
 	if c.ManualRecoveryBaseline != nil && (*c.ManualRecoveryBaseline <= 0 || time.Duration(*c.ManualRecoveryBaseline) > 30*24*time.Hour) {
 		return errors.New("manual_recovery_baseline must be a positive duration of at most 720h")
+	}
+	if err := c.RecoveryCostRates.validate(); err != nil {
+		return err
 	}
 	if err := c.Safety.validateBlastRadius(); err != nil {
 		return err

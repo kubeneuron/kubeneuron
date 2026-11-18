@@ -894,6 +894,13 @@ func (c *Controller) openIncidentTx(ctx context.Context, tx store.Tx, sig types.
 			inc.DryRun = true
 		}
 	}
+	// The devices the incident covers, from the node's inventory now: the
+	// report counts them later, when the inventory may have changed.
+	node, err := tx.GetNode(ctx, inc.Target.Node)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+	inc.Accelerators = incidentAccelerators(node, inc)
 	if err := tx.CreateIncident(ctx, inc); err != nil {
 		return nil, err
 	}

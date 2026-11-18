@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -104,16 +105,28 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		}
 		return err
 	}
-	_, _ = fmt.Fprintf(out, "Recovered GPU-hours: %s\n", gpuHours(r.RecoveredGPUHours))
+	// The GPU-hour lines count GPUs only; a fleet with none shows its own
+	// units below instead.
+	gpus := len(r.Groups) == 0 || r.Groups[0].Group == types.AcceleratorGroupGPU
+	if gpus {
+		_, _ = fmt.Fprintf(out, "Recovered GPU-hours: %s\n", gpuHours(r.RecoveredGPUHours))
+	}
 	_, _ = fmt.Fprintf(out, "incidents: %d in window, %d still open\n\n", r.Incidents, len(r.Open))
+	if err := printAcceleratorHours(out, r.AcceleratorHours, ""); err != nil {
+		return err
+	}
 
-	if estimate := r.SavingsEstimate; estimate != nil {
+	if estimate := r.SavingsEstimate; !gpus {
+		// The saved hours of each resource are in its row above.
+	} else if estimate != nil {
 		_, _ = fmt.Fprintf(out, "GPU-hours saved (estimate): %s (manual baseline %s)\n", gpuHours(estimate.GPUHoursSaved), seconds(estimate.ManualBaselineSeconds))
 	} else {
 		_, _ = fmt.Fprintln(out, "Set spec.manualRecoveryBaseline to estimate GPU-hours saved.")
 	}
 	w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintf(w, "degraded GPU-hours\t%s\n", gpuHours(r.DegradedGPUHours))
+	if gpus {
+		_, _ = fmt.Fprintf(w, "degraded GPU-hours\t%s\n", gpuHours(r.DegradedGPUHours))
+	}
 	_, _ = fmt.Fprintf(w, "incidents recovered\t%d of %d\t%s\n",
 		r.Recovered, r.Incidents, share(float64(r.Recovered), float64(r.Incidents)))
 	_, _ = fmt.Fprintf(w, "  without a human\t%d of %d\t%s of recovered\n",
@@ -210,6 +223,9 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		if err := printReportIncidents(cmd, sim.IncidentDetails, sim.Incidents, "SIMULATED DECISION TIME"); err != nil {
 			return err
 		}
+		if err := printAcceleratorHours(out, sim.AcceleratorHours, "  "); err != nil {
+			return err
+		}
 		if estimate := sim.WouldHaveSaved; estimate != nil {
 			_, _ = fmt.Fprintf(out, "  GPU-hours that would have been saved (estimate): %s (manual baseline %s; assumes simulated decision time equals recovery time)\n", gpuHours(estimate.GPUHoursSaved), seconds(estimate.ManualBaselineSeconds))
 		}
@@ -256,6 +272,68 @@ func printReportIncidents(cmd *cobra.Command, rows []types.RecoveryIncident, tot
 	}
 	return w.Flush()
 }
+
+// printAcceleratorHours prints the window per accelerator resource, one
+// block per group in its own unit, never a sum across resources; then the
+// node-hours of incidents whose device count is unknown, and the total cost
+// estimate when every resource shown has a rate.
+func printAcceleratorHours(out io.Writer, h types.AcceleratorHours, indent string) error {
+	if len(h.Groups) == 0 && h.DeviceCountUnknown == nil {
+		return nil
+	}
+	w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
+	for _, g := range h.Groups {
+		_, _ = fmt.Fprintf(w, "%s%s — %s\n", indent, acceleratorGroupTitle(g.Group), g.Unit)
+		_, _ = fmt.Fprintf(w, "%s  RESOURCE\tINCIDENTS\tDEGRADED\tRECOVERED\tSAVED (ESTIMATE)\tCOST EQUIVALENT (ESTIMATE)\n", indent)
+		for _, r := range g.Resources {
+			saved, cost := "Manual recovery baseline not set", "-"
+			if e := r.SavedEstimate; e != nil {
+				saved = fmt.Sprintf("%s %s, manual baseline %s", gpuHours(e.Hours), g.Unit, seconds(e.ManualBaselineSeconds))
+				cost = "rate not set"
+				if c := e.Cost; c != nil {
+					cost = fmt.Sprintf("%s %s at %s %s per %s", money(c.Amount), c.Currency, money(c.RatePerHour), c.Currency, strings.TrimSuffix(g.Unit, "s"))
+				}
+			}
+			_, _ = fmt.Fprintf(w, "%s  %s\t%d\t%s\t%s\t%s\t%s\n", indent, r.Resource, r.Incidents,
+				gpuHours(r.DegradedHours), gpuHours(r.RecoveredHours), saved, cost)
+		}
+	}
+	if u := h.DeviceCountUnknown; u != nil {
+		_, _ = fmt.Fprintf(w, "%sDevice count unknown — node-hours\n", indent)
+		_, _ = fmt.Fprintf(w, "%s  degraded\t%s\t(%d incident(s); no device count was recorded, so no device-hours and no cost)\n",
+			indent, gpuHours(u.DegradedNodeHours), u.Incidents)
+		_, _ = fmt.Fprintf(w, "%s  recovered\t%s\n", indent, gpuHours(u.RecoveredNodeHours))
+	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if len(h.Groups) > 1 || len(h.Groups) == 1 && len(h.Groups[0].Resources) > 1 {
+		_, _ = fmt.Fprintf(out, "%sHours are not added across resources: each counts its own devices.\n", indent)
+	}
+	if t := h.SavedCostTotal; t != nil {
+		if t.Amount != nil {
+			_, _ = fmt.Fprintf(out, "%sTotal cost equivalent (estimate): %s %s\n", indent, money(*t.Amount), t.Currency)
+		} else {
+			_, _ = fmt.Fprintf(out, "%sTotal cost equivalent (estimate) unavailable. Rate not set for: %s.\n", indent, strings.Join(t.RateNotSetFor, ", "))
+		}
+	}
+	_, err := fmt.Fprintln(out)
+	return err
+}
+
+func acceleratorGroupTitle(group string) string {
+	switch group {
+	case types.AcceleratorGroupGPU:
+		return "GPU"
+	case types.AcceleratorGroupTPU:
+		return "TPU"
+	case types.AcceleratorGroupAWSNeuron:
+		return "AWS Neuron"
+	}
+	return group
+}
+
+func money(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) }
 
 func gpuHours(v float64) string { return strconv.FormatFloat(v, 'f', 1, 64) }
 

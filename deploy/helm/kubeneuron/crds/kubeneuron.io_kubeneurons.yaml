@@ -1387,6 +1387,33 @@ spec:
                 - message: a Managed grafana with an External store requires grafana.datasource.url
                   rule: '!has(self.grafana) || self.grafana.mode != ''Managed'' ||
                     !has(self.store) || self.store.mode != ''External'' || has(self.grafana.datasource)'
+              recoveryCostRates:
+                description: |-
+                  RecoveryCostRates are the operator's cost of one device-hour of each
+                  accelerator resource, used only to show the device-hours saved as an
+                  estimated cost. There are no default rates: a resource without one
+                  shows hours only.
+                properties:
+                  currency:
+                    description: Currency is an ISO 4217 code, e.g. USD.
+                    pattern: ^[A-Z]{3}$
+                    type: string
+                  perDeviceHour:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      PerDeviceHour maps an accelerator resource (nvidia.com/gpu, amd.com/gpu,
+                      google.com/tpu, aws.amazon.com/neuron) to the cost of one device-hour
+                      of it, a decimal such as "2.50".
+                    maxProperties: 16
+                    type: object
+                    x-kubernetes-validations:
+                    - message: each rate must be a decimal such as 2.50
+                      rule: self.all(k, self[k].matches('^[0-9]{1,9}([.][0-9]{1,4})?$'))
+                required:
+                - currency
+                - perDeviceHour
+                type: object
               safety:
                 description: |-
                   SafetySpec holds execution limits. ExecutionMode defaults to DryRun in the

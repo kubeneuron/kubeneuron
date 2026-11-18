@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/action"
+	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -86,8 +87,10 @@ func (c *Controller) RecoveryReport(ctx context.Context, window time.Duration) (
 	// incident per incident would issue a query per row and still answer the
 	// same question.
 	gpusPerNode := make(map[string]int, len(nodes))
+	inventory := make(map[string]*types.Node, len(nodes))
 	for _, n := range nodes {
 		gpusPerNode[n.Name] = len(n.GPUs)
+		inventory[n.Name] = n
 	}
 	// And one audit read for the whole report, asked only about the incidents
 	// whose answer can change a number: RESOLVED is the only state that counts
@@ -112,7 +115,9 @@ func (c *Controller) RecoveryReport(ctx context.Context, window time.Duration) (
 			remediated[inc.ID] = remediationOutcome(executed[inc.ID], inc.DryRun)
 		}
 	}
-	report := aggregateRecovery(incidents, gpusPerNode, remediated, from, to, c.runtimeConfig(ctx).ManualRecoveryBaseline)
+	rc := c.runtimeConfig(ctx)
+	report := aggregateRecoveryOf(incidents, reportInventory{gpusPerNode: gpusPerNode, nodes: inventory, rates: rc.CostRates},
+		remediated, from, to, rc.ManualRecoveryBaseline)
 	opened := make(map[string]time.Time, len(incidents))
 	for _, inc := range incidents {
 		if inc != nil {
@@ -322,7 +327,19 @@ func remediationOutcome(results []string, simulated bool) bool {
 // remediated answers "did a remediation step run" per incident ID; an ID
 // absent from it did not.
 func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, remediated map[string]bool, from, to time.Time, baseline time.Duration) *types.RecoveryReport {
-	report := aggregateRecoverySubset(incidents, gpusPerNode, remediated, from, to, false, baseline)
+	return aggregateRecoveryOf(incidents, reportInventory{gpusPerNode: gpusPerNode}, remediated, from, to, baseline)
+}
+
+// reportInventory is what the report reads of the inventory: the agent GPUs
+// of each node, the node rows, and the operator's cost rates.
+type reportInventory struct {
+	gpusPerNode map[string]int
+	nodes       map[string]*types.Node
+	rates       *config.CostRates
+}
+
+func aggregateRecoveryOf(incidents []*types.Incident, inv reportInventory, remediated map[string]bool, from, to time.Time, baseline time.Duration) *types.RecoveryReport {
+	report := aggregateRecoverySubset(incidents, inv, remediated, from, to, false, baseline)
 	// The simulated view answers the question a pilot actually has. The
 	// checklist tells them to stay in dry-run until they have watched the
 	// system decide, and for that whole period the real report is empty by
@@ -330,7 +347,7 @@ func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, 
 	// us", the answer was a blank table. Same arithmetic, same incidents,
 	// labelled as a simulation and never folded into the headline.
 	if report.DryRunExcluded > 0 {
-		sim := aggregateRecoverySubset(incidents, gpusPerNode, remediated, from, to, true, baseline)
+		sim := aggregateRecoverySubset(incidents, inv, remediated, from, to, true, baseline)
 		report.Simulated = &types.SimulatedRecovery{
 			IncidentDetails:          sim.IncidentDetails,
 			IncidentDetailsTruncated: sim.IncidentDetailsTruncated,
@@ -343,6 +360,7 @@ func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, 
 			WouldRecoverGPUHours:     sim.RecoveredGPUHours,
 			MTTR:                     sim.MTTR,
 			AnnouncedInterruptions:   sim.AnnouncedInterruptions,
+			AcceleratorHours:         sim.AcceleratorHours,
 		}
 	}
 	return report
@@ -350,7 +368,7 @@ func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, 
 
 // aggregateRecoverySubset is the arithmetic, over either the real incidents or
 // the dry-run ones.
-func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string]int, remediated map[string]bool, from, to time.Time, wantDryRun bool, baseline time.Duration) *types.RecoveryReport {
+func aggregateRecoverySubset(incidents []*types.Incident, inv reportInventory, remediated map[string]bool, from, to time.Time, wantDryRun bool, baseline time.Duration) *types.RecoveryReport {
 	report := &types.RecoveryReport{
 		From: from, To: to,
 		// Both slices are initialised so an empty report marshals as [] and
@@ -370,6 +388,7 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 	var mttrSamples []float64
 	recovered := map[string][]gpuBoundary{}
 	saved := map[string][]gpuBoundary{}
+	accel := newAcceleratorAccum()
 
 	for _, inc := range incidents {
 		if inc != nil && inc.DryRun != wantDryRun {
@@ -405,11 +424,20 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 			report.AnnouncedInterruptions++
 			continue
 		}
-		gpus, assumed := affectedGPUCount(inc, gpusPerNode)
+		// The GPU-hour fields count GPUs only: an incident on TPU chips or
+		// AWS Neuron devices is in the incident counts and in its own unit
+		// below, never in a GPU-hour.
+		gpus, assumed := 0, false
+		if coversGPU(inc, inv.nodes) {
+			gpus, assumed = affectedGPUCount(inc, inv.gpusPerNode)
+		}
 		if assumed {
 			report.AssumedSingleGPU++
 		}
-		hours := overlapEnd.Sub(overlapStart).Hours() * float64(gpus)
+		span := overlapEnd.Sub(overlapStart).Hours()
+		hours := span * float64(gpus)
+		var accelRecoveredSpan, accelSavedSpan *[2]time.Time
+		accelState := accelOpen
 
 		acc := classes[inc.Class]
 		if acc == nil {
@@ -424,6 +452,7 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 		detail := types.RecoveryIncident{ID: inc.ID, Node: inc.Target.Node, Vendor: inc.Vendor, State: inc.State, DegradedGPUHours: roundHours(hours)}
 		switch {
 		case inc.State == types.StateSuperseded:
+			accelState = accelSuperseded
 			report.Superseded++
 			report.SupersededGPUHours += hours
 			acc.row.Superseded++
@@ -434,17 +463,18 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 			// RESOLVED, but nothing was ever executed against the fleet. The
 			// degraded hours above are real and stay in the total; the recovery
 			// is not, so it is counted here and nowhere else.
+			accelState = accelObservedOnly
 			report.ObservedOnly++
 			report.ObservedOnlyGPUHours += hours
 			acc.row.ObservedOnly++
 			acc.row.ObservedOnlyGPUHours += hours
 		default:
 			report.Recovered++
-			device := inc.Target.GPUUUID
-			if device == "" && inc.Target.PCIAddr != "" {
-				device = "pci:" + inc.Target.PCIAddr
+			device := recoveryDevice(inc)
+			if gpus > 0 {
+				recovered[inc.Target.Node] = append(recovered[inc.Target.Node], gpuBoundary{overlapStart, device, gpus}, gpuBoundary{overlapEnd, device, -gpus})
 			}
-			recovered[inc.Target.Node] = append(recovered[inc.Target.Node], gpuBoundary{overlapStart, device, gpus}, gpuBoundary{overlapEnd, device, -gpus})
+			accelState, accelRecoveredSpan = accelRecovered, &[2]time.Time{overlapStart, overlapEnd}
 			acc.row.Recovered++
 			acc.row.RecoveredGPUHours += hours
 			if inc.ApprovalEpoch == 0 {
@@ -456,8 +486,11 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 			// the window cannot account for.
 			if !end.Before(from) && !end.After(to) {
 				duration := end.Sub(start)
-				if report.SavingsEstimate != nil && !assumed && baseline > duration {
+				if report.SavingsEstimate != nil && !assumed && gpus > 0 && baseline > duration {
 					saved[inc.Target.Node] = append(saved[inc.Target.Node], gpuBoundary{end, device, gpus}, gpuBoundary{start.Add(baseline), device, -gpus})
+				}
+				if report.SavingsEstimate != nil && baseline > duration {
+					accelSavedSpan = &[2]time.Time{end, start.Add(baseline)}
 				}
 				seconds := duration.Seconds()
 				detail.RecoverySeconds = &seconds
@@ -465,6 +498,7 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 				acc.durations = append(acc.durations, seconds)
 			}
 		}
+		accel.add(inc, span, accelState, recoveryDevice(inc), accelRecoveredSpan, accelSavedSpan)
 		report.IncidentDetails = append(report.IncidentDetails, detail)
 		if !inc.State.Terminal() {
 			report.Open = append(report.Open, types.RecoveryOpenIncident{
@@ -479,6 +513,11 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 		}
 	}
 
+	var baselineSeconds float64
+	if report.SavingsEstimate != nil {
+		baselineSeconds = baseline.Seconds()
+	}
+	report.AcceleratorHours = accel.result(baselineSeconds, inv.rates)
 	report.DegradedGPUHours = roundHours(report.DegradedGPUHours)
 	report.RecoveredGPUHours = roundHours(distinctGPUHours(recovered))
 	if report.SavingsEstimate != nil {
@@ -523,6 +562,18 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 		return report.Open[i].ID < report.Open[j].ID
 	})
 	return report
+}
+
+// recoveryDevice names the device of a device-scoped incident for counting
+// its intervals once; empty for a node-scoped one.
+func recoveryDevice(inc *types.Incident) string {
+	if inc.Target.GPUUUID != "" {
+		return inc.Target.GPUUUID
+	}
+	if inc.Target.PCIAddr != "" {
+		return "pci:" + inc.Target.PCIAddr
+	}
+	return ""
 }
 
 // degradedInterval is the span an incident charges capacity for. Only a

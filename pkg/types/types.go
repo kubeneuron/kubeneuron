@@ -7,6 +7,7 @@ package types
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -345,6 +346,20 @@ type Incident struct {
 	// the moment it is planned, on a pool whose size the controller sets back
 	// after the delete. Nil when the incident never planned one.
 	RemoveFirst *RemoveFirstRecord `json:"remove_first,omitempty"`
+	// Accelerators are the accelerator devices the incident covered when it
+	// opened, from the node's inventory at that moment: one device of its
+	// resource for a device-scoped incident, every device of the node for a
+	// node-scoped one. Empty when the count was not known, and on incidents
+	// opened before it was recorded.
+	Accelerators []IncidentAccelerator `json:"accelerators,omitempty"`
+}
+
+// IncidentAccelerator is one accelerator resource an incident covered.
+type IncidentAccelerator struct {
+	// Resource is the extended resource name, e.g. nvidia.com/gpu.
+	Resource string     `json:"resource"`
+	Unit     DeviceUnit `json:"unit"`
+	Count    int64      `json:"count"`
 }
 
 // Remove-first outcomes. An empty outcome is a plan still open: the instance
@@ -471,6 +486,7 @@ func (i *Incident) Clone() *Incident {
 	}
 	c.Successor = i.Successor.Clone()
 	c.RemoveFirst = i.RemoveFirst.Clone()
+	c.Accelerators = slices.Clone(i.Accelerators)
 	if i.ResolvedAt != nil {
 		t := *i.ResolvedAt
 		c.ResolvedAt = &t

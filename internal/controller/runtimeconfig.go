@@ -85,8 +85,11 @@ type RuntimeConfig struct {
 	// InstallRuntimeConfig treats zero as keep-current, matching the
 	// SetTimings contract).
 	ManualRecoveryBaseline time.Duration
-	VerifyQuiet            time.Duration
-	ApprovalTTL            time.Duration
+	// CostRates price the device-hours saved in the recovery report; nil
+	// shows hours only.
+	CostRates   *config.CostRates
+	VerifyQuiet time.Duration
+	ApprovalTTL time.Duration
 }
 
 // DegradedTaintPolicy is the resolved degraded-node taint setting. Effect is

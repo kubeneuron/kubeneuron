@@ -96,6 +96,9 @@ type Tx interface {
 	// ListIncidents reads through the transaction, so a check of other rows
 	// and the write it guards commit together.
 	ListIncidents(ctx context.Context, f IncidentFilter) ([]*types.Incident, error)
+	// GetNode reads a node's inventory through the transaction, for what an
+	// incident records of it when it opens.
+	GetNode(ctx context.Context, name string) (*types.Node, error)
 	CreateIncident(ctx context.Context, inc *types.Incident) error
 	// UpdateIncident persists inc guarded by its optimistic version. It returns
 	// ErrConflict when the stored row has a newer version than inc.Version, and

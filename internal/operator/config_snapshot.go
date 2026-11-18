@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -146,6 +147,16 @@ func CompileSnapshot(
 			return nil, fmt.Errorf("manualRecoveryBaseline: %w", err)
 		}
 		cfg.ManualRecoveryBaseline = &d
+	}
+	if rates := installation.Spec.RecoveryCostRates; rates != nil {
+		cfg.RecoveryCostRates = &config.CostRates{Currency: rates.Currency, PerDeviceHour: map[string]float64{}}
+		for resource, value := range rates.PerDeviceHour {
+			rate, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				return nil, fmt.Errorf("recoveryCostRates.perDeviceHour[%q]: %w", resource, err)
+			}
+			cfg.RecoveryCostRates.PerDeviceHour[resource] = rate
+		}
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("compiled policies: %w", err)

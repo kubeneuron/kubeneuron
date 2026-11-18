@@ -131,6 +131,10 @@ type RecoveryReport struct {
 	// the question that decides whether to enable enforcement — "what would
 	// this have got us?" — had a blank table for an answer.
 	Simulated *SimulatedRecovery `json:"simulated,omitempty"`
+	// AcceleratorHours counts the window per accelerator resource, in the
+	// unit of each. The GPU-hour fields above count nvidia.com/gpu and
+	// amd.com/gpu only.
+	AcceleratorHours
 }
 
 // SimulatedRecovery is the dry-run half of the window: the same arithmetic
@@ -172,6 +176,9 @@ type SimulatedRecovery struct {
 	// AnnouncedInterruptions counts the dry-run cloud-interruption incidents
 	// whose interval overlaps the window, left out of every number above.
 	AnnouncedInterruptions int `json:"announced_interruptions,omitempty"`
+	// AcceleratorHours is the same per accelerator resource; its recovered
+	// and saved hours are what the ladder would have recovered and saved.
+	AcceleratorHours
 }
 
 // RecoveryLatency is a duration distribution computed from the raw incident

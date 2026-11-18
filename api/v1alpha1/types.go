@@ -1128,6 +1128,12 @@ type KubeNeuronSpec struct {
 	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$`
 	// +optional
 	ManualRecoveryBaseline string `json:"manualRecoveryBaseline,omitempty"`
+	// RecoveryCostRates are the operator's cost of one device-hour of each
+	// accelerator resource, used only to show the device-hours saved as an
+	// estimated cost. There are no default rates: a resource without one
+	// shows hours only.
+	// +optional
+	RecoveryCostRates *RecoveryCostRates `json:"recoveryCostRates,omitempty"`
 	// Namespace is immutable because moving an installation would otherwise
 	// leave the old namespace's runtime resources active.
 	// +kubebuilder:validation:MinLength=1
@@ -1945,4 +1951,18 @@ func init() {
 		&AcceleratorRuntimeProfile{}, &AcceleratorRuntimeProfileList{},
 		&GPUAutonomyPlan{}, &GPUAutonomyPlanList{},
 	)
+}
+
+// RecoveryCostRates are the cost of one device-hour per accelerator
+// resource, in one currency.
+type RecoveryCostRates struct {
+	// Currency is an ISO 4217 code, e.g. USD.
+	// +kubebuilder:validation:Pattern=`^[A-Z]{3}$`
+	Currency string `json:"currency"`
+	// PerDeviceHour maps an accelerator resource (nvidia.com/gpu, amd.com/gpu,
+	// google.com/tpu, aws.amazon.com/neuron) to the cost of one device-hour
+	// of it, a decimal such as "2.50".
+	// +kubebuilder:validation:MaxProperties=16
+	// +kubebuilder:validation:XValidation:rule="self.all(k, self[k].matches('^[0-9]{1,9}([.][0-9]{1,4})?$'))",message="each rate must be a decimal such as 2.50"
+	PerDeviceHour map[string]string `json:"perDeviceHour"`
 }

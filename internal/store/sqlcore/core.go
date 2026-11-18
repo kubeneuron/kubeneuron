@@ -419,6 +419,10 @@ func (q *Queries) CreateIncident(ctx context.Context, inc *types.Incident) error
 	if err != nil {
 		return err
 	}
+	accelerators, err := json.Marshal(inc.Accelerators)
+	if err != nil {
+		return err
+	}
 	stateChanged := inc.StateChangedAt
 	if stateChanged.IsZero() {
 		stateChanged = inc.OpenedAt
@@ -427,14 +431,14 @@ func (q *Queries) CreateIncident(ctx context.Context, inc *types.Incident) error
 		INSERT INTO incidents (id, node, gpu_uuid, gpu_index, pci_addr, class, state, playbook,
 		                       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
 		                       vendor, opened_at, updated_at, state_changed_at, version, cloud_identity,
-		                       successor, successor_open, remove_first, remove_first_open)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		                       successor, successor_open, remove_first, remove_first_open, accelerators)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		inc.ID, inc.Target.Node, inc.Target.GPUUUID, inc.Target.GPUIndex,
 		types.NormalizePCIAddress(inc.Target.PCIAddr),
 		string(inc.Class), string(inc.State), inc.Playbook,
 		inc.StepIndex, inc.Attempt, b2i(inc.DryRun), inc.SignalSeen, b2i(inc.RemediationSlotHeld), inc.ApprovalEpoch,
 		string(inc.Vendor), ts(inc.OpenedAt), ts(inc.UpdatedAt), ts(stateChanged), inc.Version, string(identity),
-		string(successor), b2i(inc.Successor.Open()), string(removeFirst), b2i(inc.RemoveFirst.Open()))
+		string(successor), b2i(inc.Successor.Open()), string(removeFirst), b2i(inc.RemoveFirst.Open()), string(accelerators))
 	return err
 }
 
@@ -750,19 +754,19 @@ const incidentSelect = `
 	SELECT id, node, gpu_uuid, gpu_index, pci_addr, class, state, playbook,
 	       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
 	       vendor, opened_at, updated_at, state_changed_at, resolved_at, version, cloud_identity, successor,
-	       remove_first
+	       remove_first, accelerators
 	FROM incidents`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
 func scanIncident(r rowScanner) (*types.Incident, error) {
 	var inc types.Incident
-	var class, state, vendor, opened, updated, stateChanged, identity, successor, removeFirst string
+	var class, state, vendor, opened, updated, stateChanged, identity, successor, removeFirst, accelerators string
 	var dryRun, slotHeld int
 	var resolved sql.NullString
 	err := r.Scan(&inc.ID, &inc.Target.Node, &inc.Target.GPUUUID, &inc.Target.GPUIndex,
 		&inc.Target.PCIAddr, &class, &state, &inc.Playbook, &inc.StepIndex, &inc.Attempt, &dryRun,
-		&inc.SignalSeen, &slotHeld, &inc.ApprovalEpoch, &vendor, &opened, &updated, &stateChanged, &resolved, &inc.Version, &identity, &successor, &removeFirst)
+		&inc.SignalSeen, &slotHeld, &inc.ApprovalEpoch, &vendor, &opened, &updated, &stateChanged, &resolved, &inc.Version, &identity, &successor, &removeFirst, &accelerators)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
@@ -777,6 +781,9 @@ func scanIncident(r rowScanner) (*types.Incident, error) {
 	}
 	if err := json.Unmarshal([]byte(removeFirst), &inc.RemoveFirst); err != nil {
 		return nil, fmt.Errorf("decode incident remove-first plan: %w", err)
+	}
+	if err := json.Unmarshal([]byte(accelerators), &inc.Accelerators); err != nil {
+		return nil, fmt.Errorf("decode incident accelerators: %w", err)
 	}
 	inc.Class = types.ProblemClass(class)
 	inc.State = types.IncidentState(state)

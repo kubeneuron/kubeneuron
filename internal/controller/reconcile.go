@@ -1091,7 +1091,8 @@ func (c *Controller) DegradedGPUs(ctx context.Context) (map[metrics.DegradedKey]
 	return out, nil
 }
 
-// affectedGPUs is how many accelerators the incident covered: one for a
+// affectedGPUs is how many GPUs the incident covered — none on a node whose
+// accelerators are TPU chips or AWS Neuron devices: one for a
 // DEVICE-scoped incident (a UUID or a bus address names one card), the node's
 // whole inventory for a node-scoped one.
 // Unknown inventory counts as one — undercounting is the honest failure
@@ -1104,6 +1105,11 @@ func (c *Controller) DegradedGPUs(ctx context.Context) (map[metrics.DegradedKey]
 // reporting-side twin of this fallback is Report.AssumedSingleGPU, which
 // counts how often it was taken.
 func (c *Controller) affectedGPUs(ctx context.Context, inc *types.Incident) int {
+	// GPUs only: an incident that recorded TPU chips or AWS Neuron devices
+	// is no GPU.
+	if len(inc.Accelerators) > 0 && !coversGPU(inc, nil) {
+		return 0
+	}
 	// One device, whether or not we know its UUID. A bus address names a card
 	// as precisely as a UUID does for this purpose — see IsDeviceScoped.
 	if inc.Target.IsDeviceScoped() {
@@ -1111,6 +1117,8 @@ func (c *Controller) affectedGPUs(ctx context.Context, inc *types.Incident) int 
 	}
 	node, err := c.store.GetNode(ctx, inc.Target.Node)
 	switch {
+	case err == nil && node != nil && !coversGPU(inc, map[string]*types.Node{node.Name: node}):
+		return 0
 	case err != nil:
 		c.log.Warn("cannot read a node's GPU inventory; charging its incident one GPU, so recovered capacity is understated",
 			"node", inc.Target.Node, "incident", inc.ID, "err", err)
