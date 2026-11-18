@@ -36,19 +36,23 @@ from pathlib import Path
 
 def report(**fact):
     volume = Path("/var/run/training-report")
-    tls = ssl.create_default_context(cafile=str(volume / "ca.crt"))
-    conn = http.client.HTTPSConnection(os.environ["TRAINING_REPORT_HOST"], 8444, context=tls, timeout=5)
-    try:
-        headers = {"Authorization": "Bearer " + (volume / "token").read_text().strip(), "Content-Type": "application/json"}
-        conn.request("POST", "/v1/training/reports", json.dumps(fact), headers)
-        return conn.getresponse().status
-    finally:
-        conn.close()
+    for attempt in range(5):
+        tls = ssl.create_default_context(cafile=str(volume / "ca.crt"))
+        conn = http.client.HTTPSConnection(os.environ["TRAINING_REPORT_HOST"], 8444, context=tls, timeout=5)
+        try:
+            headers = {"Authorization": "Bearer " + (volume / "token").read_text().strip(), "Content-Type": "application/json"}
+            conn.request("POST", "/v1/training/reports", json.dumps(fact), headers)
+            status = conn.getresponse().status
+            if status != 503 or attempt == 4:
+                return status
+        finally:
+            conn.close()
+        time.sleep(2 ** attempt)
 ```
 
 Call `report(kind="checkpoint", checkpoint_id="epoch-12", step=1200)` after the checkpoint write succeeds. After the replacement worker loads it, call `report(kind="resume", checkpoint_id="epoch-12")`. Once training advances, call `report(kind="progress", step=1201)`. Use a nonnegative step and an opaque checkpoint identifier of up to 128 ASCII letters, digits, periods, underscores or hyphens. Use the same identifier for a checkpoint and its resume. Keep storage paths, URLs, personal data and credentials out of identifiers.
 
-HTTP 204 means the controller handled the request. A worker without a matching incident also receives 204. For HTTP 429, back off before retrying. Duplicate reports preserve the original receipt time. Each worker has a budget of 60 requests per minute. Reporting is optional; a reporting failure can be handled separately from training or checkpoint I/O.
+HTTP 204 means the controller handled the request. A worker without a matching incident also receives 204. With multiple replicas, the Service can route a request to a follower, which returns HTTP 503. Retry the same report on a fresh connection with exponential backoff. Send routine progress at most once every 30 seconds per worker. For HTTP 429, back off before retrying. Duplicate reports preserve the original receipt time. Each worker has a budget of 60 requests per minute. Reporting is optional; a reporting failure can be handled separately from training or checkpoint I/O.
 
 In incident detail, each affected job has a `recovery.progress_status`. It is `unknown` when infrastructure readiness, the job identity or report evidence is unavailable. After verified infrastructure recovery, a job with report evidence has status `not_confirmed` until an accepted progress report advances its worker's step. The status then becomes `confirmed`, with the first confirmation time in `progress_confirmed_at`.
 

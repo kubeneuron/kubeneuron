@@ -4,6 +4,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import time
 import ssl
 import sys
 
@@ -13,17 +14,21 @@ volume = Path("/var/run/training-report")
 
 
 def report(**fact):
-    tls = ssl.create_default_context(cafile=str(volume / "ca.crt"))
-    conn = http.client.HTTPSConnection(host, 8444, context=tls, timeout=10)
-    try:
-        token = (volume / "token").read_text().strip()
-        conn.request("POST", "/v1/training/reports", json.dumps(fact),
-                     {"Authorization": "Bearer " + token, "Content-Type": "application/json"})
-        status = conn.getresponse().status
-        if status != 204:
-            raise RuntimeError(f"training report returned HTTP {status}")
-    finally:
-        conn.close()
+    for attempt in range(5):
+        tls = ssl.create_default_context(cafile=str(volume / "ca.crt"))
+        conn = http.client.HTTPSConnection(host, 8444, context=tls, timeout=10)
+        try:
+            token = (volume / "token").read_text().strip()
+            conn.request("POST", "/v1/training/reports", json.dumps(fact),
+                         {"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+            status = conn.getresponse().status
+            if status == 204:
+                return
+            if status != 503 or attempt == 4:
+                raise RuntimeError(f"training report returned HTTP {status}")
+        finally:
+            conn.close()
+        time.sleep(2 ** attempt)
 
 
 def update(weight):
