@@ -5,6 +5,8 @@ package aws
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 
 	sdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
@@ -22,6 +24,14 @@ func (p *managedProvider) observeSuccessor(ctx context.Context, s cloud.Successo
 	group, err := p.successorGroup(ctx, s)
 	if err != nil {
 		return s, err
+	}
+	members := strings.Split(s.State["members"], ",")
+	if group.DesiredCapacity != nil && int(*group.DesiredCapacity) == len(members)+1 && s.State["before"] == strconv.Itoa(len(members)) && len(group.Instances) == len(members) {
+		baseline := group
+		baseline.DesiredCapacity = sdk.Int32(int32(len(members)))
+		if settledMembership(s, baseline, members) {
+			return s, checkSuccessorActivities(ctx, p.scaling, s, "")
+		}
 	}
 	candidate, err := successorCandidate(s, group)
 	if err != nil {

@@ -47,6 +47,25 @@ func TestObserveSuccessor(t *testing.T) {
 		t.Fatalf("created: %+v %v", got, err)
 	}
 
+	t.Run("capacity failure before instance appears", func(t *testing.T) {
+		pending := g
+		pending.Instances = pending.Instances[:1]
+		a := pages[""].Activities[0]
+		a.StatusCode = at.ScalingActivityStatusCodeFailed
+		a.Description = sdk.String("Launching a new EC2 instance")
+		a.StatusMessage = sdk.String("InsufficientInstanceCapacity")
+		history := launchActivityPages{"": {Activities: []at.Activity{a}}}
+		reader := managedProvider{repairReader: &repairReader{cluster: "training", eks: eksReader}}
+		reader.scaling = observedASG{membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{pending}}}, history}
+		for _, want := range []error{cloud.ErrReplacementCapacity, cloud.ErrNeedsOperator} {
+			result, err := reader.PrepareSuccessor(t.Context(), s)
+			if !errors.Is(err, want) || result.ProviderID != "" || result.Phase != cloud.SuccessorRequested {
+				t.Fatalf("got %+v, %v; want %v", result, err, want)
+			}
+			history[""].Activities = append(history[""].Activities, a)
+		}
+	})
+
 	terminator := &terminateFixture{t: t, expectedID: "i-old", out: &autoscaling.TerminateInstanceInAutoScalingGroupOutput{Activity: &at.Activity{ActivityId: sdk.String("terminate-old")}}}
 	p.terminator = terminator
 	foreign := got
