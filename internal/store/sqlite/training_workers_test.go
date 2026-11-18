@@ -4,6 +4,7 @@ package sqlite
 
 import (
 	"testing"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -40,5 +41,36 @@ func TestTrainingWorkersKeepFirstObservation(t *testing.T) {
 	got, err = s.TrainingWorkers(ctx, "empty")
 	if err != nil || got == nil || len(got) != 0 {
 		t.Fatalf("empty=%v err=%v", got, err)
+	}
+}
+
+func TestTrainingProgressRetryAndRetention(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	ctx := t.Context()
+	impactIncident(t, s, "incident")
+	start := time.Now().UTC()
+	for i, step := range []int64{0, 10, 10, 3} {
+		if err := s.SaveTrainingProgress(ctx, "incident", "job", "worker", step, start.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var step int64
+	var received string
+	if err := s.sqlDB.QueryRowContext(ctx, "SELECT step, received_at FROM training_progress").Scan(&step, &received); err != nil {
+		t.Fatal(err)
+	}
+	if step != 10 || received != start.Add(time.Minute).Format(time.RFC3339Nano) {
+		t.Fatalf("step %d received %s", step, received)
+	}
+	if _, err := s.sqlDB.ExecContext(ctx, "DELETE FROM incidents WHERE id='incident'"); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.sqlDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM training_progress").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("count %d err %v", count, err)
 	}
 }

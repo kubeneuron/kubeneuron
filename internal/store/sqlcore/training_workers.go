@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -39,4 +40,17 @@ func (q *Queries) TrainingWorkers(ctx context.Context, id string) ([]types.Train
 	var workers []types.TrainingWorker
 	err = json.Unmarshal([]byte(value.String), &workers)
 	return workers, err
+}
+
+// SaveTrainingProgress retains the highest reported step for this worker attempt.
+// Duplicate and out-of-order reports cannot refresh the evidence of progress.
+func (q *Queries) SaveTrainingProgress(ctx context.Context, incidentID, jobUID, podUID string, step int64, received time.Time) error {
+	if incidentID == "" || jobUID == "" || podUID == "" || step < 0 || received.IsZero() {
+		return errors.New("invalid training progress")
+	}
+	_, err := q.db.ExecContext(ctx, `INSERT INTO training_progress (incident_id,job_uid,pod_uid,step,received_at)
+		VALUES (?,?,?,?,?) ON CONFLICT (incident_id,job_uid,pod_uid) DO UPDATE
+		SET step=excluded.step, received_at=excluded.received_at
+		WHERE excluded.step > training_progress.step`, incidentID, jobUID, podUID, step, ts(received))
+	return err
 }
