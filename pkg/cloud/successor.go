@@ -74,9 +74,17 @@ type Successor struct {
 	State map[string]string `json:"state,omitempty"`
 }
 
+// UnrequestedPlan reports whether the caller has yet to record a growth request.
+func (s Successor) UnrequestedPlan() bool {
+	return s.Phase == SuccessorPlanned && s.RequestedAt.IsZero()
+}
+
 // SuccessorProvider brings up the successor of a node before the node is
 // drained, for replacement by adding first. Every method acts only on the
 // operation it is given and is safe to call again with the same input.
+// Before requesting growth the caller must persist the planned operation with
+// RequestedAt set. For a planned operation with zero RequestedAt, PrepareSuccessor
+// returns an error and ReleaseSuccessor succeeds. Neither calls the cloud.
 type SuccessorProvider interface {
 	// CheckAddFirst reports whether the instance's pool can prepare a
 	// successor: nil, or an error wrapping ErrAddFirstUnavailable with the

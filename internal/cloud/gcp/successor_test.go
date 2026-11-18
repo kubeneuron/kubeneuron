@@ -16,10 +16,11 @@ import (
 )
 
 func TestSuccessorConformance(t *testing.T) {
-	cloudtest.SuccessorConformance(t, cloudtest.SuccessorCase{
+	cloudtest.SuccessorConformance(t, cloudtest.SuccessorCase{Offline: &Provider{},
 		Instance: testInstance(1),
 		New: func(*testing.T) (cloud.SuccessorProvider, cloudtest.SuccessorCloud) {
 			f := newFakeGKE(3)
+			f.now = time.Now().UTC()
 			return testProvider(f), f
 		},
 	})
@@ -34,6 +35,9 @@ func prepare(t *testing.T, p *Provider, s cloud.Successor, want cloud.SuccessorP
 			t.Fatalf("prepare from %q: %v", s.Phase, err)
 		}
 		s = next
+		if s.UnrequestedPlan() {
+			s.RequestedAt = fakeStartTime
+		}
 		if s.Phase == want {
 			return s
 		}

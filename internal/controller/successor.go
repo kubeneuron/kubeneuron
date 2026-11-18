@@ -430,7 +430,7 @@ func (c *Controller) advanceSuccessor(ctx context.Context, inc *types.Incident, 
 	if rec.Phase == cloud.SuccessorCreated {
 		return c.acceptSuccessor(ctx, inc, plat, pin, rec)
 	}
-	if rec.Phase == cloud.SuccessorPlanned && rec.RequestedAt.IsZero() {
+	if rec.UnrequestedPlan() {
 		// Record the request time before the request, so the timeout runs
 		// from the first attempt even across a restart.
 		rec.RequestedAt = time.Now().UTC()
@@ -594,7 +594,7 @@ func (c *Controller) releaseSuccessor(ctx context.Context, inc *types.Incident, 
 	if !rec.Open() {
 		return nil
 	}
-	if rec.Phase == "" || rec.Phase == cloud.SuccessorPlanned && rec.RequestedAt.IsZero() {
+	if rec.Phase == "" || rec.UnrequestedPlan() {
 		// Nothing was asked of the cloud: the request time is recorded
 		// before the request.
 		return c.endSuccessor(ctx, inc, types.SuccessorNotCreated, why)

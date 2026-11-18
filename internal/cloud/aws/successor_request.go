@@ -54,11 +54,6 @@ func sendScaleRequest(ctx context.Context, client nodegroupUpdater, cluster stri
 			return s, fmt.Errorf("%w: EKS update %s does not confirm the original scaling request", cloud.ErrNeedsOperator, *u.Id)
 		}
 	}
-	// Direct SuccessorProvider callers may omit the controller's write-ahead
-	// timestamp. A replay must use the accepted update's original time.
-	if s.RequestedAt.IsZero() && out.Update.CreatedAt != nil {
-		s.RequestedAt = out.Update.CreatedAt.UTC()
-	}
 	s.State = maps.Clone(s.State)
 	s.State["update"] = *out.Update.Id
 	s.Phase = cloud.SuccessorRequested

@@ -7,13 +7,14 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/cloud/cloudtest"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
 func TestSuccessorConformance(t *testing.T) {
-	cloudtest.SuccessorConformance(t, cloudtest.SuccessorCase{
+	cloudtest.SuccessorConformance(t, cloudtest.SuccessorCase{Offline: &Provider{},
 		Instance: testInstance(1),
 		New: func(*testing.T) (cloud.SuccessorProvider, cloudtest.SuccessorCloud) {
 			f := newFakeAKS(3)
@@ -31,6 +32,9 @@ func prepare(t *testing.T, p *Provider, s cloud.Successor, want cloud.SuccessorP
 			t.Fatalf("prepare from %q: %v", s.Phase, err)
 		}
 		s = next
+		if s.UnrequestedPlan() {
+			s.RequestedAt = time.Now().UTC()
+		}
 		if s.Phase == want {
 			return s
 		}

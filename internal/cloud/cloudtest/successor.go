@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
@@ -32,6 +33,8 @@ type SuccessorCloud interface {
 // provider and fake cloud per check, and a pinned instance in a pool that
 // can grow by one.
 type SuccessorCase struct {
+	// Offline has no cloud clients. Handling an unsent plan must work on it.
+	Offline  cloud.SuccessorProvider
 	New      func(t *testing.T) (cloud.SuccessorProvider, SuccessorCloud)
 	Instance string
 }
@@ -60,6 +63,7 @@ func SuccessorConformance(t *testing.T, c SuccessorCase) {
 		if fake.Requests() != 0 {
 			t.Fatalf("planning sent %d requests, want none", fake.Requests())
 		}
+		s.RequestedAt = time.Now().UTC()
 		fake.HoldNextRequest()
 		s, err := p.PrepareSuccessor(ctx, s)
 		if err != nil || s.Phase != cloud.SuccessorRequested {
@@ -89,6 +93,7 @@ func SuccessorConformance(t *testing.T, c SuccessorCase) {
 		p, fake := c.New(t)
 		size := fake.Size()
 		planned := plan(t, p, "op-lost")
+		planned.RequestedAt = time.Now().UTC()
 		fake.HoldNextRequest()
 		fake.LoseNextAnswer()
 		if _, err := p.PrepareSuccessor(ctx, planned); err == nil {
@@ -108,6 +113,7 @@ func SuccessorConformance(t *testing.T, c SuccessorCase) {
 		p, fake := c.New(t)
 		size := fake.Size()
 		planned := plan(t, p, "op-uncertain")
+		planned.RequestedAt = time.Now().UTC()
 		fake.HoldNextRequest()
 		fake.LoseNextAnswer()
 		if _, err := p.PrepareSuccessor(ctx, planned); err == nil {
@@ -123,11 +129,20 @@ func SuccessorConformance(t *testing.T, c SuccessorCase) {
 		}
 	})
 
+	t.Run("growth requires a recorded request time", func(t *testing.T) {
+		p, fake := c.New(t)
+		size := fake.Size()
+		s := plan(t, p, "op-no-time")
+		if _, err := c.Offline.PrepareSuccessor(ctx, s); err == nil || fake.Requests() != 0 || fake.Size() != size {
+			t.Fatalf("prepare returned %v, requests %d, size %d", err, fake.Requests(), fake.Size())
+		}
+	})
+
 	t.Run("a plan never requested is released without a change", func(t *testing.T) {
 		p, fake := c.New(t)
 		size := fake.Size()
 		planned := plan(t, p, "op-unsent")
-		if err := p.ReleaseSuccessor(ctx, planned); err != nil {
+		if err := c.Offline.ReleaseSuccessor(ctx, planned); err != nil {
 			t.Fatalf("release of an unsent plan: %v", err)
 		}
 		if fake.Requests() != 0 || fake.Size() != size {

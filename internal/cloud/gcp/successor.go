@@ -56,6 +56,9 @@ func addFirstRefusal(pl nodePool, c cluster) error {
 // PrepareSuccessor moves an add-first operation on by one phase; see
 // cloud.SuccessorProvider.
 func (p *Provider) PrepareSuccessor(ctx context.Context, s cloud.Successor) (cloud.Successor, error) {
+	if s.UnrequestedPlan() {
+		return s, fmt.Errorf("%w: planned successor has no RequestedAt", cloud.ErrNeedsOperator)
+	}
 	switch s.Phase {
 	case "":
 		return p.planSuccessor(ctx, s)
@@ -197,6 +200,9 @@ func (p *Provider) settleSuccessor(ctx context.Context, s cloud.Successor) (clou
 // The pool is never shrunk through GKE, which would choose the node: only
 // the operation's own new member is deleted, by name.
 func (p *Provider) ReleaseSuccessor(ctx context.Context, s cloud.Successor) error {
+	if s.UnrequestedPlan() {
+		return nil
+	}
 	pl, g, members, err := p.successorPool(ctx, s)
 	if err != nil {
 		return err

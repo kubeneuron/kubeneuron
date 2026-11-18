@@ -43,7 +43,7 @@ func (f *lostUpdateResponse) UpdateNodegroupConfig(_ context.Context, in *eks.Up
 
 func TestRequestSuccessorReplaysLostResponse(t *testing.T) {
 	client := &lostUpdateResponse{t: t, tokens: map[string]bool{}, cluster: "cluster", group: "workers"}
-	plan := cloud.Successor{Operation: "op", Phase: cloud.SuccessorPlanned, State: map[string]string{"cluster": "cluster", "before": "2", "nodegroup": "workers"}}
+	plan := cloud.Successor{RequestedAt: time.Unix(990, 0), Operation: "op", Phase: cloud.SuccessorPlanned, State: map[string]string{"cluster": "cluster", "before": "2", "nodegroup": "workers"}}
 	if _, err := requestSuccessor(t.Context(), client, "different-cluster", plan); !errors.Is(err, cloud.ErrNeedsOperator) || len(client.tokens) != 0 {
 		t.Fatalf("cluster mismatch: %v", err)
 	}
@@ -54,11 +54,6 @@ func TestRequestSuccessorReplaysLostResponse(t *testing.T) {
 	if err != nil || got.Phase != cloud.SuccessorRequested || got.State["update"] != "update-id" || len(client.tokens) != 1 || plan.State["update"] != "" {
 		t.Fatalf("replay: %+v %v", got, err)
 	}
-	if !got.RequestedAt.Equal(time.Unix(1000, 0)) {
-		t.Fatalf("activity window starts at %v", got.RequestedAt)
-	}
-	plan.RequestedAt = time.Unix(990, 0)
-	got, err = requestSuccessor(t.Context(), client, "cluster", plan)
 	if err != nil || !got.RequestedAt.Equal(plan.RequestedAt) {
 		t.Fatalf("lost persisted request time: %+v %v", got, err)
 	}

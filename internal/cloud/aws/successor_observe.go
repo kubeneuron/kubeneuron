@@ -48,6 +48,9 @@ func (p *managedProvider) observeSuccessor(ctx context.Context, s cloud.Successo
 
 // PrepareSuccessor advances one persisted phase of the EKS add-first operation.
 func (p *managedProvider) PrepareSuccessor(ctx context.Context, s cloud.Successor) (cloud.Successor, error) {
+	if s.UnrequestedPlan() {
+		return s, fmt.Errorf("%w: planned successor has no RequestedAt", cloud.ErrNeedsOperator)
+	}
 	switch s.Phase {
 	case "":
 		return p.readSuccessorPlan(ctx, s)

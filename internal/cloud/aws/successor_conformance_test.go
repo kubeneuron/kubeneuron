@@ -93,7 +93,7 @@ func newSuccessorLab(t *testing.T) (cloud.SuccessorProvider, cloudtest.Successor
 }
 
 func TestEKSSuccessorConformance(t *testing.T) {
-	cloudtest.SuccessorConformance(t, cloudtest.SuccessorCase{Instance: "i-pinned", New: newSuccessorLab})
+	cloudtest.SuccessorConformance(t, cloudtest.SuccessorCase{Offline: &managedProvider{}, Instance: "i-pinned", New: newSuccessorLab})
 }
 
 // A lost response can precede visibility in either control plane. The

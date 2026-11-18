@@ -67,6 +67,9 @@ func (p *Provider) successorPool(ctx context.Context, instanceID string) (target
 // PrepareSuccessor moves an add-first operation on by one phase; see
 // cloud.SuccessorProvider.
 func (p *Provider) PrepareSuccessor(ctx context.Context, s cloud.Successor) (cloud.Successor, error) {
+	if s.UnrequestedPlan() {
+		return s, fmt.Errorf("%w: planned successor has no RequestedAt", cloud.ErrNeedsOperator)
+	}
 	t, machines, pl, err := p.successorPool(ctx, s.Instance)
 	if err != nil {
 		return s, err
@@ -182,6 +185,9 @@ func settleSuccessor(s cloud.Successor, t target, machines []machine, pl pool, b
 
 // ReleaseSuccessor undoes an abandoned operation; see cloud.SuccessorProvider.
 func (p *Provider) ReleaseSuccessor(ctx context.Context, s cloud.Successor) error {
+	if s.UnrequestedPlan() {
+		return nil
+	}
 	t, machines, pl, err := p.successorPool(ctx, s.Instance)
 	if err != nil {
 		return err

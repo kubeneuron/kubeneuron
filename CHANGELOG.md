@@ -570,6 +570,8 @@ API is `v1alpha1`.
 
 ### Changed
 
+- In the `pkg/cloud` module, callers must persist `RequestedAt` before requesting a successor from a saved plan. A plan without this timestamp can be released without contacting the cloud.
+
 - Agent reports from multiple GPUs can join one open node incident of the
   same class. The incident audit records the reporting GPU UUIDs.
 

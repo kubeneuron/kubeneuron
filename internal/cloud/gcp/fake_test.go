@@ -77,11 +77,13 @@ type fakeGKE struct {
 	calls []string
 }
 
+var fakeStartTime = time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+
 func newFakeGKE(n int, zones ...string) *fakeGKE {
 	if len(zones) == 0 {
 		zones = []string{testZone}
 	}
-	f := &fakeGKE{now: time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC), autoRepair: true, labels: map[string]string{labelCluster: testCluster, labelNodePool: testPool}, permissions: fixedPoolPermissions}
+	f := &fakeGKE{now: fakeStartTime, autoRepair: true, labels: map[string]string{labelCluster: testCluster, labelNodePool: testPool}, permissions: fixedPoolPermissions}
 	for _, z := range zones {
 		g := &fakeGroup{ref: groupRef{project: testProject, zone: z, name: "gke-training-gpu-" + z[len(z)-1:] + "-grp"}, target: int32(n), stable: true}
 		g.grow(int32(n), nil)

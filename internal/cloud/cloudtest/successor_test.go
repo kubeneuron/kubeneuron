@@ -46,6 +46,9 @@ func (p *pool) add() {
 func (p *pool) CheckAddFirst(context.Context, string) error { return nil }
 
 func (p *pool) PrepareSuccessor(_ context.Context, s cloud.Successor) (cloud.Successor, error) {
+	if s.UnrequestedPlan() {
+		return s, cloud.ErrNeedsOperator
+	}
 	switch s.Phase {
 	case "":
 		s.Phase = cloud.SuccessorPlanned
@@ -94,6 +97,9 @@ func (p *pool) added(s cloud.Successor) []string {
 }
 
 func (p *pool) ReleaseSuccessor(_ context.Context, s cloud.Successor) error {
+	if s.UnrequestedPlan() {
+		return nil
+	}
 	if p.marker != s.Operation {
 		return nil // nothing of this operation reached the cloud
 	}
@@ -124,6 +130,7 @@ func (p *pool) remove(member string) {
 
 func TestSuccessorConformanceOnAReferencePool(t *testing.T) {
 	SuccessorConformance(t, SuccessorCase{
+		Offline:  (*pool)(nil),
 		Instance: "old",
 		New: func(*testing.T) (cloud.SuccessorProvider, SuccessorCloud) {
 			p := &pool{members: []string{"old", "other"}, size: 2}

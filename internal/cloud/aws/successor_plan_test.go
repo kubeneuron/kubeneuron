@@ -5,6 +5,7 @@ package aws
 import (
 	"errors"
 	"testing"
+	"time"
 
 	sdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
@@ -88,6 +89,7 @@ func TestVerifySuccessorBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	plan.RequestedAt = time.Unix(990, 0)
 	if err = p.verifySuccessorBaseline(t.Context(), plan); err != nil {
 		t.Fatal(err)
 	}

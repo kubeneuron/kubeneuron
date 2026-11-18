@@ -62,6 +62,9 @@ func (p *managedProvider) ReplaceWithSuccessor(ctx context.Context, s cloud.Succ
 
 // ReleaseSuccessor reconciles an abandoned replacement from its persisted phase.
 func (p *managedProvider) ReleaseSuccessor(ctx context.Context, s cloud.Successor) error {
+	if s.UnrequestedPlan() {
+		return nil
+	}
 	switch s.Phase {
 	case cloud.SuccessorRequested:
 		return p.releaseRequestedSuccessor(ctx, s)
