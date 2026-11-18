@@ -751,6 +751,19 @@ func (c *Controller) ingestClaimedEvent(ctx context.Context, claimed *store.Clai
 // commits, so an outbox retry has no duplicated incident accounting.
 func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal, identity *cloud.NodeIdentity) (ingestOutcome, error) {
 	inc, err := tx.GetOpenIncident(ctx, sig.Target, sig.Class)
+	if errors.Is(err, store.ErrNotFound) && sig.Source == types.SourceAgentEvent && sig.Target.IsGPU() {
+		inc, err = tx.GetOpenIncident(ctx, types.Target{Node: sig.Target.Node}, sig.Class)
+		if err == nil {
+			if err := tx.AppendAudit(ctx, &types.AuditEntry{
+				IncidentID: inc.ID, Time: time.Now(), FromState: inc.State, ToState: inc.State,
+				Actor: "system", Action: "agent-device-signal", DryRun: inc.DryRun,
+				Params: map[string]string{"gpu_uuid": sig.Target.GPUUUID, "source": string(sig.Source)},
+				Result: "Device signal joined the open node incident for the same class.",
+			}); err != nil {
+				return ingestOutcome{}, err
+			}
+		}
+	}
 	switch {
 	case err == store.ErrNotFound:
 		opened, err := c.openIncidentTx(ctx, tx, sig, identity)
@@ -759,7 +772,7 @@ func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal
 		return ingestOutcome{}, err
 	}
 	var outcome ingestOutcome
-	if inc.Target.IsUnattributed() && sig.Target.IsGPU() {
+	if inc.Target.PCIAddr != "" && inc.Target.IsUnattributed() && sig.Target.IsGPU() {
 		// The store returned this incident as a PROMOTION candidate: it was
 		// opened from a kernel fault that could only name the device by PCI
 		// address, and this signal names the SAME address with a real GPU UUID.

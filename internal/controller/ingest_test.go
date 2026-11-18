@@ -190,3 +190,39 @@ func TestIngestWithoutPolicyOpensObserveOnlyIncident(t *testing.T) {
 		t.Fatalf("incidents = %+v, want one observe-only incident without playbook", incidents)
 	}
 }
+
+func TestAgentDevicesJoinOpenNodeFault(t *testing.T) {
+	c, st := newIngestTestController(t)
+	ctx := t.Context()
+	sig := signal(types.ClassECCDBE, "node-a", "")
+
+	if err := c.IngestSignal(ctx, sig); err != nil {
+		t.Fatal(err)
+	}
+	for _, uuid := range []string{"GPU-first", "GPU-second"} {
+		if err := c.IngestSignal(ctx, signal(sig.Class, "node-a", uuid)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	incs, err := st.ListIncidents(ctx, store.IncidentFilter{})
+	if err != nil || len(incs) != 1 {
+		t.Fatalf("incidents=%v err=%v", incs, err)
+	}
+	inc := incs[0]
+	if inc.Target.IsDeviceScoped() || inc.SignalSeen != 3 {
+		t.Fatalf("incident=%+v", inc)
+	}
+	trail, err := st.AuditTrail(ctx, inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := map[string]int{}
+	for _, e := range trail {
+		if e.Action == "agent-device-signal" {
+			joined[e.Params["gpu_uuid"]]++
+		}
+	}
+	if joined["GPU-first"] != 1 || joined["GPU-second"] != 1 {
+		t.Fatalf("joined=%v", joined)
+	}
+}
