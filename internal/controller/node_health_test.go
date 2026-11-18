@@ -13,7 +13,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
+	"github.com/kubeneuron/kubeneuron/internal/nodehealth"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -363,5 +365,57 @@ func TestNodeHealthJoinsTheAgentsDeviceIncident(t *testing.T) {
 	}
 	if joined != 1 {
 		t.Fatalf("node report recorded %d times on the device incident, want once: %+v", joined, trail)
+	}
+}
+
+func TestJoinedFaultRunsOneCloudLadder(t *testing.T) {
+	for _, mode := range []recoverymode.Mode{recoverymode.Approval, recoverymode.Automatic} {
+		for _, order := range []string{"node-first", "agent-first"} {
+			t.Run(string(mode)+"/"+order, func(t *testing.T) {
+				ctx := t.Context()
+				p := newSuccessorPlatform()
+				c, st, _ := successorFixture(t, mode, p, recoverymode.RemoveFirst)
+				node := func() {
+					c.observeHealth(ctx, "kubernetes", []nodehealth.NodeHealth{{Node: "n1", Observations: []nodehealth.Observation{{State: nodehealth.StateFault, Class: types.ClassFellOffBus, Profile: "nvidia", Rule: "eks-node-monitoring", Key: "condition:AcceleratedHardwareReady", Reads: 1}}}})
+				}
+				device := func(uuid string) {
+					t.Helper()
+					if err := c.IngestSignal(ctx, signal(types.ClassFellOffBus, "n1", uuid)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if order == "node-first" {
+					node()
+					device("GPU-1")
+					device("GPU-2")
+				} else {
+					device("GPU-1")
+					node()
+				}
+				incs, err := st.ListIncidents(ctx, store.IncidentFilter{})
+				if err != nil || len(incs) != 1 {
+					t.Fatalf("incidents=%v err=%v", incs, err)
+				}
+				id := incs[0].ID
+				approvals := 0
+				waitSettled(t, c, st, id, func(inc *types.Incident) bool {
+					if inc.State == types.StateAwaitingApproval {
+						if mode != recoverymode.Approval {
+							t.Fatalf("unexpected approval: %s", dump(trail(t, st, id)))
+						}
+						if err := c.DecideApproval(ctx, id, "alice", "test", types.ApprovalApproved, inc.ApprovalEpoch, "", ""); err != nil {
+							t.Fatal(err)
+						}
+						approvals++
+					}
+					return inc.State == types.StateVerifying
+				})
+				p.mu.Lock()
+				defer p.mu.Unlock()
+				if len(p.cordoned["n1"]) != 1 || p.cordoned["n1"][0] != id || len(p.drained) != 1 || len(p.plain) != 1 || (mode == recoverymode.Approval && approvals == 0) {
+					t.Fatalf("cordon owners=%v drains=%v replacements=%v approvals=%d", p.cordoned, p.drained, p.plain, approvals)
+				}
+			})
+		}
 	}
 }
