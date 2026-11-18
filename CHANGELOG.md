@@ -28,6 +28,8 @@ API is `v1alpha1`.
   start in DryRun); elsewhere `AddFirst` still holds before
   the cordon, and `RemoveFirst` is unchanged. See [Add-first replacement](docs/playbook-authoring.md#add-first-replacement).
 
+- **Node conditions in incidents.** The panel and CLI show Kubernetes readiness and pressure at the last recorded transition. Each transition retains its observation in the audit trail.
+
 - **Azure provider for AKS (experimental, not validated on AKS).**
   `spec.cloud.provider: azure` with `spec.cloud.azure` (subscription,
   resource group, cluster, the workload identity's client ID) replaces a

@@ -948,6 +948,16 @@ function decisionBinding(d){
   if(d.impact_preview_digest && d.decision_impact_digest === d.impact_preview_digest) return `${verdict} <span class="small" style="color:var(--ok)">bound to the current preview</span>`;
   return `${verdict} <span class="small" style="color:var(--warn)">bound to an earlier preview</span> <span class="mono small dimmer" style="word-break:break-all">${esc(d.decision_impact_digest)}</span>`;
 }
+function nodeConditionsSummary(detail){
+  const snapshot = detail.node_conditions;
+  if(!snapshot) return detail.node_conditions_unavailable
+    ? `Unavailable (${esc(detail.node_conditions_unavailable)})` : "No recorded observation";
+  const conditions = snapshot.conditions || [];
+  const notReady = conditions.some(c => c.type === "Ready" && c.status === "False");
+  const values = conditions.map(c => `${esc(c.type)}: ${esc(c.status)}`).join("<br>");
+  const warning = notReady ? '<strong class="pill NEEDS_HUMAN">Node NotReady</strong><br>' : "";
+  return `${warning}${values}<br><span class="dimmer">Observed ${esc(snapshot.observed_at)}</span>`;
+}
 async function renderDrawer(){
   if(!openIncident) return;
   let d;
@@ -961,6 +971,7 @@ async function renderDrawer(){
   $("dMeta").innerHTML = [
     ["Class", `<span class="mono">${esc(inc.class)}</span>`],
     ["Node", `<span class="mono">${esc(inc.target.node)}</span>`],
+    ["Node conditions", nodeConditionsSummary(d)],
     ["GPU", inc.target.gpu_uuid ? `<span class="mono">${esc(inc.target.gpu_uuid)}</span>` : '<span class="dimmer">node-level</span>'],
     ["Playbook", `${esc(inc.playbook || "—")} <span class="dimmer">step ${inc.step_index}, attempt ${inc.attempt}</span>`],
     ["Mode", inc.dry_run ? "dry-run (no real side effects)" : "live"],

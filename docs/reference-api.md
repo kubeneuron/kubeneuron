@@ -68,7 +68,7 @@ Without a configured operator token the operator API is disabled entirely
 | Route | Purpose |
 |---|---|
 | `GET /api/v1/incidents` | list; filters `?state=OPEN,EXECUTING&node=<node>&limit=<n>` |
-| `GET /api/v1/incidents/{id}` | detail including the audit trail |
+| `GET /api/v1/incidents/{id}` | detail including the audit trail and the latest observed Kubernetes node conditions. These conditions provide context only and cannot trigger or authorize recovery. |
 | `POST /api/v1/incidents` | manual remediation trigger; body `{"node","class","actor?","gpu_uuid?","gpu_index?"}` — `node` and `class` are required; `actor` only with the static token |
 | `POST /api/v1/incidents/{id}/approve` | approve the pending step; body `{"actor","reason?","park_epoch?","impact_digest?"}` |
 | `POST /api/v1/incidents/{id}/reject` | reject the pending step; body `{"actor","reason?","park_epoch?","impact_digest?"}` |
