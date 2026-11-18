@@ -906,13 +906,23 @@ func TestControllerDeploymentPostgresStore(t *testing.T) {
 		Type:      "Postgres",
 		SecretRef: &kubeneuronv1alpha1.SecretReference{Name: "fleet-postgres-dsn"},
 	}
+	installation.Spec.TrainingReports = true
+	service := controllerService(installation)
+	if service.Spec.PublishNotReadyAddresses {
+		t.Fatal("training Service publishes standby addresses")
+	}
 	deployment, err := controllerDeployment(installation, &Snapshot{Digest: "d"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	container := deployment.Spec.Template.Spec.Containers[0]
+	if probe := container.ReadinessProbe; probe == nil || probe.HTTPGet == nil || probe.HTTPGet.Path != "/readyz" {
+		t.Fatal("Postgres controller readiness must follow the leader check")
+	}
 	for _, arg := range []string{
 		"--store=postgres",
+		"--leader-elect",
+		"--training-report-listen=:8444",
 		"--postgres-dsn-file=/var/run/secrets/kube-neuron/postgres-dsn/dsn",
 	} {
 		if !containsString(container.Args, arg) {
