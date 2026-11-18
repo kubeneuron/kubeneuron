@@ -112,6 +112,7 @@ type Tx interface {
 	// drained for a human, although the exact device had been identified
 	// seconds after the fault.
 	PromoteIncidentTarget(ctx context.Context, inc *types.Incident, to types.Target) error
+	AuditTrail(ctx context.Context, incidentID string) ([]*types.AuditEntry, error)
 	AppendAudit(ctx context.Context, e *types.AuditEntry) error
 	RecordApproval(ctx context.Context, a *types.Approval) error
 }

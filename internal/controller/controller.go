@@ -754,12 +754,7 @@ func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal
 	if errors.Is(err, store.ErrNotFound) && sig.Source == types.SourceAgentEvent && sig.Target.IsGPU() {
 		inc, err = tx.GetOpenIncident(ctx, types.Target{Node: sig.Target.Node}, sig.Class)
 		if err == nil {
-			if err := tx.AppendAudit(ctx, &types.AuditEntry{
-				IncidentID: inc.ID, Time: time.Now(), FromState: inc.State, ToState: inc.State,
-				Actor: "system", Action: "agent-device-signal", DryRun: inc.DryRun,
-				Params: map[string]string{"gpu_uuid": sig.Target.GPUUUID, "source": string(sig.Source)},
-				Result: "Device signal joined the open node incident for the same class.",
-			}); err != nil {
+			if err := recordAgentDeviceJoin(ctx, tx, inc, sig); err != nil {
 				return ingestOutcome{}, err
 			}
 		}
@@ -831,6 +826,24 @@ func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal
 		return ingestOutcome{}, err
 	}
 	return outcome, nil
+}
+
+func recordAgentDeviceJoin(ctx context.Context, tx store.Tx, inc *types.Incident, sig types.Signal) error {
+	trail, err := tx.AuditTrail(ctx, inc.ID)
+	if err != nil {
+		return err
+	}
+	for _, entry := range trail {
+		if entry.Action == "agent-device-signal" && entry.Params["gpu_uuid"] == sig.Target.GPUUUID {
+			return nil
+		}
+	}
+	return tx.AppendAudit(ctx, &types.AuditEntry{
+		IncidentID: inc.ID, Time: time.Now(), FromState: inc.State, ToState: inc.State,
+		Actor: "system", Action: "agent-device-signal", DryRun: inc.DryRun,
+		Params: map[string]string{"gpu_uuid": sig.Target.GPUUUID, "source": string(sig.Source)},
+		Result: "Device signal joined the open node incident for the same class.",
+	})
 }
 
 // ingestOutcome carries the parts of a committed ingest that have effects

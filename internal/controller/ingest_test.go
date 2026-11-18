@@ -199,7 +199,7 @@ func TestAgentDevicesJoinOpenNodeFault(t *testing.T) {
 	if err := c.IngestSignal(ctx, sig); err != nil {
 		t.Fatal(err)
 	}
-	for _, uuid := range []string{"GPU-first", "GPU-second"} {
+	for _, uuid := range []string{"GPU-first", "GPU-first", "GPU-first", "GPU-second"} {
 		if err := c.IngestSignal(ctx, signal(sig.Class, "node-a", uuid)); err != nil {
 			t.Fatal(err)
 		}
@@ -209,7 +209,7 @@ func TestAgentDevicesJoinOpenNodeFault(t *testing.T) {
 		t.Fatalf("incidents=%v err=%v", incs, err)
 	}
 	inc := incs[0]
-	if inc.Target.IsDeviceScoped() || inc.SignalSeen != 3 {
+	if inc.Target.IsDeviceScoped() || inc.SignalSeen != 5 {
 		t.Fatalf("incident=%+v", inc)
 	}
 	trail, err := st.AuditTrail(ctx, inc.ID)
