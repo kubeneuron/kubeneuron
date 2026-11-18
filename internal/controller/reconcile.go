@@ -907,6 +907,7 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 		release = hadSlotBit
 		inc.RemediationSlotHeld = false
 	}
+	params = c.decisionNodeContext(ctx, inc.Target.Node, params)
 	if err := c.store.WithTx(ctx, func(tx store.Tx) error {
 		// Re-read the row inside the transaction and apply the change to the
 		// fresh copy rather than persisting this goroutine's snapshot. A long
