@@ -15,9 +15,11 @@ drain-and-reset → reboot → driver remediation → hardware escalation.
     supported but off by default: it must be confined by
     `spec.safety.destructiveExecution` (a non-empty node selector plus an
     exact acknowledgement), enforced at admission, compilation, controller
-    dispatch, and the agent executor. The confined destructive path has been
-    validated on a live EKS GPU cluster; per-device GPU reset remains
-    hardware-gated and needs bare metal to validate.
+    dispatch, and the agent executor. On EKS/T4, the historical v0.2.1 test exercised an
+    injected fault through EC2 termination. Replacement-node readiness and
+    resumed training were not verified. The current EKS, AKS and GKE replacement
+    paths await live-cluster validation. Per-device GPU reset still needs
+    bare-metal validation. See [live cloud evidence](reference-capabilities.md#live-cloud-evidence).
 
 ## Why KubeNeuron
 

@@ -9,6 +9,15 @@ Every cell below was derived by reading the code, not the roadmap. A cell that
 says *shipped* names the file that backs it. Where the code is weaker than a
 reader would assume, the note says so.
 
+## Live cloud evidence
+
+The 2026-08-05 run recorded in the v0.2.1 changelog used an EKS
+`g4dn.xlarge` with a Tesla T4 in `kubeneuron-e2e10`. An injected fault
+exercised cordon, drain and EC2 instance termination. The recorded evidence
+ends at termination. It does not establish that replacement capacity became
+ready or that a training job resumed. The current EKS, AKS and GKE replacement
+paths each await validation on a live cluster.
+
 ## How to read a cell
 
 | Status | Means |
@@ -82,7 +91,7 @@ The table below records the evidence for each action.
 | Cordon / drain | shipped & hardware-validated | `internal/platform/kubernetes/kubernetes.go`. Both executed for real on the EKS node in the confined destructive phase (`Cordon → Drain → ReplaceNode`, `hack/hw-e2e.sh`). Vendor-blind: eviction is a pod operation. The PDB-blocked retry loop is fixture-tested only — no hardware run has had an eviction refused by a budget. |
 | Uncordon | shipped, not hardware-validated | Same file. Every hardware run either ended in a dry-run ladder or terminated the node, so the real uncordon (and the cordon janitor's recovery path) has not executed on hardware. |
 | Node reboot | shipped, not hardware-validated | `internal/agent/executor/executor.go`. See the note below — this cell surprises people. |
-| Cloud node replace (terminate for the autoscaler) | shipped & hardware-validated (AWS only) | `internal/cloud/aws/`, `internal/platform/kubernetes/recycle.go`. A real EC2 instance was terminated in the `kubeneuron-e2e10` run. Every non-AWS provider is seam only — `internal/cloud/providers/providers.go` registers exactly one. |
+| Cloud node replacement | Current EKS, AKS and GKE implementations await live validation. | The historical EKS/T4 run confirmed termination. See [live cloud evidence](#live-cloud-evidence). |
 | Cloud node recycle (stop/start in place) | shipped, not hardware-validated (AWS only) | Same files. The AWS provider refuses autoscaling-group members (`cloud.ErrRecycleNotViable`), and every hardware node so far has been an ASG member, so the successful path has never run. |
 
 ## Table 3 — GPU reliability observability (v0.7, NVIDIA / DCGM only)

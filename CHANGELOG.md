@@ -2764,8 +2764,7 @@ on a running installation, read the Fixed section before upgrading.**
   confinement for real. All four are listed under Fixed.
 - **A fleet-fit table** (`docs/pilot-checklist.md`, linked from the README).
   Every fact in it was already stated in the capability matrix; nobody
-  assembled them into the question an evaluator actually has. NVIDIA on AWS is
-  validated end to end; NVIDIA elsewhere tops out at a reboot rung that has
+  assembled them into the question an evaluator actually has. The historical NVIDIA T4 run on AWS reached EC2 termination; NVIDIA elsewhere tops out at a reboot rung that has
   never executed; AMD detects, protects and closes but arms nothing; Intel is
   a seam. The bare-metal row says plainly that such a pilot would be the first
   real per-device GPU reset anywhere.
@@ -3278,8 +3277,7 @@ assertion is being replaced with one the parser can violate.
   XID-79 dry-run ladder (cordon→drain→approval→dry-run reboot, ~90s, the
   approval-round notification and `token:`-prefixed approver in the
   audit), the confined destructive ReplaceNode (real
-  `ec2:TerminateInstances` under the run-scoped IRSA role, nodegroup
-  replacement, resolved through the ladder), and a NEW `test-threshold`
+  `ec2:TerminateInstances` under the run-scoped IRSA role, without a recorded assertion of replacement readiness or training progress), and a NEW `test-threshold`
   phase — XID 92, the only code with distinct pipeline behavior: one
   signal must hold in OBSERVING, the third (each injected past the
   agent's 2-minute dedup window) crosses the policy threshold and the
@@ -3667,7 +3665,7 @@ off-by-default mode confined by `spec.safety.destructiveExecution`.
 - Cloud GPU node remediation: `ReplaceNode` (terminate → node-group
   replacement) as the primary primitive on autoscaled fleets and
   `RecycleNode` (stop/start) for self-managed nodes, driven controller-side
-  through IRSA. Validated end to end on live EKS.
+  through IRSA. The subsequent v0.2.1 live EKS/T4 test recorded EC2 termination.
 - Operator-issued mTLS on `spec.tls.issuer: Operator`, with automatic
   renewal and a rollout of the consumers on reissue.
 - Evidence-based reset refusal: the agent refuses a per-device GPU reset

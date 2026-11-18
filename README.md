@@ -31,11 +31,10 @@ named approver on the record.
   `kubeneuron_incidents_recovered_total`,
   `kubeneuron_degraded_gpu_seconds_total`. What the fleet got back is a
   number, not a feeling.
-- **Vendor-neutral by construction — NVIDIA validated, AMD shipping.** The
+- **Vendor-neutral by construction — NVIDIA T4 hardware evidence, AMD fixture coverage.** The
   fault envelope and the accelerator seam carry `(vendor, source, code)`
   with no XID pretense, so a new vendor is a detection adapter and a
-  catalog row rather than a fork. NVIDIA detection is validated on real
-  hardware; AMD detection ships (`amd-smi`/`rocm-smi` polling plus
+  catalog row rather than a fork. Injected NVIDIA XIDs were detected on a Tesla T4; AMD detection ships (`amd-smi`/`rocm-smi` polling plus
   `amdgpu` kernel-log parsing) but **has never run against an AMD GPU** —
   its parser fixtures are reconstructed, not captured. Intel is seam only.
   Every cell of that claim is graded per vendor, against the code, in the
@@ -487,22 +486,12 @@ completed safety case:
 - credentials are represented by Secret references, not inline values.
 
 Approval delivery (Slack, generic webhook, PagerDuty), verification before
-resolution, and the pause/resume control path are implemented. Real
-destructive execution is now open for cloud node remediation — validated end
-to end on live EKS — under the `destructiveExecution` confinement above. The
-one door still deliberately closed is per-device *hardware* GPU reset, which a
-virtualized instance cannot perform and which the agent refuses on evidence
-until the bare-metal matrix passes.
-
-**How much of this is proven depends on which fleet you have**, and the
-difference is large enough that it belongs before the install command rather
-than in a footnote. NVIDIA on AWS is validated end to end; NVIDIA elsewhere
-tops out at a reboot rung that has never executed on hardware; AMD detects,
-protects and closes incidents but arms nothing and resets nothing; Intel is a
-seam with no implementation behind it.
-[The capability matrix](docs/reference-capabilities.md) states every cell of
-it against the code, with `hack/verify-docs.sh` failing the build when the two
-disagree.
+resolution, and the pause/resume control path are implemented. The historical EKS/T4 test recorded in v0.2.1 exercised an injected fault,
+cordon, drain and EC2 instance termination. Replacement-node readiness and
+resumed training were not verified. The current EKS, AKS and GKE replacement
+paths each await validation on a live cluster. Start in DryRun.
+See the [capability matrix](docs/reference-capabilities.md#live-cloud-evidence)
+for the run and its scope.
 
 ## Configuration sources
 
@@ -550,12 +539,7 @@ deadlock so config changes apply without a Deployment roll; crash-safe
 agent host state across restarts; and cloud GPU node remediation —
 `ReplaceNode` (terminate → node-group replacement) as the primary
 primitive on autoscaled fleets and `RecycleNode` (stop/start) for
-self-managed nodes, driven controller-side through IRSA. The destructive
-path is validated on live EKS: a `fell-off-bus` incident ran
-cordon → drain → approval → `ReplaceNode` against a real g4dn instance —
-the controller terminated it, the node group replaced it, and the
-incident resolved through the verification quiet window — under the
-`destructiveExecution` node confinement.
+self-managed nodes, driven controller-side through IRSA.
 
 **Remaining, deliberately hardware-gated:** per-device *hardware* GPU
 reset on bare metal (a virtualized instance has no guest PCI reset, so the

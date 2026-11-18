@@ -729,8 +729,8 @@ instance and a 30-minute settling period after nodegroup changes, then reads
 the policy and membership again. A repair started before native repair was
 disabled could outlast that window. Replacement requires EC2 to confirm a TerminateInstances DryRun for the
 pinned instance before disruption and again before termination. Managed groups
-remain ineligible for stop/start recycle. These observations are not validated
-against a live EKS cluster.
+remain ineligible for stop/start recycle. The current replacement path, including these eligibility checks, awaits
+validation on a live EKS cluster.
 Replacement calls `TerminateInstances` first. The Auto Scaling group then
 launches a successor. Adding a node before termination is not yet supported.
 
