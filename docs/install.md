@@ -389,7 +389,11 @@ the fleet you intend.
 ### EKS managed nodegroups
 
 Replacement on EKS has not yet been validated against a live cluster.
-Start in `DryRun` mode.
+Start in `DryRun` mode. EKS replacement terminates the EC2 instance first,
+then its Auto Scaling group launches a successor. With the default `AddFirst`
+strategy, the incident waits before cordon because this provider cannot bring
+up the successor first.
+
 For an AWS installation, set `spec.cloud.aws.clusterName` on the KubeNeuron
 resource to the name of the EKS cluster. The operator passes it to the
 controller. Each node's `eks.amazonaws.com/nodegroup` label identifies the
