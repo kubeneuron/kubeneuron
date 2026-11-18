@@ -3,7 +3,9 @@
 package aws
 
 import (
+	"context"
 	"errors"
+	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"testing"
 	"time"
 
@@ -33,5 +35,32 @@ func TestConfirmSuccessorLaunch(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+type launchActivityPages map[string]*autoscaling.DescribeScalingActivitiesOutput
+
+func (p launchActivityPages) DescribeScalingActivities(_ context.Context, in *autoscaling.DescribeScalingActivitiesInput, _ ...func(*autoscaling.Options)) (*autoscaling.DescribeScalingActivitiesOutput, error) {
+	if sdk.ToString(in.AutoScalingGroupName) != "workers" {
+		return nil, errors.New("unexpected group")
+	}
+	return p[sdk.ToString(in.NextToken)], nil
+}
+
+func TestCheckSuccessorActivityPages(t *testing.T) {
+	now := time.Now()
+	s := cloud.Successor{Pool: "workers", RequestedAt: now, State: map[string]string{"before": "1", "asg_arn": "arn"}}
+	launch := at.Activity{StartTime: &now, AutoScalingGroupName: &s.Pool, AutoScalingGroupARN: sdk.String("arn"), StatusCode: at.ScalingActivityStatusCodeSuccessful, Description: sdk.String("Launching a new EC2 instance: i-new"), Cause: sdk.String("changing the desired capacity from 1 to 2.")}
+	pages := launchActivityPages{"": {Activities: []at.Activity{launch}, NextToken: sdk.String("p2")}, "p2": {}}
+	if err := checkSuccessorActivities(t.Context(), pages, s, "i-new"); err != nil {
+		t.Fatal(err)
+	}
+	pages["p2"].Activities = []at.Activity{launch}
+	if err := checkSuccessorActivities(t.Context(), pages, s, "i-new"); !errors.Is(err, cloud.ErrNeedsOperator) {
+		t.Fatalf("competing launch: %v", err)
+	}
+	pages["p2"] = &autoscaling.DescribeScalingActivitiesOutput{NextToken: sdk.String("p2")}
+	if err := checkSuccessorActivities(t.Context(), pages, s, "i-new"); !errors.Is(err, cloud.ErrNeedsOperator) {
+		t.Fatalf("repeated token: %v", err)
 	}
 }

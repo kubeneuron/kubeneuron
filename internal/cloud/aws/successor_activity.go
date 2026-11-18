@@ -3,7 +3,9 @@
 package aws
 
 import (
+	"context"
 	"fmt"
+	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"regexp"
 	"strconv"
 	"time"
@@ -41,4 +43,44 @@ func confirmSuccessorLaunch(s cloud.Successor, candidate string, activities []at
 		return fmt.Errorf("%w: no matching ASG launch activity", cloud.ErrNeedsOperator)
 	}
 	return nil
+}
+
+// checkSuccessorActivities reads newest-first ASG history until it covers the
+// operation window. A truncated history cannot establish a unique launch.
+func checkSuccessorActivities(ctx context.Context, client activityReader, s cloud.Successor, candidate string) error {
+	if s.Pool == "" || s.RequestedAt.IsZero() {
+		return fmt.Errorf("%w: missing ASG activity scope", cloud.ErrNeedsOperator)
+	}
+	in := &autoscaling.DescribeScalingActivitiesInput{AutoScalingGroupName: &s.Pool, MaxRecords: sdk.Int32(100)}
+	seen := map[string]bool{}
+	cutoff := s.RequestedAt.Add(-time.Minute)
+	var recent []at.Activity
+	for {
+		page, err := client.DescribeScalingActivities(ctx, in)
+		if err != nil {
+			return err
+		}
+		if page == nil {
+			return fmt.Errorf("%w: missing ASG activity page", cloud.ErrNeedsOperator)
+		}
+		olderPage := len(page.Activities) > 0
+		for _, a := range page.Activities {
+			if a.StartTime == nil || a.StartTime.IsZero() || sdk.ToString(a.AutoScalingGroupName) != s.Pool {
+				return fmt.Errorf("%w: incomplete ASG activity scope or time", cloud.ErrNeedsOperator)
+			}
+			if !a.StartTime.Before(cutoff) {
+				olderPage = false
+				recent = append(recent, a)
+			}
+		}
+		token := sdk.ToString(page.NextToken)
+		if token == "" || olderPage {
+			return confirmSuccessorLaunch(s, candidate, recent)
+		}
+		if seen[token] {
+			return fmt.Errorf("%w: repeated ASG activity page token", cloud.ErrNeedsOperator)
+		}
+		seen[token] = true
+		in.NextToken = page.NextToken
+	}
 }
