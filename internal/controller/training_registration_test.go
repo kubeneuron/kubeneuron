@@ -43,3 +43,16 @@ func TestTrainingNodeRequiresCurrentRegistration(t *testing.T) {
 		})
 	}
 }
+
+func TestTrainingNodeFromKubernetesInventoryRequiresLiveUID(t *testing.T) {
+	c, st := newIngestTestController(t)
+	if err := st.UpsertKubernetesInventory(t.Context(), &types.Node{Name: "worker", UID: "original"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, live := range []string{"original", "replacement", ""} {
+		c.platform = trainingNodeIdentity{uid: live}
+		if got := c.TrainingNodeMonitored(t.Context(), "worker"); got != (live == "original") {
+			t.Errorf("live UID %q monitored=%t", live, got)
+		}
+	}
+}
