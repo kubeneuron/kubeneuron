@@ -401,8 +401,8 @@ func TestRecoveryOutcomeMetricsRecordedOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := testutil.ToFloat64(metrics.IncidentsRecovered.WithLabelValues(class, "true")); got != before+1 {
-		t.Fatalf("unattended recovery counter = %v, want %v — exactly one observation per incident", got, before+1)
+	if got := testutil.ToFloat64(metrics.IncidentsRecovered.WithLabelValues(class, "true")); got != before {
+		t.Fatalf("manual resolution without remediation evidence moved recovery counter to %v", got)
 	}
 	// Two GPUs on the node, ~90s open, charged ONCE: ~180 GPU-seconds. The
 	// park must not have charged a second interval.

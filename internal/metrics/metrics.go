@@ -113,7 +113,7 @@ var (
 	// waking anybody.
 	IncidentsRecovered = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "kubeneuron_incidents_recovered_total",
-		Help: "Incidents that reached RESOLVED, by class and whether they needed a human decision.",
+		Help: "Incidents that reached RESOLVED with audited live remediation, by class and whether they needed a human decision.",
 	}, []string{"class", "unattended"})
 
 	// DegradedGPUSeconds accumulates GPU-seconds spent under an incident that

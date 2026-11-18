@@ -1025,7 +1025,12 @@ func (c *Controller) recordRecoveryOutcome(ctx context.Context, inc *types.Incid
 		if inc.ApprovalEpoch == 0 {
 			unattended = "true"
 		}
-		metrics.IncidentsRecovered.WithLabelValues(class, unattended).Inc()
+		executed, err := c.store.ExecutedStepResults(ctx, []string{inc.ID})
+		if err != nil {
+			c.log.Warn("reading recovery counter evidence", "incident", inc.ID, "error", err)
+		} else if remediationOutcome(executed[inc.ID], false) {
+			metrics.IncidentsRecovered.WithLabelValues(class, unattended).Inc()
+		}
 	}
 	metrics.DegradedGPUSeconds.WithLabelValues(class, outcome).
 		Add(duration * float64(c.affectedGPUs(ctx, inc)))
