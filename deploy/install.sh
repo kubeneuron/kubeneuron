@@ -67,6 +67,7 @@ KubeNeuron one-command installer.
 Flags:
   --name NAME            root object name           (default: kubeneuron)
   --policy-pack PACK     cloud (new installation default) or bare-metal-alpha
+                         --policy-pack bare-metal-alpha enables node-level actions on the operator and on this installation (Alpha, not validated on real hardware). These actions can reboot hosts and reset GPUs.
   --namespace NS         runtime namespace          (default: kube-neuron)
   --version vX.Y.Z|latest  released install manifest (public curl, gh fallback)
   --manifest FILE        pre-downloaded install manifest
@@ -258,6 +259,24 @@ if ! kubectl get storageclass -o json | grep -q '"storageclass.kubernetes.io/is-
 	echo "  WARNING: no default StorageClass — the SQLite and metrics store PVCs will stay Pending until one exists" >&2
 fi
 
+# The Deployment is shared by installations. Preserve its permission across
+# manifest upgrades, including upgrades requested by another installation.
+operator_args() {
+ kubectl -n kube-neuron get deployment kubeneuron-operator --ignore-not-found \
+   -o 'go-template={{range .spec.template.spec.containers}}{{if eq .name "operator"}}{{range .args}}{{println .}}{{end}}{{end}}{{end}}'
+}
+operator_permission() {
+ local arg value=false
+ while IFS= read -r arg; do
+   case "$arg" in
+     --allow-node-level-actions|--allow-node-level-actions=true) value=true ;;
+     --allow-node-level-actions=false) value=false ;;
+   esac
+ done
+ echo "$value"
+}
+previous_args=$(operator_args)
+previous_permission=$(operator_permission <<<"$previous_args")
 say "installing CRDs and the operator"
 if [[ -n $MANIFEST ]]; then
 	kubectl apply -f "$MANIFEST" >/dev/null
@@ -275,7 +294,6 @@ else
 	die "not in a repo checkout — pass --version vX.Y.Z (or latest), or --manifest FILE"
 fi
 kubectl get namespace "$NS" >/dev/null 2>&1 || kubectl create namespace "$NS" >/dev/null
-kubectl -n kube-neuron rollout status deployment/kubeneuron-operator --timeout=180s >/dev/null
 for crd in kubeneurons gpuplaybooks gpuremediationpolicies; do
 	kubectl wait --for=condition=Established "crd/$crd.kubeneuron.io" --timeout=60s >/dev/null
 done
@@ -285,6 +303,20 @@ done
 # users and its KubeNeuron, of which only the images and an explicit
 # --observability are updated.
 existing_cr=$(kubectl get kubeneuron "$NAME" --ignore-not-found -o name)
+if [[ -z $existing_cr && $REQUESTED_PACK == bare-metal-alpha ]]; then
+ say "--policy-pack bare-metal-alpha enables node-level actions on the operator and on this installation (Alpha, not validated on real hardware). These actions can reboot hosts and reset GPUs."
+ previous_permission=true
+fi
+current_args=$(operator_args)
+if [[ $previous_permission == true && $(operator_permission <<<"$current_args") != true ]]; then
+ operator_index=$(kubectl -n kube-neuron get deployment kubeneuron-operator \
+   -o 'go-template={{range $i,$c := .spec.template.spec.containers}}{{if eq $c.name "operator"}}{{$i}}{{end}}{{end}}')
+ [[ $operator_index =~ ^[0-9]+$ ]] || die "operator container missing from deployment"
+ path="/spec/template/spec/containers/$operator_index"
+ kubectl -n kube-neuron patch deployment kubeneuron-operator --type=json \
+   -p "[{\"op\":\"test\",\"path\":\"$path/name\",\"value\":\"operator\"},{\"op\":\"add\",\"path\":\"$path/args/-\",\"value\":\"--allow-node-level-actions=true\"}]" >/dev/null
+fi
+kubectl -n kube-neuron rollout status deployment/kubeneuron-operator --timeout=180s >/dev/null
 say "generating operational secrets"
 api_token=$(kubectl -n "$NS" get secret "$NAME-operator-api-token" --ignore-not-found -o jsonpath='{.data.token}' | base64 --decode)
 api_token_kept=1

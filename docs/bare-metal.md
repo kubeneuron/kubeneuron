@@ -7,7 +7,9 @@ to install the node-level recovery playbooks. The default cloud pack uses
 provider APIs. An agent reboot restarts the host operating system. GPU reset
 and driver operations can interrupt workloads using the device.
 
-The cluster administrator must enable node-level actions on the operator. With
+On a fresh installation, `--policy-pack bare-metal-alpha` enables node-level actions on the operator and on this installation (Alpha, not validated on real hardware). These actions can reboot hosts and reset GPUs.
+
+For a separately managed operator, enable the operator permission explicitly. With
 Helm, set `operator.allowNodeLevelActions=true`. With a manifest-managed
 operator, add `--allow-node-level-actions=true` to the operator container's
 arguments in the Deployment manifest and apply it. Keep this setting in the
