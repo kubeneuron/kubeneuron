@@ -75,3 +75,23 @@ func (q *Queries) SaveTrainingReport(ctx context.Context, incidentID, jobUID, po
 		incidentID, jobUID, podUID, report.Kind, report.CheckpointID, report.Step, ts(received))
 	return err
 }
+
+// RecordAffectedJobReport links a report only to a verified root in the
+// immutable allocation. A replacement worker can report from a different node.
+func (q *Queries) RecordAffectedJobReport(ctx context.Context, incidentID, namespace, ownerUID, podUID string, report checkpoint.TrainingReport, received time.Time) (bool, error) {
+	workers, err := q.TrainingWorkers(ctx, incidentID)
+	if err != nil {
+		return false, err
+	}
+	for _, worker := range workers {
+		if namespace == "" || worker.Namespace != namespace || worker.OwnerUnknownReason != "" || len(worker.Owners) == 0 {
+			continue
+		}
+		root := worker.Owners[len(worker.Owners)-1]
+		if ownerUID != "" && root.UID == ownerUID {
+			err := q.SaveTrainingReport(ctx, incidentID, ownerUID, podUID, report, received)
+			return err == nil, err
+		}
+	}
+	return false, nil
+}

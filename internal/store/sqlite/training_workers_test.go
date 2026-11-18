@@ -104,3 +104,36 @@ func TestTrainingCheckpointReceipts(t *testing.T) {
 		t.Fatalf("after deletion: %d, %v", count, err)
 	}
 }
+
+func TestRecordAffectedJobReportMatchesVerifiedRoot(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := t.Context()
+	impactIncident(t, s, "incident")
+	workers := []types.TrainingWorker{
+		{Namespace: "ml", PodUID: "old", Owners: []types.TrainingOwner{{UID: "child"}, {UID: "root"}}},
+		{Namespace: "ml", OwnerUnknownReason: "OwnerReadFailed", Owners: []types.TrainingOwner{{UID: "partial"}}},
+	}
+	if err := s.SaveTrainingWorkers(ctx, "incident", workers); err != nil {
+		t.Fatal(err)
+	}
+	report := checkpoint.TrainingReport{Kind: "resume", CheckpointID: "epoch-1"}
+	for _, tc := range []struct {
+		namespace, uid string
+		want           bool
+	}{
+		{"other", "root", false}, {"ml", "child", false}, {"ml", "partial", false}, {"ml", "recreated-job", false}, {"ml", "root", true},
+	} {
+		written, err := s.RecordAffectedJobReport(ctx, "incident", tc.namespace, tc.uid, "replacement-worker", report, time.Now())
+		if err != nil || written != tc.want {
+			t.Fatalf("%v: written=%v err=%v", tc, written, err)
+		}
+	}
+	var count int
+	if err := s.sqlDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM training_checkpoint_facts").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("rows=%d err=%v", count, err)
+	}
+}
