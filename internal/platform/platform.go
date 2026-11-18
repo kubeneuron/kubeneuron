@@ -502,6 +502,18 @@ type NodeHealthReader interface {
 	NodeHealth(ctx context.Context) ([]types.NodeHealthSnapshot, error)
 }
 
+// DRAHealthError is a read of the DRA device taints that could not be made,
+// with a stable reason: api-unavailable (the cluster serves no
+// resource.k8s.io/v1 ResourceSlices), forbidden, timeout, list-failed,
+// bounds-exceeded or dynamic-client-unavailable.
+type DRAHealthError struct {
+	Reason string
+	Err    error
+}
+
+func (e *DRAHealthError) Error() string { return "dra health: " + e.Reason + ": " + e.Err.Error() }
+func (e *DRAHealthError) Unwrap() error { return e.Err }
+
 // NodeIdentity is implemented by platforms that can read the UID of one
 // exact node object. A node that is not found is ("", false, nil).
 type NodeIdentity interface {

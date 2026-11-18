@@ -460,6 +460,8 @@ func TestDashboardQueriesUseRealLabels(t *testing.T) {
 var notCharted = map[string]string{
 	"kubeneuron_cloud_health_reads_total":            "experimental and not validated against a live cloud: the outcome of each read of accelerator health from the cloud's monitoring, for ad hoc queries",
 	"kubeneuron_accelerator_health_ignored_nodes":    "experimental and not validated against a live GKE cluster: the nodes whose Cloud Monitoring TPU health is read and not acted on, by reason, for ad hoc queries",
+	"kubeneuron_dra_health_devices":                  "experimental, opt-in and not validated on hardware: DRA devices per profile and state, for ad hoc queries",
+	"kubeneuron_dra_health_reads_total":              "experimental, opt-in: the outcome of each read of the DRA device taints, for ad hoc queries",
 	"kubeneuron_accelerator_health_nodes":            "experimental and not validated on hardware: a count of nodes per health profile and state, for ad hoc queries until a profile has run on real nodes",
 	"kubeneuron_incident_evidence_total":             "a breakdown of incidents opened by recorded evidence, for ad hoc queries; each incident's evidence is read from the incident itself",
 	"kubeneuron_replacement_overlap_seconds":         "a cost figure per replacement, read from the incident and the recovery report; a chart of it is a billing question, answered ad hoc",

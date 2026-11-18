@@ -397,6 +397,21 @@ var (
 		Help: "Accelerator nodes reporting a signal that is read and not acted on, by health source, profile and reason (degraded, networking-issue).",
 	}, []string{"source", "profile", "reason"})
 
+	// DRAHealthReads counts the reads of the DRA device taints, by outcome:
+	// ok, api-unavailable, forbidden, timeout, list-failed, bounds-exceeded,
+	// dynamic-client-unavailable.
+	DRAHealthReads = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_dra_health_reads_total",
+		Help: "Reads of device health from the resource.k8s.io/v1 ResourceSlices, by outcome (ok, api-unavailable, forbidden, timeout, list-failed, bounds-exceeded, dynamic-client-unavailable).",
+	}, []string{"outcome"})
+
+	// DRAHealthDevices is how many DRA devices of each profile the last
+	// read found in each state. No node or device label.
+	DRAHealthDevices = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kubeneuron_dra_health_devices",
+		Help: "DRA devices by profile and state (fault, unknown, ignored, unmonitored, no-health-taint). No-health-taint and unmonitored are not health: the device says nothing.",
+	}, []string{"profile", "state"})
+
 	// CloudHealthReads counts the reads of accelerator health from the
 	// cloud's monitoring, by outcome: ok, permission-denied, api-error, or
 	// no-nodes when no node needed one and nothing was asked of the cloud.

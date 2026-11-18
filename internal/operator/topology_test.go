@@ -458,3 +458,62 @@ func TestDefaultTrainingOwnerGrants(t *testing.T) {
 		t.Fatalf("owner grants = %#v", got)
 	}
 }
+
+// The DRA health source costs the same one read-only rule, granted only when
+// it is enabled; with the topology classifier's DRA read on as well, the rule
+// is still one.
+func TestControllerRBACDRARuleFollowsHealthPolicy(t *testing.T) {
+	baseline := controllerClusterRole(testKubeNeuron())
+	for name, spec := range map[string]*kubeneuronv1alpha1.AcceleratorHealthSpec{
+		"omitted": nil, "empty": {}, "disabled": {DRA: &kubeneuronv1alpha1.AcceleratorHealthDRASpec{}},
+	} {
+		installation := testKubeNeuron()
+		installation.Spec.Safety.AcceleratorHealth = spec
+		if role := controllerClusterRole(installation); !reflect.DeepEqual(role.Rules, baseline.Rules) {
+			t.Fatalf("%s: controller ClusterRole differs from the default: %#v", name, role.Rules)
+		}
+	}
+	installation := testKubeNeuron()
+	installation.Spec.Safety.AcceleratorHealth = &kubeneuronv1alpha1.AcceleratorHealthSpec{DRA: &kubeneuronv1alpha1.AcceleratorHealthDRASpec{Enabled: true}}
+	role := controllerClusterRole(installation)
+	if got := draRules(role.Rules); len(got) != 1 || !reflect.DeepEqual(got[0], draReadOnlyRule) || len(role.Rules) != len(baseline.Rules)+1 {
+		t.Fatalf("DRA rules = %#v, want exactly %#v added", got, draReadOnlyRule)
+	}
+	installation.Spec.Safety.TopologyClassifier = draEnabled()
+	if got := draRules(controllerClusterRole(installation).Rules); len(got) != 1 {
+		t.Fatalf("both opt-ins hold %d DRA rules, want one", len(got))
+	}
+}
+
+// An absent or disabled acceleratorHealth block compiles to the digest of an
+// installation that never heard of it; enabling DRA emits the key.
+func TestCompileSnapshotOmitsAcceleratorHealthUnlessEnabled(t *testing.T) {
+	compile := func(t *testing.T, spec *kubeneuronv1alpha1.AcceleratorHealthSpec) (*config.AcceleratorHealth, string, string) {
+		t.Helper()
+		installation := testKubeNeuron()
+		installation.Spec.Safety.AcceleratorHealth = spec
+		policies, playbooks := testPolicyFixture()
+		snapshot, err := CompileSnapshot(installation, policies, playbooks, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("CompileSnapshot() error = %v", err)
+		}
+		var compiled config.Config
+		if err := yaml.Unmarshal(snapshot.PoliciesYAML, &compiled); err != nil {
+			t.Fatalf("unmarshal compiled policies: %v", err)
+		}
+		return compiled.Safety.AcceleratorHealth, string(snapshot.PoliciesYAML), snapshot.Digest
+	}
+	_, _, baseline := compile(t, nil)
+	for name, spec := range map[string]*kubeneuronv1alpha1.AcceleratorHealthSpec{
+		"empty": {}, "disabled": {DRA: &kubeneuronv1alpha1.AcceleratorHealthDRASpec{}},
+	} {
+		got, text, digest := compile(t, spec)
+		if got != nil || strings.Contains(text, "accelerator_health") || digest != baseline {
+			t.Fatalf("%s left a trace in the snapshot:\n%s", name, text)
+		}
+	}
+	got, _, digest := compile(t, &kubeneuronv1alpha1.AcceleratorHealthSpec{DRA: &kubeneuronv1alpha1.AcceleratorHealthDRASpec{Enabled: true}})
+	if got == nil || !got.DRA.Enabled || digest == baseline {
+		t.Fatalf("enabled: %+v, digest unchanged %v", got, digest == baseline)
+	}
+}

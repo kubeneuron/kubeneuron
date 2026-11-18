@@ -171,8 +171,9 @@ func controllerPodVerbs(installation *kubeneuronv1alpha1.KubeNeuron) []string {
 }
 
 // controllerDRARules is the read-only Dynamic Resource Allocation grant the
-// topology classifier needs, present ONLY while
-// spec.safety.topologyClassifier.dra.enabled is true. It is get/list/watch on
+// topology classifier and the DRA health source need, present ONLY while
+// spec.safety.topologyClassifier.dra.enabled or
+// spec.safety.acceleratorHealth.dra.enabled is true. It is get/list/watch on
 // resource.k8s.io resourceslices and nothing else: no claims, no other
 // version, no write verb. An installation that never asked for DRA discovery
 // holds no rule on the group at all.
@@ -183,7 +184,7 @@ func controllerPodVerbs(installation *kubeneuronv1alpha1.KubeNeuron) []string {
 // discovery costs exactly one read-only rule and the group's claim objects
 // are never readable by KubeNeuron.
 func controllerDRARules(installation *kubeneuronv1alpha1.KubeNeuron) []rbacv1.PolicyRule {
-	if !topologyDRADiscoveryEnabled(installation) {
+	if !topologyDRADiscoveryEnabled(installation) && !draHealthEnabled(installation) {
 		return nil
 	}
 	return []rbacv1.PolicyRule{

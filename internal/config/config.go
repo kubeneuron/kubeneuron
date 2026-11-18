@@ -79,8 +79,24 @@ type Safety struct {
 	// read is ever attempted by a controller whose configuration predates the
 	// field, and the operator emits the key only when discovery is enabled.
 	TopologyClassifier *TopologyClassifier `yaml:"topology_classifier,omitempty"`
+	// AcceleratorHealth is the compiled spec.safety.acceleratorHealth. A nil
+	// pointer reads no optional health source; the operator emits the key
+	// only when one is enabled.
+	AcceleratorHealth *AcceleratorHealth `yaml:"accelerator_health,omitempty"`
 	// ImpactPreview is the compiled spec.safety.impactPreview. Absent is off.
 	ImpactPreview *ImpactPreview `yaml:"impact_preview,omitempty"`
+}
+
+// AcceleratorHealth carries the opt-in health sources. See the CRD field of
+// the same name.
+type AcceleratorHealth struct {
+	DRA AcceleratorHealthDRA `yaml:"dra"`
+}
+
+// AcceleratorHealthDRA switches the read-only resource.k8s.io/v1
+// ResourceSlice device taint read on. Off by default.
+type AcceleratorHealthDRA struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // TopologyClassifier carries the opt-in inputs of the device topology

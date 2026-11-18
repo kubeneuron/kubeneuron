@@ -98,8 +98,8 @@ the signal is not silent.
 | EKS `AcceleratedHardwareReady=False` with reason `DCGMDiagnosticFailure`, `DCGMError` or `DCGMHealthCode<code>` | DCGM reports its own failure or a diagnostic result. The EKS documentation gives it no repair action. |
 
 Not read at all: conditions whose names a public document does not confirm,
-Kubernetes events, DRA ResourceSlice device taints and cloud monitoring
-APIs other than the opt-in read below.
+Kubernetes events, and DRA ResourceSlice device taints and cloud monitoring
+APIs other than the opt-in reads below.
 
 ## TPU health from Google Cloud Monitoring (opt-in)
 
@@ -154,6 +154,69 @@ and [metric list](https://docs.cloud.google.com/monitoring/api/metrics_gcp_c)
   `monitoring.timeSeries.list` in those projects; see
   [Replacing GPU nodes on GKE](cloud-gcp.md#setup).
 
+## Device taints from Kubernetes DRA (opt-in)
+
+With `spec.safety.acceleratorHealth.dra.enabled: true`, the controller also
+lists the `resource.k8s.io/v1` ResourceSlices and reads the taints that
+Dynamic Resource Allocation drivers set on the devices they publish, as one
+more source (`dra`) of the profiles. It is off by default. Device taints
+are a Kubernetes beta feature in 1.36 (feature gate `DRADeviceTaints`, on by
+default there); Kubernetes and the drivers may still change them. This read
+is experimental and has not run against a driver on hardware.
+
+- **What is read.** Once per controller pass, one list of the v1
+  ResourceSlices. Only a slice whose `spec.nodeName` names an existing Node
+  is read; a slice scoped by a node selector, all nodes or per-device
+  selection is skipped. From a device: the driver, pool and device name, its
+  `uuid` attribute and its taints (key, value, effect, `timeAdded`). Nothing
+  is written, and `DeviceTaintRule` objects are not read.
+- **Drivers and taints.** Only the drivers and keys below, from the drivers'
+  own documentation (read 2026-11-18); a key is read only in a slice of its
+  own driver. Effects `NoSchedule` and `NoExecute` act alike; `None`, or an
+  effect not listed, does not act.
+
+| Driver (the slice's driver name) | Profile | Taint | Effect | Read as |
+|---|---|---|---|---|
+| `gpu.nvidia.com` ([NVIDIA DRA driver](https://github.com/kubernetes-sigs/dra-driver-nvidia-gpu) v0.4.0+, health checks behind its `NVMLDeviceHealthCheck` gate) | `nvidia` | `gpu.nvidia.com/xid`, value the XID | `NoSchedule` / `NoExecute` | fault, classed by the XID table |
+| | | `gpu.nvidia.com/xid` | `None` | ignored, `non-fatal-xid` |
+| | | `gpu.nvidia.com/gpu-lost` | `NoSchedule` / `NoExecute` | `accelerator-fault` |
+| | | `gpu.nvidia.com/unmonitored` | any | no signal (`unmonitored`) |
+| `neuron.aws.com` ([Neuron DRA driver](https://awsdocs-neuron.readthedocs-hosted.com/en/latest/deploy/eks/neuron-device-taints-guide.html) 1.3.0+, Kubernetes 1.36+, health monitoring off by default) | `aws-neuron` | `neuron.aws.com/device-unhealthy`: `hbm-uncorrectable-error`, `sram-uncorrectable-error`, `device-unreachable`, `link-host-error`, `firmware-service-processor-error` | `NoSchedule` / `NoExecute` | `accelerator-fault` |
+| | | `neuron.aws.com/device-unhealthy`: `link-intraserver-error`, `link-interserver-error`, `link-efa-error`, `link-switch-error`, `fabric-error` | any | ignored, `interconnect`: it does not place the fault on this device |
+| | | `neuron.aws.com/device-unhealthy`, any other value (including `firmware-service-api-error`) | any | unknown |
+| | | `neuron.aws.com/peer-tainted` | `None` | ignored, `peer-tainted` |
+| `gpu.amd.com` | `amd-instinct` | none documented for health | | |
+| any of these | | any other key | any | ignored, `undocumented-taint` |
+
+  The Google TPU DRA driver publishes no device taints; TPU health is not
+  read this way. A slice of any other driver is not read.
+- **No taint is no signal.** A device without a taint, or one its driver
+  marks `unmonitored`, says nothing: it is neither healthy nor unknown,
+  holds no step and clears no other source's fault. With the gate off the
+  API server drops the taints, and a driver may not publish health taints at
+  all, so the absence of a taint is not health. Such devices are counted as
+  `no-health-taint` and `unmonitored` in `kubeneuron_dra_health_devices`.
+- **Fault.** A fault taint opens its class on the node after two reads, or
+  on the first read when its `timeAdded` is at least two minutes old. The
+  incident is the node's; its evidence names the source (`dra`), the
+  driver, pool and device, the device's UUID when it is in the agent's form,
+  and the XID or the documented value. The taint's text is kept only when
+  it is a number or a value listed above.
+- **Clearing and holding.** A pending fault clears only when the same
+  device (driver, pool, device name) is published again without it. A
+  device that is no longer published, or a read that fails, is unknown and
+  holds the fault.
+- **Reads** are counted in `kubeneuron_dra_health_reads_total` by outcome.
+  A cluster that serves no `resource.k8s.io/v1` ResourceSlices (before
+  Kubernetes 1.34, or a beta version only) reads as `api-unavailable`;
+  nothing else changes, and no step is held for it.
+- **Trust.** Anyone who can write ResourceSlices can open an incident here
+  and, through the policy, have the node replaced. Grant that write only to
+  the DRA drivers.
+- **Permission.** The controller's ClusterRole gains `get`, `list` and
+  `watch` on `resource.k8s.io` `resourceslices` while this, or the topology
+  classifier's DRA read, is on; nothing else in the group.
+
 ## When KubeNeuron only observes
 
 - **Another repairer.** A node with the taint `amd-gpu-unhealthy` (set by the
@@ -167,7 +230,7 @@ and [metric list](https://docs.cloud.google.com/monitoring/api/metrics_gcp_c)
   listed in `qualifiedProfiles`: listing a profile there means the operator has
   confirmed that no other repairer acts on those nodes.
 - **Before the first read.** Until every health source (the Nodes, and
-  Cloud Monitoring when it is turned on) has been read once since this
+  Cloud Monitoring and the DRA device taints when they are turned on) has been read once since this
   controller became leader, KubeNeuron cannot tell whether another repairer
   is acting on a node, so it holds every such step on every node and records
   why. A failed read of the Nodes does not count. A new leader asks Cloud
@@ -186,4 +249,5 @@ run on hardware. For Cloud Monitoring: whether Google writes
 long after a fault; and whether it writes one series per instance or one per
 status with the value 0 or 1. The value is not read, so in the second case
 every sample time carries two statuses and the node stays unknown: safe, but
-the source then tells nothing.
+the source then tells nothing. For DRA: that the drivers set these taints on
+real faults, with these values, and how long after.

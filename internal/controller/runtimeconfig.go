@@ -69,6 +69,9 @@ type RuntimeConfig struct {
 	// classifier off, because the classifier only ever narrows the reset gate
 	// and a configuration must not be able to widen it.
 	Topology TopologyPolicy
+	// Health is the compiled spec.safety.acceleratorHealth. The zero value
+	// reads no optional health source.
+	Health HealthPolicy
 	// Impact is the compiled spec.safety.impactPreview. The zero value is
 	// off: no preview is computed and no approval is bound to one.
 	Impact impact.Policy

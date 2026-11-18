@@ -153,6 +153,9 @@ func (c *Controller) healthSources() []healthSource {
 	if reader, ok := c.platform.(cloudHealthReader); ok && reader.CloudAcceleratorHealthEnabled() {
 		out = append(out, cloudHealthSource{reader: reader, c: c})
 	}
+	if reader, ok := c.platform.(draHealthReader); ok && c.runtimeConfig(context.Background()).Health.DRA {
+		out = append(out, draHealthSource{reader: reader, c: c})
+	}
 	return out
 }
 
@@ -340,6 +343,9 @@ func healthSignal(source string, n nodehealth.NodeHealth, o nodehealth.Observati
 	if o.Device != "" {
 		evidence["device"] = o.Device
 	}
+	if o.DeviceUUID != "" {
+		evidence["gpu_uuid"] = o.DeviceUUID
+	}
 	if !o.Since.IsZero() {
 		evidence["since"] = o.Since.UTC().Format(time.RFC3339)
 	}
@@ -398,7 +404,9 @@ func (c *Controller) countNodeHealth(source string, nodes []nodehealth.NodeHealt
 // ignoredReasons are the reasons of a signal read and not acted on that the
 // ignored-nodes metric names. The list is closed, so the label stays
 // bounded.
-var ignoredReasons = map[string]bool{"degraded": true, "networking-issue": true}
+var ignoredReasons = map[string]bool{"degraded": true, "networking-issue": true,
+	nodehealth.DRAReasonNonFatalXID: true, nodehealth.DRAReasonPeerTainted: true, nodehealth.DRAReasonInterconnect: true,
+	nodehealth.DRAReasonEffectNone: true, nodehealth.DRAReasonUndocumentedTaint: true}
 
 func profileState(n nodehealth.NodeHealth, profile string) nodehealth.State {
 	state := nodehealth.StateHealthy

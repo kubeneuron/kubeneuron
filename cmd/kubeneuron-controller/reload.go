@@ -169,6 +169,7 @@ func applyRuntimeConfigWithNodePauses(
 		DegradedTaint:          degradedTaintPolicy(cfg.Safety.TaintDegradedNodes),
 		Checkpoint:             checkpointPolicy(cfg.Safety.CheckpointCoordination),
 		Topology:               topologyPolicy(cfg.Safety.TopologyClassifier),
+		Health:                 controller.HealthPolicy{DRA: cfg.Safety.AcceleratorHealth != nil && cfg.Safety.AcceleratorHealth.DRA.Enabled},
 		Impact:                 impactPolicy(cfg.Safety.ImpactPreview),
 		VerifyQuiet:            cfg.Safety.VerifyQuietWindow.Std(),
 		ApprovalTTL:            cfg.Approvals.TTL.Std(),

@@ -453,6 +453,10 @@ type SafetySpec struct {
 	// labels and the agent report, without reading Dynamic Resource
 	// Allocation objects.
 	TopologyClassifier *TopologyClassifierSpec `json:"topologyClassifier,omitempty"`
+	// AcceleratorHealth turns on the optional sources of the accelerator
+	// health profiles. Omitted means only the Kubernetes Node objects are
+	// read.
+	AcceleratorHealth *AcceleratorHealthSpec `json:"acceleratorHealth,omitempty"`
 	// ImpactPreview, when enabled, computes a durable impact-preview/v1 record
 	// for every approval round: the node and its device topology, the
 	// workloads the downstream disruption would touch and which of them can
@@ -487,6 +491,26 @@ type TopologyClassifierDRASpec struct {
 	// classified as unknown and device-scoped actions are refused; nothing
 	// is ever assumed. Default false, and false is also what an absent block
 	// means.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// AcceleratorHealthSpec configures the optional accelerator health sources.
+type AcceleratorHealthSpec struct {
+	// DRA reads the device taints of Dynamic Resource Allocation drivers.
+	// Omitted means off.
+	DRA *AcceleratorHealthDRASpec `json:"dra,omitempty"`
+}
+
+// AcceleratorHealthDRASpec is the opt-in read of the device taints in
+// resource.k8s.io/v1 ResourceSlices (DRADeviceTaints, beta in Kubernetes
+// 1.36; experimental here).
+type AcceleratorHealthDRASpec struct {
+	// Enabled makes the controller list the resource.k8s.io/v1
+	// ResourceSlices (get/list/watch only, never another version or verb)
+	// and read the taints the documented drivers set on their devices. The
+	// managed controller ClusterRole gains only that read-only ResourceSlice
+	// rule while this is true. Default false.
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 }

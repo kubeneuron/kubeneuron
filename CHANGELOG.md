@@ -33,6 +33,17 @@ API is `v1alpha1`.
   require a recent checkpoint report for each affected job. See the
   [training reports guide](docs/training-reports.md).
 
+- **Device health from Kubernetes DRA device taints (experimental, opt-in).**
+  With `spec.safety.acceleratorHealth.dra.enabled`, the controller lists the
+  `resource.k8s.io/v1` ResourceSlices and reads the device taints of the
+  NVIDIA (`gpu.nvidia.com`) and AWS Neuron (`neuron.aws.com`) DRA drivers as
+  one more source of the accelerator health profiles. Only documented keys
+  and values open a fault; other taints are counted as `ignored`, and a
+  device without a taint is no signal, not health. Device taints are a
+  Kubernetes beta feature in 1.36. The controller ClusterRole gains
+  `resourceslices` get/list/watch only while it is on. Off by default; not
+  run against a driver on hardware.
+
 - **TPU health from Google Cloud Monitoring (experimental, opt-in).** With
   `spec.cloud.gcp.tpuInfraHealth.enabled`, the controller reads the Cloud
   Monitoring metric `compute.googleapis.com/instance/tpu/infra_health` for

@@ -25,6 +25,28 @@ type NodeHealthSnapshot struct {
 	// the read failed.
 	Cloud      []CloudHealthPoint `json:"cloud,omitempty"`
 	CloudError string             `json:"cloud_error,omitempty"`
+	// DRADevices are the devices Dynamic Resource Allocation drivers publish
+	// for the node in resource.k8s.io/v1 ResourceSlices, with their taints,
+	// when that read is turned on.
+	DRADevices []DRADevice `json:"dra_devices,omitempty"`
+}
+
+// DRADevice is one device of a ResourceSlice published for a node.
+type DRADevice struct {
+	Driver string `json:"driver"`
+	Pool   string `json:"pool"`
+	Device string `json:"device"`
+	// UUID is the device's uuid attribute, when the driver publishes one.
+	UUID   string     `json:"uuid,omitempty"`
+	Taints []DRATaint `json:"taints,omitempty"`
+}
+
+// DRATaint is one taint of a DRA device.
+type DRATaint struct {
+	Key       string    `json:"key"`
+	Value     string    `json:"value,omitempty"`
+	Effect    string    `json:"effect"`
+	TimeAdded time.Time `json:"time_added,omitzero"`
 }
 
 // CloudHealthPoint is one sample of the instance's accelerator health from

@@ -67,8 +67,12 @@ type Observation struct {
 	// Reason is the condition's reason or the label's value, as the node
 	// reports it.
 	Reason string
-	// Device is the device index when the signal names one.
+	// Device is the device index when the signal names one, or the DRA
+	// device name.
 	Device string
+	// DeviceUUID is the device's UUID in the agent's form, when the source
+	// names one.
+	DeviceUUID string
 	// Since is when the signal last changed, when the Node says so.
 	Since time.Time
 	// Why says why a signal is unknown.

@@ -1392,6 +1392,28 @@ spec:
                   SafetySpec holds execution limits. ExecutionMode defaults to DryRun in the
                   operator, even when omitted from the CR.
                 properties:
+                  acceleratorHealth:
+                    description: |-
+                      AcceleratorHealth turns on the optional sources of the accelerator
+                      health profiles. Omitted means only the Kubernetes Node objects are
+                      read.
+                    properties:
+                      dra:
+                        description: |-
+                          DRA reads the device taints of Dynamic Resource Allocation drivers.
+                          Omitted means off.
+                        properties:
+                          enabled:
+                            default: false
+                            description: |-
+                              Enabled makes the controller list the resource.k8s.io/v1
+                              ResourceSlices (get/list/watch only, never another version or verb)
+                              and read the taints the documented drivers set on their devices. The
+                              managed controller ClusterRole gains only that read-only ResourceSlice
+                              rule while this is true. Default false.
+                            type: boolean
+                        type: object
+                    type: object
                   checkpointCoordination:
                     description: |-
                       CheckpointCoordination optionally warns opted-in workloads before a
