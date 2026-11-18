@@ -1078,7 +1078,7 @@ KIND
 	# floors on its own, blocked only by the three-peer floor.
 	assert_count "NVIDIA A10G peer group has 2 devices" 'count(count by (gpu_uuid) (kubeneuron_gpu_clock_ratio{domain="sm",gpu_model="NVIDIA A10G"}))' 2
 	assert_count "slow A10G would pass the 15% deviation floor against its pair" \
-		'count((1 - max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm",gpu_model="NVIDIA A10G"}) / on (gpu_model) group_left() (median by (gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm",gpu_model="NVIDIA A10G"})) > 0)) >= 0.15)' 1
+		'count((1 - max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm",gpu_model="NVIDIA A10G"}) / on (gpu_model) group_left() (quantile by (gpu_model) (0.5, max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm",gpu_model="NVIDIA A10G"})) > 0)) >= 0.15)' 1
 	assert_count "slow A10G passes the throttle floor" "count(kubeneuron_gpu_throttle_share_ratio{gpu_uuid=\"$A10G_SLOW_UUID\"} >= 0.05)" 1
 	assert_absent "score for the two-device A10G group" 'kubeneuron_gpu_fail_slow_score_ratio{gpu_model="NVIDIA A10G"}'
 

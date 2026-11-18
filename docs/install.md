@@ -95,8 +95,8 @@ operator; see [Metrics path](#metrics-path-specobservability).
   the `kubeneuron_gpu_*` series the dashboards read back into it.
   `ObservabilityRulesReady` reports it. **With an External store the
   recording rules are yours to run**: load that file into the rule
-  evaluator of your Prometheus or VictoriaMetrics, or the GPU dashboards
-  stay empty.
+  evaluator of your Prometheus or VictoriaMetrics (the file is plain PromQL,
+  see [observability](observability.md)), or the GPU dashboards stay empty.
 - **The Managed store detects the faults that reach KubeNeuron on NVIDIA
   only as metric alerts.** The same vmalert evaluates
   `configs/vmalert/gpu-alert-rules.yaml` and sends what fires to the

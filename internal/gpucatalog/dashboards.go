@@ -100,7 +100,7 @@ type DashboardSpec struct {
 	Panels      []PanelSpec
 }
 
-// PanelSpec is one panel. Targets are PromQL/MetricsQL expressions built
+// PanelSpec is one panel. Targets are plain PromQL expressions built
 // from the scope selectors above so every expression is filtered by the
 // board's variables and no expression repeats a selector by hand.
 type PanelSpec struct {

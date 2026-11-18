@@ -22,7 +22,7 @@ GENERATED_PATHS := api/v1alpha1/zz_generated.deepcopy.go config/crd/bases deploy
 # The lock verify-generate serialises on. In .gitignore; created on first use.
 GENERATE_LOCK := .make-generate.lock
 
-.PHONY: all build test test-integration-kind test-upgrade-rollback-kind kind-clean lint clean tidy generate verify-generate verify-generate-locked generate-gpucatalog verify-gpucatalog proto web docs docs-serve docker gates gates-full verify-docs verify-image verify-hw-e2e-sweep verify-hw-e2e-observability verify-tls-scripts mirror test-gpu-observability-kind verify-gpu-observability-fixture kind-gpu-observability-clean test-workload-safe-kind verify-workload-safe-examples test-alert-rules
+.PHONY: all build test test-integration-kind test-upgrade-rollback-kind kind-clean lint clean tidy generate verify-generate verify-generate-locked generate-gpucatalog verify-gpucatalog proto web docs docs-serve docker gates gates-full verify-docs verify-image verify-hw-e2e-sweep verify-hw-e2e-observability verify-tls-scripts mirror test-gpu-observability-kind verify-gpu-observability-fixture kind-gpu-observability-clean test-workload-safe-kind verify-workload-safe-examples test-alert-rules check-rules
 
 all: build
 
@@ -107,6 +107,9 @@ verify-docs:
 
 test-alert-rules:
 	bash hack/test-alert-rules.sh
+
+check-rules:
+	bash hack/check-rules.sh
 
 verify-image:
 	python3 -I hack/test_verify_image.py

@@ -7,8 +7,6 @@
 # Names, thresholds and `for` are those of gpu-rules.yaml, so both paths
 # open the same incidents; names must stay in internal/detect/alertmanager.go
 # (alertClassMap). Differences from gpu-rules.yaml:
-#   - plain PromQL only: the throttle bits are tested with floor and modulo,
-#     not bitmap_and;
 #   - every expression aggregates to (node, gpu, UUID) or to node, so the
 #     workload labels pod, namespace, container and pod_uid never reach an
 #     alert, also with collector.dcgmExporter.keepWorkloadLabels;

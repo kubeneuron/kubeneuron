@@ -209,7 +209,7 @@ var scalarExprRE = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)(?: \* ([0-9][0-
 
 // decodeExprRE matches the clock-event decode: one bit of the bitmask
 // tested for being set.
-var decodeExprRE = regexp.MustCompile(`^bitmap_and\(([A-Za-z_][A-Za-z0-9_]*), ([0-9]+)\) > bool 0$`)
+var decodeExprRE = regexp.MustCompile(`^floor\(([A-Za-z_][A-Za-z0-9_]*) / ([0-9]+)\) % 2$`)
 
 // clockEventBits is the decode table for field 112 the catalog's help text
 // documents (0x08, 0x20, 0x40, 0x80) and the recording rule must implement:
@@ -291,7 +291,7 @@ func TestCanonicalRulesImplementCatalog(t *testing.T) {
 				matched[k] = true
 				m := decodeExprRE.FindStringSubmatch(r.Expr)
 				if m == nil {
-					t.Errorf("field %d reason %s: expr %q is not `bitmap_and(<series>, <bit>) > bool 0`", f.DCGMFieldID, reason, r.Expr)
+					t.Errorf("field %d reason %s: expr %q is not `floor(<series> / <bit>) %% 2`", f.DCGMFieldID, reason, r.Expr)
 					continue
 				}
 				if m[1] != f.Series {
@@ -536,7 +536,7 @@ func canonicalRuleMismatches(fields []yamlField, groups []ruleGroup) []string {
 				matched[k] = true
 				m := decodeExprRE.FindStringSubmatch(r.Expr)
 				if m == nil {
-					out = append(out, fmt.Sprintf("field %d reason %s: expr %q is not a bitmap_and decode", f.DCGMFieldID, reason, r.Expr))
+					out = append(out, fmt.Sprintf("field %d reason %s: expr %q is not a floor/modulo decode", f.DCGMFieldID, reason, r.Expr))
 					continue
 				}
 				if m[1] != f.Series {
@@ -729,13 +729,13 @@ func TestRuleMismatchHelpersRejectDrift(t *testing.T) {
 	eccRow := func(scope string) DerivedSignal {
 		return DerivedSignal{
 			Series: hardFault, Group: "gpu-derived-memory", Labels: []Label{L("component", "uncorrectable_ecc_"+scope)},
-			Formula: `label_del(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="` + scope + `"}[1h]), "bits", "scope") > bool 0`,
+			Formula: `label_replace(label_replace(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="` + scope + `"}[1h]), "bits", "", "bits", ".*"), "scope", "", "scope", ".*") > bool 0`,
 		}
 	}
 	eccRule := func(component, scope string) recordingRule {
 		return recordingRule{
 			Record: hardFault, Labels: map[string]string{"component": component},
-			Expr: `label_del(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="` + scope + `"}[1h]), "bits", "scope") > bool 0`,
+			Expr: `label_replace(label_replace(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="` + scope + `"}[1h]), "bits", "", "bits", ".*"), "scope", "", "scope", ".*") > bool 0`,
 		}
 	}
 	eccCatalog := []DerivedSignal{eccRow("volatile"), eccRow("aggregate")}
@@ -816,7 +816,7 @@ func TestMirrorHelperRejectsDivergence(t *testing.T) {
 	}
 }
 
-// exprIdentRE matches an identifier in a MetricsQL expression. Label keys
+// exprIdentRE matches an identifier in a PromQL expression. Label keys
 // (`by (node, gpu_uuid)`, `{domain=...}`) never carry the kubeneuron_
 // prefix, so the prefix test below keeps only series references.
 var exprIdentRE = regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)

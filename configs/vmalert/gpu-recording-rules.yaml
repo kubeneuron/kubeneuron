@@ -23,7 +23,8 @@
 # the catalog's `derived` table. Not here: alerts and the XID counter
 # (reserved; field 230 is a sticky last-value gauge and is read by no rule).
 #
-# Syntax is vmalert v1.147.0 (MetricsQL). Deployed mirror:
+# Plain PromQL: hack/check-rules.sh checks it with promtool and with
+# vmalert v1.147.0 -dryRun. Deployed mirror:
 # deploy/kubernetes/dependencies/observability/rules.yaml (VMRule
 # kubeneuron-gpu-recording); the groups there must stay identical to these.
 
@@ -54,23 +55,23 @@ groups:
           domain: memory
       # dcgm:112: bitmask -> kubeneuron_gpu_clock_event_active, one series per decoded reason bit
       # (hw_slowdown=8, sw_thermal=32, hw_thermal=64, hw_power_brake=128).
-      # bitmap_and keeps the bit value (0 or the mask); `> bool 0` turns it into
-      # 1 while the bit is set and 0 while it is clear. The series exists only
+      # floor(x / bit) % 2 is the bit itself: 1 while it is set and 0 while it is
+      # clear (plain PromQL, no bitmap_and). The series exists only
       # while the source bitmask is reported; no source sample -> no series.
       - record: kubeneuron_gpu_clock_event_active
-        expr: bitmap_and(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS, 8) > bool 0
+        expr: floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 8) % 2
         labels:
           reason: hw_slowdown
       - record: kubeneuron_gpu_clock_event_active
-        expr: bitmap_and(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS, 32) > bool 0
+        expr: floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 32) % 2
         labels:
           reason: sw_thermal
       - record: kubeneuron_gpu_clock_event_active
-        expr: bitmap_and(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS, 64) > bool 0
+        expr: floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 64) % 2
         labels:
           reason: hw_thermal
       - record: kubeneuron_gpu_clock_event_active
-        expr: bitmap_and(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS, 128) > bool 0
+        expr: floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 128) % 2
         labels:
           reason: hw_power_brake
 
@@ -294,7 +295,7 @@ groups:
   # a missing result (the thermal headroom needs either the margin or both
   # fallback inputs and is missing only when neither is reported), and a
   # zero divisor is excluded by `> 0` rather than turned into Inf or NaN.
-  # label_del removes a fixed catalog label that selected the input so it
+  # label_replace(x, "l", "", "l", ".*") removes a fixed catalog label that selected the input so it
   # does not leak onto the result; identity and placement labels (node,
   # gpu_uuid, cluster, node_pool, ...) flow through untouched and are never
   # grouped on. Components only: no aggregate health or error score; the one
@@ -309,7 +310,7 @@ groups:
     interval: 30s
     rules:
       - record: kubeneuron_gpu_thermal_headroom_celsius
-        expr: kubeneuron_gpu_thermal_margin_celsius or (label_del(kubeneuron_gpu_temperature_limit_celsius{limit="slowdown"}, "limit") - kubeneuron_gpu_temperature_celsius)
+        expr: kubeneuron_gpu_thermal_margin_celsius or (label_replace(kubeneuron_gpu_temperature_limit_celsius{limit="slowdown"}, "limit", "", "limit", ".*") - kubeneuron_gpu_temperature_celsius)
       - record: kubeneuron_gpu_memory_thermal_headroom_celsius
         expr: kubeneuron_gpu_memory_temperature_limit_celsius - kubeneuron_gpu_memory_temperature_celsius
 
@@ -339,24 +340,24 @@ groups:
       # scope (volatile, aggregate) flows through from the counter; only the
       # bits selector is collapsed, so the two scopes never collide.
       - record: kubeneuron_gpu_ecc_corrected_errors_per_second
-        expr: label_del(rate(kubeneuron_gpu_ecc_errors_total{bits="single"}[5m]), "bits")
+        expr: label_replace(rate(kubeneuron_gpu_ecc_errors_total{bits="single"}[5m]), "bits", "", "bits", ".*")
       - record: kubeneuron_gpu_ecc_uncorrectable_errors_per_second
-        expr: label_del(rate(kubeneuron_gpu_ecc_errors_total{bits="double"}[5m]), "bits")
+        expr: label_replace(rate(kubeneuron_gpu_ecc_errors_total{bits="double"}[5m]), "bits", "", "bits", ".*")
       # cause (single_bit, double_bit) flows through; pre-Ampere only.
       - record: kubeneuron_gpu_retired_pages_per_second
         expr: rate(kubeneuron_gpu_retired_pages_total[5m])
       # Uncorrectable ECC: one component per counter scope (311 volatile,
       # 313 aggregate); each reads its own counter and nothing combines them.
       - record: kubeneuron_gpu_memory_hard_fault_active
-        expr: label_del(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="volatile"}[1h]), "bits", "scope") > bool 0
+        expr: label_replace(label_replace(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="volatile"}[1h]), "bits", "", "bits", ".*"), "scope", "", "scope", ".*") > bool 0
         labels:
           component: uncorrectable_ecc_volatile
       - record: kubeneuron_gpu_memory_hard_fault_active
-        expr: label_del(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="aggregate"}[1h]), "bits", "scope") > bool 0
+        expr: label_replace(label_replace(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="aggregate"}[1h]), "bits", "", "bits", ".*"), "scope", "", "scope", ".*") > bool 0
         labels:
           component: uncorrectable_ecc_aggregate
       - record: kubeneuron_gpu_memory_hard_fault_active
-        expr: label_del(increase(kubeneuron_gpu_remapped_rows_total{kind="uncorrectable"}[1h]), "kind") > bool 0
+        expr: label_replace(increase(kubeneuron_gpu_remapped_rows_total{kind="uncorrectable"}[1h]), "kind", "", "kind", ".*") > bool 0
         labels:
           component: uncorrectable_row_remap
       - record: kubeneuron_gpu_memory_hard_fault_active
@@ -384,9 +385,9 @@ groups:
       - record: kubeneuron_gpu_pcie_replays_per_second
         expr: rate(kubeneuron_gpu_pcie_replays_total[5m])
       - record: kubeneuron_gpu_pcie_link_width_ratio
-        expr: label_del(kubeneuron_gpu_pcie_link_width{kind="current"}, "kind") / (label_del(kubeneuron_gpu_pcie_link_width{kind="max"}, "kind") > 0)
+        expr: label_replace(kubeneuron_gpu_pcie_link_width{kind="current"}, "kind", "", "kind", ".*") / (label_replace(kubeneuron_gpu_pcie_link_width{kind="max"}, "kind", "", "kind", ".*") > 0)
       - record: kubeneuron_gpu_pcie_link_generation_ratio
-        expr: label_del(kubeneuron_gpu_pcie_link_generation{kind="current"}, "kind") / (label_del(kubeneuron_gpu_pcie_link_generation{kind="max"}, "kind") > 0)
+        expr: label_replace(kubeneuron_gpu_pcie_link_generation{kind="current"}, "kind", "", "kind", ".*") / (label_replace(kubeneuron_gpu_pcie_link_generation{kind="max"}, "kind", "", "kind", ".*") > 0)
       # type flows through from the counter.
       - record: kubeneuron_gpu_nvlink_errors_per_second
         expr: rate(kubeneuron_gpu_nvlink_errors_total[5m])
@@ -397,7 +398,7 @@ groups:
     rules:
       # class flows through from the counter.
       - record: kubeneuron_gpu_recovered_capacity_hours_total
-        expr: label_del(kubeneuron_degraded_gpu_seconds_total{outcome="resolved"}, "outcome") / 3600
+        expr: label_replace(kubeneuron_degraded_gpu_seconds_total{outcome="resolved"}, "outcome", "", "outcome", ".*") / 3600
 
   # Experimental fail-slow shadow score (recording only; nothing consumes it).
   # Reads the derived clock and throttle ratios. Absent unless the device's SM
@@ -411,4 +412,4 @@ groups:
     interval: 30s
     rules:
       - record: kubeneuron_gpu_fail_slow_score_ratio
-        expr: (1 - max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"}) / on (gpu_model) group_left() (median by (gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"})) > 0)) >= 0.15 and on (node, gpu_uuid, gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_throttle_share_ratio) >= 0.05) and on (gpu_model) (count by (gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"})) >= 3)
+        expr: (1 - max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"}) / on (gpu_model) group_left() (quantile by (gpu_model) (0.5, max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"})) > 0)) >= 0.15 and on (node, gpu_uuid, gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_throttle_share_ratio) >= 0.05) and on (gpu_model) (count by (gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"})) >= 3)

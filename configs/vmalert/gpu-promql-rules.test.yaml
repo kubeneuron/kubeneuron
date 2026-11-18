@@ -1,0 +1,215 @@
+# Unit tests for the rules written in plain PromQL instead of MetricsQL:
+# the clock-event decode, the derived rules that drop a fixed label with
+# label_replace, the fail-slow peer median and the two throttle alerts of
+# gpu-rules.yaml. hack/check-rules.sh runs this one file with both promtool
+# and vmalert-tool, so the same inputs give the same results on Prometheus
+# and on vmalert.
+rule_files:
+  - gpu-recording-rules.yaml
+  - gpu-rules.yaml
+
+evaluation_interval: 30s
+
+tests:
+  - name: the clock-event bitmask decodes into one 0/1 series per reason
+    interval: 30s
+    input_series:
+      # 104 = hw_slowdown (8) + sw_thermal (32) + hw_thermal (64).
+      - series: 'DCGM_FI_DEV_CLOCK_THROTTLE_REASONS{node="n1",gpu="0",UUID="GPU-1"}'
+        values: "104x30"
+      # 129 = hw_power_brake (128) + gpu_idle (1), a bit no rule decodes.
+      - series: 'DCGM_FI_DEV_CLOCK_THROTTLE_REASONS{node="n2",gpu="0",UUID="GPU-2"}'
+        values: "129x30"
+    promql_expr_test:
+      - expr: kubeneuron_gpu_clock_event_active{node="n1"}
+        eval_time: 5m
+        exp_samples:
+          - labels: 'kubeneuron_gpu_clock_event_active{node="n1",gpu="0",UUID="GPU-1",reason="hw_slowdown"}'
+            value: 1
+          - labels: 'kubeneuron_gpu_clock_event_active{node="n1",gpu="0",UUID="GPU-1",reason="sw_thermal"}'
+            value: 1
+          - labels: 'kubeneuron_gpu_clock_event_active{node="n1",gpu="0",UUID="GPU-1",reason="hw_thermal"}'
+            value: 1
+          - labels: 'kubeneuron_gpu_clock_event_active{node="n1",gpu="0",UUID="GPU-1",reason="hw_power_brake"}'
+            value: 0
+      - expr: kubeneuron_gpu_clock_event_active{node="n2"}
+        eval_time: 5m
+        exp_samples:
+          - labels: 'kubeneuron_gpu_clock_event_active{node="n2",gpu="0",UUID="GPU-2",reason="hw_slowdown"}'
+            value: 0
+          - labels: 'kubeneuron_gpu_clock_event_active{node="n2",gpu="0",UUID="GPU-2",reason="sw_thermal"}'
+            value: 0
+          - labels: 'kubeneuron_gpu_clock_event_active{node="n2",gpu="0",UUID="GPU-2",reason="hw_thermal"}'
+            value: 0
+          - labels: 'kubeneuron_gpu_clock_event_active{node="n2",gpu="0",UUID="GPU-2",reason="hw_power_brake"}'
+            value: 1
+
+  - name: a thermal bit fires GpuThermalThrottle, the power-brake bit GpuPowerBrake
+    interval: 30s
+    input_series:
+      # sw_thermal (32) only.
+      - series: 'DCGM_FI_DEV_CLOCK_THROTTLE_REASONS{node="n1",gpu="0",UUID="GPU-1"}'
+        values: "32x30"
+      # hw_power_brake (128) only.
+      - series: 'DCGM_FI_DEV_CLOCK_THROTTLE_REASONS{node="n2",gpu="0",UUID="GPU-2"}'
+        values: "128x30"
+      # gpu_idle (1) and sw_power_cap (4): neither alert.
+      - series: 'DCGM_FI_DEV_CLOCK_THROTTLE_REASONS{node="n3",gpu="0",UUID="GPU-3"}'
+        values: "5x30"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: GpuThermalThrottle
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              node: n1
+              gpu: "0"
+              UUID: GPU-1
+            exp_annotations:
+              runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gputhermalthrottle"
+              summary: "Thermal throttling on n1 GPU 0"
+              description: "HW slowdown/thermal throttle for 10m. Usually a facility issue — do not reset."
+      - eval_time: 12m
+        alertname: GpuPowerBrake
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              node: n2
+              gpu: "0"
+              UUID: GPU-2
+            exp_annotations:
+              runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpupowerbrake"
+              summary: "HW power brake on n2 GPU 0"
+              description: "External power brake asserted for 10m — facility/PSU issue."
+
+  - name: derived rules drop the fixed label that selected their input
+    interval: 30s
+    input_series:
+      # Thermal headroom: n1 from the slowdown limit, n2 from the margin.
+      - series: 'kubeneuron_gpu_temperature_limit_celsius{node="n1",gpu_uuid="GPU-1",limit="slowdown"}'
+        values: "90x170"
+      - series: 'kubeneuron_gpu_temperature_limit_celsius{node="n1",gpu_uuid="GPU-1",limit="shutdown"}'
+        values: "95x170"
+      - series: 'kubeneuron_gpu_temperature_celsius{node="n1",gpu_uuid="GPU-1"}'
+        values: "60x170"
+      - series: 'kubeneuron_gpu_thermal_margin_celsius{node="n2",gpu_uuid="GPU-2"}'
+        values: "12x170"
+      # ECC: 3 errors per 30s single-bit, one double-bit volatile error at
+      # 65m. Evaluated at 75m, an hour after the counters first appear:
+      # vmalert counts the first sample of a new series as an increase from
+      # 0 and Prometheus does not, so a 1h increase that reaches back to the
+      # first sample differs between the two.
+      - series: 'kubeneuron_gpu_ecc_errors_total{node="n1",gpu_uuid="GPU-1",bits="single",scope="volatile"}'
+        values: "0+3x170"
+      - series: 'kubeneuron_gpu_ecc_errors_total{node="n1",gpu_uuid="GPU-1",bits="double",scope="volatile"}'
+        values: "0x130 1x40"
+      - series: 'kubeneuron_gpu_ecc_errors_total{node="n1",gpu_uuid="GPU-1",bits="double",scope="aggregate"}'
+        values: "4x170"
+      - series: 'kubeneuron_gpu_remapped_rows_total{node="n1",gpu_uuid="GPU-1",kind="uncorrectable"}'
+        values: "0x130 2x40"
+      # PCIe: x8 of x16, gen 4 of 4; n2 reports a max of 0.
+      - series: 'kubeneuron_gpu_pcie_link_width{node="n1",gpu_uuid="GPU-1",kind="current"}'
+        values: "8x170"
+      - series: 'kubeneuron_gpu_pcie_link_width{node="n1",gpu_uuid="GPU-1",kind="max"}'
+        values: "16x170"
+      - series: 'kubeneuron_gpu_pcie_link_width{node="n2",gpu_uuid="GPU-2",kind="current"}'
+        values: "8x170"
+      - series: 'kubeneuron_gpu_pcie_link_width{node="n2",gpu_uuid="GPU-2",kind="max"}'
+        values: "0x170"
+      - series: 'kubeneuron_gpu_pcie_link_generation{node="n1",gpu_uuid="GPU-1",kind="current"}'
+        values: "4x170"
+      - series: 'kubeneuron_gpu_pcie_link_generation{node="n1",gpu_uuid="GPU-1",kind="max"}'
+        values: "4x170"
+      # Two resolved hours of class thermal; the abandoned ones are not counted.
+      - series: 'kubeneuron_degraded_gpu_seconds_total{class="thermal",outcome="resolved"}'
+        values: "7200x170"
+      - series: 'kubeneuron_degraded_gpu_seconds_total{class="thermal",outcome="abandoned"}'
+        values: "3600x170"
+    promql_expr_test:
+      - expr: kubeneuron_gpu_thermal_headroom_celsius
+        eval_time: 75m
+        exp_samples:
+          - labels: 'kubeneuron_gpu_thermal_headroom_celsius{node="n1",gpu_uuid="GPU-1"}'
+            value: 30
+          - labels: 'kubeneuron_gpu_thermal_headroom_celsius{node="n2",gpu_uuid="GPU-2"}'
+            value: 12
+      - expr: kubeneuron_gpu_ecc_corrected_errors_per_second
+        eval_time: 75m
+        exp_samples:
+          - labels: 'kubeneuron_gpu_ecc_corrected_errors_per_second{node="n1",gpu_uuid="GPU-1",scope="volatile"}'
+            value: 0.1
+      - expr: kubeneuron_gpu_ecc_uncorrectable_errors_per_second
+        eval_time: 75m
+        exp_samples:
+          - labels: 'kubeneuron_gpu_ecc_uncorrectable_errors_per_second{node="n1",gpu_uuid="GPU-1",scope="volatile"}'
+            value: 0
+          - labels: 'kubeneuron_gpu_ecc_uncorrectable_errors_per_second{node="n1",gpu_uuid="GPU-1",scope="aggregate"}'
+            value: 0
+      - expr: kubeneuron_gpu_memory_hard_fault_active{component=~"uncorrectable_.*"}
+        eval_time: 75m
+        exp_samples:
+          - labels: 'kubeneuron_gpu_memory_hard_fault_active{node="n1",gpu_uuid="GPU-1",component="uncorrectable_ecc_volatile"}'
+            value: 1
+          - labels: 'kubeneuron_gpu_memory_hard_fault_active{node="n1",gpu_uuid="GPU-1",component="uncorrectable_ecc_aggregate"}'
+            value: 0
+          - labels: 'kubeneuron_gpu_memory_hard_fault_active{node="n1",gpu_uuid="GPU-1",component="uncorrectable_row_remap"}'
+            value: 1
+      - expr: kubeneuron_gpu_pcie_link_width_ratio
+        eval_time: 75m
+        exp_samples:
+          - labels: 'kubeneuron_gpu_pcie_link_width_ratio{node="n1",gpu_uuid="GPU-1"}'
+            value: 0.5
+      - expr: kubeneuron_gpu_pcie_link_generation_ratio
+        eval_time: 75m
+        exp_samples:
+          - labels: 'kubeneuron_gpu_pcie_link_generation_ratio{node="n1",gpu_uuid="GPU-1"}'
+            value: 1
+      - expr: kubeneuron_gpu_recovered_capacity_hours_total
+        eval_time: 75m
+        exp_samples:
+          - labels: 'kubeneuron_gpu_recovered_capacity_hours_total{class="thermal"}'
+            value: 2
+
+  - name: the fail-slow score compares a device to the median of its peers
+    interval: 30s
+    input_series:
+      # Model A, three devices: median 1, the 0.5 device scores 0.5.
+      - series: 'kubeneuron_gpu_clock_ratio{node="a1",gpu_uuid="GPU-A1",gpu_model="A",domain="sm"}'
+        values: "1x30"
+      - series: 'kubeneuron_gpu_clock_ratio{node="a2",gpu_uuid="GPU-A2",gpu_model="A",domain="sm"}'
+        values: "1x30"
+      - series: 'kubeneuron_gpu_clock_ratio{node="a3",gpu_uuid="GPU-A3",gpu_model="A",domain="sm"}'
+        values: "0.5x30"
+      # Model B, four devices: the median of 0.25, 0.5, 1.5, 1.5 is 1 (the
+      # mean of the two middle values), so 0.25 scores 0.75 and 0.5 scores 0.5.
+      - series: 'kubeneuron_gpu_clock_ratio{node="b1",gpu_uuid="GPU-B1",gpu_model="B",domain="sm"}'
+        values: "0.25x30"
+      - series: 'kubeneuron_gpu_clock_ratio{node="b2",gpu_uuid="GPU-B2",gpu_model="B",domain="sm"}'
+        values: "0.5x30"
+      - series: 'kubeneuron_gpu_clock_ratio{node="b3",gpu_uuid="GPU-B3",gpu_model="B",domain="sm"}'
+        values: "1.5x30"
+      - series: 'kubeneuron_gpu_clock_ratio{node="b4",gpu_uuid="GPU-B4",gpu_model="B",domain="sm"}'
+        values: "1.5x30"
+      # Model C, two devices: below the three-device floor, no score.
+      - series: 'kubeneuron_gpu_clock_ratio{node="c1",gpu_uuid="GPU-C1",gpu_model="C",domain="sm"}'
+        values: "1x30"
+      - series: 'kubeneuron_gpu_clock_ratio{node="c2",gpu_uuid="GPU-C2",gpu_model="C",domain="sm"}'
+        values: "0.25x30"
+      - series: 'kubeneuron_gpu_throttle_share_ratio{node="a3",gpu_uuid="GPU-A3",gpu_model="A",reason="sw_thermal"}'
+        values: "0.25x30"
+      - series: 'kubeneuron_gpu_throttle_share_ratio{node="b1",gpu_uuid="GPU-B1",gpu_model="B",reason="sw_thermal"}'
+        values: "0.25x30"
+      - series: 'kubeneuron_gpu_throttle_share_ratio{node="b2",gpu_uuid="GPU-B2",gpu_model="B",reason="sw_thermal"}'
+        values: "0.25x30"
+      - series: 'kubeneuron_gpu_throttle_share_ratio{node="c2",gpu_uuid="GPU-C2",gpu_model="C",reason="sw_thermal"}'
+        values: "0.25x30"
+    promql_expr_test:
+      - expr: kubeneuron_gpu_fail_slow_score_ratio
+        eval_time: 10m
+        exp_samples:
+          - labels: 'kubeneuron_gpu_fail_slow_score_ratio{node="a3",gpu_uuid="GPU-A3",gpu_model="A"}'
+            value: 0.5
+          - labels: 'kubeneuron_gpu_fail_slow_score_ratio{node="b1",gpu_uuid="GPU-B1",gpu_model="B"}'
+            value: 0.75
+          - labels: 'kubeneuron_gpu_fail_slow_score_ratio{node="b2",gpu_uuid="GPU-B2",gpu_model="B"}'
+            value: 0.5

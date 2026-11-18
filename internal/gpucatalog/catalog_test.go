@@ -1684,8 +1684,8 @@ func TestDerivedMemoryCoverageRejectsDrift(t *testing.T) {
 	cases := map[string]string{
 		"wrong scope":    strings.Replace(ok, `scope="aggregate"`, `scope="volatile"`, 1),
 		"unscoped":       strings.Replace(ok, `{bits="double",scope="aggregate"}`, `{bits="double"}`, 1),
-		"summed scopes":  `sum(label_del(increase(kubeneuron_gpu_ecc_errors_total{bits="double"}[1h]), "bits", "scope")) > bool 0`,
-		"or fallback":    `(` + ok + `) or (label_del(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="volatile"}[1h]), "bits", "scope") > bool 0)`,
+		"summed scopes":  `sum without (bits, scope) (increase(kubeneuron_gpu_ecc_errors_total{bits="double"}[1h])) > bool 0`,
+		"or fallback":    `(` + ok + `) or (label_replace(label_replace(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="volatile"}[1h]), "bits", "", "bits", ".*"), "scope", "", "scope", ".*") > bool 0)`,
 		"not a boolean":  strings.TrimSuffix(ok, " > bool 0"),
 		"double counted": strings.Replace(ok, `scope="aggregate"}[1h])`, `scope="aggregate"}[1h]) + increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="aggregate"}[1h])`, 1),
 	}
@@ -1747,7 +1747,7 @@ func TestFailSlowContract(t *testing.T) {
 		t.Errorf("inputs %v", d.Inputs)
 	}
 	for _, want := range []string{
-		`median by (gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"}))`,
+		`quantile by (gpu_model) (0.5, max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"}))`,
 		`>= 0.15`, `>= 0.05`, `>= 3`,
 		`max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_throttle_share_ratio)`,
 		`count by (gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"}))`,

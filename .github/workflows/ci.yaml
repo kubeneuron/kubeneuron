@@ -290,6 +290,9 @@ jobs:
       - name: Alert rule unit tests (vmalert-tool, pinned by digest)
         run: make test-alert-rules
 
+      - name: Rules and dashboards are plain PromQL (promtool and vmalert, pinned by digest)
+        run: make check-rules
+
       - name: actionlint (workflow files stay valid)
         # From the module's own tool dependency, not @version: the fetch form
         # reaches the network on every run, so a proxy hiccup fails the lint

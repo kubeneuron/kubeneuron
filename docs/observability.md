@@ -56,7 +56,15 @@ Collector at your own store instead. The Managed store comes with vmalert,
 which writes the `kubeneuron_gpu_*` series the dashboards read and sends
 metric alerts to the controller. An External store gets neither: run
 `configs/vmalert/gpu-recording-rules.yaml` and
-`configs/vmalert/gpu-alert-rules.yaml` against it yourself.
+`configs/vmalert/gpu-alert-rules.yaml` against it yourself. The rule files
+in `configs/vmalert` and the dashboard queries are plain PromQL: CI loads
+them with promtool (Prometheus v3.16.0) and with vmalert v1.147.0, and runs
+the same rule unit tests in both (`make check-rules`). That is a check of the
+files, not a run against a live Prometheus. One difference stays between the
+two: vmalert counts the first sample of a new counter as an increase from 0
+and Prometheus does not, so during the first hour of a counter that starts
+above 0 the `kubeneuron_gpu_memory_hard_fault_active` ECC and row-remap
+components can read 1 on vmalert and 0 on Prometheus.
 
 **3. Dashboards.** A Managed Grafana runs the unmodified Grafana OSS image
 (AGPL-3.0), pulled from Docker Hub, with the six boards from

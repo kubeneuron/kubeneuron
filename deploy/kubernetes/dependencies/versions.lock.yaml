@@ -92,6 +92,13 @@ images:
     repository: victoriametrics/vmalert-tool
     tag: v1.147.0
     digest: sha256:b89411be0487fbf0d966047dd76657c18f23522c4e547ae1ac757d644c52335a
+  # The promtool hack/check-rules.sh runs over the rule pack and the
+  # dashboards (from the Prometheus image, entrypoint promtool); test only,
+  # never installed. Apache-2.0.
+  prometheusTool:
+    repository: prom/prometheus
+    tag: v3.16.0
+    digest: sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
   prometheusAlertmanager:
     repository: prom/alertmanager
     tag: v0.32.1

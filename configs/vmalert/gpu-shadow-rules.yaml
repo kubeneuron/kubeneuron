@@ -28,7 +28,8 @@
 # presence or GPU missing and no telemetry-gap rule in v0.7: the project has
 # no recorded source for those, and a shadow rule must not invent one.
 #
-# Syntax is vmalert v1.147.0 (MetricsQL). Deployed mirror:
+# Plain PromQL: hack/check-rules.sh checks it with promtool and with
+# vmalert v1.147.0 -dryRun. Deployed mirror:
 # deploy/kubernetes/dependencies/observability/rules.yaml (VMRule
 # kubeneuron-gpu-shadow); the group there must stay identical to this one,
 # and shadow rules are never mixed into the controller-facing gpu-hardware,

@@ -498,6 +498,20 @@ API is `v1alpha1`.
 
 ### Changed
 
+- **The default rule pack is plain PromQL.** The recording rules and
+  `gpu-rules.yaml` used MetricsQL functions (`bitmap_and`, `label_del`,
+  `median`) that only vmalert and VictoriaMetrics accept, so Prometheus
+  refused to load those files. The clock-event bits are now read with
+  `floor(x / bit) % 2`, a fixed label is dropped with `label_replace`, and
+  the fail-slow peer median is `quantile(0.5, ...)`; series names, labels
+  and when an alert fires are unchanged. The dashboards were already plain
+  PromQL and are now checked too. CI (`make check-rules`) loads every rule file and every panel
+  expression with promtool (Prometheus v3.16.0) and with vmalert v1.147.0
+  `-dryRun`, and runs one set of rule unit tests in both promtool and
+  vmalert-tool. This is a check of the files, not a run against a live
+  Prometheus. A Go test also fails on a MetricsQL-only function in the
+  rules or the dashboards.
+
 - `kubeneuron_incidents_recovered_total` now requires an audited live
   remediation followed by verified resolution. Dashboards and alerts using
   this counter may show fewer recoveries after upgrade because manual and

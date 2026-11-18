@@ -79,10 +79,10 @@ groups:
   - name: gpu-thermal-power
     interval: 30s
     rules:
-      # bitmap_and is MetricsQL (vmalert/VictoriaMetrics). Throttle-reason
+      # Plain PromQL: floor(x / bit) % 2 is one bit of the bitmask. Throttle-reason
       # bits: 8=HW_SLOWDOWN, 32=SW_THERMAL, 64=HW_THERMAL, 128=HW_POWER_BRAKE.
       - alert: GpuThermalThrottle
-        expr: bitmap_and(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS, 104) > 0
+        expr: (floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 8) % 2 + floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 32) % 2 + floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 64) % 2) > 0
         for: 10m
         labels:
           severity: warning
@@ -102,7 +102,7 @@ groups:
           description: "Sustained temperature above 88C. Drain the node; investigate cooling."
 
       - alert: GpuPowerBrake
-        expr: bitmap_and(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS, 128) > 0
+        expr: floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 128) % 2 > 0
         for: 10m
         labels:
           severity: warning

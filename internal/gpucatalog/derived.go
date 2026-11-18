@@ -43,7 +43,7 @@ type DerivedSignal struct {
 	// (a rate over kubeneuron_gpu_throttle_seconds_total keeps reason).
 	// Identity and placement labels always flow through and are not listed.
 	Carried []string `yaml:"carried,omitempty" json:"carried,omitempty"`
-	// Formula is the MetricsQL expression, exactly as the recording rule
+	// Formula is the PromQL expression, exactly as the recording rule
 	// states it. Empty only when Deferred is set.
 	Formula string `yaml:"formula,omitempty" json:"formula,omitempty"`
 	// Inputs are the catalog series (canonical kubeneuron_gpu_* or Tier T4
@@ -106,12 +106,13 @@ const DerivedRateWindow = "5m"
 // the experimental fail-slow peer score is the only permitted score and it
 // aggregates nothing, see above), anything reading XID 230, recovery action
 // 1523 or the uncataloged NVLink byte rates 1011/1012. Fixed-label inputs
-// that must not leak into a result are removed with label_del, which the
-// pinned vmalert (v1.147.0) accepts.
+// that must not leak into a result are removed with
+// label_replace(x, "l", "", "l", ".*"): plain PromQL, so the rules load in
+// Prometheus as well as in vmalert.
 var DerivedSignals = []DerivedSignal{
 	{
 		Series: "kubeneuron_gpu_thermal_headroom_celsius", Kind: KindGauge, Unit: UnitCelsius, Group: DerivedGroupThermal,
-		Formula: `kubeneuron_gpu_thermal_margin_celsius or (label_del(kubeneuron_gpu_temperature_limit_celsius{limit="slowdown"}, "limit") - kubeneuron_gpu_temperature_celsius)`,
+		Formula: `kubeneuron_gpu_thermal_margin_celsius or (label_replace(kubeneuron_gpu_temperature_limit_celsius{limit="slowdown"}, "limit", "", "limit", ".*") - kubeneuron_gpu_temperature_celsius)`,
 		Inputs:  []string{"kubeneuron_gpu_thermal_margin_celsius", "kubeneuron_gpu_temperature_limit_celsius", "kubeneuron_gpu_temperature_celsius"},
 		NoData:  "absent when the GPU reports neither a thermal margin (153) nor both a slowdown threshold (158) and a temperature (150); the fallback is used only for devices with no margin sample, never summed with it.",
 		Help:    "Degrees of headroom before thermal slowdown: the reported thermal margin, else slowdown threshold minus GPU temperature.",
@@ -153,14 +154,14 @@ var DerivedSignals = []DerivedSignal{
 	},
 	{
 		Series: "kubeneuron_gpu_ecc_corrected_errors_per_second", Kind: KindGauge, Unit: UnitCount, Group: DerivedGroupMemory, Carried: []string{"scope"},
-		Formula: `label_del(rate(kubeneuron_gpu_ecc_errors_total{bits="single"}[5m]), "bits")`,
+		Formula: `label_replace(rate(kubeneuron_gpu_ecc_errors_total{bits="single"}[5m]), "bits", "", "bits", ".*")`,
 		Inputs:  []string{"kubeneuron_gpu_ecc_errors_total"},
 		NoData:  "absent per scope when the single-bit ECC counter for that scope (310 volatile, 312 aggregate) is not reported (ECC disabled or unsupported) or has fewer than two samples in the window; scope stays on the result so the two never collide.",
 		Help:    "Corrected (single-bit) ECC errors per second over the last 5m, per scope (volatile, aggregate); a soft-error rate, not a fault.",
 	},
 	{
 		Series: "kubeneuron_gpu_ecc_uncorrectable_errors_per_second", Kind: KindGauge, Unit: UnitCount, Group: DerivedGroupMemory, Carried: []string{"scope"},
-		Formula: `label_del(rate(kubeneuron_gpu_ecc_errors_total{bits="double"}[5m]), "bits")`,
+		Formula: `label_replace(rate(kubeneuron_gpu_ecc_errors_total{bits="double"}[5m]), "bits", "", "bits", ".*")`,
 		Inputs:  []string{"kubeneuron_gpu_ecc_errors_total"},
 		NoData:  "absent per scope when the double-bit ECC counter for that scope (311 volatile, 313 aggregate) is not reported or has fewer than two samples in the window; scope stays on the result so the two never collide.",
 		Help:    "Uncorrectable (double-bit) ECC errors per second over the last 5m, per scope (volatile, aggregate).",
@@ -174,21 +175,21 @@ var DerivedSignals = []DerivedSignal{
 	},
 	{
 		Series: "kubeneuron_gpu_memory_hard_fault_active", Kind: KindGauge, Unit: UnitBool, Group: DerivedGroupMemory, Labels: []Label{L("component", "uncorrectable_ecc_volatile")},
-		Formula: `label_del(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="volatile"}[1h]), "bits", "scope") > bool 0`,
+		Formula: `label_replace(label_replace(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="volatile"}[1h]), "bits", "", "bits", ".*"), "scope", "", "scope", ".*") > bool 0`,
 		Inputs:  []string{"kubeneuron_gpu_ecc_errors_total"},
 		NoData:  "absent when the volatile double-bit ECC counter (311) is not reported (ECC disabled or unsupported) or has fewer than two samples in the 1h window; 0 when it is reported and did not grow in the last hour. Reads 311 only; the aggregate counter (313) is its own component, and the two are never combined.",
 		Help:    "1 while the volatile (since last reset) uncorrectable ECC counter grew in the last hour. One component of hard memory fault; components are never summed.",
 	},
 	{
 		Series: "kubeneuron_gpu_memory_hard_fault_active", Kind: KindGauge, Unit: UnitBool, Group: DerivedGroupMemory, Labels: []Label{L("component", "uncorrectable_ecc_aggregate")},
-		Formula: `label_del(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="aggregate"}[1h]), "bits", "scope") > bool 0`,
+		Formula: `label_replace(label_replace(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="aggregate"}[1h]), "bits", "", "bits", ".*"), "scope", "", "scope", ".*") > bool 0`,
 		Inputs:  []string{"kubeneuron_gpu_ecc_errors_total"},
 		NoData:  "absent when the aggregate (lifetime) double-bit ECC counter (313) is not reported (ECC disabled or unsupported) or has fewer than two samples in the 1h window; 0 when it is reported and did not grow in the last hour. Reads 313 only; the volatile counter (311) is its own component, and the two are never combined.",
 		Help:    "1 while the aggregate (lifetime, persists across resets) uncorrectable ECC counter grew in the last hour. One component of hard memory fault; components are never summed.",
 	},
 	{
 		Series: "kubeneuron_gpu_memory_hard_fault_active", Kind: KindGauge, Unit: UnitBool, Group: DerivedGroupMemory, Labels: []Label{L("component", "uncorrectable_row_remap")},
-		Formula: `label_del(increase(kubeneuron_gpu_remapped_rows_total{kind="uncorrectable"}[1h]), "kind") > bool 0`,
+		Formula: `label_replace(increase(kubeneuron_gpu_remapped_rows_total{kind="uncorrectable"}[1h]), "kind", "", "kind", ".*") > bool 0`,
 		Inputs:  []string{"kubeneuron_gpu_remapped_rows_total"},
 		NoData:  "absent when the uncorrectable remapped-rows counter (393) is not reported (row remapping is Ampere+, not-applicable on the Tesla T4); 0 when reported and unchanged in the last hour.",
 		Help:    "1 while at least one row was remapped for an uncorrectable error in the last hour.",
@@ -230,14 +231,14 @@ var DerivedSignals = []DerivedSignal{
 	},
 	{
 		Series: "kubeneuron_gpu_pcie_link_width_ratio", Kind: KindGauge, Unit: UnitRatio, Group: DerivedGroupLinks,
-		Formula: `label_del(kubeneuron_gpu_pcie_link_width{kind="current"}, "kind") / (label_del(kubeneuron_gpu_pcie_link_width{kind="max"}, "kind") > 0)`,
+		Formula: `label_replace(kubeneuron_gpu_pcie_link_width{kind="current"}, "kind", "", "kind", ".*") / (label_replace(kubeneuron_gpu_pcie_link_width{kind="max"}, "kind", "", "kind", ".*") > 0)`,
 		Inputs:  []string{"kubeneuron_gpu_pcie_link_width"},
 		NoData:  "absent when the current (237) or maximum (236) link width is not reported, or the maximum is 0.",
 		Help:    "Current PCIe link width as a fraction of the maximum width; below 1 means the link trained narrow.",
 	},
 	{
 		Series: "kubeneuron_gpu_pcie_link_generation_ratio", Kind: KindGauge, Unit: UnitRatio, Group: DerivedGroupLinks,
-		Formula: `label_del(kubeneuron_gpu_pcie_link_generation{kind="current"}, "kind") / (label_del(kubeneuron_gpu_pcie_link_generation{kind="max"}, "kind") > 0)`,
+		Formula: `label_replace(kubeneuron_gpu_pcie_link_generation{kind="current"}, "kind", "", "kind", ".*") / (label_replace(kubeneuron_gpu_pcie_link_generation{kind="max"}, "kind", "", "kind", ".*") > 0)`,
 		Inputs:  []string{"kubeneuron_gpu_pcie_link_generation"},
 		NoData:  "absent when the current (238) or maximum (235) link generation is not reported, or the maximum is 0. The current generation drops legitimately at idle on many boards; a low ratio under load is the signal.",
 		Help:    "Current PCIe link generation as a fraction of the maximum generation.",
@@ -251,14 +252,14 @@ var DerivedSignals = []DerivedSignal{
 	},
 	{
 		Series: "kubeneuron_gpu_recovered_capacity_hours_total", Kind: KindCounter, Unit: UnitHours, Group: DerivedGroupCapacity, Carried: []string{"class"},
-		Formula: `label_del(kubeneuron_degraded_gpu_seconds_total{outcome="resolved"}, "outcome") / 3600`,
+		Formula: `label_replace(kubeneuron_degraded_gpu_seconds_total{outcome="resolved"}, "outcome", "", "outcome", ".*") / 3600`,
 		Inputs:  []string{"kubeneuron_degraded_gpu_seconds_total"},
 		NoData:  "absent until the controller has closed at least one incident as resolved for the class; a fleet with no resolved incident has no sample, not 0.",
 		Help:    "GPU-hours returned to service by resolved incidents, per problem class (resolved degraded GPU-seconds / 3600).",
 	},
 	{
 		Series: "kubeneuron_gpu_fail_slow_score_ratio", Kind: KindGauge, Unit: UnitRatio, Group: DerivedGroupFailSlow, Experimental: true,
-		Formula: `(1 - max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"}) / on (gpu_model) group_left() (median by (gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"})) > 0)) >= 0.15 and on (node, gpu_uuid, gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_throttle_share_ratio) >= 0.05) and on (gpu_model) (count by (gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"})) >= 3)`,
+		Formula: `(1 - max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"}) / on (gpu_model) group_left() (quantile by (gpu_model) (0.5, max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"})) > 0)) >= 0.15 and on (node, gpu_uuid, gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_throttle_share_ratio) >= 0.05) and on (gpu_model) (count by (gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"})) >= 3)`,
 		Inputs:  []string{"kubeneuron_gpu_clock_ratio", "kubeneuron_gpu_throttle_share_ratio"},
 		NoData:  "shadow only: read by the Fail-slow Radar board and the shadow-only ShadowGpuFailSlow alert, which route to humans and trigger no remediation; no controller path consumes it. Absent unless all three gates hold at the sample instant: score = 1 - own SM clock ratio / median SM clock ratio of the gpu_model peer group is at least 0.15 (own clock at least 15% below the peer median); the device's maximum throttle share over 5m across reasons is at least 0.05; and the gpu_model has at least 3 distinct devices (node, gpu_uuid, gpu_model) reporting an SM clock ratio. Inputs are deduplicated to (node, gpu_uuid, gpu_model) before the median and the count, so pod, namespace and container labels do not appear on the result and cannot weight the peer group. Also absent when the peer median is 0 or either input is missing. A healthy, idle or singleton device has no sample, not 0.",
 		Help:    "Fail-slow degradation score: how far the SM clock ratio sits below its gpu_model peer median (1 - own/peer_median), recorded only when the device is also throttled and has at least 3 peers.",

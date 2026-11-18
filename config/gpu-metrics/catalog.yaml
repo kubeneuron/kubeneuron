@@ -1994,7 +1994,7 @@ derived:
   - series: kubeneuron_gpu_thermal_headroom_celsius
     kind: gauge
     unit: celsius
-    formula: kubeneuron_gpu_thermal_margin_celsius or (label_del(kubeneuron_gpu_temperature_limit_celsius{limit="slowdown"}, "limit") - kubeneuron_gpu_temperature_celsius)
+    formula: kubeneuron_gpu_thermal_margin_celsius or (label_replace(kubeneuron_gpu_temperature_limit_celsius{limit="slowdown"}, "limit", "", "limit", ".*") - kubeneuron_gpu_temperature_celsius)
     inputs:
       - kubeneuron_gpu_thermal_margin_celsius
       - kubeneuron_gpu_temperature_limit_celsius
@@ -2060,7 +2060,7 @@ derived:
     unit: count
     carried:
       - scope
-    formula: label_del(rate(kubeneuron_gpu_ecc_errors_total{bits="single"}[5m]), "bits")
+    formula: label_replace(rate(kubeneuron_gpu_ecc_errors_total{bits="single"}[5m]), "bits", "", "bits", ".*")
     inputs:
       - kubeneuron_gpu_ecc_errors_total
     no_data: absent per scope when the single-bit ECC counter for that scope (310 volatile, 312 aggregate) is not reported (ECC disabled or unsupported) or has fewer than two samples in the window; scope stays on the result so the two never collide.
@@ -2071,7 +2071,7 @@ derived:
     unit: count
     carried:
       - scope
-    formula: label_del(rate(kubeneuron_gpu_ecc_errors_total{bits="double"}[5m]), "bits")
+    formula: label_replace(rate(kubeneuron_gpu_ecc_errors_total{bits="double"}[5m]), "bits", "", "bits", ".*")
     inputs:
       - kubeneuron_gpu_ecc_errors_total
     no_data: absent per scope when the double-bit ECC counter for that scope (311 volatile, 313 aggregate) is not reported or has fewer than two samples in the window; scope stays on the result so the two never collide.
@@ -2094,7 +2094,7 @@ derived:
     labels:
       - name: component
         value: uncorrectable_ecc_volatile
-    formula: label_del(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="volatile"}[1h]), "bits", "scope") > bool 0
+    formula: label_replace(label_replace(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="volatile"}[1h]), "bits", "", "bits", ".*"), "scope", "", "scope", ".*") > bool 0
     inputs:
       - kubeneuron_gpu_ecc_errors_total
     no_data: absent when the volatile double-bit ECC counter (311) is not reported (ECC disabled or unsupported) or has fewer than two samples in the 1h window; 0 when it is reported and did not grow in the last hour. Reads 311 only; the aggregate counter (313) is its own component, and the two are never combined.
@@ -2106,7 +2106,7 @@ derived:
     labels:
       - name: component
         value: uncorrectable_ecc_aggregate
-    formula: label_del(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="aggregate"}[1h]), "bits", "scope") > bool 0
+    formula: label_replace(label_replace(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="aggregate"}[1h]), "bits", "", "bits", ".*"), "scope", "", "scope", ".*") > bool 0
     inputs:
       - kubeneuron_gpu_ecc_errors_total
     no_data: absent when the aggregate (lifetime) double-bit ECC counter (313) is not reported (ECC disabled or unsupported) or has fewer than two samples in the 1h window; 0 when it is reported and did not grow in the last hour. Reads 313 only; the volatile counter (311) is its own component, and the two are never combined.
@@ -2118,7 +2118,7 @@ derived:
     labels:
       - name: component
         value: uncorrectable_row_remap
-    formula: label_del(increase(kubeneuron_gpu_remapped_rows_total{kind="uncorrectable"}[1h]), "kind") > bool 0
+    formula: label_replace(increase(kubeneuron_gpu_remapped_rows_total{kind="uncorrectable"}[1h]), "kind", "", "kind", ".*") > bool 0
     inputs:
       - kubeneuron_gpu_remapped_rows_total
     no_data: absent when the uncorrectable remapped-rows counter (393) is not reported (row remapping is Ampere+, not-applicable on the Tesla T4); 0 when reported and unchanged in the last hour.
@@ -2184,7 +2184,7 @@ derived:
   - series: kubeneuron_gpu_pcie_link_width_ratio
     kind: gauge
     unit: ratio
-    formula: label_del(kubeneuron_gpu_pcie_link_width{kind="current"}, "kind") / (label_del(kubeneuron_gpu_pcie_link_width{kind="max"}, "kind") > 0)
+    formula: label_replace(kubeneuron_gpu_pcie_link_width{kind="current"}, "kind", "", "kind", ".*") / (label_replace(kubeneuron_gpu_pcie_link_width{kind="max"}, "kind", "", "kind", ".*") > 0)
     inputs:
       - kubeneuron_gpu_pcie_link_width
     no_data: absent when the current (237) or maximum (236) link width is not reported, or the maximum is 0.
@@ -2193,7 +2193,7 @@ derived:
   - series: kubeneuron_gpu_pcie_link_generation_ratio
     kind: gauge
     unit: ratio
-    formula: label_del(kubeneuron_gpu_pcie_link_generation{kind="current"}, "kind") / (label_del(kubeneuron_gpu_pcie_link_generation{kind="max"}, "kind") > 0)
+    formula: label_replace(kubeneuron_gpu_pcie_link_generation{kind="current"}, "kind", "", "kind", ".*") / (label_replace(kubeneuron_gpu_pcie_link_generation{kind="max"}, "kind", "", "kind", ".*") > 0)
     inputs:
       - kubeneuron_gpu_pcie_link_generation
     no_data: absent when the current (238) or maximum (235) link generation is not reported, or the maximum is 0. The current generation drops legitimately at idle on many boards; a low ratio under load is the signal.
@@ -2215,7 +2215,7 @@ derived:
     unit: hours
     carried:
       - class
-    formula: label_del(kubeneuron_degraded_gpu_seconds_total{outcome="resolved"}, "outcome") / 3600
+    formula: label_replace(kubeneuron_degraded_gpu_seconds_total{outcome="resolved"}, "outcome", "", "outcome", ".*") / 3600
     inputs:
       - kubeneuron_degraded_gpu_seconds_total
     no_data: absent until the controller has closed at least one incident as resolved for the class; a fleet with no resolved incident has no sample, not 0.
@@ -2224,7 +2224,7 @@ derived:
   - series: kubeneuron_gpu_fail_slow_score_ratio
     kind: gauge
     unit: ratio
-    formula: (1 - max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"}) / on (gpu_model) group_left() (median by (gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"})) > 0)) >= 0.15 and on (node, gpu_uuid, gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_throttle_share_ratio) >= 0.05) and on (gpu_model) (count by (gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"})) >= 3)
+    formula: (1 - max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"}) / on (gpu_model) group_left() (quantile by (gpu_model) (0.5, max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"})) > 0)) >= 0.15 and on (node, gpu_uuid, gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_throttle_share_ratio) >= 0.05) and on (gpu_model) (count by (gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"})) >= 3)
     inputs:
       - kubeneuron_gpu_clock_ratio
       - kubeneuron_gpu_throttle_share_ratio
