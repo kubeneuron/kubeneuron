@@ -712,13 +712,8 @@ spec:
                 type: object
               observability:
                 description: |-
-                  ObservabilitySpec describes where KubeNeuron's metrics go and the
-                  alerting dependency.
-
-                  collector, store and grafana are each Managed (the operator runs it),
-                  External (the user's own) or Disabled. A field left out is Disabled, so an
-                  upgrade never deploys anything on its own; the chart and the samples write
-                  Managed for new installations.
+                  Observability is where KubeNeuron's metrics go. Left out, like any of
+                  its parts, it is Disabled: an upgrade never deploys anything on its own.
                 properties:
                   alertmanager:
                     description: |-
@@ -1878,7 +1873,6 @@ spec:
             - agent
             - controller
             - namespace
-            - observability
             - tls
             - workflowStore
             type: object

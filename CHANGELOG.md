@@ -22,7 +22,7 @@ API is `v1alpha1`.
   `--uninstall --delete-data` deletes it too, only when it is labelled as
   this installation's. An installation without these blocks, including one
   upgraded from an earlier release, stays `Disabled` until you add them or
-  re-run the installer. The sample runs the Managed stack. A new
+  re-run the installer with `--observability managed`. The sample runs the Managed stack. A new
   [Observability](docs/observability.md) page describes what each part
   promises, the combinations (an External Collector with the Managed store
   is not offered) and what happens when telemetry is lost.
@@ -123,6 +123,16 @@ API is `v1alpha1`.
   `recycle.enabled: true`.
 
 ### Fixed
+
+- **Re-running the installer no longer replaces what an installation
+  has.** `deploy/install.sh` on an existing installation used to generate a
+  new operator API token, webhook token and panel password and re-apply the
+  whole KubeNeuron, which locked out clients and the Alertmanager or
+  vmalert holding the old tokens and reset edits such as the execution
+  mode. It now keeps the three Secrets and the KubeNeuron's spec, updating
+  only the component images and an explicit `--observability`, and its
+  summary says the token and sign-in were kept instead of printing them as
+  new. TLS material was already the operator's and is untouched.
 
 - **A dead GPU exporter no longer starts recovery (behaviour change of the
   dependency profile).** `GpuExporterDown` used to open a `driver-hang`

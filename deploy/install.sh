@@ -273,16 +273,32 @@ for crd in kubeneurons gpuplaybooks gpuremediationpolicies; do
 	kubectl wait --for=condition=Established "crd/$crd.kubeneuron.io" --timeout=60s >/dev/null
 done
 
+# A re-run changes nothing an installation already has: its tokens (clients
+# and the Alertmanager or vmalert holding them keep working), its panel
+# users and its KubeNeuron, of which only the images and an explicit
+# --observability are updated.
+existing_cr=$(kubectl get kubeneuron "$NAME" --ignore-not-found -o name)
 say "generating operational secrets"
-api_token=$(openssl rand -hex 32)
-kubectl -n "$NS" create secret generic "$NAME-operator-api-token" \
-	--from-literal=token="$api_token" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-kubectl -n "$NS" create secret generic "$NAME-webhook-token" \
-	--from-literal=token="$(openssl rand -hex 32)" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+api_token=$(kubectl -n "$NS" get secret "$NAME-operator-api-token" --ignore-not-found -o jsonpath='{.data.token}' | base64 --decode)
+api_token_kept=1
+if [[ -z $api_token ]]; then
+	api_token_kept=0
+	api_token=$(openssl rand -hex 32)
+	kubectl -n "$NS" create secret generic "$NAME-operator-api-token" \
+		--from-literal=token="$api_token" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+fi
+if [[ -z $(kubectl -n "$NS" get secret "$NAME-webhook-token" --ignore-not-found -o name) ]]; then
+	kubectl -n "$NS" create secret generic "$NAME-webhook-token" \
+		--from-literal=token="$(openssl rand -hex 32)" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+fi
 
 admin_password=""
 auth_block=""
-if [[ -n $ADMIN_USER ]]; then
+panel_users_kept=0
+if [[ -n $(kubectl -n "$NS" get secret "$NAME-panel-users" --ignore-not-found -o name) ]]; then
+	panel_users_kept=1
+	auth_block=$'  auth:\n    users:\n      name: '"$NAME-panel-users"
+elif [[ -n $ADMIN_USER && -z $existing_cr ]]; then
 	hash=""
 	admin_password=$(openssl rand -base64 15)
 	if command -v htpasswd >/dev/null; then
@@ -767,29 +783,37 @@ EOF
 # Managed: the operator runs the Collector, the metrics store with its alert
 # rules, and Grafana. Detection from the agents and recovery never depend on
 # them. Your own Collector or store: set spec.observability by hand
-# (docs/observability.md). A re-run without --observability keeps what the
-# existing installation has, an External store and its Secret included.
+# (docs/observability.md). A re-run without --observability leaves an
+# existing installation's block, or its lack of one, as it is: only a new
+# installation defaults to Managed.
+[[ -n $OBSERVABILITY || -n $existing_cr ]] || OBSERVABILITY=managed
+observability_mode=""
+case $OBSERVABILITY in
+managed) observability_mode=Managed ;;
+disabled)
+	observability_mode=Disabled
+	echo "  WARNING: --observability disabled: no metrics store, no dashboards, and no detection of the faults that reach KubeNeuron only as metric alerts (docs/observability.md)" >&2
+	;;
+esac
 observability_yaml=""
-if [[ -z $OBSERVABILITY ]]; then
-	existing_observability=$(kubectl get kubeneuron "$NAME" --ignore-not-found -o jsonpath='{.spec.observability}')
-	[[ -z $existing_observability ]] || observability_yaml="  observability: $existing_observability"
-	OBSERVABILITY=managed
-fi
-if [[ -z $observability_yaml ]]; then
-	observability_mode=Managed
-	if [[ $OBSERVABILITY == disabled ]]; then
-		observability_mode=Disabled
-		echo "  WARNING: --observability disabled: no metrics store, no dashboards, and no detection of the faults that reach KubeNeuron only as metric alerts (docs/observability.md)" >&2
-	fi
-	observability_yaml="  observability:
+[[ -z $observability_mode ]] || observability_yaml="  observability:
     collector: {mode: $observability_mode}
     store: {mode: $observability_mode}
     grafana: {mode: $observability_mode}"
-fi
-if [[ $observability_yaml == *Managed* ]]; then
+if [[ $observability_mode == Managed ]]; then
 	say "Installing third-party components, unmodified, pulled from their publishers: OpenTelemetry Collector, VictoriaMetrics, vmalert (Apache-2.0) and Grafana (AGPL-3.0). Use --observability disabled to skip them."
 fi
 
+if [[ -n $existing_cr ]]; then
+	say "updating the images of the existing installation $NAME; the rest of its spec is kept"
+	kubectl patch kubeneuron "$NAME" --type merge >/dev/null \
+		-p "{\"spec\":{\"controller\":{\"image\":\"$controller_image\"},\"agent\":{\"image\":\"$agent_image\"}}}"
+	if [[ -n $observability_mode ]]; then
+		# The whole block: a mode change drops the endpoints of the old one.
+		kubectl patch kubeneuron "$NAME" --type json >/dev/null \
+			-p "[{\"op\":\"add\",\"path\":\"/spec/observability\",\"value\":{\"collector\":{\"mode\":\"$observability_mode\"},\"store\":{\"mode\":\"$observability_mode\"},\"grafana\":{\"mode\":\"$observability_mode\"}}}]"
+	fi
+else
 kubectl apply -f - >/dev/null <<EOF
 apiVersion: kubeneuron.io/v1alpha1
 kind: KubeNeuron
@@ -824,6 +848,7 @@ $observability_yaml
     clientSecretRef: {name: $NAME-agent-tls}
     clientCASecretRef: {name: $NAME-agent-client-ca}
 EOF
+fi
 
 # TLS material is issued by the operator, not here.
 #
@@ -861,12 +886,30 @@ if [[ -n $admin_password ]]; then
   Sign in       $ADMIN_USER / $admin_password
                 (change it: kubeneuronctl passwd → update the $NAME-panel-users Secret)
 EOF
+elif ((panel_users_kept)); then
+	cat <<EOF
+  Sign in       unchanged: the $NAME-panel-users Secret was kept
+EOF
+fi
+if ((api_token_kept)); then
+	cat <<EOF
+  API token     unchanged: kept in the $NAME-operator-api-token Secret
+                (kubectl -n $NS get secret $NAME-operator-api-token -o jsonpath='{.data.token}' | base64 -d)
+EOF
+else
+	cat <<EOF
+  API token     $api_token
+EOF
 fi
 cat <<EOF
-  API token     $api_token
                 (automation/CLI: kubeneuronctl --server http://127.0.0.1:8080 --token ...)
-  Mode          DryRun — detection, workflows, approvals, audit; no node is touched.
 EOF
+execution_mode=$(kubectl get kubeneuron "$NAME" -o jsonpath='{.spec.safety.executionMode}')
+if [[ $execution_mode == DryRun ]]; then
+	echo "  Mode          DryRun — detection, workflows, approvals, audit; no node is touched."
+else
+	echo "  Mode          $execution_mode (kept from the existing installation)"
+fi
 if [[ $(kubectl get kubeneuron "$NAME" -o jsonpath='{.spec.observability.grafana.mode}') == Managed ]]; then
 	cat <<EOF
   Dashboards    kubectl -n $NS port-forward service/$NAME-grafana 3000:3000
@@ -883,7 +926,6 @@ cat <<EOF
   Next steps    bind real playbooks/policies (docs/playbook-authoring.md)
                 and follow docs/quickstart.md to check GPU visibility and
                 open a dry-run incident.
-  TLS note      this script generated a self-signed 90-day PKI to get you
-                running; for production follow docs/install.md §3 or
-                deploy/cert-manager/.
+  TLS           issued and renewed by the operator; to bring your own,
+                follow docs/install.md §3 or deploy/cert-manager/.
 EOF

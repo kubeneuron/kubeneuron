@@ -1022,8 +1022,11 @@ type KubeNeuronSpec struct {
 	// Cloud enables node recycle/replace remediation against the cloud provider
 	// behind the nodes. Leave empty to disable it; a RecycleNode/ReplaceNode
 	// step then fails closed rather than silently succeeding.
-	Cloud         *CloudSpec        `json:"cloud,omitempty"`
-	Observability ObservabilitySpec `json:"observability"`
+	Cloud *CloudSpec `json:"cloud,omitempty"`
+	// Observability is where KubeNeuron's metrics go. Left out, like any of
+	// its parts, it is Disabled: an upgrade never deploys anything on its own.
+	// +optional
+	Observability ObservabilitySpec `json:"observability,omitempty"`
 	Archive       *ArchiveSpec      `json:"archive,omitempty"`
 	TLS           TLSSpec           `json:"tls"`
 }

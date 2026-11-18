@@ -55,6 +55,8 @@ connect_api() {
 api() { curl --silent --show-error --fail --noproxy '*' --connect-timeout 5 --max-time 30 -H "@$work/header" "$@"; }
 install
 claim_uid=$("$KUBECTL_BIN" -n "$namespace" get pvc "$name-controller-state" -o jsonpath='{.metadata.uid}')
+token_versions() { "$KUBECTL_BIN" -n "$namespace" get secret "$name-operator-api-token" "$name-webhook-token" -o jsonpath='{.items[*].metadata.resourceVersion}'; }
+tokens=$(token_versions)
 # The installer writes the Managed stack; the operator makes the metrics
 # store's claim, which outlives the installation.
 [[ $("$KUBECTL_BIN" get kubeneuron "$name" -o jsonpath='{.spec.observability.store.mode}') == Managed ]] || fail "installer did not write a Managed store"
@@ -79,12 +81,25 @@ YAML
 other_metrics_uid=$("$KUBECTL_BIN" -n "$namespace" get pvc "$name-b-metrics-store" -o jsonpath='{.metadata.uid}')
 # A re-run without --observability keeps the user's metrics path: here an
 # External store, which must not turn back into Managed.
+# The user's own edits elsewhere in the spec stay too: here Paused.
 "$KUBECTL_BIN" patch kubeneuron "$name" --type merge \
-	-p '{"spec":{"observability":{"store":{"mode":"External","endpoint":"http://metrics.example.invalid:8428/opentelemetry"},"grafana":{"mode":"Disabled"}}}}' >/dev/null
+	-p '{"spec":{"safety":{"executionMode":"Paused"},"observability":{"store":{"mode":"External","endpoint":"http://metrics.example.invalid:8428/opentelemetry"},"grafana":{"mode":"Disabled"}}}}' >/dev/null
 install
+[[ $("$KUBECTL_BIN" get kubeneuron "$name" -o jsonpath='{.spec.safety.executionMode}') == Paused ]] ||
+	fail "a re-run reset the installation's execution mode"
+grep -Fq 'API token     unchanged' "$work/install.log" || fail "a re-run did not report the kept API token"
+"$KUBECTL_BIN" patch kubeneuron "$name" --type merge -p '{"spec":{"safety":{"executionMode":"DryRun"}}}' >/dev/null
 [[ $("$KUBECTL_BIN" get kubeneuron "$name" -o jsonpath='{.spec.observability.store.mode}/{.spec.observability.store.endpoint}/{.spec.observability.grafana.mode}') == External/http://metrics.example.invalid:8428/opentelemetry/Disabled ]] ||
 	fail "a re-run without --observability changed the installation's metrics path"
 [[ -z $("$KUBECTL_BIN" get kubeneuron "$name" -o jsonpath='{.spec.observability.alertmanager}') ]] || fail "installer wrote an Alertmanager"
+# An existing installation without the block (one from before the metrics
+# path existed) gets none from a re-run: Managed is only the default of a
+# new one.
+"$KUBECTL_BIN" patch kubeneuron "$name" --type json -p '[{"op":"remove","path":"/spec/observability"}]' >/dev/null
+install
+[[ $("$KUBECTL_BIN" get kubeneuron "$name" -o jsonpath='{.spec.observability.collector.mode}/{.spec.observability.store.mode}/{.spec.observability.grafana.mode}') != *Managed* ]] ||
+	fail "a re-run without --observability turned on the metrics path of an installation that had none"
+[[ $(token_versions) == "$tokens" ]] || fail "a re-run replaced the API or webhook token of an existing installation"
 connect_api
 "$KUBECTL_BIN" wait "kubeneuron/$name" --for='jsonpath={.status.conditions[?(@.type=="GPUVisibility")].reason}=NoGPUResource' --timeout=180s
 [[ -z $("$KUBECTL_BIN" get kubeneuron "$name" -o 'jsonpath={.status.conditions[?(@.type=="ResetAvailable")].type}') ]] || fail "reset condition present with node actions disabled"

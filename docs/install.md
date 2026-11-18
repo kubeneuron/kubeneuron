@@ -200,10 +200,12 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
     notifications, and real playbooks. For a new installation it writes the
     whole metrics path as `Managed` (see [Observability](observability.md))
     and first names the third-party components it pulls;
-    `--observability disabled` leaves it off. A re-run without
-    `--observability` keeps an existing installation's `observability`
-    block, External endpoints and Secret references included; an explicit
-    flag always applies. `--uninstall` removes the
+    `--observability disabled` leaves it off. A re-run on an existing
+    installation keeps what it has: the API and webhook tokens, the panel
+    users and the KubeNeuron's spec, including its `observability` block
+    (External endpoints and Secret references) or its lack of one. It
+    updates only the component images and, when you pass it,
+    `--observability`. `--uninstall` removes the
     installation while retaining SQLite state and the metrics store's claim;
     `--uninstall --delete-data` explicitly removes both after confirmation.
     Reinstall with the same name, namespace and storage settings to reuse it.
@@ -299,7 +301,8 @@ owns, or generates Secret data.
 ## 4. Tokens and notifications
 
 The one-command installer already creates these as `<name>-operator-api-token`
-and `<name>-webhook-token`; create them by hand only on the manual path, and
+and `<name>-webhook-token`, and a re-run keeps them; create them by hand
+only on the manual path, and
 keep the names consistent with whichever path you used:
 
 ```sh
