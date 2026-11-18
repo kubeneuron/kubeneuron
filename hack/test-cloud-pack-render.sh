@@ -31,8 +31,13 @@ jq -e '
   [ .[] | select(.kind == "GPUPlaybook") ] as $books |
   [$books[].metadata.name] as $names |
   ["Observe", "Cordon", "Drain", "RecycleNode", "ReplaceNode"] as $allowed |
+  # The interruption book only warns and cordons; the warning is its alone.
+  ["CheckpointWarning", "Cordon"] as $interruption |
   ($books | length > 0) and
-  all($books[].spec.steps[].action; . as $action | $allowed | index($action) != null) and
+  ([$books[] | select(.metadata.name == "fleet-cloud-interruption")] | length == 1) and
+  all($books[];
+    (if .metadata.name == "fleet-cloud-interruption" then $interruption else $allowed end) as $ok |
+    all(.spec.steps[].action; . as $action | $ok | index($action) != null)) and
   all(.[] | (.spec.playbookRef, .spec.onFailure.playbookRef) | select(. != null);
       . as $ref | $names | index($ref) != null)
 ' "$tmp/actual" >/dev/null
