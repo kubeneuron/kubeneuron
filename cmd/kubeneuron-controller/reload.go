@@ -75,7 +75,7 @@ func applyRuntimeConfigWithNodePauses(
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-	books, err := playbook.LoadDir(paths.playbooks)
+	books, err := playbook.LoadRuntimeDir(paths.playbooks, cfg.Safety.NodeLevelActions)
 	if err != nil {
 		return fmt.Errorf("loading playbooks: %w", err)
 	}

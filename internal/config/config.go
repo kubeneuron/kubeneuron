@@ -32,6 +32,7 @@ type Config struct {
 
 // Safety mirrors internal/safety.Limits plus flap settings.
 type Safety struct {
+	NodeLevelActions bool `yaml:"node_level_actions,omitempty"`
 	// DryRun is true unless the file says `dry_run: false`. Load seeds it
 	// before decoding, so a file that omits the key cannot enable execution;
 	// a misspelt key is rejected by strict decoding.

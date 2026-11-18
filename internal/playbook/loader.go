@@ -119,3 +119,19 @@ func ValidateEscalationGraph(books map[string]*Playbook) error {
 	}
 	return nil
 }
+
+// LoadRuntimeDir applies the installation opt-in before exposing books to the controller.
+func LoadRuntimeDir(dir string, nodeLevelActions bool) (map[string]*Playbook, error) {
+	books, err := LoadDir(dir)
+	if err != nil || nodeLevelActions {
+		return books, err
+	}
+	for _, book := range books {
+		for _, step := range book.Steps {
+			if IsNodeLevelAction(step.Action) {
+				return nil, fmt.Errorf("playbook %q uses %q while safety.node_level_actions is disabled", book.Name, step.Action)
+			}
+		}
+	}
+	return books, nil
+}

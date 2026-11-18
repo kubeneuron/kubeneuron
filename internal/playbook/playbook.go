@@ -186,3 +186,9 @@ func (d Duration) MarshalYAML() (any, error) {
 
 // Std returns the standard-library duration.
 func (d Duration) Std() time.Duration { return time.Duration(d) }
+
+// IsNodeLevelAction identifies operations restricted to the alpha node-level pack.
+func IsNodeLevelAction(wire string) bool {
+	def, _ := action.ByWire(wire)
+	return def.Kind == action.KindAgent || wire == "platform.quiesce_accelerator_stack" || wire == "platform.restore_accelerator_stack"
+}

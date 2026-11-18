@@ -524,7 +524,8 @@ func TestReloadRefusesPlaybookThatRebootsWithoutApproval(t *testing.T) {
 		}
 	}
 	policies := filepath.Join(dir, "runtime.yaml")
-	if err := os.WriteFile(policies, []byte("policies:\n  - match: {class: fell-off-bus}\n    playbook: reboot-now\n"), 0o644); err != nil {
+	const policyText = "policies:\n  - match: {class: fell-off-bus}\n    playbook: reboot-now\n"
+	if err := os.WriteFile(policies, []byte(policyText), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	st, err := storesqlite.Open(":memory:")
@@ -540,6 +541,12 @@ func TestReloadRefusesPlaybookThatRebootsWithoutApproval(t *testing.T) {
 	logSink := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	book("    approval: required\n")
+	if err := applyRuntimeConfig(ctx, ctrl, api, paths, logSink); err == nil || !strings.Contains(err.Error(), "node_level_actions is disabled") {
+		t.Fatalf("expected refusal without node-level opt-in, got %v", err)
+	}
+	if err := os.WriteFile(policies, []byte("safety: {node_level_actions: true}\n"+policyText), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := applyRuntimeConfig(ctx, ctrl, api, paths, logSink); err != nil {
 		t.Fatalf("an approved reboot must load: %v", err)
 	}

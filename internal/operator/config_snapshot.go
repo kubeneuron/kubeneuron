@@ -115,6 +115,7 @@ func CompileSnapshot(
 	// destructive-execution nodes.
 	cfg := config.Config{
 		Safety: config.Safety{
+			NodeLevelActions:          installation.Spec.Safety.NodeLevelActions,
 			DryRun:                    effectiveExecutionMode(installation.Spec.Safety) != kubeneuronv1alpha1.ExecutionModeEnabled,
 			MaxConcurrentRemediations: effectivePositive(installation.Spec.Safety.MaxConcurrentRemediations, 2),
 			MaxConcurrentReboots:      effectivePositive(installation.Spec.Safety.MaxConcurrentReboots, 1),
@@ -961,11 +962,6 @@ func effectivePositive(value int32, defaultValue int) int {
 	return int(value)
 }
 
-func nodeLevelAction(wire string) bool {
-	def, _ := action.ByWire(wire)
-	return def.Kind == action.KindAgent || wire == "platform.quiesce_accelerator_stack" || wire == "platform.restore_accelerator_stack"
-}
-
 func compilePolicies(
 	installation *kubeneuronv1alpha1.KubeNeuron,
 	policies []kubeneuronv1alpha1.GPURemediationPolicy,
@@ -1009,7 +1005,7 @@ func compilePolicies(
 			// compilePlaybookIndex has already verified that escalation paths are acyclic.
 			for book := books[policy.Spec.PlaybookRef]; book != nil; book = books[book.OnFailure.EscalateTo] {
 				for _, step := range book.Steps {
-					if nodeLevelAction(step.Action) {
+					if playbook.IsNodeLevelAction(step.Action) {
 						return nil, fmt.Errorf("policy %q: Automatic mode cannot use node-level action %q in playbook %q; use Approval mode", policy.Name, step.Action, book.Name)
 					}
 				}
@@ -1060,7 +1056,7 @@ func compilePlaybookIndex(installation *kubeneuronv1alpha1.KubeNeuron, playbooks
 		}
 		if !installation.Spec.Safety.NodeLevelActions {
 			for _, step := range book.Steps {
-				if nodeLevelAction(step.Action) {
+				if playbook.IsNodeLevelAction(step.Action) {
 					return nil, fmt.Errorf("playbook %q uses %q while spec.safety.nodeLevelActions is disabled", book.Name, step.Action)
 				}
 			}
