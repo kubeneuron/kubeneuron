@@ -177,9 +177,8 @@ func TestWalkVerifyingResolvesAfterQuietWindow(t *testing.T) {
 	if !resolved {
 		t.Fatal("resolution must be notified")
 	}
-	// The playbook cooldown must now be recorded on the gate.
-	if c.gate.CooldownRemaining(types.Target{Node: "n1", GPUUUID: "GPU-1"}, playbookCooldownAction("drain-and-reset")) == 0 {
-		t.Fatal("playbook cooldown must be recorded after resolve")
+	if c.gate.CooldownRemaining(types.Target{Node: "n1", GPUUUID: "GPU-1"}, playbookCooldownAction("drain-and-reset")) != 0 {
+		t.Fatal("dry-run resolution must leave the live playbook cooldown clear")
 	}
 }
 

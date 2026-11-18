@@ -596,14 +596,6 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 		}
 		depth = reason
 	}
-	cooldown := time.Duration(0)
-	if book, ok := c.runtimeConfig(ctx).Engine.Playbook(inc.Playbook); ok {
-		cooldown = book.Cooldown.Std()
-	}
-	// Record the playbook cooldown only: this path holds no gate slot (each
-	// step released its own in startStep), so it must not call Done and
-	// release a reservation a concurrent incident on the same target owns.
-	c.gate.RecordCooldown(inc.Target, playbookCooldownAction(inc.Playbook), cooldown)
 	result := fmt.Sprintf("healthy: quiet for %s", c.runtimeConfig(ctx).VerifyQuiet)
 	if depth != "" {
 		result += "; " + depth
@@ -614,6 +606,13 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 	}
 	if err := c.transition(ctx, inc, types.StateResolved, "system", "resolve", result, evidence); err != nil {
 		return err
+	}
+	// Only a committed live recovery starts the playbook cooldown. A
+	// simulation must not delay the next live response to this target.
+	if !c.simulating(ctx, inc) {
+		if book, ok := c.runtimeConfig(ctx).Engine.Playbook(inc.Playbook); ok {
+			c.gate.RecordCooldown(inc.Target, playbookCooldownAction(inc.Playbook), book.Cooldown.Std())
+		}
 	}
 	if c.flap != nil {
 		c.flap.RecordResolved(inc.Target, inc.Class)
