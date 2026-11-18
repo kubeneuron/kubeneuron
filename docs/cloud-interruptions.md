@@ -38,10 +38,13 @@ handler. GKE sets no documented node signal for spot reclaim; a GKE spot
 node is not covered.
 
 A signal without a time is assumed due a fixed time after KubeNeuron first
-read it, the shortest notice documented for its source:
+read it, the shortest notice documented for its source, or a stated
+assumption where the source documents none:
 
 - AWS spot: 2 minutes. AWS sends the notice two minutes before the instance
-  stops, and the handler taints the node when it receives it.
+  stops, and the handler taints the node when it receives it. The real
+  deadline is earlier than assumed by the time the notice took to reach the
+  node.
 - AKS `VMEventScheduled`: 30 seconds. The condition does not say which
   Azure event is scheduled, and a preempted VM gets at least 30 seconds.
 - GKE `impending-node-termination`: 30 seconds. GKE documents no time
@@ -82,6 +85,11 @@ writes annotations on opted-in pods and stops nothing. The circuit breaker,
 the concurrency limits and the cooldowns do not hold it, so a mass reclaim
 warns every node; they apply to the cordon. A global pause holds both.
 
+An announced interruption is not a fault. It does not count toward the
+circuit breaker of a repair policy, so a mass spot reclaim does not stop the
+automatic repair of broken nodes. The breaker of the interruption's own cordon
+counts only interruptions.
+
 ### When it happens
 
 The incident and its notification are created as soon as the notice is read.
@@ -121,7 +129,11 @@ incident is running.
 ## What is recorded
 
 The incident records the kind, the deadline and the source of each notice.
-It does not record the cloud's message text. When the workloads cannot
+It does not record the cloud's message text. The node is not counted
+as degraded: the incident is left out of `kubeneuron_degraded_gpus`,
+`kubeneuron_degraded_gpu_seconds_total` and
+`kubeneuron_incidents_recovered_total`, and `kubeneuronctl report` counts
+announced interruptions apart, with no GPU-hours. When the workloads cannot
 be read at the deadline, the outcome is recorded as unknown, not as missed.
 The metric
 `kubeneuron_cloud_interruptions_total` counts notices and warning outcomes by

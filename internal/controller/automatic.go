@@ -108,14 +108,18 @@ func (c *Controller) authorizeByPolicy(ctx context.Context, inc *types.Incident,
 		}
 	}
 	// Unhealthy: a node of the pool with an open incident, or one the
-	// platform reports not Ready.
+	// platform reports not Ready. An interruption the cloud announced is not
+	// a fault: it does not count toward a repair policy's breaker, so a mass
+	// spot reclaim does not stop the repair of broken nodes. The breaker of
+	// an interruption's cordon counts only interruptions.
+	interruption := inc.Class == types.ClassCloudInterruption
 	unhealthy := map[string]bool{}
 	for _, other := range open {
-		if poolNodes[other.Target.Node] {
+		if poolNodes[other.Target.Node] && (other.Class == types.ClassCloudInterruption) == interruption {
 			unhealthy[other.Target.Node] = true
 		}
 	}
-	if readiness, ok := c.platform.(nodeReadiness); ok {
+	if readiness, ok := c.platform.(nodeReadiness); ok && !interruption {
 		for name := range poolNodes {
 			if unhealthy[name] {
 				continue

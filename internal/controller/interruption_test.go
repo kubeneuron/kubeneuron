@@ -720,3 +720,66 @@ func TestInterruptionPassReadsTheIncidentsOnce(t *testing.T) {
 		t.Fatalf("a settled pass listed %d times and read %d trails, want 1 and 0", lists, trails)
 	}
 }
+
+// An interruption the cloud announced is not a degraded node: it is left out
+// of the report's GPU-hours and of the degraded gauge.
+func TestInterruptionIsNotDegradation(t *testing.T) {
+	to := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	got := aggregateRecovery([]*types.Incident{
+		incident("i1", types.ClassCloudInterruption, "n", "", types.StateResolved, at(to, -20), at(to, -2)),
+		incident("i2", types.ClassFellOffBus, "n", "", types.StateResolved, at(to, -6), at(to, -4)),
+	}, map[string]int{"n": 8}, map[string]bool{"i1": true, "i2": true}, to.Add(-24*time.Hour), to)
+	if got.AnnouncedInterruptions != 1 || got.Incidents != 1 || got.DegradedGPUHours != 16 || got.Recovered != 1 {
+		t.Fatalf("report %+v; want the interruption counted apart, with no GPU-hours", got)
+	}
+
+	c, st, plat, _ := interruptionFixture(t, interruptionEngine(t, recoverymode.Approval, nil), liveLimits(), 1)
+	plat.announce(spotNotice("n1", time.Time{}))
+	c.pollInterruptions(context.Background())
+	settle(t, c, st, interruptionIncident(t, st, "n1").ID)
+	degraded, err := c.DegradedGPUs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, n := range degraded {
+		if key.Class == string(types.ClassCloudInterruption) && n > 0 {
+			t.Fatalf("degraded gauge counts the interruption: %v", degraded)
+		}
+	}
+}
+
+func openIncidentOf(t *testing.T, st *sqlite.Store, id string, class types.ProblemClass, node string) {
+	t.Helper()
+	now := time.Now()
+	if err := st.CreateIncident(context.Background(), &types.Incident{ID: id, Class: class, Target: types.Target{Node: node},
+		State: types.StateObserving, OpenedAt: now, UpdatedAt: now, StateChangedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A mass spot reclaim does not trip the breaker of a repair policy: the
+// broken node is still repaired automatically.
+func TestInterruptionsDoNotTripARepairBreaker(t *testing.T) {
+	c, st, notifier := autoFixture(t, recoverymode.Automatic, autoSettings(), 4)
+	for i := 2; i <= 4; i++ {
+		openIncidentOf(t, st, "spot-"+nodeName(i), types.ClassCloudInterruption, nodeName(i))
+	}
+	if inc := step(t, c, st, openOn(t, c, "n1"), 200); inc.State != types.StateResolved || len(notifier.approvals) != 0 {
+		t.Fatalf("state=%s approvals=%v, want the fault repaired despite the announced interruptions", inc.State, notifier.approvals)
+	}
+}
+
+// The breaker of an interruption's cordon counts only interruptions: faults
+// elsewhere in the pool do not hold it.
+func TestInterruptionCordonBreakerCountsOnlyInterruptions(t *testing.T) {
+	c, st, plat, _ := interruptionFixture(t, interruptionEngine(t, recoverymode.Automatic, autoSettings()), liveLimits(), 4)
+	for i := 2; i <= 4; i++ {
+		openIncidentOf(t, st, "fault-"+nodeName(i), types.ClassFellOffBus, nodeName(i))
+	}
+	plat.announce(spotNotice("n1", time.Time{}))
+	c.pollInterruptions(context.Background())
+	settle(t, c, st, interruptionIncident(t, st, "n1").ID)
+	if got := plat.cordoned(); len(got) != 1 || !strings.HasPrefix(got[0], "n1/") {
+		t.Fatalf("cordons %v; faults on other nodes held the interruption's cordon", got)
+	}
+}

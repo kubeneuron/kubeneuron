@@ -34,7 +34,9 @@ API is `v1alpha1`.
   within `spec.interruption.lead` (default `10m`) of the deadline; a
   `rebalance` hint is only recorded. The incident ends when the node is gone
   or its notice is no longer present; a notice still present an hour after
-  its deadline goes to a person with the cordon kept. A spot notice is about
+  its deadline goes to a person with the cordon kept. An announced
+  interruption is not counted as degraded capacity, in the report or the
+  metrics, nor toward a repair policy's circuit breaker. A spot notice is about
   two minutes on AWS and shorter elsewhere, so a checkpoint is asked for, not
   guaranteed.
   The cloud pack adds the playbook and its policy. New metric

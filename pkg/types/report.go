@@ -104,6 +104,11 @@ type RecoveryReport struct {
 	// large count here means "the system is watching but not acting", which
 	// is a different and much better answer than a fabricated one.
 	DryRunExcluded int `json:"dry_run_excluded"`
+	// AnnouncedInterruptions counts cloud-interruption incidents whose
+	// interval overlaps the window. An interruption the cloud announced is
+	// not a fault of the node: it is left out of every GPU-hour, incident and
+	// recovery number above.
+	AnnouncedInterruptions int `json:"announced_interruptions,omitempty"`
 	// Simulated is what the excluded dry-run incidents WOULD have produced,
 	// present only when there were any. It is deliberately a separate object
 	// rather than a set of fields alongside the real ones: nothing here may be

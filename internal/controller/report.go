@@ -328,6 +328,12 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 		if !overlapEnd.After(overlapStart) {
 			continue
 		}
+		if inc.Class == types.ClassCloudInterruption {
+			// The cloud announced it will take a healthy node: no capacity
+			// was degraded and nothing is recovered.
+			report.AnnouncedInterruptions++
+			continue
+		}
 		gpus, assumed := affectedGPUCount(inc, gpusPerNode)
 		if assumed {
 			report.AssumedSingleGPU++

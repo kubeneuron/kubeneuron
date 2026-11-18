@@ -1024,6 +1024,10 @@ func (c *Controller) recordRecoveryOutcome(ctx context.Context, inc *types.Incid
 	outcome := strings.ToLower(string(to))
 	class := string(inc.Class)
 	metrics.IncidentDuration.WithLabelValues(class, outcome).Observe(duration)
+	if inc.Class == types.ClassCloudInterruption {
+		// An announced interruption degrades nothing and recovers nothing.
+		return
+	}
 	if to == types.StateResolved {
 		// An incident that never minted an approval round was handled end to
 		// end without a human decision — the automation's actual yield.
@@ -1069,10 +1073,11 @@ func (c *Controller) DegradedGPUs(ctx context.Context) (map[metrics.DegradedKey]
 	out := map[metrics.DegradedKey]int{}
 	for _, group := range [][]*types.Incident{incidents, parked} {
 		for _, inc := range group {
-			if inc.DryRun {
+			if inc.DryRun || inc.Class == types.ClassCloudInterruption {
 				// Dry-run executes nothing, so it neither degrades nor
 				// recovers anything — the same exclusion the counter and the
-				// report both apply.
+				// report both apply. An interruption the cloud announced is
+				// not a degraded node either.
 				continue
 			}
 			owner := "automation"

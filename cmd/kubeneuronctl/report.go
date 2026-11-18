@@ -177,6 +177,10 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		_, _ = fmt.Fprintf(out, "\nnote: %d node-scoped incident(s) hit nodes with no registered GPU inventory\n"+
 			"and were charged 1 GPU each — the real degraded GPU-hours are higher.\n", r.AssumedSingleGPU)
 	}
+	if r.AnnouncedInterruptions > 0 {
+		_, _ = fmt.Fprintf(out, "\nnote: %d interruption(s) announced by the cloud are left out: the nodes were\n"+
+			"not degraded, and nothing was recovered.\n", r.AnnouncedInterruptions)
+	}
 	if r.DryRunExcluded > 0 {
 		// Say this loudly. On a fresh install every incident is dry-run, so a
 		// silent zero would read as "nothing happened" when the truth is
