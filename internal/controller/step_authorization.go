@@ -40,10 +40,22 @@ func (c *Controller) authorizeAndStartStep(ctx context.Context, inc *types.Incid
 	if handled, err := c.holdOrSkipByPolicy(ctx, inc, step); handled || err != nil {
 		return err
 	}
-	if step.NeedsApproval() {
+	if c.stepNeedsApproval(ctx, inc, step) {
+		note := "step requires human approval"
+		if c.successorStep(ctx, inc, step) && !c.simulating(ctx, inc) {
+			// Planning reads the pool and changes nothing; it names the pool
+			// the person is asked to add a node to.
+			if err := c.planSuccessor(ctx, inc); err != nil {
+				reason := "recovery unavailable: " + addFirstReason(err) + "; the node is not cordoned or drained"
+				c.deferStep(inc, step, metrics.DeferRecoveryUnavailable)
+				c.logOnceStepUnavailable(inc, step, reason)
+				return nil
+			}
+			note = successorApprovalNote(inc)
+		}
 		pol, automatic := c.automaticPolicyFor(ctx, inc)
 		if !automatic {
-			return c.parkForApproval(ctx, inc, step, "step requires human approval")
+			return c.parkForApproval(ctx, inc, step, note)
 		}
 		verdict, reason := c.authorizeByPolicy(ctx, inc, step, pol)
 		switch verdict {

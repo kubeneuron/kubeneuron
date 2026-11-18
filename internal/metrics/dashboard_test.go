@@ -458,6 +458,7 @@ func TestDashboardQueriesUseRealLabels(t *testing.T) {
 // question at the console, not for watching. Adding a line is fine; adding one
 // without a reason is not.
 var notCharted = map[string]string{
+	"kubeneuron_replacement_overlap_seconds":         "a cost figure per replacement, read from the incident and the recovery report; a chart of it is a billing question, answered ad hoc",
 	"kubeneuron_runtime_config_info":                 "an info gauge: identity of the loaded config, read by /api/v1/runtime-config and by alerts, not watched over time",
 	"kubeneuron_auth_failures_total":                 "alert-only (KubeNeuronAuthFailureBurst); a chart invites watching a number that should page",
 	"kubeneuron_stack_restore_failures_total":        "alert-only (KubeNeuronStackRestoreFailing)",

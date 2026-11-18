@@ -9,9 +9,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -79,5 +81,21 @@ func TestUnauthorizedGivesActionableError(t *testing.T) {
 	_, err := runCommand(t, server.URL, "nodes")
 	if err == nil || !strings.Contains(err.Error(), "KUBENEURONCTL_TOKEN") {
 		t.Fatalf("err = %v, want hint about token configuration", err)
+	}
+}
+
+func TestSuccessorLinesShowTheOverlap(t *testing.T) {
+	ready := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
+	ended := ready.Add(25 * time.Minute)
+	s := &types.SuccessorRecord{Node: "gpu-7", NodeUID: "uid", ReadyAt: &ready, EndedAt: &ended, Outcome: types.SuccessorReplaced}
+	s.Operation, s.Pool, s.Phase = "inc-a0", "train", cloud.SuccessorCreated
+	got := strings.Join(successorLines(s, ready.Add(time.Hour)), "\n")
+	for _, want := range []string{"gpu-7 in pool train", "replaced", "two nodes ran for 25m0s"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("successor lines %q lack %q", got, want)
+		}
+	}
+	if successorLines(nil, ready) != nil {
+		t.Fatal("no successor, no lines")
 	}
 }

@@ -324,6 +324,66 @@ type Incident struct {
 	// CloudIdentity is the original target pinned when the incident opens.
 	// Nil on legacy/unidentified incidents; never infer authorization from it.
 	CloudIdentity *cloud.NodeIdentity `json:"cloud_identity,omitempty"`
+	// Successor is the node brought up to replace the target before it is
+	// drained (add-first replacement), from the moment it is planned. Nil
+	// when the incident never prepared one.
+	Successor *SuccessorRecord `json:"successor,omitempty"`
+}
+
+// Successor outcomes. An empty outcome is an operation still open: the
+// successor exists or may exist and has neither taken over nor been removed.
+const (
+	SuccessorReplaced       = "replaced"        // the target was removed; the successor took over
+	SuccessorReleased       = "released"        // the replacement was abandoned and the successor removed
+	SuccessorNotCreated     = "not-created"     // abandoned before any successor existed
+	SuccessorHandedOver     = "needs-operator"  // left for a person, with the reason
+	SuccessorCapacityDenied = "capacity-denied" // the pool could not give a successor
+)
+
+// SuccessorRecord is the incident's durable record of an add-first
+// successor: the provider's operation, the Kubernetes node it became, and
+// how long two nodes ran.
+type SuccessorRecord struct {
+	cloud.Successor
+	// Node is the successor's Kubernetes node name, once it is registered.
+	Node string `json:"node,omitempty"`
+	// NodeUID is that node's UID; the agent registration must match it.
+	NodeUID string `json:"node_uid,omitempty"`
+	// ReadyAt is when the successor was accepted: Ready, schedulable, and its
+	// accelerators allocatable and reported by an agent registered after the
+	// request. Two nodes run from here.
+	ReadyAt *time.Time `json:"ready_at,omitempty"`
+	// EndedAt is when the operation closed with Outcome.
+	EndedAt *time.Time `json:"ended_at,omitempty"`
+	Outcome string     `json:"outcome,omitempty"`
+	// Reason is why it ended that way, or why it waits.
+	Reason string `json:"reason,omitempty"`
+}
+
+// Open reports whether the operation has not ended yet.
+func (s *SuccessorRecord) Open() bool { return s != nil && s.Outcome == "" }
+
+// Clone returns a deep copy.
+func (s *SuccessorRecord) Clone() *SuccessorRecord {
+	if s == nil {
+		return nil
+	}
+	c := *s
+	if s.State != nil {
+		c.State = make(map[string]string, len(s.State))
+		for k, v := range s.State {
+			c.State[k] = v
+		}
+	}
+	if s.ReadyAt != nil {
+		t := *s.ReadyAt
+		c.ReadyAt = &t
+	}
+	if s.EndedAt != nil {
+		t := *s.EndedAt
+		c.EndedAt = &t
+	}
+	return &c
 }
 
 // Clone returns a deep copy. Use it whenever an incident crosses a goroutine
@@ -338,6 +398,7 @@ func (i *Incident) Clone() *Incident {
 		pin := *i.CloudIdentity
 		c.CloudIdentity = &pin
 	}
+	c.Successor = i.Successor.Clone()
 	if i.ResolvedAt != nil {
 		t := *i.ResolvedAt
 		c.ResolvedAt = &t

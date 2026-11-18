@@ -78,6 +78,7 @@ func (c *Controller) reconcile(ctx context.Context) {
 	defer func(start time.Time) {
 		metrics.ReconcileSeconds.Observe(time.Since(start).Seconds())
 	}(time.Now())
+	c.sweepSuccessors(ctx)
 	incidents, err := c.store.ListIncidents(ctx, store.IncidentFilter{
 		States: []types.IncidentState{
 			types.StateOpen, types.StateObserving, types.StateEvaluating,
@@ -363,6 +364,8 @@ func (c *Controller) parkForApproval(ctx context.Context, inc *types.Incident, s
 			return store.ErrConflict
 		}
 		inc.SignalSeen = fresh.SignalSeen
+		// Only saveSuccessor writes the successor, and it writes through.
+		inc.Successor = fresh.Successor
 		inc.Version = fresh.Version
 		inc.ApprovalEpoch = fresh.ApprovalEpoch + 1
 		if err := tx.UpdateIncident(ctx, inc); err != nil {
@@ -926,6 +929,8 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 			release = release && fresh.RemediationSlotHeld
 		}
 		inc.SignalSeen = fresh.SignalSeen
+		// Only saveSuccessor writes the successor, and it writes through.
+		inc.Successor = fresh.Successor
 		inc.Vendor = fresh.Vendor
 		inc.Version = fresh.Version
 		if err := tx.UpdateIncident(ctx, inc); err != nil {

@@ -34,7 +34,7 @@ func Conformance(t *testing.T, c Case) {
 		t.Fatalf("provider %q does not report as registered", p.Name())
 	}
 	caps := p.Capabilities()
-	if caps.ReinitializeInPlace && !declared.ReinitializeInPlace || caps.Replace && !declared.Replace {
+	if caps.ReinitializeInPlace && !declared.ReinitializeInPlace || caps.Replace && !declared.Replace || caps.AddFirst && !declared.AddFirst {
 		t.Fatalf("live capabilities %+v exceed the declared %+v", caps, declared)
 	}
 	got, err := p.InstanceID(c.ProviderID)
@@ -48,5 +48,8 @@ func Conformance(t *testing.T, c Case) {
 	}
 	if _, aware := p.(cloud.RepairAwareProvider); !aware && caps.Replace {
 		t.Fatalf("provider %q replaces nodes without the native-repair contract", p.Name())
+	}
+	if _, prepares := p.(cloud.SuccessorProvider); caps.AddFirst && !prepares {
+		t.Fatalf("provider %q declares add-first without the successor contract", p.Name())
 	}
 }

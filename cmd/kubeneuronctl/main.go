@@ -300,6 +300,9 @@ func cmdIncidents() *cobra.Command {
 		for _, line := range authorisations(detail.Audit) {
 			_, _ = fmt.Fprintln(out, line)
 		}
+		for _, line := range successorLines(inc.Successor, time.Now()) {
+			_, _ = fmt.Fprintln(out, line)
+		}
 		_, _ = fmt.Fprintln(out, "\naudit trail:")
 		w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
 		_, _ = fmt.Fprintln(w, "TIME\tFROM\tTO\tACTOR\tACTION\tRESULT")
@@ -610,6 +613,34 @@ func authorisations(trail []*types.AuditEntry) []string {
 			continue
 		}
 		lines = append(lines, fmt.Sprintf("step %-12s approved by %s", e.Action, e.Actor))
+	}
+	return lines
+}
+
+// successorLines describes an add-first successor: its node, where its
+// operation stands, and how long two nodes have run (both are billed).
+func successorLines(s *types.SuccessorRecord, now time.Time) []string {
+	if s == nil {
+		return nil
+	}
+	status := "open"
+	if s.Outcome != "" {
+		status = s.Outcome
+	}
+	node := s.Node
+	if node == "" {
+		node = "(not registered yet)"
+	}
+	lines := []string{fmt.Sprintf("successor: %s in pool %s, phase %s, %s (operation %s)", node, s.Pool, s.Phase, status, s.Operation)}
+	if s.ReadyAt != nil {
+		end := now
+		if s.EndedAt != nil {
+			end = *s.EndedAt
+		}
+		lines = append(lines, fmt.Sprintf("overlap:   two nodes ran for %s from %s", end.Sub(*s.ReadyAt).Round(time.Second), s.ReadyAt.Format(time.RFC3339)))
+	}
+	if s.Reason != "" {
+		lines = append(lines, "why:       "+s.Reason)
 	}
 	return lines
 }

@@ -80,7 +80,9 @@ func (c *Controller) policyRecoveryPreflight(ctx context.Context, inc *types.Inc
 	switch step.Action {
 	case "platform.replace_node":
 		if addFirst {
-			return "recovery unavailable: " + addFirstUnavailable, ""
+			if hold := c.addFirstHold(ctx, inc, step); hold != "" {
+				return hold, ""
+			}
 		}
 	case "platform.recycle_node":
 		if !pol.RecycleEnabled {
@@ -92,8 +94,12 @@ func (c *Controller) policyRecoveryPreflight(ctx context.Context, inc *types.Inc
 		case path.replace && addFirst:
 			// Even with a recycle enabled before it: the recycle may fail and
 			// the replace it falls back to could not run, so nothing on the
-			// path may disrupt the node until the policy names remove-first.
-			return "recovery unavailable: " + addFirstUnavailable + "; the node is not cordoned or drained", ""
+			// path may disrupt the node until a successor is ready or the
+			// policy names remove-first. Only a rung that replaces the node
+			// itself prepares a successor.
+			if hold := c.addFirstHold(ctx, inc, step); hold != "" {
+				return hold, ""
+			}
 		case path.recycle && !path.replace && !pol.RecycleEnabled:
 			return "recovery unavailable: " + recycleNotEnabled + ", and the path has no replace step; the node is not cordoned or drained", ""
 		}

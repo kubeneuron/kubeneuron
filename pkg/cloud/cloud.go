@@ -55,6 +55,11 @@ type Capabilities struct {
 	// Replace is true when the provider can terminate the instance for an
 	// autoscaler to replace it with a fresh one — the ReplaceNode primitive.
 	Replace bool
+	// AddFirst is true when the provider can bring up a successor in the
+	// node's pool before the node is drained and deleted: it implements
+	// SuccessorProvider. Whether a given pool allows it is CheckAddFirst's
+	// answer.
+	AddFirst bool
 }
 
 // Provider is the provider-neutral cloud seam. Each implementation owns its own

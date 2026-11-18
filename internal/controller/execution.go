@@ -18,6 +18,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -493,6 +494,12 @@ func (c *Controller) effectiveDryRun(ctx context.Context, inc *types.Incident) b
 // off after the operator stopped new remediation.
 func (c *Controller) executeStep(ctx context.Context, inc *types.Incident, step *playbook.Step) (*types.ActionResult, error) {
 	timeout := effectiveStepTimeout(step)
+	prepares := c.successorStep(ctx, inc, step)
+	if prepares {
+		// The step first waits for its successor, for at most the policy's
+		// successor timeout, then does its own work in its own timeout.
+		timeout += recoverymode.EffectiveSuccessorTimeout(c.incidentPolicy(ctx, inc).SuccessorTimeout)
+	}
 	// The agent gets the step's timeout; the controller waits slightly
 	// longer. Given the same deadline the controller always wins the race
 	// and reports "context deadline exceeded", throwing away the agent's
@@ -517,6 +524,9 @@ func (c *Controller) executeStep(ctx context.Context, inc *types.Incident, step 
 		(!def.Compensating || !c.hasRecordedAcceleratorStackQuiesce(ctx, inc)) {
 		now := time.Now()
 		output := fmt.Sprintf("DRY-RUN: would execute %s on %s", step.Action, inc.Target.Node)
+		if prepares {
+			output += "; first a temporary additional node would be created in the node's pool and waited for until Ready with its accelerators, and both nodes billed until the old one is removed"
+		}
 		if def.Kind == action.KindPlatform {
 			// A simulated disruption step may add a read-only projection of what
 			// checkpoint coordination would have asked. It patches nothing, waits
@@ -587,6 +597,11 @@ func (c *Controller) executePlatformStep(ctx context.Context, inc *types.Inciden
 	// changes nothing about the disruption that follows: a workload that opted
 	// in is told and given a bounded deadline, then drained or evicted exactly
 	// as before. On a disabled policy (the default) it is a single boolean.
+	if c.successorStep(ctx, inc, step) {
+		if err := c.awaitSuccessor(ctx, inc); err != nil {
+			return nil, err
+		}
+	}
 	c.coordinateCheckpoint(ctx, inc, step, op)
 	// Checkpoint coordination can wait long enough for native repair or a node
 	// replacement. Re-read evidence after that wait, before any disruption.

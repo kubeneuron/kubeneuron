@@ -80,6 +80,31 @@ func ValidateStrategy(s Strategy) error {
 // DefaultMinUnhealthyNodes is the circuit breaker's absolute floor: it never
 // trips on fewer unhealthy nodes than this, so the first fault in a two-node
 // pool does not lock the pool.
+// Successor timeout bounds: how long an add-first replacement waits for its
+// successor to be ready before giving it up and leaving the old node alone.
+const (
+	DefaultSuccessorTimeout = 30 * time.Minute
+	MinSuccessorTimeout     = 5 * time.Minute
+	MaxSuccessorTimeout     = 2 * time.Hour
+)
+
+// EffectiveSuccessorTimeout is the timeout in force: the default when unset.
+func EffectiveSuccessorTimeout(d time.Duration) time.Duration {
+	if d == 0 {
+		return DefaultSuccessorTimeout
+	}
+	return d
+}
+
+// ValidateSuccessorTimeout accepts zero (the default) or a timeout within the
+// bounds.
+func ValidateSuccessorTimeout(d time.Duration) error {
+	if d != 0 && (d < MinSuccessorTimeout || d > MaxSuccessorTimeout) {
+		return fmt.Errorf("replacement successor_timeout %s must be between %s and %s", d, MinSuccessorTimeout, MaxSuccessorTimeout)
+	}
+	return nil
+}
+
 const DefaultMinUnhealthyNodes = 2
 
 // Settings is the advance approval an automatic policy carries: where it may

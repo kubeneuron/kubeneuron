@@ -415,6 +415,23 @@ stop. The package imports only the standard library; SDKs are linked only by
 the binaries that wire a provider. Adding a cloud is a new package plus one
 registry line.
 
+**Add-first replacement** is an optional second contract,
+`cloud.SuccessorProvider`, declared by `Capabilities.AddFirst`. The controller
+drives one operation per attempt (`<incident>-a<attempt>`) through
+planned → requested → created and persists the record on the incident after
+every call, so a restart continues it and never grows the pool twice. The
+plan is recorded before the first request; the request time is recorded
+before the request. The controller, not the provider, decides that the
+successor is ready (Ready, schedulable, joined and agent-registered after the
+request, accelerators at least the old node's), and only then lets the rung
+cordon the old node; `ReplaceWithSuccessor` removes the old instance and
+restores the pool's size. An abandoned operation — timeout, rejection,
+resolution, a new attempt — is released: a successor running only DaemonSet
+pods is removed; anything else, and any pool change the provider cannot
+attribute (`ErrNeedsOperator`), is handed to an operator and never changed
+again automatically. A provider without the contract keeps today's
+behaviour: `AddFirst` holds, `RemoveFirst` is unchanged.
+
 ### 2.4c The fault envelope (`AgentEvent.Fault`)
 
 XID stays the NVIDIA-native fault encoding for sources that observe a genuine
@@ -816,7 +833,7 @@ operator-accepted controller stores. PostgreSQL is the HA choice: the DSN
 comes from a mounted Secret, the controller Deployment is stateless, and the
 store backend passes the same conformance suite as SQLite (see §2.5 for the
 honest scope of what that parity does and does not prove). Migration heads
-travel in lockstep (sqlite 0029 / postgres 0020, including the incident’s first observed training workers).
+travel in lockstep (sqlite 0030 / postgres 0021, including the incident’s add-first successor).
 
 The operator provisions a `ReadWriteOnce` claim for SQLite, defaulting to
 `5Gi`. Reconciliation preserves API-selected/bound fields, permits only

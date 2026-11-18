@@ -4,6 +4,7 @@ package playbook
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -26,6 +27,7 @@ type Policy struct {
 	Automatic *recoverymode.Settings
 	// ReplacementStrategy and RecycleEnabled: see config.Policy.
 	ReplacementStrategy recoverymode.Strategy
+	SuccessorTimeout    time.Duration
 	RecycleEnabled      bool
 }
 

@@ -211,7 +211,7 @@ func (c *Controller) authorisedBy(ctx context.Context, incidentID, actor string,
 // the live automatic policy named by its actor. It returns "" when the step
 // may start.
 func (c *Controller) policyAuthorisationRefusal(ctx context.Context, inc *types.Incident, step *playbook.Step, actor string) string {
-	if !step.NeedsApproval() {
+	if !c.stepNeedsApproval(ctx, inc, step) {
 		return ""
 	}
 	if actor == "" || actor == "system" {

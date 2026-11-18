@@ -736,3 +736,38 @@ type WorkloadCheckpointer interface {
 type VerifiedNodeRecycler interface {
 	RecyclePinnedNodeVerified(context.Context, cloud.NodeIdentity) (cloud.RecycleResult, error)
 }
+
+// SuccessorNodeRecycler replaces a pinned node by adding first: a successor is
+// brought up in the node's pool before the node is drained, and the node is
+// removed only once the successor has taken over. Every mutation repeats the
+// guard against the pin, as GuardedNodeRecycler does.
+type SuccessorNodeRecycler interface {
+	// AddFirstAvailable is nil when the pinned node's pool can prepare a
+	// successor, or an error wrapping cloud.ErrAddFirstUnavailable with why.
+	AddFirstAvailable(ctx context.Context, pin cloud.NodeIdentity) error
+	// PrepareSuccessor moves the operation one phase on (see
+	// cloud.SuccessorProvider). The request for an instance is made only
+	// while the pinned node is eligible for replacement.
+	PrepareSuccessor(ctx context.Context, pin cloud.NodeIdentity, s cloud.Successor) (cloud.Successor, error)
+	// SuccessorNode reads the Kubernetes node a successor became, by its
+	// providerID.
+	SuccessorNode(ctx context.Context, providerID string) (SuccessorNode, error)
+	// ReleaseSuccessor removes an abandoned successor (see
+	// cloud.SuccessorProvider.ReleaseSuccessor).
+	ReleaseSuccessor(ctx context.Context, s cloud.Successor) error
+	// ReplacePinnedNodeWithSuccessor removes the pinned node once its
+	// successor has taken over, under the same guard as ReplacePinnedNode.
+	ReplacePinnedNodeWithSuccessor(ctx context.Context, pin cloud.NodeIdentity, s cloud.Successor) error
+}
+
+// SuccessorNode is what the controller needs to accept a successor: whether it
+// is there, Ready and schedulable, when it joined, and what it can run.
+type SuccessorNode struct {
+	Found         bool
+	Name, UID     string
+	CreatedAt     time.Time
+	Ready         bool
+	Unschedulable bool
+	// Allocatable holds the node's domain-qualified extended resources.
+	Allocatable map[string]int64
+}

@@ -996,6 +996,10 @@ func compilePolicies(
 			(installation.Spec.Safety.CheckpointCoordination == nil || !installation.Spec.Safety.CheckpointCoordination.Enabled) {
 			return nil, fmt.Errorf("policy %q: spec.automatic.checkpointWait needs spec.safety.checkpointCoordination enabled", policy.Name)
 		}
+		replacement, err := compileReplacement(policy.Spec.Replacement)
+		if err != nil {
+			return nil, fmt.Errorf("policy %q: %w", policy.Name, err)
+		}
 		result = append(result, config.Policy{
 			Name: policy.Name,
 			Match: config.Match{
@@ -1006,7 +1010,7 @@ func compilePolicies(
 			Params:      copyStringMap(policy.Spec.Parameters),
 			Mode:        mode,
 			Automatic:   automatic,
-			Replacement: config.Replacement{Strategy: compileStrategy(policy.Spec.Replacement)},
+			Replacement: replacement,
 			Recycle:     config.Recycle{Enabled: policy.Spec.Recycle != nil && policy.Spec.Recycle.Enabled},
 		})
 	}
@@ -1417,6 +1421,23 @@ func policyModeName(mode recoverymode.Mode) string {
 	default:
 		return "Approval"
 	}
+}
+
+// compileReplacement maps the CRD replacement settings to the runtime ones.
+func compileReplacement(spec *kubeneuronv1alpha1.ReplacementSpec) (config.Replacement, error) {
+	out := config.Replacement{Strategy: compileStrategy(spec)}
+	if spec == nil || spec.SuccessorTimeout == "" {
+		return out, nil
+	}
+	d, err := time.ParseDuration(spec.SuccessorTimeout)
+	if err != nil {
+		return out, fmt.Errorf("replacement.successorTimeout: %w", err)
+	}
+	if err := recoverymode.ValidateSuccessorTimeout(d); err != nil {
+		return out, err
+	}
+	out.SuccessorTimeout = d
+	return out, nil
 }
 
 // compileStrategy maps the CRD spelling to the runtime strategy.

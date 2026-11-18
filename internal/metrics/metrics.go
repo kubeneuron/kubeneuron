@@ -89,6 +89,16 @@ var (
 		Buckets: []float64{30, 60, 300, 900, 1800, 3600, 7200, 14400, 32400},
 	}, []string{"class", "outcome"})
 
+	// ReplacementOverlapSeconds measures how long an add-first successor and
+	// the node it replaces ran side by side: from the successor's acceptance
+	// to the end of its operation. Both are billed for that time. Labelled by
+	// provider, pool and how the operation ended; never by workload.
+	ReplacementOverlapSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "kubeneuron_replacement_overlap_seconds",
+		Help:    "Time an add-first successor and the node it replaces both ran, by provider, pool and outcome.",
+		Buckets: []float64{60, 300, 900, 1800, 3600, 7200, 14400, 43200},
+	}, []string{"provider", "pool", "outcome"})
+
 	// IncidentsRecovered counts incidents that ended RESOLVED, split by
 	// whether a human decision was needed. unattended="true" is the
 	// automation's actual yield: degradation the fleet absorbed without

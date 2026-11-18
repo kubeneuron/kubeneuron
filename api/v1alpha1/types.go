@@ -1187,10 +1187,19 @@ type GPURemediationPolicySpec struct {
 }
 
 // ReplacementSpec selects the replacement strategy.
+// +kubebuilder:validation:XValidation:rule="!has(self.successorTimeout) || (duration(self.successorTimeout) >= duration('5m') && duration(self.successorTimeout) <= duration('2h'))",message="successorTimeout must be between 5m and 2h"
 type ReplacementSpec struct {
 	// +kubebuilder:validation:Enum=AddFirst;RemoveFirst
 	// +kubebuilder:default=AddFirst
 	Strategy string `json:"strategy,omitempty"`
+	// SuccessorTimeout is how long AddFirst waits for the new node to be
+	// Ready with its accelerators. When it passes, KubeNeuron removes the
+	// node it added, if nothing else runs on it, and does not drain or remove
+	// the old node.
+	// +kubebuilder:default="30m"
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$`
+	// +optional
+	SuccessorTimeout string `json:"successorTimeout,omitempty"`
 }
 
 // RecycleSpec enables the restart through the cloud API.

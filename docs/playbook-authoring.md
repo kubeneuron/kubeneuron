@@ -444,10 +444,13 @@ approval does not lift them:
 - `replacement.strategy`: `AddFirst` (default) brings up the new node and
   waits until it is ready with its accelerators before the old one is drained
   and removed; `RemoveFirst` removes the old node first and is used only when
-  named. Until the provider supports add-first, a replace step under
-  `AddFirst` is held as unavailable and no approval is asked; it is never done
-  the other way. A policy that needs node replacement today names
-  `RemoveFirst` explicitly.
+  named. Where the node's provider or pool cannot prepare a replacement
+  first, a replace step under `AddFirst` is held as unavailable and no
+  approval is asked; it is never done the other way. No built-in provider
+  supports add-first yet, so a policy that needs node replacement today names
+  `RemoveFirst` explicitly. See [Add-first replacement](#add-first-replacement).
+- `replacement.successorTimeout` (default `30m`, from `5m` to `2h`): how long
+  the prepared replacement may take to become ready under `AddFirst`.
 - `recycle.enabled` (default false): the optional restart through the cloud API.
   Without it, a recycle is skipped as not applicable: it is not attempted, not
   counted as failed or as an escalation, and does not use up the escalation
@@ -508,6 +511,74 @@ spec:
   # replacement: { strategy: AddFirst }
   # recycle: { enabled: false }
 ```
+
+### Add-first replacement
+
+Under `replacement.strategy: AddFirst`, a rung that replaces the node prepares
+a replacement before draining the affected node. If the prepared replacement
+is not ready, KubeNeuron does not start draining or deleting the old node
+under this policy and shows why it is waiting.
+
+The phases, in order, as the audit trail and `kubeneuronctl incident show`
+report them:
+
+1. **Planned** (`successor-planned`). The provider reads the node's pool and
+   records its size and members. Nothing changes in the cloud. Under
+   `Approval`, this is when the step is parked; the approval request says that
+   approving creates a temporary additional node in the pool before the node
+   is cordoned, and that both nodes are billed until the old one is removed.
+   Rejecting it ends the operation as `not-created`.
+2. **Requested** (`successor-requesting`, `successor-requested`). The pool is
+   asked for one more node. The same limits as for any other disruptive step
+   (concurrency, cooldown, unhealthy share) are checked first. The request
+   time is recorded before the request, so a restart continues the same
+   operation and never asks twice.
+3. **Created** (`successor-created`). Exactly one new machine in the pool is
+   tied to the operation. If there is none, or more than one could be ours,
+   the operation is handed to an operator (see below).
+4. **Ready** (`successor-ready`). The new node is Ready and schedulable, it
+   joined after the request, its KubeNeuron agent registered after the request
+   and reports its GPUs, and it offers at least the accelerators the old node
+   had. Until then the audit records `successor-waiting` with the reason.
+5. **Cordon, drain, replace.** Only now is the old node cordoned and drained
+   as the playbook says, and the replace step removes the old node, leaving
+   the pool at its size before the request (`successor-replaced`).
+
+Under `DryRun`, nothing is created: the step reports that a temporary
+additional node would be created first.
+
+**Timeout.** If the replacement is not ready within
+`replacement.successorTimeout` of the request, the old node is left alone and
+the step fails like any other, so the ladder escalates or stops. A
+replacement that was created is cordoned and removed only if it runs nothing
+but DaemonSet pods (`successor-released`); if other work has already been
+scheduled on it, it is uncordoned and kept, and the incident records that the
+pool is one node larger. KubeNeuron never evicts work to clean up. The same
+release runs when the incident is resolved, rejected or abandoned during the
+overlap. While the old node is gone, a replacement is never removed.
+
+**No capacity.** If the pool has no capacity or quota for one more node, the
+operation ends as `capacity-denied` and the old node is not cordoned or
+drained.
+
+**Needs an operator** (`successor-needs-operator`). KubeNeuron stops changing
+the pool and records why when:
+
+- the pool changed in a way that cannot be tied to this operation (no new
+  machine, or more than one);
+- the replacement runs work and was kept after a timeout;
+- the pool's members changed before the replacement existed, so restoring
+  its size could remove a node KubeNeuron did not create.
+
+Check the pool's size and members against the incident's record, remove what
+is not needed, and resolve the incident.
+
+**Billing and quota.** During the overlap, from the moment the replacement is
+created until the old node is removed, the pool runs one extra node, and your
+cloud provider bills both. The pool needs headroom for one more node in its
+size limit and in your quota for that instance type. The
+`kubeneuron_replacement_overlap_seconds` histogram (labels `provider`, `pool`,
+`outcome`) records how long each overlap lasted.
 
 ## Authoring guidelines
 

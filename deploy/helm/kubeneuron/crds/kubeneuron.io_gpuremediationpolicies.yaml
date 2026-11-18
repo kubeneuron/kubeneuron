@@ -290,7 +290,20 @@ spec:
                     - AddFirst
                     - RemoveFirst
                     type: string
+                  successorTimeout:
+                    default: 30m
+                    description: |-
+                      SuccessorTimeout is how long AddFirst waits for the new node to be
+                      Ready with its accelerators. When it passes, KubeNeuron removes the
+                      node it added, if nothing else runs on it, and does not drain or remove
+                      the old node.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$
+                    type: string
                 type: object
+                x-kubernetes-validations:
+                - message: successorTimeout must be between 5m and 2h
+                  rule: '!has(self.successorTimeout) || (duration(self.successorTimeout)
+                    >= duration(''5m'') && duration(self.successorTimeout) <= duration(''2h''))'
             required:
             - kubeNeuronRef
             - match

@@ -60,6 +60,9 @@ type IncidentFilter struct {
 	States []types.IncidentState
 	Node   string
 	Limit  int
+	// OpenSuccessor keeps only incidents whose add-first successor operation
+	// has not ended.
+	OpenSuccessor bool
 	// ActiveSince keeps incidents whose lifetime reaches into [ActiveSince,
 	// now): everything not lifecycle-terminal is kept regardless of when it
 	// opened, and a terminal incident is kept when it ended at or after the
