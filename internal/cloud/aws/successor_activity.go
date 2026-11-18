@@ -41,7 +41,14 @@ func confirmSuccessorLaunch(s cloud.Successor, candidate string, activities []at
 			return fmt.Errorf("%w: competing or unconfirmed ASG launch activity", cloud.ErrNeedsOperator)
 		}
 		if candidate == "" {
-			capacityFailure = a.StatusCode == at.ScalingActivityStatusCodeFailed && sdk.ToString(a.Description) == "Launching a new EC2 instance" && launchCapacityFailure.MatchString(sdk.ToString(a.StatusMessage))
+			if sdk.ToString(a.Description) != "Launching a new EC2 instance" {
+				return fmt.Errorf("%w: ASG activity is not a launch", cloud.ErrNeedsOperator)
+			}
+			if a.StatusCode == at.ScalingActivityStatusCodeInProgress {
+				matched = true
+				continue
+			}
+			capacityFailure = a.StatusCode == at.ScalingActivityStatusCodeFailed && launchCapacityFailure.MatchString(sdk.ToString(a.StatusMessage))
 			if !capacityFailure {
 				return fmt.Errorf("%w: unconfirmed ASG capacity failure", cloud.ErrNeedsOperator)
 			}

@@ -177,6 +177,9 @@ func (p *managedProvider) releaseRequestedSuccessor(ctx context.Context, s cloud
 		if err != nil {
 			return err
 		}
+		if created.Phase == cloud.SuccessorRequested {
+			return fmt.Errorf("waiting for the in-progress ASG launch in %s before cleanup", s.Pool)
+		}
 		if created.Phase == cloud.SuccessorCreated {
 			// The controller could not check workloads without a persisted provider ID.
 			return fmt.Errorf("%w: successor %s appeared before its identity was saved; check its workloads before removing it", cloud.ErrNeedsOperator, created.ProviderID)

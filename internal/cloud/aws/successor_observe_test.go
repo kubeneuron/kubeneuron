@@ -57,6 +57,16 @@ func TestObserveSuccessor(t *testing.T) {
 		history := launchActivityPages{"": {Activities: []at.Activity{a}}}
 		reader := managedProvider{repairReader: &repairReader{cluster: "training", eks: eksReader}}
 		reader.scaling = observedASG{membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{pending}}}, history}
+		history[""].Activities[0].StatusCode = at.ScalingActivityStatusCodeInProgress
+		result, err := reader.PrepareSuccessor(t.Context(), s)
+		if err != nil || result.Phase != cloud.SuccessorRequested || result.ProviderID != "" {
+			t.Fatalf("pending ASG launch: %+v, %v", result, err)
+		}
+		if err := reader.ReleaseSuccessor(t.Context(), s); err == nil || errors.Is(err, cloud.ErrNeedsOperator) {
+			t.Fatalf("cleanup while ASG launching: %v", err)
+		}
+		history[""].Activities[0].StatusCode = at.ScalingActivityStatusCodeFailed
+
 		for _, want := range []error{cloud.ErrReplacementCapacity, cloud.ErrNeedsOperator} {
 			result, err := reader.PrepareSuccessor(t.Context(), s)
 			if !errors.Is(err, want) || result.ProviderID != "" || result.Phase != cloud.SuccessorRequested {
