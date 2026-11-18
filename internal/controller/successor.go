@@ -188,14 +188,14 @@ func (c *Controller) stepNeedsApproval(ctx context.Context, inc *types.Incident,
 	return !c.simulating(ctx, inc) && c.successorStep(ctx, inc, step)
 }
 
-// successorApprovalNote is what the approval round says about the successor.
+// successorApprovalNote is what the approval round, and a simulated step,
+// says about the successor.
 func successorApprovalNote(inc *types.Incident) string {
 	pool := "the node's pool"
 	if s := inc.Successor; s != nil && s.Pool != "" {
 		pool = "pool " + s.Pool
 	}
-	return fmt.Sprintf("approving creates a temporary additional node in %s before %s is cordoned; both nodes are billed until %s is removed",
-		pool, inc.Target.Node, inc.Target.Node)
+	return fmt.Sprintf("This step creates one temporary additional node in %s. The cloud provider bills it until the old node is deleted.", pool)
 }
 
 // planSuccessor records this attempt's operation and the provider's plan for

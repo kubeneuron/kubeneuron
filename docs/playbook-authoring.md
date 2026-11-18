@@ -451,6 +451,12 @@ approval does not lift them:
   `RemoveFirst` explicitly. See [Add-first replacement](#add-first-replacement).
 - `replacement.successorTimeout` (default `30m`, from `5m` to `2h`): how long
   the prepared replacement may take to become ready under `AddFirst`.
+  Add-first replacement creates one additional node in the pool before the old
+  node is drained. Your cloud provider bills both nodes while they overlap,
+  and the additional node needs quota. If the new node does not become ready
+  within `successorTimeout`, KubeNeuron removes it only when it is the node
+  this operation created and no workload runs on it. Otherwise the pool stays
+  one node larger until a person removes it, and the incident says so.
 - `recycle.enabled` (default false): the optional restart through the cloud API.
   Without it, a recycle is skipped as not applicable: it is not attempted, not
   counted as failed or as an escalation, and does not use up the escalation
@@ -524,10 +530,10 @@ report them:
 
 1. **Planned** (`successor-planned`). The provider reads the node's pool and
    records its size and members. Nothing changes in the cloud. Under
-   `Approval`, this is when the step is parked; the approval request says that
-   approving creates a temporary additional node in the pool before the node
-   is cordoned, and that both nodes are billed until the old one is removed.
-   Rejecting it ends the operation as `not-created`.
+   `Approval`, this is when the step is parked; the approval request says
+   "This step creates one temporary additional node in pool <pool>. The cloud
+   provider bills it until the old node is deleted." Rejecting it ends the
+   operation as `not-created`.
 2. **Requested** (`successor-requesting`, `successor-requested`). The pool is
    asked for one more node. The same limits as for any other disruptive step
    (concurrency, cooldown, unhealthy share) are checked first. The request
@@ -544,8 +550,8 @@ report them:
    as the playbook says, and the replace step removes the old node, leaving
    the pool at its size before the request (`successor-replaced`).
 
-Under `DryRun`, nothing is created: the step reports that a temporary
-additional node would be created first.
+Under `DryRun`, nothing is created: the simulated step carries the same
+sentence as the approval request.
 
 **Timeout.** If the replacement is not ready within
 `replacement.successorTimeout` of the request, the old node is left alone and
@@ -573,12 +579,21 @@ the pool and records why when:
 Check the pool's size and members against the incident's record, remove what
 is not needed, and resolve the incident.
 
-**Billing and quota.** During the overlap, from the moment the replacement is
-created until the old node is removed, the pool runs one extra node, and your
-cloud provider bills both. The pool needs headroom for one more node in its
-size limit and in your quota for that instance type. The
-`kubeneuron_replacement_overlap_seconds` histogram (labels `provider`, `pool`,
-`outcome`) records how long each overlap lasted.
+**Billing and quota.** Add-first replacement creates one additional node in
+the pool before the old node is drained. Your cloud provider bills both nodes
+while they overlap, and the additional node needs quota. If the new node does
+not become ready within `successorTimeout`, KubeNeuron removes it only when it
+is the node this operation created and no workload runs on it. Otherwise the
+pool stays one node larger until a person removes it, and the incident says
+so.
+The pool needs headroom for one more node in its size limit and in your quota
+for that instance type. KubeNeuron shows only how long the overlap lasted, in
+the incident and in the `kubeneuron_replacement_overlap_seconds` histogram
+(labels `provider`, `pool`, `outcome`); what it costs depends on your
+provider's rates.
+
+In Automatic mode a replacement policy with `AddFirst` creates billed nodes
+without a person approving each one.
 
 ## Authoring guidelines
 

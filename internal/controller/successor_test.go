@@ -523,7 +523,7 @@ func TestAddFirstDryRunCreatesNothingAndSaysWhatWouldBeAdded(t *testing.T) {
 	if requests, _, replaced, plain, drained := p.counts(); requests+replaced+plain+drained != 0 || inc.Successor != nil {
 		t.Fatalf("a dry run changed the cloud or recorded a successor: %+v%s", inc.Successor, dump(entries))
 	}
-	if !auditHas(entries, "cordon", "temporary additional node would be created") {
+	if !auditHas(entries, "cordon", "creates one temporary additional node in the node's pool") {
 		t.Fatalf("the simulated cordon does not say a node would be added%s", dump(entries))
 	}
 	if !auditHas(entries, "replace", "DRY-RUN") {

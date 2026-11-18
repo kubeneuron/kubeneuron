@@ -73,16 +73,22 @@ type SuccessorProvider interface {
 	// requests the instance; a retry after a request that was accepted but
 	// not answered must find that request and not grow the pool again. From
 	// SuccessorRequested it returns SuccessorCreated once exactly one new
-	// instance can be tied to the operation, and the same phase while there is
-	// none yet. No capacity or quota wraps ErrReplacementCapacity, a pool
-	// change it cannot attribute wraps ErrNeedsOperator. It never deletes.
+	// instance can be tied to the operation. While the request is still in
+	// progress and no new instance is there yet, it returns the same phase and
+	// no error; the caller asks again until its timeout. A finished request
+	// with no instance to tie to it, or a pool change it cannot attribute,
+	// wraps ErrNeedsOperator. No capacity or quota wraps
+	// ErrReplacementCapacity. It never deletes.
 	PrepareSuccessor(ctx context.Context, s Successor) (Successor, error)
 	// ReleaseSuccessor undoes the operation when the replacement is
 	// abandoned: it removes the created successor and returns the pool to its
 	// size before the request. With no successor created yet, it restores the
-	// size only if the pool's members are exactly those before; otherwise it
-	// returns ErrNeedsOperator. The caller has made sure the successor runs no
-	// workload.
+	// size only if the pool's members are exactly those before and it can show
+	// that no request of the operation is still in flight: it never reached
+	// the cloud, or the cloud ended it. Members equal to those before are not
+	// enough after a request whose answer was lost. Otherwise it returns
+	// ErrNeedsOperator and changes nothing. The caller has made sure the
+	// successor runs no workload.
 	ReleaseSuccessor(ctx context.Context, s Successor) error
 	// ReplaceWithSuccessor removes the pinned instance once its created
 	// successor has taken over, leaving the pool at its size before the

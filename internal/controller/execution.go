@@ -525,7 +525,7 @@ func (c *Controller) executeStep(ctx context.Context, inc *types.Incident, step 
 		now := time.Now()
 		output := fmt.Sprintf("DRY-RUN: would execute %s on %s", step.Action, inc.Target.Node)
 		if prepares {
-			output += "; first a temporary additional node would be created in the node's pool and waited for until Ready with its accelerators, and both nodes billed until the old one is removed"
+			output += ". " + successorApprovalNote(inc)
 		}
 		if def.Kind == action.KindPlatform {
 			// A simulated disruption step may add a read-only projection of what
