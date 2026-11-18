@@ -37,10 +37,6 @@ func (c *Controller) AcceleratorHealth(ctx context.Context, node string) types.A
 	sources := c.healthSources()
 	want := func(n string) bool { return node == "" || n == node }
 	var rows []types.AcceleratorHealthRow
-	nodes := map[string]bool{}
-	if node != "" {
-		nodes[node] = true
-	}
 
 	c.health.mu.Lock()
 	for _, src := range sources {
@@ -63,7 +59,7 @@ func (c *Controller) AcceleratorHealth(ctx context.Context, node string) types.A
 			if !strings.HasPrefix(key, name+"/") || !want(h.Node) || len(h.Profiles) == 0 && len(h.Observations) == 0 {
 				continue
 			}
-			nodes[h.Node] = true
+
 			rows = append(rows, healthRows(name, h, readAt)...)
 		}
 		if name != draHealthSourceName {
@@ -73,7 +69,7 @@ func (c *Controller) AcceleratorHealth(ctx context.Context, node string) types.A
 			if !want(n) {
 				continue
 			}
-			nodes[n] = true
+
 			for _, d := range devices {
 				why := "the device carries no taint; the driver may not publish health taints, so this is not health"
 				if d.state == nodehealth.DRAUnmonitored {
@@ -86,20 +82,24 @@ func (c *Controller) AcceleratorHealth(ctx context.Context, node string) types.A
 	}
 	c.health.mu.Unlock()
 
-	for _, row := range c.neuronHeldRows(ctx, want, time.Now()) {
-		nodes[row.Node] = true
-		rows = append(rows, row)
-	}
+	rows = append(rows, c.neuronHeldRows(ctx, want, time.Now())...)
 
-	if read := c.agentSourceReader(); read != nil {
-		for n := range nodes {
-			rows = append(rows, agentHealthRows(n, read(n), node != "")...)
+	read := c.AgentSignalSources
+	if c.agentSignalSources != nil {
+		read = c.agentSignalSources
+	}
+	sourcesFromAgents := read(node)
+	if node != "" {
+		rows = append(rows, agentHealthRows(node, sourcesFromAgents, slices.ContainsFunc(rows, func(r types.AcceleratorHealthRow) bool { return r.Node == node && r.Profile != "" }))...)
+	} else {
+		for _, s := range sourcesFromAgents {
+			rows = append(rows, agentHealthRows(s.Node, []types.AgentSignalSource{s}, false)...)
 		}
 	}
 
 	slices.SortFunc(rows, func(a, b types.AcceleratorHealthRow) int {
 		return cmp.Or(cmp.Compare(a.Node, b.Node), cmp.Compare(a.Source, b.Source), cmp.Compare(a.Profile, b.Profile),
-			cmp.Compare(a.Rule, b.Rule), cmp.Compare(a.Device, b.Device), cmp.Compare(a.State, b.State))
+			cmp.Compare(a.Rule, b.Rule), cmp.Compare(a.Class, b.Class), cmp.Compare(a.Device, b.Device), cmp.Compare(a.State, b.State))
 	})
 	view := types.AcceleratorHealthView{ProfileVersion: nodehealth.Version, Rows: rows}
 	if len(rows) > maxHealthRows {
@@ -111,23 +111,51 @@ func (c *Controller) AcceleratorHealth(ctx context.Context, node string) types.A
 	return view
 }
 
-// agentSignalSourceReader is a controller that holds what the agents report
-// about their signal sources: all nodes for "", or the one named exactly.
-type agentSignalSourceReader interface {
-	AgentSignalSources(node string) []types.AgentSignalSource
+type agentSourceSnapshot struct {
+	rows     []types.AgentSignalSource
+	received time.Time
 }
 
-// agentSourceReader reads the agents' signal sources, or is nil while the
-// controller holds none.
-func (c *Controller) agentSourceReader() func(string) []types.AgentSignalSource {
-	if c.agentSignalSources != nil {
-		return c.agentSignalSources
+// RecordAgentSignalSources replaces the full snapshot for an authenticated node.
+func (c *Controller) RecordAgentSignalSources(node string, rows []types.AgentSignalSource) {
+	now := time.Now()
+	c.health.mu.Lock()
+	defer c.health.mu.Unlock()
+	if c.health.agentReports == nil {
+		c.health.agentReports = make(map[string]agentSourceSnapshot)
 	}
-	if r, ok := any(c).(agentSignalSourceReader); ok {
-		return r.AgentSignalSources
+	if now.After(c.health.agentPruneAt) {
+		for n, report := range c.health.agentReports {
+			if now.Sub(report.received) > agentReportTTL {
+				delete(c.health.agentReports, n)
+			}
+		}
+		c.health.agentPruneAt = now.Add(agentReportTTL)
 	}
-	return nil
+	c.health.agentReports[node] = agentSourceSnapshot{slices.Clone(rows), now}
 }
+
+// AgentSignalSources returns fresh heartbeat reports for one node or for the fleet.
+func (c *Controller) AgentSignalSources(node string) []types.AgentSignalSource {
+	c.health.mu.Lock()
+	defer c.health.mu.Unlock()
+	if node != "" {
+		report := c.health.agentReports[node]
+		if time.Since(report.received) <= agentReportTTL {
+			return slices.Clone(report.rows)
+		}
+		return nil
+	}
+	var rows []types.AgentSignalSource
+	for _, report := range c.health.agentReports {
+		if time.Since(report.received) <= agentReportTTL {
+			rows = append(rows, report.rows...)
+		}
+	}
+	return rows
+}
+
+const agentReportTTL = 2 * time.Minute
 
 // healthRows are the rows of one node's read of one source: one for every
 // observation, one for every profile of the node that has none, and one for

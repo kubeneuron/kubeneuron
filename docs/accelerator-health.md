@@ -282,8 +282,8 @@ nothing new and changes nothing.
   and that is not healthy. For the signal sources an agent reads on the node
   (`source` `agent`, the rule naming the agent's source), `unknown` is one it
   cannot read, with its reason, and `available` one it reads: a fault it reads
-  opens an incident, and none read is not health. Agents do not report their
-  sources yet, and until they do there are no such rows. Once they do, a node
+  opens an incident, and none read is not health. Agents send a full report at registration heartbeats. Reports expire two minutes
+  after receipt. A node
   asked for by name whose agent reports none (an older agent, or no agent) has
   one `agent` row `unknown` saying there is no data.
 - **Held steps.** A source not yet read in this term has one row with the

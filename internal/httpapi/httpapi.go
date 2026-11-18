@@ -379,6 +379,7 @@ func (s *Server) AgentRoutes(authenticator AgentAuthenticator) http.Handler {
 	mux.HandleFunc("GET "+types.AgentRegistrationV2Path, s.handleRegistrationCapabilityV2)
 	mux.HandleFunc("POST "+types.AgentRegistrationV2Path, s.handleRegisterV2)
 	mux.HandleFunc("GET "+types.AgentAcceleratorProfilePath, s.handleAcceleratorObservationProfile)
+	mux.HandleFunc("POST "+types.AgentSignalSourcesPath, s.handleAgentSignalSources)
 	mux.HandleFunc("POST "+types.AgentAcceleratorReportPath, s.handleAcceleratorReport)
 	// The first lease-bearing action protocol is intentionally versioned. The
 	// old unleased route is not registered: mixed controller/agent versions

@@ -88,7 +88,7 @@ func TestAcceleratorHealthNodeFilterAndOrder(t *testing.T) {
 		t.Fatalf("rows %+v", view.Rows)
 	}
 	view = c.AcceleratorHealth(ctx, "trn-1")
-	if len(view.Rows) != 2 || view.Rows[0].Node != "trn-1" || view.Rows[1].Node != "trn-1" {
+	if len(view.Rows) != 3 || view.Rows[0].Source != agentHealthSource || view.Rows[1].Node != "trn-1" || view.Rows[2].Node != "trn-1" {
 		t.Fatalf("filtered rows %+v", view.Rows)
 	}
 	if view = c.AcceleratorHealth(ctx, "trn"); len(view.Rows) != 0 || view.Rows == nil {
@@ -174,8 +174,8 @@ func TestAcceleratorHealthAgentSources(t *testing.T) {
 	ctx := context.Background()
 	plat.set(neuronNode(clock, "False", "NeuronHealthy"))
 	c.pollNodeHealth(ctx)
-	if rows := healthRowsOf(c.AcceleratorHealth(ctx, "trn-1"), agentHealthSource); len(rows) != 0 {
-		t.Fatalf("agent rows with no agent sources wired %+v", rows)
+	if rows := healthRowsOf(c.AcceleratorHealth(ctx, "trn-1"), agentHealthSource); len(rows) != 1 || rows[0].State != "unknown" {
+		t.Fatalf("agent rows before first report %+v", rows)
 	}
 	sources := map[string][]types.AgentSignalSource{
 		"trn-1": {

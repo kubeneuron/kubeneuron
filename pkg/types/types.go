@@ -56,11 +56,11 @@ const (
 	// expiry. The agent persists it with the opaque token and only resumes a
 	// crash-interrupted action while that exact lease remains current.
 	AgentActionLeaseExpiresHeader = "X-KubeNeuron-Action-Lease-Expires-At"
+	// AgentSignalSourcesPath accepts authenticated source availability snapshots.
+	AgentSignalSourcesPath = "/api/v1/agents/signal-sources/report-v1"
 	// AgentAcceleratorReportPath is the versioned, observation-only inventory
 	// and runtime-preflight report sent by an authenticated node agent. A
 	// controller that has not wired this exact protocol must not accept it.
-	AgentSignalSourcesPath = "/api/v1/agents/signal-sources/report-v1"
-
 	AgentAcceleratorReportPath = "/api/v1/agents/accelerators/report-v1"
 	// AgentAcceleratorProfilePath is the authenticated, controller-owned
 	// profile lookup used by an agent before it emits an observation bound to

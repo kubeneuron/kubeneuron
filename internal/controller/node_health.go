@@ -124,9 +124,11 @@ type pendingHealth struct {
 // healthSignals is the confirmation state of every source's fault signals,
 // and the last read of each node.
 type healthSignals struct {
-	mu      sync.Mutex
-	pending map[string]*pendingHealth
-	latest  map[string]nodehealth.NodeHealth
+	agentReports map[string]agentSourceSnapshot
+	agentPruneAt time.Time
+	mu           sync.Mutex
+	pending      map[string]*pendingHealth
+	latest       map[string]nodehealth.NodeHealth
 	// read are the sources read successfully in this leadership term, and
 	// readAt when each was last read.
 	read   map[string]bool
@@ -155,6 +157,7 @@ type healthSignals struct {
 func (h *healthSignals) reset() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.agentReports = nil
 	h.pending, h.latest, h.read, h.readAt, h.failedAt, h.draQuiet = nil, nil, nil, nil, nil, nil
 	h.cloudAt, h.cloudNodes, h.cloudEvery = time.Time{}, nil, 0
 	h.neuronHeld, h.neuronRestored = nil, false
