@@ -146,8 +146,17 @@ var (
 	// not known. Never sum across resources: the units differ.
 	DegradedAcceleratorSeconds = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "kubeneuron_degraded_accelerator_seconds_total",
-		Help: "Device-seconds charged when an incident reached a terminal state, by class, outcome and accelerator resource, in that resource's own device. Incidents with no recorded device count are not charged. Do not sum across resources.",
+		Help: "Device-seconds charged when an incident reached a terminal state, by class, outcome and accelerator resource, in that resource's own device. Incidents with no recorded device count are in kubeneuron_degraded_node_seconds_device_count_unknown_total. Keep the resource label when aggregating: each resource counts time in its own device unit.",
 	}, []string{"class", "outcome", "resource"})
+
+	// DegradedNodeSecondsDeviceCountUnknown is the rest of the incidents
+	// DegradedAcceleratorSeconds leaves out: those that recorded no device
+	// count, charged in node-seconds on the same terminal transition, the
+	// node-hours block of the report.
+	DegradedNodeSecondsDeviceCountUnknown = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_degraded_node_seconds_device_count_unknown_total",
+		Help: "Node-seconds charged when an incident with no recorded device count reached a terminal state, by class and outcome. No device count is guessed.",
+	}, []string{"class", "outcome"})
 
 	// --- Protection: what the fleet did NOT lose ---------------------------
 	//

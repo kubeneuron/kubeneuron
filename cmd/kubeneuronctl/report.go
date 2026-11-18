@@ -245,7 +245,7 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		// Say this loudly. On a fresh install every incident is dry-run, so a
 		// silent zero would read as "nothing happened" when the truth is
 		// "everything was watched and nothing was executed, by design".
-		installation := "their installation was"
+		installation := "their installations were"
 		if r.DryRunExcluded == 1 {
 			installation = "its installation was"
 		}
@@ -327,7 +327,7 @@ func printReportIncidents(cmd *cobra.Command, rows []types.RecoveryIncident, tot
 		if len(rows) < total {
 			_, _ = fmt.Fprintf(w, "\nShowing %d of %d incidents\n", len(rows), total)
 		}
-		_, _ = fmt.Fprintf(w, "\nINCIDENT\tNODE\tVENDOR\tSTATE\t%s\n", timeLabel)
+		_, _ = fmt.Fprintf(w, "\nINCIDENT\tNODE\tVENDOR / RESOURCE\tSTATE\t%s\n", timeLabel)
 		for _, row := range rows {
 			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", row.ID, row.Node, reportVendor(row), row.State, reportDuration(row))
 		}

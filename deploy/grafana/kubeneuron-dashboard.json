@@ -958,18 +958,45 @@
     {
       "type": "timeseries",
       "title": "Device-hours degraded per accelerator resource, cumulative by outcome",
-      "description": "Cumulative device-hours spent under an incident since controller start, one series per accelerator resource and outcome, each in its own unit: GPU-hours for nvidia.com/gpu and amd.com/gpu, TPU chip-hours for google.com/tpu, AWS Neuron device-hours for aws.amazon.com/neuron. Series are not stacked and must not be added together: the units differ. Counted with the devices an incident recorded when it opened; incidents with no recorded device count are not in this panel (see kubeneuronctl report, node-hours).",
+      "description": "Cumulative device-hours spent under an incident since controller start, one series per accelerator resource and outcome, each in its own unit: GPU-hours for nvidia.com/gpu and amd.com/gpu, TPU chip-hours for google.com/tpu, AWS Neuron device-hours for aws.amazon.com/neuron. Series are not stacked and must not be added together: the units differ. Counted with the devices an incident recorded when it opened; incidents with no recorded device count are not in this panel: they are in Node-hours (device count unknown) beside it.",
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 18,
         "x": 0,
         "y": 106
       },
       "targets": [
         {
-          "expr": "sum by (resource, outcome) (kubeneuron_degraded_accelerator_seconds_total) / 3600",
-          "legendFormat": "{{resource}} {{outcome}}",
+          "expr": "sum by (resource, outcome) (kubeneuron_degraded_accelerator_seconds_total{resource=\"nvidia.com/gpu\"}) / 3600",
+          "legendFormat": "nvidia.com/gpu — GPU-hours {{outcome}}",
           "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        },
+        {
+          "expr": "sum by (resource, outcome) (kubeneuron_degraded_accelerator_seconds_total{resource=\"amd.com/gpu\"}) / 3600",
+          "legendFormat": "amd.com/gpu — GPU-hours {{outcome}}",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        },
+        {
+          "expr": "sum by (resource, outcome) (kubeneuron_degraded_accelerator_seconds_total{resource=\"google.com/tpu\"}) / 3600",
+          "legendFormat": "google.com/tpu — TPU chip-hours {{outcome}}",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        },
+        {
+          "expr": "sum by (resource, outcome) (kubeneuron_degraded_accelerator_seconds_total{resource=\"aws.amazon.com/neuron\"}) / 3600",
+          "legendFormat": "aws.amazon.com/neuron — AWS Neuron device-hours {{outcome}}",
+          "refId": "D",
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
@@ -985,6 +1012,34 @@
               "mode": "none"
             }
           }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Node-hours (device count unknown)",
+      "description": "Node-hours spent under incidents that recorded no device count when they opened, charged when they closed, since controller start. No device count is guessed for them, so they are in node-hours and in no device-hour series; kubeneuronctl report shows the same block for a window.",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 106
+      },
+      "targets": [
+        {
+          "expr": "sum(kubeneuron_degraded_node_seconds_device_count_unknown_total) / 3600",
+          "legendFormat": "node-hours",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 1
         }
       }
     }

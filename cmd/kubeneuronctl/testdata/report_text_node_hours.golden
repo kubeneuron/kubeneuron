@@ -13,8 +13,8 @@ Time to recover (n=1)                p50 30m0s  p90 30m0s  mean 30m0s
 
 Showing 1 of 2 incidents
 
-INCIDENT  NODE    VENDOR  STATE     TIME TO RECOVER
-inc-1     node-a  nvidia  RESOLVED  30m0s
+INCIDENT  NODE    VENDOR / RESOURCE  STATE     TIME TO RECOVER
+inc-1     node-a  nvidia             RESOLVED  30m0s
 
 problem classes:
 CLASS   INCIDENTS  NOTHING DONE  UNATTENDED  MTTR P50  MTTR P90

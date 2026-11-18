@@ -29,8 +29,8 @@ SIMULATED — what dry-run WOULD have done (nothing was executed)
   no ladder to run      0   ← closed with no policy bound to the class
   ladder decision time  p50 30m0s  p90 30m0s
 
-INCIDENT  NODE      VENDOR          STATE     SIMULATED DECISION TIME
-inc-3     tpu-node  google.com/tpu  RESOLVED  30m0s
+INCIDENT  NODE      VENDOR / RESOURCE  STATE     SIMULATED DECISION TIME
+inc-3     tpu-node  google.com/tpu     RESOLVED  30m0s
 
   TPU — TPU chip-hours
     RESOURCE        INCIDENTS  DEGRADED  WOULD RECOVER  WOULD SAVE (ESTIMATE)                   COST EQUIVALENT (ESTIMATE)

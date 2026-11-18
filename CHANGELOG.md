@@ -23,7 +23,10 @@ API is `v1alpha1`.
   `kubeneuron_degraded_accelerator_seconds_total{class,outcome,resource}`
   counts each closed incident in its resource's own device, from the devices
   it recorded when it opened; incidents with no recorded count are not
-  charged. The overview dashboard shows it per resource, unstacked. The
+  charged there but in node-seconds in
+  `kubeneuron_degraded_node_seconds_device_count_unknown_total`. The overview
+  dashboard shows each resource as its own series with its unit, unstacked,
+  and the node-hours of incidents with no recorded count beside it. The
   report's classes count their hours per resource (`classes[].accelerator_groups`)
   and its incidents list what they recorded (`incident_details[].accelerators`).
 - **Accelerator health view (experimental).** `kubeneuronctl health` and
