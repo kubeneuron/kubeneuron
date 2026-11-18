@@ -44,7 +44,7 @@ func (f *successorLab) Deliver() {
 func (f *successorLab) UpdateNodegroupConfig(_ context.Context, in *eks.UpdateNodegroupConfigInput, _ ...func(*eks.Options)) (*eks.UpdateNodegroupConfigOutput, error) {
 	token := sdk.ToString(in.ClientRequestToken)
 	if token == "" || sdk.ToInt32(in.ScalingConfig.DesiredSize) != 2 {
-		f.terminateFixture.t.Fatalf("unexpected scaling request: %+v", in)
+		f.t.Fatalf("unexpected scaling request: %+v", in)
 	}
 	if token != f.token {
 		f.token = token
@@ -117,7 +117,7 @@ func TestReleaseAfterLostAnswerWithStaleCloudReads(t *testing.T) {
 	if err := provider.ReleaseSuccessor(t.Context(), plan); !errors.Is(err, cloud.ErrNeedsOperator) {
 		t.Fatalf("release: %v", err)
 	}
-	if f.Requests() != 1 || f.terminateFixture.calls != 0 {
-		t.Fatalf("requests=%d terminations=%d", f.Requests(), f.terminateFixture.calls)
+	if f.Requests() != 1 || f.calls != 0 {
+		t.Fatalf("requests=%d terminations=%d", f.Requests(), f.calls)
 	}
 }
