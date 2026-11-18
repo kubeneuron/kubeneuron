@@ -266,6 +266,15 @@ func TestRecycleRefusedAfterTheRungStartedEscalates(t *testing.T) {
 			break
 		}
 		c.reconcile(ctx)
+		// Let this dispatched step publish its completion before another
+		// reconcile can admit the recycle whose precondition we are testing.
+		deadline := time.Now().Add(5 * time.Second)
+		for c.isInFlight(id) {
+			if time.Now().After(deadline) {
+				t.Fatal("timed out waiting for step completion")
+			}
+			time.Sleep(time.Millisecond)
+		}
 	}
 	if inc := mustIncident(t, st, id); inc.StepIndex != 2 || inc.Playbook != "cloud-recycle" {
 		t.Fatalf("step=%d playbook=%s, want cloud-recycle waiting at its recycle%s", inc.StepIndex, inc.Playbook, dump(trail(t, st, id)))
