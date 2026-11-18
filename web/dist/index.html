@@ -854,7 +854,9 @@ function recoveryReportBlock(data, simulated){
   const hours = n => Number.isFinite(n) ? n.toLocaleString(undefined,{maximumFractionDigits:4}) : "Unknown";
   const heading = simulated ? "DryRun simulation" : "Actual incidents";
   if(!data.incidents) return '<div class="sectiontitle">'+heading+'</div><p>No incidents in this window.</p>';
-  const cards = statCard(hours(data.degraded_gpu_hours),"Degraded GPU-hours") +
+  const cards = statCard(hours(simulated ? data.would_recover_gpu_hours : data.recovered_gpu_hours),
+      simulated ? "GPU-hours that would have been returned (estimate)" : "Recovered GPU-hours") +
+    statCard(hours(data.degraded_gpu_hours),"Degraded GPU-hours") +
     statCard(data.mttr?.samples ? reportDuration(data.mttr.p50_seconds) : "Unknown",
       simulated ? "Median simulated decision time" : "Time to recover (median)") +
     (estimate ? statCard(hours(estimate.gpu_hours_saved),
@@ -862,7 +864,7 @@ function recoveryReportBlock(data, simulated){
       " · manual baseline "+reportDuration(estimate.manual_baseline_seconds)) : "");
   return '<div class="sectiontitle">'+heading+'</div><div class="stats">'+cards+'</div>'+
     (!estimate ? '<p>Set <code>spec.manualRecoveryBaseline</code> to estimate GPU-hours saved.</p>' : "")+
-    (simulated && estimate ? '<p>Assumes simulated decision time equals recovery time.</p>' : "") + reportIncidents(data.incident_details,simulated);
+    (simulated ? '<p>Assumes the simulated action restores the affected GPUs at the simulated resolution time.</p>' : "") + reportIncidents(data.incident_details,simulated);
 }
 let reportRequest = 0, reportPeriod = "", reportFetchedAt = 0;
 async function loadRecoveryReport(){
