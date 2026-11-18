@@ -4,7 +4,7 @@ package controller
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -26,6 +26,8 @@ type cloudHealthPlatform struct {
 	points   []types.CloudHealthPoint
 	cloudErr string
 	calls    int
+	// noDevices drops the node's TPU count, as a failed chip can.
+	noDevices bool
 }
 
 func (p *cloudHealthPlatform) CloudAcceleratorHealthEnabled() bool { return p.enabled }
@@ -35,11 +37,15 @@ func (p *cloudHealthPlatform) CloudAcceleratorHealth(context.Context) ([]types.N
 	defer p.cmu.Unlock()
 	p.calls++
 	snap := tpuHealthNode(p.clock)
+	if p.noDevices {
+		snap.Devices = nil
+	}
 	snap.ReadAt = p.clock.Now()
 	snap.Cloud = append([]types.CloudHealthPoint(nil), p.points...)
 	if p.cloudErr != "" {
 		snap.Cloud, snap.CloudError = nil, p.cloudErr
-		return []types.NodeHealthSnapshot{snap}, errors.New(p.cloudErr + ": scripted")
+		// Google's errors carry a request ID: each one's text differs.
+		return []types.NodeHealthSnapshot{snap}, fmt.Errorf("%s: scripted, request %d", p.cloudErr, p.calls)
 	}
 	return []types.NodeHealthSnapshot{snap}, nil
 }
@@ -221,7 +227,7 @@ func TestCloudHealthPermissionDeniedIsUnknown(t *testing.T) {
 // A degraded or networking-issue node is counted as ignored and opens
 // nothing.
 func TestCloudHealthIgnoredIsCounted(t *testing.T) {
-	for _, tc := range []struct{ status, category string }{{"DEGRADED", ""}, {"UNHEALTHY", "NETWORKING_ISSUE"}} {
+	for _, tc := range []struct{ status, category, reason string }{{"DEGRADED", "", "degraded"}, {"UNHEALTHY", "NETWORKING_ISSUE", "networking-issue"}} {
 		c, plat, clock := cloudHealthFixture(t)
 		ctx := context.Background()
 		plat.sample(3*time.Minute, tc.status, tc.category)
@@ -234,6 +240,15 @@ func TestCloudHealthIgnoredIsCounted(t *testing.T) {
 		}
 		if got := testutil.ToFloat64(metrics.AcceleratorHealthNodes.WithLabelValues("cloud-monitoring", "google-tpu", "ignored")); got != 1 {
 			t.Errorf("%s %s: ignored TPU nodes %v, want 1", tc.status, tc.category, got)
+		}
+		for _, reason := range []string{"degraded", "networking-issue"} {
+			want := 0.0
+			if reason == tc.reason {
+				want = 1
+			}
+			if got := testutil.ToFloat64(metrics.AcceleratorHealthIgnoredNodes.WithLabelValues("cloud-monitoring", "google-tpu", reason)); got != want {
+				t.Errorf("%s %s: ignored nodes with reason %s %v, want %v", tc.status, tc.category, reason, got, want)
+			}
 		}
 	}
 }
@@ -262,5 +277,31 @@ func TestCloudHealthNewLeaderReadsAgain(t *testing.T) {
 	}
 	if err := c.requireCloudRecovery(ctx, &types.Incident{ID: "i", Target: types.Target{Node: "tpu-1"}}, step); err != nil {
 		t.Fatalf("still refused after the new term's read: %v", err)
+	}
+}
+
+// The cloud's read error is logged under its reason, not its text, so the
+// log-once keys stay bounded.
+func TestCloudHealthLogKeyIsTheReason(t *testing.T) {
+	c, plat, clock := cloudHealthFixture(t)
+	ctx := context.Background()
+	plat.cloudErr = "api-error"
+	for range 3 {
+		c.pollNodeHealth(ctx)
+		clock.Advance(10 * time.Minute)
+	}
+	if n := plat.callCount(); n != 3 {
+		t.Fatalf("%d reads, want 3", n)
+	}
+	c.logOnce.mu.Lock()
+	defer c.logOnce.mu.Unlock()
+	var keys []string
+	for k := range c.logOnce.seen {
+		if strings.HasPrefix(k, "cloud-health/") {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) != 1 || keys[0] != "cloud-health/api-error" {
+		t.Fatalf("log keys %v, want one, the reason", keys)
 	}
 }

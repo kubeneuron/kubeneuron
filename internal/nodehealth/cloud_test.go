@@ -141,4 +141,14 @@ func TestEvaluateCloudMultiHostSlice(t *testing.T) {
 	if h := EvaluateCloud(s); h.Slice != "slice-a" {
 		t.Errorf("slice %q, want slice-a", h.Slice)
 	}
+	// With the TPU count gone, the node may still be one host of many.
+	s.Devices = nil
+	if h := EvaluateCloud(s); h.Slice != "slice-a" {
+		t.Errorf("without a TPU count: slice %q, want slice-a", h.Slice)
+	}
+	s.Labels = map[string]string{labelTPUTopology: "2x2", labelGKENodePool: "single"}
+	s.Devices = []types.DeviceCount{{Resource: "google.com/tpu", Capacity: 4, Allocatable: 4}}
+	if h := EvaluateCloud(s); h.Slice != "" {
+		t.Errorf("single host: slice %q, want none", h.Slice)
+	}
 }

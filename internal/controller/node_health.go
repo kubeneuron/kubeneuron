@@ -92,7 +92,9 @@ func (s cloudHealthSource) read(ctx context.Context) ([]nodehealth.NodeHealth, e
 	switch {
 	case err != nil:
 		outcome = snaps[0].CloudError
-		if s.c.logOnce.first("cloud-health/" + err.Error()) {
+		// The key is the reason, not the error's text: Google's errors
+		// carry request IDs, and the set of keys must stay bounded.
+		if s.c.logOnce.first("cloud-health/" + outcome) {
 			s.c.log.Warn("could not read accelerator health from the cloud's monitoring; its nodes are unknown", "err", err)
 		}
 		h.mu.Lock()
@@ -375,7 +377,28 @@ func (c *Controller) countNodeHealth(source string, nodes []nodehealth.NodeHealt
 			metrics.AcceleratorHealthNodes.WithLabelValues(source, p.Name, string(s)).Set(counts[[2]string{p.Name, string(s)}])
 		}
 	}
+	ignored := map[[2]string]float64{}
+	for _, n := range nodes {
+		seen := map[[2]string]bool{}
+		for _, o := range n.Observations {
+			k := [2]string{o.Profile, o.Reason}
+			if o.State == nodehealth.StateIgnored && ignoredReasons[o.Reason] && !seen[k] {
+				seen[k] = true
+				ignored[k]++
+			}
+		}
+	}
+	for _, p := range nodehealth.Profiles {
+		for reason := range ignoredReasons {
+			metrics.AcceleratorHealthIgnoredNodes.WithLabelValues(source, p.Name, reason).Set(ignored[[2]string{p.Name, reason}])
+		}
+	}
 }
+
+// ignoredReasons are the reasons of a signal read and not acted on that the
+// ignored-nodes metric names. The list is closed, so the label stays
+// bounded.
+var ignoredReasons = map[string]bool{"degraded": true, "networking-issue": true}
 
 func profileState(n nodehealth.NodeHealth, profile string) nodehealth.State {
 	state := nodehealth.StateHealthy

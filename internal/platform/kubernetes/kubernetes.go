@@ -233,6 +233,9 @@ var drainPollInterval = 5 * time.Second
 type Platform struct {
 	client   kubernetes.Interface
 	recycler platform.InstanceRecycler
+	// cloudHealthTimeout overrides the bound of one read of the cloud's
+	// monitoring; zero is cloudHealthTimeout.
+	cloudHealthTimeout time.Duration
 	// dynamic serves the one read that has no typed client at the pinned
 	// Kubernetes API version: the opt-in resource.k8s.io/v1 ResourceSlice
 	// observation (topology.go). Nil on a Platform built without New (tests),

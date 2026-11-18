@@ -434,7 +434,9 @@ const (
 
 // multiHostSlice is the node pool of the TPU slice the node is one host of,
 // when the slice's topology holds more chips than the node: replacing one
-// such node alone is not a recovery.
+// such node alone is not a recovery. A node with a topology and no TPU count
+// (a failed chip can take it to zero) may be one host of many, and is
+// taken to be.
 func multiHostSlice(snap types.NodeHealthSnapshot) string {
 	topology, ok := snap.Labels[labelTPUTopology]
 	if !ok {
@@ -454,7 +456,7 @@ func multiHostSlice(snap types.NodeHealthSnapshot) string {
 			perNode = d.Capacity
 		}
 	}
-	if perNode <= 0 || chips <= perNode {
+	if perNode > 0 && chips <= perNode {
 		return ""
 	}
 	if pool := snap.Labels[labelGKENodePool]; pool != "" {

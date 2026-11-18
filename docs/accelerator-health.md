@@ -113,9 +113,15 @@ and [metric list](https://docs.cloud.google.com/monitoring/api/metrics_gcp_c)
 (2026-11-18).
 
 - **What is read.** Once a minute, one list per project of the TPU nodes'
-  provider IDs, for the last 15 minutes. A series is matched to a node by the
-  instance's zone and name. Nothing is asked of Cloud Monitoring while the
-  cluster has no TPU node. The metric names no chip: a fault is the node's.
+  provider IDs, for the last 15 minutes; one read waits at most 20 seconds
+  for an answer, then counts as `api-error`. A TPU node is one that lists
+  `google.com/tpu`, even at zero (a failed chip can take the count down), or
+  carries GKE's `cloud.google.com/gke-tpu-accelerator` label. A series is
+  matched to a node by the instance's zone and name. Nothing is asked of
+  Cloud Monitoring while the cluster has no TPU node. The metric names no
+  chip: a fault is the node's. A TPU node without a TPU count is taken to be
+  one host of a multi-host slice when it has a topology label, so it is not
+  replaced alone.
 - **Fault.** `UNHEALTHY` with category `BAD_TPU_CHIP` or `BAD_SC_CHIP` on two
   consecutive samples (two samples, not two reads of one) opens
   `accelerator-fault` on the node. The incident records the source
@@ -124,7 +130,8 @@ and [metric list](https://docs.cloud.google.com/monitoring/api/metrics_gcp_c)
 - **Read, not acted on.** `DEGRADED` (reason `degraded`: performance, not a
   fault) and `UNHEALTHY` with `NETWORKING_ISSUE` (reason `networking-issue`:
   it does not place the fault on this node) open nothing and are counted as
-  `ignored` in `kubeneuron_accelerator_health_nodes`.
+  `ignored` in `kubeneuron_accelerator_health_nodes`, and by reason in
+  `kubeneuron_accelerator_health_ignored_nodes`.
 - **Unknown, never healthy.** No sample for the instance, a newest sample
   more than 10 minutes old (the metric is sampled every 60 seconds and
   visible up to 420 seconds later), a failed read (`permission-denied`,
@@ -171,4 +178,7 @@ That each component writes these signals on these nodes, with these names and
 reasons, and how long after a fault it writes them. None of the profiles has
 run on hardware. For Cloud Monitoring: whether Google writes
 `infra_health` for the instances of GKE TPU nodes, with these labels, and how
-long after a fault.
+long after a fault; and whether it writes one series per instance or one per
+status with the value 0 or 1. The value is not read, so in the second case
+every sample time carries two statuses and the node stays unknown: safe, but
+the source then tells nothing.

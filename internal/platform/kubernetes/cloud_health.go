@@ -5,13 +5,25 @@ package kubernetes
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
 
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
-// tpuResource is the extended resource of a GKE TPU node.
-const tpuResource = "google.com/tpu"
+const (
+	// tpuResource is the extended resource of a GKE TPU node.
+	tpuResource = "google.com/tpu"
+	// labelTPUAccelerator is the GKE label naming a TPU node's accelerator.
+	labelTPUAccelerator = "cloud.google.com/gke-tpu-accelerator"
+	// cloudHealthTimeout bounds one read of the cloud's monitoring, so a
+	// call that hangs does not stop the health loop.
+	cloudHealthTimeout = 20 * time.Second
+)
 
 // cloudHealth is the configured provider's accelerator health read, when it
 // has one and the operator turned it on.
@@ -44,20 +56,22 @@ func (p *Platform) CloudAcceleratorHealth(ctx context.Context) ([]types.NodeHeal
 	if !ok {
 		return nil, nil
 	}
-	snaps, err := p.NodeHealth(ctx)
+	nodes, err := p.allNodes(ctx)
 	if err != nil {
 		return nil, err
 	}
+	readAt := time.Now()
 	var out []types.NodeHealthSnapshot
 	ids := map[string]string{}
 	var instances []string
-	for _, snap := range snaps {
-		if !hasDevice(snap, tpuResource) {
+	for _, n := range nodes {
+		if !isTPUNode(n) {
 			continue
 		}
 		// Only the cloud's read is evaluated here; the Node's own signals
 		// are the Kubernetes source's.
-		snap.Taints, snap.Conditions = nil, nil
+		snap := types.NodeHealthSnapshot{Node: n.Name, UID: string(n.UID), Labels: n.Labels, Devices: nodeDevices(n),
+			ReadAt: readAt, ProviderID: n.Spec.ProviderID, CreatedAt: n.CreationTimestamp.Time}
 		if id, err := p.recycler.InstanceID(snap.ProviderID); err == nil {
 			ids[snap.Node] = id
 			instances = append(instances, id)
@@ -67,7 +81,8 @@ func (p *Platform) CloudAcceleratorHealth(ctx context.Context) ([]types.NodeHeal
 	if len(out) == 0 {
 		return nil, nil
 	}
-	points, err := r.AcceleratorHealth(ctx, instances)
+	sort.Slice(out, func(i, j int) bool { return out[i].Node < out[j].Node })
+	points, err := p.readCloudHealth(ctx, r, instances)
 	if err != nil {
 		reason := cloud.HealthReadAPIError
 		var herr *cloud.HealthReadError
@@ -87,11 +102,40 @@ func (p *Platform) CloudAcceleratorHealth(ctx context.Context) ([]types.NodeHeal
 	return out, nil
 }
 
-func hasDevice(snap types.NodeHealthSnapshot, resource string) bool {
-	for _, d := range snap.Devices {
-		if d.Resource == resource && d.Capacity > 0 {
-			return true
-		}
+// readCloudHealth asks the cloud, for at most cloudHealthTimeout. A call
+// that outlasts it, even one that ignores its context, is an api-error.
+func (p *Platform) readCloudHealth(ctx context.Context, r cloud.AcceleratorHealthReader, instances []string) (map[string][]cloud.HealthPoint, error) {
+	timeout := p.cloudHealthTimeout
+	if timeout <= 0 {
+		timeout = cloudHealthTimeout
 	}
-	return false
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	type answer struct {
+		points map[string][]cloud.HealthPoint
+		err    error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		points, err := r.AcceleratorHealth(ctx, instances)
+		done <- answer{points, err}
+	}()
+	select {
+	case a := <-done:
+		return a.points, a.err
+	case <-ctx.Done():
+		return nil, &cloud.HealthReadError{Reason: cloud.HealthReadAPIError,
+			Err: fmt.Errorf("no answer from the cloud's monitoring within %s: %w", timeout, ctx.Err())}
+	}
+}
+
+// isTPUNode reports whether the Node is a GKE TPU node: it lists the TPU
+// resource, even at zero (a failed chip can take the count down), or
+// carries GKE's TPU accelerator label. The cloud's read must go on for the
+// node exactly when its devices go missing.
+func isTPUNode(n *corev1.Node) bool {
+	if _, ok := n.Status.Capacity[tpuResource]; ok {
+		return true
+	}
+	return n.Labels[labelTPUAccelerator] != ""
 }

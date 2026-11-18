@@ -389,6 +389,14 @@ var (
 		Help: "Accelerator nodes by health source, profile and state (healthy, fault, unknown). Unknown is a node without a fresh signal, never a healthy one. Ignored counts, in addition, the nodes reporting a problem on a signal that is read and not acted on.",
 	}, []string{"source", "profile", "state"})
 
+	// AcceleratorHealthIgnoredNodes is how many nodes report a signal that
+	// is read and not acted on, by its reason: degraded or networking-issue
+	// (TPU health from Cloud Monitoring). No other reason is a label value.
+	AcceleratorHealthIgnoredNodes = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kubeneuron_accelerator_health_ignored_nodes",
+		Help: "Accelerator nodes reporting a signal that is read and not acted on, by health source, profile and reason (degraded, networking-issue).",
+	}, []string{"source", "profile", "reason"})
+
 	// CloudHealthReads counts the reads of accelerator health from the
 	// cloud's monitoring, by outcome: ok, permission-denied, api-error, or
 	// no-nodes when no node needed one and nothing was asked of the cloud.

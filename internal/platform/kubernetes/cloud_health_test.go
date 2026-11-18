@@ -23,11 +23,16 @@ type healthRecycler struct {
 	points  map[string][]cloud.HealthPoint
 	err     error
 	asked   [][]string
+	// hang, when set, is waited on: the call ignores its context.
+	hang chan struct{}
 }
 
 func (h *healthRecycler) AcceleratorHealthEnabled() bool { return h.enabled }
 func (h *healthRecycler) AcceleratorHealth(_ context.Context, ids []string) (map[string][]cloud.HealthPoint, error) {
 	h.asked = append(h.asked, ids)
+	if h.hang != nil {
+		<-h.hang
+	}
 	return h.points, h.err
 }
 
@@ -98,5 +103,49 @@ func TestCloudAcceleratorHealthFailureMarksEveryNode(t *testing.T) {
 		if s.CloudError != cloud.HealthReadPermissionDenied || len(s.Cloud) != 0 {
 			t.Errorf("%s: error %q points %v", s.Node, s.CloudError, s.Cloud)
 		}
+	}
+}
+
+// A failed chip can take the TPU count to zero; the cloud's read goes on for
+// the node then, and for a node GKE labels as TPU without the resource.
+func TestCloudAcceleratorHealthKeepsTPUNodesWithoutDevices(t *testing.T) {
+	zero := deviceNode("tpu-1", "gce://proj-a/us-central2-b/tpu-vm-1", "google.com/tpu")
+	zero.Status.Capacity["google.com/tpu"] = resource.MustParse("0")
+	zero.Status.Allocatable["google.com/tpu"] = resource.MustParse("0")
+	labelled := deviceNode("tpu-2", "gce://proj-a/us-central2-b/tpu-vm-2", "example.com/other")
+	labelled.Labels = map[string]string{"cloud.google.com/gke-tpu-accelerator": "tpu-v5-lite-podslice"}
+	rec := &healthRecycler{enabled: true}
+	p := &Platform{client: fake.NewSimpleClientset(zero, labelled, deviceNode("cpu-1", "gce://proj-a/us-central2-b/cpu-vm-1", "example.com/other")), recycler: rec}
+	got, err := p.CloudAcceleratorHealth(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Node != "tpu-1" || got[1].Node != "tpu-2" {
+		t.Fatalf("snapshots %+v, want tpu-1 and tpu-2", got)
+	}
+	if len(rec.asked) != 1 || len(rec.asked[0]) != 2 {
+		t.Errorf("asked about %v, want both instances", rec.asked)
+	}
+}
+
+// A call that hangs, even one that ignores its context, ends as an api-error
+// with every node unknown.
+func TestCloudAcceleratorHealthTimesOut(t *testing.T) {
+	hang := make(chan struct{})
+	defer close(hang)
+	rec := &healthRecycler{enabled: true, hang: hang}
+	p := &Platform{client: fake.NewSimpleClientset(deviceNode("tpu-1", "gce://proj-a/us-central2-b/tpu-vm-1", "google.com/tpu")),
+		recycler: rec, cloudHealthTimeout: 50 * time.Millisecond}
+	start := time.Now()
+	got, err := p.CloudAcceleratorHealth(context.Background())
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("the read took %s", took)
+	}
+	var herr *cloud.HealthReadError
+	if !errors.As(err, &herr) || herr.Reason != cloud.HealthReadAPIError {
+		t.Fatalf("err %v, want an api-error", err)
+	}
+	if len(got) != 1 || got[0].CloudError != cloud.HealthReadAPIError {
+		t.Fatalf("snapshots %+v, want tpu-1 marked api-error", got)
 	}
 }
