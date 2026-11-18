@@ -572,6 +572,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	metrics.SetXIDSourceUnavailable("nvidia-dcgm", "xid-field-unavailable", 1)
 	events, err := a.watcher.Watch(ctx)
 	reportKernelSourceAvailability(err == nil)
+	a.reportSignalSources(ctx)
 	if err != nil {
 		// Non-fatal: the retry tick below keeps reopening the watcher.
 		a.log.Error("kmsg watcher unavailable, will retry", "err", err)
@@ -674,6 +675,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			if err := a.register(ctx); err != nil {
 				a.log.Debug("registration heartbeat failed", "err", err)
 			}
+			a.reportSignalSources(ctx)
 			a.reportNVIDIA(ctx)
 			a.reportAdapters(ctx)
 			a.pollAdapterDetections(ctx)
@@ -1475,6 +1477,17 @@ func (a *Agent) register(ctx context.Context) error {
 	}
 	a.recordRegistrationAcknowledgment()
 	return nil
+}
+
+// reportSignalSources sends a full snapshot independently of the registration ack.
+func (a *Agent) reportSignalSources(ctx context.Context) {
+	rows := metrics.AgentSignalSources(a.cfg.NodeName)
+	if len(rows) == 0 {
+		return
+	}
+	if err := a.postExpectStatus(ctx, types.AgentSignalSourcesPath, rows, http.StatusNoContent); err != nil {
+		a.log.Debug("signal source report failed; will retry at next heartbeat", "err", err)
+	}
 }
 
 // reportNVIDIA publishes the current NVIDIA preflight snapshot when, and only

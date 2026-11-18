@@ -1643,3 +1643,43 @@ func TestAgentAdoptsControllerServedArming(t *testing.T) {
 		}
 	})
 }
+
+func TestSignalSourceReportRetriesWithCurrentAvailability(t *testing.T) {
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != types.AgentSignalSourcesPath {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var rows []types.AgentSignalSource
+		if err := json.NewDecoder(r.Body).Decode(&rows); err != nil {
+			t.Error(err)
+		}
+		first := posts.Add(1) == 1
+		found := false
+		for _, row := range rows {
+			if row.Source == "amd-kmsg" && row.Class == types.ClassPCIe {
+				found = true
+				if row.Node == "" || row.ReadAt.IsZero() || row.Available == first || (row.Reason == "kernel-log-unavailable") != first {
+					t.Errorf("unexpected source observation %+v", row)
+				}
+			}
+		}
+		if !found {
+			t.Error("missing AMD PCIe source")
+		}
+		if first {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	a := newTestAgent(t, server.URL, &testClock{now: time.Now()}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	reportKernelSourceAvailability(false)
+	a.reportSignalSources(context.Background())
+	reportKernelSourceAvailability(true)
+	a.reportSignalSources(context.Background())
+	if posts.Load() != 2 {
+		t.Fatalf("got %d posts", posts.Load())
+	}
+}
