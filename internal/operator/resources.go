@@ -413,6 +413,9 @@ func controllerDeployment(installation *kubeneuronv1alpha1.KubeNeuron, snapshot 
 			{Name: "client-ca", MountPath: "/var/run/secrets/kube-neuron/client-ca", ReadOnly: true},
 		},
 	}
+	if cloud := installation.Spec.Cloud; cloud != nil && cloud.Provider == "aws" && cloud.AWS != nil && cloud.AWS.ClusterName != "" {
+		container.Env = append(container.Env, corev1.EnvVar{Name: "KUBENEURON_EKS_CLUSTER", Value: cloud.AWS.ClusterName})
+	}
 	if installation.Spec.TLS.PublicServerSecretRef != nil {
 		// Probes must speak the listener's protocol once it serves TLS.
 		container.ReadinessProbe.HTTPGet.Scheme = corev1.URISchemeHTTPS

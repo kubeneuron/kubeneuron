@@ -361,3 +361,13 @@ exact acknowledgement, and the agent records every side effect in a
 crash-safe action journal (intent before start, outcome before reporting).
 Confine any move to `Enabled` to the narrowest node selector that covers
 the fleet you intend.
+
+
+### EKS managed nodegroups
+
+For an AWS installation, set `spec.cloud.aws.clusterName` on the KubeNeuron
+resource to the name of the EKS cluster. The operator passes it to the
+controller. Each node's `eks.amazonaws.com/nodegroup` label identifies the
+group to inspect. The controller verifies instance membership through AWS
+before using the group's repair policy. Omitting the cluster name keeps
+cloud recovery unavailable.

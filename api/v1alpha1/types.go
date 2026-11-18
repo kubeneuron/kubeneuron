@@ -46,6 +46,11 @@ type CloudSpec struct {
 
 // AWSCloudSpec configures the AWS EC2 backing for node recycle/replace.
 type AWSCloudSpec struct {
+	// ClusterName identifies the EKS cluster for managed nodegroup repair checks.
+	// Without a cluster name, cloud recovery remains unavailable.
+	// +kubebuilder:validation:MaxLength=100
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9_-]*$`
+	ClusterName string `json:"clusterName,omitempty"`
 	// Region is the EC2 region (e.g. us-east-1). Empty uses the controller's
 	// ambient region (AWS_REGION).
 	Region string `json:"region,omitempty"`

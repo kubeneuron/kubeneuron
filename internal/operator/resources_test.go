@@ -1234,15 +1234,26 @@ func TestControllerCloudWiring(t *testing.T) {
 	installation.Spec.Cloud = &kubeneuronv1alpha1.CloudSpec{
 		Provider: "aws",
 		AWS: &kubeneuronv1alpha1.AWSCloudSpec{
-			Region:     "us-east-1",
-			IAMRoleARN: "arn:aws:iam::123:role/kubeneuron-recycle",
+			ClusterName: "training",
+			Region:      "us-east-1",
+			IAMRoleARN:  "arn:aws:iam::123:role/kubeneuron-recycle",
 		},
 	}
 	deployment, err := controllerDeployment(installation, &Snapshot{Digest: "d"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	args := deployment.Spec.Template.Spec.Containers[0].Args
+	container := deployment.Spec.Template.Spec.Containers[0]
+	found := false
+	for _, env := range container.Env {
+		if env.Name == "KUBENEURON_EKS_CLUSTER" && env.Value == "training" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("controller missing configured EKS cluster")
+	}
+	args := container.Args
 	for _, want := range []string{"--cloud-provider=aws", "--cloud-region=us-east-1"} {
 		if !containsString(args, want) {
 			t.Fatalf("controller args %v missing %q", args, want)

@@ -480,6 +480,13 @@ spec:
                     description: AWS carries the AWS-specific configuration. Required
                       when provider is aws.
                     properties:
+                      clusterName:
+                        description: |-
+                          ClusterName identifies the EKS cluster for managed nodegroup repair checks.
+                          Without a cluster name, cloud recovery remains unavailable.
+                        maxLength: 100
+                        pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+                        type: string
                       iamRoleARN:
                         description: |-
                           IAMRoleARN is set as the eks.amazonaws.com/role-arn annotation on the
