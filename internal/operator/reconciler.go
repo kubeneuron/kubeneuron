@@ -1301,5 +1301,8 @@ func cloudRecoveryCondition(installation *kubeneuronv1alpha1.KubeNeuron) metav1.
 		condition.Reason = "ProviderNotConfigured"
 		condition.Message = "cloud recovery unavailable: spec.cloud.provider is not configured; detection and incident reporting remain enabled"
 	}
+	if installation.Labels["kubeneuron.io/policy-pack"] == "cloud" {
+		condition.Message += ". The default cloud pack supports observation and dry-run; live replacement requires an eligible provider with add-first support."
+	}
 	return condition
 }
