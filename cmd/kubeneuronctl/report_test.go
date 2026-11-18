@@ -95,6 +95,17 @@ func TestReportTextOutputStatesWhatItCounts(t *testing.T) {
 	}
 }
 
+func TestReportEmptyWindow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(types.RecoveryReport{})
+	}))
+	defer server.Close()
+	out, err := runReport(t, server.URL, "report")
+	if err != nil || !strings.HasSuffix(out, "No incidents in this window.\n") {
+		t.Fatalf("report=%q err=%v", out, err)
+	}
+}
+
 func TestReportJSONShape(t *testing.T) {
 	var window string
 	server := reportServer(t, &window)

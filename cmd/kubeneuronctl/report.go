@@ -97,6 +97,10 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 	out := cmd.OutOrStdout()
 	_, _ = fmt.Fprintf(out, "window:    %s .. %s (%s)\n",
 		r.From.UTC().Format(time.RFC3339), r.To.UTC().Format(time.RFC3339), since)
+	if r.Incidents == 0 && r.DryRunExcluded == 0 && r.Simulated == nil {
+		_, err := fmt.Fprintln(out, "No incidents in this window.")
+		return err
+	}
 	_, _ = fmt.Fprintf(out, "incidents: %d in window, %d still open\n\n", r.Incidents, len(r.Open))
 
 	w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
