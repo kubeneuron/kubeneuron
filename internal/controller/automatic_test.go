@@ -629,9 +629,18 @@ func TestAutomaticNeverAuthorisesNodeLevelActions(t *testing.T) {
 		{Name: "cordon", Action: "platform.cordon"},
 		{Name: "reboot", Action: "agent.reboot", Approval: "required"},
 	}}
-	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{"node": book}, []playbook.Policy{{
+	policies := []playbook.Policy{{
 		Name: autoPolicy, Class: types.ClassFellOffBus, Playbook: "node", Mode: recoverymode.Automatic, Automatic: autoSettings(),
-	}})
+	}}
+	books := map[string]*playbook.Playbook{"node": book}
+	if _, err := playbook.NewEngine(books, policies); err == nil || !strings.Contains(err.Error(), "agent.reboot") {
+		t.Fatalf("expected reboot refusal at load, got %v", err)
+	}
+	// Exercise runtime defence independently of the load-time validation.
+	reboot := book.Steps[1]
+	book.Steps[1] = playbook.Step{Name: "observe", Action: "notify.observe"}
+	engine, err := playbook.NewEngine(books, policies)
+	book.Steps[1] = reboot
 	if err != nil {
 		t.Fatal(err)
 	}

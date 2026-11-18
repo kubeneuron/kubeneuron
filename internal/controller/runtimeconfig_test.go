@@ -307,7 +307,7 @@ func TestStepCompletesAgainstTheAdmittingEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	step := &twoStep.Steps[0]
-	if err := c.startStep(ctx, inc, step, "system"); err != nil {
+	if err := c.startStep(ctx, inc, step, "test-approver"); err != nil {
 		t.Fatal(err)
 	}
 	// Hot-swap the engine while the step is blocked mid-execution.
