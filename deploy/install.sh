@@ -579,6 +579,7 @@ else
     create_pack "$work/cloud-pack.yaml" cloud
     say "Cloud recovery supports observation and dry-run. Live replacement requires a configured provider with add-first support."
   else
+    pack_label="  labels: {kubeneuron.io/policy-pack: bare-metal-alpha}"
     say "Node-level recovery: Alpha, not validated on real hardware."
     cat > "$work/bare-metal-pack.yaml" <<EOF
 apiVersion: kubeneuron.io/v1alpha1
