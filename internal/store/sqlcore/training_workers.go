@@ -143,3 +143,28 @@ func (q *Queries) TrainingConfirmations(ctx context.Context, id string, ready ti
 	}
 	return out, rows.Err()
 }
+
+// TrainingCheckpointsAt returns each job's latest checkpoint receipt at or
+// before the decision. Jobs without a qualifying receipt are absent.
+func (q *Queries) TrainingCheckpointsAt(ctx context.Context, incidentID string, decision time.Time) (map[string]time.Time, error) {
+	rows, err := q.db.QueryContext(ctx, "SELECT job_uid, received_at FROM training_checkpoint_facts WHERE incident_id=? AND kind='checkpoint'", incidentID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	latest := make(map[string]time.Time)
+	for rows.Next() {
+		var uid, stamp string
+		if err := rows.Scan(&uid, &stamp); err != nil {
+			return nil, err
+		}
+		received, err := time.Parse(time.RFC3339Nano, stamp)
+		if err != nil {
+			return nil, err
+		}
+		if !received.After(decision) && received.After(latest[uid]) {
+			latest[uid] = received
+		}
+	}
+	return latest, rows.Err()
+}

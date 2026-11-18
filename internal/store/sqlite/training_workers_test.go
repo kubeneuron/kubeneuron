@@ -188,3 +188,31 @@ func TestTrainingConfirmationDistinguishesSilentAndReportingJobs(t *testing.T) {
 		t.Fatal("silent job counted as reporting")
 	}
 }
+
+func TestTrainingCheckpointsAtDecision(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	impactIncident(t, s, "incident")
+	at := time.Now().UTC().Truncate(time.Second)
+	for _, fact := range []struct {
+		job, kind, id string
+		offset        time.Duration
+	}{
+		{"job", "checkpoint", "earlier", -time.Minute},
+		{"job", "checkpoint", "at-decision", 0},
+		{"job", "checkpoint", "later", time.Nanosecond},
+		{"resume-only", "resume", "restored", -time.Second},
+	} {
+		r := checkpoint.TrainingReport{Kind: fact.kind, CheckpointID: fact.id}
+		if err := s.SaveTrainingReport(t.Context(), "incident", fact.job, "pod", r, at.Add(fact.offset)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.TrainingCheckpointsAt(t.Context(), "incident", at)
+	if err != nil || len(got) != 1 || !got["job"].Equal(at) {
+		t.Fatalf("checkpoint receipts at decision = %v, %v", got, err)
+	}
+}
