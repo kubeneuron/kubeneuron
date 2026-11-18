@@ -262,15 +262,16 @@ func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, 
 	if report.DryRunExcluded > 0 {
 		sim := aggregateRecoverySubset(incidents, gpusPerNode, remediated, from, to, true, baseline)
 		report.Simulated = &types.SimulatedRecovery{
-			IncidentDetails:        sim.IncidentDetails,
-			WouldHaveSaved:         sim.SavingsEstimate,
-			Incidents:              sim.Incidents,
-			WouldRecover:           sim.Recovered,
-			WouldRecoverUnattended: sim.RecoveredUnattended,
-			ObservedOnly:           sim.ObservedOnly,
-			DegradedGPUHours:       sim.DegradedGPUHours,
-			WouldRecoverGPUHours:   sim.RecoveredGPUHours,
-			MTTR:                   sim.MTTR,
+			IncidentDetails:          sim.IncidentDetails,
+			IncidentDetailsTruncated: sim.IncidentDetailsTruncated,
+			WouldHaveSaved:           sim.SavingsEstimate,
+			Incidents:                sim.Incidents,
+			WouldRecover:             sim.Recovered,
+			WouldRecoverUnattended:   sim.RecoveredUnattended,
+			ObservedOnly:             sim.ObservedOnly,
+			DegradedGPUHours:         sim.DegradedGPUHours,
+			WouldRecoverGPUHours:     sim.RecoveredGPUHours,
+			MTTR:                     sim.MTTR,
 		}
 	}
 	return report
@@ -426,6 +427,18 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 		}
 		return report.Classes[i].Class < report.Classes[j].Class
 	})
+	const maxDetails = 200
+	if len(report.IncidentDetails) > maxDetails {
+		rows := report.IncidentDetails
+		sort.Slice(rows, func(i, j int) bool {
+			if rows[i].DegradedGPUHours == rows[j].DegradedGPUHours {
+				return rows[i].ID < rows[j].ID
+			}
+			return rows[i].DegradedGPUHours > rows[j].DegradedGPUHours
+		})
+		report.IncidentDetails = rows[:maxDetails]
+		report.IncidentDetailsTruncated = true
+	}
 	sort.Slice(report.Open, func(i, j int) bool {
 		if !report.Open[i].OpenedAt.Equal(report.Open[j].OpenedAt) {
 			return report.Open[i].OpenedAt.Before(report.Open[j].OpenedAt)

@@ -127,7 +127,7 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		return err
 	}
 
-	if err := printReportIncidents(cmd, r.IncidentDetails, "TIME TO RECOVER"); err != nil {
+	if err := printReportIncidents(cmd, r.IncidentDetails, r.Incidents, "TIME TO RECOVER"); err != nil {
 		return err
 	}
 	if len(r.Classes) > 0 {
@@ -203,7 +203,7 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 			gpuHours(sim.DegradedGPUHours),
 			gpuHours(sim.WouldRecoverGPUHours),
 			seconds(sim.MTTR.P50Seconds), seconds(sim.MTTR.P90Seconds))
-		if err := printReportIncidents(cmd, sim.IncidentDetails, "SIMULATED DECISION TIME"); err != nil {
+		if err := printReportIncidents(cmd, sim.IncidentDetails, sim.Incidents, "SIMULATED DECISION TIME"); err != nil {
 			return err
 		}
 		if estimate := sim.WouldHaveSaved; estimate != nil {
@@ -216,11 +216,14 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 	return nil
 }
 
-func printReportIncidents(cmd *cobra.Command, rows []types.RecoveryIncident, timeLabel string) error {
+func printReportIncidents(cmd *cobra.Command, rows []types.RecoveryIncident, total int, timeLabel string) error {
 	if len(rows) == 0 {
 		return nil
 	}
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
+	if len(rows) < total {
+		_, _ = fmt.Fprintf(w, "\nShowing %d of %d incidents (highest degraded GPU-hours)\n", len(rows), total)
+	}
 	_, _ = fmt.Fprintf(w, "\nINCIDENT\tNODE\tVENDOR\tSTATE\tDEGRADED GPU-HOURS\t%s\n", timeLabel)
 	for _, row := range rows {
 		vendor := string(row.Vendor)

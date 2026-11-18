@@ -3,6 +3,7 @@
 package controller
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -693,5 +694,26 @@ func TestSavingsEstimateDeduplicatesIntervals(t *testing.T) {
 				t.Fatalf("live %v, simulated %v, want %v each", report.SavingsEstimate.GPUHoursSaved, report.Simulated.WouldHaveSaved.GPUHoursSaved, tc.want)
 			}
 		})
+	}
+}
+
+func TestReportCapsIncidentDetailsPerMode(t *testing.T) {
+	from := time.Unix(1000, 0)
+	var rows []*types.Incident
+	for i := 1; i <= 201; i++ {
+		id := fmt.Sprintf("device-%03d", i)
+		live := incident(id, types.ClassECCDBE, "node", id, types.StateResolved, from, at(from, float64(i)))
+		dry := *live
+		dry.ID, dry.DryRun = "dry-"+id, true
+		rows = append(rows, live, &dry)
+	}
+	r := aggregateRecovery(rows, nil, allRemediated(rows), from, at(from, 202), 0)
+	if !r.IncidentDetailsTruncated || !r.Simulated.IncidentDetailsTruncated || r.Incidents != 201 || r.Simulated.Incidents != 201 {
+		t.Fatal("expected 201 incidents and truncated details in each mode")
+	}
+	for _, details := range [][]types.RecoveryIncident{r.IncidentDetails, r.Simulated.IncidentDetails} {
+		if len(details) != 200 || details[0].DegradedGPUHours != 201 || details[199].DegradedGPUHours != 2 {
+			t.Fatal("expected the top 200 incidents by degraded GPU-hours")
+		}
 	}
 }
