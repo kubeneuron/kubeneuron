@@ -959,6 +959,19 @@ function itemContext(it){
   }
   return parts.length ? `<div class="item2">${parts.join(" — ")}</div>` : "";
 }
+function approvalTrainingJobs(jobs){
+  if(!Array.isArray(jobs)) return "Unknown";
+  if(!jobs.length) return "None observed";
+  return jobs.map(job => {
+    const owner = job.owner;
+    const identity = owner ? esc(owner.kind) + " " + esc(job.namespace) + "/" + esc(owner.name) : "Unknown owner";
+    const receipt = job.last_checkpoint;
+    const checkpoint = receipt ? "Worker-reported checkpoint received " + esc(receipt.received_at) +
+      " (" + esc(String(receipt.age_seconds)) + " s before preview)" : "Checkpoint age unknown";
+    const recreation = [...new Set((job.workers || []).map(worker => worker.worker_recreation || "Unknown"))];
+    return `<div>${identity}<br>${checkpoint}<br>Worker recreation: ${recreation.map(esc).join(", ") || "Unknown"}</div>`;
+  }).join("");
+}
 function renderImpact(p, inc){
   if(!p) return `<span class="dimmer" style="font-size:.78rem">no impact preview for round ${esc(String(inc.approval_epoch))} — the controller has none, or the route is not served</span>`;
   if(p.unavailable){
@@ -988,6 +1001,7 @@ function renderImpact(p, inc){
     <div class="k">Node</div><div><span class="mono">${esc(p.node && p.node.name || "")}</span> · ${topo}</div>
     <div class="k">Pending</div><div><span class="mono">${esc(p.pending_step || "")}</span> → ${esc((p.downstream_disruptions || []).join(", ") || "no disruption downstream")}</div>
     <div class="k">Workloads</div><div>${w.total || 0} total · ${w.gpu_holders || 0} GPU holders · ${w.namespaces || 0} namespaces · <span style="color:var(--ok)">${w.eligible_for_checkpoint || 0} eligible for a checkpoint request</span></div>
+    <div class="k">Training jobs</div><div class="small">${approvalTrainingJobs(p.affected_jobs)}</div>
     <div class="k">Ineligible</div><div class="small">${inel}</div>
     <div class="k">Groups</div><div class="small">${groups}</div>
     <div class="k">Warnings</div><div>${warnings}</div>
