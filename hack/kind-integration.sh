@@ -283,9 +283,9 @@ cleanup_fixtures() {
 	"$KUBECTL_BIN" delete gpumaintenancewindow "${ROOT_NAME}-status-window" --ignore-not-found >/dev/null 2>&1 || true
 	"$KUBECTL_BIN" delete kubeneuron "$ROOT_NAME" \
 		--ignore-not-found --wait=true --timeout=90s >/dev/null 2>&1 || true
-	"$KUBECTL_BIN" delete gpuremediationpolicy "$POLICY_NAME" "$RESTART_POLICY_NAME" \
+	"$KUBECTL_BIN" delete gpuremediationpolicy "$POLICY_NAME" "$RESTART_POLICY_NAME" integration-denied-policy \
 		--ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
-	"$KUBECTL_BIN" delete gpuplaybook "$PLAYBOOK_NAME" "$LADDER_PLAYBOOK_NAME" \
+	"$KUBECTL_BIN" delete gpuplaybook "$PLAYBOOK_NAME" "$LADDER_PLAYBOOK_NAME" integration-denied-reboot \
 		--ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
 	"$KUBECTL_BIN" delete acceleratorruntimeprofile kind-runtime-contract-e2e \
 		--ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
@@ -3488,6 +3488,26 @@ exercise_controller_restart_mid_playbook() {
 	}
 
 	start_restart_port_forward
+	local denied_id
+	"$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o json |
+		"$JQ_BIN" -e 'any(.status.conditions[]; .type == "NodeLevelActionsAllowed" and .status == "False" and .reason == "InstallationOptInRequired")' >/dev/null ||
+		die "missing installation opt-in denial"
+	api_curl --fail -H 'Content-Type: application/json' \
+		--data-binary "{\"node\":\"${node_name}\",\"class\":\"integration-denied-test\",\"actor\":\"harness\"}" \
+		"http://127.0.0.1:${public_port}/api/v1/incidents" >/dev/null
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	denied_id=''
+	while ((SECONDS < deadline)); do
+		denied_id=$(api_curl "http://127.0.0.1:${public_port}/api/v1/incidents?node=${node_name}" |
+			"$JQ_BIN" -r '[.[] | select(.class == "integration-denied-test" and .state == "OBSERVING")][0].id // empty')
+		[[ -z $denied_id ]] || break
+		sleep 1
+	done
+	[[ -n $denied_id ]] || die "reboot without installation opt-in did not reach OBSERVING"
+	api_curl --fail -H 'Content-Type: application/json' -H "Idempotency-Key: kind-${RUN_ID}-denied-resolve" \
+		--data-binary '{"actor":"harness","reason":"opt-in denial verified"}' \
+		"http://127.0.0.1:${public_port}/api/v1/incidents/${denied_id}/resolve" >/dev/null
+	note "reboot without installation opt-in stayed in observation"
 	local trigger_code
 	trigger_code=$(api_curl -H 'Content-Type: application/json' \
 		--data-binary "{\"node\":\"${node_name}\",\"class\":\"integration-restart-test\",\"actor\":\"harness\"}" \
@@ -3557,9 +3577,9 @@ exercise_controller_restart_mid_playbook() {
 	[[ $state == VERIFYING || $state == RESOLVED ]] || \
 		die "incident state after approval is ${state:-unknown}, want VERIFYING or RESOLVED"
 	audit_json=$(fetch_audit)
-	local reboot_count approver_entries
-	reboot_count=$(dry_run_step_count reboot)
-	[[ $reboot_count == 1 ]] || die "reboot dry-run recorded $reboot_count times, want exactly 1"
+	local drain_count approver_entries
+	drain_count=$(dry_run_step_count drain)
+	[[ $drain_count == 1 ]] || die "drain dry-run recorded $drain_count times, want exactly 1"
 	approver_entries=$("$JQ_BIN" '[.[] | select(.actor == "token:harness-approver")] | length' <<<"$audit_json")
 	((approver_entries >= 1)) || die "audit trail does not record the post-restart approver identity"
 

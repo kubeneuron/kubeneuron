@@ -26,9 +26,32 @@ spec:
   steps:
     - name: cordon
       action: Cordon
+    - name: drain
+      action: Drain
+      approval: Required
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: integration-denied-reboot
+spec:
+  kubeNeuronRef: integration-smoke
+  target: Node
+  steps:
     - name: reboot
       action: Reboot
       approval: Required
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: integration-denied-policy
+spec:
+  kubeNeuronRef: integration-smoke
+  priority: 5
+  match:
+    class: integration-denied-test
+  playbookRef: integration-denied-reboot
 ---
 # Cordon ONLY, and no approval. The real-execution phase drives this one with
 # executionMode temporarily switched to Enabled, so every rung it contains
