@@ -2909,11 +2909,15 @@ exercise_incident_evidence() {
 	"$KUBECTL_BIN" -n "$ns" create token default --audience="kubeneuron.io/training-report/$installation_uid" \
 		--duration=10m --bound-object-kind=Pod --bound-object-name="$worker" >"$work_dir/worker-token"
 	write_bearer_header "$work_dir/worker-token" "$work_dir/worker-header"
-	code=$(curl --silent --show-error --noproxy '*' --max-time 10 --cacert "$work_dir/pki/server-ca.crt" \
-		--resolve "${service_dns}:${training_port}:127.0.0.1" -H "@$work_dir/worker-header" \
-		-H 'Content-Type: application/json' --data '{"kind":"progress","step":1}' \
-		-o /dev/null -w '%{http_code}' "https://${service_dns}:${training_port}/v1/training/reports")
-	[[ $code == 204 ]] || die "verified worker progress returned $code, want 204"
+	local fact
+	for fact in '{"kind":"checkpoint","checkpoint_id":"epoch-0","step":0}' \
+		'{"kind":"resume","checkpoint_id":"epoch-0"}' '{"kind":"progress","step":1}'; do
+		code=$(curl --silent --show-error --noproxy '*' --max-time 10 --cacert "$work_dir/pki/server-ca.crt" \
+			--resolve "${service_dns}:${training_port}:127.0.0.1" -H "@$work_dir/worker-header" \
+			-H 'Content-Type: application/json' --data "$fact" \
+			-o /dev/null -w '%{http_code}' "https://${service_dns}:${training_port}/v1/training/reports")
+		[[ $code == 204 ]] || die "verified worker report $fact returned $code, want 204"
+	done
 	local snapshot="$work_dir/training-report.db" pod_uid
 	pod_uid=$("$KUBECTL_BIN" -n "$ns" get pod "$worker" -o jsonpath='{.metadata.uid}')
 	evidence_api --fail "http://127.0.0.1:${public_port}/api/v1/backup" -o "$snapshot"
@@ -2927,6 +2931,13 @@ exercise_incident_evidence() {
 		        "SELECT step FROM training_progress WHERE incident_id=? AND job_uid=? AND pod_uid=?",
 		        sys.argv[2:],
 		    ).fetchone()
+		    facts = db.execute(
+		        "SELECT kind, checkpoint_id, step FROM training_checkpoint_facts "
+		        "WHERE incident_id=? AND job_uid=? AND pod_uid=? ORDER BY kind",
+		        sys.argv[2:],
+		    ).fetchall()
+		if facts != [("checkpoint", "epoch-0", 0), ("resume", "epoch-0", None)]:
+		    raise SystemExit(f"unexpected persisted checkpoint reports: {facts}")
 		if row != (1,):
 		    raise SystemExit(f"expected persisted worker step 1, got {row}")
 	PYTHON
