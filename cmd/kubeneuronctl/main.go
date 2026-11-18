@@ -278,9 +278,11 @@ func cmdIncidents() *cobra.Command {
 			return err
 		}
 		var detail struct {
-			Incident    *types.Incident     `json:"incident"`
-			Audit       []*types.AuditEntry `json:"audit"`
-			ObserveOnly string              `json:"observe_only"`
+			Incident                  *types.Incident              `json:"incident"`
+			Audit                     []*types.AuditEntry          `json:"audit"`
+			NodeConditions            *types.NodeConditionSnapshot `json:"node_conditions"`
+			NodeConditionsUnavailable string                       `json:"node_conditions_unavailable"`
+			ObserveOnly               string                       `json:"observe_only"`
 		}
 		if err := cl.do("GET", "/api/v1/incidents/"+args[0], nil, &detail); err != nil {
 			return err
@@ -291,6 +293,19 @@ func cmdIncidents() *cobra.Command {
 			inc.ID, inc.State, inc.Class, inc.Target.Node, inc.Target.GPUUUID,
 			inc.Playbook, inc.StepIndex, inc.Attempt, inc.DryRun, inc.SignalSeen,
 			inc.OpenedAt.Format(time.RFC3339))
+		if snap := detail.NodeConditions; snap != nil {
+			for _, condition := range snap.Conditions {
+				if condition.Type == "Ready" && condition.Status == "False" {
+					fmt.Fprintln(out, "Node NotReady")
+				}
+			}
+			fmt.Fprintf(out, "Node conditions observed %s\n", snap.ObservedAt.Format(time.RFC3339))
+			for _, condition := range snap.Conditions {
+				fmt.Fprintf(out, "  %s: %s\n", condition.Type, condition.Status)
+			}
+		} else if detail.NodeConditionsUnavailable != "" {
+			fmt.Fprintf(out, "Node conditions unavailable (%s)\n", detail.NodeConditionsUnavailable)
+		}
 		if detail.ObserveOnly != "" {
 			_, _ = fmt.Fprintf(out, "observe:   %s\n", detail.ObserveOnly)
 		}

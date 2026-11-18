@@ -542,17 +542,41 @@ func (s *Server) handleListIncidents(w http.ResponseWriter, r *http.Request) {
 // was not bound to a preview): the two digests agree only when the human
 // decided on the preview that is still current.
 type IncidentDetail struct {
-	AffectedJobsUnavailable  string                      `json:"affected_jobs_unavailable,omitempty"`
-	AffectedJobs             []types.AffectedJob         `json:"affected_jobs"`
-	RecoveryAvailability     *types.RecoveryAvailability `json:"recovery_availability,omitempty"`
-	Incident                 *types.Incident             `json:"incident"`
-	Audit                    []*types.AuditEntry         `json:"audit"`
-	ImpactPreviewDigest      string                      `json:"impact_preview_digest,omitempty"`
-	ImpactPreviewUnavailable string                      `json:"impact_preview_unavailable,omitempty"`
-	Decision                 string                      `json:"decision,omitempty"`
-	DecisionImpactDigest     string                      `json:"decision_impact_digest,omitempty"`
+	NodeConditions            *types.NodeConditionSnapshot `json:"node_conditions,omitempty"`
+	NodeConditionsUnavailable string                       `json:"node_conditions_unavailable,omitempty"`
+	AffectedJobsUnavailable   string                       `json:"affected_jobs_unavailable,omitempty"`
+	AffectedJobs              []types.AffectedJob          `json:"affected_jobs"`
+	RecoveryAvailability      *types.RecoveryAvailability  `json:"recovery_availability,omitempty"`
+	Incident                  *types.Incident              `json:"incident"`
+	Audit                     []*types.AuditEntry          `json:"audit"`
+	ImpactPreviewDigest       string                       `json:"impact_preview_digest,omitempty"`
+	ImpactPreviewUnavailable  string                       `json:"impact_preview_unavailable,omitempty"`
+	Decision                  string                       `json:"decision,omitempty"`
+	DecisionImpactDigest      string                       `json:"decision_impact_digest,omitempty"`
 	// ObserveOnly says, for a class that never starts recovery, why.
 	ObserveOnly string `json:"observe_only,omitempty"`
+}
+
+// Audit entries arrive in insertion order. An unsuccessful read supersedes
+// earlier observations, which remain available in the decision history.
+func latestNodeConditions(audit []*types.AuditEntry) (*types.NodeConditionSnapshot, string) {
+	for i := len(audit) - 1; i >= 0; i-- {
+		entry := audit[i]
+		if entry == nil {
+			continue
+		}
+		if reason := entry.Params["node_conditions_unavailable"]; reason != "" {
+			return nil, reason
+		}
+		if raw, ok := entry.Params["node_conditions"]; ok {
+			var snap types.NodeConditionSnapshot
+			if json.Unmarshal([]byte(raw), &snap) != nil || snap.ObservedAt.IsZero() {
+				return nil, "InvalidSnapshot"
+			}
+			return &snap, ""
+		}
+	}
+	return nil, ""
 }
 
 func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
@@ -562,6 +586,7 @@ func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail := IncidentDetail{Incident: inc, Audit: audit, RecoveryAvailability: types.RecoveryAvailabilityFromAudit(audit)}
+	detail.NodeConditions, detail.NodeConditionsUnavailable = latestNodeConditions(audit)
 	if reason, ok := detect.ObserveOnly(inc.Class); ok {
 		detail.ObserveOnly = reason + "; no recovery step runs"
 	}
