@@ -301,6 +301,12 @@ footer.lf{margin-top:1.4rem;color:var(--dimmer);font-size:.7rem;text-align:cente
     <!-- overview -->
     <section id="view-overview" style="display:none">
       <div class="viewhead"><h1>Overview</h1><span class="sub" id="ovSub"></span><span class="live">live</span></div>
+      <div class="sectiontitle"><label for="reportWindow">Recovery report</label>
+        <select id="reportWindow" onchange="loadRecoveryReport()">
+          <option value="24h">Last 24 hours</option><option value="168h" selected>Last 7 days</option><option value="720h">Last 30 days</option>
+        </select>
+      </div>
+      <div id="recoveryReport" aria-live="polite">Loading recovery report…</div>
       <div class="stats" id="stats"></div>
       <div class="sectiontitle">Fleet health</div>
       <div class="fleet" id="fleetGrid"></div>
@@ -829,7 +835,47 @@ async function loadAudit(){
   try { const response=await api("/api/v1/audit-events?"+query.toString()); cache.audit=response.items||[]; renderAudit(); }
   catch(e){ toast("audit: "+e.message,"bad"); }
 }
+function reportDuration(seconds){
+  if(!Number.isFinite(seconds)) return "Unknown";
+  if(seconds < 60) return seconds.toLocaleString(undefined,{maximumFractionDigits:1})+" s";
+  if(seconds < 3600) return (seconds/60).toLocaleString(undefined,{maximumFractionDigits:1})+" min";
+  return (seconds/3600).toLocaleString(undefined,{maximumFractionDigits:2})+" h";
+}
+function recoveryReportBlock(data, simulated){
+  const estimate = simulated ? data.would_have_saved_estimate : data.savings_estimate;
+  const hours = n => Number.isFinite(n) ? n.toLocaleString(undefined,{maximumFractionDigits:4}) : "Unknown";
+  const heading = simulated ? "DryRun simulation" : "Actual incidents";
+  if(!data.incidents) return '<div class="sectiontitle">'+heading+'</div><p>No incidents in this window.</p>';
+  const cards = statCard(hours(data.degraded_gpu_hours),"Degraded GPU-hours") +
+    statCard(data.mttr?.samples ? reportDuration(data.mttr.p50_seconds) : "Unknown",
+      simulated ? "Median simulated decision time" : "Time to recover (median)") +
+    (estimate ? statCard(hours(estimate.gpu_hours_saved),
+      (simulated ? "GPU-hours that would have been saved (estimate)" : "GPU-hours saved (estimate)")+
+      " · manual baseline "+reportDuration(estimate.manual_baseline_seconds)) : "");
+  return '<div class="sectiontitle">'+heading+'</div><div class="stats">'+cards+'</div>'+
+    (!estimate ? '<p>Set <code>spec.manualRecoveryBaseline</code> to estimate GPU-hours saved.</p>' : "")+
+    (simulated && estimate ? '<p>Assumes simulated decision time equals recovery time.</p>' : "");
+}
+let reportRequest = 0, reportPeriod = "", reportFetchedAt = 0;
+async function loadRecoveryReport(){
+  const period = $("reportWindow").value;
+  if(period === reportPeriod && Date.now()-reportFetchedAt < 60000) return;
+  const request = ++reportRequest;
+  reportPeriod = period;
+  reportFetchedAt = Date.now();
+  const output = $("recoveryReport");
+  output.textContent = "Loading recovery report…";
+  try {
+    const data = await api("/api/v1/report/recovery?window="+encodeURIComponent(period));
+    if(request !== reportRequest) return;
+    output.innerHTML = recoveryReportBlock(data,false) +
+      (data.simulated ? recoveryReportBlock(data.simulated,true) : "");
+  } catch(e){
+    if(request === reportRequest) output.textContent = "Recovery report unavailable: "+e.message;
+  }
+}
 async function loadView(view){
+  if(view==="overview") return loadRecoveryReport();
   if(view==="readiness") return loadReadiness();
   if(view==="operations") return loadOperations();
   if(view==="autonomy") return loadAutonomy();
@@ -1076,7 +1122,7 @@ async function tick(){
     renderOverview(); renderIncidents(); renderFleet();
     if(openIncident) await renderDrawer();
     const activeView = (location.hash.replace("#/","") || "overview");
-    if(["readiness","operations","autonomy","audit"].includes(activeView)) await loadView(activeView);
+    if(["overview","readiness","operations","autonomy","audit"].includes(activeView)) await loadView(activeView);
   } catch(e){ /* auth redirect handled in api() */ }
 }
 setInterval(() => { if($("shell").style.display !== "none") tick(); }, 5000);
