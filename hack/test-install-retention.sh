@@ -134,6 +134,27 @@ grep -Eq '^dry-run: +true$' "$work/first-run.out" || fail "first-run incident wa
 grep -Fq "$name-observe (step " "$work/first-run.out" || fail "first-run incident lacks observe playbook"
 incident=$(awk '$1 == "id:" {print $2}' "$work/first-run.out")
 [[ -n $incident ]] || fail "first-run incident lacks ID"
+# Exercise the same dry-run path against a real Node so its UID and Ready
+# status can be checked against the API rather than the synthetic demo name.
+node=$("$KUBECTL_BIN" get nodes -o jsonpath='{.items[0].metadata.name}')
+node_uid=$("$KUBECTL_BIN" get node "$node" -o jsonpath='{.metadata.uid}')
+ready=$("$KUBECTL_BIN" get node "$node" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+(
+ export KUBENEURONCTL_TOKEN
+ KUBENEURONCTL_TOKEN=$(sed 's/^Authorization: Bearer //' "$work/header")
+ ctl=(kubeneuronctl --server "http://127.0.0.1:$port")
+ "${ctl[@]}" remediate "$node" --class xid-app >/dev/null
+ deadline=$((SECONDS+90))
+ until ((SECONDS >= deadline)); do
+   id=$("${ctl[@]}" incidents | awk -v node="$node" '$3=="xid-app" && $4==node {print $1; exit}')
+   if [[ -n $id ]] && api "http://127.0.0.1:$port/api/v1/incidents/$id" |
+     jq -e --arg uid "$node_uid" --arg ready "$ready" '.node_conditions | .node_uid == $uid and (.conditions | any(.type == "Ready" and .status == $ready))' >/dev/null; then
+     exit 0
+   fi
+   sleep 2
+ done
+ fail "incident did not record the observed node UID and readiness"
+)
 # Legacy objects lack the new installation label. Foreign and mislabeled
 # objects both carry the old global label; neither may be deleted.
 for suffix in legacy other mislabeled; do
