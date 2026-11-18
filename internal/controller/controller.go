@@ -859,7 +859,7 @@ func (c *Controller) afterSignalCommitted(ctx context.Context, sig types.Signal,
 			FromState: types.StateOpen, ToState: types.StateOpen, Params: params, DryRun: opened.DryRun,
 		})
 		if err != nil {
-			c.log.Warn("could not record opening node conditions", "incident", opened.ID)
+			c.log.Warn("could not record opening node conditions", "incident", opened.ID, "err", err)
 		}
 	}
 	metrics.IncidentsOpened.WithLabelValues(string(opened.Class)).Inc()

@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"maps"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -35,6 +37,10 @@ func (c *Controller) decisionNodeContext(ctx context.Context, node string, param
 			return result
 		}
 	}
-	result["node_conditions_unavailable"] = "NodeReadFailed"
+	if apierrors.IsNotFound(err) {
+		result["node_conditions_unavailable"] = "NodeNotFound"
+	} else {
+		result["node_conditions_unavailable"] = "NodeReadFailed"
+	}
 	return result
 }

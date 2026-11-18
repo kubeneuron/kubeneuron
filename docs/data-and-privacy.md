@@ -8,6 +8,8 @@ The installed agent runs privileged and shares the host PID namespace, including
 
 ## What is stored
 
+The incident audit records the node UID, observation time, and status and available transition time for five Kubernetes node conditions (Ready, MemoryPressure, DiskPressure, PIDPressure and NetworkUnavailable). These records are deleted with the incident.
+
 For each incident KubeNeuron records the accelerator worker pods observed on the node (namespace, name, UID) and the training jobs that own them: kind, namespace, name, UID and status. It also records the observation time and the completion index when verified for an Indexed Job. It reads them with `get` on Jobs, JobSets, RayClusters and RayJobs that own the affected pods. It does not store or log job specifications, environment variables, commands or annotations. Job names stay in the incident record and audit trail; they are not added to metric labels and are left out of notifications by default. They are deleted with the incident.
 
 Incidents, approvals, actions, operational state and the audit trail live in SQLite on a volume in your cluster by default. If you configure PostgreSQL, they live at the database address you supply. Approval and audit records identify the person who approved, rejected or triggered an action. Password sign-in accounts use a Kubernetes Secret. For automatic mode, the policy and audit trail record the identifier declared in `enabledBy`. KubeNeuron excludes that identifier from metric labels, logs and telemetry exports.

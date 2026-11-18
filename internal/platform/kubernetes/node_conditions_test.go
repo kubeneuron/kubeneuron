@@ -4,6 +4,7 @@ package kubernetes
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 	"testing"
@@ -28,7 +29,7 @@ func TestNodeConditionsContext(t *testing.T) {
 	if acts := client.Actions(); len(acts) != 1 || acts[0].GetVerb() != "get" {
 		t.Fatalf("actions %v", acts)
 	}
-	if snap, err := p.NodeConditions(t.Context(), "absent"); snap != nil || err == nil {
+	if snap, err := p.NodeConditions(t.Context(), "absent"); snap != nil || !apierrors.IsNotFound(err) {
 		t.Fatal("missing node returned an observation")
 	}
 }

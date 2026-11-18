@@ -950,6 +950,7 @@ function decisionBinding(d){
 }
 function nodeConditionsSummary(detail){
   const snapshot = detail.node_conditions;
+  if(!snapshot && detail.node_conditions_unavailable === "NodeNotFound") return "node no longer exists";
   if(!snapshot) return detail.node_conditions_unavailable
     ? `Unavailable (${esc(detail.node_conditions_unavailable)})` : "No recorded observation";
   const conditions = snapshot.conditions || [];

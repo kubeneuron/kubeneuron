@@ -13,6 +13,10 @@ func TestLatestNodeConditions(t *testing.T) {
 	if snap, reason := latestNodeConditions(trail); snap == nil || snap.NodeUID != "worker" || reason != "" {
 		t.Fatal(snap, reason)
 	}
+	missing := append(trail, &types.AuditEntry{Params: map[string]string{"node_conditions_unavailable": "NodeNotFound"}})
+	if snap, reason := latestNodeConditions(missing); snap != nil || reason != "NodeNotFound" {
+		t.Fatalf("deleted node: %+v %q", snap, reason)
+	}
 	for key, value := range map[string]string{"node_conditions_unavailable": "NodeReadFailed", "node_conditions": "broken"} {
 		next := append(trail, &types.AuditEntry{Params: map[string]string{key: value}})
 		if snap, reason := latestNodeConditions(next); snap != nil || reason == "" {

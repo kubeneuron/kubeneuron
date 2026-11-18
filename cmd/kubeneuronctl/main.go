@@ -303,6 +303,8 @@ func cmdIncidents() *cobra.Command {
 			for _, condition := range snap.Conditions {
 				_, _ = fmt.Fprintf(out, "  %s: %s\n", condition.Type, condition.Status)
 			}
+		} else if detail.NodeConditionsUnavailable == "NodeNotFound" {
+			_, _ = fmt.Fprintln(out, "Node conditions: node no longer exists")
 		} else if detail.NodeConditionsUnavailable != "" {
 			_, _ = fmt.Fprintf(out, "Node conditions unavailable (%s)\n", detail.NodeConditionsUnavailable)
 		}
