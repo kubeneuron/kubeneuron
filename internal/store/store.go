@@ -152,6 +152,11 @@ type Store interface {
 	// with an empty slice, so "nothing ran" and "not asked about" stay
 	// distinguishable at the call site.
 	ExecutedStepResults(ctx context.Context, incidentIDs []string) (map[string][]string, error)
+	// VerifiedStepResults returns ExecutedStepResults evidence for IDs whose latest
+	// transition into RESOLVED was a system resolve from VERIFYING. When an
+	// incident is reopened and closed again, the latest closure determines
+	// eligibility. Callers select currently resolved incidents and distinguish
+	// live from simulated step results.
 	VerifiedStepResults(ctx context.Context, incidentIDs []string) (map[string][]string, error)
 
 	// Approvals

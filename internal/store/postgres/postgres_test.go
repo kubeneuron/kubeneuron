@@ -365,3 +365,31 @@ func TestActionProtocolAttemptsBootAndCancellation(t *testing.T) {
 		t.Fatalf("claim after cancel = %+v, %v (want act-3)", next, err)
 	}
 }
+
+func TestVerifiedStepResultsAfterReopen(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	const id = "recurring"
+	if err := s.CreateIncident(ctx, testIncident(id)); err != nil {
+		t.Fatal(err)
+	}
+	audit := func(from, to types.IncidentState, actor, action, result string) {
+		t.Helper()
+		if err := s.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: time.Now(), FromState: from, ToState: to, Actor: actor, Action: action, Result: result}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const result = "step-outcome: executed platform.cordon"
+	audit(types.StateExecuting, types.StateVerifying, "system", "step", result)
+	audit(types.StateVerifying, types.StateResolved, "system", "resolve", "healthy")
+	results, err := s.VerifiedStepResults(ctx, []string{id})
+	if err != nil || len(results[id]) != 1 || results[id][0] != result {
+		t.Fatalf("verified closure: %v, %v", results, err)
+	}
+	audit(types.StateResolved, types.StateOpen, "operator", "reopen", "")
+	audit(types.StateOpen, types.StateResolved, "operator", "manual-resolve", "")
+	results, err = s.VerifiedStepResults(ctx, []string{id})
+	if err != nil || len(results) != 0 {
+		t.Fatalf("manual closure after reopen: %v, %v", results, err)
+	}
+}
