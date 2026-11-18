@@ -10,6 +10,16 @@ type SavingsEstimate struct {
 	GPUHoursSaved         float64 `json:"gpu_hours_saved"`
 }
 
+// RecoveryIncident is one incident's contribution to the selected period.
+type RecoveryIncident struct {
+	ID               string            `json:"id"`
+	Node             string            `json:"node"`
+	Vendor           AcceleratorVendor `json:"vendor,omitempty"`
+	State            IncidentState     `json:"state"`
+	DegradedGPUHours float64           `json:"degraded_gpu_hours"`
+	RecoverySeconds  *float64          `json:"recovery_seconds,omitempty"`
+}
+
 // RecoveryReport answers the question a capacity owner asks about a window:
 // how much accelerator capacity was degraded, how much of it came back, and
 // how much came back without waking anybody. It is the wire shape of
@@ -33,7 +43,8 @@ type SavingsEstimate struct {
 //   - GPU-hours are degraded-GPU-hours, not lost-GPU-hours: a degraded GPU may
 //     still have been serving traffic.
 type RecoveryReport struct {
-	SavingsEstimate *SavingsEstimate `json:"savings_estimate,omitempty"`
+	IncidentDetails []RecoveryIncident `json:"incident_details,omitempty"`
+	SavingsEstimate *SavingsEstimate   `json:"savings_estimate,omitempty"`
 	// Superseded is a changed target, never a verified recovery.
 	Superseded         int     `json:"superseded"`
 	SupersededGPUHours float64 `json:"superseded_gpu_hours"`
@@ -115,8 +126,9 @@ type RecoveryReport struct {
 // what the policy decided, which is exactly what a pilot is evaluating and is
 // all this can honestly support.
 type SimulatedRecovery struct {
-	WouldHaveSaved *SavingsEstimate `json:"would_have_saved_estimate,omitempty"`
-	Incidents      int              `json:"incidents"`
+	IncidentDetails []RecoveryIncident `json:"incident_details,omitempty"`
+	WouldHaveSaved  *SavingsEstimate   `json:"would_have_saved_estimate,omitempty"`
+	Incidents       int                `json:"incidents"`
 	// WouldRecover counts dry-run incidents that reached RESOLVED, i.e. the
 	// ladder ran to completion without needing a human.
 	WouldRecover int `json:"would_recover"`

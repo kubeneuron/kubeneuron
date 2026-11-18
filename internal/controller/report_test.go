@@ -636,3 +636,25 @@ func TestDryRunAuditFeedsOnlySimulation(t *testing.T) {
 		t.Fatal("simulated drain must contribute only to simulated recoveries")
 	}
 }
+
+func TestReportIncidentDetailsSeparateOutcomes(t *testing.T) {
+	from := time.Unix(1000, 0)
+	end := from.Add(time.Hour)
+	live := incident("live", types.ClassECCDBE, "node", "gpu", types.StateResolved, from, end)
+	live.Vendor = "nvidia"
+	dry := *live
+	dry.ID, dry.DryRun = "dry", true
+	observed := *live
+	observed.ID = "observed"
+	report := aggregateRecovery([]*types.Incident{live, &dry, &observed}, nil, map[string]bool{"live": true, "dry": true}, from, end, 0)
+	if len(report.IncidentDetails) != 2 || len(report.Simulated.IncidentDetails) != 1 {
+		t.Fatal("unexpected incident counts")
+	}
+	row := report.IncidentDetails[0]
+	if row.ID != "live" || row.Node != "node" || row.Vendor != "nvidia" || row.DegradedGPUHours != 1 || row.RecoverySeconds == nil || *row.RecoverySeconds != 3600 {
+		t.Fatal(row)
+	}
+	if report.IncidentDetails[1].RecoverySeconds != nil || report.Simulated.IncidentDetails[0].ID != "dry" {
+		t.Fatal("incorrect outcome attribution")
+	}
+}

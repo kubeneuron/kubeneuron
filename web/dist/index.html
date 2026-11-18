@@ -841,6 +841,14 @@ function reportDuration(seconds){
   if(seconds < 3600) return (seconds/60).toLocaleString(undefined,{maximumFractionDigits:1})+" min";
   return (seconds/3600).toLocaleString(undefined,{maximumFractionDigits:2})+" h";
 }
+function reportIncidents(rows, simulated){
+  if(!rows?.length) return "";
+  const body = rows.map(r => "<tr>"+[r.id,r.node,r.vendor || "Unknown",r.state,r.degraded_gpu_hours,reportDuration(r.recovery_seconds)]
+    .map(value => "<td>"+esc(value)+"</td>").join("")+"</tr>").join("");
+  return '<details><summary>Incident details ('+rows.length+')</summary><table class="card"><thead><tr>'+
+    '<th>Incident</th><th>Node</th><th>Vendor</th><th>State</th><th>Degraded GPU-hours</th><th>'+
+    (simulated ? "Simulated decision time" : "Time to recover")+'</th></tr></thead><tbody>'+body+'</tbody></table></details>';
+}
 function recoveryReportBlock(data, simulated){
   const estimate = simulated ? data.would_have_saved_estimate : data.savings_estimate;
   const hours = n => Number.isFinite(n) ? n.toLocaleString(undefined,{maximumFractionDigits:4}) : "Unknown";
@@ -854,7 +862,7 @@ function recoveryReportBlock(data, simulated){
       " · manual baseline "+reportDuration(estimate.manual_baseline_seconds)) : "");
   return '<div class="sectiontitle">'+heading+'</div><div class="stats">'+cards+'</div>'+
     (!estimate ? '<p>Set <code>spec.manualRecoveryBaseline</code> to estimate GPU-hours saved.</p>' : "")+
-    (simulated && estimate ? '<p>Assumes simulated decision time equals recovery time.</p>' : "");
+    (simulated && estimate ? '<p>Assumes simulated decision time equals recovery time.</p>' : "") + reportIncidents(data.incident_details,simulated);
 }
 let reportRequest = 0, reportPeriod = "", reportFetchedAt = 0;
 async function loadRecoveryReport(){

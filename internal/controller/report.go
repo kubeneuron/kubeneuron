@@ -262,6 +262,7 @@ func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, 
 	if report.DryRunExcluded > 0 {
 		sim := aggregateRecoverySubset(incidents, gpusPerNode, remediated, from, to, true, baseline)
 		report.Simulated = &types.SimulatedRecovery{
+			IncidentDetails:        sim.IncidentDetails,
 			WouldHaveSaved:         sim.SavingsEstimate,
 			Incidents:              sim.Incidents,
 			WouldRecover:           sim.Recovered,
@@ -340,6 +341,7 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 		acc.row.Incidents++
 		acc.row.DegradedGPUHours += hours
 
+		detail := types.RecoveryIncident{ID: inc.ID, Node: inc.Target.Node, Vendor: inc.Vendor, State: inc.State, DegradedGPUHours: roundHours(hours)}
 		switch {
 		case inc.State == types.StateSuperseded:
 			report.Superseded++
@@ -374,10 +376,12 @@ func aggregateRecoverySubset(incidents []*types.Incident, gpusPerNode map[string
 					report.SavingsEstimate.GPUHoursSaved += max(0, (baseline-duration).Hours()) * float64(gpus)
 				}
 				seconds := duration.Seconds()
+				detail.RecoverySeconds = &seconds
 				mttrSamples = append(mttrSamples, seconds)
 				acc.durations = append(acc.durations, seconds)
 			}
 		}
+		report.IncidentDetails = append(report.IncidentDetails, detail)
 		if !inc.State.Terminal() {
 			report.Open = append(report.Open, types.RecoveryOpenIncident{
 				ID:               inc.ID,

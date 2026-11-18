@@ -128,6 +128,9 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		return err
 	}
 
+	if err := printReportIncidents(cmd, r.IncidentDetails, "TIME TO RECOVER"); err != nil {
+		return err
+	}
 	if len(r.Classes) > 0 {
 		_, _ = fmt.Fprintln(out, "\ntop problem classes by degraded GPU-hours:")
 		w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
@@ -206,6 +209,9 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 			gpuHours(sim.DegradedGPUHours),
 			gpuHours(sim.WouldRecoverGPUHours),
 			seconds(sim.MTTR.P50Seconds), seconds(sim.MTTR.P90Seconds))
+		if err := printReportIncidents(cmd, sim.IncidentDetails, "SIMULATED DECISION TIME"); err != nil {
+			return err
+		}
 		if estimate := sim.WouldHaveSaved; estimate != nil {
 			_, _ = fmt.Fprintf(out, "  GPU-hours that would have been saved (estimate): %s (manual baseline %s; assumes simulated decision time equals recovery time)\n", gpuHours(estimate.GPUHoursSaved), seconds(estimate.ManualBaselineSeconds))
 		}
@@ -214,6 +220,26 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 			"what a dry-run pilot is for — and not what came back.\n")
 	}
 	return nil
+}
+
+func printReportIncidents(cmd *cobra.Command, rows []types.RecoveryIncident, timeLabel string) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintf(w, "\nINCIDENT\tNODE\tVENDOR\tSTATE\tDEGRADED GPU-HOURS\t%s\n", timeLabel)
+	for _, row := range rows {
+		vendor := string(row.Vendor)
+		if vendor == "" {
+			vendor = "unknown"
+		}
+		duration := "—"
+		if row.RecoverySeconds != nil {
+			duration = (time.Duration(*row.RecoverySeconds * float64(time.Second))).Round(time.Second).String()
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", row.ID, row.Node, vendor, row.State, gpuHours(row.DegradedGPUHours), duration)
+	}
+	return w.Flush()
 }
 
 func gpuHours(v float64) string { return strconv.FormatFloat(v, 'f', 1, 64) }
