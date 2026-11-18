@@ -88,3 +88,24 @@ func TestScalingUpdateComplete(t *testing.T) {
 		})
 	}
 }
+
+func TestRecordedScalingUpdateChecksReportedTarget(t *testing.T) {
+	s := cloud.Successor{Phase: cloud.SuccessorRequested, State: map[string]string{"cluster": "training", "nodegroup": "gpu", "before": "2", "update": "update-1"}}
+	for _, tc := range []struct {
+		param et.UpdateParamType
+		value string
+		valid bool
+	}{
+		{et.UpdateParamTypeDesiredSize, "3", true},
+		{et.UpdateParamTypeDesiredSize, "4", false},
+		{et.UpdateParamTypeMaxSize, "3", false},
+		{et.UpdateParamTypeMinSize, "2", false},
+	} {
+		update := et.Update{Id: sdk.String("update-1"), Type: et.UpdateTypeConfigUpdate, Status: et.UpdateStatusSuccessful, Params: []et.UpdateParam{{Type: tc.param, Value: &tc.value}}}
+		p := managedProvider{repairReader: &repairReader{cluster: "training", eks: &scalingUpdateFixture{out: &eks.DescribeUpdateOutput{Update: &update}}}}
+		complete, err := p.scalingUpdateComplete(t.Context(), s)
+		if complete != tc.valid || (tc.valid && err != nil) || (!tc.valid && !errors.Is(err, cloud.ErrNeedsOperator)) {
+			t.Errorf("%s=%s: complete=%v err=%v", tc.param, tc.value, complete, err)
+		}
+	}
+}

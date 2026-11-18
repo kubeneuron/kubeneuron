@@ -82,5 +82,20 @@ func (p *managedProvider) recordedScalingUpdate(ctx context.Context, s cloud.Suc
 	if out == nil || out.Update == nil || sdk.ToString(out.Update.Id) != id {
 		return nil, fmt.Errorf("%w: EKS did not confirm the recorded update ID", cloud.ErrNeedsOperator)
 	}
-	return out.Update, nil
+	update := out.Update
+	if update.Type != "" && update.Type != et.UpdateTypeConfigUpdate {
+		return nil, fmt.Errorf("%w: recorded EKS update has unexpected type %q", cloud.ErrNeedsOperator, update.Type)
+	}
+	for _, param := range update.Params {
+		switch param.Type {
+		case et.UpdateParamTypeDesiredSize:
+			before, err := strconv.ParseInt(s.State["before"], 10, 32)
+			if err != nil || before < 1 || before >= math.MaxInt32 || sdk.ToString(param.Value) != strconv.FormatInt(before+1, 10) {
+				return nil, fmt.Errorf("%w: EKS update desired size differs from the saved scale-up", cloud.ErrNeedsOperator)
+			}
+		case et.UpdateParamTypeMinSize, et.UpdateParamTypeMaxSize:
+			return nil, fmt.Errorf("%w: recorded EKS update changes nodegroup scaling bounds", cloud.ErrNeedsOperator)
+		}
+	}
+	return update, nil
 }
