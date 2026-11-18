@@ -24,3 +24,15 @@ kubectl kustomize config/cloud-policies |
         if .spec.onFailure.playbookRef then .spec.onFailure.playbookRef |= install_name else . end)
     | sort_by(.kind,.metadata.name)' > "$tmp/expected"
 diff -u "$tmp/expected" "$tmp/actual"
+
+# Check the action boundary independently of parity: both copies could acquire
+# the same unsafe edit. Check all books, including those reached by escalation.
+jq -e '
+  [ .[] | select(.kind == "GPUPlaybook") ] as $books |
+  [$books[].metadata.name] as $names |
+  ["Observe", "Cordon", "Drain", "RecycleNode", "ReplaceNode"] as $allowed |
+  ($books | length > 0) and
+  all($books[].spec.steps[].action; . as $action | $allowed | index($action) != null) and
+  all(.[] | (.spec.playbookRef, .spec.onFailure.playbookRef) | select(. != null);
+      . as $ref | $names | index($ref) != null)
+' "$tmp/actual" >/dev/null
