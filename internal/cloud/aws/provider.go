@@ -27,8 +27,8 @@ type managedProvider struct {
 
 var _ cloud.RepairAwareProvider = (*managedProvider)(nil)
 
-// Read-side observations cannot authorize a mutation until action-specific IAM checks exist.
-func (*managedProvider) Capabilities() cloud.Capabilities { return cloud.Capabilities{} }
+// An EKS managed group can replace a stopped instance during a recycle.
+func (*managedProvider) Capabilities() cloud.Capabilities { return cloud.Capabilities{Replace: true} }
 
 func init() {
 	cloud.Register(providerName, capabilities, func(ctx context.Context, cfg cloud.Config) (cloud.Provider, error) {

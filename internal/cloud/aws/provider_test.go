@@ -50,7 +50,7 @@ func TestProviderRegisteredWithCapabilities(t *testing.T) {
 	}
 }
 
-func TestAWSFactoryBuildsObservationOnlyProvider(t *testing.T) {
+func TestAWSFactoryBuildsReplacementProvider(t *testing.T) {
 	p, err := cloud.Build(t.Context(), providerName, cloud.Config{Region: "us-east-1", Options: map[string]string{"cluster": "training"}})
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +59,7 @@ func TestAWSFactoryBuildsObservationOnlyProvider(t *testing.T) {
 	if !ok || r.cluster != "training" {
 		t.Fatal("missing configured EKS reader")
 	}
-	if caps := p.Capabilities(); caps.Replace || caps.ReinitializeInPlace {
-		t.Fatal("read-only observation authorized mutation")
+	if caps := p.Capabilities(); !caps.Replace || caps.ReinitializeInPlace {
+		t.Fatal("unexpected managed nodegroup capabilities")
 	}
 }

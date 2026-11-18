@@ -11,9 +11,9 @@ import (
 	"github.com/aws/smithy-go"
 )
 
-// checkReplacePermission asks EC2 to authorize the exact request used by
+// CheckReplacePermission asks EC2 to authorize the exact request used by
 // Replace. A successful dry run is reported as an AWS API error.
-func (r *Recycler) checkReplacePermission(ctx context.Context, id string) error {
+func (r *Recycler) CheckReplacePermission(ctx context.Context, id string) error {
 	if id == "" {
 		return errors.New("missing pinned instance ID")
 	}

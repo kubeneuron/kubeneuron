@@ -639,8 +639,9 @@ The reader checks the pinned instance's group membership, native repair
 setting, scaling activities and scheduled EC2 events. It requires a running
 instance and a 30-minute settling period after nodegroup changes, then reads
 the policy and membership again. A repair started before native repair was
-disabled could outlast that window. AWS mutation remains disabled pending
-action-specific permission checks. These observations are not validated
+disabled could outlast that window. Replacement requires EC2 to confirm a TerminateInstances DryRun for the
+pinned instance before disruption and again before termination. Managed groups
+remain ineligible for stop/start recycle. These observations are not validated
 against a live EKS cluster.
 
 ### 4.2 Target escalation ladder

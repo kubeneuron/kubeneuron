@@ -52,7 +52,13 @@ func (p *Platform) RecoveryEligibility(ctx context.Context, pin cloud.NodeIdenti
 		v.Reason = "cloud repair is active, changed the target, or cannot be excluded: " + repair.Reason
 		return v, nil
 	}
-	v.ReplaceAllowed = provider.Capabilities().Replace
+	if provider.Capabilities().Replace {
+		if err := provider.CheckReplacePermission(ctx, pin.InstanceID); err != nil {
+			v.Reason = "replacement permission unconfirmed"
+			return v, err
+		}
+		v.ReplaceAllowed = true
+	}
 	if provider.Capabilities().ReinitializeInPlace {
 		err = provider.CheckRecycle(ctx, pin.InstanceID)
 		if err != nil && !errors.Is(err, cloud.ErrRecycleNotViable) {

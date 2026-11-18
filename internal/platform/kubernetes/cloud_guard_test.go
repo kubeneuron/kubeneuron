@@ -14,9 +14,16 @@ import (
 
 type repairRecycler struct {
 	fakeRecycler
-	mode       cloud.RepairMode
-	repair     cloud.RepairObservation
-	afterQuery func()
+	mode             cloud.RepairMode
+	repair           cloud.RepairObservation
+	afterQuery       func()
+	permissionErr    error
+	permissionTarget string
+}
+
+func (r *repairRecycler) CheckReplacePermission(_ context.Context, id string) error {
+	r.permissionTarget = id
+	return r.permissionErr
 }
 
 func (*repairRecycler) Name() string                     { return "test" }
@@ -32,7 +39,7 @@ func (r *repairRecycler) OpenRepair(context.Context, cloud.NodeRef) (cloud.Repai
 }
 
 func TestPinnedReplacementRefusesChangedOrUncertainTarget(t *testing.T) {
-	for _, scenario := range []string{"allowed", "repair-on", "repair-unknown", "repair-active", "replaced", "identity-changed-during-query", "veto-not-established"} {
+	for _, scenario := range []string{"allowed", "permission-revoked", "repair-on", "repair-unknown", "repair-active", "replaced", "identity-changed-during-query", "veto-not-established"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx := context.Background()
 			n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker", UID: "uid-old"}, Spec: corev1.NodeSpec{ProviderID: "cloud:///zone/i-old"}, Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{BootID: "boot-old"}}}
@@ -44,6 +51,12 @@ func TestPinnedReplacementRefusesChangedOrUncertainTarget(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch scenario {
+			case "permission-revoked":
+				v, err := p.RecoveryEligibility(ctx, ref.Identity)
+				if err != nil || !v.ReplaceAllowed || rec.permissionTarget != "i-old" {
+					t.Fatalf("initial eligibility=%+v target=%s err=%v", v, rec.permissionTarget, err)
+				}
+				rec.permissionErr = errors.New("authorization denied")
 			case "repair-on":
 				rec.mode = cloud.RepairOn
 			case "repair-unknown":

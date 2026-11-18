@@ -97,6 +97,7 @@ type RepairAwareProvider interface {
 	Provider
 	RepairPolicy(context.Context, NodeRef) (RepairPolicy, error)
 	OpenRepair(context.Context, NodeRef) (RepairObservation, error)
+	CheckReplacePermission(ctx context.Context, instanceID string) error
 }
 
 // RecoveryEligibility is shared by first-run status and the execution gate.

@@ -45,7 +45,7 @@ func TestReplacePermission(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &permissionEC2{t: t, response: tc.response}
-			err := NewWithAPI(f).checkReplacePermission(t.Context(), tc.id)
+			err := NewWithAPI(f).CheckReplacePermission(t.Context(), tc.id)
 			if (err == nil) != tc.allowed || f.calls != tc.calls {
 				t.Fatalf("permission err=%v calls=%d", err, f.calls)
 			}
