@@ -72,11 +72,10 @@ AMD SMI tools. Synthetic tests cover both paths. AMD hardware validation
 is still outstanding. Intel requires a manually opened incident or a
 configured supported alert source.
 
-Earlier installations bound a single problem class. The baseline pack in
-`config/policies`, applied by `deploy/install.sh` or directly with
-`kubectl apply -k config/policies`, binds the classes emitted by the
-detectors. The policy-pack test checks these bindings. The table below
-records the separate evidence for each action.
+A fresh installation uses the cloud policies in `config/cloud-policies`.
+Node-level policies in `config/policies` require the installer option
+`--policy-pack bare-metal-alpha` (Alpha, not validated on real hardware).
+The table below records the evidence for each action.
 
 | Capability | Status | Notes |
 |---|---|---|

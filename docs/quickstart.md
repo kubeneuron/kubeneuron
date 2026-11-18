@@ -2,8 +2,9 @@
 
 ## Install in DryRun mode
 
-KubeNeuron can reboot and replace nodes. The installer selects DryRun by
-default. The cluster operator is responsible for enabling execution and
+A fresh installation selects the cloud recovery pack and DryRun. Cloud recovery
+uses provider APIs. Reboot through the node agent requires the explicit
+`--policy-pack bare-metal-alpha` option (Alpha, not validated on real hardware). The cluster operator is responsible for enabling execution and
 reviewing the policies that can act on workloads.
 
 ```sh

@@ -289,6 +289,8 @@ controller Service — no `pods/exec` RBAC and nothing extra in the distroless
 image. The kind integration suite rehearses the full backup→wipe→restore
 cycle on every run, so the procedure above is exercised, not just written.
 
+A fresh installer run selects the cloud recovery pack. See [Recovery policies](install.md#recovery-policies-installed-by-the-script) for ladder selection and the node-level alpha option.
+
 **Retention:** `deploy/install.sh --uninstall --name NAME --namespace NS`
 retains the SQLite PVC and its incidents/audit data by default. The installer
 requests retention with the current root's name and UID on the PVC and waits

@@ -509,9 +509,9 @@ disagree.
 - [`api/v1alpha1/`](api/v1alpha1/) — Kubernetes API types.
 - [`config/crd/bases/`](config/crd/bases/) — generated CRD manifests.
 - [`config/samples/`](config/samples/) — development custom-resource examples.
-- [`config/policies/`](config/policies/) — the baseline policy pack: one
-  binding for every problem class the shipped detectors can emit, with the
-  blast-radius reasoning per class. `install.sh` applies a copy of it.
+- [Cloud recovery policies](config/cloud-policies/) are the default for a fresh
+  installation. The [node-level policies](config/policies/) require an explicit
+  `--policy-pack bare-metal-alpha` selection (Alpha, not validated on real hardware).
 - [`configs/policies.yaml`](configs/policies.yaml) and
   [`configs/playbooks/`](configs/playbooks/) — current file-based controller
   input used by local and bare-metal development.

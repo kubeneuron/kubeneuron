@@ -16,8 +16,10 @@ To choose a ladder for one class, edit its `GPURemediationPolicy`.
 Set `spec.playbookRef` to the installation's observe, cloud-replace or
 cloud-recycle playbook. The recycle ladder additionally requires
 `spec.recycle.enabled: true` and escalates to replacement. The default
-replacement strategy is `AddFirst`. While add-first is unavailable, a path
-that includes replacement waits before cordon. Check the installation's
+replacement strategy is `AddFirst`. Add-first is currently unavailable across all providers. An incident whose
+ladder includes replacement stays in `EVALUATING` before cordon. Its audit
+records `recovery-unavailable` and explains that the provider lacks add-first
+and the policy has not selected remove-first. Check the installation's
 `CloudRecoveryAvailable` condition for provider configuration and the
 incident for the eligibility decision on its node.
 

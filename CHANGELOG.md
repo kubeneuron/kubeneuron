@@ -11,6 +11,10 @@ API is `v1alpha1`.
 
 ### Added
 
+- **Cloud recovery pack on first install.** New installations use cloud policies
+  in DryRun. Node-level policies require `--policy-pack bare-metal-alpha`
+  (Alpha, not validated on real hardware). Repeat installs preserve existing policies.
+
 - **The installer runs the metrics path.** `deploy/install.sh` writes
   `spec.observability` with the Collector, the metrics store and Grafana
   `Managed` for a new installation, after naming the third-party
