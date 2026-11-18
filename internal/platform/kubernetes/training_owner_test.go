@@ -113,3 +113,14 @@ func TestIndexedJobCompletionIndex(t *testing.T) {
 		}
 	}
 }
+
+func TestRecreationDependsOnObservedOwner(t *testing.T) {
+	job := unstructuredObject(batchJobs, "Job", "training", "job", nil)
+	if workerRecreation(nil, "Unknown", false) != "Unknown" || workerRecreation(nil, "Unknown", true) != "No" || workerRecreation(job, "Active", false) != "Yes" {
+		t.Fatal("unexpected owner capability")
+	}
+	job.Object["spec"] = map[string]any{"suspend": true}
+	if workerRecreation(job, "Active", false) != "No" {
+		t.Fatal("suspended Job marked capable")
+	}
+}

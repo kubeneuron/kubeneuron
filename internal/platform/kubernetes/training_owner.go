@@ -7,6 +7,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	"sort"
 	"strconv"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -68,6 +69,7 @@ func (p *Platform) TrainingWorkers(ctx context.Context, node string) ([]types.Tr
 	if err != nil {
 		return nil, err
 	}
+	observedAt := time.Now().UTC()
 	workers := make([]types.TrainingWorker, 0)
 	for i := range pods {
 		pod := &pods[i]
@@ -79,7 +81,14 @@ func (p *Platform) TrainingWorkers(ctx context.Context, node string) ([]types.Tr
 		for _, ref := range chain {
 			owners = append(owners, types.TrainingOwner{APIVersion: ref.APIVersion, Kind: ref.Kind, Name: ref.Name, UID: string(ref.UID)})
 		}
-		workers = append(workers, types.TrainingWorker{Namespace: pod.Namespace, Pod: pod.Name, PodUID: string(pod.UID), Owners: owners, CompletionIndex: jobCompletionIndex(pod, owner), ControllerState: trainingControllerState(owner), OwnerUnknownReason: reason})
+		state := trainingControllerState(owner)
+		workers = append(workers, types.TrainingWorker{
+			Namespace: pod.Namespace, Pod: pod.Name, PodUID: string(pod.UID),
+			Source: "kubernetes", ObservedAt: &observedAt,
+			Owners: owners, CompletionIndex: jobCompletionIndex(pod, owner),
+			ControllerState: state, OwnerUnknownReason: reason,
+			WorkerRecreation: workerRecreation(owner, state, len(pod.OwnerReferences) == 0),
+		})
 	}
 	sort.Slice(workers, func(i, j int) bool {
 		if workers[i].Namespace != workers[j].Namespace {
@@ -143,4 +152,33 @@ func jobCompletionIndex(pod *corev1.Pod, job *unstructured.Unstructured) *int64 
 		return nil
 	}
 	return &index
+}
+
+// workerRecreation describes the owner's ability to replace a worker at the
+// observation time. It cannot predict placement or successful startup.
+func workerRecreation(owner *unstructured.Unstructured, state string, standalone bool) string {
+	if standalone {
+		return "No"
+	}
+	if owner == nil {
+		return "Unknown"
+	}
+	if owner.GetDeletionTimestamp() != nil {
+		return "No"
+	}
+	switch state {
+	case "Failed", "Complete", "Completed", "Suspended", "FAILED", "STOPPED", "SUCCEEDED":
+		return "No"
+	}
+	if owner.GetKind() == "Job" {
+		suspended, _, _ := unstructured.NestedBool(owner.Object, "spec", "suspend")
+		parallelism, explicit, _ := unstructured.NestedInt64(owner.Object, "spec", "parallelism")
+		if suspended || (explicit && parallelism == 0) {
+			return "No"
+		}
+		if state == "Active" {
+			return "Yes"
+		}
+	}
+	return "Unknown"
 }

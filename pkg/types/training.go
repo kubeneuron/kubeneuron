@@ -14,6 +14,9 @@ type TrainingOwner struct {
 
 // TrainingWorker records the pod even when its owning job cannot be verified.
 type TrainingWorker struct {
+	Source             string          `json:"source,omitempty"`
+	ObservedAt         *time.Time      `json:"observedAt,omitempty"`
+	WorkerRecreation   string          `json:"workerRecreation"`
 	CompletionIndex    *int64          `json:"completionIndex,omitempty"`
 	ControllerState    string          `json:"controllerState"`
 	Namespace          string          `json:"namespace"`
