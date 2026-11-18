@@ -28,6 +28,10 @@ python3 -I "$REPO_ROOT/hack/dashboard-rules.py" >"$work/dashboards.yaml"
 sed 's/^\([[:space:]]*\)promql_expr_test:/\1metricsql_expr_test:/' \
 	"$REPO_ROOT/configs/vmalert/gpu-promql-rules.test.yaml" >"$work/vmalert-tool.test.yaml"
 cp "$REPO_ROOT/configs/vmalert/gpu-promql-rules.test.yaml" "$work/promtool.test.yaml"
+# The images run as an unprivileged user (nobody in prom/prometheus) and
+# mktemp -d makes the directory 0700 for the caller: let them read it.
+chmod 755 "$work"
+chmod a+r "$work"/*
 
 files=("${RULES[@]}" dashboards.yaml)
 vmalert_args=()
