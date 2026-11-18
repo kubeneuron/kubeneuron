@@ -3,6 +3,8 @@
 package kubernetes
 
 import (
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	ktesting "k8s.io/client-go/testing"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -34,6 +36,11 @@ func TestTrainingOwnerRequiresSameNamespaceAndUID(t *testing.T) {
 	check("")
 	pod.Namespace = "another"
 	check(contextReasonAPIUnavailable)
+	client := p.dynamic.(*dynamicfake.FakeDynamicClient)
+	client.PrependReactor("get", "jobs", func(ktesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(batchJobs.GroupResource(), "job", nil)
+	})
+	check(contextReasonForbidden)
 }
 
 func TestTrainingOwnerResolvesJobSetAndRayJob(t *testing.T) {

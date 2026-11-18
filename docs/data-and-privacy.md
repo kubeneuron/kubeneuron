@@ -8,6 +8,8 @@ The installed agent runs privileged and shares the host PID namespace, including
 
 ## What is stored
 
+For each incident KubeNeuron records the training jobs affected on the node: kind, namespace, name, UID and status. It reads them with `get` on Jobs, JobSets, RayClusters and RayJobs that own the affected pods. It does not store or log job specifications, environment variables, commands or annotations. Job names stay in the incident record and audit trail; they are not added to metric labels and are left out of notifications by default. They are deleted with the incident.
+
 Incidents, approvals, actions, operational state and the audit trail live in SQLite on a volume in your cluster by default. If you configure PostgreSQL, they live at the database address you supply. Approval and audit records identify the person who approved, rejected or triggered an action. Password sign-in accounts use a Kubernetes Secret. For automatic mode, the policy and audit trail record the identifier declared in `enabledBy`. KubeNeuron excludes that identifier from metric labels, logs and telemetry exports.
 
 The managed metrics store keeps metrics in your cluster for 30 days by default. You can change its retention period. GPU series identify nodes and GPU UUIDs. The managed Collector drops standard workload labels for pod, namespace, container and pod UID before storage unless you enable `keepWorkloadLabels`. Additional labels you enable in dcgm-exporter are stored as sent.

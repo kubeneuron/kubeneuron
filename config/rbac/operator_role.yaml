@@ -222,6 +222,9 @@ rules:
       - get
       - list
       - watch
+  - apiGroups: ["jobset.x-k8s.io"]
+    resources: ["jobsets"]
+    verbs: ["get"]
   - apiGroups:
       - ray.io
     resources:

@@ -329,6 +329,9 @@ var contextReadOnlyRules = []rbacv1.PolicyRule{
 func contextRules(rules []rbacv1.PolicyRule) []rbacv1.PolicyRule {
 	var out []rbacv1.PolicyRule
 	for _, rule := range rules {
+		if reflect.DeepEqual(rule.Verbs, []string{"get"}) {
+			continue
+		}
 		if containsString(rule.APIGroups, "batch") || containsString(rule.APIGroups, "kueue.x-k8s.io") || containsString(rule.APIGroups, "ray.io") {
 			out = append(out, rule)
 		}
@@ -433,5 +436,25 @@ func TestContextGrantsAreReadOnlyEverywhere(t *testing.T) {
 		if strings.Contains(string(helm), forbidden) {
 			t.Errorf("helm rbac.yaml grants a write verb on a context group")
 		}
+	}
+}
+
+func TestDefaultTrainingOwnerGrants(t *testing.T) {
+	var got []rbacv1.PolicyRule
+	for _, r := range controllerClusterRole(testKubeNeuron()).Rules {
+		for _, g := range r.APIGroups {
+			switch g {
+			case "batch", "jobset.x-k8s.io", "ray.io", "kueue.x-k8s.io":
+				got = append(got, r)
+			}
+		}
+	}
+	want := []rbacv1.PolicyRule{
+		{APIGroups: []string{"batch"}, Resources: []string{"jobs"}, Verbs: []string{"get"}},
+		{APIGroups: []string{"jobset.x-k8s.io"}, Resources: []string{"jobsets"}, Verbs: []string{"get"}},
+		{APIGroups: []string{"ray.io"}, Resources: []string{"rayclusters", "rayjobs"}, Verbs: []string{"get"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("owner grants = %#v", got)
 	}
 }

@@ -163,14 +163,18 @@ func controllerDRARules(installation *kubeneuronv1alpha1.KubeNeuron) []rbacv1.Po
 }
 
 // controllerContextRules are the read-only grants behind the impact
-// preview's workload-context resolvers, each present ONLY while the preview
+// preview and the incident job map. Additional preview grants apply while the preview
 // is enabled and that resolver selected. get/list/watch and nothing else:
 // no write verb exists anywhere in KubeNeuron for batch, Kueue or Ray
 // objects, and no claim is made that any of those frameworks integrates
 // with KubeNeuron — the resolver only says whose Pod a Pod is.
 func controllerContextRules(installation *kubeneuronv1alpha1.KubeNeuron) []rbacv1.PolicyRule {
 	batchJobs, kueue, kuberay := impactContextSelection(installation)
-	var rules []rbacv1.PolicyRule
+	rules := []rbacv1.PolicyRule{
+		{APIGroups: []string{"batch"}, Resources: []string{"jobs"}, Verbs: []string{"get"}},
+		{APIGroups: []string{"jobset.x-k8s.io"}, Resources: []string{"jobsets"}, Verbs: []string{"get"}},
+		{APIGroups: []string{"ray.io"}, Resources: []string{"rayclusters", "rayjobs"}, Verbs: []string{"get"}},
+	}
 	if batchJobs {
 		rules = append(rules, rbacv1.PolicyRule{APIGroups: []string{"batch"}, Resources: []string{"jobs"}, Verbs: []string{"get", "list", "watch"}})
 	}
