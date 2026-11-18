@@ -499,6 +499,39 @@ report_cloud_pack_changes() {
   done
 }
 
+# Recover from a partial create without taking ownership of existing resources.
+create_pack() {
+  local manifest=$1 pack=$2 ref installed_by installation label file
+  local dir="$work/pack-parts" missing="$work/missing.yaml"
+  mkdir -p "$dir"
+  kubectl get gpuplaybooks,gpuremediationpolicies -o go-template='{{range .items}}{{if eq .spec.kubeNeuronRef "'"$NAME"'"}}{{.kind}}/{{.metadata.name}} {{index .metadata.labels "kubeneuron.io/installed-by"}} {{index .metadata.labels "kubeneuron.io/installation"}} {{index .metadata.labels "kubeneuron.io/policy-pack"}}{{"\n"}}{{end}}{{end}}' > "$dir/ownership"
+  while read -r ref installed_by installation label; do
+    [[ $installed_by == install-sh && $installation == "$NAME" && $label == "$pack" ]] ||
+      die "Conflicting recovery object $ref; check installation ownership and pack."
+  done < "$dir/ownership"
+  if [[ -s $dir/ownership ]]; then
+    say "Resuming interrupted installation of $pack for $NAME; preserving existing recovery objects."
+    awk -v dir="$dir" '/^---$/ {close(path); n++; next} {path=dir "/" (n+1) ".yaml"; print >path}' "$manifest"
+    : > "$missing"
+    for file in "$dir"/*.yaml; do
+      ref=$(kubectl create --dry-run=client -f "$file" -o name)
+      if [[ -n $(kubectl get "$ref" --ignore-not-found -o name) ]]; then
+        # A name collision can also refer to a different root, outside the list above.
+        local owner
+        owner=$(kubectl get "$ref" -o jsonpath='{.spec.kubeNeuronRef}')
+        [[ $owner == "$NAME" ]] || die "Conflicting recovery object $ref belongs to $owner."
+        continue
+      fi
+      printf '%s\n' '---' >> "$missing"
+      cat "$file" >> "$missing"
+    done
+    [[ -s $missing ]] || return 0
+    manifest=$missing
+  fi
+  kubectl create --dry-run=server -f "$manifest" >/dev/null
+  kubectl create -f "$manifest" >/dev/null
+}
+
 # The baseline policy pack: one binding for every problem class the shipped
 # detectors can emit.
 #
@@ -540,13 +573,10 @@ if [[ -n $root ]]; then
 else
   # A root may be absent after an interrupted install or a manual uninstall.
   # Check spec.kubeNeuronRef even for objects without installer labels.
-  bindings=$(kubectl get gpuplaybooks,gpuremediationpolicies -o "jsonpath={range .items[?(@.spec.kubeNeuronRef==\"$NAME\")]}{.metadata.name}{' '}{end}")
-  [[ -z $bindings ]] || die "Existing recovery objects for $NAME: $bindings. Resolve ownership before installing a pack."
   if [[ ${REQUESTED_PACK:-cloud} == cloud ]]; then
     pack_label="  labels: {kubeneuron.io/policy-pack: cloud}"
     render_cloud_pack > "$work/cloud-pack.yaml"
-    kubectl create --dry-run=server -f "$work/cloud-pack.yaml" >/dev/null
-    kubectl create -f "$work/cloud-pack.yaml" >/dev/null
+    create_pack "$work/cloud-pack.yaml" cloud
     say "Cloud recovery supports observation and dry-run. Live replacement requires a configured provider with add-first support."
   else
     say "Node-level recovery: Alpha, not validated on real hardware."
@@ -918,8 +948,7 @@ spec:
   match: {class: row-remap-budget}
   playbookRef: $NAME-rma
 EOF
-    kubectl create --dry-run=server -f "$work/bare-metal-pack.yaml" >/dev/null
-    kubectl create -f "$work/bare-metal-pack.yaml" >/dev/null
+    create_pack "$work/bare-metal-pack.yaml" baseline
   fi
 fi
 

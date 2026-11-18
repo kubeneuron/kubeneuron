@@ -53,7 +53,21 @@ connect_api() {
 	printf 'Authorization: Bearer %s\n' "$("$KUBECTL_BIN" -n "$namespace" get secret "$name-operator-api-token" -o jsonpath='{.data.token}' | base64 --decode)" >"$work/header"
 }
 api() { curl --silent --show-error --fail --noproxy '*' --connect-timeout 5 --max-time 30 -H "@$work/header" "$@"; }
+# An interrupted first install can leave a user-edited pack object before the root exists.
+"$KUBECTL_BIN" create -f - >/dev/null <<YAML
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $name-cloud-xid-app
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $name, kubeneuron.io/policy-pack: cloud}
+spec:
+  kubeNeuronRef: $name
+  priority: 891
+  match: {class: xid-app}
+  playbookRef: $name-observe
+YAML
 install
+[[ $("$KUBECTL_BIN" get gpuremediationpolicy "$name-cloud-xid-app" -o jsonpath='{.spec.priority}') == 891 ]] || fail "resume overwrote the existing policy"
 claim_uid=$("$KUBECTL_BIN" -n "$namespace" get pvc "$name-controller-state" -o jsonpath='{.metadata.uid}')
 token_versions() { "$KUBECTL_BIN" -n "$namespace" get secret "$name-operator-api-token" "$name-webhook-token" -o jsonpath='{.items[*].metadata.resourceVersion}'; }
 tokens=$(token_versions)
