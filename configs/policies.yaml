@@ -85,3 +85,11 @@ policies:
   # binding records and notifies.
   - match: { class: exporter-down }
     playbook: observe-suspect
+  # accelerator-fault: the Kubernetes Node reports an uncorrectable accelerator
+  # error. No software step restores the device: straight to RMA.
+  - match: { class: accelerator-fault }
+    playbook: rma
+  # accelerator-unallocatable: fewer allocatable devices than capacity. A
+  # stopped device plugin and a failed device look the same: observe only.
+  - match: { class: accelerator-unallocatable }
+    playbook: observe-suspect

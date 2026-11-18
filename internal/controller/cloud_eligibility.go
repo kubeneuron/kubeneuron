@@ -46,6 +46,9 @@ func (c *Controller) requireCloudRecovery(ctx context.Context, inc *types.Incide
 	default:
 		return nil // Observation and compensating cleanup must remain possible.
 	}
+	if reason := c.healthRecoveryRefusal(inc.Target.Node, step.Action); reason != "" {
+		return fmt.Errorf("%w: %s", errCloudRecoveryUnavailable, reason)
+	}
 	direct := step.Action == "platform.recycle_node" || step.Action == "platform.replace_node"
 	if !direct && inc.CloudIdentity == nil && !c.cloudRecoveryLadder(ctx, inc.Playbook) {
 		return nil

@@ -500,9 +500,9 @@ spec:
       approval: Required
 EOF
   local class ladder
-  for class in xid-app ecc-sbe-rate thermal power pcie agent-down exporter-down ecc-contained row-remap-ok gsp-error driver-hang row-remap-failure row-remap-budget ecc-dbe nvlink fell-off-bus gpu-lost cloud-interruption; do
+  for class in xid-app ecc-sbe-rate thermal power pcie agent-down exporter-down ecc-contained row-remap-ok gsp-error driver-hang row-remap-failure row-remap-budget ecc-dbe nvlink fell-off-bus gpu-lost cloud-interruption accelerator-fault accelerator-unallocatable; do
     case $class in
-      ecc-dbe|nvlink|fell-off-bus|gpu-lost) ladder=$NAME-cloud-replace ;;
+      ecc-dbe|nvlink|fell-off-bus|gpu-lost|accelerator-fault) ladder=$NAME-cloud-replace ;;
       cloud-interruption) ladder=$NAME-cloud-interruption ;;
       *) ladder=$NAME-observe ;;
     esac
@@ -892,6 +892,28 @@ spec:
   kubeNeuronRef: $NAME
   priority: 900
   match: {class: exporter-down}
+  playbookRef: $NAME-observe
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-accelerator-fault
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: accelerator-fault}
+  playbookRef: $NAME-rma
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: $NAME-accelerator-unallocatable
+  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $NAME, kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: $NAME
+  priority: 900
+  match: {class: accelerator-unallocatable}
   playbookRef: $NAME-observe
 ---
 apiVersion: kubeneuron.io/v1alpha1

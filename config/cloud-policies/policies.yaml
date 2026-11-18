@@ -104,6 +104,34 @@ spec:
 apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
+  name: kubeneuron-cloud-accelerator-fault
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: accelerator-fault}
+  playbookRef: kubeneuron-cloud-replace
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-accelerator-unallocatable
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: accelerator-unallocatable}
+  playbookRef: kubeneuron-cloud-observe
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
   name: kubeneuron-cloud-ecc-contained
   labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
 spec:

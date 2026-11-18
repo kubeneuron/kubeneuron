@@ -19,6 +19,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/action"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
+	"github.com/kubeneuron/kubeneuron/internal/nodehealth"
 	kubernetesplatform "github.com/kubeneuron/kubeneuron/internal/platform/kubernetes"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -306,6 +307,9 @@ func emittableClasses() map[types.ProblemClass][]string {
 	for _, class := range detect.AlertClasses() {
 		add(class, "an Alertmanager rule")
 	}
+	for _, class := range nodehealth.Classes() {
+		add(class, "an accelerator health profile")
+	}
 	for _, sources := range out {
 		sort.Strings(sources)
 	}
@@ -322,6 +326,7 @@ func declaredClasses() map[types.ProblemClass]bool {
 		types.ClassGSPError: true, types.ClassThermal: true, types.ClassPower: true,
 		types.ClassPCIe: true, types.ClassDriverHang: true, types.ClassGPULost: true,
 		types.ClassDiagFailure: true, types.ClassAgentDown: true,
+		types.ClassAcceleratorFault: true, types.ClassAcceleratorUnallocatable: true,
 	}
 }
 

@@ -26,6 +26,7 @@ Each live-cloud entry applies only to the path and run shown.
 | AMD fault detection | Synthetic amdgpu kernel logs and AMD SMI / ROCm SMI polling fixtures | No | No |
 | Node conditions in incident context | Controller and API tests | Installer suite checks conditions in incident detail and audit | No |
 | AWS interruption queue (EventBridge to SQS: spot warning, rebalance, AWS Health scheduled change, instance state change) | Event parser on the AWS documentation examples (2026-11-18), simulated SQS queue, provider contract and controller tests | No | No |
+| Accelerator health from Kubernetes nodes ([profiles](accelerator-health.md)) | Profile and controller tests with fake nodes | No | No. Experimental: signal names from vendor documentation, not validated on hardware |
 
 The 2026-10-18 hardware harness used v0.7.0 release source (`d06fcfa`) on EKS
 `g4dn.xlarge` / Tesla T4. Its observability phases predate the current Managed

@@ -5,6 +5,7 @@ package kubernetes
 import (
 	"context"
 	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,6 +37,52 @@ const (
 // accelerator device resource it advertises. It reads the synced node cache,
 // or the API server while the cache is not synced or holds no node.
 func (p *Platform) NodeInventory(ctx context.Context) ([]types.Node, error) {
+	nodes, err := p.allNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]types.Node, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, types.Node{Name: n.Name, UID: string(n.UID), Labels: n.Labels, Devices: nodeDevices(n)})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// NodeHealth implements platform.NodeHealthReader: what every Node that
+// advertises an accelerator device says about it, from the same read as
+// NodeInventory. Condition messages are left out.
+func (p *Platform) NodeHealth(ctx context.Context) ([]types.NodeHealthSnapshot, error) {
+	nodes, err := p.allNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	readAt := time.Now()
+	var out []types.NodeHealthSnapshot
+	for _, n := range nodes {
+		devices := nodeDevices(n)
+		if len(devices) == 0 {
+			continue
+		}
+		snap := types.NodeHealthSnapshot{Node: n.Name, UID: string(n.UID), Labels: n.Labels, Devices: devices, ReadAt: readAt}
+		for _, t := range n.Spec.Taints {
+			snap.Taints = append(snap.Taints, types.NodeTaint{Key: t.Key, Value: t.Value, Effect: string(t.Effect)})
+		}
+		for _, c := range n.Status.Conditions {
+			snap.Conditions = append(snap.Conditions, types.NodeHealthCondition{
+				Type: string(c.Type), Status: string(c.Status), Reason: c.Reason,
+				LastHeartbeatTime: c.LastHeartbeatTime.Time, LastTransitionTime: c.LastTransitionTime.Time,
+			})
+		}
+		out = append(out, snap)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Node < out[j].Node })
+	return out, nil
+}
+
+// allNodes reads the synced node cache, or the API server while the cache is
+// not synced or holds no node.
+func (p *Platform) allNodes(ctx context.Context) ([]*corev1.Node, error) {
 	var nodes []*corev1.Node
 	if lp := p.nodeLister.Load(); lp != nil {
 		if cached, err := (*lp).List(labels.Everything()); err == nil {
@@ -51,12 +98,7 @@ func (p *Platform) NodeInventory(ctx context.Context) ([]types.Node, error) {
 			nodes = append(nodes, &list.Items[i])
 		}
 	}
-	out := make([]types.Node, 0, len(nodes))
-	for _, n := range nodes {
-		out = append(out, types.Node{Name: n.Name, UID: string(n.UID), Labels: n.Labels, Devices: nodeDevices(n)})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
+	return nodes, nil
 }
 
 func nodeDevices(n *corev1.Node) []types.DeviceCount {

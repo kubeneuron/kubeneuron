@@ -1,0 +1,172 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package nodehealth
+
+import (
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/kubeneuron/kubeneuron/pkg/types"
+)
+
+var readAt = time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+
+func snapshot(resource string, conds ...types.NodeHealthCondition) types.NodeHealthSnapshot {
+	return types.NodeHealthSnapshot{
+		Node: "n1", ReadAt: readAt, Conditions: conds,
+		Devices: []types.DeviceCount{{Resource: resource, Capacity: 8, Allocatable: 8}},
+	}
+}
+
+func cond(kind, status, reason string) types.NodeHealthCondition {
+	return types.NodeHealthCondition{Type: kind, Status: status, Reason: reason,
+		LastHeartbeatTime: readAt.Add(-time.Minute), LastTransitionTime: readAt.Add(-time.Hour)}
+}
+
+func find(t *testing.T, h NodeHealth, key string) Observation {
+	t.Helper()
+	for _, o := range h.Observations {
+		if o.Key == key {
+			return o
+		}
+	}
+	t.Fatalf("no observation %q in %+v", key, h.Observations)
+	return Observation{}
+}
+
+func TestConditionsMapToClasses(t *testing.T) {
+	cases := []struct {
+		name, resource string
+		cond           types.NodeHealthCondition
+		profile        string
+		class          types.ProblemClass
+	}{
+		{"neuron npd", "aws.amazon.com/neuron", cond("NeuronHealth", "True", "NeuronHasError_HBM_UNCORRECTABLE_ERROR"), "aws-neuron", types.ClassAcceleratorFault},
+		{"neuron eks", "aws.amazon.com/neuron", cond("AcceleratedHardwareReady", "False", "NeuronHBMUncorrectableError"), "aws-neuron", types.ClassAcceleratorFault},
+		{"nvidia eks dbe", "nvidia.com/gpu", cond("AcceleratedHardwareReady", "False", "NvidiaDoubleBitError"), "nvidia", types.ClassECCDBE},
+		{"nvidia eks nvlink", "nvidia.com/gpu", cond("AcceleratedHardwareReady", "False", "NvidiaNVLinkError"), "nvidia", types.ClassNVLink},
+		{"nvidia eks xid 79", "nvidia.com/gpu", cond("AcceleratedHardwareReady", "False", "NvidiaXID79Error"), "nvidia", types.ClassFellOffBus},
+		{"nvidia eks app xid", "nvidia.com/gpu", cond("AcceleratedHardwareReady", "False", "NvidiaXID13Error"), "nvidia", types.ClassXIDApp},
+		{"nvidia eks dcgm", "nvidia.com/gpu", cond("AcceleratedHardwareReady", "False", "DCGMHealthCode42"), "nvidia", types.ClassAcceleratorFault},
+		{"nvidia aks missing", "nvidia.com/gpu", cond("GPUMissing", "True", ""), "nvidia", types.ClassGPULost},
+		{"nvidia aks nvlink", "nvidia.com/gpu", cond("NVLinkDown", "True", ""), "nvidia", types.ClassNVLink},
+		{"nvidia aks ecc", "nvidia.com/gpu", cond("GPUECCError", "True", ""), "nvidia", types.ClassAcceleratorFault},
+		{"amd npd", "amd.com/gpu", cond("AMDGPUProblem", "True", ""), "amd-instinct", types.ClassAcceleratorFault},
+		{"amd npd down", "amd.com/gpu", cond("AMDGPUIsDown", "True", ""), "amd-instinct", types.ClassAcceleratorFault},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := Evaluate(snapshot(tc.resource, tc.cond))
+			o := find(t, h, "condition:"+tc.cond.Type+"="+tc.cond.Status)
+			if o.State != StateFault || o.Class != tc.class || o.Profile != tc.profile || h.State != StateFault {
+				t.Fatalf("got %+v (node %s), want fault %s of %s", o, h.State, tc.class, tc.profile)
+			}
+			if !slices.Contains(Classes(), o.Class) {
+				t.Fatalf("Classes() leaves out %s", o.Class)
+			}
+			if o.Reason != tc.cond.Reason || !o.Since.Equal(tc.cond.LastTransitionTime) || o.Reads != confirmReads {
+				t.Fatalf("evidence %+v", o)
+			}
+		})
+	}
+}
+
+func TestHealthyConditionIsHealthy(t *testing.T) {
+	h := Evaluate(snapshot("aws.amazon.com/neuron", cond("NeuronHealth", "False", ""), cond("AcceleratedHardwareReady", "True", "")))
+	if h.State != StateHealthy {
+		t.Fatalf("state %s, want healthy: %+v", h.State, h.Observations)
+	}
+}
+
+// Missing, stale or unknown-status signals are unknown, never healthy.
+func TestNoFreshSignalIsUnknown(t *testing.T) {
+	stale := cond("NeuronHealth", "False", "")
+	stale.LastHeartbeatTime = readAt.Add(-11 * time.Minute)
+	noHeartbeat := cond("NeuronHealth", "False", "")
+	noHeartbeat.LastHeartbeatTime = time.Time{}
+	staleFault := cond("NeuronHealth", "True", "NeuronHasError_NC_UNCORRECTABLE_ERROR")
+	staleFault.LastHeartbeatTime = readAt.Add(-time.Hour)
+	cases := []struct {
+		name string
+		snap types.NodeHealthSnapshot
+		key  string
+		why  string
+	}{
+		{"missing", snapshot("aws.amazon.com/neuron"), "conditions", "none of the conditions NeuronHealth, AcceleratedHardwareReady"},
+		{"stale", snapshot("aws.amazon.com/neuron", stale), "condition:NeuronHealth", "stale: heartbeat 11m0s old"},
+		{"stale fault", snapshot("aws.amazon.com/neuron", staleFault), "condition:NeuronHealth", "stale"},
+		{"no heartbeat", snapshot("aws.amazon.com/neuron", noHeartbeat), "condition:NeuronHealth", "no heartbeat time"},
+		{"status unknown", snapshot("aws.amazon.com/neuron", cond("NeuronHealth", "Unknown", "")), "condition:NeuronHealth", `status "Unknown"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := Evaluate(tc.snap)
+			o := find(t, h, tc.key)
+			if o.State != StateUnknown || o.Class != "" || h.State != StateUnknown || !strings.Contains(o.Why, tc.why) {
+				t.Fatalf("got %+v (node %s), want unknown with %q", o, h.State, tc.why)
+			}
+		})
+	}
+}
+
+func TestAMDLabelNamesTheDevice(t *testing.T) {
+	snap := snapshot("amd.com/gpu", cond("AMDGPUProblem", "False", ""))
+	snap.Labels = map[string]string{
+		"metricsexporter.amd.com.gpu.3.state": "unhealthy",
+		"metricsexporter.amd.com.gpu.5.state": "unknown",
+	}
+	h := Evaluate(snap)
+	o := find(t, h, "label:metricsexporter.amd.com.gpu.3.state")
+	if o.State != StateFault || o.Device != "3" || o.Class != types.ClassAcceleratorFault {
+		t.Fatalf("got %+v", o)
+	}
+	if o := find(t, h, "label:metricsexporter.amd.com.gpu.5.state"); o.State != StateUnknown || o.Device != "5" {
+		t.Fatalf("got %+v", o)
+	}
+}
+
+func TestAllocatableBelowCapacityIsHeld(t *testing.T) {
+	snap := snapshot("google.com/tpu")
+	snap.Devices[0].Allocatable = 6
+	h := Evaluate(snap)
+	o := find(t, h, "allocatable:google.com/tpu")
+	if o.State != StateFault || o.Class != types.ClassAcceleratorUnallocatable || o.Hold != unallocatableHold || o.Reason != "6 of 8 allocatable" {
+		t.Fatalf("got %+v", o)
+	}
+	snap.Devices[0].Allocatable = 8
+	if h := Evaluate(snap); h.State != StateHealthy || !reflect.DeepEqual(h.Profiles, []string{"google-tpu"}) {
+		t.Fatalf("got %+v", h)
+	}
+}
+
+func TestNodeWithoutAcceleratorsHasNoProfile(t *testing.T) {
+	h := Evaluate(types.NodeHealthSnapshot{Node: "cpu", ReadAt: readAt,
+		Conditions: []types.NodeHealthCondition{cond("NeuronHealth", "True", "x")}})
+	if len(h.Profiles) != 0 || len(h.Observations) != 0 || h.State != "" {
+		t.Fatalf("got %+v", h)
+	}
+}
+
+func TestOtherRepairersFromTaints(t *testing.T) {
+	snap := snapshot("amd.com/gpu")
+	snap.Taints = []types.NodeTaint{{Key: "amd-gpu-unhealthy", Effect: "NoSchedule"}, {Key: "karpenter.sh/disrupted", Effect: "NoSchedule"}, {Key: "other"}}
+	if got := Evaluate(snap).OtherRepairers; !reflect.DeepEqual(got, []string{"amd-gpu-operator", "karpenter"}) {
+		t.Fatalf("repairers %v", got)
+	}
+}
+
+func TestMultiHostTPUSlice(t *testing.T) {
+	snap := snapshot("google.com/tpu")
+	snap.Devices[0].Capacity, snap.Devices[0].Allocatable = 4, 4
+	snap.Labels = map[string]string{labelTPUTopology: "2x2x4", labelGKENodePool: "v5p-pool"}
+	if got := Evaluate(snap).Slice; got != "v5p-pool" {
+		t.Fatalf("slice %q", got)
+	}
+	snap.Labels[labelTPUTopology] = "2x2"
+	if got := Evaluate(snap).Slice; got != "" {
+		t.Fatalf("a single-host topology is a slice: %q", got)
+	}
+}

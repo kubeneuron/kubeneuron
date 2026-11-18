@@ -192,6 +192,13 @@ const (
 	// node (spot reclaim, rebalance hint, maintenance). It is not a fault of
 	// the node and never enters a recovery ladder.
 	ClassCloudInterruption ProblemClass = "cloud-interruption"
+	// ClassAcceleratorFault: the node reports an uncorrectable accelerator
+	// error that no class above names, read from a Kubernetes Node.
+	ClassAcceleratorFault ProblemClass = "accelerator-fault"
+	// ClassAcceleratorUnallocatable: the node advertises fewer allocatable
+	// accelerator devices than its capacity. Software or hardware, nothing
+	// says which.
+	ClassAcceleratorUnallocatable ProblemClass = "accelerator-unallocatable"
 )
 
 // Severity of a signal.
@@ -211,6 +218,7 @@ const (
 	SourceAlertmanager SignalSource = "alertmanager" // slow path: vmalert -> Alertmanager webhook
 	SourceManual       SignalSource = "manual"       // operator-triggered via API/CLI
 	SourceCloudNotice  SignalSource = "cloud-notice" // an interruption the cloud announced
+	SourceNodeHealth   SignalSource = "node-health"  // a health profile read from the Kubernetes Node
 )
 
 // Signal is a normalized observation about a target. Both Alertmanager

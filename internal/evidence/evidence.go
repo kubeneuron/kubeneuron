@@ -180,13 +180,15 @@ var deviceClasses = map[types.ProblemClass]bool{
 	types.ClassNVLink: true, types.ClassFellOffBus: true, types.ClassGSPError: true,
 	types.ClassThermal: true, types.ClassPower: true, types.ClassPCIe: true,
 	types.ClassDriverHang: true, types.ClassDiagFailure: true,
+	types.ClassAcceleratorFault: true,
 }
 
 // unknownClasses never place a fault on the node by themselves.
 var unknownClasses = map[types.ProblemClass]string{
-	types.ClassXIDApp:       "an application XID is usually the workload, not the node",
-	types.ClassAgentDown:    "the agent stopped reporting; that says nothing about the device",
-	types.ClassExporterDown: "the metrics exporter stopped reporting; that says nothing about the device",
+	types.ClassXIDApp:                   "an application XID is usually the workload, not the node",
+	types.ClassAgentDown:                "the agent stopped reporting; that says nothing about the device",
+	types.ClassExporterDown:             "the metrics exporter stopped reporting; that says nothing about the device",
+	types.ClassAcceleratorUnallocatable: "fewer allocatable devices than the node's capacity; a stopped device plugin and a failed device look the same",
 }
 
 // Locate places the fault of an incident of class on node opened at, given

@@ -54,6 +54,10 @@ See `configs/vmalert/gpu-rules.yaml`:
 - **NVLink CRC, PCIe replay storms** — link degradation trends.
 - **Exporter down** (`exporter-down`): a monitoring gap, not a fault. The
   controller records and notifies it and never runs a step for it.
+- **The Kubernetes Node reports an accelerator fault** (`accelerator-fault`)
+  or **fewer allocatable devices than capacity** (`accelerator-unallocatable`):
+  read from Node conditions and labels by the experimental
+  [health profiles](accelerator-health.md).
 - **Agent heartbeat stale** (`agent-down`): no data from the node. Recorded
   and notified, never acted on: every rung above observe would run through
   the agent that stopped answering.

@@ -159,6 +159,35 @@ spec:
   match: {class: exporter-down}
   playbookRef: kubeneuron-observe
 ---
+# The Kubernetes Node reports an uncorrectable accelerator error (a vendor's
+# node problem detector, the cloud's node monitoring agent, or a vendor
+# exporter's device label). No software step restores such a device:
+# quarantine and hand it to hardware, as for a failed row remap.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-accelerator-fault
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: accelerator-fault}
+  playbookRef: kubeneuron-rma
+---
+# The Node advertises fewer allocatable accelerator devices than its
+# capacity, for at least five minutes. A stopped device plugin and a failed
+# device look the same from here, so this records and notifies only.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-accelerator-unallocatable
+  labels: {kubeneuron.io/policy-pack: baseline}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  match: {class: accelerator-unallocatable}
+  playbookRef: kubeneuron-observe
+---
 # XID 94 — contained ECC error (A100+). Containment means exactly one
 # workload's context was corrupted and the rest of the device is sound, so the
 # surgical response IS the correct one: evict that workload, keep the GPU

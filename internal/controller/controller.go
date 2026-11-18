@@ -81,6 +81,8 @@ type Controller struct {
 	logOnce *lru
 	// inventory is what the Kubernetes inventory sync last wrote.
 	inventory inventorySync
+	// health is the confirmation state of the accelerator health signals.
+	health healthSignals
 
 	// armingHoldSince records when each incident FIRST hit the
 	// arming-in-flight hold (in scope, agent freshly unarmed). The
@@ -422,6 +424,7 @@ func (c *Controller) runJanitors(ctx context.Context) {
 		// generations across its loop.
 		passCtx := c.pinRuntimeConfig(ctx)
 		c.syncAcceleratorInventory(passCtx)
+		c.pollNodeHealth(passCtx)
 		c.restoreAbandonedAcceleratorStacks(passCtx)
 		c.reconcileCordonedNodes(passCtx)
 		c.reconcileDegradedTaints(passCtx)

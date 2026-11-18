@@ -458,6 +458,7 @@ func TestDashboardQueriesUseRealLabels(t *testing.T) {
 // question at the console, not for watching. Adding a line is fine; adding one
 // without a reason is not.
 var notCharted = map[string]string{
+	"kubeneuron_accelerator_health_nodes":            "experimental and not validated on hardware: a count of nodes per health profile and state, for ad hoc queries until a profile has run on real nodes",
 	"kubeneuron_incident_evidence_total":             "a breakdown of incidents opened by recorded evidence, for ad hoc queries; each incident's evidence is read from the incident itself",
 	"kubeneuron_replacement_overlap_seconds":         "a cost figure per replacement, read from the incident and the recovery report; a chart of it is a billing question, answered ad hoc",
 	"kubeneuron_runtime_config_info":                 "an info gauge: identity of the loaded config, read by /api/v1/runtime-config and by alerts, not watched over time",

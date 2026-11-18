@@ -495,6 +495,13 @@ type AcceleratorInventory interface {
 	NodeInventory(ctx context.Context) ([]types.Node, error)
 }
 
+// NodeHealthReader is implemented by platforms that can read what each Node
+// that advertises an accelerator device says about it: its labels, taints,
+// conditions (without their messages) and device counts.
+type NodeHealthReader interface {
+	NodeHealth(ctx context.Context) ([]types.NodeHealthSnapshot, error)
+}
+
 // NodeIdentity is implemented by platforms that can read the UID of one
 // exact node object. A node that is not found is ("", false, nil).
 type NodeIdentity interface {
