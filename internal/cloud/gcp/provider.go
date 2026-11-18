@@ -37,6 +37,8 @@ const (
 
 type settings struct {
 	project, location, cluster string
+	// tpuInfraHealth turns on the TPU health read from Cloud Monitoring.
+	tpuInfraHealth bool
 }
 
 func settingsFrom(cfg cloud.Config) (settings, error) {
@@ -44,6 +46,8 @@ func settingsFrom(cfg cloud.Config) (settings, error) {
 		project:  cfg.Options[OptionProject],
 		location: cfg.Options[OptionLocation],
 		cluster:  cfg.Options[OptionCluster],
+
+		tpuInfraHealth: cfg.Options[OptionTPUInfraHealth] == "true",
 	}
 	if s.project == "" || s.location == "" || s.cluster == "" {
 		return s, errors.New("gcp: the GKE project, location and cluster name are required")
@@ -55,7 +59,9 @@ func settingsFrom(cfg cloud.Config) (settings, error) {
 type Provider struct {
 	settings
 	api gkeAPI
-	now func() time.Time
+	// monitoring is nil unless the TPU health read is turned on.
+	monitoring monitoringAPI
+	now        func() time.Time
 }
 
 var (
@@ -69,14 +75,20 @@ func init() {
 		if err != nil {
 			return nil, err
 		}
+		var p *Provider
 		api, err := newSDKAPI(ctx, s)
 		if err != nil {
 			// Without credentials the controller still runs: every cloud call
 			// fails with the cause, so each recovery is refused with a reason
 			// instead of the controller restarting in a loop.
-			return newWithAPI(s, unavailableAPI{err}), nil
+			p = newWithAPI(s, unavailableAPI{err})
+		} else {
+			p = newWithAPI(s, api)
 		}
-		return newWithAPI(s, api), nil
+		if s.tpuInfraHealth {
+			p.monitoring = newSDKMonitoring(ctx)
+		}
+		return p, nil
 	})
 }
 

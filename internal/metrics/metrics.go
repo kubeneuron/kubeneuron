@@ -389,6 +389,14 @@ var (
 		Help: "Accelerator nodes by health source, profile and state (healthy, fault, unknown). Unknown is a node without a fresh signal, never a healthy one. Ignored counts, in addition, the nodes reporting a problem on a signal that is read and not acted on.",
 	}, []string{"source", "profile", "state"})
 
+	// CloudHealthReads counts the reads of accelerator health from the
+	// cloud's monitoring, by outcome: ok, permission-denied, api-error, or
+	// no-nodes when no node needed one and nothing was asked of the cloud.
+	CloudHealthReads = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_cloud_health_reads_total",
+		Help: "Reads of accelerator health from the cloud's monitoring, by outcome (ok, permission-denied, api-error, no-nodes).",
+	}, []string{"outcome"})
+
 	// ActionsPending is the durable action-queue depth (queued work agents
 	// have not yet completed).
 	ActionsPending = promauto.NewGauge(prometheus.GaugeOpts{

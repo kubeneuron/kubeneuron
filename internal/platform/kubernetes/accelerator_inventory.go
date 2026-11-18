@@ -64,7 +64,8 @@ func (p *Platform) NodeHealth(ctx context.Context) ([]types.NodeHealthSnapshot, 
 		if len(devices) == 0 {
 			continue
 		}
-		snap := types.NodeHealthSnapshot{Node: n.Name, UID: string(n.UID), Labels: n.Labels, Devices: devices, ReadAt: readAt}
+		snap := types.NodeHealthSnapshot{Node: n.Name, UID: string(n.UID), Labels: n.Labels, Devices: devices, ReadAt: readAt,
+			ProviderID: n.Spec.ProviderID, CreatedAt: n.CreationTimestamp.Time}
 		for _, t := range n.Spec.Taints {
 			snap.Taints = append(snap.Taints, types.NodeTaint{Key: t.Key, Value: t.Value, Effect: string(t.Effect)})
 		}

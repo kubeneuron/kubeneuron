@@ -11,12 +11,28 @@ import "time"
 type NodeHealthSnapshot struct {
 	Node       string                `json:"node"`
 	UID        string                `json:"uid,omitempty"`
+	ProviderID string                `json:"provider_id,omitempty"`
 	Labels     map[string]string     `json:"labels,omitempty"`
 	Taints     []NodeTaint           `json:"taints,omitempty"`
 	Conditions []NodeHealthCondition `json:"conditions,omitempty"`
 	Devices    []DeviceCount         `json:"devices,omitempty"`
 	// ReadAt is when this controller read the Node.
 	ReadAt time.Time `json:"read_at"`
+	// CreatedAt is the Node's creation time.
+	CreatedAt time.Time `json:"created_at,omitzero"`
+	// Cloud is what the cloud's monitoring reports about the node's
+	// instance, oldest first, when that read is turned on; CloudError is why
+	// the read failed.
+	Cloud      []CloudHealthPoint `json:"cloud,omitempty"`
+	CloudError string             `json:"cloud_error,omitempty"`
+}
+
+// CloudHealthPoint is one sample of the instance's accelerator health from
+// the cloud's monitoring.
+type CloudHealthPoint struct {
+	At       time.Time `json:"at"`
+	Status   string    `json:"status"`
+	Category string    `json:"category,omitempty"`
 }
 
 // NodeTaint is one taint of a Node.

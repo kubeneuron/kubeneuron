@@ -47,6 +47,71 @@ func (s nodeHealthSource) read(ctx context.Context) ([]nodehealth.NodeHealth, er
 	return out, nil
 }
 
+// cloudHealthReader is a platform that reads accelerator health from the
+// cloud's monitoring.
+type cloudHealthReader interface {
+	CloudAcceleratorHealthEnabled() bool
+	// CloudAcceleratorHealth returns the nodes the cloud's read covers. When
+	// the cloud's read fails the nodes come back marked with why, together
+	// with the error; with no nodes, the error is the Node list's.
+	CloudAcceleratorHealth(ctx context.Context) ([]types.NodeHealthSnapshot, error)
+}
+
+const (
+	// cloudHealthEvery is how often the cloud's monitoring is asked: the TPU
+	// health metric is sampled once a minute.
+	cloudHealthEvery = time.Minute
+	// cloudHealthBackoff is the longest wait after failed reads.
+	cloudHealthBackoff = 5 * time.Minute
+)
+
+// cloudHealthSource reads the health profiles from the cloud's monitoring.
+// Between reads it returns the last one again.
+type cloudHealthSource struct {
+	reader cloudHealthReader
+	c      *Controller
+}
+
+func (cloudHealthSource) name() string { return "cloud-monitoring" }
+
+func (s cloudHealthSource) read(ctx context.Context) ([]nodehealth.NodeHealth, error) {
+	h := &s.c.health
+	now := s.c.checkpointNowFunc()()
+	h.mu.Lock()
+	if !h.cloudAt.IsZero() && now.Sub(h.cloudAt) < h.cloudEvery {
+		cached := h.cloudNodes
+		h.mu.Unlock()
+		return cached, nil
+	}
+	h.mu.Unlock()
+	snaps, err := s.reader.CloudAcceleratorHealth(ctx)
+	if err != nil && len(snaps) == 0 {
+		return nil, err
+	}
+	outcome, every := "ok", cloudHealthEvery
+	switch {
+	case err != nil:
+		outcome = snaps[0].CloudError
+		if s.c.logOnce.first("cloud-health/" + err.Error()) {
+			s.c.log.Warn("could not read accelerator health from the cloud's monitoring; its nodes are unknown", "err", err)
+		}
+		h.mu.Lock()
+		every = min(2*max(h.cloudEvery, cloudHealthEvery), cloudHealthBackoff)
+		h.mu.Unlock()
+	case len(snaps) == 0:
+		outcome = "no-nodes"
+	}
+	metrics.CloudHealthReads.WithLabelValues(outcome).Inc()
+	out := make([]nodehealth.NodeHealth, 0, len(snaps))
+	for _, snap := range snaps {
+		out = append(out, nodehealth.EvaluateCloud(snap))
+	}
+	h.mu.Lock()
+	h.cloudAt, h.cloudEvery, h.cloudNodes = now, every, out
+	h.mu.Unlock()
+	return out, nil
+}
+
 // pendingHealth is one fault signal being confirmed or already reported.
 type pendingHealth struct {
 	firstSeen time.Time
@@ -62,6 +127,11 @@ type healthSignals struct {
 	latest  map[string]nodehealth.NodeHealth
 	// read are the sources read successfully in this leadership term.
 	read map[string]bool
+	// cloudAt is when the cloud's monitoring was last read in this term,
+	// cloudNodes what it said and cloudEvery the wait before the next read.
+	cloudAt    time.Time
+	cloudNodes []nodehealth.NodeHealth
+	cloudEvery time.Duration
 }
 
 // reset forgets what was read: a new leadership term starts with nothing
@@ -70,12 +140,16 @@ func (h *healthSignals) reset() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pending, h.latest, h.read = nil, nil, nil
+	h.cloudAt, h.cloudNodes, h.cloudEvery = time.Time{}, nil, 0
 }
 
 func (c *Controller) healthSources() []healthSource {
 	var out []healthSource
 	if reader, ok := c.platform.(platform.NodeHealthReader); ok {
 		out = append(out, nodeHealthSource{reader: reader})
+	}
+	if reader, ok := c.platform.(cloudHealthReader); ok && reader.CloudAcceleratorHealthEnabled() {
+		out = append(out, cloudHealthSource{reader: reader, c: c})
 	}
 	return out
 }
