@@ -28,18 +28,18 @@ func (s *Server) handleAgentSignalSources(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if len(rows) > 20 || rows == nil {
-		http.Error(w, "invalid source list", 400)
+		http.Error(w, "invalid source list", http.StatusBadRequest)
 		return
 	}
 	seen := make(map[[2]string]bool, len(rows))
 	for _, row := range rows {
 		if row.Node != principal.NodeName {
-			http.Error(w, "agent is not authorized for the requested node", 403)
+			http.Error(w, "agent is not authorized for the requested node", http.StatusForbidden)
 			return
 		}
 		key := [2]string{row.Source, string(row.Class)}
 		if seen[key] || !validAgentSource(row) {
-			http.Error(w, "invalid source observation", 400)
+			http.Error(w, "invalid source observation", http.StatusBadRequest)
 			return
 		}
 		seen[key] = true
@@ -48,7 +48,7 @@ func (s *Server) handleAgentSignalSources(w http.ResponseWriter, r *http.Request
 		RecordAgentSignalSources(string, []types.AgentSignalSource)
 	})
 	if !ok {
-		http.Error(w, "source reports unavailable", 503)
+		http.Error(w, "source reports unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	backend.RecordAgentSignalSources(principal.NodeName, rows)
