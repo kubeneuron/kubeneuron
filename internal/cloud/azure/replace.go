@@ -100,6 +100,9 @@ func (p *Provider) replacement(ctx context.Context, instanceID string) (*replace
 		}
 		return nil, p.finish(ctx, t.pool, pl, marked, before)
 	}
+	if op, _, _ := parseSuccessorTag(pl.Tags); op != "" {
+		return nil, fmt.Errorf("azure: agent pool %s is preparing a successor for operation %s; waiting, one replacement per pool at a time", t.pool, op)
+	}
 	if marked != "" && !strings.EqualFold(marked, t.machine) {
 		return nil, fmt.Errorf("azure: agent pool %s is replacing %s; waiting, one replacement per pool at a time", t.pool, marked)
 	}

@@ -92,6 +92,9 @@ type SuccessorProvider interface {
 	ReleaseSuccessor(ctx context.Context, s Successor) error
 	// ReplaceWithSuccessor removes the pinned instance once its created
 	// successor has taken over, leaving the pool at its size before the
-	// request. It continues the same operation after a restart.
+	// request. It continues the same operation after a restart. When the
+	// operation or the successor does not match the pool, or a delete was
+	// sent and its result is unknown, it wraps ErrNeedsOperator: the caller
+	// then keeps the successor and changes nothing more.
 	ReplaceWithSuccessor(ctx context.Context, s Successor) error
 }

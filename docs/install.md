@@ -17,8 +17,8 @@ Set `spec.playbookRef` to the installation's observe, cloud-replace or
 cloud-recycle playbook. The recycle ladder additionally requires
 `spec.recycle.enabled: true` and escalates to replacement. The default
 replacement strategy is `AddFirst`, which needs a provider that can prepare
-a replacement first; no built-in provider can yet. Until then, an incident
-whose ladder includes replacement stays in `EVALUATING` before cordon. Its
+a replacement first: today, Azure on a fixed-size AKS node pool. Elsewhere,
+an incident whose ladder includes replacement stays in `EVALUATING` before cordon. Its
 audit records `recovery-unavailable` and explains that the provider lacks
 add-first and the policy has not selected remove-first. See
 [Add-first replacement](playbook-authoring.md#add-first-replacement). Check the installation's

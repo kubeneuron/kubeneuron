@@ -446,9 +446,9 @@ approval does not lift them:
   and removed; `RemoveFirst` removes the old node first and is used only when
   named. Where the node's provider or pool cannot prepare a replacement
   first, a replace step under `AddFirst` is held as unavailable and no
-  approval is asked; it is never done the other way. No built-in provider
-  supports add-first yet, so a policy that needs node replacement today names
-  `RemoveFirst` explicitly. See [Add-first replacement](#add-first-replacement).
+  approval is asked; it is never done the other way. Add-first is available
+  on fixed-size AKS node pools; on other providers and pools, a policy that
+  needs node replacement names `RemoveFirst` explicitly. See [Add-first replacement](#add-first-replacement).
 - `replacement.successorTimeout` (default `30m`, from `5m` to `2h`): how long
   the prepared replacement may take to become ready under `AddFirst`.
   Add-first replacement creates one additional node in the pool before the old

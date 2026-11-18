@@ -21,9 +21,9 @@ API is `v1alpha1`.
   already runs work is kept and handed to an operator. The approval request
   says a temporary extra node will be created and billed. Progress is in the
   audit trail and `kubeneuronctl incident show`; the overlap is measured by
-  `kubeneuron_replacement_overlap_seconds`. No built-in provider implements
-  it yet, so `AddFirst` still holds everywhere and `RemoveFirst` is
-  unchanged. See [Add-first replacement](docs/playbook-authoring.md#add-first-replacement).
+  `kubeneuron_replacement_overlap_seconds`. The Azure provider implements
+  it for fixed-size AKS node pools; elsewhere `AddFirst` still holds before
+  the cordon, and `RemoveFirst` is unchanged. See [Add-first replacement](docs/playbook-authoring.md#add-first-replacement).
 
 - **Azure provider for AKS (experimental, not validated on AKS).**
   `spec.cloud.provider: azure` with `spec.cloud.azure` (subscription,

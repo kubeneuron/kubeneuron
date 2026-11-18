@@ -96,6 +96,13 @@ func (c *Controller) replaceWithSuccessor(ctx context.Context, inc *types.Incide
 	}
 	rec := inc.Successor
 	if err := succ.ReplacePinnedNodeWithSuccessor(ctx, pin, rec.Successor); err != nil {
+		if errors.Is(err, cloud.ErrNeedsOperator) {
+			// The old instance may be gone: the successor stays, and nothing
+			// more is changed automatically.
+			if serr := c.endSuccessor(ctx, inc, types.SuccessorHandedOver, err.Error()); serr != nil {
+				return nil, fmt.Errorf("platform.replace_node: %w; recording the hand-over failed: %v", err, serr)
+			}
+		}
 		return nil, fmt.Errorf("platform.replace_node: %w", err)
 	}
 	if err := c.endSuccessor(ctx, inc, types.SuccessorReplaced, ""); err != nil {

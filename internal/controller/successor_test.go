@@ -42,6 +42,7 @@ type successorPlatform struct {
 	successorAllocatable int64
 	successorWorkload    bool
 	releaseErr           error
+	replaceErr           error
 	// oldGPUs is what the replaced node advertises; dropAfterPlan sets it to
 	// 0 once the operation is planned. prepareErrs / nodeErrs: transient
 	// failures of the next requested-phase polls and successor node reads.
@@ -135,6 +136,9 @@ func (p *successorPlatform) ReplacePinnedNodeWithSuccessor(_ context.Context, pi
 	defer p.mu.Unlock()
 	if s.Instance != pin.InstanceID {
 		return errors.New("wrong instance")
+	}
+	if p.replaceErr != nil {
+		return p.replaceErr
 	}
 	p.replacedBy = append(p.replacedBy, s)
 	return nil
@@ -650,5 +654,20 @@ func TestAddFirstNeedsAllocatableDevicesWhenOnlyTheAgentCountIsKnown(t *testing.
 	}
 	if p.cordonedNode("n1") || inc.Successor.ReadyAt != nil {
 		t.Fatal("a successor with only agent inventory was accepted")
+	}
+}
+
+func TestAddFirstUnknownDeleteKeepsTheSuccessor(t *testing.T) {
+	p := newSuccessorPlatform()
+	p.replaceErr = fmt.Errorf("deleting the old machine: the result is unknown: %w", cloud.ErrNeedsOperator)
+	c, st, _ := successorFixture(t, recoverymode.Automatic, p, "")
+	registerSuccessorAgent(t, st, 8)
+	id := openOn(t, c, "n1")
+	inc := waitSettled(t, c, st, id, func(inc *types.Incident) bool { return inc.Successor != nil && !inc.Successor.Open() })
+	for range 5 {
+		c.reconcile(context.Background())
+	}
+	if _, released, _, _, _ := p.counts(); released != 0 || inc.Successor.Outcome != types.SuccessorHandedOver {
+		t.Fatalf("released=%d successor=%+v, want the successor kept for an operator%s", released, inc.Successor, dump(trail(t, st, id)))
 	}
 }

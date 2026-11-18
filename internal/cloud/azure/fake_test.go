@@ -50,6 +50,11 @@ type fakeAKS struct {
 
 	growErr        error
 	growsMachine   bool
+	// hold leaves the next growth scaling, with no machine, until Deliver;
+	// lose applies the next growth and fails its answer.
+	hold, held, lose bool
+	requests         int
+	deleteErr        error
 	shrinkOnDelete bool
 	permissions    []permission
 
@@ -89,6 +94,15 @@ func (f *fakeAKS) WritePool(_ context.Context, name string, p pool, count int32,
 	if tags["team"] != "ml" {
 		return errors.New("write dropped a tag it did not own")
 	}
+	if count > f.count {
+		f.requests++
+	}
+	if count > f.count && f.hold {
+		f.hold, f.held = false, true
+		f.state, f.count, f.tags = "Scaling", count, maps.Clone(tags)
+		f.version++
+		return f.answer()
+	}
 	if count > f.count && f.growErr != nil {
 		f.state, f.count, f.tags = "Failed", count, maps.Clone(tags)
 		f.version++
@@ -103,11 +117,37 @@ func (f *fakeAKS) WritePool(_ context.Context, name string, p pool, count int32,
 	f.count = count
 	f.tags = maps.Clone(tags)
 	f.version++
+	return f.answer()
+}
+
+func (f *fakeAKS) answer() error {
+	if f.lose {
+		f.lose = false
+		return errors.New("context deadline exceeded")
+	}
 	return nil
+}
+
+// The cloudtest.SuccessorCloud hooks.
+func (f *fakeAKS) HoldNextRequest() { f.hold = true }
+func (f *fakeAKS) LoseNextAnswer()  { f.lose = true }
+func (f *fakeAKS) Requests() int    { return f.requests }
+func (f *fakeAKS) Size() int        { return int(f.count) }
+func (f *fakeAKS) Deliver() {
+	if f.held {
+		f.held = false
+		f.machines = append(f.machines, testMachine(f.next))
+		f.next++
+		f.state = "Succeeded"
+		f.version++
+	}
 }
 
 func (f *fakeAKS) DeleteMachines(_ context.Context, name string, names []string) error {
 	f.calls = append(f.calls, "delete "+strings.Join(names, ","))
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	for _, n := range names {
 		for i, m := range f.machines {
 			if m.Name == n {

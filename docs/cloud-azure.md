@@ -22,16 +22,20 @@ reimaging a scale set instance directly leaves the cluster unsupported. So on
 AKS:
 
 - `RecycleNode` is never available. A ladder goes straight to replacement.
-- `ReplaceNode` uses only the AKS agent pool API. The playbook has already
-  cordoned and drained the node, since AKS does neither.
+- With the default `replacement.strategy: AddFirst`, on a **fixed-size
+  pool**, the new node comes up before the old one is cordoned; see
+  [Add-first on AKS](#add-first-on-aks). On a pool under the cluster
+  autoscaler, add-first is unavailable and the incident is held before the
+  cordon, with the reason.
+- With `RemoveFirst`, `ReplaceNode` uses only the AKS agent pool API. The
+  playbook has already cordoned and drained the node, since AKS does neither.
     - On a **fixed-size pool**, KubeNeuron grows the pool by one, waits until
       AKS lists the new machine and the pool has settled, and only then
       deletes the node's machine. If there is no capacity or quota for the
       new machine, the step fails as "replacement capacity unavailable" and
       nothing is deleted. Capacity is added before the old instance is
       deleted, but after the drain: workloads are already evicted while the
-      new node comes up. Playbooks that require add-first replacement still
-      hold.
+      new node comes up.
     - On a pool under the **cluster autoscaler**, the pool's size is left
       alone. The machine is deleted and the autoscaler decides whether a new
       one comes.
@@ -40,16 +44,44 @@ AKS:
   replacement and never grows the pool twice. A pool left a node larger, or
   a tag left behind, is reported as needing an operator and is never shrunk
   automatically: shrinking would delete a node AKS chooses.
-- The ready-and-no-auto-repair check runs before the step starts, not again
-  between growing the pool and deleting the machine. Growing a pool takes
-  minutes; if the node turns NotReady in that time, AKS auto-repair can act
-  on it while KubeNeuron deletes it. This closes once preparing the new node
-  becomes a phase of its own, checked before the cordon.
+- Under `RemoveFirst`, the ready-and-no-auto-repair check runs before the
+  step starts, not again between growing the pool and deleting the machine.
+  Growing a pool takes minutes; if the node turns NotReady in that time, AKS
+  auto-repair can act on it while KubeNeuron deletes it. Under `AddFirst` the
+  check runs again before the pool is grown and before the old machine is
+  deleted.
 - Each write to the pool carries its version (`If-Match`), so it never
   overwrites a change made after KubeNeuron read the pool.
 - A node is recognized only if it is a machine of an agent pool of the
   configured cluster: its scale set instance must be in the cluster's node
   resource group and listed by AKS in that pool. Anything else is refused.
+
+### Add-first on AKS
+
+The phases are those of [Add-first replacement](playbook-authoring.md#add-first-replacement):
+
+1. **Plan.** KubeNeuron reads the pool: its node count and machines. Nothing
+   changes in Azure.
+2. **Request.** If the pool is still as planned, KubeNeuron writes the count
+   plus one and the `kubeneuron-successor` tag (`<operation>:<count>`) in one
+   request. If the answer is lost, the tag shows the request reached AKS, and
+   a retry never grows the pool again.
+3. **Created.** Once the pool is `Succeeded` at the grown count with exactly
+   one machine that was not there at the plan, that machine is the
+   successor. Any other result needs an operator.
+4. **Replace.** After the successor's node is ready and the old node is
+   drained, KubeNeuron deletes only the old machine, checks the pool is back
+   to its count and removes the tag.
+
+When the replacement is abandoned, KubeNeuron deletes only the successor
+machine (if nothing but DaemonSet pods runs on it), or, if no machine came,
+writes the count back and removes the tag. It does neither while the pool is
+still scaling, or when the pool holds machines it cannot account for: that
+needs an operator. A delete whose result is unknown also needs an operator,
+and the successor is kept.
+
+Add-first and remove-first replacements never run in the same pool at the
+same time.
 
 ### AKS node auto-repair
 
@@ -121,7 +153,16 @@ cluster.
 
 ## When a pool needs an operator
 
-KubeNeuron stops and reports "needs an operator" rather than guess. The
+KubeNeuron stops and reports "needs an operator" rather than guess. For an
+add-first operation, the incident (`kubeneuronctl incident show`) names the
+operation, the successor machine and why it stopped; the pool carries the
+`kubeneuron-successor` tag `<operation>:<count>`, with the pool's count before
+it was grown. Bring the pool to the size you want as below, deleting the
+successor or the old machine as needed
+(`az aks machine list` shows which machines the pool runs), then remove the
+tag and resolve the incident.
+
+For a remove-first replacement, the
 `kubeneuron-replacing` tag on the pool has the form `<machine>:<count>`: the
 machine being replaced and the pool's node count before it was grown. While
 the tag is there, KubeNeuron starts no other replacement in that pool. Remove
@@ -171,6 +212,9 @@ can still refuse a call after the pool has been grown.
 
 These are open until a run on a real cluster:
 
+- whether AKS lists the new machine of a grown pool by the time the pool is
+  `Succeeded` (add-first waits for both, and needs an operator if the pool
+  settles without it);
 - whether deleting a machine lowers the pool's node count (the AKS documentation
   does not say; KubeNeuron fails as "needs an operator" if it does not);
 - that a machine AKS lists after the pool grows is a node ready for work

@@ -23,8 +23,9 @@ import (
 // providerName is this provider's registry key and matches spec.cloud.provider.
 const providerName = "azure"
 
-// capabilities: replacement only. AKS has no supported single-node restart.
-var capabilities = cloud.Capabilities{Replace: true}
+// capabilities: replacement, adding the successor first on a fixed-size pool.
+// AKS has no supported single-node restart.
+var capabilities = cloud.Capabilities{Replace: true, AddFirst: true}
 
 // Option keys of cloud.Config.Options.
 const (
@@ -87,7 +88,7 @@ func newWithAPI(s settings, api aksAPI) *Provider { return &Provider{settings: s
 // Name identifies this provider in the registry and the CR.
 func (p *Provider) Name() string { return providerName }
 
-// Capabilities reports replacement only.
+// Capabilities reports replacement, with add-first.
 func (p *Provider) Capabilities() cloud.Capabilities { return capabilities }
 
 // InstanceID extracts the VMSS instance from an AKS node providerID. The ID is
