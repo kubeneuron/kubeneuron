@@ -973,7 +973,20 @@ func TestFollowerRemembersReleasedOwnerAfterRestart(t *testing.T) {
 			t.Fatalf("initial owner for %s = %q", id, got)
 		}
 	}
-	if _, err := s.sqlDB.ExecContext(ctx, "DELETE FROM node_remediation_owners WHERE incident_id='owner'"); err != nil {
+	rollback := errors.New("roll back completion")
+	if err := s.WithTx(ctx, func(tx store.Tx) error {
+		if err := tx.ReleaseNodeRemediation(ctx, "owner"); err != nil {
+			return err
+		}
+		return rollback
+	}); !errors.Is(err, rollback) {
+		t.Fatalf("rollback: %v", err)
+	}
+	var retained string
+	if err := s.sqlDB.QueryRowContext(ctx, "SELECT incident_id FROM node_remediation_owners").Scan(&retained); err != nil || retained != "owner" {
+		t.Fatalf("owner after rollback = %q, err = %v", retained, err)
+	}
+	if err := s.WithTx(ctx, func(tx store.Tx) error { return tx.ReleaseNodeRemediation(ctx, "owner") }); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {

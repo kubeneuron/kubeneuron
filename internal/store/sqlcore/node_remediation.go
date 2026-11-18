@@ -37,3 +37,10 @@ func (q *Queries) ClaimNodeRemediation(ctx context.Context, node, uid, incidentI
 	}
 	return owner, nil
 }
+
+// ReleaseNodeRemediation drops only the active owner's claim. Followers keep
+// their persisted link so they can verify the outcome independently.
+func (q *Queries) ReleaseNodeRemediation(ctx context.Context, incidentID string) error {
+	_, err := q.db.ExecContext(ctx, "DELETE FROM node_remediation_owners WHERE incident_id=?", incidentID)
+	return err
+}

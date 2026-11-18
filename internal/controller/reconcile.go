@@ -961,6 +961,11 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 		if err := tx.UpdateIncident(ctx, inc); err != nil {
 			return err
 		}
+		if from == types.StateVerifying && to == types.StateResolved && !fresh.Successor.Open() && !fresh.RemoveFirst.Open() {
+			if err := tx.ReleaseNodeRemediation(ctx, inc.ID); err != nil {
+				return err
+			}
+		}
 		return tx.AppendAudit(ctx, &types.AuditEntry{
 			IncidentID: inc.ID, Time: now,
 			FromState: from, ToState: to,
