@@ -1419,3 +1419,18 @@ func TestDisabledNodeLevelActionsRejectResetPlaybook(t *testing.T) {
 		t.Fatalf("expected disabled node-level action error, got %v", err)
 	}
 }
+
+func TestOperatorDeniesRebootAndKeepsInstallationCompilable(t *testing.T) {
+	installation := testKubeNeuron()
+	policies, books := testPolicyFixture()
+	books[0].Spec.Target = kubeneuronv1alpha1.PlaybookTargetNode
+	books[0].Spec.Steps[0].Action = kubeneuronv1alpha1.ActionReboot
+	installation.Spec.Safety.NodeLevelActions = false
+	observeDeniedPlaybooks(installation.Name, books)
+	if len(books[0].Spec.Steps) != 1 || books[0].Spec.Steps[0].Action != kubeneuronv1alpha1.ActionObserve {
+		t.Fatal("denied reboot must reduce the playbook to observation")
+	}
+	if _, err := CompileSnapshot(installation, policies, books, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+}

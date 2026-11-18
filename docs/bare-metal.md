@@ -7,6 +7,10 @@ to install the node-level recovery playbooks. The default cloud pack uses
 provider APIs. An agent reboot restarts the host operating system. GPU reset
 and driver operations can interrupt workloads using the device.
 
+When upgrading an existing bare-metal installation, set the Helm value
+`operator.allowNodeLevelActions=true` and set `spec.safety.nodeLevelActions: true`
+on each installation that needs node-level recovery. Both default to false.
+
 Start in `DryRun` to inspect the proposed steps. For live node-level
 recovery use an approval policy. An Automatic policy that reaches an agent
 action through an escalation also fails validation.

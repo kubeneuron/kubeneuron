@@ -25,6 +25,7 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
+            - --allow-node-level-actions={{ .Values.operator.allowNodeLevelActions }}
             - --leader-elect=true
             - --leader-election-namespace=$(POD_NAMESPACE)
             - --metrics-bind-address=:8080

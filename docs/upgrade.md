@@ -460,3 +460,11 @@ Upgrades do not rotate TLS Secrets. If an upgrade window coincides with a
 planned rotation, finish the rotation first — `hack/tls-rotate.sh` phases
 record exact root generations and will refuse to continue across an
 unexpected generation change.
+
+### Bare-metal alpha recovery
+
+For existing bare-metal installations that use node-level actions, set the Helm
+value `operator.allowNodeLevelActions=true` and set `spec.safety.nodeLevelActions: true`
+in each installation that requires them. With operator permission disabled, a
+request in the CR produces an `OperatorPermissionRequired` warning and affected
+playbooks run only their observation fallback.

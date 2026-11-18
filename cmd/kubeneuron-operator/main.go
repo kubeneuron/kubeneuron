@@ -40,12 +40,13 @@ var version = "dev"
 
 func main() {
 	var (
-		metricsAddr     = flag.String("metrics-bind-address", ":8080", "address for Prometheus metrics")
-		probeAddr       = flag.String("health-probe-bind-address", ":8081", "address for health probes")
-		leaderElect     = flag.Bool("leader-elect", true, "enable Kubernetes Lease leader election")
-		leaderNamespace = flag.String("leader-election-namespace", "", "namespace for the leader-election Lease (default: pod namespace)")
-		showVersion     = flag.Bool("version", false, "print version and exit")
-		defaultAdapters = flag.String("default-agent-adapters", "",
+		allowNodeLevelActions = flag.Bool("allow-node-level-actions", false, "permit installations to opt into alpha node-level actions")
+		metricsAddr           = flag.String("metrics-bind-address", ":8080", "address for Prometheus metrics")
+		probeAddr             = flag.String("health-probe-bind-address", ":8081", "address for health probes")
+		leaderElect           = flag.Bool("leader-elect", true, "enable Kubernetes Lease leader election")
+		leaderNamespace       = flag.String("leader-election-namespace", "", "namespace for the leader-election Lease (default: pod namespace)")
+		showVersion           = flag.Bool("version", false, "print version and exit")
+		defaultAdapters       = flag.String("default-agent-adapters", "",
 			"JSON list of spec.agent.adapters entries added to every installation, e.g. "+
 				`'[{"vendor":"amd","options":{"tool":"amd-smi"}}]'; an installation entry replaces a default for the same vendor`)
 		collectorImage = flag.String("otel-collector-image", operator.DefaultCollectorImage,
@@ -95,15 +96,16 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&operator.KubeNeuronReconciler{
-		Client:               mgr.GetClient(),
-		APIReader:            mgr.GetAPIReader(),
-		Scheme:               mgr.GetScheme(),
-		Recorder:             mgr.GetEventRecorderFor("kubeneuron-operator"),
-		DefaultAgentAdapters: agentAdapters,
-		CollectorImage:       *collectorImage,
-		MetricsStoreImage:    *metricsStoreImage,
-		MetricsRulesImage:    *metricsRulesImage,
-		GrafanaImage:         *grafanaImage,
+		AllowNodeLevelActions: *allowNodeLevelActions,
+		Client:                mgr.GetClient(),
+		APIReader:             mgr.GetAPIReader(),
+		Scheme:                mgr.GetScheme(),
+		Recorder:              mgr.GetEventRecorderFor("kubeneuron-operator"),
+		DefaultAgentAdapters:  agentAdapters,
+		CollectorImage:        *collectorImage,
+		MetricsStoreImage:     *metricsStoreImage,
+		MetricsRulesImage:     *metricsRulesImage,
+		GrafanaImage:          *grafanaImage,
 		// The chart sets POD_NAMESPACE; the collector admits the operator's
 		// own telemetry from that namespace only.
 		OperatorNamespace: os.Getenv("POD_NAMESPACE"),

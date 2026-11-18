@@ -11,6 +11,10 @@ image:
   tag: v0.8.0
   pullPolicy: IfNotPresent
 
+operator:
+  # Permit individual installations to opt into alpha node-level actions.
+  allowNodeLevelActions: false
+
 replicas: 1
 
 resources:

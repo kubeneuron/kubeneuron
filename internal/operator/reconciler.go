@@ -59,8 +59,9 @@ const (
 // VictoriaMetrics store, which this reconciler runs without backups.
 type KubeNeuronReconciler struct {
 	client.Client
-	APIReader client.Reader
-	Scheme    *runtime.Scheme
+	AllowNodeLevelActions bool
+	APIReader             client.Reader
+	Scheme                *runtime.Scheme
 	// Recorder emits Kubernetes Events on the KubeNeuron object; nil (tests)
 	// disables event emission.
 	Recorder record.EventRecorder
@@ -92,6 +93,49 @@ func (r *KubeNeuronReconciler) event(installation *kubeneuronv1alpha1.KubeNeuron
 	r.Recorder.Event(installation, eventType, reason, message)
 }
 
+// observeDeniedPlaybooks disables entire recovery paths, including disruptive
+// preparation before a denied escalation. Only the in-memory config is changed.
+func observeDeniedPlaybooks(installation string, books []kubeneuronv1alpha1.GPUPlaybook) {
+	denied := map[string]bool{}
+	parents := map[string][]string{}
+	var pending []string
+	for _, book := range books {
+		if book.Spec.KubeNeuronRef != installation {
+			continue
+		}
+		if failure := book.Spec.OnFailure; failure != nil {
+			parents[failure.PlaybookRef] = append(parents[failure.PlaybookRef], book.Name)
+		}
+		for _, step := range book.Spec.Steps {
+			wire, _, _ := legacyAction(step.Action)
+			if playbook.IsNodeLevelAction(wire) {
+				pending = append(pending, book.Name)
+				break
+			}
+		}
+	}
+	for len(pending) > 0 {
+		name := pending[0]
+		pending = pending[1:]
+		if denied[name] {
+			continue
+		}
+		denied[name] = true
+		pending = append(pending, parents[name]...)
+	}
+	for i := range books {
+		b := &books[i]
+		if b.Spec.KubeNeuronRef != installation || !denied[b.Name] {
+			continue
+		}
+		b.Spec.OnFailure = nil
+		b.Spec.Steps = []kubeneuronv1alpha1.PlaybookStep{{Name: "operator-permission-required", Action: kubeneuronv1alpha1.ActionObserve}}
+		if b.Spec.Target == kubeneuronv1alpha1.PlaybookTargetNode {
+			b.Spec.Effects = []string{"node"}
+		}
+	}
+}
+
 // Reconcile compiles CRD configuration, publishes an immutable configuration
 // snapshot, and converges the controller and agent workloads.
 func (r *KubeNeuronReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -112,6 +156,28 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, req.NamespacedName, &installation); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	denied := installation.Spec.Safety.NodeLevelActions && !r.AllowNodeLevelActions
+	if denied {
+		const message = "The installation requests node-level actions, but the operator requires --allow-node-level-actions."
+		before := installation.DeepCopy()
+		changed := meta.SetStatusCondition(&installation.Status.Conditions, metav1.Condition{
+			Type: "NodeLevelActionsAllowed", Status: metav1.ConditionFalse, Reason: "OperatorPermissionRequired",
+			Message: message, ObservedGeneration: installation.Generation,
+		})
+		if changed {
+			if err := r.Status().Patch(ctx, &installation, client.MergeFrom(before)); err != nil {
+				return ctrl.Result{}, err
+			}
+			r.event(&installation, corev1.EventTypeWarning, "OperatorPermissionRequired", message)
+		}
+		installation.Spec.Safety.NodeLevelActions = false
+	} else if meta.FindStatusCondition(installation.Status.Conditions, "NodeLevelActionsAllowed") != nil {
+		before := installation.DeepCopy()
+		meta.RemoveStatusCondition(&installation.Status.Conditions, "NodeLevelActionsAllowed")
+		if err := r.Status().Patch(ctx, &installation, client.MergeFrom(before)); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	// The operator's default adapters join the installation's own list in
 	// memory only: they are validated and rendered with it, and never
 	// written back (this reconciler writes status, not spec).
@@ -127,6 +193,9 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 				fmt.Sprintf("reconcile TLS material while configuration is unlistable: %v", pkiErr))
 		}
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, nil, err)
+	}
+	if denied {
+		observeDeniedPlaybooks(installation.Name, playbooks)
 	}
 	snapshot, err := CompileSnapshot(&installation, policies, playbooks, mappings, maintenance, nodeConfigs, acceleratorProfiles)
 	if err != nil {
