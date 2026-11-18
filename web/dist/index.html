@@ -1043,6 +1043,22 @@ function evidenceRows(d){
     ["Network resource", `${evidenceState(net.state)}${reason(net.reason)}<br>${res(net.resources)}${net.plugin ? "<br>" + comps([net.plugin]) : ""}`],
   ];
 }
+function trainingJobRows(detail){
+  const jobs = detail.affected_jobs;
+  if(!Array.isArray(jobs)) return [["Training jobs", "Unknown"]];
+  if(!jobs.length) return [["Training jobs", "None observed"]];
+  return jobs.map(job => {
+    const owner = job.owner;
+    const identity = owner ? esc(owner.kind) + " " + esc(job.namespace) + "/" + esc(owner.name) : "Unknown owner";
+    const recovery = job.recovery || {};
+    let progress = "Unknown";
+    if(recovery.progress_status === "not_confirmed") progress = "Not confirmed";
+    if(recovery.progress_status === "confirmed" && recovery.progress_confirmed_at) {
+      progress = "Confirmed at " + esc(recovery.progress_confirmed_at);
+    }
+    return ["Training job", identity + "<br>Infrastructure ready: " + esc(recovery.infrastructure_ready_at || "Unknown") + "<br>Training progress: " + progress];
+  });
+}
 async function renderDrawer(){
   if(!openIncident) return;
   let d;
@@ -1057,7 +1073,7 @@ async function renderDrawer(){
     ["Class", `<span class="mono">${esc(inc.class)}</span>`],
     ["Node", `<span class="mono">${esc(inc.target.node)}</span>`],
     ["Node conditions", nodeConditionsSummary(d)],
-  ].concat(evidenceRows(d)).concat([
+  ].concat(evidenceRows(d), trainingJobRows(d)).concat([
     ["GPU", inc.target.gpu_uuid ? `<span class="mono">${esc(inc.target.gpu_uuid)}</span>` : '<span class="dimmer">node-level</span>'],
     ["Playbook", `${esc(inc.playbook || "—")} <span class="dimmer">step ${inc.step_index}, attempt ${inc.attempt}</span>`],
     ["Mode", inc.dry_run ? "dry-run (no real side effects)" : "live"],
