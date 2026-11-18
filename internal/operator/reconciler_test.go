@@ -1169,3 +1169,43 @@ func TestReconcileRequeuesSilentlyOnUpdateConflict(t *testing.T) {
 		}
 	}
 }
+
+func TestReconcileOperatorPermissionForReboot(t *testing.T) {
+	ctx := context.Background()
+	scheme := newOperatorScheme(t)
+	root := testKubeNeuron()
+	root.UID = "fleet-uid"
+	root.Spec.Safety.NodeLevelActions = true
+	policies, books := testPolicyFixture()
+	book := &books[0]
+	book.Spec.Target = kubeneuronv1alpha1.PlaybookTargetNode
+	book.Spec.Steps[0].Action = kubeneuronv1alpha1.ActionReboot
+	book.Spec.Steps[0].Approval = kubeneuronv1alpha1.ApprovalRequired
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: root.Spec.Namespace}}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(root, book, &policies[0], &appsv1.Deployment{}, &appsv1.DaemonSet{}).
+		WithObjects(root, book, &policies[0], ns).Build()
+	r := &KubeNeuronReconciler{Client: c, Scheme: scheme}
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(root)}
+	for _, allowed := range []bool{false, true, false} {
+		r.AllowNodeLevelActions = allowed
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatal(err)
+		}
+		var current kubeneuronv1alpha1.KubeNeuron
+		if err := c.Get(ctx, req.NamespacedName, &current); err != nil {
+			t.Fatal(err)
+		}
+		denial := meta.FindStatusCondition(current.Status.Conditions, "NodeLevelActionsAllowed")
+		if !current.Spec.Safety.NodeLevelActions || (denial != nil) == allowed || (denial != nil && denial.Reason != "OperatorPermissionRequired") {
+			t.Fatalf("operator permission %v: unexpected installation status %#v", allowed, denial)
+		}
+		var agents appsv1.DaemonSet
+		if err := c.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: root.Name + "-agent"}, &agents); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(strings.Join(agents.Spec.Template.Spec.Containers[0].Args, " "), "--enable-node-level-actions"); got != allowed {
+			t.Fatalf("operator permission %v: agent enabled = %v", allowed, got)
+		}
+	}
+}
