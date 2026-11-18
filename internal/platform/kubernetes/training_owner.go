@@ -4,7 +4,9 @@ package kubernetes
 
 import (
 	"context"
+	batchv1 "k8s.io/api/batch/v1"
 	"sort"
+	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -77,7 +79,7 @@ func (p *Platform) TrainingWorkers(ctx context.Context, node string) ([]types.Tr
 		for _, ref := range chain {
 			owners = append(owners, types.TrainingOwner{APIVersion: ref.APIVersion, Kind: ref.Kind, Name: ref.Name, UID: string(ref.UID)})
 		}
-		workers = append(workers, types.TrainingWorker{Namespace: pod.Namespace, Pod: pod.Name, PodUID: string(pod.UID), Owners: owners, ControllerState: trainingControllerState(owner), OwnerUnknownReason: reason})
+		workers = append(workers, types.TrainingWorker{Namespace: pod.Namespace, Pod: pod.Name, PodUID: string(pod.UID), Owners: owners, CompletionIndex: jobCompletionIndex(pod, owner), ControllerState: trainingControllerState(owner), OwnerUnknownReason: reason})
 	}
 	sort.Slice(workers, func(i, j int) bool {
 		if workers[i].Namespace != workers[j].Namespace {
@@ -125,4 +127,20 @@ func trainingControllerState(owner *unstructured.Unstructured) string {
 		}
 	}
 	return "Unknown"
+}
+
+// jobCompletionIndex reads the Job controller's annotation only for the
+// verified Indexed Job and within the completion range it declared.
+func jobCompletionIndex(pod *corev1.Pod, job *unstructured.Unstructured) *int64 {
+	if job == nil || job.GetKind() != "Job" || job.GetAPIVersion() != "batch/v1" {
+		return nil
+	}
+	mode, _, _ := unstructured.NestedString(job.Object, "spec", "completionMode")
+	n, _, _ := unstructured.NestedInt64(job.Object, "spec", "completions")
+	raw := pod.Annotations[batchv1.JobCompletionIndexAnnotation]
+	index, err := strconv.ParseInt(raw, 10, 32)
+	if mode != "Indexed" || err != nil || index < 0 || index >= n || strconv.FormatInt(index, 10) != raw {
+		return nil
+	}
+	return &index
 }

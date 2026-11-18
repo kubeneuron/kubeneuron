@@ -93,3 +93,16 @@ func TestTrainingControllerState(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestIndexedJobCompletionIndex(t *testing.T) {
+	job := unstructuredObject(batchJobs, "Job", "training", "job", nil)
+	job.Object["spec"] = map[string]any{"completionMode": "Indexed", "completions": int64(2)}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}}}
+	for _, raw := range []string{"0", "1", "2", "-1", "", "01"} {
+		pod.Annotations["batch.kubernetes.io/job-completion-index"] = raw
+		got := jobCompletionIndex(pod, job)
+		if (got != nil) != (raw == "0" || raw == "1") {
+			t.Fatalf("index %q: %v", raw, got)
+		}
+	}
+}
