@@ -201,4 +201,12 @@ func TestRecoveryReportGPUHoursFromTheRecord(t *testing.T) {
 	if len(r.IncidentDetails) != 1 || r.IncidentDetails[0].DegradedGPUHours != 8 {
 		t.Fatalf("details %+v", r.IncidentDetails)
 	}
+
+	// With no record, the inventory when the report is read.
+	old := incident("old", types.ClassFellOffBus, "gpu-1", "", types.StateResolved, at(to, -10), at(to, -9))
+	incidents = []*types.Incident{old}
+	r = aggregateRecoveryOf(incidents, inv, allRemediated(incidents), to.Add(-24*time.Hour), to, 4*time.Hour)
+	if r.RecoveredGPUHours != 4 || r.SavingsEstimate == nil || r.SavingsEstimate.GPUHoursSaved != 12 || r.DeviceCountUnknown == nil {
+		t.Fatalf("no record: recovered %v saved %+v unknown %+v", r.RecoveredGPUHours, r.SavingsEstimate, r.DeviceCountUnknown)
+	}
 }
