@@ -722,8 +722,10 @@ spec:
                 properties:
                   alertmanager:
                     description: |-
-                      DependencySpec describes a dependency managed by its own upstream operator
-                      or supplied as an existing endpoint.
+                      Alertmanager names the user's Alertmanager. It is informational: the
+                      controller receives alerts on its own webhooks and never calls it. Left
+                      out, there is none; the Managed store sends metric alerts to the
+                      controller without one.
                     properties:
                       endpoint:
                         type: string
@@ -1252,19 +1254,17 @@ spec:
                         > 0)
                     - message: Disabled dependencies cannot set endpoint or secretRef
                       rule: self.mode != 'Disabled' || (!has(self.endpoint) && !has(self.secretRef))
-                required:
-                - alertmanager
                 type: object
                 x-kubernetes-validations:
                 - message: victoriaMetrics currently supports only External mode
                   rule: '!has(self.victoriaMetrics) || self.victoriaMetrics.mode ==
                     ''External'''
                 - message: alertmanager currently supports only External mode
-                  rule: self.alertmanager.mode == 'External'
+                  rule: '!has(self.alertmanager) || self.alertmanager.mode == ''External'''
                 - message: victoriaMetrics secretRef is not supported
                   rule: '!has(self.victoriaMetrics) || !has(self.victoriaMetrics.secretRef)'
                 - message: alertmanager secretRef is not supported
-                  rule: '!has(self.alertmanager.secretRef)'
+                  rule: '!has(self.alertmanager) || !has(self.alertmanager.secretRef)'
                 - message: victoriaMetrics is deprecated and replaced by store; set
                     only store
                   rule: '!has(self.victoriaMetrics) || !has(self.store)'

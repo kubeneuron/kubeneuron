@@ -14,7 +14,11 @@
 #     alert, also with collector.dcgmExporter.keepWorkloadLabels;
 #   - the OTLP path has no up for the agent and drops a target that is not
 #     Ready, so liveness is "series seen in the last hour but not in the
-#     last two minutes".
+#     last two minutes";
+#   - a liveness alert fires only while the controller's own series still
+#     arrive through the same Collector: when the whole path stops, every
+#     node falls silent at once, and that is one failure of the pipeline
+#     (ObservabilityCollectorReady), not one incident per node.
 
 groups:
   - name: gpu-hardware-alerts
@@ -72,11 +76,14 @@ groups:
     rules:
       - alert: GpuExporterDown
         expr: >-
-          max by (node) (up{"service.name"="dcgm-exporter"}) == 0
-          or (
-            max by (node) (present_over_time(DCGM_FI_DEV_GPU_TEMP[1h]))
-            unless max by (node) (present_over_time(DCGM_FI_DEV_GPU_TEMP[2m]))
+          (
+            max by (node) (up{"service.name"="dcgm-exporter"}) == 0
+            or (
+              max by (node) (present_over_time(DCGM_FI_DEV_GPU_TEMP[1h]))
+              unless max by (node) (present_over_time(DCGM_FI_DEV_GPU_TEMP[2m]))
+            )
           )
+          and on () count(present_over_time(kubeneuron_reconcile_seconds_count{"service.name"="kubeneuron-controller"}[2m])) > 0
         for: 5m
         labels:
           severity: warning
@@ -90,6 +97,7 @@ groups:
             unless max by ("k8s.node.name") (present_over_time(kubeneuron_agent_spool_depth{"service.name"="kubeneuron-agent"}[2m])),
             "node", "$1", "k8s.node.name", "(.+)"
           )
+          and on () count(present_over_time(kubeneuron_reconcile_seconds_count{"service.name"="kubeneuron-controller"}[2m])) > 0
         for: 3m
         labels:
           severity: warning

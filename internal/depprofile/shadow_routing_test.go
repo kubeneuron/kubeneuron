@@ -332,7 +332,8 @@ func TestRuleAndMatcherLabelNamesFollowPrometheusGrammar(t *testing.T) {
 	}
 	files := 0
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+		// *.test.yaml are vmalert-tool unit tests, not rules.
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") || strings.HasSuffix(e.Name(), ".test.yaml") {
 			continue
 		}
 		files++

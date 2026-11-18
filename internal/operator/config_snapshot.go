@@ -692,8 +692,10 @@ func validateRuntimeSupport(s *kubeneuronv1alpha1.KubeNeuron) error {
 	if err := validateObservability(s); err != nil {
 		return err
 	}
-	if err := validateDependency("alertmanager", s.Spec.Observability.Alertmanager); err != nil {
-		return err
+	if am := s.Spec.Observability.Alertmanager; am != nil {
+		if err := validateDependency("alertmanager", *am); err != nil {
+			return err
+		}
 	}
 	if err := validateArchive(s.Spec.Archive); err != nil {
 		return err

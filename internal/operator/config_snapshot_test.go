@@ -32,7 +32,7 @@ func testKubeNeuron() *kubeneuronv1alpha1.KubeNeuron {
 			},
 			Observability: kubeneuronv1alpha1.ObservabilitySpec{
 				VictoriaMetrics: &kubeneuronv1alpha1.DependencySpec{Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: "http://vm.example"},
-				Alertmanager:    kubeneuronv1alpha1.DependencySpec{Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: "http://am.example"},
+				Alertmanager:    &kubeneuronv1alpha1.DependencySpec{Mode: kubeneuronv1alpha1.IntegrationModeExternal, Endpoint: "http://am.example"},
 			},
 			Notifications: &kubeneuronv1alpha1.NotificationsSpec{
 				OperatorAPIToken: &kubeneuronv1alpha1.SecretReference{Name: "fleet-api-token"},
@@ -546,6 +546,14 @@ func TestValidateInstallationDependencyContract(t *testing.T) {
 	}{
 		{
 			name: "omitted archive",
+		},
+		{
+			// The installer writes no Alertmanager: the Managed store sends
+			// metric alerts to the controller itself.
+			name: "omitted alertmanager",
+			mutate: func(installation *kubeneuronv1alpha1.KubeNeuron) {
+				installation.Spec.Observability.Alertmanager = nil
+			},
 		},
 		{
 			name: "disabled archive",

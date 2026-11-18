@@ -30,9 +30,10 @@ set -euo pipefail
 #   --controller-image I / --agent-image I
 #                        image overrides (air-gapped / development)
 #   --observability managed|disabled
-#                        managed (default): the operator runs a Collector, a
-#                        metrics store, its alert rules and Grafana in the
-#                        namespace; disabled: none of them
+#                        managed: the operator runs a Collector, a metrics
+#                        store, its alert rules and Grafana in the namespace;
+#                        disabled: none of them. Omitted: managed for a new
+#                        installation, an existing one keeps its own
 #   --uninstall          remove the installation, retaining SQLite state
 #   --delete-data        also remove SQLite state and the Managed metrics
 #                        store's claim (confirmation required)
@@ -50,7 +51,7 @@ PROFILE=auto
 UNINSTALL=0
 DELETE_DATA=0
 ASSUME_YES=0
-OBSERVABILITY=managed
+OBSERVABILITY=""
 CONTROLLER_IMAGE=""
 AGENT_IMAGE=""
 
@@ -70,8 +71,9 @@ Flags:
   --profile PROFILE      auto (default), host-al2023, gpu-operator-ubuntu, or none
   --admin USER           panel username to create   (default: admin; "" skips)
   --controller-image I / --agent-image I   image overrides (air-gapped/dev)
-  --observability MODE   managed (default): Collector, metrics store, alert rules
-                         and Grafana in the namespace; disabled: none of them
+  --observability MODE   managed: Collector, metrics store, alert rules and Grafana
+                         in the namespace; disabled: none of them. Omitted: managed
+                         for a new installation; an existing one keeps its own
   --uninstall            remove this installation; retain SQLite state and metrics by default
   --delete-data          with --uninstall: also delete the SQLite PVC with the audit
                          data and the Managed metrics store's PVC
@@ -107,7 +109,7 @@ die() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 [[ $NS =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#NS} -le 63 ]] || die "invalid namespace"
 
 case $OBSERVABILITY in
-managed|disabled) ;;
+''|managed|disabled) ;;
 *) die "unknown --observability $OBSERVABILITY (managed or disabled; for your own Collector or store see docs/observability.md)" ;;
 esac
 
@@ -765,11 +767,27 @@ EOF
 # Managed: the operator runs the Collector, the metrics store with its alert
 # rules, and Grafana. Detection from the agents and recovery never depend on
 # them. Your own Collector or store: set spec.observability by hand
-# (docs/observability.md).
-observability_mode=Managed
-if [[ $OBSERVABILITY == disabled ]]; then
-	observability_mode=Disabled
-	echo "  WARNING: --observability disabled: no metrics store, no dashboards, and no detection of the faults that reach KubeNeuron only as metric alerts (docs/observability.md)" >&2
+# (docs/observability.md). A re-run without --observability keeps what the
+# existing installation has, an External store and its Secret included.
+observability_yaml=""
+if [[ -z $OBSERVABILITY ]]; then
+	existing_observability=$(kubectl get kubeneuron "$NAME" --ignore-not-found -o jsonpath='{.spec.observability}')
+	[[ -z $existing_observability ]] || observability_yaml="  observability: $existing_observability"
+	OBSERVABILITY=managed
+fi
+if [[ -z $observability_yaml ]]; then
+	observability_mode=Managed
+	if [[ $OBSERVABILITY == disabled ]]; then
+		observability_mode=Disabled
+		echo "  WARNING: --observability disabled: no metrics store, no dashboards, and no detection of the faults that reach KubeNeuron only as metric alerts (docs/observability.md)" >&2
+	fi
+	observability_yaml="  observability:
+    collector: {mode: $observability_mode}
+    store: {mode: $observability_mode}
+    grafana: {mode: $observability_mode}"
+fi
+if [[ $observability_yaml == *Managed* ]]; then
+	say "Installing third-party components, unmodified, pulled from their publishers: OpenTelemetry Collector, VictoriaMetrics, vmalert (Apache-2.0) and Grafana (AGPL-3.0). Use --observability disabled to skip them."
 fi
 
 kubectl apply -f - >/dev/null <<EOF
@@ -798,11 +816,7 @@ $auth_block
     type: SQLite
     sqlite:
       size: 5Gi
-  observability:
-    collector: {mode: $observability_mode}
-    store: {mode: $observability_mode}
-    grafana: {mode: $observability_mode}
-    alertmanager: {mode: External, endpoint: "http://alertmanager-unset.$NS.svc:9093"}
+$observability_yaml
   tls:
     issuer: Operator
     serverSecretRef: {name: $NAME-controller-tls}
@@ -853,7 +867,7 @@ cat <<EOF
                 (automation/CLI: kubeneuronctl --server http://127.0.0.1:8080 --token ...)
   Mode          DryRun — detection, workflows, approvals, audit; no node is touched.
 EOF
-if [[ $observability_mode == Managed ]]; then
+if [[ $(kubectl get kubeneuron "$NAME" -o jsonpath='{.spec.observability.grafana.mode}') == Managed ]]; then
 	cat <<EOF
   Dashboards    kubectl -n $NS port-forward service/$NAME-grafana 3000:3000
                 → http://127.0.0.1:3000 (user admin; password:

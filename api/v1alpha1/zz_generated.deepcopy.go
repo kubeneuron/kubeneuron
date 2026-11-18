@@ -1670,7 +1670,11 @@ func (in *ObservabilitySpec) DeepCopyInto(out *ObservabilitySpec) {
 		*out = new(DependencySpec)
 		(*in).DeepCopyInto(*out)
 	}
-	in.Alertmanager.DeepCopyInto(&out.Alertmanager)
+	if in.Alertmanager != nil {
+		in, out := &in.Alertmanager, &out.Alertmanager
+		*out = new(DependencySpec)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.Collector != nil {
 		in, out := &in.Collector, &out.Collector
 		*out = new(CollectorSpec)

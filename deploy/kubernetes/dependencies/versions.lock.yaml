@@ -85,6 +85,13 @@ images:
     repository: victoriametrics/vmalert
     tag: v1.147.0
     digest: sha256:45ea994098b77d56904f3d5d7cb2771effad9ddefb1d07d4ffa0c1da4c3e4c5c
+  # The rule tester hack/test-alert-rules.sh runs over the Managed store's
+  # alert rules; test only, never installed. Apache-2.0. Same release as
+  # victoriaMetricsAlert.
+  victoriaMetricsAlertTool:
+    repository: victoriametrics/vmalert-tool
+    tag: v1.147.0
+    digest: sha256:b89411be0487fbf0d966047dd76657c18f23522c4e547ae1ac757d644c52335a
   prometheusAlertmanager:
     repository: prom/alertmanager
     tag: v0.32.1

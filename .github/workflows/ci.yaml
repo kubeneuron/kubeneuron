@@ -272,6 +272,9 @@ jobs:
       - name: Inputs pinned (actions by commit SHA, images by digest)
         run: bash hack/verify-pins.sh
 
+      - name: Alert rule unit tests (vmalert-tool, pinned by digest)
+        run: make test-alert-rules
+
       - name: actionlint (workflow files stay valid)
         # From the module's own tool dependency, not @version: the fetch form
         # reaches the network on every run, so a proxy hiccup fails the lint

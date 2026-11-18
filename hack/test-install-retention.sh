@@ -77,6 +77,14 @@ spec:
   resources: {requests: {storage: 1Gi}}
 YAML
 other_metrics_uid=$("$KUBECTL_BIN" -n "$namespace" get pvc "$name-b-metrics-store" -o jsonpath='{.metadata.uid}')
+# A re-run without --observability keeps the user's metrics path: here an
+# External store, which must not turn back into Managed.
+"$KUBECTL_BIN" patch kubeneuron "$name" --type merge \
+	-p '{"spec":{"observability":{"store":{"mode":"External","endpoint":"http://metrics.example.invalid:8428/opentelemetry"},"grafana":{"mode":"Disabled"}}}}' >/dev/null
+install
+[[ $("$KUBECTL_BIN" get kubeneuron "$name" -o jsonpath='{.spec.observability.store.mode}/{.spec.observability.store.endpoint}/{.spec.observability.grafana.mode}') == External/http://metrics.example.invalid:8428/opentelemetry/Disabled ]] ||
+	fail "a re-run without --observability changed the installation's metrics path"
+[[ -z $("$KUBECTL_BIN" get kubeneuron "$name" -o jsonpath='{.spec.observability.alertmanager}') ]] || fail "installer wrote an Alertmanager"
 connect_api
 "$KUBECTL_BIN" wait "kubeneuron/$name" --for='jsonpath={.status.conditions[?(@.type=="GPUVisibility")].reason}=NoGPUResource' --timeout=180s
 [[ -z $("$KUBECTL_BIN" get kubeneuron "$name" -o 'jsonpath={.status.conditions[?(@.type=="ResetAvailable")].type}') ]] || fail "reset condition present with node actions disabled"

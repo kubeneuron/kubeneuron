@@ -24,8 +24,17 @@ and `grafana` all `Managed`, so the operator runs all four parts in the
 installation namespace. An installation created without these blocks, or
 upgraded from a release that had none, keeps them `Disabled`: an upgrade
 never starts a Collector, a store or Grafana by itself. Re-running the
-installer on an existing installation writes `Managed`; pass
-`--observability disabled` to keep the stack off.
+installer without `--observability` leaves an existing installation's
+`observability` block as it is, External endpoints and Secret references
+included; only a new installation gets `Managed` by default. An explicit
+`--observability managed` or `--observability disabled` always applies.
+Before it applies anything Managed, the installer prints: "Installing
+third-party components, unmodified, pulled from their publishers:
+OpenTelemetry Collector, VictoriaMetrics, vmalert (Apache-2.0) and Grafana
+(AGPL-3.0). Use --observability disabled to skip them."
+`spec.observability.alertmanager` is optional and informational: absent
+means none, and the Managed store sends its alerts to the controller
+without one.
 
 ## The three contracts
 
@@ -97,7 +106,7 @@ alert.
 
 | What stops | What you lose | What keeps working |
 |---|---|---|
-| Collector | new metrics; after 3 to 5 minutes every node opens an `agent-down` and an `exporter-down` incident, which only record and notify | detection from the agents, recovery, approvals, audit |
+| Collector | new metrics; `ObservabilityCollectorReady` shows the loss. No incident opens: the liveness alerts fire only while the controller's own series still reaches the store, and it comes through the same Collector | detection from the agents, recovery, approvals, audit |
 | Metrics store | dashboards and the six metric-alert classes | detection from the agents, recovery, approvals, audit |
 | vmalert | the `kubeneuron_gpu_*` series the GPU dashboards read, and the six metric-alert classes; `ObservabilityRulesReady` turns `False` | detection from the agents, recovery, approvals, audit |
 | Grafana | dashboards | everything else |

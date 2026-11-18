@@ -754,9 +754,9 @@ type DependencySpec struct {
 // upgrade never deploys anything on its own; the chart and the samples write
 // Managed for new installations.
 // +kubebuilder:validation:XValidation:rule="!has(self.victoriaMetrics) || self.victoriaMetrics.mode == 'External'",message="victoriaMetrics currently supports only External mode"
-// +kubebuilder:validation:XValidation:rule="self.alertmanager.mode == 'External'",message="alertmanager currently supports only External mode"
+// +kubebuilder:validation:XValidation:rule="!has(self.alertmanager) || self.alertmanager.mode == 'External'",message="alertmanager currently supports only External mode"
 // +kubebuilder:validation:XValidation:rule="!has(self.victoriaMetrics) || !has(self.victoriaMetrics.secretRef)",message="victoriaMetrics secretRef is not supported"
-// +kubebuilder:validation:XValidation:rule="!has(self.alertmanager.secretRef)",message="alertmanager secretRef is not supported"
+// +kubebuilder:validation:XValidation:rule="!has(self.alertmanager) || !has(self.alertmanager.secretRef)",message="alertmanager secretRef is not supported"
 // +kubebuilder:validation:XValidation:rule="!has(self.victoriaMetrics) || !has(self.store)",message="victoriaMetrics is deprecated and replaced by store; set only store"
 // +kubebuilder:validation:XValidation:rule="!has(self.collector) || self.collector.mode != 'External' || !has(self.store) || self.store.mode != 'Managed'",message="an external collector routes metrics itself: store cannot be Managed"
 // +kubebuilder:validation:XValidation:rule="!has(self.grafana) || self.grafana.mode != 'Managed' || (has(self.store) && self.store.mode != 'Disabled')",message="a Managed grafana needs a Managed or External store to read"
@@ -768,7 +768,12 @@ type ObservabilitySpec struct {
 	// store the collector drops what it receives.
 	// +optional
 	VictoriaMetrics *DependencySpec `json:"victoriaMetrics,omitempty"`
-	Alertmanager    DependencySpec  `json:"alertmanager"`
+	// Alertmanager names the user's Alertmanager. It is informational: the
+	// controller receives alerts on its own webhooks and never calls it. Left
+	// out, there is none; the Managed store sends metric alerts to the
+	// controller without one.
+	// +optional
+	Alertmanager *DependencySpec `json:"alertmanager,omitempty"`
 	// Collector receives OTLP over HTTP from the controller, the agents and
 	// the operator, and sends it to the store. Managed runs an OpenTelemetry
 	// Collector in the installation namespace; External points the

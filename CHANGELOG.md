@@ -13,7 +13,11 @@ API is `v1alpha1`.
 
 - **The installer runs the metrics path.** `deploy/install.sh` writes
   `spec.observability` with the Collector, the metrics store and Grafana
-  `Managed`; `--observability disabled` leaves them off. `--uninstall`
+  `Managed` for a new installation, after naming the third-party
+  components it pulls; `--observability disabled` leaves them off. A
+  re-run without `--observability` keeps an existing installation's
+  block, External endpoints and Secret references included.
+  `spec.observability.alertmanager` is now optional: absent means none. `--uninstall`
   keeps the metrics store's claim and prints how to erase it;
   `--uninstall --delete-data` deletes it too, only when it is labelled as
   this installation's. An installation without these blocks, including one
@@ -29,7 +33,10 @@ API is `v1alpha1`.
   Alertmanager API v2 body, the webhook bearer token): thermal, power,
   remapped-row budget, PCIe replays, a dead dcgm-exporter and a silent
   agent open incidents without an Alertmanager. The rules are plain PromQL
-  and aggregate away the workload labels. `AlertDetectionConfigured`
+  and aggregate away the workload labels. The two liveness alerts fire
+  only while the controller's own series still reaches the store, so a
+  Collector outage opens no incident per node; `make test-alert-rules`
+  checks both cases with vmalert-tool. `AlertDetectionConfigured`
   reports whether metric alerts reach the controller; with an External
   store it turns `True` when the controller accepts the first alert, which
   it records as `firstAlertAcceptedAt` in the inventory summary.

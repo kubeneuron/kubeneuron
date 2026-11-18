@@ -1,0 +1,80 @@
+# Unit tests for the liveness alerts in gpu-alert-rules.yaml, run by
+# hack/test-alert-rules.sh with vmalert-tool. One silent node is an alert;
+# the whole path falling silent, the controller's own series included, is
+# none: that is the Collector, not the nodes.
+rule_files:
+  - gpu-alert-rules.yaml
+
+evaluation_interval: 30s
+
+tests:
+  - name: one silent node opens agent-down and exporter-down for it only
+    interval: 30s
+    input_series:
+      - series: 'kubeneuron_reconcile_seconds_count{"service.name"="kubeneuron-controller"}'
+        values: "1+1x60"
+      - series: 'kubeneuron_agent_spool_depth{"service.name"="kubeneuron-agent","k8s.node.name"="n1"}'
+        values: "0x60"
+      - series: 'kubeneuron_agent_spool_depth{"service.name"="kubeneuron-agent","k8s.node.name"="n2"}'
+        values: "0x20"
+      - series: 'up{"service.name"="dcgm-exporter",node="n1"}'
+        values: "1x60"
+      - series: 'up{"service.name"="dcgm-exporter",node="n2"}'
+        values: "1x20"
+      - series: 'DCGM_FI_DEV_GPU_TEMP{node="n1",gpu="0",UUID="GPU-1"}'
+        values: "40x60"
+      - series: 'DCGM_FI_DEV_GPU_TEMP{node="n2",gpu="0",UUID="GPU-2"}'
+        values: "40x20"
+    alert_rule_test:
+      - eval_time: 25m
+        groupname: gpu-liveness-alerts
+        alertname: KubeNeuronAgentDown
+        exp_alerts:
+          - exp_labels:
+              alertname: KubeNeuronAgentDown
+              alertgroup: gpu-liveness-alerts
+              severity: warning
+              node: n2
+              k8s.node.name: n2
+            exp_annotations:
+              summary: kubeneuron-agent down on n2
+              description: "No data from the node's agent for 5m: KubeNeuron records it and runs no step on that node."
+      - eval_time: 25m
+        groupname: gpu-liveness-alerts
+        alertname: GpuExporterDown
+        exp_alerts:
+          - exp_labels:
+              alertname: GpuExporterDown
+              alertgroup: gpu-liveness-alerts
+              severity: warning
+              node: n2
+            exp_annotations:
+              summary: dcgm-exporter down on n2
+              description: "No GPU metrics for 5m: a monitoring gap, not a GPU fault. KubeNeuron records it and runs no step; check the exporter and the node."
+
+  - name: the whole path falling silent opens nothing
+    interval: 30s
+    input_series:
+      - series: 'kubeneuron_reconcile_seconds_count{"service.name"="kubeneuron-controller"}'
+        values: "1+1x20"
+      - series: 'kubeneuron_agent_spool_depth{"service.name"="kubeneuron-agent","k8s.node.name"="n1"}'
+        values: "0x20"
+      - series: 'kubeneuron_agent_spool_depth{"service.name"="kubeneuron-agent","k8s.node.name"="n2"}'
+        values: "0x20"
+      - series: 'up{"service.name"="dcgm-exporter",node="n1"}'
+        values: "1x20"
+      - series: 'up{"service.name"="dcgm-exporter",node="n2"}'
+        values: "1x20"
+      - series: 'DCGM_FI_DEV_GPU_TEMP{node="n1",gpu="0",UUID="GPU-1"}'
+        values: "40x20"
+      - series: 'DCGM_FI_DEV_GPU_TEMP{node="n2",gpu="0",UUID="GPU-2"}'
+        values: "40x20"
+    alert_rule_test:
+      - eval_time: 25m
+        groupname: gpu-liveness-alerts
+        alertname: KubeNeuronAgentDown
+        exp_alerts: []
+      - eval_time: 25m
+        groupname: gpu-liveness-alerts
+        alertname: GpuExporterDown
+        exp_alerts: []

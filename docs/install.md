@@ -73,7 +73,8 @@ operator; see [Metrics path](#metrics-path-specobservability).
   `configs/vmalert/gpu-alert-rules.yaml` and sends what fires to the
   controller (`/api/v1/webhooks/vmalert`, the Alertmanager API v2 body),
   with the webhook token from `notifications.webhookToken` as a bearer
-  header read from a file, never in the URL; no Alertmanager is installed.
+  header read from a file, never in the URL; no Alertmanager is installed,
+  and `spec.observability.alertmanager` is optional (absent means none).
   The six classes, with the thresholds of the dependency profile:
 
   | Class | Alert | Fires when |
@@ -196,9 +197,13 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
     a readiness wait — then prints your sign-in credentials. It does not
     generate TLS material; the operator issues that itself. It is the fastest path to a working
     DryRun installation; return to this page for production TLS,
-    notifications, and real playbooks. It writes the whole metrics path as
-    `Managed` (see [Observability](observability.md));
-    `--observability disabled` leaves it off. `--uninstall` removes the
+    notifications, and real playbooks. For a new installation it writes the
+    whole metrics path as `Managed` (see [Observability](observability.md))
+    and first names the third-party components it pulls;
+    `--observability disabled` leaves it off. A re-run without
+    `--observability` keeps an existing installation's `observability`
+    block, External endpoints and Secret references included; an explicit
+    flag always applies. `--uninstall` removes the
     installation while retaining SQLite state and the metrics store's claim;
     `--uninstall --delete-data` explicitly removes both after confirmation.
     Reinstall with the same name, namespace and storage settings to reuse it.

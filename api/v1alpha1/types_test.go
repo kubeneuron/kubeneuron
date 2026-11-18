@@ -433,3 +433,30 @@ func TestGeneratedKubeNeuronCRDImpactPreviewIsOptInAndBounded(t *testing.T) {
 		}
 	}
 }
+
+// The installer writes no Alertmanager: the Managed store delivers metric
+// alerts to the controller without one. The field stays optional, and its
+// rules hold only when it is set.
+func TestGeneratedKubeNeuronCRDAlertmanagerIsOptional(t *testing.T) {
+	data, err := os.ReadFile("../../config/crd/bases/kubeneuron.io_kubeneurons.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crd map[string]any
+	if err := sigyaml.Unmarshal(data, &crd); err != nil {
+		t.Fatalf("parse generated CRD: %v", err)
+	}
+	observability := schemaProperty(t, servedSchema(t, crd), "spec", "observability")
+	if required, _ := observability["required"].([]any); slices.Contains(required, any("alertmanager")) {
+		t.Fatal("spec.observability must not require alertmanager")
+	}
+	rules := xValidations(t, observability)
+	for _, rule := range []string{
+		"!has(self.alertmanager) || self.alertmanager.mode == 'External'",
+		"!has(self.alertmanager) || !has(self.alertmanager.secretRef)",
+	} {
+		if _, ok := rules[rule]; !ok {
+			t.Errorf("spec.observability is missing the rule %q", rule)
+		}
+	}
+}
