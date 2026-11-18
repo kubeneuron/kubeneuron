@@ -118,6 +118,12 @@ func (c *Controller) previewImpactDurable(ctx context.Context, inc *types.Incide
 		in.TrainingWorkers = nil
 		in.AffectedJobsUnavailable = "SnapshotReadFailed"
 	}
+	if reader, ok := c.store.(interface {
+		TrainingCheckpointsAt(context.Context, string, time.Time) (map[string]time.Time, error)
+	}); ok && len(in.TrainingWorkers) > 0 {
+		in.CheckpointReceipts, err = reader.TrainingCheckpointsAt(roundCtx, inc.ID, in.ComputedAt)
+		in.CheckpointReadFailed = err != nil
+	}
 	if cp := in.Checkpoint; cp.Groups.Enabled {
 		in.Groups = &impact.GroupPolicy{MaxGroupSize: cp.Groups.MaxGroupSize, CrossNode: cp.Groups.CrossNode}
 		in.GroupTotals, in.GroupTruncated = c.previewGroupTotals(roundCtx, cp, workloads)

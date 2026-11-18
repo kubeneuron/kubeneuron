@@ -29,10 +29,18 @@ type TrainingWorker struct {
 // AffectedJob groups the workers of a verified controller in one namespace.
 // An unresolved worker has its own entry and retains the reported owner chain.
 type AffectedJob struct {
-	Recovery  TrainingRecoverySnapshot `json:"recovery"`
-	Namespace string                   `json:"namespace"`
-	Owner     *TrainingOwner           `json:"owner,omitempty"`
-	Workers   []TrainingWorker         `json:"workers"`
+	LastCheckpoint *CheckpointReceipt       `json:"last_checkpoint,omitempty"`
+	Recovery       TrainingRecoverySnapshot `json:"recovery"`
+	Namespace      string                   `json:"namespace"`
+	Owner          *TrainingOwner           `json:"owner,omitempty"`
+	Workers        []TrainingWorker         `json:"workers"`
+}
+
+// CheckpointReceipt describes an application report as of the preview time.
+type CheckpointReceipt struct {
+	ReceivedAt time.Time `json:"received_at"`
+	AgeSeconds int64     `json:"age_seconds"`
+	Source     string    `json:"source"`
 }
 
 func GroupAffectedJobs(workers []TrainingWorker) []AffectedJob {

@@ -77,6 +77,8 @@ type Policy struct {
 // Input is the snapshot Compute renders. The controller fills it under the
 // round's budget; Compute itself does no I/O.
 type Input struct {
+	CheckpointReceipts      map[string]time.Time
+	CheckpointReadFailed    bool
 	AffectedJobsUnavailable string
 	TrainingWorkers         []types.TrainingWorker
 	IncidentID              string
@@ -256,6 +258,19 @@ func Compute(in Input) Preview {
 		},
 		Limits:   LimitsView{MaxItems: maxItems},
 		Warnings: []string{},
+	}
+	if in.CheckpointReadFailed {
+		p.Warnings = append(p.Warnings, "CheckpointReceiptsUnavailable")
+	}
+	for i := range p.AffectedJobs {
+		job := &p.AffectedJobs[i]
+		if job.Owner == nil {
+			continue
+		}
+		at, ok := in.CheckpointReceipts[job.Owner.UID]
+		if ok && !at.After(in.ComputedAt) {
+			job.LastCheckpoint = &types.CheckpointReceipt{ReceivedAt: at.UTC(), AgeSeconds: int64(in.ComputedAt.Sub(at) / time.Second), Source: "worker-report"}
+		}
 	}
 	if in.Checkpoint.Enabled {
 		p.CheckpointPolicy.DefaultWait = in.Checkpoint.DefaultWait.String()

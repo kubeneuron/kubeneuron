@@ -4,6 +4,7 @@ package impact
 
 import (
 	"testing"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -27,5 +28,17 @@ func TestUnreadableJobMapPreservesApprovalPreview(t *testing.T) {
 	in.Round++
 	if Compute(in).Digest == first.Digest {
 		t.Fatal("digest did not bind approval round")
+	}
+}
+
+func TestPreviewBindsCheckpointAge(t *testing.T) {
+	at := time.Now().UTC()
+	in := Input{ComputedAt: at, TrainingWorkers: []types.TrainingWorker{{Owners: []types.TrainingOwner{{UID: "job"}}}}}
+	before := Compute(in)
+	in.CheckpointReceipts = map[string]time.Time{"job": at.Add(-2 * time.Minute)}
+	after := Compute(in)
+	got := after.AffectedJobs[0].LastCheckpoint
+	if before.AffectedJobs[0].LastCheckpoint != nil || before.Digest == after.Digest || got == nil || got.AgeSeconds != 120 || !got.ReceivedAt.Equal(in.CheckpointReceipts["job"]) {
+		t.Fatalf("unexpected checkpoint receipt: %+v", got)
 	}
 }
