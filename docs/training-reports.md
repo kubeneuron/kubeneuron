@@ -28,7 +28,7 @@ Mount it read-only at `/var/run/training-report` in the worker container. Set `T
 
 ## Send a report from Python
 
-This function uses the Python standard library and can be called from a PyTorch training loop. It rereads the projected token on each call so Kubernetes can rotate it.
+This function uses the Python standard library and can be called from a training loop. It rereads the projected token on each call so Kubernetes can rotate it.
 
 ```python
 import http.client, json, os, ssl
@@ -54,7 +54,9 @@ In incident detail, each affected job has a `recovery.progress_status`. It is `u
 
 ## Use checkpoint age before drain
 
-Set `spec.automatic.maxCheckpointAgeMinutes` on the remediation policy to require a recent checkpoint from each affected job before automatic drain. Zero disables this check. For example, with a value of 10, a receipt exactly ten minutes old meets the requirement. An older receipt sends the drain for human approval. The approval preview shows the age at the time the preview was computed.
+A report is the worker's own statement. KubeNeuron does not check that the checkpoint exists, is complete or can be loaded.
+
+Set `spec.automatic.maxCheckpointAgeMinutes` on the remediation policy to require a recent checkpoint report from each affected job before automatic drain. Zero disables this check. For example, with a value of 10, a receipt exactly ten minutes old meets the requirement. An older receipt sends the drain for human approval. The approval preview shows the age at the time the preview was computed.
 
 When the job owner or checkpoint age is unknown, the default is human approval. Set `spec.automatic.allowUnknownCheckpoint: true` to let automatic drain proceed in that case. A known stale checkpoint still requires approval. A storage read error also requires approval.
 

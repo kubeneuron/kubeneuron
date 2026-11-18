@@ -29,6 +29,7 @@ Each live-cloud entry applies only to the path and run shown.
 | Accelerator health from Kubernetes nodes ([profiles](accelerator-health.md)) | Profile and controller tests with fake nodes | No | No. Experimental: signal names from vendor documentation, not validated on hardware |
 | TPU health from Google Cloud Monitoring (`infra_health`, Google Cloud Beta; opt-in, [how it is read](accelerator-health.md#tpu-health-from-google-cloud-monitoring-opt-in)) | State table, fake Cloud Monitoring API, REST client against a local test server, controller tests with fake nodes | No | No. Experimental, not validated against a live GKE cluster; whether Google writes the metric for GKE nodes is not confirmed |
 | Node conditions read and not acted on (AKS `XIDError`, `GPUECCError`, `GPUClockThrottling`, `UnhealthyNvidiaDevicePlugin`, `UnhealthyNvidiaDCGMServices`; EKS DCGM reasons) | Profile and controller tests with fake nodes | No | No. Counted as `ignored`, never an incident: none of them says enough to blame the node ([why, per condition](accelerator-health.md#read-not-acted-on)) |
+| Training reports | Authentication, ownership, storage and recovery timing tests | The harness sends checkpoint, resume and progress with a scripted worker's pod-bound token and checks the stored facts | No. Testing with a real training process is pending. |
 
 The 2026-10-18 hardware harness used v0.7.0 release source (`d06fcfa`) on EKS
 `g4dn.xlarge` / Tesla T4. Its observability phases predate the current Managed
