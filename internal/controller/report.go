@@ -272,6 +272,7 @@ func aggregateRecovery(incidents []*types.Incident, gpusPerNode map[string]int, 
 			DegradedGPUHours:         sim.DegradedGPUHours,
 			WouldRecoverGPUHours:     sim.RecoveredGPUHours,
 			MTTR:                     sim.MTTR,
+			AnnouncedInterruptions:   sim.AnnouncedInterruptions,
 		}
 	}
 	return report

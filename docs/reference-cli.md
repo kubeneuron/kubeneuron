@@ -90,7 +90,9 @@ Run `kubeneuronctl report --since 7d` for the trailing week. The controller
 uses its incident store and returns the exact window boundaries. Use
 `--json` for the API representation. The panel's Overview uses the same
 endpoint. Both show the node, vendor when known, and degraded time for each
-incident. An empty window displays “No incidents in this window.”
+incident. An empty window displays “No incidents in this window.” Interruptions
+announced by the cloud are left out of every number, and both say how many
+there were, in the dry-run simulation too.
 
 ### How we count
 

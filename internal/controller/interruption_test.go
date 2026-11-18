@@ -728,7 +728,7 @@ func TestInterruptionIsNotDegradation(t *testing.T) {
 	got := aggregateRecovery([]*types.Incident{
 		incident("i1", types.ClassCloudInterruption, "n", "", types.StateResolved, at(to, -20), at(to, -2)),
 		incident("i2", types.ClassFellOffBus, "n", "", types.StateResolved, at(to, -6), at(to, -4)),
-	}, map[string]int{"n": 8}, map[string]bool{"i1": true, "i2": true}, to.Add(-24*time.Hour), to)
+	}, map[string]int{"n": 8}, map[string]bool{"i1": true, "i2": true}, to.Add(-24*time.Hour), to, 0)
 	if got.AnnouncedInterruptions != 1 || got.Incidents != 1 || got.DegradedGPUHours != 16 || got.Recovered != 1 {
 		t.Fatalf("report %+v; want the interruption counted apart, with no GPU-hours", got)
 	}
@@ -745,6 +745,24 @@ func TestInterruptionIsNotDegradation(t *testing.T) {
 		if key.Class == string(types.ClassCloudInterruption) && n > 0 {
 			t.Fatalf("degraded gauge counts the interruption: %v", degraded)
 		}
+	}
+}
+
+// A window that holds only announced interruptions, live or dry-run, still
+// says how many it left out.
+func TestInterruptionOnlyWindowCountsTheInterruptions(t *testing.T) {
+	to := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	live := incident("i1", types.ClassCloudInterruption, "n", "", types.StateResolved, at(to, -20), at(to, -2))
+	got := aggregateRecovery([]*types.Incident{live}, map[string]int{"n": 8}, map[string]bool{"i1": true}, to.Add(-24*time.Hour), to, 0)
+	if got.AnnouncedInterruptions != 1 || got.Incidents != 0 || got.Simulated != nil {
+		t.Fatalf("live-only report %+v; want one announced interruption and nothing else", got)
+	}
+
+	dry := incident("i2", types.ClassCloudInterruption, "n", "", types.StateResolved, at(to, -20), at(to, -2))
+	dry.DryRun = true
+	got = aggregateRecovery([]*types.Incident{dry}, map[string]int{"n": 8}, map[string]bool{}, to.Add(-24*time.Hour), to, 0)
+	if got.AnnouncedInterruptions != 0 || got.Simulated == nil || got.Simulated.AnnouncedInterruptions != 1 || got.Simulated.Incidents != 0 {
+		t.Fatalf("dry-run-only report %+v simulated %+v; want the interruption counted in the simulation", got, got.Simulated)
 	}
 }
 

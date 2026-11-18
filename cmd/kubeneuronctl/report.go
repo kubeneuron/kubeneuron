@@ -99,6 +99,9 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		r.From.UTC().Format(time.RFC3339), r.To.UTC().Format(time.RFC3339), since)
 	if r.Incidents == 0 && r.DryRunExcluded == 0 && r.Simulated == nil {
 		_, err := fmt.Fprintln(out, "No incidents in this window.")
+		if err == nil {
+			printAnnouncedInterruptions(cmd, r.AnnouncedInterruptions)
+		}
 		return err
 	}
 	_, _ = fmt.Fprintf(out, "Recovered GPU-hours: %s\n", gpuHours(r.RecoveredGPUHours))
@@ -177,10 +180,7 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		_, _ = fmt.Fprintf(out, "\nnote: %d node-scoped incident(s) hit nodes with no registered GPU inventory\n"+
 			"and were charged 1 GPU each — the real degraded GPU-hours are higher.\n", r.AssumedSingleGPU)
 	}
-	if r.AnnouncedInterruptions > 0 {
-		_, _ = fmt.Fprintf(out, "\nnote: %d interruption(s) announced by the cloud are left out: the nodes were\n"+
-			"not degraded, and nothing was recovered.\n", r.AnnouncedInterruptions)
-	}
+	printAnnouncedInterruptions(cmd, r.AnnouncedInterruptions)
 	if r.DryRunExcluded > 0 {
 		// Say this loudly. On a fresh install every incident is dry-run, so a
 		// silent zero would read as "nothing happened" when the truth is
@@ -213,11 +213,25 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		if estimate := sim.WouldHaveSaved; estimate != nil {
 			_, _ = fmt.Fprintf(out, "  GPU-hours that would have been saved (estimate): %s (manual baseline %s; assumes simulated decision time equals recovery time)\n", gpuHours(estimate.GPUHoursSaved), seconds(estimate.ManualBaselineSeconds))
 		}
+		if sim.AnnouncedInterruptions > 0 {
+			_, _ = fmt.Fprintf(out, "  %d dry-run interruption(s) announced by the cloud are left out: the nodes were not degraded.\n", sim.AnnouncedInterruptions)
+		}
 		_, _ = fmt.Fprint(out, "\nThese are decisions, not repairs: every one of them reached RESOLVED against a\n"+
 			"synthetic success, so they measure what the policy would have chosen — which is\n"+
 			"what a dry-run pilot is for — and not what came back.\n")
 	}
 	return nil
+}
+
+// printAnnouncedInterruptions says how many announced cloud interruptions
+// the numbers leave out, so a window that held only those does not read as
+// a quiet one.
+func printAnnouncedInterruptions(cmd *cobra.Command, n int) {
+	if n == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "\nnote: %d interruption(s) announced by the cloud are left out: the nodes were\n"+
+		"not degraded, and nothing was recovered.\n", n)
 }
 
 func printReportIncidents(cmd *cobra.Command, rows []types.RecoveryIncident, total int, timeLabel string) error {

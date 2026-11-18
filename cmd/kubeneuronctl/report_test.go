@@ -106,6 +106,33 @@ func TestReportEmptyWindow(t *testing.T) {
 	}
 }
 
+func TestReportInterruptionOnlyWindow(t *testing.T) {
+	for name, tc := range map[string]struct {
+		report types.RecoveryReport
+		want   string
+	}{
+		"live": {
+			report: types.RecoveryReport{AnnouncedInterruptions: 2},
+			want:   "No incidents in this window.\n\nnote: 2 interruption(s) announced by the cloud are left out",
+		},
+		"dry-run": {
+			report: types.RecoveryReport{DryRunExcluded: 1, Simulated: &types.SimulatedRecovery{AnnouncedInterruptions: 1}},
+			want:   "1 dry-run interruption(s) announced by the cloud are left out",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(tc.report)
+			}))
+			defer server.Close()
+			out, err := runReport(t, server.URL, "report")
+			if err != nil || !strings.Contains(out, tc.want) {
+				t.Fatalf("report=%q err=%v; want %q", out, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestReportJSONShape(t *testing.T) {
 	var window string
 	server := reportServer(t, &window)

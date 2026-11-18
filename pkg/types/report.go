@@ -159,6 +159,9 @@ type SimulatedRecovery struct {
 	// MTTR here is how long the ladder TOOK to decide, not how long a repair
 	// took — no repair happened.
 	MTTR RecoveryLatency `json:"mttr"`
+	// AnnouncedInterruptions counts the dry-run cloud-interruption incidents
+	// whose interval overlaps the window, left out of every number above.
+	AnnouncedInterruptions int `json:"announced_interruptions,omitempty"`
 }
 
 // RecoveryLatency is a duration distribution computed from the raw incident
