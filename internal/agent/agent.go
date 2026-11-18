@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -226,13 +227,14 @@ type Agent struct {
 	journal *actionjournal.Journal
 	// journalLock remains held for the Agent lifetime. It ensures two local
 	// processes cannot concurrently act on the same durable journal.
-	journalLock *os.File
-	watcher     *kmsg.Watcher
-	health      *gpuhealth.Watcher
-	amdHealth   *amdhealth.Watcher
-	client      *http.Client
-	log         *slog.Logger
-	nvidia      *nvidiaObservation
+	journalLock          *os.File
+	missingKernelLogOnce sync.Once
+	watcher              *kmsg.Watcher
+	health               *gpuhealth.Watcher
+	amdHealth            *amdhealth.Watcher
+	client               *http.Client
+	log                  *slog.Logger
+	nvidia               *nvidiaObservation
 	// adapters holds one entry per enabled, registered accelerator adapter,
 	// in registry order, including adapters that failed to build (which fail
 	// closed for their own vendor only).
@@ -575,7 +577,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.reportSignalSources(ctx)
 	if err != nil {
 		// Non-fatal: the retry tick below keeps reopening the watcher.
-		a.log.Error("kmsg watcher unavailable, will retry", "err", err)
+		a.logKernelOpenError(err)
 	}
 
 	// The DCGM/nvidia-smi second source polls on its own schedule. It never
@@ -665,7 +667,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-retry.C:
 			if events == nil && ctx.Err() == nil {
 				if ch, err := a.watcher.Watch(ctx); err != nil {
-					a.log.Error("kmsg watcher reopen failed, will retry", "err", err)
+					a.logKernelOpenError(err)
 				} else {
 					a.log.Info("kmsg watcher reopened")
 					events = ch
@@ -682,6 +684,14 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.flushSpool(ctx)
 		}
 	}
+}
+
+func (a *Agent) logKernelOpenError(err error) {
+	if errors.Is(err, os.ErrNotExist) {
+		a.missingKernelLogOnce.Do(func() { a.log.Info("kernel log not mounted") })
+		return
+	}
+	a.log.Error("kmsg watcher unavailable, will retry", "err", err)
 }
 
 // reportKernelSourceAvailability exposes the loss of AMD kernel fault evidence
@@ -1482,6 +1492,9 @@ func (a *Agent) register(ctx context.Context) error {
 // reportSignalSources sends a full snapshot independently of the registration ack.
 func (a *Agent) reportSignalSources(ctx context.Context) {
 	rows := metrics.AgentSignalSources(a.cfg.NodeName)
+	if strings.TrimSpace(a.cfg.NVIDIAObservation.DCGMEndpoint) == "" {
+		rows = slices.DeleteFunc(rows, func(r types.AgentSignalSource) bool { return r.Source == "nvidia-dcgm" })
+	}
 	if len(rows) == 0 {
 		return
 	}

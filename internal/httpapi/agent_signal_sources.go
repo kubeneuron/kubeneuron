@@ -27,7 +27,7 @@ func (s *Server) handleAgentSignalSources(w http.ResponseWriter, r *http.Request
 		writeJSONDecodeError(w, "bad source report", err)
 		return
 	}
-	if len(rows) > 20 || rows == nil {
+	if len(rows) > 64 || rows == nil {
 		http.Error(w, "invalid source list", http.StatusBadRequest)
 		return
 	}
