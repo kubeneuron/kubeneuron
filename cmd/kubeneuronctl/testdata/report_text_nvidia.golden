@@ -4,7 +4,7 @@ incidents: 2 in window, 1 still open
 
 GPU — GPU-hours
   RESOURCE        INCIDENTS  DEGRADED  RECOVERED  SAVED (ESTIMATE)                   COST EQUIVALENT (ESTIMATE)
-  nvidia.com/gpu  1          20.0      10.0       1.0 GPU-hours, manual baseline 4h  rate not set
+  nvidia.com/gpu  2          20.0      8.0        3.0 GPU-hours, manual baseline 4h  rate not set
 
 GPU-hours saved (estimate): 3.0 (manual baseline 4h)
 degraded GPU-hours                   20.0

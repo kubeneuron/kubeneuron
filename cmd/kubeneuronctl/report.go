@@ -241,10 +241,10 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		// Say this loudly. On a fresh install every incident is dry-run, so a
 		// silent zero would read as "nothing happened" when the truth is
 		// "everything was watched and nothing was executed, by design".
-		_, _ = fmt.Fprintf(out, "\nnote: %d incident(s) excluded because their installation was in dry-run.\n"+
+		_, _ = fmt.Fprintf(out, "\nnote: %s excluded because their installation was in dry-run.\n"+
 			"Dry-run executes nothing, so it recovers nothing; these are not counted as capacity\n"+
 			"returned to service. Switch to executionMode: Enabled (confined) to measure real recovery.\n",
-			r.DryRunExcluded)
+			incidents(r.DryRunExcluded))
 	}
 	if sim := r.Simulated; sim != nil {
 		// Printed AFTER the note above and under its own heading, never

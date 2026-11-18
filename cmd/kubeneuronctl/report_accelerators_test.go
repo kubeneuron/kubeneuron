@@ -88,9 +88,11 @@ func TestRecoveryReportTextGolden(t *testing.T) {
 	to := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	baseline := 4 * 3600.0
 	p50 := 1800.0
-	resource := func(name string, degraded float64) types.AcceleratorResourceReport {
-		return types.AcceleratorResourceReport{Resource: name, Incidents: 1, DegradedHours: degraded, RecoveredHours: degraded / 2,
-			SavedEstimate: &types.AcceleratorSavedEstimate{Hours: 1, ManualBaselineSeconds: baseline}}
+	// The numbers add up to the report's: 2 incidents, 20 degraded, 8
+	// recovered, 3 saved.
+	resource := func(name string, n int, degraded, recovered, saved float64) types.AcceleratorResourceReport {
+		return types.AcceleratorResourceReport{Resource: name, Incidents: n, DegradedHours: degraded, RecoveredHours: recovered,
+			SavedEstimate: &types.AcceleratorSavedEstimate{Hours: saved, ManualBaselineSeconds: baseline}}
 	}
 	gpu := func(rs ...types.AcceleratorResourceReport) types.AcceleratorGroupReport {
 		return types.AcceleratorGroupReport{Group: types.AcceleratorGroupGPU, Unit: "GPU-hours", Resources: rs}
@@ -108,7 +110,7 @@ func TestRecoveryReportTextGolden(t *testing.T) {
 		}
 	}
 	tpuOnly := types.AcceleratorHours{Groups: []types.AcceleratorGroupReport{{Group: types.AcceleratorGroupTPU, Unit: "TPU chip-hours",
-		Resources: []types.AcceleratorResourceReport{resource("google.com/tpu", 12)}}}}
+		Resources: []types.AcceleratorResourceReport{resource("google.com/tpu", 1, 12, 6, 3)}}}}
 	dryRun := &types.RecoveryReport{From: to.Add(-168 * time.Hour), To: to, DryRunExcluded: 1, Classes: []types.RecoveryClassReport{}, Open: []types.RecoveryOpenIncident{},
 		Simulated: &types.SimulatedRecovery{Incidents: 1, WouldRecover: 1, DegradedGPUHours: 12, WouldRecoverGPUHours: 6,
 			MTTR:             types.RecoveryLatency{P50Seconds: p50, P90Seconds: p50},
@@ -119,10 +121,10 @@ func TestRecoveryReportTextGolden(t *testing.T) {
 		name string
 		r    *types.RecoveryReport
 	}{
-		{"mixed", report(types.AcceleratorHours{Groups: []types.AcceleratorGroupReport{gpu(resource("amd.com/gpu", 8), resource("nvidia.com/gpu", 12))}}, 2)},
+		{"mixed", report(types.AcceleratorHours{Groups: []types.AcceleratorGroupReport{gpu(resource("amd.com/gpu", 1, 8, 3, 1), resource("nvidia.com/gpu", 1, 12, 5, 2))}}, 2)},
 		{"node_hours", report(types.AcceleratorHours{DeviceCountUnknown: &types.DeviceCountUnknown{Incidents: 2, DegradedNodeHours: 6, RecoveredNodeHours: 4}}, 2)},
 		{"tpu_dry_run", dryRun},
-		{"nvidia", report(types.AcceleratorHours{Groups: []types.AcceleratorGroupReport{gpu(resource("nvidia.com/gpu", 20))}}, 2)},
+		{"nvidia", report(types.AcceleratorHours{Groups: []types.AcceleratorGroupReport{gpu(resource("nvidia.com/gpu", 2, 20, 8, 3))}}, 2)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
