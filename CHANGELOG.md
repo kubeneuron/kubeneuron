@@ -345,6 +345,8 @@ API is `v1alpha1`.
 
 - **AWS checks replacement permissions.** Replacement requires a successful
   permission probe for `ec2:TerminateInstances` on the pinned instance.
+  Replacement on EKS has not yet been validated against a live cluster.
+  Start in `DryRun` mode.
   Stop/start recycle stays disabled for managed groups. To inspect native repair for an EKS managed
   nodegroup, the controller role needs `eks:DescribeNodegroup`,
   `eks:ListUpdates`, `eks:DescribeUpdate`,
