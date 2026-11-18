@@ -18,6 +18,7 @@ type lostUpdateResponse struct {
 	t              *testing.T
 	tokens         map[string]bool
 	cluster, group string
+	replayErr      error
 }
 
 func (f *lostUpdateResponse) UpdateNodegroupConfig(_ context.Context, in *eks.UpdateNodegroupConfigInput, _ ...func(*eks.Options)) (*eks.UpdateNodegroupConfigOutput, error) {
@@ -34,7 +35,10 @@ func (f *lostUpdateResponse) UpdateNodegroupConfig(_ context.Context, in *eks.Up
 		f.tokens[token] = true
 		return nil, errors.New("response lost")
 	}
-	return &eks.UpdateNodegroupConfigOutput{Update: &et.Update{Id: sdk.String("update-id"), CreatedAt: sdk.Time(time.Unix(1000, 0))}}, nil
+	if f.replayErr != nil {
+		return nil, f.replayErr
+	}
+	return &eks.UpdateNodegroupConfigOutput{Update: &et.Update{Id: sdk.String("update-id"), Type: et.UpdateTypeConfigUpdate, Params: []et.UpdateParam{{Type: et.UpdateParamTypeDesiredSize, Value: sdk.String("3")}}, CreatedAt: sdk.Time(time.Unix(1000, 0))}}, nil
 }
 
 func TestRequestSuccessorReplaysLostResponse(t *testing.T) {

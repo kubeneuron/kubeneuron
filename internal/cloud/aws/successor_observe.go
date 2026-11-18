@@ -4,6 +4,7 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -52,7 +53,22 @@ func (p *managedProvider) PrepareSuccessor(ctx context.Context, s cloud.Successo
 		return p.readSuccessorPlan(ctx, s)
 	case cloud.SuccessorPlanned:
 		if err := p.verifySuccessorBaseline(ctx, s); err != nil {
-			return s, err
+			if !errors.Is(err, cloud.ErrNeedsOperator) {
+				return s, err
+			}
+			group, readErr := p.successorGroup(ctx, s)
+			if readErr != nil {
+				return s, readErr
+			}
+			before, parseErr := strconv.ParseInt(s.State["before"], 10, 32)
+			if parseErr != nil || group.DesiredCapacity == nil || int64(*group.DesiredCapacity) != before+1 || sdk.ToString(group.AutoScalingGroupARN) != s.State["asg_arn"] || s.State["asg_arn"] == "" {
+				return s, err
+			}
+			next, replayErr := sendScaleRequest(ctx, p.updater, p.cluster, s, true)
+			if replayErr != nil {
+				return s, fmt.Errorf("%w: EKS nodegroup %s ASG %s desired was %d, now %d: %v", cloud.ErrNeedsOperator, s.State["nodegroup"], s.Pool, before, *group.DesiredCapacity, replayErr)
+			}
+			return next, nil
 		}
 		return requestSuccessor(ctx, p.updater, p.cluster, s)
 	case cloud.SuccessorRequested:

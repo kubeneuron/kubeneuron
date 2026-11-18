@@ -35,3 +35,10 @@ alone lets Auto Scaling choose the instance to terminate.
 
 For the deployed replacement path and its IAM permissions, see
 [Operations](operations.md).
+
+The [EKS UpdateNodegroupConfig API reference](https://docs.aws.amazon.com/eks/latest/APIReference/API_UpdateNodegroupConfig.html)
+documents idempotency for a client request token and gives no retention period
+for this operation. When the original answer is lost and the pinned group already
+shows the requested size, the provider reuses the saved token and absolute size.
+It requires the returned update to predate or coincide with the retry and to
+report the requested desired size. A conflicting update requires inspection.

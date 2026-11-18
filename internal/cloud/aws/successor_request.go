@@ -10,6 +10,7 @@ import (
 	"maps"
 	"math"
 	"strconv"
+	"time"
 
 	sdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
@@ -24,12 +25,18 @@ type nodegroupUpdater interface {
 
 // requestSuccessor replays the original absolute target and EKS token after a lost response.
 func requestSuccessor(ctx context.Context, client nodegroupUpdater, cluster string, s cloud.Successor) (cloud.Successor, error) {
+	return sendScaleRequest(ctx, client, cluster, s, false)
+}
+
+// EKS documents token idempotency for UpdateNodegroupConfig without a retention period.
+func sendScaleRequest(ctx context.Context, client nodegroupUpdater, cluster string, s cloud.Successor, replay bool) (cloud.Successor, error) {
 	before, err := strconv.ParseInt(s.State["before"], 10, 32)
 	group := s.State["nodegroup"]
 	if err != nil || before < 1 || before >= math.MaxInt32 || group == "" || cluster == "" || cluster != s.State["cluster"] || s.Operation == "" || s.Phase != cloud.SuccessorPlanned {
 		return s, fmt.Errorf("%w: incomplete EKS scaling plan", cloud.ErrNeedsOperator)
 	}
 	token := fmt.Sprintf("%x", sha256.Sum256([]byte(s.Operation)))
+	started := time.Now()
 	out, err := client.UpdateNodegroupConfig(ctx, &eks.UpdateNodegroupConfigInput{ClusterName: &cluster, NodegroupName: &group, ClientRequestToken: &token, ScalingConfig: &et.NodegroupScalingConfig{DesiredSize: sdk.Int32(int32(before + 1))}})
 	if err != nil {
 		var api smithy.APIError
@@ -40,6 +47,12 @@ func requestSuccessor(ctx context.Context, client nodegroupUpdater, cluster stri
 	}
 	if out == nil || out.Update == nil || sdk.ToString(out.Update.Id) == "" {
 		return s, fmt.Errorf("EKS returned no scaling update ID")
+	}
+	if replay {
+		u := out.Update
+		if u.CreatedAt == nil || u.CreatedAt.After(started) || u.CreatedAt.Before(s.RequestedAt) || u.Type != et.UpdateTypeConfigUpdate || len(u.Params) != 1 || u.Params[0].Type != et.UpdateParamTypeDesiredSize || sdk.ToString(u.Params[0].Value) != strconv.FormatInt(before+1, 10) {
+			return s, fmt.Errorf("%w: EKS update %s does not confirm the original scaling request", cloud.ErrNeedsOperator, *u.Id)
+		}
 	}
 	// Direct SuccessorProvider callers may omit the controller's write-ahead
 	// timestamp. A replay must use the accepted update's original time.
