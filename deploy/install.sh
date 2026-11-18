@@ -504,7 +504,7 @@ create_pack() {
   local manifest=$1 pack=$2 ref installed_by installation label file
   local dir="$work/pack-parts" missing="$work/missing.yaml"
   mkdir -p "$dir"
-  kubectl get gpuplaybooks,gpuremediationpolicies -o go-template='{{range .items}}{{if eq .spec.kubeNeuronRef "'"$NAME"'"}}{{.kind}}/{{.metadata.name}} {{index .metadata.labels "kubeneuron.io/installed-by"}} {{index .metadata.labels "kubeneuron.io/installation"}} {{index .metadata.labels "kubeneuron.io/policy-pack"}}{{"\n"}}{{end}}{{end}}' > "$dir/ownership"
+  kubectl get gpuplaybooks,gpuremediationpolicies -o go-template='{{range .items}}{{if eq .spec.kubeNeuronRef "'"$NAME"'"}}{{.kind}}/{{.metadata.name}} {{with .metadata.labels}}{{index . "kubeneuron.io/installed-by"}} {{index . "kubeneuron.io/installation"}} {{index . "kubeneuron.io/policy-pack"}}{{else}}- - -{{end}}{{"\n"}}{{end}}{{end}}' > "$dir/ownership"
   while read -r ref installed_by installation label; do
     [[ $installed_by == install-sh && $installation == "$NAME" && $label == "$pack" ]] ||
       die "Conflicting recovery object $ref; check installation ownership and pack."

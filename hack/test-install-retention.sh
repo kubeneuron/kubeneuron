@@ -59,13 +59,17 @@ apiVersion: kubeneuron.io/v1alpha1
 kind: GPURemediationPolicy
 metadata:
   name: $name-cloud-xid-app
-  labels: {kubeneuron.io/installed-by: install-sh, kubeneuron.io/installation: $name, kubeneuron.io/policy-pack: cloud}
 spec:
   kubeNeuronRef: $name
   priority: 891
   match: {class: xid-app}
   playbookRef: $name-observe
 YAML
+if (install) >/dev/null 2>&1; then
+  fail "installer accepted an unlabelled recovery object"
+fi
+grep -Fq "Conflicting recovery object GPURemediationPolicy/$name-cloud-xid-app" "$work/install.log" || fail "missing ownership conflict diagnostic"
+"$KUBECTL_BIN" label gpuremediationpolicy "$name-cloud-xid-app" kubeneuron.io/installed-by=install-sh "kubeneuron.io/installation=$name" kubeneuron.io/policy-pack=cloud >/dev/null
 install
 [[ $("$KUBECTL_BIN" get gpuremediationpolicy "$name-cloud-xid-app" -o jsonpath='{.spec.priority}') == 891 ]] || fail "resume overwrote the existing policy"
 claim_uid=$("$KUBECTL_BIN" -n "$namespace" get pvc "$name-controller-state" -o jsonpath='{.metadata.uid}')
