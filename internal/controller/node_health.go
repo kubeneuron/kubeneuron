@@ -127,8 +127,16 @@ type healthSignals struct {
 	mu      sync.Mutex
 	pending map[string]*pendingHealth
 	latest  map[string]nodehealth.NodeHealth
-	// read are the sources read successfully in this leadership term.
-	read map[string]bool
+	// read are the sources read successfully in this leadership term, and
+	// readAt when each was last read.
+	read   map[string]bool
+	readAt map[string]time.Time
+	// failedAt is when a source's read last failed, while no later read
+	// succeeded.
+	failedAt map[string]time.Time
+	// draQuiet are the devices of each node the DRA read lists without a
+	// health signal: no taint, or a driver that does not watch them.
+	draQuiet map[string][]draQuietDevice
 	// cloudAt is when the cloud's monitoring was last read in this term,
 	// cloudNodes what it said and cloudEvery the wait before the next read.
 	cloudAt    time.Time
@@ -141,7 +149,7 @@ type healthSignals struct {
 func (h *healthSignals) reset() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.pending, h.latest, h.read = nil, nil, nil
+	h.pending, h.latest, h.read, h.readAt, h.failedAt, h.draQuiet = nil, nil, nil, nil, nil, nil
 	h.cloudAt, h.cloudNodes, h.cloudEvery = time.Time{}, nil, 0
 }
 
@@ -172,6 +180,12 @@ func (c *Controller) pollNodeHealth(ctx context.Context) {
 			if c.logOnce.first("health-read/" + src.name() + "/" + err.Error()) {
 				c.log.Warn("could not read accelerator health", "source", src.name(), "err", err)
 			}
+			c.health.mu.Lock()
+			if c.health.failedAt == nil {
+				c.health.failedAt = map[string]time.Time{}
+			}
+			c.health.failedAt[src.name()] = c.checkpointNowFunc()()
+			c.health.mu.Unlock()
 			continue
 		}
 		c.observeHealth(ctx, src.name(), nodes)
@@ -189,6 +203,11 @@ func (c *Controller) observeHealth(ctx context.Context, source string, nodes []n
 		c.health.read = map[string]bool{}
 	}
 	c.health.read[source] = true
+	if c.health.readAt == nil {
+		c.health.readAt = map[string]time.Time{}
+	}
+	c.health.readAt[source] = now
+	delete(c.health.failedAt, source)
 	latest := map[string]nodehealth.NodeHealth{}
 	for node, h := range c.health.latest {
 		if !strings.HasPrefix(node, prefix) {

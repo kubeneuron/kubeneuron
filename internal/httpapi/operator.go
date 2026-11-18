@@ -80,6 +80,12 @@ type AcceleratorReportOperatorBackend interface {
 	AcceleratorReports(ctx context.Context, node string) ([]*types.AgentAcceleratorReport, error)
 }
 
+// AcceleratorHealthBackend serves the elected leader's last read of every
+// accelerator health source.
+type AcceleratorHealthBackend interface {
+	AcceleratorHealth(ctx context.Context, node string) types.AcceleratorHealthView
+}
+
 // RecoveryReportBackend is an optional read-only extension that aggregates
 // the incident store into the capacity-owner view of a window. It is separate
 // from OperatorBackend for the same reason the accelerator reports are: a
@@ -416,6 +422,7 @@ func (s *Server) registerOperatorRoutes(mux routeMux) {
 	mux.HandleFunc("GET /api/v1/nodes/{node}/evidence", s.requireOperator(s.handleNodeEvidence))
 	mux.HandleFunc("GET /api/v1/nodes/{node}/health-checks", s.requireOperator(s.handleListNodeHealthChecks))
 	mux.HandleFunc("GET /api/v1/nodes/{node}/accelerators", s.requireOperator(s.handleAcceleratorReports))
+	mux.HandleFunc("GET "+types.AcceleratorHealthPath, s.requireOperator(s.handleAcceleratorHealth))
 	mux.HandleFunc("GET /api/v1/nodes/{node}/runtime-contract", s.requireOperator(s.handleNodeRuntimeContract))
 	mux.HandleFunc("GET /api/v1/nodes/{node}/topology", s.requireOperator(s.handleNodeTopology))
 	mux.HandleFunc("GET /api/v1/runtime-contracts/coverage", s.requireOperator(s.handleFleetRuntimeContractCoverage))
@@ -952,6 +959,22 @@ func (s *Server) handleAcceleratorReports(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, reports)
+}
+
+// handleAcceleratorHealth serves what the controller last read from every
+// accelerator health source. The read is held in the leader's memory, so a
+// standby has nothing to serve. ?node= is an exact node name.
+func (s *Server) handleAcceleratorHealth(w http.ResponseWriter, r *http.Request) {
+	backend, ok := s.operator.(AcceleratorHealthBackend)
+	if !ok {
+		http.Error(w, "accelerator health view unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !s.isLeader() {
+		http.Error(w, "standby: not the elected leader; the health read is held by the leader", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, backend.AcceleratorHealth(r.Context(), r.URL.Query().Get("node")))
 }
 
 const (

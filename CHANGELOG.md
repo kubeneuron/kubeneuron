@@ -11,6 +11,13 @@ API is `v1alpha1`.
 
 ### Added
 
+- **Accelerator health view (experimental).** `kubeneuronctl health` and
+  `GET /api/v1/accelerator-health` show what the leader last read from every
+  accelerator health source, per node, source, rule and device, with the
+  state, the reported reason and why: `no-signal` for a DRA device with no
+  health taint, `not-read-this-term` for a source not read since this
+  controller became leader, which holds the steps that take a node out of
+  service. Read-only.
 - **Accelerator health from Kubernetes nodes (experimental).** The controller
   reads the conditions and allocatable device counts that vendor and
   cloud components write to the Node of an accelerator node, through built-in

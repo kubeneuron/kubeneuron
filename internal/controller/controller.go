@@ -87,6 +87,9 @@ type Controller struct {
 	inventory inventorySync
 	// health is the confirmation state of the accelerator health signals.
 	health healthSignals
+	// agentSignalSources is what the agent of a node reports about the
+	// signal sources it reads; nil before agents report them.
+	agentSignalSources func(node string) []types.AgentSignalSource
 
 	// armingHoldSince records when each incident FIRST hit the
 	// arming-in-flight hold (in scope, agent freshly unarmed). The

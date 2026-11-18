@@ -61,13 +61,18 @@ func (s draHealthSource) read(ctx context.Context) ([]nodehealth.NodeHealth, err
 	exists := map[string]bool{}
 	published := map[string]bool{}
 	counts := map[[2]string]float64{}
+	quiet := map[string][]draQuietDevice{}
 	for _, snap := range snaps {
 		exists[snap.Node] = true
 		h, states := nodehealth.EvaluateDRA(snap)
 		for _, d := range snap.DRADevices {
 			published[snap.Node+"/"+nodehealth.DRADeviceKey(d)] = true
 			if profile := nodehealth.DRAProfile(d.Driver); profile != "" {
-				counts[[2]string{profile, states[nodehealth.DRADeviceKey(d)]}]++
+				state := states[nodehealth.DRADeviceKey(d)]
+				counts[[2]string{profile, state}]++
+				if state == nodehealth.DRANoHealthTaint || state == nodehealth.DRAUnmonitored {
+					quiet[snap.Node] = append(quiet[snap.Node], draQuietDevice{profile: profile, device: d.Device, state: state})
+				}
 			}
 		}
 		if len(h.Observations) > 0 {
@@ -78,6 +83,7 @@ func (s draHealthSource) read(ctx context.Context) ([]nodehealth.NodeHealth, err
 	// A pending fault of a device its existing Node did not publish in this
 	// read is held; that of a Node that is gone is not.
 	s.c.health.mu.Lock()
+	s.c.health.draQuiet = quiet
 	var held []string
 	for key := range s.c.health.pending {
 		if strings.HasPrefix(key, draHealthSourceName+"/") {
@@ -130,6 +136,9 @@ func (s draHealthSource) read(ctx context.Context) ([]nodehealth.NodeHealth, err
 	}
 	return out, nil
 }
+
+// draQuietDevice is a device the DRA read lists without a health signal.
+type draQuietDevice struct{ profile, device, state string }
 
 // draDeviceStates are the states the DRA device metric counts.
 var draDeviceStates = []string{

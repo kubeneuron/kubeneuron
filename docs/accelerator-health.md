@@ -249,6 +249,37 @@ run by hand; CI does not run it.
   slice's node pool, and KubeNeuron never recycles or replaces one host alone:
   that is not a recovery of the slice.
 
+## Seeing what was read
+
+`kubeneuronctl health [--node <node>] [--json]` (`GET /api/v1/accelerator-health?node=<node>`)
+shows what the elected leader last read from every source: one row per node,
+source, profile, rule and device, sorted in that order, with the state, the
+reason the source reported, KubeNeuron's explanation and when the source was
+read. `--node` is an exact node name. The view is held in the leader's memory
+and starts empty in every leadership term; a standby answers `503`. It reads
+nothing new and changes nothing.
+
+- **States.** `healthy`, `fault`, `unknown` and `ignored` are those of the
+  profiles above. `no-signal` is a DRA device that carries no taint, or that
+  its driver says it does not watch: the source says nothing about its health,
+  and that is not healthy. For the signal sources an agent reads on the node
+  (`source` `agent`, the rule naming the agent's source), `unknown` is one it
+  cannot read, with its reason, and `available` one it reads: a fault it reads
+  opens an incident, and none read is not health. An agent that reports no
+  sources, an older one or none at all, gives no data.
+- **Held steps.** A source not yet read in this term has one row with the
+  state `not-read-this-term`: it is the reason every step that takes a node
+  out of service is held on every node (see [Before the first read](#when-kubeneuron-only-observes)).
+  A source whose reads fail says so on that row; once read, a later failed read
+  adds an `unknown` row and the other rows stay those of the read before. A
+  node another repairer acts on has a row with the rule `other-repairer`.
+- **Text.** The explanation is KubeNeuron's own. What a source reports is
+  shown only as its reason, cut to 256 characters; a condition's message and a
+  cloud's error text are never shown. An agent's source name or reason is
+  shown only in the form of a code.
+- **Size.** At most 5000 rows; past that the answer has `truncated: true` and
+  the command says so.
+
 ## What only real hardware can show
 
 That each component writes these signals on these nodes, with these names and
