@@ -83,6 +83,11 @@ func (c *Controller) authorizeByPolicy(ctx context.Context, inc *types.Incident,
 	if reason := c.unqualifiedPair(ctx, inc, auto, labels); replaces && reason != "" {
 		return policyPark, reason
 	}
+	if step.Action == "platform.drain" && auto.MaxCheckpointAgeMinutes > 0 {
+		if reason := c.drainCheckpointReason(ctx, inc.ID, auto); reason != "" {
+			return policyPark, reason
+		}
+	}
 	if tripped, err := c.breakerTripped(ctx, pol); err != nil {
 		return policyPark, fmt.Sprintf("the circuit breaker state cannot be read (%v)", err)
 	} else if tripped {
@@ -338,4 +343,41 @@ func (c *Controller) logOnceStepHeld(inc *types.Incident, step *playbook.Step, p
 	if err := c.appendAudit(context.Background(), inc, "system", "recovery-held", step.Name+" held by policy "+pol.Name+": "+reason); err != nil {
 		c.log.Error("recovery-held audit append failed", "incident", inc.ID, "err", err)
 	}
+}
+
+func (c *Controller) drainCheckpointReason(ctx context.Context, id string, policy *recoverymode.Settings) string {
+	workers, err := c.IncidentTrainingWorkers(ctx, id)
+	if err != nil {
+		return "the affected training workers could not be read"
+	}
+	reader, ok := c.store.(interface {
+		TrainingCheckpointsAt(context.Context, string, time.Time) (map[string]time.Time, error)
+	})
+	if !ok {
+		return "checkpoint receipts could not be read"
+	}
+	now := c.checkpointNowFunc()()
+	receipts, err := reader.TrainingCheckpointsAt(ctx, id, now)
+	if err != nil {
+		return "checkpoint receipts could not be read"
+	}
+	unknown := workers == nil
+	for _, job := range types.GroupAffectedJobs(workers) {
+		if job.Owner == nil {
+			unknown = true
+			continue
+		}
+		at, found := receipts[job.Owner.UID]
+		if !found {
+			unknown = true
+			continue
+		}
+		if now.Sub(at).Minutes() > float64(policy.MaxCheckpointAgeMinutes) {
+			return "a reported checkpoint is older than the policy allows"
+		}
+	}
+	if unknown && !policy.AllowUnknownCheckpoint {
+		return "checkpoint age is unknown for affected training work"
+	}
+	return ""
 }

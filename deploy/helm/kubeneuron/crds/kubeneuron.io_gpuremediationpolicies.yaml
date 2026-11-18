@@ -82,6 +82,10 @@ spec:
                     - I understand that automatic mode drains and replaces nodes without
                       asking
                     type: string
+                  allowUnknownCheckpoint:
+                    description: AllowUnknownCheckpoint permits automatic drain when
+                      a worker or its checkpoint is unknown.
+                    type: boolean
                   checkpointWait:
                     description: |-
                       CheckpointWait is how long a step that stops work waits for the job's
@@ -98,6 +102,13 @@ spec:
                       Kubernetes API audit log shows who actually changed this object.
                     minLength: 1
                     type: string
+                  maxCheckpointAgeMinutes:
+                    description: |-
+                      MaxCheckpointAgeMinutes requires a recent worker-reported checkpoint for automatic drain.
+                      Zero disables the requirement.
+                    format: int32
+                    minimum: 0
+                    type: integer
                   maxConcurrentNodes:
                     format: int32
                     minimum: 1

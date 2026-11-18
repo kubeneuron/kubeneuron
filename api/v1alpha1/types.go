@@ -1322,6 +1322,12 @@ type AutomaticRecoverySpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	MinUnhealthyNodes int32 `json:"minUnhealthyNodes,omitempty"`
+	// MaxCheckpointAgeMinutes requires a recent worker-reported checkpoint for automatic drain.
+	// Zero disables the requirement.
+	// +kubebuilder:validation:Minimum=0
+	MaxCheckpointAgeMinutes int32 `json:"maxCheckpointAgeMinutes,omitempty"`
+	// AllowUnknownCheckpoint permits automatic drain when a worker or its checkpoint is unknown.
+	AllowUnknownCheckpoint bool `json:"allowUnknownCheckpoint,omitempty"`
 	// QualifiedProfiles names the accelerator runtime profiles on which this
 	// policy's problem class is qualified for automatic recovery. Together with
 	// the policy's class each one is a qualified pair. A node matching no

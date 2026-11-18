@@ -1424,6 +1424,8 @@ func compileRecoveryMode(policy *kubeneuronv1alpha1.GPURemediationPolicy) (recov
 			NodeCooldown:              cooldown,
 			MaxUnhealthyPercent:       int(auto.MaxUnhealthyPercent),
 			MinUnhealthyNodes:         int(auto.MinUnhealthyNodes),
+			MaxCheckpointAgeMinutes:   auto.MaxCheckpointAgeMinutes,
+			AllowUnknownCheckpoint:    auto.AllowUnknownCheckpoint,
 			QualifiedProfiles:         slices.Clone(auto.QualifiedProfiles),
 			Generation:                policy.Generation,
 			EnabledBy:                 auto.EnabledBy,

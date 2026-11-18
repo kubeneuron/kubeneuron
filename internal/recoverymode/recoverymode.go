@@ -135,7 +135,9 @@ type Settings struct {
 	MaxUnhealthyPercent int `yaml:"max_unhealthy_percent" json:"maxUnhealthyPercent"`
 	// MinUnhealthyNodes is the breaker's absolute floor (zero means
 	// DefaultMinUnhealthyNodes).
-	MinUnhealthyNodes int `yaml:"min_unhealthy_nodes,omitempty" json:"minUnhealthyNodes,omitempty"`
+	MinUnhealthyNodes       int   `yaml:"min_unhealthy_nodes,omitempty" json:"minUnhealthyNodes,omitempty"`
+	MaxCheckpointAgeMinutes int32 `yaml:"max_checkpoint_age_minutes,omitempty" json:"maxCheckpointAgeMinutes,omitempty"`
+	AllowUnknownCheckpoint  bool  `yaml:"allow_unknown_checkpoint,omitempty" json:"allowUnknownCheckpoint,omitempty"`
 	// QualifiedProfiles are the accelerator runtime profiles on which the
 	// policy's class is qualified for automatic recovery: each, with the
 	// class, is a qualified pair. A node on no listed profile is recovered
@@ -201,6 +203,9 @@ func Validate(mode Mode, auto *Settings) error {
 	}
 	if auto.MaxConcurrentNodesPerPool < 0 || auto.MaxConcurrentNodesPerPool > auto.MaxConcurrentNodes {
 		return fmt.Errorf("automatic: max_concurrent_nodes_per_pool must be between 0 and max_concurrent_nodes")
+	}
+	if auto.MaxCheckpointAgeMinutes < 0 {
+		return fmt.Errorf("maxCheckpointAgeMinutes must be nonnegative")
 	}
 	if auto.CheckpointWait < 0 {
 		return fmt.Errorf("automatic: checkpoint_wait must not be negative")
