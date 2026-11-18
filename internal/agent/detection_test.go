@@ -498,3 +498,17 @@ func TestRepeatedUnattributedFaultAtOneAddressStaysOneDetection(t *testing.T) {
 			got, first.PCIAddr, second.PCIAddr)
 	}
 }
+
+func TestExternalDCGMWithoutLocalSMI(t *testing.T) {
+	a, err := New(Config{
+		NodeName: "gpu-node", ControllerURL: "http://controller.invalid", AllowInsecureHTTP: true,
+		SpoolPath: filepath.Join(t.TempDir(), "spool"), ActionJournalPath: filepath.Join(t.TempDir(), "actions"),
+		NVIDIAObservation: NVIDIAObservationConfig{DCGMPath: "/bin/sh", DCGMEndpoint: "hostengine:5555"},
+	}, &nvml.Fake{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.health == nil || a.health.DCGMEndpoint != "hostengine:5555" || a.health.NVIDIASMIPath != "" || a.health.ResolveGPU != nil {
+		t.Fatal("expected external DCGM watcher without local SMI or synthetic GPU identity")
+	}
+}

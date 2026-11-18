@@ -402,14 +402,19 @@ func New(cfg Config, driver nvml.GPUDriver, log *slog.Logger) (*Agent, error) {
 	// suppress the new boot's XIDs; a boot-ID mismatch makes the watcher fail
 	// safe to tail-seek. Reuses the same host boot-ID source as registration.
 	watcher.BootID = agent.currentBootID()
-	// The DCGM/nvidia-smi health poll is a second, observation-only detection
-	// source beside kmsg. It runs only on a real nvidia-smi runtime: the Fake
-	// driver must never fabricate events, mirroring --require-real-driver, so a
-	// CPU-only install simply has no second source rather than crashing.
-	if smi, ok := driver.(*nvml.SMI); ok {
-		health := gpuhealth.New(cfg.NodeName, cfg.NVIDIAObservation.DCGMPath, cfg.NVIDIAObservation.DCGMEndpoint, smi.Path)
+	// An external hostengine can supply numeric XIDs without a local SMI driver.
+	// Only use local inventory to resolve a GPU when that driver is real.
+	smi, localSMI := driver.(*nvml.SMI)
+	var smiPath string
+	if localSMI {
+		smiPath = smi.Path
+	}
+	health := gpuhealth.New(cfg.NodeName, cfg.NVIDIAObservation.DCGMPath, cfg.NVIDIAObservation.DCGMEndpoint, smiPath)
+	if localSMI || (health.DCGMEndpoint != "" && health.DCGMPath != "") {
 		health.Logger = log
-		health.ResolveGPU = agent.resolveGPUByIndex
+		if localSMI {
+			health.ResolveGPU = agent.resolveGPUByIndex
+		}
 		// Persist which retained XIDs have already been emitted, beside the spool
 		// and kmsg cursor, boot-scoped like the cursor. Without this a routine
 		// agent restart re-emits DCGM's retained last-XID on every node and
