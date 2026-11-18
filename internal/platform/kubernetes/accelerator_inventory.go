@@ -43,7 +43,7 @@ func (p *Platform) NodeInventory(ctx context.Context) ([]types.Node, error) {
 	}
 	out := make([]types.Node, 0, len(nodes))
 	for _, n := range nodes {
-		out = append(out, types.Node{Name: n.Name, UID: string(n.UID), Labels: n.Labels, Devices: nodeDevices(n)})
+		out = append(out, types.Node{Name: n.Name, UID: string(n.UID), Labels: n.Labels, Devices: nodeDevices(n, false)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
@@ -60,7 +60,9 @@ func (p *Platform) NodeHealth(ctx context.Context) ([]types.NodeHealthSnapshot, 
 	readAt := time.Now()
 	var out []types.NodeHealthSnapshot
 	for _, n := range nodes {
-		devices := nodeDevices(n)
+		// A resource the node lists at zero is kept: a failed device can
+		// take the count down, and the node's signals must still be read.
+		devices := nodeDevices(n, true)
 		if len(devices) == 0 {
 			continue
 		}
@@ -102,11 +104,13 @@ func (p *Platform) allNodes(ctx context.Context) ([]*corev1.Node, error) {
 	return nodes, nil
 }
 
-func nodeDevices(n *corev1.Node) []types.DeviceCount {
+// nodeDevices are the accelerator resources the node lists; with keepZero,
+// also those it lists at zero.
+func nodeDevices(n *corev1.Node, keepZero bool) []types.DeviceCount {
 	var out []types.DeviceCount
 	add := func(name corev1.ResourceName, unit types.DeviceUnit) bool {
 		capacity, ok := n.Status.Capacity[name]
-		if !ok || capacity.Value() <= 0 {
+		if !ok || capacity.Value() < 0 || capacity.Value() == 0 && !keepZero {
 			return false
 		}
 		var allocatable int64

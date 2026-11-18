@@ -70,7 +70,7 @@ func (p *Platform) CloudAcceleratorHealth(ctx context.Context) ([]types.NodeHeal
 		}
 		// Only the cloud's read is evaluated here; the Node's own signals
 		// are the Kubernetes source's.
-		snap := types.NodeHealthSnapshot{Node: n.Name, UID: string(n.UID), Labels: n.Labels, Devices: nodeDevices(n),
+		snap := types.NodeHealthSnapshot{Node: n.Name, UID: string(n.UID), Labels: n.Labels, Devices: nodeDevices(n, true),
 			ReadAt: readAt, ProviderID: n.Spec.ProviderID, CreatedAt: n.CreationTimestamp.Time}
 		if id, err := p.recycler.InstanceID(snap.ProviderID); err == nil {
 			ids[snap.Node] = id

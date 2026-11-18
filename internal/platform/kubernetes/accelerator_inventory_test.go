@@ -88,3 +88,19 @@ func TestNodeHealthReadsAcceleratorNodes(t *testing.T) {
 		t.Fatalf("got %+v\nwant %+v", got[0], want)
 	}
 }
+
+// A node listing its accelerator at zero is read for health, not counted in
+// the inventory.
+func TestNodeHealthKeepsZeroCapacity(t *testing.T) {
+	q := resource.MustParse
+	tpu := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "tpu"}, Status: corev1.NodeStatus{
+		Capacity: corev1.ResourceList{"google.com/tpu": q("0")}, Allocatable: corev1.ResourceList{"google.com/tpu": q("0")}}}
+	p := &Platform{client: fake.NewSimpleClientset(tpu)}
+	got, err := p.NodeHealth(context.Background())
+	if err != nil || len(got) != 1 || len(got[0].Devices) != 1 || got[0].Devices[0].Capacity != 0 {
+		t.Fatalf("health %+v, %v: want tpu with google.com/tpu at zero", got, err)
+	}
+	if devs := nodeDevices(tpu, false); len(devs) != 0 {
+		t.Fatalf("inventory devices %+v, want none", devs)
+	}
+}

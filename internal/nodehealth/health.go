@@ -312,7 +312,7 @@ func (p Profile) devices(snap types.NodeHealthSnapshot) []types.DeviceCount {
 	var out []types.DeviceCount
 	for _, d := range snap.Devices {
 		for _, r := range p.Resources {
-			if d.Resource == r && d.Capacity > 0 {
+			if d.Resource == r {
 				out = append(out, d)
 			}
 		}
@@ -351,9 +351,14 @@ func (p Profile) evaluate(snap types.NodeHealthSnapshot, devices []types.DeviceC
 	for _, d := range devices {
 		o := Observation{Profile: p.Name, Rule: "allocatable", Key: "allocatable:" + d.Resource, Hold: unallocatableHold, Reads: confirmReads,
 			Reason: fmt.Sprintf("%d of %d allocatable", d.Allocatable, d.Capacity)}
-		if d.Allocatable < d.Capacity {
+		switch {
+		case d.Capacity <= 0:
+			// No count to compare: neither a fault nor healthy, so a
+			// pending unallocatable fault is held, not cleared.
+			o.State, o.Why = StateUnknown, "the node lists "+d.Resource+" at zero"
+		case d.Allocatable < d.Capacity:
 			o.State, o.Class = StateFault, types.ClassAcceleratorUnallocatable
-		} else {
+		default:
 			o.State = StateHealthy
 		}
 		out = append(out, o)

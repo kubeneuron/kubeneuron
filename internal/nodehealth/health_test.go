@@ -210,3 +210,17 @@ func TestMultiHostTPUSlice(t *testing.T) {
 		t.Fatalf("a single-host topology is a slice: %q", got)
 	}
 }
+
+// A failed device can take the node's count to zero: the profile still
+// applies, its conditions are read, and the count is unknown, not healthy.
+func TestZeroCapacityStillReadsTheProfile(t *testing.T) {
+	snap := snapshot("aws.amazon.com/neuron", cond("NeuronHealth", "True", "NeuronHasError_DMA_ERROR"))
+	snap.Devices[0].Capacity, snap.Devices[0].Allocatable = 0, 0
+	h := Evaluate(snap)
+	if !reflect.DeepEqual(h.Profiles, []string{"aws-neuron"}) || h.State != StateFault {
+		t.Fatalf("got %+v", h)
+	}
+	if o := find(t, h, "allocatable:aws.amazon.com/neuron"); o.State != StateUnknown || o.Class != "" {
+		t.Fatalf("allocatable at zero: %+v", o)
+	}
+}

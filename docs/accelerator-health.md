@@ -77,6 +77,11 @@ reason named in the observation: for example a Neuron node problem detector
 reason other than `NeuronHasError_DMA_ERROR`, or an XID the EKS table does
 not list.
 
+A node that lists its resource at zero (a failed device can take the count
+down) is still read with the profile: its conditions and taints as above,
+and its allocatable count as unknown, which neither confirms nor clears a
+pending `accelerator-unallocatable`.
+
 ### Read, not acted on
 
 These conditions and reasons are read and never open an incident. A node on which one is `True` is counted as `ignored` in
