@@ -86,9 +86,9 @@ func (c *Controller) AcceleratorHealth(_ context.Context, node string) types.Acc
 	}
 	c.health.mu.Unlock()
 
-	if c.agentSignalSources != nil {
+	if read := c.agentSourceReader(); read != nil {
 		for n := range nodes {
-			rows = append(rows, agentHealthRows(n, c.agentSignalSources(n), node != "")...)
+			rows = append(rows, agentHealthRows(n, read(n), node != "")...)
 		}
 	}
 
@@ -104,6 +104,24 @@ func (c *Controller) AcceleratorHealth(_ context.Context, node string) types.Acc
 		view.Rows = []types.AcceleratorHealthRow{}
 	}
 	return view
+}
+
+// agentSignalSourceReader is a controller that holds what the agents report
+// about their signal sources: all nodes for "", or the one named exactly.
+type agentSignalSourceReader interface {
+	AgentSignalSources(node string) []types.AgentSignalSource
+}
+
+// agentSourceReader reads the agents' signal sources, or is nil while the
+// controller holds none.
+func (c *Controller) agentSourceReader() func(string) []types.AgentSignalSource {
+	if c.agentSignalSources != nil {
+		return c.agentSignalSources
+	}
+	if r, ok := any(c).(agentSignalSourceReader); ok {
+		return r.AgentSignalSources
+	}
+	return nil
 }
 
 // healthRows are the rows of one node's read of one source: one for every

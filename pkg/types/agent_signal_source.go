@@ -4,14 +4,13 @@ package types
 
 import "time"
 
-// AgentSignalSource is whether the agent on a node can read one of its
-// accelerator signal sources. Available is not health: it says the source is
-// read, not that it reports no fault.
+// AgentSignalSource describes whether an agent can read a signal for a class.
+// Available describes the source and makes no assertion about device health.
 type AgentSignalSource struct {
 	Node      string       `json:"node"`
 	Source    string       `json:"source"`
-	Class     ProblemClass `json:"class,omitempty"`
+	Class     ProblemClass `json:"class"`
 	Available bool         `json:"available"`
 	Reason    string       `json:"reason,omitempty"`
-	ReadAt    time.Time    `json:"read_at,omitzero"`
+	ReadAt    time.Time    `json:"read_at"`
 }
