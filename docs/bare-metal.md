@@ -63,5 +63,5 @@ drain and EC2 instance termination. That run ended at termination. See the
   observation. A successful `verify.gpu_health` step checks actuator
   health; confirming physical recovery requires separate GPU evidence.
 - **Deployment limits.** The SSH actuator is a stub. The Kubernetes agent
-  runs privileged and shares the host PID namespace even when node-level
-  actions are disabled. See [Data and privacy](data-and-privacy.md).
+  runs privileged and shares the host PID namespace only when both the
+  operator and installation permit node-level actions. See [Data and privacy](data-and-privacy.md).

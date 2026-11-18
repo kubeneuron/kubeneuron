@@ -618,6 +618,12 @@ API is `v1alpha1`.
   Prometheus. A Go test also fails on a MetricsQL-only function in the
   rules or the dashboards.
 
+- Existing cloud agents with node-level actions disabled lose local kmsg access.
+  Numeric NVIDIA XIDs require DCGM field 230, which the shipped exporter profile
+  omits. Polling its last value can miss repeated XIDs and the `xid-app` threshold.
+  Without DCGM, numeric XIDs are unavailable. AMD kernel ring timeouts and PCIe
+  errors are unavailable. Accessible AMD SMI tooling still reports ECC and page retirement.
+
 - `kubeneuron_incidents_recovered_total` now requires an audited live
   remediation followed by verified resolution. Dashboards and alerts using
   this counter may show fewer recoveries after upgrade because manual and

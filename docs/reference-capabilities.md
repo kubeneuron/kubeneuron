@@ -9,6 +9,15 @@ Every cell below was derived by reading the code, not the roadmap. A cell that
 says *shipped* names the file that backs it. Where the code is weaker than a
 reader would assume, the note says so.
 
+## Agent signals with node-level actions disabled
+
+| Source | What the agent can observe |
+|---|---|
+| NVIDIA DCGM hostengine | Field 230 reports the most recent numeric XID. Repeated identical XIDs between polls may be missed, so an `xid-app` threshold may never be reached. The shipped exporter profile omits field 230. Without a readable kernel log or a reachable DCGM hostengine, numeric XIDs are unavailable. |
+| NVIDIA SMI | When available, successive samples can show a rise in volatile uncorrectable ECC errors or a transition to row-remap failure. Neither reading supplies a numeric XID. |
+| AMD kernel log | Without kernel log access, kernel ring timeouts (`driver-hang`) and kernel PCIe errors (`pcie`) are unavailable. |
+| AMD SMI | ECC and page retirement remain observable when the SMI tooling and devices are accessible. |
+
 ## Live cloud evidence
 
 The kind tests run on CPU-only Kubernetes nodes without GPUs or cloud API calls.

@@ -50,6 +50,10 @@ The remaining instructions apply to installations running v1.0.0-rc.1 or later.
 3. Check `kubectl get kubeneurons -o yaml` status conditions are all
    `Ready=True` — never start an upgrade from a degraded installation.
 
+## Unreleased cloud agent permissions
+
+On existing installations with node-level actions disabled, the replacement agent Pod loses access to `/dev/kmsg`. Numeric NVIDIA XIDs then depend on a reachable DCGM hostengine and field 230. The shipped exporter profile omits this field. Polling the last value can miss repeated identical XIDs and leave the `xid-app` threshold unmet. Without the hostengine, numeric XIDs are unavailable. AMD kernel ring timeouts and PCIe errors are also unavailable. ECC and page retirement can still be observed through accessible AMD SMI tooling. An unavailable source leaves the device's health unknown.
+
 ## Unreleased: automatic replacement notes
 
 - **Automatic replacement needs qualified profiles.** After the upgrade an

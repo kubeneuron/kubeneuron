@@ -4,7 +4,9 @@ KubeNeuron sends no usage data, metrics or reports to its authors and does not c
 
 ## Agent privileges
 
-The installed agent runs privileged and shares the host PID namespace, including in dry-run mode. It reads host kernel fault messages and uses host namespaces and tools for configured diagnostics and node actions. Dry-run controls remediation execution. It does not change the agent pod's permissions.
+With the default permissions, the agent runs without privilege or host PID access and drops all Linux capabilities. It keeps its spool, cursors and journal on one writable hostPath, `/var/lib/kube-neuron`, so the Pod Security `baseline` profile is not met. Explicitly configured host tooling can also mount read-only binary and library directories. The agent can poll a configured external DCGM hostengine without reading the host kernel log.
+
+The agent runs privileged and shares the host PID namespace only when both the operator and installation permit node-level actions. This also applies in DryRun, which controls execution of recovery steps.
 
 ## What is stored
 
