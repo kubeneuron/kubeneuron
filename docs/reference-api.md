@@ -158,7 +158,7 @@ replaces a node without approval only when the fault location is
 | `GET /api/v1/nodes/{node}` | one node's detail |
 | `GET /api/v1/nodes/{node}/accelerators` | latest per-vendor accelerator runtime reports |
 | `GET /api/v1/targets?port=<p>` | Prometheus `http_sd` target groups for registered nodes |
-| `GET /api/v1/report/recovery?window=<Go duration>` | recovery report aggregated from the incident store over a trailing window (default `168h`, max `8784h`): degraded and recovered GPU-hours, unattended share, MTTR by class, incidents still open. See [`kubeneuronctl report`](reference-cli.md#report--what-the-fleet-got-back) for what each number counts. A controller that cannot compute it answers `503`, never an empty report |
+| `GET /api/v1/report/recovery?window=<Go duration>` | recovery report aggregated from the incident store over a trailing window (default `168h`, max `8784h`): degraded GPU-hours, time to recover, incident details and optional savings estimates with the manual baseline. See [`kubeneuronctl report`](reference-cli.md#recovery-report) for what each number counts. A controller that cannot compute it answers `503`, never an empty report |
 
 ## Control
 

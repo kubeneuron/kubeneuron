@@ -30,7 +30,7 @@ import (
 func cmdReport() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "report",
-		Short: "Recovery report for a window: GPU-hours degraded, recovered, and unattended",
+		Short: "Show degraded GPU-hours, recovery times and optional savings estimates",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cl, err := newClient(cmd)
 			if err != nil {
@@ -110,7 +110,7 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 	}
 	w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintf(w, "degraded GPU-hours\t%s\n", gpuHours(r.DegradedGPUHours))
-	_, _ = fmt.Fprintf(w, "recovered GPU-hours\t%s\t%s of degraded\n",
+	_, _ = fmt.Fprintf(w, "degraded GPU-hours in remediated incidents\t%s\t%s of degraded\n",
 		gpuHours(r.RecoveredGPUHours), share(r.RecoveredGPUHours, r.DegradedGPUHours))
 	_, _ = fmt.Fprintf(w, "incidents recovered\t%d of %d\t%s\n",
 		r.Recovered, r.Incidents, share(float64(r.Recovered), float64(r.Incidents)))
@@ -122,7 +122,7 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		r.ObservedOnly, r.Incidents, share(float64(r.ObservedOnly), float64(r.Incidents)),
 		gpuHours(r.ObservedOnlyGPUHours))
 	_, _ = fmt.Fprintf(w, "target changed, recovery unverified\t%d\t(%s degraded)\n", r.Superseded, gpuHours(r.SupersededGPUHours))
-	_, _ = fmt.Fprintf(w, "MTTR (recovered, n=%d)\tp50 %s\tp90 %s\tmean %s\n",
+	_, _ = fmt.Fprintf(w, "Time to recover (n=%d)\tp50 %s\tp90 %s\tmean %s\n",
 		r.MTTR.Samples, seconds(r.MTTR.P50Seconds), seconds(r.MTTR.P90Seconds), seconds(r.MTTR.MeanSeconds))
 	if err := w.Flush(); err != nil {
 		return err
@@ -134,7 +134,7 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 	if len(r.Classes) > 0 {
 		_, _ = fmt.Fprintln(out, "\ntop problem classes by degraded GPU-hours:")
 		w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
-		_, _ = fmt.Fprintln(w, "CLASS\tINCIDENTS\tDEGRADED\tRECOVERED\tNOTHING DONE\tUNATTENDED\tMTTR P50\tMTTR P90")
+		_, _ = fmt.Fprintln(w, "CLASS\tINCIDENTS\tDEGRADED\tDEGRADED IN REMEDIATED INCIDENTS\tNOTHING DONE\tUNATTENDED\tMTTR P50\tMTTR P90")
 		for _, class := range r.Classes {
 			_, _ = fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%d\t%d\t%s\t%s\n",
 				class.Class, class.Incidents, gpuHours(class.DegradedGPUHours),
@@ -201,7 +201,7 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 			"  would recover         %d (%d without asking a human)\n"+
 			"  no ladder to run      %d   ← closed with no policy bound to the class\n"+
 			"  degraded GPU-hours    %s   ← real: the hardware was degraded this long\n"+
-			"  would recover         %s   ← hypothetical: no capacity was returned\n"+
+			"  degraded GPU-hours in simulated remediations  %s\n"+
 			"  ladder decision time  p50 %s  p90 %s\n",
 			sim.Incidents,
 			sim.WouldRecover, sim.WouldRecoverUnattended,

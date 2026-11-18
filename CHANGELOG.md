@@ -86,6 +86,12 @@ API is `v1alpha1`.
   (`cloud.RemoveFirstChecker`); the controller asks before the cordon and
   holds the step with the reason. AWS behaviour is unchanged.
 
+- **Recovery estimates in Overview and the CLI.** Set
+  `spec.manualRecoveryBaseline` to compare incident durations with your
+  team's manual recovery time. Each estimate includes the baseline. DryRun
+  results appear separately. Existing recovery report JSON fields remain
+  available for API clients.
+
 - **Cloud recovery pack on first install.** New installations use cloud policies
   in DryRun. Node-level policies require `--policy-pack bare-metal-alpha`
   (Alpha, not validated on real hardware). Repeat installs preserve existing policies.

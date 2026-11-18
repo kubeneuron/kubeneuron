@@ -16,6 +16,8 @@ the existing `kubeneuron_incidents`, `kubeneuron_degraded_gpus`,
 `kubeneuron_degraded_gpu_seconds_total` and related series below without
 renaming them.
 
+The panel and CLI compute period estimates from the incident store. See [how the recovery report counts GPU-hours](reference-cli.md#how-we-count).
+
 ## Controller
 
 | Series | Type | Labels | Meaning |

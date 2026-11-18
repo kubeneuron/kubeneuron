@@ -73,7 +73,7 @@ func TestReportTextOutputStatesWhatItCounts(t *testing.T) {
 	}
 	for _, want := range []string{
 		"degraded GPU-hours", "47.0",
-		"recovered GPU-hours", "34.0", "72.3%", // 34/47
+		"degraded GPU-hours in remediated incidents", "34.0", "72.3%", // 34/47
 		"incidents recovered", "2 of 4", "50.0%",
 		"without a human", "1 of 2",
 		"p50 2h0m0s", "p90 4h0m0s",
