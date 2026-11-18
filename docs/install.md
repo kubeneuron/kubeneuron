@@ -30,7 +30,8 @@ incident for the eligibility decision on its node.
 
 A repeat install preserves edited policies and reports missing cloud pack
 objects. On a fresh installation, `--policy-pack bare-metal-alpha` explicitly
-selects the node-level pack (Alpha, not validated on real hardware).
+selects the node-level pack. See [Bare metal (alpha)](bare-metal.md) for its
+prerequisites and hardware validation status.
 
 ## DCGM client
 

@@ -30,6 +30,7 @@ nav:
       - First run on Kubernetes: quickstart.md
       - From-source dry-run demo: developer-demo.md
       - Production install: install.md
+      - Bare metal (alpha): bare-metal.md
   - Operating:
       - Data and privacy: data-and-privacy.md
       - Observability: observability.md
