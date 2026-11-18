@@ -1329,9 +1329,14 @@ exercise_agent_authentication() {
 	local plaintext_code plaintext_rc no_token_code malformed_code wrong_audience_code wrong_sa_code
 	local valid_code mismatch_code event_code other_cert_code final_valid_code stale_code
 	local agent_local_port='' public_local_port='' agent_base=''
+	local training_port training_code installation_uid
 	local -a valid_tls=()
 	local pki_dir="$work_dir/pki"
 
+	"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type merge -p '{"spec":{"trainingReports":true}}'
+	wait_observed_generation "$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status "deployment/${ROOT_NAME}-controller" --timeout=180s
+	installation_uid=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.uid}')
 	agent_pod=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get pods \
 		-l "app.kubernetes.io/instance=${ROOT_NAME},app.kubernetes.io/component=agent" \
 		-o jsonpath='{.items[0].metadata.name}')
@@ -1369,14 +1374,15 @@ exercise_agent_authentication() {
 		public_local_port=
 		: >"$port_forward_log"
 		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
-			"service/${ROOT_NAME}-controller" ":${agentIngressPort}" ":${controllerPort}" \
+			"service/${ROOT_NAME}-controller" ":${agentIngressPort}" ":${controllerPort}" ":8444" \
 			>"$port_forward_log" 2>&1 &
 		port_forward_pid=$!
 		deadline=$((SECONDS + 30))
 		while ((SECONDS < deadline)); do
 			agent_local_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${agentIngressPort}$/\\1/p" "$port_forward_log")
 			public_local_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$port_forward_log")
-			[[ -n $agent_local_port && -n $public_local_port ]] && break
+			training_port=$(awk '/^Forwarding from 127[.]0[.]0[.]1:/ && $NF == 8444 {split($3,a,":"); print a[2]}' "$port_forward_log")
+			[[ -n $training_port && -n $agent_local_port && -n $public_local_port ]] && break
 			kill -0 "$port_forward_pid" >/dev/null 2>&1 || {
 				printf '%s\n' "$(<"$port_forward_log")" >&2
 				die "controller port-forward exited early"
@@ -1394,6 +1400,21 @@ exercise_agent_authentication() {
 		)
 	}
 	start_auth_port_forward
+
+	# The agent pod has a real bound identity but is not a training worker.
+	local training_header="$work_dir/training-header"
+	local -a training_request=(--silent --show-error --noproxy '*' --max-time 10
+		--cacert "$pki_dir/server-ca.crt" --resolve "${service_dns}:${training_port}:127.0.0.1"
+		-H 'Content-Type: application/json' --data '{"kind":"progress","step":1}'
+		-o /dev/null -w '%{http_code}' "https://${service_dns}:${training_port}/v1/training/reports")
+	training_code=$(curl "${training_request[@]}" -H "@$wrong_audience_header")
+	[[ $training_code == 401 ]] || die "training report with wrong audience returned $training_code, want 401"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create token "${ROOT_NAME}-agent" \
+		--audience="kubeneuron.io/training-report/$installation_uid" --duration=10m \
+		--bound-object-kind=Pod --bound-object-name="$agent_pod" >"$work_dir/training-token"
+	write_bearer_header "$work_dir/training-token" "$training_header"
+	training_code=$(curl "${training_request[@]}" -H "@$training_header")
+	[[ $training_code == 403 ]] || die "training report from agent pod returned $training_code, want 403"
 
 	public_code=$(curl --silent --show-error --noproxy '*' --max-time 10 \
 		-o /dev/null -w '%{http_code}' \
