@@ -395,6 +395,21 @@
     "review": []
   },
   {
+    "module": "github.com/aws/aws-sdk-go-v2/service/sqs@v1.53.0",
+    "files": [
+      "LICENSE.txt"
+    ],
+    "spdx": [
+      "Apache-2.0"
+    ],
+    "licenses": {
+      "LICENSE.txt": [
+        "Apache-2.0"
+      ]
+    },
+    "review": []
+  },
+  {
     "module": "github.com/aws/aws-sdk-go-v2/service/sso@v1.33.3",
     "files": [
       "LICENSE.txt"

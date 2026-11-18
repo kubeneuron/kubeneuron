@@ -29,20 +29,31 @@ type InterruptionCase struct {
 // InterruptionAware provider: nothing announced is an empty answer, not an
 // error; an announcement is reported valid and for the instance it names; and
 // the same announcement read again keeps its key, so the controller can tell
-// it from a new one.
+// it from a new one. A queue (cloud.InterruptionQueue) is received from
+// before each read, and must report an announcement until it is
+// acknowledged, and not after.
 func InterruptionConformance(t *testing.T, c InterruptionCase) {
 	t.Helper()
 	ctx := context.Background()
 	nodes := []cloud.NodeRef{c.Node}
 
 	p, fake := c.New(t)
-	got, err := p.Interruptions(ctx, nodes)
+	queue, isQueue := p.(cloud.InterruptionQueue)
+	read := func() ([]cloud.Interruption, error) {
+		if isQueue {
+			if _, err := queue.ReceiveInterruptions(ctx); err != nil {
+				return nil, err
+			}
+		}
+		return p.Interruptions(ctx, nodes)
+	}
+	got, err := read()
 	if err != nil || len(got) != 0 {
 		t.Fatalf("nothing announced: %+v, %v; want none and no error", got, err)
 	}
 
 	fake.Announce(cloud.InterruptionSpotReclaim)
-	first, err := p.Interruptions(ctx, nodes)
+	first, err := read()
 	if err != nil || len(first) != 1 {
 		t.Fatalf("one announcement: %+v, %v", first, err)
 	}
@@ -52,7 +63,7 @@ func InterruptionConformance(t *testing.T, c InterruptionCase) {
 	if first[0].InstanceID != c.Node.Identity.InstanceID || first[0].Kind != cloud.InterruptionSpotReclaim {
 		t.Fatalf("announcement %+v, want spot-reclaim of %s", first[0], c.Node.Identity.InstanceID)
 	}
-	again, err := p.Interruptions(ctx, nodes)
+	again, err := read()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +74,7 @@ func InterruptionConformance(t *testing.T, c InterruptionCase) {
 	}
 
 	fake.Announce(cloud.InterruptionRebalance)
-	both, err := p.Interruptions(ctx, nodes)
+	both, err := read()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,5 +92,19 @@ func InterruptionConformance(t *testing.T, c InterruptionCase) {
 	}
 	if !found {
 		t.Fatalf("second announcement not reported: %+v", both)
+	}
+	if !isQueue {
+		return
+	}
+	for _, i := range both {
+		if !i.Once {
+			t.Fatalf("a queue's announcement %+v is not marked Once", i)
+		}
+		if err := queue.AckInterruption(ctx, i.Key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if after, err := read(); err != nil || len(after) != 0 {
+		t.Fatalf("after every announcement was acknowledged: %+v, %v", after, err)
 	}
 }

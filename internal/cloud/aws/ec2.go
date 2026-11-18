@@ -26,6 +26,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
@@ -72,7 +73,11 @@ func newManagedProvider(ctx context.Context, options cloud.Config) (*managedProv
 		return nil, fmt.Errorf("aws: no region configured; set AWS_REGION or the node's region label")
 	}
 	client := ec2.NewFromConfig(cfg)
-	return &managedProvider{Recycler: &Recycler{api: client, pollInterval: 10 * time.Second}, repairReader: &repairReader{cluster: options.Options["cluster"], eks: eks.NewFromConfig(cfg), scaling: autoscaling.NewFromConfig(cfg), ec2: client}}, nil
+	provider := &managedProvider{Recycler: &Recycler{api: client, pollInterval: 10 * time.Second}, repairReader: &repairReader{cluster: options.Options["cluster"], eks: eks.NewFromConfig(cfg), scaling: autoscaling.NewFromConfig(cfg), ec2: client}}
+	if url := options.Options[OptionInterruptionQueue]; url != "" {
+		provider.queue = newInterruptionQueue(sqs.NewFromConfig(cfg), url)
+	}
+	return provider, nil
 }
 
 // NewWithAPI builds a Recycler over an explicit client, for tests.

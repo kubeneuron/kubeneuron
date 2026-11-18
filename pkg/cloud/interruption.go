@@ -53,6 +53,14 @@ type Interruption struct {
 	// is recognised. Two different notices for one instance have different
 	// keys.
 	Key string `json:"key"`
+	// Once is set when the source delivers the notice once rather than for
+	// as long as it is in force, as an event queue does: its absence from a
+	// later read says nothing about the interruption.
+	Once bool `json:"once,omitempty"`
+	// Ended is set when the source reports that the instance's interruption
+	// is over: the maintenance finished, or the instance is running again.
+	// Kind may then be empty.
+	Ended bool `json:"ended,omitempty"`
 }
 
 // Validate checks the fields the controller relies on.
@@ -60,7 +68,7 @@ func (i Interruption) Validate() error {
 	switch {
 	case i.InstanceID == "":
 		return errors.New("interruption: instance ID is empty")
-	case !i.Kind.Valid():
+	case !i.Kind.Valid() && (!i.Ended || i.Kind != ""):
 		return fmt.Errorf("interruption: unknown kind %q", i.Kind)
 	case i.Source == "":
 		return errors.New("interruption: source is empty")
@@ -80,4 +88,21 @@ type InterruptionAware interface {
 	// order. An error is a failed read: the controller keeps what it already
 	// knows and asks again on the next poll.
 	Interruptions(ctx context.Context, nodes []NodeRef) ([]Interruption, error)
+}
+
+// InterruptionQueue is implemented by an InterruptionAware provider whose
+// source is a queue: it delivers each notice once (Interruption.Once) and
+// forgets it only when told to. The controller receives from it in a loop of
+// its own while it leads, and acknowledges a notice once it is durably
+// recorded, so a notice is not lost to a restart between the two.
+type InterruptionQueue interface {
+	InterruptionAware
+	// ReceiveInterruptions waits up to the source's long-poll time for new
+	// notices and keeps them for Interruptions. It reports whether any
+	// arrived. A message it cannot read is removed from the source at once.
+	ReceiveInterruptions(ctx context.Context) (bool, error)
+	// AckInterruption tells the source that the notice with key needs
+	// nothing more, so the source may delete it. A notice never
+	// acknowledged is delivered again.
+	AckInterruption(ctx context.Context, key string) error
 }

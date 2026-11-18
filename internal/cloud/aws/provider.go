@@ -25,6 +25,8 @@ var _ cloud.Provider = (*Recycler)(nil)
 type managedProvider struct {
 	*Recycler
 	*repairReader
+	// queue is the interruption queue, when one is configured.
+	queue *interruptionQueue
 }
 
 var _ cloud.RepairAwareProvider = (*managedProvider)(nil)
@@ -37,6 +39,9 @@ func init() {
 		r, err := newManagedProvider(ctx, cfg)
 		if err != nil {
 			return nil, err
+		}
+		if r.queue != nil {
+			return &queueProvider{managedProvider: r, interruptionQueue: r.queue}, nil
 		}
 		return r, nil
 	})
