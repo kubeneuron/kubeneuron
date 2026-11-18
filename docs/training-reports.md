@@ -51,3 +51,17 @@ Call `report(kind="checkpoint", checkpoint_id="epoch-12", step=1200)` after the 
 HTTP 204 means the controller handled the request. A worker without a matching incident also receives 204. For HTTP 429, back off before retrying. Duplicate reports preserve the original receipt time. Each worker has a budget of 60 requests per minute. Reporting is optional; a reporting failure can be handled separately from training or checkpoint I/O.
 
 In incident detail, each affected job has a `recovery.progress_status`. It is `unknown` when infrastructure readiness, the job identity or report evidence is unavailable. After verified infrastructure recovery, a job with report evidence has status `not_confirmed` until an accepted progress report advances its worker's step. The status then becomes `confirmed`, with the first confirmation time in `progress_confirmed_at`.
+
+## Use checkpoint age before drain
+
+Set `spec.automatic.maxCheckpointAgeMinutes` on the remediation policy to require a recent checkpoint from each affected job before automatic drain. Zero disables this check. For example, with a value of 10, a receipt exactly ten minutes old meets the requirement. An older receipt sends the drain for human approval. The approval preview shows the age at the time the preview was computed.
+
+When the job owner or checkpoint age is unknown, the default is human approval. Set `spec.automatic.allowUnknownCheckpoint: true` to let automatic drain proceed in that case. A known stale checkpoint still requires approval. A storage read error also requires approval.
+
+The receiver associates reports with matching incident job maps and accepts them for up to 24 hours after resolution. A checkpoint reported before any matching incident exists cannot establish freshness for a later drain.
+
+## Read the recovery report
+
+In `kubeneuronctl report --json`, the live report's `incident_details[].jobs[]` lists identified jobs by namespace and owner. For each job, `infrastructure_ready_seconds` measures elapsed time from incident opening to verified infrastructure readiness. `progress_confirmed_seconds` uses the same starting point and ends at confirmed worker progress after readiness. Each field appears only when its evidence is available.
+
+`checkpoint_age_at_drain_seconds` measures the time from the last checkpoint receipt to the audited start of the latest live drain in the current attempt. Later receipts leave that historical age unchanged. The report omits the field when either timestamp is unknown.

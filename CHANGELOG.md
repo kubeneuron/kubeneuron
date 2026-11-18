@@ -27,6 +27,11 @@ API is `v1alpha1`.
   vendor documentation on 2026-11-18 and are not validated on real hardware.
   Accelerator nodes without kubeneuron-agent are now in the inventory, read
   from Kubernetes, with their labels and device counts.
+- Training workers can report checkpoint completion, resume and progress over
+  an opt-in HTTPS endpoint. Incident detail shows infrastructure readiness and
+  subsequent training progress separately. An automatic drain policy can
+  require a recent checkpoint report for each affected job. See the
+  [training reports guide](docs/training-reports.md).
 
 - **TPU health from Google Cloud Monitoring (experimental, opt-in).** With
   `spec.cloud.gcp.tpuInfraHealth.enabled`, the controller reads the Cloud
