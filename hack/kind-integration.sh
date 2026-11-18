@@ -2807,16 +2807,18 @@ exercise_incident_evidence() {
 	trap restore_evidence RETURN
 
 	patch_node_status_resources "$target_node" 2 nvidia.com/gpu
-	"$KUBECTL_BIN" patch node "$target_node" --subresource=status --type=json \
-		-p '[{"op":"add","path":"/status/allocatable/nvidia.com~1gpu","value":"1"}]' >/dev/null
 	"$KUBECTL_BIN" create namespace "$ns" >/dev/null
 	"$KUBECTL_BIN" -n "$ns" apply -f - >/dev/null <<-JSON
 		{"apiVersion":"v1","kind":"Pod","metadata":{"name":"fake-device-plugin","labels":{"app":"nvidia-device-plugin-daemonset"}},
 		 "spec":{"nodeName":"$target_node","tolerations":[{"operator":"Exists"}],
-		  "containers":[{"name":"pause","image":"$pause_image","imagePullPolicy":"IfNotPresent"}]}}
+		  "containers":[{"name":"pause","image":"$pause_image","imagePullPolicy":"IfNotPresent",
+		   "readinessProbe":{"exec":{"command":["/kubeneuron-not-ready"]},"periodSeconds":1}}]}}
 	JSON
-	"$KUBECTL_BIN" -n "$ns" wait pod/fake-device-plugin --for=condition=Ready --timeout=120s >/dev/null ||
-		die "fake device plugin pod did not become Ready"
+	# Running but never Ready, the way a device plugin that cannot reach
+	# its devices looks. The kubelet rewrites allocatable from capacity, so
+	# a not-ready plugin is the stable degraded signal here.
+	"$KUBECTL_BIN" -n "$ns" wait pod/fake-device-plugin --for=jsonpath='{.status.phase}'=Running --timeout=120s >/dev/null ||
+		die "fake device plugin pod did not start"
 
 	: >"$pf_log"
 	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
@@ -2834,7 +2836,11 @@ exercise_incident_evidence() {
 			-H 'Authorization: Bearer integration-operator-token' "$@"
 	}
 	open_and_read() {
-		local node=$1 class=$2 id=''
+		local node=$1 class=$2 id='' before
+		# An earlier phase may have left an incident of the same class on
+		# this node: read only the one this call opens.
+		before=$(evidence_api "http://127.0.0.1:${public_port}/api/v1/incidents?node=${node}" |
+			"$JQ_BIN" -c --arg class "$class" '[(. // [])[] | select(.class == $class) | .id]')
 		code=$(evidence_api -H 'Content-Type: application/json' \
 			--data-binary "{\"node\":\"${node}\",\"class\":\"${class}\",\"actor\":\"harness\"}" \
 			-o /dev/null -w '%{http_code}' "http://127.0.0.1:${public_port}/api/v1/incidents")
@@ -2842,7 +2848,8 @@ exercise_incident_evidence() {
 		deadline=$((SECONDS + TIMEOUT_SECONDS))
 		while ((SECONDS < deadline)); do
 			id=$(evidence_api "http://127.0.0.1:${public_port}/api/v1/incidents?node=${node}" |
-				"$JQ_BIN" -r --arg class "$class" '[.[] | select(.class == $class)][0].id // empty')
+				"$JQ_BIN" -r --arg class "$class" --argjson before "$before" \
+					'[(. // [])[] | select(.class == $class and (.id as $id | $before | index($id) | not))][0].id // empty')
 			if [[ -n $id ]]; then
 				detail=$(evidence_api "http://127.0.0.1:${public_port}/api/v1/incidents/${id}")
 				"$JQ_BIN" -e '.evidence.observed_at' >/dev/null <<<"$detail" && return 0
@@ -2855,14 +2862,16 @@ exercise_incident_evidence() {
 	open_and_read "$target_node" gpu-lost
 	"$JQ_BIN" -e '
 		.evidence.vendor_software.state == "degraded" and
-		(.evidence.vendor_software.resources | any(.name == "nvidia.com/gpu" and .capacity == 2 and .allocatable == 1)) and
-		(.evidence.vendor_software.components | any(.name == "device-plugin" and .state == "running")) and
+		(.evidence.vendor_software.resources | any(.name == "nvidia.com/gpu" and .capacity == 2)) and
+		(.evidence.vendor_software.components | any(.name == "device-plugin" and .state == "not-ready")) and
 		(.evidence | tostring | contains("fake-device-plugin") | not) and
 		.evidence.fault_location.location == "unknown" and
 		.evidence.network_resource.state == "unknown" and
-		(.audit | any(.action == "evidence"))' >/dev/null <<<"$detail" ||
+		(.audit | any(.action == "evidence"))' >/dev/null <<<"$detail" || {
+		"$JQ_BIN" -c '{id, class, evidence}' <<<"$detail" >&2 || true
 		die "gpu-lost evidence does not show the degraded software state"
-	note "a lost GPU with one device unallocatable is shown as software, location unknown"
+	}
+	note "a lost GPU beside a not-ready device plugin is shown as software, location unknown"
 
 	# Without the plugin pod or the resource, nothing may read as healthy.
 	"$KUBECTL_BIN" -n "$ns" delete pod fake-device-plugin --wait=true >/dev/null
@@ -2871,8 +2880,10 @@ exercise_incident_evidence() {
 	"$JQ_BIN" -e '
 		.evidence.vendor_software.state != "ok" and
 		.evidence.network_resource.state == "unknown" and
-		.evidence.fault_location.location == "this-node"' >/dev/null <<<"$detail" ||
+		.evidence.fault_location.location == "this-node"' >/dev/null <<<"$detail" || {
+		"$JQ_BIN" -c '{id, class, evidence}' <<<"$detail" >&2 || true
 		die "evidence read a node without a device plugin as healthy"
+	}
 	note "incident evidence: PASS"
 }
 
