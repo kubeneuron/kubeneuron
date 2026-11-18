@@ -309,6 +309,8 @@ if [[ -z $existing_cr && $REQUESTED_PACK == bare-metal-alpha ]]; then
 fi
 current_args=$(operator_args)
 if [[ $previous_permission == true && $(operator_permission <<<"$current_args") != true ]]; then
+ # The Go template owns $i and $c.
+ # shellcheck disable=SC2016
  operator_index=$(kubectl -n kube-neuron get deployment kubeneuron-operator \
    -o 'go-template={{range $i,$c := .spec.template.spec.containers}}{{if eq $c.name "operator"}}{{$i}}{{end}}{{end}}')
  [[ $operator_index =~ ^[0-9]+$ ]] || die "operator container missing from deployment"
