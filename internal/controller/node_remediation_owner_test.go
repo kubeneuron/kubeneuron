@@ -13,21 +13,11 @@ func TestRepairFollowerDoesNotCordonOrRequestApproval(t *testing.T) {
 	p := newSuccessorPlatform()
 	c, st, notifier := successorFixture(t, recoverymode.Approval, p, recoverymode.RemoveFirst)
 	ctx := t.Context()
-	engine := c.runtimeConfig(ctx).Engine
-	book, _ := engine.Playbook("cloud-replace")
-	pol, _ := engine.PolicyFor(types.ClassFellOffBus, "")
-	other := pol
-	other.Name = "node-fault"
-	other.Class = types.ClassAcceleratorFault
-	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{book.Name: book}, []playbook.Policy{pol, other})
-	if err != nil {
+	configureRepairClasses(t, c)
+	if err := c.IngestSignal(ctx, signal(types.ClassAcceleratorFault, "n1", "")); err != nil {
 		t.Fatal(err)
 	}
-	c.SetEngine(engine)
-	if err := c.IngestSignal(ctx, signal(other.Class, "n1", "")); err != nil {
-		t.Fatal(err)
-	}
-	first, err := st.GetOpenIncident(ctx, types.Target{Node: "n1"}, other.Class)
+	first, err := st.GetOpenIncident(ctx, types.Target{Node: "n1"}, types.ClassAcceleratorFault)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,4 +69,46 @@ func TestRepairFollowerDoesNotCordonOrRequestApproval(t *testing.T) {
 	}
 	waitSettled(t, c, st, follower.ID, func(i *types.Incident) bool { return i.State == types.StateVerifying })
 	checkCalls()
+}
+
+func configureRepairClasses(t *testing.T, c *Controller) {
+	t.Helper()
+	engine := c.runtimeConfig(t.Context()).Engine
+	book, _ := engine.Playbook("cloud-replace")
+	pol, _ := engine.PolicyFor(types.ClassFellOffBus, "")
+	other := pol
+	other.Name = "node-fault"
+	other.Class = types.ClassAcceleratorFault
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{book.Name: book}, []playbook.Policy{pol, other})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetEngine(engine)
+}
+
+func TestAutomaticRepairFollowerDoesNotRepeatReplacement(t *testing.T) {
+	p := newSuccessorPlatform()
+	c, st, notifier := successorFixture(t, recoverymode.Automatic, p, recoverymode.RemoveFirst)
+	ctx := t.Context()
+	configureRepairClasses(t, c)
+	owner := openIncidentFor(t, c, types.ClassFellOffBus)
+	waitSettled(t, c, st, owner, func(i *types.Incident) bool { return i.StepIndex == 1 })
+	second := signal(types.ClassAcceleratorFault, "n1", "")
+	if err := c.IngestSignal(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	follower, err := st.GetOpenIncident(ctx, second.Target, second.Class)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitSettled(t, c, st, owner, func(i *types.Incident) bool { return i.State == types.StateVerifying })
+	step(t, c, st, follower.ID, 20)
+	if got := mustIncident(t, st, follower.ID); got.State != types.StateEvaluating || got.StepIndex != 0 {
+		t.Fatalf("follower reached %s step %d", got.State, got.StepIndex)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if owners := p.cordoned["n1"]; len(owners) != 1 || owners[0] != owner || len(p.drained) != 1 || len(p.plain) != 1 || len(notifier.approvals) != 0 {
+		t.Fatalf("cordon owners=%v drains=%v replacements=%v approvals=%d", owners, p.drained, p.plain, len(notifier.approvals))
+	}
 }
