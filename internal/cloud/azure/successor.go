@@ -4,6 +4,8 @@ package azure
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"maps"
 	"slices"
@@ -14,7 +16,9 @@ import (
 )
 
 // successorTag marks a fixed-size pool grown by one for an add-first
-// operation: "<operation>:<count before>". It is written in the same request
+// operation: "<operation token>:<count before>". The token is a hash of the
+// operation, which names the incident and so the node: the tag is visible
+// to anyone who can read the pool. It is written in the same request
 // as the new size, so the pool shows whether the request reached AKS, and a
 // retry after a lost answer finds it instead of growing the pool again.
 const successorTag = "kubeneuron-successor"
@@ -75,14 +79,14 @@ func (p *Provider) PrepareSuccessor(ctx context.Context, s cloud.Successor) (clo
 	case "":
 		return p.planSuccessor(s, t, machines, pl)
 	case cloud.SuccessorPlanned:
-		if op == s.Operation {
+		if op == operationToken(s.Operation) {
 			// The request reached AKS; its answer was lost.
 			s.Phase = cloud.SuccessorRequested
 			return s, nil
 		}
 		return p.requestSuccessor(ctx, s, t, machines, pl, op)
 	case cloud.SuccessorRequested:
-		if op != s.Operation {
+		if op != operationToken(s.Operation) {
 			return s, fmt.Errorf("azure: agent pool %s no longer carries the %s tag of operation %s: %w", t.pool, successorTag, s.Operation, cloud.ErrNeedsOperator)
 		}
 		return settleSuccessor(s, t, machines, pl, before)
@@ -116,7 +120,7 @@ func (p *Provider) planSuccessor(s cloud.Successor, t target, machines []machine
 // still as planned. One replacement runs per pool at a time.
 func (p *Provider) requestSuccessor(ctx context.Context, s cloud.Successor, t target, machines []machine, pl pool, other string) (cloud.Successor, error) {
 	if other != "" {
-		return s, fmt.Errorf("azure: agent pool %s is preparing a successor for operation %s; waiting, one replacement per pool at a time", t.pool, other)
+		return s, fmt.Errorf("azure: agent pool %s is preparing a successor for another operation (tag %s); waiting, one replacement per pool at a time", t.pool, other)
 	}
 	if marked, _, _ := parseMarker(pl.Tags); marked != "" {
 		return s, fmt.Errorf("azure: agent pool %s is replacing %s; waiting, one replacement per pool at a time", t.pool, marked)
@@ -139,7 +143,7 @@ func (p *Provider) requestSuccessor(ctx context.Context, s cloud.Successor, t ta
 	if tags == nil {
 		tags = map[string]string{}
 	}
-	tags[successorTag] = s.Operation + ":" + strconv.Itoa(int(before))
+	tags[successorTag] = operationToken(s.Operation) + ":" + strconv.Itoa(int(before))
 	if err := p.api.WritePool(ctx, t.pool, pl, before+1, tags); err != nil {
 		if capacityError(err) {
 			return s, fmt.Errorf("azure: growing agent pool %s for a successor of %s: %w: %w", t.pool, t.machine, cloud.ErrReplacementCapacity, err)
@@ -181,7 +185,7 @@ func (p *Provider) ReleaseSuccessor(ctx context.Context, s cloud.Successor) erro
 	if err != nil {
 		return fmt.Errorf("azure: agent pool %s: %w: %w", t.pool, cloud.ErrNeedsOperator, err)
 	}
-	if op != s.Operation {
+	if op != operationToken(s.Operation) {
 		if s.Phase == cloud.SuccessorCreated {
 			return fmt.Errorf("azure: agent pool %s no longer carries the %s tag of operation %s: %w", t.pool, successorTag, s.Operation, cloud.ErrNeedsOperator)
 		}
@@ -229,7 +233,7 @@ func (p *Provider) ReplaceWithSuccessor(ctx context.Context, s cloud.Successor) 
 	if err != nil {
 		return fmt.Errorf("azure: agent pool %s: %w: %w", t.pool, cloud.ErrNeedsOperator, err)
 	}
-	if op != s.Operation {
+	if op != operationToken(s.Operation) {
 		if t.machine == "" {
 			return nil // replaced and closed on an earlier call
 		}
@@ -317,7 +321,13 @@ func machineByProviderID(machines []machine, providerID string) (machine, bool) 
 	return machine{}, false
 }
 
-// parseSuccessorTag reads the successor tag: the operation and the pool's
+// operationToken is how an operation appears in the pool's tag.
+func operationToken(operation string) string {
+	sum := sha256.Sum256([]byte(operation))
+	return "kn-" + hex.EncodeToString(sum[:8])
+}
+
+// parseSuccessorTag reads the successor tag: the operation token and the pool's
 // size before it was grown. No tag is no operation under way.
 func parseSuccessorTag(tags map[string]string) (string, int32, error) {
 	v, ok := tags[successorTag]

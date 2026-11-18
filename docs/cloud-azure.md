@@ -63,7 +63,7 @@ The phases are those of [Add-first replacement](playbook-authoring.md#add-first-
 1. **Plan.** KubeNeuron reads the pool: its node count and machines. Nothing
    changes in Azure.
 2. **Request.** If the pool is still as planned, KubeNeuron writes the count
-   plus one and the `kubeneuron-successor` tag (`<operation>:<count>`) in one
+   plus one and the `kubeneuron-successor` tag (`<token>:<count>`) in one
    request. If the answer is lost, the tag shows the request reached AKS, and
    a retry never grows the pool again.
 3. **Created.** Once the pool is `Succeeded` at the grown count with exactly
@@ -156,8 +156,10 @@ cluster.
 KubeNeuron stops and reports "needs an operator" rather than guess. For an
 add-first operation, the incident (`kubeneuronctl incident show`) names the
 operation, the successor machine and why it stopped; the pool carries the
-`kubeneuron-successor` tag `<operation>:<count>`, with the pool's count before
-it was grown. Bring the pool to the size you want as below, deleting the
+`kubeneuron-successor` tag `<token>:<count>`, with the pool's count before it
+was grown. The token is `kn-` and the first 16 hex digits of the SHA-256 of
+the operation, so the tag names no node:
+`printf %s <operation> | sha256sum | cut -c1-16`. Bring the pool to the size you want as below, deleting the
 successor or the old machine as needed
 (`az aks machine list` shows which machines the pool runs), then remove the
 tag and resolve the incident.

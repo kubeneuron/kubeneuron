@@ -54,7 +54,7 @@ func TestAddFirstGrowsTheTaggedPoolAndRemovesTheOldMachine(t *testing.T) {
 		t.Fatalf("planning wrote %q; plan %+v", f.calls, s)
 	}
 	s = prepare(t, p, s, cloud.SuccessorRequested)
-	if f.count != 4 || f.tags[successorTag] != "inc-1-a1:3" || f.tags["team"] != "ml" {
+	if f.count != 4 || f.tags[successorTag] != operationToken("inc-1-a1")+":3" || strings.Contains(f.tags[successorTag], "inc-1") || f.tags["team"] != "ml" {
 		t.Fatalf("count=%d tags=%v after the request", f.count, f.tags)
 	}
 	s = prepare(t, p, s, cloud.SuccessorCreated)
