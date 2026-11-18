@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -23,16 +24,12 @@ func (c *Controller) RecordTrainingReport(ctx context.Context, pod *corev1.Pod, 
 	if !ok {
 		return errors.New("training report storage unavailable")
 	}
-	cutoff := received.Add(-24 * time.Hour)
-	incidents, err := c.store.ListIncidents(ctx, store.IncidentFilter{ActiveSince: cutoff})
+	routes, err := c.trainingDestinations(ctx, received)
 	if err != nil {
 		return err
 	}
-	for _, inc := range incidents {
-		if inc.State == types.StateExpired || inc.State == types.StateSuperseded {
-			continue
-		}
-		if inc.State == types.StateResolved && (inc.ResolvedAt == nil || inc.ResolvedAt.Before(cutoff)) {
+	for _, inc := range routes[trainingJobKey{pod.Namespace, owner.UID}] {
+		if inc.ResolvedAt != nil && inc.ResolvedAt.Before(received.Add(-24*time.Hour)) {
 			continue
 		}
 		_, err := writer.RecordAffectedJobReport(ctx, inc.ID, pod.Namespace, owner.UID, string(pod.UID), report, received)
@@ -41,6 +38,55 @@ func (c *Controller) RecordTrainingReport(ctx context.Context, pod *corev1.Pod, 
 		}
 	}
 	return nil
+}
+
+type trainingJobKey struct{ namespace, uid string }
+
+type trainingRouteCache struct {
+	sync.Mutex
+	until  time.Time
+	routes map[trainingJobKey][]*types.Incident
+}
+
+func (c *Controller) trainingDestinations(ctx context.Context, received time.Time) (map[trainingJobKey][]*types.Incident, error) {
+	cache := &c.trainingRoutes
+	cache.Lock()
+	defer cache.Unlock()
+	now := time.Now()
+	if now.Before(cache.until) {
+		return cache.routes, nil
+	}
+	routes := make(map[trainingJobKey][]*types.Incident)
+	cutoff := received.Add(-24 * time.Hour)
+	incidents, err := c.store.ListIncidents(ctx, store.IncidentFilter{ActiveSince: cutoff})
+	if err != nil {
+		return nil, err
+	}
+	for _, inc := range incidents {
+		if inc.State == types.StateExpired || inc.State == types.StateSuperseded {
+			continue
+		}
+		if inc.State == types.StateResolved && (inc.ResolvedAt == nil || inc.ResolvedAt.Before(cutoff)) {
+			continue
+		}
+		workers, err := c.IncidentTrainingWorkers(ctx, inc.ID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, job := range types.GroupAffectedJobs(workers) {
+			if job.Owner == nil {
+				continue
+			}
+			key := trainingJobKey{job.Namespace, job.Owner.UID}
+			routes[key] = append(routes[key], inc)
+		}
+	}
+	cache.routes = routes
+	cache.until = now.Add(5 * time.Second)
+	return routes, nil
 }
 
 func (c *Controller) TrainingConfirmations(ctx context.Context, id string, ready time.Time) (map[string]time.Time, error) {

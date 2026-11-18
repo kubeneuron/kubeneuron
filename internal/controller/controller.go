@@ -34,14 +34,15 @@ import (
 
 // Controller is the control-plane brain.
 type Controller struct {
-	store    store.Store
-	sink     store.EventSink
-	gate     *safety.Gate
-	flap     *safety.FlapDetector
-	platform platform.Platform
-	actuator actuator.Actuator
-	notifier notify.Notifier
-	log      *slog.Logger
+	trainingRoutes trainingRouteCache
+	store          store.Store
+	sink           store.EventSink
+	gate           *safety.Gate
+	flap           *safety.FlapDetector
+	platform       platform.Platform
+	actuator       actuator.Actuator
+	notifier       notify.Notifier
+	log            *slog.Logger
 
 	signals        chan types.Signal
 	droppedSignals atomic.Uint64
