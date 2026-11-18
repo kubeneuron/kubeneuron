@@ -7,8 +7,9 @@ trap 'rm -rf "$tmp"' EXIT
 
 # Exercise the standalone renderer without running any installer mutations.
 sed -n '/^render_cloud_pack() {$/,/^}$/p' deploy/install.sh > "$tmp/render.sh"
+# shellcheck source=/dev/null
 source "$tmp/render.sh"
-NAME=fleet
+export NAME=fleet
 render_cloud_pack | yq -o=json -I=0 '.' | jq -sS 'sort_by(.kind,.metadata.name)' > "$tmp/actual"
 
 # Expand installation-owned names and labels as they appear in a fresh install.
