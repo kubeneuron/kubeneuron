@@ -37,7 +37,10 @@ func (f *lostUpdateResponse) UpdateNodegroupConfig(_ context.Context, in *eks.Up
 
 func TestRequestSuccessorReplaysLostResponse(t *testing.T) {
 	client := &lostUpdateResponse{t: t, tokens: map[string]bool{}}
-	plan := cloud.Successor{Operation: "op", Phase: cloud.SuccessorPlanned, State: map[string]string{"before": "2", "nodegroup": "workers"}}
+	plan := cloud.Successor{Operation: "op", Phase: cloud.SuccessorPlanned, State: map[string]string{"cluster": "cluster", "before": "2", "nodegroup": "workers"}}
+	if _, err := requestSuccessor(t.Context(), client, "different-cluster", plan); !errors.Is(err, cloud.ErrNeedsOperator) || len(client.tokens) != 0 {
+		t.Fatalf("cluster mismatch: %v", err)
+	}
 	if got, err := requestSuccessor(t.Context(), client, "cluster", plan); err == nil || got.Phase != cloud.SuccessorPlanned {
 		t.Fatalf("first request: %+v %v", got, err)
 	}

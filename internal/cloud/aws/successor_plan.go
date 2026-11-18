@@ -93,9 +93,19 @@ func (p *managedProvider) readSuccessorPlan(ctx context.Context, s cloud.Success
 	if sdk.ToString(ng.ClusterName) != p.cluster || sdk.ToString(ng.NodegroupName) != nodegroup || ng.Status != et.NodegroupStatusActive || ng.Resources == nil || len(ng.Resources.AutoScalingGroups) != 1 || sdk.ToString(ng.Resources.AutoScalingGroups[0].Name) != name {
 		return s, fmt.Errorf("%w: EKS must confirm exactly one backing ASG for the active nodegroup", cloud.ErrAddFirstUnavailable)
 	}
+	// Names can be reused after deletion. Pin both resource generations before
+	// handing a plan to the controller for persistence.
+	asgARN := sdk.ToString(group.AutoScalingGroupARN)
+	nodegroupARN := sdk.ToString(ng.NodegroupArn)
+	if asgARN == "" || nodegroupARN == "" {
+		return s, fmt.Errorf("%w: EKS or ASG resource identity is missing", cloud.ErrAddFirstUnavailable)
+	}
 	plan, err := planSuccessor(s, group)
 	if err == nil {
 		plan.State["nodegroup"] = nodegroup
+		plan.State["cluster"] = p.cluster
+		plan.State["asg_arn"] = asgARN
+		plan.State["nodegroup_arn"] = nodegroupARN
 	}
 	return plan, err
 }

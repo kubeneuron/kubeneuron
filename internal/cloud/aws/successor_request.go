@@ -26,7 +26,7 @@ type nodegroupUpdater interface {
 func requestSuccessor(ctx context.Context, client nodegroupUpdater, cluster string, s cloud.Successor) (cloud.Successor, error) {
 	before, err := strconv.ParseInt(s.State["before"], 10, 32)
 	group := s.State["nodegroup"]
-	if err != nil || before < 1 || before >= math.MaxInt32 || group == "" || cluster == "" || s.Operation == "" || s.Phase != cloud.SuccessorPlanned {
+	if err != nil || before < 1 || before >= math.MaxInt32 || group == "" || cluster == "" || cluster != s.State["cluster"] || s.Operation == "" || s.Phase != cloud.SuccessorPlanned {
 		return s, fmt.Errorf("%w: incomplete EKS scaling plan", cloud.ErrNeedsOperator)
 	}
 	token := fmt.Sprintf("%x", sha256.Sum256([]byte(s.Operation)))
