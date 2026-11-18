@@ -817,6 +817,10 @@ func TestAutomaticDrainCheckpointAge(t *testing.T) {
 			want := types.StateResolved
 			if tc.wantApproval {
 				want = types.StateAwaitingApproval
+				pending, done, err := c.runtimeConfig(t.Context()).Engine.NextStep(inc)
+				if err != nil || done || pending == nil || pending.Action != "platform.drain" {
+					t.Fatalf("expected approval at drain, pending=%v done=%v err=%v", pending, done, err)
+				}
 			}
 			if inc.State != want {
 				t.Fatalf("state=%s want %s", inc.State, want)
