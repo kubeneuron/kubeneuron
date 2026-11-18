@@ -42,3 +42,13 @@ func (c *Controller) RecordTrainingReport(ctx context.Context, pod *corev1.Pod, 
 	}
 	return nil
 }
+
+func (c *Controller) TrainingConfirmations(ctx context.Context, id string, ready time.Time) (map[string]time.Time, error) {
+	reader, ok := c.store.(interface {
+		TrainingConfirmations(context.Context, string, time.Time) (map[string]time.Time, error)
+	})
+	if !ok {
+		return nil, errors.New("training report storage unavailable")
+	}
+	return reader.TrainingConfirmations(ctx, id, ready)
+}

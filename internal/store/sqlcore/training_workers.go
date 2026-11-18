@@ -49,10 +49,23 @@ func (q *Queries) SaveTrainingProgress(ctx context.Context, incidentID, jobUID, 
 	if incidentID == "" || jobUID == "" || podUID == "" || step < 0 || received.IsZero() {
 		return errors.New("invalid training progress")
 	}
-	_, err := q.db.ExecContext(ctx, `INSERT INTO training_progress (incident_id,job_uid,pod_uid,step,received_at)
-		VALUES (?,?,?,?,?) ON CONFLICT (incident_id,job_uid,pod_uid) DO UPDATE
-		SET step=excluded.step, received_at=excluded.received_at
-		WHERE excluded.step > training_progress.step`, incidentID, jobUID, podUID, step, ts(received))
+	trail, err := q.AuditTrail(ctx, incidentID)
+	if err != nil {
+		return err
+	}
+	var ready, confirmed *string
+	if at := types.VerifiedInfrastructureTime(trail); at != nil && received.After(*at) {
+		r, c := ts(*at), ts(received)
+		ready, confirmed = &r, &c
+	}
+	_, err = q.db.ExecContext(ctx, `INSERT INTO training_progress (incident_id,job_uid,pod_uid,step,received_at,ready_at,confirmed_at)
+		VALUES (?,?,?,?,?,?,?) ON CONFLICT (incident_id,job_uid,pod_uid) DO UPDATE
+		SET step=excluded.step, received_at=excluded.received_at,
+		confirmed_at=CASE WHEN excluded.ready_at IS NOT NULL AND
+		    (training_progress.ready_at IS NULL OR training_progress.ready_at <> excluded.ready_at)
+		    THEN excluded.confirmed_at ELSE training_progress.confirmed_at END,
+		ready_at=COALESCE(excluded.ready_at, training_progress.ready_at)
+		WHERE excluded.step > training_progress.step`, incidentID, jobUID, podUID, step, ts(received), ready, confirmed)
 	return err
 }
 
@@ -94,4 +107,28 @@ func (q *Queries) RecordAffectedJobReport(ctx context.Context, incidentID, names
 		}
 	}
 	return false, nil
+}
+
+// TrainingConfirmations returns the earliest accepted post-recovery progress per job.
+func (q *Queries) TrainingConfirmations(ctx context.Context, id string, ready time.Time) (map[string]time.Time, error) {
+	rows, err := q.db.QueryContext(ctx, "SELECT job_uid,confirmed_at FROM training_progress WHERE incident_id=? AND ready_at=?", id, ts(ready))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[string]time.Time)
+	for rows.Next() {
+		var uid, stamp string
+		if err := rows.Scan(&uid, &stamp); err != nil {
+			return nil, err
+		}
+		at, err := time.Parse(time.RFC3339Nano, stamp)
+		if err != nil {
+			return nil, err
+		}
+		if first, ok := out[uid]; !ok || at.Before(first) {
+			out[uid] = at
+		}
+	}
+	return out, rows.Err()
 }

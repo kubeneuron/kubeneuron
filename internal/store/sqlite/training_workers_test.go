@@ -137,3 +137,30 @@ func TestRecordAffectedJobReportMatchesVerifiedRoot(t *testing.T) {
 		t.Fatalf("rows=%d err=%v", count, err)
 	}
 }
+
+func TestTrainingConfirmationPreservesFirstAdvance(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := t.Context()
+	impactIncident(t, s, "i")
+	at := time.Now().UTC()
+	if err := s.AppendAudit(ctx, &types.AuditEntry{IncidentID: "i", Time: at, Actor: "system", Action: "resolve", FromState: types.StateVerifying, ToState: types.StateResolved, Params: map[string]string{"infrastructure_evidence": "verified_recycle_inventory"}}); err != nil {
+		t.Fatal(err)
+	}
+	for i, step := range []int64{1, 1, 2, 3} {
+		if err := s.SaveTrainingProgress(ctx, "i", "job", "pod", step, at.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		results, err := s.TrainingConfirmations(ctx, "i", at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := results["job"]
+		if (i < 2 && !got.IsZero()) || (i >= 2 && !got.Equal(at.Add(2*time.Minute))) {
+			t.Fatalf("report %d: confirmation %v", i, got)
+		}
+	}
+}

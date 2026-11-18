@@ -607,8 +607,22 @@ func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		detail.AffectedJobs = types.GroupAffectedJobs(workers)
 		readyAt := types.VerifiedInfrastructureTime(audit)
+		var confirmations map[string]time.Time
+		if reader, ok := s.operator.(interface {
+			TrainingConfirmations(context.Context, string, time.Time) (map[string]time.Time, error)
+		}); ok && readyAt != nil {
+			if times, err := reader.TrainingConfirmations(r.Context(), inc.ID, *readyAt); err == nil {
+				confirmations = times
+			}
+		}
 		for i := range detail.AffectedJobs {
-			detail.AffectedJobs[i].Recovery.InfrastructureReadyAt = readyAt
+			job := &detail.AffectedJobs[i]
+			job.Recovery.InfrastructureReadyAt = readyAt
+			if job.Owner != nil {
+				if at, ok := confirmations[job.Owner.UID]; ok {
+					job.Recovery.ProgressConfirmedAt = &at
+				}
+			}
 		}
 	}
 
