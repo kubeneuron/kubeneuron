@@ -283,6 +283,7 @@ func cmdIncidents() *cobra.Command {
 			Evidence                  *types.IncidentEvidence      `json:"evidence"`
 			NodeConditions            *types.NodeConditionSnapshot `json:"node_conditions"`
 			NodeConditionsUnavailable string                       `json:"node_conditions_unavailable"`
+			AffectedJobs              []types.AffectedJob          `json:"affected_jobs"`
 			ObserveOnly               string                       `json:"observe_only"`
 		}
 		if err := cl.do("GET", "/api/v1/incidents/"+args[0], nil, &detail); err != nil {
@@ -310,6 +311,7 @@ func cmdIncidents() *cobra.Command {
 			_, _ = fmt.Fprintf(out, "Node conditions unavailable (%s)\n", detail.NodeConditionsUnavailable)
 		}
 		printEvidence(out, detail.Evidence)
+		printTrainingRecovery(out, detail.AffectedJobs)
 		if detail.ObserveOnly != "" {
 			_, _ = fmt.Fprintf(out, "observe:   %s\n", detail.ObserveOnly)
 		}
