@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/config"
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -509,5 +510,16 @@ func TestLoadDirRejectsUnapprovedReboot(t *testing.T) {
 	}
 	if _, err := LoadDir(dir); err == nil {
 		t.Fatal("a playbook directory with an unapproved reboot loaded")
+	}
+}
+
+func TestEngineRejectsAutomaticHostEscalation(t *testing.T) {
+	books := map[string]*Playbook{
+		"observe":  {OnFailure: OnFailure{EscalateTo: "fallback"}},
+		"fallback": {Steps: []Step{{Action: "agent.reboot", Approval: "required"}}},
+	}
+	_, err := NewEngine(books, []Policy{{Playbook: "observe", Mode: recoverymode.Automatic}})
+	if err == nil || !strings.Contains(err.Error(), "agent.reboot") {
+		t.Fatalf("expected automatic escalation refusal, got %v", err)
 	}
 }

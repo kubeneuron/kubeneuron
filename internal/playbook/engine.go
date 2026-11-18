@@ -43,9 +43,15 @@ type Engine struct {
 // one scope the first match wins; a vendor-specific policy always takes
 // precedence over the unscoped fallback for that vendor.
 func NewEngine(books map[string]*Playbook, policies []Policy) (*Engine, error) {
+	if err := ValidateEscalationGraph(books); err != nil {
+		return nil, err
+	}
 	for _, pol := range policies {
 		if _, ok := books[pol.Playbook]; !ok {
 			return nil, fmt.Errorf("policy for class %q references unknown playbook %q", pol.Class, pol.Playbook)
+		}
+		if err := ValidatePolicyActions(pol.Mode, pol.Playbook, books); err != nil {
+			return nil, fmt.Errorf("policy for class %q: %w", pol.Class, err)
 		}
 	}
 	return &Engine{books: books, policies: policies}, nil
@@ -137,4 +143,19 @@ func (e *Engine) Escalation(name string) (*Playbook, bool) {
 func (e *Engine) Playbook(name string) (*Playbook, bool) {
 	p, ok := e.books[name]
 	return p, ok
+}
+
+// ValidatePolicyActions checks the reachable steps of a validated escalation graph.
+func ValidatePolicyActions(mode recoverymode.Mode, root string, books map[string]*Playbook) error {
+	if mode != recoverymode.Automatic {
+		return nil
+	}
+	for name := root; name != ""; name = books[name].OnFailure.EscalateTo {
+		for _, step := range books[name].Steps {
+			if IsNodeLevelAction(step.Action) {
+				return fmt.Errorf("Automatic mode cannot use node-level action %q in playbook %q; use Approval mode", step.Action, name)
+			}
+		}
+	}
+	return nil
 }

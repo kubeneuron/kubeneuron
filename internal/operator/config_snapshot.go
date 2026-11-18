@@ -1001,15 +1001,8 @@ func compilePolicies(
 		if err != nil {
 			return nil, err
 		}
-		if mode == recoverymode.Automatic {
-			// compilePlaybookIndex has already verified that escalation paths are acyclic.
-			for book := books[policy.Spec.PlaybookRef]; book != nil; book = books[book.OnFailure.EscalateTo] {
-				for _, step := range book.Steps {
-					if playbook.IsNodeLevelAction(step.Action) {
-						return nil, fmt.Errorf("policy %q: Automatic mode cannot use node-level action %q in playbook %q; use Approval mode", policy.Name, step.Action, book.Name)
-					}
-				}
-			}
+		if err := playbook.ValidatePolicyActions(mode, policy.Spec.PlaybookRef, books); err != nil {
+			return nil, fmt.Errorf("policy %q: %w", policy.Name, err)
 		}
 		if automatic != nil && automatic.CheckpointWait > 0 &&
 			(installation.Spec.Safety.CheckpointCoordination == nil || !installation.Spec.Safety.CheckpointCoordination.Enabled) {
