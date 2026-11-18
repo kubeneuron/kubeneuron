@@ -137,6 +137,18 @@ var (
 		Help: "GPU-seconds charged when an incident reached a terminal state, by class and outcome (resolved = returned to service). Parked incidents are counted by kubeneuron_degraded_gpus until they close.",
 	}, []string{"class", "outcome"})
 
+	// DegradedAcceleratorSeconds is DegradedGPUSeconds per accelerator
+	// resource, in each resource's own device: GPU-seconds for nvidia.com/gpu
+	// and amd.com/gpu, TPU chip-seconds for google.com/tpu, AWS Neuron
+	// device-seconds for aws.amazon.com/neuron. Charged on the same terminal
+	// transition, with the devices the incident recorded when it opened; an
+	// incident that recorded none is not charged here, because its count is
+	// not known. Never sum across resources: the units differ.
+	DegradedAcceleratorSeconds = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_degraded_accelerator_seconds_total",
+		Help: "Device-seconds charged when an incident reached a terminal state, by class, outcome and accelerator resource, in that resource's own device. Incidents with no recorded device count are not charged. Do not sum across resources.",
+	}, []string{"class", "outcome", "resource"})
+
 	// --- Protection: what the fleet did NOT lose ---------------------------
 	//
 	// Sibling of the recovery-outcome block above, and outcome rather than

@@ -954,6 +954,39 @@
           }
         }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Device-hours degraded per accelerator resource, cumulative by outcome",
+      "description": "Cumulative device-hours spent under an incident since controller start, one series per accelerator resource and outcome, each in its own unit: GPU-hours for nvidia.com/gpu and amd.com/gpu, TPU chip-hours for google.com/tpu, AWS Neuron device-hours for aws.amazon.com/neuron. Series are not stacked and must not be added together: the units differ. Counted with the devices an incident recorded when it opened; incidents with no recorded device count are not in this panel (see kubeneuronctl report, node-hours).",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 106
+      },
+      "targets": [
+        {
+          "expr": "sum by (resource, outcome) (kubeneuron_degraded_accelerator_seconds_total) / 3600",
+          "legendFormat": "{{resource}} {{outcome}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "axisLabel": "device-hours (own unit per resource)",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
     }
   ]
 }

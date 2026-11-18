@@ -90,6 +90,27 @@ func TestRecoveryReportPerAcceleratorResource(t *testing.T) {
 		t.Fatalf("gpu-hours %v assumed %d incidents %d", r.DegradedGPUHours, r.AssumedSingleGPU, r.Incidents)
 	}
 
+	// Per class: its own hours per resource, no saved estimate and no cost.
+	for _, class := range r.Classes {
+		switch class.Class {
+		case types.ClassAcceleratorFault:
+			tpuRow, trnRow := resourceRow(t, class.AcceleratorHours, "tpu", "google.com/tpu"), resourceRow(t, class.AcceleratorHours, "aws-neuron", "aws.amazon.com/neuron")
+			if tpuRow.DegradedHours != 8 || tpuRow.RecoveredHours != 8 || trnRow.DegradedHours != 16 || tpuRow.SavedEstimate != nil ||
+				class.SavedCostTotal != nil || class.DeviceCountUnknown != nil || class.DegradedGPUHours != 0 {
+				t.Fatalf("accelerator-fault class %+v", class)
+			}
+		case types.ClassFellOffBus:
+			if u := class.DeviceCountUnknown; u == nil || u.Incidents != 1 || resourceRow(t, class.AcceleratorHours, "gpu", "amd.com/gpu").DegradedHours != 8 {
+				t.Fatalf("fell-off-bus class %+v", class)
+			}
+		}
+	}
+	for _, d := range r.IncidentDetails {
+		if d.ID == "tpu" && (len(d.Accelerators) != 1 || d.Accelerators[0].Resource != "google.com/tpu") {
+			t.Fatalf("tpu detail %+v", d)
+		}
+	}
+
 	// Every rate set: a total; no baseline: no saved and no total.
 	inv.rates.PerDeviceHour["amd.com/gpu"], inv.rates.PerDeviceHour["google.com/tpu"] = 3, 2
 	r = aggregateRecoveryOf(incidents, inv, allRemediated(incidents), from, to, 4*time.Hour)

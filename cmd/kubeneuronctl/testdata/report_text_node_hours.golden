@@ -20,6 +20,10 @@ problem classes:
 CLASS   INCIDENTS  NOTHING DONE  UNATTENDED  MTTR P50  MTTR P90
 xid-79  2          1             1           30m0s     30m0s
 
+hours per class and resource (not added across resources):
+CLASS   RESOURCE              DEGRADED        RECOVERED
+xid-79  device count unknown  6.0 node-hours  4.0 node-hours
+
 still open (1), oldest first:
 ID     STATE  CLASS   NODE    AGE
 inc-2  OPEN   xid-79  node-b  2h0m0s

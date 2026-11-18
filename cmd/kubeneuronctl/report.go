@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -164,6 +165,9 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		if err := w.Flush(); err != nil {
 			return err
 		}
+		if err := printClassHours(out, r.Classes); err != nil {
+			return err
+		}
 	} else if len(r.Classes) > 0 {
 		_, _ = fmt.Fprintln(out, "\ntop problem classes by degraded GPU-hours:")
 		w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
@@ -241,10 +245,14 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		// Say this loudly. On a fresh install every incident is dry-run, so a
 		// silent zero would read as "nothing happened" when the truth is
 		// "everything was watched and nothing was executed, by design".
-		_, _ = fmt.Fprintf(out, "\nnote: %s excluded because their installation was in dry-run.\n"+
+		installation := "their installation was"
+		if r.DryRunExcluded == 1 {
+			installation = "its installation was"
+		}
+		_, _ = fmt.Fprintf(out, "\nnote: %s excluded because %s in dry-run.\n"+
 			"Dry-run executes nothing, so it recovers nothing; these are not counted as capacity\n"+
 			"returned to service. Switch to executionMode: Enabled (confined) to measure real recovery.\n",
-			incidents(r.DryRunExcluded))
+			incidents(r.DryRunExcluded), installation)
 	}
 	if sim := r.Simulated; sim != nil {
 		// Printed AFTER the note above and under its own heading, never
@@ -335,11 +343,52 @@ func printReportIncidents(cmd *cobra.Command, rows []types.RecoveryIncident, tot
 	return w.Flush()
 }
 
+// reportVendor is the incident's vendor, else the resources it recorded
+// when it opened: a TPU or an AWS Neuron incident has no GPU vendor.
 func reportVendor(row types.RecoveryIncident) string {
-	if row.Vendor == "" {
+	if row.Vendor != "" {
+		return string(row.Vendor)
+	}
+	var resources []string
+	for _, a := range row.Accelerators {
+		if !slices.Contains(resources, a.Resource) {
+			resources = append(resources, a.Resource)
+		}
+	}
+	if len(resources) == 0 {
 		return "unknown"
 	}
-	return string(row.Vendor)
+	return strings.Join(resources, ",")
+}
+
+// printClassHours prints each class's hours per resource in the resource's
+// own unit, and in node-hours where no device count was recorded.
+func printClassHours(out io.Writer, classes []types.RecoveryClassReport) error {
+	w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
+	rows := 0
+	for _, class := range classes {
+		for _, g := range class.Groups {
+			for _, r := range g.Resources {
+				if rows == 0 {
+					_, _ = fmt.Fprintln(out, "\nhours per class and resource (not added across resources):")
+					_, _ = fmt.Fprintln(w, "CLASS\tRESOURCE\tDEGRADED\tRECOVERED")
+				}
+				rows++
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s %s\t%s %s\n", class.Class, r.Resource,
+					gpuHours(r.DegradedHours), g.Unit, gpuHours(r.RecoveredHours), g.Unit)
+			}
+		}
+		if u := class.DeviceCountUnknown; u != nil {
+			if rows == 0 {
+				_, _ = fmt.Fprintln(out, "\nhours per class and resource (not added across resources):")
+				_, _ = fmt.Fprintln(w, "CLASS\tRESOURCE\tDEGRADED\tRECOVERED")
+			}
+			rows++
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s node-hours\t%s node-hours\n", class.Class, "device count unknown",
+				gpuHours(u.DegradedNodeHours), gpuHours(u.RecoveredNodeHours))
+		}
+	}
+	return w.Flush()
 }
 
 func reportDuration(row types.RecoveryIncident) string {

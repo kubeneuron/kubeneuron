@@ -19,6 +19,8 @@ type RecoveryIncident struct {
 	State            IncidentState       `json:"state"`
 	DegradedGPUHours float64             `json:"degraded_gpu_hours"`
 	RecoverySeconds  *float64            `json:"recovery_seconds,omitempty"`
+	// Accelerators is what the incident recorded when it opened.
+	Accelerators []IncidentAccelerator `json:"accelerators,omitempty"`
 }
 
 // JobRecoveryTiming measures seconds from the incident opening to each observed result.
@@ -210,6 +212,9 @@ type RecoveryClassReport struct {
 	ObservedOnlyGPUHours float64         `json:"observed_only_gpu_hours"`
 	RecoveredUnattended  int             `json:"recovered_unattended"`
 	MTTR                 RecoveryLatency `json:"mttr"`
+	// AcceleratorHours is this class's hours per accelerator resource, with
+	// no saved estimate and no cost: those are the window's.
+	AcceleratorHours
 }
 
 // RecoveryOpenIncident is an incident still costing capacity at the end of

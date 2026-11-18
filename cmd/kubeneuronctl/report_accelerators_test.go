@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -98,13 +99,22 @@ func TestRecoveryReportTextGolden(t *testing.T) {
 		return types.AcceleratorGroupReport{Group: types.AcceleratorGroupGPU, Unit: "GPU-hours", Resources: rs}
 	}
 	report := func(h types.AcceleratorHours, n int) *types.RecoveryReport {
+		// The class has the window's hours, with no saved estimate.
+		classHours := types.AcceleratorHours{DeviceCountUnknown: h.DeviceCountUnknown}
+		for _, g := range h.Groups {
+			g.Resources = slices.Clone(g.Resources)
+			for i := range g.Resources {
+				g.Resources[i].SavedEstimate = nil
+			}
+			classHours.Groups = append(classHours.Groups, g)
+		}
 		return &types.RecoveryReport{
 			From: to.Add(-168 * time.Hour), To: to, Incidents: n, Recovered: 1, RecoveredUnattended: 1, ObservedOnly: 1,
 			DegradedGPUHours: 20, RecoveredGPUHours: 8, ObservedOnlyGPUHours: 2, Superseded: 0,
 			MTTR:             types.RecoveryLatency{Samples: 1, P50Seconds: p50, P90Seconds: p50, MeanSeconds: p50},
 			SavingsEstimate:  &types.SavingsEstimate{GPUHoursSaved: 3, ManualBaselineSeconds: baseline},
 			IncidentDetails:  []types.RecoveryIncident{{ID: "inc-1", Node: "node-a", Vendor: "nvidia", State: types.IncidentState("RESOLVED"), DegradedGPUHours: 8, RecoverySeconds: &p50}},
-			Classes:          []types.RecoveryClassReport{{Class: "xid-79", Incidents: n, DegradedGPUHours: 20, RecoveredGPUHours: 8, ObservedOnly: 1, RecoveredUnattended: 1, MTTR: types.RecoveryLatency{P50Seconds: p50, P90Seconds: p50}}},
+			Classes:          []types.RecoveryClassReport{{Class: "xid-79", Incidents: n, DegradedGPUHours: 20, RecoveredGPUHours: 8, ObservedOnly: 1, RecoveredUnattended: 1, MTTR: types.RecoveryLatency{P50Seconds: p50, P90Seconds: p50}, AcceleratorHours: classHours}},
 			Open:             []types.RecoveryOpenIncident{{ID: "inc-2", Class: "xid-79", Node: "node-b", State: types.IncidentState("OPEN"), OpenedAt: to.Add(-2 * time.Hour), DegradedGPUHours: 2}},
 			AcceleratorHours: h,
 		}
@@ -115,7 +125,8 @@ func TestRecoveryReportTextGolden(t *testing.T) {
 		Simulated: &types.SimulatedRecovery{Incidents: 1, WouldRecover: 1, DegradedGPUHours: 12, WouldRecoverGPUHours: 6,
 			MTTR:             types.RecoveryLatency{P50Seconds: p50, P90Seconds: p50},
 			WouldHaveSaved:   &types.SavingsEstimate{GPUHoursSaved: 3, ManualBaselineSeconds: baseline},
-			IncidentDetails:  []types.RecoveryIncident{{ID: "inc-3", Node: "tpu-node", State: types.IncidentState("RESOLVED"), DegradedGPUHours: 12, RecoverySeconds: &p50}},
+			IncidentDetails:  []types.RecoveryIncident{{ID: "inc-3", Node: "tpu-node", State: types.IncidentState("RESOLVED"), DegradedGPUHours: 12, RecoverySeconds: &p50,
+				Accelerators: []types.IncidentAccelerator{{Resource: "google.com/tpu", Unit: types.DeviceUnitTPUChip, Count: 4}}}},
 			AcceleratorHours: tpuOnly}}
 	for _, tc := range []struct {
 		name string

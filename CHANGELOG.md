@@ -19,6 +19,13 @@ API is `v1alpha1`.
   recorded count are node-hours apart. `spec.recoveryCostRates` shows the
   saved hours as an estimated cost per resource; there are no default rates.
   Migrations sqlite 0036 / postgres 0027.
+- **Degraded device-seconds per accelerator resource.**
+  `kubeneuron_degraded_accelerator_seconds_total{class,outcome,resource}`
+  counts each closed incident in its resource's own device, from the devices
+  it recorded when it opened; incidents with no recorded count are not
+  charged. The overview dashboard shows it per resource, unstacked. The
+  report's classes count their hours per resource (`classes[].accelerator_groups`)
+  and its incidents list what they recorded (`incident_details[].accelerators`).
 - **Accelerator health view (experimental).** `kubeneuronctl health` and
   `GET /api/v1/accelerator-health` show what the leader last read from every
   accelerator health source, per node, source, rule and device, with the

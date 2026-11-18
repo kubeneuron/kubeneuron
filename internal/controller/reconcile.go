@@ -1045,6 +1045,11 @@ func (c *Controller) recordRecoveryOutcome(ctx context.Context, inc *types.Incid
 	}
 	metrics.DegradedGPUSeconds.WithLabelValues(class, outcome).
 		Add(duration * float64(c.affectedGPUs(ctx, inc)))
+	for _, a := range inc.Accelerators {
+		if a.Count > 0 {
+			metrics.DegradedAcceleratorSeconds.WithLabelValues(class, outcome, a.Resource).Add(duration * float64(a.Count))
+		}
+	}
 }
 
 // DegradedGPUs reports how many accelerators sit under a non-terminal,

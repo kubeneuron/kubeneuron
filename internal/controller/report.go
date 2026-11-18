@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -383,6 +384,7 @@ func aggregateRecoverySubset(incidents []*types.Incident, inv reportInventory, r
 	type classAccum struct {
 		row       types.RecoveryClassReport
 		durations []float64
+		accel     *acceleratorAccum
 	}
 	classes := map[types.ProblemClass]*classAccum{}
 	var mttrSamples []float64
@@ -441,7 +443,7 @@ func aggregateRecoverySubset(incidents []*types.Incident, inv reportInventory, r
 
 		acc := classes[inc.Class]
 		if acc == nil {
-			acc = &classAccum{row: types.RecoveryClassReport{Class: inc.Class}}
+			acc = &classAccum{row: types.RecoveryClassReport{Class: inc.Class}, accel: newAcceleratorAccum()}
 			classes[inc.Class] = acc
 		}
 		report.Incidents++
@@ -449,7 +451,8 @@ func aggregateRecoverySubset(incidents []*types.Incident, inv reportInventory, r
 		acc.row.Incidents++
 		acc.row.DegradedGPUHours += hours
 
-		detail := types.RecoveryIncident{ID: inc.ID, Node: inc.Target.Node, Vendor: inc.Vendor, State: inc.State, DegradedGPUHours: roundHours(hours)}
+		detail := types.RecoveryIncident{ID: inc.ID, Node: inc.Target.Node, Vendor: inc.Vendor, State: inc.State, DegradedGPUHours: roundHours(hours),
+			Accelerators: slices.Clone(inc.Accelerators)}
 		switch {
 		case inc.State == types.StateSuperseded:
 			accelState = accelSuperseded
@@ -499,6 +502,7 @@ func aggregateRecoverySubset(incidents []*types.Incident, inv reportInventory, r
 			}
 		}
 		accel.add(inc, span, accelState, recoveryDevice(inc), accelRecoveredSpan, accelSavedSpan)
+		acc.accel.add(inc, span, accelState, recoveryDevice(inc), accelRecoveredSpan, nil)
 		report.IncidentDetails = append(report.IncidentDetails, detail)
 		if !inc.State.Terminal() {
 			report.Open = append(report.Open, types.RecoveryOpenIncident{
@@ -533,6 +537,7 @@ func aggregateRecoverySubset(incidents []*types.Incident, inv reportInventory, r
 		acc.row.ObservedOnlyGPUHours = roundHours(acc.row.ObservedOnlyGPUHours)
 		acc.row.SupersededGPUHours = roundHours(acc.row.SupersededGPUHours)
 		acc.row.MTTR = summarizeLatency(acc.durations)
+		acc.row.AcceleratorHours = acc.accel.result(0, nil)
 		report.Classes = append(report.Classes, acc.row)
 	}
 	// Cost ranking first, then class name: a stable order keeps two runs over

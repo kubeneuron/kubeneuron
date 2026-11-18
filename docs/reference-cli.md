@@ -156,6 +156,11 @@ degraded, per class, per incident and in the simulated block) are printed only
 for a window whose incidents are all of one GPU resource with a recorded
 device count. For any other window, hours are shown only in the table per
 resource and in the node-hours block; the other lines show counts and times.
+Under the problem classes, such a window lists each class's hours per
+resource, in the resource's unit, and in node-hours where no device count was
+recorded; there is no saved estimate or cost per class. The incident list
+shows, for an incident with no GPU vendor, the resources it recorded when it
+opened (for example `google.com/tpu`).
 
 **Cost equivalent (estimate).** Set `spec.recoveryCostRates` to show the saved
 hours of a resource as a cost:
