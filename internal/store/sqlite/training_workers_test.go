@@ -164,3 +164,27 @@ func TestTrainingConfirmationPreservesFirstAdvance(t *testing.T) {
 		}
 	}
 }
+
+func TestTrainingConfirmationDistinguishesSilentAndReportingJobs(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := t.Context()
+	impactIncident(t, s, "i")
+	now := time.Now().UTC()
+	if err := s.SaveTrainingReport(ctx, "i", "reporting", "pod", checkpoint.TrainingReport{Kind: "checkpoint", CheckpointID: "epoch1"}, now); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.TrainingConfirmations(ctx, "i", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stamp, ok := got["reporting"]; !ok || !stamp.IsZero() {
+		t.Fatalf("missing reporting job without progress: %v", got)
+	}
+	if _, ok := got["silent"]; ok {
+		t.Fatal("silent job counted as reporting")
+	}
+}

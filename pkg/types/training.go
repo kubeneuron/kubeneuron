@@ -64,6 +64,7 @@ func GroupAffectedJobs(workers []TrainingWorker) []AffectedJob {
 // TrainingRecoverySnapshot carries independently established observations.
 // Nil values encode unknown, including for incidents that predate the contract.
 type TrainingRecoverySnapshot struct {
+	ProgressStatus                 string     `json:"progress_status,omitempty"`
 	InfrastructureReadyAt          *time.Time `json:"infrastructure_ready_at"`
 	ProgressConfirmedAt            *time.Time `json:"progress_confirmed_at"`
 	CheckpointAgeAtDecisionSeconds *int64     `json:"checkpoint_age_at_decision_seconds"`

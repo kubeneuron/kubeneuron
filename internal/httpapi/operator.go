@@ -618,9 +618,14 @@ func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
 		for i := range detail.AffectedJobs {
 			job := &detail.AffectedJobs[i]
 			job.Recovery.InfrastructureReadyAt = readyAt
+			job.Recovery.ProgressStatus = "unknown"
 			if job.Owner != nil {
 				if at, ok := confirmations[job.Owner.UID]; ok {
-					job.Recovery.ProgressConfirmedAt = &at
+					job.Recovery.ProgressStatus = "not_confirmed"
+					if !at.IsZero() {
+						job.Recovery.ProgressStatus = "confirmed"
+						job.Recovery.ProgressConfirmedAt = &at
+					}
 				}
 			}
 		}
