@@ -62,6 +62,9 @@ func TestObserveSuccessor(t *testing.T) {
 			if !errors.Is(err, want) || result.ProviderID != "" || result.Phase != cloud.SuccessorRequested {
 				t.Fatalf("got %+v, %v; want %v", result, err, want)
 			}
+			if err := reader.ReleaseSuccessor(t.Context(), s); !errors.Is(err, cloud.ErrNeedsOperator) {
+				t.Fatalf("release with increased desired: %v", err)
+			}
 			history[""].Activities = append(history[""].Activities, a)
 		}
 	})
@@ -87,7 +90,7 @@ func TestObserveSuccessor(t *testing.T) {
 	}
 
 	terminator.calls = 0
-	if err := p.ReleaseSuccessor(t.Context(), s); err != nil || terminator.calls != 1 {
+	if err := p.ReleaseSuccessor(t.Context(), s); !errors.Is(err, cloud.ErrNeedsOperator) || terminator.calls != 0 {
 		t.Fatalf("release before candidate ID persisted: err=%v calls=%d", err, terminator.calls)
 	}
 	planned := s

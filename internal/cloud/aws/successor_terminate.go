@@ -171,11 +171,15 @@ func (p *managedProvider) releaseRequestedSuccessor(ctx context.Context, s cloud
 	}
 	if update.Status == et.UpdateStatusSuccessful {
 		created, err := p.observeSuccessor(ctx, s)
+		if errors.Is(err, cloud.ErrReplacementCapacity) {
+			return fmt.Errorf("%w: ASG %s still has increased desired capacity after a failed launch; inspect pending launches before restoring desired to %s", cloud.ErrNeedsOperator, s.Pool, s.State["before"])
+		}
 		if err != nil {
 			return err
 		}
 		if created.Phase == cloud.SuccessorCreated {
-			return p.releaseCreatedSuccessor(ctx, created)
+			// The controller could not check workloads without a persisted provider ID.
+			return fmt.Errorf("%w: successor %s appeared before its identity was saved; check its workloads before removing it", cloud.ErrNeedsOperator, created.ProviderID)
 		}
 	}
 	return fmt.Errorf("%w: scaling update ended without a confirmed successor or restored group", cloud.ErrNeedsOperator)
