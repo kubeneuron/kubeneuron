@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -72,5 +73,34 @@ func TestTrainingProgressRetryAndRetention(t *testing.T) {
 	var count int
 	if err := s.sqlDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM training_progress").Scan(&count); err != nil || count != 0 {
 		t.Fatalf("count %d err %v", count, err)
+	}
+}
+
+func TestTrainingCheckpointReceipts(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := t.Context()
+	impactIncident(t, s, "incident")
+	start := time.Now().UTC()
+	for _, kind := range []string{"checkpoint", "resume"} {
+		r := checkpoint.TrainingReport{Kind: kind, CheckpointID: "epoch-1"}
+		for _, received := range []time.Time{start, start.Add(time.Minute)} {
+			if err := s.SaveTrainingReport(ctx, "incident", "job", "pod", r, received); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	var count int
+	if err := s.sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM training_checkpoint_facts WHERE received_at=? AND step IS NULL`, start.Format(time.RFC3339Nano)).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("original receipts: %d, %v", count, err)
+	}
+	if _, err := s.sqlDB.ExecContext(ctx, "DELETE FROM incidents WHERE id='incident'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.sqlDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM training_checkpoint_facts").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("after deletion: %d, %v", count, err)
 	}
 }
