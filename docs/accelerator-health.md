@@ -43,7 +43,10 @@ unrelated to the AWS Neuron SDK.
 
 The incident's target is the node. When the agent has already opened the
 same class for one of the node's devices, the node's signal is recorded on
-that incident instead, and no second incident opens.
+that incident instead, and no second incident opens. When the node incident
+opens first, later agent reports for identified GPUs on that node join the
+open incident of the same class. Its audit records each reporting GPU UUID,
+and its playbook continues from the current step.
 
 ## Classes
 

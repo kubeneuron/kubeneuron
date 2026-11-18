@@ -529,6 +529,9 @@ API is `v1alpha1`.
 
 ### Changed
 
+- Agent reports from multiple GPUs can join one open node incident of the
+  same class. The incident audit records the reporting GPU UUIDs.
+
 - **The default rule pack is plain PromQL.** The recording rules and
   `gpu-rules.yaml` used MetricsQL functions (`bitmap_and`, `label_del`,
   `median`) that only vmalert and VictoriaMetrics accept, so Prometheus
