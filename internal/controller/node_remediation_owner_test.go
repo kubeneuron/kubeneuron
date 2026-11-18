@@ -57,6 +57,18 @@ func TestRepairFollowerDoesNotCordonOrRequestApproval(t *testing.T) {
 			t.Errorf("drains %v replacements %v, want one each", p.drained, p.plain)
 		}
 	}
+	var waits int
+	for _, entry := range trail(t, st, follower.ID) {
+		if entry.Action == "wait-for-node-repair" {
+			waits++
+			if entry.Params["owner_id"] != first.ID {
+				t.Fatalf("wait recorded owner %q, want %q", entry.Params["owner_id"], first.ID)
+			}
+		}
+	}
+	if waits != 1 {
+		t.Fatalf("wait audit entries = %d, want one", waits)
+	}
 	checkCalls()
 	owner, err := st.GetIncident(ctx, first.ID)
 	if err != nil {

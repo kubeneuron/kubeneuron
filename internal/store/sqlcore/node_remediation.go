@@ -6,6 +6,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"time"
+
+	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
 // ClaimNodeRemediation records the first owner or links the incident to the
@@ -29,8 +32,28 @@ func (q *Queries) ClaimNodeRemediation(ctx context.Context, node, uid, incidentI
 		return "", err
 	}
 	if owner != incidentID {
-		_, err := q.db.ExecContext(ctx, `INSERT INTO node_remediation_followers (incident_id, owner_id)
- VALUES (?, ?) ON CONFLICT (incident_id) DO UPDATE SET owner_id=excluded.owner_id`, incidentID, owner)
+		res, err := q.db.ExecContext(ctx, `INSERT INTO node_remediation_followers (incident_id, owner_id)
+ VALUES (?, ?) ON CONFLICT (incident_id) DO NOTHING`, incidentID, owner)
+		if err != nil {
+			return "", err
+		}
+		inserted, err := res.RowsAffected()
+		if err != nil {
+			return "", err
+		}
+		if inserted == 0 {
+			err := q.db.QueryRowContext(ctx, "SELECT owner_id FROM node_remediation_followers WHERE incident_id=?", incidentID).Scan(&owner)
+			return owner, err
+		}
+		inc, err := q.GetIncident(ctx, incidentID)
+		if err != nil {
+			return "", err
+		}
+		err = q.AppendAudit(ctx, &types.AuditEntry{
+			IncidentID: incidentID, Time: time.Now(), FromState: inc.State, ToState: inc.State,
+			Actor: "system", Action: "wait-for-node-repair", Params: map[string]string{"owner_id": owner},
+			Result: "node repair is owned by incident " + owner,
+		})
 		if err != nil {
 			return "", err
 		}
