@@ -14,9 +14,12 @@ import (
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/agent/gpuhealth"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -152,5 +155,44 @@ func TestArchivedEventSurvivesControllerRestartAndStillOpensItsIncident(t *testi
 	}
 	if len(incidents) != 1 || incidents[0].Class != types.ClassECCDBE {
 		t.Fatalf("incidents after restart = %+v, want the orphaned event's ecc-dbe incident", incidents)
+	}
+}
+
+func TestDCGMHardwareXIDOpensIncidentWithoutKernelLog(t *testing.T) {
+	c, st, _ := miniController(t, pipelineEngine(t))
+	dcgmi := filepath.Join(t.TempDir(), "dcgmi")
+	const fixture = `#!/bin/sh
+[ "$*" = "dmon --host hostengine:5555 -e 230 -c 1" ] || exit 1
+echo '#Entity XIDERRORS'
+echo 'GPU 0 79'
+`
+	if err := os.WriteFile(dcgmi, []byte(fixture), 0700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	watcher := gpuhealth.Watcher{NodeName: "n1", DCGMPath: dcgmi, DCGMEndpoint: "hostengine:5555"}
+	events, err := watcher.Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-events:
+		if event.XID != 79 {
+			t.Fatalf("got XID %d, want 79", event.XID)
+		}
+		if err := c.HandleAgentEvent(httptest.NewRequest("POST", "/api/v1/events", nil), event); err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for DCGM XID")
+	}
+	c.drainEventOutbox(ctx)
+	incidents, err := st.ListIncidents(ctx, store.IncidentFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(incidents) != 1 || incidents[0].Class != types.ClassFellOffBus || incidents[0].Target.Node != "n1" {
+		t.Fatalf("got incidents %+v, want one fell-off-bus incident on n1", incidents)
 	}
 }
