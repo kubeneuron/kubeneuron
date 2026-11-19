@@ -3,6 +3,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -386,5 +387,34 @@ func TestPolicyHeldIncidentLeavesRepairAvailable(t *testing.T) {
 	defer p.mu.Unlock()
 	if ids := p.cordoned["n1"]; len(ids) != 1 || ids[0] != other.ID || len(p.drained) != 1 || len(p.plain) != 1 {
 		t.Fatalf("cordons=%v drains=%v replacements=%v", ids, p.drained, p.plain)
+	}
+}
+
+func TestExecutingTransactionExcludesDrainAndGPUReset(t *testing.T) {
+	c, st, _ := walkFixture(t, false)
+	ctx := t.Context()
+	for _, id := range []string{"device", "drain"} {
+		inc := &types.Incident{ID: id, Target: types.Target{Node: "n1", GPUUUID: id}, Class: types.ClassFellOffBus, State: types.StateEvaluating, RepairNodeUID: "uid"}
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := func(id, wire string) error {
+		return c.transitionWithRepairStep(ctx, mustIncident(t, st, id), types.StateExecuting, "system", wire, auditStepStartResult(wire), nil, wire, false)
+	}
+	if err := start("device", "agent.gpu_reset"); err != nil {
+		t.Fatal(err)
+	}
+	if err := start("drain", "platform.drain"); !errors.Is(err, errRepairStepBusy) {
+		t.Fatalf("drain admission=%v", err)
+	}
+	if got := mustIncident(t, st, "drain"); got.State != types.StateEvaluating {
+		t.Fatalf("blocked drain state=%s", got.State)
+	}
+	if err := c.transitionWithRepairStep(ctx, mustIncident(t, st, "device"), types.StateVerifying, "system", "reset", "done", nil, "", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := start("drain", "platform.drain"); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -243,8 +243,12 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 	// proof of a side effect: a DryRun reload may stop the action at its final
 	// boundary. runStep appends the actual outcome before it changes state; the
 	// recovery report reads that outcome rather than this start record.
-	if err := c.transition(ctx, inc, types.StateExecuting, actor, step.Name,
-		auditStepStartResult(step.Action), step.Params); err != nil {
+	wire := step.Action
+	if c.simulating(ctx, inc) {
+		wire = ""
+	}
+	if err := c.transitionWithRepairStep(ctx, inc, types.StateExecuting, actor, step.Name,
+		auditStepStartResult(step.Action), step.Params, wire, false); err != nil {
 		if warning {
 			return err
 		}
@@ -255,6 +259,9 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 			// halting transition this incident may never take from here.
 			inc.RemediationSlotHeld = false
 			c.gate.ReleaseRemediation(inc.Target)
+		}
+		if errors.Is(err, errRepairStepBusy) {
+			return nil
 		}
 		return err
 	}
@@ -359,7 +366,7 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 		next = types.StateVerifying
 		note = "playbook complete; verifying quiet window"
 	}
-	if err := c.transition(ctx, inc, next, "system", step.Name, firstNonBlank(output, note), step.Params); err != nil {
+	if err := c.transitionWithRepairStep(ctx, inc, next, "system", step.Name, firstNonBlank(output, note), step.Params, "", true); err != nil {
 		c.log.Error("post-step transition failed", "incident", inc.ID, "err", err)
 		return
 	}
@@ -927,4 +934,19 @@ func okResult(inc *types.Incident, output string) *types.ActionResult {
 		StartedAt:  now,
 		FinishedAt: now,
 	}
+}
+
+func repairStepScope(wire string) (device, guarded bool) {
+	def, ok := action.ByWire(wire)
+	if !ok {
+		return false, false
+	}
+	if def.Scope == action.ScopeGPU {
+		return true, def.Destructive || def.AgentDestructive
+	}
+	switch wire {
+	case "platform.drain", "platform.replace_node", "platform.recycle_node", "agent.reboot":
+		return false, true
+	}
+	return false, false
 }

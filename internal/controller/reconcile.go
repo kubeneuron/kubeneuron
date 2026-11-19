@@ -970,7 +970,13 @@ func (c *Controller) recoverOrphanedExecution(ctx context.Context, inc *types.In
 
 // transition applies a validated state change and persists the incident and
 // its audit entry in one store transaction (the statemachine contract).
+var errRepairStepBusy = errors.New("another repair step is active on the node")
+
 func (c *Controller) transition(ctx context.Context, inc *types.Incident, to types.IncidentState, actor, action, result string, params map[string]string) error {
+	return c.transitionWithRepairStep(ctx, inc, to, actor, action, result, params, "", false)
+}
+
+func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.Incident, to types.IncidentState, actor, action, result string, params map[string]string, wire string, completed bool) error {
 	from := inc.State
 	if err := playbook.Transition(inc, to); err != nil {
 		return err
@@ -1038,6 +1044,22 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 		}
 		if fresh.State != from || !fresh.StateChangedAt.Equal(fence) {
 			return store.ErrConflict
+		}
+		if completed {
+			if err := tx.ReleaseRepairStep(ctx, inc.ID); err != nil {
+				return err
+			}
+		} else if wire != "" {
+			device, guarded := repairStepScope(wire)
+			if uid := repairNodeUID(fresh); guarded && uid != "" {
+				admitted, err := tx.ClaimRepairStep(ctx, fresh.Target.Node, uid, inc.ID, device)
+				if err != nil {
+					return err
+				}
+				if !admitted {
+					return errRepairStepBusy
+				}
+			}
 		}
 		if to.Halted() {
 			release = release && fresh.RemediationSlotHeld
