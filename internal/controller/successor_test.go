@@ -434,7 +434,7 @@ func TestAddFirstAmbiguousSuccessorGoesToAnOperator(t *testing.T) {
 func TestAddFirstUnavailablePoolHoldsWithTheReason(t *testing.T) {
 	p := newSuccessorPlatform()
 	p.unavailable = fmt.Errorf("%w: agent pool train is at its maximum size", cloud.ErrAddFirstUnavailable)
-	c, st, _ := successorFixture(t, recoverymode.Automatic, p, "")
+	c, st, notifier := successorFixture(t, recoverymode.Automatic, p, "")
 	id := openOn(t, c, "n1")
 	inc := step(t, c, st, id, 20)
 	entries := trail(t, st, id)
@@ -443,6 +443,27 @@ func TestAddFirstUnavailablePoolHoldsWithTheReason(t *testing.T) {
 	}
 	if !auditHas(entries, "recovery-unavailable", "maximum size") {
 		t.Fatalf("the hold does not carry the provider's reason%s", dump(entries))
+	}
+
+	notifications := 0
+	for _, event := range notifier.events {
+		if strings.Contains(event.Message, "maximum size") {
+			notifications++
+		}
+	}
+	if notifications != 1 {
+		t.Fatalf("got %d pool hold notifications after 20 passes", notifications)
+	}
+	for _, action := range []string{"notify-pending", "notified"} {
+		count := 0
+		for _, entry := range entries {
+			if entry.Action == action {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("got %d %s rows", count, action)
+		}
 	}
 }
 

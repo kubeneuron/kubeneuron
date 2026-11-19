@@ -74,21 +74,21 @@ const (
 
 // policyRecoveryPreflight returns a hold reason or a skip reason for the
 // step, or neither.
-func (c *Controller) policyRecoveryPreflight(ctx context.Context, inc *types.Incident, step *playbook.Step) (hold, skip string) {
+func (c *Controller) policyRecoveryPreflight(ctx context.Context, inc *types.Incident, step *playbook.Step) (hold, skip string, notifyHold bool) {
 	pol := c.incidentPolicy(ctx, inc)
 	addFirst := pol.ReplacementStrategy.Effective() == recoverymode.AddFirst
 	switch step.Action {
 	case "platform.replace_node":
 		if addFirst {
-			if hold := c.addFirstHold(ctx, inc, step); hold != "" {
-				return hold, ""
+			if hold, notifyHold := c.addFirstHold(ctx, inc, step); hold != "" {
+				return hold, "", notifyHold
 			}
 		} else if hold := c.removeFirstHold(ctx, inc, step); hold != "" {
-			return hold, ""
+			return hold, "", false
 		}
 	case "platform.recycle_node":
 		if !pol.RecycleEnabled {
-			return "", recycleNotEnabled
+			return "", recycleNotEnabled, false
 		}
 	case "platform.cordon", "platform.drain", "platform.evict_gpu_workload":
 		path := c.cloudRecoveryPath(ctx, inc.Playbook)
@@ -99,31 +99,34 @@ func (c *Controller) policyRecoveryPreflight(ctx context.Context, inc *types.Inc
 			// path may disrupt the node until a successor is ready or the
 			// policy names remove-first. Only a rung that replaces the node
 			// itself prepares a successor.
-			if hold := c.addFirstHold(ctx, inc, step); hold != "" {
-				return hold, ""
+			if hold, notifyHold := c.addFirstHold(ctx, inc, step); hold != "" {
+				return hold, "", notifyHold
 			}
 		case path.replace:
 			// The same for remove-first: a provider that cannot replace this
 			// node by removing it first says so before the node is disrupted.
 			if hold := c.removeFirstHold(ctx, inc, step); hold != "" {
-				return hold, ""
+				return hold, "", false
 			}
 		case path.recycle && !path.replace && !pol.RecycleEnabled:
-			return "recovery unavailable: " + recycleNotEnabled + ", and the path has no replace step; the node is not cordoned or drained", ""
+			return "recovery unavailable: " + recycleNotEnabled + ", and the path has no replace step; the node is not cordoned or drained", "", false
 		}
 		if !pol.RecycleEnabled && c.rungRecycle(ctx, inc) != nil {
-			return "", recycleNotEnabled
+			return "", recycleNotEnabled, false
 		}
 	}
-	return "", ""
+	return "", "", false
 }
 
 // holdOrSkipByPolicy applies the preflight at the authorization boundary.
 // It reports whether it handled the step.
 func (c *Controller) holdOrSkipByPolicy(ctx context.Context, inc *types.Incident, step *playbook.Step) (bool, error) {
-	hold, skip := c.policyRecoveryPreflight(ctx, inc, step)
+	hold, skip, notifyHold := c.policyRecoveryPreflight(ctx, inc, step)
 	if hold != "" {
 		c.deferStep(inc, step, metrics.DeferRecoveryUnavailable)
+		if notifyHold && !c.simulating(ctx, inc) {
+			return true, c.notifyAddFirstHold(ctx, inc, step.Name, hold)
+		}
 		c.logOnceStepUnavailable(inc, step, hold)
 		return true, nil
 	}

@@ -110,8 +110,11 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 	// the incident is superseded whatever the policy would have said.
 	// A step the policy would skip is not started either: skipping is the
 	// boundary's move, here it holds.
-	if hold, skip := c.policyRecoveryPreflight(ctx, inc, step); hold != "" || skip != "" {
+	if hold, skip, notifyHold := c.policyRecoveryPreflight(ctx, inc, step); hold != "" || skip != "" {
 		c.deferStep(inc, step, metrics.DeferRecoveryUnavailable)
+		if notifyHold && !c.simulating(ctx, inc) {
+			return c.notifyAddFirstHold(ctx, inc, step.Name, hold)
+		}
 		c.logOnceStepUnavailable(inc, step, firstNonBlank(hold, "recovery unavailable: "+skip))
 		return nil
 	}

@@ -118,25 +118,25 @@ func (c *Controller) rungAddsFirst(ctx context.Context, inc *types.Incident, pol
 }
 
 // addFirstHold is why the step must wait under an add-first policy, or "".
-func (c *Controller) addFirstHold(ctx context.Context, inc *types.Incident, step *playbook.Step) string {
+func (c *Controller) addFirstHold(ctx context.Context, inc *types.Incident, step *playbook.Step) (string, bool) {
 	if successorReady(inc) {
-		return ""
+		return "", false
 	}
 	if step.Action == "platform.replace_node" {
 		// A simulation prepares no successor; it replaces wherever the
 		// live run could have prepared one.
 		if c.simulating(ctx, inc) && c.addFirstAvailable(ctx, inc) == nil {
-			return ""
+			return "", false
 		}
-		return "recovery unavailable: no prepared replacement is ready for this node, and the policy does not name remove-first"
+		return "recovery unavailable: no prepared replacement is ready for this node, and the policy does not name remove-first", false
 	}
 	if !c.successorStep(ctx, inc, step) {
-		return "recovery unavailable: " + addFirstUnavailable + "; the node is not cordoned or drained"
+		return "recovery unavailable: " + addFirstUnavailable + "; the node is not cordoned or drained", false
 	}
 	if err := c.addFirstAvailable(ctx, inc); err != nil {
-		return "recovery unavailable: " + addFirstReason(err) + "; the node is not cordoned or drained"
+		return "recovery unavailable: " + addFirstReason(err) + "; the node is not cordoned or drained", errors.Is(err, cloud.ErrAddFirstUnavailable)
 	}
-	return ""
+	return "", false
 }
 
 func addFirstReason(err error) string {
