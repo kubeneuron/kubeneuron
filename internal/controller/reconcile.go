@@ -644,6 +644,20 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 		return err
 	}
 	if inc.UpdatedAt.After(inc.StateChangedAt) {
+		entries, err := c.store.AuditTrail(ctx, inc.ID)
+		if err != nil {
+			return err
+		}
+		for i := len(entries) - 1; i >= 0; i-- {
+			entry := entries[i]
+			if entry.FromState == entry.ToState || entry.ToState != types.StateVerifying {
+				continue
+			}
+			if entry.Action == "verify-owner-replacement" {
+				return c.quarantine(ctx, inc, "signal recurred after replacement verified by incident "+entry.Params["owner_id"])
+			}
+			break
+		}
 		return c.escalate(ctx, inc, "verification failed: signal recurred during quiet window")
 	}
 	if time.Since(inc.StateChangedAt) < c.runtimeConfig(ctx).VerifyQuiet {

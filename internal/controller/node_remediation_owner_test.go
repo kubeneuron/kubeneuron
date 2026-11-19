@@ -84,6 +84,14 @@ func TestRepairFollowerDoesNotCordonOrRequestApproval(t *testing.T) {
 	}
 	waitSettled(t, c, st, follower.ID, func(i *types.Incident) bool { return i.State == types.StateVerifying })
 	checkCalls()
+	if err := c.IngestSignal(ctx, followerSignal); err != nil {
+		t.Fatal(err)
+	}
+	got := step(t, c, st, follower.ID, 20)
+	if got.State != types.StateNeedsHuman || !auditHas(trail(t, st, follower.ID), "quarantine", first.ID) {
+		t.Fatalf("recurring follower signal: state=%s audit=%s", got.State, dump(trail(t, st, follower.ID)))
+	}
+	checkCalls()
 }
 
 func configureRepairClasses(t *testing.T, c *Controller) {
