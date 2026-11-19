@@ -69,8 +69,8 @@ func (q *Queries) ReleaseNodeRemediation(ctx context.Context, incidentID string)
 }
 
 // ReleaseRepairFollowers lets each waiting incident seek a new authorization
-// when the owner expired before executing any step.
-func (q *Queries) ReleaseRepairFollowers(ctx context.Context, ownerID string, at time.Time) error {
+// when approval ended before the owner executed a step.
+func (q *Queries) ReleaseRepairFollowers(ctx context.Context, ownerID string, at time.Time, reason string) error {
 	rows, err := q.db.QueryContext(ctx, "DELETE FROM node_remediation_followers WHERE owner_id=? RETURNING incident_id", ownerID)
 	if err != nil {
 		return err
@@ -95,7 +95,7 @@ func (q *Queries) ReleaseRepairFollowers(ctx context.Context, ownerID string, at
 		if err != nil {
 			return err
 		}
-		if err := q.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: at, Actor: "system", Action: "node-repair-released", FromState: inc.State, ToState: inc.State, Params: map[string]string{"owner_id": ownerID}, Result: "previous repair owner expired before execution"}); err != nil {
+		if err := q.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: at, Actor: "system", Action: "node-repair-released", FromState: inc.State, ToState: inc.State, Params: map[string]string{"owner_id": ownerID}, Result: "previous owner released repair before execution: " + reason}); err != nil {
 			return err
 		}
 	}

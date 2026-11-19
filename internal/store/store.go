@@ -86,7 +86,7 @@ type Tx interface {
 	// ClaimNodeRemediation returns the winning incident ID for this Node identity.
 	ClaimNodeRemediation(ctx context.Context, node, uid, incidentID string) (string, error)
 	ReleaseNodeRemediation(ctx context.Context, incidentID string) error
-	ReleaseRepairFollowers(ctx context.Context, ownerID string, at time.Time) error
+	ReleaseRepairFollowers(ctx context.Context, ownerID string, at time.Time, reason string) error
 	// GetOpenIncident reads the current non-terminal incident for a target and
 	// problem class through the same transaction as its subsequent mutation.
 	// It is deliberately the only incident read exposed on Tx today: event

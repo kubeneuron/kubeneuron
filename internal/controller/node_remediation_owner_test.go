@@ -153,6 +153,13 @@ func TestAutomaticRepairFollowerDoesNotRepeatReplacement(t *testing.T) {
 }
 
 func TestInventoryNodeUIDSharesRepairApprovalWithoutCloudIdentity(t *testing.T) {
+	for _, ending := range []string{"expired", "rejected"} {
+		t.Run(ending, func(t *testing.T) { checkInventoryRepairApproval(t, ending) })
+	}
+}
+
+func checkInventoryRepairApproval(t *testing.T, ending string) {
+	t.Helper()
 	c, st, notifier := walkFixture(t, false)
 	ctx := t.Context()
 	if err := st.UpsertNode(ctx, &types.Node{Name: "n1", UID: "inventory-uid"}); err != nil {
@@ -218,11 +225,21 @@ func TestInventoryNodeUIDSharesRepairApprovalWithoutCloudIdentity(t *testing.T) 
 	if got := step(t, c, st, third.ID, 10); got.State != types.StateNeedsHuman || len(notifier.approvals) != 1 {
 		t.Fatalf("missing node: state=%s approvals=%d", got.State, len(notifier.approvals))
 	}
-	c.SetTimings(0, time.Nanosecond)
-	drive(t, c, st, owner, types.StateExpired)
+	wantReason := "no decision"
+	if ending == "rejected" {
+		inc := mustIncident(t, st, owner)
+		if err := c.DecideApproval(ctx, owner, "alice", "reject cordon", types.ApprovalRejected, inc.ApprovalEpoch, "", ""); err != nil {
+			t.Fatal(err)
+		}
+		waitSettled(t, c, st, owner, func(i *types.Incident) bool { return i.State == types.StateNeedsHuman })
+		wantReason = "approval rejected"
+	} else {
+		c.SetTimings(0, time.Nanosecond)
+		drive(t, c, st, owner, types.StateExpired)
+	}
 	c.SetTimings(0, time.Hour)
 	got := drive(t, c, st, followerID, types.StateAwaitingApproval)
-	if got.StepIndex != 0 || len(notifier.approvals) != 2 || !auditHas(trail(t, st, followerID), "node-repair-released", "expired") {
+	if got.StepIndex != 0 || len(notifier.approvals) != 2 || !auditHas(trail(t, st, followerID), "node-repair-released", wantReason) {
 		t.Fatalf("new owner step=%d approvals=%d audit=%s", got.StepIndex, len(notifier.approvals), dump(trail(t, st, followerID)))
 	}
 	if status := types.RecoveryAvailabilityFromAudit(trail(t, st, followerID)); status != nil && status.Source == "node-repair" {

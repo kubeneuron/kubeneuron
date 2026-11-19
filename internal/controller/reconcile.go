@@ -1051,13 +1051,14 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 			return err
 		}
 		releaseRepair := from == types.StateVerifying && to == types.StateResolved
-		if from == types.StateAwaitingApproval && to == types.StateExpired && !fresh.Successor.Open() && !fresh.RemoveFirst.Open() {
+		approvalEnded := from == types.StateAwaitingApproval && (to == types.StateExpired || (to == types.StateNeedsHuman && result == "approval rejected"))
+		if approvalEnded && !fresh.Successor.Open() && !fresh.RemoveFirst.Open() {
 			entries, err := tx.AuditTrail(ctx, inc.ID)
 			if err != nil {
 				return err
 			}
 			// A rewound playbook can be at step zero after an earlier
-			// execution. Only release on expiry when no step ever started.
+			// execution. Only release when no step ever started.
 			releaseRepair = true
 			for _, entry := range entries {
 				if entry.ToState == types.StateExecuting {
@@ -1066,8 +1067,8 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 				}
 			}
 		}
-		if releaseRepair && to == types.StateExpired {
-			if err := tx.ReleaseRepairFollowers(ctx, inc.ID, now); err != nil {
+		if releaseRepair && approvalEnded {
+			if err := tx.ReleaseRepairFollowers(ctx, inc.ID, now, result); err != nil {
 				return err
 			}
 		}
