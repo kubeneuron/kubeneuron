@@ -1,4 +1,4 @@
 Incident inc-owner is closed.
-Repair of node worker is still blocked: the cloud replace operation started at 2026-11-18T12:00:00Z (operation op-1) (pool training) has no confirmed outcome.
+Repair of node worker is still blocked: the cloud replace operation started at 2026-11-18T12:00:00Z (operation op-1, pool training) has no confirmed outcome.
 Check the operation in AWS. Once you have verified that it completed or was canceled, run:
   kubeneuronctl resolve inc-owner --cloud-operation-settled --reason "<what you verified>"

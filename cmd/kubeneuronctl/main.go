@@ -278,6 +278,7 @@ func cmdIncidents() *cobra.Command {
 			return err
 		}
 		var detail struct {
+			RecoveryAvailability      *types.RecoveryAvailability  `json:"recovery_availability"`
 			Incident                  *types.Incident              `json:"incident"`
 			Audit                     []*types.AuditEntry          `json:"audit"`
 			Evidence                  *types.IncidentEvidence      `json:"evidence"`
@@ -315,7 +316,11 @@ func cmdIncidents() *cobra.Command {
 		if detail.ObserveOnly != "" {
 			_, _ = fmt.Fprintf(out, "observe:   %s\n", detail.ObserveOnly)
 		}
-		if recovery := types.RecoveryAvailabilityFromAudit(detail.Audit); recovery != nil {
+		recovery := detail.RecoveryAvailability
+		if recovery == nil {
+			recovery = types.RecoveryAvailabilityFromAudit(detail.Audit)
+		}
+		if recovery != nil {
 			_, _ = fmt.Fprintf(out, "recovery:  %s [%s] (assessed %s)\nreason:    %s\n", recovery.Status, recovery.Source, recovery.ObservedAt.Format(time.RFC3339), recovery.Reason)
 		}
 		for _, line := range authorisations(detail.Audit) {

@@ -1,0 +1,4 @@
+Incident inc-owner is closed.
+Repair of node worker is still blocked: the cloud remove-first operation started at 2026-11-18T12:00:00Z (operation op-1, pool training) has no confirmed outcome.
+Check the operation in Google Cloud. Once you have verified that it completed or was canceled, run:
+  kubeneuronctl resolve inc-owner --cloud-operation-settled --reason "<what you verified>"

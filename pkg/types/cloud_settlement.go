@@ -29,11 +29,15 @@ func (inc *Incident) CloudSettlementHint() string {
 	if !started.IsZero() {
 		detail = " started at " + started.UTC().Format(time.RFC3339)
 	}
+	var identifiers []string
 	if operation != "" {
-		detail += " (operation " + operation + ")"
+		identifiers = append(identifiers, "operation "+operation)
 	}
 	if pool != "" {
-		detail += " (pool " + pool + ")"
+		identifiers = append(identifiers, "pool "+pool)
+	}
+	if len(identifiers) > 0 {
+		detail += " (" + strings.Join(identifiers, ", ") + ")"
 	}
 	provider := "your cloud provider"
 	if inc.CloudIdentity != nil {

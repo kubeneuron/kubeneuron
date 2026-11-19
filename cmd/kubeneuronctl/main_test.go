@@ -135,22 +135,33 @@ func TestIncidentShowPolicyHoldAndRecovery(t *testing.T) {
 }
 
 func TestResolveCloudSettlementHint(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" || r.URL.Path != "/api/v1/incidents/inc-owner/resolve" {
-			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
-		}
-		_ = json.NewEncoder(w).Encode(types.Incident{ID: "inc-owner", State: types.StateResolved, Target: types.Target{Node: "worker"}, CloudIdentity: &cloud.NodeIdentity{ProviderID: "aws:///zone/i-old"}, Successor: &types.SuccessorRecord{Outcome: types.SuccessorHandedOver, Successor: cloud.Successor{Operation: "op-1", Pool: "training", RequestedAt: time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)}}})
-	}))
-	defer server.Close()
-	got, err := runCommand(t, server.URL, "resolve", "inc-owner")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, err := os.ReadFile("testdata/cloud-settlement.golden")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != string(want) {
-		t.Fatalf("resolve output:\n%s", got)
+	for _, golden := range []string{"cloud-settlement.golden", "cloud-settlement-remove-first.golden"} {
+		t.Run(golden, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "POST" || r.URL.Path != "/api/v1/incidents/inc-owner/resolve" {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+				incident := types.Incident{ID: "inc-owner", State: types.StateResolved, Target: types.Target{Node: "worker"}, CloudIdentity: &cloud.NodeIdentity{ProviderID: "aws:///zone/i-old"}, Successor: &types.SuccessorRecord{Outcome: types.SuccessorHandedOver, Successor: cloud.Successor{Operation: "op-1", Pool: "training", RequestedAt: time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)}}}
+				if strings.Contains(golden, "remove-first") {
+					s := incident.Successor
+					incident.Successor = nil
+					incident.CloudIdentity.ProviderID = "gce://project/zone/node"
+					incident.RemoveFirst = &types.RemoveFirstRecord{Outcome: types.RemoveFirstNeedsOperator, RemoveFirstPlan: cloud.RemoveFirstPlan{Operation: s.Operation, Pool: s.Pool, PlannedAt: s.RequestedAt}}
+				}
+				_ = json.NewEncoder(w).Encode(incident)
+			}))
+			defer server.Close()
+			got, err := runCommand(t, server.URL, "resolve", "inc-owner")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := os.ReadFile("testdata/" + golden)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != string(want) {
+				t.Fatalf("resolve output:\n%s", got)
+			}
+		})
 	}
 }

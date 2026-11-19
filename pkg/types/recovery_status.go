@@ -7,6 +7,7 @@ import "time"
 // RecoveryAvailability is the last recorded eligibility assessment, not a
 // current authorization or evidence that recovery succeeded.
 type RecoveryAvailability struct {
+	OwnerID    string    `json:"owner_id,omitempty"`
 	Source     string    `json:"source"`
 	Status     string    `json:"status"`
 	Reason     string    `json:"reason"`
@@ -46,6 +47,9 @@ func RecoveryAvailabilityFromAudit(trail []*AuditEntry) *RecoveryAvailability {
 		}
 		seen[source] = true
 		assessment := &RecoveryAvailability{Source: source, Status: status, Reason: e.Result, ObservedAt: e.Time}
+		if source == "node-repair" {
+			assessment.OwnerID = e.Params["owner_id"]
+		}
 		// A satisfied condition cannot clear another condition's denial.
 		if status == "unavailable" {
 			return assessment

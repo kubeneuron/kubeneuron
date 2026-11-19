@@ -600,6 +600,14 @@ func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail := IncidentDetail{Incident: inc, Audit: audit, RecoveryAvailability: types.RecoveryAvailabilityFromAudit(audit)}
+	if recovery := detail.RecoveryAvailability; recovery != nil && recovery.OwnerID != "" {
+		owner, _, err := s.operator.IncidentDetail(r.Context(), recovery.OwnerID)
+		if err == nil && owner != nil {
+			if hint := owner.CloudSettlementHint(); hint != "" {
+				recovery.Reason += "\n" + hint
+			}
+		}
+	}
 	detail.NodeConditions, detail.NodeConditionsUnavailable = latestNodeConditions(audit)
 	detail.Evidence = evidence.Latest(audit)
 	if reason, ok := detect.ObserveOnly(inc.Class); ok {
