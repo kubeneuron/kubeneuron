@@ -1086,6 +1086,14 @@ clusters are observe-only. See
 [Replacing GPU nodes on GKE](cloud-gcp.md) for setup, the roles and what the
 step deletes.
 
+When a live add-first eligibility check refuses recovery, the controller holds
+the step and sends a best-effort notification with the reason. Check the
+incident details in the panel or run `kubeneuronctl incidents show <id>` to
+see the recorded reason and audit trail. After the pool is corrected, the
+controller resumes the same incident once its cached eligibility check expires.
+A restart between notification dispatch and acknowledgement can repeat the
+notification.
+
 Without a cloud provider configured at all, a `RecycleNode`/`ReplaceNode` step
 fails closed with a clear message rather than reporting a node recycled that was
 never touched.
