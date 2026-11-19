@@ -39,17 +39,23 @@ func TestCheckAddFirstRequiresEKSBackingGroup(t *testing.T) {
 	for _, tc := range []struct {
 		name, cluster, backing string
 		eligible               bool
+		autoscalerTag          string
 	}{
-		{"confirmed", "training", "workers", true},
-		{"foreign cluster", "other", "workers", false},
-		{"tagged self-managed ASG", "training", "different-asg", false},
+		{"confirmed", "training", "workers", true, ""},
+		{"autoscaler enabled", "training", "workers", false, "k8s.io/cluster-autoscaler/enabled"},
+		{"autoscaler cluster", "training", "workers", false, "k8s.io/cluster-autoscaler/training"},
+		{"foreign cluster", "other", "workers", false, ""},
+		{"tagged self-managed ASG", "training", "different-asg", false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			group := at.AutoScalingGroup{
 				AutoScalingGroupARN: sdk.String("asg-arn"), AutoScalingGroupName: sdk.String("workers"), DesiredCapacity: sdk.Int32(1), MaxSize: sdk.Int32(2),
 				AvailabilityZones: []string{"zone-a"},
 				Instances:         []at.Instance{{InstanceId: sdk.String("i-pinned"), AvailabilityZone: sdk.String("zone-a"), LifecycleState: at.LifecycleStateInService}},
-				Tags:              []at.TagDescription{{Key: sdk.String("eks:nodegroup-name"), Value: sdk.String("gpu")}, {Key: sdk.String("k8s.io/cluster-autoscaler/enabled"), Value: sdk.String("true")}},
+				Tags:              []at.TagDescription{{Key: sdk.String("eks:nodegroup-name"), Value: sdk.String("gpu")}},
+			}
+			if tc.autoscalerTag != "" {
+				group.Tags = append(group.Tags, at.TagDescription{Key: sdk.String(tc.autoscalerTag)})
 			}
 			eksGroup := et.Nodegroup{NodegroupArn: sdk.String("group-arn"), ClusterName: sdk.String(tc.cluster), NodegroupName: sdk.String("gpu"), Status: et.NodegroupStatusActive,
 				Resources: &et.NodegroupResources{AutoScalingGroups: []et.AutoScalingGroup{{Name: sdk.String(tc.backing)}}}}
@@ -89,7 +95,7 @@ func TestVerifySuccessorBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plan.RequestedAt = time.Unix(990, 0)
+	plan.RequestedAt = time.Unix(1030, 0) // Controller clock leads the EKS update time by 30 seconds.
 	if err = p.verifySuccessorBaseline(t.Context(), plan); err != nil {
 		t.Fatal(err)
 	}

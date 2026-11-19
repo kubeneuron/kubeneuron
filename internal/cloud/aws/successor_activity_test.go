@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,5 +64,16 @@ func TestCheckSuccessorActivityPages(t *testing.T) {
 	pages["p2"] = &autoscaling.DescribeScalingActivitiesOutput{NextToken: sdk.String("p2")}
 	if err := checkSuccessorActivities(t.Context(), pages, s, "i-new"); !errors.Is(err, cloud.ErrNeedsOperator) {
 		t.Fatalf("repeated token: %v", err)
+	}
+
+	token := ""
+	for n := 1; n <= 20; n++ {
+		next := strconv.Itoa(n)
+		pages[token] = &autoscaling.DescribeScalingActivitiesOutput{NextToken: &next}
+		token = next
+	}
+	pages[token] = &autoscaling.DescribeScalingActivitiesOutput{Activities: []at.Activity{launch}}
+	if err := checkSuccessorActivities(t.Context(), pages, s, "i-new"); !errors.Is(err, cloud.ErrNeedsOperator) || !strings.Contains(err.Error(), "activity history too long") {
+		t.Fatalf("21 pages: %v", err)
 	}
 }

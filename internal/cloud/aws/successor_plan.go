@@ -21,7 +21,10 @@ import (
 
 // planSuccessor records the baseline from an already verified EKS backing group.
 func planSuccessor(s cloud.Successor, group at.AutoScalingGroup) (cloud.Successor, error) {
-	if len(group.AvailabilityZones) != 1 || group.AvailabilityZones[0] == "" {
+	if len(group.AvailabilityZones) > 1 {
+		return s, fmt.Errorf("%w: node group spans several zones; use a single-zone node group or explicitly choose terminate-first for this pool", cloud.ErrAddFirstUnavailable)
+	}
+	if len(group.AvailabilityZones) == 0 || group.AvailabilityZones[0] == "" {
 		return s, fmt.Errorf("%w: add-first requires a single availability zone", cloud.ErrAddFirstUnavailable)
 	}
 	if group.DesiredCapacity == nil || group.MaxSize == nil || *group.DesiredCapacity < 1 || *group.DesiredCapacity >= *group.MaxSize {
@@ -76,7 +79,10 @@ func (p *managedProvider) readSuccessorPlan(ctx context.Context, s cloud.Success
 	group := groups.AutoScalingGroups[0]
 	var nodegroup string
 	for _, tag := range group.Tags {
-		if sdk.ToString(tag.Key) == "eks:nodegroup-name" {
+		switch sdk.ToString(tag.Key) {
+		case "k8s.io/cluster-autoscaler/enabled", "k8s.io/cluster-autoscaler/" + p.cluster:
+			return s, fmt.Errorf("%w: ASG carries a Cluster Autoscaler discovery tag", cloud.ErrAddFirstUnavailable)
+		case "eks:nodegroup-name":
 			nodegroup = sdk.ToString(tag.Value)
 		}
 	}

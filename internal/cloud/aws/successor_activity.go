@@ -15,8 +15,13 @@ import (
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
+const successorClockSkew = time.Minute
+
 var launchCapacityFailure = regexp.MustCompile(`\b(InsufficientInstanceCapacity|InstanceLimitExceeded|VcpuLimitExceeded)\b`)
 
+// AWS shows free-form Cause and Description examples at
+// https://docs.aws.amazon.com/autoscaling/ec2/APIReference/API_DescribeScalingActivities.html .
+// The exact wording matched here is a fixture assumption pending live EKS validation.
 var desiredTransition = regexp.MustCompile(`\bdesired capacity from ([0-9]+) to ([0-9]+)\b`)
 
 // confirmSuccessorLaunch expects the complete activity window for the pinned ASG.
@@ -26,7 +31,7 @@ func confirmSuccessorLaunch(s cloud.Successor, candidate string, activities []at
 	if err != nil || before < 1 || s.RequestedAt.IsZero() || s.State["asg_arn"] == "" {
 		return fmt.Errorf("%w: incomplete launch evidence", cloud.ErrNeedsOperator)
 	}
-	cutoff := s.RequestedAt.Add(-time.Minute)
+	cutoff := s.RequestedAt.Add(-successorClockSkew)
 	matched := false
 	capacityFailure := false
 	for _, a := range activities {
@@ -74,9 +79,9 @@ func checkSuccessorActivities(ctx context.Context, client activityReader, s clou
 	}
 	in := &autoscaling.DescribeScalingActivitiesInput{AutoScalingGroupName: &s.Pool, MaxRecords: sdk.Int32(100)}
 	seen := map[string]bool{}
-	cutoff := s.RequestedAt.Add(-time.Minute)
+	cutoff := s.RequestedAt.Add(-successorClockSkew)
 	var recent []at.Activity
-	for {
+	for range 20 {
 		page, err := client.DescribeScalingActivities(ctx, in)
 		if err != nil {
 			return err
@@ -104,4 +109,5 @@ func checkSuccessorActivities(ctx context.Context, client activityReader, s clou
 		seen[token] = true
 		in.NextToken = page.NextToken
 	}
+	return fmt.Errorf("%w: activity history too long", cloud.ErrNeedsOperator)
 }

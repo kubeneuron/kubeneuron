@@ -50,7 +50,7 @@ func sendScaleRequest(ctx context.Context, client nodegroupUpdater, cluster stri
 	}
 	if replay {
 		u := out.Update
-		if u.CreatedAt == nil || u.CreatedAt.After(started) || u.CreatedAt.Before(s.RequestedAt) || u.Type != et.UpdateTypeConfigUpdate || len(u.Params) != 1 || u.Params[0].Type != et.UpdateParamTypeDesiredSize || sdk.ToString(u.Params[0].Value) != strconv.FormatInt(before+1, 10) {
+		if u.CreatedAt == nil || u.CreatedAt.After(started) || u.CreatedAt.Before(s.RequestedAt.Add(-successorClockSkew)) || u.Type != et.UpdateTypeConfigUpdate || len(u.Params) != 1 || u.Params[0].Type != et.UpdateParamTypeDesiredSize || sdk.ToString(u.Params[0].Value) != strconv.FormatInt(before+1, 10) {
 			return s, fmt.Errorf("%w: EKS update %s does not confirm the original scaling request", cloud.ErrNeedsOperator, *u.Id)
 		}
 	}

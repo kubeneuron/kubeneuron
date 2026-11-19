@@ -11,7 +11,7 @@ The plan records the managed node group's ARN, its backing Auto Scaling group's
 ARN, the availability zone, the original desired capacity and the EC2 instance
 IDs. Planning requires one zone and room below the group's maximum size. In a
 multi-zone group the new instance could land outside the zone required by a
-training job's volume.
+training job's volume. Use a single-zone group or explicitly select terminate-first for that pool. Planning also refuses groups with Cluster Autoscaler discovery tags.
 
 The scaling request sets desired capacity to the recorded value plus one and
 uses a client token derived from the operation ID. Before accepting a successor,
@@ -19,6 +19,20 @@ the provider checks the EKS update, the group's membership and its scaling
 activities. All original instances must still be present. Exactly one additional
 instance must be in service, with a matching successful launch in the activity
 history.
+
+## Permissions and preflight
+
+The read-only preflight checks the managed node group and its backing Auto Scaling group. Write permissions are first exercised when requesting growth and terminating an instance.
+
+| Actions | IAM resource |
+| --- | --- |
+| `eks:DescribeNodegroup`, `eks:UpdateNodegroupConfig`, `eks:DescribeUpdate` for the node group update | Managed node group ARN |
+| `autoscaling:DescribeAutoScalingInstances`, `autoscaling:DescribeAutoScalingGroups`, `autoscaling:DescribeScalingActivities` | `*` |
+| `autoscaling:TerminateInstanceInAutoScalingGroup` | Backing Auto Scaling group ARN |
+
+See the AWS authorization references for [EKS](https://docs.aws.amazon.com/service-authorization/latest/reference/list_eks.html) and [EC2 Auto Scaling](https://docs.aws.amazon.com/service-authorization/latest/reference/list_autoscaling.html).
+
+After replacement, the last desired size requested through EKS is the original size plus one. Termination decrements the backing group's desired capacity to the original size. EKS can temporarily show the higher value. When updating the node group's scaling configuration, explicitly setting the intended desired size reconciles the two.
 
 ## When cleanup needs an operator
 
