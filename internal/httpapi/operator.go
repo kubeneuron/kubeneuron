@@ -422,6 +422,7 @@ func (s *Server) registerOperatorRoutes(mux routeMux) {
 	mux.HandleFunc("GET /api/v1/nodes/{node}/evidence", s.requireOperator(s.handleNodeEvidence))
 	mux.HandleFunc("GET /api/v1/nodes/{node}/health-checks", s.requireOperator(s.handleListNodeHealthChecks))
 	mux.HandleFunc("GET /api/v1/nodes/{node}/accelerators", s.requireOperator(s.handleAcceleratorReports))
+	mux.HandleFunc("GET "+types.PoolAvailabilityPath, s.requireOperator(s.handlePoolAvailability))
 	mux.HandleFunc("GET "+types.AcceleratorHealthPath, s.requireOperator(s.handleAcceleratorHealth))
 	mux.HandleFunc("GET /api/v1/nodes/{node}/runtime-contract", s.requireOperator(s.handleNodeRuntimeContract))
 	mux.HandleFunc("GET /api/v1/nodes/{node}/topology", s.requireOperator(s.handleNodeTopology))
@@ -959,6 +960,23 @@ func (s *Server) handleAcceleratorReports(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, reports)
+}
+
+// handlePoolAvailability reads the leader's cached assessments. An operator
+// request never initiates a cloud check.
+func (s *Server) handlePoolAvailability(w http.ResponseWriter, _ *http.Request) {
+	if !s.isLeader() {
+		http.Error(w, "pool assessments are held by the elected leader", http.StatusServiceUnavailable)
+		return
+	}
+	backend, ok := s.operator.(interface {
+		PoolAvailability() types.PoolAvailabilityView
+	})
+	if !ok {
+		http.Error(w, "pool assessments unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, backend.PoolAvailability())
 }
 
 // handleAcceleratorHealth serves what the controller last read from every

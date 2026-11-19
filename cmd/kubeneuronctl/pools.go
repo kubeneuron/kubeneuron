@@ -20,9 +20,7 @@ func cmdPools() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var view struct {
-				Pools []types.PoolAvailability `json:"pools"`
-			}
+			var view types.PoolAvailabilityView
 			if err := client.do("GET", types.PoolAvailabilityPath, nil, &view); err != nil {
 				return err
 			}

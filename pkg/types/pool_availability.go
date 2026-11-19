@@ -6,6 +6,11 @@ import "time"
 
 const PoolAvailabilityPath = "/api/v1/pools"
 
+// PoolAvailabilityView contains the most recent assessments of accelerator pools.
+type PoolAvailabilityView struct {
+	Pools []PoolAvailability `json:"pools"`
+}
+
 // PoolAvailability describes the leader's latest assessment of an accelerator pool.
 type PoolAvailability struct {
 	Pool              string     `json:"pool"`
