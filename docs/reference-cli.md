@@ -103,7 +103,7 @@ there were, in the dry-run simulation too.
 with an audited remediation step followed by a verified resolution. Overlapping
 intervals on one GPU count once. Manual closures and observe-only incidents
 are excluded. It measures degraded time that ended in a verified recovery, not
-capacity confirmed to be serving work again.
+capacity confirmed to be serving work again. A replacement counts as recovered when the new node is confirmed at the depth available for its accelerator; the resolution of each incident says which.
 
 **Degraded GPU-hours** sums each incident's time within the selected window
 multiplied by its affected GPU count. A degraded GPU may still serve work.

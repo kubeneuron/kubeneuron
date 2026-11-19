@@ -36,12 +36,15 @@ API is `v1alpha1`.
   [Kernel log from the node's journal](docs/install.md#kernel-log-from-the-nodes-journal).
 - **An incident resolves after a cloud replacement.** After a replace step
   succeeds, the incident is verified on the node that took the target's
-  place. Under add-first, that is the accepted successor. Under remove-first,
-  it is the only node of the old node's pool created after the delete. The
-  depth of the check depends on the vendor, and the resolution names the new
-  node and what was confirmed. Without that evidence by the deadline, the
-  incident goes to a person with what is missing. Before, every replacement
-  ended in `NEEDS_HUMAN`. See
+  place. Under add-first, that is the node the cloud operation named. Under
+  remove-first, it is the only node whose UID was not in the pool before
+  the delete. Where several nodes joined, the incident goes to a person and
+  is not counted recovered. What is confirmed follows the accelerators the
+  incident covered, and the resolution, the RESOLVED notification and
+  `incidents show` name the new node. Without that evidence by the
+  deadline, the incident goes to a person with what is missing. Before,
+  every replacement ended in `NEEDS_HUMAN`. Tested with a simulated
+  provider only. See
   [Verification after a replacement](docs/playbook-authoring.md#verification-after-a-replacement).
 - **AWS Neuron faults from the agent, off by default (experimental).** The
   fault table maps three codes of vendor `aws` (`hbm-ecc-uncorrectable`,

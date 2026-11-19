@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -58,13 +59,21 @@ type cloudReplacement struct {
 	// label and pool name the target's pool, recorded before a remove-first
 	// delete; empty when it could not be read.
 	label, pool string
+	// members are the UIDs of the pool's nodes before the delete; nil when
+	// they could not be read.
+	members []string
+	// agent is whether the replaced node ran an agent, so its replacement is
+	// expected to.
+	agent bool
 	// since is when the new node's evidence may start: the successor's
 	// acceptance, or the moment before the remove-first delete.
 	since time.Time
 }
 
 // recordReplacementPool writes, before a remove-first delete, which pool the
-// target belongs to: once it is deleted, its labels are gone with it. A pool
+// target belongs to and the UIDs of the pool's nodes: once it is deleted, its
+// labels are gone with it, and a node whose UID is not in that set is one
+// that joined after. It also records whether the target ran an agent. A pool
 // already recorded for this replacement step is not written again.
 func (c *Controller) recordReplacementPool(ctx context.Context, inc *types.Incident, pin cloud.NodeIdentity) error {
 	observer, ok := c.platform.(platform.CloudNodeObserver)
@@ -98,11 +107,31 @@ func (c *Controller) recordReplacementPool(ctx context.Context, inc *types.Incid
 			break
 		}
 	}
+	params := map[string]string{"label": label, "pool": pool, "node": pin.Node, "node_uid": pin.NodeUID}
+	if lister, ok := c.platform.(platform.PoolNodeLister); ok {
+		members, err := lister.PoolNodes(ctx, label, pool)
+		if err != nil {
+			return err
+		}
+		uids := make([]string, 0, len(members)+1)
+		for _, n := range members {
+			uids = append(uids, n.UID)
+		}
+		if !slices.Contains(uids, pin.NodeUID) {
+			uids = append(uids, pin.NodeUID)
+		}
+		slices.Sort(uids)
+		params["member_uids"] = strings.Join(uids, ",")
+	}
+	if registered, err := c.store.GetNode(ctx, pin.Node); err == nil && registered != nil &&
+		registered.InventorySource != types.InventoryKubernetes && !registered.AgentLastSeen.IsZero() {
+		params["agent"] = "true"
+	}
 	return c.store.AppendAudit(ctx, &types.AuditEntry{
 		IncidentID: inc.ID, Time: time.Now(), FromState: inc.State, ToState: inc.State, Actor: "system",
 		Action: replacementPoolAction, DryRun: inc.DryRun,
-		Result: fmt.Sprintf("removing %s from pool %s; the node that takes its place is looked for there", pin.Node, pool),
-		Params: map[string]string{"label": label, "pool": pool, "node": pin.Node, "node_uid": pin.NodeUID},
+		Result: fmt.Sprintf("removing %s from pool %s; the node that joins the pool after it is looked for there", pin.Node, pool),
+		Params: params,
 	})
 }
 
@@ -138,136 +167,179 @@ func (c *Controller) findCloudReplacement(ctx context.Context, inc *types.Incide
 		return nil, nil
 	}
 	if s := inc.Successor; s != nil && s.Outcome == types.SuccessorReplaced && s.ReadyAt != nil {
-		found.successor, found.since = s, *s.ReadyAt
+		// The successor's agent registered before it was accepted.
+		found.successor, found.since, found.agent = s, *s.ReadyAt, true
 		return found, nil
 	}
 	if pool != nil {
 		found.label, found.pool, found.since = pool.Params["label"], pool.Params["pool"], pool.Time
+		found.agent = pool.Params["agent"] == "true"
+		if uids := pool.Params["member_uids"]; uids != "" {
+			found.members = strings.Split(uids, ",")
+		}
 	}
 	return found, nil
 }
 
 // verifyReplacement verifies the node that took the target's place: it is
 // there, Ready, the one the replacement is tied to, and its agent reports its
-// accelerators since. It returns the depth of what was confirmed, or why it
-// waits, and the evidence the resolution records.
+// accelerators since. It returns what was confirmed, or why it waits, and the
+// evidence the resolution records.
 func (c *Controller) verifyReplacement(ctx context.Context, inc *types.Incident, r *cloudReplacement) (bool, string, map[string]string) {
-	node, how, reason := c.replacementNode(ctx, inc, r)
+	node, found, reason := c.replacementNode(ctx, inc, r)
 	if reason != "" {
 		return false, reason, nil
 	}
-	ok, depth := c.verifyReplacementInventory(ctx, inc, node, r.since)
+	ok, depth := c.verifyReplacementInventory(ctx, inc, node, r)
 	if !ok {
 		return false, depth, nil
 	}
-	return true, fmt.Sprintf("replaced by node %s (%s): %s", node.Name, how, depth), map[string]string{
+	how := replacementByPool
+	if r.successor != nil {
+		how = replacementBySuccessor
+	}
+	return true, found + " " + depth, map[string]string{
 		"infrastructure_evidence": replacementInfrastructureEvidence,
 		"replacement_node":        node.Name,
 		"replacement_node_uid":    node.UID,
-		"replacement_correlation": map[bool]string{true: replacementBySuccessor, false: replacementByPool}[r.successor != nil],
+		"replacement_correlation": how,
 	}
 }
 
-// replacementNode finds the node that took the target's place, and says how
-// it is tied to the replacement.
+// replacementNode finds the node that took the target's place, and says in
+// one sentence how it was found.
 func (c *Controller) replacementNode(ctx context.Context, inc *types.Incident, r *cloudReplacement) (platform.SuccessorNode, string, string) {
 	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	if s := r.successor; s != nil {
 		plat, ok := c.platform.(platform.SuccessorNodeRecycler)
 		if !ok {
-			return platform.SuccessorNode{}, "", "the successor node cannot be read on this platform"
+			return platform.SuccessorNode{}, "", "The successor node cannot be read on this platform."
 		}
 		node, err := plat.SuccessorNode(readCtx, s.ProviderID)
 		switch {
 		case err != nil:
-			return node, "", "the successor node could not be read"
+			return node, "", fmt.Sprintf("New node %s could not be read.", s.Node)
 		case !node.Found:
-			return node, "", fmt.Sprintf("successor node %s is not in the cluster", s.Node)
+			return node, "", fmt.Sprintf("New node %s is not in the cluster.", s.Node)
 		case node.Name != s.Node || node.UID != s.NodeUID:
-			return node, "", fmt.Sprintf("the node at the successor's instance is no longer %s as accepted", s.Node)
+			return node, "", fmt.Sprintf("New node %s is no longer the node the cloud operation named.", s.Node)
 		}
-		return node, "successor of operation " + s.Operation, ""
+		return node, fmt.Sprintf("Replaced by node %s, named by the cloud operation.", node.Name), ""
 	}
 	if r.pool == "" {
-		return platform.SuccessorNode{}, "", "the replaced node's pool was not recorded, so no node can be tied to the replacement"
+		return platform.SuccessorNode{}, "", "The replaced node's pool was not recorded, so no node can be tied to the replacement."
+	}
+	if r.members == nil {
+		return platform.SuccessorNode{}, "", fmt.Sprintf("The nodes of pool %s before the removal were not recorded, so no node can be tied to the replacement.", r.pool)
 	}
 	lister, ok := c.platform.(platform.PoolNodeLister)
 	if !ok {
-		return platform.SuccessorNode{}, "", "the pool's nodes cannot be read on this platform"
+		return platform.SuccessorNode{}, "", "The pool's nodes cannot be read on this platform."
 	}
 	members, err := lister.PoolNodes(readCtx, r.label, r.pool)
 	if err != nil {
-		return platform.SuccessorNode{}, "", fmt.Sprintf("the nodes of pool %s could not be read", r.pool)
+		return platform.SuccessorNode{}, "", fmt.Sprintf("The nodes of pool %s could not be read.", r.pool)
 	}
-	var created []platform.SuccessorNode
+	// A node is new by its UID: a group can recreate an instance under the
+	// old node's name, and the cluster's and the controller's clocks differ.
+	var joined []platform.SuccessorNode
 	for _, n := range members {
-		if n.Name == inc.Target.Node || (inc.CloudIdentity != nil && n.UID == inc.CloudIdentity.NodeUID) || !n.CreatedAt.After(r.since) {
-			continue
+		if n.UID != "" && !slices.Contains(r.members, n.UID) {
+			joined = append(joined, n)
 		}
-		created = append(created, n)
 	}
-	switch len(created) {
+	switch len(joined) {
 	case 0:
-		return platform.SuccessorNode{}, "", fmt.Sprintf("no node of pool %s was created after the removal", r.pool)
+		return platform.SuccessorNode{}, "", fmt.Sprintf("No node joined pool %s after the removal.", r.pool)
 	case 1:
 	default:
-		names := make([]string, 0, len(created))
-		for _, n := range created {
-			names = append(names, n.Name)
-		}
-		return platform.SuccessorNode{}, "", fmt.Sprintf("ambiguous: %d nodes of pool %s were created after the removal (%s)", len(created), r.pool, strings.Join(names, ", "))
+		return platform.SuccessorNode{}, "", fmt.Sprintf("Several nodes joined pool %s after the removal. KubeNeuron could not determine which one replaced the node.", r.pool)
 	}
-	node := created[0]
+	node := joined[0]
+	return node, fmt.Sprintf("Node %s is Ready. It was the only node that joined pool %s after the removal.", node.Name, r.pool), ""
+}
+
+// lacksCapacity says why node offers fewer accelerators than the incident
+// covered, or "" when it offers at least as many.
+func lacksCapacity(inc *types.Incident, node platform.SuccessorNode) string {
 	for _, a := range inc.Accelerators {
 		if node.Allocatable[a.Resource] < a.Count {
-			return node, "", fmt.Sprintf("node %s has %d allocatable %s, fewer than the %d the incident covered", node.Name, node.Allocatable[a.Resource], a.Resource, a.Count)
+			return fmt.Sprintf("New node %s has %d allocatable %s, fewer than the %d the incident covered.", node.Name, node.Allocatable[a.Resource], a.Resource, a.Count)
 		}
 	}
-	return node, "the only node of pool " + r.pool + " created after the removal", ""
+	return ""
+}
+
+// replacementReportVendor is the vendor whose agent report the new node is
+// expected to send, from the accelerators the incident covered, and false
+// when no agent of this build sends a report for them. An incident that
+// recorded neither reads NVIDIA, as verifyRuntimeEvidence does.
+func replacementReportVendor(inc *types.Incident) (types.AcceleratorVendor, bool) {
+	if inc.Vendor.Valid() && reportingVendors[inc.Vendor] {
+		return inc.Vendor, true
+	}
+	for _, a := range inc.Accelerators {
+		switch {
+		case strings.HasPrefix(a.Resource, "nvidia.com/"):
+			return types.AcceleratorVendorNVIDIA, true
+		case strings.HasPrefix(a.Resource, "aws.amazon.com/neuron"):
+			return types.AcceleratorVendorAWS, true
+		}
+	}
+	if inc.Vendor.Valid() || len(inc.Accelerators) > 0 {
+		return inc.Vendor, false
+	}
+	return types.AcceleratorVendorNVIDIA, true
 }
 
 // verifyReplacementInventory reads the new node's accelerators from its
-// agent's report, at the depth the incident's vendor allows. A vendor no
-// agent of this build reports is verified on the node being Ready and its
-// agent's heartbeat, and the depth says the devices were not checked.
-func (c *Controller) verifyReplacementInventory(ctx context.Context, inc *types.Incident, node platform.SuccessorNode, since time.Time) (bool, string) {
+// agent's report, at the depth the vendor allows. Where no report can come
+// (a vendor no agent of this build reports, or a pool whose nodes run no
+// agent), it confirms the node's readiness and its advertised accelerators,
+// and the agent's heartbeat when the replaced node ran one.
+func (c *Controller) verifyReplacementInventory(ctx context.Context, inc *types.Incident, node platform.SuccessorNode, r *cloudReplacement) (bool, string) {
 	if !node.Ready {
-		return false, fmt.Sprintf("replacement node %s is not Ready", node.Name)
+		return false, fmt.Sprintf("New node %s is not Ready.", node.Name)
 	}
 	if node.Unschedulable {
-		return false, fmt.Sprintf("replacement node %s is not schedulable", node.Name)
+		return false, fmt.Sprintf("New node %s is not schedulable.", node.Name)
 	}
-	vendor := inc.Vendor
-	if !vendor.Valid() {
-		vendor = types.AcceleratorVendorNVIDIA
+	if reason := lacksCapacity(inc, node); reason != "" {
+		return false, reason
 	}
+	vendor, reported := replacementReportVendor(inc)
 	now := time.Now()
-	if !reportingVendors[vendor] {
-		registered, err := c.store.GetNode(ctx, node.Name)
-		if err != nil || registered == nil || registered.UID != node.UID ||
-			!registered.AgentLastSeen.After(since) || now.Sub(registered.AgentLastSeen) > verifyEvidenceMaxAge {
-			return false, fmt.Sprintf("no agent on replacement node %s has reported since the replacement", node.Name)
+	if !reported || !r.agent {
+		if len(inc.Accelerators) == 0 && r.successor == nil {
+			return false, fmt.Sprintf("The incident recorded no accelerators to compare new node %s against.", node.Name)
 		}
-		return true, fmt.Sprintf("the node is Ready and its agent reports; this build reads no %s accelerator report, so its devices were not checked", vendor)
+		if r.agent {
+			registered, err := c.store.GetNode(ctx, node.Name)
+			if err != nil || registered == nil || registered.UID != node.UID ||
+				!registered.AgentLastSeen.After(r.since) || now.Sub(registered.AgentLastSeen) > verifyEvidenceMaxAge {
+				return false, fmt.Sprintf("No agent on new node %s has reported since the replacement.", node.Name)
+			}
+		}
+		return true, "Verification used Kubernetes node readiness and advertised accelerator capacity."
 	}
 	reports, ok := c.store.(store.AcceleratorReportStore)
 	if !ok {
-		return false, "accelerator report store is unavailable"
+		return false, "The accelerator report store is unavailable."
 	}
 	report, err := reports.GetAcceleratorReport(ctx, node.Name, vendor)
-	if err != nil || report == nil || report.NodeUID != node.UID || !report.ObservedAt.After(since) ||
+	if err != nil || report == nil || report.NodeUID != node.UID || !report.ObservedAt.After(r.since) ||
 		report.ObservedAt.After(now) || now.Sub(report.ObservedAt) > verifyEvidenceMaxAge {
-		return false, fmt.Sprintf("no fresh %s accelerator report from replacement node %s since the replacement", vendor, node.Name)
+		return false, fmt.Sprintf("No fresh accelerator report from new node %s.", node.Name)
 	}
-	if !inventoryMatches(report, "", since, now) {
-		return false, fmt.Sprintf("the %s accelerator report of replacement node %s shows no ready devices (readiness %s)", vendor, node.Name, report.Readiness)
+	if !inventoryMatches(report, "", r.since, now) {
+		return false, fmt.Sprintf("New node %s reports no accelerator devices.", node.Name)
 	}
 	switch report.Readiness {
 	case types.AcceleratorReadinessDegraded:
-		return true, "accelerator inventory and driver probe observed; DCGM not present, device health not checked"
+		return true, "Accelerator inventory and driver probe observed; DCGM not present, device health not checked."
 	case types.AcceleratorReadinessObserved:
-		return true, "fresh accelerator inventory observed: device presence observed; runtime not attested"
+		return true, "Device presence observed; runtime not attested."
 	}
-	return true, "fresh accelerator inventory and driver health observed"
+	return true, "Fresh accelerator inventory and driver health observed."
 }

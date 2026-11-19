@@ -745,9 +745,14 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 	if c.flap != nil {
 		c.flap.RecordResolved(inc.Target, inc.Class)
 	}
+	message := fmt.Sprintf("incident resolved after %s quiet window", c.runtimeConfig(ctx).VerifyQuiet)
+	if evidence["replacement_node"] != "" {
+		// The operator sees what replaced the node and what was confirmed.
+		message += ". " + depth
+	}
 	return c.notifier.Notify(ctx, notify.NotifyEvent{
 		Kind: notify.EventResolved, Incident: inc,
-		Message: fmt.Sprintf("incident resolved after %s quiet window", c.runtimeConfig(ctx).VerifyQuiet),
+		Message: message,
 	})
 }
 

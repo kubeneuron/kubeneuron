@@ -165,3 +165,23 @@ func TestResolveCloudSettlementHint(t *testing.T) {
 		})
 	}
 }
+
+// incidents show names the node that replaced the target, from the
+// resolution's evidence, and how it was found.
+func TestReplacementLineNamesTheNewNode(t *testing.T) {
+	resolve := func(correlation string) *types.AuditEntry {
+		return &types.AuditEntry{FromState: types.StateVerifying, ToState: types.StateResolved, Actor: "system", Action: "resolve",
+			Params: map[string]string{"infrastructure_evidence": "verified_replacement_node", "replacement_node": "n9",
+				"replacement_node_uid": "uid-n9", "replacement_correlation": correlation}}
+	}
+	if got, want := replacementLine([]*types.AuditEntry{resolve("successor")}), "replaced:  node n9 (uid uid-n9), named by the cloud operation"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if got, want := replacementLine([]*types.AuditEntry{resolve("pool")}), "replaced:  node n9 (uid uid-n9), the only node that joined its pool after the removal"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	reopened := &types.AuditEntry{FromState: types.StateResolved, ToState: types.StateOpen, Action: "reopen"}
+	if got := replacementLine([]*types.AuditEntry{resolve("pool"), reopened}); got != "" {
+		t.Fatalf("a later transition must hide the line, got %q", got)
+	}
+}

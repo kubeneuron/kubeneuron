@@ -45,6 +45,18 @@ func (r *recordingNotifier) RequestApproval(_ context.Context, inc *types.Incide
 	return nil
 }
 
+// hasMessage reports whether a notification's message contains text.
+func (r *recordingNotifier) hasMessage(text string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, ev := range r.events {
+		if strings.Contains(ev.Message, text) {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *recordingNotifier) kinds() []notify.EventKind {
 	r.mu.Lock()
 	defer r.mu.Unlock()

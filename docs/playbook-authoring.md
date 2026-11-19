@@ -637,40 +637,54 @@ without a person approving each one.
 The node that was replaced is gone, so its incident is verified on the node
 that took its place. That node is found in one of two ways:
 
-- **Add-first:** the replacement the provider tied to the operation and
-  KubeNeuron accepted (`successor-ready`). Its name and UID must still be the
-  ones that were accepted.
-- **Remove-first:** before the delete, KubeNeuron records the old node's pool
-  (`replacement-pool`) from its pool label: `eks.amazonaws.com/nodegroup`,
-  `cloud.google.com/gke-nodepool` or `kubernetes.azure.com/agentpool`. The
-  provider does not say which new node replaced the old one. The node is
-  accepted only when it is the only node of that pool created after the
-  delete was sent. It must also offer at least the accelerators the incident
-  covered. Two or more new nodes are reported as ambiguous and are not
-  counted. A pool scaled out at the same time can make the match ambiguous.
+- **Add-first:** the cloud operation named it. It is the node KubeNeuron
+  accepted (`successor-ready`), and its name and UID must still be the ones
+  that were accepted.
+- **Remove-first:** no cloud operation of this release names the new node.
+  Before the delete, KubeNeuron records the old node's pool from its pool
+  label (`eks.amazonaws.com/nodegroup`, `cloud.google.com/gke-nodepool` or
+  `kubernetes.azure.com/agentpool`) and the UIDs of the pool's nodes
+  (`replacement-pool`). A node is new when its UID is not in that set, so a
+  node that comes back under the old name counts as new. It is accepted only
+  if it is the only new node of the pool. If two or more nodes joined, for
+  example during a scale-out, KubeNeuron cannot tell which one replaced the
+  node, and it does not guess.
 
-The new node must be Ready and schedulable. Its agent's accelerator report
-must be newer than the replacement, and how much that report shows depends
-on the vendor:
+The new node must be Ready and schedulable, and offer at least the
+accelerators the incident covered. Which report is then expected follows the
+accelerators the incident covered:
 
-| Vendor | What is confirmed |
+| Accelerator | What is confirmed |
 |---|---|
-| NVIDIA | the report lists a ready device, or a driver probe ran after the replacement |
-| AWS (Neuron sysfs) | the report lists a device: device presence observed; runtime not attested |
-| any other | no agent of this release sends a report for the vendor, so the node being Ready and its agent's heartbeat are accepted, and the resolution says the devices were not checked |
+| NVIDIA (`nvidia.com/...`) | a fresh agent report from the new node lists a ready device, or a driver probe ran after the replacement |
+| AWS Neuron (`aws.amazon.com/neuron...`) | a fresh agent report from the new node lists a device: device presence observed; runtime not attested |
+| any other, or a pool whose nodes run no agent | no agent report exists for it, so KubeNeuron uses the node's Kubernetes readiness and advertised accelerator capacity; where the old node ran an agent, the new node's agent must have reported too |
 
-The resolution names the new node, how it was tied to the replacement and
-what was confirmed. Its audit entry records `infrastructure_evidence:
-verified_replacement_node`, `replacement_node`, `replacement_node_uid` and
-`replacement_correlation` (`successor` or `pool`). The incident keeps its
-original target. `kubeneuronctl report` counts it as recovered, and the
-degraded time ends when the new node is confirmed.
+The resolution says in its first sentence how the node was found:
+`Replaced by node <new>, named by the cloud operation.` or `Node <new> is
+Ready. It was the only node that joined pool <pool> after the removal.` Its
+second sentence says what was confirmed: the driver check that passed,
+`Device presence observed; runtime not attested.`, or `Verification used
+Kubernetes node readiness and advertised accelerator capacity.` The same
+text is in the RESOLVED notification. `kubeneuronctl incidents show` prints
+the new node on a `replaced:` line. The audit entry records
+`infrastructure_evidence: verified_replacement_node`, `replacement_node`,
+`replacement_node_uid` and `replacement_correlation` (`successor` or `pool`).
+The incident keeps its original target. `kubeneuronctl report` counts it as
+recovered, and the degraded time ends when the new node is confirmed. This
+says the node was confirmed, not that a workload resumed.
 
 If that evidence is not there by the verification deadline, the incident
-goes to `NEEDS_HUMAN` with what is missing. For example: the new node is not
-Ready, no new node of the pool was found, the match was ambiguous, no fresh
-report came from it, or the report shows no ready devices. No second
-replacement is started.
+goes to `NEEDS_HUMAN` with what is missing, for example:
+
+- `No node joined pool <pool> after the removal.`
+- `New node <new> is not Ready.`
+- `No fresh accelerator report from new node <new>.`
+- `New node <new> reports no accelerator devices.`
+- `Several nodes joined pool <pool> after the removal. KubeNeuron could not determine which one replaced the node.`
+
+Such an incident is not counted as recovered, and no second replacement is
+started.
 
 ## Authoring guidelines
 

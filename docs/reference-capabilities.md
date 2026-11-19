@@ -69,6 +69,7 @@ Each live-cloud entry applies only to the path and run shown.
 | EKS managed nodegroup replacement (remove-first) | AWS provider and contract tests | Controller approval, cordon and drain only | No for the current path. On 2026-08-05, the v0.2.1 run on EKS `g4dn.xlarge` / Tesla T4 reached EC2 termination after an injected fault. Replacement readiness and resumed training were not verified. |
 | AKS restart and replacement, including add-first on fixed-size pools; configured multi-zone pools are refused before growth | Simulated AKS API and provider contract tests | No | No |
 | GKE Standard replacement (remove-first on autoscaled pools and, with a recorded size restore, on fixed-size pools of equal zones; add-first on fixed-size single-zone pools) | Simulated GKE and Compute Engine APIs. Autopilot is observation-only. | No | No |
+| Incident resolves after a cloud replacement (add-first and remove-first) | Simulated provider only | No | No |
 | DryRun and Approval modes | Controller policy tests | DryRun leaves pods unchanged. Approval exercises drain after approval. | No for the current modes |
 | Automatic mode | Controller policy tests | No dedicated Automatic execution scenario | No |
 | Managed monitoring (Collector, metrics store, Grafana and alert delivery to controller) | Operator and rule tests | Synthetic DCGM input through the Managed stack | No for the current stack |

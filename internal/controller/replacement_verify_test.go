@@ -3,6 +3,7 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"strings"
@@ -21,19 +22,38 @@ import (
 const poolNodeName = "n10"
 
 // poolPlatform is a successorPlatform whose nodes carry an EKS nodegroup
-// label, and whose pool gains a node once the target is removed.
+// label, and whose pool gains a node once the target is removed: the target
+// is then gone from the cluster.
 type poolPlatform struct {
 	*successorPlatform
 	// members are the pool's nodes besides the target; added on removal.
 	members []platform.SuccessorNode
 	// extra is how many more new nodes the pool gains on removal.
 	extra int
+	// sameName recreates the instance under the target's name, with a new
+	// UID, as a managed instance group can.
+	sameName bool
+	// resource is what the new nodes advertise; nvidia.com/gpu when empty.
+	resource string
+	removed  bool
 }
 
 func (p *poolPlatform) CloudNode(ctx context.Context, node string) (cloud.NodeRef, error) {
 	ref, err := p.successorPlatform.CloudNode(ctx, node)
 	ref.Labels = map[string]string{"eks.amazonaws.com/nodegroup": "train"}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.removed && p.sameName && node == "n1" {
+		ref.Identity.NodeUID, ref.Identity.InstanceID, ref.Identity.BootID = "uid-n1-new", "i-n1-new", "boot-n1-new"
+		ref.Identity.ProviderID = "aws:///zone/i-n1-new"
+	}
 	return ref, err
+}
+
+func (p *poolPlatform) NodeExists(_ context.Context, node string) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return node != "n1" || !p.removed || p.sameName, nil
 }
 
 func (p *poolPlatform) ReplacePinnedNode(ctx context.Context, pin cloud.NodeIdentity) error {
@@ -42,14 +62,21 @@ func (p *poolPlatform) ReplacePinnedNode(ctx context.Context, pin cloud.NodeIden
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.removed = true
+	resource := cmp.Or(p.resource, topology.ResourceWholeGPU)
 	for i := 0; i <= p.extra; i++ {
-		name := poolNodeName
+		name, uid := poolNodeName, "uid-"+poolNodeName
 		if i > 0 {
 			name += strings.Repeat("x", i)
+			uid = "uid-" + name
+		} else if p.sameName {
+			name, uid = "n1", "uid-n1-new"
 		}
-		p.members = append(p.members, platform.SuccessorNode{Found: true, Name: name, UID: "uid-" + name,
-			CreatedAt: time.Now().Add(time.Millisecond), Ready: p.nodeReady,
-			Allocatable: map[string]int64{topology.ResourceWholeGPU: p.successorAllocatable, "amd.com/gpu": p.successorAllocatable}})
+		// The cluster's clock: a new node may carry a creation time before the
+		// controller recorded the pool.
+		p.members = append(p.members, platform.SuccessorNode{Found: true, Name: name, UID: uid,
+			CreatedAt: time.Now().Add(-time.Minute), Ready: p.nodeReady,
+			Allocatable: map[string]int64{resource: p.successorAllocatable}})
 	}
 	return nil
 }
@@ -60,15 +87,18 @@ func (p *poolPlatform) PoolNodes(_ context.Context, label, pool string) ([]platf
 	if label != "eks.amazonaws.com/nodegroup" || pool != "train" {
 		return nil, nil
 	}
-	old := platform.SuccessorNode{Found: true, Name: "n2", UID: "uid-n2", CreatedAt: time.Now().Add(-time.Hour), Ready: true}
-	return append([]platform.SuccessorNode{old}, p.members...), nil
+	out := []platform.SuccessorNode{{Found: true, Name: "n2", UID: "uid-n2", CreatedAt: time.Now().Add(-time.Hour), Ready: true}}
+	if !p.removed {
+		out = append(out, platform.SuccessorNode{Found: true, Name: "n1", UID: "uid-n1", CreatedAt: time.Now().Add(-time.Hour), Ready: true})
+	}
+	return append(out, p.members...), nil
 }
 
 // reportFrom has the agent on node post its accelerator report now.
-func reportFrom(t *testing.T, st *sqlite.Store, node string, vendor types.AcceleratorVendor, readiness types.AcceleratorReadiness) {
+func reportFrom(t *testing.T, st *sqlite.Store, node, uid string, vendor types.AcceleratorVendor, readiness types.AcceleratorReadiness) {
 	t.Helper()
 	report := readyNVIDIAResetReport(time.Now(), "profile")
-	report.Node, report.NodeUID, report.Vendor, report.Readiness = node, "uid-"+node, vendor, readiness
+	report.Node, report.NodeUID, report.Vendor, report.Readiness = node, uid, vendor, readiness
 	report.Devices[0].ID = "GPU-new-0"
 	if readiness == types.AcceleratorReadinessNotReady {
 		report.ReadinessReasons = []string{"driver not loaded"}
@@ -89,7 +119,9 @@ func reportFrom(t *testing.T, st *sqlite.Store, node string, vendor types.Accele
 func openVendorIncident(t *testing.T, c *Controller, node string, vendor types.AcceleratorVendor) string {
 	t.Helper()
 	sig := signal(types.ClassFellOffBus, node, "")
-	sig.Evidence["vendor"] = string(vendor)
+	if vendor != "" {
+		sig.Evidence["vendor"] = string(vendor)
+	}
 	if err := c.ingest(context.Background(), sig); err != nil {
 		t.Fatal(err)
 	}
@@ -134,45 +166,94 @@ func resolveEntry(entries []*types.AuditEntry) *types.AuditEntry {
 }
 
 // A cloud replacement resolves on the node that took the target's place: the
-// successor the provider named (add-first), or the one node of the target's
-// pool created after the removal (remove-first). The resolution names the
-// node, how it was tied to the replacement and what was confirmed, at the
-// depth the vendor's report allows, and the report counts it recovered.
+// successor the cloud operation named (add-first), or the only node that
+// joined the target's pool after the removal (remove-first). The resolution
+// names the node, how it was found and what was confirmed, at the depth the
+// accelerator allows; the notification names it too, the incident keeps its
+// target, and the report counts it recovered with the degraded time ending
+// at the confirmation. The old node being gone, or recreated under its name,
+// never supersedes the incident first.
 func TestReplacementResolvesOnTheNewNode(t *testing.T) {
+	const (
+		successorSentence = "Replaced by node n9, named by the cloud operation."
+		poolSentence      = "Node n10 is Ready. It was the only node that joined pool train after the removal."
+		driverDepth       = "Fresh accelerator inventory and driver health observed."
+		observedDepth     = "Device presence observed; runtime not attested."
+		capacityDepth     = "Verification used Kubernetes node readiness and advertised accelerator capacity."
+	)
 	for _, tc := range []struct {
-		name      string
-		mode      recoverymode.Mode
-		strategy  recoverymode.Strategy
-		vendor    types.AcceleratorVendor
-		node, how string
-		depth     string
+		name     string
+		mode     recoverymode.Mode
+		strategy recoverymode.Strategy
+		vendor   types.AcceleratorVendor
+		setup    func(*testing.T, *sqlite.Store, *poolPlatform)
+		noAgent  bool
+		node     string
+		uid      string
+		how      string
+		sentence string
+		depth    string
 	}{
-		{"add-first nvidia", recoverymode.Automatic, "", types.AcceleratorVendorNVIDIA, successorNodeName, replacementBySuccessor, "driver health observed"},
-		{"add-first aws approval", recoverymode.Approval, "", types.AcceleratorVendorAWS, successorNodeName, replacementBySuccessor, "device presence observed; runtime not attested"},
-		{"remove-first nvidia approval", recoverymode.Approval, recoverymode.RemoveFirst, types.AcceleratorVendorNVIDIA, poolNodeName, replacementByPool, "driver health observed"},
-		{"remove-first aws", recoverymode.Automatic, recoverymode.RemoveFirst, types.AcceleratorVendorAWS, poolNodeName, replacementByPool, "device presence observed; runtime not attested"},
-		{"remove-first amd", recoverymode.Automatic, recoverymode.RemoveFirst, types.AcceleratorVendorAMD, poolNodeName, replacementByPool, "this build reads no amd accelerator report, so its devices were not checked"},
+		{name: "add-first nvidia", mode: recoverymode.Automatic, vendor: types.AcceleratorVendorNVIDIA,
+			node: successorNodeName, how: replacementBySuccessor, sentence: successorSentence, depth: driverDepth},
+		{name: "add-first aws approval", mode: recoverymode.Approval, vendor: types.AcceleratorVendorAWS,
+			node: successorNodeName, how: replacementBySuccessor, sentence: successorSentence, depth: observedDepth},
+		{name: "remove-first nvidia approval", mode: recoverymode.Approval, strategy: recoverymode.RemoveFirst, vendor: types.AcceleratorVendorNVIDIA,
+			node: poolNodeName, how: replacementByPool, sentence: poolSentence, depth: driverDepth},
+		{name: "remove-first aws", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, vendor: types.AcceleratorVendorAWS,
+			node: poolNodeName, how: replacementByPool, sentence: poolSentence, depth: observedDepth},
+		{name: "remove-first amd", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, vendor: types.AcceleratorVendorAMD,
+			setup: func(_ *testing.T, _ *sqlite.Store, p *poolPlatform) { p.resource = "amd.com/gpu" },
+			node:  poolNodeName, how: replacementByPool, sentence: poolSentence, depth: capacityDepth},
+		{name: "remove-first tpu node-health without an agent", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, noAgent: true,
+			setup: func(t *testing.T, st *sqlite.Store, p *poolPlatform) {
+				p.resource = "google.com/tpu"
+				p.successorAllocatable = 4
+				if err := st.UpsertKubernetesInventory(context.Background(), &types.Node{Name: "n1", UID: "uid-n1",
+					Labels:  map[string]string{"pool": "train"},
+					Devices: []types.DeviceCount{{Resource: "google.com/tpu", Unit: types.DeviceUnitTPUChip, Capacity: 4}}}); err != nil {
+					t.Fatal(err)
+				}
+			},
+			node: poolNodeName, how: replacementByPool, sentence: poolSentence, depth: capacityDepth},
+		{name: "remove-first nvidia recreated under the old name", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, vendor: types.AcceleratorVendorNVIDIA,
+			setup: func(_ *testing.T, _ *sqlite.Store, p *poolPlatform) { p.sameName = true },
+			node:  "n1", uid: "uid-n1-new", how: replacementByPool,
+			sentence: "Node n1 is Ready. It was the only node that joined pool train after the removal.", depth: driverDepth},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &poolPlatform{successorPlatform: newSuccessorPlatform()}
-			c, st, _ := successorFixture(t, tc.mode, p.successorPlatform, tc.strategy)
+			c, st, notifier := successorFixture(t, tc.mode, p.successorPlatform, tc.strategy)
 			c.platform = p
 			registerSuccessorAgent(t, st, 8)
-			registerOldNode(t, st, 8)
+			if tc.setup != nil {
+				tc.setup(t, st, p)
+			}
+			if !tc.noAgent {
+				registerOldNode(t, st, 8, tc.vendor)
+			}
+			uid := cmp.Or(tc.uid, "uid-"+tc.node)
 			id := openVendorIncident(t, c, "n1", tc.vendor)
 			inc := untilState(t, c, st, id, func(inc *types.Incident) bool { return inc.State.Halted() || inc.State == types.StateVerifying })
-			if inc.State != types.StateVerifying {
+			// A node without an agent sends no evidence to wait for.
+			if inc.State != types.StateVerifying && (!tc.noAgent || inc.State != types.StateResolved) {
 				t.Fatalf("state = %s, want VERIFYING after the replacement%s", inc.State, dump(trail(t, st, id)))
 			}
-			if tc.node == poolNodeName {
-				registerAgent(t, st, poolNodeName)
+			if !tc.noAgent {
+				// Before the new node's evidence: reconciles never supersede it.
+				inc = step(t, c, st, id, 5)
+				if inc.State != types.StateVerifying {
+					t.Fatalf("state = %s before any evidence, want VERIFYING%s", inc.State, dump(trail(t, st, id)))
+				}
 			}
-			readiness := types.AcceleratorReadinessReady
-			if tc.vendor == types.AcceleratorVendorAWS {
-				readiness = types.AcceleratorReadinessObserved
+			if tc.node != successorNodeName && !tc.noAgent {
+				registerAgentAs(t, st, tc.node, uid)
 			}
-			if tc.vendor != types.AcceleratorVendorAMD {
-				reportFrom(t, st, tc.node, tc.vendor, readiness)
+			switch tc.depth {
+			case driverDepth:
+				reportFrom(t, st, tc.node, uid, tc.vendor, types.AcceleratorReadinessReady)
+			case observedDepth:
+				reportFrom(t, st, tc.node, uid, tc.vendor, types.AcceleratorReadinessObserved)
 			}
 			inc = untilState(t, c, st, id, func(inc *types.Incident) bool { return inc.State != types.StateVerifying })
 			entries := trail(t, st, id)
@@ -181,15 +262,18 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 			}
 			resolved := resolveEntry(entries)
 			if resolved == nil || resolved.Params["infrastructure_evidence"] != replacementInfrastructureEvidence ||
-				resolved.Params["replacement_node"] != tc.node || resolved.Params["replacement_node_uid"] != "uid-"+tc.node ||
+				resolved.Params["replacement_node"] != tc.node || resolved.Params["replacement_node_uid"] != uid ||
 				resolved.Params["replacement_correlation"] != tc.how {
 				t.Fatalf("resolve entry = %+v", resolved)
 			}
-			if !strings.Contains(resolved.Result, "replaced by node "+tc.node) || !strings.Contains(resolved.Result, tc.depth) {
-				t.Fatalf("resolution %q does not name the node and %q", resolved.Result, tc.depth)
+			if !strings.HasSuffix(resolved.Result, "; "+tc.sentence+" "+tc.depth) {
+				t.Fatalf("resolution %q, want %q then %q", resolved.Result, tc.sentence, tc.depth)
 			}
 			if inc.Target.Node != "n1" {
 				t.Fatalf("target = %+v, want the incident's original target", inc.Target)
+			}
+			if !notifier.hasMessage(tc.sentence) {
+				t.Fatalf("no RESOLVED notification names the new node: %q", tc.sentence)
 			}
 			if ready := types.VerifiedInfrastructureTime(entries); ready == nil || !ready.Equal(resolved.Time) {
 				t.Fatalf("verified infrastructure time = %v, want the resolution's %v", ready, resolved.Time)
@@ -201,12 +285,16 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 			if report.Recovered != 1 {
 				t.Fatalf("recovered = %d, want the replacement counted", report.Recovered)
 			}
+			if inc.ResolvedAt == nil || inc.ResolvedAt.Sub(resolved.Time).Abs() > time.Second {
+				t.Fatalf("resolved at %v, want the degraded time to end at the confirmation %v", inc.ResolvedAt, resolved.Time)
+			}
 		})
 	}
 }
 
 // Without evidence from the new node by the deadline, the incident goes to a
-// person with what is missing, and no second replacement is started.
+// person with what is missing, is not counted recovered, and no second
+// replacement is started.
 func TestReplacementWithoutEvidenceGoesToAPerson(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -215,12 +303,14 @@ func TestReplacementWithoutEvidenceGoesToAPerson(t *testing.T) {
 		report   types.AcceleratorReadiness
 		want     string
 	}{
-		{"no report", "", nil, "", "no fresh nvidia accelerator report from replacement node n9"},
-		{"no devices", "", nil, types.AcceleratorReadinessNotReady, "shows no ready devices"},
-		{"not ready", recoverymode.RemoveFirst, func(p *poolPlatform) { p.nodeReady = false }, types.AcceleratorReadinessReady, "replacement node n10 is not Ready"},
-		{"no new pool node", recoverymode.RemoveFirst, func(p *poolPlatform) { p.extra = -1 }, "", "no node of pool train was created after the removal"},
-		{"ambiguous pool", recoverymode.RemoveFirst, func(p *poolPlatform) { p.extra = 1 }, types.AcceleratorReadinessReady, "ambiguous: 2 nodes of pool train were created after the removal"},
-		{"too few devices", recoverymode.RemoveFirst, func(p *poolPlatform) { p.successorAllocatable = 4 }, types.AcceleratorReadinessReady, "has 4 allocatable"},
+		{"no report", "", nil, "", "No fresh accelerator report from new node n9."},
+		{"no devices", "", nil, types.AcceleratorReadinessNotReady, "New node n9 reports no accelerator devices."},
+		{"not ready", recoverymode.RemoveFirst, func(p *poolPlatform) { p.nodeReady = false }, types.AcceleratorReadinessReady, "New node n10 is not Ready."},
+		{"no new pool node", recoverymode.RemoveFirst, func(p *poolPlatform) { p.extra = -1 }, "", "No node joined pool train after the removal."},
+		{"several new pool nodes", recoverymode.RemoveFirst, func(p *poolPlatform) { p.extra = 1 }, types.AcceleratorReadinessReady,
+			"Several nodes joined pool train after the removal. KubeNeuron could not determine which one replaced the node."},
+		{"too few devices", recoverymode.RemoveFirst, func(p *poolPlatform) { p.successorAllocatable = 4 }, types.AcceleratorReadinessReady,
+			"New node n10 has 4 allocatable nvidia.com/gpu, fewer than the 8 the incident covered."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &poolPlatform{successorPlatform: newSuccessorPlatform()}
@@ -230,7 +320,7 @@ func TestReplacementWithoutEvidenceGoesToAPerson(t *testing.T) {
 			c, st, _ := successorFixture(t, recoverymode.Automatic, p.successorPlatform, tc.strategy)
 			c.platform = p
 			registerSuccessorAgent(t, st, 8)
-			registerOldNode(t, st, 8)
+			registerOldNode(t, st, 8, types.AcceleratorVendorNVIDIA)
 			id := openVendorIncident(t, c, "n1", types.AcceleratorVendorNVIDIA)
 			inc := untilState(t, c, st, id, func(inc *types.Incident) bool { return inc.State.Halted() || inc.State == types.StateVerifying })
 			if inc.State != types.StateVerifying {
@@ -239,13 +329,13 @@ func TestReplacementWithoutEvidenceGoesToAPerson(t *testing.T) {
 			node := successorNodeName
 			if tc.strategy == recoverymode.RemoveFirst {
 				node = poolNodeName
-				registerAgent(t, st, poolNodeName)
+				registerAgentAs(t, st, poolNodeName, "uid-"+poolNodeName)
 			}
 			if tc.report != "" {
-				reportFrom(t, st, node, types.AcceleratorVendorNVIDIA, tc.report)
+				reportFrom(t, st, node, "uid-"+node, types.AcceleratorVendorNVIDIA, tc.report)
 			}
 			ctx := context.Background()
-			if ok, reason, _ := c.verifyRecovery(ctx, inc); ok || !strings.Contains(reason, tc.want) {
+			if ok, reason, _ := c.verifyRecovery(ctx, inc); ok || reason != tc.want {
 				t.Fatalf("verify = %v %q, want held on %q", ok, reason, tc.want)
 			}
 			// Past the deadline.
@@ -265,27 +355,38 @@ func TestReplacementWithoutEvidenceGoesToAPerson(t *testing.T) {
 			if _, _, replaced, plain, _ := p.counts(); replaced+plain != 1 {
 				t.Fatalf("%d replacements, want the one", replaced+plain)
 			}
+			report, err := c.RecoveryReport(ctx, time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.Recovered != 0 {
+				t.Fatalf("recovered = %d, want an unconfirmed replacement not counted", report.Recovered)
+			}
 		})
 	}
 }
 
-// registerAgent has a node's agent register with its UID.
-func registerAgent(t *testing.T, st *sqlite.Store, node string) {
+// registerAgentAs has a node's agent register with the given UID.
+func registerAgentAs(t *testing.T, st *sqlite.Store, node, uid string) {
 	t.Helper()
-	n := &types.Node{Name: node, UID: "uid-" + node, AgentLastSeen: time.Now(),
+	n := &types.Node{Name: node, UID: uid, AgentLastSeen: time.Now(),
 		GPUs: []types.GPUInfo{{UUID: "GPU-new-0"}}}
 	if err := st.UpsertAgentRegistration(context.Background(), n); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// registerOldNode gives the target n1 its agent's accelerators, so the
-// incident records what it covered.
-func registerOldNode(t *testing.T, st *sqlite.Store, gpus int) {
+// registerOldNode gives the target n1 its agent's accelerators of vendor, so
+// the incident records what it covered.
+func registerOldNode(t *testing.T, st *sqlite.Store, gpus int, vendor types.AcceleratorVendor) {
 	t.Helper()
 	n := &types.Node{Name: "n1", UID: "uid-n1", AgentLastSeen: time.Now(), Labels: map[string]string{"pool": "train"}}
 	for i := 0; i < gpus; i++ {
-		n.GPUs = append(n.GPUs, types.GPUInfo{UUID: fmt.Sprintf("GPU-n1-%d", i), Index: i})
+		gpu := types.GPUInfo{UUID: fmt.Sprintf("GPU-n1-%d", i), Index: i}
+		if vendor == types.AcceleratorVendorAMD {
+			gpu.UUID, gpu.Model = fmt.Sprintf("amd-n1-%d", i), "AMD Instinct MI300X"
+		}
+		n.GPUs = append(n.GPUs, gpu)
 	}
 	if err := st.UpsertAgentRegistration(context.Background(), n); err != nil {
 		t.Fatal(err)

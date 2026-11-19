@@ -329,6 +329,9 @@ func cmdIncidents() *cobra.Command {
 		for _, line := range successorLines(inc.Successor, time.Now()) {
 			_, _ = fmt.Fprintln(out, line)
 		}
+		if line := replacementLine(detail.Audit); line != "" {
+			_, _ = fmt.Fprintln(out, line)
+		}
 		_, _ = fmt.Fprintln(out, "\naudit trail:")
 		w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
 		_, _ = fmt.Fprintln(w, "TIME\tFROM\tTO\tACTOR\tACTION\tRESULT")
@@ -681,6 +684,26 @@ func successorLines(s *types.SuccessorRecord, now time.Time) []string {
 		lines = append(lines, "why:       "+s.Reason)
 	}
 	return lines
+}
+
+// replacementLine names the node that replaced the incident's target, from
+// the resolution that confirmed it, and how it was tied to the replacement.
+func replacementLine(audit []*types.AuditEntry) string {
+	for i := len(audit) - 1; i >= 0; i-- {
+		e := audit[i]
+		if e == nil || e.FromState == e.ToState || e.ToState == "" {
+			continue
+		}
+		if e.Action != "resolve" || e.ToState != types.StateResolved || e.Params["infrastructure_evidence"] != "verified_replacement_node" {
+			return ""
+		}
+		how := "named by the cloud operation"
+		if e.Params["replacement_correlation"] == "pool" {
+			how = "the only node that joined its pool after the removal"
+		}
+		return fmt.Sprintf("replaced:  node %s (uid %s), %s", e.Params["replacement_node"], e.Params["replacement_node_uid"], how)
+	}
+	return ""
 }
 
 // printEvidence prints the evidence block of an incident. No block is
