@@ -23,8 +23,15 @@ func RecoveryAvailabilityFromAudit(trail []*AuditEntry) *RecoveryAvailability {
 		if e == nil {
 			continue
 		}
+		// Once verification begins or the incident closes, an earlier wait
+		// for another repair no longer describes its current step.
+		if e.Action == "verify-owner-replacement" || e.ToState.Terminal() {
+			seen["node-repair"] = true
+		}
 		source, status := "", ""
 		switch e.Action {
+		case "wait-for-node-repair":
+			source, status = "node-repair", "unavailable"
 		case "provider-recovery-unavailable":
 			source, status = "provider", "unavailable"
 		case "provider-recovery-available":

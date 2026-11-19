@@ -36,3 +36,17 @@ func TestProviderEligibilityDoesNotClearPolicyUnavailability(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+func TestNodeRepairWaitIsVisibleUntilVerification(t *testing.T) {
+	wait := &AuditEntry{Action: "wait-for-node-repair", Result: "node repair is owned by incident inc-2"}
+	trail := []*AuditEntry{{Action: "recovery-unavailable", Result: "pool unavailable"}, wait, {Action: "provider-recovery-available"}}
+	if got := RecoveryAvailabilityFromAudit(trail); got == nil || got.Source != "node-repair" || got.Reason != wait.Result {
+		t.Fatalf("wait assessment = %+v", got)
+	}
+	for _, finished := range []*AuditEntry{{Action: "verify-owner-replacement"}, {ToState: StateExpired}} {
+		got := RecoveryAvailabilityFromAudit(append(trail, finished))
+		if got == nil || got.Source != "policy" || got.Reason != "pool unavailable" {
+			t.Fatalf("remaining assessment = %+v", got)
+		}
+	}
+}
