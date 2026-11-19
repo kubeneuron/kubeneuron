@@ -423,3 +423,29 @@ func TestExecutingTransactionExcludesDrainAndGPUReset(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestFailedGPUResetResultReleasesStep(t *testing.T) {
+	act := &hostActuator{err: errors.New("reset failed")}
+	c, st := stackTestControllerWithActuator(t, wholeDeviceTopologyPlatform(), act)
+	ctx := t.Context()
+	inc := resetIncident()
+	inc.State, inc.RepairNodeUID, inc.Attempt = types.StateEvaluating, "node-uid-a", maxEscalationAttempts
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	step := &playbook.Step{Name: "reset", Action: "agent.gpu_reset"}
+	if err := c.transitionWithRepairStep(ctx, mustIncident(t, st, inc.ID), types.StateExecuting, "system", step.Name, auditStepStartResult(step.Action), nil, step.Action, false); err != nil {
+		t.Fatal(err)
+	}
+	c.runStep(ctx, nil, mustIncident(t, st, inc.ID), step)
+	if len(act.actions) != 1 || mustIncident(t, st, inc.ID).State != types.StateNeedsHuman {
+		t.Fatalf("actions=%v state=%v", act.actions, mustIncident(t, st, inc.ID).State)
+	}
+	drain := &types.Incident{ID: "drain", Target: types.Target{Node: inc.Target.Node}, RepairNodeUID: inc.RepairNodeUID, State: types.StateEvaluating}
+	if err := st.CreateIncident(ctx, drain); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.transitionWithRepairStep(ctx, mustIncident(t, st, drain.ID), types.StateExecuting, "system", "drain", "start", nil, "platform.drain", false); err != nil {
+		t.Fatal(err)
+	}
+}

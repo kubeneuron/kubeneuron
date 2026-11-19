@@ -343,7 +343,11 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 			}
 			return
 		}
-		if escErr := c.escalate(ctx, inc, fmt.Sprintf("step %s failed: %v", step.Name, err)); escErr != nil {
+		// A returned device result confirms the agent finished this step.
+		// Transport failures leave the reservation in place.
+		device, guarded := repairStepScope(step.Action)
+		completed := device && guarded && result != nil
+		if escErr := c.escalateAfterStep(ctx, inc, fmt.Sprintf("step %s failed: %v", step.Name, err), completed); escErr != nil {
 			c.log.Error("escalation failed", "incident", inc.ID, "err", escErr)
 		}
 		return
@@ -864,25 +868,29 @@ func (c *Controller) executeAgentStep(ctx context.Context, inc *types.Incident, 
 // escalate switches the incident to the failure-escalation playbook, or
 // quarantines it when the ladder is exhausted.
 func (c *Controller) escalate(ctx context.Context, inc *types.Incident, reason string) error {
+	return c.escalateAfterStep(ctx, inc, reason, false)
+}
+
+func (c *Controller) escalateAfterStep(ctx context.Context, inc *types.Incident, reason string, completed bool) error {
 	c.cancelPendingActions(ctx, inc)
 	if inc.Attempt >= maxEscalationAttempts {
 		// The ladder has climbed as far as it is allowed to on its own. Fail
 		// closed to a human instead of continuing to drive destructive rungs.
-		return c.quarantine(ctx, inc,
+		return c.quarantineAfterStep(ctx, inc,
 			fmt.Sprintf("%s; escalation cap reached (%d attempts) — stopping automation and handing off to a human",
-				reason, inc.Attempt))
+				reason, inc.Attempt), completed)
 	}
 	next, ok := c.runtimeConfig(ctx).Engine.Escalation(inc.Playbook)
 	if !ok {
-		return c.quarantine(ctx, inc, reason+"; no escalation playbook")
+		return c.quarantineAfterStep(ctx, inc, reason+"; no escalation playbook", completed)
 	}
 	metrics.EscalationsTotal.Inc()
 	previous := inc.Playbook
 	inc.Playbook = next.Name
 	inc.StepIndex = 0
 	inc.Attempt++
-	if err := c.transition(ctx, inc, types.StateEvaluating, "system", "escalate",
-		fmt.Sprintf("%s; escalating %s -> %s (attempt %d)", reason, previous, next.Name, inc.Attempt), nil); err != nil {
+	if err := c.transitionWithRepairStep(ctx, inc, types.StateEvaluating, "system", "escalate",
+		fmt.Sprintf("%s; escalating %s -> %s (attempt %d)", reason, previous, next.Name, inc.Attempt), nil, "", completed); err != nil {
 		return err
 	}
 	return c.notify(ctx, notify.NotifyEvent{
@@ -908,8 +916,12 @@ func (c *Controller) cancelPendingActions(ctx context.Context, inc *types.Incide
 
 // quarantine fails the incident closed to NEEDS_HUMAN.
 func (c *Controller) quarantine(ctx context.Context, inc *types.Incident, reason string) error {
+	return c.quarantineAfterStep(ctx, inc, reason, false)
+}
+
+func (c *Controller) quarantineAfterStep(ctx context.Context, inc *types.Incident, reason string, completed bool) error {
 	c.cancelPendingActions(ctx, inc)
-	if err := c.transition(ctx, inc, types.StateNeedsHuman, "system", "quarantine", reason, nil); err != nil {
+	if err := c.transitionWithRepairStep(ctx, inc, types.StateNeedsHuman, "system", "quarantine", reason, nil, "", completed); err != nil {
 		return err
 	}
 	return c.notify(ctx, notify.NotifyEvent{
