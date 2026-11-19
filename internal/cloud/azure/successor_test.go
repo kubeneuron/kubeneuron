@@ -263,7 +263,7 @@ func TestAddFirstRefusesMultizoneBeforeGrowth(t *testing.T) {
 	refused := func(err error) {
 		t.Helper()
 		var refusal *cloud.PoolRefusal
-		if !errors.As(err, &refusal) || refusal.Code != cloud.PoolMultiZone {
+		if !errors.As(err, &refusal) || refusal.Code != cloud.PoolMultiZone || refusal.Reason != "AKS chooses the zone of a new node in this pool" {
 			t.Fatalf("expected multi-zone refusal: %v", err)
 		}
 	}

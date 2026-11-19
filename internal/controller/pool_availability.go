@@ -184,7 +184,7 @@ func poolRefusalAction(refusal *cloud.PoolRefusal) string {
 	case cloud.PoolAutoscaled:
 		return "use a fixed-size pool" + alternative
 	case cloud.PoolMultiZone:
-		return "use a single-zone pool" + alternative
+		return "use a single-zone node pool" + alternative
 	case cloud.PoolInstanceMissing:
 		return "verify that the node belongs to the configured AKS agent pool"
 	default:
