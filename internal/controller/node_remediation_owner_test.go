@@ -595,7 +595,7 @@ func TestDryRunIncidentAlongsideLiveRepairOwner(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		return i.State == types.StateVerifying
+		return i.State == types.StateResolved
 	})
 	if auditHas(trail(t, st, second.ID), "wait-for-node-repair", "") || len(notifier.approvals) != 3 {
 		t.Fatal("unexpected repair wait or approval count")
