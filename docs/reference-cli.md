@@ -31,6 +31,7 @@ In-cluster, port-forward first:
 | `kubeneuronctl reject <incident-id> --actor <who> [--round <n>]` | reject the pending risky step |
 | `kubeneuronctl acknowledge <incident-id> --actor <who> [--resource-version <n>]` | record custody of an active incident without changing its state |
 | `kubeneuronctl resolve <incident-id> --actor <who> [--resource-version <n>]` | manually resolve an incident through the idempotent v0.4 lifecycle API |
+| `kubeneuronctl resolve <owner-incident-id> --cloud-operation-settled --reason "<what you verified>"` | record that the operator verified the replacement finished or was canceled in the cloud provider, and release the node for other repairs |
 | `kubeneuronctl remediate <node> --class <problem-class> --actor <who>` | manually open an incident for a node |
 | `kubeneuronctl pause` / `kubeneuronctl resume` | global automation pause (big red button) |
 

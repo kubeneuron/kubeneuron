@@ -358,7 +358,10 @@ API is `v1alpha1`.
   controller identifies the node by its pinned cloud identity or the Kubernetes
   Node UID recorded when the incident opened. Waiting incidents show the owner ID before
   approval, drain or replacement. SQLite migration 0037 and PostgreSQL
-  migration 0028 persist ownership across controller restarts.
+  migration 0028 persist ownership across controller restarts. After checking
+  an unconfirmed replacement in the cloud provider, operators can record its
+  completion or cancellation on the owning incident with
+  `kubeneuronctl resolve <id> --cloud-operation-settled --reason "<what you verified>"`.
 
 - The recovery report's GPU-hour fields and `kubeneuron_degraded_gpu_seconds_total`
   count GPUs only (`nvidia.com/gpu`, `amd.com/gpu`): an incident on TPU chips
