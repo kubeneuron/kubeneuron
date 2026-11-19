@@ -61,6 +61,7 @@ func (s *inventorySync) recordPools(nodes []types.Node, engine *playbook.Engine,
 		}
 	}
 	rows := make([]types.PoolAvailability, 0, len(counts))
+	checksLeft := 4
 	for key, count := range counts {
 		row := types.PoolAvailability{Pool: key.name, Cloud: key.cloud, AcceleratorNodes: count, Status: "unknown", ReplacementPolicy: cmp.Or(orders[key], "AddFirst")}
 		switch {
@@ -77,7 +78,8 @@ func (s *inventorySync) recordPools(nodes []types.Node, engine *playbook.Engine,
 			row.Status = "unavailable"
 			row.ReasonCode = "eks-add-first-disabled"
 			row.Reason = "add-first on EKS is not enabled in this release"
-		case check != nil:
+		case check != nil && checksLeft > 0:
+			checksLeft--
 			row.CheckedAt = &now
 			err := check(representatives[key])
 			var refusal *cloud.PoolRefusal
@@ -142,6 +144,8 @@ func (c *Controller) poolChecker(ctx context.Context) func(types.Node) error {
 		return nil
 	}
 	return func(n types.Node) error {
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
 		ref, err := reader.CloudNode(ctx, n.Name)
 		if err != nil {
 			return err

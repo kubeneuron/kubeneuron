@@ -46,7 +46,6 @@ func (c *Controller) syncAcceleratorInventory(ctx context.Context) {
 		}
 		return
 	}
-	c.inventory.recordPools(nodes, c.runtimeConfig(ctx).Engine, time.Now().UTC(), c.poolChecker(ctx))
 	present := map[string]bool{}
 	seen := map[string]string{}
 	for i := range nodes {
@@ -93,12 +92,10 @@ func (c *Controller) syncAcceleratorInventory(ctx context.Context) {
 	}
 	c.inventory.keep(seen)
 	names := inventoryNames(present)
-	if c.inventory.sweptFor(names) {
-		return
-	}
-	if c.removeVanishedInventory(ctx, present) {
+	if !c.inventory.sweptFor(names) && c.removeVanishedInventory(ctx, present) {
 		c.inventory.markSwept(names)
 	}
+	c.inventory.recordPools(nodes, c.runtimeConfig(ctx).Engine, time.Now().UTC(), c.poolChecker(ctx))
 }
 
 // keepLostDevices is the node's devices now, plus every device resource it

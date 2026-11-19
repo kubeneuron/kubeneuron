@@ -14,7 +14,7 @@ import (
 func cmdPools() *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "pools", Short: "Show add-first availability for accelerator node pools", Args: cobra.NoArgs,
-		Long: "Show add-first availability for accelerator node pools. Mixed means that different remediation policies can apply to nodes in this pool, depending on fault class and accelerator vendor. Those policies use different replacement orders.",
+		Long: "Show add-first availability for accelerator node pools. Mixed means that different remediation policies can apply to nodes in this pool, depending on fault class and accelerator vendor. Those policies use different replacement orders. Availability reflects the pool configuration at its last check. The cloud determines capacity for the extra node when it receives the request.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			client, err := newClient(cmd)
 			if err != nil {

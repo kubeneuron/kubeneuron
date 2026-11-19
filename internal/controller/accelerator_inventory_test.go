@@ -455,3 +455,59 @@ func TestPoolChecksBeforeIncident(t *testing.T) {
 		t.Fatalf("unexpected checks %v", p.checks)
 	}
 }
+
+type blockingPoolPlatform struct {
+	*poolAssessmentPlatform
+	started chan struct{}
+}
+
+func (p *blockingPoolPlatform) AddFirstAvailable(ctx context.Context, _ cloud.NodeIdentity) error {
+	close(p.started)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestInventoryWrittenBeforePoolTimeout(t *testing.T) {
+	c, st, inv := inventoryFixture(t)
+	p := &blockingPoolPlatform{&poolAssessmentPlatform{inventoryPlatform: inv}, make(chan struct{})}
+	p.nodes = []types.Node{{Name: "gke", UID: "gke-uid", Labels: map[string]string{"cloud.google.com/gke-nodepool": "train"}, Devices: tpuDevices}}
+	c.platform = p
+	done := make(chan struct{})
+	go func() { defer close(done); c.syncAcceleratorInventory(t.Context()) }()
+	select {
+	case <-p.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pool check did not start")
+	}
+	if _, err := st.GetNode(t.Context(), "gke"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(12 * time.Second):
+		t.Fatal("pool check exceeded timeout")
+	}
+}
+
+func TestPoolCheckBudget(t *testing.T) {
+	var c Controller
+	var nodes []types.Node
+	for _, name := range []string{"a", "b", "c", "d", "e", "f"} {
+		nodes = append(nodes, types.Node{Name: name, Labels: map[string]string{"cloud.google.com/gke-nodepool": name}, Devices: tpuDevices})
+	}
+	now := time.Now().UTC()
+	calls := 0
+	check := func(types.Node) error { calls++; return nil }
+	for _, want := range []int{4, 6} {
+		c.inventory.recordPools(nodes, nil, now, check)
+		pending := 0
+		for _, row := range c.PoolAvailability().Pools {
+			if row.CheckedAt == nil && row.Status == "unknown" {
+				pending++
+			}
+		}
+		if calls != want || pending != len(nodes)-want {
+			t.Fatalf("calls=%d pending=%d want %d checked", calls, pending, want)
+		}
+	}
+}
