@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/store"
@@ -45,7 +46,7 @@ func (c *Controller) syncAcceleratorInventory(ctx context.Context) {
 		}
 		return
 	}
-	c.inventory.recordPools(nodes, c.runtimeConfig(ctx).Engine)
+	c.inventory.recordPools(nodes, c.runtimeConfig(ctx).Engine, time.Now().UTC(), c.poolChecker(ctx))
 	present := map[string]bool{}
 	seen := map[string]string{}
 	for i := range nodes {

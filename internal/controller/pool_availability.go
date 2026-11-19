@@ -4,6 +4,10 @@ package controller
 
 import (
 	"cmp"
+	"context"
+	"errors"
+	"github.com/kubeneuron/kubeneuron/internal/platform"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"slices"
 	"time"
 
@@ -15,8 +19,15 @@ import (
 
 // recordPools uses the same complete Kubernetes node list as inventory sync.
 // Reading the operator endpoint does not trigger another Kubernetes list.
-func (s *inventorySync) recordPools(nodes []types.Node, engine *playbook.Engine) {
+func (s *inventorySync) recordPools(nodes []types.Node, engine *playbook.Engine, now time.Time, check func(types.Node) error) {
 	type poolKey struct{ cloud, name string }
+	s.mu.Lock()
+	previous := map[poolKey]types.PoolAvailability{}
+	for _, row := range s.pools {
+		previous[poolKey{row.Cloud, row.Pool}] = row
+	}
+	s.mu.Unlock()
+	representatives := map[poolKey]types.Node{}
 	counts := map[poolKey]int{}
 	orders := map[poolKey]string{}
 	vendorOrders := map[types.AcceleratorVendor]string{}
@@ -33,6 +44,9 @@ func (s *inventorySync) recordPools(nodes []types.Node, engine *playbook.Engine)
 		} {
 			if name := n.Labels[provider.label]; name != "" {
 				key := poolKey{provider.cloud, name}
+				if counts[key] == 0 {
+					representatives[key] = n
+				}
 				counts[key]++
 				for _, device := range n.Devices {
 					vendor := vendorFor[device.Resource]
@@ -53,13 +67,32 @@ func (s *inventorySync) recordPools(nodes []types.Node, engine *playbook.Engine)
 		switch {
 		case row.ReplacementPolicy == "RemoveFirst":
 			row.Status = ""
+		case previous[key].CheckedAt != nil && now.Sub(*previous[key].CheckedAt) < 10*time.Minute:
+			cached := previous[key]
+			cached.ReplacementPolicy = row.ReplacementPolicy
+			cached.AcceleratorNodes = count
+			row = cached
 		case row.Cloud == "EKS":
 			// The release disables EKS add-first regardless of pool configuration.
-			checked := time.Now().UTC()
-			row.CheckedAt = &checked
+			row.CheckedAt = &now
 			row.Status = "unavailable"
 			row.ReasonCode = "eks-add-first-disabled"
 			row.Reason = "add-first on EKS is not enabled in this release"
+		case check != nil:
+			row.CheckedAt = &now
+			err := check(representatives[key])
+			var refusal *cloud.PoolRefusal
+			switch {
+			case err == nil:
+				row.Status = "available"
+				row.CapabilityEnabled = true
+			case errors.As(err, &refusal):
+				row.CapabilityEnabled = true
+				row.Status, row.ReasonCode, row.Reason = "unavailable", refusal.Code, refusal.Reason
+				row.Action = "use an eligible pool, or set RemoveFirst in the remediation policy that applies to these nodes"
+			default:
+				row.ReasonCode, row.Reason = "read-failed", "could not read pool configuration; check provider access and permissions"
+			}
 		}
 		rows = append(rows, row)
 	}
@@ -99,4 +132,24 @@ func poolVendorOrder(engine *playbook.Engine, vendor types.AcceleratorVendor) st
 		}
 	}
 	return order
+}
+
+func (c *Controller) poolChecker(ctx context.Context) func(types.Node) error {
+	reader, ok := c.platform.(interface {
+		platform.CloudNodeObserver
+		AddFirstAvailable(context.Context, cloud.NodeIdentity) error
+	})
+	if !ok {
+		return nil
+	}
+	return func(n types.Node) error {
+		ref, err := reader.CloudNode(ctx, n.Name)
+		if err != nil {
+			return err
+		}
+		if n.UID == "" || ref.Identity.NodeUID != n.UID {
+			return errors.New("pool node identity changed")
+		}
+		return reader.AddFirstAvailable(ctx, ref.Identity)
+	}
 }

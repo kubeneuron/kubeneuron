@@ -353,13 +353,41 @@ func TestPoolReplacementOrders(t *testing.T) {
 		for _, resource := range tc.resources {
 			nodes = append(nodes, types.Node{Name: resource, Labels: map[string]string{"eks.amazonaws.com/nodegroup": "train"}, Devices: []types.DeviceCount{{Resource: resource}}})
 		}
-		c.inventory.recordPools(nodes, engine)
+		c.inventory.recordPools(nodes, engine, time.Now(), nil)
 		row := c.PoolAvailability().Pools[0]
 		if tc.want == "RemoveFirst" && (row.Status != "" || row.Reason != "" || row.CheckedAt != nil) {
 			t.Fatalf("unexpected check for remove-first: %+v", row)
 		}
 		if got := row.ReplacementPolicy; got != tc.want {
 			t.Fatalf("%v: got %q, want %q", tc.resources, got, tc.want)
+		}
+	}
+}
+
+func TestPoolCheckInterval(t *testing.T) {
+	var c Controller
+	node := types.Node{Name: "gpu1", Labels: map[string]string{"cloud.google.com/gke-nodepool": "train"}, Devices: tpuDevices}
+	second := node
+	second.Name = "gpu2"
+	nodes := []types.Node{node, second}
+	now := time.Now().UTC()
+	calls := 0
+	check := func(types.Node) error {
+		calls++
+		if calls == 1 {
+			return errors.New("read failure")
+		}
+		return nil
+	}
+	for _, tc := range []struct {
+		after  time.Duration
+		calls  int
+		status string
+	}{{0, 1, "unknown"}, {9 * time.Minute, 1, "unknown"}, {10 * time.Minute, 2, "available"}} {
+		c.inventory.recordPools(nodes, nil, now.Add(tc.after), check)
+		row := c.PoolAvailability().Pools[0]
+		if row.Status != tc.status || calls != tc.calls || row.CheckedAt == nil || row.AcceleratorNodes != 2 {
+			t.Fatalf("after %s: calls %d row %+v", tc.after, calls, row)
 		}
 	}
 }
