@@ -96,7 +96,7 @@ Three independent mechanisms, all fail toward not acting:
    optional `matchLabels` node selector. Incidents hold their position and
    continue after the window closes; recorded approvals survive the wait.
 
-## When two incidents need to repair the same cloud node
+## When two incidents need to repair the same node
 
 For live repairs, the controller identifies the node by its pinned cloud identity
 or by the Kubernetes Node UID recorded in inventory when the incident opened.
@@ -115,6 +115,18 @@ After the owner's live replacement is confirmed by inventory and the owner
 resolves, the waiting incident enters its own verification window. Closing
 the owner manually supplies no inventory evidence. The waiting incident's
 audit retains the owner ID so an operator can trace both histories.
+
+If the first approval expires or an operator rejects it before any step has
+entered `EXECUTING`, the controller releases ownership once it confirms there
+is no open replacement plan. Waiting incidents record `node-repair-released`
+and retry under their own policies. An incident whose step requires approval
+requests its own approval.
+
+A live GPU reset and a drain or replacement on the same Node UID also exclude
+each other while the step runs. If the controller loses the agent's response
+to a reset, it hands the reset incident to an operator. Even after manual
+closure, the drain or replacement waits. When the action queue accepts a late
+result for that reset under its lease, the next admission check can proceed.
 
 ## Taking a node over from a remediation
 
