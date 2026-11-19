@@ -96,6 +96,7 @@ func TestJournalLabelFollowsTheOSImage(t *testing.T) {
 		platform.JournalNode{Name: "debian", OSImage: "Debian GNU/Linux 12 (bookworm)", Labels: gpu, Accelerator: true},
 		platform.JournalNode{Name: "cpu", OSImage: "Amazon Linux 2023.12.20261112", Labels: gpu},
 		platform.JournalNode{Name: "elsewhere", OSImage: "Amazon Linux 2023.12.20261112", Labels: map[string]string{"pool": "cpu"}, Accelerator: true},
+		// Another installation's node: its label is left alone.
 		platform.JournalNode{Name: "stale", OSImage: "Ubuntu 22.04.5 LTS", Labels: map[string]string{}, Dir: "var"},
 		platform.JournalNode{Name: "agent-only", OSImage: "Bottlerocket OS 1.50.0 (aws-k8s-1.34)", Labels: gpu},
 	)
@@ -104,7 +105,7 @@ func TestJournalLabelFollowsTheOSImage(t *testing.T) {
 	}
 	c.reconcileJournalLabels(context.Background())
 	want := map[string]string{
-		"al2023": "var", "ubuntu": "var", "kind": "run", "debian": "", "cpu": "", "elsewhere": "", "stale": "", "agent-only": "var",
+		"al2023": "var", "ubuntu": "var", "kind": "run", "debian": "", "cpu": "", "elsewhere": "", "stale": "var", "agent-only": "var",
 	}
 	for node, dir := range want {
 		if got := p.dir(node); got != dir {
@@ -245,5 +246,24 @@ func TestKernelLogSourceCarriesTheJournalReason(t *testing.T) {
 		if got[k] != v {
 			t.Errorf("%s reason = %q, want %q", k, got[k], v)
 		}
+	}
+}
+
+// Two installations with their agents on separate node pools: one switching
+// the journal off leaves the other's labels alone.
+func TestDisabledJournalLeavesOtherInstallationsNodes(t *testing.T) {
+	cfg := journalConfig()
+	cfg.Enabled = false
+	cfg.AgentNodeSelector = map[string]string{"pool": "a"}
+	c, _, p := journalFixture(t, cfg,
+		platform.JournalNode{Name: "mine", OSImage: "Amazon Linux 2023", Labels: map[string]string{"pool": "a"}, Accelerator: true, Dir: "var"},
+		platform.JournalNode{Name: "theirs", OSImage: "Amazon Linux 2023", Labels: map[string]string{"pool": "b"}, Accelerator: true, Dir: "var"},
+	)
+	c.reconcileJournalLabels(context.Background())
+	if p.dir("mine") != "" || p.dir("theirs") != "var" {
+		t.Fatalf("labels mine=%q theirs=%q", p.dir("mine"), p.dir("theirs"))
+	}
+	if got := c.JournalReason("theirs"); got != "" {
+		t.Errorf("theirs reason = %q", got)
 	}
 }

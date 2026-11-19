@@ -46,7 +46,12 @@ entries, and does not read entries of other transports.
 The agent mounts one journal directory per node, `/var/log/journal` or
 `/run/log/journal`. The controller picks it from the node's OS image and
 records the choice in the node label `kubeneuron.io/journal-dir` (`var` or
-`run`). It sets the label only on accelerator nodes where the agent runs.
+`run`). It sets the label only on accelerator nodes where the agent runs,
+and changes it only on nodes that the installation's
+`spec.agent.nodeSelector` matches, so installations with their agents on
+separate node pools keep to their own nodes. Installations whose agents
+share a node are not supported: their agents share the node's state
+directory.
 The agent DaemonSets are `<name>-agent` (no journal mount, for nodes
 without the label), `<name>-agent-detect-journal-var` and
 `<name>-agent-detect-journal-run`; each node runs exactly one of them. A

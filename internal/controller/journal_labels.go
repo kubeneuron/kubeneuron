@@ -57,7 +57,7 @@ func (c *Controller) JournalReason(node string) string {
 
 // reconcileJournalLabels sets kubeneuron.io/journal-dir on accelerator nodes
 // the agent runs on, from the OS image table or an override, and removes it
-// everywhere else. A configuration without the agent_journal block leaves
+// from the other nodes the agent's node selector matches. A configuration without the agent_journal block leaves
 // the label alone. A failed read changes nothing.
 func (c *Controller) reconcileJournalLabels(ctx context.Context) {
 	rc := c.runtimeConfig(ctx)
@@ -117,12 +117,17 @@ func (c *Controller) reconcileJournalLabels(ctx context.Context) {
 	c.journal.mu.Unlock()
 }
 
-// want is the label value for a node, and why it has none.
+// want is the label value for a node, and why it has none. A node outside
+// the agent's node selector keeps its label as it is: it may belong to
+// another installation's agents.
 func (j *journalLabels) want(cfg *config.AgentJournal, n *platform.JournalNode, accelerator bool, now time.Time) (string, string) {
+	if !labelsMatchSelector(cfg.AgentNodeSelector, n.Labels) {
+		return n.Dir, ""
+	}
 	if !cfg.Enabled {
 		return "", JournalReasonDisabled
 	}
-	if !accelerator || !labelsMatchSelector(cfg.AgentNodeSelector, n.Labels) {
+	if !accelerator {
 		return "", ""
 	}
 	dir := ""
