@@ -118,7 +118,23 @@ func TestAutomaticRepairFollowerDoesNotRepeatReplacement(t *testing.T) {
 	ctx := t.Context()
 	configureRepairClasses(t, c)
 	owner := openIncidentFor(t, c, types.ClassFellOffBus)
-	waitSettled(t, c, st, owner, func(i *types.Incident) bool { return i.StepIndex == 1 })
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("cordon did not finish%s", dump(trail(t, st, owner)))
+		}
+		if c.isInFlight(owner) {
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		inc := mustIncident(t, st, owner)
+		if inc.StepIndex == 1 {
+			break
+		}
+		if err := c.advance(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
 	second := signal(types.ClassAcceleratorFault, "n1", "")
 	if err := c.IngestSignal(ctx, second); err != nil {
 		t.Fatal(err)
@@ -127,10 +143,18 @@ func TestAutomaticRepairFollowerDoesNotRepeatReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	step(t, c, st, follower.ID, 10)
+	for range 10 {
+		if err := c.advance(ctx, mustIncident(t, st, follower.ID)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	c = restartWith(t, c, st, p)
 	// Reconcile the follower first after leadership changes.
-	step(t, c, st, follower.ID, 10)
+	for range 10 {
+		if err := c.advance(ctx, mustIncident(t, st, follower.ID)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	waitSettled(t, c, st, owner, func(i *types.Incident) bool { return i.State == types.StateVerifying })
 	step(t, c, st, follower.ID, 20)
 	if got := mustIncident(t, st, follower.ID); got.State != types.StateEvaluating || got.StepIndex != 0 {
