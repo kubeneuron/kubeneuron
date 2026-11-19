@@ -79,7 +79,7 @@ func (q *Queries) ReleaseRepairFollowers(ctx context.Context, ownerID string, at
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
 		ids = append(ids, id)
@@ -164,7 +164,7 @@ func (q *Queries) ListRepairNodeIdentities(ctx context.Context) ([]types.Node, e
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var nodes []types.Node
 	for rows.Next() {
 		var n types.Node

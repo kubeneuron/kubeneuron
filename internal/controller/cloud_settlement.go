@@ -34,7 +34,7 @@ func settleCloudOperation(inc *types.Incident, reason string, at time.Time) erro
 		settled = true
 	}
 	if !settled {
-		return fmt.Errorf("Incident %s has no open cloud operation to mark as settled.", inc.ID)
+		return fmt.Errorf("Incident %s has no open cloud operation to mark as settled.", inc.ID) //nolint:staticcheck // Displayed verbatim by the CLI.
 	}
 	return nil
 }

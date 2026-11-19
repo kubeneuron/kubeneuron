@@ -1017,7 +1017,11 @@ func TestRepairStepExclusion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	ctx := t.Context()
 	if err := s.WithTx(ctx, func(tx store.Tx) error {
 		for _, id := range []string{"gpu-a", "gpu-b", "node"} {
