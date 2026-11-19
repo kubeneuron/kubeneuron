@@ -211,3 +211,31 @@ func TestAcceleratorHealthAgentSources(t *testing.T) {
 		t.Fatalf("no-data rows in the fleet view %+v", rows)
 	}
 }
+
+// A source of another vendor than the node's accelerators is not the node's:
+// an agent built for every vendor lists them all.
+func TestAcceleratorHealthAgentSourcesOfTheNodesVendor(t *testing.T) {
+	c, _, _, clock := healthFixture(t)
+	ctx := context.Background()
+	name := c.healthSources()[0].name()
+	c.health.mu.Lock()
+	c.health.read = map[string]bool{name: true}
+	c.health.latest = map[string]nodehealth.NodeHealth{
+		name + "/gpu-1": {Node: "gpu-1", Profiles: []string{"nvidia"}},
+		name + "/mi-1":  {Node: "mi-1", Profiles: []string{"amd-instinct"}},
+	}
+	c.health.mu.Unlock()
+	all := func(node string) []types.AgentSignalSource {
+		return []types.AgentSignalSource{
+			{Node: node, Source: "nvidia-kmsg", Available: true, ReadAt: clock.Now()},
+			{Node: node, Source: "amd-kmsg", Class: types.ClassPCIe, Available: true, ReadAt: clock.Now()},
+		}
+	}
+	c.agentSignalSources = all
+	for node, want := range map[string]string{"gpu-1": "nvidia-kmsg", "mi-1": "amd-kmsg"} {
+		rows := healthRowsOf(c.AcceleratorHealth(ctx, node), agentHealthSource)
+		if len(rows) != 1 || rows[0].Rule != want {
+			t.Fatalf("%s: rows %+v, want only %s", node, rows, want)
+		}
+	}
+}

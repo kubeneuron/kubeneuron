@@ -1255,3 +1255,31 @@ func TestReconcileOperatorPermissionForReboot(t *testing.T) {
 		}
 	}
 }
+
+// The kernel log condition informs; an agent without the host kernel log is
+// a supported install, so it never holds Ready.
+func TestKernelLogSourceDoesNotHoldReady(t *testing.T) {
+	ctx := context.Background()
+	scheme := newOperatorScheme(t)
+	for _, nodeLevel := range []bool{false, true} {
+		root := testKubeNeuron()
+		root.Spec.Safety.NodeLevelActions = nodeLevel
+		c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(root).WithObjects(root).Build()
+		r := &KubeNeuronReconciler{Client: c, Scheme: scheme}
+		var installation kubeneuronv1alpha1.KubeNeuron
+		if err := c.Get(ctx, client.ObjectKeyFromObject(root), &installation); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.updateStatus(ctx, &installation, &Snapshot{Digest: "d"}, nil, true, ""); err != nil {
+			t.Fatal(err)
+		}
+		kernelLog := meta.FindStatusCondition(installation.Status.Conditions, "KernelLogSource")
+		ready := meta.FindStatusCondition(installation.Status.Conditions, "Ready")
+		if kernelLog == nil || kernelLog.Status == metav1.ConditionTrue {
+			t.Fatalf("node-level %v: kernel log condition %+v, want not true", nodeLevel, kernelLog)
+		}
+		if ready == nil || ready.Status != metav1.ConditionTrue {
+			t.Fatalf("node-level %v: kernel log %s held Ready: %+v", nodeLevel, kernelLog.Status, ready)
+		}
+	}
+}

@@ -33,6 +33,8 @@ func TestAgentSourceReportToHealthView(t *testing.T) {
 	post(body, 204)
 	post(strings.Replace(body, "node-a", "node-b", 1), 403)
 	post(strings.Replace(body, "kernel-log-unavailable", "arbitrary text", 1), 400)
+	row := strings.Trim(body, "[]")
+	post("["+strings.Repeat(row+",", 64)+row+"]", 400)
 	for _, node := range []string{"", "node-a"} {
 		rows := healthRowsOf(c.AcceleratorHealth(t.Context(), node), agentHealthSource)
 		if len(rows) != 1 || rows[0].Reason != "kernel-log-unavailable" || rows[0].State != "unknown" {
