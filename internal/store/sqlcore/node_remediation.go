@@ -142,3 +142,19 @@ func (q *Queries) ReleaseRepairStep(ctx context.Context, incident string) error 
 	_, err := q.db.ExecContext(ctx, "DELETE FROM repair_step_claims WHERE incident_id=?", incident)
 	return err
 }
+
+// ReleaseVanishedRepairNode drops execution rights for a confirmed vanished
+// incarnation. Historical follower links and cloud plan records remain available
+// to verification and operator settlement.
+func (q *Queries) ReleaseVanishedRepairNode(ctx context.Context, node, uid string) error {
+	for _, statement := range []string{
+		"DELETE FROM repair_step_claims WHERE node=? AND node_uid=?",
+		"DELETE FROM repair_step_guards WHERE node=? AND node_uid=?",
+		"DELETE FROM node_remediation_owners WHERE node=? AND node_uid=?",
+	} {
+		if _, err := q.db.ExecContext(ctx, statement, node, uid); err != nil {
+			return err
+		}
+	}
+	return nil
+}

@@ -1063,3 +1063,40 @@ func TestRepairStepExclusion(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestReleaseVanishedRepairNodeKeepsReplacementUID(t *testing.T) {
+	s, openErr := Open(":memory:")
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := t.Context()
+	for _, id := range []string{"old", "current"} {
+		inc := testIncident(id, time.Now())
+		inc.Target.GPUUUID = id
+		if err := s.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := s.WithTx(ctx, func(tx store.Tx) error {
+		for _, uid := range []string{"old", "current"} {
+			if _, err := tx.ClaimNodeRemediation(ctx, "n", uid, uid, time.Now()); err != nil {
+				return err
+			}
+			if _, err := tx.ClaimRepairStep(ctx, "n", uid, uid, "", false); err != nil {
+				return err
+			}
+		}
+		return tx.ReleaseVanishedRepairNode(ctx, "n", "old")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"repair_step_claims", "repair_step_guards", "node_remediation_owners"} {
+		var uid string
+		var count int
+		if err := s.SQL.QueryRow("SELECT COUNT(*),MIN(node_uid) FROM "+table).Scan(&count, &uid); err != nil || count != 1 || uid != "current" {
+			t.Fatalf("%s: count=%d UID=%q error=%v", table, count, uid, err)
+		}
+	}
+}

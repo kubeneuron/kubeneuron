@@ -83,6 +83,7 @@ type IncidentFilter struct {
 // contract (internal/playbook/statemachine.go) requires an incident change
 // and its audit entry to persist in the same transaction.
 type Tx interface {
+	ReleaseVanishedRepairNode(ctx context.Context, node, uid string) error
 	ClaimRepairStep(ctx context.Context, node, uid, incident, actionID string, device bool) (bool, error)
 	ReleaseRepairStep(ctx context.Context, incident string) error
 	// ClaimNodeRemediation returns the winning incident ID for this Node identity.
