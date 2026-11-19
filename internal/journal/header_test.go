@@ -14,8 +14,8 @@ func TestReadHeader(t *testing.T) {
 	binary.LittleEndian.PutUint64(data[88:], 208)
 	binary.LittleEndian.PutUint64(data[96:], 16)
 	binary.LittleEndian.PutUint64(data[136:], 208)
-	if tail, err := readHeader(bytes.NewReader(data[:]), 224); tail != 208 || err != nil {
-		t.Fatalf("tail %d, error %v", tail, err)
+	if h, err := readHeader(bytes.NewReader(data[:]), 224); h.tail != 208 || err != nil {
+		t.Fatalf("tail %d, error %v", h.tail, err)
 	}
 	for _, index := range []int{0, 12, 16, 88, 96, 136} {
 		bad := data
@@ -33,13 +33,14 @@ func FuzzReadHeader(f *testing.F) {
 	f.Add(header, int64(len(header)))
 	f.Add([]byte("LPKSHHRH"), int64(8))
 	f.Fuzz(func(t *testing.T, data []byte, fileSize int64) {
-		tail, err := readHeader(bytes.NewReader(data), fileSize)
+		h, err := readHeader(bytes.NewReader(data), fileSize)
 		if err != nil {
 			return
 		}
 		if len(data) < 208 || fileSize < 208 {
 			t.Fatal("accepted a truncated fixed header")
 		}
+		tail := h.tail
 		if tail != 0 && (tail%8 != 0 || tail < 208 || tail > uint64(fileSize)-16) {
 			t.Fatalf("tail offset %d cannot address an object in %d bytes", tail, fileSize)
 		}
