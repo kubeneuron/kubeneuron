@@ -104,6 +104,23 @@ Not read at all: conditions whose names a public document does not confirm,
 Kubernetes events, and DRA ResourceSlice device taints and cloud monitoring
 APIs other than the opt-in reads below.
 
+## Sources off by default
+
+These sources are not validated on live hardware, so none of them opens an
+incident until it is switched on. In Automatic mode a misread signal could
+mean a replaced node.
+
+| Source | Switch | While it is off |
+|---|---|---|
+| [TPU health from Google Cloud Monitoring](#tpu-health-from-google-cloud-monitoring-opt-in) | `spec.cloud.gcp.tpuInfraHealth.enabled` | not read |
+| [Device taints from Kubernetes DRA](#device-taints-from-kubernetes-dra-opt-in) | `spec.safety.acceleratorHealth.dra.enabled` | not read |
+| AWS Neuron device health from the driver's sysfs, read by the agent | `spec.safety.acceleratorHealth.awsNeuronSysfs.enabled` | a fault is shown in `kubeneuronctl health` as not acted on, for up to a day, and counted in `kubeneuron_accelerator_faults_not_acted_on_total`; no incident |
+
+The agent does not send the AWS Neuron faults yet; the switch and the
+controller's handling of them are in place for when it does. If the switch
+is turned off after it was on, faults that already opened incidents are
+also listed as not acted on; their incidents remain.
+
 ## TPU health from Google Cloud Monitoring (opt-in)
 
 GKE writes no TPU condition to the Node. With

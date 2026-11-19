@@ -153,6 +153,8 @@ var faultTable = map[FaultKey]FaultInfo{
 		Vendor: "aws", Code: "sram-ecc-uncorrectable", Name: "sram-uncorrectable-ecc-error",
 		Class: types.ClassAcceleratorFault, Severity: types.SeverityCritical,
 	},
+	// The agent sends this only after two consecutive reads list the
+	// component; one read is no event.
 	{Vendor: "aws", Code: "unhealthy-component"}: {
 		Vendor: "aws", Code: "unhealthy-component", Name: "unhealthy-device-component",
 		Class: types.ClassAcceleratorFault, Severity: types.SeverityCritical,
