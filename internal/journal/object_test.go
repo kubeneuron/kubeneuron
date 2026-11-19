@@ -15,7 +15,7 @@ func FuzzObjectAt(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, off, size uint64) {
 		var data [272]byte
-		h := fileHeader{208, 272, 240}
+		h := fileHeader{start: 208, end: 272, tail: 240}
 		if off <= 256 {
 			data[off] = 1
 			binary.LittleEndian.PutUint64(data[off+8:], size)

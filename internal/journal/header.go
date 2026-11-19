@@ -12,6 +12,7 @@ import (
 
 type fileHeader struct {
 	start, end, tail uint64
+	compact          bool
 }
 
 // readHeader checks the fixed header before offsets can be used to read objects.
@@ -36,5 +37,5 @@ func readHeader(r io.ReaderAt, fileSize int64) (fileHeader, error) {
 	if tail != 0 && (tail%8 != 0 || tail < size || tail > size+arena || size+arena-tail < 16) {
 		return fileHeader{}, errors.New("invalid journal tail offset")
 	}
-	return fileHeader{start: size, end: size + arena, tail: tail}, nil
+	return fileHeader{start: size, end: size + arena, tail: tail, compact: header[12]&16 != 0}, nil
 }
