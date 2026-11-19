@@ -788,6 +788,9 @@ const (
 	AcceleratorVendorAMD    AcceleratorVendor = "amd"
 	AcceleratorVendorIntel  AcceleratorVendor = "intel"
 	AcceleratorVendorGoogle AcceleratorVendor = "google"
+	// AcceleratorVendorAWS is the vendor of AWS Neuron devices (AWS
+	// Trainium and AWS Inferentia).
+	AcceleratorVendorAWS AcceleratorVendor = "aws"
 )
 
 // MaxAcceleratorVendorLength bounds a vendor id. Vendor reaches metric

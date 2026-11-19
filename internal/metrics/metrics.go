@@ -418,6 +418,14 @@ var (
 		Help: "Accelerator nodes reporting a signal that is read and not acted on, by health source, profile and reason (degraded, networking-issue).",
 	}, []string{"source", "profile", "reason"})
 
+	// AcceleratorFaultsNotActedOn counts the agent's faults that open no
+	// incident because their source is off, by source and class. No node
+	// label.
+	AcceleratorFaultsNotActedOn = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "kubeneuron_accelerator_faults_not_acted_on_total",
+		Help: "Accelerator faults an agent read whose source is not switched on to open incidents, by source and class.",
+	}, []string{"source", "class"})
+
 	// DRAHealthReads counts the reads of the DRA device taints, by outcome:
 	// ok, api-unavailable, forbidden, timeout, list-failed, bounds-exceeded,
 	// dynamic-client-unavailable.

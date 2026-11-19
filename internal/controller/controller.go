@@ -543,7 +543,7 @@ func (c *Controller) HandleAgentEvent(r *http.Request, ev types.AgentEvent) erro
 		}
 		return nil
 	}
-	if sig, ok := c.runtimeConfig(r.Context()).Catalog.SignalFromAgentEvent(ev); ok {
+	if sig, ok := c.agentEventSignal(r.Context(), ev); ok {
 		c.HandleSignal(r, sig)
 	}
 	return nil
@@ -566,7 +566,7 @@ func (c *Controller) drainEventOutbox(ctx context.Context) {
 			c.log.Error("event outbox claim failed", "err", err)
 			return
 		}
-		if sig, ok := c.runtimeConfig(ctx).Catalog.SignalFromAgentEvent(claimed.Event); ok {
+		if sig, ok := c.agentEventSignal(ctx, claimed.Event); ok {
 			if err := c.ingestClaimedEvent(ctx, claimed, sig); err != nil {
 				if !errors.Is(err, store.ErrEventLeaseLost) {
 					c.log.Error("event outbox workflow failed", "err", err, "event_id", claimed.Event.EventID)

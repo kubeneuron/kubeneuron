@@ -19,6 +19,9 @@ import (
 type HealthPolicy struct {
 	// DRA reads the device taints of resource.k8s.io/v1 ResourceSlices.
 	DRA bool
+	// AWSNeuronSysfs lets the faults the agent reads from the AWS Neuron
+	// driver's sysfs tree open incidents.
+	AWSNeuronSysfs bool
 }
 
 // draHealthReader is a platform that reads the devices DRA drivers publish

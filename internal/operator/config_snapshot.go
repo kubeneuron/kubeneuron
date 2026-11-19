@@ -569,17 +569,24 @@ func topologyDRADiscoveryEnabled(installation *kubeneuronv1alpha1.KubeNeuron) bo
 // emitted only when a source is enabled, so an absent or disabled block
 // compiles to the digest of a configuration written before the field.
 func acceleratorHealth(spec *kubeneuronv1alpha1.AcceleratorHealthSpec) *config.AcceleratorHealth {
-	if spec == nil || spec.DRA == nil || !spec.DRA.Enabled {
+	if spec == nil {
 		return nil
 	}
-	return &config.AcceleratorHealth{DRA: config.AcceleratorHealthDRA{Enabled: true}}
+	var out config.AcceleratorHealth
+	out.DRA.Enabled = spec.DRA != nil && spec.DRA.Enabled
+	out.AWSNeuronSysfs.Enabled = spec.AWSNeuronSysfs != nil && spec.AWSNeuronSysfs.Enabled
+	if out == (config.AcceleratorHealth{}) {
+		return nil
+	}
+	return &out
 }
 
 // draHealthEnabled reports whether the installation opted into the DRA
 // device taint read: the single predicate behind its snapshot key and its
 // share of the conditional RBAC rule.
 func draHealthEnabled(installation *kubeneuronv1alpha1.KubeNeuron) bool {
-	return acceleratorHealth(installation.Spec.Safety.AcceleratorHealth) != nil
+	h := acceleratorHealth(installation.Spec.Safety.AcceleratorHealth)
+	return h != nil && h.DRA.Enabled
 }
 
 // normalizedStrings trims, drops blanks, de-duplicates and sorts, so two

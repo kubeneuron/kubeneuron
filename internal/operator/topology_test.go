@@ -466,6 +466,8 @@ func TestControllerRBACDRARuleFollowsHealthPolicy(t *testing.T) {
 	baseline := controllerClusterRole(testKubeNeuron())
 	for name, spec := range map[string]*kubeneuronv1alpha1.AcceleratorHealthSpec{
 		"omitted": nil, "empty": {}, "disabled": {DRA: &kubeneuronv1alpha1.AcceleratorHealthDRASpec{}},
+		// Acting on the AWS Neuron sysfs read needs no permission.
+		"aws neuron sysfs": {AWSNeuronSysfs: &kubeneuronv1alpha1.AcceleratorHealthAWSNeuronSysfsSpec{Enabled: true}},
 	} {
 		installation := testKubeNeuron()
 		installation.Spec.Safety.AcceleratorHealth = spec
@@ -506,6 +508,7 @@ func TestCompileSnapshotOmitsAcceleratorHealthUnlessEnabled(t *testing.T) {
 	_, _, baseline := compile(t, nil)
 	for name, spec := range map[string]*kubeneuronv1alpha1.AcceleratorHealthSpec{
 		"empty": {}, "disabled": {DRA: &kubeneuronv1alpha1.AcceleratorHealthDRASpec{}},
+		"aws neuron sysfs disabled": {AWSNeuronSysfs: &kubeneuronv1alpha1.AcceleratorHealthAWSNeuronSysfsSpec{}},
 	} {
 		got, text, digest := compile(t, spec)
 		if got != nil || strings.Contains(text, "accelerator_health") || digest != baseline {
@@ -515,5 +518,13 @@ func TestCompileSnapshotOmitsAcceleratorHealthUnlessEnabled(t *testing.T) {
 	got, _, digest := compile(t, &kubeneuronv1alpha1.AcceleratorHealthSpec{DRA: &kubeneuronv1alpha1.AcceleratorHealthDRASpec{Enabled: true}})
 	if got == nil || !got.DRA.Enabled || digest == baseline {
 		t.Fatalf("enabled: %+v, digest unchanged %v", got, digest == baseline)
+	}
+	// DRA alone compiles as it did before the AWS Neuron sysfs key existed.
+	if _, text, _ := compile(t, &kubeneuronv1alpha1.AcceleratorHealthSpec{DRA: &kubeneuronv1alpha1.AcceleratorHealthDRASpec{Enabled: true}}); strings.Contains(text, "aws_neuron_sysfs") {
+		t.Fatalf("DRA alone carries the AWS Neuron sysfs key:\n%s", text)
+	}
+	got, _, digest = compile(t, &kubeneuronv1alpha1.AcceleratorHealthSpec{AWSNeuronSysfs: &kubeneuronv1alpha1.AcceleratorHealthAWSNeuronSysfsSpec{Enabled: true}})
+	if got == nil || got.DRA.Enabled || !got.AWSNeuronSysfs.Enabled || digest == baseline {
+		t.Fatalf("aws neuron sysfs enabled: %+v, digest unchanged %v", got, digest == baseline)
 	}
 }

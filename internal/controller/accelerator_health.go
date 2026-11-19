@@ -33,7 +33,7 @@ var agentSourceToken = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // truncated. The text of a row is KubeNeuron's own; what a source reports is
 // repeated only as a bounded reason, never a condition's message or a
 // cloud's error.
-func (c *Controller) AcceleratorHealth(_ context.Context, node string) types.AcceleratorHealthView {
+func (c *Controller) AcceleratorHealth(ctx context.Context, node string) types.AcceleratorHealthView {
 	sources := c.healthSources()
 	want := func(n string) bool { return node == "" || n == node }
 	var rows []types.AcceleratorHealthRow
@@ -85,6 +85,11 @@ func (c *Controller) AcceleratorHealth(_ context.Context, node string) types.Acc
 		}
 	}
 	c.health.mu.Unlock()
+
+	for _, row := range c.neuronHeldRows(ctx, want, time.Now()) {
+		nodes[row.Node] = true
+		rows = append(rows, row)
+	}
 
 	if read := c.agentSourceReader(); read != nil {
 		for n := range nodes {

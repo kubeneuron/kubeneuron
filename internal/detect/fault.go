@@ -138,7 +138,31 @@ var faultTable = map[FaultKey]FaultInfo{
 		Vendor: "amd", Code: "pcie-error", Name: "pcie-error",
 		Class: types.ClassPCIe, Severity: types.SeverityWarning,
 	},
+
+	// AWS Neuron devices, read by the agent from the Neuron driver's sysfs
+	// tree (source NeuronSysfsSource). The tree names a device by index and
+	// nothing else, so each is the node's accelerator-fault, the class the
+	// same errors reach from a Node condition, not a device class whose
+	// ladder resets a GPU. Experimental: not validated against a live AWS
+	// Trainium or Inferentia node.
+	{Vendor: "aws", Code: "hbm-ecc-uncorrectable"}: {
+		Vendor: "aws", Code: "hbm-ecc-uncorrectable", Name: "hbm-uncorrectable-ecc-error",
+		Class: types.ClassAcceleratorFault, Severity: types.SeverityCritical,
+	},
+	{Vendor: "aws", Code: "sram-ecc-uncorrectable"}: {
+		Vendor: "aws", Code: "sram-ecc-uncorrectable", Name: "sram-uncorrectable-ecc-error",
+		Class: types.ClassAcceleratorFault, Severity: types.SeverityCritical,
+	},
+	{Vendor: "aws", Code: "unhealthy-component"}: {
+		Vendor: "aws", Code: "unhealthy-component", Name: "unhealthy-device-component",
+		Class: types.ClassAcceleratorFault, Severity: types.SeverityCritical,
+	},
 }
+
+// NeuronSysfsSource is the FaultSignal.Source of the agent's read of the AWS
+// Neuron driver's sysfs tree. Its faults open an incident only while the
+// installation opts in (spec.safety.acceleratorHealth.awsNeuronSysfs).
+const NeuronSysfsSource = "aws-neuron-sysfs"
 
 // ClassifyFault returns the classification for a vendor-native fault code, and
 // whether it is one KubeNeuron acts on. Codes not listed are recorded but open

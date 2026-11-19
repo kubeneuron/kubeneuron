@@ -500,6 +500,23 @@ type AcceleratorHealthSpec struct {
 	// DRA reads the device taints of Dynamic Resource Allocation drivers.
 	// Omitted means off.
 	DRA *AcceleratorHealthDRASpec `json:"dra,omitempty"`
+	// AWSNeuronSysfs acts on the faults the agent reads from the AWS Neuron
+	// driver's sysfs tree. Omitted means off.
+	AWSNeuronSysfs *AcceleratorHealthAWSNeuronSysfsSpec `json:"awsNeuronSysfs,omitempty"`
+}
+
+// AcceleratorHealthAWSNeuronSysfsSpec is the opt-in to incidents from the
+// agent's read of the AWS Neuron driver's sysfs tree (experimental, not
+// validated against a live AWS Trainium or Inferentia node).
+type AcceleratorHealthAWSNeuronSysfsSpec struct {
+	// Enabled lets an uncorrectable ECC error or a failing device component
+	// the agent reads from /sys/devices/virtual/neuron_device open an
+	// accelerator-fault incident on the node. While false the agent still
+	// reads the tree and the controller shows each fault in the accelerator
+	// health view as not acted on; nothing is held, cordoned or replaced
+	// for it. No permission changes either way. Default false.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // AcceleratorHealthDRASpec is the opt-in read of the device taints in

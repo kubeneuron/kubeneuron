@@ -1427,6 +1427,22 @@ spec:
                       health profiles. Omitted means only the Kubernetes Node objects are
                       read.
                     properties:
+                      awsNeuronSysfs:
+                        description: |-
+                          AWSNeuronSysfs acts on the faults the agent reads from the AWS Neuron
+                          driver's sysfs tree. Omitted means off.
+                        properties:
+                          enabled:
+                            default: false
+                            description: |-
+                              Enabled lets an uncorrectable ECC error or a failing device component
+                              the agent reads from /sys/devices/virtual/neuron_device open an
+                              accelerator-fault incident on the node. While false the agent still
+                              reads the tree and the controller shows each fault in the accelerator
+                              health view as not acted on; nothing is held, cordoned or replaced
+                              for it. No permission changes either way. Default false.
+                            type: boolean
+                        type: object
                       dra:
                         description: |-
                           DRA reads the device taints of Dynamic Resource Allocation drivers.

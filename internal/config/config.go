@@ -91,7 +91,15 @@ type Safety struct {
 // AcceleratorHealth carries the opt-in health sources. See the CRD field of
 // the same name.
 type AcceleratorHealth struct {
-	DRA AcceleratorHealthDRA `yaml:"dra"`
+	DRA            AcceleratorHealthDRA            `yaml:"dra"`
+	AWSNeuronSysfs AcceleratorHealthAWSNeuronSysfs `yaml:"aws_neuron_sysfs,omitempty"`
+}
+
+// AcceleratorHealthAWSNeuronSysfs lets a fault the agent reads from the AWS
+// Neuron driver's sysfs tree open an incident. Off by default: the read goes
+// on, and its faults are shown and not acted on.
+type AcceleratorHealthAWSNeuronSysfs struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // AcceleratorHealthDRA switches the read-only resource.k8s.io/v1

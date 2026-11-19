@@ -114,3 +114,27 @@ func TestAMDFaultsClassifyWithoutNewProblemClasses(t *testing.T) {
 		}
 	}
 }
+
+// TestAWSNeuronFaultsAreTheNodesAcceleratorFault pins the AWS Neuron rows:
+// the sysfs read names a device by index alone, so each is the node's
+// accelerator-fault, never a device class whose ladder resets a GPU.
+func TestAWSNeuronFaultsAreTheNodesAcceleratorFault(t *testing.T) {
+	codes := map[string]bool{}
+	for _, f := range FaultTable() {
+		if f.Vendor != string(types.AcceleratorVendorAWS) {
+			continue
+		}
+		codes[f.Code] = true
+		if f.Class != types.ClassAcceleratorFault || f.Severity != types.SeverityCritical {
+			t.Errorf("aws/%s classifies to %s at %s, want accelerator-fault, critical", f.Code, f.Class, f.Severity)
+		}
+	}
+	for _, code := range []string{"hbm-ecc-uncorrectable", "sram-ecc-uncorrectable", "unhealthy-component"} {
+		if !codes[code] {
+			t.Errorf("aws/%s is not in the fault table", code)
+		}
+	}
+	if len(codes) != 3 {
+		t.Errorf("aws rows %v, want exactly the three the sysfs read emits", codes)
+	}
+}

@@ -170,7 +170,7 @@ func applyRuntimeConfigWithNodePauses(
 		DegradedTaint:          degradedTaintPolicy(cfg.Safety.TaintDegradedNodes),
 		Checkpoint:             checkpointPolicy(cfg.Safety.CheckpointCoordination),
 		Topology:               topologyPolicy(cfg.Safety.TopologyClassifier),
-		Health:                 controller.HealthPolicy{DRA: cfg.Safety.AcceleratorHealth != nil && cfg.Safety.AcceleratorHealth.DRA.Enabled},
+		Health:                 healthPolicy(cfg.Safety.AcceleratorHealth),
 		Impact:                 impactPolicy(cfg.Safety.ImpactPreview),
 		VerifyQuiet:            cfg.Safety.VerifyQuietWindow.Std(),
 		ApprovalTTL:            cfg.Approvals.TTL.Std(),
@@ -252,6 +252,16 @@ func impactPolicy(compiled *config.ImpactPreview) impact.Policy {
 			KubeRay:   compiled.WorkloadContext.KubeRay,
 		},
 	}
+}
+
+// healthPolicy resolves the compiled accelerator health opt-ins. An absent
+// key is the default: no DRA read, and no incident from the AWS Neuron sysfs
+// read.
+func healthPolicy(compiled *config.AcceleratorHealth) controller.HealthPolicy {
+	if compiled == nil {
+		return controller.HealthPolicy{}
+	}
+	return controller.HealthPolicy{DRA: compiled.DRA.Enabled, AWSNeuronSysfs: compiled.AWSNeuronSysfs.Enabled}
 }
 
 // topologyPolicy resolves the compiled topology classifier inputs. An absent
