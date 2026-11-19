@@ -218,6 +218,9 @@ func DashboardSpecs() []DashboardSpec {
 						{Expr: "max by (node, gpu_uuid) (kubeneuron_gpu_nvlink_errors_per_second" + sel + ")", Legend: "nvlink {{node}} {{gpu_uuid}}"},
 						{Expr: "max by (node, gpu_uuid) (kubeneuron_gpu_pcie_replays_per_second" + sel + ")", Legend: "pcie {{node}} {{gpu_uuid}}"},
 					}},
+				{Title: "Accelerator faults not acted on", Type: "timeseries", Unit: "short", Width: 24, Height: 8,
+					Description: "Faults an agent read whose source is off by default and not switched on, so no incident opened (AWS Neuron sysfs: spec.safety.acceleratorHealth.awsNeuronSysfs.enabled). Experimental, not validated on hardware. kubeneuronctl health names the node and device.",
+					Targets:     []TargetSpec{{Expr: "sum by (source, class) (increase(kubeneuron_accelerator_faults_not_acted_on_total" + ctl + "[1h]))", Legend: "{{source}} {{class}}"}}},
 			},
 		},
 		{

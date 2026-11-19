@@ -19,7 +19,8 @@ API is `v1alpha1`.
   `spec.safety.acceleratorHealth.awsNeuronSysfs.enabled: true`; otherwise it
   is shown in `kubeneuronctl health` as not acted on for a day, until the
   controller restarts, and counted in
-  `kubeneuron_accelerator_faults_not_acted_on_total{source,class}`. The
+  `kubeneuron_accelerator_faults_not_acted_on_total{source,class}`, charted
+  on the Health & Errors dashboard. The
   agent does not send these faults yet. Not validated against a live AWS
   Trainium or Inferentia node.
 - When add-first recovery is unavailable, the controller sends a notification with the reason at the start of each hold. A restart during dispatch can repeat the notification.

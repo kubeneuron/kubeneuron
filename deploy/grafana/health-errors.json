@@ -498,6 +498,43 @@
           "format": "time_series"
         }
       ]
+    },
+    {
+      "id": 8,
+      "title": "Accelerator faults not acted on",
+      "type": "timeseries",
+      "description": "Faults an agent read whose source is off by default and not switched on, so no incident opened (AWS Neuron sysfs: spec.safety.acceleratorHealth.awsNeuronSysfs.enabled). Experimental, not validated on hardware. kubeneuronctl health names the node and device.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (source, class) (increase(kubeneuron_accelerator_faults_not_acted_on_total{cluster=~\"$cluster\"}[1h]))",
+          "legendFormat": "{{source}} {{class}}",
+          "instant": false,
+          "range": true,
+          "format": "time_series"
+        }
+      ]
     }
   ]
 }
