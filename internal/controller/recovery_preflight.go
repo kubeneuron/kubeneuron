@@ -34,8 +34,11 @@ type recoveryPath struct {
 }
 
 func (c *Controller) cloudRecoveryPath(ctx context.Context, name string) recoveryPath {
+	return cloudRecoveryPath(c.runtimeConfig(ctx).Engine, name)
+}
+
+func cloudRecoveryPath(engine *playbook.Engine, name string) recoveryPath {
 	var path recoveryPath
-	engine := c.runtimeConfig(ctx).Engine
 	if engine == nil {
 		return path
 	}

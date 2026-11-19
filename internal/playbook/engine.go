@@ -102,6 +102,19 @@ func (e *Engine) PolicyFor(class types.ProblemClass, vendor types.AcceleratorVen
 	return Policy{}, false
 }
 
+// PolicyClasses lists each configured class once in policy order.
+func (e *Engine) PolicyClasses() []types.ProblemClass {
+	seen := map[types.ProblemClass]bool{}
+	var classes []types.ProblemClass
+	for _, policy := range e.policies {
+		if !seen[policy.Class] {
+			classes = append(classes, policy.Class)
+			seen[policy.Class] = true
+		}
+	}
+	return classes
+}
+
 // SelectFor binds a playbook from a class and vendor directly, for the late
 // bind: an incident that lost its playbook to an engine reload has no signal to
 // reconstruct, and building a fake one dropped the vendor on the floor.

@@ -45,7 +45,7 @@ func (c *Controller) syncAcceleratorInventory(ctx context.Context) {
 		}
 		return
 	}
-	c.inventory.recordPools(nodes)
+	c.inventory.recordPools(nodes, c.runtimeConfig(ctx).Engine)
 	present := map[string]bool{}
 	seen := map[string]string{}
 	for i := range nodes {

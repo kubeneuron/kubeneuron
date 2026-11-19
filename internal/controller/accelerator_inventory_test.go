@@ -327,3 +327,29 @@ func TestAcceleratorPoolInventoryBeforeIncident(t *testing.T) {
 		t.Fatalf("removed pools still present: %+v", got)
 	}
 }
+
+func TestPoolReplacementOrders(t *testing.T) {
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{"repair": {Steps: []playbook.Step{{Action: "platform.replace_node"}}}}, []playbook.Policy{
+		{Class: types.ClassFellOffBus, Playbook: "repair"},
+		{Class: types.ClassFellOffBus, Vendor: "amd", Playbook: "repair", ReplacementStrategy: recoverymode.RemoveFirst},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c Controller
+	for _, tc := range []struct {
+		resources []string
+		want      string
+	}{
+		{[]string{"amd.com/gpu"}, "RemoveFirst"}, {[]string{"nvidia.com/gpu"}, "AddFirst"}, {[]string{"amd.com/gpu", "nvidia.com/gpu"}, "mixed"},
+	} {
+		var nodes []types.Node
+		for _, resource := range tc.resources {
+			nodes = append(nodes, types.Node{Name: resource, Labels: map[string]string{"cloud.google.com/gke-nodepool": "train"}, Devices: []types.DeviceCount{{Resource: resource}}})
+		}
+		c.inventory.recordPools(nodes, engine)
+		if got := c.PoolAvailability().Pools[0].ReplacementPolicy; got != tc.want {
+			t.Fatalf("%v: got %q, want %q", tc.resources, got, tc.want)
+		}
+	}
+}
