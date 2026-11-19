@@ -5,6 +5,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
@@ -215,6 +216,22 @@ func TestInventoryNodeUIDSharesRepairApprovalWithoutCloudIdentity(t *testing.T) 
 	c.store = missingRepairInventory{st, "n2"}
 	if got := step(t, c, st, third.ID, 10); got.State != types.StateNeedsHuman || len(notifier.approvals) != 1 {
 		t.Fatalf("missing node: state=%s approvals=%d", got.State, len(notifier.approvals))
+	}
+	c.SetTimings(0, time.Nanosecond)
+	drive(t, c, st, owner, types.StateExpired)
+	// A newly opened incident can now claim the original node incarnation.
+	if err := st.WithTx(ctx, func(tx store.Tx) error {
+		inc := &types.Incident{ID: "next", Target: types.Target{Node: "n1"}, Class: types.ClassThermal, State: types.StateOpen}
+		if err := tx.CreateIncident(ctx, inc); err != nil {
+			return err
+		}
+		got, err := tx.ClaimNodeRemediation(ctx, "n1", "inventory-uid", inc.ID)
+		if err == nil && got != inc.ID {
+			t.Errorf("after expiration owner=%q, want %q", got, inc.ID)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
 	}
 
 }

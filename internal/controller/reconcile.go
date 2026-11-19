@@ -1050,7 +1050,23 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 		if err := tx.UpdateIncident(ctx, inc); err != nil {
 			return err
 		}
-		if from == types.StateVerifying && to == types.StateResolved && !fresh.Successor.Open() && !fresh.RemoveFirst.Open() {
+		releaseRepair := from == types.StateVerifying && to == types.StateResolved
+		if from == types.StateAwaitingApproval && to == types.StateExpired && !fresh.Successor.Open() && !fresh.RemoveFirst.Open() {
+			entries, err := tx.AuditTrail(ctx, inc.ID)
+			if err != nil {
+				return err
+			}
+			// A rewound playbook can be at step zero after an earlier
+			// execution. Only release on expiry when no step ever started.
+			releaseRepair = true
+			for _, entry := range entries {
+				if entry.ToState == types.StateExecuting {
+					releaseRepair = false
+					break
+				}
+			}
+		}
+		if releaseRepair && !fresh.Successor.Open() && !fresh.RemoveFirst.Open() {
 			if err := tx.ReleaseNodeRemediation(ctx, inc.ID); err != nil {
 				return err
 			}
