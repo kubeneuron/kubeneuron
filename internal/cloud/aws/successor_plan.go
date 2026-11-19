@@ -22,7 +22,7 @@ import (
 // planSuccessor records the baseline from an already verified EKS backing group.
 func planSuccessor(s cloud.Successor, group at.AutoScalingGroup) (cloud.Successor, error) {
 	if len(group.AvailabilityZones) > 1 {
-		return s, &cloud.PoolRefusal{Code: cloud.PoolMultiZone, Reason: "node group spans several zones", Action: "use a single-zone node group, or set RemoveFirst in the remediation policy that applies to these nodes"}
+		return s, &cloud.PoolRefusal{Code: cloud.PoolMultiZone, Reason: "EKS chooses the zone of a new node in this pool", Action: "use a single-zone node pool, or set RemoveFirst in the remediation policy that applies to these nodes"}
 	}
 	if len(group.AvailabilityZones) == 0 || group.AvailabilityZones[0] == "" {
 		return s, fmt.Errorf("%w: add-first requires a single availability zone", cloud.ErrAddFirstUnavailable)

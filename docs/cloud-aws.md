@@ -11,11 +11,11 @@ The plan records the managed node group's ARN, its backing Auto Scaling group's
 ARN, the availability zone, the original desired capacity and the EC2 instance
 IDs. Planning requires one zone and room below the group's maximum size. In a
 multi-zone group the new instance could land outside the zone required by a
-training job's volume.
+training job's volume or its scheduling constraints.
 
 | Planning refusal | Operator action |
 | --- | --- |
-| node group spans several zones | Use a single-zone managed node group, or set RemoveFirst in the remediation policy that applies to these nodes. |
+| EKS chooses the zone of a new node in this pool | Use a single-zone node pool, or set RemoveFirst in the remediation policy that applies to these nodes. |
 | node group is managed by Cluster Autoscaler | Use a single-zone group outside Cluster Autoscaler management, or set RemoveFirst in the remediation policy that applies to these nodes. |
 | no room below maxSize | Provide room for one more node, or set RemoveFirst in the remediation policy that applies to these nodes. |
 

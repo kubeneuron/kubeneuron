@@ -26,7 +26,7 @@ func TestPlanSuccessor(t *testing.T) {
 		t.Fatalf("plan=%+v err=%v", plan, err)
 	}
 	group.AvailabilityZones = append(group.AvailabilityZones, "zone-b")
-	if _, err := planSuccessor(s, group); !errors.Is(err, cloud.ErrAddFirstUnavailable) || !strings.Contains(err.Error(), "node group spans several zones") {
+	if _, err := planSuccessor(s, group); !errors.Is(err, cloud.ErrAddFirstUnavailable) || !strings.Contains(err.Error(), "EKS chooses the zone of a new node in this pool") {
 		t.Fatal(err)
 	}
 	group.AvailabilityZones = group.AvailabilityZones[:1]
