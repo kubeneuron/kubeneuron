@@ -4,9 +4,13 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"github.com/kubeneuron/kubeneuron/internal/httpapi"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"sync"
@@ -417,7 +421,29 @@ func TestPoolChecksBeforeIncident(t *testing.T) {
 	}
 	c.syncAcceleratorInventory(t.Context())
 	c.syncAcceleratorInventory(t.Context())
-	rows := c.PoolAvailability().Pools
+	api := httpapi.New(c)
+	api.EnableOperatorAPI(c, "test-token")
+	api.SetReadyCheck(func() bool { return true })
+	server := httptest.NewServer(api.Routes())
+	defer server.Close()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+types.PoolAvailabilityPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-token")
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("pool status HTTP %d", resp.StatusCode)
+	}
+	var result types.PoolAvailabilityView
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	rows := result.Pools
 	if len(rows) != 3 || rows[0].Status != "available" || rows[1].ReasonCode != "eks-add-first-disabled" || rows[2].ReasonCode != cloud.PoolAutopilot || !strings.Contains(rows[2].Action, "GKE Standard") || strings.Contains(rows[2].Action, "RemoveFirst") {
 		t.Fatalf("unexpected pool assessments: %+v", rows)
 	}
