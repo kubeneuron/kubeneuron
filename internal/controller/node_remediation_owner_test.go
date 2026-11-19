@@ -242,3 +242,16 @@ func TestSameRepairNodeUsesRecordedInventoryUID(t *testing.T) {
 		}
 	}
 }
+
+type missingRepairTx struct{ store.Tx }
+
+func (s missingRepairInventory) WithTx(ctx context.Context, f func(store.Tx) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Tx) error { return f(missingRepairTx{tx}) })
+}
+
+func (s missingRepairTx) GetNode(ctx context.Context, node string) (*types.Node, error) {
+	if node == "n2" {
+		return nil, store.ErrNotFound
+	}
+	return s.Tx.GetNode(ctx, node)
+}

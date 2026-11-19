@@ -341,24 +341,30 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 	uid := repairNodeUID(inc)
 	if registered && def.Scope == action.ScopeNode && (def.Destructive || def.AgentDestructive) &&
 		uid != "" && inc.Class != types.ClassCloudInterruption && !c.simulating(ctx, inc) {
-		if inc.CloudIdentity == nil {
-			node, err := c.store.GetNode(ctx, inc.Target.Node)
-			if errors.Is(err, store.ErrNotFound) {
-				return c.escalate(ctx, inc, "node no longer exists in inventory")
-			}
-			if err != nil {
-				return err
-			}
-			if node.UID != uid {
-				return c.escalate(ctx, inc, "node identity changed since the incident opened")
-			}
-		}
 		var owner string
+		missing := errors.New("node no longer exists in inventory")
+		changed := errors.New("node identity changed since the incident opened")
 		err := c.store.WithTx(ctx, func(tx store.Tx) error {
 			var err error
 			owner, err = tx.ClaimNodeRemediation(ctx, inc.Target.Node, uid, inc.ID)
+			if err != nil || owner != inc.ID || inc.CloudIdentity != nil {
+				return err
+			}
+			// A follower checks its original owner's result even after the
+			// old node disappears. Only a prospective executor needs a live
+			// inventory match; a failed check rolls back its claim.
+			node, err := tx.GetNode(ctx, inc.Target.Node)
+			if errors.Is(err, store.ErrNotFound) {
+				return missing
+			}
+			if err == nil && node.UID != uid {
+				return changed
+			}
 			return err
 		})
+		if errors.Is(err, missing) || errors.Is(err, changed) {
+			return c.escalate(ctx, inc, err.Error())
+		}
 		if err != nil {
 			return err
 		}
