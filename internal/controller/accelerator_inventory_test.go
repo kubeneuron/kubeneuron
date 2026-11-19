@@ -18,6 +18,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/safety"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/internal/store/sqlite"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -389,5 +390,38 @@ func TestPoolCheckInterval(t *testing.T) {
 		if row.Status != tc.status || calls != tc.calls || row.CheckedAt == nil || row.AcceleratorNodes != 2 {
 			t.Fatalf("after %s: calls %d row %+v", tc.after, calls, row)
 		}
+	}
+}
+
+type poolAssessmentPlatform struct {
+	*inventoryPlatform
+	checks []string
+}
+
+func (p *poolAssessmentPlatform) CloudNode(_ context.Context, name string) (cloud.NodeRef, error) {
+	return cloud.NodeRef{Identity: cloud.NodeIdentity{Node: name, NodeUID: name + "-uid"}}, nil
+}
+func (p *poolAssessmentPlatform) AddFirstAvailable(_ context.Context, pin cloud.NodeIdentity) error {
+	p.checks = append(p.checks, pin.Node)
+	if pin.Node == "gke" {
+		return &cloud.PoolRefusal{Code: cloud.PoolAutopilot, Reason: "GKE Autopilot manages its nodes"}
+	}
+	return nil
+}
+func TestPoolChecksBeforeIncident(t *testing.T) {
+	c, _, inv := inventoryFixture(t)
+	p := &poolAssessmentPlatform{inventoryPlatform: inv}
+	c.platform = p
+	for name, label := range map[string]string{"aks": "kubernetes.azure.com/agentpool", "gke": "cloud.google.com/gke-nodepool", "eks": "eks.amazonaws.com/nodegroup"} {
+		p.nodes = append(p.nodes, types.Node{Name: name, UID: name + "-uid", Labels: map[string]string{label: "train"}, Devices: tpuDevices})
+	}
+	c.syncAcceleratorInventory(t.Context())
+	c.syncAcceleratorInventory(t.Context())
+	rows := c.PoolAvailability().Pools
+	if len(rows) != 3 || rows[0].Status != "available" || rows[1].ReasonCode != "eks-add-first-disabled" || rows[2].ReasonCode != cloud.PoolAutopilot || !strings.Contains(rows[2].Action, "GKE Standard") || strings.Contains(rows[2].Action, "RemoveFirst") {
+		t.Fatalf("unexpected pool assessments: %+v", rows)
+	}
+	if len(p.checks) != 2 || p.checks[0] == p.checks[1] || p.checks[0] == "eks" || p.checks[1] == "eks" {
+		t.Fatalf("unexpected checks %v", p.checks)
 	}
 }

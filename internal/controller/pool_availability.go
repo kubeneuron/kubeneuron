@@ -6,14 +6,13 @@ import (
 	"cmp"
 	"context"
 	"errors"
-	"github.com/kubeneuron/kubeneuron/internal/platform"
-	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"slices"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
-
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -89,7 +88,7 @@ func (s *inventorySync) recordPools(nodes []types.Node, engine *playbook.Engine,
 			case errors.As(err, &refusal):
 				row.CapabilityEnabled = true
 				row.Status, row.ReasonCode, row.Reason = "unavailable", refusal.Code, refusal.Reason
-				row.Action = "use an eligible pool, or set RemoveFirst in the remediation policy that applies to these nodes"
+				row.Action = poolRefusalAction(refusal.Code)
 			default:
 				row.ReasonCode, row.Reason = "read-failed", "could not read pool configuration; check provider access and permissions"
 			}
@@ -151,5 +150,21 @@ func (c *Controller) poolChecker(ctx context.Context) func(types.Node) error {
 			return errors.New("pool node identity changed")
 		}
 		return reader.AddFirstAvailable(ctx, ref.Identity)
+	}
+}
+
+func poolRefusalAction(code string) string {
+	const alternative = ", or set RemoveFirst in the remediation policy that applies to these nodes"
+	switch code {
+	case cloud.PoolAutopilot:
+		return "use a GKE Standard node pool for KubeNeuron-managed replacement"
+	case cloud.PoolAutoscaled:
+		return "use a fixed-size pool" + alternative
+	case cloud.PoolMultiZone:
+		return "use a single-zone pool" + alternative
+	case cloud.PoolInstanceMissing:
+		return "verify that the node belongs to the configured AKS agent pool"
+	default:
+		return "check the pool configuration"
 	}
 }
