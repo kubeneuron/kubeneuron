@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/notify"
@@ -76,7 +77,10 @@ func (c *Controller) notifyAddFirstHold(ctx context.Context, inc *types.Incident
 	if !send {
 		return nil
 	}
-	msg := reason + ". Make this pool eligible for add-first or explicitly select remove-first in its replacement policy."
+	msg := reason
+	if !strings.Contains(reason, "set RemoveFirst in the remediation policy that applies to these nodes") {
+		msg += ". Make this pool eligible for add-first, or set RemoveFirst in the remediation policy that applies to these nodes."
+	}
 	if err := c.notify(ctx, notify.NotifyEvent{Incident: inc, Kind: notify.EventNeedsHuman, Message: msg}); err != nil {
 		return err
 	}

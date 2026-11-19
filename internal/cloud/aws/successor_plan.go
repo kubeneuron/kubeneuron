@@ -22,7 +22,7 @@ import (
 // planSuccessor records the baseline from an already verified EKS backing group.
 func planSuccessor(s cloud.Successor, group at.AutoScalingGroup) (cloud.Successor, error) {
 	if len(group.AvailabilityZones) > 1 {
-		return s, fmt.Errorf("%w: node group spans several zones; use a single-zone node group or explicitly choose remove-first for this pool", cloud.ErrAddFirstUnavailable)
+		return s, fmt.Errorf("%w: node group spans several zones; use a single-zone node group, or set RemoveFirst in the remediation policy that applies to these nodes", cloud.ErrAddFirstUnavailable)
 	}
 	if len(group.AvailabilityZones) == 0 || group.AvailabilityZones[0] == "" {
 		return s, fmt.Errorf("%w: add-first requires a single availability zone", cloud.ErrAddFirstUnavailable)
@@ -31,7 +31,7 @@ func planSuccessor(s cloud.Successor, group at.AutoScalingGroup) (cloud.Successo
 		return s, fmt.Errorf("%w: group scaling limits are incomplete or desired capacity is below one", cloud.ErrAddFirstUnavailable)
 	}
 	if *group.DesiredCapacity >= *group.MaxSize {
-		return s, fmt.Errorf("%w: no room below maxSize; use a single-zone node group with spare capacity or explicitly choose remove-first for this pool", cloud.ErrAddFirstUnavailable)
+		return s, fmt.Errorf("%w: no room below maxSize; provide room for one more node, or set RemoveFirst in the remediation policy that applies to these nodes", cloud.ErrAddFirstUnavailable)
 	}
 	ids := make([]string, 0, len(group.Instances))
 	for _, instance := range group.Instances {
@@ -84,7 +84,7 @@ func (p *managedProvider) readSuccessorPlan(ctx context.Context, s cloud.Success
 	for _, tag := range group.Tags {
 		switch sdk.ToString(tag.Key) {
 		case "k8s.io/cluster-autoscaler/enabled", "k8s.io/cluster-autoscaler/" + p.cluster:
-			return s, fmt.Errorf("%w: node group is managed by Cluster Autoscaler; use a single-zone node group outside Cluster Autoscaler management or explicitly choose remove-first for this pool", cloud.ErrAddFirstUnavailable)
+			return s, fmt.Errorf("%w: node group is managed by Cluster Autoscaler; use a single-zone node group outside Cluster Autoscaler management, or set RemoveFirst in the remediation policy that applies to these nodes", cloud.ErrAddFirstUnavailable)
 		case "eks:nodegroup-name":
 			nodegroup = sdk.ToString(tag.Value)
 		}

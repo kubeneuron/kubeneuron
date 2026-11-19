@@ -14,6 +14,7 @@ import (
 func cmdPools() *cobra.Command {
 	cmd := &cobra.Command{
 		Use: "pools", Short: "Show add-first availability for accelerator node pools", Args: cobra.NoArgs,
+		Long: "Show add-first availability for accelerator node pools. Mixed means that different remediation policies can apply to nodes in this pool, depending on fault class and accelerator vendor. Those policies use different replacement orders.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			client, err := newClient(cmd)
 			if err != nil {
@@ -41,6 +42,9 @@ func cmdPools() *cobra.Command {
 				} else {
 					if status == "" {
 						status = "unknown"
+					}
+					if status == "unknown" && row.CheckedAt == nil && row.Reason == "" {
+						status += " — not checked yet"
 					}
 					if row.Reason != "" {
 						status += " — " + row.Reason

@@ -23,7 +23,7 @@ func runCommand(t *testing.T, server string, args ...string) (string, error) {
 	root.PersistentFlags().String("server", server, "")
 	root.PersistentFlags().String("token", "test-token", "")
 	root.PersistentFlags().String("token-file", "", "")
-	root.AddCommand(cmdStatus(), cmdNodes(), cmdIncidents(), cmdApprove(), cmdReject(), cmdResolve(), cmdRemediate(), cmdPause(), cmdResume())
+	root.AddCommand(cmdPools(), cmdStatus(), cmdNodes(), cmdIncidents(), cmdApprove(), cmdReject(), cmdResolve(), cmdRemediate(), cmdPause(), cmdResume())
 	var out bytes.Buffer
 	root.SetOut(&out)
 	root.SetArgs(args)
@@ -101,7 +101,7 @@ func TestSuccessorLinesShowTheOverlap(t *testing.T) {
 }
 
 func TestIncidentShowPolicyHoldAndRecovery(t *testing.T) {
-	const reason = "node group spans several zones; use a single-zone node group or explicitly choose remove-first for this pool"
+	const reason = "node group spans several zones; use a single-zone node group, or set RemoveFirst in the remediation policy that applies to these nodes"
 	for _, tc := range []struct {
 		name, action, result, status string
 	}{
