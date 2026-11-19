@@ -346,6 +346,9 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 		uid != "" && inc.Class != types.ClassCloudInterruption && !c.simulating(ctx, inc) {
 		if inc.CloudIdentity == nil {
 			node, err := c.store.GetNode(ctx, inc.Target.Node)
+			if errors.Is(err, store.ErrNotFound) {
+				return c.escalate(ctx, inc, "node no longer exists in inventory")
+			}
 			if err != nil {
 				return err
 			}

@@ -2,11 +2,13 @@
 package controller
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
+	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -188,4 +190,31 @@ func TestInventoryNodeUIDSharesRepairApprovalWithoutCloudIdentity(t *testing.T) 
 	if len(notifier.approvals) != 1 {
 		t.Fatalf("approval requests = %d, want one", len(notifier.approvals))
 	}
+	// An incident opened on a different node loses its inventory record
+	// before its first step. It must stop before requesting approval.
+	if err := st.UpsertNode(ctx, &types.Node{Name: "n2", UID: "other-uid"}); err != nil {
+		t.Fatal(err)
+	}
+	sig := signal(classes[0], "n2", "GPU-new")
+	if err := c.IngestSignal(ctx, sig); err != nil {
+		t.Fatal(err)
+	}
+	third, err := st.GetOpenIncident(ctx, sig.Target, sig.Class)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.store = missingRepairInventory{st}
+	if got := step(t, c, st, third.ID, 10); got.State != types.StateNeedsHuman || len(notifier.approvals) != 1 {
+		t.Fatalf("missing node: state=%s approvals=%d", got.State, len(notifier.approvals))
+	}
+
+}
+
+type missingRepairInventory struct{ store.Store }
+
+func (s missingRepairInventory) GetNode(ctx context.Context, node string) (*types.Node, error) {
+	if node == "n2" {
+		return nil, store.ErrNotFound
+	}
+	return s.Store.GetNode(ctx, node)
 }

@@ -354,8 +354,9 @@ API is `v1alpha1`.
 
 ### Fixed
 
-- Concurrent live repair incidents on the same recorded cloud Node UID now
-  share one repair owner. Waiting incidents show the owner ID before
+- Concurrent live repair incidents on the same node share one repair owner. The
+  controller identifies the node by its pinned cloud identity or the Kubernetes
+  Node UID recorded when the incident opened. Waiting incidents show the owner ID before
   approval, drain or replacement. SQLite migration 0037 and PostgreSQL
   migration 0028 persist ownership across controller restarts.
 
