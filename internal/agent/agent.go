@@ -236,8 +236,9 @@ type Agent struct {
 	// processes cannot concurrently act on the same durable journal.
 	journalLock          *os.File
 	missingKernelLogOnce sync.Once
-	journalOpenOnce      sync.Once
-	watcher              *kmsg.Watcher
+	// journalOpenErr is the last journal open failure logged.
+	journalOpenErr string
+	watcher        *kmsg.Watcher
 	// journalSource reads kernel entries from the journal mount; nil when
 	// the agent has none.
 	journalSource *kmsg.JournalSource
@@ -424,6 +425,7 @@ func New(cfg Config, driver nvml.GPUDriver, log *slog.Logger) (*Agent, error) {
 			Open:       cfg.JournalOpen,
 			CursorPath: filepath.Join(filepath.Dir(cfg.SpoolPath), "journal-cursor.json"),
 			Logger:     log,
+			BootID:     agent.currentBootID(),
 		}
 	}
 	// An external hostengine can supply numeric XIDs without a local SMI driver.
@@ -751,9 +753,13 @@ func (a *Agent) openJournal(ctx context.Context) <-chan kmsg.Event {
 	a.journalReadable = err == nil
 	if err != nil {
 		// The error names the directory, never journal content.
-		a.journalOpenOnce.Do(func() { a.log.Warn("journal kernel log unavailable, will retry", "err", err) })
+		if err.Error() != a.journalOpenErr {
+			a.journalOpenErr = err.Error()
+			a.log.Warn("journal kernel log unavailable, will retry", "err", err)
+		}
 		return nil
 	}
+	a.journalOpenErr = ""
 	return ch
 }
 

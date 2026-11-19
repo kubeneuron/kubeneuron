@@ -23,8 +23,12 @@ var ErrJournalNotMounted = fmt.Errorf("journal not mounted: %w", os.ErrNotExist)
 const journalCursorVersion = 1
 
 // journalIdle is how long the source waits after a read that reached the
-// tail, failed, or was not delivered.
-const journalIdle = 2 * time.Second
+// tail or failed. A batch that was not delivered waits twice as long each
+// time, up to journalRedeliverMax.
+const (
+	journalIdle         = 2 * time.Second
+	journalRedeliverMax = time.Minute
+)
 
 // JournalSource reads kernel entries from a systemd journal directory and
 // classifies them with the same parser as /dev/kmsg. The reader returns only
@@ -42,8 +46,16 @@ type JournalSource struct {
 	CursorPath string
 	// Logger records read and cursor problems, never journal content.
 	Logger *slog.Logger
+	// BootID is the node's current boot. A cursor saved under another boot
+	// is not used: the read starts at the tail, so faults of the previous
+	// boot, which the reboot may have been meant to clear, do not open
+	// incidents again. Empty means unknown, and the read also starts at the
+	// tail.
+	BootID string
 	// Idle overrides journalIdle; tests set it.
 	Idle time.Duration
+	// RedeliverMax overrides journalRedeliverMax; tests set it.
+	RedeliverMax time.Duration
 
 	refusalMu     sync.Mutex
 	refusalLogged map[string]bool
@@ -53,16 +65,23 @@ type JournalSource struct {
 // between /var/log/journal and /run/log/journal neither applies one
 // journal's cursor to the other nor loses the place in either.
 type journalCursorFile struct {
-	Version int                       `json:"version"`
-	Cursors map[string]journal.Cursor `json:"cursors"`
+	Version int                           `json:"version"`
+	Cursors map[string]journalCursorEntry `json:"cursors"`
+}
+
+// journalCursorEntry is a read position and the boot it was saved under.
+type journalCursorEntry struct {
+	Cursor journal.Cursor `json:"cursor"`
+	BootID string         `json:"boot_id"`
 }
 
 // Watch opens the journal and streams classified kernel fault events until
 // ctx ends or the reader cannot continue. Each batch's cursor is saved only
 // after every event of the batch is acknowledged; an event that is not
 // acknowledged (Abandon) leaves the saved cursor where it was and the batch
-// is read again. With no saved cursor the read starts at the tail, so an
-// old entry never opens an incident again.
+// is read again; the events of it already acknowledged are not sent again.
+// With no saved cursor, or one saved under another boot, the read starts at
+// the tail, so an old entry never opens an incident again.
 func (s *JournalSource) Watch(ctx context.Context) (<-chan Event, error) {
 	if s.Dir == "" {
 		return nil, ErrJournalNotMounted
@@ -89,7 +108,16 @@ func (s *JournalSource) Watch(ctx context.Context) (<-chan Event, error) {
 		if idle <= 0 {
 			idle = journalIdle
 		}
+		redeliverMax := s.RedeliverMax
+		if redeliverMax <= 0 {
+			redeliverMax = journalRedeliverMax
+		}
 		failures := 0
+		// acked holds the indexes of the records, in the batch read from
+		// cursor, whose events were acknowledged. A batch read again from
+		// the same cursor starts with the same records.
+		acked := map[int]bool{}
+		wait := idle
 		for {
 			batch, err := reader.Next(ctx, cursor)
 			if err != nil {
@@ -109,19 +137,28 @@ func (s *JournalSource) Watch(ctx context.Context) (<-chan Event, error) {
 				continue
 			}
 			failures = 0
-			delivered, ok := s.emit(ctx, ch, batch.Records)
+			delivered, ok := s.emit(ctx, ch, batch.Records, acked)
 			if !ok {
 				return
 			}
-			if delivered {
-				cursor = batch.Cursor
-				if err := s.saveCursor(cursor); err != nil {
-					// The events are delivered; a restart may read them
-					// again, and the controller deduplicates them.
-					s.warn("journal cursor not saved; events may replay after a restart", "err", err)
+			if !delivered {
+				// Read the batch again later, more slowly each time, so an
+				// event the agent cannot take does not spin the source.
+				if !sleepCtx(ctx, wait) {
+					return
 				}
+				wait = min(2*wait, redeliverMax)
+				continue
 			}
-			if !delivered || !batch.More {
+			wait = idle
+			clear(acked)
+			cursor = batch.Cursor
+			if err := s.saveCursor(cursor); err != nil {
+				// The events are delivered; a restart may read them
+				// again, and the controller deduplicates them.
+				s.warn("journal cursor not saved; events may replay after a restart", "err", err)
+			}
+			if !batch.More {
 				if !sleepCtx(ctx, idle) {
 					return
 				}
@@ -131,13 +168,21 @@ func (s *JournalSource) Watch(ctx context.Context) (<-chan Event, error) {
 	return ch, nil
 }
 
-// emit classifies and sends one batch, then waits until each event is
-// acknowledged or abandoned. delivered is false when any was abandoned; ok
+// emit classifies and sends one batch, skipping the records in acked, then
+// waits until each event is acknowledged or abandoned and adds the
+// acknowledged ones to acked. delivered is false when any was abandoned; ok
 // is false when ctx ended.
-func (s *JournalSource) emit(ctx context.Context, ch chan<- Event, records []journal.Record) (delivered, ok bool) {
-	results := make(chan bool, len(records))
+func (s *JournalSource) emit(ctx context.Context, ch chan<- Event, records []journal.Record, acked map[int]bool) (delivered, ok bool) {
+	type result struct {
+		index int
+		ok    bool
+	}
+	results := make(chan result, len(records))
 	sent := 0
-	for _, rec := range records {
+	for i, rec := range records {
+		if acked[i] {
+			continue
+		}
 		ev, matched, refusal := parseLine(rec.Message)
 		if refusal != "" {
 			s.logRefusal(refusal)
@@ -148,10 +193,10 @@ func (s *JournalSource) emit(ctx context.Context, ch chan<- Event, records []jou
 		ev.Raw = ""
 		var once sync.Once
 		ev.acknowledge = func() error {
-			once.Do(func() { results <- true })
+			once.Do(func() { results <- result{i, true} })
 			return nil
 		}
-		ev.abandon = func() { once.Do(func() { results <- false }) }
+		ev.abandon = func() { once.Do(func() { results <- result{i, false} }) }
 		select {
 		case ch <- ev:
 			sent++
@@ -163,7 +208,10 @@ func (s *JournalSource) emit(ctx context.Context, ch chan<- Event, records []jou
 	for i := 0; i < sent; i++ {
 		select {
 		case r := <-results:
-			delivered = delivered && r
+			if r.ok {
+				acked[r.index] = true
+			}
+			delivered = delivered && r.ok
 		case <-ctx.Done():
 			return false, false
 		}
@@ -200,7 +248,11 @@ func (s *JournalSource) loadCursor() (journal.Cursor, error) {
 	if err != nil {
 		return "", err
 	}
-	return file.Cursors[s.Dir], nil
+	entry := file.Cursors[s.Dir]
+	if s.BootID == "" || entry.BootID != s.BootID {
+		return "", nil
+	}
+	return entry.Cursor, nil
 }
 
 func (s *JournalSource) readCursors() (journalCursorFile, error) {
@@ -227,12 +279,13 @@ func (s *JournalSource) saveCursor(cursor journal.Cursor) error {
 	}
 	file, err := s.readCursors()
 	if err != nil {
+		s.warn("journal cursor file unreadable; replacing it, the cursors of other directories are lost", "err", err)
 		file = journalCursorFile{Version: journalCursorVersion}
 	}
 	if file.Cursors == nil {
-		file.Cursors = map[string]journal.Cursor{}
+		file.Cursors = map[string]journalCursorEntry{}
 	}
-	file.Cursors[s.Dir] = cursor
+	file.Cursors[s.Dir] = journalCursorEntry{Cursor: cursor, BootID: s.BootID}
 	data, err := json.Marshal(file)
 	if err != nil {
 		return err

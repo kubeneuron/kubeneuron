@@ -66,7 +66,7 @@ func journalSource(t *testing.T, f *fakeJournal, dir, cursorPath string, logs *b
 		t.Fatal(err)
 	}
 	s := &JournalSource{
-		Dir: dir, CursorPath: cursorPath, Idle: 5 * time.Millisecond,
+		Dir: dir, CursorPath: cursorPath, Idle: 5 * time.Millisecond, BootID: "boot-1",
 		Open: func(directory string) (journal.Reader, error) {
 			if directory != dir {
 				t.Errorf("opened %q, want %q", directory, dir)
@@ -253,4 +253,74 @@ func TestJournalSourceUnavailable(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("an invalid journal did not stop the source")
 	}
+}
+
+// A reboot is often the recovery itself: faults written before it must not
+// open incidents again when the agent comes back on the new boot.
+func TestJournalCursorFromAnotherBootStartsAtTheTail(t *testing.T) {
+	root := t.TempDir()
+	cursorPath := filepath.Join(root, "journal-cursor.json")
+	f := &fakeJournal{}
+	s := journalSource(t, f, filepath.Join(root, "var"), cursorPath, nil)
+	if err := s.saveCursor("0"); err != nil {
+		t.Fatal(err)
+	}
+	f.append(xidLine)
+	s.BootID = "boot-2"
+	ch := watch(t, s)
+	noEvent(t, ch)
+	f.mu.Lock()
+	first := f.reads[0]
+	f.mu.Unlock()
+	if first != "" {
+		t.Fatalf("the first read on a new boot used cursor %q, want the tail", first)
+	}
+	f.append(xidLine)
+	if ev := nextEvent(t, ch); ev.XID != 79 {
+		t.Fatalf("event = %+v", ev)
+	}
+}
+
+// An event the agent cannot take holds its batch back, but the events of the
+// batch already taken are not sent again, and the batch is read more slowly
+// each time.
+func TestJournalSourceRereadsOnlyWhatWasNotTaken(t *testing.T) {
+	root := t.TempDir()
+	f := &fakeJournal{}
+	s := journalSource(t, f, filepath.Join(root, "var"), filepath.Join(root, "journal-cursor.json"), nil)
+	s.RedeliverMax = 80 * time.Millisecond
+	ch := watch(t, s)
+	noEvent(t, ch)
+	const dbeLine = "NVRM: Xid (PCI:0000:5e:00): 48, pid=1234, An uncorrectable double bit error"
+	f.append(xidLine, dbeLine)
+	if ev := nextEvent(t, ch); ev.XID != 79 {
+		t.Fatalf("first event = %+v", ev)
+	} else if err := ev.Acknowledge(); err != nil {
+		t.Fatal(err)
+	}
+	var at []time.Time
+	for i := 0; i < 5; i++ {
+		ev := nextEvent(t, ch)
+		if ev.XID != 48 {
+			t.Fatalf("redelivery %d sent XID %d again", i, ev.XID)
+		}
+		at = append(at, time.Now())
+		ev.Abandon()
+	}
+	if first, last := at[1].Sub(at[0]), at[4].Sub(at[3]); last < 4*first || last < 30*time.Millisecond {
+		t.Fatalf("redelivery gaps %v then %v, want a growing pause", first, last)
+	}
+	ev := nextEvent(t, ch)
+	if ev.XID != 48 {
+		t.Fatalf("event = %+v", ev)
+	}
+	_ = ev.Acknowledge()
+	deadline := time.Now().Add(2 * time.Second)
+	for savedCursor(t, s) != "2" {
+		if time.Now().After(deadline) {
+			t.Fatalf("cursor = %q, want 2 once the whole batch was taken", savedCursor(t, s))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	noEvent(t, ch)
 }
