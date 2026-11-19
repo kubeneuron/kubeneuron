@@ -504,3 +504,45 @@ func TestLostGPUResetResponseRetainsStep(t *testing.T) {
 	}
 
 }
+
+func TestDryRunIncidentAlongsideLiveRepairOwner(t *testing.T) {
+	p := newSuccessorPlatform()
+	c, st, notifier := successorFixture(t, recoverymode.Approval, p, recoverymode.RemoveFirst)
+	ctx := t.Context()
+	engine := c.runtimeConfig(ctx).Engine
+	book, _ := engine.Playbook("cloud-replace")
+	live, _ := engine.PolicyFor(types.ClassFellOffBus, "")
+	sim := live
+	sim.Name, sim.Class, sim.Mode = "simulate", types.ClassAcceleratorFault, recoverymode.DryRun
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{book.Name: book}, []playbook.Policy{live, sim})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetEngine(engine)
+	owner := openIncidentFor(t, c, live.Class)
+	waitSettled(t, c, st, owner, func(i *types.Incident) bool { return i.State == types.StateAwaitingApproval })
+	sig := signal(sim.Class, "n1", "")
+	if err := c.IngestSignal(ctx, sig); err != nil {
+		t.Fatal(err)
+	}
+	second, err := st.GetOpenIncident(ctx, sig.Target, sim.Class)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitSettled(t, c, st, second.ID, func(i *types.Incident) bool {
+		if i.State == types.StateAwaitingApproval {
+			if err := c.DecideApproval(ctx, i.ID, "alice", "simulate", types.ApprovalApproved, i.ApprovalEpoch, "", ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return i.State == types.StateVerifying
+	})
+	if auditHas(trail(t, st, second.ID), "wait-for-node-repair", "") || len(notifier.approvals) != 3 {
+		t.Fatal("unexpected repair wait or approval count")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if owners := p.cordoned["n1"]; len(owners) != 1 || owners[0] != owner || len(p.drained) != 0 || len(p.plain) != 0 {
+		t.Fatalf("cordon owners=%v drains=%v replacements=%v", owners, p.drained, p.plain)
+	}
+}
