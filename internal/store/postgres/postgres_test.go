@@ -393,3 +393,41 @@ func TestVerifiedStepResultsAfterReopen(t *testing.T) {
 		t.Fatalf("manual closure after reopen: %v, %v", results, err)
 	}
 }
+
+func TestConcurrentRepairStepsExcludeNodeAndDevice(t *testing.T) {
+	s := openTestStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, id := range []string{"drain", "reset"} {
+		inc := testIncident(id)
+		if id == "drain" {
+			inc.Target.GPUUUID = ""
+		}
+		if err := s.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := make(chan struct{})
+	type result struct {
+		admitted bool
+		err      error
+	}
+	results := make(chan result, 2)
+	for _, id := range []string{"drain", "reset"} {
+		go func(id string) {
+			var admitted bool
+			err := s.WithTx(ctx, func(tx store.Tx) error {
+				<-start
+				var err error
+				admitted, err = tx.ClaimRepairStep(ctx, "node-a", "uid-a", id, id == "reset")
+				return err
+			})
+			results <- result{admitted, err}
+		}(id)
+	}
+	close(start)
+	a, b := <-results, <-results
+	if a.err != nil || b.err != nil || a.admitted == b.admitted {
+		t.Fatalf("expected exactly one committed claim, got %+v and %+v", a, b)
+	}
+}
