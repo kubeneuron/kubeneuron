@@ -135,6 +135,7 @@ type Tx interface {
 
 // Store is the persistence interface used by the controller.
 type Store interface {
+	ListRepairNodeIdentities(context.Context) ([]types.Node, error)
 	// WithTx runs fn inside one transaction: either every mutation made
 	// through the Tx commits, or none do. fn must not retain the Tx.
 	WithTx(ctx context.Context, fn func(Tx) error) error

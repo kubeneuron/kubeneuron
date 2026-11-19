@@ -422,6 +422,11 @@ func (p *Platform) NodeUID(ctx context.Context, node string) (string, bool, erro
 			return "", false, nil
 		}
 	}
+	return p.LiveNodeUID(ctx, node)
+}
+
+// LiveNodeUID bypasses the informer cache before retiring durable repair ownership.
+func (p *Platform) LiveNodeUID(ctx context.Context, node string) (string, bool, error) {
 	n, err := p.client.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return "", false, nil

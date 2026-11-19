@@ -158,3 +158,20 @@ func (q *Queries) ReleaseVanishedRepairNode(ctx context.Context, node, uid strin
 	}
 	return nil
 }
+
+func (q *Queries) ListRepairNodeIdentities(ctx context.Context) ([]types.Node, error) {
+	rows, err := q.db.QueryContext(ctx, `SELECT node,node_uid FROM node_remediation_owners UNION SELECT node,node_uid FROM repair_step_guards`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var nodes []types.Node
+	for rows.Next() {
+		var n types.Node
+		if err := rows.Scan(&n.Name, &n.UID); err != nil {
+			return nil, err
+		}
+		nodes = append(nodes, n)
+	}
+	return nodes, rows.Err()
+}

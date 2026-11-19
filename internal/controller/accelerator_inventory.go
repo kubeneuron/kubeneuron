@@ -90,6 +90,7 @@ func (c *Controller) syncAcceleratorInventory(ctx context.Context) {
 		}
 		seen[n.Name] = digest
 	}
+	c.retireVanishedRepairNodes(ctx, nodes)
 	c.inventory.keep(seen)
 	names := inventoryNames(present)
 	if !c.inventory.sweptFor(names) && c.removeVanishedInventory(ctx, present) {
@@ -209,4 +210,34 @@ func (s *inventorySync) reset() {
 	s.written = nil
 	s.swept = nil
 	s.pools = nil
+}
+
+func (c *Controller) retireVanishedRepairNodes(ctx context.Context, nodes []types.Node) {
+	live, ok := c.platform.(interface {
+		LiveNodeUID(context.Context, string) (string, bool, error)
+	})
+	if !ok {
+		return
+	}
+	claims, err := c.store.ListRepairNodeIdentities(ctx)
+	if err != nil {
+		c.log.Warn("could not list repair node identities", "err", err)
+		return
+	}
+	current := make(map[string]string, len(nodes))
+	for _, n := range nodes {
+		current[n.Name] = n.UID
+	}
+	for _, claim := range claims {
+		if claim.UID == "" || current[claim.Name] == claim.UID {
+			continue
+		}
+		uid, found, err := live.LiveNodeUID(ctx, claim.Name)
+		if err != nil || (found && (uid == "" || uid == claim.UID)) {
+			continue
+		}
+		if err := c.store.WithTx(ctx, func(tx store.Tx) error { return tx.ReleaseVanishedRepairNode(ctx, claim.Name, claim.UID) }); err != nil {
+			c.log.Warn("could not release vanished node repair", "node", claim.Name, "err", err)
+		}
+	}
 }

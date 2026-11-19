@@ -553,3 +553,44 @@ func TestTrainiumPoolOrderMatchesNodeHealthIncident(t *testing.T) {
 
 	}
 }
+
+type liveRepairInventory struct {
+	*inventoryPlatform
+	uid     string
+	readErr error
+}
+
+func (p *liveRepairInventory) LiveNodeUID(context.Context, string) (string, bool, error) {
+	return p.uid, p.uid != "", p.readErr
+}
+
+func TestRepairInventoryRequiresLiveConfirmation(t *testing.T) {
+	c, st, p := inventoryFixture(t)
+	live := &liveRepairInventory{inventoryPlatform: p, uid: "original"}
+	c.platform = live
+	ctx := t.Context()
+	inc := &types.Incident{ID: "owner", Target: types.Target{Node: "worker"}, State: types.StateEvaluating}
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WithTx(ctx, func(tx store.Tx) error {
+		_, err := tx.ClaimNodeRemediation(ctx, "worker", "original", inc.ID, time.Now())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	check := func(want int) {
+		t.Helper()
+		c.syncAcceleratorInventory(ctx)
+		rows, err := st.ListRepairNodeIdentities(ctx)
+		if err != nil || len(rows) != want {
+			t.Fatalf("claims=%v err=%v", rows, err)
+		}
+	}
+	check(1)
+	live.readErr = errors.New("unavailable")
+	live.uid = ""
+	check(1)
+	live.readErr = nil
+	check(0)
+}
