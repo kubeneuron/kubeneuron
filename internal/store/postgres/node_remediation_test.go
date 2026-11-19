@@ -3,9 +3,11 @@
 package postgres
 
 import (
+	"fmt"
+	"testing"
+
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
-	"testing"
 )
 
 func TestConcurrentNodeRemediationClaims(t *testing.T) {
@@ -15,6 +17,7 @@ func TestConcurrentNodeRemediationClaims(t *testing.T) {
 	for _, id := range ids {
 		if err := s.WithTx(ctx, func(tx store.Tx) error {
 			inc := testIncident(id)
+			inc.RepairNodeUID = "uid-a"
 			if id == ids[1] {
 				inc.Class = types.ClassFellOffBus
 			}
@@ -34,8 +37,14 @@ func TestConcurrentNodeRemediationClaims(t *testing.T) {
 			<-start
 			var owner string
 			err := s.WithTx(ctx, func(tx store.Tx) error {
-				var err error
-				owner, err = tx.ClaimNodeRemediation(ctx, "node-a", "uid-a", id)
+				inc, err := tx.GetIncident(ctx, id)
+				if err != nil {
+					return err
+				}
+				if inc.RepairNodeUID != "uid-a" {
+					return fmt.Errorf("stored repair UID = %q", inc.RepairNodeUID)
+				}
+				owner, err = tx.ClaimNodeRemediation(ctx, "node-a", inc.RepairNodeUID, id)
 				return err
 			})
 			results <- result{owner, err}
