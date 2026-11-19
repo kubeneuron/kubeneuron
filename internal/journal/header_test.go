@@ -46,3 +46,20 @@ func FuzzReadHeader(f *testing.F) {
 		}
 	})
 }
+
+func TestReadTailWithoutEntryData(t *testing.T) {
+	var buf [208]byte
+	copy(buf[:], "LPKSHHRH")
+	copy(buf[24:], "unique-file-id01")
+	copy(buf[72:], "sequence-id-0001")
+	binary.LittleEndian.PutUint64(buf[88:], 208)
+	binary.LittleEndian.PutUint64(buf[96:], 64)
+	binary.LittleEndian.PutUint64(buf[136:], 240)
+	binary.LittleEndian.PutUint64(buf[160:], 491)
+	// Supply just the header to demonstrate that reading the tail sequence
+	// does not access ENTRY objects or messages in the declared arena.
+	h, err := readHeader(bytes.NewReader(buf[:]), 272)
+	if err != nil || string(h.fileID[:]) != "unique-file-id01" || string(h.sequenceID[:]) != "sequence-id-0001" || h.tailSequence != 491 {
+		t.Fatalf("tail header %+v, err %v", h, err)
+	}
+}
