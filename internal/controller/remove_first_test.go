@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
 	"github.com/kubeneuron/kubeneuron/internal/store/sqlite"
@@ -128,7 +129,7 @@ func plannedFixture(t *testing.T, p *plannedPlatform) (*Controller, *sqlite.Stor
 }
 
 // restartWith is a new controller process on the same store and platform.
-func restartWith(t *testing.T, c *Controller, st *sqlite.Store, p *plannedPlatform) *Controller {
+func restartWith(t *testing.T, c *Controller, st *sqlite.Store, p platform.Platform) *Controller {
 	t.Helper()
 	live := safety.Limits{MaxConcurrentRemediations: 8, MaxConcurrentReboots: 8}
 	r := New(st, st, nil, safety.NewGate(live), safety.NewFlapDetector(100, time.Hour), p, nil, &recordingNotifier{},

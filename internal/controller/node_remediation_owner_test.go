@@ -113,6 +113,10 @@ func TestAutomaticRepairFollowerDoesNotRepeatReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	step(t, c, st, follower.ID, 10)
+	c = restartWith(t, c, st, p)
+	// Reconcile the follower first after leadership changes.
+	step(t, c, st, follower.ID, 10)
 	waitSettled(t, c, st, owner, func(i *types.Incident) bool { return i.State == types.StateVerifying })
 	step(t, c, st, follower.ID, 20)
 	if got := mustIncident(t, st, follower.ID); got.State != types.StateEvaluating || got.StepIndex != 0 {
