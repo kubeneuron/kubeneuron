@@ -99,3 +99,11 @@ func TestHoldNotificationEpisodes(t *testing.T) {
 		})
 	}
 }
+
+func TestHoldNotificationMessage(t *testing.T) {
+	for _, action := range []string{"provide room for one more node", "Provide room for one more node."} {
+		if got := holdNotificationMessage("node not cordoned or drained", action); got != "node not cordoned or drained. Provide room for one more node." {
+			t.Fatal(got)
+		}
+	}
+}

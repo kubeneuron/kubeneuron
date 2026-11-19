@@ -74,7 +74,7 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 			row.Status, row.ReasonCode, row.Reason = "not applicable", "no-replacement-policy", "no remediation policy replaces these nodes"
 		case row.ReplacementPolicy == "RemoveFirst":
 			row.Status = ""
-		case previous[key].CheckedAt != nil && now.Sub(*previous[key].CheckedAt) < 10*time.Minute:
+		case previous[key].CheckedAt != nil && (now.Sub(*previous[key].CheckedAt) < 10*time.Minute || (checksLeft == 0 && check != nil && row.Cloud != "EKS")):
 			cached := previous[key]
 			cached.ReplacementPolicy = row.ReplacementPolicy
 			cached.AcceleratorNodes = count

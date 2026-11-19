@@ -504,6 +504,23 @@ func TestPoolCheckBudget(t *testing.T) {
 			t.Fatalf("calls=%d pending=%d want %d checked", calls, pending, want)
 		}
 	}
+	later := now.Add(11 * time.Minute)
+	c.inventory.recordPools(nodes, nil, poolTestEngine(t), later, check)
+	stale := 0
+	for _, row := range c.PoolAvailability().Pools {
+		if row.Status != "available" || row.CheckedAt == nil {
+			t.Fatalf("lost assessment: %+v", row)
+		}
+		if row.CheckedAt.Equal(now) {
+			stale++
+		} else if !row.CheckedAt.Equal(later) {
+			t.Fatalf("unexpected check time: %+v", row)
+		}
+	}
+	if stale != 2 || calls != 10 {
+		t.Fatalf("stale=%d calls=%d", stale, calls)
+	}
+
 }
 
 func poolTestEngine(t *testing.T) *playbook.Engine {

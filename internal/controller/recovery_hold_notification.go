@@ -4,6 +4,9 @@ package controller
 
 import (
 	"context"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"time"
 
@@ -77,9 +80,18 @@ func (c *Controller) notifyAddFirstHold(ctx context.Context, inc *types.Incident
 	if !send {
 		return nil
 	}
-	msg := reason + ". " + action
+	msg := holdNotificationMessage(reason, action)
 	if err := c.notify(ctx, notify.NotifyEvent{Incident: inc, Kind: notify.EventNeedsHuman, Message: msg}); err != nil {
 		return err
 	}
 	return c.appendAudit(ctx, inc, "system", "notified", reason)
+}
+
+func holdNotificationMessage(reason, action string) string {
+	action = strings.TrimSpace(action)
+	if action == "" {
+		return reason
+	}
+	first, size := utf8.DecodeRuneInString(action)
+	return strings.TrimRight(reason, ".") + ". " + string(unicode.ToUpper(first)) + strings.TrimRight(action[size:], ".") + "."
 }
