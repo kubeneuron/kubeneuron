@@ -929,8 +929,15 @@ func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snaps
 	return agentDaemonSets(installation, snapshot, tlsRevision...)[0]
 }
 
+// AgentDaemonSetLabel marks every agent DaemonSet and its Pods, so tooling
+// selects them all without a list of names. It is not part of the
+// selector, which is immutable.
+const AgentDaemonSetLabel = "kubeneuron.io/agent"
+
 func agentVariantDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot, variant agentVariant, tlsRevision ...string) *appsv1.DaemonSet {
 	labels := resourceLabels(installation, strings.TrimPrefix(variant.suffix, "-"))
+	objectLabels := copyStringMap(labels)
+	objectLabels[AgentDaemonSetLabel] = "true"
 	nodeActions := installation.Spec.Safety.NodeLevelActions
 	security := &corev1.SecurityContext{Privileged: ptr.To(nodeActions)}
 	agent := installation.Spec.Agent.DeepCopy()
@@ -991,7 +998,7 @@ func agentVariantDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        installation.Name + variant.suffix,
 			Namespace:   installation.Spec.Namespace,
-			Labels:      labels,
+			Labels:      objectLabels,
 			Annotations: annotations,
 		},
 		Spec: appsv1.DaemonSetSpec{
@@ -1018,7 +1025,7 @@ func agentVariantDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot
 				// in the fleet, serially at maxUnavailable 1 — on 500 nodes, a
 				// multi-hour rolling blind spot walking the fleet, during
 				// which each node has no kmsg watcher and no DCGM poll.
-				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: controllerPodAnnotations(annotations)},
+				ObjectMeta: metav1.ObjectMeta{Labels: objectLabels, Annotations: controllerPodAnnotations(annotations)},
 				Spec: corev1.PodSpec{
 					ServiceAccountName:            installation.Name + "-agent",
 					DeprecatedServiceAccount:      installation.Name + "-agent",

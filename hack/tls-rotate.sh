@@ -238,6 +238,9 @@ kubectl_run() {
 	"${kubectl_command[@]}" "$@"
 }
 
+# Every agent DaemonSet of the installation and its Pods carry this label.
+agent_selector="app.kubernetes.io/instance=${root_name},kubeneuron.io/agent=true"
+
 if [[ $direction == server ]]; then
 	leaf_field=serverSecretRef
 	ca_field=serverCASecretRef
@@ -731,8 +734,7 @@ wait_fresh_agent_acknowledgments() {
 	# increment must therefore have been acknowledged by that controller; this
 	# avoids comparing clocks on different Kubernetes nodes.
 	while ((SECONDS < deadline)); do
-		daemonset_json=$(kubectl_run -n "$namespace" get daemonsets \
-			-l "app.kubernetes.io/instance=${root_name},app.kubernetes.io/managed-by=kubeneuron-operator" -o json 2>/dev/null || true)
+		daemonset_json=$(kubectl_run -n "$namespace" get daemonsets -l "$agent_selector" -o json 2>/dev/null || true)
 		# Do not use ${var:-{}} here: bash treats the first closing brace as the
 		# end of the parameter expansion, so a non-empty value gains a trailing
 		# `}` and becomes invalid JSON. Keep the empty fallback explicit.
@@ -740,16 +742,14 @@ wait_fresh_agent_acknowledgments() {
 			daemonset_json='{"items":[]}'
 		fi
 		# Every agent DaemonSet: "-agent" and the journal variants.
-		agent_owners=$($JQ_BIN -c --arg root "$root_name" '
-		  [.items[] | select(.metadata.name == ($root + "-agent") or
-		    .metadata.name == ($root + "-agent-detect-journal-var") or
-		    .metadata.name == ($root + "-agent-detect-journal-run"))]
+		agent_owners=$($JQ_BIN -c '
+		  [.items[] | select(.metadata.deletionTimestamp == null)]
 		  | map({key: .metadata.name, value: {uid: .metadata.uid, desired: (.status.desiredNumberScheduled // 0)}})
 		  | from_entries' <<<"$daemonset_json")
 		desired=$($JQ_BIN -r '[.[].desired] | add // 0' <<<"$agent_owners")
 		daemonset_uid=$($JQ_BIN -r --arg root "$root_name" '.[$root + "-agent"].uid // empty' <<<"$agent_owners")
 		pods_json=$(kubectl_run -n "$namespace" get pods \
-			-l "app.kubernetes.io/instance=${root_name},app.kubernetes.io/component in (agent,agent-detect-journal-var,agent-detect-journal-run)" -o json 2>/dev/null || true)
+			-l "$agent_selector" -o json 2>/dev/null || true)
 		if [[ -z $pods_json ]]; then
 			pods_json='{"items":[]}'
 		fi
@@ -788,7 +788,7 @@ wait_fresh_agent_acknowledgments() {
 	deadline=$((SECONDS + TIMEOUT_SECONDS))
 	while ((SECONDS < deadline)); do
 		pods_json=$(kubectl_run -n "$namespace" get pods \
-			-l "app.kubernetes.io/instance=${root_name},app.kubernetes.io/component in (agent,agent-detect-journal-var,agent-detect-journal-run)" -o json 2>/dev/null || true)
+			-l "$agent_selector" -o json 2>/dev/null || true)
 		if [[ -z $pods_json ]]; then
 			pods_json='{"items":[]}'
 		fi
@@ -851,9 +851,11 @@ wait_rollout_and_ready() {
 		die "$kind/$namespace/$name did not complete its rollout; run the matching rollback phase"
 	fi
 	if [[ $kind == daemonset && $name == "${root_name}-agent" ]]; then
-		# The journal variants mount the same Secrets; wait for those present.
+		# Every other agent DaemonSet mounts the same Secrets.
 		local variant variant_json
-		for variant in "${root_name}-agent-detect-journal-var" "${root_name}-agent-detect-journal-run"; do
+		for variant in $(kubectl_run -n "$namespace" get daemonsets -l "$agent_selector" \
+			-o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+			[[ $variant != "$name" ]] || continue
 			variant_json=$(kubectl_run -n "$namespace" get daemonset "$variant" -o json 2>/dev/null || true)
 			[[ -n $variant_json ]] || continue
 			deadline=$((SECONDS + TIMEOUT_SECONDS))

@@ -392,11 +392,11 @@ wait_workload_secret() {
 
 wait_workload_secret deployment "${root_name}-controller" server-tls "$server_leaf_secret"
 wait_workload_secret daemonset "${root_name}-agent" client-tls "$client_leaf_secret"
-# The journal variants mount the same client leaf; wait for those present.
-for variant in "${root_name}-agent-detect-journal-var" "${root_name}-agent-detect-journal-run"; do
-	if [[ -n $(kubectl_run -n "$namespace" get daemonset "$variant" --ignore-not-found -o name) ]]; then
-		wait_workload_secret daemonset "$variant" client-tls "$client_leaf_secret"
-	fi
+# Every other agent DaemonSet mounts the same client leaf.
+for variant in $(kubectl_run -n "$namespace" get daemonsets -l "app.kubernetes.io/instance=${root_name},kubeneuron.io/agent=true" \
+	-o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+	[[ $variant != "${root_name}-agent" ]] || continue
+	wait_workload_secret daemonset "$variant" client-tls "$client_leaf_secret"
 done
 
 deadline=$((SECONDS + TIMEOUT_SECONDS))

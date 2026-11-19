@@ -4,6 +4,7 @@ package operator
 
 import (
 	"context"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -92,6 +93,13 @@ func TestJournalVariantsRunOneAgentPerNode(t *testing.T) {
 		selectors[key] = true
 		if key != strings.TrimPrefix(ds.Name, "fleet-") {
 			t.Errorf("%s: component %q", ds.Name, key)
+		}
+		// The selector is immutable: "-agent" keeps the one it had.
+		if !maps.Equal(ds.Spec.Selector.MatchLabels, resourceLabels(installation, key)) {
+			t.Errorf("%s: selector %v", ds.Name, ds.Spec.Selector.MatchLabels)
+		}
+		if ds.Labels[AgentDaemonSetLabel] != "true" || ds.Spec.Template.Labels[AgentDaemonSetLabel] != "true" {
+			t.Errorf("%s: lacks %s on the object or its Pods", ds.Name, AgentDaemonSetLabel)
 		}
 	}
 }
