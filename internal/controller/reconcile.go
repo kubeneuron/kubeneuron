@@ -420,9 +420,25 @@ func (c *Controller) verifyAfterOwnersReplacement(ctx context.Context, inc *type
 			replaced = true
 		}
 		if replaced && entry.FromState == types.StateVerifying && entry.ToState == types.StateResolved &&
-			entry.Action == "resolve" && entry.Params["infrastructure_evidence"] == "verified_recycle_inventory" {
+			entry.Action == "resolve" {
+			proof := map[string]string{"owner_id": ownerID}
+			switch entry.Params["infrastructure_evidence"] {
+			case "verified_replacement_node":
+				s := owner.Successor
+				if entry.Params["replacement_correlation"] != "successor" || s == nil || s.Outcome != types.SuccessorReplaced ||
+					s.ReadyAt == nil || s.Node == "" || s.NodeUID == "" || s.Node != entry.Params["replacement_node"] || s.NodeUID != entry.Params["replacement_node_uid"] {
+					return c.quarantine(ctx, inc, "replacement evidence from owner "+ownerID+" does not identify a confirmed successor for this incident")
+				}
+				proof["replacement_node"] = s.Node
+				proof["replacement_node_uid"] = s.NodeUID
+				proof["replacement_correlation"] = "successor"
+			case "verified_recycle_inventory":
+				// Older resolutions record the inventory evidence without successor fields.
+			default:
+				continue
+			}
 			return c.transition(ctx, inc, types.StateVerifying, "system", "verify-owner-replacement",
-				"checking this incident after the owning incident verified replacement", map[string]string{"owner_id": ownerID})
+				"checking this incident after the owning incident verified replacement", proof)
 		}
 	}
 	return nil

@@ -294,6 +294,8 @@ func TestInventoryFollowerVerifiesAfterOriginalNodeDisappears(t *testing.T) {
 			if id == "owner" {
 				inc.CloudIdentity = &cloud.NodeIdentity{NodeUID: "original"}
 				inc.Class = types.ClassAcceleratorFault
+				now := time.Now()
+				inc.Successor = &types.SuccessorRecord{Node: "new-worker", NodeUID: "new-uid", ReadyAt: &now, Outcome: types.SuccessorReplaced}
 				inc.State = types.StateResolved
 			}
 			if err := tx.CreateIncident(ctx, inc); err != nil {
@@ -306,7 +308,7 @@ func TestInventoryFollowerVerifiesAfterOriginalNodeDisappears(t *testing.T) {
 		if err := tx.AppendAudit(ctx, &types.AuditEntry{IncidentID: "owner", Result: auditStepOutcomeResult("platform.replace_node", false, true)}); err != nil {
 			return err
 		}
-		if err := tx.AppendAudit(ctx, &types.AuditEntry{IncidentID: "owner", Action: "resolve", FromState: types.StateVerifying, ToState: types.StateResolved, Params: map[string]string{"infrastructure_evidence": "verified_recycle_inventory"}}); err != nil {
+		if err := tx.AppendAudit(ctx, &types.AuditEntry{IncidentID: "owner", Action: "resolve", FromState: types.StateVerifying, ToState: types.StateResolved, Params: map[string]string{"infrastructure_evidence": "verified_replacement_node", "replacement_correlation": "successor", "replacement_node": "new-worker", "replacement_node_uid": "new-uid"}}); err != nil {
 			return err
 		}
 		return tx.ReleaseNodeRemediation(ctx, "owner")
@@ -316,7 +318,7 @@ func TestInventoryFollowerVerifiesAfterOriginalNodeDisappears(t *testing.T) {
 	c.store = missingRepairInventory{st, "n1"}
 	waitSettled(t, c, st, "follower", func(i *types.Incident) bool { return i.State == types.StateVerifying })
 	for _, entry := range trail(t, st, "follower") {
-		if entry.Action == "verify-owner-replacement" && entry.Params["owner_id"] == "owner" {
+		if entry.Action == "verify-owner-replacement" && entry.Params["owner_id"] == "owner" && entry.Params["replacement_node_uid"] == "new-uid" && entry.Params["replacement_node"] == "new-worker" {
 			return
 		}
 	}
