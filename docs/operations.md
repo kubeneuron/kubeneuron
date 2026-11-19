@@ -96,6 +96,24 @@ Three independent mechanisms, all fail toward not acting:
    optional `matchLabels` node selector. Incidents hold their position and
    continue after the window closes; recorded approvals survive the wait.
 
+## When two incidents need to repair the same cloud node
+
+For live repair incidents with a recorded cloud node identity, the first
+incident to reach a disruptive node step becomes the repair owner. A second
+incident on the same Node UID waits at its own step. Only the owner requests
+approval or runs the cordon, drain and replacement. The workflow store
+preserves the owner and the waiting incident's link across controller restarts.
+
+Run `kubeneuronctl incidents show <waiting-incident-id>`. The recovery
+assessment shows `unavailable [node-repair]` and names the owner. Use that
+ID with the same command to inspect the active step and its approvals.
+The incident detail panel also shows the owner in **Recovery eligibility**.
+
+After the owner's live replacement is confirmed by inventory and the owner
+resolves, the waiting incident enters its own verification window. Closing
+the owner manually supplies no inventory evidence. The waiting incident's
+audit retains the owner ID so an operator can trace both histories.
+
 ## Taking a node over from a remediation
 
 KubeNeuron cordons a node while it remediates it, and returns it to the

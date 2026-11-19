@@ -354,6 +354,11 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- Concurrent live repair incidents on the same recorded cloud Node UID now
+  share one repair owner. Waiting incidents show the owner ID before
+  approval, drain or replacement. SQLite migration 0037 and PostgreSQL
+  migration 0028 persist ownership across controller restarts.
+
 - The recovery report's GPU-hour fields and `kubeneuron_degraded_gpu_seconds_total`
   count GPUs only (`nvidia.com/gpu`, `amd.com/gpu`): an incident on TPU chips
   or AWS Neuron devices is no longer charged there as one GPU; the new
