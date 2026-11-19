@@ -43,6 +43,7 @@ type successorPlatform struct {
 	successorWorkload    bool
 	releaseErr           error
 	replaceErr           error
+	replaceAttempts      int
 	// oldGPUs is what the replaced node advertises; dropAfterPlan sets it to
 	// 0 once the operation is planned. prepareErrs / nodeErrs: transient
 	// failures of the next requested-phase polls and successor node reads.
@@ -144,6 +145,7 @@ func (p *successorPlatform) ReplacePinnedNodeWithSuccessor(_ context.Context, pi
 	if s.Instance != pin.InstanceID {
 		return errors.New("wrong instance")
 	}
+	p.replaceAttempts++
 	if p.replaceErr != nil {
 		return p.replaceErr
 	}
@@ -744,6 +746,7 @@ func TestAddFirstUnknownDeleteKeepsTheSuccessor(t *testing.T) {
 	p := newSuccessorPlatform()
 	p.replaceErr = fmt.Errorf("deleting the old machine: the result is unknown: %w", cloud.ErrNeedsOperator)
 	c, st, _ := successorFixture(t, recoverymode.Automatic, p, "")
+	configureRepairClasses(t, c)
 	registerSuccessorAgent(t, st, 8)
 	id := openOn(t, c, "n1")
 	inc := waitSettled(t, c, st, id, func(inc *types.Incident) bool { return inc.Successor != nil && !inc.Successor.Open() })
@@ -752,6 +755,25 @@ func TestAddFirstUnknownDeleteKeepsTheSuccessor(t *testing.T) {
 	}
 	if _, released, _, _, _ := p.counts(); released != 0 || inc.Successor.Outcome != types.SuccessorHandedOver {
 		t.Fatalf("released=%d successor=%+v, want the successor kept for an operator%s", released, inc.Successor, dump(trail(t, st, id)))
+	}
+	c = restartWith(t, c, st, p)
+	sig := signal(types.ClassAcceleratorFault, "n1", "")
+	if err := c.IngestSignal(t.Context(), sig); err != nil {
+		t.Fatal(err)
+	}
+	follower, err := st.GetOpenIncident(t.Context(), sig.Target, sig.Class)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := step(t, c, st, follower.ID, 20)
+	assessment := types.RecoveryAvailabilityFromAudit(trail(t, st, follower.ID))
+	if got.State != types.StateEvaluating || assessment == nil || assessment.Source != "node-repair" || !strings.Contains(assessment.Reason, id) {
+		t.Fatalf("follower state=%s assessment=%+v", got.State, assessment)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.replaceAttempts != 1 || len(p.drained) != 1 || len(p.plain) != 0 {
+		t.Fatalf("replace attempts=%d drains=%d remove-first calls=%d", p.replaceAttempts, len(p.drained), len(p.plain))
 	}
 }
 
