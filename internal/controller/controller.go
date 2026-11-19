@@ -88,6 +88,9 @@ type Controller struct {
 	inventory inventorySync
 	// health is the confirmation state of the accelerator health signals.
 	health healthSignals
+	// journal is the journal label state: mount failures and the reason
+	// each node has no journal.
+	journal journalLabels
 	// agentSignalSources, when set, replaces the controller's own
 	// AgentSignalSources; tests set it.
 	agentSignalSources func(node string) []types.AgentSignalSource
@@ -437,6 +440,7 @@ func (c *Controller) runJanitors(ctx context.Context) {
 		c.restoreAbandonedAcceleratorStacks(passCtx)
 		c.reconcileCordonedNodes(passCtx)
 		c.reconcileDegradedTaints(passCtx)
+		c.reconcileJournalLabels(passCtx)
 		c.resolveIncidentsOnVanishedNodes(passCtx)
 		c.pollInterruptions(passCtx)
 	wait:

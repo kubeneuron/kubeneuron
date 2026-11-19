@@ -224,7 +224,7 @@ func controllerClusterRole(installation *kubeneuronv1alpha1.KubeNeuron) *rbacv1.
 			{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: controllerPodVerbs(installation)},
 			{APIGroups: []string{""}, Resources: []string{"serviceaccounts"}, ResourceNames: []string{installation.Name + "-agent"}, Verbs: []string{"get"}},
 			{APIGroups: []string{""}, Resources: []string{"pods/eviction"}, Verbs: []string{"create"}},
-			{APIGroups: []string{"apps"}, Resources: []string{"daemonsets"}, ResourceNames: []string{installation.Name + "-agent", installation.Name + "-agent-detect"}, Verbs: []string{"get"}},
+			{APIGroups: []string{"apps"}, Resources: []string{"daemonsets"}, ResourceNames: agentDaemonSetNames(installation), Verbs: []string{"get"}},
 			{APIGroups: []string{"authentication.k8s.io"}, Resources: []string{"tokenreviews"}, Verbs: []string{"create"}},
 			// Operator-API authorization: callers authenticated by TokenReview
 			// are admitted only if RBAC lets them get/update this KubeNeuron.
@@ -403,11 +403,11 @@ func controllerDeployment(installation *kubeneuronv1alpha1.KubeNeuron, snapshot 
 		"--agent-token-audience=" + agentTokenAudience,
 		"--agent-token-namespace=" + installation.Spec.Namespace,
 		"--agent-token-service-account=" + installation.Name + "-agent",
-		// Both agent DaemonSets may authenticate: the primary, and the
-		// detection-only companion that exists under Enabled arming. Listing
-		// the detect name unconditionally is safe — the authenticator verifies
-		// the live owner UID, so a name with no DaemonSet admits nothing.
-		"--agent-daemonset=" + installation.Name + "-agent," + installation.Name + "-agent-detect",
+		// Every agent DaemonSet name may authenticate: "-agent", the two
+		// journal variants, and the retired "-agent-detect". Listing them
+		// unconditionally is safe — the authenticator verifies the live
+		// owner UID, so a name with no DaemonSet admits nothing.
+		"--agent-daemonset=" + strings.Join(agentDaemonSetNames(installation), ","),
 		"--installation-name=" + installation.Name,
 		"--installation-uid=" + string(installation.UID),
 		"--config=/etc/kube-neuron/policies.yaml",
@@ -859,8 +859,76 @@ func agentTolerations(installation *kubeneuronv1alpha1.KubeNeuron) []corev1.Tole
 	})
 }
 
+// journalMountPath is where a journal variant sees the node's journal
+// directory.
+const journalMountPath = "/host/journal"
+
+// agentVariant is one agent DaemonSet: its name suffix and component, the
+// host journal directory it mounts ("" for none), and the values of the
+// kubeneuron.io/journal-dir label it runs on.
+type agentVariant struct {
+	suffix  string
+	journal string
+	labelIn string
+	noLabel bool
+}
+
+// The journal variants, in the order they are rendered.
+var journalVariants = []agentVariant{
+	{suffix: "-agent-detect-journal-var", journal: "/var/log/journal", labelIn: kubeneuronv1alpha1.JournalDirVar},
+	{suffix: "-agent-detect-journal-run", journal: "/run/log/journal", labelIn: kubeneuronv1alpha1.JournalDirRun},
+}
+
+// agentDaemonSetNames are every agent DaemonSet name an installation may
+// own, for the read-only RBAC rule and the controller's agent allowlist.
+// "-agent-detect" is the retired companion, kept so its Pods authenticate
+// until the reconciler removes it.
+func agentDaemonSetNames(installation *kubeneuronv1alpha1.KubeNeuron) []string {
+	names := []string{installation.Name + "-agent", installation.Name + "-agent-detect"}
+	for _, v := range journalVariants {
+		names = append(names, installation.Name+v.suffix)
+	}
+	return names
+}
+
+// agentDaemonSets renders the agent DaemonSets the installation runs. With
+// the journal mounted the fleet is split by the kubeneuron.io/journal-dir
+// label: "-agent" on nodes without it, one journal variant per value. The
+// node affinities are disjoint, so a node runs exactly one agent.
+func agentDaemonSets(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot, tlsRevision ...string) []*appsv1.DaemonSet {
+	if !journalMounted(installation) {
+		return []*appsv1.DaemonSet{agentVariantDaemonSet(installation, snapshot, agentVariant{suffix: "-agent"}, tlsRevision...)}
+	}
+	out := []*appsv1.DaemonSet{agentVariantDaemonSet(installation, snapshot, agentVariant{suffix: "-agent", noLabel: true}, tlsRevision...)}
+	for _, v := range journalVariants {
+		out = append(out, agentVariantDaemonSet(installation, snapshot, v, tlsRevision...))
+	}
+	return out
+}
+
+// retiredAgentDaemonSets are the agent DaemonSet names the installation
+// does not run in its current configuration.
+func retiredAgentDaemonSets(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot) []string {
+	running := map[string]bool{}
+	for _, ds := range agentDaemonSets(installation, snapshot) {
+		running[ds.Name] = true
+	}
+	var out []string
+	for _, name := range agentDaemonSetNames(installation) {
+		if !running[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// agentDaemonSet is the "-agent" DaemonSet.
 func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot, tlsRevision ...string) *appsv1.DaemonSet {
-	labels := resourceLabels(installation, "agent")
+	return agentDaemonSets(installation, snapshot, tlsRevision...)[0]
+}
+
+func agentVariantDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot, variant agentVariant, tlsRevision ...string) *appsv1.DaemonSet {
+	labels := resourceLabels(installation, strings.TrimPrefix(variant.suffix, "-"))
 	nodeActions := installation.Spec.Safety.NodeLevelActions
 	security := &corev1.SecurityContext{Privileged: ptr.To(nodeActions)}
 	agent := installation.Spec.Agent.DeepCopy()
@@ -888,6 +956,30 @@ func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snaps
 		toolingVolumes = append(toolingVolumes, hostPathVolume("kmsg", "/dev/kmsg", corev1.HostPathUnset))
 		toolingArgs = append(toolingArgs, "--enable-node-level-actions")
 	}
+	if variant.journal != "" {
+		// type: Directory, read-only, no subPath: the kubelet refuses to
+		// start the Pod rather than create the directory, so the mount
+		// never writes to the host or changes where journald stores.
+		toolingMounts = append(toolingMounts, corev1.VolumeMount{Name: "journal", MountPath: journalMountPath, ReadOnly: true})
+		toolingVolumes = append(toolingVolumes, hostPathVolume("journal", variant.journal, corev1.HostPathDirectory))
+		toolingArgs = append(toolingArgs, "--journal-dir="+journalMountPath)
+	}
+	var affinity *corev1.Affinity
+	if variant.noLabel || variant.labelIn != "" {
+		// NotIn rather than DoesNotExist: it also matches a node without
+		// the label, and a value outside the list leaves the node with
+		// this agent instead of none.
+		requirement := corev1.NodeSelectorRequirement{Key: kubeneuronv1alpha1.JournalDirLabel, Operator: corev1.NodeSelectorOpNotIn,
+			Values: []string{kubeneuronv1alpha1.JournalDirVar, kubeneuronv1alpha1.JournalDirRun}}
+		if variant.labelIn != "" {
+			requirement = corev1.NodeSelectorRequirement{Key: kubeneuronv1alpha1.JournalDirLabel, Operator: corev1.NodeSelectorOpIn, Values: []string{variant.labelIn}}
+		}
+		affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{requirement}}},
+			},
+		}}
+	}
 	agentNodes := copyStringMap(installation.Spec.Agent.NodeSelector)
 	annotations := map[string]string{"kubeneuron.io/config-digest": snapshot.Digest}
 	if len(tlsRevision) != 0 && tlsRevision[0] != "" {
@@ -895,7 +987,7 @@ func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snaps
 	}
 	return &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        installation.Name + "-agent",
+			Name:        installation.Name + variant.suffix,
 			Namespace:   installation.Spec.Namespace,
 			Labels:      labels,
 			Annotations: annotations,
@@ -935,6 +1027,7 @@ func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snaps
 					SchedulerName:                 corev1.DefaultSchedulerName,
 					HostPID:                       nodeActions,
 					NodeSelector:                  agentNodes,
+					Affinity:                      affinity,
 					Tolerations:                   agentTolerations(installation),
 					Containers: []corev1.Container{{
 						Name:            "agent",

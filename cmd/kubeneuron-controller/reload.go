@@ -159,6 +159,7 @@ func applyRuntimeConfigWithNodePauses(
 	if err := ctrl.InstallRuntimeConfigContext(ctx, controller.RuntimeConfig{
 		ManualRecoveryBaseline: baseline,
 		CostRates:              cfg.RecoveryCostRates,
+		AgentJournal:           cfg.AgentJournal,
 		SafetyLimits:           &limits,
 		Engine:                 engine,
 		Catalog:                catalog,

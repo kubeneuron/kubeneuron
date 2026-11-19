@@ -49,6 +49,13 @@ type Authenticator struct {
 	now    func() time.Time
 }
 
+// agentComponents are the component labels of the agent DaemonSets: the
+// primary, the retired detection companion, and the two journal variants.
+var agentComponents = map[string]bool{
+	"agent": true, "agent-detect": true,
+	"agent-detect-journal-var": true, "agent-detect-journal-run": true,
+}
+
 // allowedDaemonSet reports whether name is one of the configured agent
 // DaemonSets.
 func (a *Authenticator) allowedDaemonSet(name string) bool {
@@ -155,7 +162,7 @@ func (a *Authenticator) AuthenticateAgent(r *http.Request) (httpapi.AgentPrincip
 	component := pod.Labels["app.kubernetes.io/component"]
 	if pod.Labels["app.kubernetes.io/name"] != "kube-neuron" ||
 		pod.Labels["app.kubernetes.io/instance"] != a.cfg.InstallationName ||
-		(component != "agent" && component != "agent-detect") ||
+		!agentComponents[component] ||
 		pod.Labels["app.kubernetes.io/managed-by"] != "kubeneuron-operator" {
 		return httpapi.AgentPrincipal{}, forbidden("Pod labels do not identify the expected agent")
 	}

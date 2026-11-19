@@ -288,14 +288,20 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.ensureDeployment(ctx, &installation, deployment); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile controller Deployment: %w", err))
 	}
-	if err := r.ensureDaemonSet(ctx, &installation, agentDaemonSet(&installation, snapshot, pkiResult.Revisions.Agent)); err != nil {
-		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile agent DaemonSet: %w", err))
+	for _, agents := range agentDaemonSets(&installation, snapshot, pkiResult.Revisions.Agent) {
+		if err := r.ensureDaemonSet(ctx, &installation, agents); err != nil {
+			return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile agent DaemonSet %s: %w", agents.Name, err))
+		}
 	}
-	// The two-DaemonSet era is retired: arming is controller-served data, one
-	// DaemonSet covers the whole fleet, and the old "-agent-detect" companion
-	// is removed on upgrade (only when owned by this installation).
-	if err := r.removeOwnedDaemonSet(ctx, &installation, installation.Name+"-agent-detect"); err != nil {
-		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("remove retired detection agent DaemonSet: %w", err))
+	// Remove the agent DaemonSets this configuration does not run: the
+	// journal variants once the journal is off or node-level actions are on,
+	// and the "-agent-detect" companion of the two-DaemonSet era, whose
+	// arming is now controller-served data. Only objects owned by this
+	// installation are removed.
+	for _, name := range retiredAgentDaemonSets(&installation, snapshot) {
+		if err := r.removeOwnedDaemonSet(ctx, &installation, name); err != nil {
+			return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("remove agent DaemonSet %s: %w", name, err))
+		}
 	}
 	if err := r.ensurePDB(ctx, &installation, controllerPDB(&installation)); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile controller PodDisruptionBudget: %w", err))
@@ -460,29 +466,35 @@ func (r *KubeNeuronReconciler) workloadsReady(ctx context.Context, installation 
 		deployment.Status.UnavailableReplicas != 0 {
 		return false, "controller deployment is not fully available at its current generation", nil
 	}
-	var agents appsv1.DaemonSet
-	if err := r.Get(ctx, types.NamespacedName{Name: installation.Name + "-agent", Namespace: installation.Spec.Namespace}, &agents); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, "agent daemonset not found", nil
+	// Every agent DaemonSet must be fully available. A journal variant may
+	// have no node to run on; the fleet as a whole must have one agent.
+	desiredFleet := int32(0)
+	for _, wanted := range agentDaemonSets(installation, &Snapshot{}) {
+		var agents appsv1.DaemonSet
+		if err := r.Get(ctx, types.NamespacedName{Name: wanted.Name, Namespace: installation.Spec.Namespace}, &agents); err != nil {
+			if apierrors.IsNotFound(err) {
+				return false, "agent daemonset " + wanted.Name + " not found", nil
+			}
+			return false, "agent daemonset " + wanted.Name + " could not be read", err
 		}
-		return false, "agent daemonset could not be read", err
+		if ready, message := managedObjectReady(installation, &agents, "agent daemonset "+wanted.Name); !ready {
+			return false, message, nil
+		}
+		if agents.Status.ObservedGeneration < agents.Generation {
+			return false, "agent daemonset " + wanted.Name + " has not observed its current generation", nil
+		}
+		desiredAgents := agents.Status.DesiredNumberScheduled
+		desiredFleet += desiredAgents
+		if agents.Status.UpdatedNumberScheduled != desiredAgents ||
+			agents.Status.CurrentNumberScheduled != desiredAgents ||
+			agents.Status.NumberAvailable != desiredAgents ||
+			agents.Status.NumberUnavailable != 0 ||
+			agents.Status.NumberMisscheduled != 0 {
+			return false, "agent daemonset " + wanted.Name + " is not fully available at its current generation", nil
+		}
 	}
-	if ready, message := managedObjectReady(installation, &agents, "agent daemonset"); !ready {
-		return false, message, nil
-	}
-	if agents.Status.ObservedGeneration < agents.Generation {
-		return false, "agent daemonset has not observed its current generation", nil
-	}
-	if agents.Status.DesiredNumberScheduled == 0 {
+	if desiredFleet == 0 {
 		return false, "agent daemonset has no desired pods", nil
-	}
-	desiredAgents := agents.Status.DesiredNumberScheduled
-	if agents.Status.UpdatedNumberScheduled != desiredAgents ||
-		agents.Status.CurrentNumberScheduled != desiredAgents ||
-		agents.Status.NumberAvailable != desiredAgents ||
-		agents.Status.NumberUnavailable != 0 ||
-		agents.Status.NumberMisscheduled != 0 {
-		return false, "agent daemonset is not fully available at its current generation", nil
 	}
 
 	return true, "runtime is available", nil

@@ -202,7 +202,9 @@ done
 # Deletion must be confirmed BEFORE touching root, PVC or other objects.
 if uninstall --delete-data </dev/null >"$work/refused.log" 2>&1; then fail "unconfirmed data deletion succeeded"; fi
 "$KUBECTL_BIN" get kubeneuron "$name" >/dev/null
+"$KUBECTL_BIN" label nodes --all kubeneuron.io/journal-dir=run --overwrite >/dev/null
 uninstall >"$work/uninstall.log"
+[[ -z $("$KUBECTL_BIN" get nodes -l kubeneuron.io/journal-dir -o name) ]] || fail "uninstall left the journal-dir node label"
 [[ $("$KUBECTL_BIN" -n "$namespace" get pvc "$name-controller-state" -o jsonpath='{.metadata.uid}') == "$claim_uid" ]] || fail "PVC identity changed on uninstall"
 [[ $("$KUBECTL_BIN" -n "$namespace" get pvc "$name-metrics-store" -o jsonpath='{.metadata.uid}') == "$metrics_uid" ]] || fail "uninstall without --delete-data removed the metrics claim"
 grep -Fq "kubectl delete pvc $name-metrics-store -n $namespace" "$work/uninstall.log" || fail "uninstall did not say how to erase the retained metrics"

@@ -30,6 +30,11 @@ type Config struct {
 	Approvals              Approvals                   `yaml:"approvals"`
 	Policies               []Policy                    `yaml:"policies"`
 	AcceleratorProfiles    []AcceleratorRuntimeProfile `yaml:"accelerator_profiles,omitempty"`
+	// AgentJournal is the compiled spec.agent.kernelLog.journal. A nil
+	// pointer leaves the kubeneuron.io/journal-dir label alone: a
+	// configuration written before the field existed neither adds nor
+	// removes it.
+	AgentJournal *AgentJournal `yaml:"agent_journal,omitempty"`
 }
 
 // Safety mirrors internal/safety.Limits plus flap settings.
@@ -86,6 +91,28 @@ type Safety struct {
 	AcceleratorHealth *AcceleratorHealth `yaml:"accelerator_health,omitempty"`
 	// ImpactPreview is the compiled spec.safety.impactPreview. Absent is off.
 	ImpactPreview *ImpactPreview `yaml:"impact_preview,omitempty"`
+}
+
+// AgentJournal tells the controller how to label nodes for the agent's
+// journal mount.
+type AgentJournal struct {
+	// Enabled labels accelerator nodes. False removes every label.
+	Enabled bool `yaml:"enabled"`
+	// Namespace and Installation find the journal-variant agent Pods.
+	Namespace    string `yaml:"namespace"`
+	Installation string `yaml:"installation"`
+	// AgentNodeSelector is spec.agent.nodeSelector: a node the agent does
+	// not run on is not labelled.
+	AgentNodeSelector map[string]string `yaml:"agent_node_selector,omitempty"`
+	// NodeOverrides come before the OS image table; the first match wins.
+	NodeOverrides []JournalNodeOverride `yaml:"node_overrides,omitempty"`
+}
+
+// JournalNodeOverride chooses the journal directory for matching nodes.
+type JournalNodeOverride struct {
+	NodeSelector map[string]string `yaml:"node_selector"`
+	// Dir is var, run or none.
+	Dir string `yaml:"dir"`
 }
 
 // AcceleratorHealth carries the opt-in health sources. See the CRD field of
@@ -373,6 +400,16 @@ func decodeStrict(data []byte, out any) error {
 
 // Validate checks configuration invariants and applies defaults.
 func (c *Config) Validate() error {
+	if j := c.AgentJournal; j != nil {
+		for _, o := range j.NodeOverrides {
+			if o.Dir != "var" && o.Dir != "run" && o.Dir != "none" {
+				return fmt.Errorf("agent_journal.node_overrides: dir %q is not var, run or none", o.Dir)
+			}
+			if len(o.NodeSelector) == 0 {
+				return errors.New("agent_journal.node_overrides: node_selector must not be empty")
+			}
+		}
+	}
 	if c.ManualRecoveryBaseline != nil && (*c.ManualRecoveryBaseline <= 0 || time.Duration(*c.ManualRecoveryBaseline) > 30*24*time.Hour) {
 		return errors.New("manual_recovery_baseline must be a positive duration of at most 720h")
 	}

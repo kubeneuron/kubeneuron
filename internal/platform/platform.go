@@ -426,6 +426,33 @@ type NodeTainter interface {
 	DegradedTaintedNodes(ctx context.Context) ([]string, error)
 }
 
+// JournalLabeler is implemented by platforms that choose the agent's
+// journal mount through a node label.
+type JournalLabeler interface {
+	// JournalNodes reads every node with what the journal label needs: its
+	// OS image, labels, current label value, and whether a journal-variant
+	// agent Pod of the installation in namespace has waited on it without
+	// starting its container.
+	JournalNodes(ctx context.Context, namespace, installation string) ([]JournalNode, error)
+	// SetJournalDir sets the label to dir, or removes it when dir is empty.
+	SetJournalDir(ctx context.Context, node, dir string) error
+}
+
+// JournalNode is one node as the journal label sees it.
+type JournalNode struct {
+	Name       string
+	OSImage    string
+	ProviderID string
+	Labels     map[string]string
+	// Dir is the current kubeneuron.io/journal-dir value, empty when absent.
+	Dir string
+	// Accelerator is true when the node advertises an accelerator resource.
+	Accelerator bool
+	// WaitingSince is when the node's journal-variant agent Pod was
+	// scheduled, while it has not started its container. Zero otherwise.
+	WaitingSince time.Time
+}
+
 // InstanceRecycler drives the cloud instance behind a node. It is satisfied by
 // any cloud provider (pkg/cloud) and injected into the platform, so the
 // platform stays free of any cloud SDK and of any provider's providerID scheme.

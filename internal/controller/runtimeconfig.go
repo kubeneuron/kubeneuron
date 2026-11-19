@@ -87,9 +87,12 @@ type RuntimeConfig struct {
 	ManualRecoveryBaseline time.Duration
 	// CostRates price the device-hours saved in the recovery report; nil
 	// shows hours only.
-	CostRates   *config.CostRates
-	VerifyQuiet time.Duration
-	ApprovalTTL time.Duration
+	CostRates *config.CostRates
+	// AgentJournal is the journal label configuration; nil leaves the
+	// label alone.
+	AgentJournal *config.AgentJournal
+	VerifyQuiet  time.Duration
+	ApprovalTTL  time.Duration
 }
 
 // DegradedTaintPolicy is the resolved degraded-node taint setting. Effect is

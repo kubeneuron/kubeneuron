@@ -131,6 +131,10 @@ type Config struct {
 	AllowInsecureHTTP bool
 	// SpoolPath is the on-disk event queue, default /var/lib/kube-neuron/spool.jsonl.
 	SpoolPath string
+	// JournalDir is the read-only mount of the node's systemd journal
+	// directory, or empty when the agent has none. The agent reads kernel
+	// entries from it when it cannot read /dev/kmsg.
+	JournalDir string
 	// ActionJournalPath is the crash-safe write-ahead journal for remediation
 	// actions, default /var/lib/kube-neuron/actions.jsonl. It must remain on
 	// durable node-local storage: a restarted agent uses it to avoid replaying

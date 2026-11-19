@@ -140,6 +140,7 @@ func CompileSnapshot(
 		},
 		Policies:            compiledPolicies,
 		AcceleratorProfiles: compiledAcceleratorProfiles,
+		AgentJournal:        agentJournal(installation),
 	}
 	if value := installation.Spec.ManualRecoveryBaseline; value != "" {
 		d, err := configDuration(value, "")
@@ -579,6 +580,30 @@ func acceleratorHealth(spec *kubeneuronv1alpha1.AcceleratorHealthSpec) *config.A
 		return nil
 	}
 	return &out
+}
+
+// journalMounted reports whether the agent mounts a journal directory: the
+// unprivileged agent with the journal enabled. The privileged agent reads
+// /dev/kmsg instead.
+func journalMounted(installation *kubeneuronv1alpha1.KubeNeuron) bool {
+	return !installation.Spec.Safety.NodeLevelActions && installation.Spec.Agent.JournalEnabled()
+}
+
+// agentJournal compiles the journal label settings for the controller. It is
+// always emitted, so turning the journal off removes the labels.
+func agentJournal(installation *kubeneuronv1alpha1.KubeNeuron) *config.AgentJournal {
+	out := &config.AgentJournal{
+		Enabled:           journalMounted(installation),
+		Namespace:         installation.Spec.Namespace,
+		Installation:      installation.Name,
+		AgentNodeSelector: copyStringMap(installation.Spec.Agent.NodeSelector),
+	}
+	for _, o := range installation.Spec.Agent.JournalNodeOverrides() {
+		out.NodeOverrides = append(out.NodeOverrides, config.JournalNodeOverride{
+			NodeSelector: copyStringMap(o.NodeSelector), Dir: o.Dir,
+		})
+	}
+	return out
 }
 
 // draHealthEnabled reports whether the installation opted into the DRA

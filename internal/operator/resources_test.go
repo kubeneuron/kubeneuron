@@ -50,7 +50,7 @@ func TestControllerRBACTargetsManagedServiceAccount(t *testing.T) {
 		{apiGroup: "", resource: "serviceaccounts", names: []string{"fleet-agent"}},
 		// Both agent DaemonSets may own authenticated Pods: the primary and
 		// the detection-only companion that exists under Enabled arming.
-		{apiGroup: "apps", resource: "daemonsets", names: []string{"fleet-agent", "fleet-agent-detect"}},
+		{apiGroup: "apps", resource: "daemonsets", names: []string{"fleet-agent", "fleet-agent-detect", "fleet-agent-detect-journal-var", "fleet-agent-detect-journal-run"}},
 	} {
 		rule := findRule(role.Rules, wanted.apiGroup, wanted.resource)
 		if rule == nil || !reflect.DeepEqual(rule.ResourceNames, wanted.names) {
@@ -438,7 +438,7 @@ func TestSQLiteControllerDeploymentUsesKubeNeuronStatePath(t *testing.T) {
 		"--agent-token-audience=kubeneuron-controller",
 		"--agent-token-namespace=kube-neuron-system",
 		"--agent-token-service-account=fleet-agent",
-		"--agent-daemonset=fleet-agent,fleet-agent-detect",
+		"--agent-daemonset=fleet-agent,fleet-agent-detect,fleet-agent-detect-journal-var,fleet-agent-detect-journal-run",
 		"--installation-name=fleet",
 		"--installation-uid=installation-uid",
 	} {

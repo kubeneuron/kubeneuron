@@ -285,6 +285,74 @@ type AgentSpec struct {
 	// +listType=map
 	// +listMapKey=vendor
 	Adapters []AgentAdapterSpec `json:"adapters,omitempty"`
+	// KernelLog configures where an agent without node-level actions reads
+	// kernel messages. It has no effect while spec.safety.nodeLevelActions
+	// is true: that agent reads /dev/kmsg.
+	KernelLog *AgentKernelLogSpec `json:"kernelLog,omitempty"`
+}
+
+// AgentKernelLogSpec configures the agent's kernel log sources.
+type AgentKernelLogSpec struct {
+	// Journal mounts the node's systemd journal directory read-only into
+	// the agent. The agent reads kernel entries only.
+	Journal *AgentJournalSpec `json:"journal,omitempty"`
+}
+
+// JournalDirLabel is the node label that chooses the agent's journal
+// mount. The controller sets it on accelerator nodes; its value is one of
+// JournalDirVar or JournalDirRun.
+const JournalDirLabel = "kubeneuron.io/journal-dir"
+
+// Journal directory choices for a node.
+const (
+	JournalDirVar  = "var"
+	JournalDirRun  = "run"
+	JournalDirNone = "none"
+)
+
+// AgentJournalSpec configures the journal mount.
+type AgentJournalSpec struct {
+	// Enabled mounts the journal on accelerator nodes whose OS image
+	// KubeNeuron recognises. False removes the mount and the
+	// kubeneuron.io/journal-dir label. Default true.
+	// +kubebuilder:default=true
+	Enabled *bool `json:"enabled,omitempty"`
+	// NodeOverrides chooses the journal directory for matching nodes
+	// instead of the OS image table. The first matching entry wins.
+	// +kubebuilder:validation:MaxItems=32
+	NodeOverrides []JournalNodeOverride `json:"nodeOverrides,omitempty"`
+}
+
+// JournalNodeOverride chooses the journal directory for nodes whose labels
+// match NodeSelector.
+type JournalNodeOverride struct {
+	// NodeSelector matches node labels; every entry must match. It may not
+	// use kubeneuron.io/journal-dir.
+	// +kubebuilder:validation:MinProperties=1
+	// +kubebuilder:validation:MaxProperties=16
+	// +kubebuilder:validation:XValidation:rule="!('kubeneuron.io/journal-dir' in self)",message="nodeSelector must not use kubeneuron.io/journal-dir"
+	NodeSelector map[string]string `json:"nodeSelector"`
+	// Dir is var (/var/log/journal), run (/run/log/journal) or none (no
+	// journal mount on these nodes).
+	// +kubebuilder:validation:Enum=var;run;none
+	Dir string `json:"dir"`
+}
+
+// JournalEnabled reports whether the journal mount is on. An absent block
+// is on.
+func (a AgentSpec) JournalEnabled() bool {
+	if a.KernelLog == nil || a.KernelLog.Journal == nil || a.KernelLog.Journal.Enabled == nil {
+		return true
+	}
+	return *a.KernelLog.Journal.Enabled
+}
+
+// JournalNodeOverrides returns the configured overrides.
+func (a AgentSpec) JournalNodeOverrides() []JournalNodeOverride {
+	if a.KernelLog == nil || a.KernelLog.Journal == nil {
+		return nil
+	}
+	return a.KernelLog.Journal.NodeOverrides
 }
 
 // AgentAdapterSpec enables one registered accelerator adapter.

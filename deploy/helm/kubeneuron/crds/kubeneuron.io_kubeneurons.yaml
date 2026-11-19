@@ -272,6 +272,62 @@ spec:
                       rule: '!self.endsWith('':latest'')'
                     - message: image must be pinned by an explicit tag or digest
                       rule: self.contains('@') || self.lastIndexOf(':') > self.lastIndexOf('/')
+                  kernelLog:
+                    description: |-
+                      KernelLog configures where an agent without node-level actions reads
+                      kernel messages. It has no effect while spec.safety.nodeLevelActions
+                      is true: that agent reads /dev/kmsg.
+                    properties:
+                      journal:
+                        description: |-
+                          Journal mounts the node's systemd journal directory read-only into
+                          the agent. The agent reads kernel entries only.
+                        properties:
+                          enabled:
+                            default: true
+                            description: |-
+                              Enabled mounts the journal on accelerator nodes whose OS image
+                              KubeNeuron recognises. False removes the mount and the
+                              kubeneuron.io/journal-dir label. Default true.
+                            type: boolean
+                          nodeOverrides:
+                            description: |-
+                              NodeOverrides chooses the journal directory for matching nodes
+                              instead of the OS image table. The first matching entry wins.
+                            items:
+                              description: |-
+                                JournalNodeOverride chooses the journal directory for nodes whose labels
+                                match NodeSelector.
+                              properties:
+                                dir:
+                                  description: |-
+                                    Dir is var (/var/log/journal), run (/run/log/journal) or none (no
+                                    journal mount on these nodes).
+                                  enum:
+                                  - var
+                                  - run
+                                  - none
+                                  type: string
+                                nodeSelector:
+                                  additionalProperties:
+                                    type: string
+                                  description: |-
+                                    NodeSelector matches node labels; every entry must match. It may not
+                                    use kubeneuron.io/journal-dir.
+                                  maxProperties: 16
+                                  minProperties: 1
+                                  type: object
+                                  x-kubernetes-validations:
+                                  - message: nodeSelector must not use kubeneuron.io/journal-dir
+                                    rule: '!(''kubeneuron.io/journal-dir'' in self)'
+                              required:
+                              - dir
+                              - nodeSelector
+                              type: object
+                            maxItems: 32
+                            type: array
+                        type: object
+                    type: object
                   nodeSelector:
                     additionalProperties:
                       type: string

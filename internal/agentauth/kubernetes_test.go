@@ -350,3 +350,44 @@ func TestAuthenticateAgentAcceptsDetectionCompanionDaemonSet(t *testing.T) {
 		t.Fatalf("principal = %#v, want node %s", principal, testNode)
 	}
 }
+
+// Each of the four agent DaemonSets owns Pods that authenticate, once its
+// name is allow-listed; a component outside the four does not.
+func TestAuthenticateAgentAcceptsEveryAgentDaemonSet(t *testing.T) {
+	for _, component := range []string{"agent", "agent-detect", "agent-detect-journal-var", "agent-detect-journal-run"} {
+		t.Run(component, func(t *testing.T) {
+			fixture := newTestingFixture(t)
+			controller := true
+			owner := &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{
+				Name: "fleet-" + component, Namespace: testNamespace, UID: k8stypes.UID(component + "-uid"),
+			}}
+			if component != "agent" {
+				if err := fixture.client.Tracker().Add(owner); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				owner = fixture.daemonSet
+			}
+			fixture.pod.Labels["app.kubernetes.io/component"] = component
+			fixture.pod.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: "apps/v1", Kind: "DaemonSet", Name: owner.Name, UID: owner.UID, Controller: &controller,
+			}}
+			if _, err := fixture.client.CoreV1().Pods(testNamespace).Update(context.Background(), fixture.pod, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			fixture.authenticator.cfg.AgentDaemonSets = []string{
+				testDaemonSet, "fleet-agent-detect", "fleet-agent-detect-journal-var", "fleet-agent-detect-journal-run",
+			}
+			if principal, err := fixture.authenticator.AuthenticateAgent(fixture.request); err != nil || principal.NodeName != testNode {
+				t.Fatalf("principal = %#v, err = %v", principal, err)
+			}
+			fixture.pod.Labels["app.kubernetes.io/component"] = component + "-other"
+			if _, err := fixture.client.CoreV1().Pods(testNamespace).Update(context.Background(), fixture.pod, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.authenticator.AuthenticateAgent(fixture.request); err == nil {
+				t.Fatal("an unknown component authenticated")
+			}
+		})
+	}
+}

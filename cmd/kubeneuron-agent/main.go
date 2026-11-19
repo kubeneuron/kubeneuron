@@ -41,6 +41,7 @@ func main() {
 		tlsKeyFile        = flag.String("tls-key", "", "agent fleet client private key")
 		allowInsecureHTTP = flag.Bool("allow-insecure-http", false, "allow plaintext controller HTTP for local development only")
 		spoolPath         = flag.String("spool", "/var/lib/kube-neuron/spool.jsonl", "event spool file")
+		journalDir        = flag.String("journal-dir", "", "read-only mount of the node's systemd journal directory; kernel entries only")
 		scriptsDir        = flag.String("scripts-dir", "/etc/kube-neuron/scripts", "directory of operator-provisioned remediation scripts")
 		rebootCommand     = flag.String(
 			"reboot-command",
@@ -203,6 +204,7 @@ func main() {
 		TLSKeyFile:               *tlsKeyFile,
 		AllowInsecureHTTP:        *allowInsecureHTTP,
 		SpoolPath:                *spoolPath,
+		JournalDir:               *journalDir,
 		ScriptsDir:               *scriptsDir,
 		RebootCommand:            strings.Fields(*rebootCommand),
 		EnableDestructiveActions: *enableDestructive,

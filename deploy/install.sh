@@ -213,6 +213,14 @@ if ((UNINSTALL)); then
 	fi
 	say "removing KubeNeuron installation '$NAME' (namespace $NS)"
 	kubectl delete kubeneuron "$NAME" --ignore-not-found --wait=true --timeout=120s
+	# The journal mount label is the one change KubeNeuron makes to Node
+	# objects in every mode. Another installation keeps using it.
+	if [[ -z $(kubectl get kubeneuron -o name 2>/dev/null) ]]; then
+		kubectl label nodes --all kubeneuron.io/journal-dir- >/dev/null
+		say "removed the kubeneuron.io/journal-dir node label"
+	else
+		say "left the kubeneuron.io/journal-dir node label: another KubeNeuron installation uses it"
+	fi
 	# Include legacy objects without the new installation label, but never
 	# delete one unless its actual reference names this installation.
 	for resource in gpuplaybooks gpuremediationpolicies; do
