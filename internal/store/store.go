@@ -84,8 +84,9 @@ type IncidentFilter struct {
 // and its audit entry to persist in the same transaction.
 type Tx interface {
 	ReleaseVanishedRepairNode(ctx context.Context, node, uid string) error
-	ClaimRepairStep(ctx context.Context, node, uid, incident, actionID string, device bool) (bool, error)
+	ClaimRepairStep(ctx context.Context, node, uid, incident, actionID string, device bool, now time.Time) (bool, error)
 	ReleaseRepairStep(ctx context.Context, incident string) error
+	ReleaseNodeRepairStep(ctx context.Context, incident string) error
 	// ClaimNodeRemediation returns the winning incident ID for this Node identity.
 	ClaimNodeRemediation(ctx context.Context, node, uid, incidentID string, at time.Time) (string, error)
 	ReleaseNodeRemediation(ctx context.Context, incidentID string) error

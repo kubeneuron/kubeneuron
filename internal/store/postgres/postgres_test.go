@@ -419,7 +419,7 @@ func TestConcurrentRepairStepsExcludeNodeAndDevice(t *testing.T) {
 			err := s.WithTx(ctx, func(tx store.Tx) error {
 				<-start
 				var err error
-				admitted, err = tx.ClaimRepairStep(ctx, "node-a", "uid-a", id, "", id == "reset")
+				admitted, err = tx.ClaimRepairStep(ctx, "node-a", "uid-a", id, "", id == "reset", time.Now())
 				return err
 			})
 			results <- result{admitted, err}
@@ -445,7 +445,7 @@ func TestLateResetResultReleasesOnlyMatchingClaim(t *testing.T) {
 	claim := func(incident, action string, device, want bool) {
 		t.Helper()
 		err := s.WithTx(ctx, func(tx store.Tx) error {
-			got, err := tx.ClaimRepairStep(ctx, "node-a", "uid-a", incident, action, device)
+			got, err := tx.ClaimRepairStep(ctx, "node-a", "uid-a", incident, action, device, time.Now())
 			if err == nil && got != want {
 				t.Errorf("claim %s = %t, want %t", incident, got, want)
 			}
@@ -476,5 +476,38 @@ func TestLateResetResultReleasesOnlyMatchingClaim(t *testing.T) {
 			t.Fatal(err)
 		}
 		claim(drain.ID, "", false, id == "reset-current")
+	}
+}
+
+func TestFailedNodeStepReleaseAllowsGPUReset(t *testing.T) {
+	s := openTestStore(t)
+	ctx := t.Context()
+	drain, reset := testIncident("drain"), testIncident("reset")
+	drain.Target.GPUUUID = ""
+	for _, inc := range []*types.Incident{drain, reset} {
+		if err := s.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.WithTx(ctx, func(tx store.Tx) error {
+		claim := func(id string, device, want bool) error {
+			got, err := tx.ClaimRepairStep(ctx, "worker", "uid", id, "", device, time.Now())
+			if err == nil && got != want {
+				t.Errorf("claim %s = %v, want %v", id, got, want)
+			}
+			return err
+		}
+		if err := claim(drain.ID, false, true); err != nil {
+			return err
+		}
+		if err := claim(reset.ID, true, false); err != nil {
+			return err
+		}
+		if err := tx.ReleaseNodeRepairStep(ctx, drain.ID); err != nil {
+			return err
+		}
+		return claim(reset.ID, true, true)
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

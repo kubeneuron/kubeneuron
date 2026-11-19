@@ -1038,7 +1038,7 @@ func TestRepairStepExclusion(t *testing.T) {
 			id           string
 			device, want bool
 		}{{"gpu-a", true, true}, {"gpu-b", true, true}, {"node", false, false}} {
-			got, err := tx.ClaimRepairStep(ctx, "n", "uid", check.id, "", check.device)
+			got, err := tx.ClaimRepairStep(ctx, "n", "uid", check.id, "", check.device, time.Now())
 			if err != nil {
 				return err
 			}
@@ -1051,14 +1051,14 @@ func TestRepairStepExclusion(t *testing.T) {
 				return err
 			}
 		}
-		got, err := tx.ClaimRepairStep(ctx, "n", "uid", "node", "", false)
+		got, err := tx.ClaimRepairStep(ctx, "n", "uid", "node", "", false, time.Now())
 		if err != nil {
 			return err
 		}
 		if !got {
 			t.Error("node still blocked")
 		}
-		got, err = tx.ClaimRepairStep(ctx, "n", "uid", "gpu-a", "", true)
+		got, err = tx.ClaimRepairStep(ctx, "n", "uid", "gpu-a", "", true, time.Now())
 		if got {
 			t.Error("device admitted during node step")
 		}
@@ -1087,7 +1087,7 @@ func TestReleaseVanishedRepairNodeKeepsReplacementUID(t *testing.T) {
 			if _, err := tx.ClaimNodeRemediation(ctx, "n", uid, uid, time.Now()); err != nil {
 				return err
 			}
-			if _, err := tx.ClaimRepairStep(ctx, "n", uid, uid, "", false); err != nil {
+			if _, err := tx.ClaimRepairStep(ctx, "n", uid, uid, "", false, time.Now()); err != nil {
 				return err
 			}
 		}

@@ -95,7 +95,7 @@ func (q *Queries) ReleaseRepairFollowers(ctx context.Context, ownerID string, at
 		if err != nil {
 			return err
 		}
-		if err := q.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: at, Actor: "system", Action: "node-repair-released", FromState: inc.State, ToState: inc.State, Params: map[string]string{"owner_id": ownerID}, Result: "previous owner released repair before execution: " + reason}); err != nil {
+		if err := q.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: at, Actor: "system", Action: "node-repair-released", FromState: inc.State, ToState: inc.State, Params: map[string]string{"owner_id": ownerID}, Result: "previous owner released repair: " + reason}); err != nil {
 			return err
 		}
 	}
@@ -104,14 +104,13 @@ func (q *Queries) ReleaseRepairFollowers(ctx context.Context, ownerID string, at
 
 // ClaimRepairStep admits concurrent device steps or one node step. The
 // upsert locks the guard row until the caller commits the admission.
-func (q *Queries) ClaimRepairStep(ctx context.Context, node, uid, incident, actionID string, device bool) (bool, error) {
+func (q *Queries) ClaimRepairStep(ctx context.Context, node, uid, incident, actionID string, device bool, now time.Time) (bool, error) {
 	if _, err := q.db.ExecContext(ctx, `INSERT INTO repair_step_guards(node,node_uid) VALUES(?,?)
 		ON CONFLICT(node,node_uid) DO UPDATE SET node_uid=excluded.node_uid`, node, uid); err != nil {
 		return false, err
 	}
 	// Cancel the expired lease before dropping the reservation. A competing
 	// claim of the action either renews it first or sees the tombstone.
-	now := time.Now()
 	if _, err := q.db.ExecContext(ctx, `UPDATE actions SET state='cancelled', updated_at=?, lease_token=''
 		WHERE state='leased' AND lease_expires_at_ns<=? AND id IN
 		(SELECT r.action_id FROM repair_step_claims r JOIN incidents i ON i.id=r.incident_id
@@ -136,6 +135,11 @@ func (q *Queries) ClaimRepairStep(ctx context.Context, node, uid, incident, acti
 	_, err := q.db.ExecContext(ctx, `INSERT INTO repair_step_claims(incident_id,node,node_uid,action_id,device_step) VALUES(?,?,?,?,?)
 	ON CONFLICT(incident_id) DO UPDATE SET node=excluded.node,node_uid=excluded.node_uid,action_id=excluded.action_id,device_step=excluded.device_step`, incident, node, uid, actionID, b2i(device))
 	return err == nil, err
+}
+
+func (q *Queries) ReleaseNodeRepairStep(ctx context.Context, incident string) error {
+	_, err := q.db.ExecContext(ctx, "DELETE FROM repair_step_claims WHERE incident_id=? AND device_step=0", incident)
+	return err
 }
 
 func (q *Queries) ReleaseRepairStep(ctx context.Context, incident string) error {

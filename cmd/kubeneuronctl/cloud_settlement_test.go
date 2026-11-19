@@ -71,4 +71,8 @@ func TestFollowerShowsOwnerSettlementCommand(t *testing.T) {
 	if got := show(); strings.Contains(got, "--cloud-operation-settled") || strings.Contains(got, "unavailable [node-repair]") {
 		t.Fatalf("stale hold after settlement:\n%s", got)
 	}
+	_, err = runCommand(t, server.URL, "resolve", owner.ID, "--cloud-operation-settled", "--reason", "checked again")
+	if err == nil || !strings.Contains(err.Error(), "Incident "+owner.ID+" has no open cloud operation to mark as settled.") {
+		t.Fatalf("missing no-open-operation explanation: %v", err)
+	}
 }

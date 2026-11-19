@@ -1062,6 +1062,11 @@ func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.In
 		if fresh.State != from || !fresh.StateChangedAt.Equal(fence) {
 			return store.ErrConflict
 		}
+		if to.Halted() && !cloudOperationUnsettled(fresh) {
+			if err := tx.ReleaseNodeRepairStep(ctx, inc.ID); err != nil {
+				return err
+			}
+		}
 		if completed {
 			if err := tx.ReleaseRepairStep(ctx, inc.ID); err != nil {
 				return err
@@ -1073,7 +1078,7 @@ func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.In
 				if wire == "agent.gpu_reset" {
 					agentActionID = actionID(inc)
 				}
-				admitted, err := tx.ClaimRepairStep(ctx, fresh.Target.Node, uid, inc.ID, agentActionID, device)
+				admitted, err := tx.ClaimRepairStep(ctx, fresh.Target.Node, uid, inc.ID, agentActionID, device, now)
 				if err != nil {
 					return err
 				}
@@ -1096,7 +1101,8 @@ func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.In
 		}
 		releaseRepair := from == types.StateVerifying && to == types.StateResolved && action == "resolve"
 		approvalEnded := from == types.StateAwaitingApproval && (to == types.StateExpired || (to == types.StateNeedsHuman && result == "approval rejected"))
-		aborted := approvalEnded || to == types.StateSuperseded || (to == types.StateResolved && action == "manual-resolve")
+		manualClose := to == types.StateResolved && action == "manual-resolve"
+		aborted := approvalEnded || to == types.StateSuperseded
 		if aborted && !cloudOperationUnsettled(fresh) {
 			entries, err := tx.AuditTrail(ctx, inc.ID)
 			if err != nil {
@@ -1112,7 +1118,27 @@ func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.In
 				}
 			}
 		}
-		if releaseRepair && aborted {
+		if manualClose && !cloudOperationUnsettled(fresh) {
+			releaseRepair = true
+		}
+		releaseFollowers := aborted || manualClose
+		if releaseRepair && !releaseFollowers && !cloudOperationUnsettled(fresh) {
+			releaseFollowers = true
+			switch params["infrastructure_evidence"] {
+			case "verified_replacement_node", "verified_recycle_inventory":
+				entries, err := tx.AuditTrail(ctx, inc.ID)
+				if err != nil {
+					return err
+				}
+				for _, entry := range entries {
+					if !entry.DryRun && entry.Result == auditStepOutcomeResult("platform.replace_node", false, true) {
+						releaseFollowers = false
+						break
+					}
+				}
+			}
+		}
+		if releaseRepair && releaseFollowers {
 			if err := tx.ReleaseRepairFollowers(ctx, inc.ID, now, result); err != nil {
 				return err
 			}

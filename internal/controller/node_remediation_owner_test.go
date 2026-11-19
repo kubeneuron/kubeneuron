@@ -160,21 +160,25 @@ func TestAutomaticRepairFollowerDoesNotRepeatReplacement(t *testing.T) {
 	if got := mustIncident(t, st, follower.ID); got.State != types.StateEvaluating || got.StepIndex != 0 {
 		t.Fatalf("follower reached %s step %d", got.State, got.StepIndex)
 	}
+	p.mu.Lock()
+	if owners := p.cordoned["n1"]; len(owners) != 1 || owners[0] != owner || len(p.drained) != 1 || len(p.plain) != 1 || len(notifier.approvals) != 0 {
+		t.Fatalf("cordon owners=%v drains=%v replacements=%v approvals=%d", owners, p.drained, p.plain, len(notifier.approvals))
+	}
+	p.mu.Unlock()
 	// An operator closing the owner does not verify replacement for the follower.
 	if err := c.ResolveIncident(ctx, owner, "alice", "closed manually"); err != nil {
 		t.Fatal(err)
 	}
-	step(t, c, st, follower.ID, 20)
+	waitSettled(t, c, st, follower.ID, func(i *types.Incident) bool { return i.StepIndex > 0 })
+	if !auditHas(trail(t, st, follower.ID), "node-repair-released", "closed manually") {
+		t.Fatal("follower advanced without an audited release")
+	}
 	for _, entry := range trail(t, st, follower.ID) {
 		if entry.Action == "verify-owner-replacement" {
 			t.Fatal("manual closure used as verified replacement evidence")
 		}
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if owners := p.cordoned["n1"]; len(owners) != 1 || owners[0] != owner || len(p.drained) != 1 || len(p.plain) != 1 || len(notifier.approvals) != 0 {
-		t.Fatalf("cordon owners=%v drains=%v replacements=%v approvals=%d", owners, p.drained, p.plain, len(notifier.approvals))
-	}
+
 }
 
 func TestInventoryNodeUIDSharesRepairApprovalWithoutCloudIdentity(t *testing.T) {
@@ -419,7 +423,7 @@ func TestPolicyHeldIncidentLeavesRepairAvailable(t *testing.T) {
 func TestExecutingTransactionExcludesDrainAndGPUReset(t *testing.T) {
 	c, st, _ := walkFixture(t, false)
 	ctx := t.Context()
-	for _, id := range []string{"device", "drain"} {
+	for _, id := range []string{"device", "drain", "next-reset"} {
 		inc := &types.Incident{ID: id, Target: types.Target{Node: "n1", GPUUUID: id}, Class: types.ClassFellOffBus, State: types.StateEvaluating, RepairNodeUID: "uid"}
 		if err := st.CreateIncident(ctx, inc); err != nil {
 			t.Fatal(err)
@@ -447,6 +451,12 @@ func TestExecutingTransactionExcludesDrainAndGPUReset(t *testing.T) {
 	}
 	if err := start("drain", "platform.drain"); err != nil {
 		t.Fatal(err)
+	}
+	if err := c.transition(ctx, mustIncident(t, st, "drain"), types.StateNeedsHuman, "system", "escalate", "drain failed", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := start("next-reset", "agent.gpu_reset"); err != nil {
+		t.Fatalf("GPU reset after failed drain: %v", err)
 	}
 }
 
@@ -594,5 +604,44 @@ func TestDryRunIncidentAlongsideLiveRepairOwner(t *testing.T) {
 	defer p.mu.Unlock()
 	if owners := p.cordoned["n1"]; len(owners) != 1 || owners[0] != owner || len(p.drained) != 0 || len(p.plain) != 0 {
 		t.Fatalf("cordon owners=%v drains=%v replacements=%v", owners, p.drained, p.plain)
+	}
+}
+
+func TestVerifiedRecycleReleasesRepairFollower(t *testing.T) {
+	c, st, _ := walkFixture(t, false)
+	ctx := t.Context()
+	err := st.WithTx(ctx, func(tx store.Tx) error {
+		for _, id := range []string{"owner", "follower"} {
+			inc := &types.Incident{ID: id, State: types.StateEvaluating, Target: types.Target{Node: "worker"}, RepairNodeUID: "uid", Class: types.ClassFellOffBus}
+			if id == "owner" {
+				inc.State = types.StateVerifying
+				inc.Class = types.ClassAcceleratorFault
+			}
+			if err := tx.CreateIncident(ctx, inc); err != nil {
+				return err
+			}
+			if _, err := tx.ClaimNodeRemediation(ctx, "worker", "uid", id, time.Now()); err != nil {
+				return err
+			}
+		}
+		return tx.AppendAudit(ctx, &types.AuditEntry{IncidentID: "owner", Result: auditStepOutcomeResult("platform.recycle_node", false, true)})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.transition(ctx, mustIncident(t, st, "owner"), types.StateResolved, "system", "resolve", "verified recycle", map[string]string{"infrastructure_evidence": "verified_recycle_inventory"}); err != nil {
+		t.Fatal(err)
+	}
+	if !auditHas(trail(t, st, "follower"), "node-repair-released", "verified recycle") {
+		t.Fatal("missing follower release")
+	}
+	if err := st.WithTx(ctx, func(tx store.Tx) error {
+		owner, err := tx.ClaimNodeRemediation(ctx, "worker", "uid", "follower", time.Now())
+		if err == nil && owner != "follower" {
+			t.Errorf("repair owner = %q", owner)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

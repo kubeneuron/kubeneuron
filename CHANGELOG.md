@@ -357,7 +357,8 @@ API is `v1alpha1`.
 - Concurrent live repair incidents on the same node share one repair owner. The
   controller identifies the node by its pinned cloud identity or the Kubernetes
   Node UID recorded when the incident opened. Waiting incidents show the owner ID before
-  approval, drain or replacement. SQLite migration 0037 and PostgreSQL
+  approval, drain or replacement. A GPU reset and a disruptive node step on the
+  same node wait for each other to finish. SQLite migration 0037 and PostgreSQL
   migration 0028 persist ownership across controller restarts. After checking
   an unconfirmed replacement in the cloud provider, operators can record its
   completion or cancellation on the owning incident with
