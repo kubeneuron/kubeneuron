@@ -1044,6 +1044,7 @@ func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.In
 		inc.RemediationSlotHeld = false
 	}
 	params = c.decisionNodeContext(ctx, inc.Target.Node, params)
+	stepBusy := false
 	if err := c.store.WithTx(ctx, func(tx store.Tx) error {
 		// Re-read the row inside the transaction and apply the change to the
 		// fresh copy rather than persisting this goroutine's snapshot. A long
@@ -1083,7 +1084,8 @@ func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.In
 					return err
 				}
 				if !admitted {
-					return errRepairStepBusy
+					stepBusy = true
+					return nil // commit the wait audit without advancing the incident
 				}
 			}
 		}
@@ -1160,6 +1162,11 @@ func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.In
 			inc.RemediationSlotHeld = hadSlotBit
 		}
 		return err
+	}
+	if stepBusy {
+		inc.State = from
+		inc.StateChangedAt = fence
+		return errRepairStepBusy
 	}
 	committed = true
 	if from == types.StateExecuting {

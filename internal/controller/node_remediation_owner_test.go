@@ -645,3 +645,52 @@ func TestVerifiedRecycleReleasesRepairFollower(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestApprovedDrainWaitsForGPURepairStep(t *testing.T) {
+	c, st, notifier := successorFixture(t, recoverymode.Approval, newSuccessorPlatform(), recoverymode.RemoveFirst)
+	ctx := t.Context()
+	id := openIncidentFor(t, c, types.ClassFellOffBus)
+	park := waitSettled(t, c, st, id, func(i *types.Incident) bool { return i.State == types.StateAwaitingApproval && i.StepIndex == 1 })
+	holder := &types.Incident{ID: "gpu-holder", Target: types.Target{Node: park.Target.Node, GPUUUID: "gpu-other"}, Class: types.ClassAcceleratorFault, State: types.StateNeedsHuman, RepairNodeUID: repairNodeUID(park)}
+	if err := st.CreateIncident(ctx, holder); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WithTx(ctx, func(tx store.Tx) error {
+		ok, err := tx.ClaimRepairStep(ctx, holder.Target.Node, holder.RepairNodeUID, holder.ID, "reset", true, time.Now())
+		if !ok {
+			t.Fatal("could not reserve GPU step")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DecideApproval(ctx, id, "alice", "test", types.ApprovalApproved, park.ApprovalEpoch, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		if err := c.advance(ctx, mustIncident(t, st, id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries := trail(t, st, id)
+	waits := 0
+	for _, entry := range entries {
+		if entry.Action == "wait-for-repair-step" && entry.Params["owner_id"] == holder.ID {
+			waits++
+		}
+	}
+	view := types.RecoveryAvailabilityFromAudit(entries)
+	if waits != 1 || view == nil || !strings.Contains(view.Reason, holder.ID) || mustIncident(t, st, id).ApprovalEpoch != park.ApprovalEpoch {
+		t.Fatalf("waiting approval: %s", dump(entries))
+	}
+	if err := st.WithTx(ctx, func(tx store.Tx) error { return tx.ReleaseRepairStep(ctx, holder.ID) }); err != nil {
+		t.Fatal(err)
+	}
+	waitSettled(t, c, st, id, func(i *types.Incident) bool { return i.StepIndex > 1 })
+	if len(notifier.approvals) > 2 || !auditHas(trail(t, st, id), "drain", "step-outcome") {
+		t.Fatalf("drain after release: %s", dump(trail(t, st, id)))
+	}
+	if v := types.RecoveryAvailabilityFromAudit(trail(t, st, id)); v != nil && v.Source == "repair-step" {
+		t.Fatal("stale step hold")
+	}
+}

@@ -127,12 +127,37 @@ func (q *Queries) ClaimRepairStep(ctx context.Context, node, uid, incident, acti
 			(a.state='done' OR (a.state='cancelled' AND a.lease_expires_at_ns>0 AND a.lease_expires_at_ns<=?)))`, node, uid, now.Add(-types.AgentResultGrace).UnixNano()); err != nil {
 		return false, err
 	}
-	var busy bool
-	if err := q.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM repair_step_claims
-		WHERE node=? AND node_uid=? AND incident_id<>? AND (device_step=0 OR ?=0))`, node, uid, incident, b2i(device)).Scan(&busy); err != nil || busy {
+	var blocker string
+	err := q.db.QueryRowContext(ctx, `SELECT incident_id FROM repair_step_claims
+		WHERE node=? AND node_uid=? AND incident_id<>? AND (device_step=0 OR ?=0)
+		ORDER BY incident_id LIMIT 1`, node, uid, incident, b2i(device)).Scan(&blocker)
+	if err == nil {
+		entries, err := q.AuditTrail(ctx, incident)
+		if err != nil {
+			return false, err
+		}
+		for i := len(entries) - 1; i >= 0; i-- {
+			e := entries[i]
+			if e.Action == "wait-for-repair-step" {
+				if e.Params["owner_id"] == blocker {
+					return false, nil
+				}
+				break
+			}
+			if e.FromState != e.ToState {
+				break
+			}
+		}
+		inc, err := q.GetIncident(ctx, incident)
+		if err != nil {
+			return false, err
+		}
+		return false, q.AppendAudit(ctx, &types.AuditEntry{IncidentID: incident, Time: now, Actor: "system", Action: "wait-for-repair-step", FromState: inc.State, ToState: inc.State, Params: map[string]string{"owner_id": blocker}, Result: "waiting for the repair step held by incident " + blocker})
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
-	_, err := q.db.ExecContext(ctx, `INSERT INTO repair_step_claims(incident_id,node,node_uid,action_id,device_step) VALUES(?,?,?,?,?)
+	_, err = q.db.ExecContext(ctx, `INSERT INTO repair_step_claims(incident_id,node,node_uid,action_id,device_step) VALUES(?,?,?,?,?)
 	ON CONFLICT(incident_id) DO UPDATE SET node=excluded.node,node_uid=excluded.node_uid,action_id=excluded.action_id,device_step=excluded.device_step`, incident, node, uid, actionID, b2i(device))
 	return err == nil, err
 }

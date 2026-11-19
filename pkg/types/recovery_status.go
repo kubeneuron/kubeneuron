@@ -29,8 +29,13 @@ func RecoveryAvailabilityFromAudit(trail []*AuditEntry) *RecoveryAvailability {
 		if e.Action == "verify-owner-replacement" || e.Action == "node-repair-released" || e.ToState.Terminal() {
 			seen["node-repair"] = true
 		}
+		if e.FromState != e.ToState {
+			seen["repair-step"] = true
+		}
 		source, status := "", ""
 		switch e.Action {
+		case "wait-for-repair-step":
+			source, status = "repair-step", "unavailable"
 		case "wait-for-node-repair":
 			source, status = "node-repair", "unavailable"
 		case "provider-recovery-unavailable":
