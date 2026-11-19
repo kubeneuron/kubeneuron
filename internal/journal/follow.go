@@ -6,9 +6,27 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 )
+
+var errTickBudget = errors.New("journal tick budget exhausted")
+
+type tickReader struct {
+	source    io.ReaderAt
+	remaining *int
+}
+
+func (r tickReader) ReadAt(p []byte, offset int64) (int, error) {
+	if len(p) > *r.remaining {
+		return 0, errTickBudget
+	}
+	n, err := r.source.ReadAt(p, offset)
+	*r.remaining -= n
+	return n, err
+}
 
 type directoryReader struct{ path string }
 type filePosition struct {
@@ -61,6 +79,7 @@ func (r directoryReader) Next(ctx context.Context, after Cursor) (Batch, error) 
 	}
 	var batch Batch
 	remaining := MaxEntriesPerTick
+	readBytes, outputBytes := MaxBytesPerTick, MaxBytesPerTick
 	for _, path := range files {
 		if err := ctx.Err(); err != nil {
 			return Batch{}, err
@@ -74,9 +93,14 @@ func (r directoryReader) Next(ctx context.Context, after Cursor) (Batch, error) 
 		if after == "" {
 			p.After = h.tailSequence
 		} else if h.tailSequence > p.After {
-			err = h.readNew(ctx, f, &p, &remaining, &batch)
+			err = h.readNew(ctx, tickReader{f, &readBytes}, &p, &remaining, &outputBytes, &batch)
 		}
 		_ = f.Close()
+		if errors.Is(err, errTickBudget) {
+			positions[key] = p
+			batch.More = true
+			break
+		}
 		if err != nil {
 			return Batch{}, err
 		}
@@ -87,7 +111,7 @@ func (r directoryReader) Next(ctx context.Context, after Cursor) (Batch, error) 
 	return batch, err
 }
 
-func (h fileHeader) readNew(ctx context.Context, f *os.File, p *filePosition, remaining *int, batch *Batch) error {
+func (h fileHeader) readNew(ctx context.Context, f io.ReaderAt, p *filePosition, remaining, outputBytes *int, batch *Batch) error {
 	if p.Transport == 0 {
 		match, resume, err := h.findKernelData(f, p.Search, 256)
 		if err != nil {
@@ -138,7 +162,6 @@ func (h fileHeader) readNew(ctx context.Context, f *os.File, p *filePosition, re
 			if err != nil {
 				return err
 			}
-			p.Slot++
 		}
 		e, err := h.entryAt(f, off)
 		if err != nil {
@@ -150,9 +173,16 @@ func (h fileHeader) readNew(ctx context.Context, f *os.File, p *filePosition, re
 				return err
 			}
 			if ok {
+				if len(msg) > *outputBytes {
+					return errTickBudget
+				}
+				*outputBytes -= len(msg)
 				batch.Records = append(batch.Records, Record{Message: msg})
 			}
 			p.After = e.sequence
+		}
+		if p.Consumed > 0 {
+			p.Slot++
 		}
 		p.Consumed++
 		*remaining--
