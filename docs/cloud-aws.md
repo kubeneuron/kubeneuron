@@ -11,7 +11,14 @@ The plan records the managed node group's ARN, its backing Auto Scaling group's
 ARN, the availability zone, the original desired capacity and the EC2 instance
 IDs. Planning requires one zone and room below the group's maximum size. In a
 multi-zone group the new instance could land outside the zone required by a
-training job's volume. Use a single-zone group or explicitly select terminate-first for that pool. Planning also refuses groups with Cluster Autoscaler discovery tags.
+training job's volume.
+
+| Planning refusal | Operator action |
+| --- | --- |
+| node group spans several zones | Use a single-zone managed node group or explicitly choose terminate-first for this pool. |
+| node group is managed by Cluster Autoscaler | Use a single-zone group outside Cluster Autoscaler management or explicitly choose terminate-first for this pool. |
+| no room below maxSize | Provide room for one more node in the single-zone group or explicitly choose terminate-first for this pool. |
+
 
 The scaling request sets desired capacity to the recorded value plus one and
 uses a client token derived from the operation ID. Before accepting a successor,

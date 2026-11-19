@@ -4,6 +4,7 @@ package aws
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,12 +26,12 @@ func TestPlanSuccessor(t *testing.T) {
 		t.Fatalf("plan=%+v err=%v", plan, err)
 	}
 	group.AvailabilityZones = append(group.AvailabilityZones, "zone-b")
-	if _, err := planSuccessor(s, group); !errors.Is(err, cloud.ErrAddFirstUnavailable) {
+	if _, err := planSuccessor(s, group); !errors.Is(err, cloud.ErrAddFirstUnavailable) || !strings.Contains(err.Error(), "node group spans several zones") {
 		t.Fatal(err)
 	}
 	group.AvailabilityZones = group.AvailabilityZones[:1]
 	group.MaxSize = sdk.Int32(2)
-	if _, err := planSuccessor(s, group); !errors.Is(err, cloud.ErrAddFirstUnavailable) {
+	if _, err := planSuccessor(s, group); !errors.Is(err, cloud.ErrAddFirstUnavailable) || !strings.Contains(err.Error(), "no room below maxSize") {
 		t.Fatal(err)
 	}
 }
@@ -62,6 +63,9 @@ func TestCheckAddFirstRequiresEKSBackingGroup(t *testing.T) {
 			p := managedProvider{repairReader: &repairReader{cluster: "training", eks: &groupHistory{group: eksGroup},
 				scaling: quietASG{membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{group}}}}}}
 			err := p.CheckAddFirst(t.Context(), "i-pinned")
+			if tc.autoscalerTag != "" && (err == nil || !strings.Contains(err.Error(), "node group is managed by Cluster Autoscaler")) {
+				t.Fatalf("autoscaler refusal: %v", err)
+			}
 			if tc.eligible {
 				if err != nil {
 					t.Fatal(err)

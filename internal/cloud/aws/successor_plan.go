@@ -27,8 +27,11 @@ func planSuccessor(s cloud.Successor, group at.AutoScalingGroup) (cloud.Successo
 	if len(group.AvailabilityZones) == 0 || group.AvailabilityZones[0] == "" {
 		return s, fmt.Errorf("%w: add-first requires a single availability zone", cloud.ErrAddFirstUnavailable)
 	}
-	if group.DesiredCapacity == nil || group.MaxSize == nil || *group.DesiredCapacity < 1 || *group.DesiredCapacity >= *group.MaxSize {
-		return s, fmt.Errorf("%w: group needs spare capacity below maxSize", cloud.ErrAddFirstUnavailable)
+	if group.DesiredCapacity == nil || group.MaxSize == nil || *group.DesiredCapacity < 1 {
+		return s, fmt.Errorf("%w: group scaling limits are incomplete or desired capacity is below one", cloud.ErrAddFirstUnavailable)
+	}
+	if *group.DesiredCapacity >= *group.MaxSize {
+		return s, fmt.Errorf("%w: no room below maxSize; use a single-zone node group with spare capacity or explicitly choose terminate-first for this pool", cloud.ErrAddFirstUnavailable)
 	}
 	ids := make([]string, 0, len(group.Instances))
 	for _, instance := range group.Instances {
@@ -81,7 +84,7 @@ func (p *managedProvider) readSuccessorPlan(ctx context.Context, s cloud.Success
 	for _, tag := range group.Tags {
 		switch sdk.ToString(tag.Key) {
 		case "k8s.io/cluster-autoscaler/enabled", "k8s.io/cluster-autoscaler/" + p.cluster:
-			return s, fmt.Errorf("%w: ASG carries a Cluster Autoscaler discovery tag", cloud.ErrAddFirstUnavailable)
+			return s, fmt.Errorf("%w: node group is managed by Cluster Autoscaler; use a single-zone node group outside Cluster Autoscaler management or explicitly choose terminate-first for this pool", cloud.ErrAddFirstUnavailable)
 		case "eks:nodegroup-name":
 			nodegroup = sdk.ToString(tag.Value)
 		}
