@@ -153,7 +153,9 @@ func (a *Agent) neuronEvent(device int, code string, attrs map[string]string) ty
 
 // postNeuronReport sends the node's AWS Neuron devices as an observation-only
 // accelerator report of vendor aws, so the controller knows the node's
-// vendor. It never declares a capability and is never ready.
+// vendor. It never declares a capability and is never ready: it is
+// observed, degraded when a device cannot be read, not ready when the tree
+// cannot.
 func (a *Agent) postNeuronReport(ctx context.Context, devices []neuronsysfs.Device, reason string) {
 	report := types.AgentAcceleratorReport{
 		Node:             a.cfg.NodeName,
@@ -163,8 +165,8 @@ func (a *Agent) postNeuronReport(ctx context.Context, devices []neuronsysfs.Devi
 		Devices:          []types.AgentAcceleratorDevice{},
 		TopologySafety:   types.AcceleratorTopologyUnknown,
 		Capabilities:     []types.AgentAcceleratorCapability{},
-		Readiness:        types.AcceleratorReadinessDegraded,
-		ReadinessReasons: []string{"observation only: AWS Neuron devices are read from the driver's sysfs"},
+		Readiness:        types.AcceleratorReadinessObserved,
+		ReadinessReasons: []string{"device presence observed; runtime not attested: AWS Neuron devices are read from the driver's sysfs"},
 	}
 	if reason != "" {
 		report.Readiness = types.AcceleratorReadinessNotReady
@@ -174,6 +176,7 @@ func (a *Agent) postNeuronReport(ctx context.Context, devices []neuronsysfs.Devi
 		report.Devices = append(report.Devices, types.AgentAcceleratorDevice{
 			ID: neuronDevice(d.Index), Kind: types.AcceleratorDevicePhysical, Family: types.AcceleratorFamilyNeuron})
 		if d.Err != "" {
+			report.Readiness = types.AcceleratorReadinessDegraded
 			report.ReadinessReasons = append(report.ReadinessReasons, fmt.Sprintf("%s unreadable: %s", neuronDevice(d.Index), d.Err))
 		}
 	}

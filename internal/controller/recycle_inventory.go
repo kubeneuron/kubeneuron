@@ -14,6 +14,7 @@ import (
 
 const recycleDriverProbeEvidence = "accelerator inventory and driver probe observed after verified recycle; DCGM not present, device health not checked"
 const recycleInventoryEvidence = "fresh accelerator inventory and driver health observed after verified recycle"
+const recycleObservedEvidence = "fresh accelerator inventory observed after verified recycle: device presence observed; runtime not attested"
 
 // recycleInventoryMatches checks the agent's observation against the pin
 // persisted after a verified reboot. The API supplies the report's node UID.
@@ -22,6 +23,20 @@ func recycleInventoryMatches(report *types.AgentAcceleratorReport, pin cloud.Nod
 		report.Node != pin.Node || report.NodeUID != pin.NodeUID || report.BootID != pin.BootID ||
 		!report.ObservedAt.After(completed) || report.ObservedAt.After(now) ||
 		now.Sub(report.ObservedAt) > verifyEvidenceMaxAge {
+		return false
+	}
+	if report.Readiness == types.AcceleratorReadinessObserved {
+		// An observation-only report of a vendor this build cannot attest:
+		// the new boot's devices are present, which is all it says. It never
+		// stands in for a device-scoped incident's device.
+		if gpu != "" || vendorRuntimeAttested(report.Vendor) {
+			return false
+		}
+		for _, device := range report.Devices {
+			if device.ID != "" && device.Kind == types.AcceleratorDevicePhysical {
+				return true
+			}
+		}
 		return false
 	}
 	for _, device := range report.Devices {
@@ -93,6 +108,9 @@ func (c *Controller) verifyRecycledInventory(ctx context.Context, inc *types.Inc
 	}
 	if report.Readiness == types.AcceleratorReadinessDegraded {
 		return true, recycleDriverProbeEvidence
+	}
+	if report.Readiness == types.AcceleratorReadinessObserved {
+		return true, recycleObservedEvidence
 	}
 	return true, recycleInventoryEvidence
 }

@@ -952,10 +952,15 @@ const (
 	AcceleratorReadinessReady    AcceleratorReadiness = "ready"
 	AcceleratorReadinessDegraded AcceleratorReadiness = "degraded"
 	AcceleratorReadinessNotReady AcceleratorReadiness = "not-ready"
+	// AcceleratorReadinessObserved is a report that observes the devices
+	// and attests no runtime: nothing is wrong, and nothing is checked
+	// beyond the devices being present.
+	AcceleratorReadinessObserved AcceleratorReadiness = "observed"
 )
 
 func (r AcceleratorReadiness) valid() bool {
-	return r == AcceleratorReadinessReady || r == AcceleratorReadinessDegraded || r == AcceleratorReadinessNotReady
+	return r == AcceleratorReadinessReady || r == AcceleratorReadinessDegraded || r == AcceleratorReadinessNotReady ||
+		r == AcceleratorReadinessObserved
 }
 
 // AgentAcceleratorReport is the vendor-neutral, agent-owned runtime report

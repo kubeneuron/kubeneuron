@@ -229,8 +229,16 @@ func TestNeuronReportAndFaultReachTheController(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.NodeUID != "uid-gpu-node-1" || len(report.Devices) != 1 || report.Devices[0].ID != "neuron2" {
+	if report.NodeUID != "uid-gpu-node-1" || len(report.Devices) != 1 || report.Devices[0].ID != "neuron2" ||
+		report.Readiness != types.AcceleratorReadinessObserved {
 		t.Fatalf("stored report %+v", report)
+	}
+	a.reportSignalSources(ctx)
+	if testing.Verbose() {
+		out, _ := json.MarshalIndent(report, "", "  ")
+		t.Logf("stored report:\n%s", out)
+		view, _ := json.MarshalIndent(c.AcceleratorHealth(ctx, "gpu-node-1"), "", "  ")
+		t.Logf("health view:\n%s", view)
 	}
 	events, err := st.RecentFaultEvents(ctx, "aws", clock.Now().Add(-time.Hour), 10)
 	if err != nil {

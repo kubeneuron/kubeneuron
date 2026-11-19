@@ -732,7 +732,7 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 		result += "; " + depth
 	}
 	var evidence map[string]string
-	if depth == recycleDriverProbeEvidence || depth == recycleInventoryEvidence {
+	if depth == recycleDriverProbeEvidence || depth == recycleInventoryEvidence || depth == recycleObservedEvidence {
 		evidence = map[string]string{"infrastructure_evidence": "verified_recycle_inventory"}
 	}
 	if err := c.transition(ctx, inc, types.StateResolved, "system", "resolve", result, evidence); err != nil {

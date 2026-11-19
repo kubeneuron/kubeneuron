@@ -302,8 +302,8 @@ and hyphens, at most 32 characters), so this works for vendors beyond the four
 built-in constants. When a current (at most five minutes old) report exists,
 the incident is verified against it instead of the heartbeat alone: the report
 must not be `not-ready`, and the target device must be in its inventory as a
-physical GPU. An observation-only report is `degraded` at best by design, and
-that is accepted; the resolve audit entry says the device was present and the
+physical GPU. An observation-only report is `degraded` or `observed` at best
+by design, and that is accepted; the resolve audit entry says the device was present and the
 runtime was not attested. With no current report the heartbeat path above
 still applies. Only an authenticated agent can name an incident's vendor:
 a `vendor` annotation on an Alertmanager alert, or on a manual trigger, is
