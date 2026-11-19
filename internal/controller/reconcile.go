@@ -338,10 +338,7 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 	// Serialize disruptive repair steps against the incarnation pinned at open.
 	// The notice-only ladder uses its own cordon ownership accounting.
 	def, registered := action.ByWire(step.Action)
-	uid := inc.RepairNodeUID
-	if inc.CloudIdentity != nil {
-		uid = inc.CloudIdentity.NodeUID
-	}
+	uid := repairNodeUID(inc)
 	if registered && def.Scope == action.ScopeNode && (def.Destructive || def.AgentDestructive) &&
 		uid != "" && inc.Class != types.ClassCloudInterruption && !c.simulating(ctx, inc) {
 		if inc.CloudIdentity == nil {
@@ -372,6 +369,21 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 	return c.authorizeAndStartStep(ctx, inc, step)
 }
 
+func repairNodeUID(inc *types.Incident) string {
+	if inc.CloudIdentity != nil {
+		return inc.CloudIdentity.NodeUID
+	}
+	return inc.RepairNodeUID
+}
+
+func sameRepairNode(a, b *types.Incident) bool {
+	if a.CloudIdentity != nil && b.CloudIdentity != nil && *a.CloudIdentity != *b.CloudIdentity {
+		return false
+	}
+	uid := repairNodeUID(a)
+	return uid != "" && uid == repairNodeUID(b) && a.Target.Node == b.Target.Node
+}
+
 // verifyAfterOwnersReplacement lets the follower begin its own quiet window
 // only after the pinned owner's live replacement passed inventory verification.
 func (c *Controller) verifyAfterOwnersReplacement(ctx context.Context, inc *types.Incident, ownerID string) error {
@@ -379,9 +391,11 @@ func (c *Controller) verifyAfterOwnersReplacement(ctx context.Context, inc *type
 	if err != nil {
 		return err
 	}
-	if owner.State != types.StateResolved || owner.DryRun || owner.CloudIdentity == nil ||
-		inc.CloudIdentity == nil || *inc.CloudIdentity != *owner.CloudIdentity {
+	if owner.State != types.StateResolved || owner.DryRun {
 		return nil
+	}
+	if !sameRepairNode(inc, owner) {
+		return c.quarantine(ctx, inc, "repair owner "+ownerID+" resolved against a different node identity")
 	}
 	entries, err := c.store.AuditTrail(ctx, ownerID)
 	if err != nil {

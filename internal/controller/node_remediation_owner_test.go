@@ -9,6 +9,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/internal/store"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -225,4 +226,19 @@ func (s missingRepairInventory) GetNode(ctx context.Context, node string) (*type
 		return nil, store.ErrNotFound
 	}
 	return s.Store.GetNode(ctx, node)
+}
+
+func TestSameRepairNodeUsesRecordedInventoryUID(t *testing.T) {
+	target := types.Target{Node: "worker"}
+	owner := &types.Incident{Target: target, CloudIdentity: &cloud.NodeIdentity{NodeUID: "original"}}
+	follower := &types.Incident{Target: target, RepairNodeUID: "original"}
+	if !sameRepairNode(follower, owner) {
+		t.Fatal("matching inventory UID did not identify the owner node")
+	}
+	for _, uid := range []string{"replacement", ""} {
+		follower.RepairNodeUID = uid
+		if sameRepairNode(follower, owner) {
+			t.Fatalf("matched owner against inventory UID %q", uid)
+		}
+	}
 }
