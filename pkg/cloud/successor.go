@@ -19,14 +19,22 @@ var ErrAddFirstUnavailable = errors.New("add-first replacement is not available 
 type PoolRefusal struct {
 	Code   string
 	Reason string
+	Action string
 }
 
-func (r *PoolRefusal) Error() string { return ErrAddFirstUnavailable.Error() + ": " + r.Reason }
+func (r *PoolRefusal) Error() string {
+	message := ErrAddFirstUnavailable.Error() + ": " + r.Reason
+	if r.Action != "" {
+		message += "; " + r.Action
+	}
+	return message
+}
 func (r *PoolRefusal) Unwrap() error { return ErrAddFirstUnavailable }
 
 // Stable reason codes shared by provider checks and operator-facing pool assessments.
 const (
 	PoolAutoscaled      = "autoscaled"
+	PoolAtMaximum       = "max-size"
 	PoolMultiZone       = "multi-zone"
 	PoolAutopilot       = "autopilot"
 	PoolInstanceMissing = "instance-not-in-pool"

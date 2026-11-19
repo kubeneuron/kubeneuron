@@ -118,25 +118,35 @@ func (c *Controller) rungAddsFirst(ctx context.Context, inc *types.Incident, pol
 }
 
 // addFirstHold is why the step must wait under an add-first policy, or "".
-func (c *Controller) addFirstHold(ctx context.Context, inc *types.Incident, step *playbook.Step) (string, bool) {
+func (c *Controller) addFirstHold(ctx context.Context, inc *types.Incident, step *playbook.Step) (string, string) {
 	if successorReady(inc) {
-		return "", false
+		return "", ""
 	}
 	if step.Action == "platform.replace_node" {
 		// A simulation prepares no successor; it replaces wherever the
 		// live run could have prepared one.
 		if c.simulating(ctx, inc) && c.addFirstAvailable(ctx, inc) == nil {
-			return "", false
+			return "", ""
 		}
-		return "recovery unavailable: no prepared replacement is ready for this node, and the policy does not name remove-first", false
+		return "recovery unavailable: no prepared replacement is ready for this node, and the policy does not name remove-first", ""
 	}
 	if !c.successorStep(ctx, inc, step) {
-		return "recovery unavailable: " + addFirstUnavailable + "; the node is not cordoned or drained", false
+		return "recovery unavailable: " + addFirstUnavailable + "; the node is not cordoned or drained", ""
 	}
 	if err := c.addFirstAvailable(ctx, inc); err != nil {
-		return "recovery unavailable: " + addFirstReason(err) + "; the node is not cordoned or drained", errors.Is(err, cloud.ErrAddFirstUnavailable)
+		reason := addFirstReason(err)
+		var action string
+		var refusal *cloud.PoolRefusal
+		switch {
+		case errors.As(err, &refusal):
+			reason = refusal.Reason
+			action = poolRefusalAction(refusal)
+		case errors.Is(err, cloud.ErrAddFirstUnavailable):
+			action = "Make this pool eligible for add-first, or set RemoveFirst in the remediation policy that applies to these nodes."
+		}
+		return "recovery unavailable: " + reason + "; the node is not cordoned or drained", action
 	}
-	return "", false
+	return "", ""
 }
 
 func addFirstReason(err error) string {

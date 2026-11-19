@@ -4,7 +4,7 @@ package controller
 
 import (
 	"context"
-	"strings"
+
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/notify"
@@ -14,7 +14,7 @@ import (
 
 // notifyAddFirstHold records the intent before dispatch. A crash after Notify
 // but before its acknowledgement can repeat the notification on the next tick.
-func (c *Controller) notifyAddFirstHold(ctx context.Context, inc *types.Incident, step, reason string) error {
+func (c *Controller) notifyAddFirstHold(ctx context.Context, inc *types.Incident, step, reason, action string) error {
 	// A concurrent tick can retry once this incident's dispatch has finished.
 	if _, busy := c.holdDispatches.LoadOrStore(inc.ID, struct{}{}); busy {
 		return nil
@@ -77,10 +77,7 @@ func (c *Controller) notifyAddFirstHold(ctx context.Context, inc *types.Incident
 	if !send {
 		return nil
 	}
-	msg := reason
-	if !strings.Contains(reason, "set RemoveFirst in the remediation policy that applies to these nodes") {
-		msg += ". Make this pool eligible for add-first, or set RemoveFirst in the remediation policy that applies to these nodes."
-	}
+	msg := reason + ". " + action
 	if err := c.notify(ctx, notify.NotifyEvent{Incident: inc, Kind: notify.EventNeedsHuman, Message: msg}); err != nil {
 		return err
 	}

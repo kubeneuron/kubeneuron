@@ -103,7 +103,7 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 			case errors.As(err, &refusal):
 				row.CapabilityEnabled = true
 				row.Status, row.ReasonCode, row.Reason = "unavailable", refusal.Code, refusal.Reason
-				row.Action = poolRefusalAction(refusal.Code)
+				row.Action = poolRefusalAction(refusal)
 			default:
 				row.ReasonCode, row.Reason = "read-failed", "could not read pool configuration; check provider access and permissions"
 			}
@@ -173,9 +173,12 @@ func (c *Controller) poolChecker(ctx context.Context) func(types.Node) error {
 	}
 }
 
-func poolRefusalAction(code string) string {
+func poolRefusalAction(refusal *cloud.PoolRefusal) string {
+	if refusal.Action != "" {
+		return refusal.Action
+	}
 	const alternative = ", or set RemoveFirst in the remediation policy that applies to these nodes"
-	switch code {
+	switch refusal.Code {
 	case cloud.PoolAutopilot:
 		return "use a GKE Standard node pool for KubeNeuron-managed replacement"
 	case cloud.PoolAutoscaled:

@@ -42,7 +42,7 @@ func TestPendingHoldNotificationAfterControllerRestart(t *testing.T) {
 						t.Fatalf("interruption = %v", got)
 					}
 				}()
-				_ = c.notifyAddFirstHold(t.Context(), inc, "cordon", reason)
+				_ = c.notifyAddFirstHold(t.Context(), inc, "cordon", reason, "use a single-zone pool")
 			}()
 			entries := trail(t, st, inc.ID)
 			if !auditHas(entries, "recovery-unavailable", reason) || !auditHas(entries, "notify-pending", reason) || auditHas(entries, "notified", reason) {
@@ -50,7 +50,7 @@ func TestPendingHoldNotificationAfterControllerRestart(t *testing.T) {
 			}
 			restarted := &Controller{store: st, notifier: n}
 			for range 3 {
-				if err := restarted.notifyAddFirstHold(t.Context(), inc, "cordon", reason); err != nil {
+				if err := restarted.notifyAddFirstHold(t.Context(), inc, "cordon", reason, "use a single-zone pool"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -82,7 +82,7 @@ func TestHoldNotificationEpisodes(t *testing.T) {
 				}
 				want++
 				for range 2 {
-					if err := c.notifyAddFirstHold(t.Context(), inc, "cordon", reason); err != nil {
+					if err := c.notifyAddFirstHold(t.Context(), inc, "cordon", reason, "use a single-zone pool"); err != nil {
 						t.Fatal(err)
 					}
 				}
