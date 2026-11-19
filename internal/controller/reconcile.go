@@ -1052,7 +1052,7 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 		}
 		releaseRepair := from == types.StateVerifying && to == types.StateResolved && action == "resolve"
 		approvalEnded := from == types.StateAwaitingApproval && (to == types.StateExpired || (to == types.StateNeedsHuman && result == "approval rejected"))
-		aborted := approvalEnded || (to == types.StateResolved && action == "manual-resolve")
+		aborted := approvalEnded || to == types.StateSuperseded || (to == types.StateResolved && action == "manual-resolve")
 		if aborted && !fresh.Successor.Open() && !fresh.RemoveFirst.Open() {
 			entries, err := tx.AuditTrail(ctx, inc.ID)
 			if err != nil {

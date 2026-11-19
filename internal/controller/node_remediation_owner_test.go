@@ -153,7 +153,7 @@ func TestAutomaticRepairFollowerDoesNotRepeatReplacement(t *testing.T) {
 }
 
 func TestInventoryNodeUIDSharesRepairApprovalWithoutCloudIdentity(t *testing.T) {
-	for _, ending := range []string{"expired", "rejected", "manual"} {
+	for _, ending := range []string{"expired", "rejected", "manual", "superseded"} {
 		t.Run(ending, func(t *testing.T) { checkInventoryRepairApproval(t, ending) })
 	}
 }
@@ -228,6 +228,19 @@ func checkInventoryRepairApproval(t *testing.T, ending string) {
 	wantReason := "no decision"
 	c.store = st
 	switch ending {
+	case "superseded":
+		if err := st.UpsertNode(ctx, &types.Node{Name: "n1", UID: "replacement-uid"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.supersedeCloudTarget(ctx, mustIncident(t, st, owner), cloud.ErrIdentityChanged); err != nil {
+			t.Fatal(err)
+		}
+		got := step(t, c, st, followerID, 10)
+		if mustIncident(t, st, owner).State != types.StateSuperseded || got.State != types.StateNeedsHuman || len(notifier.approvals) != 1 ||
+			!auditHas(trail(t, st, followerID), "node-repair-released", "target identity changed") {
+			t.Fatalf("follower state=%s approvals=%d audit=%s", got.State, len(notifier.approvals), dump(trail(t, st, followerID)))
+		}
+		return
 	case "manual":
 		inc := mustIncident(t, st, owner)
 		wantReason = "operator closed before cordon"
