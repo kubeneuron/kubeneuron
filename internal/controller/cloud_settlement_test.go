@@ -78,6 +78,28 @@ func TestVerifiedClosureRetainsOwnerForHandedOverCloudPlan(t *testing.T) {
 			if got := claim(follower.ID); got != owner.ID {
 				t.Fatalf("new claim returned %s, want original owner", got)
 			}
+			const reason = "checked the cloud operation"
+			resolved, replayed, err := c.ResolveSettledCloudOperation(ctx, owner.ID, "alice", reason, 0, "confirm")
+			if err != nil || replayed || resolved.State != types.StateResolved {
+				t.Fatalf("settle: %v %v %v", resolved, replayed, err)
+			}
+			if _, replayed, err = c.ResolveSettledCloudOperation(ctx, owner.ID, "alice", reason, 0, "confirm"); err != nil || !replayed {
+				t.Fatalf("retry: %v %v", replayed, err)
+			}
+			if got := claim(follower.ID); got != follower.ID {
+				t.Fatalf("after settlement owner = %s", got)
+			}
+			entries := trail(t, st, owner.ID)
+			var count int
+			for _, entry := range entries {
+				if entry.Action == "cloud-operation-settled" && entry.Actor == "alice" && entry.Result == reason {
+					count++
+				}
+			}
+			if count != 1 {
+				t.Fatalf("settlement audit entries = %d", count)
+			}
+
 		})
 	}
 }

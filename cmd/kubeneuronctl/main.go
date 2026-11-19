@@ -540,6 +540,13 @@ func cmdResolve() *cobra.Command {
 			reason, _ := cmd.Flags().GetString("reason")
 			version, _ := cmd.Flags().GetInt("resource-version")
 			body := map[string]any{"actor": actorOrLocalUser(cmd), "reason": reason, "resource_version": version}
+			settled, _ := cmd.Flags().GetBool("cloud-operation-settled")
+			if settled {
+				if strings.TrimSpace(reason) == "" {
+					return fmt.Errorf("--cloud-operation-settled requires --reason")
+				}
+				body["cloud_operation_settled"] = true
+			}
 			var incident types.Incident
 			if err := client.doHeaders("POST", "/api/v1/incidents/"+url.PathEscape(args[0])+"/resolve", body, &incident, map[string]string{"Idempotency-Key": operationKey()}); err != nil {
 				return err
@@ -548,6 +555,7 @@ func cmdResolve() *cobra.Command {
 			return err
 		},
 	}
+	command.Flags().Bool("cloud-operation-settled", false, "Record that you verified the cloud operation completed or was canceled, and release the node for repair. KubeNeuron does not verify this. Include what you checked in --reason.")
 	command.Flags().String("actor", "", "audited actor (default: $USER)")
 	command.Flags().String("reason", "", "resolution rationale recorded in audit")
 	command.Flags().Int("resource-version", 0, "optimistic version from incidents show (0 reads current)")

@@ -843,9 +843,10 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 }
 
 type resolveIncidentRequest struct {
-	Actor           string `json:"actor"`
-	Reason          string `json:"reason,omitempty"`
-	ResourceVersion int    `json:"resource_version,omitempty"`
+	CloudOperationSettled bool   `json:"cloud_operation_settled,omitempty"`
+	Actor                 string `json:"actor"`
+	Reason                string `json:"reason,omitempty"`
+	ResourceVersion       int    `json:"resource_version,omitempty"`
 }
 
 func (s *Server) handleIdempotentResolve(w http.ResponseWriter, r *http.Request, backend IncidentResolutionBackend) {
@@ -862,7 +863,18 @@ func (s *Server) handleIdempotentResolve(w http.ResponseWriter, r *http.Request,
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	incident, replayed, err := backend.ResolveIncidentRequest(r.Context(), r.PathValue("id"), actor, request.Reason, request.ResourceVersion, key)
+	resolve := backend.ResolveIncidentRequest
+	if request.CloudOperationSettled {
+		settler, ok := backend.(interface {
+			ResolveSettledCloudOperation(context.Context, string, string, string, int, string) (*types.Incident, bool, error)
+		})
+		if !ok {
+			http.Error(w, "cloud settlement unavailable", http.StatusNotImplemented)
+			return
+		}
+		resolve = settler.ResolveSettledCloudOperation
+	}
+	incident, replayed, err := resolve(r.Context(), r.PathValue("id"), actor, request.Reason, request.ResourceVersion, key)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrNotFound):
