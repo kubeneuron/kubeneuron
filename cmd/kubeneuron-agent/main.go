@@ -24,6 +24,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/agent/dcgm"
 	"github.com/kubeneuron/kubeneuron/internal/agent/nvml"
 	"github.com/kubeneuron/kubeneuron/internal/inventory"
+	"github.com/kubeneuron/kubeneuron/internal/journal"
 	"github.com/kubeneuron/kubeneuron/internal/telemetry"
 	"github.com/kubeneuron/kubeneuron/pkg/accelerator"
 )
@@ -205,6 +206,7 @@ func main() {
 		AllowInsecureHTTP:        *allowInsecureHTTP,
 		SpoolPath:                *spoolPath,
 		JournalDir:               *journalDir,
+		JournalOpen:              journal.Open,
 		ScriptsDir:               *scriptsDir,
 		RebootCommand:            strings.Fields(*rebootCommand),
 		EnableDestructiveActions: *enableDestructive,
