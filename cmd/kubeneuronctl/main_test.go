@@ -99,3 +99,36 @@ func TestSuccessorLinesShowTheOverlap(t *testing.T) {
 		t.Fatal("no successor, no lines")
 	}
 }
+
+func TestIncidentShowPolicyHoldAndRecovery(t *testing.T) {
+	const reason = "node group spans several zones; use a single-zone node group or explicitly choose terminate-first for this pool"
+	for _, tc := range []struct {
+		name, action, result, status string
+	}{
+		{"awaiting recovery", "notified", "", "unavailable"},
+		{"pool corrected", "recovery-available-again", "pool eligible", "eligible"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "GET" || r.URL.Path != "/api/v1/incidents/held" {
+					http.NotFound(w, r)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"incident": types.Incident{ID: "held", State: types.StateEvaluating}, "audit": []types.AuditEntry{{Action: "recovery-unavailable", Result: reason}, {Action: tc.action, Result: tc.result}}})
+			}))
+			defer server.Close()
+			output, err := runCommand(t, server.URL, "incidents", "show", "held")
+			if err != nil {
+				t.Fatal(err)
+			}
+			header, _, _ := strings.Cut(output, "audit trail:")
+			wantReason := reason
+			if tc.status == "eligible" {
+				wantReason = tc.result
+			}
+			if !strings.Contains(header, "recovery:  "+tc.status+" [policy]") || !strings.Contains(header, "reason:    "+wantReason+"\n") {
+				t.Fatalf("incident details: %s", header)
+			}
+		})
+	}
+}
