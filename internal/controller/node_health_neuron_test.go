@@ -188,3 +188,86 @@ func TestNeuronSysfsHeldFaultsOutliveANewTerm(t *testing.T) {
 		t.Fatalf("second view %+v", again)
 	}
 }
+
+// A fault that opened an incident while the switch was on is not read back
+// as not acted on once it is off; its incident says what was done.
+func TestNeuronSysfsRestoreSkipsFaultsActedOn(t *testing.T) {
+	c, st := neuronFixture(t, true)
+	sendAgentEvent(t, c, neuronEvent("n-1", "hbm-ecc-uncorrectable", map[string]string{"device": "neuron3"}))
+	if len(incidentsOf(t, st)) != 1 {
+		t.Fatal("the fault opened no incident while on")
+	}
+	rc := *c.runtime.Load()
+	rc.Health = HealthPolicy{}
+	c.runtime.Store(&rc)
+	other := neuronEvent("n-2", "sram-ecc-uncorrectable", map[string]string{"device": "neuron1"})
+	other.Node = "trn-2"
+	sendAgentEvent(t, c, other)
+
+	c.health.reset()
+	rows := healthRowsOf(c.AcceleratorHealth(context.Background(), ""), detect.NeuronSysfsSource)
+	if len(rows) != 1 || rows[0].Node != "trn-2" {
+		t.Fatalf("rows after a new term %+v, want only the fault not acted on", rows)
+	}
+}
+
+func TestNeuronActedOnNeedsAnIncidentOpenWhenTheFaultCame(t *testing.T) {
+	at := time.Now()
+	ev := neuronEvent("", "hbm-ecc-uncorrectable", nil)
+	ev.Timestamp = at
+	before := at.Add(-time.Minute)
+	inc := func(node string, opened time.Time, state types.IncidentState, changed time.Time) *types.Incident {
+		return &types.Incident{Target: types.Target{Node: node}, Class: types.ClassAcceleratorFault, State: state, OpenedAt: opened, StateChangedAt: changed}
+	}
+	for _, tc := range []struct {
+		name string
+		inc  *types.Incident
+		want bool
+	}{
+		{"open", inc("trn-1", at.Add(time.Second), types.StateExecuting, at), true},
+		{"another node", inc("trn-2", at, types.StateExecuting, at), false},
+		{"opened a day later", inc("trn-1", at.Add(neuronHeldFor), types.StateExecuting, at), false},
+		{"expired before", inc("trn-1", before.Add(-time.Hour), types.StateExpired, before), false},
+		{"expired after", inc("trn-1", before, types.StateExpired, at.Add(time.Minute)), true},
+	} {
+		if got := neuronActedOn(ev, types.ClassAcceleratorFault, []*types.Incident{tc.inc}); got != tc.want {
+			t.Errorf("%s: acted on %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// writeOnlySink is an event archive that cannot be read back, as an
+// external one.
+type writeOnlySink struct{ store.EventSink }
+
+// failingFaultReader is an archive whose read back fails.
+type failingFaultReader struct {
+	store.EventSink
+	reads int
+}
+
+func (f *failingFaultReader) RecentFaultEvents(context.Context, string, time.Time, int) ([]types.AgentEvent, error) {
+	f.reads++
+	return nil, io.ErrUnexpectedEOF
+}
+
+func TestNeuronSysfsRestoreWithoutAReadableArchive(t *testing.T) {
+	c, _ := neuronFixture(t, false)
+	sink := c.sink
+	c.sink = writeOnlySink{sink}
+	sendAgentEvent(t, c, neuronEvent("n-1", "hbm-ecc-uncorrectable", map[string]string{"device": "neuron3"}))
+	c.health.reset()
+	if rows := healthRowsOf(c.AcceleratorHealth(context.Background(), ""), detect.NeuronSysfsSource); len(rows) != 0 {
+		t.Fatalf("rows %+v from an archive that cannot be read back", rows)
+	}
+
+	failing := &failingFaultReader{EventSink: sink}
+	c.sink = failing
+	c.health.reset()
+	for range 3 {
+		c.AcceleratorHealth(context.Background(), "")
+	}
+	if failing.reads != 1 {
+		t.Fatalf("archive read %d times in a term, want once", failing.reads)
+	}
+}

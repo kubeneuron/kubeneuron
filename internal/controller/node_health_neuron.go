@@ -12,6 +12,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/nodehealth"
+	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -20,6 +21,9 @@ const (
 	neuronHeldMax = 1000
 	// neuronHeldFor is how long a fault not acted on is shown.
 	neuronHeldFor = 24 * time.Hour
+	// neuronActedLag is how long after a fault the incident it opened may
+	// have been opened: the agent's clock and the outbox both lag.
+	neuronActedLag = 10 * time.Minute
 )
 
 // neuronSysfsNotActedOn is why a fault of the AWS Neuron sysfs read opened no
@@ -93,9 +97,11 @@ func (c *Controller) holdNeuronFaultLocked(ev types.AgentEvent, class types.Prob
 // restoreNeuronHeld reads back, once a term, the faults of the last day from
 // the event archive, so a restart or a new leader does not show a broken
 // device as quiet: the agent sends a counter's rise once. A fault read while
-// the installation had opted in, and acted on then, is shown as well; the
-// incident it opened says the rest. A failed read is tried again on the next
-// view.
+// the installation had opted in has an incident of its node that was open
+// when it came; it was acted on and is not shown. The archive is read once a
+// term, also when the read fails, since it scans the event table; an event
+// sink that cannot read it back, such as an external archive, restores
+// nothing.
 func (c *Controller) restoreNeuronHeld(ctx context.Context, now time.Time) {
 	c.health.mu.Lock()
 	done := c.health.neuronRestored
@@ -104,10 +110,11 @@ func (c *Controller) restoreNeuronHeld(ctx context.Context, now time.Time) {
 	if done || !ok {
 		return
 	}
-	events, err := reader.RecentFaultEvents(ctx, string(types.AcceleratorVendorAWS), now.Add(-neuronHeldFor), neuronHeldMax)
-	if err != nil {
-		c.log.Warn("reading back the AWS Neuron faults not acted on failed", "err", err)
-		return
+	since := now.Add(-neuronHeldFor)
+	events, err := reader.RecentFaultEvents(ctx, string(types.AcceleratorVendorAWS), since, neuronHeldMax)
+	var incidents []*types.Incident
+	if err == nil && len(events) > 0 {
+		incidents, err = c.store.ListIncidents(ctx, store.IncidentFilter{ActiveSince: since})
 	}
 	catalog := c.runtimeConfig(ctx).Catalog
 	c.health.mu.Lock()
@@ -115,14 +122,41 @@ func (c *Controller) restoreNeuronHeld(ctx context.Context, now time.Time) {
 	if c.health.neuronRestored {
 		return
 	}
+	c.health.neuronRestored = true
+	if err != nil {
+		c.log.Warn("reading back the AWS Neuron faults not acted on failed", "err", err)
+		return
+	}
 	// Oldest first, so the bound keeps the newest.
 	for i := len(events) - 1; i >= 0; i-- {
 		ev := events[i]
-		if sig, ok := catalog.SignalFromAgentEvent(ev); ok {
+		if sig, ok := catalog.SignalFromAgentEvent(ev); ok && !neuronActedOn(ev, sig.Class, incidents) {
 			c.holdNeuronFaultLocked(ev, sig.Class, now)
 		}
 	}
-	c.health.neuronRestored = true
+}
+
+// neuronActedOn reports whether an incident of the fault's node and class
+// was open when the fault came, so the fault opened it or was attached to it.
+func neuronActedOn(ev types.AgentEvent, class types.ProblemClass, incidents []*types.Incident) bool {
+	for _, inc := range incidents {
+		if inc.Target.Node != ev.Node || inc.Class != class || inc.OpenedAt.After(ev.Timestamp.Add(neuronActedLag)) {
+			continue
+		}
+		// Only a resolved incident records when it ended; an expired or
+		// superseded one ended at its last change of state.
+		if !inc.State.Terminal() {
+			return true
+		}
+		ended := inc.StateChangedAt
+		if inc.ResolvedAt != nil {
+			ended = *inc.ResolvedAt
+		}
+		if !ended.Before(ev.Timestamp) {
+			return true
+		}
+	}
+	return false
 }
 
 // dropOldestNeuronHeldLocked forgets the oldest fault kept.

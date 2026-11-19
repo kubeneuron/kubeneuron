@@ -117,9 +117,11 @@ mean a replaced node.
 | AWS Neuron device health from the driver's sysfs, read by the agent | `spec.safety.acceleratorHealth.awsNeuronSysfs.enabled` | a fault is shown in `kubeneuronctl health` as not acted on, for up to a day, and counted in `kubeneuron_accelerator_faults_not_acted_on_total`; no incident |
 
 The agent does not send the AWS Neuron faults yet; the switch and the
-controller's handling of them are in place for when it does. If the switch
-is turned off after it was on, faults that already opened incidents are
-also listed as not acted on; their incidents remain.
+controller's handling of them are in place for when it does. After a
+restart or a change of leader the controller reads the faults of the last
+day back from its event archive; a fault that came while an incident of its
+node was open is not listed, since that incident says what was done. With
+an external event archive the rows are not restored after a restart.
 
 ## TPU health from Google Cloud Monitoring (opt-in)
 
