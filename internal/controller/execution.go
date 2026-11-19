@@ -24,6 +24,8 @@ import (
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
+var errDeviceOutcomeUnknown = errors.New("device action outcome is unknown")
+
 // This file is the execution seam: dispatching an admitted step to the
 // platform, the agent, verification, or notification, and routing its outcome
 // (advance, escalate, quarantine). Admission decisions are made before
@@ -324,6 +326,12 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 		c.log.Warn("step failed", "incident", inc.ID, "step", step.Name, "err", err)
 		if auditErr := c.appendAudit(ctx, inc, "system", step.Name, "FAILED: "+err.Error()); auditErr != nil {
 			c.log.Error("audit append failed", "incident", inc.ID, "err", auditErr)
+		}
+		if errors.Is(err, errDeviceOutcomeUnknown) {
+			if qErr := c.quarantine(ctx, inc, err.Error()); qErr != nil {
+				c.log.Error("device action handoff failed", "incident", inc.ID, "err", qErr)
+			}
+			return
 		}
 		if stopped {
 			// Do NOT escalate. Escalation switches to the failure playbook,
@@ -857,6 +865,9 @@ func (c *Controller) executeAgentStep(ctx context.Context, inc *types.Incident, 
 		Timeout:    effectiveStepTimeout(step),
 	})
 	if err != nil {
+		if device, guarded := repairStepScope(step.Action); device && guarded {
+			return nil, fmt.Errorf("%w (%s): %w", errDeviceOutcomeUnknown, step.Action, err)
+		}
 		return nil, err
 	}
 	if !result.OK {
