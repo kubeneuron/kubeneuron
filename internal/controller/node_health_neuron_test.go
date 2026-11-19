@@ -163,3 +163,28 @@ func TestNeuronSysfsHeldFaultsAreBounded(t *testing.T) {
 		t.Fatalf("%d rows a day later, want none", len(rows))
 	}
 }
+
+// The agent sends a counter's rise once, so a restart or a new leader reads
+// the faults not acted on back from the event archive instead of showing a
+// broken device as quiet.
+func TestNeuronSysfsHeldFaultsOutliveANewTerm(t *testing.T) {
+	c, _ := neuronFixture(t, false)
+	sendAgentEvent(t, c, neuronEvent("n-1", "hbm-ecc-uncorrectable", map[string]string{"device": "neuron3"}))
+	old := neuronEvent("n-2", "sram-ecc-uncorrectable", map[string]string{"device": "neuron4"})
+	old.Timestamp = time.Now().Add(-neuronHeldFor - time.Hour)
+	sendAgentEvent(t, c, old)
+	// Another vendor's fault is not this source's.
+	amd := types.AgentEvent{EventID: "a-1", Node: "mi-1", Timestamp: time.Now(),
+		Fault: &types.FaultSignal{Vendor: "amd", Source: "amd-smi", Code: "ecc-uncorrectable"}}
+	sendAgentEvent(t, c, amd)
+
+	c.health.reset()
+	rows := healthRowsOf(c.AcceleratorHealth(context.Background(), ""), detect.NeuronSysfsSource)
+	if len(rows) != 1 || rows[0].Device != "neuron3" || rows[0].Rule != "hbm-ecc-uncorrectable" || rows[0].State != "fault" {
+		t.Fatalf("rows after a new term %+v, want the fault of the last day", rows)
+	}
+	// Read back once a term: a second view does not add another row.
+	if again := healthRowsOf(c.AcceleratorHealth(context.Background(), ""), detect.NeuronSysfsSource); len(again) != 1 {
+		t.Fatalf("second view %+v", again)
+	}
+}

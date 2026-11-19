@@ -145,6 +145,9 @@ type healthSignals struct {
 	// neuronHeld are the faults of the AWS Neuron sysfs read that were not
 	// acted on, the last of each node, device and fault code.
 	neuronHeld map[string]heldNeuronFault
+	// neuronRestored is whether this term read them back from the event
+	// archive.
+	neuronRestored bool
 }
 
 // reset forgets what was read: a new leadership term starts with nothing
@@ -154,7 +157,7 @@ func (h *healthSignals) reset() {
 	defer h.mu.Unlock()
 	h.pending, h.latest, h.read, h.readAt, h.failedAt, h.draQuiet = nil, nil, nil, nil, nil, nil
 	h.cloudAt, h.cloudNodes, h.cloudEvery = time.Time{}, nil, 0
-	h.neuronHeld = nil
+	h.neuronHeld, h.neuronRestored = nil, false
 }
 
 func (c *Controller) healthSources() []healthSource {

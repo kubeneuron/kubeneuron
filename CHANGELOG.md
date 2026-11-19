@@ -17,8 +17,9 @@ API is `v1alpha1`.
   `accelerator-fault`, and a policy can scope a ladder to `vendor: aws`. A
   fault of the agent's AWS Neuron sysfs read opens an incident only with
   `spec.safety.acceleratorHealth.awsNeuronSysfs.enabled: true`; otherwise it
-  is shown in `kubeneuronctl health` as not acted on for a day, until the
-  controller restarts, and counted in
+  is shown in `kubeneuronctl health` as not acted on for a day, read back
+  from the event archive after a restart or a change of leader, and counted
+  in
   `kubeneuron_accelerator_faults_not_acted_on_total{source,class}`, charted
   on the Health & Errors dashboard. The
   agent does not send these faults yet. Not validated against a live AWS
