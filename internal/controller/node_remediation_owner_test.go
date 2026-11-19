@@ -474,6 +474,12 @@ func TestLostGPUResetResponseRetainsStep(t *testing.T) {
 	if len(act.actions) != 1 || mustIncident(t, st, inc.ID).State != types.StateNeedsHuman || !auditHas(trail(t, st, inc.ID), "quarantine", "device action outcome is unknown") {
 		t.Fatal("missing operator handoff after reset lost its response")
 	}
+	// Closing the incident records the operator's decision. Without a result
+	// from the leased action it supplies no evidence that the reset stopped.
+	resolved, replay, err := c.ResolveIncidentRequest(ctx, inc.ID, "operator", "closing incident", 0, "close-lost-reset")
+	if err != nil || replay || resolved.State != types.StateResolved {
+		t.Fatalf("manual resolution = %+v, replay=%t, err=%v", resolved, replay, err)
+	}
 	c = restartWith(t, c, st, nil)
 	drain := &types.Incident{ID: "drain", Target: types.Target{Node: inc.Target.Node}, RepairNodeUID: inc.RepairNodeUID, State: types.StateEvaluating}
 	if err := st.CreateIncident(ctx, drain); err != nil {
