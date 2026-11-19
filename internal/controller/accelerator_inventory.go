@@ -23,6 +23,7 @@ type inventorySync struct {
 	mu      sync.Mutex
 	written map[string]string
 	swept   *string
+	pools   []types.PoolAvailability
 }
 
 // syncAcceleratorInventory records the nodes that advertise accelerator
@@ -44,6 +45,7 @@ func (c *Controller) syncAcceleratorInventory(ctx context.Context) {
 		}
 		return
 	}
+	c.inventory.recordPools(nodes)
 	present := map[string]bool{}
 	seen := map[string]string{}
 	for i := range nodes {
@@ -198,4 +200,5 @@ func (s *inventorySync) reset() {
 	defer s.mu.Unlock()
 	s.written = nil
 	s.swept = nil
+	s.pools = nil
 }

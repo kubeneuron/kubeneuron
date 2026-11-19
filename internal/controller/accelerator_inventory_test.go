@@ -304,3 +304,26 @@ func TestInventoryLabelsPlaceNodesInTheirPool(t *testing.T) {
 		t.Fatalf("pool b: state=%s reason=%q, want the breaker to trip", inc.State, parkReason(t, st, inc.ID))
 	}
 }
+
+func TestAcceleratorPoolInventoryBeforeIncident(t *testing.T) {
+	c, _, p := inventoryFixture(t)
+	for i, label := range []string{"eks.amazonaws.com/nodegroup", "cloud.google.com/gke-nodepool", "kubernetes.azure.com/agentpool", "cloud.google.com/gke-nodepool"} {
+		p.nodes = append(p.nodes, types.Node{Name: []string{"e", "g1", "a", "g2"}[i], Labels: map[string]string{label: "train"}, Devices: []types.DeviceCount{{Resource: "nvidia.com/gpu", Capacity: 4}}})
+	}
+	p.nodes = append(p.nodes, types.Node{Name: "cpu", Labels: map[string]string{"cloud.google.com/gke-nodepool": "train"}})
+	c.syncAcceleratorInventory(t.Context())
+	rows := c.PoolAvailability().Pools
+	if len(rows) != 3 || rows[0].Cloud != "AKS" || rows[1].Cloud != "EKS" || rows[2].Cloud != "GKE" || rows[2].AcceleratorNodes != 2 {
+		t.Fatalf("unexpected pools: %+v", rows)
+	}
+	for _, row := range rows {
+		if row.Status != "unknown" || row.CheckedAt != nil {
+			t.Fatalf("unexpected assessment: %+v", row)
+		}
+	}
+	p.nodes = nil
+	c.syncAcceleratorInventory(t.Context())
+	if got := c.PoolAvailability().Pools; len(got) != 0 {
+		t.Fatalf("removed pools still present: %+v", got)
+	}
+}
