@@ -1101,11 +1101,9 @@ func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.In
 		if err := tx.UpdateIncident(ctx, inc); err != nil {
 			return err
 		}
-		releaseRepair := from == types.StateVerifying && to == types.StateResolved && action == "resolve"
-		approvalEnded := from == types.StateAwaitingApproval && (to == types.StateExpired || (to == types.StateNeedsHuman && result == "approval rejected"))
-		manualClose := to == types.StateResolved && action == "manual-resolve"
-		aborted := approvalEnded || to == types.StateSuperseded
-		if aborted && !cloudOperationUnsettled(fresh) {
+		releaseRepair := to.Terminal() && !cloudOperationUnsettled(fresh)
+		// A rejected first approval can also release the node before execution.
+		if from == types.StateAwaitingApproval && to == types.StateNeedsHuman && result == "approval rejected" && !cloudOperationUnsettled(fresh) {
 			entries, err := tx.AuditTrail(ctx, inc.ID)
 			if err != nil {
 				return err
@@ -1120,12 +1118,8 @@ func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.In
 				}
 			}
 		}
-		if manualClose && !cloudOperationUnsettled(fresh) {
-			releaseRepair = true
-		}
-		releaseFollowers := aborted || manualClose
-		if releaseRepair && !releaseFollowers && !cloudOperationUnsettled(fresh) {
-			releaseFollowers = true
+		releaseFollowers := true
+		if releaseRepair && from == types.StateVerifying && to == types.StateResolved && action == "resolve" {
 			switch params["infrastructure_evidence"] {
 			case "verified_replacement_node", "verified_recycle_inventory":
 				entries, err := tx.AuditTrail(ctx, inc.ID)
@@ -1145,7 +1139,7 @@ func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.In
 				return err
 			}
 		}
-		if releaseRepair && !cloudOperationUnsettled(fresh) {
+		if releaseRepair {
 			if err := tx.ReleaseNodeRemediation(ctx, inc.ID); err != nil {
 				return err
 			}

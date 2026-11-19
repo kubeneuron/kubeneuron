@@ -116,9 +116,12 @@ resolves, the waiting incident enters its own verification window. Closing
 the owner manually supplies no inventory evidence. The waiting incident's
 audit retains the owner ID so an operator can trace both histories.
 
-If the first approval expires or an operator rejects it before any step has
-entered `EXECUTING`, the controller releases ownership once it confirms there
-is no open replacement plan. Waiting incidents record `node-repair-released`
+When an owner reaches `RESOLVED`, `EXPIRED`, or `SUPERSEDED` with no
+unsettled cloud operation, it releases the node even if a step already ran.
+Followers keep their link for independent verification after a confirmed
+replacement. An operator rejecting the first approval before execution also
+releases the node when there is no unsettled cloud operation. In the other
+release cases, waiting incidents record `node-repair-released`
 and retry under their own policies. An incident whose step requires approval
 requests its own approval.
 

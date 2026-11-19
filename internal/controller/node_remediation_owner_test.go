@@ -694,3 +694,45 @@ func TestApprovedDrainWaitsForGPURepairStep(t *testing.T) {
 		t.Fatal("stale step hold")
 	}
 }
+
+func TestTerminalOwnerAfterCordonReleasesFollower(t *testing.T) {
+	for _, ending := range []types.IncidentState{types.StateExpired, types.StateSuperseded} {
+		t.Run(string(ending), func(t *testing.T) {
+			ctx := t.Context()
+			p := newSuccessorPlatform()
+			c, st, notifier := successorFixture(t, recoverymode.Approval, p, recoverymode.RemoveFirst)
+			configureRepairClasses(t, c)
+			owner := openIncidentFor(t, c, types.ClassFellOffBus)
+			parked := drive(t, c, st, owner, types.StateAwaitingApproval)
+			if parked.StepIndex != 1 || !auditHas(trail(t, st, owner), "cordon", auditStepOutcomeResult("platform.cordon", false, true)) {
+				t.Fatal("owner did not execute cordon")
+			}
+			sig := signal(types.ClassAcceleratorFault, "n1", "")
+			if err := c.IngestSignal(ctx, sig); err != nil {
+				t.Fatal(err)
+			}
+			other, err := st.GetOpenIncident(ctx, sig.Target, sig.Class)
+			if err != nil {
+				t.Fatal(err)
+			}
+			follower := other.ID
+			step(t, c, st, follower, 8)
+			if !auditHas(trail(t, st, follower), "wait-for-node-repair", owner) {
+				t.Fatal("missing follower wait")
+			}
+			if ending == types.StateExpired {
+				c.SetTimings(0, time.Nanosecond)
+				if err := c.advance(ctx, parked); err != nil {
+					t.Fatal(err)
+				}
+				c.SetTimings(0, time.Hour)
+			} else if err := c.supersedeCloudTarget(ctx, parked, cloud.ErrIdentityChanged); err != nil {
+				t.Fatal(err)
+			}
+			next := drive(t, c, st, follower, types.StateAwaitingApproval)
+			if mustIncident(t, st, owner).State != ending || next.StepIndex != 1 || len(notifier.approvals) != 2 || !auditHas(trail(t, st, follower), "node-repair-released", "") {
+				t.Fatalf("follower %s", dump(trail(t, st, follower)))
+			}
+		})
+	}
+}
