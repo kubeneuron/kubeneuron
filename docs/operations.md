@@ -127,6 +127,27 @@ each other while the step runs. If the controller loses the agent's response
 to a reset, it hands the reset incident to an operator. Even after manual
 closure, the drain or replacement waits. When the action queue accepts a late
 result for that reset under its lease, the next admission check can proceed.
+If the agent never returns a result, the controller can cancel the expired
+lease and admit the waiting step 15 seconds after lease expiry.
+
+If the inventory loses the original Node UID, the controller reads the Node
+directly from the Kubernetes API. A confirmed deletion or a different UID
+releases reservations and repair ownership for the old UID. A read error
+preserves both. A node recreated under the same name keeps its own reservations.
+
+If a cloud replacement has an unknown outcome, closing its incident leaves
+repair blocked. The waiting incident's details show the owner ID and the
+command below. Use it only after you have checked in the cloud console that
+the operation finished or was canceled. KubeNeuron does not verify this.
+
+```sh
+kubeneuronctl resolve <owner-incident-id> --cloud-operation-settled --reason "checked ASG activity, launch canceled"
+```
+
+This records the actor, reason and time in the owner's audit, marks the plan
+settled and releases waiting incidents to retry under their own policies.
+If the operation is still running, the next incident can replace the node
+again, which can leave an extra billed node.
 
 ## Taking a node over from a remediation
 
