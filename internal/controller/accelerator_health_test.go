@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/nodehealth"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -223,16 +224,18 @@ func TestAcceleratorHealthAgentSourcesOfTheNodesVendor(t *testing.T) {
 	c.health.latest = map[string]nodehealth.NodeHealth{
 		name + "/gpu-1": {Node: "gpu-1", Profiles: []string{"nvidia"}},
 		name + "/mi-1":  {Node: "mi-1", Profiles: []string{"amd-instinct"}},
+		name + "/trn-1": {Node: "trn-1", Profiles: []string{"aws-neuron"}},
 	}
 	c.health.mu.Unlock()
 	all := func(node string) []types.AgentSignalSource {
 		return []types.AgentSignalSource{
 			{Node: node, Source: "nvidia-kmsg", Available: true, ReadAt: clock.Now()},
 			{Node: node, Source: "amd-kmsg", Class: types.ClassPCIe, Available: true, ReadAt: clock.Now()},
+			{Node: node, Source: detect.NeuronSysfsSource, Class: types.ClassAcceleratorFault, Available: true, ReadAt: clock.Now()},
 		}
 	}
 	c.agentSignalSources = all
-	for node, want := range map[string]string{"gpu-1": "nvidia-kmsg", "mi-1": "amd-kmsg"} {
+	for node, want := range map[string]string{"gpu-1": "nvidia-kmsg", "mi-1": "amd-kmsg", "trn-1": detect.NeuronSysfsSource} {
 		rows := healthRowsOf(c.AcceleratorHealth(ctx, node), agentHealthSource)
 		if len(rows) != 1 || rows[0].Rule != want {
 			t.Fatalf("%s: rows %+v, want only %s", node, rows, want)

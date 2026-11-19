@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/nodehealth"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -98,6 +99,9 @@ func (c *Controller) AcceleratorHealth(ctx context.Context, node string) types.A
 				continue
 			}
 			if source.Source == "amd-kmsg" && !slices.Contains(profiles, "amd-instinct") {
+				continue
+			}
+			if source.Source == detect.NeuronSysfsSource && !slices.Contains(profiles, "aws-neuron") {
 				continue
 			}
 		}
@@ -221,6 +225,10 @@ func agentHealthRows(node string, sources []types.AgentSignalSource, asked bool)
 		if s.Available {
 			row.State = types.HealthRowAvailable
 			row.Why = "the agent reads this source; a fault it reads opens an incident, and none read is not health"
+			if rule == detect.NeuronSysfsSource {
+				row.Why = "the agent reads this source; a fault it reads opens an incident only with " +
+					"spec.safety.acceleratorHealth.awsNeuronSysfs.enabled, and none read is not health"
+			}
 		} else {
 			row.State = string(nodehealth.StateUnknown)
 			row.Why = "the agent cannot read this source"

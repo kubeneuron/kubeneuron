@@ -143,6 +143,9 @@ type Config struct {
 	// durable node-local storage: a restarted agent uses it to avoid replaying
 	// an action whose side effect may already have happened.
 	ActionJournalPath string
+	// NeuronSysfsRoot is where the AWS Neuron driver's devices are read,
+	// default neuronsysfs.DefaultRoot; tests point it at a synthetic tree.
+	NeuronSysfsRoot string
 	// ScriptsDir holds operator-provisioned remediation scripts, default
 	// /etc/kube-neuron/scripts.
 	ScriptsDir string
@@ -254,6 +257,7 @@ type Agent struct {
 	journalSkipShown bool
 	health           *gpuhealth.Watcher
 	amdHealth        *amdhealth.Watcher
+	neuron           *neuronSysfs
 	client           *http.Client
 	log              *slog.Logger
 	nvidia           *nvidiaObservation
@@ -482,6 +486,7 @@ func New(cfg Config, driver nvml.GPUDriver, log *slog.Logger) (*Agent, error) {
 		}
 	}
 	agent.buildAdapters(cfg, driver)
+	agent.neuron = agent.newNeuronSysfs(cfg.NeuronSysfsRoot, filepath.Dir(cfg.ActionJournalPath))
 	return agent, nil
 }
 
@@ -601,6 +606,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	a.reportNVIDIA(ctx)
 	a.reportAdapters(ctx)
+	a.readNeuron(ctx)
 	adapterEvents := a.watchAdapterDetections(ctx)
 	a.pollAdapterDetections(ctx)
 
@@ -744,6 +750,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.reportSignalSources(ctx)
 			a.reportNVIDIA(ctx)
 			a.reportAdapters(ctx)
+			a.readNeuron(ctx)
 			a.pollAdapterDetections(ctx)
 			a.flushSpool(ctx)
 		}
@@ -1123,6 +1130,11 @@ func nodeFaultKey(ev types.AgentEvent) string {
 // never collapsed into one detection. The class is used only for the separate
 // cross-source anchors below.
 func nativeToken(ev types.AgentEvent) string {
+	if ev.Fault != nil && ev.Fault.Source == detect.NeuronSysfsSource {
+		// Scoped to the node, so the device and component tell two faults
+		// of one code apart.
+		return "fault|" + ev.Fault.Vendor + "|" + ev.Fault.Code + "|" + ev.Fault.Attributes["device"] + "|" + ev.Fault.Attributes["component"]
+	}
 	if ev.Fault != nil {
 		return "fault|" + ev.Fault.Vendor + "|" + ev.Fault.Code
 	}

@@ -33,6 +33,11 @@ func TestAgentSourceReportToHealthView(t *testing.T) {
 	post(body, 204)
 	post(strings.Replace(body, "node-a", "node-b", 1), 403)
 	post(strings.Replace(body, "kernel-log-unavailable", "arbitrary text", 1), 400)
+	neuron := `[{"node":"node-a","source":"aws-neuron-sysfs","class":"accelerator-fault","available":false,"reason":"permission-denied","read_at":"2026-11-18T00:00:00Z"}]`
+	post(strings.Replace(neuron, "permission-denied", "kernel-log-unavailable", 1), 400)
+	post(strings.Replace(neuron, "accelerator-fault", "pcie", 1), 400)
+	post(neuron, 204)
+	post(body, 204)
 	row := strings.Trim(body, "[]")
 	post("["+strings.Repeat(row+",", 64)+row+"]", 400)
 	for _, node := range []string{"", "node-a"} {

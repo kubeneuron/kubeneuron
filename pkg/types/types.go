@@ -833,10 +833,13 @@ type AcceleratorDeviceFamily string
 const (
 	AcceleratorFamilyGPU AcceleratorDeviceFamily = "gpu"
 	AcceleratorFamilyTPU AcceleratorDeviceFamily = "tpu"
+	// AcceleratorFamilyNeuron is an AWS Neuron device (Trainium or
+	// Inferentia), named by its index in the driver's tree.
+	AcceleratorFamilyNeuron AcceleratorDeviceFamily = "neuron"
 )
 
 func (f AcceleratorDeviceFamily) valid() bool {
-	return f == AcceleratorFamilyGPU || f == AcceleratorFamilyTPU
+	return f == AcceleratorFamilyGPU || f == AcceleratorFamilyTPU || f == AcceleratorFamilyNeuron
 }
 
 // AcceleratorDeviceKind distinguishes an independently recoverable physical

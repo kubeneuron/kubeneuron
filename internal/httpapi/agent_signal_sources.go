@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -70,6 +71,19 @@ func validAgentSource(row types.AgentSignalSource) bool {
 		}
 		if row.Source == "nvidia-dcgm" {
 			reason = "xid-field-unavailable"
+		}
+	case detect.NeuronSysfsSource:
+		if row.Class != types.ClassAcceleratorFault {
+			return false
+		}
+		// The reasons the AWS Neuron sysfs read gives, a closed list.
+		reason = ""
+		switch row.Reason {
+		case "permission-denied", "read-error", "too-many-devices", "unexpected-value":
+			reason = row.Reason
+		}
+		if !row.Available && reason == "" {
+			return false
 		}
 	default:
 		return false
