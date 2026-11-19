@@ -533,3 +533,26 @@ func TestPoolWithoutReplacementPolicySkipsCheck(t *testing.T) {
 		t.Fatal(row)
 	}
 }
+
+func TestTrainiumPoolOrderMatchesNodeHealthIncident(t *testing.T) {
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{"repair": {Steps: []playbook.Step{{Action: "platform.replace_node"}}}}, []playbook.Policy{
+		{Class: types.ClassAcceleratorFault, Vendor: "aws", Playbook: "repair"},
+		{Class: types.ClassAcceleratorFault, Playbook: "repair", ReplacementStrategy: recoverymode.RemoveFirst},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signal := types.Signal{Class: types.ClassAcceleratorFault, Source: types.SourceNodeHealth, Evidence: map[string]string{"vendor": "aws"}}
+	policy, ok := engine.PolicyFor(signal.Class, signal.Vendor())
+	if !ok || policy.ReplacementStrategy != recoverymode.RemoveFirst {
+		t.Fatalf("unexpected node-health policy: %+v", policy)
+	}
+	for _, resource := range []string{"aws.amazon.com/neuron", "aws.amazon.com/neurondevice"} {
+		var c Controller
+		nodes := []types.Node{{Name: "trainium", Labels: map[string]string{"eks.amazonaws.com/nodegroup": "train"}, Devices: []types.DeviceCount{{Resource: resource, Capacity: 1, Unit: types.DeviceUnitAWSDevice}}}}
+		c.inventory.recordPools(nodes, engine, time.Now(), nil)
+		if row := c.PoolAvailability().Pools[0]; row.ReplacementPolicy != "RemoveFirst" {
+			t.Fatalf("%s: %+v", resource, row)
+		}
+	}
+}
