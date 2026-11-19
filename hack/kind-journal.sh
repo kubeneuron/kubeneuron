@@ -18,10 +18,13 @@
 #      cannot start, and after three minutes the controller takes the label
 #      off with reason journal-mount-failed;
 #   5. spec.agent.kernelLog.journal.enabled=false removes every label and
-#      both variants, and "-agent" still has its UID.
+#      both variants, and "-agent" still has its UID;
+#   6. with KERNEL_RECORD=1, a synthetic XID 79 line written to the kernel
+#      log reaches the unprivileged agent through the journal and opens an
+#      incident on the worker.
 #
-# CPU-only: the accelerator is a status patch, no kernel record is written.
-# Reading a kernel record into an incident needs the journal reader.
+# CPU-only: the accelerator is a status patch and the kernel record is a
+# synthetic line, not a GPU fault.
 # Needs docker, kind, kubectl, jq, openssl and git.
 set -euo pipefail
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -34,6 +37,10 @@ CLUSTER_NAME=${CLUSTER_NAME:-kn-journal-$$}
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-300}
 # How long a worker may hold two agent Pods, or no Ready one, during a move.
 ROLLOUT_SECONDS=${ROLLOUT_SECONDS:-120}
+# KERNEL_RECORD=1 writes a synthetic XID 79 line to /dev/kmsg. kind nodes
+# share the host kernel, so every kind cluster on the host sees the line:
+# by default it runs only in CI (CI=true), where the host is disposable.
+KERNEL_RECORD=${KERNEL_RECORD:-$([[ ${CI:-} == true ]] && echo 1 || echo 0)}
 # The same immutable node image hack/kind-integration.sh pins.
 readonly NODE_IMAGE='kindest/node:v1.33.12@sha256:3f5c8443c620245e4d355cfe09e96a91ead32ceaa569d3f1ca9edf0cb2fe2ff4'
 readonly NAME=journal NS=kubeneuron-journal LABEL=kubeneuron.io/journal-dir
@@ -47,9 +54,11 @@ umask 077
 work=$(mktemp -d "${TMPDIR:-/tmp}/kubeneuron-journal.XXXXXX")
 base_tree=
 sampler=
+pf_pid=
 created=0
 cleanup() {
 	local status=$?
+	[[ -z $pf_pid ]] || { kill "$pf_pid" 2>/dev/null || true; wait "$pf_pid" 2>/dev/null || true; }
 	[[ -z $sampler ]] || { kill "$sampler" 2>/dev/null || true; wait "$sampler" 2>/dev/null || true; }
 	if ((status != 0 && created)); then
 		"$KUBECTL_BIN" get nodes -L "$LABEL" 2>&1 || true
@@ -232,6 +241,29 @@ note "PASS: upgrade kept -agent ($agent_uid) and moved both workers to the journ
   (.spec.template.spec.containers[0].securityContext.privileged // false) == false' >/dev/null ||
 	die "the journal-run DaemonSet has the wrong selector, label or mount"
 note "PASS: journal-run mounts only /run/log/journal, read-only, unprivileged"
+
+# incident_on: an incident is open on the node.
+incident_on() {
+	curl --silent --show-error --fail --noproxy '*' --max-time 10 -H "@$work/header" \
+		"http://127.0.0.1:$port/api/v1/incidents?node=$1" |
+		"$JQ_BIN" -e --arg n "$1" '(if type == "array" then . else .incidents end) | any(.node == $n)' >/dev/null
+}
+if ((KERNEL_RECORD)); then
+	"$KUBECTL_BIN" -n "$NS" port-forward "service/$NAME-controller" :8080 >"$work/forward.log" 2>&1 &
+	pf_pid=$!
+	forwarded() {
+		port=$(sed -n 's/.*127.0.0.1:\([0-9]*\) -> 8080.*/\1/p' "$work/forward.log" | head -1)
+		[[ -n $port ]]
+	}
+	wait_for "the controller port-forward" forwarded
+	printf 'Authorization: Bearer %s\n' "$("$KUBECTL_BIN" -n "$NS" get secret "$NAME-operator-api-token" -o jsonpath='{.data.token}' | base64 --decode)" >"$work/header"
+	! incident_on "${workers[0]}" || die "an incident was open on ${workers[0]} before the kernel record"
+	"$DOCKER_BIN" exec "${workers[0]}" sh -c 'echo "NVRM: Xid (PCI:0000:3b:00): 79, pid=1, GPU has fallen off the bus." >/dev/kmsg'
+	wait_for "an incident on ${workers[0]} from the journal" incident_on "${workers[0]}"
+	note "PASS: a kernel XID 79 read from the journal opened an incident on ${workers[0]}"
+else
+	note "skip: KERNEL_RECORD=0 (the kernel record is shared with every kind cluster on this host)"
+fi
 
 moved=${workers[0]} neighbour=${workers[1]}
 neighbour_uid=$(pod_uid "$neighbour")
