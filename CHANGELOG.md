@@ -354,8 +354,6 @@ API is `v1alpha1`.
 
 ### Fixed
 
-- AKS add-first preflight and planning reject pools configured with multiple availability zones. Use a single-zone node pool, or set `RemoveFirst` in the remediation policy that applies to these nodes.
-
 - Concurrent live repair incidents on the same node share one repair owner. The
   controller identifies the node by its pinned cloud identity or the Kubernetes
   Node UID recorded when the incident opened. Waiting incidents show the owner ID before
@@ -596,6 +594,8 @@ API is `v1alpha1`.
   each. A store that cannot commit atomically is refused for these writes.
 
 ### Changed
+
+- Add-first on an AKS node pool configured with several availability zones is now refused before any incident step. Previously the new node could start in a different zone from the node it replaced. Use a single-zone node pool, or set `RemoveFirst` in the remediation policy that applies to these nodes. For GKE, the refusal now explains that add-first would add a node in every zone of the pool.
 
 - When a recovery policy hold lifts, the audit records `recovery-available-again`. Existing `recovery-available` entries remain readable.
 

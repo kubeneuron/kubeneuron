@@ -119,12 +119,6 @@ func (p *Provider) planSuccessor(s cloud.Successor, t target, machines []machine
 		stateCount:   strconv.Itoa(int(pl.Count)),
 		stateMembers: strings.Join(names, ","),
 	}
-	for _, m := range machines {
-		if m.Name == t.machine && m.Zone != "" {
-			s.State["originalZone"] = m.Zone
-			break
-		}
-	}
 	return s, nil
 }
 

@@ -36,7 +36,6 @@ type pool struct {
 // machine is one AKS machine of an agent pool: its name (the node name on a
 // VMSS pool) and the ARM ID of the VMSS instance behind it.
 type machine struct {
-	Zone       string
 	Name       string
 	ResourceID string
 }
@@ -168,11 +167,7 @@ func (a *sdkAPI) Machines(ctx context.Context, poolName string) ([]machine, erro
 			if m == nil || m.Name == nil || m.Properties == nil || m.Properties.ResourceID == nil {
 				return nil, fmt.Errorf("agent pool %q lists a machine without a name or instance", poolName)
 			}
-			item := machine{Name: *m.Name, ResourceID: *m.Properties.ResourceID}
-			if len(m.Zones) == 1 && m.Zones[0] != nil {
-				item.Zone = *m.Zones[0]
-			}
-			all = append(all, item)
+			all = append(all, machine{Name: *m.Name, ResourceID: *m.Properties.ResourceID})
 		}
 	}
 	return all, nil

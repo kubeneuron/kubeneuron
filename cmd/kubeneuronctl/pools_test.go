@@ -24,7 +24,9 @@ func TestPoolsCommand(t *testing.T) {
  {"pool":"disabled","cloud":"EKS","accelerator_nodes":4,"replacement_policy":"AddFirst","status":"unavailable","reason":"add-first on EKS is not enabled in this release","checked_at":"2026-11-18T12:00:00Z"},
  {"pool":"fixed","cloud":"EKS","accelerator_nodes":2,"replacement_policy":"RemoveFirst"},
  {"pool":"observe","cloud":"GKE","accelerator_nodes":1,"replacement_policy":"none","status":"not applicable","reason":"no remediation policy replaces these nodes"},
- {"pool":"unwired","cloud":"AKS","accelerator_nodes":1,"replacement_policy":"AddFirst","status":"unknown","reason":"no cloud provider configured"}]}`)
+ {"pool":"unwired","cloud":"AKS","accelerator_nodes":1,"replacement_policy":"AddFirst","status":"unknown","reason":"no cloud provider configured"},
+ {"pool":"zones","cloud":"AKS","accelerator_nodes":2,"replacement_policy":"AddFirst","status":"unavailable","reason":"AKS chooses the zone of a new node in this pool","action":"use a single-zone node pool, or set RemoveFirst in the remediation policy that applies to these nodes","checked_at":"2026-11-18T12:00:00Z"},
+ {"pool":"zones","cloud":"GKE","accelerator_nodes":2,"replacement_policy":"AddFirst","status":"unavailable","reason":"add-first would add a node in every zone of this pool","action":"use a single-zone node pool, or set RemoveFirst in the remediation policy that applies to these nodes","checked_at":"2026-11-18T12:00:00Z"}]}`)
 	}))
 	defer server.Close()
 	got, err := runCommand(t, server.URL, "pools")

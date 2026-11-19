@@ -253,12 +253,8 @@ func TestAddFirstFailedPoolWithoutANewMachineIsCapacity(t *testing.T) {
 func TestAddFirstRefusesMultizoneBeforeGrowth(t *testing.T) {
 	f := newFakeAKS(3)
 	f.zoneCount = 1
-	f.machines[1].Zone = "2"
 	p := testProvider(f)
 	s := prepare(t, p, newOperation(), cloud.SuccessorPlanned)
-	if s.State["originalZone"] != "2" {
-		t.Fatalf("plan zone = %q", s.State["originalZone"])
-	}
 	f.zoneCount = 2
 	refused := func(err error) {
 		t.Helper()

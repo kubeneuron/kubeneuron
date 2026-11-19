@@ -838,3 +838,28 @@ func TestReportIncludesHeldAddFirstIncidentAfterManualClosure(t *testing.T) {
 		t.Fatalf("manually closed incident: %+v", r)
 	}
 }
+
+func TestMultiZoneIncidentHoldsBeforeCordon(t *testing.T) {
+	const action = "use a single-zone node pool, or set RemoveFirst in the remediation policy that applies to these nodes"
+	for name, reason := range map[string]string{"AKS": "AKS chooses the zone of a new node in this pool", "GKE": "add-first would add a node in every zone of this pool"} {
+		t.Run(name, func(t *testing.T) {
+			p := newSuccessorPlatform()
+			p.unavailable = &cloud.PoolRefusal{Code: cloud.PoolMultiZone, Reason: reason}
+			c, st, notifier := successorFixture(t, recoverymode.Automatic, p, "")
+			id := openOn(t, c, "n1")
+			inc := step(t, c, st, id, 20)
+			if inc.State != types.StateEvaluating || inc.StepIndex != 0 || inc.Successor != nil || p.cordonedNode("n1") || !auditHas(trail(t, st, id), "recovery-unavailable", reason) {
+				t.Fatalf("unexpected hold: %s", dump(trail(t, st, id)))
+			}
+			notices := 0
+			for _, e := range notifier.events {
+				if strings.Contains(e.Message, reason) && strings.Contains(e.Message, action) {
+					notices++
+				}
+			}
+			if notices != 1 {
+				t.Fatalf("expected one notification with reason and action, got %+v", notifier.events)
+			}
+		})
+	}
+}
