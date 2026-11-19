@@ -603,6 +603,26 @@ func (c *Controller) releaseSuccessor(ctx context.Context, inc *types.Incident, 
 	if !ok {
 		return fmt.Errorf("the platform cannot release a successor")
 	}
+	if rec.Phase == cloud.SuccessorRequested && inc.CloudIdentity != nil {
+		// Poll the existing request before cleanup so a newly visible node goes
+		// through the same persisted identity and workload checks as any other.
+		next, err := plat.PrepareSuccessor(ctx, *inc.CloudIdentity, rec.Successor)
+		if err == nil {
+			if next.Operation != rec.Operation || next.Instance != rec.Instance || next.Pool != rec.Pool ||
+				(next.Phase != cloud.SuccessorRequested && next.Phase != cloud.SuccessorCreated) ||
+				(next.Phase == cloud.SuccessorCreated && next.ProviderID == "") {
+				return c.endSuccessor(ctx, inc, types.SuccessorHandedOver, why+"; cannot confirm successor identity during cleanup")
+			}
+			if next.Phase == cloud.SuccessorCreated {
+				rec.Successor = next
+				if err := c.saveSuccessor(ctx, inc, rec, "successor-created", "identified successor before cleanup: "+next.ProviderID); err != nil {
+					return err
+				}
+			}
+		} else if !errors.Is(err, cloud.ErrReplacementCapacity) && !errors.Is(err, cloud.ErrNeedsOperator) {
+			return err
+		}
+	}
 	owner := successorReleaseOwnerPrefix + inc.ID
 	cordoned := ""
 	if rec.Phase == cloud.SuccessorCreated {

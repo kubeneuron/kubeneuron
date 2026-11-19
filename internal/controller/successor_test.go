@@ -701,3 +701,32 @@ func TestAddFirstUnknownDeleteKeepsTheSuccessor(t *testing.T) {
 		t.Fatalf("released=%d successor=%+v, want the successor kept for an operator%s", released, inc.Successor, dump(trail(t, st, id)))
 	}
 }
+
+func TestReleaseRequestedSuccessorChecksWorkload(t *testing.T) {
+	for _, busy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("busy=%t", busy), func(t *testing.T) {
+			p := newSuccessorPlatform()
+			p.createAfter = 0
+			p.successorWorkload = busy
+			c, st, _ := successorFixture(t, recoverymode.Automatic, p, "")
+			id := openOn(t, c, "n1")
+			inc := mustIncident(t, st, id)
+			inc.CloudIdentity = &cloud.NodeIdentity{InstanceID: "i-old"}
+			rec := &types.SuccessorRecord{Successor: cloud.Successor{Operation: "cancel", Instance: "i-old", Pool: "train", Phase: cloud.SuccessorRequested, RequestedAt: time.Now()}}
+			if err := c.saveSuccessor(t.Context(), inc, rec, "successor-requested", "fixture"); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.releaseSuccessor(t.Context(), inc, "cancelled"); err != nil {
+				t.Fatal(err)
+			}
+			saved := mustIncident(t, st, id).Successor
+			if saved.ProviderID == "" {
+				t.Fatal("missing saved successor identity")
+			}
+			_, released, _, _, _ := p.counts()
+			if busy && (released != 0 || saved.Outcome != types.SuccessorHandedOver) || !busy && (released != 1 || saved.Outcome != types.SuccessorReleased) {
+				t.Fatalf("released=%d outcome=%s", released, saved.Outcome)
+			}
+		})
+	}
+}
