@@ -12,7 +12,7 @@ import (
 // systemFiles enumerates system journals directly below the mount or in
 // journald's machine-ID directory. User journals and symlinks are skipped.
 func systemFiles(root string) ([]string, error) {
-	var files []string
+	var archived, active []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -33,14 +33,18 @@ func systemFiles(root string) ([]string, error) {
 		if !d.Type().IsRegular() || !(name == "system.journal" || strings.HasPrefix(name, "system@") && strings.HasSuffix(name, ".journal")) {
 			return nil
 		}
-		files = append(files, path)
+		if name == "system.journal" {
+			active = append(active, path)
+		} else {
+			archived = append(archived, path)
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	if len(files) == 0 {
+	if len(archived)+len(active) == 0 {
 		return nil, &os.PathError{Op: "find system journal", Path: root, Err: fs.ErrNotExist}
 	}
-	return files, nil
+	return append(archived, active...), nil
 }

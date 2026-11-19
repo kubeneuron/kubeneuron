@@ -68,8 +68,26 @@ func TestFollowFromTail(t *testing.T) {
 	put(buf[transport+48:], uint64(array))
 	put(buf[transport+56:], 2)
 	write()
+	// Rotate before the reader sees the last append. A fresh reader must
+	// finish the renamed file before it delivers the new active file.
+	if err := os.Rename(path, filepath.Join(dir, "system@archive.journal")); err != nil {
+		t.Fatal(err)
+	}
+	buf = make([]byte, 208)
+	copy(buf, "LPKSHHRH")
+	buf[24] = 1
+	put(buf[88:], 208)
+	transport = data("_TRANSPORT=kernel")
+	first := entry(3, "MESSAGE=after rotation")
+	put(buf[transport+40:], uint64(first))
+	put(buf[transport+56:], 1)
+	write()
+	r, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	b, err = r.Next(context.Background(), b.Cursor)
-	if err != nil || len(b.Records) != 1 || b.Records[0].Message != "new" {
+	if err != nil || len(b.Records) != 2 || b.Records[0].Message != "new" || b.Records[1].Message != "after rotation" {
 		t.Fatalf("append %+v %v", b, err)
 	}
 	b, err = r.Next(context.Background(), b.Cursor)
