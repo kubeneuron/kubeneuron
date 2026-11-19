@@ -104,9 +104,17 @@ func (q *Queries) ReleaseRepairFollowers(ctx context.Context, ownerID string, at
 
 // ClaimRepairStep admits concurrent device steps or one node step. The
 // upsert locks the guard row until the caller commits the admission.
-func (q *Queries) ClaimRepairStep(ctx context.Context, node, uid, incident string, device bool) (bool, error) {
+func (q *Queries) ClaimRepairStep(ctx context.Context, node, uid, incident, actionID string, device bool) (bool, error) {
 	if _, err := q.db.ExecContext(ctx, `INSERT INTO repair_step_guards(node,node_uid) VALUES(?,?)
 		ON CONFLICT(node,node_uid) DO UPDATE SET node_uid=excluded.node_uid`, node, uid); err != nil {
+		return false, err
+	}
+	// A reset result may arrive after the controller handed the incident to
+	// an operator. Reconcile that exact leased action before admitting work.
+	if _, err := q.db.ExecContext(ctx, `DELETE FROM repair_step_claims
+		WHERE node=? AND node_uid=? AND device_step=1 AND action_id<>''
+		AND EXISTS (SELECT 1 FROM actions a WHERE a.id=repair_step_claims.action_id
+			AND a.incident_id=repair_step_claims.incident_id AND a.state='done' AND a.attempts>0)`, node, uid); err != nil {
 		return false, err
 	}
 	var busy bool
@@ -114,8 +122,8 @@ func (q *Queries) ClaimRepairStep(ctx context.Context, node, uid, incident strin
 		WHERE node=? AND node_uid=? AND incident_id<>? AND (device_step=0 OR ?=0))`, node, uid, incident, b2i(device)).Scan(&busy); err != nil || busy {
 		return false, err
 	}
-	_, err := q.db.ExecContext(ctx, `INSERT INTO repair_step_claims(incident_id,node,node_uid,device_step) VALUES(?,?,?,?)
-	ON CONFLICT(incident_id) DO UPDATE SET node=excluded.node,node_uid=excluded.node_uid,device_step=excluded.device_step`, incident, node, uid, b2i(device))
+	_, err := q.db.ExecContext(ctx, `INSERT INTO repair_step_claims(incident_id,node,node_uid,action_id,device_step) VALUES(?,?,?,?,?)
+	ON CONFLICT(incident_id) DO UPDATE SET node=excluded.node,node_uid=excluded.node_uid,action_id=excluded.action_id,device_step=excluded.device_step`, incident, node, uid, actionID, b2i(device))
 	return err == nil, err
 }
 

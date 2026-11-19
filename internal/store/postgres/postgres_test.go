@@ -419,7 +419,7 @@ func TestConcurrentRepairStepsExcludeNodeAndDevice(t *testing.T) {
 			err := s.WithTx(ctx, func(tx store.Tx) error {
 				<-start
 				var err error
-				admitted, err = tx.ClaimRepairStep(ctx, "node-a", "uid-a", id, id == "reset")
+				admitted, err = tx.ClaimRepairStep(ctx, "node-a", "uid-a", id, "", id == "reset")
 				return err
 			})
 			results <- result{admitted, err}

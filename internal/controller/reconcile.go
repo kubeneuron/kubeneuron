@@ -1052,7 +1052,11 @@ func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.In
 		} else if wire != "" {
 			device, guarded := repairStepScope(wire)
 			if uid := repairNodeUID(fresh); guarded && uid != "" {
-				admitted, err := tx.ClaimRepairStep(ctx, fresh.Target.Node, uid, inc.ID, device)
+				var agentActionID string
+				if wire == "agent.gpu_reset" {
+					agentActionID = actionID(inc)
+				}
+				admitted, err := tx.ClaimRepairStep(ctx, fresh.Target.Node, uid, inc.ID, agentActionID, device)
 				if err != nil {
 					return err
 				}

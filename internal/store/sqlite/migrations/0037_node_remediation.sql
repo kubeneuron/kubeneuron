@@ -28,6 +28,7 @@ CREATE TABLE repair_step_claims (
     incident_id TEXT PRIMARY KEY REFERENCES incidents(id) ON DELETE CASCADE,
     node TEXT NOT NULL,
     node_uid TEXT NOT NULL,
+    action_id TEXT NOT NULL,
     device_step INTEGER NOT NULL CHECK (device_step IN (0, 1)),
     FOREIGN KEY (node, node_uid) REFERENCES repair_step_guards(node, node_uid)
 );

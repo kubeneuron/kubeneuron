@@ -470,6 +470,14 @@ func TestLostGPUResetResponseRetainsStep(t *testing.T) {
 	if err := c.transitionWithRepairStep(ctx, mustIncident(t, st, inc.ID), types.StateExecuting, "system", step.Name, auditStepStartResult(step.Action), nil, step.Action, false); err != nil {
 		t.Fatal(err)
 	}
+	id := actionID(inc)
+	if err := st.EnqueueAction(ctx, inc.Target.Node, types.Action{ID: id, IncidentID: inc.ID, Type: types.ActionGPUReset}); err != nil {
+		t.Fatal(err)
+	}
+	leased, err := st.ClaimNextAction(ctx, inc.Target.Node, "boot", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
 	c.runStep(ctx, nil, mustIncident(t, st, inc.ID), step)
 	if len(act.actions) != 1 || mustIncident(t, st, inc.ID).State != types.StateNeedsHuman || !auditHas(trail(t, st, inc.ID), "quarantine", "device action outcome is unknown") {
 		t.Fatal("missing operator handoff after reset lost its response")
@@ -488,4 +496,11 @@ func TestLostGPUResetResponseRetainsStep(t *testing.T) {
 	if err := c.transitionWithRepairStep(ctx, mustIncident(t, st, drain.ID), types.StateExecuting, "system", "drain", "start", nil, "platform.drain", false); !errors.Is(err, errRepairStepBusy) {
 		t.Fatalf("drain after lost response: %v", err)
 	}
+	if err := st.CompleteClaimedAction(ctx, id, leased.LeaseToken, "boot", types.ActionResult{ActionID: id, OK: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.transitionWithRepairStep(ctx, mustIncident(t, st, drain.ID), types.StateExecuting, "system", "drain", "start", nil, "platform.drain", false); err != nil {
+		t.Fatalf("drain after confirmed late result: %v", err)
+	}
+
 }
