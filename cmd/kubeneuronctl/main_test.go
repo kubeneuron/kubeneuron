@@ -101,7 +101,7 @@ func TestSuccessorLinesShowTheOverlap(t *testing.T) {
 }
 
 func TestIncidentShowPolicyHoldAndRecovery(t *testing.T) {
-	const reason = "node group spans several zones; use a single-zone node group or explicitly choose terminate-first for this pool"
+	const reason = "node group spans several zones; use a single-zone node group or explicitly choose remove-first for this pool"
 	for _, tc := range []struct {
 		name, action, result, status string
 	}{

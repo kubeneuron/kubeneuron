@@ -1068,7 +1068,7 @@ pinned instance and checks it again before termination. Replacement on EKS
 has yet to be validated on a live cluster. Start in KubeNeuron's `DryRun` mode.
 
 The operator accepts AWS playbooks containing recycle or replace. At runtime,
-EKS managed nodegroups support only terminate-first replacement. Stop/start
+EKS managed nodegroups support only remove-first replacement. Stop/start
 recycle is disabled because the Auto Scaling group can replace a stopped node.
 The [EKS add-first guide](cloud-aws.md) describes the experimental provider
 checks and the conditions that require operator inspection.

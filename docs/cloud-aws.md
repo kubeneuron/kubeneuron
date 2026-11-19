@@ -1,7 +1,7 @@
 # Add-first replacement on EKS
 
 **Experimental, not validated against a live EKS cluster.** The AWS provider
-currently advertises terminate-first replacement. The add-first path described
+currently advertises remove-first replacement. The add-first path described
 here is under development and has been exercised with simulated EKS and Auto
 Scaling responses.
 
@@ -15,9 +15,9 @@ training job's volume.
 
 | Planning refusal | Operator action |
 | --- | --- |
-| node group spans several zones | Use a single-zone managed node group or explicitly choose terminate-first for this pool. |
-| node group is managed by Cluster Autoscaler | Use a single-zone group outside Cluster Autoscaler management or explicitly choose terminate-first for this pool. |
-| no room below maxSize | Provide room for one more node in the single-zone group or explicitly choose terminate-first for this pool. |
+| node group spans several zones | Use a single-zone managed node group or explicitly choose remove-first for this pool. |
+| node group is managed by Cluster Autoscaler | Use a single-zone group outside Cluster Autoscaler management or explicitly choose remove-first for this pool. |
+| no room below maxSize | Provide room for one more node in the single-zone group or explicitly choose remove-first for this pool. |
 
 
 The scaling request sets desired capacity to the recorded value plus one and
