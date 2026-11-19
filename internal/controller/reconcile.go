@@ -1066,6 +1066,11 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 				}
 			}
 		}
+		if releaseRepair && to == types.StateExpired {
+			if err := tx.ReleaseRepairFollowers(ctx, inc.ID, now); err != nil {
+				return err
+			}
+		}
 		if releaseRepair && !fresh.Successor.Open() && !fresh.RemoveFirst.Open() {
 			if err := tx.ReleaseNodeRemediation(ctx, inc.ID); err != nil {
 				return err

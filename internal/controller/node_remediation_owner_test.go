@@ -171,7 +171,7 @@ func TestInventoryNodeUIDSharesRepairApprovalWithoutCloudIdentity(t *testing.T) 
 		t.Fatal(err)
 	}
 	c.SetEngine(engine)
-	var owner string
+	var owner, followerID string
 	for _, class := range classes {
 		sig := signal(class, "n1", "")
 		if err := c.IngestSignal(ctx, sig); err != nil {
@@ -192,6 +192,7 @@ func TestInventoryNodeUIDSharesRepairApprovalWithoutCloudIdentity(t *testing.T) 
 			}
 			continue
 		}
+		followerID = inc.ID
 		status := types.RecoveryAvailabilityFromAudit(trail(t, st, inc.ID))
 		if got.State != types.StateEvaluating || status == nil || status.Source != "node-repair" || !strings.Contains(status.Reason, owner) {
 			t.Fatalf("follower state=%s recovery=%+v", got.State, status)
@@ -219,21 +220,14 @@ func TestInventoryNodeUIDSharesRepairApprovalWithoutCloudIdentity(t *testing.T) 
 	}
 	c.SetTimings(0, time.Nanosecond)
 	drive(t, c, st, owner, types.StateExpired)
-	// A newly opened incident can now claim the original node incarnation.
-	if err := st.WithTx(ctx, func(tx store.Tx) error {
-		inc := &types.Incident{ID: "next", Target: types.Target{Node: "n1"}, Class: types.ClassThermal, State: types.StateOpen}
-		if err := tx.CreateIncident(ctx, inc); err != nil {
-			return err
-		}
-		got, err := tx.ClaimNodeRemediation(ctx, "n1", "inventory-uid", inc.ID)
-		if err == nil && got != inc.ID {
-			t.Errorf("after expiration owner=%q, want %q", got, inc.ID)
-		}
-		return err
-	}); err != nil {
-		t.Fatal(err)
+	c.SetTimings(0, time.Hour)
+	got := drive(t, c, st, followerID, types.StateAwaitingApproval)
+	if got.StepIndex != 0 || len(notifier.approvals) != 2 || !auditHas(trail(t, st, followerID), "node-repair-released", "expired") {
+		t.Fatalf("new owner step=%d approvals=%d audit=%s", got.StepIndex, len(notifier.approvals), dump(trail(t, st, followerID)))
 	}
-
+	if status := types.RecoveryAvailabilityFromAudit(trail(t, st, followerID)); status != nil && status.Source == "node-repair" {
+		t.Fatalf("stale repair wait: %+v", status)
+	}
 }
 
 type missingRepairInventory struct {
