@@ -11,6 +11,8 @@ API is `v1alpha1`.
 
 ### Added
 
+- When add-first recovery is unavailable, the controller sends a notification with the reason at the start of each hold. A restart during dispatch can repeat the notification.
+
 - **Recovery report per accelerator resource.** The report, its API and
   `kubeneuronctl report` count the window per accelerator resource, each in
   its own unit: GPU-hours for `nvidia.com/gpu` and `amd.com/gpu` apart, TPU
