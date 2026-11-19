@@ -212,20 +212,62 @@ func TestInventoryNodeUIDSharesRepairApprovalWithoutCloudIdentity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.store = missingRepairInventory{st}
+	c.store = missingRepairInventory{st, "n2"}
 	if got := step(t, c, st, third.ID, 10); got.State != types.StateNeedsHuman || len(notifier.approvals) != 1 {
 		t.Fatalf("missing node: state=%s approvals=%d", got.State, len(notifier.approvals))
 	}
 
 }
 
-type missingRepairInventory struct{ store.Store }
+type missingRepairInventory struct {
+	store.Store
+	missing string
+}
 
 func (s missingRepairInventory) GetNode(ctx context.Context, node string) (*types.Node, error) {
-	if node == "n2" {
+	if node == s.missing {
 		return nil, store.ErrNotFound
 	}
 	return s.Store.GetNode(ctx, node)
+}
+
+func TestInventoryFollowerVerifiesAfterOriginalNodeDisappears(t *testing.T) {
+	c, st, _ := walkFixture(t, false)
+	ctx := t.Context()
+	target := types.Target{Node: "n1"}
+	if err := st.WithTx(ctx, func(tx store.Tx) error {
+		for _, id := range []string{"owner", "follower"} {
+			inc := &types.Incident{ID: id, Target: target, RepairNodeUID: "original", Class: types.ClassFellOffBus, State: types.StateEvaluating, Playbook: "fell-off-bus"}
+			if id == "owner" {
+				inc.CloudIdentity = &cloud.NodeIdentity{NodeUID: "original"}
+				inc.Class = types.ClassAcceleratorFault
+				inc.State = types.StateResolved
+			}
+			if err := tx.CreateIncident(ctx, inc); err != nil {
+				return err
+			}
+			if _, err := tx.ClaimNodeRemediation(ctx, target.Node, inc.RepairNodeUID, id); err != nil {
+				return err
+			}
+		}
+		if err := tx.AppendAudit(ctx, &types.AuditEntry{IncidentID: "owner", Result: auditStepOutcomeResult("platform.replace_node", false, true)}); err != nil {
+			return err
+		}
+		if err := tx.AppendAudit(ctx, &types.AuditEntry{IncidentID: "owner", Action: "resolve", FromState: types.StateVerifying, ToState: types.StateResolved, Params: map[string]string{"infrastructure_evidence": "verified_recycle_inventory"}}); err != nil {
+			return err
+		}
+		return tx.ReleaseNodeRemediation(ctx, "owner")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c.store = missingRepairInventory{st, "n1"}
+	waitSettled(t, c, st, "follower", func(i *types.Incident) bool { return i.State == types.StateVerifying })
+	for _, entry := range trail(t, st, "follower") {
+		if entry.Action == "verify-owner-replacement" && entry.Params["owner_id"] == "owner" {
+			return
+		}
+	}
+	t.Fatal("missing verification transition linked to original owner")
 }
 
 func TestSameRepairNodeUsesRecordedInventoryUID(t *testing.T) {
@@ -243,14 +285,17 @@ func TestSameRepairNodeUsesRecordedInventoryUID(t *testing.T) {
 	}
 }
 
-type missingRepairTx struct{ store.Tx }
+type missingRepairTx struct {
+	store.Tx
+	missing string
+}
 
 func (s missingRepairInventory) WithTx(ctx context.Context, f func(store.Tx) error) error {
-	return s.Store.WithTx(ctx, func(tx store.Tx) error { return f(missingRepairTx{tx}) })
+	return s.Store.WithTx(ctx, func(tx store.Tx) error { return f(missingRepairTx{tx, s.missing}) })
 }
 
 func (s missingRepairTx) GetNode(ctx context.Context, node string) (*types.Node, error) {
-	if node == "n2" {
+	if node == s.missing {
 		return nil, store.ErrNotFound
 	}
 	return s.Tx.GetNode(ctx, node)
