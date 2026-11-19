@@ -111,10 +111,14 @@ assessment shows `unavailable [node-repair]` and names the owner. Use that
 ID with the same command to inspect the active step and its approvals.
 The incident detail panel also shows the owner in **Recovery eligibility**.
 
-After the owner's live replacement is confirmed by inventory and the owner
-resolves, the waiting incident enters its own verification window. Closing
-the owner manually supplies no inventory evidence. The waiting incident's
-audit retains the owner ID so an operator can trace both histories.
+The owner resolves by itself once its replacement is verified on the new
+node. If the cloud operation named that node (`replacement_correlation:
+successor`, add-first), the waiting incident then starts its own
+verification on the same node and asks for no second replacement. If the
+node was found only as the one that joined the pool (`pool`), the waiting
+incident goes to an operator (`NEEDS_HUMAN`). Closing the owner manually
+supplies no replacement evidence. The waiting incident's audit retains the
+owner ID so an operator can trace both histories.
 
 When an owner reaches `RESOLVED`, `EXPIRED`, or `SUPERSEDED` with no
 unsettled cloud operation, it releases the node even if a step already ran.
