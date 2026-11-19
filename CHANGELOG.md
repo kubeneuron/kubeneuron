@@ -354,6 +354,8 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- AKS add-first preflight and planning reject pools configured with multiple availability zones. The provider checks again before requesting growth.
+
 - Concurrent live repair incidents on the same node share one repair owner. The
   controller identifies the node by its pinned cloud identity or the Kubernetes
   Node UID recorded when the incident opened. Waiting incidents show the owner ID before

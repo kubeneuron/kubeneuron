@@ -18,7 +18,7 @@ Each live-cloud entry applies only to the path and run shown.
 |---|---|---|---|
 | EKS add-first (disabled) | Simulated EKS and Auto Scaling APIs only | No | No. Single-zone managed node groups only. Multi-zone groups are unsupported in this release. |
 | EKS managed nodegroup replacement (remove-first) | AWS provider and contract tests | Controller approval, cordon and drain only | No for the current path. On 2026-08-05, the v0.2.1 run on EKS `g4dn.xlarge` / Tesla T4 reached EC2 termination after an injected fault. Replacement readiness and resumed training were not verified. |
-| AKS restart and replacement, including add-first on fixed-size pools | Simulated AKS API and provider contract tests | No | No |
+| AKS restart and replacement, including add-first on fixed-size pools; configured multi-zone pools are refused before growth | Simulated AKS API and provider contract tests | No | No |
 | GKE Standard replacement (remove-first on autoscaled pools and, with a recorded size restore, on fixed-size pools of equal zones; add-first on fixed-size single-zone pools) | Simulated GKE and Compute Engine APIs. Autopilot is observation-only. | No | No |
 | DryRun and Approval modes | Controller policy tests | DryRun leaves pods unchanged. Approval exercises drain after approval. | No for the current modes |
 | Automatic mode | Controller policy tests | No dedicated Automatic execution scenario | No |

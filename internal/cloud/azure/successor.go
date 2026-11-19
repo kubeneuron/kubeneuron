@@ -49,6 +49,9 @@ func addFirstRefusal(name string, pl pool) error {
 	if pl.Autoscaling {
 		return &cloud.PoolRefusal{Code: cloud.PoolAutoscaled, Reason: fmt.Sprintf("agent pool %s is under the cluster autoscaler, which owns its size", name)}
 	}
+	if pl.ZoneCount > 1 {
+		return &cloud.PoolRefusal{Code: cloud.PoolMultiZone, Reason: "AKS chooses the zone of a new node in this pool"}
+	}
 	return nil
 }
 
@@ -115,6 +118,12 @@ func (p *Provider) planSuccessor(s cloud.Successor, t target, machines []machine
 		stateMachine: t.machine,
 		stateCount:   strconv.Itoa(int(pl.Count)),
 		stateMembers: strings.Join(names, ","),
+	}
+	for _, m := range machines {
+		if m.Name == t.machine && m.Zone != "" {
+			s.State["originalZone"] = m.Zone
+			break
+		}
 	}
 	return s, nil
 }

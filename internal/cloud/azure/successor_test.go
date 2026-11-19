@@ -249,3 +249,31 @@ func TestAddFirstFailedPoolWithoutANewMachineIsCapacity(t *testing.T) {
 		t.Fatalf("settle with a new machine = %v, want needs-operator", err)
 	}
 }
+
+func TestAddFirstRefusesMultizoneBeforeGrowth(t *testing.T) {
+	f := newFakeAKS(3)
+	f.zoneCount = 1
+	f.machines[1].Zone = "2"
+	p := testProvider(f)
+	s := prepare(t, p, newOperation(), cloud.SuccessorPlanned)
+	if s.State["originalZone"] != "2" {
+		t.Fatalf("plan zone = %q", s.State["originalZone"])
+	}
+	f.zoneCount = 2
+	refused := func(err error) {
+		t.Helper()
+		var refusal *cloud.PoolRefusal
+		if !errors.As(err, &refusal) || refusal.Code != cloud.PoolMultiZone {
+			t.Fatalf("expected multi-zone refusal: %v", err)
+		}
+	}
+	refused(p.CheckAddFirst(t.Context(), testInstance(1)))
+	_, err := p.PrepareSuccessor(t.Context(), newOperation())
+	refused(err)
+	s.RequestedAt = time.Now()
+	_, err = p.PrepareSuccessor(t.Context(), s)
+	refused(err)
+	if f.requests != 0 || len(f.calls) != 0 {
+		t.Fatalf("unexpected cloud writes: %v", f.calls)
+	}
+}

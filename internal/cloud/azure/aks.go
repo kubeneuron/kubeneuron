@@ -22,6 +22,7 @@ import (
 // pool is what this package reads from an AKS agent pool. raw is the pool as
 // returned, so a scale writes back everything it did not mean to change.
 type pool struct {
+	ZoneCount         int
 	Count             int32
 	Autoscaling       bool
 	ProvisioningState string
@@ -35,6 +36,7 @@ type pool struct {
 // machine is one AKS machine of an agent pool: its name (the node name on a
 // VMSS pool) and the ARM ID of the VMSS instance behind it.
 type machine struct {
+	Zone       string
 	Name       string
 	ResourceID string
 }
@@ -138,7 +140,7 @@ func (a *sdkAPI) Pool(ctx context.Context, name string) (pool, error) {
 	if props == nil || props.Count == nil {
 		return pool{}, fmt.Errorf("agent pool %q has no node count", name)
 	}
-	p := pool{Count: *props.Count, raw: out.AgentPool, Tags: map[string]string{}}
+	p := pool{ZoneCount: len(props.AvailabilityZones), Count: *props.Count, raw: out.AgentPool, Tags: map[string]string{}}
 	p.Autoscaling = props.EnableAutoScaling != nil && *props.EnableAutoScaling
 	if props.ProvisioningState != nil {
 		p.ProvisioningState = *props.ProvisioningState
@@ -166,7 +168,11 @@ func (a *sdkAPI) Machines(ctx context.Context, poolName string) ([]machine, erro
 			if m == nil || m.Name == nil || m.Properties == nil || m.Properties.ResourceID == nil {
 				return nil, fmt.Errorf("agent pool %q lists a machine without a name or instance", poolName)
 			}
-			all = append(all, machine{Name: *m.Name, ResourceID: *m.Properties.ResourceID})
+			item := machine{Name: *m.Name, ResourceID: *m.Properties.ResourceID}
+			if len(m.Zones) == 1 && m.Zones[0] != nil {
+				item.Zone = *m.Zones[0]
+			}
+			all = append(all, item)
 		}
 	}
 	return all, nil

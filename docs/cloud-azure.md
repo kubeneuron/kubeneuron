@@ -58,6 +58,8 @@ AKS:
 
 ### Add-first on AKS
 
+On pools configured with multiple availability zones, AKS chooses the zone of a new machine. KubeNeuron refuses add-first before requesting growth. Use a single-zone pool or set `RemoveFirst` in the remediation policy that applies to these nodes.
+
 The phases are those of [Add-first replacement](playbook-authoring.md#add-first-replacement):
 
 1. **Plan.** KubeNeuron reads the pool: its node count and machines. Nothing
