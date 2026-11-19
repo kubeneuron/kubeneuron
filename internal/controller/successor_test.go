@@ -465,6 +465,38 @@ func TestAddFirstUnavailablePoolHoldsWithTheReason(t *testing.T) {
 			t.Fatalf("got %d %s rows", count, action)
 		}
 	}
+	// Advance the cached observation past its TTL without changing the incident.
+	expireCheck := func() {
+		c.addFirst.mu.Lock()
+		defer c.addFirst.mu.Unlock()
+		key := successorOperation(inc)
+		entry := c.addFirst.entries[key]
+		entry.at = time.Now().Add(-2 * addFirstCheckTTL)
+		c.addFirst.entries[key] = entry
+	}
+	p.unavailable = fmt.Errorf("%w: node group spans several zones", cloud.ErrAddFirstUnavailable)
+	expireCheck()
+	step(t, c, st, id, 10)
+	notices := 0
+	for _, event := range notifier.events {
+		if strings.Contains(event.Message, "several zones") {
+			notices++
+		}
+	}
+	if notices != 1 || p.cordonedNode("n1") {
+		t.Fatalf("changed reason: notices=%d cordoned=%v", notices, p.cordonedNode("n1"))
+	}
+	if requests, released, replaced, plain, drained := p.counts(); requests+released+replaced+plain+drained != 0 {
+		t.Fatal("provider acted during the hold")
+	}
+	registerSuccessorAgent(t, st, 8)
+	p.unavailable = nil
+	expireCheck()
+	inc = waitSettled(t, c, st, id, func(i *types.Incident) bool { return i.State.Halted() || i.State == types.StateVerifying })
+	if inc.Successor == nil || inc.Successor.Outcome != types.SuccessorReplaced || !auditHas(trail(t, st, id), "recovery-available-again", "") {
+		t.Fatalf("corrected pool did not resume the existing incident: %s%s", inc.State, dump(trail(t, st, id)))
+	}
+
 }
 
 func TestRemoveFirstStillReplacesDirectly(t *testing.T) {

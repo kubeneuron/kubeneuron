@@ -41,6 +41,10 @@ See the AWS authorization references for [EKS](https://docs.aws.amazon.com/servi
 
 After replacement, the last desired size requested through EKS is the original size plus one. Termination decrements the backing group's desired capacity to the original size. EKS can temporarily show the higher value. When updating the node group's scaling configuration, explicitly setting the intended desired size reconciles the two.
 
+## When add-first recovery is unavailable
+
+The controller sends a best-effort notification when a live add-first eligibility check refuses recovery. The reason remains visible in `kubeneuronctl incidents show` and the incident audit. The controller checks again after its cached assessment expires and continues the same incident when the pool becomes eligible.
+
 ## When cleanup needs an operator
 
 AWS bills the additional instance while it exists. If the operation is
