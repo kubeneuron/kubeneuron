@@ -431,3 +431,50 @@ func TestConcurrentRepairStepsExcludeNodeAndDevice(t *testing.T) {
 		t.Fatalf("expected exactly one committed claim, got %+v and %+v", a, b)
 	}
 }
+
+func TestLateResetResultReleasesOnlyMatchingClaim(t *testing.T) {
+	s := openTestStore(t)
+	ctx := t.Context()
+	reset, drain := testIncident("reset"), testIncident("drain")
+	drain.Target.GPUUUID = ""
+	for _, inc := range []*types.Incident{reset, drain} {
+		if err := s.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	claim := func(incident, action string, device, want bool) {
+		t.Helper()
+		err := s.WithTx(ctx, func(tx store.Tx) error {
+			got, err := tx.ClaimRepairStep(ctx, "node-a", "uid-a", incident, action, device)
+			if err == nil && got != want {
+				t.Errorf("claim %s = %t, want %t", incident, got, want)
+			}
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	claim(reset.ID, "reset-current", true, true)
+	for _, id := range []string{"reset-old", "reset-current"} {
+		if err := s.EnqueueAction(ctx, "node-a", types.Action{ID: id, IncidentID: reset.ID, Type: types.ActionGPUReset}); err != nil {
+			t.Fatal(err)
+		}
+		leased, err := s.ClaimNextAction(ctx, "node-a", "boot-a", time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res := types.ActionResult{ActionID: id, OK: true}
+		if err := s.CompleteClaimedAction(ctx, id, "obsolete", "boot-a", res); !errors.Is(err, store.ErrLeaseLost) {
+			t.Fatalf("obsolete lease: %v", err)
+		}
+		if err := s.CompleteClaimedAction(ctx, id, leased.LeaseToken, "boot-b", res); !errors.Is(err, store.ErrExecutorBootMismatch) {
+			t.Fatalf("wrong boot: %v", err)
+		}
+		claim(drain.ID, "", false, false)
+		if err := s.CompleteClaimedAction(ctx, id, leased.LeaseToken, "boot-a", res); err != nil {
+			t.Fatal(err)
+		}
+		claim(drain.ID, "", false, id == "reset-current")
+	}
+}
