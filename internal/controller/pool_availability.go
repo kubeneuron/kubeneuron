@@ -63,8 +63,10 @@ func (s *inventorySync) recordPools(nodes []types.Node, engine *playbook.Engine,
 	rows := make([]types.PoolAvailability, 0, len(counts))
 	checksLeft := 4
 	for key, count := range counts {
-		row := types.PoolAvailability{Pool: key.name, Cloud: key.cloud, AcceleratorNodes: count, Status: "unknown", ReplacementPolicy: cmp.Or(orders[key], "AddFirst")}
+		row := types.PoolAvailability{Pool: key.name, Cloud: key.cloud, AcceleratorNodes: count, Status: "unknown", ReplacementPolicy: cmp.Or(orders[key], "none")}
 		switch {
+		case row.ReplacementPolicy == "none":
+			row.Status, row.ReasonCode, row.Reason = "not applicable", "no-replacement-policy", "no remediation policy replaces these nodes"
 		case row.ReplacementPolicy == "RemoveFirst":
 			row.Status = ""
 		case previous[key].CheckedAt != nil && now.Sub(*previous[key].CheckedAt) < 10*time.Minute:
@@ -73,12 +75,14 @@ func (s *inventorySync) recordPools(nodes []types.Node, engine *playbook.Engine,
 			cached.AcceleratorNodes = count
 			row = cached
 		case row.Cloud == "EKS":
-			// The release disables EKS add-first regardless of pool configuration.
+			// Remove this release gate when the EKS provider advertises add-first.
 			row.CheckedAt = &now
 			row.Status = "unavailable"
 			row.ReasonCode = "eks-add-first-disabled"
 			row.Reason = "add-first on EKS is not enabled in this release"
-		case check != nil && checksLeft > 0:
+		case check == nil:
+			row.ReasonCode, row.Reason = "no-cloud-provider", "no cloud provider configured"
+		case checksLeft > 0:
 			checksLeft--
 			row.CheckedAt = &now
 			err := check(representatives[key])
@@ -136,6 +140,9 @@ func poolVendorOrder(engine *playbook.Engine, vendor types.AcceleratorVendor) st
 }
 
 func (c *Controller) poolChecker(ctx context.Context) func(types.Node) error {
+	if p, ok := c.platform.(interface{ CloudRecyclingConfigured() bool }); ok && !p.CloudRecyclingConfigured() {
+		return nil
+	}
 	reader, ok := c.platform.(interface {
 		platform.CloudNodeObserver
 		AddFirstAvailable(context.Context, cloud.NodeIdentity) error

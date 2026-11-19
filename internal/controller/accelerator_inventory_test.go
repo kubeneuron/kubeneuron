@@ -312,6 +312,7 @@ func TestInventoryLabelsPlaceNodesInTheirPool(t *testing.T) {
 
 func TestAcceleratorPoolInventoryBeforeIncident(t *testing.T) {
 	c, _, p := inventoryFixture(t)
+	c.SetEngine(poolTestEngine(t))
 	for i, label := range []string{"eks.amazonaws.com/nodegroup", "cloud.google.com/gke-nodepool", "kubernetes.azure.com/agentpool", "cloud.google.com/gke-nodepool"} {
 		p.nodes = append(p.nodes, types.Node{Name: []string{"e", "g1", "a", "g2"}[i], Labels: map[string]string{label: "train"}, Devices: []types.DeviceCount{{Resource: "nvidia.com/gpu", Capacity: 4}}})
 	}
@@ -328,7 +329,7 @@ func TestAcceleratorPoolInventoryBeforeIncident(t *testing.T) {
 			}
 			continue
 		}
-		if row.Status != "unknown" || row.CheckedAt != nil {
+		if row.Status != "unknown" || row.Reason != "no cloud provider configured" || row.CheckedAt != nil {
 			t.Fatalf("unexpected assessment: %+v", row)
 		}
 	}
@@ -389,7 +390,7 @@ func TestPoolCheckInterval(t *testing.T) {
 		calls  int
 		status string
 	}{{0, 1, "unknown"}, {9 * time.Minute, 1, "unknown"}, {10 * time.Minute, 2, "available"}} {
-		c.inventory.recordPools(nodes, nil, now.Add(tc.after), check)
+		c.inventory.recordPools(nodes, poolTestEngine(t), now.Add(tc.after), check)
 		row := c.PoolAvailability().Pools[0]
 		if row.Status != tc.status || calls != tc.calls || row.CheckedAt == nil || row.AcceleratorNodes != 2 {
 			t.Fatalf("after %s: calls %d row %+v", tc.after, calls, row)
@@ -414,6 +415,7 @@ func (p *poolAssessmentPlatform) AddFirstAvailable(_ context.Context, pin cloud.
 }
 func TestPoolChecksBeforeIncident(t *testing.T) {
 	c, _, inv := inventoryFixture(t)
+	c.SetEngine(poolTestEngine(t))
 	p := &poolAssessmentPlatform{inventoryPlatform: inv}
 	c.platform = p
 	for name, label := range map[string]string{"aks": "kubernetes.azure.com/agentpool", "gke": "cloud.google.com/gke-nodepool", "eks": "eks.amazonaws.com/nodegroup"} {
@@ -469,6 +471,7 @@ func (p *blockingPoolPlatform) AddFirstAvailable(ctx context.Context, _ cloud.No
 
 func TestInventoryWrittenBeforePoolTimeout(t *testing.T) {
 	c, st, inv := inventoryFixture(t)
+	c.SetEngine(poolTestEngine(t))
 	p := &blockingPoolPlatform{&poolAssessmentPlatform{inventoryPlatform: inv}, make(chan struct{})}
 	p.nodes = []types.Node{{Name: "gke", UID: "gke-uid", Labels: map[string]string{"cloud.google.com/gke-nodepool": "train"}, Devices: tpuDevices}}
 	c.platform = p
@@ -499,7 +502,7 @@ func TestPoolCheckBudget(t *testing.T) {
 	calls := 0
 	check := func(types.Node) error { calls++; return nil }
 	for _, want := range []int{4, 6} {
-		c.inventory.recordPools(nodes, nil, now, check)
+		c.inventory.recordPools(nodes, poolTestEngine(t), now, check)
 		pending := 0
 		for _, row := range c.PoolAvailability().Pools {
 			if row.CheckedAt == nil && row.Status == "unknown" {
@@ -509,5 +512,24 @@ func TestPoolCheckBudget(t *testing.T) {
 		if calls != want || pending != len(nodes)-want {
 			t.Fatalf("calls=%d pending=%d want %d checked", calls, pending, want)
 		}
+	}
+}
+
+func poolTestEngine(t *testing.T) *playbook.Engine {
+	t.Helper()
+	e, err := playbook.NewEngine(map[string]*playbook.Playbook{"replace": {Steps: []playbook.Step{{Action: "platform.replace_node"}}}}, []playbook.Policy{{Class: types.ClassFellOffBus, Playbook: "replace"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func TestPoolWithoutReplacementPolicySkipsCheck(t *testing.T) {
+	var c Controller
+	nodes := []types.Node{{Name: "a", Labels: map[string]string{"kubernetes.azure.com/agentpool": "train"}, Devices: tpuDevices}}
+	c.inventory.recordPools(nodes, nil, time.Now(), func(types.Node) error { t.Fatal("unexpected cloud check"); return nil })
+	row := c.PoolAvailability().Pools[0]
+	if row.ReplacementPolicy != "none" || row.Status != "not applicable" || row.CheckedAt != nil {
+		t.Fatal(row)
 	}
 }
