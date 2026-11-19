@@ -1050,9 +1050,10 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 		if err := tx.UpdateIncident(ctx, inc); err != nil {
 			return err
 		}
-		releaseRepair := from == types.StateVerifying && to == types.StateResolved
+		releaseRepair := from == types.StateVerifying && to == types.StateResolved && action == "resolve"
 		approvalEnded := from == types.StateAwaitingApproval && (to == types.StateExpired || (to == types.StateNeedsHuman && result == "approval rejected"))
-		if approvalEnded && !fresh.Successor.Open() && !fresh.RemoveFirst.Open() {
+		aborted := approvalEnded || (to == types.StateResolved && action == "manual-resolve")
+		if aborted && !fresh.Successor.Open() && !fresh.RemoveFirst.Open() {
 			entries, err := tx.AuditTrail(ctx, inc.ID)
 			if err != nil {
 				return err
@@ -1067,7 +1068,7 @@ func (c *Controller) transition(ctx context.Context, inc *types.Incident, to typ
 				}
 			}
 		}
-		if releaseRepair && approvalEnded {
+		if releaseRepair && aborted {
 			if err := tx.ReleaseRepairFollowers(ctx, inc.ID, now, result); err != nil {
 				return err
 			}

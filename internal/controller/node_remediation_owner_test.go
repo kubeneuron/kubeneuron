@@ -153,7 +153,7 @@ func TestAutomaticRepairFollowerDoesNotRepeatReplacement(t *testing.T) {
 }
 
 func TestInventoryNodeUIDSharesRepairApprovalWithoutCloudIdentity(t *testing.T) {
-	for _, ending := range []string{"expired", "rejected"} {
+	for _, ending := range []string{"expired", "rejected", "manual"} {
 		t.Run(ending, func(t *testing.T) { checkInventoryRepairApproval(t, ending) })
 	}
 }
@@ -226,14 +226,25 @@ func checkInventoryRepairApproval(t *testing.T, ending string) {
 		t.Fatalf("missing node: state=%s approvals=%d", got.State, len(notifier.approvals))
 	}
 	wantReason := "no decision"
-	if ending == "rejected" {
+	c.store = st
+	switch ending {
+	case "manual":
+		inc := mustIncident(t, st, owner)
+		wantReason = "operator closed before cordon"
+		for _, replay := range []bool{false, true} {
+			resolved, replayed, err := c.ResolveIncidentRequest(ctx, owner, "alice", wantReason, inc.Version, "close-owner")
+			if err != nil || replayed != replay || resolved.State != types.StateResolved {
+				t.Fatalf("manual resolution: replay=%t err=%v", replayed, err)
+			}
+		}
+	case "rejected":
 		inc := mustIncident(t, st, owner)
 		if err := c.DecideApproval(ctx, owner, "alice", "reject cordon", types.ApprovalRejected, inc.ApprovalEpoch, "", ""); err != nil {
 			t.Fatal(err)
 		}
 		waitSettled(t, c, st, owner, func(i *types.Incident) bool { return i.State == types.StateNeedsHuman })
 		wantReason = "approval rejected"
-	} else {
+	default:
 		c.SetTimings(0, time.Nanosecond)
 		drive(t, c, st, owner, types.StateExpired)
 	}
