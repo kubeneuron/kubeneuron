@@ -312,7 +312,7 @@ func (c *Controller) lastPolicyAssessment(ctx context.Context, id string) (strin
 			last = trail[i].Result
 			break
 		}
-		if trail[i].Action == "recovery-available" {
+		if trail[i].Action == "recovery-available" || trail[i].Action == "recovery-available-again" {
 			break
 		}
 	}
@@ -336,7 +336,7 @@ func (c *Controller) recordRecoveryDenied(ctx context.Context, inc *types.Incide
 	return nil
 }
 
-// recordRecoveryAvailable writes the policy-scope "recovery-available" row
+// recordRecoveryAvailable writes the policy-scope "recovery-available-again" row
 // once the policy no longer holds a step it held before, so the panel and
 // CLI stop showing the old denial.
 func (c *Controller) recordRecoveryAvailable(ctx context.Context, inc *types.Incident) error {
@@ -346,7 +346,7 @@ func (c *Controller) recordRecoveryAvailable(ctx context.Context, inc *types.Inc
 	if err != nil || last == "" {
 		return err
 	}
-	if err := c.appendAudit(ctx, inc, "system", "recovery-available", "the policy's recovery settings allow the step; step authorization still required"); err != nil {
+	if err := c.appendAudit(ctx, inc, "system", "recovery-available-again", "the policy's recovery settings allow the step; step authorization still required"); err != nil {
 		return err
 	}
 	c.policyAssessed[inc.ID] = ""

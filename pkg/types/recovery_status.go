@@ -31,7 +31,7 @@ func RecoveryAvailabilityFromAudit(trail []*AuditEntry) *RecoveryAvailability {
 			source, status = "provider", "eligible"
 		case "recovery-unavailable":
 			source, status = "policy", "unavailable"
-		case "recovery-available":
+		case "recovery-available", "recovery-available-again":
 			source, status = "policy", "eligible"
 		}
 		if source == "" || seen[source] {

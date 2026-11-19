@@ -98,7 +98,7 @@ func TestNoUsableRecoveryHoldsBeforeCordon(t *testing.T) {
 			entries = trail(t, st, id)
 			lifted := false
 			for _, e := range entries {
-				lifted = lifted || e.Action == "recovery-available"
+				lifted = lifted || e.Action == "recovery-available-again"
 			}
 			if !lifted {
 				t.Fatalf("no recovery-available row after the policy changed%s", dump(entries))

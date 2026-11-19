@@ -27,11 +27,11 @@ func TestProviderEligibilityDoesNotClearPolicyUnavailability(t *testing.T) {
 	if got.Status != "unavailable" || got.Source != "policy" || got.Reason != "add-first unsupported" {
 		t.Fatalf("got %+v", got)
 	}
-	trail = append(trail, &AuditEntry{Action: "recovery-available", Result: "strategy available"})
+	trail = append(trail, &AuditEntry{Action: "recovery-available-again", Result: "strategy available"})
 	if got = RecoveryAvailabilityFromAudit(trail); got.Status != "eligible" {
 		t.Fatalf("got %+v", got)
 	}
-	trail = append(trail, &AuditEntry{Action: "provider-recovery-unavailable", Result: "identity changed"}, &AuditEntry{Action: "recovery-available", Result: "strategy available"})
+	trail = append(trail, &AuditEntry{Action: "provider-recovery-unavailable", Result: "identity changed"}, &AuditEntry{Action: "recovery-available-again", Result: "strategy available"})
 	if got = RecoveryAvailabilityFromAudit(trail); got.Status != "unavailable" || got.Source != "provider" {
 		t.Fatalf("got %+v", got)
 	}
