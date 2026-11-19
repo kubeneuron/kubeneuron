@@ -537,7 +537,7 @@
       ]
     },
     {
-      "id": 8,
+      "id": 9,
       "title": "Accelerator faults not acted on",
       "type": "timeseries",
       "description": "Faults an agent read whose source is off by default and not switched on, so no incident opened (AWS Neuron sysfs: spec.safety.acceleratorHealth.awsNeuronSysfs.enabled). Experimental, not validated on hardware. kubeneuronctl health names the node and device.",
@@ -549,7 +549,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 24
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
