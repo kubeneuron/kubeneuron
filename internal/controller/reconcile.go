@@ -401,7 +401,7 @@ func (c *Controller) verifyAfterOwnersReplacement(ctx context.Context, inc *type
 	if err != nil {
 		return err
 	}
-	if owner.State != types.StateResolved || owner.DryRun {
+	if owner.State != types.StateResolved || owner.DryRun || cloudOperationUnsettled(owner) {
 		return nil
 	}
 	if !sameRepairNode(inc, owner) {
@@ -458,6 +458,7 @@ func (c *Controller) parkForApproval(ctx context.Context, inc *types.Incident, s
 		inc.SignalSeen = fresh.SignalSeen
 		// Only saveSuccessor writes the successor, and it writes through.
 		inc.Successor = fresh.Successor
+		inc.RemoveFirst = fresh.RemoveFirst
 		inc.Version = fresh.Version
 		inc.ApprovalEpoch = fresh.ApprovalEpoch + 1
 		if err := tx.UpdateIncident(ctx, inc); err != nil {
@@ -1071,6 +1072,7 @@ func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.In
 		inc.SignalSeen = fresh.SignalSeen
 		// Only saveSuccessor writes the successor, and it writes through.
 		inc.Successor = fresh.Successor
+		inc.RemoveFirst = fresh.RemoveFirst
 		inc.Vendor = fresh.Vendor
 		inc.Version = fresh.Version
 		if err := tx.UpdateIncident(ctx, inc); err != nil {
@@ -1079,7 +1081,7 @@ func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.In
 		releaseRepair := from == types.StateVerifying && to == types.StateResolved && action == "resolve"
 		approvalEnded := from == types.StateAwaitingApproval && (to == types.StateExpired || (to == types.StateNeedsHuman && result == "approval rejected"))
 		aborted := approvalEnded || to == types.StateSuperseded || (to == types.StateResolved && action == "manual-resolve")
-		if aborted && !fresh.Successor.Open() && !fresh.RemoveFirst.Open() {
+		if aborted && !cloudOperationUnsettled(fresh) {
 			entries, err := tx.AuditTrail(ctx, inc.ID)
 			if err != nil {
 				return err
@@ -1099,7 +1101,7 @@ func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.In
 				return err
 			}
 		}
-		if releaseRepair && !fresh.Successor.Open() && !fresh.RemoveFirst.Open() {
+		if releaseRepair && !cloudOperationUnsettled(fresh) {
 			if err := tx.ReleaseNodeRemediation(ctx, inc.ID); err != nil {
 				return err
 			}
