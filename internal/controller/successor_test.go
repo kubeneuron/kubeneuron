@@ -783,3 +783,36 @@ func TestReleaseRequestedSuccessorChecksWorkload(t *testing.T) {
 		})
 	}
 }
+
+func TestReportIncludesHeldAddFirstIncidentAfterManualClosure(t *testing.T) {
+	p := newSuccessorPlatform()
+	p.unavailable = fmt.Errorf("%w: no room below maxSize", cloud.ErrAddFirstUnavailable)
+	c, st, _ := successorFixture(t, recoverymode.Automatic, p, "")
+	id := openOn(t, c, "n1")
+	step(t, c, st, id, 10)
+	if !auditHas(trail(t, st, id), "notified", "no room below maxSize") {
+		t.Fatal("hold was not established")
+	}
+	readReport := func() *types.RecoveryReport {
+		t.Helper()
+		r, err := c.RecoveryReport(t.Context(), time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Incidents != 1 || r.Recovered != 0 || r.RecoveredGPUHours != 0 || len(r.IncidentDetails) != 1 || r.IncidentDetails[0].ID != id {
+			t.Fatalf("unexpected recovery accounting: %+v", r)
+		}
+		return r
+	}
+	r := readReport()
+	if len(r.Open) != 1 || r.Open[0].ID != id || r.ObservedOnly != 0 {
+		t.Fatalf("held incident: %+v", r)
+	}
+	if err := c.ResolveIncident(t.Context(), id, "operator", "closing without a replacement"); err != nil {
+		t.Fatal(err)
+	}
+	r = readReport()
+	if len(r.Open) != 0 || r.ObservedOnly != 1 || r.IncidentDetails[0].RecoverySeconds != nil {
+		t.Fatalf("manually closed incident: %+v", r)
+	}
+}
