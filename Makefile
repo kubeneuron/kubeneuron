@@ -22,7 +22,7 @@ GENERATED_PATHS := api/v1alpha1/zz_generated.deepcopy.go config/crd/bases deploy
 # The lock verify-generate serialises on. In .gitignore; created on first use.
 GENERATE_LOCK := .make-generate.lock
 
-.PHONY: all build test test-integration-kind test-upgrade-rollback-kind kind-clean lint clean tidy generate verify-generate verify-generate-locked generate-gpucatalog verify-gpucatalog proto web docs docs-serve docker gates gates-full verify-docs verify-image verify-hw-e2e-sweep verify-hw-e2e-observability verify-tls-scripts mirror test-gpu-observability-kind verify-gpu-observability-fixture kind-gpu-observability-clean test-workload-safe-kind verify-workload-safe-examples test-alert-rules check-rules
+.PHONY: all build test test-integration-kind test-journal-kind test-upgrade-rollback-kind kind-clean lint clean tidy generate verify-generate verify-generate-locked generate-gpucatalog verify-gpucatalog proto web docs docs-serve docker gates gates-full verify-docs verify-image verify-hw-e2e-sweep verify-hw-e2e-observability verify-tls-scripts mirror test-gpu-observability-kind verify-gpu-observability-fixture kind-gpu-observability-clean test-workload-safe-kind verify-workload-safe-examples test-alert-rules check-rules
 
 all: build
 
@@ -295,6 +295,14 @@ test-integration-kind: build
 	KIND_BIN="$(KIND)" KUBECTL_BIN="$(KUBECTL)" \
 	INTEGRATION_SUITE="$(INTEGRATION_SUITE)" \
 	./hack/kind-integration.sh
+
+# The agent's journal mount on its own kind cluster (1 control plane + 2
+# workers): upgrade from main, the node label, one agent per node, the
+# neighbour's Pod UID, a failed mount and the switch off
+# (hack/kind-journal.sh). Builds the images of this tree and of main.
+test-journal-kind:
+	CLUSTER_NAME="$(KIND_CLUSTER_NAME)" KIND_BIN="$(KIND)" KUBECTL_BIN="$(KUBECTL)" \
+	./hack/kind-journal.sh
 
 # The v0.7.0 -> HEAD -> v0.7.0 (restore the pre-upgrade snapshot, then the
 # images) -> HEAD rehearsal from docs/upgrade.md, on one disposable kind
