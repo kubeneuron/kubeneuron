@@ -298,7 +298,7 @@ func TestInventoryFollowerVerifiesAfterOriginalNodeDisappears(t *testing.T) {
 			if err := tx.CreateIncident(ctx, inc); err != nil {
 				return err
 			}
-			if _, err := tx.ClaimNodeRemediation(ctx, target.Node, inc.RepairNodeUID, id); err != nil {
+			if _, err := tx.ClaimNodeRemediation(ctx, target.Node, inc.RepairNodeUID, id, time.Now()); err != nil {
 				return err
 			}
 		}

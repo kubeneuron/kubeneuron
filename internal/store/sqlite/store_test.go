@@ -898,6 +898,7 @@ func TestConcurrentNodeRemediationClaims(t *testing.T) {
 	}
 	defer func() { _ = s.Close() }()
 	ctx := context.Background()
+	claimedAt := time.Unix(1700000000, 0).UTC()
 	ids := []string{"incident-a", "incident-b"}
 	for _, id := range ids {
 		if err := s.WithTx(ctx, func(tx store.Tx) error {
@@ -922,7 +923,7 @@ func TestConcurrentNodeRemediationClaims(t *testing.T) {
 			var owner string
 			err := s.WithTx(ctx, func(tx store.Tx) error {
 				var err error
-				owner, err = tx.ClaimNodeRemediation(ctx, "node-a", "uid-a", id)
+				owner, err = tx.ClaimNodeRemediation(ctx, "node-a", "uid-a", id, claimedAt)
 				return err
 			})
 			results <- result{owner, err}
@@ -935,6 +936,15 @@ func TestConcurrentNodeRemediationClaims(t *testing.T) {
 	}
 	if first.owner != second.owner || (first.owner != ids[0] && first.owner != ids[1]) {
 		t.Fatalf("unexpected owners: %q and %q", first.owner, second.owner)
+	}
+	for _, id := range ids {
+		if id == first.owner {
+			continue
+		}
+		entries, err := s.AuditTrail(ctx, id)
+		if err != nil || len(entries) != 1 || !entries[0].Time.Equal(claimedAt) {
+			t.Fatalf("wait audit=%+v err=%v, want time %s", entries, err, claimedAt)
+		}
 	}
 }
 
@@ -954,7 +964,7 @@ func TestFollowerRemembersReleasedOwnerAfterRestart(t *testing.T) {
 		var owner string
 		if err := s.WithTx(ctx, func(tx store.Tx) error {
 			var err error
-			owner, err = tx.ClaimNodeRemediation(ctx, "node-a", "uid-a", id)
+			owner, err = tx.ClaimNodeRemediation(ctx, "node-a", "uid-a", id, time.Now())
 			return err
 		}); err != nil {
 			t.Fatal(err)

@@ -13,7 +13,7 @@ import (
 
 // ClaimNodeRemediation records the first owner or links the incident to the
 // existing owner. The caller's transaction also records any change of step.
-func (q *Queries) ClaimNodeRemediation(ctx context.Context, node, uid, incidentID string) (string, error) {
+func (q *Queries) ClaimNodeRemediation(ctx context.Context, node, uid, incidentID string, at time.Time) (string, error) {
 	// A follower must verify its original owner's outcome, even if the node
 	// becomes available between reconciles or during a leadership change.
 	var owner string
@@ -50,7 +50,7 @@ func (q *Queries) ClaimNodeRemediation(ctx context.Context, node, uid, incidentI
 			return "", err
 		}
 		err = q.AppendAudit(ctx, &types.AuditEntry{
-			IncidentID: incidentID, Time: time.Now(), FromState: inc.State, ToState: inc.State,
+			IncidentID: incidentID, Time: at, FromState: inc.State, ToState: inc.State,
 			Actor: "system", Action: "wait-for-node-repair", Params: map[string]string{"owner_id": owner},
 			Result: "node repair is owned by incident " + owner,
 		})

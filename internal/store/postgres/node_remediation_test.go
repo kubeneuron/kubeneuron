@@ -5,6 +5,7 @@ package postgres
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -44,7 +45,7 @@ func TestConcurrentNodeRemediationClaims(t *testing.T) {
 				if inc.RepairNodeUID != "uid-a" {
 					return fmt.Errorf("stored repair UID = %q", inc.RepairNodeUID)
 				}
-				owner, err = tx.ClaimNodeRemediation(ctx, "node-a", inc.RepairNodeUID, id)
+				owner, err = tx.ClaimNodeRemediation(ctx, "node-a", inc.RepairNodeUID, id, time.Now())
 				return err
 			})
 			results <- result{owner, err}

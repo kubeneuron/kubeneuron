@@ -350,7 +350,7 @@ func (c *Controller) holdForRepairOwner(ctx context.Context, inc *types.Incident
 		changed := errors.New("node identity changed since the incident opened")
 		err := c.store.WithTx(ctx, func(tx store.Tx) error {
 			var err error
-			owner, err = tx.ClaimNodeRemediation(ctx, inc.Target.Node, uid, inc.ID)
+			owner, err = tx.ClaimNodeRemediation(ctx, inc.Target.Node, uid, inc.ID, time.Now())
 			if err != nil || owner != inc.ID || inc.CloudIdentity != nil {
 				return err
 			}

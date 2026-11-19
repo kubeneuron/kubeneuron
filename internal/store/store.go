@@ -84,7 +84,7 @@ type IncidentFilter struct {
 // and its audit entry to persist in the same transaction.
 type Tx interface {
 	// ClaimNodeRemediation returns the winning incident ID for this Node identity.
-	ClaimNodeRemediation(ctx context.Context, node, uid, incidentID string) (string, error)
+	ClaimNodeRemediation(ctx context.Context, node, uid, incidentID string, at time.Time) (string, error)
 	ReleaseNodeRemediation(ctx context.Context, incidentID string) error
 	ReleaseRepairFollowers(ctx context.Context, ownerID string, at time.Time, reason string) error
 	// GetOpenIncident reads the current non-terminal incident for a target and
