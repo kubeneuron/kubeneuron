@@ -15,3 +15,5 @@ CREATE TABLE node_remediation_followers (
     CHECK (incident_id <> owner_id)
 );
 CREATE INDEX node_remediation_followers_owner ON node_remediation_followers(owner_id);
+
+ALTER TABLE incidents ADD COLUMN repair_node_uid TEXT NOT NULL DEFAULT '';

@@ -901,6 +901,9 @@ func (c *Controller) openIncidentTx(ctx context.Context, tx store.Tx, sig types.
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return nil, err
 	}
+	if node != nil {
+		inc.RepairNodeUID = node.UID
+	}
 	inc.Accelerators = incidentAccelerators(node, inc)
 	if err := tx.CreateIncident(ctx, inc); err != nil {
 		return nil, err

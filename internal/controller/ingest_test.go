@@ -66,6 +66,9 @@ func TestIngestOpensIncidentWithPlaybookAndAudit(t *testing.T) {
 	c, st := newIngestTestController(t)
 	ctx := context.Background()
 
+	if err := st.UpsertNode(ctx, &types.Node{Name: "n1", UID: "original"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.ingest(ctx, signal(types.ClassFellOffBus, "n1", "GPU-1")); err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +80,9 @@ func TestIngestOpensIncidentWithPlaybookAndAudit(t *testing.T) {
 		t.Fatalf("incidents = %d, want 1", len(incidents))
 	}
 	inc := incidents[0]
+	if inc.RepairNodeUID != "original" {
+		t.Fatalf("stored repair node UID = %q", inc.RepairNodeUID)
+	}
 	if inc.State != types.StateOpen || inc.Playbook != "fell-off-bus" || !inc.DryRun {
 		t.Fatalf("incident = %+v, want OPEN with fell-off-bus playbook in dry-run", inc)
 	}

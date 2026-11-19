@@ -335,6 +335,8 @@ type Incident struct {
 	// operations (acknowledge and resolve) rather than asking API clients to
 	// infer concurrency from a timestamp.
 	Version int `json:"resource_version"`
+	// RepairNodeUID pins the Kubernetes inventory incarnation for repair ownership.
+	RepairNodeUID string `json:"-"`
 	// CloudIdentity is the original target pinned when the incident opens.
 	// Nil on legacy/unidentified incidents; never infer authorization from it.
 	CloudIdentity *cloud.NodeIdentity `json:"cloud_identity,omitempty"`

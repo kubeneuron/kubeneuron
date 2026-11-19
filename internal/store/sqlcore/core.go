@@ -431,14 +431,14 @@ func (q *Queries) CreateIncident(ctx context.Context, inc *types.Incident) error
 		INSERT INTO incidents (id, node, gpu_uuid, gpu_index, pci_addr, class, state, playbook,
 		                       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
 		                       vendor, opened_at, updated_at, state_changed_at, version, cloud_identity,
-		                       successor, successor_open, remove_first, remove_first_open, accelerators)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		                       successor, successor_open, remove_first, remove_first_open, accelerators, repair_node_uid)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		inc.ID, inc.Target.Node, inc.Target.GPUUUID, inc.Target.GPUIndex,
 		types.NormalizePCIAddress(inc.Target.PCIAddr),
 		string(inc.Class), string(inc.State), inc.Playbook,
 		inc.StepIndex, inc.Attempt, b2i(inc.DryRun), inc.SignalSeen, b2i(inc.RemediationSlotHeld), inc.ApprovalEpoch,
 		string(inc.Vendor), ts(inc.OpenedAt), ts(inc.UpdatedAt), ts(stateChanged), inc.Version, string(identity),
-		string(successor), b2i(inc.Successor.Open()), string(removeFirst), b2i(inc.RemoveFirst.Open()), string(accelerators))
+		string(successor), b2i(inc.Successor.Open()), string(removeFirst), b2i(inc.RemoveFirst.Open()), string(accelerators), inc.RepairNodeUID)
 	return err
 }
 
@@ -754,7 +754,7 @@ const incidentSelect = `
 	SELECT id, node, gpu_uuid, gpu_index, pci_addr, class, state, playbook,
 	       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
 	       vendor, opened_at, updated_at, state_changed_at, resolved_at, version, cloud_identity, successor,
-	       remove_first, accelerators
+	       remove_first, accelerators, repair_node_uid
 	FROM incidents`
 
 type rowScanner interface{ Scan(dest ...any) error }
@@ -766,7 +766,7 @@ func scanIncident(r rowScanner) (*types.Incident, error) {
 	var resolved sql.NullString
 	err := r.Scan(&inc.ID, &inc.Target.Node, &inc.Target.GPUUUID, &inc.Target.GPUIndex,
 		&inc.Target.PCIAddr, &class, &state, &inc.Playbook, &inc.StepIndex, &inc.Attempt, &dryRun,
-		&inc.SignalSeen, &slotHeld, &inc.ApprovalEpoch, &vendor, &opened, &updated, &stateChanged, &resolved, &inc.Version, &identity, &successor, &removeFirst, &accelerators)
+		&inc.SignalSeen, &slotHeld, &inc.ApprovalEpoch, &vendor, &opened, &updated, &stateChanged, &resolved, &inc.Version, &identity, &successor, &removeFirst, &accelerators, &inc.RepairNodeUID)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}

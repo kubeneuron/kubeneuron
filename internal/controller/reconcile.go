@@ -338,12 +338,25 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 	// Serialize disruptive repair steps against the incarnation pinned at open.
 	// The notice-only ladder uses its own cordon ownership accounting.
 	def, registered := action.ByWire(step.Action)
+	uid := inc.RepairNodeUID
+	if inc.CloudIdentity != nil {
+		uid = inc.CloudIdentity.NodeUID
+	}
 	if registered && def.Scope == action.ScopeNode && (def.Destructive || def.AgentDestructive) &&
-		inc.CloudIdentity != nil && inc.Class != types.ClassCloudInterruption && !c.simulating(ctx, inc) {
+		uid != "" && inc.Class != types.ClassCloudInterruption && !c.simulating(ctx, inc) {
+		if inc.CloudIdentity == nil {
+			node, err := c.store.GetNode(ctx, inc.Target.Node)
+			if err != nil {
+				return err
+			}
+			if node.UID != uid {
+				return c.escalate(ctx, inc, "node identity changed since the incident opened")
+			}
+		}
 		var owner string
 		err := c.store.WithTx(ctx, func(tx store.Tx) error {
 			var err error
-			owner, err = tx.ClaimNodeRemediation(ctx, inc.Target.Node, inc.CloudIdentity.NodeUID, inc.ID)
+			owner, err = tx.ClaimNodeRemediation(ctx, inc.Target.Node, uid, inc.ID)
 			return err
 		})
 		if err != nil {
