@@ -154,6 +154,7 @@ replaces a node without approval only when the fault location is
 
 | Route | Purpose |
 |---|---|
+| `GET /api/v1/pools` | Read the leader’s cached accelerator pool assessments before an incident. The response contains a `pools` array with pool name, cloud, accelerator node count, replacement policy, capability flag, and assessment. When present, `checked_at` gives the UTC assessment time, `reason_code` and `reason` explain the status, and `action` gives the operator a next step. An explicit `RemoveFirst` policy omits the assessment status. Reads require operator authentication. A standby returns `503`. |
 | `GET /api/v1/nodes` | registered nodes with GPU inventory and heartbeat age |
 | `GET /api/v1/nodes/{node}` | one node's detail |
 | `GET /api/v1/nodes/{node}/accelerators` | latest per-vendor accelerator runtime reports |
