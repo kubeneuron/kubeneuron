@@ -632,6 +632,46 @@ provider's rates.
 In Automatic mode a replacement policy with `AddFirst` creates billed nodes
 without a person approving each one.
 
+### Verification after a replacement
+
+The node that was replaced is gone, so its incident is verified on the node
+that took its place. That node is found in one of two ways:
+
+- **Add-first:** the replacement the provider tied to the operation and
+  KubeNeuron accepted (`successor-ready`). Its name and UID must still be the
+  ones that were accepted.
+- **Remove-first:** before the delete, KubeNeuron records the old node's pool
+  (`replacement-pool`) from its pool label: `eks.amazonaws.com/nodegroup`,
+  `cloud.google.com/gke-nodepool` or `kubernetes.azure.com/agentpool`. The
+  provider does not say which new node replaced the old one. The node is
+  accepted only when it is the only node of that pool created after the
+  delete was sent. It must also offer at least the accelerators the incident
+  covered. Two or more new nodes are reported as ambiguous and are not
+  counted. A pool scaled out at the same time can make the match ambiguous.
+
+The new node must be Ready and schedulable. Its agent's accelerator report
+must be newer than the replacement, and how much that report shows depends
+on the vendor:
+
+| Vendor | What is confirmed |
+|---|---|
+| NVIDIA | the report lists a ready device, or a driver probe ran after the replacement |
+| AWS (Neuron sysfs) | the report lists a device: device presence observed; runtime not attested |
+| any other | no agent of this release sends a report for the vendor, so the node being Ready and its agent's heartbeat are accepted, and the resolution says the devices were not checked |
+
+The resolution names the new node, how it was tied to the replacement and
+what was confirmed. Its audit entry records `infrastructure_evidence:
+verified_replacement_node`, `replacement_node`, `replacement_node_uid` and
+`replacement_correlation` (`successor` or `pool`). The incident keeps its
+original target. `kubeneuronctl report` counts it as recovered, and the
+degraded time ends when the new node is confirmed.
+
+If that evidence is not there by the verification deadline, the incident
+goes to `NEEDS_HUMAN` with what is missing. For example: the new node is not
+Ready, no new node of the pool was found, the match was ambiguous, no fresh
+report came from it, or the report shows no ready devices. No second
+replacement is started.
+
 ## Authoring guidelines
 
 1. **Every rung must leave the node safe on failure** — cordon before

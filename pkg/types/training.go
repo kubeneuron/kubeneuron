@@ -98,7 +98,8 @@ func (s *TrainingRecoverySnapshot) RecordCheckpointSteps(checkpoint, last, resum
 }
 
 // VerifiedInfrastructureTime reads the durable evidence recorded when the
-// controller accepted post-recycle inventory from the verified boot.
+// controller accepted post-recycle inventory from the verified boot, or the
+// inventory of the node that replaced the target.
 func VerifiedInfrastructureTime(trail []*AuditEntry) *time.Time {
 	// AuditTrail is ordered by insertion. Only the latest state transition
 	// can establish readiness for the current recovery attempt.
@@ -107,7 +108,7 @@ func VerifiedInfrastructureTime(trail []*AuditEntry) *time.Time {
 		if entry == nil || entry.ToState == "" || entry.FromState == entry.ToState {
 			continue
 		}
-		if !entry.DryRun && entry.Actor == "system" && entry.Action == "resolve" && entry.FromState == StateVerifying && entry.ToState == StateResolved && entry.Params["infrastructure_evidence"] == "verified_recycle_inventory" && !entry.Time.IsZero() {
+		if !entry.DryRun && entry.Actor == "system" && entry.Action == "resolve" && entry.FromState == StateVerifying && entry.ToState == StateResolved && (entry.Params["infrastructure_evidence"] == "verified_recycle_inventory" || entry.Params["infrastructure_evidence"] == "verified_replacement_node") && !entry.Time.IsZero() {
 			t := entry.Time
 			return &t
 		}

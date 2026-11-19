@@ -838,6 +838,14 @@ type SuccessorNodeRecycler interface {
 	ReplacePinnedNodeWithSuccessor(ctx context.Context, pin cloud.NodeIdentity, s cloud.Successor) error
 }
 
+// PoolNodeLister lists the Kubernetes nodes of a node pool: after a
+// remove-first replacement the provider names no new instance, so the node
+// that took the old one's place is looked for among the pool's members.
+type PoolNodeLister interface {
+	// PoolNodes returns the nodes whose label is pool.
+	PoolNodes(ctx context.Context, label, pool string) ([]SuccessorNode, error)
+}
+
 // SuccessorNode is what the controller needs to accept a successor: whether it
 // is there, Ready and schedulable, when it joined, and what it can run.
 type SuccessorNode struct {

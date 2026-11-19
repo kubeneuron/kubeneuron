@@ -708,8 +708,9 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 	// resolve audit entry says what the resolution was attested on rather than
 	// presenting every RESOLVED as the same check.
 	var depth string
+	var evidence map[string]string
 	if !c.simulating(ctx, inc) {
-		ok, reason := c.verifyRuntimeEvidence(ctx, inc)
+		ok, reason, proof := c.verifyRecovery(ctx, inc)
 		if !ok {
 			if time.Since(inc.StateChangedAt) < c.verifyEvidenceDeadline(ctx) {
 				c.log.Debug("verification evidence not ready, holding",
@@ -725,15 +726,11 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 				Message: "cannot verify remediation: " + reason,
 			})
 		}
-		depth = reason
+		depth, evidence = reason, proof
 	}
 	result := fmt.Sprintf("healthy: quiet for %s", c.runtimeConfig(ctx).VerifyQuiet)
 	if depth != "" {
 		result += "; " + depth
-	}
-	var evidence map[string]string
-	if depth == recycleDriverProbeEvidence || depth == recycleInventoryEvidence || depth == recycleObservedEvidence {
-		evidence = map[string]string{"infrastructure_evidence": "verified_recycle_inventory"}
 	}
 	if err := c.transition(ctx, inc, types.StateResolved, "system", "resolve", result, evidence); err != nil {
 		return err
@@ -767,6 +764,25 @@ func (c *Controller) verifyEvidenceDeadline(ctx context.Context) time.Duration {
 		return d
 	}
 	return 10 * time.Minute
+}
+
+// verifyRecovery is verifyRuntimeEvidence, except after a cloud replacement:
+// the target is gone then, and the node that took its place is verified
+// instead. It also returns the infrastructure evidence the resolution
+// records, for a cloud recovery.
+func (c *Controller) verifyRecovery(ctx context.Context, inc *types.Incident) (bool, string, map[string]string) {
+	replaced, err := c.findCloudReplacement(ctx, inc)
+	if err != nil {
+		return false, "cloud recovery history is unavailable", nil
+	}
+	if replaced != nil {
+		return c.verifyReplacement(ctx, inc, replaced)
+	}
+	ok, reason := c.verifyRuntimeEvidence(ctx, inc)
+	if ok && (reason == recycleDriverProbeEvidence || reason == recycleInventoryEvidence || reason == recycleObservedEvidence) {
+		return true, reason, map[string]string{"infrastructure_evidence": recycleInfrastructureEvidence}
+	}
+	return ok, reason, nil
 }
 
 // verifyRuntimeEvidence checks positive health evidence for a non-dry-run

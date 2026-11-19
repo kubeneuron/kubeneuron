@@ -45,11 +45,7 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 		if len(n.Devices) == 0 && len(n.GPUs) == 0 && len(reported) == 0 {
 			continue
 		}
-		for _, provider := range []struct{ cloud, label string }{
-			{"AKS", "kubernetes.azure.com/agentpool"},
-			{"EKS", "eks.amazonaws.com/nodegroup"},
-			{"GKE", "cloud.google.com/gke-nodepool"},
-		} {
+		for _, provider := range poolLabels {
 			if name := n.Labels[provider.label]; name != "" {
 				key := poolKey{provider.cloud, name}
 				if counts[key] == 0 {

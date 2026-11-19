@@ -26,7 +26,8 @@ func neuronObservationReport(node string, id cloud.NodeIdentity, at time.Time) *
 // An incident opened by a fault of the AWS Neuron sysfs read names the
 // vendor aws. After a verified recycle it resolves on the agent's report
 // from the new boot, which observes the devices and attests no runtime, and
-// the resolution says so. A replacement holds as it does for every vendor.
+// the resolution says so. After a replacement, the old node's report does
+// not resolve it: TestReplacementResolvesOnTheNewNode reads the new node.
 func TestNeuronIncidentResolvesAfterAVerifiedRecycle(t *testing.T) {
 	for _, name := range []string{"recycle", "recycle-old-boot", "recycle-no-device", "replace"} {
 		t.Run(name, func(t *testing.T) {
@@ -67,8 +68,13 @@ func TestNeuronIncidentResolvesAfterAVerifiedRecycle(t *testing.T) {
 				t.Fatal(err)
 			}
 			if name == "replace" {
-				if err := st.AppendAudit(ctx, &types.AuditEntry{IncidentID: inc.ID, Time: now, Result: auditStepStartResult("platform.replace_node")}); err != nil {
-					t.Fatal(err)
+				// The target was replaced after its recycle: the old node's
+				// report, however fresh, is not evidence for the node that
+				// took its place.
+				for _, result := range []string{auditStepStartResult("platform.replace_node"), auditStepOutcomeResult("platform.replace_node", false, true)} {
+					if err := st.AppendAudit(ctx, &types.AuditEntry{IncidentID: inc.ID, Time: now, Result: result}); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			report := neuronObservationReport("node-a", ref.Identity, now)

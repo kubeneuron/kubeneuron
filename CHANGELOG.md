@@ -34,6 +34,15 @@ API is `v1alpha1`.
   journal files by an unprivileged Pod was checked on one EKS AL2023 node;
   other node images are from documentation, not checked. See
   [Kernel log from the node's journal](docs/install.md#kernel-log-from-the-nodes-journal).
+- **An incident resolves after a cloud replacement.** After a replace step
+  succeeds, the incident is verified on the node that took the target's
+  place. Under add-first, that is the accepted successor. Under remove-first,
+  it is the only node of the old node's pool created after the delete. The
+  depth of the check depends on the vendor, and the resolution names the new
+  node and what was confirmed. Without that evidence by the deadline, the
+  incident goes to a person with what is missing. Before, every replacement
+  ended in `NEEDS_HUMAN`. See
+  [Verification after a replacement](docs/playbook-authoring.md#verification-after-a-replacement).
 - **AWS Neuron faults from the agent, off by default (experimental).** The
   fault table maps three codes of vendor `aws` (`hbm-ecc-uncorrectable`,
   `sram-ecc-uncorrectable`, `unhealthy-component`) to the node's

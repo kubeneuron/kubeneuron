@@ -25,6 +25,14 @@ func recycleInventoryMatches(report *types.AgentAcceleratorReport, pin cloud.Nod
 		now.Sub(report.ObservedAt) > verifyEvidenceMaxAge {
 		return false
 	}
+	return inventoryMatches(report, gpu, completed, now)
+}
+
+// inventoryMatches checks that a report lists the device, or with gpu empty
+// any physical device, at a readiness that vouches for it: ready, NVIDIA
+// degraded with a driver probe since, or observed for a vendor this build
+// cannot attest.
+func inventoryMatches(report *types.AgentAcceleratorReport, gpu string, completed, now time.Time) bool {
 	if report.Readiness == types.AcceleratorReadinessObserved {
 		// An observation-only report of a vendor this build cannot attest:
 		// the new boot's devices are present, which is all it says. It never

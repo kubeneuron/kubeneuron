@@ -15,7 +15,10 @@ import (
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
-var _ platform.SuccessorNodeRecycler = (*Platform)(nil)
+var (
+	_ platform.SuccessorNodeRecycler = (*Platform)(nil)
+	_ platform.PoolNodeLister        = (*Platform)(nil)
+)
 
 func (p *Platform) successorProvider() (cloud.SuccessorProvider, error) {
 	provider, ok := p.recycler.(cloud.SuccessorProvider)
@@ -84,21 +87,9 @@ func (p *Platform) SuccessorNode(ctx context.Context, providerID string) (platfo
 	if providerID == "" {
 		return platform.SuccessorNode{}, nil
 	}
-	var nodes []*corev1.Node
-	if lp := p.nodeLister.Load(); lp != nil {
-		cached, err := (*lp).List(labels.Everything())
-		if err == nil {
-			nodes = cached
-		}
-	}
-	if nodes == nil {
-		list, err := p.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return platform.SuccessorNode{}, err
-		}
-		for i := range list.Items {
-			nodes = append(nodes, &list.Items[i])
-		}
+	nodes, err := p.cachedNodes(ctx)
+	if err != nil {
+		return platform.SuccessorNode{}, err
 	}
 	var found *corev1.Node
 	for _, n := range nodes {
@@ -115,16 +106,56 @@ func (p *Platform) SuccessorNode(ctx context.Context, providerID string) (platfo
 	if found == nil {
 		return platform.SuccessorNode{}, nil
 	}
-	out := platform.SuccessorNode{
-		Found: true, Name: found.Name, UID: string(found.UID), CreatedAt: found.CreationTimestamp.Time,
-		Unschedulable: found.Spec.Unschedulable, Allocatable: extendedResourceValues(found.Status.Allocatable),
+	return successorNodeOf(found), nil
+}
+
+func (p *Platform) PoolNodes(ctx context.Context, label, pool string) ([]platform.SuccessorNode, error) {
+	if label == "" || pool == "" {
+		return nil, nil
 	}
-	for _, condition := range found.Status.Conditions {
+	nodes, err := p.cachedNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []platform.SuccessorNode
+	for _, n := range nodes {
+		if n.Labels[label] == pool {
+			out = append(out, successorNodeOf(n))
+		}
+	}
+	return out, nil
+}
+
+// cachedNodes lists the nodes from the watch cache, or from the API server
+// before the cache has started.
+func (p *Platform) cachedNodes(ctx context.Context) ([]*corev1.Node, error) {
+	if lp := p.nodeLister.Load(); lp != nil {
+		if cached, err := (*lp).List(labels.Everything()); err == nil {
+			return cached, nil
+		}
+	}
+	list, err := p.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	nodes := make([]*corev1.Node, 0, len(list.Items))
+	for i := range list.Items {
+		nodes = append(nodes, &list.Items[i])
+	}
+	return nodes, nil
+}
+
+func successorNodeOf(n *corev1.Node) platform.SuccessorNode {
+	out := platform.SuccessorNode{
+		Found: true, Name: n.Name, UID: string(n.UID), CreatedAt: n.CreationTimestamp.Time,
+		Unschedulable: n.Spec.Unschedulable, Allocatable: extendedResourceValues(n.Status.Allocatable),
+	}
+	for _, condition := range n.Status.Conditions {
 		if condition.Type == corev1.NodeReady {
 			out.Ready = condition.Status == corev1.ConditionTrue
 		}
 	}
-	return out, nil
+	return out
 }
 
 func (p *Platform) ReleaseSuccessor(ctx context.Context, s cloud.Successor) error {

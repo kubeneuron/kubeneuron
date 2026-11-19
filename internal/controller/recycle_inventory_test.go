@@ -72,8 +72,13 @@ func TestRecycleVerificationAfterControllerRestart(t *testing.T) {
 				t.Fatal(err)
 			}
 			if replacing {
-				if err := st.AppendAudit(ctx, &types.AuditEntry{IncidentID: inc.ID, Time: now, Result: auditStepStartResult("platform.replace_node")}); err != nil {
-					t.Fatal(err)
+				// The target was replaced after its recycle: the old node's
+				// report, however fresh, is not evidence for the node that
+				// took its place.
+				for _, result := range []string{auditStepStartResult("platform.replace_node"), auditStepOutcomeResult("platform.replace_node", false, true)} {
+					if err := st.AppendAudit(ctx, &types.AuditEntry{IncidentID: inc.ID, Time: now, Result: result}); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			report := readyNVIDIAResetReport(now, "profile")

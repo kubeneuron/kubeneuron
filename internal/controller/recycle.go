@@ -57,6 +57,9 @@ func (c *Controller) recycleNodeStep(ctx context.Context, inc *types.Incident, r
 		return c.replaceWithSuccessor(ctx, inc, pin)
 	}
 	if replace {
+		if err := c.recordReplacementPool(ctx, inc, pin); err != nil {
+			return nil, fmt.Errorf("platform.replace_node: recording the pool: %w", err)
+		}
 		if planned, ok := c.platform.(platform.PlannedRemoveFirstRecycler); ok {
 			if res, handled, err := c.replaceRemoveFirst(ctx, inc, planned, pin); handled {
 				return res, err

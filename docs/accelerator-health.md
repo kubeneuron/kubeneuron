@@ -305,9 +305,9 @@ not something KubeNeuron checked. Every test tree is synthetic.
   device cannot be read and `not-ready` when the tree cannot. After a
   verified recycle of the node, an incident from this source resolves on a
   report from the new boot that lists a device, and the resolution says the
-  runtime was not attested. After a replacement it waits for the new node's
-  inventory and, past the evidence deadline, goes to a person, as it does
-  for every vendor.
+  runtime was not attested. After a replacement it resolves the same way on
+  a report from the node that took its place (see
+  [Verification after a replacement](playbook-authoring.md#verification-after-a-replacement)).
 - **Fault.** With the switch on, the incident is the node's. Its evidence
   names the source, the device (`neuron<N>`), the class and, for a
   component, its name from the list above.
