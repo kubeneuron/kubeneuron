@@ -176,7 +176,7 @@ func TestResumeLargeUncompressedBacklog(t *testing.T) {
 		}
 		bytes := 0
 		for _, record := range b.Records {
-			if seen >= count || record.Message != want[seen] {
+			if seen >= len(want) || record.Message != want[seen] {
 				t.Fatalf("unexpected message at index %d", seen)
 			}
 			seen++
@@ -185,9 +185,28 @@ func TestResumeLargeUncompressedBacklog(t *testing.T) {
 		if bytes > MaxBytesPerTick {
 			t.Errorf("tick %d delivered %d uncompressed message bytes (limit %d)", tick, bytes, MaxBytesPerTick)
 		}
-		if !b.More && seen == count && len(b.Records) == 0 {
+		if tick == 0 {
+			if !b.More || seen == 0 || seen >= count {
+				t.Fatalf("expected a partial batch before rotation, received %d records, More=%v", seen, b.More)
+			}
+			if err := os.Rename(path, filepath.Join(dir, "system@archive.journal")); err != nil {
+				t.Fatal(err)
+			}
+			buf = make([]byte, 208)
+			copy(buf, "LPKSHHRH")
+			buf[24] = 1
+			put(buf[88:], 208)
+			transport = data("_TRANSPORT=kernel")
+			const marker = "first message after rotation"
+			off := entry(count+2, "MESSAGE="+marker)
+			put(buf[transport+40:], uint64(off))
+			put(buf[transport+56:], 1)
+			write()
+			want = append(want, marker)
+		}
+		if !b.More && seen == len(want) && len(b.Records) == 0 {
 			return
 		}
 	}
-	t.Fatalf("did not reach idle tail after delivering %d/%d records", seen, count)
+	t.Fatalf("did not reach idle tail after delivering %d/%d records", seen, len(want))
 }
