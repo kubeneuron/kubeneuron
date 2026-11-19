@@ -68,6 +68,7 @@ type Controller struct {
 	// the write of a new one.
 	removeFirstPools sync.Mutex
 	successorPoll    time.Duration // zero: defaultSuccessorPoll
+	holdDispatches   sync.Map      // incident IDs with a notification assessment or dispatch in progress
 	policyAssessedMu sync.Mutex
 	policyAssessed   map[string]string
 

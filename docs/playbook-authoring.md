@@ -496,7 +496,7 @@ a replace under `AddFirst`, even after an enabled recycle the replace would
 back up, or a recycle-only path without `recycle.enabled` — the incident is
 held before the cordon: the node is not cordoned or drained for a recovery
 that cannot follow, and no approval is asked. Once the policy changes, the
-hold lifts and the audit trail records `recovery-available`.
+hold lifts and the audit trail records `recovery-available-again`.
 
 An automatic policy authorises only cloud recovery ladders: playbooks with a
 recycle or replace step through the cloud API on their path. On any other

@@ -66,3 +66,36 @@ func TestPendingHoldNotificationAfterControllerRestart(t *testing.T) {
 		})
 	}
 }
+
+func TestHoldNotificationEpisodes(t *testing.T) {
+	for _, middle := range []string{"B", "available"} {
+		t.Run(middle, func(t *testing.T) {
+			c, st, n := successorFixture(t, recoverymode.Automatic, newSuccessorPlatform(), "")
+			inc := mustIncident(t, st, openOn(t, c, "n1"))
+			want := 0
+			for _, reason := range []string{"A", middle, "A"} {
+				if reason == "available" {
+					if err := c.recordRecoveryAvailable(t.Context(), inc); err != nil {
+						t.Fatal(err)
+					}
+					continue
+				}
+				want++
+				for range 2 {
+					if err := c.notifyAddFirstHold(t.Context(), inc, "cordon", reason); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			got := 0
+			for _, ev := range n.events {
+				if ev.Kind == notify.EventNeedsHuman {
+					got++
+				}
+			}
+			if got != want {
+				t.Fatalf("got %d notifications, want %d", got, want)
+			}
+		})
+	}
+}
