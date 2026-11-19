@@ -35,7 +35,7 @@
     "review": []
   },
   {
-    "module": "cloud.google.com/go/auth@v0.24.1-0.20261001053825-dbc26066f70a",
+    "module": "cloud.google.com/go/auth@v0.24.1",
     "files": [
       "LICENSE"
     ],
