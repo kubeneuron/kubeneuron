@@ -114,14 +114,13 @@ mean a replaced node.
 |---|---|---|
 | [TPU health from Google Cloud Monitoring](#tpu-health-from-google-cloud-monitoring-opt-in) | `spec.cloud.gcp.tpuInfraHealth.enabled` | not read |
 | [Device taints from Kubernetes DRA](#device-taints-from-kubernetes-dra-opt-in) | `spec.safety.acceleratorHealth.dra.enabled` | not read |
-| AWS Neuron device health from the driver's sysfs, read by the agent | `spec.safety.acceleratorHealth.awsNeuronSysfs.enabled` | a fault is shown in `kubeneuronctl health` as not acted on, for up to a day, and counted in `kubeneuron_accelerator_faults_not_acted_on_total`; no incident |
+| [AWS Neuron device health from the driver's sysfs](#aws-neuron-device-health-from-the-drivers-sysfs-incidents-opt-in), read by the agent | `spec.safety.acceleratorHealth.awsNeuronSysfs.enabled` | a fault is shown in `kubeneuronctl health` as not acted on, for up to a day, and counted in `kubeneuron_accelerator_faults_not_acted_on_total`; no incident |
 
-The agent does not send the AWS Neuron faults yet; the switch and the
-controller's handling of them are in place for when it does. After a
-restart or a change of leader the controller reads the faults of the last
-day back from its event archive; a fault that came while an incident of its
-node was open is not listed, since that incident says what was done. With
-an external event archive the rows are not restored after a restart.
+After a restart or a change of leader the controller reads the faults of
+the last day back from its event archive; a fault that came while an
+incident of its node was open is not listed, since that incident says what
+was done. With an external event archive the rows are not restored after a
+restart.
 
 ## TPU health from Google Cloud Monitoring (opt-in)
 
@@ -244,6 +243,67 @@ run by hand; CI does not run it.
 - **Permission.** The controller's ClusterRole gains `get`, `list` and
   `watch` on `resource.k8s.io` `resourceslices` while this, or the topology
   classifier's DRA read, is on; nothing else in the group.
+
+## AWS Neuron device health from the driver's sysfs (incidents opt-in)
+
+On a node with the AWS Neuron kernel driver, the agent reads each device's
+error counters and its list of failing components from the driver's sysfs
+tree, `/sys/devices/virtual/neuron_device`, as one more source
+(`aws-neuron-sysfs`) of the `aws-neuron` profile. AWS Neuron devices are the
+accelerators (AWS Trainium and AWS Inferentia) that the
+`aws.amazon.com/neuron` resource counts. The read needs no switch; an
+incident from it does: with
+`spec.safety.acceleratorHealth.awsNeuronSysfs.enabled: true` a fault opens an
+incident, and it is off by default. Off, a fault is shown in
+`kubeneuronctl health` as a fault that was not acted on, with the switch
+that would act on it, and nothing is held, cordoned or replaced for it.
+
+This read is experimental, not validated against a live AWS Trainium or
+Inferentia node. The file paths and their meanings are taken from AWS
+documentation, reviewed 2026-11-18: the
+[Neuron sysfs user guide](https://awsdocs-neuron.readthedocs-hosted.com/en/v2.25.0/tools/neuron-sys-tools/neuron-sysfs-user-guide.html)
+and the
+[Neuron runtime and driver release notes](https://awsdocs-neuron.readthedocs-hosted.com/en/v2.32.0/release-notes/components/runtime.html).
+The driver version that adds the component list (2.30.2) is AWS's statement,
+not something KubeNeuron checked. Every test tree is synthetic.
+
+- **What is read.** For each `neuron<N>` directory, at most 64 of them:
+  the HBM and SRAM ECC counters under `stats/hardware` and
+  `stats/hardware/health_status/unhealthy_components`. Only numbers and
+  component names are read, each file at most 4 KiB. The agent runs no AWS
+  tool, never writes to the tree (writing clears the counters, which another
+  tool on the node may also read) and does not read serial numbers. A device
+  is its index, `neuron<N>`.
+- **Counters.** A rise of `mem_ecc_uncorrected` (HBM) or
+  `sram_ecc_uncorrected` (SRAM) is an `accelerator-fault`. The last values are
+  kept in the agent's state directory with the boot they were read in, so an
+  error that happened while the agent was down is still a rise; they are kept
+  only after the finding has been delivered. A counter that was already above
+  zero when there was no earlier value to compare with is recorded, never a
+  fault: nothing says when it rose. A rise of
+  `mem_ecc_repairable_uncorrected` is an observation, not a diagnosis: the
+  device can repair these. The corrected counters are read and not acted
+  on.
+- **Components.** A component the driver lists as failing is an
+  `accelerator-fault` once two consecutive reads list it; one read is no
+  fault. It is sent once, and again only after a read no longer lists it. A name not in the documented list (`hbm`,
+  `sram`, `firmware_service_api`, `firmware_service_processor`,
+  `link_intraserver`, `link_host`, `link_efa`, `link_interserver`,
+  `link_switch`, `axi_fabric`) is recorded as `unknown-component`; text read
+  from the node is never kept.
+- **No file is no signal.** A driver without `health_status` says nothing
+  about components; it is not healthy. A node without the `neuron_device`
+  directory does not report this source at all. A device that cannot be read
+  is unknown and holds its own state while the other devices are read; a
+  device that was read before and is gone from the tree is an observation. A
+  tree that cannot be read is shown in `kubeneuronctl health` as an
+  unavailable agent source with its reason, never as a healthy node.
+- **Vendor.** The agent sends the node's devices to the controller in an
+  accelerator report of vendor `aws`, observation only: it declares no
+  action KubeNeuron could take on a device.
+- **Fault.** With the switch on, the incident is the node's. Its evidence
+  names the source, the device (`neuron<N>`), the class and, for a
+  component, its name from the list above.
 
 ## When KubeNeuron only observes
 

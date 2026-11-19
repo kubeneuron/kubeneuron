@@ -45,8 +45,18 @@ API is `v1alpha1`.
   counted in `kubeneuron_accelerator_faults_not_acted_on_total{source,class}`,
   charted on the Health & Errors dashboard; see
   [Sources off by default](docs/accelerator-health.md#sources-off-by-default).
-  The agent does not send these faults yet. Not validated against a live AWS
-  Trainium or Inferentia node.
+  A fault that came while an incident of its node was open is not read back
+  as not acted on. Not validated against a live AWS Trainium or Inferentia
+  node.
+- **AWS Neuron device health read by the agent (experimental).** On a node
+  with the AWS Neuron driver the agent reads each device's uncorrectable HBM
+  and SRAM ECC counters and its failing components from the driver's sysfs
+  tree, with no privilege and no AWS tool, and sends a rise or a component
+  listed by two reads in a row as an AWS Neuron fault, with the device as
+  `neuron<N>`. It reports the devices in an accelerator report of vendor
+  `aws`, and an unreadable tree as an unavailable source. See
+  [AWS Neuron device health from the driver's sysfs](docs/accelerator-health.md#aws-neuron-device-health-from-the-drivers-sysfs-incidents-opt-in).
+  Not validated against a live AWS Trainium or Inferentia node.
 - When add-first recovery is unavailable, the controller sends a notification with the reason at the start of each hold. A restart during dispatch can repeat the notification.
 
 - **Recovery report per accelerator resource.** The report, its API and
