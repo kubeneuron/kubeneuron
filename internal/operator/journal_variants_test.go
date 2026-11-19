@@ -121,7 +121,7 @@ func TestJournalVariantMountsOneDirectoryReadOnly(t *testing.T) {
 			}
 		}
 		wantDir := hostDirs[ds.Name]
-		hasArg := slices.Contains(container.Args, "--journal-dir=/host/journal")
+		hasArg := slices.ContainsFunc(container.Args, func(a string) bool { return strings.HasPrefix(a, "--journal-dir=") })
 		if wantDir == "" {
 			if len(journal) != 0 || hasArg {
 				t.Errorf("%s: mounts a journal: %+v arg=%t", ds.Name, journal, hasArg)
@@ -132,8 +132,8 @@ func TestJournalVariantMountsOneDirectoryReadOnly(t *testing.T) {
 			journal[0].HostPath.Type == nil || *journal[0].HostPath.Type != corev1.HostPathDirectory {
 			t.Fatalf("%s: journal volumes %+v, want one %s of type Directory", ds.Name, journal, wantDir)
 		}
-		if !hasArg {
-			t.Errorf("%s: args %v lack --journal-dir", ds.Name, container.Args)
+		if !slices.Contains(container.Args, "--journal-dir=/host"+wantDir) {
+			t.Errorf("%s: args %v lack --journal-dir=/host%s", ds.Name, container.Args, wantDir)
 		}
 		found := false
 		for _, m := range container.VolumeMounts {
@@ -141,9 +141,9 @@ func TestJournalVariantMountsOneDirectoryReadOnly(t *testing.T) {
 				continue
 			}
 			found = true
-			if !m.ReadOnly || m.SubPath != "" || m.SubPathExpr != "" || m.MountPath != journalMountPath ||
+			if !m.ReadOnly || m.SubPath != "" || m.SubPathExpr != "" || m.MountPath != "/host"+wantDir ||
 				(m.MountPropagation != nil && *m.MountPropagation != corev1.MountPropagationNone) {
-				t.Errorf("%s: journal mount %+v, want read-only at %s without subPath", ds.Name, m, journalMountPath)
+				t.Errorf("%s: journal mount %+v, want read-only at /host%s without subPath", ds.Name, m, wantDir)
 			}
 		}
 		if !found {

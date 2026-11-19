@@ -77,5 +77,9 @@ func validAgentSource(row types.AgentSignalSource) bool {
 	if row.Available {
 		reason = ""
 	}
+	if row.Source != "nvidia-dcgm" && !row.Available && row.Reason == "journal-unreadable" {
+		// An agent with a journal mount that it cannot read.
+		reason = row.Reason
+	}
 	return !row.ReadAt.IsZero() && row.Reason == reason
 }

@@ -145,21 +145,33 @@ func (c *Controller) RecordAgentSignalSources(node string, rows []types.AgentSig
 	c.health.agentReports[node] = agentSourceSnapshot{slices.Clone(rows), now}
 }
 
-// AgentSignalSources returns fresh heartbeat reports for one node or for the fleet.
+// AgentSignalSources returns fresh heartbeat reports for one node or for the
+// fleet. A kernel log the agent cannot read on a node the controller gave no
+// journal mount carries the controller's reason: disabled,
+// os-image-not-recognized or journal-mount-failed.
 func (c *Controller) AgentSignalSources(node string) []types.AgentSignalSource {
 	c.health.mu.Lock()
-	defer c.health.mu.Unlock()
+	var rows []types.AgentSignalSource
 	if node != "" {
 		report := c.health.agentReports[node]
 		if time.Since(report.received) <= agentReportTTL {
-			return slices.Clone(report.rows)
+			rows = slices.Clone(report.rows)
 		}
-		return nil
+	} else {
+		for _, report := range c.health.agentReports {
+			if time.Since(report.received) <= agentReportTTL {
+				rows = append(rows, report.rows...)
+			}
+		}
 	}
-	var rows []types.AgentSignalSource
-	for _, report := range c.health.agentReports {
-		if time.Since(report.received) <= agentReportTTL {
-			rows = append(rows, report.rows...)
+	c.health.mu.Unlock()
+	for i := range rows {
+		r := &rows[i]
+		if r.Available || r.Reason != "kernel-log-unavailable" || (r.Source != "nvidia-kmsg" && r.Source != "amd-kmsg") {
+			continue
+		}
+		if why := c.JournalReason(r.Node); why != "" {
+			r.Reason = why
 		}
 	}
 	return rows

@@ -859,9 +859,11 @@ func agentTolerations(installation *kubeneuronv1alpha1.KubeNeuron) []corev1.Tole
 	})
 }
 
-// journalMountPath is where a journal variant sees the node's journal
-// directory.
-const journalMountPath = "/host/journal"
+// journalMountRoot prefixes the host journal directory inside the agent: a
+// variant sees /var/log/journal at /host/var/log/journal. Distinct paths keep
+// the agent's resume cursors for the two directories apart in the shared
+// state directory.
+const journalMountRoot = "/host"
 
 // agentVariant is one agent DaemonSet: its name suffix and component, the
 // host journal directory it mounts ("" for none), and the values of the
@@ -960,9 +962,9 @@ func agentVariantDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot
 		// type: Directory, read-only, no subPath: the kubelet refuses to
 		// start the Pod rather than create the directory, so the mount
 		// never writes to the host or changes where journald stores.
-		toolingMounts = append(toolingMounts, corev1.VolumeMount{Name: "journal", MountPath: journalMountPath, ReadOnly: true})
+		toolingMounts = append(toolingMounts, corev1.VolumeMount{Name: "journal", MountPath: journalMountRoot + variant.journal, ReadOnly: true})
 		toolingVolumes = append(toolingVolumes, hostPathVolume("journal", variant.journal, corev1.HostPathDirectory))
-		toolingArgs = append(toolingArgs, "--journal-dir="+journalMountPath)
+		toolingArgs = append(toolingArgs, "--journal-dir="+journalMountRoot+variant.journal)
 	}
 	var affinity *corev1.Affinity
 	if variant.noLabel || variant.labelIn != "" {

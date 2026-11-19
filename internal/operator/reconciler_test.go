@@ -1209,11 +1209,13 @@ func TestReconcileOperatorPermissionForReboot(t *testing.T) {
 			t.Fatal(err)
 		}
 		kernelLog := meta.FindStatusCondition(current.Status.Conditions, "KernelLogSource")
-		wantKernelLog := metav1.ConditionFalse
+		// Unknown either way: /dev/kmsg with node-level actions, the journal
+		// (on by default) without.
+		wantKernelLog, wantReason := metav1.ConditionUnknown, "JournalAccessUnverified"
 		if allowed {
-			wantKernelLog = metav1.ConditionUnknown
+			wantReason = "KernelLogAccessUnverified"
 		}
-		if kernelLog == nil || kernelLog.Status != wantKernelLog || kernelLog.ObservedGeneration != current.Generation {
+		if kernelLog == nil || kernelLog.Status != wantKernelLog || kernelLog.Reason != wantReason || kernelLog.ObservedGeneration != current.Generation {
 			t.Fatalf("permission %v: kernel log condition = %+v", allowed, kernelLog)
 		}
 		denial := meta.FindStatusCondition(current.Status.Conditions, "NodeLevelActionsAllowed")
@@ -1258,6 +1260,28 @@ func TestReconcileOperatorPermissionForReboot(t *testing.T) {
 
 // The kernel log condition informs; an agent without the host kernel log is
 // a supported install, so it never holds Ready.
+func TestKernelLogSourceNamesTheJournalSwitch(t *testing.T) {
+	ctx := context.Background()
+	scheme := newOperatorScheme(t)
+	root := testKubeNeuron()
+	root.Spec.Safety.NodeLevelActions = false
+	root.Spec.Agent.KernelLog = &kubeneuronv1alpha1.AgentKernelLogSpec{Journal: &kubeneuronv1alpha1.AgentJournalSpec{Enabled: new(bool)}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(root).WithObjects(root).Build()
+	r := &KubeNeuronReconciler{Client: c, Scheme: scheme}
+	var installation kubeneuronv1alpha1.KubeNeuron
+	if err := c.Get(ctx, client.ObjectKeyFromObject(root), &installation); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.updateStatus(ctx, &installation, &Snapshot{Digest: "d"}, nil, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	kernelLog := meta.FindStatusCondition(installation.Status.Conditions, "KernelLogSource")
+	if kernelLog == nil || kernelLog.Status != metav1.ConditionFalse || kernelLog.Reason != "KernelLogDisabled" ||
+		!strings.Contains(kernelLog.Message, "spec.agent.kernelLog.journal.enabled is false") {
+		t.Fatalf("kernel log condition = %+v", kernelLog)
+	}
+}
+
 func TestKernelLogSourceDoesNotHoldReady(t *testing.T) {
 	ctx := context.Background()
 	scheme := newOperatorScheme(t)

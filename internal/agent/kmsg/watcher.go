@@ -61,6 +61,9 @@ type Event struct {
 	// must call Acknowledge only after the event is durably accepted by the
 	// controller or its local outbox.
 	acknowledge func() error
+	// abandon is installed by the journal source: the event was not
+	// delivered, so its batch is read again.
+	abandon func()
 }
 
 // Acknowledge advances the durable /dev/kmsg cursor for this event. It is a
@@ -73,6 +76,15 @@ func (e Event) Acknowledge() error {
 		return nil
 	}
 	return e.acknowledge()
+}
+
+// Abandon reports that the event was neither accepted by the controller nor
+// spooled. A journal event's batch is then read again; for /dev/kmsg it is a
+// no-op, and the unacknowledged sequence pins the cursor instead.
+func (e Event) Abandon() {
+	if e.abandon != nil {
+		e.abandon()
+	}
 }
 
 // xidRe matches NVRM Xid lines. Formats seen in the wild:

@@ -594,6 +594,7 @@ func journalMounted(installation *kubeneuronv1alpha1.KubeNeuron) bool {
 func agentJournal(installation *kubeneuronv1alpha1.KubeNeuron) *config.AgentJournal {
 	out := &config.AgentJournal{
 		Enabled:           journalMounted(installation),
+		KernelMessages:    installation.Spec.Safety.NodeLevelActions,
 		Namespace:         installation.Spec.Namespace,
 		Installation:      installation.Name,
 		AgentNodeSelector: copyStringMap(installation.Spec.Agent.NodeSelector),

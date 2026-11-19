@@ -98,6 +98,9 @@ type Safety struct {
 type AgentJournal struct {
 	// Enabled labels accelerator nodes. False removes every label.
 	Enabled bool `yaml:"enabled"`
+	// KernelMessages is true when the agent reads /dev/kmsg instead
+	// (node-level actions): no node then lacks a journal for a reason.
+	KernelMessages bool `yaml:"kernel_messages,omitempty"`
 	// Namespace and Installation find the journal-variant agent Pods.
 	Namespace    string `yaml:"namespace"`
 	Installation string `yaml:"installation"`

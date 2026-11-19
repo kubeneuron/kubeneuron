@@ -92,7 +92,7 @@ func (c *Controller) reconcileJournalLabels(ctx context.Context) {
 		n := &nodes[i]
 		accelerator := n.Accelerator || accelerators[n.Name]
 		dir, reason := c.journal.want(cfg, n, accelerator, now)
-		if accelerator && reason != "" {
+		if accelerator && reason != "" && !cfg.KernelMessages {
 			reasons[n.Name] = reason
 		}
 		if dir == n.Dir {

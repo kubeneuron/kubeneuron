@@ -87,7 +87,7 @@ func loadCursor(path, bootID string) (uint64, bool, error) {
 // temp+rename+fsync pattern the executor's accelerator state uses: a torn
 // write can never leave a partially rewritten cursor that would be misread as
 // a valid, smaller resume point.
-func saveCursor(path, bootID string, seq uint64) (retErr error) {
+func saveCursor(path, bootID string, seq uint64) error {
 	if path == "" {
 		return nil
 	}
@@ -95,13 +95,20 @@ func saveCursor(path, bootID string, seq uint64) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("encode kmsg cursor: %w", err)
 	}
+	return writeDurably(path, ".kmsg-cursor-*", data)
+}
+
+// writeDurably replaces path with data through a temp file, rename and
+// fsync of the file and its directory, so a torn write never leaves a
+// partial file.
+func writeDurably(path, pattern string, data []byte) (retErr error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create kmsg cursor directory: %w", err)
+		return fmt.Errorf("create cursor directory: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, ".kmsg-cursor-*")
+	tmp, err := os.CreateTemp(dir, pattern)
 	if err != nil {
-		return fmt.Errorf("create kmsg cursor: %w", err)
+		return fmt.Errorf("create cursor: %w", err)
 	}
 	tmpPath := tmp.Name()
 	defer func() {
@@ -111,31 +118,31 @@ func saveCursor(path, bootID string, seq uint64) (retErr error) {
 	}()
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("protect kmsg cursor: %w", err)
+		return fmt.Errorf("protect cursor: %w", err)
 	}
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("write kmsg cursor: %w", err)
+		return fmt.Errorf("write cursor: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("sync kmsg cursor: %w", err)
+		return fmt.Errorf("sync cursor: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close kmsg cursor: %w", err)
+		return fmt.Errorf("close cursor: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("replace kmsg cursor: %w", err)
+		return fmt.Errorf("replace cursor: %w", err)
 	}
 	// fsync the directory so the rename survives a power loss, matching the
 	// durability the accelerator-state writer guarantees.
 	dirFile, err := os.Open(dir)
 	if err != nil {
-		return fmt.Errorf("open kmsg cursor directory: %w", err)
+		return fmt.Errorf("open cursor directory: %w", err)
 	}
 	defer func() { _ = dirFile.Close() }()
 	if err := dirFile.Sync(); err != nil {
-		return fmt.Errorf("sync kmsg cursor directory: %w", err)
+		return fmt.Errorf("sync cursor directory: %w", err)
 	}
 	return nil
 }

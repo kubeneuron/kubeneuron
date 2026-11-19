@@ -1,0 +1,256 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package kmsg
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/kubeneuron/kubeneuron/internal/journal"
+)
+
+// fakeJournal is a kernel log whose cursor is the index of the next entry.
+// The zero cursor starts at the tail, as the reader contract says.
+type fakeJournal struct {
+	mu      sync.Mutex
+	entries []string
+	err     error
+	reads   []journal.Cursor
+}
+
+func (f *fakeJournal) append(lines ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.entries = append(f.entries, lines...)
+}
+
+func (f *fakeJournal) Next(_ context.Context, after journal.Cursor) (journal.Batch, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reads = append(f.reads, after)
+	if f.err != nil {
+		return journal.Batch{}, f.err
+	}
+	if after == "" {
+		return journal.Batch{Cursor: journal.Cursor(strconv.Itoa(len(f.entries)))}, nil
+	}
+	from, err := strconv.Atoi(string(after))
+	if err != nil {
+		return journal.Batch{}, journal.ErrInvalidJournal
+	}
+	var batch journal.Batch
+	for _, line := range f.entries[from:] {
+		batch.Records = append(batch.Records, journal.Record{Message: line})
+	}
+	batch.Cursor = journal.Cursor(strconv.Itoa(len(f.entries)))
+	return batch, nil
+}
+
+const (
+	xidLine   = "NVRM: Xid (PCI:0000:3b:00): 79, pid=1234, GPU has fallen off the bus."
+	otherLine = "EXT4-fs (nvme0n1p1): mounted filesystem private-detail-42"
+)
+
+func journalSource(t *testing.T, f *fakeJournal, dir, cursorPath string, logs *bytes.Buffer) *JournalSource {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := &JournalSource{
+		Dir: dir, CursorPath: cursorPath, Idle: 5 * time.Millisecond,
+		Open: func(directory string) (journal.Reader, error) {
+			if directory != dir {
+				t.Errorf("opened %q, want %q", directory, dir)
+			}
+			return f, nil
+		},
+	}
+	if logs != nil {
+		s.Logger = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
+	return s
+}
+
+// watch starts the source and stops it, waiting for its goroutine, before
+// the test's directories are removed.
+func watch(t *testing.T, s *JournalSource) <-chan Event {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := s.Watch(ctx)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		for range ch {
+		}
+	})
+	return ch
+}
+
+func nextEvent(t *testing.T, ch <-chan Event) Event {
+	t.Helper()
+	select {
+	case ev, ok := <-ch:
+		if !ok {
+			t.Fatal("journal source stopped")
+		}
+		return ev
+	case <-time.After(2 * time.Second):
+		t.Fatal("no journal event")
+	}
+	return Event{}
+}
+
+func noEvent(t *testing.T, ch <-chan Event) {
+	t.Helper()
+	select {
+	case ev := <-ch:
+		t.Fatalf("unexpected event %+v", ev)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func savedCursor(t *testing.T, s *JournalSource) journal.Cursor {
+	t.Helper()
+	c, err := s.loadCursor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func TestJournalSourceStartsAtTheTailAndSendsOnlyClassifiedFields(t *testing.T) {
+	root := t.TempDir()
+	f := &fakeJournal{entries: []string{xidLine, otherLine}}
+	var logs bytes.Buffer
+	s := journalSource(t, f, filepath.Join(root, "var"), filepath.Join(root, "state", "journal-cursor.json"), &logs)
+	ch := watch(t, s)
+	// The old XID is before the tail: it must not open an incident again.
+	noEvent(t, ch)
+	if got := savedCursor(t, s); got != "2" {
+		t.Fatalf("cursor after the first empty read = %q, want the tail", got)
+	}
+	f.append(otherLine, xidLine)
+	ev := nextEvent(t, ch)
+	if ev.XID != 79 || ev.PCIAddr != "0000:3b:00" || ev.Raw != "" {
+		t.Fatalf("event = %+v, want XID 79 on 0000:3b:00 with no raw text", ev)
+	}
+	if got := savedCursor(t, s); got != "2" {
+		t.Fatalf("cursor moved to %q before the event was acknowledged", got)
+	}
+	if err := ev.Acknowledge(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for savedCursor(t, s) != "4" {
+		if time.Now().After(deadline) {
+			t.Fatalf("cursor = %q after the acknowledgement, want 4", savedCursor(t, s))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	noEvent(t, ch)
+	if strings.Contains(logs.String(), "private-detail") || strings.Contains(logs.String(), "fallen off") {
+		t.Fatalf("journal content reached the log: %s", logs.String())
+	}
+}
+
+func TestJournalSourceReadsAnAbandonedBatchAgain(t *testing.T) {
+	root := t.TempDir()
+	f := &fakeJournal{}
+	s := journalSource(t, f, filepath.Join(root, "var"), filepath.Join(root, "journal-cursor.json"), nil)
+	ch := watch(t, s)
+	noEvent(t, ch)
+	f.append(xidLine)
+	nextEvent(t, ch).Abandon()
+	again := nextEvent(t, ch)
+	if again.XID != 79 {
+		t.Fatalf("redelivered %+v", again)
+	}
+	if got := savedCursor(t, s); got != "0" {
+		t.Fatalf("an abandoned batch moved the cursor to %q", got)
+	}
+	_ = again.Acknowledge()
+}
+
+// A variant switch moves the node between the two directories: each keeps its
+// own place in the shared state file, and returning to one neither replays
+// what it delivered nor applies the other's cursor.
+func TestJournalCursorSurvivesAVariantSwitch(t *testing.T) {
+	root := t.TempDir()
+	cursorPath := filepath.Join(root, "state", "journal-cursor.json")
+	varLog := &fakeJournal{}
+	runLog := &fakeJournal{entries: []string{xidLine, xidLine, xidLine}}
+
+	run := func(f *fakeJournal, dir string, appended []string, want int) {
+		t.Helper()
+		s := journalSource(t, f, filepath.Join(root, dir), cursorPath, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		ch, err := s.Watch(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(appended) != 0 {
+			// Reach the tail first, then write.
+			noEvent(t, ch)
+			f.append(appended...)
+		}
+		for i := 0; i < want; i++ {
+			_ = nextEvent(t, ch).Acknowledge()
+		}
+		noEvent(t, ch)
+		cancel()
+		for range ch {
+		}
+	}
+	run(varLog, "var", []string{xidLine}, 1)
+	// The run journal's old entries are before its tail: the var cursor is
+	// not applied to it.
+	run(runLog, "run", nil, 0)
+	// Back on var: only what was written while the agent was away.
+	varLog.append(xidLine, otherLine)
+	run(varLog, "var", nil, 1)
+	run(varLog, "var", nil, 0)
+	if varLog.reads[0] != "" {
+		t.Fatalf("first var read used cursor %q", varLog.reads[0])
+	}
+	if runLog.reads[0] != "" {
+		t.Fatalf("first run read used cursor %q, want the tail", runLog.reads[0])
+	}
+}
+
+func TestJournalSourceUnavailable(t *testing.T) {
+	if _, err := (&JournalSource{}).Watch(context.Background()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("no mount: %v", err)
+	}
+	if _, err := (&JournalSource{Dir: filepath.Join(t.TempDir(), "absent"), Open: func(string) (journal.Reader, error) {
+		return &fakeJournal{}, nil
+	}}).Watch(context.Background()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("absent directory: %v", err)
+	}
+	root := t.TempDir()
+	f := &fakeJournal{err: journal.ErrInvalidJournal}
+	ch, err := journalSource(t, f, filepath.Join(root, "var"), "", nil).Watch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("an invalid journal produced an event")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("an invalid journal did not stop the source")
+	}
+}

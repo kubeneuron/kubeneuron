@@ -44,6 +44,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/agent/spool"
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
+	"github.com/kubeneuron/kubeneuron/internal/journal"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/pkg/accelerator"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -135,6 +136,8 @@ type Config struct {
 	// directory, or empty when the agent has none. The agent reads kernel
 	// entries from it when it cannot read /dev/kmsg.
 	JournalDir string
+	// JournalOpen opens the journal reader; nil when the build has none.
+	JournalOpen journal.OpenReader
 	// ActionJournalPath is the crash-safe write-ahead journal for remediation
 	// actions, default /var/lib/kube-neuron/actions.jsonl. It must remain on
 	// durable node-local storage: a restarted agent uses it to avoid replaying
@@ -233,12 +236,19 @@ type Agent struct {
 	// processes cannot concurrently act on the same durable journal.
 	journalLock          *os.File
 	missingKernelLogOnce sync.Once
+	journalOpenOnce      sync.Once
 	watcher              *kmsg.Watcher
-	health               *gpuhealth.Watcher
-	amdHealth            *amdhealth.Watcher
-	client               *http.Client
-	log                  *slog.Logger
-	nvidia               *nvidiaObservation
+	// journalSource reads kernel entries from the journal mount; nil when
+	// the agent has none.
+	journalSource *kmsg.JournalSource
+	// kmsgReadable and journalReadable are the two kernel log sources'
+	// last state, owned by the Run loop.
+	kmsgReadable, journalReadable bool
+	health                        *gpuhealth.Watcher
+	amdHealth                     *amdhealth.Watcher
+	client                        *http.Client
+	log                           *slog.Logger
+	nvidia                        *nvidiaObservation
 	// adapters holds one entry per enabled, registered accelerator adapter,
 	// in registry order, including adapters that failed to build (which fail
 	// closed for their own vendor only).
@@ -408,6 +418,14 @@ func New(cfg Config, driver nvml.GPUDriver, log *slog.Logger) (*Agent, error) {
 	// suppress the new boot's XIDs; a boot-ID mismatch makes the watcher fail
 	// safe to tail-seek. Reuses the same host boot-ID source as registration.
 	watcher.BootID = agent.currentBootID()
+	if cfg.JournalDir != "" {
+		agent.journalSource = &kmsg.JournalSource{
+			Dir:        cfg.JournalDir,
+			Open:       cfg.JournalOpen,
+			CursorPath: filepath.Join(filepath.Dir(cfg.SpoolPath), "journal-cursor.json"),
+			Logger:     log,
+		}
+	}
 	// An external hostengine can supply numeric XIDs without a local SMI driver.
 	// Only use local inventory to resolve a GPU when that driver is real.
 	smi, localSMI := driver.(*nvml.SMI)
@@ -577,12 +595,14 @@ func (a *Agent) Run(ctx context.Context) error {
 
 	metrics.SetXIDSourceUnavailable("nvidia-dcgm", "xid-field-unavailable", 1)
 	events, err := a.watcher.Watch(ctx)
-	reportKernelSourceAvailability(err == nil)
-	a.reportSignalSources(ctx)
+	a.kmsgReadable = err == nil
 	if err != nil {
 		// Non-fatal: the retry tick below keeps reopening the watcher.
 		a.logKernelOpenError(err)
 	}
+	journalEvents := a.openJournal(ctx)
+	a.reportKernelLog()
+	a.reportSignalSources(ctx)
 
 	// The DCGM/nvidia-smi second source polls on its own schedule. It never
 	// returns an error (an unusable source degrades to observed-only), and a
@@ -629,7 +649,8 @@ func (a *Agent) Run(ctx context.Context) error {
 				// Watcher died; the retry tick reopens it. Detection must
 				// never silently stay dark until an agent restart.
 				events = nil
-				reportKernelSourceAvailability(false)
+				a.kmsgReadable = false
+				a.reportKernelLog()
 				a.log.Error("kmsg watcher stopped, will reopen")
 				continue
 			}
@@ -641,6 +662,21 @@ func (a *Agent) Run(ctx context.Context) error {
 				if err := ev.Acknowledge(); err != nil {
 					a.log.Warn("kmsg cursor acknowledge failed; event may replay", "err", err)
 				}
+			}
+		case ev, ok := <-journalEvents:
+			if !ok {
+				journalEvents = nil
+				a.journalReadable = false
+				a.reportKernelLog()
+				a.log.Error("journal kernel log source stopped, will reopen")
+				continue
+			}
+			// The batch's cursor advances only when every event of it was
+			// accepted or spooled; an abandoned one reads the batch again.
+			if a.handleKernelEvent(ctx, ev) {
+				_ = ev.Acknowledge()
+			} else {
+				ev.Abandon()
 			}
 		case ev, ok := <-healthEvents:
 			if !ok {
@@ -675,7 +711,14 @@ func (a *Agent) Run(ctx context.Context) error {
 				} else {
 					a.log.Info("kmsg watcher reopened")
 					events = ch
-					reportKernelSourceAvailability(true)
+					a.kmsgReadable = true
+					a.reportKernelLog()
+				}
+			}
+			if journalEvents == nil && a.journalSource != nil && ctx.Err() == nil {
+				if journalEvents = a.openJournal(ctx); journalEvents != nil {
+					a.log.Info("journal kernel log source reopened")
+					a.reportKernelLog()
 				}
 			}
 			if err := a.register(ctx); err != nil {
@@ -698,16 +741,47 @@ func (a *Agent) logKernelOpenError(err error) {
 	a.log.Error("kmsg watcher unavailable, will retry", "err", err)
 }
 
+// openJournal opens the journal source, or returns nil when the agent has
+// none or it cannot be opened now.
+func (a *Agent) openJournal(ctx context.Context) <-chan kmsg.Event {
+	if a.journalSource == nil {
+		return nil
+	}
+	ch, err := a.journalSource.Watch(ctx)
+	a.journalReadable = err == nil
+	if err != nil {
+		// The error names the directory, never journal content.
+		a.journalOpenOnce.Do(func() { a.log.Warn("journal kernel log unavailable, will retry", "err", err) })
+		return nil
+	}
+	return ch
+}
+
+// reportKernelLog publishes whether the agent reads kernel faults from
+// either source. An agent with a journal mount that it cannot read says so;
+// the controller adds why a node has no mount at all.
+func (a *Agent) reportKernelLog() {
+	reason := "kernel-log-unavailable"
+	if a.journalSource != nil {
+		reason = "journal-unreadable"
+	}
+	reportKernelSource(a.kmsgReadable || a.journalReadable, reason)
+}
+
 // reportKernelSourceAvailability exposes the loss of AMD kernel fault evidence
 // even on installations where the optional SMI poller is disabled.
 func reportKernelSourceAvailability(available bool) {
+	reportKernelSource(available, "kernel-log-unavailable")
+}
+
+func reportKernelSource(available bool, reason string) {
 	unavailable := 1.0
 	if available {
 		unavailable = 0
 	}
-	metrics.SetXIDSourceUnavailable("nvidia-kmsg", "kernel-log-unavailable", unavailable)
+	metrics.SetXIDSourceUnavailable("nvidia-kmsg", reason, unavailable)
 	for _, class := range []types.ProblemClass{types.ClassDriverHang, types.ClassPCIe} {
-		metrics.SetSignalSourceUnavailable("amd-kmsg", class, "kernel-log-unavailable", unavailable)
+		metrics.SetSignalSourceUnavailable("amd-kmsg", class, reason, unavailable)
 	}
 }
 

@@ -215,3 +215,35 @@ func TestJournalMountFailureTakesTheLabelOffForAnHour(t *testing.T) {
 		t.Fatalf("after the hour: label %q", p.dir("a"))
 	}
 }
+
+// health shows why a node's agent has no kernel log: the agent knows only
+// that it has none, the controller knows why.
+func TestKernelLogSourceCarriesTheJournalReason(t *testing.T) {
+	c, _, _ := journalFixture(t, journalConfig(),
+		platform.JournalNode{Name: "debian", OSImage: "Debian GNU/Linux 12 (bookworm)", Accelerator: true},
+		platform.JournalNode{Name: "al2023", OSImage: "Amazon Linux 2023", Accelerator: true},
+	)
+	c.reconcileJournalLabels(context.Background())
+	now := time.Now()
+	for _, node := range []string{"debian", "al2023"} {
+		c.RecordAgentSignalSources(node, []types.AgentSignalSource{
+			{Node: node, Source: "nvidia-kmsg", Class: types.ClassXIDApp, Reason: "kernel-log-unavailable", ReadAt: now},
+			{Node: node, Source: "nvidia-dcgm", Class: types.ClassXIDApp, Reason: "xid-field-unavailable", ReadAt: now},
+		})
+	}
+	got := map[string]string{}
+	for _, r := range c.AgentSignalSources("") {
+		got[r.Node+"/"+r.Source] = r.Reason
+	}
+	want := map[string]string{
+		"debian/nvidia-kmsg": JournalReasonOSImageNotRecognized,
+		"debian/nvidia-dcgm": "xid-field-unavailable",
+		"al2023/nvidia-kmsg": "kernel-log-unavailable",
+		"al2023/nvidia-dcgm": "xid-field-unavailable",
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s reason = %q, want %q", k, got[k], v)
+		}
+	}
+}

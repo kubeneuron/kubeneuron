@@ -520,10 +520,18 @@ func (r *KubeNeuronReconciler) updateStatus(ctx context.Context, installation *k
 		Status: metav1.ConditionFalse, Reason: "KernelLogNotMounted",
 		Message: "The agent has no host kernel log. NVIDIA XID codes are unavailable unless DCGM field 230 is readable. AMD kernel ring timeouts and PCIe errors are unavailable.",
 	}
-	if installation.Spec.Safety.NodeLevelActions {
+	switch {
+	case installation.Spec.Safety.NodeLevelActions:
 		kernelLog.Status = metav1.ConditionUnknown
 		kernelLog.Reason = "KernelLogAccessUnverified"
 		kernelLog.Message = "The agent mounts /dev/kmsg. The operator has no confirmation that the agent can read it."
+	case journalMounted(installation):
+		kernelLog.Status = metav1.ConditionUnknown
+		kernelLog.Reason = "JournalAccessUnverified"
+		kernelLog.Message = "The agent reads kernel entries from the node's systemd journal on accelerator nodes with a recognised OS image. The operator has no confirmation that the agent can read it. kubeneuronctl health shows each node's kernel log source and, when it is unavailable, why: disabled, os-image-not-recognized, journal-mount-failed or journal-unreadable."
+	default:
+		kernelLog.Reason = "KernelLogDisabled"
+		kernelLog.Message = "spec.agent.kernelLog.journal.enabled is false. " + kernelLog.Message
 	}
 	meta.SetStatusCondition(&installation.Status.Conditions, kernelLog)
 	if validationErr != nil {
