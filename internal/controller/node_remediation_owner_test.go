@@ -118,6 +118,16 @@ func TestAutomaticRepairFollowerDoesNotRepeatReplacement(t *testing.T) {
 	if got := mustIncident(t, st, follower.ID); got.State != types.StateEvaluating || got.StepIndex != 0 {
 		t.Fatalf("follower reached %s step %d", got.State, got.StepIndex)
 	}
+	// An operator closing the owner does not verify replacement for the follower.
+	if err := c.ResolveIncident(ctx, owner, "alice", "closed manually"); err != nil {
+		t.Fatal(err)
+	}
+	step(t, c, st, follower.ID, 20)
+	for _, entry := range trail(t, st, follower.ID) {
+		if entry.Action == "verify-owner-replacement" {
+			t.Fatal("manual closure used as verified replacement evidence")
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if owners := p.cordoned["n1"]; len(owners) != 1 || owners[0] != owner || len(p.drained) != 1 || len(p.plain) != 1 || len(notifier.approvals) != 0 {
