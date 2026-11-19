@@ -95,7 +95,17 @@ func (c *Controller) syncAcceleratorInventory(ctx context.Context) {
 	if !c.inventory.sweptFor(names) && c.removeVanishedInventory(ctx, present) {
 		c.inventory.markSwept(names)
 	}
-	c.inventory.recordPools(nodes, c.runtimeConfig(ctx).Engine, time.Now().UTC(), c.poolChecker(ctx))
+	var reports []*types.AgentAcceleratorReport
+	if source, ok := c.store.(store.AcceleratorReportStore); ok {
+		reports, err = source.ListAcceleratorReports(ctx, "")
+		if err != nil {
+			if c.logOnce.first("pool-report-read") {
+				c.log.Warn("could not refresh pool policies from accelerator reports", "err", err)
+			}
+			return
+		}
+	}
+	c.inventory.recordPools(nodes, reports, c.runtimeConfig(ctx).Engine, time.Now().UTC(), c.poolChecker(ctx))
 }
 
 // keepLostDevices is the node's devices now, plus every device resource it

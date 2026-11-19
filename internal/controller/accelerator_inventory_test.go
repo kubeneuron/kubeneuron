@@ -349,23 +349,14 @@ func TestPoolReplacementOrders(t *testing.T) {
 		t.Fatal(err)
 	}
 	var c Controller
-	for _, tc := range []struct {
-		resources []string
-		want      string
-	}{
-		{[]string{"amd.com/gpu"}, "RemoveFirst"}, {[]string{"nvidia.com/gpu"}, "AddFirst"}, {[]string{"amd.com/gpu", "nvidia.com/gpu"}, "mixed"},
+	nodes := []types.Node{{Name: "worker", UID: "current", Labels: map[string]string{"eks.amazonaws.com/nodegroup": "train"}, Devices: []types.DeviceCount{{Resource: "amd.com/gpu"}}}}
+	for _, tc := range []struct{ uid, want string }{
+		{"previous", "AddFirst"}, {"", "AddFirst"}, {"current", "mixed"},
 	} {
-		var nodes []types.Node
-		for _, resource := range tc.resources {
-			nodes = append(nodes, types.Node{Name: resource, Labels: map[string]string{"eks.amazonaws.com/nodegroup": "train"}, Devices: []types.DeviceCount{{Resource: resource}}})
-		}
-		c.inventory.recordPools(nodes, engine, time.Now(), nil)
-		row := c.PoolAvailability().Pools[0]
-		if tc.want == "RemoveFirst" && (row.Status != "" || row.Reason != "" || row.CheckedAt != nil) {
-			t.Fatalf("unexpected check for remove-first: %+v", row)
-		}
-		if got := row.ReplacementPolicy; got != tc.want {
-			t.Fatalf("%v: got %q, want %q", tc.resources, got, tc.want)
+		reports := []*types.AgentAcceleratorReport{{Node: "worker", NodeUID: tc.uid, Vendor: "amd"}}
+		c.inventory.recordPools(nodes, reports, engine, time.Now(), nil)
+		if got := c.PoolAvailability().Pools[0].ReplacementPolicy; got != tc.want {
+			t.Fatalf("UID %q: got %s want %s", tc.uid, got, tc.want)
 		}
 	}
 }
@@ -390,7 +381,7 @@ func TestPoolCheckInterval(t *testing.T) {
 		calls  int
 		status string
 	}{{0, 1, "unknown"}, {9 * time.Minute, 1, "unknown"}, {10 * time.Minute, 2, "available"}} {
-		c.inventory.recordPools(nodes, poolTestEngine(t), now.Add(tc.after), check)
+		c.inventory.recordPools(nodes, nil, poolTestEngine(t), now.Add(tc.after), check)
 		row := c.PoolAvailability().Pools[0]
 		if row.Status != tc.status || calls != tc.calls || row.CheckedAt == nil || row.AcceleratorNodes != 2 {
 			t.Fatalf("after %s: calls %d row %+v", tc.after, calls, row)
@@ -502,7 +493,7 @@ func TestPoolCheckBudget(t *testing.T) {
 	calls := 0
 	check := func(types.Node) error { calls++; return nil }
 	for _, want := range []int{4, 6} {
-		c.inventory.recordPools(nodes, poolTestEngine(t), now, check)
+		c.inventory.recordPools(nodes, nil, poolTestEngine(t), now, check)
 		pending := 0
 		for _, row := range c.PoolAvailability().Pools {
 			if row.CheckedAt == nil && row.Status == "unknown" {
@@ -527,7 +518,7 @@ func poolTestEngine(t *testing.T) *playbook.Engine {
 func TestPoolWithoutReplacementPolicySkipsCheck(t *testing.T) {
 	var c Controller
 	nodes := []types.Node{{Name: "a", Labels: map[string]string{"kubernetes.azure.com/agentpool": "train"}, Devices: tpuDevices}}
-	c.inventory.recordPools(nodes, nil, time.Now(), func(types.Node) error { t.Fatal("unexpected cloud check"); return nil })
+	c.inventory.recordPools(nodes, nil, nil, time.Now(), func(types.Node) error { t.Fatal("unexpected cloud check"); return nil })
 	row := c.PoolAvailability().Pools[0]
 	if row.ReplacementPolicy != "none" || row.Status != "not applicable" || row.CheckedAt != nil {
 		t.Fatal(row)
@@ -549,10 +540,16 @@ func TestTrainiumPoolOrderMatchesNodeHealthIncident(t *testing.T) {
 	}
 	for _, resource := range []string{"aws.amazon.com/neuron", "aws.amazon.com/neurondevice"} {
 		var c Controller
-		nodes := []types.Node{{Name: "trainium", Labels: map[string]string{"eks.amazonaws.com/nodegroup": "train"}, Devices: []types.DeviceCount{{Resource: resource, Capacity: 1, Unit: types.DeviceUnitAWSDevice}}}}
-		c.inventory.recordPools(nodes, engine, time.Now(), nil)
+		nodes := []types.Node{{Name: "trainium", UID: "trn-uid", Labels: map[string]string{"eks.amazonaws.com/nodegroup": "train"}, Devices: []types.DeviceCount{{Resource: resource, Capacity: 1, Unit: types.DeviceUnitAWSDevice}}}}
+		c.inventory.recordPools(nodes, nil, engine, time.Now(), nil)
 		if row := c.PoolAvailability().Pools[0]; row.ReplacementPolicy != "RemoveFirst" {
 			t.Fatalf("%s: %+v", resource, row)
 		}
+		reports := []*types.AgentAcceleratorReport{{Node: "trainium", NodeUID: "trn-uid", Vendor: "aws"}}
+		c.inventory.recordPools(nodes, reports, engine, time.Now(), nil)
+		if row := c.PoolAvailability().Pools[0]; row.ReplacementPolicy != "mixed" {
+			t.Fatalf("%s with authenticated AWS report: %+v", resource, row)
+		}
+
 	}
 }

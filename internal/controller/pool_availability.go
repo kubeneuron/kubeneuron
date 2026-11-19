@@ -18,7 +18,7 @@ import (
 
 // recordPools uses the same complete Kubernetes node list as inventory sync.
 // Reading the operator endpoint does not trigger another Kubernetes list.
-func (s *inventorySync) recordPools(nodes []types.Node, engine *playbook.Engine, now time.Time, check func(types.Node) error) {
+func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAcceleratorReport, engine *playbook.Engine, now time.Time, check func(types.Node) error) {
 	type poolKey struct{ cloud, name string }
 	s.mu.Lock()
 	previous := map[poolKey]types.PoolAvailability{}
@@ -30,10 +30,19 @@ func (s *inventorySync) recordPools(nodes []types.Node, engine *playbook.Engine,
 	counts := map[poolKey]int{}
 	orders := map[poolKey]string{}
 	vendorOrders := map[types.AcceleratorVendor]string{}
-	vendorFor := map[string]types.AcceleratorVendor{"nvidia.com/gpu": "nvidia", "amd.com/gpu": "amd", "google.com/tpu": "google"}
+	type nodeKey struct{ name, uid string }
+	vendors := map[nodeKey][]types.AcceleratorVendor{}
+	for _, report := range reports {
+		if report != nil && report.NodeUID != "" && report.Vendor.Valid() {
+			key := nodeKey{report.Node, report.NodeUID}
+			vendors[key] = append(vendors[key], report.Vendor)
+		}
+	}
+	generic := poolVendorOrder(engine, "")
 
 	for _, n := range nodes {
-		if len(n.Devices) == 0 && len(n.GPUs) == 0 {
+		reported := vendors[nodeKey{n.Name, n.UID}]
+		if len(n.Devices) == 0 && len(n.GPUs) == 0 && len(reported) == 0 {
 			continue
 		}
 		for _, provider := range []struct{ cloud, label string }{
@@ -47,8 +56,8 @@ func (s *inventorySync) recordPools(nodes []types.Node, engine *playbook.Engine,
 					representatives[key] = n
 				}
 				counts[key]++
-				for _, device := range n.Devices {
-					vendor := vendorFor[device.Resource]
+				orders[key] = mergePoolOrder(orders[key], generic)
+				for _, vendor := range reported {
 					order, found := vendorOrders[vendor]
 					if !found {
 						order = poolVendorOrder(engine, vendor)
