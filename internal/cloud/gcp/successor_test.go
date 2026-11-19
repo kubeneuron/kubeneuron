@@ -101,7 +101,8 @@ func TestAddFirstIsUnavailableWhereGKEOwnsTheSize(t *testing.T) {
 		"autopilot":  {func() *fakeGKE { f := newFakeGKE(3); f.autopilot = true; return f }(), "Autopilot"},
 	} {
 		p := testProvider(tc.f)
-		if err := p.CheckAddFirst(t.Context(), testInstance(1)); !errors.Is(err, cloud.ErrAddFirstUnavailable) || !strings.Contains(err.Error(), tc.want) {
+		var refusal *cloud.PoolRefusal
+		if err := p.CheckAddFirst(t.Context(), testInstance(1)); !errors.As(err, &refusal) || refusal.Code != name || !errors.Is(err, cloud.ErrAddFirstUnavailable) || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: CheckAddFirst = %v", name, err)
 		}
 		if _, err := p.PrepareSuccessor(t.Context(), newOperation()); !errors.Is(err, cloud.ErrAddFirstUnavailable) {

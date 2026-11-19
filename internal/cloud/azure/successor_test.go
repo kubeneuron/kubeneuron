@@ -86,7 +86,8 @@ func TestAddFirstIsUnavailableOnAnAutoscaledPool(t *testing.T) {
 	f := newFakeAKS(3)
 	f.autoscaling = true
 	p := testProvider(f)
-	if err := p.CheckAddFirst(t.Context(), testInstance(1)); !errors.Is(err, cloud.ErrAddFirstUnavailable) || !strings.Contains(err.Error(), "autoscaler") {
+	var refusal *cloud.PoolRefusal
+	if err := p.CheckAddFirst(t.Context(), testInstance(1)); !errors.As(err, &refusal) || refusal.Code != cloud.PoolAutoscaled || !errors.Is(err, cloud.ErrAddFirstUnavailable) || !strings.Contains(err.Error(), "autoscaler") {
 		t.Fatalf("CheckAddFirst = %v", err)
 	}
 	if _, err := p.PrepareSuccessor(t.Context(), newOperation()); !errors.Is(err, cloud.ErrAddFirstUnavailable) {

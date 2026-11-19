@@ -40,14 +40,14 @@ func (p *Provider) CheckAddFirst(ctx context.Context, instanceID string) error {
 		return err
 	}
 	if t.machine == "" {
-		return fmt.Errorf("%w: instance %s is not a machine of agent pool %s", cloud.ErrAddFirstUnavailable, instanceID, t.pool)
+		return &cloud.PoolRefusal{Code: cloud.PoolInstanceMissing, Reason: fmt.Sprintf("instance %s is not a machine of agent pool %s", instanceID, t.pool)}
 	}
 	return addFirstRefusal(t.pool, pl)
 }
 
 func addFirstRefusal(name string, pl pool) error {
 	if pl.Autoscaling {
-		return fmt.Errorf("%w: agent pool %s is under the cluster autoscaler, which owns its size", cloud.ErrAddFirstUnavailable, name)
+		return &cloud.PoolRefusal{Code: cloud.PoolAutoscaled, Reason: fmt.Sprintf("agent pool %s is under the cluster autoscaler, which owns its size", name)}
 	}
 	return nil
 }

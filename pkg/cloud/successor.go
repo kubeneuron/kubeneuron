@@ -14,6 +14,24 @@ import (
 // wrapping error says which.
 var ErrAddFirstUnavailable = errors.New("add-first replacement is not available for this node")
 
+// PoolRefusal identifies a confirmed pool restriction returned by CheckAddFirst.
+// Read failures have no reason code and should be reported as unknown.
+type PoolRefusal struct {
+	Code   string
+	Reason string
+}
+
+func (r *PoolRefusal) Error() string { return ErrAddFirstUnavailable.Error() + ": " + r.Reason }
+func (r *PoolRefusal) Unwrap() error { return ErrAddFirstUnavailable }
+
+// Stable reason codes shared by provider checks and operator-facing pool assessments.
+const (
+	PoolAutoscaled      = "autoscaled"
+	PoolMultiZone       = "multi-zone"
+	PoolAutopilot       = "autopilot"
+	PoolInstanceMissing = "instance-not-in-pool"
+)
+
 // ErrRemoveFirstUnavailable is wrapped by a provider that cannot replace a
 // node by removing it first, with the reason.
 var ErrRemoveFirstUnavailable = errors.New("remove-first replacement is not available for this node")

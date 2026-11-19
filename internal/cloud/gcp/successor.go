@@ -44,11 +44,11 @@ func (p *Provider) CheckAddFirst(ctx context.Context, instanceID string) error {
 func addFirstRefusal(pl nodePool, c cluster) error {
 	switch {
 	case c.Autopilot:
-		return fmt.Errorf("%w: GKE Autopilot manages its nodes; KubeNeuron only observes them", cloud.ErrAddFirstUnavailable)
+		return &cloud.PoolRefusal{Code: cloud.PoolAutopilot, Reason: "GKE Autopilot manages its nodes; KubeNeuron only observes them"}
 	case pl.Autoscaling:
-		return fmt.Errorf("%w: node pool %s is under the cluster autoscaler, which owns its size", cloud.ErrAddFirstUnavailable, pl.Name)
+		return &cloud.PoolRefusal{Code: cloud.PoolAutoscaled, Reason: fmt.Sprintf("node pool %s is under the cluster autoscaler, which owns its size", pl.Name)}
 	case len(pl.Groups) != 1:
-		return fmt.Errorf("%w: node pool %s spans %d zones, and GKE grows every zone at once", cloud.ErrAddFirstUnavailable, pl.Name, len(pl.Groups))
+		return &cloud.PoolRefusal{Code: cloud.PoolMultiZone, Reason: fmt.Sprintf("node pool %s spans %d zones, and GKE grows every zone at once", pl.Name, len(pl.Groups))}
 	}
 	return nil
 }
