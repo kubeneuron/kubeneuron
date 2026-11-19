@@ -458,6 +458,16 @@ func (a *lostDeviceResponse) Execute(_ context.Context, _ types.Node, act types.
 }
 
 func TestLostGPUResetResponseRetainsStep(t *testing.T) {
+	for _, late := range []bool{true, false} {
+		name := "lease-expired"
+		if late {
+			name = "late-result"
+		}
+		t.Run(name, func(t *testing.T) { checkLostResetResponse(t, late) })
+	}
+}
+
+func checkLostResetResponse(t *testing.T, late bool) {
 	act := &lostDeviceResponse{}
 	c, st := stackTestControllerWithActuator(t, wholeDeviceTopologyPlatform(), act)
 	ctx := t.Context()
@@ -496,8 +506,22 @@ func TestLostGPUResetResponseRetainsStep(t *testing.T) {
 	if err := c.transitionWithRepairStep(ctx, mustIncident(t, st, drain.ID), types.StateExecuting, "system", "drain", "start", nil, "platform.drain", false); !errors.Is(err, errRepairStepBusy) {
 		t.Fatalf("drain after lost response: %v", err)
 	}
-	if err := st.CompleteClaimedAction(ctx, id, leased.LeaseToken, "boot", types.ActionResult{ActionID: id, OK: true}); err != nil {
-		t.Fatal(err)
+	if late {
+		if err := st.CompleteClaimedAction(ctx, id, leased.LeaseToken, "boot", types.ActionResult{ActionID: id, OK: true}); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		for _, age := range []time.Duration{time.Second, types.AgentResultGrace + time.Second} {
+			if _, err := st.SQL.ExecContext(ctx, "UPDATE actions SET lease_expires_at_ns=? WHERE id=?", time.Now().Add(-age).UnixNano(), id); err != nil {
+				t.Fatal(err)
+			}
+			if age < types.AgentResultGrace {
+				err := c.transitionWithRepairStep(ctx, mustIncident(t, st, drain.ID), types.StateExecuting, "system", "drain", "start", nil, "platform.drain", false)
+				if !errors.Is(err, errRepairStepBusy) {
+					t.Fatalf("inside lease grace: %v", err)
+				}
+			}
+		}
 	}
 	if err := c.transitionWithRepairStep(ctx, mustIncident(t, st, drain.ID), types.StateExecuting, "system", "drain", "start", nil, "platform.drain", false); err != nil {
 		t.Fatalf("drain after confirmed late result: %v", err)

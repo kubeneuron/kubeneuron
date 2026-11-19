@@ -109,12 +109,23 @@ func (q *Queries) ClaimRepairStep(ctx context.Context, node, uid, incident, acti
 		ON CONFLICT(node,node_uid) DO UPDATE SET node_uid=excluded.node_uid`, node, uid); err != nil {
 		return false, err
 	}
+	// Cancel the expired lease before dropping the reservation. A competing
+	// claim of the action either renews it first or sees the tombstone.
+	now := time.Now()
+	if _, err := q.db.ExecContext(ctx, `UPDATE actions SET state='cancelled', updated_at=?, lease_token=''
+		WHERE state='leased' AND lease_expires_at_ns<=? AND id IN
+		(SELECT r.action_id FROM repair_step_claims r JOIN incidents i ON i.id=r.incident_id
+		 WHERE r.node=? AND r.node_uid=? AND r.device_step=1 AND i.state IN ('NEEDS_HUMAN','RESOLVED'))`,
+		ts(now), now.Add(-types.AgentResultGrace).UnixNano(), node, uid); err != nil {
+		return false, err
+	}
 	// A reset result may arrive after the controller handed the incident to
 	// an operator. Reconcile that exact leased action before admitting work.
 	if _, err := q.db.ExecContext(ctx, `DELETE FROM repair_step_claims
 		WHERE node=? AND node_uid=? AND device_step=1 AND action_id<>''
 		AND EXISTS (SELECT 1 FROM actions a WHERE a.id=repair_step_claims.action_id
-			AND a.incident_id=repair_step_claims.incident_id AND a.state='done' AND a.attempts>0)`, node, uid); err != nil {
+			AND a.incident_id=repair_step_claims.incident_id AND a.attempts>0 AND
+			(a.state='done' OR (a.state='cancelled' AND a.lease_expires_at_ns>0 AND a.lease_expires_at_ns<=?)))`, node, uid, now.Add(-types.AgentResultGrace).UnixNano()); err != nil {
 		return false, err
 	}
 	var busy bool

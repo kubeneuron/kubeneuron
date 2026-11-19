@@ -1643,7 +1643,7 @@ func (q *Queries) CancelPendingActionsForIncident(ctx context.Context, incidentI
 		return 0, fmt.Errorf("cancel actions: incident ID is required")
 	}
 	out, err := q.db.ExecContext(ctx, `
-		UPDATE actions SET state='cancelled', lease_token='', lease_expires_at_ns=0, updated_at=?
+		UPDATE actions SET state='cancelled', lease_token='', updated_at=?
 		WHERE incident_id=?
 		  AND (state='pending'
 		       OR (state='leased' AND lease_expires_at_ns <= ?))`,
