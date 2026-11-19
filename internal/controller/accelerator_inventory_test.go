@@ -435,7 +435,11 @@ func TestPoolChecksBeforeIncident(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("pool status HTTP %d", resp.StatusCode)
 	}

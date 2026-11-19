@@ -28,7 +28,9 @@ func cmdPools() *cobra.Command {
 				return printOperationJSON(cmd, view)
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "POOL\tCLOUD\tACCELERATOR NODES\tREPLACEMENT POLICY\tCHECKED (UTC)\tADD-FIRST")
+			if _, err := fmt.Fprintln(w, "POOL\tCLOUD\tACCELERATOR NODES\tREPLACEMENT POLICY\tCHECKED (UTC)\tADD-FIRST"); err != nil {
+				return err
+			}
 			for _, row := range view.Pools {
 				checked := "—"
 				if row.CheckedAt != nil {
@@ -51,7 +53,9 @@ func cmdPools() *cobra.Command {
 						status += " — " + row.Action
 					}
 				}
-				fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\n", row.Pool, row.Cloud, row.AcceleratorNodes, row.ReplacementPolicy, checked, status)
+				if _, err := fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\n", row.Pool, row.Cloud, row.AcceleratorNodes, row.ReplacementPolicy, checked, status); err != nil {
+					return err
+				}
 			}
 			return w.Flush()
 		},
