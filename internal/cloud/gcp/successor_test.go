@@ -97,7 +97,7 @@ func TestAddFirstIsUnavailableWhereGKEOwnsTheSize(t *testing.T) {
 		want string
 	}{
 		"autoscaled": {func() *fakeGKE { f := newFakeGKE(3); f.autoscaling = true; return f }(), "autoscaler"},
-		"multi-zone": {newFakeGKE(3, testZone, "us-central1-b"), "zones"},
+		"multi-zone": {newFakeGKE(3, testZone, "us-central1-b"), "add-first would add a node in every zone of this pool"},
 		"autopilot":  {func() *fakeGKE { f := newFakeGKE(3); f.autopilot = true; return f }(), "Autopilot"},
 	} {
 		p := testProvider(tc.f)

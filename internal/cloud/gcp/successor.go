@@ -48,7 +48,7 @@ func addFirstRefusal(pl nodePool, c cluster) error {
 	case pl.Autoscaling:
 		return &cloud.PoolRefusal{Code: cloud.PoolAutoscaled, Reason: fmt.Sprintf("node pool %s is under the cluster autoscaler, which owns its size", pl.Name)}
 	case len(pl.Groups) != 1:
-		return &cloud.PoolRefusal{Code: cloud.PoolMultiZone, Reason: fmt.Sprintf("node pool %s spans %d zones, and GKE grows every zone at once", pl.Name, len(pl.Groups))}
+		return &cloud.PoolRefusal{Code: cloud.PoolMultiZone, Reason: "add-first would add a node in every zone of this pool"}
 	}
 	return nil
 }
