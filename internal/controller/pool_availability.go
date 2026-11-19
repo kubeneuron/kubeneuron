@@ -5,6 +5,7 @@ package controller
 import (
 	"cmp"
 	"slices"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
@@ -48,7 +49,19 @@ func (s *inventorySync) recordPools(nodes []types.Node, engine *playbook.Engine)
 	}
 	rows := make([]types.PoolAvailability, 0, len(counts))
 	for key, count := range counts {
-		rows = append(rows, types.PoolAvailability{Pool: key.name, Cloud: key.cloud, AcceleratorNodes: count, Status: "unknown", ReplacementPolicy: cmp.Or(orders[key], "AddFirst")})
+		row := types.PoolAvailability{Pool: key.name, Cloud: key.cloud, AcceleratorNodes: count, Status: "unknown", ReplacementPolicy: cmp.Or(orders[key], "AddFirst")}
+		switch {
+		case row.ReplacementPolicy == "RemoveFirst":
+			row.Status = ""
+		case row.Cloud == "EKS":
+			// The release disables EKS add-first regardless of pool configuration.
+			checked := time.Now().UTC()
+			row.CheckedAt = &checked
+			row.Status = "unavailable"
+			row.ReasonCode = "eks-add-first-disabled"
+			row.Reason = "add-first on EKS is not enabled in this release"
+		}
+		rows = append(rows, row)
 	}
 	slices.SortFunc(rows, func(a, b types.PoolAvailability) int {
 		return cmp.Or(cmp.Compare(a.Cloud, b.Cloud), cmp.Compare(a.Pool, b.Pool))

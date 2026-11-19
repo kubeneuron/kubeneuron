@@ -317,6 +317,12 @@ func TestAcceleratorPoolInventoryBeforeIncident(t *testing.T) {
 		t.Fatalf("unexpected pools: %+v", rows)
 	}
 	for _, row := range rows {
+		if row.Cloud == "EKS" {
+			if row.Status != "unavailable" || row.Reason != "add-first on EKS is not enabled in this release" || row.CheckedAt == nil || row.Action != "" {
+				t.Fatalf("unexpected EKS release assessment: %+v", row)
+			}
+			continue
+		}
 		if row.Status != "unknown" || row.CheckedAt != nil {
 			t.Fatalf("unexpected assessment: %+v", row)
 		}
@@ -345,10 +351,14 @@ func TestPoolReplacementOrders(t *testing.T) {
 	} {
 		var nodes []types.Node
 		for _, resource := range tc.resources {
-			nodes = append(nodes, types.Node{Name: resource, Labels: map[string]string{"cloud.google.com/gke-nodepool": "train"}, Devices: []types.DeviceCount{{Resource: resource}}})
+			nodes = append(nodes, types.Node{Name: resource, Labels: map[string]string{"eks.amazonaws.com/nodegroup": "train"}, Devices: []types.DeviceCount{{Resource: resource}}})
 		}
 		c.inventory.recordPools(nodes, engine)
-		if got := c.PoolAvailability().Pools[0].ReplacementPolicy; got != tc.want {
+		row := c.PoolAvailability().Pools[0]
+		if tc.want == "RemoveFirst" && (row.Status != "" || row.Reason != "" || row.CheckedAt != nil) {
+			t.Fatalf("unexpected check for remove-first: %+v", row)
+		}
+		if got := row.ReplacementPolicy; got != tc.want {
 			t.Fatalf("%v: got %q, want %q", tc.resources, got, tc.want)
 		}
 	}
