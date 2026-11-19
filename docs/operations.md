@@ -98,7 +98,9 @@ Three independent mechanisms, all fail toward not acting:
 
 ## When two incidents need to repair the same cloud node
 
-For live repair incidents with a recorded cloud node identity, the first
+For live repairs, the controller identifies the node by its pinned cloud identity
+or by the Kubernetes Node UID recorded in inventory when the incident opened.
+For incidents with either identity, the first
 incident to reach a disruptive node step becomes the repair owner. A second
 incident on the same Node UID waits at its own step. Only the owner requests
 approval or runs the cordon, drain and replacement. The workflow store

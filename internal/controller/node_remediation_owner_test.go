@@ -2,6 +2,7 @@
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
@@ -136,5 +137,55 @@ func TestAutomaticRepairFollowerDoesNotRepeatReplacement(t *testing.T) {
 	defer p.mu.Unlock()
 	if owners := p.cordoned["n1"]; len(owners) != 1 || owners[0] != owner || len(p.drained) != 1 || len(p.plain) != 1 || len(notifier.approvals) != 0 {
 		t.Fatalf("cordon owners=%v drains=%v replacements=%v approvals=%d", owners, p.drained, p.plain, len(notifier.approvals))
+	}
+}
+
+func TestInventoryNodeUIDSharesRepairApprovalWithoutCloudIdentity(t *testing.T) {
+	c, st, notifier := walkFixture(t, false)
+	ctx := t.Context()
+	if err := st.UpsertNode(ctx, &types.Node{Name: "n1", UID: "inventory-uid"}); err != nil {
+		t.Fatal(err)
+	}
+	book := &playbook.Playbook{Name: "repair", Target: "node", Steps: []playbook.Step{
+		{Name: "cordon", Action: "platform.cordon", Approval: "required"},
+	}}
+	classes := []types.ProblemClass{types.ClassFellOffBus, types.ClassAcceleratorFault}
+	var policies []playbook.Policy
+	for _, class := range classes {
+		policies = append(policies, playbook.Policy{Name: string(class), Class: class, Playbook: book.Name, Mode: recoverymode.Approval})
+	}
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{book.Name: book}, policies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetEngine(engine)
+	var owner string
+	for _, class := range classes {
+		sig := signal(class, "n1", "")
+		if err := c.IngestSignal(ctx, sig); err != nil {
+			t.Fatal(err)
+		}
+		inc, err := st.GetOpenIncident(ctx, sig.Target, class)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if inc.CloudIdentity != nil || inc.RepairNodeUID != "inventory-uid" {
+			t.Fatalf("unexpected identity for %s", class)
+		}
+		got := step(t, c, st, inc.ID, 10)
+		if owner == "" {
+			owner = inc.ID
+			if got.State != types.StateAwaitingApproval {
+				t.Fatalf("owner state = %s", got.State)
+			}
+			continue
+		}
+		status := types.RecoveryAvailabilityFromAudit(trail(t, st, inc.ID))
+		if got.State != types.StateEvaluating || status == nil || status.Source != "node-repair" || !strings.Contains(status.Reason, owner) {
+			t.Fatalf("follower state=%s recovery=%+v", got.State, status)
+		}
+	}
+	if len(notifier.approvals) != 1 {
+		t.Fatalf("approval requests = %d, want one", len(notifier.approvals))
 	}
 }
