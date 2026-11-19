@@ -551,6 +551,10 @@ func cmdResolve() *cobra.Command {
 			if err := client.doHeaders("POST", "/api/v1/incidents/"+url.PathEscape(args[0])+"/resolve", body, &incident, map[string]string{"Idempotency-Key": operationKey()}); err != nil {
 				return err
 			}
+			if hint := incident.CloudSettlementHint(); hint != "" {
+				_, err = fmt.Fprintf(cmd.OutOrStdout(), "Incident %s is closed.\n%s\n", incident.ID, hint)
+				return err
+			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "resolved: %s (resource version %d)\n", incident.ID, incident.Version)
 			return err
 		},
