@@ -405,6 +405,11 @@ func TestExecutingTransactionExcludesDrainAndGPUReset(t *testing.T) {
 	if err := start("device", "agent.gpu_reset"); err != nil {
 		t.Fatal(err)
 	}
+	// The incoming controller has no in-memory record of the GPU step.
+	c = restartWith(t, c, st, nil)
+	if got := mustIncident(t, st, "device"); got.State != types.StateExecuting {
+		t.Fatalf("GPU step after restart = %s", got.State)
+	}
 	if err := start("drain", "platform.drain"); !errors.Is(err, errRepairStepBusy) {
 		t.Fatalf("drain admission=%v", err)
 	}
