@@ -412,6 +412,14 @@ func TestInterruptionOnANodeWithAnotherIncident(t *testing.T) {
 	other := playbook.Policy{Name: "fell-off-bus", Class: types.ClassFellOffBus, Playbook: "cloud-replace", Mode: recoverymode.Approval}
 	c, st, plat, _ := interruptionFixture(t, interruptionEngine(t, recoverymode.Automatic, autoSettings(), other), liveLimits(), 1)
 	ctx := context.Background()
+	node, err := st.GetNode(ctx, "n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.UID = "uid-n1"
+	if err := st.UpsertNode(ctx, node); err != nil {
+		t.Fatal(err)
+	}
 	if err := c.ingest(ctx, signal(types.ClassFellOffBus, "n1", "GPU-n1")); err != nil {
 		t.Fatal(err)
 	}
@@ -419,10 +427,17 @@ func TestInterruptionOnANodeWithAnotherIncident(t *testing.T) {
 	if err != nil || len(first) != 1 {
 		t.Fatalf("incidents %d, err %v", len(first), err)
 	}
+	waitSettled(t, c, st, first[0].ID, func(i *types.Incident) bool { return i.State == types.StateAwaitingApproval })
+	if first[0].RepairNodeUID != node.UID {
+		t.Fatalf("recorded repair UID = %q", first[0].RepairNodeUID)
+	}
 	plat.announce(spotNotice("n1", time.Time{}))
 	c.pollInterruptions(ctx)
 	inc := settle(t, c, st, interruptionIncident(t, st, "n1").ID)
 
+	if auditHas(trail(t, st, inc.ID), "wait-for-node-repair", "") {
+		t.Fatal("interruption warning parked behind the repair owner")
+	}
 	if plat.requests["trainer"] != 1 {
 		t.Fatalf("the job was asked %d times, want once", plat.requests["trainer"])
 	}
