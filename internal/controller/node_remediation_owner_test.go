@@ -300,3 +300,39 @@ func (s missingRepairTx) GetNode(ctx context.Context, node string) (*types.Node,
 	}
 	return s.Tx.GetNode(ctx, node)
 }
+
+func TestPolicyHeldIncidentLeavesRepairAvailable(t *testing.T) {
+	p := newSuccessorPlatform()
+	p.unavailable = cloud.ErrAddFirstUnavailable
+	c, st, _ := successorFixture(t, recoverymode.Automatic, p, recoverymode.AddFirst)
+	ctx := t.Context()
+	engine := c.runtimeConfig(ctx).Engine
+	book, _ := engine.Playbook("cloud-replace")
+	a, _ := engine.PolicyFor(types.ClassFellOffBus, "")
+	b := a
+	b.Name, b.Class, b.ReplacementStrategy = "remove-first", types.ClassAcceleratorFault, recoverymode.RemoveFirst
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{book.Name: book}, []playbook.Policy{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetEngine(engine)
+	held := openOn(t, c, "n1")
+	step(t, c, st, held, 20)
+	if !auditHas(trail(t, st, held), "recovery-unavailable", "") {
+		t.Fatal("expected add-first policy hold")
+	}
+	sig := signal(b.Class, "n1", "")
+	if err := c.IngestSignal(ctx, sig); err != nil {
+		t.Fatal(err)
+	}
+	other, err := st.GetOpenIncident(ctx, sig.Target, b.Class)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitSettled(t, c, st, other.ID, func(i *types.Incident) bool { return i.State == types.StateVerifying })
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if ids := p.cordoned["n1"]; len(ids) != 1 || ids[0] != other.ID || len(p.drained) != 1 || len(p.plain) != 1 {
+		t.Fatalf("cordons=%v drains=%v replacements=%v", ids, p.drained, p.plain)
+	}
+}

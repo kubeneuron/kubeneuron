@@ -60,6 +60,9 @@ func (c *Controller) authorizeAndStartStep(ctx context.Context, inc *types.Incid
 		}
 		pol, automatic := c.automaticPolicyFor(ctx, inc)
 		if !automatic {
+			if held, err := c.holdForRepairOwner(ctx, inc, step); held || err != nil {
+				return err
+			}
 			return c.parkForApproval(ctx, inc, step, note)
 		}
 		verdict, reason := c.authorizeByPolicy(ctx, inc, step, pol)
@@ -68,6 +71,9 @@ func (c *Controller) authorizeAndStartStep(ctx context.Context, inc *types.Incid
 			// Recorded once the step has started and before its goroutine
 			// runs, so every step the policy started names the policy, however
 			// fast the step finishes.
+			if held, err := c.holdForRepairOwner(ctx, inc, step); held || err != nil {
+				return err
+			}
 			return c.startStepThen(ctx, inc, step, policyActor(pol.Name), func() {
 				if err := c.appendAudit(ctx, inc, policyActor(pol.Name), "policy-authorised",
 					policyAuthorisationNote(pol, time.Now())+": "+step.Name); err != nil {
@@ -79,9 +85,15 @@ func (c *Controller) authorizeAndStartStep(ctx context.Context, inc *types.Incid
 			c.logOnceStepHeld(inc, step, pol, reason)
 			return nil
 		default:
+			if held, err := c.holdForRepairOwner(ctx, inc, step); held || err != nil {
+				return err
+			}
 			return c.parkForApproval(ctx, inc, step,
 				fmt.Sprintf("automatic policy %s did not authorise this step: %s", pol.Name, reason))
 		}
+	}
+	if held, err := c.holdForRepairOwner(ctx, inc, step); held || err != nil {
+		return err
 	}
 	return c.startStep(ctx, inc, step, "system")
 }

@@ -335,6 +335,10 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 		c.deferStep(inc, step, metrics.DeferUnarmedAgent)
 		return c.escalate(ctx, inc, reason)
 	}
+	return c.authorizeAndStartStep(ctx, inc, step)
+}
+
+func (c *Controller) holdForRepairOwner(ctx context.Context, inc *types.Incident, step *playbook.Step) (bool, error) {
 	// Serialize disruptive repair steps against the incarnation pinned at open.
 	// The notice-only ladder uses its own cordon ownership accounting.
 	def, registered := action.ByWire(step.Action)
@@ -363,16 +367,16 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 			return err
 		})
 		if errors.Is(err, missing) || errors.Is(err, changed) {
-			return c.escalate(ctx, inc, err.Error())
+			return true, c.escalate(ctx, inc, err.Error())
 		}
 		if err != nil {
-			return err
+			return true, err
 		}
 		if owner != inc.ID {
-			return c.verifyAfterOwnersReplacement(ctx, inc, owner)
+			return true, c.verifyAfterOwnersReplacement(ctx, inc, owner)
 		}
 	}
-	return c.authorizeAndStartStep(ctx, inc, step)
+	return false, nil
 }
 
 func repairNodeUID(inc *types.Incident) string {
