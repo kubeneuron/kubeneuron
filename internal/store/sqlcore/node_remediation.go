@@ -101,3 +101,25 @@ func (q *Queries) ReleaseRepairFollowers(ctx context.Context, ownerID string, at
 	}
 	return nil
 }
+
+// ClaimRepairStep admits concurrent device steps or one node step. The
+// upsert locks the guard row until the caller commits the admission.
+func (q *Queries) ClaimRepairStep(ctx context.Context, node, uid, incident string, device bool) (bool, error) {
+	if _, err := q.db.ExecContext(ctx, `INSERT INTO repair_step_guards(node,node_uid) VALUES(?,?)
+		ON CONFLICT(node,node_uid) DO UPDATE SET node_uid=excluded.node_uid`, node, uid); err != nil {
+		return false, err
+	}
+	var busy bool
+	if err := q.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM repair_step_claims
+		WHERE node=? AND node_uid=? AND incident_id<>? AND (device_step=0 OR ?=0))`, node, uid, incident, b2i(device)).Scan(&busy); err != nil || busy {
+		return false, err
+	}
+	_, err := q.db.ExecContext(ctx, `INSERT INTO repair_step_claims(incident_id,node,node_uid,device_step) VALUES(?,?,?,?)
+	ON CONFLICT(incident_id) DO UPDATE SET node=excluded.node,node_uid=excluded.node_uid,device_step=excluded.device_step`, incident, node, uid, b2i(device))
+	return err == nil, err
+}
+
+func (q *Queries) ReleaseRepairStep(ctx context.Context, incident string) error {
+	_, err := q.db.ExecContext(ctx, "DELETE FROM repair_step_claims WHERE incident_id=?", incident)
+	return err
+}

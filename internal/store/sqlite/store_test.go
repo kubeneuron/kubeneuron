@@ -1011,3 +1011,55 @@ func TestFollowerRemembersReleasedOwnerAfterRestart(t *testing.T) {
 		t.Fatalf("active claims = %d, error = %v", count, err)
 	}
 }
+
+func TestRepairStepExclusion(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := t.Context()
+	if err := s.WithTx(ctx, func(tx store.Tx) error {
+		for _, id := range []string{"gpu-a", "gpu-b", "node"} {
+			inc := testIncident(id, time.Now())
+			inc.Target = types.Target{Node: "n"}
+			if id != "node" {
+				inc.Target.GPUUUID = id
+			}
+			if err := tx.CreateIncident(ctx, inc); err != nil {
+				return err
+			}
+		}
+		for _, check := range []struct {
+			id           string
+			device, want bool
+		}{{"gpu-a", true, true}, {"gpu-b", true, true}, {"node", false, false}} {
+			got, err := tx.ClaimRepairStep(ctx, "n", "uid", check.id, check.device)
+			if err != nil {
+				return err
+			}
+			if got != check.want {
+				t.Errorf("%s admitted=%v", check.id, got)
+			}
+		}
+		for _, id := range []string{"gpu-a", "gpu-b"} {
+			if err := tx.ReleaseRepairStep(ctx, id); err != nil {
+				return err
+			}
+		}
+		got, err := tx.ClaimRepairStep(ctx, "n", "uid", "node", false)
+		if err != nil {
+			return err
+		}
+		if !got {
+			t.Error("node still blocked")
+		}
+		got, err = tx.ClaimRepairStep(ctx, "n", "uid", "gpu-a", true)
+		if got {
+			t.Error("device admitted during node step")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
