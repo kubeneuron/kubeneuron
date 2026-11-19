@@ -1091,8 +1091,9 @@ the step and sends a best-effort notification with the reason. Check the
 incident details in the panel or run `kubeneuronctl incidents show <id>` to
 see the recorded reason and audit trail. After the pool is corrected, the
 controller resumes the same incident once its cached eligibility check expires.
-A restart between notification dispatch and acknowledgement can repeat the
-notification.
+A notification can be lost (for example when the notification queue is full)
+or sent twice after a restart. The reason is always in the incident details and
+the audit trail.
 
 Without a cloud provider configured at all, a `RecycleNode`/`ReplaceNode` step
 fails closed with a clear message rather than reporting a node recycled that was
