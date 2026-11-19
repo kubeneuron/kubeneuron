@@ -15,8 +15,33 @@ reader would assume, the note says so.
 |---|---|
 | NVIDIA DCGM hostengine | Field 230 reports the most recent numeric XID. Repeated identical XIDs between polls may be missed, so an `xid-app` threshold may never be reached. The shipped exporter profile omits field 230. Without a readable kernel log or a reachable DCGM hostengine, numeric XIDs are unavailable. A CPU-only test uses a DCGM fixture to verify that an XID reaches the controller and opens an incident. |
 | NVIDIA SMI | When available, successive samples can show a rise in volatile uncorrectable ECC errors or a transition to row-remap failure. Neither reading supplies a numeric XID. |
-| AMD kernel log | Without kernel log access, kernel ring timeouts (`driver-hang`) and kernel PCIe errors (`pcie`) are unavailable. |
+| AMD kernel log | Without kernel log access, kernel ring timeouts (`driver-hang`) and kernel PCIe errors (`pcie`) are unavailable. The agent reads the kernel log from the node's journal where it can; see [Kernel log from the journal](#kernel-log-from-the-journal). |
 | AMD SMI | ECC and page retirement remain observable when the SMI tooling and devices are accessible. |
+
+## Kernel log from the journal
+
+With node-level actions disabled, the agent reads kernel entries from one
+read-only journal directory per node (experimental). The controller
+chooses the directory from the node's OS image with the table in
+`internal/controller/journal_os_images.go`; an override in
+`spec.agent.kernelLog.journal.nodeOverrides` comes first. OS names
+describe the node images the table matches, nothing more. Sources were
+reviewed on 2026-11-19.
+
+| Node image | Directory | Status | Source |
+|---|---|---|---|
+| Amazon Linux 2023 (EKS) | `/var/log/journal` | journal files readable by an unprivileged Pod, checked on a live node (AL2023.12.20261112, EKS v1.34.12); kernel record to incident through the agent not yet checked | [AL2023 journald](https://docs.aws.amazon.com/linux/al2023/ug/journald.html) |
+| Bottlerocket (EKS) | `/var/log/journal` | from documentation, not checked | [Bottlerocket restricted filesystem](https://bottlerocket.dev/en/os/1.50.x/concepts/restricted-filesystem/) |
+| Container-Optimized OS (GKE) | `/var/log/journal` | from documentation, not checked | [GKE node images](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/node-images) |
+| Ubuntu (GKE, AKS) | `/var/log/journal` | from documentation, not checked | [GKE node images](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/node-images), [AKS kubelet logs](https://learn.microsoft.com/en-us/azure/aks/kubelet-logs) |
+| Azure Linux (AKS) | `/var/log/journal` | from documentation, not checked | [AKS kubelet logs](https://learn.microsoft.com/en-us/azure/aks/kubelet-logs) |
+| kind node image | `/run/log/journal` | checked on kind (Debian-based node image): the label, the mount and the move between agent DaemonSets (`hack/kind-journal.sh`) | [kind node image](https://kind.sigs.k8s.io/docs/design/node-image/) |
+
+Another image keeps the agent without a journal mount, and its kernel log
+source reads `os-image-not-recognized`. If the agent cannot read the
+mounted journal, for example because of file permissions or a security
+module, the source reads `journal-unreadable`; KubeNeuron adds no
+privilege for it.
 
 ## Live cloud evidence
 

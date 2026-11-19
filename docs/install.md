@@ -33,6 +33,58 @@ objects. On a fresh installation, `--policy-pack bare-metal-alpha` explicitly
 selects the node-level pack (Alpha, not validated on real hardware). See [Bare metal (alpha)](bare-metal.md) for its
 prerequisites and hardware validation status.
 
+## Kernel log from the node's journal
+
+With node-level actions disabled, the agent has no access to `/dev/kmsg`.
+It reads kernel fault records from the node's systemd journal instead
+(experimental). The agent has read-only access to the node's systemd
+journal directories. It reads only kernel entries (`_TRANSPORT=kernel`),
+matches them against its fault patterns and sends only the classified
+event to the controller. It does not store, forward or log journal
+entries, and does not read entries of other transports.
+
+The agent mounts one journal directory per node, `/var/log/journal` or
+`/run/log/journal`. The controller picks it from the node's OS image and
+records the choice in the node label `kubeneuron.io/journal-dir` (`var` or
+`run`). It sets the label only on accelerator nodes where the agent runs.
+The agent DaemonSets are `<name>-agent` (no journal mount, for nodes
+without the label), `<name>-agent-detect-journal-var` and
+`<name>-agent-detect-journal-run`; each node runs exactly one of them. A
+node whose OS image is not in the table keeps `<name>-agent`, and its
+kernel log source reads `os-image-not-recognized` in `kubeneuronctl health`.
+If the journal Pod cannot start within three minutes, the controller
+removes the label (`journal-mount-failed`) and tries again after an hour or
+after the node's OS image or your override changes. See the
+[capability matrix](reference-capabilities.md#kernel-log-from-the-journal)
+for which OS images were checked.
+
+In every mode, including `DryRun`, KubeNeuron adds one label,
+`kubeneuron.io/journal-dir`, to accelerator nodes to choose the agent's
+journal mount. It runs no recovery action. Set
+`spec.agent.kernelLog.journal.enabled: false` to remove the label and the
+mount.
+
+For an image the table does not know, set the directory by node selector;
+the first matching override wins, and `none` mounts nothing:
+
+```yaml
+spec:
+  agent:
+    kernelLog:
+      journal:
+        nodeOverrides:
+          - nodeSelector: {node.kubernetes.io/instance-type: p5.48xlarge}
+            dir: var
+```
+
+`deploy/install.sh --uninstall` removes the label when no other
+installation remains in the cluster. After an uninstall with Helm or by
+hand, remove it yourself:
+
+```sh
+kubectl label nodes --all kubeneuron.io/journal-dir-
+```
+
 ## DCGM client
 
 DCGM is not bundled in the agent image. The agent uses the narrower
@@ -226,7 +278,11 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
     a readiness wait — then prints your sign-in credentials. It does not
     generate TLS material; the operator issues that itself. It is the fastest path to a working
     DryRun installation; return to this page for production TLS,
-    notifications, and real playbooks. For a new installation it writes the
+    notifications, and real playbooks. In every mode, including `DryRun`,
+    KubeNeuron adds one label, `kubeneuron.io/journal-dir`, to accelerator
+    nodes to choose the agent's journal mount. It runs no recovery action.
+    Set `spec.agent.kernelLog.journal.enabled: false` to remove the label
+    and the mount. For a new installation it writes the
     whole metrics path as `Managed` (see [Observability](observability.md))
     and first names the third-party components it pulls;
     `--observability disabled` leaves it off. A re-run on an existing

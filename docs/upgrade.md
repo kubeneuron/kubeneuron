@@ -54,6 +54,35 @@ The remaining instructions apply to installations running v1.0.0-rc.1 or later.
 
 On existing installations with node-level actions disabled, the replacement agent Pod loses access to `/dev/kmsg`. Numeric NVIDIA XIDs then depend on a reachable DCGM hostengine and field 230. The shipped exporter profile omits this field. Polling the last value can miss repeated identical XIDs and leave the `xid-app` threshold unmet. Without the hostengine, numeric XIDs are unavailable. AMD kernel ring timeouts and PCIe errors are also unavailable. ECC and page retirement can still be observed through accessible AMD SMI tooling. An unavailable source leaves the device's health unknown.
 
+## Unreleased: kernel log from the node's journal
+
+With node-level actions disabled, the agent now reads kernel entries from
+the node's systemd journal, read-only (experimental). The agent has
+read-only access to the node's systemd journal directories. It reads only
+kernel entries (`_TRANSPORT=kernel`), matches them against its fault
+patterns and sends only the classified event to the controller. It does not
+store, forward or log journal entries, and does not read entries of other
+transports. See [Kernel log from the node's journal](install.md#kernel-log-from-the-nodes-journal).
+
+In every mode, including `DryRun`, KubeNeuron adds one label,
+`kubeneuron.io/journal-dir`, to accelerator nodes to choose the agent's
+journal mount. It runs no recovery action. Set
+`spec.agent.kernelLog.journal.enabled: false` to remove the label and the
+mount; set it before the upgrade to keep the agent without the journal.
+
+What the upgrade does to the agent:
+
+- `<name>-agent` keeps its name and UID. It rolls once to gain a node
+  affinity that keeps it off labelled nodes and the label
+  `kubeneuron.io/agent=true`.
+- The operator adds `<name>-agent-detect-journal-var` and
+  `<name>-agent-detect-journal-run`. When the controller labels a node, the
+  node's agent Pod moves from `<name>-agent` to the matching DaemonSet. The
+  agent's spool and cursors stay in `/var/lib/kube-neuron` across the move.
+- Scripts that wait for agent rollouts should select every agent DaemonSet
+  with `app.kubernetes.io/instance=<name>,kubeneuron.io/agent=true`, as
+  `hack/tls-rotate.sh` does, not wait for `<name>-agent` alone.
+
 ## Unreleased: automatic replacement notes
 
 - **Automatic replacement needs qualified profiles.** After the upgrade an

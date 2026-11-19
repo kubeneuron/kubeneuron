@@ -11,6 +11,29 @@ API is `v1alpha1`.
 
 ### Added
 
+- **Kernel log from the node's journal, on by default (experimental).** With
+  node-level actions disabled, the agent gets read-only access to one
+  systemd journal directory of the node, `/var/log/journal` or
+  `/run/log/journal`, and reads kernel fault records there instead of
+  `/dev/kmsg`. The agent has read-only access to the node's systemd journal
+  directories. It reads only kernel entries (`_TRANSPORT=kernel`), matches
+  them against its fault patterns and sends only the classified event to the
+  controller. It does not store, forward or log journal entries, and does not
+  read entries of other transports. In every mode, including `DryRun`,
+  KubeNeuron adds one label, `kubeneuron.io/journal-dir`, to accelerator
+  nodes to choose the agent's journal mount. It runs no recovery action. Set
+  `spec.agent.kernelLog.journal.enabled: false` to remove the label and the
+  mount. The controller picks the directory from the node's OS image;
+  `spec.agent.kernelLog.journal.nodeOverrides` sets it by node selector. The
+  agent runs as `<name>-agent` on nodes without the label and as
+  `<name>-agent-detect-journal-var` or `<name>-agent-detect-journal-run` on
+  labelled ones; every agent DaemonSet carries `kubeneuron.io/agent=true`.
+  `kubeneuronctl health` and the `KernelLogSource` condition say why a node
+  has no kernel log (`disabled`, `os-image-not-recognized`,
+  `journal-mount-failed`, `journal-unreadable`). Checked on kind; the read of
+  journal files by an unprivileged Pod was checked on one EKS AL2023 node;
+  other node images are from documentation, not checked. See
+  [Kernel log from the node's journal](docs/install.md#kernel-log-from-the-nodes-journal).
 - **AWS Neuron faults from the agent, off by default (experimental).** The
   fault table maps three codes of vendor `aws` (`hbm-ecc-uncorrectable`,
   `sram-ecc-uncorrectable`, `unhealthy-component`) to the node's
