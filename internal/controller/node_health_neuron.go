@@ -24,6 +24,9 @@ const (
 	// neuronActedLag is how long after a fault the incident it opened may
 	// have been opened: the agent's clock and the outbox both lag.
 	neuronActedLag = 10 * time.Minute
+	// neuronRestoreRetry is how long a failed read back waits before the
+	// next.
+	neuronRestoreRetry = 5 * time.Minute
 )
 
 // neuronSysfsNotActedOn is why a fault of the AWS Neuron sysfs read opened no
@@ -99,12 +102,12 @@ func (c *Controller) holdNeuronFaultLocked(ev types.AgentEvent, class types.Prob
 // device as quiet: the agent sends a counter's rise once. A fault read while
 // the installation had opted in has an incident of its node that was open
 // when it came; it was acted on and is not shown. The archive is read once a
-// term, also when the read fails, since it scans the event table; an event
-// sink that cannot read it back, such as an external archive, restores
-// nothing.
+// term, since it scans the event table; a failed read is tried again after
+// neuronRestoreRetry. An event sink that cannot read it back, such as an
+// external archive, restores nothing.
 func (c *Controller) restoreNeuronHeld(ctx context.Context, now time.Time) {
 	c.health.mu.Lock()
-	done := c.health.neuronRestored
+	done := c.health.neuronRestored || now.Sub(c.health.neuronRestoreFailed) < neuronRestoreRetry
 	c.health.mu.Unlock()
 	reader, ok := c.sink.(faultEventReader)
 	if done || !ok {
@@ -122,11 +125,12 @@ func (c *Controller) restoreNeuronHeld(ctx context.Context, now time.Time) {
 	if c.health.neuronRestored {
 		return
 	}
-	c.health.neuronRestored = true
 	if err != nil {
+		c.health.neuronRestoreFailed = now
 		c.log.Warn("reading back the AWS Neuron faults not acted on failed", "err", err)
 		return
 	}
+	c.health.neuronRestored = true
 	// Oldest first, so the bound keeps the newest.
 	for i := len(events) - 1; i >= 0; i-- {
 		ev := events[i]

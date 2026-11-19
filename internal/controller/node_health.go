@@ -150,6 +150,8 @@ type healthSignals struct {
 	// neuronRestored is whether this term read them back from the event
 	// archive.
 	neuronRestored bool
+	// neuronRestoreFailed is when the last read back failed.
+	neuronRestoreFailed time.Time
 }
 
 // reset forgets what was read: a new leadership term starts with nothing
@@ -160,7 +162,7 @@ func (h *healthSignals) reset() {
 	h.agentReports = nil
 	h.pending, h.latest, h.read, h.readAt, h.failedAt, h.draQuiet = nil, nil, nil, nil, nil, nil
 	h.cloudAt, h.cloudNodes, h.cloudEvery = time.Time{}, nil, 0
-	h.neuronHeld, h.neuronRestored = nil, false
+	h.neuronHeld, h.neuronRestored, h.neuronRestoreFailed = nil, false, time.Time{}
 }
 
 func (c *Controller) healthSources() []healthSource {

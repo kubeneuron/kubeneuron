@@ -240,15 +240,18 @@ func TestNeuronActedOnNeedsAnIncidentOpenWhenTheFaultCame(t *testing.T) {
 // external one.
 type writeOnlySink struct{ store.EventSink }
 
-// failingFaultReader is an archive whose read back fails.
+// failingFaultReader is an archive whose read back fails a number of times.
 type failingFaultReader struct {
 	store.EventSink
-	reads int
+	fails, reads int
 }
 
-func (f *failingFaultReader) RecentFaultEvents(context.Context, string, time.Time, int) ([]types.AgentEvent, error) {
+func (f *failingFaultReader) RecentFaultEvents(ctx context.Context, vendor string, since time.Time, limit int) ([]types.AgentEvent, error) {
 	f.reads++
-	return nil, io.ErrUnexpectedEOF
+	if f.reads <= f.fails {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return f.EventSink.(faultEventReader).RecentFaultEvents(ctx, vendor, since, limit)
 }
 
 func TestNeuronSysfsRestoreWithoutAReadableArchive(t *testing.T) {
@@ -261,13 +264,25 @@ func TestNeuronSysfsRestoreWithoutAReadableArchive(t *testing.T) {
 		t.Fatalf("rows %+v from an archive that cannot be read back", rows)
 	}
 
-	failing := &failingFaultReader{EventSink: sink}
+	// A failed read is tried again after the retry interval, not on every
+	// view, and not only in the next term.
+	failing := &failingFaultReader{EventSink: sink, fails: 1}
 	c.sink = failing
 	c.health.reset()
+	ctx, now, all := context.Background(), time.Now(), func(string) bool { return true }
 	for range 3 {
-		c.AcceleratorHealth(context.Background(), "")
+		if rows := c.neuronHeldRows(ctx, all, now); len(rows) != 0 {
+			t.Fatalf("rows %+v after a failed read", rows)
+		}
 	}
 	if failing.reads != 1 {
-		t.Fatalf("archive read %d times in a term, want once", failing.reads)
+		t.Fatalf("archive read %d times within the retry interval, want once", failing.reads)
+	}
+	if rows := c.neuronHeldRows(ctx, all, now.Add(neuronRestoreRetry)); len(rows) != 1 || rows[0].Device != "neuron3" {
+		t.Fatalf("rows %+v after the retry, want the fault read back", rows)
+	}
+	c.neuronHeldRows(ctx, all, now.Add(2*neuronRestoreRetry))
+	if failing.reads != 2 {
+		t.Fatalf("archive read %d times, want twice: once more after a success is not needed", failing.reads)
 	}
 }
