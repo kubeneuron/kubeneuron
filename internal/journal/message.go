@@ -15,8 +15,7 @@ func (h fileHeader) plainKernelMessage(r io.ReaderAt, entry, transport uint64) (
 	if err != nil {
 		return "", false, err
 	}
-	var message string
-	var matched, found bool
+	var matched bool
 	for i := int64(0); i < e.items.Size()/e.stride; i++ {
 		off, err := e.dataOffset(i)
 		if err != nil {
@@ -24,6 +23,20 @@ func (h fileHeader) plainKernelMessage(r io.ReaderAt, entry, transport uint64) (
 		}
 		if off == transport {
 			matched = true
+			break
+		}
+	}
+	if !matched {
+		return "", false, fmt.Errorf("%w: ENTRY missing matched transport", ErrInvalidJournal)
+	}
+	var message string
+	var found bool
+	for i := int64(0); i < e.items.Size()/e.stride; i++ {
+		off, err := e.dataOffset(i)
+		if err != nil {
+			return "", false, err
+		}
+		if off == transport {
 			continue
 		}
 		d, err := h.dataAt(r, off)
@@ -55,9 +68,6 @@ func (h fileHeader) plainKernelMessage(r io.ReaderAt, entry, transport uint64) (
 		}
 		message = string(value)
 		found = true
-	}
-	if !matched {
-		return "", false, fmt.Errorf("%w: ENTRY missing matched transport", ErrInvalidJournal)
 	}
 	return message, found, nil
 }

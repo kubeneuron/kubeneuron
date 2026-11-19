@@ -33,9 +33,24 @@ func TestPlainKernelMessage(t *testing.T) {
 		if err != nil || !ok || got != "test marker" {
 			t.Fatalf("compact %t: %q %v %v", compact, got, ok, err)
 		}
-		_, _, err = h.plainKernelMessage(bytes.NewReader(buf), entry, 216)
+		// A broken backlink permits only ENTRY metadata reads.
+		_, _, err = h.plainKernelMessage(entryOnlyReader{t, bytes.NewReader(buf), entry}, entry, 216)
 		if !errors.Is(err, ErrInvalidJournal) {
 			t.Fatalf("missing backlink: %v", err)
 		}
 	}
+}
+
+type entryOnlyReader struct {
+	t     *testing.T
+	r     *bytes.Reader
+	entry int64
+}
+
+func (r entryOnlyReader) ReadAt(p []byte, off int64) (int, error) {
+	r.t.Helper()
+	if off < r.entry {
+		r.t.Fatalf("read DATA at %d before confirming kernel transport", off)
+	}
+	return r.r.ReadAt(p, off)
 }
