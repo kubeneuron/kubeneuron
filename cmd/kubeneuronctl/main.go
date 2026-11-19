@@ -49,7 +49,7 @@ func newRootCommand() *cobra.Command {
 		cmdReject(), cmdAcknowledge(), cmdResolve(), cmdRemediate(), cmdPause(), cmdResume(),
 		cmdPasswd(), cmdReadiness(), cmdCandidates(), cmdPreview(), cmdHealthCheck(),
 		cmdSimulate(), cmdAutonomy(), cmdAuditEvents(), cmdRuntimeContracts(),
-		cmdRuntimeQualifications(), cmdHealth(),
+		cmdRuntimeQualifications(), cmdHealth(), cmdPools(),
 	)
 	return root
 }
