@@ -720,8 +720,15 @@ func TestRunQueuedActionExecutesAndPostsResult(t *testing.T) {
 	defer controller.Close()
 
 	clock := &testClock{now: time.Date(2026, 7, 14, 1, 2, 3, 0, time.UTC)}
-	a := newTestAgent(t, controller.URL, clock, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// Every early return of runQueuedAction logs why; show it on failure.
+	var logs strings.Builder
+	a := newTestAgent(t, controller.URL, clock, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	a.cfg.NodeLevelActions = true
+	defer func() {
+		if t.Failed() {
+			t.Logf("agent log:\n%s", logs.String())
+		}
+	}()
 
 	ctx := context.Background()
 	if !a.runQueuedAction(ctx) {

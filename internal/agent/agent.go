@@ -1536,10 +1536,12 @@ func (a *Agent) fetchAction(ctx context.Context) (claimedAction, bool) {
 		req.Header.Set(types.AgentBootIDHeader, bootID)
 	}
 	if err := a.authorize(req); err != nil {
+		a.log.Debug("action poll not authorized", "err", err)
 		return claimedAction{}, false
 	}
 	resp, err := a.client.Do(req)
 	if err != nil {
+		a.log.Debug("action poll failed", "err", err)
 		return claimedAction{}, false
 	}
 	defer func() { _ = resp.Body.Close() }()
