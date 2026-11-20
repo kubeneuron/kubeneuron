@@ -28,7 +28,8 @@ type Record struct{ Message string }
 // Batch carries a resumable checkpoint even when no records matched.
 // More indicates another tick is needed to catch up.
 type Batch struct {
-	// UnreadableEntries counts records skipped after a field decoder panic.
+	// UnreadableEntries counts skipped records or files, file selection overflow,
+	// and resets of an unusable saved cursor to the current tail.
 	UnreadableEntries int
 	Records           []Record
 	Cursor            Cursor

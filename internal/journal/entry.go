@@ -4,7 +4,7 @@ package journal
 
 import (
 	"encoding/binary"
-	"errors"
+	"fmt"
 	"io"
 )
 
@@ -25,7 +25,7 @@ func (h fileHeader) entryAt(r io.ReaderAt, offset uint64) (entryObject, error) {
 		stride = 4
 	}
 	if kind != 3 || flags != 0 || body.Size() <= fixed || (body.Size()-fixed)%stride != 0 {
-		return entryObject{}, errors.New("invalid journal ENTRY layout")
+		return entryObject{}, fmt.Errorf("%w: invalid journal ENTRY layout", ErrInvalidJournal)
 	}
 	var sequence [8]byte
 	if _, err := body.ReadAt(sequence[:], 0); err != nil {
@@ -33,7 +33,7 @@ func (h fileHeader) entryAt(r io.ReaderAt, offset uint64) (entryObject, error) {
 	}
 	seq := binary.LittleEndian.Uint64(sequence[:])
 	if seq == 0 {
-		return entryObject{}, errors.New("invalid zero journal sequence")
+		return entryObject{}, fmt.Errorf("%w: invalid zero journal sequence", ErrInvalidJournal)
 	}
 	return entryObject{seq, io.NewSectionReader(body, fixed, body.Size()-fixed), stride}, nil
 }

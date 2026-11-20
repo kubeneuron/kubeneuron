@@ -4,7 +4,7 @@ package journal
 
 import (
 	"encoding/binary"
-	"errors"
+	"fmt"
 	"io"
 )
 
@@ -20,7 +20,7 @@ func (h fileHeader) dataAt(r io.ReaderAt, offset uint64) (dataObject, error) {
 		return dataObject{}, err
 	}
 	if kind != 1 {
-		return dataObject{}, errors.New("expected journal DATA object")
+		return dataObject{}, fmt.Errorf("%w: expected journal DATA object", ErrInvalidJournal)
 	}
 	var fixed [48]byte
 	payloadStart := int64(len(fixed))
@@ -28,7 +28,7 @@ func (h fileHeader) dataAt(r io.ReaderAt, offset uint64) (dataObject, error) {
 		payloadStart += 8
 	}
 	if body.Size() <= payloadStart {
-		return dataObject{}, errors.New("missing journal DATA payload")
+		return dataObject{}, fmt.Errorf("%w: missing journal DATA payload", ErrInvalidJournal)
 	}
 	if _, err := body.ReadAt(fixed[:], 0); err != nil {
 		return dataObject{}, err

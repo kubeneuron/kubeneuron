@@ -4,7 +4,7 @@ package journal
 
 import (
 	"encoding/binary"
-	"errors"
+	"fmt"
 	"io"
 )
 
@@ -26,7 +26,7 @@ func (h fileHeader) arrayAt(r io.ReaderAt, offset uint64) (entryArray, error) {
 		width = 4
 	}
 	if kind != 6 || flags != 0 || body.Size() <= 8 || (body.Size()-8)%width != 0 {
-		return entryArray{}, errors.New("invalid journal ENTRY_ARRAY layout")
+		return entryArray{}, fmt.Errorf("%w: invalid journal ENTRY_ARRAY layout", ErrInvalidJournal)
 	}
 	var raw [8]byte
 	if _, err := body.ReadAt(raw[:], 0); err != nil {
@@ -34,7 +34,7 @@ func (h fileHeader) arrayAt(r io.ReaderAt, offset uint64) (entryArray, error) {
 	}
 	next := binary.LittleEndian.Uint64(raw[:])
 	if next != 0 && (next < offset+16+uint64(body.Size()) || next%8 != 0 || next > h.tail) {
-		return entryArray{}, errors.New("invalid journal ENTRY_ARRAY link")
+		return entryArray{}, fmt.Errorf("%w: invalid journal ENTRY_ARRAY link", ErrInvalidJournal)
 	}
 	return entryArray{next: next, items: io.NewSectionReader(body, 8, body.Size()-8), width: width}, nil
 }

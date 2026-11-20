@@ -275,12 +275,13 @@ func (h fileHeader) readNew(ctx context.Context, f io.ReaderAt, p *filePosition,
 			}
 		}
 		e, err := h.entryAt(f, off)
-		if err != nil {
+		if errors.Is(err, ErrInvalidJournal) {
+			batch.UnreadableEntries++
+		} else if err != nil {
 			return err
-		}
-		if e.sequence > p.After {
+		} else if e.sequence > p.After {
 			msg, ok, err := h.plainKernelMessage(f, off, p.Transport, decode)
-			if errors.Is(err, errUnreadableField) {
+			if errors.Is(err, errUnreadableField) || errors.Is(err, ErrInvalidJournal) {
 				batch.UnreadableEntries++
 			} else if err != nil {
 				return err
