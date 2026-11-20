@@ -37,7 +37,8 @@ CLUSTER_NAME=${CLUSTER_NAME:-kn-journal-$$}
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-300}
 # How long a worker may hold two agent Pods, or no Ready one, during a move.
 ROLLOUT_SECONDS=${ROLLOUT_SECONDS:-120}
-# KERNEL_RECORD=1 writes a synthetic XID 79 line to /dev/kmsg. kind nodes
+# KERNEL_RECORD=1 turns on ReadKMsg in one worker's journald (the kind image
+# turns it off) and writes a synthetic XID 79 line to /dev/kmsg. kind nodes
 # share the host kernel, so every kind cluster on the host sees the line:
 # by default it runs only in CI (CI=true), where the host is disposable.
 KERNEL_RECORD=${KERNEL_RECORD:-$([[ ${CI:-} == true ]] && echo 1 || echo 0)}
@@ -258,7 +259,16 @@ if ((KERNEL_RECORD)); then
 	wait_for "the controller port-forward" forwarded
 	printf 'Authorization: Bearer %s\n' "$("$KUBECTL_BIN" -n "$NS" get secret "$NAME-operator-api-token" -o jsonpath='{.data.token}' | base64 --decode)" >"$work/header"
 	! incident_on "${workers[0]}" || die "an incident was open on ${workers[0]} before the kernel record"
+	# The kind node image sets ReadKMsg=no, so journald keeps no kernel
+	# records; turn it on for this worker only, as a real node has it.
+	"$DOCKER_BIN" exec "${workers[0]}" sh -c 'mkdir -p /etc/systemd/journald.conf.d &&
+		printf "[Journal]\nReadKMsg=yes\n" >/etc/systemd/journald.conf.d/kubeneuron-e2e-kmsg.conf &&
+		systemctl restart systemd-journald'
+	kernel_in_journal() { "$DOCKER_BIN" exec "${workers[0]}" journalctl -k -q --no-pager -n 1 -o cat | grep -q .; }
+	wait_for "kernel records in the journal of ${workers[0]}" kernel_in_journal
 	"$DOCKER_BIN" exec "${workers[0]}" sh -c 'echo "NVRM: Xid (PCI:0000:3b:00): 79, pid=1, GPU has fallen off the bus." >/dev/kmsg'
+	xid_in_journal() { "$DOCKER_BIN" exec "${workers[0]}" journalctl -k -q --no-pager -o cat --grep 'NVRM: Xid \(PCI:0000:3b:00\): 79' | grep -q .; }
+	wait_for "the XID 79 record in the journal of ${workers[0]}" xid_in_journal
 	wait_for "an incident on ${workers[0]} from the journal" incident_on "${workers[0]}"
 	note "PASS: a kernel XID 79 read from the journal opened an incident on ${workers[0]}"
 else
