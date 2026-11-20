@@ -840,7 +840,7 @@ func TestReportIncludesHeldAddFirstIncidentAfterManualClosure(t *testing.T) {
 }
 
 func TestMultiZoneIncidentHoldsBeforeCordon(t *testing.T) {
-	const action = "use a single-zone node pool, or set RemoveFirst in the remediation policy that applies to these nodes"
+	const action = "Use a single-zone node pool, or set RemoveFirst in the remediation policy that applies to these nodes."
 	for name, reason := range map[string]string{"AKS": "AKS chooses the zone of a new node in this pool", "GKE": "add-first would add a node in every zone of this pool"} {
 		t.Run(name, func(t *testing.T) {
 			p := newSuccessorPlatform()
