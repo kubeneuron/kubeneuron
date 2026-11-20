@@ -159,6 +159,9 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 			state = freshTail()
 		}
 	}
+	if after != "" && state.FileList == "" {
+		batch.UnreadableEntries++
+	}
 	if omitted {
 		if state.Overflow != listID {
 			batch.UnreadableEntries++

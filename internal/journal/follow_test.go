@@ -334,7 +334,7 @@ func TestUnknownCursorStartsAtTail(t *testing.T) {
 	for _, after := range []Cursor{Cursor(raw), Cursor(strings.Repeat(" ", 65536) + string(raw)), Cursor(missing), `{"00000000000000000000000000000000":{"After":1}}`, "broken"} {
 		b, err := r.Next(context.Background(), after)
 		var s scanCursor
-		if err != nil || len(b.Records) != 0 || b.More || json.Unmarshal([]byte(b.Cursor), &s) != nil || s.Positions[strings.Repeat("0", 32)].After != 42 {
+		if err != nil || b.UnreadableEntries != 1 || len(b.Records) != 0 || b.More || json.Unmarshal([]byte(b.Cursor), &s) != nil || s.Positions[strings.Repeat("0", 32)].After != 42 {
 			t.Fatalf("tail: %+v %v", b, err)
 		}
 	}
