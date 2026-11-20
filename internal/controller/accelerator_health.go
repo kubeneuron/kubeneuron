@@ -225,6 +225,12 @@ func agentHealthRows(node string, sources []types.AgentSignalSource, asked bool)
 		if s.Available {
 			row.State = types.HealthRowAvailable
 			row.Why = "the agent reads this source; a fault it reads opens an incident, and none read is not health"
+			switch s.Via {
+			case "journal":
+				row.Why = "the agent reads this source from the node's journal; a fault it reads opens an incident, and none read is not health"
+			case "kmsg":
+				row.Why = "the agent reads this source from /dev/kmsg; a fault it reads opens an incident, and none read is not health"
+			}
 			if rule == detect.NeuronSysfsSource {
 				row.Why = "the agent reads this source; a fault it reads opens an incident only with " +
 					"spec.safety.acceleratorHealth.awsNeuronSysfs.enabled, and none read is not health"

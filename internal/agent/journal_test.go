@@ -46,13 +46,19 @@ func journalAgent(t *testing.T, dir string, open journal.OpenReader) *Agent {
 
 func kernelSourceReason(t *testing.T) (bool, string) {
 	t.Helper()
+	r := kernelSourceRow(t, "nvidia-kmsg", types.ClassXIDApp)
+	return r.Available, r.Reason
+}
+
+func kernelSourceRow(t *testing.T, source string, class types.ProblemClass) types.AgentSignalSource {
+	t.Helper()
 	for _, r := range metrics.AgentSignalSources("gpu-node-1") {
-		if r.Source == "nvidia-kmsg" && r.Class == types.ClassXIDApp {
-			return r.Available, r.Reason
+		if r.Source == source && r.Class == class {
+			return r
 		}
 	}
-	t.Fatal("no nvidia-kmsg row")
-	return false, ""
+	t.Fatalf("no %s %s row", source, class)
+	return types.AgentSignalSource{}
 }
 
 func TestAgentReportsAnUnreadableJournal(t *testing.T) {
@@ -70,6 +76,17 @@ func TestAgentReportsAnUnreadableJournal(t *testing.T) {
 	a.reportKernelLog()
 	if available, reason := kernelSourceReason(t); available || reason != "journal-unreadable" {
 		t.Fatalf("kernel log = %t %q, want unavailable journal-unreadable", available, reason)
+	}
+	if r := kernelSourceRow(t, "nvidia-kmsg", types.ClassXIDApp); r.Via != "" {
+		t.Fatalf("an unavailable source says via %q", r.Via)
+	}
+	// /dev/kmsg readable beside an unreadable journal: the source reads kmsg.
+	a.kmsgReadable = true
+	a.reportKernelLog()
+	for _, r := range []types.AgentSignalSource{kernelSourceRow(t, "nvidia-kmsg", types.ClassXIDApp), kernelSourceRow(t, "amd-kmsg", types.ClassPCIe)} {
+		if !r.Available || r.Via != "kmsg" || r.Reason != "" {
+			t.Fatalf("kmsg beside an unreadable journal %+v, want available via kmsg", r)
+		}
 	}
 
 	dir := t.TempDir()
@@ -95,8 +112,10 @@ func TestAgentReportsAnUnreadableJournal(t *testing.T) {
 		}
 	}()
 	a.reportKernelLog()
-	if available, _ := kernelSourceReason(t); !available {
-		t.Fatal("a readable journal is reported unavailable")
+	for _, r := range []types.AgentSignalSource{kernelSourceRow(t, "nvidia-kmsg", types.ClassXIDApp), kernelSourceRow(t, "amd-kmsg", types.ClassDriverHang)} {
+		if !r.Available || r.Via != "journal" {
+			t.Fatalf("a readable journal %+v, want available via journal", r)
+		}
 	}
 }
 

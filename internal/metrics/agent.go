@@ -105,11 +105,17 @@ var (
 // SetXIDSourceUnavailable tracks each numeric-XID input separately so a
 // working kernel reader does not mask an unavailable DCGM field or vice versa.
 func SetXIDSourceUnavailable(source, reason string, unavailable float64) {
+	SetXIDSourceVia(source, reason, "", unavailable)
+}
+
+// SetXIDSourceVia is SetXIDSourceUnavailable for a kernel source that says
+// which kernel log it reads while available.
+func SetXIDSourceVia(source, reason, via string, unavailable float64) {
 	for _, class := range []types.ProblemClass{
 		types.ClassXIDApp, types.ClassECCDBE, types.ClassECCSBERate, types.ClassECCContained,
 		types.ClassFellOffBus, types.ClassGSPError, types.ClassNVLink, types.ClassRowRemapFailure, types.ClassRowRemapOK,
 	} {
-		SetSignalSourceUnavailable(source, class, reason, unavailable)
+		SetSignalSourceVia(source, class, reason, via, unavailable)
 	}
 }
 
@@ -125,11 +131,19 @@ var agentSourceState = struct {
 
 // SetSignalSourceUnavailable records the observation shared by heartbeat reports and metrics.
 func SetSignalSourceUnavailable(source string, class types.ProblemClass, reason string, unavailable float64) {
+	SetSignalSourceVia(source, class, reason, "", unavailable)
+}
+
+// SetSignalSourceVia is SetSignalSourceUnavailable for a kernel source that
+// says which kernel log it reads while available. The metric is unchanged.
+func SetSignalSourceVia(source string, class types.ProblemClass, reason, via string, unavailable float64) {
 	agentSourceState.Lock()
 	defer agentSourceState.Unlock()
 	AgentSignalSourceUnavailable.WithLabelValues(source, string(class), reason).Set(unavailable)
 	row := types.AgentSignalSource{Source: source, Class: class, Available: unavailable == 0, ReadAt: time.Now().UTC()}
-	if !row.Available {
+	if row.Available {
+		row.Via = via
+	} else {
 		row.Reason = reason
 	}
 	agentSourceState.rows[sourceClass{source, class}] = row

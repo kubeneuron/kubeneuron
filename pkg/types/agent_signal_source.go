@@ -13,4 +13,7 @@ type AgentSignalSource struct {
 	Available bool         `json:"available"`
 	Reason    string       `json:"reason,omitempty"`
 	ReadAt    time.Time    `json:"read_at"`
+	// Via is the kernel log an available kernel source is read from,
+	// "journal" or "kmsg"; empty for other sources and older agents.
+	Via string `json:"via,omitempty"`
 }

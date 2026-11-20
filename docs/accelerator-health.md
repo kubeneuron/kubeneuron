@@ -351,7 +351,9 @@ nothing new and changes nothing.
   and that is not healthy. For the signal sources an agent reads on the node
   (`source` `agent`, the rule naming the agent's source), `unknown` is one it
   cannot read, with its reason, and `available` one it reads: a fault it reads
-  opens an incident, and none read is not health. Agents send a full report at registration heartbeats. Reports expire two minutes
+  opens an incident, and none read is not health. For the kernel log sources
+  (`nvidia-kmsg`, `amd-kmsg`) the `available` row also says whether the agent
+  reads the node's journal or `/dev/kmsg`; an older agent does not say. Agents send a full report at registration heartbeats. Reports expire two minutes
   after receipt. A node
   asked for by name whose agent reports none (an older agent, or no agent) has
   one `agent` row `unknown` saying there is no data.

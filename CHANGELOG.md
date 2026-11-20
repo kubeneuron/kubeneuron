@@ -397,6 +397,11 @@ API is `v1alpha1`.
   `replacement.strategy: RemoveFirst` (until add-first replacement exists) or
   `recycle.enabled: true`.
 
+- **Which kernel log a source reads.** An agent's available `nvidia-kmsg`
+  and `amd-kmsg` signal sources carry an optional `via`, `journal` or
+  `kmsg`, and `kubeneuronctl health` names it in the row's WHY. An older
+  agent sends none and its row reads as before.
+
 ### Fixed
 
 - List endpoints of the operator API answer an empty list as `[]` (or

@@ -829,23 +829,29 @@ func (a *Agent) reportKernelLog() {
 		a.journalSkipShown = a.journalSkipHeld()
 		journalOK = journalOK && !a.journalSkipShown
 	}
-	reportKernelSource(a.kmsgReadable || journalOK, reason)
+	via := "kmsg"
+	if journalOK {
+		via = "journal"
+	}
+	reportKernelSource(a.kmsgReadable || journalOK, reason, via)
 }
 
 // reportKernelSourceAvailability exposes the loss of AMD kernel fault evidence
 // even on installations where the optional SMI poller is disabled.
 func reportKernelSourceAvailability(available bool) {
-	reportKernelSource(available, "kernel-log-unavailable")
+	reportKernelSource(available, "kernel-log-unavailable", "kmsg")
 }
 
-func reportKernelSource(available bool, reason string) {
+// reportKernelSource publishes both kernel sources; via is the kernel log
+// read while available, "journal" or "kmsg".
+func reportKernelSource(available bool, reason, via string) {
 	unavailable := 1.0
 	if available {
 		unavailable = 0
 	}
-	metrics.SetXIDSourceUnavailable("nvidia-kmsg", reason, unavailable)
+	metrics.SetXIDSourceVia("nvidia-kmsg", reason, via, unavailable)
 	for _, class := range []types.ProblemClass{types.ClassDriverHang, types.ClassPCIe} {
-		metrics.SetSignalSourceUnavailable("amd-kmsg", class, reason, unavailable)
+		metrics.SetSignalSourceVia("amd-kmsg", class, reason, via, unavailable)
 	}
 }
 

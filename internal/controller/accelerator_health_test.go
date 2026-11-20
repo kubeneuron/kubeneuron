@@ -242,3 +242,27 @@ func TestAcceleratorHealthAgentSourcesOfTheNodesVendor(t *testing.T) {
 		}
 	}
 }
+
+// An available kernel source says in WHY which kernel log the agent reads;
+// an older agent that sends no via reads as before.
+func TestAcceleratorHealthAgentKernelSourceVia(t *testing.T) {
+	for _, tc := range []struct{ via, why string }{
+		{"journal", "the agent reads this source from the node's journal; a fault it reads opens an incident, and none read is not health"},
+		{"kmsg", "the agent reads this source from /dev/kmsg; a fault it reads opens an incident, and none read is not health"},
+		{"", "the agent reads this source; a fault it reads opens an incident, and none read is not health"},
+	} {
+		rows := agentHealthRows("gpu-1", []types.AgentSignalSource{{Node: "gpu-1", Source: "nvidia-kmsg", Available: true, Via: tc.via}}, true)
+		if len(rows) != 1 || rows[0].State != types.HealthRowAvailable || rows[0].Why != tc.why {
+			t.Fatalf("via %q rows %+v, want why %q", tc.via, rows, tc.why)
+		}
+	}
+	// An older agent's report has no via field at all.
+	var old []types.AgentSignalSource
+	if err := json.Unmarshal([]byte(`[{"node":"gpu-1","source":"amd-kmsg","class":"pcie","available":true,"read_at":"2026-11-20T00:00:00Z"}]`), &old); err != nil {
+		t.Fatal(err)
+	}
+	if rows := agentHealthRows("gpu-1", old, true); len(rows) != 1 ||
+		rows[0].Why != "the agent reads this source; a fault it reads opens an incident, and none read is not health" {
+		t.Fatalf("older agent rows %+v", rows)
+	}
+}

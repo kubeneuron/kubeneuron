@@ -1666,7 +1666,8 @@ func TestSignalSourceReportRetriesWithCurrentAvailability(t *testing.T) {
 		for _, row := range rows {
 			if row.Source == "amd-kmsg" && row.Class == types.ClassPCIe {
 				found = true
-				if row.Node == "" || row.ReadAt.IsZero() || row.Available == first || (row.Reason == "kernel-log-unavailable") != first {
+				if row.Node == "" || row.ReadAt.IsZero() || row.Available == first || (row.Reason == "kernel-log-unavailable") != first ||
+					(row.Via == "kmsg") == first {
 					t.Errorf("unexpected source observation %+v", row)
 				}
 			}
