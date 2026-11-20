@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 var errTickBudget = errors.New("journal tick budget exhausted")
@@ -36,7 +37,7 @@ type filePosition struct {
 	After, Search, Transport, Consumed, Array, Slot uint64
 }
 
-func openHeader(path string) (*os.File, fileHeader, error) {
+func openHeader(path string, remaining *int) (*os.File, fileHeader, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fileHeader{}, err
@@ -44,7 +45,7 @@ func openHeader(path string) (*os.File, fileHeader, error) {
 	info, err := f.Stat()
 	if err == nil {
 		var h fileHeader
-		h, err = readHeader(f, info.Size())
+		h, err = readHeader(tickReader{f, remaining}, info.Size())
 		if err == nil {
 			return f, h, nil
 		}
@@ -59,7 +60,8 @@ func Open(directory string) (Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, _, err := openHeader(files[0])
+	budget := MaxBytesPerTick
+	f, _, err := openHeader(files[0], &budget)
 	if err != nil {
 		return nil, err
 	}
@@ -70,10 +72,29 @@ func Open(directory string) (Reader, error) {
 }
 
 func (r directoryReader) Next(ctx context.Context, after Cursor) (Batch, error) {
-	positions := map[string]filePosition{}
+	return r.next(ctx, after, MaxBytesPerTick)
+}
+
+type scanCursor struct {
+	Positions map[string]filePosition
+	Resume    string
+	Starting  bool
+}
+
+func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) (Batch, error) {
+	state := scanCursor{Starting: after == ""}
 	if after != "" {
-		if err := json.Unmarshal([]byte(after), &positions); err != nil || positions == nil {
+		if err := json.Unmarshal([]byte(after), &state); err != nil {
 			return Batch{}, fmt.Errorf("%w: invalid cursor", ErrInvalidJournal)
+		}
+	}
+	if state.Positions == nil {
+		state.Positions = map[string]filePosition{}
+		if after != "" {
+			// Older cursors contained only the per-file position map.
+			if err := json.Unmarshal([]byte(after), &state.Positions); err != nil || state.Positions == nil {
+				return Batch{}, fmt.Errorf("%w: invalid cursor", ErrInvalidJournal)
+			}
 		}
 	}
 	files, err := systemFiles(r.path)
@@ -82,34 +103,62 @@ func (r directoryReader) Next(ctx context.Context, after Cursor) (Batch, error) 
 	}
 	var batch Batch
 	remaining := MaxEntriesPerTick
-	readBytes, outputBytes := MaxBytesPerTick, MaxBytesPerTick
+	outputBytes := MaxBytesPerTick
+	if state.Resume != "" {
+		for i, path := range files {
+			if path == state.Resume {
+				files = files[i:]
+				break
+			}
+		}
+	}
+	previousArchive := ""
+	state.Resume = ""
 	for _, path := range files {
 		if err := ctx.Err(); err != nil {
 			return Batch{}, err
 		}
-		f, h, err := openHeader(path)
-		if err != nil {
-			return Batch{}, err
-		}
-		key := hex.EncodeToString(h.fileID[:])
-		p := positions[key]
-		if after == "" {
-			p.After = h.tailSequence
-		} else if h.tailSequence > p.After {
-			err = h.readNew(ctx, tickReader{f, &readBytes}, &p, &remaining, &outputBytes, &batch, r.decode)
-		}
-		_ = f.Close()
+		f, h, err := openHeader(path, &readBytes)
 		if errors.Is(err, errTickBudget) {
-			positions[key] = p
+			state.Resume = path
+			if filepath.Base(path) == "system.journal" {
+				state.Resume = previousArchive
+			}
 			batch.More = true
 			break
 		}
 		if err != nil {
 			return Batch{}, err
 		}
-		positions[key] = p
+		key := hex.EncodeToString(h.fileID[:])
+		p, seen := state.Positions[key]
+		if state.Starting && !seen {
+			p.After = h.tailSequence
+		} else if h.tailSequence > p.After {
+			err = h.readNew(ctx, tickReader{f, &readBytes}, &p, &remaining, &outputBytes, &batch, r.decode)
+		}
+		_ = f.Close()
+		if errors.Is(err, errTickBudget) {
+			state.Positions[key] = p
+			state.Resume = path
+			if filepath.Base(path) == "system.journal" {
+				state.Resume = previousArchive
+			}
+			batch.More = true
+			break
+		}
+		if err != nil {
+			return Batch{}, err
+		}
+		state.Positions[key] = p
+		if filepath.Base(path) != "system.journal" {
+			previousArchive = path
+		}
 	}
-	encoded, err := json.Marshal(positions)
+	if !batch.More {
+		state.Starting = false
+	}
+	encoded, err := json.Marshal(state)
 	batch.Cursor = Cursor(encoded)
 	return batch, err
 }

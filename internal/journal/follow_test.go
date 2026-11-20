@@ -5,6 +5,7 @@ package journal
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -262,4 +263,34 @@ func TestResumeLargeUncompressedBacklog(t *testing.T) {
 		}
 	}
 	t.Fatalf("did not reach idle tail after delivering %d/%d records", seen, len(want))
+}
+
+func TestHeaderBudgetResumesInitialTail(t *testing.T) {
+	dir := t.TempDir()
+	for i, name := range []string{"system@a.journal", "system@b.journal", "system.journal"} {
+		buf := make([]byte, 208)
+		copy(buf, "LPKSHHRH")
+		buf[24] = byte(i + 1)
+		binary.LittleEndian.PutUint64(buf[88:], 208)
+		binary.LittleEndian.PutUint64(buf[160:], uint64(i+1))
+		if err := os.WriteFile(filepath.Join(dir, name), buf, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := r.(directoryReader).next(context.Background(), "", 2*208)
+	if err != nil || !b.More || len(b.Records) != 0 {
+		t.Fatalf("first tick: %+v %v", b, err)
+	}
+	b, err = r.(directoryReader).next(context.Background(), b.Cursor, 2*208)
+	if err != nil || b.More || len(b.Records) != 0 {
+		t.Fatalf("second tick: %+v %v", b, err)
+	}
+	var state scanCursor
+	if err = json.Unmarshal([]byte(b.Cursor), &state); err != nil || state.Starting || len(state.Positions) != 3 {
+		t.Fatalf("tail positions: %+v %v", state, err)
+	}
 }
