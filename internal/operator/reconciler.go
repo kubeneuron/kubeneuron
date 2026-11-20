@@ -249,6 +249,9 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.ensureConfigMap(ctx, &installation, playbooksConfigMap(&installation, snapshot)); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile playbooks ConfigMap: %w", err))
 	}
+	if err := r.ensureAutoscalerStatusAccess(ctx, &installation); err != nil {
+		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile autoscaler status access: %w", err))
+	}
 	if err := r.ensureInventorySummary(ctx, &installation); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile inventory summary: %w", err))
 	}

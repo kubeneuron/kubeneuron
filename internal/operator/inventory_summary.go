@@ -32,13 +32,40 @@ func (r *KubeNeuronReconciler) ensureInventorySummary(ctx context.Context, insta
 	if err != nil {
 		return err
 	}
+	return r.ensureConfigMapAccess(ctx, installation, meta, "inventory-summary", meta.Name, []string{"get", "update", "patch"})
+}
+
+func (r *KubeNeuronReconciler) ensureAutoscalerStatusAccess(ctx context.Context, installation *api.KubeNeuron) error {
+	meta := metav1.ObjectMeta{Name: installation.Name + "-autoscaler-status", Namespace: metav1.NamespaceSystem}
+	if installation.Spec.Cloud != nil && installation.Spec.Cloud.Provider == "aws" {
+		return r.ensureConfigMapAccess(ctx, installation, meta, "autoscaler-status", "cluster-autoscaler-status", []string{"get"})
+	}
+	for _, obj := range []client.Object{&rbacv1.RoleBinding{}, &rbacv1.Role{}} {
+		err := r.Get(ctx, client.ObjectKey{Namespace: meta.Namespace, Name: meta.Name}, obj)
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if metav1.IsControlledBy(obj, installation) {
+			uid := obj.GetUID()
+			if err := client.IgnoreNotFound(r.Delete(ctx, obj, client.Preconditions{UID: &uid})); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (r *KubeNeuronReconciler) ensureConfigMapAccess(ctx context.Context, installation *api.KubeNeuron, meta metav1.ObjectMeta, component, configMap string, verbs []string) error {
 	role := &rbacv1.Role{ObjectMeta: meta}
-	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, role, func() error {
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, role, func() error {
 		if err := ensureControlledBy(installation, role, "Role"); err != nil {
 			return err
 		}
-		role.Labels = resourceLabels(installation, "inventory-summary")
-		role.Rules = []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{meta.Name}, Verbs: []string{"get", "update", "patch"}}}
+		role.Labels = resourceLabels(installation, component)
+		role.Rules = []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{configMap}, Verbs: verbs}}
 		return setOwner(r.Scheme, installation, role)
 	})
 	if err != nil {
@@ -49,9 +76,9 @@ func (r *KubeNeuronReconciler) ensureInventorySummary(ctx context.Context, insta
 		if err := ensureControlledBy(installation, binding, "RoleBinding"); err != nil {
 			return err
 		}
-		binding.Labels = resourceLabels(installation, "inventory-summary")
+		binding.Labels = resourceLabels(installation, component)
 		binding.RoleRef = rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: meta.Name}
-		binding.Subjects = []rbacv1.Subject{{Kind: "ServiceAccount", Name: installation.Name + "-controller", Namespace: meta.Namespace}}
+		binding.Subjects = []rbacv1.Subject{{Kind: "ServiceAccount", Name: installation.Name + "-controller", Namespace: installation.Spec.Namespace}}
 		return setOwner(r.Scheme, installation, binding)
 	})
 	return err

@@ -2,7 +2,9 @@
 package operator
 
 import (
+	api "github.com/kubeneuron/kubeneuron/api/v1alpha1"
 	"github.com/kubeneuron/kubeneuron/internal/inventory"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"reflect"
 	"testing"
@@ -90,5 +92,37 @@ func TestInventoryConditionsRejectStaleMalformedAndMissingEvidence(t *testing.T)
 	r.setInventoryConditions(ctx, root, false)
 	if meta.FindStatusCondition(root.Status.Conditions, "ResetAvailable") != nil || meta.FindStatusCondition(root.Status.Conditions, "GPUVisibility") == nil {
 		t.Fatal("disabling node actions should remove only ResetAvailable")
+	}
+}
+
+func TestAutoscalerStatusAccess(t *testing.T) {
+	ctx := t.Context()
+	root := testKubeNeuron()
+	root.UID = "installation-a"
+	root.Spec.Cloud = &api.CloudSpec{Provider: "aws"}
+	scheme := newOperatorScheme(t)
+	r := &KubeNeuronReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Scheme: scheme}
+	if err := r.ensureAutoscalerStatusAccess(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	key := client.ObjectKey{Namespace: "kube-system", Name: root.Name + "-autoscaler-status"}
+	var role rbacv1.Role
+	want := []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{"cluster-autoscaler-status"}, Verbs: []string{"get"}}}
+	if err := r.Get(ctx, key, &role); err != nil || !reflect.DeepEqual(role.Rules, want) {
+		t.Fatalf("role %v: %+v", err, role.Rules)
+	}
+	var binding rbacv1.RoleBinding
+	subjects := []rbacv1.Subject{{Kind: "ServiceAccount", Name: root.Name + "-controller", Namespace: root.Spec.Namespace}}
+	if err := r.Get(ctx, key, &binding); err != nil || binding.RoleRef.Name != role.Name || !reflect.DeepEqual(binding.Subjects, subjects) {
+		t.Fatalf("binding %v: %+v", err, binding)
+	}
+	root.Spec.Cloud = nil
+	if err := r.ensureAutoscalerStatusAccess(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	for _, obj := range []client.Object{&role, &binding} {
+		if err := r.Get(ctx, key, obj); !apierrors.IsNotFound(err) {
+			t.Fatalf("expected removal of %T: %v", obj, err)
+		}
 	}
 }
