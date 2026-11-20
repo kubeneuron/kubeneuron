@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 var errEntryBudget = fmt.Errorf("journal entry exceeds read budget: %w", errTickBudget)
@@ -238,7 +237,7 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 			err = h.readNew(ctx, tickReader{f, &readBytes}, &p, &remaining, &outputBytes, &batch, r.decode)
 		}
 		_ = f.Close()
-		if archivePath(path) && (!h.online || strings.HasSuffix(path, ".journal~")) && errors.Is(err, ErrInvalidJournal) {
+		if archivePath(path) && errors.Is(err, ErrInvalidJournal) {
 			p.After = h.tailSequence
 			batch.UnreadableEntries++
 			err = nil

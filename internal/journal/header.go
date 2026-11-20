@@ -12,7 +12,7 @@ import (
 
 type fileHeader struct {
 	start, end, tail   uint64
-	compact, online    bool
+	compact            bool
 	fileID, sequenceID [16]byte
 	tailSequence       uint64
 }
@@ -42,7 +42,7 @@ func readHeader(r io.ReaderAt, fileSize int64) (fileHeader, error) {
 	if tail != 0 && (tail%8 != 0 || tail < size || tail > size+arena || size+arena-tail < 16) {
 		return fileHeader{}, fmt.Errorf("%w: invalid journal tail offset", ErrInvalidJournal)
 	}
-	return fileHeader{start: size, end: size + arena, tail: tail, online: header[16] == 1, compact: header[12]&16 != 0,
+	return fileHeader{start: size, end: size + arena, tail: tail, compact: header[12]&16 != 0,
 		fileID: [16]byte(header[24:40]), sequenceID: [16]byte(header[72:88]), tailSequence: binary.LittleEndian.Uint64(header[160:168]),
 	}, nil
 }
