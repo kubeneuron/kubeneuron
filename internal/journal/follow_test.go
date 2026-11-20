@@ -442,4 +442,14 @@ func TestLimitedJournalSet(t *testing.T) {
 		t.Fatal("oldest file retained")
 	}
 	tick(128, 0)
+	// Reconciliation reads every selected header before the regular scan.
+	// Replacing a valid header must retire its ID even at the position cap.
+	if err := os.WriteFile(filepath.Join(dir, "system@004.journal"), []byte("truncated"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	state = tick(128, 1)
+	if _, ok := state.Positions["04000000000000000000000000000000"]; ok {
+		t.Fatal("obsolete file ID retained after header corruption")
+	}
+	tick(128, 0)
 }
