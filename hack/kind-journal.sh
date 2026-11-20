@@ -58,6 +58,24 @@ base_tree=
 sampler=
 pf_pid=
 created=0
+# collect_diagnostics: on a failed run, save what the CI artifact step would
+# otherwise miss, since the cluster is deleted before that step runs.
+collect_diagnostics() {
+	local dir=${KIND_ARTIFACTS_DIR:-} pod
+	[[ -n $dir ]] || return 0
+	mkdir -p "$dir" || return 0
+	"$KUBECTL_BIN" get nodes -o wide -L "$LABEL" >"$dir/journal-nodes.txt" 2>&1 || true
+	"$KUBECTL_BIN" -n "$NS" get kubeneurons,deployments,daemonsets,pods -o wide >"$dir/journal-resources.txt" 2>&1 || true
+	"$KUBECTL_BIN" -n "$NS" get daemonsets -o yaml >"$dir/journal-daemonsets.yaml" 2>&1 || true
+	"$KUBECTL_BIN" get events --all-namespaces --sort-by=.lastTimestamp >"$dir/journal-events.txt" 2>&1 || true
+	for pod in $("$KUBECTL_BIN" -n "$NS" get pods -o name 2>/dev/null); do
+		"$KUBECTL_BIN" -n "$NS" logs "$pod" --all-containers --tail=-1 >"$dir/journal-${pod#pod/}.log" 2>&1 || true
+	done
+	if [[ -n ${workers[0]:-} ]]; then
+		"$DOCKER_BIN" exec "${workers[0]}" journalctl -k -q --no-pager -n 200 -o short-monotonic \
+			>"$dir/journal-kernel-${workers[0]}.txt" 2>&1 || true
+	fi
+}
 cleanup() {
 	local status=$?
 	[[ -z $pf_pid ]] || { kill "$pf_pid" 2>/dev/null || true; wait "$pf_pid" 2>/dev/null || true; }
@@ -65,6 +83,7 @@ cleanup() {
 	if ((status != 0 && created)); then
 		"$KUBECTL_BIN" get nodes -L "$LABEL" 2>&1 || true
 		"$KUBECTL_BIN" -n "$NS" get daemonsets,pods -o wide 2>&1 || true
+		collect_diagnostics
 	fi
 	if ((created)) && [[ ${KEEP_CLUSTER:-0} != 1 ]]; then
 		"$KIND_BIN" delete cluster --name "$CLUSTER_NAME" >/dev/null 2>&1 || true
@@ -244,12 +263,13 @@ note "PASS: upgrade kept -agent ($agent_uid) and moved both workers to the journ
 	die "the journal-run DaemonSet has the wrong selector, label or mount"
 note "PASS: journal-run mounts only /run/log/journal, read-only, unprivileged"
 
-# incidents_on: the node's incidents as a JSON array; fails when the API does
-# not answer with one, so an error never reads as "no incident".
+# incidents_on: the node's incidents as a JSON array (the API answers null
+# for none); fails when the API does not answer with a list, so an error
+# never reads as "no incident".
 incidents_on() {
 	curl --silent --show-error --fail --noproxy '*' --max-time 10 -H "@$work/header" \
 		"http://127.0.0.1:$port/api/v1/incidents?node=$1" |
-		"$JQ_BIN" -e -c '(if type == "array" then . else .incidents end) | arrays'
+		"$JQ_BIN" -e -c 'if . == null then [] elif type == "array" then . else .incidents end | arrays'
 }
 if ((KERNEL_RECORD)); then
 	"$KUBECTL_BIN" -n "$NS" port-forward "service/$NAME-controller" :8080 >"$work/forward.log" 2>&1 &
