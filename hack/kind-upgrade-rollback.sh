@@ -1033,6 +1033,8 @@ post_report() {
 	local root ns agent_pod token_file header_file report_file code
 	root=$(root_name "$store")
 	ns=$(store_ns "$store")
+	# component=agent, not kubeneuron.io/agent=true: v0.7.0 agents carry no
+	# such label, and no node here is an accelerator node, so no journal DaemonSet.
 	agent_pod=$("$KUBECTL_BIN" -n "$ns" get pods -l "app.kubernetes.io/instance=$root,app.kubernetes.io/component=agent" \
 		--field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
 	[[ -n $agent_pod ]] || die "[$store] no running agent Pod"
