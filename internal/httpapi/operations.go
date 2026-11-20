@@ -77,7 +77,7 @@ func (s *Server) handleFleetReadiness(w http.ResponseWriter, r *http.Request) {
 		operationsError(w, err)
 		return
 	}
-	response := map[string]any{"items": items, "evaluator_version": decision.EvaluatorVersion}
+	response := map[string]any{"items": listOrEmpty(items), "evaluator_version": decision.EvaluatorVersion}
 	if nextNode != "" {
 		response["next_cursor"] = encodeReadinessCursor(nextNode)
 	}
@@ -188,7 +188,7 @@ func (s *Server) handleFleetRuntimeContractCoverage(w http.ResponseWriter, r *ht
 		operationsError(w, err)
 		return
 	}
-	response := map[string]any{"items": items, "coverage_version": config.RuntimeContractCoverageVersion}
+	response := map[string]any{"items": listOrEmpty(items), "coverage_version": config.RuntimeContractCoverageVersion}
 	if nextNode != "" {
 		response["next_cursor"] = encodeReadinessCursor(nextNode)
 	}
@@ -534,7 +534,7 @@ func (s *Server) handleListNodeHealthChecks(w http.ResponseWriter, r *http.Reque
 		operationsError(w, err)
 		return
 	}
-	response := map[string]any{"items": runs}
+	response := map[string]any{"items": listOrEmpty(runs)}
 	if !nextAt.IsZero() && nextID != "" {
 		response["next_cursor"] = encodeOperationalCursor(nextAt, nextID)
 	}
@@ -824,7 +824,7 @@ func encodeOperationalCursor(createdAt time.Time, id string) string {
 }
 
 func writeOperationalPage[T any](w http.ResponseWriter, items []T, limit int, cursor func(T) (time.Time, string)) {
-	response := map[string]any{"items": items}
+	response := map[string]any{"items": listOrEmpty(items)}
 	if len(items) == limit && len(items) > 0 {
 		createdAt, id := cursor(items[len(items)-1])
 		response["next_cursor"] = encodeOperationalCursor(createdAt, id)
@@ -1115,7 +1115,7 @@ func (s *Server) handleListOperationalAuditEvents(w http.ResponseWriter, r *http
 		operationsError(w, err)
 		return
 	}
-	response := map[string]any{"items": events}
+	response := map[string]any{"items": listOrEmpty(events)}
 	if len(events) == limit {
 		response["next_cursor"] = encodeAuditCursor(events[len(events)-1].ID)
 	}

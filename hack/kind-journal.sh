@@ -279,8 +279,8 @@ journal_source_open() {
 wait_for "the journal source of the agent on ${workers[0]}" journal_source_open
 note "PASS: the agent on ${workers[0]} opened its journal source"
 
-# incidents_on: the node's incidents as a JSON array (the API answers null
-# for none); fails when the API does not answer with a list, so an error
+# incidents_on: the node's incidents as a JSON array (an older controller
+# answers null for none); fails when the API does not answer with a list, so an error
 # never reads as "no incident".
 incidents_on() {
 	curl --silent --show-error --fail --noproxy '*' --max-time 10 -H "@$work/header" \

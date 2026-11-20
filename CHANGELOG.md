@@ -399,6 +399,8 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- List endpoints of the operator API answer an empty list as `[]` (or
+  `"items": []`), not `null`.
 - Concurrent live repair incidents on the same node share one repair owner. The
   controller identifies the node by its pinned cloud identity or the Kubernetes
   Node UID recorded when the incident opened. Waiting incidents show the owner ID before

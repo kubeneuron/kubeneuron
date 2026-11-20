@@ -539,7 +539,7 @@ func (s *Server) handleListIncidents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "listing incidents failed", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, incidents)
+	writeJSON(w, listOrEmpty(incidents))
 }
 
 // IncidentDetail is the incident plus its full audit trail. ImpactPreviewDigest
@@ -949,7 +949,7 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "listing nodes failed", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, nodes)
+	writeJSON(w, listOrEmpty(nodes))
 }
 
 func (s *Server) handleGetNode(w http.ResponseWriter, r *http.Request) {
@@ -979,7 +979,7 @@ func (s *Server) handleAcceleratorReports(w http.ResponseWriter, r *http.Request
 		http.Error(w, "accelerator report visibility unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	writeJSON(w, reports)
+	writeJSON(w, listOrEmpty(reports))
 }
 
 // handlePoolAvailability reads the leader's cached assessments. An operator
@@ -1128,6 +1128,15 @@ func decodeStrict(w http.ResponseWriter, r *http.Request, v any) bool {
 		return false
 	}
 	return true
+}
+
+// listOrEmpty keeps an empty list a JSON array: a nil slice encodes as null,
+// which clients would have to read as "no items" by hand.
+func listOrEmpty[T any](items []T) []T {
+	if items == nil {
+		return []T{}
+	}
+	return items
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
