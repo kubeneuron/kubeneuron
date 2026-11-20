@@ -50,6 +50,7 @@ func openHeader(path string, remaining *int) (*os.File, fileHeader, error) {
 	if err == nil {
 		var h fileHeader
 		h, err = readHeader(tickReader{f, remaining}, info.Size())
+		err = layoutReadError(err)
 		if err == nil {
 			return f, h, nil
 		}
@@ -60,16 +61,18 @@ func openHeader(path string, remaining *int) (*os.File, fileHeader, error) {
 
 func archivePath(path string) bool { return filepath.Base(path) != "system.journal" }
 
-// Archived files cannot acquire a missing suffix. A short read therefore
-// invalidates that archive; other I/O errors must still reach the caller.
-func invalidArchive(path string, err error) bool {
-	return archivePath(path) && (errors.Is(err, ErrInvalidJournal) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF))
+// Both the file and bounded section readers may end inside a declared layout.
+func layoutReadError(err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return fmt.Errorf("%w: short journal read: %w", ErrInvalidJournal, err)
+	}
+	return err
 }
 
 // A malformed archived header may have no usable file ID. Track its path
 // in the same bounded position map across polls.
 func headerPosition(path string, h fileHeader, err error) (string, bool) {
-	if invalidArchive(path, err) {
+	if archivePath(path) && errors.Is(err, ErrInvalidJournal) {
 		digest := sha256.Sum256([]byte(path))
 		return hex.EncodeToString(digest[:16]), true
 	}
@@ -241,9 +244,10 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 			p.After = h.tailSequence
 		} else if h.tailSequence > p.After {
 			err = h.readNew(ctx, tickReader{f, &readBytes}, &p, &remaining, &outputBytes, &batch, r.decode)
+			err = layoutReadError(err)
 		}
 		_ = f.Close()
-		if invalidArchive(path, err) {
+		if archivePath(path) && errors.Is(err, ErrInvalidJournal) {
 			p.After = h.tailSequence
 			batch.UnreadableEntries++
 			err = nil

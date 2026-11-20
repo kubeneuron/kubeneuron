@@ -31,3 +31,23 @@ func TestJournalZstdFieldLimit(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkJournalZstdField(b *testing.B) {
+	field := bytes.Repeat([]byte("journal message "), 256)
+	encoder, err := zstd.NewWriter(nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	block := encoder.EncodeAll(field, nil)
+	encoder.Close()
+	var decoders fieldDecoders
+	payload := io.NewSectionReader(bytes.NewReader(block), 0, int64(len(block)))
+	b.SetBytes(int64(len(field)))
+	b.ReportAllocs()
+	for b.Loop() {
+		got, err := decoders.readZstd(payload)
+		if err != nil || len(got) != len(field) {
+			b.Fatalf("decoded %d bytes: %v", len(got), err)
+		}
+	}
+}
