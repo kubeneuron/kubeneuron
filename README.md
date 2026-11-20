@@ -4,7 +4,7 @@ KubeNeuron helps teams that train models on Kubernetes recover cloud capacity af
 
 ## v1.0.0-rc.1 candidate scope and evidence
 
-The cloud policies cover fleets using NVIDIA GPUs, AMD Instinct on Azure, Google TPU and AWS Trainium. In DryRun, operators can inspect proposed actions. Approval mode asks an operator to authorize disruptive steps. Automatic mode executes eligible steps under the configured policy.
+The cloud policies are written for fleets using NVIDIA GPUs, AMD Instinct on Azure, Google TPU and AWS Trainium. None of these accelerators has been used in a live run of this candidate. In DryRun, operators can inspect proposed actions. Approval mode asks an operator to authorize disruptive steps. Automatic mode executes eligible steps under the configured policy.
 
 | Cloud | Simulated provider | Live CPU replacement with synthetic accelerator resource | Live accelerator validation |
 |---|---|---|---|
@@ -12,7 +12,7 @@ The cloud policies cover fleets using NVIDIA GPUs, AMD Instinct on Azure, Google
 | Azure Kubernetes Service (AKS) | Replacement tested | Pending | Unverified |
 | Google Kubernetes Engine (GKE) | Replacement tested | Pending | Unverified |
 
-With the simulated providers, an incident resolves by itself after the controller confirms the new node. No live cloud run has confirmed this yet. Use `kubeneuronctl pools` to inspect add-first eligibility and `kubeneuronctl incidents show <id>` to see how the controller identified the node and what it verified. The incident records infrastructure recovery. See the [capability and evidence matrix](docs/reference-capabilities.md#live-cloud-evidence) for individual checks.
+With the simulated providers, an incident resolves by itself after the controller confirms the new node. No live cloud run has confirmed this yet. Use `kubeneuronctl pools` to inspect add-first eligibility and `kubeneuronctl incidents show <id>` to see how the controller identified the node and what it verified. The incident records infrastructure recovery. It does not show that a training job resumed. See the [capability and evidence matrix](docs/reference-capabilities.md#live-cloud-evidence) for individual checks.
 
 Upgrading from 0.x releases is not supported. Uninstall the 0.x installation, then install v1.0. See the [clean installation steps](docs/upgrade.md#moving-from-0x-to-v10).
 
