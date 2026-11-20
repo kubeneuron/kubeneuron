@@ -101,3 +101,25 @@ func FuzzXZShortRead(f *testing.F) {
 		}
 	})
 }
+
+// The synthetic stream contains one CRC64-protected block at offset 12,
+// with total block size 36. Its last eight bytes are the block check.
+func TestXZBlockChecksumCorruption(t *testing.T) {
+	block, err := os.ReadFile("testdata/new.xz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for bit := range 64 {
+		var decoders fieldDecoders
+		damaged := bytes.Clone(block)
+		damaged[40+bit/8] ^= 1 << (bit % 8)
+		got, err := decoders.decodeField(1, io.NewSectionReader(bytes.NewReader(damaged), 0, int64(len(damaged))))
+		if !errors.Is(err, ErrInvalidJournal) || len(got) != 0 {
+			t.Fatalf("checksum bit %d: decoded %d bytes, error %v", bit, len(got), err)
+		}
+		got, err = decoders.decodeField(1, io.NewSectionReader(bytes.NewReader(block), 0, int64(len(block))))
+		if err != nil || string(got) != "MESSAGE=new" {
+			t.Fatalf("complete field after checksum bit %d: got %q, error %v", bit, got, err)
+		}
+	}
+}
