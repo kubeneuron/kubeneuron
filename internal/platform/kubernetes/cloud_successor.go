@@ -43,6 +43,21 @@ func (p *Platform) AddFirstAvailable(ctx context.Context, pin cloud.NodeIdentity
 	return provider.CheckAddFirst(ctx, pin.InstanceID)
 }
 
+// AssessAddFirstPool performs only the provider's read-only configuration check.
+// An EKS group can be assessed while successor execution is release-gated.
+func (p *Platform) AssessAddFirstPool(ctx context.Context, pin cloud.NodeIdentity) error {
+	if err := pin.Validate(); err != nil {
+		return err
+	}
+	checker, ok := p.recycler.(interface {
+		CheckAddFirst(context.Context, string) error
+	})
+	if !ok {
+		return fmt.Errorf("no pool configuration reader")
+	}
+	return checker.CheckAddFirst(ctx, pin.InstanceID)
+}
+
 var _ platform.RemoveFirstChecker = (*Platform)(nil)
 
 // RemoveFirstAvailable asks a provider that implements

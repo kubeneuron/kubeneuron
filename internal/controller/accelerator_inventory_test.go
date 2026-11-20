@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -404,6 +405,10 @@ func (p *poolAssessmentPlatform) AddFirstAvailable(_ context.Context, pin cloud.
 	}
 	return nil
 }
+func (p *poolAssessmentPlatform) AssessAddFirstPool(_ context.Context, pin cloud.NodeIdentity) error {
+	p.checks = append(p.checks, pin.Node)
+	return &cloud.PoolRefusal{Code: cloud.PoolFixedSizeUndeclared, Reason: "EKS does not say whether an autoscaler manages this node group", Action: "tag the node group kubeneuron.io/fixed-size=true"}
+}
 func TestPoolChecksBeforeIncident(t *testing.T) {
 	c, _, inv := inventoryFixture(t)
 	c.SetEngine(poolTestEngine(t))
@@ -441,10 +446,10 @@ func TestPoolChecksBeforeIncident(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows := result.Pools
-	if len(rows) != 3 || rows[0].Status != "available" || rows[1].ReasonCode != "eks-add-first-disabled" || rows[2].ReasonCode != cloud.PoolAutopilot || !strings.Contains(rows[2].Action, "GKE Standard") || strings.Contains(rows[2].Action, "RemoveFirst") {
+	if len(rows) != 3 || rows[0].Status != "available" || rows[1].ReasonCode != cloud.PoolFixedSizeUndeclared || rows[1].CapabilityEnabled || !strings.Contains(rows[1].Action, "kubeneuron.io/fixed-size=true") || rows[2].ReasonCode != cloud.PoolAutopilot || !strings.Contains(rows[2].Action, "GKE Standard") || strings.Contains(rows[2].Action, "RemoveFirst") {
 		t.Fatalf("unexpected pool assessments: %+v", rows)
 	}
-	if len(p.checks) != 2 || p.checks[0] == p.checks[1] || p.checks[0] == "eks" || p.checks[1] == "eks" {
+	if len(p.checks) != 3 || !slices.Contains(p.checks, "eks") {
 		t.Fatalf("unexpected checks %v", p.checks)
 	}
 }

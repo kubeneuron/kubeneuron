@@ -74,12 +74,12 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 			row.Status, row.ReasonCode, row.Reason = "not applicable", "no-replacement-policy", "no remediation policy replaces these nodes"
 		case row.ReplacementPolicy == "RemoveFirst":
 			row.Status = ""
-		case previous[key].CheckedAt != nil && (now.Sub(*previous[key].CheckedAt) < 10*time.Minute || (checksLeft == 0 && check != nil && row.Cloud != "EKS")):
+		case previous[key].CheckedAt != nil && (now.Sub(*previous[key].CheckedAt) < 10*time.Minute || (checksLeft == 0 && check != nil)):
 			cached := previous[key]
 			cached.ReplacementPolicy = row.ReplacementPolicy
 			cached.AcceleratorNodes = count
 			row = cached
-		case row.Cloud == "EKS":
+		case row.Cloud == "EKS" && check == nil:
 			// Remove this release gate when the EKS provider advertises add-first.
 			row.CheckedAt = &now
 			row.Status = "unavailable"
@@ -91,13 +91,19 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 			checksLeft--
 			row.CheckedAt = &now
 			err := check(representatives[key])
+			enabled := true
+			if row.Cloud == "EKS" {
+				caps, _ := cloud.DeclaredCapabilities("aws")
+				enabled = caps.AddFirst
+			}
+			row.CapabilityEnabled = enabled
 			var refusal *cloud.PoolRefusal
 			switch {
+			case err == nil && !enabled:
+				row.Status, row.ReasonCode, row.Reason = "unavailable", "eks-add-first-disabled", "add-first on EKS is not enabled in this release"
 			case err == nil:
 				row.Status = "available"
-				row.CapabilityEnabled = true
 			case errors.As(err, &refusal):
-				row.CapabilityEnabled = true
 				row.Status, row.ReasonCode, row.Reason = "unavailable", refusal.Code, refusal.Reason
 				row.Action = poolRefusalAction(refusal)
 			default:
@@ -164,6 +170,13 @@ func (c *Controller) poolChecker(ctx context.Context) func(types.Node) error {
 		}
 		if n.UID == "" || ref.Identity.NodeUID != n.UID {
 			return errors.New("pool node identity changed")
+		}
+		if n.Labels["eks.amazonaws.com/nodegroup"] != "" {
+			if assessment, ok := c.platform.(interface {
+				AssessAddFirstPool(context.Context, cloud.NodeIdentity) error
+			}); ok {
+				return assessment.AssessAddFirstPool(ctx, ref.Identity)
+			}
 		}
 		return reader.AddFirstAvailable(ctx, ref.Identity)
 	}
