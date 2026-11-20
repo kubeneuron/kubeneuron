@@ -175,4 +175,9 @@ func TestNodegroupDiscoveryRequiresNodeLabel(t *testing.T) {
 	if !errors.As(err, &hold) || hold.Code != cloud.HoldUnconfirmed || policy.Mode != cloud.RepairUnknown {
 		t.Fatalf("missing label: policy %+v, error %v", policy, err)
 	}
+	// the package's own error text goes to the log, not the operator
+	want := "KubeNeuron could not confirm that EKS is not repairing the node's EKS node group: EKS, Auto Scaling or EC2 did not confirm the node's group and state. KubeNeuron checks again every minute."
+	if hold.Message() != want || hold.Cause == nil {
+		t.Fatalf("message %q", hold.Message())
+	}
 }

@@ -130,9 +130,10 @@ func (r *repairReader) hold(ref cloud.NodeRef, err error) error {
 			Action:     "KubeNeuron retries every minute.",
 			PoolReason: fmt.Sprintf("could not read the node group: %s failed", read.call)}
 	}
-	// Every other error on this path is one of this package's own checks.
+	// Every other error on this path is one of this package's own checks; its
+	// text stays in Cause, for the controller log.
 	return &cloud.RecoveryHold{Code: cloud.HoldUnconfirmed, Cause: err,
-		Reason: fmt.Sprintf("KubeNeuron could not confirm that EKS is not repairing %s: %v.", group, err),
+		Reason: fmt.Sprintf("KubeNeuron could not confirm that EKS is not repairing %s: EKS, Auto Scaling or EC2 did not confirm the node's group and state.", group),
 		Action: "KubeNeuron checks again every minute."}
 }
 

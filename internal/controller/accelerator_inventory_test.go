@@ -623,7 +623,7 @@ func TestPoolRowShowsRepairHold(t *testing.T) {
 	on := &cloud.RecoveryHold{Code: cloud.HoldNativeRepair, Reason: "EKS node auto repair is enabled for node group train, so KubeNeuron does not replace its nodes.", Action: "Leave repairs of this group to EKS.", PoolReason: "EKS node auto repair is enabled for this node group", PoolAction: "leave repairs to EKS"}
 	denied := &cloud.RecoveryHold{Code: cloud.HoldReadFailed, Reason: "KubeNeuron could not read node group train: eks:ListUpdates was denied.", Action: "Allow eks:ListUpdates in the controller's IAM role. KubeNeuron retries every minute.", PoolReason: "could not read the node group: eks:ListUpdates was denied", PoolAction: "allow eks:ListUpdates in the controller's IAM role", Cause: errors.New("raw")}
 	failed := &cloud.RecoveryHold{Code: cloud.HoldReadFailed, Reason: "KubeNeuron could not read node group train: eks:ListUpdates failed.", Action: "KubeNeuron retries every minute.", PoolReason: "could not read the node group: eks:ListUpdates failed"}
-	unconfirmed := &cloud.RecoveryHold{Code: cloud.HoldUnconfirmed, Reason: "KubeNeuron could not confirm that EKS is not repairing node group train: missing EKS backing groups.", Action: "KubeNeuron checks again every minute."}
+	unconfirmed := &cloud.RecoveryHold{Code: cloud.HoldUnconfirmed, Reason: "KubeNeuron could not confirm that EKS is not repairing node group train: EKS, Auto Scaling or EC2 did not confirm the node's group and state.", Action: "KubeNeuron checks again every minute."}
 	for _, tc := range []struct {
 		hold                   *cloud.RecoveryHold
 		status, reason, action string
