@@ -1,6 +1,6 @@
 # Release checklist
 
-Work through this list, in order, before pushing a `vX.Y.Z` release tag.
+Work through this list, in order, before pushing a release tag, including `v1.0.0-rc.1`.
 Release tags (`refs/tags/v*`) and adapter contract module tags
 (`refs/tags/pkg/accelerator/v*`, `refs/tags/pkg/cloud/v*`) can be created,
 moved, or deleted only by repository admins (repository ruleset "release
@@ -9,9 +9,9 @@ tags: admins only").
 ## 1. Gates
 
 - [ ] `make gates` passes on the release commit.
-- [ ] The hardware GPU E2E run is green for the release commit (dispatch it,
-      or confirm the latest weekly run is green). See
-      [Hardware E2E dispatch](hw-e2e-dispatch.md).
+- [ ] For rc.1, review the live CPU replacement results for EKS, GKE and AKS against the capability matrix. Record the synthetic accelerator capacity and the verification depth. Document any approved exception for a missing cloud run. Mark real GPU, TPU and Trainium validation separately.
+- [ ] Replace any editorial HTML reminder in the README with verified results or remove it.
+- [ ] Run govulncheck with the release toolchain on the final dependency graph. Review the pinned XZ decoder for advisories and for a maintained replacement with a hard dictionary limit.
 - [ ] CI is green on `main` at the release commit.
 
 ## 2. Adapter contract modules (required before the next release)
@@ -120,10 +120,11 @@ tagging the release.
 
 ## 3. Tag and verify
 
-- [ ] Push the `vX.Y.Z` tag; the release workflow builds, signs, and
-      publishes a draft, verifies it, and publishes it.
-- [ ] Run `bash hack/verify-release.sh vX.Y.Z kubeneuron/kubeneuron` against
-      the published release.
+- [ ] For `v1.0.0-rc.1`, verify that Chart.yaml has `version: 1.0.0-rc.1` and `appVersion: v1.0.0-rc.1`. Check the release workflow's `BASELINE` before tagging. With `v0.7.0`, confirm the rehearsal inputs are available. For a first release with no base, explicitly set `BASELINE: ''` and confirm the gate summary reports `upgrade rehearsal: skipped, no base release`. rc.1 supports a clean installation.
+- [ ] Confirm approval before pushing the tag. **Pushing the tag starts public distribution**: the workflow can publish four tagged GHCR images before it creates the GitHub Release draft. For rc.1 the image tag is exactly `v1.0.0-rc.1`.
+- [ ] Wait for `release-verify` to succeed for the draft ID created by this run. Review the install manifest, installer, CLI archives, image digests, SBOMs and signed checksums.
+- [ ] For rc.1, confirm that exact release ID has the expected tag, `draft=true` and `prerelease=true`. After maintainer review, publish the verified draft by ID with `draft=false`, `prerelease=true` and `make_latest="false"`. Verify the published release retains prerelease status and the Latest release pointer has not moved. For stable tags the workflow publishes automatically after verification.
+- [ ] Run `bash hack/verify-release.sh v1.0.0-rc.1 kubeneuron/kubeneuron` against the published candidate.
 
 ## Pinned inputs and tool versions
 
