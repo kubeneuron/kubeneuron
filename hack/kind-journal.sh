@@ -19,9 +19,10 @@
 #      off with reason journal-mount-failed;
 #   5. spec.agent.kernelLog.journal.enabled=false removes every label and
 #      both variants, and "-agent" still has its UID;
-#   6. with KERNEL_RECORD=1, a synthetic XID 79 line written to the kernel
-#      log reaches the unprivileged agent through the journal and opens an
-#      incident on the worker.
+#   6. with KERNEL_RECORD=1, a synthetic XID 79 line with this run's own PCI
+#      address, written to the kernel log, reaches the unprivileged agent
+#      through the journal and opens a new incident for that address on the
+#      worker, with XID 79 in its evidence.
 #
 # CPU-only: the accelerator is a status patch and the kernel record is a
 # synthetic line, not a GPU fault.
@@ -243,11 +244,12 @@ note "PASS: upgrade kept -agent ($agent_uid) and moved both workers to the journ
 	die "the journal-run DaemonSet has the wrong selector, label or mount"
 note "PASS: journal-run mounts only /run/log/journal, read-only, unprivileged"
 
-# incident_on: an incident is open on the node.
-incident_on() {
+# incidents_on: the node's incidents as a JSON array; fails when the API does
+# not answer with one, so an error never reads as "no incident".
+incidents_on() {
 	curl --silent --show-error --fail --noproxy '*' --max-time 10 -H "@$work/header" \
 		"http://127.0.0.1:$port/api/v1/incidents?node=$1" |
-		"$JQ_BIN" -e --arg n "$1" '(if type == "array" then . else .incidents end) | any(.node == $n)' >/dev/null
+		"$JQ_BIN" -e -c '(if type == "array" then . else .incidents end) | arrays'
 }
 if ((KERNEL_RECORD)); then
 	"$KUBECTL_BIN" -n "$NS" port-forward "service/$NAME-controller" :8080 >"$work/forward.log" 2>&1 &
@@ -258,7 +260,9 @@ if ((KERNEL_RECORD)); then
 	}
 	wait_for "the controller port-forward" forwarded
 	printf 'Authorization: Bearer %s\n' "$("$KUBECTL_BIN" -n "$NS" get secret "$NAME-operator-api-token" -o jsonpath='{.data.token}' | base64 --decode)" >"$work/header"
-	! incident_on "${workers[0]}" || die "an incident was open on ${workers[0]} before the kernel record"
+	api_answers() { before=$(incidents_on "${workers[0]}"); }
+	wait_for "the incident API" api_answers
+	[[ $("$JQ_BIN" length <<<"$before") == 0 ]] || die "an incident was open on ${workers[0]} before the kernel record"
 	# The kind node image sets ReadKMsg=no, so journald keeps no kernel
 	# records; turn it on for this worker only, as a real node has it.
 	"$DOCKER_BIN" exec "${workers[0]}" sh -c 'mkdir -p /etc/systemd/journald.conf.d &&
@@ -266,11 +270,37 @@ if ((KERNEL_RECORD)); then
 		systemctl restart systemd-journald'
 	kernel_in_journal() { "$DOCKER_BIN" exec "${workers[0]}" journalctl -k -q --no-pager -n 1 -o cat | grep -q .; }
 	wait_for "kernel records in the journal of ${workers[0]}" kernel_in_journal
-	"$DOCKER_BIN" exec "${workers[0]}" sh -c 'echo "NVRM: Xid (PCI:0000:3b:00): 79, pid=1, GPU has fallen off the bus." >/dev/kmsg'
-	xid_in_journal() { "$DOCKER_BIN" exec "${workers[0]}" journalctl -k -q --no-pager -o cat --grep 'NVRM: Xid \(PCI:0000:3b:00\): 79' | grep -q .; }
-	wait_for "the XID 79 record in the journal of ${workers[0]}" xid_in_journal
-	wait_for "an incident on ${workers[0]} from the journal" incident_on "${workers[0]}"
-	note "PASS: a kernel XID 79 read from the journal opened an incident on ${workers[0]}"
+	# On restart journald copies the kernel buffer, which may hold XID lines
+	# from earlier runs or other kind clusters on this host. This run's line
+	# names its own PCI domain and is looked for only after the journal's
+	# position from before it was written.
+	pci=$(printf '%04x:3b:00' $((0x1000 + RANDOM % 0x8000)))
+	journal_cursor=$("$DOCKER_BIN" exec "${workers[0]}" journalctl -k -q --no-pager -n 1 -o cat --show-cursor | sed -n 's/^-- cursor: //p')
+	[[ -n $journal_cursor ]] || die "no journal cursor on ${workers[0]}"
+	"$DOCKER_BIN" exec "${workers[0]}" sh -c "echo 'NVRM: Xid (PCI:$pci): 79, pid=1, GPU has fallen off the bus.' >/dev/kmsg"
+	xid_in_journal() {
+		"$DOCKER_BIN" exec "${workers[0]}" journalctl -k -q --no-pager -o cat --after-cursor "$journal_cursor" \
+			--grep "NVRM: Xid \\(PCI:$pci\\): 79," | grep -q .
+	}
+	wait_for "the XID 79 record for $pci in the journal of ${workers[0]}" xid_in_journal
+	xid_incident() {
+		local list
+		list=$(incidents_on "${workers[0]}") || return 1
+		incident_id=$("$JQ_BIN" -r --arg pci "$pci" '[.[] | select(.target.pci_addr == $pci)][0].id // empty' <<<"$list")
+		[[ -n $incident_id ]]
+	}
+	wait_for "an incident on ${workers[0]} for $pci from the journal" xid_incident
+	curl --silent --show-error --fail --noproxy '*' --max-time 10 -H "@$work/header" \
+		"http://127.0.0.1:$port/api/v1/incidents/$incident_id" >"$work/incident.json" ||
+		die "reading incident $incident_id failed"
+	"$JQ_BIN" -e --arg id "$incident_id" --arg n "${workers[0]}" --arg pci "$pci" '
+		.incident.id == $id and .incident.target.node == $n and .incident.target.pci_addr == $pci and
+		any(.audit[]; .action == "open" and .params.xid == "79" and .params.vendor == "nvidia")' \
+		"$work/incident.json" >/dev/null || {
+		"$JQ_BIN" -c '{incident: {id: .incident.id, class: .incident.class, target: .incident.target}, open: [.audit[] | select(.action == "open") | .params]}' "$work/incident.json" >&2 || true
+		die "incident $incident_id is not the XID 79 for $pci on ${workers[0]}"
+	}
+	note "PASS: this run's kernel XID 79 ($pci) read from the journal opened incident $incident_id on ${workers[0]}"
 else
 	note "skip: KERNEL_RECORD=0 (the kernel record is shared with every kind cluster on this host)"
 fi
