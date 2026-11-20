@@ -229,7 +229,7 @@ verify_image_licenses() (
 	local image=$1 arch=$2 container file
 	container=$(docker create --platform "linux/$arch" "$image") || exit 1
 	trap 'docker rm "$container" >/dev/null' EXIT
-	for file in NOTICE THIRD_PARTY_LICENSES; do
+	for file in LICENSE NOTICE THIRD_PARTY_LICENSES; do
 		docker cp "$container:/licenses/$file" "$work/image-$file" || exit 1
 		cmp "$work/tag-$file" "$work/image-$file" || exit 1
 	done
@@ -242,7 +242,7 @@ if [[ ! -r $images ]]; then
 	bad "no images.txt: nothing states which images this release is"
 else
 	if [[ $TAG != v0.* ]]; then
-		for file in NOTICE THIRD_PARTY_LICENSES; do
+		for file in LICENSE NOTICE THIRD_PARTY_LICENSES; do
 			"$GH_BIN" api -H 'Accept: application/vnd.github.raw+json' \
 				"repos/$REPO/contents/$file?ref=$TAG" >"$work/tag-$file" || bad "could not read $file at $TAG"
 		done
