@@ -175,7 +175,7 @@ func renderMarkdown(c Catalog) []byte {
 	b.WriteString("**T4** KubeNeuron control-plane telemetry. Tier T4 is the control plane and is unrelated to the Tesla T4 GPU, which is a hardware column. ")
 	b.WriteString("Hardware support is a separate dimension; `validated` means a recorded run of this project observed the value, and every such cell cites its evidence; ")
 	b.WriteString("`not-applicable` is asserted only where NVIDIA documentation establishes the feature is absent, otherwise a cell is `unknown`. ")
-	b.WriteString("No v0.7 hardware validation has been performed; `declared` cells are unvalidated.\n\n")
+	b.WriteString("The validated field 230 cell cites the v0.6.0-era Tesla T4 run. For measurements from the later v0.7.0 run, see [the capability matrix](reference-capabilities.md). Neither run used v1.0.0-rc.1.\n\n")
 	b.WriteString("Units: `raw` is what the source emits; `canonical` is the normalised unit with `canonical = raw × factor` (a decode, marked `decoded`, has no factor). ")
 	fmt.Fprintf(&b, "`Profiled` is `yes` only when the shipped exporter profile (%s) lists the source series, so the pinned exporter is configured to emit it; ", ShippedProfilePath)
 	b.WriteString("every other field is cataloged from NVIDIA documentation and no exporter is asserted to emit it. ")

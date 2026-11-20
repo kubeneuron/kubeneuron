@@ -1360,7 +1360,7 @@ func TestRenderIsDeterministic(t *testing.T) {
 	}
 	md := string(a[PathMarkdown])
 	for _, want := range []string{
-		"No v0.7 hardware validation has been performed",
+		"Neither run used v1.0.0-rc.1",
 		"**T2** DCGM effective-work / profiling telemetry (deferred, no entries)",
 		"**T3** serving / Triton telemetry (deferred, no entries)",
 		"unrelated to the Tesla T4 GPU",
