@@ -31,11 +31,11 @@ func systemFiles(root string) ([]string, error) {
 			}
 			return nil
 		}
-		name := d.Name()
+		name := strings.TrimSuffix(d.Name(), "~")
 		if !d.Type().IsRegular() || !(name == "system.journal" || strings.HasPrefix(name, "system@") && strings.HasSuffix(name, ".journal")) {
 			return nil
 		}
-		if name == "system.journal" {
+		if d.Name() == "system.journal" {
 			active = append(active, path)
 		} else {
 			archived = append(archived, path)

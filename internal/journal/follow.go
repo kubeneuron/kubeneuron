@@ -59,7 +59,7 @@ func openHeader(path string, remaining *int) (*os.File, fileHeader, error) {
 	return nil, fileHeader{}, err
 }
 
-func archivePath(path string) bool { return strings.HasPrefix(filepath.Base(path), "system@") }
+func archivePath(path string) bool { return filepath.Base(path) != "system.journal" }
 
 // A malformed archived header may have no usable file ID. Track its path
 // in the same bounded position map across polls.
@@ -238,7 +238,7 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 			err = h.readNew(ctx, tickReader{f, &readBytes}, &p, &remaining, &outputBytes, &batch, r.decode)
 		}
 		_ = f.Close()
-		if archivePath(path) && !h.online && errors.Is(err, ErrInvalidJournal) {
+		if archivePath(path) && (!h.online || strings.HasSuffix(path, ".journal~")) && errors.Is(err, ErrInvalidJournal) {
 			p.After = h.tailSequence
 			batch.UnreadableEntries++
 			err = nil

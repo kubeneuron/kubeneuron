@@ -181,7 +181,11 @@ func testFollowFromTail(t *testing.T, headerFlag uint32, dataFlag byte, encode f
 	write()
 	// Rotate before the reader sees the last append. A fresh reader must
 	// finish the renamed file before it delivers the new active file.
-	if err := os.Rename(path, filepath.Join(dir, "system@archive.journal")); err != nil {
+	archiveName := "system@archive.journal"
+	if encode == nil {
+		archiveName += "~"
+	}
+	if err := os.Rename(path, filepath.Join(dir, archiveName)); err != nil {
 		t.Fatal(err)
 	}
 	buf = make([]byte, 208)
