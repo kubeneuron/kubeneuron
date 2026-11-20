@@ -740,7 +740,6 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 			if journalEvents == nil && a.journalSource != nil && ctx.Err() == nil {
 				if journalEvents = a.openJournal(ctx); journalEvents != nil {
-					a.log.Info("journal kernel log source reopened")
 					a.reportKernelLog()
 				}
 			}
@@ -782,6 +781,8 @@ func (a *Agent) openJournal(ctx context.Context) <-chan kmsg.Event {
 		return nil
 	}
 	a.journalOpenErr = ""
+	// The directory names the mount, never journal content.
+	a.log.Info("journal kernel log source open", "dir", a.journalSource.Dir)
 	return ch
 }
 

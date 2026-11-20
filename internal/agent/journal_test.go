@@ -56,10 +56,15 @@ func kernelSourceReason(t *testing.T) (bool, string) {
 
 func TestAgentReportsAnUnreadableJournal(t *testing.T) {
 	a := journalAgent(t, filepath.Join(t.TempDir(), "absent"), func(string) (journal.Reader, error) { return tailJournal{}, nil })
+	var logs strings.Builder
+	a.log = slog.New(slog.NewTextHandler(&logs, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if ch := a.openJournal(ctx); ch != nil {
 		t.Fatal("an absent journal directory opened")
+	}
+	if strings.Contains(logs.String(), "source open") || !strings.Contains(logs.String(), "will retry") {
+		t.Fatalf("absent journal logs %q, want only the retry warning", logs.String())
 	}
 	a.reportKernelLog()
 	if available, reason := kernelSourceReason(t); available || reason != "journal-unreadable" {
@@ -71,9 +76,15 @@ func TestAgentReportsAnUnreadableJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	a = journalAgent(t, dir, func(string) (journal.Reader, error) { return tailJournal{}, nil })
+	logs.Reset()
+	a.log = slog.New(slog.NewTextHandler(&logs, nil))
 	ch := a.openJournal(ctx)
 	if ch == nil {
 		t.Fatal("a readable journal did not open")
+	}
+	// The script of the kind journal test waits for this line.
+	if want := `msg="journal kernel log source open" dir=` + dir; !strings.Contains(logs.String(), want) {
+		t.Fatalf("readable journal logs %q, want %q", logs.String(), want)
 	}
 	defer func() {
 		cancel()
