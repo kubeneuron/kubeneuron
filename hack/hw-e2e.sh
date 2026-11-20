@@ -709,7 +709,7 @@ assert_real_driver() {
 		die "the agent DaemonSet did not roll out after host tooling was armed; --require-real-driver refuses to start without nvidia-smi, so check binDir/libDirs against this AMI's NVIDIA userspace layout"
 
 	agent_pod=$(kubectl -n "$RUNTIME_NAMESPACE" get pods \
-		-l "app.kubernetes.io/instance=${ROOT_NAME},app.kubernetes.io/component=agent" \
+		-l "app.kubernetes.io/instance=${ROOT_NAME},kubeneuron.io/agent=true" \
 		--field-selector "spec.nodeName=$node" -o jsonpath='{.items[0].metadata.name}')
 	[ -n "$agent_pod" ] || die "no agent pod on the GPU node $node"
 
@@ -938,7 +938,7 @@ cmd_test_dcgm() {
 
 	local agent_pod dcgm_pod
 	agent_pod=$(kubectl -n "$RUNTIME_NAMESPACE" get pods \
-		-l "app.kubernetes.io/instance=${ROOT_NAME},app.kubernetes.io/component=agent" \
+		-l "app.kubernetes.io/instance=${ROOT_NAME},kubeneuron.io/agent=true" \
 		--field-selector "spec.nodeName=$node" -o jsonpath='{.items[0].metadata.name}')
 	[ -n "$agent_pod" ] || die "no agent pod on $node"
 	dcgm_pod=$(kubectl -n gpu-operator get pods -l app=nvidia-dcgm \
@@ -1914,7 +1914,7 @@ runtime_profile_apply() {
 	# runtime_profile_apply <node>: pin the profile to the versions the agent
 	# on <node> answers with, select the node, wait for whole-device.
 	local node="$1" agent_pod driver client digest i
-	agent_pod=$(kubectl -n "$RUNTIME_NAMESPACE" get pods -l app.kubernetes.io/component=agent \
+	agent_pod=$(kubectl -n "$RUNTIME_NAMESPACE" get pods -l "app.kubernetes.io/instance=${ROOT_NAME},kubeneuron.io/agent=true" \
 		--field-selector "spec.nodeName=${node},status.phase=Running" -o jsonpath='{.items[0].metadata.name}')
 	[ -n "$agent_pod" ] || die "no running agent Pod on $node to attest its runtime"
 	# The same two probes the agent's own preflight runs: nvidia-smi for the
@@ -3267,12 +3267,16 @@ ensure_ecr_repo() {
 # inject_xid writes an NVRM Xid line into the node's kernel ring buffer,
 # exactly the format the agent's kmsg watcher matches. `kubectl debug node`
 # gives a privileged pod in the node's namespaces with /dev/kmsg writable.
+# A line written from user space has the user facility, and journald moves
+# its leading "word:" into SYSLOG_IDENTIFIER; the leading "kernel:" keeps
+# "NVRM: Xid" in the message of the journal entry, as for the driver's own
+# lines, so an agent reading the journal matches it too.
 inject_xid() {
 	local node="$1" xid="$2"
 	case "$xid" in
 	*[!0-9]* | "") die "XID must be a positive integer" ;;
 	esac
-	local line="NVRM: Xid (PCI:0000:00:1e): ${xid}, pid=0, hardware E2E synthetic fault."
+	local line="kernel: NVRM: Xid (PCI:0000:00:1e): ${xid}, pid=0, hardware E2E synthetic fault."
 	kubectl debug "node/$node" --profile=sysadmin -q \
 		--image=busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 -- \
 		sh -c "printf '%s\n' '$line' > /dev/kmsg"

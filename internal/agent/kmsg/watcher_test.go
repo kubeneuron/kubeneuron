@@ -27,6 +27,14 @@ func TestParseLine(t *testing.T) {
 			wantOK:  true,
 		},
 		{
+			// hack/hw-e2e.sh writes its synthetic line so from user space.
+			name:    "synthetic line with a kernel: prefix",
+			line:    `12,4472,3023054990,-;kernel: NVRM: Xid (PCI:0000:00:1e): 79, pid=0, hardware E2E synthetic fault.`,
+			wantXID: 79,
+			wantPCI: "0000:00:1e",
+			wantOK:  true,
+		},
+		{
 			name:    "double bit ECC without PCI prefix",
 			line:    `NVRM: Xid (0000:af:00): 48, pid='<unknown>', name=<unknown>, Ch 00000008`,
 			wantXID: 48,
