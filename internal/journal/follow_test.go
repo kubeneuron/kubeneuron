@@ -12,9 +12,23 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestFollowFromTail(t *testing.T) {
+	t.Run("plain", func(t *testing.T) { testFollowFromTail(t, nil) })
+	t.Run("zstandard", func(t *testing.T) {
+		enc, err := zstd.NewWriter(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer enc.Close()
+		testFollowFromTail(t, enc)
+	})
+}
+
+func testFollowFromTail(t *testing.T, enc *zstd.Encoder) {
 	dir := t.TempDir()
 	if _, err := Open(dir); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal(err)
@@ -39,7 +53,16 @@ func TestFollowFromTail(t *testing.T) {
 	data := func(field string) int { off := add(1, 64+len(field)); copy(buf[off+64:], field); return off }
 	transport := data("_TRANSPORT=kernel")
 	entry := func(seq uint64, field string) int {
-		msg := data(field)
+		var msg int
+		if enc == nil {
+			msg = data(field)
+		} else {
+			binary.LittleEndian.PutUint32(buf[12:], 1<<3)
+			block := enc.EncodeAll([]byte(field), nil)
+			msg = add(1, 64+len(block))
+			buf[msg+1] = 4
+			copy(buf[msg+64:], block)
+		}
 		off := add(3, 96)
 		put(buf[off+16:], seq)
 		put(buf[off+64:], uint64(transport))
