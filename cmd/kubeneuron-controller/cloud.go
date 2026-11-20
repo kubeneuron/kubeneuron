@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"k8s.io/client-go/kubernetes"
 	"os"
 
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
@@ -19,10 +20,13 @@ import (
 // newInstanceRecycler builds the cloud provider that recycles or replaces the
 // instance behind a node, by name, from the registry. An unsupported provider
 // fails closed with a clear message rather than silently disabling recycling.
-func newInstanceRecycler(ctx context.Context, provider, region string) (platform.InstanceRecycler, error) {
+func newInstanceRecycler(ctx context.Context, provider, region string, kube kubernetes.Interface) (platform.InstanceRecycler, error) {
 	cfg := cloud.Config{Region: region}
 	switch provider {
 	case "aws":
+		cfg.CheckAutoscalerGroup = func(ctx context.Context, group string) (bool, error) {
+			return aws.CheckAutoscalerGroup(ctx, kube.CoreV1().ConfigMaps("kube-system"), group)
+		}
 		cfg.Options = map[string]string{
 			"cluster":                   os.Getenv("KUBENEURON_EKS_CLUSTER"),
 			aws.OptionInterruptionQueue: os.Getenv("KUBENEURON_AWS_INTERRUPTION_QUEUE_URL"),

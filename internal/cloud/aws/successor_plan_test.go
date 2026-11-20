@@ -3,6 +3,7 @@
 package aws
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -14,6 +15,8 @@ import (
 	et "github.com/aws/aws-sdk-go-v2/service/eks/types"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
+
+func unmanagedGroup(context.Context, string) (bool, error) { return false, nil }
 
 func TestPlanSuccessor(t *testing.T) {
 	group := at.AutoScalingGroup{AutoScalingGroupName: sdk.String("workers"), AvailabilityZones: []string{"zone-a"}, DesiredCapacity: sdk.Int32(2), MaxSize: sdk.Int32(3)}
@@ -43,8 +46,8 @@ func TestCheckAddFirstRequiresEKSBackingGroup(t *testing.T) {
 		autoscalerTag          string
 	}{
 		{"confirmed", "training", "workers", true, ""},
-		{"autoscaler enabled", "training", "workers", false, "k8s.io/cluster-autoscaler/enabled"},
-		{"autoscaler cluster", "training", "workers", false, "k8s.io/cluster-autoscaler/training"},
+		{"autoscaler enabled", "training", "workers", true, "k8s.io/cluster-autoscaler/enabled"},
+		{"autoscaler cluster", "training", "workers", true, "k8s.io/cluster-autoscaler/training"},
 		{"foreign cluster", "other", "workers", false, ""},
 		{"tagged self-managed ASG", "training", "different-asg", false, ""},
 	} {
@@ -60,12 +63,9 @@ func TestCheckAddFirstRequiresEKSBackingGroup(t *testing.T) {
 			}
 			eksGroup := et.Nodegroup{NodegroupArn: sdk.String("group-arn"), ClusterName: sdk.String(tc.cluster), NodegroupName: sdk.String("gpu"), Tags: map[string]string{fixedSizeTag: "true"}, Status: et.NodegroupStatusActive,
 				Resources: &et.NodegroupResources{AutoScalingGroups: []et.AutoScalingGroup{{Name: sdk.String(tc.backing)}}}}
-			p := managedProvider{repairReader: &repairReader{cluster: "training", eks: &groupHistory{group: eksGroup},
+			p := managedProvider{repairReader: &repairReader{checkAutoscalerGroup: unmanagedGroup, cluster: "training", eks: &groupHistory{group: eksGroup},
 				scaling: quietASG{membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{group}}}}}}
 			err := p.CheckAddFirst(t.Context(), "i-pinned")
-			if tc.autoscalerTag != "" && (err == nil || !strings.Contains(err.Error(), "node group is managed by Cluster Autoscaler")) {
-				t.Fatalf("autoscaler refusal: %v", err)
-			}
 			if tc.eligible {
 				if err != nil {
 					t.Fatal(err)
@@ -94,7 +94,7 @@ func TestVerifySuccessorBaseline(t *testing.T) {
 	}
 	out := &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{group}}
 	eksReader := &groupHistory{group: et.Nodegroup{NodegroupArn: sdk.String("ng-1"), ClusterName: sdk.String("training"), NodegroupName: sdk.String("gpu"), Tags: map[string]string{fixedSizeTag: "true"}, Status: et.NodegroupStatusActive, Resources: &et.NodegroupResources{AutoScalingGroups: []et.AutoScalingGroup{{Name: sdk.String("workers")}}}}}
-	p := managedProvider{repairReader: &repairReader{cluster: "training", eks: eksReader, scaling: quietASG{membershipFixture{t, out}}}}
+	p := managedProvider{repairReader: &repairReader{checkAutoscalerGroup: unmanagedGroup, cluster: "training", eks: eksReader, scaling: quietASG{membershipFixture{t, out}}}}
 	plan, err := p.PrepareSuccessor(t.Context(), cloud.Successor{Operation: "op", Instance: "i-pinned"})
 	if err != nil {
 		t.Fatal(err)
@@ -103,6 +103,13 @@ func TestVerifySuccessorBaseline(t *testing.T) {
 	if err = p.verifySuccessorBaseline(t.Context(), plan); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("autoscaler takes ownership before grow", func(t *testing.T) {
+		p.checkAutoscalerGroup = func(_ context.Context, group string) (bool, error) { return group == "workers", nil }
+		defer func() { p.checkAutoscalerGroup = unmanagedGroup }()
+		if err := p.verifySuccessorBaseline(t.Context(), plan); !errors.Is(err, cloud.ErrNeedsOperator) {
+			t.Fatalf("changed autoscaler ownership: %v", err)
+		}
+	})
 	t.Run("fixed size declaration withdrawn", func(t *testing.T) {
 		defer func() { eksReader.group.Tags[fixedSizeTag] = "true" }()
 		for _, value := range []string{"", "TRUE", "false"} {

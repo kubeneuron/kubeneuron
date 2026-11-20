@@ -88,7 +88,7 @@ func newSuccessorLab(t *testing.T) (cloud.SuccessorProvider, cloudtest.Successor
 		scalingUpdateFixture: scalingUpdateFixture{out: &eks.DescribeUpdateOutput{}, groupHistory: groupHistory{group: ng}},
 		terminateFixture:     terminateFixture{t: t, expectedID: "i-pinned", out: &autoscaling.TerminateInstanceInAutoScalingGroupOutput{Activity: &at.Activity{ActivityId: sdk.String("term")}}},
 	}
-	p := &managedProvider{repairReader: &repairReader{cluster: "training", eks: f, scaling: f}, updater: f, terminator: f}
+	p := &managedProvider{repairReader: &repairReader{checkAutoscalerGroup: unmanagedGroup, cluster: "training", eks: f, scaling: f}, updater: f, terminator: f}
 	return p, f
 }
 

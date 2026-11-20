@@ -94,6 +94,8 @@ type Provider interface {
 // Config carries provider-agnostic construction settings. Region is a
 // near-universal cloud concept; a provider that needs more reads Options.
 type Config struct {
+	// CheckAutoscalerGroup checks current cluster autoscaler ownership of an AWS scaling group.
+	CheckAutoscalerGroup func(context.Context, string) (bool, error)
 	// Region is the provider region (empty uses the provider's ambient default,
 	// e.g. AWS_REGION for AWS).
 	Region string

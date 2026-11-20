@@ -27,10 +27,11 @@ type scalingReader interface {
 // repairReader has only read clients. Execution is enabled separately once
 // action-specific authorization has been checked.
 type repairReader struct {
-	cluster string
-	eks     nodegroupReader
-	scaling scalingReader
-	ec2     instanceStatusReader
+	checkAutoscalerGroup func(context.Context, string) (bool, error)
+	cluster              string
+	eks                  nodegroupReader
+	scaling              scalingReader
+	ec2                  instanceStatusReader
 }
 
 func (r *repairReader) managedGroup(ctx context.Context, ref cloud.NodeRef) (*et.Nodegroup, string, error) {

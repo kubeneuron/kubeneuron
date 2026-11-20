@@ -288,7 +288,7 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 		}
 		plat = kubePlatform
 		if cloudProvider != "" {
-			recycler, err := newInstanceRecycler(context.Background(), cloudProvider, cloudRegion)
+			recycler, err := newInstanceRecycler(context.Background(), cloudProvider, cloudRegion, kubePlatform.Client())
 			if err != nil {
 				return fmt.Errorf("cloud provider %q: %w", cloudProvider, err)
 			}

@@ -84,10 +84,7 @@ func (p *managedProvider) readSuccessorPlan(ctx context.Context, s cloud.Success
 	group := groups.AutoScalingGroups[0]
 	var nodegroup string
 	for _, tag := range group.Tags {
-		switch sdk.ToString(tag.Key) {
-		case "k8s.io/cluster-autoscaler/enabled", "k8s.io/cluster-autoscaler/" + p.cluster:
-			return s, &cloud.PoolRefusal{Code: cloud.PoolAutoscaled, Reason: "node group is managed by Cluster Autoscaler", Action: "use a single-zone node group outside Cluster Autoscaler management, or set RemoveFirst in the remediation policy that applies to these nodes"}
-		case "eks:nodegroup-name":
+		if sdk.ToString(tag.Key) == "eks:nodegroup-name" {
 			nodegroup = sdk.ToString(tag.Value)
 		}
 	}
@@ -105,6 +102,16 @@ func (p *managedProvider) readSuccessorPlan(ctx context.Context, s cloud.Success
 	ng := out.Nodegroup
 	if sdk.ToString(ng.ClusterName) != p.cluster || sdk.ToString(ng.NodegroupName) != nodegroup || ng.Status != et.NodegroupStatusActive || ng.Resources == nil || len(ng.Resources.AutoScalingGroups) != 1 || sdk.ToString(ng.Resources.AutoScalingGroups[0].Name) != name {
 		return s, fmt.Errorf("%w: EKS must confirm exactly one backing ASG for the active nodegroup", cloud.ErrAddFirstUnavailable)
+	}
+	if p.checkAutoscalerGroup == nil {
+		return s, fmt.Errorf("%w: Cluster Autoscaler status reader unavailable", cloud.ErrAddFirstUnavailable)
+	}
+	managed, err := p.checkAutoscalerGroup(ctx, name)
+	if err != nil {
+		return s, fmt.Errorf("%w: could not confirm Cluster Autoscaler status: %w", cloud.ErrAddFirstUnavailable, err)
+	}
+	if managed {
+		return s, &cloud.PoolRefusal{Code: cloud.PoolAutoscaled, Reason: "node group is managed by Cluster Autoscaler", Action: "use a single-zone node group outside Cluster Autoscaler management, or set RemoveFirst in the remediation policy that applies to these nodes"}
 	}
 	if ng.Tags[fixedSizeTag] != "true" {
 		return s, &cloud.PoolRefusal{Code: cloud.PoolFixedSizeUndeclared, Reason: "EKS does not say whether an autoscaler manages this node group", Action: "tag the node group kubeneuron.io/fixed-size=true if nothing else changes its size, or set RemoveFirst in the remediation policy that applies to these nodes"}
