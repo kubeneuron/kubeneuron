@@ -10,8 +10,10 @@ tags: admins only").
 
 - [ ] `make gates` passes on the release commit.
 - [ ] For rc.1, review the live CPU replacement results for EKS, GKE and AKS against the capability matrix. Record the synthetic accelerator capacity and the verification depth. Document any approved exception for a missing cloud run. Mark real GPU, TPU and Trainium validation separately.
+- [ ] Keep each README validation result marked `Pending` until run evidence supports replacing it.
 - [ ] Replace any editorial HTML reminder in the README with verified results or remove it.
 - [ ] Run govulncheck with the release toolchain on the final dependency graph. Review the pinned XZ decoder for advisories and for a maintained replacement with a hard dictionary limit.
+- [ ] Run `make verify-licenses` on the release commit.
 - [ ] CI is green on `main` at the release commit.
 
 ## 2. Adapter contract modules (required before the next release)
@@ -123,6 +125,7 @@ tagging the release.
 - [ ] For `v1.0.0-rc.1`, verify that Chart.yaml has `version: 1.0.0-rc.1` and `appVersion: v1.0.0-rc.1`. Check the release workflow's `BASELINE` before tagging. With `v0.7.0`, confirm the rehearsal inputs are available. For a first release with no base, explicitly set `BASELINE: ''` and confirm the gate summary reports `upgrade rehearsal: skipped, no base release`. rc.1 supports a clean installation.
 - [ ] Confirm approval before pushing the tag. **Pushing the tag starts public distribution**: the workflow can publish four tagged GHCR images before it creates the GitHub Release draft. For rc.1 the image tag is exactly `v1.0.0-rc.1`.
 - [ ] Wait for `release-verify` to succeed for the draft ID created by this run. Review the install manifest, installer, CLI archives, image digests, SBOMs and signed checksums.
+- [ ] Compare `/licenses/THIRD_PARTY_LICENSES` and `/licenses/NOTICE` from each signed image digest with `THIRD_PARTY_LICENSES` and `NOTICE` in the tagged tree. Require a byte-for-byte match.
 - [ ] For rc.1, confirm that exact release ID has the expected tag, `draft=true` and `prerelease=true`. After maintainer review, publish the verified draft by ID with `draft=false`, `prerelease=true` and `make_latest="false"`. Verify the published release retains prerelease status and the Latest release pointer has not moved. For stable tags the workflow publishes automatically after verification.
 - [ ] Run `bash hack/verify-release.sh v1.0.0-rc.1 kubeneuron/kubeneuron` against the published candidate.
 
