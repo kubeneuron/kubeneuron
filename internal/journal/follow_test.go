@@ -17,18 +17,28 @@ import (
 )
 
 func TestFollowFromTail(t *testing.T) {
-	t.Run("plain", func(t *testing.T) { testFollowFromTail(t, nil) })
+	t.Run("plain", func(t *testing.T) { testFollowFromTail(t, 0, 0, nil) })
 	t.Run("zstandard", func(t *testing.T) {
 		enc, err := zstd.NewWriter(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer enc.Close()
-		testFollowFromTail(t, enc)
+		testFollowFromTail(t, 1<<3, 4, func(field []byte) []byte { return enc.EncodeAll(field, nil) })
+	})
+	t.Run("xz", func(t *testing.T) {
+		testFollowFromTail(t, 1, 1, func(field []byte) []byte {
+			name := strings.TrimPrefix(string(field), "MESSAGE=")
+			block, err := os.ReadFile(filepath.Join("testdata", name+".xz"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return block
+		})
 	})
 }
 
-func testFollowFromTail(t *testing.T, enc *zstd.Encoder) {
+func testFollowFromTail(t *testing.T, headerFlag uint32, dataFlag byte, encode func([]byte) []byte) {
 	dir := t.TempDir()
 	if _, err := Open(dir); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal(err)
@@ -54,13 +64,13 @@ func testFollowFromTail(t *testing.T, enc *zstd.Encoder) {
 	transport := data("_TRANSPORT=kernel")
 	entry := func(seq uint64, field string) int {
 		var msg int
-		if enc == nil {
+		if encode == nil {
 			msg = data(field)
 		} else {
-			binary.LittleEndian.PutUint32(buf[12:], 1<<3)
-			block := enc.EncodeAll([]byte(field), nil)
+			binary.LittleEndian.PutUint32(buf[12:], headerFlag)
+			block := encode([]byte(field))
 			msg = add(1, 64+len(block))
-			buf[msg+1] = 4
+			buf[msg+1] = dataFlag
 			copy(buf[msg+64:], block)
 		}
 		off := add(3, 96)
