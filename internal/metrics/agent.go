@@ -44,6 +44,14 @@ var (
 		Help: "Agent events permanently rejected by the controller and dropped.",
 	})
 
+	// AgentJournalUnreadableEntries counts journal entries the agent could
+	// not read and skipped; the kernel faults in them are lost. No node label:
+	// the scrape target names the node.
+	AgentJournalUnreadableEntries = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "kubeneuron_agent_journal_unreadable_entries_total",
+		Help: "Journal entries the agent could not read and skipped; kernel faults in them are lost.",
+	})
+
 	// AgentRegistrationAcks counts durable controller registration
 	// acknowledgments; staleness here mirrors the /readyz probe.
 	AgentRegistrationAcks = promauto.NewCounter(prometheus.CounterOpts{

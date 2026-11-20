@@ -25,6 +25,9 @@ type fakeJournal struct {
 	entries []string
 	err     error
 	reads   []journal.Cursor
+	// unreadable marks entries the reader cannot decode: counted in the
+	// batch, never returned.
+	unreadable map[int]bool
 }
 
 func (f *fakeJournal) append(lines ...string) {
@@ -48,7 +51,11 @@ func (f *fakeJournal) Next(_ context.Context, after journal.Cursor) (journal.Bat
 		return journal.Batch{}, journal.ErrInvalidJournal
 	}
 	var batch journal.Batch
-	for _, line := range f.entries[from:] {
+	for i, line := range f.entries[from:] {
+		if f.unreadable[from+i] {
+			batch.UnreadableEntries++
+			continue
+		}
 		batch.Records = append(batch.Records, journal.Record{Message: line})
 	}
 	batch.Cursor = journal.Cursor(strconv.Itoa(len(f.entries)))
@@ -181,6 +188,48 @@ func TestJournalSourceReadsAnAbandonedBatchAgain(t *testing.T) {
 		t.Fatalf("an abandoned batch moved the cursor to %q", got)
 	}
 	_ = again.Acknowledge()
+}
+
+// An entry the reader skipped is reported once, when its batch is done, even
+// if the batch is read again; the valid entry beside it is delivered and the
+// cursor moves past both.
+func TestJournalSourceReportsSkippedEntriesOnce(t *testing.T) {
+	root := t.TempDir()
+	f := &fakeJournal{unreadable: map[int]bool{0: true}}
+	var logs bytes.Buffer
+	s := journalSource(t, f, filepath.Join(root, "var"), filepath.Join(root, "journal-cursor.json"), &logs)
+	var mu sync.Mutex
+	var reported []int
+	s.Unreadable = func(n int) {
+		mu.Lock()
+		defer mu.Unlock()
+		reported = append(reported, n)
+	}
+	ch := watch(t, s)
+	noEvent(t, ch)
+	f.append("private-detail-42 that does not decode", xidLine)
+	nextEvent(t, ch).Abandon()
+	ev := nextEvent(t, ch)
+	if ev.XID != 79 {
+		t.Fatalf("event = %+v, want the valid entry", ev)
+	}
+	_ = ev.Acknowledge()
+	deadline := time.Now().Add(2 * time.Second)
+	for savedCursor(t, s) != "2" {
+		if time.Now().After(deadline) {
+			t.Fatalf("cursor = %q, want past both entries", savedCursor(t, s))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	noEvent(t, ch)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reported) != 1 || reported[0] != 1 {
+		t.Fatalf("reported skips = %v, want one report of 1", reported)
+	}
+	if strings.Contains(logs.String(), "private-detail") {
+		t.Fatalf("journal content reached the log: %s", logs.String())
+	}
 }
 
 // A variant switch moves the node between the two directories: each keeps its

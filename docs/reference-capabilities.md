@@ -43,6 +43,13 @@ mounted journal, for example because of file permissions or a security
 module, the source reads `journal-unreadable`; KubeNeuron adds no
 privilege for it.
 
+When the agent cannot decode a journal entry, it skips that entry and
+reads the next one. Any kernel fault in a skipped entry is lost and opens
+no incident. The source reads `journal-unreadable` from the skip until ten
+minutes after the last skipped entry, and
+`kubeneuron_agent_journal_unreadable_entries_total` counts the skipped
+entries. The agent does not store or log the content of a skipped entry.
+
 ## Live cloud evidence
 
 The kind tests run on CPU-only Kubernetes nodes without GPUs or cloud API calls.

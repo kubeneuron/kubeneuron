@@ -56,6 +56,11 @@ type JournalSource struct {
 	Idle time.Duration
 	// RedeliverMax overrides journalRedeliverMax; tests set it.
 	RedeliverMax time.Duration
+	// Unreadable, when set, is called from the reading goroutine with the
+	// number of entries the reader skipped in a batch, once, when the batch
+	// is done and its cursor moves past them. The kernel faults in those
+	// entries are lost; nothing of their content is passed.
+	Unreadable func(entries int)
 
 	refusalMu     sync.Mutex
 	refusalLogged map[string]bool
@@ -152,6 +157,9 @@ func (s *JournalSource) Watch(ctx context.Context) (<-chan Event, error) {
 			}
 			wait = idle
 			clear(acked)
+			if batch.UnreadableEntries > 0 && s.Unreadable != nil {
+				s.Unreadable(batch.UnreadableEntries)
+			}
 			cursor = batch.Cursor
 			if err := s.saveCursor(cursor); err != nil {
 				// The events are delivered; a restart may read them

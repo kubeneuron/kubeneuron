@@ -245,11 +245,18 @@ type Agent struct {
 	// kmsgReadable and journalReadable are the two kernel log sources'
 	// last state, owned by the Run loop.
 	kmsgReadable, journalReadable bool
-	health                        *gpuhealth.Watcher
-	amdHealth                     *amdhealth.Watcher
-	client                        *http.Client
-	log                           *slog.Logger
-	nvidia                        *nvidiaObservation
+	// journalSkip is when the journal source last skipped an entry it could
+	// not read; the source reports journal-unreadable for journalSkipHold
+	// after it. Written by the journal goroutine, read by the Run loop.
+	journalSkipMu    sync.Mutex
+	journalSkipAt    time.Time
+	journalSkipped   chan struct{}
+	journalSkipShown bool
+	health           *gpuhealth.Watcher
+	amdHealth        *amdhealth.Watcher
+	client           *http.Client
+	log              *slog.Logger
+	nvidia           *nvidiaObservation
 	// adapters holds one entry per enabled, registered accelerator adapter,
 	// in registry order, including adapters that failed to build (which fail
 	// closed for their own vendor only).
@@ -427,6 +434,8 @@ func New(cfg Config, driver nvml.GPUDriver, log *slog.Logger) (*Agent, error) {
 			Logger:     log,
 			BootID:     agent.currentBootID(),
 		}
+		agent.journalSkipped = make(chan struct{}, 1)
+		agent.journalSource.Unreadable = agent.journalUnreadable
 	}
 	// An external hostengine can supply numeric XIDs without a local SMI driver.
 	// Only use local inventory to resolve a GPU when that driver is real.
@@ -680,6 +689,8 @@ func (a *Agent) Run(ctx context.Context) error {
 			} else {
 				ev.Abandon()
 			}
+		case <-a.journalSkipped:
+			a.reportKernelLog()
 		case ev, ok := <-healthEvents:
 			if !ok {
 				// The second source stopped; kmsg remains the primary path.
@@ -716,6 +727,10 @@ func (a *Agent) Run(ctx context.Context) error {
 					a.kmsgReadable = true
 					a.reportKernelLog()
 				}
+			}
+			if a.journalSource != nil && a.journalSkipHeld() != a.journalSkipShown {
+				// The hold after the last skipped entry ended.
+				a.reportKernelLog()
 			}
 			if journalEvents == nil && a.journalSource != nil && ctx.Err() == nil {
 				if journalEvents = a.openJournal(ctx); journalEvents != nil {
@@ -763,15 +778,50 @@ func (a *Agent) openJournal(ctx context.Context) <-chan kmsg.Event {
 	return ch
 }
 
+// journalSkipHold is how long the journal source stays journal-unreadable
+// after the last entry it skipped.
+const journalSkipHold = 10 * time.Minute
+
+// journalUnreadable records entries the journal source skipped. It warns
+// once on entering the state, not on every batch, and never logs content.
+func (a *Agent) journalUnreadable(entries int) {
+	metrics.AgentJournalUnreadableEntries.Add(float64(entries))
+	a.journalSkipMu.Lock()
+	held := a.journalSkipHeldLocked()
+	a.journalSkipAt = a.now()
+	a.journalSkipMu.Unlock()
+	if !held {
+		a.log.Warn("journal entries could not be read and were skipped; kernel faults in them are lost", "entries", entries)
+	}
+	select {
+	case a.journalSkipped <- struct{}{}:
+	default:
+	}
+}
+
+func (a *Agent) journalSkipHeld() bool {
+	a.journalSkipMu.Lock()
+	defer a.journalSkipMu.Unlock()
+	return a.journalSkipHeldLocked()
+}
+
+func (a *Agent) journalSkipHeldLocked() bool {
+	return !a.journalSkipAt.IsZero() && a.now().Sub(a.journalSkipAt) < journalSkipHold
+}
+
 // reportKernelLog publishes whether the agent reads kernel faults from
-// either source. An agent with a journal mount that it cannot read says so;
-// the controller adds why a node has no mount at all.
+// either source. An agent with a journal mount that it cannot read says so,
+// and so does one whose journal skipped an entry in the last
+// journalSkipHold; the controller adds why a node has no mount at all.
 func (a *Agent) reportKernelLog() {
 	reason := "kernel-log-unavailable"
+	journalOK := a.journalReadable
 	if a.journalSource != nil {
 		reason = "journal-unreadable"
+		a.journalSkipShown = a.journalSkipHeld()
+		journalOK = journalOK && !a.journalSkipShown
 	}
-	reportKernelSource(a.kmsgReadable || a.journalReadable, reason)
+	reportKernelSource(a.kmsgReadable || journalOK, reason)
 }
 
 // reportKernelSourceAvailability exposes the loss of AMD kernel fault evidence

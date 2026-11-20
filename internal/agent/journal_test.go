@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/journal"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 type tailJournal struct{}
@@ -81,5 +83,61 @@ func TestAgentReportsAnUnreadableJournal(t *testing.T) {
 	a.reportKernelLog()
 	if available, _ := kernelSourceReason(t); !available {
 		t.Fatal("a readable journal is reported unavailable")
+	}
+}
+
+// A skipped journal entry is a lost kernel fault: the source reads
+// journal-unreadable from the skip until journalSkipHold after the last one,
+// a new skip extends that, and the counter counts the entries.
+func TestAgentHoldsJournalUnreadableAfterASkippedEntry(t *testing.T) {
+	a := journalAgent(t, t.TempDir(), func(string) (journal.Reader, error) { return tailJournal{}, nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := a.openJournal(ctx)
+	if ch == nil {
+		cancel()
+		t.Fatal("a readable journal did not open")
+	}
+	defer func() {
+		cancel()
+		for range ch {
+		}
+	}()
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return now }
+	var logs strings.Builder
+	a.log = slog.New(slog.NewTextHandler(&logs, nil))
+	before := testutil.ToFloat64(metrics.AgentJournalUnreadableEntries)
+	want := func(available bool) {
+		t.Helper()
+		a.reportKernelLog()
+		got, reason := kernelSourceReason(t)
+		if got != available || (!available && reason != "journal-unreadable") {
+			t.Fatalf("at %s kernel log = %t %q, want available=%t", now.Format(time.TimeOnly), got, reason, available)
+		}
+	}
+
+	want(true)
+	a.journalSource.Unreadable(1)
+	select {
+	case <-a.journalSkipped:
+	default:
+		t.Fatal("a skip did not wake the Run loop")
+	}
+	want(false)
+	now = now.Add(9 * time.Minute)
+	want(false)
+	a.journalSource.Unreadable(2)
+	now = now.Add(journalSkipHold - time.Second)
+	want(false)
+	now = now.Add(time.Second)
+	if !a.journalSkipShown || a.journalSkipHeld() {
+		t.Fatal("the end of the hold is not noticed on the next tick")
+	}
+	want(true)
+	if n := strings.Count(logs.String(), "level=WARN"); n != 1 {
+		t.Fatalf("%d warnings for two skips in one hold, want one on entering it:\n%s", n, logs.String())
+	}
+	if got := testutil.ToFloat64(metrics.AgentJournalUnreadableEntries) - before; got != 3 {
+		t.Fatalf("unreadable entries counted %v, want 3", got)
 	}
 }
