@@ -77,3 +77,27 @@ func FuzzXZFieldSequence(f *testing.F) {
 		}
 	})
 }
+
+// FuzzXZShortRead varies where an otherwise valid field ends. A short
+// read must not produce a partial message or affect the next complete field.
+func FuzzXZShortRead(f *testing.F) {
+	block, err := os.ReadFile("testdata/new.xz")
+	if err != nil {
+		f.Fatal(err)
+	}
+	for n := range len(block) {
+		f.Add(uint16(n))
+	}
+	f.Fuzz(func(t *testing.T, position uint16) {
+		var decoders fieldDecoders
+		n := int64(int(position) % len(block))
+		got, err := decoders.decodeField(1, io.NewSectionReader(bytes.NewReader(block), 0, n))
+		if !errors.Is(err, ErrInvalidJournal) || len(got) != 0 {
+			t.Fatalf("short field of %d bytes: decoded %d bytes, error %v", n, len(got), err)
+		}
+		got, err = decoders.decodeField(1, io.NewSectionReader(bytes.NewReader(block), 0, int64(len(block))))
+		if err != nil || string(got) != "MESSAGE=new" {
+			t.Fatalf("complete field: got %q, error %v", got, err)
+		}
+	})
+}
