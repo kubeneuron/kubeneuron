@@ -43,14 +43,20 @@ func (h fileHeader) plainKernelMessage(r io.ReaderAt, entry, transport uint64) (
 		if err != nil {
 			return "", false, err
 		}
-		if d.flags == 2 {
-			field, err := readLZ4(d.payload)
+		if d.flags != 0 {
+			var field []byte
+			switch d.flags {
+			case 2:
+				field, err = readLZ4(d.payload)
+			case 4:
+				field, err = readZstd(d.payload)
+			default:
+				return "", false, fmt.Errorf("%w: unsupported DATA compression", ErrInvalidJournal)
+			}
 			if err != nil {
 				return "", false, err
 			}
 			d.payload = io.NewSectionReader(bytes.NewReader(field), 0, int64(len(field)))
-		} else if d.flags != 0 {
-			return "", false, fmt.Errorf("%w: compressed DATA requires decoder", ErrInvalidJournal)
 		}
 		const prefix = "MESSAGE="
 		if d.payload.Size() < int64(len(prefix)) {
