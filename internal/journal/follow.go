@@ -66,7 +66,7 @@ func Open(directory string) (Reader, error) {
 	if err = f.Close(); err != nil {
 		return nil, err
 	}
-	return directoryReader{directory, decodeField}, nil
+	return directoryReader{directory, new(fieldDecoders).decodeField}, nil
 }
 
 func (r directoryReader) Next(ctx context.Context, after Cursor) (Batch, error) {
@@ -172,7 +172,7 @@ func (h fileHeader) readNew(ctx context.Context, f io.ReaderAt, p *filePosition,
 		}
 		if e.sequence > p.After {
 			msg, ok, err := h.plainKernelMessage(f, off, p.Transport, decode)
-			if errors.Is(err, errDecoderPanic) {
+			if errors.Is(err, errUnreadableField) {
 				batch.UnreadableEntries++
 			} else if err != nil {
 				return err

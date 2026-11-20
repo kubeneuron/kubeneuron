@@ -12,6 +12,7 @@ import (
 )
 
 func TestJournalZstdFieldLimit(t *testing.T) {
+	var decoders fieldDecoders
 	encoder, err := zstd.NewWriter(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -20,7 +21,7 @@ func TestJournalZstdFieldLimit(t *testing.T) {
 	for _, size := range []int{1024, MaxFieldBytes, MaxFieldBytes + 1} {
 		field := bytes.Repeat([]byte("x"), size)
 		block := encoder.EncodeAll(field, nil)
-		got, err := readZstd(io.NewSectionReader(bytes.NewReader(block), 0, int64(len(block))))
+		got, err := decoders.decodeField(4, io.NewSectionReader(bytes.NewReader(block), 0, int64(len(block))))
 		if size > MaxFieldBytes {
 			if !errors.Is(err, ErrInvalidJournal) {
 				t.Fatalf("size %d: %v", size, err)

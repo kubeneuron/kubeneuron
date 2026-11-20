@@ -10,7 +10,7 @@ import (
 	"github.com/xi2/xz"
 )
 
-func readXZ(payload *io.SectionReader) ([]byte, error) {
+func (d *fieldDecoders) readXZ(payload *io.SectionReader) ([]byte, error) {
 	if payload.Size() == 0 || payload.Size() > MaxFieldBytes {
 		return nil, fmt.Errorf("%w: invalid XZ field size", ErrInvalidJournal)
 	}
@@ -19,11 +19,16 @@ func readXZ(payload *io.SectionReader) ([]byte, error) {
 		return nil, err
 	}
 	const maxDictionary = 8 << 20
-	reader, err := xz.NewReader(bytes.NewReader(block), maxDictionary)
+	var err error
+	if d.xz == nil {
+		d.xz, err = xz.NewReader(bytes.NewReader(block), maxDictionary)
+	} else {
+		err = d.xz.Reset(bytes.NewReader(block))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid XZ header: %v", ErrInvalidJournal, err)
 	}
-	field, err := io.ReadAll(io.LimitReader(reader, MaxFieldBytes+1))
+	field, err := io.ReadAll(io.LimitReader(d.xz, MaxFieldBytes+1))
 	if err != nil || len(field) > MaxFieldBytes {
 		return nil, fmt.Errorf("%w: invalid or oversized XZ field", ErrInvalidJournal)
 	}

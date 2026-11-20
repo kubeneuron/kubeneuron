@@ -29,12 +29,12 @@ func TestPlainKernelMessage(t *testing.T) {
 		binary.LittleEndian.PutUint32(buf[entry+64:], transport)
 		binary.LittleEndian.PutUint32(buf[entry+64+stride:], message)
 		h := fileHeader{start: 208, end: uint64(len(buf)), tail: entry, compact: compact}
-		got, ok, err := h.plainKernelMessage(bytes.NewReader(buf), entry, transport, decodeField)
+		got, ok, err := h.plainKernelMessage(bytes.NewReader(buf), entry, transport, new(fieldDecoders).decodeField)
 		if err != nil || !ok || got != "test marker" {
 			t.Fatalf("compact %t: %q %v %v", compact, got, ok, err)
 		}
 		// A broken backlink permits only ENTRY metadata reads.
-		_, _, err = h.plainKernelMessage(entryOnlyReader{t, bytes.NewReader(buf), entry}, entry, 216, decodeField)
+		_, _, err = h.plainKernelMessage(entryOnlyReader{t, bytes.NewReader(buf), entry}, entry, 216, new(fieldDecoders).decodeField)
 		if !errors.Is(err, ErrInvalidJournal) {
 			t.Fatalf("missing backlink: %v", err)
 		}

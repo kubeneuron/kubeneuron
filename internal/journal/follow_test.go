@@ -133,7 +133,7 @@ func testFollowFromTail(t *testing.T, headerFlag uint32, dataFlag byte, encode f
 				first = false
 				panic("synthetic decoder failure")
 			}
-			return decodeField(flags, payload)
+			return new(fieldDecoders).decodeField(flags, payload)
 		}
 		r = reader
 	}

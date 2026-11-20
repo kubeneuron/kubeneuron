@@ -4,7 +4,10 @@ package journal
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"github.com/klauspost/compress/zstd"
+	"github.com/xi2/xz"
 	"io"
 )
 
@@ -78,25 +81,51 @@ func (h fileHeader) plainKernelMessage(r io.ReaderAt, entry, transport uint64, d
 
 type fieldDecoder func(byte, *io.SectionReader) ([]byte, error)
 
-var errDecoderPanic = fmt.Errorf("%w: field decoder panicked", ErrInvalidJournal)
+var errUnreadableField = fmt.Errorf("%w: unreadable compressed field", ErrInvalidJournal)
 
 func guardedDecode(decode fieldDecoder, flags byte, payload *io.SectionReader) (field []byte, err error) {
 	defer func() {
 		if recover() != nil {
-			field, err = nil, errDecoderPanic
+			field, err = nil, errUnreadableField
 		}
 	}()
-	return decode(flags, payload)
+	field, err = decode(flags, payload)
+	if errors.Is(err, ErrInvalidJournal) {
+		return nil, errUnreadableField
+	}
+	return field, err
 }
 
-func decodeField(flags byte, payload *io.SectionReader) ([]byte, error) {
+type fieldDecoders struct {
+	xz   *xz.Reader
+	zstd *zstd.Decoder
+}
+
+func (d *fieldDecoders) decodeField(flags byte, payload *io.SectionReader) (field []byte, err error) {
+	completed := false
+	defer func() {
+		if !completed || err != nil {
+			switch flags {
+			case 1:
+				d.xz = nil
+			case 4:
+				d.zstd = nil
+			}
+		}
+	}()
+	field, err = d.decode(flags, payload)
+	completed = true
+	return field, err
+}
+
+func (d *fieldDecoders) decode(flags byte, payload *io.SectionReader) ([]byte, error) {
 	switch flags {
 	case 1:
-		return readXZ(payload)
+		return d.readXZ(payload)
 	case 2:
 		return readLZ4(payload)
 	case 4:
-		return readZstd(payload)
+		return d.readZstd(payload)
 	default:
 		return nil, fmt.Errorf("%w: unsupported DATA compression", ErrInvalidJournal)
 	}
