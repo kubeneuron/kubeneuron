@@ -82,7 +82,7 @@ Always: **CRDs → operator → controller/agent images.**
    single replica: expect a short public-API/webhook outage while the new
    Pod starts (Alertmanager retries deliveries). PostgreSQL HA installs run
    two replicas with rolling updates and leader-following readiness, so
-   there is no such gap. The agent DaemonSet rolls node by node; each agent
+   there is no such gap. Each agent DaemonSet rolls node by node; each agent
    turns Ready only after a fresh durable registration acknowledgment from
    the new controller.
 

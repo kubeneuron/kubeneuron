@@ -56,7 +56,7 @@ share a node are not supported: their agents share the node's state
 directory.
 The agent DaemonSets are `<name>-agent` (no journal mount, for nodes
 without the label), `<name>-agent-detect-journal-var` and
-`<name>-agent-detect-journal-run`; each node runs exactly one of them. When the controller labels a node, its agent Pod moves to the matching journal DaemonSet. Scripts that wait for agent rollouts should select all three with `app.kubernetes.io/instance=<name>,kubeneuron.io/agent=true`. A
+`<name>-agent-detect-journal-run`; each node runs exactly one of them. When the controller labels a node, its agent Pod moves to the matching journal DaemonSet. Its spool and cursors stay in `/var/lib/kube-neuron`. Scripts that wait for agent rollouts should select all three with `app.kubernetes.io/instance=<name>,kubeneuron.io/agent=true`. A
 node whose OS image is not in the table keeps `<name>-agent`, and its
 kernel log source reads `os-image-not-recognized` in `kubeneuronctl health`.
 If the journal Pod cannot start within three minutes, the controller
