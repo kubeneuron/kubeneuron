@@ -147,8 +147,7 @@ hardware validation of the checkpoint feature: the release source passed the
 full AWS hardware harness on a temporary EKS `g4dn.xlarge` / Tesla T4 cluster
 on 2026-10-07, which exercised the shared agent/controller runtime against
 injected faults and carried no opted-in checkpointing Pod. See the
-[design record](docs/checkpoint-coordination-design.md) and the
-[upgrade notes](https://github.com/kubeneuron/kubeneuron/blob/v0.8.0/docs/upgrade.md#v060-checkpoint-coordination-notes).
+[design record](docs/checkpoint-coordination-design.md).
 
 **Start here:** [product tour](docs/product-tour.md) (screenshots + live
 demo) · [install](docs/install.md) · [docs site](docs/index.md)

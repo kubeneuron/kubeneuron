@@ -509,8 +509,7 @@ costs exactly one get/list/watch rule on its group (`batch/jobs`,
 `kueue.x-k8s.io/{workloads,localqueues,clusterqueues}`,
 `ray.io/{rayclusters,rayjobs}`) on the managed controller ClusterRole, and
 nothing is ever written to those objects. A cluster without the CRD group
-reports the resolver as not observed. The store gains a table and two columns (SQLite 0025 /
-PostgreSQL 0016, see [upgrade notes](https://github.com/kubeneuron/kubeneuron/blob/v0.8.0/docs/upgrade.md#v080-workload-safe-recovery-notes)).
+reports the resolver as not observed.
 Two self-monitoring alerts cover the two courtesies that can silently miss
 their audience, `KubeNeuronImpactPreviewUnavailable` and
 `KubeNeuronCheckpointAdvisoryUnreachable` ([runbooks](runbooks.md#workload-safe-recovery-alerts-v08-development-route-to-humans)).
@@ -614,8 +613,7 @@ next config reload, and the operator removes `patch` from the controller's
 `pods` rule on the next reconcile. Request annotations already stamped on
 Pods are durable history: they are harmless, nothing reads them once the
 policy is off, and they need no cleanup. Disable the policy before rolling
-back to a release that does not understand it; see
-[upgrade](https://github.com/kubeneuron/kubeneuron/blob/v0.8.0/docs/upgrade.md#v060-checkpoint-coordination-notes).
+back to a release that does not understand it.
 
 ## PostgreSQL workflow store (HA installations)
 
