@@ -193,8 +193,10 @@ jobs:
               --format '{{json .Manifest}}' | jq -r .digest)"
             test -n "$digest" && [[ "$digest" == sha256:* ]]
             cosign sign --yes "$image@$digest"
-            "${{ steps.syft.outputs.cmd }}" "$image:$version" \
-              -o spdx-json > "dist/sbom-${name}-${version}.spdx.json"
+            for arch in amd64 arm64; do
+              "${{ steps.syft.outputs.cmd }}" "registry:$image@$digest" --platform "linux/$arch" \
+                -o spdx-json > "dist/sbom-${name}-${version}-linux-${arch}.spdx.json"
+            done
             echo "${image}@${digest}" >> dist/images.txt
             digests="${digests}\"${name}\":\"${digest}\","
           done

@@ -223,12 +223,37 @@ else
 	bad "checksums-${TAG}.txt is published without a .sig/.pem pair"
 fi
 
+# Compare the files without running either platform's image. The source
+# bytes come from the release tag even when this script runs elsewhere.
+verify_image_licenses() (
+	local image=$1 arch=$2 container file
+	container=$(docker create --platform "linux/$arch" "$image") || exit 1
+	trap 'docker rm "$container" >/dev/null' EXIT
+	for file in NOTICE THIRD_PARTY_LICENSES; do
+		docker cp "$container:/licenses/$file" "$work/image-$file" || exit 1
+		cmp "$work/tag-$file" "$work/image-$file" || exit 1
+	done
+)
+
 # --- images are digest-pinned -------------------------------------------------
 note "image digest table"
 images="$work/images.txt"
 if [[ ! -r $images ]]; then
 	bad "no images.txt: nothing states which images this release is"
 else
+	if [[ $TAG != v0.* ]]; then
+		for file in NOTICE THIRD_PARTY_LICENSES; do
+			"$GH_BIN" api -H 'Accept: application/vnd.github.raw+json' \
+				"repos/$REPO/contents/$file?ref=$TAG" >"$work/tag-$file" || bad "could not read $file at $TAG"
+		done
+		for component in operator controller agent kubeneuronctl; do
+			[[ $(cut -d@ -f1 "$images" | grep -Fxc "ghcr.io/${REPO%/*}/kubeneuron/$component") == 1 ]] || bad "expected one digest for $component"
+			for arch in amd64 arm64; do
+				sbom="$work/sbom-$component-$TAG-linux-$arch.spdx.json"
+				jq -e '.spdxVersion and (.packages | length > 0)' "$sbom" >/dev/null || bad "invalid or missing SPDX for $component linux/$arch"
+			done
+		done
+	fi
 	signed=0
 	while IFS= read -r line; do
 		[[ -z $line ]] && continue
@@ -242,6 +267,11 @@ else
 			if cosign verify --certificate-identity "$signer_identity" \
 				--certificate-oidc-issuer "$signer_issuer" "$line" </dev/null >/dev/null 2>&1; then
 				signed=$((signed + 1))
+				if [[ $TAG != v0.* ]]; then
+					for arch in amd64 arm64; do
+						verify_image_licenses "$line" "$arch" || bad "license verification failed for $line linux/$arch"
+					done
+				fi
 			else
 				bad "the image ${line} has no cosign signature from ${signer_identity}"
 			fi
