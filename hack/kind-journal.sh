@@ -266,6 +266,18 @@ note "PASS: upgrade kept -agent ($agent_uid) and moved both workers to the journ
   (.spec.template.spec.containers[0].securityContext.privileged // false) == false' >/dev/null ||
 	die "the journal-run DaemonSet has the wrong selector, label or mount"
 note "PASS: journal-run mounts only /run/log/journal, read-only, unprivileged"
+# The node's agent says its journal source is open, so a missing incident
+# after the kernel record cannot be a source that never started.
+journal_source_open() {
+	local pod
+	pod=$("$KUBECTL_BIN" -n "$NS" get pods -l "$AGENTS" --field-selector "spec.nodeName=${workers[0]}" -o name) &&
+		[[ -n $pod ]] &&
+		"$KUBECTL_BIN" -n "$NS" logs "$pod" |
+		"$JQ_BIN" -R -c 'fromjson? | select(.msg == "journal kernel log source open" and .dir == "/host/run/log/journal")' |
+			grep -q .
+}
+wait_for "the journal source of the agent on ${workers[0]}" journal_source_open
+note "PASS: the agent on ${workers[0]} opened its journal source"
 
 # incidents_on: the node's incidents as a JSON array (the API answers null
 # for none); fails when the API does not answer with a list, so an error
@@ -294,15 +306,6 @@ if ((KERNEL_RECORD)); then
 		systemctl restart systemd-journald'
 	kernel_in_journal() { "$DOCKER_BIN" exec "${workers[0]}" journalctl -k -q --no-pager -n 1 -o cat | grep -q .; }
 	wait_for "kernel records in the journal of ${workers[0]}" kernel_in_journal
-	# Before the record: the node's agent says its journal source is open, so
-	# a missing incident cannot be a source that never started.
-	journal_source_open() {
-		local pod
-		pod=$("$KUBECTL_BIN" -n "$NS" get pods -l "$AGENTS" --field-selector "spec.nodeName=${workers[0]}" -o name) &&
-			[[ -n $pod ]] &&
-			"$KUBECTL_BIN" -n "$NS" logs "$pod" | grep -qF 'msg="journal kernel log source open" dir=/host/run/log/journal'
-	}
-	wait_for "the journal source of the agent on ${workers[0]}" journal_source_open
 	# On restart journald copies the kernel buffer, which may hold XID lines
 	# from earlier runs or other kind clusters on this host. This run's line
 	# names its own PCI domain and is looked for only after the journal's
@@ -317,12 +320,13 @@ if ((KERNEL_RECORD)); then
 	"$DOCKER_BIN" exec "${workers[0]}" sh -c "echo 'kernel: NVRM: Xid (PCI:$pci): 79, pid=1, GPU has fallen off the bus.' >/dev/kmsg"
 	xid_in_journal() {
 		"$DOCKER_BIN" exec "${workers[0]}" journalctl -k -q --no-pager -o json --after-cursor "$journal_cursor" >"$work/after.json" &&
-			"$JQ_BIN" -c --arg line "NVRM: Xid (PCI:$pci): 79," \
-				'select(.MESSAGE | type == "string" and contains($line)) | {_TRANSPORT, SYSLOG_IDENTIFIER, MESSAGE}' \
+			"$JQ_BIN" -c --arg pci "PCI:$pci" \
+				'select(.MESSAGE | type == "string" and contains($pci)) | {_TRANSPORT, SYSLOG_IDENTIFIER, MESSAGE}' \
 				"$work/after.json" >"$work/xid.json" && [[ -s $work/xid.json ]]
 	}
 	wait_for "the XID 79 record for $pci in the journal of ${workers[0]}" xid_in_journal
-	"$JQ_BIN" -e -s 'length == 1 and (.[0] | ._TRANSPORT == "kernel" and .SYSLOG_IDENTIFIER == "kernel" and (.MESSAGE | startswith("NVRM: Xid ")))' \
+	"$JQ_BIN" -e -s --arg line "NVRM: Xid (PCI:$pci): 79," \
+		'length == 1 and (.[0] | ._TRANSPORT == "kernel" and .SYSLOG_IDENTIFIER == "kernel" and (.MESSAGE | startswith($line)))' \
 		"$work/xid.json" >/dev/null || die "the XID record is not stored as a driver line: $(cat "$work/xid.json")"
 	xid_incident() {
 		local list

@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -76,15 +77,17 @@ func TestAgentReportsAnUnreadableJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	a = journalAgent(t, dir, func(string) (journal.Reader, error) { return tailJournal{}, nil })
+	// The agent binary logs JSON, and hack/kind-journal.sh waits for this
+	// line's msg and dir in that form.
 	logs.Reset()
-	a.log = slog.New(slog.NewTextHandler(&logs, nil))
+	a.log = slog.New(slog.NewJSONHandler(&logs, nil))
 	ch := a.openJournal(ctx)
 	if ch == nil {
 		t.Fatal("a readable journal did not open")
 	}
-	// The script of the kind journal test waits for this line.
-	if want := `msg="journal kernel log source open" dir=` + dir; !strings.Contains(logs.String(), want) {
-		t.Fatalf("readable journal logs %q, want %q", logs.String(), want)
+	var line struct{ Msg, Dir string }
+	if err := json.Unmarshal([]byte(logs.String()), &line); err != nil || line.Msg != "journal kernel log source open" || line.Dir != dir {
+		t.Fatalf("readable journal logs %q (%v), want the open line with dir %q", logs.String(), err, dir)
 	}
 	defer func() {
 		cancel()
