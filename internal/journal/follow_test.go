@@ -104,6 +104,39 @@ func testFollowFromTail(t *testing.T, headerFlag uint32, dataFlag byte, encode f
 		t.Fatalf("tail %+v %v", b, err)
 	}
 	if encode == nil {
+		t.Run("entry exceeds full tick", func(t *testing.T) {
+			original := append([]byte(nil), buf...)
+			defer func() { buf = original; write() }()
+			large := entry(2, "MESSAGE="+strings.Repeat("x", 4096))
+			next := entry(3, "MESSAGE=small")
+			array := add(6, 40)
+			put(buf[array+24:], uint64(large))
+			put(buf[array+32:], uint64(next))
+			put(buf[transport+48:], uint64(array))
+			put(buf[transport+56:], 3)
+			write()
+			cursor := b.Cursor
+			skipped := 0
+			var messages []string
+			for range 6 {
+				got, err := r.(directoryReader).next(context.Background(), cursor, 1024)
+				if err != nil || (got.More && got.Cursor == cursor) {
+					t.Fatalf("stalled: %+v %v", got, err)
+				}
+				skipped += got.UnreadableEntries
+				for _, record := range got.Records {
+					messages = append(messages, record.Message)
+				}
+				if !got.More {
+					if skipped != 1 || len(messages) != 1 || messages[0] != "small" {
+						t.Fatalf("skips=%d messages=%v", skipped, messages)
+					}
+					return
+				}
+				cursor = got.Cursor
+			}
+			t.Fatal("backlog did not drain")
+		})
 		t.Run("vacuum during catch-up", func(t *testing.T) {
 			archive := filepath.Join(dir, "system@vacuum.journal")
 			header := append([]byte(nil), buf...)

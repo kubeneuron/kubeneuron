@@ -15,6 +15,8 @@ import (
 	"strings"
 )
 
+var errEntryBudget = fmt.Errorf("journal entry exceeds read budget: %w", errTickBudget)
+
 var errTickBudget = errors.New("journal tick budget exhausted")
 
 type tickReader struct {
@@ -194,6 +196,10 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 	} else {
 		state.Overflow = ""
 	}
+	retryPath := state.Resume
+	if state.FileList != listID {
+		retryPath = ""
+	}
 	state.FileList = listID
 	state.Resume = ""
 	for _, path := range files {
@@ -225,6 +231,7 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 			state.Positions[key] = p
 			continue
 		}
+		before := p
 		if state.Starting && !seen {
 			p.After = h.tailSequence
 		} else if h.tailSequence > p.After {
@@ -237,6 +244,15 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 			err = nil
 		}
 		if errors.Is(err, errTickBudget) {
+			// The saved entry was the first work on a fresh tick and still
+			// exhausted its budget. Advance past it so the next entry can run.
+			if retryPath == path && p == before && errors.Is(err, errEntryBudget) {
+				if p.Consumed > 0 {
+					p.Slot++
+				}
+				p.Consumed++
+				batch.UnreadableEntries++
+			}
 			state.Positions[key] = p
 			state.Resume = path
 			batch.More = true
@@ -319,6 +335,9 @@ func (h fileHeader) readNew(ctx context.Context, f io.ReaderAt, p *filePosition,
 			return err
 		} else if e.sequence > p.After {
 			msg, ok, err := h.plainKernelMessage(f, off, p.Transport, decode)
+			if errors.Is(err, errTickBudget) {
+				return errEntryBudget
+			}
 			if errors.Is(err, errUnreadableField) || errors.Is(err, ErrInvalidJournal) {
 				batch.UnreadableEntries++
 			} else if err != nil {
