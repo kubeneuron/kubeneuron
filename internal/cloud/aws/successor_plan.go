@@ -19,6 +19,8 @@ import (
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
+const fixedSizeTag = "kubeneuron.io/fixed-size"
+
 // planSuccessor records the baseline from an already verified EKS backing group.
 func planSuccessor(s cloud.Successor, group at.AutoScalingGroup) (cloud.Successor, error) {
 	if len(group.AvailabilityZones) > 1 {
@@ -103,6 +105,9 @@ func (p *managedProvider) readSuccessorPlan(ctx context.Context, s cloud.Success
 	ng := out.Nodegroup
 	if sdk.ToString(ng.ClusterName) != p.cluster || sdk.ToString(ng.NodegroupName) != nodegroup || ng.Status != et.NodegroupStatusActive || ng.Resources == nil || len(ng.Resources.AutoScalingGroups) != 1 || sdk.ToString(ng.Resources.AutoScalingGroups[0].Name) != name {
 		return s, fmt.Errorf("%w: EKS must confirm exactly one backing ASG for the active nodegroup", cloud.ErrAddFirstUnavailable)
+	}
+	if ng.Tags[fixedSizeTag] != "true" {
+		return s, &cloud.PoolRefusal{Code: cloud.PoolFixedSizeUndeclared, Reason: "EKS does not say whether an autoscaler manages this node group", Action: "tag the node group kubeneuron.io/fixed-size=true if nothing else changes its size, or set RemoveFirst in the remediation policy that applies to these nodes"}
 	}
 	// Names can be reused after deletion. Pin both resource generations before
 	// handing a plan to the controller for persistence.

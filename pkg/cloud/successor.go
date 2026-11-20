@@ -33,11 +33,12 @@ func (r *PoolRefusal) Unwrap() error { return ErrAddFirstUnavailable }
 
 // Stable reason codes shared by provider checks and operator-facing pool assessments.
 const (
-	PoolAutoscaled      = "autoscaled"
-	PoolAtMaximum       = "max-size"
-	PoolMultiZone       = "multi-zone"
-	PoolAutopilot       = "autopilot"
-	PoolInstanceMissing = "instance-not-in-pool"
+	PoolFixedSizeUndeclared = "fixed-size-undeclared"
+	PoolAutoscaled          = "autoscaled"
+	PoolAtMaximum           = "max-size"
+	PoolMultiZone           = "multi-zone"
+	PoolAutopilot           = "autopilot"
+	PoolInstanceMissing     = "instance-not-in-pool"
 )
 
 // ErrRemoveFirstUnavailable is wrapped by a provider that cannot replace a

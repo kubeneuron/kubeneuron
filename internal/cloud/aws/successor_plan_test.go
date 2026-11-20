@@ -58,7 +58,7 @@ func TestCheckAddFirstRequiresEKSBackingGroup(t *testing.T) {
 			if tc.autoscalerTag != "" {
 				group.Tags = append(group.Tags, at.TagDescription{Key: sdk.String(tc.autoscalerTag)})
 			}
-			eksGroup := et.Nodegroup{NodegroupArn: sdk.String("group-arn"), ClusterName: sdk.String(tc.cluster), NodegroupName: sdk.String("gpu"), Status: et.NodegroupStatusActive,
+			eksGroup := et.Nodegroup{NodegroupArn: sdk.String("group-arn"), ClusterName: sdk.String(tc.cluster), NodegroupName: sdk.String("gpu"), Tags: map[string]string{fixedSizeTag: "true"}, Status: et.NodegroupStatusActive,
 				Resources: &et.NodegroupResources{AutoScalingGroups: []et.AutoScalingGroup{{Name: sdk.String(tc.backing)}}}}
 			p := managedProvider{repairReader: &repairReader{cluster: "training", eks: &groupHistory{group: eksGroup},
 				scaling: quietASG{membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{group}}}}}}
@@ -93,7 +93,7 @@ func TestVerifySuccessorBaseline(t *testing.T) {
 		Tags:      []at.TagDescription{{Key: sdk.String("eks:nodegroup-name"), Value: sdk.String("gpu")}},
 	}
 	out := &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{group}}
-	eksReader := &groupHistory{group: et.Nodegroup{NodegroupArn: sdk.String("ng-1"), ClusterName: sdk.String("training"), NodegroupName: sdk.String("gpu"), Status: et.NodegroupStatusActive, Resources: &et.NodegroupResources{AutoScalingGroups: []et.AutoScalingGroup{{Name: sdk.String("workers")}}}}}
+	eksReader := &groupHistory{group: et.Nodegroup{NodegroupArn: sdk.String("ng-1"), ClusterName: sdk.String("training"), NodegroupName: sdk.String("gpu"), Tags: map[string]string{fixedSizeTag: "true"}, Status: et.NodegroupStatusActive, Resources: &et.NodegroupResources{AutoScalingGroups: []et.AutoScalingGroup{{Name: sdk.String("workers")}}}}}
 	p := managedProvider{repairReader: &repairReader{cluster: "training", eks: eksReader, scaling: quietASG{membershipFixture{t, out}}}}
 	plan, err := p.PrepareSuccessor(t.Context(), cloud.Successor{Operation: "op", Instance: "i-pinned"})
 	if err != nil {
@@ -103,6 +103,15 @@ func TestVerifySuccessorBaseline(t *testing.T) {
 	if err = p.verifySuccessorBaseline(t.Context(), plan); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("fixed size declaration withdrawn", func(t *testing.T) {
+		defer func() { eksReader.group.Tags[fixedSizeTag] = "true" }()
+		for _, value := range []string{"", "TRUE", "false"} {
+			eksReader.group.Tags[fixedSizeTag] = value
+			if err := p.verifySuccessorBaseline(t.Context(), plan); !errors.Is(err, cloud.ErrNeedsOperator) {
+				t.Fatalf("tag %q: %v", value, err)
+			}
+		}
+	})
 	t.Run("accepted request after membership changes", func(t *testing.T) {
 		client := &lostUpdateResponse{t: t, tokens: map[string]bool{}, cluster: "training", group: "gpu"}
 		first := managedProvider{repairReader: p.repairReader, updater: client}

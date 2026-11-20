@@ -81,7 +81,7 @@ func newSuccessorLab(t *testing.T) (cloud.SuccessorProvider, cloudtest.Successor
 	}
 	ng := et.Nodegroup{
 		ClusterName: sdk.String("training"), NodegroupName: sdk.String("gpu"), NodegroupArn: sdk.String("ng"),
-		Status: et.NodegroupStatusActive, Resources: &et.NodegroupResources{AutoScalingGroups: []et.AutoScalingGroup{{Name: group.AutoScalingGroupName}}},
+		Tags: map[string]string{fixedSizeTag: "true"}, Status: et.NodegroupStatusActive, Resources: &et.NodegroupResources{AutoScalingGroups: []et.AutoScalingGroup{{Name: group.AutoScalingGroupName}}},
 	}
 	f := &successorLab{
 		observedASG:          observedASG{membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{group}}}, launchActivityPages{"": {}}},
