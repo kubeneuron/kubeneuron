@@ -25,7 +25,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
-          docker run -d --name rehearsal-registry -p 127.0.0.1:5000:5000 registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          # registry 2.8.3 by digest alone: name:tag@digest fails on the runner's Docker ("cannot overwrite digest")
+          docker run -d --name rehearsal-registry -p 127.0.0.1:5000:5000 docker.io/library/registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
           trap 'docker rm -fv rehearsal-registry' EXIT
           image=localhost:5000/kubeneuron/operator
           work=$(mktemp -d)
