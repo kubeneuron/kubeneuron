@@ -403,8 +403,11 @@ provider-neutral seam. Each provider registers by name and owns three things:
 2. **Its primitives** — `Recycle` (stop/start: tears down and re-establishes
    GPU passthrough in place) and `Replace` (terminate for the autoscaler).
 3. **Its capability declaration** — static, credential-free, queried by the
-   operator at compile time so a `RecycleNode`/`ReplaceNode` playbook is
-   rejected when the configured provider cannot perform it.
+   operator at compile time so a `RecycleNode`/`ReplaceNode` playbook that a
+   policy reaches, directly or through `onFailure`, is rejected when the
+   configured provider cannot perform it. A playbook no policy reaches never
+   runs, so it is not checked: the cloud pack's optional recycle ladder does
+   not invalidate an AKS or GKE installation.
 
 Capabilities are provider-scoped; **viability is instance-scoped**.
 `CheckRecycle` renders a per-instance verdict (typed

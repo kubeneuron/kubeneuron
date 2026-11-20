@@ -78,7 +78,7 @@ func CompileSnapshot(
 	if err != nil {
 		return nil, err
 	}
-	if err := validateCloudCapabilities(installation, playbooks); err != nil {
+	if err := validateCloudCapabilities(installation, policies, playbooks); err != nil {
 		return nil, err
 	}
 
@@ -266,7 +266,35 @@ func compileMaintenanceWindows(installationName string, maintenance []kubeneuron
 // incident reporting. The controller's cloud eligibility gate holds before
 // cordon/drain and exposes recovery as unavailable. A named but unknown or
 // incapable provider remains a configuration error.
-func validateCloudCapabilities(installation *kubeneuronv1alpha1.KubeNeuron, playbooks []kubeneuronv1alpha1.GPUPlaybook) error {
+//
+// Only playbooks an incident can run are checked: those a policy of the
+// installation names, and the onFailure escalations they lead to. An
+// incident starts only from a policy, so a playbook no policy reaches, such
+// as the cloud pack's optional recycle ladder, never runs and does not make
+// the installation invalid.
+func validateCloudCapabilities(installation *kubeneuronv1alpha1.KubeNeuron, policies []kubeneuronv1alpha1.GPURemediationPolicy, playbooks []kubeneuronv1alpha1.GPUPlaybook) error {
+	byName := make(map[string]*kubeneuronv1alpha1.GPUPlaybook, len(playbooks))
+	for i := range playbooks {
+		if playbooks[i].Spec.KubeNeuronRef == installation.Name {
+			byName[playbooks[i].Name] = &playbooks[i]
+		}
+	}
+	reachable := map[string]bool{}
+	for i := range policies {
+		if policies[i].Spec.KubeNeuronRef != installation.Name {
+			continue
+		}
+		// The escalation graph is acyclic (compilePlaybookIndex), and
+		// reachable stops a walk at a playbook already seen.
+		for name := policies[i].Spec.PlaybookRef; name != "" && !reachable[name]; {
+			reachable[name] = true
+			pb := byName[name]
+			if pb == nil || pb.Spec.OnFailure == nil {
+				break
+			}
+			name = pb.Spec.OnFailure.PlaybookRef
+		}
+	}
 	cloudSpec := installation.Spec.Cloud
 	providerConfigured := cloudSpec != nil && cloudSpec.Provider != ""
 	var caps cloud.Capabilities
@@ -276,7 +304,7 @@ func validateCloudCapabilities(installation *kubeneuronv1alpha1.KubeNeuron, play
 	}
 	for i := range playbooks {
 		pb := &playbooks[i]
-		if pb.Spec.KubeNeuronRef != installation.Name {
+		if pb.Spec.KubeNeuronRef != installation.Name || !reachable[pb.Name] {
 			continue
 		}
 		for _, step := range pb.Spec.Steps {

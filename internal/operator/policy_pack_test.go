@@ -332,7 +332,12 @@ func declaredClasses() map[types.ProblemClass]bool {
 
 func loadPolicyPack(t *testing.T) ([]kubeneuronv1alpha1.GPUPlaybook, []kubeneuronv1alpha1.GPURemediationPolicy) {
 	t.Helper()
-	files, err := filepath.Glob(filepath.Join(policyPackDir, "*.yaml"))
+	return loadPack(t, policyPackDir)
+}
+
+func loadPack(t *testing.T, dir string) ([]kubeneuronv1alpha1.GPUPlaybook, []kubeneuronv1alpha1.GPURemediationPolicy) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(dir, "*.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +380,7 @@ func loadPolicyPack(t *testing.T) ([]kubeneuronv1alpha1.GPUPlaybook, []kubeneuro
 	}
 	if len(playbooks) == 0 || len(policies) == 0 {
 		t.Fatalf("loaded %d playbooks and %d policies from %s; the pack is not being read at all",
-			len(playbooks), len(policies), policyPackDir)
+			len(playbooks), len(policies), dir)
 	}
 	return playbooks, policies
 }

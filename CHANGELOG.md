@@ -416,6 +416,15 @@ API is `v1alpha1`.
   passes; the controller log carries the AWS error with the incident ID. See
   [Add-first replacement on EKS](docs/cloud-aws.md#when-ekss-own-repair-holds-a-replacement).
 
+- **AKS and GKE: a fresh installation with a cloud provider becomes Ready.**
+  The cloud policy pack ships an optional recycle ladder that no policy uses.
+  The operator checked every playbook against the provider's capabilities,
+  and only AWS can recycle a node in place, so on `azure` and `gcp` the whole
+  configuration was rejected and the installation never became Ready. Only
+  playbooks a policy reaches, directly or through `onFailure`, are checked
+  now; a policy that reaches a recycle step is still rejected on those
+  providers.
+
 - List endpoints of the operator API answer an empty list as `[]` (or
   `"items": []`), not `null`.
 - Concurrent live repair incidents on the same node share one repair owner. The
