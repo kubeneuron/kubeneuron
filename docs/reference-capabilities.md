@@ -167,6 +167,8 @@ The table below records the evidence for each action.
 
 ## Table 3 — GPU reliability observability (NVIDIA / DCGM only)
 
+The hardware runs in this table were recorded on 0.x builds (dates are given per row). They have not been repeated on v1.0.0-rc.1.
+
 The GPU metric catalog describes a read-only observability layer beside the detection and
 remediation paths above: a metric catalog, a wider dcgm-exporter profile, a
 scrape label contract, recording rules, five Grafana boards and shadow-only
@@ -206,6 +208,8 @@ remapping and no MIG, so the rows that read those fields cannot be validated
 on it even when the gates run; nothing here is evidence for A100/H100.
 
 ## Table 4 — Workload-safe recovery (hardware evidence limited to one Tesla T4)
+
+The hardware runs in this table were recorded on 0.x builds (dates are given per row). They have not been repeated on v1.0.0-rc.1.
 
 The CPU-only evidence behind every cell is the same: unit tests, the offline
 kind gate (`make test-integration-kind`, which drives the advisory, the

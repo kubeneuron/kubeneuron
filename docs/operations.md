@@ -439,7 +439,7 @@ must be recorded by the adapter and its operating procedure.
 
 ## Checkpoint coordination (opt-in)
 
-The hardware test used a toy trainer on one Tesla T4. Validation with a production checkpointing workload is pending.
+The v0.8.0 hardware test used a toy trainer on one Tesla T4. Validation with a production checkpointing workload is pending.
 
 `spec.safety.checkpointCoordination` lets opted-in Pods be told, and given a
 bounded deadline, before a `Drain` or `EvictGPUWorkload` step disrupts them.
@@ -687,10 +687,7 @@ the [GPU metric catalog](reference-gpu-metrics.md) that have a canonical
 pinned dcgm-exporter uses. A unit test pins the list to the catalog in both
 directions. The sticky last-XID gauge (230), the recovery-action field
 (1523), the P-state (190) and every profiling field except the PCIe byte
-rates are deliberately not listed. Only the nine series the baseline profile
-had were ever scraped by a recorded run of this project (on a Tesla T4);
-every added series is listed from NVIDIA documentation and has not been
-observed on any GPU by this project. Series documented as absent for a GPU
+rates are deliberately not listed. The v0.7.0 run on one Tesla T4 observed a subset of the configured fields. See the [capability matrix](reference-capabilities.md) for the fields and recording rules checked on that build. Series documented as absent for a GPU
 model (NVLink and row remapping on a Tesla T4) are expected to be missing,
 not zero, and anything built on them later shows No data.
 
@@ -1377,8 +1374,7 @@ separately.
    recording-rule series are queryable, and points the `KubeNeuron` root at
    the profile's endpoints. Then runs the **read-only observability check**:
    T0/T1 exporter series, the canonical label contract, the EKS `node_pool`,
-   the MiB-to-bytes rule and the Tesla T4 absences. Neither step has run on
-   hardware yet; both are new in the workflow.
+   the MiB-to-bytes rule and the Tesla T4 absences. The [capability matrix](reference-capabilities.md) records the subset of these checks exercised on the v0.7.0 build.
 4. Injects a kernel **XID 79** into a GPU node's `/dev/kmsg` and asserts the
    incident walks cordon → drain → approval → dry-run reboot ladder, with the
    approver identity recorded in the audit trail — and that the controller
