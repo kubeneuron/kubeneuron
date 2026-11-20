@@ -6,6 +6,8 @@ import "time"
 
 // AgentSignalSource describes whether an agent can read a signal for a class.
 // Available describes the source and makes no assertion about device health.
+// The signal-sources route strict-decodes this body, so once a release ships
+// it a new field is a 400 from every controller that predates it.
 type AgentSignalSource struct {
 	Node      string       `json:"node"`
 	Source    string       `json:"source"`

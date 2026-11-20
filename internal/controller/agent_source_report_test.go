@@ -37,6 +37,11 @@ func TestAgentSourceReportToHealthView(t *testing.T) {
 	post(strings.Replace(neuron, "permission-denied", "kernel-log-unavailable", 1), 400)
 	post(strings.Replace(neuron, "accelerator-fault", "pcie", 1), 400)
 	post(neuron, 204)
+	kernel := `[{"node":"node-a","source":"amd-kmsg","class":"pcie","available":true,"via":"journal","read_at":"2026-11-18T00:00:00Z"}]`
+	post(strings.Replace(kernel, `"journal"`, `"dmesg"`, 1), 400)
+	post(strings.Replace(kernel, `"available":true`, `"available":false,"reason":"kernel-log-unavailable"`, 1), 400)
+	post(strings.Replace(neuron, `"available":false,"reason":"permission-denied"`, `"available":true,"via":"kmsg"`, 1), 400)
+	post(kernel, 204)
 	post(body, 204)
 	row := strings.Trim(body, "[]")
 	post("["+strings.Repeat(row+",", 64)+row+"]", 400)
