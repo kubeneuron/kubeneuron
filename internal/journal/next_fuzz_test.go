@@ -55,7 +55,9 @@ func FuzzFollowKernelEntries(f *testing.F) {
 				t.Fatal(err)
 			}
 			block = enc.EncodeAll(field, nil)
-			enc.Close()
+			if err := enc.Close(); err != nil {
+				t.Fatal(err)
+			}
 			header, flag = 8, 4
 		}
 		base, stride, width := 64, 16, 8

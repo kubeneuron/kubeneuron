@@ -32,7 +32,8 @@ func systemFiles(root string) ([]string, error) {
 			return nil
 		}
 		name := strings.TrimSuffix(d.Name(), "~")
-		if !d.Type().IsRegular() || !(name == "system.journal" || strings.HasPrefix(name, "system@") && strings.HasSuffix(name, ".journal")) {
+		systemJournal := name == "system.journal" || strings.HasPrefix(name, "system@") && strings.HasSuffix(name, ".journal")
+		if !d.Type().IsRegular() || !systemJournal {
 			return nil
 		}
 		if d.Name() == "system.journal" {

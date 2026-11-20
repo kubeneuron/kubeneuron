@@ -146,7 +146,7 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 	// case, using per-file positions to suppress already delivered entries.
 	hash := sha256.New()
 	for _, path := range files {
-		io.WriteString(hash, path)
+		_, _ = io.WriteString(hash, path) // hash.Hash writes never fail.
 		hash.Write([]byte{0})
 	}
 	listID := hex.EncodeToString(hash.Sum(nil))
@@ -161,7 +161,9 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 				if err != nil {
 					return Batch{}, err
 				}
-				f.Close()
+				if closeErr := f.Close(); closeErr != nil {
+					return Batch{}, closeErr
+				}
 			}
 			live[key] = true
 		}
@@ -227,7 +229,9 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 		p, seen := state.Positions[key]
 		if !seen && len(state.Positions) >= maxJournalFiles {
 			if f != nil {
-				f.Close()
+				if closeErr := f.Close(); closeErr != nil {
+					return Batch{}, closeErr
+				}
 			}
 			return Batch{}, errors.New("journal files changed during scan")
 		}

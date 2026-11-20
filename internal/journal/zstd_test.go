@@ -17,7 +17,11 @@ func TestJournalZstdFieldLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer encoder.Close()
+	t.Cleanup(func() {
+		if err := encoder.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	for _, size := range []int{1024, MaxFieldBytes, MaxFieldBytes + 1} {
 		field := bytes.Repeat([]byte("x"), size)
 		block := encoder.EncodeAll(field, nil)
@@ -39,7 +43,9 @@ func BenchmarkJournalZstdField(b *testing.B) {
 		b.Fatal(err)
 	}
 	block := encoder.EncodeAll(field, nil)
-	encoder.Close()
+	if err := encoder.Close(); err != nil {
+		b.Fatal(err)
+	}
 	var decoders fieldDecoders
 	payload := io.NewSectionReader(bytes.NewReader(block), 0, int64(len(block)))
 	b.SetBytes(int64(len(field)))

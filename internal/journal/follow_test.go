@@ -26,7 +26,11 @@ func TestFollowFromTail(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer enc.Close()
+		t.Cleanup(func() {
+			if err := enc.Close(); err != nil {
+				t.Error(err)
+			}
+		})
 		testFollowFromTail(t, 1<<3, 4, func(field []byte) []byte { return enc.EncodeAll(field, nil) }, false)
 		t.Run("decoder panic", func(t *testing.T) {
 			testFollowFromTail(t, 1<<3, 4, func(field []byte) []byte { return enc.EncodeAll(field, nil) }, true)
@@ -207,7 +211,11 @@ func testFollowFromTail(t *testing.T, headerFlag uint32, dataFlag byte, encode f
 			if err := os.WriteFile(path, []byte("truncated"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { os.Remove(path) })
+			t.Cleanup(func() {
+				if err := os.Remove(path); err != nil {
+					t.Error(err)
+				}
+			})
 			reader, err := Open(dir)
 			if err != nil {
 				t.Fatal(err)
