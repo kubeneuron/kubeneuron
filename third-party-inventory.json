@@ -1173,6 +1173,61 @@
     "review": []
   },
   {
+    "module": "github.com/klauspost/compress@v1.20.2",
+    "files": [
+      "LICENSE",
+      "gzhttp/LICENSE",
+      "internal/lz4ref/LICENSE",
+      "internal/snapref/LICENSE",
+      "s2/LICENSE",
+      "s2/cmd/internal/filepathx/LICENSE",
+      "s2/cmd/internal/readahead/LICENSE",
+      "snappy/LICENSE",
+      "snappy/xerial/LICENSE",
+      "zstd/internal/xxhash/LICENSE.txt"
+    ],
+    "spdx": [
+      "Apache-2.0",
+      "BSD-3-Clause",
+      "MIT"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "Apache-2.0",
+        "BSD-3-Clause",
+        "MIT"
+      ],
+      "gzhttp/LICENSE": [
+        "Apache-2.0"
+      ],
+      "internal/lz4ref/LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "internal/snapref/LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "s2/LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "s2/cmd/internal/filepathx/LICENSE": [
+        "MIT"
+      ],
+      "s2/cmd/internal/readahead/LICENSE": [
+        "MIT"
+      ],
+      "snappy/LICENSE": [
+        "BSD-3-Clause"
+      ],
+      "snappy/xerial/LICENSE": [
+        "MIT"
+      ],
+      "zstd/internal/xxhash/LICENSE.txt": [
+        "MIT"
+      ]
+    },
+    "review": []
+  },
+  {
     "module": "github.com/kubeneuron/kubeneuron/pkg/accelerator@local",
     "files": [
       "LICENSE"
@@ -1288,6 +1343,21 @@
     "licenses": {
       "LICENSE": [
         "MIT"
+      ]
+    },
+    "review": []
+  },
+  {
+    "module": "github.com/pierrec/lz4/v4@v4.1.33",
+    "files": [
+      "LICENSE"
+    ],
+    "spdx": [
+      "BSD-3-Clause"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "BSD-3-Clause"
       ]
     },
     "review": []
@@ -1447,6 +1517,21 @@
     "licenses": {
       "LICENSE": [
         "MIT"
+      ]
+    },
+    "review": []
+  },
+  {
+    "module": "github.com/xi2/xz@v0.0.0-20171230120015-48954b6210f8",
+    "files": [
+      "LICENSE"
+    ],
+    "spdx": [
+      "LicenseRef-xi2-xz-public-domain"
+    ],
+    "licenses": {
+      "LICENSE": [
+        "LicenseRef-xi2-xz-public-domain"
       ]
     },
     "review": []
