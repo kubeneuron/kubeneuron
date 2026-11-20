@@ -152,7 +152,7 @@ others.
    checkpoint, with a deadline 30 seconds before the cloud's. The step only
    stamps the request; it does not wait. KubeNeuron then records, by the
    deadline, how many of the asked jobs reported a checkpoint or finished.
-   The warning needs [checkpoint coordination](operations.md#checkpoint-coordination-opt-in-v060)
+   The warning needs [checkpoint coordination](operations.md#checkpoint-coordination-opt-in)
    to be enabled; otherwise the step records that no job was asked.
 2. **Cordon**. The node takes no new pods.
 

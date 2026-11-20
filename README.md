@@ -1,153 +1,22 @@
 # KubeNeuron
 
-**A vendor-neutral GPU fleet reliability control plane that detects
-degradation, protects workloads, automates safe recovery, and measures
-recovered capacity.**
+KubeNeuron helps Kubernetes operators detect accelerator faults and replace affected cloud nodes. Start in DryRun to see the proposed actions. In Approval mode an operator authorizes disruptive steps. In Automatic mode the controller follows the configured policy and records each decision in the incident.
 
-A GPU falls off the bus at 3am. KubeNeuron catches the kernel's XID event,
-opens an incident, cordons and drains the node, and pages a human with
-exactly one question — *approve the reboot?* — with every step recorded in
-a transactional audit trail. Detection is automatic; anything destructive
-runs a policy ladder you wrote, behind safety gates you configured, with a
-named approver on the record.
+## v1.0.0-rc.1 candidate scope and evidence
 
-- **Detects degradation**, not just failure: kernel XIDs and
-  DCGM/`nvidia-smi`, normalized into problem classes — single-bit ECC
-  rates and row-remap budgets included, so a GPU on its way out is an
-  incident before it takes a job with it.
-- **Protects workloads** first: evict GPU pods, cordon, drain with PDB
-  respect, and prove the device is idle before anything destructive runs.
-  Maintenance windows and per-node pauses hold the ladder when you need
-  the fleet untouched.
-- **Automates safe recovery** through declarative playbooks and policies
-  (CRDs): observe → evict → drain → reset/reboot → replace the cloud
-  node, each rung gated by concurrency caps, quiet windows, and human
-  approval where you demand it — with verified approver identity
-  (password, OIDC SSO, or Kubernetes RBAC) and an audit trail that
-  survives restarts and failover.
-- **Measures recovered**: MTTR per class, incidents recovered with and
-  without a human, and GPU-hours of degradation returned to service —
-  `kubeneuron_incident_duration_seconds`,
-  `kubeneuron_incidents_recovered_total`,
-  `kubeneuron_degraded_gpu_seconds_total`. What the fleet got back is a
-  number, not a feeling.
-- **Vendor-neutral by construction — NVIDIA T4 hardware evidence, AMD fixture coverage.** The
-  fault envelope and the accelerator seam carry `(vendor, source, code)`
-  with no XID pretense, so a new vendor is a detection adapter and a
-  catalog row rather than a fork. Injected NVIDIA XIDs were detected on a Tesla T4; AMD detection ships (`amd-smi`/`rocm-smi` polling plus
-  `amdgpu` kernel-log parsing) but **has never run against an AMD GPU** —
-  its parser fixtures are reconstructed, not captured. Intel is seam only.
-  Every cell of that claim is graded per vendor, against the code, in the
-  [capability matrix](docs/reference-capabilities.md).
-- **Fails closed.** Dry-run is the default everywhere. Real execution
-  (`executionMode: Enabled`) must be confined to an explicit node selector
-  plus an acknowledgement sentence — it can never arm the whole fleet.
+On Amazon EKS, Azure AKS and Google GKE, replacement depends on the node pool and its policy. Use `kubeneuronctl pools` to inspect add-first eligibility and `kubeneuronctl incidents show <id>` to see the evidence for a repair. The candidate targets automatic incident closure when the controller confirms the new node. The resolution records how the node was identified and what accelerator evidence was available. Training progress is tracked separately.
 
-**Status (v0.4.0):** the controller now includes the durable remediation
-intelligence surface: one explainable decision/evidence evaluator, readiness,
-candidate preview, bounded diagnostics, frozen simulation, incident custody,
-an operational audit explorer, and a time-bounded `GPUAutonomyPlan` envelope.
-The installed controller intentionally runs autonomy in **simulation-only**
-mode unless a deployment explicitly wires a hardware-qualified effect adapter;
-this repository does not claim a new driver/runtime qualification merely from
-unit or integration fixtures. Existing destructive remediation remains behind
-its separate dry-run, confinement, approval, and evidence gates. Full history:
-[CHANGELOG.md](CHANGELOG.md).
+| Cloud | Candidate replacement evidence |
+|---|---|
+| Amazon EKS | Simulated provider tests. Live candidate run pending. |
+| Azure AKS | Simulated provider tests. Live candidate run pending. |
+| Google GKE | Simulated provider tests. Live candidate run pending. |
 
-**Released (v0.5.0, 2026-09-20):** the GPU Runtime
-Contract Lifecycle — a read-only, versioned runtime contract coverage view per
-node and vendor (`selection`, `attestation`, `verification_depth`, reason
-codes); a candidate preview that separates the static pre-deploy selection a
-candidate profile set would make from the fresh post-deploy attestation only a
-later report can supply; and a durable, fixed-cohort, evidence-only runtime
-contract qualification with no approve, promote, apply, or delete path. All
-three are statements about evidence, add no CRD, RBAC rule, or store
-migration, and are never read by admission, incidents, actions, or
-`GPUAutonomyPlan`. They are unit-tested, and the CPU-only kind integration
-harness drives them through the public API and CLI against a real controller
-and store using synthetic accelerator evidence; that proves the wiring, not
-the hardware. The full AWS hardware harness (`hack/hw-e2e.sh`) passed on a
-temporary EKS `g4dn.xlarge` cluster on 2026-09-13, and its focused
-`up → deploy → test-destructive → teardown` sequence passed again on a fresh
-cluster on 2026-09-14 with the teardown sweep completing on its own; that
-harness exercises the shared agent/controller runtime and does not call the
-v0.5 routes or commands, so v0.5.0 claims no GPU hardware qualification of its
-own surfaces. Its tag, images, and release assets remain available from the
-[v0.5.0 GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.5.0).
-See also the [REST](docs/reference-api.md) and [CLI](docs/reference-cli.md)
-references and the [upgrade notes](docs/upgrade.md).
+<!-- Before publication, update each row from the recorded run. For EKS record the build, date, node type, replacement order and incident outcome. Distinguish CPU tests from accelerator hardware tests. -->
 
-**Latest release (v0.8.0, 2026-11-08):** workload-safe GPU
-recovery — a read-only, fail-closed device topology classifier; an opt-in
-checkpoint *advisory* at approval park; an opt-in, digest-sealed *impact
-preview* of what a pending step would touch; opt-in bounded checkpoint
-*groups*; and opt-in read-only Kueue, KubeRay and batch Job context in the
-preview (see [CHANGELOG.md](CHANGELOG.md) and the
-[design record](docs/workload-safe-recovery-design.md)). The advisory, the
-preview, the groups and the context readers are opt-in and off by default;
-the topology classifier is **not** optional — it always runs, has no
-switch, and can refuse a device-scoped reset that v0.7.0 would have allowed
-(a shared or partitioned layout, a capacity that disagrees with the report,
-an unobserved resource source), so a tree with every block absent is v0.7.0
-with a narrower reset gate, never a wider one. The release adds no
-remediation action, no device-scoped action on partitioned or shared GPUs,
-no write to Kueue, Ray or DRA objects, and no network path from the
-controller to any workload. Its evidence is unit tests, the offline kind
-gates, the CPU-only examples fixture and hardware runs of
-`hack/hw-e2e.sh` (`test-impact`, `test-checkpoint`, `test-timeslice`,
-`test-destructive` on a single Tesla T4, 2026-11-05 and 2026-11-06; the
-CHANGELOG entry records which gates passed on which source and what those
-runs did not cover). The `v0.8.0` tag, images, install manifest, and
-release assets are available from the
-[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.8.0),
-published 2026-11-08 UTC as a non-prerelease release with 15 assets and
-independently checked with `hack/verify-release.sh v0.8.0
-kubeneuron/kubeneuron` (asset set, checksums, digest pins, and the Cosign
-signature). The product decision (D0) and the security review sign-off
-preceded the tag. Nothing here is a claim that any framework integrates
-with KubeNeuron.
+The [live cloud evidence table](docs/reference-capabilities.md#live-cloud-evidence) records the scope of each test, including historical hardware runs.
 
-**Previous release (v0.7.0, 2026-10-19):** GPU fleet reliability
-observability, MVP — a canonical GPU metric catalog, a wider dcgm-exporter
-reliability profile, a scrape label contract, canonical and derived
-recording rules, five Grafana dashboards-as-code, and shadow-only alerts
-that go to humans and never to the controller (see
-[CHANGELOG.md](CHANGELOG.md)). It adds no action, playbook rung, webhook
-path, CRD field, store migration, or RBAC rule for any KubeNeuron
-component, and the controller, agent, and operator binaries carry no
-feature change. The `v0.7.0` tag, images, install manifest, and release
-assets are available from the
-[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.7.0),
-published 2026-10-19 UTC as a non-prerelease release with 15 assets and
-independently checked with `hack/verify-release.sh v0.7.0
-kubeneuron/kubeneuron` (asset set, checksums, and digest pins; that run did
-not check the Cosign signature because its machine had no `cosign`). The
-manifests, Helm chart, and samples in this source tree carry the v0.8.0
-pins; the v0.7.0 images are what the `v0.7.0` tag's manifests install.
-
-**Released in v0.6.1 (2026-10-11):** a security and toolchain patch to
-v0.6.0 — Go 1.26.9 with updated `golang.org/x/net` and `golang.org/x/text`,
-closing the `govulncheck` advisories listed in [CHANGELOG.md](CHANGELOG.md).
-It changes no feature, CRD, RBAC rule, store schema, or default, and claims
-no GPU hardware validation of its own. The `v0.6.1` tag, images, install
-manifest, and release assets remain available from the
-[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.6.1).
-
-**Introduced in v0.6.0 (published 2026-10-11 UTC):** checkpoint
-coordination, Phase 1 — the opt-in `spec.safety.checkpointCoordination`
-block that tells opted-in Pods, with a bounded deadline, before a `Drain` or
-`EvictGPUWorkload` step disrupts them (see [CHANGELOG.md](CHANGELOG.md)). The
-`v0.6.0` tag, images, install manifest, and release assets remain available
-from the
-[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.6.0),
-published as a non-prerelease release with 15 assets and independently
-verified with `hack/verify-release.sh v0.6.0 kubeneuron/kubeneuron` (asset
-set, checksums, digest pins, and Cosign signature). v0.6.0 claims no GPU
-hardware validation of the checkpoint feature: the release source passed the
-full AWS hardware harness on a temporary EKS `g4dn.xlarge` / Tesla T4 cluster
-on 2026-10-07, which exercised the shared agent/controller runtime against
-injected faults and carried no opted-in checkpointing Pod. See the
-[design record](docs/checkpoint-coordination-design.md).
+Upgrading from 0.x releases is not supported. Uninstall the 0.x installation, then install v1.0. See the [clean installation steps](docs/upgrade.md#moving-from-0x-to-v10).
 
 **Start here:** [product tour](docs/product-tour.md) (screenshots + live
 demo) · [install](docs/install.md) · [docs site](docs/index.md)
@@ -506,38 +375,6 @@ screenshots and a recorded demo captured on a live EKS cluster with a real
 Tesla T4: a kernel-injected XID 79 opens an incident, the playbook ladder
 runs, a named human approves the reboot step, and the audit trail records
 every transition.
-
-## Roadmap
-
-Current status:
-
-**Done and released (v0.1.0):** the complete DryRun control plane —
-incident workflow, agent action dispatch with lease/boot-ID protocol,
-approvals with verifiable actor identity (Kubernetes TokenReview + RBAC),
-REST API/CLI/web panel, metrics/dashboards/alerts/runbooks and the docs
-site, hardened TLS lifecycle with rotation and cert-manager convenience,
-PostgreSQL HA store with leader election and proven no-duplicate
-failover, notification channels (Slack/webhook/PagerDuty) with
-retry/dead-letter, signed multi-arch images with SBOM. GPU runtime access
-uses the real `nvidia-smi` binary through opt-in host mounts
-(`spec.agent.hostTooling`), verified end-to-end on a live T4 node —
-kernel XID through the full dry-run remediation ladder.
-
-**Done and released (v0.2.0):** operator-issued mTLS with automatic
-renewal (no manual rotation on the operator-issuer path); in-place
-controller configuration hot-reload, which removes the HA rollout
-deadlock so config changes apply without a Deployment roll; crash-safe
-agent host state across restarts; and cloud GPU node remediation —
-`ReplaceNode` (terminate → node-group replacement) as the primary
-primitive on autoscaled fleets and `RecycleNode` (stop/start) for
-self-managed nodes, driven controller-side through IRSA.
-
-**Remaining, deliberately hardware-gated:** per-device *hardware* GPU
-reset on bare metal (a virtualized instance has no guest PCI reset, so the
-agent refuses it on evidence) and step-time verification depth.
-
-**Later evaluations:** ClickHouse archival, Slurm, and ticketing
-integrations.
 
 ## Security
 

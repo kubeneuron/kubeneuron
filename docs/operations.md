@@ -437,18 +437,9 @@ or a dashboard data point as hardware qualification. Qualification, rollback
 compensation, and driver/runtime support are deployment-specific evidence that
 must be recorded by the adapter and its operating procedure.
 
-## Checkpoint coordination (opt-in, v0.6.0)
+## Checkpoint coordination (opt-in)
 
-> Released in v0.6.0 (published 2026-10-11 UTC); the v0.6.1 security and
-> toolchain patch released the same day and the v0.7.0 observability release
-> (2026-10-19) leave it unchanged; v0.8.0 (published 2026-11-08, the latest
-> release) adds the opt-in advisory and group blocks on top of it, and this
-> tree's manifests, chart, and samples carry the v0.8.0 pins. Releases before
-> v0.6.0 do not contain it. The v0.6.0 hardware run exercised the shared
-> runtime, not this feature; the first hardware exercise of the protocol
-> itself was the v0.8.0 candidate's run on 2026-11-05 (`hack/hw-e2e.sh
-> test-checkpoint`, one toy trainer holding a Tesla T4). It has not been
-> exercised by a real checkpointing workload.
+The hardware test used a toy trainer on one Tesla T4. Validation with a production checkpointing workload is pending.
 
 `spec.safety.checkpointCoordination` lets opted-in Pods be told, and given a
 bounded deadline, before a `Drain` or `EvictGPUWorkload` step disrupts them.

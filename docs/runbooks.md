@@ -239,7 +239,7 @@ Tesla T4.
 
 Both rules read counters that exist only on an installation that opted into
 `spec.safety.impactPreview` or `spec.safety.checkpointCoordination.advisory`
-([operations](operations.md#checkpoint-coordination-opt-in-v060)). They
+([operations](operations.md#checkpoint-coordination-opt-in)). They
 describe a courtesy that did not reach its audience, never a fault on a
 GPU: no remediation is slower, faster or different because they fired.
 KubeNeuron counts acknowledgements, exits and expiries; it does not
