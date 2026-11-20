@@ -83,6 +83,14 @@ func TestInventoryConditionsRejectStaleMalformedAndMissingEvidence(t *testing.T)
 			}
 		}
 	}
+	check(inventory.Summary{ObservedAt: time.Now(), UndeclaredEKSPool: "train"}.Data(), "NoFreshAgentReport")
+	if c := meta.FindStatusCondition(root.Status.Conditions, "EKSFixedSizeUndeclared"); c == nil || c.Status != metav1.ConditionTrue || c.Reason != "FixedSizeDeclarationMissing" {
+		t.Fatalf("missing EKS pool warning: %+v", c)
+	}
+	check(inventory.Summary{ObservedAt: time.Now()}.Data(), "NoFreshAgentReport")
+	if meta.FindStatusCondition(root.Status.Conditions, "EKSFixedSizeUndeclared") != nil {
+		t.Fatal("resolved declaration warning persisted")
+	}
 	check(nil, "AwaitingController")
 	check(map[string]string{inventory.FirstAlertAcceptedAt: time.Now().UTC().Format(time.RFC3339Nano)}, "AwaitingController")
 	check(map[string]string{"schemaVersion": "99"}, "InvalidSummary")

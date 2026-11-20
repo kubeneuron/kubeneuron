@@ -105,6 +105,10 @@ func (r *KubeNeuronReconciler) setInventoryConditions(ctx context.Context, root 
 		record("GPUVisibility", metav1.ConditionUnknown, reason, message)
 		record("ResetAvailable", metav1.ConditionUnknown, reason, message)
 	}
+	const poolWarning = "EKSFixedSizeUndeclared"
+	if err != nil || !metav1.IsControlledBy(&cm, root) || cm.Data["schemaVersion"] == "" {
+		apimeta.RemoveStatusCondition(&root.Status.Conditions, poolWarning)
+	}
 	switch {
 	case apierrors.IsNotFound(err):
 		unknown("AwaitingController", "Controller has not reported yet.")
@@ -119,6 +123,14 @@ func (r *KubeNeuronReconciler) setInventoryConditions(ctx context.Context, root 
 		return
 	}
 	s, err := inventory.Parse(cm.Data, now)
+	if err == nil && now.Sub(s.ObservedAt) <= 3*inventory.Interval && s.UndeclaredEKSPool != "" {
+		apimeta.SetStatusCondition(&root.Status.Conditions, metav1.Condition{
+			Type: poolWarning, Status: metav1.ConditionTrue, Reason: "FixedSizeDeclarationMissing",
+			ObservedGeneration: root.Generation, Message: fmt.Sprintf("EKS node group %s has no fixed-size declaration. Set kubeneuron.io/fixed-size=true only if nothing else changes its size, or choose RemoveFirst. Run kubeneuronctl pools to see all affected groups.", s.UndeclaredEKSPool),
+		})
+	} else {
+		apimeta.RemoveStatusCondition(&root.Status.Conditions, poolWarning)
+	}
 	switch {
 	case err != nil:
 		unknown("InvalidSummary", "Controller inventory summary is invalid.")

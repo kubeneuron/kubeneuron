@@ -17,7 +17,7 @@ const Suffix = "-inventory-summary"
 const FirstAlertAcceptedAt = "firstAlertAcceptedAt"
 
 // schemaKeys are the keys Data may write; Merge replaces exactly these.
-var schemaKeys = []string{"advertisedNodes", "schemaVersion", "observedAt", "reportingNodes", "gpuCount", "resetConfirmed", "diagnostic", "lastReportAt"}
+var schemaKeys = []string{"advertisedNodes", "schemaVersion", "observedAt", "reportingNodes", "gpuCount", "resetConfirmed", "diagnostic", "lastReportAt", "undeclaredEKSPool"}
 
 const (
 	ExitSMIMissing        = 78
@@ -38,13 +38,14 @@ func DiagnosticMessage(reason string) string {
 }
 
 type Summary struct {
-	Diagnostic      string
-	AdvertisedNodes int
-	ObservedAt      time.Time
-	LastReportAt    time.Time
-	ReportingNodes  int
-	GPUs            int
-	ResetConfirmed  bool
+	UndeclaredEKSPool string
+	Diagnostic        string
+	AdvertisedNodes   int
+	ObservedAt        time.Time
+	LastReportAt      time.Time
+	ReportingNodes    int
+	GPUs              int
+	ResetConfirmed    bool
 }
 
 func (s Summary) Data() map[string]string {
@@ -55,6 +56,9 @@ func (s Summary) Data() map[string]string {
 		"reportingNodes":  strconv.Itoa(s.ReportingNodes),
 		"gpuCount":        strconv.Itoa(s.GPUs),
 		"resetConfirmed":  strconv.FormatBool(s.ResetConfirmed),
+	}
+	if s.UndeclaredEKSPool != "" {
+		data["undeclaredEKSPool"] = s.UndeclaredEKSPool
 	}
 	if s.Diagnostic != "" {
 		data["diagnostic"] = s.Diagnostic
@@ -86,7 +90,7 @@ func FirstAlert(data map[string]string) (time.Time, bool) {
 
 func Parse(data map[string]string, now time.Time) (Summary, error) {
 	invalid := errors.New("invalid inventory summary")
-	s := Summary{}
+	s := Summary{UndeclaredEKSPool: data["undeclaredEKSPool"]}
 	var err error
 	s.Diagnostic = data["diagnostic"]
 	if s.Diagnostic != "" && DiagnosticMessage(s.Diagnostic) == "" {

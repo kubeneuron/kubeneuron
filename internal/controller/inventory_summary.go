@@ -16,6 +16,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/inventory"
 	"github.com/kubeneuron/kubeneuron/internal/store"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -24,6 +25,13 @@ import (
 func (c *Controller) InventorySummary(ctx context.Context) (inventory.Summary, error) {
 	now := time.Now().UTC()
 	s := inventory.Summary{ObservedAt: now}
+	// Rows are sorted; report one affected pool and direct operators to the full list.
+	for _, row := range c.PoolAvailability().Pools {
+		if row.Cloud == "EKS" && row.ReasonCode == cloud.PoolFixedSizeUndeclared {
+			s.UndeclaredEKSPool = row.Pool
+			break
+		}
+	}
 	nodes, err := c.Nodes(ctx)
 	if err != nil {
 		return s, err
