@@ -11,6 +11,8 @@ support. Read the release notes for every version you skip.
 
 Upgrading from 0.x releases is not supported. Uninstall the 0.x installation, then install v1.0.
 
+Helm skips existing CRDs from the chart’s `crds/` directory without checking their release line, so follow the same removal steps below before installing v1.0 with Helm.
+
 Back up policies, configuration and incident history before uninstalling. Back up the state store separately. The old installer can remove install-managed policies shared by multiple installations. Removing a CRD deletes every object of that type across the cluster.
 
 For each installation, use the installer from its installed 0.x release with its original name and namespace:
