@@ -4,8 +4,9 @@ package main
 
 import (
 	"context"
-	"k8s.io/client-go/kubernetes"
 	"os"
+
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	// Blank import registers every cloud provider. Adding a cloud is a new

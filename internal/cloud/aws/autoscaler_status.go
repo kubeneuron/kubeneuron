@@ -5,7 +5,10 @@ package aws
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
+
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,6 +26,17 @@ func CheckAutoscalerGroup(ctx context.Context, maps core.ConfigMapInterface, gro
 	if err != nil {
 		return false, err
 	}
+	return autoscalerGroupStatus(cm.Data["status"], group, time.Now())
+}
+
+func autoscalerGroupStatus(status, group string, now time.Time) (bool, error) {
+	if strings.HasPrefix(status, "Cluster-autoscaler status at ") {
+		return false, &cloud.PoolRefusal{
+			Code:   "legacy-autoscaler-status",
+			Reason: "Cluster Autoscaler publishes a legacy text status report",
+			Action: "upgrade Cluster Autoscaler to a version that publishes YAML or use RemoveFirst",
+		}
+	}
 	var report struct {
 		AutoscalerStatus string
 		ClusterWide      struct {
@@ -30,11 +44,13 @@ func CheckAutoscalerGroup(ctx context.Context, maps core.ConfigMapInterface, gro
 		}
 		NodeGroups []struct{ Name string }
 	}
-	if err := yaml.Unmarshal([]byte(cm.Data["status"]), &report); err != nil {
+	// CA omits nodeGroups when it manages zero groups. An explicit null is malformed.
+	report.NodeGroups = []struct{ Name string }{}
+	if err := yaml.Unmarshal([]byte(status), &report); err != nil {
 		return false, errors.New("invalid Cluster Autoscaler status")
 	}
-	age := time.Since(report.ClusterWide.Health.LastProbeTime)
-	if report.AutoscalerStatus != "Running" || age < 0 || age > 5*time.Minute || report.NodeGroups == nil {
+	age := now.Sub(report.ClusterWide.Health.LastProbeTime)
+	if report.AutoscalerStatus != "Running" || age < -time.Minute || age > 5*time.Minute || report.NodeGroups == nil {
 		return false, errors.New("stale or incomplete Cluster Autoscaler status")
 	}
 	matched := false

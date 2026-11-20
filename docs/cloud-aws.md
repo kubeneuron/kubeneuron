@@ -28,7 +28,8 @@ that no other tool changes the group's size. It recognizes Cluster Autoscaler
 when a running status report in `kube-system/cluster-autoscaler-status` names
 the backing Auto Scaling group and its last health probe is at most five minutes
 old. That group is treated as autoscaled regardless of its tag. If the ConfigMap
-is absent, the declaration is still required. A stale, incomplete or unreadable
+is absent, the declaration is still required. A status ConfigMap in another
+namespace or with a different name is invisible to this check. A stale, incomplete or unreadable
 status blocks add-first. Other tools that change the group's size are outside
 this check.
 
@@ -50,7 +51,8 @@ training job's volume or its scheduling constraints.
 | EKS chooses the zone of a new node in this pool | Use a single-zone node pool, or set RemoveFirst in the remediation policy that applies to these nodes. |
 | node group is managed by Cluster Autoscaler | Use a single-zone group outside Cluster Autoscaler management, or set RemoveFirst in the remediation policy that applies to these nodes. |
 | EKS does not say whether an autoscaler manages this node group | Tag the managed node group with `kubeneuron.io/fixed-size=true` if nothing else changes its size, or select `RemoveFirst` in its remediation policy. |
-| Could not confirm Cluster Autoscaler status | Check the controller's access to the status ConfigMap and the freshness and completeness of the report. The pool assessment shows `unknown` if the read fails. |
+| Cluster Autoscaler publishes a legacy text status report | Upgrade Cluster Autoscaler to a version that publishes YAML or use RemoveFirst. |
+| Could not confirm Cluster Autoscaler status | Check the controller's access to the status ConfigMap and the freshness and completeness of the YAML report. The pool assessment shows `unknown` if the read fails. |
 | no room below maxSize | Provide room for one more node, or set RemoveFirst in the remediation policy that applies to these nodes. |
 
 
