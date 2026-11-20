@@ -5,6 +5,24 @@ currently advertises remove-first replacement. The add-first path described
 here is under development and has been exercised with simulated EKS and Auto
 Scaling responses.
 
+## Declare who controls the group size
+
+Before configuring add-first, confirm that no autoscaler or other automation
+manages the group's desired size. If another component manages it, use
+`RemoveFirst`. For a group whose size you control, set `CLUSTER` and
+`NODEGROUP` to the EKS cluster and managed node group names, then tag the group:
+
+```sh
+GROUP_ARN=$(aws eks describe-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$NODEGROUP" --query 'nodegroup.nodegroupArn' --output text) &&
+  aws eks tag-resource --resource-arn "$GROUP_ARN" --tags 'kubeneuron.io/fixed-size=true'
+```
+
+The controller reads this declaration from the EKS managed node group with
+`eks:DescribeNodegroup` during planning and again before increasing capacity.
+Only the exact value `true` qualifies. The identity applying the tag needs
+`eks:TagResource`; the controller only reads the tag. Remove the declaration
+before handing control of desired size to an autoscaler.
+
 ## How the provider identifies the extra instance
 
 The plan records the managed node group's ARN, its backing Auto Scaling group's
