@@ -10,8 +10,9 @@ import (
 
 // journalOSImage is one row of the table that chooses a node's journal
 // directory from its Node object. Checked says whether the row was read on a
-// live node; the others follow the linked documentation and were not
-// checked. Reviewed 2026-11-19. docs/reference-capabilities.md shows the
+// node of that image: a live cloud node, or for the kind row a kind test
+// node, which is a test setup and not a live node. The others follow the
+// linked documentation and were not checked. Reviewed 2026-11-19. docs/reference-capabilities.md shows the
 // same rows.
 type journalOSImage struct {
 	name    string
