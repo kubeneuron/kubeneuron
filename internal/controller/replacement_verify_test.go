@@ -259,7 +259,7 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 			id := openVendorIncident(t, c, "n1", tc.vendor)
 			inc := untilState(t, c, st, id, func(inc *types.Incident) bool { return inc.State.Halted() || inc.State == types.StateVerifying })
 			// A node without an agent sends no evidence to wait for.
-			if inc.State != types.StateVerifying && (!(tc.noAgent || tc.heard) || inc.State != types.StateResolved) {
+			if inc.State != types.StateVerifying && (!tc.noAgent && !tc.heard || inc.State != types.StateResolved) {
 				t.Fatalf("state = %s, want VERIFYING after the replacement%s", inc.State, dump(trail(t, st, id)))
 			}
 			if !tc.noAgent && !tc.heard {
