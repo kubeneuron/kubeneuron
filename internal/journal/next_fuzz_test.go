@@ -19,11 +19,14 @@ func FuzzFollowKernelEntries(f *testing.F) {
 	for codec := uint8(0); codec < 3; codec++ {
 		for _, compact := range []bool{false, true} {
 			for _, n := range []uint16{0, 255, 256, 319} {
-				f.Add(codec, compact, n)
+				f.Add(codec, compact, n, []byte{})
+				for _, offset := range []uint16{0, 208, 224, 320, 400, 800} {
+					f.Add(codec, compact, n, []byte{byte(offset), byte(offset >> 8), 1})
+				}
 			}
 		}
 	}
-	f.Fuzz(func(t *testing.T, codec uint8, compact bool, n uint16) {
+	f.Fuzz(func(t *testing.T, codec uint8, compact bool, n uint16, edits []byte) {
 		count := 1 + int(n%320)
 		field := []byte("MESSAGE=new")
 		var block []byte
@@ -115,17 +118,48 @@ func FuzzFollowKernelEntries(f *testing.F) {
 		}
 		put(buf[transport+56:], uint64(count))
 		put(buf[160:], uint64(count))
+		mutated := len(edits) >= 3
+		if mutated {
+			archive := append([]byte(nil), buf...)
+			// Each triple selects a byte and an XOR mask. Bound the work per input.
+			for i := 0; i+2 < len(edits) && i < 24; i += 3 {
+				offset := int(binary.LittleEndian.Uint16(edits[i:])) % len(archive)
+				archive[offset] ^= edits[i+2]
+			}
+			if err := os.WriteFile(filepath.Join(filepath.Dir(path), "system@prior.journal~"), archive, 0600); err != nil {
+				t.Fatal(err)
+			}
+			// A different file ID and unique message identify the healthy file.
+			buf = buf[:208]
+			copy(buf[24:40], "healthy-file-id!")
+			transport = add(1, base+len("_TRANSPORT=kernel"))
+			copy(buf[transport+base:], "_TRANSPORT=kernel")
+			marker := add(1, base+len("MESSAGE=healthy"))
+			copy(buf[marker+base:], "MESSAGE=healthy")
+			pos := add(3, 64+2*stride)
+			put(buf[pos+16:], 1)
+			binary.LittleEndian.PutUint32(buf[pos+64:], uint32(transport))
+			binary.LittleEndian.PutUint32(buf[pos+64+stride:], uint32(marker))
+			put(buf[transport+40:], uint64(pos))
+			put(buf[160:], 1)
+			put(buf[transport+48:], 0)
+			put(buf[transport+56:], 1)
+		}
 		write()
 		cursor := tail.Cursor
 		seen := 0
+		healthy := 0
 		for range 12 {
 			b, err := reader.Next(context.Background(), cursor)
-			if err != nil || b.UnreadableEntries != 0 || len(b.Records) > MaxEntriesPerTick {
+			if err != nil || (!mutated && b.UnreadableEntries != 0) || len(b.Records) > MaxEntriesPerTick {
 				t.Fatalf("batch: records=%d skips=%d err=%v", len(b.Records), b.UnreadableEntries, err)
 			}
 			size := 0
 			for _, rec := range b.Records {
-				if rec.Message != "new" {
+				if rec.Message == "healthy" {
+					healthy++
+				}
+				if !mutated && rec.Message != "new" {
 					t.Fatal("unexpected record")
 				}
 				size += len(rec.Message)
@@ -135,7 +169,10 @@ func FuzzFollowKernelEntries(f *testing.F) {
 			}
 			seen += len(b.Records)
 			if !b.More {
-				if seen != count {
+				if mutated && healthy != 1 {
+					t.Fatalf("healthy records: %d", healthy)
+				}
+				if !mutated && seen != count {
 					t.Fatalf("got %d records, want %d", seen, count)
 				}
 				return
