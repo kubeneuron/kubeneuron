@@ -35,6 +35,7 @@ type directoryReader struct {
 }
 type filePosition struct {
 	After, Search, Transport, Consumed, Array, Slot uint64
+	Seen                                            bool `json:",omitempty"`
 }
 
 func openHeader(path string, remaining *int) (*os.File, fileHeader, error) {
@@ -56,7 +57,7 @@ func openHeader(path string, remaining *int) (*os.File, fileHeader, error) {
 
 // Open checks that the mount contains a readable system journal.
 func Open(directory string) (Reader, error) {
-	files, err := systemFiles(directory)
+	files, _, err := selectedFiles(directory)
 	if err != nil {
 		return nil, err
 	}
@@ -79,6 +80,7 @@ type scanCursor struct {
 	FileList  string `json:",omitempty"`
 	Positions map[string]filePosition
 	Resume    string
+	Overflow  string `json:",omitempty"`
 	Starting  bool
 }
 
@@ -87,17 +89,27 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 		return scanCursor{Starting: true, Positions: make(map[string]filePosition)}
 	}
 	state := freshTail()
-	if after != "" {
+	if after != "" && len(after) <= 64<<10 {
 		var saved scanCursor
-		if err := json.Unmarshal([]byte(after), &saved); err == nil && saved.Positions != nil && len(saved.FileList) == sha256.Size*2 {
-			state = saved
+		if err := json.Unmarshal([]byte(after), &saved); err == nil && saved.Positions != nil && len(saved.Positions) <= maxJournalFiles && len(saved.FileList) == sha256.Size*2 {
+			valid := true
+			for id := range saved.Positions {
+				if len(id) != 32 {
+					valid = false
+					break
+				}
+			}
+			if valid {
+				state = saved
+			}
 		}
 	}
-	files, err := systemFiles(r.path)
+	files, omitted, err := selectedFiles(r.path)
 	if err != nil {
 		return Batch{}, err
 	}
 	var batch Batch
+
 	remaining := MaxEntriesPerTick
 	outputBytes := MaxBytesPerTick
 	// Rotation can insert an archive before the saved path. Rescan in that
@@ -108,6 +120,30 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 		hash.Write([]byte{0})
 	}
 	listID := hex.EncodeToString(hash.Sum(nil))
+	// A full cursor may contain expired IDs after rotation. Reconcile its
+	// keys before inserting new positions so partial checkpoints stay bounded.
+	if len(state.Positions)+len(files) > maxJournalFiles {
+		live := make(map[string]bool, len(files))
+		for _, path := range files {
+			f, h, err := openHeader(path, &readBytes)
+			if err != nil {
+				return Batch{}, err
+			}
+			f.Close()
+			live[hex.EncodeToString(h.fileID[:])] = true
+		}
+		for id := range state.Positions {
+			if !live[id] {
+				delete(state.Positions, id)
+			}
+		}
+	}
+	if state.Resume == "" || state.FileList != listID {
+		for id, p := range state.Positions {
+			p.Seen = false
+			state.Positions[id] = p
+		}
+	}
 	if state.Resume != "" {
 		found := false
 		for i, path := range files {
@@ -122,6 +158,14 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 		if !found {
 			state = freshTail()
 		}
+	}
+	if omitted {
+		if state.Overflow != listID {
+			batch.UnreadableEntries++
+		}
+		state.Overflow = listID
+	} else {
+		state.Overflow = ""
 	}
 	state.FileList = listID
 	state.Resume = ""
@@ -140,6 +184,11 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 		}
 		key := hex.EncodeToString(h.fileID[:])
 		p, seen := state.Positions[key]
+		if !seen && len(state.Positions) >= maxJournalFiles {
+			f.Close()
+			return Batch{}, errors.New("journal files changed during scan")
+		}
+		p.Seen = true
 		if state.Starting && !seen {
 			p.After = h.tailSequence
 		} else if h.tailSequence > p.After {
@@ -159,6 +208,11 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 	}
 	if !batch.More {
 		state.Starting = false
+		for id, p := range state.Positions {
+			if !p.Seen {
+				delete(state.Positions, id)
+			}
+		}
 	}
 	encoded, err := json.Marshal(state)
 	batch.Cursor = Cursor(encoded)

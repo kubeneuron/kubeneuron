@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -325,11 +326,66 @@ func TestUnknownCursorStartsAtTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, after := range []Cursor{Cursor(missing), `{"00000000000000000000000000000000":{"After":1}}`, "broken"} {
+	many := scanCursor{FileList: strings.Repeat("0", 64), Positions: map[string]filePosition{}}
+	for i := 0; i < 129; i++ {
+		many.Positions[fmt.Sprintf("%032x", i)] = filePosition{After: 99}
+	}
+	raw, _ := json.Marshal(many)
+	for _, after := range []Cursor{Cursor(raw), Cursor(strings.Repeat(" ", 65536) + string(raw)), Cursor(missing), `{"00000000000000000000000000000000":{"After":1}}`, "broken"} {
 		b, err := r.Next(context.Background(), after)
 		var s scanCursor
 		if err != nil || len(b.Records) != 0 || b.More || json.Unmarshal([]byte(b.Cursor), &s) != nil || s.Positions[strings.Repeat("0", 32)].After != 42 {
 			t.Fatalf("tail: %+v %v", b, err)
 		}
 	}
+}
+
+func TestLimitedJournalSet(t *testing.T) {
+	dir := t.TempDir()
+	write := func(i int, name string) {
+		b := make([]byte, 208)
+		copy(b, "LPKSHHRH")
+		b[24] = byte(i)
+		binary.LittleEndian.PutUint64(b[88:], 208)
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, b, 0600); err != nil {
+			t.Fatal(err)
+		}
+		stamp := time.Unix(int64(i+1), 0)
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var cursor Cursor
+	tick := func(n, skip int) scanCursor {
+		r, err := Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := r.Next(context.Background(), cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var state scanCursor
+		if err := json.Unmarshal([]byte(b.Cursor), &state); err != nil {
+			t.Fatal(err)
+		}
+		if b.More || len(state.Positions) != n || b.UnreadableEntries != skip || len(b.Cursor) > 65536 {
+			t.Fatalf("positions=%d skip=%d more=%t", len(state.Positions), b.UnreadableEntries, b.More)
+		}
+		cursor = b.Cursor
+		return state
+	}
+	for i := 0; i < 4; i++ {
+		write(i, "system.journal")
+		tick(1, 0)
+	}
+	for i := 4; i <= 131; i++ {
+		write(i, fmt.Sprintf("system@%03d.journal", i))
+	}
+	state := tick(128, 1)
+	if _, ok := state.Positions["03000000000000000000000000000000"]; ok {
+		t.Fatal("oldest file retained")
+	}
+	tick(128, 0)
 }
