@@ -17,6 +17,12 @@ import (
 
 const successorClockSkew = time.Minute
 
+// successorLaunchGrace is how long a raised desired capacity may go without
+// an ASG launch activity. The ASG starts the launch some seconds after EKS
+// reports the size update done (14 s in a live EKS run); only a longer
+// silence leaves the request to the operator.
+const successorLaunchGrace = 5 * time.Minute
+
 var launchCapacityFailure = regexp.MustCompile(`\b(InsufficientInstanceCapacity|InstanceLimitExceeded|VcpuLimitExceeded)\b`)
 
 // AWS shows free-form Cause and Description examples at
@@ -26,7 +32,9 @@ var desiredTransition = regexp.MustCompile(`\bdesired capacity from ([0-9]+) to 
 
 // confirmSuccessorLaunch expects the complete activity window for the pinned ASG.
 // Unknown cause text or competing activity leaves attribution to the operator.
-func confirmSuccessorLaunch(s cloud.Successor, candidate string, activities []at.Activity) error {
+// With no candidate instance yet, an empty window within successorLaunchGrace
+// of the request is a launch the ASG has not started: nil, read again later.
+func confirmSuccessorLaunch(s cloud.Successor, candidate string, activities []at.Activity, now time.Time) error {
 	before, err := strconv.ParseInt(s.State["before"], 10, 32)
 	if err != nil || before < 1 || s.RequestedAt.IsZero() || s.State["asg_arn"] == "" {
 		return fmt.Errorf("%w: incomplete launch evidence", cloud.ErrNeedsOperator)
@@ -66,6 +74,9 @@ func confirmSuccessorLaunch(s cloud.Successor, candidate string, activities []at
 		return fmt.Errorf("%w: ASG failed to launch the additional instance", cloud.ErrReplacementCapacity)
 	}
 	if !matched {
+		if candidate == "" && now.Sub(s.RequestedAt) < successorLaunchGrace {
+			return nil
+		}
 		return fmt.Errorf("%w: no matching ASG launch activity", cloud.ErrNeedsOperator)
 	}
 	return nil
@@ -101,7 +112,7 @@ func checkSuccessorActivities(ctx context.Context, client activityReader, s clou
 		}
 		token := sdk.ToString(page.NextToken)
 		if token == "" || olderPage {
-			return confirmSuccessorLaunch(s, candidate, recent)
+			return confirmSuccessorLaunch(s, candidate, recent, time.Now())
 		}
 		if seen[token] {
 			return fmt.Errorf("%w: repeated ASG activity page token", cloud.ErrNeedsOperator)

@@ -32,11 +32,27 @@ func TestConfirmSuccessorLaunch(t *testing.T) {
 		{"matching launch", []at.Activity{launch, stale}, true}, {"outside window", []at.Activity{stale}, false}, {"wrong transition", []at.Activity{wrong}, false}, {"competing activity", []at.Activity{launch, wrong}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := confirmSuccessorLaunch(s, "i-new", tc.activities)
+			err := confirmSuccessorLaunch(s, "i-new", tc.activities, now)
 			if tc.ok && err != nil || !tc.ok && !errors.Is(err, cloud.ErrNeedsOperator) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// The live order on EKS: the size update is done, the ASG has the new desired
+// capacity and no launch activity yet; it starts the launch seconds later.
+func TestConfirmSuccessorLaunchNotStarted(t *testing.T) {
+	requested := time.Now()
+	s := cloud.Successor{RequestedAt: requested, State: map[string]string{"before": "1", "asg_arn": "arn"}}
+	if err := confirmSuccessorLaunch(s, "", nil, requested.Add(15*time.Second)); err != nil {
+		t.Fatalf("15 s after the request: %v", err)
+	}
+	if err := confirmSuccessorLaunch(s, "", nil, requested.Add(successorLaunchGrace)); !errors.Is(err, cloud.ErrNeedsOperator) || !strings.Contains(err.Error(), "no matching ASG launch activity") {
+		t.Fatalf("after the grace: %v", err)
+	}
+	if err := confirmSuccessorLaunch(s, "i-new", nil, requested.Add(15*time.Second)); !errors.Is(err, cloud.ErrNeedsOperator) {
+		t.Fatalf("an instance without its launch activity: %v", err)
 	}
 }
 

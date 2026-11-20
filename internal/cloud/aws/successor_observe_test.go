@@ -4,6 +4,7 @@ package aws
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,6 +47,22 @@ func TestObserveSuccessor(t *testing.T) {
 	if err != nil || got.Phase != cloud.SuccessorCreated || got.ProviderID != "aws:///az/i-abcd" {
 		t.Fatalf("created: %+v %v", got, err)
 	}
+
+	t.Run("launch not started yet", func(t *testing.T) {
+		pending := g
+		pending.Instances = pending.Instances[:1]
+		reader := managedProvider{repairReader: &repairReader{cluster: "training", eks: eksReader}}
+		reader.scaling = observedASG{membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{pending}}}, launchActivityPages{"": {}}}
+		result, err := reader.PrepareSuccessor(t.Context(), s)
+		if err != nil || result.Phase != cloud.SuccessorRequested || result.ProviderID != "" {
+			t.Fatalf("desired raised, no launch yet: %+v, %v", result, err)
+		}
+		late := s
+		late.RequestedAt = now.Add(-successorLaunchGrace - time.Second)
+		if _, err := reader.PrepareSuccessor(t.Context(), late); !errors.Is(err, cloud.ErrNeedsOperator) || !strings.Contains(err.Error(), "no matching ASG launch activity") {
+			t.Fatalf("no launch after the grace: %v", err)
+		}
+	})
 
 	t.Run("capacity failure before instance appears", func(t *testing.T) {
 		pending := g

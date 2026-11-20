@@ -416,6 +416,13 @@ API is `v1alpha1`.
   passes; the controller log carries the AWS error with the incident ID. See
   [Add-first replacement on EKS](docs/cloud-aws.md#when-ekss-own-repair-holds-a-replacement).
 
+- **EKS: add-first waits for the Auto Scaling group to start the launch.**
+  The group starts the new instance some seconds after EKS reports the size
+  update done. KubeNeuron used to read the empty activity history in that gap
+  as an unconfirmed launch and stop the replacement for the operator, while
+  the additional node was already on its way. It now waits up to five minutes
+  for the launch activity before it hands the replacement over.
+
 - **AKS and GKE: a fresh installation with a cloud provider becomes Ready.**
   The cloud policy pack ships an optional recycle ladder that no policy uses.
   The operator checked every playbook against the provider's capabilities,
