@@ -297,7 +297,11 @@ if ((KERNEL_RECORD)); then
 	pci=$(printf '%04x:3b:00' $((0x1000 + RANDOM % 0x8000)))
 	journal_cursor=$("$DOCKER_BIN" exec "${workers[0]}" journalctl -k -q --no-pager -n 1 -o cat --show-cursor | sed -n 's/^-- cursor: //p')
 	[[ -n $journal_cursor ]] || die "no journal cursor on ${workers[0]}"
-	"$DOCKER_BIN" exec "${workers[0]}" sh -c "echo 'NVRM: Xid (PCI:$pci): 79, pid=1, GPU has fallen off the bus.' >/dev/kmsg"
+	# A line written to /dev/kmsg from user space has the user facility, and
+	# journald moves its leading "word:" into SYSLOG_IDENTIFIER. The driver's
+	# own lines have the kernel facility: identifier "kernel", MESSAGE starting
+	# with "NVRM:". The leading "kernel:" makes journald store this line so.
+	"$DOCKER_BIN" exec "${workers[0]}" sh -c "echo 'kernel: NVRM: Xid (PCI:$pci): 79, pid=1, GPU has fallen off the bus.' >/dev/kmsg"
 	xid_in_journal() {
 		"$DOCKER_BIN" exec "${workers[0]}" journalctl -k -q --no-pager -o cat --after-cursor "$journal_cursor" \
 			--grep "NVRM: Xid \\(PCI:$pci\\): 79," | grep -q .
