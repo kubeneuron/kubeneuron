@@ -83,19 +83,14 @@ type scanCursor struct {
 }
 
 func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) (Batch, error) {
-	state := scanCursor{Starting: after == ""}
-	if after != "" {
-		if err := json.Unmarshal([]byte(after), &state); err != nil {
-			return Batch{}, fmt.Errorf("%w: invalid cursor", ErrInvalidJournal)
-		}
+	freshTail := func() scanCursor {
+		return scanCursor{Starting: true, Positions: make(map[string]filePosition)}
 	}
-	if state.Positions == nil {
-		state.Positions = map[string]filePosition{}
-		if after != "" {
-			// Older cursors contained only the per-file position map.
-			if err := json.Unmarshal([]byte(after), &state.Positions); err != nil || state.Positions == nil {
-				return Batch{}, fmt.Errorf("%w: invalid cursor", ErrInvalidJournal)
-			}
+	state := freshTail()
+	if after != "" {
+		var saved scanCursor
+		if err := json.Unmarshal([]byte(after), &saved); err == nil && saved.Positions != nil && len(saved.FileList) == sha256.Size*2 {
+			state = saved
 		}
 	}
 	files, err := systemFiles(r.path)
@@ -113,12 +108,19 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 		hash.Write([]byte{0})
 	}
 	listID := hex.EncodeToString(hash.Sum(nil))
-	if state.Resume != "" && state.FileList == listID {
+	if state.Resume != "" {
+		found := false
 		for i, path := range files {
 			if path == state.Resume {
-				files = files[i:]
+				found = true
+				if state.FileList == listID {
+					files = files[i:]
+				}
 				break
 			}
+		}
+		if !found {
+			state = freshTail()
 		}
 	}
 	state.FileList = listID

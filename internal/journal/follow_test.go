@@ -307,3 +307,29 @@ func testHeaderBudget(t *testing.T, names []string) {
 		t.Fatalf("tail positions: %+v %v", state, err)
 	}
 }
+
+func TestUnknownCursorStartsAtTail(t *testing.T) {
+	dir := t.TempDir()
+	buf := make([]byte, 208)
+	copy(buf, "LPKSHHRH")
+	binary.LittleEndian.PutUint64(buf[88:], 208)
+	binary.LittleEndian.PutUint64(buf[160:], 42)
+	if err := os.WriteFile(filepath.Join(dir, "system.journal"), buf, 0600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing, err := json.Marshal(scanCursor{Resume: "missing", FileList: strings.Repeat("0", 64), Positions: map[string]filePosition{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, after := range []Cursor{Cursor(missing), `{"00000000000000000000000000000000":{"After":1}}`, "broken"} {
+		b, err := r.Next(context.Background(), after)
+		var s scanCursor
+		if err != nil || len(b.Records) != 0 || b.More || json.Unmarshal([]byte(b.Cursor), &s) != nil || s.Positions[strings.Repeat("0", 32)].After != 42 {
+			t.Fatalf("tail: %+v %v", b, err)
+		}
+	}
+}
