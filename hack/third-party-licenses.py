@@ -26,6 +26,9 @@ PLATFORMS = ('linux/amd64', 'linux/arm64', 'darwin/amd64', 'darwin/arm64')
 # Licences a dependency may carry. The Go patent grant is allowed only beside
 # BSD-3-Clause, the licence it accompanies in the Go repositories.
 ALLOWED = {'Apache-2.0', 'BSD-2-Clause', 'BSD-3-Clause', 'MIT', 'ISC', '0BSD', 'Zlib', 'BSL-1.0'}
+XZ_MODULE = 'github.com/xi2/xz@v0.0.0-20171230120015-48954b6210f8'
+XZ_LICENSE_SHA256 = '5c640056d513f276d56635af7a0bed81cb7eac02a31b6e56d40c416557a8d8ce'
+XZ_LICENSE_REF = 'LicenseRef-xi2-xz-public-domain'
 PATENT_GRANT = 'Go-patent-grant'
 # Reviewed exceptions: (module path, legal file) -> (sha256 of the reviewed
 # content, why it is allowed). Bound to the content: if the file changes in a
@@ -71,6 +74,9 @@ def problems(module, licenses, digests=None):
     maps a legal file to the sha256 of its content, for the exceptions."""
     path = module.split('@')[0]
     found, issues = set(), []
+    if path == 'github.com/xi2/xz':
+        if module != XZ_MODULE or (digests or {}).get('LICENSE') != XZ_LICENSE_SHA256:
+            issues.append('xi2/xz version or LICENSE changed since review')
     for name, ids in licenses.items():
         exception = EXCEPTIONS.get((path, name))
         if exception and (digests or {}).get(name) == exception[0]:
@@ -82,7 +88,10 @@ def problems(module, licenses, digests=None):
         # Only NOTICE files, or only a reviewed exception: there is no licence
         # text at all, which is worse than an unknown one.
         issues.append('no licence text found')
-    for spdx in sorted(found - ALLOWED - {PATENT_GRANT}):
+    allowed = ALLOWED
+    if module == XZ_MODULE and (digests or {}).get('LICENSE') == XZ_LICENSE_SHA256:
+        allowed = ALLOWED | {XZ_LICENSE_REF}
+    for spdx in sorted(found - allowed - {PATENT_GRANT}):
         issues.append(f'{spdx} is not an allowed licence')
     if PATENT_GRANT in found and 'BSD-3-Clause' not in found:
         issues.append('Go patent grant without the BSD-3-Clause licence it accompanies')
@@ -134,7 +143,8 @@ def generate():
             raise RuntimeError(f'No legal files for {identity}')
         licenses, digests = {}, {}
         for path in files:
-            data = path.read_text(encoding='utf-8')
+            raw = path.read_bytes()
+            data = raw.decode('utf-8')
             name = str(path.relative_to(directory))
             label = f'{identity}/{name}'
             chunks.append(f'\n===== {label} =====\n{data}\n')
@@ -143,7 +153,9 @@ def generate():
                 notices.append(f'\n===== {label} =====\n{data}\n')
             else:
                 licenses[name] = classify(data)
-                digests[name] = hashlib.sha256(data.encode('utf-8')).hexdigest()
+                digests[name] = hashlib.sha256(raw).hexdigest()
+                if identity == XZ_MODULE and name == 'LICENSE' and digests[name] == XZ_LICENSE_SHA256:
+                    licenses[name] = [XZ_LICENSE_REF]
         spdx = sorted({i for ids in licenses.values() for i in ids})
         inventory.append({'module': identity, 'files': [str(p.relative_to(directory)) for p in files],
                           'spdx': spdx, 'licenses': licenses, 'review': problems(identity, licenses, digests)})

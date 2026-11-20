@@ -84,6 +84,15 @@ PATENTS = 'Additional IP Rights Grant (Patents)\n'
 
 
 class GateTest(unittest.TestCase):
+    def test_xz_approval_is_pinned(self):
+        module = collector.XZ_MODULE
+        files = {'LICENSE': [collector.XZ_LICENSE_REF]}
+        hashes = {'LICENSE': collector.XZ_LICENSE_SHA256}
+        self.assertEqual(collector.problems(module, files, hashes), [])
+        self.assertTrue(collector.problems(module + '.changed', files, hashes))
+        self.assertTrue(collector.problems(module, files, {'LICENSE': 'changed'}))
+        self.assertTrue(collector.problems(module, {**files, 'COPYING': ['UNKNOWN']}, hashes))
+
     def test_classifies_known_texts(self):
         self.assertEqual(collector.classify(APACHE), ['Apache-2.0'])
         self.assertEqual(collector.classify(MIT), ['MIT'])
