@@ -43,7 +43,7 @@ matches them against its fault patterns and sends only the classified
 event to the controller. It does not store, forward or log journal
 entries, and does not read entries of other transports.
 
-When the journal is disabled or unavailable and node-level actions are disabled, numeric NVIDIA XIDs depend on a reachable DCGM hostengine exposing field 230. The shipped exporter profile omits that field. Polling its last value can miss repeated identical XIDs.
+When the journal is disabled or unavailable and node-level actions are disabled, numeric NVIDIA XIDs depend on a reachable DCGM hostengine exposing field 230. The shipped exporter profile omits that field. Polling its last value can miss repeated identical XIDs. Without the hostengine, numeric XIDs are unavailable.
 
 The agent mounts one journal directory per node, `/var/log/journal` or
 `/run/log/journal`. The controller picks it from the node's OS image and
@@ -56,7 +56,7 @@ share a node are not supported: their agents share the node's state
 directory.
 The agent DaemonSets are `<name>-agent` (no journal mount, for nodes
 without the label), `<name>-agent-detect-journal-var` and
-`<name>-agent-detect-journal-run`; each node runs exactly one of them. A
+`<name>-agent-detect-journal-run`; each node runs exactly one of them. When the controller labels a node, its agent Pod moves to the matching journal DaemonSet. Scripts that wait for agent rollouts should select all three with `app.kubernetes.io/instance=<name>,kubeneuron.io/agent=true`. A
 node whose OS image is not in the table keeps `<name>-agent`, and its
 kernel log source reads `os-image-not-recognized` in `kubeneuronctl health`.
 If the journal Pod cannot start within three minutes, the controller
