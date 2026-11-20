@@ -50,67 +50,6 @@ The remaining instructions apply to installations running v1.0.0-rc.1 or later.
 3. Check `kubectl get kubeneurons -o yaml` status conditions are all
    `Ready=True` — never start an upgrade from a degraded installation.
 
-## Unreleased cloud agent permissions
-
-On existing installations with node-level actions disabled, the replacement agent Pod loses access to `/dev/kmsg`. Numeric NVIDIA XIDs then depend on a reachable DCGM hostengine and field 230. The shipped exporter profile omits this field. Polling the last value can miss repeated identical XIDs and leave the `xid-app` threshold unmet. Without the hostengine, numeric XIDs are unavailable. AMD kernel ring timeouts and PCIe errors are also unavailable. ECC and page retirement can still be observed through accessible AMD SMI tooling. An unavailable source leaves the device's health unknown.
-
-## Unreleased: kernel log from the node's journal
-
-With node-level actions disabled, the agent now reads kernel entries from
-the node's systemd journal, read-only (experimental). The agent has
-read-only access to the node's systemd journal directories. It reads only
-kernel entries (`_TRANSPORT=kernel`), matches them against its fault
-patterns and sends only the classified event to the controller. It does not
-store, forward or log journal entries, and does not read entries of other
-transports. See [Kernel log from the node's journal](install.md#kernel-log-from-the-nodes-journal).
-
-In every mode, including `DryRun`, KubeNeuron adds one label,
-`kubeneuron.io/journal-dir`, to accelerator nodes to choose the agent's
-journal mount. It runs no recovery action. Set
-`spec.agent.kernelLog.journal.enabled: false` to remove the label and the
-mount; set it before the upgrade to keep the agent without the journal.
-
-What the upgrade does to the agent:
-
-- `<name>-agent` keeps its name and UID. It rolls once to gain a node
-  affinity that keeps it off labelled nodes and the label
-  `kubeneuron.io/agent=true`.
-- The operator adds `<name>-agent-detect-journal-var` and
-  `<name>-agent-detect-journal-run`. When the controller labels a node, the
-  node's agent Pod moves from `<name>-agent` to the matching DaemonSet. The
-  agent's spool and cursors stay in `/var/lib/kube-neuron` across the move.
-- Scripts that wait for agent rollouts should select every agent DaemonSet
-  with `app.kubernetes.io/instance=<name>,kubeneuron.io/agent=true`, as
-  `hack/tls-rotate.sh` does, not wait for `<name>-agent` alone.
-
-## Unreleased: automatic replacement notes
-
-- **Automatic replacement needs qualified profiles.** After the upgrade an
-  `Automatic` policy replaces a node on its own only when the node's
-  accelerator runtime profile is listed in `automatic.qualifiedProfiles` and
-  the incident's fault location is `this-node`. An existing Automatic policy
-  has no such list, so its replacement steps wait for approval until you add
-  one; the earlier steps (cordon) still run as before, and the incident says
-  why it waits. Check the policy's `AutomaticReplacement` condition: `False`
-  with reason `NoQualifiedProfiles` means the list is empty. Listing a
-  profile is the operator's decision; KubeNeuron does not verify the
-  hardware or software behind it.
-- **No schema migration and no new permission.** The incident evidence is
-  an audit row; it reads the node and the pods on it with the access the
-  controller already has.
-
-## Unreleased: announced cloud interruptions
-
-The cloud pack gains the `cloud-interruption` playbook and its policy (see
-[Announced cloud interruptions](cloud-interruptions.md)). An installer rerun
-on an existing installation keeps the policy objects it finds and does not
-create new ones; it reports the two as missing. Until you create them, a
-`cloud-interruption` incident is only observed: no job is asked and no node
-is cordoned. To opt in, create the `GPUPlaybook` and the
-`GPURemediationPolicy` for `cloud-interruption` from
-`config/cloud-policies/`, with your installation's name in
-`metadata.name`, `spec.kubeNeuronRef` and `spec.playbookRef`.
-
 ## Upgrade order
 
 Always: **CRDs → operator → controller/agent images.**
@@ -148,8 +87,8 @@ Always: **CRDs → operator → controller/agent images.**
    the new controller.
 
 3. **Verify**: root `Ready=True`, controller `/metrics` serving, agent
-   DaemonSet fully available, and a synthetic signal walks to an incident
-   (see [quickstart](quickstart.md) step 5).
+   DaemonSets fully available, and a synthetic signal walks to an incident
+   (see [quickstart](quickstart.md) step 5). With node-level actions disabled, check the kernel-log source in `kubeneuronctl health` after rollout. See [Kernel log from the node's journal](install.md#kernel-log-from-the-nodes-journal) for the unprivileged agent's read-only mount and fault coverage.
 
 ## Version skew
 

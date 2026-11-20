@@ -43,6 +43,8 @@ matches them against its fault patterns and sends only the classified
 event to the controller. It does not store, forward or log journal
 entries, and does not read entries of other transports.
 
+When the journal is disabled or unavailable and node-level actions are disabled, numeric NVIDIA XIDs depend on a reachable DCGM hostengine exposing field 230. The shipped exporter profile omits that field. Polling its last value can miss repeated identical XIDs.
+
 The agent mounts one journal directory per node, `/var/log/journal` or
 `/run/log/journal`. The controller picks it from the node's OS image and
 records the choice in the node label `kubeneuron.io/journal-dir` (`var` or

@@ -147,6 +147,8 @@ The cloud pack installs the `kubeneuron-cloud-interruption` playbook and a
 policy for the `cloud-interruption` class. The playbook has two steps and no
 others.
 
+On an existing installation, rerunning the installer reports missing policy objects. To enable interruption handling, create the missing `GPUPlaybook` and `GPURemediationPolicy` from `config/cloud-policies/` with names and references appropriate to your installation. Until both are present, the incident is observed without requesting checkpoints or cordoning the node.
+
 1. **Checkpoint warning** (`CheckpointWarning`). Every opted-in job on the node
    that checkpoint coordination would ask before a drain is asked to
    checkpoint, with a deadline 30 seconds before the cloud's. The step only

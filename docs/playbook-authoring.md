@@ -434,7 +434,7 @@ carries the limits:
   locates the fault on this node (`this-node`). With an empty list, a node on
   an unlisted or unknown profile, or a fault that is `shared` or `unknown`,
   the replacement waits for approval and the incident states the reason; the
-  policy's `AutomaticReplacement` condition shows an empty list at once.
+  policy's `AutomaticReplacement` condition is `False` with reason `NoQualifiedProfiles` when the list is empty.
   Listing a profile is the operator's decision; KubeNeuron does not verify
   that automatic replacement is safe for it. Steps that replace no node, and
   DryRun, are unchanged.

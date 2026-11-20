@@ -1182,6 +1182,8 @@ rebooting again.
 
 ## TLS material and its renewal
 
+When waiting for agent rollouts, select all agent DaemonSets for the installation with `app.kubernetes.io/instance=<name>,kubeneuron.io/agent=true`. This includes the variants that mount a journal directory.
+
 The controller and its agents authenticate to each other with mTLS. The operator
 issues that material and renews it: a long-lived authority (10 years) signs
 short-lived certificates (90 days), and each certificate is replaced once less
