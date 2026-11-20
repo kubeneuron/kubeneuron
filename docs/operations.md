@@ -687,7 +687,7 @@ the [GPU metric catalog](reference-gpu-metrics.md) that have a canonical
 pinned dcgm-exporter uses. A unit test pins the list to the catalog in both
 directions. The sticky last-XID gauge (230), the recovery-action field
 (1523), the P-state (190) and every profiling field except the PCIe byte
-rates are deliberately not listed. The v0.7.0 run on one Tesla T4 observed a subset of the configured fields. See the [capability matrix](reference-capabilities.md) for the fields and recording rules checked on that build. Series documented as absent for a GPU
+rates are deliberately not listed. The v0.7.0 run on one Tesla T4 observed a subset of the configured fields. See the [capability matrix](reference-capabilities.md) for the fields and recording rules checked on that build. Fields outside that subset are listed from NVIDIA documentation and have not been observed on a GPU by this project. Series documented as absent for a GPU
 model (NVLink and row remapping on a Tesla T4) are expected to be missing,
 not zero, and anything built on them later shows No data.
 
