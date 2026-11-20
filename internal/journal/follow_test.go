@@ -164,6 +164,27 @@ func testFollowFromTail(t *testing.T, headerFlag uint32, dataFlag byte, encode f
 	if err != nil {
 		t.Fatal(err)
 	}
+	if encode == nil {
+		t.Run("broken archive header", func(t *testing.T) {
+			path := filepath.Join(dir, "system@0.journal")
+			if err := os.WriteFile(path, []byte("truncated"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.Remove(path) })
+			reader, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := reader.Next(context.Background(), b.Cursor)
+			if err != nil || got.UnreadableEntries != 1 || len(got.Records) != 2 || got.Records[1].Message != "after rotation" {
+				t.Fatalf("after bad header: %+v %v", got, err)
+			}
+			got, err = reader.Next(context.Background(), got.Cursor)
+			if err != nil || got.UnreadableEntries != 0 || len(got.Records) != 0 || got.More {
+				t.Fatalf("idle: %+v %v", got, err)
+			}
+		})
+	}
 	if panicOnce {
 		reader := r.(directoryReader)
 		first := true

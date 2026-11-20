@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 var errTickBudget = errors.New("journal tick budget exhausted")
@@ -55,6 +57,18 @@ func openHeader(path string, remaining *int) (*os.File, fileHeader, error) {
 	return nil, fileHeader{}, err
 }
 
+func archivePath(path string) bool { return strings.HasPrefix(filepath.Base(path), "system@") }
+
+// A malformed archived header may have no usable file ID. Track its path
+// in the same bounded position map across polls.
+func headerPosition(path string, h fileHeader, err error) (string, bool) {
+	if err != nil && archivePath(path) && errors.Is(err, ErrInvalidJournal) {
+		digest := sha256.Sum256([]byte(path))
+		return hex.EncodeToString(digest[:16]), true
+	}
+	return hex.EncodeToString(h.fileID[:]), false
+}
+
 // Open checks that the mount contains a readable system journal.
 func Open(directory string) (Reader, error) {
 	files, _, err := selectedFiles(directory)
@@ -62,12 +76,18 @@ func Open(directory string) (Reader, error) {
 		return nil, err
 	}
 	budget := MaxBytesPerTick
-	f, _, err := openHeader(files[0], &budget)
-	if err != nil {
-		return nil, err
-	}
-	if err = f.Close(); err != nil {
-		return nil, err
+	for _, path := range files {
+		f, h, err := openHeader(path, &budget)
+		if _, skip := headerPosition(path, h, err); skip {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err = f.Close(); err != nil {
+			return nil, err
+		}
+		break
 	}
 	return directoryReader{directory, new(fieldDecoders).decodeField}, nil
 }
@@ -126,11 +146,14 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 		live := make(map[string]bool, len(files))
 		for _, path := range files {
 			f, h, err := openHeader(path, &readBytes)
-			if err != nil {
-				return Batch{}, err
+			key, skip := headerPosition(path, h, err)
+			if !skip {
+				if err != nil {
+					return Batch{}, err
+				}
+				f.Close()
 			}
-			f.Close()
-			live[hex.EncodeToString(h.fileID[:])] = true
+			live[key] = true
 		}
 		for id := range state.Positions {
 			if !live[id] {
@@ -183,22 +206,36 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 			batch.More = true
 			break
 		}
-		if err != nil {
+		key, skipHeader := headerPosition(path, h, err)
+		if err != nil && !skipHeader {
 			return Batch{}, err
 		}
-		key := hex.EncodeToString(h.fileID[:])
 		p, seen := state.Positions[key]
 		if !seen && len(state.Positions) >= maxJournalFiles {
-			f.Close()
+			if f != nil {
+				f.Close()
+			}
 			return Batch{}, errors.New("journal files changed during scan")
 		}
 		p.Seen = true
+		if skipHeader {
+			if !seen {
+				batch.UnreadableEntries++
+			}
+			state.Positions[key] = p
+			continue
+		}
 		if state.Starting && !seen {
 			p.After = h.tailSequence
 		} else if h.tailSequence > p.After {
 			err = h.readNew(ctx, tickReader{f, &readBytes}, &p, &remaining, &outputBytes, &batch, r.decode)
 		}
 		_ = f.Close()
+		if archivePath(path) && !h.online && errors.Is(err, ErrInvalidJournal) {
+			p.After = h.tailSequence
+			batch.UnreadableEntries++
+			err = nil
+		}
 		if errors.Is(err, errTickBudget) {
 			state.Positions[key] = p
 			state.Resume = path
