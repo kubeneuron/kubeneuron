@@ -142,6 +142,15 @@ spec:
     image: @AGENT_IMAGE@
     tolerations:
       - operator: Exists
+    # Keep the journal off here. The topology phase writes a synthetic
+    # nvidia.com/gpu capacity on the agent's node, which makes it an
+    # accelerator node: the controller labels it for the journal and its
+    # agent moves to a journal DaemonSet mid-run, so the bound token the
+    # harness holds names a deleted Pod and is refused. hack/kind-journal.sh
+    # covers the journal and the moves between its DaemonSets.
+    kernelLog:
+      journal:
+        enabled: false
   safety:
     executionMode: DryRun
   notifications:
