@@ -23,7 +23,7 @@ class CollectorTest(unittest.TestCase):
             dep = root / 'dep'
             dep.mkdir()
             license_text = 'Apache License\nVersion 2.0, January 2004\nCopyright example\n'
-            (dep / 'LICENSE').write_text(license_text)
+            (dep / 'LICENSE').write_bytes(license_text.replace('\n', '\r\n').encode('utf-8'))
             (dep / 'NOTICE').write_text('upstream attribution\n')
             (dep / 'notice_response.go').write_text('not a legal file')
             (dep / 'nested').mkdir()

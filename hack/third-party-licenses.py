@@ -144,7 +144,7 @@ def generate():
         licenses, digests = {}, {}
         for path in files:
             raw = path.read_bytes()
-            data = raw.decode('utf-8')
+            data = raw.decode('utf-8').replace('\r\n', '\n').replace('\r', '\n')
             name = str(path.relative_to(directory))
             label = f'{identity}/{name}'
             chunks.append(f'\n===== {label} =====\n{data}\n')
