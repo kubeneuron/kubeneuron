@@ -354,7 +354,7 @@ jobs:
     if: github.repository == 'kubeneuron/kubeneuron'
     needs: [gates]
     runs-on: ubuntu-24.04
-    # Two v0.6.1 installations, a PostgreSQL pull, three HEAD image builds,
+    # Two baseline installations, a PostgreSQL pull, three HEAD image builds,
     # two image-level rollbacks and two re-upgrades on a three-node kind
     # cluster (one control-plane plus one dedicated labeled worker per store,
     # because the agent's hostPath spool state must not be shared): well
@@ -364,7 +364,7 @@ jobs:
       contents: read
       packages: read
     env:
-      BASELINE: v0.7.0
+      BASELINE: v0.7.0 # Set explicitly to an empty string for a release with no base.
       STORES: sqlite postgres
       # The published release (its install manifest and images.txt) lives in
       # the repository the tag is pushed to; the script also uses this to
@@ -379,6 +379,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        if: env.BASELINE != ''
         with:
           go-version: "1.26.11"
           cache: true
@@ -388,6 +389,7 @@ jobs:
       # download of the tool that builds the cluster this release is gated on
       # is not a shortcut worth taking.
       - name: Install pinned Kubernetes clients
+        if: env.BASELINE != ''
         shell: bash
         run: |
           set -euo pipefail
@@ -412,13 +414,14 @@ jobs:
       # the operator, two controller/agent installations and a PostgreSQL Pod;
       # the runner default is not sized for that many watches on one host.
       - name: Raise inotify limits for the kind cluster
+        if: env.BASELINE != ''
         run: |
           sudo sysctl fs.inotify.max_user_instances=512 \
             fs.inotify.max_user_watches=524288
 
-      - name: Rehearse upgrade and rollback against v0.6.1 on both stores
+      - name: Rehearse upgrade and rollback against ${{ env.BASELINE }} on both stores
         env:
-          # `gh release download` of the v0.6.1 install manifest and
+          # `gh release download` of the baseline install manifest and
           # images.txt, and the GHCR login fallback for the baseline images.
           GH_TOKEN: ${{ github.token }}
         run: bash hack/kind-upgrade-rollback.sh
@@ -564,7 +567,8 @@ jobs:
   # or skipped verification leaves a draft a maintainer can inspect and
   # delete, never a published release nobody checked.
   release-publish:
-    if: github.repository == 'kubeneuron/kubeneuron'
+    # Leave verified prereleases as drafts for manual publication.
+    if: github.repository == 'kubeneuron/kubeneuron' && !contains(github.ref_name, '-')
     needs: [release, release-verify]
     runs-on: ubuntu-latest
     timeout-minutes: 10

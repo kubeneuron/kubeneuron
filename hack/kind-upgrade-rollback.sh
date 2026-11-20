@@ -99,7 +99,16 @@ set -Eeuo pipefail
 #   POSTGRES_IMAGE    throwaway database image (default: docker.io/library/postgres:16-alpine)
 #   KIND_BIN, KUBECTL_BIN, DOCKER_BIN, JQ_BIN  command paths
 
-BASELINE=${BASELINE:-v0.7.0}
+# Unset selects the normal baseline; an explicitly empty value selects a first release.
+BASELINE=${BASELINE-v0.7.0}
+if [[ -z $BASELINE ]]; then
+	message="upgrade rehearsal: skipped, no base release"
+	echo "$message"
+	if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+		echo "$message" >> "$GITHUB_STEP_SUMMARY"
+	fi
+	exit 0
+fi
 RELEASE_REPO=${RELEASE_REPO:-kubeneuron/kubeneuron}
 LOAD_PLATFORM=${LOAD_PLATFORM:-linux/$(go env GOARCH 2>/dev/null || echo amd64)}
 CLUSTER_NAME=${CLUSTER_NAME:-kubeneuron-upgrade-rollback}
