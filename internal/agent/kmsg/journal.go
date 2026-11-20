@@ -125,6 +125,10 @@ func (s *JournalSource) Watch(ctx context.Context) (<-chan Event, error) {
 		acked := map[int]bool{}
 		wait := idle
 		for {
+			// Stopping does not depend on the reader honouring ctx.
+			if ctx.Err() != nil {
+				return
+			}
 			batch, err := reader.Next(ctx, cursor)
 			if err != nil {
 				if ctx.Err() != nil {

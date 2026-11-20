@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -404,5 +405,38 @@ func TestJournalSourceWaitsOnABatchThatDoesNotMove(t *testing.T) {
 	r.mu.Unlock()
 	if reads < 2 || reads > 15 {
 		t.Fatalf("%d reads in 200ms with a 20ms idle wait, want about 10", reads)
+	}
+}
+
+// busyJournal ignores ctx and always has more, with a moving cursor.
+type busyJournal struct{ n atomic.Int64 }
+
+func (b *busyJournal) Next(context.Context, journal.Cursor) (journal.Batch, error) {
+	return journal.Batch{Cursor: journal.Cursor(strconv.FormatInt(b.n.Add(1), 10)), More: true}, nil
+}
+
+// TestJournalSourceStopsWithAReaderThatIgnoresContext: cancelling ends the
+// watch even when the reader never looks at ctx and never runs out.
+func TestJournalSourceStopsWithAReaderThatIgnoresContext(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "var")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := &JournalSource{Dir: dir, Idle: time.Millisecond, BootID: "boot-1",
+		Open: func(string) (journal.Reader, error) { return &busyJournal{}, nil }}
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := s.Watch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case _, open := <-ch:
+		if open {
+			t.Fatal("event from a reader that returns no records")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("watch did not stop after cancel")
 	}
 }

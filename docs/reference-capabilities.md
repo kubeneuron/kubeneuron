@@ -45,8 +45,9 @@ privilege for it.
 
 The agent skips what it cannot read in the journal and reads on:
 
-- an entry it cannot decode;
-- an archived journal file it cannot read;
+- an entry it cannot decode or that is too large to read in one cycle;
+- an archived journal file it cannot read or that was removed before it
+  was read;
 - the oldest journal files, beyond the newest 128;
 - the entries between a saved read position it cannot use and the end of
   the journal, where it starts again.
