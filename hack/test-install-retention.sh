@@ -53,6 +53,20 @@ connect_api() {
 	printf 'Authorization: Bearer %s\n' "$("$KUBECTL_BIN" -n "$namespace" get secret "$name-operator-api-token" -o jsonpath='{.data.token}' | base64 --decode)" >"$work/header"
 }
 api() { curl --silent --show-error --fail --noproxy '*' --connect-timeout 5 --max-time 30 -H "@$work/header" "$@"; }
+# Simulate the CRD left by a 0.x uninstall in this isolated kind cluster.
+crd=kubeneurons.kubeneuron.io
+"$KUBECTL_BIN" annotate crd "$crd" kubeneuron.io/release-line- >/dev/null
+crd_revision=$("$KUBECTL_BIN" get crd "$crd" -o jsonpath='{.metadata.resourceVersion}')
+deployment_generation() {
+	"$KUBECTL_BIN" -n kube-neuron get deploy kubeneuron-operator -o jsonpath='{.metadata.generation}'
+}
+operator_before=$(deployment_generation)
+if (install) >/dev/null 2>&1; then fail "installer accepted an unmarked CRD"; fi
+grep -Fq 'Upgrading from 0.x releases is not supported. Uninstall the 0.x installation, then install v1.0.' "$work/install.log" || fail "missing 0.x diagnostic"
+[[ $("$KUBECTL_BIN" get crd "$crd" -o jsonpath='{.metadata.resourceVersion}') == "$crd_revision" ]] || fail "installer modified the existing CRD"
+[[ $(deployment_generation) == "$operator_before" ]] || fail "installer modified the operator"
+"$KUBECTL_BIN" annotate crd "$crd" kubeneuron.io/release-line=v1 >/dev/null
+
 # An interrupted first install can leave a user-edited pack object before the root exists.
 "$KUBECTL_BIN" create -f - >/dev/null <<YAML
 apiVersion: kubeneuron.io/v1alpha1

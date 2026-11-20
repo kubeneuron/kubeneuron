@@ -7,6 +7,30 @@ This runbook covers upgrading KubeNeuron itself. Third-party dependencies
 The API is `v1alpha1`: minor releases may change it without conversion
 support. Read the release notes for every version you skip.
 
+## Moving from 0.x to v1.0
+
+Upgrading from 0.x releases is not supported. Uninstall the 0.x installation, then install v1.0.
+
+Back up policies, configuration and incident history before uninstalling. Back up the state store separately. The old installer can remove install-managed policies shared by multiple installations. Removing a CRD deletes every object of that type across the cluster.
+
+For each installation, use the installer from its installed 0.x release with its original name and namespace:
+
+```sh
+bash ./install.sh --uninstall --name "$NAME" --namespace "$NS"
+```
+
+After removing all 0.x installations, inspect the original release manifest before deleting it. Its resources can include shared CRDs and a namespace. Deleting a namespace also deletes its PVCs. Once backups are complete, remove the shared operator with `kubectl delete --ignore-not-found -f "$OLD_MANIFEST"`. For v0.7.0 and v0.8.0, remove any remaining CRDs with the command below. For another 0.x release, use the list in that release's manifest.
+
+```sh
+kubectl delete crd --ignore-not-found \
+  acceleratorruntimeprofiles.kubeneuron.io gpuautonomyplans.kubeneuron.io \
+  gpumaintenancewindows.kubeneuron.io gpunodeconfigs.kubeneuron.io \
+  gpuplaybooks.kubeneuron.io gpuremediationpolicies.kubeneuron.io \
+  gpusignalmappings.kubeneuron.io kubeneurons.kubeneuron.io
+```
+
+Check for retained PVCs and external databases before installing v1.0. Select fresh storage so the new installation starts without the old state.
+
 ## Fleet membership changed in v0.2.2 — check it before you upgrade
 
 Through v0.2.1 a node joined the GPU fleet only if it advertised

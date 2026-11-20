@@ -253,6 +253,13 @@ fi
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 
 say "preflight"
+# A missing CRD prints nothing. An existing, unmarked CRD prints its name.
+release_line=$(kubectl get crd kubeneurons.kubeneuron.io --ignore-not-found \
+	-o jsonpath='{.metadata.name}{"/"}{.metadata.annotations.kubeneuron\.io/release-line}') || die "could not read the KubeNeuron CRD"
+case "$release_line" in
+	""|kubeneurons.kubeneuron.io/v1) ;;
+	*) die "Upgrading from 0.x releases is not supported. Uninstall the 0.x installation, then install v1.0." ;;
+esac
 server_minor=$(kubectl version -o json 2>/dev/null | sed -n 's/.*"minor": *"\([0-9]*\).*/\1/p' | head -1)
 [[ -n $server_minor && $server_minor -ge 29 ]] || die "Kubernetes 1.29+ required (server minor: ${server_minor:-unknown})"
 if ! kubectl get storageclass -o json | grep -q '"storageclass.kubernetes.io/is-default-class": *"true"'; then

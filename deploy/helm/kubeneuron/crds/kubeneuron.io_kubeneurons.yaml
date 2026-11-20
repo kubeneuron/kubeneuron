@@ -4,6 +4,7 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.17.3
+    kubeneuron.io/release-line: v1
   name: kubeneurons.kubeneuron.io
 spec:
   group: kubeneuron.io

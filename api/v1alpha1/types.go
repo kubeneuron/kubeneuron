@@ -1190,6 +1190,7 @@ type KubeNeuronStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:metadata:annotations="kubeneuron.io/release-line=v1"
 // +kubebuilder:resource:scope=Cluster,shortName=kneuron
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
