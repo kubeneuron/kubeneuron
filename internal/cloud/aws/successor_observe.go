@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -33,6 +34,9 @@ func (p *managedProvider) observeSuccessor(ctx context.Context, s cloud.Successo
 		if settledMembership(s, baseline, members) {
 			return s, checkSuccessorActivities(ctx, p.scaling, s, "")
 		}
+	}
+	if launchingMember(s, group, members) {
+		return s, checkSuccessorActivities(ctx, p.scaling, s, "")
 	}
 	candidate, err := successorCandidate(s, group)
 	if err != nil {
@@ -103,4 +107,32 @@ func (p *managedProvider) successorGroup(ctx context.Context, s cloud.Successor)
 		return at.AutoScalingGroup{}, fmt.Errorf("%w: incomplete ASG response", cloud.ErrNeedsOperator)
 	}
 	return groups.AutoScalingGroups[0], nil
+}
+
+// launchingMember is the raised group with every saved member InService and
+// one new instance in the plan's zone that is not InService yet.
+func launchingMember(s cloud.Successor, g at.AutoScalingGroup, members []string) bool {
+	zone := s.State["zone"]
+	if g.DesiredCapacity == nil || int(*g.DesiredCapacity) != len(members)+1 || s.State["before"] != strconv.Itoa(len(members)) || len(g.Instances) != len(members)+1 || zone == "" {
+		return false
+	}
+	launching := 0
+	for _, member := range g.Instances {
+		if sdk.ToString(member.AvailabilityZone) != zone {
+			return false
+		}
+		if slices.Contains(members, sdk.ToString(member.InstanceId)) {
+			if member.LifecycleState != at.LifecycleStateInService {
+				return false
+			}
+			continue
+		}
+		switch member.LifecycleState {
+		case at.LifecycleStatePending, at.LifecycleStatePendingWait, at.LifecycleStatePendingProceed:
+			launching++
+		default:
+			return false
+		}
+	}
+	return launching == 1
 }

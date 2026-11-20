@@ -8,6 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	sdk "github.com/aws/aws-sdk-go-v2/aws"
@@ -54,10 +55,12 @@ func confirmSuccessorLaunch(s cloud.Successor, candidate string, activities []at
 			return fmt.Errorf("%w: competing or unconfirmed ASG launch activity", cloud.ErrNeedsOperator)
 		}
 		if candidate == "" {
-			if sdk.ToString(a.Description) != "Launching a new EC2 instance" {
+			if !launchDescription(sdk.ToString(a.Description)) {
 				return fmt.Errorf("%w: ASG activity is not a launch", cloud.ErrNeedsOperator)
 			}
-			if a.StatusCode == at.ScalingActivityStatusCodeInProgress {
+			// the instance is not an InService member yet: a launch under way, or done
+			// before the group lists the instance InService, is read again later
+			if launchUnderWay(a.StatusCode) {
 				matched = true
 				continue
 			}
@@ -80,6 +83,24 @@ func confirmSuccessorLaunch(s cloud.Successor, candidate string, activities []at
 		return fmt.Errorf("%w: no matching ASG launch activity", cloud.ErrNeedsOperator)
 	}
 	return nil
+}
+
+// launchDescription is an ASG launch activity's Description: AWS names the
+// instance once it has one ("Launching a new EC2 instance: i-...").
+func launchDescription(d string) bool {
+	return d == "Launching a new EC2 instance" || strings.HasPrefix(d, "Launching a new EC2 instance: i-")
+}
+
+// launchUnderWay is a launch activity that started an instance or is still
+// starting one.
+func launchUnderWay(code at.ScalingActivityStatusCode) bool {
+	switch code {
+	case at.ScalingActivityStatusCodeWaitingForInstanceId, at.ScalingActivityStatusCodePreInService,
+		at.ScalingActivityStatusCodeInProgress, at.ScalingActivityStatusCodeMidLifecycleAction,
+		at.ScalingActivityStatusCodeWaitingForInstanceWarmup, at.ScalingActivityStatusCodeSuccessful:
+		return true
+	}
+	return false
 }
 
 // checkSuccessorActivities reads newest-first ASG history until it covers the
