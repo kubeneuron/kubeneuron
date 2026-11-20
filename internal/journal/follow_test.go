@@ -103,6 +103,43 @@ func testFollowFromTail(t *testing.T, headerFlag uint32, dataFlag byte, encode f
 	if err != nil || b.Cursor == "" || len(b.Records) != 0 {
 		t.Fatalf("tail %+v %v", b, err)
 	}
+	if encode == nil {
+		t.Run("vacuum during catch-up", func(t *testing.T) {
+			archive := filepath.Join(dir, "system@vacuum.journal")
+			header := append([]byte(nil), buf...)
+			header[24] = 2
+			if err := os.WriteFile(archive, header, 0600); err != nil {
+				t.Fatal(err)
+			}
+			partial, err := r.(directoryReader).next(context.Background(), b.Cursor, 0)
+			if err != nil || !partial.More {
+				t.Fatalf("partial: %+v %v", partial, err)
+			}
+			if err := os.Remove(archive); err != nil {
+				t.Fatal(err)
+			}
+			original := append([]byte(nil), buf...)
+			defer func() { buf = original; write() }()
+			newEntry := entry(2, "MESSAGE=survived")
+			array := add(6, 32)
+			put(buf[array+24:], uint64(newEntry))
+			put(buf[transport+48:], uint64(array))
+			put(buf[transport+56:], 2)
+			write()
+			reopened, err := Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := reopened.Next(context.Background(), partial.Cursor)
+			if err != nil || got.More || got.UnreadableEntries != 1 || len(got.Records) != 1 || got.Records[0].Message != "survived" {
+				t.Fatalf("vacuum: %+v %v", got, err)
+			}
+			idle, err := reopened.Next(context.Background(), got.Cursor)
+			if err != nil || idle.More || idle.UnreadableEntries != 0 || len(idle.Records) != 0 {
+				t.Fatalf("idle: %+v %v", idle, err)
+			}
+		})
+	}
 	fresh := entry(2, "MESSAGE=new")
 	array := add(6, 32)
 	put(buf[array+24:], uint64(fresh))
@@ -322,16 +359,12 @@ func TestUnknownCursorStartsAtTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	missing, err := json.Marshal(scanCursor{Resume: "missing", FileList: strings.Repeat("0", 64), Positions: map[string]filePosition{}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	many := scanCursor{FileList: strings.Repeat("0", 64), Positions: map[string]filePosition{}}
 	for i := 0; i < 129; i++ {
 		many.Positions[fmt.Sprintf("%032x", i)] = filePosition{After: 99}
 	}
 	raw, _ := json.Marshal(many)
-	for _, after := range []Cursor{Cursor(raw), Cursor(strings.Repeat(" ", 65536) + string(raw)), Cursor(missing), `{"00000000000000000000000000000000":{"After":1}}`, "broken"} {
+	for _, after := range []Cursor{Cursor(raw), Cursor(strings.Repeat(" ", 65536) + string(raw)), `{"00000000000000000000000000000000":{"After":1}}`, "broken"} {
 		b, err := r.Next(context.Background(), after)
 		var s scanCursor
 		if err != nil || b.UnreadableEntries != 1 || len(b.Records) != 0 || b.More || json.Unmarshal([]byte(b.Cursor), &s) != nil || s.Positions[strings.Repeat("0", 32)].After != 42 {

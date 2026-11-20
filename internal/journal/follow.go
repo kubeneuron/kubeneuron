@@ -156,7 +156,8 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 			}
 		}
 		if !found {
-			state = freshTail()
+			// Vacuum can remove the resume file while other files still have unread entries.
+			batch.UnreadableEntries++
 		}
 	}
 	if after != "" && state.FileList == "" {
