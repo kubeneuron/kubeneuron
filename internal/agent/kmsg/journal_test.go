@@ -373,3 +373,36 @@ func TestJournalSourceRereadsOnlyWhatWasNotTaken(t *testing.T) {
 	}
 	noEvent(t, ch)
 }
+
+// stalledJournal always asks for another tick without moving its cursor.
+type stalledJournal struct {
+	mu    sync.Mutex
+	reads int
+}
+
+func (s *stalledJournal) Next(context.Context, journal.Cursor) (journal.Batch, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reads++
+	return journal.Batch{Cursor: "same", More: true}, nil
+}
+
+// TestJournalSourceWaitsOnABatchThatDoesNotMove: More without progress is
+// read again after the idle wait, not at once.
+func TestJournalSourceWaitsOnABatchThatDoesNotMove(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "var")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &stalledJournal{}
+	s := &JournalSource{Dir: dir, Idle: 20 * time.Millisecond, BootID: "boot-1",
+		Open: func(string) (journal.Reader, error) { return r, nil }}
+	watch(t, s)
+	time.Sleep(200 * time.Millisecond)
+	r.mu.Lock()
+	reads := r.reads
+	r.mu.Unlock()
+	if reads < 2 || reads > 15 {
+		t.Fatalf("%d reads in 200ms with a 20ms idle wait, want about 10", reads)
+	}
+}

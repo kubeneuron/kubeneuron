@@ -43,12 +43,19 @@ mounted journal, for example because of file permissions or a security
 module, the source reads `journal-unreadable`; KubeNeuron adds no
 privilege for it.
 
-When the agent cannot decode a journal entry, it skips that entry and
-reads the next one. Any kernel fault in a skipped entry is lost and opens
-no incident. The source reads `journal-unreadable` from the skip until ten
-minutes after the last skipped entry, and
-`kubeneuron_agent_journal_unreadable_entries_total` counts the skipped
-entries. The agent does not store or log the content of a skipped entry.
+The agent skips what it cannot read in the journal and reads on:
+
+- an entry it cannot decode;
+- an archived journal file it cannot read;
+- the oldest journal files, beyond the newest 128;
+- the entries between a saved read position it cannot use and the end of
+  the journal, where it starts again.
+
+Any kernel fault in what it skipped is lost and opens no incident. The
+source reads `journal-unreadable` from the skip until ten minutes after
+the last one, and `kubeneuron_agent_journal_unreadable_entries_total`
+counts the skips. The agent does not store or log the content of what it
+skipped.
 
 ## Live cloud evidence
 

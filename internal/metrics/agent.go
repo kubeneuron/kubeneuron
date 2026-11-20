@@ -49,7 +49,7 @@ var (
 	// the scrape target names the node.
 	AgentJournalUnreadableEntries = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "kubeneuron_agent_journal_unreadable_entries_total",
-		Help: "Journal entries the agent could not read and skipped; kernel faults in them are lost.",
+		Help: "Journal entries, files and saved positions the agent could not read and skipped; kernel faults in them are lost.",
 	})
 
 	// AgentRegistrationAcks counts durable controller registration

@@ -147,7 +147,7 @@ does charge parked incidents.
 | `kubeneuron_agent_events_posted_total` | counter | XID events delivered to the controller |
 | `kubeneuron_agent_events_spooled_total` | counter | events diverted to the durable spool after a failed post |
 | `kubeneuron_agent_spool_depth` | gauge | undelivered events currently spooled |
-| `kubeneuron_agent_journal_unreadable_entries_total` | counter | journal entries the agent could not decode and skipped; the kernel faults in them are lost |
+| `kubeneuron_agent_journal_unreadable_entries_total` | counter | journal entries, journal files and saved read positions the agent could not read and skipped; the kernel faults in them are lost |
 | `kubeneuron_agent_detections_total` | counter | `node`, `source` | faults observed per detection source (`kmsg`, `gpuhealth`) — the only way to tell which source saw a fault |
 | `kubeneuron_agent_detections_deduplicated_total` | counter | `node` | detections collapsed as duplicates of one physical fault across sources |
 | `kubeneuron_agent_events_rejected_total` | counter | `node` | events the controller semantically rejected and the agent dropped — non-zero means detections are being discarded |
