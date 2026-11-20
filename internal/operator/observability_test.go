@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -198,8 +199,27 @@ func TestCollectorNetworkPolicy(t *testing.T) {
 			components = append(components, c)
 		}
 	}
-	if !operator || strings.Join(components, ",") != "controller,agent" {
+	if !operator || strings.Join(components, ",") != "controller," {
 		t.Errorf("ingress peers = %#v", from)
+	}
+	// Every agent Pod sends OTLP, on a journal variant too.
+	agents := from[1].PodSelector
+	if agents.MatchLabels[AgentDaemonSetLabel] != "true" {
+		t.Errorf("agent peer = %#v, want the %s label", agents, AgentDaemonSetLabel)
+	}
+	selector, err := metav1.LabelSelectorAsSelector(agents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kn.Spec.Safety.NodeLevelActions = false
+	daemonSets := agentDaemonSets(kn, &Snapshot{Digest: "abc"})
+	if len(daemonSets) != 3 {
+		t.Fatalf("agent DaemonSets = %d, want -agent and both journal variants", len(daemonSets))
+	}
+	for _, ds := range daemonSets {
+		if !selector.Matches(labels.Set(ds.Spec.Template.Labels)) {
+			t.Errorf("collector ingress does not admit the Pods of %s (%v)", ds.Name, ds.Spec.Template.Labels)
+		}
 	}
 	if p := policy.Spec.Ingress[0].Ports; len(p) != 1 || p[0].Port.IntValue() != collectorOTLPPort {
 		t.Errorf("ingress ports = %#v", p)

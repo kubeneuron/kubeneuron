@@ -360,6 +360,15 @@ func operatorPeer(operatorNamespace string) networkingv1.NetworkPolicyPeer {
 	return peer
 }
 
+// agentPodLabels select the Pods of every agent DaemonSet of the
+// installation: "-agent" and the journal variants differ in component.
+func agentPodLabels(installation *kubeneuronv1alpha1.KubeNeuron) map[string]string {
+	labels := resourceLabels(installation, "")
+	delete(labels, "app.kubernetes.io/component")
+	labels[AgentDaemonSetLabel] = "true"
+	return labels
+}
+
 // collectorNetworkPolicy admits OTLP only from this installation's
 // controller and agents and from the operator, and lets the collector reach
 // DNS and the store. An external store's address cannot be named in a
@@ -392,7 +401,7 @@ func collectorNetworkPolicy(installation *kubeneuronv1alpha1.KubeNeuron, operato
 			Ingress: []networkingv1.NetworkPolicyIngressRule{{
 				From: []networkingv1.NetworkPolicyPeer{
 					{PodSelector: &metav1.LabelSelector{MatchLabels: resourceLabels(installation, "controller")}},
-					{PodSelector: &metav1.LabelSelector{MatchLabels: resourceLabels(installation, "agent")}},
+					{PodSelector: &metav1.LabelSelector{MatchLabels: agentPodLabels(installation)}},
 					operatorPeer(operatorNamespace),
 				},
 				Ports: []networkingv1.NetworkPolicyPort{tcpPort(collectorOTLPPort)},
