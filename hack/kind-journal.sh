@@ -163,12 +163,16 @@ deploy_operator() {
 	"$KUBECTL_BIN" -n kube-neuron rollout status deployment/kubeneuron-operator --timeout="${TIMEOUT_SECONDS}s" >/dev/null
 }
 
-# wait_for runs a check until it passes.
+# wait_for runs a check until it passes; on timeout it shows the check's
+# last error output.
 wait_for() {
 	local what=$1 deadline=$((SECONDS + TIMEOUT_SECONDS))
 	shift
-	until "$@"; do
-		((SECONDS < deadline)) || die "timed out waiting for $what"
+	until "$@" 2>"$work/check.err"; do
+		if ((SECONDS >= deadline)); then
+			[[ -s $work/check.err ]] && sed 's/^/  check: /' "$work/check.err" | tail -20 >&2
+			die "timed out waiting for $what"
+		fi
 		sleep 2
 	done
 }
@@ -290,6 +294,15 @@ if ((KERNEL_RECORD)); then
 		systemctl restart systemd-journald'
 	kernel_in_journal() { "$DOCKER_BIN" exec "${workers[0]}" journalctl -k -q --no-pager -n 1 -o cat | grep -q .; }
 	wait_for "kernel records in the journal of ${workers[0]}" kernel_in_journal
+	# Before the record: the node's agent says its journal source is open, so
+	# a missing incident cannot be a source that never started.
+	journal_source_open() {
+		local pod
+		pod=$("$KUBECTL_BIN" -n "$NS" get pods -l "$AGENTS" --field-selector "spec.nodeName=${workers[0]}" -o name) &&
+			[[ -n $pod ]] &&
+			"$KUBECTL_BIN" -n "$NS" logs "$pod" | grep -qF 'msg="journal kernel log source open" dir=/host/run/log/journal'
+	}
+	wait_for "the journal source of the agent on ${workers[0]}" journal_source_open
 	# On restart journald copies the kernel buffer, which may hold XID lines
 	# from earlier runs or other kind clusters on this host. This run's line
 	# names its own PCI domain and is looked for only after the journal's
@@ -303,10 +316,14 @@ if ((KERNEL_RECORD)); then
 	# with "NVRM:". The leading "kernel:" makes journald store this line so.
 	"$DOCKER_BIN" exec "${workers[0]}" sh -c "echo 'kernel: NVRM: Xid (PCI:$pci): 79, pid=1, GPU has fallen off the bus.' >/dev/kmsg"
 	xid_in_journal() {
-		"$DOCKER_BIN" exec "${workers[0]}" journalctl -k -q --no-pager -o cat --after-cursor "$journal_cursor" \
-			--grep "NVRM: Xid \\(PCI:$pci\\): 79," | grep -q .
+		"$DOCKER_BIN" exec "${workers[0]}" journalctl -k -q --no-pager -o json --after-cursor "$journal_cursor" >"$work/after.json" &&
+			"$JQ_BIN" -c --arg line "NVRM: Xid (PCI:$pci): 79," \
+				'select(.MESSAGE | type == "string" and contains($line)) | {_TRANSPORT, SYSLOG_IDENTIFIER, MESSAGE}' \
+				"$work/after.json" >"$work/xid.json" && [[ -s $work/xid.json ]]
 	}
 	wait_for "the XID 79 record for $pci in the journal of ${workers[0]}" xid_in_journal
+	"$JQ_BIN" -e -s 'length == 1 and (.[0] | ._TRANSPORT == "kernel" and .SYSLOG_IDENTIFIER == "kernel" and (.MESSAGE | startswith("NVRM: Xid ")))' \
+		"$work/xid.json" >/dev/null || die "the XID record is not stored as a driver line: $(cat "$work/xid.json")"
 	xid_incident() {
 		local list
 		list=$(incidents_on "${workers[0]}") || return 1
