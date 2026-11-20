@@ -404,6 +404,18 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- **EKS: a default node group no longer blocks replacement, and every hold says
+  why.** A managed node group without `nodeRepairConfig`, which EKS reports
+  for groups created without the setting, reads as node auto repair off, the
+  EKS default; it used to hold every replacement. The settling check no longer
+  uses the group's `modifiedAt`, which EKS moves without an update and which
+  kept the 30-minute window from ever closing. It now uses the update history,
+  and an update that only changed the group's size does not open the window.
+  `kubeneuronctl incidents show`, the incident's audit and the pool's row in
+  `kubeneuronctl pools` give the reason and what to do, or when the check
+  passes; the controller log carries the AWS error with the incident ID. See
+  [Add-first replacement on EKS](docs/cloud-aws.md#when-ekss-own-repair-holds-a-replacement).
+
 - List endpoints of the operator API answer an empty list as `[]` (or
   `"items": []`), not `null`.
 - Concurrent live repair incidents on the same node share one repair owner. The

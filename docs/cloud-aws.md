@@ -73,13 +73,57 @@ ConfigMap (`get` only). They are removed when the AWS provider is turned off.
 
 | Actions | IAM resource |
 | --- | --- |
-| `eks:DescribeNodegroup`, `eks:UpdateNodegroupConfig`, `eks:DescribeUpdate` for the node group update | Managed node group ARN |
+| `eks:DescribeNodegroup`, `eks:UpdateNodegroupConfig` | Managed node group ARN |
+| `eks:ListUpdates`, `eks:DescribeUpdate` for the node group's updates | Cluster ARN and managed node group ARN |
 | `autoscaling:DescribeAutoScalingInstances`, `autoscaling:DescribeAutoScalingGroups`, `autoscaling:DescribeScalingActivities` | `*` |
+| `ec2:DescribeInstanceStatus` | `*` |
 | `autoscaling:TerminateInstanceInAutoScalingGroup` | Backing Auto Scaling group ARN |
 
 See the AWS authorization references for [EKS](https://docs.aws.amazon.com/service-authorization/latest/reference/list_eks.html) and [EC2 Auto Scaling](https://docs.aws.amazon.com/service-authorization/latest/reference/list_autoscaling.html).
 
 After replacement, the last desired size requested through EKS is the original size plus one. Termination decrements the backing group's desired capacity to the original size. EKS can temporarily show the higher value. When updating the node group's scaling configuration, explicitly setting the intended desired size reconciles the two.
+
+## When EKS's own repair holds a replacement
+
+KubeNeuron and EKS node auto repair do not act on the same node group. While
+auto repair is enabled, KubeNeuron opens incidents for the group's nodes but
+does not replace them. Turning auto repair off is your decision: EKS then
+stops repairing nodes in that group, including for conditions KubeNeuron does
+not detect. KubeNeuron does not change this setting.
+
+Before replacing a node, and in the background for `kubeneuronctl pools`, the
+controller reads the node group's repair setting. A group created without
+`nodeRepairConfig` needs no step: the
+[EKS API reference](https://docs.aws.amazon.com/eks/latest/APIReference/API_NodeRepairConfig.html)
+states that "Node auto repair is disabled by default.", and KubeNeuron reads
+the absent setting as off.
+
+With auto repair off, a replacement also waits until the node group is
+settled: its EKS update history shows no unfinished update and no update in
+the last 30 minutes, its Auto Scaling group has no unfinished activity, and
+the pinned instance is running without scheduled events. An update that
+changed only the group's size (desired, minimum or maximum) does not open the
+30-minute window, so a replacement's own scale-out does not hold the next
+replacement in the pool. The group's `modifiedAt` is not used: EKS moves it
+without an update.
+
+`kubeneuronctl incidents show` prints the current reason a replacement is
+held at the top, and the incident's audit records each new reason. Times are
+in UTC, with the date when it is not today's. A pool's row in
+`kubeneuronctl pools` shows a hold that needs an operator; a hold that clears
+on its own does not change the pool's status. The controller log carries the
+AWS error with the incident ID; the incident and the pool row name only the
+IAM action.
+
+| Reason code | Meaning | What to do |
+| --- | --- | --- |
+| `native-repair-on` | Node auto repair is enabled for the group. | Leave repairs of this group to EKS, or turn node auto repair off for the group. The message gives the command. |
+| `pool-changed-recently` | An update other than a size change was created less than 30 minutes ago. | Nothing; the message gives the time the check passes. |
+| `pool-update-running` | An EKS update of the group is unfinished. | Nothing; checked again every minute. |
+| `pool-activity-running` | The group's Auto Scaling group has an unfinished activity. | Nothing; checked again every minute. |
+| `pool-changed-during-check` | The repair setting, backing group, launch template, version or update history changed while the controller checked. | Nothing; checked again every minute. |
+| `read-failed` | An AWS read was denied or failed; the message names the IAM action. | If denied, allow that action in the controller's IAM role. |
+| `repair-unconfirmed` | The answers did not establish that EKS is not repairing the node, for example the instance is not a healthy member of the group. | Inspect the node group and the instance. |
 
 ## When cleanup needs an operator
 

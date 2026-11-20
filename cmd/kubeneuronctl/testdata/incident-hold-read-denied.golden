@@ -1,0 +1,17 @@
+id:        inc-held
+state:     EVALUATING
+class:     xid-79
+node:      gpu-node-1
+gpu:       
+playbook:  gpu-replace (step 0, attempt 0)
+dry-run:   false
+signals:   0
+opened:    2026-11-20T15:40:00Z
+recovery:  unavailable [provider] (assessed 2026-11-20T15:41:00Z)
+reason:    KubeNeuron could not read node group gpu: eks:ListUpdates was denied. Allow eks:ListUpdates in the controller's IAM role. KubeNeuron retries every minute.
+fault:     unknown (no evidence recorded)
+Affected training jobs: unknown
+
+audit trail:
+TIME                  FROM  TO  ACTOR   ACTION                         RESULT
+2026-11-20T15:41:00Z            system  provider-recovery-unavailable  KubeNeuron could not read node group gpu: eks:ListUpdates was denied. Allow eks:ListUpdates in the controller's IAM role. KubeNeuron retries every minute.

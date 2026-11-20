@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/kubeneuron/kubeneuron/internal/httpapi"
 	"io"
 	"log/slog"
@@ -615,4 +616,28 @@ func TestRepairInventoryRequiresLiveConfirmation(t *testing.T) {
 	check(1)
 	live.readErr = nil
 	check(0)
+}
+
+func TestPoolRowShowsRepairHold(t *testing.T) {
+	nodes := []types.Node{{Name: "eks", UID: "eks-uid", Labels: map[string]string{"eks.amazonaws.com/nodegroup": "train"}, Devices: tpuDevices}}
+	on := &cloud.RecoveryHold{Code: cloud.HoldNativeRepair, Reason: "EKS node auto repair is enabled for node group train, so KubeNeuron does not replace its nodes.", Action: "Leave repairs of this group to EKS.", PoolReason: "EKS node auto repair is enabled for this node group", PoolAction: "leave repairs to EKS"}
+	denied := &cloud.RecoveryHold{Code: cloud.HoldReadFailed, Reason: "KubeNeuron could not read node group train: eks:ListUpdates was denied.", Action: "Allow eks:ListUpdates in the controller's IAM role. KubeNeuron retries every minute.", PoolReason: "could not read the node group: eks:ListUpdates was denied", PoolAction: "allow eks:ListUpdates in the controller's IAM role", Cause: errors.New("raw")}
+	failed := &cloud.RecoveryHold{Code: cloud.HoldReadFailed, Reason: "KubeNeuron could not read node group train: eks:ListUpdates failed.", Action: "KubeNeuron retries every minute.", PoolReason: "could not read the node group: eks:ListUpdates failed"}
+	unconfirmed := &cloud.RecoveryHold{Code: cloud.HoldUnconfirmed, Reason: "KubeNeuron could not confirm that EKS is not repairing node group train: missing EKS backing groups.", Action: "KubeNeuron checks again every minute."}
+	for _, tc := range []struct {
+		hold                   *cloud.RecoveryHold
+		status, reason, action string
+	}{
+		{on, "unavailable", on.PoolReason, on.PoolAction},
+		{denied, "unknown", denied.PoolReason, denied.PoolAction},
+		{failed, "unknown", failed.PoolReason, ""},
+		{unconfirmed, "unknown", unconfirmed.Reason, unconfirmed.Action},
+	} {
+		var c Controller
+		c.inventory.recordPools(nodes, nil, poolTestEngine(t), time.Now().UTC(), func(types.Node) error { return fmt.Errorf("assess: %w", tc.hold) })
+		row := c.PoolAvailability().Pools[0]
+		if row.Status != tc.status || row.ReasonCode != tc.hold.Code || row.Reason != tc.reason || row.Action != tc.action {
+			t.Fatalf("%s: row %+v", tc.hold.Code, row)
+		}
+	}
 }

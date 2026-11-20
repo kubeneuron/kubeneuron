@@ -731,10 +731,14 @@ needs read access to these operations. Missing access or incomplete evidence
 holds recovery.
 
 The reader checks the pinned instance's group membership, native repair
-setting, scaling activities and scheduled EC2 events. It requires a running
-instance and a 30-minute settling period after nodegroup changes, then reads
-the policy and membership again. A repair started before native repair was
-disabled could outlast that window. Replacement requires EC2 to confirm a TerminateInstances DryRun for the
+setting, update history, scaling activities and scheduled EC2 events. An
+absent `nodeRepairConfig` reads as repair off, the EKS default. It requires a
+running instance and 30 minutes since the group's last update other than a
+size change, then reads the policy, membership, launch template, version and
+update history again. It does not use the nodegroup's `modifiedAt`, which EKS
+moves without an update. A repair started before native repair was disabled
+could outlast that window. Each hold carries an operator-facing reason and
+action; the raw AWS error goes only to the controller log. Replacement requires EC2 to confirm a TerminateInstances DryRun for the
 pinned instance before disruption and again before termination. Managed groups
 remain ineligible for stop/start recycle. The current replacement path, including these eligibility checks, awaits
 validation on a live EKS cluster.

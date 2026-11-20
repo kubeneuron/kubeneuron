@@ -134,6 +134,42 @@ func TestIncidentShowPolicyHoldAndRecovery(t *testing.T) {
 	}
 }
 
+// The texts are the EKS provider's own, from internal/cloud/aws.
+func TestIncidentShowProviderHold(t *testing.T) {
+	at := time.Date(2026, 11, 20, 15, 41, 0, 0, time.UTC)
+	for _, tc := range []struct{ golden, reason string }{
+		{"incident-hold-native-repair.golden", "EKS node auto repair is enabled for node group gpu, so KubeNeuron does not replace its nodes. Leave repairs of this group to EKS, or turn EKS node auto repair off for this group: aws eks update-nodegroup-config --cluster-name training --nodegroup-name gpu --node-repair-config enabled=false. EKS then no longer repairs nodes in this group. KubeNeuron checks again every minute."},
+		{"incident-hold-recent-change.golden", "Node group gpu changed at 15:30 UTC (EKS update: NodeRepairEnabled). KubeNeuron waits 30 minutes after a change and checks again at 16:00 UTC."},
+		{"incident-hold-read-denied.golden", "KubeNeuron could not read node group gpu: eks:ListUpdates was denied. Allow eks:ListUpdates in the controller's IAM role. KubeNeuron retries every minute."},
+	} {
+		t.Run(tc.golden, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "GET" || r.URL.Path != "/api/v1/incidents/inc-held" {
+					http.NotFound(w, r)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"incident": types.Incident{ID: "inc-held", State: types.StateEvaluating, Class: "xid-79", Target: types.Target{Node: "gpu-node-1"}, Playbook: "gpu-replace", OpenedAt: at.Add(-time.Minute)},
+					"audit":    []types.AuditEntry{{Time: at, Actor: "system", Action: "provider-recovery-unavailable", Result: tc.reason}}})
+			}))
+			defer server.Close()
+			got, err := runCommand(t, server.URL, "incidents", "show", "inc-held")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := os.ReadFile("testdata/" + tc.golden)
+			if os.Getenv("UPDATE_GOLDEN") != "" {
+				err = os.WriteFile("testdata/"+tc.golden, []byte(got), 0o644)
+			} else if got != string(want) {
+				t.Fatalf("incidents show:\n%s", got)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestResolveCloudSettlementHint(t *testing.T) {
 	for _, golden := range []string{"cloud-settlement.golden", "cloud-settlement-remove-first.golden"} {
 		t.Run(golden, func(t *testing.T) {

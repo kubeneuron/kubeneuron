@@ -1,0 +1,17 @@
+id:        inc-held
+state:     EVALUATING
+class:     xid-79
+node:      gpu-node-1
+gpu:       
+playbook:  gpu-replace (step 0, attempt 0)
+dry-run:   false
+signals:   0
+opened:    2026-11-20T15:40:00Z
+recovery:  unavailable [provider] (assessed 2026-11-20T15:41:00Z)
+reason:    Node group gpu changed at 15:30 UTC (EKS update: NodeRepairEnabled). KubeNeuron waits 30 minutes after a change and checks again at 16:00 UTC.
+fault:     unknown (no evidence recorded)
+Affected training jobs: unknown
+
+audit trail:
+TIME                  FROM  TO  ACTOR   ACTION                         RESULT
+2026-11-20T15:41:00Z            system  provider-recovery-unavailable  Node group gpu changed at 15:30 UTC (EKS update: NodeRepairEnabled). KubeNeuron waits 30 minutes after a change and checks again at 16:00 UTC.

@@ -5,6 +5,7 @@ package aws
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -58,6 +59,48 @@ func TestRequestSuccessorReplaysLostResponse(t *testing.T) {
 		t.Fatalf("lost persisted request time: %+v %v", got, err)
 	}
 
+}
+
+// recordedScaleRequest keeps the inputs of UpdateNodegroupConfig.
+type recordedScaleRequest struct {
+	inputs  []*eks.UpdateNodegroupConfigInput
+	created time.Time
+}
+
+func (r *recordedScaleRequest) UpdateNodegroupConfig(_ context.Context, in *eks.UpdateNodegroupConfigInput, _ ...func(*eks.Options)) (*eks.UpdateNodegroupConfigOutput, error) {
+	r.inputs = append(r.inputs, in)
+	return &eks.UpdateNodegroupConfigOutput{Update: &et.Update{Id: sdk.String("update-id"), Type: et.UpdateTypeConfigUpdate, Params: []et.UpdateParam{{Type: et.UpdateParamTypeDesiredSize, Value: sdk.String("3")}}, CreatedAt: &r.created}}, nil
+}
+
+// KubeNeuron changes only a group's size; it never changes EKS node auto
+// repair or any other group setting.
+func TestScaleRequestSendsOnlyTheSize(t *testing.T) {
+	requested := time.Now().Add(-time.Minute)
+	client := &recordedScaleRequest{created: requested}
+	plan := cloud.Successor{RequestedAt: requested, Operation: "op", Phase: cloud.SuccessorPlanned, State: map[string]string{"cluster": "cluster", "before": "2", "nodegroup": "workers"}}
+	for _, replay := range []bool{false, true} {
+		if _, err := sendScaleRequest(t.Context(), client, "cluster", plan, replay); err != nil {
+			t.Fatal(err)
+		}
+	}
+	allowed := map[string]bool{"ClusterName": true, "NodegroupName": true, "ClientRequestToken": true, "ScalingConfig": true}
+	for _, in := range client.inputs {
+		if in.NodeRepairConfig != nil {
+			t.Fatal("the scaling request sets nodeRepairConfig")
+		}
+		v := reflect.ValueOf(in).Elem()
+		for i := range v.NumField() {
+			if name := v.Type().Field(i).Name; !allowed[name] && v.Type().Field(i).IsExported() && !v.Field(i).IsZero() {
+				t.Fatalf("the scaling request sets %s", name)
+			}
+		}
+		if cfg := in.ScalingConfig; cfg.MinSize != nil || cfg.MaxSize != nil || sdk.ToInt32(cfg.DesiredSize) != 3 {
+			t.Fatalf("scaling config %+v", cfg)
+		}
+	}
+	if len(client.inputs) != 2 {
+		t.Fatalf("requests %d", len(client.inputs))
+	}
 }
 
 type scalingUpdateFixture struct {

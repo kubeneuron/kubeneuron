@@ -23,7 +23,7 @@ func checkInstanceStatus(ctx context.Context, client instanceStatusReader, insta
 	}
 	out, err := client.DescribeInstanceStatus(ctx, &ec2.DescribeInstanceStatusInput{InstanceIds: []string{instanceID}, IncludeAllInstances: awssdk.Bool(true)})
 	if err != nil {
-		return err
+		return &readError{"ec2:DescribeInstanceStatus", err}
 	}
 	if out == nil || len(out.InstanceStatuses) != 1 || awssdk.ToString(out.NextToken) != "" {
 		return errors.New("incomplete EC2 instance status")

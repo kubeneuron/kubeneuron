@@ -296,6 +296,14 @@ func cmdIncidents() *cobra.Command {
 			inc.ID, inc.State, inc.Class, inc.Target.Node, inc.Target.GPUUUID,
 			inc.Playbook, inc.StepIndex, inc.Attempt, inc.DryRun, inc.SignalSeen,
 			inc.OpenedAt.Format(time.RFC3339))
+		// The current reason recovery is held comes first, before the evidence.
+		recovery := detail.RecoveryAvailability
+		if recovery == nil {
+			recovery = types.RecoveryAvailabilityFromAudit(detail.Audit)
+		}
+		if recovery != nil {
+			_, _ = fmt.Fprintf(out, "recovery:  %s [%s] (assessed %s)\nreason:    %s\n", recovery.Status, recovery.Source, recovery.ObservedAt.Format(time.RFC3339), recovery.Reason)
+		}
 		if snap := detail.NodeConditions; snap != nil {
 			for _, condition := range snap.Conditions {
 				if condition.Type == "Ready" && condition.Status == "False" {
@@ -315,13 +323,6 @@ func cmdIncidents() *cobra.Command {
 		printTrainingRecovery(out, detail.AffectedJobs)
 		if detail.ObserveOnly != "" {
 			_, _ = fmt.Fprintf(out, "observe:   %s\n", detail.ObserveOnly)
-		}
-		recovery := detail.RecoveryAvailability
-		if recovery == nil {
-			recovery = types.RecoveryAvailabilityFromAudit(detail.Audit)
-		}
-		if recovery != nil {
-			_, _ = fmt.Fprintf(out, "recovery:  %s [%s] (assessed %s)\nreason:    %s\n", recovery.Status, recovery.Source, recovery.ObservedAt.Format(time.RFC3339), recovery.Reason)
 		}
 		for _, line := range authorisations(detail.Audit) {
 			_, _ = fmt.Fprintln(out, line)

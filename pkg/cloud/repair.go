@@ -105,9 +105,68 @@ type RepairEvidence struct {
 }
 
 type RepairPolicy struct {
-	Mode     RepairMode       `json:"mode"`
-	Reason   string           `json:"reason"`
+	Mode   RepairMode `json:"mode"`
+	Reason string     `json:"reason"`
+	// Action, when set, tells an operator what would let recovery go ahead.
+	Action   string           `json:"action,omitempty"`
 	Evidence []RepairEvidence `json:"evidence,omitempty"`
+	// Pool, when set, is the hold a pool assessment reports for this policy.
+	Pool *RecoveryHold `json:"-"`
+}
+
+// Message is the operator-facing text: the reason, then the action.
+func (p RepairPolicy) Message() string { return joinSentences(p.Reason, p.Action) }
+
+// RecoveryHold is a provider's operator-facing reason for holding recovery:
+// Reason says what is wrong, Action what to do or when the check passes.
+// Neither carries a raw provider error; Cause does, for the controller log.
+// PoolReason and PoolAction, when set, are the shorter texts of a pool row.
+type RecoveryHold struct {
+	Code       string
+	Reason     string
+	Action     string
+	PoolReason string
+	PoolAction string
+	Cause      error
+}
+
+// Reason codes of a RecoveryHold, shared with pool assessments.
+const (
+	HoldNativeRepair     = "native-repair-on"
+	HoldRecentChange     = "pool-changed-recently"
+	HoldUpdateRunning    = "pool-update-running"
+	HoldActivityRunning  = "pool-activity-running"
+	HoldChangedDuringRun = "pool-changed-during-check"
+	HoldUnconfirmed      = "repair-unconfirmed"
+	HoldReadFailed       = "read-failed"
+)
+
+func (h *RecoveryHold) Message() string { return joinSentences(h.Reason, h.Action) }
+
+// Transient reports a hold that clears without the operator: it says nothing
+// about whether the pool can take add-first.
+func (h *RecoveryHold) Transient() bool {
+	switch h.Code {
+	case HoldRecentChange, HoldUpdateRunning, HoldActivityRunning, HoldChangedDuringRun:
+		return true
+	}
+	return false
+}
+
+func (h *RecoveryHold) Error() string {
+	if h.Cause != nil {
+		return h.Message() + ": " + h.Cause.Error()
+	}
+	return h.Message()
+}
+
+func (h *RecoveryHold) Unwrap() error { return h.Cause }
+
+func joinSentences(a, b string) string {
+	if a == "" || b == "" {
+		return a + b
+	}
+	return a + " " + b
 }
 
 // RepairObservation distinguishes an unknown result from a confirmed absence

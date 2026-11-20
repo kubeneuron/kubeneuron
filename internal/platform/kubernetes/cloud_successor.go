@@ -4,6 +4,7 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -43,8 +44,10 @@ func (p *Platform) AddFirstAvailable(ctx context.Context, pin cloud.NodeIdentity
 	return provider.CheckAddFirst(ctx, pin.InstanceID)
 }
 
-// AssessAddFirstPool performs only the provider's read-only configuration check.
-// An EKS group can be assessed while successor execution is release-gated.
+// AssessAddFirstPool performs only the provider's read-only checks: the pool's
+// configuration, then whether the cloud's own repair would hold a replacement
+// (a *cloud.RecoveryHold). An EKS group can be assessed while successor
+// execution is release-gated.
 func (p *Platform) AssessAddFirstPool(ctx context.Context, pin cloud.NodeIdentity) error {
 	if err := pin.Validate(); err != nil {
 		return err
@@ -55,7 +58,35 @@ func (p *Platform) AssessAddFirstPool(ctx context.Context, pin cloud.NodeIdentit
 	if !ok {
 		return fmt.Errorf("no pool configuration reader")
 	}
-	return checker.CheckAddFirst(ctx, pin.InstanceID)
+	if err := checker.CheckAddFirst(ctx, pin.InstanceID); err != nil {
+		return err
+	}
+	provider, ok := p.recycler.(cloud.RepairAwareProvider)
+	if !ok {
+		return nil
+	}
+	ref, err := p.CloudNode(ctx, pin.Node)
+	if err != nil {
+		return err
+	}
+	policy, err := provider.RepairPolicy(ctx, ref)
+	switch {
+	case err != nil:
+		return err
+	case policy.Mode == cloud.RepairOn && policy.Pool != nil:
+		return policy.Pool
+	case policy.Mode == cloud.RepairOn:
+		return &cloud.RecoveryHold{Code: cloud.HoldNativeRepair, Reason: policy.Reason, Action: policy.Action}
+	case policy.Mode != cloud.RepairOff:
+		return nil
+	}
+	_, err = provider.OpenRepair(ctx, ref)
+	// A transient hold clears on its own; the incident shows it while it lasts.
+	var hold *cloud.RecoveryHold
+	if errors.As(err, &hold) && hold.Transient() {
+		return nil
+	}
+	return err
 }
 
 var _ platform.RemoveFirstChecker = (*Platform)(nil)

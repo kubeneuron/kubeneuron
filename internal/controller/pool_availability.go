@@ -98,11 +98,20 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 			}
 			row.CapabilityEnabled = enabled
 			var refusal *cloud.PoolRefusal
+			var hold *cloud.RecoveryHold
 			switch {
 			case err == nil && !enabled:
 				row.Status, row.ReasonCode, row.Reason = "unavailable", "eks-add-first-disabled", "add-first on EKS is not enabled in this release"
 			case err == nil:
 				row.Status = "available"
+			case errors.As(err, &hold):
+				row.Status, row.ReasonCode, row.Reason, row.Action = "unavailable", hold.Code, hold.Reason, hold.Action
+				if hold.PoolReason != "" {
+					row.Reason, row.Action = hold.PoolReason, hold.PoolAction
+				}
+				if hold.Code == cloud.HoldReadFailed || hold.Code == cloud.HoldUnconfirmed {
+					row.Status = "unknown"
+				}
 			case errors.As(err, &refusal):
 				row.Status, row.ReasonCode, row.Reason = "unavailable", refusal.Code, refusal.Reason
 				row.Action = poolRefusalAction(refusal)

@@ -127,6 +127,10 @@ func (c *Controller) assessUnavailableCloudRecovery(ctx context.Context, inc *ty
 	if last != nil && last.Action == "provider-recovery-unavailable" && last.Result == reason {
 		return true, "", nil
 	}
+	if err != nil && c.log != nil {
+		// The raw provider error goes to the log, once per new reason.
+		c.log.Warn("cloud recovery held", "incident", inc.ID, "reason", reason, "err", err)
+	}
 	if err := c.appendAudit(ctx, inc, "system", "provider-recovery-unavailable", reason); err != nil {
 		return true, "", err
 	}

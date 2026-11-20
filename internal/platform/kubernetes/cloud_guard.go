@@ -36,10 +36,10 @@ func (p *Platform) RecoveryEligibility(ctx context.Context, pin cloud.NodeIdenti
 	}
 	policy, err := provider.RepairPolicy(ctx, ref)
 	if err != nil {
-		v.Reason = "native-repair policy unavailable"
+		v.Reason = holdMessage(err, "native-repair policy unavailable")
 		return v, err
 	}
-	v.Mode, v.Reason = policy.Mode, policy.Reason
+	v.Mode, v.Reason = policy.Mode, policy.Message()
 	switch policy.Mode {
 	case cloud.RepairOff:
 	case cloud.RepairNotReadyOnly:
@@ -53,7 +53,7 @@ func (p *Platform) RecoveryEligibility(ctx context.Context, pin cloud.NodeIdenti
 	}
 	repair, err := provider.OpenRepair(ctx, ref)
 	if err != nil {
-		v.Reason = "open-repair query failed"
+		v.Reason = holdMessage(err, "open-repair query failed")
 		return v, err
 	}
 	if !repair.Known || repair.Active || repair.Replaced {
@@ -91,6 +91,15 @@ func (p *Platform) RecoveryEligibility(ctx context.Context, pin cloud.NodeIdenti
 		v.Reason = "node became NotReady during eligibility check; the cloud's own repair may act on it"
 	}
 	return v, nil
+}
+
+// holdMessage is a provider's operator-facing text for err, if it gave one.
+func holdMessage(err error, fallback string) string {
+	var hold *cloud.RecoveryHold
+	if errors.As(err, &hold) {
+		return hold.Message()
+	}
+	return fallback
 }
 
 func (p *Platform) ReplacePinnedNode(ctx context.Context, pin cloud.NodeIdentity) error {

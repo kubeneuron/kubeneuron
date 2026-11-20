@@ -27,7 +27,7 @@ func confirmedGroup(ctx context.Context, client membershipReader, id string, gro
 	}
 	members, err := client.DescribeAutoScalingInstances(ctx, &autoscaling.DescribeAutoScalingInstancesInput{InstanceIds: []string{id}})
 	if err != nil {
-		return "", err
+		return "", &readError{"autoscaling:DescribeAutoScalingInstances", err}
 	}
 	if members == nil || len(members.AutoScalingInstances) != 1 || sdk.ToString(members.NextToken) != "" {
 		return "", errors.New("incomplete Auto Scaling instance membership")
@@ -39,7 +39,7 @@ func confirmedGroup(ctx context.Context, client membershipReader, id string, gro
 	}
 	out, err := client.DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{AutoScalingGroupNames: []string{group}, IncludeInstances: sdk.Bool(true)})
 	if err != nil {
-		return "", err
+		return "", &readError{"autoscaling:DescribeAutoScalingGroups", err}
 	}
 	if out == nil || len(out.AutoScalingGroups) != 1 || sdk.ToString(out.NextToken) != "" || sdk.ToString(out.AutoScalingGroups[0].AutoScalingGroupName) != group {
 		return "", errors.New("incomplete Auto Scaling group response")
@@ -59,6 +59,9 @@ func confirmedGroup(ctx context.Context, client membershipReader, id string, gro
 	return group, nil
 }
 
+// errActivityRunning is an Auto Scaling activity that has not finished.
+var errActivityRunning = errors.New("unfinished or unknown Auto Scaling group activity")
+
 type activityReader interface {
 	DescribeScalingActivities(context.Context, *autoscaling.DescribeScalingActivitiesInput, ...func(*autoscaling.Options)) (*autoscaling.DescribeScalingActivitiesOutput, error)
 }
@@ -75,7 +78,7 @@ func checkGroupActivities(ctx context.Context, client activityReader, group stri
 	for {
 		out, err := client.DescribeScalingActivities(ctx, in)
 		if err != nil {
-			return err
+			return &readError{"autoscaling:DescribeScalingActivities", err}
 		}
 		if out == nil {
 			return errors.New("missing Auto Scaling activity response")
@@ -91,7 +94,7 @@ func checkGroupActivities(ctx context.Context, client activityReader, group stri
 					oldPage = false
 				}
 			default:
-				return errors.New("unfinished or unknown Auto Scaling group activity")
+				return errActivityRunning
 			}
 		}
 		token := sdk.ToString(out.NextToken)
