@@ -4,13 +4,13 @@ package journal
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 )
 
 var errTickBudget = errors.New("journal tick budget exhausted")
@@ -76,6 +76,7 @@ func (r directoryReader) Next(ctx context.Context, after Cursor) (Batch, error) 
 }
 
 type scanCursor struct {
+	FileList  string `json:",omitempty"`
 	Positions map[string]filePosition
 	Resume    string
 	Starting  bool
@@ -104,7 +105,15 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 	var batch Batch
 	remaining := MaxEntriesPerTick
 	outputBytes := MaxBytesPerTick
-	if state.Resume != "" {
+	// Rotation can insert an archive before the saved path. Rescan in that
+	// case, using per-file positions to suppress already delivered entries.
+	hash := sha256.New()
+	for _, path := range files {
+		io.WriteString(hash, path)
+		hash.Write([]byte{0})
+	}
+	listID := hex.EncodeToString(hash.Sum(nil))
+	if state.Resume != "" && state.FileList == listID {
 		for i, path := range files {
 			if path == state.Resume {
 				files = files[i:]
@@ -112,7 +121,7 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 			}
 		}
 	}
-	previousArchive := ""
+	state.FileList = listID
 	state.Resume = ""
 	for _, path := range files {
 		if err := ctx.Err(); err != nil {
@@ -121,9 +130,6 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 		f, h, err := openHeader(path, &readBytes)
 		if errors.Is(err, errTickBudget) {
 			state.Resume = path
-			if filepath.Base(path) == "system.journal" {
-				state.Resume = previousArchive
-			}
 			batch.More = true
 			break
 		}
@@ -141,9 +147,6 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 		if errors.Is(err, errTickBudget) {
 			state.Positions[key] = p
 			state.Resume = path
-			if filepath.Base(path) == "system.journal" {
-				state.Resume = previousArchive
-			}
 			batch.More = true
 			break
 		}
@@ -151,9 +154,6 @@ func (r directoryReader) next(ctx context.Context, after Cursor, readBytes int) 
 			return Batch{}, err
 		}
 		state.Positions[key] = p
-		if filepath.Base(path) != "system.journal" {
-			previousArchive = path
-		}
 	}
 	if !batch.More {
 		state.Starting = false

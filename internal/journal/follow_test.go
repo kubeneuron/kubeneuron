@@ -266,8 +266,17 @@ func TestResumeLargeUncompressedBacklog(t *testing.T) {
 }
 
 func TestHeaderBudgetResumesInitialTail(t *testing.T) {
+	for _, names := range [][]string{{"system@a.journal", "system@b.journal", "system.journal"}, {"a/system.journal", "b/system.journal", "c/system.journal"}} {
+		t.Run(names[0], func(t *testing.T) { testHeaderBudget(t, names) })
+	}
+}
+
+func testHeaderBudget(t *testing.T, names []string) {
 	dir := t.TempDir()
-	for i, name := range []string{"system@a.journal", "system@b.journal", "system.journal"} {
+	for i, name := range names {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0700); err != nil {
+			t.Fatal(err)
+		}
 		buf := make([]byte, 208)
 		copy(buf, "LPKSHHRH")
 		buf[24] = byte(i + 1)
@@ -284,6 +293,10 @@ func TestHeaderBudgetResumesInitialTail(t *testing.T) {
 	b, err := r.(directoryReader).next(context.Background(), "", 2*208)
 	if err != nil || !b.More || len(b.Records) != 0 {
 		t.Fatalf("first tick: %+v %v", b, err)
+	}
+	r, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
 	}
 	b, err = r.(directoryReader).next(context.Background(), b.Cursor, 2*208)
 	if err != nil || b.More || len(b.Records) != 0 {
