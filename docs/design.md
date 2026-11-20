@@ -1,6 +1,8 @@
 # KubeNeuron — Design Document
 
-Status: **accepted target architecture**, actively maintained.
+This historical design record describes decisions made for 0.x. See the [capability matrix](reference-capabilities.md) for current behavior and validation.
+
+Status: **accepted target architecture at the time of review**.
 
 Last updated: 2026-09-20 (v0.5.0 released; claims last
 re-audited against v0.5.0)

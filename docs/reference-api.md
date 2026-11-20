@@ -41,7 +41,7 @@ refused too. Behind a reverse proxy the host is also matched against
 `application/json` (or a YAML type for a candidate upload), otherwise
 `415`. Bearer-token requests are not affected.
 
-Critical v0.4 operations additionally require Kubernetes TokenReview group
+Critical operations additionally require Kubernetes TokenReview group
 membership. A browser session and the shared static token intentionally carry
 no such groups and cannot approve an autonomy plan or request Extended
 diagnostics.
@@ -72,14 +72,14 @@ Without a configured operator token the operator API is disabled entirely
 | `POST /api/v1/incidents` | manual remediation trigger; body `{"node","class","actor?","gpu_uuid?","gpu_index?"}` — `node` and `class` are required; `actor` only with the static token |
 | `POST /api/v1/incidents/{id}/approve` | approve the pending step; body `{"actor","reason?","park_epoch?","impact_digest?"}` |
 | `POST /api/v1/incidents/{id}/reject` | reject the pending step; body `{"actor","reason?","park_epoch?","impact_digest?"}` |
-| `GET /api/v1/incidents/{id}/impact-preview[?round=N]` | the newest `impact-preview/v1` document of one approval round (the current round by default) — what the pending step and the disruptions downstream of it would touch (v0.8.0, below) |
-| `POST /api/v1/incidents/{id}/impact-preview/recompute` | recompute the current round's preview; body `{"actor"}` and `Idempotency-Key` required; answers the new document (v0.8.0) |
+| `GET /api/v1/incidents/{id}/impact-preview[?round=N]` | the newest `impact-preview/v1` document of one approval round (the current round by default) — what the pending step and the disruptions downstream of it would touch (see below) |
+| `POST /api/v1/incidents/{id}/impact-preview/recompute` | recompute the current round's preview; body `{"actor"}` and `Idempotency-Key` required; answers the new document |
 | `POST /api/v1/incidents/{id}/acknowledge` | record operator custody without changing remediation state; body `{"actor","reason?","resource_version?"}` and `Idempotency-Key` required |
-| `POST /api/v1/incidents/{id}/resolve` | manually resolve; current v0.4 controllers require `{"actor","reason?","resource_version?"}` and `Idempotency-Key` |
+| `POST /api/v1/incidents/{id}/resolve` | manually resolve; current controllers require `{"actor","reason?","resource_version?"}` and `Idempotency-Key` |
 
 Decisions return `204 No Content`. `park_epoch` pins the decision to the
 approval round shown to the human; a decision against a superseded round
-is refused. `impact_digest` (v0.8.0) pins an approve to the impact
+is refused. `impact_digest` pins an approve to the impact
 preview the human read: an approve whose digest is not the round's current
 preview is refused with `409`, and under
 `spec.safety.impactPreview.requireForApproval` an approve without a digest,
@@ -170,9 +170,9 @@ replaces a node without approval only when the fault location is
 | `POST /api/v1/pause` | pause all automated remediation (big red button) |
 | `DELETE /api/v1/pause` | resume |
 
-## Remediation intelligence (v0.4.0)
+## Remediation intelligence
 
-The v0.4 operational paths use one side-effect-free, versioned decision
+The operational paths use one side-effect-free, versioned decision
 evaluator. A response that contains a decision also contains its evaluator
 version, configuration digest, explicit expiry, reason codes, limits, and
 redacted evidence references. A snapshot is immutable once captured: a newer
@@ -193,12 +193,9 @@ with `Retry-After`.
 
 Three surfaces below — runtime contract coverage, the candidate runtime
 contract impact inside previews, and runtime contract qualifications — form
-the **GPU Runtime Contract Lifecycle** scope of v0.5.0, released on
-2026-09-20. They are unit-tested and driven by the
+the **GPU Runtime Contract Lifecycle** interface. They are unit-tested and driven by the
 CPU-only kind integration harness against a real controller with synthetic
-accelerator evidence; no GPU hardware run has called them. A v0.4.0
-controller answers `404` on the new routes and
-its previews carry no `runtime_contract_impact`. All three are statements
+accelerator evidence; no GPU hardware run has called them. All three are statements
 about evidence: none of them is read by admission, incidents, action dispatch,
 verification before resolve, or `GPUAutonomyPlan`, and none adds a CRD, RBAC
 rule, or store migration.
@@ -209,7 +206,7 @@ rule, or store migration.
 |---|---|
 | `GET /api/v1/readiness` | stable node-name ordered fleet page with `items`, optional opaque `next_cursor`, and evaluator version |
 | `GET /api/v1/nodes/{node}/readiness` | one live explainability response: snapshot, typed decision, reason codes, limits, evidence references and effective digest; plus an additive `topology` object (the device topology classification below) when the controller classifies device topology |
-| `GET /api/v1/nodes/{node}/topology` | one live, read-only `topology-classification/v1` document: the node's device layout and whether device-scoped actions are eligible on it (v0.8.0) |
+| `GET /api/v1/nodes/{node}/topology` | one live, read-only `topology-classification/v1` document: the node's device layout and whether device-scoped actions are eligible on it |
 | `GET /api/v1/nodes/{node}/evidence` | redacted evidence-reference timeline for the current node decision |
 
 Fleet readiness accepts `limit` (1–500), opaque `cursor`, `state`
@@ -218,7 +215,7 @@ Fleet readiness accepts `limit` (1–500), opaque `cursor`, `state`
 node labels `kubeneuron.io/tenant` and `kubeneuron.io/cluster`; they are a
 filtering contract, not a substitute for Kubernetes RBAC on the API itself.
 
-### Device topology (read-only, v0.8.0)
+### Device topology (read-only)
 
 `GET /api/v1/nodes/{node}/topology` classifies one node's device layout from
 the evidence the controller already holds and says whether a device-scoped
@@ -302,14 +299,12 @@ rendered as `not-observed` with the failed check as the reason (for example
 and add `DraObservationInvalid` to `reasons`; the raw observation is never
 rendered or digested.
 
-This surface shipped in v0.8.0 (2026-11-08). It is unit-tested and was
+On the historical v0.8.0 build, this route was
 exercised on one Tesla T4 (`hack/hw-e2e.sh test-impact`, where every
 classification was `whole-device` refused with `ReportNotReady`, because a
 guest cannot reset the GPU); nothing is claimed for any other device.
-Controllers before v0.8.0 have no such route and their readiness responses
-carry no `topology` field.
 
-### Impact preview (v0.8.0)
+### Impact preview
 
 With `spec.safety.impactPreview.enabled`, every park and re-park for
 approval computes, under the policy `budget` (default 15s, at most 60s), a
@@ -371,7 +366,7 @@ the incident (`impact-preview-computed`, `impact-preview-unavailable`,
 summary and the digest beside the round. A released controller has no such
 routes and no `impact_digest` field; it rejects the field with `400`.
 
-### Runtime contract coverage (read-only, v0.5.0)
+### Runtime contract coverage (read-only)
 
 | Route | Purpose |
 |---|---|
@@ -464,14 +459,13 @@ candidate digest, inventory snapshot ID, evaluator version, and per-node
 before/after reason/limit deltas; stale or incomplete inventory fails with
 `422` rather than returning a plausible partial change.
 
-#### Candidate runtime contract impact (pre-deploy, static, non-authorizing; v0.5.0)
+#### Candidate runtime contract impact (pre-deploy, static, non-authorizing)
 
 Every per-node delta in `newly_eligible`, `newly_blocked`,
 `changed_observed_only`, and `unchanged` carries a `runtime_contract_impact`
 object, and the preview carries `runtime_contract_impact_version`
 (`candidate-runtime-contract-impact/v1`) and `runtime_contract_profile_change`.
-Both are absent on previews persisted before this field existed, including
-every preview a v0.4.0 controller created. The impact is a pure function of
+Both are absent on previews persisted before this field existed. The impact is a pure function of
 the candidate profile set and the captured node name, labels, and vendor
 identity. That vendor identity is taken from the captured report, and it is
 the **only** thing the captured report contributes: the report's attestation
@@ -584,7 +578,7 @@ hardware-qualified adapter that accepts the persisted deterministic effect ID
 as its idempotency key. The REST/CRD contract does not itself certify any
 driver/runtime combination.
 
-### Runtime contract qualifications (evidence only, v0.5.0)
+### Runtime contract qualifications (evidence only)
 
 | Route | Purpose |
 |---|---|
@@ -631,7 +625,7 @@ Responses present `requirements.min_duration` as a duration string.
 
 | Route | Purpose |
 |---|---|
-| `GET /api/v1/audit-events` | globally ordered, opaque-cursor-paged append-only v0.4 audit events; filters `kind`, `resource_id`, `tenant`, `cluster`, `actor`, `request_id`, `decision_id`, `action`, `since`, `until` |
+| `GET /api/v1/audit-events` | globally ordered, opaque-cursor-paged append-only audit events; filters `kind`, `resource_id`, `tenant`, `cluster`, `actor`, `request_id`, `decision_id`, `action`, `since`, `until` |
 | `GET /api/v1/backup` | streams a transactionally consistent SQLite snapshot (`VACUUM INTO`); see [operations](operations.md#sqlite-workflow-store-backup-and-restore) |
 
 Operational audit events form a per-resource SHA-256 chain (`prev_hash`,

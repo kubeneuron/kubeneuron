@@ -165,9 +165,9 @@ The table below records the evidence for each action.
 | Cloud node replacement | See [live cloud evidence](#live-cloud-evidence) for provider-specific test coverage. | Historical and current paths are listed separately there. |
 | Cloud node recycle (stop/start in place) | shipped, not hardware-validated (AWS only) | Same files. The AWS provider refuses autoscaling-group members (`cloud.ErrRecycleNotViable`), and every hardware node so far has been an ASG member, so the successful path has never run. |
 
-## Table 3 — GPU reliability observability (v0.7, NVIDIA / DCGM only)
+## Table 3 — GPU reliability observability (NVIDIA / DCGM only)
 
-v0.7 adds a read-only observability layer beside the detection and
+The GPU metric catalog describes a read-only observability layer beside the detection and
 remediation paths above: a metric catalog, a wider dcgm-exporter profile, a
 scrape label contract, recording rules, five Grafana boards and shadow-only
 alerts. Every row is NVIDIA-specific by construction (the inputs are DCGM
@@ -180,7 +180,7 @@ evidence limited**, and their notes name exactly what that phase observed;
 the other three stay **shipped, not hardware-validated**, because the phase
 does not look at Grafana, fires no shadow alert, and never computed a
 fail-slow score for a real peer group. No row is *hardware-validated*. The
-AMD and Intel columns of Table 1 are untouched by v0.7; the catalog maps NVIDIA/DCGM sources only, and mapping
+The catalog maps NVIDIA/DCGM sources only, and mapping
 any other vendor's exporter is a later phase. The layer adds no action, no rung,
 no controller or agent code path, no CRD field, no store migration and no
 controller RBAC; a cell here is a claim about what an operator can *see*,
@@ -203,10 +203,9 @@ no shadow alert, and does not prove every catalog field, rule or dashboard —
 which is why the four promoted rows stop at *hardware evidence limited*. The
 hardware this project has access to (Tesla T4) has no NVLink, no row
 remapping and no MIG, so the rows that read those fields cannot be validated
-on it even when the gates run; nothing here is evidence for A100/H100. That
-run is not release authorization: no `v0.7.0` tag or release exists.
+on it even when the gates run; nothing here is evidence for A100/H100.
 
-## Table 4 — Workload-safe recovery (v0.8, hardware evidence limited to one Tesla T4)
+## Table 4 — Workload-safe recovery (hardware evidence limited to one Tesla T4)
 
 The CPU-only evidence behind every cell is the same: unit tests, the offline
 kind gate (`make test-integration-kind`, which drives the advisory, the
@@ -311,12 +310,6 @@ a `vendor` annotation on an Alertmanager alert, or on a manual trigger, is
 ignored, and an agent event whose fault names a malformed vendor id is
 rejected.
 
-Until v0.2.3 it did not resolve at all: the NVIDIA report was read
-unconditionally, so an AMD device-scoped incident held for the evidence
-deadline and then parked in `NEEDS_HUMAN` after the cordon and drain had
-already run — and an AMD fleet's recovery report read 0% recovered for a
-system that had recovered it.
-
 **An NVIDIA node that no `AcceleratorRuntimeProfile` selects is verified the
 same way, and for the same reason.** The operator-managed agent asks the
 controller which profile selects its node and, when none does, holds
@@ -333,11 +326,7 @@ ladder a node-scoped incident runs. The full-depth check is unchanged
 wherever the agent WAS told to report: a node a profile selects still fails
 closed on a missing or stale report, a fresh report that says the runtime is
 not ready is never outranked by the heartbeat, and overlapping profiles or
-unresolvable node labels fail closed with the cause in the reason. Until
-v0.4.0 the no-profile case was indistinguishable from a degraded agent, so
-every device-scoped incident on an ordinary Enabled install with a real
-driver parked in `NEEDS_HUMAN` after the evidence deadline; hardware run 12
-was the first to attempt one and found it.
+unresolvable node labels fail closed with the cause in the reason.
 
 **What AMD still does not get: arming, per-device reset, or a device-holder
 preflight with anything to read.** Detection, classification, cordon, drain
@@ -403,7 +392,7 @@ hardware attempt failed with `systemctl reboot: exit status 127` *after* a human
 had approved it, which is why `Executor.PreflightReboot` exists. Every EKS
 ladder that reached a reboot rung ran it in dry-run.
 
-## Two silent no-ops (fixed in v0.2.2 and v0.2.3)
+## Vendor matching for inventory and eviction
 
 Most missing vendor support fails loudly — no driver, no detection source, no
 events. Two places used to fail **quietly**, which is worse. Both are fixed;
@@ -447,7 +436,7 @@ ledger in [design.md §2.4c](design.md) with this page's cell for each:
 
 | Joint | Matrix consequence |
 |---|---|
-| ~~`verifyRuntimeEvidence` reads an NVIDIA accelerator report for every GPU-class target~~ | **fixed in v0.2.3.** A vendor with no runtime adapter now verifies on the agent heartbeat, logged as reduced depth, instead of holding for a report nothing can produce |
+| ~~`verifyRuntimeEvidence` reads an NVIDIA accelerator report for every GPU-class target~~ | A vendor with no runtime adapter now verifies on the agent heartbeat, logged as reduced depth, instead of holding for a report nothing can produce |
 | arming requires the concrete `*nvml.SMI` driver | no non-NVIDIA node can be armed for destructive execution |
 | the physical-reset gate is `CapabilityNVIDIAReset` / `allowNVIDIAReset` only | per-device reset is structurally NVIDIA-only, not merely unimplemented |
 | device-holder preflight (`holders.go`) has no non-NVIDIA report to read | it reads the incident's own vendor now, but only NVIDIA agents produce holder data, so the pre-cordon obstruction check is unprotected elsewhere — conservative in direction, absent in effect |

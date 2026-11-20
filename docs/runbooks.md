@@ -88,7 +88,7 @@ metrics path its series stopped arriving. The incident is `agent-down`
 no step runs, in any mode and whatever policy binds the class. Check the agent pod (`kubectl -n <ns> logs ds/<name>-agent`),
 its `/readyz`, and the mTLS material if it logs TLS errors.
 
-## Shadow-only GPU alerts (v0.7, route to humans, never to the controller)
+## Shadow-only GPU alerts (route to humans, never to the controller)
 
 Every `ShadowGpu*` rule in `configs/vmalert/gpu-shadow-rules.yaml` (deployed
 as the `kubeneuron-gpu-shadow` VMRule, group `gpu-shadow`) is observation
@@ -235,7 +235,7 @@ inhibited alert, a paused node), and the `GpuRowRemapPending` runbook above
 applies. Row remapping is Ampere and later; the series is absent on a
 Tesla T4.
 
-## Workload-safe recovery alerts (v0.8.0, route to humans)
+## Workload-safe recovery alerts (route to humans)
 
 Both rules read counters that exist only on an installation that opted into
 `spec.safety.impactPreview` or `spec.safety.checkpointCoordination.advisory`

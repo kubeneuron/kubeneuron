@@ -373,7 +373,7 @@ PVC. Deleting the runtime namespace also deletes retained PVCs. Use backups
 and a `Retain` reclaim policy for production. The claim can
 grow (`workflowStore.sqlite.size`) but never shrink. High-volume operational
 tables (events, outbox, completed actions) are pruned hourly with a 90-day
-default (`-store-retention`). v0.4 candidate, preview, health-check,
+default (`-store-retention`). Candidate, preview, health-check,
 simulation, autonomy-plan, rollout, and effect summaries follow the same data
 retention window only after they are terminal and expired. Idempotency records
 expire after their retry window. Operational audit chains are different: a
@@ -384,7 +384,7 @@ by default; budget roughly a few KB per incident step, or opt in to
 `-store-audit-retention` to prune *terminal* incidents with their audit and
 approval history after a window you choose.
 
-## v0.4 remediation intelligence and autonomy
+## Remediation intelligence and autonomy
 
 The native operations paths are the system of record for readiness, candidate
 review, diagnostics, simulation, incident custody, autonomy observations, and
@@ -463,7 +463,7 @@ operator's rollout guide.
   time out; a step whose timeout leaves nothing after the reserve does not
   wait at all.
 
-**Advisory at approval park (v0.8.0).** `advisory.enabled: true`
+**Advisory at approval park.** `advisory.enabled: true`
 inside the block adds no verb and no wait: when an incident parks for
 approval with a disruption downstream, eligible Pods are stamped with the
 `kubeneuron.io/checkpoint-advisory-*` keys under their own `budget` (default
@@ -475,7 +475,7 @@ without its disruption withdraws the notice best effort
 protocol is in [playbook authoring](playbook-authoring.md). A released
 controller has no such field; this tree carries it as development work.
 
-**Checkpoint groups (v0.8.0).** `groups.enabled: true` inside the
+**Checkpoint groups.** `groups.enabled: true` inside the
 block makes a disruption's request reach a member's peers (same namespace,
 same `kubeneuron.io/checkpoint-group`) with their own deadline from the same
 formula; `crossNode` (default off) decides whether peers on other nodes are
@@ -486,7 +486,7 @@ list per group in that namespace; no verb is added. Peer outcomes land in
 `checkpoint-group-request` row per group on the incident's audit trail.
 Start with `crossNode: false`.
 
-**Impact preview (v0.8.0).** `spec.safety.impactPreview.enabled:
+**Impact preview.** `spec.safety.impactPreview.enabled:
 true` computes, at every park for approval, a durable record of what the
 pending step would touch (the [REST API reference](reference-api.md#impact-preview-v08-development)
 has the document), hands a three-line summary to the notification channels,
@@ -669,19 +669,16 @@ scrape_configs:
           credentials_file: /etc/vmagent/kubeneuron-token
 ```
 
-## GPU reliability telemetry: exporter profile and scrape labels (v0.7)
+## GPU reliability telemetry: exporter profile and scrape labels
 
-v0.7 widens what the dependency profile *observes* and changes nothing about
-what KubeNeuron *does*: the exporter emits more DCGM series, vmagent stamps
+The exporter emits DCGM series, vmagent stamps
 a few well-defined labels on them, recording rules normalise them into
 `kubeneuron_gpu_*` series, five Grafana boards read those, and a set of
 shadow-only alerts shows what *would* be worth a look. This is observability
 only. No detector threshold, playbook, controller-facing alert or controller
 path is added or altered by it, and nothing here starts a remediation. The
 agent's own GPU health path (`dcgmi dmon` on field 230 and `nvidia-smi`) is
-independent of the exporter profile. None of the v0.7 additions has run
-against GPU hardware in this tree: the gates the release plan requires for
-that have not been executed, and no document in this tree says otherwise.
+independent of the exporter profile. See the [capability matrix](reference-capabilities.md) for hardware evidence.
 
 **The profile.** `deploy/kubernetes/dependencies/gpu-operator/values.yaml`
 (`dcgmExporter.config.data`) lists exactly the tier T0 and tier T1 fields of
@@ -690,7 +687,7 @@ the [GPU metric catalog](reference-gpu-metrics.md) that have a canonical
 pinned dcgm-exporter uses. A unit test pins the list to the catalog in both
 directions. The sticky last-XID gauge (230), the recovery-action field
 (1523), the P-state (190) and every profiling field except the PCIe byte
-rates are deliberately not listed. Only the nine series the v0.6.1 profile
+rates are deliberately not listed. Only the nine series the baseline profile
 had were ever scraped by a recorded run of this project (on a Tesla T4);
 every added series is listed from NVIDIA documentation and has not been
 observed on any GPU by this project. Series documented as absent for a GPU
@@ -716,17 +713,14 @@ kubectl rollout status daemonset/nvidia-dcgm-exporter \
 Confirm with a series the old profile lacked, such as
 `DCGM_FI_DEV_POWER_USAGE`, on the exporter's `/metrics` or in VMSingle.
 
-**Rollback.** Put the nine-series v0.6.1 list back into
-`dcgmExporter.config.data` (the dependency README carries it verbatim, and
-`git show v0.6.1:deploy/kubernetes/dependencies/gpu-operator/values.yaml`
-has the whole file) and run the same two commands. Every controller-facing
+**Rollback.** Restore the nine-series list from the dependency README in `dcgmExporter.config.data` and run the same two commands. Every controller-facing
 alert rule (`Gpu*`) reads one of those nine series, so no incident-opening
 rule loses its input; no controller, agent or store state is involved. The
 canonical and derived `kubeneuron_gpu_*` series that were fed by the added
 fields stop being recorded (there is no `or vector(0)` anywhere, so they go
-absent, not to zero), the v0.7 dashboards show No data for those panels, and
+absent, not to zero), the dashboards show No data for those panels, and
 the shadow alerts built on them fall silent. That is the whole effect, and
-it reverses again with the forward rollout above. To remove the v0.7 rules
+it reverses again with the forward rollout above. To remove the telemetry rules
 as well, delete the `kubeneuron-gpu-recording` and `kubeneuron-gpu-shadow`
 VMRules; the controller-facing `kubeneuron-gpu` VMRule is a separate object
 and is untouched by either step.
@@ -805,13 +799,12 @@ with `Gpu`, so the Alertmanager route that feeds the controller webhook
 carries the label `kubeneuron_shadow="true"`, and the shipped Alertmanager
 config routes that label to the `human-default` receiver in a route placed
 *before* the webhook route, with `continue: false`; and no `ShadowGpu*` name
-is in the controller's alert-to-class map, which is itself pinned to its
-pre-v0.7 content, so a shadow alert that somehow reached the webhook would
+is in the controller's alert-to-class map, so a shadow alert that somehow reached the webhook would
 be dropped as unknown. They carry `severity: info`. The Remediation &
 Recovered Capacity and Fail-slow Radar boards show them through vmalert's
 own `ALERTS{kubeneuron_shadow="true"}` series; the controller exports no
 shadow metric and keeps no shadow state. Each rule has an entry in the
-[runbooks](runbooks.md#shadow-only-gpu-alerts-v07-route-to-humans-never-to-the-controller),
+[runbooks](runbooks.md#shadow-only-gpu-alerts-route-to-humans-never-to-the-controller),
 and each entry opens with the sentence that matters. To disable them, delete
 the `kubeneuron-gpu-shadow` VMRule; nothing else notices. The
 `human-default` receiver is a placeholder in the shipped profile: an empty
@@ -1296,7 +1289,7 @@ suite is a separate, gated target that always destroys its cluster afterward.
   including any other well-formed digest, or when the install step would
   accept an unverified download. Moving kubectl is a reviewed change to the
   workflow and the verifier together.
-- **GPU operator profile:** `up-finish` installs the checked-in v0.7
+- **GPU operator profile:** `up-finish` installs the checked-in
   reliability profile (`deploy/kubernetes/dependencies/gpu-operator/values.yaml`,
   chart `v26.3.3`) with `--values` plus the EKS-only overrides
   `driver.enabled=false` and `dcgm.enabled=true`. A `GPU_OPERATOR_VERSION` that
@@ -1398,7 +1391,7 @@ separately.
    letting the quiet window resolve the incident.
 7. Exercises the **threshold path**: XID 92 holds sub-threshold in `OBSERVING`
    and the third signal escalates.
-8. Three v0.8 workload-safe phases, on the one GPU node and before it is
+8. Three workload-safe phases, on the one GPU node and before it is
    terminated. Each first pins an `AcceleratorRuntimeProfile` to the driver
    and DCGM client versions the agent on that node answers with, because the
    agent attests its runtime only while a profile selects the node and the

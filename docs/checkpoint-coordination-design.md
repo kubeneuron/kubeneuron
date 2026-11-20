@@ -1,14 +1,9 @@
 # Checkpoint coordination — design and Phase 1 implementation record
 
-Status: **Phase 1 implemented and released in v0.6.0** (published
-2026-10-11 UTC;
-[GitHub Release](https://github.com/kubeneuron/kubeneuron/releases/tag/v0.6.0),
-verified with `hack/verify-release.sh`). Design accepted 2026-08-05. The
-manifests, chart, and samples in this source tree carry the v0.8.0 pins
-(v0.8.0, published 2026-11-08, is the latest release); the v0.6.1
-security and toolchain patch and the v0.7.0 observability release leave
-Phase 1 unchanged, and v0.8.0 adds the opt-in advisory and
-group blocks described in the
+This historical design record describes decisions made for 0.x. See the [capability matrix](reference-capabilities.md) for current behavior and validation.
+
+
+Status: **Phase 1 implemented and released in v0.6.0**; v0.8.0 added the advisory and group settings described in the
 [workload-safe recovery design record](workload-safe-recovery-design.md).
 Nothing in this document is a claim that the feature has been exercised on
 GPU hardware: the release source passed the full AWS hardware harness on

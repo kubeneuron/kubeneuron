@@ -1,11 +1,12 @@
 # Workload-safe GPU recovery — design record (v0.8.0)
 
+This historical design record describes decisions made for 0.x. See the [capability matrix](reference-capabilities.md) for current behavior and validation.
+
+
 Status: **design accepted for v0.8 development; implemented and released
 in v0.8.0 (published 2026-11-08 UTC), validated by the gates the CHANGELOG
 records (unit, kind, the CPU-only examples fixture, and hardware runs on a
-single Tesla T4).** Recorded 2026-11-05. The source tree that carries this
-page pins v0.8.0, the latest published release; v0.7.0 and earlier
-controllers have none of the surfaces described here. Every sentence below is
+single Tesla T4).** Recorded 2026-11-05. Every sentence below is
 a decision about what to build and in which order; what shipped, and with
 which evidence, is stated by each surface's reference page and by the
 capability matrix with the gate, SHA and date that proved it. This page

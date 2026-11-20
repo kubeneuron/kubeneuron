@@ -318,10 +318,10 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
     The assets are covered by a single `checksums-vX.Y.Z.txt`, signed with
     cosign against this repository's GitHub OIDC identity. To verify a release
     end to end — asset set, checksum coverage, signature, and digest pinning —
-    run the same script the release pipeline runs on itself:
+    set `RELEASE_TAG` to the tag you downloaded and run:
 
     ```sh
-    hack/verify-release.sh v0.2.2
+    hack/verify-release.sh "$RELEASE_TAG"
     ```
 
 ## 2. Namespace and root object
