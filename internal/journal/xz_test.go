@@ -50,3 +50,30 @@ func TestXZInterruptedFieldThenCompleteField(t *testing.T) {
 		t.Fatalf("complete field: got %q, error %v", got, err)
 	}
 }
+
+// FuzzXZFieldSequence checks that reusing the dictionary across valid fields
+// preserves the exact bytes of each message, irrespective of their order.
+func FuzzXZFieldSequence(f *testing.F) {
+	names := []string{"old", "new", "after rotation", "dict8"}
+	messages := []string{"MESSAGE=old", "MESSAGE=new", "MESSAGE=after rotation", "MESSAGE=synthetic dictionary check"}
+	blocks := make([][]byte, len(names))
+	for i, name := range names {
+		var err error
+		blocks[i], err = os.ReadFile("testdata/" + name + ".xz")
+		if err != nil {
+			f.Fatal(err)
+		}
+	}
+	f.Add([]byte{0, 1, 2, 3, 0})
+	f.Fuzz(func(t *testing.T, order []byte) {
+		var decoders fieldDecoders
+		for _, selector := range order[:min(len(order), MaxEntriesPerTick)] {
+			i := int(selector) % len(blocks)
+			block := blocks[i]
+			got, err := decoders.decodeField(1, io.NewSectionReader(bytes.NewReader(block), 0, int64(len(block))))
+			if err != nil || string(got) != messages[i] {
+				t.Fatalf("field %s: got %q, error %v", names[i], got, err)
+			}
+		}
+	})
+}
