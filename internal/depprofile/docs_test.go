@@ -157,7 +157,7 @@ func TestDocsScopeStatements(t *testing.T) {
 		}},
 		operationsDoc: {ops, []string{
 			"nothing here starts a remediation",
-			"has not been observed on any GPU by this project",
+			"have not been observed on a GPU by this project",
 			"`driver` is **intentionally absent**",
 			"kubectl rollout restart daemonset/nvidia-dcgm-exporter",
 			"reference-gpu-metrics.md",
