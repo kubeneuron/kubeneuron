@@ -141,10 +141,10 @@ func (j *journalLabels) want(cfg *config.AgentJournal, n *platform.JournalNode, 
 	if !overridden {
 		dir = journalDirForImage(n.OSImage, n.ProviderID)
 	}
-	switch {
-	case dir == kubeneuronv1alpha1.JournalDirNone:
+	switch dir {
+	case kubeneuronv1alpha1.JournalDirNone:
 		return "", JournalReasonDisabled
-	case dir == "":
+	case "":
 		return "", JournalReasonOSImageNotRecognized
 	}
 	basis := n.OSImage + "\x00" + dir
