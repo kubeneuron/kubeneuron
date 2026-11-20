@@ -1,25 +1,22 @@
 # KubeNeuron
 
-KubeNeuron helps Kubernetes operators detect accelerator faults and replace affected cloud nodes. Start in DryRun to see the proposed actions. In Approval mode an operator authorizes disruptive steps. In Automatic mode the controller follows the configured policy and records each decision in the incident.
+KubeNeuron helps teams that train models on Kubernetes recover cloud capacity after an accelerator or node fault. It detects the fault, replaces the affected node when policy permits, and closes the incident once the controller verifies the new node. In Automatic mode this can complete without waking an operator to repair the node manually.
 
 ## v1.0.0-rc.1 candidate scope and evidence
 
-On Amazon EKS, Azure AKS and Google GKE, replacement depends on the node pool and its policy. Use `kubeneuronctl pools` to inspect add-first eligibility and `kubeneuronctl incidents show <id>` to see the evidence for a repair. The candidate targets automatic incident closure when the controller confirms the new node. The resolution records how the node was identified and what accelerator evidence was available. Training progress is tracked separately.
+The cloud policies cover fleets using NVIDIA GPUs, AMD Instinct on Azure, Google TPU and AWS Trainium. In DryRun, operators can inspect proposed actions. Approval mode asks an operator to authorize disruptive steps. Automatic mode executes eligible steps under the configured policy.
 
-| Cloud | Candidate replacement evidence |
-|---|---|
-| Amazon EKS | Simulated provider tests. Live candidate run pending. |
-| Azure AKS | Simulated provider tests. Live candidate run pending. |
-| Google GKE | Simulated provider tests. Live candidate run pending. |
+| Cloud | Simulated provider | Live CPU replacement with synthetic accelerator resource | Live accelerator validation |
+|---|---|---|---|
+| Amazon Elastic Kubernetes Service (EKS) | Replacement tested | Pending | Unverified |
+| Azure Kubernetes Service (AKS) | Replacement tested | Pending | Unverified |
+| Google Kubernetes Engine (GKE) | Replacement tested | Pending | Unverified |
 
-<!-- Before publication, update each row from the recorded run. For EKS record the build, date, node type, replacement order and incident outcome. Distinguish CPU tests from accelerator hardware tests. -->
-
-The [live cloud evidence table](docs/reference-capabilities.md#live-cloud-evidence) records the scope of each test, including historical hardware runs.
+With the simulated providers, an incident resolves by itself after the controller confirms the new node. No live cloud run has confirmed this yet. Use `kubeneuronctl pools` to inspect add-first eligibility and `kubeneuronctl incidents show <id>` to see how the controller identified the node and what it verified. The incident records infrastructure recovery. See the [capability and evidence matrix](docs/reference-capabilities.md#live-cloud-evidence) for individual checks.
 
 Upgrading from 0.x releases is not supported. Uninstall the 0.x installation, then install v1.0. See the [clean installation steps](docs/upgrade.md#moving-from-0x-to-v10).
 
-**Start here:** [product tour](docs/product-tour.md) (screenshots + live
-demo) · [install](docs/install.md) · [docs site](docs/index.md)
+[Installation guide](docs/install.md) · [Documentation](docs/index.md)
 
 ## Architecture
 
@@ -43,12 +40,12 @@ kubeneuron-agent <- actions ------- remediation workflow
 
 The repository builds four custom binaries:
 
-| Binary | Responsibility | Current maturity |
-|---|---|---|
-| `kubeneuron-operator` | Watches KubeNeuron CRDs, validates and compiles their configuration, and reconciles the controller and agent Kubernetes workloads. | Released. SQLite or PostgreSQL store; `DryRun`/`Paused`/`Enabled`, where `Enabled` requires `spec.safety.destructiveExecution` (a non-empty node selector plus the exact acknowledgement) and arms only the named nodes. Issues and automatically renews the installation's operator-issued mTLS material and rolls the consumers on renewal. Alertmanager webhook authentication is mandatory; Paused also requires an API token. Emits Kubernetes Events; readiness follows informer-cache sync. |
-| `kubeneuron-controller` | Ingests Alertmanager and agent events and owns incident, policy, safety, and workflow execution. | Released. State walk, safety gates, approvals with verified actor identity, escalation, transactional audit, durable action queue with lease/boot-ID binding, authenticated operator REST API, embedded control panel. PostgreSQL HA with leader election; failover is proven not to duplicate an action. |
-| `kubeneuron-agent` | Runs on GPU nodes, watches kernel events, reports inventory/events, and executes queued actions. | Released. Registration and events use mTLS plus projected Pod-bound identity. `spec.agent.hostTooling` mounts the node's `nvidia-smi`/driver libraries into the distroless image — verified reading a real Tesla T4 — and arms `--require-real-driver`. Typed action contracts execute in dry-run unless a live controller serves arming for a node inside `destructiveExecution.nodeSelector`; agents outside that blast radius remain scheduled for detection but cannot execute destructive work. Host state (persistence mode, DCGM) is snapshotted crash-safe across restarts, and a hardware GPU reset is refused on evidence where the guest has no PCI reset. |
-| `kubeneuronctl` | Operator-facing CLI for status, incidents, approvals, manual remediation, pause/resume, and the read-only v0.4/v0.5 operational views. | All declared commands implemented against the operator REST API. |
+| Binary | Role in cloud recovery |
+|---|---|
+| `kubeneuron-operator` | Reconciles installation settings and deploys the controller and agents. |
+| `kubeneuron-controller` | Opens incidents, applies the recovery policy, requests replacements and verifies the new node. |
+| `kubeneuron-agent` | Runs without privileges by default and reports node signals and accelerator inventory to the controller. |
+| `kubeneuronctl` | Shows pool eligibility and incident evidence, and lets operators approve steps or pause recovery. |
 
 VictoriaMetrics, vmalert, Alertmanager, Grafana, dcgm-exporter, and
 node_exporter are integrations rather than KubeNeuron binaries. The
@@ -104,11 +101,7 @@ make test-integration-kind
 ./bin/kubeneuronctl --version
 ```
 
-No GPU is needed for the unit tests. The retired plaintext Compose, systemd,
-and static Kubernetes scaffolds have been removed: they described the old
-bare-metal path and could not run against the current fail-closed binaries.
-The operator-managed Kubernetes path is the only authenticated deployment
-shape at this checkpoint.
+No GPU is needed for the unit tests.
 
 `make test-integration-kind` is the slower Kubernetes integration target. It
 requires Docker, jq, curl, OpenSSL, checksum-pinned kind v0.32.0, and kubectl
@@ -139,14 +132,9 @@ This is deliberately a CPU-only Kubernetes reconciliation test. A passing run
 validates the agent mTLS transport, Kubernetes Pod/node authorization, and a
 durable SQLite registration acknowledgment, plus the specifically tested
 manual routine TLS-rotation and dual-leaf recovery contracts — now across a
-multi-node cluster with an agent per worker. Its spoof test still rejects an
-arbitrary other node name; replaying real node-A credentials against node B
-remains future work. It does not validate NVIDIA drivers, real
-NVML, DCGM, GPU telemetry or actions, automated issuance/expiry detection,
-CA revocation/recovery, the (shipped) durable action protocol and its
-crash-safe completion across an agent restart, or remediation behavior.
+multi-node cluster with an agent per worker. The test checks that an agent cannot register under an arbitrary other node name.
 
-## Operator preview install
+## Operator installation
 
 The CRDs use Kubernetes quantity CEL functions, so the installation requires
 Kubernetes 1.29 or newer. A separately owned, version-pinned GPU/observability
@@ -321,9 +309,7 @@ configuration is not a supported operator installation.
 The remaining `deploy/` content is current: version-pinned third-party
 dependency profiles under `deploy/kubernetes/dependencies/`, the SQLite
 backup CronJob example under `deploy/kubernetes/backup/`, and the Grafana
-dashboard under `deploy/grafana/`. The retired static Kubernetes, systemd,
-and Compose scaffolds were removed because they lacked the managed DaemonSet
-ownership and projected identity required by the controller.
+dashboard under `deploy/grafana/`.
 
 ## Safety posture
 
@@ -358,9 +344,7 @@ resolution, and the pause/resume control path are implemented. The current EKS, 
 - [`config/crd/bases/`](config/crd/bases/) — generated CRD manifests.
 - [`config/samples/`](config/samples/) — development custom-resource examples.
 - [Cloud recovery policies](config/cloud-policies/) are the default for a fresh
-  installation. The [node-level policies](config/policies/) require an explicit
-  `--policy-pack bare-metal-alpha` selection and operator permission. See [Bare metal (alpha)](docs/bare-metal.md)
-  for both settings. Alpha, not validated on real hardware.
+  installation.
 - [`configs/policies.yaml`](configs/policies.yaml) and
   [`configs/playbooks/`](configs/playbooks/) — current file-based controller
   input used by local and bare-metal development.
@@ -368,13 +352,7 @@ resolution, and the pause/resume control path are implemented. The current EKS, 
   rules.
 - [`docs/xid-catalog.md`](docs/xid-catalog.md) — XID classification rationale.
 
-## Product tour
-
-[docs/product-tour.md](docs/product-tour.md) walks the whole workflow with
-screenshots and a recorded demo captured on a live EKS cluster with a real
-Tesla T4: a kernel-injected XID 79 opens an incident, the playbook ladder
-runs, a named human approves the reboot step, and the audit trail records
-every transition.
+Bare-metal deployments and node-level actions such as GPU reset are alpha and outside the v1.0 cloud validation scope. The candidate has no real-hardware validation for these paths. See [Bare metal (alpha)](docs/bare-metal.md) for the required policy and operator permissions.
 
 ## Security
 
@@ -395,7 +373,7 @@ behavior.
 
 ## License
 
-KubeNeuron is open source under the Apache License, Version 2.0. See
+Version 1.0 is released under Apache-2.0. Each 0.x release remains under the license under which it was published. See
 [LICENSE](LICENSE) and [NOTICE](NOTICE); third-party components are listed in
 THIRD_PARTY_LICENSES. "KubeNeuron" and its logo are trademarks of Andrii Petruk;
 see [TRADEMARKS.md](TRADEMARKS.md).
