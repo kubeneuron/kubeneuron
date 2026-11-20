@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -17,14 +18,17 @@ import (
 )
 
 func TestFollowFromTail(t *testing.T) {
-	t.Run("plain", func(t *testing.T) { testFollowFromTail(t, 0, 0, nil) })
+	t.Run("plain", func(t *testing.T) { testFollowFromTail(t, 0, 0, nil, false) })
 	t.Run("zstandard", func(t *testing.T) {
 		enc, err := zstd.NewWriter(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer enc.Close()
-		testFollowFromTail(t, 1<<3, 4, func(field []byte) []byte { return enc.EncodeAll(field, nil) })
+		testFollowFromTail(t, 1<<3, 4, func(field []byte) []byte { return enc.EncodeAll(field, nil) }, false)
+		t.Run("decoder panic", func(t *testing.T) {
+			testFollowFromTail(t, 1<<3, 4, func(field []byte) []byte { return enc.EncodeAll(field, nil) }, true)
+		})
 	})
 	t.Run("xz", func(t *testing.T) {
 		testFollowFromTail(t, 1, 1, func(field []byte) []byte {
@@ -34,11 +38,11 @@ func TestFollowFromTail(t *testing.T) {
 				t.Fatal(err)
 			}
 			return block
-		})
+		}, false)
 	})
 }
 
-func testFollowFromTail(t *testing.T, headerFlag uint32, dataFlag byte, encode func([]byte) []byte) {
+func testFollowFromTail(t *testing.T, headerFlag uint32, dataFlag byte, encode func([]byte) []byte, panicOnce bool) {
 	dir := t.TempDir()
 	if _, err := Open(dir); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal(err)
@@ -121,8 +125,24 @@ func testFollowFromTail(t *testing.T, headerFlag uint32, dataFlag byte, encode f
 	if err != nil {
 		t.Fatal(err)
 	}
+	if panicOnce {
+		reader := r.(directoryReader)
+		first := true
+		reader.decode = func(flags byte, payload *io.SectionReader) ([]byte, error) {
+			if first {
+				first = false
+				panic("synthetic decoder failure")
+			}
+			return decodeField(flags, payload)
+		}
+		r = reader
+	}
 	b, err = r.Next(context.Background(), b.Cursor)
-	if err != nil || len(b.Records) != 2 || b.Records[0].Message != "new" || b.Records[1].Message != "after rotation" {
+	if panicOnce {
+		if err != nil || b.UnreadableEntries != 1 || len(b.Records) != 1 || b.Records[0].Message != "after rotation" {
+			t.Fatalf("after panic %+v %v", b, err)
+		}
+	} else if err != nil || len(b.Records) != 2 || b.Records[0].Message != "new" || b.Records[1].Message != "after rotation" {
 		t.Fatalf("append %+v %v", b, err)
 	}
 	b, err = r.Next(context.Background(), b.Cursor)

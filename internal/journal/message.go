@@ -10,7 +10,7 @@ import (
 
 // plainKernelMessage checks both ends of the DATA-to-ENTRY link before
 // returning a message. transport is the previously matched kernel DATA offset.
-func (h fileHeader) plainKernelMessage(r io.ReaderAt, entry, transport uint64) (string, bool, error) {
+func (h fileHeader) plainKernelMessage(r io.ReaderAt, entry, transport uint64, decode fieldDecoder) (string, bool, error) {
 	e, err := h.entryAt(r, entry)
 	if err != nil {
 		return "", false, err
@@ -44,17 +44,7 @@ func (h fileHeader) plainKernelMessage(r io.ReaderAt, entry, transport uint64) (
 			return "", false, err
 		}
 		if d.flags != 0 {
-			var field []byte
-			switch d.flags {
-			case 1:
-				field, err = readXZ(d.payload)
-			case 2:
-				field, err = readLZ4(d.payload)
-			case 4:
-				field, err = readZstd(d.payload)
-			default:
-				return "", false, fmt.Errorf("%w: unsupported DATA compression", ErrInvalidJournal)
-			}
+			field, err := guardedDecode(decode, d.flags, d.payload)
 			if err != nil {
 				return "", false, err
 			}
@@ -84,4 +74,30 @@ func (h fileHeader) plainKernelMessage(r io.ReaderAt, entry, transport uint64) (
 		found = true
 	}
 	return message, found, nil
+}
+
+type fieldDecoder func(byte, *io.SectionReader) ([]byte, error)
+
+var errDecoderPanic = fmt.Errorf("%w: field decoder panicked", ErrInvalidJournal)
+
+func guardedDecode(decode fieldDecoder, flags byte, payload *io.SectionReader) (field []byte, err error) {
+	defer func() {
+		if recover() != nil {
+			field, err = nil, errDecoderPanic
+		}
+	}()
+	return decode(flags, payload)
+}
+
+func decodeField(flags byte, payload *io.SectionReader) ([]byte, error) {
+	switch flags {
+	case 1:
+		return readXZ(payload)
+	case 2:
+		return readLZ4(payload)
+	case 4:
+		return readZstd(payload)
+	default:
+		return nil, fmt.Errorf("%w: unsupported DATA compression", ErrInvalidJournal)
+	}
 }

@@ -28,7 +28,10 @@ func (r tickReader) ReadAt(p []byte, offset int64) (int, error) {
 	return n, err
 }
 
-type directoryReader struct{ path string }
+type directoryReader struct {
+	path   string
+	decode fieldDecoder
+}
 type filePosition struct {
 	After, Search, Transport, Consumed, Array, Slot uint64
 }
@@ -63,7 +66,7 @@ func Open(directory string) (Reader, error) {
 	if err = f.Close(); err != nil {
 		return nil, err
 	}
-	return directoryReader{directory}, nil
+	return directoryReader{directory, decodeField}, nil
 }
 
 func (r directoryReader) Next(ctx context.Context, after Cursor) (Batch, error) {
@@ -93,7 +96,7 @@ func (r directoryReader) Next(ctx context.Context, after Cursor) (Batch, error) 
 		if after == "" {
 			p.After = h.tailSequence
 		} else if h.tailSequence > p.After {
-			err = h.readNew(ctx, tickReader{f, &readBytes}, &p, &remaining, &outputBytes, &batch)
+			err = h.readNew(ctx, tickReader{f, &readBytes}, &p, &remaining, &outputBytes, &batch, r.decode)
 		}
 		_ = f.Close()
 		if errors.Is(err, errTickBudget) {
@@ -111,7 +114,7 @@ func (r directoryReader) Next(ctx context.Context, after Cursor) (Batch, error) 
 	return batch, err
 }
 
-func (h fileHeader) readNew(ctx context.Context, f io.ReaderAt, p *filePosition, remaining, outputBytes *int, batch *Batch) error {
+func (h fileHeader) readNew(ctx context.Context, f io.ReaderAt, p *filePosition, remaining, outputBytes *int, batch *Batch, decode fieldDecoder) error {
 	if p.Transport == 0 {
 		match, resume, err := h.findKernelData(f, p.Search, 256)
 		if err != nil {
@@ -168,8 +171,10 @@ func (h fileHeader) readNew(ctx context.Context, f io.ReaderAt, p *filePosition,
 			return err
 		}
 		if e.sequence > p.After {
-			msg, ok, err := h.plainKernelMessage(f, off, p.Transport)
-			if err != nil {
+			msg, ok, err := h.plainKernelMessage(f, off, p.Transport, decode)
+			if errors.Is(err, errDecoderPanic) {
+				batch.UnreadableEntries++
+			} else if err != nil {
 				return err
 			}
 			if ok {
