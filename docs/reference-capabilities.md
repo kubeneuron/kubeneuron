@@ -380,7 +380,7 @@ about to be reset. Deciding which nodes are in the fleet errs toward refusing:
 everything in the fleet is a machine a playbook may cordon, drain and reboot,
 so membership is anchored to recognised vendor domains and a GPU-shaped
 resource from anywhere else is ignored and logged. See
-[upgrading](upgrade.md#fleet-membership-changed-in-v022--check-it-before-you-upgrade)
+[upgrading](https://github.com/kubeneuron/kubeneuron/blob/v0.8.0/docs/upgrade.md#fleet-membership-changed-in-v022--check-it-before-you-upgrade)
 for the audit that change deserves.
 
 ## What is actually vendor-neutral today
