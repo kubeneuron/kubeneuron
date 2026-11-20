@@ -15,6 +15,7 @@ tags: admins only").
 - [ ] Replace any editorial HTML reminder in the README with verified results or remove it.
 - [ ] Run govulncheck with the release toolchain on the final dependency graph. Review the pinned XZ decoder for advisories and for a maintained replacement with a hard dictionary limit.
 - [ ] Run `make verify-licenses` on the release commit.
+- [ ] Before tagging, dispatch the **Rehearse release image verification** workflow on the release branch and wait for a successful run. Confirm the run SHA matches the release commit.
 - [ ] CI is green on `main` at the release commit.
 
 ## 2. Adapter contract modules (required before the next release)
