@@ -33,7 +33,7 @@ type poolPlatform struct {
 	// sameName recreates the instance under the target's name, with a new
 	// UID, as a managed instance group can.
 	sameName bool
-	// resource is what the new nodes advertise; nvidia.com/gpu when empty.
+	// resource is what the new nodes and the successor advertise; nvidia.com/gpu when empty.
 	resource string
 	removed  bool
 }
@@ -79,6 +79,23 @@ func (p *poolPlatform) ReplacePinnedNode(ctx context.Context, pin cloud.NodeIden
 			Allocatable: map[string]int64{resource: p.successorAllocatable}})
 	}
 	return nil
+}
+
+func (p *poolPlatform) SuccessorNode(ctx context.Context, providerID string) (platform.SuccessorNode, error) {
+	n, err := p.successorPlatform.SuccessorNode(ctx, providerID)
+	if p.resource != "" && n.Allocatable != nil {
+		n.Allocatable = map[string]int64{p.resource: n.Allocatable[topology.ResourceWholeGPU]}
+	}
+	return n, err
+}
+
+func (p *poolPlatform) NodeResources(ctx context.Context, node string) (topology.Resources, bool, error) {
+	r, ok, err := p.successorPlatform.NodeResources(ctx, node)
+	if p.resource != "" && r.Capacity != nil {
+		n := r.Capacity[topology.ResourceWholeGPU]
+		r = topology.Resources{Capacity: map[string]int64{p.resource: n}, Allocatable: map[string]int64{p.resource: n}}
+	}
+	return r, ok, err
 }
 
 func (p *poolPlatform) PoolNodes(_ context.Context, label, pool string) ([]platform.SuccessorNode, error) {
@@ -188,6 +205,7 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 		vendor   types.AcceleratorVendor
 		setup    func(*testing.T, *sqlite.Store, *poolPlatform)
 		noAgent  bool
+		heard    bool
 		node     string
 		uid      string
 		how      string
@@ -202,6 +220,11 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 			node: poolNodeName, how: replacementByPool, sentence: poolSentence, depth: driverDepth},
 		{name: "remove-first aws", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, vendor: types.AcceleratorVendorAWS,
 			node: poolNodeName, how: replacementByPool, sentence: poolSentence, depth: observedDepth},
+		// No report comes for AMD; the successor's agent, heard before the old
+		// node is removed, is all the evidence there is.
+		{name: "add-first amd approval", mode: recoverymode.Approval, vendor: types.AcceleratorVendorAMD,
+			setup: func(_ *testing.T, _ *sqlite.Store, p *poolPlatform) { p.resource = "amd.com/gpu" },
+			node:  successorNodeName, how: replacementBySuccessor, sentence: successorSentence, depth: capacityDepth, heard: true},
 		{name: "remove-first amd", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, vendor: types.AcceleratorVendorAMD,
 			setup: func(_ *testing.T, _ *sqlite.Store, p *poolPlatform) { p.resource = "amd.com/gpu" },
 			node:  poolNodeName, how: replacementByPool, sentence: poolSentence, depth: capacityDepth},
@@ -236,10 +259,10 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 			id := openVendorIncident(t, c, "n1", tc.vendor)
 			inc := untilState(t, c, st, id, func(inc *types.Incident) bool { return inc.State.Halted() || inc.State == types.StateVerifying })
 			// A node without an agent sends no evidence to wait for.
-			if inc.State != types.StateVerifying && (!tc.noAgent || inc.State != types.StateResolved) {
+			if inc.State != types.StateVerifying && (!(tc.noAgent || tc.heard) || inc.State != types.StateResolved) {
 				t.Fatalf("state = %s, want VERIFYING after the replacement%s", inc.State, dump(trail(t, st, id)))
 			}
-			if !tc.noAgent {
+			if !tc.noAgent && !tc.heard {
 				// Before the new node's evidence: reconciles never supersede it.
 				inc = step(t, c, st, id, 5)
 				if inc.State != types.StateVerifying {
