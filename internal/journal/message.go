@@ -46,6 +46,8 @@ func (h fileHeader) plainKernelMessage(r io.ReaderAt, entry, transport uint64) (
 		if d.flags != 0 {
 			var field []byte
 			switch d.flags {
+			case 1:
+				field, err = readXZ(d.payload)
 			case 2:
 				field, err = readLZ4(d.payload)
 			case 4:
