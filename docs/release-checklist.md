@@ -10,6 +10,7 @@ tags: admins only").
 
 - [ ] `make gates` passes on the release commit.
 - [ ] For rc.1, review the live CPU replacement results for EKS, GKE and AKS against the capability matrix. Record the synthetic accelerator capacity and the verification depth. Document any approved exception for a missing cloud run. Mark real GPU, TPU and Trainium validation separately.
+- [ ] For stable v1.0.0, require live runs on accelerator hardware and link their results in the capability matrix.
 - [ ] Keep each README validation result marked `Pending` until run evidence supports replacing it.
 - [ ] Replace any editorial HTML reminder in the README with verified results or remove it.
 - [ ] Run govulncheck with the release toolchain on the final dependency graph. Review the pinned XZ decoder for advisories and for a maintained replacement with a hard dictionary limit.
