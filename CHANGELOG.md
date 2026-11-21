@@ -421,7 +421,18 @@ API is `v1alpha1`.
   update done. KubeNeuron used to read the empty activity history in that gap
   as an unconfirmed launch and stop the replacement for the operator, while
   the additional node was already on its way. It now waits up to five minutes
-  for the launch activity before it hands the replacement over.
+  for the launch activity before it hands the replacement over, and keeps
+  waiting while the new instance is pending and its launch runs or has
+  finished.
+
+- **Add-first accepts a successor whose agent inventories no devices.** When
+  the agent of the old node reported no accelerators, as for a vendor it does
+  not inventory, the successor's agent was still asked for some, so the
+  replacement never completed. The successor is now ready when it is Ready,
+  has the old node's allocatable accelerator resources and its agent has
+  registered since the request; the health of its devices is not checked in
+  that case. `kubeneuronctl incidents show` says whether the wait is for the
+  agent's registration or for its accelerators.
 
 - **AKS and GKE: a fresh installation with a cloud provider becomes Ready.**
   The cloud policy pack ships an optional recycle ladder that no policy uses.

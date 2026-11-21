@@ -32,7 +32,7 @@ func TestConfirmSuccessorLaunch(t *testing.T) {
 		{"matching launch", []at.Activity{launch, stale}, true}, {"outside window", []at.Activity{stale}, false}, {"wrong transition", []at.Activity{wrong}, false}, {"competing activity", []at.Activity{launch, wrong}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := confirmSuccessorLaunch(s, "i-new", tc.activities, now)
+			err := confirmSuccessorLaunch(s, "i-new", "", tc.activities, now)
 			if tc.ok && err != nil || !tc.ok && !errors.Is(err, cloud.ErrNeedsOperator) {
 				t.Fatal(err)
 			}
@@ -45,13 +45,13 @@ func TestConfirmSuccessorLaunch(t *testing.T) {
 func TestConfirmSuccessorLaunchNotStarted(t *testing.T) {
 	requested := time.Now()
 	s := cloud.Successor{RequestedAt: requested, State: map[string]string{"before": "1", "asg_arn": "arn"}}
-	if err := confirmSuccessorLaunch(s, "", nil, requested.Add(15*time.Second)); err != nil {
+	if err := confirmSuccessorLaunch(s, "", "", nil, requested.Add(15*time.Second)); err != nil {
 		t.Fatalf("15 s after the request: %v", err)
 	}
-	if err := confirmSuccessorLaunch(s, "", nil, requested.Add(successorLaunchGrace)); !errors.Is(err, cloud.ErrNeedsOperator) || !strings.Contains(err.Error(), "no matching ASG launch activity") {
+	if err := confirmSuccessorLaunch(s, "", "", nil, requested.Add(successorLaunchGrace)); !errors.Is(err, cloud.ErrNeedsOperator) || !strings.Contains(err.Error(), "no matching ASG launch activity") {
 		t.Fatalf("after the grace: %v", err)
 	}
-	if err := confirmSuccessorLaunch(s, "i-new", nil, requested.Add(15*time.Second)); !errors.Is(err, cloud.ErrNeedsOperator) {
+	if err := confirmSuccessorLaunch(s, "i-new", "", nil, requested.Add(15*time.Second)); !errors.Is(err, cloud.ErrNeedsOperator) {
 		t.Fatalf("an instance without its launch activity: %v", err)
 	}
 }
@@ -70,15 +70,15 @@ func TestCheckSuccessorActivityPages(t *testing.T) {
 	s := cloud.Successor{Pool: "workers", RequestedAt: now, State: map[string]string{"before": "1", "asg_arn": "arn"}}
 	launch := at.Activity{StartTime: &now, AutoScalingGroupName: &s.Pool, AutoScalingGroupARN: sdk.String("arn"), StatusCode: at.ScalingActivityStatusCodeSuccessful, Description: sdk.String("Launching a new EC2 instance: i-new"), Cause: sdk.String("changing the desired capacity from 1 to 2.")}
 	pages := launchActivityPages{"": {Activities: []at.Activity{launch}, NextToken: sdk.String("p2")}, "p2": {}}
-	if err := checkSuccessorActivities(t.Context(), pages, s, "i-new"); err != nil {
+	if err := checkSuccessorActivities(t.Context(), pages, s, "i-new", ""); err != nil {
 		t.Fatal(err)
 	}
 	pages["p2"].Activities = []at.Activity{launch}
-	if err := checkSuccessorActivities(t.Context(), pages, s, "i-new"); !errors.Is(err, cloud.ErrNeedsOperator) {
+	if err := checkSuccessorActivities(t.Context(), pages, s, "i-new", ""); !errors.Is(err, cloud.ErrNeedsOperator) {
 		t.Fatalf("competing launch: %v", err)
 	}
 	pages["p2"] = &autoscaling.DescribeScalingActivitiesOutput{NextToken: sdk.String("p2")}
-	if err := checkSuccessorActivities(t.Context(), pages, s, "i-new"); !errors.Is(err, cloud.ErrNeedsOperator) {
+	if err := checkSuccessorActivities(t.Context(), pages, s, "i-new", ""); !errors.Is(err, cloud.ErrNeedsOperator) {
 		t.Fatalf("repeated token: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestCheckSuccessorActivityPages(t *testing.T) {
 		token = next
 	}
 	pages[token] = &autoscaling.DescribeScalingActivitiesOutput{Activities: []at.Activity{launch}}
-	if err := checkSuccessorActivities(t.Context(), pages, s, "i-new"); !errors.Is(err, cloud.ErrNeedsOperator) || !strings.Contains(err.Error(), "activity history too long") {
+	if err := checkSuccessorActivities(t.Context(), pages, s, "i-new", ""); !errors.Is(err, cloud.ErrNeedsOperator) || !strings.Contains(err.Error(), "activity history too long") {
 		t.Fatalf("21 pages: %v", err)
 	}
 }

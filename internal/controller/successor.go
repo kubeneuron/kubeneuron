@@ -552,7 +552,13 @@ func (c *Controller) successorNotReady(ctx context.Context, inc *types.Incident,
 	if err != nil || registered == nil {
 		return fmt.Sprintf("no agent has registered node %s yet", node.Name)
 	}
-	if registered.UID != node.UID || !registered.AgentLastSeen.After(rec.RequestedAt) || len(registered.GPUs) == 0 {
+	if registered.UID != node.UID || !registered.AgentLastSeen.After(rec.RequestedAt) {
+		return fmt.Sprintf("the agent on %s has not registered since the request", node.Name)
+	}
+	// An agent that saw no device on the old node (no inventory for this
+	// vendor) is not asked for one on the successor: allocatable and a fresh
+	// registration are the whole check then.
+	if rec.ExpectedGPUs > 0 && len(registered.GPUs) == 0 {
 		return fmt.Sprintf("the agent on %s has not reported its accelerators since the request", node.Name)
 	}
 	if len(registered.GPUs) < rec.ExpectedGPUs {

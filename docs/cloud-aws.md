@@ -61,7 +61,18 @@ uses a client token derived from the operation ID. Before accepting a successor,
 the provider checks the EKS update, the group's membership and its scaling
 activities. All original instances must still be present. Exactly one additional
 instance must be in service, with a matching successful launch in the activity
-history.
+history. The Auto Scaling group starts the launch some seconds after EKS reports
+the size update done, and lists the new instance as pending until it is in
+service: KubeNeuron reads the group again in both cases. It hands the
+replacement to an operator when no launch activity appears within five minutes
+of the request, or when the activity does not match the request.
+
+The controller then accepts the new node when it is Ready and schedulable, has at
+least the old node's allocatable accelerator resources and its KubeNeuron agent
+has registered since the request. When the old node's agent reported its
+devices, the new node's agent must report at least as many. When it reported
+none, as on a vendor the agent does not inventory, the health of the new node's
+devices is not checked.
 
 ## Permissions and preflight
 

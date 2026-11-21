@@ -73,12 +73,14 @@ func TestObserveSuccessorLiveLaunchOrder(t *testing.T) {
 	}
 
 	// what still goes to the operator at once: a pending instance with a cancelled launch,
-	// or with a launch another size change caused
+	// with a launch another size change caused, or with a launch of another instance
 	g := at.AutoScalingGroup{AutoScalingGroupName: &s.Pool, AutoScalingGroupARN: sdk.String("arn"), DesiredCapacity: sdk.Int32(2), AvailabilityZones: []string{"az"},
 		Instances: []at.Instance{member("i-old", at.LifecycleStateInService), member("i-new", at.LifecycleStatePending)}}
 	other := withStatus(activity, at.ScalingActivityStatusCodeInProgress)
 	other.Cause = sdk.String("At 2026-11-20T23:30:23Z a user request explicitly set group desired capacity changing the desired capacity from 1 to 3.")
-	for name, a := range map[string]at.Activity{"cancelled": withStatus(activity, at.ScalingActivityStatusCodeCancelled), "other change": other} {
+	elsewhere := withStatus(activity, at.ScalingActivityStatusCodeInProgress)
+	elsewhere.Description = sdk.String("Launching a new EC2 instance: i-other")
+	for name, a := range map[string]at.Activity{"cancelled": withStatus(activity, at.ScalingActivityStatusCodeCancelled), "other change": other, "another instance": elsewhere} {
 		p := managedProvider{repairReader: &repairReader{cluster: "training", eks: eksReader}}
 		p.scaling = observedASG{membershipFixture{t, &autoscaling.DescribeAutoScalingGroupsOutput{AutoScalingGroups: []at.AutoScalingGroup{g}}},
 			launchActivityPages{"": {Activities: []at.Activity{a}}}}

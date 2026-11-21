@@ -429,7 +429,10 @@ plan is recorded before the first request; the request time is recorded
 before the request. The controller, not the provider, decides that the
 successor is ready (Ready, schedulable, joined and agent-registered after the
 request, accelerators at least the old node's), and only then lets the rung
-cordon the old node; `ReplaceWithSuccessor` removes the old instance and
+cordon the old node. When the old node's agent reported no devices (a vendor
+it does not inventory), the successor is ready when it is Ready, has at least
+the old node's allocatable accelerator resources and its agent has registered
+since the request; the health of the successor's devices is not checked then; `ReplaceWithSuccessor` removes the old instance and
 restores the pool's size. An abandoned operation — timeout, rejection,
 resolution, a new attempt — is released: a successor running only DaemonSet
 pods is removed; anything else, and any pool change the provider cannot

@@ -8,7 +8,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	sdk "github.com/aws/aws-sdk-go-v2/aws"
@@ -35,7 +34,9 @@ var desiredTransition = regexp.MustCompile(`\bdesired capacity from ([0-9]+) to 
 // Unknown cause text or competing activity leaves attribution to the operator.
 // With no candidate instance yet, an empty window within successorLaunchGrace
 // of the request is a launch the ASG has not started: nil, read again later.
-func confirmSuccessorLaunch(s cloud.Successor, candidate string, activities []at.Activity, now time.Time) error {
+// pending is the new instance the group lists but not yet InService; a launch
+// that names an instance must name that one.
+func confirmSuccessorLaunch(s cloud.Successor, candidate, pending string, activities []at.Activity, now time.Time) error {
 	before, err := strconv.ParseInt(s.State["before"], 10, 32)
 	if err != nil || before < 1 || s.RequestedAt.IsZero() || s.State["asg_arn"] == "" {
 		return fmt.Errorf("%w: incomplete launch evidence", cloud.ErrNeedsOperator)
@@ -55,8 +56,8 @@ func confirmSuccessorLaunch(s cloud.Successor, candidate string, activities []at
 			return fmt.Errorf("%w: competing or unconfirmed ASG launch activity", cloud.ErrNeedsOperator)
 		}
 		if candidate == "" {
-			if !launchDescription(sdk.ToString(a.Description)) {
-				return fmt.Errorf("%w: ASG activity is not a launch", cloud.ErrNeedsOperator)
+			if !launchDescription(sdk.ToString(a.Description), pending) {
+				return fmt.Errorf("%w: ASG activity is not a launch of the pending instance", cloud.ErrNeedsOperator)
 			}
 			// the instance is not an InService member yet: a launch under way, or done
 			// before the group lists the instance InService, is read again later
@@ -86,9 +87,14 @@ func confirmSuccessorLaunch(s cloud.Successor, candidate string, activities []at
 }
 
 // launchDescription is an ASG launch activity's Description: AWS names the
-// instance once it has one ("Launching a new EC2 instance: i-...").
-func launchDescription(d string) bool {
-	return d == "Launching a new EC2 instance" || strings.HasPrefix(d, "Launching a new EC2 instance: i-")
+// instance once it has one ("Launching a new EC2 instance: i-..."). That
+// instance must be pending, the one the group lists and has not yet put in
+// service.
+func launchDescription(d, pending string) bool {
+	if d == "Launching a new EC2 instance" {
+		return true
+	}
+	return pending != "" && d == "Launching a new EC2 instance: "+pending
 }
 
 // launchUnderWay is a launch activity that started an instance or is still
@@ -105,7 +111,7 @@ func launchUnderWay(code at.ScalingActivityStatusCode) bool {
 
 // checkSuccessorActivities reads newest-first ASG history until it covers the
 // operation window. A truncated history cannot establish a unique launch.
-func checkSuccessorActivities(ctx context.Context, client activityReader, s cloud.Successor, candidate string) error {
+func checkSuccessorActivities(ctx context.Context, client activityReader, s cloud.Successor, candidate, pending string) error {
 	if s.Pool == "" || s.RequestedAt.IsZero() {
 		return fmt.Errorf("%w: missing ASG activity scope", cloud.ErrNeedsOperator)
 	}
@@ -133,7 +139,7 @@ func checkSuccessorActivities(ctx context.Context, client activityReader, s clou
 		}
 		token := sdk.ToString(page.NextToken)
 		if token == "" || olderPage {
-			return confirmSuccessorLaunch(s, candidate, recent, time.Now())
+			return confirmSuccessorLaunch(s, candidate, pending, recent, time.Now())
 		}
 		if seen[token] {
 			return fmt.Errorf("%w: repeated ASG activity page token", cloud.ErrNeedsOperator)

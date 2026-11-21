@@ -32,17 +32,17 @@ func (p *managedProvider) observeSuccessor(ctx context.Context, s cloud.Successo
 		baseline := group
 		baseline.DesiredCapacity = sdk.Int32(int32(len(members)))
 		if settledMembership(s, baseline, members) {
-			return s, checkSuccessorActivities(ctx, p.scaling, s, "")
+			return s, checkSuccessorActivities(ctx, p.scaling, s, "", "")
 		}
 	}
-	if launchingMember(s, group, members) {
-		return s, checkSuccessorActivities(ctx, p.scaling, s, "")
+	if pending, ok := launchingMember(s, group, members); ok {
+		return s, checkSuccessorActivities(ctx, p.scaling, s, "", pending)
 	}
 	candidate, err := successorCandidate(s, group)
 	if err != nil {
 		return s, err
 	}
-	if err := checkSuccessorActivities(ctx, p.scaling, s, candidate); err != nil {
+	if err := checkSuccessorActivities(ctx, p.scaling, s, candidate, ""); err != nil {
 		return s, err
 	}
 	s.ProviderID = "aws:///" + s.State["zone"] + "/" + candidate
@@ -110,29 +110,34 @@ func (p *managedProvider) successorGroup(ctx context.Context, s cloud.Successor)
 }
 
 // launchingMember is the raised group with every saved member InService and
-// one new instance in the plan's zone that is not InService yet.
-func launchingMember(s cloud.Successor, g at.AutoScalingGroup, members []string) bool {
+// one new instance in the plan's zone that is not InService yet; it returns
+// that instance.
+func launchingMember(s cloud.Successor, g at.AutoScalingGroup, members []string) (string, bool) {
 	zone := s.State["zone"]
 	if g.DesiredCapacity == nil || int(*g.DesiredCapacity) != len(members)+1 || s.State["before"] != strconv.Itoa(len(members)) || len(g.Instances) != len(members)+1 || zone == "" {
-		return false
+		return "", false
 	}
-	launching := 0
+	pending := ""
 	for _, member := range g.Instances {
-		if sdk.ToString(member.AvailabilityZone) != zone {
-			return false
+		id := sdk.ToString(member.InstanceId)
+		if sdk.ToString(member.AvailabilityZone) != zone || id == "" {
+			return "", false
 		}
-		if slices.Contains(members, sdk.ToString(member.InstanceId)) {
+		if slices.Contains(members, id) {
 			if member.LifecycleState != at.LifecycleStateInService {
-				return false
+				return "", false
 			}
 			continue
 		}
 		switch member.LifecycleState {
 		case at.LifecycleStatePending, at.LifecycleStatePendingWait, at.LifecycleStatePendingProceed:
-			launching++
+			if pending != "" {
+				return "", false
+			}
+			pending = id
 		default:
-			return false
+			return "", false
 		}
 	}
-	return launching == 1
+	return pending, pending != ""
 }

@@ -282,6 +282,18 @@ func registerSuccessorAgent(t *testing.T, st *sqlite.Store, gpus int) {
 	}
 }
 
+// registerOldAgent has the agent of n1, the node being replaced, report its accelerators.
+func registerOldAgent(t *testing.T, st *sqlite.Store, gpus int) {
+	t.Helper()
+	node := &types.Node{Name: "n1", Labels: map[string]string{"pool": "train"}, AgentLastSeen: time.Now()}
+	for i := 0; i < gpus; i++ {
+		node.GPUs = append(node.GPUs, types.GPUInfo{UUID: fmt.Sprintf("GPU-old-%d", i), Index: i})
+	}
+	if err := st.UpsertAgentRegistration(context.Background(), node); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func waitSettled(t *testing.T, c *Controller, st *sqlite.Store, id string, done func(*types.Incident) bool) *types.Incident {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -365,7 +377,10 @@ func TestAddFirstNoCapacityLeavesTheNodeAlone(t *testing.T) {
 func TestAddFirstRejectsASuccessorWithoutItsAccelerators(t *testing.T) {
 	for name, setup := range map[string]func(*successorPlatform, *sqlite.Store, *testing.T){
 		"no agent inventory": func(_ *successorPlatform, _ *sqlite.Store, _ *testing.T) {},
-		"inventory, no GPUs": func(_ *successorPlatform, st *sqlite.Store, t *testing.T) { registerSuccessorAgent(t, st, 0) },
+		"inventory, no GPUs": func(_ *successorPlatform, st *sqlite.Store, t *testing.T) {
+			registerOldAgent(t, st, 2)
+			registerSuccessorAgent(t, st, 0)
+		},
 		"fewer allocatable GPUs": func(p *successorPlatform, st *sqlite.Store, t *testing.T) {
 			p.successorAllocatable = 4
 			registerSuccessorAgent(t, st, 8)
@@ -386,6 +401,49 @@ func TestAddFirstRejectsASuccessorWithoutItsAccelerators(t *testing.T) {
 			inc := mustIncident(t, st, id)
 			if inc.Successor.ReadyAt != nil || p.cordonedNode("n1") {
 				t.Fatalf("an unfit successor was accepted: %+v%s", inc.Successor, dump(trail(t, st, id)))
+			}
+		})
+	}
+}
+
+// An agent that inventories no device of this vendor reported none on the old
+// node either: allocatable and a fresh registration make the successor ready.
+func TestAddFirstAcceptsAFreshAgentWhenTheOldNodeReportedNoDevices(t *testing.T) {
+	p := newSuccessorPlatform()
+	c, st, _ := successorFixture(t, recoverymode.Automatic, p, "")
+	registerSuccessorAgent(t, st, 0)
+	id := openOn(t, c, "n1")
+	inc := waitSettled(t, c, st, id, func(inc *types.Incident) bool { return inc.State.Halted() || inc.State == types.StateVerifying })
+	if inc.Successor == nil || inc.Successor.ExpectedGPUs != 0 || inc.Successor.ReadyAt == nil || inc.Successor.Node != successorNodeName {
+		t.Fatalf("successor = %+v%s", inc.Successor, dump(trail(t, st, id)))
+	}
+}
+
+// The agent's registration must be fresh and the successor's own, whatever
+// the old node's agent reported; the reason names what is awaited.
+func TestAddFirstWaitsForTheSuccessorAgentToRegister(t *testing.T) {
+	for name, tc := range map[string]struct {
+		oldGPUs int
+		node    types.Node
+	}{
+		"stale, no old inventory":     {0, types.Node{Name: successorNodeName, UID: "uid-" + successorNodeName, AgentLastSeen: time.Now().Add(-time.Hour)}},
+		"stale, old inventory":        {2, types.Node{Name: successorNodeName, UID: "uid-" + successorNodeName, AgentLastSeen: time.Now().Add(-time.Hour), GPUs: []types.GPUInfo{{UUID: "GPU-a"}, {UUID: "GPU-b", Index: 1}}}},
+		"another node's registration": {0, types.Node{Name: successorNodeName, UID: "uid-earlier", AgentLastSeen: time.Now().Add(time.Second)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newSuccessorPlatform()
+			c, st, _ := successorFixture(t, recoverymode.Automatic, p, "")
+			registerOldAgent(t, st, tc.oldGPUs)
+			node := tc.node
+			if err := st.UpsertAgentRegistration(context.Background(), &node); err != nil {
+				t.Fatal(err)
+			}
+			id := openOn(t, c, "n1")
+			inc := waitSettled(t, c, st, id, func(inc *types.Incident) bool {
+				return inc.Successor != nil && inc.Successor.Node != "" && inc.Successor.Reason != ""
+			})
+			if inc.Successor.ReadyAt != nil || p.cordonedNode("n1") || !strings.Contains(inc.Successor.Reason, "has not registered since the request") {
+				t.Fatalf("successor = %+v%s", inc.Successor, dump(trail(t, st, id)))
 			}
 		})
 	}
