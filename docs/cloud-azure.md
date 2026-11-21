@@ -219,6 +219,11 @@ the node's pool and requires every action above, honouring wildcards and
 `notActions`. That API does not show deny assignments, so a deny assignment
 can still refuse a call after the pool has been grown.
 
+`kubeneuronctl pools` runs the same check. When it fails, the incident and
+the pool row name the missing actions, or the error code Azure answered with,
+and what to do; the Azure error itself goes to the controller log only, as
+its request URL names the subscription and resource group.
+
 ## What needs a live AKS cluster
 
 These are open until a run on a real cluster:

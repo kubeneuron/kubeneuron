@@ -418,6 +418,11 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- On AKS and EKS too, a replacement held by its permission check names the
+  missing permission, or the error code the cloud answered with, and what to
+  do, instead of showing the cloud's error, which can carry the subscription
+  and resource group (Azure) or the role's ARN (AWS); that error goes to the
+  controller log. The three clouds now answer the operator the same way.
 - On GKE, a replacement held by its permission check now says which Google
   API is disabled or which permission is missing, and what to do, instead of
   showing Google's error, which names the project; that error goes to the

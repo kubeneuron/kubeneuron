@@ -13,6 +13,8 @@ import (
 	sdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/smithy-go"
+
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
 type permissionEC2 struct {
@@ -56,6 +58,10 @@ func TestReplacePermission(t *testing.T) {
 				if !errors.Is(err, tc.response) || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), apiErr.ErrorCode()) {
 					t.Fatalf("expected diagnostic %q with AWS cause, got %v", want, err)
 				}
+			}
+			var hold *cloud.RecoveryHold
+			if !tc.allowed && tc.response != nil && (!errors.As(err, &hold) || strings.Contains(hold.Message(), "i-pinned") || strings.Contains(hold.Message(), "DryRun failed")) {
+				t.Fatalf("expected a hold without the raw error, got %v", err)
 			}
 			if (err == nil) != tc.allowed || f.calls != tc.calls {
 				t.Fatalf("permission err=%v calls=%d", err, f.calls)

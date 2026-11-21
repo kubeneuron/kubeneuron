@@ -58,6 +58,7 @@ type fakeAKS struct {
 	deleteErr        error
 	shrinkOnDelete   bool
 	permissions      []permission
+	permissionsErr   error
 
 	calls []string
 }
@@ -168,6 +169,9 @@ func (f *fakeAKS) Permissions(_ context.Context, scope string) ([]permission, er
 	if !strings.HasSuffix(scope, "/managedClusters/"+testCluster+"/agentPools/"+testPool) {
 		return nil, fmt.Errorf("unexpected scope %s", scope)
 	}
+	if f.permissionsErr != nil {
+		return nil, f.permissionsErr
+	}
 	return f.permissions, nil
 }
 
@@ -177,6 +181,17 @@ func armFailure(outer, inner string) error {
 	req, _ := http.NewRequest(http.MethodPut, "https://management.azure.com/x", nil)
 	return runtime.NewResponseError(&http.Response{
 		StatusCode: http.StatusBadRequest, Header: http.Header{"Content-Type": {"application/json"}},
+		Body: io.NopCloser(bytes.NewBufferString(body)), Request: req,
+	})
+}
+
+// armDenied is ARM's refusal of the permissions read, the subscription in its
+// URL and message as Azure sends them.
+func armDenied() error {
+	body := `{"error":{"code":"AuthorizationFailed","message":"The client does not have authorization over scope '/subscriptions/` + testSub + `'."}}`
+	req, _ := http.NewRequest(http.MethodGet, "https://management.azure.com/subscriptions/"+testSub+"/providers/Microsoft.Authorization/permissions", nil)
+	return runtime.NewResponseError(&http.Response{
+		StatusCode: http.StatusForbidden, Header: http.Header{"Content-Type": {"application/json"}},
 		Body: io.NopCloser(bytes.NewBufferString(body)), Request: req,
 	})
 }

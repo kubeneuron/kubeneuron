@@ -111,7 +111,7 @@ func (p *Provider) CheckReplacePermission(ctx context.Context, instanceID string
 	}
 	perms, err := p.api.Permissions(ctx, p.poolScope(t.pool))
 	if err != nil {
-		return fmt.Errorf("azure: reading permissions on agent pool %s: %w", t.pool, err)
+		return permissionReadHold(t.pool, fmt.Errorf("azure: reading permissions on agent pool %s: %w", t.pool, err))
 	}
 	var missing []string
 	for _, action := range replaceActions {
@@ -120,9 +120,28 @@ func (p *Provider) CheckReplacePermission(ctx context.Context, instanceID string
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("azure: missing on agent pool %s: %s", t.pool, strings.Join(missing, ", "))
+		list := strings.Join(missing, ", ")
+		return &cloud.RecoveryHold{Code: cloud.HoldPermissionMissing,
+			Reason:     fmt.Sprintf("The controller's identity lacks %s on agent pool %s.", list, t.pool),
+			Action:     "Grant these permissions to the controller's identity on the agent pool (see docs/cloud-azure.md). KubeNeuron checks again every minute.",
+			PoolReason: "the controller lacks " + list + " on the agent pool",
+			PoolAction: "grant these permissions on the agent pool (docs/cloud-azure.md)"}
 	}
 	return nil
+}
+
+// permissionReadHold says why the permission check could not be made. The ARM
+// error carries the request URL, with the subscription and resource group, so
+// it stays in Cause, for the controller log; only its code is shown.
+func permissionReadHold(pool string, err error) error {
+	answer := "the Azure Resource Manager call failed"
+	if codes := errorCodes(err); len(codes) > 0 && codes[0] != "" {
+		answer = "Azure Resource Manager answered " + codes[0]
+	}
+	return &cloud.RecoveryHold{Code: cloud.HoldReadFailed, Cause: err,
+		Reason:     fmt.Sprintf("KubeNeuron could not read the controller's permissions on agent pool %s: %s.", pool, answer),
+		Action:     "KubeNeuron checks again every minute.",
+		PoolReason: "could not read permissions: " + answer}
 }
 
 // allowed applies Azure RBAC to one action: some permission grants it and that
