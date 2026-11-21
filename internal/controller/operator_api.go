@@ -294,6 +294,7 @@ func (c *Controller) AcknowledgeIncident(ctx context.Context, id, actor, reason 
 	}
 
 	var acknowledged *types.Incident
+	var ackAt time.Time
 	err = c.store.WithTx(ctx, func(tx store.Tx) error {
 		incident, err := tx.GetIncident(ctx, id)
 		if err != nil {
@@ -305,12 +306,13 @@ func (c *Controller) AcknowledgeIncident(ctx context.Context, id, actor, reason 
 		if incident.State.Terminal() {
 			return fmt.Errorf("incident %q is already terminal", id)
 		}
-		incident.UpdatedAt = time.Now().UTC()
+		ackAt = time.Now().UTC()
+		touchUpdated(incident, ackAt)
 		if err := tx.UpdateIncident(ctx, incident); err != nil {
 			return err
 		}
 		if err := tx.AppendAudit(ctx, &types.AuditEntry{
-			IncidentID: incident.ID, Time: incident.UpdatedAt, FromState: incident.State, ToState: incident.State,
+			IncidentID: incident.ID, Time: ackAt, FromState: incident.State, ToState: incident.State,
 			Actor: actor, Action: "acknowledge", Params: map[string]string{"reason": firstNonBlank(reason, "acknowledged")},
 			Result: "acknowledged", DryRun: incident.DryRun,
 		}); err != nil {
@@ -326,7 +328,7 @@ func (c *Controller) AcknowledgeIncident(ctx context.Context, id, actor, reason 
 	// record. The operational chain adds global explorer correlation without
 	// storing raw incident evidence a second time.
 	if err := operational.AppendOperationalAudit(ctx, &types.OperationalAuditEvent{
-		Kind: types.ResourceIncidentOperation, ResourceID: id, Time: acknowledged.UpdatedAt,
+		Kind: types.ResourceIncidentOperation, ResourceID: id, Time: ackAt,
 		Actor: actor, Action: "acknowledge", RequestID: idempotencyKey,
 		Params: map[string]string{"reason": firstNonBlank(reason, "acknowledged")}, Result: "acknowledged",
 	}); err != nil {

@@ -192,7 +192,7 @@ func (c *Controller) saveRemoveFirst(ctx context.Context, inc *types.Incident, r
 			}
 		}
 		fresh.RemoveFirst = rec.Clone()
-		fresh.UpdatedAt = now
+		touchUpdated(fresh, now)
 		if err := tx.UpdateIncident(ctx, fresh); err != nil {
 			return err
 		}

@@ -496,3 +496,76 @@ func auditHasParam(entries []*types.AuditEntry, action, key, value string) bool 
 	}
 	return false
 }
+
+// A replacement plan that closes, or an operator who acknowledges, while the
+// incident verifies is not a recurrence: on GKE the pool's resize settles
+// after the incident has entered VERIFYING. A signal in that window still is.
+func TestVerifyingWritesThatAreNotSignals(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		strategy recoverymode.Strategy
+		write    func(*testing.T, *Controller, *types.Incident)
+		recurs   bool
+	}{
+		{"remove-first plan closes", recoverymode.RemoveFirst, func(t *testing.T, c *Controller, inc *types.Incident) {
+			rec := &types.RemoveFirstRecord{Outcome: types.RemoveFirstRestored}
+			rec.Operation, rec.Pool = "resize-1", "train"
+			if err := c.saveRemoveFirst(context.Background(), inc, rec, "remove-first-restored", "ended restored"); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"successor record written", "", func(t *testing.T, c *Controller, inc *types.Incident) {
+			if err := c.saveSuccessor(context.Background(), inc, successorOrNew(inc), "successor-noted", "noted while verifying"); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"operator acknowledges", recoverymode.RemoveFirst, func(t *testing.T, c *Controller, inc *types.Incident) {
+			if _, _, err := c.AcknowledgeIncident(context.Background(), inc.ID, "operator", "looking", 0, "ack-1"); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"the signal recurs", recoverymode.RemoveFirst, func(t *testing.T, c *Controller, inc *types.Incident) {
+			if err := c.ingest(context.Background(), signal(types.ClassFellOffBus, "n1", "")); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &poolPlatform{successorPlatform: newSuccessorPlatform()}
+			c, st, _ := successorFixture(t, recoverymode.Automatic, p.successorPlatform, tc.strategy)
+			c.platform = p
+			registerSuccessorAgent(t, st, 8)
+			registerOldNode(t, st, 8, types.AcceleratorVendorNVIDIA)
+			id := openVendorIncident(t, c, "n1", types.AcceleratorVendorNVIDIA)
+			inc := untilState(t, c, st, id, func(inc *types.Incident) bool { return inc.State.Halted() || inc.State == types.StateVerifying })
+			if inc.State != types.StateVerifying {
+				t.Fatalf("state = %s, want VERIFYING%s", inc.State, dump(trail(t, st, id)))
+			}
+			tc.write(t, c, inc)
+			node := successorNodeName
+			if tc.strategy == recoverymode.RemoveFirst {
+				node = poolNodeName
+				registerAgentAs(t, st, node, "uid-"+node)
+			}
+			reportFrom(t, st, node, "uid-"+node, types.AcceleratorVendorNVIDIA, types.AcceleratorReadinessReady)
+			inc = untilState(t, c, st, id, func(inc *types.Incident) bool { return inc.State != types.StateVerifying })
+			entries := trail(t, st, id)
+			recurred := false
+			for _, e := range entries {
+				recurred = recurred || strings.Contains(e.Result, "signal recurred")
+			}
+			if tc.recurs != recurred || tc.recurs == (inc.State == types.StateResolved) {
+				t.Fatalf("state = %s, recurred = %v, want recurred = %v%s", inc.State, recurred, tc.recurs, dump(entries))
+			}
+		})
+	}
+}
+
+func successorOrNew(inc *types.Incident) *types.SuccessorRecord {
+	if inc.Successor != nil {
+		return inc.Successor.Clone()
+	}
+	rec := &types.SuccessorRecord{}
+	rec.Operation = "add-1"
+	return rec
+}

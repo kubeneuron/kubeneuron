@@ -418,6 +418,12 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- A replacement whose cloud operation settles after the incident has entered
+  `VERIFYING` (on GKE the pool's resize back to its size finishes there) no
+  longer goes to `NEEDS_HUMAN` with "verification failed: signal recurred
+  during quiet window". Closing the replacement plan, or an operator's
+  acknowledgement, while the incident verifies is no longer read as a new
+  signal; a signal that does recur still escalates.
 - A remove-first replacement of a node whose agent does not inventory its
   vendor's devices (for example AMD without a device adapter) no longer goes to
   `NEEDS_HUMAN` with "The incident recorded no accelerators to compare new

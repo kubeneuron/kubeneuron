@@ -1391,6 +1391,16 @@ func (c *Controller) noteVerifyWait(ctx context.Context, inc *types.Incident, re
 	return c.appendAudit(ctx, inc, "system", verifyWaitAction, reason)
 }
 
+// touchUpdated moves UpdatedAt for a write that is not a signal. In VERIFYING
+// an UpdatedAt past StateChangedAt is how advanceVerifying sees a signal that
+// recurred during the quiet window, so there a replacement plan's or an
+// operator's write leaves it alone.
+func touchUpdated(inc *types.Incident, now time.Time) {
+	if inc.State != types.StateVerifying {
+		inc.UpdatedAt = now
+	}
+}
+
 // appendAudit records an event that does not change state (e.g. a failed
 // step before escalation decides the next state).
 func (c *Controller) appendAudit(ctx context.Context, inc *types.Incident, actor, action, result string) error {
