@@ -1103,15 +1103,13 @@ set `interruptionQueueURL` and grant `sqs:ReceiveMessage` and
 
 For replacement, grant `ec2:TerminateInstances` scoped to the intended cluster
 instances. The controller probes this permission with an EC2 DryRun for the
-pinned instance and checks it again before termination. Yes, once, on a
-pre-release build: EKS remove-first replacement completed on a live cluster
-(CPU nodes, synthetic accelerator capacity; verification depth: node readiness
-and advertised capacity). Not repeated on v1.0.0-rc.1. Yes, once, on
-pre-release builds: EKS add-first replacement completed on a live cluster (CPU
-nodes, synthetic accelerator capacity; verification depth: node readiness and
-advertised capacity). The controller was updated during the incident. Not
-repeated on v1.0.0-rc.1. Neither is validated on accelerator hardware. Start in
-KubeNeuron's `DryRun` mode.
+pinned instance and checks it again before termination.
+
+Both replacement orders have completed on a live EKS cluster.
+Once, on a pre-release build: EKS remove-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1.
+Once, on pre-release builds: EKS add-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). The controller was updated during the incident. Not repeated on v1.0.0-rc.1.
+Neither is validated on accelerator hardware. Start in KubeNeuron's `DryRun`
+mode.
 
 The operator accepts AWS playbooks containing recycle or replace. At runtime,
 EKS managed nodegroups support remove-first replacement, and add-first on a
@@ -1120,13 +1118,15 @@ recycle is disabled because the Auto Scaling group can replace a stopped node.
 The [EKS add-first guide](cloud-aws.md) describes the experimental provider
 checks and the conditions that require operator inspection.
 
-On AKS (experimental, not validated against a live AKS cluster), replacement
+On AKS (experimental; add-first and remove-first each completed once on a live
+cluster, see [Replacing GPU nodes on AKS](cloud-azure.md)), replacement
 goes through the AKS agent pool API and recycle is not available; see
 [Replacing GPU nodes on AKS](cloud-azure.md) for setup, the minimal role and
 what the step deletes.
 
-On GKE (experimental, not validated against a live GKE cluster; start in
-DryRun), replacement deletes the node's instance from its node pool's managed
+On GKE (experimental; on a fixed-size single-zone Standard node pool add-first
+and remove-first each completed once on a live cluster, see
+[Replacing GPU nodes on GKE](cloud-gcp.md); start in DryRun), replacement deletes the node's instance from its node pool's managed
 instance group: remove-first only on autoscaled pools, add-first on
 fixed-size pools in one zone. Recycle is not available, and Autopilot
 clusters are observe-only. See

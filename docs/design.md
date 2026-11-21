@@ -746,14 +746,12 @@ moves without an update. A repair started before native repair was disabled
 could outlast that window. Each hold carries an operator-facing reason and
 action; the raw AWS error goes only to the controller log. Replacement requires EC2 to confirm a TerminateInstances DryRun for the
 pinned instance before disruption and again before termination. Managed groups
-remain ineligible for stop/start recycle. With these
-eligibility checks: yes, once, on a pre-release build: EKS remove-first
-replacement completed on a live cluster (CPU nodes, synthetic accelerator
-capacity; verification depth: node readiness and advertised capacity). Not
-repeated on v1.0.0-rc.1. Yes, once, on pre-release builds: EKS add-first
-replacement completed on a live cluster (CPU nodes, synthetic accelerator
-capacity; verification depth: node readiness and advertised capacity). The
-controller was updated during the incident. Not repeated on v1.0.0-rc.1.
+remain ineligible for stop/start recycle.
+
+With these eligibility checks, both replacement orders have completed on a
+live EKS cluster.
+Once, on a pre-release build: EKS remove-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1.
+Once, on pre-release builds: EKS add-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). The controller was updated during the incident. Not repeated on v1.0.0-rc.1.
 Neither is validated on accelerator hardware. Remove-first replacement calls
 `TerminateInstances` first, and the Auto Scaling group then launches a
 successor. Add-first raises the group's desired size first, on a single-zone

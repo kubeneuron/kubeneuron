@@ -17,10 +17,13 @@ Set `spec.playbookRef` to the installation's observe, cloud-replace or
 cloud-recycle playbook. The recycle ladder additionally requires
 `spec.recycle.enabled: true` and escalates to replacement. The default
 replacement strategy is `AddFirst`, which needs a provider that can prepare
-a replacement first: today, Azure on a fixed-size AKS node pool
-(experimental, not validated against a live AKS cluster) and GCP on a
-fixed-size GKE Standard node pool in one zone (experimental, not validated
-against a live GKE cluster; start in DryRun). Elsewhere,
+a replacement first: today, AWS on a single-zone EKS managed node group
+whose size is declared fixed, Azure on a fixed-size AKS node pool and GCP on
+a fixed-size GKE Standard node pool in one zone. All three are experimental;
+each completed once on a live cluster with CPU nodes and synthetic
+accelerator capacity, on pre-release builds (see the
+[live cloud evidence table](reference-capabilities.md#live-cloud-evidence)).
+Start in DryRun. Elsewhere,
 an incident whose ladder includes replacement stays in `EVALUATING` before cordon. Its
 audit records `recovery-unavailable` and explains that the provider lacks
 add-first and the policy has not selected remove-first. See
@@ -457,11 +460,15 @@ the fleet you intend.
 
 ### EKS managed nodegroups
 
-Replacement on EKS has not yet been validated against a live cluster.
-Start in `DryRun` mode. EKS replacement terminates the EC2 instance first,
-then its Auto Scaling group launches a successor. With the default `AddFirst`
-strategy, the incident waits before cordon because this provider cannot bring
-up the successor first.
+Add-first and remove-first replacement each completed once on a live EKS
+cluster with CPU nodes and synthetic accelerator capacity, on pre-release
+builds; neither is validated on accelerator hardware (see the
+[live cloud evidence table](reference-capabilities.md#live-cloud-evidence)).
+Start in `DryRun` mode. Remove-first terminates the EC2 instance first, then
+its Auto Scaling group launches a successor. The default `AddFirst` strategy
+raises the group's size first; it needs a single-zone managed node group
+whose size you have declared fixed (see [cloud-aws.md](cloud-aws.md)). On any
+other group the incident waits before cordon and says why.
 
 For an AWS installation, set `spec.cloud.aws.clusterName` on the KubeNeuron
 resource to the name of the EKS cluster. The operator passes it to the

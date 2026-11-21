@@ -8,11 +8,11 @@ The cloud policies are written for fleets using NVIDIA GPUs, AMD Instinct on Azu
 
 | Cloud | Simulated provider | Live CPU replacement with synthetic accelerator resource | Live accelerator validation |
 |---|---|---|---|
-| Amazon Elastic Kubernetes Service (EKS) | Replacement tested | Pending | Unverified |
-| Azure Kubernetes Service (AKS) | Replacement tested | Pending | Unverified |
-| Google Kubernetes Engine (GKE) | Replacement tested | Pending | Unverified |
+| Amazon Elastic Kubernetes Service (EKS) | Replacement tested | Add-first and remove-first each completed once, on pre-release builds | Unverified |
+| Azure Kubernetes Service (AKS) | Replacement tested | Add-first and remove-first each completed once, on a pre-release build | Unverified |
+| Google Kubernetes Engine (GKE) | Replacement tested | Add-first and remove-first on a fixed-size single-zone Standard node pool each completed once, on pre-release builds | Unverified |
 
-With the simulated providers, an incident resolves by itself after the controller confirms the new node. No live cloud run has confirmed this yet. Use `kubeneuronctl pools` to inspect add-first eligibility and `kubeneuronctl incidents show <id>` to see how the controller identified the node and what it verified. The incident records infrastructure recovery. It does not show that a training job resumed. See the [capability and evidence matrix](docs/reference-capabilities.md#live-cloud-evidence) for individual checks.
+In each live run the nodes were CPU nodes with synthetic accelerator capacity, and the controller verified the new node by node readiness and advertised capacity. Device health on the new node was not checked. On EKS the controller was updated during the add-first incident. On GKE the controller was updated between the two runs. The runs were not repeated on v1.0.0-rc.1. GKE remove-first on autoscaled pools, multi-zone pools and Autopilot were not run live. In those runs, and with the simulated providers, the incident resolved by itself after the controller confirmed the new node. Use `kubeneuronctl pools` to inspect add-first eligibility and `kubeneuronctl incidents show <id>` to see how the controller identified the node and what it verified. The incident records infrastructure recovery. It does not show that a training job resumed. See the [capability and evidence matrix](docs/reference-capabilities.md#live-cloud-evidence) for individual checks.
 
 Upgrading from 0.x releases is not supported. Uninstall the 0.x installation, then install v1.0. See the [clean installation steps](docs/upgrade.md#moving-from-0x-to-v10).
 
@@ -336,7 +336,7 @@ completed safety case:
 - credentials are represented by Secret references, not inline values.
 
 Approval delivery (Slack, generic webhook, PagerDuty), verification before
-resolution, and the pause/resume control path are implemented. The current EKS, AKS and GKE replacement paths have not yet been validated on a live cluster; start in DryRun. See the [live cloud evidence table](docs/reference-capabilities.md#live-cloud-evidence) for what was tested and how.
+resolution, and the pause/resume control path are implemented. The EKS, AKS and GKE replacement paths each completed once on a live cluster with CPU nodes and synthetic accelerator capacity, on pre-release builds. None is validated on accelerator hardware; start in DryRun. See the [live cloud evidence table](docs/reference-capabilities.md#live-cloud-evidence) for what was tested and how.
 
 ## Configuration sources
 

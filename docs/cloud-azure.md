@@ -1,7 +1,8 @@
 # Replacing GPU nodes on AKS
 
-**Experimental, not validated against a live AKS cluster.** The Azure
-provider has been tested only against a simulated AKS API. Start in
+**Experimental.** Yes, once, on a pre-release build: AKS add-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; device health on the new node was not checked). Not repeated on v1.0.0-rc.1.
+Yes, once, on a pre-release build: AKS remove-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1.
+It is not validated on accelerator hardware. Start in
 KubeNeuron's `DryRun` mode and move a narrow node selector to live recovery
 only after you have watched it decide on your own cluster.
 
@@ -226,7 +227,9 @@ its request URL names the subscription and resource group.
 
 ## What needs a live AKS cluster
 
-These are open until a run on a real cluster:
+One live run completed add-first and remove-first replacement on a fixed-size
+single-zone node pool (see the top of this page). That run did not examine
+the points below one by one, so they stay open:
 
 - whether AKS lists the new machine of a grown pool by the time the pool is
   `Succeeded` (add-first waits for both, and needs an operator if the pool

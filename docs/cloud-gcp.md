@@ -1,8 +1,10 @@
 # Replacing GPU nodes on GKE
 
-**Experimental, not validated against a live GKE cluster; start in DryRun.**
-The GCP provider has been tested only against a simulated GKE and Compute
-Engine API. Start in KubeNeuron's `DryRun` mode and move a narrow node
+**Experimental; start in DryRun.** Yes, once, on a pre-release build: GKE Standard add-first replacement completed on a live cluster (fixed-size single-zone node pool, CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; device health on the new node was not checked). Not repeated on v1.0.0-rc.1.
+Yes, once, on a pre-release build: GKE Standard remove-first replacement on a fixed-size pool completed on a live cluster, with the pool's size restored (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1.
+Remove-first on autoscaled pools, multi-zone pools and Autopilot
+(observation-only) have been tested only against a simulated GKE and Compute
+Engine API. Nothing here is validated on accelerator hardware. Start in KubeNeuron's `DryRun` mode and move a narrow node
 selector to live recovery only after you have watched it decide on your own
 cluster.
 
@@ -98,7 +100,7 @@ next attempt.
 
 ### Remove-first on a fixed-size pool
 
-Experimental, not validated against a live GKE cluster. On a fixed-size
+Experimental. Yes, once, on a pre-release build: GKE Standard remove-first replacement on a fixed-size pool completed on a live cluster, with the pool's size restored (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1. On a fixed-size
 pool, deleting a node's instance leaves the pool one node short until its
 size is set back, which takes a second call. KubeNeuron keeps a plan of the
 replacement on the incident, so a controller that stops between the two
@@ -268,7 +270,10 @@ them.
 
 ## What needs a live GKE cluster
 
-These are open until a run on a real cluster:
+One live run completed add-first and remove-first replacement on a fixed-size
+single-zone Standard node pool (see the top of this page). That run did not
+examine the points below one by one, so they stay open, as do remove-first
+on autoscaled pools and multi-zone pools:
 
 - that deleting a member of a node pool's instance group is accepted by GKE
   and lowers the pool by one, without GKE restoring it;

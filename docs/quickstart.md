@@ -9,8 +9,12 @@ uses provider APIs. Reboot through the node agent requires the explicit
 reviewing the policies that can act on workloads.
 
 ```sh
-curl -fsSL https://github.com/kubeneuron/kubeneuron/releases/latest/download/install.sh | bash -s -- --version latest
+curl -fsSL https://github.com/kubeneuron/kubeneuron/releases/download/v1.0.0-rc.1/install.sh | bash -s -- --version v1.0.0-rc.1
 ```
+
+A release candidate is a pre-release and installs only by its explicit
+version. `latest` still points to the last 0.x release, which is a different
+release line under its own license; upgrading from 0.x is not supported.
 
 Use a Kubernetes 1.29+ cluster with a default StorageClass. The installer
 prints the port-forward command and credentials. Run that port-forward in a
