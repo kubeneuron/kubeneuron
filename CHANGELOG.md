@@ -9,6 +9,8 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+## [v1.0.0-rc.1] - 2026-11-21
+
 ### Added
 
 - **EKS: add-first replacement is enabled (experimental).** On a single-zone
