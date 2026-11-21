@@ -296,6 +296,11 @@ func cmdIncidents() *cobra.Command {
 			inc.ID, inc.State, inc.Class, inc.Target.Node, inc.Target.GPUUUID,
 			inc.Playbook, inc.StepIndex, inc.Attempt, inc.DryRun, inc.SignalSeen,
 			inc.OpenedAt.Format(time.RFC3339))
+		// The round is what approve, reject and incidents impact bind to; without
+		// a notification channel this is the only place an operator can read it.
+		if inc.State == types.StateAwaitingApproval && inc.ApprovalEpoch > 0 {
+			_, _ = fmt.Fprintf(out, "approval:  round %d (use --round %d with approve, reject and incidents impact)\n", inc.ApprovalEpoch, inc.ApprovalEpoch)
+		}
 		// The current reason recovery is held comes first, before the evidence.
 		recovery := detail.RecoveryAvailability
 		if recovery == nil {

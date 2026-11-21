@@ -138,6 +138,29 @@ func TestIncidentShowPolicyHoldAndRecovery(t *testing.T) {
 	}
 }
 
+// Without a notification channel the round an approve binds to is read here.
+func TestIncidentShowApprovalRound(t *testing.T) {
+	for _, tc := range []struct {
+		state types.IncidentState
+		want  bool
+	}{{types.StateAwaitingApproval, true}, {types.StateExecuting, false}} {
+		t.Run(string(tc.state), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"incident": types.Incident{ID: "parked", State: tc.state, ApprovalEpoch: 3}})
+			}))
+			defer server.Close()
+			out, err := runCommand(t, server.URL, "incidents", "show", "parked")
+			if err != nil {
+				t.Fatal(err)
+			}
+			line := "approval:  round 3 (use --round 3 with approve, reject and incidents impact)\n"
+			if strings.Contains(out, line) != tc.want {
+				t.Fatalf("incidents show in %s:\n%s", tc.state, out)
+			}
+		})
+	}
+}
+
 // The texts are the EKS provider's own, from internal/cloud/aws.
 func TestIncidentShowProviderHold(t *testing.T) {
 	at := time.Date(2026, 11, 20, 15, 41, 0, 0, time.UTC)
