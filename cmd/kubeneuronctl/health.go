@@ -52,7 +52,7 @@ func printHealth(out io.Writer, view types.AcceleratorHealthView) {
 		return
 	}
 	w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "NODE\tSOURCE\tPROFILE\tRULE\tDEVICE\tSTATE\tREASON\tREAD\tWHY")
+	_, _ = fmt.Fprintln(w, "NODE\tSOURCE\tPROFILE\tRULE\tCLASS\tDEVICE\tSTATE\tREASON\tREAD\tWHY")
 	for _, r := range view.Rows {
 		read := "-"
 		if !r.ReadAt.IsZero() {
@@ -62,8 +62,8 @@ func printHealth(out io.Writer, view types.AcceleratorHealthView) {
 		if node == "" {
 			node = "(all)"
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			node, r.Source, dash(r.Profile), dash(r.Rule), dash(r.Device), r.State, dash(r.Reason), read, dash(r.Why))
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			node, r.Source, dash(r.Profile), dash(r.Rule), dash(string(r.Class)), dash(r.Device), r.State, dash(r.Reason), read, dash(r.Why))
 	}
 	_ = w.Flush()
 	if view.Truncated {

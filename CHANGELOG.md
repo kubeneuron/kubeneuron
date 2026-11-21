@@ -18,6 +18,9 @@ API is `v1alpha1`.
   had to avoid moving it. Now any write may update the incident, and only a
   recurring signal escalates. Going back to v1.0.0-rc.1 after this migration
   needs the pre-upgrade backup (see `docs/upgrade.md`).
+- The `kubeneuronctl health` table has a `CLASS` column, the incident class
+  a fault on the row opens. Rows of one rule that differ only by class no
+  longer look like duplicates.
 
 ## [v1.0.0-rc.1] - 2026-11-21
 

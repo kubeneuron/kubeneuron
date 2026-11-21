@@ -28,6 +28,8 @@ func TestHealthCommand(t *testing.T) {
 			{Source: "dra", State: types.HealthRowNotReadThisTerm, Why: "not read since this controller became leader"},
 			{Node: "gpu-1", Source: "kubernetes-node", Profile: "nvidia", Rule: "conditions", State: "fault", Reason: "XidCriticalError",
 				ReadAt: time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)},
+			{Node: "gpu-1", Source: "agent", Rule: "nvidia-kmsg", Class: types.ClassECCDBE, State: "unknown", Reason: "kernel-log-unavailable"},
+			{Node: "gpu-1", Source: "agent", Rule: "nvidia-kmsg", Class: types.ClassXIDApp, State: "unknown", Reason: "kernel-log-unavailable"},
 		}})
 	}))
 	defer server.Close()
@@ -50,13 +52,23 @@ func TestHealthCommand(t *testing.T) {
 	if query != "node=gpu-1" {
 		t.Fatalf("query %q", query)
 	}
-	for _, want := range []string{"(all)", "not-read-this-term", "gpu-1", "XidCriticalError", "2026-11-18T12:00:00Z", "Truncated at 2 rows"} {
+	// Rows that differ only by the class a fault opens must not read as duplicates.
+	lines := strings.Split(out, "\n")
+	if got := strings.Join(strings.Fields(lines[0])[3:6], " "); got != "RULE CLASS DEVICE" {
+		t.Fatalf("header %q", lines[0])
+	}
+	for i, class := range []types.ProblemClass{types.ClassECCDBE, types.ClassXIDApp} {
+		if fields := strings.Fields(lines[3+i]); fields[3] != "nvidia-kmsg" || fields[4] != string(class) {
+			t.Fatalf("row %q, want class %s", lines[3+i], class)
+		}
+	}
+	for _, want := range []string{"(all)", "not-read-this-term", "gpu-1", "XidCriticalError", "2026-11-18T12:00:00Z", "Truncated at 4 rows"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in\n%s", want, out)
 		}
 	}
 	var view types.AcceleratorHealthView
-	if err := json.Unmarshal([]byte(run("health", "--json")), &view); err != nil || len(view.Rows) != 2 || query != "" {
+	if err := json.Unmarshal([]byte(run("health", "--json")), &view); err != nil || len(view.Rows) != 4 || query != "" {
 		t.Fatalf("json %+v %v %q", view, err, query)
 	}
 }

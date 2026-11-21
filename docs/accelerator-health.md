@@ -339,7 +339,7 @@ not something KubeNeuron checked. Every test tree is synthetic.
 
 `kubeneuronctl health [--node <node>] [--json]` (`GET /api/v1/accelerator-health?node=<node>`)
 shows what the elected leader last read from every source: one row per node,
-source, profile, rule and device, sorted in that order, with the state, the
+source, profile, rule, incident class and device, sorted in that order, with the state, the
 reason the source reported, KubeNeuron's explanation and when the source was
 read. `--node` is an exact node name. The view is held in the leader's memory
 and starts empty in every leadership term; a standby answers `503`. It reads
