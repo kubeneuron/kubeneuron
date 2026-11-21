@@ -1,7 +1,7 @@
 # Replacing GPU nodes on AKS
 
-**Experimental.** Yes, once, on a pre-release build: AKS add-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; device health on the new node was not checked). Not repeated on v1.0.0-rc.1.
-Yes, once, on a pre-release build: AKS remove-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1.
+**Experimental.** Once, on a pre-release build: AKS add-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; device health on the new node was not checked). Not repeated on v1.0.0-rc.1.
+Once, on a pre-release build: AKS remove-first replacement on a fixed-size node pool completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1.
 It is not validated on accelerator hardware. Start in
 KubeNeuron's `DryRun` mode and move a narrow node selector to live recovery
 only after you have watched it decide on your own cluster.

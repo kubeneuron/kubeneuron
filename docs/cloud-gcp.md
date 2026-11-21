@@ -1,7 +1,7 @@
 # Replacing GPU nodes on GKE
 
-**Experimental; start in DryRun.** Yes, once, on a pre-release build: GKE Standard add-first replacement completed on a live cluster (fixed-size single-zone node pool, CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; device health on the new node was not checked). Not repeated on v1.0.0-rc.1.
-Yes, once, on a pre-release build: GKE Standard remove-first replacement on a fixed-size pool completed on a live cluster, with the pool's size restored (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1.
+**Experimental; start in DryRun.** Once, on a pre-release build: GKE Standard add-first replacement completed on a live cluster (fixed-size single-zone node pool, CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; device health on the new node was not checked). Not repeated on v1.0.0-rc.1.
+Once, on a pre-release build: GKE Standard remove-first replacement on a fixed-size pool completed on a live cluster, with the pool's size restored (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1.
 Remove-first on autoscaled pools, multi-zone pools and Autopilot
 (observation-only) have been tested only against a simulated GKE and Compute
 Engine API. Nothing here is validated on accelerator hardware. Start in KubeNeuron's `DryRun` mode and move a narrow node
@@ -100,7 +100,7 @@ next attempt.
 
 ### Remove-first on a fixed-size pool
 
-Experimental. Yes, once, on a pre-release build: GKE Standard remove-first replacement on a fixed-size pool completed on a live cluster, with the pool's size restored (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1. On a fixed-size
+Experimental. Once, on a pre-release build: GKE Standard remove-first replacement on a fixed-size pool completed on a live cluster, with the pool's size restored (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1. On a fixed-size
 pool, deleting a node's instance leaves the pool one node short until its
 size is set back, which takes a second call. KubeNeuron keeps a plan of the
 replacement on the incident, so a controller that stops between the two
