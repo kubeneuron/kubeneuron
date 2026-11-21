@@ -174,6 +174,15 @@ func (c *Controller) poolChecker(ctx context.Context) func(types.Node) error {
 		if n.UID == "" || ref.Identity.NodeUID != n.UID {
 			return errors.New("pool node identity changed")
 		}
+		// "available" means the incident path would not hold on permissions
+		// either: GKE checks them with Resource Manager, which can be off.
+		if permission, ok := c.platform.(interface {
+			ReplacePermission(context.Context, cloud.NodeIdentity) error
+		}); ok {
+			if err := permission.ReplacePermission(ctx, ref.Identity); err != nil {
+				return err
+			}
+		}
 		if n.Labels["eks.amazonaws.com/nodegroup"] != "" {
 			if assessment, ok := c.platform.(interface {
 				AssessAddFirstPool(context.Context, cloud.NodeIdentity) error

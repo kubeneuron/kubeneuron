@@ -449,6 +449,32 @@ func TestPoolChecksBeforeIncident(t *testing.T) {
 	}
 }
 
+type permissionHoldPlatform struct {
+	*poolAssessmentPlatform
+}
+
+func (p *permissionHoldPlatform) ReplacePermission(context.Context, cloud.NodeIdentity) error {
+	return &cloud.RecoveryHold{Code: cloud.HoldAPIDisabled, Cause: errors.New("googleapi: Error 403"),
+		Reason: "KubeNeuron could not check the controller's permissions", PoolReason: "could not check permissions: cloudresourcemanager.googleapis.com is disabled in the project",
+		PoolAction: "enable cloudresourcemanager.googleapis.com in the cluster's project"}
+}
+
+// A pool is not "available" while the incident path would hold on the
+// controller's permissions.
+func TestPoolCheckAsksForThePermissionsAReplacementNeeds(t *testing.T) {
+	c, _, inv := inventoryFixture(t)
+	c.SetEngine(poolTestEngine(t))
+	c.platform = &permissionHoldPlatform{&poolAssessmentPlatform{inventoryPlatform: inv}}
+	inv.nodes = append(inv.nodes, types.Node{Name: "g1", UID: "g1-uid", Labels: map[string]string{"cloud.google.com/gke-nodepool": "train"}, Devices: tpuDevices})
+	c.syncAcceleratorInventory(t.Context())
+	c.syncAcceleratorInventory(t.Context())
+	rows := c.PoolAvailability().Pools
+	if len(rows) != 1 || rows[0].Status != "unavailable" || rows[0].ReasonCode != cloud.HoldAPIDisabled ||
+		!strings.Contains(rows[0].Action, "enable cloudresourcemanager.googleapis.com") || strings.Contains(rows[0].Reason, "googleapi:") {
+		t.Fatalf("pool rows %+v", rows)
+	}
+}
+
 type blockingPoolPlatform struct {
 	*poolAssessmentPlatform
 	started chan struct{}

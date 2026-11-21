@@ -161,7 +161,18 @@ the VM), the incident records it and no recovery step starts.
    token from the metadata server. Do not give it a service account key.
    Without credentials the controller still runs, but refuses every
    replacement and names the cause.
-2. Create a custom role with these permissions and grant it, on the
+2. Enable, in the cluster's project, the Google APIs the controller calls:
+
+    ```sh
+    gcloud services enable container.googleapis.com compute.googleapis.com \
+      cloudresourcemanager.googleapis.com --project=<project>
+    ```
+
+    A new project has the Cloud Resource Manager API off. KubeNeuron needs it
+    to check its permissions before it changes anything; while it is off,
+    every replacement holds and names the API to enable.
+
+3. Create a custom role with these permissions and grant it, on the
    project, to the controller's ServiceAccount (`<installation>-controller`
    in the installation namespace) as a Workload Identity Federation
    principal:
@@ -189,7 +200,7 @@ the VM), the incident records it and no recovery step starts.
     leave out `container.clusters.update`: those pools' sizes are never set.
     Any fixed-size pool needs it, with either strategy.
 
-3. Configure the KubeNeuron resource:
+4. Configure the KubeNeuron resource:
 
     ```yaml
     spec:
@@ -201,7 +212,7 @@ the VM), the incident records it and no recovery step starts.
           clusterName: training
     ```
 
-4. Optionally, to read TPU health from Google Cloud Monitoring
+5. Optionally, to read TPU health from Google Cloud Monitoring
    ([what is read](accelerator-health.md#tpu-health-from-google-cloud-monitoring-opt-in);
    experimental, the metric is a Google Cloud Beta feature), set
    `tpuInfraHealth: {enabled: true}` under `gcp`, and grant the controller's
@@ -241,6 +252,19 @@ Before any change, KubeNeuron asks Cloud Resource Manager
 (`projects.testIamPermissions`) which of the permissions above the controller
 holds on the project. Grants on narrower resources, and deny policies, are
 not seen there: a call can still be refused after the pool has been grown.
+
+`kubeneuronctl pools` runs the same check, so a GKE pool shows as available
+only once these permissions are confirmed. A pool whose check failed shows
+the disabled API or the missing permission, and what to do; the Google
+error itself goes to the controller log only, as it names the project.
+
+## Deleting the cluster
+
+Deleting a GKE cluster does not delete the persistent disks behind
+KubeNeuron's volume claims (the SQLite state and the metrics store).
+Uninstall with `--uninstall --delete-data` first, or list the leftover disks
+afterwards (`gcloud compute disks list --filter="name~^pvc-"`) and delete
+them.
 
 ## What needs a live GKE cluster
 

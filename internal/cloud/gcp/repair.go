@@ -184,7 +184,7 @@ func (p *Provider) CheckReplacePermission(ctx context.Context, instanceID string
 	}
 	held, err := p.api.Permissions(ctx, want)
 	if err != nil {
-		return fmt.Errorf("gcp: testing permissions on project %s: %w", p.project, err)
+		return permissionReadHold(fmt.Errorf("gcp: testing permissions on project %s: %w", p.project, err))
 	}
 	var missing []string
 	for _, perm := range want {
@@ -193,7 +193,29 @@ func (p *Provider) CheckReplacePermission(ctx context.Context, instanceID string
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("gcp: missing on project %s: %s", p.project, strings.Join(missing, ", "))
+		list := strings.Join(missing, ", ")
+		return &cloud.RecoveryHold{Code: cloud.HoldPermissionMissing,
+			Reason:     fmt.Sprintf("The controller's service account lacks %s on the cluster's project.", list),
+			Action:     "Grant the KubeNeuron role on the project. KubeNeuron checks again every minute.",
+			PoolReason: "the controller lacks " + list + " on the project",
+			PoolAction: "grant the KubeNeuron role on the project"}
 	}
 	return nil
+}
+
+// permissionReadHold says why the permission check could not be made. The
+// Google error names the project and links its console, so it stays in
+// Cause, for the controller log.
+func permissionReadHold(err error) error {
+	if service, ok := disabledService(err); ok {
+		return &cloud.RecoveryHold{Code: cloud.HoldAPIDisabled, Cause: err,
+			Reason:     fmt.Sprintf("KubeNeuron could not check the controller's permissions on the cluster's project: %s is disabled there.", service),
+			Action:     fmt.Sprintf("Enable %s in the project. KubeNeuron checks again every minute.", service),
+			PoolReason: fmt.Sprintf("could not check permissions: %s is disabled in the project", service),
+			PoolAction: "enable " + service + " in the cluster's project"}
+	}
+	return &cloud.RecoveryHold{Code: cloud.HoldReadFailed, Cause: err,
+		Reason:     "KubeNeuron could not check the controller's permissions on the cluster's project: Resource Manager testIamPermissions failed.",
+		Action:     "KubeNeuron checks again every minute.",
+		PoolReason: "could not check permissions: testIamPermissions failed"}
 }

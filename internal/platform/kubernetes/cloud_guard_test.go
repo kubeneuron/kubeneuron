@@ -89,6 +89,23 @@ func TestPinnedReplacementRefusesChangedOrUncertainTarget(t *testing.T) {
 	}
 }
 
+// A provider's hold is what the incident shows; its raw cause is not.
+func TestPermissionHoldReasonLeavesTheCauseOut(t *testing.T) {
+	ctx := context.Background()
+	n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker", UID: "uid-old"}, Spec: corev1.NodeSpec{ProviderID: "cloud:///zone/i-old"}, Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{BootID: "boot-old"}}}
+	rec := &repairRecycler{mode: cloud.RepairOff, repair: cloud.RepairObservation{Known: true},
+		permissionErr: &cloud.RecoveryHold{Code: cloud.HoldAPIDisabled, Reason: "An API is disabled.", Action: "Enable it.", Cause: errors.New("googleapi: Error 403 in project 123")}}
+	p := &Platform{client: fake.NewSimpleClientset(n), recycler: rec}
+	ref, err := p.CloudNode(ctx, n.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := p.RecoveryEligibility(ctx, ref.Identity)
+	if err == nil || v.ReplaceAllowed || v.Reason != "An API is disabled. Enable it." {
+		t.Fatalf("eligibility %+v, err %v", v, err)
+	}
+}
+
 type verifiedRecycler struct {
 	repairRecycler
 	onRecycle func()

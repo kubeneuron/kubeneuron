@@ -418,6 +418,13 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- On GKE, a replacement held by its permission check now says which Google
+  API is disabled or which permission is missing, and what to do, instead of
+  showing Google's error, which names the project; that error goes to the
+  controller log. `kubeneuronctl pools` runs the same check, so a pool no
+  longer shows as available while every replacement in it would hold. The
+  GKE guide lists the APIs to enable, including Cloud Resource Manager, and
+  the disks a deleted cluster leaves behind.
 - A replacement whose cloud operation settles after the incident has entered
   `VERIFYING` (on GKE the pool's resize back to its size finishes there) no
   longer goes to `NEEDS_HUMAN` with "verification failed: signal recurred

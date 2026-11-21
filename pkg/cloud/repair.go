@@ -132,13 +132,15 @@ type RecoveryHold struct {
 
 // Reason codes of a RecoveryHold, shared with pool assessments.
 const (
-	HoldNativeRepair     = "native-repair-on"
-	HoldRecentChange     = "pool-changed-recently"
-	HoldUpdateRunning    = "pool-update-running"
-	HoldActivityRunning  = "pool-activity-running"
-	HoldChangedDuringRun = "pool-changed-during-check"
-	HoldUnconfirmed      = "repair-unconfirmed"
-	HoldReadFailed       = "read-failed"
+	HoldNativeRepair      = "native-repair-on"
+	HoldRecentChange      = "pool-changed-recently"
+	HoldUpdateRunning     = "pool-update-running"
+	HoldActivityRunning   = "pool-activity-running"
+	HoldChangedDuringRun  = "pool-changed-during-check"
+	HoldUnconfirmed       = "repair-unconfirmed"
+	HoldReadFailed        = "read-failed"
+	HoldAPIDisabled       = "api-disabled"
+	HoldPermissionMissing = "permission-missing"
 )
 
 func (h *RecoveryHold) Message() string { return joinSentences(h.Reason, h.Action) }

@@ -334,6 +334,19 @@ func (a *sdkAPI) Permissions(ctx context.Context, permissions []string) ([]strin
 	return out.GetPermissions(), nil
 }
 
+// disabledService names the Google API that err says is disabled in the
+// project, if it says so.
+func disabledService(err error) (string, bool) {
+	var ae *apierror.APIError
+	if !errors.As(err, &ae) || ae.Reason() != "SERVICE_DISABLED" {
+		return "", false
+	}
+	if service := ae.Metadata()["service"]; service != "" {
+		return service, true
+	}
+	return "a Google API the controller calls", true
+}
+
 func notFound(err error) bool {
 	var ae *apierror.APIError
 	return errors.As(err, &ae) && (ae.HTTPCode() == http.StatusNotFound || ae.GRPCStatus().Code() == codes.NotFound)

@@ -44,6 +44,17 @@ func (p *Platform) AddFirstAvailable(ctx context.Context, pin cloud.NodeIdentity
 	return provider.CheckAddFirst(ctx, pin.InstanceID)
 }
 
+// ReplacePermission asks the provider whether the controller holds what a
+// replacement needs on the pinned node's pool, as the incident path does
+// before it acts; a provider without that check is not asked.
+func (p *Platform) ReplacePermission(ctx context.Context, pin cloud.NodeIdentity) error {
+	provider, ok := p.recycler.(cloud.RepairAwareProvider)
+	if !ok || !provider.Capabilities().Replace {
+		return nil
+	}
+	return provider.CheckReplacePermission(ctx, pin.InstanceID)
+}
+
 // AssessAddFirstPool performs only the provider's read-only checks: the pool's
 // configuration, then whether the cloud's own repair would hold a replacement
 // (a *cloud.RecoveryHold). An EKS group can be assessed while successor

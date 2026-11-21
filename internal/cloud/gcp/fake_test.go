@@ -55,6 +55,7 @@ type fakeGKE struct {
 	labels                             map[string]string
 	maintenance                        string
 	permissions                        []string
+	permissionsErr                     error
 
 	setSizeErr   error
 	createErrors []string
@@ -267,6 +268,9 @@ func (f *fakeGKE) finishDeletes() {
 }
 
 func (f *fakeGKE) Permissions(_ context.Context, want []string) ([]string, error) {
+	if f.permissionsErr != nil {
+		return nil, f.permissionsErr
+	}
 	var held []string
 	for _, p := range want {
 		if slices.Contains(f.permissions, p) {

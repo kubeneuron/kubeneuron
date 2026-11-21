@@ -62,7 +62,7 @@ func (p *Platform) RecoveryEligibility(ctx context.Context, pin cloud.NodeIdenti
 	}
 	if provider.Capabilities().Replace {
 		if err := provider.CheckReplacePermission(ctx, pin.InstanceID); err != nil {
-			v.Reason = err.Error()
+			v.Reason = holdMessage(err, err.Error())
 			return v, err
 		}
 		v.ReplaceAllowed = true

@@ -181,6 +181,46 @@ func TestCheckReplacePermissionNamesWhatIsMissing(t *testing.T) {
 	}
 }
 
+// The hold names the API or permission and what to do; the Google error,
+// which names the project and links its console, stays in the cause.
+func TestCheckReplacePermissionHoldsWithoutTheRawError(t *testing.T) {
+	disabled := `{"error":{"code":403,"message":"Cloud Resource Manager API has not been used in project 123456789012 before or it is disabled.","status":"PERMISSION_DENIED",` +
+		`"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"SERVICE_DISABLED","domain":"googleapis.com","metadata":{"service":"cloudresourcemanager.googleapis.com","consumer":"projects/123456789012"}}]}}`
+	apiErr := func(body string) error {
+		err, _ := apierror.FromError(&googleapi.Error{Code: 403, Message: "denied in project 123456789012", Body: body})
+		return err
+	}
+	for _, tc := range []struct {
+		name, code, want string
+		setup            func(*fakeGKE)
+	}{
+		{"api disabled", cloud.HoldAPIDisabled, "cloudresourcemanager.googleapis.com is disabled there. Enable cloudresourcemanager.googleapis.com in the project.",
+			func(f *fakeGKE) { f.permissionsErr = apiErr(disabled) }},
+		{"call failed", cloud.HoldReadFailed, "Resource Manager testIamPermissions failed.",
+			func(f *fakeGKE) { f.permissionsErr = apiErr("") }},
+		{"permission missing", cloud.HoldPermissionMissing, "lacks container.clusters.update on the cluster's project.",
+			func(f *fakeGKE) { f.permissions = basePermissions }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeGKE(2)
+			tc.setup(f)
+			err := testProvider(f).CheckReplacePermission(t.Context(), testInstance(0))
+			var hold *cloud.RecoveryHold
+			if !errors.As(err, &hold) || hold.Code != tc.code {
+				t.Fatalf("err = %v, want a %s hold", err, tc.code)
+			}
+			for _, text := range []string{hold.Message(), hold.PoolReason, hold.PoolAction} {
+				if strings.Contains(text, testProject) || strings.Contains(text, "123456789012") || strings.Contains(text, "googleapi:") || strings.Contains(text, "Error 403") {
+					t.Fatalf("operator text %q carries the raw error or the project", text)
+				}
+			}
+			if !strings.Contains(hold.Message(), tc.want) {
+				t.Fatalf("message %q, want it to contain %q", hold.Message(), tc.want)
+			}
+		})
+	}
+}
+
 // A fixed-size pool across zones of different sizes has no replacement
 // path, and says so before the node is cordoned; one of equal zones, or an
 // autoscaled one, has.
