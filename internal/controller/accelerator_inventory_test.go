@@ -325,12 +325,6 @@ func TestAcceleratorPoolInventoryBeforeIncident(t *testing.T) {
 		t.Fatalf("unexpected pools: %+v", rows)
 	}
 	for _, row := range rows {
-		if row.Cloud == "EKS" {
-			if row.Status != "unavailable" || row.Reason != "add-first on EKS is not enabled in this release" || row.CheckedAt == nil || row.Action != "" {
-				t.Fatalf("unexpected EKS release assessment: %+v", row)
-			}
-			continue
-		}
 		if row.Status != "unknown" || row.Reason != "no cloud provider configured" || row.CheckedAt != nil {
 			t.Fatalf("unexpected assessment: %+v", row)
 		}

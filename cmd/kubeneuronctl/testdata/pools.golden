@@ -3,7 +3,7 @@ train        GKE    2                  AddFirst            2026-11-18T12:00:00Z 
 full         AKS    3                  mixed               2026-11-18T12:00:00Z  unavailable — no room below maxSize — provide room for one more node, or set RemoveFirst in the remediation policy that applies to these nodes
 denied       AKS    1                  AddFirst            2026-11-18T12:00:00Z  unknown — permission denied while reading pool configuration
 pending      GKE    1                  AddFirst            —                     unknown — not checked yet
-disabled     EKS    4                  AddFirst            2026-11-18T12:00:00Z  unavailable — add-first on EKS is not enabled in this release
+sized        EKS    4                  AddFirst            2026-11-18T12:00:00Z  available
 fixed        EKS    2                  RemoveFirst         —                     not required
 observe      GKE    1                  none                —                     not applicable — no remediation policy replaces these nodes
 unwired      AKS    1                  AddFirst            —                     unknown — no cloud provider configured

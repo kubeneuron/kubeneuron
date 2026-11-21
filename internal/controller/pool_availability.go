@@ -79,12 +79,6 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 			cached.ReplacementPolicy = row.ReplacementPolicy
 			cached.AcceleratorNodes = count
 			row = cached
-		case row.Cloud == "EKS" && check == nil:
-			// Remove this release gate when the EKS provider advertises add-first.
-			row.CheckedAt = &now
-			row.Status = "unavailable"
-			row.ReasonCode = "eks-add-first-disabled"
-			row.Reason = "add-first on EKS is not enabled in this release"
 		case check == nil:
 			row.ReasonCode, row.Reason = "no-cloud-provider", "no cloud provider configured"
 		case checksLeft > 0:

@@ -21,7 +21,7 @@ func TestPoolsCommand(t *testing.T) {
  {"pool":"full","cloud":"AKS","accelerator_nodes":3,"replacement_policy":"mixed","status":"unavailable","reason":"no room below maxSize","action":"provide room for one more node, or set RemoveFirst in the remediation policy that applies to these nodes","checked_at":"2026-11-18T12:00:00Z"},
  {"pool":"denied","cloud":"AKS","accelerator_nodes":1,"replacement_policy":"AddFirst","status":"unknown","reason":"permission denied while reading pool configuration","checked_at":"2026-11-18T12:00:00Z"},
  {"pool":"pending","cloud":"GKE","accelerator_nodes":1,"replacement_policy":"AddFirst","status":"unknown"},
- {"pool":"disabled","cloud":"EKS","accelerator_nodes":4,"replacement_policy":"AddFirst","status":"unavailable","reason":"add-first on EKS is not enabled in this release","checked_at":"2026-11-18T12:00:00Z"},
+ {"pool":"sized","cloud":"EKS","accelerator_nodes":4,"replacement_policy":"AddFirst","status":"available","checked_at":"2026-11-18T12:00:00Z"},
  {"pool":"fixed","cloud":"EKS","accelerator_nodes":2,"replacement_policy":"RemoveFirst"},
  {"pool":"observe","cloud":"GKE","accelerator_nodes":1,"replacement_policy":"none","status":"not applicable","reason":"no remediation policy replaces these nodes"},
  {"pool":"unwired","cloud":"AKS","accelerator_nodes":1,"replacement_policy":"AddFirst","status":"unknown","reason":"no cloud provider configured"},

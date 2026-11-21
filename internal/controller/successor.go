@@ -514,8 +514,13 @@ func (c *Controller) acceptSuccessor(ctx context.Context, inc *types.Incident, p
 	}
 	now := time.Now().UTC()
 	rec.ReadyAt, rec.Reason = &now, ""
+	// Without the old node's device inventory, no device of the successor's was checked either.
+	ready := "is Ready with its accelerators;"
+	if rec.ExpectedGPUs == 0 {
+		ready = "is Ready and advertises the same accelerator capacity. Device health on it was not checked;"
+	}
 	return c.saveSuccessor(ctx, inc, rec, "successor-ready",
-		fmt.Sprintf("operation %s: successor %s is Ready with its accelerators; two nodes run until %s is removed", rec.Operation, node.Name, inc.Target.Node))
+		fmt.Sprintf("operation %s: successor %s %s two nodes run until %s is removed", rec.Operation, node.Name, ready, inc.Target.Node))
 }
 
 func (c *Controller) successorNotReady(ctx context.Context, inc *types.Incident, pin cloud.NodeIdentity, rec *types.SuccessorRecord, node platform.SuccessorNode) string {

@@ -307,6 +307,10 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 			if inc.Target.Node != "n1" {
 				t.Fatalf("target = %+v, want the incident's original target", inc.Target)
 			}
+			// The old node's agent reported its devices: the successor is accepted with its own.
+			if tc.how == replacementBySuccessor && !auditHas(entries, "successor-ready", "is Ready with its accelerators; two nodes run until n1 is removed") {
+				t.Fatalf("successor-ready, want the accelerators its agent reported%s", dump(entries))
+			}
 			if tc.blind && (len(inc.Accelerators) != 0 || !auditHasParam(entries, replacementPoolAction, "capacity", "amd.com/gpu=8")) {
 				t.Fatalf("accelerators %+v; want none recorded on the incident and the old node's capacity with the pool%s", inc.Accelerators, dump(entries))
 			}

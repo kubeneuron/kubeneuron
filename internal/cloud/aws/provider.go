@@ -17,7 +17,7 @@ const providerName = "aws"
 // in place (RecycleNode) and terminate hands it to the autoscaler (ReplaceNode).
 // The operator uses these provider-wide capabilities to compile playbooks.
 // The runtime managedProvider narrows them to replacement for EKS managed nodes.
-var capabilities = cloud.Capabilities{ReinitializeInPlace: true, Replace: true}
+var capabilities = cloud.Capabilities{ReinitializeInPlace: true, Replace: true, AddFirst: true}
 
 // Recycler is the AWS cloud.Provider.
 var _ cloud.Provider = (*Recycler)(nil)
@@ -34,7 +34,9 @@ type managedProvider struct {
 var _ cloud.RepairAwareProvider = (*managedProvider)(nil)
 
 // An EKS managed group can replace a stopped instance during a recycle.
-func (*managedProvider) Capabilities() cloud.Capabilities { return cloud.Capabilities{Replace: true} }
+func (*managedProvider) Capabilities() cloud.Capabilities {
+	return cloud.Capabilities{Replace: true, AddFirst: true}
+}
 
 func init() {
 	cloud.Register(providerName, capabilities, func(ctx context.Context, cfg cloud.Config) (cloud.Provider, error) {

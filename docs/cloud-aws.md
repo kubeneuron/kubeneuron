@@ -1,9 +1,10 @@
 # Add-first replacement on EKS
 
-**Experimental, not validated against a live EKS cluster.** The AWS provider
-currently advertises remove-first replacement. The add-first path described
-here is under development and has been exercised with simulated EKS and Auto
-Scaling responses.
+**Experimental.** Add-first replacement on EKS managed node groups completed
+once on a live cluster: CPU nodes, synthetic accelerator capacity, approvals
+given through the API, verification at the depth of node readiness and
+advertised capacity. It is not validated on accelerator hardware. Single-zone
+managed node groups only.
 
 ## Declare who controls the group size
 

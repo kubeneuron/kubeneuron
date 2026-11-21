@@ -11,6 +11,18 @@ API is `v1alpha1`.
 
 ### Added
 
+- **EKS: add-first replacement is enabled (experimental).** On a single-zone
+  managed node group whose size is declared fixed
+  (`kubeneuron.io/fixed-size=true`), the AWS provider now advertises add-first:
+  the new node joins and is accepted before the old one is cordoned and
+  removed. `kubeneuronctl pools` no longer reports EKS add-first as disabled.
+  Evidence: EKS add-first replacement completed on a live cluster (CPU nodes,
+  synthetic accelerator capacity; verification depth: node readiness and
+  advertised capacity). It is not validated on accelerator hardware. When the
+  old node's agent reported no devices, the `successor-ready` row now says the
+  successor advertises the same accelerator capacity and that device health on
+  it was not checked, instead of "Ready with its accelerators".
+
 - **Kernel log from the node's journal, on by default (experimental).** With
   node-level actions disabled, the agent gets read-only access to one
   systemd journal directory of the node, `/var/log/journal` or

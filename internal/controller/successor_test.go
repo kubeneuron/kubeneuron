@@ -417,6 +417,11 @@ func TestAddFirstAcceptsAFreshAgentWhenTheOldNodeReportedNoDevices(t *testing.T)
 	if inc.Successor == nil || inc.Successor.ExpectedGPUs != 0 || inc.Successor.ReadyAt == nil || inc.Successor.Node != successorNodeName {
 		t.Fatalf("successor = %+v%s", inc.Successor, dump(trail(t, st, id)))
 	}
+	// It says no more than was checked.
+	want := "successor " + successorNodeName + " is Ready and advertises the same accelerator capacity. Device health on it was not checked; two nodes run until n1 is removed"
+	if entries := trail(t, st, id); !auditHas(entries, "successor-ready", want) || auditHas(entries, "successor-ready", "with its accelerators") {
+		t.Fatalf("successor-ready, want %q%s", want, dump(entries))
+	}
 }
 
 // The agent's registration must be fresh and the successor's own, whatever

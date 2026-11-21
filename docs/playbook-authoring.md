@@ -561,7 +561,10 @@ report them:
 4. **Ready** (`successor-ready`). The new node is Ready and schedulable, it
    joined after the request, its KubeNeuron agent registered after the request
    and reports its GPUs, and it offers at least the accelerators the old node
-   had. Until then the audit records `successor-waiting` with the reason.
+   had. When the old node's agent reported no devices, the agent's GPUs are
+   not required, and the row says `is Ready and advertises the same
+   accelerator capacity. Device health on it was not checked`. Until then the
+   audit records `successor-waiting` with the reason.
 5. **Cordon, drain, replace.** Only now is the old node cordoned and drained
    as the playbook says, and the replace step removes the old node, leaving
    the pool at its size before the request (`successor-replaced`).
