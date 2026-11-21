@@ -88,8 +88,9 @@ ConfigMap (`get` only). They are removed when the AWS provider is turned off.
 | `eks:DescribeNodegroup`, `eks:UpdateNodegroupConfig` | Managed node group ARN |
 | `eks:ListUpdates`, `eks:DescribeUpdate` for the node group's updates | Cluster ARN and managed node group ARN |
 | `autoscaling:DescribeAutoScalingInstances`, `autoscaling:DescribeAutoScalingGroups`, `autoscaling:DescribeScalingActivities` | `*` |
-| `ec2:DescribeInstanceStatus` | `*` |
+| `ec2:DescribeInstances`, `ec2:DescribeInstanceStatus` | `*` |
 | `autoscaling:TerminateInstanceInAutoScalingGroup` | Backing Auto Scaling group ARN |
+| `ec2:TerminateInstances` (also probed with a DryRun before any change) | The node group's instances, for example `*` with a condition on the `eks:cluster-name` and `eks:nodegroup-name` resource tags |
 
 See the AWS authorization references for [EKS](https://docs.aws.amazon.com/service-authorization/latest/reference/list_eks.html) and [EC2 Auto Scaling](https://docs.aws.amazon.com/service-authorization/latest/reference/list_autoscaling.html).
 
