@@ -23,7 +23,10 @@ playbook: step₁ → step₂ → … → verify quiet window → RESOLVED
 - One open incident per (target, class); duplicate signals attach to it.
 - A step marked `approval: Required` parks the incident in
   `AWAITING_APPROVAL` until a human decides (TTL-bounded, never
-  auto-approved).
+  auto-approved). A node-level action
+  (`IdleCheck`, `WaitIdle`, `GPUReset`, `QuiesceAcceleratorStack`,
+  `RestoreAcceleratorStack`, `RunDiag`, `CollectBundle`, `Reboot`) parks
+  there too, whatever its `approval` says.
 - After the last step the incident waits out the configured quiet window in
   `VERIFYING`; a recurring signal there fails verification and escalates.
 - The playbook `cooldown` throttles repeat runs on the same target.

@@ -16,7 +16,9 @@ Use a Kubernetes 1.29+ cluster with a default StorageClass. The installer
 prints the port-forward command and credentials. Run that port-forward in a
 separate terminal. In your working terminal set `SERVER=http://127.0.0.1:8080`
 and supply the printed API token through `KUBENEURONCTL_TOKEN` in the
-environment. Use the matching release of `kubeneuronctl`.
+environment. Use the matching release of `kubeneuronctl`: each release
+publishes `kubeneuronctl-<version>-<os>-<arch>.tar.gz` for linux and darwin,
+amd64 and arm64.
 
 ## Check GPU visibility
 
