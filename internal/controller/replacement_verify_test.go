@@ -205,6 +205,9 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 		vendor   types.AcceleratorVendor
 		setup    func(*testing.T, *sqlite.Store, *poolPlatform)
 		noAgent  bool
+		// blind has the old node's agent register no devices, as one that
+		// does not inventory its vendor's devices.
+		blind    bool
 		heard    bool
 		node     string
 		uid      string
@@ -228,6 +231,11 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 		{name: "remove-first amd", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, vendor: types.AcceleratorVendorAMD,
 			setup: func(_ *testing.T, _ *sqlite.Store, p *poolPlatform) { p.resource = "amd.com/gpu" },
 			node:  poolNodeName, how: replacementByPool, sentence: poolSentence, depth: capacityDepth},
+		// The incident records no accelerators; the old node's advertised
+		// capacity, recorded with the pool, is the base.
+		{name: "remove-first amd, agent without devices", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, vendor: types.AcceleratorVendorAMD,
+			setup: func(_ *testing.T, _ *sqlite.Store, p *poolPlatform) { p.resource = "amd.com/gpu" }, blind: true,
+			node: poolNodeName, how: replacementByPool, sentence: poolSentence, depth: capacityDepth},
 		{name: "remove-first tpu node-health without an agent", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, noAgent: true,
 			setup: func(t *testing.T, st *sqlite.Store, p *poolPlatform) {
 				p.resource = "google.com/tpu"
@@ -253,7 +261,11 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 				tc.setup(t, st, p)
 			}
 			if !tc.noAgent {
-				registerOldNode(t, st, 8, tc.vendor)
+				gpus := 8
+				if tc.blind {
+					gpus = 0
+				}
+				registerOldNode(t, st, gpus, tc.vendor)
 			}
 			uid := cmp.Or(tc.uid, "uid-"+tc.node)
 			id := openVendorIncident(t, c, "n1", tc.vendor)
@@ -294,6 +306,9 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 			}
 			if inc.Target.Node != "n1" {
 				t.Fatalf("target = %+v, want the incident's original target", inc.Target)
+			}
+			if tc.blind && (len(inc.Accelerators) != 0 || !auditHasParam(entries, replacementPoolAction, "capacity", "amd.com/gpu=8")) {
+				t.Fatalf("accelerators %+v; want none recorded on the incident and the old node's capacity with the pool%s", inc.Accelerators, dump(entries))
 			}
 			if !notifier.hasMessage(tc.sentence) {
 				t.Fatalf("no RESOLVED notification names the new node: %q", tc.sentence)
@@ -414,4 +429,66 @@ func registerOldNode(t *testing.T, st *sqlite.Store, gpus int, vendor types.Acce
 	if err := st.UpsertAgentRegistration(context.Background(), n); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// An incident that recorded no accelerators (the old node's agent saw none)
+// compares the new pool node with what the old node advertised, and says why
+// it waits before the deadline; with nothing recorded it still cannot.
+func TestRemoveFirstComparesWithTheReplacedNodeCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*poolPlatform)
+		want  string
+	}{
+		{"fewer than the old node", func(p *poolPlatform) { p.successorAllocatable = 4 },
+			"New node n10 has 4 allocatable amd.com/gpu, fewer than the 8 the replaced node advertised."},
+		{"old node advertised nothing", func(p *poolPlatform) { p.oldNoResource = true },
+			"The incident recorded no accelerators to compare new node n10 against."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &poolPlatform{successorPlatform: newSuccessorPlatform(), resource: "amd.com/gpu"}
+			tc.setup(p)
+			c, st, _ := successorFixture(t, recoverymode.Automatic, p.successorPlatform, recoverymode.RemoveFirst)
+			c.platform = p
+			registerOldNode(t, st, 0, types.AcceleratorVendorAMD)
+			id := openVendorIncident(t, c, "n1", types.AcceleratorVendorAMD)
+			inc := untilState(t, c, st, id, func(inc *types.Incident) bool { return inc.State.Halted() || inc.State == types.StateVerifying })
+			if inc.State != types.StateVerifying {
+				t.Fatalf("state = %s, want VERIFYING%s", inc.State, dump(trail(t, st, id)))
+			}
+			registerAgentAs(t, st, poolNodeName, "uid-"+poolNodeName)
+			ctx := context.Background()
+			if ok, reason, _ := c.verifyRecovery(ctx, inc); ok || reason != tc.want {
+				t.Fatalf("verify = %v %q, want held on %q", ok, reason, tc.want)
+			}
+			// Inside the deadline: the reason is written once, not per reconcile.
+			for range 3 {
+				if err := c.advanceVerifying(ctx, mustIncident(t, st, id)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			entries := trail(t, st, id)
+			waits := 0
+			for _, e := range entries {
+				if e.Action == verifyWaitAction {
+					waits++
+					if e.Result != tc.want {
+						t.Fatalf("waiting on %q, want %q", e.Result, tc.want)
+					}
+				}
+			}
+			if waits != 1 || mustIncident(t, st, id).State != types.StateVerifying {
+				t.Fatalf("%d waiting rows, want one while VERIFYING%s", waits, dump(entries))
+			}
+		})
+	}
+}
+
+func auditHasParam(entries []*types.AuditEntry, action, key, value string) bool {
+	for _, e := range entries {
+		if e.Action == action && e.Params[key] == value {
+			return true
+		}
+	}
+	return false
 }

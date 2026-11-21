@@ -649,7 +649,10 @@ that took its place. That node is found in one of two ways:
   node, and it does not guess.
 
 The new node must be Ready and schedulable, and offer at least the
-accelerators the incident covered. Which report is then expected follows the
+accelerators the incident covered. When the incident recorded none, because
+the old node's agent does not inventory its vendor's devices, a remove-first
+replacement compares the new node with the accelerator resources the old node
+advertised, recorded with its pool before the delete. Which report is then expected follows the
 accelerators the incident covered:
 
 | Accelerator | What is confirmed |
@@ -672,7 +675,9 @@ The incident keeps its original target. `kubeneuronctl report` counts it as
 recovered, and the degraded time ends when the new node is confirmed. This
 says the node was confirmed, not that a workload resumed.
 
-If that evidence is not there by the verification deadline, the incident
+While verification waits, `kubeneuronctl incidents show` lists what it waits
+for on a `verify-waiting` audit row, written again only when the reason
+changes. If that evidence is not there by the verification deadline, the incident
 goes to `NEEDS_HUMAN` with what is missing, for example:
 
 - `No node joined pool <pool> after the removal.`

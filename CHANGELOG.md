@@ -404,6 +404,14 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- A remove-first replacement of a node whose agent does not inventory its
+  vendor's devices (for example AMD without a device adapter) no longer goes to
+  `NEEDS_HUMAN` with "The incident recorded no accelerators to compare new
+  node … against": the accelerator resources the old node advertised are
+  recorded with its pool, and the new node is compared with them, at the
+  depth of node readiness and advertised capacity. A verification that waits
+  now says why on a `verify-waiting` audit row in `incidents show`, instead of
+  only in the controller's debug log.
 - **EKS: a default node group no longer blocks replacement, and every hold says
   why.** A managed node group without `nodeRepairConfig`, which EKS reports
   for groups created without the setting, reads as node auto repair off, the

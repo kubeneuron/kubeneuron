@@ -715,7 +715,7 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 			if time.Since(inc.StateChangedAt) < c.verifyEvidenceDeadline(ctx) {
 				c.log.Debug("verification evidence not ready, holding",
 					"incident", inc.ID, "reason", reason)
-				return nil
+				return c.noteVerifyWait(ctx, inc, reason)
 			}
 			if err := c.transition(ctx, inc, types.StateNeedsHuman, "system", "verify-evidence",
 				"verification evidence unavailable: "+reason, nil); err != nil {
@@ -1363,6 +1363,32 @@ func (c *Controller) affectedGPUs(ctx context.Context, inc *types.Incident) int 
 		return 1
 	}
 	return len(node.GPUs)
+}
+
+// verifyWaitAction is the audit row that says what a VERIFYING incident
+// waits for, written when the reason changes.
+const verifyWaitAction = "verify-waiting"
+
+// noteVerifyWait records why verification holds, once per reason since the
+// incident entered VERIFYING, so the operator sees it before the deadline.
+func (c *Controller) noteVerifyWait(ctx context.Context, inc *types.Incident, reason string) error {
+	trail, err := c.store.AuditTrail(ctx, inc.ID)
+	if err != nil {
+		return err
+	}
+	for i := len(trail) - 1; i >= 0; i-- {
+		e := trail[i]
+		if e.Action == verifyWaitAction {
+			if e.Result == reason {
+				return nil
+			}
+			break
+		}
+		if e.FromState != e.ToState && e.ToState == types.StateVerifying {
+			break
+		}
+	}
+	return c.appendAudit(ctx, inc, "system", verifyWaitAction, reason)
 }
 
 // appendAudit records an event that does not change state (e.g. a failed

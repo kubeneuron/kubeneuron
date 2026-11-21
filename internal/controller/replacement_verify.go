@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,6 +66,10 @@ type cloudReplacement struct {
 	// agent is whether the replaced node ran an agent, so its replacement is
 	// expected to.
 	agent bool
+	// capacity is the accelerator resources the replaced node advertised
+	// before the delete: what the new node is compared against when the
+	// incident recorded no accelerators of its own. Nil when not recorded.
+	capacity []types.IncidentAccelerator
 	// since is when the new node's evidence may start: the successor's
 	// acceptance, or the moment before the remove-first delete.
 	since time.Time
@@ -73,7 +78,9 @@ type cloudReplacement struct {
 // recordReplacementPool writes, before a remove-first delete, which pool the
 // target belongs to and the UIDs of the pool's nodes: once it is deleted, its
 // labels are gone with it, and a node whose UID is not in that set is one
-// that joined after. It also records whether the target ran an agent. A pool
+// that joined after. It also records whether the target ran an agent, and
+// the accelerator resources it advertised, for an incident that recorded none
+// of its own (an agent that does not inventory its vendor's devices). A pool
 // already recorded for this replacement step is not written again.
 func (c *Controller) recordReplacementPool(ctx context.Context, inc *types.Incident, pin cloud.NodeIdentity) error {
 	observer, ok := c.platform.(platform.CloudNodeObserver)
@@ -127,6 +134,14 @@ func (c *Controller) recordReplacementPool(ctx context.Context, inc *types.Incid
 		registered.InventorySource != types.InventoryKubernetes && !registered.AgentLastSeen.IsZero() {
 		params["agent"] = "true"
 	}
+	if expected, _, err := c.expectedAccelerators(ctx, inc); err == nil && len(expected) > 0 {
+		counts := make([]string, 0, len(expected))
+		for name, n := range expected {
+			counts = append(counts, fmt.Sprintf("%s=%d", name, n))
+		}
+		slices.Sort(counts)
+		params["capacity"] = strings.Join(counts, ",")
+	}
 	return c.store.AppendAudit(ctx, &types.AuditEntry{
 		IncidentID: inc.ID, Time: time.Now(), FromState: inc.State, ToState: inc.State, Actor: "system",
 		Action: replacementPoolAction, DryRun: inc.DryRun,
@@ -177,6 +192,7 @@ func (c *Controller) findCloudReplacement(ctx context.Context, inc *types.Incide
 		if uids := pool.Params["member_uids"]; uids != "" {
 			found.members = strings.Split(uids, ",")
 		}
+		found.capacity = parseCapacity(pool.Params["capacity"])
 	}
 	return found, nil
 }
@@ -260,12 +276,30 @@ func (c *Controller) replacementNode(ctx context.Context, inc *types.Incident, r
 	return node, fmt.Sprintf("Node %s is Ready. It was the only node that joined pool %s after the removal.", node.Name, r.pool), ""
 }
 
-// lacksCapacity says why node offers fewer accelerators than the incident
-// covered, or "" when it offers at least as many.
-func lacksCapacity(inc *types.Incident, node platform.SuccessorNode) string {
-	for _, a := range inc.Accelerators {
+// parseCapacity reads the capacity param of a replacement-pool row; nil when
+// it is empty or malformed.
+func parseCapacity(param string) []types.IncidentAccelerator {
+	if param == "" {
+		return nil
+	}
+	var out []types.IncidentAccelerator
+	for _, kv := range strings.Split(param, ",") {
+		name, count, ok := strings.Cut(kv, "=")
+		n, err := strconv.ParseInt(count, 10, 64)
+		if !ok || name == "" || err != nil || n <= 0 {
+			return nil
+		}
+		out = append(out, types.IncidentAccelerator{Resource: name, Count: n})
+	}
+	return out
+}
+
+// lacksCapacity says why node offers fewer accelerators than want, which
+// whom names, or "" when it offers at least as many.
+func lacksCapacity(want []types.IncidentAccelerator, whom string, node platform.SuccessorNode) string {
+	for _, a := range want {
 		if node.Allocatable[a.Resource] < a.Count {
-			return fmt.Sprintf("New node %s has %d allocatable %s, fewer than the %d the incident covered.", node.Name, node.Allocatable[a.Resource], a.Resource, a.Count)
+			return fmt.Sprintf("New node %s has %d allocatable %s, fewer than the %d %s.", node.Name, node.Allocatable[a.Resource], a.Resource, a.Count, whom)
 		}
 	}
 	return ""
@@ -305,13 +339,19 @@ func (c *Controller) verifyReplacementInventory(ctx context.Context, inc *types.
 	if node.Unschedulable {
 		return false, fmt.Sprintf("New node %s is not schedulable.", node.Name)
 	}
-	if reason := lacksCapacity(inc, node); reason != "" {
+	want, whom := inc.Accelerators, "the incident covered"
+	if len(want) == 0 && r.successor == nil {
+		// The incident recorded none: the replaced node's advertised
+		// capacity is the base, no stricter than the node itself.
+		want, whom = r.capacity, "the replaced node advertised"
+	}
+	if reason := lacksCapacity(want, whom, node); reason != "" {
 		return false, reason
 	}
 	vendor, reported := replacementReportVendor(inc)
 	now := time.Now()
 	if !reported || !r.agent {
-		if len(inc.Accelerators) == 0 && r.successor == nil {
+		if len(want) == 0 && r.successor == nil {
 			return false, fmt.Sprintf("The incident recorded no accelerators to compare new node %s against.", node.Name)
 		}
 		if r.agent {
