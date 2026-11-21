@@ -418,6 +418,20 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- `kubeneuronctl approve` and `reject` print `approve: <id>` and `reject: <id>`
+  instead of `/approve: <id>`.
+- The dry-run section of `kubeneuronctl report` no longer says
+  "closed with no policy bound to the class" for every resolved incident
+  without a verified simulated repair. The row is now "closed unverified"
+  and names the cases it counts: no policy, a playbook that only observes, or
+  a ladder a person closed before it verified.
+- `kubeneuronctl incidents show` prints the current approval round while an
+  incident is `AWAITING_APPROVAL`, so `--round` can be used without a
+  notification channel.
+- An incident on a node KubeNeuron had no record of when it opened, such as
+  the quickstart's `quickstart-demo`, is no longer closed "as replaced" once
+  the controller sees the node is not in the cluster; the close reason says
+  that KubeNeuron had no record of the node.
 - On AKS and EKS too, a replacement held by its permission check names the
   missing permission, or the error code the cloud answered with, and what to
   do, instead of showing the cloud's error, which can carry the subscription
