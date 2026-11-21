@@ -367,7 +367,7 @@ jobs:
       contents: read
       packages: read
     env:
-      BASELINE: v0.7.0 # Set explicitly to an empty string for a release with no base.
+      BASELINE: "" # Set explicitly to an empty string for a release with no base.
       STORES: sqlite postgres
       # The published release (its install manifest and images.txt) lives in
       # the repository the tag is pushed to; the script also uses this to

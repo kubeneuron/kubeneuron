@@ -146,8 +146,15 @@ func TestJournalSourceStartsAtTheTailAndSendsOnlyClassifiedFields(t *testing.T) 
 	ch := watch(t, s)
 	// The old XID is before the tail: it must not open an incident again.
 	noEvent(t, ch)
-	if got := savedCursor(t, s); got != "2" {
-		t.Fatalf("cursor after the first empty read = %q, want the tail", got)
+	// The first read runs in the source's goroutine; under -race on a busy
+	// runner it can finish after noEvent's 50ms. Appending before it would
+	// move the tail past the new XID.
+	deadline := time.Now().Add(2 * time.Second)
+	for savedCursor(t, s) != "2" {
+		if time.Now().After(deadline) {
+			t.Fatalf("cursor after the first empty read = %q, want the tail", savedCursor(t, s))
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	f.append(otherLine, xidLine)
 	ev := nextEvent(t, ch)
@@ -160,7 +167,7 @@ func TestJournalSourceStartsAtTheTailAndSendsOnlyClassifiedFields(t *testing.T) 
 	if err := ev.Acknowledge(); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	deadline = time.Now().Add(2 * time.Second)
 	for savedCursor(t, s) != "4" {
 		if time.Now().After(deadline) {
 			t.Fatalf("cursor = %q after the acknowledgement, want 4", savedCursor(t, s))
