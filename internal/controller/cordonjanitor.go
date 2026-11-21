@@ -228,7 +228,13 @@ func (c *Controller) resolveIncidentsOnVanishedNodes(ctx context.Context) {
 			continue
 		}
 		message := fmt.Sprintf("node %s no longer exists; the incident cannot be remediated and is closed as replaced", inc.Target.Node)
-		c.log.Info("closing an incident whose node was replaced", "incident", inc.ID, "node", inc.Target.Node)
+		if inc.RepairNodeUID == "" {
+			// No inventory row named the node when the incident opened (a
+			// mistyped or made-up name, or a node nothing had reported), so
+			// nothing says it existed and was replaced.
+			message = fmt.Sprintf("node %s is not in the cluster, and KubeNeuron had no record of it when the incident opened; the incident cannot be remediated and is closed", inc.Target.Node)
+		}
+		c.log.Info("closing an incident whose node is not in the cluster", "incident", inc.ID, "node", inc.Target.Node)
 		// EXECUTING has no direct edge to RESOLVED in the state machine, and an
 		// orphaned EXECUTING incident (no running step goroutine, skipped above)
 		// on a deleted node would otherwise fail this transition and re-log the

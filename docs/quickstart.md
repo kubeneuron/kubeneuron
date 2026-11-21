@@ -64,4 +64,6 @@ kubeneuronctl --server "$SERVER" incidents show "$incident"
 ```
 
 Look for `dry-run:   true` and the installation's observe playbook.
+Within about ten seconds the controller closes the incident, because
+`quickstart-demo` is not a node of the cluster; its audit trail says so.
 For the local Go walkthrough, see the [developer demo](developer-demo.md).
