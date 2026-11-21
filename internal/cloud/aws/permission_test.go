@@ -63,6 +63,9 @@ func TestReplacePermission(t *testing.T) {
 			if !tc.allowed && tc.response != nil && (!errors.As(err, &hold) || strings.Contains(hold.Message(), "i-pinned") || strings.Contains(hold.Message(), "DryRun failed")) {
 				t.Fatalf("expected a hold without the raw error, got %v", err)
 			}
+			if tc.name == "denied" && hold.Message() != "The controller's IAM role is not allowed to call ec2:TerminateInstances on the node's instance. Allow ec2:TerminateInstances in the controller's IAM role (see docs/operations.md). KubeNeuron checks again every minute." {
+				t.Fatalf("denied message %q", hold.Message())
+			}
 			if (err == nil) != tc.allowed || f.calls != tc.calls {
 				t.Fatalf("permission err=%v calls=%d", err, f.calls)
 			}

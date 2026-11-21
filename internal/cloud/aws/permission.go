@@ -30,8 +30,8 @@ func (r *Recycler) CheckReplacePermission(ctx context.Context, id string) error 
 			// EC2's message can carry an encoded authorization failure with
 			// the role's ARN: it stays in Cause, for the controller log.
 			return &cloud.RecoveryHold{Code: cloud.HoldPermissionMissing, Cause: fmt.Errorf("ec2:TerminateInstances denied for %s: %w", id, err),
-				Reason:     "The controller's IAM role may not call ec2:TerminateInstances on the node's instance.",
-				Action:     "Allow ec2:TerminateInstances in the controller's IAM role (see docs/cloud-aws.md). KubeNeuron checks again every minute.",
+				Reason:     "The controller's IAM role is not allowed to call ec2:TerminateInstances on the node's instance.",
+				Action:     "Allow ec2:TerminateInstances in the controller's IAM role (see docs/operations.md). KubeNeuron checks again every minute.",
 				PoolReason: "the controller lacks ec2:TerminateInstances",
 				PoolAction: "allow ec2:TerminateInstances in the controller's IAM role"}
 		}

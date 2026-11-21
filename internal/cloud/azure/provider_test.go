@@ -141,7 +141,7 @@ func TestCheckReplacePermissionHoldsWithoutTheRawError(t *testing.T) {
 		name, code, want string
 		setup            func(*fakeAKS)
 	}{
-		{"read refused", cloud.HoldReadFailed, "could not read the controller's permissions on agent pool " + testPool + ": Azure Resource Manager answered AuthorizationFailed.",
+		{"read refused", cloud.HoldReadFailed, "could not read the controller's permissions on agent pool " + testPool + ": Azure Resource Manager answered AuthorizationFailed. KubeNeuron checks again every minute.",
 			func(f *fakeAKS) { f.permissionsErr = armDenied() }},
 		{"read failed", cloud.HoldReadFailed, ": the Azure Resource Manager call failed.",
 			func(f *fakeAKS) { f.permissionsErr = errors.New("dial tcp: i/o timeout") }},
