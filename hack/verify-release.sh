@@ -226,8 +226,13 @@ fi
 # Compare the files without running either platform's image. The source
 # bytes come from the release tag even when this script runs elsewhere.
 verify_image_licenses() (
-	local image=$1 arch=$2 container file
-	container=$(docker create --platform "linux/$arch" "$image") || exit 1
+	local image=$1 arch=$2 container file platform
+	# Docker's classic image store keeps one platform per digest: creating the
+	# index digest for a second platform fails with "cannot overwrite digest".
+	# Create each platform's own manifest, as the signed index lists it.
+	platform=$(docker buildx imagetools inspect --raw "$image" | jq -er --arg arch "$arch" \
+		'[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest] | if length == 1 then .[0] else error("no single linux/\($arch) manifest") end') || exit 1
+	container=$(docker create --platform "linux/$arch" "${image%@*}@$platform") || exit 1
 	trap 'docker rm "$container" >/dev/null' EXIT
 	for file in LICENSE NOTICE THIRD_PARTY_LICENSES; do
 		docker cp "$container:/licenses/$file" "$work/image-$file" || exit 1
