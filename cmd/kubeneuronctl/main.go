@@ -489,7 +489,7 @@ func decisionCommand(use, short, route string, withRound bool) *cobra.Command {
 		if err := cl.do("POST", "/api/v1/incidents/"+args[0]+route, body, nil); err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", strings.TrimSuffix(route, "/"), args[0])
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", strings.TrimPrefix(route, "/"), args[0])
 		return nil
 	}}
 	c.Flags().String("actor", "", "audited actor (default: $USER)")

@@ -65,11 +65,15 @@ func TestIncidentsListAndApprove(t *testing.T) {
 		t.Fatalf("incidents output = %q", out)
 	}
 
-	if _, err := runCommand(t, server.URL, "approve", "ecc-dbe-n1-abc", "--actor", "alice"); err != nil {
+	out, err = runCommand(t, server.URL, "approve", "ecc-dbe-n1-abc", "--actor", "alice")
+	if err != nil {
 		t.Fatal(err)
 	}
 	if approved.Actor != "alice" {
 		t.Fatalf("approved actor = %q", approved.Actor)
+	}
+	if out != "approve: ecc-dbe-n1-abc\n" {
+		t.Fatalf("approve output = %q", out)
 	}
 }
 
