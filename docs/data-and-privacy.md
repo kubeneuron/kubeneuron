@@ -57,6 +57,8 @@ Uninstall retains the controller's state by default. See the [installation guide
 
 The operator never deletes the managed metrics volume. `deploy/install.sh --uninstall --delete-data` deletes it together with the controller's state; a plain uninstall keeps it, and it can still contain metrics and node names. To erase the volume, run `kubectl delete pvc <name>-metrics-store -n <namespace>`, substituting the KubeNeuron resource name and its configured namespace. Underlying disk disposal follows the volume's reclaim policy.
 
+Deleting the cluster does not delete these volumes' disks: on GKE, and on EKS when the StorageClass retains volumes or the cluster is deleted with its claims in place, the disks behind the controller's state and the metrics volume remain in your cloud account, with incident records and metrics on them. Delete the claims before the cluster, or the disks after it.
+
 Your team controls access and retention. Handle user identities in approval and audit records according to the requirements that apply in your environment.
 
 The EKS add-first path (experimental) sends the cluster and node group names, the requested desired size and a SHA-256 hash of the operation ID as its client token. Auto Scaling requests identify the group or EC2 instance, and termination requests decrement desired capacity. The provider writes no AWS tags. It reads the managed node group's tags and the Cluster Autoscaler status ConfigMap. KubeNeuron retains the pool assessment in controller memory. When the fixed-size declaration is missing, it also records the first affected group name in the installation's inventory summary ConfigMap and status condition. It does not copy the tag map or the autoscaler report into either.
