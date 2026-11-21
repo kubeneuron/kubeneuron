@@ -26,7 +26,7 @@ returned to service. Switch to executionMode: Enabled (confined) to measure real
 SIMULATED — what dry-run WOULD have done (nothing was executed)
   incidents             1
   would recover         1 (0 without asking a human)
-  no ladder to run      0   ← closed with no policy bound to the class
+  closed unverified     0   ← no simulated repair reached verification (no policy, observe only, or closed by a person)
   ladder decision time  p50 30m0s  p90 30m0s
 
 INCIDENT  NODE      VENDOR / RESOURCE  STATE     SIMULATED DECISION TIME

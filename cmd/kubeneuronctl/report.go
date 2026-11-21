@@ -262,7 +262,7 @@ func printRecoveryReport(cmd *cobra.Command, r *types.RecoveryReport, since stri
 		_, _ = fmt.Fprintf(out, "\nSIMULATED — what dry-run WOULD have done (nothing was executed)\n"+
 			"  incidents             %d\n"+
 			"  would recover         %d (%d without asking a human)\n"+
-			"  no ladder to run      %d   ← closed with no policy bound to the class\n",
+			"  closed unverified     %d   ← no simulated repair reached verification (no policy, observe only, or closed by a person)\n",
 			sim.Incidents,
 			sim.WouldRecover, sim.WouldRecoverUnattended,
 			sim.ObservedOnly)

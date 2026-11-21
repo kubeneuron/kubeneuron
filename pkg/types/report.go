@@ -158,9 +158,11 @@ type SimulatedRecovery struct {
 	// WouldRecoverUnattended is the subset that never minted an approval
 	// round — the automation's projected yield if enforcement were on.
 	WouldRecoverUnattended int `json:"would_recover_unattended"`
-	// ObservedOnly counts the dry-run incidents that reached RESOLVED with no
-	// ladder step simulated at all — the ones with no policy bound to their
-	// class. They are the pilot's coverage gap, and they are the reason this
+	// ObservedOnly counts the dry-run incidents that reached RESOLVED without a
+	// simulated repair step and its verification: no policy bound to the
+	// class, a playbook that only observes, or a ladder that a person (or the
+	// node's removal) closed before it verified. They are the pilot's coverage
+	// gap, and they are the reason this
 	// field is here rather than folded into WouldRecover: a projection that
 	// silently includes "we would have done nothing" is the projection most
 	// likely to be quoted.

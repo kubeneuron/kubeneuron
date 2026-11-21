@@ -133,6 +133,24 @@ func TestReportInterruptionOnlyWindow(t *testing.T) {
 	}
 }
 
+// A dry-run ladder a person closed before it verified simulated its steps, so
+// the row it lands in must not say that no policy was bound.
+func TestSimulatedUnverifiedRowDoesNotClaimNoPolicy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(types.RecoveryReport{DryRunExcluded: 1,
+			Simulated: &types.SimulatedRecovery{Incidents: 1, ObservedOnly: 1}})
+	}))
+	defer server.Close()
+	out, err := runReport(t, server.URL, "report")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "closed unverified     1   ← no simulated repair reached verification") ||
+		strings.Contains(out, "no policy bound") {
+		t.Fatalf("report=%q", out)
+	}
+}
+
 func TestReportJSONShape(t *testing.T) {
 	var window string
 	server := reportServer(t, &window)
