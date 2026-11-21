@@ -1103,8 +1103,11 @@ set `interruptionQueueURL` and grant `sqs:ReceiveMessage` and
 
 For replacement, grant `ec2:TerminateInstances` scoped to the intended cluster
 instances. The controller probes this permission with an EC2 DryRun for the
-pinned instance and checks it again before termination. Replacement on EKS
-has yet to be validated on a live cluster. Start in KubeNeuron's `DryRun` mode.
+pinned instance and checks it again before termination. Replacement on EKS,
+remove-first and add-first, each completed once on a live cluster (CPU nodes,
+synthetic accelerator capacity; verification depth: node readiness and
+advertised capacity). It is not validated on accelerator hardware. Start in
+KubeNeuron's `DryRun` mode.
 
 The operator accepts AWS playbooks containing recycle or replace. At runtime,
 EKS managed nodegroups support remove-first replacement, and add-first on a
