@@ -59,7 +59,7 @@ func TestControllerGCPWiring(t *testing.T) {
 		t.Fatalf("node event rules = %v", rules)
 	}
 	condition := cloudRecoveryCondition(installation)
-	if condition.Reason != "NotReadyOnlyRepair" || !strings.Contains(condition.Message, "experimental, not validated against a live GKE cluster; start in DryRun") {
+	if condition.Reason != "NotReadyOnlyRepair" || !strings.Contains(condition.Message, "experimental, not validated on accelerator hardware; start in DryRun") {
 		t.Fatalf("condition = %+v", condition)
 	}
 }

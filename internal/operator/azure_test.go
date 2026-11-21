@@ -57,7 +57,7 @@ func TestControllerAzureWiring(t *testing.T) {
 		t.Fatalf("SA annotations = %v", sa.Annotations)
 	}
 	condition := cloudRecoveryCondition(installation)
-	if condition.Reason != "NotReadyOnlyRepair" || condition.Status != metav1.ConditionUnknown || !strings.Contains(condition.Message, "not validated on AKS") {
+	if condition.Reason != "NotReadyOnlyRepair" || condition.Status != metav1.ConditionUnknown || !strings.Contains(condition.Message, "experimental, not validated on accelerator hardware; start in DryRun") {
 		t.Fatalf("condition = %+v", condition)
 	}
 }

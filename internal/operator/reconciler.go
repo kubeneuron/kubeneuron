@@ -1420,11 +1420,11 @@ func cloudRecoveryCondition(installation *kubeneuronv1alpha1.KubeNeuron) metav1.
 	if installation.Spec.Cloud != nil && installation.Spec.Cloud.Provider == "azure" {
 		// AKS auto-repair cannot be turned off; say which mode that leaves.
 		condition.Reason = "NotReadyOnlyRepair"
-		condition.Message = "experimental, not validated on AKS: AKS node auto-repair is always on and acts on NotReady nodes, so cloud recovery runs only on nodes that stay Ready with no recent auto-repair event; each node must still pass runtime eligibility checks"
+		condition.Message = "experimental, not validated on accelerator hardware; start in DryRun: AKS node auto-repair is always on and acts on NotReady nodes, so cloud recovery runs only on nodes that stay Ready with no recent auto-repair event; each node must still pass runtime eligibility checks"
 	}
 	if installation.Spec.Cloud != nil && installation.Spec.Cloud.Provider == "gcp" {
 		condition.Reason = "NotReadyOnlyRepair"
-		condition.Message = "experimental, not validated against a live GKE cluster; start in DryRun: GKE node auto-repair acts on nodes that are not Ready, so cloud recovery runs only on Ready nodes with no GKE operation running on their node pool; Autopilot is observe-only; each node must still pass runtime eligibility checks"
+		condition.Message = "experimental, not validated on accelerator hardware; start in DryRun: GKE node auto-repair acts on nodes that are not Ready, so cloud recovery runs only on Ready nodes with no GKE operation running on their node pool; Autopilot is observe-only; each node must still pass runtime eligibility checks"
 	}
 	if installation.Labels["kubeneuron.io/policy-pack"] == "cloud" {
 		condition.Message += ". The default cloud pack supports observation and dry-run; live replacement requires an eligible provider with add-first support."

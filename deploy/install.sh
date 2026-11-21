@@ -7,8 +7,8 @@ set -euo pipefail
 #
 #   ./deploy/install.sh                             # from a repo checkout
 #   ./install.sh --version v0.1.0                   # from a release asset
-#   curl -sfL https://github.com/kubeneuron/kubeneuron/releases/latest/download/install.sh \
-#     | bash -s -- --version latest                 # once releases are public
+#   curl -sfL https://github.com/kubeneuron/kubeneuron/releases/download/<version>/install.sh \
+#     | bash -s -- --version <version>              # once releases are public
 #   gh release download v0.1.0 -p 'install-*.sh' -O - | bash -s -- --version v0.1.0
 #                                                   # while the repo is private
 #
@@ -62,7 +62,7 @@ KubeNeuron one-command installer.
 
   ./deploy/install.sh                    # from a repo checkout
   ./install.sh --version v0.1.0          # from a release asset
-  curl -sfL <release-url>/install.sh | bash -s -- --version latest
+  curl -sfL <release-url>/install.sh | bash -s -- --version <version>
 
 Flags:
   --name NAME            root object name           (default: kubeneuron)

@@ -130,6 +130,7 @@ tagging the release.
 - [ ] Compare `/licenses/THIRD_PARTY_LICENSES` and `/licenses/NOTICE` from each signed image digest with `THIRD_PARTY_LICENSES` and `NOTICE` in the tagged tree. Require a byte-for-byte match.
 - [ ] For rc.1, confirm that exact release ID has the expected tag, `draft=true` and `prerelease=true`. After maintainer review, publish the verified draft by ID with `draft=false`, `prerelease=true` and `make_latest="false"`. Verify the published release retains prerelease status and the Latest release pointer has not moved. For stable tags the workflow publishes automatically after verification.
 - [ ] Run `bash hack/verify-release.sh v1.0.0-rc.1 kubeneuron/kubeneuron` against the published candidate.
+- [ ] For the first stable (GA) release, return the install command in `docs/quickstart.md` and `docs/install.md` to `latest`, and review every "Not repeated on v1.0.0-rc.1" sentence in README and docs against the runs on the release being tagged.
 
 ## Pinned inputs and tool versions
 

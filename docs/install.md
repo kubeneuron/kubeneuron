@@ -307,8 +307,8 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
 
     The one-liner:
     ```sh
-    curl -sfL https://github.com/kubeneuron/kubeneuron/releases/latest/download/install.sh \
-      | bash -s -- --version latest
+    curl -sfL https://github.com/kubeneuron/kubeneuron/releases/download/v1.0.0-rc.1/install.sh \
+      | bash -s -- --version v1.0.0-rc.1
     ```
     Pin a concrete version in anything repeatable: it selects the matching
     signed images and install manifest.

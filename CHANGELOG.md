@@ -217,15 +217,15 @@ API is `v1alpha1`.
   says a temporary extra node will be created and billed. Progress is in the
   audit trail and `kubeneuronctl incident show`; the overlap is measured by
   `kubeneuron_replacement_overlap_seconds`. The Azure provider implements
-  it for fixed-size AKS node pools (experimental, not validated against a
-  live AKS cluster), and the GCP provider for fixed-size GKE Standard node
-  pools in one zone (experimental, not validated against a live GKE cluster;
-  start in DryRun); elsewhere `AddFirst` still holds before
+  it for fixed-size AKS node pools (experimental; Once, on a pre-release build: AKS add-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; device health on the new node was not checked). Not repeated on v1.0.0-rc.1.), and the GCP
+  provider for fixed-size GKE Standard node pools in one zone
+  (experimental; start in DryRun; Once, on a pre-release build: GKE Standard add-first replacement completed on a live cluster (fixed-size single-zone node pool, CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; device health on the new node was not checked). Not repeated on v1.0.0-rc.1.); elsewhere `AddFirst` still holds before
   the cordon, and `RemoveFirst` is unchanged. See [Add-first replacement](docs/playbook-authoring.md#add-first-replacement).
 
 - **Node conditions in incidents.** The panel and CLI show Kubernetes readiness and pressure at the last recorded transition. Each transition retains its observation in the audit trail.
 
-- **Azure provider for AKS (experimental, not validated on AKS).**
+- **Azure provider for AKS (experimental, not validated on accelerator
+  hardware).** Once, on a pre-release build: AKS add-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; device health on the new node was not checked). Not repeated on v1.0.0-rc.1. Once, on a pre-release build: AKS remove-first replacement on a fixed-size node pool completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1.
   `spec.cloud.provider: azure` with `spec.cloud.azure` (subscription,
   resource group, cluster, the workload identity's client ID) replaces a
   GPU node by deleting its machine through the AKS agent pool API. A
@@ -239,8 +239,8 @@ API is `v1alpha1`.
   See [Replacing GPU nodes on AKS](docs/cloud-azure.md) for the minimal
   role and what the step deletes.
 
-- **GCP provider for GKE (experimental, not validated against a live GKE
-  cluster; start in DryRun).** `spec.cloud.provider: gcp` with
+- **GCP provider for GKE (experimental, not validated on accelerator
+  hardware; start in DryRun).** Once, on a pre-release build: GKE Standard add-first replacement completed on a live cluster (fixed-size single-zone node pool, CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; device health on the new node was not checked). Not repeated on v1.0.0-rc.1. Once, on a pre-release build: GKE Standard remove-first replacement on a fixed-size pool completed on a live cluster, with the pool's size restored (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1. `spec.cloud.provider: gcp` with
   `spec.cloud.gcp` (project, location, cluster) replaces a GPU node on GKE
   Standard by deleting its instance from the node pool's managed instance
   group, a Compute Engine call GKE does not document for node pools.
