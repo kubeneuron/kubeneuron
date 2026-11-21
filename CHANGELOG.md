@@ -16,9 +16,11 @@ API is `v1alpha1`.
   (`kubeneuron.io/fixed-size=true`), the AWS provider now advertises add-first:
   the new node joins and is accepted before the old one is cordoned and
   removed. `kubeneuronctl pools` no longer reports EKS add-first as disabled.
-  Evidence: EKS add-first replacement completed on a live cluster (CPU nodes,
-  synthetic accelerator capacity; verification depth: node readiness and
-  advertised capacity). It is not validated on accelerator hardware. When the
+  Evidence: yes, once, on pre-release builds: EKS add-first replacement
+  completed on a live cluster (CPU nodes, synthetic accelerator capacity;
+  verification depth: node readiness and advertised capacity). The controller
+  was updated during the incident. Not repeated on v1.0.0-rc.1. It is not
+  validated on accelerator hardware. When the
   old node's agent reported no devices, the `successor-ready` row now says the
   successor advertises the same accelerator capacity and that device health on
   it was not checked, instead of "Ready with its accelerators".

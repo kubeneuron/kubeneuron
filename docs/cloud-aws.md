@@ -1,10 +1,10 @@
 # Add-first replacement on EKS
 
-**Experimental.** Add-first replacement on EKS managed node groups completed
-once on a live cluster: CPU nodes, synthetic accelerator capacity, approvals
-given through the API, verification at the depth of node readiness and
-advertised capacity. It is not validated on accelerator hardware. Single-zone
-managed node groups only.
+**Experimental.** Yes, once, on pre-release builds: EKS add-first replacement
+completed on a live cluster (CPU nodes, synthetic accelerator capacity;
+verification depth: node readiness and advertised capacity). The controller
+was updated during the incident. Not repeated on v1.0.0-rc.1. It is not
+validated on accelerator hardware. Single-zone managed node groups only.
 
 ## Declare who controls the group size
 
