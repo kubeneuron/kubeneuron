@@ -419,6 +419,14 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- The release install manifest keeps the operator's `root-events` Role and
+  RoleBinding in `default`. The kustomize build moved them into
+  `kube-neuron`, so an installation from the manifest with
+  `spec.cloud.provider: azure` failed to reconcile (the operator could not
+  grant the controller `list` on node events), and the operator could not
+  record events on the KubeNeuron object. Installation from a repository
+  checkout and the Helm chart were not affected. CI and the release workflow
+  now check each object's namespace in the manifest.
 - `kubeneuronctl approve` and `reject` print `approve: <id>` and `reject: <id>`
   instead of `/approve: <id>`.
 - The dry-run section of `kubeneuronctl report` no longer says

@@ -248,6 +248,7 @@ jobs:
             build "$workdir/config/default" > "dist/kubeneuron-install-${version}.yaml"
           grep -q "image: ${IMAGE_REPO}/operator@${operator_digest}" \
             "dist/kubeneuron-install-${version}.yaml"
+          bash hack/test-install-manifest-namespaces.sh "dist/kubeneuron-install-${version}.yaml"
           # The manifest must not smuggle any tag-pinned image reference.
           # Any tag-shaped reference (:v1.2.3, :1.2.3, :latest) is a leak;
           # only digest pins may survive.

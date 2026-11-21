@@ -295,6 +295,9 @@ jobs:
       - name: Compare installer cloud pack with the shipped manifests
         run: make test-cloud-pack-render
 
+      - name: Install manifest keeps each object's namespace
+        run: make test-install-manifest-namespaces
+
       - name: Alert rule unit tests (vmalert-tool, pinned by digest)
         run: make test-alert-rules
 
