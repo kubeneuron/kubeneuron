@@ -198,7 +198,7 @@ func TestCheckReplacePermissionHoldsWithoutTheRawError(t *testing.T) {
 			func(f *fakeGKE) { f.permissionsErr = apiErr(disabled) }},
 		{"call failed", cloud.HoldReadFailed, "Resource Manager testIamPermissions failed.",
 			func(f *fakeGKE) { f.permissionsErr = apiErr("") }},
-		{"permission missing", cloud.HoldPermissionMissing, "lacks container.clusters.update on the cluster's project.",
+		{"permission missing", cloud.HoldPermissionMissing, "lacks container.clusters.update on the cluster's project. Grant these permissions to the controller's service account on the project (see docs/cloud-gcp.md).",
 			func(f *fakeGKE) { f.permissions = basePermissions }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

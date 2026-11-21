@@ -196,9 +196,9 @@ func (p *Provider) CheckReplacePermission(ctx context.Context, instanceID string
 		list := strings.Join(missing, ", ")
 		return &cloud.RecoveryHold{Code: cloud.HoldPermissionMissing,
 			Reason:     fmt.Sprintf("The controller's service account lacks %s on the cluster's project.", list),
-			Action:     "Grant the KubeNeuron role on the project. KubeNeuron checks again every minute.",
+			Action:     "Grant these permissions to the controller's service account on the project (see docs/cloud-gcp.md). KubeNeuron checks again every minute.",
 			PoolReason: "the controller lacks " + list + " on the project",
-			PoolAction: "grant the KubeNeuron role on the project"}
+			PoolAction: "grant these permissions on the project (docs/cloud-gcp.md)"}
 	}
 	return nil
 }
