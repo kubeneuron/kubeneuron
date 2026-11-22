@@ -23,4 +23,12 @@ type PoolAvailability struct {
 	Reason            string     `json:"reason,omitempty"`
 	Action            string     `json:"action,omitempty"`
 	CheckedAt         *time.Time `json:"checked_at,omitempty"`
+	// ReplacementStatus says whether a node of the pool could be replaced at
+	// all, in any order: "available", "unavailable" (the operator must change
+	// something first) or "unknown". Empty when no remediation policy
+	// replaces these nodes. Status is the add-first assessment on top of it.
+	ReplacementStatus     string `json:"replacement_status,omitempty"`
+	ReplacementReasonCode string `json:"replacement_reason_code,omitempty"`
+	ReplacementReason     string `json:"replacement_reason,omitempty"`
+	ReplacementAction     string `json:"replacement_action,omitempty"`
 }

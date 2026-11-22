@@ -106,7 +106,7 @@ func (c *Controller) syncAcceleratorInventory(ctx context.Context) {
 			return
 		}
 	}
-	c.inventory.recordPools(nodes, reports, c.runtimeConfig(ctx).Engine, time.Now().UTC(), c.poolChecker(ctx))
+	c.inventory.recordPools(nodes, reports, c.runtimeConfig(ctx).Engine, time.Now().UTC(), c.poolChecker(ctx), c.replacementChecker(ctx))
 }
 
 // keepLostDevices is the node's devices now, plus every device resource it

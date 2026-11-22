@@ -325,7 +325,7 @@ func TestAcceleratorPoolInventoryBeforeIncident(t *testing.T) {
 		t.Fatalf("unexpected pools: %+v", rows)
 	}
 	for _, row := range rows {
-		if row.Status != "unknown" || row.Reason != "no cloud provider configured" || row.CheckedAt != nil {
+		if row.Status != "unknown" || row.Reason != "no cloud provider configured" || row.ReplacementReason != row.Reason || row.CheckedAt != nil {
 			t.Fatalf("unexpected assessment: %+v", row)
 		}
 	}
@@ -350,7 +350,7 @@ func TestPoolReplacementOrders(t *testing.T) {
 		{"previous", "AddFirst"}, {"", "AddFirst"}, {"current", "mixed"},
 	} {
 		reports := []*types.AgentAcceleratorReport{{Node: "worker", NodeUID: tc.uid, Vendor: "amd"}}
-		c.inventory.recordPools(nodes, reports, engine, time.Now(), nil)
+		c.inventory.recordPools(nodes, reports, engine, time.Now(), nil, nil)
 		if got := c.PoolAvailability().Pools[0].ReplacementPolicy; got != tc.want {
 			t.Fatalf("UID %q: got %s want %s", tc.uid, got, tc.want)
 		}
@@ -365,7 +365,7 @@ func TestPoolCheckInterval(t *testing.T) {
 	nodes := []types.Node{node, second}
 	now := time.Now().UTC()
 	calls := 0
-	check := func(types.Node) error {
+	check := func(types.Node, bool) error {
 		calls++
 		if calls == 1 {
 			return errors.New("read failure")
@@ -377,7 +377,7 @@ func TestPoolCheckInterval(t *testing.T) {
 		calls  int
 		status string
 	}{{0, 1, "unknown"}, {9 * time.Minute, 1, "unknown"}, {10 * time.Minute, 2, "available"}} {
-		c.inventory.recordPools(nodes, nil, poolTestEngine(t), now.Add(tc.after), check)
+		c.inventory.recordPools(nodes, nil, poolTestEngine(t), now.Add(tc.after), check, nil)
 		row := c.PoolAvailability().Pools[0]
 		if row.Status != tc.status || calls != tc.calls || row.CheckedAt == nil || row.AcceleratorNodes != 2 {
 			t.Fatalf("after %s: calls %d row %+v", tc.after, calls, row)
@@ -475,6 +475,49 @@ func TestPoolCheckAsksForThePermissionsAReplacementNeeds(t *testing.T) {
 	}
 }
 
+type eligibilityPermissionPlatform struct {
+	*poolAssessmentPlatform
+	verdict     cloud.RecoveryEligibility
+	permissions int
+}
+
+func (p *eligibilityPermissionPlatform) PoolRecoveryEligibility(context.Context, cloud.NodeIdentity) (cloud.RecoveryEligibility, *cloud.RecoveryHold, error) {
+	return p.verdict, nil, nil
+}
+
+func (p *eligibilityPermissionPlatform) ReplacePermission(context.Context, cloud.NodeIdentity) error {
+	p.permissions++
+	return nil
+}
+
+// A pool check asks for the replace permissions once: the add-first check
+// does not repeat what the eligibility check already asked.
+func TestPoolCheckAsksForThePermissionsOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		verdict cloud.RecoveryEligibility
+		want    int
+	}{
+		{"eligibility checked them", cloud.RecoveryEligibility{Mode: cloud.RepairOff, ReplaceAllowed: true}, 0},
+		{"eligibility stopped before them", cloud.RecoveryEligibility{Mode: cloud.RepairOff}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _, inv := inventoryFixture(t)
+			c.SetEngine(poolTestEngine(t))
+			p := &eligibilityPermissionPlatform{poolAssessmentPlatform: &poolAssessmentPlatform{inventoryPlatform: inv}, verdict: tc.verdict}
+			c.platform = p
+			inv.nodes = append(inv.nodes, types.Node{Name: "g1", UID: "g1-uid", Labels: map[string]string{"cloud.google.com/gke-nodepool": "train"}, Devices: tpuDevices})
+			c.syncAcceleratorInventory(t.Context())
+			if rows := c.PoolAvailability().Pools; len(rows) != 1 || rows[0].CheckedAt == nil {
+				t.Fatalf("pool rows %+v", rows)
+			}
+			if p.permissions != tc.want {
+				t.Fatalf("ReplacePermission called %d times, want %d", p.permissions, tc.want)
+			}
+		})
+	}
+}
+
 type blockingPoolPlatform struct {
 	*poolAssessmentPlatform
 	started chan struct{}
@@ -517,9 +560,9 @@ func TestPoolCheckBudget(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	calls := 0
-	check := func(types.Node) error { calls++; return nil }
+	check := func(types.Node, bool) error { calls++; return nil }
 	for _, want := range []int{4, 6} {
-		c.inventory.recordPools(nodes, nil, poolTestEngine(t), now, check)
+		c.inventory.recordPools(nodes, nil, poolTestEngine(t), now, check, nil)
 		pending := 0
 		for _, row := range c.PoolAvailability().Pools {
 			if row.CheckedAt == nil && row.Status == "unknown" {
@@ -531,7 +574,7 @@ func TestPoolCheckBudget(t *testing.T) {
 		}
 	}
 	later := now.Add(11 * time.Minute)
-	c.inventory.recordPools(nodes, nil, poolTestEngine(t), later, check)
+	c.inventory.recordPools(nodes, nil, poolTestEngine(t), later, check, nil)
 	stale := 0
 	for _, row := range c.PoolAvailability().Pools {
 		if row.Status != "available" || row.CheckedAt == nil {
@@ -561,7 +604,7 @@ func poolTestEngine(t *testing.T) *playbook.Engine {
 func TestPoolWithoutReplacementPolicySkipsCheck(t *testing.T) {
 	var c Controller
 	nodes := []types.Node{{Name: "a", Labels: map[string]string{"kubernetes.azure.com/agentpool": "train"}, Devices: tpuDevices}}
-	c.inventory.recordPools(nodes, nil, nil, time.Now(), func(types.Node) error { t.Fatal("unexpected cloud check"); return nil })
+	c.inventory.recordPools(nodes, nil, nil, time.Now(), func(types.Node, bool) error { t.Fatal("unexpected cloud check"); return nil }, nil)
 	row := c.PoolAvailability().Pools[0]
 	if row.ReplacementPolicy != "none" || row.Status != "not applicable" || row.CheckedAt != nil {
 		t.Fatal(row)
@@ -584,12 +627,12 @@ func TestTrainiumPoolOrderMatchesNodeHealthIncident(t *testing.T) {
 	for _, resource := range []string{"aws.amazon.com/neuron", "aws.amazon.com/neurondevice"} {
 		var c Controller
 		nodes := []types.Node{{Name: "trainium", UID: "trn-uid", Labels: map[string]string{"eks.amazonaws.com/nodegroup": "train"}, Devices: []types.DeviceCount{{Resource: resource, Capacity: 1, Unit: types.DeviceUnitAWSDevice}}}}
-		c.inventory.recordPools(nodes, nil, engine, time.Now(), nil)
+		c.inventory.recordPools(nodes, nil, engine, time.Now(), nil, nil)
 		if row := c.PoolAvailability().Pools[0]; row.ReplacementPolicy != "RemoveFirst" {
 			t.Fatalf("%s: %+v", resource, row)
 		}
 		reports := []*types.AgentAcceleratorReport{{Node: "trainium", NodeUID: "trn-uid", Vendor: "aws"}}
-		c.inventory.recordPools(nodes, reports, engine, time.Now(), nil)
+		c.inventory.recordPools(nodes, reports, engine, time.Now(), nil, nil)
 		if row := c.PoolAvailability().Pools[0]; row.ReplacementPolicy != "mixed" {
 			t.Fatalf("%s with authenticated AWS report: %+v", resource, row)
 		}
@@ -654,7 +697,7 @@ func TestPoolRowShowsRepairHold(t *testing.T) {
 		{unconfirmed, "unknown", unconfirmed.Reason, unconfirmed.Action},
 	} {
 		var c Controller
-		c.inventory.recordPools(nodes, nil, poolTestEngine(t), time.Now().UTC(), func(types.Node) error { return fmt.Errorf("assess: %w", tc.hold) })
+		c.inventory.recordPools(nodes, nil, poolTestEngine(t), time.Now().UTC(), func(types.Node, bool) error { return fmt.Errorf("assess: %w", tc.hold) }, nil)
 		row := c.PoolAvailability().Pools[0]
 		if row.Status != tc.status || row.ReasonCode != tc.hold.Code || row.Reason != tc.reason || row.Action != tc.action {
 			t.Fatalf("%s: row %+v", tc.hold.Code, row)

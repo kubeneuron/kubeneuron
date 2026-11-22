@@ -123,8 +123,9 @@ without an update.
 `kubeneuronctl incidents show` prints the current reason a replacement is
 held at the top, and the incident's audit records each new reason. Times are
 in UTC, with the date when it is not today's. A pool's row in
-`kubeneuronctl pools` shows a hold that needs an operator; a hold that clears
-on its own does not change the pool's status. The controller log carries the
+`kubeneuronctl pools` shows a hold that needs an operator in its REPLACEMENT
+column, for `AddFirst` and `RemoveFirst` pools alike; a hold that clears on
+its own does not change the pool's status. The controller log carries the
 AWS error with the incident ID; the incident and the pool row name only the
 IAM action.
 

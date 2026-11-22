@@ -15,29 +15,36 @@ import (
 // A veto capability alone does not prove an effective veto; until the provider
 // supplies that evidence its pool remains unavailable for mutation.
 func (p *Platform) RecoveryEligibility(ctx context.Context, pin cloud.NodeIdentity) (cloud.RecoveryEligibility, error) {
+	v, _, err := p.PoolRecoveryEligibility(ctx, pin)
+	return v, err
+}
+
+// PoolRecoveryEligibility is RecoveryEligibility with, when the cloud's own
+// repair is on, that policy's hold with the shorter texts a pool row shows.
+func (p *Platform) PoolRecoveryEligibility(ctx context.Context, pin cloud.NodeIdentity) (cloud.RecoveryEligibility, *cloud.RecoveryHold, error) {
 	v := cloud.RecoveryEligibility{Identity: pin, Mode: cloud.RepairUnknown}
 	if err := pin.Validate(); err != nil {
 		v.Reason = err.Error()
-		return v, err
+		return v, nil, err
 	}
 	provider, ok := p.recycler.(cloud.RepairAwareProvider)
 	if !ok {
 		v.Reason = "provider has no native-repair contract"
-		return v, nil
+		return v, nil, nil
 	}
 	ref, err := p.CloudNode(ctx, pin.Node)
 	if err != nil {
 		v.Reason = "live node identity unavailable"
-		return v, err
+		return v, nil, err
 	}
 	if err := pin.Match(ref.Identity); err != nil {
 		v.Reason = err.Error()
-		return v, err
+		return v, nil, err
 	}
 	policy, err := provider.RepairPolicy(ctx, ref)
 	if err != nil {
 		v.Reason = holdMessage(err, "native-repair policy unavailable")
-		return v, err
+		return v, nil, err
 	}
 	v.Mode, v.Reason = policy.Mode, policy.Message()
 	switch policy.Mode {
@@ -46,24 +53,30 @@ func (p *Platform) RecoveryEligibility(ctx context.Context, pin cloud.NodeIdenti
 		// The cloud's own repair may act on a NotReady node at any time.
 		if !ref.Ready {
 			v.Reason = "node is NotReady; the cloud's own repair may act on it"
-			return v, nil
+			return v, nil, nil
 		}
+	case cloud.RepairOn:
+		hold := policy.Pool
+		if hold == nil {
+			hold = &cloud.RecoveryHold{Code: cloud.HoldNativeRepair, Reason: policy.Reason, Action: policy.Action}
+		}
+		return v, hold, nil
 	default:
-		return v, nil
+		return v, nil, nil
 	}
 	repair, err := provider.OpenRepair(ctx, ref)
 	if err != nil {
 		v.Reason = holdMessage(err, "open-repair query failed")
-		return v, err
+		return v, nil, err
 	}
 	if !repair.Known || repair.Active || repair.Replaced {
 		v.Reason = "cloud repair is active, changed the target, or cannot be excluded: " + repair.Reason
-		return v, nil
+		return v, nil, nil
 	}
 	if provider.Capabilities().Replace {
 		if err := provider.CheckReplacePermission(ctx, pin.InstanceID); err != nil {
 			v.Reason = holdMessage(err, err.Error())
-			return v, err
+			return v, nil, err
 		}
 		v.ReplaceAllowed = true
 	}
@@ -72,7 +85,7 @@ func (p *Platform) RecoveryEligibility(ctx context.Context, pin cloud.NodeIdenti
 		if err != nil && !errors.Is(err, cloud.ErrRecycleNotViable) {
 			v.ReplaceAllowed = false
 			v.Reason = "recycle viability query failed"
-			return v, err
+			return v, nil, err
 		}
 		v.RecycleAllowed = err == nil
 	}
@@ -84,13 +97,13 @@ func (p *Platform) RecoveryEligibility(ctx context.Context, pin cloud.NodeIdenti
 	if err != nil {
 		v.ReplaceAllowed, v.RecycleAllowed = false, false
 		v.Reason = "node identity changed during eligibility check"
-		return v, err
+		return v, nil, err
 	}
 	if policy.Mode == cloud.RepairNotReadyOnly && !current.Ready {
 		v.ReplaceAllowed, v.RecycleAllowed = false, false
 		v.Reason = "node became NotReady during eligibility check; the cloud's own repair may act on it"
 	}
-	return v, nil
+	return v, nil, nil
 }
 
 // holdMessage is a provider's operator-facing text for err, if it gave one.

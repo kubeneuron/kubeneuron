@@ -9,6 +9,18 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+### Added
+
+- **`kubeneuronctl pools` shows whether a pool's nodes can be replaced at
+  all.** A new REPLACEMENT column, before ADD-FIRST, reports `available`,
+  `unavailable — <reason> — <action>` or `unknown — <reason>` from the same
+  check an incident runs, for `RemoveFirst` pools too, within the existing
+  background check budget. A reason that holds every replacement (EKS node
+  auto repair, a permission, no cloud provider) moves from ADD-FIRST to
+  REPLACEMENT, and ADD-FIRST shows `see REPLACEMENT`. `--json` adds
+  `replacement_status`, `replacement_reason_code`, `replacement_reason` and
+  `replacement_action`; the existing fields are unchanged.
+
 ### Fixed
 
 - The `VERIFYING` quiet window now starts from when a signal last joined the

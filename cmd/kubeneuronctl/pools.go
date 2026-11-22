@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"text/tabwriter"
 	"time"
@@ -28,7 +29,7 @@ func cmdPools() *cobra.Command {
 				return printOperationJSON(cmd, view)
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
-			if _, err := fmt.Fprintln(w, "POOL\tCLOUD\tACCELERATOR NODES\tREPLACEMENT POLICY\tCHECKED (UTC)\tADD-FIRST"); err != nil {
+			if _, err := fmt.Fprintln(w, "POOL\tCLOUD\tACCELERATOR NODES\tREPLACEMENT POLICY\tCHECKED (UTC)\tREPLACEMENT\tADD-FIRST"); err != nil {
 				return err
 			}
 			for _, row := range view.Pools {
@@ -36,24 +37,19 @@ func cmdPools() *cobra.Command {
 				if row.CheckedAt != nil {
 					checked = row.CheckedAt.UTC().Format(time.RFC3339)
 				}
-				status := row.Status
-				if row.ReplacementPolicy == "RemoveFirst" {
-					status = "not required"
-				} else {
-					if status == "" {
-						status = "unknown"
-					}
-					if status == "unknown" && row.CheckedAt == nil && row.Reason == "" {
-						status += " — not checked yet"
-					}
-					if row.Reason != "" {
-						status += " — " + row.Reason
-					}
-					if row.Action != "" {
-						status += " — " + row.Action
-					}
+				replacement := "—"
+				if row.ReplacementPolicy != "none" {
+					replacement = poolCell(row.ReplacementStatus, row.ReplacementReason, row.ReplacementAction, row.CheckedAt == nil)
 				}
-				if _, err := fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\n", row.Pool, row.Cloud, row.AcceleratorNodes, row.ReplacementPolicy, checked, status); err != nil {
+				status := "not required"
+				switch {
+				case row.ReplacementPolicy == "RemoveFirst":
+				case row.Reason != "" && row.Reason == row.ReplacementReason && row.ReasonCode == row.ReplacementReasonCode:
+					status = cmp.Or(row.Status, "unknown") + " — see REPLACEMENT"
+				default:
+					status = poolCell(row.Status, row.Reason, row.Action, row.CheckedAt == nil)
+				}
+				if _, err := fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n", row.Pool, row.Cloud, row.AcceleratorNodes, row.ReplacementPolicy, checked, replacement, status); err != nil {
 					return err
 				}
 			}
@@ -62,4 +58,20 @@ func cmdPools() *cobra.Command {
 	}
 	cmd.Flags().Bool("json", false, "print the pool assessments as JSON")
 	return cmd
+}
+
+// poolCell is a status with its reason and action; an unknown status that was
+// never checked says so.
+func poolCell(status, reason, action string, unchecked bool) string {
+	status = cmp.Or(status, "unknown")
+	if status == "unknown" && unchecked && reason == "" {
+		status += " — not checked yet"
+	}
+	if reason != "" {
+		status += " — " + reason
+	}
+	if action != "" {
+		status += " — " + action
+	}
+	return status
 }
