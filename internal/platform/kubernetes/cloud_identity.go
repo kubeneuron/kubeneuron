@@ -24,17 +24,11 @@ func (p *Platform) CloudNode(ctx context.Context, name string) (cloud.NodeRef, e
 	if err != nil {
 		return cloud.NodeRef{}, err
 	}
-	id, err := p.recycler.InstanceID(n.Spec.ProviderID)
+	identity, err := p.nodeIdentity(n)
 	if err != nil {
 		return cloud.NodeRef{}, err
 	}
-	ref := cloud.NodeRef{Identity: cloud.NodeIdentity{
-		Node: n.Name, NodeUID: string(n.UID), ProviderID: n.Spec.ProviderID,
-		InstanceID: id, BootID: n.Status.NodeInfo.BootID,
-	}, Labels: maps.Clone(n.Labels), Annotations: maps.Clone(n.Annotations)}
-	if err := ref.Identity.Validate(); err != nil {
-		return cloud.NodeRef{}, err
-	}
+	ref := cloud.NodeRef{Identity: identity, Labels: maps.Clone(n.Labels), Annotations: maps.Clone(n.Annotations)}
 	for _, condition := range n.Status.Conditions {
 		if condition.Type == corev1.NodeReady {
 			ref.Ready = condition.Status == corev1.ConditionTrue
@@ -44,6 +38,37 @@ func (p *Platform) CloudNode(ctx context.Context, name string) (cloud.NodeRef, e
 		ref.Events, ref.EventsKnown = p.nodeEvents(ctx, n.Name, aware.NodeEventSources())
 	}
 	return ref, nil
+}
+
+// MatchCloudNodeUID reads only the Node. Compare its UID before parsing the
+// provider ID: a newly created Node may not have a provider ID yet.
+func (p *Platform) MatchCloudNodeUID(ctx context.Context, name, uid string) (cloud.NodeIdentity, error) {
+	if uid == "" || p.recycler == nil {
+		return cloud.NodeIdentity{}, fmt.Errorf("matching requires an opening node UID and a configured cloud provider")
+	}
+	n, err := p.client.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return cloud.NodeIdentity{}, err
+	}
+	if n.Name != name || string(n.UID) != uid {
+		return cloud.NodeIdentity{}, cloud.ErrIdentityChanged
+	}
+	return p.nodeIdentity(n)
+}
+
+func (p *Platform) nodeIdentity(n *corev1.Node) (cloud.NodeIdentity, error) {
+	id, err := p.recycler.InstanceID(n.Spec.ProviderID)
+	if err != nil {
+		return cloud.NodeIdentity{}, err
+	}
+	pin := cloud.NodeIdentity{
+		Node: n.Name, NodeUID: string(n.UID), ProviderID: n.Spec.ProviderID,
+		InstanceID: id, BootID: n.Status.NodeInfo.BootID,
+	}
+	if err := pin.Validate(); err != nil {
+		return cloud.NodeIdentity{}, err
+	}
+	return pin, nil
 }
 
 // nodeEventLimit bounds one read of a node's events; a node with more is a

@@ -45,6 +45,8 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- An incident that opened before its node could be matched to a cloud instance no longer always waits for a manual resolve: the controller checks again every minute and continues once the same Kubernetes node (same UID) is matched. The late match is recorded in the audit trail as cloud-instance-matched. If the node was re-created, or the incident did not record the node's UID, it still needs kubeneuronctl resolve.
+
 - The `VERIFYING` quiet window now starts from when a signal last joined the
   incident, stored as `last_signal_at` (schema migration SQLite 0038,
   PostgreSQL 0029; existing rows take their `updated_at`). In v1.0.0-rc.1 it

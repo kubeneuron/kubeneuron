@@ -1,0 +1,15 @@
+id:        inc-held
+state:     EVALUATING
+class:     xid-79
+node:      gpu-node-1
+gpu:       
+playbook:  gpu-replace (step 0, attempt 0)
+dry-run:   false
+signals:   0
+opened:    2026-11-20T15:40:00Z
+fault:     unknown (no evidence recorded)
+Affected training jobs: unknown
+
+audit trail:
+TIME                  FROM  TO  ACTOR   ACTION                  RESULT
+2026-11-20T15:41:00Z            system  cloud-instance-matched  cloud instance matched after the incident opened: the Kubernetes node is the same object (same UID) as when the incident opened; boot ID recorded at match time

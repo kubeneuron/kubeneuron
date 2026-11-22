@@ -1,0 +1,17 @@
+id:        inc-held
+state:     EVALUATING
+class:     xid-79
+node:      gpu-node-1
+gpu:       
+playbook:  gpu-replace (step 0, attempt 0)
+dry-run:   false
+signals:   0
+opened:    2026-11-20T15:40:00Z
+recovery:  unavailable [provider] (assessed 2026-11-20T15:41:00Z)
+reason:    KubeNeuron could not match this node to a cloud instance yet, so it cannot be replaced — the cloud instance could not be identified when the incident opened; KubeNeuron checks again every minute
+fault:     unknown (no evidence recorded)
+Affected training jobs: unknown
+
+audit trail:
+TIME                  FROM  TO  ACTOR   ACTION                         RESULT
+2026-11-20T15:41:00Z            system  provider-recovery-unavailable  KubeNeuron could not match this node to a cloud instance yet, so it cannot be replaced — the cloud instance could not be identified when the incident opened; KubeNeuron checks again every minute

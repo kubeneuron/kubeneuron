@@ -186,12 +186,15 @@ func TestIncidentShowApprovalRound(t *testing.T) {
 // The audit result carries the controller or provider hold reason.
 func TestIncidentShowProviderHold(t *testing.T) {
 	at := time.Date(2026, 11, 20, 15, 41, 0, 0, time.UTC)
-	for _, tc := range []struct{ golden, reason string }{
-		{"incident-hold-no-provider.golden", "no cloud provider is configured, so this node cannot be replaced — set spec.cloud.provider (see docs/install.md)"},
-		{"incident-hold-unmatched.golden", "KubeNeuron could not match this node to a cloud instance, so it cannot be replaced — the incident has no record of which instance belonged to the node when it opened; check that the node has a provider ID and that the controller can read the Kubernetes node (see docs/cloud-aws.md), then resolve this incident with kubeneuronctl resolve inc-held --actor <who> so that the next fault opens a new one"},
-		{"incident-hold-native-repair.golden", "EKS node auto repair is enabled for node group gpu, so KubeNeuron does not replace its nodes. Leave repairs of this group to EKS, or turn EKS node auto repair off for this group: aws eks update-nodegroup-config --cluster-name training --nodegroup-name gpu --node-repair-config enabled=false. EKS then no longer repairs nodes in this group. KubeNeuron checks again every minute."},
-		{"incident-hold-recent-change.golden", "Node group gpu changed at 15:30 UTC (EKS update: NodeRepairEnabled). KubeNeuron waits 30 minutes after a change and checks again at 16:00 UTC."},
-		{"incident-hold-read-denied.golden", "KubeNeuron could not read node group gpu: eks:ListUpdates was denied. Allow eks:ListUpdates in the controller's IAM role. KubeNeuron retries every minute."},
+	for _, tc := range []struct{ golden, action, reason string }{
+		{"incident-hold-no-provider.golden", "provider-recovery-unavailable", "no cloud provider is configured, so this node cannot be replaced — set spec.cloud.provider (see docs/install.md)"},
+		{"incident-hold-unmatched.golden", "provider-recovery-unavailable", "KubeNeuron could not match this node to a cloud instance, so it cannot be replaced — the incident has no record of which instance belonged to the node when it opened; check that the node has a provider ID and that the controller can read the Kubernetes node (see docs/cloud-aws.md), then resolve this incident with kubeneuronctl resolve inc-held --actor <who> so that the next fault opens a new one"},
+		{"incident-hold-match-pending.golden", "provider-recovery-unavailable", "KubeNeuron could not match this node to a cloud instance yet, so it cannot be replaced — the cloud instance could not be identified when the incident opened; KubeNeuron checks again every minute"},
+		{"incident-hold-node-recreated.golden", "provider-recovery-unavailable", "KubeNeuron could not match this node to a cloud instance, so it cannot be replaced — the node was re-created under the same name after the incident opened, so it is no longer the node the fault was seen on; resolve this incident with kubeneuronctl resolve inc-held --actor <who>"},
+		{"incident-late-cloud-match.golden", "cloud-instance-matched", "cloud instance matched after the incident opened: the Kubernetes node is the same object (same UID) as when the incident opened; boot ID recorded at match time"},
+		{"incident-hold-native-repair.golden", "provider-recovery-unavailable", "EKS node auto repair is enabled for node group gpu, so KubeNeuron does not replace its nodes. Leave repairs of this group to EKS, or turn EKS node auto repair off for this group: aws eks update-nodegroup-config --cluster-name training --nodegroup-name gpu --node-repair-config enabled=false. EKS then no longer repairs nodes in this group. KubeNeuron checks again every minute."},
+		{"incident-hold-recent-change.golden", "provider-recovery-unavailable", "Node group gpu changed at 15:30 UTC (EKS update: NodeRepairEnabled). KubeNeuron waits 30 minutes after a change and checks again at 16:00 UTC."},
+		{"incident-hold-read-denied.golden", "provider-recovery-unavailable", "KubeNeuron could not read node group gpu: eks:ListUpdates was denied. Allow eks:ListUpdates in the controller's IAM role. KubeNeuron retries every minute."},
 	} {
 		t.Run(tc.golden, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -201,7 +204,7 @@ func TestIncidentShowProviderHold(t *testing.T) {
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"incident": types.Incident{ID: "inc-held", State: types.StateEvaluating, Class: "xid-79", Target: types.Target{Node: "gpu-node-1"}, Playbook: "gpu-replace", OpenedAt: at.Add(-time.Minute)},
-					"audit":    []types.AuditEntry{{Time: at, Actor: "system", Action: "provider-recovery-unavailable", Result: tc.reason}}})
+					"audit":    []types.AuditEntry{{Time: at, Actor: "system", Action: tc.action, Result: tc.reason}}})
 			}))
 			defer server.Close()
 			got, err := runCommand(t, server.URL, "incidents", "show", "inc-held")

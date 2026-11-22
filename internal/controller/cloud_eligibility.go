@@ -14,7 +14,7 @@ import (
 )
 
 func (c *Controller) missingCloudIdentityReason(incidentID string) string {
-	recycler, ok := c.platform.(platform.NodeRecycler)
+	recycler, ok := c.platform.(interface{ CloudRecyclingConfigured() bool })
 	if !ok || !recycler.CloudRecyclingConfigured() {
 		return "no cloud provider is configured, so this node cannot be replaced — set spec.cloud.provider (see docs/install.md)"
 	}

@@ -9,9 +9,13 @@ Run `kubeneuronctl incidents show <id>` and read the reason for
 `provider-recovery-unavailable`. If no cloud provider is configured, set
 `spec.cloud.provider` as described in the [installation guide](install.md).
 If the incident has no matching instance, check the Kubernetes node's provider ID
-and the controller's access to the Kubernetes Node. The controller records
-the match when an incident opens. Once the configuration is corrected,
-run `kubeneuronctl resolve <id> --actor <who>` so the next fault starts a fresh lookup.
+and the controller's access to the Kubernetes Node. Before authorization, the controller checks
+again every minute if it recorded the node UID when the incident opened.
+A successful match to that same UID appears in the audit as
+`cloud-instance-matched`; the boot ID is recorded at match time. The incident
+continues under its original policy. If the reason instead names the resolve
+command (for example, the opening UID is missing or the node was re-created),
+correct the configuration and run that command so the next fault starts a fresh lookup.
 
 ## The root KubeNeuron is not Ready
 

@@ -71,7 +71,14 @@ type cloudAssessment struct {
 }
 
 func (c *Controller) assessUnavailableCloudRecovery(ctx context.Context, inc *types.Incident, step *playbook.Step, entry *cloudAssessment) (bool, string, error) {
+	matchReason, err := c.backfillCloudIdentity(ctx, inc)
+	if err != nil {
+		return true, "", err
+	}
 	verdict, err := c.cloudRecoveryEligibility(ctx, inc)
+	if matchReason != "" {
+		verdict.Reason = matchReason
+	}
 	if errors.Is(err, cloud.ErrIdentityChanged) {
 		return true, "", c.supersedeCloudTarget(ctx, inc, err)
 	}
