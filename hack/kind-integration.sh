@@ -2017,7 +2017,7 @@ EOF
 		die "CLI qualification audit events carry an actor other than token:${ctl_actor}: $(jq -c '[.items[]?.actor]' "$ctl_audit_file")"
 	note "kubeneuronctl runtime-qualifications observe recorded one Full sample on $ctl_qual_id (still Observing, audit create,observe by token:${ctl_actor})"
 
-	# exercise_candidate_runtime_contract_impact drives the v0.5 candidate
+	# exercise_candidate_runtime_contract_impact drives the candidate
 	# runtime-contract impact through the real public API and the CLI, on the
 	# same live fixture: a CandidateConfiguration whose one profile carries the
 	# live profile's identity (name/uid/generation/digest) and selector is
@@ -3250,7 +3250,7 @@ exercise_real_cordon_and_uncordon() {
 	# And the half nothing had ever run: resolving the incident must give the
 	# capacity back, without anybody uncordoning by hand.
 	#
-	# Since v0.4.0 every mutable operator route requires an Idempotency-Key and
+	# Every mutable operator route requires an Idempotency-Key and
 	# a resolve answers 200 with the incident it resolved (docs/reference-api.md).
 	# The older 204/202 are still accepted so the phase keeps reading on a
 	# controller that predates the fencing; the 400 a missing key earns is not.
@@ -3276,7 +3276,7 @@ exercise_real_cordon_and_uncordon() {
 	note "the cordon janitor uncordoned $target_node after its incident resolved"
 }
 
-# exercise_workload_safe_recovery is the live G2 coverage of the v0.8
+# exercise_workload_safe_recovery is the live G2 coverage of the
 # workload-safe recovery surfaces (docs/workload-safe-recovery-design.md) on
 # this same fixture: the advisory at approval park, its withdrawal on a
 # rejection, the durable impact preview and the approve bound to its digest,
@@ -3462,7 +3462,7 @@ exercise_workload_safe_recovery() {
 	wait_pods_running bystander "$target_node"
 	[[ -z $peer_node ]] || wait_pods_running rank-2 "$peer_node"
 
-	# Arm the one worker and switch the v0.8 blocks on: coordination with the
+	# Arm the one worker and switch the workload-safe blocks on: coordination with the
 	# advisory and cross-node groups, and a preview the approve must carry.
 	"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=merge -p "$(cat <<-JSON
 		{"spec":{"safety":{"executionMode":"Enabled","destructiveExecution":{
@@ -4635,5 +4635,5 @@ if grep -Fq 'real NVML driver not wired yet; using fake driver (skeleton)' <<<"$
 	note "agent explicitly reports its fake NVML skeleton"
 fi
 
-	note "PASS: 99 CEL checks (including the destructive-execution admission gate, the checkpoint-coordination, advisory, group and impact-preview bounds, and the GPUAutonomyPlan envelope rules), scoped RBAC, mTLS plus Pod/node identity rejection, authenticated public API and Alertmanager webhook, manual immutable/versioned routine TLS rotation, explicit dual-leaf emergency recovery, stale-state/plan rejection, failed-leaf and failed-contraction rollback, fresh registration proof, durable readiness loss/recovery, 11 owners, ownership collision/non-adoption/recovery, and acknowledged no-op reconciliation, plus a controller restart mid-playbook with durable approval state and no re-executed step, and a REAL cordon with the janitor's uncordon on an armed worker, plus the v0.8 workload-safe recovery phases on real Pods: advisory at park and its withdrawal, a durable impact preview the approve must carry, a Phase 1 request reaching a group peer on another node, a REAL drain after acknowledgement, and a dry-run park that patches nothing"
+	note "PASS: 99 CEL checks (including the destructive-execution admission gate, the checkpoint-coordination, advisory, group and impact-preview bounds, and the GPUAutonomyPlan envelope rules), scoped RBAC, mTLS plus Pod/node identity rejection, authenticated public API and Alertmanager webhook, manual immutable/versioned routine TLS rotation, explicit dual-leaf emergency recovery, stale-state/plan rejection, failed-leaf and failed-contraction rollback, fresh registration proof, durable readiness loss/recovery, 11 owners, ownership collision/non-adoption/recovery, and acknowledged no-op reconciliation, plus a controller restart mid-playbook with durable approval state and no re-executed step, and a REAL cordon with the janitor's uncordon on an armed worker, plus the workload-safe recovery phases on real Pods: advisory at park and its withdrawal, a durable impact preview the approve must carry, a Phase 1 request reaching a group peer on another node, a REAL drain after acknowledgement, and a dry-run park that patches nothing"
 note "CPU-only boundary: this validates transport, the tested manual TLS-rotation and leaf-recovery contracts, and Kubernetes workload identity; it also proves operator-issued TLS reissuance for a deleted, operator-owned set; it does not validate expiry-driven renewal timing, emergency CA revocation, NVIDIA, NVML, DCGM, or GPU actions. Remediation is now partly covered: one destructive controller-side step (Cordon) and its janitor run for real against an armed node"

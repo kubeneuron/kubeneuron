@@ -368,7 +368,7 @@ func cmdIncidents() *cobra.Command {
 
 // cmdIncidentImpact reads one approval round's impact preview: what the
 // pending step and the disruptions downstream of it would touch, and the
-// digest an approve may bind to (v0.8 development).
+// digest an approve may bind to.
 func cmdIncidentImpact() *cobra.Command {
 	c := &cobra.Command{Use: "impact <incident-id>", Short: "Impact preview of the pending approval round", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		cl, err := newClient(cmd)
@@ -480,7 +480,7 @@ func decisionCommand(use, short, route string, withRound bool) *cobra.Command {
 				body["park_epoch"] = round
 			}
 			// The impact digest pins the decision to the preview the human
-			// read (v0.8 development). It is never taken from the server at
+			// read. It is never taken from the server at
 			// approve time: an approve that fetched "the current preview"
 			// and bound to it would approve whatever is current — a preview
 			// another operator recomputed after this one was read — which is

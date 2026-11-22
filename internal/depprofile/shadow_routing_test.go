@@ -16,7 +16,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 )
 
-// M5 safety boundary (v0.7), deployment side: shadow-only GPU alerts
+// M5 safety boundary, deployment side: shadow-only GPU alerts
 // (configs/vmalert/gpu-shadow-rules.yaml, label kubeneuron_shadow="true",
 // names ShadowGpu*) are routed to humans before the controller webhook route
 // is consulted, the existing Gpu*/KubeNeuronAgentDown routing to the

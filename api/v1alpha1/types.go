@@ -531,7 +531,7 @@ type SafetySpec struct {
 	// checkpoint, and the warnings a human should read before approving. It
 	// is advisory and cannot block an approve; with requireForApproval it
 	// binds the approve to the exact preview the human saw. Omitted means
-	// off. (v0.8 development)
+	// off.
 	ImpactPreview *ImpactPreviewSpec `json:"impactPreview,omitempty"`
 }
 
@@ -1962,7 +1962,7 @@ type GPUAutonomyPlanSpec struct {
 	PolicyRef string `json:"policyRef"`
 	// +kubebuilder:validation:MinLength=1
 	ProfileRef string `json:"profileRef"`
-	// v0.4.0 intentionally permits exactly one action class per plan. A
+	// A plan intentionally permits exactly one action class. A
 	// second action needs a separate approval and canary envelope.
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=1

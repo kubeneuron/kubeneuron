@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// v0.8 non-goal, pinned at the source: the dynamic client exists to READ
+// Non-goal, pinned at the source: the dynamic client exists to READ
 // foreign objects (ResourceSlices, Jobs, Kueue Workloads, RayClusters,
 // RayJobs) for the topology classifier and the context resolvers. No code
 // path in those files may create, update, patch, delete or apply anything

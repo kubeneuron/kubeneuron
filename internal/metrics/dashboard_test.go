@@ -26,7 +26,7 @@ import (
 //
 // Two kinds of board are covered. The legacy kubeneuron-dashboard.json is
 // hand-maintained and reads this package's series and the exporter's DCGM
-// series directly. The five v0.7 boards are generated from
+// series directly. The five GPU boards are generated from
 // internal/gpucatalog.DashboardSpecs and read canonical kubeneuron_gpu_*
 // series, derived series, T4 control-plane series and vmalert's ALERTS.
 
@@ -232,7 +232,7 @@ func catalogSeries(t *testing.T) map[string]bool {
 }
 
 // profileSeries returns the DCGM series names the shipped exporter profile
-// (v0.7 M2) configures dcgm-exporter to emit, spelled as the pinned exporter
+// configures dcgm-exporter to emit, spelled as the pinned exporter
 // publishes them.
 func profileSeries(t *testing.T) map[string]bool {
 	t.Helper()
@@ -526,7 +526,7 @@ func TestEveryMetricIsChartedOrExcused(t *testing.T) {
 	}
 }
 
-// --- v0.7 generated boards -------------------------------------------------
+// --- generated GPU boards ----------------------------------------------------
 
 // TestGeneratedDashboardsAreTheGeneratorOutput fails when a checked-in board
 // differs from what internal/gpucatalog renders from its one spec, so a

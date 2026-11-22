@@ -834,8 +834,8 @@ func TestRuleConsumersMatchFiles(t *testing.T) {
 }
 
 // Exporter exposure and rule consumption are independent claims. The
-// reliability profile (v0.7 M2) lists every eligible field; the canonical
-// recording rules (v0.7 M3) read every one of them, and the legacy raw
+// reliability profile lists every eligible field; the canonical
+// recording rules read every one of them, and the legacy raw
 // alerts still read only the nine v0.6.1 series. The profile must never
 // appear as a consumer, and a profiled field with no consumer must still
 // validate and render honestly even though the shipped table no longer has

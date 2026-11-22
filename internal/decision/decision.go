@@ -308,7 +308,7 @@ func Evaluate(s Snapshot) Result {
 	// The topology classification is consulted LAST and can only take away:
 	// every check above has already passed, and a refused classification
 	// turns that pass into a block. It is never consulted for a node-scoped
-	// action, which is how node-scoped rungs keep their v0.7 behaviour.
+	// action, which is how node-scoped rungs keep their whole-node behaviour.
 	if deviceScopedReset(s.Request) && s.Topology != nil && !s.Topology.Eligible() {
 		return finalize(result, StateBlocked, []ReasonCode{ReasonTopologyUnqualified}, s)
 	}

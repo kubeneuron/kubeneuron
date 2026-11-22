@@ -29,8 +29,8 @@ type Payload struct {
 	Step     string          `json:"step,omitempty"`
 	Message  string          `json:"message,omitempty"`
 	Incident *types.Incident `json:"incident"`
-	// Impact is set on approval requests when an impact preview was computed
-	// (v0.8 development): its short summary and the digest to bind the
+	// Impact is set on approval requests when an impact preview was computed:
+	// its short summary and the digest to bind the
 	// decision to. Additive; absent when there is none.
 	Impact *ImpactContext `json:"impact,omitempty"`
 }

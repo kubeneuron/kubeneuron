@@ -40,7 +40,7 @@ type StepIdentity struct {
 	StepHash     string
 	ParkEpoch    int
 	// ImpactDigest is the impact preview the human was shown, when the
-	// client carried one and the controller accepted it (v0.8 development).
+	// client carried one and the controller accepted it.
 	ImpactDigest string
 }
 

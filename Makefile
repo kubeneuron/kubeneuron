@@ -82,7 +82,7 @@ gates:
 ## gates-full: gates plus everything that needs Docker or a cluster.
 # Order: the offline image check first, then the three disposable kind
 # clusters from cheapest to dearest. test-integration-kind is fully offline.
-# test-gpu-observability-kind is the v0.7 GPU observability fixture: its own
+# test-gpu-observability-kind is the GPU observability fixture: its own
 # CPU-only kind cluster with a SYNTHETIC dcgm-exporter stand-in, scraped and
 # evaluated by the pinned VictoriaMetrics v1.147.0 pipeline, routed through
 # the shipped Alertmanager route tree into recorder sinks, and provisioned
@@ -123,7 +123,7 @@ verify-image:
 verify-hw-e2e-sweep:
 	bash hack/verify-hw-e2e-sweep.sh
 
-# Offline check of the hardware harness's v0.7 GPU operator profile wiring
+# Offline check of the hardware harness's GPU operator profile wiring
 # (pinned --values, v26.3.3 default, fail-closed pre-Helm gate), the
 # read-only test-observability phase (dispatch, target guard, bounded curl,
 # T0/T1 witness fields, node/gpu_uuid/gpu_model/node_pool label contract,
@@ -317,7 +317,7 @@ test-upgrade-rollback-kind:
 	KIND_BIN="$(KIND)" KUBECTL_BIN="$(KUBECTL)" \
 	./hack/kind-upgrade-rollback.sh
 
-# v0.7 GPU observability fixture on its own disposable kind cluster
+# GPU observability fixture on its own disposable kind cluster
 # (kubeneuron-gpu-observability): a synthetic dcgm-exporter stand-in
 # (hack/dcgmfixture, CPU-only, no DCGM/NVML) scraped by vmagent with the
 # checked-in M2 relabeling into vmsingle; vmalert evaluating
@@ -360,7 +360,7 @@ verify-gpu-observability-fixture:
 kind-gpu-observability-clean:
 	$(KIND) delete cluster --name kubeneuron-gpu-observability
 
-# v0.8 examples fixture: examples/checkpoint/{plain-job,kueue-job,
+# Workload-safe examples fixture: examples/checkpoint/{plain-job,kueue-job,
 # kuberay-ray-train} driven through a REAL KubeNeuron installation on an
 # existing cluster (the one `KEEP_CLUSTER=1 make test-integration-kind`
 # leaves behind fits the defaults), with the Kueue release manifest and the

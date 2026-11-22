@@ -28,7 +28,7 @@ const (
 func (s *Server) operationsManager(w http.ResponseWriter) *operations.Manager {
 	provider, ok := s.operator.(OperationsProvider)
 	if !ok || provider.Operations() == nil {
-		http.Error(w, "v0.4.0 operational workflows are unavailable", http.StatusServiceUnavailable)
+		http.Error(w, "operational workflows are unavailable", http.StatusServiceUnavailable)
 		return nil
 	}
 	return provider.Operations()

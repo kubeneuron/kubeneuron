@@ -299,7 +299,7 @@ metadata:
 spec:
   # The gpu-canonical-* groups mirror configs/vmalert/gpu-recording-rules.yaml
   # exactly: canonical kubeneuron_gpu_* series recorded from dcgm-exporter
-  # series with the catalog's factor and fixed labels (v0.7 M3, slice 1),
+  # series with the catalog's factor and fixed labels (slice 1),
   # then the gpu-derived-* groups computed from those canonical series
   # (slice 2). No alerts, no zero synthesis; an absent source field stays
   # an absent canonical series and an absent input an absent derived one.
@@ -561,7 +561,7 @@ spec:
               type: recovery
 
       # ---------------------------------------------------------------------
-      # Derived signals (v0.7 M3, slice 2). Every expression below reads only
+      # Derived signals (slice 2). Every expression below reads only
       # the canonical kubeneuron_gpu_* series above (or a T4 control-plane
       # series), never a dcgm-exporter series. The catalog's `derived` table is
       # the contract: formula, inputs, unit and no-data semantics are listed
@@ -699,8 +699,8 @@ metadata:
     kubeneuron.io/rule-set: default
 spec:
   # The gpu-shadow group mirrors configs/vmalert/gpu-shadow-rules.yaml exactly
-  # (a unit test in internal/detect pins them together). Shadow-only (v0.7
-  # M5): every alert is named ShadowGpu* (never Gpu*, so the controller
+  # (a unit test in internal/detect pins them together). Shadow-only:
+  # every alert is named ShadowGpu* (never Gpu*, so the controller
   # webhook route's alertname regex cannot match it), carries
   # kubeneuron_shadow="true" (routed to human-default before the webhook
   # route in vmalertmanager.yaml) and is absent from detect.alertClassMap.

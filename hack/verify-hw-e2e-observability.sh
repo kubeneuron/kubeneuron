@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 
-# verify-hw-e2e-observability.sh — prove the hardware harness's v0.7 GPU
+# verify-hw-e2e-observability.sh — prove the hardware harness's GPU
 # operator profile wiring and test-observability phase without AWS.
 #
 # No cluster, no Docker, a second. It runs the REAL hack/hw-e2e.sh up-finish
@@ -170,7 +170,7 @@ for series in kubeneuron_gpu_temperature_celsius kubeneuron_gpu_power_watts kube
 	in_fn cmd_test_observability "canonical series $series" "$series"
 done
 in_fn cmd_test_observability "MiB->bytes factor" '\* 1048576'
-# Label contract on the selected canonical samples (v0.7 M2).
+# Label contract on the selected canonical samples.
 in_fn cmd_test_observability "node/gpu_uuid/gpu_model/node_pool asserted non-empty" '^[[:space:]]*for lbl in node gpu_uuid gpu_model node_pool; do$'
 in_fn cmd_test_observability "gpu_uuid equals the exporter UUID" '\.\[0\]\.metric\.gpu_uuid == \$v'
 in_fn cmd_test_observability "gpu_model equals the exporter modelName" '\.\[0\]\.metric\.gpu_model == \$v'
@@ -551,7 +551,7 @@ ordered cmd_deploy_observability \
 	'wait_for_installation_ready' \
 	'jsonpath='"'"'{.spec.observability.victoriaMetrics.endpoint}'"'" \
 	'jsonpath='"'"'{.spec.observability.alertmanager.endpoint}'"'"
-# The exporter gate (v0.7 G3, 2026-10-18): before the operator manifest is
+# The exporter gate (G3, 2026-10-18): before the operator manifest is
 # even fetched, the DaemonSet must be rolled out, the Service must have ready
 # endpoints, and /metrics, read through the bounded port-forward on the port
 # the Service declares, must carry the raw series the pipeline wait looks

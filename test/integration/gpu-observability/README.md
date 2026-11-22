@@ -120,6 +120,6 @@ executing.
 It proves nothing about DCGM, dcgm-exporter, NVIDIA drivers, real GPU
 faults, MIG, a real pager integration, the KubeNeuron controller (which
 never runs here) or any hardware; the exporter is a Go program printing
-numbers and the receivers are recorders. These are rows of the v0.7 G2 gate,
+numbers and the receivers are recorders. These are rows of the GPU observability G2 gate,
 not G2. Not covered here: the `hack/hw-e2e.sh` `test-observability` phase
 and anything on real GPUs.

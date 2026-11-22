@@ -83,13 +83,13 @@ import (
 // and consumed_by lists only rule files and components that read it, never
 // the profile itself. No key changed.
 //
-// v1.5.0 (v0.7 M2) expanded the shipped exporter profile to the reliability
+// v1.5.0 expanded the shipped exporter profile to the reliability
 // profile: exporter_exposed is now true for exactly the T0/T1 fields with a
 // canonical mapping that are not deferred (ProfileEligible), and Validate
 // enforces that equality. No consumer was added: the new profile entries were
 // read by no rule until the recording-rule phase. No key changed.
 //
-// v1.6.0 (v0.7 M3, slice 1) added the canonical recording rules
+// v1.6.0 added the canonical recording rules
 // (CanonicalRuleConsumerPaths) as the consumer of every profiled field: each
 // kubeneuron_gpu_* series is now recorded from its source series with the
 // catalog's factor and fixed labels, wherever the source exists. The nine
@@ -97,7 +97,7 @@ import (
 // (LegacyRuleConsumerPaths) as well. Producing a series is not validating
 // it: no hardware cell changed. No key changed.
 //
-// v1.7.0 (v0.7 M3, slice 2) added the derived-signal schema (DerivedSignal,
+// v1.7.0 added the derived-signal schema (DerivedSignal,
 // Catalog.Derived): kubeneuron_gpu_* series computed from canonical series
 // by the gpu-derived-* recording groups, each with its formula, inputs,
 // unit, no-data semantics and an experimental flag, including the
@@ -485,7 +485,7 @@ const (
 	// series directly; it was never extended to the reliability profile.
 	LegacyRulePath = "configs/vmalert/gpu-rules.yaml"
 	// CanonicalRulePath holds the recording rules that derive every
-	// kubeneuron_gpu_* series from its profiled source (v0.7 M3).
+	// kubeneuron_gpu_* series from its profiled source.
 	CanonicalRulePath = "configs/vmalert/gpu-recording-rules.yaml"
 	// DeployedRulePath is the Kubernetes manifest carrying both: the legacy
 	// alert VMRule and the mirror of the canonical recording groups.
@@ -566,7 +566,7 @@ func legacy(f Field, oldName string) Field {
 // is the only constructor that assigns SourceDCGMExporter, and it is the
 // only thing exporter exposure depends on: it claims no consumer. Whether a
 // rule reads the series is readBy()'s separate claim, so a profile change
-// never has to pretend a rule exists. The reliability profile (v0.7 M2)
+// never has to pretend a rule exists. The reliability profile
 // applies it to every ProfileEligible field and to nothing else; Validate
 // rejects a table where the two disagree.
 func profiled(f Field) Field {

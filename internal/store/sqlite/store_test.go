@@ -403,7 +403,7 @@ func TestMigrateExistingAcceleratorReportDatabaseAddsIdentityColumns(t *testing.
 }
 
 func TestMigrateOperationalAuditScopeBackfillsExistingRows(t *testing.T) {
-	// Model a database produced by the initial v0.4.0 binary. The new scope
+	// Model a database produced by the first binary with durable operational records. The new scope
 	// columns must be added exactly once and inherit the durable envelope's
 	// tenant/cluster rather than making historic audit rows appear unscoped.
 	path := filepath.Join(t.TempDir(), "operational-v22.db")

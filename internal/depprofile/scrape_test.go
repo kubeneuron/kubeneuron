@@ -11,7 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// The scrape label contract (v0.7 M2) lives in the VMAgent resource's
+// The scrape label contract lives in the VMAgent resource's
 // inline scrape config. These tests parse it as the relabel rules it is and
 // evaluate them, instead of grepping for strings: the node_pool fallback is
 // an ordering property of `replace` rules, and only running the rules over
@@ -258,7 +258,7 @@ func TestDCGMJobDiscovery(t *testing.T) {
 			t.Errorf("attach_metadata.%s is not part of the contract", k)
 		}
 	}
-	// Keep filters are unchanged from v0.6.1: the exporter Service and its
+	// Keep filters are unchanged from the legacy profile: the exporter Service and its
 	// metrics port, nothing else.
 	keeps := 0
 	for _, r := range j.RelabelConfigs {
@@ -279,7 +279,7 @@ func TestDCGMJobDiscovery(t *testing.T) {
 		}
 	}
 	if keeps != 2 {
-		t.Errorf("want the two v0.6.1 keep rules, got %d", keeps)
+		t.Errorf("want the two legacy keep rules, got %d", keeps)
 	}
 	node, ok := findRule(j.RelabelConfigs, "node")
 	if !ok || len(node.SourceLabels) != 1 || node.SourceLabels[0] != "__meta_kubernetes_pod_node_name" || node.Regex != nil || node.Replacement != nil {

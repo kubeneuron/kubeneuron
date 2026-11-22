@@ -12,7 +12,7 @@ in `sessionStorage` only). Surfaces:
 2. Incidents with state badges, playbook progress, and per-incident
    Approve / Reject / Resolve actions (audited with the actor field).
 3. Incident audit-trail drill-down, with the approval round's impact
-   preview (v0.8 development): node and topology, what the pending step
+   preview: node and topology, what the pending step
    would touch, which workloads are eligible for a checkpoint request,
    each workload's owner chain and resolved context (batch Job, Kueue,
    Ray), checkpoint groups with their on-node count and a cluster total

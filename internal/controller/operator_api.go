@@ -159,7 +159,7 @@ func (c *Controller) ResolveIncident(ctx context.Context, id, actor, reason stri
 	})
 }
 
-// ResolveIncidentRequest is the v0.4 idempotent/optimistic-concurrency form
+// ResolveIncidentRequest is the idempotent/optimistic-concurrency form
 // of manual resolution. The older ResolveIncident method remains for existing
 // integrations, while the public API uses this form whenever the controller
 // advertises it. A retry returns the resolved incident instead of attempting a
@@ -170,7 +170,7 @@ func (c *Controller) ResolveIncidentRequest(ctx context.Context, id, actor, reas
 	}
 	operational, ok := c.store.(store.OperationalStore)
 	if !ok {
-		return nil, false, fmt.Errorf("incident resolution requires the v0.4.0 operational store")
+		return nil, false, fmt.Errorf("incident resolution requires the operational store")
 	}
 	current, err := c.store.GetIncident(ctx, id)
 	if err != nil {
@@ -253,7 +253,7 @@ func (c *Controller) AcknowledgeIncident(ctx context.Context, id, actor, reason 
 	}
 	operational, ok := c.store.(store.OperationalStore)
 	if !ok {
-		return nil, false, fmt.Errorf("incident acknowledgement requires the v0.4.0 operational store")
+		return nil, false, fmt.Errorf("incident acknowledgement requires the operational store")
 	}
 	// Validate the caller's observed version before claiming the key. A bad
 	// request must never leave an idempotency reservation that makes a later

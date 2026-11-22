@@ -4,7 +4,7 @@
 # shellcheck disable=SC2016 # Single-quoted jq programs expand jq, not shell, variables.
 set -Eeuo pipefail
 
-# The v0.8 examples fixture: examples/checkpoint/{plain-job,kueue-job,
+# The workload-safe examples fixture: examples/checkpoint/{plain-job,kueue-job,
 # kuberay-ray-train} driven end to end through a real KubeNeuron installation,
 # CPU-only. It proves that the three toys read the advisory and the request
 # off their own Pods, checkpoint and acknowledge (by leaving, or for the Ray
@@ -991,7 +991,7 @@ run_cluster() {
 	snapshot_foreign before
 	[[ ! -s "$work_dir/foreign-before.list" ]] || note "foreign objects under watch: $(tr '\n' ' ' <"$work_dir/foreign-before.list")"
 
-	# Arm the one node and switch the v0.8 blocks on, with every context
+	# Arm the one node and switch the workload-safe blocks on, with every context
 	# resolver the examples need.
 	kc label node "$target_node" "${NODE_LABEL}=yes" --overwrite >/dev/null
 	kc patch kubeneuron "$ROOT_NAME" --type=merge -p "$(

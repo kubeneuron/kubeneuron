@@ -99,7 +99,7 @@ const (
 // the 30s canonical interval by a margin that survives a missed scrape.
 const DerivedRateWindow = "5m"
 
-// DerivedSignals is the shipped derived-signal table (v0.7 M3, slices 2-3).
+// DerivedSignals is the shipped derived-signal table.
 // A row may read a derived series declared earlier in this table (the
 // fail-slow score reads the clock and throttle ratios). Excluded on
 // purpose: any aggregate health or error score (misleading by construction;

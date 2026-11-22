@@ -1009,7 +1009,7 @@ func scanApproval(row *sql.Row) (*types.Approval, error) {
 	return &a, nil
 }
 
-// --- impact previews (v0.8 development) ---
+// --- impact previews ---
 
 func (q *Queries) PutImpactPreview(ctx context.Context, p *types.ImpactPreview) error {
 	var payload any

@@ -21,6 +21,13 @@ API is `v1alpha1`.
   `replacement_status`, `replacement_reason_code`, `replacement_reason` and
   `replacement_action`; the existing fields are unchanged.
 
+### Changed
+
+- CRD field descriptions (`kubectl explain`), the `kubeneuronctl audit-events`
+  help, the API's 503 for an unavailable operations service and the incident
+  acknowledgement and resolution errors no longer name 0.x versions. Behaviour
+  is unchanged.
+
 ### Fixed
 
 - The `VERIFYING` quiet window now starts from when a signal last joined the

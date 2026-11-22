@@ -72,7 +72,7 @@ Commands (the workflow runs them in this order):
   test-destructive   Flip to executionMode=Enabled under a confined
                      destructiveExecution block and assert the ReplaceNode path
                      closes the incident as replaced.
-  test-impact        v0.8: an opted-in GPU toy trainer on the real node, under
+  test-impact        An opted-in GPU toy trainer on the real node, under
                      an AcceleratorRuntimeProfile pinned to the node's own
                      driver and DCGM client (the agent attests only while a
                      profile selects it); inject, park for approval, assert the
@@ -81,18 +81,18 @@ Commands (the workflow runs them in this order):
                      can reset, refused with ReportNotReady on a cloud VM),
                      refuse an approve without the digest, reject, assert the
                      advisory is withdrawn. Read-only beyond the cordon.
-  test-checkpoint    v0.8: the same toy; park -> advisory stamped and the sidecar
+  test-checkpoint    The same toy; park -> advisory stamped and the sidecar
                      checkpoints -> approve bound to the preview digest -> request
                      with a deadline -> the trainer checkpoints and exits ->
                      audited exited, counters moved, the node really drained.
                      The first opted-in Pod this project has ever disrupted on
                      hardware.
-  test-timeslice     v0.8: switch the GPU Operator device plugin to time-slicing
+  test-timeslice     Switch the GPU Operator device plugin to time-slicing
                      (replicas=2) on the Tesla T4, assert the classifier reads
                      the node as time-sliced/refused/device-wide, switch it back
                      and assert whole-device returns. No action is ever taken
                      on the shared device.
-  test-observability Read-only check of the v0.7 GPU reliability profile on
+  test-observability Read-only check of the GPU reliability profile on
                      EKS: the kubeneuron-dcgm-metrics ConfigMap carries the T0
                      and T1 fields, nvidia-dcgm-exporter is rolled out and
                      serves both tiers with UUID/modelName labels, and — on
@@ -174,7 +174,7 @@ readonly DRAIN_XID=48
 # reason RECUR_XID exists — a recurrence must not deduplicate into the first —
 # but it must map to THIS phase's class, which RECUR_XID does not.
 readonly DRAIN_RECUR_XID=13
-# v0.8 workload-safe phases. Two XIDs so the second phase's injection is not
+# Workload-safe phases. Two XIDs so the second phase's injection is not
 # swallowed by the agent's per-XID dedup window when it follows the first
 # within two minutes; both are mapped to the checkpoint-probe class by the
 # phase's own GPUSignalMapping, which overrides the catalog class the way the
@@ -207,7 +207,7 @@ readonly CSI_PVC_NAMESPACE_TAG="kubernetes.io/created-for/pvc/namespace"
 # The in-tree provisioner's cluster tag, the same literal the sweep's legacy
 # delete and audit filter on.
 readonly LEGACY_CLUSTER_TAG="KubernetesCluster"
-# The GPU operator install is the checked-in v0.7 reliability profile, not an
+# The GPU operator install is the checked-in reliability profile, not an
 # ad-hoc chart default. Both the values file and the chart version are pinned
 # in deploy/kubernetes/dependencies (versions.lock.yaml, values.yaml); the
 # harness repeats the version so a stale GPU_OPERATOR_VERSION cannot install a
@@ -267,7 +267,7 @@ K8S_VERSION="${K8S_VERSION:-1.33}"
 # the same major as the client. assert_dcgm_versions_agree below enforces the
 # pairing rather than trusting this line to stay correct.
 #
-# Since v0.7 the default is the profile's locked chart release
+# The default is the profile's locked chart release
 # (GPU_OPERATOR_PINNED_VERSION); overriding it is refused by
 # assert_gpu_operator_profile so the stand always installs what is reviewed.
 GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION:-$GPU_OPERATOR_PINNED_VERSION}"
@@ -1856,7 +1856,7 @@ cmd_deploy_observability() {
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
-# v0.8 workload-safe recovery phases (G3 rows test-impact, test-checkpoint,
+# Workload-safe recovery phases (G3 rows test-impact, test-checkpoint,
 # test-timeslice of the release plan).
 #
 # One fixture serves the first two: a Job with ONE Pod that requests the Tesla
@@ -1885,10 +1885,10 @@ _WS_SAFETY_BEFORE=""
 # AcceleratorRuntimeProfile selects it (-nvidia-controller-profile holds the
 # report back otherwise), and the topology classifier reads whole-device from
 # that attestation alone: no profile, no report, ReportMissing, refused. The
-# first v0.8 run on EKS (2026-11-05) stopped exactly there. The fixture
+# first workload-safe run on EKS (2026-11-05) stopped exactly there. The fixture
 # therefore pins a profile to the driver and DCGM client versions the agent
 # on the node actually answers with, selects the node, and waits until the
-# classifier reads whole-device before any v0.8 assertion. The profile is
+# classifier reads whole-device before any workload-safe assertion. The profile is
 # removed with the fixture; nothing else on the stand selects the node.
 readonly WS_PROFILE="${ROOT_NAME}-e2e-runtime"
 readonly WS_PROFILE_LABEL="kubeneuron.io/e2e-runtime-profile"
@@ -2492,7 +2492,7 @@ WSEOF
 	runtime_profile_cleanup
 }
 
-# test-observability — v0.7 M6 read-only profile check.
+# test-observability — read-only profile check.
 #
 # Nothing here mutates the cluster: it reads a ConfigMap, a DaemonSet rollout,
 # the exporter's /metrics through a bounded port-forward, and (only when the
@@ -3322,7 +3322,7 @@ api() {
 	local base="http://127.0.0.1:${_API_LOCAL_PORT}"
 	if [ "$method" = POST ]; then
 		# Every mutable operator route requires an Idempotency-Key
-		# (docs/reference-api.md). A v0.4 controller answers a resolve without
+		# (docs/reference-api.md). The controller answers a resolve without
 		# one with 400, and close_incident used to swallow that: run 10 left
 		# every phase's incident open, and the next phase on the node attached
 		# to it. One fresh key per call; nothing here is ever retried.

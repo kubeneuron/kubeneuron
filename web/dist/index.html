@@ -151,7 +151,7 @@ tr.sel{cursor:pointer;transition:background .12s}
 tr.sel:hover td{background:#5b8cff0d}
 tr.selected td{background:#5b8cff14}
 
-/* ============ v0.4 operations ============ */
+/* ============ operations ============ */
 .opsgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:.75rem}
 .panel{padding:1rem}
 .panel h2{font-size:.92rem;margin-bottom:.2rem}.panel p{font-size:.76rem;color:var(--dim);margin-bottom:.8rem}
@@ -684,7 +684,7 @@ function renderFleet(){
   }).join("") || `<tr><td colspan="7" class="dimmer">no nodes registered</td></tr>`;
 }
 
-/* ---------- v0.4 operations console ---------- */
+/* ---------- operations console ---------- */
 function recoveryActionLabel(action){
   const hostAction = typeof action === "string" && (action.startsWith("agent.") ||
     action === "platform.quiesce_accelerator_stack" || action === "platform.restore_accelerator_stack");
@@ -1108,7 +1108,7 @@ async function renderDrawer(){
     notice.innerHTML = `<b>${esc(impactNotice.verb || "decision")} not recorded.</b> The approval request or its impact preview changed since it was displayed. The preview below was reloaded from the controller — review it and click Approve or Reject again. Nothing was resubmitted.<span class="mono">${esc(impactNotice.text || "")}</span>`;
   } else { notice.style.display = "none"; notice.innerHTML = ""; }
 
-  // Impact preview of the current approval round (v0.8 development). Cached
+  // Impact preview of the current approval round. Cached
   // per round so the 5s tick does not refetch it; a 404/503 is "none".
   if(inc.state === "AWAITING_APPROVAL" && inc.approval_epoch > 0){
     const key = inc.id + "#" + inc.approval_epoch;

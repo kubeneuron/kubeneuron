@@ -306,7 +306,7 @@ check_root "checkpoint coordination maxWait above the 30m ceiling" \
 	'.metadata.name="cel-checkpoint-max-over-ceiling" | .spec.safety.checkpointCoordination={enabled: true, namespaces: ["ml-training"], defaultWait: "5m", maxWait: "45m"}'
 check_root "checkpoint coordination enabled with an allowlist and ordered waits" "" \
 	'.metadata.name="cel-checkpoint-enabled" | .spec.safety.checkpointCoordination={enabled: true, namespaces: ["ml-training", "ml-research"], defaultWait: "5m", maxWait: "15m"}'
-# v0.8 development blocks: each is optional and off; an advisory or a group
+# Workload-safe blocks: each is optional and off; an advisory or a group
 # block needs coordination enabled, the budgets and sizes are bounded, and
 # requireForApproval needs the preview enabled — all refused by the CRD before
 # any controller sees them.

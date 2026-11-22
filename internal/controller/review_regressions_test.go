@@ -19,7 +19,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
-// Regressions from the v0.8.0 pre-tag review (2026-11-05): each test below
+// Regressions from the 2026-11-05 pre-tag review: each test below
 // reproduced a defect before its fix and pins the corrected behaviour.
 
 // An installation switched to DryRun after an incident opened Enabled must

@@ -1714,7 +1714,7 @@ spec:
                       checkpoint, and the warnings a human should read before approving. It
                       is advisory and cannot block an approve; with requireForApproval it
                       binds the approve to the exact preview the human saw. Omitted means
-                      off. (v0.8 development)
+                      off.
                     properties:
                       budget:
                         default: 15s

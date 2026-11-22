@@ -38,7 +38,7 @@ type OperatorBackend interface {
 	Paused() bool
 }
 
-// ImpactPreviewBackend is the optional v0.8-development extension behind the
+// ImpactPreviewBackend is the optional extension behind the
 // impact preview routes. Absent, the routes answer 503.
 type ImpactPreviewBackend interface {
 	// ImpactPreview returns the newest preview of one round (0 = the
@@ -49,14 +49,14 @@ type ImpactPreviewBackend interface {
 	RecomputeImpactPreview(ctx context.Context, id, actor, idempotencyKey string) (*types.ImpactPreview, bool, error)
 }
 
-// RoundDecisionBackend is the optional v0.8-development extension that lets
+// RoundDecisionBackend is the optional extension that lets
 // the incident detail show the decision recorded on the current round and
 // the impact digest that decision row persisted.
 type RoundDecisionBackend interface {
 	RoundDecision(ctx context.Context, id string, round int) (*types.Approval, error)
 }
 
-// IncidentAcknowledgementBackend is an optional v0.4.0 extension. Keeping it
+// IncidentAcknowledgementBackend is an optional extension. Keeping it
 // separate preserves fail-closed compatibility for an older controller: the
 // new endpoint returns 503 instead of accepting an acknowledgement it cannot
 // persist with idempotency and optimistic concurrency.
@@ -64,7 +64,7 @@ type IncidentAcknowledgementBackend interface {
 	AcknowledgeIncident(ctx context.Context, id, actor, reason string, expectedVersion int, idempotencyKey string) (*types.Incident, bool, error)
 }
 
-// IncidentResolutionBackend is the idempotent v0.4.0 resolution extension.
+// IncidentResolutionBackend is the idempotent resolution extension.
 // The legacy OperatorBackend method remains for compatibility with an older
 // out-of-tree controller; current controllers expose this form and the public
 // route then requires an idempotency key and displayed resource version.
@@ -96,7 +96,7 @@ type RecoveryReportBackend interface {
 	RecoveryReport(ctx context.Context, window time.Duration) (*types.RecoveryReport, error)
 }
 
-// OperationsProvider exposes the v0.4.0 durable product service.  It remains
+// OperationsProvider exposes the durable product service.  It remains
 // optional so an older/out-of-tree controller fails closed with 503 instead of
 // presenting an in-memory-looking candidate, diagnostic, or simulation API.
 type OperationsProvider interface {
@@ -544,7 +544,7 @@ func (s *Server) handleListIncidents(w http.ResponseWriter, r *http.Request) {
 
 // IncidentDetail is the incident plus its full audit trail. ImpactPreviewDigest
 // is the digest of the current round's newest impact preview when one
-// exists (v0.8 development); absent otherwise. ImpactPreviewUnavailable is
+// exists; absent otherwise. ImpactPreviewUnavailable is
 // set when that preview could not be computed. Decision is the human
 // decision recorded on the current round, when there is one, and
 // DecisionImpactDigest the digest THAT row persisted ("" when the decision
@@ -803,8 +803,8 @@ type DecisionRequest struct {
 	// click can never be recorded against content the human never saw. Zero
 	// (older clients) keeps the bind-to-current behavior.
 	ParkEpoch int `json:"park_epoch,omitempty"`
-	// ImpactDigest is the digest of the impact preview the client DISPLAYED
-	// (v0.8 development). When set, an approve is refused if the round's
+	// ImpactDigest is the digest of the impact preview the client DISPLAYED.
+	// When set, an approve is refused if the round's
 	// current preview differs; when the policy requires it, an approve
 	// without it is refused. Empty keeps the bind-to-round behavior.
 	ImpactDigest string `json:"impact_digest,omitempty"`

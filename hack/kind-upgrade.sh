@@ -130,7 +130,7 @@ pull_baseline() {
 		# --all-platforms`, which fails on an index whose other platforms'
 		# blobs the local daemon never fetched — under the containerd image
 		# store the index survives the pull, so this is not hypothetical: it
-		# is what the v0.2.2-rc rehearsals hit.
+		# is what earlier rehearsals hit.
 		if ! "$DOCKER_BIN" pull --quiet --platform "$LOAD_PLATFORM" "$ref" >/dev/null 2>&1; then
 			gh auth token | "$DOCKER_BIN" login ghcr.io \
 				--username "$(gh api user -q .login)" --password-stdin >/dev/null 2>&1 || true
@@ -150,7 +150,7 @@ pull_baseline() {
 # image is a multi-arch index. Under the containerd image store that index
 # survives locally even after a single-platform pull, so the import demands
 # blobs for a platform that was never fetched and fails — which is exactly
-# what killed the v0.2.2-rc rehearsals. `docker save --platform` exports one
+# what killed earlier rehearsals. `docker save --platform` exports one
 # platform's bytes with no dangling references, and `kind load image-archive`
 # takes it as-is.
 load_baseline_images() {

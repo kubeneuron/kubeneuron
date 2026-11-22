@@ -1238,15 +1238,15 @@ type Approval struct {
 	// carried across a re-park.
 	ParkEpoch int `json:"park_epoch,omitempty"`
 	// ImpactDigest, on a decision row, is the digest of the impact preview
-	// the human was shown when they decided (v0.8 development). Empty when
+	// the human was shown when they decided. Empty when
 	// the client carried none. The controller refuses a decision whose digest
 	// does not match the round's current preview when the policy requires
 	// it; otherwise the digest is recorded as what was seen.
 	ImpactDigest string `json:"impact_digest,omitempty"`
 }
 
-// ImpactPreview is one durable impact-preview/v1 record of an approval round
-// (v0.8 development): what a human was shown about the node, its workloads
+// ImpactPreview is one durable impact-preview/v1 record of an approval round:
+// what a human was shown about the node, its workloads
 // and the disruption downstream when the incident parked. A round may hold
 // several (a recompute appends; the newest by ComputedAt is the current one)
 // and the Digest identifies exactly which was seen. Payload is the canonical

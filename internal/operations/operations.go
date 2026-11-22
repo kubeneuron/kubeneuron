@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Package operations implements the durable product workflows introduced by
-// v0.4.0: explainable readiness, candidate policy impact previews, bounded
+// Package operations implements the durable product workflows:
+// explainable readiness, candidate policy impact previews, bounded
 // diagnostics, and no-side-effect remediation simulations.
 //
 // The package does not know how to read Kubernetes or execute an action.  Its
@@ -230,7 +230,7 @@ type ReadinessFilter struct {
 }
 
 // OperationalListOptions is the common list/query contract for durable
-// v0.4.0 resources. The (created_at,id) cursor is deliberately represented as
+// resources. The (created_at,id) cursor is deliberately represented as
 // a pair internally; HTTP turns it into an opaque value, so callers cannot
 // accidentally depend on a database timestamp format.
 type OperationalListOptions struct {
@@ -532,7 +532,7 @@ func (m *Manager) FleetRuntimeContractCoveragePage(ctx context.Context, filter R
 }
 
 // operationalNodeScopeMatches is the common tenant/cluster boundary for
-// durable v0.4.0 resources. Scope comes from controller-owned node labels,
+// durable resources. Scope comes from controller-owned node labels,
 // never from a client-supplied resource alone: otherwise a request could label
 // itself as tenant A while evaluating a tenant B node.
 func operationalNodeScopeMatches(node *types.Node, tenant, cluster string) bool {
@@ -2218,7 +2218,7 @@ type RemediationSimulation struct {
 	DeviceID        string `json:"device_id,omitempty"`
 	// Action and Scope bind a later autonomy envelope to the exact simulated
 	// hardware effect.  Older snapshots without these fields intentionally
-	// cannot qualify a v0.4 autonomy plan; treating an observe-only simulation
+	// cannot qualify an autonomy plan; treating an observe-only simulation
 	// as authority for a reset would violate the frozen-plan contract.
 	Action             types.AcceleratorAction      `json:"action,omitempty"`
 	Scope              types.AcceleratorTargetScope `json:"scope,omitempty"`

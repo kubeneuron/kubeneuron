@@ -21,7 +21,7 @@ import (
 )
 
 // BuildDecisionSnapshot captures the controller-owned facts for a single
-// decision.  It is deliberately the only live adapter used by the v0.4.0
+// decision.  It is deliberately the only live adapter used by the
 // operations service: preview and simulation receive the resulting immutable
 // value, never a pointer back into controller state.
 func (c *Controller) BuildDecisionSnapshot(ctx context.Context, nodeName string, request decision.Request) (decision.Snapshot, error) {
@@ -197,10 +197,10 @@ func evidenceReferenceDigest(parts ...string) string {
 }
 
 // LiveAdmissionDecision is the compatibility seam between the established
-// remediation state machine and v0.4.0's shared evaluator. Every live
+// remediation state machine and the shared evaluator. Every live
 // accelerator admission captures the same immutable input shape used by
 // preview/simulation/autonomy. The existing fine-grained step gates remain
-// authoritative during the v0.4 compatibility window; their outcome is
+// authoritative during the compatibility window; their outcome is
 // compared and logged rather than silently changing a running fleet's
 // historical admission behavior.
 func (c *Controller) LiveAdmissionDecision(ctx context.Context, nodeName string, request decision.Request) (decision.Result, error) {
@@ -238,7 +238,7 @@ func cloneNode(node *types.Node) types.Node {
 	return out
 }
 
-// Operations returns the durable v0.4.0 service when the configured store
+// Operations returns the durable service when the configured store
 // supports it.  The HTTP adapter uses this narrow accessor to fail closed on
 // unsupported deployments.
 func (c *Controller) Operations() *operations.Manager { return c.operations }

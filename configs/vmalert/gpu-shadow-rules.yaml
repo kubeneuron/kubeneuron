@@ -1,4 +1,4 @@
-# Shadow-only GPU alerts: v0.7 M5.
+# Shadow-only GPU alerts.
 #
 # Every rule here is observation for humans. None of them reaches the
 # controller, opens an incident or triggers remediation, and this is enforced
@@ -25,7 +25,7 @@
 # there is no `or vector(0)`, `default` or `absent()`, so a GPU whose
 # exporter does not report an input simply has no shadow alert for it. That
 # is why there is no XID event rate, no recovery-action (1523), no GPU
-# presence or GPU missing and no telemetry-gap rule in v0.7: the project has
+# presence or GPU missing and no telemetry-gap rule: the project has
 # no recorded source for those, and a shadow rule must not invent one.
 #
 # Plain PromQL: hack/check-rules.sh checks it with promtool and with

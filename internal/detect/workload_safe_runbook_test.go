@@ -9,8 +9,8 @@ import (
 	"testing"
 )
 
-// M7 documentation invariant for the v0.8 workload-safe recovery alerts:
-// every self-health rule that reads a v0.8 counter (impact previews,
+// M7 documentation invariant for the workload-safe recovery alerts:
+// every self-health rule that reads a workload-safe counter (impact previews,
 // checkpoint advisories) has exactly one runbook entry in the section
 // reserved for them, every entry there documents such a rule, each opens by
 // saying it does not trigger remediation, the section says what KubeNeuron
@@ -26,7 +26,7 @@ const (
 	workloadSafeNoClaim = "it does not\nmeasure saved or lost training progress"
 )
 
-// workloadSafeMetricRE matches the v0.8 counters a rule may read.
+// workloadSafeMetricRE matches the workload-safe counters a rule may read.
 var workloadSafeMetricRE = regexp.MustCompile(`kubeneuron_(impact_preview|checkpoint_advisor)[a-z_]*`)
 
 // foreignWriteRE matches a kubectl write into a Kueue or Ray object.
@@ -104,7 +104,7 @@ func workloadSafeEntries(t *testing.T) (preamble string, entries map[string]stri
 func TestWorkloadSafeAlertsShipAndHaveRunbookEntries(t *testing.T) {
 	rules := workloadSafeRules(t)
 	if len(rules) < 2 {
-		t.Fatalf("%s: expected at least the two v0.8 self-health rules reading impact preview and advisory counters, found %d", selfRulesPath, len(rules))
+		t.Fatalf("%s: expected at least the two workload-safe self-health rules reading impact preview and advisory counters, found %d", selfRulesPath, len(rules))
 	}
 	_, entries := workloadSafeEntries(t)
 	shipped := map[string]bool{}
@@ -116,7 +116,7 @@ func TestWorkloadSafeAlertsShipAndHaveRunbookEntries(t *testing.T) {
 	}
 	for name := range entries {
 		if !shipped[name] {
-			t.Errorf("%s: entry %q is in the workload-safe section but no %s rule reading a v0.8 counter carries that name", runbooksPath, name, selfRulesPath)
+			t.Errorf("%s: entry %q is in the workload-safe section but no %s rule reading a workload-safe counter carries that name", runbooksPath, name, selfRulesPath)
 		}
 	}
 }

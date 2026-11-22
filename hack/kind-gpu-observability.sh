@@ -4,7 +4,7 @@
 # shellcheck disable=SC2016 # Single-quoted jq programs expand jq, not shell, variables.
 set -Eeuo pipefail
 
-# Disposable kind fixture for the v0.7 GPU observability rows of the G2 gate.
+# Disposable kind fixture for the GPU observability rows of the G2 gate.
 #
 # CPU-only and synthetic, by construction: the "exporter" is hack/dcgmfixture,
 # a Go program that serves DCGM_FI_* text exposition with made-up values and

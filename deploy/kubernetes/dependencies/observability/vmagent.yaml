@@ -26,7 +26,7 @@ spec:
   # or, after install, with the kubectl patch shown in ../README.md. Without
   # it the label is absent, and no shipped rule or dashboard requires it.
   inlineScrapeConfig: |
-    # Scrape label contract for dcgm-exporter series (v0.7 M2). Every label
+    # Scrape label contract for dcgm-exporter series. Every label
     # below is observability only: it renames or copies what the exporter and
     # the Kubernetes API already provide, and no shipped rule may require an
     # optional label (node_pool, mig_profile, cluster) until the recording-rule

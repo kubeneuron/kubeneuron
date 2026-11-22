@@ -267,7 +267,7 @@ func (q *Queries) AppendOperationalAudit(ctx context.Context, event *types.Opera
 	// filter without decoding arbitrary resource payloads. Resolve missing
 	// scope from the durable envelope while both the head advance and INSERT
 	// are still in this transaction. Incident-operation events predate the
-	// v0.4 envelope and deliberately remain unscoped unless their caller
+	// envelope and deliberately remain unscoped unless their caller
 	// supplies an explicit scope.
 	if event.Tenant == "" || event.Cluster == "" {
 		var tenant, cluster string
@@ -531,7 +531,7 @@ func operationalAuditHash(event types.OperationalAuditEvent) string {
 	// restarts. The ID is purposely excluded because it is database-assigned.
 	//
 	// Tenant/Cluster intentionally are not part of this pre-existing chain
-	// payload. v0.4.0 scope columns were added after audit rows already existed;
+	// payload. The scope columns were added after audit rows already existed;
 	// hashing them would invalidate every retained historic hash (and therefore
 	// every later PrevHash) during an additive migration. Their immutable
 	// database values are still used for access filtering, while this canonical

@@ -48,7 +48,7 @@ var (
 	// obtain a fresh preflight observation rather than treating stale runtime
 	// capability data as current.
 	ErrStaleAcceleratorReport = errors.New("store: stale accelerator report")
-	// ErrOperationalConflict is returned when a v0.4.0 durable resource was
+	// ErrOperationalConflict is returned when a durable resource was
 	// updated from an obsolete resource version, or when an idempotency key is
 	// reused for a different request.  Callers must re-read rather than
 	// overwriting the current decision/audit state.
@@ -370,8 +370,8 @@ type AcceleratorReportStore interface {
 	ListAcceleratorReports(ctx context.Context, node string) ([]*types.AgentAcceleratorReport, error)
 }
 
-// ImpactPreviewStore persists the impact previews of approval rounds (v0.8
-// development). It is an optional extension for the same reason as the
+// ImpactPreviewStore persists the impact previews of approval rounds.
+// It is an optional extension for the same reason as the
 // others: a store without it means "no preview was retained", which the API
 // reports as unavailable rather than inventing one.
 type ImpactPreviewStore interface {
@@ -386,7 +386,7 @@ type ImpactPreviewStore interface {
 	ListImpactPreviews(ctx context.Context, incidentID string, epoch int) ([]*types.ImpactPreview, error)
 }
 
-// OperationalStore persists the durable product records introduced in v0.4.0.
+// OperationalStore persists the durable product records introduced with the operations service.
 // It is intentionally an optional extension: existing controller-only Store
 // implementations remain safe and the API can fail closed when its durable
 // backing is unavailable rather than silently becoming in-memory.
@@ -424,7 +424,7 @@ type OperationalTx interface {
 // OperationalTransactionalStore is an OperationalStore that can also run a
 // group of operational writes as one transaction. It is a separate optional
 // capability so that an out-of-tree OperationalStore keeps working for the
-// v0.4 workflows that write their key, resource, and audit as separate
+// workflows that write their key, resource, and audit as separate
 // statements, while a workflow whose correctness depends on atomicity (the
 // runtime contract qualification) can require it and fail closed otherwise.
 //

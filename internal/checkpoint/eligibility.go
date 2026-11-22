@@ -14,7 +14,7 @@ import (
 // all decide "is this workload one we coordinate with" through Evaluate, so
 // the four surfaces cannot disagree about who is eligible. The codes extend
 // Ineligibility: the four Phase 1 codes keep their spelling (they label audit
-// rows since v0.6.0), and the ones below are new.
+// rows from the first release), and the ones below are new.
 
 const (
 	// IneligibleDrainExcluded: the disruption would not touch the workload

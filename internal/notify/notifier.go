@@ -41,8 +41,8 @@ type Notifier interface {
 	RequestApproval(ctx context.Context, inc *types.Incident, stepName string) error
 }
 
-// ApprovalContext is what a notifier may carry beside an approval request
-// (v0.8 development): the short impact summary and the digest of the preview
+// ApprovalContext is what a notifier may carry beside an approval request:
+// the short impact summary and the digest of the preview
 // it came from, so the human's command can bind to what they were shown.
 // Zero values mean "no preview".
 type ApprovalContext struct {

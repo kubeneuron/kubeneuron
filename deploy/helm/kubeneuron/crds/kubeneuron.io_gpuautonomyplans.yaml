@@ -58,7 +58,7 @@ spec:
             properties:
               allowedActions:
                 description: |-
-                  v0.4.0 intentionally permits exactly one action class per plan. A
+                  A plan intentionally permits exactly one action class. A
                   second action needs a separate approval and canary envelope.
                 items:
                   description: |-

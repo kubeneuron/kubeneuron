@@ -55,7 +55,7 @@ func (c *client) do(method, path string, in, out any) error {
 	return c.doHeaders(method, path, in, out, nil)
 }
 
-// doHeaders is the operation-aware variant of do. v0.4.0 mutations carry an
+// doHeaders is the operation-aware variant of do. Operational mutations carry an
 // Idempotency-Key so a terminal retry never creates a second diagnostic,
 // simulation, approval or autonomous rollout transition.
 func (c *client) doHeaders(method, path string, in, out any, headers map[string]string) error {

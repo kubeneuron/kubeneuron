@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// OperationalResourceKind names a durable v0.4.0 product resource.  These
+// OperationalResourceKind names a durable product resource.  These
 // values are intentionally stable because they are used as storage partitions,
 // audit filters, and API link targets.
 type OperationalResourceKind string
@@ -18,7 +18,7 @@ const (
 	ResourcePolicyImpactPreview    OperationalResourceKind = "policy-impact-preview"
 	ResourceHealthCheckRun         OperationalResourceKind = "health-check-run"
 	ResourceRemediationSimulation  OperationalResourceKind = "remediation-simulation"
-	// ResourceIncidentOperation is an idempotency/audit partition for v0.4.0
+	// ResourceIncidentOperation is an idempotency/audit partition for
 	// first-class incident operations. Incidents themselves remain in the
 	// established workflow table; this avoids duplicating their state machine
 	// merely to give acknowledge/resolve-style requests durable correlation.
@@ -38,7 +38,7 @@ const (
 	ResourceRuntimeContractQualification OperationalResourceKind = "runtime-contract-qualification"
 )
 
-// OperationalResource is the durable envelope around a versioned v0.4.0
+// OperationalResource is the durable envelope around a versioned
 // resource.  Payload is normalized JSON owned by the feature package; the
 // envelope owns concurrency, scope, lifecycle, retention, and audit linkage.
 // It deliberately does not store raw diagnostic blobs outside the payload so

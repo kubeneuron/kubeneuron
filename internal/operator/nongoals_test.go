@@ -14,11 +14,11 @@ import (
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
 )
 
-// v0.8 non-goals, pinned on every role this repository ships or generates:
+// Non-goals, pinned on every role this repository ships or generates:
 // no network or process path from the controller into a workload. That
 // means no pods/exec, pods/attach, pods/portforward or
-// pods/ephemeralcontainers in any rule, under any combination of the v0.8
-// opt-ins, and no wildcard that would quietly include them.
+// pods/ephemeralcontainers in any rule, under any combination of the
+// workload-safe opt-ins, and no wildcard that would quietly include them.
 var forbiddenPodSubresources = []string{"pods/exec", "pods/attach", "pods/portforward", "pods/ephemeralcontainers", "pods/proxy"}
 
 func assertNoWorkloadPath(t *testing.T, where string, rules []rbacv1.PolicyRule) {
@@ -42,7 +42,7 @@ func assertNoWorkloadPath(t *testing.T, where string, rules []rbacv1.PolicyRule)
 	}
 }
 
-// everyOptIn is a KubeNeuron with every v0.8 block switched on at once, the
+// everyOptIn is a KubeNeuron with every workload-safe block switched on at once, the
 // widest ClusterRole the operator can generate.
 func everyOptIn() *kubeneuronv1alpha1.KubeNeuron {
 	kn := testKubeNeuron()
@@ -99,7 +99,7 @@ func TestNoRoleOpensAPathIntoAWorkload(t *testing.T) {
 
 // The widest generated role writes exactly one resource: pods (annotations,
 // through the guarded patch), and only while checkpoint coordination is on.
-// Everything v0.8 adds is read-only, so every other rule carries read verbs
+// Everything the workload-safe blocks add is read-only, so every other rule carries read verbs
 // alone.
 func TestWidestControllerRoleWritesOnlyPods(t *testing.T) {
 	readOnly := map[string]bool{"get": true, "list": true, "watch": true}
@@ -112,14 +112,14 @@ func TestWidestControllerRoleWritesOnlyPods(t *testing.T) {
 			if podsOnly && verb == "patch" {
 				continue
 			}
-			// Pre-v0.8 write verbs (node cordon/drain, evictions, events,
+			// Other write verbs (node cordon/drain, evictions, events,
 			// leases, the operator-managed objects) are allowed on their own
 			// resources; what this test forbids is a write verb on any of the
-			// v0.8 groups.
+			// workload-safe groups.
 			for _, group := range rule.APIGroups {
 				switch group {
 				case "resource.k8s.io", "batch", "kueue.x-k8s.io", "ray.io":
-					t.Errorf("v0.8 group %s carries write verb %q: %#v", group, verb, rule)
+					t.Errorf("workload-safe group %s carries write verb %q: %#v", group, verb, rule)
 				}
 			}
 		}

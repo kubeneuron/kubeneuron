@@ -29,7 +29,7 @@ const (
 	// negativeAuthMaxEntries bounds the negative cache under credential churn.
 	negativeAuthMaxEntries = 4096
 	// operationalMutationWindow is a deliberately modest in-process abuse
-	// guard for v0.4 workflows. Deployments may add a stronger gateway quota,
+	// guard for workflows. Deployments may add a stronger gateway quota,
 	// but candidate parsing and fleet previews must still be bounded when the
 	// controller is addressed directly through a port-forward.
 	operationalMutationWindow     = time.Minute
@@ -180,7 +180,7 @@ func remoteSource(r *http.Request) string {
 	return host
 }
 
-// operationRateLimiter bounds expensive, authenticated v0.4 write paths per
+// operationRateLimiter bounds expensive, authenticated write paths per
 // source and operation. It is intentionally separate from failureLimiter:
 // valid operators should not be counted as authentication failures, while a
 // candidate compiler or fleet simulation still needs back-pressure.

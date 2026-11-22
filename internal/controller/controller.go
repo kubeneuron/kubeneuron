@@ -157,7 +157,7 @@ type Controller struct {
 	checkpointNow  func() time.Time
 	checkpointPoll time.Duration
 
-	// operations owns the v0.4.0 durable product workflows.  It is nil only
+	// operations owns the durable product workflows.  It is nil only
 	// for legacy/out-of-tree stores that do not implement OperationalStore;
 	// their API surface fails closed instead of keeping workflow state in
 	// process memory.

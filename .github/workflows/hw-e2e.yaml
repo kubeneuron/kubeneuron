@@ -180,7 +180,7 @@ jobs:
       - name: Threshold path (XID 92 sub-threshold hold, 3-signal escalation)
         run: hack/hw-e2e.sh test-threshold
 
-      # v0.8 workload-safe recovery, on the one GPU node, before it is
+      # Workload-safe recovery, on the one GPU node, before it is
       # terminated. test-impact and test-checkpoint place an opted-in toy
       # trainer that holds the Tesla T4 and drive park -> preview -> advisory
       # (-> digest-bound approve -> request -> exit -> real drain); the

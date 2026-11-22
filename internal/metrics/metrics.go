@@ -381,7 +381,7 @@ var (
 		Help: "Shared decisions held for stale, absent, or unhealthy evidence by adapter and reason.",
 	}, []string{"adapter", "reason"})
 
-	// DecisionCompatibilityHolds counts live reset admissions where the v0.4
+	// DecisionCompatibilityHolds counts live reset admissions where the shared
 	// evaluator would hold while the established compatibility gate continues
 	// its narrower pinned-evidence path. It is a detector, not evidence that a
 	// device action occurred; operators use it to retire compatibility cases.

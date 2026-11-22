@@ -19,7 +19,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
-// M5 safety boundary (v0.7): shadow-only GPU alerts exist for humans and can
+// M5 safety boundary: shadow-only GPU alerts exist for humans and can
 // never reach the controller. The boundary has three independent levels, and
 // each test here pins one of them against the shipped files, parsed as YAML
 // rather than matched as text:
@@ -228,7 +228,7 @@ func TestSignalFromAlertReturnsFalseForEveryShadowAlert(t *testing.T) {
 	}
 }
 
-// Golden list: alertClassMap exactly as it stood before M5 (v0.6.1). M5 adds
+// Golden list: alertClassMap exactly as it stood before M5. M5 adds
 // shadow rules, routing and tests, and nothing else; any entry added here,
 // removed or re-classed is a change to what the controller acts on and is
 // out of M5's scope by definition. The one deliberate change since:

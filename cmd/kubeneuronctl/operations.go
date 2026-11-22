@@ -545,7 +545,7 @@ func autonomyMutationCommand(use, short, operation string, needsRole bool) *cobr
 }
 
 func cmdAuditEvents() *cobra.Command {
-	command := &cobra.Command{Use: "audit-events", Short: "Query immutable v0.4.0 operational audit events", RunE: func(cmd *cobra.Command, _ []string) error {
+	command := &cobra.Command{Use: "audit-events", Short: "Query immutable operational audit events", RunE: func(cmd *cobra.Command, _ []string) error {
 		client, err := newClient(cmd)
 		if err != nil {
 			return err

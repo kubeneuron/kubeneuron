@@ -167,7 +167,7 @@ func TestBoundedWaitIsPerWorkload(t *testing.T) {
 	p := enabledPolicy()
 	short := optedIn("training", map[string]string{AnnotationMaxWait: "30s"})
 	silent := optedIn("training", nil)
-	// v0.8 keys on the same Pod: an advisory (controller-written, no
+	// Workload-safe keys on the same Pod: an advisory (controller-written, no
 	// deadline), a group (workload-written) and, as tampering, a far-future
 	// request deadline. None of them is an input to the grant.
 	decorated := optedIn("training", map[string]string{

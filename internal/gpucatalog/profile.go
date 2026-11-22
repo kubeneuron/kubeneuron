@@ -14,7 +14,7 @@ import (
 )
 
 // The shipped dcgm-exporter profile (ShippedProfilePath, the GPU Operator
-// values file) is the reliability profile of v0.7: it lists exactly the
+// values file) is the reliability profile: it lists exactly the
 // catalog fields ProfileEligible admits, under the series name the pinned
 // exporter uses for each field id. The profile is written by hand, not
 // generated, so this file gives the tests one parser and one eligibility
