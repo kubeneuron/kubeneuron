@@ -1434,8 +1434,8 @@ separately.
    impossible on a virtualized g4dn, so ReplaceNode is the destructive
    primitive exercised here.
 
-    The separate `node-replaced` audit action belongs to the vanished-node
-    janitor — the other closure path, taken only when the node disappears
+    The separate `node-replaced` audit action (`node-unknown` for a node
+    KubeNeuron had no record of) belongs to the vanished-node janitor — the other closure path, taken only when the node disappears
     before the ladder finishes — so this phase deliberately does not assert it.
 
 !!! note "CSI volumes need `fsGroup`"

@@ -138,24 +138,46 @@ func TestIncidentShowPolicyHoldAndRecovery(t *testing.T) {
 	}
 }
 
-// Without a notification channel the round an approve binds to is read here.
+// Without a notification channel the round an approve binds to is read here;
+// incidents impact is named only when the round has a preview to read.
 func TestIncidentShowApprovalRound(t *testing.T) {
+	const (
+		withPreview    = "approval:  round 3 (use --round 3 with approve, reject and incidents impact)\n"
+		unavailable    = "approval:  round 3 (use --round 3 with approve and reject; no impact preview for this round: WorkloadListingTimeout)\n"
+		off            = "approval:  round 3 (use --round 3 with approve and reject; impact preview is off — set spec.safety.impactPreview.enabled to see what this step affects)\n"
+	)
 	for _, tc := range []struct {
-		state types.IncidentState
-		want  bool
-	}{{types.StateAwaitingApproval, true}, {types.StateExecuting, false}} {
-		t.Run(string(tc.state), func(t *testing.T) {
+		name    string
+		state   types.IncidentState
+		preview map[string]any
+		want    string
+	}{
+		{"preview", types.StateAwaitingApproval, map[string]any{"impact_preview_digest": "sha256:abc"}, withPreview},
+		{"unavailable preview", types.StateAwaitingApproval, map[string]any{"impact_preview_unavailable": "WorkloadListingTimeout"}, unavailable},
+		{"previews off", types.StateAwaitingApproval, nil, off},
+		{"not parked", types.StateExecuting, map[string]any{"impact_preview_digest": "sha256:abc"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				_ = json.NewEncoder(w).Encode(map[string]any{"incident": types.Incident{ID: "parked", State: tc.state, ApprovalEpoch: 3}})
+				body := map[string]any{"incident": types.Incident{ID: "parked", State: tc.state, ApprovalEpoch: 3}}
+				for k, v := range tc.preview {
+					body[k] = v
+				}
+				_ = json.NewEncoder(w).Encode(body)
 			}))
 			defer server.Close()
 			out, err := runCommand(t, server.URL, "incidents", "show", "parked")
 			if err != nil {
 				t.Fatal(err)
 			}
-			line := "approval:  round 3 (use --round 3 with approve, reject and incidents impact)\n"
-			if strings.Contains(out, line) != tc.want {
-				t.Fatalf("incidents show in %s:\n%s", tc.state, out)
+			got := ""
+			for _, line := range strings.SplitAfter(out, "\n") {
+				if strings.HasPrefix(line, "approval:") {
+					got = line
+				}
+			}
+			if got != tc.want {
+				t.Fatalf("approval line %q, want %q:\n%s", got, tc.want, out)
 			}
 		})
 	}

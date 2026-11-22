@@ -241,9 +241,9 @@ func TestIncidentOnAVanishedNodeIsClosed(t *testing.T) {
 // Only a node KubeNeuron had a record of is said to have been replaced; a name
 // nothing ever reported (the quickstart's made-up node) closes as unknown.
 func TestVanishedNodeCloseReasonSaysWhetherItWasKnown(t *testing.T) {
-	for _, tc := range []struct{ uid, want string }{
-		{"uid-1", "node node-deleted no longer exists; the incident cannot be remediated and is closed as replaced"},
-		{"", "node node-deleted is not in the cluster, and KubeNeuron had no record of it when the incident opened; the incident cannot be remediated and is closed"},
+	for _, tc := range []struct{ uid, action, want string }{
+		{"uid-1", "node-replaced", "node node-deleted no longer exists; the incident cannot be remediated and is closed as replaced"},
+		{"", "node-unknown", "node node-deleted is not in the cluster, and KubeNeuron had no record of it when the incident opened; the incident cannot be remediated and is closed"},
 	} {
 		t.Run("uid="+tc.uid, func(t *testing.T) {
 			c, st := stackTestController(t, &janitorPlatform{})
@@ -262,8 +262,8 @@ func TestVanishedNodeCloseReasonSaysWhetherItWasKnown(t *testing.T) {
 				t.Fatal(err)
 			}
 			last := trail[len(trail)-1]
-			if last.Action != "node-replaced" || last.Result != tc.want {
-				t.Fatalf("close = %s %q, want %q", last.Action, last.Result, tc.want)
+			if last.Action != tc.action || last.Result != tc.want {
+				t.Fatalf("close = %s %q, want %s %q", last.Action, last.Result, tc.action, tc.want)
 			}
 		})
 	}

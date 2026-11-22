@@ -21,6 +21,13 @@ API is `v1alpha1`.
 - The `kubeneuronctl health` table has a `CLASS` column, the incident class
   a fault on the row opens. Rows of one rule that differ only by class no
   longer look like duplicates.
+- `kubeneuronctl incidents show` names `incidents impact` in its `approval:`
+  line only when the round has an impact preview; otherwise it says why there
+  is none (previews are off, or the reason this round's preview could not be
+  computed) instead of pointing at a command that answers 404.
+- An incident closed because its node is not in the cluster, and KubeNeuron
+  had no record of the node when the incident opened, is audited as
+  `node-unknown` instead of `node-replaced`.
 
 ## [v1.0.0-rc.1] - 2026-11-21
 

@@ -284,6 +284,8 @@ func cmdIncidents() *cobra.Command {
 			Evidence                  *types.IncidentEvidence      `json:"evidence"`
 			NodeConditions            *types.NodeConditionSnapshot `json:"node_conditions"`
 			NodeConditionsUnavailable string                       `json:"node_conditions_unavailable"`
+			ImpactPreviewDigest       string                       `json:"impact_preview_digest"`
+			ImpactPreviewUnavailable  string                       `json:"impact_preview_unavailable"`
 			AffectedJobs              []types.AffectedJob          `json:"affected_jobs"`
 			ObserveOnly               string                       `json:"observe_only"`
 		}
@@ -298,8 +300,20 @@ func cmdIncidents() *cobra.Command {
 			inc.OpenedAt.Format(time.RFC3339))
 		// The round is what approve, reject and incidents impact bind to; without
 		// a notification channel this is the only place an operator can read it.
+		// incidents impact is named only when the round has a preview to read.
+		// The controller records a preview, or why it could not compute one,
+		// for every round when previews are on, so a round with neither means
+		// they are off.
 		if inc.State == types.StateAwaitingApproval && inc.ApprovalEpoch > 0 {
-			_, _ = fmt.Fprintf(out, "approval:  round %d (use --round %d with approve, reject and incidents impact)\n", inc.ApprovalEpoch, inc.ApprovalEpoch)
+			hint := "approve, reject and incidents impact"
+			switch {
+			case detail.ImpactPreviewDigest != "":
+			case detail.ImpactPreviewUnavailable != "":
+				hint = "approve and reject; no impact preview for this round: " + detail.ImpactPreviewUnavailable
+			default:
+				hint = "approve and reject; impact preview is off — set spec.safety.impactPreview.enabled to see what this step affects"
+			}
+			_, _ = fmt.Fprintf(out, "approval:  round %d (use --round %d with %s)\n", inc.ApprovalEpoch, inc.ApprovalEpoch, hint)
 		}
 		// The current reason recovery is held comes first, before the evidence.
 		recovery := detail.RecoveryAvailability
