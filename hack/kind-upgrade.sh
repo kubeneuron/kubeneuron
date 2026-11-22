@@ -61,6 +61,7 @@ work_dir=$(mktemp -d)
 port_forward_pid=
 created_cluster=0
 baseline_tree=
+head_tag=
 cleanup() {
 	local status=$?
 	if [[ -n $port_forward_pid ]]; then
@@ -78,6 +79,9 @@ cleanup() {
 	fi
 	if ((created_cluster)) && [[ ${KEEP_CLUSTER:-0} != 1 ]]; then
 		"$KIND_BIN" delete cluster --name "$CLUSTER_NAME" >/dev/null 2>&1 || true
+	fi
+	if [[ -n ${head_tag:-} ]]; then
+		"$DOCKER_BIN" rmi "kubeneuron-operator:$head_tag" "kubeneuron-controller:$head_tag" "kubeneuron-agent:$head_tag" >/dev/null 2>&1 || true
 	fi
 	rm -rf -- "$work_dir"
 }
