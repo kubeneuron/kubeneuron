@@ -1,0 +1,593 @@
+name: Release
+
+# Tag-driven release: gated on the full CI (build/vet/tests on both store
+# backends + the kind integration suite), on the tagged source carrying the
+# tag's own version in every consumer-facing pin, and on the upgrade/rollback
+# rehearsal; only then multi-arch images to GHCR (cosign-keyless-signed, with
+# SBOMs), a DIGEST-pinned single-file install manifest, kubeneuronctl
+# binaries, and one checksums file — assembled into a DRAFT GitHub release
+# whose notes carry the digest table. The draft is verified the way a user
+# would consume it (release-verify) and only then promoted to a published
+# release (release-publish).
+#
+# A tag on a broken tree must ship nothing: every publishing job `needs` the
+# gates, and nothing public (an image push, a signature, a visible release)
+# happens before the independent source-metadata and upgrade-rehearsal checks
+# have passed. Nothing here uses a stored secret — GHCR auth is GITHUB_TOKEN
+# and cosign signing is keyless via the job's OIDC identity token.
+on:
+  push:
+    tags: ["v*"]
+
+# Default-deny; each job asks for exactly what it publishes with.
+permissions: {}
+
+env:
+  # MUST match what every consumer looks at (config/default, the Helm
+  # chart, deploy/install.sh, docs): ghcr.io/<owner>/kubeneuron/<image>.
+  # Publishing anywhere else would put images where no manifest or chart
+  # ever looks.
+  IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/kubeneuron
+  KUSTOMIZE_VERSION: v5.6.0
+
+jobs:
+  # The gate IS the CI workflow — identical checks, zero drift.
+  gates:
+    if: github.repository == 'kubeneuron/kubeneuron'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yaml
+
+  # The tagged source must already SAY what the tag says. The manifest job
+  # used to sed the version into the chart and the kustomize base at release
+  # time, which meant the tree a user checks out at the tag and the artifacts
+  # the release ships could disagree and nothing would notice. Now a stale pin
+  # fails the run here, before any image is pushed, and the fix is a commit
+  # on the tree rather than a mutation in a runner. Nothing is modified: the
+  # job renders the Helm chart to a scratch file and reads the rest as YAML.
+  source-metadata:
+    if: github.repository == 'kubeneuron/kubeneuron'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Render the Helm chart with its default values
+        shell: bash
+        run: |
+          set -euo pipefail
+          helm template kubeneuron deploy/helm/kubeneuron \
+            --namespace kube-neuron > "$RUNNER_TEMP/helm-out.yaml"
+
+      - name: Tagged source must carry the tag's version in every pin
+        shell: python
+        env:
+          VERSION: ${{ github.ref_name }}
+          HELM_OUT: ${{ runner.temp }}/helm-out.yaml
+        run: |
+          import os, re, sys, yaml
+
+          version = os.environ["VERSION"]
+          repo = os.environ["IMAGE_REPO"]
+          if not re.fullmatch(r"v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?", version):
+              sys.exit(f"tag {version!r} is not a vX.Y.Z[-pre] release tag")
+          failures = []
+
+          def expect(what, got, want):
+              if got != want:
+                  failures.append(f"{what}: have {got!r}, want {want!r}")
+
+          def load(path):
+              with open(path) as f:
+                  return yaml.safe_load(f)
+
+          def container_image(deployment, name):
+              for c in deployment["spec"]["template"]["spec"]["containers"]:
+                  if c["name"] == name:
+                      return c["image"]
+              return None
+
+          operator_image = f"{repo}/operator:{version}"
+          kust = load("config/default/operator_deployment.yaml")
+          expect("config/default operator image", container_image(kust, "operator"), operator_image)
+
+          chart = load("deploy/helm/kubeneuron/Chart.yaml")
+          # YAML parsing, not grep: `appVersion: "v1.0.0"` and `appVersion: v1.0.0`
+          # are the same value, and a quoted `version: "0.6.0"` is still a string.
+          expect("Chart.yaml version", str(chart.get("version")), version.removeprefix("v"))
+          expect("Chart.yaml appVersion", str(chart.get("appVersion")), version)
+
+          values = load("deploy/helm/kubeneuron/values.yaml")
+          expect("values.yaml image.repository", values.get("image", {}).get("repository"), f"{repo}/operator")
+          expect("values.yaml image.tag", str(values.get("image", {}).get("tag")), version)
+
+          with open(os.environ["HELM_OUT"]) as f:
+              helm_docs = [d for d in yaml.safe_load_all(f) if d]
+          helm_deps = [d for d in helm_docs if d.get("kind") == "Deployment"]
+          if len(helm_deps) != 1:
+              failures.append(f"rendered Helm chart has {len(helm_deps)} Deployments, want 1")
+          else:
+              expect("rendered Helm operator image", container_image(helm_deps[0], "operator"), operator_image)
+
+          sample = load("config/samples/kubeneuron_v1alpha1_kubeneuron.yaml")
+          expect("sample controller image", sample["spec"]["controller"]["image"], f"{repo}/controller:{version}")
+          expect("sample agent image", sample["spec"]["agent"]["image"], f"{repo}/agent:{version}")
+
+          heading = re.compile(r"^## \[" + re.escape(version) + r"\](\s|$)")
+          with open("CHANGELOG.md") as f:
+              if not any(heading.match(line) for line in f):
+                  failures.append(f"CHANGELOG.md has no '## [{version}]' heading")
+
+          if failures:
+              print("the tagged source does not describe this tag:", file=sys.stderr)
+              for item in failures:
+                  print(f"  - {item}", file=sys.stderr)
+              sys.exit(1)
+          print(f"source metadata matches {version}: kustomize, chart, values, rendered chart, sample, CHANGELOG")
+
+  images:
+    if: github.repository == 'kubeneuron/kubeneuron'
+    # Nothing public (push, signature, SBOM of a pushed image) until the two
+    # independent checks have passed alongside the gates. upgrade-rehearsal
+    # builds and tags its own HEAD images locally, so it does not depend on
+    # this job and there is no cycle.
+    needs: [gates, source-metadata, upgrade-rehearsal]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # cosign keyless signing
+    outputs:
+      digests: ${{ steps.build.outputs.digests }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        id: syft
+
+      - name: Build, push, sign, and SBOM the images
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          digests="{"
+          # published image name -> Dockerfile stage
+          # --provenance=false is deliberate, and was re-added after an
+          # upgrade rehearsal failed on it: buildx attestations
+          # ride in the image index as unknown/unknown manifests, and
+          # `kind load docker-image` (which runs `ctr import --all-platforms`)
+          # cannot import an index whose attestation blobs the local daemon
+          # never pulled. That breaks the most common way anyone verifies a
+          # released image locally. Supply-chain evidence is not lost: every
+          # image is cosign-signed and every component ships an SBOM as a
+          # release asset.
+          for entry in operator=operator controller=controller agent=agent kubeneuronctl=cli; do
+            name="${entry%%=*}"
+            stage="${entry#*=}"
+            image="${IMAGE_REPO}/${name}"
+            docker buildx build \
+              --file build/Dockerfile \
+              --platform linux/amd64,linux/arm64 \
+              --target "$stage" \
+              --build-arg VERSION="$version" \
+              --tag "$image:$version" \
+              --provenance=false \
+              --push .
+            digest="$(docker buildx imagetools inspect "$image:$version" \
+              --format '{{json .Manifest}}' | jq -r .digest)"
+            test -n "$digest" && [[ "$digest" == sha256:* ]]
+            cosign sign --yes "$image@$digest"
+            for arch in amd64 arm64; do
+              "${{ steps.syft.outputs.cmd }}" "registry:$image@$digest" --platform "linux/$arch" \
+                -o spdx-json > "dist/sbom-${name}-${version}-linux-${arch}.spdx.json"
+            done
+            echo "${image}@${digest}" >> dist/images.txt
+            digests="${digests}\"${name}\":\"${digest}\","
+          done
+          digests="${digests%,}}"
+          echo "digests=${digests}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: images-dist
+          path: dist/
+          retention-days: 1
+
+  manifest:
+    if: github.repository == 'kubeneuron/kubeneuron'
+    needs: [images]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26.11"
+          cache: true
+
+      - name: Build DIGEST-pinned single-file install manifest
+        shell: bash
+        env:
+          DIGESTS: ${{ needs.images.outputs.digests }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          operator_digest="$(jq -r .operator <<<"$DIGESTS")"
+          [[ "$operator_digest" == sha256:* ]]
+          workdir="$(mktemp -d)"
+          cp -r config "$workdir/config"
+          (
+            cd "$workdir/config/default"
+            # Pin by digest, not tag: a re-pushed tag can never change what
+            # an already-downloaded manifest installs.
+            go run "sigs.k8s.io/kustomize/kustomize/v5@${KUSTOMIZE_VERSION}" \
+              edit set image \
+              "${IMAGE_REPO}/operator=${IMAGE_REPO}/operator@${operator_digest}"
+          )
+          go run "sigs.k8s.io/kustomize/kustomize/v5@${KUSTOMIZE_VERSION}" \
+            build "$workdir/config/default" > "dist/kubeneuron-install-${version}.yaml"
+          grep -q "image: ${IMAGE_REPO}/operator@${operator_digest}" \
+            "dist/kubeneuron-install-${version}.yaml"
+          bash hack/test-install-manifest-namespaces.sh "dist/kubeneuron-install-${version}.yaml"
+          # The manifest must not smuggle any tag-pinned image reference.
+          # Any tag-shaped reference (:v1.2.3, :1.2.3, :latest) is a leak;
+          # only digest pins may survive.
+          if grep -E "image: [^@[:space:]]+:[^@[:space:]]+$" "dist/kubeneuron-install-${version}.yaml"; then
+            echo "tag-pinned image reference in the install manifest" >&2
+            exit 1
+          fi
+          # Stamp the published digests into the installer. Without this the
+          # manifest above pins the operator by digest while install.sh
+          # resolves the controller and the agent — the two components that
+          # actually run the fleet — as moveable tags, so "digest-pinned
+          # install" was true of one image out of three.
+          controller_digest="$(jq -r .controller <<<"$DIGESTS")"
+          agent_digest="$(jq -r .agent <<<"$DIGESTS")"
+          [[ "$controller_digest" == sha256:* && "$agent_digest" == sha256:* ]]
+          sed -E \
+            -e "s|^RELEASE_STAMPED=.*|RELEASE_STAMPED=\${RELEASE_STAMPED:-${version}}|" \
+            -e "s|^CONTROLLER_DIGEST=.*|CONTROLLER_DIGEST=\${CONTROLLER_DIGEST:-${controller_digest}}|" \
+            -e "s|^AGENT_DIGEST=.*|AGENT_DIGEST=\${AGENT_DIGEST:-${agent_digest}}|" \
+            deploy/install.sh > "dist/install-${version}.sh"
+          grep -q "RELEASE_STAMPED:-${version}" "dist/install-${version}.sh"
+          grep -q "CONTROLLER_DIGEST:-${controller_digest}" "dist/install-${version}.sh"
+          grep -q "AGENT_DIGEST:-${agent_digest}" "dist/install-${version}.sh"
+          bash -n "dist/install-${version}.sh"
+          cp "dist/install-${version}.sh" dist/install.sh
+          # The Helm chart and the kustomize base pin their own image tag, and
+          # this job used to sed the tag's version over them at release time.
+          # That hid stale pins instead of fixing them: the tree at the tag
+          # said one version while the runner's scratch copy said another.
+          # The source-metadata job now fails the run before any image push
+          # unless the tagged source already carries ${version} everywhere,
+          # so nothing here rewrites checked-out files.
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: manifest-dist
+          path: dist/
+          retention-days: 1
+
+  ctl:
+    if: github.repository == 'kubeneuron/kubeneuron'
+    needs: [gates]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26.11"
+          cache: true
+
+      - name: Build kubeneuronctl binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            goos="${platform%%/*}"; goarch="${platform#*/}"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath -ldflags "-s -w -X main.version=${version}" \
+              -o "dist/kubeneuronctl-${version}-${goos}-${goarch}" ./cmd/kubeneuronctl
+            bundle="kubeneuronctl-${version}-${goos}-${goarch}"
+            tar -czf "dist/${bundle}.tar.gz" -C dist "$bundle" -C "$GITHUB_WORKSPACE" NOTICE THIRD_PARTY_LICENSES LICENSE
+            rm "dist/$bundle"
+          done
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ctl-dist
+          path: dist/
+          retention-days: 1
+
+
+  # No tag ships without an upgrade from the release before it AND a rollback
+  # to it, rehearsed in the documented order on a real cluster.
+  # hack/kind-upgrade-rollback.sh drives BASELINE -> HEAD -> BASELINE (restore
+  # the pre-upgrade snapshot, then the images) -> HEAD for BOTH workflow
+  # stores (SQLite PVC and a throwaway in-cluster PostgreSQL) side by side.
+  # Migrations are forward-only, so it proves the baseline binary refuses the
+  # migrated store with the schema-version error, performs the documented
+  # restore and proves the baseline serves the pre-upgrade state, then
+  # re-upgrades on the restored, re-migrated store. This shape of rehearsal
+  # catches what neither unit tests nor the integration suite can see: a
+  # store migration an existing installation cannot cross, and a CRD whose
+  # new fields the upgraded API does not actually serve.
+  #
+  # The baseline is the actual previous published release, not a variable.
+  # v1.0.0-rc.1 is the first published release, so it has none: an empty
+  # BASELINE skips the job with "upgrade rehearsal: skipped, no base release".
+  upgrade-rehearsal:
+    if: github.repository == 'kubeneuron/kubeneuron'
+    needs: [gates]
+    runs-on: ubuntu-24.04
+    # Two baseline installations, a PostgreSQL pull, three HEAD image builds,
+    # two image-level rollbacks and two re-upgrades on a three-node kind
+    # cluster (one control-plane plus one dedicated labeled worker per store,
+    # because the agent's hostPath spool state must not be shared): well
+    # over the 45 minutes the single-store, upgrade-only rehearsal needed.
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      packages: read
+    env:
+      BASELINE: "" # Set explicitly to an empty string for a release with no base.
+      STORES: sqlite postgres
+      # The published release (its install manifest and images.txt) lives in
+      # the repository the tag is pushed to; the script also uses this to
+      # fetch the baseline tag if it must fall back to building from source.
+      RELEASE_REPO: ${{ github.repository }}
+      CLUSTER_NAME: kubeneuron-upgrade-rollback-ci
+      KIND_VERSION: v0.32.0
+      KIND_SHA256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
+      KUBECTL_VERSION: v1.33.12
+      KUBECTL_SHA256: fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        if: env.BASELINE != ''
+        with:
+          go-version: "1.26.11"
+          cache: true
+
+      # Same shape as ci.yaml's kind job, including the checksums: a runner's
+      # /usr/local/bin is not writable by the job user, and an unverified
+      # download of the tool that builds the cluster this release is gated on
+      # is not a shortcut worth taking.
+      - name: Install pinned Kubernetes clients
+        if: env.BASELINE != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          tools="$RUNNER_TEMP/kubeneuron-tools"
+          mkdir -p "$tools"
+          curl --fail --location --retry 3 \
+            --output "$tools/kind" \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          printf '%s  %s\n' "$KIND_SHA256" "$tools/kind" | sha256sum --check -
+          curl --fail --location --retry 3 \
+            --output "$tools/kubectl" \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          printf '%s  %s\n' "$KUBECTL_SHA256" "$tools/kubectl" | sha256sum --check -
+          chmod 0755 "$tools/kind" "$tools/kubectl"
+          echo "$tools" >> "$GITHUB_PATH"
+
+      # The kind cluster is one control-plane node plus one dedicated labeled
+      # worker per store (the agent's hostPath spool state must not be shared
+      # between installations). All three nodes are containers on this one
+      # runner and its kernel owns the inotify budget for every kubelet plus
+      # the operator, two controller/agent installations and a PostgreSQL Pod;
+      # the runner default is not sized for that many watches on one host.
+      - name: Raise inotify limits for the kind cluster
+        if: env.BASELINE != ''
+        run: |
+          sudo sysctl fs.inotify.max_user_instances=512 \
+            fs.inotify.max_user_watches=524288
+
+      - name: Rehearse upgrade and rollback against ${{ env.BASELINE }} on both stores
+        env:
+          # `gh release download` of the baseline install manifest and
+          # images.txt, and the GHCR login fallback for the baseline images.
+          GH_TOKEN: ${{ github.token }}
+        run: bash hack/kind-upgrade-rollback.sh
+
+  release:
+    if: github.repository == 'kubeneuron/kubeneuron'
+    needs: [images, manifest, ctl, upgrade-rehearsal]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write # cosign sign-blob of the checksums file
+    outputs:
+      release_id: ${{ steps.publish.outputs.id }}
+    steps:
+      # The notes derive the store migration heads from the tree, so this job
+      # needs the source as well as the artifacts. Hardcoding them rotted the
+      # moment a migration landed, which is exactly the class of drift the
+      # docs lint exists to catch — and the lint cannot see workflow YAML.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          # ONLY this workflow's own build artifacts. Without the pattern
+          # this pulls every artifact in the run — including the kind gate's
+          # diagnostic dump (controller/agent logs, cluster resources) — and
+          # ships it as release assets. The rc-1 run proved it.
+          pattern: "*-dist"
+          path: collected
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+
+      - name: Assemble dist, checksums, and digest table
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          cp collected/*/* dist/
+          # Fail loudly rather than ship a surprise: the release carries
+          # exactly the four artifact kinds below.
+          for f in dist/*; do
+            case "$(basename "$f")" in
+              kubeneuronctl-*|sbom-*|images.txt|install.sh|install-*.sh|kubeneuron-install-*.yaml) ;;
+              *) echo "unexpected release asset: $f" >&2; exit 1 ;;
+            esac
+          done
+          (
+            cd dist
+            sha256sum -- * > "checksums-${version}.txt"
+            cosign sign-blob --yes \
+              --output-signature "checksums-${version}.txt.sig" \
+              --output-certificate "checksums-${version}.txt.pem" \
+              "checksums-${version}.txt"
+          )
+          {
+            echo "## Images (multi-arch, cosign-signed, digest-pinned)"
+            echo
+            echo '```'
+            cat dist/images.txt
+            echo '```'
+            echo
+            echo "Install manifest and installer pin these digests. Verify any image with:"
+            echo
+            echo '```'
+            echo "cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  --certificate-identity https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yaml@refs/tags/${GITHUB_REF_NAME} <image@digest>"
+            echo '```' 
+            echo
+            head_of() {
+              local f head=""
+              for f in "$1"/[0-9][0-9][0-9][0-9]_*.sql; do
+                f=$(basename "$f"); head=${f:0:4}
+              done
+              printf '%s' "$head"
+            }
+            sqlite_head=$(head_of internal/store/sqlite/migrations)
+            pg_head=$(head_of internal/store/postgres/migrations)
+            echo "Store migration heads: sqlite ${sqlite_head} / postgres ${pg_head}. A park"
+            echo "pending across the upgrade needs one re-approval."
+          } > notes.md
+
+      - name: Create the GitHub release as a draft
+        id: publish
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          # A draft is invisible to users and to releases/latest. It is
+          # promoted by release-publish only after release-verify has
+          # downloaded and checked the exact assets attached to it, so a
+          # release that fails its own verification is never published.
+          draft: true
+          # A tag containing '-' is a prerelease (v1.0.0-rc.1): it must never
+          # become releases/latest, which is what install.md's advertised
+          # one-liner downloads.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          body_path: notes.md
+          files: dist/*
+
+  # The only job that looks at the release the way a stranger does: it
+  # downloads the assets and checks what install.md promises about them.
+  # Everything upstream verifies inputs; earlier release candidates each found
+  # a defect that only the finished artifact could show. The release is still
+  # a draft here, and a draft cannot be reached by tag: `gh release download
+  # <tag>` answers `release not found`. So the script
+  # is handed the id of the draft the release job created and fetches exactly
+  # that release through the API, bound to this tag, so the check runs on the
+  # exact assets a user would get, before any user can get them.
+  release-verify:
+    if: github.repository == 'kubeneuron/kubeneuron'
+    needs: [release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # write, not read, because GitHub shows a DRAFT release only to a token
+      # with push access; with `contents: read` the draft does not exist as
+      # far as the API is concerned. Nothing here writes: the script only
+      # GETs the release and its assets, and promotion stays in
+      # release-publish, which runs only if this job passes.
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+      - name: Verify the draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          # Same contract release-publish enforces: no id means the release
+          # job did not create the draft, and verifying by tag would at best
+          # find some OTHER release carrying this tag.
+          [[ $RELEASE_ID =~ ^[0-9]+$ ]] || {
+            echo "release job produced no release id (got '${RELEASE_ID}')" >&2
+            exit 1
+          }
+          bash hack/verify-release.sh "${GITHUB_REF_NAME}" "${GITHUB_REPOSITORY}" "${RELEASE_ID}"
+
+  # Promotion is the last step and the only one that makes the release
+  # visible. It touches exactly the draft the release job created (by id, not
+  # by tag lookup) and asserts the result is no longer a draft, so a failed
+  # or skipped verification leaves a draft a maintainer can inspect and
+  # delete, never a published release nobody checked.
+  release-publish:
+    # Leave verified prereleases as drafts for manual publication.
+    if: github.repository == 'kubeneuron/kubeneuron' && !contains(github.ref_name, '-')
+    needs: [release, release-verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the verified draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          [[ $RELEASE_ID =~ ^[0-9]+$ ]] || {
+            echo "release job produced no release id (got '${RELEASE_ID}')" >&2
+            exit 1
+          }
+          tag="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq .tag_name)"
+          [[ $tag == "$GITHUB_REF_NAME" ]] || {
+            echo "release ${RELEASE_ID} is for tag '${tag}', not '${GITHUB_REF_NAME}'" >&2
+            exit 1
+          }
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            --field draft=false --silent
+          draft="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq .draft)"
+          [[ $draft == false ]] || {
+            echo "release ${RELEASE_ID} is still a draft after promotion" >&2
+            exit 1
+          }
+          echo "published ${GITHUB_REPOSITORY}@${GITHUB_REF_NAME} (release ${RELEASE_ID})"

@@ -1,0 +1,206 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package sqlcore
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"time"
+
+	"github.com/kubeneuron/kubeneuron/pkg/types"
+)
+
+// ClaimNodeRemediation records the first owner or links the incident to the
+// existing owner. The caller's transaction also records any change of step.
+func (q *Queries) ClaimNodeRemediation(ctx context.Context, node, uid, incidentID string, at time.Time) (string, error) {
+	// A follower must verify its original owner's outcome, even if the node
+	// becomes available between reconciles or during a leadership change.
+	var owner string
+	err := q.db.QueryRowContext(ctx, "SELECT owner_id FROM node_remediation_followers WHERE incident_id=?", incidentID).Scan(&owner)
+	if err == nil {
+		return owner, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	if _, err := q.db.ExecContext(ctx, `INSERT INTO node_remediation_owners (node, node_uid, incident_id)
+ VALUES (?, ?, ?) ON CONFLICT (node, node_uid) DO NOTHING`, node, uid, incidentID); err != nil {
+		return "", err
+	}
+	if err := q.db.QueryRowContext(ctx, `SELECT incident_id FROM node_remediation_owners WHERE node=? AND node_uid=?`, node, uid).Scan(&owner); err != nil {
+		return "", err
+	}
+	if owner != incidentID {
+		res, err := q.db.ExecContext(ctx, `INSERT INTO node_remediation_followers (incident_id, owner_id)
+ VALUES (?, ?) ON CONFLICT (incident_id) DO NOTHING`, incidentID, owner)
+		if err != nil {
+			return "", err
+		}
+		inserted, err := res.RowsAffected()
+		if err != nil {
+			return "", err
+		}
+		if inserted == 0 {
+			err := q.db.QueryRowContext(ctx, "SELECT owner_id FROM node_remediation_followers WHERE incident_id=?", incidentID).Scan(&owner)
+			return owner, err
+		}
+		inc, err := q.GetIncident(ctx, incidentID)
+		if err != nil {
+			return "", err
+		}
+		err = q.AppendAudit(ctx, &types.AuditEntry{
+			IncidentID: incidentID, Time: at, FromState: inc.State, ToState: inc.State,
+			Actor: "system", Action: "wait-for-node-repair", Params: map[string]string{"owner_id": owner},
+			Result: "node repair is owned by incident " + owner,
+		})
+		if err != nil {
+			return "", err
+		}
+	}
+	return owner, nil
+}
+
+// ReleaseNodeRemediation drops only the active owner's claim. Followers keep
+// their persisted link so they can verify the outcome independently.
+func (q *Queries) ReleaseNodeRemediation(ctx context.Context, incidentID string) error {
+	_, err := q.db.ExecContext(ctx, "DELETE FROM node_remediation_owners WHERE incident_id=?", incidentID)
+	return err
+}
+
+// ReleaseRepairFollowers lets each waiting incident seek a new authorization
+// when approval ended before the owner executed a step.
+func (q *Queries) ReleaseRepairFollowers(ctx context.Context, ownerID string, at time.Time, reason string) error {
+	rows, err := q.db.QueryContext(ctx, "DELETE FROM node_remediation_followers WHERE owner_id=? RETURNING incident_id", ownerID)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		inc, err := q.GetIncident(ctx, id)
+		if err != nil {
+			return err
+		}
+		if err := q.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: at, Actor: "system", Action: "node-repair-released", FromState: inc.State, ToState: inc.State, Params: map[string]string{"owner_id": ownerID}, Result: "previous owner released repair: " + reason}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ClaimRepairStep admits concurrent device steps or one node step. The
+// upsert locks the guard row until the caller commits the admission.
+func (q *Queries) ClaimRepairStep(ctx context.Context, node, uid, incident, actionID string, device bool, now time.Time) (bool, error) {
+	if _, err := q.db.ExecContext(ctx, `INSERT INTO repair_step_guards(node,node_uid) VALUES(?,?)
+		ON CONFLICT(node,node_uid) DO UPDATE SET node_uid=excluded.node_uid`, node, uid); err != nil {
+		return false, err
+	}
+	// Cancel the expired lease before dropping the reservation. A competing
+	// claim of the action either renews it first or sees the tombstone.
+	if _, err := q.db.ExecContext(ctx, `UPDATE actions SET state='cancelled', updated_at=?, lease_token=''
+		WHERE state='leased' AND lease_expires_at_ns<=? AND id IN
+		(SELECT r.action_id FROM repair_step_claims r JOIN incidents i ON i.id=r.incident_id
+		 WHERE r.node=? AND r.node_uid=? AND r.device_step=1 AND i.state IN ('NEEDS_HUMAN','RESOLVED'))`,
+		ts(now), now.Add(-types.AgentResultGrace).UnixNano(), node, uid); err != nil {
+		return false, err
+	}
+	// A reset result may arrive after the controller handed the incident to
+	// an operator. Reconcile that exact leased action before admitting work.
+	if _, err := q.db.ExecContext(ctx, `DELETE FROM repair_step_claims
+		WHERE node=? AND node_uid=? AND device_step=1 AND action_id<>''
+		AND EXISTS (SELECT 1 FROM actions a WHERE a.id=repair_step_claims.action_id
+			AND a.incident_id=repair_step_claims.incident_id AND a.attempts>0 AND
+			(a.state='done' OR (a.state='cancelled' AND a.lease_expires_at_ns>0 AND a.lease_expires_at_ns<=?)))`, node, uid, now.Add(-types.AgentResultGrace).UnixNano()); err != nil {
+		return false, err
+	}
+	var blocker string
+	err := q.db.QueryRowContext(ctx, `SELECT incident_id FROM repair_step_claims
+		WHERE node=? AND node_uid=? AND incident_id<>? AND (device_step=0 OR ?=0)
+		ORDER BY incident_id LIMIT 1`, node, uid, incident, b2i(device)).Scan(&blocker)
+	if err == nil {
+		entries, err := q.AuditTrail(ctx, incident)
+		if err != nil {
+			return false, err
+		}
+		for i := len(entries) - 1; i >= 0; i-- {
+			e := entries[i]
+			if e.Action == "wait-for-repair-step" {
+				if e.Params["owner_id"] == blocker {
+					return false, nil
+				}
+				break
+			}
+			if e.FromState != e.ToState {
+				break
+			}
+		}
+		inc, err := q.GetIncident(ctx, incident)
+		if err != nil {
+			return false, err
+		}
+		return false, q.AppendAudit(ctx, &types.AuditEntry{IncidentID: incident, Time: now, Actor: "system", Action: "wait-for-repair-step", FromState: inc.State, ToState: inc.State, Params: map[string]string{"owner_id": blocker}, Result: "waiting for the repair step held by incident " + blocker})
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	_, err = q.db.ExecContext(ctx, `INSERT INTO repair_step_claims(incident_id,node,node_uid,action_id,device_step) VALUES(?,?,?,?,?)
+	ON CONFLICT(incident_id) DO UPDATE SET node=excluded.node,node_uid=excluded.node_uid,action_id=excluded.action_id,device_step=excluded.device_step`, incident, node, uid, actionID, b2i(device))
+	return err == nil, err
+}
+
+func (q *Queries) ReleaseNodeRepairStep(ctx context.Context, incident string) error {
+	_, err := q.db.ExecContext(ctx, "DELETE FROM repair_step_claims WHERE incident_id=? AND device_step=0", incident)
+	return err
+}
+
+func (q *Queries) ReleaseRepairStep(ctx context.Context, incident string) error {
+	_, err := q.db.ExecContext(ctx, "DELETE FROM repair_step_claims WHERE incident_id=?", incident)
+	return err
+}
+
+// ReleaseVanishedRepairNode drops execution rights for a confirmed vanished
+// incarnation. Historical follower links and cloud plan records remain available
+// to verification and operator settlement.
+func (q *Queries) ReleaseVanishedRepairNode(ctx context.Context, node, uid string) error {
+	for _, statement := range []string{
+		"DELETE FROM repair_step_claims WHERE node=? AND node_uid=?",
+		"DELETE FROM repair_step_guards WHERE node=? AND node_uid=?",
+		"DELETE FROM node_remediation_owners WHERE node=? AND node_uid=?",
+	} {
+		if _, err := q.db.ExecContext(ctx, statement, node, uid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (q *Queries) ListRepairNodeIdentities(ctx context.Context) ([]types.Node, error) {
+	rows, err := q.db.QueryContext(ctx, `SELECT node,node_uid FROM node_remediation_owners UNION SELECT node,node_uid FROM repair_step_guards`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var nodes []types.Node
+	for rows.Next() {
+		var n types.Node
+		if err := rows.Scan(&n.Name, &n.UID); err != nil {
+			return nil, err
+		}
+		nodes = append(nodes, n)
+	}
+	return nodes, rows.Err()
+}

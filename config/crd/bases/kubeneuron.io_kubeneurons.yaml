@@ -1,0 +1,2233 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.3
+    kubeneuron.io/release-line: v1
+  name: kubeneurons.kubeneuron.io
+spec:
+  group: kubeneuron.io
+  names:
+    kind: KubeNeuron
+    listKind: KubeNeuronList
+    plural: kubeneurons
+    shortNames:
+    - kneuron
+    singular: kubeneuron
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .spec.safety.executionMode
+      name: Mode
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: KubeNeuron defines a complete KubeNeuron installation.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              KubeNeuronSpec is the root desired-state resource for one KubeNeuron
+              installation. All configuration resources reference this object by name.
+            properties:
+              agent:
+                description: AgentSpec configures the node agent managed by the operator.
+                properties:
+                  adapters:
+                    description: |-
+                      Adapters enables registered accelerator adapters in the agent, one
+                      entry per vendor. The operator renders one --adapter=<vendor> per entry
+                      and one --adapter-option=<vendor>.<key>=<value> per option, in vendor
+                      and key order. NVIDIA observation stays enabled as before whether or not
+                      it is listed; an "nvidia" entry only adds options.
+
+                      On a mixed fleet one agent DaemonSet runs on every accelerator node, so
+                      an adapter listed here also starts on nodes without its hardware. An
+                      adapter reports that case (accelerator.ErrNotPresent) and the agent
+                      skips that vendor on that node quietly.
+
+                      Adapters the operator was started with (--default-agent-adapters, the
+                      Helm value agentAdapters) are added to this list; an entry here replaces
+                      a default entry for the same vendor.
+                    items:
+                      description: AgentAdapterSpec enables one registered accelerator
+                        adapter.
+                      properties:
+                        hostTooling:
+                          description: |-
+                            HostTooling mounts this adapter's host binaries, libraries, and device
+                            nodes into the agent, for vendors whose tooling the agent image does not
+                            ship (for example amd-smi).
+                          properties:
+                            binDirs:
+                              description: |-
+                                BinDirs are host directories holding the vendor's tools. Each is
+                                mounted read-only at /host/adapters/<vendor>/bin/<i> and appended to
+                                the agent's PATH after the system directories, so a host tool never
+                                shadows one shipped in the agent image.
+                              items:
+                                maxLength: 4096
+                                type: string
+                                x-kubernetes-validations:
+                                - message: binDirs entries must be absolute host paths
+                                    without ':' or '..'
+                                  rule: self.startsWith('/') && !self.contains(':')
+                                    && !self.contains('..')
+                              maxItems: 4
+                              type: array
+                            devices:
+                              description: |-
+                                Devices are host device nodes the tools open, such as /dev/kfd. Each is
+                                mounted at the same path in the agent container. /dev/kmsg is always
+                                mounted and cannot be listed.
+                              items:
+                                maxLength: 256
+                                type: string
+                                x-kubernetes-validations:
+                                - message: devices entries must be device paths under
+                                    /dev/ without ':' or '..', other than /dev/kmsg
+                                  rule: self.startsWith('/dev/') && !self.contains(':')
+                                    && !self.contains('..') && self != '/dev/kmsg'
+                              maxItems: 16
+                              type: array
+                            libDirs:
+                              description: |-
+                                LibDirs are host directories holding the libraries those tools are
+                                linked against. Each is mounted read-only at
+                                /host/adapters/<vendor>/lib/<i> and appended to LD_LIBRARY_PATH. When
+                                spec.agent.hostTooling is unset, the first libDirs entry of the first
+                                adapter (in vendor order) is also mounted at /lib64, because the agent
+                                image has no ELF loader of its own: that directory must then contain
+                                the loader a dynamically linked tool needs.
+                              items:
+                                maxLength: 4096
+                                type: string
+                                x-kubernetes-validations:
+                                - message: libDirs entries must be absolute host paths
+                                    without ':' or '..'
+                                  rule: self.startsWith('/') && !self.contains(':')
+                                    && !self.contains('..')
+                              maxItems: 4
+                              type: array
+                          type: object
+                        options:
+                          additionalProperties:
+                            type: string
+                          description: |-
+                            Options is passed to the adapter factory. Keys are defined by each
+                            adapter: letters, digits, '.', '_', and '-', at most 63 characters.
+                            Values are at most 1024 characters.
+                          maxProperties: 32
+                          type: object
+                          x-kubernetes-validations:
+                          - message: option keys must be 1-63 letters, digits, '.',
+                              '_', or '-', starting with a letter or digit
+                            rule: self.all(k, k.matches('^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$'))
+                          - message: option values must be at most 1024 characters
+                            rule: self.all(k, self[k].size() <= 1024)
+                        vendor:
+                          description: |-
+                            Vendor is the adapter's vendor id: lowercase letters, digits, and
+                            hyphens, at most 32 characters. An adapter must be registered in the
+                            agent build for that vendor; an unregistered vendor fails closed with a
+                            not-ready report.
+                          maxLength: 32
+                          minLength: 1
+                          pattern: ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$
+                          type: string
+                      required:
+                      - vendor
+                      type: object
+                    maxItems: 8
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - vendor
+                    x-kubernetes-list-type: map
+                  hostTooling:
+                    description: |-
+                      HostTooling opts the agent DaemonSet into read-only host mounts of the
+                      NVIDIA userspace tooling (nvidia-smi, dcgmi, driver libraries) so the
+                      distroless agent image can execute them. Setting it also arms
+                      --require-real-driver: with host tooling declared, a silent Fake-driver
+                      fallback becomes a startup failure instead of a lie. Leave unset on
+                      CPU-only installs and on nodes where the device plugin injects the
+                      tooling by other means.
+
+                      On a MIXED cluster, set spec.agent.nodeSelector alongside it. The two are
+                      not coupled automatically because an all-GPU fleet with no selector is a
+                      legitimate and common installation, and refusing it to protect mixed
+                      clusters would break those. But with tooling declared and no selector,
+                      the DaemonSet lands on CPU nodes too, where --require-real-driver refuses
+                      to start and the hostPath type: Directory check leaves pods in
+                      ContainerCreating — visible and loud, and the installation stays
+                      Ready=False until it is fixed.
+                    properties:
+                      binDir:
+                        default: /usr/bin
+                        description: |-
+                          BinDir is the host directory containing nvidia-smi (and dcgmi when
+                          present). It is appended to the agent's PATH.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: binDir must be an absolute host path without ':'
+                          rule: self.startsWith('/') && !self.contains(':')
+                      dcgmEndpoint:
+                        description: |-
+                          DCGMEndpoint is where this node's DCGM host engine listens. Runtime
+                          attestation — the evidence every destructive action depends on —
+                          needs to reach it.
+
+                          With the NVIDIA GPU Operator this is
+                          "nvidia-dcgm.gpu-operator.svc:5555" — measured, not assumed: the
+                          operator runs the engine as an ordinary pod with no host port, so
+                          neither the node's address nor its loopback reaches it. That Service
+                          carries internalTrafficPolicy=Local, which is what keeps the evidence
+                          node-local: a request only ever lands on the engine sharing this
+                          node. Verify that policy before pointing this at any other Service,
+                          or attestation quietly becomes hearsay about someone else's hardware.
+
+                          The engine must exist: the operator ships it disabled
+                          (dcgm.enabled=false) because its exporter embeds a private one. Empty
+                          here keeps dcgmi's local default and, with no reachable engine,
+                          leaves the report degraded — fail-closed, no destructive action.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: dcgmEndpoint must be host:port, for example nvidia-dcgm.gpu-operator.svc:5555
+                          rule: self.contains(':')
+                      dcgmiPath:
+                        description: |-
+                          DCGMIPath selects a dcgmi client already installed on the node instead
+                          of the one shipped in the agent image.
+
+                          Leave it unset unless you mean it. The attested runtime version is
+                          whichever client answers, and an AcceleratorRuntimeProfile pins one exact
+                          value; taking the client from the node makes that value depend on how
+                          each node was provisioned, so a fleet built from mixed images would
+                          attest different versions and part of it would go degraded. Set this only
+                          when the node's client is deliberately the one your profile pins.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: dcgmiPath must be an absolute host path without
+                            ':'
+                          rule: self.startsWith('/') && !self.contains(':')
+                      libDirs:
+                        default:
+                        - /usr/lib64
+                        description: |-
+                          LibDirs are host directories holding the NVIDIA driver userspace
+                          libraries nvidia-smi is linked against; they become the agent's
+                          LD_LIBRARY_PATH. Defaults to /usr/lib64 (AL2023 NVIDIA AMI).
+                        items:
+                          type: string
+                          x-kubernetes-validations:
+                          - message: libDirs entries must be absolute host paths without
+                              ':'
+                            rule: self.startsWith('/') && !self.contains(':')
+                        maxItems: 4
+                        type: array
+                      scriptsDir:
+                        description: |-
+                          ScriptsDir optionally mounts operator-provisioned remediation scripts
+                          read-only at /etc/kube-neuron/scripts (the agent's --scripts-dir).
+                          The run_script action additionally requires destructive enablement,
+                          which the operator does not set; the mount alone executes nothing.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: scriptsDir must be an absolute host path without
+                            ':'
+                          rule: self.startsWith('/') && !self.contains(':')
+                    type: object
+                  image:
+                    description: |-
+                      Image must be pinned by an explicit tag or digest; the floating
+                      :latest tag is rejected so a managed rollout is always reproducible.
+                    minLength: 1
+                    type: string
+                    x-kubernetes-validations:
+                    - message: image must not use the floating :latest tag
+                      rule: '!self.endsWith('':latest'')'
+                    - message: image must be pinned by an explicit tag or digest
+                      rule: self.contains('@') || self.lastIndexOf(':') > self.lastIndexOf('/')
+                  kernelLog:
+                    description: |-
+                      KernelLog configures where an agent without node-level actions reads
+                      kernel messages. It has no effect while spec.safety.nodeLevelActions
+                      is true: that agent reads /dev/kmsg.
+                    properties:
+                      journal:
+                        description: |-
+                          Journal mounts the node's systemd journal directory read-only into
+                          the agent. The agent reads kernel entries only.
+                        properties:
+                          enabled:
+                            default: true
+                            description: |-
+                              Enabled mounts the journal on accelerator nodes whose OS image
+                              KubeNeuron recognises. False removes the mount and the
+                              kubeneuron.io/journal-dir label. Default true.
+                            type: boolean
+                          nodeOverrides:
+                            description: |-
+                              NodeOverrides chooses the journal directory for matching nodes
+                              instead of the OS image table. The first matching entry wins.
+                            items:
+                              description: |-
+                                JournalNodeOverride chooses the journal directory for nodes whose labels
+                                match NodeSelector.
+                              properties:
+                                dir:
+                                  description: |-
+                                    Dir is var (/var/log/journal), run (/run/log/journal) or none (no
+                                    journal mount on these nodes).
+                                  enum:
+                                  - var
+                                  - run
+                                  - none
+                                  type: string
+                                nodeSelector:
+                                  additionalProperties:
+                                    type: string
+                                  description: |-
+                                    NodeSelector matches node labels; every entry must match. It may not
+                                    use kubeneuron.io/journal-dir.
+                                  maxProperties: 16
+                                  minProperties: 1
+                                  type: object
+                                  x-kubernetes-validations:
+                                  - message: nodeSelector must not use kubeneuron.io/journal-dir
+                                    rule: '!(''kubeneuron.io/journal-dir'' in self)'
+                              required:
+                              - dir
+                              - nodeSelector
+                              type: object
+                            maxItems: 32
+                            type: array
+                        type: object
+                    type: object
+                  nodeSelector:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  tolerations:
+                    items:
+                      description: |-
+                        The pod this Toleration is attached to tolerates any taint that matches
+                        the triple <key,value,effect> using the matching operator <operator>.
+                      properties:
+                        effect:
+                          description: |-
+                            Effect indicates the taint effect to match. Empty means match all taint effects.
+                            When specified, allowed values are NoSchedule, PreferNoSchedule and NoExecute.
+                          type: string
+                        key:
+                          description: |-
+                            Key is the taint key that the toleration applies to. Empty means match all taint keys.
+                            If the key is empty, operator must be Exists; this combination means to match all values and all keys.
+                          type: string
+                        operator:
+                          description: |-
+                            Operator represents a key's relationship to the value.
+                            Valid operators are Exists and Equal. Defaults to Equal.
+                            Exists is equivalent to wildcard for value, so that a pod can
+                            tolerate all taints of a particular category.
+                          type: string
+                        tolerationSeconds:
+                          description: |-
+                            TolerationSeconds represents the period of time the toleration (which must be
+                            of effect NoExecute, otherwise this field is ignored) tolerates the taint. By default,
+                            it is not set, which means tolerate the taint forever (do not evict). Zero and
+                            negative values will be treated as 0 (evict immediately) by the system.
+                          format: int64
+                          type: integer
+                        value:
+                          description: |-
+                            Value is the taint value the toleration matches to.
+                            If the operator is Exists, the value should be empty, otherwise just a regular string.
+                          type: string
+                      type: object
+                    type: array
+                required:
+                - image
+                type: object
+              approvals:
+                description: ApprovalSpec configures human approval behavior.
+                properties:
+                  channels:
+                    items:
+                      type: string
+                    type: array
+                  ttl:
+                    default: 12h
+                    type: string
+                type: object
+              archive:
+                description: |-
+                  ArchiveSpec describes the optional raw-event archive. It must never be used
+                  as the workflow lock or incident authority.
+                  The preview runtime has no archive ingestion path, so ClickHouse may only be
+                  omitted or explicitly disabled.
+                properties:
+                  clickHouse:
+                    description: |-
+                      DependencySpec describes a dependency managed by its own upstream operator
+                      or supplied as an existing endpoint.
+                    properties:
+                      endpoint:
+                        type: string
+                      mode:
+                        default: External
+                        description: |-
+                          IntegrationMode describes whether a dependency is supplied by the cluster
+                          or managed by its dedicated upstream operator.
+                        enum:
+                        - External
+                        - Managed
+                        - Disabled
+                        type: string
+                      secretRef:
+                        description: |-
+                          SecretReference refers to a Kubernetes Secret. Credentials must never live
+                          directly in a KubeNeuron custom resource.
+                        properties:
+                          key:
+                            maxLength: 253
+                            type: string
+                          name:
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          namespace:
+                            maxLength: 63
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: External dependencies require an endpoint
+                      rule: self.mode != 'External' || (has(self.endpoint) && self.endpoint.size()
+                        > 0)
+                    - message: Disabled dependencies cannot set endpoint or secretRef
+                      rule: self.mode != 'Disabled' || (!has(self.endpoint) && !has(self.secretRef))
+                type: object
+                x-kubernetes-validations:
+                - message: clickHouse currently supports only Disabled mode
+                  rule: '!has(self.clickHouse) || self.clickHouse.mode == ''Disabled'''
+              auth:
+                description: |-
+                  AuthSpec configures how humans sign in to the operator API and panel.
+                  Bearer tokens (static break-glass and Kubernetes TokenReview) keep
+                  working regardless; this adds browser-friendly sign-in.
+                properties:
+                  oidc:
+                    description: |-
+                      OIDC enables single sign-on through any spec-compliant provider
+                      (Okta, Keycloak, Dex, Entra, Google, …).
+                    properties:
+                      allowedEmailDomains:
+                        description: |-
+                          AllowedEmailDomains optionally restricts sign-in to verified email
+                          addresses of these domains; empty admits any principal the issuer
+                          authenticates.
+                        items:
+                          type: string
+                        maxItems: 8
+                        type: array
+                      clientID:
+                        minLength: 1
+                        type: string
+                      clientSecretRef:
+                        description: |-
+                          ClientSecretRef references a Secret in spec.namespace holding the
+                          OIDC client secret. Key defaults to "client-secret". Namespace must
+                          be omitted.
+                        properties:
+                          key:
+                            maxLength: 253
+                            type: string
+                          name:
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          namespace:
+                            maxLength: 63
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      issuerURL:
+                        description: |-
+                          IssuerURL is the provider's issuer, e.g.
+                          https://your-org.okta.com or https://keycloak.example/realms/prod.
+                        minLength: 1
+                        type: string
+                        x-kubernetes-validations:
+                        - message: issuerURL must be https
+                          rule: self.startsWith('https://')
+                      redirectURL:
+                        description: |-
+                          RedirectURL is the externally reachable callback,
+                          https://<panel-host>/api/v1/auth/oidc/callback — register the same
+                          value at the provider.
+                        minLength: 1
+                        type: string
+                        x-kubernetes-validations:
+                        - message: redirectURL must be a URL
+                          rule: self.startsWith('https://') || self.startsWith('http://')
+                    required:
+                    - clientID
+                    - clientSecretRef
+                    - issuerURL
+                    - redirectURL
+                    type: object
+                  users:
+                    description: |-
+                      Users references a Secret in spec.namespace enabling username and
+                      password sign-in: every Secret key is a username and its value a
+                      bcrypt password hash (generate with
+                      `htpasswd -bnBC 12 "" 'pass' | tr -d ':\n'`). Namespace must be
+                      omitted. The operator mounts the Secret; hashes are re-read per
+                      attempt, so rotation needs no restart.
+                    properties:
+                      key:
+                        maxLength: 253
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        maxLength: 63
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+              cloud:
+                description: |-
+                  Cloud enables node recycle/replace remediation against the cloud provider
+                  behind the nodes. Leave empty to disable it; a RecycleNode/ReplaceNode
+                  step then fails closed rather than silently succeeding.
+                properties:
+                  aws:
+                    description: AWS carries the AWS-specific configuration. Required
+                      when provider is aws.
+                    properties:
+                      clusterName:
+                        description: |-
+                          ClusterName identifies the EKS cluster for managed nodegroup repair checks.
+                          Without a cluster name, cloud recovery remains unavailable.
+                        maxLength: 100
+                        pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+                        type: string
+                      iamRoleARN:
+                        description: |-
+                          IAMRoleARN is set as the eks.amazonaws.com/role-arn annotation on the
+                          controller ServiceAccount so IRSA grants ec2:Stop/Start/Terminate/
+                          DescribeInstances. Required unless the role is attached another way.
+                        type: string
+                      interruptionQueueURL:
+                        description: |-
+                          InterruptionQueueURL is an SQS queue that EventBridge delivers the
+                          account's EC2 spot interruption, rebalance and instance state-change
+                          events and AWS Health scheduled changes to. The controller reads it and
+                          deletes the messages it has read; the queue must be dedicated to this
+                          installation. Empty reads no queue. Experimental.
+                        maxLength: 256
+                        pattern: ^https://sqs\.[a-z0-9-]+\.amazonaws\.com(\.cn)?/[0-9]{12}/[A-Za-z0-9_-]{1,80}$
+                        type: string
+                      region:
+                        description: |-
+                          Region is the EC2 region (e.g. us-east-1). Empty uses the controller's
+                          ambient region (AWS_REGION).
+                        type: string
+                    type: object
+                  azure:
+                    description: Azure carries the AKS configuration. Required when
+                      provider is azure.
+                    properties:
+                      clientID:
+                        description: |-
+                          ClientID is the client ID of the managed identity federated with the
+                          controller ServiceAccount; it is set as that ServiceAccount's
+                          azure.workload.identity/client-id annotation. It is an identifier, not a
+                          credential.
+                        pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+                        type: string
+                      clusterName:
+                        description: ClusterName is the name of the AKS cluster.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-zA-Z0-9]$|^[a-zA-Z0-9][-_a-zA-Z0-9]{0,61}[a-zA-Z0-9]$
+                        type: string
+                      resourceGroup:
+                        description: |-
+                          ResourceGroup is the resource group of the AKS cluster resource (not
+                          its node resource group).
+                        maxLength: 90
+                        minLength: 1
+                        pattern: ^[-\w\._\(\)]+$
+                        type: string
+                      subscriptionID:
+                        description: SubscriptionID is the Azure subscription of the
+                          AKS cluster.
+                        pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+                        type: string
+                      tenantID:
+                        description: |-
+                          TenantID is the Microsoft Entra tenant of that identity, when it is not
+                          the cluster's own.
+                        pattern: ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+                        type: string
+                    required:
+                    - clientID
+                    - clusterName
+                    - resourceGroup
+                    - subscriptionID
+                    type: object
+                  gcp:
+                    description: GCP carries the GKE configuration. Required when
+                      provider is gcp.
+                    properties:
+                      clusterName:
+                        description: ClusterName is the name of the GKE cluster.
+                        pattern: ^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$
+                        type: string
+                      location:
+                        description: Location is the cluster's region or zone (e.g.
+                          us-central1).
+                        pattern: ^[a-z]+-[a-z]+[0-9]+(-[a-z])?$
+                        type: string
+                      project:
+                        description: Project is the ID of the Google Cloud project
+                          of the cluster.
+                        pattern: ^[a-z][-a-z0-9]{4,28}[a-z0-9]$
+                        type: string
+                      tpuInfraHealth:
+                        description: |-
+                          TPUInfraHealth reads the health of the TPU nodes' instances from
+                          Google Cloud Monitoring (compute.googleapis.com/instance/tpu/infra_health,
+                          a Google Cloud Beta metric). Off unless set. Experimental, not
+                          validated against a live GKE cluster.
+                        properties:
+                          enabled:
+                            description: Enabled turns the read on.
+                            type: boolean
+                        required:
+                        - enabled
+                        type: object
+                    required:
+                    - clusterName
+                    - location
+                    - project
+                    type: object
+                  provider:
+                    description: |-
+                      Provider is the cloud backing the nodes: "aws" (EC2 and EKS), "azure"
+                      (AKS, experimental) or "gcp" (GKE, experimental).
+                    enum:
+                    - aws
+                    - azure
+                    - gcp
+                    type: string
+                required:
+                - provider
+                type: object
+                x-kubernetes-validations:
+                - message: spec.cloud.aws is required when provider is aws
+                  rule: self.provider != 'aws' || has(self.aws)
+                - message: spec.cloud.azure is required when provider is azure
+                  rule: self.provider != 'azure' || has(self.azure)
+                - message: spec.cloud.gcp is required when provider is gcp
+                  rule: self.provider != 'gcp' || has(self.gcp)
+              controller:
+                description: ComponentSpec configures a managed controller component.
+                properties:
+                  allowGPUNodes:
+                    description: |-
+                      AllowGPUNodes lets the controller be scheduled onto GPU nodes.
+
+                      Off by default, and worth leaving off: a reboot playbook has been
+                      observed rebooting the node its own controller was running on, which cut
+                      the playbook off mid-step and left the node cordoned. Enable it only on
+                      clusters where every node has a GPU, and accept that a node reboot will
+                      interrupt whatever the controller was doing.
+                    type: boolean
+                  image:
+                    description: |-
+                      Image must be pinned by an explicit tag or digest; the floating
+                      :latest tag is rejected so a managed rollout is always reproducible.
+                    minLength: 1
+                    type: string
+                    x-kubernetes-validations:
+                    - message: image must not use the floating :latest tag
+                      rule: '!self.endsWith('':latest'')'
+                    - message: image must be pinned by an explicit tag or digest
+                      rule: self.contains('@') || self.lastIndexOf(':') > self.lastIndexOf('/')
+                  resources:
+                    description: ResourceRequirements describes the compute resource
+                      requirements.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This is an alpha field and requires enabling the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                required:
+                - image
+                type: object
+              manualRecoveryBaseline:
+                description: |-
+                  ManualRecoveryBaseline is the operator's usual manual recovery time.
+                  Omit it to suppress GPU-hours saved estimates.
+                pattern: ^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$
+                type: string
+              namespace:
+                description: |-
+                  Namespace is immutable because moving an installation would otherwise
+                  leave the old namespace's runtime resources active.
+                maxLength: 63
+                minLength: 1
+                type: string
+                x-kubernetes-validations:
+                - message: namespace is immutable
+                  rule: self == oldSelf
+              notifications:
+                description: |-
+                  NotificationsSpec configures human-facing notification delivery. Enabled
+                  execution is deliberately unavailable in the current Kubernetes runtime;
+                  notification delivery remains useful for dry-run and paused installations.
+                properties:
+                  operatorAPIToken:
+                    description: |-
+                      OperatorAPIToken references a Secret in spec.namespace containing the
+                      bearer token for the human/operator API. Key defaults to "token".
+                      Namespace must be omitted. The operator mounts this Secret without
+                      reading its contents.
+                    properties:
+                      key:
+                        maxLength: 253
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        maxLength: 63
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  pagerduty:
+                    description: |-
+                      PagerDuty references a Secret in spec.namespace containing a PagerDuty
+                      Events API v2 routing key. Key defaults to "routing-key". Namespace
+                      must be omitted. Incidents map to PagerDuty alerts by incident ID:
+                      needs-human and approval requests page critical, resolution resolves
+                      the alert.
+                    properties:
+                      key:
+                        maxLength: 253
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        maxLength: 63
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  slack:
+                    description: |-
+                      Slack references a Secret in spec.namespace containing a Slack
+                      incoming-webhook URL. Key defaults to "webhook-url". Namespace must be
+                      omitted. The operator mounts the Secret into the controller; it never
+                      reads the URL itself.
+                    properties:
+                      key:
+                        maxLength: 253
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        maxLength: 63
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  webhook:
+                    description: |-
+                      Webhook references a Secret in spec.namespace holding a generic
+                      notification endpoint: key "url" (required) receives every incident
+                      notification as versioned JSON; key "token" (optional) is sent as an
+                      Authorization bearer credential. Namespace must be omitted. Delivery
+                      is retried with backoff and dead-lettered to the log on failure.
+                    properties:
+                      key:
+                        maxLength: 253
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        maxLength: 63
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  webhookToken:
+                    description: |-
+                      WebhookToken references a Secret in spec.namespace containing the bearer
+                      token required by the Alertmanager webhook. Key defaults to "token".
+                      Namespace must be omitted. The public webhook is never left anonymous on
+                      an operator-managed installation.
+                    properties:
+                      key:
+                        maxLength: 253
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        maxLength: 63
+                        type: string
+                    required:
+                    - name
+                    type: object
+                type: object
+              observability:
+                description: |-
+                  Observability is where KubeNeuron's metrics go. Left out, like any of
+                  its parts, it is Disabled: an upgrade never deploys anything on its own.
+                properties:
+                  alertmanager:
+                    description: |-
+                      Alertmanager names the user's Alertmanager. It is informational: the
+                      controller receives alerts on its own webhooks and never calls it. Left
+                      out, there is none; the Managed store sends metric alerts to the
+                      controller without one.
+                    properties:
+                      endpoint:
+                        type: string
+                      mode:
+                        default: External
+                        description: |-
+                          IntegrationMode describes whether a dependency is supplied by the cluster
+                          or managed by its dedicated upstream operator.
+                        enum:
+                        - External
+                        - Managed
+                        - Disabled
+                        type: string
+                      secretRef:
+                        description: |-
+                          SecretReference refers to a Kubernetes Secret. Credentials must never live
+                          directly in a KubeNeuron custom resource.
+                        properties:
+                          key:
+                            maxLength: 253
+                            type: string
+                          name:
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          namespace:
+                            maxLength: 63
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: External dependencies require an endpoint
+                      rule: self.mode != 'External' || (has(self.endpoint) && self.endpoint.size()
+                        > 0)
+                    - message: Disabled dependencies cannot set endpoint or secretRef
+                      rule: self.mode != 'Disabled' || (!has(self.endpoint) && !has(self.secretRef))
+                  collector:
+                    description: |-
+                      Collector receives OTLP over HTTP from the controller, the agents and
+                      the operator, and sends it to the store. Managed runs an OpenTelemetry
+                      Collector in the installation namespace; External points the
+                      components at the user's own collector; Disabled turns export off.
+                    properties:
+                      authorizationSecretRef:
+                        description: |-
+                          AuthorizationSecretRef selects a key of a Secret in the installation
+                          namespace whose value is the HTTP Authorization header, for example
+                          "Bearer <token>" or "Basic <base64>". The operator never reads it: the
+                          value reaches the sender as an environment variable.
+                        properties:
+                          key:
+                            maxLength: 253
+                            type: string
+                          name:
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          namespace:
+                            maxLength: 63
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      dcgmExporter:
+                        description: |-
+                          DCGMExporter has the managed collector scrape the dcgm-exporter that
+                          already runs in the cluster, for example the one GPU Operator
+                          installs. KubeNeuron never installs dcgm-exporter.
+                        properties:
+                          keepWorkloadLabels:
+                            description: |-
+                              KeepWorkloadLabels keeps the pod, namespace, container and pod_uid labels
+                              dcgm-exporter adds for the workload that holds a GPU. Default false:
+                              they are dropped before anything is stored, so the store holds no
+                              names of the user's workloads.
+                            type: boolean
+                          namespace:
+                            description: Namespace of the Service. Empty searches
+                              every namespace.
+                            maxLength: 63
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          scrape:
+                            description: |-
+                              Scrape turns scraping on or off. Default true. Turn it off when the
+                              store already receives dcgm-exporter metrics from another scraper.
+                            type: boolean
+                          serviceName:
+                            description: |-
+                              ServiceName is the dcgm-exporter Service. Default
+                              nvidia-dcgm-exporter, the name GPU Operator uses.
+                            maxLength: 63
+                            pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                        type: object
+                      endpoint:
+                        description: |-
+                          Endpoint is the OTLP/HTTP base URL; the sender appends /v1/metrics.
+                          For VictoriaMetrics: http://<host>:8428/opentelemetry. For Prometheus
+                          with its OTLP receiver: http://<host>:9090/api/v1/otlp. For a
+                          collector: http://<host>:4318.
+                        maxLength: 2048
+                        pattern: ^https?://\S+$
+                        type: string
+                      mode:
+                        allOf:
+                        - enum:
+                          - External
+                          - Managed
+                          - Disabled
+                        - enum:
+                          - Managed
+                          - External
+                          - Disabled
+                        description: |-
+                          IntegrationMode describes whether a dependency is supplied by the cluster
+                          or managed by its dedicated upstream operator.
+                        type: string
+                      resources:
+                        description: |-
+                          Resources of the managed collector container. The memory limit also
+                          sizes the collector's memory_limiter.
+                        properties:
+                          claims:
+                            description: |-
+                              Claims lists the names of resources, defined in spec.resourceClaims,
+                              that are used by this container.
+
+                              This is an alpha field and requires enabling the
+                              DynamicResourceAllocation feature gate.
+
+                              This field is immutable. It can only be set for containers.
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name must match the name of one entry in pod.spec.resourceClaims of
+                                    the Pod where this field is used. It makes that resource available
+                                    inside a container.
+                                  type: string
+                                request:
+                                  description: |-
+                                    Request is the name chosen for a request in the referenced claim.
+                                    If empty, everything from the claim is made available, otherwise
+                                    only the result of this request.
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Limits describes the maximum amount of compute resources allowed.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Requests describes the minimum amount of compute resources required.
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                        type: object
+                    required:
+                    - mode
+                    type: object
+                    x-kubernetes-validations:
+                    - message: resources apply only to a Managed collector
+                      rule: self.mode == 'Managed' || !has(self.resources)
+                    - message: dcgmExporter applies only to a Managed collector
+                      rule: self.mode == 'Managed' || !has(self.dcgmExporter)
+                    - message: External requires an endpoint
+                      rule: self.mode != 'External' || (has(self.endpoint) && self.endpoint.size()
+                        > 0)
+                    - message: endpoint and authorizationSecretRef apply only to External
+                      rule: self.mode == 'External' || (!has(self.endpoint) && !has(self.authorizationSecretRef))
+                    - message: credentials must not be part of the endpoint URL; use
+                        authorizationSecretRef
+                      rule: '!has(self.endpoint) || !self.endpoint.contains(''@'')'
+                  grafana:
+                    description: |-
+                      Grafana shows the dashboards. Managed runs the official, unmodified
+                      Grafana image (AGPL-3.0) with the store as its datasource and the
+                      KubeNeuron dashboards provisioned; External is the user's own Grafana,
+                      which loads the dashboard files itself.
+                    properties:
+                      datasource:
+                        description: |-
+                          Datasource is where a Managed Grafana queries an External store. The
+                          store's endpoint is where metrics are written, which is not always
+                          where they are read, so it is named separately.
+                        properties:
+                          authorizationSecretRef:
+                            description: |-
+                              AuthorizationSecretRef selects a key of a Secret in the installation
+                              namespace whose value is the HTTP Authorization header Grafana sends
+                              to the store. The operator never reads it.
+                            properties:
+                              key:
+                                maxLength: 253
+                                type: string
+                              name:
+                                maxLength: 253
+                                minLength: 1
+                                type: string
+                              namespace:
+                                maxLength: 63
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          url:
+                            description: |-
+                              URL is the Prometheus query API base: for VictoriaMetrics
+                              http://<host>:8428, for Prometheus http://<host>:9090.
+                            maxLength: 2048
+                            pattern: ^https?://\S+$
+                            type: string
+                        required:
+                        - url
+                        type: object
+                        x-kubernetes-validations:
+                        - message: credentials must not be part of the url; use authorizationSecretRef
+                          rule: '!self.url.contains(''@'')'
+                      endpoint:
+                        description: Endpoint is the address of the user's own Grafana
+                          (External).
+                        maxLength: 2048
+                        type: string
+                      mode:
+                        allOf:
+                        - enum:
+                          - External
+                          - Managed
+                          - Disabled
+                        - enum:
+                          - Managed
+                          - External
+                          - Disabled
+                        description: |-
+                          IntegrationMode describes whether a dependency is supplied by the cluster
+                          or managed by its dedicated upstream operator.
+                        type: string
+                      resources:
+                        description: Resources of the managed Grafana container.
+                        properties:
+                          claims:
+                            description: |-
+                              Claims lists the names of resources, defined in spec.resourceClaims,
+                              that are used by this container.
+
+                              This is an alpha field and requires enabling the
+                              DynamicResourceAllocation feature gate.
+
+                              This field is immutable. It can only be set for containers.
+                            items:
+                              description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name must match the name of one entry in pod.spec.resourceClaims of
+                                    the Pod where this field is used. It makes that resource available
+                                    inside a container.
+                                  type: string
+                                request:
+                                  description: |-
+                                    Request is the name chosen for a request in the referenced claim.
+                                    If empty, everything from the claim is made available, otherwise
+                                    only the result of this request.
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          limits:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Limits describes the maximum amount of compute resources allowed.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: |-
+                              Requests describes the minimum amount of compute resources required.
+                              If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                              otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                              More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                            type: object
+                        type: object
+                    required:
+                    - mode
+                    type: object
+                    x-kubernetes-validations:
+                    - message: External requires an endpoint
+                      rule: self.mode != 'External' || (has(self.endpoint) && self.endpoint.size()
+                        > 0)
+                    - message: datasource and resources apply only to a Managed grafana
+                      rule: self.mode == 'Managed' || (!has(self.datasource) && !has(self.resources))
+                  store:
+                    description: |-
+                      Store is the one metrics backend. Managed runs a single-node
+                      VictoriaMetrics with a PersistentVolumeClaim; External is the user's
+                      VictoriaMetrics or Prometheus, which must accept OTLP over HTTP
+                      (Prometheus with its OTLP receiver enabled; remote write is not
+                      supported). With an External collector the store is not written by
+                      KubeNeuron: an External store then only names the datasource a
+                      Managed Grafana reads.
+                    properties:
+                      authorizationSecretRef:
+                        description: |-
+                          AuthorizationSecretRef selects a key of a Secret in the installation
+                          namespace whose value is the HTTP Authorization header, for example
+                          "Bearer <token>" or "Basic <base64>". The operator never reads it: the
+                          value reaches the sender as an environment variable.
+                        properties:
+                          key:
+                            maxLength: 253
+                            type: string
+                          name:
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          namespace:
+                            maxLength: 63
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      endpoint:
+                        description: |-
+                          Endpoint is the OTLP/HTTP base URL; the sender appends /v1/metrics.
+                          For VictoriaMetrics: http://<host>:8428/opentelemetry. For Prometheus
+                          with its OTLP receiver: http://<host>:9090/api/v1/otlp. For a
+                          collector: http://<host>:4318.
+                        maxLength: 2048
+                        pattern: ^https?://\S+$
+                        type: string
+                      managed:
+                        description: |-
+                          ManagedStoreSpec configures the managed single-node VictoriaMetrics.
+                          KubeNeuron does not back it up.
+                        properties:
+                          resources:
+                            description: ResourceRequirements describes the compute
+                              resource requirements.
+                            properties:
+                              claims:
+                                description: |-
+                                  Claims lists the names of resources, defined in spec.resourceClaims,
+                                  that are used by this container.
+
+                                  This is an alpha field and requires enabling the
+                                  DynamicResourceAllocation feature gate.
+
+                                  This field is immutable. It can only be set for containers.
+                                items:
+                                  description: ResourceClaim references one entry
+                                    in PodSpec.ResourceClaims.
+                                  properties:
+                                    name:
+                                      description: |-
+                                        Name must match the name of one entry in pod.spec.resourceClaims of
+                                        the Pod where this field is used. It makes that resource available
+                                        inside a container.
+                                      type: string
+                                    request:
+                                      description: |-
+                                        Request is the name chosen for a request in the referenced claim.
+                                        If empty, everything from the claim is made available, otherwise
+                                        only the result of this request.
+                                      type: string
+                                  required:
+                                  - name
+                                  type: object
+                                type: array
+                                x-kubernetes-list-map-keys:
+                                - name
+                                x-kubernetes-list-type: map
+                              limits:
+                                additionalProperties:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                description: |-
+                                  Limits describes the maximum amount of compute resources allowed.
+                                  More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                                type: object
+                              requests:
+                                additionalProperties:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                  x-kubernetes-int-or-string: true
+                                description: |-
+                                  Requests describes the minimum amount of compute resources required.
+                                  If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                                  otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                                  More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                                type: object
+                            type: object
+                          retention:
+                            default: 30d
+                            description: Retention is the VictoriaMetrics -retentionPeriod,
+                              for example 30d.
+                            pattern: ^[0-9]+[hdwy]?$
+                            type: string
+                          storage:
+                            description: |-
+                              StoreStorageSpec is the managed store's volume. The claim outlives the
+                              managed store: switching to External or Disabled leaves it in place.
+                            properties:
+                              ephemeral:
+                                description: |-
+                                  Ephemeral uses an emptyDir instead of a claim: every restart of the
+                                  store loses its data. Only for trials.
+                                type: boolean
+                              size:
+                                default: 20Gi
+                                type: string
+                              storageClassName:
+                                type: string
+                            type: object
+                        type: object
+                      mode:
+                        allOf:
+                        - enum:
+                          - External
+                          - Managed
+                          - Disabled
+                        - enum:
+                          - Managed
+                          - External
+                          - Disabled
+                        description: |-
+                          IntegrationMode describes whether a dependency is supplied by the cluster
+                          or managed by its dedicated upstream operator.
+                        type: string
+                    required:
+                    - mode
+                    type: object
+                    x-kubernetes-validations:
+                    - message: managed applies only to a Managed store
+                      rule: self.mode == 'Managed' || !has(self.managed)
+                    - message: External requires an endpoint
+                      rule: self.mode != 'External' || (has(self.endpoint) && self.endpoint.size()
+                        > 0)
+                    - message: endpoint and authorizationSecretRef apply only to External
+                      rule: self.mode == 'External' || (!has(self.endpoint) && !has(self.authorizationSecretRef))
+                    - message: credentials must not be part of the endpoint URL; use
+                        authorizationSecretRef
+                      rule: '!has(self.endpoint) || !self.endpoint.contains(''@'')'
+                  victoriaMetrics:
+                    description: |-
+                      VictoriaMetrics is deprecated: use store. It names a query address,
+                      not an OTLP destination, so the collector never sends to it; with no
+                      store the collector drops what it receives.
+                    properties:
+                      endpoint:
+                        type: string
+                      mode:
+                        default: External
+                        description: |-
+                          IntegrationMode describes whether a dependency is supplied by the cluster
+                          or managed by its dedicated upstream operator.
+                        enum:
+                        - External
+                        - Managed
+                        - Disabled
+                        type: string
+                      secretRef:
+                        description: |-
+                          SecretReference refers to a Kubernetes Secret. Credentials must never live
+                          directly in a KubeNeuron custom resource.
+                        properties:
+                          key:
+                            maxLength: 253
+                            type: string
+                          name:
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          namespace:
+                            maxLength: 63
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: External dependencies require an endpoint
+                      rule: self.mode != 'External' || (has(self.endpoint) && self.endpoint.size()
+                        > 0)
+                    - message: Disabled dependencies cannot set endpoint or secretRef
+                      rule: self.mode != 'Disabled' || (!has(self.endpoint) && !has(self.secretRef))
+                type: object
+                x-kubernetes-validations:
+                - message: victoriaMetrics currently supports only External mode
+                  rule: '!has(self.victoriaMetrics) || self.victoriaMetrics.mode ==
+                    ''External'''
+                - message: alertmanager currently supports only External mode
+                  rule: '!has(self.alertmanager) || self.alertmanager.mode == ''External'''
+                - message: victoriaMetrics secretRef is not supported
+                  rule: '!has(self.victoriaMetrics) || !has(self.victoriaMetrics.secretRef)'
+                - message: alertmanager secretRef is not supported
+                  rule: '!has(self.alertmanager) || !has(self.alertmanager.secretRef)'
+                - message: victoriaMetrics is deprecated and replaced by store; set
+                    only store
+                  rule: '!has(self.victoriaMetrics) || !has(self.store)'
+                - message: 'an external collector routes metrics itself: store cannot
+                    be Managed'
+                  rule: '!has(self.collector) || self.collector.mode != ''External''
+                    || !has(self.store) || self.store.mode != ''Managed'''
+                - message: a Managed grafana needs a Managed or External store to
+                    read
+                  rule: '!has(self.grafana) || self.grafana.mode != ''Managed'' ||
+                    (has(self.store) && self.store.mode != ''Disabled'')'
+                - message: grafana.datasource applies only to an External store; a
+                    Managed store is the datasource itself
+                  rule: '!has(self.grafana) || !has(self.grafana.datasource) || (has(self.store)
+                    && self.store.mode == ''External'')'
+                - message: a Managed grafana with an External store requires grafana.datasource.url
+                  rule: '!has(self.grafana) || self.grafana.mode != ''Managed'' ||
+                    !has(self.store) || self.store.mode != ''External'' || has(self.grafana.datasource)'
+              recoveryCostRates:
+                description: |-
+                  RecoveryCostRates are the operator's cost of one device-hour of each
+                  accelerator resource, used only to show the device-hours saved as an
+                  estimated cost. There are no default rates: a resource without one
+                  shows hours only.
+                properties:
+                  currency:
+                    description: Currency is an ISO 4217 code, e.g. USD.
+                    pattern: ^[A-Z]{3}$
+                    type: string
+                  perDeviceHour:
+                    additionalProperties:
+                      description: DeviceHourRate is the cost of one device-hour,
+                        a decimal such as "2.50".
+                      maxLength: 14
+                      pattern: ^[0-9]{1,9}([.][0-9]{1,4})?$
+                      type: string
+                    description: |-
+                      PerDeviceHour maps an accelerator resource (nvidia.com/gpu, amd.com/gpu,
+                      google.com/tpu, aws.amazon.com/neuron) to the cost of one device-hour
+                      of it, a decimal such as "2.50".
+                    maxProperties: 16
+                    minProperties: 1
+                    type: object
+                required:
+                - currency
+                - perDeviceHour
+                type: object
+              safety:
+                description: |-
+                  SafetySpec holds execution limits. ExecutionMode defaults to DryRun in the
+                  operator, even when omitted from the CR.
+                properties:
+                  acceleratorHealth:
+                    description: |-
+                      AcceleratorHealth turns on the optional sources of the accelerator
+                      health profiles. Omitted means only the Kubernetes Node objects are
+                      read.
+                    properties:
+                      awsNeuronSysfs:
+                        description: |-
+                          AWSNeuronSysfs acts on the faults the agent reads from the AWS Neuron
+                          driver's sysfs tree. Omitted means off.
+                        properties:
+                          enabled:
+                            default: false
+                            description: |-
+                              Enabled lets an uncorrectable ECC error or a failing device component
+                              the agent reads from /sys/devices/virtual/neuron_device open an
+                              accelerator-fault incident on the node. While false the agent still
+                              reads the tree and the controller shows each fault in the accelerator
+                              health view as not acted on; nothing is held, cordoned or replaced
+                              for it. No permission changes either way. Default false.
+                            type: boolean
+                        type: object
+                      dra:
+                        description: |-
+                          DRA reads the device taints of Dynamic Resource Allocation drivers.
+                          Omitted means off.
+                        properties:
+                          enabled:
+                            default: false
+                            description: |-
+                              Enabled makes the controller list the resource.k8s.io/v1
+                              ResourceSlices (get/list/watch only, never another version or verb)
+                              and read the taints the documented drivers set on their devices. The
+                              managed controller ClusterRole gains only that read-only ResourceSlice
+                              rule while this is true. Default false.
+                            type: boolean
+                        type: object
+                    type: object
+                  checkpointCoordination:
+                    description: |-
+                      CheckpointCoordination optionally warns opted-in workloads before a
+                      disruption and waits, for a bounded time, for them to checkpoint.
+
+                      Omitted means off. Waiting is a change to how every disruption step
+                      behaves, so it must never arrive by default with an upgrade.
+                    properties:
+                      advisory:
+                        description: |-
+                          Advisory, when enabled, stamps a deadline-free notice on every eligible
+                          opted-in Pod the moment its incident parks for human approval with a
+                          drain or GPU-workload eviction still downstream, so a job can start
+                          checkpointing during the minutes a human takes to decide instead of
+                          learning about the disruption only when it begins. It promises nothing
+                          and waits for nothing: the deadline-bearing request still arrives at
+                          the disruption step exactly as without it. Omitted means off. It needs
+                          enabled: true on this block; the advisory uses the same allowlist, the
+                          same Pod identity confinement and the same `pods: patch` grant, and
+                          adds no RBAC of its own.
+                        properties:
+                          budget:
+                            default: 10s
+                            description: |-
+                              Budget bounds one advisory round end to end (listing the node's
+                              workloads and stamping each eligible one). The park is already
+                              committed when the round starts, so the budget delays no decision; a
+                              round that runs out of budget leaves the rest unstamped and counts them
+                              unreachable. At most 60s.
+                            type: string
+                          enabled:
+                            default: false
+                            description: Enabled turns the advisory on. Default false.
+                            type: boolean
+                        type: object
+                        x-kubernetes-validations:
+                        - message: advisory.budget must be a positive duration of
+                            at most 60s
+                          rule: '!has(self.budget) || (duration(self.budget) > duration(''0s'')
+                            && duration(self.budget) <= duration(''60s''))'
+                      defaultWait:
+                        default: 5m
+                        description: DefaultWait is granted to an opted-in workload
+                          that requests nothing.
+                        type: string
+                      enabled:
+                        default: false
+                        description: |-
+                          Enabled turns coordination on. Default false, and false is also what an
+                          absent block means: no disruption waits for anything until somebody
+                          asks it to.
+                        type: boolean
+                      groups:
+                        description: |-
+                          Groups, when enabled, extends a request to the peers of a Pod that
+                          declares kubeneuron.io/checkpoint-group: the Pods in the same namespace
+                          with the same value get the same request with their own deadline from
+                          the same formula, and nothing else — disruption stays on the one node.
+                          Omitted means off. Needs enabled: true on this block.
+                        properties:
+                          crossNode:
+                            default: false
+                            description: |-
+                              CrossNode stamps peers on other nodes too. Default false: the group is
+                              then the members on the disrupted node, which is lead time for local
+                              ranks with zero new blast radius.
+                            type: boolean
+                          enabled:
+                            default: false
+                            description: Enabled turns group requests on. Default
+                              false.
+                            type: boolean
+                          maxGroupSize:
+                            default: 64
+                            description: |-
+                              MaxGroupSize bounds a group. A larger group has its peers skipped: the
+                              step asks only the members on the disrupted node, counts the skip, and
+                              the impact preview says so. 1 to 512, default 64.
+                            maximum: 512
+                            minimum: 1
+                            type: integer
+                        type: object
+                      maxWait:
+                        default: 15m
+                        description: |-
+                          MaxWait is the hard ceiling on any wait. A workload annotation can only
+                          shorten it, and the whole installation cannot raise it above 30m.
+                        type: string
+                      namespaces:
+                        description: |-
+                          Namespaces is the explicit allowlist of namespaces whose workloads may
+                          opt in. Required when enabled, so an untrusted tenant fleet is excluded
+                          without turning the feature off for the trusted one.
+                        items:
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        maxItems: 256
+                        type: array
+                        x-kubernetes-list-type: set
+                      skipClasses:
+                        default:
+                        - fell-off-bus
+                        - gpu-lost
+                        description: |-
+                          SkipClasses lists problem classes for which no coordination is
+                          attempted. This is correctness, not an optimization: when the device has
+                          fallen off the bus the job is already dead, and waiting to be polite to
+                          a process that cannot make progress only delays recovery.
+
+                          Omitted defaults to the device-dead classes, fell-off-bus and gpu-lost.
+                          An explicit list replaces the default rather than adding to it, and an
+                          explicit empty list means coordinate for every class.
+                        items:
+                          minLength: 1
+                          type: string
+                        maxItems: 64
+                        type: array
+                        x-kubernetes-list-type: set
+                    type: object
+                    x-kubernetes-validations:
+                    - message: 'checkpointCoordination.enabled requires a non-empty
+                        namespaces allowlist: self-declaration is a trust decision
+                        and is never fleet-wide by default'
+                      rule: '!self.enabled || (has(self.namespaces) && self.namespaces.size()
+                        > 0)'
+                    - message: defaultWait must be a positive duration
+                      rule: '!has(self.defaultWait) || duration(self.defaultWait)
+                        > duration(''0s'')'
+                    - message: maxWait must be a positive duration of at most 30m
+                      rule: '!has(self.maxWait) || (duration(self.maxWait) > duration(''0s'')
+                        && duration(self.maxWait) <= duration(''30m''))'
+                    - message: defaultWait must not exceed maxWait
+                      rule: '!has(self.defaultWait) || !has(self.maxWait) || duration(self.defaultWait)
+                        <= duration(self.maxWait)'
+                    - message: 'checkpointCoordination.advisory.enabled requires checkpointCoordination.enabled:
+                        an advisory is part of coordination, not a feature of its
+                        own'
+                      rule: '!has(self.advisory) || !self.advisory.enabled || self.enabled'
+                    - message: checkpointCoordination.groups.enabled requires checkpointCoordination.enabled
+                      rule: '!has(self.groups) || !self.groups.enabled || self.enabled'
+                  destructiveExecution:
+                    description: |-
+                      DestructiveExecution is the only way to reach executionMode Enabled.
+                      It arms real reset, reboot, and driver actions, and it deliberately
+                      cannot be switched on fleet-wide: a node selector is mandatory, and
+                      only nodes matching it ever receive an agent armed for destructive
+                      work.
+                    properties:
+                      acknowledgement:
+                        description: |-
+                          Acknowledgement must read exactly
+                          "I understand these nodes may be reset, rebooted, or destroyed".
+                          A typo is a rejected installation, not a rebooted production node.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: acknowledgement text must match exactly
+                          rule: self == 'I understand these nodes may be reset, rebooted,
+                            or destroyed'
+                      nodeSelector:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          NodeSelector selects the nodes permitted to execute destructive
+                          actions. It must be non-empty, and the operator arms the agent only
+                          on nodes that match it.
+                        minProperties: 1
+                        type: object
+                    required:
+                    - acknowledgement
+                    - nodeSelector
+                    type: object
+                  executionMode:
+                    default: DryRun
+                    description: ExecutionMode controls whether the operator may schedule
+                      remediation.
+                    enum:
+                    - DryRun
+                    - Enabled
+                    - Paused
+                    type: string
+                  flapCount:
+                    default: 3
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  flapWindow:
+                    default: 24h
+                    type: string
+                  impactPreview:
+                    description: |-
+                      ImpactPreview, when enabled, computes a durable impact-preview/v1 record
+                      for every approval round: the node and its device topology, the
+                      workloads the downstream disruption would touch and which of them can
+                      checkpoint, and the warnings a human should read before approving. It
+                      is advisory and cannot block an approve; with requireForApproval it
+                      binds the approve to the exact preview the human saw. Omitted means
+                      off. (v0.8 development)
+                    properties:
+                      budget:
+                        default: 15s
+                        description: |-
+                          Budget bounds one preview computation (listing the node's workloads and
+                          classifying its topology). A computation that runs out of budget is
+                          recorded as unavailable with its reason. At most 60s.
+                        type: string
+                      enabled:
+                        default: false
+                        description: Enabled turns the preview on. Default false.
+                        type: boolean
+                      maxItems:
+                        default: 200
+                        description: |-
+                          MaxItems bounds how many workloads the preview itemises; the rest are
+                          counted and items_truncated is set. 10 to 1000.
+                        maximum: 1000
+                        minimum: 10
+                        type: integer
+                      requireForApproval:
+                        default: false
+                        description: |-
+                          RequireForApproval refuses an approve that carries no impact_digest, or
+                          a digest that does not match the round's current preview, and refuses
+                          every approve while the round's preview is unavailable. Default false:
+                          the preview is advisory unless the operator makes it a condition.
+                        type: boolean
+                      workloadContext:
+                        description: |-
+                          WorkloadContext selects read-only resolvers that add "whose Pod is
+                          this" to each itemised workload of the preview: the owning batch Job,
+                          the Kueue Workload admitting it, the KubeRay cluster and job. Each is
+                          off by default; enabling one grants the controller get/list/watch on
+                          that group and nothing else, and an absent CRD group is reported as
+                          not observed rather than failing the preview.
+                        properties:
+                          batchJobs:
+                            default: false
+                            description: BatchJobs reads batch/v1 Jobs that own itemised
+                              Pods.
+                            type: boolean
+                          kuberay:
+                            default: false
+                            description: KubeRay reads ray.io RayClusters and RayJobs.
+                            type: boolean
+                          kueue:
+                            default: false
+                            description: Kueue reads kueue.x-k8s.io Workloads, LocalQueues
+                              and ClusterQueues.
+                            type: boolean
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: impactPreview.requireForApproval requires impactPreview.enabled
+                      rule: '!has(self.requireForApproval) || !self.requireForApproval
+                        || self.enabled'
+                    - message: impactPreview.budget must be a positive duration of
+                        at most 60s
+                      rule: '!has(self.budget) || (duration(self.budget) > duration(''0s'')
+                        && duration(self.budget) <= duration(''60s''))'
+                  maxConcurrentReboots:
+                    default: 1
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  maxConcurrentRemediations:
+                    default: 2
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  nodeLevelActions:
+                    default: false
+                    description: |-
+                      NodeLevelActions enables agent recovery actions on this installation.
+                      Alpha, not validated on real hardware. Defaults to false.
+                      Existing destructive-action and approval checks still apply.
+                    type: boolean
+                  quiesce:
+                    description: |-
+                      Quiesce tunes how the vendor's own components are stood down before a
+                      GPU reset.
+                    properties:
+                      forbidResetWhenPresent:
+                        description: |-
+                          ForbidResetWhenPresent lists process names whose presence on a node means
+                          a per-device reset must not be attempted there at all.
+
+                          Some processes hold the GPU and must not be stopped. `nv-fabricmanager`
+                          is the standing example: on NVSwitch machines it is required for the GPUs
+                          to function, and the honest answer is "this node is not reset per-device"
+                          rather than killing a critical daemon to make room for a remediation.
+                          Declaring it here turns a reset attempt into an early, explained refusal
+                          instead of a cordoned and drained node followed by a failure.
+
+                          Names are matched against the process name the node reports, which Linux
+                          truncates to 15 characters. Longer entries are truncated here to match,
+                          so `nv-fabricmanager` and `nv-fabricmanage` both work.
+                        items:
+                          minLength: 1
+                          type: string
+                        maxItems: 32
+                        type: array
+                    type: object
+                  taintDegradedNodes:
+                    description: |-
+                      TaintDegradedNodes optionally stops a node under an open incident from
+                      attracting NEW GPU work, before any playbook cordons it.
+
+                      Omitted means off. Scheduling is the one thing every workload in the
+                      cluster depends on, so this must never arrive by default with an
+                      upgrade.
+                    properties:
+                      effect:
+                        default: PreferNoSchedule
+                        description: |-
+                          Effect selects how hard the hint is.
+
+                          PreferNoSchedule, the default, is a bias: the scheduler avoids the node
+                          when it has somewhere else to put the pod, and still uses it rather than
+                          leaving work pending. NoSchedule is a wall — for a node under an OPEN
+                          incident, whose fault may yet turn out to be benign, that is a bigger
+                          hammer than the cordon a playbook applies deliberately and after
+                          evidence, which is why it is never the default.
+                        enum:
+                        - PreferNoSchedule
+                        - NoSchedule
+                        type: string
+                      enabled:
+                        default: false
+                        description: |-
+                          Enabled turns the taint on. Default false, and false is also what an
+                          absent block means: KubeNeuron does not touch node scheduling until
+                          somebody asks it to.
+                        type: boolean
+                    type: object
+                  topologyClassifier:
+                    description: |-
+                      TopologyClassifier tunes the read-only device topology classifier
+                      (whole-device, mig, time-sliced, dra-managed, mixed, unknown). The
+                      classifier always runs and can only add refusals to a device-scoped
+                      GPU reset; this block carries only its opt-in inputs.
+
+                      Omitted means: classify from node capacity, GPU Feature Discovery
+                      labels and the agent report, without reading Dynamic Resource
+                      Allocation objects.
+                    properties:
+                      dra:
+                        description: |-
+                          DRA optionally lets the classifier read Dynamic Resource Allocation
+                          state. Omitted means off.
+                        properties:
+                          enabled:
+                            default: false
+                            description: |-
+                              Enabled makes the controller list ResourceSlices (resource.k8s.io/v1,
+                              get/list/watch only, never any other version or verb) for a node when
+                              it classifies that node, and inspect the ResourceClaim references of
+                              the Pods scheduled on it through the core Pod list it already holds
+                              (ResourceClaim objects are never read). The managed controller
+                              ClusterRole gains only that read-only ResourceSlice rule while this is
+                              true. When the group/version is not served, either read fails, or a
+                              ResourceSlice is scoped by anything other than an explicit nodeName
+                              (nodeSelector, allNodes, perDeviceNodeSelection), the node is
+                              classified as unknown and device-scoped actions are refused; nothing
+                              is ever assumed. Default false, and false is also what an absent block
+                              means.
+                            type: boolean
+                        type: object
+                    type: object
+                  verifyQuietWindow:
+                    default: 10m
+                    type: string
+                type: object
+              tls:
+                description: |-
+                  TLSSpec references mTLS material used for agent/controller traffic. The
+                  operator writes Secret volume references into managed workloads; kubelet
+                  performs the mounts. The operator never reads or copies private key bytes
+                  into a ConfigMap or custom-resource status.
+                properties:
+                  clientCASecretRef:
+                    description: |-
+                      ClientCASecretRef selects the CA bundle used by the controller to verify
+                      agent fleet certificates. Key defaults to ca.crt.
+                    properties:
+                      key:
+                        maxLength: 253
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        maxLength: 63
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  clientSecretRef:
+                    description: |-
+                      ClientSecretRef selects a kubernetes.io/tls-style Secret mounted by every
+                      agent. Its clientAuth leaf must contain exactly the installation URI SAN
+                      documented in docs/design.md; the projected Pod token supplies node
+                      identity, so this shared leaf is not treated as a node credential.
+                    properties:
+                      key:
+                        maxLength: 253
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        maxLength: 63
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  issuer:
+                    allOf:
+                    - enum:
+                      - External
+                      - Operator
+                    - enum:
+                      - External
+                      - Operator
+                    default: External
+                    description: |-
+                      Issuer decides who fills in the Secrets this block names.
+
+                      External, the default, means somebody else owns them: the installer,
+                      cert-manager, an organisation's own CA. The operator never writes them,
+                      and reports how close they are to expiry so they cannot lapse silently.
+
+                      Operator means KubeNeuron issues and renews them itself — a long-lived
+                      authority signing short-lived certificates that are replaced well before
+                      they expire.
+
+                      It is deliberately explicit rather than inferred from whether the Secrets
+                      happen to exist. "Absent" and "supposed to be mine" are different things:
+                      treating a missing Secret as an invitation would let the operator take
+                      over material somebody else manages the moment they deleted it mid-
+                      rotation.
+                    type: string
+                  publicServerSecretRef:
+                    description: |-
+                      PublicServerSecretRef optionally selects a kubernetes.io/tls-style
+                      Secret for the controller's public listener (operator API, Alertmanager
+                      webhook, control panel, metrics). When omitted, the public listener
+                      serves plain HTTP and should be protected by an Ingress/Gateway that
+                      terminates TLS; when set, bearer tokens never cross the network in
+                      cleartext even inside the cluster.
+                    properties:
+                      key:
+                        maxLength: 253
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        maxLength: 63
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  serverCASecretRef:
+                    description: |-
+                      ServerCASecretRef selects the CA bundle agents use to verify the
+                      controller Service certificate. Key defaults to ca.crt.
+                    properties:
+                      key:
+                        maxLength: 253
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        maxLength: 63
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  serverSecretRef:
+                    description: |-
+                      ServerSecretRef selects a kubernetes.io/tls-style Secret containing
+                      tls.crt and tls.key. The certificate must cover the controller Service DNS
+                      name and be valid for server authentication.
+                    properties:
+                      key:
+                        maxLength: 253
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        maxLength: 63
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - clientCASecretRef
+                - clientSecretRef
+                - serverCASecretRef
+                - serverSecretRef
+                type: object
+                x-kubernetes-validations:
+                - message: serverSecretRef, clientCASecretRef, clientSecretRef, and
+                    serverCASecretRef are required
+                  rule: has(self.serverSecretRef) && has(self.clientCASecretRef) &&
+                    has(self.clientSecretRef) && has(self.serverCASecretRef)
+                - message: TLS key-pair Secret references cannot select one key
+                  rule: '!has(self.serverSecretRef.key) && !has(self.clientSecretRef.key)
+                    && (!has(self.publicServerSecretRef) || !has(self.publicServerSecretRef.key))'
+              trainingReports:
+                description: TrainingReports enables the in-cluster HTTPS endpoint
+                  for authenticated worker reports.
+                type: boolean
+              workflowStore:
+                description: |-
+                  WorkflowStoreSpec describes the authoritative store for workflow state.
+                  PostgreSQL is required for a highly available controller; SQLite is only for
+                  local development and a single controller replica.
+                properties:
+                  database:
+                    type: string
+                  secretRef:
+                    description: |-
+                      SecretReference refers to a Kubernetes Secret. Credentials must never live
+                      directly in a KubeNeuron custom resource.
+                    properties:
+                      key:
+                        maxLength: 253
+                        type: string
+                      name:
+                        maxLength: 253
+                        minLength: 1
+                        type: string
+                      namespace:
+                        maxLength: 63
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  sqlite:
+                    description: |-
+                      SQLiteStoreSpec configures the persistent volume used by the single-node
+                      SQLite runtime. Omitting size defaults to 5Gi. Size may grow after claim
+                      creation, but it cannot shrink, and storageClassName cannot change.
+                    properties:
+                      size:
+                        default: 5Gi
+                        type: string
+                        x-kubernetes-validations:
+                        - message: size must be a positive Kubernetes quantity
+                          rule: isQuantity(self) && quantity(self).compareTo(quantity('0'))
+                            > 0
+                      storageClassName:
+                        type: string
+                    required:
+                    - size
+                    type: object
+                    x-kubernetes-validations:
+                    - message: size cannot decrease
+                      rule: '!has(oldSelf.size) || (has(self.size) && isQuantity(self.size)
+                        && isQuantity(oldSelf.size) && quantity(self.size).compareTo(quantity(oldSelf.size))
+                        >= 0)'
+                    - message: storageClassName is immutable
+                      rule: has(self.storageClassName) == has(oldSelf.storageClassName)
+                        && (!has(self.storageClassName) || self.storageClassName ==
+                        oldSelf.storageClassName)
+                  type:
+                    enum:
+                    - Postgres
+                    - SQLite
+                    type: string
+                required:
+                - type
+                type: object
+                x-kubernetes-validations:
+                - message: secretRef is not supported for SQLite
+                  rule: self.type != 'SQLite' || !has(self.secretRef)
+                - message: database is not supported for SQLite
+                  rule: self.type != 'SQLite' || !has(self.database)
+                - message: secretRef is required for Postgres
+                  rule: self.type != 'Postgres' || has(self.secretRef)
+                - message: sqlite settings are not supported for Postgres
+                  rule: self.type != 'Postgres' || !has(self.sqlite)
+                - message: sqlite settings are required for SQLite
+                  rule: self.type != 'SQLite' || has(self.sqlite)
+                - message: the Postgres DSN Secret must omit namespace and use spec.namespace
+                  rule: self.type != 'Postgres' || !has(self.secretRef) || !has(self.secretRef.namespace)
+                - message: workflow store type is immutable
+                  rule: self.type == oldSelf.type
+            required:
+            - agent
+            - controller
+            - namespace
+            - tls
+            - workflowStore
+            type: object
+            x-kubernetes-validations:
+            - message: TLS Secret references must omit namespace and use spec.namespace
+              rule: '!has(self.tls.serverSecretRef.namespace) && !has(self.tls.clientCASecretRef.namespace)
+                && !has(self.tls.clientSecretRef.namespace) && !has(self.tls.serverCASecretRef.namespace)
+                && (!has(self.tls.publicServerSecretRef) || !has(self.tls.publicServerSecretRef.namespace))'
+            - message: 'executionMode Enabled requires spec.safety.destructiveExecution:
+                real reset and reboot are confined to explicitly declared nodes'
+              rule: '!has(self.safety) || self.safety.executionMode != ''Enabled''
+                || has(self.safety.destructiveExecution)'
+            - message: 'notifications.webhookToken is required: Alertmanager ingress
+                must be authenticated'
+              rule: has(self.notifications) && has(self.notifications.webhookToken)
+            - message: notifications.operatorAPIToken is required for Paused mode
+                so the gate can be resumed through the authenticated API
+              rule: '!has(self.safety) || self.safety.executionMode != ''Paused''
+                || (has(self.notifications) && has(self.notifications.operatorAPIToken))'
+            - message: auth Secret references must omit namespace and use spec.namespace
+              rule: '!has(self.auth) || ((!has(self.auth.users) || !has(self.auth.users.namespace))
+                && (!has(self.auth.oidc) || !has(self.auth.oidc.clientSecretRef.namespace)))'
+            - message: notification Secret references must omit namespace and use
+                spec.namespace
+              rule: '!has(self.notifications) || ((!has(self.notifications.slack)
+                || !has(self.notifications.slack.namespace)) && (!has(self.notifications.operatorAPIToken)
+                || !has(self.notifications.operatorAPIToken.namespace)) && (!has(self.notifications.webhookToken)
+                || !has(self.notifications.webhookToken.namespace)) && (!has(self.notifications.webhook)
+                || !has(self.notifications.webhook.namespace)) && (!has(self.notifications.pagerduty)
+                || !has(self.notifications.pagerduty.namespace)))'
+            - message: manualRecoveryBaseline must be a positive duration of at most
+                720h
+              rule: '!has(self.manualRecoveryBaseline) || (duration(self.manualRecoveryBaseline)
+                > duration(''0s'') && duration(self.manualRecoveryBaseline) <= duration(''720h''))'
+          status:
+            description: KubeNeuronStatus summarizes the operator's observed desired
+              state.
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              configDigest:
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              playbooksConfigMap:
+                type: string
+              runtimeConfigMap:
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

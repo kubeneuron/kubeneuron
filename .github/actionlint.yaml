@@ -1,0 +1,5 @@
+# Custom labels of our self-hosted runners; actionlint validates runs-on
+# against this list (the CI lint job runs actionlint on every change).
+self-hosted-runner:
+  labels:
+    - azure

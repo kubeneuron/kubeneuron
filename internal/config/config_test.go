@@ -1,0 +1,436 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
+	"github.com/kubeneuron/kubeneuron/pkg/types"
+)
+
+func writeConfig(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "policies.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestLoadShippedConfig(t *testing.T) {
+	c, err := Load("../../configs/policies.yaml")
+	if err != nil {
+		t.Fatalf("shipped config must load: %v", err)
+	}
+	if !c.Safety.DryRun {
+		t.Fatal("shipped config must default to dry-run")
+	}
+	if c.Safety.MaxConcurrentRemediations <= 0 || c.Safety.MaxConcurrentReboots <= 0 {
+		t.Fatal("shipped config must set positive concurrency limits")
+	}
+}
+
+func TestLoadAppliesDefaults(t *testing.T) {
+	path := writeConfig(t, `
+policies:
+  - match: { class: ecc-dbe }
+    playbook: drain-and-reset
+`)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Safety.MaxConcurrentRemediations != 2 || c.Safety.MaxConcurrentReboots != 1 {
+		t.Fatalf("concurrency defaults = %d/%d, want 2/1",
+			c.Safety.MaxConcurrentRemediations, c.Safety.MaxConcurrentReboots)
+	}
+	if c.Approvals.TTL.Std() != 12*time.Hour {
+		t.Fatalf("approval TTL default = %v, want 12h", c.Approvals.TTL.Std())
+	}
+	if c.Policies[0].Match.Class != types.ClassECCDBE {
+		t.Fatalf("class = %s", c.Policies[0].Match.Class)
+	}
+}
+
+func TestLoadRejectsInvalidConfig(t *testing.T) {
+	for name, tc := range map[string]struct {
+		content string
+		wantErr string
+	}{
+		"no policies":      {"safety: { dry_run: true }", "at least one policy"},
+		"missing class":    {"policies:\n  - playbook: rma", "match.class is required"},
+		"missing playbook": {"policies:\n  - match: { class: ecc-dbe }", "playbook is required"},
+		"bad duration":     {"safety: { verify_quiet_window: nonsense }\npolicies:\n  - match: { class: x }\n    playbook: y", "invalid duration"},
+		"bad yaml":         {"policies: [", "yaml"},
+		// A typo'd taint effect must fail the load, not fall back to something
+		// that works: the whole point of the field is that the operator gets
+		// the scheduling effect they asked for.
+		"bad taint effect": {"safety:\n  taint_degraded_nodes: { enabled: true, effect: NoExecute }\npolicies:\n  - match: { class: x }\n    playbook: y", "taint_degraded_nodes.effect"},
+		// An enabled checkpoint policy fails closed on every bound it could
+		// not enforce as written. A wait that quietly became longer, or an
+		// allowlist that quietly became "everyone", is exactly what the
+		// feature promises cannot happen.
+		"checkpoint no namespaces":      {checkpointConfig("{ enabled: true }"), "namespaces must name"},
+		"checkpoint blank namespace":    {checkpointConfig(`{ enabled: true, namespaces: ["a", " "] }`), "blank entry"},
+		"checkpoint blank skip class":   {checkpointConfig(`{ enabled: true, namespaces: [a], skip_classes: [""] }`), "skip_classes must not"},
+		"checkpoint negative default":   {checkpointConfig(`{ enabled: true, namespaces: [a], default_wait: -1m }`), "default_wait must be positive"},
+		"checkpoint negative max":       {checkpointConfig(`{ enabled: true, namespaces: [a], max_wait: -1m }`), "max_wait must be positive"},
+		"checkpoint max above ceiling":  {checkpointConfig(`{ enabled: true, namespaces: [a], max_wait: 31m }`), "exceeds the 30m0s ceiling"},
+		"checkpoint default above max":  {checkpointConfig(`{ enabled: true, namespaces: [a], default_wait: 10m, max_wait: 5m }`), "default_wait 10m0s exceeds max_wait"},
+		"checkpoint malformed duration": {checkpointConfig(`{ enabled: true, namespaces: [a], max_wait: soon }`), "invalid duration"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(writeConfig(t, tc.content))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// The weak effect is what an operator who only said "enabled" gets. A stronger
+// one has to be typed out.
+func TestTaintEffectDefaultsToPreferNoSchedule(t *testing.T) {
+	cfg, err := Load(writeConfig(t,
+		"safety:\n  taint_degraded_nodes: { enabled: true }\npolicies:\n  - match: { class: x }\n    playbook: y"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Safety.TaintDegradedNodes == nil || cfg.Safety.TaintDegradedNodes.Effect != TaintEffectPreferNoSchedule {
+		t.Fatalf("compiled taint = %+v, want the weak default effect", cfg.Safety.TaintDegradedNodes)
+	}
+}
+
+// checkpointConfig wraps one checkpoint_coordination block in a loadable file.
+func checkpointConfig(block string) string {
+	return "safety:\n  checkpoint_coordination: " + block + "\npolicies:\n  - match: { class: x }\n    playbook: y"
+}
+
+func TestCheckpointCoordinationDefaultsAndDisabled(t *testing.T) {
+	cfg, err := Load(writeConfig(t, checkpointConfig(`{ enabled: true, namespaces: [training], skip_classes: [fell-off-bus] }`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc := cfg.Safety.CheckpointCoordination
+	if cc == nil || !cc.Enabled {
+		t.Fatalf("compiled checkpoint policy = %+v, want enabled", cc)
+	}
+	if cc.DefaultWait != CheckpointDefaultWait || cc.MaxWait != CheckpointDefaultMaxWait {
+		t.Fatalf("waits = %v/%v, want the 5m/15m defaults", cc.DefaultWait.Std(), cc.MaxWait.Std())
+	}
+	if len(cc.Namespaces) != 1 || cc.Namespaces[0] != "training" {
+		t.Fatalf("namespaces = %v", cc.Namespaces)
+	}
+	if len(cc.SkipClasses) != 1 || cc.SkipClasses[0] != types.ClassFellOffBus {
+		t.Fatalf("explicit skip classes = %v, want exactly what was written", cc.SkipClasses)
+	}
+
+	// An absent skip list defaults to the device-dead classes; an explicit
+	// empty list is the explicit decision to coordinate for every class, and
+	// the two must not collapse into each other.
+	cfg, err = Load(writeConfig(t, checkpointConfig(`{ enabled: true, namespaces: [training] }`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Safety.CheckpointCoordination.SkipClasses; !reflect.DeepEqual(got, checkpoint.DefaultSkipClasses()) {
+		t.Fatalf("absent skip_classes = %v, want the defaults %v", got, checkpoint.DefaultSkipClasses())
+	}
+	cfg, err = Load(writeConfig(t, checkpointConfig(`{ enabled: true, namespaces: [training], skip_classes: [] }`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Safety.CheckpointCoordination.SkipClasses; got == nil || len(got) != 0 {
+		t.Fatalf("explicit empty skip_classes = %v, want an empty list that skips nothing", got)
+	}
+	// The round trip keeps the key even when empty, so a controller reloading
+	// what the operator wrote cannot re-default an explicit "skip none".
+	out, err := yaml.Marshal(cfg.Safety)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "skip_classes: []") {
+		t.Fatalf("marshalled safety block drops the empty skip list:\n%s", out)
+	}
+
+	// Explicit values are carried through, including the ceiling itself.
+	cfg, err = Load(writeConfig(t, checkpointConfig(`{ enabled: true, namespaces: [a], default_wait: 30m, max_wait: 30m }`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cc := cfg.Safety.CheckpointCoordination; cc.DefaultWait.Std() != 30*time.Minute || cc.MaxWait.Std() != 30*time.Minute {
+		t.Fatalf("waits = %+v, want 30m/30m", cc)
+	}
+
+	// A disabled block is inert: nothing in it is validated or defaulted,
+	// because nothing in it is read.
+	cfg, err = Load(writeConfig(t, checkpointConfig(`{ enabled: false, max_wait: 2h }`)))
+	if err != nil {
+		t.Fatalf("a disabled block must load: %v", err)
+	}
+	if cc := cfg.Safety.CheckpointCoordination; cc == nil || cc.Enabled || cc.DefaultWait != 0 {
+		t.Fatalf("disabled block = %+v, want untouched", cc)
+	}
+
+	// The absent key is the common case and stays nil.
+	cfg, err = Load(writeConfig(t, "policies:\n  - match: { class: x }\n    playbook: y"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Safety.CheckpointCoordination != nil {
+		t.Fatalf("absent key compiled to %+v, want nil", cfg.Safety.CheckpointCoordination)
+	}
+}
+
+func TestDurationRoundTrip(t *testing.T) {
+	d := Duration(90 * time.Minute)
+	out, err := d.MarshalYAML()
+	if err != nil || out != "1h30m0s" {
+		t.Fatalf("MarshalYAML = %v, %v", out, err)
+	}
+}
+
+func TestCheckpointAdvisoryDefaultsBoundsAndRequiresCoordination(t *testing.T) {
+	cfg, err := Load(writeConfig(t, checkpointConfig(`{ enabled: true, namespaces: [training], advisory: { enabled: true } }`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adv := cfg.Safety.CheckpointCoordination.Advisory
+	if adv == nil || !adv.Enabled || adv.Budget != CheckpointAdvisoryDefaultBudget {
+		t.Fatalf("advisory = %+v, want enabled with the 10s default budget", adv)
+	}
+	for name, block := range map[string]string{
+		"budget above the ceiling":      `{ enabled: true, namespaces: [training], advisory: { enabled: true, budget: 61s } }`,
+		"negative budget":               `{ enabled: true, namespaces: [training], advisory: { enabled: true, budget: -1s } }`,
+		"advisory without coordination": `{ enabled: false, advisory: { enabled: true } }`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, checkpointConfig(block))); err == nil {
+				t.Fatalf("Load accepted %s", block)
+			}
+		})
+	}
+	// An advisory that is off inside a disabled block is not read at all.
+	cfg, err = Load(writeConfig(t, checkpointConfig(`{ enabled: false, advisory: { enabled: false, budget: 5m } }`)))
+	if err != nil {
+		t.Fatalf("a disabled advisory inside a disabled block must be ignored: %v", err)
+	}
+	if cfg.Safety.CheckpointCoordination.Advisory == nil || cfg.Safety.CheckpointCoordination.Advisory.Enabled {
+		t.Fatal("the block must be kept as written and stay off")
+	}
+}
+
+func impactConfig(block string) string {
+	return "safety:\n  impact_preview: " + block + "\npolicies:\n  - match: { class: x }\n    playbook: y"
+}
+
+func TestImpactPreviewDefaultsAndBounds(t *testing.T) {
+	cfg, err := Load(writeConfig(t, impactConfig(`{ enabled: true }`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ip := cfg.Safety.ImpactPreview
+	if ip == nil || !ip.Enabled || ip.Budget != ImpactPreviewDefaultBudget || ip.MaxItems != ImpactPreviewDefaultItems || ip.RequireForApproval {
+		t.Fatalf("impact preview = %+v, want enabled with the 15s/200 defaults", ip)
+	}
+	for name, block := range map[string]string{
+		"budget above the ceiling": `{ enabled: true, budget: 2m }`,
+		"too few items":            `{ enabled: true, max_items: 5 }`,
+		"too many items":           `{ enabled: true, max_items: 5000 }`,
+		"require without enabled":  `{ enabled: false, require_for_approval: true }`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, impactConfig(block))); err == nil {
+				t.Fatalf("Load accepted %s", block)
+			}
+		})
+	}
+	if _, err := Load(writeConfig(t, impactConfig(`{ enabled: false, budget: 5m, max_items: 9 }`))); err != nil {
+		t.Fatalf("a disabled block is not read: %v", err)
+	}
+}
+
+func TestCheckpointGroupsDefaultsBoundsAndRequiresCoordination(t *testing.T) {
+	cfg, err := Load(writeConfig(t, checkpointConfig(`{ enabled: true, namespaces: [training], groups: { enabled: true } }`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := cfg.Safety.CheckpointCoordination.Groups
+	if g == nil || !g.Enabled || g.MaxGroupSize != checkpoint.DefaultMaxGroupSize || g.CrossNode {
+		t.Fatalf("groups = %+v, want enabled, size 64, crossNode off", g)
+	}
+	for name, block := range map[string]string{
+		"size above the ceiling":      `{ enabled: true, namespaces: [training], groups: { enabled: true, max_group_size: 513 } }`,
+		"negative size":               `{ enabled: true, namespaces: [training], groups: { enabled: true, max_group_size: -1 } }`,
+		"groups without coordination": `{ enabled: false, groups: { enabled: true } }`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, checkpointConfig(block))); err == nil {
+				t.Fatalf("Load accepted %s", block)
+			}
+		})
+	}
+}
+
+const minimalPolicy = `
+policies:
+  - match: { class: ecc-dbe }
+    playbook: drain-and-reset
+`
+
+func TestDryRunFailsClosed(t *testing.T) {
+	cases := []struct {
+		name    string
+		safety  string
+		want    bool
+		wantErr string
+	}{
+		{name: "key absent", safety: "", want: true},
+		{name: "safety block without the key", safety: "safety:\n  max_concurrent_reboots: 1\n", want: true},
+		{name: "explicit true", safety: "safety:\n  dry_run: true\n", want: true},
+		{name: "explicit false", safety: "safety:\n  dry_run: false\n  destructive_execution_node_selector: {pool: gpu-a}\n", want: false},
+		{name: "misspelt camelCase", safety: "safety:\n  dryRun: true\n", wantErr: "dryRun"},
+		{name: "misspelt top level", safety: "dry_run: true\n", wantErr: "dry_run"},
+		{name: "unknown key elsewhere", safety: "approvals:\n  tll: 1h\n", wantErr: "tll"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Load(writeConfig(t, tc.safety+minimalPolicy))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Load() error = %v, want an error naming %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Safety.DryRun != tc.want {
+				t.Fatalf("DryRun = %v, want %v", c.Safety.DryRun, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsSecondDocument(t *testing.T) {
+	if _, err := Load(writeConfig(t, minimalPolicy+"---\nsafety:\n  dry_run: false\n")); err == nil {
+		t.Fatal("a second YAML document must be rejected, not ignored")
+	}
+}
+
+func TestFlapAndDurationsDefaultOrReject(t *testing.T) {
+	c, err := Load(writeConfig(t, minimalPolicy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Safety.Flap.Count != DefaultFlapCount || c.Safety.Flap.Window != DefaultFlapWindow {
+		t.Fatalf("flap defaults = %d/%v, want %d/%v", c.Safety.Flap.Count, c.Safety.Flap.Window.Std(),
+			DefaultFlapCount, DefaultFlapWindow.Std())
+	}
+	for _, bad := range []string{
+		"safety:\n  flap:\n    count: -1\n",
+		"safety:\n  flap:\n    window: -1h\n",
+		"approvals:\n  ttl: -1h\n",
+		"safety:\n  verify_quiet_window: -1m\n",
+	} {
+		if _, err := Load(writeConfig(t, bad+minimalPolicy)); err == nil {
+			t.Errorf("Load(%q) accepted a negative safety setting", bad)
+		}
+	}
+}
+
+func TestSideFilesRejectUnknownKeys(t *testing.T) {
+	if _, err := LoadWindowsFromBytes([]byte("windows:\n  - name: w\n    pauseAutomaton: true\n")); err == nil || !strings.Contains(err.Error(), "pauseAutomaton") {
+		t.Errorf("windows: unknown key not rejected: %v", err)
+	}
+	if _, err := LoadNodeConfigsFromBytes([]byte("nodes:\n  - node: n1\n    pasued: true\n")); err == nil || !strings.Contains(err.Error(), "pasued") {
+		t.Errorf("node configs: unknown key not rejected: %v", err)
+	}
+	if _, err := LoadSignalOverridesFromBytes([]byte("overides: []\n")); err == nil || !strings.Contains(err.Error(), "overides") {
+		t.Errorf("signal overrides: unknown key not rejected: %v", err)
+	}
+	for name, load := range map[string]func([]byte) error{
+		"windows":      func(b []byte) error { _, err := LoadWindowsFromBytes(b); return err },
+		"node configs": func(b []byte) error { _, err := LoadNodeConfigsFromBytes(b); return err },
+		"overrides":    func(b []byte) error { _, err := LoadSignalOverridesFromBytes(b); return err },
+	} {
+		if err := load(nil); err != nil {
+			t.Errorf("%s: an empty document must stay an empty set, got %v", name, err)
+		}
+	}
+}
+
+// Audit #22 follow-up (#43): a live file config must say where destructive
+// steps may run; an absent selector is never read as "every node".
+func TestLiveConfigMustNameTheBlastRadius(t *testing.T) {
+	cases := []struct {
+		name, safety, wantErr string
+	}{
+		{name: "live, no selector", safety: "safety:\n  dry_run: false\n", wantErr: "destructive_execution_node_selector is empty"},
+		{name: "live, empty selector", safety: "safety:\n  dry_run: false\n  destructive_execution_node_selector: {}\n", wantErr: "destructive_execution_node_selector is empty"},
+		{name: "live, named nodes", safety: "safety:\n  dry_run: false\n  destructive_execution_node_selector: {pool: gpu-a}\n"},
+		{name: "live, explicit all nodes", safety: "safety:\n  dry_run: false\n  destructive_execution_all_nodes: true\n"},
+		{name: "both selector and all nodes", safety: "safety:\n  dry_run: false\n  destructive_execution_all_nodes: true\n  destructive_execution_node_selector: {pool: gpu-a}\n", wantErr: "not both"},
+		{name: "dry-run, no selector", safety: "safety:\n  dry_run: true\n"},
+		{name: "default dry-run, no selector", safety: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeConfig(t, tc.safety+minimalPolicy))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Load() = %v, want accepted", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Load() = %v, want an error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestAutomaticPolicyConfig(t *testing.T) {
+	const automatic = `
+policies:
+  - name: auto-dbe
+    match: { class: ecc-dbe }
+    playbook: drain-and-reset
+    mode: automatic
+    automatic:
+      node_selector: { pool: train }
+      max_concurrent_nodes: 1
+      node_cooldown: 6h
+      max_unhealthy_percent: 25
+      enabled_by: alice
+      enabled_at: 2026-11-15T09:00:00Z
+      acknowledgement: "I understand that automatic mode drains and replaces nodes without asking"
+`
+	c, err := Load(writeConfig(t, automatic))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := c.Policies[0]; p.Mode != "automatic" || p.Automatic == nil || p.Automatic.NodeCooldown != 6*time.Hour {
+		t.Fatalf("policy = %+v", p)
+	}
+	for name, tc := range map[string]struct{ from, to, want string }{
+		"empty selector":       {"node_selector: { pool: train }", "node_selector: {}", "node_selector must name"},
+		"no name":              {"name: auto-dbe", "name: \"\"", "needs a name"},
+		"checkpoint wait, off": {"max_concurrent_nodes: 1", "max_concurrent_nodes: 1\n      checkpoint_wait: 10m", "checkpoint coordination"},
+		"unknown key":          {"max_concurrent_nodes: 1", "max_concurrent_node: 1", "max_concurrent_node"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(writeConfig(t, strings.Replace(automatic, tc.from, tc.to, 1)))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Load() = %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+}

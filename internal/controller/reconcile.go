@@ -1,0 +1,1502 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package controller
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/kubeneuron/kubeneuron/internal/action"
+	"github.com/kubeneuron/kubeneuron/internal/approval"
+	"github.com/kubeneuron/kubeneuron/internal/detect"
+	"github.com/kubeneuron/kubeneuron/internal/metrics"
+	"github.com/kubeneuron/kubeneuron/internal/notify"
+	"github.com/kubeneuron/kubeneuron/internal/platform"
+	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/internal/store"
+	"github.com/kubeneuron/kubeneuron/pkg/types"
+)
+
+// This file is the state walk: the reconcile tick, the per-state advance
+// functions, the approval request/decision protocol, verification, and the
+// transactional transition every state change goes through. Its seams live
+// beside it: gate admission and confinement in admission.go, step execution
+// in execution.go, node resolution in noderesolution.go.
+
+// Default timings; SetTimings overrides them from configs/policies.yaml.
+const (
+	defaultVerifyQuietWindow = 10 * time.Minute
+	defaultApprovalTTL       = 12 * time.Hour
+	defaultObserveWindow     = 24 * time.Hour
+	defaultReconcileInterval = 10 * time.Second
+	// agentResultGrace is how much longer the controller waits than the agent's
+	// own action budget, so a failing action's reason survives the deadline.
+	// The store sizes the action lease with the same value — see
+	// types.AgentResultGrace — because a controller willing to hear an answer
+	// the store will refuse to accept is worse than not waiting at all.
+	agentResultGrace = types.AgentResultGrace
+	// defaultStepTimeout bounds a step whose playbook declares no timeout. It is
+	// generous — a drain or a reboot can legitimately take many minutes — because
+	// its job is not pacing but leak prevention: without any bound, a step whose
+	// agent never answers holds its goroutine, inFlight mark, and gate slot until
+	// the controller restarts.
+	defaultStepTimeout = 30 * time.Minute
+	// maxEscalationAttempts caps how many times one incident may climb its
+	// escalation ladder before it fails closed to NEEDS_HUMAN. inc.Attempt is
+	// bumped once per escalation, so this bounds a persistent fault that keeps
+	// re-failing each rung: past the cap a human decides, rather than the
+	// destructive ladder repeating at reconcile speed. Cyclic ladders are
+	// already rejected at compile/load; this is the runtime backstop for a long
+	// (but acyclic) ladder and for an engine assembled without that validation.
+	maxEscalationAttempts = 8
+)
+
+// SetTimings configures the verification quiet window and the approval TTL.
+// Zero values keep the current setting.
+func (c *Controller) SetTimings(verifyQuiet, approvalTTL time.Duration) {
+	c.mutateRuntimeConfig(func(rc *RuntimeConfig) {
+		if verifyQuiet > 0 {
+			rc.VerifyQuiet = verifyQuiet
+		}
+		if approvalTTL > 0 {
+			rc.ApprovalTTL = approvalTTL
+		}
+	})
+}
+
+// reconcile advances every non-terminal incident one step. Long-running
+// steps execute in per-incident goroutines guarded by the inFlight set, so
+// a 30-minute drain never blocks the other incidents.
+func (c *Controller) reconcile(ctx context.Context) {
+	defer func(start time.Time) {
+		metrics.ReconcileSeconds.Observe(time.Since(start).Seconds())
+	}(time.Now())
+	c.sweepSuccessors(ctx)
+	c.sweepRemoveFirst(ctx)
+	incidents, err := c.store.ListIncidents(ctx, store.IncidentFilter{
+		States: []types.IncidentState{
+			types.StateOpen, types.StateObserving, types.StateEvaluating,
+			types.StateAwaitingApproval, types.StateExecuting, types.StateVerifying,
+		},
+	})
+	if err != nil {
+		c.log.Error("reconcile: listing incidents failed", "err", err)
+		return
+	}
+	for _, inc := range incidents {
+		if c.isInFlight(inc.ID) {
+			continue
+		}
+		if err := c.advance(ctx, inc); err != nil {
+			c.log.Error("reconcile: advancing incident failed",
+				"incident", inc.ID, "state", inc.State, "err", err)
+		}
+	}
+	// Health-check completion is a read of the existing durable action queue;
+	// it never dispatches a new action.  Keeping it in the controller tick
+	// means agent loss, safety-stop cancellation and timeout survive process
+	// restart just like incident reconciliation does.
+	if c.operations != nil {
+		if err := c.operations.ReconcileHealthChecks(ctx); err != nil {
+			c.log.Error("reconcile: health checks", "err", err)
+		}
+		if err := c.operations.ReconcileAutonomy(ctx); err != nil {
+			c.log.Error("reconcile: autonomy plans", "err", err)
+		}
+	}
+}
+
+func (c *Controller) advance(ctx context.Context, inc *types.Incident) error {
+	// Pin ONE configuration snapshot for this whole advance — and for the
+	// step goroutine it may spawn, which captures the same ctx. Every read
+	// below (engine, selectors, windows, timings, catalog, profiles) observes
+	// the same generation; the next advance re-pins fresh, so a hot reload is
+	// visible within one tick without ever mixing generations mid-decision.
+	ctx = c.pinRuntimeConfig(ctx)
+	// Pin execution mode alongside the runtime configuration.  Admission gates
+	// (evidence, arming, approvals) and the eventual dispatcher must agree that
+	// this pass is dry-run; otherwise an emergency stop can still strand a node
+	// behind a live-only precondition.
+	ctx, _ = c.pinSimulate(ctx, inc)
+	switch inc.State {
+	case types.StateOpen:
+		return c.advanceOpen(ctx, inc)
+	case types.StateObserving:
+		return c.advanceObserving(ctx, inc)
+	case types.StateEvaluating:
+		return c.advanceEvaluating(ctx, inc)
+	case types.StateAwaitingApproval:
+		return c.advanceAwaitingApproval(ctx, inc)
+	case types.StateExecuting:
+		return c.recoverOrphanedExecution(ctx, inc)
+	case types.StateVerifying:
+		return c.advanceVerifying(ctx, inc)
+	default:
+		return nil
+	}
+}
+
+// advanceOpen routes a fresh incident to OBSERVING (observe-first classes)
+// or EVALUATING, quarantining flapping targets first.
+func (c *Controller) advanceOpen(ctx context.Context, inc *types.Incident) error {
+	if err := c.captureTrainingWorkers(ctx, inc); err != nil {
+		return err
+	}
+	if c.flap != nil && c.flap.RecordReopen(inc.Target, inc.Class) {
+		return c.quarantine(ctx, inc, "flap threshold reached: automation stopped")
+	}
+	if reason, ok := detect.ObserveOnly(inc.Class); ok {
+		return c.transition(ctx, inc, types.StateObserving, "system", "observe-only", reason, nil)
+	}
+	book, hasBook := c.runtimeConfig(ctx).Engine.Playbook(inc.Playbook)
+	if !hasBook || isObservePlaybook(book) {
+		return c.transition(ctx, inc, types.StateObserving, "system", "observe", "", nil)
+	}
+	return c.transition(ctx, inc, types.StateEvaluating, "system", "evaluate", "", nil)
+}
+
+// advanceObserving escalates once the policy threshold is crossed and
+// resolves incidents that stay quiet for the whole observation window.
+func (c *Controller) advanceObserving(ctx context.Context, inc *types.Incident) error {
+	// Late-bind, narrowly: an incident that opened before its policy existed
+	// carries no playbook (binding is open-time), and without one it can only
+	// quiet-resolve — a fault that raced a configuration rollout would get
+	// neither remediation nor a page. Bind here IF a policy now matches:
+	// only never-bound incidents, only in OBSERVING (no approval round, no
+	// gate slot, no step state exists yet), from this pass's pinned
+	// snapshot. Bound incidents are never re-bound — selection changes must
+	// not move a mid-ladder incident between playbooks.
+	if inc.Playbook == "" {
+		// SelectFor, not a reconstructed Signal: building one from the class
+		// alone dropped the incident's vendor, so an incident that raced a
+		// vendor-scoped policy rollout could never late-bind to it and would
+		// quietly resolve with no ladder at all.
+		if book, ok := c.runtimeConfig(ctx).Engine.SelectFor(inc.Class, inc.Vendor); ok && book != nil {
+			// Field-only rewrite: bump StateChangedAt — the WRITE-FENCE —
+			// so a concurrent transition off a stale snapshot conflicts
+			// instead of silently overwriting the bind.
+			inc.StateChangedAt = time.Now()
+			inc.Playbook = book.Name
+			if err := c.store.UpdateIncident(ctx, inc); err != nil {
+				return err // conflict: the next pass re-reads and retries
+			}
+			if err := c.appendAudit(ctx, inc, "system", "bind-playbook",
+				fmt.Sprintf("policy for class %s appeared after open; bound playbook %q", inc.Class, book.Name)); err != nil {
+				c.log.Error("bind-playbook audit append failed", "incident", inc.ID, "err", err)
+			}
+			c.log.Info("late-bound playbook to incident opened before its policy existed",
+				"incident", inc.ID, "class", inc.Class, "playbook", book.Name)
+		}
+	}
+	threshold, window := c.observePolicy(ctx, inc.Class, inc.Vendor)
+	_, observeOnly := detect.ObserveOnly(inc.Class)
+	if threshold > 0 && inc.SignalSeen >= threshold && !observeOnly {
+		// Only escalate to EVALUATING when a playbook is actually bound to act on.
+		// A threshold-crossed class with no bound playbook (a CRD-compiled policy
+		// set that omits the class) would otherwise livelock: advanceEvaluating
+		// sends an unbound incident straight back to OBSERVING, and every
+		// transition rewrites UpdatedAt — the quiet-window anchor — so it can never
+		// quiet-resolve and appends ~8,640 audit rows/day. With no playbook bound,
+		// hold in OBSERVING and let the quiet window resolve it instead.
+		if _, bound := c.runtimeConfig(ctx).Engine.Playbook(inc.Playbook); bound {
+			return c.transition(ctx, inc, types.StateEvaluating, "system", "observe-threshold",
+				fmt.Sprintf("%d signals >= threshold %d", inc.SignalSeen, threshold), nil)
+		}
+	}
+	if time.Since(inc.UpdatedAt) >= window {
+		if err := c.transition(ctx, inc, types.StateResolved, "system", "observe-quiet",
+			fmt.Sprintf("no recurrence within %s", window), nil); err != nil {
+			return err
+		}
+		if c.flap != nil {
+			c.flap.RecordResolved(inc.Target, inc.Class)
+		}
+		return c.notifier.Notify(ctx, notify.NotifyEvent{
+			Kind: notify.EventResolved, Incident: inc,
+			Message: fmt.Sprintf("observed incident resolved: quiet for %s", window),
+		})
+	}
+	return nil
+}
+
+// advanceEvaluating picks the next step and either parks the incident for
+// approval or reserves a safety slot and starts execution.
+func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident) error {
+	if c.pauseHolds(ctx, inc) {
+		c.deferPlaybook(ctx, inc, metrics.DeferNodePaused)
+		return nil // per-node pause: hold position, retry next tick
+	}
+	if window, active := c.activeMaintenanceWindow(ctx, inc.Target.Node); active {
+		c.deferPlaybook(ctx, inc, metrics.DeferMaintenanceWindow)
+		c.log.Debug("maintenance window active, holding incident",
+			"incident", inc.ID, "node", inc.Target.Node, "window", window)
+		return nil
+	}
+	// Whatever brought an observe-only class here (an incident that opened
+	// before this build, a hand-made binding), no step runs for it.
+	if reason, ok := detect.ObserveOnly(inc.Class); ok {
+		return c.transition(ctx, inc, types.StateObserving, "system", "observe-only", reason, nil)
+	}
+	book, ok := c.runtimeConfig(ctx).Engine.Playbook(inc.Playbook)
+	if !ok {
+		return c.transition(ctx, inc, types.StateObserving, "system", "observe",
+			"no playbook bound; observing", nil)
+	}
+	// Respect the playbook-level cooldown before the first step of any run on
+	// this target — including a rung reached by escalation (Attempt > 0). Gating
+	// this on Attempt == 0 let every escalated rung skip cooldown and drive its
+	// first (often destructive) step at reconcile speed; keying only on
+	// StepIndex == 0 keeps the loop rate bounded by the cooldown as well as by
+	// the escalation cap.
+	if inc.StepIndex == 0 {
+		if remaining := c.gate.CooldownRemaining(inc.Target, playbookCooldownAction(inc.Playbook)); remaining > 0 {
+			c.deferPlaybook(ctx, inc, metrics.DeferPlaybookCooldown)
+			c.log.Debug("playbook in cooldown", "incident", inc.ID, "playbook", inc.Playbook, "remaining", remaining)
+			return nil
+		}
+		// Refuse a reset the node can never perform before the first step
+		// disrupts anything. Escalation is the right outcome here, not a hold:
+		// this is a reported fact, not missing evidence, so the ladder should
+		// move on to a rung that can actually work.
+		if err := c.refuseInfeasibleReset(ctx, inc, book); err != nil {
+			c.log.Info("reset playbook refused before any disruptive step",
+				"incident", inc.ID, "playbook", inc.Playbook, "reason", err.Error())
+			if !errors.Is(err, errResetTargetUnattributed) && !errors.Is(err, errResetVendorMismatch) {
+				// Only the holder refusal is protection: processes are using the
+				// device, so nothing was disrupted for a reset that could not
+				// have worked. An unattributed incident is a structural dead end
+				// — the ladder escalates to a rung that DOES run — so counting it
+				// as protection would claim a disruption that still happens.
+				c.deferPlaybook(ctx, inc, metrics.DeferDeviceHolders)
+			}
+			if errors.Is(err, errResetTargetUnattributed) || errors.Is(err, errResetVendorMismatch) {
+				// An unattributed incident has no device to reset and can never gain
+				// one. From EVALUATING the ladder cannot legally re-enter EVALUATING to
+				// swap in the reboot rung, so fail closed to a human with the reason —
+				// the task-sanctioned outcome — instead of holding here forever. A
+				// human can identify the affected GPU (or reboot the node) by hand.
+				return c.quarantine(ctx, inc, err.Error())
+			}
+			return c.escalate(ctx, inc, err.Error())
+		}
+		// Same principle for the arming boundary: if any rung of this playbook
+		// is agent-destructive and the node's agent has definitively declared
+		// itself unarmed, escalate before the first cordon/drain — not after
+		// the node is disrupted and the reboot rung dies at the executor.
+		if !c.simulating(ctx, inc) && playbookNeedsArmedAgent(book) {
+			for i := range book.Steps {
+				reason, verdict := c.refuseUnarmedAgent(ctx, inc, &book.Steps[i])
+				if verdict == armingHold {
+					c.deferStep(inc, &book.Steps[i], metrics.DeferUnarmedAgent)
+					c.log.Info("holding: destructive-execution arming is still propagating to the node's agent",
+						"incident", inc.ID, "node", inc.Target.Node)
+					return nil
+				}
+				if verdict == armingRefuse {
+					c.deferStep(inc, &book.Steps[i], metrics.DeferUnarmedAgent)
+					c.log.Info("playbook needs an armed agent the node does not have",
+						"incident", inc.ID, "playbook", inc.Playbook, "reason", reason)
+					return c.escalate(ctx, inc, reason)
+				}
+			}
+		}
+	}
+	step, done, err := c.runtimeConfig(ctx).Engine.NextStep(inc)
+	if err != nil {
+		return c.quarantine(ctx, inc, err.Error())
+	}
+	if done {
+		return c.transition(ctx, inc, types.StateVerifying, "system", "verify",
+			"playbook steps complete; verifying quiet window", nil)
+	}
+	// A recycle whose instance provably cannot be recycled (an autoscaling-group
+	// member) escalates now — before a human is asked to approve a step the
+	// node group would fight and lose by timeout. Likewise an agent-destructive
+	// step on a node whose agent definitively registered as unarmed: the human
+	// must never be asked to approve a step the node will provably refuse.
+	if reason, refused := c.refuseUnrecyclableNode(ctx, inc, step); refused {
+		c.deferStep(inc, step, metrics.DeferRecycleNotViable)
+		return c.escalate(ctx, inc, reason)
+	}
+	if reason, verdict := c.refuseUnarmedAgent(ctx, inc, step); verdict == armingHold {
+		c.deferStep(inc, step, metrics.DeferUnarmedAgent)
+		c.log.Info("holding before approval: destructive-execution arming is still propagating to the node's agent",
+			"incident", inc.ID, "node", inc.Target.Node)
+		return nil
+	} else if verdict == armingRefuse {
+		c.deferStep(inc, step, metrics.DeferUnarmedAgent)
+		return c.escalate(ctx, inc, reason)
+	}
+	return c.authorizeAndStartStep(ctx, inc, step)
+}
+
+func (c *Controller) holdForRepairOwner(ctx context.Context, inc *types.Incident, step *playbook.Step) (bool, error) {
+	// Serialize disruptive repair steps against the incarnation pinned at open.
+	// The notice-only ladder uses its own cordon ownership accounting.
+	def, registered := action.ByWire(step.Action)
+	uid := repairNodeUID(inc)
+	if registered && def.Scope == action.ScopeNode && (def.Destructive || def.AgentDestructive) &&
+		uid != "" && inc.Class != types.ClassCloudInterruption && !c.simulating(ctx, inc) {
+		var owner string
+		missing := errors.New("node no longer exists in inventory")
+		changed := errors.New("node identity changed since the incident opened")
+		err := c.store.WithTx(ctx, func(tx store.Tx) error {
+			var err error
+			owner, err = tx.ClaimNodeRemediation(ctx, inc.Target.Node, uid, inc.ID, time.Now())
+			if err != nil || owner != inc.ID || inc.CloudIdentity != nil {
+				return err
+			}
+			// A follower checks its original owner's result even after the
+			// old node disappears. Only a prospective executor needs a live
+			// inventory match; a failed check rolls back its claim.
+			node, err := tx.GetNode(ctx, inc.Target.Node)
+			if errors.Is(err, store.ErrNotFound) {
+				return missing
+			}
+			if err == nil && node.UID != uid {
+				return changed
+			}
+			return err
+		})
+		if errors.Is(err, missing) || errors.Is(err, changed) {
+			return true, c.escalate(ctx, inc, err.Error())
+		}
+		if err != nil {
+			return true, err
+		}
+		if owner != inc.ID {
+			return true, c.verifyAfterOwnersReplacement(ctx, inc, owner)
+		}
+	}
+	return false, nil
+}
+
+func repairNodeUID(inc *types.Incident) string {
+	if inc.CloudIdentity != nil {
+		return inc.CloudIdentity.NodeUID
+	}
+	return inc.RepairNodeUID
+}
+
+func sameRepairNode(a, b *types.Incident) bool {
+	if a.CloudIdentity != nil && b.CloudIdentity != nil && *a.CloudIdentity != *b.CloudIdentity {
+		return false
+	}
+	uid := repairNodeUID(a)
+	return uid != "" && uid == repairNodeUID(b) && a.Target.Node == b.Target.Node
+}
+
+// verifyAfterOwnersReplacement lets the follower begin its own quiet window
+// only after the pinned owner's live replacement passed inventory verification.
+func (c *Controller) verifyAfterOwnersReplacement(ctx context.Context, inc *types.Incident, ownerID string) error {
+	owner, err := c.store.GetIncident(ctx, ownerID)
+	if err != nil {
+		return err
+	}
+	if owner.State != types.StateResolved || owner.DryRun || cloudOperationUnsettled(owner) {
+		return nil
+	}
+	if !sameRepairNode(inc, owner) {
+		return c.quarantine(ctx, inc, "repair owner "+ownerID+" resolved against a different node identity")
+	}
+	entries, err := c.store.AuditTrail(ctx, ownerID)
+	if err != nil {
+		return err
+	}
+	replaced := false
+	for _, entry := range entries {
+		if entry.DryRun {
+			continue
+		}
+		if entry.Result == auditStepOutcomeResult("platform.replace_node", false, true) {
+			replaced = true
+		}
+		if replaced && entry.FromState == types.StateVerifying && entry.ToState == types.StateResolved &&
+			entry.Action == "resolve" {
+			proof := map[string]string{"owner_id": ownerID}
+			switch entry.Params["infrastructure_evidence"] {
+			case "verified_replacement_node":
+				s := owner.Successor
+				if entry.Params["replacement_correlation"] != "successor" || s == nil || s.Outcome != types.SuccessorReplaced ||
+					s.ReadyAt == nil || s.Node == "" || s.NodeUID == "" || s.Node != entry.Params["replacement_node"] || s.NodeUID != entry.Params["replacement_node_uid"] {
+					return c.quarantine(ctx, inc, "replacement evidence from owner "+ownerID+" does not identify a confirmed successor for this incident")
+				}
+				proof["replacement_node"] = s.Node
+				proof["replacement_node_uid"] = s.NodeUID
+				proof["replacement_correlation"] = "successor"
+			case "verified_recycle_inventory":
+				// Older resolutions record the inventory evidence without successor fields.
+			default:
+				continue
+			}
+			return c.transition(ctx, inc, types.StateVerifying, "system", "verify-owner-replacement",
+				"checking this incident after the owning incident verified replacement", proof)
+		}
+	}
+	return nil
+}
+
+// parkForApproval parks (or re-parks) the incident for a human decision as
+// ONE atomic approval round: the state change, the epoch bump, the audit
+// entry, and the round's "requested" record — the durable statement of
+// exactly what the human is being asked — commit in a single transaction.
+// A decision then binds to this round by epoch (see DecideApproval), so a
+// playbook hot-swap between the notification and the click cannot substitute
+// the approved action, and a re-park orphans every stale decision by
+// construction rather than by timestamp comparison.
+func (c *Controller) parkForApproval(ctx context.Context, inc *types.Incident, step *playbook.Step, note string) error {
+	from := inc.State
+	if from != types.StateAwaitingApproval {
+		if err := playbook.Transition(inc, types.StateAwaitingApproval); err != nil {
+			return err
+		}
+	}
+	now := time.Now()
+	fence := inc.StateChangedAt // same write-fence as transition(); see there
+	inc.UpdatedAt = now
+	inc.StateChangedAt = now // the round's TTL anchor
+	if err := c.store.WithTx(ctx, func(tx store.Tx) error {
+		fresh, err := tx.GetIncident(ctx, inc.ID)
+		if err != nil {
+			return err
+		}
+		if fresh.State != from || !fresh.StateChangedAt.Equal(fence) {
+			return store.ErrConflict
+		}
+		inc.SignalSeen = fresh.SignalSeen
+		// Only saveSuccessor writes the successor, and it writes through.
+		inc.Successor = fresh.Successor
+		inc.RemoveFirst = fresh.RemoveFirst
+		inc.Version = fresh.Version
+		inc.ApprovalEpoch = fresh.ApprovalEpoch + 1
+		if err := tx.UpdateIncident(ctx, inc); err != nil {
+			return err
+		}
+		if err := tx.AppendAudit(ctx, &types.AuditEntry{
+			IncidentID: inc.ID, Time: now,
+			FromState: from, ToState: types.StateAwaitingApproval,
+			Actor: "system", Action: step.Name, Result: note, DryRun: inc.DryRun,
+		}); err != nil {
+			return err
+		}
+		return tx.RecordApproval(ctx, &types.Approval{
+			IncidentID:   inc.ID,
+			StepName:     step.Name,
+			Decision:     types.ApprovalRequested,
+			Actor:        "system",
+			Channel:      "system",
+			At:           now,
+			PlaybookName: inc.Playbook,
+			StepAction:   step.Action,
+			StepHash:     stepContentHash(inc.Playbook, step),
+			ParkEpoch:    inc.ApprovalEpoch,
+		})
+	}); err != nil {
+		return err
+	}
+	if from == types.StateAwaitingApproval {
+		c.log.Warn("re-parking for a fresh approval", "incident", inc.ID, "step", step.Name, "reason", note)
+	}
+	// The round is committed. Two bounded things happen before this park
+	// returns: the advisory to the workloads (its own budget) and the impact
+	// preview (its own budget). The preview is gathered BEFORE the human is
+	// notified, deliberately, so the notification carries its summary and
+	// digest — that budget (impactPreview.budget, 15s by default) is the
+	// most the notification can be delayed by. The advisory runs beside it,
+	// not before it, and is waited for only after the notification is
+	// handed off, so it never adds to that delay; the park as a whole, and
+	// the reconcile pass it is part of, spends at most the longer of the two
+	// budgets here, never their sum.
+	var advised sync.WaitGroup
+	advised.Add(1)
+	go func() {
+		defer advised.Done()
+		c.adviseCheckpoint(ctx, inc)
+	}()
+	preview := c.previewImpact(ctx, inc, "computed at park")
+	err := notify.RequestApprovalWithContext(ctx, c.notifier, inc, step.Name, approvalContext(preview))
+	advised.Wait()
+	return err
+}
+
+// advanceAwaitingApproval resumes on the current approval round's decision
+// and expires undecided rounds. The round is identified by the incident's
+// ApprovalEpoch: decisions of earlier epochs are invisible by construction,
+// so no timestamp ordering against StateChangedAt is needed to ignore them.
+func (c *Controller) advanceAwaitingApproval(ctx context.Context, inc *types.Incident) error {
+	step, done, err := c.runtimeConfig(ctx).Engine.NextStep(inc)
+	if err != nil || done {
+		return c.resumeAwaitingApproval(ctx, inc)
+	}
+	return c.authorizeAndStartStep(ctx, inc, step)
+}
+
+// resumeAwaitingApproval validates the durable decision before calling startStep.
+func (c *Controller) resumeAwaitingApproval(ctx context.Context, inc *types.Incident) error {
+	if inc.ApprovalEpoch == 0 {
+		// Epoch 0 is the pre-upgrade population, not a round: every legacy
+		// row — requests AND orphaned decisions from any number of old parks
+		// — carries park_epoch 0, so consulting decisions here could pair a
+		// stale approval with a request from a DIFFERENT park and execute a
+		// step the human never approved. Migrate the park into a verifiable
+		// round first; the human re-decides that one.
+		step, done, err := c.runtimeConfig(ctx).Engine.NextStep(inc)
+		if err != nil || done {
+			return c.quarantine(ctx, inc, "parked step no longer exists")
+		}
+		return c.parkForApproval(ctx, inc, step,
+			"re-parking: this park predates approval rounds; a fresh approval is required")
+	}
+	decision, err := c.store.FirstApprovalDecision(ctx, inc.ID, inc.ApprovalEpoch)
+	if err != nil && err != store.ErrNotFound {
+		return err
+	}
+	ttl := c.runtimeConfig(ctx).ApprovalTTL
+	if decision != nil && !approval.DecidedInTime(inc, decision, ttl) {
+		// Recorded after the request had expired (a click racing the walk):
+		// not honored. The round expires below as if undecided.
+		c.log.Warn("ignoring an approval decision made after the request expired",
+			"incident", inc.ID, "round", inc.ApprovalEpoch, "actor", decision.Actor, "decided_at", decision.At)
+		decision = nil
+	}
+	if decision != nil {
+		step, done, err := c.runtimeConfig(ctx).Engine.NextStep(inc)
+		if err != nil || done {
+			return c.quarantine(ctx, inc, "approved step no longer exists")
+		}
+		switch decision.Decision {
+		case types.ApprovalApproved:
+			// The decision is honored only for the exact step this round asked
+			// about. The round's request record ALWAYS exists and always carries
+			// full identity — a round without one (a pre-epoch park upgraded
+			// mid-flight) fails closed into a fresh round rather than being
+			// waved through as "legacy".
+			request, reqErr := c.store.GetApprovalRequest(ctx, inc.ID, inc.ApprovalEpoch)
+			if reqErr != nil {
+				return c.parkForApproval(ctx, inc, step,
+					"re-parking: this park predates approval rounds and has no request record; a fresh approval is required")
+			}
+			if reason := requestMismatch(request, inc.Playbook, step); reason != "" {
+				return c.parkForApproval(ctx, inc, step, "not executing approved step: "+reason)
+			}
+			if window, active := c.activeMaintenanceWindow(ctx, inc.Target.Node); active {
+				c.deferStep(inc, step, metrics.DeferMaintenanceWindow)
+				c.log.Debug("maintenance window active, holding approved step",
+					"incident", inc.ID, "node", inc.Target.Node, "window", window)
+				return nil // execute once the window closes; approval stays recorded
+			}
+			return c.startStep(ctx, inc, step, decision.Actor)
+		case types.ApprovalRejected:
+			// Audit and notify with the step the human actually REJECTED — the
+			// decision inherits its round's request identity — not whatever
+			// step is current now (a hot-swap may have changed it; the
+			// rejection deliberately fails closed regardless of the swap).
+			rejected := firstNonBlank(decision.StepName, step.Name)
+			if err := c.transition(ctx, inc, types.StateNeedsHuman, decision.Actor, rejected,
+				"approval rejected", nil); err != nil {
+				return err
+			}
+			return c.notifier.Notify(ctx, notify.NotifyEvent{
+				Kind: notify.EventNeedsHuman, Incident: inc,
+				Message: fmt.Sprintf("step %s rejected by %s", rejected, decision.Actor),
+			})
+		}
+	}
+	if time.Since(inc.StateChangedAt) > ttl {
+		if err := c.transition(ctx, inc, types.StateExpired, "system", "approval-ttl",
+			fmt.Sprintf("no decision within %s", ttl), nil); err != nil {
+			return err
+		}
+		return c.notifier.Notify(ctx, notify.NotifyEvent{
+			Kind: notify.EventExpired, Incident: inc,
+			Message: "approval request expired without a decision",
+		})
+	}
+	return nil
+}
+
+// stepContentHash hashes the meaningful content of a step — its playbook, name,
+// action, approval requirement, and params — so an edit at the same index is
+// detected even when the step's name and action are unchanged.
+func stepContentHash(playbookName string, step *playbook.Step) string {
+	h := sha256.New()
+	write := func(s string) {
+		_, _ = h.Write([]byte(s))
+		_, _ = h.Write([]byte{0})
+	}
+	write(playbookName)
+	write(step.Name)
+	write(step.Action)
+	write(step.Approval)
+	keys := make([]string, 0, len(step.Params))
+	for k := range step.Params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		write(k)
+		write(step.Params[k])
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// requestMismatch reports why the current step no longer matches what this
+// approval round ASKED the human, or "" when they match. Unlike the retired
+// decision-identity ladder, there is no legacy waiver: a request record
+// always exists for a round and always carries full identity, so any
+// difference fails closed into a fresh round.
+func requestMismatch(request *types.Approval, playbookName string, step *playbook.Step) string {
+	if request.PlaybookName != playbookName {
+		return fmt.Sprintf("approval was requested under playbook %q but the incident now runs %q", request.PlaybookName, playbookName)
+	}
+	if request.StepName != step.Name {
+		return fmt.Sprintf("approval was requested for step %q but the current step is %q", request.StepName, step.Name)
+	}
+	if request.StepAction != step.Action {
+		return fmt.Sprintf("approval was requested for action %q but the current step runs %q", request.StepAction, step.Action)
+	}
+	if request.StepHash != stepContentHash(playbookName, step) {
+		return "the requested step's content changed at this index"
+	}
+	return ""
+}
+
+// advanceVerifying resolves after a quiet window; a new signal during
+// verification means the remediation did not hold and the ladder escalates.
+// A non-dry-run incident additionally requires positive runtime evidence —
+// a fresh agent heartbeat and a fresh, ready accelerator report that still
+// contains the target device. Missing evidence never auto-resolves: it
+// holds, and after the evidence deadline it fails closed to NEEDS_HUMAN.
+func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) error {
+	// A cloud interruption is not repaired: the incident stays open, and the
+	// node cordoned, until the cloud takes the node or the notice is gone. A
+	// further notice is recorded, not a failed remediation. One the cloud has
+	// not acted on long after its deadline goes to a person.
+	if inc.Class == types.ClassCloudInterruption {
+		_, err := c.overdueInterruption(ctx, inc)
+		return err
+	}
+	if inc.UpdatedAt.After(inc.StateChangedAt) {
+		entries, err := c.store.AuditTrail(ctx, inc.ID)
+		if err != nil {
+			return err
+		}
+		for i := len(entries) - 1; i >= 0; i-- {
+			entry := entries[i]
+			if entry.FromState == entry.ToState || entry.ToState != types.StateVerifying {
+				continue
+			}
+			if entry.Action == "verify-owner-replacement" {
+				return c.quarantine(ctx, inc, "signal recurred after replacement verified by incident "+entry.Params["owner_id"])
+			}
+			break
+		}
+		return c.escalate(ctx, inc, "verification failed: signal recurred during quiet window")
+	}
+	if time.Since(inc.StateChangedAt) < c.runtimeConfig(ctx).VerifyQuiet {
+		return nil
+	}
+	// depth names a reduced verification, when one was accepted, so the
+	// resolve audit entry says what the resolution was attested on rather than
+	// presenting every RESOLVED as the same check.
+	var depth string
+	var evidence map[string]string
+	if !c.simulating(ctx, inc) {
+		ok, reason, proof := c.verifyRecovery(ctx, inc)
+		if !ok {
+			if time.Since(inc.StateChangedAt) < c.verifyEvidenceDeadline(ctx) {
+				c.log.Debug("verification evidence not ready, holding",
+					"incident", inc.ID, "reason", reason)
+				return c.noteVerifyWait(ctx, inc, reason)
+			}
+			if err := c.transition(ctx, inc, types.StateNeedsHuman, "system", "verify-evidence",
+				"verification evidence unavailable: "+reason, nil); err != nil {
+				return err
+			}
+			return c.notifier.Notify(ctx, notify.NotifyEvent{
+				Kind: notify.EventNeedsHuman, Incident: inc,
+				Message: "cannot verify remediation: " + reason,
+			})
+		}
+		depth, evidence = reason, proof
+	}
+	result := fmt.Sprintf("healthy: quiet for %s", c.runtimeConfig(ctx).VerifyQuiet)
+	if depth != "" {
+		result += "; " + depth
+	}
+	if err := c.transition(ctx, inc, types.StateResolved, "system", "resolve", result, evidence); err != nil {
+		return err
+	}
+	// Only a committed live recovery starts the playbook cooldown. A
+	// simulation must not delay the next live response to this target.
+	if !c.simulating(ctx, inc) {
+		if book, ok := c.runtimeConfig(ctx).Engine.Playbook(inc.Playbook); ok {
+			c.gate.RecordCooldown(inc.Target, playbookCooldownAction(inc.Playbook), book.Cooldown.Std())
+		}
+	}
+	if c.flap != nil {
+		c.flap.RecordResolved(inc.Target, inc.Class)
+	}
+	message := fmt.Sprintf("incident resolved after %s quiet window", c.runtimeConfig(ctx).VerifyQuiet)
+	if evidence["replacement_node"] != "" {
+		// The operator sees what replaced the node and what was confirmed.
+		message += ". " + depth
+	}
+	return c.notifier.Notify(ctx, notify.NotifyEvent{
+		Kind: notify.EventResolved, Incident: inc,
+		Message: message,
+	})
+}
+
+// verifyEvidenceMaxAge bounds how old runtime evidence may be to support a
+// resolution, and the deadline multiplier bounds how long VERIFYING waits
+// for evidence before failing closed to a human.
+const verifyEvidenceMaxAge = 5 * time.Minute
+
+func (c *Controller) verifyEvidenceDeadline(ctx context.Context) time.Duration {
+	// Three quiet windows is enough for a healthy agent to report twice;
+	// never below 10 minutes so short dev quiet windows cannot flap
+	// incidents into NEEDS_HUMAN on scheduling jitter alone.
+	if d := 3 * c.runtimeConfig(ctx).VerifyQuiet; d > 10*time.Minute {
+		return d
+	}
+	return 10 * time.Minute
+}
+
+// verifyRecovery is verifyRuntimeEvidence, except after a cloud replacement:
+// the target is gone then, and the node that took its place is verified
+// instead. It also returns the infrastructure evidence the resolution
+// records, for a cloud recovery.
+func (c *Controller) verifyRecovery(ctx context.Context, inc *types.Incident) (bool, string, map[string]string) {
+	replaced, err := c.findCloudReplacement(ctx, inc)
+	if err != nil {
+		return false, "cloud recovery history is unavailable", nil
+	}
+	if replaced != nil {
+		return c.verifyReplacement(ctx, inc, replaced)
+	}
+	ok, reason := c.verifyRuntimeEvidence(ctx, inc)
+	if ok && (reason == recycleDriverProbeEvidence || reason == recycleInventoryEvidence || reason == recycleObservedEvidence) {
+		return true, reason, map[string]string{"infrastructure_evidence": recycleInfrastructureEvidence}
+	}
+	return ok, reason, nil
+}
+
+// verifyRuntimeEvidence checks positive health evidence for a non-dry-run
+// resolution: a fresh agent heartbeat, and — for GPU-class targets — a
+// fresh, ready NVIDIA accelerator report bound to the current node that
+// still lists the target device. It returns ok=false with a reason that is
+// safe to surface to operators. When it accepts a resolution at REDUCED
+// depth — the heartbeat alone, because no report can exist for this node —
+// it returns ok=true with a note naming that depth, so the caller can record
+// it beside the resolution rather than presenting it as the full check.
+func (c *Controller) verifyRuntimeEvidence(ctx context.Context, inc *types.Incident) (bool, string) {
+	if pending, err := c.cloudRecoveryNeedsConfirmation(ctx, inc); err != nil {
+		return false, "cloud recovery history is unavailable"
+	} else if pending {
+		return c.verifyRecycledInventory(ctx, inc)
+	}
+	node, err := c.store.GetNode(ctx, inc.Target.Node)
+	if err != nil || node == nil {
+		return false, "node is not registered"
+	}
+	if node.AgentLastSeen.IsZero() || time.Since(node.AgentLastSeen) > verifyEvidenceMaxAge {
+		return false, "agent heartbeat is stale"
+	}
+	if !inc.Target.IsGPU() {
+		// Node-scoped incidents: the durable heartbeat is the strongest
+		// node-liveness evidence available today; deeper node diagnostics
+		// arrive with the hardware-qualified runtime.
+		return true, ""
+	}
+	if vendor := inc.Vendor; vendor.Valid() && !vendorRuntimeAttested(vendor) {
+		// This build has no runtime adapter for the incident's vendor, so the
+		// report it would wait for cannot be produced by any agent, ever.
+		//
+		// Holding anyway is not caution, it is a dead end: the incident sits
+		// out the evidence deadline and then parks in NEEDS_HUMAN — AFTER the
+		// cordon and drain have run — with a reason that names no action a
+		// human can take. Every AMD device-scoped incident on a healthy node
+		// ended that way, which made the recovery report read 0% recovered for
+		// a system that had recovered them.
+		//
+		// So verify on the same evidence a node-scoped incident uses: the
+		// durable agent heartbeat, already checked above. That is a genuine
+		// reduction in verification depth and it is recorded as one, in the
+		// audit trail and in docs/reference-capabilities.md, rather than
+		// quietly presented as the same check.
+		//
+		// An accelerator adapter for the vendor may still be running in the
+		// agent. It has no preflight, so it cannot attest the runtime, but its
+		// observation-only report names the devices it sees and their health.
+		// When a current one exists, the incident is verified against it.
+		if ok, reason, found := c.verifyAgainstObservationReport(ctx, inc, vendor); found {
+			return ok, reason
+		}
+		c.logReducedVerificationOnce(inc, vendor)
+		return true, fmt.Sprintf("verified on the agent heartbeat: this build has no %s runtime adapter", vendor)
+	}
+	reports, ok := c.store.(store.AcceleratorReportStore)
+	if !ok {
+		return false, "accelerator report store is not configured"
+	}
+	// An unknown vendor still reads NVIDIA. XIDs and neutral fault envelopes
+	// both name their vendor now, so what reaches here is an incident opened
+	// by a manual trigger or a metric alert — and on the fleets that have one,
+	// NVIDIA is the runtime that exists. Guessing "no runtime" for those would
+	// turn a degraded NVIDIA agent into a resolved incident, which is the one
+	// direction this function must never fail.
+	vendor := inc.Vendor
+	if !vendor.Valid() {
+		vendor = types.AcceleratorVendorNVIDIA
+	}
+	report, err := reports.GetAcceleratorReport(ctx, inc.Target.Node, vendor)
+	if err != nil {
+		return c.verifyWithoutCurrentReport(ctx, inc, vendor, fmt.Sprintf("no %s accelerator report for the node", vendor))
+	}
+	if time.Since(report.ObservedAt) > verifyEvidenceMaxAge {
+		return c.verifyWithoutCurrentReport(ctx, inc, vendor, "accelerator report is stale")
+	}
+	if report.Readiness != types.AcceleratorReadinessReady {
+		return false, fmt.Sprintf("accelerator runtime is %s, not ready", report.Readiness)
+	}
+	for _, device := range report.Devices {
+		if device.ID == inc.Target.GPUUUID &&
+			device.Kind == types.AcceleratorDevicePhysical &&
+			device.Family == types.AcceleratorFamilyGPU {
+			return true, ""
+		}
+	}
+	return false, fmt.Sprintf("GPU %s is missing from the current inventory", inc.Target.GPUUUID)
+}
+
+// verifyAgainstObservationReport verifies a device-scoped incident of a
+// vendor this build cannot attest against that vendor's observation-only
+// accelerator report, posted by an accelerator adapter in the agent.
+//
+// found is false when there is no current report for the (node, vendor): the
+// caller then keeps the heartbeat-only path. With a current report, the
+// resolution needs the report not to be not-ready (an observation-only
+// report is "degraded" at best, by design) and the target device to be in
+// its inventory as a physical GPU. The note names the depth: an inventory and
+// health observation, not an attested runtime.
+func (c *Controller) verifyAgainstObservationReport(ctx context.Context, inc *types.Incident, vendor types.AcceleratorVendor) (ok bool, reason string, found bool) {
+	reports, isReportStore := c.store.(store.AcceleratorReportStore)
+	if !isReportStore {
+		return false, "", false
+	}
+	report, err := reports.GetAcceleratorReport(ctx, inc.Target.Node, vendor)
+	if err != nil || report == nil || time.Since(report.ObservedAt) > verifyEvidenceMaxAge {
+		return false, "", false
+	}
+	if report.Readiness == types.AcceleratorReadinessNotReady {
+		return false, fmt.Sprintf("%s accelerator report is not ready: %s", vendor, strings.Join(report.ReadinessReasons, "; ")), true
+	}
+	for _, device := range report.Devices {
+		if device.ID == inc.Target.GPUUUID &&
+			device.Kind == types.AcceleratorDevicePhysical &&
+			device.Family == types.AcceleratorFamilyGPU {
+			return true, fmt.Sprintf("verified against the %s observation-only accelerator report (readiness %s): the device is present; the runtime is not attested", vendor, report.Readiness), true
+		}
+	}
+	return false, fmt.Sprintf("GPU %s is missing from the current %s inventory", inc.Target.GPUUUID, vendor), true
+}
+
+// verifyWithoutCurrentReport decides what a missing or stale accelerator
+// report means for a GPU-scoped incident whose vendor this build CAN attest.
+// absence is the operator-facing reason the report path produced.
+//
+// The operator-managed agent is started with --nvidia-controller-profile and
+// asks the controller, every tick, which AcceleratorRuntimeProfile selects
+// its node. On "none" (204) it deliberately holds observation and posts no
+// report at all — the default-deny that keeps a DaemonSet from claiming
+// capabilities during a rollout or a selector change. That answer is a
+// property of the installation, not of the agent's health, and an ordinary
+// Enabled install ships no profile: the standard samples, the Helm chart and
+// deploy/install.sh create none, and a profile is documented as a contract
+// that NARROWS accelerator actions, never as a prerequisite for closing an
+// incident.
+//
+// So "no report" has two causes with opposite meanings, and the controller
+// must ask the same question the agent asked to tell them apart:
+//
+//   - a profile selects the node, and there is still no current report: the
+//     agent was told to report and has not. That is a degraded agent, and the
+//     resolution fails closed exactly as before;
+//   - no profile selects the node: the report cannot arrive by construction.
+//     Holding for it is the AMD dead end again — the incident sits out the
+//     evidence deadline and parks in NEEDS_HUMAN after the cordon and drain,
+//     with a reason naming no action anybody can take, and every incident on
+//     a healthy Enabled fleet ends that way. Run 12 of the hardware stand was
+//     the first real-mode, device-scoped resolution ever attempted on a real
+//     driver, and it ended there. Without a profile no accelerator-runtime
+//     action (reset, quiesce) can have been admitted for this incident
+//     either, so the ladder that ran was platform actions only — the same
+//     ladder a node-scoped incident runs, verified on the same evidence: the
+//     durable heartbeat already checked, plus the quiet window. The reduced
+//     depth is named in the resolve audit entry and logged once per node.
+//
+// Anything in between — labels unavailable, overlapping profiles — cannot say
+// what the agent was told, and fails closed with the cause in the reason.
+func (c *Controller) verifyWithoutCurrentReport(ctx context.Context, inc *types.Incident, vendor types.AcceleratorVendor, absence string) (bool, string) {
+	selected, err := c.AcceleratorObservationProfile(ctx, inc.Target.Node, vendor)
+	if err != nil {
+		return false, absence + "; cannot tell whether a runtime profile selects the node: " + err.Error()
+	}
+	if selected != nil {
+		return false, absence
+	}
+	c.logNoProfileVerificationOnce(inc, vendor)
+	return true, fmt.Sprintf("verified on the agent heartbeat: no %s accelerator runtime profile selects the node, so its agent holds observation and no report can exist", vendor)
+}
+
+// logNoProfileVerificationOnce records, once per (node, vendor), that an
+// incident was verified on the heartbeat alone because no runtime profile
+// selects the node. Once per pair rather than per incident: it is a statement
+// about the installation and the machine, not about any one fault.
+func (c *Controller) logNoProfileVerificationOnce(inc *types.Incident, vendor types.AcceleratorVendor) {
+	if !c.logOnce.first("no-profile-verify/" + inc.Target.Node + "/" + string(vendor)) {
+		return
+	}
+	c.log.Warn("verifying a remediation on the agent heartbeat alone: no accelerator runtime profile selects this node, so its agent holds observation and never posts a report; create an AcceleratorRuntimeProfile selecting the node to verify device-scoped incidents against a runtime report",
+		"node", inc.Target.Node, "vendor", vendor, "incident", inc.ID)
+}
+
+// attestedRuntimeVendors are the accelerator vendors THIS BUILD can attest at
+// runtime — the vendors for which an internal/accelerator adapter exists and
+// an agent can therefore produce a report.
+//
+// It is a property of the build, not of the fleet. A vendor absent here has no
+// report to wait for, so anything that blocks on one must take a different
+// path rather than waiting forever. TestAttestedVendorsMatchTheAdapters fails
+// the build if an adapter package lands without being listed.
+var attestedRuntimeVendors = map[types.AcceleratorVendor]bool{
+	types.AcceleratorVendorNVIDIA: true,
+}
+
+func vendorRuntimeAttested(v types.AcceleratorVendor) bool {
+	return attestedRuntimeVendors[v]
+}
+
+// logReducedVerificationOnce records, once per (node, vendor), that an
+// incident was verified on the heartbeat alone because this build cannot
+// attest its vendor's runtime. Once per pair rather than per incident: it is a
+// statement about the build and the machine, not about any one fault.
+func (c *Controller) logReducedVerificationOnce(inc *types.Incident, vendor types.AcceleratorVendor) {
+	if !c.logOnce.first("reduced-verify/" + inc.Target.Node + "/" + string(vendor)) {
+		return
+	}
+	c.log.Warn("verifying a remediation on the agent heartbeat alone: this build has no runtime adapter for the incident's accelerator vendor, so no report can attest the device",
+		"node", inc.Target.Node, "vendor", vendor, "incident", inc.ID)
+}
+
+// recoverOrphanedExecution handles EXECUTING incidents with no running step
+// goroutine — a controller restart mid-step. Action IDs are deterministic,
+// so re-evaluating and re-running the step is idempotent by design.
+func (c *Controller) recoverOrphanedExecution(ctx context.Context, inc *types.Incident) error {
+	return c.transition(ctx, inc, types.StateEvaluating, "system", "recover",
+		"controller restarted mid-step; re-evaluating (idempotent action IDs)", nil)
+}
+
+// transition applies a validated state change and persists the incident and
+// its audit entry in one store transaction (the statemachine contract).
+var errRepairStepBusy = errors.New("another repair step is active on the node")
+
+func (c *Controller) transition(ctx context.Context, inc *types.Incident, to types.IncidentState, actor, action, result string, params map[string]string) error {
+	return c.transitionWithRepairStep(ctx, inc, to, actor, action, result, params, "", false)
+}
+
+func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.Incident, to types.IncidentState, actor, action, result string, params map[string]string, wire string, completed bool) error {
+	from := inc.State
+	if err := playbook.Transition(inc, to); err != nil {
+		return err
+	}
+	// A round that ends anywhere but in its own step's execution — rejected,
+	// expired, resolved by hand, quarantined — ended without the disruption
+	// the advisory announced, so the notice is withdrawn, best effort, after
+	// the state change below commits.
+	// Only a COMMITTED change withdraws: playbook.Transition has already
+	// moved inc.State in memory, so the deferred check is on the transaction
+	// below, never on the field — a transition that lost its conflict check
+	// never happened, and the notice it would have ended still stands.
+	withdraw := from == types.StateAwaitingApproval && to != types.StateExecuting
+	round := inc.ApprovalEpoch
+	committed := false
+	if withdraw {
+		defer func() {
+			if committed {
+				c.withdrawCheckpointAdvisories(ctx, inc, round)
+			}
+		}()
+	}
+	now := time.Now()
+	// fence: the caller's snapshot of when the incident last changed shape.
+	// StateChangedAt is the WRITE-FENCE for every non-state field rewrite:
+	// ingest never touches it (only UpdatedAt/SignalSeen), while the janitor's
+	// quiesce rewind — which moves StepIndex without changing State — bumps
+	// it deliberately. Guarding on it below turns a rewind that landed
+	// between this caller's ListIncidents snapshot and this transition into a
+	// detected conflict instead of a silent un-rewind (the janitors run on
+	// their own goroutine since round 8, so this interleaving is real).
+	fence := inc.StateChangedAt
+	inc.UpdatedAt = now
+	inc.StateChangedAt = now
+	if to == types.StateResolved {
+		inc.ResolvedAt = &now
+	}
+	// A halting transition clears the durable slot bit in the SAME transaction
+	// that halts the incident, and releases the in-memory gate slot only if
+	// the FRESH row still held the bit — so two racing halting paths release
+	// exactly once (the loser fails fresh.State != from and the version
+	// guard), and a crash after commit loses nothing: the bit is durably 0
+	// and the dead process's gate memory dies with it.
+	release := false
+	hadSlotBit := inc.RemediationSlotHeld
+	if to.Halted() {
+		release = hadSlotBit
+		inc.RemediationSlotHeld = false
+	}
+	params = c.decisionNodeContext(ctx, inc.Target.Node, params)
+	stepBusy := false
+	if err := c.store.WithTx(ctx, func(tx store.Tx) error {
+		// Re-read the row inside the transaction and apply the change to the
+		// fresh copy rather than persisting this goroutine's snapshot. A long
+		// step runs in its own goroutine off a snapshot captured at
+		// ListIncidents; while it ran, a concurrent ingest may have bumped
+		// SignalSeen. Writing the stale snapshot back would erase that count
+		// (and, under a READ COMMITTED backend, could regress state/StepIndex).
+		// The reconcile path owns state and playbook progress; the ingest path
+		// owns SignalSeen and late vendor identification — so take those fields
+		// and the current version from the fresh row, and fail closed if the
+		// state OR the fence moved out from under us.
+		fresh, err := tx.GetIncident(ctx, inc.ID)
+		if err != nil {
+			return err
+		}
+		if fresh.State != from || !fresh.StateChangedAt.Equal(fence) {
+			return store.ErrConflict
+		}
+		if to.Halted() && !cloudOperationUnsettled(fresh) {
+			if err := tx.ReleaseNodeRepairStep(ctx, inc.ID); err != nil {
+				return err
+			}
+		}
+		if completed {
+			if err := tx.ReleaseRepairStep(ctx, inc.ID); err != nil {
+				return err
+			}
+		} else if wire != "" {
+			device, guarded := repairStepScope(wire)
+			if uid := repairNodeUID(fresh); guarded && uid != "" {
+				var agentActionID string
+				if wire == "agent.gpu_reset" {
+					agentActionID = actionID(inc)
+				}
+				admitted, err := tx.ClaimRepairStep(ctx, fresh.Target.Node, uid, inc.ID, agentActionID, device, now)
+				if err != nil {
+					return err
+				}
+				if !admitted {
+					stepBusy = true
+					return nil // commit the wait audit without advancing the incident
+				}
+			}
+		}
+		if to.Halted() {
+			release = release && fresh.RemediationSlotHeld
+		}
+		inc.SignalSeen = fresh.SignalSeen
+		// Only saveSuccessor writes the successor, and it writes through.
+		inc.Successor = fresh.Successor
+		inc.RemoveFirst = fresh.RemoveFirst
+		inc.Vendor = fresh.Vendor
+		inc.Version = fresh.Version
+		if err := tx.UpdateIncident(ctx, inc); err != nil {
+			return err
+		}
+		releaseRepair := to.Terminal() && !cloudOperationUnsettled(fresh)
+		// A rejected first approval can also release the node before execution.
+		if from == types.StateAwaitingApproval && to == types.StateNeedsHuman && result == "approval rejected" && !cloudOperationUnsettled(fresh) {
+			entries, err := tx.AuditTrail(ctx, inc.ID)
+			if err != nil {
+				return err
+			}
+			// A rewound playbook can be at step zero after an earlier
+			// execution. Only release when no step ever started.
+			releaseRepair = true
+			for _, entry := range entries {
+				if entry.ToState == types.StateExecuting {
+					releaseRepair = false
+					break
+				}
+			}
+		}
+		releaseFollowers := true
+		if releaseRepair && from == types.StateVerifying && to == types.StateResolved && action == "resolve" {
+			switch params["infrastructure_evidence"] {
+			case "verified_replacement_node", "verified_recycle_inventory":
+				entries, err := tx.AuditTrail(ctx, inc.ID)
+				if err != nil {
+					return err
+				}
+				for _, entry := range entries {
+					if !entry.DryRun && entry.Result == auditStepOutcomeResult("platform.replace_node", false, true) {
+						releaseFollowers = false
+						break
+					}
+				}
+			}
+		}
+		if releaseRepair && releaseFollowers {
+			if err := tx.ReleaseRepairFollowers(ctx, inc.ID, now, result); err != nil {
+				return err
+			}
+		}
+		if releaseRepair {
+			if err := tx.ReleaseNodeRemediation(ctx, inc.ID); err != nil {
+				return err
+			}
+		}
+		return tx.AppendAudit(ctx, &types.AuditEntry{
+			IncidentID: inc.ID, Time: now,
+			FromState: from, ToState: to,
+			Actor: actor, Action: action,
+			Params: params, Result: result, DryRun: inc.DryRun,
+		})
+	}); err != nil {
+		if to.Halted() {
+			// The halting write never committed; restore the caller's snapshot.
+			inc.RemediationSlotHeld = hadSlotBit
+		}
+		return err
+	}
+	if stepBusy {
+		inc.State = from
+		inc.StateChangedAt = fence
+		return errRepairStepBusy
+	}
+	committed = true
+	if from == types.StateExecuting {
+		// The incident just left EXECUTING. If a per-step slot was seeded for it
+		// on leadership acquisition, hand it back now: recovery either re-admits
+		// it through the normal admission path (next reconcile) or closes it.
+		// No-op for any incident that was not seeded.
+		c.releaseRecoveredSlot(inc.ID)
+	}
+	if release && c.gate != nil {
+		// A promotion preserves PCIAddr, and the safety gate keys every target
+		// with a PCI address by that immutable physical identity. A stale step
+		// snapshot therefore releases the same reservation as the promoted row,
+		// without a post-commit re-key race.
+		c.gate.ReleaseRemediation(inc.Target)
+	}
+	// Any committed transition ends the arming-in-flight hold epoch: if the
+	// incident re-enters EVALUATING later, the propagation grace starts over
+	// from its next first observation.
+	c.clearArmingHold(inc.ID)
+	// Scheduler feedback rides on the committed transition, never on the
+	// attempt: a node must not be marked degraded by a transition that lost its
+	// conflict check and never happened.
+	c.syncDegradedTaint(ctx, inc, from, to)
+	if to.Terminal() {
+		c.recordRecoveryOutcome(ctx, inc, to)
+	}
+	return nil
+}
+
+// recordRecoveryOutcome emits the outcome metrics once per incident, on the
+// committed TERMINAL transition: how long it was open, whether it came back,
+// and how much accelerator capacity was degraded meanwhile. Everything else
+// the controller exports is process telemetry; this is what the fleet got
+// back, which is the number a capacity owner actually budgets against.
+//
+// Terminal, not Halted. NEEDS_HUMAN is halted but reversible — a human can
+// resolve it or send it back to EVALUATING — and measuring there charged the
+// SAME incident again, in full from its open time, at every park. A single
+// incident cycling park/unpark three times reported four times its real
+// degraded GPU-seconds, unbounded in the number of cycles, and inflated the
+// stacked dashboard panel past the fleet's actual capacity. RESOLVED and
+// EXPIRED are the states nothing returns from, so each incident lands here
+// exactly once.
+//
+// Dry-run incidents are excluded for the reason the protection metrics
+// exclude them: dry-run executes nothing, so nothing was recovered. Counting
+// them would make a default install — dry-run is the shipped default —
+// report GPU-hours "returned to service" by a system that took no action at
+// all, which is the one number this feature exists to be trusted on.
+//
+// The LIVE gate decides that, not the flag stamped when the incident opened.
+// Execution consults the live gate, so an incident opened Enabled and switched
+// to DryRun mid-ladder simulates every remaining step while still carrying
+// DryRun=false — and charging it here would report exactly the GPU-hours the
+// paragraph above refuses to report, to an operator who had just pressed stop.
+// For a live resolution the counter also checks the stored action evidence.
+func (c *Controller) recordRecoveryOutcome(ctx context.Context, inc *types.Incident, to types.IncidentState) {
+	if inc.OpenedAt.IsZero() || c.effectiveDryRun(ctx, inc) {
+		return
+	}
+	duration := time.Since(inc.OpenedAt).Seconds()
+	if duration < 0 {
+		return
+	}
+	outcome := strings.ToLower(string(to))
+	class := string(inc.Class)
+	metrics.IncidentDuration.WithLabelValues(class, outcome).Observe(duration)
+	if inc.Class == types.ClassCloudInterruption {
+		// An announced interruption degrades nothing and recovers nothing.
+		return
+	}
+	if to == types.StateResolved {
+		// An incident that never minted an approval round was handled end to
+		// end without a human decision — the automation's actual yield.
+		unattended := "false"
+		if inc.ApprovalEpoch == 0 {
+			unattended = "true"
+		}
+		executed, err := c.store.VerifiedStepResults(ctx, []string{inc.ID})
+		if err != nil {
+			c.log.Warn("reading recovery counter evidence", "incident", inc.ID, "error", err)
+		} else if remediationOutcome(executed[inc.ID], false) {
+			metrics.IncidentsRecovered.WithLabelValues(class, unattended).Inc()
+		}
+	}
+	metrics.DegradedGPUSeconds.WithLabelValues(class, outcome).
+		Add(duration * float64(c.affectedGPUs(ctx, inc)))
+	if len(inc.Accelerators) == 0 {
+		metrics.DegradedNodeSecondsDeviceCountUnknown.WithLabelValues(class, outcome).Add(duration)
+	}
+	for _, a := range inc.Accelerators {
+		if a.Count > 0 {
+			metrics.DegradedAcceleratorSeconds.WithLabelValues(class, outcome, a.Resource).Add(duration * float64(a.Count))
+		}
+	}
+}
+
+// DegradedGPUs reports how many accelerators sit under a non-terminal,
+// non-dry-run incident right now, keyed by problem class and by whether
+// automation still owns the incident or a human does.
+//
+// It lives here rather than in the store because it must expand a node-scoped
+// incident with exactly the rule affectedGPUs uses — the two numbers describe
+// the same fleet and must not drift — and because a node's GPU inventory is a
+// JSON column, so the expansion is not portable SQL.
+//
+// It exists because kubeneuron_degraded_gpu_seconds_total is charged once, on
+// the terminal transition: an incident parked in NEEDS_HUMAN contributes
+// nothing to it until somebody closes it, which is precisely the population
+// whose capacity is most thoroughly lost. This is the gauge that shows it.
+func (c *Controller) DegradedGPUs(ctx context.Context) (map[metrics.DegradedKey]int, error) {
+	incidents, err := c.store.ListIncidents(ctx, store.IncidentFilter{States: activeIncidentStates()})
+	if err != nil {
+		return nil, err
+	}
+	parked, err := c.store.ListIncidents(ctx, store.IncidentFilter{
+		States: []types.IncidentState{types.StateNeedsHuman},
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := map[metrics.DegradedKey]int{}
+	for _, group := range [][]*types.Incident{incidents, parked} {
+		for _, inc := range group {
+			if inc.DryRun || inc.Class == types.ClassCloudInterruption {
+				// Dry-run executes nothing, so it neither degrades nor
+				// recovers anything — the same exclusion the counter and the
+				// report both apply. An interruption the cloud announced is
+				// not a degraded node either.
+				continue
+			}
+			owner := "automation"
+			if inc.State == types.StateNeedsHuman {
+				owner = "human"
+			}
+			out[metrics.DegradedKey{Class: string(inc.Class), Owner: owner}] += c.affectedGPUs(ctx, inc)
+		}
+	}
+	return out, nil
+}
+
+// affectedGPUs is how many GPUs the incident covered: the GPUs it recorded
+// when it opened, the count its report rows use. Without that record, none
+// on a node whose accelerators are TPU chips or AWS Neuron devices: one for a
+// DEVICE-scoped incident (a UUID or a bus address names one card), the node's
+// whole inventory for a node-scoped one.
+// Unknown inventory counts as one — undercounting is the honest failure
+// direction for a capacity number.
+//
+// The fallback is not silent. A node-scoped incident on an 8-GPU node charged
+// as one device understates recovered capacity eightfold, and the number ends
+// up in front of whoever pays for the fleet; if that is happening because the
+// store could not be read, somebody has to be able to find out why. The
+// reporting-side twin of this fallback is Report.AssumedSingleGPU, which
+// counts how often it was taken.
+func (c *Controller) affectedGPUs(ctx context.Context, inc *types.Incident) int {
+	// GPUs only: an incident that recorded TPU chips or AWS Neuron devices
+	// is no GPU.
+	if n, ok := recordedGPUs(inc); ok {
+		return n
+	}
+	// One device, whether or not we know its UUID. A bus address names a card
+	// as precisely as a UUID does for this purpose — see IsDeviceScoped.
+	if inc.Target.IsDeviceScoped() {
+		return 1
+	}
+	node, err := c.store.GetNode(ctx, inc.Target.Node)
+	switch {
+	case err == nil && node != nil && !coversGPU(inc, map[string]*types.Node{node.Name: node}):
+		return 0
+	case err != nil:
+		c.log.Warn("cannot read a node's GPU inventory; charging its incident one GPU, so recovered capacity is understated",
+			"node", inc.Target.Node, "incident", inc.ID, "err", err)
+		return 1
+	case node == nil || len(node.GPUs) == 0:
+		c.log.Info("a node-scoped incident closed on a node with no registered GPU inventory; charging it one GPU",
+			"node", inc.Target.Node, "incident", inc.ID)
+		return 1
+	}
+	return len(node.GPUs)
+}
+
+// verifyWaitAction is the audit row that says what a VERIFYING incident
+// waits for, written when the reason changes.
+const verifyWaitAction = "verify-waiting"
+
+// noteVerifyWait records why verification holds, once per reason since the
+// incident entered VERIFYING, so the operator sees it before the deadline.
+func (c *Controller) noteVerifyWait(ctx context.Context, inc *types.Incident, reason string) error {
+	trail, err := c.store.AuditTrail(ctx, inc.ID)
+	if err != nil {
+		return err
+	}
+	for i := len(trail) - 1; i >= 0; i-- {
+		e := trail[i]
+		if e.Action == verifyWaitAction {
+			if e.Result == reason {
+				return nil
+			}
+			break
+		}
+		if e.FromState != e.ToState && e.ToState == types.StateVerifying {
+			break
+		}
+	}
+	return c.appendAudit(ctx, inc, "system", verifyWaitAction, reason)
+}
+
+// touchUpdated moves UpdatedAt for a write that is not a signal. In VERIFYING
+// an UpdatedAt past StateChangedAt is how advanceVerifying sees a signal that
+// recurred during the quiet window, so there a replacement plan's or an
+// operator's write leaves it alone.
+func touchUpdated(inc *types.Incident, now time.Time) {
+	if inc.State != types.StateVerifying {
+		inc.UpdatedAt = now
+	}
+}
+
+// appendAudit records an event that does not change state (e.g. a failed
+// step before escalation decides the next state).
+func (c *Controller) appendAudit(ctx context.Context, inc *types.Incident, actor, action, result string) error {
+	return c.store.AppendAudit(ctx, &types.AuditEntry{
+		IncidentID: inc.ID, Time: time.Now(),
+		FromState: inc.State, ToState: inc.State,
+		Actor: actor, Action: action, Result: result, DryRun: inc.DryRun,
+	})
+}
+
+// --- helpers ---
+
+func (c *Controller) isInFlight(id string) bool {
+	c.inFlightMu.Lock()
+	defer c.inFlightMu.Unlock()
+	return c.inFlight[id]
+}
+
+func (c *Controller) setInFlight(id string, v bool) {
+	c.inFlightMu.Lock()
+	defer c.inFlightMu.Unlock()
+	if v {
+		c.inFlight[id] = true
+	} else {
+		delete(c.inFlight, id)
+	}
+}
+
+// observePolicy reads the observation threshold and window for a class.
+// Explicit policy params win; otherwise the detection catalog's declared
+// threshold ("XID 13 is actionable after 3 occurrences in 1h") applies, so
+// the documented catalog semantics are enforced rather than advisory.
+// threshold 0 means "never auto-escalate".
+// The vendor is part of the lookup: an AMD incident reading an NVIDIA policy's
+// threshold escalates on another vendor's timing, which is a decision nobody
+// made about hardware nobody looked at.
+func (c *Controller) observePolicy(ctx context.Context, class types.ProblemClass, vendor types.AcceleratorVendor) (threshold int, window time.Duration) {
+	window = defaultObserveWindow
+	if catThreshold, catWindow, ok := c.runtimeConfig(ctx).Catalog.ObservePolicy(class); ok {
+		threshold, window = catThreshold, catWindow
+	}
+	pol, ok := c.runtimeConfig(ctx).Engine.PolicyFor(class, vendor)
+	if !ok {
+		return threshold, window
+	}
+	if v, err := strconv.Atoi(pol.Params["threshold"]); err == nil && v > 0 {
+		threshold = v
+	}
+	if d, err := time.ParseDuration(pol.Params["window"]); err == nil && d > 0 {
+		window = d
+	}
+	return threshold, window
+}
+
+// isObservePlaybook reports whether a playbook only records and notifies.
+func isObservePlaybook(book *playbook.Playbook) bool {
+	return len(book.Steps) == 1 && strings.HasPrefix(book.Steps[0].Action, "notify.")
+}
+
+func firstNonBlank(ss ...string) string {
+	for _, s := range ss {
+		if strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// observeOnlyNodeGone reports whether an observe-only signal names a node
+// that is no longer there: no Kubernetes Node of that name, or one with a
+// different UID than the node the controller knows. A liveness alert built
+// from "seen in the last hour but not now" fires for a node removed by a
+// scale-down or a replacement; that is not a loss of visibility. When the
+// platform cannot tell, the signal opens its incident: it never starts a
+// step.
+func (c *Controller) observeOnlyNodeGone(ctx context.Context, sig types.Signal) bool {
+	if _, ok := detect.ObserveOnly(sig.Class); !ok {
+		return false
+	}
+	identity, ok := c.platform.(platform.NodeIdentity)
+	if !ok {
+		return false
+	}
+	uid, found, err := identity.NodeUID(ctx, sig.Target.Node)
+	if err != nil {
+		c.log.Warn("could not read the node for an observe-only signal", "class", sig.Class, "node", sig.Target.Node, "err", err)
+		return false
+	}
+	if !found {
+		c.log.Info("ignoring an observe-only signal for a node that no longer exists", "class", sig.Class, "node", sig.Target.Node)
+		return true
+	}
+	known, err := c.store.GetNode(ctx, sig.Target.Node)
+	if err == nil && known.UID != "" && uid != "" && known.UID != uid {
+		c.log.Info("ignoring an observe-only signal for a replaced node", "class", sig.Class, "node", sig.Target.Node)
+		return true
+	}
+	return false
+}

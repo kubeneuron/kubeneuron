@@ -1,0 +1,46 @@
+==============NVSMI LOG==============
+
+Timestamp                                 : Tue Jul 29 12:00:30 2026
+Driver Version                            : 550.54.15
+CUDA Version                              : 12.4
+
+Attached GPUs                             : 2
+GPU 00000000:3B:00.0
+    Product Name                          : NVIDIA A100-SXM4-40GB
+    GPU UUID                              : GPU-aaaa1111-bbbb-2222-cccc-333344445555
+    ECC Errors
+        Volatile
+            SRAM Correctable              : 0
+            SRAM Uncorrectable            : 0
+            DRAM Correctable              : 5
+            DRAM Uncorrectable            : 2
+        Aggregate
+            SRAM Correctable              : 0
+            SRAM Uncorrectable            : 0
+            DRAM Correctable              : 17
+            DRAM Uncorrectable            : 9
+    Remapped Rows
+        Correctable Error                 : 0
+        Uncorrectable Error               : 2
+        Pending                           : Yes
+        Remapping Failure Occurred        : No
+
+GPU 00000000:AF:00.0
+    Product Name                          : NVIDIA A100-SXM4-40GB
+    GPU UUID                              : GPU-dddd6666-eeee-7777-ffff-888899990000
+    ECC Errors
+        Volatile
+            SRAM Correctable              : 0
+            SRAM Uncorrectable            : 0
+            DRAM Correctable              : 0
+            DRAM Uncorrectable            : 0
+        Aggregate
+            SRAM Correctable              : 0
+            SRAM Uncorrectable            : 0
+            DRAM Correctable              : 0
+            DRAM Uncorrectable            : 0
+    Remapped Rows
+        Correctable Error                 : 0
+        Uncorrectable Error               : 0
+        Pending                           : No
+        Remapping Failure Occurred        : Yes

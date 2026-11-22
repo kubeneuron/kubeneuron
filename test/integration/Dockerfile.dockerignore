@@ -1,0 +1,15 @@
+# The integration images package only prebuilt static binaries. Keep the
+# repo-root build context narrow and exclude source control and preservation
+# artifacts explicitly.
+**
+.git
+.git/**
+**/*.orig
+**/*.rej
+!bin
+!bin/kubeneuron-operator
+!bin/kubeneuron-controller
+!bin/kubeneuron-agent
+!test
+!test/integration
+!test/integration/Dockerfile

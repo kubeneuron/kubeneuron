@@ -1,0 +1,166 @@
+# Forbidden documentation claims — one extended regex per line, '#' comments.
+#
+# Each entry is a status claim that WAS true once and went false; hack/
+# verify-docs.sh greps every published markdown file and fails on any match,
+# so a stale spelling can never rot silently back in (the failure mode the
+# 2026-08-05 re-audit found in five audience-facing docs at once). When a
+# status flips, add the old spelling here in the same commit.
+#
+# Keep patterns narrow enough not to forbid HISTORY sections: CHANGELOG.md is
+# exempt in the checker.
+executionMode:? .?Enabled.? (is|remains|stays) (deliberately )?(rejected|prohibited|locked)
+operator rejects .?(executionMode:? )?.?Enabled
+PostgreSQL.{0,60}(is not implemented|rejects (it|that store)|no controller PostgreSQL backend)
+webhook.{0,30}does not (yet )?authenticate
+does not yet authenticate Alertmanager
+the (current )?skeleton
+still an early skeleton
+frozen at 2026-07-14
+six CRDs
+--version v0\.1\.[01]
+unfinished (KubeNeuron )?runtime
+preview profile
+child-resource status is still
+# The source tree moved past v0.5.0 (the pins carry v0.6.0); no doc may say
+# this tree still pins the older release.
+in this tree (still )?pins? v0\.5\.0
+# v0.6.0 was published on 2026-10-11 UTC. While it was a candidate, the public
+# docs carried these spellings by design; after publication every one of them
+# is a stale status claim. They are narrow enough to leave history alone:
+# "an earlier, unpublished v0.6.0 candidate" (a past rehearsal) and "ahead of
+# the release" (when a review was written) stay legal.
+prepared in source
+not yet tagged or published
+v0\.6\.0 candidate pins
+(tag|images|assets)[^.]{0,80}do(es)? not yet exist
+v0\.6\.0 (scope|candidate), unreleased
+candidate in source, unreleased
+latest published release(,)? (is|remains) v0\.5\.0
+v0\.5\.0 is the latest (\*\*)?published
+pending (the )?v0\.6\.0( release)?
+v0\.6\.0 release, which has not happened
+before the v0\.6\.0 release is published
+# v0.6.1 (the Go 1.26.9 / x/net / x/text security patch) superseded v0.6.0 as
+# the latest release on 2026-10-11 and the pins moved with it. Narrow: "released
+# in v0.6.0", "introduced in v0.6.0" and "the v0.6.0 notes" (feature history)
+# stay legal; only "latest release" and "this tree's pins" claims are stale.
+v0\.6\.0 is the latest (\*\*)?(published )?(\*\*)?release
+latest (published )?release(,)? (is|remains) v0\.6\.0
+carry the v0\.6\.0 pins
+in this tree (still )?pins? v0\.6\.0
+# go.mod moved to `go 1.26.0` / `toolchain go1.26.9` with the v0.6.1 patch.
+Go 1\.25(\+| or newer)
+# v0.7.0 was published on 2026-10-19 UTC and superseded v0.6.1 as the latest
+# release. While it was a candidate the public docs said "not tagged, not
+# published" by design; afterwards every one of these is a stale status
+# claim. Narrow, as for v0.6.0: "released in v0.6.1", "the v0.6.1 note" and
+# "introduced in v0.7.0" (history) stay legal, and so does "an earlier,
+# unpublished v0.7.0 candidate" (the word precedes the version); only
+# "latest release" claims about v0.6.1, "this tree's pins" claims about
+# v0.6.1, and "not tagged" / "not published" claims about v0.7.0 are
+# forbidden. The pins patterns mirror the v0.6.0 ones above; the two
+# "v0.6.1 ... is the latest release" spellings are the ones the upgrade
+# notes carried on 2026-10-19 (the [^.] span cannot cross another version
+# number, so "superseded v0.6.1; v0.7.0 is the latest release" stays
+# legal). The checker greps line by line, so a claim wrapped across a line
+# break is outside its reach; fixing the text is the
+# remedy, these patterns only stop the one-line spellings from returning.
+Latest release \(v0\.6\.1
+v0\.6\.1 is the latest (\*\*)?(published )?(\*\*)?release
+v0\.6\.1[^.]{0,80}is the latest release
+superseded as the latest release by (the )?v0\.6\.1
+latest (published )?release(,)? (is|remains) v0\.6\.1
+carry the v0\.6\.1 pins
+in this tree (still )?pins? v0\.6\.1
+v0\.7\.0 is not (yet )?tagged
+v0\.7\.0[^.]{0,60}(not (yet )?(tagged|published)|untagged|unpublished)
+candidate prepared in source
+# v0.8.0 was published on 2026-11-08 UTC and superseded v0.7.0 as the latest
+# release. Same narrowing as above: "released in v0.7.0", "the v0.7.0 notes"
+# and "introduced in v0.8.0" stay legal; forbidden are "latest release"
+# claims about v0.7.0, "release candidate" pins claims about this tree, and
+# "not tagged" / "not published" / "not released" claims about v0.8.0 or
+# its surfaces. "What remains before a tag" was the README's pre-tag
+# sentence and may not return.
+Latest release \(v0\.7\.0
+v0\.7\.0 is the latest (\*\*)?(published )?(\*\*)?release
+v0\.7\.0[^.]{0,80}is the latest (published )?release
+latest (published )?release(,)? (is|remains) v0\.7\.0
+pins (of )?the (v0\.8\.0 )?release candidate
+v0\.8\.0 (release )?candidate(,|;| adds| as| and| source)
+v0\.8\.0 is not (yet )?(tagged|published|released)
+v0\.8\.0[^.]{0,60}(not (yet )?(tagged|published|released)|untagged|unpublished)
+Release status: candidate
+What remains before a tag
+
+# --- v0.7 catalog vocabulary ------------------------------------------------
+# "Tier T4" is the metric catalog's control-plane tier; "Tesla T4" is the
+# only GPU this project has run on. A lone "T4" next to catalog vocabulary
+# is ambiguous between the two and is forbidden in public prose (the
+# generated docs/reference-gpu-metrics.md spells both out). Narrow by
+# design: "a real T4", "EKS T4", "g4dn/T4" in hardware history stay legal,
+# because there the GPU is the only possible reading. ERE has no
+# look-behind, so the prefix class excludes a preceding "Tier " / "tier "
+# (ends in r) and "Tesla " (ends in a) by their last letter.
+(^|[^ra] |[^ ])T4 (control[- ]plane|tier|catalog|series|metrics?)\b
+# The v0.7 shadow alerts are observation for humans. Any public sentence
+# that says a ShadowGpu rule opens an incident or triggers remediation is a
+# stale claim about authority the rules were built never to have.
+ShadowGpu[A-Za-z]*[^.]{0,60}(opens? an incident|triggers? (a )?remediation|feeds? the controller|reaches the controller webhook)
+# The v0.7 derived series and shadow rules shipped in v0.7.0; they are no
+# longer "read by nothing".
+(derived|canonical) series[^.]{0,40}read by nothing
+no alert does yet
+
+# --- vendor support claims -------------------------------------------------
+# The second category in this file: claims that are not yet true. Shipping
+# detection and actions are NVIDIA-only (docs/reference-capabilities.md is the
+# per-vendor matrix, machine-checked against the filesystem by verify-docs.sh).
+# These patterns fail the build on the prose spellings of shipped multi-vendor
+# support, so a README or tour sentence cannot quietly outrun the matrix.
+# When a vendor genuinely lands, delete the patterns it makes true IN THE SAME
+# COMMIT as the matrix cells — that deletion is the deliberate act this file
+# exists to force.
+[Ss]upports? (both )?(NVIDIA and (AMD|Intel)|(AMD|Intel) and NVIDIA)
+(AMD|Intel|ROCm)[^|]{0,40}(is|are) (now |fully |already )*(supported|hardware-validated)
+[Mm]ulti-?vendor[^|]{0,20}(support|detection|remediation) (is|has) (shipped|landed|arrived|live)
+(amd-smi|rocm-smi|amdgpu|xpu-smi|[Ll]evel ?[Zz]ero)[^|]{0,40}(ships|shipped|is (implemented|wired|supported))
+# AMD detection ships (unvalidated) since the definition round; the
+# overclaim to guard is now VALIDATION, not existence.
+(AMD|Intel|ROCm)[^|]{0,40}(hardware[- ]validated|validated on (real |AMD |Intel )*hardware|proven on hardware)
+# Vendor-support claims that go stale the moment a vendor adapter lands.
+[Ss]hipping detection is NVIDIA-only
+[Ss]hipping detection is NVIDIA[- ]only
+
+# --- v0.8 workload-safe recovery claims --------------------------------------
+# Second-category patterns (not yet true, and some never true), added with
+# the v0.8 feature flags per the release plan's claims rule. The protocol
+# records acknowledged/exited/expired/unreachable/skipped and nothing about a
+# checkpoint's content, so no public sentence may say a checkpoint or
+# training progress WAS saved, preserved or guaranteed by KubeNeuron, or put
+# a number on saved or lost training GPU-hours (the recovery report's
+# "degraded" and "recovered" GPU-hours are a different, measured quantity
+# and stay legal). Claim-shaped on purpose: the design record's "never says
+# checkpoint saved" and "does not estimate lost training GPU-hours" are
+# negations and must stay legal.
+checkpoints? (was|were|is|are|has been|have been|got) (saved|preserved|guaranteed|protected)
+(saves|preserves|guarantees|protects) (the |your |their |a )?(training |job |model )?(checkpoints?|progress)
+(training |job )?progress (is|was|has been|were|are) (saved|preserved|protected|guaranteed)
+[0-9][0-9.,]* (training )?GPU[- ]hours (saved|preserved|protected)
+(saved|preserved|protected) [0-9][0-9.,]* (training )?GPU[- ]hours
+# Kueue, KubeRay and Ray Train: the only legal shape before a pilot is
+# "read-only context from …, demonstrated in kind, not validated on a
+# production fleet". "Works with", "integrates with", "validated/tested on"
+# and "supported/integrated" are forbidden in that direction; "integrates
+# with KubeNeuron" in the examples' disclaimer names KubeNeuron, not a
+# framework, and stays legal.
+(works|integrates|integrated|validated|tested|proven|certified|qualified) (with|on|against) (Kueue|KubeRay|Ray Train|Ray)\b
+(Kueue|KubeRay|Ray Train)[^|.]{0,40}(is|are) (now |fully |officially )?(supported|integrated)
+(Kueue|KubeRay|Ray) (support|integration) (is|has) (shipped|landed|arrived|live)
+# MIG and DRA exist in v0.8 only as refusals the classifier renders from
+# read-only evidence. No device-scoped action on them ships, so none is
+# "supported".
+(MIG|DRA)[^|.]{0,30}(is|are) (now |fully )?supported
+supports? (MIG|DRA)\b
+MIG (remediation|reset|actions?)[^|.]{0,20}(is |are )?(now )?(supported|shipped|available)
+DRA[- ]managed (devices?|GPUs?)[^|.]{0,30}(remediat|reset)

@@ -1,0 +1,19 @@
+# Optional cloud API restart, disabled unless recycle.enabled is explicit.
+# This branch drains BEFORE a replacement is ready and interrupts workloads.
+# A failed restart may escalate only to cloud recovery, never host commands.
+name: cloud-recycle
+target: node
+cooldown: 6h
+steps:
+  - name: cordon
+    action: platform.cordon
+  - name: drain
+    action: platform.drain
+    approval: required
+    timeout: 30m
+  - name: recycle
+    action: platform.recycle_node
+    approval: required
+    timeout: 20m
+on_failure:
+  escalate_to: cloud-replace

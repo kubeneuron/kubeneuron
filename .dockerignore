@@ -1,0 +1,10 @@
+# bin/ is deliberately NOT excluded: the kind integration image
+# (test/integration/Dockerfile) copies host-built binaries from it.
+.git
+dist/
+web/node_modules/
+*.db
+*.db-wal
+*.db-shm
+AGENT_SESSION_STATE.md
+TRANSFER_HANDOFF.md

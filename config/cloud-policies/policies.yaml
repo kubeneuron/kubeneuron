@@ -1,0 +1,283 @@
+# Cloud-only policy pack. Requires the recovery-mode CRD schema.
+# Global installation DryRun remains the default. AddFirst is never silently
+# downgraded to RemoveFirst; until provision-before-delete is implemented the
+# replacement path reports unavailable. Qualify each fault/pool before arming.
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-xid-app
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: xid-app}
+  playbookRef: kubeneuron-cloud-observe
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-ecc-sbe-rate
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: ecc-sbe-rate}
+  playbookRef: kubeneuron-cloud-observe
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-thermal
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: thermal}
+  playbookRef: kubeneuron-cloud-observe
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-power
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: power}
+  playbookRef: kubeneuron-cloud-observe
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-pcie
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: pcie}
+  playbookRef: kubeneuron-cloud-observe
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-agent-down
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: agent-down}
+  playbookRef: kubeneuron-cloud-observe
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-exporter-down
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: exporter-down}
+  playbookRef: kubeneuron-cloud-observe
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-accelerator-fault
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: accelerator-fault}
+  playbookRef: kubeneuron-cloud-replace
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-accelerator-unallocatable
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: accelerator-unallocatable}
+  playbookRef: kubeneuron-cloud-observe
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-ecc-contained
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: ecc-contained}
+  playbookRef: kubeneuron-cloud-observe
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-row-remap-ok
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: row-remap-ok}
+  playbookRef: kubeneuron-cloud-observe
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-gsp-error
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: gsp-error}
+  playbookRef: kubeneuron-cloud-observe
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-driver-hang
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: driver-hang}
+  playbookRef: kubeneuron-cloud-observe
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-ecc-dbe
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: ecc-dbe}
+  playbookRef: kubeneuron-cloud-replace
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-nvlink
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: nvlink}
+  playbookRef: kubeneuron-cloud-replace
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-fell-off-bus
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: fell-off-bus}
+  playbookRef: kubeneuron-cloud-replace
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-gpu-lost
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: gpu-lost}
+  playbookRef: kubeneuron-cloud-replace
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-row-remap-failure
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: row-remap-failure}
+  playbookRef: kubeneuron-cloud-observe
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-row-remap-budget
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: row-remap-budget}
+  playbookRef: kubeneuron-cloud-observe
+  replacement: {strategy: AddFirst}
+  recycle: {enabled: false}
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: kubeneuron-cloud-cloud-interruption
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  priority: 900
+  mode: Approval
+  match: {class: cloud-interruption}
+  playbookRef: kubeneuron-cloud-interruption
+  interruption: {lead: 10m}

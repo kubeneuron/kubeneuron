@@ -1,0 +1,478 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package controller
+
+// Round-8: the approval protocol is first-class rounds. Each park mints an
+// epoch and its request record atomically; decisions bind to a round; a
+// re-park orphans stale decisions by construction, not by timestamp
+// comparison; and rounds without request records fail closed.
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/kubeneuron/kubeneuron/internal/metrics"
+	"github.com/kubeneuron/kubeneuron/internal/notify"
+	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/internal/store"
+	"github.com/kubeneuron/kubeneuron/internal/store/sqlite"
+	"github.com/kubeneuron/kubeneuron/pkg/types"
+)
+
+func approvalEpochFixture(t *testing.T) (*Controller, *sqlite.Store, string) {
+	t.Helper()
+	pb := &playbook.Playbook{
+		Name: "pb", Target: "node",
+		Steps: []playbook.Step{{Name: "reboot", Action: "agent.reboot", Approval: "required"}},
+	}
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{"pb": pb}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, st, _ := miniController(t, engine)
+	ctx := context.Background()
+	if err := st.UpsertNode(ctx, &types.Node{Name: "n1"}); err != nil {
+		t.Fatal(err)
+	}
+	inc := &types.Incident{
+		ID: "inc-epoch", Target: types.Target{Node: "n1"},
+		Class: types.ClassFellOffBus, State: types.StateEvaluating, Playbook: "pb",
+		OpenedAt: time.Now(), UpdatedAt: time.Now(), StateChangedAt: time.Now(),
+	}
+	allowCloudApprovalFixture(c, inc)
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	c.reconcile(ctx) // parks: epoch 1 + its request record, atomically
+	return c, st, inc.ID
+}
+
+// A park mints its epoch and request record together: immediately after the
+// park, the round is fully formed and decidable.
+func TestParkMintsEpochAndRequestAtomically(t *testing.T) {
+	_, st, id := approvalEpochFixture(t)
+	ctx := context.Background()
+
+	inc, err := st.GetIncident(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inc.State != types.StateAwaitingApproval || inc.ApprovalEpoch != 1 {
+		t.Fatalf("after park: state=%s epoch=%d, want AWAITING_APPROVAL at epoch 1", inc.State, inc.ApprovalEpoch)
+	}
+	request, err := st.GetApprovalRequest(ctx, id, inc.ApprovalEpoch)
+	if err != nil {
+		t.Fatalf("the round's request record must exist: %v", err)
+	}
+	if request.StepAction != "agent.reboot" || request.StepHash == "" || request.ParkEpoch != 1 {
+		t.Fatalf("request = %+v, want full identity at epoch 1", request)
+	}
+}
+
+// A decision belongs to its round: after a re-park (new epoch), the old
+// round's approval is invisible to resume — orphaned by construction, with no
+// timestamp ordering involved.
+func TestReParkOrphansThePreviousRoundsDecision(t *testing.T) {
+	c, st, id := approvalEpochFixture(t)
+	ctx := context.Background()
+
+	// Approve round 1 through the real API.
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Before the walk resumes, the playbook hot-swaps: resume detects the
+	// mismatch against round 1's request and re-parks into round 2.
+	swapped := &playbook.Playbook{
+		Name: "pb", Target: "node",
+		Steps: []playbook.Step{{Name: "reboot", Action: "platform.replace_node", Approval: "required"}},
+	}
+	engine2, err := playbook.NewEngine(map[string]*playbook.Playbook{"pb": swapped}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetEngine(engine2)
+	c.reconcile(ctx)
+
+	inc, err := st.GetIncident(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inc.State != types.StateAwaitingApproval || inc.ApprovalEpoch != 2 {
+		t.Fatalf("after mismatch: state=%s epoch=%d, want a re-park into epoch 2", inc.State, inc.ApprovalEpoch)
+	}
+	// Round 1's approval must be invisible to round 2.
+	if _, err := st.FirstApprovalDecision(ctx, id, inc.ApprovalEpoch); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("round 2 decision lookup = %v, want ErrNotFound — the stale approval is orphaned", err)
+	}
+	// And the walk must NOT execute anything on further passes.
+	c.reconcile(ctx)
+	still, err := st.GetIncident(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if still.State != types.StateAwaitingApproval || still.StepIndex != 0 {
+		t.Fatalf("state=%s step=%d, want the incident still parked", still.State, still.StepIndex)
+	}
+	// Approving round 2 executes the step that round 2 asked about.
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	decision, err := st.FirstApprovalDecision(ctx, id, 2)
+	if err != nil || decision.StepAction != "platform.replace_node" {
+		t.Fatalf("round-2 decision = %+v, %v; want it bound to the round-2 request", decision, err)
+	}
+}
+
+// A park that predates approval rounds (epoch 0) fails closed in both
+// directions — modelled with the TRUE legacy shape: the old code always wrote
+// request rows, so a real pre-upgrade incident has requests AND orphaned
+// decisions all defaulted to park_epoch 0. Pairing them naively could match
+// a stale approval of one park against the request of a DIFFERENT park and
+// execute a step the human never approved; epoch 0 must therefore never be
+// consulted as a round at all.
+func TestPreEpochParkFailsClosedIntoAFreshRound(t *testing.T) {
+	c, st, id := approvalEpochFixture(t)
+	ctx := context.Background()
+
+	// Regress to the real pre-upgrade shape: parked at epoch 0, with a stale
+	// APPROVED decision from an earlier park (for a different step/hash) AND
+	// a later request row — all at park_epoch 0, exactly as the migration
+	// defaults them.
+	if _, err := st.SQL.ExecContext(ctx, `UPDATE incidents SET approval_epoch=0 WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SQL.ExecContext(ctx, `UPDATE approvals SET park_epoch=0 WHERE incident_id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordApproval(ctx, &types.Approval{
+		IncidentID: id, StepName: "old-reset", Decision: types.ApprovalApproved,
+		Actor: "legacy", Channel: "cli", At: time.Now().Add(-time.Hour),
+		PlaybookName: "pb", StepAction: "agent.gpu_reset", StepHash: "stale-hash",
+		ParkEpoch: 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The decision API refuses: epoch 0 is not a verifiable round.
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 0, "", ""); err == nil {
+		t.Fatal("a pre-epoch park must not accept a decision")
+	}
+	// Resume must NOT pair the stale approval with any epoch-0 request: it
+	// migrates the park into round 1 and executes nothing.
+	c.reconcile(ctx)
+	inc, err := st.GetIncident(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inc.State != types.StateAwaitingApproval || inc.ApprovalEpoch != 1 || inc.StepIndex != 0 {
+		t.Fatalf("state=%s epoch=%d step=%d, want a fresh round (epoch 1) with nothing executed", inc.State, inc.ApprovalEpoch, inc.StepIndex)
+	}
+	if _, err := st.GetApprovalRequest(ctx, id, 1); err != nil {
+		t.Fatalf("the fresh round must have its request record: %v", err)
+	}
+	// Further passes stay parked: the stale epoch-0 approval never resumes
+	// anything.
+	c.reconcile(ctx)
+	if still, _ := st.GetIncident(ctx, id); still.State != types.StateAwaitingApproval || still.StepIndex != 0 {
+		t.Fatalf("state=%s step=%d, want still parked", still.State, still.StepIndex)
+	}
+}
+
+// R10.1: the click carries the round the human SAW. A notification renders
+// round N and its suggested command pins --round N; if a re-park mints round
+// N+1 before the click lands, the decision must be refused — never silently
+// recorded against content the human never read. Round 0 (older clients)
+// keeps the bind-to-current behavior.
+func TestDecisionPinnedToDisplayedRoundRefusedAfterRePark(t *testing.T) {
+	c, st, id := approvalEpochFixture(t)
+	ctx := context.Background()
+
+	// A decision pinned to the wrong round is refused even before any
+	// re-park: the client's view must match the current round exactly.
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 7, "", ""); err == nil {
+		t.Fatal("a decision pinned to a round that never existed must be refused")
+	}
+	// Pinned to the current round: accepted.
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalApproved, 1, "", ""); err != nil {
+		t.Fatalf("decision pinned to the current round refused: %v", err)
+	}
+
+	// The playbook hot-swaps before resume; the walk detects the mismatch
+	// against round 1's request and re-parks into round 2. The Slack message
+	// for round 1 is now stale in someone's channel.
+	swapped := &playbook.Playbook{
+		Name: "pb", Target: "node",
+		Steps: []playbook.Step{{Name: "reboot", Action: "platform.replace_node", Approval: "required"}},
+	}
+	engine2, err := playbook.NewEngine(map[string]*playbook.Playbook{"pb": swapped}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetEngine(engine2)
+	c.reconcile(ctx)
+	inc, err := st.GetIncident(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inc.ApprovalEpoch != 2 {
+		t.Fatalf("epoch = %d, want re-park into round 2", inc.ApprovalEpoch)
+	}
+
+	// The click from the stale round-1 message must bounce with a re-read
+	// instruction, not bind to round 2.
+	if err := c.DecideApproval(ctx, id, "bob", "slack", types.ApprovalApproved, 1, "", ""); err == nil {
+		t.Fatal("a round-1 click after the re-park into round 2 must be refused")
+	}
+	if _, err := st.FirstApprovalDecision(ctx, id, 2); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("round 2 must have no decision after the refused stale click, got err=%v", err)
+	}
+	// A fresh read shows round 2; deciding it (pinned or legacy-unpinned)
+	// works.
+	if err := c.DecideApproval(ctx, id, "bob", "slack", types.ApprovalApproved, 2, "", ""); err != nil {
+		t.Fatalf("decision pinned to the fresh round refused: %v", err)
+	}
+	decision, err := st.FirstApprovalDecision(ctx, id, 2)
+	if err != nil || decision.StepAction != "platform.replace_node" {
+		t.Fatalf("round-2 decision = %+v, %v; want it bound to round 2's request", decision, err)
+	}
+}
+
+// R11.2 (review F2): the decision moment — and the human's stated reason —
+// lands in the audit trail at decide time, not only at resume.
+func TestDecisionReasonIsAudited(t *testing.T) {
+	c, st, id := approvalEpochFixture(t)
+	c.platform = diskPressureNode{}
+	ctx := context.Background()
+	if err := c.DecideApproval(ctx, id, "alice", "cli", types.ApprovalRejected, 1, "wrong node, hardware ticket filed", ""); err != nil {
+		t.Fatal(err)
+	}
+	trail, err := st.AuditTrail(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range trail {
+		if e.Action == "approval-rejected" && e.Actor == "alice" && e.Params["node_conditions"] != "" && e.Result == "wrong node, hardware ticket filed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("audit trail lacks the decision entry with its reason: %+v", trail)
+	}
+}
+
+// R11.4: an incident that opened BEFORE its policy existed (playbook binding
+// is open-time) is late-bound in OBSERVING once a matching policy appears —
+// with the write-fence bump and an audit row — instead of holding unbound
+// until quiet-resolve buries the fault. Bound incidents are never re-bound.
+func TestLateBindsIncidentOpenedBeforeItsPolicyExisted(t *testing.T) {
+	emptyEngine, err := playbook.NewEngine(map[string]*playbook.Playbook{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, st, _ := miniController(t, emptyEngine)
+	ctx := context.Background()
+	if err := st.UpsertNode(ctx, &types.Node{Name: "n1"}); err != nil {
+		t.Fatal(err)
+	}
+	inc := &types.Incident{
+		ID: "inc-latebind", Target: types.Target{Node: "n1"},
+		Class: types.ClassFellOffBus, State: types.StateObserving, DryRun: true,
+		OpenedAt: time.Now(), UpdatedAt: time.Now(), StateChangedAt: time.Now(),
+	}
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+
+	// No policy yet: the pass leaves the incident unbound.
+	c.reconcile(ctx)
+	got, err := st.GetIncident(ctx, inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Playbook != "" {
+		t.Fatalf("playbook = %q, want unbound while no policy matches", got.Playbook)
+	}
+	fence := got.StateChangedAt
+
+	// The policy arrives (config rollout lands). The next pass binds it.
+	pb := &playbook.Playbook{
+		Name: "late", Target: "node",
+		Steps: []playbook.Step{{Name: "Observe", Action: "notify.observe"}},
+	}
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{"late": pb},
+		[]playbook.Policy{{Class: types.ClassFellOffBus, Playbook: "late"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetEngine(engine)
+	c.reconcile(ctx)
+	got, err = st.GetIncident(ctx, inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Playbook != "late" {
+		t.Fatalf("playbook = %q, want late-bound %q", got.Playbook, "late")
+	}
+	if !got.StateChangedAt.After(fence) {
+		t.Fatal("late-bind must bump StateChangedAt (the write-fence)")
+	}
+	trail, err := st.AuditTrail(ctx, inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := false
+	for _, e := range trail {
+		if e.Action == "bind-playbook" {
+			bound = true
+		}
+	}
+	if !bound {
+		t.Fatalf("audit trail lacks the bind-playbook entry: %+v", trail)
+	}
+}
+
+// The outcome metrics are the product's headline claim ("measures the
+// capacity it recovers"), so they carry three properties the review found
+// broken: they fire once per incident even across a park, they ignore
+// dry-run (the shipped default, which executes nothing), and they scale by
+// the node's accelerator inventory.
+func TestRecoveryOutcomeMetricsRecordedOnce(t *testing.T) {
+	pb := &playbook.Playbook{
+		Name: "observe", Target: "gpu",
+		Steps: []playbook.Step{{Name: "Observe", Action: "notify.observe"}},
+	}
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{"observe": pb},
+		[]playbook.Policy{{Class: types.ClassFellOffBus, Playbook: "observe"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, st, _ := miniController(t, engine)
+	ctx := context.Background()
+	if err := st.UpsertNode(ctx, &types.Node{
+		Name: "n1", GPUs: []types.GPUInfo{{Index: 0, UUID: "GPU-a"}, {Index: 1, UUID: "GPU-b"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	class := string(types.ClassFellOffBus)
+	before := testutil.ToFloat64(metrics.IncidentsRecovered.WithLabelValues(class, "true"))
+	beforeGPU := testutil.ToFloat64(metrics.DegradedGPUSeconds.WithLabelValues(class, "resolved"))
+
+	open := func(id string, dryRun bool) *types.Incident {
+		inc := &types.Incident{
+			ID: id, Target: types.Target{Node: "n1"},
+			Class: types.ClassFellOffBus, State: types.StateObserving, DryRun: dryRun, Playbook: "observe",
+			OpenedAt: time.Now().Add(-90 * time.Second), UpdatedAt: time.Now(), StateChangedAt: time.Now(),
+		}
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		return inc
+	}
+
+	// A dry-run incident resolves and must contribute NOTHING: it executed
+	// nothing, so it recovered nothing. Dry-run is the shipped default, so
+	// counting it would make a fresh install report fabricated capacity.
+	dry := open("inc-dry", true)
+	if err := c.transition(ctx, dry, types.StateResolved, "system", "resolve", "healthy", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := testutil.ToFloat64(metrics.IncidentsRecovered.WithLabelValues(class, "true")); got != before {
+		t.Fatalf("dry-run moved the recovery counter to %v; it must contribute nothing", got)
+	}
+
+	// A real incident that PARKS for a human and is then resolved must be
+	// measured exactly once. NEEDS_HUMAN is halted but reversible, and
+	// measuring there charged the whole incident again at every park.
+	inc := open("inc-outcome", false)
+	if err := c.transition(ctx, inc, types.StateNeedsHuman, "system", "escalate", "needs a human", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := testutil.ToFloat64(metrics.IncidentsRecovered.WithLabelValues(class, "true")); got != before {
+		t.Fatalf("a park moved the recovery counter to %v; only a terminal state may record", got)
+	}
+	if err := c.transition(ctx, inc, types.StateResolved, "human", "manual-resolve", "fixed by hand", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := testutil.ToFloat64(metrics.IncidentsRecovered.WithLabelValues(class, "true")); got != before {
+		t.Fatalf("manual resolution without remediation evidence moved recovery counter to %v", got)
+	}
+	// Two GPUs on the node, ~90s open, charged ONCE: ~180 GPU-seconds. The
+	// park must not have charged a second interval.
+	gained := testutil.ToFloat64(metrics.DegradedGPUSeconds.WithLabelValues(class, "resolved")) - beforeGPU
+	if gained < 150 || gained > 260 {
+		t.Fatalf("degraded GPU-seconds gained = %v, want ~180 (2 GPUs x ~90s, counted once)", gained)
+	}
+}
+
+// TestDegradedGPUsCountsWhatTheCounterCannot is the other half of the recovery
+// story. kubeneuron_degraded_gpu_seconds_total is charged once, on the terminal
+// transition, so an incident parked in NEEDS_HUMAN contributes nothing to it —
+// permanently, and for exactly the population whose capacity is most lost.
+func TestDegradedGPUsCountsWhatTheCounterCannot(t *testing.T) {
+	st, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	c := New(st, st, nil, nil, nil, nil, nil, &notify.Log{Logger: log}, log)
+
+	// An 8-GPU node, so a node-scoped incident must expand.
+	gpus := make([]types.GPUInfo, 8)
+	for i := range gpus {
+		gpus[i] = types.GPUInfo{Index: i, UUID: "GPU-" + string(rune('a'+i))}
+	}
+	if err := st.UpsertNode(ctx, &types.Node{Name: "n1", UID: "n1-uid", GPUs: gpus}); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	mk := func(id string, state types.IncidentState, gpu string, class types.ProblemClass, dryRun bool) {
+		t.Helper()
+		inc := &types.Incident{
+			ID: id, Target: types.Target{Node: "n1", GPUUUID: gpu}, Class: class,
+			State: state, DryRun: dryRun,
+			OpenedAt: now, UpdatedAt: now, StateChangedAt: now,
+		}
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("parked", types.StateNeedsHuman, "GPU-a", types.ClassECCDBE, false)
+	mk("working", types.StateExecuting, "GPU-b", types.ClassFellOffBus, false)
+	mk("node-wide", types.StateEvaluating, "", types.ClassThermal, false)
+	mk("dry", types.StateNeedsHuman, "GPU-c", types.ClassNVLink, true)
+	mk("closed", types.StateResolved, "GPU-d", types.ClassGPULost, false)
+
+	got, err := c.DegradedGPUs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[metrics.DegradedKey]int{
+		{Class: string(types.ClassECCDBE), Owner: "human"}:          1,
+		{Class: string(types.ClassFellOffBus), Owner: "automation"}: 1,
+		{Class: string(types.ClassThermal), Owner: "automation"}:    8, // node-scoped expands
+	}
+	if len(got) != len(want) {
+		t.Fatalf("degraded = %+v, want %+v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("degraded[%+v] = %d, want %d", k, got[k], v)
+		}
+	}
+	// The parked incident is the whole point: it is invisible to the counter
+	// and must be visible here.
+	if got[metrics.DegradedKey{Class: string(types.ClassECCDBE), Owner: "human"}] == 0 {
+		t.Fatal("an incident parked in NEEDS_HUMAN is degrading the fleet and must be counted somewhere")
+	}
+}

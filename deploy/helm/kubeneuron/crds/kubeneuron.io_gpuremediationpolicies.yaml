@@ -1,0 +1,444 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.3
+  name: gpuremediationpolicies.kubeneuron.io
+spec:
+  group: kubeneuron.io
+  names:
+    kind: GPURemediationPolicy
+    listKind: GPURemediationPolicyList
+    plural: gpuremediationpolicies
+    shortNames:
+    - gpolicy
+    singular: gpuremediationpolicy
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.match.class
+      name: Class
+      type: string
+    - jsonPath: .spec.playbookRef
+      name: Playbook
+      type: string
+    - jsonPath: .status.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.effectiveMode
+      name: Effective
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: GPURemediationPolicy selects a playbook for a normalized problem
+          class.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              GPURemediationPolicySpec binds one normalized signal class to a playbook.
+              The runtime consumes only class matching today; the other match fields are
+              rejected at admission so a policy cannot silently mean less than it says
+              (the compiler applies the same fail-closed rule).
+            properties:
+              automatic:
+                description: |-
+                  Automatic is the advance approval of an Automatic policy.
+
+                  Automatic mode acts without asking. For the node pools and fault classes
+                  you list here, KubeNeuron drains the node and restarts or replaces it
+                  through your cloud provider's API as soon as the conditions of your
+                  policy are met. Workloads on that node are stopped. A replacement
+                  instance may not be available, and the cloud provider bills instances
+                  according to its own terms. When replacement adds a node first, two
+                  instances run and are billed until the old one is removed, and your
+                  quota must allow the extra instance. You are responsible for the policy
+                  you set here and for its effect on your workloads. Start in dry-run,
+                  then in approval mode, before enabling automatic mode.
+                properties:
+                  acknowledgement:
+                    description: |-
+                      Acknowledgement must read exactly "I understand that automatic mode
+                      drains and replaces nodes without asking".
+                    enum:
+                    - I understand that automatic mode drains and replaces nodes without
+                      asking
+                    type: string
+                  allowUnknownCheckpoint:
+                    description: AllowUnknownCheckpoint permits automatic drain when
+                      a worker or its checkpoint is unknown.
+                    type: boolean
+                  checkpointWait:
+                    description: |-
+                      CheckpointWait is how long a step that stops work waits for the job's
+                      checkpoint before it proceeds.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                  enabledAt:
+                    format: date-time
+                    type: string
+                  enabledBy:
+                    description: |-
+                      EnabledBy and EnabledAt declare who enabled automatic mode and when.
+                      KubeNeuron records them as declared and cannot verify them; the
+                      Kubernetes API audit log shows who actually changed this object.
+                    minLength: 1
+                    type: string
+                  maxCheckpointAgeMinutes:
+                    description: |-
+                      MaxCheckpointAgeMinutes requires a recent worker-reported checkpoint for automatic drain.
+                      Zero disables the requirement.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  maxConcurrentNodes:
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  maxConcurrentNodesPerPool:
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  maxUnhealthyPercent:
+                    description: |-
+                      MaxUnhealthyPercent is the circuit breaker: when more than this share of
+                      a pool's nodes have an open incident or are not Ready, the policy falls
+                      back to approval and stays there until the policy is changed.
+                    format: int32
+                    maximum: 100
+                    minimum: 1
+                    type: integer
+                  minUnhealthyNodes:
+                    description: |-
+                      MinUnhealthyNodes is the breaker's absolute floor: it never trips on
+                      fewer unhealthy nodes than this (default 2).
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  nodeCooldown:
+                    description: |-
+                      NodeCooldown is the minimum time between two automatic recoveries of one
+                      node.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                  nodeSelector:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      NodeSelector names the node pools by label. It must not be empty: an
+                      absent selector never means "every node".
+                    minProperties: 1
+                    type: object
+                  poolLabel:
+                    description: |-
+                      PoolLabel is the node label that identifies a pool, for the per-pool
+                      limit and the circuit breaker. Empty treats all selected nodes as one
+                      pool.
+                    type: string
+                  qualifiedProfiles:
+                    description: |-
+                      QualifiedProfiles names the accelerator runtime profiles on which this
+                      policy's problem class is qualified for automatic recovery. Together with
+                      the policy's class each one is a qualified pair. A node matching no
+                      listed profile, or an empty list, is never recovered automatically: the
+                      step waits for approval.
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
+                required:
+                - acknowledgement
+                - enabledAt
+                - enabledBy
+                - maxConcurrentNodes
+                - maxUnhealthyPercent
+                - nodeCooldown
+                - nodeSelector
+                type: object
+                x-kubernetes-validations:
+                - message: maxConcurrentNodesPerPool must not exceed maxConcurrentNodes
+                  rule: '!has(self.maxConcurrentNodesPerPool) || self.maxConcurrentNodesPerPool
+                    <= self.maxConcurrentNodes'
+              interruption:
+                description: Interruption times the steps of a policy for class cloud-interruption.
+                properties:
+                  lead:
+                    default: 10m
+                    description: |-
+                      Lead is how long before the deadline the cloud announced the checkpoint
+                      warning and the cordon start. A notice further away only opens the
+                      incident and notifies.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: lead must be between 1m and 60m
+                  rule: '!has(self.lead) || (duration(self.lead) >= duration(''1m'')
+                    && duration(self.lead) <= duration(''60m''))'
+              kubeNeuronRef:
+                minLength: 1
+                type: string
+              match:
+                description: SignalMatch selects normalized signals for a remediation
+                  policy.
+                properties:
+                  class:
+                    minLength: 1
+                    type: string
+                  nodeSelector:
+                    description: |-
+                      A label selector is a label query over a set of resources. The result of matchLabels and
+                      matchExpressions are ANDed. An empty label selector matches all objects. A null
+                      label selector matches no objects.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  severity:
+                    type: string
+                  source:
+                    type: string
+                  vendor:
+                    description: |-
+                      Vendor scopes this policy to one accelerator vendor. Leave it unset to
+                      match any, which is what every policy did before this field existed.
+
+                      A problem class is not vendor-specific — an uncorrectable ECC error
+                      happens on NVIDIA, AMD and Intel alike — but the ladder that answers it
+                      is: a GPU reset is an NVIDIA contract, and quiescing the vendor stack
+                      means different things per vendor. Without this, adding AMD nodes to a
+                      fleet meant their faults selected the NVIDIA ladder, which is refused at
+                      the capability gate — after the cordon and the drain have already run.
+
+                      A signal that names NO vendor does not match a vendor-scoped policy. That
+                      is deliberate: these ladders reset and reboot hardware, so acting on an
+                      unconfirmed guess is the wrong direction to fail in.
+
+                      Any vendor id is accepted (lowercase letters, digits, and hyphens, at
+                      most 32 characters), so a policy can scope a ladder to the vendor of an
+                      accelerator adapter added after this API version.
+                    maxLength: 32
+                    pattern: ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$
+                    type: string
+                required:
+                - class
+                type: object
+              mode:
+                description: |-
+                  Mode says who authorises a step that stops work for the incidents this
+                  policy matches. DryRun simulates every step. Approval (the default)
+                  waits for a named person before each such step. Automatic runs them
+                  without a person, within spec.automatic. The installation-wide
+                  spec.safety.executionMode still applies: under DryRun nothing executes.
+                enum:
+                - DryRun
+                - Approval
+                - Automatic
+                type: string
+              parameters:
+                additionalProperties:
+                  type: string
+                type: object
+              playbookRef:
+                minLength: 1
+                type: string
+              priority:
+                format: int32
+                type: integer
+              recycle:
+                description: |-
+                  Recycle enables the optional restart through the cloud API before
+                  replacement; off by default.
+
+                  A restart through the cloud API drains the node before it is tried, so it
+                  can interrupt the workload before a prepared replacement is ready; the
+                  add-first guarantee does not cover it.
+                properties:
+                  enabled:
+                    type: boolean
+                type: object
+              replacement:
+                description: |-
+                  Replacement says how a node is replaced. AddFirst (the default) brings
+                  up the new node and waits until it is ready with its accelerators before
+                  the old one is drained and removed; RemoveFirst removes the old node
+                  first and is used only when named here.
+                properties:
+                  strategy:
+                    default: AddFirst
+                    enum:
+                    - AddFirst
+                    - RemoveFirst
+                    type: string
+                  successorTimeout:
+                    default: 30m
+                    description: |-
+                      SuccessorTimeout is how long AddFirst waits for the new node to be
+                      Ready with its accelerators. When it passes, KubeNeuron removes the
+                      node it added, if nothing else runs on it, and does not drain or remove
+                      the old node.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: successorTimeout must be between 5m and 2h
+                  rule: '!has(self.successorTimeout) || (duration(self.successorTimeout)
+                    >= duration(''5m'') && duration(self.successorTimeout) <= duration(''2h''))'
+            required:
+            - kubeNeuronRef
+            - match
+            - playbookRef
+            - priority
+            type: object
+            x-kubernetes-validations:
+            - message: match fields source/severity/nodeSelector are not supported
+                by the current runtime
+              rule: '!has(self.match.source) && !has(self.match.severity) && !has(self.match.nodeSelector)'
+            - message: spec.automatic is required with mode Automatic and not allowed
+                with any other mode
+              rule: (has(self.mode) && self.mode == 'Automatic') == has(self.automatic)
+          status:
+            description: GPURemediationPolicyStatus records validation and reference
+              resolution.
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              digest:
+                type: string
+              effectiveMode:
+                description: |-
+                  EffectiveMode is what actually happens: DryRun while the installation's
+                  spec.safety.executionMode is not Enabled, whatever Mode says.
+                type: string
+              mode:
+                description: 'Mode is the policy''s recovery mode: DryRun, Approval
+                  or Automatic.'
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              resolvedPlaybook:
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

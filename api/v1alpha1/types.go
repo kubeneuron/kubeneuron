@@ -1,0 +1,2062 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package v1alpha1
+
+import (
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// ExecutionMode controls whether the operator may schedule remediation.
+// +kubebuilder:validation:Enum=DryRun;Enabled;Paused
+type ExecutionMode string
+
+const (
+	ExecutionModeDryRun  ExecutionMode = "DryRun"
+	ExecutionModeEnabled ExecutionMode = "Enabled"
+	ExecutionModePaused  ExecutionMode = "Paused"
+)
+
+// IntegrationMode describes whether a dependency is supplied by the cluster
+// or managed by its dedicated upstream operator.
+// +kubebuilder:validation:Enum=External;Managed;Disabled
+type IntegrationMode string
+
+const (
+	IntegrationModeExternal IntegrationMode = "External"
+	IntegrationModeManaged  IntegrationMode = "Managed"
+	IntegrationModeDisabled IntegrationMode = "Disabled"
+)
+
+// CloudSpec configures node recycle/replace against a cloud provider. On AWS a
+// RecycleNode stops/starts the EC2 instance (reinitializing the GPU
+// passthrough) and a ReplaceNode terminates it for the autoscaler.
+//
+// Provider-specific settings live in a per-provider sub-block (aws today) so a
+// future provider adds its own block rather than widening a shared top level:
+// nothing here is cloud-specific except which block the provider selects.
+// +kubebuilder:validation:XValidation:rule="self.provider != 'aws' || has(self.aws)",message="spec.cloud.aws is required when provider is aws"
+// +kubebuilder:validation:XValidation:rule="self.provider != 'azure' || has(self.azure)",message="spec.cloud.azure is required when provider is azure"
+// +kubebuilder:validation:XValidation:rule="self.provider != 'gcp' || has(self.gcp)",message="spec.cloud.gcp is required when provider is gcp"
+type CloudSpec struct {
+	// Provider is the cloud backing the nodes: "aws" (EC2 and EKS), "azure"
+	// (AKS, experimental) or "gcp" (GKE, experimental).
+	// +kubebuilder:validation:Enum=aws;azure;gcp
+	Provider string `json:"provider"`
+	// AWS carries the AWS-specific configuration. Required when provider is aws.
+	AWS *AWSCloudSpec `json:"aws,omitempty"`
+	// Azure carries the AKS configuration. Required when provider is azure.
+	Azure *AzureCloudSpec `json:"azure,omitempty"`
+	// GCP carries the GKE configuration. Required when provider is gcp.
+	GCP *GCPCloudSpec `json:"gcp,omitempty"`
+}
+
+// GCPCloudSpec names the GKE cluster whose node pools replace GPU nodes. The
+// controller authenticates with Application Default Credentials only, which
+// on GKE are its Workload Identity Federation token: no key is read from here
+// or anywhere else.
+type GCPCloudSpec struct {
+	// Project is the ID of the Google Cloud project of the cluster.
+	// +kubebuilder:validation:Pattern=`^[a-z][-a-z0-9]{4,28}[a-z0-9]$`
+	Project string `json:"project"`
+	// Location is the cluster's region or zone (e.g. us-central1).
+	// +kubebuilder:validation:Pattern=`^[a-z]+-[a-z]+[0-9]+(-[a-z])?$`
+	Location string `json:"location"`
+	// ClusterName is the name of the GKE cluster.
+	// +kubebuilder:validation:Pattern=`^[a-z]([-a-z0-9]{0,38}[a-z0-9])?$`
+	ClusterName string `json:"clusterName"`
+	// TPUInfraHealth reads the health of the TPU nodes' instances from
+	// Google Cloud Monitoring (compute.googleapis.com/instance/tpu/infra_health,
+	// a Google Cloud Beta metric). Off unless set. Experimental, not
+	// validated against a live GKE cluster.
+	// +optional
+	TPUInfraHealth *TPUInfraHealthSpec `json:"tpuInfraHealth,omitempty"`
+}
+
+// TPUInfraHealthSpec turns on the TPU health read from Google Cloud
+// Monitoring. The controller needs the monitoring.timeSeries.list permission
+// in the projects of its TPU nodes.
+type TPUInfraHealthSpec struct {
+	// Enabled turns the read on.
+	Enabled bool `json:"enabled"`
+}
+
+// AzureCloudSpec names the AKS cluster whose agent pools replace GPU nodes.
+// The controller authenticates with Azure Workload Identity only: no secret
+// is read from here or anywhere else.
+type AzureCloudSpec struct {
+	// SubscriptionID is the Azure subscription of the AKS cluster.
+	// +kubebuilder:validation:Pattern=`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`
+	SubscriptionID string `json:"subscriptionID"`
+	// ResourceGroup is the resource group of the AKS cluster resource (not
+	// its node resource group).
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=90
+	// +kubebuilder:validation:Pattern=`^[-\w\._\(\)]+$`
+	ResourceGroup string `json:"resourceGroup"`
+	// ClusterName is the name of the AKS cluster.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-zA-Z0-9]$|^[a-zA-Z0-9][-_a-zA-Z0-9]{0,61}[a-zA-Z0-9]$`
+	ClusterName string `json:"clusterName"`
+	// ClientID is the client ID of the managed identity federated with the
+	// controller ServiceAccount; it is set as that ServiceAccount's
+	// azure.workload.identity/client-id annotation. It is an identifier, not a
+	// credential.
+	// +kubebuilder:validation:Pattern=`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`
+	ClientID string `json:"clientID"`
+	// TenantID is the Microsoft Entra tenant of that identity, when it is not
+	// the cluster's own.
+	// +kubebuilder:validation:Pattern=`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`
+	TenantID string `json:"tenantID,omitempty"`
+}
+
+// AWSCloudSpec configures the AWS EC2 backing for node recycle/replace.
+type AWSCloudSpec struct {
+	// ClusterName identifies the EKS cluster for managed nodegroup repair checks.
+	// Without a cluster name, cloud recovery remains unavailable.
+	// +kubebuilder:validation:MaxLength=100
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9_-]*$`
+	ClusterName string `json:"clusterName,omitempty"`
+	// Region is the EC2 region (e.g. us-east-1). Empty uses the controller's
+	// ambient region (AWS_REGION).
+	Region string `json:"region,omitempty"`
+	// IAMRoleARN is set as the eks.amazonaws.com/role-arn annotation on the
+	// controller ServiceAccount so IRSA grants ec2:Stop/Start/Terminate/
+	// DescribeInstances. Required unless the role is attached another way.
+	IAMRoleARN string `json:"iamRoleARN,omitempty"`
+	// InterruptionQueueURL is an SQS queue that EventBridge delivers the
+	// account's EC2 spot interruption, rebalance and instance state-change
+	// events and AWS Health scheduled changes to. The controller reads it and
+	// deletes the messages it has read; the queue must be dedicated to this
+	// installation. Empty reads no queue. Experimental.
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^https://sqs\.[a-z0-9-]+\.amazonaws\.com(\.cn)?/[0-9]{12}/[A-Za-z0-9_-]{1,80}$`
+	InterruptionQueueURL string `json:"interruptionQueueURL,omitempty"`
+}
+
+// TLSIssuer names who fills in an installation's TLS Secrets.
+// +kubebuilder:validation:Enum=External;Operator
+type TLSIssuer string
+
+const (
+	// TLSIssuerExternal leaves the material to whoever created it.
+	TLSIssuerExternal TLSIssuer = "External"
+	// TLSIssuerOperator has KubeNeuron issue and renew the material.
+	TLSIssuerOperator TLSIssuer = "Operator"
+)
+
+// PlaybookTarget is the failure-domain target a playbook addresses.
+// +kubebuilder:validation:Enum=GPU;Node
+// +kubebuilder:validation:Enum=GPU;Node
+type PlaybookTarget string
+
+const (
+	PlaybookTargetGPU  PlaybookTarget = "GPU"
+	PlaybookTargetNode PlaybookTarget = "Node"
+)
+
+// PlaybookAction is deliberately closed. Arbitrary commands must never be
+// admitted through a configuration CRD.
+// +kubebuilder:validation:Enum=Observe;Cordon;Drain;Uncordon;EvictGPUWorkload;IdleCheck;WaitIdle;QuiesceAcceleratorStack;RestoreAcceleratorStack;GPUReset;CollectBundle;Reboot;RecycleNode;ReplaceNode;RunDiag;VerifyGPUHealth;VerifyNodeHealth;OpenTicket;CheckpointWarning
+type PlaybookAction string
+
+const (
+	ActionObserve          PlaybookAction = "Observe"
+	ActionCordon           PlaybookAction = "Cordon"
+	ActionDrain            PlaybookAction = "Drain"
+	ActionUncordon         PlaybookAction = "Uncordon"
+	ActionEvictGPUWorkload PlaybookAction = "EvictGPUWorkload"
+	ActionIdleCheck        PlaybookAction = "IdleCheck"
+	ActionWaitIdle         PlaybookAction = "WaitIdle"
+	// ActionQuiesceAcceleratorStack stops the GPU vendor's own monitoring
+	// components on the node. They hold open handles on the device nodes, so a
+	// GPUReset fails while they run no matter how well the node was drained.
+	ActionQuiesceAcceleratorStack PlaybookAction = "QuiesceAcceleratorStack"
+	// ActionRestoreAcceleratorStack puts back exactly what the quiesce step
+	// stopped. The controller also restores automatically once an incident
+	// stops running, so a playbook that fails midway cannot leave monitoring
+	// switched off.
+	ActionRestoreAcceleratorStack PlaybookAction = "RestoreAcceleratorStack"
+	ActionGPUReset                PlaybookAction = "GPUReset"
+	ActionCollectBundle           PlaybookAction = "CollectBundle"
+	ActionReboot                  PlaybookAction = "Reboot"
+	// ActionRecycleNode stops and starts the node's cloud instance. It is the
+	// cloud-native stand-in for a GPU reset on a virtualized instance, where a
+	// hardware reset is impossible: stop/start reinitializes the GPU passthrough
+	// on the same node. Whole-VM restart, so approval is required.
+	ActionRecycleNode PlaybookAction = "RecycleNode"
+	// ActionReplaceNode terminates the node's cloud instance for the autoscaler
+	// to replace with a fresh one. The escalation rung after RecycleNode.
+	ActionReplaceNode      PlaybookAction = "ReplaceNode"
+	ActionRunDiag          PlaybookAction = "RunDiag"
+	ActionVerifyGPUHealth  PlaybookAction = "VerifyGPUHealth"
+	ActionVerifyNodeHealth PlaybookAction = "VerifyNodeHealth"
+	ActionOpenTicket       PlaybookAction = "OpenTicket"
+	// ActionCheckpointWarning asks the workloads on a node the cloud announced
+	// it will take to checkpoint before the cloud's deadline. It changes
+	// nothing in the cluster but the request annotations, and is allowed only
+	// in a cloud-interruption playbook.
+	ActionCheckpointWarning PlaybookAction = "CheckpointWarning"
+)
+
+// ApprovalRequirement controls whether a step requires an operator decision.
+// +kubebuilder:validation:Enum=None;Required
+type ApprovalRequirement string
+
+const (
+	ApprovalNone     ApprovalRequirement = "None"
+	ApprovalRequired ApprovalRequirement = "Required"
+)
+
+// SecretReference refers to a Kubernetes Secret. Credentials must never live
+// directly in a KubeNeuron custom resource.
+type SecretReference struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+	// +kubebuilder:validation:MaxLength=63
+	Namespace string `json:"namespace,omitempty"`
+	// +kubebuilder:validation:MaxLength=253
+	Key string `json:"key,omitempty"`
+}
+
+// ComponentSpec configures a managed controller component.
+type ComponentSpec struct {
+	// AllowGPUNodes lets the controller be scheduled onto GPU nodes.
+	//
+	// Off by default, and worth leaving off: a reboot playbook has been
+	// observed rebooting the node its own controller was running on, which cut
+	// the playbook off mid-step and left the node cordoned. Enable it only on
+	// clusters where every node has a GPU, and accept that a node reboot will
+	// interrupt whatever the controller was doing.
+	AllowGPUNodes bool `json:"allowGPUNodes,omitempty"`
+	// Image must be pinned by an explicit tag or digest; the floating
+	// :latest tag is rejected so a managed rollout is always reproducible.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="!self.endsWith(':latest')",message="image must not use the floating :latest tag"
+	// +kubebuilder:validation:XValidation:rule="self.contains('@') || self.lastIndexOf(':') > self.lastIndexOf('/')",message="image must be pinned by an explicit tag or digest"
+	Image     string                      `json:"image"`
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// AgentSpec configures the node agent managed by the operator.
+type AgentSpec struct {
+	// Image must be pinned by an explicit tag or digest; the floating
+	// :latest tag is rejected so a managed rollout is always reproducible.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="!self.endsWith(':latest')",message="image must not use the floating :latest tag"
+	// +kubebuilder:validation:XValidation:rule="self.contains('@') || self.lastIndexOf(':') > self.lastIndexOf('/')",message="image must be pinned by an explicit tag or digest"
+	Image        string              `json:"image"`
+	NodeSelector map[string]string   `json:"nodeSelector,omitempty"`
+	Tolerations  []corev1.Toleration `json:"tolerations,omitempty"`
+	// HostTooling opts the agent DaemonSet into read-only host mounts of the
+	// NVIDIA userspace tooling (nvidia-smi, dcgmi, driver libraries) so the
+	// distroless agent image can execute them. Setting it also arms
+	// --require-real-driver: with host tooling declared, a silent Fake-driver
+	// fallback becomes a startup failure instead of a lie. Leave unset on
+	// CPU-only installs and on nodes where the device plugin injects the
+	// tooling by other means.
+	//
+	// On a MIXED cluster, set spec.agent.nodeSelector alongside it. The two are
+	// not coupled automatically because an all-GPU fleet with no selector is a
+	// legitimate and common installation, and refusing it to protect mixed
+	// clusters would break those. But with tooling declared and no selector,
+	// the DaemonSet lands on CPU nodes too, where --require-real-driver refuses
+	// to start and the hostPath type: Directory check leaves pods in
+	// ContainerCreating — visible and loud, and the installation stays
+	// Ready=False until it is fixed.
+	HostTooling *HostToolingSpec `json:"hostTooling,omitempty"`
+	// Adapters enables registered accelerator adapters in the agent, one
+	// entry per vendor. The operator renders one --adapter=<vendor> per entry
+	// and one --adapter-option=<vendor>.<key>=<value> per option, in vendor
+	// and key order. NVIDIA observation stays enabled as before whether or not
+	// it is listed; an "nvidia" entry only adds options.
+	//
+	// On a mixed fleet one agent DaemonSet runs on every accelerator node, so
+	// an adapter listed here also starts on nodes without its hardware. An
+	// adapter reports that case (accelerator.ErrNotPresent) and the agent
+	// skips that vendor on that node quietly.
+	//
+	// Adapters the operator was started with (--default-agent-adapters, the
+	// Helm value agentAdapters) are added to this list; an entry here replaces
+	// a default entry for the same vendor.
+	// +kubebuilder:validation:MaxItems=8
+	// +listType=map
+	// +listMapKey=vendor
+	Adapters []AgentAdapterSpec `json:"adapters,omitempty"`
+	// KernelLog configures where an agent without node-level actions reads
+	// kernel messages. It has no effect while spec.safety.nodeLevelActions
+	// is true: that agent reads /dev/kmsg.
+	KernelLog *AgentKernelLogSpec `json:"kernelLog,omitempty"`
+}
+
+// AgentKernelLogSpec configures the agent's kernel log sources.
+type AgentKernelLogSpec struct {
+	// Journal mounts the node's systemd journal directory read-only into
+	// the agent. The agent reads kernel entries only.
+	Journal *AgentJournalSpec `json:"journal,omitempty"`
+}
+
+// JournalDirLabel is the node label that chooses the agent's journal
+// mount. The controller sets it on accelerator nodes; its value is one of
+// JournalDirVar or JournalDirRun.
+const JournalDirLabel = "kubeneuron.io/journal-dir"
+
+// Journal directory choices for a node.
+const (
+	JournalDirVar  = "var"
+	JournalDirRun  = "run"
+	JournalDirNone = "none"
+)
+
+// AgentJournalSpec configures the journal mount.
+type AgentJournalSpec struct {
+	// Enabled mounts the journal on accelerator nodes whose OS image
+	// KubeNeuron recognises. False removes the mount and the
+	// kubeneuron.io/journal-dir label. Default true.
+	// +kubebuilder:default=true
+	Enabled *bool `json:"enabled,omitempty"`
+	// NodeOverrides chooses the journal directory for matching nodes
+	// instead of the OS image table. The first matching entry wins.
+	// +kubebuilder:validation:MaxItems=32
+	NodeOverrides []JournalNodeOverride `json:"nodeOverrides,omitempty"`
+}
+
+// JournalNodeOverride chooses the journal directory for nodes whose labels
+// match NodeSelector.
+type JournalNodeOverride struct {
+	// NodeSelector matches node labels; every entry must match. It may not
+	// use kubeneuron.io/journal-dir.
+	// +kubebuilder:validation:MinProperties=1
+	// +kubebuilder:validation:MaxProperties=16
+	// +kubebuilder:validation:XValidation:rule="!('kubeneuron.io/journal-dir' in self)",message="nodeSelector must not use kubeneuron.io/journal-dir"
+	NodeSelector map[string]string `json:"nodeSelector"`
+	// Dir is var (/var/log/journal), run (/run/log/journal) or none (no
+	// journal mount on these nodes).
+	// +kubebuilder:validation:Enum=var;run;none
+	Dir string `json:"dir"`
+}
+
+// JournalEnabled reports whether the journal mount is on. An absent block
+// is on.
+func (a AgentSpec) JournalEnabled() bool {
+	if a.KernelLog == nil || a.KernelLog.Journal == nil || a.KernelLog.Journal.Enabled == nil {
+		return true
+	}
+	return *a.KernelLog.Journal.Enabled
+}
+
+// JournalNodeOverrides returns the configured overrides.
+func (a AgentSpec) JournalNodeOverrides() []JournalNodeOverride {
+	if a.KernelLog == nil || a.KernelLog.Journal == nil {
+		return nil
+	}
+	return a.KernelLog.Journal.NodeOverrides
+}
+
+// AgentAdapterSpec enables one registered accelerator adapter.
+type AgentAdapterSpec struct {
+	// Vendor is the adapter's vendor id: lowercase letters, digits, and
+	// hyphens, at most 32 characters. An adapter must be registered in the
+	// agent build for that vendor; an unregistered vendor fails closed with a
+	// not-ready report.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`
+	Vendor string `json:"vendor"`
+	// Options is passed to the adapter factory. Keys are defined by each
+	// adapter: letters, digits, '.', '_', and '-', at most 63 characters.
+	// Values are at most 1024 characters.
+	// +kubebuilder:validation:MaxProperties=32
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k.matches('^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$'))",message="option keys must be 1-63 letters, digits, '.', '_', or '-', starting with a letter or digit"
+	// +kubebuilder:validation:XValidation:rule="self.all(k, self[k].size() <= 1024)",message="option values must be at most 1024 characters"
+	Options map[string]string `json:"options,omitempty"`
+	// HostTooling mounts this adapter's host binaries, libraries, and device
+	// nodes into the agent, for vendors whose tooling the agent image does not
+	// ship (for example amd-smi).
+	HostTooling *AdapterHostToolingSpec `json:"hostTooling,omitempty"`
+}
+
+// AdapterHostToolingSpec mounts one adapter's host tooling into the agent.
+// Directories are mounted read-only at fixed container paths under
+// /host/adapters/<vendor>/, so a node image cannot shadow agent binaries.
+type AdapterHostToolingSpec struct {
+	// BinDirs are host directories holding the vendor's tools. Each is
+	// mounted read-only at /host/adapters/<vendor>/bin/<i> and appended to
+	// the agent's PATH after the system directories, so a host tool never
+	// shadows one shipped in the agent image.
+	// +kubebuilder:validation:MaxItems=4
+	// +kubebuilder:validation:items:MaxLength=4096
+	// +kubebuilder:validation:items:XValidation:rule="self.startsWith('/') && !self.contains(':') && !self.contains('..')",message="binDirs entries must be absolute host paths without ':' or '..'"
+	BinDirs []string `json:"binDirs,omitempty"`
+	// LibDirs are host directories holding the libraries those tools are
+	// linked against. Each is mounted read-only at
+	// /host/adapters/<vendor>/lib/<i> and appended to LD_LIBRARY_PATH. When
+	// spec.agent.hostTooling is unset, the first libDirs entry of the first
+	// adapter (in vendor order) is also mounted at /lib64, because the agent
+	// image has no ELF loader of its own: that directory must then contain
+	// the loader a dynamically linked tool needs.
+	// +kubebuilder:validation:MaxItems=4
+	// +kubebuilder:validation:items:MaxLength=4096
+	// +kubebuilder:validation:items:XValidation:rule="self.startsWith('/') && !self.contains(':') && !self.contains('..')",message="libDirs entries must be absolute host paths without ':' or '..'"
+	LibDirs []string `json:"libDirs,omitempty"`
+	// Devices are host device nodes the tools open, such as /dev/kfd. Each is
+	// mounted at the same path in the agent container. /dev/kmsg is always
+	// mounted and cannot be listed.
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=256
+	// +kubebuilder:validation:items:XValidation:rule="self.startsWith('/dev/') && !self.contains(':') && !self.contains('..') && self != '/dev/kmsg'",message="devices entries must be device paths under /dev/ without ':' or '..', other than /dev/kmsg"
+	Devices []string `json:"devices,omitempty"`
+}
+
+// HostToolingSpec mounts NVIDIA userspace tooling from the node into the
+// agent container. All paths are host paths and are mounted read-only; the
+// defaults match the AL2023 EKS NVIDIA AMI (nvidia-smi in /usr/bin, driver
+// libraries in /usr/lib64).
+type HostToolingSpec struct {
+	// BinDir is the host directory containing nvidia-smi (and dcgmi when
+	// present). It is appended to the agent's PATH.
+	// +kubebuilder:default="/usr/bin"
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !self.contains(':')",message="binDir must be an absolute host path without ':'"
+	BinDir string `json:"binDir,omitempty"`
+	// LibDirs are host directories holding the NVIDIA driver userspace
+	// libraries nvidia-smi is linked against; they become the agent's
+	// LD_LIBRARY_PATH. Defaults to /usr/lib64 (AL2023 NVIDIA AMI).
+	// +kubebuilder:default={"/usr/lib64"}
+	// +kubebuilder:validation:MaxItems=4
+	// +kubebuilder:validation:items:XValidation:rule="self.startsWith('/') && !self.contains(':')",message="libDirs entries must be absolute host paths without ':'"
+	LibDirs []string `json:"libDirs,omitempty"`
+	// ScriptsDir optionally mounts operator-provisioned remediation scripts
+	// read-only at /etc/kube-neuron/scripts (the agent's --scripts-dir).
+	// The run_script action additionally requires destructive enablement,
+	// which the operator does not set; the mount alone executes nothing.
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !self.contains(':')",message="scriptsDir must be an absolute host path without ':'"
+	ScriptsDir string `json:"scriptsDir,omitempty"`
+	// DCGMEndpoint is where this node's DCGM host engine listens. Runtime
+	// attestation — the evidence every destructive action depends on —
+	// needs to reach it.
+	//
+	// With the NVIDIA GPU Operator this is
+	// "nvidia-dcgm.gpu-operator.svc:5555" — measured, not assumed: the
+	// operator runs the engine as an ordinary pod with no host port, so
+	// neither the node's address nor its loopback reaches it. That Service
+	// carries internalTrafficPolicy=Local, which is what keeps the evidence
+	// node-local: a request only ever lands on the engine sharing this
+	// node. Verify that policy before pointing this at any other Service,
+	// or attestation quietly becomes hearsay about someone else's hardware.
+	//
+	// The engine must exist: the operator ships it disabled
+	// (dcgm.enabled=false) because its exporter embeds a private one. Empty
+	// here keeps dcgmi's local default and, with no reachable engine,
+	// leaves the report degraded — fail-closed, no destructive action.
+	// +kubebuilder:validation:XValidation:rule="self.contains(':')",message="dcgmEndpoint must be host:port, for example nvidia-dcgm.gpu-operator.svc:5555"
+	DCGMEndpoint string `json:"dcgmEndpoint,omitempty"`
+	// DCGMIPath selects a dcgmi client already installed on the node instead
+	// of the one shipped in the agent image.
+	//
+	// Leave it unset unless you mean it. The attested runtime version is
+	// whichever client answers, and an AcceleratorRuntimeProfile pins one exact
+	// value; taking the client from the node makes that value depend on how
+	// each node was provisioned, so a fleet built from mixed images would
+	// attest different versions and part of it would go degraded. Set this only
+	// when the node's client is deliberately the one your profile pins.
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('/') && !self.contains(':')",message="dcgmiPath must be an absolute host path without ':'"
+	DCGMIPath string `json:"dcgmiPath,omitempty"`
+}
+
+// SafetySpec holds execution limits. ExecutionMode defaults to DryRun in the
+// operator, even when omitted from the CR.
+type SafetySpec struct {
+	// NodeLevelActions enables agent recovery actions on this installation.
+	// Alpha, not validated on real hardware. Defaults to false.
+	// Existing destructive-action and approval checks still apply.
+	// +optional
+	// +kubebuilder:default=false
+	NodeLevelActions bool `json:"nodeLevelActions,omitempty"`
+
+	// +kubebuilder:default=DryRun
+	ExecutionMode ExecutionMode `json:"executionMode,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=2
+	MaxConcurrentRemediations int32 `json:"maxConcurrentRemediations,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=1
+	MaxConcurrentReboots int32 `json:"maxConcurrentReboots,omitempty"`
+	// +kubebuilder:default="10m"
+	VerifyQuietWindow string `json:"verifyQuietWindow,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=3
+	FlapCount int32 `json:"flapCount,omitempty"`
+	// +kubebuilder:default="24h"
+	FlapWindow string `json:"flapWindow,omitempty"`
+	// DestructiveExecution is the only way to reach executionMode Enabled.
+	// It arms real reset, reboot, and driver actions, and it deliberately
+	// cannot be switched on fleet-wide: a node selector is mandatory, and
+	// only nodes matching it ever receive an agent armed for destructive
+	// work.
+	DestructiveExecution *DestructiveExecutionSpec `json:"destructiveExecution,omitempty"`
+	// Quiesce tunes how the vendor's own components are stood down before a
+	// GPU reset.
+	Quiesce *QuiesceSpec `json:"quiesce,omitempty"`
+	// TaintDegradedNodes optionally stops a node under an open incident from
+	// attracting NEW GPU work, before any playbook cordons it.
+	//
+	// Omitted means off. Scheduling is the one thing every workload in the
+	// cluster depends on, so this must never arrive by default with an
+	// upgrade.
+	TaintDegradedNodes *TaintDegradedNodesSpec `json:"taintDegradedNodes,omitempty"`
+	// CheckpointCoordination optionally warns opted-in workloads before a
+	// disruption and waits, for a bounded time, for them to checkpoint.
+	//
+	// Omitted means off. Waiting is a change to how every disruption step
+	// behaves, so it must never arrive by default with an upgrade.
+	CheckpointCoordination *CheckpointCoordinationSpec `json:"checkpointCoordination,omitempty"`
+	// TopologyClassifier tunes the read-only device topology classifier
+	// (whole-device, mig, time-sliced, dra-managed, mixed, unknown). The
+	// classifier always runs and can only add refusals to a device-scoped
+	// GPU reset; this block carries only its opt-in inputs.
+	//
+	// Omitted means: classify from node capacity, GPU Feature Discovery
+	// labels and the agent report, without reading Dynamic Resource
+	// Allocation objects.
+	TopologyClassifier *TopologyClassifierSpec `json:"topologyClassifier,omitempty"`
+	// AcceleratorHealth turns on the optional sources of the accelerator
+	// health profiles. Omitted means only the Kubernetes Node objects are
+	// read.
+	AcceleratorHealth *AcceleratorHealthSpec `json:"acceleratorHealth,omitempty"`
+	// ImpactPreview, when enabled, computes a durable impact-preview/v1 record
+	// for every approval round: the node and its device topology, the
+	// workloads the downstream disruption would touch and which of them can
+	// checkpoint, and the warnings a human should read before approving. It
+	// is advisory and cannot block an approve; with requireForApproval it
+	// binds the approve to the exact preview the human saw. Omitted means
+	// off. (v0.8 development)
+	ImpactPreview *ImpactPreviewSpec `json:"impactPreview,omitempty"`
+}
+
+// TopologyClassifierSpec configures the device topology classifier. There is
+// deliberately no switch to turn the classifier off: it is a safety
+// narrowing of the reset gate, and a configuration must not be able to widen
+// that gate.
+type TopologyClassifierSpec struct {
+	// DRA optionally lets the classifier read Dynamic Resource Allocation
+	// state. Omitted means off.
+	DRA *TopologyClassifierDRASpec `json:"dra,omitempty"`
+}
+
+// TopologyClassifierDRASpec is the opt-in read of resource.k8s.io/v1.
+type TopologyClassifierDRASpec struct {
+	// Enabled makes the controller list ResourceSlices (resource.k8s.io/v1,
+	// get/list/watch only, never any other version or verb) for a node when
+	// it classifies that node, and inspect the ResourceClaim references of
+	// the Pods scheduled on it through the core Pod list it already holds
+	// (ResourceClaim objects are never read). The managed controller
+	// ClusterRole gains only that read-only ResourceSlice rule while this is
+	// true. When the group/version is not served, either read fails, or a
+	// ResourceSlice is scoped by anything other than an explicit nodeName
+	// (nodeSelector, allNodes, perDeviceNodeSelection), the node is
+	// classified as unknown and device-scoped actions are refused; nothing
+	// is ever assumed. Default false, and false is also what an absent block
+	// means.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// AcceleratorHealthSpec configures the optional accelerator health sources.
+type AcceleratorHealthSpec struct {
+	// DRA reads the device taints of Dynamic Resource Allocation drivers.
+	// Omitted means off.
+	DRA *AcceleratorHealthDRASpec `json:"dra,omitempty"`
+	// AWSNeuronSysfs acts on the faults the agent reads from the AWS Neuron
+	// driver's sysfs tree. Omitted means off.
+	AWSNeuronSysfs *AcceleratorHealthAWSNeuronSysfsSpec `json:"awsNeuronSysfs,omitempty"`
+}
+
+// AcceleratorHealthAWSNeuronSysfsSpec is the opt-in to incidents from the
+// agent's read of the AWS Neuron driver's sysfs tree (experimental, not
+// validated against a live AWS Trainium or Inferentia node).
+type AcceleratorHealthAWSNeuronSysfsSpec struct {
+	// Enabled lets an uncorrectable ECC error or a failing device component
+	// the agent reads from /sys/devices/virtual/neuron_device open an
+	// accelerator-fault incident on the node. While false the agent still
+	// reads the tree and the controller shows each fault in the accelerator
+	// health view as not acted on; nothing is held, cordoned or replaced
+	// for it. No permission changes either way. Default false.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// AcceleratorHealthDRASpec is the opt-in read of the device taints in
+// resource.k8s.io/v1 ResourceSlices (DRADeviceTaints, beta in Kubernetes
+// 1.36; experimental here).
+type AcceleratorHealthDRASpec struct {
+	// Enabled makes the controller list the resource.k8s.io/v1
+	// ResourceSlices (get/list/watch only, never another version or verb)
+	// and read the taints the documented drivers set on their devices. The
+	// managed controller ClusterRole gains only that read-only ResourceSlice
+	// rule while this is true. Default false.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// CheckpointCoordinationSpec configures checkpoint-aware remediation
+// (docs/checkpoint-coordination-design.md): a workload that opts in with the
+// kubeneuron.io/checkpoint: "true" annotation is told, through annotations on
+// its own Pod, that a disruption is coming and by when, and the disruption
+// waits for it to acknowledge or for the deadline, whichever is first.
+//
+// The clock belongs to the operator. A workload may ask for less time than
+// defaultWait and never for more than maxWait, so the only power it gains is
+// to make its own disruption cleaner, never later.
+// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.namespaces) && self.namespaces.size() > 0)",message="checkpointCoordination.enabled requires a non-empty namespaces allowlist: self-declaration is a trust decision and is never fleet-wide by default"
+// +kubebuilder:validation:XValidation:rule="!has(self.defaultWait) || duration(self.defaultWait) > duration('0s')",message="defaultWait must be a positive duration"
+// +kubebuilder:validation:XValidation:rule="!has(self.maxWait) || (duration(self.maxWait) > duration('0s') && duration(self.maxWait) <= duration('30m'))",message="maxWait must be a positive duration of at most 30m"
+// +kubebuilder:validation:XValidation:rule="!has(self.defaultWait) || !has(self.maxWait) || duration(self.defaultWait) <= duration(self.maxWait)",message="defaultWait must not exceed maxWait"
+// +kubebuilder:validation:XValidation:rule="!has(self.advisory) || !self.advisory.enabled || self.enabled",message="checkpointCoordination.advisory.enabled requires checkpointCoordination.enabled: an advisory is part of coordination, not a feature of its own"
+// +kubebuilder:validation:XValidation:rule="!has(self.groups) || !self.groups.enabled || self.enabled",message="checkpointCoordination.groups.enabled requires checkpointCoordination.enabled"
+type CheckpointCoordinationSpec struct {
+	// Enabled turns coordination on. Default false, and false is also what an
+	// absent block means: no disruption waits for anything until somebody
+	// asks it to.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+	// DefaultWait is granted to an opted-in workload that requests nothing.
+	// +kubebuilder:default="5m"
+	DefaultWait string `json:"defaultWait,omitempty"`
+	// MaxWait is the hard ceiling on any wait. A workload annotation can only
+	// shorten it, and the whole installation cannot raise it above 30m.
+	// +kubebuilder:default="15m"
+	MaxWait string `json:"maxWait,omitempty"`
+	// SkipClasses lists problem classes for which no coordination is
+	// attempted. This is correctness, not an optimization: when the device has
+	// fallen off the bus the job is already dead, and waiting to be polite to
+	// a process that cannot make progress only delays recovery.
+	//
+	// Omitted defaults to the device-dead classes, fell-off-bus and gpu-lost.
+	// An explicit list replaces the default rather than adding to it, and an
+	// explicit empty list means coordinate for every class.
+	// +kubebuilder:default={"fell-off-bus","gpu-lost"}
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:items:MinLength=1
+	// +listType=set
+	SkipClasses []string `json:"skipClasses,omitempty"`
+	// Namespaces is the explicit allowlist of namespaces whose workloads may
+	// opt in. Required when enabled, so an untrusted tenant fleet is excluded
+	// without turning the feature off for the trusted one.
+	// +kubebuilder:validation:MaxItems=256
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=63
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +listType=set
+	Namespaces []string `json:"namespaces,omitempty"`
+	// Advisory, when enabled, stamps a deadline-free notice on every eligible
+	// opted-in Pod the moment its incident parks for human approval with a
+	// drain or GPU-workload eviction still downstream, so a job can start
+	// checkpointing during the minutes a human takes to decide instead of
+	// learning about the disruption only when it begins. It promises nothing
+	// and waits for nothing: the deadline-bearing request still arrives at
+	// the disruption step exactly as without it. Omitted means off. It needs
+	// enabled: true on this block; the advisory uses the same allowlist, the
+	// same Pod identity confinement and the same `pods: patch` grant, and
+	// adds no RBAC of its own.
+	Advisory *CheckpointAdvisorySpec `json:"advisory,omitempty"`
+	// Groups, when enabled, extends a request to the peers of a Pod that
+	// declares kubeneuron.io/checkpoint-group: the Pods in the same namespace
+	// with the same value get the same request with their own deadline from
+	// the same formula, and nothing else — disruption stays on the one node.
+	// Omitted means off. Needs enabled: true on this block.
+	Groups *CheckpointGroupsSpec `json:"groups,omitempty"`
+}
+
+// CheckpointGroupsSpec is the bounded gang coordination.
+type CheckpointGroupsSpec struct {
+	// Enabled turns group requests on. Default false.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+	// MaxGroupSize bounds a group. A larger group has its peers skipped: the
+	// step asks only the members on the disrupted node, counts the skip, and
+	// the impact preview says so. 1 to 512, default 64.
+	// +kubebuilder:default=64
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=512
+	MaxGroupSize int `json:"maxGroupSize,omitempty"`
+	// CrossNode stamps peers on other nodes too. Default false: the group is
+	// then the members on the disrupted node, which is lead time for local
+	// ranks with zero new blast radius.
+	// +kubebuilder:default=false
+	CrossNode bool `json:"crossNode,omitempty"`
+}
+
+// CheckpointAdvisorySpec is the Phase 2 advisory at approval park.
+// +kubebuilder:validation:XValidation:rule="!has(self.budget) || (duration(self.budget) > duration('0s') && duration(self.budget) <= duration('60s'))",message="advisory.budget must be a positive duration of at most 60s"
+type CheckpointAdvisorySpec struct {
+	// Enabled turns the advisory on. Default false.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+	// Budget bounds one advisory round end to end (listing the node's
+	// workloads and stamping each eligible one). The park is already
+	// committed when the round starts, so the budget delays no decision; a
+	// round that runs out of budget leaves the rest unstamped and counts them
+	// unreachable. At most 60s.
+	// +kubebuilder:default="10s"
+	Budget string `json:"budget,omitempty"`
+}
+
+// ImpactPreviewSpec configures the impact preview of approval rounds.
+// +kubebuilder:validation:XValidation:rule="!has(self.requireForApproval) || !self.requireForApproval || self.enabled",message="impactPreview.requireForApproval requires impactPreview.enabled"
+// +kubebuilder:validation:XValidation:rule="!has(self.budget) || (duration(self.budget) > duration('0s') && duration(self.budget) <= duration('60s'))",message="impactPreview.budget must be a positive duration of at most 60s"
+type ImpactPreviewSpec struct {
+	// Enabled turns the preview on. Default false.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+	// Budget bounds one preview computation (listing the node's workloads and
+	// classifying its topology). A computation that runs out of budget is
+	// recorded as unavailable with its reason. At most 60s.
+	// +kubebuilder:default="15s"
+	Budget string `json:"budget,omitempty"`
+	// MaxItems bounds how many workloads the preview itemises; the rest are
+	// counted and items_truncated is set. 10 to 1000.
+	// +kubebuilder:default=200
+	// +kubebuilder:validation:Minimum=10
+	// +kubebuilder:validation:Maximum=1000
+	MaxItems int `json:"maxItems,omitempty"`
+	// RequireForApproval refuses an approve that carries no impact_digest, or
+	// a digest that does not match the round's current preview, and refuses
+	// every approve while the round's preview is unavailable. Default false:
+	// the preview is advisory unless the operator makes it a condition.
+	// +kubebuilder:default=false
+	RequireForApproval bool `json:"requireForApproval,omitempty"`
+	// WorkloadContext selects read-only resolvers that add "whose Pod is
+	// this" to each itemised workload of the preview: the owning batch Job,
+	// the Kueue Workload admitting it, the KubeRay cluster and job. Each is
+	// off by default; enabling one grants the controller get/list/watch on
+	// that group and nothing else, and an absent CRD group is reported as
+	// not observed rather than failing the preview.
+	WorkloadContext *ImpactWorkloadContextSpec `json:"workloadContext,omitempty"`
+}
+
+// ImpactWorkloadContextSpec selects the read-only context resolvers.
+type ImpactWorkloadContextSpec struct {
+	// BatchJobs reads batch/v1 Jobs that own itemised Pods.
+	// +kubebuilder:default=false
+	BatchJobs bool `json:"batchJobs,omitempty"`
+	// Kueue reads kueue.x-k8s.io Workloads, LocalQueues and ClusterQueues.
+	// +kubebuilder:default=false
+	Kueue bool `json:"kueue,omitempty"`
+	// KubeRay reads ray.io RayClusters and RayJobs.
+	// +kubebuilder:default=false
+	KubeRay bool `json:"kuberay,omitempty"`
+}
+
+// NodeTaintEffect is the scheduling effect of the degraded-node taint.
+// +kubebuilder:validation:Enum=PreferNoSchedule;NoSchedule
+type NodeTaintEffect string
+
+const (
+	// TaintEffectPreferNoSchedule biases the scheduler away from the node
+	// without forbidding anything.
+	TaintEffectPreferNoSchedule NodeTaintEffect = "PreferNoSchedule"
+	// TaintEffectNoSchedule refuses every new pod that does not tolerate the
+	// taint.
+	TaintEffectNoSchedule NodeTaintEffect = "NoSchedule"
+)
+
+// TaintDegradedNodesSpec configures the kubeneuron.io/degraded taint: applied
+// when an incident starts working on a node, removed when that incident halts.
+//
+// It is scheduler feedback, not remediation. A node that has already begun
+// failing keeps being handed fresh jobs right up to the moment a playbook
+// cordons it, and every job started in that window is one more workload the
+// remediation has to evict. The taint closes that window without taking any
+// capacity away: nothing already running is touched.
+type TaintDegradedNodesSpec struct {
+	// Enabled turns the taint on. Default false, and false is also what an
+	// absent block means: KubeNeuron does not touch node scheduling until
+	// somebody asks it to.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+	// Effect selects how hard the hint is.
+	//
+	// PreferNoSchedule, the default, is a bias: the scheduler avoids the node
+	// when it has somewhere else to put the pod, and still uses it rather than
+	// leaving work pending. NoSchedule is a wall — for a node under an OPEN
+	// incident, whose fault may yet turn out to be benign, that is a bigger
+	// hammer than the cordon a playbook applies deliberately and after
+	// evidence, which is why it is never the default.
+	// +kubebuilder:default=PreferNoSchedule
+	Effect NodeTaintEffect `json:"effect,omitempty"`
+}
+
+// QuiesceSpec declares node-side facts KubeNeuron cannot discover on its own.
+type QuiesceSpec struct {
+	// ForbidResetWhenPresent lists process names whose presence on a node means
+	// a per-device reset must not be attempted there at all.
+	//
+	// Some processes hold the GPU and must not be stopped. `nv-fabricmanager`
+	// is the standing example: on NVSwitch machines it is required for the GPUs
+	// to function, and the honest answer is "this node is not reset per-device"
+	// rather than killing a critical daemon to make room for a remediation.
+	// Declaring it here turns a reset attempt into an early, explained refusal
+	// instead of a cordoned and drained node followed by a failure.
+	//
+	// Names are matched against the process name the node reports, which Linux
+	// truncates to 15 characters. Longer entries are truncated here to match,
+	// so `nv-fabricmanager` and `nv-fabricmanage` both work.
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MinLength=1
+	ForbidResetWhenPresent []string `json:"forbidResetWhenPresent,omitempty"`
+}
+
+// DestructiveExecutionSpec confines real destructive actions to an
+// explicitly named set of nodes. Every field is required on purpose: a
+// half-configured block must not resolve to "the whole fleet".
+type DestructiveExecutionSpec struct {
+	// NodeSelector selects the nodes permitted to execute destructive
+	// actions. It must be non-empty, and the operator arms the agent only
+	// on nodes that match it.
+	// +kubebuilder:validation:MinProperties=1
+	NodeSelector map[string]string `json:"nodeSelector"`
+	// Acknowledgement must read exactly
+	// "I understand these nodes may be reset, rebooted, or destroyed".
+	// A typo is a rejected installation, not a rebooted production node.
+	// +kubebuilder:validation:XValidation:rule="self == 'I understand these nodes may be reset, rebooted, or destroyed'",message="acknowledgement text must match exactly"
+	Acknowledgement string `json:"acknowledgement"`
+}
+
+// ApprovalSpec configures human approval behavior.
+type ApprovalSpec struct {
+	Channels []string `json:"channels,omitempty"`
+	// +kubebuilder:default="12h"
+	TTL string `json:"ttl,omitempty"`
+}
+
+// NotificationsSpec configures human-facing notification delivery. Enabled
+// execution is deliberately unavailable in the current Kubernetes runtime;
+// notification delivery remains useful for dry-run and paused installations.
+type NotificationsSpec struct {
+	// Slack references a Secret in spec.namespace containing a Slack
+	// incoming-webhook URL. Key defaults to "webhook-url". Namespace must be
+	// omitted. The operator mounts the Secret into the controller; it never
+	// reads the URL itself.
+	Slack *SecretReference `json:"slack,omitempty"`
+	// OperatorAPIToken references a Secret in spec.namespace containing the
+	// bearer token for the human/operator API. Key defaults to "token".
+	// Namespace must be omitted. The operator mounts this Secret without
+	// reading its contents.
+	OperatorAPIToken *SecretReference `json:"operatorAPIToken,omitempty"`
+	// WebhookToken references a Secret in spec.namespace containing the bearer
+	// token required by the Alertmanager webhook. Key defaults to "token".
+	// Namespace must be omitted. The public webhook is never left anonymous on
+	// an operator-managed installation.
+	WebhookToken *SecretReference `json:"webhookToken,omitempty"`
+	// Webhook references a Secret in spec.namespace holding a generic
+	// notification endpoint: key "url" (required) receives every incident
+	// notification as versioned JSON; key "token" (optional) is sent as an
+	// Authorization bearer credential. Namespace must be omitted. Delivery
+	// is retried with backoff and dead-lettered to the log on failure.
+	Webhook *SecretReference `json:"webhook,omitempty"`
+	// PagerDuty references a Secret in spec.namespace containing a PagerDuty
+	// Events API v2 routing key. Key defaults to "routing-key". Namespace
+	// must be omitted. Incidents map to PagerDuty alerts by incident ID:
+	// needs-human and approval requests page critical, resolution resolves
+	// the alert.
+	PagerDuty *SecretReference `json:"pagerduty,omitempty"`
+}
+
+// AuthSpec configures how humans sign in to the operator API and panel.
+// Bearer tokens (static break-glass and Kubernetes TokenReview) keep
+// working regardless; this adds browser-friendly sign-in.
+type AuthSpec struct {
+	// Users references a Secret in spec.namespace enabling username and
+	// password sign-in: every Secret key is a username and its value a
+	// bcrypt password hash (generate with
+	// `htpasswd -bnBC 12 "" 'pass' | tr -d ':\n'`). Namespace must be
+	// omitted. The operator mounts the Secret; hashes are re-read per
+	// attempt, so rotation needs no restart.
+	Users *SecretReference `json:"users,omitempty"`
+	// OIDC enables single sign-on through any spec-compliant provider
+	// (Okta, Keycloak, Dex, Entra, Google, …).
+	OIDC *OIDCSpec `json:"oidc,omitempty"`
+}
+
+// OIDCSpec configures the authorization-code single sign-on flow.
+type OIDCSpec struct {
+	// IssuerURL is the provider's issuer, e.g.
+	// https://your-org.okta.com or https://keycloak.example/realms/prod.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('https://')",message="issuerURL must be https"
+	IssuerURL string `json:"issuerURL"`
+	// +kubebuilder:validation:MinLength=1
+	ClientID string `json:"clientID"`
+	// ClientSecretRef references a Secret in spec.namespace holding the
+	// OIDC client secret. Key defaults to "client-secret". Namespace must
+	// be omitted.
+	ClientSecretRef SecretReference `json:"clientSecretRef"`
+	// RedirectURL is the externally reachable callback,
+	// https://<panel-host>/api/v1/auth/oidc/callback — register the same
+	// value at the provider.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('https://') || self.startsWith('http://')",message="redirectURL must be a URL"
+	RedirectURL string `json:"redirectURL"`
+	// AllowedEmailDomains optionally restricts sign-in to verified email
+	// addresses of these domains; empty admits any principal the issuer
+	// authenticates.
+	// +kubebuilder:validation:MaxItems=8
+	AllowedEmailDomains []string `json:"allowedEmailDomains,omitempty"`
+}
+
+// SQLiteStoreSpec configures the persistent volume used by the single-node
+// SQLite runtime. Omitting size defaults to 5Gi. Size may grow after claim
+// creation, but it cannot shrink, and storageClassName cannot change.
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.size) || (has(self.size) && isQuantity(self.size) && isQuantity(oldSelf.size) && quantity(self.size).compareTo(quantity(oldSelf.size)) >= 0)",message="size cannot decrease"
+// +kubebuilder:validation:XValidation:rule="has(self.storageClassName) == has(oldSelf.storageClassName) && (!has(self.storageClassName) || self.storageClassName == oldSelf.storageClassName)",message="storageClassName is immutable"
+type SQLiteStoreSpec struct {
+	// +kubebuilder:default="5Gi"
+	// +kubebuilder:validation:XValidation:rule="isQuantity(self) && quantity(self).compareTo(quantity('0')) > 0",message="size must be a positive Kubernetes quantity"
+	Size             string  `json:"size"`
+	StorageClassName *string `json:"storageClassName,omitempty"`
+}
+
+// WorkflowStoreSpec describes the authoritative store for workflow state.
+// PostgreSQL is required for a highly available controller; SQLite is only for
+// local development and a single controller replica.
+// +kubebuilder:validation:XValidation:rule="self.type != 'SQLite' || !has(self.secretRef)",message="secretRef is not supported for SQLite"
+// +kubebuilder:validation:XValidation:rule="self.type != 'SQLite' || !has(self.database)",message="database is not supported for SQLite"
+// +kubebuilder:validation:XValidation:rule="self.type != 'Postgres' || has(self.secretRef)",message="secretRef is required for Postgres"
+// +kubebuilder:validation:XValidation:rule="self.type != 'Postgres' || !has(self.sqlite)",message="sqlite settings are not supported for Postgres"
+// +kubebuilder:validation:XValidation:rule="self.type != 'SQLite' || has(self.sqlite)",message="sqlite settings are required for SQLite"
+// +kubebuilder:validation:XValidation:rule="self.type != 'Postgres' || !has(self.secretRef) || !has(self.secretRef.namespace)",message="the Postgres DSN Secret must omit namespace and use spec.namespace"
+// +kubebuilder:validation:XValidation:rule="self.type == oldSelf.type",message="workflow store type is immutable"
+type WorkflowStoreSpec struct {
+	// +kubebuilder:validation:Enum=Postgres;SQLite
+	Type      string           `json:"type"`
+	SecretRef *SecretReference `json:"secretRef,omitempty"`
+	Database  string           `json:"database,omitempty"`
+	SQLite    *SQLiteStoreSpec `json:"sqlite,omitempty"`
+}
+
+// DependencySpec describes a dependency managed by its own upstream operator
+// or supplied as an existing endpoint.
+// +kubebuilder:validation:XValidation:rule="self.mode != 'External' || (has(self.endpoint) && self.endpoint.size() > 0)",message="External dependencies require an endpoint"
+// +kubebuilder:validation:XValidation:rule="self.mode != 'Disabled' || (!has(self.endpoint) && !has(self.secretRef))",message="Disabled dependencies cannot set endpoint or secretRef"
+type DependencySpec struct {
+	// +kubebuilder:default=External
+	Mode      IntegrationMode  `json:"mode,omitempty"`
+	Endpoint  string           `json:"endpoint,omitempty"`
+	SecretRef *SecretReference `json:"secretRef,omitempty"`
+}
+
+// ObservabilitySpec describes where KubeNeuron's metrics go and the
+// alerting dependency.
+//
+// collector, store and grafana are each Managed (the operator runs it),
+// External (the user's own) or Disabled. A field left out is Disabled, so an
+// upgrade never deploys anything on its own; the chart and the samples write
+// Managed for new installations.
+// +kubebuilder:validation:XValidation:rule="!has(self.victoriaMetrics) || self.victoriaMetrics.mode == 'External'",message="victoriaMetrics currently supports only External mode"
+// +kubebuilder:validation:XValidation:rule="!has(self.alertmanager) || self.alertmanager.mode == 'External'",message="alertmanager currently supports only External mode"
+// +kubebuilder:validation:XValidation:rule="!has(self.victoriaMetrics) || !has(self.victoriaMetrics.secretRef)",message="victoriaMetrics secretRef is not supported"
+// +kubebuilder:validation:XValidation:rule="!has(self.alertmanager) || !has(self.alertmanager.secretRef)",message="alertmanager secretRef is not supported"
+// +kubebuilder:validation:XValidation:rule="!has(self.victoriaMetrics) || !has(self.store)",message="victoriaMetrics is deprecated and replaced by store; set only store"
+// +kubebuilder:validation:XValidation:rule="!has(self.collector) || self.collector.mode != 'External' || !has(self.store) || self.store.mode != 'Managed'",message="an external collector routes metrics itself: store cannot be Managed"
+// +kubebuilder:validation:XValidation:rule="!has(self.grafana) || self.grafana.mode != 'Managed' || (has(self.store) && self.store.mode != 'Disabled')",message="a Managed grafana needs a Managed or External store to read"
+// +kubebuilder:validation:XValidation:rule="!has(self.grafana) || !has(self.grafana.datasource) || (has(self.store) && self.store.mode == 'External')",message="grafana.datasource applies only to an External store; a Managed store is the datasource itself"
+// +kubebuilder:validation:XValidation:rule="!has(self.grafana) || self.grafana.mode != 'Managed' || !has(self.store) || self.store.mode != 'External' || has(self.grafana.datasource)",message="a Managed grafana with an External store requires grafana.datasource.url"
+type ObservabilitySpec struct {
+	// VictoriaMetrics is deprecated: use store. It names a query address,
+	// not an OTLP destination, so the collector never sends to it; with no
+	// store the collector drops what it receives.
+	// +optional
+	VictoriaMetrics *DependencySpec `json:"victoriaMetrics,omitempty"`
+	// Alertmanager names the user's Alertmanager. It is informational: the
+	// controller receives alerts on its own webhooks and never calls it. Left
+	// out, there is none; the Managed store sends metric alerts to the
+	// controller without one.
+	// +optional
+	Alertmanager *DependencySpec `json:"alertmanager,omitempty"`
+	// Collector receives OTLP over HTTP from the controller, the agents and
+	// the operator, and sends it to the store. Managed runs an OpenTelemetry
+	// Collector in the installation namespace; External points the
+	// components at the user's own collector; Disabled turns export off.
+	// +optional
+	Collector *CollectorSpec `json:"collector,omitempty"`
+	// Store is the one metrics backend. Managed runs a single-node
+	// VictoriaMetrics with a PersistentVolumeClaim; External is the user's
+	// VictoriaMetrics or Prometheus, which must accept OTLP over HTTP
+	// (Prometheus with its OTLP receiver enabled; remote write is not
+	// supported). With an External collector the store is not written by
+	// KubeNeuron: an External store then only names the datasource a
+	// Managed Grafana reads.
+	// +optional
+	Store *MetricsStoreSpec `json:"store,omitempty"`
+	// Grafana shows the dashboards. Managed runs the official, unmodified
+	// Grafana image (AGPL-3.0) with the store as its datasource and the
+	// KubeNeuron dashboards provisioned; External is the user's own Grafana,
+	// which loads the dashboard files itself.
+	// +optional
+	Grafana *GrafanaSpec `json:"grafana,omitempty"`
+}
+
+// OTLPEndpointSpec is a Managed, External or Disabled OTLP/HTTP endpoint.
+// Credentials are never part of the URL: they come from a Secret holding the
+// HTTP Authorization header value.
+// +kubebuilder:validation:XValidation:rule="self.mode != 'External' || (has(self.endpoint) && self.endpoint.size() > 0)",message="External requires an endpoint"
+// +kubebuilder:validation:XValidation:rule="self.mode == 'External' || (!has(self.endpoint) && !has(self.authorizationSecretRef))",message="endpoint and authorizationSecretRef apply only to External"
+// +kubebuilder:validation:XValidation:rule="!has(self.endpoint) || !self.endpoint.contains('@')",message="credentials must not be part of the endpoint URL; use authorizationSecretRef"
+type OTLPEndpointSpec struct {
+	// +kubebuilder:validation:Enum=Managed;External;Disabled
+	Mode IntegrationMode `json:"mode"`
+	// Endpoint is the OTLP/HTTP base URL; the sender appends /v1/metrics.
+	// For VictoriaMetrics: http://<host>:8428/opentelemetry. For Prometheus
+	// with its OTLP receiver: http://<host>:9090/api/v1/otlp. For a
+	// collector: http://<host>:4318.
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^https?://\S+$`
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+	// AuthorizationSecretRef selects a key of a Secret in the installation
+	// namespace whose value is the HTTP Authorization header, for example
+	// "Bearer <token>" or "Basic <base64>". The operator never reads it: the
+	// value reaches the sender as an environment variable.
+	// +optional
+	AuthorizationSecretRef *SecretReference `json:"authorizationSecretRef,omitempty"`
+}
+
+// CollectorSpec configures the OpenTelemetry Collector.
+// +kubebuilder:validation:XValidation:rule="self.mode == 'Managed' || !has(self.resources)",message="resources apply only to a Managed collector"
+// +kubebuilder:validation:XValidation:rule="self.mode == 'Managed' || !has(self.dcgmExporter)",message="dcgmExporter applies only to a Managed collector"
+type CollectorSpec struct {
+	OTLPEndpointSpec `json:",inline"`
+	// Resources of the managed collector container. The memory limit also
+	// sizes the collector's memory_limiter.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+	// DCGMExporter has the managed collector scrape the dcgm-exporter that
+	// already runs in the cluster, for example the one GPU Operator
+	// installs. KubeNeuron never installs dcgm-exporter.
+	// +optional
+	DCGMExporter *DCGMExporterScrapeSpec `json:"dcgmExporter,omitempty"`
+}
+
+// DCGMExporterScrapeSpec selects the dcgm-exporter the managed collector
+// scrapes: the pods behind a Service, on its port named gpu-metrics.
+type DCGMExporterScrapeSpec struct {
+	// Scrape turns scraping on or off. Default true. Turn it off when the
+	// store already receives dcgm-exporter metrics from another scraper.
+	// +optional
+	Scrape *bool `json:"scrape,omitempty"`
+	// ServiceName is the dcgm-exporter Service. Default
+	// nvidia-dcgm-exporter, the name GPU Operator uses.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z]([-a-z0-9]*[a-z0-9])?$`
+	// +optional
+	ServiceName string `json:"serviceName,omitempty"`
+	// Namespace of the Service. Empty searches every namespace.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+	// KeepWorkloadLabels keeps the pod, namespace, container and pod_uid labels
+	// dcgm-exporter adds for the workload that holds a GPU. Default false:
+	// they are dropped before anything is stored, so the store holds no
+	// names of the user's workloads.
+	// +optional
+	KeepWorkloadLabels bool `json:"keepWorkloadLabels,omitempty"`
+}
+
+// MetricsStoreSpec configures the metrics backend.
+// +kubebuilder:validation:XValidation:rule="self.mode == 'Managed' || !has(self.managed)",message="managed applies only to a Managed store"
+type MetricsStoreSpec struct {
+	OTLPEndpointSpec `json:",inline"`
+	// +optional
+	Managed *ManagedStoreSpec `json:"managed,omitempty"`
+}
+
+// ManagedStoreSpec configures the managed single-node VictoriaMetrics.
+// KubeNeuron does not back it up.
+type ManagedStoreSpec struct {
+	// +optional
+	Storage StoreStorageSpec `json:"storage,omitempty"`
+	// Retention is the VictoriaMetrics -retentionPeriod, for example 30d.
+	// +kubebuilder:validation:Pattern=`^[0-9]+[hdwy]?$`
+	// +kubebuilder:default="30d"
+	// +optional
+	Retention string `json:"retention,omitempty"`
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// StoreStorageSpec is the managed store's volume. The claim outlives the
+// managed store: switching to External or Disabled leaves it in place.
+type StoreStorageSpec struct {
+	// +kubebuilder:default="20Gi"
+	// +optional
+	Size string `json:"size,omitempty"`
+	// +optional
+	StorageClassName *string `json:"storageClassName,omitempty"`
+	// Ephemeral uses an emptyDir instead of a claim: every restart of the
+	// store loses its data. Only for trials.
+	// +optional
+	Ephemeral bool `json:"ephemeral,omitempty"`
+}
+
+// GrafanaSpec configures the Grafana that shows the dashboards.
+// +kubebuilder:validation:XValidation:rule="self.mode != 'External' || (has(self.endpoint) && self.endpoint.size() > 0)",message="External requires an endpoint"
+// +kubebuilder:validation:XValidation:rule="self.mode == 'Managed' || (!has(self.datasource) && !has(self.resources))",message="datasource and resources apply only to a Managed grafana"
+type GrafanaSpec struct {
+	// +kubebuilder:validation:Enum=Managed;External;Disabled
+	Mode IntegrationMode `json:"mode"`
+	// Endpoint is the address of the user's own Grafana (External).
+	// +kubebuilder:validation:MaxLength=2048
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+	// Datasource is where a Managed Grafana queries an External store. The
+	// store's endpoint is where metrics are written, which is not always
+	// where they are read, so it is named separately.
+	// +optional
+	Datasource *GrafanaDatasourceSpec `json:"datasource,omitempty"`
+	// Resources of the managed Grafana container.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// GrafanaDatasourceSpec is a Prometheus-compatible query address.
+// +kubebuilder:validation:XValidation:rule="!self.url.contains('@')",message="credentials must not be part of the url; use authorizationSecretRef"
+type GrafanaDatasourceSpec struct {
+	// URL is the Prometheus query API base: for VictoriaMetrics
+	// http://<host>:8428, for Prometheus http://<host>:9090.
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern=`^https?://\S+$`
+	URL string `json:"url"`
+	// AuthorizationSecretRef selects a key of a Secret in the installation
+	// namespace whose value is the HTTP Authorization header Grafana sends
+	// to the store. The operator never reads it.
+	// +optional
+	AuthorizationSecretRef *SecretReference `json:"authorizationSecretRef,omitempty"`
+}
+
+// ArchiveSpec describes the optional raw-event archive. It must never be used
+// as the workflow lock or incident authority.
+// The preview runtime has no archive ingestion path, so ClickHouse may only be
+// omitted or explicitly disabled.
+// +kubebuilder:validation:XValidation:rule="!has(self.clickHouse) || self.clickHouse.mode == 'Disabled'",message="clickHouse currently supports only Disabled mode"
+type ArchiveSpec struct {
+	ClickHouse *DependencySpec `json:"clickHouse,omitempty"`
+}
+
+// TLSSpec references mTLS material used for agent/controller traffic. The
+// operator writes Secret volume references into managed workloads; kubelet
+// performs the mounts. The operator never reads or copies private key bytes
+// into a ConfigMap or custom-resource status.
+// +kubebuilder:validation:XValidation:rule="has(self.serverSecretRef) && has(self.clientCASecretRef) && has(self.clientSecretRef) && has(self.serverCASecretRef)",message="serverSecretRef, clientCASecretRef, clientSecretRef, and serverCASecretRef are required"
+// +kubebuilder:validation:XValidation:rule="!has(self.serverSecretRef.key) && !has(self.clientSecretRef.key) && (!has(self.publicServerSecretRef) || !has(self.publicServerSecretRef.key))",message="TLS key-pair Secret references cannot select one key"
+type TLSSpec struct {
+	// Issuer decides who fills in the Secrets this block names.
+	//
+	// External, the default, means somebody else owns them: the installer,
+	// cert-manager, an organisation's own CA. The operator never writes them,
+	// and reports how close they are to expiry so they cannot lapse silently.
+	//
+	// Operator means KubeNeuron issues and renews them itself — a long-lived
+	// authority signing short-lived certificates that are replaced well before
+	// they expire.
+	//
+	// It is deliberately explicit rather than inferred from whether the Secrets
+	// happen to exist. "Absent" and "supposed to be mine" are different things:
+	// treating a missing Secret as an invitation would let the operator take
+	// over material somebody else manages the moment they deleted it mid-
+	// rotation.
+	// +kubebuilder:validation:Enum=External;Operator
+	// +kubebuilder:default=External
+	Issuer TLSIssuer `json:"issuer,omitempty"`
+	// ServerSecretRef selects a kubernetes.io/tls-style Secret containing
+	// tls.crt and tls.key. The certificate must cover the controller Service DNS
+	// name and be valid for server authentication.
+	// +kubebuilder:validation:Required
+	ServerSecretRef *SecretReference `json:"serverSecretRef,omitempty"`
+	// ClientCASecretRef selects the CA bundle used by the controller to verify
+	// agent fleet certificates. Key defaults to ca.crt.
+	// +kubebuilder:validation:Required
+	ClientCASecretRef *SecretReference `json:"clientCASecretRef,omitempty"`
+	// ClientSecretRef selects a kubernetes.io/tls-style Secret mounted by every
+	// agent. Its clientAuth leaf must contain exactly the installation URI SAN
+	// documented in docs/design.md; the projected Pod token supplies node
+	// identity, so this shared leaf is not treated as a node credential.
+	// +kubebuilder:validation:Required
+	ClientSecretRef *SecretReference `json:"clientSecretRef,omitempty"`
+	// ServerCASecretRef selects the CA bundle agents use to verify the
+	// controller Service certificate. Key defaults to ca.crt.
+	// +kubebuilder:validation:Required
+	ServerCASecretRef *SecretReference `json:"serverCASecretRef,omitempty"`
+	// PublicServerSecretRef optionally selects a kubernetes.io/tls-style
+	// Secret for the controller's public listener (operator API, Alertmanager
+	// webhook, control panel, metrics). When omitted, the public listener
+	// serves plain HTTP and should be protected by an Ingress/Gateway that
+	// terminates TLS; when set, bearer tokens never cross the network in
+	// cleartext even inside the cluster.
+	PublicServerSecretRef *SecretReference `json:"publicServerSecretRef,omitempty"`
+}
+
+// KubeNeuronSpec is the root desired-state resource for one KubeNeuron
+// installation. All configuration resources reference this object by name.
+// +kubebuilder:validation:XValidation:rule="!has(self.tls.serverSecretRef.namespace) && !has(self.tls.clientCASecretRef.namespace) && !has(self.tls.clientSecretRef.namespace) && !has(self.tls.serverCASecretRef.namespace) && (!has(self.tls.publicServerSecretRef) || !has(self.tls.publicServerSecretRef.namespace))",message="TLS Secret references must omit namespace and use spec.namespace"
+// +kubebuilder:validation:XValidation:rule="!has(self.safety) || self.safety.executionMode != 'Enabled' || has(self.safety.destructiveExecution)",message="executionMode Enabled requires spec.safety.destructiveExecution: real reset and reboot are confined to explicitly declared nodes"
+// +kubebuilder:validation:XValidation:rule="has(self.notifications) && has(self.notifications.webhookToken)",message="notifications.webhookToken is required: Alertmanager ingress must be authenticated"
+// +kubebuilder:validation:XValidation:rule="!has(self.safety) || self.safety.executionMode != 'Paused' || (has(self.notifications) && has(self.notifications.operatorAPIToken))",message="notifications.operatorAPIToken is required for Paused mode so the gate can be resumed through the authenticated API"
+// +kubebuilder:validation:XValidation:rule="!has(self.auth) || ((!has(self.auth.users) || !has(self.auth.users.namespace)) && (!has(self.auth.oidc) || !has(self.auth.oidc.clientSecretRef.namespace)))",message="auth Secret references must omit namespace and use spec.namespace"
+// +kubebuilder:validation:XValidation:rule="!has(self.notifications) || ((!has(self.notifications.slack) || !has(self.notifications.slack.namespace)) && (!has(self.notifications.operatorAPIToken) || !has(self.notifications.operatorAPIToken.namespace)) && (!has(self.notifications.webhookToken) || !has(self.notifications.webhookToken.namespace)) && (!has(self.notifications.webhook) || !has(self.notifications.webhook.namespace)) && (!has(self.notifications.pagerduty) || !has(self.notifications.pagerduty.namespace)))",message="notification Secret references must omit namespace and use spec.namespace"
+// +kubebuilder:validation:XValidation:rule="!has(self.manualRecoveryBaseline) || (duration(self.manualRecoveryBaseline) > duration('0s') && duration(self.manualRecoveryBaseline) <= duration('720h'))",message="manualRecoveryBaseline must be a positive duration of at most 720h"
+type KubeNeuronSpec struct {
+	// ManualRecoveryBaseline is the operator's usual manual recovery time.
+	// Omit it to suppress GPU-hours saved estimates.
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$`
+	// +optional
+	ManualRecoveryBaseline string `json:"manualRecoveryBaseline,omitempty"`
+	// RecoveryCostRates are the operator's cost of one device-hour of each
+	// accelerator resource, used only to show the device-hours saved as an
+	// estimated cost. There are no default rates: a resource without one
+	// shows hours only.
+	// +optional
+	RecoveryCostRates *RecoveryCostRates `json:"recoveryCostRates,omitempty"`
+	// Namespace is immutable because moving an installation would otherwise
+	// leave the old namespace's runtime resources active.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="namespace is immutable"
+	Namespace     string             `json:"namespace"`
+	Controller    ComponentSpec      `json:"controller"`
+	Agent         AgentSpec          `json:"agent"`
+	Auth          *AuthSpec          `json:"auth,omitempty"`
+	Safety        SafetySpec         `json:"safety,omitempty"`
+	Approvals     ApprovalSpec       `json:"approvals,omitempty"`
+	Notifications *NotificationsSpec `json:"notifications,omitempty"`
+	WorkflowStore WorkflowStoreSpec  `json:"workflowStore"`
+	// TrainingReports enables the in-cluster HTTPS endpoint for authenticated worker reports.
+	TrainingReports bool `json:"trainingReports,omitempty"`
+	// Cloud enables node recycle/replace remediation against the cloud provider
+	// behind the nodes. Leave empty to disable it; a RecycleNode/ReplaceNode
+	// step then fails closed rather than silently succeeding.
+	Cloud *CloudSpec `json:"cloud,omitempty"`
+	// Observability is where KubeNeuron's metrics go. Left out, like any of
+	// its parts, it is Disabled: an upgrade never deploys anything on its own.
+	// +optional
+	Observability ObservabilitySpec `json:"observability,omitempty"`
+	Archive       *ArchiveSpec      `json:"archive,omitempty"`
+	TLS           TLSSpec           `json:"tls"`
+}
+
+// KubeNeuronStatus summarizes the operator's observed desired state.
+type KubeNeuronStatus struct {
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// +listType=map
+	// +listMapKey=type
+	Conditions         []metav1.Condition `json:"conditions,omitempty"`
+	ConfigDigest       string             `json:"configDigest,omitempty"`
+	RuntimeConfigMap   string             `json:"runtimeConfigMap,omitempty"`
+	PlaybooksConfigMap string             `json:"playbooksConfigMap,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:metadata:annotations="kubeneuron.io/release-line=v1"
+// +kubebuilder:resource:scope=Cluster,shortName=kneuron
+// +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
+// +kubebuilder:printcolumn:name="Mode",type="string",JSONPath=".spec.safety.executionMode"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+
+// KubeNeuron defines a complete KubeNeuron installation.
+type KubeNeuron struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              KubeNeuronSpec   `json:"spec"`
+	Status            KubeNeuronStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// KubeNeuronList contains KubeNeuron objects.
+type KubeNeuronList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []KubeNeuron `json:"items"`
+}
+
+// SignalMatch selects normalized signals for a remediation policy.
+type SignalMatch struct {
+	// +kubebuilder:validation:MinLength=1
+	Class string `json:"class"`
+	// Vendor scopes this policy to one accelerator vendor. Leave it unset to
+	// match any, which is what every policy did before this field existed.
+	//
+	// A problem class is not vendor-specific — an uncorrectable ECC error
+	// happens on NVIDIA, AMD and Intel alike — but the ladder that answers it
+	// is: a GPU reset is an NVIDIA contract, and quiescing the vendor stack
+	// means different things per vendor. Without this, adding AMD nodes to a
+	// fleet meant their faults selected the NVIDIA ladder, which is refused at
+	// the capability gate — after the cordon and the drain have already run.
+	//
+	// A signal that names NO vendor does not match a vendor-scoped policy. That
+	// is deliberate: these ladders reset and reboot hardware, so acting on an
+	// unconfirmed guess is the wrong direction to fail in.
+	//
+	// Any vendor id is accepted (lowercase letters, digits, and hyphens, at
+	// most 32 characters), so a policy can scope a ladder to the vendor of an
+	// accelerator adapter added after this API version.
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`
+	Vendor       string                `json:"vendor,omitempty"`
+	Source       string                `json:"source,omitempty"`
+	Severity     string                `json:"severity,omitempty"`
+	NodeSelector *metav1.LabelSelector `json:"nodeSelector,omitempty"`
+}
+
+// GPURemediationPolicySpec binds one normalized signal class to a playbook.
+// The runtime consumes only class matching today; the other match fields are
+// rejected at admission so a policy cannot silently mean less than it says
+// (the compiler applies the same fail-closed rule).
+// +kubebuilder:validation:XValidation:rule="!has(self.match.source) && !has(self.match.severity) && !has(self.match.nodeSelector)",message="match fields source/severity/nodeSelector are not supported by the current runtime"
+// +kubebuilder:validation:XValidation:rule="(has(self.mode) && self.mode == 'Automatic') == has(self.automatic)",message="spec.automatic is required with mode Automatic and not allowed with any other mode"
+type GPURemediationPolicySpec struct {
+	// +kubebuilder:validation:MinLength=1
+	KubeNeuronRef string      `json:"kubeNeuronRef"`
+	Priority      int32       `json:"priority"`
+	Match         SignalMatch `json:"match"`
+	// +kubebuilder:validation:MinLength=1
+	PlaybookRef string            `json:"playbookRef"`
+	Parameters  map[string]string `json:"parameters,omitempty"`
+	// Mode says who authorises a step that stops work for the incidents this
+	// policy matches. DryRun simulates every step. Approval (the default)
+	// waits for a named person before each such step. Automatic runs them
+	// without a person, within spec.automatic. The installation-wide
+	// spec.safety.executionMode still applies: under DryRun nothing executes.
+	// +kubebuilder:validation:Enum=DryRun;Approval;Automatic
+	// +optional
+	Mode string `json:"mode,omitempty"`
+	// Automatic is the advance approval of an Automatic policy.
+	//
+	// Automatic mode acts without asking. For the node pools and fault classes
+	// you list here, KubeNeuron drains the node and restarts or replaces it
+	// through your cloud provider's API as soon as the conditions of your
+	// policy are met. Workloads on that node are stopped. A replacement
+	// instance may not be available, and the cloud provider bills instances
+	// according to its own terms. When replacement adds a node first, two
+	// instances run and are billed until the old one is removed, and your
+	// quota must allow the extra instance. You are responsible for the policy
+	// you set here and for its effect on your workloads. Start in dry-run,
+	// then in approval mode, before enabling automatic mode.
+	// +optional
+	Automatic *AutomaticRecoverySpec `json:"automatic,omitempty"`
+	// Replacement says how a node is replaced. AddFirst (the default) brings
+	// up the new node and waits until it is ready with its accelerators before
+	// the old one is drained and removed; RemoveFirst removes the old node
+	// first and is used only when named here.
+	// +optional
+	Replacement *ReplacementSpec `json:"replacement,omitempty"`
+	// Recycle enables the optional restart through the cloud API before
+	// replacement; off by default.
+	//
+	// A restart through the cloud API drains the node before it is tried, so it
+	// can interrupt the workload before a prepared replacement is ready; the
+	// add-first guarantee does not cover it.
+	// +optional
+	Recycle *RecycleSpec `json:"recycle,omitempty"`
+	// Interruption times the steps of a policy for class cloud-interruption.
+	// +optional
+	Interruption *InterruptionSpec `json:"interruption,omitempty"`
+}
+
+// InterruptionSpec times a cloud-interruption policy.
+// +kubebuilder:validation:XValidation:rule="!has(self.lead) || (duration(self.lead) >= duration('1m') && duration(self.lead) <= duration('60m'))",message="lead must be between 1m and 60m"
+type InterruptionSpec struct {
+	// Lead is how long before the deadline the cloud announced the checkpoint
+	// warning and the cordon start. A notice further away only opens the
+	// incident and notifies.
+	// +kubebuilder:default="10m"
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$`
+	// +optional
+	Lead string `json:"lead,omitempty"`
+}
+
+// ReplacementSpec selects the replacement strategy.
+// +kubebuilder:validation:XValidation:rule="!has(self.successorTimeout) || (duration(self.successorTimeout) >= duration('5m') && duration(self.successorTimeout) <= duration('2h'))",message="successorTimeout must be between 5m and 2h"
+type ReplacementSpec struct {
+	// +kubebuilder:validation:Enum=AddFirst;RemoveFirst
+	// +kubebuilder:default=AddFirst
+	Strategy string `json:"strategy,omitempty"`
+	// SuccessorTimeout is how long AddFirst waits for the new node to be
+	// Ready with its accelerators. When it passes, KubeNeuron removes the
+	// node it added, if nothing else runs on it, and does not drain or remove
+	// the old node.
+	// +kubebuilder:default="30m"
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$`
+	// +optional
+	SuccessorTimeout string `json:"successorTimeout,omitempty"`
+}
+
+// RecycleSpec enables the restart through the cloud API.
+type RecycleSpec struct {
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// AutomaticRecoverySpec bounds where and how much an Automatic policy may
+// recover without a person, and records who enabled it.
+// +kubebuilder:validation:XValidation:rule="!has(self.maxConcurrentNodesPerPool) || self.maxConcurrentNodesPerPool <= self.maxConcurrentNodes",message="maxConcurrentNodesPerPool must not exceed maxConcurrentNodes"
+type AutomaticRecoverySpec struct {
+	// NodeSelector names the node pools by label. It must not be empty: an
+	// absent selector never means "every node".
+	// +kubebuilder:validation:MinProperties=1
+	NodeSelector map[string]string `json:"nodeSelector"`
+	// PoolLabel is the node label that identifies a pool, for the per-pool
+	// limit and the circuit breaker. Empty treats all selected nodes as one
+	// pool.
+	// +optional
+	PoolLabel string `json:"poolLabel,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	MaxConcurrentNodes int32 `json:"maxConcurrentNodes"`
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxConcurrentNodesPerPool int32 `json:"maxConcurrentNodesPerPool,omitempty"`
+	// CheckpointWait is how long a step that stops work waits for the job's
+	// checkpoint before it proceeds.
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
+	// +optional
+	CheckpointWait string `json:"checkpointWait,omitempty"`
+	// NodeCooldown is the minimum time between two automatic recoveries of one
+	// node.
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
+	NodeCooldown string `json:"nodeCooldown"`
+	// MaxUnhealthyPercent is the circuit breaker: when more than this share of
+	// a pool's nodes have an open incident or are not Ready, the policy falls
+	// back to approval and stays there until the policy is changed.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	MaxUnhealthyPercent int32 `json:"maxUnhealthyPercent"`
+	// MinUnhealthyNodes is the breaker's absolute floor: it never trips on
+	// fewer unhealthy nodes than this (default 2).
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MinUnhealthyNodes int32 `json:"minUnhealthyNodes,omitempty"`
+	// MaxCheckpointAgeMinutes requires a recent worker-reported checkpoint for automatic drain.
+	// Zero disables the requirement.
+	// +kubebuilder:validation:Minimum=0
+	MaxCheckpointAgeMinutes int32 `json:"maxCheckpointAgeMinutes,omitempty"`
+	// AllowUnknownCheckpoint permits automatic drain when a worker or its checkpoint is unknown.
+	AllowUnknownCheckpoint bool `json:"allowUnknownCheckpoint,omitempty"`
+	// QualifiedProfiles names the accelerator runtime profiles on which this
+	// policy's problem class is qualified for automatic recovery. Together with
+	// the policy's class each one is a qualified pair. A node matching no
+	// listed profile, or an empty list, is never recovered automatically: the
+	// step waits for approval.
+	// +listType=set
+	// +optional
+	QualifiedProfiles []string `json:"qualifiedProfiles,omitempty"`
+	// EnabledBy and EnabledAt declare who enabled automatic mode and when.
+	// KubeNeuron records them as declared and cannot verify them; the
+	// Kubernetes API audit log shows who actually changed this object.
+	// +kubebuilder:validation:MinLength=1
+	EnabledBy string      `json:"enabledBy"`
+	EnabledAt metav1.Time `json:"enabledAt"`
+	// Acknowledgement must read exactly "I understand that automatic mode
+	// drains and replaces nodes without asking".
+	// +kubebuilder:validation:Enum="I understand that automatic mode drains and replaces nodes without asking"
+	Acknowledgement string `json:"acknowledgement"`
+}
+
+// GPURemediationPolicyStatus records validation and reference resolution.
+type GPURemediationPolicyStatus struct {
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// +listType=map
+	// +listMapKey=type
+	Conditions       []metav1.Condition `json:"conditions,omitempty"`
+	ResolvedPlaybook string             `json:"resolvedPlaybook,omitempty"`
+	Digest           string             `json:"digest,omitempty"`
+	// Mode is the policy's recovery mode: DryRun, Approval or Automatic.
+	Mode string `json:"mode,omitempty"`
+	// EffectiveMode is what actually happens: DryRun while the installation's
+	// spec.safety.executionMode is not Enabled, whatever Mode says.
+	EffectiveMode string `json:"effectiveMode,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:scope=Cluster,shortName=gpolicy
+// +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Class",type=string,JSONPath=`.spec.match.class`
+// +kubebuilder:printcolumn:name="Playbook",type=string,JSONPath=`.spec.playbookRef`
+// +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.status.mode`
+// +kubebuilder:printcolumn:name="Effective",type=string,JSONPath=`.status.effectiveMode`
+
+// GPURemediationPolicy selects a playbook for a normalized problem class.
+type GPURemediationPolicy struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              GPURemediationPolicySpec   `json:"spec"`
+	Status            GPURemediationPolicyStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// GPURemediationPolicyList contains GPURemediationPolicy objects.
+type GPURemediationPolicyList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []GPURemediationPolicy `json:"items"`
+}
+
+// PlaybookStep is one typed action in a remediation playbook.
+type PlaybookStep struct {
+	// +kubebuilder:validation:MinLength=1
+	Name     string              `json:"name"`
+	Action   PlaybookAction      `json:"action"`
+	Approval ApprovalRequirement `json:"approval,omitempty"`
+	// Timeout is a Go duration (e.g. "10m").
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
+	Timeout string            `json:"timeout,omitempty"`
+	Params  map[string]string `json:"params,omitempty"`
+}
+
+// PlaybookFailure defines escalation after failure.
+type PlaybookFailure struct {
+	// +kubebuilder:validation:MinLength=1
+	PlaybookRef string `json:"playbookRef,omitempty"`
+}
+
+// GPUPlaybookSpec describes a typed, declarative remediation workflow.
+// Reboot is the most destructive typed action; requiring its approval at
+// admission mirrors the compiler's fail-closed rule.
+// +kubebuilder:validation:XValidation:rule="self.steps.all(s, s.action != 'Reboot' || (has(s.approval) && s.approval == 'Required'))",message="Reboot steps require approval Required"
+type GPUPlaybookSpec struct {
+	// +kubebuilder:validation:MinLength=1
+	KubeNeuronRef string         `json:"kubeNeuronRef"`
+	Target        PlaybookTarget `json:"target"`
+	Effects       []string       `json:"effects,omitempty"`
+	// Cooldown is a Go duration (e.g. "6h").
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
+	Cooldown string `json:"cooldown,omitempty"`
+	// +kubebuilder:validation:MinItems=1
+	Steps     []PlaybookStep   `json:"steps"`
+	OnFailure *PlaybookFailure `json:"onFailure,omitempty"`
+}
+
+// GPUPlaybookStatus records validation and its immutable effective digest.
+type GPUPlaybookStatus struct {
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	Digest     string             `json:"digest,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:scope=Cluster,shortName=gplaybook
+// +kubebuilder:subresource:status
+
+// GPUPlaybook is a typed remediation playbook.
+type GPUPlaybook struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              GPUPlaybookSpec   `json:"spec"`
+	Status            GPUPlaybookStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// GPUPlaybookList contains GPUPlaybook objects.
+type GPUPlaybookList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []GPUPlaybook `json:"items"`
+}
+
+// FaultCodeSelector names one vendor-native neutral fault code — the
+// non-XID analogue of an XID number, matching AgentEvent.Fault (vendor,
+// code) as emitted by e.g. the nvidia-smi/DCGM fallback source.
+type FaultCodeSelector struct {
+	// Vendor is a vendor id: lowercase letters, digits, and hyphens, at most
+	// 32 characters. Any vendor is accepted, including one served by an
+	// accelerator adapter added after this API version.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`
+	Vendor string `json:"vendor"`
+	// +kubebuilder:validation:MinLength=1
+	Code string `json:"code"`
+}
+
+// GPUSignalMappingSpec makes signal normalization declarative. Exactly one
+// source matcher should be set for a mapping.
+// +kubebuilder:validation:XValidation:rule="(has(self.xidCodes) ? 1 : 0) + (has(self.alertName) ? 1 : 0) + (has(self.faults) ? 1 : 0) == 1",message="exactly one of xidCodes, alertName, or faults must be set"
+type GPUSignalMappingSpec struct {
+	// +kubebuilder:validation:MinLength=1
+	KubeNeuronRef string `json:"kubeNeuronRef"`
+	// +kubebuilder:validation:MinLength=1
+	Source string `json:"source"`
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:Minimum=1
+	XIDCodes []int32 `json:"xidCodes,omitempty"`
+	// +kubebuilder:validation:MinLength=1
+	AlertName string `json:"alertName,omitempty"`
+	// Faults overrides classification of vendor-neutral fault codes (source
+	// "fault"), so a policy override reaches both detection encodings: an
+	// installation that remaps XID 48 can remap the equivalent neutral
+	// "nvidia/ecc-dbe" the fallback source emits, instead of the two sources
+	// silently applying different policy for one physical condition.
+	// +kubebuilder:validation:MinItems=1
+	Faults []FaultCodeSelector `json:"faults,omitempty"`
+	Labels map[string]string   `json:"labels,omitempty"`
+	// +kubebuilder:validation:MinLength=1
+	Class string `json:"class"`
+	// +kubebuilder:validation:Enum=info;warning;critical
+	Severity string `json:"severity"`
+}
+
+// GPUSignalMappingStatus records mapping validation.
+type GPUSignalMappingStatus struct {
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	Digest     string             `json:"digest,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:scope=Cluster,shortName=gsignal
+// +kubebuilder:subresource:status
+
+// GPUSignalMapping configures XID or alert normalization.
+type GPUSignalMapping struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              GPUSignalMappingSpec   `json:"spec"`
+	Status            GPUSignalMappingStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// GPUSignalMappingList contains GPUSignalMapping objects.
+type GPUSignalMappingList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []GPUSignalMapping `json:"items"`
+}
+
+// GPUMaintenanceWindowSpec pauses automation for nodes selected during a
+// bounded maintenance window.
+// +kubebuilder:validation:XValidation:rule="self.startsAt < self.endsAt",message="startsAt must be before endsAt"
+type GPUMaintenanceWindowSpec struct {
+	// +kubebuilder:validation:MinLength=1
+	KubeNeuronRef   string               `json:"kubeNeuronRef"`
+	NodeSelector    metav1.LabelSelector `json:"nodeSelector"`
+	StartsAt        *metav1.Time         `json:"startsAt"`
+	EndsAt          *metav1.Time         `json:"endsAt"`
+	PauseAutomation bool                 `json:"pauseAutomation"`
+}
+
+// GPUMaintenanceWindowStatus records whether a maintenance window is active.
+type GPUMaintenanceWindowStatus struct {
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// +listType=map
+	// +listMapKey=type
+	Conditions    []metav1.Condition `json:"conditions,omitempty"`
+	AffectedNodes int32              `json:"affectedNodes,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:scope=Cluster,shortName=gmaint
+// +kubebuilder:subresource:status
+
+// GPUMaintenanceWindow pauses automation for matching nodes.
+type GPUMaintenanceWindow struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              GPUMaintenanceWindowSpec   `json:"spec"`
+	Status            GPUMaintenanceWindowStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// GPUMaintenanceWindowList contains GPUMaintenanceWindow objects.
+type GPUMaintenanceWindowList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []GPUMaintenanceWindow `json:"items"`
+}
+
+// GPUNodeConfigSpec holds per-node desired configuration. Secret references
+// preserve address and credential ownership without agents being able to
+// overwrite inventory fields.
+// SSH/BMC credential references stay fail-closed at admission (as in the
+// compiler) until an actuator consumes them.
+// +kubebuilder:validation:XValidation:rule="!has(self.sshSecretRef) && !has(self.bmcSecretRef)",message="sshSecretRef/bmcSecretRef are not supported: no actuator consumes them yet"
+type GPUNodeConfigSpec struct {
+	// +kubebuilder:validation:MinLength=1
+	KubeNeuronRef string `json:"kubeNeuronRef"`
+	// +kubebuilder:validation:MinLength=1
+	NodeName     string           `json:"nodeName"`
+	Paused       bool             `json:"paused,omitempty"`
+	SSHSecretRef *SecretReference `json:"sshSecretRef,omitempty"`
+	BMCSecretRef *SecretReference `json:"bmcSecretRef,omitempty"`
+}
+
+// GPUNodeConfigStatus reflects the native node and agent observation.
+type GPUNodeConfigStatus struct {
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// +listType=map
+	// +listMapKey=type
+	Conditions    []metav1.Condition `json:"conditions,omitempty"`
+	NodeUID       string             `json:"nodeUID,omitempty"`
+	AgentLastSeen *metav1.Time       `json:"agentLastSeen,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:scope=Cluster,shortName=gnodecfg
+// +kubebuilder:subresource:status
+
+// GPUNodeConfig configures one physical node.
+type GPUNodeConfig struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              GPUNodeConfigSpec   `json:"spec"`
+	Status            GPUNodeConfigStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// GPUNodeConfigList contains GPUNodeConfig objects.
+type GPUNodeConfigList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []GPUNodeConfig `json:"items"`
+}
+
+// AcceleratorRuntimeVendor identifies the accelerator runtime contract a
+// profile governs: a vendor id of lowercase letters, digits, and hyphens, at
+// most 32 characters.
+//
+// Any vendor id is admitted, but a profile only ever narrows. It admits an
+// action only against a fresh report whose readiness is "ready", and only the
+// NVIDIA preflight produces a ready report: an accelerator adapter without a
+// preflight reports at most "degraded" and never declares a physical reset.
+// A profile for any other vendor therefore admits no accelerator action until
+// that vendor ships its own preflight; it never inherits NVIDIA permissions.
+// +kubebuilder:validation:MaxLength=32
+// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`
+type AcceleratorRuntimeVendor string
+
+const (
+	AcceleratorRuntimeVendorNVIDIA AcceleratorRuntimeVendor = "nvidia"
+)
+
+// AcceleratorRuntimeAction is a semantic remediation capability. It names a
+// controller-level action, never an arbitrary command or an enablement switch.
+// +kubebuilder:validation:Enum=evacuate-workloads;quarantine-node;reset-device;restart-runtime;reboot-node;collect-diagnostics;verify-health;replace-node
+type AcceleratorRuntimeAction string
+
+const (
+	AcceleratorRuntimeActionEvacuateWorkloads  AcceleratorRuntimeAction = "evacuate-workloads"
+	AcceleratorRuntimeActionQuarantineNode     AcceleratorRuntimeAction = "quarantine-node"
+	AcceleratorRuntimeActionResetDevice        AcceleratorRuntimeAction = "reset-device"
+	AcceleratorRuntimeActionRestartRuntime     AcceleratorRuntimeAction = "restart-runtime"
+	AcceleratorRuntimeActionRebootNode         AcceleratorRuntimeAction = "reboot-node"
+	AcceleratorRuntimeActionCollectDiagnostics AcceleratorRuntimeAction = "collect-diagnostics"
+	AcceleratorRuntimeActionVerifyHealth       AcceleratorRuntimeAction = "verify-health"
+	AcceleratorRuntimeActionReplaceNode        AcceleratorRuntimeAction = "replace-node"
+)
+
+// AcceleratorRuntimeScope identifies the failure-domain scope at which an
+// action can be considered. A physical device and a partition remain distinct
+// so a logical partition can never silently inherit a physical reset.
+// +kubebuilder:validation:Enum=node;physical-device;partition
+type AcceleratorRuntimeScope string
+
+const (
+	AcceleratorRuntimeScopeNode           AcceleratorRuntimeScope = "node"
+	AcceleratorRuntimeScopePhysicalDevice AcceleratorRuntimeScope = "physical-device"
+	AcceleratorRuntimeScopePartition      AcceleratorRuntimeScope = "partition"
+)
+
+// AcceleratorRuntimeActionPolicy permits a semantic action at explicit target
+// scopes. It is only a server-owned allow-list: it does not enable execution
+// and must still be combined with a fresh, matching agent report and all
+// normal controller safety gates.
+//
+// A reset is deliberately narrower than other semantic actions. It may target
+// only a physical device and must require verified-unpartitioned topology; an
+// agent report remains the runtime evidence for that precondition.
+// +kubebuilder:validation:XValidation:rule="self.action != 'reset-device' || (self.scopes.all(scope, scope == 'physical-device') && self.requireVerifiedUnpartitionedTopology)",message="reset-device only supports physical-device scope and requires requireVerifiedUnpartitionedTopology=true"
+// +kubebuilder:validation:XValidation:rule="self.action == 'reset-device' || !has(self.requireVerifiedUnpartitionedTopology) || !self.requireVerifiedUnpartitionedTopology",message="requireVerifiedUnpartitionedTopology is only valid for reset-device"
+type AcceleratorRuntimeActionPolicy struct {
+	Action AcceleratorRuntimeAction `json:"action"`
+	// Scopes is bounded (there are only three scope values) so the CEL cost
+	// estimator can price the reset-device rule; without MaxItems the API
+	// server rejects the whole CRD as exceeding the validation cost budget.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=3
+	// +listType=set
+	Scopes []AcceleratorRuntimeScope `json:"scopes"`
+	// RequireVerifiedUnpartitionedTopology forces the controller to demand
+	// current runtime evidence with topology_safety=verified-unpartitioned.
+	// It is required for every physical reset and invalid for other actions.
+	RequireVerifiedUnpartitionedTopology bool `json:"requireVerifiedUnpartitionedTopology,omitempty"`
+}
+
+// AcceleratorRuntimeProfileSpec is the server-owned accelerator runtime
+// contract for a selected NVIDIA node fleet. It intentionally has no
+// execution-mode field and cannot make the Kubernetes runtime Enabled.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.nodeSelector.matchLabels) && self.nodeSelector.matchLabels.size() > 0",message="nodeSelector.matchLabels is required and cannot select every node"
+// +kubebuilder:validation:XValidation:rule="!has(self.nodeSelector.matchExpressions) || self.nodeSelector.matchExpressions.size() == 0",message="nodeSelector supports matchLabels only"
+// +kubebuilder:validation:XValidation:rule="duration(self.maxReportAge) > duration('0s')",message="maxReportAge must be a positive duration"
+type AcceleratorRuntimeProfileSpec struct {
+	// +kubebuilder:validation:MinLength=1
+	KubeNeuronRef string `json:"kubeNeuronRef"`
+	// NodeSelector is deliberately restricted to a nonempty matchLabels map.
+	// Match expressions would make overlap and fail-closed profile selection
+	// substantially harder to reason about in this first API version.
+	NodeSelector metav1.LabelSelector     `json:"nodeSelector"`
+	Vendor       AcceleratorRuntimeVendor `json:"vendor"`
+	// +kubebuilder:validation:Pattern="^sha256:[a-f0-9]{64}$"
+	ProfileDigest string `json:"profileDigest"`
+	// DriverVersion pins the exact NVIDIA driver version that this profile was
+	// reviewed against. The node agent must observe this value from the live
+	// driver; this field is an allow-list input, never a substitute for runtime
+	// evidence.
+	// +kubebuilder:validation:MinLength=1
+	DriverVersion string `json:"driverVersion"`
+	// RuntimeVersion pins the exact locally attested DCGM/runtime version
+	// reviewed with this profile, normalized as dcgm-X.Y[.Z...]. It must match
+	// a bounded node-local probe; this declaration never substitutes for
+	// runtime evidence.
+	//
+	// This is the DCGM *client* the agent runs, which is not necessarily the
+	// version of the host engine it queries: `dcgmi --version` answers from the
+	// binary alone, and DCGM exposes no way to ask the engine for its build. A
+	// newer client serving an older engine is normal with the GPU Operator. The
+	// engine is attested separately, by a live connection whose GPU count must
+	// match the independent nvidia-smi inventory. Pin this to the client the
+	// agent image ships.
+	// +kubebuilder:validation:MinLength=1
+	RuntimeVersion string `json:"runtimeVersion"`
+	// MaxReportAge bounds how long an agent observation can support a
+	// capability decision. A missing or non-positive duration is rejected.
+	// +kubebuilder:validation:Format=duration
+	MaxReportAge metav1.Duration `json:"maxReportAge"`
+	// AllowedActions is intentionally optional: an empty list is an explicit
+	// observation-only profile. It never authorizes a side effect on its own.
+	// Bounded by the closed action vocabulary (eight actions, one entry per
+	// action via the map list key).
+	// +kubebuilder:validation:MaxItems=8
+	// +listType=map
+	// +listMapKey=action
+	AllowedActions []AcceleratorRuntimeActionPolicy `json:"allowedActions,omitempty"`
+}
+
+// AcceleratorRuntimeProfileStatus records only reconciliation of the desired
+// profile object. It never claims accelerator health, report freshness, or
+// remediation eligibility; those remain runtime observations and controller
+// decisions.
+type AcceleratorRuntimeProfileStatus struct {
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:scope=Cluster,shortName=arprofile
+// +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Vendor",type="string",JSONPath=".spec.vendor"
+// +kubebuilder:printcolumn:name="Profile",type="string",JSONPath=".spec.profileDigest"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+
+// AcceleratorRuntimeProfile defines a server-owned runtime contract for an
+// accelerator fleet. It narrows what may be considered for remediation; it
+// does not enable execution.
+type AcceleratorRuntimeProfile struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              AcceleratorRuntimeProfileSpec   `json:"spec"`
+	Status            AcceleratorRuntimeProfileStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// AcceleratorRuntimeProfileList contains AcceleratorRuntimeProfile objects.
+type AcceleratorRuntimeProfileList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []AcceleratorRuntimeProfile `json:"items"`
+}
+
+// GPUAutonomyEvidenceSpec names the bounded evidence contract an autonomy
+// plan must re-check immediately before an effect. Sources are names, not
+// arbitrary URLs or credentials; raw diagnostics remain outside the CRD.
+type GPUAutonomyEvidenceSpec struct {
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
+	MaxAge string `json:"maxAge"`
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=8
+	// +kubebuilder:validation:items:Enum=agent;controller;dcgm
+	// +listType=set
+	RequiredSources []string `json:"requiredSources"`
+}
+
+// GPUAutonomyGuardrailsSpec bounds one plan's blast radius. These are upper
+// bounds, never permissions: the controller's global pause, runtime profile,
+// agent arming and existing safety gates remain mandatory.
+type GPUAutonomyGuardrailsSpec struct {
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MinLength=1
+	// +listType=set
+	MaintenanceWindows []string `json:"maintenanceWindows,omitempty"`
+	// +kubebuilder:validation:Minimum=1
+	MaxConcurrentNodes int32 `json:"maxConcurrentNodes"`
+	// +kubebuilder:validation:Minimum=1
+	MaxActionsPerHour int32 `json:"maxActionsPerHour"`
+	// +kubebuilder:validation:Minimum=0
+	ErrorBudget      int32 `json:"errorBudget"`
+	NoActiveIncident bool  `json:"noActiveIncident"`
+}
+
+// GPUAutonomyRolloutSpec defines the bounded canary and bake envelope.
+type GPUAutonomyRolloutSpec struct {
+	// +kubebuilder:validation:Minimum=1
+	CanaryNodes int32 `json:"canaryNodes"`
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$`
+	BakeDuration string `json:"bakeDuration"`
+	// ExpansionSteps are absolute bounded target counts. A plan remains
+	// one-action-class and one selector; an expansion cannot introduce a
+	// different device or workload scope.
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:Minimum=1
+	ExpansionSteps []int32 `json:"expansionSteps,omitempty"`
+}
+
+// GPUAutonomyApprovalsSpec requires multi-party approval before a plan can
+// leave simulation. The API/controller bind every approval to the immutable
+// configuration digest in status; this spec cannot be a global switch.
+// +kubebuilder:validation:XValidation:rule="self.distinctSubjects == true",message="GPUAutonomyPlan requires distinctSubjects=true"
+type GPUAutonomyApprovalsSpec struct {
+	// +kubebuilder:validation:MinItems=2
+	// +kubebuilder:validation:MaxItems=8
+	// +listType=set
+	RequiredRoles    []string `json:"requiredRoles"`
+	DistinctSubjects bool     `json:"distinctSubjects"`
+}
+
+// GPUAutonomyPlanSpec is a deliberately narrow autonomous effect envelope.
+// It does not replace the controller's global execution mode; every effect is
+// still re-evaluated against the profile, evidence, ownership and pause gates.
+// +kubebuilder:validation:XValidation:rule="has(self.selector.matchLabels) && self.selector.matchLabels.size() > 0",message="selector.matchLabels is required and cannot select every node"
+// +kubebuilder:validation:XValidation:rule="!has(self.selector.matchExpressions) || self.selector.matchExpressions.size() == 0",message="selector supports matchLabels only"
+// +kubebuilder:validation:XValidation:rule="self.policyRef.contains('@sha256:') || self.policyRef.contains('#')",message="policyRef must name an immutable revision"
+// +kubebuilder:validation:XValidation:rule="self.profileRef.contains('@sha256:') || self.profileRef.contains('#')",message="profileRef must name an immutable revision"
+// +kubebuilder:validation:XValidation:rule="self.guardrails.noActiveIncident == true",message="guardrails.noActiveIncident must be true"
+// +kubebuilder:validation:XValidation:rule="self.rollout.canaryNodes <= self.guardrails.maxConcurrentNodes",message="canaryNodes cannot exceed maxConcurrentNodes"
+type GPUAutonomyPlanSpec struct {
+	Selector metav1.LabelSelector `json:"selector"`
+	// PolicyRef and ProfileRef identify immutable reviewed revisions (usually
+	// name@digest or name#generation), not a mutable default policy.
+	// +kubebuilder:validation:MinLength=1
+	PolicyRef string `json:"policyRef"`
+	// +kubebuilder:validation:MinLength=1
+	ProfileRef string `json:"profileRef"`
+	// v0.4.0 intentionally permits exactly one action class per plan. A
+	// second action needs a separate approval and canary envelope.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=1
+	// +listType=set
+	AllowedActions []AcceleratorRuntimeAction `json:"allowedActions"`
+	Evidence       GPUAutonomyEvidenceSpec    `json:"evidence"`
+	Guardrails     GPUAutonomyGuardrailsSpec  `json:"guardrails"`
+	Rollout        GPUAutonomyRolloutSpec     `json:"rollout"`
+	Approvals      GPUAutonomyApprovalsSpec   `json:"approvals"`
+	ExpiresAt      metav1.Time                `json:"expiresAt"`
+}
+
+// GPUAutonomyApprovalStatus is a non-secret audit summary. The approving
+// subject and role are retained, but no bearer token, raw diagnostic payload,
+// or authorization assertion is copied into the CRD.
+type GPUAutonomyApprovalStatus struct {
+	Actor        string      `json:"actor"`
+	Role         string      `json:"role"`
+	ConfigDigest string      `json:"configDigest"`
+	ApprovedAt   metav1.Time `json:"approvedAt"`
+}
+
+// GPUAutonomyPlanStatus projects the durable autonomy lifecycle for kubectl
+// and GitOps readers. It is not an authority to execute: the controller's
+// operational store remains the append-only audit and effect authority.
+type GPUAutonomyPlanStatus struct {
+	ObservedGeneration int64                       `json:"observedGeneration,omitempty"`
+	State              string                      `json:"state,omitempty"`
+	ConfigDigest       string                      `json:"configDigest,omitempty"`
+	SimulationID       string                      `json:"simulationID,omitempty"`
+	RolloutID          string                      `json:"rolloutID,omitempty"`
+	Approvals          []GPUAutonomyApprovalStatus `json:"approvals,omitempty"`
+	LastTransitionTime *metav1.Time                `json:"lastTransitionTime,omitempty"`
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:scope=Cluster,shortName=gautonomy
+// +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="State",type="string",JSONPath=".status.state"
+// +kubebuilder:printcolumn:name="Expires",type="date",JSONPath=".spec.expiresAt"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+
+// GPUAutonomyPlan declares a time-bounded, independently approved automatic
+// action envelope. Creating it alone never enables cluster-wide automation.
+type GPUAutonomyPlan struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              GPUAutonomyPlanSpec   `json:"spec"`
+	Status            GPUAutonomyPlanStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// GPUAutonomyPlanList contains GPUAutonomyPlan objects.
+type GPUAutonomyPlanList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []GPUAutonomyPlan `json:"items"`
+}
+
+func init() {
+	SchemeBuilder.Register(
+		&KubeNeuron{}, &KubeNeuronList{},
+		&GPURemediationPolicy{}, &GPURemediationPolicyList{},
+		&GPUPlaybook{}, &GPUPlaybookList{},
+		&GPUSignalMapping{}, &GPUSignalMappingList{},
+		&GPUMaintenanceWindow{}, &GPUMaintenanceWindowList{},
+		&GPUNodeConfig{}, &GPUNodeConfigList{},
+		&AcceleratorRuntimeProfile{}, &AcceleratorRuntimeProfileList{},
+		&GPUAutonomyPlan{}, &GPUAutonomyPlanList{},
+	)
+}
+
+// RecoveryCostRates are the cost of one device-hour per accelerator
+// resource, in one currency.
+type RecoveryCostRates struct {
+	// Currency is an ISO 4217 code, e.g. USD.
+	// +kubebuilder:validation:Pattern=`^[A-Z]{3}$`
+	Currency string `json:"currency"`
+	// PerDeviceHour maps an accelerator resource (nvidia.com/gpu, amd.com/gpu,
+	// google.com/tpu, aws.amazon.com/neuron) to the cost of one device-hour
+	// of it, a decimal such as "2.50".
+	// +kubebuilder:validation:MinProperties=1
+	// +kubebuilder:validation:MaxProperties=16
+	PerDeviceHour map[string]DeviceHourRate `json:"perDeviceHour"`
+}
+
+// A pattern on the value rather than a CEL rule over the map: the apiserver
+// prices a rule over every entry of a map past its cost budget.
+
+// DeviceHourRate is the cost of one device-hour, a decimal such as "2.50".
+// +kubebuilder:validation:MaxLength=14
+// +kubebuilder:validation:Pattern=`^[0-9]{1,9}([.][0-9]{1,4})?$`
+type DeviceHourRate string

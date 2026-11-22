@@ -1,0 +1,13 @@
+POOL         CLOUD  ACCELERATOR NODES  REPLACEMENT POLICY  CHECKED (UTC)         ADD-FIRST
+train        GKE    2                  AddFirst            2026-11-18T12:00:00Z  available
+full         AKS    3                  mixed               2026-11-18T12:00:00Z  unavailable — no room below maxSize — provide room for one more node, or set RemoveFirst in the remediation policy that applies to these nodes
+denied       AKS    1                  AddFirst            2026-11-18T12:00:00Z  unknown — permission denied while reading pool configuration
+pending      GKE    1                  AddFirst            —                     unknown — not checked yet
+sized        EKS    4                  AddFirst            2026-11-18T12:00:00Z  available
+fixed        EKS    2                  RemoveFirst         —                     not required
+observe      GKE    1                  none                —                     not applicable — no remediation policy replaces these nodes
+unwired      AKS    1                  AddFirst            —                     unknown — no cloud provider configured
+zones        AKS    2                  AddFirst            2026-11-18T12:00:00Z  unavailable — AKS chooses the zone of a new node in this pool — use a single-zone node pool, or set RemoveFirst in the remediation policy that applies to these nodes
+auto-repair  EKS    2                  AddFirst            2026-11-18T12:00:00Z  unavailable — EKS node auto repair is enabled for this node group — leave repairs to EKS, or turn it off with aws eks update-nodegroup-config --cluster-name training --nodegroup-name auto-repair --node-repair-config enabled=false; EKS then no longer repairs nodes in this group
+no-list      EKS    1                  AddFirst            2026-11-18T12:00:00Z  unknown — could not read the node group: eks:ListUpdates was denied — allow eks:ListUpdates in the controller's IAM role
+zones        GKE    2                  AddFirst            2026-11-18T12:00:00Z  unavailable — add-first would add a node in every zone of this pool — use a single-zone node pool, or set RemoveFirst in the remediation policy that applies to these nodes

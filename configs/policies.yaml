@@ -1,0 +1,95 @@
+# KubeNeuron controller configuration: safety limits, approvals, and
+# signal-class -> playbook policy bindings. Within one vendor scope the first
+# match wins; a vendor-specific binding takes precedence over the unscoped
+# fallback for that vendor.
+#
+# Problem classes are defined in pkg/types (ProblemClass); playbook names
+# must exist in configs/playbooks/.
+
+safety:
+  # Dry-run is ON by default: the full pipeline runs and reports
+  # "would execute X" without touching anything. Run at least two weeks in
+  # dry-run before enabling automation.
+  dry_run: true
+  max_concurrent_remediations: 2
+  max_concurrent_reboots: 1
+  flap:
+    count: 3
+    window: 24h
+  # No new signals for this long after an action => healthy.
+  verify_quiet_window: 10m
+
+approvals:
+  channels: [slack, cli, web]
+  ttl: 12h
+
+policies:
+  # --- hardware-critical: act immediately ---
+  - match: { class: fell-off-bus }        # XID 79: reset won't help
+    playbook: fell-off-bus
+  - match: { class: ecc-dbe }             # XID 48/95, volatile DBE alerts
+    playbook: drain-and-reset
+  - match: { class: row-remap-failure }   # XID 64: straight to RMA
+    playbook: rma
+  - match: { class: nvlink }              # XID 74, NVLink CRC storms
+    playbook: drain-and-reset
+  - match: { class: gsp-error }           # XID 119/120
+    playbook: gpu-reset
+  # driver-hang: an amdgpu ring timeout (a dead exporter is exporter-down).
+  # NOT drain-and-reset: gpu-reset leads with an idle check, so a busy device
+  # stops for a human and only an idle one is reset; escalation still reaches
+  # the drain when the reset does not clear it.
+  - match: { class: driver-hang }
+    playbook: gpu-reset
+
+  # --- scheduled / soft actions ---
+  - match: { class: row-remap-ok }        # XID 63: reset applies the remap
+    playbook: reset-when-idle
+  - match: { class: ecc-contained }       # XID 94: restart affected workload
+    playbook: workload-restart
+  - match: { class: row-remap-budget }    # remapped rows near exhaustion
+    playbook: rma
+
+  # --- observe-first (app-level or facility issues) ---
+  - match: { class: xid-app }             # XID 13/31: workload bugs unless recurrent
+    playbook: observe-suspect
+    params: { threshold: "3", window: "1h" }
+  - match: { class: ecc-sbe-rate }        # XID 92: corrected errors, watch the trend
+    playbook: observe-suspect
+    params: { threshold: "3", window: "24h" }
+  - match: { class: thermal }             # facility issue: drain, don't reset
+    playbook: observe-suspect
+  - match: { class: power }
+    playbook: observe-suspect
+  - match: { class: pcie }
+    playbook: observe-suspect
+  # gpu-lost: a device has vanished from the vendor tool's own enumeration.
+  # NOT drain-and-reset: a missing device has no UUID to address, so the reset
+  # preflight refuses it as structurally impossible and the incident fails
+  # closed to a human — after the cordon and drain have already run. The reboot
+  # ladder spends the same disruption on a rung that can return the device.
+  - match: { class: gpu-lost }
+    playbook: reboot
+  - match: { class: diag-failure }
+    playbook: observe-suspect
+  # agent-down: the node's agent stopped reporting. Every rung above observe is
+  # executed BY that agent, over the channel that is down, on a node whose
+  # telemetry we no longer have — remediating it would mean acting blind
+  # through a broken pipe. The page is KubeNeuronAgentNeverAcked; this binding
+  # exists so the incident is recorded and notified rather than sitting
+  # unbound, which looks identical in the store and says nothing about intent.
+  - match: { class: agent-down }
+    playbook: observe-suspect
+  # exporter-down: the GPU metrics exporter stopped reporting, a monitoring
+  # gap rather than a fault. The controller never runs a step for it; this
+  # binding records and notifies.
+  - match: { class: exporter-down }
+    playbook: observe-suspect
+  # accelerator-fault: the Kubernetes Node reports an uncorrectable accelerator
+  # error. No software step restores the device: straight to RMA.
+  - match: { class: accelerator-fault }
+    playbook: rma
+  # accelerator-unallocatable: fewer allocatable devices than capacity. A
+  # stopped device plugin and a failed device look the same: observe only.
+  - match: { class: accelerator-unallocatable }
+    playbook: observe-suspect

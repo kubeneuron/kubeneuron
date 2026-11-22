@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package controller
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/kubeneuron/kubeneuron/internal/metrics"
+	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/pkg/types"
+)
+
+// authorizeAndStartStep is the decision boundary shared by evaluation and
+// approval resumption. Authorization never bypasses startStep's live safety
+// checks. Policy authorization can extend this boundary without changing the
+// recovery ladder or treating a parked state as proof of consent.
+func (c *Controller) authorizeAndStartStep(ctx context.Context, inc *types.Incident, step *playbook.Step) error {
+	// Provider first, so a changed target is superseded whatever the policy
+	// says; then the policy's recovery settings. Both before any approval.
+	// Before a recycle-only rung starts, the provider is asked about its
+	// recycle: a refused recycle skips the rung before its cordon.
+	// A cloud-interruption step waits for its deadline to come within the
+	// policy's lead, and its cordon for the node to be free of other work.
+	if held, err := c.holdInterruptionStep(ctx, inc, step); held || err != nil {
+		return err
+	}
+	assess := step
+	if recycle := c.rungRecycle(ctx, inc); recycle != nil {
+		assess = recycle
+	}
+	held, skip, err := c.holdUnavailableCloudRecovery(ctx, inc, assess)
+	if held || err != nil {
+		return err
+	}
+	if skip != "" {
+		return c.skipRecycle(ctx, inc, step, skip)
+	}
+	// A parked round resumes under its own checks: startStep applies the
+	// policy's recovery settings again before anything runs.
+	if inc.State == types.StateAwaitingApproval {
+		return c.resumeAwaitingApproval(ctx, inc)
+	}
+	if handled, err := c.holdOrSkipByPolicy(ctx, inc, step); handled || err != nil {
+		return err
+	}
+	if c.stepNeedsApproval(ctx, inc, step) {
+		note := "step requires human approval"
+		if c.successorStep(ctx, inc, step) && !c.simulating(ctx, inc) {
+			// Planning reads the pool and changes nothing; it names the pool
+			// the person is asked to add a node to.
+			if err := c.planSuccessor(ctx, inc); err != nil {
+				reason := "recovery unavailable: " + addFirstReason(err) + "; the node is not cordoned or drained"
+				c.deferStep(inc, step, metrics.DeferRecoveryUnavailable)
+				c.logOnceStepUnavailable(inc, step, reason)
+				return nil
+			}
+			note = successorApprovalNote(inc)
+		}
+		pol, automatic := c.automaticPolicyFor(ctx, inc)
+		if !automatic {
+			if held, err := c.holdForRepairOwner(ctx, inc, step); held || err != nil {
+				return err
+			}
+			return c.parkForApproval(ctx, inc, step, note)
+		}
+		verdict, reason := c.authorizeByPolicy(ctx, inc, step, pol)
+		switch verdict {
+		case policyRun:
+			// Recorded once the step has started and before its goroutine
+			// runs, so every step the policy started names the policy, however
+			// fast the step finishes.
+			if held, err := c.holdForRepairOwner(ctx, inc, step); held || err != nil {
+				return err
+			}
+			return c.startStepThen(ctx, inc, step, policyActor(pol.Name), func() {
+				if err := c.appendAudit(ctx, inc, policyActor(pol.Name), "policy-authorised",
+					policyAuthorisationNote(pol, time.Now())+": "+step.Name); err != nil {
+					c.log.Error("policy authorisation audit append failed", "incident", inc.ID, "err", err)
+				}
+			})
+		case policyHold:
+			c.deferStep(inc, step, metrics.DeferAutomaticLimit)
+			c.logOnceStepHeld(inc, step, pol, reason)
+			return nil
+		default:
+			if held, err := c.holdForRepairOwner(ctx, inc, step); held || err != nil {
+				return err
+			}
+			return c.parkForApproval(ctx, inc, step,
+				fmt.Sprintf("automatic policy %s did not authorise this step: %s", pol.Name, reason))
+		}
+	}
+	if held, err := c.holdForRepairOwner(ctx, inc, step); held || err != nil {
+		return err
+	}
+	return c.startStep(ctx, inc, step, "system")
+}

@@ -1,0 +1,233 @@
+# Metrics reference
+
+All KubeNeuron series carry the `kubeneuron_` prefix. The controller serves
+them on the public listener at `/metrics`; the agent on its health port
+(`:9402`) at `/metrics`. The dependency profile's vmagent scrapes both, plus
+the operator's controller-runtime metrics.
+
+This page lists the series the controller and agent processes *emit*. The
+`kubeneuron_gpu_*` series are different: they are recorded by vmalert from
+dcgm-exporter series under the dependency profile, not served by any
+KubeNeuron process, and their catalog (DCGM field, unit, factor, labels,
+derived formulas, no-data semantics and hardware-support cells) is the
+generated [GPU metric catalog](reference-gpu-metrics.md). The control-plane tier (Tier T4 in the catalog) maps
+the existing `kubeneuron_incidents`, `kubeneuron_degraded_gpus`,
+`kubeneuron_degraded_gpu_seconds_total` and related series below without
+renaming them.
+
+The panel and CLI compute period estimates from the incident store. See [how the recovery report counts GPU-hours](reference-cli.md#how-we-count).
+
+## Controller
+
+| Series | Type | Labels | Meaning |
+|---|---|---|---|
+| `kubeneuron_incidents` | gauge | `state` | current incidents per state; alert on `state="NEEDS_HUMAN"` |
+| `kubeneuron_signals_total` | counter | `source`, `class` | normalized signals entering the pipeline |
+| `kubeneuron_signals_dropped_total` | counter | — | signals lost to ingest-queue overflow |
+| `kubeneuron_events_duplicate_total` | counter | — | agent-event replays rejected by capture ID |
+| `kubeneuron_incidents_opened_total` | counter | `class` | incidents opened |
+| `kubeneuron_incident_evidence_total` | counter | `class`, `location` (`this-node`, `shared`, `unknown`), `software` (`ok`, `degraded`, `unknown`), `network` (`present`, `missing`, `unknown`) | incidents opened, by the [evidence](reference-api.md#incident-evidence) recorded for them; a signal that could not be read counts as `unknown`, never as healthy |
+| `kubeneuron_steps_total` | counter | `outcome` (`ok`, `failed`, `dry_run`) | playbook steps executed |
+| `kubeneuron_accelerator_health_nodes` | gauge | `source`, `profile`, `state` | accelerator nodes each [health profile](accelerator-health.md) reads as `healthy`, `fault` or `unknown`; unknown is a node without a fresh signal, never a healthy one. `ignored` counts, in addition, the nodes reporting a problem on a condition that is read and not acted on. No node label |
+| `kubeneuron_accelerator_health_ignored_nodes` | gauge | `source`, `profile`, `reason` | accelerator nodes reporting a signal that is read and not acted on, by reason: `degraded` or `networking-issue` (TPU health from [Cloud Monitoring](accelerator-health.md#tpu-health-from-google-cloud-monitoring-opt-in)), `non-fatal-xid`, `peer-tainted`, `interconnect`, `effect-none` or `undocumented-taint` ([DRA device taints](accelerator-health.md#device-taints-from-kubernetes-dra-opt-in)); no other reason is a label value. No node label |
+| `kubeneuron_accelerator_faults_not_acted_on_total` | counter | `source` (`aws-neuron-sysfs`), `class` | faults an agent read and the controller did not act on, because their source is [off by default](accelerator-health.md#sources-off-by-default) and not switched on; each is shown in `kubeneuronctl health`. No node label |
+| `kubeneuron_dra_health_reads_total` | counter | `outcome` | reads of the [DRA device taints](accelerator-health.md#device-taints-from-kubernetes-dra-opt-in): `ok`, `api-unavailable`, `forbidden`, `timeout`, `list-failed`, `bounds-exceeded`, `dynamic-client-unavailable` |
+| `kubeneuron_dra_health_devices` | gauge | `profile`, `state` | DRA devices the last read found as `fault`, `unknown`, `ignored`, `unmonitored` or `no-health-taint`; the last two say nothing about health. No node or device label |
+| `kubeneuron_cloud_health_reads_total` | counter | `outcome` (`ok`, `permission-denied`, `api-error`, `no-nodes`) | reads of accelerator health from the cloud's monitoring; `no-nodes` is a read with no node to ask about, which asks the cloud nothing. Experimental, not validated against a live cloud |
+| `kubeneuron_actions_pending` | gauge | — | agent actions dispatched and not yet claimed; sustained non-zero means an unreachable or unregistered agent |
+| `kubeneuron_reconcile_seconds` | histogram | — | reconcile-walk duration; p99 above a few seconds delays approvals and verification |
+| `kubeneuron_decision_evaluations_total` | counter | `adapter`, `state` | shared evaluator outcomes for the closed adapters `live-admission`, `readiness`, `preview`, and `snapshot`; use it to spot a growing `Blocked`/`Unknown` population without adding a node label |
+| `kubeneuron_decision_evaluation_seconds` | histogram | `adapter` | time spent inside the pure shared evaluator; separate from inventory capture and candidate compilation |
+| `kubeneuron_decision_stale_evidence_total` | counter | `adapter`, `reason` | decisions held for `EvidenceStale`, `NoHealthyAgent`, or `EvidenceSourceMissing`; a rising rate is an evidence-source/agent investigation signal, not a remediation-success signal |
+| `kubeneuron_decision_compatibility_holds_total` | counter | `state` | legacy live reset admissions the shared evaluator would hold while the compatibility path remains authoritative; it never proves that a hardware action occurred |
+| `kubeneuron_stack_restore_failures_total` | counter | — | failed accelerator-stack restores by the janitor — a growing rate means a node's GPU monitoring is staying down |
+| `kubeneuron_runtime_config_info` | gauge | `digest` | identity of the loaded runtime configuration (always 1); a digest lagging `KubeNeuron.status.configDigest` is a rollout that never landed |
+| `kubeneuron_incident_duration_seconds` | histogram | `class`, `outcome` | open-to-halted wall time — MTTR, split by how the incident ended |
+| `kubeneuron_incidents_recovered_total` | counter | `class`, `unattended` | incidents with an audited live remediation and a verified resolution; `unattended="true"` means no approval round was opened. `cloud-interruption` incidents are not counted: they degrade nothing |
+| `kubeneuron_degraded_gpu_seconds_total` | counter | `class`, `outcome` | GPU-seconds charged when an incident reached a terminal state (`cloud-interruption` incidents are not counted); divide by 3600 for degraded GPU-hours. The resolved share includes manual closures and observe-only incidents. Use the recovery report for GPU-hours attributed to verified remediation. Recorded once per incident, on its terminal transition only, and never for dry-run — so an incident parked in `NEEDS_HUMAN` contributes **nothing here** until somebody closes it |
+| `kubeneuron_degraded_accelerator_seconds_total` | counter | `class`, `outcome`, `resource` | device-seconds charged on the same terminal transition, per accelerator resource and in its own device: GPU-seconds for `nvidia.com/gpu` and `amd.com/gpu`, TPU chip-seconds for `google.com/tpu`, AWS Neuron device-seconds for `aws.amazon.com/neuron`; divide by 3600 for hours. Counted with the devices the incident recorded when it opened; an incident with no recorded count is not charged here but in `kubeneuron_degraded_node_seconds_device_count_unknown_total`. AWS Neuron devices are the accelerators (AWS Trainium and AWS Inferentia) that the `aws.amazon.com/neuron` resource counts. KubeNeuron is not affiliated with AWS and is unrelated to the AWS Neuron SDK. **Keep the `resource` label when aggregating**: each resource counts time in its own device unit. Never for dry-run or `cloud-interruption` incidents |
+| `kubeneuron_degraded_node_seconds_device_count_unknown_total` | counter | `class`, `outcome` | node-seconds charged on the same terminal transition for incidents that recorded no device count when they opened (the report's node-hours block); no device count is guessed, so they are in no device-second series |
+| `kubeneuron_degraded_gpus` | gauge | `class`, `owner` | accelerators under a non-terminal incident right now (`cloud-interruption` incidents are not counted). `owner="human"` is the `NEEDS_HUMAN` population — capacity that stays lost until a person acts — and is exactly what the counter above cannot show. Node-scoped incidents expand to the node's GPU count |
+| `kubeneuron_workloads_evicted_total` | counter | `reason` | GPU workloads moved off a node ahead of a destructive step, by problem class — what remediation cost. No `node` label by design: this control plane replaces nodes, so node names are an unbounded set and a per-node series would grow for the life of the process. Per-node detail lives in the incident record and audit trail |
+| `kubeneuron_destructive_steps_deferred_total` | counter | `reason` | destructive steps that did **not** run, by the guard that stopped them — what remediation deliberately did not cost |
+| `kubeneuron_topology_classifications_total` | counter | `topology`, `result` | device topology classifications by the layout found (`whole-device`, `mig`, `time-sliced`, `dra-managed`, `mixed`, `unknown`) and the verdict on device-scoped actions (`eligible`, `refused`). Both label sets are closed. Counted once per classification wherever it ran: a `GET /api/v1/nodes/{node}/topology` or single-node readiness read, the reset gate's narrowing step, and every decision snapshot built for a `reset-device` request with `physical-device` scope (a `POST /api/v1/simulations` with that shape, and the shared-evaluator snapshot the live reset admission records before its narrowing step) each add one, so one admission of a reset adds more than one observation, and a polled API inflates it. It is a rate of classifications, not a node count and not a count of refused resets. No node label by design; which node classified how is the API's answer. `result="refused"` with `topology="unknown"` is any input the classifier could not trust: the node's advertisement unobserved or implausible, a malformed GPU Feature Discovery label, an unrecognised sharing strategy, missing, stale or not-ready agent evidence, a contradiction between the report and the advertisement, or a Dynamic Resource Allocation observation that was not performed or failed the classifier's consistency checks; with any other topology it is the layout itself refusing |
+| `kubeneuron_checkpoint_requests_total` | counter | `outcome` | checkpoint coordination outcomes ahead of a `platform.drain` or `platform.evict_gpu_workload` (emitted only under an enabled `spec.safety.checkpointCoordination`): one count per eligible workload the step tried to ask (`acknowledged` — explicit `checkpoint-state: complete:<incident>`, bound to the `checkpoint-incident` stamped on the Pod; a plain `complete` does not count; `exited` — terminated, deleted or replaced, which also covers a crash and a Pod already gone before any request reached it; `expired` — its own stamped deadline passed unanswered; `unreachable` — the request could not be stamped, a foreign request the listing did not show refused it, the Pod could not be read, or the coordination budget ran out or the step was cancelled before the Pod's own deadline, so this outcome includes cases where no request ever reached the object), plus one `skipped` per disruption step where no request went out at all (skipped class, no eligible workload, no budget, platform without the capability). The label set is closed. `acknowledged / (acknowledged + expired)` is the share of coordinated disruptions where the job was told and said "done" before anything was killed. No node, pod, namespace or incident label; which workload was asked is on the incident's audit trail |
+| `kubeneuron_cloud_interruptions_total` | counter | `provider`, `kind`, `outcome` | cloud interruption notices and the checkpoint warning they led to (experimental): `announced` once per notice recorded, `ended` once per notice of an incident closed because the notice is no longer present on a node that is still there (cancelled or completed), and per warning `warned` (opted-in jobs were asked), `no-jobs` (none on the node), `not-asked` (checkpoint coordination off or unsupported, or the jobs could not be listed) or `missed` (the deadline left no time); once the warned jobs settle or the deadline passes, `checkpointed-in-time` (every asked job reported a checkpoint or finished), `missed`, or `unknown` (the jobs could not be read at the deadline). `provider` is `aws`, `azure`, `gcp` or `unknown`; `kind` is `spot-reclaim`, `rebalance`, `scheduled-maintenance` or `host-maintenance`. Closed label sets; no node, pool or instance type label |
+| `kubeneuron_impact_previews_total` | counter | `result` | impact preview computations at approval park (emitted only under `spec.safety.impactPreview.enabled`): `computed`, `truncated` (computed, with more workloads than it itemised) or `unavailable` (the reason is on the record). Closed label set, no incident or node label |
+| `kubeneuron_impact_preview_seconds` | histogram | — | seconds one impact preview took to gather and render, bounded by the policy `budget` (at most 60s); a p90 near the budget means the listing or the topology read is slow enough to start producing unavailable previews |
+| `kubeneuron_approvals_bound_total` | counter | `binding` | approval decisions by what the client bound them to: `round` (`park_epoch` only), `round_and_impact` (also the impact digest the human read), `none` (an older client). Closed label set |
+| `kubeneuron_checkpoint_group_requests_total` | counter | `outcome` | checkpoint requests sent to group PEERS — members of a coordinated workload's `kubeneuron.io/checkpoint-group` that the disruption itself does not touch (emitted only under `spec.safety.checkpointCoordination.groups.enabled`): the Phase 1 outcomes `acknowledged`, `exited`, `expired`, `unreachable` per peer, plus `skipped` for each peer not asked (on another node with `crossNode` off) and once per group not asked at all (above `maxGroupSize`, or a listing that failed or ran out of budget). The step's own `kubeneuron_checkpoint_requests_total` counts only the node's candidates. Closed label set; no group label |
+| `kubeneuron_checkpoint_advisories_total` | counter | `outcome` | checkpoint advisory outcomes at approval park (emitted only under `spec.safety.checkpointCoordination.advisory.enabled`): `stamped` and `unreachable` once per eligible workload the round tried to notify, `withdrawn` once per notice withdrawn when the round ended without its disruption, `skipped` once per round that sent nothing (advisory or coordination off is silent, not skipped; a skipped class, no disruption downstream, no eligible workload, a failed listing, a platform without the capability, or a dry run). The label set is closed. No node, pod, namespace or incident label; which Pods were notified is on the incident's audit trail |
+| `kubeneuron_checkpoint_wait_seconds` | histogram | — | per workload with a request in force, the elapsed seconds from that request's durable `checkpoint-requested-at` on the Pod until its outcome settled. A request stamped fresh measures from the moment the step issued it; a same-incident request resumed after a controller restart keeps its original request time, so the observation spans the whole window the workload was given, including the part elapsed before the restart; an honored foreign request measures from its own request time. The start is never later than the step's own request time and never more than the 30m ceiling before it, and the observation itself is bounded to 0..30m (`checkpoint.MaxWaitCeiling`), so a stale or tampered stamp cannot produce a negative observation or one above the ceiling even when the step waits on after it; an observation of exactly 30m may therefore be a cut-off value rather than a measured one. It includes near-zero observations for requests that settled on the first look (an immediate acknowledgement, a resumed window that had already expired), so it is *not* only the time the step spent sleeping; the `checkpoint_wait` deferral reason below counts the steps that actually paused. This is what calibrates `spec.safety.checkpointCoordination.maxWait`: a p90 far under the ceiling means it is more generous than jobs need, a cliff at the ceiling means jobs are being cut off. Buckets run from 1s to the 30m ceiling |
+| `kubeneuron_dead_lettered_total` | counter | `queue` (`actions`, `events`) | work that exhausted its attempt budget and left the claimable pool for good. Non-zero means something stopped being retried without succeeding: a queued action no agent could complete, or an agent event that failed ingestion. Both sweeps were silent before this series existed |
+| `kubeneuron_gate_denials_total` | counter | — | steps denied by the safety gate (pause, cooldown, concurrency, capability) |
+| `kubeneuron_escalations_total` | counter | — | ladder escalations after step/verification failures |
+| `kubeneuron_notifications_dropped_total` | counter | `kind` (`event`, `approval_request`, `dead_letter`) | notifications lost to queue overflow or dead-lettered after delivery retries |
+| `kubeneuron_auth_failures_total` | counter | `api` (`operator`, `webhook`, `agent`) | rejected authentication attempts; repeated failures from one source are throttled with `429` |
+| `kubeneuron_tls_certificate_not_after_seconds` | gauge | `certificate` | NotAfter (unix s) of every loaded TLS artifact; bundles report their earliest expiry |
+
+`kubeneuron_destructive_steps_deferred_total` `reason` values: `not_idle`
+(an idle guard found the device busy), `device_holders` (processes hold the GPU
+that KubeNeuron cannot release), `maintenance_window`, `node_paused` (a
+GPUNodeConfig pause), `global_pause` (the fleet-wide switch), `concurrency_cap`,
+`playbook_cooldown`, `automatic_limit` (an automatic policy's concurrency
+limit, cool-down or unreadable pool holds the step), `recovery_unavailable`
+(the policy's replacement strategy or recycle setting does not allow the step,
+in any mode), `unarmed_agent`, `confinement` (outside the declared
+destructiveExecution blast radius), `recycle_not_viable`,
+`accelerator_evidence` (a reset held for missing or stale runtime evidence),
+`checkpoint_wait` (a drain or GPU-workload eviction really paused for
+opted-in workloads to checkpoint first; counted once per step and only when a
+wait actually happened, never for a request that settled on the first look),
+and `topology_unqualified` (the runtime evidence passed but
+the device topology classifier refused the device-scoped reset because the
+node is MIG-partitioned, time-sliced, DRA-managed, mixed, or its topology
+could not be established; narrowing only, so nothing the classifier says lets
+a reset through that the evidence gate refused, and every such refusal also
+counts once under `kubeneuron_topology_classifications_total{result="refused"}`).
+It counts *decisions*, so a hold that persists — a maintenance window, a paused
+node — is counted again on every reconcile pass: read it with `rate()` as "how
+much protection is currently in force", and one-shot refusals as single events.
+Dry-run incidents and playbooks with no disruptive rung never appear, because
+neither was going to touch a workload.
+
+`not_idle` counts only a guard the agent reported as a refusal: the device was
+genuinely held by live processes. An idle probe that could not run at all — a
+missing `nvidia-smi`, a wedged driver, a timeout — fails the same step and
+fails just as closed, but it is not evidence that a workload was spared, so it
+is deliberately absent. An agent older than the refusal field reports no
+refusals, which under-counts protection rather than inventing it. A `not_idle`
+refusal also stops the ladder and hands the incident to a human rather than
+escalating, because every rung above the guard is more destructive than the one
+it just stopped — expect `kubeneuron_incidents_recovered_total` not to move for
+these and `NEEDS_HUMAN` to gain one.
+
+The controller increments `kubeneuron_incidents_recovered_total` when the
+audit trail records a live remediation and the controller resolves the
+incident from VERIFYING. Manual closures, observe-only incidents, and
+simulated actions are excluded. If the audit read fails, the controller
+logs the error and skips the increment. The recovery report reads the
+stored evidence when requested.
+
+`kubeneuron_degraded_gpu_seconds_total` measures time spent degraded.
+A live incident closed manually or after observation still contributes
+degraded time under `outcome="resolved"`. DryRun contributes to neither
+counter.
+
+The two recovery series answer different questions and must be read together.
+The counter is what FINISHED: closed incidents, charged once, so a park and
+unpark cannot bill the same hour twice. The gauge is what is HAPPENING: it
+includes every parked incident, which the counter deliberately omits. To get
+degraded GPU-hours over a window including parked incidents, integrate the
+gauge (`sum_over_time(kubeneuron_degraded_gpus[7d]) * <scrape interval> / 3600`)
+or ask `kubeneuronctl report`, which computes it from the incident store and
+does charge parked incidents.
+
+!!! note "Store-derived gauges come from the leader only"
+    `kubeneuron_degraded_gpus`, `kubeneuron_incidents` and
+    `kubeneuron_actions_pending` describe the fleet, not the process reporting
+    them: they are counted from the shared workflow store on the scrape. On a
+    multi-replica PostgreSQL installation only the leader answers, so
+    `sum(...)` is correct — every replica answering would have reported the
+    same numbers once per replica. `kubeneuron_degraded_gpus` and
+    `kubeneuron_incidents` are absent from a standby's output entirely;
+    `kubeneuron_actions_pending` is a plain gauge, so it reads `0` there rather
+    than disappearing. Collection is also bounded, so a slow store costs one
+    empty gauge rather than a scrape timeout that marks the whole target down.
+
+`certificate` label values: `controller-server-leaf`, `agent-client-ca`,
+`public-server-leaf` (when public TLS is enabled) on the controller;
+`fleet-client-leaf`, `controller-server-ca` on the agent.
+
+## Agent
+
+| Series | Type | Meaning |
+|---|---|---|
+| `kubeneuron_agent_events_posted_total` | counter | XID events delivered to the controller |
+| `kubeneuron_agent_events_spooled_total` | counter | events diverted to the durable spool after a failed post |
+| `kubeneuron_agent_spool_depth` | gauge | undelivered events currently spooled |
+| `kubeneuron_agent_journal_unreadable_entries_total` | counter | journal entries, journal files and saved read positions the agent could not read and skipped; the kernel faults in them are lost |
+| `kubeneuron_agent_detections_total` | counter | `node`, `source` | faults observed per detection source (`kmsg`, `gpuhealth`) — the only way to tell which source saw a fault |
+| `kubeneuron_agent_detections_deduplicated_total` | counter | `node` | detections collapsed as duplicates of one physical fault across sources |
+| `kubeneuron_agent_events_rejected_total` | counter | `node` | events the controller semantically rejected and the agent dropped — non-zero means detections are being discarded |
+| `kubeneuron_agent_registration_acks_total` | counter | durable controller registration acknowledgments |
+
+Both processes also export the standard Go runtime and process collectors.
+
+## OTLP export
+
+The controller, agent and operator can also push their metrics to an
+OpenTelemetry Collector over OTLP. The OpenTelemetry Prometheus bridge reads
+the same registry that serves `/metrics`, so each series arrives under its
+`kubeneuron_*` name with the same labels and the same values; there is one
+set of instruments, not two. Feed one backend from either OTLP or a scrape of
+`/metrics`, not both, or every series is stored twice.
+
+Export is off until an endpoint is set. The standard variables configure it:
+
+| Variable | Effect |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Collector address; setting either turns export on |
+| `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` | unset or `http/protobuf`, the only transport (port 4318 on a Collector); `grpc` is refused |
+| `OTEL_EXPORTER_OTLP_HEADERS`, `_CERTIFICATE`, `_CLIENT_CERTIFICATE`, `_CLIENT_KEY`, `_TIMEOUT` | transport, as in the OpenTelemetry specification |
+| `OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_METRIC_EXPORT_TIMEOUT` | milliseconds; defaults 30000 and 10000 |
+| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | resource; `service.name` defaults to `kubeneuron-controller`, `kubeneuron-agent` or `kubeneuron-operator` |
+| `OTEL_SDK_DISABLED=true`, `OTEL_METRICS_EXPORTER=none` | turn export off |
+
+Pass credentials for the Collector in `OTEL_EXPORTER_OTLP_HEADERS` (for
+example `Authorization=Bearer ...`), never in the endpoint URL: an export
+error is logged with the URL it was sent to.
+
+Telemetry never holds a process up. An unsupported value (another exporter or
+protocol) is logged and the process runs without export. At most one batch is
+in flight, bounded by the export timeout; a batch that fails is dropped
+(series are cumulative, so the next one carries current values) and counted:
+
+| Series | Type | Meaning |
+|---|---|---|
+| `kubeneuron_telemetry_export_failures_total` | counter | OTLP exports that failed and were dropped; present only while export is on |
+
+At shutdown the last batch is flushed for at most 5 seconds. Detection and
+recovery do not depend on telemetry: with the Collector down they work as
+before.
+
+No metric label carries a person's identity, a credential, an endpoint URL or
+the name of a user's workload (namespace, pod, training job); a test over
+every declared and gathered label enforces it.
+
+## Shipped alerts
+
+The dependency profile's `kubeneuron-self` VMRule group covers:
+`KubeNeuronControllerDown`, `KubeNeuronAgentDown`,
+`KubeNeuronIncidentNeedsHuman`, `KubeNeuronSignalsDropped`,
+`KubeNeuronNotificationsDropped`, `KubeNeuronAgentSpoolBacklog`, and
+`KubeNeuronTLSCertExpiringSoon` (30 days before expiry), plus the
+round-12 additions: `KubeNeuronAuthFailureBurst`,
+`KubeNeuronStackRestoreFailing`, `KubeNeuronActionQueueStuck`,
+`KubeNeuronIncidentExpired`, `KubeNeuronAgentEventsRejected`,
+`KubeNeuronAgentNeverAcked`, and `KubeNeuronReconcileSlow`, plus the two
+workload-safe recovery rules, `KubeNeuronImpactPreviewUnavailable` and
+`KubeNeuronCheckpointAdvisoryUnreachable`, which fire only on installations
+that opted into those blocks and never trigger remediation. Running your own
+Prometheus instead of the reference profile? Load
+[`configs/vmalert/self-rules.yaml`](https://github.com/kubeneuron/kubeneuron/blob/main/configs/vmalert/self-rules.yaml)
+— every rule links to its [runbook](runbooks.md) entry. GPU-signal alerts
+(`Gpu*`) live in the `gpu-*` groups and feed the controller webhook; unit
+tests pin the deployed rules to both canonical files.
+
+Two more VMRules ship with the dependency profile, and neither
+feeds the controller. `kubeneuron-gpu-recording`
+([`configs/vmalert/gpu-recording-rules.yaml`](https://github.com/kubeneuron/kubeneuron/blob/main/configs/vmalert/gpu-recording-rules.yaml))
+holds only `record:` rules, the canonical and derived `kubeneuron_gpu_*`
+series of the catalog. `kubeneuron-gpu-shadow`
+([`configs/vmalert/gpu-shadow-rules.yaml`](https://github.com/kubeneuron/kubeneuron/blob/main/configs/vmalert/gpu-shadow-rules.yaml))
+holds the seven shadow-only alerts `ShadowGpuPcieLinkWidthDegraded`,
+`ShadowGpuNvlinkLinkDegraded`, `ShadowGpuFailSlow`,
+`ShadowGpuThermalHeadroomLow`, `ShadowGpuMemoryThermalHeadroomLow`,
+`ShadowGpuMemoryBeyondRepair` and `ShadowGpuRowRemapPending`. Each carries
+`kubeneuron_shadow="true"` and `severity: info`, is routed to the
+`human-default` receiver ahead of the webhook route, is absent from the
+controller's alert-to-class map, and has a
+[runbook](runbooks.md#shadow-only-gpu-alerts-route-to-humans-never-to-the-controller)
+entry that opens by saying so. They trigger no remediation. None of them has
+been exercised on GPU hardware by this project.

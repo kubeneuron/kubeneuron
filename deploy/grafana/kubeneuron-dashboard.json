@@ -1,0 +1,1047 @@
+{
+  "__comment": "KubeNeuron overview dashboard. Import into Grafana with a Prometheus/VictoriaMetrics datasource scraping the controller's /metrics and dcgm-exporter. The top row (y<8) is the recovery outcome a capacity owner reads: GPU-hours degraded and returned, unattended recovery share, MTTR. Everything below it is process telemetry; rows at y>=37 cover self-monitoring: availability, notification drops, spool backlog, and TLS expiry.",
+  "title": "KubeNeuron",
+  "uid": "kubeneuron-overview",
+  "schemaVersion": 39,
+  "tags": [
+    "kubeneuron",
+    "gpu"
+  ],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "GPU-hours degraded, cumulative by outcome (resolved = returned to service)",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
+      "description": "Cumulative GPU-hours spent under an open incident since controller start, split by how each incident ended; the resolved series is capacity remediation brought back. Drawn from the counter directly because recoveries are sparse enough that increase() over a dashboard window frequently reports zero.",
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (kubeneuron_degraded_gpu_seconds_total) / 3600",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "axisLabel": "GPU-hours",
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Unattended recovery share (since controller start)",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
+      "description": "Share of recovered incidents that never needed a human decision. Computed from the raw counters rather than increase() over the window: recoveries are sparse, and a counter series born inside the window shows no growth to increase(), which silently rendered this panel empty on exactly the fleets it matters for. Resets when the controller restarts; use kubeneuronctl report for a windowed figure computed from the incident store.",
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 10,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "100 * sum(kubeneuron_incidents_recovered_total{unattended=\"true\"}) / sum(kubeneuron_incidents_recovered_total)",
+          "legendFormat": "unattended"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 50
+              },
+              {
+                "color": "green",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "percent"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "MTTR p50/p90 by class (resolved incidents)",
+      "description": "Median and 90th-percentile time from incident open to resolution, per problem class, over every resolved incident since controller start. Not rate()-based: a fleet resolving a handful of incidents a day leaves a histogram too sparse for a windowed rate to report anything at all.",
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 14,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (class, le) (kubeneuron_incident_duration_seconds_bucket{outcome=\"resolved\"}))",
+          "legendFormat": "{{class}} p50"
+        },
+        {
+          "expr": "histogram_quantile(0.9, sum by (class, le) (kubeneuron_incident_duration_seconds_bucket{outcome=\"resolved\"}))",
+          "legendFormat": "{{class}} p90"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Incidents needing a human",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(kubeneuron_incidents{state=\"NEEDS_HUMAN\"})",
+          "legendFormat": "needs human"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Awaiting approval",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(kubeneuron_incidents{state=\"AWAITING_APPROVAL\"})",
+          "legendFormat": "awaiting"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Active incidents",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(kubeneuron_incidents{state!~\"RESOLVED|EXPIRED\"})",
+          "legendFormat": "active"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Signals dropped (queue overflow)",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 12,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(kubeneuron_signals_dropped_total[1h]))",
+          "legendFormat": "dropped 1h"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "description": "Counter-reset caveat: these are process-lifetime counters, so a controller restart (upgrade, rollout, crash) resets them to zero and increase() attributes the gap to the restart rather than to the fleet. Treat a sudden drop as a restart until you have checked, and use kubeneuronctl report for any figure that has to survive one."
+    },
+    {
+      "type": "stat",
+      "title": "Gate denials (1h)",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 16,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(kubeneuron_gate_denials_total[1h]))",
+          "legendFormat": "denials 1h"
+        }
+      ],
+      "description": "Counter-reset caveat: these are process-lifetime counters, so a controller restart (upgrade, rollout, crash) resets them to zero and increase() attributes the gap to the restart rather than to the fleet. Treat a sudden drop as a restart until you have checked, and use kubeneuronctl report for any figure that has to survive one."
+    },
+    {
+      "type": "stat",
+      "title": "Escalations (24h)",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 20,
+        "y": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(kubeneuron_escalations_total[24h]))",
+          "legendFormat": "escalations 24h"
+        }
+      ],
+      "description": "Counter-reset caveat: these are process-lifetime counters, so a controller restart (upgrade, rollout, crash) resets them to zero and increase() attributes the gap to the restart rather than to the fleet. Treat a sudden drop as a restart until you have checked, and use kubeneuronctl report for any figure that has to survive one."
+    },
+    {
+      "type": "timeseries",
+      "title": "Incidents by state",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "targets": [
+        {
+          "expr": "kubeneuron_incidents",
+          "legendFormat": "{{state}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Signal rate by class",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "targets": [
+        {
+          "expr": "sum by (class) (rate(kubeneuron_signals_total[5m]))",
+          "legendFormat": "{{class}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Incidents opened by class",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "targets": [
+        {
+          "expr": "sum by (class) (increase(kubeneuron_incidents_opened_total[1h]))",
+          "legendFormat": "{{class}}"
+        }
+      ],
+      "description": "Counter-reset caveat: these are process-lifetime counters, so a controller restart (upgrade, rollout, crash) resets them to zero and increase() attributes the gap to the restart rather than to the fleet. Treat a sudden drop as a restart until you have checked, and use kubeneuronctl report for any figure that has to survive one."
+    },
+    {
+      "type": "timeseries",
+      "title": "Playbook steps by outcome",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (increase(kubeneuron_steps_total[1h]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ],
+      "description": "Counter-reset caveat: these are process-lifetime counters, so a controller restart (upgrade, rollout, crash) resets them to zero and increase() attributes the gap to the restart rather than to the fleet. Treat a sudden drop as a restart until you have checked, and use kubeneuronctl report for any figure that has to survive one."
+    },
+    {
+      "type": "timeseries",
+      "title": "GPU ECC uncorrectable errors (DCGM)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 29
+      },
+      "targets": [
+        {
+          "expr": "sum by (Hostname, gpu) (increase(DCGM_FI_DEV_ECC_DBE_VOL_TOTAL[1h]))",
+          "legendFormat": "{{Hostname}} gpu{{gpu}}"
+        }
+      ],
+      "description": "Counter-reset caveat: these are process-lifetime counters, so a controller restart (upgrade, rollout, crash) resets them to zero and increase() attributes the gap to the restart rather than to the fleet. Treat a sudden drop as a restart until you have checked, and use kubeneuronctl report for any figure that has to survive one."
+    },
+    {
+      "type": "timeseries",
+      "title": "GPU temperature (DCGM)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 29
+      },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_GPU_TEMP",
+          "legendFormat": "{{Hostname}} gpu{{gpu}}"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Controller up",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 37
+      },
+      "targets": [
+        {
+          "expr": "min(up{job=\"kubeneuron-controller\"}) or ((time() - max(timestamp(kubeneuron_reconcile_seconds_count{\"service.name\"=\"kubeneuron-controller\"}))) < bool 120) or on() vector(0)",
+          "legendFormat": "controller"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Agents down",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 37
+      },
+      "targets": [
+        {
+          "expr": "count(up{job=\"kubeneuron-agent\"} == 0) or count((time() - max by (\"k8s.node.name\") (max_over_time(timestamp(kubeneuron_agent_spool_depth{\"service.name\"=\"kubeneuron-agent\"})[1h:1m]))) > 120) OR on() vector(0)",
+          "legendFormat": "agents down"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Notifications dropped (24h)",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 37
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(kubeneuron_notifications_dropped_total[24h])) OR on() vector(0)",
+          "legendFormat": "dropped"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "description": "Counter-reset caveat: these are process-lifetime counters, so a controller restart (upgrade, rollout, crash) resets them to zero and increase() attributes the gap to the restart rather than to the fleet. Treat a sudden drop as a restart until you have checked, and use kubeneuronctl report for any figure that has to survive one."
+    },
+    {
+      "type": "stat",
+      "title": "Spooled events (fleet)",
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 12,
+        "y": 37
+      },
+      "targets": [
+        {
+          "expr": "sum(kubeneuron_agent_spool_depth) OR on() vector(0)",
+          "legendFormat": "spooled"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "TLS: days to first expiry",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 37
+      },
+      "targets": [
+        {
+          "expr": "(min(kubeneuron_tls_certificate_not_after_seconds) - time()) / 86400",
+          "legendFormat": "days left"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 14
+              },
+              {
+                "color": "green",
+                "value": 30
+              }
+            ]
+          },
+          "unit": "d"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Agent event delivery (fleet rate)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 42
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(kubeneuron_agent_events_posted_total[5m]))",
+          "legendFormat": "posted/s"
+        },
+        {
+          "expr": "sum(rate(kubeneuron_agent_events_spooled_total[5m]))",
+          "legendFormat": "spooled/s"
+        },
+        {
+          "expr": "sum(kubeneuron_agent_spool_depth)",
+          "legendFormat": "spool depth"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "TLS certificate days to expiry (per artifact)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 42
+      },
+      "targets": [
+        {
+          "expr": "(kubeneuron_tls_certificate_not_after_seconds - time()) / 86400",
+          "legendFormat": "{{certificate}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "d"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconcile pass latency (p50/p99) and action backlog",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 50
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(kubeneuron_reconcile_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(kubeneuron_reconcile_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99"
+        },
+        {
+          "expr": "kubeneuron_actions_pending",
+          "legendFormat": "pending actions"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Accelerators degraded right now (owner=human is capacity a person must free)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 58
+      },
+      "targets": [
+        {
+          "expr": "sum by (owner) (kubeneuron_degraded_gpus)",
+          "legendFormat": "{{owner}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Workloads evicted ahead of a destructive step (what remediation cost)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 58
+      },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(kubeneuron_workloads_evicted_total[1h]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Unmanaged pods destroyed by a forced drain (work that does NOT come back)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 66
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(kubeneuron_forced_unmanaged_evictions_total[5m]))",
+          "legendFormat": "destroyed/s",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ],
+      "description": "Pods with no controller that a drain was told to evict anyway. Nothing recreates these — they are typically a `kubectl run` or the debug shell somebody left open on the node that is failing. Any sustained rate here means a playbook has params.force set on a rung that should not have it."
+    },
+    {
+      "type": "timeseries",
+      "title": "Nodes whose cordon state cannot be read (stranded, and nothing else says so)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 74
+      },
+      "targets": [
+        {
+          "expr": "max(kubeneuron_cordon_state_unreadable_nodes)",
+          "legendFormat": "unreadable",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ],
+      "description": "A cordoned node whose KubeNeuron owner annotation cannot be parsed is dropped from the janitor's listing on purpose — releasing a cordon we cannot reason about would be worse. But then nothing releases it either: kubectl shows an ordinary cordon, the incident row ages out, and there is no owner left to ask. Any non-zero value here is GPU capacity out of the fleet that no incident explains. Usually a hand-edited annotation."
+    },
+    {
+      "type": "timeseries",
+      "title": "Destructive steps deferred by a guard (what remediation deliberately did not cost)",
+      "links": [
+        {
+          "title": "KubeNeuron / Remediation & Recovered Capacity",
+          "url": "/d/kubeneuron-remediation",
+          "targetBlank": false
+        }
+      ],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 82
+      },
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(kubeneuron_destructive_steps_deferred_total[1h]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Agent detection source (dcgm is the deeper source; nvidia-smi is the fallback)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 82
+      },
+      "targets": [
+        {
+          "expr": "sum by (source) (kubeneuron_agent_health_source)",
+          "legendFormat": "{{source}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Work dead-lettered (permanently stopped being retried)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 90
+      },
+      "targets": [
+        {
+          "expr": "sum by (queue) (rate(kubeneuron_dead_lettered_total[1h]))",
+          "legendFormat": "{{queue}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkpoint requests by outcome (acknowledged before a drain or eviction = the feature working)",
+      "description": "One count per workload a checkpoint request went out to, by what it did: acknowledged (patched checkpoint-state: complete:<incident>, bound to the incident stamped on the Pod; a plain complete does not count), exited (terminated or gone, which also covers a crash), expired (its own stamped deadline passed unanswered), unreachable (could not be asked or read, or still open when the coordination budget ran out or the step was cancelled before its deadline). skipped counts disruption steps where no request went out at all: a skipped class, a platform without the capability, no opted-in workload, or a step budget too short to wait. acknowledged / (acknowledged + expired) is the share of coordinated disruptions where the job was told and said done before anything was killed.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 90
+      },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(kubeneuron_checkpoint_requests_total[1h]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkpoint wait p50/p90 (what calibrates maxWait)",
+      "description": "Elapsed seconds from the moment a disruption step issued its checkpoint requests until each request's outcome settled. Includes near-zero observations for requests that settled on the first look (an immediate acknowledgement, a resumed window that had already expired), so it is not only time spent sleeping. A p90 far under spec.safety.checkpointCoordination.maxWait means the ceiling is more generous than jobs need; a cliff at the ceiling means jobs are being cut off before they finish checkpointing. Read beside checkpoint_wait in the deferred-steps panel, which counts the steps that actually paused.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 98
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(kubeneuron_checkpoint_wait_seconds_bucket[1h])))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.9, sum by (le) (rate(kubeneuron_checkpoint_wait_seconds_bucket[1h])))",
+          "legendFormat": "p90",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        },
+        {
+          "expr": "sum(increase(kubeneuron_checkpoint_wait_seconds_count[1h]))",
+          "legendFormat": "requests waited on (1h)",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Cloud interruptions by provider, kind and outcome (warned / checkpointed-in-time = jobs told before the cloud took the node)",
+      "description": "One count per interruption notice the cloud announced (announced) and per checkpoint warning: warned (opted-in jobs were asked to checkpoint before the announced deadline), no-jobs (no opted-in job on the node), not-asked (checkpoint coordination off, unsupported, or the jobs could not be listed), missed (the deadline left no time, or a warned job did not answer by it), checkpointed-in-time (every warned job reported a checkpoint or finished by the deadline), withdrawn (the cloud no longer announces it). The warning asks; it does not guarantee a checkpoint.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 98
+      },
+      "targets": [
+        {
+          "expr": "sum by (provider, kind, outcome) (rate(kubeneuron_cloud_interruptions_total[1h]))",
+          "legendFormat": "{{provider}} {{kind}} {{outcome}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Device-hours degraded per accelerator resource, cumulative by outcome",
+      "description": "Cumulative device-hours spent under an incident since controller start, one series per accelerator resource and outcome, each in its own unit: GPU-hours for nvidia.com/gpu and amd.com/gpu, TPU chip-hours for google.com/tpu, AWS Neuron device-hours for aws.amazon.com/neuron. Series are not stacked and must not be added together: the units differ. Counted with the devices an incident recorded when it opened; incidents with no recorded device count are not in this panel: they are in Node-hours (device count unknown) beside it.",
+      "gridPos": {
+        "h": 8,
+        "w": 18,
+        "x": 0,
+        "y": 106
+      },
+      "targets": [
+        {
+          "expr": "sum by (resource, outcome) (kubeneuron_degraded_accelerator_seconds_total{resource=\"nvidia.com/gpu\"}) / 3600",
+          "legendFormat": "nvidia.com/gpu — GPU-hours {{outcome}}",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        },
+        {
+          "expr": "sum by (resource, outcome) (kubeneuron_degraded_accelerator_seconds_total{resource=\"amd.com/gpu\"}) / 3600",
+          "legendFormat": "amd.com/gpu — GPU-hours {{outcome}}",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        },
+        {
+          "expr": "sum by (resource, outcome) (kubeneuron_degraded_accelerator_seconds_total{resource=\"google.com/tpu\"}) / 3600",
+          "legendFormat": "google.com/tpu — TPU chip-hours {{outcome}}",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        },
+        {
+          "expr": "sum by (resource, outcome) (kubeneuron_degraded_accelerator_seconds_total{resource=\"aws.amazon.com/neuron\"}) / 3600",
+          "legendFormat": "aws.amazon.com/neuron — AWS Neuron device-hours {{outcome}}",
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "axisLabel": "device-hours (own unit per resource)",
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Node-hours (device count unknown)",
+      "description": "Node-hours spent under incidents that recorded no device count when they opened, charged when they closed, since controller start. No device count is guessed for them, so they are in node-hours and in no device-hour series; kubeneuronctl report shows the same block for a window.",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 106
+      },
+      "targets": [
+        {
+          "expr": "sum(kubeneuron_degraded_node_seconds_device_count_unknown_total) / 3600",
+          "legendFormat": "node-hours",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 1
+        }
+      }
+    }
+  ]
+}

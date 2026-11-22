@@ -1,0 +1,68 @@
+name: Hardware GPU E2E reaper
+
+# Out-of-band watchdog for the Hardware GPU E2E target (safety rule: a
+# max-lifetime guard that force-deletes the cluster even if the
+# owning job hangs). It runs on its OWN frequent schedule, independent of the
+# hw-e2e.yaml run it protects, so a wedged runner cannot leak a paid cluster.
+#
+# It force-deletes any kubeneuron-e2e* cluster past its expires-at tag and
+# sweeps EC2/stacks/EBS/IAM leftovers. It never touches a healthy in-flight
+# run's cluster (that cluster's expiry has not passed).
+#
+# Deliberately NOT gated by the gpu-lab environment: a watchdog must not wait
+# on a human. It only ever deletes; it never creates.
+#
+# Required secrets:  AWS_GPU_LAB_ROLE_ARN
+# Required vars:     AWS_REGION
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: hw-e2e-reaper
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+
+jobs:
+  reap:
+    # No-op until the OIDC role exists (docs/hw-e2e-dispatch.md): without
+    # this guard the schedule failed red every 30 minutes on missing
+    # credentials, which trains people to ignore the one workflow whose
+    # failure should mean "a paid cluster may be leaking".
+    # Enable by setting the repository variable HW_E2E_ENABLED=true once the
+    # role from docs/hw-e2e-dispatch.md exists.
+    if: vars.HW_E2E_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Assume the GPU-lab AWS role (OIDC)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ secrets.AWS_GPU_LAB_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Install eksctl
+        env:
+          EKSCTL_VERSION: v0.199.0
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/hw-e2e-tools"
+          mkdir -p "$tools"
+          curl --fail --location --retry 3 \
+            "https://github.com/eksctl-io/eksctl/releases/download/${EKSCTL_VERSION}/eksctl_Linux_amd64.tar.gz" \
+            | tar -xz -C "$tools" eksctl
+          chmod 0755 "$tools/eksctl"
+          echo "$tools" >> "$GITHUB_PATH"
+
+      - name: Reap expired ephemeral clusters
+        run: hack/hw-e2e.sh reap

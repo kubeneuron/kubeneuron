@@ -1,0 +1,127 @@
+# cert-manager convenience path for the KubeNeuron four-Secret TLS model.
+#
+# Substitute before applying (envsubst or sed):
+#   ${NAME}      — the root KubeNeuron object name
+#   ${NAMESPACE} — spec.namespace of the installation
+#   ${ROOT_UID}  — kubectl get kubeneuron ${NAME} -o jsonpath='{.metadata.uid}'
+#
+# Trust model produced here:
+#   - two independent self-signed CAs (server-side and client-side trust
+#     are deliberately separate),
+#   - a controller serving leaf for <name>-controller.<ns>.svc,
+#   - the agent fleet clientAuth leaf whose ONLY URI SAN is the
+#     installation identity; the controller rejects leaves valid >100 days.
+#
+# The issued leaf Secrets carry ca.crt alongside the key pair, so spec.tls
+# CA references point at the leaf Secrets (key ca.crt) — the operator
+# mounts only that key and no CA private key ever reaches a workload.
+#
+# Renewal: cert-manager rotates the Secrets in place; the controller and
+# agents load certificates at startup, so schedule a rollout after renewal
+# (kubectl rollout restart, or annotate the workloads for Reloader/Wave).
+# renewBefore is set five days ahead of the 30-day
+# KubeNeuronTLSCertExpiringSoon alert: if automation stalls, the alert
+# still fires with time to act.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: kubeneuron-selfsigned
+  namespace: ${NAMESPACE}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: kubeneuron-server-ca
+  namespace: ${NAMESPACE}
+spec:
+  isCA: true
+  commonName: kubeneuron-server-ca-${NAME}
+  secretName: kubeneuron-server-ca
+  duration: 17520h # 2 years; rotate CAs with the documented expand/contract procedure
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: kubeneuron-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: kubeneuron-client-ca
+  namespace: ${NAMESPACE}
+spec:
+  isCA: true
+  commonName: kubeneuron-client-ca-${NAME}
+  secretName: kubeneuron-client-ca
+  duration: 17520h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: kubeneuron-selfsigned
+    kind: Issuer
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: kubeneuron-server-ca
+  namespace: ${NAMESPACE}
+spec:
+  ca:
+    secretName: kubeneuron-server-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: kubeneuron-client-ca
+  namespace: ${NAMESPACE}
+spec:
+  ca:
+    secretName: kubeneuron-client-ca
+---
+# Controller serving leaf (spec.tls.serverSecretRef). Agents verify it
+# against this Secret's ca.crt (spec.tls.serverCASecretRef -> same Secret).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ${NAME}-controller-tls
+  namespace: ${NAMESPACE}
+spec:
+  secretName: ${NAME}-controller-tls
+  duration: 2160h    # 90 days
+  renewBefore: 840h  # 35 days — renews before the 30-day expiry alert fires
+  usages: ["server auth"]
+  dnsNames:
+    - ${NAME}-controller.${NAMESPACE}.svc
+    - ${NAME}-controller.${NAMESPACE}.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: kubeneuron-server-ca
+    kind: Issuer
+---
+# Agent fleet clientAuth leaf (spec.tls.clientSecretRef). The controller
+# requires: a non-CA leaf, valid at most 100 days, clientAuth usage, and
+# EXACTLY this one URI SAN — no DNS names, no IPs, no commonName.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: ${NAME}-agent-tls
+  namespace: ${NAMESPACE}
+spec:
+  secretName: ${NAME}-agent-tls
+  duration: 2160h    # 90 days — inside the enforced 100-day ceiling
+  renewBefore: 840h
+  usages: ["client auth"]
+  uris:
+    - spiffe://kubeneuron.io/installation/${ROOT_UID}/agent
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: kubeneuron-client-ca
+    kind: Issuer

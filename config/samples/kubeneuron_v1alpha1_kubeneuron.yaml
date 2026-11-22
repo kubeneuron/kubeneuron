@@ -1,0 +1,86 @@
+apiVersion: kubeneuron.io/v1alpha1
+kind: KubeNeuron
+metadata:
+  name: kubeneuron
+spec:
+  namespace: kube-neuron
+  controller:
+    image: ghcr.io/kubeneuron/kubeneuron/controller:v1.0.0-rc.1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        memory: 512Mi
+  agent:
+    image: ghcr.io/kubeneuron/kubeneuron/agent:v1.0.0-rc.1
+    nodeSelector:
+      nvidia.com/gpu.present: "true"
+    tolerations:
+      - operator: Exists
+  safety:
+    executionMode: DryRun
+    maxConcurrentRemediations: 2
+    maxConcurrentReboots: 1
+    verifyQuietWindow: 10m
+    flapCount: 3
+    flapWindow: 24h
+  approvals:
+    ttl: 12h
+  # Alertmanager ingress is always bearer-authenticated. The operator API
+  # token is also required when starting Paused so an authenticated operator
+  # can resume the gate. Both Secret keys default to "token".
+  notifications:
+    operatorAPIToken:
+      name: kubeneuron-operator-api-token
+    webhookToken:
+      name: kubeneuron-alertmanager-webhook-token
+    # slack:
+    #   name: kubeneuron-slack
+  workflowStore:
+    # SQLite is intended only for a single-controller dry-run installation.
+    type: SQLite
+    sqlite:
+      size: 5Gi
+      # storageClassName: fast-retain
+  # These four Secrets are installation-local. No service mesh or external
+  # certificate operator is required; hack/kind-integration.sh generates
+  # ephemeral fixtures with the same key and SAN contract for its smoke test.
+  tls:
+    serverSecretRef:
+      name: kubeneuron-controller-tls
+    clientCASecretRef:
+      name: kubeneuron-agent-client-ca
+    clientSecretRef:
+      name: kubeneuron-agent-tls
+    serverCASecretRef:
+      name: kubeneuron-controller-server-ca
+  # Node recycle/replace remediation against the cloud behind the nodes.
+  # Provider-scoped: the provider selects which per-provider block applies.
+  # Leave the whole block out to disable it (RecycleNode/ReplaceNode then fail
+  # closed). AWS declares both primitives; a provider that lacks one is rejected
+  # at compile time for any playbook that would use it.
+  # cloud:
+  #   provider: aws
+  #   aws:
+  #     region: us-east-1
+  #     iamRoleARN: arn:aws:iam::123456789012:role/kubeneuron-recycle
+  observability:
+    # The operator runs the Collector, the metrics store with its alert rules,
+    # and Grafana with the dashboards (docs/observability.md).
+    collector: {mode: Managed}
+    store: {mode: Managed}
+    grafana: {mode: Managed}
+    # With the dependency profile instead (deploy/kubernetes/dependencies runs
+    # its own vmagent, VMSingle and Alertmanager), keep the collector off and
+    # let a Managed Grafana read that store:
+    # collector: {mode: Disabled}
+    # store:
+    #   mode: External
+    #   endpoint: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8429
+    # grafana:
+    #   mode: Managed
+    #   datasource: {url: http://vmsingle-kubeneuron.kubeneuron-monitoring.svc:8429}
+    alertmanager:
+      mode: External
+      endpoint: http://vmalertmanager-kubeneuron.kubeneuron-monitoring.svc:9093

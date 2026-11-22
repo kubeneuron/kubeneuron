@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The baseline policy pack, applied on its own:
+#
+#   kubectl apply -k config/policies
+#
+# It is a separate directory from config/samples on purpose. The samples
+# kustomization also carries a KubeNeuron ROOT OBJECT, so applying it over a
+# live installation rewrites that installation's images, secret references and
+# endpoints — which is the last thing an operator following the pilot checklist
+# wants at the point where they are only trying to bind more problem classes.
+# Nothing in here creates or modifies a KubeNeuron object.
+#
+# Everything here references kubeNeuronRef: kubeneuron, the default root object
+# name. If you installed under another name, install.sh has already applied the
+# same pack with the right reference; otherwise substitute it.
+resources:
+  - playbooks.yaml
+  - policies.yaml

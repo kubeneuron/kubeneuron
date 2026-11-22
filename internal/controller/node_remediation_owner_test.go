@@ -1,0 +1,738 @@
+// SPDX-License-Identifier: Apache-2.0
+package controller
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
+	"github.com/kubeneuron/kubeneuron/internal/store"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
+	"github.com/kubeneuron/kubeneuron/pkg/types"
+)
+
+func TestRepairFollowerDoesNotCordonOrRequestApproval(t *testing.T) {
+	p := newSuccessorPlatform()
+	c, st, notifier := successorFixture(t, recoverymode.Approval, p, recoverymode.RemoveFirst)
+	ctx := t.Context()
+	configureRepairClasses(t, c)
+	if err := c.IngestSignal(ctx, signal(types.ClassAcceleratorFault, "n1", "")); err != nil {
+		t.Fatal(err)
+	}
+	first, err := st.GetOpenIncident(ctx, types.Target{Node: "n1"}, types.ClassAcceleratorFault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitSettled(t, c, st, first.ID, func(i *types.Incident) bool { return i.State == types.StateAwaitingApproval && i.StepIndex == 1 })
+
+	followerSignal := signal(types.ClassFellOffBus, "n1", "GPU-1")
+	if err := c.IngestSignal(ctx, followerSignal); err != nil {
+		t.Fatal(err)
+	}
+	follower, err := st.GetOpenIncident(ctx, followerSignal.Target, followerSignal.Class)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step(t, c, st, follower.ID, 20)
+	if got := len(notifier.approvals); got != 1 {
+		t.Errorf("approval requests %d, want only the owner's drain request", got)
+	}
+	waitSettled(t, c, st, first.ID, func(i *types.Incident) bool {
+		if i.State == types.StateAwaitingApproval {
+			if err := c.DecideApproval(ctx, i.ID, "alice", "test", types.ApprovalApproved, i.ApprovalEpoch, "", ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return i.State == types.StateVerifying
+	})
+	step(t, c, st, follower.ID, 20)
+	if got := len(notifier.approvals); got != 2 {
+		t.Errorf("approval requests %d, want the owner's drain and replace", got)
+	}
+	checkCalls := func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if owners := p.cordoned["n1"]; len(owners) != 1 || owners[0] != first.ID {
+			t.Errorf("cordon owners %v, want only %s", owners, first.ID)
+		}
+		if len(p.drained) != 1 || len(p.plain) != 1 {
+			t.Errorf("drains %v replacements %v, want one each", p.drained, p.plain)
+		}
+	}
+	var waits int
+	for _, entry := range trail(t, st, follower.ID) {
+		if entry.Action == "wait-for-node-repair" {
+			waits++
+			if entry.Params["owner_id"] != first.ID {
+				t.Fatalf("wait recorded owner %q, want %q", entry.Params["owner_id"], first.ID)
+			}
+		}
+	}
+	if waits != 1 {
+		t.Fatalf("wait audit entries = %d, want one", waits)
+	}
+	checkCalls()
+	owner, err := st.GetIncident(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Supply the same inventory evidence that live cloud verification records.
+	if err := c.transition(ctx, owner, types.StateResolved, "system", "resolve", "verified",
+		map[string]string{"infrastructure_evidence": "verified_recycle_inventory"}); err != nil {
+		t.Fatal(err)
+	}
+	waitSettled(t, c, st, follower.ID, func(i *types.Incident) bool { return i.State == types.StateVerifying })
+	checkCalls()
+	if err := c.IngestSignal(ctx, followerSignal); err != nil {
+		t.Fatal(err)
+	}
+	got := step(t, c, st, follower.ID, 20)
+	if got.State != types.StateNeedsHuman || !auditHas(trail(t, st, follower.ID), "quarantine", first.ID) {
+		t.Fatalf("recurring follower signal: state=%s audit=%s", got.State, dump(trail(t, st, follower.ID)))
+	}
+	checkCalls()
+}
+
+func configureRepairClasses(t *testing.T, c *Controller) {
+	t.Helper()
+	engine := c.runtimeConfig(t.Context()).Engine
+	book, _ := engine.Playbook("cloud-replace")
+	pol, _ := engine.PolicyFor(types.ClassFellOffBus, "")
+	other := pol
+	other.Name = "node-fault"
+	other.Class = types.ClassAcceleratorFault
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{book.Name: book}, []playbook.Policy{pol, other})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetEngine(engine)
+}
+
+func TestAutomaticRepairFollowerDoesNotRepeatReplacement(t *testing.T) {
+	p := newSuccessorPlatform()
+	c, st, notifier := successorFixture(t, recoverymode.Automatic, p, recoverymode.RemoveFirst)
+	ctx := t.Context()
+	configureRepairClasses(t, c)
+	owner := openIncidentFor(t, c, types.ClassFellOffBus)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("cordon did not finish%s", dump(trail(t, st, owner)))
+		}
+		if c.isInFlight(owner) {
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		inc := mustIncident(t, st, owner)
+		if inc.StepIndex == 1 {
+			break
+		}
+		if err := c.advance(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	second := signal(types.ClassAcceleratorFault, "n1", "")
+	if err := c.IngestSignal(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	follower, err := st.GetOpenIncident(ctx, second.Target, second.Class)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 10 {
+		if err := c.advance(ctx, mustIncident(t, st, follower.ID)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c = restartWith(t, c, st, p)
+	// Reconcile the follower first after leadership changes.
+	for range 10 {
+		if err := c.advance(ctx, mustIncident(t, st, follower.ID)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitSettled(t, c, st, owner, func(i *types.Incident) bool { return i.State == types.StateVerifying })
+	step(t, c, st, follower.ID, 20)
+	if got := mustIncident(t, st, follower.ID); got.State != types.StateEvaluating || got.StepIndex != 0 {
+		t.Fatalf("follower reached %s step %d", got.State, got.StepIndex)
+	}
+	p.mu.Lock()
+	if owners := p.cordoned["n1"]; len(owners) != 1 || owners[0] != owner || len(p.drained) != 1 || len(p.plain) != 1 || len(notifier.approvals) != 0 {
+		t.Fatalf("cordon owners=%v drains=%v replacements=%v approvals=%d", owners, p.drained, p.plain, len(notifier.approvals))
+	}
+	p.mu.Unlock()
+	// An operator closing the owner does not verify replacement for the follower.
+	if err := c.ResolveIncident(ctx, owner, "alice", "closed manually"); err != nil {
+		t.Fatal(err)
+	}
+	waitSettled(t, c, st, follower.ID, func(i *types.Incident) bool { return i.StepIndex > 0 })
+	if !auditHas(trail(t, st, follower.ID), "node-repair-released", "closed manually") {
+		t.Fatal("follower advanced without an audited release")
+	}
+	for _, entry := range trail(t, st, follower.ID) {
+		if entry.Action == "verify-owner-replacement" {
+			t.Fatal("manual closure used as verified replacement evidence")
+		}
+	}
+
+}
+
+func TestInventoryNodeUIDSharesRepairApprovalWithoutCloudIdentity(t *testing.T) {
+	for _, ending := range []string{"expired", "rejected", "manual", "superseded"} {
+		t.Run(ending, func(t *testing.T) { checkInventoryRepairApproval(t, ending) })
+	}
+}
+
+func checkInventoryRepairApproval(t *testing.T, ending string) {
+	t.Helper()
+	c, st, notifier := walkFixture(t, false)
+	ctx := t.Context()
+	if err := st.UpsertNode(ctx, &types.Node{Name: "n1", UID: "inventory-uid"}); err != nil {
+		t.Fatal(err)
+	}
+	book := &playbook.Playbook{Name: "repair", Target: "node", Steps: []playbook.Step{
+		{Name: "cordon", Action: "platform.cordon", Approval: "required"},
+	}}
+	classes := []types.ProblemClass{types.ClassFellOffBus, types.ClassAcceleratorFault}
+	var policies []playbook.Policy
+	for _, class := range classes {
+		policies = append(policies, playbook.Policy{Name: string(class), Class: class, Playbook: book.Name, Mode: recoverymode.Approval})
+	}
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{book.Name: book}, policies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetEngine(engine)
+	var owner, followerID string
+	for _, class := range classes {
+		sig := signal(class, "n1", "")
+		if err := c.IngestSignal(ctx, sig); err != nil {
+			t.Fatal(err)
+		}
+		inc, err := st.GetOpenIncident(ctx, sig.Target, class)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if inc.CloudIdentity != nil || inc.RepairNodeUID != "inventory-uid" {
+			t.Fatalf("unexpected identity for %s", class)
+		}
+		got := step(t, c, st, inc.ID, 10)
+		if owner == "" {
+			owner = inc.ID
+			if got.State != types.StateAwaitingApproval {
+				t.Fatalf("owner state = %s", got.State)
+			}
+			continue
+		}
+		followerID = inc.ID
+		status := types.RecoveryAvailabilityFromAudit(trail(t, st, inc.ID))
+		if got.State != types.StateEvaluating || status == nil || status.Source != "node-repair" || !strings.Contains(status.Reason, owner) {
+			t.Fatalf("follower state=%s recovery=%+v", got.State, status)
+		}
+	}
+	if len(notifier.approvals) != 1 {
+		t.Fatalf("approval requests = %d, want one", len(notifier.approvals))
+	}
+	// An incident opened on a different node loses its inventory record
+	// before its first step. It must stop before requesting approval.
+	if err := st.UpsertNode(ctx, &types.Node{Name: "n2", UID: "other-uid"}); err != nil {
+		t.Fatal(err)
+	}
+	sig := signal(classes[0], "n2", "GPU-new")
+	if err := c.IngestSignal(ctx, sig); err != nil {
+		t.Fatal(err)
+	}
+	third, err := st.GetOpenIncident(ctx, sig.Target, sig.Class)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.store = missingRepairInventory{st, "n2"}
+	if got := step(t, c, st, third.ID, 10); got.State != types.StateNeedsHuman || len(notifier.approvals) != 1 {
+		t.Fatalf("missing node: state=%s approvals=%d", got.State, len(notifier.approvals))
+	}
+	wantReason := "no decision"
+	c.store = st
+	switch ending {
+	case "superseded":
+		if err := st.UpsertNode(ctx, &types.Node{Name: "n1", UID: "replacement-uid"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.supersedeCloudTarget(ctx, mustIncident(t, st, owner), cloud.ErrIdentityChanged); err != nil {
+			t.Fatal(err)
+		}
+		got := step(t, c, st, followerID, 10)
+		if mustIncident(t, st, owner).State != types.StateSuperseded || got.State != types.StateNeedsHuman || len(notifier.approvals) != 1 ||
+			!auditHas(trail(t, st, followerID), "node-repair-released", "target identity changed") {
+			t.Fatalf("follower state=%s approvals=%d audit=%s", got.State, len(notifier.approvals), dump(trail(t, st, followerID)))
+		}
+		return
+	case "manual":
+		inc := mustIncident(t, st, owner)
+		wantReason = "operator closed before cordon"
+		for _, replay := range []bool{false, true} {
+			resolved, replayed, err := c.ResolveIncidentRequest(ctx, owner, "alice", wantReason, inc.Version, "close-owner")
+			if err != nil || replayed != replay || resolved.State != types.StateResolved {
+				t.Fatalf("manual resolution: replay=%t err=%v", replayed, err)
+			}
+		}
+	case "rejected":
+		inc := mustIncident(t, st, owner)
+		if err := c.DecideApproval(ctx, owner, "alice", "reject cordon", types.ApprovalRejected, inc.ApprovalEpoch, "", ""); err != nil {
+			t.Fatal(err)
+		}
+		waitSettled(t, c, st, owner, func(i *types.Incident) bool { return i.State == types.StateNeedsHuman })
+		wantReason = "approval rejected"
+	default:
+		c.SetTimings(0, time.Nanosecond)
+		drive(t, c, st, owner, types.StateExpired)
+	}
+	c.SetTimings(0, time.Hour)
+	got := drive(t, c, st, followerID, types.StateAwaitingApproval)
+	if got.StepIndex != 0 || len(notifier.approvals) != 2 || !auditHas(trail(t, st, followerID), "node-repair-released", wantReason) {
+		t.Fatalf("new owner step=%d approvals=%d audit=%s", got.StepIndex, len(notifier.approvals), dump(trail(t, st, followerID)))
+	}
+	if status := types.RecoveryAvailabilityFromAudit(trail(t, st, followerID)); status != nil && status.Source == "node-repair" {
+		t.Fatalf("stale repair wait: %+v", status)
+	}
+}
+
+type missingRepairInventory struct {
+	store.Store
+	missing string
+}
+
+func (s missingRepairInventory) GetNode(ctx context.Context, node string) (*types.Node, error) {
+	if node == s.missing {
+		return nil, store.ErrNotFound
+	}
+	return s.Store.GetNode(ctx, node)
+}
+
+func TestInventoryFollowerVerifiesAfterOriginalNodeDisappears(t *testing.T) {
+	c, st, _ := walkFixture(t, false)
+	ctx := t.Context()
+	target := types.Target{Node: "n1"}
+	if err := st.WithTx(ctx, func(tx store.Tx) error {
+		for _, id := range []string{"owner", "follower"} {
+			inc := &types.Incident{ID: id, Target: target, RepairNodeUID: "original", Class: types.ClassFellOffBus, State: types.StateEvaluating, Playbook: "fell-off-bus"}
+			if id == "owner" {
+				inc.CloudIdentity = &cloud.NodeIdentity{NodeUID: "original"}
+				inc.Class = types.ClassAcceleratorFault
+				now := time.Now()
+				inc.Successor = &types.SuccessorRecord{Node: "new-worker", NodeUID: "new-uid", ReadyAt: &now, Outcome: types.SuccessorReplaced}
+				inc.State = types.StateResolved
+			}
+			if err := tx.CreateIncident(ctx, inc); err != nil {
+				return err
+			}
+			if _, err := tx.ClaimNodeRemediation(ctx, target.Node, inc.RepairNodeUID, id, time.Now()); err != nil {
+				return err
+			}
+		}
+		if err := tx.AppendAudit(ctx, &types.AuditEntry{IncidentID: "owner", Result: auditStepOutcomeResult("platform.replace_node", false, true)}); err != nil {
+			return err
+		}
+		if err := tx.AppendAudit(ctx, &types.AuditEntry{IncidentID: "owner", Action: "resolve", FromState: types.StateVerifying, ToState: types.StateResolved, Params: map[string]string{"infrastructure_evidence": "verified_replacement_node", "replacement_correlation": "successor", "replacement_node": "new-worker", "replacement_node_uid": "new-uid"}}); err != nil {
+			return err
+		}
+		return tx.ReleaseNodeRemediation(ctx, "owner")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c.store = missingRepairInventory{st, "n1"}
+	waitSettled(t, c, st, "follower", func(i *types.Incident) bool { return i.State == types.StateVerifying })
+	for _, entry := range trail(t, st, "follower") {
+		if entry.Action == "verify-owner-replacement" && entry.Params["owner_id"] == "owner" && entry.Params["replacement_node_uid"] == "new-uid" && entry.Params["replacement_node"] == "new-worker" {
+			return
+		}
+	}
+	t.Fatal("missing verification transition linked to original owner")
+}
+
+func TestSameRepairNodeUsesRecordedInventoryUID(t *testing.T) {
+	target := types.Target{Node: "worker"}
+	owner := &types.Incident{Target: target, CloudIdentity: &cloud.NodeIdentity{NodeUID: "original"}}
+	follower := &types.Incident{Target: target, RepairNodeUID: "original"}
+	if !sameRepairNode(follower, owner) {
+		t.Fatal("matching inventory UID did not identify the owner node")
+	}
+	for _, uid := range []string{"replacement", ""} {
+		follower.RepairNodeUID = uid
+		if sameRepairNode(follower, owner) {
+			t.Fatalf("matched owner against inventory UID %q", uid)
+		}
+	}
+}
+
+type missingRepairTx struct {
+	store.Tx
+	missing string
+}
+
+func (s missingRepairInventory) WithTx(ctx context.Context, f func(store.Tx) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Tx) error { return f(missingRepairTx{tx, s.missing}) })
+}
+
+func (s missingRepairTx) GetNode(ctx context.Context, node string) (*types.Node, error) {
+	if node == s.missing {
+		return nil, store.ErrNotFound
+	}
+	return s.Tx.GetNode(ctx, node)
+}
+
+func TestPolicyHeldIncidentLeavesRepairAvailable(t *testing.T) {
+	p := newSuccessorPlatform()
+	p.unavailable = cloud.ErrAddFirstUnavailable
+	c, st, _ := successorFixture(t, recoverymode.Automatic, p, recoverymode.AddFirst)
+	ctx := t.Context()
+	engine := c.runtimeConfig(ctx).Engine
+	book, _ := engine.Playbook("cloud-replace")
+	a, _ := engine.PolicyFor(types.ClassFellOffBus, "")
+	b := a
+	b.Name, b.Class, b.ReplacementStrategy = "remove-first", types.ClassAcceleratorFault, recoverymode.RemoveFirst
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{book.Name: book}, []playbook.Policy{a, b})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetEngine(engine)
+	held := openOn(t, c, "n1")
+	step(t, c, st, held, 20)
+	if !auditHas(trail(t, st, held), "recovery-unavailable", "") {
+		t.Fatal("expected add-first policy hold")
+	}
+	sig := signal(b.Class, "n1", "")
+	if err := c.IngestSignal(ctx, sig); err != nil {
+		t.Fatal(err)
+	}
+	other, err := st.GetOpenIncident(ctx, sig.Target, b.Class)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitSettled(t, c, st, other.ID, func(i *types.Incident) bool { return i.State == types.StateVerifying })
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if ids := p.cordoned["n1"]; len(ids) != 1 || ids[0] != other.ID || len(p.drained) != 1 || len(p.plain) != 1 {
+		t.Fatalf("cordons=%v drains=%v replacements=%v", ids, p.drained, p.plain)
+	}
+}
+
+func TestExecutingTransactionExcludesDrainAndGPUReset(t *testing.T) {
+	c, st, _ := walkFixture(t, false)
+	ctx := t.Context()
+	for _, id := range []string{"device", "drain", "next-reset"} {
+		inc := &types.Incident{ID: id, Target: types.Target{Node: "n1", GPUUUID: id}, Class: types.ClassFellOffBus, State: types.StateEvaluating, RepairNodeUID: "uid"}
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := func(id, wire string) error {
+		return c.transitionWithRepairStep(ctx, mustIncident(t, st, id), types.StateExecuting, "system", wire, auditStepStartResult(wire), nil, wire, false)
+	}
+	if err := start("device", "agent.gpu_reset"); err != nil {
+		t.Fatal(err)
+	}
+	// The incoming controller has no in-memory record of the GPU step.
+	c = restartWith(t, c, st, nil)
+	if got := mustIncident(t, st, "device"); got.State != types.StateExecuting {
+		t.Fatalf("GPU step after restart = %s", got.State)
+	}
+	if err := start("drain", "platform.drain"); !errors.Is(err, errRepairStepBusy) {
+		t.Fatalf("drain admission=%v", err)
+	}
+	if got := mustIncident(t, st, "drain"); got.State != types.StateEvaluating {
+		t.Fatalf("blocked drain state=%s", got.State)
+	}
+	if err := c.transitionWithRepairStep(ctx, mustIncident(t, st, "device"), types.StateVerifying, "system", "reset", "done", nil, "", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := start("drain", "platform.drain"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.transition(ctx, mustIncident(t, st, "drain"), types.StateNeedsHuman, "system", "escalate", "drain failed", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := start("next-reset", "agent.gpu_reset"); err != nil {
+		t.Fatalf("GPU reset after failed drain: %v", err)
+	}
+}
+
+func TestFailedGPUResetResultReleasesStep(t *testing.T) {
+	act := &hostActuator{err: errors.New("reset failed")}
+	c, st := stackTestControllerWithActuator(t, wholeDeviceTopologyPlatform(), act)
+	ctx := t.Context()
+	inc := resetIncident()
+	inc.State, inc.RepairNodeUID, inc.Attempt = types.StateEvaluating, "node-uid-a", maxEscalationAttempts
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	step := &playbook.Step{Name: "reset", Action: "agent.gpu_reset"}
+	if err := c.transitionWithRepairStep(ctx, mustIncident(t, st, inc.ID), types.StateExecuting, "system", step.Name, auditStepStartResult(step.Action), nil, step.Action, false); err != nil {
+		t.Fatal(err)
+	}
+	c.runStep(ctx, nil, mustIncident(t, st, inc.ID), step)
+	if len(act.actions) != 1 || mustIncident(t, st, inc.ID).State != types.StateNeedsHuman {
+		t.Fatalf("actions=%v state=%v", act.actions, mustIncident(t, st, inc.ID).State)
+	}
+	drain := &types.Incident{ID: "drain", Target: types.Target{Node: inc.Target.Node}, RepairNodeUID: inc.RepairNodeUID, State: types.StateEvaluating}
+	if err := st.CreateIncident(ctx, drain); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.transitionWithRepairStep(ctx, mustIncident(t, st, drain.ID), types.StateExecuting, "system", "drain", "start", nil, "platform.drain", false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type lostDeviceResponse struct{ hostActuator }
+
+func (a *lostDeviceResponse) Execute(_ context.Context, _ types.Node, act types.Action) (*types.ActionResult, error) {
+	a.actions = append(a.actions, act.Type)
+	return nil, context.DeadlineExceeded
+}
+
+func TestLostGPUResetResponseRetainsStep(t *testing.T) {
+	for _, late := range []bool{true, false} {
+		name := "lease-expired"
+		if late {
+			name = "late-result"
+		}
+		t.Run(name, func(t *testing.T) { checkLostResetResponse(t, late) })
+	}
+}
+
+func checkLostResetResponse(t *testing.T, late bool) {
+	act := &lostDeviceResponse{}
+	c, st := stackTestControllerWithActuator(t, wholeDeviceTopologyPlatform(), act)
+	ctx := t.Context()
+	inc := resetIncident()
+	inc.State, inc.RepairNodeUID = types.StateEvaluating, "node-uid-a"
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	step := &playbook.Step{Name: "reset", Action: "agent.gpu_reset"}
+	if err := c.transitionWithRepairStep(ctx, mustIncident(t, st, inc.ID), types.StateExecuting, "system", step.Name, auditStepStartResult(step.Action), nil, step.Action, false); err != nil {
+		t.Fatal(err)
+	}
+	id := actionID(inc)
+	if err := st.EnqueueAction(ctx, inc.Target.Node, types.Action{ID: id, IncidentID: inc.ID, Type: types.ActionGPUReset}); err != nil {
+		t.Fatal(err)
+	}
+	leased, err := st.ClaimNextAction(ctx, inc.Target.Node, "boot", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.runStep(ctx, nil, mustIncident(t, st, inc.ID), step)
+	if len(act.actions) != 1 || mustIncident(t, st, inc.ID).State != types.StateNeedsHuman || !auditHas(trail(t, st, inc.ID), "quarantine", "device action outcome is unknown") {
+		t.Fatal("missing operator handoff after reset lost its response")
+	}
+	// Closing the incident records the operator's decision. Without a result
+	// from the leased action it supplies no evidence that the reset stopped.
+	resolved, replay, err := c.ResolveIncidentRequest(ctx, inc.ID, "operator", "closing incident", 0, "close-lost-reset")
+	if err != nil || replay || resolved.State != types.StateResolved {
+		t.Fatalf("manual resolution = %+v, replay=%t, err=%v", resolved, replay, err)
+	}
+	c = restartWith(t, c, st, nil)
+	drain := &types.Incident{ID: "drain", Target: types.Target{Node: inc.Target.Node}, RepairNodeUID: inc.RepairNodeUID, State: types.StateEvaluating}
+	if err := st.CreateIncident(ctx, drain); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.transitionWithRepairStep(ctx, mustIncident(t, st, drain.ID), types.StateExecuting, "system", "drain", "start", nil, "platform.drain", false); !errors.Is(err, errRepairStepBusy) {
+		t.Fatalf("drain after lost response: %v", err)
+	}
+	if late {
+		if err := st.CompleteClaimedAction(ctx, id, leased.LeaseToken, "boot", types.ActionResult{ActionID: id, OK: true}); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		for _, age := range []time.Duration{time.Second, types.AgentResultGrace + time.Second} {
+			if _, err := st.SQL.ExecContext(ctx, "UPDATE actions SET lease_expires_at_ns=? WHERE id=?", time.Now().Add(-age).UnixNano(), id); err != nil {
+				t.Fatal(err)
+			}
+			if age < types.AgentResultGrace {
+				err := c.transitionWithRepairStep(ctx, mustIncident(t, st, drain.ID), types.StateExecuting, "system", "drain", "start", nil, "platform.drain", false)
+				if !errors.Is(err, errRepairStepBusy) {
+					t.Fatalf("inside lease grace: %v", err)
+				}
+			}
+		}
+	}
+	if err := c.transitionWithRepairStep(ctx, mustIncident(t, st, drain.ID), types.StateExecuting, "system", "drain", "start", nil, "platform.drain", false); err != nil {
+		t.Fatalf("drain after confirmed late result: %v", err)
+	}
+
+}
+
+func TestDryRunIncidentAlongsideLiveRepairOwner(t *testing.T) {
+	p := newSuccessorPlatform()
+	c, st, notifier := successorFixture(t, recoverymode.Approval, p, recoverymode.RemoveFirst)
+	ctx := t.Context()
+	engine := c.runtimeConfig(ctx).Engine
+	book, _ := engine.Playbook("cloud-replace")
+	live, _ := engine.PolicyFor(types.ClassFellOffBus, "")
+	sim := live
+	sim.Name, sim.Class, sim.Mode = "simulate", types.ClassAcceleratorFault, recoverymode.DryRun
+	engine, err := playbook.NewEngine(map[string]*playbook.Playbook{book.Name: book}, []playbook.Policy{live, sim})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetEngine(engine)
+	owner := openIncidentFor(t, c, live.Class)
+	waitSettled(t, c, st, owner, func(i *types.Incident) bool { return i.State == types.StateAwaitingApproval })
+	sig := signal(sim.Class, "n1", "")
+	if err := c.IngestSignal(ctx, sig); err != nil {
+		t.Fatal(err)
+	}
+	second, err := st.GetOpenIncident(ctx, sig.Target, sim.Class)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitSettled(t, c, st, second.ID, func(i *types.Incident) bool {
+		if i.State == types.StateAwaitingApproval {
+			if err := c.DecideApproval(ctx, i.ID, "alice", "simulate", types.ApprovalApproved, i.ApprovalEpoch, "", ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return i.State == types.StateResolved
+	})
+	if auditHas(trail(t, st, second.ID), "wait-for-node-repair", "") || len(notifier.approvals) != 3 {
+		t.Fatal("unexpected repair wait or approval count")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if owners := p.cordoned["n1"]; len(owners) != 1 || owners[0] != owner || len(p.drained) != 0 || len(p.plain) != 0 {
+		t.Fatalf("cordon owners=%v drains=%v replacements=%v", owners, p.drained, p.plain)
+	}
+}
+
+func TestVerifiedRecycleReleasesRepairFollower(t *testing.T) {
+	c, st, _ := walkFixture(t, false)
+	ctx := t.Context()
+	err := st.WithTx(ctx, func(tx store.Tx) error {
+		for _, id := range []string{"owner", "follower"} {
+			inc := &types.Incident{ID: id, State: types.StateEvaluating, Target: types.Target{Node: "worker"}, RepairNodeUID: "uid", Class: types.ClassFellOffBus}
+			if id == "owner" {
+				inc.State = types.StateVerifying
+				inc.Class = types.ClassAcceleratorFault
+			}
+			if err := tx.CreateIncident(ctx, inc); err != nil {
+				return err
+			}
+			if _, err := tx.ClaimNodeRemediation(ctx, "worker", "uid", id, time.Now()); err != nil {
+				return err
+			}
+		}
+		return tx.AppendAudit(ctx, &types.AuditEntry{IncidentID: "owner", Result: auditStepOutcomeResult("platform.recycle_node", false, true)})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.transition(ctx, mustIncident(t, st, "owner"), types.StateResolved, "system", "resolve", "verified recycle", map[string]string{"infrastructure_evidence": "verified_recycle_inventory"}); err != nil {
+		t.Fatal(err)
+	}
+	if !auditHas(trail(t, st, "follower"), "node-repair-released", "verified recycle") {
+		t.Fatal("missing follower release")
+	}
+	if err := st.WithTx(ctx, func(tx store.Tx) error {
+		owner, err := tx.ClaimNodeRemediation(ctx, "worker", "uid", "follower", time.Now())
+		if err == nil && owner != "follower" {
+			t.Errorf("repair owner = %q", owner)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApprovedDrainWaitsForGPURepairStep(t *testing.T) {
+	c, st, notifier := successorFixture(t, recoverymode.Approval, newSuccessorPlatform(), recoverymode.RemoveFirst)
+	ctx := t.Context()
+	id := openIncidentFor(t, c, types.ClassFellOffBus)
+	park := waitSettled(t, c, st, id, func(i *types.Incident) bool { return i.State == types.StateAwaitingApproval && i.StepIndex == 1 })
+	holder := &types.Incident{ID: "gpu-holder", Target: types.Target{Node: park.Target.Node, GPUUUID: "gpu-other"}, Class: types.ClassAcceleratorFault, State: types.StateNeedsHuman, RepairNodeUID: repairNodeUID(park)}
+	if err := st.CreateIncident(ctx, holder); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WithTx(ctx, func(tx store.Tx) error {
+		ok, err := tx.ClaimRepairStep(ctx, holder.Target.Node, holder.RepairNodeUID, holder.ID, "reset", true, time.Now())
+		if !ok {
+			t.Fatal("could not reserve GPU step")
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DecideApproval(ctx, id, "alice", "test", types.ApprovalApproved, park.ApprovalEpoch, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		if err := c.advance(ctx, mustIncident(t, st, id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries := trail(t, st, id)
+	waits := 0
+	for _, entry := range entries {
+		if entry.Action == "wait-for-repair-step" && entry.Params["owner_id"] == holder.ID {
+			waits++
+		}
+	}
+	view := types.RecoveryAvailabilityFromAudit(entries)
+	if waits != 1 || view == nil || !strings.Contains(view.Reason, holder.ID) || mustIncident(t, st, id).ApprovalEpoch != park.ApprovalEpoch {
+		t.Fatalf("waiting approval: %s", dump(entries))
+	}
+	if err := st.WithTx(ctx, func(tx store.Tx) error { return tx.ReleaseRepairStep(ctx, holder.ID) }); err != nil {
+		t.Fatal(err)
+	}
+	waitSettled(t, c, st, id, func(i *types.Incident) bool { return i.StepIndex > 1 })
+	if len(notifier.approvals) > 2 || !auditHas(trail(t, st, id), "drain", "step-outcome") {
+		t.Fatalf("drain after release: %s", dump(trail(t, st, id)))
+	}
+	if v := types.RecoveryAvailabilityFromAudit(trail(t, st, id)); v != nil && v.Source == "repair-step" {
+		t.Fatal("stale step hold")
+	}
+}
+
+func TestTerminalOwnerAfterCordonReleasesFollower(t *testing.T) {
+	for _, ending := range []types.IncidentState{types.StateExpired, types.StateSuperseded} {
+		t.Run(string(ending), func(t *testing.T) {
+			ctx := t.Context()
+			p := newSuccessorPlatform()
+			c, st, notifier := successorFixture(t, recoverymode.Approval, p, recoverymode.RemoveFirst)
+			configureRepairClasses(t, c)
+			owner := openIncidentFor(t, c, types.ClassFellOffBus)
+			parked := drive(t, c, st, owner, types.StateAwaitingApproval)
+			if parked.StepIndex != 1 || !auditHas(trail(t, st, owner), "cordon", auditStepOutcomeResult("platform.cordon", false, true)) {
+				t.Fatal("owner did not execute cordon")
+			}
+			sig := signal(types.ClassAcceleratorFault, "n1", "")
+			if err := c.IngestSignal(ctx, sig); err != nil {
+				t.Fatal(err)
+			}
+			other, err := st.GetOpenIncident(ctx, sig.Target, sig.Class)
+			if err != nil {
+				t.Fatal(err)
+			}
+			follower := other.ID
+			step(t, c, st, follower, 8)
+			if !auditHas(trail(t, st, follower), "wait-for-node-repair", owner) {
+				t.Fatal("missing follower wait")
+			}
+			if ending == types.StateExpired {
+				c.SetTimings(0, time.Nanosecond)
+				if err := c.advance(ctx, parked); err != nil {
+					t.Fatal(err)
+				}
+				c.SetTimings(0, time.Hour)
+			} else if err := c.supersedeCloudTarget(ctx, parked, cloud.ErrIdentityChanged); err != nil {
+				t.Fatal(err)
+			}
+			next := drive(t, c, st, follower, types.StateAwaitingApproval)
+			if mustIncident(t, st, owner).State != ending || next.StepIndex != 1 || len(notifier.approvals) != 2 || !auditHas(trail(t, st, follower), "node-repair-released", "") {
+				t.Fatalf("follower %s", dump(trail(t, st, follower)))
+			}
+		})
+	}
+}

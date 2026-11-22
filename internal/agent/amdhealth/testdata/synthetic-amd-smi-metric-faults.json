@@ -1,0 +1,64 @@
+[
+  {
+    "gpu": 0,
+    "bdf": "0000:C3:00.0",
+    "uuid": "amd-c3000000-0000-1000-8000-000000000001",
+    "asic": {
+      "market_name": "Instinct MI300X",
+      "vendor_id": "0x1002"
+    },
+    "temperature": {
+      "edge": { "value": 44, "unit": "C" },
+      "hotspot": { "value": 61, "unit": "C" },
+      "mem": { "value": 49, "unit": "C" }
+    },
+    "throttle": {
+      "thermal_throttle_status": "INACTIVE",
+      "power_throttle_status": "INACTIVE"
+    },
+    "ecc": {
+      "total_correctable_count": 0,
+      "total_uncorrectable_count": 2,
+      "total_deferred_count": 0
+    },
+    "ras": {
+      "retired_page_count": 3,
+      "ras_eeprom_version": "0x2"
+    },
+    "xgmi": {
+      "link_error_count": 0,
+      "link_count": 8
+    }
+  },
+  {
+    "gpu": 1,
+    "bdf": "0000:C6:00.0",
+    "uuid": "amd-c6000000-0000-1000-8000-000000000002",
+    "asic": {
+      "market_name": "Instinct MI300X",
+      "vendor_id": "0x1002"
+    },
+    "temperature": {
+      "edge": { "value": 88, "unit": "C" },
+      "hotspot": { "value": 108, "unit": "C" },
+      "mem": { "value": 94, "unit": "C" }
+    },
+    "throttle": {
+      "thermal_throttle_status": "ACTIVE",
+      "power_throttle_status": "INACTIVE"
+    },
+    "ecc": {
+      "total_correctable_count": 4,
+      "total_uncorrectable_count": 0,
+      "total_deferred_count": 0
+    },
+    "ras": {
+      "retired_page_count": 0,
+      "ras_eeprom_version": "0x2"
+    },
+    "xgmi": {
+      "link_error_count": 7,
+      "link_count": 8
+    }
+  }
+]

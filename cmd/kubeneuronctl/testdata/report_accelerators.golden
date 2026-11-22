@@ -1,0 +1,20 @@
+GPU — GPU-hours
+  RESOURCE        INCIDENTS  DEGRADED  RECOVERED  SAVED (ESTIMATE)                   COST EQUIVALENT (ESTIMATE)
+  amd.com/gpu     1          10.0      8.0        4.0 GPU-hours, manual baseline 4h  rate not set
+  nvidia.com/gpu  2          20.0      16.0       8.0 GPU-hours, manual baseline 4h  32.00 USD at 4.00 USD per GPU-hour
+TPU — TPU chip-hours
+  RESOURCE        INCIDENTS  DEGRADED  RECOVERED  SAVED (ESTIMATE)                        COST EQUIVALENT (ESTIMATE)
+  google.com/tpu  1          12.0      8.0        4.0 TPU chip-hours, manual baseline 4h  rate not set
+AWS Neuron — AWS Neuron device-hours
+  RESOURCE               INCIDENTS  DEGRADED  RECOVERED  SAVED (ESTIMATE)                                 COST EQUIVALENT (ESTIMATE)
+  aws.amazon.com/neuron  1          8.0       6.0        2.0 AWS Neuron device-hours, manual baseline 4h  3.00 USD at 1.50 USD per AWS Neuron device-hour
+Device count unknown — node-hours
+  degraded   6.0  (2 incidents; no device count was recorded, so no device-hours and no cost)
+  recovered  4.0
+Hours are not added across resources: each counts its own devices.
+Total cost equivalent (estimate) unavailable. Rate not set for: amd.com/gpu, google.com/tpu.
+
+TPU — TPU chip-hours
+  RESOURCE        INCIDENTS  DEGRADED  RECOVERED  SAVED (ESTIMATE)                  COST EQUIVALENT (ESTIMATE)
+  google.com/tpu  1          12.0      8.0        Manual recovery baseline not set  -
+

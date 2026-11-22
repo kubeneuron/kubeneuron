@@ -1,0 +1,5 @@
+#Entity   XIDERRORS
+     Id
+GPU 0            0
+GPU 1           79
+GPU 2          N/A

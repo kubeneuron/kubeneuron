@@ -1,0 +1,814 @@
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
+metadata:
+  name: kubeneuron-gpu
+  namespace: kubeneuron-monitoring
+  labels:
+    app.kubernetes.io/part-of: kube-neuron-dependencies
+    kubeneuron.io/rule-set: default
+spec:
+  # The gpu-* groups mirror configs/vmalert/gpu-rules.yaml exactly (a unit
+  # test in internal/detect pins them together); those alerts feed the
+  # controller webhook and become incidents. The kubeneuron-self group is
+  # additional here: it watches KubeNeuron itself and routes to humans, not
+  # to the webhook.
+  groups:
+    - name: gpu-hardware
+      interval: 30s
+      rules:
+        - alert: GpuDoubleBitEccVolatile
+          expr: increase(DCGM_FI_DEV_ECC_DBE_VOL_TOTAL[5m]) > 0
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpudoublebiteccvolatile"
+            summary: "Double-bit ECC error on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "Uncorrectable memory fault. Playbook: drain-and-reset."
+
+        - alert: GpuDoubleBitEccAggregate
+          expr: DCGM_FI_DEV_ECC_DBE_AGG_TOTAL > 4
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpudoublebiteccaggregate"
+            summary: "Aggregate DBE count high on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "Lifetime double-bit ECC count is elevated; evaluate for RMA."
+
+        - alert: GpuRowRemapPending
+          expr: DCGM_FI_DEV_ROW_REMAP_PENDING == 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpurowremappending"
+            summary: "Row remap pending on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "A GPU reset is needed to apply the remap. Playbook: reset-when-idle."
+
+        - alert: GpuRowRemapFailure
+          expr: DCGM_FI_DEV_ROW_REMAP_FAILURE == 1
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpurowremapfailure"
+            summary: "Row remap FAILED on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "Memory can no longer be remapped. Playbook: rma."
+
+        - alert: GpuRemappedRowsHigh
+          expr: DCGM_FI_DEV_UNCORRECTABLE_REMAPPED_ROWS >= 8
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpuremappedrowshigh"
+            summary: "Remapped-row budget nearly exhausted on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "Uncorrectable remapped rows >= 8 (bank exhaustion proxy). Evaluate for RMA."
+
+        - alert: GpuNvlinkCrcErrors
+          expr: increase(DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL[15m]) > 100
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpunvlinkcrcerrors"
+            summary: "NVLink CRC errors on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "Sustained NVLink CRC errors. Playbook: drain-and-reset; check cabling/topology."
+
+        - alert: GpuPcieReplayHigh
+          expr: increase(DCGM_FI_DEV_PCIE_REPLAY_COUNTER[1h]) > 1000
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpupciereplayhigh"
+            summary: "PCIe replay storm on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "High PCIe replay rate — reseat/RMA candidate; observe first."
+
+    - name: gpu-thermal-power
+      interval: 30s
+      rules:
+        # Plain PromQL: floor(x / bit) % 2 is one bit of the bitmask. Throttle-reason
+        # bits: 8=HW_SLOWDOWN, 32=SW_THERMAL, 64=HW_THERMAL, 128=HW_POWER_BRAKE.
+        - alert: GpuThermalThrottle
+          expr: (floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 8) % 2 + floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 32) % 2 + floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 64) % 2) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gputhermalthrottle"
+            summary: "Thermal throttling on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "HW slowdown/thermal throttle for 10m. Usually a facility issue — do not reset."
+
+        - alert: GpuTempCritical
+          expr: DCGM_FI_DEV_GPU_TEMP > 88
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gputempcritical"
+            summary: "Critical GPU temperature on {{ $labels.node }} GPU {{ $labels.gpu }} ({{ $value }}C)"
+            description: "Sustained temperature above 88C. Drain the node; investigate cooling."
+
+        - alert: GpuPowerBrake
+          expr: floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 128) % 2 > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpupowerbrake"
+            summary: "HW power brake on {{ $labels.node }} GPU {{ $labels.gpu }}"
+            description: "External power brake asserted for 10m — facility/PSU issue."
+
+    - name: gpu-liveness
+      interval: 30s
+      rules:
+        - alert: GpuExporterDown
+          expr: up{job="dcgm-exporter"} == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#gpuexporterdown"
+            summary: "dcgm-exporter down on {{ $labels.node }}"
+            description: "No GPU metrics for 5m: a monitoring gap, not a GPU fault. KubeNeuron records it and runs no step; check the exporter and the node."
+
+        - alert: KubeNeuronAgentDown
+          expr: up{job="kubeneuron-agent"} == 0
+          for: 3m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronagentdown"
+            summary: "kubeneuron-agent down on {{ $labels.node }}"
+            description: "Agent metrics endpoint unreachable for 3m. Auto-actions on this node are suppressed (cannot verify)."
+
+    - name: kubeneuron-self
+      interval: 30s
+      rules:
+        - alert: KubeNeuronControllerDown
+          expr: up{job="kubeneuron-controller"} == 0
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuroncontrollerdown"
+            summary: "KubeNeuron controller down"
+            description: "Controller metrics endpoint unreachable for 3m — no ingestion, no remediation walk."
+
+        - alert: KubeNeuronIncidentNeedsHuman
+          expr: kubeneuron_incidents{state="NEEDS_HUMAN"} > 0
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronincidentneedshuman"
+            summary: "{{ $value }} incident(s) need a human decision"
+            description: "Automation stopped (quarantine/rejection/flap); review with kubeneuronctl incidents."
+
+        - alert: KubeNeuronSignalsDropped
+          expr: increase(kubeneuron_signals_dropped_total[15m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronsignalsdropped"
+            summary: "KubeNeuron dropped {{ $value }} signals in 15m"
+            description: "Ingest queue overflow — incidents may be missing. Check controller load."
+
+        - alert: KubeNeuronNotificationsDropped
+          expr: increase(kubeneuron_notifications_dropped_total[15m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronnotificationsdropped"
+            summary: "KubeNeuron dropped {{ $value }} notifications in 15m"
+            description: "Delivery queue overflow — approval requests may be among the lost messages."
+
+        - alert: KubeNeuronAgentSpoolBacklog
+          expr: kubeneuron_agent_spool_depth > 100
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronagentspoolbacklog"
+            summary: "Agent event spool backlog on {{ $labels.node }}"
+            description: "More than 100 undelivered events for 15m — the controller is unreachable from this node."
+
+        - alert: KubeNeuronTLSCertExpiringSoon
+          expr: (kubeneuron_tls_certificate_not_after_seconds - time()) < 30 * 86400
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneurontlscertexpiringsoon"
+            summary: "KubeNeuron TLS artifact {{ $labels.certificate }} expires in under 30 days"
+            description: "Rotate with hack/tls-rotate.sh before expiry; the fleet leaf has a hard 100-day ceiling and there is no auto-renewal."
+
+        - alert: KubeNeuronAuthFailureBurst
+          expr: increase(kubeneuron_auth_failures_total[5m]) > 10
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronauthfailureburst"
+            summary: "{{ $value }} rejected authentications on the {{ $labels.api }} API in 5m"
+            description: "Either a misconfigured client or someone probing. The per-source limiter throttles online brute force, but a burst deserves eyes before it pages as an outage elsewhere."
+
+        - alert: KubeNeuronStackRestoreFailing
+          expr: increase(kubeneuron_stack_restore_failures_total[30m]) > 3
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronstackrestorefailing"
+            summary: "The accelerator-stack janitor cannot restore a quiesced node"
+            description: "A node's GPU monitoring is staying DOWN after a quiesce. GpuExporterDown on that node inhibits its per-GPU alerts, so the blind spot hides itself — act on this alert, not on the silence."
+
+        - alert: KubeNeuronActionQueueStuck
+          expr: kubeneuron_actions_pending > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronactionqueuestuck"
+            summary: "{{ $value }} agent action(s) pending for 30m"
+            description: "Dispatched work nobody claimed: the target node's agent is unreachable, unregistered, or its lease keeps expiring."
+
+        - alert: KubeNeuronIncidentExpired
+          expr: kubeneuron_incidents{state="EXPIRED"} > 0
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronincidentexpired"
+            summary: "{{ $value }} incident(s) expired without a human decision"
+            description: "An approval request timed out. The node may be left cordoned and drained — notifications are droppable, so this metric is the reliable signal."
+
+        - alert: KubeNeuronAgentEventsRejected
+          expr: increase(kubeneuron_agent_events_rejected_total[15m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronagenteventsrejected"
+            summary: "Agent on {{ $labels.node }} dropped {{ $value }} controller-rejected events"
+            description: "The controller semantically rejected these events, so detections are being discarded rather than spooled. Usually a malformed or unsupported encoding after a partial upgrade."
+
+        - alert: KubeNeuronAgentNeverAcked
+          # An agent whose registration is refused keeps serving /metrics, so
+          # KubeNeuronAgentDown never fires: the fleet can lose automation
+          # silently. Alive process, no acknowledgment, is the real signal.
+          expr: up{job="kubeneuron-agent"} == 1 and increase(kubeneuron_agent_registration_acks_total[15m]) == 0
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronagentneveracked"
+            summary: "Agent on {{ $labels.node }} is running but never acknowledged by the controller"
+            description: "mTLS identity, token, or CA problem. This node's faults are invisible and its remediation cannot execute, while the pod looks healthy."
+
+        - alert: KubeNeuronReconcileSlow
+          expr: histogram_quantile(0.99, sum(rate(kubeneuron_reconcile_seconds_bucket[5m])) by (le)) > 5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronreconcileslow"
+            summary: "Reconcile p99 is {{ $value }}s"
+            description: "The walk is falling behind: approvals resume late and verification windows stretch. Check open-incident count and store latency."
+
+        - alert: KubeNeuronImpactPreviewUnavailable
+          expr: increase(kubeneuron_impact_previews_total{result="unavailable"}[30m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuronimpactpreviewunavailable"
+            summary: "{{ $value }} impact preview(s) could not be computed in the last 30m"
+            description: "An incident parked for approval without the preview the approver was promised. Under impactPreview.requireForApproval the approve is held until a recompute succeeds; rejecting is never held. Check the controller's read access to the node's Pods and the preview budget."
+
+        - alert: KubeNeuronCheckpointAdvisoryUnreachable
+          expr: increase(kubeneuron_checkpoint_advisories_total{outcome="unreachable"}[30m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            runbook_url: "https://github.com/kubeneuron/kubeneuron/blob/main/docs/runbooks.md#kubeneuroncheckpointadvisoryunreachable"
+            summary: "{{ $value }} opted-in Pod(s) could not be given the checkpoint advisory in the last 30m"
+            description: "The advisory could not be stamped: pods patch missing, the Pod unreadable, or the advisory budget spent. Nothing is delayed or blocked; those Pods were simply not warned ahead of the approval."
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
+metadata:
+  name: kubeneuron-gpu-recording
+  namespace: kubeneuron-monitoring
+  labels:
+    app.kubernetes.io/part-of: kube-neuron-dependencies
+    kubeneuron.io/rule-set: default
+spec:
+  # The gpu-canonical-* groups mirror configs/vmalert/gpu-recording-rules.yaml
+  # exactly: canonical kubeneuron_gpu_* series recorded from dcgm-exporter
+  # series with the catalog's factor and fixed labels (v0.7 M3, slice 1),
+  # then the gpu-derived-* groups computed from those canonical series
+  # (slice 2). No alerts, no zero synthesis; an absent source field stays
+  # an absent canonical series and an absent input an absent derived one.
+  groups:
+      # Clock frequencies (MHz -> Hz) and the decoded clock-event bitmask.
+      - name: gpu-canonical-clocks
+        interval: 30s
+        rules:
+          # dcgm:100: megahertz -> hertz, factor 1000000.
+          - record: kubeneuron_gpu_clock_hertz
+            expr: DCGM_FI_DEV_SM_CLOCK * 1000000
+            labels:
+              domain: sm
+          # dcgm:101: megahertz -> hertz, factor 1000000.
+          - record: kubeneuron_gpu_clock_hertz
+            expr: DCGM_FI_DEV_MEM_CLOCK * 1000000
+            labels:
+              domain: memory
+          # dcgm:113: megahertz -> hertz, factor 1000000.
+          - record: kubeneuron_gpu_clock_max_hertz
+            expr: DCGM_FI_DEV_MAX_SM_CLOCK * 1000000
+            labels:
+              domain: sm
+          # dcgm:114: megahertz -> hertz, factor 1000000.
+          - record: kubeneuron_gpu_clock_max_hertz
+            expr: DCGM_FI_DEV_MAX_MEM_CLOCK * 1000000
+            labels:
+              domain: memory
+          # dcgm:112: bitmask -> kubeneuron_gpu_clock_event_active, one series per decoded reason bit
+          # (hw_slowdown=8, sw_thermal=32, hw_thermal=64, hw_power_brake=128).
+          # floor(x / bit) % 2 is the bit itself: 1 while it is set and 0 while it is
+          # clear (plain PromQL, no bitmap_and). The series exists only
+          # while the source bitmask is reported; no source sample -> no series.
+          - record: kubeneuron_gpu_clock_event_active
+            expr: floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 8) % 2
+            labels:
+              reason: hw_slowdown
+          - record: kubeneuron_gpu_clock_event_active
+            expr: floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 32) % 2
+            labels:
+              reason: sw_thermal
+          - record: kubeneuron_gpu_clock_event_active
+            expr: floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 64) % 2
+            labels:
+              reason: hw_thermal
+          - record: kubeneuron_gpu_clock_event_active
+            expr: floor(DCGM_FI_DEV_CLOCK_THROTTLE_REASONS / 128) % 2
+            labels:
+              reason: hw_power_brake
+
+      # Temperatures and thermal limits (already celsius; factor 1).
+      - name: gpu-canonical-thermal
+        interval: 30s
+        rules:
+          # dcgm:140: celsius, factor 1.
+          - record: kubeneuron_gpu_memory_temperature_celsius
+            expr: DCGM_FI_DEV_MEMORY_TEMP
+          # dcgm:150: celsius, factor 1.
+          - record: kubeneuron_gpu_temperature_celsius
+            expr: DCGM_FI_DEV_GPU_TEMP
+          # dcgm:151: celsius, factor 1.
+          - record: kubeneuron_gpu_memory_temperature_limit_celsius
+            expr: DCGM_FI_DEV_MEM_MAX_OP_TEMP
+          # dcgm:153: celsius, factor 1.
+          - record: kubeneuron_gpu_thermal_margin_celsius
+            expr: DCGM_FI_DEV_GPU_TEMP_LIMIT
+          # dcgm:158: celsius, factor 1.
+          - record: kubeneuron_gpu_temperature_limit_celsius
+            expr: DCGM_FI_DEV_SLOWDOWN_TEMP
+            labels:
+              limit: slowdown
+          # dcgm:159: celsius, factor 1.
+          - record: kubeneuron_gpu_temperature_limit_celsius
+            expr: DCGM_FI_DEV_SHUTDOWN_TEMP
+            labels:
+              limit: shutdown
+
+      # Power, energy (mJ -> J) and throttle violation time (ns -> s).
+      - name: gpu-canonical-power
+        interval: 30s
+        rules:
+          # dcgm:155: watts, factor 1.
+          - record: kubeneuron_gpu_power_watts
+            expr: DCGM_FI_DEV_POWER_USAGE
+          # dcgm:164: watts, factor 1.
+          - record: kubeneuron_gpu_power_limit_watts
+            expr: DCGM_FI_DEV_ENFORCED_POWER_LIMIT
+          # dcgm:156: millijoules -> joules, factor 0.001.
+          - record: kubeneuron_gpu_energy_joules_total
+            expr: DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION * 0.001
+          # dcgm:240: nanoseconds -> seconds, factor 1e-9.
+          - record: kubeneuron_gpu_throttle_seconds_total
+            expr: DCGM_FI_DEV_POWER_VIOLATION * 1e-9
+            labels:
+              reason: power
+          # dcgm:241: nanoseconds -> seconds, factor 1e-9.
+          - record: kubeneuron_gpu_throttle_seconds_total
+            expr: DCGM_FI_DEV_THERMAL_VIOLATION * 1e-9
+            labels:
+              reason: thermal
+          # dcgm:242: nanoseconds -> seconds, factor 1e-9.
+          - record: kubeneuron_gpu_throttle_seconds_total
+            expr: DCGM_FI_DEV_SYNC_BOOST_VIOLATION * 1e-9
+            labels:
+              reason: sync_boost
+          # dcgm:243: nanoseconds -> seconds, factor 1e-9.
+          - record: kubeneuron_gpu_throttle_seconds_total
+            expr: DCGM_FI_DEV_BOARD_LIMIT_VIOLATION * 1e-9
+            labels:
+              reason: board_limit
+          # dcgm:245: nanoseconds -> seconds, factor 1e-9.
+          - record: kubeneuron_gpu_throttle_seconds_total
+            expr: DCGM_FI_DEV_RELIABILITY_VIOLATION * 1e-9
+            labels:
+              reason: reliability
+
+      # Utilization (percent -> ratio).
+      - name: gpu-canonical-utilization
+        interval: 30s
+        rules:
+          # dcgm:203: percent -> ratio, factor 0.01.
+          - record: kubeneuron_gpu_utilization_ratio
+            expr: DCGM_FI_DEV_GPU_UTIL * 0.01
+          # dcgm:204: percent -> ratio, factor 0.01.
+          - record: kubeneuron_gpu_memory_copy_utilization_ratio
+            expr: DCGM_FI_DEV_MEM_COPY_UTIL * 0.01
+
+      # Framebuffer capacity (MiB -> bytes).
+      - name: gpu-canonical-memory
+        interval: 30s
+        rules:
+          # dcgm:250: mebibytes -> bytes, factor 1048576.
+          - record: kubeneuron_gpu_memory_total_bytes
+            expr: DCGM_FI_DEV_FB_TOTAL * 1048576
+          # dcgm:251: mebibytes -> bytes, factor 1048576.
+          - record: kubeneuron_gpu_memory_free_bytes
+            expr: DCGM_FI_DEV_FB_FREE * 1048576
+          # dcgm:252: mebibytes -> bytes, factor 1048576.
+          - record: kubeneuron_gpu_memory_used_bytes
+            expr: DCGM_FI_DEV_FB_USED * 1048576
+
+      # ECC, retired pages, row remap and unrepairable-memory state.
+      - name: gpu-canonical-memory-errors
+        interval: 30s
+        rules:
+          # dcgm:310: count, factor 1.
+          - record: kubeneuron_gpu_ecc_errors_total
+            expr: DCGM_FI_DEV_ECC_SBE_VOL_TOTAL
+            labels:
+              bits: single
+              scope: volatile
+          # dcgm:311: count, factor 1.
+          - record: kubeneuron_gpu_ecc_errors_total
+            expr: DCGM_FI_DEV_ECC_DBE_VOL_TOTAL
+            labels:
+              bits: double
+              scope: volatile
+          # dcgm:312: count, factor 1.
+          - record: kubeneuron_gpu_ecc_errors_total
+            expr: DCGM_FI_DEV_ECC_SBE_AGG_TOTAL
+            labels:
+              bits: single
+              scope: aggregate
+          # dcgm:313: count, factor 1.
+          - record: kubeneuron_gpu_ecc_errors_total
+            expr: DCGM_FI_DEV_ECC_DBE_AGG_TOTAL
+            labels:
+              bits: double
+              scope: aggregate
+          # dcgm:390: count, factor 1.
+          - record: kubeneuron_gpu_retired_pages_total
+            expr: DCGM_FI_DEV_RETIRED_SBE
+            labels:
+              cause: single_bit
+          # dcgm:391: count, factor 1.
+          - record: kubeneuron_gpu_retired_pages_total
+            expr: DCGM_FI_DEV_RETIRED_DBE
+            labels:
+              cause: double_bit
+          # dcgm:392: boolean, factor 1.
+          - record: kubeneuron_gpu_retired_pages_pending
+            expr: DCGM_FI_DEV_RETIRED_PENDING
+          # dcgm:393: count, factor 1.
+          - record: kubeneuron_gpu_remapped_rows_total
+            expr: DCGM_FI_DEV_UNCORRECTABLE_REMAPPED_ROWS
+            labels:
+              kind: uncorrectable
+          # dcgm:394: count, factor 1.
+          - record: kubeneuron_gpu_remapped_rows_total
+            expr: DCGM_FI_DEV_CORRECTABLE_REMAPPED_ROWS
+            labels:
+              kind: correctable
+          # dcgm:395: boolean, factor 1.
+          - record: kubeneuron_gpu_row_remap_failed
+            expr: DCGM_FI_DEV_ROW_REMAP_FAILURE
+          # dcgm:396: boolean, factor 1.
+          - record: kubeneuron_gpu_row_remap_pending
+            expr: DCGM_FI_DEV_ROW_REMAP_PENDING
+          # dcgm:1507: boolean, factor 1.
+          - record: kubeneuron_gpu_memory_unrepairable
+            expr: DCGM_FI_DEV_MEMORY_UNREPAIRABLE_FLAG
+
+      # PCIe link state, replays, throughput and NVLink error counters.
+      - name: gpu-canonical-pcie-nvlink
+        interval: 30s
+        rules:
+          # dcgm:235: count, factor 1.
+          - record: kubeneuron_gpu_pcie_link_generation
+            expr: DCGM_FI_DEV_PCIE_MAX_LINK_GEN
+            labels:
+              kind: max
+          # dcgm:236: count, factor 1.
+          - record: kubeneuron_gpu_pcie_link_width
+            expr: DCGM_FI_DEV_PCIE_MAX_LINK_WIDTH
+            labels:
+              kind: max
+          # dcgm:237: count, factor 1.
+          - record: kubeneuron_gpu_pcie_link_generation
+            expr: DCGM_FI_DEV_PCIE_LINK_GEN
+            labels:
+              kind: current
+          # dcgm:238: count, factor 1.
+          - record: kubeneuron_gpu_pcie_link_width
+            expr: DCGM_FI_DEV_PCIE_LINK_WIDTH
+            labels:
+              kind: current
+          # dcgm:202: count, factor 1.
+          - record: kubeneuron_gpu_pcie_replays_total
+            expr: DCGM_FI_DEV_PCIE_REPLAY_COUNTER
+          # dcgm:1009: bytes_per_second, factor 1.
+          - record: kubeneuron_gpu_pcie_bytes_per_second
+            expr: DCGM_FI_PROF_PCIE_TX_BYTES
+            labels:
+              direction: tx
+          # dcgm:1010: bytes_per_second, factor 1.
+          - record: kubeneuron_gpu_pcie_bytes_per_second
+            expr: DCGM_FI_PROF_PCIE_RX_BYTES
+            labels:
+              direction: rx
+          # dcgm:409: count, factor 1.
+          - record: kubeneuron_gpu_nvlink_errors_total
+            expr: DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL
+            labels:
+              type: crc_flit
+          # dcgm:419: count, factor 1.
+          - record: kubeneuron_gpu_nvlink_errors_total
+            expr: DCGM_FI_DEV_NVLINK_CRC_DATA_ERROR_COUNT_TOTAL
+            labels:
+              type: crc_data
+          # dcgm:429: count, factor 1.
+          - record: kubeneuron_gpu_nvlink_errors_total
+            expr: DCGM_FI_DEV_NVLINK_REPLAY_ERROR_COUNT_TOTAL
+            labels:
+              type: replay
+          # dcgm:439: count, factor 1.
+          - record: kubeneuron_gpu_nvlink_errors_total
+            expr: DCGM_FI_DEV_NVLINK_RECOVERY_ERROR_COUNT_TOTAL
+            labels:
+              type: recovery
+
+      # ---------------------------------------------------------------------
+      # Derived signals (v0.7 M3, slice 2). Every expression below reads only
+      # the canonical kubeneuron_gpu_* series above (or a T4 control-plane
+      # series), never a dcgm-exporter series. The catalog's `derived` table is
+      # the contract: formula, inputs, unit and no-data semantics are listed
+      # there and in docs/reference-gpu-metrics.md. No `or vector(0)`, no
+      # `default`, no `absent()`: an input a formula needs and does not have is
+      # a missing result (the thermal headroom needs either the margin or both
+      # fallback inputs and is missing only when neither is reported), and a
+      # zero divisor is excluded by `> 0` rather than turned into Inf or NaN.
+      # label_replace(x, "l", "", "l", ".*") removes a fixed catalog label that selected the input so it
+      # does not leak onto the result; identity and placement labels (node,
+      # gpu_uuid, cluster, node_pool, ...) flow through untouched and are never
+      # grouped on. Components only: no aggregate health or error score; the one
+      # score here, the experimental fail-slow peer score, is recording-only and
+      # compares a device to its peers without summing components.
+      # Not here: alerts, GPU presence (intentionally
+      # No data: kube-state-metrics is not an established dependency).
+
+      # Thermal headroom: reported margin (153) first, slowdown threshold (158)
+      # minus GPU temperature (150) for devices with no margin sample.
+      - name: gpu-derived-thermal
+        interval: 30s
+        rules:
+          - record: kubeneuron_gpu_thermal_headroom_celsius
+            expr: kubeneuron_gpu_thermal_margin_celsius or (label_replace(kubeneuron_gpu_temperature_limit_celsius{limit="slowdown"}, "limit", "", "limit", ".*") - kubeneuron_gpu_temperature_celsius)
+          - record: kubeneuron_gpu_memory_thermal_headroom_celsius
+            expr: kubeneuron_gpu_memory_temperature_limit_celsius - kubeneuron_gpu_memory_temperature_celsius
+
+      # Power draw against the enforced limit, and throttle time share by reason.
+      - name: gpu-derived-power
+        interval: 30s
+        rules:
+          - record: kubeneuron_gpu_power_ratio
+            expr: kubeneuron_gpu_power_watts / (kubeneuron_gpu_power_limit_watts > 0)
+          # reason flows through from the counter.
+          - record: kubeneuron_gpu_throttle_share_ratio
+            expr: rate(kubeneuron_gpu_throttle_seconds_total[5m])
+
+      # Current clock against the maximum, per domain (sm, memory).
+      - name: gpu-derived-clocks
+        interval: 30s
+        rules:
+          - record: kubeneuron_gpu_clock_ratio
+            expr: kubeneuron_gpu_clock_hertz / (kubeneuron_gpu_clock_max_hertz > 0)
+
+      # Framebuffer use, ECC rates and the named hard-fault components.
+      - name: gpu-derived-memory
+        interval: 30s
+        rules:
+          - record: kubeneuron_gpu_memory_used_ratio
+            expr: kubeneuron_gpu_memory_used_bytes / (kubeneuron_gpu_memory_total_bytes > 0)
+          # scope (volatile, aggregate) flows through from the counter; only the
+          # bits selector is collapsed, so the two scopes never collide.
+          - record: kubeneuron_gpu_ecc_corrected_errors_per_second
+            expr: label_replace(rate(kubeneuron_gpu_ecc_errors_total{bits="single"}[5m]), "bits", "", "bits", ".*")
+          - record: kubeneuron_gpu_ecc_uncorrectable_errors_per_second
+            expr: label_replace(rate(kubeneuron_gpu_ecc_errors_total{bits="double"}[5m]), "bits", "", "bits", ".*")
+          # cause (single_bit, double_bit) flows through; pre-Ampere only.
+          - record: kubeneuron_gpu_retired_pages_per_second
+            expr: rate(kubeneuron_gpu_retired_pages_total[5m])
+          # Uncorrectable ECC: one component per counter scope (311 volatile,
+          # 313 aggregate); each reads its own counter and nothing combines them.
+          - record: kubeneuron_gpu_memory_hard_fault_active
+            expr: label_replace(label_replace(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="volatile"}[1h]), "bits", "", "bits", ".*"), "scope", "", "scope", ".*") > bool 0
+            labels:
+              component: uncorrectable_ecc_volatile
+          - record: kubeneuron_gpu_memory_hard_fault_active
+            expr: label_replace(label_replace(increase(kubeneuron_gpu_ecc_errors_total{bits="double",scope="aggregate"}[1h]), "bits", "", "bits", ".*"), "scope", "", "scope", ".*") > bool 0
+            labels:
+              component: uncorrectable_ecc_aggregate
+          - record: kubeneuron_gpu_memory_hard_fault_active
+            expr: label_replace(increase(kubeneuron_gpu_remapped_rows_total{kind="uncorrectable"}[1h]), "kind", "", "kind", ".*") > bool 0
+            labels:
+              component: uncorrectable_row_remap
+          - record: kubeneuron_gpu_memory_hard_fault_active
+            expr: kubeneuron_gpu_row_remap_failed > bool 0
+            labels:
+              component: row_remap_failed
+          - record: kubeneuron_gpu_memory_hard_fault_active
+            expr: kubeneuron_gpu_row_remap_pending > bool 0
+            labels:
+              component: row_remap_pending
+          - record: kubeneuron_gpu_memory_hard_fault_active
+            expr: kubeneuron_gpu_retired_pages_pending > bool 0
+            labels:
+              component: retired_page_pending
+          - record: kubeneuron_gpu_memory_hard_fault_active
+            expr: kubeneuron_gpu_memory_unrepairable > bool 0
+            labels:
+              component: unrepairable
+
+      # PCIe replay rate, link width/generation against their maxima, NVLink
+      # error rates by type.
+      - name: gpu-derived-links
+        interval: 30s
+        rules:
+          - record: kubeneuron_gpu_pcie_replays_per_second
+            expr: rate(kubeneuron_gpu_pcie_replays_total[5m])
+          - record: kubeneuron_gpu_pcie_link_width_ratio
+            expr: label_replace(kubeneuron_gpu_pcie_link_width{kind="current"}, "kind", "", "kind", ".*") / (label_replace(kubeneuron_gpu_pcie_link_width{kind="max"}, "kind", "", "kind", ".*") > 0)
+          - record: kubeneuron_gpu_pcie_link_generation_ratio
+            expr: label_replace(kubeneuron_gpu_pcie_link_generation{kind="current"}, "kind", "", "kind", ".*") / (label_replace(kubeneuron_gpu_pcie_link_generation{kind="max"}, "kind", "", "kind", ".*") > 0)
+          # type flows through from the counter.
+          - record: kubeneuron_gpu_nvlink_errors_per_second
+            expr: rate(kubeneuron_gpu_nvlink_errors_total[5m])
+
+      # Capacity returned to service, from the controller's resolved incidents.
+      - name: gpu-derived-capacity
+        interval: 30s
+        rules:
+          # class flows through from the counter.
+          - record: kubeneuron_gpu_recovered_capacity_hours_total
+            expr: label_replace(kubeneuron_degraded_gpu_seconds_total{outcome="resolved"}, "outcome", "", "outcome", ".*") / 3600
+
+      # Experimental fail-slow shadow score (recording only; nothing consumes it).
+      # Reads the derived clock and throttle ratios. Absent unless the device's SM
+      # clock ratio is at least 15% below the median of its gpu_model peers, its
+      # maximum throttle share over 5m is at least 0.05, and the gpu_model has at
+      # least 3 distinct devices. Inputs are deduplicated to (node, gpu_uuid,
+      # gpu_model) before the median and the count, so workload labels cannot
+      # inflate the peer group. The value is the degradation score
+      # 1 - own/peer_median, not a boolean.
+      - name: gpu-derived-fail-slow
+        interval: 30s
+        rules:
+          - record: kubeneuron_gpu_fail_slow_score_ratio
+            expr: (1 - max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"}) / on (gpu_model) group_left() (quantile by (gpu_model) (0.5, max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"})) > 0)) >= 0.15 and on (node, gpu_uuid, gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_throttle_share_ratio) >= 0.05) and on (gpu_model) (count by (gpu_model) (max by (node, gpu_uuid, gpu_model) (kubeneuron_gpu_clock_ratio{domain="sm"})) >= 3)
+---
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMRule
+metadata:
+  name: kubeneuron-gpu-shadow
+  namespace: kubeneuron-monitoring
+  labels:
+    app.kubernetes.io/part-of: kube-neuron-dependencies
+    kubeneuron.io/rule-set: default
+spec:
+  # The gpu-shadow group mirrors configs/vmalert/gpu-shadow-rules.yaml exactly
+  # (a unit test in internal/detect pins them together). Shadow-only (v0.7
+  # M5): every alert is named ShadowGpu* (never Gpu*, so the controller
+  # webhook route's alertname regex cannot match it), carries
+  # kubeneuron_shadow="true" (routed to human-default before the webhook
+  # route in vmalertmanager.yaml) and is absent from detect.alertClassMap.
+  # Nothing here opens an incident or triggers remediation. Shadow rules are
+  # deliberately a separate VMRule from the controller-facing kubeneuron-gpu
+  # groups, and every expression reads only the recorded canonical or
+  # derived series: no absent(), default or vector(0) synthesis.
+  groups:
+    - name: gpu-shadow
+      interval: 30s
+      rules:
+        # PCIe link trained narrower than its maximum width for 15m. Width is
+        # stable under load and at idle (unlike the generation, which many
+        # boards lower legitimately when idle), so a sustained ratio below 1 is
+        # a degraded or badly seated link, not a power-saving state.
+        - alert: ShadowGpuPcieLinkWidthDegraded
+          expr: kubeneuron_gpu_pcie_link_width_ratio < 1
+          for: 15m
+          labels:
+            kubeneuron_shadow: "true"
+            severity: info
+          annotations:
+            summary: "Shadow: PCIe link width degraded on {{ $labels.node }} GPU {{ $labels.gpu }} ({{ $labels.gpu_uuid }})"
+            description: "Shadow-only signal for human review; no remediation is triggered and no incident is opened. The PCIe link has run at {{ $value | humanizePercentage }} of its maximum width for 15m (kubeneuron_gpu_pcie_link_width_ratio < 1). Check seating, the slot and the host PCIe topology before acting."
+
+        # NVLink replay or recovery errors accumulating for 15m. These are
+        # link-level retraining events, distinct from the CRC flit storm the
+        # controller-facing GpuNvlinkCrcErrors rule acts on; the rate is
+        # recorded per error type, so the firing series names which one.
+        - alert: ShadowGpuNvlinkLinkDegraded
+          expr: kubeneuron_gpu_nvlink_errors_per_second{type=~"replay|recovery"} > 0
+          for: 15m
+          labels:
+            kubeneuron_shadow: "true"
+            severity: info
+          annotations:
+            summary: "Shadow: NVLink {{ $labels.type }} errors on {{ $labels.node }} GPU {{ $labels.gpu }} ({{ $labels.gpu_uuid }})"
+            description: "Shadow-only signal for human review; no remediation is triggered and no incident is opened. NVLink {{ $labels.type }} errors have accrued at {{ $value | humanize }}/s for 15m (kubeneuron_gpu_nvlink_errors_per_second{type=\"{{ $labels.type }}\"} > 0). Check cabling, the NVSwitch topology and peer GPUs before acting."
+
+        # Fail-slow: the experimental peer score (M3) is recorded only while the
+        # device's SM clock sits at least 15% below its gpu_model peer median,
+        # it is throttled, and the model has at least 3 peers. The alert
+        # restates that floor explicitly and asks for it to hold for 30m, so a
+        # transient dip never fires.
+        - alert: ShadowGpuFailSlow
+          expr: kubeneuron_gpu_fail_slow_score_ratio >= 0.15
+          for: 30m
+          labels:
+            kubeneuron_shadow: "true"
+            severity: info
+          annotations:
+            summary: "Shadow: fail-slow suspect {{ $labels.node }} GPU {{ $labels.gpu_uuid }} ({{ $labels.gpu_model }})"
+            description: "Shadow-only signal for human review; no remediation is triggered and no incident is opened. The SM clock has sat {{ $value | humanizePercentage }} below the median of its {{ $labels.gpu_model }} peers while throttled, for 30m (kubeneuron_gpu_fail_slow_score_ratio >= 0.15). The score is experimental: compare the device against its peers on the dashboards before concluding anything."
+
+        # Thermal headroom (reported margin, else slowdown threshold minus GPU
+        # temperature) at or below 5C for 15m: the GPU is about to throttle or
+        # already is. The controller-facing GpuTempCritical rule acts on an
+        # absolute temperature; this one watches the distance to the device's
+        # own slowdown point.
+        - alert: ShadowGpuThermalHeadroomLow
+          expr: kubeneuron_gpu_thermal_headroom_celsius <= 5
+          for: 15m
+          labels:
+            kubeneuron_shadow: "true"
+            severity: info
+          annotations:
+            summary: "Shadow: {{ $value }}C of thermal headroom on {{ $labels.node }} GPU {{ $labels.gpu }} ({{ $labels.gpu_uuid }})"
+            description: "Shadow-only signal for human review; no remediation is triggered and no incident is opened. The GPU has had at most 5C of headroom before its slowdown temperature for 15m (kubeneuron_gpu_thermal_headroom_celsius <= 5). Usually airflow, inlet temperature or a fan: inspect cooling; do not reset."
+
+        # Memory thermal headroom (maximum operating temperature minus memory
+        # temperature) at or below 5C for 15m. Absent on devices that report no
+        # memory temperature or limit, which is correct: no data, no alert.
+        - alert: ShadowGpuMemoryThermalHeadroomLow
+          expr: kubeneuron_gpu_memory_thermal_headroom_celsius <= 5
+          for: 15m
+          labels:
+            kubeneuron_shadow: "true"
+            severity: info
+          annotations:
+            summary: "Shadow: {{ $value }}C of memory thermal headroom on {{ $labels.node }} GPU {{ $labels.gpu }} ({{ $labels.gpu_uuid }})"
+            description: "Shadow-only signal for human review; no remediation is triggered and no incident is opened. The GPU memory has had at most 5C of headroom before its maximum operating temperature for 15m (kubeneuron_gpu_memory_thermal_headroom_celsius <= 5). Inspect cooling; do not reset."
+
+        # Memory beyond repair: the derived hard-fault components for a failed
+        # row remap (395) and unrepairable memory (1507). One series per
+        # component, never summed, so the firing alert names which flag is set.
+        # The controller-facing GpuRowRemapFailure already acts on 395; this
+        # shadow adds 1507, which no controller rule reads, and keeps both as
+        # observation only.
+        - alert: ShadowGpuMemoryBeyondRepair
+          expr: kubeneuron_gpu_memory_hard_fault_active{component=~"row_remap_failed|unrepairable"} == 1
+          for: 5m
+          labels:
+            kubeneuron_shadow: "true"
+            severity: info
+          annotations:
+            summary: "Shadow: memory beyond repair ({{ $labels.component }}) on {{ $labels.node }} GPU {{ $labels.gpu }} ({{ $labels.gpu_uuid }})"
+            description: "Shadow-only signal for human review; no remediation is triggered and no incident is opened. The GPU has reported {{ $labels.component }} for 5m (kubeneuron_gpu_memory_hard_fault_active{component=\"{{ $labels.component }}\"} == 1): row remapping or page retirement can no longer repair this memory. Evaluate for RMA; nothing here resets or drains anything."
+
+        # Row remap pending a GPU reset, read from the canonical series. This
+        # is the shadow twin of the controller-facing GpuRowRemapPending rule
+        # (which acts via reset-when-idle); it exists to show, in the same
+        # Alertmanager, what the canonical series sees, without any action.
+        - alert: ShadowGpuRowRemapPending
+          expr: kubeneuron_gpu_row_remap_pending == 1
+          for: 5m
+          labels:
+            kubeneuron_shadow: "true"
+            severity: info
+          annotations:
+            summary: "Shadow: row remap pending on {{ $labels.node }} GPU {{ $labels.gpu }} ({{ $labels.gpu_uuid }})"
+            description: "Shadow-only signal for human review; no remediation is triggered and no incident is opened. A row remap has been pending a GPU reset for 5m (kubeneuron_gpu_row_remap_pending == 1). The controller-facing GpuRowRemapPending rule, not this one, decides whether a reset is scheduled."

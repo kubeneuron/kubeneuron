@@ -1,0 +1,551 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package controller
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/kubeneuron/kubeneuron/internal/action"
+	"github.com/kubeneuron/kubeneuron/internal/config"
+	"github.com/kubeneuron/kubeneuron/internal/decision"
+	"github.com/kubeneuron/kubeneuron/internal/metrics"
+	"github.com/kubeneuron/kubeneuron/internal/platform"
+	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/internal/store"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
+	"github.com/kubeneuron/kubeneuron/pkg/types"
+)
+
+// This file is the admission seam: everything consulted BEFORE a step may
+// run. Gate slot lifecycle (remediation slots held to terminalization, the
+// leadership rebuild), destructive blast-radius confinement, and the
+// accelerator capability/evidence gates. Nothing here executes anything.
+
+// recoveredSlot records a gate reservation seeded from a durable EXECUTING
+// incident so it can be released, once, when that incident is re-driven.
+type recoveredSlot struct {
+	target types.Target
+	action types.ActionType
+}
+
+// RebuildGateOccupancy re-seeds the safety gate's concurrency occupancy from
+// the durable EXECUTING incidents before the first reconcile tick, so the
+// MaxConcurrentRemediations/MaxConcurrentReboots caps hold across a leader
+// failover. When a leader dies, agents may still be executing leased
+// destructive actions the previous leader admitted; a new leader that started
+// with empty slots would admit fresh remediations past the cap until
+// recoverOrphanedExecution re-admitted each incident one reconcile at a time.
+// Each seeded slot is released by releaseRecoveredSlot the first time its
+// incident leaves EXECUTING (recovery re-admits it through the normal Allow
+// path, or closes it), so the occupancy is a hand-off, not a leak.
+func (c *Controller) RebuildGateOccupancy(ctx context.Context) error {
+	if c.gate == nil {
+		return nil
+	}
+	// Ownership is the durable bit on the incident row, not an inference from
+	// state/StepIndex: escalate() resets StepIndex to 0 mid-remediation, so
+	// the old inference silently dropped an escalated incident's slot across
+	// failover. Every non-halted state is scanned — a slot-holding incident
+	// can legally sit in OPEN/OBSERVING after an engine hot-swap unbound its
+	// playbook, and it keeps its slot there until it halts.
+	incidents, err := c.store.ListIncidents(ctx, store.IncidentFilter{
+		States: []types.IncidentState{
+			types.StateOpen, types.StateObserving,
+			types.StateEvaluating, types.StateAwaitingApproval,
+			types.StateExecuting, types.StateVerifying,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	engine := c.currentEngine()
+	for _, inc := range incidents {
+		if !inc.RemediationSlotHeld {
+			continue
+		}
+		c.gate.OccupyRemediation(inc.Target)
+		if inc.State == types.StateExecuting {
+			// The previous leader also held this incident's per-step (reboot
+			// class) slot; reserve it too until recovery moves the incident out
+			// of EXECUTING. This stays a rebuilt in-memory hand-off: its action
+			// class is derived from the engine at rebuild time (persisting it
+			// would go stale across hot-swaps) and its lifetime is one recovery
+			// pass.
+			var action types.ActionType
+			if engine != nil {
+				if step, done, stepErr := engine.NextStep(inc); stepErr == nil && !done && step != nil {
+					action = gateAction(step)
+				}
+			}
+			c.gate.OccupyStep(inc.Target, action)
+			c.recoveredMu.Lock()
+			c.recoveredSlots[inc.ID] = recoveredSlot{target: inc.Target, action: action}
+			c.recoveredMu.Unlock()
+		}
+		c.log.Info("re-seeded safety gate slot from a durable mid-remediation incident",
+			"incident", inc.ID, "state", inc.State, "node", inc.Target.Node, "gpu", inc.Target.GPUUUID)
+	}
+	return nil
+}
+
+// releaseRecoveredSlot hands back the per-step slot seeded by
+// RebuildGateOccupancy. It is idempotent: only the first call for an incident
+// releases the reservation, so the later normal EXECUTING exits are no-ops.
+// The incident's remediation slot is not touched here — it lives until the
+// incident terminalizes (releaseHeldSlot).
+func (c *Controller) releaseRecoveredSlot(incidentID string) {
+	c.recoveredMu.Lock()
+	slot, ok := c.recoveredSlots[incidentID]
+	if ok {
+		delete(c.recoveredSlots, incidentID)
+	}
+	c.recoveredMu.Unlock()
+	if ok && c.gate != nil {
+		c.gate.StepDone(slot.target, slot.action, 0)
+	}
+}
+
+// errResetTargetUnattributed marks a reset step whose target carries no GPU
+// UUID. It is a reported fact (a permanent infeasibility), not missing evidence
+// that could still arrive, so it must escalate rather than hold: an empty UUID
+// can never be filled in by a later report.
+var errResetTargetUnattributed = errors.New("physical NVIDIA reset requires a GPU UUID target, but this incident is unattributed (empty GPU UUID)")
+
+// errResetVendorMismatch marks a reset step that can NEVER run for this
+// incident because the action is scoped to one accelerator vendor and the
+// incident is about another's device.
+//
+// It is a distinct sentinel from "evidence has not arrived" on purpose. The
+// evidence path HOLDS, because an agent that has not reported yet will. A
+// vendor mismatch never resolves: the target UUID cannot appear in that
+// vendor's accelerator report at any future time. Held as missing evidence,
+// such an incident cordons the node, drains every workload off it, then
+// re-denies the reset on every reconcile tick with nothing ever reaching a
+// human — silent, unbounded capacity loss. Refusing permanently, before the
+// first disruptive step, is the only safe reading.
+var errResetVendorMismatch = errors.New("this incident's accelerator vendor cannot be reset by a vendor-scoped reset action")
+
+// confinementResult classifies a destructive step against the declared
+// destructiveExecution blast radius.
+type confinementResult int
+
+const (
+	// confinementAllowed: proceed. Dry-run, no selector configured, a
+	// non-destructive step, or a node proven inside the selector.
+	confinementAllowed confinementResult = iota
+	// confinementOutOfScope: the node's labels resolved and do NOT match the
+	// selector. A confirmed scope violation — fail closed to a human, never
+	// execute.
+	confinementOutOfScope
+	// confinementUnresolved: the node's labels could not be resolved right now
+	// (a transient apiserver/ListNodes blip, or the node is momentarily absent
+	// from inventory). This is missing evidence, not a confirmed violation, so
+	// hold and retry — the step never executes while scope is unknown.
+	confinementUnresolved
+)
+
+// destructiveStepConfinement classifies whether a destructive controller-side
+// platform step may run against its target node given the declared
+// destructiveExecution blast radius. It never returns "allowed" for a node it
+// cannot prove is in scope: an unresolvable label lookup is reported as
+// unresolved (hold-and-retry) and a resolved non-match as out-of-scope
+// (quarantine). The destructive classification comes from the action registry,
+// not a hand-maintained map. Dry-run incidents and installs with no selector
+// are never in scope for the check (nothing executes for them).
+func (c *Controller) destructiveStepConfinement(ctx context.Context, inc *types.Incident, step *playbook.Step) (string, confinementResult) {
+	// The step's PINNED decision when there is one, so this and the execution
+	// that follows cannot answer differently about the same step.
+	if c.simulating(ctx, inc) {
+		return "", confinementAllowed
+	}
+	def, ok := action.ByWire(step.Action)
+	if !ok || !def.Destructive {
+		return "", confinementAllowed
+	}
+	selector := c.destructiveNodeSelector(ctx)
+	if len(selector) == 0 {
+		// "No confinement configured" — a file-based deployment may run
+		// live with no selector; Config.Validate does not require one.
+		//
+		// An operator-managed install cannot reach here with an empty
+		// selector and a live step: the operator compiles the selector only
+		// for an Enabled install, so any other mode empties it, and
+		// effectiveDryRun above has already turned every step into a no-op by
+		// then. That ordering is load-bearing rather than incidental — see
+		// effectiveDryRun for what it used to cost.
+		return "", confinementAllowed
+	}
+	labels, err := c.nodeLabelsForConfinement(ctx, inc.Target.Node)
+	if err != nil {
+		return fmt.Sprintf("cannot confirm destructive step %s on node %s is within the declared spec.safety.destructiveExecution.nodeSelector: %v",
+			step.Action, inc.Target.Node, err), confinementUnresolved
+	}
+	if !labelsMatchSelector(selector, labels) {
+		return fmt.Sprintf("refusing destructive step %s on node %s: it is outside the declared spec.safety.destructiveExecution.nodeSelector (blast radius), which the controller path must honor just as the agent path does",
+			step.Action, inc.Target.Node), confinementOutOfScope
+	}
+	return "", confinementAllowed
+}
+
+// labelsMatchSelector reports whether every selector key/value is present on
+// the node labels (Kubernetes matchLabels semantics).
+func labelsMatchSelector(selector, labels map[string]string) bool {
+	for k, v := range selector {
+		if labels[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Controller) allowAcceleratorStep(ctx context.Context, inc *types.Incident, step *playbook.Step) error {
+	// Dry-run executes no side effect and is intentionally usable without a
+	// hardware profile, so operators can see the planned ladder before
+	// qualifying a node/runtime combination.
+	if c.simulating(ctx, inc) {
+		return nil
+	}
+	// The capability gate is a registry fact now, not a hard-coded
+	// agent.gpu_reset string match: any future gated action is a registry entry
+	// with CapabilityGate set, not another special case here.
+	def, ok := action.ByWire(step.Action)
+	if !ok || def.CapabilityGate != action.CapabilityNVIDIAReset {
+		return nil
+	}
+	return c.allowNVIDIAReset(ctx, inc, inc.Target)
+}
+
+// allowNVIDIAReset combines the configured server profile with a fresh,
+// ready, agent-owned observation. Neither input alone is authority: the
+// profile selects the intended node fleet and digest, while the report proves
+// the current physical device and unpartitioned topology. This is deliberately
+// narrower than a future general action gate so unmodelled agent actions do
+// not accidentally inherit a reset capability.
+// allowNVIDIAReset admits a physical reset only on current, node-bound,
+// profile-matched runtime evidence.
+//
+// Evidence pinned by a quiesce step is accepted in place of the live report:
+// stopping the DCGM host engine is what makes the reset possible at all, and it
+// also erases the attestation from every later report. The pin is the same
+// evidence, validated by this same gate a moment earlier, and it is still
+// subject to verifyEvidenceMaxAge. Every other check is re-run against it, and
+// the profile and node identity it is checked against are read LIVE — see
+// liveResetAuthority.
+func (c *Controller) allowNVIDIAReset(ctx context.Context, inc *types.Incident, target types.Target) error {
+	// Run the common evaluator for every live reset admission. This release
+	// keeps the long-established reset-specific gate authoritative while the
+	// compatibility telemetry is compared in production: pinned evidence after
+	// a stack quiesce is a legacy exception the pure snapshot cannot represent
+	// without widening its authority. The result is nevertheless the same
+	// recorded contract surfaced by readiness, preview and simulation.
+	if result, err := c.LiveAdmissionDecision(ctx, target.Node, decision.Request{
+		Class: decision.ActionRemediate, AcceleratorAction: types.AcceleratorActionResetDevice,
+		Scope: types.AcceleratorScopePhysicalDevice, TargetDeviceID: target.GPUUUID,
+	}); err != nil {
+		c.log.Debug("shared evaluator could not capture live reset admission", "incident", inc.ID, "err", err)
+	} else if !result.Permitted() {
+		metrics.DecisionCompatibilityHolds.WithLabelValues(string(result.State)).Inc()
+		c.log.Debug("shared evaluator compatibility hold for live reset admission",
+			"incident", inc.ID, "state", result.State, "reasons", result.ReasonCodes)
+	}
+	if pin, ok := c.takePinnedAcceleratorEvidence(inc.ID, time.Now()); ok {
+		if pin.node != target.Node {
+			return fmt.Errorf("pinned accelerator evidence belongs to node %q, not %q", pin.node, target.Node)
+		}
+		// Only the REPORT is taken from the pin. The report is the one thing
+		// the quiesce destroys — stopping the host engine erases the
+		// attestation — and it is the only thing worth remembering.
+		//
+		// The profile and the node UID were pinned beside it, and both are
+		// things the controller can always read right now. Pinning them froze
+		// the controller's own authority rather than preserving evidence:
+		// an operator who edits spec.acceleratorProfiles to revoke
+		// reset-device — the documented way to withdraw permission, typically
+		// typed while resets are actively going wrong — was ignored for the
+		// life of the pin, and a reset executed on an already-quiesced node
+		// with nothing in the audit trail explaining why. And because both
+		// operands of the node-UID check came from the same pin, that check
+		// was vacuous by construction: it exists so a recreated node cannot
+		// inherit a matching profile, which is exactly what it could not
+		// detect here.
+		profile, nodeUID, err := c.liveResetAuthority(ctx, target)
+		if err != nil {
+			return err
+		}
+		if err := checkNVIDIAResetEvidence(profile, &pin.report, nodeUID, target); err != nil {
+			return err
+		}
+		// The topology classifier runs AFTER the legacy test and only ever
+		// adds a refusal; the pinned report is the report it judges, so a
+		// quiesce cannot smuggle a partitioned or shared device past it.
+		return c.refuseUnqualifiedResetTopology(ctx, target, &pin.report)
+	}
+	_, _, _, err := c.acceleratorEvidenceForReset(ctx, target)
+	return err
+}
+
+// liveResetAuthority resolves the two things a reset gate must never take from
+// a snapshot: the profile that grants the action, and the identity of the node
+// it applies to. Neither is destroyed by a quiesce, so neither has any reason
+// to be remembered.
+func (c *Controller) liveResetAuthority(ctx context.Context, target types.Target) (*config.AcceleratorRuntimeProfile, string, error) {
+	node, ok := c.acceleratorNode(ctx, target.Node)
+	if !ok || node.UID == "" {
+		return nil, "", fmt.Errorf("node UID is unavailable for accelerator report binding")
+	}
+	if node.Labels == nil {
+		return nil, "", fmt.Errorf("node labels are unavailable for runtime profile selection")
+	}
+	profiles := c.runtimeConfig(ctx).AcceleratorProfiles
+	profile, err := (config.Config{AcceleratorProfiles: profiles}).
+		ResolveAcceleratorRuntimeProfile(node.Labels, types.AcceleratorVendorNVIDIA)
+	if err != nil {
+		return nil, "", err
+	}
+	return profile, node.UID, nil
+}
+
+// acceleratorEvidenceForReset resolves and validates the live evidence for a
+// physical reset, returning it so a caller can pin it.
+func (c *Controller) acceleratorEvidenceForReset(ctx context.Context, target types.Target) (*types.AgentAcceleratorReport, string, *config.AcceleratorRuntimeProfile, error) {
+	if target.Node == "" {
+		return nil, "", nil, fmt.Errorf("physical NVIDIA reset requires a node target")
+	}
+	if target.GPUUUID == "" {
+		// A missing GPU UUID is not missing evidence that could still arrive: the
+		// incident is structurally unattributed (kmsg PCI->GPU resolution failed on
+		// a wedged nvidia-smi). Return a distinct, permanent error so the caller
+		// escalates to a rung that needs no device target instead of holding in
+		// EVALUATING and re-denying the reset on every tick.
+		return nil, "", nil, errResetTargetUnattributed
+	}
+	// Node names and labels can change with a Kubernetes delete/recreate. Read
+	// both from one current inventory object before considering a report, so a
+	// previous node object cannot inherit a matching profile or capability.
+	profile, nodeUID, err := c.liveResetAuthority(ctx, target)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	reports, ok := c.store.(store.AcceleratorReportStore)
+	if !ok {
+		return nil, "", nil, fmt.Errorf("accelerator report store is not configured")
+	}
+	report, err := reports.GetAcceleratorReport(ctx, target.Node, types.AcceleratorVendorNVIDIA)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("load NVIDIA accelerator report: %w", err)
+	}
+	if err := checkNVIDIAResetEvidence(profile, report, nodeUID, target); err != nil {
+		return nil, "", nil, err
+	}
+	// Narrowing only: the device topology classifier is consulted after the
+	// legacy evidence passed and can refuse (MIG, time-slicing, DRA, unknown)
+	// but never admit. It applies to both callers of this function — the live
+	// reset admission and the quiesce step that pins evidence for it — so
+	// monitoring is never stood down for a reset the topology forbids.
+	if err := c.refuseUnqualifiedResetTopology(ctx, target, report); err != nil {
+		return nil, "", nil, err
+	}
+	return report, nodeUID, profile, nil
+}
+
+// checkNVIDIAResetEvidence is the whole evidence test, applied identically to a
+// live report and to one pinned by a quiesce step.
+func checkNVIDIAResetEvidence(profile *config.AcceleratorRuntimeProfile, report *types.AgentAcceleratorReport, nodeUID string, target types.Target) error {
+	if report.NodeUID != nodeUID {
+		return fmt.Errorf("accelerator report node UID does not match current node")
+	}
+	if err := profile.CheckAction(time.Now(), *report,
+		types.AcceleratorActionResetDevice, types.AcceleratorScopePhysicalDevice); err != nil {
+		return err
+	}
+	for _, device := range report.Devices {
+		if device.ID == target.GPUUUID && device.Kind == types.AcceleratorDevicePhysical && device.Family == types.AcceleratorFamilyGPU {
+			return nil
+		}
+	}
+	return fmt.Errorf("report does not contain targeted physical NVIDIA GPU %q", target.GPUUUID)
+}
+
+// gateAction maps a step to the action type the safety gate reasons about,
+// so reboot-class steps hit the reboot concurrency cap. The class is a
+// registry fact; a step whose action is not in the registry gates on its raw
+// wire string (it cannot be reboot-class — reboot classes are registry
+// entries — so the raw string is a safe, conservative identity).
+func gateAction(step *playbook.Step) types.ActionType {
+	if def, ok := action.ByWire(step.Action); ok {
+		return def.GateAction()
+	}
+	return types.ActionType(step.Action)
+}
+
+// playbookCooldownAction is the pseudo-action under which a completed
+// playbook's cooldown is recorded on the gate.
+func playbookCooldownAction(name string) types.ActionType {
+	return types.ActionType("playbook:" + name)
+}
+
+// refuseUnrecyclableNode reports whether the incident's next step is a
+// recycle_node whose target instance provably cannot be recycled — the
+// per-instance verdict behind the provider-scoped capability. Capabilities
+// gate the playbook at compile time, but an autoscaling-group member fails
+// its group's health check the moment it stops and is terminated mid-recycle,
+// so before this check the gap surfaced as a step timeout after a human had
+// already approved the step. A definitive verdict escalates the ladder (the
+// next rung is typically ReplaceNode, which is exactly what the node group
+// wants); a transient lookup failure changes nothing — RecycleNode re-checks
+// before issuing the stop, so the worst case is the old crisp step failure,
+// never a blind stop.
+func (c *Controller) refuseUnrecyclableNode(ctx context.Context, inc *types.Incident, step *playbook.Step) (string, bool) {
+	// Registry fact, not a wire-string match: any action that reinitializes the
+	// instance in place needs the same per-instance viability verdict.
+	def, ok := action.ByWire(step.Action)
+	if c.simulating(ctx, inc) || !ok || def.CloudPrimitive != action.CloudPrimitiveReinitializeInPlace {
+		return "", false
+	}
+	recycler, ok := c.platform.(platform.NodeRecycler)
+	if !ok || !recycler.CloudRecyclingConfigured() {
+		return "", false // recycleNodeStep owns the no-provider failure path
+	}
+	err := recycler.CheckRecycleNode(ctx, inc.Target.Node)
+	if err == nil {
+		return "", false
+	}
+	if errors.Is(err, cloud.ErrRecycleNotViable) {
+		return "refusing recycle_node before requesting approval: " + err.Error(), true
+	}
+	c.log.Debug("recycle viability could not be established; proceeding (RecycleNode re-checks before stopping)",
+		"incident", inc.ID, "node", inc.Target.Node, "err", err)
+	return "", false
+}
+
+// armingAdmission is refuseUnarmedAgent's verdict on one step.
+type armingAdmission int
+
+const (
+	armingProceed armingAdmission = iota
+	// armingHold: the node is inside the served blast radius but its agent's
+	// fresh registration still says unarmed — adoption is in flight. The walk
+	// holds (no transition, re-checked next pass) instead of asking a human
+	// to approve a step the node cannot execute yet.
+	armingHold
+	armingRefuse
+)
+
+// armingPropagationGrace bounds the arming-in-flight hold: four agent
+// registration ticks at the agent's default 30s interval, comfortably inside
+// verifyEvidenceMaxAge so the declaration stays "fresh" for the whole window.
+// An agent that still freshly registers unarmed after this long, on a node
+// the selector says to arm, is not propagating — it CANNOT arm.
+const armingPropagationGrace = 2 * time.Minute
+
+// armingHoldDuration returns how long the incident has been observed in the
+// arming-in-flight hold, recording the first observation. The grace is
+// measured from here, NOT from StateChangedAt: pauses, maintenance windows,
+// and playbook cooldowns hold an incident in EVALUATING without touching it,
+// and an anchor on StateChangedAt would expire a grace that never ran the
+// moment such a hold clears (review F1).
+func (c *Controller) armingHoldDuration(id string) time.Duration {
+	now := time.Now()
+	c.armingHoldMu.Lock()
+	defer c.armingHoldMu.Unlock()
+	first, ok := c.armingHoldSince[id]
+	if !ok {
+		c.armingHoldSince[id] = now
+		return 0
+	}
+	return now.Sub(first)
+}
+
+// clearArmingHold forgets an incident's hold anchor. Called on every non-hold
+// arming verdict and on every state transition, so the map cannot leak.
+func (c *Controller) clearArmingHold(id string) {
+	c.armingHoldMu.Lock()
+	delete(c.armingHoldSince, id)
+	c.armingHoldMu.Unlock()
+}
+
+// refuseUnarmedAgent judges an agent-destructive step against the node's
+// arming declaration. It refuses when the agent has DEFINITIVELY declared
+// itself unarmed: the registration explicitly said "unarmed" AND is fresh
+// (AgentLastSeen within verifyEvidenceMaxAge — the same bound the verifier
+// already trusts heartbeats for, and ten registration ticks). Everything else
+// — unknown (an old agent or a v1 registration), no node row, a stale
+// declaration (the pod may have been replaced by an armed one after a
+// selector change) — is transient and proceeds: the agent executor
+// re-refuses at dispatch, so the worst case is a crisp step failure, never a
+// silent bypass. This check is advisory-early — a human must not be asked to
+// approve a step the node will provably refuse — the executor's own boundary
+// remains the enforcement.
+func (c *Controller) refuseUnarmedAgent(ctx context.Context, inc *types.Incident, step *playbook.Step) (reason string, verdict armingAdmission) {
+	if c.simulating(ctx, inc) {
+		return "", armingProceed
+	}
+	def, ok := action.ByWire(step.Action)
+	if !ok || !def.AgentDestructive {
+		// NOT an agent-destructive step: this verdict says nothing about the
+		// agent's arming, so it must not touch the hold anchor. The
+		// playbook-scope preflight walks EVERY step each pass — clearing
+		// here made the cordon/drain rungs of a standard ladder reset the
+		// reboot rung's anchor every pass, so the grace never expired and a
+		// never-armable node held silently forever (round-12 review H1).
+		return "", armingProceed
+	}
+	// From here every verdict IS about arming. A proceed (armed, unknown,
+	// stale declaration) ends any hold epoch; a hold keeps its anchor; a
+	// refuse leaves the anchor for the ESCALATING TRANSITION to clear once
+	// it commits — clearing before the commit would grant a fresh full
+	// grace after every transition conflict, postponing the refusal
+	// indefinitely (round-12 review M1).
+	defer func() {
+		if verdict == armingProceed {
+			c.clearArmingHold(inc.ID)
+		}
+	}()
+	node, err := c.store.GetNode(ctx, inc.Target.Node)
+	if err != nil || node == nil {
+		return "", armingProceed // transient: no inventory row right now
+	}
+	if node.AgentArming != types.AgentArmingUnarmed {
+		return "", armingProceed // armed, or unknown (old agent) — proceed
+	}
+	if node.AgentLastSeen.IsZero() || time.Since(node.AgentLastSeen) > verifyEvidenceMaxAge {
+		return "", armingProceed // stale declaration: not definitive
+	}
+	// With controller-SERVED arming, a freshly-booted agent on an in-scope
+	// node reports unarmed until it adopts the served answer — normally
+	// within one registration tick. Hold, bounded by the grace, rather than
+	// park: a human must not be asked to approve a step the node cannot
+	// execute yet. Past the grace the declaration is a verdict, not
+	// propagation — the agent refuses served arming (non-real GPU driver,
+	// static unarmed pin) and can NEVER execute this step — so escalate now
+	// instead of looping approve→executor-refusal→escalate. The hold clock
+	// is the FIRST hold observation (armingHoldDuration), so the grace
+	// genuinely runs for its full length regardless of how long the incident
+	// already sat in EVALUATING behind a pause, window, or cooldown.
+	if c.servedArming(ctx, inc.Target.Node) == types.AgentArmingArmed {
+		held := c.armingHoldDuration(inc.ID)
+		if held <= armingPropagationGrace {
+			return "", armingHold
+		}
+		return fmt.Sprintf("refusing %s before requesting approval: node %s is inside spec.safety.destructiveExecution.nodeSelector but its agent kept registering unarmed for %s of arming-propagation grace — it cannot adopt served arming (non-real GPU driver or a static pin); fix the agent or route the ladder to a platform-side rung",
+			step.Action, inc.Target.Node, held.Round(time.Second)), armingRefuse
+	}
+	return fmt.Sprintf("refusing %s before requesting approval: node %s's agent registered as unarmed and the node is outside spec.safety.destructiveExecution.nodeSelector; label it into the blast radius or route the ladder to a platform-side rung",
+		step.Action, inc.Target.Node), armingRefuse
+}
+
+// playbookNeedsArmedAgent reports whether ANY step of the playbook is
+// agent-destructive — the playbook-scope companion of refuseUnarmedAgent,
+// consulted before the first disruptive step so a ladder does not cordon and
+// drain a node only to die at its reboot rung.
+func playbookNeedsArmedAgent(book *playbook.Playbook) bool {
+	for _, step := range book.Steps {
+		if def, ok := action.ByWire(step.Action); ok && def.AgentDestructive {
+			return true
+		}
+	}
+	return false
+}

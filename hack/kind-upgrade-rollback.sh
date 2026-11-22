@@ -1,0 +1,1522 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+
+# shellcheck disable=SC2016 # Single-quoted jq programs expand jq, not shell, variables.
+set -Eeuo pipefail
+
+# v0.7.0 -> HEAD -> v0.7.0 (restore the pre-upgrade snapshot, then the
+# images) -> HEAD lifecycle rehearsal on kind, for BOTH workflow stores, with
+# the v0.5 runtime contract qualification rows and their hash-chained audit
+# history as the durable evidence under test, and the v0.6 checkpoint
+# coordination policy and the v0.8 workload-safe blocks (new, default off)
+# exercised on HEAD and switched back off before the rollback, as
+# docs/upgrade.md requires.
+#
+# v0.8 moves the schema heads (SQLite 0025, PostgreSQL 0016) and migrations
+# are forward-only, so the documented rollback is no longer images only: the
+# v0.7.0 binary REFUSES the v0.8 schema, and rolling back means restoring the
+# snapshot taken before the upgrade and then the v0.7.0 images. This
+# rehearsal proves both halves: first that the refusal happens and is clean
+# (the old binary exits with the schema-version error and touches nothing),
+# then that the documented restore brings v0.7.0 back serving the
+# pre-upgrade state, and that a second upgrade migrates the restored store
+# again and runs the whole v0.5 lifecycle on it.
+#
+# One disposable kind cluster hosts two BASELINE installations side by side —
+# `upgrade-sqlite` on the SQLite PVC store and `upgrade-postgres` on a
+# throwaway in-cluster PostgreSQL — under the one cluster-scoped operator, so
+# every step below is performed once for the operator and once per store:
+#
+#   1. install the released BASELINE (official install manifest and the
+#      digest-pinned images from images.txt), seed a baseline incident per
+#      store, and confirm the baseline already serves the v0.5 runtime
+#      contract routes (an empty qualification list, a coverage answer for
+#      the store's node): v0.5.0 shipped them, so nothing below may treat
+#      them as new;
+#   2. upgrade in the documented order (CRDs -> operator -> controller/agent
+#      images) to the locally built HEAD;
+#   3. drive the v0.5 runtime contract lifecycle per store through the public
+#      API: a profile selects that store's agent node, the real agent identity
+#      posts a synthetic report, coverage reads Exact/FreshCompatible/Full, a
+#      qualification is created and observed to ReadyForApproval, and its
+#      audit chain (create, observe, observe, ready) is snapshotted;
+#   4. exercise the v0.6 checkpoint coordination policy per store: the
+#      managed `<root>-controller` ClusterRole holds exactly get,list,watch
+#      on core pods while the policy is absent; enabling a short policy
+#      allowlisting that store's own namespace advances the compiled config
+#      digest, goes live on the leader, and grants exactly
+#      get,list,watch,patch; disabling it again advances the digest once
+#      more, goes live, and returns the role to exactly get,list,watch
+#      before any image moves (the documented rollback order). Neither
+#      toggle may roll or restart a Pod: every controller and agent Pod's
+#      UID and container restart counts are snapshotted before the policy is
+#      touched and must be identical after enable and after disable;
+#   5. roll the controller/agent images back to BASELINE with the policies
+#      off and prove the BASELINE binary refuses the migrated store with the
+#      schema-version error (docs/upgrade.md "v0.8.0 workload-safe recovery
+#      notes"); then perform the documented restore — operator to zero,
+#      controller to zero, the pre-upgrade snapshot copied back (the SQLite
+#      file through the restore helper Pod; the PostgreSQL dump through
+#      psql), operator back — and prove BASELINE serves the baseline
+#      incident with its audit, an empty qualification list (the rows HEAD
+#      wrote after the snapshot are gone, which is what a restore means),
+#      both coverage routes, and a read-only role on pods;
+#   6. upgrade to HEAD again on the restored store, prove the migration runs
+#      again (the baseline incident is still served, the list is still
+#      empty), drive the whole v0.5 lifecycle a second time to
+#      ReadyForApproval with a fresh four-event audit chain, and extend that
+#      chain with one more observation.
+#
+# Node layout. The agent DaemonSet runs with hostPID and owns host state under
+# hostPath /var/lib/kube-neuron (its spool), so two installations' agents on
+# ONE node share that state and are not isolated from each other: the second
+# agent crash-loops. The cluster therefore has one control-plane node plus one
+# dedicated worker PER STORE, labeled kubeneuron.io/upgrade-store=<store>;
+# every root object pins its agent there with spec.agent.nodeSelector (a
+# field the v0.5.0 baseline already honours), and that worker is the node
+# identity used for the profile, report, coverage, and qualification of that
+# store. The controllers carry no node constraint on kind (no GPU labels).
+#
+# CPU-only. No kind node has a GPU: the accelerator report is synthetic
+# evidence signed by the real agent Pod identity over real mTLS, which proves
+# store, API, and upgrade wiring, not NVIDIA/NVML/DCGM or any GPU action.
+#
+# Requirements: docker, kind, kubectl, jq, curl, openssl, gh. The baseline
+# images are pulled from the real release, so this cannot run air-gapped.
+# Docker group membership is required: `sg docker -c 'hack/kind-upgrade-rollback.sh'`
+# if the current login predates it.
+#
+# Env:
+#   BASELINE          released tag to start from (default: none, which skips
+#                     the rehearsal: v1.0.0-rc.1 is the first published
+#                     release). The steps below were written against a 0.x
+#                     baseline and must be revisited before the first run
+#                     with a 1.x one.
+#   STORES            space-separated subset of "sqlite postgres" (default: both)
+#   CLUSTER_NAME      kind cluster (default: kubeneuron-upgrade-rollback;
+#                     created if absent, deleted on exit unless KEEP_CLUSTER=1)
+#   KEEP_CLUSTER=1    retain the cluster for inspection
+#   TIMEOUT_SECONDS   per-wait timeout (default: 300)
+#   POSTGRES_IMAGE    throwaway database image (default: docker.io/library/postgres:16-alpine)
+#   KIND_BIN, KUBECTL_BIN, DOCKER_BIN, JQ_BIN  command paths
+
+# Unset or empty: no published release to start from.
+BASELINE=${BASELINE-}
+if [[ -z $BASELINE ]]; then
+	message="upgrade rehearsal: skipped, no base release"
+	echo "$message"
+	if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+		echo "$message" >> "$GITHUB_STEP_SUMMARY"
+	fi
+	exit 0
+fi
+RELEASE_REPO=${RELEASE_REPO:-kubeneuron/kubeneuron}
+LOAD_PLATFORM=${LOAD_PLATFORM:-linux/$(go env GOARCH 2>/dev/null || echo amd64)}
+CLUSTER_NAME=${CLUSTER_NAME:-kubeneuron-upgrade-rollback}
+STORES=${STORES:-sqlite postgres}
+POSTGRES_IMAGE=${POSTGRES_IMAGE:-docker.io/library/postgres:16-alpine@sha256:81e77a4833487b8132fe4b00bedd39dc3f74b8641e387f19312a48f7de218c2e}
+KIND_BIN=${KIND_BIN:-kind}
+KUBECTL_BIN=${KUBECTL_BIN:-kubectl}
+JQ_BIN=${JQ_BIN:-jq}
+PYTHON_BIN=${PYTHON_BIN:-python3} # verifies the SQLite snapshot opens (stdlib sqlite3 only)
+DOCKER_BIN=${DOCKER_BIN:-docker}
+TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-300}
+RUN_ID=${RUN_ID:-$(date -u +%Y%m%d%H%M%S)-$$}
+# The same immutable node image hack/kind-integration.sh pins.
+readonly NODE_IMAGE='kindest/node:v1.33.12@sha256:3f5c8443c620245e4d355cfe09e96a91ead32ceaa569d3f1ca9edf0cb2fe2ff4'
+
+REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+readonly OPERATOR_NS=kube-neuron
+readonly BASELINE_REGISTRY=ghcr.io/kubeneuron/kubeneuron
+readonly controllerPort=8080
+readonly agentIngressPort=8443
+readonly agentTokenAudience=kubeneuron-controller
+readonly QUAL_MIN_DURATION_SECONDS=5
+readonly PROFILE_DIGEST='sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+readonly PROFILE_DRIVER=570.1
+readonly PROFILE_RUNTIME=dcgm-4.1
+
+note() { printf 'upgrade-rollback: %s\n' "$*"; }
+die() {
+	printf 'upgrade-rollback FAIL: %s\n' "$*" >&2
+	exit 1
+}
+
+for store in $STORES; do
+	[[ $store == sqlite || $store == postgres ]] || die "STORES may only contain sqlite and postgres (got $store)"
+done
+
+root_name() { printf 'upgrade-%s' "$1"; }
+store_ns() { printf 'kubeneuron-upgrade-%s' "$1"; }
+operator_token() { printf 'upgrade-%s-operator-token' "$1"; }
+# store_node_label is the node label that dedicates one kind worker to one
+# store: the agent nodeSelector and the runtime profile both select on it.
+readonly STORE_NODE_LABEL=kubeneuron.io/upgrade-store
+# store_node / store_node_uid: the dedicated worker per store (filled in once
+# the cluster is up).
+declare -A store_node=() store_node_uid=()
+
+umask 077
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/kubeneuron-upgrade-rollback.XXXXXX")
+port_forward_pid=
+created_cluster=0
+baseline_tree=
+head_tag="upgrade-rollback-head-$RUN_ID"
+head_images_built=0
+stop_port_forward() {
+	if [[ -n $port_forward_pid ]]; then
+		kill "$port_forward_pid" >/dev/null 2>&1 || true
+		wait "$port_forward_pid" >/dev/null 2>&1 || true
+		port_forward_pid=
+	fi
+}
+cleanup() {
+	local status=$?
+	stop_port_forward
+	# Diagnostics only once this run's cluster exists and its kubeconfig is in
+	# use; before that, kubectl would just dial localhost and print
+	# connection-refused noise unrelated to the real failure.
+	if ((status != 0)) && ((created_cluster)) && [[ ${KUBECONFIG:-} == "$work_dir/kubeconfig" && -s $KUBECONFIG ]]; then
+		note "failure diagnostics follow"
+		"$KUBECTL_BIN" get nodes -L "$STORE_NODE_LABEL" 2>&1 || true
+		for store in $STORES; do
+			"$KUBECTL_BIN" get kubeneuron "$(root_name "$store")" -o yaml 2>&1 | sed -n '/^status:/,$p' || true
+			"$KUBECTL_BIN" -n "$(store_ns "$store")" get pods -o wide 2>&1 || true
+			"$KUBECTL_BIN" -n "$(store_ns "$store")" logs "deployment/$(root_name "$store")-controller" --all-containers --tail=60 2>&1 || true
+		done
+		"$KUBECTL_BIN" -n "$OPERATOR_NS" logs deployment/kubeneuron-operator --all-containers --tail=60 2>&1 || true
+	fi
+	if [[ -n $baseline_tree ]]; then
+		git -C "$REPO_ROOT" worktree remove --force "$baseline_tree" >/dev/null 2>&1 || true
+	fi
+	if ((created_cluster)) && [[ ${KEEP_CLUSTER:-0} != 1 ]]; then
+		"$KIND_BIN" delete cluster --name "$CLUSTER_NAME" >/dev/null 2>&1 || true
+	fi
+	if ((head_images_built)); then
+		# Only this run's uniquely tagged HEAD images; the retagged baseline
+		# pulls are ordinary local copies of the published release.
+		"$DOCKER_BIN" rmi "kubeneuron-operator:$head_tag" "kubeneuron-controller:$head_tag" \
+			"kubeneuron-agent:$head_tag" >/dev/null 2>&1 || true
+	fi
+	rm -rf -- "$work_dir"
+}
+trap cleanup EXIT
+
+for command in "$KIND_BIN" "$KUBECTL_BIN" "$JQ_BIN" "$DOCKER_BIN" "$PYTHON_BIN" curl openssl gh git sed grep; do
+	command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
+done
+if ! docker_version=$("$DOCKER_BIN" info --format '{{.ServerVersion}}' 2>&1); then
+	die "Docker is unavailable: $docker_version (a stale login may need: sg docker -c '$0')"
+fi
+note "run $RUN_ID: baseline $BASELINE, stores: $STORES, Docker $docker_version, kind $("$KIND_BIN" version | awk 'NR == 1 {print $2}')"
+
+# --- baseline artifacts ------------------------------------------------------
+
+note "downloading the $BASELINE release manifest and image digests"
+install_manifest="$work_dir/kubeneuron-install-$BASELINE.yaml"
+if ! gh release download "$BASELINE" -R "$RELEASE_REPO" \
+	-p "kubeneuron-install-$BASELINE.yaml" -p images.txt \
+	--dir "$work_dir" --clobber 2>/dev/null || [[ ! -s $install_manifest ]]; then
+	note "release assets unavailable for $BASELINE; building the manifest from the tag's tree"
+	baseline_tree="$work_dir/baseline-tree"
+	rm -rf "$baseline_tree"
+	if ! git -C "$REPO_ROOT" rev-parse --verify "refs/tags/$BASELINE" >/dev/null 2>&1; then
+		git -C "$REPO_ROOT" fetch --quiet "https://github.com/${RELEASE_REPO}.git" \
+			"refs/tags/${BASELINE}:refs/tags/${BASELINE}" 2>/dev/null || true
+	fi
+	git -C "$REPO_ROOT" worktree add --detach "$baseline_tree" "$BASELINE" >/dev/null 2>&1 ||
+		die "cannot check out baseline $BASELINE to build its manifest"
+	("$KUBECTL_BIN" kustomize "$baseline_tree/config/default" >"$install_manifest")
+	git -C "$REPO_ROOT" worktree remove --force "$baseline_tree" >/dev/null 2>&1 || true
+	baseline_tree=
+	: >"$work_dir/images.txt"
+fi
+[[ -s $install_manifest ]] || die "release install manifest is empty"
+
+declare -A baseline_image=()
+while IFS= read -r ref; do
+	[[ -n $ref ]] || continue
+	name=${ref%%@*}
+	baseline_image[${name##*/}]=$ref
+done <"$work_dir/images.txt"
+
+pull_baseline() {
+	local component ref
+	for component in operator controller agent; do
+		ref=${baseline_image[$component]:-}
+		[[ -n $ref ]] || return 1
+		# ONE platform, explicitly: see hack/kind-upgrade.sh pull_baseline for
+		# why a multi-arch index cannot be handed to `kind load docker-image`.
+		if ! "$DOCKER_BIN" pull --quiet --platform "$LOAD_PLATFORM" "$ref" >/dev/null 2>&1; then
+			gh auth token | "$DOCKER_BIN" login ghcr.io \
+				--username "$(gh api user -q .login)" --password-stdin >/dev/null 2>&1 || true
+			"$DOCKER_BIN" pull --quiet --platform "$LOAD_PLATFORM" "$ref" >/dev/null 2>&1 || return 1
+		fi
+		"$DOCKER_BIN" tag "$ref" "${BASELINE_REGISTRY}/${component}:${BASELINE}"
+	done
+	return 0
+}
+
+build_baseline_from_tag() {
+	note "building baseline images from git tag $BASELINE (no registry access)"
+	baseline_tree="$work_dir/baseline-src"
+	git -C "$REPO_ROOT" worktree add --detach "$baseline_tree" "$BASELINE" >/dev/null
+	local target
+	for target in operator controller agent; do
+		"$DOCKER_BIN" build --target "$target" \
+			--tag "${BASELINE_REGISTRY}/${target}:${BASELINE}" \
+			--file "$baseline_tree/build/Dockerfile" "$baseline_tree" >/dev/null
+	done
+}
+
+# load_image hands ONE single-platform image archive to kind (see
+# hack/kind-upgrade.sh load_baseline_images for the multi-arch failure this
+# avoids).
+load_image() {
+	local ref=$1 archive="$work_dir/image-load.tar"
+	"$DOCKER_BIN" save --platform "$LOAD_PLATFORM" -o "$archive" "$ref" ||
+		die "cannot export image $ref"
+	"$KIND_BIN" load image-archive "$archive" --name "$CLUSTER_NAME" >/dev/null ||
+		die "cannot load image $ref into kind"
+	rm -f "$archive"
+}
+
+note "obtaining the $BASELINE baseline images"
+if ! pull_baseline; then
+	build_baseline_from_tag
+fi
+if [[ " $STORES " == *" postgres "* ]]; then
+	note "obtaining the throwaway database image $POSTGRES_IMAGE"
+	"$DOCKER_BIN" pull --quiet --platform "$LOAD_PLATFORM" "$POSTGRES_IMAGE" >/dev/null ||
+		die "cannot pull $POSTGRES_IMAGE"
+fi
+
+# --- cluster -------------------------------------------------------------------
+
+if ! "$KIND_BIN" get clusters 2>/dev/null | grep -Fxq "$CLUSTER_NAME"; then
+	note "creating kind cluster $CLUSTER_NAME (pinned control-plane + one dedicated agent worker per store: $STORES)"
+	{
+		printf 'kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n- role: control-plane\n  image: %s\n' "$NODE_IMAGE"
+		for store in $STORES; do
+			printf -- '- role: worker\n  image: %s\n  labels:\n    %s: %s\n' "$NODE_IMAGE" "$STORE_NODE_LABEL" "$store"
+		done
+	} >"$work_dir/kind.yaml"
+	"$KIND_BIN" create cluster --name "$CLUSTER_NAME" --config "$work_dir/kind.yaml" \
+		--wait "${TIMEOUT_SECONDS}s" --kubeconfig "$work_dir/kubeconfig" >/dev/null
+	created_cluster=1
+else
+	die "cluster $CLUSTER_NAME already exists; delete it or choose another CLUSTER_NAME (this rehearsal needs a fresh store)"
+fi
+export KUBECONFIG="$work_dir/kubeconfig"
+# Same kindnetd page-cache guard as hack/kind-integration.sh: kind's 50Mi
+# limit makes kindnetd refault its binary from disk once the cluster has
+# churned for a while, and etcd on a slow disk then loses its leader.
+"$KUBECTL_BIN" -n kube-system set resources daemonset/kindnet \
+	--limits=memory=256Mi --requests=memory=50Mi >/dev/null
+"$KUBECTL_BIN" -n kube-system rollout status daemonset/kindnet --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+# Resolve each store's dedicated worker by label: exactly one node per store,
+# so the agent nodeSelector below can only ever land on that node.
+for store in $STORES; do
+	nodes=$("$KUBECTL_BIN" get nodes -l "${STORE_NODE_LABEL}=${store}" -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.uid}{"\n"}{end}')
+	[[ $(printf '%s' "$nodes" | grep -c .) -eq 1 ]] || die "[$store] want exactly one node labeled ${STORE_NODE_LABEL}=${store}, got: ${nodes:-none}"
+	store_node[$store]=${nodes%% *}
+	store_node_uid[$store]=${nodes#* }
+	[[ -n ${store_node[$store]} && -n ${store_node_uid[$store]} ]] || die "[$store] dedicated node has no name/UID"
+	note "[$store] dedicated agent node: ${store_node[$store]} (uid ${store_node_uid[$store]})"
+done
+
+note "loading baseline images into kind"
+for component in operator controller agent; do
+	load_image "${BASELINE_REGISTRY}/${component}:${BASELINE}"
+done
+if [[ " $STORES " == *" postgres "* ]]; then
+	load_image "$POSTGRES_IMAGE"
+fi
+
+# The official manifest pins the operator by digest. The image loaded into
+# kind is exactly that digest's single-platform bytes, retagged, so the only
+# rewrite is the reference style; imagePullPolicy Never then guarantees the
+# cluster can never silently substitute a registry pull for the loaded bytes.
+rewrite_operator_image() {
+	local source=$1 image=$2 target=$3
+	sed -E "s|image: ghcr\.io/kubeneuron/kubeneuron/operator[:@][A-Za-z0-9._:-]+|image: $image|" "$source" >"$target"
+	grep -Fq "image: $image" "$target" || die "operator image substitution failed for $image"
+}
+pin_operator_pull_policy() {
+	"$KUBECTL_BIN" -n "$OPERATOR_NS" patch deployment kubeneuron-operator --type=strategic \
+		-p '{"spec":{"template":{"spec":{"containers":[{"name":"operator","imagePullPolicy":"Never"}]}}}}' >/dev/null
+	"$KUBECTL_BIN" -n "$OPERATOR_NS" rollout status deployment/kubeneuron-operator \
+		--timeout="${TIMEOUT_SECONDS}s" >/dev/null
+}
+
+note "installing baseline $BASELINE (official install manifest: CRDs + RBAC + operator)"
+baseline_manifest="$work_dir/install-baseline.yaml"
+rewrite_operator_image "$install_manifest" "${BASELINE_REGISTRY}/operator:${BASELINE}" "$baseline_manifest"
+"$KUBECTL_BIN" apply -f "$baseline_manifest" >/dev/null
+pin_operator_pull_policy
+
+# --- per-store installation ------------------------------------------------------
+
+install_postgres() {
+	local ns=$1
+	local password="upgrade-postgres-$RUN_ID"
+	cat >"$work_dir/postgres-$ns.yaml" <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: $ns
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: upgrade-postgres
+  template:
+    metadata:
+      labels:
+        app: upgrade-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: $POSTGRES_IMAGE
+          imagePullPolicy: Never
+          env:
+            - name: POSTGRES_USER
+              value: kubeneuron
+            - name: POSTGRES_PASSWORD
+              value: "$password"
+            - name: POSTGRES_DB
+              value: kubeneuron
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "kubeneuron", "-d", "kubeneuron"]
+            periodSeconds: 2
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: $ns
+spec:
+  selector:
+    app: upgrade-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+EOF
+	"$KUBECTL_BIN" apply -f "$work_dir/postgres-$ns.yaml" >/dev/null
+	"$KUBECTL_BIN" -n "$ns" create secret generic upgrade-postgres-dsn \
+		--from-literal=dsn="postgres://kubeneuron:${password}@postgres.${ns}.svc:5432/kubeneuron?sslmode=disable" >/dev/null
+	"$KUBECTL_BIN" -n "$ns" rollout status deployment/postgres --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+}
+
+generate_pki() {
+	local store=$1 root=$2 ns=$3 root_uid=$4
+	local pki="$work_dir/pki-$store"
+	mkdir -m 0700 -- "$pki"
+	openssl ecparam -name prime256v1 -genkey -noout -out "$pki/server-ca.key" 2>/dev/null
+	openssl req -x509 -new -key "$pki/server-ca.key" -out "$pki/server-ca.crt" \
+		-subj "/CN=upgrade-server-ca-$store" -days 30 >/dev/null 2>&1
+	openssl ecparam -name prime256v1 -genkey -noout -out "$pki/client-ca.key" 2>/dev/null
+	openssl req -x509 -new -key "$pki/client-ca.key" -out "$pki/client-ca.crt" \
+		-subj "/CN=upgrade-client-ca-$store" -days 30 >/dev/null 2>&1
+	openssl ecparam -name prime256v1 -genkey -noout -out "$pki/server.key" 2>/dev/null
+	openssl req -new -key "$pki/server.key" -out "$pki/server.csr" \
+		-subj "/CN=${root}-controller.${ns}.svc" >/dev/null 2>&1
+	# The same four name forms hack/kind-integration.sh issues: the agent dials
+	# <root>-controller.<ns>.svc, but the short and cluster.local forms cost
+	# nothing and keep any in-cluster client that uses them from failing TLS.
+	openssl x509 -req -in "$pki/server.csr" -CA "$pki/server-ca.crt" -CAkey "$pki/server-ca.key" \
+		-CAcreateserial -out "$pki/server.crt" -days 20 \
+		-extfile <(printf 'extendedKeyUsage=serverAuth\nsubjectAltName=DNS:%s-controller,DNS:%s-controller.%s,DNS:%s-controller.%s.svc,DNS:%s-controller.%s.svc.cluster.local\n' \
+			"$root" "$root" "$ns" "$root" "$ns" "$root" "$ns") \
+		>/dev/null 2>&1
+	openssl verify -CAfile "$pki/server-ca.crt" -verify_hostname "${root}-controller.${ns}.svc" \
+		"$pki/server.crt" >/dev/null 2>&1 || die "[$store] server certificate does not verify for ${root}-controller.${ns}.svc"
+	openssl ecparam -name prime256v1 -genkey -noout -out "$pki/client.key" 2>/dev/null
+	openssl req -new -key "$pki/client.key" -out "$pki/client.csr" -subj "/" >/dev/null 2>&1
+	openssl x509 -req -in "$pki/client.csr" -CA "$pki/client-ca.crt" -CAkey "$pki/client-ca.key" \
+		-CAcreateserial -out "$pki/client.crt" -days 20 \
+		-extfile <(printf 'extendedKeyUsage=clientAuth\nsubjectAltName=URI:spiffe://kubeneuron.io/installation/%s/agent\n' "$root_uid") \
+		>/dev/null 2>&1
+	"$KUBECTL_BIN" -n "$ns" create secret tls "${root}-controller-tls" \
+		--cert="$pki/server.crt" --key="$pki/server.key" >/dev/null
+	"$KUBECTL_BIN" -n "$ns" create secret generic "${root}-controller-server-ca" \
+		--from-file=ca.crt="$pki/server-ca.crt" >/dev/null
+	"$KUBECTL_BIN" -n "$ns" create secret tls "${root}-agent-tls" \
+		--cert="$pki/client.crt" --key="$pki/client.key" >/dev/null
+	"$KUBECTL_BIN" -n "$ns" create secret generic "${root}-agent-client-ca" \
+		--from-file=ca.crt="$pki/client-ca.crt" >/dev/null
+}
+
+install_store() {
+	local store=$1
+	local root ns
+	root=$(root_name "$store")
+	ns=$(store_ns "$store")
+	note "[$store] installing baseline root object $root in namespace $ns"
+	"$KUBECTL_BIN" create namespace "$ns" >/dev/null
+	"$KUBECTL_BIN" -n "$ns" create secret generic "${root}-operator-api-token" \
+		--from-literal=token="$(operator_token "$store")" >/dev/null
+	"$KUBECTL_BIN" -n "$ns" create secret generic "${root}-webhook-token" \
+		--from-literal=token="upgrade-$store-webhook-token" >/dev/null
+	local store_spec
+	if [[ $store == postgres ]]; then
+		install_postgres "$ns"
+		store_spec=$'    type: Postgres\n    secretRef:\n      name: upgrade-postgres-dsn'
+	else
+		store_spec=$'    type: SQLite\n    sqlite:\n      size: 1Gi'
+	fi
+	cat >"$work_dir/root-$store.yaml" <<ROOT
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: ${root}-observe
+spec:
+  kubeNeuronRef: $root
+  target: GPU
+  steps:
+    - name: observe
+      action: Observe
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: ${root}-policy
+spec:
+  kubeNeuronRef: $root
+  priority: 1
+  match:
+    class: upgrade-test
+  playbookRef: ${root}-observe
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: KubeNeuron
+metadata:
+  name: $root
+spec:
+  namespace: $ns
+  controller:
+    image: ${BASELINE_REGISTRY}/controller:${BASELINE}
+  agent:
+    image: ${BASELINE_REGISTRY}/agent:${BASELINE}
+    # Pin this store's agent to its own worker: the agent owns host state
+    # under /var/lib/kube-neuron, which two installations cannot share.
+    nodeSelector:
+      ${STORE_NODE_LABEL}: ${store}
+    tolerations:
+      - operator: Exists
+  safety:
+    executionMode: DryRun
+  notifications:
+    operatorAPIToken:
+      name: ${root}-operator-api-token
+    webhookToken:
+      name: ${root}-webhook-token
+  workflowStore:
+${store_spec}
+  observability:
+    victoriaMetrics:
+      mode: External
+      endpoint: http://vmsingle-unused.${ns}.svc:8428
+    alertmanager:
+      mode: External
+      endpoint: http://alertmanager-unused.${ns}.svc:9093
+  tls:
+    serverSecretRef:
+      name: ${root}-controller-tls
+    clientCASecretRef:
+      name: ${root}-agent-client-ca
+    clientSecretRef:
+      name: ${root}-agent-tls
+    serverCASecretRef:
+      name: ${root}-controller-server-ca
+ROOT
+	"$KUBECTL_BIN" apply -f "$work_dir/root-$store.yaml" >/dev/null
+	local root_uid
+	root_uid=$("$KUBECTL_BIN" get kubeneuron "$root" -o jsonpath='{.metadata.uid}')
+	[[ -n $root_uid ]] || die "[$store] root object has no UID"
+	generate_pki "$store" "$root" "$ns" "$root_uid"
+}
+
+# wait_converged waits until the operator has observed the root object's
+# current generation and compiled its configuration, the controller
+# Deployment is fully rolled to the expected image (spec generation observed,
+# every replica updated), every controller/agent Pod runs the expected image,
+# and exactly one agent is Ready on the store's dedicated worker (a second
+# agent, or one on another node, would mean the nodeSelector was lost and the
+# host-state isolation with it). Ready on the root alone is not enough right after
+# an image patch: the operator may not have observed the new generation yet,
+# and a stale Ready=True would pass.
+#
+# SQLite additionally requires Ready=True at the current generation.
+# PostgreSQL cannot: the operator renders an active/standby pair whose
+# standby answers 503 on /readyz by design (internal/operator/resources.go
+# controllerReplicas + the /readyz readiness override), yet its
+# workloadsReady (internal/operator/reconciler.go) demands every replica
+# Available, so a Postgres root reports Ready=False/RuntimeUnavailable
+# forever. That is an operator gap this rehearsal records rather than hides:
+# for Postgres the converged state is exactly one Ready (leader) controller
+# Pod out of the rendered replica count, and Ready=True is accepted too
+# should the operator ever be fixed. Never `rollout status`: it would wait
+# on the standby.
+wait_converged() {
+	local store=$1 label=$2 controller_image=$3 agent_image=$4
+	local root ns node deadline root_json pods_json deploy_json ok
+	root=$(root_name "$store")
+	ns=$(store_ns "$store")
+	node=${store_node[$store]}
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		root_json=$("$KUBECTL_BIN" get kubeneuron "$root" -o json 2>/dev/null || true)
+		pods_json=$("$KUBECTL_BIN" -n "$ns" get pods -l "app.kubernetes.io/instance=$root" -o json 2>/dev/null || true)
+		deploy_json=$("$KUBECTL_BIN" -n "$ns" get deployment "${root}-controller" -o json 2>/dev/null || true)
+		ok=$(
+			"$JQ_BIN" -n --argjson root "${root_json:-null}" --argjson pods "${pods_json:-null}" \
+				--argjson deploy "${deploy_json:-null}" --arg store "$store" --arg node "$node" \
+				--arg controller "$controller_image" --arg agent "$agent_image" '
+				def cond($obj; $type): any($obj.status.conditions[]?; .type == $type and .status == "True");
+				($root != null and $pods != null and $deploy != null) and
+				($root.metadata.generation as $g |
+					$root.status.observedGeneration == $g and
+					any($root.status.conditions[]?; .type == "ConfigurationValid" and .status == "True" and .observedGeneration == $g) and
+					any($root.status.conditions[]?; .type == "Ready" and .observedGeneration == $g)) and
+				(($deploy.spec.replicas // 1) as $want |
+					$deploy.status.observedGeneration >= $deploy.metadata.generation and
+					$deploy.spec.template.spec.containers[0].image == $controller and
+					($deploy.status.replicas // 0) == $want and ($deploy.status.updatedReplicas // 0) == $want and
+					([$pods.items[] | select(.metadata.labels["app.kubernetes.io/component"] == "controller")] as $c |
+						($c | length) == $want and
+						all($c[]; .spec.containers[0].image == $controller and .status.phase == "Running" and .metadata.deletionTimestamp == null) and
+						([$c[] | select(cond(.; "Ready"))] | length) as $ready |
+						if $store == "sqlite" then
+							$ready == $want and cond($root; "Ready")
+						else
+							$ready == 1 or ($ready == $want and cond($root; "Ready"))
+						end)) and
+				([$pods.items[] | select(.metadata.labels["app.kubernetes.io/component"] == "agent")] as $a |
+					($a | length) == 1 and all($a[]; .spec.nodeName == $node and
+						.spec.containers[0].image == $agent and .status.phase == "Running" and
+						.metadata.deletionTimestamp == null and cond(.; "Ready")))
+			' 2>/dev/null || echo false
+		)
+		if [[ $ok == true ]]; then
+			if [[ $store == sqlite ]]; then
+				note "[$store] $label: root $root is Ready on controller $controller_image"
+			else
+				note "[$store] $label: root $root converged on controller $controller_image (root Ready=$(printf '%s' "$root_json" | "$JQ_BIN" -r '[.status.conditions[]? | select(.type == "Ready")][0].status // "absent"'); one Ready leader of $(printf '%s' "$deploy_json" | "$JQ_BIN" -r '.spec.replicas // 1') replicas)"
+			fi
+			return 0
+		fi
+		sleep 3
+	done
+	printf '%s\n' "$root_json" | "$JQ_BIN" '.status // {}' >&2 || true
+	printf '%s\n' "$deploy_json" | "$JQ_BIN" '.status // {}' >&2 || true
+	"$KUBECTL_BIN" -n "$ns" get pods -o wide >&2 || true
+	die "[$store] $label: root $root never converged on $controller_image"
+}
+
+# wait_config_digest waits until the operator has recompiled the root's
+# configuration to a digest other than $2 AND the live leader reports that
+# digest on /readyz through the current port-forward. This is what "the
+# profile is applied" means; the Deployment does not roll for a config change
+# (the ConfigMap is reloaded in place), so image/Ready checks would pass
+# trivially and prove nothing about the profile being live.
+wait_config_digest() {
+	local store=$1 previous=$2 label=$3
+	local root deadline digest='' live=''
+	root=$(root_name "$store")
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		digest=$("$KUBECTL_BIN" get kubeneuron "$root" -o jsonpath='{.status.configDigest}' 2>/dev/null || true)
+		if [[ -n $digest && $digest != "$previous" ]]; then
+			live=$(curl --silent --noproxy '*' --max-time 5 "http://127.0.0.1:${public_port}/readyz" 2>/dev/null || true)
+			if [[ $live == *"config=${digest}"* ]]; then
+				note "[$store] $label: config digest $digest is compiled and live on the leader"
+				return 0
+			fi
+		fi
+		sleep 2
+	done
+	die "[$store] $label: config digest never advanced from ${previous:-<none>} and went live (status $digest, /readyz '$live')"
+}
+
+# leader_pod prints the one Ready controller Pod (the elected leader under
+# PostgreSQL, the only Pod under SQLite).
+leader_pod() {
+	local store=$1 root ns
+	root=$(root_name "$store")
+	ns=$(store_ns "$store")
+	"$KUBECTL_BIN" -n "$ns" get pods -l "app.kubernetes.io/instance=$root,app.kubernetes.io/component=controller" -o json |
+		"$JQ_BIN" -r '[.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))][0].metadata.name // ""'
+}
+
+public_port=
+agent_port=
+start_port_forward() {
+	local store=$1 pod ns log deadline
+	stop_port_forward
+	ns=$(store_ns "$store")
+	pod=$(leader_pod "$store")
+	[[ -n $pod ]] || die "[$store] no Ready controller Pod to port-forward to"
+	log="$work_dir/port-forward-$store.log"
+	: >"$log"
+	"$KUBECTL_BIN" -n "$ns" port-forward "pod/$pod" ":${controllerPort}" ":${agentIngressPort}" >"$log" 2>&1 &
+	port_forward_pid=$!
+	deadline=$((SECONDS + 30))
+	public_port='' agent_port=''
+	while ((SECONDS < deadline)); do
+		public_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$log")
+		agent_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${agentIngressPort}$/\\1/p" "$log")
+		[[ -n $public_port && -n $agent_port ]] && return 0
+		kill -0 "$port_forward_pid" >/dev/null 2>&1 || die "[$store] port-forward to $pod exited early"
+		sleep 1
+	done
+	die "[$store] port-forward to $pod allocated no local ports"
+}
+# api runs one bounded public-API request: api <store> <curl args...>
+api() {
+	local store=$1
+	shift
+	curl --silent --show-error --noproxy '*' --max-time 10 \
+		-H "Authorization: Bearer $(operator_token "$store")" "$@"
+}
+api_code() {
+	local store=$1 out=$2
+	shift 2
+	api "$store" -o "$out" -w '%{http_code}' "$@"
+}
+qual_url() { printf 'http://127.0.0.1:%s/api/v1/runtime-contract-qualifications' "$public_port"; }
+
+coverage_url() { printf 'http://127.0.0.1:%s/api/v1/nodes/%s/runtime-contract?vendor=nvidia' "$public_port" "$1"; }
+fleet_coverage_url() { printf 'http://127.0.0.1:%s/api/v1/runtime-contracts/coverage?vendor=nvidia' "$public_port"; }
+
+# --- checkpoint coordination (v0.6) helpers ------------------------------------------
+
+# controller_pod_verbs prints the managed <root>-controller ClusterRole's grant
+# on core pods as a sorted comma-joined verb list, or a diagnostic token when
+# the role does not have exactly one narrow rule for it. "Narrow" is judged
+# the way an RBAC reviewer would: any rule whose apiGroups reach the core
+# group ("" or "*") and whose resources reach pods ("pods" or "*") counts, so
+# a broadened rule (wildcards, pods bundled with other resources, or a second
+# pods rule) fails the exact-verb comparison instead of hiding behind it.
+controller_pod_verbs() {
+	local store=$1 role_json
+	role_json=$("$KUBECTL_BIN" get clusterrole "$(root_name "$store")-controller" -o json 2>/dev/null || true)
+	[[ -n $role_json ]] || {
+		printf 'ROLE_ABSENT'
+		return 0
+	}
+	printf '%s' "$role_json" | "$JQ_BIN" -r '
+		[.rules[]? | select(
+			any(.apiGroups[]?; . == "" or . == "*") and
+			any(.resources[]?; . == "pods" or . == "*"))] as $r |
+		if ($r | length) != 1 then "PODS_RULES=\($r | length)"
+		elif $r[0].apiGroups != [""] or $r[0].resources != ["pods"] then "BROADENED=\($r[0] | tojson)"
+		elif ($r[0].resourceNames // [] | length) != 0 then "RESOURCE_NAMES=\($r[0].resourceNames | tojson)"
+		elif any($r[0].verbs[]?; . == "*") then "WILDCARD_VERBS"
+		else ($r[0].verbs | sort | join(","))
+		end'
+}
+
+# assert_pod_verbs waits (bounded) until the managed controller role's core
+# pods grant is exactly $2 and dies with the actual shape otherwise. The
+# operator ensures the ClusterRole in the same reconcile pass that publishes
+# status.configDigest, so once wait_config_digest has returned the role is
+# already in its final shape; the bounded poll is defence against an
+# apiserver cache lag, not a substitute for the digest gate.
+assert_pod_verbs() {
+	local store=$1 want=$2 label=$3 deadline actual=''
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		actual=$(controller_pod_verbs "$store")
+		if [[ $actual == "$want" ]]; then
+			note "[$store] $label: ClusterRole $(root_name "$store")-controller grants exactly [$want] on core pods"
+			return 0
+		fi
+		sleep 2
+	done
+	"$KUBECTL_BIN" get clusterrole "$(root_name "$store")-controller" -o json 2>&1 | "$JQ_BIN" '.rules' >&2 || true
+	die "[$store] $label: ClusterRole $(root_name "$store")-controller grants '$actual' on core pods, want exactly [$want]"
+}
+
+# pod_identities prints one line per managed controller/agent Pod of the
+# store — "<component> <name> <uid> <restart counts>" — sorted, so two
+# snapshots compare with a plain string test. A Pod that was rolled has a new
+# name and UID; a Pod whose container was restarted in place has the same
+# UID and a higher restart count; a Pod that was added or removed changes the
+# line count. Any of those is a rollout the policy toggle must not cause.
+# Pods being deleted are included on purpose: a terminating Pod is a rollout
+# in progress, and a snapshot that skipped it would hide exactly that.
+pod_identities() {
+	local store=$1 root ns
+	root=$(root_name "$store")
+	ns=$(store_ns "$store")
+	"$KUBECTL_BIN" -n "$ns" get pods -l "app.kubernetes.io/instance=$root" -o json |
+		"$JQ_BIN" -r '
+			[.items[] | select(.metadata.labels["app.kubernetes.io/component"] == "controller" or
+				.metadata.labels["app.kubernetes.io/component"] == "agent")
+			| "\(.metadata.labels["app.kubernetes.io/component"]) \(.metadata.name) \(.metadata.uid) \([.status.containerStatuses[]? | .restartCount] | join(","))"]
+			| sort | .[]'
+}
+
+# assert_no_pod_rollout compares the live Pod identities of the store with
+# the snapshot in $2 (a pod_identities listing) and dies on any difference.
+# It runs only after wait_config_digest has proved the toggled policy is
+# compiled and live on the leader, so "unchanged" means the operator applied
+# the change in place (ConfigMap reload, ClusterRole edit) and not that the
+# rollout simply had not started yet. A short settle poll then re-reads the
+# snapshot a few times: a rollout that the digest gate raced ahead of would
+# surface as a terminating or replacement Pod within seconds, and a Pod
+# count that drifts during the poll fails the same way.
+assert_no_pod_rollout() {
+	local store=$1 before=$2 label=$3 now i
+	for i in 1 2 3; do
+		now=$(pod_identities "$store")
+		if [[ $now != "$before" ]]; then
+			{
+				echo "--- before"
+				printf '%s\n' "$before"
+				echo "--- after"
+				printf '%s\n' "$now"
+			} >&2
+			die "[$store] $label: a controller/agent Pod was rolled, restarted, added, or removed by the policy toggle (compare UIDs and restart counts above)"
+		fi
+		((i < 3)) && sleep 2
+	done
+	note "[$store] $label: every controller/agent Pod kept its UID and restart counts ($(printf '%s\n' "$before" | grep -c .) Pods)"
+}
+
+# set_checkpoint_policy patches spec.safety.checkpointCoordination on the
+# root object: enabled=true with the store's own namespace as the explicit
+# allowlist (the CRD refuses an enabled policy without one) and waits that
+# are short but legal (defaultWait <= maxWait <= 30m), or enabled=false with
+# the block left in place, which is one of the two documented rollback
+# spellings (docs/upgrade.md: "Set enabled: false (or remove the block)").
+set_checkpoint_policy() {
+	local store=$1 enabled=$2 patch
+	patch=$("$JQ_BIN" -cn --argjson enabled "$enabled" --arg ns "$(store_ns "$store")" \
+		'{spec: {safety: {checkpointCoordination: {enabled: $enabled, defaultWait: "10s", maxWait: "30s", namespaces: [$ns]}}}}')
+	"$KUBECTL_BIN" patch kubeneuron "$(root_name "$store")" --type=merge -p "$patch" >/dev/null ||
+		die "[$store] cannot patch checkpointCoordination.enabled=$enabled onto $(root_name "$store")"
+}
+
+# --- store snapshots (docs/upgrade.md "Before any upgrade") ------------------------
+
+# snapshot_store takes the pre-upgrade backup the documented rollback restores:
+# the controller's online VACUUM INTO snapshot for SQLite (GET /api/v1/backup),
+# a plain pg_dump for PostgreSQL. Both are verified to open before the
+# upgrade starts, as the docs require. Needs the store's port-forward.
+snapshot_store() {
+	local store=$1 ns code
+	ns=$(store_ns "$store")
+	if [[ $store == sqlite ]]; then
+		code=$(api_code "$store" "$work_dir/snapshot-$store.db" "http://127.0.0.1:${public_port}/api/v1/backup")
+		[[ $code == 200 ]] || die "[$store] GET /api/v1/backup returned $code, want 200"
+		[[ "$("$PYTHON_BIN" -I -c 'import sqlite3, sys; print(sqlite3.connect(sys.argv[1]).execute("pragma integrity_check").fetchone()[0])' "$work_dir/snapshot-$store.db")" == ok ]] ||
+			die "[$store] the pre-upgrade snapshot does not pass integrity_check"
+	else
+		"$KUBECTL_BIN" -n "$ns" exec deploy/postgres -- pg_dump -U kubeneuron -d kubeneuron --no-owner >"$work_dir/snapshot-$store.sql" ||
+			die "[$store] pg_dump of the pre-upgrade store failed"
+		grep -q 'CREATE TABLE' "$work_dir/snapshot-$store.sql" || die "[$store] the pre-upgrade dump holds no tables"
+	fi
+	note "[$store] pre-upgrade snapshot taken and verified ($(wc -c <"$work_dir/snapshot-$store".*) bytes)"
+}
+
+# --- baseline install and v0.5 seed ----------------------------------------------
+
+for store in $STORES; do
+	install_store "$store"
+done
+for store in $STORES; do
+	wait_converged "$store" "baseline install" "${BASELINE_REGISTRY}/controller:${BASELINE}" "${BASELINE_REGISTRY}/agent:${BASELINE}"
+done
+
+declare -A incident_id=() incident_audit=()
+for store in $STORES; do
+	note "[$store] seeding a baseline incident through the $BASELINE operator API"
+	start_port_forward "$store"
+	code=$(api_code "$store" /dev/null -H 'Content-Type: application/json' \
+		--data-binary '{"node":"upgrade-node","class":"upgrade-test","actor":"upgrade-harness"}' \
+		"http://127.0.0.1:${public_port}/api/v1/incidents")
+	[[ $code == 202 ]] || die "[$store] manual incident returned $code, want 202"
+	id=''
+	deadline=$((SECONDS + 60))
+	while ((SECONDS < deadline)); do
+		id=$(api "$store" "http://127.0.0.1:${public_port}/api/v1/incidents?node=upgrade-node" |
+			"$JQ_BIN" -r '[.[] | select(.class == "upgrade-test")][0].id // empty')
+		[[ -n $id ]] && break
+		sleep 1
+	done
+	[[ -n $id ]] || die "[$store] seed incident never appeared"
+	incident_id[$store]=$id
+	incident_audit[$store]=$(api "$store" "http://127.0.0.1:${public_port}/api/v1/incidents/${id}" | "$JQ_BIN" '.audit | length')
+	((incident_audit[$store] >= 1)) || die "[$store] seed incident has no audit trail"
+	# The v0.5 runtime-contract routes are part of the baseline: v0.5.0 shipped
+	# them, so the rollback below must find them served, not hidden. Pin that
+	# here so a BASELINE older than v0.5.0 fails at once instead of turning
+	# the post-rollback assertions into a lie.
+	code=$(api_code "$store" "$work_dir/qual-list-baseline-$store.json" "$(qual_url)")
+	[[ $code == 200 ]] || die "[$store] baseline $BASELINE answered $code on runtime-contract-qualifications, want 200 (this rehearsal needs a v0.5.0 or later baseline)"
+	"$JQ_BIN" -e '(.items // []) | length == 0' "$work_dir/qual-list-baseline-$store.json" >/dev/null ||
+		die "[$store] baseline qualification list is not empty on a fresh store: $("$JQ_BIN" -c . "$work_dir/qual-list-baseline-$store.json")"
+	# The node route answers 404 until the agent has registered its node in
+	# the store, which can trail the agent Pod becoming Ready by a beat.
+	code=''
+	deadline=$((SECONDS + 60))
+	while ((SECONDS < deadline)); do
+		code=$(api_code "$store" "$work_dir/coverage-baseline-$store.json" "$(coverage_url "${store_node[$store]}")")
+		[[ $code == 200 ]] && break
+		sleep 2
+	done
+	[[ $code == 200 ]] || die "[$store] baseline $BASELINE answered $code on the node runtime-contract route for ${store_node[$store]}, want 200"
+	# No profile exists yet, so the baseline must report the node as
+	# uncovered rather than fabricate coverage.
+	"$JQ_BIN" -e '.verification_depth != "Full"' "$work_dir/coverage-baseline-$store.json" >/dev/null ||
+		die "[$store] baseline reports Full coverage without any profile: $("$JQ_BIN" -c . "$work_dir/coverage-baseline-$store.json")"
+	note "[$store] seeded incident $id with ${incident_audit[$store]} audit entries; baseline $BASELINE serves the v0.5 routes (empty qualification list, node not yet covered)"
+	snapshot_store "$store"
+done
+stop_port_forward
+
+# --- upgrade to HEAD ----------------------------------------------------------------
+
+note "building HEAD images from build/Dockerfile"
+for target in operator controller agent; do
+	"$DOCKER_BIN" build --target "$target" --tag "kubeneuron-$target:$head_tag" \
+		--file "$REPO_ROOT/build/Dockerfile" "$REPO_ROOT" >/dev/null
+done
+head_images_built=1
+for target in operator controller agent; do
+	load_image "kubeneuron-$target:$head_tag"
+done
+
+upgrade_to_head() {
+	local label=$1
+	note "$label step 1/2: HEAD CRDs, RBAC, and operator (docs/upgrade.md order)"
+	"$KUBECTL_BIN" apply -k "$REPO_ROOT/config/crd" >/dev/null
+	"$KUBECTL_BIN" apply -k "$REPO_ROOT/config/rbac" >/dev/null
+	rewrite_operator_image "$REPO_ROOT/config/default/operator_deployment.yaml" \
+		"kubeneuron-operator:$head_tag" "$work_dir/operator-head.yaml"
+	"$KUBECTL_BIN" apply -f "$work_dir/operator-head.yaml" >/dev/null
+	pin_operator_pull_policy
+	note "$label step 2/2: controller/agent images on every root object"
+	local store
+	for store in $STORES; do
+		"$KUBECTL_BIN" patch kubeneuron "$(root_name "$store")" --type=merge -p "{
+  \"spec\": {
+    \"controller\": {\"image\": \"kubeneuron-controller:$head_tag\"},
+    \"agent\":      {\"image\": \"kubeneuron-agent:$head_tag\"}
+  }
+}" >/dev/null
+	done
+	for store in $STORES; do
+		wait_converged "$store" "$label" "kubeneuron-controller:$head_tag" "kubeneuron-agent:$head_tag"
+	done
+}
+
+rollback_images_to_baseline() {
+	# Patch every root object back to the previous images. The operator and
+	# CRDs stay at HEAD (the separate "Operator/CRDs" path re-applies the
+	# previous install manifest; not what this rehearsal claims), and every
+	# new policy block has already been switched off through the CR, so the
+	# HEAD operator compiles nothing the BASELINE controller does not know.
+	# What the BASELINE controller cannot cross is the store: v0.8 migrated it
+	# forward, and the old binary must refuse it rather than downgrade it.
+	note "rollback: controller/agent images back to $BASELINE on every root object (CRDs, operator untouched; the store still carries the v0.8 schema)"
+	local store
+	for store in $STORES; do
+		"$KUBECTL_BIN" patch kubeneuron "$(root_name "$store")" --type=merge -p "{
+  \"spec\": {
+    \"controller\": {\"image\": \"${BASELINE_REGISTRY}/controller:${BASELINE}\"},
+    \"agent\":      {\"image\": \"${BASELINE_REGISTRY}/agent:${BASELINE}\"}
+  }
+}" >/dev/null
+	done
+}
+
+# wait_schema_refusal waits until a BASELINE controller Pod of the store has
+# logged the forward-only schema refusal. The Pod crash-loops, so the line
+# may sit in the current or the previous container log.
+wait_schema_refusal() {
+	local store=$1 root ns deadline pod line=''
+	root=$(root_name "$store")
+	ns=$(store_ns "$store")
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		for pod in $("$KUBECTL_BIN" -n "$ns" get pods -l "app.kubernetes.io/instance=$root,app.kubernetes.io/component=controller" 			-o jsonpath="{range .items[?(@.spec.containers[0].image=='${BASELINE_REGISTRY}/controller:${BASELINE}')]}{.metadata.name}{'\n'}{end}" 2>/dev/null); do
+			line=$({ "$KUBECTL_BIN" -n "$ns" logs "pod/$pod" --tail=200 2>/dev/null; "$KUBECTL_BIN" -n "$ns" logs "pod/$pod" --previous --tail=200 2>/dev/null; } |
+				grep -oE 'schema version [0-9]+ is newer than this binary'"'"'s [0-9]+[^"]*' | head -n 1 || true)
+			if [[ -n $line ]]; then
+				note "[$store] $BASELINE refuses the v0.8 store as documented: $line"
+				return 0
+			fi
+		done
+		sleep 3
+	done
+	"$KUBECTL_BIN" -n "$ns" get pods -o wide >&2 || true
+	die "[$store] no $BASELINE controller Pod logged the forward-only schema refusal within ${TIMEOUT_SECONDS}s"
+}
+
+# scale_operator <replicas> scales the shared operator and waits for its Pods
+# to match: the operator owns every controller Deployment's replica count,
+# so a restore must stop it first (docs/operations.md, restore step 0) and
+# restart it to bring the controllers back (step 4).
+scale_operator() {
+	local replicas=$1 selector deadline n
+	"$KUBECTL_BIN" -n "$OPERATOR_NS" scale deploy/kubeneuron-operator --replicas="$replicas" >/dev/null
+	selector=$("$KUBECTL_BIN" -n "$OPERATOR_NS" get deploy/kubeneuron-operator -o json |
+		"$JQ_BIN" -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		n=$("$KUBECTL_BIN" -n "$OPERATOR_NS" get pods -l "$selector" --field-selector=status.phase=Running -o name 2>/dev/null | grep -c . || true)
+		if ((replicas == 0)); then
+			(("$("$KUBECTL_BIN" -n "$OPERATOR_NS" get pods -l "$selector" -o name 2>/dev/null | grep -c . || true)" == 0)) && return 0
+		else
+			((n == replicas)) && return 0
+		fi
+		sleep 2
+	done
+	die "operator did not reach $replicas replica(s) within ${TIMEOUT_SECONDS}s"
+}
+
+# restore_store performs the documented restore of the pre-upgrade snapshot
+# with the operator already stopped: controller to zero, the snapshot copied
+# back, the controller left at zero for the operator to restore.
+restore_store() {
+	local store=$1 root ns helper
+	root=$(root_name "$store")
+	ns=$(store_ns "$store")
+	note "[$store] restore: controller to zero, then the pre-upgrade snapshot back into the store"
+	"$KUBECTL_BIN" -n "$ns" scale "deploy/${root}-controller" --replicas=0 >/dev/null
+	"$KUBECTL_BIN" -n "$ns" wait --for=delete pod -l "app.kubernetes.io/instance=$root,app.kubernetes.io/component=controller" --timeout="${TIMEOUT_SECONDS}s" >/dev/null 2>&1 || true
+	[[ "$("$KUBECTL_BIN" -n "$ns" get pods -l "app.kubernetes.io/instance=$root,app.kubernetes.io/component=controller" -o name | grep -c . || true)" == 0 ]] ||
+		die "[$store] controller Pods still present after scaling to zero"
+	if [[ $store == sqlite ]]; then
+		"$KUBECTL_BIN" -n "$ns" get pvc "${root}-controller-state" >/dev/null || die "[$store] PVC ${root}-controller-state not found"
+		helper="$work_dir/restore-helper-$store.yaml"
+		sed "s/claimName: kubeneuron-controller-state/claimName: ${root}-controller-state/" "$REPO_ROOT/deploy/kubernetes/backup/restore-helper.yaml" >"$helper"
+		grep -q "claimName: ${root}-controller-state" "$helper" || die "[$store] restore-helper.yaml no longer names the default claim; update the rehearsal"
+		"$KUBECTL_BIN" -n "$ns" apply -f "$helper" >/dev/null
+		"$KUBECTL_BIN" -n "$ns" wait --for=condition=Ready pod/kubeneuron-restore-helper --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+		"$KUBECTL_BIN" -n "$ns" cp "$work_dir/snapshot-$store.db" kubeneuron-restore-helper:/state/kubeneuron.db
+		"$KUBECTL_BIN" -n "$ns" exec kubeneuron-restore-helper -- sh -c 'rm -f /state/kubeneuron.db-wal /state/kubeneuron.db-shm && test -s /state/kubeneuron.db' ||
+			die "[$store] the restored file is missing or empty in the state volume"
+		"$KUBECTL_BIN" -n "$ns" delete pod kubeneuron-restore-helper --wait=true >/dev/null
+	else
+		"$KUBECTL_BIN" -n "$ns" exec deploy/postgres -- sh -c 'dropdb -U kubeneuron --if-exists --force kubeneuron && createdb -U kubeneuron kubeneuron' >/dev/null ||
+			die "[$store] could not recreate the database before the restore"
+		"$KUBECTL_BIN" -n "$ns" exec -i deploy/postgres -- psql -q -U kubeneuron -d kubeneuron -v ON_ERROR_STOP=1 <"$work_dir/snapshot-$store.sql" >/dev/null ||
+			die "[$store] psql restore of the pre-upgrade dump failed"
+	fi
+}
+
+upgrade_to_head "upgrade"
+
+# --- v0.5 lifecycle per store ----------------------------------------------------------
+
+# post_report signs a synthetic accelerator report with the real agent Pod
+# identity (Pod-bound ServiceAccount token + installation client certificate
+# over mTLS) acknowledging the live profile. No node_uid on the wire: the
+# controller stamps it from the identity and rejects a supplied one.
+post_report() {
+	local store=$1 profile_uid=$2 profile_generation=$3
+	local root ns agent_pod token_file header_file report_file code
+	root=$(root_name "$store")
+	ns=$(store_ns "$store")
+	# component=agent, not kubeneuron.io/agent=true: v0.7.0 agents carry no
+	# such label, and no node here is an accelerator node, so no journal DaemonSet.
+	agent_pod=$("$KUBECTL_BIN" -n "$ns" get pods -l "app.kubernetes.io/instance=$root,app.kubernetes.io/component=agent" \
+		--field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+	[[ -n $agent_pod ]] || die "[$store] no running agent Pod"
+	token_file="$work_dir/agent-token-$store"
+	"$KUBECTL_BIN" -n "$ns" create token "${root}-agent" --audience="$agentTokenAudience" --duration=10m \
+		--bound-object-kind=Pod --bound-object-name="$agent_pod" >"$token_file"
+	header_file="$work_dir/agent-header-$store"
+	printf 'Authorization: Bearer %s\n' "$(tr -d '\r\n' <"$token_file")" >"$header_file"
+	report_file="$work_dir/report-$store.json"
+	cat >"$report_file" <<EOF
+{
+  "node": "${store_node[$store]}",
+  "vendor": "nvidia",
+  "observed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "devices": [
+    {"id": "GPU-upgrade-00000000-0000-0000-0000-000000000000", "kind": "physical", "family": "gpu", "model": "kind-synthetic-cpu-only"}
+  ],
+  "driver_version": "${PROFILE_DRIVER}",
+  "runtime_version": "${PROFILE_RUNTIME}",
+  "topology_safety": "verified-unpartitioned",
+  "capabilities": [{"action": "reset-device", "scopes": ["physical-device"]}],
+  "readiness": "ready",
+  "profile_digest": "${PROFILE_DIGEST}",
+  "profile_uid": "${profile_uid}",
+  "profile_generation": ${profile_generation},
+  "device_holders": []
+}
+EOF
+	local service_dns="${root}-controller.${ns}.svc" pki="$work_dir/pki-$store"
+	code=$(curl --silent --show-error --noproxy '*' --max-time 10 \
+		--resolve "${service_dns}:${agent_port}:127.0.0.1" \
+		--cacert "$pki/server-ca.crt" --cert "$pki/client.crt" --key "$pki/client.key" \
+		-H "@$header_file" -H 'Content-Type: application/json' --data-binary "@$report_file" \
+		-o "$work_dir/report-response-$store" -w '%{http_code}' \
+		"https://${service_dns}:${agent_port}/api/v1/agents/accelerators/report-v1")
+	[[ $code == 204 ]] || {
+		sed -n '1,20p' "$work_dir/report-response-$store" >&2
+		die "[$store] synthetic accelerator report returned $code, want 204"
+	}
+}
+
+# wait_full_coverage polls the read-only coverage route until the node reads
+# Exact/FreshCompatible/Full and leaves the response in $1.
+wait_full_coverage() {
+	local store=$1 out=$2 label=$3 node deadline code=''
+	node=${store_node[$store]}
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		code=$(api_code "$store" "$out" "http://127.0.0.1:${public_port}/api/v1/nodes/${node}/runtime-contract?vendor=nvidia")
+		if [[ $code == 200 ]] && "$JQ_BIN" -e '.selection == "Exact" and .attestation == "FreshCompatible" and .verification_depth == "Full" and (.reasons // [] | length) == 0' "$out" >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 2
+	done
+	"$JQ_BIN" . "$out" >&2 2>/dev/null || sed -n '1,20p' "$out" >&2
+	die "[$store] $label: coverage for $node never became Exact/FreshCompatible/Full (last HTTP $code)"
+}
+
+# observe posts one observation bound to the version in qual_version[store],
+# leaves the response in $2, and advances qual_version.
+declare -A qual_id=() qual_version=() profile_uid=() profile_generation=()
+observe() {
+	local store=$1 out=$2 key=$3 code
+	code=$(api_code "$store" "$out" -H 'Content-Type: application/json' \
+		-H "Idempotency-Key: upgrade-rollback-${RUN_ID}-${store}-observe-${LIFECYCLE_PASS}-${key}" \
+		--data-binary "{\"actor\":\"upgrade-harness\",\"resource_version\":${qual_version[$store]}}" \
+		"$(qual_url)/${qual_id[$store]}/observe")
+	[[ $code == 200 ]] || {
+		sed -n '1,20p' "$out" >&2
+		die "[$store] observe ($key) returned $code, want 200"
+	}
+	qual_version[$store]=$("$JQ_BIN" -r '.resource_version // 0' "$out")
+	"$JQ_BIN" -e '.observations[-1].successful == true' "$out" >/dev/null || {
+		"$JQ_BIN" '.observations[-1]' "$out" >&2
+		die "[$store] observation ($key) was not a successful Full sample"
+	}
+}
+audit_events() {
+	local store=$1 out=$2 code
+	code=$(api_code "$store" "$out" \
+		"http://127.0.0.1:${public_port}/api/v1/audit-events?kind=runtime-contract-qualification&resource_id=${qual_id[$store]}&limit=50")
+	[[ $code == 200 ]] || {
+		sed -n '1,20p' "$out" >&2
+		die "[$store] audit-events for qualification ${qual_id[$store]} returned $code, want 200"
+	}
+}
+audit_actions() { "$JQ_BIN" -r '[.items[]? | .action] | join(",")' "$1"; }
+
+# drive_v05_lifecycle <pass> runs the v0.5 runtime contract lifecycle on every
+# store through the public API, up to ReadyForApproval with a four-event audit
+# chain. The first pass creates the profile; the second (after the restore and
+# the re-upgrade) finds it still in the cluster, since the profile is a CR,
+# not a store row, and only drives the store-side rows again.
+LIFECYCLE_PASS=first
+drive_v05_lifecycle() {
+	LIFECYCLE_PASS=$1
+	local store root profile_name node node_uid digest_before coverage_file create_file expires_at code actions
+for store in $STORES; do
+	root=$(root_name "$store")
+	profile_name="${root}-profile"
+	node=${store_node[$store]}
+	node_uid=${store_node_uid[$store]}
+	# The profile selects on the same store label that pins the agent, so it
+	# covers exactly this store's dedicated worker and no other node.
+	note "[$store] v0.5 lifecycle ($LIFECYCLE_PASS pass): profile $profile_name selects $node via ${STORE_NODE_LABEL}=${store}"
+	start_port_forward "$store"
+	if [[ $LIFECYCLE_PASS == first ]]; then
+	digest_before=$("$KUBECTL_BIN" get kubeneuron "$root" -o jsonpath='{.status.configDigest}')
+	[[ -n $digest_before ]] || die "[$store] root $root has no compiled configDigest before the profile"
+	cat >"$work_dir/profile-$store.yaml" <<EOF
+apiVersion: kubeneuron.io/v1alpha1
+kind: AcceleratorRuntimeProfile
+metadata:
+  name: ${profile_name}
+spec:
+  kubeNeuronRef: ${root}
+  vendor: nvidia
+  nodeSelector:
+    matchLabels:
+      ${STORE_NODE_LABEL}: ${store}
+  profileDigest: ${PROFILE_DIGEST}
+  driverVersion: "${PROFILE_DRIVER}"
+  runtimeVersion: ${PROFILE_RUNTIME}
+  maxReportAge: 10m
+  allowedActions:
+    - action: reset-device
+      scopes:
+        - physical-device
+      requireVerifiedUnpartitionedTopology: true
+EOF
+	"$KUBECTL_BIN" apply -f "$work_dir/profile-$store.yaml" >/dev/null
+	profile_uid[$store]=$("$KUBECTL_BIN" get acceleratorruntimeprofile "$profile_name" -o jsonpath='{.metadata.uid}')
+	profile_generation[$store]=$("$KUBECTL_BIN" get acceleratorruntimeprofile "$profile_name" -o jsonpath='{.metadata.generation}')
+	[[ -n ${profile_uid[$store]} && ${profile_generation[$store]:-0} -gt 0 ]] || die "[$store] profile $profile_name has no UID/generation"
+	# The profile changes the compiled configuration without rolling any Pod;
+	# wait until the recompiled digest is live on the leader before judging
+	# coverage (or creating a qualification) against a stale snapshot.
+	wait_config_digest "$store" "$digest_before" "profile applied"
+	else
+		[[ -n ${profile_uid[$store]} ]] || die "[$store] second pass without a profile from the first"
+		[[ "$("$KUBECTL_BIN" get acceleratorruntimeprofile "$profile_name" -o jsonpath='{.metadata.uid}')" == "${profile_uid[$store]}" ]] ||
+			die "[$store] profile $profile_name changed identity across the rollback cycle"
+	fi
+
+	post_report "$store" "${profile_uid[$store]}" "${profile_generation[$store]}"
+	coverage_file="$work_dir/coverage-$store.json"
+	wait_full_coverage "$store" "$coverage_file" "post-upgrade"
+	"$JQ_BIN" -e --arg node "$node" --arg uid "$node_uid" --arg p "$profile_name" --arg puid "${profile_uid[$store]}" \
+		'.node_name == $node and .node_uid == $uid and .profile_name == $p and .profile_uid == $puid' "$coverage_file" >/dev/null ||
+		die "[$store] coverage identity mismatch: $("$JQ_BIN" -c '{node_name, node_uid, profile_name, profile_uid}' "$coverage_file")"
+	note "[$store] coverage: $("$JQ_BIN" -r '.summary' "$coverage_file")"
+
+	create_file="$work_dir/qual-create-$store.json"
+	# The expiry window must outlast the whole rehearsal with room to spare.
+	# effective_state, expired, expiry_pending, ready_for_approval, and summary
+	# are all computed from the clock against expires_at at read time, so an
+	# expiry during the cycle would break the byte-identical comparison below
+	# and turn the post-re-upgrade observation into an `expire` transition
+	# (docs/upgrade.md: "the first observation after that records Expired if
+	# the window has passed"). One hour is not enough margin for four image
+	# rollouts across two stores; the ceiling is 30 days.
+	expires_at=$(date -u -d '+12 hours' +%Y-%m-%dT%H:%M:%SZ)
+	code=$(api_code "$store" "$create_file" -H 'Content-Type: application/json' \
+		-H "Idempotency-Key: upgrade-rollback-${RUN_ID}-${store}-create-${LIFECYCLE_PASS}" \
+		--data-binary "{\"actor\":\"upgrade-harness\",\"nodes\":[\"${node}\"],\"vendor\":\"nvidia\",\"requirements\":{\"min_samples\":1,\"min_duration\":\"${QUAL_MIN_DURATION_SECONDS}s\"},\"expires_at\":\"${expires_at}\"}" \
+		"$(qual_url)")
+	[[ $code == 201 ]] || {
+		sed -n '1,20p' "$create_file" >&2
+		die "[$store] qualification create returned $code, want 201"
+	}
+	qual_id[$store]=$("$JQ_BIN" -r '.id // ""' "$create_file")
+	qual_version[$store]=$("$JQ_BIN" -r '.resource_version // 0' "$create_file")
+	[[ -n ${qual_id[$store]} && ${qual_version[$store]} -gt 0 ]] || die "[$store] qualification create returned no id/version"
+	"$JQ_BIN" -e --arg uid "$node_uid" --arg puid "${profile_uid[$store]}" '
+		.state == "Observing" and .effective_state == "Observing" and .ready_for_approval == false and
+		.successful_samples == 0 and .total_observations == 0 and
+		(.cohort | length) == 1 and .cohort[0].uid == $uid and .profile.uid == $puid and
+		.initial_coverage[0].verification_depth == "Full"' "$create_file" >/dev/null || {
+		"$JQ_BIN" . "$create_file" >&2
+		die "[$store] created qualification ${qual_id[$store]} is not a fresh Observing record over $node"
+	}
+	sleep "$QUAL_MIN_DURATION_SECONDS"
+	observe "$store" "$work_dir/qual-observe1-$store.json" first
+	"$JQ_BIN" -e '.successful_samples == 1 and .state == "Observing"' "$work_dir/qual-observe1-$store.json" >/dev/null ||
+		die "[$store] after the first sample: $("$JQ_BIN" -c '{successful_samples, state}' "$work_dir/qual-observe1-$store.json"), want 1/Observing"
+	sleep "$QUAL_MIN_DURATION_SECONDS"
+	observe "$store" "$work_dir/qual-observe2-$store.json" second
+	"$JQ_BIN" -e '.successful_samples == 2 and .state == "ReadyForApproval" and .effective_state == "ReadyForApproval" and .ready_for_approval == true' \
+		"$work_dir/qual-observe2-$store.json" >/dev/null ||
+		die "[$store] after the second sample: $("$JQ_BIN" -c '{successful_samples, state, effective_state, ready_for_approval}' "$work_dir/qual-observe2-$store.json"), want 2/ReadyForApproval"
+
+	# Snapshots the rollback and re-upgrade are judged against. evaluated_at
+	# is the read-time clock and legitimately differs per read.
+	code=$(api_code "$store" "$work_dir/qual-before-$store.json" "$(qual_url)/${qual_id[$store]}")
+	[[ $code == 200 ]] || die "[$store] qualification GET returned $code, want 200"
+	"$JQ_BIN" -S 'del(.evaluated_at)' "$work_dir/qual-before-$store.json" >"$work_dir/qual-before-$store.canonical.json"
+	audit_events "$store" "$work_dir/audit-before-$store.json"
+	actions=$(audit_actions "$work_dir/audit-before-$store.json")
+	[[ $actions == "create,observe,observe,ready" ]] || {
+		"$JQ_BIN" -c '[.items[]? | {action, actor, result}]' "$work_dir/audit-before-$store.json" >&2
+		die "[$store] audit actions were '$actions', want create,observe,observe,ready"
+	}
+	"$JQ_BIN" -S '.items' "$work_dir/audit-before-$store.json" >"$work_dir/audit-before-$store.canonical.json"
+	"$JQ_BIN" -e '[.items[] | .hash] | length == 4 and (unique | length) == 4' "$work_dir/audit-before-$store.json" >/dev/null ||
+		die "[$store] audit chain hashes are not four distinct values"
+	note "[$store] qualification ${qual_id[$store]} is ReadyForApproval at resource_version ${qual_version[$store]} with audit create,observe,observe,ready"
+done
+stop_port_forward
+}
+drive_v05_lifecycle first
+
+# --- v0.6 checkpoint coordination policy per store ----------------------------------------
+
+# The policy is exercised on HEAD and switched back off BEFORE any image
+# moves, which is the rollback order docs/upgrade.md prescribes. Every state
+# is judged only after the recompiled configuration is live on the leader
+# (wait_config_digest): a config change is supposed to roll no Pod, so a
+# Deployment or Ready check would pass trivially and prove nothing about the
+# policy — and "rolls no Pod" is itself asserted, not assumed: the Pod
+# identities (UID, restart counts) snapshotted before the first toggle must
+# be unchanged after enable and again after disable.
+declare -A digest_policy_off=() pods_policy_off=()
+for store in $STORES; do
+	root=$(root_name "$store")
+	ns=$(store_ns "$store")
+	note "[$store] v0.6 checkpoint coordination: default off, enable, disable, on root $root"
+	start_port_forward "$store"
+	# 1. Absent block: the upgrade alone must have granted nothing.
+	"$JQ_BIN" -e '.spec.safety.checkpointCoordination == null' <<<"$("$KUBECTL_BIN" get kubeneuron "$root" -o json)" >/dev/null ||
+		die "[$store] root $root carries a checkpointCoordination block before this rehearsal set one"
+	assert_pod_verbs "$store" "get,list,watch" "policy absent after upgrade"
+	digest_policy_off[$store]=$("$KUBECTL_BIN" get kubeneuron "$root" -o jsonpath='{.status.configDigest}')
+	[[ -n ${digest_policy_off[$store]} ]] || die "[$store] root $root has no compiled configDigest before the policy"
+	# The Pod identities the two toggles are judged against. wait_converged
+	# has just proved the upgrade rollout finished (every replica updated,
+	# nothing terminating), so this is a settled set, not a mid-rollout one.
+	pods_policy_off[$store]=$(pod_identities "$store")
+	[[ $(printf '%s\n' "${pods_policy_off[$store]}" | grep -c '^controller ') -ge 1 && $(printf '%s\n' "${pods_policy_off[$store]}" | grep -c '^agent ') -eq 1 ]] ||
+		die "[$store] unexpected managed Pod set before the policy: ${pods_policy_off[$store]:-none}"
+
+	# 2. The CRD's own guard: an enabled policy without an allowlist is refused
+	# by admission (server-side dry run, nothing persisted), so a fleet-wide
+	# self-declaration can never arrive by a typo.
+	rejected=$("$KUBECTL_BIN" patch kubeneuron "$root" --type=merge --dry-run=server \
+		-p '{"spec":{"safety":{"checkpointCoordination":{"enabled":true}}}}' 2>&1 || true)
+	grep -Fq 'non-empty namespaces allowlist' <<<"$rejected" ||
+		die "[$store] an enabled policy without namespaces was not refused by the CRD: ${rejected:-accepted}"
+
+	# 3. Enable with this installation's own namespace as the allowlist.
+	set_checkpoint_policy "$store" true
+	wait_config_digest "$store" "${digest_policy_off[$store]}" "checkpoint policy enabled"
+	digest_policy_on=$("$KUBECTL_BIN" get kubeneuron "$root" -o jsonpath='{.status.configDigest}')
+	root_json=$("$KUBECTL_BIN" get kubeneuron "$root" -o json)
+	"$JQ_BIN" -e --arg ns "$ns" '
+		.metadata.generation as $g |
+		.status.observedGeneration == $g and
+		any(.status.conditions[]?; .type == "ConfigurationValid" and .status == "True" and .observedGeneration == $g) and
+		.spec.safety.checkpointCoordination.enabled == true and
+		.spec.safety.checkpointCoordination.namespaces == [$ns]' <<<"$root_json" >/dev/null ||
+		die "[$store] root $root did not compile the enabled policy at its current generation: $("$JQ_BIN" -c '{generation: .metadata.generation, policy: .spec.safety.checkpointCoordination, status}' <<<"$root_json")"
+	assert_pod_verbs "$store" "get,list,patch,watch" "policy enabled"
+	assert_no_pod_rollout "$store" "${pods_policy_off[$store]}" "policy enabled"
+
+	# 4. Disable again: a new digest goes live, and the role returns to
+	# read-only before any image is rolled. An explicit enabled=false compiles
+	# to exactly what an absent block does (internal/operator/config_snapshot.go
+	# checkpointCoordination), so the digest must return to its pre-policy value.
+	set_checkpoint_policy "$store" false
+	wait_config_digest "$store" "$digest_policy_on" "checkpoint policy disabled"
+	digest_after=$("$KUBECTL_BIN" get kubeneuron "$root" -o jsonpath='{.status.configDigest}')
+	[[ $digest_after == "${digest_policy_off[$store]}" ]] ||
+		die "[$store] disabling the policy compiled digest $digest_after, want the pre-policy digest ${digest_policy_off[$store]} (an explicit enabled=false must compile like an absent block)"
+	assert_pod_verbs "$store" "get,list,watch" "policy disabled before rollback"
+	assert_no_pod_rollout "$store" "${pods_policy_off[$store]}" "policy disabled"
+	logs=$("$KUBECTL_BIN" -n "$ns" logs "pod/$(leader_pod "$store")" --tail=-1 2>&1)
+	if grep -Eiq 'panic|fatal' <<<"$logs"; then
+		die "[$store] controller logs contain a panic/fatal line after the checkpoint policy cycle"
+	fi
+	note "[$store] checkpoint policy cycle: role patch granted only while enabled (digests ${digest_policy_off[$store]} -> $digest_policy_on -> $digest_after), no Pod rolled or restarted by either toggle"
+done
+stop_port_forward
+
+# --- v0.8 workload-safe blocks per store ---------------------------------------------------
+
+# The v0.8 blocks (advisory and groups inside checkpointCoordination, the
+# impact preview with its three read-only context resolvers) are exercised on
+# HEAD the same way and switched off BEFORE any image moves — the order
+# docs/upgrade.md "v0.8.0 workload-safe recovery notes" prescribes. What is
+# judged: the upgrade alone granted nothing on batch, kueue.x-k8s.io or
+# ray.io; the CRD refuses the preview's requireForApproval without the
+# preview, and an advisory inside a disabled coordination block; enabling
+# everything compiles a new digest, grants exactly get/list/watch on the three
+# context groups beside the Phase 1 pods patch, and rolls no Pod; disabling
+# everything returns the digest to its pre-policy value and the role to its
+# pre-policy shape. The rows the preview would write need a parked incident
+# and are covered by the kind integration gate; here the question is only
+# whether the store and the role move back cleanly before the baseline binary
+# returns.
+controller_context_groups() {
+	local store=$1 role_json
+	role_json=$("$KUBECTL_BIN" get clusterrole "$(root_name "$store")-controller" -o json 2>/dev/null || true)
+	[[ -n $role_json ]] || { printf 'ROLE_ABSENT'; return 0; }
+	printf '%s' "$role_json" | "$JQ_BIN" -r '
+		[.rules[]? | select(any(.apiGroups[]?; . == "batch" or . == "kueue.x-k8s.io" or . == "ray.io"))
+		| "\(.apiGroups | join(","))=\(.resources | sort | join(","))[\(.verbs | sort | join(","))]"] | sort | join(";")'
+}
+assert_context_groups() {
+	local store=$1 want=$2 label=$3 deadline actual=''
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		actual=$(controller_context_groups "$store")
+		if [[ $actual == "$want" ]]; then
+			note "[$store] $label: ClusterRole $(root_name "$store")-controller context rules are exactly [${want:-none}]"
+			return 0
+		fi
+		sleep 2
+	done
+	die "[$store] $label: ClusterRole $(root_name "$store")-controller context rules are '$actual', want exactly [${want:-none}]"
+}
+readonly CONTEXT_RULES_ALL='batch=jobs[get,list,watch];kueue.x-k8s.io=clusterqueues,localqueues,workloads[get,list,watch];ray.io=rayclusters,rayjobs[get,list,watch]'
+set_workload_safe_policy() {
+	# set_workload_safe_policy <store> <true|false>: every v0.8 block at once,
+	# enabled=false left in place (the documented rollback spelling).
+	local store=$1 enabled=$2 patch
+	patch=$("$JQ_BIN" -cn --argjson enabled "$enabled" --arg ns "$(store_ns "$store")" '{spec: {safety: {
+		checkpointCoordination: {enabled: $enabled, defaultWait: "10s", maxWait: "30s", namespaces: [$ns],
+			advisory: {enabled: $enabled, budget: "5s"}, groups: {enabled: $enabled, maxGroupSize: 8, crossNode: false}},
+		impactPreview: {enabled: $enabled, budget: "10s", maxItems: 50, requireForApproval: $enabled,
+			workloadContext: {batchJobs: $enabled, kueue: $enabled, kuberay: $enabled}}}}}')
+	"$KUBECTL_BIN" patch kubeneuron "$(root_name "$store")" --type=merge -p "$patch" >/dev/null ||
+		die "[$store] cannot patch the v0.8 blocks (enabled=$enabled) onto $(root_name "$store")"
+}
+for store in $STORES; do
+	root=$(root_name "$store")
+	ns=$(store_ns "$store")
+	note "[$store] v0.8 workload-safe blocks: default off, enable, disable, on root $root"
+	start_port_forward "$store"
+	"$JQ_BIN" -e '.spec.safety.impactPreview == null and .spec.safety.checkpointCoordination.advisory == null and .spec.safety.checkpointCoordination.groups == null' \
+		<<<"$("$KUBECTL_BIN" get kubeneuron "$root" -o json)" >/dev/null ||
+		die "[$store] root $root carries a v0.8 block before this rehearsal set one"
+	assert_context_groups "$store" "" "v0.8 blocks absent after upgrade"
+	assert_pod_verbs "$store" "get,list,watch" "v0.8 blocks absent after upgrade"
+	# CEL guards, server-side dry run: nothing persisted.
+	rejected=$("$KUBECTL_BIN" patch kubeneuron "$root" --type=merge --dry-run=server \
+		-p '{"spec":{"safety":{"impactPreview":{"requireForApproval":true}}}}' 2>&1 || true)
+	grep -Fq 'requireForApproval requires impactPreview.enabled' <<<"$rejected" ||
+		die "[$store] requireForApproval without the preview was not refused by the CRD: ${rejected:-accepted}"
+	rejected=$("$KUBECTL_BIN" patch kubeneuron "$root" --type=merge --dry-run=server \
+		-p '{"spec":{"safety":{"checkpointCoordination":{"enabled":false,"advisory":{"enabled":true}}}}}' 2>&1 || true)
+	grep -Fq 'advisory.enabled requires checkpointCoordination.enabled' <<<"$rejected" ||
+		die "[$store] an advisory inside a disabled coordination block was not refused by the CRD: ${rejected:-accepted}"
+
+	set_workload_safe_policy "$store" true
+	wait_config_digest "$store" "${digest_policy_off[$store]}" "v0.8 blocks enabled"
+	digest_v08_on=$("$KUBECTL_BIN" get kubeneuron "$root" -o jsonpath='{.status.configDigest}')
+	root_json=$("$KUBECTL_BIN" get kubeneuron "$root" -o json)
+	"$JQ_BIN" -e '
+		.metadata.generation as $g |
+		.status.observedGeneration == $g and
+		any(.status.conditions[]?; .type == "ConfigurationValid" and .status == "True" and .observedGeneration == $g) and
+		.spec.safety.impactPreview.enabled == true and .spec.safety.impactPreview.requireForApproval == true and
+		.spec.safety.checkpointCoordination.advisory.enabled == true and .spec.safety.checkpointCoordination.groups.enabled == true' <<<"$root_json" >/dev/null ||
+		die "[$store] root $root did not compile the v0.8 blocks at its current generation: $("$JQ_BIN" -c '{generation: .metadata.generation, safety: .spec.safety, status}' <<<"$root_json")"
+	assert_pod_verbs "$store" "get,list,patch,watch" "v0.8 blocks enabled"
+	assert_context_groups "$store" "$CONTEXT_RULES_ALL" "v0.8 blocks enabled"
+	assert_no_pod_rollout "$store" "${pods_policy_off[$store]}" "v0.8 blocks enabled"
+	# The HEAD controller serves the v0.8 route on the seeded baseline incident:
+	# no preview was ever computed for it (it never parked under the policy),
+	# so the answer is a 404, not an error — the row shape is readable.
+	code=$(api_code "$store" /dev/null "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id[$store]}/impact-preview")
+	[[ $code == 404 ]] || die "[$store] impact-preview for the baseline incident returned $code, want 404 (no preview was ever computed for it)"
+
+	set_workload_safe_policy "$store" false
+	wait_config_digest "$store" "$digest_v08_on" "v0.8 blocks disabled"
+	digest_after=$("$KUBECTL_BIN" get kubeneuron "$root" -o jsonpath='{.status.configDigest}')
+	[[ $digest_after == "${digest_policy_off[$store]}" ]] ||
+		die "[$store] disabling the v0.8 blocks compiled digest $digest_after, want the pre-policy digest ${digest_policy_off[$store]} (explicit enabled=false must compile like absent blocks)"
+	assert_pod_verbs "$store" "get,list,watch" "v0.8 blocks disabled before rollback"
+	assert_context_groups "$store" "" "v0.8 blocks disabled before rollback"
+	assert_no_pod_rollout "$store" "${pods_policy_off[$store]}" "v0.8 blocks disabled"
+	logs=$("$KUBECTL_BIN" -n "$ns" logs "pod/$(leader_pod "$store")" --tail=-1 2>&1)
+	if grep -Eiq 'panic|fatal' <<<"$logs"; then
+		die "[$store] controller logs contain a panic/fatal line after the v0.8 cycle"
+	fi
+	note "[$store] v0.8 cycle: context rules and pods patch granted only while enabled (digests ${digest_policy_off[$store]} -> $digest_v08_on -> $digest_after), no Pod rolled or restarted by either toggle"
+done
+stop_port_forward
+
+# --- rollback to baseline: refusal, then the documented restore --------------------------
+
+rollback_images_to_baseline
+for store in $STORES; do
+	wait_schema_refusal "$store"
+done
+
+note "rollback: documented restore (docs/operations.md) — operator to zero, each controller to zero, the pre-upgrade snapshot back, operator restarted"
+scale_operator 0
+for store in $STORES; do
+	restore_store "$store"
+done
+scale_operator 1
+for store in $STORES; do
+	wait_converged "$store" "restore + rollback" "${BASELINE_REGISTRY}/controller:${BASELINE}" "${BASELINE_REGISTRY}/agent:${BASELINE}"
+done
+
+for store in $STORES; do
+	start_port_forward "$store"
+	note "[$store] rolled back: asserting the $BASELINE binary serves the restored pre-upgrade state"
+	# The restore returns the store to the moment before the upgrade: the
+	# baseline incident with its audit is there, the qualification HEAD wrote
+	# afterwards is not. That loss is the documented price of the forward-only
+	# schema, and the rehearsal asserts it rather than hiding it.
+	survived=$(api "$store" "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id[$store]}" |
+		"$JQ_BIN" --arg id "${incident_id[$store]}" --argjson n "${incident_audit[$store]}" '(.incident.id == $id) and ((.audit | length) >= $n)')
+	[[ $survived == true ]] || die "[$store] baseline incident ${incident_id[$store]} or its audit did not survive the restore"
+	code=$(api_code "$store" "$work_dir/qual-list-rollback-$store.json" "$(qual_url)")
+	[[ $code == 200 ]] || die "[$store] rolled-back $BASELINE controller answered $code on the qualification list, want 200"
+	"$JQ_BIN" -e '(.items // []) | length == 0' "$work_dir/qual-list-rollback-$store.json" >/dev/null ||
+		die "[$store] the restored store still lists qualifications; the restore did not return it to the pre-upgrade snapshot: $("$JQ_BIN" -c . "$work_dir/qual-list-rollback-$store.json")"
+	code=$(api_code "$store" /dev/null "$(qual_url)/${qual_id[$store]}")
+	[[ $code == 404 ]] || die "[$store] qualification ${qual_id[$store]} answered $code after the restore, want 404 (it postdates the snapshot)"
+	for path in "$(coverage_url "${store_node[$store]}")" "$(fleet_coverage_url)"; do
+		code=$(api_code "$store" /dev/null "$path")
+		[[ $code == 200 ]] || die "[$store] rolled-back $BASELINE controller answered $code on ${path#*"${public_port}"}, want 200"
+	done
+	# The policies were disabled before the images moved, and the HEAD
+	# operator keeps reconciling: the BASELINE controller must be running
+	# under exactly the read-only pods grant it was built for.
+	assert_pod_verbs "$store" "get,list,watch" "after restore and image rollback"
+	logs=$("$KUBECTL_BIN" -n "$(store_ns "$store")" logs "pod/$(leader_pod "$store")" --tail=-1 2>&1)
+	if grep -Eiq 'panic|fatal' <<<"$logs"; then
+		die "[$store] restored controller logs contain a panic/fatal line"
+	fi
+	note "[$store] $BASELINE serves incident ${incident_id[$store]} with its audit from the restored snapshot, lists no qualification (${qual_id[$store]} postdates it, 404), answers both coverage routes, read-only on pods"
+done
+stop_port_forward
+
+# --- re-upgrade to HEAD on the restored store ---------------------------------------------
+
+upgrade_to_head "re-upgrade"
+
+for store in $STORES; do
+	start_port_forward "$store"
+	note "[$store] re-upgraded: the migration ran again on the restored store"
+	survived=$(api "$store" "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id[$store]}" |
+		"$JQ_BIN" --arg id "${incident_id[$store]}" '.incident.id == $id')
+	[[ $survived == true ]] || die "[$store] baseline incident ${incident_id[$store]} is gone after re-upgrade"
+	code=$(api_code "$store" "$work_dir/qual-list-after-$store.json" "$(qual_url)")
+	[[ $code == 200 ]] || die "[$store] qualification list after re-upgrade returned $code, want 200"
+	"$JQ_BIN" -e '(.items // []) | length == 0' "$work_dir/qual-list-after-$store.json" >/dev/null ||
+		die "[$store] qualification list is not empty right after the re-upgrade of the restored store"
+done
+stop_port_forward
+
+# The restored-then-migrated store is usable, not just readable: the whole
+# v0.5 lifecycle runs again (a fresh report from the new agent Pod identity,
+# Full coverage, a new qualification observed to ReadyForApproval with its own
+# four-event chain), and one more observation extends that chain.
+drive_v05_lifecycle second
+
+for store in $STORES; do
+	start_port_forward "$store"
+	observe "$store" "$work_dir/qual-observe3-$store.json" third
+	"$JQ_BIN" -e '.successful_samples == 3 and .total_observations == 3 and .state == "ReadyForApproval"' "$work_dir/qual-observe3-$store.json" >/dev/null ||
+		die "[$store] third observation: $("$JQ_BIN" -c '{successful_samples, total_observations, state}' "$work_dir/qual-observe3-$store.json"), want 3/3 ReadyForApproval"
+	audit_events "$store" "$work_dir/audit-final-$store.json"
+	actions=$(audit_actions "$work_dir/audit-final-$store.json")
+	[[ $actions == "create,observe,observe,ready,observe" ]] || die "[$store] final audit actions were '$actions', want create,observe,observe,ready,observe"
+	chained=$("$JQ_BIN" -r '(.items[3].hash == .items[4].prev_hash) and (.items[4].hash != .items[3].hash)' "$work_dir/audit-final-$store.json")
+	[[ $chained == true ]] || die "[$store] the fifth audit event does not chain onto the fourth"
+	logs=$("$KUBECTL_BIN" -n "$(store_ns "$store")" logs "pod/$(leader_pod "$store")" --tail=-1 2>&1)
+	if grep -Eiq 'panic|fatal' <<<"$logs"; then
+		die "[$store] re-upgraded controller logs contain a panic/fatal line"
+	fi
+	note "[$store] the restored store migrated again and ran the full v0.5 lifecycle: qualification ${qual_id[$store]} ReadyForApproval with a 5-event linked audit chain"
+done
+stop_port_forward
+
+operator_logs=$("$KUBECTL_BIN" -n "$OPERATOR_NS" logs deployment/kubeneuron-operator --all-containers --tail=-1 2>&1)
+if grep -Eiq 'forbidden|panic|fatal' <<<"$operator_logs"; then
+	die "operator logs contain an unexpected RBAC/fatal error"
+fi
+
+note "PASS: $BASELINE -> HEAD -> $BASELINE (refused the v0.8 schema as documented; restored the pre-upgrade snapshot, then the images) -> HEAD converged for: $STORES; the baseline incident and its audit survived the restore on every store, the v0.5 lifecycle ran to ReadyForApproval with a hash-chained audit both before the rollback and again on the restored, re-migrated store, the checkpoint coordination policy granted pods patch only while enabled, and the v0.8 blocks granted the three read-only context rules only while enabled; both rolled or restarted no Pod when toggled and were off before rollback (CPU-only kind, synthetic accelerator evidence, no hardware claim, no real checkpoint workload)"

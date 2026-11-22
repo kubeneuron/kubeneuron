@@ -1,0 +1,28 @@
+# Paths hack/verify-spec-paths.py must not flag, each with the reason it is
+# not an invented field. Anything not listed here and not in a generated CRD
+# is a doc naming an API that does not exist — the defect this file's owner
+# exists to catch, so keep this list short and justified.
+
+# A field the definition plan PROPOSES and explicitly says not to build yet
+# (§5.3: "Do not build this before real data exists to calibrate it").
+# Deliberately still listed: if it ever ships, this line comes out and the
+# check starts enforcing the real schema instead.
+spec.reliability.targets
+
+# A core Kubernetes Deployment path inside a kubectl jsonpath expression, not
+# a KubeNeuron field.
+spec.template.spec.containers
+
+# A POD's spec, not KubeNeuron's. The documented check reads the DCGM
+# engine's image out of the gpu-operator DaemonSet to compare its version
+# against the client in the agent image — the check that stops the second
+# detection source degrading in silence.
+spec.containers
+
+# The VMAgent CRD of the VictoriaMetrics operator (dependency profile), not
+# KubeNeuron's. deploy/kubernetes/dependencies/README.md and
+# docs/operations.md show the administrator how to stamp a `cluster` label
+# on every scraped series through that resource's externalLabels field; the
+# matching kubectl patch body targets `vmagent/kubeneuron`, never a
+# KubeNeuron object.
+spec.externalLabels

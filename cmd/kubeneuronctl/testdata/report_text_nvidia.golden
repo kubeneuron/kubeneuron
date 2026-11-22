@@ -1,0 +1,40 @@
+window:    2026-11-11T12:00:00Z .. 2026-11-18T12:00:00Z (168h)
+Recovered GPU-hours: 8.0
+incidents: 2 in window, 1 still open
+
+GPU — GPU-hours
+  RESOURCE        INCIDENTS  DEGRADED  RECOVERED  SAVED (ESTIMATE)                   COST EQUIVALENT (ESTIMATE)
+  nvidia.com/gpu  2          20.0      8.0        3.0 GPU-hours, manual baseline 4h  rate not set
+
+GPU-hours saved (estimate): 3.0 (manual baseline 4h)
+degraded GPU-hours                   20.0
+incidents recovered                  1 of 2     50.0%
+  without a human                    1 of 1     100.0% of recovered
+closed without verified recovery     1 of 2     50.0%  (2.0 degraded)
+target changed, recovery unverified  0          (0.0 degraded)
+Time to recover (n=1)                p50 30m0s  p90 30m0s  mean 30m0s
+
+Showing 1 of 2 incidents (highest degraded GPU-hours)
+
+INCIDENT  NODE    VENDOR  STATE     DEGRADED GPU-HOURS  TIME TO RECOVER
+inc-1     node-a  nvidia  RESOLVED  8.0                 30m0s
+
+top problem classes by degraded GPU-hours:
+CLASS   INCIDENTS  DEGRADED  DEGRADED IN REMEDIATED INCIDENTS  NOTHING DONE  UNATTENDED  MTTR P50  MTTR P90
+xid-79  2          20.0      8.0                               1             1           30m0s     30m0s
+
+still open (1), oldest first:
+ID     STATE  CLASS   NODE    GPU  AGE     DEGRADED
+inc-2  OPEN   xid-79  node-b       2h0m0s  2.0
+
+legend:
+  recovered     = an audited remediation followed by a verified resolution.
+                  Overlapping recovery intervals on one GPU count once in the fleet total.
+  unverified    = closed without that evidence, including observation and manual closure.
+  unattended    = recovered without ever asking for an approval (no human decision).
+  GPU-hours     = degraded GPU-time clipped to the window, not lost GPU-time:
+                  a degraded GPU may still have been serving.
+                  1 GPU for a GPU-scoped incident, the node's registered inventory
+                  for a node-scoped one.
+  MTTR          = full open-to-resolved time of incidents that RECOVERED in the
+                  window; an incident nothing repaired contributes no repair time.

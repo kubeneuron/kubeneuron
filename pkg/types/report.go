@@ -1,0 +1,232 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package types
+
+import "time"
+
+// SavingsEstimate compares observed duration with the configured manual baseline.
+type SavingsEstimate struct {
+	ManualBaselineSeconds float64 `json:"manual_baseline_seconds"`
+	GPUHoursSaved         float64 `json:"gpu_hours_saved"`
+}
+
+// RecoveryIncident is one incident's contribution to the selected period.
+type RecoveryIncident struct {
+	Jobs             []JobRecoveryTiming `json:"jobs,omitempty"`
+	ID               string              `json:"id"`
+	Node             string              `json:"node"`
+	Vendor           AcceleratorVendor   `json:"vendor,omitempty"`
+	State            IncidentState       `json:"state"`
+	DegradedGPUHours float64             `json:"degraded_gpu_hours"`
+	RecoverySeconds  *float64            `json:"recovery_seconds,omitempty"`
+	// Accelerators is what the incident recorded when it opened.
+	Accelerators []IncidentAccelerator `json:"accelerators,omitempty"`
+}
+
+// JobRecoveryTiming measures seconds from the incident opening to each observed result.
+type JobRecoveryTiming struct {
+	CheckpointAgeAtDrainSeconds *float64      `json:"checkpoint_age_at_drain_seconds,omitempty"`
+	Namespace                   string        `json:"namespace"`
+	Owner                       TrainingOwner `json:"owner"`
+	InfrastructureReadySeconds  *float64      `json:"infrastructure_ready_seconds,omitempty"`
+	ProgressConfirmedSeconds    *float64      `json:"progress_confirmed_seconds,omitempty"`
+}
+
+// RecoveryReport answers the question a capacity owner asks about a window:
+// how much accelerator capacity was degraded, how much of it came back, and
+// how much came back without waking anybody. It is the wire shape of
+// GET /api/v1/report/recovery and of `kubeneuronctl report --json`.
+//
+// Every number here is derived from the incident store, not from Prometheus:
+// the store holds the ground truth (opened_at, resolved_at, class, target,
+// approval epoch), so the report is exact, needs no metrics backend, and is
+// reproducible from a database snapshot. The equivalent Prometheus series
+// (kubeneuron_degraded_gpu_seconds_total and friends) answer the same
+// question for dashboards, where a range query is natural.
+//
+// Three conventions must be stated wherever these numbers are shown, because a
+// reader who guesses will guess wrong:
+//   - "recovered" means the incident reached RESOLVED **and** something was
+//     executed against the fleet on its behalf. Nothing else counts — an
+//     incident parked in NEEDS_HUMAN or aged out to EXPIRED did not return
+//     capacity to service as far as KubeNeuron can prove.
+//   - "observed only" is the rest of RESOLVED: an incident that closed with no
+//     remediation step ever running. See ObservedOnly.
+//   - GPU-hours are degraded-GPU-hours, not lost-GPU-hours: a degraded GPU may
+//     still have been serving traffic.
+type RecoveryReport struct {
+	IncidentDetails          []RecoveryIncident `json:"incident_details,omitempty"`
+	IncidentDetailsTruncated bool               `json:"incident_details_truncated,omitempty"`
+	SavingsEstimate          *SavingsEstimate   `json:"savings_estimate,omitempty"`
+	// Superseded is a changed target, never a verified recovery.
+	Superseded         int     `json:"superseded"`
+	SupersededGPUHours float64 `json:"superseded_gpu_hours"`
+	// From and To bound the window the numbers cover, as resolved by the
+	// controller's clock (the same clock that stamped the incident rows).
+	From time.Time `json:"from"`
+	To   time.Time `json:"to"`
+	// DegradedGPUHours is the GPU-time spent under an incident inside the
+	// window: every incident's degraded interval is clipped to the window, so
+	// a long incident contributes only its in-window part and the number
+	// cannot exceed the window's real elapsed GPU-time.
+	DegradedGPUHours float64 `json:"degraded_gpu_hours"`
+	// RecoveredGPUHours is the DegradedGPUHours share belonging to incidents
+	// that reached RESOLVED — the capacity remediation demonstrably returned.
+	RecoveredGPUHours float64 `json:"recovered_gpu_hours"`
+	// Incidents counts incidents whose degraded interval overlaps the window,
+	// including ones opened before it and ones still open now.
+	Incidents int `json:"incidents"`
+	// Recovered counts those that reached RESOLVED with at least one
+	// remediation step executed; RecoveredUnattended is the subset that never
+	// minted an approval round, i.e. no human decided.
+	Recovered           int `json:"recovered"`
+	RecoveredUnattended int `json:"recovered_unattended"`
+	// ObservedOnly counts incidents that reached RESOLVED without a single
+	// remediation step ever executing, and ObservedOnlyGPUHours is their share
+	// of DegradedGPUHours. They are the honest name for what an incomplete
+	// policy set produces: a problem class with no playbook bound to it opens
+	// an incident, observes, and quiet-resolves.
+	//
+	// They are a SEPARATE bucket rather than a subset of Recovered because the
+	// two answer different questions and only one of them belongs in a budget
+	// conversation. Counting them as recovered — which is what happened until
+	// this field existed — meant a fleet that had bound one problem class out
+	// of twenty reported near-total recovery, and reported it as unattended
+	// too, since an incident nothing acted on never asks anybody's permission.
+	ObservedOnly         int     `json:"observed_only"`
+	ObservedOnlyGPUHours float64 `json:"observed_only_gpu_hours"`
+	// MTTR is measured over incidents that RECOVERED inside the window, using
+	// the full open-to-resolved duration (not the clipped one — a clipped
+	// duration is not a recovery time).
+	MTTR RecoveryLatency `json:"mttr"`
+	// Classes are the problem classes seen in the window, ordered by degraded
+	// GPU-hours descending: the cost ranking a capacity owner reads first.
+	Classes []RecoveryClassReport `json:"classes"`
+	// Open lists incidents that are still not lifecycle-terminal at To,
+	// oldest first. NEEDS_HUMAN belongs here: automation has stopped, but the
+	// capacity has not been returned.
+	Open []RecoveryOpenIncident `json:"open_incidents"`
+	// AssumedSingleGPU counts node-scoped incidents whose node had no
+	// registered GPU inventory and were therefore charged one GPU. It exists
+	// so the undercount is visible instead of silently flattering the report.
+	AssumedSingleGPU int `json:"assumed_single_gpu"`
+	// DryRunExcluded counts incidents left out because their installation was
+	// in dry-run and therefore executed nothing. Reported rather than hidden:
+	// on a fresh install — dry-run is the default — an empty report with a
+	// large count here means "the system is watching but not acting", which
+	// is a different and much better answer than a fabricated one.
+	DryRunExcluded int `json:"dry_run_excluded"`
+	// AnnouncedInterruptions counts cloud-interruption incidents whose
+	// interval overlaps the window. An interruption the cloud announced is
+	// not a fault of the node: it is left out of every GPU-hour, incident and
+	// recovery number above.
+	AnnouncedInterruptions int `json:"announced_interruptions,omitempty"`
+	// Simulated is what the excluded dry-run incidents WOULD have produced,
+	// present only when there were any. It is deliberately a separate object
+	// rather than a set of fields alongside the real ones: nothing here may be
+	// added to a number above, and a reader skimming the headline must not be
+	// able to mistake one for the other.
+	//
+	// It exists because dry-run is the shipped default and the pilot checklist
+	// tells operators to stay in it until they have watched the system decide.
+	// For that entire period every number above is zero by construction, so
+	// the question that decides whether to enable enforcement — "what would
+	// this have got us?" — had a blank table for an answer.
+	Simulated *SimulatedRecovery `json:"simulated,omitempty"`
+	// AcceleratorHours counts the window per accelerator resource, in the
+	// unit of each. The GPU-hour fields above count nvidia.com/gpu and
+	// amd.com/gpu only.
+	AcceleratorHours
+}
+
+// SimulatedRecovery is the dry-run half of the window: the same arithmetic
+// over incidents that ran the whole ladder against synthetic successes.
+//
+// Every field is named in the conditional on purpose. A dry-run incident
+// reached RESOLVED without touching a node, so "recovered" would be a claim
+// about capacity that was never returned; "would recover" is a claim about
+// what the policy decided, which is exactly what a pilot is evaluating and is
+// all this can honestly support.
+type SimulatedRecovery struct {
+	IncidentDetails          []RecoveryIncident `json:"incident_details,omitempty"`
+	IncidentDetailsTruncated bool               `json:"incident_details_truncated,omitempty"`
+	WouldHaveSaved           *SavingsEstimate   `json:"would_have_saved_estimate,omitempty"`
+	Incidents                int                `json:"incidents"`
+	// WouldRecover counts dry-run incidents that reached RESOLVED, i.e. the
+	// ladder ran to completion without needing a human.
+	WouldRecover int `json:"would_recover"`
+	// WouldRecoverUnattended is the subset that never minted an approval
+	// round — the automation's projected yield if enforcement were on.
+	WouldRecoverUnattended int `json:"would_recover_unattended"`
+	// ObservedOnly counts the dry-run incidents that reached RESOLVED without a
+	// simulated repair step and its verification: no policy bound to the
+	// class, a playbook that only observes, or a ladder that a person (or the
+	// node's removal) closed before it verified. They are the pilot's coverage
+	// gap, and they are the reason this
+	// field is here rather than folded into WouldRecover: a projection that
+	// silently includes "we would have done nothing" is the projection most
+	// likely to be quoted.
+	ObservedOnly int `json:"observed_only"`
+	// DegradedGPUHours is real: the hardware was genuinely degraded for this
+	// long. Only the recovery is hypothetical.
+	DegradedGPUHours float64 `json:"degraded_gpu_hours"`
+	// WouldRecoverGPUHours is the share belonging to incidents the ladder
+	// carried to RESOLVED. Nothing was returned to service; this is what
+	// enforcement would have addressed.
+	WouldRecoverGPUHours float64 `json:"would_recover_gpu_hours"`
+	// MTTR here is how long the ladder TOOK to decide, not how long a repair
+	// took — no repair happened.
+	MTTR RecoveryLatency `json:"mttr"`
+	// AnnouncedInterruptions counts the dry-run cloud-interruption incidents
+	// whose interval overlaps the window, left out of every number above.
+	AnnouncedInterruptions int `json:"announced_interruptions,omitempty"`
+	// AcceleratorHours is the same per accelerator resource; its recovered
+	// and saved hours are what the ladder would have recovered and saved.
+	AcceleratorHours
+}
+
+// RecoveryLatency is a duration distribution computed from the raw incident
+// durations, not from histogram buckets: with the store as the source there
+// is no reason to report an interpolated quantile when the exact one is
+// available. Percentiles are nearest-rank.
+type RecoveryLatency struct {
+	Samples     int     `json:"samples"`
+	MeanSeconds float64 `json:"mean_seconds"`
+	P50Seconds  float64 `json:"p50_seconds"`
+	P90Seconds  float64 `json:"p90_seconds"`
+}
+
+// RecoveryClassReport is one problem class's contribution to the window.
+type RecoveryClassReport struct {
+	Superseded         int          `json:"superseded"`
+	SupersededGPUHours float64      `json:"superseded_gpu_hours"`
+	Class              ProblemClass `json:"class"`
+	Incidents          int          `json:"incidents"`
+	DegradedGPUHours   float64      `json:"degraded_gpu_hours"`
+	RecoveredGPUHours  float64      `json:"recovered_gpu_hours"`
+	Recovered          int          `json:"recovered"`
+	// ObservedOnly and ObservedOnlyGPUHours are this class's share of the
+	// report-level buckets of the same name. Per class is where they are most
+	// useful: a class whose whole column is observed-only is a class with no
+	// playbook bound to it, which is a configuration gap the fleet's owner can
+	// read straight off the table.
+	ObservedOnly         int             `json:"observed_only"`
+	ObservedOnlyGPUHours float64         `json:"observed_only_gpu_hours"`
+	RecoveredUnattended  int             `json:"recovered_unattended"`
+	MTTR                 RecoveryLatency `json:"mttr"`
+	// AcceleratorHours is this class's hours per accelerator resource, with
+	// no saved estimate and no cost: those are the window's.
+	AcceleratorHours
+}
+
+// RecoveryOpenIncident is an incident still costing capacity at the end of
+// the window, with the GPU-hours it has cost inside it.
+type RecoveryOpenIncident struct {
+	ID               string        `json:"id"`
+	Class            ProblemClass  `json:"class"`
+	Node             string        `json:"node"`
+	GPUUUID          string        `json:"gpu_uuid,omitempty"`
+	State            IncidentState `json:"state"`
+	OpenedAt         time.Time     `json:"opened_at"`
+	DegradedGPUHours float64       `json:"degraded_gpu_hours"`
+}

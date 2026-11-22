@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+
+# verify-image.sh — assert the PUBLISHED image is the one the code assumes.
+#
+# Why this exists: for a long time the only image any automated suite ever ran
+# was test/integration/Dockerfile — the host-built binaries dropped into FROM
+# scratch. The shipped image is a different artifact: distroless rather than
+# empty, carrying the nsenter host tool the agent shells out to, running as a
+# different user. Every divergence between them is invisible to the tests and
+# visible to whoever runs the release, which is how `Reboot` reached live
+# hardware and exited 127 for want of nsenter.
+#
+# So this builds the real build/Dockerfile with BuildKit — the same
+# path `make docker` takes, which has broken on its own before — and then
+# asserts the properties that a Go test cannot see because they are properties
+# of the image, not of the code.
+#
+# Usage: hack/verify-image.sh [tag]
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+cd "$repo_root"
+
+TAG=${1:-verify-image}
+DOCKER_BIN=${DOCKER_BIN:-docker}
+fail=0
+
+note() { printf '\n=== %s\n' "$*"; }
+bad() {
+	echo "IMAGE CHECK FAILED: $*" >&2
+	fail=1
+}
+
+note "building every published target from build/Dockerfile (BuildKit)"
+for target in operator controller agent cli; do
+	echo "--- $target"
+	"$DOCKER_BIN" build --target "$target" --tag "kubeneuron-${target}:${TAG}" \
+		--file build/Dockerfile . >/dev/null
+done
+
+# --- every binary starts and identifies itself --------------------------------
+# A distroless image has no shell, so an entrypoint that cannot resolve its
+# own loader fails with a bare exit code and no message. Running each one is
+# the only way to find that out before a cluster does.
+note "each entrypoint runs"
+for target in operator controller agent cli; do
+	image="kubeneuron-${target}:${TAG}"
+	case "$target" in
+	cli) binary=kubeneuronctl ;;
+	*) binary="kubeneuron-${target}" ;;
+	esac
+	if out=$("$DOCKER_BIN" run --rm "$image" --version 2>&1); then
+		grep -q "$binary" <<<"$out" ||
+			bad "$image --version printed '$out', which does not name $binary"
+	else
+		bad "$image could not run --version: $out"
+	fi
+done
+
+# --- the host tools the agent shells out to -----------------------------------
+# nsenter: Reboot asks the host's init, reachable only through PID 1's
+# namespaces. DCGM must be supplied explicitly by the operator; NVIDIA's
+# packaged client and libraries cannot be redistributed in our image.
+note "the agent carries nsenter and excludes packaged DCGM"
+agent_image="kubeneuron-agent:${TAG}"
+
+# Assert on the image FILESYSTEM, never on a command's output.
+#
+# The first version of this check grepped the combined output of running the
+# binary for /usr|busybox|nsenter/. When the binary is absent the container
+# never starts and Docker prints `exec: "/bin/nsenter": no such file or
+# directory` — which contains the word nsenter, so the grep matched and the
+# check passed. A gate added specifically to catch a missing nsenter could not
+# catch a missing nsenter. Listing the layers cannot be fooled that way.
+image_contains() {
+	local image=$1 path=$2 cid listing rc=0
+	cid=$("$DOCKER_BIN" create "$image") || return 1
+	listing=$(mktemp)
+	# Materialise the listing before grepping it. Piping `docker export | tar
+	# -tf - | grep -q` looks natural and is wrong: grep exits at the first
+	# match, tar then writes to a closed pipe and fails, and under `set -o
+	# pipefail` the whole pipeline reports failure — so a file that IS present
+	# was reported missing. It failed in the safe direction, which is exactly
+	# why it survived a local run and only showed up in CI.
+	"$DOCKER_BIN" export "$cid" >"$listing.tar" 2>/dev/null || rc=1
+	if ((rc == 0)); then
+		tar -tf "$listing.tar" >"$listing" 2>/dev/null || rc=1
+	fi
+	if ((rc == 0)) && ! grep -qx "${path#/}" "$listing"; then
+		rc=1
+	fi
+	rm -f "$listing" "$listing.tar"
+	"$DOCKER_BIN" rm -f "$cid" >/dev/null 2>&1 || true
+	return $rc
+}
+image_contains "$agent_image" /bin/nsenter ||
+	bad "$agent_image has no /bin/nsenter; the Reboot action will exit 127 on a real node"
+for path in toybox/LICENSE toybox/VERSION toybox/SOURCE musl/COPYRIGHT musl/VERSION musl/SOURCE SOURCES; do
+    image_contains "$agent_image" "/licenses/native/$path" ||
+        bad "$agent_image lacks /licenses/native/$path"
+done
+# The licence texts must be the real ones, not empty files from a wrong path.
+license_starts_with() {
+	local image=$1 path=$2 want=$3 cid got
+	cid=$("$DOCKER_BIN" create "$image") || return 1
+	got=$("$DOCKER_BIN" cp "$cid:$path" - 2>/dev/null | tar -xOf - 2>/dev/null | head -n 1) || true
+	"$DOCKER_BIN" rm -f "$cid" >/dev/null 2>&1 || true
+	[[ -n $got && $got == *"$want"* ]]
+}
+license_starts_with "$agent_image" /licenses/native/toybox/LICENSE "by Rob Landley" ||
+	bad "$agent_image /licenses/native/toybox/LICENSE is empty or not the toybox licence"
+license_starts_with "$agent_image" /licenses/native/musl/COPYRIGHT "musl as a whole is licensed under the following standard MIT license" ||
+	bad "$agent_image /licenses/native/musl/COPYRIGHT is empty or not the musl copyright"
+
+# nsenter must actually enter PID 1's namespaces with the exact flags the
+# agent uses (internal/agent/executor), not merely be present.
+note "the agent's nsenter enters PID 1's namespaces"
+if ! out=$("$DOCKER_BIN" run --rm --privileged --pid=host --entrypoint /bin/nsenter "$agent_image" \
+	-t 1 -m -u -i -n -p -- true 2>&1); then
+	bad "$agent_image nsenter -t 1 -m -u -i -n -p -- true failed: $out"
+fi
+
+# Export failures must fail this negative check too, never count as absence.
+cid=$("$DOCKER_BIN" create "$agent_image")
+listing=$(mktemp)
+if ! "$DOCKER_BIN" export "$cid" >"$listing.tar"; then
+    bad "could not export $agent_image to check excluded native components"
+elif ! tar -tf "$listing.tar" >"$listing"; then
+    bad "could not list $agent_image to check excluded native components"
+elif grep -Eq '(^|/)(dcgmi|libdcgm[^/]*|libgcc_s[^/]*|datacenter-gpu-manager[^/]*|libgcc-s1|dcgm)(/|$)' "$listing"; then
+    bad "$agent_image contains excluded DCGM/libgcc components or legal files"
+elif grep -Eiq '(^|/)([^/]*busybox[^/]*|[^/]*uclibc[^/]*|OFFER)(/|$)' "$listing"; then
+    bad "$agent_image contains BusyBox/uClibc components or their legal files"
+fi
+rm -f "$listing" "$listing.tar"
+"$DOCKER_BIN" rm -f "$cid" >/dev/null
+
+# Legal files must be present even in images without a shell.
+note "each image carries third-party legal files"
+for target in operator controller agent cli; do
+    image="kubeneuron-${target}:${TAG}"
+    for path in NOTICE THIRD_PARTY_LICENSES LICENSE BASE-IMAGE-PACKAGES; do
+        image_contains "$image" "/licenses/$path" || bad "$image lacks /licenses/$path"
+    done
+done
+
+# The base-image package record must describe the base images actually pinned.
+note "the base-image package record matches the pinned base images"
+python3 -I hack/base-image-packages.py --check || bad "build/licenses/base-image-packages.txt is stale for the pinned base images"
+
+# --- the user each image runs as ----------------------------------------------
+# The agent runs privileged with hostPID and must read /dev/kmsg, so it is
+# root by design; everything else must not be. A silent flip either way is a
+# security posture change nobody reviewed.
+note "each image runs as the user its deployment assumes"
+expect_user() {
+	local target=$1 want=$2 got
+	got=$("$DOCKER_BIN" inspect --format '{{.Config.User}}' "kubeneuron-${target}:${TAG}")
+	got=${got%%:*}
+	[[ -z $got ]] && got=0
+	[[ $got == "$want" ]] || bad "kubeneuron-${target} runs as user '${got}', want '${want}'"
+}
+expect_user operator 65532
+expect_user controller 65532
+expect_user cli 65532
+expect_user agent 0
+
+# --- provenance labels --------------------------------------------------------
+note "each image is labelled with its source and licence"
+for target in operator controller agent cli; do
+	image="kubeneuron-${target}:${TAG}"
+	src=$("$DOCKER_BIN" inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "$image")
+	lic=$("$DOCKER_BIN" inspect --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}' "$image")
+	[[ $src == https://github.com/* ]] || bad "$image has no OCI source label (got '${src}')"
+	want_lic="Apache-2.0"
+	[[ $target == agent ]] && want_lic="Apache-2.0 AND 0BSD AND MIT"
+	[[ $lic == "$want_lic" ]] || bad "$image licence label is '${lic}', want '${want_lic}'"
+done
+
+if ((fail)); then
+	echo "verify-image: FAILED" >&2
+	exit 1
+fi
+echo
+echo "verify-image: OK (four targets built from build/Dockerfile, entrypoints run, host tools present, users as declared)"

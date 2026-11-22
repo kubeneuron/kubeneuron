@@ -1,0 +1,5 @@
+go test fuzz v1
+byte('^')
+bool(true)
+uint16(12)
+[]byte("88\x11")

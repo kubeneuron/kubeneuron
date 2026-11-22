@@ -1,0 +1,61 @@
+site_name: KubeNeuron
+site_description: GPU failure detection and remediation for NVIDIA Kubernetes clusters
+repo_url: https://github.com/kubeneuron/kubeneuron
+edit_uri: blob/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: blue grey
+      toggle: { icon: material/weather-night, name: light mode }
+    - scheme: default
+      primary: blue grey
+      toggle: { icon: material/weather-sunny, name: dark mode }
+  features:
+    - navigation.sections
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Product tour (screenshots & demo): product-tour.md
+      - First run on Kubernetes: quickstart.md
+      - From-source dry-run demo: developer-demo.md
+      - Production install: install.md
+      - Bare metal (alpha): bare-metal.md
+  - Operating:
+      - Data and privacy: data-and-privacy.md
+      - Observability: observability.md
+      - Operations guide: operations.md
+      - Add-first replacement on EKS (experimental): cloud-aws.md
+      - Replacing GPU nodes on AKS (experimental): cloud-azure.md
+      - Replacing GPU nodes on GKE (experimental): cloud-gcp.md
+      - Announced cloud interruptions (experimental): cloud-interruptions.md
+      - Accelerator health from Kubernetes nodes (experimental): accelerator-health.md
+      - Alert runbooks: runbooks.md
+      - Upgrades and rollback: upgrade.md
+      - Troubleshooting: troubleshooting.md
+  - Configuring:
+      - Playbook authoring: playbook-authoring.md
+      - XID catalog: xid-catalog.md
+  - Roadmap:
+      - MIG semantics decision: mig-decision.md
+      - Training reports: training-reports.md
+      - Checkpoint coordination design: checkpoint-coordination-design.md
+      - Workload-safe recovery design record (v0.8): workload-safe-recovery-design.md
+      - Hardware E2E dispatch: hw-e2e-dispatch.md
+      - Release checklist: release-checklist.md
+  - Reference:
+      - REST API: reference-api.md
+      - kubeneuronctl: reference-cli.md
+      - Metrics and alerts: reference-metrics.md
+      - Capability matrix (per vendor): reference-capabilities.md
+      - Design document: design.md

@@ -1,0 +1,11 @@
+# Announced cloud interruptions. Asks opted-in jobs to checkpoint before the
+# deadline the cloud announced, then cordons the node. Never drains or
+# replaces: the cloud takes the instance.
+name: cloud-interruption
+target: node
+steps:
+  - name: checkpoint-warning
+    action: platform.checkpoint_warning
+  - name: cordon
+    action: platform.cordon
+    approval: required

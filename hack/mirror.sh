@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+
+# mirror.sh — publish this development tree to the public repository.
+#
+# This procedure used to be a sequence of commands typed by hand. That was
+# acceptable while the private repository ran CI on every push; it stopped
+# being acceptable when Actions was disabled there, because the mirror is now
+# the ENFORCEMENT BOUNDARY: public CI validates whatever this step produces,
+# and if the exclusion list drops or adds a file, it validates a tree nobody
+# developed.
+#
+# So the exclusion list lives here, in one place, and the script asserts
+# afterwards that the published tree differs from this one by exactly those
+# exclusions and nothing else.
+#
+# It does NOT commit or push. It prepares the mirror, prints the diff, and
+# stops — publishing is a decision, not a side effect.
+#
+# Usage:
+#   hack/mirror.sh [target-dir]
+#
+# Env:
+#   PUBLIC_REPO   default kubeneuron/kubeneuron
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+cd "$repo_root"
+
+PUBLIC_REPO=${PUBLIC_REPO:-kubeneuron/kubeneuron}
+TARGET=${1:-${MIRROR_DIR:-}}
+
+# --- the exclusion list -------------------------------------------------------
+# Every entry is a file that must NEVER reach the public repository, with the
+# reason it must not. Anything added here must also be added to the doc-lint
+# skip list in hack/verify-docs.sh; the published-prose sweep below reads
+# this list directly. This list must cover every private document.
+EXCLUDES=(
+	# Agent working state, session checkpoints, handoff notes, and a scratch
+	# blocker file. Internal process, not product.
+	"AGENT_SESSION_STATE.md"
+	"TRANSFER_HANDOFF.md"
+	"blocker.md"
+	"main.md"
+	"main-codex.md"
+	# Private release plans. Their roadmap and delivery decisions are
+	# intentionally kept in the private repository until separately published.
+	# They are excluded because they are private documents, not because of
+	# the release state of the version they describe: V0.5.0 stays excluded
+	# after the v0.5.0 tag exists, exactly as V0.4.0 did, and V0.7.0 is
+	# excluded from the day it is written, while it is still only a plan.
+	"V0.4.0_RELEASE_PLAN.md"
+	"V0.5.0_RELEASE_PLAN.md"
+	"V0.6.0_RELEASE_PLAN.md"
+	"V0.7.0_RELEASE_PLAN.md"
+	"V0.8.0_RELEASE_PLAN.md"
+	# Private v0.8 discovery and pilot records. Same rule as the plans: they
+	# are private working documents from the day they are written, and they
+	# are listed here before they exist so the first draft cannot leak.
+	"docs/discovery-d0-record.md"
+	"docs/pilot-p1-record.md"
+	# Product plans, the pitch, pilot and definition plans, and the security
+	# reviews. Private working documents, retired from the public repository.
+	"PRODUCT_PLAN.md"
+	"PRODUCTION_READINESS_PLAN.md"
+	"ROADMAP.md"
+	"docs/one-pager.md"
+	"docs/pilot-checklist.md"
+	"docs/definition-plan.md"
+	"docs/security-review-v0.5.0.md"
+	"docs/security-review-v0.6.0.md"
+	"docs/security-review-v0.7.0.md"
+	"docs/security-review-v0.8.0.md"
+	# Build output and local tooling.
+	"bin/"
+	".claude/"
+	# No trailing slash, deliberately. An rsync pattern ending in "/" matches
+	# only a DIRECTORY, and in a linked git worktree .git is a regular file
+	# (a one-line "gitdir:" pointer). "`.git/`" let that file through, and
+	# rsync --delete replaced the target checkout's .git directory with it —
+	# the mirror's own git metadata, overwritten by the source's. A bare
+	# ".git" matches either form. excluded() below strips the slash before
+	# matching anyway, so the assertion is unchanged; the prose sweep skips
+	# this entry by name because it is not a document.
+	".git"
+)
+
+note() { printf '\n=== %s\n' "$*"; }
+die() {
+	echo "mirror: $*" >&2
+	exit 1
+}
+
+[[ -n $TARGET ]] || die "usage: hack/mirror.sh <target-dir>   (a checkout of ${PUBLIC_REPO})"
+[[ -d $TARGET/.git ]] || die "$TARGET is not a git checkout; clone ${PUBLIC_REPO} there first"
+
+target_remote=$(git -C "$TARGET" remote get-url origin 2>/dev/null || true)
+case "$target_remote" in
+*"${PUBLIC_REPO}"*) ;;
+*) die "$TARGET's origin is '${target_remote}', not ${PUBLIC_REPO}; refusing to mirror into the wrong repository" ;;
+esac
+
+if [[ -n $(git -C "$TARGET" status --porcelain) ]]; then
+	die "$TARGET has uncommitted changes; commit or discard them before mirroring onto it"
+fi
+
+note "syncing the tree"
+rsync_args=(-a --delete)
+# Honour .gitignore as well as the explicit list above.
+#
+# The explicit list names documents and directories. It cannot name
+# the working tree's debris, and rsync copied all of it: a 126 MB
+# kubeneuron-controller build output at the repository root rode into the
+# public checkout on every mirror. It was never COMMITTED, because the mirrored
+# .gitignore ignores it there too — which is precisely why nobody noticed. The
+# mirror should carry what git tracks, not whatever happens to be lying around.
+rsync_args+=(--filter="dir-merge,- .gitignore")
+for e in "${EXCLUDES[@]}"; do
+	rsync_args+=(--exclude "$e")
+done
+# A tracked file that ALSO matches .gitignore would be skipped by that filter,
+# and rsync does not delete what it excludes — so an already-published copy
+# would stay in the mirror unchanged, the MISSING check would pass because the
+# file is present, and that file would be frozen at its old contents forever.
+# git itself can answer whether any such file exists, so ask before syncing.
+frozen=$(git ls-files -i -c --exclude-standard)
+if [[ -n $frozen ]]; then
+	echo "TRACKED BUT IGNORED — rsync would skip these, and their published copies would silently stop updating:" >&2
+	echo "$frozen" >&2
+	die "resolve the .gitignore/tracked-file conflict before mirroring"
+fi
+
+rsync "${rsync_args[@]}" "$repo_root/" "$TARGET/"
+
+# --- the assertion the hand-typed procedure never made ------------------------
+# Compare the two trees directly. Anything that differs and is not an exclusion
+# is either a file rsync failed to copy or one that should not be here — both
+# are the drift this script exists to make impossible.
+note "verifying the published tree differs by exactly the exclusions"
+listing() {
+	git -C "$1" ls-files
+}
+mapfile -t here < <(listing "$repo_root")
+# Files PRESENT in the mirror that git there does not track. `status
+# --porcelain` was the wrong question: it also reports DELETIONS, so a file
+# rsync --delete removed — a retired document, a rename — came back as
+# "ADDED: ... it would be published", which is the exact inverse of the truth,
+# and blocked every mirror that removes a file until a human overrode the gate.
+mapfile -t there < <(git -C "$TARGET" ls-files --others --exclude-standard)
+
+excluded() {
+	local path=$1 e
+	for e in "${EXCLUDES[@]}"; do
+		[[ $path == "$e" || $path == "${e%/}/"* ]] && return 0
+	done
+	return 1
+}
+
+unexpected=0
+declare -A tracked=()
+for path in "${here[@]}"; do
+	tracked["$path"]=1
+	if excluded "$path"; then
+		if [[ -e "$TARGET/$path" ]]; then
+			echo "LEAKED: $path is on the exclusion list but is present in the mirror" >&2
+			unexpected=1
+		fi
+		continue
+	fi
+	if [[ ! -e "$TARGET/$path" ]]; then
+		echo "MISSING: $path is tracked here but absent from the mirror" >&2
+		unexpected=1
+	fi
+done
+
+# The other direction, which this script claimed in its header and did not
+# check: anything the mirror would ADD.
+#
+# `there` was computed and then never read — shellcheck SC2034, and shellcheck
+# is not in make gates, so nothing said so. The loop above only walks this
+# tree's tracked files, so it can report MISSING and LEAKED and never ADDED.
+# Meanwhile rsync copies every untracked, non-ignored working-tree file into
+# the checkout and the script signs off with `git add -A && git commit && git
+# push` — so a scratch file left beside the code is published, and the
+# assertion written to make that impossible was inert.
+for path in "${there[@]}"; do
+	[[ -n $path ]] || continue
+	[[ -n ${tracked["$path"]:-} ]] && continue
+	excluded "$path" && continue
+	echo "ADDED: $path is in the mirror but is not tracked here; it would be published" >&2
+	unexpected=1
+done
+((unexpected == 0)) || die "the mirror does not match this tree; fix before publishing"
+
+# --- the grep sweep -----------------------------------------------------------
+# A last look for a published DOCUMENT that cites an unpublished one — how an
+# internal note leaks by reference rather than by copy. A reader who follows
+# such a link gets a 404 on a repository that is supposed to be self-contained.
+#
+# Prose only. Tooling that names these files in its own skip lists
+# (.dockerignore, verify-spec-paths.py, this script) is doing exactly what it
+# should, and flagging it would train everyone to ignore this check.
+note "sweeping published prose for references to excluded documents"
+sweep=0
+# Derived from EXCLUDES, not retyped: the sweep once listed main-codex.md but
+# not main.md, so a published document could cite the local handoff notes by
+# name and pass. Every excluded DOCUMENT is swept; the directories (bin/,
+# .claude/) and .git are not prose and are skipped. .git is listed without
+# the trailing slash (see EXCLUDES) and must be skipped by name: a -F grep
+# for ".git" would hit every published mention of .gitignore and .github.
+for e in "${EXCLUDES[@]}"; do
+	[[ $e == */ || $e == .git ]] && continue
+	if hits=$(git -C "$TARGET" grep -n --untracked -F -- "$e" -- '*.md' 2>/dev/null); then
+		echo "A PUBLISHED DOCUMENT REFERENCES $e, WHICH IS NOT PUBLISHED:" >&2
+		echo "$hits" >&2
+		sweep=1
+	fi
+done
+((sweep == 0)) || die "published documents reference documents that are not published"
+
+note "what would be published"
+git -C "$TARGET" status --short | head -50
+changed=$(git -C "$TARGET" status --porcelain | wc -l | tr -d ' ')
+echo
+echo "mirror: OK — ${changed} path(s) staged in ${TARGET}"
+echo
+echo "Nothing has been committed or pushed. Review the diff, then in ${TARGET}:"
+echo "  git add -A && git commit && git push"

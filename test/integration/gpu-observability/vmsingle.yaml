@@ -1,0 +1,67 @@
+# Disposable VictoriaMetrics store for the kind GPU observability fixture.
+# Plain Deployment, not the VMSingle custom resource: the fixture proves the
+# rules and the label contract, not the VictoriaMetrics operator, so it
+# needs no operator and no PVC. Image tag is the one pinned in
+# deploy/kubernetes/dependencies/versions.lock.yaml (victoriaMetricsSingle).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmsingle
+  labels:
+    app.kubernetes.io/name: vmsingle
+    app.kubernetes.io/part-of: kubeneuron-gpu-observability-fixture
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vmsingle
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vmsingle
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: vmsingle
+          image: victoriametrics/victoria-metrics:v1.147.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - -storageDataPath=/storage
+            - -retentionPeriod=1d
+            - -httpListenAddr=:8428
+          ports:
+            - name: http
+              containerPort: 8428
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+          volumeMounts:
+            - name: storage
+              mountPath: /storage
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: storage
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmsingle
+  labels:
+    app.kubernetes.io/part-of: kubeneuron-gpu-observability-fixture
+spec:
+  selector:
+    app.kubernetes.io/name: vmsingle
+  ports:
+    - name: http
+      port: 8428
+      targetPort: http

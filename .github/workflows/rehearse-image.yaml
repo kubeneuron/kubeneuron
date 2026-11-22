@@ -1,0 +1,43 @@
+name: Rehearse release image verification
+on: workflow_dispatch
+permissions:
+  contents: read
+
+jobs:
+  operator:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."localhost:5000"]
+              http = true
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        id: syft
+      - name: Build and inspect both operator platforms on amd64
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+          SYFT_REGISTRY_INSECURE_USE_HTTP: "true"
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          # registry 2.8.3 by digest alone: name:tag@digest fails on the runner's Docker ("cannot overwrite digest")
+          docker run -d --name rehearsal-registry -p 127.0.0.1:5000:5000 docker.io/library/registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+          trap 'docker rm -fv rehearsal-registry' EXIT
+          image=localhost:5000/kubeneuron/operator
+          work=$(mktemp -d)
+          docker buildx build -f build/Dockerfile --target operator --platform linux/amd64,linux/arm64 \
+            --metadata-file "$work/build.json" --provenance=false -t "$image:rehearsal" --push .
+          digest=$(jq -er '."containerimage.digest"' "$work/build.json")
+          # shellcheck disable=SC1090
+          source <(sed -n '/^verify_image_licenses() (/,/^)/p' hack/verify-release.sh)
+          for file in LICENSE NOTICE THIRD_PARTY_LICENSES; do cp "$file" "$work/tag-$file"; done
+          for arch in amd64 arm64; do
+            "$SYFT" "registry:$image@$digest" --platform "linux/$arch" -o "spdx-json=$work/$arch.json"
+            jq -e --arg arch "$arch" 'any(.packages[].externalRefs[]?.referenceLocator; contains("arch=" + $arch))' "$work/$arch.json"
+            verify_image_licenses "$image@$digest" "$arch"
+          done

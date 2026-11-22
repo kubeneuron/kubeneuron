@@ -1,0 +1,42 @@
+# This is deliberately a Draft-only envelope. Creating it never enables a
+# hardware action: the runtime service still requires a frozen simulation,
+# two distinct approvals, fresh evidence, a bounded canary and (for a real
+# effect) an explicitly wired hardware-qualified executor.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUAutonomyPlan
+metadata:
+  name: reset-a100-canary
+spec:
+  selector:
+    matchLabels:
+      accelerator-pool: a100-canary
+  # Immutable references are required. Do not use a mutable CR name alone.
+  policyRef: ecc-reset@sha256:replace-with-reviewed-policy-digest
+  profileRef: nvidia-a100#7
+  allowedActions:
+    - reset-device
+  evidence:
+    maxAge: 5m
+    requiredSources:
+      - agent
+      - controller
+      - dcgm
+  guardrails:
+    maintenanceWindows:
+      - gpu-maintenance-weekly
+    maxConcurrentNodes: 1
+    maxActionsPerHour: 1
+    errorBudget: 0
+    noActiveIncident: true
+  rollout:
+    canaryNodes: 1
+    bakeDuration: 30m
+    expansionSteps:
+      - 2
+      - 4
+  approvals:
+    requiredRoles:
+      - platform-approver
+      - safety-approver
+    distinctSubjects: true
+  expiresAt: "2099-01-01T00:00:00Z"

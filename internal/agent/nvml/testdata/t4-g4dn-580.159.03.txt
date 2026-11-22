@@ -1,0 +1,6 @@
+=== --query-gpu=index,uuid,name,pci.bus_id ===
+0, GPU-cd2cc23a-268c-3330-18d0-e980341f8a07, Tesla T4, 00000000:00:1E.0
+=== --query-gpu=mig.mode.current ===
+[N/A]
+=== --query-gpu=driver_version ===
+580.159.03

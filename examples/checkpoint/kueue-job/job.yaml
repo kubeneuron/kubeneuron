@@ -1,0 +1,98 @@
+# The plain-job Job placed in a Kueue LocalQueue. Nothing about the
+# checkpoint protocol changes: the Pods opt in the same way and run the same
+# trainer and sidecar. What changes is what the impact preview can say about
+# them when spec.safety.impactPreview.workloadContext.kueue is true — the
+# LocalQueue, the ClusterQueue that admitted the Workload, and its priority.
+#
+# Requires Kueue (https://kueue.sigs.k8s.io) installed; versions are not
+# pinned here because this is an example, not a gate.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: default-flavor
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: cpu-queue
+spec:
+  namespaceSelector: {}
+  resourceGroups:
+    - coveredResources: ["cpu", "memory"]
+      flavors:
+        - name: default-flavor
+          resources:
+            - name: cpu
+              nominalQuota: 4
+            - name: memory
+              nominalQuota: 8Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: team-a
+  namespace: ml-training
+spec:
+  clusterQueue: cpu-queue
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kueue-job-run
+  namespace: ml-training
+  labels:
+    kueue.x-k8s.io/queue-name: team-a
+spec:
+  suspend: true # Kueue unsuspends the Job when it admits the Workload
+  completions: 2
+  parallelism: 2
+  completionMode: Indexed
+  backoffLimitPerIndex: 3
+  maxFailedIndexes: 2
+  template:
+    metadata:
+      annotations:
+        kubeneuron.io/checkpoint: "true"
+        kubeneuron.io/checkpoint-max-wait: "3m"
+        kubeneuron.io/checkpoint-group: kueue-job-run
+    spec:
+      restartPolicy: Never
+      shareProcessNamespace: true
+      terminationGracePeriodSeconds: 20
+      volumes:
+        - name: podinfo
+          downwardAPI:
+            items:
+              - path: annotations
+                fieldRef:
+                  fieldPath: metadata.annotations
+        - name: ckpt
+          emptyDir: {}
+        - name: scripts
+          configMap:
+            name: checkpoint-scripts
+            defaultMode: 0555
+      containers:
+        - name: trainer
+          image: busybox:1.37
+          command: ["/bin/sh", "/scripts/trainer.sh"]
+          env:
+            - { name: CKPT_DIR, value: /ckpt }
+            - { name: STEPS, value: "3600" }
+          volumeMounts:
+            - { name: ckpt, mountPath: /ckpt }
+            - { name: scripts, mountPath: /scripts }
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+        - name: checkpoint-sidecar
+          image: busybox:1.37
+          command: ["/bin/sh", "/scripts/sidecar.sh"]
+          env:
+            - { name: ANNOTATIONS, value: /etc/podinfo/annotations }
+            - { name: CKPT_DIR, value: /ckpt }
+          volumeMounts:
+            - { name: podinfo, mountPath: /etc/podinfo, readOnly: true }
+            - { name: ckpt, mountPath: /ckpt }
+            - { name: scripts, mountPath: /scripts }
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }

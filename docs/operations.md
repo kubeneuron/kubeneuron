@@ -1,0 +1,1528 @@
+# KubeNeuron operations guide
+
+Day-2 procedures for a running installation. Everything here assumes the
+operator-managed Kubernetes path; `<ns>` is your `spec.namespace` and
+`<name>` the root `KubeNeuron` object name.
+
+## Tokens
+
+| Token | Set with | Used by |
+|---|---|---|
+| Operator API | controller `-api-token-file` | `kubeneuronctl`, the web panel, vmagent `http_sd` |
+| Alertmanager webhook | controller `-webhook-token-file` | Alertmanager `http_config.authorization` |
+| Slack webhook URL | `spec.notifications.slack` Secret | controller notifier |
+| Generic webhook URL (+ optional bearer) | `spec.notifications.webhook` Secret (keys `url`, `token`) | controller notifier |
+| PagerDuty routing key | `spec.notifications.pagerduty` Secret (key `routing-key`) | controller notifier (Events API v2) |
+
+Generate strong random tokens (`openssl rand -hex 32`) and reference their
+Secrets through `spec.notifications.operatorAPIToken` and
+`spec.notifications.webhookToken`; the operator mounts them into the
+controller without reading their contents. `webhookToken` is mandatory for
+every operator-managed installation. Without `-api-token-file` the operator
+API and panel are disabled (fail closed); the API token is mandatory for
+`Paused` mode so an authenticated operator can resume it.
+
+**Prefer per-person credentials over the shared token.** Managed
+installations also accept any Kubernetes bearer token on the operator API
+(`--api-authn-kubernetes`, set automatically by the operator): the
+controller verifies the caller with `TokenReview` and admits them only if
+Kubernetes RBAC grants `get` (reads) / `update` (mutations) on this
+installation's `kubeneurons.kubeneuron.io` object. Audit rows then carry
+the verified principal. Actions taken with the shared static token are
+recorded as `token:<claimed name>` — treat that token as break-glass and
+grant humans RBAC instead:
+
+```sh
+kubectl create clusterrole kubeneuron-operators \
+  --verb=get,update --resource=kubeneurons.kubeneuron.io \
+  --resource-name=<name>
+kubectl create clusterrolebinding kubeneuron-operators \
+  --clusterrole=kubeneuron-operators --user=alice@example.com
+kubeneuronctl --token "$(kubectl create token sre-bot -n ops)" ...
+```
+
+**Rotation:** update the token Secret in place
+(`kubectl -n <ns> create secret generic <name> --from-literal=token="$(openssl rand -hex 32)" --dry-run=client -o yaml | kubectl apply -f -`).
+The kubelet refreshes the mounted file within about a minute and the
+controller re-reads it every 10 seconds — no restart. Rotate immediately
+if `kubeneuron_auth_failures_total` spikes. Repeated failed attempts from
+one source are throttled (20 failures/minute → `429`), and every failure
+is logged with the source address.
+
+## Notification delivery guarantees
+
+Every external channel (Slack, generic webhook, PagerDuty) runs behind its
+own asynchronous queue so an outage can never stall ingestion or the
+reconcile walk. Failed deliveries are retried 4 times with exponential
+backoff (~21 s total); after the final failure the payload is
+**dead-lettered to the controller log** (`notification dead-lettered after
+retries`, full message included for manual replay) and
+`kubeneuron_notifications_dropped_total{reason="dead_letter"}` increments —
+the `KubeNeuronNotificationsDropped` alert covers both queue overflow and
+dead-letters. The audit trail, not any notification channel, remains the
+system of record.
+
+PagerDuty mapping: one KubeNeuron incident = one PagerDuty alert
+(`dedup_key` = incident ID). `needs_human`, `expired`, and approval
+requests page at `critical`; lifecycle updates re-trigger at
+`warning`/`info`; incident resolution resolves the PagerDuty alert.
+
+The generic webhook receives `POST` JSON
+`{"version":1,"kind":"<event|approval_required>","step?","message?","incident":{...}}`
+with an optional `Authorization: Bearer` header from the Secret's `token`
+key. Consumers must ignore unknown fields.
+
+## Pausing automation
+
+Three independent mechanisms, all fail toward not acting:
+
+1. **Global pause (big red button):** `kubeneuronctl pause` /
+   `kubeneuronctl resume`, the panel button, or
+   `POST/DELETE /api/v1/pause`. Also available at install time via
+   `executionMode: Paused` (controller starts gate-closed). The controller
+   immediately tombstones every undelivered agent action except
+   `restore_accelerator_host`; non-compensating actions queued while paused
+   are also discarded before a later resume. Work already under an unexpired
+   agent lease may already be running and is reported honestly rather than
+   falsely marked cancelled. The sole exception may be delivered while stopped
+   to undo KubeNeuron's own recorded accelerator-stack quiesce, so GPU
+   monitoring is not left disabled. The matching controller-side
+   `platform.restore_accelerator_stack` step is also allowed to start while
+   paused; it only completes that recorded undo and cannot begin another
+   remediation. It cannot claim or run any other queued action.
+2. **Per-node pause:** create a `GPUNodeConfig` with `paused: true` for the
+   node. The compiled set is authoritative: deleting the CR unpauses.
+3. **Maintenance windows:** `GPUMaintenanceWindow` with a time range and
+   optional `matchLabels` node selector. Incidents hold their position and
+   continue after the window closes; recorded approvals survive the wait.
+
+## When two incidents need to repair the same node
+
+For live repairs, the controller identifies the node by its pinned cloud identity
+or by the Kubernetes Node UID recorded in inventory when the incident opened.
+For incidents with either identity, the first
+incident to reach a disruptive node step becomes the repair owner. A second
+incident on the same Node UID waits at its own step. Only the owner requests
+approval or runs the cordon, drain and replacement. The workflow store
+preserves the owner and the waiting incident's link across controller restarts.
+
+Run `kubeneuronctl incidents show <waiting-incident-id>`. The recovery
+assessment shows `unavailable [node-repair]` and names the owner. Use that
+ID with the same command to inspect the active step and its approvals.
+The incident detail panel also shows the owner in **Recovery eligibility**.
+
+The owner resolves by itself once its replacement is verified on the new
+node. If the cloud operation named that node (`replacement_correlation:
+successor`, add-first), the waiting incident then starts its own
+verification on the same node and asks for no second replacement. If the
+node was found only as the one that joined the pool (`pool`), the waiting
+incident goes to an operator (`NEEDS_HUMAN`). Closing the owner manually
+supplies no replacement evidence. The waiting incident's audit retains the
+owner ID so an operator can trace both histories.
+
+When an owner reaches `RESOLVED`, `EXPIRED`, or `SUPERSEDED` with no
+unsettled cloud operation, it releases the node even if a step already ran.
+Followers keep their link for independent verification after a confirmed
+replacement. An operator rejecting the first approval before execution also
+releases the node when there is no unsettled cloud operation. In the other
+release cases, waiting incidents record `node-repair-released`
+and retry under their own policies. An incident whose step requires approval
+requests its own approval.
+
+A live GPU reset and a drain or replacement on the same Node UID also exclude
+each other while the step runs. If the controller loses the agent's response
+to a reset, it hands the reset incident to an operator. Even after manual
+closure, the drain or replacement waits. When the action queue accepts a late
+result for that reset under its lease, the next admission check can proceed.
+If the agent never returns a result, the controller can cancel the expired
+lease and admit the waiting step 15 seconds after lease expiry.
+
+If the inventory loses the original Node UID, the controller reads the Node
+directly from the Kubernetes API. A confirmed deletion or a different UID
+releases reservations and repair ownership for the old UID. A read error
+preserves both. A node recreated under the same name keeps its own reservations.
+
+If a cloud replacement has an unknown outcome, closing its incident leaves
+repair blocked. The waiting incident's details show the owner ID and the
+command below. Use it only after you have checked in the cloud console that
+the operation finished or was canceled. KubeNeuron does not verify this.
+
+```sh
+kubeneuronctl resolve <owner-incident-id> --cloud-operation-settled --reason "checked ASG activity, launch canceled"
+```
+
+This records the actor, reason and time in the owner's audit, marks the plan
+settled and releases waiting incidents to retry under their own policies.
+If the operation is still running, the next incident can replace the node
+again, which can leave an extra billed node.
+
+## Taking a node over from a remediation
+
+KubeNeuron cordons a node while it remediates it, and returns it to the
+scheduler when the last incident holding that cordon finishes. If you decide the
+node should stay out of service — a bad riser, an RMA raised, anything you want
+to look at yourself — say so with an annotation:
+
+```sh
+kubectl annotate node <node> \
+  kubeneuron.io/cordon-handoff="bad riser, RMA 12345 — leave it down"
+```
+
+**The node will not return to the fleet until you remove that annotation.** That
+is the point of it, and it is the whole cost: capacity stays withheld until
+somebody acts.
+
+```sh
+# When you are done, hand it back.
+kubectl annotate node <node> kubeneuron.io/cordon-handoff-
+kubectl uncordon <node>
+```
+
+Cordoning the node yourself is **not** enough, and this is worth understanding
+before you rely on it. KubeNeuron records what the node looked like before it
+cordoned it, and restores that. An engineer who cordons a node KubeNeuron has
+already cordoned sets exactly the value KubeNeuron set — there is only one such
+flag — so the restore cannot tell the two apart and hands the machine back. The
+annotation is the one signal KubeNeuron never writes itself, which is why it is
+the one it can trust.
+
+What the handoff does and does not do:
+
+- It prevents **only** the return to a schedulable state. Nothing else about the
+  remediation changes: the ladder runs, incidents resolve, and steps execute as
+  they otherwise would.
+- KubeNeuron still removes its own `kubeneuron.io/cordon-*` bookkeeping when the
+  last holder leaves, so the node does not accumulate stuck-cordon reports for
+  an incident that has finished.
+- It never touches your annotation, and it leaves the node's unschedulable flag and any
+  `karpenter.sh/do-not-disrupt` pin exactly as they are — the pin stays so a
+  machine you are working on is not consolidated out from under you. Remove it
+  yourself if you no longer want it.
+- It is distinct from `kubeneuron.io/cordon-held`, which KubeNeuron sets itself
+  when an incident halts and a human has to decide. The handoff is your claim on
+  a node whose remediation may be finishing perfectly normally.
+
+The check is made against the live object at the moment of the write, so
+annotating a node while a release is already in flight is safe: the write is
+rejected and retried, and the retry sees your claim.
+
+## Bare-metal status
+
+The standalone `-platform baremetal` controller is not supported in this build.
+Although the platform package has durable cordon/drain hooks, the controller's
+mandatory agent API authenticates Kubernetes workload identity and has no
+equivalent bare-metal node identity contract. The binary rejects the flag at
+startup before it opens listeners; use the Kubernetes operator-managed path.
+
+The hook package remains an internal integration seam. It must not be presented
+as a runnable controller deployment until a node-registration and mTLS identity
+model for bare-metal agents exists.
+
+## Draining the controller's own node
+
+`kubectl drain` on the node running the controller **will hang, by design.**
+Expect it, because nothing about the symptom says so: the eviction is refused
+repeatedly with a disruption-budget message and no timeout.
+
+The controller ships a PodDisruptionBudget with `minAvailable: 1` over a
+single replica, which admits no voluntary eviction at all. That is a deliberate
+trade against automated node maintenance: evicting the controller mid-ladder
+strands in-flight incidents part-way through a remediation, and with the SQLite
+store the RWO claim pins the pod to that node anyway — so a "successful"
+eviction would only produce a Pod that cannot schedule.
+
+To drain that node, take the controller down on purpose first:
+
+```sh
+# Where is it?
+kubectl -n kube-neuron get pod -l app.kubernetes.io/component=controller -o wide
+
+# Quiesce first: nothing should be mid-remediation when it goes away.
+kubeneuronctl pause
+kubeneuronctl incidents --state EXECUTING     # expect none
+
+# The operator reconciles the controller's replica count, so stop it first or
+# the controller comes straight back.
+kubectl -n kube-neuron-system scale deploy/kubeneuron-operator --replicas=0
+kubectl -n kube-neuron scale deployment/kubeneuron-controller --replicas=0
+kubectl -n kube-neuron wait --for=delete pod \
+  -l app.kubernetes.io/component=controller --timeout=2m
+kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
+# ... maintenance ...
+kubectl uncordon <node>
+kubectl -n kube-neuron-system scale deploy/kubeneuron-operator --replicas=1
+kubeneuronctl resume
+```
+
+Deleting the Pod directly also works and is faster, but it comes back on the
+same node while the PVC is bound there — fine for a restart, useless for a
+drain. On PostgreSQL with more than one replica the claim no longer pins
+anything and this section stops applying; the pause step still does.
+
+## SQLite workflow store: backup and restore
+
+The controller's state (incidents, audit, approvals, node inventory, action
+queue) lives in a single SQLite database on the operator-managed PVC
+(`<name>-controller-state`), written in WAL mode by exactly one controller
+Pod.
+
+**Backup (online, consistent):** the controller serves an authenticated
+snapshot endpoint — a `VACUUM INTO` copy taken while it keeps running, so no
+`sqlite3` binary or `kubectl exec` is needed:
+
+```sh
+curl --fail -H "Authorization: Bearer $OPERATOR_TOKEN" \
+  http://<name>-controller.<ns>.svc:8080/api/v1/backup \
+  -o kubeneuron-$(date +%F).db
+```
+
+With `spec.tls.publicServerSecretRef` set, use `https://` and the serving
+CA. Alternatively snapshot the PVC with your CSI driver's VolumeSnapshot —
+take the snapshot while the controller is scaled to zero, or accept that WAL
+replay happens on restore.
+
+**Restore** (SQLite). The controller image is distroless and the claim is
+`ReadWriteOnce`, so the restore runs with the controller stopped and a
+helper pod holding the volume — `deploy/kubernetes/backup/restore-helper.yaml`
+is that pod:
+
+```sh
+# 0. Stop the OPERATOR first, or none of this works.
+#    The operator owns the controller Deployment's replica count and
+#    reconciles a manual scale straight back to one. Skip this and step 1
+#    appears to succeed, the controller returns within a reconcile, and step 3
+#    replaces the database file underneath a running writer — corrupting the
+#    database this procedure exists to restore.
+kubectl -n kube-neuron-system scale deploy/kubeneuron-operator --replicas=0
+kubectl -n kube-neuron-system wait --for=delete pod \
+  -l app.kubernetes.io/name=kubeneuron-operator --timeout=2m
+
+# 1. Stop the controller so nothing writes the database (and the RWO claim
+#    is released).
+#
+#    Wait for the POD, not for `rollout status`. With the replica count at
+#    zero, every condition rollout status checks is trivially true the instant
+#    after the scale, so it reports success while the Pod is still running and
+#    still serving.
+kubectl -n <ns> scale deploy/<name>-controller --replicas=0
+kubectl -n <ns> wait --for=delete pod \
+  -l app.kubernetes.io/component=controller --timeout=2m
+
+# 2. Mount the state volume somewhere with a shell.
+kubectl -n <ns> apply -f deploy/kubernetes/backup/restore-helper.yaml
+kubectl -n <ns> wait --for=condition=Ready pod/kubeneuron-restore-helper --timeout=2m
+
+# 3. Copy the snapshot in and remove any stale WAL sidecars: they belong to
+#    the OLD database file and would corrupt the restored one.
+kubectl -n <ns> cp ./kubeneuron-YYYY-MM-DD.db \
+  kubeneuron-restore-helper:/state/kubeneuron.db
+kubectl -n <ns> exec kubeneuron-restore-helper -- \
+  sh -c 'rm -f /state/kubeneuron.db-wal /state/kubeneuron.db-shm; ls -l /state'
+
+# 4. Release the volume and bring the controller back.
+#    Restarting the OPERATOR is what restores the replica count; scaling the
+#    Deployment by hand here would be undone by the next reconcile anyway.
+kubectl -n <ns> delete pod kubeneuron-restore-helper --wait=true
+kubectl -n kube-neuron-system scale deploy/kubeneuron-operator --replicas=1
+#    Again: not `rollout status`. Until the operator reconciles, the controller
+#    is still at zero replicas, and rollout status calls that rolled out.
+kubectl -n <ns> wait --for=condition=Available deploy/<name>-controller --timeout=5m
+
+# 5. Verify against what you expect from the snapshot's age.
+kubeneuronctl incidents --state RESOLVED | head
+```
+
+The controller applies schema migrations forward automatically on start
+(`schema_version` table); never restore a database from a *newer* version
+of the controller onto an older binary — it refuses to start rather than
+downgrade a schema.
+
+**Restore (PostgreSQL):** there is no KubeNeuron-side restore. Use your
+platform's `pg_restore`/PITR with the controller scaled to zero, then scale
+back up; the schema-version refusal above applies identically.
+
+**Scheduled backups:** the CronJob template in
+[`deploy/kubernetes/backup/`](https://github.com/kubeneuron/kubeneuron/tree/main/deploy/kubernetes/backup)
+downloads the snapshot endpoint daily onto a dedicated backup PVC with dated
+retention. It needs only the operator-token Secret and network reach to the
+controller Service — no `pods/exec` RBAC and nothing extra in the distroless
+image. The kind integration suite rehearses the full backup→wipe→restore
+cycle on every run, so the procedure above is exercised, not just written.
+
+A fresh installer run selects the cloud recovery pack. See [Recovery policies](install.md#recovery-policies-installed-by-the-script) for ladder selection and the node-level alpha option.
+
+**Retention:** `deploy/install.sh --uninstall --name NAME --namespace NS`
+retains the SQLite PVC and its incidents/audit data by default. The installer
+requests retention with the current root's name and UID on the PVC and waits
+for the operator to remove its owner reference before deleting the root. If
+an older or unavailable operator cannot acknowledge retention, uninstall stops
+without deleting the root. Retry after upgrading or restoring the operator.
+Reinstall with the same name, namespace and storage settings to adopt the
+retained volume; unrelated or unmarked volumes are not adopted.
+
+To also delete SQLite state, use `--uninstall --delete-data`. The installer
+names the PVC and asks you to type the installation name before it changes
+anything. For unattended execution add `--yes`. This removes the PVC, and the
+Managed metrics store's claim `NAME-metrics-store` when it is labelled as this
+installation's; physical volume disposal follows the StorageClass reclaim
+policy. External PostgreSQL, an External metrics store and their data are
+never deleted by the installer.
+
+Directly deleting a root with `kubectl delete` still garbage-collects its owned
+PVC. Deleting the runtime namespace also deletes retained PVCs. Use backups
+and a `Retain` reclaim policy for production. The claim can
+grow (`workflowStore.sqlite.size`) but never shrink. High-volume operational
+tables (events, outbox, completed actions) are pruned hourly with a 90-day
+default (`-store-retention`). Candidate, preview, health-check,
+simulation, autonomy-plan, rollout, and effect summaries follow the same data
+retention window only after they are terminal and expired. Idempotency records
+expire after their retry window. Operational audit chains are different: a
+chain is deleted only as a whole, after its summary is gone and its newest
+event is older than `-store-audit-retention`; no pruning operation removes the
+middle of a retained hash chain. Audit rows and their incidents are append-only
+by default; budget roughly a few KB per incident step, or opt in to
+`-store-audit-retention` to prune *terminal* incidents with their audit and
+approval history after a window you choose.
+
+## Remediation intelligence and autonomy
+
+The native operations paths are the system of record for readiness, candidate
+review, diagnostics, simulation, incident custody, autonomy observations, and
+the append-only audit explorer. Use `kubeneuronctl readiness <node>` to obtain
+the live decision snapshot and evidence references, and retain the resource ID
+and `resource_version` when acting on a candidate, health check, simulation,
+incident, or autonomy plan. Mutations require an idempotency key; the CLI
+creates one, while direct API clients must retain and reuse theirs after a
+transport retry.
+
+Diagnostic summaries intentionally do not copy agent command output into the
+general console/API record. They contain a digest and a safe outcome; inspect
+the restricted action evidence through the authorized incident/support path
+when raw output is needed. Treat a reported `unsupported` result as a real
+terminal capability outcome, not as a successful empty diagnostic.
+
+Extended diagnostics require a Kubernetes TokenReview identity in both the
+`diagnostics-extended` and `disruption-budget-approver` groups; the shared
+token and browser sessions cannot self-authorize those grants. For autonomy,
+each requested approval role is likewise verified against the caller's
+TokenReview groups and stored under the immutable verified subject. A named
+`maintenance_windows` guardrail is a live gate, not annotation: every name
+must currently resolve to an active matching controller window for the node.
+For hardware-qualified effects, an executor acknowledgement is only hand-off;
+the bake needs fresh accelerator evidence observed after the effect and passing
+the shared evaluator. Its deterministic effect record remains retained until
+the plan expires, preventing a retention sweep from enabling a repeat dispatch.
+
+`GPUAutonomyPlan` creation is safe to enable for review, but the stock
+controller has **no hardware autonomy executor**. It records a
+`simulation-only` canary and never touches a device. Before wiring a
+hardware-qualified adapter, rehearse these operations in a non-production
+scope:
+
+1. Create the frozen simulation and attach it to the plan; collect the two
+   distinct role approvals using Kubernetes bearer credentials whose verified
+   groups match the plan roles.
+2. Verify every selected node has fresh agent/controller/DCGM evidence and
+   that the current configuration digest still matches the approval binding.
+3. During canary or bake, use `kubeneuronctl autonomy pause <plan-id> --reason
+   ...` for a hold, or `kubeneuronctl autonomy rollback <plan-id> --reason ...`
+   to terminally stop expansion. A resume returns to a fresh canary, never
+   directly to Enabled.
+4. Test the global `kubeneuronctl pause` separately. It wins over new effects;
+   an already leased external action must be investigated from its durable
+   effect record rather than presumed cancelled.
+
+Do not represent a simulation-only observation, an accepted executor hand-off,
+or a dashboard data point as hardware qualification. Qualification, rollback
+compensation, and driver/runtime support are deployment-specific evidence that
+must be recorded by the adapter and its operating procedure.
+
+## Checkpoint coordination (opt-in)
+
+The v0.8.0 hardware test used a toy trainer on one Tesla T4. Validation with a production checkpointing workload is pending.
+
+`spec.safety.checkpointCoordination` lets opted-in Pods be told, and given a
+bounded deadline, before a `Drain` or `EvictGPUWorkload` step disrupts them.
+The workload protocol is in [playbook authoring](playbook-authoring.md); the
+design and its safety argument in
+[checkpoint coordination](checkpoint-coordination-design.md). This section is the
+operator's rollout guide.
+
+**What enabling it costs.** Two things, both visible:
+
+- The managed controller ClusterRole gains `patch` on core `pods`,
+  cluster-wide, because RBAC cannot narrow a patch to an annotation prefix or
+  a namespace list. The controller confines itself in code to the five
+  `kubeneuron.io/checkpoint-*` request keys, on Pods in the allowlisted
+  namespaces, on the incident's node, and only after re-checking the live
+  Pod's UID. Disabling the policy removes the verb on the next reconcile.
+- Every `Drain` and `EvictGPUWorkload` on a node with an eligible Pod may
+  now pause for up to `maxWait` (default 15m, ceiling 30m) before
+  disrupting, once per step. The wait also fits inside the step's own
+  `timeout` minus a reserve kept for the disruption, so it cannot make a step
+  time out; a step whose timeout leaves nothing after the reserve does not
+  wait at all.
+
+**Advisory at approval park.** `advisory.enabled: true`
+inside the block adds no verb and no wait: when an incident parks for
+approval with a disruption downstream, eligible Pods are stamped with the
+`kubeneuron.io/checkpoint-advisory-*` keys under their own `budget` (default
+10s, ceiling 60s), the round's outcome is counted in
+`kubeneuron_checkpoint_advisories_total{outcome}` and audited as one
+`checkpoint-advisory` row naming up to five Pods, and a round that ends
+without its disruption withdraws the notice best effort
+(`checkpoint-advisory-withdraw`). In `DryRun` nothing is patched. The
+protocol is in [playbook authoring](playbook-authoring.md). A released
+controller has no such field; this tree carries it as development work.
+
+**Checkpoint groups.** `groups.enabled: true` inside the
+block makes a disruption's request reach a member's peers (same namespace,
+same `kubeneuron.io/checkpoint-group`) with their own deadline from the same
+formula; `crossNode` (default off) decides whether peers on other nodes are
+asked at all, and `maxGroupSize` (default 64) bounds a group, above which
+its peers are skipped. The listing behind it is one paged, read-only Pod
+list per group in that namespace; no verb is added. Peer outcomes land in
+`kubeneuron_checkpoint_group_requests_total{outcome}` and one
+`checkpoint-group-request` row per group on the incident's audit trail.
+Start with `crossNode: false`.
+
+**Impact preview.** `spec.safety.impactPreview.enabled:
+true` computes, at every park for approval, a durable record of what the
+pending step would touch (the [REST API reference](reference-api.md#impact-preview-v08-development)
+has the document), hands a three-line summary to the notification channels,
+and shows it in the panel's incident drawer and in
+`kubeneuronctl incidents impact`. It adds no verb: the listing it reads is
+the one the controller already holds. `requireForApproval: true` turns the
+preview from advice into a condition — an approve must carry the digest of
+the round's current preview, and an unavailable preview holds approval until
+`POST …/impact-preview/recompute` succeeds — so enable it only once the
+preview is reliably available on your fleet (watch
+`kubeneuron_impact_previews_total{result="unavailable"}` first). Rejecting is
+never held back. `workloadContext.{batchJobs,kueue,kuberay}` add "whose Pod
+is this" to the preview through read-only resolvers; each one selected
+costs exactly one get/list/watch rule on its group (`batch/jobs`,
+`kueue.x-k8s.io/{workloads,localqueues,clusterqueues}`,
+`ray.io/{rayclusters,rayjobs}`) on the managed controller ClusterRole, and
+nothing is ever written to those objects. A cluster without the CRD group
+reports the resolver as not observed.
+Two self-monitoring alerts cover the two courtesies that can silently miss
+their audience, `KubeNeuronImpactPreviewUnavailable` and
+`KubeNeuronCheckpointAdvisoryUnreachable` ([runbooks](runbooks.md#workload-safe-recovery-alerts-v08-development-route-to-humans)).
+The `examples/checkpoint/` directory holds three CPU-only toys — an Indexed
+Job, the same Job in a Kueue LocalQueue, a KubeRay Ray Train job — whose
+Pods read the advisory and the request off their own object and checkpoint;
+`make test-workload-safe-kind` drives them through a real installation and
+`make verify-workload-safe-examples` checks them offline. They demonstrate
+the protocol and are not evidence that any framework integrates with
+KubeNeuron.
+
+**Safe enablement.**
+
+1. Start in `DryRun`. A simulated disruption step reports, in its audited
+   output, how many Pods a real run would have asked — with no patch, no
+   wait, and no metric. That confirms the allowlist and the opt-in
+   annotations are where you think they are.
+2. Allowlist narrowly. `namespaces` is required and explicit; there is no
+   selector and no wildcard. Add the trusted training namespaces, not the
+   fleet. An enabled block without an allowlist is rejected by the CRD, the
+   operator, and the controller, and a rejected policy leaves the previous
+   configuration in force.
+3. Keep `skipClasses` at its default (`fell-off-bus`, `gpu-lost`) unless you
+   have a reason: when the device is already gone there is no job left to
+   warn, and waiting only delays recovery. An explicit list replaces the
+   default; an explicit empty list coordinates for every class.
+4. Set `maxWait` from your jobs' real checkpoint time, and let workloads
+   request less with `kubeneuron.io/checkpoint-max-wait`. A workload can
+   never request more.
+5. Confirm the RBAC change landed: the `<name>-controller` ClusterRole's
+   `pods` rule should read `get, list, watch, patch` after the reconcile.
+   Enabling the policy changes the compiled configuration digest; the
+   controller picks the new snapshot up from its mounted ConfigMap without a
+   restart, and refuses an invalid one while keeping the previous in force.
+
+**Observing it.** Two metrics and one deferral reason, all with bounded
+labels; see [metrics](reference-metrics.md) and the two panels in the shipped
+dashboard.
+
+- `kubeneuron_checkpoint_requests_total{outcome}`: `acknowledged`
+  (explicit `checkpoint-state: complete:<incident>`, bound to the
+  `checkpoint-incident` stamped on the Pod; a plain `complete` or an older
+  incident's value does not count), `exited` (terminated or gone,
+  which also covers a crash and a Pod gone before it could be asked),
+  `expired` (its own stamped deadline passed unanswered), `unreachable`
+  (could not be stamped or read, or still open when the coordination budget
+  ran out or the step was cancelled before its deadline, which includes
+  cases where no request ever reached the Pod), and `skipped` (one per
+  disruption step where no request went out: skipped class, no eligible Pod,
+  no budget, or a platform without the capability). `acknowledged /
+  (acknowledged + expired)` is the share of coordinated disruptions where the
+  job was told and said "done" in time.
+- `kubeneuron_checkpoint_wait_seconds`: elapsed time from each request's
+  durable `checkpoint-requested-at` on the Pod to its settlement. A request
+  resumed after a controller restart keeps its original request time, so the
+  observation is the whole window the Pod was given, not only the time the
+  resuming step slept; it includes near-zero observations for requests that
+  settled on the first look. Observations are bounded to 0..30m, so a stale
+  or tampered `checkpoint-requested-at` cannot push one past the histogram's
+  range. A p90 far under `maxWait` means
+  the ceiling is generous; a cliff at the ceiling means jobs are being cut
+  off.
+- `kubeneuron_destructive_steps_deferred_total{reason="checkpoint_wait"}`:
+  steps that really paused before disrupting.
+
+The incident's audit trail carries the record under the `system` actor:
+`checkpoint: requested N workload(s) …; deadline …`, `checkpoint: no request
+in force for …`, `checkpoint: skipped (…)`, and `checkpoint: complete after …:
+…; proceeding with platform.drain`. Rows name at most five Pods and count the
+rest. The rows are written under the same bounded coordination budget as the
+requests themselves, never under the step's remaining time: a row whose turn
+comes after the budget is spent (typically the `complete after` row of a wait
+that ran the budget out) is dropped and logged as `checkpoint audit append
+failed`, while the metrics still count every outcome. The `skipped (step
+budget … leaves nothing to wait with …)` row of a step too short to
+coordinate at all is attempted under an already-cancelled context for the
+same reason and may be missing from the trail; the `skipped` count is not.
+
+**Behavior and failure modes to expect.**
+
+- Expiry is not a step failure and never escalates. A job that never answers
+  costs one bounded wait, then is disrupted exactly as before.
+- A patch or read failure, a listing failure, or a bare-metal platform never
+  blocks the step: the workload is counted `unreachable` or the step
+  `skipped`, and the disruption proceeds within its own budget.
+- The deadline is stamped on the Pod as an absolute time. A controller
+  restart mid-wait resumes the same window or finds it expired; it never
+  grants a fresh one. A Pod that already carries a live request from another
+  incident is not re-stamped; its existing deadline is honored, capped to
+  this step's own.
+- Coordination acts on the Pods listed when the step starts. A Pod that
+  appears afterwards is not asked, and a Pod replaced during the window
+  (same name, new UID) is counted `exited` and its replacement is not
+  re-requested. It is a best-effort courtesy, not a guarantee.
+- The Downward API file refreshes on the kubelet's sync loop, not instantly;
+  very short waits may be consumed by that delay.
+
+**Disabling and rollback.** Set `enabled: false` or remove the block. The
+compiled configuration drops the policy, the controller stops waiting on the
+next config reload, and the operator removes `patch` from the controller's
+`pods` rule on the next reconcile. Request annotations already stamped on
+Pods are durable history: they are harmless, nothing reads them once the
+policy is off, and they need no cleanup. Disable the policy before rolling
+back to a release that does not understand it.
+
+## PostgreSQL workflow store (HA installations)
+
+Setting `spec.workflowStore.type: Postgres` with a DSN Secret
+(`secretRef`, key `dsn`, e.g.
+`postgres://user:pass@host:5432/kubeneuron?sslmode=require`) makes the
+controller stateless: no state PVC, **two replicas** with Lease-based
+leader election, rolling updates, and readiness that follows leadership —
+Services always route humans, Alertmanager, and agents to the single
+elected writer. A deposed leader exits immediately and rejoins as a
+standby; the new leader reloads persisted cooldowns, flap history, and the
+leader-owned `GPUNodeConfig` pause set before its first reconcile pass.
+Standbys reload local policies and playbooks but never write the shared pause
+set.
+
+KubeNeuron does **not** deploy or manage PostgreSQL. Use your platform's
+operator (CloudNativePG, RDS, …) and own its HA, backups, and PITR there:
+
+- Backups: `pg_dump`/`pg_basebackup` or your provider's snapshots — the
+  SQLite `GET /api/v1/backup` endpoint deliberately does not exist in
+  Postgres mode.
+- Point-in-time recovery: enable WAL archiving in your PostgreSQL
+  deployment; KubeNeuron's schema carries a `schema_version` table, and an
+  older controller binary refuses a newer schema after a careless restore.
+- Retention inside the store (`-store-retention`, `-store-audit-retention`)
+  works identically to SQLite and runs on the leader only.
+
+## Monitoring KubeNeuron itself
+
+- `GET /metrics` on the controller's public port: incident states,
+  signal/step/gate/escalation counters, notification drops, and TLS expiry
+  (`kubeneuron_*`). The agent serves `GET /metrics` on its health port
+  (events posted/spooled, spool depth, registration acks). The dependency
+  profile's vmagent scrapes controller, agent, and operator pods by their
+  managed labels. Import
+  [`deploy/grafana/kubeneuron-dashboard.json`](https://github.com/kubeneuron/kubeneuron/blob/main/deploy/grafana/kubeneuron-dashboard.json).
+- The dependency profile ships a `kubeneuron-self` rule group that covers
+  the recommended alerts: `KubeNeuronControllerDown`,
+  `KubeNeuronIncidentNeedsHuman`, `KubeNeuronSignalsDropped`,
+  `KubeNeuronNotificationsDropped`, `KubeNeuronAgentSpoolBacklog`, and
+  `KubeNeuronTLSCertExpiringSoon` (30 days before any loaded certificate
+  expires — the fleet leaf has a hard 100-day ceiling and no auto-renewal).
+- Agent health: DaemonSet readiness *is* the durable-registration signal
+  (stale after 90 s without a controller acknowledgment); the
+  `KubeNeuronAgentDown` rule fires on an unreachable agent metrics endpoint.
+
+## External scrape discovery
+
+`GET /api/v1/targets?port=9400` (operator token required) serves Prometheus
+`http_sd` groups for every registered node. vmagent example:
+
+```yaml
+scrape_configs:
+  - job_name: dcgm
+    http_sd_configs:
+      - url: http://<controller>:8080/api/v1/targets
+        authorization:
+          credentials_file: /etc/vmagent/kubeneuron-token
+```
+
+## GPU reliability telemetry: exporter profile and scrape labels
+
+The exporter emits DCGM series, vmagent stamps
+a few well-defined labels on them, recording rules normalise them into
+`kubeneuron_gpu_*` series, five Grafana boards read those, and a set of
+shadow-only alerts shows what *would* be worth a look. This is observability
+only. No detector threshold, playbook, controller-facing alert or controller
+path is added or altered by it, and nothing here starts a remediation. The
+agent's own GPU health path (`dcgmi dmon` on field 230 and `nvidia-smi`) is
+independent of the exporter profile. See the [capability matrix](reference-capabilities.md) for hardware evidence.
+
+**The profile.** `deploy/kubernetes/dependencies/gpu-operator/values.yaml`
+(`dcgmExporter.config.data`) lists exactly the tier T0 and tier T1 fields of
+the [GPU metric catalog](reference-gpu-metrics.md) that have a canonical
+`kubeneuron_gpu_*` mapping and are not deferred, under the series names the
+pinned dcgm-exporter uses. A unit test pins the list to the catalog in both
+directions. The sticky last-XID gauge (230), the recovery-action field
+(1523), the P-state (190) and every profiling field except the PCIe byte
+rates are deliberately not listed. The v0.7.0 run on one Tesla T4 observed a subset of the configured fields. See the [capability matrix](reference-capabilities.md) for the fields and recording rules checked on that build. Fields outside that subset are listed from NVIDIA documentation and have not been observed on a GPU by this project. Series documented as absent for a GPU
+model (NVLink and row remapping on a Tesla T4) are expected to be missing,
+not zero, and anything built on them later shows No data.
+
+**Rollout.** The profile is the default of the dependency directory, so a
+fresh install applies it. On an existing installation re-run the GPU
+Operator `helm upgrade` with the updated values, then restart the exporter
+DaemonSet so it re-reads the ConfigMap (dcgm-exporter reads its metrics
+list at start):
+
+```sh
+helm upgrade gpu-operator "$GPU_CHART" \
+  --namespace gpu-operator \
+  --values deploy/kubernetes/dependencies/gpu-operator/values.yaml \
+  --wait --timeout 30m
+kubectl rollout restart daemonset/nvidia-dcgm-exporter --namespace gpu-operator
+kubectl rollout status daemonset/nvidia-dcgm-exporter \
+  --namespace gpu-operator --timeout=15m
+```
+
+Confirm with a series the old profile lacked, such as
+`DCGM_FI_DEV_POWER_USAGE`, on the exporter's `/metrics` or in VMSingle.
+
+**Rollback.** Restore the nine-series list from the dependency README in `dcgmExporter.config.data` and run the same two commands. Every controller-facing
+alert rule (`Gpu*`) reads one of those nine series, so no incident-opening
+rule loses its input; no controller, agent or store state is involved. The
+canonical and derived `kubeneuron_gpu_*` series that were fed by the added
+fields stop being recorded (there is no `or vector(0)` anywhere, so they go
+absent, not to zero), the dashboards show No data for those panels, and
+the shadow alerts built on them fall silent. That is the whole effect, and
+it reverses again with the forward rollout above. To remove the telemetry rules
+as well, delete the `kubeneuron-gpu-recording` and `kubeneuron-gpu-shadow`
+VMRules; the controller-facing `kubeneuron-gpu` VMRule is a separate object
+and is untouched by either step.
+
+**Scrape labels.** The `dcgm-exporter` job in
+`deploy/kubernetes/dependencies/observability/vmagent.yaml` is the label
+contract, pinned by a unit test that evaluates the relabel rules:
+
+- `node` from the pod's node name; `gpu_uuid` and `gpu_model` copied from the
+  exporter's `UUID` and `modelName` (the originals are kept).
+- `node_pool` is **optional**: derived from a node label through
+  `attach_metadata: {node: true}`, in rising precedence
+  `kubeneuron.io/node-pool` (manual fallback), `karpenter.sh/nodepool`,
+  `cloud.google.com/gke-nodepool`, `eks.amazonaws.com/nodegroup` (wins).
+  Each rule matches only a non-empty value, so a node with none of these
+  labels gets no `node_pool` at all, never an empty string or `unknown`.
+- `mig_profile` is optional and copied from the exporter's `GPU_I_PROFILE`,
+  which exists only with MIG enabled; `pod`, `namespace` and `container`
+  come from the exporter and are empty while no workload holds the GPU.
+- `cluster` is **not set by default** and cannot be derived in-cluster. An
+  administrator who writes several clusters into one store stamps it as
+  `spec.externalLabels.cluster` on the VMAgent resource (a VictoriaMetrics
+  operator field, applied to every series vmagent writes):
+
+  ```sh
+  kubectl patch vmagent kubeneuron --namespace kubeneuron-monitoring \
+    --type merge \
+    -p '{"spec": {"externalLabels": {"cluster": "prod-eu-west-1"}}}'
+  ```
+
+- `driver` is **intentionally absent**. Neither candidate source, the GPU
+  Feature Discovery node label `nvidia.com/cuda.driver-version.full` nor a
+  `DCGM_FI_DRIVER_VERSION` label row in the exporter profile, has been
+  verified end to end by this project, and a placeholder would make false
+  peers. The dependency README records the decision.
+
+No shipped rule or dashboard may require an optional label; queries must
+work when `node_pool`, `mig_profile`, `cluster` or the workload labels are
+absent. The node metadata needs read-only access to `nodes`, which the
+VictoriaMetrics operator's generated ClusterRole for the VMAgent already
+grants; the dependency README documents the verification and the one
+configuration (a namespace-restricted operator) in which a minimal
+read-only ClusterRole must be added by hand.
+
+**Canonical and derived series, and what No data means.** The
+`kubeneuron-gpu-recording` VMRule (canonical file
+`configs/vmalert/gpu-recording-rules.yaml`) records one `kubeneuron_gpu_*`
+series per catalog row from its source series, with the catalog's unit
+factor and fixed labels, and a second set of derived signals on top of
+those: thermal and memory-thermal headroom, power ratio, throttle share by
+reason, clock ratio, memory-used ratio, ECC and retired-page rates, the
+per-component `kubeneuron_gpu_memory_hard_fault_active` family, PCIe
+replay rate and link width/generation ratios, NVLink error rates, recovered
+capacity hours and the experimental fail-slow peer score. Every formula is
+in the [GPU metric catalog](reference-gpu-metrics.md), verbatim, and a unit
+test pins the rules to the catalog in both directions. The one rule that
+matters operationally: **a missing input stays missing.** No rule uses
+`or vector(0)`, `default` or `absent()`, so a field the GPU does not report
+(row remapping and NVLink on a Tesla T4, memory temperature where the
+device has none) produces no canonical series, no derived series and no
+shadow alert. On the dashboards that is a grey No data panel, never a
+reassuring zero, and it is the expected state for those panels on such
+hardware. GPU presence (a device that exists but reports nothing) is
+deliberately not recorded, because it needs a kube-state-metrics series this
+profile does not install; the catalog says so.
+
+**Shadow-only alerts.** The `kubeneuron-gpu-shadow` VMRule (canonical file
+`configs/vmalert/gpu-shadow-rules.yaml`, group `gpu-shadow`) carries seven
+`ShadowGpu*` rules over the canonical and derived series: PCIe link width
+degraded, NVLink link degraded, fail-slow, thermal headroom low, memory
+thermal headroom low, memory beyond repair and row remap pending. They are
+observation for humans and nothing else. Three independent levels keep them
+away from the controller, and a unit test pins each: the names never start
+with `Gpu`, so the Alertmanager route that feeds the controller webhook
+(`alertname =~ "Gpu.*|KubeNeuronAgentDown"`) cannot match them; every rule
+carries the label `kubeneuron_shadow="true"`, and the shipped Alertmanager
+config routes that label to the `human-default` receiver in a route placed
+*before* the webhook route, with `continue: false`; and no `ShadowGpu*` name
+is in the controller's alert-to-class map, so a shadow alert that somehow reached the webhook would
+be dropped as unknown. They carry `severity: info`. The Remediation &
+Recovered Capacity and Fail-slow Radar boards show them through vmalert's
+own `ALERTS{kubeneuron_shadow="true"}` series; the controller exports no
+shadow metric and keeps no shadow state. Each rule has an entry in the
+[runbooks](runbooks.md#shadow-only-gpu-alerts-route-to-humans-never-to-the-controller),
+and each entry opens with the sentence that matters. To disable them, delete
+the `kubeneuron-gpu-shadow` VMRule; nothing else notices. The
+`human-default` receiver is a placeholder in the shipped profile: an empty
+receiver drops notifications, so wire it to a real channel before expecting
+to see a shadow alert anywhere but on the boards.
+
+## NVIDIA host tooling in the agent DaemonSet
+
+The agent image is distroless and carries no NVIDIA userspace. On GPU nodes,
+opt in to read-only host mounts:
+
+```yaml
+spec:
+  agent:
+    hostTooling: {}           # defaults match the AL2023 EKS NVIDIA AMI
+    # binDir: /usr/bin        # directory containing nvidia-smi (and dcgmi)
+    # libDirs: ["/usr/lib64"] # driver userspace libraries
+    # scriptsDir: /path/on/host  # optional, mounted at /etc/kube-neuron/scripts
+```
+
+The host bin directory is mounted at `/host/nvidia/bin` and prepended to the
+agent's `PATH`; library directories become `LD_LIBRARY_PATH`, and the first
+library directory is additionally mounted at `/lib64` — the scratch agent
+image has no ELF interpreter, and executing a dynamically linked
+`nvidia-smi` resolves its `PT_INTERP` (`/lib64/ld-linux-x86-64.so.2`)
+before `LD_LIBRARY_PATH` is consulted, so `libDirs[0]` must contain the
+dynamic loader (the `/usr/lib64` default does on AL2023). Setting
+`hostTooling` also arms `--require-real-driver`: if `nvidia-smi` is missing
+at the declared path, the agent refuses to start instead of silently running
+the fake driver, and a wrong `binDir`/`libDirs` keeps the Pod in
+`ContainerCreating` (`HostPathDirectory` requires the directory to exist on
+the node). Keep `hostTooling`
+unset on CPU-only node pools — use `nodeSelector` to split GPU and CPU
+installs if needed.
+
+## Accelerator adapters in the agent
+
+The agent builds every accelerator adapter that is registered in its image and
+enabled for the installation. NVIDIA observation is always on and needs no
+entry. Enable any other registered adapter, with its options and host tooling,
+in `spec.agent.adapters`:
+
+```yaml
+spec:
+  agent:
+    adapters:
+      - vendor: amd                # a vendor id: lowercase letters, digits, hyphens (max 32)
+        options:                   # passed to the adapter; keys are defined by the adapter
+          tool: amd-smi
+        hostTooling:               # optional: host tooling the agent image does not ship
+          binDirs: ["/opt/rocm/bin"]   # read-only at /host/adapters/amd/bin/<i>, appended to PATH
+          libDirs: ["/opt/rocm/lib"]   # read-only at /host/adapters/amd/lib/<i>, appended to LD_LIBRARY_PATH
+          devices: ["/dev/kfd"]        # character devices, mounted at the same path
+```
+
+The operator renders one `--adapter=<vendor>` agent argument per entry and one
+`--adapter-option=<vendor>.<key>=<value>` per option, in vendor and key order,
+so editing the list rolls the agent DaemonSet once and reordering it changes
+nothing. Each vendor may appear once; the API server and the operator both
+reject a duplicate, a malformed vendor id, an option key outside
+`[A-Za-z0-9._-]`, a relative or `..` path, a device outside `/dev/`, and
+`/dev/kmsg` (always mounted). Adapter tool directories come after the system
+directories on `PATH`, so a host binary never shadows one the agent image
+ships. When `spec.agent.hostTooling` is unset, the first `libDirs` entry of the
+first adapter (in vendor order) is also mounted at `/lib64`, for the same
+loader reason as the NVIDIA tooling below: it must then contain the dynamic
+loader its tools need. Adapter tooling does not arm `--require-real-driver`.
+
+**Mixed fleets.** One agent DaemonSet runs on every accelerator node, so an
+adapter enabled for the installation also starts on nodes without that
+vendor's hardware. An adapter reports that case by returning
+`accelerator.ErrNotPresent` from its factory, and the agent then skips the
+vendor on that node: one info line at start-up, no report, no detections, and
+no repeated warnings. An adapter that is registered but fails to build on a
+node that does have its hardware fails closed for that vendor only (a
+not-ready report), and an enabled vendor with no registered adapter does the
+same.
+
+**Defaults for every installation.** The operator also takes a list in the
+same shape from `--default-agent-adapters` (JSON), set by the Helm value
+`agentAdapters`:
+
+```yaml
+# values.yaml
+agentAdapters:
+  - vendor: amd
+    options:
+      tool: amd-smi
+```
+
+Those entries are added to every installation's `spec.agent.adapters`; an
+installation entry replaces the default for the same vendor. The operator
+refuses to start on an invalid default list.
+
+**What an adapter can and cannot do.** An adapter without the NVIDIA preflight
+is observation-only: its report is never `ready`, never declares a
+physical-device reset, and so no `AcceleratorRuntimeProfile` can admit an
+accelerator action for its vendor. Its report does name the devices it sees,
+and the controller uses it to verify that vendor's device-scoped incidents
+(see [reference capabilities](reference-capabilities.md)).
+
+## DCGM runtime attestation (required for destructive actions)
+
+Before the controller admits a real reset or reboot, the node's agent must
+attest the running DCGM version. Without that evidence the accelerator
+report stays `degraded` and every destructive step is refused — the system
+fails closed, which is why this section matters before you enable anything.
+
+**The engine is not there by default.** The NVIDIA GPU Operator ships the
+standalone host engine disabled (`dcgm.enabled=false`) because its metrics
+exporter embeds a private one that nothing else can reach. Enable it:
+
+```sh
+helm upgrade --install gpu-operator nvidia/gpu-operator -n gpu-operator   --set dcgm.enabled=true
+```
+
+**Supply the client explicitly.** The agent image does not redistribute
+NVIDIA's packaged `dcgmi` or its libraries. With the GPU Operator installed,
+`dcgmi` lives inside NVIDIA's container and is not automatically available on
+the node. Client delivery is managed separately. Without a working client,
+the agent uses the narrower `nvidia-smi` source, runtime attestation stays
+`degraded`, and destructive actions remain blocked.
+
+**If you already installed DCGM on your nodes**, that client is *not* picked up
+automatically, even though `hostTooling.binDir` comes first on the agent's PATH
+(it has to, so `nvidia-smi` matches the host driver). This is deliberate: the
+attested version is whatever client answers, and an `AcceleratorRuntimeProfile`
+pins one exact value for the whole fleet. Letting the node decide would make
+that value a property of how each node was provisioned — nodes built from
+different images would attest different versions and part of the fleet would go
+degraded for no visible reason. Name it explicitly when you mean it:
+
+```yaml
+agent:
+  hostTooling:
+    binDir: /usr/bin
+    dcgmiPath: /usr/bin/dcgmi   # must live directly in binDir
+```
+
+Then pin your profile's `runtimeVersion` to *that* client's version. A mismatch
+names the binary that produced the version, so "which client answered" is never
+something you have to guess at.
+
+Then point the agent at it:
+
+```yaml
+agent:
+  hostTooling:
+    dcgmEndpoint: nvidia-dcgm.gpu-operator.svc:5555
+```
+
+**Why a Service and not the node's address.** Measured on a live cluster:
+the operator runs the engine as an ordinary pod with no host port, so
+neither `<node-ip>:5555` nor the node's loopback reaches it — both are
+refused with `unable to establish a connection`. The Service is the only
+path, and it is safe for this purpose because the operator sets
+`internalTrafficPolicy: Local`: a request from a pod only ever lands on the
+engine sharing its node, so the attestation describes the hardware the
+agent is actually standing on. If you point `dcgmEndpoint` at any other
+Service, check that policy first — without it, attestation silently becomes
+a statement about someone else's GPU.
+
+!!! warning "DCGM has no authentication"
+    Once the standalone engine is enabled, **any pod on that node can use
+    the full DCGM API** — no credentials, no authorization. Verified from
+    an unprivileged pod: it read the GPU model, PCI address, and UUID, and
+    reached the configuration API. An attacker with a foothold in any
+    workload can therefore inventory your accelerators, run diagnostics
+    that disrupt training jobs, and alter power, clock, and ECC settings.
+    This is upstream behaviour, not a KubeNeuron setting.
+    `internalTrafficPolicy: Local` confines the blast radius to one node's
+    engine. Treat GPU nodes accordingly: restrict who may schedule there.
+
+!!! note "The attested version is the client's, not the engine's"
+    `dcgmi --version` answers from the local binary and never contacts the
+    engine, and DCGM exposes no way to ask the engine for its build. A newer
+    client serving an older engine is normal with the GPU Operator. So an
+    `AcceleratorRuntimeProfile`'s `runtimeVersion` pins the client explicitly supplied
+    to the agent; the engine is attested separately, by a live connection whose
+    GPU count must match the independent `nvidia-smi` inventory. Both must hold
+    before a report becomes `ready`.
+
+    Matching is on major and minor, not the patch level: `dcgm-4.6` and
+    `dcgm-4.6.1` both accept an attested `dcgm-4.6.2`. Otherwise every bump of
+    the supplied client would degrade each fleet still pinning the previous
+    patch — an outage caused by a release rather than by anything on the nodes.
+    A newer *minor* is still refused, because a profile names the runtime it was
+    reviewed against.
+
+## Resetting a GPU means stopping NVIDIA's own monitoring
+
+A drained node is still not a resettable one. Measured on live hardware:
+`nv-hostengine`, `dcgm-exporter` and the device plugin each hold an open handle
+on `/dev/nvidia0` without appearing as compute applications, and
+`nvidia-smi --gpu-reset` fails with exit 19 while any of them runs.
+
+Not all of them are Kubernetes workloads: `nvidia-persistenced` is a host
+service, and on EKS the device plugin comes from the machine image rather than
+the GPU Operator.
+
+Put a `QuiesceAcceleratorStack` step before `GPUReset` and a
+`RestoreAcceleratorStack` step after it. The quiesce switches the GPU Operator's
+components off through its own `nvidia.com/gpu.deploy.*` node labels (touching
+only those that were running), stops the persistence daemon, and then has the
+node confirm from its own process table that nothing holds the GPU. A holder
+that outlasts the step's timeout fails the step by name — the controller never
+guesses that the stack has settled. Because stopping DCGM also erases the
+attestation the reset gate reads, the quiesce step validates that evidence first
+and pins it for the rest of the playbook — and refuses to stop anything when the
+evidence would not have admitted a reset anyway.
+
+Monitoring is restored automatically once the incident stops running, so a
+playbook that fails at the reset never leaves the cluster blind.
+
+!!! note "A device plugin from the machine image is not covered"
+    On EKS the NVIDIA device plugin is a `kube-system` DaemonSet from the AMI
+    with no `nvidia.com/gpu.deploy.*` label, so the quiesce cannot stand it
+    down. It keeps `/dev/nvidia0` open and the step fails naming it. Stand it
+    down yourself before a reset on such a cluster.
+
+!!! warning "GPU reset is impossible on most cloud VMs"
+    On AWS EC2 g4dn (passthrough T4) the guest has no PCI reset for the device
+    — `/sys/bus/pci/devices/<addr>/reset` does not exist — and the reset fails
+    even with zero holders, persistence mode off, and the NVIDIA kernel modules
+    unloaded. NVIDIA's "currently in use by another process" text is generic and
+    misleading here. Validate resets on bare metal or on-prem.
+
+    The agent probes for this during attestation, so such a node **does not
+    advertise `reset-device` at all** and the accelerator report says why:
+
+    ```
+    physical-device reset unavailable: GPU 0 cannot be reset: the kernel
+    exposes no PCI reset for device 0000:00:1e.0; on a virtualized instance
+    the hypervisor withholds it and no GPU reset can succeed
+    ```
+
+    A playbook targeting such a fleet is refused before it cordons or drains
+    anything. Route those clusters through reboot and node replacement instead.
+
+## GPU reset on cloud VMs: recycle or replace the instance
+
+A hardware GPU reset is impossible on a virtualized instance — the hypervisor
+withholds the PCI reset from the guest (measured on AWS g4dn), so the agent does
+not advertise `reset-device` there. The cloud-native equivalent is to
+reinitialize the instance itself:
+
+- **ReplaceNode** terminates the instance; the node group's ASG or Karpenter
+  provisions a fresh node. This is the primary primitive on any autoscaled
+  fleet — an EKS managed node group, a self-managed ASG, or Karpenter — because
+  the group's health check already owns instance lifecycle. The replacement
+  boots clean, attests through the full pipeline, and the terminated node's
+  incident closes as replaced once the node object disappears.
+- **RecycleNode** stops and starts the *same* EC2 instance. Stop/start detaches
+  it from its physical host and reattaches it, so the GPU passthrough is torn
+  down and re-established from scratch — same node, EBS volumes and IP, a clean
+  GPU. Use it **only on nodes that are not under an autoscaler.** On an ASG-backed
+  group (which includes every EKS managed node group) the group's health check
+  reaps the instance the moment it stops and launches a replacement — measured
+  live: a recycle of a managed-node-group instance was overtaken by the ASG,
+  which terminated the stopped node and brought up a new one mid-recycle. There
+  the recycle wins you nothing that ReplaceNode does not, and races the ASG.
+
+Because a recycle is not done when the instance is merely powered on — the OS,
+kubelet and agent take minutes more to return — RecycleNode waits for the node
+to become `Ready` again before the ladder advances to `verify`. On an autoscaled
+group that node never comes back (the ASG replaced it), so the wait times out
+with a message telling you to use ReplaceNode: the honest signal that RecycleNode
+was the wrong action there.
+
+Both restart or destroy the whole VM, so the compiler forces `approval:
+Required` on them, exactly as for `Reboot`. Both are driven by the controller,
+never the agent — the agent dies the moment its instance stops and could never
+issue the Start that follows.
+
+For EKS managed nodegroups, configure the controller's AWS region and cluster:
+
+```yaml
+spec:
+  cloud:
+    provider: aws
+    aws:
+      region: us-east-1
+      clusterName: training
+      iamRoleARN: arn:aws:iam::123456789012:role/kubeneuron-recovery
+```
+
+The operator uses `iamRoleARN` for the controller ServiceAccount's IRSA
+annotation. Omit it if the controller obtains its AWS role another way.
+Grant the controller role these read permissions for native repair checks:
+
+- `eks:DescribeNodegroup`, `eks:ListUpdates`, `eks:DescribeUpdate`
+- `autoscaling:DescribeAutoScalingInstances`, `autoscaling:DescribeAutoScalingGroups`,
+  `autoscaling:DescribeScalingActivities`
+- `ec2:DescribeInstanceStatus`
+
+To read [announced interruptions from an SQS queue](cloud-interruptions.md#the-aws-interruption-queue),
+set `interruptionQueueURL` and grant `sqs:ReceiveMessage` and
+`sqs:DeleteMessage` on that queue only.
+
+For replacement, grant `ec2:TerminateInstances` scoped to the intended cluster
+instances. The controller probes this permission with an EC2 DryRun for the
+pinned instance and checks it again before termination.
+
+Both replacement orders have completed on a live EKS cluster.
+Once, on a pre-release build: EKS remove-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1.
+Once, on pre-release builds: EKS add-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). The controller was updated during the incident. Not repeated on v1.0.0-rc.1.
+Neither is validated on accelerator hardware. Start in KubeNeuron's `DryRun`
+mode.
+
+The operator accepts AWS playbooks containing recycle or replace. At runtime,
+EKS managed nodegroups support remove-first replacement, and add-first on a
+single-zone group whose size is declared fixed. Stop/start
+recycle is disabled because the Auto Scaling group can replace a stopped node.
+The [EKS add-first guide](cloud-aws.md) describes the experimental provider
+checks and the conditions that require operator inspection.
+
+On AKS (experimental; add-first and remove-first each completed once on a live
+cluster, see [Replacing GPU nodes on AKS](cloud-azure.md)), replacement
+goes through the AKS agent pool API and recycle is not available; see
+[Replacing GPU nodes on AKS](cloud-azure.md) for setup, the minimal role and
+what the step deletes.
+
+On GKE (experimental; on a fixed-size single-zone Standard node pool add-first
+and remove-first each completed once on a live cluster, see
+[Replacing GPU nodes on GKE](cloud-gcp.md); start in DryRun), replacement deletes the node's instance from its node pool's managed
+instance group: remove-first only on autoscaled pools, add-first on
+fixed-size pools in one zone. Recycle is not available, and Autopilot
+clusters are observe-only. See
+[Replacing GPU nodes on GKE](cloud-gcp.md) for setup, the roles and what the
+step deletes.
+
+When a live add-first eligibility check refuses recovery, the controller holds
+the step and sends a best-effort notification with the reason. Check the
+incident details in the panel or run `kubeneuronctl incidents show <id>` to
+see the recorded reason and audit trail. After the pool is corrected, the
+controller resumes the same incident once its cached eligibility check expires.
+A notification can be lost (for example when the notification queue is full)
+or sent twice after a restart. The reason is always in the incident details and
+the audit trail.
+
+Without a cloud provider configured at all, a `RecycleNode`/`ReplaceNode` step
+fails closed with a clear message rather than reporting a node recycled that was
+never touched.
+
+On an autoscaled fleet — the common EKS case — the ladder is just cordon, drain,
+replace; there is no node to uncordon because a fresh one takes its place:
+
+```yaml
+steps:
+  - {name: cordon,  action: Cordon}
+  - {name: drain,   action: Drain, timeout: "10m"}
+  - {name: replace, action: ReplaceNode, approval: Required, timeout: "10m"}
+# The ASG launches a successor after termination. Its readiness is unconfirmed.
+```
+
+Only on a fleet whose nodes are *not* under an autoscaler does recycle-first make
+sense, with replace as the escalation rung:
+
+```yaml
+steps:
+  - {name: cordon,   action: Cordon}
+  - {name: drain,    action: Drain, timeout: "10m"}
+  - {name: recycle,  action: RecycleNode, approval: Required, timeout: "10m"}
+  - {name: verify,   action: VerifyNodeHealth, timeout: "10m"}
+  - {name: uncordon, action: Uncordon}
+onFailure: {escalateTo: replace-node}   # ReplaceNode as the next rung
+```
+
+## Rebooting a node from the agent container
+
+The agent image is distroless and its own PID namespace is not the host's, so a
+plain `systemctl reboot` exits 127. The `Reboot` action instead enters PID 1's
+namespaces (`nsenter`, shipped in the agent image) and asks the host's init. When both the operator and the installation permit node-level
+actions, the managed DaemonSet runs privileged with `hostPID`, which makes this
+reachable. With the default permissions, `Reboot` is unavailable.
+
+When destructive actions are armed, the agent probes this mechanism at startup
+and logs the result. A node that cannot reboot says so then — not after an
+operator has approved the most destructive step a playbook has. Hosts with a
+different init can replace the whole command with the agent's
+`--reboot-command`; it is never derived from a playbook or action parameter.
+
+The action is idempotent on `boot_id`: if the controller stamped the boot ID it
+observed and the node has since rebooted, a retry reports success without
+rebooting again.
+
+## TLS material and its renewal
+
+When waiting for agent rollouts, select all agent DaemonSets for the installation with `app.kubernetes.io/instance=<name>,kubeneuron.io/agent=true`. This includes the variants that mount a journal directory.
+
+The controller and its agents authenticate to each other with mTLS. The operator
+issues that material and renews it: a long-lived authority (10 years) signs
+short-lived certificates (90 days), and each certificate is replaced once less
+than a third of its life remains. Renewal needs no coordination because the
+signer never changes — everyone already trusts it — and the workloads mounting a
+replaced certificate are rolled automatically.
+
+The asymmetry is deliberate. Rotating an authority means every party must trust
+the new one *before* anything presents a certificate signed by it, which is a
+multi-phase rollout that has to survive restarts. Rotating a leaf under a stable
+authority is a single write. Replacing the authority therefore stays a rare,
+operator-driven event.
+
+**Bringing your own material** still works. Create the four Secrets named in
+`spec.tls` before installing — from cert-manager, a corporate CA, anything — and
+the operator will not touch them. It watches them instead, and raises a
+`TLSMaterialExpiring` warning event when one is close to expiry, because nothing
+else will:
+
+```
+Secret kubeneuron-agent-client-ca was not issued by KubeNeuron and expires
+2027-07-29T10:14:00Z; nothing will renew it
+```
+
+Secrets the operator issued carry `kubeneuron.io/managed-pki: "true"`. That label
+is the whole distinction: without it the material is treated as somebody else's
+and is never overwritten.
+
+!!! warning "A managed CA inside its renewal window blocks every other change"
+    When a CA the operator issued approaches expiry, the reconcile stops before
+    anything converges — no ConfigMap, no Deployment, no DaemonSet. That is
+    deliberate: replacing a trust root in place leaves a fleet that cannot
+    mutually authenticate, so it has to be the documented expand/activate/retire
+    procedure and not an automatic write. But it means configuration changes you
+    make during that window will not land, and the window is up to 45 days.
+
+    **Alert on it.** The installation carries a condition naming exactly this,
+    distinct from any other reconcile failure:
+
+    ```sh
+    kubectl -n kube-neuron get kubeneuron kubeneuron \
+      -o jsonpath='{.status.conditions[?(@.type=="TLSMaterialValid")]}'
+    ```
+
+    `status: "False"` with `reason: CARotationRequired` means rotate now; the
+    message names the Secret. The condition is absent when the CA is healthy,
+    including immediately after a rotation you have completed.
+
+!!! warning "Installations created before this existed"
+    `deploy/install.sh` used to generate the four Secrets with `openssl` and
+    nothing renewed them. Those Secrets have no `kubeneuron.io/managed-pki`
+    label, so the operator will report their expiry but will not replace them.
+    To hand them over, delete them and let the operator reissue:
+
+    ```sh
+    kubectl -n kube-neuron delete secret \
+      kubeneuron-controller-tls kubeneuron-controller-server-ca \
+      kubeneuron-agent-tls kubeneuron-agent-client-ca
+    ```
+
+    The controller and agents reconnect once the new material rolls out.
+
+## Remediation scripts on nodes
+
+`driver_reload`/`driver_reinstall`/`run_script` are binary-level action
+contracts only. `hostTooling.scriptsDir` mounts operator-provisioned scripts
+read-only at the agent's `--scripts-dir`. A per-device hardware GPU *reset*
+still refuses on virtualized instances that have no guest PCI reset — there the
+cloud `ReplaceNode` primitive stands in.
+
+!!! warning "The destructive selector is a blast radius, not a scheduling selector"
+    `executionMode: Enabled` leaves the agent DaemonSet on the base
+    `spec.agent.nodeSelector`, so detection remains fleet-wide across the
+    nodes where the agent is scheduled. At each durable registration the
+    controller serves arming only when the node's live labels match
+    `spec.safety.destructiveExecution.nodeSelector`; agents outside that set
+    remain unarmed and cannot execute destructive contracts. Keep the base
+    agent selector broad enough for the fleet you want to observe, and use the
+    destructive selector only to narrow the remediation blast radius.
+
+## Hardware GPU end-to-end CI
+
+Real-NVIDIA validation runs on an **ephemeral** EKS cluster (a g4dn.xlarge /
+Tesla T4 GPU node beside a small CPU nodegroup), never on per-commit CI. Every
+push and pull request stays CPU-only (`.github/workflows/ci.yaml`); the GPU
+suite is a separate, gated target that always destroys its cluster afterward.
+
+- **Workflow:** `.github/workflows/hw-e2e.yaml`.
+- **Driver script:** `hack/hw-e2e.sh` (all the heavy logic; the YAML is thin).
+- **Watchdog:** `.github/workflows/hw-e2e-reaper.yaml` runs `hack/hw-e2e.sh reap`
+  on its own 30-minute schedule.
+- **Tooling pins:** the workflow installs `kubectl` at an exact version
+  whose minor equals the EKS control plane the script creates (`1.33`), and
+  verifies the download against a pinned SHA-256 before it is made
+  executable or put on `PATH`; a mismatch deletes the file and fails the
+  job. The earlier `v1.30.6` pin was three minors behind the API it drove.
+  `make verify-hw-e2e-observability` fails when the pin's minor drifts
+  from `K8S_VERSION`, when the version or digest differs from the reviewed
+  pair the verifier records (`v1.33.12`,
+  `fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e`, the
+  digest published upstream and compared against the binary at review),
+  including any other well-formed digest, or when the install step would
+  accept an unverified download. Moving kubectl is a reviewed change to the
+  workflow and the verifier together.
+- **GPU operator profile:** `up-finish` installs the checked-in
+  reliability profile (`deploy/kubernetes/dependencies/gpu-operator/values.yaml`,
+  chart `v26.3.3`) with `--values` plus the EKS-only overrides
+  `driver.enabled=false` and `dcgm.enabled=true`. A `GPU_OPERATOR_VERSION` that
+  differs from that pin, or a missing profile, is refused before Helm runs.
+- **`deploy-observability`:** installs the VictoriaMetrics half of the same
+  checked-in dependency profile on the ephemeral cluster, in the order
+  `deploy/kubernetes/dependencies/README.md` prescribes: the operator release
+  manifest (`v0.73.1`, `install-no-webhook`) is downloaded, compared against
+  the SHA-256 in `versions.lock.yaml` (the script repeats the pin and refuses
+  to run if the two disagree) and applied server-side only when it verifies;
+  then the five CRDs are waited on, the operator rolled out, and the
+  namespace, VMSingle (PVC `Bound` and rollout), VMAgent, VMAlertmanager,
+  VMAlert and the rules applied one at a time, each behind a bounded
+  readiness wait. The installation's webhook-token Secret is copied into
+  `kubeneuron-monitoring` under the name Alertmanager mounts, read back and
+  compared, before Alertmanager is applied, so the phase runs after
+  `deploy`. It then waits for a raw DCGM series and a canonical
+  recording-rule series to be queryable in VMSingle, and last patches the
+  `KubeNeuron` root's `External` endpoints from the installer's placeholders
+  to the profile's VMSingle and Alertmanager Services (after checking each
+  Service really serves the port the checked-in endpoint names) and waits
+  for the root to be Ready. A missing root, a lock that disagrees with the
+  script, a download that does not verify, or a Service on another port
+  stops the phase with the cause named; nothing is skipped. This phase has
+  not yet been run on hardware.
+- **`test-observability`:** read-only phase that checks the profile ConfigMap,
+  the dcgm-exporter rollout and its T0/T1 series (with `UUID`/`modelName`
+  labels), and, on the VictoriaMetrics stack `deploy-observability`
+  installed from `deploy/kubernetes/dependencies/observability`, three canonical
+  `kubeneuron_gpu_*` series for that GPU: each sample must carry non-empty
+  `node`, `gpu_uuid` and `gpu_model` labels equal to the exporter's own values,
+  `node_pool` must equal the node's `eks.amazonaws.com/nodegroup` label (a
+  managed GPU node without that label is reported as an EKS-label error; this
+  expectation is specific to the EKS phase, the scrape contract keeps
+  `node_pool` optional), and the MiB-to-bytes rule must hold. On g4dn/Tesla
+  T4 it also requires the signals the hardware cannot produce (row remap,
+  NVLink, the fail-slow peer score, MIG) to be absent from VMSingle, where any
+  sample, zero-valued or not, is reported as a finding. The VMSingle port is
+  read from the Service (the port named `http`, or the only declared port),
+  never assumed. Without the stack it fails with a prerequisite message
+  rather than passing vacuously. `make verify-hw-e2e-observability` checks
+  the wiring offline: the port resolution against a scripted `kubectl`, and
+  the whole `deploy-observability` phase against scripted
+  `aws`/`kubectl`/`curl` (workflow order, the operator pin equal to the lock,
+  no remote apply, the README's install order with bounded gates, the
+  fail-closed token copy, and refused lock drift, checksum mismatch, missing
+  root and port drift). Both phases are steps of the workflow, after
+  `deploy` and before every injection phase. Both ran on hardware for the
+  first time in the v0.8.0 candidate's G3 run (2026-11-05, EKS g4dn).
+
+### When it runs
+
+- **`workflow_dispatch`** — a human triggers it from the Actions tab and must
+  type the phrase `RUN GPU HARDWARE E2E` into the `confirm` input. A wrong or
+  empty phrase fails the run before any cloud resource is created.
+- **Weekly `schedule`** — Monday 07:00 UTC, so a regression is caught even
+  when nobody dispatches it.
+- **Before every release tag** — running it green is a mandatory gate before
+  pushing a `v*` tag. It is not wired into `release.yaml`; run it by hand (or
+  confirm the latest weekly run is green) and only then tag.
+
+A permanent self-hosted GPU runner is intentionally out of scope; if a physical
+lab box ever appears it would host a nightly destructive ladder, tracked
+separately.
+
+### What it proves
+
+1. Stands up the cluster with `eksctl`, installs the **EBS CSI addon** (a
+   prerequisite — the controller's SQLite PVC never binds without it), marks
+   `gp2` the default StorageClass, and installs the NVIDIA GPU operator with
+   `dcgm.enabled=true` so a standalone DCGM host engine exists to attest
+   against.
+2. Builds and pushes the operator/controller/agent images to ECR, installs
+   KubeNeuron through `deploy/install.sh` (stays `DryRun`), then arms
+   `spec.agent.hostTooling` and **asserts the agent is on the node's real
+   driver**. The installer writes a vendor-neutral agent block, so without this
+   the distroless agent finds no `nvidia-smi`, falls back to the fake driver,
+   and every NVIDIA assertion below would pass against a simulator running on
+   real hardware.
+3. Installs the **checked-in observability profile** (checksum-locked
+   VictoriaMetrics operator, then VMSingle, vmagent, Alertmanager with the
+   installation's webhook token, vmalert and the rules, each behind a bounded
+   readiness gate), waits until a raw DCGM series and a canonical
+   recording-rule series are queryable, and points the `KubeNeuron` root at
+   the profile's endpoints. Then runs the **read-only observability check**:
+   T0/T1 exporter series, the canonical label contract, the EKS `node_pool`,
+   the MiB-to-bytes rule and the Tesla T4 absences. The [capability matrix](reference-capabilities.md) records the subset of these checks exercised on the v0.7.0 build.
+4. Injects a kernel **XID 79** into a GPU node's `/dev/kmsg` and asserts the
+   incident walks cordon → drain → approval → dry-run reboot ladder, with the
+   approver identity recorded in the audit trail — and that the controller
+   itself reports `execution_mode: dry-run` while that step ran.
+5. Exercises the **DCGM detection source**: either an injected DCGM field
+   raises a `gpuhealth` detection, or the fallback proves DCGM is the source
+   actually serving the node and that the agent parses this build's `dmon`
+   layout.
+6. Asserts a same-class **recurrence during `VERIFYING`** escalates rather than
+   letting the quiet window resolve the incident.
+7. Exercises the **threshold path**: XID 92 holds sub-threshold in `OBSERVING`
+   and the third signal escalates.
+8. Three workload-safe phases, on the one GPU node and before it is
+   terminated. Each first pins an `AcceleratorRuntimeProfile` to the driver
+   and DCGM client versions the agent on that node answers with, because the
+   agent attests its runtime only while a profile selects the node and the
+   classifier reads the device layout from that attestation; on g4dn the
+   layout is `whole-device` / `per-pod` with device actions `refused`
+   (`ReportNotReady`: the agent cannot stand behind a reset the hypervisor
+   withholds, see "GPU reset is impossible on most cloud VMs" above), and
+   the phases assert exactly that shape, with `eligible` accepted where the
+   hardware can reset. **`test-impact`** places an opted-in toy trainer that
+   holds the Tesla T4, parks a `checkpoint-probe` incident at an
+   approval-gated cordon and asserts the impact preview reads the node as
+   `whole-device` / `per-pod` with one GPU holder and its Job owner, that an
+   approve without the preview digest is refused, and that rejecting
+   withdraws the advisory. **`test-checkpoint`** drives the
+   same toy through the whole protocol: the advisory on the Pod and the
+   sidecar's reaction to it (logging the kubelet's Downward API latency, the
+   first time it is measured outside kind), an approve that
+   `kubeneuronctl approve --round 1` refuses without the digest and records
+   with `--impact-digest`, the request with its deadline,
+   the trainer's checkpoint and exit, the audit row recording the Pod as
+   `exited`, the counters moving, and a real drain of the node.
+   **`test-timeslice`** switches the GPU Operator device plugin to
+   time-slicing (`replicas: 2`) through the ClusterPolicy, asserts the
+   classifier refuses device actions on the now time-sliced node with
+   device-wide attribution, reverts the config and asserts `whole-device`
+   returns. All three measure acknowledgements and classifications, never
+   saved training progress, and say nothing about MIG, DRA, a multi-node gang
+   or any training framework.
+9. Flips to `executionMode: Enabled` under a confined
+   `spec.safety.destructiveExecution` block (node selector + the exact
+   acknowledgement string), waits for the **controller** to report that mode
+   and that confinement as live — not merely for the operator to stamp the root
+   object Ready — and asserts the **ReplaceNode** step terminates the instance
+   and the incident resolves through the ladder. A hardware GPU *reset* is
+   impossible on a virtualized g4dn, so ReplaceNode is the destructive
+   primitive exercised here.
+
+    The separate `node-replaced` audit action belongs to the vanished-node
+    janitor — the other closure path, taken only when the node disappears
+    before the ladder finishes — so this phase deliberately does not assert it.
+
+!!! note "CSI volumes need `fsGroup`"
+    The controller mounts its SQLite PVC through the EBS CSI driver, whose
+    volumes are only writable when the pod sets an `fsGroup`. This is captured
+    as an explicit prerequisite because a live run failed on it before the
+    addon and `fsGroup` were in place.
+
+### Required secrets, vars, and environment
+
+| Kind        | Name                   | Purpose                                            |
+| ----------- | ---------------------- | -------------------------------------------------- |
+| secret      | `AWS_GPU_LAB_ROLE_ARN` | IAM role assumed via GitHub OIDC (no static keys). |
+| var         | `AWS_REGION`           | e.g. `us-east-1`.                                   |
+| var         | `ECR_REGISTRY`         | ECR host `<acct>.dkr.ecr.<region>.amazonaws.com`.  |
+| environment | `gpu-lab`              | Add required reviewers; gates every dispatch/cron. |
+| var         | `HW_E2E_ENABLED`       | `true` arms the weekly cron **and the reaper**.    |
+
+!!! danger "None of these exist yet, and two of the gaps are not symmetric"
+    On `kubeneuron/kubeneuron` the secret, both vars and the environment are
+    all absent, so no hardware run has ever been dispatched from CI and **the
+    reaper has never executed** — every scheduled run reports `skipped`. Two
+    consequences to get right when arming it:
+
+    - GitHub **auto-creates** a missing environment on first use, with no
+      protection rules. Create `gpu-lab` with required reviewers *before*
+      dispatching, or the approval gate this table describes silently is not
+      one.
+    - `HW_E2E_ENABLED=true` arms the reaper **and** the Monday 07:00 UTC cron
+      together. With an ungated environment that is a recurring unattended paid
+      run. Set the environment up first.
+
+No account id or credential is committed. The assumed role needs permission to
+run `eksctl` (EKS, CloudFormation, EC2, IAM for the cluster's service roles),
+push to ECR, and — for the sweep — terminate EC2, delete CloudFormation stacks
+and EBS volumes, and delete the recycle IAM role.
+
+### Cost and teardown guarantee
+
+The teardown step runs `if: always()` — on success, failure, or cancellation.
+It runs `eksctl delete cluster --force` and then **sweeps for leaks**: it
+asserts there is no surviving cluster, no non-terminated e2e EC2 instance, no
+`eksctl-<cluster>-*` CloudFormation stack, no orphaned e2e EBS volume (a real
+run once leaked a 1 GiB SQLite volume), and deletes both the run's ECR images
+and any manually-created recycle IAM role. If it cannot delete something it
+fails loudly rather than leaving a paid resource running.
+
+Each of those queries is deliberately redundant, because a sweep whose filter
+matches nothing is indistinguishable from a clean account and is then written
+down as proof:
+
+- **Instances** are looked up by our own run tags *and* by `aws:eks:cluster-name`,
+  which EKS stamps itself — node-group tag propagation is version-dependent.
+- **Stacks** include `DELETE_FAILED` in the status filter. That is the state a
+  stack lands in when an orphaned ENI or in-use security group wedges the
+  delete, i.e. the one state that means "stuck and costing money".
+- **Volumes** are looked up by this run's own identity only: `kubeneuron:e2e`
+  plus `kubeneuron:e2e-run=<cluster>`, which the harness stamps on the exact
+  EBS volume behind each of its two claims (the controller's SQLite claim and
+  the VMSingle claim) while the cluster is live, after walking PVC → PV → CSI
+  volume handle and cross-checking the EBS CSI driver's own `created-for`
+  tags; plus the legacy `KubernetesCluster=<cluster>` tag for older clusters.
+  The sweep never scopes volumes by PVC namespace or by the driver's
+  `created-for` tags: the driver writes nothing that names the cluster, so
+  that filter matched every cluster in the account using the same namespaces.
+  Teardown and a standalone sweep tag the claims once more before deleting a
+  still-live cluster, through the run's dedicated kubeconfig, and only after
+  that kubeconfig's API server is proven to be the EKS endpoint of exactly
+  this cluster; a claim that cannot be tied to the run (or a kubeconfig that
+  cannot be proven) is recorded as unproven, and the sweep then names it and
+  refuses to report clean instead of guessing.
+
+The reaper is the second line of defence: it force-deletes any
+`kubeneuron-e2e*` cluster whose `kubeneuron:e2e-expires-at` tag has passed, so a
+wedged runner that never reaches teardown still cannot leak a cluster past its
+max lifetime (`MAX_LIFETIME_MINUTES`, default 180). The job's own
+`timeout-minutes: 150` bounds a single run; the reaper bounds everything else.
+Keep that margin: if the two ever meet, the watchdog deletes a cluster whose
+run is still using it.
+
+Two limits worth stating plainly. The reaper is armed by `HW_E2E_ENABLED` and
+has never run (see the note above). And it enumerates *clusters*: if a cluster
+is already gone but a volume, stack or role leaked, no schedule will find it —
+that is what makes the teardown sweep, not the reaper, the load-bearing check.
+
+You can run the teardown and sweep locally against a stuck run:
+
+```sh
+CLUSTER_NAME=kubeneuron-e2e-gh42 AWS_REGION=us-east-1 hack/hw-e2e.sh teardown
+```

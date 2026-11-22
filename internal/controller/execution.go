@@ -1,0 +1,975 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package controller
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/kubeneuron/kubeneuron/internal/action"
+	"github.com/kubeneuron/kubeneuron/internal/detect"
+	"github.com/kubeneuron/kubeneuron/internal/metrics"
+	"github.com/kubeneuron/kubeneuron/internal/notify"
+	"github.com/kubeneuron/kubeneuron/internal/platform"
+	"github.com/kubeneuron/kubeneuron/internal/playbook"
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
+	"github.com/kubeneuron/kubeneuron/internal/safety"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
+	"github.com/kubeneuron/kubeneuron/pkg/types"
+)
+
+var errDeviceOutcomeUnknown = errors.New("device action outcome is unknown")
+
+// This file is the execution seam: dispatching an admitted step to the
+// platform, the agent, verification, or notification, and routing its outcome
+// (advance, escalate, quarantine). Admission decisions are made before
+// startStep in admission.go; the state walk that calls it lives in
+// reconcile.go.
+
+// startStep reserves a gate slot, moves the incident to EXECUTING, and runs
+// the step in its own goroutine.
+func (c *Controller) startStep(ctx context.Context, inc *types.Incident, step *playbook.Step, actor string) error {
+	return c.startStepThen(ctx, inc, step, actor, nil)
+}
+
+// startStepThen is startStep with started, which runs once the step has
+// durably entered EXECUTING and before its goroutine exists: the last point
+// at which the caller may still read or write inc. After startStepThen
+// returns, the step goroutine owns inc.
+func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, step *playbook.Step, actor string, started func()) error {
+	// A reload is a writer; admission is a reader.  Holding the read lock until
+	// the step has acquired its gate slot and durably entered EXECUTING gives the
+	// reload a linearization point: when a DryRun reload returns, every later
+	// admission observes its snapshot.  A pass that pinned an older generation
+	// before waiting for this lock simply retries on the next tick instead of
+	// starting work under a configuration the operator has replaced.
+	//
+	// This does not try to cancel an action already admitted before the reload;
+	// that is the normal in-flight-action contract.  executeStep has a second,
+	// last-mile dry-run check for a goroutine that was admitted but has not yet
+	// reached its side effect.
+	// The last stop for an observe-only class: the state walk never brings
+	// one here, so reaching it means a path that walk does not know about.
+	if reason, ok := detect.ObserveOnly(inc.Class); ok && !strings.HasPrefix(step.Action, "notify.") {
+		return c.quarantine(ctx, inc, "step "+step.Name+" refused: "+reason)
+	}
+	c.runtimeMu.RLock()
+	defer c.runtimeMu.RUnlock()
+	if c.runtimeConfig(ctx) != c.runtime.Load() {
+		c.log.Info("skipping step admission from a superseded runtime configuration",
+			"incident", inc.ID, "step", step.Name)
+		return nil
+	}
+
+	// A destructive controller-side platform step must stay inside the declared
+	// blast radius. On an Enabled install the agent path is already confined to
+	// spec.safety.destructiveExecution.nodeSelector; the controller path (cordon,
+	// drain, evict, recycle/replace) was not, so a non-dry-run incident on a node
+	// outside the selector could cordon and drain it and one approval from
+	// terminating it. Fail closed to NEEDS_HUMAN with an audited reason instead.
+	// Pinned HERE, before the confinement check, not later beside the audit.
+	//
+	// Confinement reads the execution MODE while the blast radius comes from
+	// the pinned runtime config, and the reload writes those two in separate
+	// statements — so on a DryRun -> Enabled reload there is a window where the
+	// gate says Enabled and the selector is still the empty one DryRun
+	// compiled, and an empty selector is read as "no confinement configured"
+	// and allowed. Deciding the mode once, above both reads, closes the half of
+	// that window this function owns: a step cannot be waved through as a
+	// simulation and then executed for real by the same call.
+	// The per-node pause holds before EVERY step, whatever path reached here:
+	// the evaluating walk checks it too, but an approved step resumed from
+	// AWAITING_APPROVAL did not. Holding keeps the approval recorded; the
+	// step starts on the first tick after the pause is lifted.
+	if c.pauseHolds(ctx, inc) {
+		c.deferStep(inc, step, metrics.DeferNodePaused)
+		return nil
+	}
+	ctx, _ = c.pinSimulate(ctx, inc)
+	if !c.simulating(ctx, inc) {
+		if err := c.requireCloudRecovery(ctx, inc, step); err != nil {
+			if errors.Is(err, cloud.ErrIdentityChanged) {
+				return c.supersedeCloudTarget(ctx, inc, err)
+			}
+
+			c.deferStep(inc, step, metrics.DeferRecoveryUnavailable)
+			key := fmt.Sprintf("cloud-admission-hold/%s/%s/%d/%s", inc.ID, step.Name, inc.StepIndex, err.Error())
+			if c.logOnce.first(key) {
+				c.log.Info("cloud recovery held before step admission", "incident", inc.ID, "step", step.Name, "reason", err.Error())
+			}
+			return nil
+		}
+	}
+	// A step that needs approval starts only under a person's decision or the
+	// live automatic policy its actor names: defence in depth for
+	// every path that reaches here. A changed cloud target is decided first:
+	// the incident is superseded whatever the policy would have said.
+	// A step the policy would skip is not started either: skipping is the
+	// boundary's move, here it holds.
+	if hold, skip, notifyAction := c.policyRecoveryPreflight(ctx, inc, step); hold != "" || skip != "" {
+		c.deferStep(inc, step, metrics.DeferRecoveryUnavailable)
+		if notifyAction != "" && !c.simulating(ctx, inc) {
+			return c.notifyAddFirstHold(ctx, inc, step.Name, hold, notifyAction)
+		}
+		c.logOnceStepUnavailable(inc, step, firstNonBlank(hold, "recovery unavailable: "+skip))
+		return nil
+	}
+	if refusal := c.policyAuthorisationRefusal(ctx, inc, step, actor); refusal != "" {
+		return c.parkForApproval(ctx, inc, step, "not starting the step: "+refusal)
+	}
+	def, known := action.ByWire(step.Action)
+	switch reason, res := c.destructiveStepConfinement(ctx, inc, step); res {
+	case confinementOutOfScope:
+		// Confirmed outside the blast radius: fail closed to a human. Never execute.
+		c.deferStep(inc, step, metrics.DeferConfinement)
+		return c.quarantine(ctx, inc, reason)
+	case confinementUnresolved:
+		c.deferStep(inc, step, metrics.DeferConfinement)
+		// The node's labels could not be resolved right now (a transient
+		// platform/apiserver blip). This is missing evidence, not a confirmed
+		// scope violation, so hold in EVALUATING and retry — matching the
+		// accelerator evidence gate below — rather than turning a passing blip
+		// into a terminal quarantine. Fail closed only if resolution stays
+		// impossible past the bounded deadline.
+		if time.Since(inc.StateChangedAt) < c.verifyEvidenceDeadline(ctx) {
+			c.log.Info("destructive-step confinement: node labels unavailable, holding",
+				"incident", inc.ID, "node", inc.Target.Node, "step", step.Name, "reason", reason)
+			return nil
+		}
+		return c.quarantine(ctx, inc, reason+"; still unresolvable past the confinement deadline")
+	}
+	// Capability evidence is a precondition, not an execution failure. If a
+	// reset cannot be admitted because its runtime profile/report is absent,
+	// stale, or unsafe, leave the incident in EVALUATING. Escalating from a
+	// withheld reset into a reboot would turn missing evidence into a more
+	// destructive action, which is the opposite of fail-closed remediation.
+	if err := c.allowAcceleratorStep(ctx, inc, step); err != nil {
+		if errors.Is(err, errResetTargetUnattributed) {
+			// Structural and permanent, not missing evidence: an empty GPU UUID can
+			// never be filled in by a later report, so a per-device reset here can
+			// never succeed. Fail closed to a human with the reason rather than
+			// re-deny this reset on every tick after the node was cordoned/drained.
+			return c.quarantine(ctx, inc, err.Error())
+		}
+		// Everything else here is missing/stale/mismatched evidence: the step is
+		// HELD, so the device keeps running whatever it is running. That is a
+		// deferral, not a failure, and it is the most common reason a reset does
+		// not happen.
+		c.deferStep(inc, step, metrics.DeferAcceleratorEvidence)
+		metrics.GateDenials.Inc()
+		// But the hold has to END somewhere, and it did not.
+		//
+		// Both siblings in this function bound their equivalent wait — the
+		// confinement hold above, and the VERIFYING evidence hold in
+		// reconcile.go — because evidence that is merely late becomes evidence
+		// that is never coming, and the two are indistinguishable from here.
+		// This one held forever, and the shipped drain-and-reset ladder reaches
+		// the reset rung AFTER cordon and drain. So a node whose evidence can
+		// never arrive — no PCI reset on a virtualised instance, MIG enabled
+		// after the incident opened, a relabelled profile, a dead agent — sat
+		// cordoned and emptied of work indefinitely, in EVALUATING rather than
+		// NEEDS_HUMAN, on no alert and in nobody's queue. A metric counter
+		// climbed and nothing else said anything.
+		//
+		// Past the deadline this is not missing evidence any more, it is an
+		// answer: this reset cannot be admitted here. Fail closed to a human,
+		// who can then uncordon the node or fix the profile. Inside the
+		// deadline the hold is unchanged — refusing to escalate to a bigger
+		// hammer on absent evidence is right, and stays.
+		if time.Since(inc.StateChangedAt) < c.verifyEvidenceDeadline(ctx) {
+			c.log.Info("accelerator capability gate denied step, will hold",
+				"incident", inc.ID, "step", step.Name, "reason", err.Error())
+			return nil
+		}
+		return c.quarantine(ctx, inc,
+			"accelerator reset evidence still unavailable past the evidence deadline: "+err.Error())
+	}
+	action := gateAction(step)
+	// A checkpoint warning only asks the node's jobs to save their state
+	// before the cloud stops the instance: a mass interruption must reach every
+	// node, so the breaker, the limits and the cooldowns do not apply. Only a
+	// global pause holds it. It takes no remediation slot.
+	warning := step.Action == playbook.CheckpointWarningAction
+	if warning && c.gate.Paused() {
+		c.deferStep(inc, step, metrics.DeferGlobalPause)
+		return nil
+	}
+	// The first admitted step acquires the target's remediation slot, held from
+	// here until the incident halts; later steps of the same remediation pass
+	// only the per-step checks. Acquiring per step and releasing between steps
+	// made MaxConcurrentRemediations a cap on concurrent steps: N incidents
+	// could interleave, each holding a slot only while a step ran. Ownership is
+	// the DURABLE bit on the incident row — persisted atomically with the
+	// EXECUTING transition below — so a leader failover rebuilds occupancy from
+	// truth instead of inferring it (the inference missed escalated incidents,
+	// whose StepIndex resets to 0 mid-remediation).
+	alreadyHeld := inc.RemediationSlotHeld
+	var admit error
+	if warning {
+		alreadyHeld = true // nothing to acquire, nothing to release
+	} else if alreadyHeld {
+		admit = c.gate.AllowHeld(inc.Target, action)
+	} else {
+		admit = c.gate.Allow(inc.Target, action)
+	}
+	if admit != nil {
+		// A global pause stops new remediation, but this exact compensating
+		// action only reverses KubeNeuron's own recorded GPU-stack quiesce. It
+		// must be able to start even when it has not yet enqueued its agent-side
+		// restore; otherwise pausing between quiesce and restore strands
+		// monitoring off. A compensating action name alone is not enough: a
+		// hand-authored restore-only playbook must not start the host-side restore
+		// while paused when there is no durable quiesce for it to undo.
+		if known && def.Compensating && isGlobalPauseDenial(admit) &&
+			c.hasRecordedAcceleratorStackQuiesce(ctx, inc) {
+			admit = nil
+		}
+	}
+	if admit != nil {
+		c.deferForGateDenial(inc, step, admit)
+		metrics.GateDenials.Inc()
+		c.log.Info("safety gate denied step, will retry",
+			"incident", inc.ID, "step", step.Name, "reason", admit.Error())
+		return nil // denial is not an error: hold position and retry
+	}
+	if !alreadyHeld {
+		inc.RemediationSlotHeld = true // persisted by the transition below
+	}
+	// Entering EXECUTING is durable before the goroutine can run, but it is not
+	// proof of a side effect: a DryRun reload may stop the action at its final
+	// boundary. runStep appends the actual outcome before it changes state; the
+	// recovery report reads that outcome rather than this start record.
+	wire := step.Action
+	if c.simulating(ctx, inc) {
+		wire = ""
+	}
+	if err := c.transitionWithRepairStep(ctx, inc, types.StateExecuting, actor, step.Name,
+		auditStepStartResult(step.Action), step.Params, wire, false); err != nil {
+		if warning {
+			return err
+		}
+		c.gate.StepDone(inc.Target, action, 0)
+		if !alreadyHeld {
+			// The transition never committed, so the bit was never persisted;
+			// undo the in-memory acquisition rather than waiting for a
+			// halting transition this incident may never take from here.
+			inc.RemediationSlotHeld = false
+			c.gate.ReleaseRemediation(inc.Target)
+		}
+		if errors.Is(err, errRepairStepBusy) {
+			return nil
+		}
+		return err
+	}
+	if started != nil {
+		started()
+	}
+	c.setInFlight(inc.ID, true)
+	// The step goroutine pins the engine that ADMITTED the step: it may run
+	// for many minutes, and re-reading the live engine after completion would
+	// compute done/not-done against a generation that never admitted this
+	// step. The next advance re-reads fresh.
+	engine := c.runtimeConfig(ctx).Engine
+	go func() {
+		defer c.setInFlight(inc.ID, false)
+		if !warning {
+			defer c.gate.StepDone(inc.Target, action, 0)
+		}
+		c.runStep(ctx, engine, inc, step)
+	}()
+	return nil
+}
+
+// runStep executes one step and applies the outcome: next step, verification,
+// escalation, or quarantine. Runs outside the reconcile goroutine, against
+// the engine snapshot that admitted the step.
+func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *types.Incident, step *playbook.Step) {
+	result, err := c.executeStep(ctx, inc, step)
+	if auditErr := c.appendAudit(ctx, inc, "system", step.Name, c.stepOutcome(ctx, inc, step, result)); auditErr != nil {
+		// The start record remains, but intentionally does not count as a repair
+		// without this outcome. Logging and proceeding is safer than repeating a
+		// side effect merely because its audit write was temporarily unavailable.
+		c.log.Error("step outcome audit append failed", "incident", inc.ID, "step", step.Name, "err", auditErr)
+	}
+
+	output := ""
+	if result != nil {
+		output = result.Output
+	}
+	if errors.Is(err, cloud.ErrIdentityChanged) {
+		if closeErr := c.supersedeCloudTarget(ctx, inc, err); closeErr != nil {
+			c.log.Error("cloud target supersede failed", "incident", inc.ID, "err", closeErr)
+		}
+		return
+	}
+	if errors.Is(err, errCloudRecoveryUnavailable) {
+		if holdErr := c.transition(ctx, inc, types.StateEvaluating, "system", step.Name, err.Error(), step.Params); holdErr != nil {
+			c.log.Error("cloud recovery hold transition failed", "incident", inc.ID, "err", holdErr)
+		}
+		return
+	}
+	if err != nil {
+		metrics.StepsExecuted.WithLabelValues("failed").Inc()
+		// An idle guard that refuses is the device saying "I am still working".
+		// The rung it stands in front of does not run, which is protection, not
+		// a malfunction — count it as such before the ladder moves on.
+		// The control decision asks only "was this a guard?" — see
+		// idleGuardStopped. The metric asks the narrower question.
+		stopped := idleGuardStopped(step)
+		c.recordIdleRefusal(inc, step, result)
+		c.log.Warn("step failed", "incident", inc.ID, "step", step.Name, "err", err)
+		if auditErr := c.appendAudit(ctx, inc, "system", step.Name, "FAILED: "+err.Error()); auditErr != nil {
+			c.log.Error("audit append failed", "incident", inc.ID, "err", auditErr)
+		}
+		if errors.Is(err, errDeviceOutcomeUnknown) {
+			if qErr := c.quarantine(ctx, inc, err.Error()); qErr != nil {
+				c.log.Error("device action handoff failed", "incident", inc.ID, "err", qErr)
+			}
+			return
+		}
+		if stopped {
+			// Do NOT escalate. Escalation switches to the failure playbook,
+			// whose rungs are by construction bigger hammers than the one that
+			// just got stopped — so a guard that refused BECAUSE live work is
+			// on the device would be answered by reaching for something more
+			// destructive. That inverts the guard into a trigger.
+			//
+			// Whether to end somebody's running job is a human's call, so the
+			// incident is handed over with the holders named in the audit
+			// trail. The node keeps whatever cordon the ladder already applied,
+			// so nothing new lands on it while the decision is pending.
+			reason := fmt.Sprintf("%s did not clear the device (%v); automation stops here "+
+				"rather than escalating to a more destructive step", step.Name, err)
+			if qErr := c.quarantine(ctx, inc, reason); qErr != nil {
+				c.log.Error("quarantine after an idle refusal failed", "incident", inc.ID, "err", qErr)
+			}
+			return
+		}
+		// A returned device result confirms the agent finished this step.
+		// Transport failures leave the reservation in place.
+		device, guarded := repairStepScope(step.Action)
+		completed := device && guarded && result != nil
+		if escErr := c.escalateAfterStep(ctx, inc, fmt.Sprintf("step %s failed: %v", step.Name, err), completed); escErr != nil {
+			c.log.Error("escalation failed", "incident", inc.ID, "err", escErr)
+		}
+		return
+	}
+
+	// The label must describe what this step DID — the decision pinned when it
+	// was admitted, not the gate as it stands now. Re-reading here reported a
+	// step that really ran as simulated whenever the operator flipped the mode
+	// while the agent held the action.
+	if c.stepWasSimulated(ctx, inc, step, result) {
+		metrics.StepsExecuted.WithLabelValues("dry_run").Inc()
+	} else {
+		metrics.StepsExecuted.WithLabelValues("ok").Inc()
+	}
+	inc.StepIndex++
+	_, done, nextErr := engine.NextStep(inc)
+	next := types.StateEvaluating
+	note := "step complete; evaluating next step"
+	if nextErr == nil && done {
+		next = types.StateVerifying
+		note = "playbook complete; verifying quiet window"
+	}
+	if err := c.transitionWithRepairStep(ctx, inc, next, "system", step.Name, firstNonBlank(output, note), step.Params, "", true); err != nil {
+		c.log.Error("post-step transition failed", "incident", inc.ID, "err", err)
+		return
+	}
+	if notifyErr := c.notify(ctx, notify.NotifyEvent{
+		Kind: notify.EventActionTaken, Incident: inc,
+		Message: fmt.Sprintf("step %s: %s", step.Name, firstNonBlank(output, "done")),
+	}); notifyErr != nil {
+		c.log.Warn("notification failed", "incident", inc.ID, "err", notifyErr)
+	}
+}
+
+func isGlobalPauseDenial(err error) bool {
+	kind, ok := safety.DenialKindOf(err)
+	return ok && kind == safety.DenialGlobalPause
+}
+
+// hasRecordedAcceleratorStackQuiesce reports whether this exact incident still
+// owns a KubeNeuron-recorded accelerator-stack quiesce. Both facts matter: the
+// in-memory pin links the incident to its quiesce attempt, while the platform
+// marker proves there is still a node-level change to undo. A marker for a
+// different incident must not give a hand-authored restore-only playbook an
+// exception to either a global pause or DryRun.
+//
+// Failure to read the marker is intentionally a denial. The normal janitor
+// will retry recovery once the platform is reachable; letting a pause exception
+// depend on unavailable evidence would turn an emergency stop into permission
+// to act.
+func (c *Controller) hasRecordedAcceleratorStackQuiesce(ctx context.Context, inc *types.Incident) bool {
+	if inc == nil {
+		return false
+	}
+	c.pinnedEvidenceMu.Lock()
+	pin, owned := c.pinnedEvidence[inc.ID]
+	c.pinnedEvidenceMu.Unlock()
+	if !owned || pin.node != inc.Target.Node {
+		return false
+	}
+	controller, ok := c.platform.(platform.AcceleratorStackController)
+	if !ok {
+		return false
+	}
+	nodes, err := controller.QuiescedNodes(ctx)
+	if err != nil {
+		c.log.Warn("cannot verify accelerator-stack quiesce for compensating restore", "node", inc.Target.Node, "err", err)
+		return false
+	}
+	for _, quiesced := range nodes {
+		if quiesced == inc.Target.Node {
+			return true
+		}
+	}
+	return false
+}
+
+// stepWasSimulated reports the outcome, rather than merely the decision at
+// admission. executeStep repeats the live DryRun check immediately before its
+// side effect, so a step admitted just before a stop can become a no-op. The
+// synthetic result prefix is controller-owned and is the same durable wording
+// users see in the audit trail.
+func (c *Controller) stepWasSimulated(ctx context.Context, inc *types.Incident, step *playbook.Step, result *types.ActionResult) bool {
+	if result != nil && strings.HasPrefix(result.Output, "DRY-RUN:") {
+		return true
+	}
+	def, ok := action.ByWire(step.Action)
+	return c.simulating(ctx, inc) && (!ok || !def.Compensating)
+}
+
+func (c *Controller) stepOutcome(ctx context.Context, inc *types.Incident, step *playbook.Step, result *types.ActionResult) string {
+	if result == nil || !result.OK {
+		return auditStepOutcomeResult(step.Action, false, false)
+	}
+	return auditStepOutcomeResult(step.Action, c.stepWasSimulated(ctx, inc, step, result), true)
+}
+
+// pinnedSimulateKey carries ONE step's simulate-or-execute decision.
+//
+// The gate reloads in place, so reading it three times per step — once for the
+// audit row, once to decide, once to label the metric — reads three different
+// answers across a window that is the whole step, minutes for a reboot. Both
+// disagreements were observable: a step dispatched for real while the operator
+// flipped to DryRun mid-flight was counted as simulated, so the very counter
+// used to confirm the stop had taken effect reported a real fleet change as a
+// no-op; and the reverse flip made the audit say "simulating" for a step that
+// then really rebooted a node, which the recovery report reads as
+// observed-only. The audit trail is the only evidence a repair happened, and
+// this made it lie about a destructive act.
+//
+// It mirrors how the engine and the runtime config are already pinned for the
+// life of a step: decide once, at admission, and carry the decision.
+type pinnedSimulateKey struct{}
+
+// pinSimulate evaluates the decision once and returns it with a context that
+// carries it to the step goroutine.
+func (c *Controller) pinSimulate(ctx context.Context, inc *types.Incident) (context.Context, bool) {
+	if pinned, ok := ctx.Value(pinnedSimulateKey{}).(bool); ok {
+		return ctx, pinned
+	}
+	simulate := c.effectiveDryRun(ctx, inc)
+	return context.WithValue(ctx, pinnedSimulateKey{}, simulate), simulate
+}
+
+// simulating reports this step's pinned decision, falling back to the live
+// gate for callers outside a step (the janitor's own actuator calls).
+func (c *Controller) simulating(ctx context.Context, inc *types.Incident) bool {
+	if pinned, ok := ctx.Value(pinnedSimulateKey{}).(bool); ok {
+		return pinned
+	}
+	return c.effectiveDryRun(ctx, inc)
+}
+
+// effectiveDryRun answers whether this step must be simulated, from the
+// incident AND the gate that is live right now.
+//
+// inc.DryRun alone is not that answer. It is stamped once, in openIncidentTx,
+// and never revisited — which was the only correct reading while configuration
+// arrived by rolling the Deployment, because a mode change restarted the
+// process and no incident outlived it. Configuration now reloads in place, so
+// an operator who sets executionMode: DryRun to STOP damage changes what the
+// gate says while every already-open incident keeps executing for real.
+//
+// That is bad on its own and worse in combination: the operator compiles the
+// destructive node selector only for an Enabled install, so the same flip
+// empties the selector, and an empty selector is read as "no confinement
+// configured" and allowed. The documented way to stop a runaway remediation
+// therefore removed the blast radius from every ladder already in flight — a
+// step refused a second earlier for being outside spec.safety.
+// destructiveExecution.nodeSelector became allowed on any node in the cluster.
+//
+// Reading the live gate here is monotonic toward safety. An incident opened in
+// DryRun stays dry-run for life whatever the gate later says, which is the
+// existing stamped-at-open guarantee and the direction worth keeping; an
+// incident opened Enabled becomes a no-op the moment the operator asks for
+// one, and resumes if they change their mind.
+//
+// Pause is already enforced, separately and earlier, by gate.Allow.
+func (c *Controller) effectiveDryRun(ctx context.Context, inc *types.Incident) bool {
+	if inc == nil || inc.DryRun {
+		return true
+	}
+	limits := c.runtimeConfig(ctx).SafetyLimits
+	if limits == nil {
+		return true
+	}
+	return limits.DryRun
+}
+
+// executeStep dispatches a step to the platform, the actuator, verification,
+// or notification. Dry-run incidents normally touch nothing. The sole
+// exception is the compensating accelerator-stack restore: it reverses only a
+// KubeNeuron-recorded quiesce, and simulating it could strand GPU monitoring
+// off after the operator stopped new remediation.
+func (c *Controller) executeStep(ctx context.Context, inc *types.Incident, step *playbook.Step) (*types.ActionResult, error) {
+	timeout := effectiveStepTimeout(step)
+	prepares := c.successorStep(ctx, inc, step)
+	if prepares {
+		// The step first waits for its successor, for at most the policy's
+		// successor timeout, then does its own work in its own timeout.
+		timeout += recoverymode.EffectiveSuccessorTimeout(c.incidentPolicy(ctx, inc).SuccessorTimeout)
+	}
+	// The agent gets the step's timeout; the controller waits slightly
+	// longer. Given the same deadline the controller always wins the race
+	// and reports "context deadline exceeded", throwing away the agent's
+	// own diagnosis — on real hardware that turned "GPU 0 is still held by
+	// nvidia-device-plugin(11621)" into a timeout with no cause named.
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, timeout+agentResultGrace)
+	defer cancel()
+	// The reconciliation pass pins its decision so all of its preconditions use
+	// one coherent configuration.  At the final side-effect boundary, however,
+	// a newly installed DryRun may only make that decision safer: do not let a
+	// goroutine that was admitted immediately before an emergency reload call a
+	// controller-side platform operation after the stop succeeded.  This is
+	// deliberately one-way.  A newly Enabled snapshot never makes an older
+	// simulated pass live, which would reopen the selector/mode split this
+	// snapshot design prevents.
+	def, ok := action.ByWire(step.Action)
+	if !ok {
+		return nil, fmt.Errorf("unknown step action %q", step.Action)
+	}
+	if (c.simulating(ctx, inc) || c.currentRuntimeDryRun()) &&
+		(!def.Compensating || !c.hasRecordedAcceleratorStackQuiesce(ctx, inc)) {
+		now := time.Now()
+		output := fmt.Sprintf("DRY-RUN: would execute %s on %s", step.Action, inc.Target.Node)
+		switch step.Action {
+		case playbook.CheckpointWarningAction:
+			output = "DRY-RUN: would warn the workloads on " + inc.Target.Node + " to checkpoint before the deadline the cloud announced"
+		case "platform.cordon":
+			if inc.Class == types.ClassCloudInterruption {
+				output = "DRY-RUN: would cordon " + inc.Target.Node + " before the interruption the cloud announced"
+			}
+		}
+		if prepares {
+			output += ". " + successorApprovalNote(inc)
+		}
+		if def.Kind == action.KindPlatform {
+			// A simulated disruption step may add a read-only projection of what
+			// checkpoint coordination would have asked. It patches nothing, waits
+			// for nothing, and counts nothing; see checkpointDryRunProjection.
+			output += c.checkpointDryRunProjection(ctx, inc, def.Op, step)
+		}
+		return &types.ActionResult{
+			ActionID:   actionID(inc),
+			OK:         true,
+			Output:     output,
+			StartedAt:  now,
+			FinishedAt: now,
+		}, nil
+	}
+	switch def.Kind {
+	case action.KindPlatform:
+		return c.executePlatformStep(ctx, inc, def.Op, step)
+	case action.KindAgent:
+		return c.executeAgentStep(ctx, inc, def.Op, step)
+	case action.KindVerify:
+		node, _ := c.nodeFor(ctx, inc.Target.Node)
+		if err := c.actuator.Healthy(ctx, node); err != nil {
+			return nil, fmt.Errorf("%s: %w", step.Action, err)
+		}
+		return okResult(inc, step.Action+" passed"), nil
+	case action.KindNotify:
+		err := c.notify(ctx, notify.NotifyEvent{
+			Kind: notify.EventActionTaken, Incident: inc,
+			Message: firstNonBlank(step.Params["note"], step.Action),
+		})
+		if err != nil {
+			return nil, err
+		}
+		return okResult(inc, step.Action+" delivered"), nil
+	default:
+		return nil, fmt.Errorf("unknown step action %q", step.Action)
+	}
+}
+
+// currentRuntimeDryRun reads the currently installed snapshot without a
+// context pin.  It is used only as the one-way last-mile stop in executeStep;
+// normal planning and admission use the coherent snapshot carried by ctx.
+func (c *Controller) currentRuntimeDryRun() bool {
+	rc := c.runtime.Load()
+	return rc == nil || rc.SafetyLimits == nil || rc.SafetyLimits.DryRun
+}
+
+// effectiveStepTimeout is the single timeout contract for both halves of an
+// agent action.  The controller waits for this budget plus result grace, and
+// the agent receives this exact budget in its queued Action.  Keeping the
+// derivation here avoids a controller timing out a zero-timeout action while
+// the agent continues it without a deadline.
+func effectiveStepTimeout(step *playbook.Step) time.Duration {
+	if step != nil && step.Timeout.Std() > 0 {
+		return step.Timeout.Std()
+	}
+	return defaultStepTimeout
+}
+
+func (c *Controller) executePlatformStep(ctx context.Context, inc *types.Incident, op string, step *playbook.Step) (*types.ActionResult, error) {
+	if c.platform == nil {
+		return nil, fmt.Errorf("platform.%s: no platform configured", op)
+	}
+	if op == "checkpoint_warning" {
+		return c.warnCheckpoint(ctx, inc)
+	}
+	node := inc.Target.Node
+	reason := cordonReason(inc)
+	// The checkpoint coordination pre-phase of the two disruption steps. It
+	// runs inside this step's own goroutine and budget, returns no error, and
+	// changes nothing about the disruption that follows: a workload that opted
+	// in is told and given a bounded deadline, then drained or evicted exactly
+	// as before. On a disabled policy (the default) it is a single boolean.
+	if c.successorStep(ctx, inc, step) {
+		if err := c.awaitSuccessor(ctx, inc); err != nil {
+			return nil, err
+		}
+	}
+	c.coordinateCheckpoint(ctx, inc, step, op)
+	// Checkpoint coordination can wait long enough for native repair or a node
+	// replacement. Re-read evidence after that wait, before any disruption.
+	if err := c.requireCloudRecovery(ctx, inc, step); err != nil {
+		return nil, err
+	}
+
+	switch op {
+	case "cordon":
+		if err := c.cordonForIncident(ctx, inc, node, reason); err != nil {
+			return nil, err
+		}
+		return okResult(inc, "cordoned "+node), nil
+	case "uncordon":
+		return c.uncordonForIncident(ctx, inc, node, reason)
+	case "drain":
+		err := c.platform.Drain(ctx, node, platform.DrainOptions{
+			// The POD's own grace period, not ours.
+			//
+			// DeleteOptions.GracePeriodSeconds overrides the pod spec in both
+			// directions, so passing a constant 30s SIGKILLed a job that
+			// declared terminationGracePeriodSeconds: 600 precisely so it could
+			// checkpoint on SIGTERM — the workload most likely to be running on
+			// the GPU we are about to reset, and the one with the most to lose.
+			//
+			// The zero value means "do not override", and evictPod clamps it
+			// to the step's own remaining budget so a tenant-declared period
+			// cannot outlast the window the ladder has.
+			GracePeriod: platform.DrainUsePodGracePeriod,
+			Timeout:     step.Timeout.Std(),
+			// force: a playbook author's answer to "what should happen when a
+			// pod has no controller".
+			//
+			// Drain refuses such a node by default, because nothing would
+			// reschedule that pod and kubectl refuses for the same reason. But
+			// kubectl is typed by a human who can add --force; a remediation
+			// ladder has nobody at that moment, so without a way to say it a
+			// node carrying one transient `kubectl run` pod could never be
+			// remediated at all — and that pod is often a debug shell somebody
+			// left open on the very node that is failing.
+			//
+			// Off by default, and stated per step, so evicting somebody's
+			// unmanaged work is a decision written down in a playbook rather
+			// than a default nobody chose.
+			Force: drainForce(step),
+		})
+		if err != nil {
+			return nil, err
+		}
+		return okResult(inc, "drained "+node), nil
+	case "quiesce_accelerator_stack":
+		return c.quiesceAcceleratorStack(ctx, inc, step)
+	case "restore_accelerator_stack":
+		return c.restoreAcceleratorStackStep(ctx, inc, step)
+	case "recycle_node":
+		return c.recycleNodeStep(ctx, inc, false)
+	case "replace_node":
+		return c.recycleNodeStep(ctx, inc, true)
+	case "evict_gpu_workload":
+		workloads, err := c.platform.NodeWorkloads(ctx, node)
+		if err != nil {
+			return nil, err
+		}
+		evicted := 0
+		for _, w := range workloads {
+			if !w.UsesGPU {
+				continue
+			}
+			if err := c.platform.EvictWorkload(ctx, w); err != nil {
+				return nil, fmt.Errorf("evicting %s/%s: %w", w.Namespace, w.Name, err)
+			}
+			evicted++
+			// Counted per workload and only after the eviction was accepted, so
+			// the series is what the fleet actually lost rather than what the
+			// step intended. Dry-run never reaches here (executeStep returns
+			// earlier), which is why no DryRun guard is needed.
+			metrics.WorkloadsEvicted.WithLabelValues(string(inc.Class)).Inc()
+		}
+		if evicted == 0 {
+			// "evicted 0" used to read as success and let the ladder proceed
+			// to a reset believing the device was clear. Say plainly that
+			// nothing matched: either the node genuinely runs no accelerator
+			// pods, or their resource name is one the matcher does not know —
+			// and the operator must be able to tell those apart from the
+			// audit trail alone.
+			c.log.Info("evict_gpu_workload matched no accelerator workloads",
+				"incident", inc.ID, "node", node, "pods_considered", len(workloads))
+			return okResult(inc, fmt.Sprintf(
+				"no accelerator workloads to evict from %s (%d pods considered)", node, len(workloads))), nil
+		}
+		return okResult(inc, fmt.Sprintf("evicted %d GPU workloads from %s", evicted, node)), nil
+	default:
+		return nil, fmt.Errorf("unknown platform action %q", op)
+	}
+}
+
+// drainForce reads a drain step's params.force. It is the one reading of that
+// key, shared by the drain itself and by the checkpoint pre-phase that
+// predicts what the drain will evict, so the two can never disagree.
+// Validate rejects an unparseable value at load, so the parse error here is
+// only reachable for an absent key: that is the default, and the default is
+// off.
+func drainForce(step *playbook.Step) bool {
+	if step == nil {
+		return false
+	}
+	v, _ := strconv.ParseBool(step.Params["force"])
+	return v
+}
+
+// cordonForIncident takes this incident's own hold on the node.
+//
+// A node has many GPUs and an incident is per (target, class), so two
+// remediations can be working two GPUs of one machine at once. Platforms that
+// can count holders take the incident ID and add it to the node's owner set;
+// the rest keep the single-owner behaviour, which is all they ever had and is
+// correct for one remediation at a time.
+func (c *Controller) cordonForIncident(ctx context.Context, inc *types.Incident, node, reason string) error {
+	// No capability check and no fallback. Counting holders is part of
+	// platform.Platform now, so a platform that cannot do it does not compile;
+	// the type assertion this used to make was a silent path back to the
+	// single-owner behaviour whose P0 the counting exists to prevent.
+	return c.platform.CordonForOwner(ctx, node, inc.ID, reason)
+}
+
+// uncordonForIncident drops this incident's hold and returns the node to service
+// only if no other remediation still holds it.
+//
+// The unguarded release is what this replaces, and it was a P0: two incidents on
+// two GPUs of one node both cordoned it, and whichever finished first uncordoned
+// the machine outright. The scheduler then put tenant work onto a node whose
+// other GPU was about to be reset, and the restore ran from whatever snapshot
+// survived the second cordon — which could clear a human's own `kubectl cordon`
+// and their karpenter.sh/do-not-disrupt pin.
+//
+// A step that hands its hold back while somebody else keeps the node cordoned
+// has done its whole job, so this succeeds and says what happened rather than
+// failing a playbook that has nothing left to do.
+func (c *Controller) uncordonForIncident(ctx context.Context, inc *types.Incident, node, reason string) (*types.ActionResult, error) {
+	// Both names this incident may be recorded under: its own ID, and — for a
+	// cordon it placed before the upgrade that introduced owner sets — the reason
+	// that build wrote instead of an owner.
+	//
+	// No fallback to the unguarded Uncordon: releasing a node without knowing
+	// who else holds it is the P0 this replaced, and counting holders is now
+	// part of platform.Platform rather than a capability a platform may lack.
+	released, remaining, err := c.platform.ReleaseCordonOwners(ctx, node,
+		[]string{inc.ID, platform.LegacyCordonOwner(reason)})
+	if err != nil {
+		return nil, err
+	}
+	if released {
+		return okResult(inc, "uncordoned "+node), nil
+	}
+	if remaining == 0 {
+		// Nothing of this incident's was on the node and nobody else holds it
+		// either: a replayed step, or a cordon a human or the janitor has since
+		// taken off. There is nothing to do and nothing to fail.
+		return okResult(inc, "no cordon of this incident's left to release on "+node), nil
+	}
+	c.log.Info("released this incident's hold on a node other remediations still hold",
+		"incident", inc.ID, "node", node, "remaining_holders", remaining)
+	return okResult(inc, fmt.Sprintf(
+		"released this incident's hold on %s; %d other remediation(s) still hold it, so it stays cordoned",
+		node, remaining)), nil
+}
+
+func (c *Controller) executeAgentStep(ctx context.Context, inc *types.Incident, op string, step *playbook.Step) (*types.ActionResult, error) {
+	if c.actuator == nil {
+		return nil, fmt.Errorf("agent.%s: no actuator configured", op)
+	}
+	// A capability-gated agent action (today only agent.gpu_reset, which the
+	// NVIDIA adapter advertises as a physical-device capability) must clear its
+	// runtime evidence gate before the action is assembled or dispatched: a
+	// report is merely evidence, and a missing, stale, profile-mismatched,
+	// partitioned, or wrong-device report must never reach the executor. The
+	// gate is selected by the registry, not a hard-coded string. Dry-run returns
+	// above, so normal planning stays observable without fabricating a
+	// capability.
+	if def, ok := action.ByWire(step.Action); ok && def.CapabilityGate == action.CapabilityNVIDIAReset {
+		if err := c.allowNVIDIAReset(ctx, inc, inc.Target); err != nil {
+			return nil, fmt.Errorf("%s: accelerator capability gate: %w", step.Action, err)
+		}
+	}
+	node, err := c.nodeFor(ctx, inc.Target.Node)
+	if err != nil {
+		return nil, err
+	}
+	params := map[string]string{}
+	for k, v := range step.Params {
+		params[k] = v
+	}
+	if inc.Target.GPUUUID != "" {
+		params["gpu_uuid"] = inc.Target.GPUUUID
+		params["gpu_index"] = strconv.Itoa(inc.Target.GPUIndex)
+	}
+	if op == string(types.ActionQuiesceAcceleratorHost) || op == string(types.ActionRestoreAcceleratorHost) {
+		// Host state is node-wide and has to survive a controller restart, so both
+		// normal playbook restoration and janitor recovery use the same durable key.
+		params["host_state_key"] = inc.Target.Node
+	}
+	if op == "reboot" && node.BootID != "" {
+		// The executor's idempotency guard: a retry after the node already
+		// rebooted (boot ID changed) succeeds without bouncing it again.
+		params["boot_id"] = node.BootID
+	}
+	result, err := c.actuator.Execute(ctx, node, types.Action{
+		ID:         actionID(inc),
+		IncidentID: inc.ID,
+		Type:       types.ActionType(op),
+		Params:     params,
+		Timeout:    effectiveStepTimeout(step),
+	})
+	if err != nil {
+		if device, guarded := repairStepScope(step.Action); device && guarded {
+			return nil, fmt.Errorf("%w (%s): %w", errDeviceOutcomeUnknown, step.Action, err)
+		}
+		return nil, err
+	}
+	if !result.OK {
+		return result, fmt.Errorf("agent.%s failed: %s", op, firstNonBlank(result.Error, "no detail"))
+	}
+	return result, nil
+}
+
+// escalate switches the incident to the failure-escalation playbook, or
+// quarantines it when the ladder is exhausted.
+func (c *Controller) escalate(ctx context.Context, inc *types.Incident, reason string) error {
+	return c.escalateAfterStep(ctx, inc, reason, false)
+}
+
+func (c *Controller) escalateAfterStep(ctx context.Context, inc *types.Incident, reason string, completed bool) error {
+	c.cancelPendingActions(ctx, inc)
+	if inc.Attempt >= maxEscalationAttempts {
+		// The ladder has climbed as far as it is allowed to on its own. Fail
+		// closed to a human instead of continuing to drive destructive rungs.
+		return c.quarantineAfterStep(ctx, inc,
+			fmt.Sprintf("%s; escalation cap reached (%d attempts) — stopping automation and handing off to a human",
+				reason, inc.Attempt), completed)
+	}
+	next, ok := c.runtimeConfig(ctx).Engine.Escalation(inc.Playbook)
+	if !ok {
+		return c.quarantineAfterStep(ctx, inc, reason+"; no escalation playbook", completed)
+	}
+	metrics.EscalationsTotal.Inc()
+	previous := inc.Playbook
+	inc.Playbook = next.Name
+	inc.StepIndex = 0
+	inc.Attempt++
+	if err := c.transitionWithRepairStep(ctx, inc, types.StateEvaluating, "system", "escalate",
+		fmt.Sprintf("%s; escalating %s -> %s (attempt %d)", reason, previous, next.Name, inc.Attempt), nil, "", completed); err != nil {
+		return err
+	}
+	return c.notify(ctx, notify.NotifyEvent{
+		Kind: notify.EventActionTaken, Incident: inc,
+		Message: fmt.Sprintf("escalated to playbook %s: %s", next.Name, reason),
+	})
+}
+
+// cancelPendingActions tombstones the incident's undelivered queue entries
+// so a superseded ladder rung can never be executed later by a slow agent.
+// Leased (possibly running) work is deliberately left to finish or expire.
+func (c *Controller) cancelPendingActions(ctx context.Context, inc *types.Incident) {
+	cancelled, err := c.store.CancelPendingActionsForIncident(ctx, inc.ID)
+	if err != nil {
+		c.log.Warn("cancelling pending actions failed", "incident", inc.ID, "err", err)
+		return
+	}
+	if cancelled > 0 {
+		c.log.Info("cancelled undelivered actions for superseded step",
+			"incident", inc.ID, "count", cancelled)
+	}
+}
+
+// quarantine fails the incident closed to NEEDS_HUMAN.
+func (c *Controller) quarantine(ctx context.Context, inc *types.Incident, reason string) error {
+	return c.quarantineAfterStep(ctx, inc, reason, false)
+}
+
+func (c *Controller) quarantineAfterStep(ctx context.Context, inc *types.Incident, reason string, completed bool) error {
+	c.cancelPendingActions(ctx, inc)
+	if err := c.transitionWithRepairStep(ctx, inc, types.StateNeedsHuman, "system", "quarantine", reason, nil, "", completed); err != nil {
+		return err
+	}
+	return c.notify(ctx, notify.NotifyEvent{
+		Kind: notify.EventNeedsHuman, Incident: inc,
+		Message: reason,
+	})
+}
+
+// actionID is deterministic per (incident, step, attempt) so replays after a
+// controller restart are idempotent (executors cache completed IDs).
+func actionID(inc *types.Incident) string {
+	h := sha256.Sum256(fmt.Appendf(nil, "%s|%d|%d", inc.ID, inc.StepIndex, inc.Attempt))
+	return hex.EncodeToString(h[:8])
+}
+
+func okResult(inc *types.Incident, output string) *types.ActionResult {
+	now := time.Now()
+	return &types.ActionResult{
+		ActionID:   actionID(inc),
+		OK:         true,
+		Output:     output,
+		StartedAt:  now,
+		FinishedAt: now,
+	}
+}
+
+func repairStepScope(wire string) (device, guarded bool) {
+	def, ok := action.ByWire(wire)
+	if !ok {
+		return false, false
+	}
+	if def.Scope == action.ScopeGPU {
+		return true, def.Destructive || def.AgentDestructive
+	}
+	switch wire {
+	case "platform.drain", "platform.replace_node", "platform.recycle_node", "agent.reboot":
+		return false, true
+	}
+	return false, false
+}

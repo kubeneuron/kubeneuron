@@ -1,0 +1,23 @@
+{
+  "card0": {
+    "GPU ID": "0x74a1",
+    "Unique ID": "0x9a3f1c7b2e5d4088",
+    "PCI Bus": "0000:C3:00.0",
+    "Temperature (Sensor edge) (C)": "44.0",
+    "Temperature (Sensor junction) (C)": "61.0",
+    "Temperature (Sensor memory) (C)": "49.0",
+    "Total Retired Pages": "3"
+  },
+  "card1": {
+    "GPU ID": "0x74a1",
+    "Unique ID": "0x9a3f1c7b2e5d4099",
+    "PCI Bus": "0000:C6:00.0",
+    "Temperature (Sensor edge) (C)": "39.0",
+    "Temperature (Sensor junction) (C)": "50.0",
+    "Temperature (Sensor memory) (C)": "44.0",
+    "Total Retired Pages": "0"
+  },
+  "system": {
+    "Driver version": "6.7.0"
+  }
+}

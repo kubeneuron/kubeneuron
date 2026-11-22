@@ -1,0 +1,72 @@
+# KubeNeuron operator chart values.
+#
+# The chart deploys only the cluster-scoped CRDs and the operator. Creating
+# a KubeNeuron installation (controller, agents, TLS Secrets, tokens) is a
+# separate, deliberate step — see the production install guide.
+
+image:
+  repository: ghcr.io/kubeneuron/kubeneuron/operator
+  # Pin an exact release tag or digest; the CRDs reject :latest for managed
+  # workload images and the operator deserves the same discipline.
+  tag: v1.0.0-rc.1
+  pullPolicy: IfNotPresent
+
+operator:
+  # Permit individual installations to opt into alpha node-level actions.
+  allowNodeLevelActions: false
+
+replicas: 1
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+serviceAccount:
+  # Name of the operator ServiceAccount the chart creates.
+  name: kubeneuron-operator
+
+# Accelerator adapters the operator enables on the agents of every
+# KubeNeuron installation, in addition to that installation's own
+# spec.agent.adapters (an entry there replaces the one here for the same
+# vendor). Each entry has the spec.agent.adapters shape: vendor, options, and
+# optional hostTooling (binDirs, libDirs, devices). The adapter must be
+# registered in the agent image. NVIDIA observation is on either way.
+#
+# A vendor enabled here starts on every accelerator node of a mixed fleet; on
+# a node without that vendor's hardware the adapter reports "not present" and
+# the agent skips it quietly.
+#
+# agentAdapters:
+#   - vendor: amd
+#     options:
+#       tool: amd-smi
+#     hostTooling:
+#       binDirs: ["/opt/rocm/bin"]
+#       libDirs: ["/opt/rocm/lib"]
+#       devices: ["/dev/kfd"]
+agentAdapters: []
+
+# Recovery modes are set per GPURemediationPolicy (spec.mode: DryRun, Approval
+# or Automatic); this chart never creates a policy and never enables automatic
+# mode. See docs/playbook-authoring.md, "Recovery modes".
+#
+# WARNING: Automatic mode acts without asking. For the node pools and fault
+# classes you list here, KubeNeuron drains the node and restarts or replaces
+# it through your cloud provider's API as soon as the conditions of your
+# policy are met. Workloads on that node are stopped. A replacement instance
+# may not be available, and the cloud provider bills instances according to
+# its own terms. When replacement adds a node first, two instances run and
+# are billed until the old one is removed, and your quota must allow the
+# extra instance. You are responsible for the policy you set here and for
+# its effect on your workloads. Start in dry-run, then in approval mode,
+# before enabling automatic mode.
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Extra labels merged into every chart-managed object.
+additionalLabels: {}

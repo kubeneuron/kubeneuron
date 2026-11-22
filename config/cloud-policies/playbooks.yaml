@@ -1,0 +1,78 @@
+# No host actions or diagnostic clients are used by this pack.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: kubeneuron-cloud-observe
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  target: GPU
+  steps:
+    - name: observe
+      action: Observe
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: kubeneuron-cloud-replace
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  target: Node
+  cooldown: 6h
+  steps:
+    - name: cordon
+      action: Cordon
+    - name: drain
+      action: Drain
+      approval: Required
+      timeout: 30m
+    - name: replace
+      action: ReplaceNode
+      approval: Required
+      timeout: 20m
+---
+# Optional restart. No default policy binds this ladder. Explicitly enabling it
+# permits drain before replacement capacity has been prepared.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: kubeneuron-cloud-recycle
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  target: Node
+  cooldown: 6h
+  steps:
+    - name: cordon
+      action: Cordon
+    - name: drain
+      action: Drain
+      approval: Required
+      timeout: 30m
+    - name: recycle
+      action: RecycleNode
+      approval: Required
+      timeout: 20m
+  onFailure:
+    playbookRef: kubeneuron-cloud-replace
+---
+# Announced cloud interruptions (spot reclaim, scheduled maintenance). Asks
+# the node's opted-in jobs to checkpoint before the deadline the cloud
+# announced, then cordons the node. It never drains or replaces: the cloud
+# takes the instance. The warning needs no approval; the cordon does, unless
+# an Automatic policy authorises it.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: kubeneuron-cloud-interruption
+  labels: {kubeneuron.io/policy-pack: cloud, kubeneuron.io/policy-pack-version: "1"}
+spec:
+  kubeNeuronRef: kubeneuron
+  target: Node
+  steps:
+    - name: checkpoint-warning
+      action: CheckpointWarning
+    - name: cordon
+      action: Cordon
+      approval: Required

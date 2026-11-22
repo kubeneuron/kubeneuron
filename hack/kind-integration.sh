@@ -1,0 +1,4639 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+
+# shellcheck disable=SC2016 # Single-quoted jq programs expand jq, not shell, variables.
+set -Eeuo pipefail
+
+# Repeatable, CPU-only Kubernetes admission and operator integration smoke.
+# This validates API admission and Kubernetes reconciliation. It does not
+# validate NVIDIA drivers, NVML, DCGM, GPU telemetry/actions, or remediation.
+
+usage() {
+	cat <<'EOF'
+Usage: hack/kind-integration.sh
+
+Creates a dedicated, digest-pinned kind cluster by default, runs the 85-case
+CEL admission matrix, installs locally built KubeNeuron images and the
+operator, and verifies mTLS/token node identity, readiness, ownership
+collisions, non-adoption, recovery, ordered certificate rotation/rollback,
+no-churn reconciliation, and the live read-only device topology classifier
+over synthetic, reversible node capacity/labels and the DRA opt-in.
+
+Configuration is through environment variables:
+  CLUSTER_NAME          kind cluster name (default: kubeneuron-integration)
+  KUBECONFIG_PATH       new path for the generated kubeconfig; the harness
+                        refuses any path that already exists
+  REUSE_CLUSTER         1 to reuse an existing, correctly pinned cluster
+  KEEP_CLUSTER          1 to retain a cluster created by this script
+  KEEP_RESOURCES        1 to retain smoke fixtures for inspection
+  BUILD_IMAGES          0 to use three already-present local images; the
+                        default packages binaries previously built under bin/
+  OPERATOR_IMAGE        local operator image name/tag
+  CONTROLLER_IMAGE      local controller image name/tag
+  AGENT_IMAGE           local agent image name/tag
+  WORKER_NODES          worker nodes beside the control plane (default: 2;
+                        0 reproduces the old single-node shape)
+  TIMEOUT_SECONDS       wait timeout in seconds (default: 240)
+  KIND_BIN, KUBECTL_BIN, DOCKER_BIN, JQ_BIN
+                        command paths (each must be one executable)
+
+The cluster always uses kind v0.32.0 and this immutable node image:
+  kindest/node:v1.33.12@sha256:3f5c8443c620245e4d355cfe09e96a91ead32ceaa569d3f1ca9edf0cb2fe2ff4
+
+If the current login predates membership in the docker group, invoke it as:
+  sg docker -c './hack/kind-integration.sh'
+
+Examples:
+  KEEP_CLUSTER=1 ./hack/kind-integration.sh
+  REUSE_CLUSTER=1 KEEP_CLUSTER=1 ./hack/kind-integration.sh
+EOF
+}
+
+if [[ ${1:-} == -h || ${1:-} == --help ]]; then
+	usage
+	exit 0
+fi
+[[ $# -eq 0 ]] || {
+	usage >&2
+	exit 2
+}
+
+readonly EXPECTED_KIND_VERSION=v0.32.0
+readonly EXPECTED_KUBECTL_VERSION=v1.33.12
+readonly NODE_IMAGE='kindest/node:v1.33.12@sha256:3f5c8443c620245e4d355cfe09e96a91ead32ceaa569d3f1ca9edf0cb2fe2ff4'
+readonly EXPECTED_SERVER_VERSION=v1.33.12
+readonly OPERATOR_NAMESPACE=kube-neuron
+readonly OPERATOR_DEPLOYMENT=kubeneuron-operator
+readonly ROOT_NAME=integration-smoke
+readonly TARGET_NAMESPACE=kubeneuron-integration-smoke
+readonly PLAYBOOK_NAME=integration-smoke-observe
+readonly POLICY_NAME=integration-smoke-policy
+readonly LADDER_PLAYBOOK_NAME=integration-smoke-ladder
+readonly RESTART_POLICY_NAME=integration-restart-policy
+readonly controllerPort=8080
+readonly agentIngressPort=8443
+readonly agentTokenAudience=kubeneuron-controller
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd -P)
+CEL_SCRIPT="$REPO_ROOT/test/integration/cel-admission.sh"
+ROTATION_SCRIPT="$REPO_ROOT/hack/tls-rotate.sh"
+EMERGENCY_TLS_SCRIPT="$REPO_ROOT/hack/tls-emergency-recover.sh"
+SMOKE_TEMPLATE="$REPO_ROOT/test/integration/operator-smoke.yaml.tmpl"
+# The PRODUCTION Dockerfile, on purpose. This suite used to package the
+# host-built binaries into FROM scratch, which tested an image nobody ships:
+# the real one is distroless, carries nsenter and dcgmi that the agent shells
+# out to, and runs as a different user. Every property that divergence hides is
+# one this suite is otherwise well placed to catch — the reboot action failing
+# with exit 127 for want of nsenter was found on live hardware instead of here.
+# Set INTEGRATION_IMAGE_DOCKERFILE to the old file for a fast local loop.
+IMAGE_DOCKERFILE=${INTEGRATION_IMAGE_DOCKERFILE:-$REPO_ROOT/build/Dockerfile}
+
+KIND_BIN=${KIND_BIN:-kind}
+KUBECTL_BIN=${KUBECTL_BIN:-kubectl}
+DOCKER_BIN=${DOCKER_BIN:-docker}
+JQ_BIN=${JQ_BIN:-jq}
+CLUSTER_NAME=${CLUSTER_NAME:-kubeneuron-integration}
+KUBECONFIG_PATH=${KUBECONFIG_PATH:-/tmp/${CLUSTER_NAME}.kubeconfig}
+REUSE_CLUSTER=${REUSE_CLUSTER:-0}
+KEEP_CLUSTER=${KEEP_CLUSTER:-0}
+KEEP_RESOURCES=${KEEP_RESOURCES:-0}
+BUILD_IMAGES=${BUILD_IMAGES:-1}
+# main: everything but the installer suite; installer: only that suite (after
+# the shared cluster, CRD and operator setup); all: both, one after the other.
+INTEGRATION_SUITE=${INTEGRATION_SUITE:-all}
+case $INTEGRATION_SUITE in
+main | installer | all) ;;
+*) echo "integration: INTEGRATION_SUITE must be main, installer or all" >&2; exit 2 ;;
+esac
+WORKER_NODES=${WORKER_NODES:-2}
+TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-240}
+RUN_ID=${RUN_ID:-$(date -u +%Y%m%d%H%M%S)-$$}
+OPERATOR_IMAGE=${OPERATOR_IMAGE:-kubeneuron-operator:kind-integration-${RUN_ID}}
+CONTROLLER_IMAGE=${CONTROLLER_IMAGE:-kubeneuron-controller:kind-integration-${RUN_ID}}
+AGENT_IMAGE=${AGENT_IMAGE:-kubeneuron-agent:kind-integration-${RUN_ID}}
+
+created_cluster=0
+fixture_applied=0
+operator_scaled_down=0
+operator_log_sequence=0
+kubeconfig_created=0
+kubeconfig_identity=
+kubeconfig_temp_identity=
+kubeconfig_temp=
+work_dir=
+tls_forward_restart=
+port_forward_pid=
+declare -A tls_secret_uids=()
+declare -A tls_secret_hashes=()
+# Live M1 topology fixture state. The exercise places synthetic NVIDIA
+# advertisements and GPU Feature Discovery labels on ONE kind node (the
+# managed-agent node) and can patch the DRA opt-in into the installation;
+# restore_topology_fixture removes exactly those from the EXIT trap, so a
+# failing run never leaves fake GPU capacity on a retained or reused cluster.
+# Every key the exercise may add is listed here, and nothing else is touched.
+topology_fixture_node=
+topology_fixture_dra=0
+readonly -a topology_status_keys=(nvidia.com/gpu nvidia.com/gpu.shared nvidia.com/mig-1g.5gb)
+readonly -a topology_label_keys=(nvidia.com/gpu.replicas nvidia.com/mig.strategy)
+
+note() {
+	printf 'integration: %s\n' "$*"
+}
+
+die() {
+	printf 'integration FAIL: %s\n' "$*" >&2
+	exit 1
+}
+
+require_boolean() {
+	local name=$1
+	local value=$2
+	[[ $value == 0 || $value == 1 ]] || die "$name must be 0 or 1 (got $value)"
+}
+
+require_positive_integer() {
+	local name=$1
+	local value=$2
+	[[ $value =~ ^[1-9][0-9]*$ ]] || die "$name must be a positive integer (got $value)"
+}
+
+cluster_exists() {
+	"$KIND_BIN" get clusters 2>/dev/null | grep -Fxq "$CLUSTER_NAME"
+}
+
+api_available() {
+	((kubeconfig_created)) && [[ -f $KUBECONFIG_PATH && ! -L $KUBECONFIG_PATH ]] && \
+		[[ $(stat --format='%d:%i' -- "$KUBECONFIG_PATH" 2>/dev/null) == "$kubeconfig_identity" ]] && \
+		"$KUBECTL_BIN" --kubeconfig="$KUBECONFIG_PATH" --request-timeout=5s \
+		get --raw=/readyz >/dev/null 2>&1
+}
+
+capture_operator_logs() {
+	local phase=$1
+	local log_file
+	operator_log_sequence=$((operator_log_sequence + 1))
+	log_file="$work_dir/operator-before-${operator_log_sequence}-${phase}.log"
+	if ! "$KUBECTL_BIN" -n "$OPERATOR_NAMESPACE" logs \
+		deployment/"$OPERATOR_DEPLOYMENT" --all-containers --tail=-1 \
+		>"$log_file" 2>&1; then
+		printf '%s\n' "$(<"$log_file")" >&2
+		die "could not capture operator logs before $phase"
+	fi
+	if grep -Eiq 'forbidden|object has been modified|panic|fatal' "$log_file"; then
+		printf '%s\n' "$(<"$log_file")" >&2
+		die "operator logs before $phase contain an unexpected RBAC/concurrency/fatal error"
+	fi
+	note "captured and checked operator logs before $phase"
+}
+
+# wait_deployment_stopped waits for a Deployment scaled to zero to have no Pod
+# left. NEVER use "kubectl rollout status" for that: it cannot express it.
+#
+# kubectl's Deployment status viewer asks three questions once the Deployment
+# controller has observed the generation — is UpdatedReplicas still short of
+# spec.replicas, are there old replicas pending termination, are updated
+# replicas unavailable. At spec.replicas=0 all three are trivially satisfied by
+# the state that exists one instant after the scale (0 < 0 is false, 1 > 1 is
+# false, 1 < 1 is false), so it prints "successfully rolled out" while the Pod
+# is still running and still serving. Nothing in it waits for Pods to go away.
+#
+# That cost a whole CI run. The registration-outage phase scaled the operator
+# to zero, rollout status returned immediately, and the still-live operator
+# reconciled the very next statement — the controller's own scale to zero —
+# straight back to one replica. The controller never went down, the agents
+# never lost their acknowledgment, and the run died 240s later in "timed out
+# waiting for agent registration readiness to become stale" with the controller
+# Deployment sitting at 1/1 and the root reporting the operator's own
+# "controller deployment is not fully available at its current generation".
+#
+# Poll the Pods, not the replica counts. A Pod object survives until the kubelet
+# confirms the container is gone, which is exactly "the process has stopped". A
+# ReplicaSet's status.replicas is not that: it stops counting a Pod the moment
+# the Pod is marked for deletion, seconds before the process exits.
+wait_deployment_stopped() {
+	local namespace=$1
+	local deployment=$2
+	local selector deadline remaining
+	selector=$("$KUBECTL_BIN" -n "$namespace" get deployment "$deployment" \
+		-o go-template='{{range $k, $v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}')
+	selector=${selector%,}
+	[[ -n $selector ]] || die "deployment $namespace/$deployment has no matchLabels selector"
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		remaining=$("$KUBECTL_BIN" -n "$namespace" get pods \
+			--selector "$selector" -o name 2>/dev/null | wc -l || true)
+		((remaining == 0)) && return 0
+		sleep 2
+	done
+	"$KUBECTL_BIN" -n "$namespace" get pods --selector "$selector" -o wide >&2 || true
+	die "timed out waiting for deployment $namespace/$deployment to stop every Pod"
+}
+
+# wait_deployment_ready waits for a Deployment to actually be serving, and is
+# the mirror of wait_deployment_stopped. "kubectl rollout status" cannot do this
+# either when the replica count is not yet what you expect: at spec.replicas=0
+# every condition it checks is trivially satisfied, so it reports success on a
+# Deployment that has no Pods at all.
+#
+# That matters wherever something ELSE restores the replica count — the operator
+# owns the controller's, so right after the operator comes back the controller
+# is still at zero and rollout status waves it through. Poll readyReplicas: it
+# cannot be satisfied by an absence.
+wait_deployment_ready() {
+	local namespace=$1
+	local deployment=$2
+	local want=${3:-1}
+	local deadline=$((SECONDS + TIMEOUT_SECONDS))
+	local ready
+	while ((SECONDS < deadline)); do
+		ready=$("$KUBECTL_BIN" -n "$namespace" get deployment "$deployment" \
+			-o jsonpath='{.status.readyReplicas}' 2>/dev/null)
+		[[ -n $ready ]] && ((ready >= want)) && return 0
+		sleep 2
+	done
+	"$KUBECTL_BIN" -n "$namespace" get deployment "$deployment" -o wide >&2 || true
+	die "timed out waiting for deployment $namespace/$deployment to have $want ready replica(s)"
+}
+
+scale_operator() {
+	local replicas=$1
+	local phase=${2:-}
+	if ((replicas == 0)); then
+		[[ -n $phase ]] || die "scale_operator requires a phase name when scaling to zero"
+		capture_operator_logs "$phase"
+	fi
+	"$KUBECTL_BIN" -n "$OPERATOR_NAMESPACE" scale \
+		deployment "$OPERATOR_DEPLOYMENT" --replicas="$replicas" >/dev/null
+	if ((replicas == 0)); then
+		# Every caller scales the operator down in order to mutate something
+		# the operator owns; one surviving reconcile silently undoes it. Wait
+		# for the process, not for rollout status.
+		wait_deployment_stopped "$OPERATOR_NAMESPACE" "$OPERATOR_DEPLOYMENT"
+		operator_scaled_down=1
+	else
+		"$KUBECTL_BIN" -n "$OPERATOR_NAMESPACE" rollout status \
+			deployment "$OPERATOR_DEPLOYMENT" --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+		operator_scaled_down=0
+	fi
+}
+
+cleanup_fixtures() {
+	"$KUBECTL_BIN" delete gpunodeconfig "${ROOT_NAME}-status-node" --ignore-not-found >/dev/null 2>&1 || true
+	"$KUBECTL_BIN" delete gpumaintenancewindow "${ROOT_NAME}-status-window" --ignore-not-found >/dev/null 2>&1 || true
+	"$KUBECTL_BIN" delete kubeneuron "$ROOT_NAME" \
+		--ignore-not-found --wait=true --timeout=90s >/dev/null 2>&1 || true
+	"$KUBECTL_BIN" delete gpuremediationpolicy "$POLICY_NAME" "$RESTART_POLICY_NAME" integration-denied-policy \
+		--ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
+	"$KUBECTL_BIN" delete gpuplaybook "$PLAYBOOK_NAME" "$LADDER_PLAYBOOK_NAME" integration-denied-reboot \
+		--ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
+	"$KUBECTL_BIN" delete acceleratorruntimeprofile kind-runtime-contract-e2e \
+		--ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
+	"$KUBECTL_BIN" label nodes -l kubeneuron.io/runtime-contract-e2e \
+		kubeneuron.io/runtime-contract-e2e- >/dev/null 2>&1 || true
+	"$KUBECTL_BIN" delete namespace "$TARGET_NAMESPACE" \
+		--ignore-not-found --wait=true --timeout=90s >/dev/null 2>&1 || true
+	"$KUBECTL_BIN" wait --for=delete "clusterrole/${ROOT_NAME}-controller" \
+		--timeout=60s >/dev/null 2>&1 || true
+	"$KUBECTL_BIN" wait --for=delete "clusterrolebinding/${ROOT_NAME}-controller" \
+		--timeout=60s >/dev/null 2>&1 || true
+}
+
+# node_status_resource_patch prints the JSON patch that adds (value given) or
+# removes (value "-") the named extended resources in BOTH status.capacity and
+# status.allocatable of the node. Keys are escaped as RFC 6901 JSON Pointer
+# segments ("~" to ~0 first, then "/" to ~1), so nvidia.com/gpu is addressed
+# as /status/capacity/nvidia.com~1gpu. A remove op is emitted only for a key
+# that is present right now (JSON patch "remove" fails on an absent path), so
+# the same call is safe before, after, and halfway through a form. Quantities
+# are strings on the wire; the value must be a plain non-negative integer.
+node_status_resource_patch() {
+	local node=$1
+	local value=$2
+	shift 2
+	if [[ $value == - ]]; then
+		"$KUBECTL_BIN" get node "$node" -o json | "$JQ_BIN" -c '
+			.status as $status
+			| [ ["capacity", "allocatable"][] as $list
+			    | $ARGS.positional[] as $key
+			    | select(($status[$list] // {}) | has($key))
+			    | {op: "remove", path: ("/status/\($list)/\($key | gsub("~"; "~0") | gsub("/"; "~1"))")} ]' \
+			--args "$@"
+	else
+		[[ $value =~ ^[0-9]+$ ]] || die "node status resource value must be a non-negative integer (got $value)"
+		"$JQ_BIN" -nc --arg value "$value" '
+			[ ["capacity", "allocatable"][] as $list
+			  | $ARGS.positional[] as $key
+			  | {op: "add", path: ("/status/\($list)/\($key | gsub("~"; "~0") | gsub("/"; "~1"))"), value: $value} ]' \
+			--args "$@"
+	fi
+}
+
+# patch_node_status_resources applies node_status_resource_patch through the
+# status subresource (the only place capacity/allocatable can be written). An
+# empty remove patch is a no-op, not an error. The kubelet keeps extended
+# resources it did not register ("avoid blindly overwriting the capacity in
+# case opaque resources are being advertised"), so the advertisement stays
+# until it is removed here, and allocatable follows capacity on removal.
+patch_node_status_resources() {
+	local node=$1
+	local value=$2
+	shift 2
+	local patch
+	patch=$(node_status_resource_patch "$node" "$value" "$@")
+	[[ $patch != '[]' ]] || return 0
+	"$KUBECTL_BIN" patch node "$node" --subresource=status --type=json -p "$patch" >/dev/null
+}
+
+# restore_topology_fixture removes every synthetic advertisement and label the
+# topology exercise can have placed on the managed-agent node, and the DRA
+# opt-in it can have patched into the installation. It is idempotent and runs
+# from the EXIT trap after a partial run, so it never dies and never touches a
+# key outside the two lists above. Label removal names the tracked node only,
+# never a label selector: a selector would strip a matching nvidia.com label
+# from every node in a reused cluster, including real GFD labels. kubectl
+# reports an already-absent label without failing, and the exit status is
+# ignored anyway, so the removal is idempotent.
+restore_topology_fixture() {
+	local node=$topology_fixture_node
+	local key
+	[[ -n $node ]] || return 0
+	patch_node_status_resources "$node" - "${topology_status_keys[@]}" >/dev/null 2>&1 || true
+	for key in "${topology_label_keys[@]}"; do
+		"$KUBECTL_BIN" label node "$node" "${key}-" >/dev/null 2>&1 || true
+	done
+	if ((topology_fixture_dra)); then
+		"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=json \
+			-p '[{"op": "remove", "path": "/spec/safety/topologyClassifier"}]' >/dev/null 2>&1 || true
+	fi
+}
+
+dump_diagnostics() {
+	local log_file
+	note "failure diagnostics follow"
+	for log_file in "$work_dir"/operator-before-*.log; do
+		[[ -f $log_file ]] || continue
+		note "saved operator phase log: ${log_file##*/}"
+		printf '%s\n' "$(<"$log_file")"
+	done
+	"$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o yaml 2>&1 || true
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+		pods,configmaps,services,persistentvolumeclaims,deployments,daemonsets,poddisruptionbudgets \
+		-o wide 2>&1 || true
+	"$KUBECTL_BIN" -n "$OPERATOR_NAMESPACE" get pods -o wide 2>&1 || true
+	"$KUBECTL_BIN" -n "$OPERATOR_NAMESPACE" logs \
+		deployment/"$OPERATOR_DEPLOYMENT" --all-containers --tail=200 2>&1 || true
+	if [[ -n $topology_fixture_node ]]; then
+		note "topology fixture was active on node $topology_fixture_node (dra opt-in: $topology_fixture_dra)"
+		"$KUBECTL_BIN" get node "$topology_fixture_node" -o json 2>&1 | "$JQ_BIN" -c '{capacity: (.status.capacity // {} | with_entries(select(.key | startswith("nvidia.com/")))), allocatable: (.status.allocatable // {} | with_entries(select(.key | startswith("nvidia.com/")))), labels: (.metadata.labels // {} | with_entries(select(.key | startswith("nvidia.com/"))))}' 2>&1 || true
+		"$KUBECTL_BIN" get clusterrole "${ROOT_NAME}-controller" -o json 2>&1 | "$JQ_BIN" -c '.rules' 2>&1 || true
+	fi
+}
+
+cleanup() {
+	local rc=$?
+	trap - EXIT
+	set +e
+	if [[ -n $port_forward_pid ]]; then
+		kill "$port_forward_pid" >/dev/null 2>&1 || true
+		wait "$port_forward_pid" >/dev/null 2>&1 || true
+	fi
+	if ((rc != 0)) && api_available; then
+		dump_diagnostics
+	fi
+	if [[ -n $topology_fixture_node ]] && api_available; then
+		restore_topology_fixture
+	fi
+	if ((operator_scaled_down)) && api_available; then
+		"$KUBECTL_BIN" -n "$OPERATOR_NAMESPACE" scale \
+			deployment "$OPERATOR_DEPLOYMENT" --replicas=1 >/dev/null 2>&1 || true
+	fi
+	if ((fixture_applied)) && ((KEEP_RESOURCES == 0)) && api_available; then
+		cleanup_fixtures
+	fi
+	if ((created_cluster)) && ((KEEP_CLUSTER == 0)) && cluster_exists; then
+		"$KIND_BIN" delete cluster --name "$CLUSTER_NAME" >/dev/null 2>&1 || true
+	elif ((created_cluster)); then
+		note "retained cluster $CLUSTER_NAME; KUBECONFIG=$KUBECONFIG_PATH"
+	fi
+	if ((KEEP_CLUSTER == 0)) && ((kubeconfig_created)); then
+		if [[ -f $KUBECONFIG_PATH && ! -L $KUBECONFIG_PATH ]] && \
+			[[ $(stat --format='%d:%i' -- "$KUBECONFIG_PATH" 2>/dev/null) == "$kubeconfig_identity" ]]; then
+			rm -f -- "$KUBECONFIG_PATH"
+		else
+			note "refusing to remove replaced kubeconfig path $KUBECONFIG_PATH"
+		fi
+	fi
+	[[ -z $kubeconfig_temp ]] || rm -f -- "$kubeconfig_temp"
+	[[ -z $work_dir ]] || rm -rf -- "$work_dir"
+	if ((rc != 0)); then
+		note "set KEEP_CLUSTER=1 KEEP_RESOURCES=1 to retain a failing run for inspection"
+	fi
+	exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+wait_root_condition() {
+	local expected_status=$1
+	local expected_reason=$2
+	local expected_message=${3:-}
+	local deadline=$((SECONDS + TIMEOUT_SECONDS))
+	local root_json=
+	while ((SECONDS < deadline)); do
+		root_json=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o json 2>/dev/null || true)
+		if [[ -n $root_json ]] && "$JQ_BIN" -e \
+			--arg status "$expected_status" \
+			--arg reason "$expected_reason" \
+			--arg message "$expected_message" '
+              .metadata.generation as $generation |
+              .status.observedGeneration == $generation and
+              any(.status.conditions[]?;
+                .type == "Ready" and
+                .status == $status and
+                .reason == $reason and
+                .observedGeneration == $generation and
+                ($message == "" or .message == $message))
+            ' <<<"$root_json" >/dev/null; then
+			return 0
+		fi
+		sleep 2
+	done
+	printf '%s\n' "$root_json" | "$JQ_BIN" '.status // {}' >&2 || true
+	die "timed out waiting for Ready=$expected_status/$expected_reason"
+}
+
+wait_observed_generation() {
+	local expected=$1
+	local deadline=$((SECONDS + TIMEOUT_SECONDS))
+	local actual=
+	while ((SECONDS < deadline)); do
+		actual=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" \
+			-o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)
+		[[ $actual == "$expected" ]] && return 0
+		sleep 2
+	done
+	die "timed out waiting for status.observedGeneration=$expected (got $actual)"
+}
+
+assert_owner() {
+	local resource=$1
+	local namespace=$2
+	local root_uid=$3
+	local object_json
+	if [[ -n $namespace ]]; then
+		object_json=$("$KUBECTL_BIN" -n "$namespace" get "$resource" -o json)
+	else
+		object_json=$("$KUBECTL_BIN" get "$resource" -o json)
+	fi
+	"$JQ_BIN" -e --arg uid "$root_uid" --arg name "$ROOT_NAME" '
+      (.metadata.ownerReferences | length) == 1 and
+      .metadata.ownerReferences[0].apiVersion == "kubeneuron.io/v1alpha1" and
+      .metadata.ownerReferences[0].kind == "KubeNeuron" and
+      .metadata.ownerReferences[0].name == $name and
+      .metadata.ownerReferences[0].uid == $uid and
+      .metadata.ownerReferences[0].controller == true and
+      .metadata.ownerReferences[0].blockOwnerDeletion == true
+    ' <<<"$object_json" >/dev/null || die "$resource does not have exactly the expected controller owner"
+}
+
+assert_all_owners() {
+	local root_uid=$1
+	local resource
+	local -a namespaced_resources=(
+		"configmap/${ROOT_NAME}-runtime"
+		"configmap/${ROOT_NAME}-playbooks"
+		"serviceaccount/${ROOT_NAME}-controller"
+		"serviceaccount/${ROOT_NAME}-agent"
+		"service/${ROOT_NAME}-controller"
+		"persistentvolumeclaim/${ROOT_NAME}-controller-state"
+		"deployment/${ROOT_NAME}-controller"
+		"daemonset/${ROOT_NAME}-agent"
+		"poddisruptionbudget/${ROOT_NAME}-controller"
+	)
+	for resource in "${namespaced_resources[@]}"; do
+		assert_owner "$resource" "$TARGET_NAMESPACE" "$root_uid"
+	done
+	assert_owner "clusterrole/${ROOT_NAME}-controller" "" "$root_uid"
+	assert_owner "clusterrolebinding/${ROOT_NAME}-controller" "" "$root_uid"
+	note "all 11 managed resources have the expected controller owner"
+}
+
+assert_child_configuration_statuses() {
+	local deadline=$((SECONDS + TIMEOUT_SECONDS))
+	local playbook_json=
+	local policy_json=
+	while ((SECONDS < deadline)); do
+		playbook_json=$("$KUBECTL_BIN" get gpuplaybook "$PLAYBOOK_NAME" -o json 2>/dev/null || true)
+		policy_json=$("$KUBECTL_BIN" get gpuremediationpolicy "$POLICY_NAME" -o json 2>/dev/null || true)
+		if "$JQ_BIN" -e '
+          .metadata.generation as $generation |
+          .status.observedGeneration == $generation and
+          (.status.digest | type == "string" and length == 64) and
+          any(.status.conditions[]?;
+            .type == "Ready" and .status == "True" and .reason == "Compiled" and
+            .observedGeneration == $generation)
+        ' <<<"$playbook_json" >/dev/null &&
+			"$JQ_BIN" -e --arg playbook "$PLAYBOOK_NAME" '
+          .metadata.generation as $generation |
+          .status.observedGeneration == $generation and
+          .status.resolvedPlaybook == $playbook and
+          (.status.digest | type == "string" and length == 64) and
+          any(.status.conditions[]?;
+            .type == "Ready" and .status == "True" and .reason == "Resolved" and
+            .observedGeneration == $generation)
+        ' <<<"$policy_json" >/dev/null; then
+			note "playbook and policy publish current compiled digests and resolved status"
+			return 0
+		fi
+		sleep 2
+	done
+	printf '%s\n' "$playbook_json" >&2
+	printf '%s\n' "$policy_json" >&2
+	die "timed out waiting for current compiled child-CR statuses"
+}
+
+# Exercise status writes with the real operator ServiceAccount, not a fake client.
+exercise_node_and_window_status_rbac() {
+	local resource verb node before after deadline child root_digest
+	for resource in kubeneurons gpuremediationpolicies gpuplaybooks gpumaintenancewindows gpunodeconfigs acceleratorruntimeprofiles gpusignalmappings gpuautonomyplans; do
+		for verb in patch update; do
+			[[ $("$KUBECTL_BIN" auth can-i "$verb" "${resource}.kubeneuron.io" --subresource=status \
+				--as="system:serviceaccount:${OPERATOR_NAMESPACE}:kubeneuron-operator") == yes ]] || \
+				die "operator cannot $verb $resource/status"
+		done
+	done
+	node=$("$KUBECTL_BIN" get nodes -o jsonpath='{.items[0].metadata.name}')
+	before=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get configmap "${ROOT_NAME}-runtime" -o json | "$JQ_BIN" -r '.data["config-digest"]')
+	"$KUBECTL_BIN" apply -f - <<EOF
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUNodeConfig
+metadata:
+  name: ${ROOT_NAME}-status-node
+spec:
+  kubeNeuronRef: ${ROOT_NAME}
+  nodeName: ${node}
+  paused: true
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUMaintenanceWindow
+metadata:
+  name: ${ROOT_NAME}-status-window
+spec:
+  kubeNeuronRef: ${ROOT_NAME}
+  nodeSelector:
+    matchLabels:
+      kubernetes.io/hostname: ${node}
+  startsAt: "$($JQ_BIN -nr 'now - 60 | todate')"
+  endsAt: "$($JQ_BIN -nr 'now + 3600 | todate')"
+  pauseAutomation: true
+EOF
+	for child in "gpunodeconfig/${ROOT_NAME}-status-node" "gpumaintenancewindow/${ROOT_NAME}-status-window"; do
+		"$KUBECTL_BIN" wait "$child" --for=condition=Ready --timeout="${TIMEOUT_SECONDS}s"
+		"$KUBECTL_BIN" get "$child" -o json | "$JQ_BIN" -e '
+          .metadata.generation as $generation |
+          .status.observedGeneration == $generation and
+          any(.status.conditions[]?; .type == "Ready" and .status == "True" and
+            .reason == "Compiled" and .observedGeneration == $generation)
+        ' >/dev/null || die "$child did not publish current compiled status"
+	done
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		after=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get configmap "${ROOT_NAME}-runtime" -o json)
+		if "$JQ_BIN" -e --arg before "$before" --arg node "$node" --arg window "${ROOT_NAME}-status-window" '
+          .data["config-digest"] != $before and
+          (.data["node-configs.yaml"] | contains($node) and contains("paused: true")) and
+          (.data["windows.yaml"] | contains($window))
+        ' <<<"$after" >/dev/null; then
+			root_digest=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.status.configDigest}')
+			[[ $root_digest == "$("$JQ_BIN" -r '.data["config-digest"]' <<<"$after")" ]] && break
+		fi
+		sleep 2
+	done
+	((SECONDS < deadline)) || die "node pause and maintenance window did not reach runtime snapshot"
+	wait_root_condition True RuntimeAvailable
+	assert_runtime_ready
+	note "operator status RBAC permits node pause and maintenance window reconciliation"
+
+	"$KUBECTL_BIN" delete gpunodeconfig "${ROOT_NAME}-status-node" --wait=true
+	"$KUBECTL_BIN" delete gpumaintenancewindow "${ROOT_NAME}-status-window" --wait=true
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		after=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get configmap "${ROOT_NAME}-runtime" -o json | "$JQ_BIN" -r '.data["config-digest"]')
+		root_digest=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.status.configDigest}')
+		[[ $after == "$before" && $root_digest == "$before" ]] && break
+		sleep 2
+	done
+	[[ $after == "$before" && $root_digest == "$before" ]] || die "runtime snapshot did not recover after status fixtures were removed"
+	wait_root_condition True RuntimeAvailable
+	assert_runtime_ready
+}
+
+assert_runtime_ready() {
+	local root_json deployment_json daemonset_json pvc_json generation observed
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status \
+		deployment/"${ROOT_NAME}-controller" --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status \
+		daemonset/"${ROOT_NAME}-agent" --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" wait \
+		"persistentvolumeclaim/${ROOT_NAME}-controller-state" \
+		"--for=jsonpath={.status.phase}=Bound" --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+
+	root_json=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o json)
+	generation=$("$JQ_BIN" -r '.metadata.generation' <<<"$root_json")
+	observed=$("$JQ_BIN" -r '.status.observedGeneration' <<<"$root_json")
+	[[ $generation == "$observed" ]] || die "root generation/observedGeneration is $generation/$observed"
+	"$JQ_BIN" -e --argjson generation "$generation" '
+      .status.configDigest != null and .status.configDigest != "" and
+      all(.status.conditions[]?; .observedGeneration == $generation)
+    ' <<<"$root_json" >/dev/null || die "root digest or condition observed generations are stale"
+
+	deployment_json=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+		deployment "${ROOT_NAME}-controller" -o json)
+	"$JQ_BIN" -e '
+      .metadata.generation == .status.observedGeneration and
+      .status.replicas == 1 and .status.updatedReplicas == 1 and
+      .status.readyReplicas == 1 and .status.availableReplicas == 1 and
+      (.status.unavailableReplicas // 0) == 0
+    ' <<<"$deployment_json" >/dev/null || die "controller Deployment is not current and fully available"
+
+	daemonset_json=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+		daemonset "${ROOT_NAME}-agent" -o json)
+	"$JQ_BIN" -e '
+      .metadata.generation == .status.observedGeneration and
+      .status.desiredNumberScheduled > 0 and
+      .status.currentNumberScheduled == .status.desiredNumberScheduled and
+      .status.updatedNumberScheduled == .status.desiredNumberScheduled and
+      .status.numberReady == .status.desiredNumberScheduled and
+      .status.numberAvailable == .status.desiredNumberScheduled and
+      (.status.numberUnavailable // 0) == 0
+    ' <<<"$daemonset_json" >/dev/null || die "agent DaemonSet is not current and fully available"
+
+	pvc_json=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+		persistentvolumeclaim "${ROOT_NAME}-controller-state" -o json)
+	"$JQ_BIN" -e '
+      .status.phase == "Bound" and
+      .spec.resources.requests.storage == "1Gi" and
+      .status.capacity.storage == "1Gi"
+    ' <<<"$pvc_json" >/dev/null || die "SQLite PVC is not Bound at requested/capacity 1Gi"
+}
+
+wait_agent_registration_readiness() {
+	local expected=$1
+	local deadline=$((SECONDS + TIMEOUT_SECONDS))
+	local daemonset_json=
+	while ((SECONDS < deadline)); do
+		daemonset_json=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+			daemonset "${ROOT_NAME}-agent" -o json 2>/dev/null || true)
+		if [[ -n $daemonset_json ]]; then
+			if [[ $expected == ready ]] && "$JQ_BIN" -e '
+              .status.desiredNumberScheduled > 0 and
+              .status.numberReady == .status.desiredNumberScheduled
+            ' <<<"$daemonset_json" >/dev/null; then
+				return 0
+			fi
+			if [[ $expected == stale ]] && "$JQ_BIN" -e '
+              .status.desiredNumberScheduled > 0 and
+              (.status.numberReady // 0) == 0
+            ' <<<"$daemonset_json" >/dev/null; then
+				return 0
+			fi
+			# degraded: at least one agent lost readiness. A broken rollout
+			# stalls at maxUnavailable on a multi-node DaemonSet — the other
+			# agents keep their previous working identity by design.
+			if [[ $expected == degraded ]] && "$JQ_BIN" -e '
+              .status.desiredNumberScheduled > 0 and
+              (.status.numberReady // 0) < .status.desiredNumberScheduled
+            ' <<<"$daemonset_json" >/dev/null; then
+				return 0
+			fi
+		fi
+		sleep 2
+	done
+	printf '%s\n' "$daemonset_json" | "$JQ_BIN" '.status // {}' >&2 || true
+	die "timed out waiting for agent registration readiness to become $expected"
+}
+
+wait_agent_log() {
+	local pattern=$1
+	local deadline=$((SECONDS + TIMEOUT_SECONDS))
+	local logs='' pod=''
+	while ((SECONDS < deadline)); do
+		# Aggregate all agent pods: the daemonset/ selector reads one
+		# arbitrary pod, which is not enough on a multi-node cluster.
+		logs=$(while read -r pod; do
+			[[ -n $pod ]] || continue
+			"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" logs "$pod" \
+				--all-containers --tail=-1 2>&1 || true
+		done < <("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get pods \
+			-l "app.kubernetes.io/instance=${ROOT_NAME},app.kubernetes.io/component=agent" \
+			-o name 2>/dev/null))
+		if grep -Fq "$pattern" <<<"$logs"; then
+			return 0
+		fi
+		sleep 2
+	done
+	printf '%s\n' "$logs" >&2
+	die "timed out waiting for agent log transition: $pattern"
+}
+
+assert_can_i() {
+	local expected=$1
+	local verb=$2
+	local resource=$3
+	local namespace=${4:-}
+	local subresource=${5:-}
+	local subject="system:serviceaccount:${OPERATOR_NAMESPACE}:kubeneuron-operator"
+	local -a command=("$KUBECTL_BIN" auth can-i "$verb" "$resource" --as="$subject")
+	local actual
+	if [[ -n $namespace ]]; then
+		command+=(--namespace "$namespace")
+	fi
+	if [[ -n $subresource ]]; then
+		command+=(--subresource="$subresource")
+	fi
+	actual=$("${command[@]}" 2>/dev/null || true)
+	[[ $actual == "$expected" ]] || \
+		die "auth can-i $verb $resource in ${namespace:-cluster scope} = ${actual:-empty}, want $expected"
+}
+
+assert_operator_rbac() {
+	local verb resource
+	for verb in create get update; do
+		assert_can_i yes "$verb" leases.coordination.k8s.io "$OPERATOR_NAMESPACE"
+	done
+	for verb in list watch patch; do
+		assert_can_i no "$verb" leases.coordination.k8s.io "$OPERATOR_NAMESPACE"
+	done
+	for verb in create patch; do
+		assert_can_i yes "$verb" events "$OPERATOR_NAMESPACE"
+		# Events for the cluster-scoped KubeNeuron object land in "default";
+		# the grant is a namespace-scoped Role there, nowhere else.
+		assert_can_i yes "$verb" events default
+		assert_can_i no "$verb" events "$TARGET_NAMESPACE"
+	done
+	# list only where node events live, to grant it to an Azure controller.
+	assert_can_i yes list events default
+	assert_can_i no list events "$TARGET_NAMESPACE"
+	assert_can_i yes get namespaces
+	assert_can_i no list namespaces
+	assert_can_i no watch namespaces
+	assert_can_i yes create tokenreviews.authentication.k8s.io
+	for verb in get list watch update patch delete; do
+		assert_can_i no "$verb" tokenreviews.authentication.k8s.io
+	done
+	for resource in gpuremediationpolicies.kubeneuron.io gpuplaybooks.kubeneuron.io; do
+		for verb in get patch update; do
+			assert_can_i yes "$verb" "$resource" "" status
+		done
+		for verb in create list watch delete; do
+			assert_can_i no "$verb" "$resource" "" status
+		done
+	done
+	note "operator Lease, Event, namespace, and child-status RBAC is minimal and correctly scoped"
+}
+
+# wait_node_events_rules waits for the operator's node-events Role in "default"
+# to carry the given rules, as compact JSON.
+wait_node_events_rules() {
+	local want=$1
+	local role="${ROOT_NAME}-controller-node-events"
+	local deadline=$((SECONDS + TIMEOUT_SECONDS))
+	local actual=
+	while ((SECONDS < deadline)); do
+		actual=$("$KUBECTL_BIN" -n default get role "$role" -o json 2>/dev/null |
+			"$JQ_BIN" -c '.rules // []' 2>/dev/null || true)
+		[[ $actual == "$want" ]] && return 0
+		sleep 2
+	done
+	die "Role default/$role rules = ${actual:-missing}, want $want"
+}
+
+# exercise_azure_cloud_wiring switches the installation to the Azure provider
+# and back on a real API server: the operator grants the controller node-event
+# reads in "default" only while Azure is set, and the controller keeps running
+# on a cluster without workload identity instead of restarting in a loop.
+exercise_azure_cloud_wiring() {
+	local controller_subject="system:serviceaccount:${TARGET_NAMESPACE}:${ROOT_NAME}-controller"
+	local selector="app.kubernetes.io/instance=${ROOT_NAME},app.kubernetes.io/component=controller"
+	local generation pods_json reason
+	note "switching the installation to the Azure provider"
+	"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=merge -p '{"spec":{"cloud":{"provider":"azure","azure":{
+		"subscriptionID":"00000000-0000-0000-0000-000000000001","resourceGroup":"kind","clusterName":"kind",
+		"clientID":"00000000-0000-0000-0000-000000000002"}}}}' >/dev/null
+	generation=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')
+	wait_observed_generation "$generation"
+	wait_node_events_rules '[{"apiGroups":[""],"resources":["events"],"verbs":["list"]}]'
+	[[ $("$KUBECTL_BIN" -n default get rolebinding "${ROOT_NAME}-controller-node-events" \
+		-o jsonpath='{.subjects[0].namespace}/{.subjects[0].name}') == "${TARGET_NAMESPACE}/${ROOT_NAME}-controller" ]] || \
+		die "node-events RoleBinding does not bind the managed controller"
+	[[ $("$KUBECTL_BIN" -n default auth can-i list events --as="$controller_subject" 2>/dev/null || true) == yes ]] || \
+		die "Azure controller cannot list node events in default"
+	[[ $("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" auth can-i list events --as="$controller_subject" 2>/dev/null || true) == no ]] || \
+		die "Azure controller can list events outside default"
+	reason=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" \
+		-o jsonpath='{.status.conditions[?(@.type=="CloudRecoveryAvailable")].reason}')
+	[[ $reason == NotReadyOnlyRepair ]] || die "CloudRecoveryAvailable reason = ${reason:-empty}, want NotReadyOnlyRepair"
+
+	# kind has no workload identity webhook, so the controller starts with no
+	# Azure credential: it must come up and stay up.
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status deployment/"${ROOT_NAME}-controller" \
+		--timeout="${TIMEOUT_SECONDS}s" >/dev/null || die "controller did not roll out with the Azure provider"
+	wait_root_condition True RuntimeAvailable
+	pods_json=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get pods -l "$selector" -o json)
+	"$JQ_BIN" -e '
+      [.items[] | select(.metadata.deletionTimestamp == null)] as $pods |
+      ($pods | length) > 0 and
+      all($pods[]; all(.status.containerStatuses[]?; .restartCount == 0 and .state.running != null))
+    ' <<<"$pods_json" >/dev/null || die "controller restarted with the Azure provider and no workload identity"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" logs deployment/"${ROOT_NAME}-controller" --tail=-1 2>/dev/null |
+		grep -Fq '"provider":"azure"' || die "controller did not enable the Azure provider"
+	note "Azure provider: node-event Role granted in default only, controller up without workload identity"
+
+	"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=json -p '[{"op":"remove","path":"/spec/cloud"}]' >/dev/null
+	generation=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')
+	wait_observed_generation "$generation"
+	wait_node_events_rules '[]'
+	[[ $("$KUBECTL_BIN" -n default auth can-i list events --as="$controller_subject" 2>/dev/null || true) == no ]] || \
+		die "controller kept node-event reads after leaving Azure"
+	wait_root_condition True RuntimeAvailable
+	note "leaving Azure emptied the node-event Role"
+}
+
+generate_tls_fixtures() {
+	local installation_uid=$1
+	local pki_dir="$work_dir/pki"
+	local service_name="${ROOT_NAME}-controller"
+	local service_dns="${service_name}.${TARGET_NAMESPACE}.svc"
+	mkdir -m 0700 -- "$pki_dir"
+
+	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+		-out "$pki_dir/server-ca.key" >/dev/null 2>&1
+	openssl req -new -x509 -sha256 -days 3650 \
+		-key "$pki_dir/server-ca.key" -out "$pki_dir/server-ca.crt" \
+		-subj "/CN=KubeNeuron integration server CA" >/dev/null 2>&1
+	generate_server_leaf "$pki_dir" server "$pki_dir/server-ca.crt" "$pki_dir/server-ca.key"
+
+	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+		-out "$pki_dir/client-ca.key" >/dev/null 2>&1
+	openssl req -new -x509 -sha256 -days 3650 \
+		-key "$pki_dir/client-ca.key" -out "$pki_dir/client-ca.crt" \
+		-subj "/CN=KubeNeuron integration agent CA" >/dev/null 2>&1
+	generate_client_leaf "$pki_dir" client "$installation_uid" "$pki_dir/client-ca.crt" "$pki_dir/client-ca.key"
+	generate_client_leaf "$pki_dir" other-client other-installation "$pki_dir/client-ca.crt" "$pki_dir/client-ca.key"
+
+	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+		-out "$pki_dir/rogue-ca.key" >/dev/null 2>&1
+	openssl req -new -x509 -sha256 -days 3650 \
+		-key "$pki_dir/rogue-ca.key" -out "$pki_dir/rogue-ca.crt" \
+		-subj "/CN=KubeNeuron integration rogue CA" >/dev/null 2>&1
+	generate_client_leaf "$pki_dir" rogue-client "$installation_uid" "$pki_dir/rogue-ca.crt" "$pki_dir/rogue-ca.key"
+
+	openssl verify -CAfile "$pki_dir/server-ca.crt" "$pki_dir/server.crt" >/dev/null
+	openssl verify -CAfile "$pki_dir/client-ca.crt" "$pki_dir/client.crt" >/dev/null
+	openssl x509 -in "$pki_dir/server.crt" -noout -text | \
+		grep -Fq "DNS:${service_dns}" || die "server certificate is missing its Service DNS SAN"
+	openssl x509 -in "$pki_dir/client.crt" -noout -text | \
+		grep -Fq "URI:spiffe://kubeneuron.io/installation/${installation_uid}/agent" || \
+		die "client certificate is missing its installation URI SAN"
+}
+
+generate_server_leaf() {
+	local pki_dir=$1
+	local name=$2
+	local ca_cert=$3
+	local ca_key=$4
+	local service_name="${ROOT_NAME}-controller"
+	local service_dns="${service_name}.${TARGET_NAMESPACE}.svc"
+	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+		-out "$pki_dir/${name}.key" >/dev/null 2>&1
+	openssl req -new -sha256 -key "$pki_dir/${name}.key" -out "$pki_dir/${name}.csr" \
+		-subj "/CN=$service_dns" >/dev/null 2>&1
+	openssl x509 -req -sha256 -days 2 -in "$pki_dir/${name}.csr" \
+		-CA "$ca_cert" -CAkey "$ca_key" -CAcreateserial \
+		-out "$pki_dir/${name}.crt" -extfile <(printf '%s\n' \
+			'basicConstraints=critical,CA:FALSE' \
+			'keyUsage=critical,digitalSignature' \
+			'extendedKeyUsage=serverAuth' \
+			"subjectAltName=DNS:${service_name},DNS:${service_name}.${TARGET_NAMESPACE},DNS:${service_dns},DNS:${service_dns}.cluster.local") \
+		>/dev/null 2>&1
+}
+
+generate_client_leaf() {
+	local pki_dir=$1
+	local name=$2
+	local installation_uid=$3
+	local ca_cert=$4
+	local ca_key=$5
+	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+		-out "$pki_dir/${name}.key" >/dev/null 2>&1
+	openssl req -new -sha256 -key "$pki_dir/${name}.key" \
+		-out "$pki_dir/${name}.csr" -subj "/CN=KubeNeuron integration agent" >/dev/null 2>&1
+	openssl x509 -req -sha256 -days 2 -in "$pki_dir/${name}.csr" \
+		-CA "$ca_cert" -CAkey "$ca_key" -CAcreateserial \
+		-out "$pki_dir/${name}.crt" -extfile <(printf '%s\n' \
+			'basicConstraints=critical,CA:FALSE' \
+			'keyUsage=critical,digitalSignature' \
+			'extendedKeyUsage=clientAuth' \
+			"subjectAltName=URI:spiffe://kubeneuron.io/installation/${installation_uid}/agent") \
+		>/dev/null 2>&1
+}
+
+create_tls_secrets() {
+	local pki_dir="$work_dir/pki"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create secret tls "${ROOT_NAME}-controller-tls" \
+		--cert="$pki_dir/server.crt" --key="$pki_dir/server.key" >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create secret generic "${ROOT_NAME}-agent-client-ca" \
+		--from-file=ca.crt="$pki_dir/client-ca.crt" >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create secret tls "${ROOT_NAME}-agent-tls" \
+		--cert="$pki_dir/client.crt" --key="$pki_dir/client.key" >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create secret generic "${ROOT_NAME}-controller-server-ca" \
+		--from-file=ca.crt="$pki_dir/server-ca.crt" >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create secret generic "${ROOT_NAME}-operator-api-token" \
+		--from-literal=token="integration-operator-token" >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create secret generic "${ROOT_NAME}-webhook-token" \
+		--from-literal=token="integration-webhook-token" >/dev/null
+
+	local secret
+	for secret in \
+		"${ROOT_NAME}-controller-tls" \
+		"${ROOT_NAME}-agent-client-ca" \
+		"${ROOT_NAME}-agent-tls" \
+		"${ROOT_NAME}-controller-server-ca"; do
+		record_tls_secret "$secret"
+	done
+	note "created four unowned installation-local TLS input Secrets and two unowned API/webhook token Secrets"
+}
+
+record_tls_secret() {
+	local secret=$1
+	local secret_json owners data_hash
+	secret_json=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get secret "$secret" -o json)
+	owners=$("$JQ_BIN" -c '.metadata.ownerReferences // []' <<<"$secret_json")
+	data_hash=$("$JQ_BIN" -cS '.data' <<<"$secret_json" | sha256sum | awk '{print $1}')
+	[[ $owners == '[]' ]] || die "input TLS Secret $secret unexpectedly has an owner reference"
+	"$JQ_BIN" -e '.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] == null' \
+		<<<"$secret_json" >/dev/null || die "input TLS Secret $secret duplicates its data in a last-applied annotation"
+	tls_secret_uids["$secret"]=$("$JQ_BIN" -r '.metadata.uid' <<<"$secret_json")
+	tls_secret_hashes["$secret"]=$data_hash
+}
+
+create_immutable_secret() {
+	local name=$1
+	local kind=$2
+	shift 2
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create secret "$kind" "$name" "$@" \
+		--dry-run=client -o json | "$JQ_BIN" '.immutable = true' | \
+		"$KUBECTL_BIN" create -f - >/dev/null
+	record_tls_secret "$name"
+}
+
+generate_rotated_tls_fixtures() {
+	local installation_uid=$1
+	local pki_dir="$work_dir/pki"
+	local service_dns="${ROOT_NAME}-controller.${TARGET_NAMESPACE}.svc"
+
+	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+		-out "$pki_dir/server-ca-v2.key" >/dev/null 2>&1
+	openssl req -new -x509 -sha256 -days 3650 \
+		-key "$pki_dir/server-ca-v2.key" -out "$pki_dir/server-ca-v2.crt" \
+		-subj "/CN=KubeNeuron integration server CA v2" >/dev/null 2>&1
+	generate_server_leaf "$pki_dir" server-v2 "$pki_dir/server-ca-v2.crt" "$pki_dir/server-ca-v2.key"
+	generate_server_leaf "$pki_dir" server-emergency-v2 "$pki_dir/server-ca-v2.crt" "$pki_dir/server-ca-v2.key"
+	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+		-out "$pki_dir/server-ca-retire-probe.key" >/dev/null 2>&1
+	openssl req -new -x509 -sha256 -days 3650 \
+		-key "$pki_dir/server-ca-retire-probe.key" -out "$pki_dir/server-ca-retire-probe.crt" \
+		-subj "/CN=KubeNeuron integration server retirement probe CA" >/dev/null 2>&1
+	generate_server_leaf "$pki_dir" server-retire-probe \
+		"$pki_dir/server-ca-retire-probe.crt" "$pki_dir/server-ca-retire-probe.key"
+
+	openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+		-out "$pki_dir/client-ca-v2.key" >/dev/null 2>&1
+	openssl req -new -x509 -sha256 -days 3650 \
+		-key "$pki_dir/client-ca-v2.key" -out "$pki_dir/client-ca-v2.crt" \
+		-subj "/CN=KubeNeuron integration agent CA v2" >/dev/null 2>&1
+	generate_client_leaf "$pki_dir" client-v2 "$installation_uid" \
+		"$pki_dir/client-ca-v2.crt" "$pki_dir/client-ca-v2.key"
+	generate_client_leaf "$pki_dir" client-emergency-v2 "$installation_uid" \
+		"$pki_dir/client-ca-v2.crt" "$pki_dir/client-ca-v2.key"
+
+	{
+		awk 'NF {print}' "$pki_dir/server-ca.crt"
+		awk 'NF {print}' "$pki_dir/server-ca-v2.crt"
+	} >"$pki_dir/server-ca-overlap.crt"
+	{
+		awk 'NF {print}' "$pki_dir/server-ca.crt"
+		awk 'NF {print}' "$pki_dir/server-ca-retire-probe.crt"
+	} >"$pki_dir/server-ca-overlap-retire-probe.crt"
+	{
+		awk 'NF {print}' "$pki_dir/client-ca.crt"
+		awk 'NF {print}' "$pki_dir/client-ca-v2.crt"
+	} >"$pki_dir/client-ca-overlap.crt"
+
+	openssl verify -purpose sslserver -verify_hostname "$service_dns" \
+		-CAfile "$pki_dir/server-ca-v2.crt" "$pki_dir/server-v2.crt" >/dev/null
+	openssl verify -purpose sslserver -verify_hostname "$service_dns" \
+		-CAfile "$pki_dir/server-ca-v2.crt" "$pki_dir/server-emergency-v2.crt" >/dev/null
+	openssl verify -purpose sslserver -verify_hostname "$service_dns" \
+		-CAfile "$pki_dir/server-ca-overlap.crt" "$pki_dir/server.crt" "$pki_dir/server-v2.crt" >/dev/null
+	openssl verify -purpose sslserver -verify_hostname "$service_dns" \
+		-CAfile "$pki_dir/server-ca-overlap-retire-probe.crt" \
+		"$pki_dir/server.crt" "$pki_dir/server-retire-probe.crt" >/dev/null
+	openssl verify -purpose sslclient \
+		-CAfile "$pki_dir/client-ca-v2.crt" "$pki_dir/client-v2.crt" >/dev/null
+	openssl verify -purpose sslclient \
+		-CAfile "$pki_dir/client-ca-v2.crt" "$pki_dir/client-emergency-v2.crt" >/dev/null
+	openssl verify -purpose sslclient \
+		-CAfile "$pki_dir/client-ca-overlap.crt" "$pki_dir/client.crt" "$pki_dir/client-v2.crt" >/dev/null
+
+	create_immutable_secret "${ROOT_NAME}-controller-tls-v2" tls \
+		--cert="$pki_dir/server-v2.crt" --key="$pki_dir/server-v2.key"
+	create_immutable_secret "${ROOT_NAME}-controller-tls-emergency-v2" tls \
+		--cert="$pki_dir/server-emergency-v2.crt" --key="$pki_dir/server-emergency-v2.key"
+	create_immutable_secret "${ROOT_NAME}-controller-tls-emergency-bad-v2" generic \
+		--type=kubernetes.io/tls \
+		--from-file=tls.crt="$pki_dir/server-v2.crt" \
+		--from-file=tls.key="$pki_dir/client-v2.key"
+	create_immutable_secret "${ROOT_NAME}-controller-tls-bad-v2" generic \
+		--type=kubernetes.io/tls \
+		--from-file=tls.crt="$pki_dir/server-v2.crt" \
+		--from-file=tls.key="$pki_dir/client-v2.key"
+	create_immutable_secret "${ROOT_NAME}-controller-server-ca-overlap-bad-leaf" generic \
+		--from-file=ca.crt="$pki_dir/server-ca-overlap.crt"
+	create_immutable_secret "${ROOT_NAME}-controller-server-ca-final-bad-leaf" generic \
+		--from-file=ca.crt="$pki_dir/server-ca-v2.crt"
+	create_immutable_secret "${ROOT_NAME}-controller-tls-retire-probe" tls \
+		--cert="$pki_dir/server-retire-probe.crt" --key="$pki_dir/server-retire-probe.key"
+	create_immutable_secret "${ROOT_NAME}-controller-server-ca-overlap-retire-probe" generic \
+		--from-file=ca.crt="$pki_dir/server-ca-overlap-retire-probe.crt"
+	create_immutable_secret "${ROOT_NAME}-controller-server-ca-bad-retire-probe" generic \
+		--from-file=ca.crt="$pki_dir/rogue-ca.crt"
+	create_immutable_secret "${ROOT_NAME}-agent-client-ca-overlap-v2" generic \
+		--from-file=ca.crt="$pki_dir/client-ca-overlap.crt"
+	create_immutable_secret "${ROOT_NAME}-agent-client-ca-v2" generic \
+		--from-file=ca.crt="$pki_dir/client-ca-v2.crt"
+	create_immutable_secret "${ROOT_NAME}-agent-tls-v2" tls \
+		--cert="$pki_dir/client-v2.crt" --key="$pki_dir/client-v2.key"
+	create_immutable_secret "${ROOT_NAME}-agent-tls-emergency-v2" tls \
+		--cert="$pki_dir/client-emergency-v2.crt" --key="$pki_dir/client-emergency-v2.key"
+	create_immutable_secret "${ROOT_NAME}-controller-server-ca-overlap-v2" generic \
+		--from-file=ca.crt="$pki_dir/server-ca-overlap.crt"
+	create_immutable_secret "${ROOT_NAME}-controller-server-ca-v2" generic \
+		--from-file=ca.crt="$pki_dir/server-ca-v2.crt"
+	note "created twelve compatible and three deliberately incompatible immutable, versioned, unowned TLS rotation/recovery Secrets"
+}
+
+assert_tls_secrets_unchanged() {
+	local secret secret_json owners data_hash
+	for secret in "${!tls_secret_uids[@]}"; do
+		secret_json=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get secret "$secret" -o json)
+		owners=$("$JQ_BIN" -c '.metadata.ownerReferences // []' <<<"$secret_json")
+		data_hash=$("$JQ_BIN" -cS '.data' <<<"$secret_json" | sha256sum | awk '{print $1}')
+		[[ $owners == '[]' ]] || die "input TLS Secret $secret acquired an owner reference"
+		[[ $("$JQ_BIN" -r '.metadata.uid' <<<"$secret_json") == "${tls_secret_uids[$secret]}" ]] || \
+			die "input TLS Secret $secret was replaced"
+		[[ $data_hash == "${tls_secret_hashes[$secret]}" ]] || \
+			die "input TLS Secret $secret data changed"
+	done
+	note "all TLS input Secrets retained their UIDs, data hashes, and unowned state"
+}
+
+# assert_operator_issues_missing_tls proves the operator can stand an
+# installation's mTLS material up on its own.
+#
+# Certificates used to be generated by the installer and renewed by nothing, so
+# an installation stopped authenticating about a year after it was created. The
+# operator now issues them. This deletes the material and requires it back,
+# because "the operator issues TLS" is exactly the kind of claim that is easy to
+# believe and was never once observed working.
+assert_operator_issues_missing_tls() {
+	local issued_dir chain_ok present deadline
+	local -a refs=() names=()
+	# Only the four Secrets the installation currently references. Earlier phases
+	# of this harness leave rotation material behind that spec.tls no longer names,
+	# and the operator issues into what the workloads actually mount.
+	refs=(serverSecretRef serverCASecretRef clientSecretRef clientCASecretRef)
+	local ref name
+	for ref in "${refs[@]}"; do
+		name=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath="{.spec.tls.$ref.name}")
+		[[ -n $name ]] || die "spec.tls.$ref has no name"
+		names+=("$name")
+	done
+
+	note "deleting the referenced TLS material and requiring the operator to reissue it"
+	for name in "${names[@]}"; do
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete secret "$name" --ignore-not-found >/dev/null
+	done
+
+	# Issuance is explicitly opt-in: an absent Secret is not an invitation to take
+	# over material somebody else manages. Everything above this point ran with the
+	# default External issuer, which is why those Secrets stayed unowned — and why
+	# deleting them triggers nothing on its own. Switching the issuer is the change
+	# that makes the operator look, and by then the material is already gone.
+	note "switching the installation to operator-issued TLS"
+	"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=merge \
+		-p '{"spec":{"tls":{"issuer":"Operator"}}}' >/dev/null
+
+	deadline=$((SECONDS + 180))
+	while ((SECONDS < deadline)); do
+		present=0
+		for name in "${names[@]}"; do
+			"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get secret "$name" >/dev/null 2>&1 && \
+				present=$((present + 1))
+		done
+		((present == ${#names[@]})) && break
+		sleep 3
+	done
+
+	for name in "${names[@]}"; do
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get secret "$name" >/dev/null 2>&1 || \
+			die "operator did not reissue TLS Secret $name"
+		[[ $("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get secret "$name" \
+			-o jsonpath='{.metadata.labels.kubeneuron\.io/managed-pki}') == true ]] || \
+			die "reissued Secret $name is not marked as operator-managed, so nothing will ever renew it"
+	done
+
+	# Material that does not chain is worse than no material: the failure only
+	# shows up as a handshake error at the far end.
+	local client_ca_name client_ca_key client_tls_name
+	client_ca_name=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.spec.tls.clientCASecretRef.name}')
+	client_ca_key=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.spec.tls.clientCASecretRef.key}')
+	[[ -n $client_ca_key ]] || client_ca_key=ca.crt
+	client_tls_name=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.spec.tls.clientSecretRef.name}')
+	issued_dir=$(mktemp -d)
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get secret "$client_ca_name" \
+		-o "jsonpath={.data['${client_ca_key//./\\.}']}" | base64 -d >"$issued_dir/ca.crt"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get secret "$client_tls_name" \
+		-o 'jsonpath={.data.tls\.crt}' | base64 -d >"$issued_dir/client.crt"
+	chain_ok=$(openssl verify -CAfile "$issued_dir/ca.crt" "$issued_dir/client.crt" 2>&1 || true)
+	rm -rf "$issued_dir"
+	[[ $chain_ok == *": OK"* ]] || die "reissued agent certificate does not chain to its authority: $chain_ok"
+
+	note "operator reissued the four referenced TLS Secrets, marked them managed, and the chain verifies"
+}
+
+write_bearer_header() {
+	local token_file=$1
+	local header_file=$2
+	printf 'Authorization: Bearer ' >"$header_file"
+	tr -d '\r\n' <"$token_file" >>"$header_file"
+	printf '\n' >>"$header_file"
+	chmod 0600 "$token_file" "$header_file"
+}
+
+assert_tls_curl_failure() {
+	local label=$1
+	local expected_pattern=$2
+	local log_file=$3
+	local probe=$4
+	local rc attempt
+
+	# tls_forward_restart names the caller's own restart function, because the
+	# rotation phase and the auth phase run different tunnels. Naming one of
+	# them here would have worked in the phase I was looking at and failed in
+	# the other.
+	#
+	# The liveness check after the request is the load-bearing part: a TLS
+	# rejection is only evidence if it came from the server rather than from a
+	# tunnel that had already died. But `kubectl port-forward` genuinely dies
+	# under CPU pressure on a small runner, and refusing to answer at all turned
+	# an infrastructure hiccup into a red release gate.
+	#
+	# So retry with a FRESH tunnel instead of either accepting an unattributable
+	# result or weakening the assertion. Three attempts: a real defect fails all
+	# three identically, while a dead tunnel is gone by the next one.
+	#
+	# ORDER MATTERS, and it was wrong. The pattern check used to come first and
+	# die outright, with the liveness check below it — so the retry could only
+	# ever help when the pattern MATCHED and the tunnel then died. The common
+	# failure is the opposite: the tunnel dies first, curl reports "Failed to
+	# connect ... Couldn't connect to server", that is not a TLS error class, and
+	# the helper died on attempt one. The retry written to survive a dead tunnel
+	# could not survive a dead tunnel, and public CI went red on exactly that.
+	#
+	# So: whenever the outcome is not the expected TLS class, ask whether the
+	# tunnel was alive before judging it. Alive and wrong is a real defect and
+	# still dies immediately. Dead is an infrastructure hiccup and is retried.
+	for attempt in 1 2 3; do
+		set +e
+		# A FUNCTION, not pre-expanded argv.
+		#
+		# The restart hook starts `kubectl port-forward` with an empty local
+		# port, so kubectl allocates a fresh random one every time. Argv built
+		# once at the call site pinned the FIRST port, so attempt two dialled a
+		# port nothing was listening on, got a connection error rather than a
+		# TLS one — over a tunnel that was by then alive — and the assertion
+		# died saying the wrong thing. The retry was structurally incapable of
+		# succeeding. A function re-reads agent_local_port and agent_base as
+		# they are now.
+		"$probe" >/dev/null 2>"$log_file"
+		rc=$?
+		set -e
+		((rc != 0)) || die "$label unexpectedly completed a TLS request"
+
+		local matched=0 alive=0
+		grep -Eiq "$expected_pattern" "$log_file" && matched=1
+		kill -0 "$port_forward_pid" >/dev/null 2>&1 && alive=1
+
+		# The only outcome that proves anything: the server rejected it, over a
+		# tunnel that was still up when we looked.
+		((matched == 1 && alive == 1)) && return 0
+
+		if ((alive == 1)); then
+			# The tunnel was fine, so this result is attributable — and it is
+			# the wrong one.
+			printf '%s\n' "$(<"$log_file")" >&2
+			die "$label failed without the expected TLS error class"
+		fi
+
+		if ((attempt == 3)); then
+			printf '%s\n' "$(<"$log_file")" >&2
+			die "$label coincided with a dead port-forward on every attempt"
+		fi
+		if [[ -z ${tls_forward_restart:-} ]]; then
+			printf '%s\n' "$(<"$log_file")" >&2
+			die "$label coincided with a dead port-forward and no restart hook is set"
+		fi
+		note "$label: port-forward died mid-check (matched=${matched}); restarting it and re-asserting (attempt $attempt)"
+		"$tls_forward_restart"
+	done
+}
+
+exercise_agent_bad_certificate_readiness() {
+	local rogue_secret="${ROOT_NAME}-rogue-agent-tls"
+	local pki_dir="$work_dir/pki"
+	local generation deadline pods_json agent_logs=
+
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create secret tls "$rogue_secret" \
+		--cert="$pki_dir/rogue-client.crt" --key="$pki_dir/rogue-client.key" >/dev/null
+	[[ $("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get secret "$rogue_secret" \
+		-o json | "$JQ_BIN" -c '.metadata.ownerReferences // []') == '[]' ]] || \
+		die "rogue auth-probe Secret unexpectedly has an owner"
+
+	"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=merge \
+		-p "{\"spec\":{\"tls\":{\"clientSecretRef\":{\"name\":\"${rogue_secret}\"}}}}" >/dev/null
+	generation=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')
+	wait_observed_generation "$generation"
+	# The rogue-cert rollout stalls fail-closed at maxUnavailable: only the
+	# replaced agent loses readiness while the rest keep their previous
+	# working identity, so a bad rotation cannot silently break the fleet.
+	wait_agent_registration_readiness degraded
+
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		pods_json=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get pods \
+			-l "app.kubernetes.io/instance=${ROOT_NAME},app.kubernetes.io/component=agent" -o json)
+		# Aggregate every agent pod's logs: on a multi-node cluster the
+		# daemonset/ log selector picks one arbitrary pod, which is usually a
+		# healthy agent that never saw the rogue certificate.
+		agent_logs=$(while read -r pod; do
+			[[ -n $pod ]] || continue
+			"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" logs "$pod" \
+				--all-containers --tail=-1 2>&1 || true
+		done < <("$JQ_BIN" -r '.items[].metadata.name' <<<"$pods_json"))
+		if "$JQ_BIN" -e '
+          any(.items[];
+            .status.phase == "Running" and
+            (.status.containerStatuses | length) > 0 and
+            all(.status.containerStatuses[];
+              .restartCount == 0 and .state.running != null) and
+            ([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length) == 0)
+        ' <<<"$pods_json" >/dev/null && \
+			grep -Eiq 'initial registration failed.*(tls|certificate)|tls.*(unknown|certificate)|controller registration never acknowledged' <<<"$agent_logs"; then
+			break
+		fi
+		sleep 2
+	done
+	if ((SECONDS >= deadline)); then
+		printf '%s\n' "$agent_logs" >&2
+		die "rogue client certificate did not leave the managed agent Running, unready, and restart-free"
+	fi
+
+	"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=merge \
+		-p "{\"spec\":{\"tls\":{\"clientSecretRef\":{\"name\":\"${ROOT_NAME}-agent-tls\"}}}}" >/dev/null
+	generation=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')
+	wait_observed_generation "$generation"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status \
+		daemonset/"${ROOT_NAME}-agent" --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+	wait_root_condition True RuntimeAvailable
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete secret "$rogue_secret" \
+		--wait=true --timeout=60s >/dev/null
+	note "a managed agent with a rogue client certificate stayed Running/restart-free but unready, then recovered after restoring valid identity"
+}
+
+exercise_agent_authentication() {
+	local service_dns="${ROOT_NAME}-controller.${TARGET_NAMESPACE}.svc"
+	local agent_pod token_file header_file wrong_audience_token wrong_audience_header wrong_sa_token wrong_sa_header
+	local port_forward_log public_code operator_unauth_code operator_auth_code webhook_unauth_code webhook_auth_code
+	local plaintext_code plaintext_rc no_token_code malformed_code wrong_audience_code wrong_sa_code
+	local valid_code mismatch_code event_code other_cert_code final_valid_code stale_code
+	local agent_local_port='' public_local_port='' agent_base=''
+	local training_port training_code installation_uid
+	local -a valid_tls=()
+	local pki_dir="$work_dir/pki"
+
+	"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type merge -p '{"spec":{"trainingReports":true}}'
+	wait_observed_generation "$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status "deployment/${ROOT_NAME}-controller" --timeout=180s
+	installation_uid=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.uid}')
+	agent_pod=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get pods \
+		-l "app.kubernetes.io/instance=${ROOT_NAME},app.kubernetes.io/component=agent" \
+		-o jsonpath='{.items[0].metadata.name}')
+	[[ -n $agent_pod ]] || die "could not find a managed agent Pod for the authentication test"
+	token_file="$work_dir/agent-token"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create token "${ROOT_NAME}-agent" \
+		--audience="$agentTokenAudience" --duration=10m \
+		--bound-object-kind=Pod --bound-object-name="$agent_pod" >"$token_file"
+	header_file="$work_dir/agent-authorization-header"
+	write_bearer_header "$token_file" "$header_file"
+
+	wrong_audience_token="$work_dir/wrong-audience-token"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create token "${ROOT_NAME}-agent" \
+		--audience=kubeneuron-wrong-audience --duration=10m \
+		--bound-object-kind=Pod --bound-object-name="$agent_pod" >"$wrong_audience_token"
+	wrong_audience_header="$work_dir/wrong-audience-header"
+	write_bearer_header "$wrong_audience_token" "$wrong_audience_header"
+
+	wrong_sa_token="$work_dir/wrong-service-account-token"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create token default \
+		--audience="$agentTokenAudience" --duration=10m >"$wrong_sa_token"
+	wrong_sa_header="$work_dir/wrong-service-account-header"
+	write_bearer_header "$wrong_sa_token" "$wrong_sa_header"
+
+	port_forward_log="$work_dir/controller-port-forward.log"
+	tls_forward_restart=start_auth_port_forward
+	start_auth_port_forward() {
+		local deadline
+		if [[ -n ${port_forward_pid:-} ]]; then
+			kill "$port_forward_pid" >/dev/null 2>&1 || true
+			wait "$port_forward_pid" >/dev/null 2>&1 || true
+			port_forward_pid=
+		fi
+		agent_local_port=
+		public_local_port=
+		: >"$port_forward_log"
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+			"service/${ROOT_NAME}-controller" ":${agentIngressPort}" ":${controllerPort}" ":8444" \
+			>"$port_forward_log" 2>&1 &
+		port_forward_pid=$!
+		deadline=$((SECONDS + 30))
+		while ((SECONDS < deadline)); do
+			agent_local_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${agentIngressPort}$/\\1/p" "$port_forward_log")
+			public_local_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$port_forward_log")
+			training_port=$(awk '/^Forwarding from 127[.]0[.]0[.]1:/ && $NF == 8444 {split($3,a,":"); print a[2]}' "$port_forward_log")
+			[[ -n $training_port && -n $agent_local_port && -n $public_local_port ]] && break
+			kill -0 "$port_forward_pid" >/dev/null 2>&1 || {
+				printf '%s\n' "$(<"$port_forward_log")" >&2
+				die "controller port-forward exited early"
+			}
+			sleep 1
+		done
+		[[ -n $agent_local_port && -n $public_local_port ]] || die "controller port-forward did not allocate both local ports"
+		agent_base="https://${service_dns}:${agent_local_port}"
+		valid_tls=(
+			--silent --show-error --noproxy '*' --max-time 10
+			--resolve "${service_dns}:${agent_local_port}:127.0.0.1"
+			--cacert "$pki_dir/server-ca.crt"
+			--cert "$pki_dir/client.crt"
+			--key "$pki_dir/client.key"
+		)
+	}
+	start_auth_port_forward
+
+	# The agent pod has a real bound identity but is not a training worker.
+	local training_header="$work_dir/training-header"
+	local -a training_request=(--silent --show-error --noproxy '*' --max-time 10
+		--cacert "$pki_dir/server-ca.crt" --resolve "${service_dns}:${training_port}:127.0.0.1"
+		-H 'Content-Type: application/json' --data '{"kind":"progress","step":1}'
+		-o /dev/null -w '%{http_code}' "https://${service_dns}:${training_port}/v1/training/reports")
+	training_code=$(curl "${training_request[@]}" -H "@$wrong_audience_header")
+	[[ $training_code == 401 ]] || die "training report with wrong audience returned $training_code, want 401"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create token "${ROOT_NAME}-agent" \
+		--audience="kubeneuron.io/training-report/$installation_uid" --duration=10m \
+		--bound-object-kind=Pod --bound-object-name="$agent_pod" >"$work_dir/training-token"
+	write_bearer_header "$work_dir/training-token" "$training_header"
+	training_code=$(curl "${training_request[@]}" -H "@$training_header")
+	[[ $training_code == 403 ]] || die "training report from agent pod returned $training_code, want 403"
+
+	public_code=$(curl --silent --show-error --noproxy '*' --max-time 10 \
+		-o /dev/null -w '%{http_code}' \
+		"http://127.0.0.1:${public_local_port}/api/v1/events")
+	[[ $public_code == 404 ]] || die "public listener agent route returned $public_code, want 404"
+	operator_unauth_code=$(curl --silent --show-error --noproxy '*' --max-time 10 \
+		-o /dev/null -w '%{http_code}' \
+		"http://127.0.0.1:${public_local_port}/api/v1/incidents")
+	[[ $operator_unauth_code == 401 ]] || die "unauthenticated public operator API returned $operator_unauth_code, want 401"
+	operator_auth_code=$(curl --silent --show-error --noproxy '*' --max-time 10 \
+		-H 'Authorization: Bearer integration-operator-token' -o /dev/null -w '%{http_code}' \
+		"http://127.0.0.1:${public_local_port}/api/v1/incidents")
+	[[ $operator_auth_code == 200 ]] || die "authenticated public operator API returned $operator_auth_code, want 200"
+	webhook_unauth_code=$(curl --silent --show-error --noproxy '*' --max-time 10 \
+		-H 'Content-Type: application/json' --data-binary '{"alerts":[]}' -o /dev/null -w '%{http_code}' \
+		"http://127.0.0.1:${public_local_port}/api/v1/webhooks/alertmanager")
+	[[ $webhook_unauth_code == 401 ]] || die "unauthenticated Alertmanager webhook returned $webhook_unauth_code, want 401"
+	webhook_auth_code=$(curl --silent --show-error --noproxy '*' --max-time 10 \
+		-H 'Authorization: Bearer integration-webhook-token' -H 'Content-Type: application/json' \
+		--data-binary '{"alerts":[]}' -o /dev/null -w '%{http_code}' \
+		"http://127.0.0.1:${public_local_port}/api/v1/webhooks/alertmanager")
+	[[ $webhook_auth_code == 202 ]] || die "authenticated Alertmanager webhook returned $webhook_auth_code, want 202"
+
+	set +e
+	plaintext_code=$(curl --silent --show-error --noproxy '*' --max-time 10 \
+		-o /dev/null -w '%{http_code}' \
+		"http://127.0.0.1:${agent_local_port}/api/v1/agents/register/narrow-v1" \
+		2>"$work_dir/plaintext-agent-port.log")
+	plaintext_rc=$?
+	set -e
+	if ((plaintext_rc == 0)); then
+		[[ $plaintext_code == 400 ]] || die "plaintext request to mTLS port returned $plaintext_code, want TLS rejection"
+	else
+		[[ $plaintext_code == 000 ]] || die "failed plaintext request reported unexpected HTTP code $plaintext_code"
+	fi
+	kill -0 "$port_forward_pid" >/dev/null 2>&1 || die "plaintext check coincided with a dead port-forward"
+
+	no_token_code=$(curl "${valid_tls[@]}" -o /dev/null -w '%{http_code}' \
+		"${agent_base}/api/v1/agents/register/narrow-v1")
+	[[ $no_token_code == 401 ]] || die "valid mTLS without a token returned $no_token_code, want 401"
+	malformed_code=$(curl "${valid_tls[@]}" -H 'Authorization: Basic invalid' -o /dev/null -w '%{http_code}' \
+		"${agent_base}/api/v1/agents/register/narrow-v1")
+	[[ $malformed_code == 401 ]] || die "malformed agent credential returned $malformed_code, want 401"
+	wrong_audience_code=$(curl "${valid_tls[@]}" -H "@$wrong_audience_header" -o /dev/null -w '%{http_code}' \
+		"${agent_base}/api/v1/agents/register/narrow-v1")
+	[[ $wrong_audience_code == 401 ]] || die "wrong-audience Pod token returned $wrong_audience_code, want 401"
+	wrong_sa_code=$(curl "${valid_tls[@]}" -H "@$wrong_sa_header" -o /dev/null -w '%{http_code}' \
+		"${agent_base}/api/v1/agents/register/narrow-v1")
+	[[ $wrong_sa_code == 403 ]] || die "wrong-ServiceAccount Pod token returned $wrong_sa_code, want 403"
+
+	valid_code=$(curl "${valid_tls[@]}" -H "@$header_file" -o "$work_dir/capability-response" -w '%{http_code}' \
+		"${agent_base}/api/v1/agents/register/narrow-v1")
+	[[ $valid_code == 200 ]] || die "valid mTLS and bound token returned $valid_code, want 200"
+	[[ $(<"$work_dir/capability-response") == kubeneuron-agent-registration/v1 ]] || \
+		die "authenticated capability response was not exact"
+
+	mismatch_code=$(curl "${valid_tls[@]}" -H "@$header_file" -H 'Content-Type: application/json' \
+		--data-binary '{"name":"spoofed-node"}' -o /dev/null -w '%{http_code}' \
+		"${agent_base}/api/v1/agents/register/narrow-v1")
+	[[ $mismatch_code == 403 ]] || die "spoofed-node registration returned $mismatch_code, want 403"
+	event_code=$(curl "${valid_tls[@]}" -H "@$header_file" -H 'Content-Type: application/json' \
+		--data-binary '{"node":"spoofed-node","xid":79}' -o /dev/null -w '%{http_code}' \
+		"${agent_base}/api/v1/events")
+	[[ $event_code == 403 ]] || die "spoofed-node event returned $event_code, want 403"
+
+	other_cert_code=$(curl --silent --show-error --noproxy '*' --max-time 10 \
+		--resolve "${service_dns}:${agent_local_port}:127.0.0.1" \
+		--cacert "$pki_dir/server-ca.crt" --cert "$pki_dir/other-client.crt" --key "$pki_dir/other-client.key" \
+		-H "@$header_file" -o /dev/null -w '%{http_code}' \
+		"${agent_base}/api/v1/agents/register/narrow-v1")
+	[[ $other_cert_code == 403 ]] || die "wrong-installation client certificate returned $other_cert_code, want 403"
+
+	# Kubernetes port-forward can tear down after a client-certificate handshake
+	# alert. Start an independent forwarding session for every negative TLS
+	# probe so one expected reset cannot make the next assertion a TCP failure.
+	start_auth_port_forward
+	probe_missing_client_certificate() {
+		curl --silent --show-error --noproxy '*' --max-time 10 \
+		--resolve "${service_dns}:${agent_local_port}:127.0.0.1" --cacert "$pki_dir/server-ca.crt" \
+		"${agent_base}/api/v1/agents/register/narrow-v1"
+	}
+	assert_tls_curl_failure "missing client certificate" \
+		'certificate required|alert certificate' "$work_dir/no-client-cert.log" \
+		probe_missing_client_certificate
+	start_auth_port_forward
+	probe_rogue_client_certificate() {
+		curl --silent --show-error --noproxy '*' --max-time 10 \
+		--resolve "${service_dns}:${agent_local_port}:127.0.0.1" --cacert "$pki_dir/server-ca.crt" \
+		--cert "$pki_dir/rogue-client.crt" --key "$pki_dir/rogue-client.key" \
+		"${agent_base}/api/v1/agents/register/narrow-v1"
+	}
+	assert_tls_curl_failure "rogue client certificate" \
+		'unknown ca|bad certificate|certificate unknown' "$work_dir/rogue-client-cert.log" \
+		probe_rogue_client_certificate
+	start_auth_port_forward
+	probe_wrong_controller_ca() {
+		curl --silent --show-error --noproxy '*' --max-time 10 \
+		--resolve "${service_dns}:${agent_local_port}:127.0.0.1" --cacert "$pki_dir/rogue-ca.crt" \
+		--cert "$pki_dir/client.crt" --key "$pki_dir/client.key" \
+		"${agent_base}/api/v1/agents/register/narrow-v1"
+	}
+	assert_tls_curl_failure "wrong controller CA" \
+		'certificate problem|unable to get local issuer certificate|self-signed certificate|unknown ca' \
+		"$work_dir/wrong-server-ca.log" \
+		probe_wrong_controller_ca
+
+	start_auth_port_forward
+	final_valid_code=$(curl "${valid_tls[@]}" -H "@$header_file" -o /dev/null -w '%{http_code}' \
+		"${agent_base}/api/v1/agents/register/narrow-v1")
+	[[ $final_valid_code == 200 ]] || die "post-negative valid identity returned $final_valid_code, want 200"
+
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete pod "$agent_pod" \
+		--wait=true --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+	deadline=$((SECONDS + 30))
+	stale_code=
+	while ((SECONDS < deadline)); do
+		stale_code=$(curl "${valid_tls[@]}" -H "@$header_file" -o /dev/null -w '%{http_code}' \
+			"${agent_base}/api/v1/agents/register/narrow-v1")
+		[[ $stale_code == 401 ]] && break
+		sleep 1
+	done
+	[[ $stale_code == 401 ]] || die "token bound to a deleted Pod returned $stale_code, want 401"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status \
+		daemonset/"${ROOT_NAME}-agent" --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+
+	kill "$port_forward_pid" >/dev/null 2>&1 || true
+	wait "$port_forward_pid" >/dev/null 2>&1 || true
+	port_forward_pid=
+	note "public API and Alertmanager webhook required their distinct bearer tokens; the agent boundary rejected public/plaintext access, malformed/wrong tokens, missing/rogue certificates, wrong installation identity, deleted-Pod tokens, and arbitrary node payloads"
+}
+
+# exercise_runtime_contract_lifecycle drives the runtime contract through the
+# real kind controller and store: it labels the node one managed agent runs on
+# (the DaemonSet also schedules onto the control plane, so this may not be a
+# worker), applies an AcceleratorRuntimeProfile selecting it, waits until the
+# public coverage API itself reports that exact profile identity as selected,
+# posts a synthetic NVIDIA report from the real agent identity that
+# acknowledges the live profile UID/generation, and asserts the read-only
+# coverage endpoint classifies the node as Exact/FreshCompatible/Full. The
+# kind nodes have no GPU, so the report is test-only CPU evidence; it proves
+# the wiring, not the hardware.
+exercise_runtime_contract_lifecycle() {
+	local profile_name=kind-runtime-contract-e2e
+	local profile_label=kubeneuron.io/runtime-contract-e2e
+	local profile_digest='sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+	local profile_driver=570.1 profile_runtime=dcgm-4.1 profile_max_age=10m
+	local service_dns="${ROOT_NAME}-controller.${TARGET_NAMESPACE}.svc"
+	local pki_dir="$work_dir/pki"
+	local agent_pod agent_node agent_node_uid token_file header_file profile_manifest
+	local profile_uid='' profile_generation='' observed_generation='' deadline
+	local port_forward_log agent_local_port='' public_local_port='' agent_base=''
+	local report_file report_code coverage_file coverage_code coverage_summary
+	local selection attestation depth cov_node cov_node_uid cov_profile cov_uid cov_generation cov_digest
+	local -a valid_tls=()
+
+	agent_pod=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get pods \
+		-l "app.kubernetes.io/instance=${ROOT_NAME},app.kubernetes.io/component=agent" \
+		--field-selector=status.phase=Running \
+		-o jsonpath='{.items[0].metadata.name}')
+	[[ -n $agent_pod ]] || die "could not find a running managed agent Pod for the runtime contract test"
+	agent_node=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get pod "$agent_pod" -o jsonpath='{.spec.nodeName}')
+	[[ -n $agent_node ]] || die "agent Pod $agent_pod is not scheduled to a node"
+	# The agent DaemonSet tolerates the control plane, so the managed-agent
+	# node selected here may be the control-plane node rather than a worker;
+	# nothing below assumes otherwise.
+	agent_node_uid=$("$KUBECTL_BIN" get node "$agent_node" -o jsonpath='{.metadata.uid}')
+	[[ -n $agent_node_uid ]] || die "managed-agent node $agent_node has no UID"
+
+	token_file="$work_dir/runtime-contract-agent-token"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create token "${ROOT_NAME}-agent" \
+		--audience="$agentTokenAudience" --duration=10m \
+		--bound-object-kind=Pod --bound-object-name="$agent_pod" >"$token_file"
+	header_file="$work_dir/runtime-contract-authorization-header"
+	write_bearer_header "$token_file" "$header_file"
+
+	"$KUBECTL_BIN" label node "$agent_node" "${profile_label}=true" --overwrite >/dev/null
+	profile_manifest="$work_dir/runtime-contract-profile.yaml"
+	cat >"$profile_manifest" <<EOF
+apiVersion: kubeneuron.io/v1alpha1
+kind: AcceleratorRuntimeProfile
+metadata:
+  name: ${profile_name}
+spec:
+  kubeNeuronRef: ${ROOT_NAME}
+  vendor: nvidia
+  nodeSelector:
+    matchLabels:
+      ${profile_label}: "true"
+  profileDigest: ${profile_digest}
+  driverVersion: "${profile_driver}"
+  runtimeVersion: ${profile_runtime}
+  maxReportAge: ${profile_max_age}
+  allowedActions:
+    - action: reset-device
+      scopes:
+        - physical-device
+      requireVerifiedUnpartitionedTopology: true
+EOF
+	"$KUBECTL_BIN" apply -f "$profile_manifest" >/dev/null
+
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		profile_uid=$("$KUBECTL_BIN" get acceleratorruntimeprofile "$profile_name" \
+			-o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+		profile_generation=$("$KUBECTL_BIN" get acceleratorruntimeprofile "$profile_name" \
+			-o jsonpath='{.metadata.generation}' 2>/dev/null || true)
+		[[ -n $profile_uid && -n $profile_generation ]] && ((profile_generation > 0)) && break
+		sleep 1
+	done
+	[[ -n $profile_uid && -n $profile_generation ]] || die "AcceleratorRuntimeProfile $profile_name never reported UID and generation"
+	wait_deployment_ready "$TARGET_NAMESPACE" "${ROOT_NAME}-controller"
+	wait_root_condition True RuntimeAvailable
+	observed_generation=$("$KUBECTL_BIN" get acceleratorruntimeprofile "$profile_name" \
+		-o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)
+	note "runtime contract profile $profile_name uid=$profile_uid generation=$profile_generation observedGeneration=${observed_generation:-<unset>} selects $agent_node (uid=$agent_node_uid)"
+
+	port_forward_log="$work_dir/runtime-contract-port-forward.log"
+	: >"$port_forward_log"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+		"service/${ROOT_NAME}-controller" ":${agentIngressPort}" ":${controllerPort}" \
+		>"$port_forward_log" 2>&1 &
+	port_forward_pid=$!
+	deadline=$((SECONDS + 30))
+	while ((SECONDS < deadline)); do
+		agent_local_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${agentIngressPort}$/\\1/p" "$port_forward_log")
+		public_local_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$port_forward_log")
+		[[ -n $agent_local_port && -n $public_local_port ]] && break
+		kill -0 "$port_forward_pid" >/dev/null 2>&1 || {
+			printf '%s\n' "$(<"$port_forward_log")" >&2
+			die "runtime-contract port-forward exited early"
+		}
+		sleep 1
+	done
+	[[ -n $agent_local_port && -n $public_local_port ]] || die "runtime-contract port-forward did not allocate both local ports"
+	agent_base="https://${service_dns}:${agent_local_port}"
+	valid_tls=(
+		--silent --show-error --noproxy '*' --max-time 10
+		--resolve "${service_dns}:${agent_local_port}:127.0.0.1"
+		--cacert "$pki_dir/server-ca.crt"
+		--cert "$pki_dir/client.crt"
+		--key "$pki_dir/client.key"
+	)
+
+	# The profile reaches the controller through the operator's rendered
+	# ConfigMap projection and a controller reload, neither of which the
+	# Deployment readiness or the root RuntimeAvailable condition above waits
+	# for. Posting the report before that lands would be answered with
+	# ProfileNotFound coverage, so the public coverage API itself is polled
+	# until it reports the exact profile identity just applied as selected;
+	# only the attestation is still expected to be Missing at this point,
+	# because no report has been posted yet.
+	local pre_coverage_file="$work_dir/runtime-contract-coverage-pre-report.json"
+	local pre_code='' pre_identity='' pre_attestation=''
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		pre_code=$(curl --silent --show-error --noproxy '*' --max-time 10 \
+			-H 'Authorization: Bearer integration-operator-token' -o "$pre_coverage_file" -w '%{http_code}' \
+			"http://127.0.0.1:${public_local_port}/api/v1/nodes/${agent_node}/runtime-contract?vendor=nvidia" || true)
+		if [[ $pre_code == 200 ]]; then
+			pre_identity=$(jq -r '"\(.selection)/\(.profile_name)/\(.profile_uid)/\(.profile_generation)/\(.profile_digest)"' "$pre_coverage_file" 2>/dev/null || true)
+			[[ $pre_identity == "Exact/${profile_name}/${profile_uid}/${profile_generation}/${profile_digest}" ]] && break
+		fi
+		sleep 2
+	done
+	[[ $pre_code == 200 ]] || {
+		[[ -s $pre_coverage_file ]] && cat "$pre_coverage_file" >&2
+		die "runtime contract coverage endpoint returned ${pre_code:-?} while waiting for profile $profile_name to be selected, want 200"
+	}
+	[[ $pre_identity == "Exact/${profile_name}/${profile_uid}/${profile_generation}/${profile_digest}" ]] || {
+		jq . "$pre_coverage_file" >&2 || cat "$pre_coverage_file" >&2
+		die "profile $profile_name (uid=$profile_uid gen=$profile_generation) was never reported as the Exact selection for $agent_node within ${TIMEOUT_SECONDS}s: coverage was ${pre_identity:-?} (reasons: $(jq -c '.reasons // []' "$pre_coverage_file"))"
+	}
+	pre_attestation=$(jq -r '.attestation // ""' "$pre_coverage_file")
+	[[ $pre_attestation == Missing ]] || {
+		jq . "$pre_coverage_file" >&2
+		die "coverage for $agent_node before any report was posted has attestation ${pre_attestation:-?}, want Missing (a report from an earlier run or fixture is present)"
+	}
+	[[ $(jq -r '.node_uid // ""' "$pre_coverage_file") == "$agent_node_uid" ]] || die "pre-report coverage node_uid $(jq -r '.node_uid' "$pre_coverage_file") != $agent_node_uid"
+	note "controller selects profile $profile_name (uid=$profile_uid gen=$profile_generation) for $agent_node as Exact with attestation Missing; posting the synthetic report now"
+
+	# The report deliberately carries no node_uid: the controller stamps it from
+	# the Pod-bound agent identity and rejects any wire-supplied value.
+	report_file="$work_dir/runtime-contract-report.json"
+	cat >"$report_file" <<EOF
+{
+  "node": "${agent_node}",
+  "vendor": "nvidia",
+  "observed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "devices": [
+    {
+      "id": "GPU-e2e-00000000-0000-0000-0000-000000000000",
+      "kind": "physical",
+      "family": "gpu",
+      "model": "kind-synthetic-cpu-only"
+    }
+  ],
+  "driver_version": "${profile_driver}",
+  "runtime_version": "${profile_runtime}",
+  "topology_safety": "verified-unpartitioned",
+  "capabilities": [
+    {"action": "reset-device", "scopes": ["physical-device"]}
+  ],
+  "readiness": "ready",
+  "profile_digest": "${profile_digest}",
+  "profile_uid": "${profile_uid}",
+  "profile_generation": ${profile_generation},
+  "device_holders": []
+}
+EOF
+	report_code=$(curl "${valid_tls[@]}" -H "@$header_file" -H 'Content-Type: application/json' \
+		--data-binary "@$report_file" -o "$work_dir/runtime-contract-report-response" -w '%{http_code}' \
+		"${agent_base}/api/v1/agents/accelerators/report-v1")
+	[[ $report_code == 204 ]] || {
+		printf '%s\n' "$(<"$work_dir/runtime-contract-report-response")" >&2
+		die "synthetic accelerator report returned $report_code, want 204"
+	}
+
+	# The profile is already selected (proven above), so this wait only covers
+	# the report's own path into the store and the coverage read-back; it still
+	# gets the full per-wait budget rather than a fixed short window.
+	coverage_file="$work_dir/runtime-contract-coverage.json"
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	selection='' attestation='' depth='' coverage_code=''
+	while ((SECONDS < deadline)); do
+		coverage_code=$(curl --silent --show-error --noproxy '*' --max-time 10 \
+			-H 'Authorization: Bearer integration-operator-token' -o "$coverage_file" -w '%{http_code}' \
+			"http://127.0.0.1:${public_local_port}/api/v1/nodes/${agent_node}/runtime-contract?vendor=nvidia" || true)
+		if [[ $coverage_code == 200 ]]; then
+			selection=$(jq -r '.selection // ""' "$coverage_file")
+			attestation=$(jq -r '.attestation // ""' "$coverage_file")
+			depth=$(jq -r '.verification_depth // ""' "$coverage_file")
+			[[ $selection == Exact && $attestation == FreshCompatible && $depth == Full ]] && break
+		fi
+		sleep 2
+	done
+	[[ $coverage_code == 200 ]] || die "runtime contract coverage endpoint returned $coverage_code, want 200"
+	coverage_summary=$(jq -r '.summary // ""' "$coverage_file")
+	[[ $selection == Exact && $attestation == FreshCompatible && $depth == Full ]] || {
+		jq . "$coverage_file" >&2 || cat "$coverage_file" >&2
+		die "runtime contract coverage was ${selection:-?}/${attestation:-?}/${depth:-?} (reasons: $(jq -c '.reasons // []' "$coverage_file")), want Exact/FreshCompatible/Full"
+	}
+	cov_node=$(jq -r '.node_name // ""' "$coverage_file")
+	cov_node_uid=$(jq -r '.node_uid // ""' "$coverage_file")
+	cov_profile=$(jq -r '.profile_name // ""' "$coverage_file")
+	cov_uid=$(jq -r '.profile_uid // ""' "$coverage_file")
+	cov_generation=$(jq -r '.profile_generation // 0' "$coverage_file")
+	cov_digest=$(jq -r '.profile_digest // ""' "$coverage_file")
+	[[ $cov_node == "$agent_node" ]] || die "coverage node_name $cov_node != $agent_node"
+	[[ $cov_node_uid == "$agent_node_uid" ]] || die "coverage node_uid $cov_node_uid != current managed-agent node UID $agent_node_uid"
+	[[ $cov_profile == "$profile_name" ]] || die "coverage profile_name $cov_profile != $profile_name"
+	[[ $cov_uid == "$profile_uid" ]] || die "coverage profile_uid $cov_uid != $profile_uid"
+	[[ $cov_generation == "$profile_generation" ]] || die "coverage profile_generation $cov_generation != $profile_generation"
+	[[ $cov_digest == "$profile_digest" ]] || die "coverage profile_digest $cov_digest != $profile_digest"
+	[[ $(jq -r '.reasons // [] | length' "$coverage_file") == 0 ]] || die "Full coverage carried reasons: $(jq -c '.reasons' "$coverage_file")"
+
+	# Qualification lifecycle through the public operator API against the real
+	# controller and store, while the report/profile/label fixture is still
+	# live. min_duration is measured from the FIRST successful sample, so one
+	# observation can only ever be Observing; a second observation after the
+	# duration has elapsed is what proves ReadyForApproval.
+	local qual_base="http://127.0.0.1:${public_local_port}/api/v1/runtime-contract-qualifications"
+	local qual_min_duration_seconds=5
+	local qual_create_file qual_create_code qual_get_file qual_get_code qual_list_file qual_list_code
+	local qual_observe_file qual_observe_code qual_audit_file qual_audit_code qual_audit_actions
+	local qual_id qual_version qual_state qual_effective qual_ready qual_expires_at
+	local -a public_curl=(
+		--silent --show-error --noproxy '*' --max-time 10
+		-H 'Authorization: Bearer integration-operator-token'
+	)
+	qual_expires_at=$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+	qual_create_file="$work_dir/runtime-contract-qualification-create.json"
+	qual_create_code=$(curl "${public_curl[@]}" -H 'Content-Type: application/json' \
+		-H "Idempotency-Key: kind-integration-${RUN_ID}-runtime-contract-qualification-create" \
+		--data-binary "{\"actor\":\"harness\",\"nodes\":[\"${agent_node}\"],\"vendor\":\"nvidia\",\"requirements\":{\"min_samples\":1,\"min_duration\":\"${qual_min_duration_seconds}s\"},\"expires_at\":\"${qual_expires_at}\"}" \
+		-o "$qual_create_file" -w '%{http_code}' "$qual_base")
+	[[ $qual_create_code == 201 ]] || {
+		printf '%s\n' "$(<"$qual_create_file")" >&2
+		die "runtime contract qualification create returned $qual_create_code, want 201"
+	}
+	qual_id=$(jq -r '.id // ""' "$qual_create_file")
+	qual_version=$(jq -r '.resource_version // 0' "$qual_create_file")
+	[[ -n $qual_id ]] || die "runtime contract qualification create returned no id"
+	((qual_version > 0)) || die "runtime contract qualification $qual_id has resource_version $qual_version, want > 0"
+	qual_state=$(jq -r '.state // ""' "$qual_create_file")
+	qual_effective=$(jq -r '.effective_state // ""' "$qual_create_file")
+	qual_ready=$(jq -r '.ready_for_approval' "$qual_create_file")
+	[[ $qual_state == Observing && $qual_effective == Observing && $qual_ready == false ]] || {
+		jq . "$qual_create_file" >&2 || cat "$qual_create_file" >&2
+		die "created qualification $qual_id was ${qual_state:-?}/${qual_effective:-?}/ready=${qual_ready:-?}, want Observing/Observing/ready=false"
+	}
+	[[ $(jq -r '.successful_samples // 0' "$qual_create_file") == 0 && $(jq -r '.total_observations // 0' "$qual_create_file") == 0 ]] ||
+		die "created qualification $qual_id already carries samples: $(jq -c '{successful_samples, total_observations}' "$qual_create_file")"
+	[[ $(jq -r '.cohort | length' "$qual_create_file") == 1 ]] || die "qualification cohort is not exactly the selected managed-agent node: $(jq -c '.cohort' "$qual_create_file")"
+	[[ $(jq -r '.cohort[0].name' "$qual_create_file") == "$agent_node" ]] || die "qualification cohort node $(jq -r '.cohort[0].name' "$qual_create_file") != $agent_node"
+	[[ $(jq -r '.cohort[0].uid' "$qual_create_file") == "$agent_node_uid" ]] || die "qualification cohort uid $(jq -r '.cohort[0].uid' "$qual_create_file") != $agent_node_uid"
+	[[ $(jq -r '.profile.name' "$qual_create_file") == "$profile_name" ]] || die "qualification profile.name $(jq -r '.profile.name' "$qual_create_file") != $profile_name"
+	[[ $(jq -r '.profile.uid' "$qual_create_file") == "$profile_uid" ]] || die "qualification profile.uid $(jq -r '.profile.uid' "$qual_create_file") != $profile_uid"
+	[[ $(jq -r '.profile.generation' "$qual_create_file") == "$profile_generation" ]] || die "qualification profile.generation $(jq -r '.profile.generation' "$qual_create_file") != $profile_generation"
+	[[ $(jq -r '.profile.digest' "$qual_create_file") == "$profile_digest" ]] || die "qualification profile.digest $(jq -r '.profile.digest' "$qual_create_file") != $profile_digest"
+	[[ $(jq -r '.initial_coverage | length' "$qual_create_file") == 1 ]] || die "qualification initial_coverage is not one node: $(jq -c '.initial_coverage' "$qual_create_file")"
+	[[ $(jq -r '.initial_coverage[0] | "\(.node)/\(.node_uid)/\(.selection)/\(.attestation)/\(.verification_depth)"' "$qual_create_file") == "${agent_node}/${agent_node_uid}/Exact/FreshCompatible/Full" ]] || {
+		jq '.initial_coverage' "$qual_create_file" >&2
+		die "qualification $qual_id initial coverage is not Exact/FreshCompatible/Full for $agent_node"
+	}
+	[[ $(jq -r '.initial_coverage[0].profile.uid' "$qual_create_file") == "$profile_uid" ]] || die "qualification initial_coverage profile.uid != $profile_uid"
+	note "runtime contract qualification $qual_id created: Observing over $agent_node with initial Full coverage (resource_version=$qual_version)"
+
+	qual_get_file="$work_dir/runtime-contract-qualification-get.json"
+	qual_get_code=$(curl "${public_curl[@]}" -o "$qual_get_file" -w '%{http_code}' "${qual_base}/${qual_id}")
+	[[ $qual_get_code == 200 ]] || {
+		printf '%s\n' "$(<"$qual_get_file")" >&2
+		die "runtime contract qualification GET returned $qual_get_code, want 200"
+	}
+	[[ $(jq -r '.id' "$qual_get_file") == "$qual_id" ]] || die "qualification GET returned id $(jq -r '.id' "$qual_get_file"), want $qual_id"
+	[[ $(jq -r '"\(.state)/\(.effective_state)/\(.ready_for_approval)/\(.total_observations)"' "$qual_get_file") == "Observing/Observing/false/0" ]] || {
+		jq . "$qual_get_file" >&2
+		die "qualification $qual_id GET before sampling is not Observing with zero observations"
+	}
+	qual_list_file="$work_dir/runtime-contract-qualification-list.json"
+	qual_list_code=$(curl "${public_curl[@]}" -o "$qual_list_file" -w '%{http_code}' "$qual_base")
+	[[ $qual_list_code == 200 ]] || {
+		printf '%s\n' "$(<"$qual_list_file")" >&2
+		die "runtime contract qualification list returned $qual_list_code, want 200"
+	}
+	[[ $(jq -r --arg id "$qual_id" '[.items[]? | select(.id == $id)] | length' "$qual_list_file") == 1 ]] || {
+		jq -c '[.items[]? | {id, state}]' "$qual_list_file" >&2
+		die "qualification $qual_id is not listed exactly once by the public list endpoint"
+	}
+	[[ $(jq -r --arg id "$qual_id" '.items[] | select(.id == $id) | "\(.state)/\(.effective_state)/\(.ready_for_approval)"' "$qual_list_file") == "Observing/Observing/false" ]] ||
+		die "qualification $qual_id is listed but not Observing before sampling"
+
+	# observe_qualification posts one observation bound to the version last read
+	# and stores the response in qual_observe_file.
+	observe_qualification() {
+		local key_suffix=$1
+		qual_observe_file="$work_dir/runtime-contract-qualification-observe-${key_suffix}.json"
+		qual_observe_code=$(curl "${public_curl[@]}" -H 'Content-Type: application/json' \
+			-H "Idempotency-Key: kind-integration-${RUN_ID}-runtime-contract-qualification-observe-${key_suffix}" \
+			--data-binary "{\"actor\":\"harness\",\"resource_version\":${qual_version}}" \
+			-o "$qual_observe_file" -w '%{http_code}' "${qual_base}/${qual_id}/observe")
+		[[ $qual_observe_code == 200 ]] || {
+			printf '%s\n' "$(<"$qual_observe_file")" >&2
+			die "runtime contract qualification observe (${key_suffix}) returned $qual_observe_code, want 200"
+		}
+		qual_version=$(jq -r '.resource_version // 0' "$qual_observe_file")
+		[[ $(jq -r '.observations[-1].successful' "$qual_observe_file") == true ]] || {
+			jq '.observations[-1]' "$qual_observe_file" >&2
+			die "qualification $qual_id observation (${key_suffix}) was not a successful Full sample"
+		}
+	}
+
+	# First sample: the count requirement is met, the duration is not yet.
+	sleep "$qual_min_duration_seconds"
+	observe_qualification first
+	[[ $(jq -r '"\(.successful_samples)/\(.total_observations)/\(.state)/\(.effective_state)/\(.ready_for_approval)"' "$qual_observe_file") == "1/1/Observing/Observing/false" ]] || {
+		jq . "$qual_observe_file" >&2
+		die "qualification $qual_id after the first sample was $(jq -c '{successful_samples, total_observations, state, effective_state, ready_for_approval}' "$qual_observe_file"), want 1/1 and still Observing"
+	}
+	# Second sample after min_duration has elapsed since the first successful one.
+	sleep "$qual_min_duration_seconds"
+	observe_qualification second
+	qual_state=$(jq -r '.state // ""' "$qual_observe_file")
+	qual_effective=$(jq -r '.effective_state // ""' "$qual_observe_file")
+	qual_ready=$(jq -r '.ready_for_approval' "$qual_observe_file")
+	[[ $(jq -r '"\(.successful_samples)/\(.total_observations)"' "$qual_observe_file") == "2/2" && $qual_state == ReadyForApproval && $qual_effective == ReadyForApproval && $qual_ready == true ]] || {
+		jq . "$qual_observe_file" >&2
+		die "qualification $qual_id after the second sample was $(jq -c '{successful_samples, total_observations, state, effective_state, ready_for_approval}' "$qual_observe_file"), want 2/2 ReadyForApproval"
+	}
+	[[ $(jq -r '.ready_at // ""' "$qual_observe_file") != "" ]] || die "ReadyForApproval qualification $qual_id has no ready_at"
+	[[ $(jq -r '.cohort[0].uid' "$qual_observe_file") == "$agent_node_uid" && $(jq -r '.profile.uid' "$qual_observe_file") == "$profile_uid" ]] ||
+		die "qualification $qual_id frozen bindings changed across observations: $(jq -c '{cohort, profile}' "$qual_observe_file")"
+
+	qual_audit_file="$work_dir/runtime-contract-qualification-audit.json"
+	qual_audit_code=$(curl "${public_curl[@]}" -o "$qual_audit_file" -w '%{http_code}' \
+		"http://127.0.0.1:${public_local_port}/api/v1/audit-events?kind=runtime-contract-qualification&resource_id=${qual_id}&limit=50")
+	[[ $qual_audit_code == 200 ]] || {
+		printf '%s\n' "$(<"$qual_audit_file")" >&2
+		die "audit-events for qualification $qual_id returned $qual_audit_code, want 200"
+	}
+	qual_audit_actions=$(jq -r --arg id "$qual_id" '[.items[]? | select(.resource_id == $id) | .action] | join(",")' "$qual_audit_file")
+	[[ $qual_audit_actions == "create,observe,observe,ready" ]] || {
+		jq -c '[.items[]? | {action, actor, result, resource_id}]' "$qual_audit_file" >&2
+		die "audit actions for qualification $qual_id were '${qual_audit_actions}', want create,observe,observe,ready"
+	}
+	[[ $(jq -r '[.items[]? | select(.actor != "token:harness")] | length' "$qual_audit_file") == 0 ]] ||
+		die "qualification audit events carry an unexpected actor: $(jq -c '[.items[]?.actor]' "$qual_audit_file")"
+	[[ $(jq -r '[.items[]? | select(.action == "ready") | .result] | first // ""' "$qual_audit_file") == ReadyForApproval ]] ||
+		die "qualification ready audit event does not record ReadyForApproval: $(jq -c '[.items[]? | select(.action == "ready")]' "$qual_audit_file")"
+	note "runtime contract qualification $qual_id reached ReadyForApproval after 2 Full samples with audit create,observe,observe,ready"
+
+	# CLI coverage: the same live fixture (label, profile, synthetic report,
+	# public port-forward) is driven through the built kubeneuronctl binary.
+	# It creates a SECOND, separate qualification so the HTTP lifecycle above is
+	# neither reused nor weakened; with min_samples=1 the single CLI observation
+	# meets the count but, because min_duration is measured from that first
+	# successful sample, must correctly still be Observing.
+	local ctl_bin="$REPO_ROOT/bin/kubeneuronctl"
+	local ctl_actor=harness-cli ctl_min_duration_seconds=5
+	local ctl_coverage_file ctl_create_file ctl_list_file ctl_show_file ctl_observe_file ctl_audit_file ctl_stderr_file
+	local ctl_qual_id ctl_qual_version ctl_qual_expires_at ctl_observe_version ctl_audit_actions
+	local -a ctl=(
+		"$ctl_bin"
+		--server "http://127.0.0.1:${public_local_port}"
+		--token integration-operator-token
+	)
+	[[ -x $ctl_bin ]] || die "missing CLI binary bin/kubeneuronctl; run 'make build' first"
+
+	# run_ctl runs one bounded CLI invocation, writing stdout to $1 and stderr
+	# to a sibling file; a failure prints both and dies.
+	run_ctl() {
+		local out_file=$1
+		shift
+		ctl_stderr_file="${out_file%.json}.stderr"
+		if ! timeout 30s "${ctl[@]}" "$@" >"$out_file" 2>"$ctl_stderr_file"; then
+			printf 'kubeneuronctl %s failed (stdout):\n' "$*" >&2
+			cat "$out_file" >&2
+			printf 'kubeneuronctl %s failed (stderr):\n' "$*" >&2
+			cat "$ctl_stderr_file" >&2
+			die "kubeneuronctl $1 ${2:-} failed against the live public port-forward"
+		fi
+		jq -e 'type == "object"' "$out_file" >/dev/null 2>&1 || {
+			cat "$out_file" >&2
+			die "kubeneuronctl $1 ${2:-} did not print a JSON object"
+		}
+	}
+
+	ctl_coverage_file="$work_dir/runtime-contract-cli-coverage.json"
+	run_ctl "$ctl_coverage_file" runtime-contracts coverage "$agent_node" --vendor nvidia
+	[[ $(jq -r '"\(.node_name)/\(.selection)/\(.attestation)/\(.verification_depth)/\(.profile_name)"' "$ctl_coverage_file") == "${agent_node}/Exact/FreshCompatible/Full/${profile_name}" ]] || {
+		jq . "$ctl_coverage_file" >&2
+		die "CLI coverage for $agent_node was $(jq -c '{node_name, selection, attestation, verification_depth, profile_name, reasons}' "$ctl_coverage_file"), want Exact/FreshCompatible/Full with profile $profile_name"
+	}
+	[[ $(jq -r '.profile_uid // ""' "$ctl_coverage_file") == "$profile_uid" ]] || die "CLI coverage profile_uid $(jq -r '.profile_uid' "$ctl_coverage_file") != $profile_uid"
+	note "kubeneuronctl runtime-contracts coverage reported $agent_node as Exact/FreshCompatible/Full under $profile_name"
+
+	ctl_qual_expires_at=$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
+	ctl_create_file="$work_dir/runtime-contract-cli-qualification-create.json"
+	run_ctl "$ctl_create_file" runtime-qualifications create \
+		--nodes "$agent_node" --vendor nvidia \
+		--min-samples 1 --min-duration "${ctl_min_duration_seconds}s" \
+		--expires-at "$ctl_qual_expires_at" --actor "$ctl_actor"
+	ctl_qual_id=$(jq -r '.id // ""' "$ctl_create_file")
+	ctl_qual_version=$(jq -r '.resource_version // 0' "$ctl_create_file")
+	[[ -n $ctl_qual_id ]] || die "CLI qualification create returned no id"
+	[[ $ctl_qual_id != "$qual_id" ]] || die "CLI qualification create returned the HTTP lifecycle qualification $qual_id instead of a new one"
+	((ctl_qual_version > 0)) || die "CLI qualification $ctl_qual_id has resource_version $ctl_qual_version, want > 0"
+	[[ $(jq -r '"\(.state)/\(.effective_state)/\(.ready_for_approval)/\(.successful_samples)/\(.total_observations)"' "$ctl_create_file") == "Observing/Observing/false/0/0" ]] || {
+		jq . "$ctl_create_file" >&2
+		die "CLI-created qualification $ctl_qual_id was $(jq -c '{state, effective_state, ready_for_approval, successful_samples, total_observations}' "$ctl_create_file"), want Observing with zero samples"
+	}
+	[[ $(jq -r '.requirements.min_samples' "$ctl_create_file") == 1 ]] || die "CLI qualification $ctl_qual_id requirements.min_samples $(jq -r '.requirements.min_samples' "$ctl_create_file") != 1"
+	[[ $(jq -r '.cohort | length' "$ctl_create_file") == 1 && $(jq -r '.cohort[0].name' "$ctl_create_file") == "$agent_node" && $(jq -r '.cohort[0].uid' "$ctl_create_file") == "$agent_node_uid" ]] ||
+		die "CLI qualification $ctl_qual_id cohort is not exactly $agent_node/$agent_node_uid: $(jq -c '.cohort' "$ctl_create_file")"
+	[[ $(jq -r '.profile.uid' "$ctl_create_file") == "$profile_uid" ]] || die "CLI qualification $ctl_qual_id profile.uid $(jq -r '.profile.uid' "$ctl_create_file") != $profile_uid"
+	note "kubeneuronctl runtime-qualifications create produced $ctl_qual_id: Observing over $agent_node (resource_version=$ctl_qual_version)"
+
+	ctl_list_file="$work_dir/runtime-contract-cli-qualification-list.json"
+	run_ctl "$ctl_list_file" runtime-qualifications list
+	[[ $(jq -r --arg id "$ctl_qual_id" '[.items[]? | select(.id == $id)] | length' "$ctl_list_file") == 1 ]] || {
+		jq -c '[.items[]? | {id, state}]' "$ctl_list_file" >&2
+		die "CLI qualification $ctl_qual_id is not listed exactly once by kubeneuronctl runtime-qualifications list"
+	}
+	[[ $(jq -r --arg id "$qual_id" '[.items[]? | select(.id == $id)] | length' "$ctl_list_file") == 1 ]] ||
+		die "kubeneuronctl runtime-qualifications list no longer shows the HTTP lifecycle qualification $qual_id"
+	ctl_show_file="$work_dir/runtime-contract-cli-qualification-show.json"
+	run_ctl "$ctl_show_file" runtime-qualifications show "$ctl_qual_id"
+	[[ $(jq -r '"\(.id)/\(.resource_version)/\(.state)/\(.effective_state)/\(.ready_for_approval)/\(.total_observations)"' "$ctl_show_file") == "${ctl_qual_id}/${ctl_qual_version}/Observing/Observing/false/0" ]] || {
+		jq . "$ctl_show_file" >&2
+		die "kubeneuronctl runtime-qualifications show $ctl_qual_id returned $(jq -c '{id, resource_version, state, effective_state, ready_for_approval, total_observations}' "$ctl_show_file"), want the Observing qualification at version $ctl_qual_version"
+	}
+
+	# One CLI observation bound to the version just shown. min_duration only
+	# starts at this first successful sample, so ReadyForApproval is impossible
+	# here and Observing with 1/1 samples is the correct outcome.
+	sleep "$ctl_min_duration_seconds"
+	ctl_observe_file="$work_dir/runtime-contract-cli-qualification-observe.json"
+	run_ctl "$ctl_observe_file" runtime-qualifications observe "$ctl_qual_id" \
+		--resource-version "$ctl_qual_version" --actor "$ctl_actor"
+	ctl_observe_version=$(jq -r '.resource_version // 0' "$ctl_observe_file")
+	[[ $(jq -r '.id' "$ctl_observe_file") == "$ctl_qual_id" ]] || die "CLI observe returned id $(jq -r '.id' "$ctl_observe_file"), want $ctl_qual_id"
+	((ctl_observe_version > ctl_qual_version)) || die "CLI observe left resource_version at $ctl_observe_version, want > $ctl_qual_version"
+	[[ $(jq -r '.observations | length' "$ctl_observe_file") == 1 && $(jq -r '.observations[0].successful' "$ctl_observe_file") == true ]] || {
+		jq '.observations' "$ctl_observe_file" >&2
+		die "CLI qualification $ctl_qual_id does not carry exactly one successful observation"
+	}
+	[[ $(jq -r '"\(.successful_samples)/\(.total_observations)/\(.state)/\(.effective_state)/\(.ready_for_approval)"' "$ctl_observe_file") == "1/1/Observing/Observing/false" ]] || {
+		jq . "$ctl_observe_file" >&2
+		die "CLI qualification $ctl_qual_id after one sample was $(jq -c '{successful_samples, total_observations, state, effective_state, ready_for_approval}' "$ctl_observe_file"), want 1/1 and still Observing"
+	}
+	[[ $(jq -r '.first_successful_sample_at // ""' "$ctl_observe_file") != "" ]] || die "CLI qualification $ctl_qual_id records no first_successful_sample_at after a successful sample"
+
+	ctl_audit_file="$work_dir/runtime-contract-cli-qualification-audit.json"
+	run_ctl "$ctl_audit_file" audit-events --kind runtime-contract-qualification --resource-id "$ctl_qual_id" --limit 50
+	ctl_audit_actions=$(jq -r --arg id "$ctl_qual_id" '[.items[]? | select(.resource_id == $id) | .action] | join(",")' "$ctl_audit_file")
+	[[ $ctl_audit_actions == "create,observe" ]] || {
+		jq -c '[.items[]? | {action, actor, result, resource_id}]' "$ctl_audit_file" >&2
+		die "audit actions for CLI qualification $ctl_qual_id were '${ctl_audit_actions}', want create,observe"
+	}
+	[[ $(jq -r --arg actor "token:${ctl_actor}" '[.items[]? | select(.actor != $actor)] | length' "$ctl_audit_file") == 0 ]] ||
+		die "CLI qualification audit events carry an actor other than token:${ctl_actor}: $(jq -c '[.items[]?.actor]' "$ctl_audit_file")"
+	note "kubeneuronctl runtime-qualifications observe recorded one Full sample on $ctl_qual_id (still Observing, audit create,observe by token:${ctl_actor})"
+
+	# exercise_candidate_runtime_contract_impact drives the v0.5 candidate
+	# runtime-contract impact through the real public API and the CLI, on the
+	# same live fixture: a CandidateConfiguration whose one profile carries the
+	# live profile's identity (name/uid/generation/digest) and selector is
+	# uploaded, previewed, and the preview's delta for the managed-agent node
+	# must say that a candidate profile can only ever be attested by fresh
+	# post-deploy evidence, so the After decision fails closed. Evidence only:
+	# nothing here deploys, applies, or promotes the candidate (no such route
+	# exists on this surface), and the live profile is untouched.
+	#
+	# A preview captures EVERY inventory node and refuses (incomplete
+	# inventory) when any capture is unusable. Only the managed-agent node
+	# holds a report, so each other kind node first posts a synthetic
+	# profile-less report from its own agent Pod identity; those nodes are
+	# uncovered by both the live and the candidate profile and stay
+	# observe-only. The target delta is then located by node name rather than
+	# assumed to be the only result.
+	exercise_candidate_runtime_contract_impact() {
+		local other_pod other_node other_token other_header other_report other_code
+		local candidate_file candidate_upload_file candidate_id candidate_state
+		local preview_file preview_id preview_delta_file preview_bucket
+		local impact_file impact_identity after_state after_allowed before_state
+		local stored_preview_file stored_code candidate_show_file
+		local entry reason
+		local -a all_agents=() other_agents=()
+
+		mapfile -t all_agents < <("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get pods \
+			-l "app.kubernetes.io/instance=${ROOT_NAME},app.kubernetes.io/component=agent" \
+			--field-selector=status.phase=Running \
+			-o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.nodeName}{"\n"}{end}' |
+			awk '$2 != ""')
+		((${#all_agents[@]} > 0)) || die "no running managed agent Pods for the candidate impact preview"
+		for entry in "${all_agents[@]}"; do
+			other_pod=${entry%% *}
+			other_node=${entry#* }
+			other_token="$work_dir/candidate-impact-token-${other_node}"
+			other_header="$work_dir/candidate-impact-header-${other_node}"
+			"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create token "${ROOT_NAME}-agent" \
+				--audience="$agentTokenAudience" --duration=10m \
+				--bound-object-kind=Pod --bound-object-name="$other_pod" >"$other_token"
+			write_bearer_header "$other_token" "$other_header"
+			other_report="$work_dir/candidate-impact-report-${other_node}.json"
+			if [[ $other_node == "$agent_node" ]]; then
+				# The managed-agent node re-posts the SAME profile-bearing report
+				# with a fresh observed_at, so the live contract's max_report_age
+				# cannot lapse between the lifecycle above and the capture below.
+				jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.observed_at = $now' "$report_file" >"$other_report"
+			else
+				# No profile identity: nothing selects this node, so the report
+				# attests no contract. Still synthetic CPU-only evidence.
+				other_agents+=("$other_node")
+				cat >"$other_report" <<EOF
+{
+  "node": "${other_node}",
+  "vendor": "nvidia",
+  "observed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "devices": [],
+  "driver_version": "${profile_driver}",
+  "runtime_version": "${profile_runtime}",
+  "topology_safety": "verified-unpartitioned",
+  "capabilities": [],
+  "readiness": "ready",
+  "device_holders": []
+}
+EOF
+			fi
+			other_code=$(curl "${valid_tls[@]}" -H "@$other_header" -H 'Content-Type: application/json' \
+				--data-binary "@$other_report" -o "$work_dir/candidate-impact-report-response-${other_node}" -w '%{http_code}' \
+				"${agent_base}/api/v1/agents/accelerators/report-v1")
+			[[ $other_code == 204 ]] || {
+				printf '%s\n' "$(<"$work_dir/candidate-impact-report-response-${other_node}")" >&2
+				die "synthetic report for $other_node (pod $other_pod) returned $other_code, want 204"
+			}
+		done
+		note "candidate impact: refreshed the $agent_node report and posted synthetic profile-less reports from ${#other_agents[@]} other managed-agent node(s) so the preview can capture the whole inventory"
+
+		# The candidate is rendered from the live profile the controller is
+		# serving right now (identity captured above and re-read from the
+		# cluster object), never typed in by hand.
+		[[ $("$KUBECTL_BIN" get acceleratorruntimeprofile "$profile_name" -o jsonpath='{.metadata.uid}/{.metadata.generation}') == "${profile_uid}/${profile_generation}" ]] ||
+			die "live profile $profile_name identity changed under the candidate render: $("$KUBECTL_BIN" get acceleratorruntimeprofile "$profile_name" -o jsonpath='{.metadata.uid}/{.metadata.generation}') != ${profile_uid}/${profile_generation}"
+		candidate_file="$work_dir/candidate-runtime-contract.yaml"
+		cat >"$candidate_file" <<EOF
+apiVersion: kubeneuron.io/v1alpha1
+kind: CandidateConfiguration
+accelerator_profiles:
+  - name: ${profile_name}
+    node_selector:
+      ${profile_label}: "true"
+    vendor: nvidia
+    profile_digest: ${profile_digest}
+    driver_version: "${profile_driver}"
+    runtime_version: ${profile_runtime}
+    profile_uid: ${profile_uid}
+    profile_generation: ${profile_generation}
+    max_report_age: ${profile_max_age}
+    allowed_actions:
+      - action: reset-device
+        scopes: [physical-device]
+        require_verified_unpartitioned_topology: true
+EOF
+		candidate_upload_file="$work_dir/candidate-runtime-contract-upload.json"
+		run_ctl "$candidate_upload_file" candidates upload "$candidate_file" --actor "$ctl_actor"
+		candidate_id=$(jq -r '.id // ""' "$candidate_upload_file")
+		candidate_state=$(jq -r '.state // ""' "$candidate_upload_file")
+		[[ -n $candidate_id ]] || die "kubeneuronctl candidates upload returned no id"
+		[[ $candidate_state == uploaded ]] || die "candidate $candidate_id state is ${candidate_state:-?}, want uploaded"
+		[[ $(jq -r '.profiles | length' "$candidate_upload_file") == 1 ]] || die "candidate $candidate_id compiled $(jq -r '.profiles | length' "$candidate_upload_file") profiles, want 1"
+		# The candidate upload response serializes config.AcceleratorRuntimeProfile,
+		# which carries yaml tags only, so encoding/json emits Go field names.
+		[[ $(jq -r '.profiles[0] | "\(.Name)/\(.ProfileUID)/\(.ProfileGeneration)/\(.ProfileDigest)"' "$candidate_upload_file") == "${profile_name}/${profile_uid}/${profile_generation}/${profile_digest}" ]] || {
+			jq '.profiles' "$candidate_upload_file" >&2
+			die "candidate $candidate_id profile identity does not match the live profile ${profile_name}/${profile_uid}/${profile_generation}/${profile_digest}"
+		}
+		note "kubeneuronctl candidates upload produced $candidate_id carrying the live profile identity ($(jq -r '.normalized_digest' "$candidate_upload_file"))"
+
+		preview_file="$work_dir/candidate-runtime-contract-preview.json"
+		run_ctl "$preview_file" preview "$candidate_id" --actor "$ctl_actor"
+		preview_id=$(jq -r '.id // ""' "$preview_file")
+		[[ -n $preview_id ]] || die "kubeneuronctl preview returned no id"
+		[[ $(jq -r '.candidate_id' "$preview_file") == "$candidate_id" ]] || die "preview $preview_id is for candidate $(jq -r '.candidate_id' "$preview_file"), want $candidate_id"
+		[[ $(jq -r '.runtime_contract_impact_version // ""' "$preview_file") == candidate-runtime-contract-impact/v1 ]] ||
+			die "preview $preview_id runtime_contract_impact_version is $(jq -r '.runtime_contract_impact_version' "$preview_file"), want candidate-runtime-contract-impact/v1"
+		[[ $(jq -r '.runtime_contract_profile_change // ""' "$preview_file") == ProfileSetReplaced ]] ||
+			die "preview $preview_id runtime_contract_profile_change is $(jq -r '.runtime_contract_profile_change' "$preview_file"), want ProfileSetReplaced"
+
+		# Locate the managed-agent node's delta across all four buckets; the
+		# other kind nodes produce deltas of their own.
+		preview_delta_file="$work_dir/candidate-runtime-contract-preview-delta.json"
+		jq -c --arg node "$agent_node" '
+			[ {bucket: "newly_eligible", deltas: (.newly_eligible // [])},
+			  {bucket: "newly_blocked", deltas: (.newly_blocked // [])},
+			  {bucket: "changed_observed_only", deltas: (.changed_observed_only // [])},
+			  {bucket: "unchanged", deltas: (.unchanged // [])} ]
+			| map(.bucket as $b | .deltas[] | select(.node == $node) | {bucket: $b, delta: .})' "$preview_file" >"$preview_delta_file"
+		[[ $(jq -r 'length' "$preview_delta_file") == 1 ]] || {
+			jq -c '{newly_eligible: [.newly_eligible[]?.node], newly_blocked: [.newly_blocked[]?.node], changed_observed_only: [.changed_observed_only[]?.node], unchanged: [.unchanged[]?.node]}' "$preview_file" >&2
+			die "preview $preview_id carries $(jq -r 'length' "$preview_delta_file") deltas for $agent_node, want exactly one"
+		}
+		preview_bucket=$(jq -r '.[0].bucket' "$preview_delta_file")
+		before_state=$(jq -r '.[0].delta.before.state // ""' "$preview_delta_file")
+		after_state=$(jq -r '.[0].delta.after.state // ""' "$preview_delta_file")
+		after_allowed=$(jq -r '.[0].delta.after.allowed_actions // [] | length' "$preview_delta_file")
+		[[ $before_state == Eligible ]] || {
+			jq '.[0].delta.before' "$preview_delta_file" >&2
+			die "preview before-decision for $agent_node is ${before_state:-?}, want Eligible under the live Full contract"
+		}
+		[[ $after_state != Eligible && $after_state != "" && $after_allowed == 0 ]] || {
+			jq '.[0].delta.after' "$preview_delta_file" >&2
+			die "preview after-decision for $agent_node is ${after_state:-?} with $after_allowed allowed action(s), want fail-closed (not Eligible, no allowed actions)"
+		}
+		[[ $preview_bucket == newly_blocked && $(jq -r '.[0].delta.changed' "$preview_delta_file") == true ]] || {
+			jq '.[0]' "$preview_delta_file" >&2
+			die "preview delta for $agent_node landed in ${preview_bucket} (changed=$(jq -r '.[0].delta.changed' "$preview_delta_file")), want newly_blocked/changed"
+		}
+		impact_file="$work_dir/candidate-runtime-contract-impact.json"
+		jq '.[0].delta.runtime_contract_impact // empty' "$preview_delta_file" >"$impact_file"
+		[[ -s $impact_file ]] || die "preview delta for $agent_node carries no runtime_contract_impact"
+		impact_identity=$(jq -r '"\(.version)/\(.assessment)/\(.node)/\(.vendor)/\(.profile_change)/\(.static_selection)/\(.post_deploy_attestation)/\(.captured_report_usable_as_candidate_attestation)/\(.after_decision_evidence)"' "$impact_file")
+		[[ $impact_identity == "candidate-runtime-contract-impact/v1/PreDeployStatic/${agent_node}/nvidia/ProfileSetReplaced/Exact/FreshRequired/false/CandidateProfileWithoutReport" ]] || {
+			jq . "$impact_file" >&2
+			die "runtime contract impact for $agent_node was $impact_identity, want candidate-runtime-contract-impact/v1/PreDeployStatic/${agent_node}/nvidia/ProfileSetReplaced/Exact/FreshRequired/false/CandidateProfileWithoutReport"
+		}
+		[[ $(jq -r '"\(.candidate_profile_name)/\(.candidate_profile_uid)/\(.candidate_profile_generation)/\(.candidate_profile_digest)"' "$impact_file") == "${profile_name}/${profile_uid}/${profile_generation}/${profile_digest}" ]] || {
+			jq . "$impact_file" >&2
+			die "runtime contract impact candidate profile identity does not match ${profile_name}/${profile_uid}/${profile_generation}/${profile_digest}"
+		}
+		for reason in CandidateProfilesPresent CapturedReportPredatesCandidate; do
+			[[ $(jq -r --arg r "$reason" '[.reasons[]? | select(. == $r)] | length' "$impact_file") == 1 ]] ||
+				die "runtime contract impact reasons $(jq -c '.reasons' "$impact_file") lack $reason"
+		done
+		[[ $(jq -r '[.reasons[]? | select(. == "ProfileNotFound")] | length' "$impact_file") == 0 ]] ||
+			die "runtime contract impact for $agent_node reports ProfileNotFound although the candidate profile selects it: $(jq -c '.reasons' "$impact_file")"
+
+		# The preview is durable and re-readable through the public API, and
+		# the candidate is still merely uploaded: nothing was promoted.
+		stored_preview_file="$work_dir/candidate-runtime-contract-preview-stored.json"
+		stored_code=$(curl "${public_curl[@]}" -o "$stored_preview_file" -w '%{http_code}' \
+			"http://127.0.0.1:${public_local_port}/api/v1/previews/${preview_id}")
+		[[ $stored_code == 200 ]] || {
+			printf '%s\n' "$(<"$stored_preview_file")" >&2
+			die "GET /api/v1/previews/$preview_id returned $stored_code, want 200"
+		}
+		[[ $(jq -r --arg node "$agent_node" '[.newly_blocked[]? | select(.node == $node) | .runtime_contract_impact.post_deploy_attestation] | first // ""' "$stored_preview_file") == FreshRequired ]] ||
+			die "stored preview $preview_id no longer shows FreshRequired for $agent_node"
+		candidate_show_file="$work_dir/candidate-runtime-contract-show.json"
+		run_ctl "$candidate_show_file" candidates show "$candidate_id"
+		[[ $(jq -r '.state' "$candidate_show_file") == uploaded ]] || die "candidate $candidate_id is $(jq -r '.state' "$candidate_show_file") after preview, want still uploaded (preview must never promote)"
+		# The live contract is untouched by the preview: coverage is still
+		# Full under the live profile.
+		run_ctl "$ctl_coverage_file" runtime-contracts coverage "$agent_node" --vendor nvidia
+		[[ $(jq -r '"\(.selection)/\(.attestation)/\(.verification_depth)/\(.profile_uid)"' "$ctl_coverage_file") == "Exact/FreshCompatible/Full/${profile_uid}" ]] ||
+			die "live coverage for $agent_node changed after the candidate preview: $(jq -c '{selection, attestation, verification_depth, profile_uid, reasons}' "$ctl_coverage_file")"
+		note "candidate $candidate_id preview $preview_id: $agent_node newly_blocked with impact ProfileSetReplaced/Exact/FreshRequired/CandidateProfileWithoutReport (after=${after_state}, no allowed actions); candidate still uploaded, live coverage still Full"
+	}
+	exercise_candidate_runtime_contract_impact
+
+	# exercise_topology_classification is the live M1 (S1) coverage: the
+	# read-only device topology classifier reached through the authenticated
+	# public API, GET /api/v1/nodes/{node}/topology, and its copy embedded in
+	# the single-node readiness answer, against the real controller, store
+	# and node watch on this same fixture. kind nodes advertise no NVIDIA
+	# resource at all, so the evidence is SYNTHETIC and reversible: the
+	# managed-agent node's status.capacity/status.allocatable (through the
+	# status subresource) and its GPU Feature Discovery labels are patched
+	# the way the device plugin and GFD would write them, and every form is
+	# removed again before the next one; restore_topology_fixture undoes all
+	# of it from the EXIT trap after a failure. Nothing here is a hardware
+	# claim: it proves that the controller observes node capacity, labels,
+	# the retained report and the DRA opt-in, and that it fails closed on
+	# each of them. No action is requested and no workload is touched.
+	exercise_topology_classification() {
+		local topology_url="http://127.0.0.1:${public_local_port}/api/v1/nodes/${agent_node}/topology"
+		local readiness_url="http://127.0.0.1:${public_local_port}/api/v1/nodes/${agent_node}/readiness"
+		local controller_sa="system:serviceaccount:${TARGET_NAMESPACE}:${ROOT_NAME}-controller"
+		local topology_code='' topology_file baseline_file baseline_digest cli_file cli_topology baseline_topology probe_file probe_code
+		local form name status_key status_value label_key label_value expect_topology expect_actions
+		local expect_reasons expect_attribution evidence_check form_file
+		local digest_before digest_enabled digest_after generation_before generation_after dra_file
+		local deadline dra_rules verb resource
+
+		# repost_managed_agent_report re-posts the lifecycle's own synthetic
+		# verified-unpartitioned report with a fresh observed_at, so report
+		# freshness can never be what a later assertion measures.
+		repost_managed_agent_report() {
+			local fresh="$work_dir/topology-report-$1.json"
+			local code
+			"$JQ_BIN" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.observed_at = $now' "$report_file" >"$fresh"
+			code=$(curl "${valid_tls[@]}" -H "@$header_file" -H 'Content-Type: application/json' \
+				--data-binary "@$fresh" -o "${fresh%.json}.response" -w '%{http_code}' \
+				"${agent_base}/api/v1/agents/accelerators/report-v1")
+			[[ $code == 204 ]] || {
+				printf '%s\n' "$(<"${fresh%.json}.response")" >&2
+				die "re-posting the synthetic report before the topology $1 phase returned $code, want 204"
+			}
+		}
+
+		# fetch_topology performs one bounded authenticated GET and leaves the
+		# status in topology_code; a non-200 answer is not a classification.
+		fetch_topology() {
+			topology_code=$(curl "${public_curl[@]}" -o "$1" -w '%{http_code}' "$topology_url" || true)
+		}
+
+		# wait_topology polls the live endpoint until the jq predicate holds
+		# on a 200 body, within the harness wait budget, then leaves the body
+		# in the file for the caller's stricter assertions.
+		wait_topology() {
+			local out_file=$1
+			local predicate=$2
+			local description=$3
+			local deadline=$((SECONDS + TIMEOUT_SECONDS))
+			while ((SECONDS < deadline)); do
+				fetch_topology "$out_file"
+				if [[ $topology_code == 200 ]] && "$JQ_BIN" -e "$predicate" "$out_file" >/dev/null 2>&1; then
+					return 0
+				fi
+				sleep 2
+			done
+			if [[ $topology_code == 200 ]]; then
+				"$JQ_BIN" . "$out_file" >&2 || true
+			else
+				printf '%s\n' "$(<"$out_file")" >&2
+			fi
+			"$KUBECTL_BIN" get node "$agent_node" -o json 2>/dev/null | "$JQ_BIN" -c '{capacity: (.status.capacity // {} | with_entries(select(.key | startswith("nvidia.com/")))), allocatable: (.status.allocatable // {} | with_entries(select(.key | startswith("nvidia.com/")))), labels: (.metadata.labels // {} | with_entries(select(.key | startswith("nvidia.com/"))))}' >&2 || true
+			die "timed out waiting for topology of $agent_node to be $description (last HTTP ${topology_code:-?})"
+		}
+
+		# assert_topology pins the whole closed-enum shape of one document:
+		# version, node identity, resource source, topology, verdict, the
+		# exact ordered reason codes, attribution, and the rendered summary.
+		# It also proves no raw node label reaches the document: the only
+		# map keys are the schema's own, and neither the kubelet's hostname
+		# label nor this fixture's own selector label is echoed anywhere.
+		assert_topology() {
+			local file=$1 topology=$2 actions=$3 reasons=$4 attribution=$5 description=$6
+			local summary="topology=${topology} device_actions=${actions} attribution=${attribution}"
+			[[ -n $reasons ]] && summary+=" reasons=${reasons}"
+			[[ $("$JQ_BIN" -r '"\(.version)/\(.node)/\(.node_uid)/\(.evidence.resource_source)"' "$file") == "topology-classification/v1/${agent_node}/${agent_node_uid}/node" ]] || {
+				"$JQ_BIN" . "$file" >&2
+				die "topology document for $description does not carry topology-classification/v1 for ${agent_node}/${agent_node_uid} from the node's own advertisement"
+			}
+			[[ $("$JQ_BIN" -r '"\(.topology)/\(.device_actions)/\(.reasons | join(","))/\(.attribution)"' "$file") == "${topology}/${actions}/${reasons}/${attribution}" ]] || {
+				"$JQ_BIN" . "$file" >&2
+				die "topology of $agent_node for $description was $("$JQ_BIN" -r '"\(.topology)/\(.device_actions)/\(.reasons | join(","))/\(.attribution)"' "$file"), want ${topology}/${actions}/${reasons}/${attribution}"
+			}
+			[[ $("$JQ_BIN" -r '.summary' "$file") == "$summary" ]] || die "topology summary for $description is '$("$JQ_BIN" -r '.summary' "$file")', want '$summary'"
+			[[ $("$JQ_BIN" -r '.inputs_digest' "$file") =~ ^sha256:[0-9a-f]{64}$ ]] || die "topology inputs_digest for $description is not a sha256 digest: $("$JQ_BIN" -r '.inputs_digest' "$file")"
+			[[ $("$JQ_BIN" -r '[paths | .[-1] | strings | select(contains("/"))] | length' "$file") == 0 ]] || {
+				"$JQ_BIN" . "$file" >&2
+				die "topology document for $description carries a raw qualified key: $("$JQ_BIN" -c '[paths | .[-1] | strings | select(contains("/"))]' "$file")"
+			}
+			if grep -Fq -e 'kubernetes.io/hostname' -e "$profile_label" "$file"; then
+				"$JQ_BIN" . "$file" >&2
+				die "topology document for $description echoes an unrelated node label"
+			fi
+		}
+
+		# assert_readiness_embeds proves the single-node readiness answer
+		# embeds the SAME classification (everything but the evaluation
+		# instant) the topology route serves, so the two can never disagree.
+		assert_readiness_embeds() {
+			local topology_file=$1 description=$2
+			local readiness_file="${topology_file%.json}-readiness.json"
+			local code
+			code=$(curl "${public_curl[@]}" -o "$readiness_file" -w '%{http_code}' "$readiness_url" || true)
+			[[ $code == 200 ]] || {
+				printf '%s\n' "$(<"$readiness_file")" >&2
+				die "node readiness for $agent_node ($description) returned ${code:-?}, want 200"
+			}
+			[[ $("$JQ_BIN" -r '.node' "$readiness_file") == "$agent_node" ]] || die "readiness for $description names node $("$JQ_BIN" -r '.node' "$readiness_file"), want $agent_node"
+			# Both documents are captured and the RHS is quoted so [[ == ]]
+			# compares the JSON literally: an unquoted RHS is a glob pattern,
+			# and "reasons":[...] contains bracket expressions.
+			local embedded_topology served_topology
+			embedded_topology=$("$JQ_BIN" -S -c '.topology | del(.observed_at)' "$readiness_file")
+			served_topology=$("$JQ_BIN" -S -c 'del(.observed_at)' "$topology_file")
+			[[ $embedded_topology == "$served_topology" ]] || {
+				"$JQ_BIN" '.topology' "$readiness_file" >&2
+				die "readiness.topology for $description differs from GET …/topology (inputs_digest $("$JQ_BIN" -r '.topology.inputs_digest // "absent"' "$readiness_file") vs $("$JQ_BIN" -r '.inputs_digest' "$topology_file"))"
+			}
+		}
+
+		# controller_dra_rules prints the managed controller ClusterRole's
+		# rules that mention resource.k8s.io, compact, so both the exact
+		# read-only grant and its absence can be asserted on the object.
+		controller_dra_rules() {
+			"$KUBECTL_BIN" get clusterrole "${ROOT_NAME}-controller" -o json 2>/dev/null |
+				"$JQ_BIN" -c '[.rules[]? | select((.apiGroups // []) | index("resource.k8s.io"))]'
+		}
+
+		# controller_can_i asks the apiserver's authorizer directly, through
+		# an authorization.k8s.io/v1 SubjectAccessReview, whether the managed
+		# controller ServiceAccount may <verb> the bare <resource> in group
+		# resource.k8s.io at cluster scope. `kubectl auth can-i` is NOT usable
+		# for this group here: it resolves the resource through discovery,
+		# and kind v1.33 does not serve resource.k8s.io, so it answers "no"
+		# even while the ClusterRole carries the rule (a proven false
+		# negative). The review names group, resource and verb literally, no
+		# discovery is involved, and RBAC evaluates the rule by name, which
+		# is exactly what is being pinned. The review object is non-persisted
+		# and is fed over stdin; nothing is written to disk.
+		controller_can_i() {
+			local expected=$1 verb=$2 resource=$3
+			local review response stderr_file allowed actual reason
+			case $expected in
+			yes | no) ;;
+			*) die "controller_can_i: expected must be yes or no, got $expected" ;;
+			esac
+			review=$("$JQ_BIN" -cn --arg user "$controller_sa" --arg verb "$verb" --arg resource "$resource" '{
+				apiVersion: "authorization.k8s.io/v1",
+				kind: "SubjectAccessReview",
+				spec: {
+					user: $user,
+					resourceAttributes: {group: "resource.k8s.io", resource: $resource, verb: $verb}
+				}
+			}') || die "controller_can_i: failed to render the SubjectAccessReview for $verb $resource"
+			# stderr is kept apart from the JSON answer so a kubectl warning
+			# can never corrupt the parse; the file lives in the 0700 work_dir.
+			stderr_file=$(mktemp "$work_dir/sar-stderr.XXXXXX") || die "controller_can_i: mktemp failed"
+			if ! response=$("$KUBECTL_BIN" create -f - -o json <<<"$review" 2>"$stderr_file"); then
+				die "SubjectAccessReview for $controller_sa $verb $resource.resource.k8s.io was not accepted: $(cat "$stderr_file" 2>/dev/null) $response"
+			fi
+			rm -f "$stderr_file"
+			# `//` would read allowed=false as absent, so the tri-state is spelled out.
+			allowed=$("$JQ_BIN" -r 'if .status.allowed == true then "true" elif .status.allowed == false then "false" else "absent" end' <<<"$response" 2>/dev/null) ||
+				die "SubjectAccessReview response for $controller_sa $verb $resource.resource.k8s.io is not JSON: $response"
+			case $allowed in
+			true) actual=yes ;;
+			false) actual=no ;;
+			*) die "SubjectAccessReview for $controller_sa $verb $resource.resource.k8s.io carries no boolean status.allowed: $response" ;;
+			esac
+			[[ $actual == "$expected" ]] || {
+				reason=$("$JQ_BIN" -r '.status.reason // "no reason given"' <<<"$response")
+				die "managed controller SubjectAccessReview $verb $resource.resource.k8s.io = $actual, want $expected ($reason)"
+			}
+		}
+
+		# The node must be pristine: this exercise refuses to clobber an
+		# advertisement or GFD label that is not its own rather than remove
+		# it, exactly as the harness refuses pre-existing fixtures.
+		if "$KUBECTL_BIN" get node "$agent_node" -o json | "$JQ_BIN" -e '
+			[(.status.capacity // {}), (.status.allocatable // {}), (.metadata.labels // {})]
+			| map(keys[] | select(startswith("nvidia.com/"))) | length > 0' >/dev/null; then
+			"$KUBECTL_BIN" get node "$agent_node" -o json | "$JQ_BIN" -c '{capacity: .status.capacity, allocatable: .status.allocatable, labels: .metadata.labels}' >&2
+			die "managed-agent node $agent_node already carries an nvidia.com/ resource or label; refusing to run the synthetic topology forms on it"
+		fi
+		[[ -n $topology_fixture_node ]] && die "topology fixture already tracks node $topology_fixture_node"
+
+		# Fail-closed with authentication and identity first: no token is a
+		# 401 before any classification, and a node outside the inventory is
+		# a 404, never an "unknown" document.
+		probe_file="$work_dir/topology-unauthenticated.json"
+		probe_code=$(curl --silent --show-error --noproxy '*' --max-time 10 -o "$probe_file" -w '%{http_code}' "$topology_url" || true)
+		[[ $probe_code == 401 ]] || die "unauthenticated GET …/topology returned ${probe_code:-?}, want 401"
+		probe_file="$work_dir/topology-unknown-node.json"
+		probe_code=$(curl "${public_curl[@]}" -o "$probe_file" -w '%{http_code}' \
+			"http://127.0.0.1:${public_local_port}/api/v1/nodes/no-such-node-${RUN_ID}/topology" || true)
+		[[ $probe_code == 404 ]] || {
+			printf '%s\n' "$(<"$probe_file")" >&2
+			die "GET …/topology for a node outside the inventory returned ${probe_code:-?}, want 404"
+		}
+
+		# The genuinely live negative: a real CPU-only kind node with a fresh
+		# verified-unpartitioned report but NO advertised device is unknown
+		# and refused. Whole-device is never assumed from the report alone.
+		repost_managed_agent_report pre-capacity
+		topology_file="$work_dir/topology-no-capacity.json"
+		wait_topology "$topology_file" '.topology == "unknown" and .evidence.report_fresh == true' "unknown with a fresh report and no advertised device"
+		assert_topology "$topology_file" unknown refused TopologyUnknown unknown "the CPU-only node without any advertisement"
+		[[ $("$JQ_BIN" -r '"\(.evidence.whole_devices)/\(.evidence.mig_instances)/\(.evidence.shared_replicas)/\(.evidence.report_topology_safety)/\(.evidence.report_readiness)/\(.evidence.report_physical_devices)/\(.dra.state)"' "$topology_file") == "0/0/0/verified-unpartitioned/ready/1/disabled" ]] || {
+			"$JQ_BIN" . "$topology_file" >&2
+			die "evidence for the CPU-only node without any advertisement is not 'no devices, fresh ready verified report, DRA disabled'"
+		}
+		note "topology: $agent_node with a fresh verified-unpartitioned report and no advertised device is unknown/refused (TopologyUnknown), DRA disabled"
+
+		# Synthetic whole-device advertisement: nvidia.com/gpu: 1 in both
+		# capacity and allocatable, beside the fresh verified report, is the
+		# ONLY input the classifier may call eligible.
+		topology_fixture_node=$agent_node
+		patch_node_status_resources "$agent_node" 1 nvidia.com/gpu
+		[[ $("$KUBECTL_BIN" get node "$agent_node" -o jsonpath='{.status.capacity.nvidia\.com/gpu}/{.status.allocatable.nvidia\.com/gpu}') == "1/1" ]] ||
+			die "synthetic nvidia.com/gpu: 1 did not land in both status.capacity and status.allocatable of $agent_node"
+		baseline_file="$work_dir/topology-whole-device.json"
+		wait_topology "$baseline_file" '.topology == "whole-device"' "whole-device after the synthetic nvidia.com/gpu: 1 advertisement"
+		assert_topology "$baseline_file" whole-device eligible "" per-pod "the synthetic whole-device advertisement"
+		[[ $("$JQ_BIN" -r '"\(.evidence.whole_devices)/\(.evidence.mig_instances)/\(.evidence.shared_replicas)/\(.evidence.report_fresh)/\(.evidence.report_partitions)/\(.dra.state)/\(.dra.pods_inspected)/\(.dra.reason // "")"' "$baseline_file") == "1/0/0/true/0/disabled/false/" ]] || {
+			"$JQ_BIN" . "$baseline_file" >&2
+			die "whole-device evidence for $agent_node is not exactly one whole device with a fresh report and DRA disabled"
+		}
+		[[ $("$JQ_BIN" -r '.evidence | has("gpu_replicas_label") or has("mig_strategy_label") or has("mig_capable_label") or has("sharing_strategy_label")' "$baseline_file") == false ]] ||
+			die "whole-device evidence for $agent_node renders a GFD label the node does not carry: $("$JQ_BIN" -c '.evidence' "$baseline_file")"
+		baseline_digest=$("$JQ_BIN" -r '.inputs_digest' "$baseline_file")
+		assert_readiness_embeds "$baseline_file" "the synthetic whole-device advertisement"
+		cli_file="$work_dir/topology-whole-device-cli.json"
+		run_ctl "$cli_file" nodes topology "$agent_node" --json
+		# Quoted RHS: the JSON must compare literally, not as a glob pattern.
+		cli_topology=$("$JQ_BIN" -S -c 'del(.observed_at)' "$cli_file")
+		baseline_topology=$("$JQ_BIN" -S -c 'del(.observed_at)' "$baseline_file")
+		[[ $cli_topology == "$baseline_topology" ]] || {
+			"$JQ_BIN" . "$cli_file" >&2
+			die "kubeneuronctl nodes topology --json differs from GET …/topology for $agent_node (inputs_digest $("$JQ_BIN" -r '.inputs_digest' "$cli_file") vs $baseline_digest)"
+		}
+		note "topology: synthetic nvidia.com/gpu: 1 on $agent_node is whole-device/eligible/per-pod through the API, the readiness embed, and kubeneuronctl (inputs_digest $baseline_digest)"
+
+		# Single-input forms, one synthetic input each, beside the whole-GPU
+		# advertisement and the fresh verified report that stay in place.
+		# Each row pins the full closed-enum answer (topology, verdict, the
+		# exact ordered reason codes or none, attribution) and the evidence
+		# field the input is rendered through, then is removed and the
+		# baseline must return with the SAME inputs digest: the classifier is
+		# deterministic and the restore was complete. The evidence predicate
+		# is part of the wait as well as the assertion, so a form whose
+		# answer equals the baseline (whole-device/eligible) is only accepted
+		# once the controller has actually observed the synthetic input.
+		#
+		# Partition evidence fails closed; the strategy label does not. A
+		# real nvidia.com/mig-* resource beside the whole-GPU advertisement
+		# contradicts the verified-unpartitioned report and is refused as
+		# unknown. A bare nvidia.com/mig.strategy label, single or mixed, is
+		# only how the device plugin and GFD were configured to advertise
+		# partitions, not proof that any exist: the GPU Operator sets
+		# mig.strategy=single by default on every GPU node, including one
+		# whose MIG configuration is all-disabled, so treating the label as
+		# partition evidence would refuse normal GPU Operator installations
+		# outright. Both spellings must leave the verified whole GPU
+		# whole-device/eligible/per-pod with no reason codes while still
+		# being rendered in the evidence and changing the inputs digest. The
+		# label is still read strictly (an unrecognised spelling is unknown,
+		# never "no MIG"); that refusal is pinned by the classifier's unit
+		# tests, not here.
+		#
+		# The count-mismatch form is the unlabeled time-slicing shape: the
+		# NVIDIA device plugin configured to time-slice without renaming
+		# advertises physical x replicas under nvidia.com/gpu, and on a node
+		# whose GFD labels are absent (GFD not deployed, or its labels
+		# stripped) that surplus is the only trace of the sharing. Here the
+		# baseline's own nvidia.com/gpu: 1 is overwritten with 4 beside the
+		# report that attests exactly one physical GPU and no label at all.
+		# The classifier must refuse it as unknown with
+		# WholeDeviceCountMismatch, never admit it as whole-device and never
+		# guess TimeSliced (nothing observed says so). The form's restore
+		# value is 1, not removal: the whole-GPU key is the baseline's own
+		# advertisement, so it is put back rather than taken away, and the
+		# baseline digest must return exactly like every other form.
+		#   name|status key|status value|label key|label value|topology|device_actions|reasons|attribution|evidence predicate[|status restore value]
+		# The trailing status restore value is optional: absent (every
+		# other form) means the status key is removed on restore; a value
+		# means it is re-advertised at that value instead. The fields are
+		# split on '|', so a predicate must not use jq's pipe (spell
+		# negation as `== false`, not `| not`).
+		local -a forms=(
+			'mig-instance-beside-whole-gpu|nvidia.com/mig-1g.5gb|1|-|-|unknown|refused|MigPartitioned,TopologyUnknown|unknown|.mig_instances == 1 and .whole_devices == 1'
+			'mig-strategy-single-label|-|-|nvidia.com/mig.strategy|single|whole-device|eligible||per-pod|.mig_strategy_label == "single" and .mig_instances == 0 and .whole_devices == 1'
+			'mig-strategy-mixed-label|-|-|nvidia.com/mig.strategy|mixed|whole-device|eligible||per-pod|.mig_strategy_label == "mixed" and .mig_instances == 0 and .whole_devices == 1'
+			'gpu-shared-replicas|nvidia.com/gpu.shared|4|-|-|time-sliced|refused|TimeSliced|device-wide|.shared_replicas == 4 and .whole_devices == 1'
+			'gpu-replicas-label|-|-|nvidia.com/gpu.replicas|4|time-sliced|refused|TimeSliced|device-wide|.gpu_replicas_label == "4" and .shared_replicas == 0'
+			'gpu-replicas-label-invalid|-|-|nvidia.com/gpu.replicas|four|unknown|refused|ReplicasLabelInvalid,TopologyUnknown|unknown|.gpu_replicas_label == "four"'
+			'whole-gpu-count-mismatch-unlabeled|nvidia.com/gpu|4|-|-|unknown|refused|WholeDeviceCountMismatch,TopologyUnknown|unknown|.whole_devices == 4 and .report_physical_devices == 1 and .shared_replicas == 0 and .mig_instances == 0 and .report_fresh == true and (has("gpu_replicas_label") or has("sharing_strategy_label") or has("mig_strategy_label") or has("mig_capable_label")) == false|1'
+		)
+		for form in "${forms[@]}"; do
+			IFS='|' read -r name status_key status_value label_key label_value expect_topology expect_actions expect_reasons expect_attribution evidence_check status_restore <<<"$form"
+			[[ -z $status_restore || $status_restore =~ ^[0-9]+$ ]] || die "form $name carries a status restore value that is not a non-negative integer: $status_restore"
+			[[ -z $status_restore || $status_key != - ]] || die "form $name carries a status restore value without a status key"
+			[[ $status_key == - || " ${topology_status_keys[*]} " == *" $status_key "* ]] || die "form $name uses status key $status_key that restore_topology_fixture does not track"
+			[[ $label_key == - || " ${topology_label_keys[*]} " == *" $label_key "* ]] || die "form $name uses label key $label_key that restore_topology_fixture does not track"
+			[[ $status_key != - ]] && patch_node_status_resources "$agent_node" "$status_value" "$status_key"
+			[[ $label_key != - ]] && "$KUBECTL_BIN" label node "$agent_node" "${label_key}=${label_value}" --overwrite >/dev/null
+			form_file="$work_dir/topology-form-${name}.json"
+			wait_topology "$form_file" ".topology == \"${expect_topology}\" and (.reasons | join(\",\")) == \"${expect_reasons}\" and (.evidence | ${evidence_check})" "${expect_topology}/${expect_reasons:-no reasons} with evidence '${evidence_check}' for form ${name}"
+			assert_topology "$form_file" "$expect_topology" "$expect_actions" "$expect_reasons" "$expect_attribution" "form $name"
+			"$JQ_BIN" -e ".evidence | ${evidence_check}" "$form_file" >/dev/null 2>&1 || {
+				"$JQ_BIN" '.evidence' "$form_file" >&2
+				die "evidence for form $name does not satisfy '${evidence_check}'"
+			}
+			[[ $("$JQ_BIN" -r '.inputs_digest' "$form_file") != "$baseline_digest" ]] || die "form $name left the whole-device inputs digest $baseline_digest unchanged"
+			[[ $("$JQ_BIN" -r '.dra.state' "$form_file") == disabled ]] || die "form $name changed the DRA state to $("$JQ_BIN" -r '.dra.state' "$form_file")"
+			assert_readiness_embeds "$form_file" "form $name"
+			[[ $status_key != - ]] && patch_node_status_resources "$agent_node" "${status_restore:--}" "$status_key"
+			[[ $label_key != - ]] && "$KUBECTL_BIN" label node "$agent_node" "${label_key}-" >/dev/null
+			wait_topology "$form_file" ".inputs_digest == \"${baseline_digest}\"" "back at the whole-device inputs digest after form ${name}"
+			assert_topology "$form_file" whole-device eligible "" per-pod "the restore after form $name"
+			note "topology: form $name -> ${expect_topology}/${expect_actions} (${expect_reasons:-no reasons}; attribution ${expect_attribution}); restored to whole-device/eligible at $baseline_digest"
+		done
+
+		# DRA opt-in, on a cluster that does not serve resource.k8s.io/v1
+		# (kind v1.33). Enabling spec.safety.topologyClassifier.dra.enabled
+		# must (1) change the compiled config digest, (2) grant the managed
+		# controller exactly get/list/watch on resourceslices and nothing
+		# else in the group, and (3) make the live classification report
+		# dra.state=not-observed with the api-unavailable reason and refuse
+		# as unknown, although the node still looks whole-device. A failed
+		# observation is rendered fail-closed: only the state and the bounded
+		# reason survive normalizeDRA, every count is zero, pods_inspected is
+		# false, and api_version and drivers are absent, not merely empty,
+		# because nothing the unserved API did not answer may be echoed back
+		# as if it had been observed. Removing the block must take all three
+		# back. No DRA object is ever written and no ResourceClaim permission
+		# ever exists. (2) is proven twice:
+		# structurally on the ClusterRole object (controller_dra_rules) and
+		# live against the authorizer (controller_can_i SubjectAccessReviews),
+		# the latter because the group is unserved here and kubectl's own
+		# can-i cannot ask about it.
+		[[ $(controller_dra_rules) == '[]' ]] || die "managed controller ClusterRole already carries a resource.k8s.io rule before DRA discovery was enabled: $(controller_dra_rules)"
+		controller_can_i no list resourceslices
+		digest_before=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.status.configDigest}')
+		[[ -n $digest_before ]] || die "root $ROOT_NAME reports no status.configDigest before the DRA opt-in"
+		generation_before=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')
+		repost_managed_agent_report dra-enable
+		topology_fixture_dra=1
+		"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=merge \
+			-p '{"spec":{"safety":{"topologyClassifier":{"dra":{"enabled":true}}}}}' >/dev/null
+		generation_after=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')
+		((generation_after > generation_before)) || die "DRA opt-in patch did not advance the root generation ($generation_before -> $generation_after)"
+		wait_observed_generation "$generation_after"
+		wait_root_condition True RuntimeAvailable
+		digest_enabled=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.status.configDigest}')
+		[[ $digest_enabled != "$digest_before" ]] || die "enabling DRA discovery left the compiled config digest $digest_before unchanged"
+		deadline=$((SECONDS + TIMEOUT_SECONDS))
+		dra_rules="[]"
+		while ((SECONDS < deadline)); do
+			dra_rules=$(controller_dra_rules)
+			"$JQ_BIN" -e 'length == 1 and .[0].apiGroups == ["resource.k8s.io"] and .[0].resources == ["resourceslices"] and (.[0].verbs | sort) == ["get", "list", "watch"] and ((.[0].resourceNames // []) | length) == 0' <<<"$dra_rules" >/dev/null 2>&1 && break
+			sleep 2
+		done
+		"$JQ_BIN" -e 'length == 1 and .[0].apiGroups == ["resource.k8s.io"] and .[0].resources == ["resourceslices"] and (.[0].verbs | sort) == ["get", "list", "watch"] and ((.[0].resourceNames // []) | length) == 0' <<<"$dra_rules" >/dev/null 2>&1 ||
+			die "managed controller ClusterRole resource.k8s.io rules after enabling DRA discovery are $dra_rules, want exactly one get/list/watch resourceslices rule"
+		for verb in get list watch; do
+			controller_can_i yes "$verb" resourceslices
+		done
+		for verb in create update patch delete deletecollection; do
+			controller_can_i no "$verb" resourceslices
+		done
+		for resource in resourceclaims resourceclaimtemplates deviceclasses; do
+			controller_can_i no get "$resource"
+			controller_can_i no list "$resource"
+		done
+		note "topology: DRA opt-in compiled (digest $digest_before -> $digest_enabled) and the managed controller holds exactly get/list/watch on resourceslices.resource.k8s.io, nothing else in the group"
+
+		dra_file="$work_dir/topology-dra-enabled.json"
+		wait_topology "$dra_file" '.dra.state == "not-observed"' "dra.state=not-observed after the controller reloaded the DRA opt-in"
+		assert_topology "$dra_file" unknown refused TopologyUnknown unknown "the DRA opt-in without resource.k8s.io/v1"
+		# Security boundary: a not-observed DRA observation carries exactly the
+		# state and the bounded reason. The counts must be zero and
+		# pods_inspected false, and api_version and drivers must be ABSENT:
+		# their presence would mean raw data from an unobserved API leaked
+		# through the fail-closed normalisation into the public summary.
+		"$JQ_BIN" -e '.dra
+			| .state == "not-observed"
+			and .reason == "api-unavailable"
+			and (has("api_version") | not)
+			and (has("drivers") | not)
+			and .pods_inspected == false
+			and .resource_slices == 0
+			and .devices == 0
+			and .claim_pods == 0
+			and .direct_claims == 0
+			and .template_claims == 0' "$dra_file" >/dev/null 2>&1 || {
+			"$JQ_BIN" '.dra' "$dra_file" >&2
+			die "DRA summary with discovery enabled on kind v1.33 is $("$JQ_BIN" -c '.dra' "$dra_file"), want exactly state=not-observed reason=api-unavailable, all counts 0, pods_inspected=false, and no api_version or drivers field (a failed observation must not echo API data)"
+		}
+		[[ $("$JQ_BIN" -r '"\(.evidence.whole_devices)/\(.evidence.report_fresh)"' "$dra_file") == "1/true" ]] || die "DRA not-observed refusal lost the whole-device evidence: $("$JQ_BIN" -c '.evidence' "$dra_file")"
+		[[ $("$JQ_BIN" -r '.inputs_digest' "$dra_file") != "$baseline_digest" ]] || die "DRA opt-in left the inputs digest at the DRA-disabled baseline $baseline_digest"
+		assert_readiness_embeds "$dra_file" "the DRA opt-in without resource.k8s.io/v1"
+		note "topology: with DRA discovery enabled, $agent_node is unknown/refused (TopologyUnknown) with dra not-observed/api-unavailable and no api_version/drivers/counts: unknown DRA evidence fails closed"
+
+		generation_before=$generation_after
+		"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=json \
+			-p '[{"op": "remove", "path": "/spec/safety/topologyClassifier"}]' >/dev/null
+		generation_after=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')
+		((generation_after > generation_before)) || die "removing the DRA opt-in did not advance the root generation ($generation_before -> $generation_after)"
+		wait_observed_generation "$generation_after"
+		wait_root_condition True RuntimeAvailable
+		digest_after=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.status.configDigest}')
+		[[ $digest_after == "$digest_before" ]] || die "removing the DRA opt-in compiled digest $digest_after, want the pre-opt-in digest $digest_before"
+		deadline=$((SECONDS + TIMEOUT_SECONDS))
+		while ((SECONDS < deadline)); do
+			dra_rules=$(controller_dra_rules)
+			[[ $dra_rules == '[]' ]] && break
+			sleep 2
+		done
+		[[ $dra_rules == '[]' ]] || die "managed controller ClusterRole still carries a resource.k8s.io rule after the DRA opt-in was removed: $dra_rules"
+		controller_can_i no list resourceslices
+		controller_can_i no get resourceslices
+		topology_fixture_dra=0
+		repost_managed_agent_report dra-disable
+		wait_topology "$dra_file" '.dra.state == "disabled" and .topology == "whole-device"' "whole-device with DRA disabled after the opt-in was removed"
+		assert_topology "$dra_file" whole-device eligible "" per-pod "the restore after the DRA opt-in"
+		[[ $("$JQ_BIN" -r '"\(.dra.reason // "")/\(.dra.api_version // "")/\(.dra.pods_inspected)"' "$dra_file") == "//false" ]] || die "DRA summary after the opt-in was removed still carries observation fields: $("$JQ_BIN" -c '.dra' "$dra_file")"
+		note "topology: DRA opt-in removed; digest back to $digest_before, the resourceslices rule is gone, and $agent_node is whole-device/eligible with dra disabled again"
+
+		# Take the synthetic advertisement away last and prove the node is
+		# exactly as this exercise found it: refused again, and carrying no
+		# nvidia.com/ resource or label at all.
+		patch_node_status_resources "$agent_node" - "${topology_status_keys[@]}"
+		wait_topology "$topology_file" '.topology == "unknown" and .evidence.whole_devices == 0' "unknown again after the synthetic advertisement was removed"
+		assert_topology "$topology_file" unknown refused TopologyUnknown unknown "the node after the synthetic advertisement was removed"
+		if "$KUBECTL_BIN" get node "$agent_node" -o json | "$JQ_BIN" -e '
+			[(.status.capacity // {}), (.status.allocatable // {}), (.metadata.labels // {})]
+			| map(keys[] | select(startswith("nvidia.com/"))) | length > 0' >/dev/null; then
+			"$KUBECTL_BIN" get node "$agent_node" -o json | "$JQ_BIN" -c '{capacity: .status.capacity, allocatable: .status.allocatable, labels: .metadata.labels}' >&2
+			die "managed-agent node $agent_node still carries an nvidia.com/ resource or label after the topology exercise"
+		fi
+		topology_fixture_node=
+		note "topology: synthetic capacity/labels removed from $agent_node and the installation is back at DRA off; this proved classifier wiring over synthetic kind node status, not any GPU, MIG, time-slicing or DRA driver"
+	}
+	exercise_topology_classification
+
+	kill "$port_forward_pid" >/dev/null 2>&1 || true
+	wait "$port_forward_pid" >/dev/null 2>&1 || true
+	port_forward_pid=
+
+	"$KUBECTL_BIN" delete acceleratorruntimeprofile "$profile_name" \
+		--ignore-not-found --wait=true --timeout=60s >/dev/null
+	"$KUBECTL_BIN" label node "$agent_node" "${profile_label}-" --overwrite >/dev/null
+	note "runtime contract lifecycle: profile $profile_name (uid=$profile_uid gen=$profile_generation) covered $agent_node as Exact/FreshCompatible/Full: $coverage_summary"
+	note "runtime contract evidence and qualification $qual_id were synthetic CPU-only evidence from a kind managed-agent node, not hardware; they prove controller/store wiring only"
+}
+
+# exercise_controller_restart_mid_playbook drives an approval-gated dry-run
+# ladder to AWAITING_APPROVAL, kills the controller Pod, and proves the
+# SQLite workflow state survives: the incident is still parked, no dry-run
+# step re-executes, and the post-restart approval resumes the ladder.
+# exercise_backup_restore proves the DOCUMENTED restore procedure works:
+# snapshot through the authenticated endpoint, destroy the live database,
+# restore it through the helper pod, and confirm the incident history that
+# only existed in the snapshot is back. Without this, docs/operations.md is
+# describing a procedure nobody has ever run.
+exercise_backup_restore() {
+	note "exercising the documented backup -> wipe -> restore cycle"
+	local pf_log="$work_dir/backup-port-forward.log"
+	local pf_pid='' port='' snapshot="$work_dir/kubeneuron-backup.db"
+	local before after helper=kubeneuron-restore-helper
+
+	# Create the log BEFORE forking, because the wait loop below reads it with
+	# a command substitution and this script runs under `set -e`.
+	#
+	# `port=$(sed ... "$pf_log")` propagates sed's exit status, so the first
+	# iteration killed the whole run whenever the parent got to it before the
+	# forked child had created the file — a plain fork race, and the loop that
+	# exists to tolerate the file not being ready yet was the thing that could
+	# not tolerate it. It failed exactly once, printed one sed error, and the
+	# run died with no `integration FAIL:` line to say why.
+	: >"$pf_log"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+		"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
+	pf_pid=$!
+	local deadline=$((SECONDS + 30))
+	while ((SECONDS < deadline)); do
+		port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$pf_log")
+		[[ -n $port ]] && break
+		sleep 1
+	done
+	[[ -n $port ]] || die "backup-phase port-forward allocated no local port"
+
+	curl --silent --show-error --fail --noproxy '*' --max-time 60 \
+		-H 'Authorization: Bearer integration-operator-token' \
+		"http://127.0.0.1:${port}/api/v1/backup" -o "$snapshot" ||
+		die "backup endpoint did not return a snapshot"
+	[[ -s $snapshot ]] || die "backup snapshot is empty"
+	before=$(curl --silent --noproxy '*' --max-time 10 \
+		-H 'Authorization: Bearer integration-operator-token' \
+		"http://127.0.0.1:${port}/api/v1/incidents" | "$JQ_BIN" 'length')
+	kill "$pf_pid" >/dev/null 2>&1 || true
+	wait "$pf_pid" >/dev/null 2>&1 || true
+
+	# Follow docs/operations.md exactly: stop the operator, stop the controller,
+	# mount, wipe, restore, start.
+	#
+	# Stopping the OPERATOR is step zero and is not optional. It owns the
+	# controller Deployment's replica count and reconciles a manual scale
+	# straight back to one, so without this the controller returns within a
+	# reconcile and the wipe below replaces the database file underneath a
+	# running writer — corrupting the database the procedure exists to restore.
+	#
+	# This phase ran for months without it and passed, because it verified the
+	# stop with `rollout status`, which reports a scale-to-zero complete the
+	# instant after the scale. The suite was proving a procedure it never
+	# actually performed; waiting for the Pod is what exposed it.
+	scale_operator 0 backup-restore
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" scale "deploy/${ROOT_NAME}-controller" --replicas=0 >/dev/null
+	# The wipe below deletes the SQLite file out from under the controller, so
+	# "stopped" has to mean the process is gone, not what rollout status calls
+	# a finished scale-to-zero. See wait_deployment_stopped.
+	wait_deployment_stopped "$TARGET_NAMESPACE" "${ROOT_NAME}-controller"
+
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete pod "$helper" --ignore-not-found --wait=true >/dev/null
+	sed "s/claimName: kubeneuron-controller-state/claimName: ${ROOT_NAME}-controller-state/" \
+		"$REPO_ROOT/deploy/kubernetes/backup/restore-helper.yaml" |
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" apply -f - >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" wait --for=condition=Ready "pod/$helper" --timeout=120s >/dev/null
+
+	# Destroy the live database so the restore has to be real.
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" exec "$helper" -- \
+		sh -c 'rm -f /state/kubeneuron.db /state/kubeneuron.db-wal /state/kubeneuron.db-shm' >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" cp "$snapshot" "${helper}:/state/kubeneuron.db" >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" exec "$helper" -- \
+		sh -c 'test -s /state/kubeneuron.db' || die "restored database is missing or empty"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete pod "$helper" --wait=true >/dev/null
+
+	# Restarting the operator is what restores the replica count, exactly as the
+	# documented procedure says; scaling the Deployment by hand would be undone
+	# by the next reconcile anyway.
+	scale_operator 1
+	# NOT rollout status: the controller is still at zero replicas until the
+	# operator acquires its lease and reconciles, and rollout status reports a
+	# Deployment with no Pods as successfully rolled out.
+	wait_deployment_ready "$TARGET_NAMESPACE" "${ROOT_NAME}-controller"
+	assert_runtime_ready
+
+	pf_log="$work_dir/backup-port-forward-2.log"
+	: >"$pf_log" # same fork race as the first port-forward above
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+		"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
+	pf_pid=$!
+	port=
+	deadline=$((SECONDS + 60))
+	while ((SECONDS < deadline)); do
+		port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$pf_log")
+		[[ -n $port ]] && break
+		sleep 1
+	done
+	[[ -n $port ]] || die "post-restore port-forward allocated no local port"
+	after=$(curl --silent --noproxy '*' --max-time 10 \
+		-H 'Authorization: Bearer integration-operator-token' \
+		"http://127.0.0.1:${port}/api/v1/incidents" | "$JQ_BIN" 'length')
+	kill "$pf_pid" >/dev/null 2>&1 || true
+	wait "$pf_pid" >/dev/null 2>&1 || true
+
+	[[ "$after" == "$before" ]] ||
+		die "restored incident count $after != snapshot count $before"
+	note "backup snapshot restored through the documented helper-pod procedure; $after incident(s) survived a wiped database"
+}
+
+# exercise_real_cordon_and_uncordon is the only phase in this suite that lets a
+# playbook actually change the cluster.
+#
+# Everything else runs in dry-run, which means the cordon path had never
+# cordoned anything and the cordon JANITOR — the code that gives a pilot its
+# capacity back after an incident resolves — had never executed outside unit
+# tests. That is the cheapest real-execution coverage available anywhere in the
+# project: a kind worker is disposable, cordon is reversible, and the assertion
+# is a single field on the Node object.
+#
+# The installation is switched to Enabled with confinement naming exactly one
+# worker, and switched back afterwards regardless of outcome.
+# exercise_incident_evidence: a worker advertising two GPUs of which one is
+# allocatable, with a fake device plugin pod on it, must give an incident
+# whose evidence reads the software state from the API: degraded, the device
+# plugin running, and a lost GPU placed as unknown rather than on the
+# hardware. Then, with no plugin pod and no resource, nothing reads ok.
+exercise_incident_evidence() {
+	note "exercising incident evidence against a fake device plugin pod"
+	local pf_log="$work_dir/evidence-port-forward.log"
+	local pf_pid='' public_port='' target_node pause_image ns=kubeneuron-evidence deadline detail='' code
+	target_node=$("$KUBECTL_BIN" get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[0].metadata.name}')
+	[[ -n $target_node ]] || die "no worker node for the evidence scenario"
+	pause_image=$("$DOCKER_BIN" exec "$target_node" crictl images -o json 2>/dev/null |
+		"$JQ_BIN" -r '[.images[].repoTags[]? | select(test("/pause:"))][0] // empty')
+	[[ -n $pause_image ]] || die "no pause image on $target_node for the fake device plugin"
+
+	local restore_done=0
+	restore_evidence() {
+		((restore_done)) && return 0
+		restore_done=1
+		if [[ -n $pf_pid ]]; then kill "$pf_pid" >/dev/null 2>&1 || true; fi
+		"$KUBECTL_BIN" delete namespace "$ns" --wait=false >/dev/null 2>&1 || true
+		patch_node_status_resources "$target_node" - nvidia.com/gpu || true
+	}
+	trap restore_evidence RETURN
+
+	patch_node_status_resources "$target_node" 2 nvidia.com/gpu
+	"$KUBECTL_BIN" create namespace "$ns" >/dev/null
+	"$KUBECTL_BIN" -n "$ns" apply -f - >/dev/null <<-JSON
+		{"apiVersion":"v1","kind":"Pod","metadata":{"name":"fake-device-plugin","labels":{"app":"nvidia-device-plugin-daemonset"}},
+		 "spec":{"nodeName":"$target_node","tolerations":[{"operator":"Exists"}],
+		  "containers":[{"name":"pause","image":"$pause_image","imagePullPolicy":"IfNotPresent",
+		   "readinessProbe":{"exec":{"command":["/kubeneuron-not-ready"]},"periodSeconds":1}}]}}
+	JSON
+	# Running but never Ready, the way a device plugin that cannot reach
+	# its devices looks. The kubelet rewrites allocatable from capacity, so
+	# a not-ready plugin is the stable degraded signal here.
+	"$KUBECTL_BIN" -n "$ns" wait pod/fake-device-plugin --for=jsonpath='{.status.phase}'=Running --timeout=120s >/dev/null ||
+		die "fake device plugin pod did not start"
+
+	local worker service_dns="${ROOT_NAME}-controller.${TARGET_NAMESPACE}.svc" installation_uid
+	installation_uid=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.uid}')
+	"$KUBECTL_BIN" -n "$ns" create configmap training-report-ca --from-file=ca.crt="$work_dir/pki/server-ca.crt"
+	"$KUBECTL_BIN" -n "$ns" apply -f - >/dev/null <<-JSON
+		{"apiVersion":"batch/v1","kind":"Job","metadata":{"name":"training-worker"},
+		 "spec":{"template":{"spec":{"nodeName":"$target_node","restartPolicy":"Never",
+		  "volumes":[{"name":"report","projected":{"sources":[
+		    {"serviceAccountToken":{"audience":"kubeneuron.io/training-report/$installation_uid","path":"token"}},
+		    {"configMap":{"name":"training-report-ca"}}]}}],
+		  "containers":[{"name":"worker","image":"python:3.12-alpine@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89",
+		    "command":["sleep","3600"],"volumeMounts":[{"name":"report","mountPath":"/var/run/training-report","readOnly":true}],
+		    "resources":{"limits":{"nvidia.com/gpu":"1"}}}]}}}}
+	JSON
+	"$KUBECTL_BIN" -n "$ns" wait pod -l job-name=training-worker --for=create --timeout=60s
+	"$KUBECTL_BIN" -n "$ns" wait pod -l job-name=training-worker --for=condition=Ready --timeout=120s
+	worker=$("$KUBECTL_BIN" -n "$ns" get pods -l job-name=training-worker -o jsonpath='{.items[0].metadata.name}')
+
+	: >"$pf_log"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+		"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
+	pf_pid=$!
+	deadline=$((SECONDS + 30))
+	while ((SECONDS < deadline)); do
+		public_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$pf_log")
+		[[ -n $public_port ]] && break
+		sleep 1
+	done
+	[[ -n $public_port ]] || die "evidence-phase port-forward allocated no local port"
+	evidence_api() {
+		curl --silent --show-error --noproxy '*' --max-time 10 \
+			-H 'Authorization: Bearer integration-operator-token' "$@"
+	}
+	open_and_read() {
+		local node=$1 class=$2 id='' before
+		# An earlier phase may have left an incident of the same class on
+		# this node: read only the one this call opens.
+		before=$(evidence_api "http://127.0.0.1:${public_port}/api/v1/incidents?node=${node}" |
+			"$JQ_BIN" -c --arg class "$class" '[(. // [])[] | select(.class == $class) | .id]')
+		code=$(evidence_api -H 'Content-Type: application/json' \
+			--data-binary "{\"node\":\"${node}\",\"class\":\"${class}\",\"actor\":\"harness\"}" \
+			-o /dev/null -w '%{http_code}' "http://127.0.0.1:${public_port}/api/v1/incidents")
+		[[ $code == 202 ]] || die "evidence incident returned $code, want 202"
+		deadline=$((SECONDS + TIMEOUT_SECONDS))
+		while ((SECONDS < deadline)); do
+			id=$(evidence_api "http://127.0.0.1:${public_port}/api/v1/incidents?node=${node}" |
+				"$JQ_BIN" -r --arg class "$class" --argjson before "$before" \
+					'[(. // [])[] | select(.class == $class and (.id as $id | $before | index($id) | not))][0].id // empty')
+			if [[ -n $id ]]; then
+				detail=$(evidence_api "http://127.0.0.1:${public_port}/api/v1/incidents/${id}")
+				"$JQ_BIN" -e '.evidence.observed_at' >/dev/null <<<"$detail" && return 0
+			fi
+			sleep 2
+		done
+		die "incident $class on $node recorded no evidence"
+	}
+
+	open_and_read "$target_node" gpu-lost
+	local job_uid
+	job_uid=$("$KUBECTL_BIN" -n "$ns" get job training-worker -o jsonpath='{.metadata.uid}')
+	# Opening evidence is available before the first reconcile captures workers.
+	local incident_id
+	incident_id=$("$JQ_BIN" -er '.incident.id' <<<"$detail")
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		detail=$(evidence_api "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}")
+		"$JQ_BIN" -e '.affected_jobs != null' <<<"$detail" >/dev/null && break
+		sleep 1
+	done
+	"$JQ_BIN" -e --arg uid "$job_uid" 'any(.affected_jobs[]?; .owner.uid == $uid)' <<<"$detail" >/dev/null ||
+		die "incident did not capture the training Job UID"
+	local phase
+	for phase in checkpoint resume; do
+		"$KUBECTL_BIN" -n "$ns" exec -i "$worker" -- python - "$phase" "$service_dns" <"$REPO_ROOT/hack/fixtures/training-worker.py"
+	done
+	local snapshot="$work_dir/training-report.db" pod_uid
+	pod_uid=$("$KUBECTL_BIN" -n "$ns" get pod "$worker" -o jsonpath='{.metadata.uid}')
+	evidence_api --fail "http://127.0.0.1:${public_port}/api/v1/backup" -o "$snapshot"
+	python3 - "$snapshot" "$incident_id" "$job_uid" "$pod_uid" <<-'PYTHON'
+		import sqlite3
+		import sys
+		from pathlib import Path
+
+		with sqlite3.connect(Path(sys.argv[1]).as_uri() + "?mode=ro", uri=True) as db:
+		    row = db.execute(
+		        "SELECT step FROM training_progress WHERE incident_id=? AND job_uid=? AND pod_uid=?",
+		        sys.argv[2:],
+		    ).fetchone()
+		    facts = db.execute(
+		        "SELECT kind, checkpoint_id, step FROM training_checkpoint_facts "
+		        "WHERE incident_id=? AND job_uid=? AND pod_uid=? ORDER BY kind",
+		        sys.argv[2:],
+		    ).fetchall()
+		if facts != [("checkpoint", "epoch-0", 0), ("resume", "epoch-0", None)]:
+		    raise SystemExit(f"unexpected persisted checkpoint reports: {facts}")
+		if row != (1,):
+		    raise SystemExit(f"expected persisted worker step 1, got {row}")
+	PYTHON
+	note "verified worker step 1 in the SQLite snapshot for the captured incident, Job and pod"
+
+
+	"$JQ_BIN" -e '
+		.evidence.vendor_software.state == "degraded" and
+		(.evidence.vendor_software.resources | any(.name == "nvidia.com/gpu" and .capacity == 2)) and
+		(.evidence.vendor_software.components | any(.name == "device-plugin" and .state == "not-ready")) and
+		(.evidence | tostring | contains("fake-device-plugin") | not) and
+		.evidence.fault_location.location == "unknown" and
+		.evidence.network_resource.state == "unknown" and
+		(.audit | any(.action == "evidence"))' >/dev/null <<<"$detail" || {
+		"$JQ_BIN" -c '{id, class, evidence}' <<<"$detail" >&2 || true
+		die "gpu-lost evidence does not show the degraded software state"
+	}
+	note "a lost GPU beside a not-ready device plugin is shown as software, location unknown"
+
+	# Without the plugin pod or the resource, nothing may read as healthy.
+	"$KUBECTL_BIN" -n "$ns" delete pod fake-device-plugin --wait=true >/dev/null
+	patch_node_status_resources "$target_node" - nvidia.com/gpu
+	open_and_read "$target_node" ecc-dbe
+	"$JQ_BIN" -e '
+		.evidence.vendor_software.state != "ok" and
+		.evidence.network_resource.state == "unknown" and
+		.evidence.fault_location.location == "this-node"' >/dev/null <<<"$detail" || {
+		"$JQ_BIN" -c '{id, class, evidence}' <<<"$detail" >&2 || true
+		die "evidence read a node without a device plugin as healthy"
+	}
+	note "incident evidence: PASS"
+}
+
+# exercise_cloud_interruption: the AWS Node Termination Handler's spot taint
+# on a worker must open a cloud-interruption incident that records the notice,
+# and removing the taint must close it as ended. The fixture binds no
+# policy to the class, so nothing is asked or cordoned.
+exercise_cloud_interruption() {
+	note "exercising an announced cloud interruption read from a node taint"
+	local pf_log="$work_dir/interruption-port-forward.log"
+	local pf_pid='' public_port='' target_node deadline id='' state='' detail=''
+	local taint=aws-node-termination-handler/spot-itn
+	target_node=$("$KUBECTL_BIN" get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[0].metadata.name}')
+	[[ -n $target_node ]] || die "no worker node for the interruption scenario"
+
+	local restore_done=0
+	restore_interruption() {
+		((restore_done)) && return 0
+		restore_done=1
+		if [[ -n $pf_pid ]]; then kill "$pf_pid" >/dev/null 2>&1 || true; fi
+		"$KUBECTL_BIN" taint node "$target_node" "${taint}-" >/dev/null 2>&1 || true
+	}
+	trap restore_interruption RETURN
+
+	: >"$pf_log"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+		"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
+	pf_pid=$!
+	deadline=$((SECONDS + 30))
+	while ((SECONDS < deadline)); do
+		public_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$pf_log")
+		[[ -n $public_port ]] && break
+		sleep 1
+	done
+	[[ -n $public_port ]] || die "interruption-phase port-forward allocated no local port"
+	interruption_api() {
+		curl --silent --show-error --noproxy '*' --max-time 10 \
+			-H 'Authorization: Bearer integration-operator-token' "$@"
+	}
+
+	"$KUBECTL_BIN" taint node "$target_node" "${taint}=kind-event-1:NoSchedule" >/dev/null
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		id=$(interruption_api "http://127.0.0.1:${public_port}/api/v1/incidents?node=${target_node}" |
+			"$JQ_BIN" -r '[(. // [])[] | select(.class == "cloud-interruption")][0].id // empty')
+		if [[ -n $id ]]; then
+			detail=$(interruption_api "http://127.0.0.1:${public_port}/api/v1/incidents/${id}")
+			"$JQ_BIN" -e '.audit | any(.action == "interruption")' >/dev/null <<<"$detail" && break
+		fi
+		sleep 2
+	done
+	[[ -n $id ]] || die "the spot taint on $target_node opened no cloud-interruption incident"
+	"$JQ_BIN" -e '
+		(.audit | any(.action == "interruption" and (.result | contains("spot-reclaim")) and
+			(.result | contains("aws-node-termination-handler:taint/spot-itn")))) and
+		(.audit | any(.action == "interruption-warned") | not)' >/dev/null <<<"$detail" || {
+		"$JQ_BIN" -c '{id: .incident.id, class: .incident.class, state: .incident.state, audit: [.audit[] | {action, result}]}' <<<"$detail" >&2 || true
+		die "the cloud-interruption incident does not record the notice, or warned without a policy"
+	}
+	note "a spot taint opened incident $id and recorded the notice"
+
+	"$KUBECTL_BIN" taint node "$target_node" "${taint}-" >/dev/null
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		state=$(interruption_api "http://127.0.0.1:${public_port}/api/v1/incidents/${id}" | "$JQ_BIN" -r '.incident.state // empty')
+		[[ $state == RESOLVED ]] && break
+		sleep 2
+	done
+	[[ $state == RESOLVED ]] || die "incident $id is $state after the taint was removed, want RESOLVED"
+	[[ -z $("$KUBECTL_BIN" get node "$target_node" -o jsonpath='{.spec.unschedulable}') ]] ||
+		die "$target_node is cordoned after an interruption without a policy"
+	note "cloud interruption: PASS"
+}
+
+exercise_accelerator_health() {
+	note "exercising an accelerator health profile against a fake Neuron condition"
+	local pf_log="$work_dir/health-port-forward.log"
+	local pf_pid='' public_port='' target_node deadline id='' detail='' now code
+	target_node=$("$KUBECTL_BIN" get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[0].metadata.name}')
+	[[ -n $target_node ]] || die "no worker node for the accelerator health scenario"
+
+	# remove_health_condition removes the synthetic NeuronHealth condition by
+	# its index, read right before the patch; absent is a no-op.
+	remove_health_condition() {
+		local index
+		index=$("$KUBECTL_BIN" get node "$target_node" -o json |
+			"$JQ_BIN" -r '[.status.conditions // [] | to_entries[] | select(.value.type == "NeuronHealth") | .key][0] // empty')
+		[[ -n $index ]] || return 0
+		"$KUBECTL_BIN" patch node "$target_node" --subresource=status --type=json \
+			-p "[{\"op\":\"remove\",\"path\":\"/status/conditions/${index}\"}]" >/dev/null
+	}
+	local restore_done=0
+	restore_health() {
+		((restore_done)) && return 0
+		restore_done=1
+		if [[ -n $pf_pid ]]; then kill "$pf_pid" >/dev/null 2>&1 || true; fi
+		remove_health_condition || true
+		patch_node_status_resources "$target_node" - aws.amazon.com/neuron || true
+	}
+	trap restore_health RETURN
+
+	# A Trainium device and the condition the Neuron node problem detector
+	# writes for an uncorrectable HBM error. The kubelet keeps both: it owns
+	# neither the extended resource nor the condition type.
+	patch_node_status_resources "$target_node" 1 aws.amazon.com/neuron
+	now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	"$KUBECTL_BIN" patch node "$target_node" --subresource=status --type=json -p "[{\"op\":\"add\",\"path\":\"/status/conditions/-\",\"value\":
+		{\"type\":\"NeuronHealth\",\"status\":\"True\",\"reason\":\"NeuronHasError_DMA_ERROR\",
+		 \"message\":\"kind-integration free text\",\"lastHeartbeatTime\":\"$now\",\"lastTransitionTime\":\"$now\"}}]" >/dev/null
+
+	: >"$pf_log"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+		"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
+	pf_pid=$!
+	deadline=$((SECONDS + 30))
+	while ((SECONDS < deadline)); do
+		public_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$pf_log")
+		[[ -n $public_port ]] && break
+		sleep 1
+	done
+	[[ -n $public_port ]] || die "health-phase port-forward allocated no local port"
+	health_api() {
+		curl --silent --show-error --noproxy '*' --max-time 10 \
+			-H 'Authorization: Bearer integration-operator-token' "$@"
+	}
+
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		id=$(health_api "http://127.0.0.1:${public_port}/api/v1/incidents?node=${target_node}" |
+			"$JQ_BIN" -r '[(. // [])[] | select(.class == "accelerator-fault")][0].id // empty')
+		[[ -n $id ]] && break
+		sleep 2
+	done
+	[[ -n $id ]] || die "the NeuronHealth condition opened no accelerator-fault incident on $target_node"
+	detail=$(health_api "http://127.0.0.1:${public_port}/api/v1/incidents/${id}")
+	"$JQ_BIN" -e '
+		(.audit[0].params as $p |
+			$p.health_source == "kubernetes-node" and $p.profile == "aws-neuron" and $p.rule == "neuron-npd" and
+			$p.reason == "NeuronHasError_DMA_ERROR" and $p.signal == "condition:NeuronHealth=True") and
+		(tostring | contains("kind-integration free text") | not)' >/dev/null <<<"$detail" || {
+		"$JQ_BIN" -c '{id, class, audit: .audit[0]}' <<<"$detail" >&2 || true
+		die "the accelerator-fault incident does not carry the profile evidence, or carries the condition message"
+	}
+	note "a NeuronHealth condition opened accelerator-fault with the profile evidence and without the message"
+
+	# The signal goes away, then the incident is closed: nothing reopens it.
+	remove_health_condition
+	sleep 25
+	code=$(health_api -X POST -H 'Content-Type: application/json' \
+		-H "Idempotency-Key: kind-integration-${RUN_ID}-health-resolve" \
+		--data-binary '{"actor":"harness","reason":"accelerator health phase complete"}' \
+		-o /dev/null -w '%{http_code}' "http://127.0.0.1:${public_port}/api/v1/incidents/${id}/resolve")
+	[[ $code == 200 || $code == 204 || $code == 202 ]] || die "resolving the accelerator-fault incident returned $code"
+	sleep 25
+	[[ -z $(health_api "http://127.0.0.1:${public_port}/api/v1/incidents?node=${target_node}" |
+		"$JQ_BIN" -r '[(. // [])[] | select(.class == "accelerator-fault" and .state != "RESOLVED")][0].id // empty') ]] ||
+		die "an accelerator-fault incident reopened after the condition was removed"
+	note "accelerator health: PASS"
+}
+
+exercise_real_cordon_and_uncordon() {
+	note "exercising REAL cordon and the janitor's uncordon on one worker"
+	local pf_log="$work_dir/cordon-port-forward.log"
+	local pf_pid='' public_port='' target_node incident_id state deadline
+
+	# A worker, never the control plane: cordoning the control plane would
+	# disturb everything else running in this cluster.
+	target_node=$("$KUBECTL_BIN" get nodes \
+		-l '!node-role.kubernetes.io/control-plane' \
+		-o jsonpath='{.items[0].metadata.name}')
+	[[ -n $target_node ]] || die "no worker node for the cordon scenario"
+
+	local restore_done=0
+	restore_dry_run() {
+		((restore_done)) && return 0
+		restore_done=1
+		"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=merge \
+			-p '{"spec":{"safety":{"executionMode":"DryRun","destructiveExecution":null}}}' >/dev/null 2>&1 || true
+		"$KUBECTL_BIN" uncordon "$target_node" >/dev/null 2>&1 || true
+		"$KUBECTL_BIN" label node "$target_node" kubeneuron.io/cordon-test- >/dev/null 2>&1 || true
+	}
+	# Restore on ANY exit from here, including a die() in the middle: leaving a
+	# cluster armed for destructive execution would silently change what every
+	# later phase means.
+	trap restore_dry_run RETURN
+
+	"$KUBECTL_BIN" label node "$target_node" kubeneuron.io/cordon-test=yes --overwrite >/dev/null
+
+	"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=merge -p "$(cat <<-JSON
+		{"spec":{"safety":{"executionMode":"Enabled","destructiveExecution":{
+		  "nodeSelector":{"kubeneuron.io/cordon-test":"yes"},
+		  "acknowledgement":"I understand these nodes may be reset, rebooted, or destroyed"}}}}
+	JSON
+	)" >/dev/null
+	# Do NOT wait on a rollout here: the operator deliberately keeps the
+	# config-digest off the controller's pod template, so a safety change
+	# reloads in place and the Deployment never rolls. `rollout status` returns
+	# instantly and means nothing, which is what made the first three attempts
+	# at this phase trigger an incident against a controller still in dry-run —
+	# and dry_run is stamped on the incident at OPEN, so it stayed dry-run for
+	# life. Wait for the controller to say the mode took effect instead.
+
+	: >"$pf_log" # same fork race as the backup phase's port-forwards
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+		"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
+	pf_pid=$!
+	deadline=$((SECONDS + 30))
+	while ((SECONDS < deadline)); do
+		public_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$pf_log")
+		[[ -n $public_port ]] && break
+		sleep 1
+	done
+	[[ -n $public_port ]] || die "cordon-phase port-forward allocated no local port"
+
+	cordon_api() {
+		curl --silent --show-error --noproxy '*' --max-time 10 \
+			-H 'Authorization: Bearer integration-operator-token' "$@"
+	}
+	node_unschedulable() {
+		"$KUBECTL_BIN" get node "$target_node" -o jsonpath='{.spec.unschedulable}' 2>/dev/null
+	}
+
+	[[ "$(node_unschedulable)" != "true" ]] || die "$target_node was already cordoned before this phase"
+
+	# The controller reports what it is ACTUALLY doing, not what was asked for.
+	# The chain from a patched CR to an armed controller runs through the
+	# operator, a ConfigMap, the kubelet's volume sync and the reload poll, and
+	# on this cluster it takes about a minute.
+	local mode deadline
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		mode=$(cordon_api "http://127.0.0.1:${public_port}/api/v1/runtime-config" |
+			"$JQ_BIN" -r '.execution_mode // empty')
+		[[ $mode == enabled ]] && break
+		sleep 3
+	done
+	[[ $mode == enabled ]] ||
+		die "the controller still reports execution_mode=${mode:-unknown} after patching the installation to Enabled"
+	note "the controller picked up executionMode: Enabled"
+
+	local trigger_code
+	trigger_code=$(cordon_api -H 'Content-Type: application/json' \
+		--data-binary "{\"node\":\"${target_node}\",\"class\":\"integration-cordon-test\",\"actor\":\"harness\"}" \
+		-o /dev/null -w '%{http_code}' \
+		"http://127.0.0.1:${public_port}/api/v1/incidents")
+	[[ $trigger_code == 202 ]] || die "cordon-test incident returned $trigger_code, want 202"
+
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		incident_id=$(cordon_api "http://127.0.0.1:${public_port}/api/v1/incidents?node=${target_node}" |
+			"$JQ_BIN" -r '[.[] | select(.class == "integration-cordon-test")][0].id // empty')
+		[[ -n $incident_id ]] && break
+		sleep 1
+	done
+	[[ -n $incident_id ]] || die "cordon-test incident never appeared"
+
+	# THE assertion: the node is really unschedulable, in the cluster.
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		[[ "$(node_unschedulable)" == "true" ]] && break
+		sleep 2
+	done
+	if [[ "$(node_unschedulable)" != "true" ]]; then
+		# Say WHY, not just that. A phase that reports only "it did not
+		# happen" costs a full 40-minute run per hypothesis, which is how
+		# three cycles went by on guesses read from the source.
+		echo "--- cordon phase diagnostics: the incident ---" >&2
+		cordon_api "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}" >&2 || true
+		echo >&2
+		echo "--- cordon phase diagnostics: the controller's runtime config ---" >&2
+		cordon_api "http://127.0.0.1:${public_port}/api/v1/runtime-config" >&2 || true
+		echo >&2
+		echo "--- cordon phase diagnostics: node labels as the cluster has them ---" >&2
+		"$KUBECTL_BIN" get node "$target_node" -o jsonpath='{.metadata.labels}' >&2 || true
+		echo >&2
+		echo "--- cordon phase diagnostics: controller log tail ---" >&2
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" logs \
+			deployment/"${ROOT_NAME}-controller" --tail=80 >&2 2>&1 || true
+		die "$target_node was never cordoned; the Cordon action does not reach the cluster"
+	fi
+	note "real cordon applied: $target_node is unschedulable"
+
+	# And the half nothing had ever run: resolving the incident must give the
+	# capacity back, without anybody uncordoning by hand.
+	#
+	# Since v0.4.0 every mutable operator route requires an Idempotency-Key and
+	# a resolve answers 200 with the incident it resolved (docs/reference-api.md).
+	# The older 204/202 are still accepted so the phase keeps reading on a
+	# controller that predates the fencing; the 400 a missing key earns is not.
+	local resolve_code
+	resolve_code=$(cordon_api -X POST -H 'Content-Type: application/json' \
+		-H "Idempotency-Key: kind-integration-${RUN_ID}-cordon-resolve" \
+		--data-binary '{"actor":"harness","reason":"cordon phase complete"}' \
+		-o /dev/null -w '%{http_code}' \
+		"http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}/resolve")
+	[[ $resolve_code == 200 || $resolve_code == 204 || $resolve_code == 202 ]] ||
+		die "resolving the cordon-test incident returned $resolve_code"
+
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		[[ "$(node_unschedulable)" != "true" ]] && break
+		sleep 2
+	done
+	[[ "$(node_unschedulable)" != "true" ]] ||
+		die "$target_node is still cordoned after its incident resolved; the janitor never gave the capacity back"
+
+	kill "$pf_pid" >/dev/null 2>&1 || true
+	wait "$pf_pid" >/dev/null 2>&1 || true
+	note "the cordon janitor uncordoned $target_node after its incident resolved"
+}
+
+# exercise_workload_safe_recovery is the live G2 coverage of the v0.8
+# workload-safe recovery surfaces (docs/workload-safe-recovery-design.md) on
+# this same fixture: the advisory at approval park, its withdrawal on a
+# rejection, the durable impact preview and the approve bound to its digest,
+# the Phase 1 request reaching a group peer on ANOTHER node, and the dry-run
+# posture that patches nothing. The workloads are real Pods (the kind node's
+# own pause image, managed by Deployments so a drain evicts them), the
+# disruption is a REAL drain on an armed worker, and every assertion reads
+# the cluster back. Nothing here is a GPU or hardware claim, and no framework
+# (Kueue, Ray) is involved: the protocol is exercised on bare Pods.
+exercise_workload_safe_recovery() {
+	note "exercising workload-safe recovery: advisory, impact preview, group peers and a real drain"
+	local ns="kubeneuron-workload-safe"
+	local pf_log="$work_dir/workload-safe-port-forward.log"
+	local pf_pid='' public_port='' target_node peer_node incident_id state deadline
+	local pause_image controller_sa
+
+	mapfile -t workers < <("$KUBECTL_BIN" get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+	((${#workers[@]} >= 1)) || die "no worker node for the workload-safe scenario"
+	# Never the node the controller runs on: its PodDisruptionBudget (minAvailable
+	# 1 of 1) refuses the eviction, the drain sits in its PDB retry loop and the
+	# phase waits on a step that cannot finish — the documented "draining the
+	# controller's own node" case, which is not what this phase tests. The
+	# controller-restart exercise before this one may have moved the Pod to
+	# either worker, so the choice is made here, not assumed.
+	local controller_node
+	controller_node=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get pods -l app.kubernetes.io/component=controller 		-o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null || true)
+	target_node=''
+	peer_node=''
+	local w
+	for w in "${workers[@]}"; do
+		if [[ $w != "$controller_node" && -z $target_node ]]; then
+			target_node=$w
+		elif [[ -z $peer_node ]]; then
+			peer_node=$w
+		fi
+	done
+	[[ -n $target_node ]] || die "every worker hosts the controller (${controller_node}); the workload-safe drain needs a node it can empty"
+
+	local restore_done=0
+	restore_workload_safe() {
+		((restore_done)) && return 0
+		restore_done=1
+		if [[ -n $pf_pid ]]; then
+			kill "$pf_pid" >/dev/null 2>&1 || true
+			wait "$pf_pid" >/dev/null 2>&1 || true
+		fi
+		"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=merge \
+			-p '{"spec":{"safety":{"executionMode":"DryRun","destructiveExecution":null,"checkpointCoordination":null,"impactPreview":null}}}' >/dev/null 2>&1 || true
+		"$KUBECTL_BIN" delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+		"$KUBECTL_BIN" uncordon "$target_node" >/dev/null 2>&1 || true
+		"$KUBECTL_BIN" label node "$target_node" kubeneuron.io/ws-test- >/dev/null 2>&1 || true
+	}
+	trap restore_workload_safe RETURN
+
+	ws_api() {
+		curl --silent --show-error --noproxy '*' --max-time 15 \
+			-H 'Authorization: Bearer integration-operator-token' "$@"
+	}
+	start_ws_port_forward() {
+		: >"$pf_log"
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+			"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
+		pf_pid=$!
+		local pf_deadline=$((SECONDS + 30))
+		while ((SECONDS < pf_deadline)); do
+			public_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$pf_log")
+			[[ -n $public_port ]] && break
+			sleep 1
+		done
+		[[ -n $public_port ]] || die "workload-safe port-forward allocated no local port"
+	}
+	incident_state() {
+		# The list is JSON null, not [], when nothing matches.
+		ws_api "http://127.0.0.1:${public_port}/api/v1/incidents?node=${target_node}" |
+			"$JQ_BIN" -r --arg id "$incident_id" '(. // [])[] | select(.id == $id) | .state'
+	}
+	incident_round() {
+		ws_api "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}" |
+			"$JQ_BIN" -r '.incident.approval_epoch // 0'
+	}
+	audit_results() {
+		ws_api "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}" |
+			"$JQ_BIN" -r '.audit[] | "\(.action)\t\(.result)"'
+	}
+	pod_annotation() {
+		"$KUBECTL_BIN" -n "$ns" get pod "$1" -o jsonpath="{.metadata.annotations.$2}" 2>/dev/null
+	}
+	pod_of() {
+		"$KUBECTL_BIN" -n "$ns" get pods -l "app=$1" --field-selector=status.phase=Running \
+			-o jsonpath='{.items[0].metadata.name}' 2>/dev/null
+	}
+	trigger_incident() {
+		local code
+		code=$(ws_api -H 'Content-Type: application/json' \
+			--data-binary "{\"node\":\"${target_node}\",\"class\":\"integration-workload-safe-test\",\"actor\":\"harness\"}" \
+			-o /dev/null -w '%{http_code}' "http://127.0.0.1:${public_port}/api/v1/incidents")
+		[[ $code == 202 ]] || die "workload-safe incident returned $code, want 202"
+		incident_id=
+		deadline=$((SECONDS + TIMEOUT_SECONDS))
+		while [[ -z $incident_id ]] && ((SECONDS < deadline)); do
+			incident_id=$(ws_api "http://127.0.0.1:${public_port}/api/v1/incidents?node=${target_node}&state=AWAITING_APPROVAL,EVALUATING,EXECUTING" |
+				"$JQ_BIN" -r '[(. // [])[] | select(.class == "integration-workload-safe-test")][0].id // empty')
+			[[ -n $incident_id ]] || sleep 1
+		done
+		[[ -n $incident_id ]] || die "workload-safe incident never appeared"
+		deadline=$((SECONDS + TIMEOUT_SECONDS))
+		state=
+		while ((SECONDS < deadline)); do
+			state=$(incident_state)
+			[[ $state == AWAITING_APPROVAL ]] && break
+			sleep 1
+		done
+		[[ $state == AWAITING_APPROVAL ]] || die "incident $incident_id is ${state:-unknown}, want AWAITING_APPROVAL"
+	}
+	wait_annotation() {
+		local pod=$1 key=$2 want=$3 what=$4
+		local got=''
+		deadline=$((SECONDS + TIMEOUT_SECONDS))
+		while ((SECONDS < deadline)); do
+			got=$(pod_annotation "$pod" "$key")
+			if [[ -n $want && $got == "$want" ]] || [[ -z $want && -n $got ]]; then
+				return 0
+			fi
+			sleep 2
+		done
+		"$KUBECTL_BIN" -n "$ns" get pod "$pod" -o jsonpath='{.metadata.annotations}' >&2 || true
+		echo >&2
+		die "timed out waiting for $what on $pod (key $key = '${got}')"
+	}
+	resolve_incident() {
+		local code
+		code=$(ws_api -X POST -H 'Content-Type: application/json' \
+			-H "Idempotency-Key: kind-integration-${RUN_ID}-ws-resolve-$1" \
+			--data-binary '{"actor":"harness","reason":"workload-safe phase complete"}' \
+			-o /dev/null -w '%{http_code}' \
+			"http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}/resolve")
+		[[ $code == 200 || $code == 204 || $code == 202 ]] || die "resolving the workload-safe incident returned $code"
+	}
+	wait_pods_running() {
+		local app node want_node=$2
+		app=$1
+		deadline=$((SECONDS + TIMEOUT_SECONDS))
+		while ((SECONDS < deadline)); do
+			node=$("$KUBECTL_BIN" -n "$ns" get pods -l "app=$app" --field-selector=status.phase=Running -o jsonpath='{.items[0].spec.nodeName}' 2>/dev/null || true)
+			[[ $node == "$want_node" ]] && return 0
+			sleep 2
+		done
+		"$KUBECTL_BIN" -n "$ns" get pods -o wide >&2 || true
+		die "$app never ran on $want_node"
+	}
+
+	# The kind node's own sandbox image is the one image every node holds
+	# without pulling anything: this gate stays offline.
+	pause_image=$("$DOCKER_BIN" exec "$target_node" crictl images -o json 2>/dev/null |
+		"$JQ_BIN" -r '[.images[].repoTags[]? | select(test("/pause:"))][0] // empty')
+	[[ -n $pause_image ]] || die "no pause image on $target_node to run the workload-safe Pods with"
+
+	"$KUBECTL_BIN" create namespace "$ns" >/dev/null
+	"$KUBECTL_BIN" label node "$target_node" kubeneuron.io/ws-test=yes --overwrite >/dev/null
+	deploy_rank() {
+		local app=$1 node=$2 opt_in=$3
+		local annotations='{}'
+		if ((opt_in)); then
+			annotations='{"kubeneuron.io/checkpoint":"true","kubeneuron.io/checkpoint-group":"run-1","kubeneuron.io/checkpoint-max-wait":"3m"}'
+		fi
+		"$KUBECTL_BIN" -n "$ns" apply -f - >/dev/null <<-JSON
+		{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"$app"},
+		 "spec":{"replicas":1,"selector":{"matchLabels":{"app":"$app"}},
+		  "template":{"metadata":{"labels":{"app":"$app"},"annotations":$annotations},
+		   "spec":{"nodeSelector":{"kubernetes.io/hostname":"$node"},
+		    "terminationGracePeriodSeconds":1,
+		    "containers":[{"name":"pause","image":"$pause_image","imagePullPolicy":"IfNotPresent"}]}}}}
+		JSON
+	}
+	deploy_rank rank-0 "$target_node" 1
+	deploy_rank rank-1 "$target_node" 1
+	deploy_rank bystander "$target_node" 0
+	if [[ -n $peer_node ]]; then
+		deploy_rank rank-2 "$peer_node" 1
+	fi
+	wait_pods_running rank-0 "$target_node"
+	wait_pods_running rank-1 "$target_node"
+	wait_pods_running bystander "$target_node"
+	[[ -z $peer_node ]] || wait_pods_running rank-2 "$peer_node"
+
+	# Arm the one worker and switch the v0.8 blocks on: coordination with the
+	# advisory and cross-node groups, and a preview the approve must carry.
+	"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=merge -p "$(cat <<-JSON
+		{"spec":{"safety":{"executionMode":"Enabled","destructiveExecution":{
+		  "nodeSelector":{"kubeneuron.io/ws-test":"yes"},
+		  "acknowledgement":"I understand these nodes may be reset, rebooted, or destroyed"},
+		 "checkpointCoordination":{"enabled":true,"namespaces":["$ns"],"defaultWait":"2m","maxWait":"5m",
+		  "advisory":{"enabled":true,"budget":"10s"},
+		  "groups":{"enabled":true,"maxGroupSize":8,"crossNode":true}},
+		 "impactPreview":{"enabled":true,"budget":"15s","maxItems":50,"requireForApproval":true}}}}
+	JSON
+	)" >/dev/null
+	controller_sa="system:serviceaccount:${TARGET_NAMESPACE}:${ROOT_NAME}-controller"
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		[[ "$("$KUBECTL_BIN" auth can-i patch pods --as="$controller_sa" 2>/dev/null || true)" == yes ]] && break
+		sleep 2
+	done
+	[[ "$("$KUBECTL_BIN" auth can-i patch pods --as="$controller_sa" 2>/dev/null || true)" == yes ]] ||
+		die "the managed controller never gained pods: patch after enabling checkpoint coordination"
+	start_ws_port_forward
+	# Wait for THIS configuration, by digest, not for execution_mode: the
+	# previous exercise left the controller in Enabled, so a mode check passes
+	# on the stale snapshot and the incident then parks under a policy with no
+	# advisory, no preview and no groups (that was the first failure of this
+	# phase, 30s ahead of the reload).
+	local mode armed_digest loaded_digest=''
+	wait_observed_generation "$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')"
+	armed_digest=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.status.configDigest}')
+	[[ -n $armed_digest ]] || die "the root has no configDigest after arming the workload-safe fixture"
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		loaded_digest=$(ws_api "http://127.0.0.1:${public_port}/api/v1/runtime-config" | "$JQ_BIN" -r '.source_digest // empty')
+		[[ $loaded_digest == "$armed_digest" ]] && break
+		sleep 3
+	done
+	[[ $loaded_digest == "$armed_digest" ]] || die "the controller still runs configuration ${loaded_digest:-unknown}, not the armed ${armed_digest}"
+	mode=$(ws_api "http://127.0.0.1:${public_port}/api/v1/runtime-config" | "$JQ_BIN" -r '.execution_mode // empty')
+	[[ $mode == enabled ]] || die "the controller reports execution_mode=${mode:-unknown} under the armed configuration"
+	note "workload-safe fixture armed on $target_node with coordination, advisory, groups and a required preview (config ${armed_digest:0:12} live)"
+
+	# --- Phase A: advisory at park, preview, refused approve, rejection → withdrawal
+	trigger_incident
+	local rank0 rank1 rank2='' bystander
+	rank0=$(pod_of rank-0)
+	rank1=$(pod_of rank-1)
+	bystander=$(pod_of bystander)
+	[[ -z $peer_node ]] || rank2=$(pod_of rank-2)
+	wait_annotation "$rank0" 'kubeneuron\.io/checkpoint-advisory' true "the advisory"
+	wait_annotation "$rank1" 'kubeneuron\.io/checkpoint-advisory' true "the advisory"
+	[[ "$(pod_annotation "$rank0" 'kubeneuron\.io/checkpoint-advisory-incident')" == "$incident_id" ]] ||
+		die "the advisory on $rank0 names another incident"
+	[[ "$(pod_annotation "$rank0" 'kubeneuron\.io/checkpoint-advisory-round')" == 1 ]] ||
+		die "the advisory on $rank0 is not round 1"
+	[[ "$(pod_annotation "$rank0" 'kubeneuron\.io/checkpoint-advisory-next-action')" == platform.drain ]] ||
+		die "the advisory on $rank0 does not name platform.drain"
+	[[ -z "$(pod_annotation "$bystander" 'kubeneuron\.io/checkpoint-advisory')" ]] ||
+		die "a Pod that never opted in was advised"
+	[[ -z "$(pod_annotation "$rank0" 'kubeneuron\.io/checkpoint-deadline-at')" ]] ||
+		die "the advisory stamped a request deadline; an advisory promises nothing"
+	note "advisory stamped on the two opted-in Pods only, round 1, before platform.drain"
+
+	local preview_file="$work_dir/ws-preview-a.json" preview_code digest
+	preview_code=$(ws_api -o "$preview_file" -w '%{http_code}' "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}/impact-preview")
+	[[ $preview_code == 200 ]] || die "impact preview returned $preview_code, want 200"
+	"$JQ_BIN" -e '.version == "impact-preview/v1" and .unavailable == null and .round == 1 and .pending_step == "cordon"' "$preview_file" >/dev/null ||
+		{ "$JQ_BIN" . "$preview_file" >&2; die "impact preview is not a computed round-1 document parked at cordon"; }
+	"$JQ_BIN" -e '.downstream_disruptions == ["platform.drain"] and .workloads.eligible_for_checkpoint == 2 and (.workloads.ineligible["not-opted-in"] // 0) >= 1' "$preview_file" >/dev/null ||
+		{ "$JQ_BIN" . "$preview_file" >&2; die "impact preview did not count the two eligible Pods and the bystander"; }
+	local want_total=2
+	[[ -z $peer_node ]] || want_total=3
+	"$JQ_BIN" -e --argjson total "$want_total" '.workloads.groups | length == 1 and .[0].name == "run-1" and .[0].members_on_node == 2 and .[0].members_total == $total and .[0].cross_node_requested == true' "$preview_file" >/dev/null ||
+		{ "$JQ_BIN" .workloads.groups "$preview_file" >&2; die "impact preview did not describe the group run-1"; }
+	"$JQ_BIN" -e '.node.topology.topology == "unknown" and .node.topology.device_actions == "refused"' "$preview_file" >/dev/null ||
+		{ "$JQ_BIN" .node "$preview_file" >&2; die "a kind node without GPU evidence must preview as unknown/refused"; }
+	digest=$("$JQ_BIN" -r '.digest' "$preview_file")
+	[[ $digest == sha256:* ]] || die "impact preview digest is '$digest'"
+	(($(audit_results | grep -c $'^impact-preview-computed\t') >= 1)) || die "no impact-preview-computed audit row"
+	(($(audit_results | grep -c $'^checkpoint-advisory\t') >= 1)) || die "no checkpoint-advisory audit row"
+	note "impact preview computed for round 1: digest $digest"
+
+	local code
+	code=$(ws_api -H 'Content-Type: application/json' --data-binary '{"actor":"harness","park_epoch":1}' \
+		-o /dev/null -w '%{http_code}' "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}/approve")
+	[[ $code == 409 ]] || die "approve without the impact digest returned $code, want 409 under requireForApproval"
+	code=$(ws_api -H 'Content-Type: application/json' --data-binary '{"actor":"harness","park_epoch":1,"impact_digest":"sha256:stale"}' \
+		-o /dev/null -w '%{http_code}' "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}/approve")
+	[[ $code == 409 ]] || die "approve with a stale digest returned $code, want 409"
+	code=$(ws_api -H 'Content-Type: application/json' --data-binary '{"actor":"harness","park_epoch":1,"reason":"not now"}' \
+		-o /dev/null -w '%{http_code}' "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}/reject")
+	[[ $code == 204 ]] || die "reject returned $code, want 204"
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		state=$(incident_state)
+		[[ $state == NEEDS_HUMAN ]] && break
+		sleep 1
+	done
+	[[ $state == NEEDS_HUMAN ]] || die "incident is ${state:-unknown} after the rejection, want NEEDS_HUMAN"
+	wait_annotation "$rank0" 'kubeneuron\.io/checkpoint-advisory-withdrawn-at' "" "the withdrawal"
+	wait_annotation "$rank1" 'kubeneuron\.io/checkpoint-advisory-withdrawn-at' "" "the withdrawal"
+	[[ "$(pod_annotation "$rank0" 'kubeneuron\.io/checkpoint')" == true ]] || die "the withdrawal touched the workload-owned opt-in"
+	(($(audit_results | grep -c $'^checkpoint-advisory-withdraw\t') >= 1)) || die "no checkpoint-advisory-withdraw audit row"
+	resolve_incident a
+	note "approve refused without and with a stale digest; rejection withdrew the advisory and kept the opt-in"
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		[[ "$("$KUBECTL_BIN" get node "$target_node" -o jsonpath='{.spec.unschedulable}')" != true ]] && break
+		sleep 2
+	done
+
+	# --- Phase B: approve bound to the digest, real drain, request to the local ranks and the peer
+	local rank2_uid='' rank0_uid
+	trigger_incident
+	rank0=$(pod_of rank-0)
+	rank1=$(pod_of rank-1)
+	rank0_uid=$("$KUBECTL_BIN" -n "$ns" get pod "$rank0" -o jsonpath='{.metadata.uid}')
+	if [[ -n $peer_node ]]; then
+		rank2=$(pod_of rank-2)
+		rank2_uid=$("$KUBECTL_BIN" -n "$ns" get pod "$rank2" -o jsonpath='{.metadata.uid}')
+	fi
+	wait_annotation "$rank0" 'kubeneuron\.io/checkpoint-advisory-incident' "$incident_id" "the second incident's advisory"
+	preview_file="$work_dir/ws-preview-b.json"
+	preview_code=$(ws_api -o "$preview_file" -w '%{http_code}' "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}/impact-preview")
+	[[ $preview_code == 200 ]] || die "second impact preview returned $preview_code"
+	digest=$("$JQ_BIN" -r '.digest' "$preview_file")
+	code=$(ws_api -H 'Content-Type: application/json' --data-binary "{\"actor\":\"harness\",\"park_epoch\":1,\"impact_digest\":\"$digest\"}" \
+		-o /dev/null -w '%{http_code}' "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}/approve")
+	[[ $code == 204 ]] || die "approve bound to the current digest returned $code, want 204"
+	wait_annotation "$rank0" 'kubeneuron\.io/checkpoint-incident' "$incident_id" "the drain's request"
+	wait_annotation "$rank1" 'kubeneuron\.io/checkpoint-incident' "$incident_id" "the drain's request"
+	[[ -n "$(pod_annotation "$rank0" 'kubeneuron\.io/checkpoint-deadline-at')" ]] || die "the request on $rank0 carries no deadline"
+	if [[ -n $peer_node ]]; then
+		wait_annotation "$rank2" 'kubeneuron\.io/checkpoint-incident' "$incident_id" "the group peer's request on $peer_node"
+		[[ "$(pod_annotation "$rank2" 'kubeneuron\.io/checkpoint-next-action')" == platform.drain ]] || die "the peer's request names no next action"
+	fi
+	# The workloads acknowledge: the state key bound to the incident, with the
+	# rights the harness has (the Pods themselves hold none).
+	for pod in "$rank0" "$rank1" ${rank2:+"$rank2"}; do
+		"$KUBECTL_BIN" -n "$ns" annotate pod "$pod" --overwrite "kubeneuron.io/checkpoint-state=complete:${incident_id}" >/dev/null
+	done
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		state=$(incident_state)
+		[[ $state == VERIFYING || $state == RESOLVED ]] && break
+		sleep 2
+	done
+	[[ $state == VERIFYING || $state == RESOLVED ]] || {
+		audit_results >&2 || true
+		die "incident is ${state:-unknown} after the acknowledged drain, want VERIFYING or RESOLVED"
+	}
+	local trail
+	trail=$(audit_results)
+	grep -q 'checkpoint: complete after' <<<"$trail" || { printf '%s\n' "$trail" >&2; die "no checkpoint completion row"; }
+	grep -q "${ns}/${rank0}=acknowledged" <<<"$trail" || { printf '%s\n' "$trail" >&2; die "$rank0 was not recorded as acknowledged"; }
+	if [[ -n $peer_node ]]; then
+		grep -q "peer ${ns}/${rank2}=acknowledged" <<<"$trail" || { printf '%s\n' "$trail" >&2; die "the peer $rank2 was not recorded as acknowledged"; }
+		grep -q "checkpoint group ${ns}/run-1:" <<<"$trail" || { printf '%s\n' "$trail" >&2; die "no group audit row"; }
+		[[ "$("$KUBECTL_BIN" -n "$ns" get pod "$rank2" -o jsonpath='{.metadata.uid}' 2>/dev/null)" == "$rank2_uid" ]] ||
+			die "the group peer on $peer_node was replaced: the disruption left its node"
+		[[ "$("$KUBECTL_BIN" get node "$peer_node" -o jsonpath='{.spec.unschedulable}')" != true ]] ||
+			die "$peer_node was cordoned: the disruption left its node"
+	fi
+	# The local ranks were really evicted by the drain: the listed instances are gone.
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		[[ "$("$KUBECTL_BIN" -n "$ns" get pod "$rank0" -o jsonpath='{.metadata.uid}' 2>/dev/null)" != "$rank0_uid" ]] && break
+		sleep 2
+	done
+	[[ "$("$KUBECTL_BIN" -n "$ns" get pod "$rank0" -o jsonpath='{.metadata.uid}' 2>/dev/null)" != "$rank0_uid" ]] ||
+		die "$rank0 survived the drain: the disruption never happened"
+	local decision_digest
+	decision_digest=$(ws_api "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}" | "$JQ_BIN" -r '.impact_preview_digest // empty')
+	[[ $decision_digest == "$digest" ]] || die "the incident detail carries digest '$decision_digest', want $digest"
+	resolve_incident b
+	note "approve bound to $digest drained $target_node for real after the local ranks and the peer acknowledged"
+
+	# --- Phase C: dry-run patches nothing
+	"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=merge \
+		-p '{"spec":{"safety":{"executionMode":"DryRun","destructiveExecution":null}}}' >/dev/null
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		mode=$(ws_api "http://127.0.0.1:${public_port}/api/v1/runtime-config" | "$JQ_BIN" -r '.execution_mode // empty')
+		[[ $mode == dry-run || $mode == dryrun || $mode == DryRun ]] && break
+		sleep 3
+	done
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while ((SECONDS < deadline)); do
+		[[ "$("$KUBECTL_BIN" get node "$target_node" -o jsonpath='{.spec.unschedulable}')" != true ]] && break
+		sleep 2
+	done
+	wait_pods_running rank-0 "$target_node"
+	wait_pods_running rank-1 "$target_node"
+	trigger_incident
+	rank0=$(pod_of rank-0)
+	sleep 5
+	[[ -z "$(pod_annotation "$rank0" 'kubeneuron\.io/checkpoint-advisory')" ]] ||
+		die "a dry-run park stamped an advisory on $rank0"
+	grep -q 'dry-run: would have advised' <<<"$(audit_results)" || { audit_results >&2; die "the dry-run park did not say what it would have advised"; }
+	resolve_incident c
+	note "dry-run parked, patched nothing and audited what it would have advised"
+
+	restore_workload_safe
+	note "workload-safe recovery phases passed on real Pods: advisory, preview-bound approval, group peer request, real drain, dry-run"
+}
+
+exercise_controller_restart_mid_playbook() {
+	note "exercising a controller restart in the middle of an approval-gated playbook"
+	local pf_log="$work_dir/restart-port-forward.log"
+	local pf_pid='' public_port='' node_name incident_id state
+	local audit_json cordon_count controller_pod deadline
+
+	node_name=$("$KUBECTL_BIN" get nodes -o jsonpath='{.items[0].metadata.name}')
+	[[ -n $node_name ]] || die "no node name for the restart scenario"
+
+	start_restart_port_forward() {
+		if [[ -n $pf_pid ]]; then
+			kill "$pf_pid" >/dev/null 2>&1 || true
+			wait "$pf_pid" >/dev/null 2>&1 || true
+			pf_pid=
+		fi
+		public_port=
+		: >"$pf_log"
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+			"service/${ROOT_NAME}-controller" ":${controllerPort}" >"$pf_log" 2>&1 &
+		pf_pid=$!
+		local pf_deadline=$((SECONDS + 30))
+		while ((SECONDS < pf_deadline)); do
+			public_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${controllerPort}$/\\1/p" "$pf_log")
+			[[ -n $public_port ]] && break
+			kill -0 "$pf_pid" >/dev/null 2>&1 || {
+				printf '%s\n' "$(<"$pf_log")" >&2
+				die "restart-phase port-forward exited early"
+			}
+			sleep 1
+		done
+		[[ -n $public_port ]] || die "restart-phase port-forward allocated no local port"
+	}
+	stop_restart_port_forward() {
+		if [[ -n $pf_pid ]]; then
+			kill "$pf_pid" >/dev/null 2>&1 || true
+			wait "$pf_pid" >/dev/null 2>&1 || true
+			pf_pid=
+		fi
+	}
+	api_curl() {
+		curl --silent --show-error --noproxy '*' --max-time 10 \
+			-H 'Authorization: Bearer integration-operator-token' "$@"
+	}
+	incident_state() {
+		api_curl "http://127.0.0.1:${public_port}/api/v1/incidents?node=${node_name}" |
+			"$JQ_BIN" -r --arg id "$incident_id" '.[] | select(.id == $id) | .state'
+	}
+	fetch_audit() {
+		api_curl "http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}" |
+			"$JQ_BIN" '.audit'
+	}
+	dry_run_step_count() {
+		local step=$1
+		"$JQ_BIN" --arg step "$step" \
+			'[.[] | select(.action == $step and .dry_run == true and (.result | tostring | contains("DRY-RUN")))] | length' \
+			<<<"$audit_json"
+	}
+
+	start_restart_port_forward
+	local denied_id
+	"$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o json |
+		"$JQ_BIN" -e 'any(.status.conditions[]; .type == "NodeLevelActionsAllowed" and .status == "False" and .reason == "InstallationOptInRequired")' >/dev/null ||
+		die "missing installation opt-in denial"
+	api_curl --fail -H 'Content-Type: application/json' \
+		--data-binary "{\"node\":\"${node_name}\",\"class\":\"integration-denied-test\",\"actor\":\"harness\"}" \
+		"http://127.0.0.1:${public_port}/api/v1/incidents" >/dev/null
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	denied_id=''
+	while ((SECONDS < deadline)); do
+		denied_id=$(api_curl "http://127.0.0.1:${public_port}/api/v1/incidents?node=${node_name}" |
+			"$JQ_BIN" -r '[.[] | select(.class == "integration-denied-test" and .state == "OBSERVING")][0].id // empty')
+		[[ -z $denied_id ]] || break
+		sleep 1
+	done
+	[[ -n $denied_id ]] || die "reboot without installation opt-in did not reach OBSERVING"
+	api_curl --fail -H 'Content-Type: application/json' -H "Idempotency-Key: kind-${RUN_ID}-denied-resolve" \
+		--data-binary '{"actor":"harness","reason":"opt-in denial verified"}' \
+		"http://127.0.0.1:${public_port}/api/v1/incidents/${denied_id}/resolve" >/dev/null
+	note "reboot without installation opt-in stayed in observation"
+	local trigger_code
+	trigger_code=$(api_curl -H 'Content-Type: application/json' \
+		--data-binary "{\"node\":\"${node_name}\",\"class\":\"integration-restart-test\",\"actor\":\"harness\"}" \
+		-o /dev/null -w '%{http_code}' \
+		"http://127.0.0.1:${public_port}/api/v1/incidents")
+	[[ $trigger_code == 202 ]] || die "manual restart-test incident returned $trigger_code, want 202"
+
+	incident_id=$(api_curl "http://127.0.0.1:${public_port}/api/v1/incidents?node=${node_name}" |
+		"$JQ_BIN" -r '[.[] | select(.class == "integration-restart-test")][0].id // empty')
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	while [[ -z $incident_id ]] && ((SECONDS < deadline)); do
+		sleep 1
+		incident_id=$(api_curl "http://127.0.0.1:${public_port}/api/v1/incidents?node=${node_name}" |
+			"$JQ_BIN" -r '[.[] | select(.class == "integration-restart-test")][0].id // empty')
+	done
+	[[ -n $incident_id ]] || die "restart-test incident never appeared"
+
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	state=
+	while ((SECONDS < deadline)); do
+		state=$(incident_state)
+		[[ $state == AWAITING_APPROVAL ]] && break
+		sleep 1
+	done
+	[[ $state == AWAITING_APPROVAL ]] || die "incident state is ${state:-unknown}, want AWAITING_APPROVAL before the restart"
+	audit_json=$(fetch_audit)
+	cordon_count=$(dry_run_step_count cordon)
+	[[ $cordon_count == 1 ]] || die "cordon dry-run recorded $cordon_count times before restart, want 1"
+
+	controller_pod=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get pods \
+		-l "app.kubernetes.io/instance=${ROOT_NAME},app.kubernetes.io/component=controller" \
+		-o jsonpath='{.items[0].metadata.name}')
+	[[ -n $controller_pod ]] || die "no controller Pod to restart"
+	stop_restart_port_forward
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete pod "$controller_pod" \
+		--wait=true --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status \
+		deployment/"${ROOT_NAME}-controller" --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+	start_restart_port_forward
+
+	deadline=$((SECONDS + 30))
+	state=
+	while ((SECONDS < deadline)); do
+		state=$(incident_state 2>/dev/null || true)
+		[[ -n $state ]] && break
+		sleep 1
+	done
+	[[ $state == AWAITING_APPROVAL ]] || \
+		die "incident state after restart is ${state:-unreachable}, want the durable AWAITING_APPROVAL"
+	audit_json=$(fetch_audit)
+	cordon_count=$(dry_run_step_count cordon)
+	[[ $cordon_count == 1 ]] || die "cordon dry-run recorded $cordon_count times after restart, want exactly 1 (no re-execution)"
+
+	local approve_code
+	approve_code=$(api_curl -H 'Content-Type: application/json' \
+		--data-binary '{"actor":"harness-approver"}' -o /dev/null -w '%{http_code}' \
+		"http://127.0.0.1:${public_port}/api/v1/incidents/${incident_id}/approve")
+	[[ $approve_code == 204 ]] || die "post-restart approval returned $approve_code, want 204"
+
+	deadline=$((SECONDS + TIMEOUT_SECONDS))
+	state=
+	while ((SECONDS < deadline)); do
+		state=$(incident_state)
+		[[ $state == VERIFYING || $state == RESOLVED ]] && break
+		sleep 1
+	done
+	[[ $state == VERIFYING || $state == RESOLVED ]] || \
+		die "incident state after approval is ${state:-unknown}, want VERIFYING or RESOLVED"
+	audit_json=$(fetch_audit)
+	local drain_count approver_entries
+	drain_count=$(dry_run_step_count drain)
+	[[ $drain_count == 1 ]] || die "drain dry-run recorded $drain_count times, want exactly 1"
+	approver_entries=$("$JQ_BIN" '[.[] | select(.actor == "token:harness-approver")] | length' <<<"$audit_json")
+	((approver_entries >= 1)) || die "audit trail does not record the post-restart approver identity"
+
+	stop_restart_port_forward
+	note "controller restart preserved the parked approval, re-executed nothing, and the post-restart approval resumed the ladder to ${state}"
+}
+
+rotation_phase() {
+	local direction=$1
+	local phase=$2
+	local rotation_id=$3
+	local timeout=${4:-$TIMEOUT_SECONDS}
+	local approve=${5:-0}
+	local -a material_args
+	if [[ $direction == server ]]; then
+		material_args=(
+			--from-leaf-secret "${ROOT_NAME}-controller-tls"
+			--from-ca-secret "${ROOT_NAME}-controller-server-ca"
+			--new-leaf-secret "${ROOT_NAME}-controller-tls-v2"
+			--overlap-ca-secret "${ROOT_NAME}-controller-server-ca-overlap-v2"
+			--final-ca-secret "${ROOT_NAME}-controller-server-ca-v2"
+		)
+	else
+		material_args=(
+			--from-leaf-secret "${ROOT_NAME}-agent-tls"
+			--from-ca-secret "${ROOT_NAME}-agent-client-ca"
+			--new-leaf-secret "${ROOT_NAME}-agent-tls-v2"
+			--overlap-ca-secret "${ROOT_NAME}-agent-client-ca-overlap-v2"
+			--final-ca-secret "${ROOT_NAME}-agent-client-ca-v2"
+		)
+	fi
+	local -a command=(
+		"$ROTATION_SCRIPT" "$direction" --phase "$phase" --root "$ROOT_NAME"
+		--rotation-id "$rotation_id" "${material_args[@]}"
+		--kubeconfig "$KUBECONFIG_PATH" --timeout-seconds "$timeout"
+	)
+	if ((approve)); then
+		command+=(--approve-retire-old-trust)
+	fi
+	KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" "${command[@]}"
+}
+
+# wait_rotation_workload_settle blocks until both managed workloads' object
+# generations hold still across two consecutive reads with completed rollouts.
+# Without this, a rotation phase's scope assertion can capture its "before"
+# generations while the PREVIOUS phase's trailing operator update is still
+# landing, and blame the new phase for a generation bump it did not cause.
+wait_rotation_workload_settle() {
+	local deadline=$((SECONDS + TIMEOUT_SECONDS)) prev="" cur
+	while ((SECONDS < deadline)); do
+		cur=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+			deployment "${ROOT_NAME}-controller" daemonset "${ROOT_NAME}-agent" \
+			-o jsonpath='{range .items[*]}{.metadata.generation},{end}' 2>/dev/null || true)
+		if [[ -n $cur && $cur == "$prev" ]] && \
+			"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status \
+				"deployment/${ROOT_NAME}-controller" --timeout=5s >/dev/null 2>&1 && \
+			"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status \
+				"daemonset/${ROOT_NAME}-agent" --timeout=5s >/dev/null 2>&1; then
+			return 0
+		fi
+		prev=$cur
+		sleep 5
+	done
+	die "managed workload generations did not settle before a rotation scope assertion"
+}
+
+assert_rotation_rollout_scope() {
+	local direction=$1
+	local phase=$2
+	local rotation_id=$3
+	local approve=${4:-0}
+	local controller_before controller_after agent_before agent_after
+	wait_rotation_workload_settle
+	controller_before=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+		deployment "${ROOT_NAME}-controller" -o jsonpath='{.metadata.generation}')
+	agent_before=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+		daemonset "${ROOT_NAME}-agent" -o jsonpath='{.metadata.generation}')
+	rotation_phase "$direction" "$phase" "$rotation_id" "$TIMEOUT_SECONDS" "$approve"
+	controller_after=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+		deployment "${ROOT_NAME}-controller" -o jsonpath='{.metadata.generation}')
+	agent_after=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+		daemonset "${ROOT_NAME}-agent" -o jsonpath='{.metadata.generation}')
+
+	local expected=consumer
+	[[ $phase == activate-leaf || $phase == rollback-leaf ]] && expected=producer
+	if [[ $direction == server && $expected == consumer || $direction == client && $expected == producer ]]; then
+		((agent_after > agent_before)) || die "$direction $phase did not advance the agent DaemonSet generation"
+		[[ $controller_after == "$controller_before" ]] || \
+			die "$direction $phase unexpectedly changed the controller Deployment generation"
+	else
+		((controller_after > controller_before)) || die "$direction $phase did not advance the controller Deployment generation"
+		[[ $agent_after == "$agent_before" ]] || \
+			die "$direction $phase unexpectedly changed the agent DaemonSet generation"
+	fi
+	note "$direction $phase rolled only its intended workload"
+}
+
+exercise_failed_server_rotation_and_rollback() {
+	local rotation_id=server-failure-probe
+	local root_json generation_before generation_after controller_logs deadline
+	local -a rollback_args=(
+		--from-leaf-secret "${ROOT_NAME}-controller-tls"
+		--from-ca-secret "${ROOT_NAME}-controller-server-ca"
+		--new-leaf-secret "${ROOT_NAME}-controller-tls-bad-v2"
+		--overlap-ca-secret "${ROOT_NAME}-controller-server-ca-overlap-bad-leaf"
+		--final-ca-secret "${ROOT_NAME}-controller-server-ca-final-bad-leaf"
+	)
+	KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" "$ROTATION_SCRIPT" server \
+		--phase expand-trust --root "$ROOT_NAME" --rotation-id "$rotation_id" \
+		"${rollback_args[@]}" --kubeconfig "$KUBECONFIG_PATH" \
+		--timeout-seconds "$TIMEOUT_SECONDS" >/dev/null
+
+	generation_before=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')
+	set +e
+	rotation_phase client expand-trust "$rotation_id" 60 0 \
+		>"$work_dir/same-id-direction-collision.log" 2>&1
+	local collision_rc=$?
+	set -e
+	((collision_rc != 0)) || die "same rotation ID hijacked an active opposite-direction transaction"
+	generation_after=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')
+	[[ $generation_after == "$generation_before" ]] || die "rejected same-ID direction collision changed root generation"
+
+	local -a inconsistent_command=(
+		"$ROTATION_SCRIPT" server --phase activate-leaf --root "$ROOT_NAME"
+		--rotation-id "$rotation_id"
+		--from-leaf-secret "${ROOT_NAME}-controller-tls"
+		--from-ca-secret "${ROOT_NAME}-controller-server-ca"
+		--new-leaf-secret "${ROOT_NAME}-controller-tls-v2"
+		--overlap-ca-secret "${ROOT_NAME}-controller-server-ca-overlap-bad-leaf"
+		--final-ca-secret "${ROOT_NAME}-controller-server-ca-final-bad-leaf"
+		--kubeconfig "$KUBECONFIG_PATH" --timeout-seconds 60
+	)
+	set +e
+	KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" "${inconsistent_command[@]}" \
+		>"$work_dir/inconsistent-rotation-plan.log" 2>&1
+	local inconsistent_rc=$?
+	set -e
+	((inconsistent_rc != 0)) || die "active rotation accepted a substituted new-leaf Secret"
+	generation_after=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')
+	[[ $generation_after == "$generation_before" ]] || die "rejected inconsistent plan changed root generation"
+
+	local -a bad_command=(
+		"$ROTATION_SCRIPT" server --phase activate-leaf --root "$ROOT_NAME"
+		--rotation-id "$rotation_id" "${rollback_args[@]}"
+		--kubeconfig "$KUBECONFIG_PATH" --timeout-seconds 60
+	)
+	set +e
+	KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" "${bad_command[@]}" \
+		>"$work_dir/failed-server-rotation.log" 2>&1
+	local rc=$?
+	set -e
+	((rc != 0)) || die "mismatched server key unexpectedly completed a rotation"
+	wait_root_condition False RuntimeUnavailable
+	root_json=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o json)
+	"$JQ_BIN" -e '
+      .metadata.annotations["kubeneuron.io/tls-rotation-phase"] == "LeafActivated" and
+      .spec.tls.serverSecretRef.name == "integration-smoke-controller-tls-bad-v2"
+	    ' <<<"$root_json" >/dev/null || die "failed server rotation phase was not durably recorded"
+
+	deadline=$((SECONDS + 30))
+	while ((SECONDS < deadline)); do
+		controller_logs=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" logs \
+			deployment/"${ROOT_NAME}-controller" --all-containers --tail=-1 2>&1 || true)
+		grep -Eiq 'private key.*(does not match|mismatch)|tls.*private key' <<<"$controller_logs" && break
+		sleep 2
+	done
+	grep -Eiq 'private key.*(does not match|mismatch)|tls.*private key' <<<"$controller_logs" || {
+		printf '%s\n' "$controller_logs" >&2
+		die "invalid server rollout did not expose the expected certificate/key mismatch"
+	}
+
+	local removed
+	for removed in \
+		"${ROOT_NAME}-controller-tls-bad-v2" \
+		"${ROOT_NAME}-controller-server-ca-final-bad-leaf"; do
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete secret "$removed" \
+			--wait=true --timeout=60s >/dev/null
+		unset 'tls_secret_uids['"$removed"']'
+		unset 'tls_secret_hashes['"$removed"']'
+	done
+	KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" "$ROTATION_SCRIPT" server \
+		--phase rollback-leaf --root "$ROOT_NAME" --rotation-id "$rotation_id" \
+		"${rollback_args[@]}" --kubeconfig "$KUBECONFIG_PATH" \
+		--timeout-seconds "$TIMEOUT_SECONDS" >/dev/null
+	KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" "$ROTATION_SCRIPT" server \
+		--phase rollback-trust --root "$ROOT_NAME" --rotation-id "$rotation_id" \
+		"${rollback_args[@]}" --kubeconfig "$KUBECONFIG_PATH" \
+		--timeout-seconds "$TIMEOUT_SECONDS" >/dev/null
+	wait_root_condition True RuntimeAvailable
+	assert_runtime_ready
+	note "same-ID/plan collisions were rejected; invalid server material produced RuntimeUnavailable and rollback succeeded after failed/unused candidates were quarantined"
+}
+
+exercise_failed_trust_retirement_and_rollback() {
+	local rotation_id=server-retirement-failure-probe
+	local root_json
+	local -a material_args=(
+		--from-leaf-secret "${ROOT_NAME}-controller-tls"
+		--from-ca-secret "${ROOT_NAME}-controller-server-ca"
+		--new-leaf-secret "${ROOT_NAME}-controller-tls-retire-probe"
+		--overlap-ca-secret "${ROOT_NAME}-controller-server-ca-overlap-retire-probe"
+		--final-ca-secret "${ROOT_NAME}-controller-server-ca-bad-retire-probe"
+	)
+	local phase
+	for phase in expand-trust activate-leaf; do
+		KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" "$ROTATION_SCRIPT" server \
+			--phase "$phase" --root "$ROOT_NAME" --rotation-id "$rotation_id" \
+			"${material_args[@]}" --kubeconfig "$KUBECONFIG_PATH" \
+			--timeout-seconds "$TIMEOUT_SECONDS" >/dev/null
+	done
+
+	set +e
+	KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" "$ROTATION_SCRIPT" server \
+		--phase retire-old-trust --root "$ROOT_NAME" --rotation-id "$rotation_id" \
+		"${material_args[@]}" --approve-retire-old-trust \
+		--kubeconfig "$KUBECONFIG_PATH" --timeout-seconds 60 \
+		>"$work_dir/failed-trust-retirement.log" 2>&1
+	local rc=$?
+	set -e
+	((rc != 0)) || die "incompatible final server CA unexpectedly completed trust retirement"
+	wait_root_condition False RuntimeUnavailable
+	root_json=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o json)
+	"$JQ_BIN" -e '
+	  .metadata.annotations["kubeneuron.io/tls-rotation-phase"] == "OldTrustRetired" and
+	  .spec.tls.serverCASecretRef.name == "integration-smoke-controller-server-ca-bad-retire-probe" and
+	  .spec.tls.serverSecretRef.name == "integration-smoke-controller-tls-retire-probe"
+	' <<<"$root_json" >/dev/null || die "failed trust retirement was not durably recorded"
+
+	KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" "$ROTATION_SCRIPT" server \
+		--phase rollback-retirement --root "$ROOT_NAME" --rotation-id "$rotation_id" \
+		"${material_args[@]}" --kubeconfig "$KUBECONFIG_PATH" \
+		--timeout-seconds "$TIMEOUT_SECONDS" >/dev/null
+	wait_root_condition True RuntimeAvailable
+	KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" "$ROTATION_SCRIPT" server \
+		--phase rollback-leaf --root "$ROOT_NAME" --rotation-id "$rotation_id" \
+		"${material_args[@]}" --kubeconfig "$KUBECONFIG_PATH" \
+		--timeout-seconds "$TIMEOUT_SECONDS" >/dev/null
+	KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" "$ROTATION_SCRIPT" server \
+		--phase rollback-trust --root "$ROOT_NAME" --rotation-id "$rotation_id" \
+		"${material_args[@]}" --kubeconfig "$KUBECONFIG_PATH" \
+		--timeout-seconds "$TIMEOUT_SECONDS" >/dev/null
+	wait_root_condition True RuntimeAvailable
+	assert_runtime_ready
+	note "incompatible trust contraction produced RuntimeUnavailable and recovered through final-to-overlap, leaf, then trust rollback"
+}
+
+assert_post_rotation_identity() {
+	local service_dns="${ROOT_NAME}-controller.${TARGET_NAMESPACE}.svc"
+	local pki_dir="$work_dir/pki"
+	local agent_pod token_file header_file port_forward_log deadline valid_code
+	local agent_local_port=''
+	agent_pod=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get pods \
+		-l "app.kubernetes.io/instance=${ROOT_NAME},app.kubernetes.io/component=agent" \
+		-o jsonpath='{.items[0].metadata.name}')
+	[[ -n $agent_pod ]] || die "could not find the rotated managed agent Pod"
+	token_file="$work_dir/rotated-agent-token"
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create token "${ROOT_NAME}-agent" \
+		--audience="$agentTokenAudience" --duration=10m \
+		--bound-object-kind=Pod --bound-object-name="$agent_pod" >"$token_file"
+	header_file="$work_dir/rotated-agent-header"
+	write_bearer_header "$token_file" "$header_file"
+
+	port_forward_log="$work_dir/rotated-controller-port-forward.log"
+	local agent_base=''
+	tls_forward_restart=start_rotated_port_forward
+	start_rotated_port_forward() {
+		if [[ -n ${port_forward_pid:-} ]]; then
+			kill "$port_forward_pid" >/dev/null 2>&1 || true
+			wait "$port_forward_pid" >/dev/null 2>&1 || true
+			port_forward_pid=
+		fi
+		agent_local_port=
+		: >"$port_forward_log"
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" port-forward \
+			"service/${ROOT_NAME}-controller" ":${agentIngressPort}" >"$port_forward_log" 2>&1 &
+		port_forward_pid=$!
+		deadline=$((SECONDS + 30))
+		while ((SECONDS < deadline)); do
+			agent_local_port=$(sed -n "s/^Forwarding from 127\\.0\\.0\\.1:\\([0-9][0-9]*\\) -> ${agentIngressPort}$/\\1/p" "$port_forward_log")
+			[[ -n $agent_local_port ]] && break
+			kill -0 "$port_forward_pid" >/dev/null 2>&1 || die "rotated controller port-forward exited early"
+			sleep 1
+		done
+		[[ -n $agent_local_port ]] || die "rotated controller port-forward did not allocate a local port"
+		agent_base="https://${service_dns}:${agent_local_port}"
+	}
+	start_rotated_port_forward
+	valid_code=$(curl --silent --show-error --noproxy '*' --max-time 10 \
+		--resolve "${service_dns}:${agent_local_port}:127.0.0.1" \
+		--cacert "$pki_dir/server-ca-v2.crt" \
+		--cert "$pki_dir/client-v2.crt" --key "$pki_dir/client-v2.key" \
+		-H "@$header_file" -o /dev/null -w '%{http_code}' \
+		"${agent_base}/api/v1/agents/register/narrow-v1")
+	[[ $valid_code == 200 ]] || die "rotated certificate pair returned $valid_code, want 200"
+
+	# Each expected handshake alert may terminate kubectl port-forward on this
+	# host. Use a fresh forwarding session per negative TLS assertion so the
+	# assertion remains about TLS rather than a follow-on TCP refusal.
+	start_rotated_port_forward
+	probe_retired_client_certificate() {
+		curl --silent --show-error --noproxy '*' --max-time 10 \
+		--resolve "${service_dns}:${agent_local_port}:127.0.0.1" \
+		--cacert "$pki_dir/server-ca-v2.crt" \
+		--cert "$pki_dir/client.crt" --key "$pki_dir/client.key" \
+		-H "@$header_file" "${agent_base}/api/v1/agents/register/narrow-v1"
+	}
+	assert_tls_curl_failure "retired client certificate" \
+		'unknown ca|bad certificate|certificate unknown' "$work_dir/retired-client-cert.log" \
+		probe_retired_client_certificate
+	start_rotated_port_forward
+	probe_retired_server_ca() {
+		curl --silent --show-error --noproxy '*' --max-time 10 \
+		--resolve "${service_dns}:${agent_local_port}:127.0.0.1" \
+		--cacert "$pki_dir/server-ca.crt" \
+		--cert "$pki_dir/client-v2.crt" --key "$pki_dir/client-v2.key" \
+		-H "@$header_file" "${agent_base}/api/v1/agents/register/narrow-v1"
+	}
+	assert_tls_curl_failure "retired server CA" \
+		'certificate problem|unable to get local issuer certificate|self-signed certificate|unknown ca' \
+		"$work_dir/retired-server-ca.log" \
+		probe_retired_server_ca
+
+	kill "$port_forward_pid" >/dev/null 2>&1 || true
+	wait "$port_forward_pid" >/dev/null 2>&1 || true
+	port_forward_pid=
+	note "new server/client identities succeeded and both retired trust directions were rejected"
+}
+
+exercise_routine_tls_rotation() {
+	local digest_before digest_after controller_before controller_after agent_before agent_after
+	digest_before=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.status.configDigest}')
+	set +e
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" patch secret \
+		"${ROOT_NAME}-controller-server-ca-v2" --type=merge \
+		-p '{"data":{"mutation-probe":"cmVqZWN0"}}' >/dev/null 2>&1
+	local immutable_rc=$?
+	set -e
+	((immutable_rc != 0)) || die "immutable TLS candidate unexpectedly accepted a data mutation"
+
+	exercise_failed_server_rotation_and_rollback
+	exercise_failed_trust_retirement_and_rollback
+	assert_rotation_rollout_scope server expand-trust server-routine-v2
+	assert_rotation_rollout_scope server activate-leaf server-routine-v2
+	set +e
+	rotation_phase server retire-old-trust server-routine-v2 "$TIMEOUT_SECONDS" 0 \
+		>"$work_dir/unapproved-trust-retirement.log" 2>&1
+	local unapproved_rc=$?
+	set -e
+	((unapproved_rc != 0)) || die "old server trust retired without explicit approval"
+	assert_rotation_rollout_scope server retire-old-trust server-routine-v2 1
+
+	controller_before=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+		deployment "${ROOT_NAME}-controller" -o jsonpath='{.metadata.generation}')
+	agent_before=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+		daemonset "${ROOT_NAME}-agent" -o jsonpath='{.metadata.generation}')
+	rotation_phase server retire-old-trust server-routine-v2 "$TIMEOUT_SECONDS" 1
+	controller_after=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+		deployment "${ROOT_NAME}-controller" -o jsonpath='{.metadata.generation}')
+	agent_after=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+		daemonset "${ROOT_NAME}-agent" -o jsonpath='{.metadata.generation}')
+	[[ $controller_after == "$controller_before" && $agent_after == "$agent_before" ]] || \
+		die "idempotent completed server phase changed a workload generation"
+
+	assert_rotation_rollout_scope client expand-trust client-routine-v2
+	assert_rotation_rollout_scope client activate-leaf client-routine-v2
+	assert_rotation_rollout_scope client retire-old-trust client-routine-v2 1
+	assert_post_rotation_identity
+
+	digest_after=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.status.configDigest}')
+	[[ $digest_after == "$digest_before" ]] || die "TLS rotation changed the compiled configuration digest"
+	"$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o json | "$JQ_BIN" -e '
+      .metadata.annotations["kubeneuron.io/tls-rotation-id"] == "client-routine-v2" and
+      .metadata.annotations["kubeneuron.io/tls-rotation-direction"] == "client" and
+	      .metadata.annotations["kubeneuron.io/tls-rotation-phase"] == "OldTrustRetired" and
+	      .metadata.annotations["kubeneuron.io/tls-rotation-from-leaf"] == "integration-smoke-agent-tls" and
+	      .metadata.annotations["kubeneuron.io/tls-rotation-new-leaf"] == "integration-smoke-agent-tls-v2" and
+	      .metadata.annotations["kubeneuron.io/tls-rotation-overlap-ca"] == "integration-smoke-agent-client-ca-overlap-v2" and
+	      .metadata.annotations["kubeneuron.io/tls-rotation-final-ca"] == "integration-smoke-agent-client-ca-v2" and
+	      (.metadata.annotations["kubeneuron.io/tls-rotation-from-leaf-uid"] | length) > 0 and
+	      (.metadata.annotations["kubeneuron.io/tls-rotation-new-leaf-uid"] | length) > 0 and
+	      (.metadata.annotations["kubeneuron.io/tls-rotation-overlap-ca-uid"] | length) > 0 and
+	      (.metadata.annotations["kubeneuron.io/tls-rotation-final-ca-uid"] | length) > 0 and
+      .spec.tls.serverSecretRef.name == "integration-smoke-controller-tls-v2" and
+      .spec.tls.serverCASecretRef.name == "integration-smoke-controller-server-ca-v2" and
+      .spec.tls.clientSecretRef.name == "integration-smoke-agent-tls-v2" and
+      .spec.tls.clientCASecretRef.name == "integration-smoke-agent-client-ca-v2"
+	    ' >/dev/null || die "root did not retain the final versioned TLS references and current transaction annotations"
+	assert_runtime_ready
+	note "routine server and client rotations completed through expand/activate/retire with fresh post-controller acknowledgments, scoped rollouts, plan/UID binding, and an idempotent terminal phase"
+}
+
+exercise_emergency_tls_leaf_recovery() {
+	local bad_server="${ROOT_NAME}-controller-tls-emergency-bad-v2"
+	local server_candidate="${ROOT_NAME}-controller-tls-emergency-v2"
+	local client_candidate="${ROOT_NAME}-agent-tls-emergency-v2"
+	local generation root_json
+
+	"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=merge \
+		-p "{\"spec\":{\"tls\":{\"serverSecretRef\":{\"name\":\"${bad_server}\"}}}}" >/dev/null
+	generation=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')
+	wait_observed_generation "$generation"
+	wait_root_condition False RuntimeUnavailable
+
+	KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" "$EMERGENCY_TLS_SCRIPT" \
+		--root "$ROOT_NAME" --recovery-id server-client-leaf-emergency-v2 \
+		--server-leaf-secret "$server_candidate" --client-leaf-secret "$client_candidate" \
+		--approve-emergency-leaf-recovery --kubeconfig "$KUBECONFIG_PATH" \
+		--timeout-seconds "$TIMEOUT_SECONDS" >/dev/null
+	wait_root_condition True RuntimeAvailable
+	assert_runtime_ready
+	root_json=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o json)
+	"$JQ_BIN" -e --arg server "$server_candidate" --arg client "$client_candidate" '
+      .metadata.annotations["kubeneuron.io/tls-emergency-recovery-id"] == "server-client-leaf-emergency-v2" and
+      .metadata.annotations["kubeneuron.io/tls-emergency-recovery-server-leaf"] == $server and
+      (.metadata.annotations["kubeneuron.io/tls-emergency-recovery-server-leaf-uid"] | length) > 0 and
+      .metadata.annotations["kubeneuron.io/tls-emergency-recovery-client-leaf"] == $client and
+      (.metadata.annotations["kubeneuron.io/tls-emergency-recovery-client-leaf-uid"] | length) > 0 and
+      .metadata.annotations["kubeneuron.io/tls-emergency-recovery-previous-server-leaf"] == "integration-smoke-controller-tls-emergency-bad-v2" and
+      .metadata.annotations["kubeneuron.io/tls-emergency-recovery-previous-client-leaf"] == "integration-smoke-agent-tls-v2" and
+      .spec.tls.serverSecretRef.name == $server and .spec.tls.clientSecretRef.name == $client and
+      .spec.tls.serverCASecretRef.name == "integration-smoke-controller-server-ca-v2" and
+      .spec.tls.clientCASecretRef.name == "integration-smoke-agent-client-ca-v2"
+    ' <<<"$root_json" >/dev/null || die "emergency recovery annotations or retained CA references are incomplete"
+	note "bad server leaf produced RuntimeUnavailable; explicit dual-leaf emergency recovery retained both CAs, rolled both workloads, and restored Ready"
+}
+
+for name in REUSE_CLUSTER KEEP_CLUSTER KEEP_RESOURCES BUILD_IMAGES; do
+	require_boolean "$name" "${!name}"
+done
+require_positive_integer TIMEOUT_SECONDS "$TIMEOUT_SECONDS"
+[[ $CLUSTER_NAME =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || die "unsafe CLUSTER_NAME: $CLUSTER_NAME"
+[[ $RUN_ID =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || die "unsafe RUN_ID: $RUN_ID"
+for image in "$OPERATOR_IMAGE" "$CONTROLLER_IMAGE" "$AGENT_IMAGE"; do
+	[[ $image =~ ^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$ ]] || die "unsafe image reference: $image"
+done
+
+for command in "$KIND_BIN" "$KUBECTL_BIN" "$DOCKER_BIN" "$JQ_BIN" awk curl openssl sed grep sha256sum stat; do
+	command -v "$command" >/dev/null 2>&1 || die "required command not found: $command"
+done
+[[ -r $CEL_SCRIPT ]] || die "missing CEL harness: $CEL_SCRIPT"
+[[ -x $ROTATION_SCRIPT ]] || die "missing executable TLS rotation helper: $ROTATION_SCRIPT"
+[[ -x $EMERGENCY_TLS_SCRIPT ]] || die "missing executable emergency TLS helper: $EMERGENCY_TLS_SCRIPT"
+[[ -r $SMOKE_TEMPLATE ]] || die "missing smoke template: $SMOKE_TEMPLATE"
+[[ -r $IMAGE_DOCKERFILE ]] || die "missing integration image Dockerfile: $IMAGE_DOCKERFILE"
+
+kind_version=$("$KIND_BIN" version | awk 'NR == 1 {print $2}')
+[[ $kind_version == "$EXPECTED_KIND_VERSION" ]] || \
+	die "kind $EXPECTED_KIND_VERSION is required (found ${kind_version:-unknown})"
+kubectl_version=$("$KUBECTL_BIN" version --client=true -o json | \
+	"$JQ_BIN" -r '.clientVersion.gitVersion')
+[[ $kubectl_version == "$EXPECTED_KUBECTL_VERSION" ]] || \
+	die "kubectl $EXPECTED_KUBECTL_VERSION is required (found ${kubectl_version:-unknown})"
+if ! docker_version=$("$DOCKER_BIN" info --format '{{.ServerVersion}}' 2>&1); then
+	die "Docker is unavailable: $docker_version (a stale login may need: sg docker -c '$0')"
+fi
+note "using kind $kind_version, kubectl $kubectl_version, and Docker $docker_version"
+
+umask 077
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/kubeneuron-integration.XXXXXX")
+mkdir -p -- "$(dirname -- "$KUBECONFIG_PATH")"
+if [[ -e $KUBECONFIG_PATH || -L $KUBECONFIG_PATH ]]; then
+	die "refusing to truncate pre-existing KUBECONFIG_PATH $KUBECONFIG_PATH"
+fi
+kubeconfig_temp=$(mktemp "${KUBECONFIG_PATH}.tmp.XXXXXX")
+
+if cluster_exists; then
+	((REUSE_CLUSTER == 1)) || \
+		die "cluster $CLUSTER_NAME already exists; set REUSE_CLUSTER=1 to use it"
+	"$KIND_BIN" get kubeconfig --name "$CLUSTER_NAME" >"$kubeconfig_temp"
+	note "reusing cluster $CLUSTER_NAME"
+else
+	# Multi-node by default: a per-node GPU remediation product must not be
+	# integration-tested only on single-node clusters. Every node pins the
+	# same digest-pinned image.
+	[[ $WORKER_NODES =~ ^[0-9]+$ ]] || die "WORKER_NODES must be a non-negative integer"
+	kind_config="$work_dir/kind-cluster.yaml"
+	{
+		printf 'kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n'
+		printf -- '- role: control-plane\n  image: %s\n' "$NODE_IMAGE"
+		for ((i = 0; i < WORKER_NODES; i++)); do
+			printf -- '- role: worker\n  image: %s\n' "$NODE_IMAGE"
+		done
+	} >"$kind_config"
+	"$KIND_BIN" create cluster --name "$CLUSTER_NAME" --config "$kind_config" \
+		--kubeconfig "$kubeconfig_temp" --wait "${TIMEOUT_SECONDS}s"
+	created_cluster=1
+	note "created cluster $CLUSTER_NAME with 1 control-plane and $WORKER_NODES worker node(s)"
+fi
+kubeconfig_temp_identity=$(stat --format='%d:%i' -- "$kubeconfig_temp")
+if ! ln --no-target-directory -- "$kubeconfig_temp" "$KUBECONFIG_PATH"; then
+	die "refusing to replace KUBECONFIG_PATH created concurrently at $KUBECONFIG_PATH"
+fi
+kubeconfig_identity=$(stat --format='%d:%i' -- "$KUBECONFIG_PATH")
+if [[ $kubeconfig_identity != "$kubeconfig_temp_identity" ]]; then
+	die "KUBECONFIG_PATH changed while it was being installed: $KUBECONFIG_PATH"
+fi
+kubeconfig_created=1
+rm -f -- "$kubeconfig_temp"
+kubeconfig_temp=
+export KUBECONFIG=$KUBECONFIG_PATH
+
+mapfile -t kind_nodes < <("$KIND_BIN" get nodes --name "$CLUSTER_NAME")
+((${#kind_nodes[@]} > 0)) || die "kind returned no nodes for $CLUSTER_NAME"
+for node in "${kind_nodes[@]}"; do
+	actual_node_image=$("$DOCKER_BIN" inspect "$node" --format '{{.Config.Image}}')
+	[[ $actual_node_image == "$NODE_IMAGE" ]] || \
+		die "node $node uses $actual_node_image, want pinned $NODE_IMAGE"
+	"$DOCKER_BIN" exec "$node" test -c /dev/kmsg || \
+		die "kind node $node does not expose /dev/kmsg as a character device"
+done
+server_version=$("$KUBECTL_BIN" version -o json | "$JQ_BIN" -r '.serverVersion.gitVersion')
+[[ $server_version == "$EXPECTED_SERVER_VERSION" ]] || \
+	die "server is $server_version, want $EXPECTED_SERVER_VERSION"
+"$KUBECTL_BIN" wait --for=condition=Ready nodes --all --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+"$KUBECTL_BIN" -n local-path-storage rollout status \
+	deployment/local-path-provisioner --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+if ((created_cluster)); then
+	# kind pins kindnetd at a 50Mi memory limit, and the pod's page cache
+	# counts against it. After an hour or two of churn the cache no longer
+	# fits, every node's kindnetd refaults its own binary from disk at
+	# ~100 MB/s, and etcd on a slow disk starts missing its fsync budget:
+	# leader elections fail, the API server restarts and every wait in this
+	# harness turns flaky. Raise the limit on the cluster this harness just
+	# created; the request stays as kind set it.
+	"$KUBECTL_BIN" -n kube-system set resources daemonset/kindnet \
+		--limits=memory=256Mi --requests=memory=50Mi >/dev/null
+	"$KUBECTL_BIN" -n kube-system rollout status daemonset/kindnet --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+fi
+note "verified $server_version from the pinned node image"
+
+if "$KUBECTL_BIN" get namespace "$TARGET_NAMESPACE" >/dev/null 2>&1; then
+	die "refusing to replace existing fixture namespace $TARGET_NAMESPACE"
+fi
+if "$KUBECTL_BIN" get crd/kubeneurons.kubeneuron.io >/dev/null 2>&1 && \
+	"$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" >/dev/null 2>&1; then
+	die "refusing to replace existing KubeNeuron fixture $ROOT_NAME"
+fi
+if "$KUBECTL_BIN" get crd/gpuplaybooks.kubeneuron.io >/dev/null 2>&1 && \
+	"$KUBECTL_BIN" get gpuplaybook "$PLAYBOOK_NAME" >/dev/null 2>&1; then
+	die "refusing to replace existing GPUPlaybook fixture $PLAYBOOK_NAME"
+fi
+if "$KUBECTL_BIN" get crd/gpuremediationpolicies.kubeneuron.io >/dev/null 2>&1 && \
+	"$KUBECTL_BIN" get gpuremediationpolicy "$POLICY_NAME" >/dev/null 2>&1; then
+	die "refusing to replace existing GPURemediationPolicy fixture $POLICY_NAME"
+fi
+
+note "installing eight generated CRDs"
+"$KUBECTL_BIN" apply -k "$REPO_ROOT/config/crd" >/dev/null
+mapfile -t crd_names < <(
+	for file in "$REPO_ROOT"/config/crd/bases/*.yaml; do
+		sed -n 's/^  name: \(.*\.kubeneuron\.io\)$/\1/p' "$file"
+	done
+)
+((${#crd_names[@]} == 8)) || die "found ${#crd_names[@]} generated CRDs, want 8"
+for crd in "${crd_names[@]}"; do
+	"$KUBECTL_BIN" wait --for=condition=Established "crd/$crd" \
+		--timeout="${TIMEOUT_SECONDS}s" >/dev/null
+done
+
+note "running the 99-case CEL admission matrix"
+CEL_ALLOW_CLUSTER_MUTATION=1 KUBECTL_BIN="$KUBECTL_BIN" JQ_BIN="$JQ_BIN" bash "$CEL_SCRIPT"
+
+if ((BUILD_IMAGES)); then
+	# The production Dockerfile compiles inside the build stage, so no
+	# bin/ artifacts are required; the legacy scratch file copies them in.
+	if [[ $IMAGE_DOCKERFILE == *test/integration/Dockerfile ]]; then
+		for binary in kubeneuron-operator kubeneuron-controller kubeneuron-agent; do
+			[[ -x $REPO_ROOT/bin/$binary ]] || \
+				die "missing static binary bin/$binary; run 'make build' first"
+		done
+	fi
+	for target_and_image in \
+		"operator=$OPERATOR_IMAGE" \
+		"controller=$CONTROLLER_IMAGE" \
+		"agent=$AGENT_IMAGE"; do
+		target=${target_and_image%%=*}
+		image=${target_and_image#*=}
+		note "building image target $target as $image from ${IMAGE_DOCKERFILE#"$REPO_ROOT"/}"
+		"$DOCKER_BIN" build --target "$target" --tag "$image" \
+			--file "$IMAGE_DOCKERFILE" "$REPO_ROOT"
+	done
+else
+	for image in "$OPERATOR_IMAGE" "$CONTROLLER_IMAGE" "$AGENT_IMAGE"; do
+		"$DOCKER_BIN" image inspect "$image" >/dev/null 2>&1 || \
+			die "BUILD_IMAGES=0 but local image is absent: $image"
+	done
+fi
+
+note "loading local images into kind"
+"$KIND_BIN" load docker-image --name "$CLUSTER_NAME" \
+	"$OPERATOR_IMAGE" "$CONTROLLER_IMAGE" "$AGENT_IMAGE"
+
+operator_manifest="$work_dir/operator-deployment.yaml"
+# Registry- and tag-agnostic: config/default pins a released image whose tag
+# changes every release and whose repository path has changed before. Matching
+# the exact path meant a namespace rename silently stopped this harness from
+# testing anything, which is how it went unnoticed.
+sed -E "s|image: [A-Za-z0-9._/-]+/operator:[A-Za-z0-9._-]+(@sha256:[a-f0-9]+)?|image: $OPERATOR_IMAGE|" \
+	"$REPO_ROOT/config/default/operator_deployment.yaml" >"$operator_manifest"
+grep -Fq "image: $OPERATOR_IMAGE" "$operator_manifest" || die "operator image substitution failed"
+if grep -Fq 'ghcr.io/kubeneuron/kubeneuron/operator:latest' "$operator_manifest"; then
+	die "operator manifest retained its published image placeholder"
+fi
+
+note "installing operator namespace, RBAC, and local Deployment"
+"$KUBECTL_BIN" apply -f "$REPO_ROOT/config/default/namespace.yaml" >/dev/null
+"$KUBECTL_BIN" apply -k "$REPO_ROOT/config/rbac" >/dev/null
+"$KUBECTL_BIN" apply -f "$operator_manifest" >/dev/null
+"$KUBECTL_BIN" -n "$OPERATOR_NAMESPACE" patch deployment "$OPERATOR_DEPLOYMENT" \
+	--type=strategic \
+	-p '{"spec":{"template":{"spec":{"containers":[{"name":"operator","imagePullPolicy":"Never"}]}}}}' >/dev/null
+"$KUBECTL_BIN" -n "$OPERATOR_NAMESPACE" rollout status \
+	deployment/"$OPERATOR_DEPLOYMENT" --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+actual_operator_image=$("$KUBECTL_BIN" -n "$OPERATOR_NAMESPACE" get \
+	deployment "$OPERATOR_DEPLOYMENT" -o jsonpath='{.spec.template.spec.containers[?(@.name=="operator")].image}')
+[[ $actual_operator_image == "$OPERATOR_IMAGE" ]] || \
+	die "operator Deployment uses $actual_operator_image, want $OPERATOR_IMAGE"
+assert_operator_rbac
+
+# The installer suite: its lifecycle and the Managed metrics path it writes,
+# on the same cluster setup, then stop. CI runs it as its own job beside the
+# rest, which the two would push past the job's time limit.
+if [[ $INTEGRATION_SUITE != main ]]; then
+	INSTALL_TEST_NAME="${ROOT_NAME}-retention" KUBECTL_BIN="$KUBECTL_BIN" \
+		CONTROLLER_IMAGE="$CONTROLLER_IMAGE" AGENT_IMAGE="$AGENT_IMAGE" \
+		bash "$REPO_ROOT/hack/test-install-retention.sh"
+	# One installation at a time: agents share a node-local state directory.
+	MANAGED_TEST_NAME="${ROOT_NAME}-managed" KUBECTL_BIN="$KUBECTL_BIN" \
+		KIND_BIN="$KIND_BIN" DOCKER_BIN="$DOCKER_BIN" JQ_BIN="$JQ_BIN" CLUSTER_NAME="$CLUSTER_NAME" \
+		CONTROLLER_IMAGE="$CONTROLLER_IMAGE" AGENT_IMAGE="$AGENT_IMAGE" \
+		bash "$REPO_ROOT/hack/test-managed-observability.sh"
+	if [[ $INTEGRATION_SUITE == installer ]]; then
+		note "PASS (installer suite): installer retention and re-run, and the Managed metrics path on synthetic DCGM input"
+		exit 0
+	fi
+fi
+
+smoke_manifest="$work_dir/operator-smoke.yaml"
+sed -e "s|@CONTROLLER_IMAGE@|$CONTROLLER_IMAGE|g" \
+	-e "s|@AGENT_IMAGE@|$AGENT_IMAGE|g" \
+	"$SMOKE_TEMPLATE" >"$smoke_manifest"
+if grep -Eq '@(CONTROLLER|AGENT)_IMAGE@' "$smoke_manifest"; then
+	die "smoke image substitution failed"
+fi
+
+note "creating the operator smoke fixtures"
+fixture_applied=1
+"$KUBECTL_BIN" apply -f "$smoke_manifest" >/dev/null
+root_uid=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.uid}')
+[[ -n $root_uid ]] || die "KubeNeuron fixture has no UID"
+generate_tls_fixtures "$root_uid"
+create_tls_secrets
+generate_rotated_tls_fixtures "$root_uid"
+wait_root_condition True RuntimeAvailable
+assert_runtime_ready
+assert_all_owners "$root_uid"
+assert_child_configuration_statuses
+exercise_node_and_window_status_rbac
+exercise_azure_cloud_wiring
+
+controller_subject="system:serviceaccount:${TARGET_NAMESPACE}:${ROOT_NAME}-controller"
+controller_tokenreview=$("$KUBECTL_BIN" auth can-i create tokenreviews.authentication.k8s.io \
+	--as="$controller_subject" 2>/dev/null || true)
+[[ $controller_tokenreview == yes ]] || \
+	die "managed controller cannot create TokenReviews (got ${controller_tokenreview:-empty})"
+for target in \
+	"serviceaccount/${ROOT_NAME}-agent" \
+	"daemonset.apps/${ROOT_NAME}-agent"; do
+	controller_target_get=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" auth can-i get "$target" \
+		--as="$controller_subject" 2>/dev/null || true)
+	[[ $controller_target_get == yes ]] || die "managed controller cannot get $target"
+done
+for other in \
+	"serviceaccount/default" \
+	"daemonset.apps/not-the-managed-agent"; do
+	controller_other_get=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" auth can-i get "$other" \
+		--as="$controller_subject" 2>/dev/null || true)
+	[[ $controller_other_get == no ]] || die "managed controller unexpectedly can get $other"
+done
+note "managed controller TokenReview and named ServiceAccount/DaemonSet reads are least-privilege scoped"
+
+deployment_generation=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+	deployment "${ROOT_NAME}-controller" -o jsonpath='{.metadata.generation}')
+digest_before=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.status.configDigest}')
+root_generation_before=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')
+"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=merge \
+	-p '{"spec":{"approvals":{}}}' >/dev/null
+root_generation_after=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.metadata.generation}')
+((root_generation_after > root_generation_before)) || \
+	die "explicit-default approvals patch did not advance the root generation"
+wait_observed_generation "$root_generation_after"
+wait_root_condition True RuntimeAvailable
+digest_after=$("$KUBECTL_BIN" get kubeneuron "$ROOT_NAME" -o jsonpath='{.status.configDigest}')
+deployment_generation_after=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+	deployment "${ROOT_NAME}-controller" -o jsonpath='{.metadata.generation}')
+[[ $digest_after == "$digest_before" ]] || die "explicit default changed compiled digest"
+[[ $deployment_generation_after == "$deployment_generation" ]] || \
+	die "acknowledged no-op reconcile changed Deployment generation $deployment_generation -> $deployment_generation_after"
+note "acknowledged explicit-default reconcile left digest and Deployment generation unchanged"
+
+wait_agent_log 'controller registration acknowledged'
+exercise_agent_bad_certificate_readiness
+exercise_agent_authentication
+exercise_runtime_contract_lifecycle
+wait_root_condition True RuntimeAvailable
+assert_runtime_ready
+exercise_controller_restart_mid_playbook
+exercise_incident_evidence
+exercise_cloud_interruption
+exercise_accelerator_health
+exercise_real_cordon_and_uncordon
+exercise_workload_safe_recovery
+exercise_backup_restore
+wait_root_condition True RuntimeAvailable
+assert_runtime_ready
+exercise_routine_tls_rotation
+exercise_emergency_tls_leaf_recovery
+
+note "exercising registration-readiness loss and recovery during controller outage"
+scale_operator 0 registration-outage
+"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" scale \
+	deployment "${ROOT_NAME}-controller" --replicas=0 >/dev/null
+# The agents only lose their acknowledgment once nothing answers registration,
+# so the outage has to be a real one before the staleness clock can start.
+# rollout status reports a scale-to-zero done while the Pod still serves.
+wait_deployment_stopped "$TARGET_NAMESPACE" "${ROOT_NAME}-controller"
+wait_agent_registration_readiness stale
+wait_agent_log 'controller registration acknowledgment lost'
+
+"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" scale \
+	deployment "${ROOT_NAME}-controller" --replicas=1 >/dev/null
+"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" rollout status \
+	deployment/"${ROOT_NAME}-controller" --timeout="${TIMEOUT_SECONDS}s" >/dev/null
+wait_agent_registration_readiness ready
+wait_agent_log 'controller registration acknowledgment recovered'
+scale_operator 1
+wait_root_condition True RuntimeAvailable
+assert_runtime_ready
+note "agent readiness became stale during controller outage and recovered after a durable acknowledgment"
+
+note "inducing an unowned runtime ConfigMap collision"
+scale_operator 0 collision-setup
+"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete \
+	configmap "${ROOT_NAME}-runtime" --wait=true --timeout=60s >/dev/null
+"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create configmap "${ROOT_NAME}-runtime" \
+	--from-literal=owner=someone-else >/dev/null
+sentinel_uid=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+	configmap "${ROOT_NAME}-runtime" -o jsonpath='{.metadata.uid}')
+sentinel_json=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+	configmap "${ROOT_NAME}-runtime" -o json)
+"$JQ_BIN" -e '
+  .data == {"owner":"someone-else"} and
+  ((.metadata.ownerReferences // []) | length) == 0
+' <<<"$sentinel_json" >/dev/null || die "collision sentinel was not created unowned and unchanged"
+collision_generation=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+	deployment "${ROOT_NAME}-controller" -o jsonpath='{.metadata.generation}')
+
+scale_operator 1
+expected_collision_message="reconcile runtime ConfigMap: ConfigMap \"${TARGET_NAMESPACE}/${ROOT_NAME}-runtime\" already exists and is not controlled by KubeNeuron \"${ROOT_NAME}\""
+wait_root_condition False ReconciliationFailed "$expected_collision_message"
+sentinel_after=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+	configmap "${ROOT_NAME}-runtime" -o json)
+"$JQ_BIN" -e --arg uid "$sentinel_uid" '
+  .metadata.uid == $uid and
+  .data == {"owner":"someone-else"} and
+  ((.metadata.ownerReferences // []) | length) == 0
+' <<<"$sentinel_after" >/dev/null || die "operator adopted or mutated the collision sentinel"
+collision_generation_after=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+	deployment "${ROOT_NAME}-controller" -o jsonpath='{.metadata.generation}')
+[[ $collision_generation_after == "$collision_generation" ]] || \
+	die "collision changed Deployment generation $collision_generation -> $collision_generation_after"
+note "collision produced Ready=False/ReconciliationFailed without adoption or Deployment churn"
+
+note "removing only the sentinel and restarting the operator for deterministic recovery"
+scale_operator 0 collision-recovery
+"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete \
+	configmap "${ROOT_NAME}-runtime" --wait=true --timeout=60s >/dev/null
+scale_operator 1
+wait_root_condition True RuntimeAvailable
+assert_runtime_ready
+recovered_json=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+	configmap "${ROOT_NAME}-runtime" -o json)
+"$JQ_BIN" -e --arg old_uid "$sentinel_uid" --arg root_uid "$root_uid" '
+  .metadata.uid != $old_uid and
+  .data["config-digest"] != null and
+  .data["policies.yaml"] != null and
+  .data.owner == null and
+  (.metadata.ownerReferences | length) == 1 and
+  .metadata.ownerReferences[0].uid == $root_uid and
+  .metadata.ownerReferences[0].controller == true
+' <<<"$recovered_json" >/dev/null || die "recovered runtime ConfigMap is not freshly owned configuration"
+recovery_generation=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" get \
+	deployment "${ROOT_NAME}-controller" -o jsonpath='{.metadata.generation}')
+[[ $recovery_generation == "$collision_generation" ]] || \
+	die "recovery changed Deployment generation $collision_generation -> $recovery_generation"
+assert_all_owners "$root_uid"
+assert_tls_secrets_unchanged
+assert_operator_issues_missing_tls
+
+operator_logs=$("$KUBECTL_BIN" -n "$OPERATOR_NAMESPACE" logs \
+	deployment/"$OPERATOR_DEPLOYMENT" --all-containers --tail=-1 2>&1)
+if grep -Eiq 'forbidden|object has been modified|panic|fatal' <<<"$operator_logs"; then
+	die "operator logs contain an unexpected RBAC/concurrency/fatal error"
+fi
+
+if "$KUBECTL_BIN" get nodes -o json | "$JQ_BIN" -e \
+	'any(.items[]; .status.capacity["nvidia.com/gpu"] != null)' >/dev/null; then
+	note "GPU capacity is advertised, but this harness deliberately makes no NVIDIA/DCGM claim"
+else
+	note "kind advertises no nvidia.com/gpu capacity, as expected for this CPU-only smoke"
+fi
+agent_logs=$("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" logs \
+	daemonset/"${ROOT_NAME}-agent" --all-containers --tail=100 2>&1 || true)
+if grep -Fq 'real NVML driver not wired yet; using fake driver (skeleton)' <<<"$agent_logs"; then
+	note "agent explicitly reports its fake NVML skeleton"
+fi
+
+	note "PASS: 99 CEL checks (including the destructive-execution admission gate, the checkpoint-coordination, advisory, group and impact-preview bounds, and the GPUAutonomyPlan envelope rules), scoped RBAC, mTLS plus Pod/node identity rejection, authenticated public API and Alertmanager webhook, manual immutable/versioned routine TLS rotation, explicit dual-leaf emergency recovery, stale-state/plan rejection, failed-leaf and failed-contraction rollback, fresh registration proof, durable readiness loss/recovery, 11 owners, ownership collision/non-adoption/recovery, and acknowledged no-op reconciliation, plus a controller restart mid-playbook with durable approval state and no re-executed step, and a REAL cordon with the janitor's uncordon on an armed worker, plus the v0.8 workload-safe recovery phases on real Pods: advisory at park and its withdrawal, a durable impact preview the approve must carry, a Phase 1 request reaching a group peer on another node, a REAL drain after acknowledgement, and a dry-run park that patches nothing"
+note "CPU-only boundary: this validates transport, the tested manual TLS-rotation and leaf-recovery contracts, and Kubernetes workload identity; it also proves operator-issued TLS reissuance for a deleted, operator-owned set; it does not validate expiry-driven renewal timing, emergency CA revocation, NVIDIA, NVML, DCGM, or GPU actions. Remediation is now partly covered: one destructive controller-side step (Cordon) and its janitor run for real against an armed node"

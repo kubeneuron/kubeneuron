@@ -1,0 +1,180 @@
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubeneuron-integration-smoke
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: integration-smoke-observe
+spec:
+  kubeNeuronRef: integration-smoke
+  target: GPU
+  steps:
+    - name: observe
+      action: Observe
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: integration-smoke-ladder
+spec:
+  kubeNeuronRef: integration-smoke
+  target: Node
+  steps:
+    - name: cordon
+      action: Cordon
+    - name: drain
+      action: Drain
+      approval: Required
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: integration-denied-reboot
+spec:
+  kubeNeuronRef: integration-smoke
+  target: Node
+  steps:
+    - name: reboot
+      action: Reboot
+      approval: Required
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: integration-denied-policy
+spec:
+  kubeNeuronRef: integration-smoke
+  priority: 5
+  match:
+    class: integration-denied-test
+  playbookRef: integration-denied-reboot
+---
+# Cordon ONLY, and no approval. The real-execution phase drives this one with
+# executionMode temporarily switched to Enabled, so every rung it contains
+# actually runs against the cluster — which is the point: nothing else in this
+# suite has ever cordoned a node for real, and the janitor's uncordon path had
+# never executed outside unit tests.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: integration-smoke-cordon-only
+spec:
+  kubeNeuronRef: integration-smoke
+  target: Node
+  steps:
+    - name: cordon
+      action: Cordon
+---
+# Cordon behind an approval, then a real Drain: the v0.8 workload-safe
+# recovery phase parks here so the advisory, the impact preview and the
+# group request can be observed on real Pods before the drain evicts them.
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPUPlaybook
+metadata:
+  name: integration-smoke-workload-safe
+spec:
+  kubeNeuronRef: integration-smoke
+  target: Node
+  steps:
+    - name: cordon
+      action: Cordon
+      approval: Required
+    - name: drain
+      action: Drain
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: integration-workload-safe-policy
+spec:
+  kubeNeuronRef: integration-smoke
+  priority: 4
+  match:
+    class: integration-workload-safe-test
+  playbookRef: integration-smoke-workload-safe
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: integration-cordon-policy
+spec:
+  kubeNeuronRef: integration-smoke
+  priority: 3
+  match:
+    class: integration-cordon-test
+  playbookRef: integration-smoke-cordon-only
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: integration-restart-policy
+spec:
+  kubeNeuronRef: integration-smoke
+  priority: 2
+  match:
+    class: integration-restart-test
+  playbookRef: integration-smoke-ladder
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: GPURemediationPolicy
+metadata:
+  name: integration-smoke-policy
+spec:
+  kubeNeuronRef: integration-smoke
+  priority: 1
+  match:
+    class: integration-smoke-test
+  playbookRef: integration-smoke-observe
+---
+apiVersion: kubeneuron.io/v1alpha1
+kind: KubeNeuron
+metadata:
+  name: integration-smoke
+spec:
+  namespace: kubeneuron-integration-smoke
+  controller:
+    image: @CONTROLLER_IMAGE@
+  agent:
+    image: @AGENT_IMAGE@
+    tolerations:
+      - operator: Exists
+    # Keep the journal off here. The topology phase writes a synthetic
+    # nvidia.com/gpu capacity on the agent's node, which makes it an
+    # accelerator node: the controller labels it for the journal and its
+    # agent moves to a journal DaemonSet mid-run, so the bound token the
+    # harness holds names a deleted Pod and is refused. hack/kind-journal.sh
+    # covers the journal and the moves between its DaemonSets.
+    kernelLog:
+      journal:
+        enabled: false
+  safety:
+    executionMode: DryRun
+  notifications:
+    operatorAPIToken:
+      name: integration-smoke-operator-api-token
+    webhookToken:
+      name: integration-smoke-webhook-token
+  workflowStore:
+    type: SQLite
+    sqlite:
+      size: 1Gi
+  observability:
+    victoriaMetrics:
+      mode: External
+      endpoint: http://vmsingle-unused.kubeneuron-integration-smoke.svc:8428
+    alertmanager:
+      mode: External
+      endpoint: http://alertmanager-unused.kubeneuron-integration-smoke.svc:9093
+  tls:
+    serverSecretRef:
+      name: integration-smoke-controller-tls
+    clientCASecretRef:
+      name: integration-smoke-agent-client-ca
+    clientSecretRef:
+      name: integration-smoke-agent-tls
+    serverCASecretRef:
+      name: integration-smoke-controller-server-ca
