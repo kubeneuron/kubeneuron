@@ -6031,7 +6031,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-===== github.com/go-jose/go-jose/v4@v4.1.4/LICENSE =====
+===== github.com/go-jose/go-jose/v4@v4.1.6/LICENSE =====
 
                                  Apache License
                            Version 2.0, January 2004
@@ -6236,7 +6236,7 @@ SOFTWARE.
    limitations under the License.
 
 
-===== github.com/go-jose/go-jose/v4@v4.1.4/json/LICENSE =====
+===== github.com/go-jose/go-jose/v4@v4.1.6/json/LICENSE =====
 Copyright (c) 2012 The Go Authors. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without

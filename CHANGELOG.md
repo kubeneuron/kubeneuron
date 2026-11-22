@@ -9,6 +9,10 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+### Security
+
+- Updated the controller’s transitive OIDC dependency `github.com/go-jose/go-jose/v4` to v4.1.6 to address GHSA-mgcc-cww5-fp2q, GHSA-vvm8-gf78-28g4 and GHSA-4w3g-jfj2-cw2q.
+
 ### Added
 
 - Add-first replacement can use any configured zone of a fixed-size EKS or AKS pool when the remediation policy selects `replacement.successorZone: AnyPoolZone`. The default is `SameZone`. Cross-zone placement was tested with simulated providers only.
