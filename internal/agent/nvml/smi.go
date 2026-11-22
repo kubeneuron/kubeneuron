@@ -4,6 +4,7 @@ package nvml
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -475,4 +476,21 @@ func (s *SMI) PersistenceMode(ctx context.Context, index int) (bool, error) {
 	default:
 		return false, fmt.Errorf("unexpected persistence mode %q", firstLine(out))
 	}
+}
+
+// RuntimeInjected is the driver of an agent whose NVIDIA devices and
+// nvidia-smi come from the container runtime rather than from host mounts.
+// It is the real driver when the runtime injected a working nvidia-smi.
+// Otherwise it is a driver with no GPUs, and the error says why: such an
+// agent still watches the kernel log, so it must not stop over a node the
+// runtime gave nothing to, and it must not report a GPU it cannot see.
+func RuntimeInjected(path string) (GPUDriver, error) {
+	if !DetectSMI(path) {
+		return &Fake{}, errors.New("the container runtime injected no nvidia-smi")
+	}
+	smi := NewSMI(path)
+	if err := smi.Init(); err != nil {
+		return &Fake{}, fmt.Errorf("the container runtime injected nvidia-smi, but it could not read the GPUs: %w", err)
+	}
+	return smi, nil
 }

@@ -145,13 +145,13 @@ func cmdStatus() *cobra.Command {
 		}
 		switch {
 		case s.Diagnostic != "":
-			_, _ = fmt.Fprintln(out, "GPU inventory:", inventory.DiagnosticMessage(s.Diagnostic))
+			_, _ = fmt.Fprintln(out, "GPU inventory:", inventory.DiagnosticText(s))
 		case s.ReportingNodes == 0:
 			_, _ = fmt.Fprintf(out, "GPU inventory unknown: no fresh agent reports (%d nodes advertise accelerator resources)\n", s.AdvertisedNodes)
 		case s.GPUs == 0 && s.AdvertisedNodes == 0:
 			_, _ = fmt.Fprintln(out, "GPU inventory: agents report zero GPUs and no node advertises an accelerator resource")
 		case s.GPUs == 0:
-			_, _ = fmt.Fprintln(out, "GPU inventory: agents report zero GPUs; check host tooling, driver and nvidia-smi")
+			_, _ = fmt.Fprintln(out, "GPU inventory: agents report zero GPUs; check the driver and nvidia-smi on the selected nodes")
 		default:
 			_, _ = fmt.Fprintf(out, "GPU inventory: %d GPUs across %d reporting nodes\n", s.GPUs, s.ReportingNodes)
 		}

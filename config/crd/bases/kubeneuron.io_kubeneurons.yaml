@@ -167,6 +167,20 @@ spec:
                     x-kubernetes-list-map-keys:
                     - vendor
                     x-kubernetes-list-type: map
+                  deviceAccess:
+                    default: NvidiaRuntime
+                    description: |-
+                      DeviceAccess is how the agent reads the node's NVIDIA GPUs. With
+                      NvidiaRuntime, the default, the agent asks the NVIDIA container runtime
+                      for every GPU of the node and for nvidia-smi, read-only, and stays
+                      unprivileged: no host path is mounted for it. Where the runtime exposes
+                      nothing, the agent reports no GPUs and keeps watching the kernel log.
+                      None asks for nothing. It applies without node-level actions only: a
+                      privileged agent reads the GPUs through HostTooling alone.
+                    enum:
+                    - NvidiaRuntime
+                    - None
+                    type: string
                   hostTooling:
                     description: |-
                       HostTooling opts the agent DaemonSet into read-only host mounts of the

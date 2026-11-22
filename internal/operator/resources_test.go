@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -597,6 +598,7 @@ func TestAgentDaemonSetReportsRegistrationReadiness(t *testing.T) {
 		"--registration-stale-after=90s",
 		"--nvidia-observation",
 		"--nvidia-controller-profile",
+		"--nvidia-runtime-devices",
 	}
 	if strings.Join(container.Args, "\n") != strings.Join(wantArgs, "\n") {
 		t.Fatalf("agent args = %q, want %q", container.Args, wantArgs)
@@ -1348,5 +1350,62 @@ func TestTrainingReportPortOptIn(t *testing.T) {
 		if listens != enabled || exposed != enabled || routed != enabled {
 			t.Fatalf("enabled=%v listens=%v containerPort=%v servicePort=%v", enabled, listens, exposed, routed)
 		}
+	}
+}
+
+// The agent reads the GPUs through the NVIDIA container runtime, unprivileged
+// and without host paths, unless deviceAccess is None. A privileged agent,
+// with node-level actions, gets a real driver only from the host tooling its
+// owner declared, never from the runtime.
+func TestAgentDeviceAccess(t *testing.T) {
+	cases := []struct {
+		name        string
+		access      kubeneuronv1alpha1.AgentDeviceAccess
+		nodeActions bool
+		hostTooling bool
+		runtime     bool
+		hostMounts  bool
+	}{
+		{"default", "", false, false, true, false},
+		{"NvidiaRuntime", kubeneuronv1alpha1.DeviceAccessNvidiaRuntime, false, false, true, false},
+		{"NvidiaRuntime, host tooling without node-level actions", kubeneuronv1alpha1.DeviceAccessNvidiaRuntime, false, true, true, false},
+		{"NvidiaRuntime, node-level actions", kubeneuronv1alpha1.DeviceAccessNvidiaRuntime, true, false, false, false},
+		{"NvidiaRuntime, node-level actions and host tooling", kubeneuronv1alpha1.DeviceAccessNvidiaRuntime, true, true, false, true},
+		{"None", kubeneuronv1alpha1.DeviceAccessNone, false, false, false, false},
+		{"None, host tooling without node-level actions", kubeneuronv1alpha1.DeviceAccessNone, false, true, false, false},
+		{"None, node-level actions and host tooling", kubeneuronv1alpha1.DeviceAccessNone, true, true, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			installation := testKubeNeuron()
+			installation.Spec.Safety.NodeLevelActions = tc.nodeActions
+			installation.Spec.Agent.DeviceAccess = tc.access
+			if tc.hostTooling {
+				installation.Spec.Agent.HostTooling = &kubeneuronv1alpha1.HostToolingSpec{}
+			}
+			for _, ds := range agentDaemonSets(installation, &Snapshot{}) {
+				pod := ds.Spec.Template.Spec
+				c := pod.Containers[0]
+				env := map[string]string{}
+				for _, e := range c.Env {
+					env[e.Name] = e.Value
+				}
+				runtime := slices.Contains(c.Args, "--nvidia-runtime-devices")
+				if runtime != tc.runtime || (env["NVIDIA_VISIBLE_DEVICES"] == "all") != tc.runtime ||
+					(env["NVIDIA_DRIVER_CAPABILITIES"] == "utility") != tc.runtime {
+					t.Fatalf("%s: runtime devices = %t, env %v, want %t", ds.Name, runtime, env, tc.runtime)
+				}
+				var hostMounts bool
+				for _, m := range c.VolumeMounts {
+					hostMounts = hostMounts || strings.HasPrefix(m.MountPath, "/host/nvidia") || m.MountPath == "/lib64"
+				}
+				if hostMounts != tc.hostMounts || slices.Contains(c.Args, "--require-real-driver") != tc.hostMounts {
+					t.Fatalf("%s: host tooling mounted = %t, want %t", ds.Name, hostMounts, tc.hostMounts)
+				}
+				if !tc.nodeActions && (*c.SecurityContext.Privileged || pod.HostPID || !*c.SecurityContext.ReadOnlyRootFilesystem) {
+					t.Fatalf("%s: agent is not unprivileged with a read-only root: %+v", ds.Name, c.SecurityContext)
+				}
+			}
+		})
 	}
 }

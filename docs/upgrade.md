@@ -45,6 +45,8 @@ The remaining instructions apply to installations running v1.0.0-rc.1 or later.
 
 After v1.0.0-rc.1, installations that omit `spec.safety.impactPreview.enabled` compute and store an advisory preview at each approval round and include its summary in configured approval notifications. Set it to `false` to retain the previous behavior. An existing explicit `false` remains effective. The default budget is 15 seconds. Workload-context resolvers and mandatory previews remain opt-in. For a round already awaiting approval, the controller computes a preview on explicit recompute or at the next park for approval; this default change preserves a timely approval already recorded for the same round and step.
 
+After v1.0.0-rc.2, the agent reads NVIDIA GPUs through the NVIDIA container runtime by default (`spec.agent.deviceAccess: NvidiaRuntime`). The upgrade rolls every agent DaemonSet of an installation without node-level actions once, node by node, to add two environment variables and one argument; no host path is added. On nodes with the NVIDIA runtime as default, the agents then report each GPU's model and UUID and the driver version (see [Data and privacy](data-and-privacy.md)). Set `deviceAccess: None` before upgrading to keep the previous behaviour: the agent reads no NVIDIA devices unless node-level actions and host tooling are enabled.
+
 1. Take a fresh workflow-store backup (see
    [operations](operations.md#sqlite-workflow-store-backup-and-restore)) and
    verify the snapshot opens. Schema migrations are **forward-only**: an

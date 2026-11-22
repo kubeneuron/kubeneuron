@@ -41,6 +41,13 @@ one of these layouts explicitly. With mixed or unidentified layouts,
 auto-detection leaves host tooling unset. Use `--profile none` to skip
 host mounts deliberately.
 
+By default the agent reads the GPUs through the NVIDIA container runtime and
+needs none of these mounts; see
+[NVIDIA host tooling](operations.md#nvidia-host-tooling-in-the-agent-daemonset).
+`RuntimeDidNotExposeGPUs` means Kubernetes advertises NVIDIA GPUs but the
+agents see none; `DeviceAccessDisabled` means `spec.agent.deviceAccess` is
+`None`.
+
 A `GPUVisibility` reason of `SMIMissing` means the agent could not find the
 executable in the mounted binary directory. For `DriverUnavailable`, check
 the host driver and its libraries. `NoGPUResource` means fresh reports

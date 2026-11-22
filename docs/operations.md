@@ -811,8 +811,41 @@ to see a shadow alert anywhere but on the boards.
 
 ## NVIDIA host tooling in the agent DaemonSet
 
-The agent image is distroless and carries no NVIDIA userspace. On GPU nodes,
-opt in to read-only host mounts:
+The agent image carries no NVIDIA userspace. By default
+(`spec.agent.deviceAccess: NvidiaRuntime`) the agent asks the NVIDIA
+container runtime for the node's GPUs and for `nvidia-smi`, through
+`NVIDIA_VISIBLE_DEVICES=all` and `NVIDIA_DRIVER_CAPABILITIES=utility`. The
+agent stays unprivileged, with a read-only root filesystem, and no host path
+is mounted for it. It reads the inventory only: without node-level actions it
+runs no action on the node. This needs the NVIDIA container runtime as the
+node's default runtime; a node whose runtime ignores these variables gives
+the agent no GPU, and the agent reports none and keeps watching the kernel
+log. This mode has not yet been exercised on real hardware.
+
+| Node image | GPUs visible to the agent by default |
+|---|---|
+| EKS Amazon Linux 2023 NVIDIA AMI | expected: the NVIDIA runtime is the default there; not yet exercised on real hardware |
+| AKS GPU node images | expected: the NVIDIA runtime is the default there; not yet exercised on real hardware |
+| GKE Container-Optimized OS, Bottlerocket | no: KubeNeuron checks a replacement by node readiness and advertised capacity |
+| CDI-only runtime setups | not verified |
+
+When Kubernetes advertises `nvidia.com/gpu` and the agents see no GPU, the
+`GPUVisibility` condition and `kubeneuronctl status` report
+`RuntimeDidNotExposeGPUs`: the agents see no device, most often because the
+NVIDIA runtime is not the default one. It is what the agents see, not a
+diagnosis of the cause. Set `deviceAccess: None` to ask the runtime for
+nothing (`DeviceAccessDisabled`).
+
+The agent can then read every GPU of its node, outside the device plugin's
+allocation, and the driver's management library. It sends the controller each
+GPU's model and UUID and the driver version; see
+[Data and privacy](data-and-privacy.md).
+
+With node-level actions enabled, the agent runs privileged and does not ask
+the runtime for GPUs: it reads them only through the host tooling you mount
+with `hostTooling`, and without it reports none (`HostToolingNotConfigured`).
+Without node-level actions, `hostTooling` mounts nothing (`dcgmEndpoint` is
+still passed to the agent):
 
 ```yaml
 spec:

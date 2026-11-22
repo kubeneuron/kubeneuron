@@ -714,7 +714,7 @@ assert_real_driver() {
 	[ -n "$agent_pod" ] || die "no agent pod on the GPU node $node"
 
 	if kubectl -n "$RUNTIME_NAMESPACE" logs "$agent_pod" --tail=-1 2>/dev/null |
-		grep -q "using fake GPU driver"; then
+		grep -qE "using fake GPU driver|no NVIDIA GPUs visible to the agent"; then
 		die "the agent on $node fell back to the fake GPU driver on real hardware; every NVIDIA assertion after this point would pass against a simulator"
 	fi
 	log "deploy: the agent on $node is on a real driver"

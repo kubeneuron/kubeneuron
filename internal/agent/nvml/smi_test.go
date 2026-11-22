@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -389,5 +391,30 @@ func TestPlaceholderUUIDsAreRefused(t *testing.T) {
 	}
 	if len(gpus) != 1 || gpus[0].UUID != "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" {
 		t.Fatalf("parsed %+v", gpus)
+	}
+}
+
+// An agent the runtime gave no working nvidia-smi runs with no GPUs and says
+// why; it never takes the fake driver's simulated GPUs or stops.
+func TestRuntimeInjectedWithoutWorkingSMI(t *testing.T) {
+	dir := t.TempDir()
+	broken := filepath.Join(dir, "nvidia-smi")
+	if err := os.WriteFile(broken, []byte("#!/bin/sh\necho 'Failed to initialize NVML: Unknown Error' >&2\nexit 9\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{"not injected": filepath.Join(dir, "missing"), "injected but failing": broken} {
+		t.Run(name, func(t *testing.T) {
+			driver, err := RuntimeInjected(path)
+			if err == nil {
+				t.Fatal("no reason given")
+			}
+			fake, ok := driver.(*Fake)
+			if !ok || len(fake.GPUs) != 0 {
+				t.Fatalf("driver = %#v, want one with no GPUs", driver)
+			}
+			if err := driver.Init(); err != nil {
+				t.Fatalf("the agent could not start on it: %v", err)
+			}
+		})
 	}
 }

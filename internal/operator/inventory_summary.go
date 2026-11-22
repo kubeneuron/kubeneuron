@@ -137,7 +137,7 @@ func (r *KubeNeuronReconciler) setInventoryConditions(ctx context.Context, root 
 	case now.Sub(s.ObservedAt) > 3*inventory.Interval:
 		unknown("StaleSummary", "Controller inventory summary is stale.")
 	case s.ReportingNodes == 0 && s.Diagnostic != "":
-		unknown(s.Diagnostic, inventory.DiagnosticMessage(s.Diagnostic))
+		unknown(s.Diagnostic, inventory.DiagnosticText(s))
 	case s.ReportingNodes == 0 && s.AdvertisedNodes > 0:
 		unknown("AwaitingGPUAgents", "Kubernetes advertises accelerator resources, but no agent has a fresh report.")
 	case s.ReportingNodes == 0:
@@ -149,9 +149,7 @@ func (r *KubeNeuronReconciler) setInventoryConditions(ctx context.Context, root 
 		case s.AdvertisedNodes == 0:
 			record("GPUVisibility", metav1.ConditionFalse, "NoGPUResource", "Agents report zero GPUs and no Kubernetes node advertises an accelerator resource.")
 		case s.Diagnostic != "":
-			record("GPUVisibility", metav1.ConditionFalse, s.Diagnostic, inventory.DiagnosticMessage(s.Diagnostic))
-		case root.Spec.Agent.HostTooling == nil:
-			record("GPUVisibility", metav1.ConditionFalse, "HostToolingNotConfigured", "Agents report zero GPUs and NVIDIA host tooling is unset.")
+			record("GPUVisibility", metav1.ConditionFalse, s.Diagnostic, inventory.DiagnosticText(s))
 		default:
 			record("GPUVisibility", metav1.ConditionFalse, "NoGPUsReported", "Agents report zero GPUs. Check the driver and nvidia-smi on the selected nodes.")
 		}

@@ -3,6 +3,7 @@ package inventory
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"time"
@@ -17,7 +18,7 @@ const Suffix = "-inventory-summary"
 const FirstAlertAcceptedAt = "firstAlertAcceptedAt"
 
 // schemaKeys are the keys Data may write; Merge replaces exactly these.
-var schemaKeys = []string{"advertisedNodes", "schemaVersion", "observedAt", "reportingNodes", "gpuCount", "resetConfirmed", "diagnostic", "lastReportAt", "undeclaredEKSPool"}
+var schemaKeys = []string{"advertisedNodes", "schemaVersion", "observedAt", "reportingNodes", "gpuCount", "resetConfirmed", "diagnostic", "lastReportAt", "undeclaredEKSPool", "nvidiaNodes"}
 
 const (
 	ExitSMIMissing        = 78
@@ -32,20 +33,48 @@ func DiagnosticMessage(reason string) string {
 		return "The managed agent found nvidia-smi but could not initialize the NVIDIA driver inventory."
 	case "HostToolingNotConfigured":
 		return "NVIDIA host tooling is unset for the managed agent."
+	case "RuntimeDidNotExposeGPUs":
+		return fmt.Sprintf(runtimeExposedNone, "")
+	case "DeviceAccessDisabled":
+		return "Agents do not inventory GPUs because spec.agent.deviceAccess is None. " + replacementCheck
 	default:
 		return ""
 	}
+}
+
+const (
+	replacementCheck   = "Node replacement does not depend on this; after a replacement KubeNeuron checks node readiness and advertised capacity, not device health."
+	runtimeExposedNone = "Kubernetes advertises NVIDIA GPUs%s, but the agents see none. The usual cause is that the NVIDIA container runtime is not the default runtime on these nodes, so the devices were not exposed to the agent (see docs/operations.md). " + replacementCheck
+)
+
+// DiagnosticText is s's diagnostic as an operator reads it, with the number
+// of nodes it is about where it names one.
+func DiagnosticText(s Summary) string {
+	if s.Diagnostic == "RuntimeDidNotExposeGPUs" && s.NVIDIANodes > 0 {
+		return fmt.Sprintf(runtimeExposedNone, fmt.Sprintf(" on %d %s", s.NVIDIANodes, plural(s.NVIDIANodes, "node", "nodes")))
+	}
+	return DiagnosticMessage(s.Diagnostic)
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 type Summary struct {
 	UndeclaredEKSPool string
 	Diagnostic        string
 	AdvertisedNodes   int
-	ObservedAt        time.Time
-	LastReportAt      time.Time
-	ReportingNodes    int
-	GPUs              int
-	ResetConfirmed    bool
+	// NVIDIANodes are the nodes that advertise nvidia.com/gpu; 0 also when
+	// the controller did not count them.
+	NVIDIANodes    int
+	ObservedAt     time.Time
+	LastReportAt   time.Time
+	ReportingNodes int
+	GPUs           int
+	ResetConfirmed bool
 }
 
 func (s Summary) Data() map[string]string {
@@ -62,6 +91,9 @@ func (s Summary) Data() map[string]string {
 	}
 	if s.Diagnostic != "" {
 		data["diagnostic"] = s.Diagnostic
+	}
+	if s.NVIDIANodes > 0 {
+		data["nvidiaNodes"] = strconv.Itoa(s.NVIDIANodes)
 	}
 	if !s.LastReportAt.IsZero() {
 		data["lastReportAt"] = s.LastReportAt.UTC().Format(time.RFC3339Nano)
@@ -114,6 +146,13 @@ func Parse(data map[string]string, now time.Time) (Summary, error) {
 		return s, invalid
 	}
 	s.AdvertisedNodes = int(advertised)
+	if n := data["nvidiaNodes"]; n != "" {
+		nvidia, err := strconv.ParseUint(n, 10, 31)
+		if err != nil || int(nvidia) > s.AdvertisedNodes {
+			return s, invalid
+		}
+		s.NVIDIANodes = int(nvidia)
+	}
 	nodes, err := strconv.ParseUint(data["reportingNodes"], 10, 31)
 	if err != nil {
 		return s, invalid

@@ -15,6 +15,7 @@ import (
 
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/inventory"
+	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -105,6 +106,19 @@ func (c *Controller) InventorySummary(ctx context.Context) (inventory.Summary, e
 		if err != nil {
 			return s, err
 		}
+		if s.Diagnostic == "RuntimeDidNotExposeGPUs" || s.Diagnostic == "DeviceAccessDisabled" {
+			if s.NVIDIANodes, err = c.nvidiaNodes(ctx, s.AdvertisedNodes); err != nil {
+				return s, err
+			}
+		}
+		switch {
+		case (s.Diagnostic == "RuntimeDidNotExposeGPUs" || s.Diagnostic == "DeviceAccessDisabled") && s.NVIDIANodes == 0,
+			s.Diagnostic == "RuntimeDidNotExposeGPUs" && s.ReportingNodes == 0:
+			// About the NVIDIA devices agents report: a fleet that
+			// advertises none, or whose agents have not reported yet, is
+			// left to the summary's counts.
+			s.Diagnostic = ""
+		}
 	}
 	return s, nil
 }
@@ -177,8 +191,16 @@ func (c *Controller) ConfigureInventoryDiagnostics(kube kubernetes.Interface, na
 			return "", errors.New("agent DaemonSet belongs to another installation")
 		}
 		for _, container := range ds.Spec.Template.Spec.Containers {
-			if container.Name == "agent" && !slices.Contains(container.Args, "--require-real-driver") {
+			switch {
+			case container.Name != "agent" || slices.Contains(container.Args, "--require-real-driver"):
+			case slices.Contains(container.Args, "--enable-node-level-actions"):
 				return "HostToolingNotConfigured", nil
+			case slices.Contains(container.Args, "--nvidia-runtime-devices"):
+				// The agent runs on whatever the runtime gave it, so its
+				// Pods say nothing: no GPU is all there is to go by.
+				return "RuntimeDidNotExposeGPUs", nil
+			default:
+				return "DeviceAccessDisabled", nil
 			}
 		}
 		pods, err := kube.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.SelectorFromSet(ds.Spec.Selector.MatchLabels).String()})
@@ -204,6 +226,37 @@ func (c *Controller) ConfigureInventoryDiagnostics(kube kubernetes.Interface, na
 		}
 		return "", nil
 	}
+}
+
+// nvidiaNodes counts the nodes that advertise nvidia.com/gpu. ListNodes does
+// not say which resource a node advertises, so it is read only for the
+// diagnostic that names them, and never above advertised: the two reads may
+// see the cache a moment apart.
+func (c *Controller) nvidiaNodes(ctx context.Context, advertised int) (int, error) {
+	devices, ok := c.platform.(platform.AcceleratorInventory)
+	if !ok || advertised == 0 {
+		return 0, nil
+	}
+	all, err := devices.NodeInventory(ctx)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, node := range all {
+		if advertisesNVIDIA(node) {
+			n++
+		}
+	}
+	return min(n, advertised), nil
+}
+
+func advertisesNVIDIA(n types.Node) bool {
+	for _, d := range n.Devices {
+		if d.Resource == "nvidia.com/gpu" && d.Capacity > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func startupDiagnostic(state *corev1.ContainerStateTerminated) string {

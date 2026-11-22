@@ -2,6 +2,7 @@
 package inventory
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,5 +22,30 @@ func TestParseInventorySummary(t *testing.T) {
 		if _, err := Parse(data, now); err == nil {
 			t.Errorf("accepted %s=%q", key, value)
 		}
+	}
+}
+
+func TestNVIDIANodesAndDiagnosticText(t *testing.T) {
+	now := time.Now().UTC()
+	want := Summary{ObservedAt: now, LastReportAt: now, ReportingNodes: 2, AdvertisedNodes: 3, NVIDIANodes: 2, Diagnostic: "RuntimeDidNotExposeGPUs"}
+	got, err := Parse(want.Data(), now)
+	if err != nil || got != want {
+		t.Fatalf("round trip: %+v, %v", got, err)
+	}
+	data := want.Data()
+	data["nvidiaNodes"] = "4"
+	if _, err := Parse(data, now); err == nil {
+		t.Error("accepted more NVIDIA nodes than advertised ones")
+	}
+	if text := DiagnosticText(want); !strings.HasPrefix(text, "Kubernetes advertises NVIDIA GPUs on 2 nodes, but the agents see none.") ||
+		!strings.HasSuffix(text, "not device health.") {
+		t.Fatalf("text = %q", text)
+	}
+	want.NVIDIANodes = 1
+	if text := DiagnosticText(want); !strings.HasPrefix(text, "Kubernetes advertises NVIDIA GPUs on 1 node, but") {
+		t.Fatalf("text = %q", text)
+	}
+	if DiagnosticText(Summary{Diagnostic: "DeviceAccessDisabled"}) != "Agents do not inventory GPUs because spec.agent.deviceAccess is None. Node replacement does not depend on this; after a replacement KubeNeuron checks node readiness and advertised capacity, not device health." {
+		t.Fatal(DiagnosticText(Summary{Diagnostic: "DeviceAccessDisabled"}))
 	}
 }

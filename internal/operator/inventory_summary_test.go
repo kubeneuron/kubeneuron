@@ -3,6 +3,7 @@ package operator
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,6 +99,21 @@ func TestInventoryConditionsRejectStaleMalformedAndMissingEvidence(t *testing.T)
 	check(inventory.Summary{ObservedAt: time.Now().Add(-4 * inventory.Interval)}.Data(), "StaleSummary")
 	check(inventory.Summary{ObservedAt: time.Now(), AdvertisedNodes: 1}.Data(), "AwaitingGPUAgents")
 	check(inventory.Summary{ObservedAt: time.Now(), Diagnostic: "SMIMissing"}.Data(), "SMIMissing")
+	now := time.Now()
+	runtime := inventory.Summary{ObservedAt: now, LastReportAt: now, ReportingNodes: 1, AdvertisedNodes: 1, NVIDIANodes: 1, Diagnostic: "RuntimeDidNotExposeGPUs"}
+	var cm corev1.ConfigMap
+	if err := r.Get(ctx, key, &cm); err != nil {
+		t.Fatal(err)
+	}
+	cm.Data = runtime.Data()
+	if err := r.Update(ctx, &cm); err != nil {
+		t.Fatal(err)
+	}
+	r.setInventoryConditions(ctx, root, true)
+	if c := meta.FindStatusCondition(root.Status.Conditions, "GPUVisibility"); c == nil || c.Status != metav1.ConditionFalse ||
+		c.Reason != "RuntimeDidNotExposeGPUs" || !strings.HasPrefix(c.Message, inventory.DiagnosticText(runtime)) {
+		t.Fatalf("GPUVisibility = %+v", c)
+	}
 	r.setInventoryConditions(ctx, root, false)
 	if meta.FindStatusCondition(root.Status.Conditions, "ResetAvailable") != nil || meta.FindStatusCondition(root.Status.Conditions, "GPUVisibility") == nil {
 		t.Fatal("disabling node actions should remove only ResetAvailable")

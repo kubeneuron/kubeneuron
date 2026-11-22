@@ -250,6 +250,16 @@ type AgentSpec struct {
 	Image        string              `json:"image"`
 	NodeSelector map[string]string   `json:"nodeSelector,omitempty"`
 	Tolerations  []corev1.Toleration `json:"tolerations,omitempty"`
+	// DeviceAccess is how the agent reads the node's NVIDIA GPUs. With
+	// NvidiaRuntime, the default, the agent asks the NVIDIA container runtime
+	// for every GPU of the node and for nvidia-smi, read-only, and stays
+	// unprivileged: no host path is mounted for it. Where the runtime exposes
+	// nothing, the agent reports no GPUs and keeps watching the kernel log.
+	// None asks for nothing. It applies without node-level actions only: a
+	// privileged agent reads the GPUs through HostTooling alone.
+	// +kubebuilder:validation:Enum=NvidiaRuntime;None
+	// +kubebuilder:default=NvidiaRuntime
+	DeviceAccess AgentDeviceAccess `json:"deviceAccess,omitempty"`
 	// HostTooling opts the agent DaemonSet into read-only host mounts of the
 	// NVIDIA userspace tooling (nvidia-smi, dcgmi, driver libraries) so the
 	// distroless agent image can execute them. Setting it also arms
@@ -377,6 +387,14 @@ type AgentAdapterSpec struct {
 	// ship (for example amd-smi).
 	HostTooling *AdapterHostToolingSpec `json:"hostTooling,omitempty"`
 }
+
+// AgentDeviceAccess is how the agent reads the node's NVIDIA GPUs.
+type AgentDeviceAccess string
+
+const (
+	DeviceAccessNvidiaRuntime AgentDeviceAccess = "NvidiaRuntime"
+	DeviceAccessNone          AgentDeviceAccess = "None"
+)
 
 // AdapterHostToolingSpec mounts one adapter's host tooling into the agent.
 // Directories are mounted read-only at fixed container paths under

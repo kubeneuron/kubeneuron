@@ -62,6 +62,7 @@ func main() {
 		)
 		fakeGPU           = flag.Bool("fake-gpu", false, "use the fake GPU driver (dev/simulator)")
 		requireRealDriver = flag.Bool("require-real-driver", false, "refuse to start when nvidia-smi is unavailable instead of falling back to the fake driver; set on every managed GPU node")
+		runtimeDevices    = flag.Bool("nvidia-runtime-devices", false, "take nvidia-smi and the GPUs from the NVIDIA container runtime; without them, run with no GPUs instead of the fake driver or a restart")
 		nvidiaSMIPath     = flag.String("nvidia-smi", "", "nvidia-smi binary path (default: nvidia-smi from PATH)")
 		nodeLevelActions  = flag.Bool("enable-node-level-actions", false, "allow agent recovery actions subject to existing safety checks. Alpha, not validated on real hardware.")
 		enableDestructive = flag.Bool("enable-destructive-actions", false, "permit reset/reboot/driver/script actions on this node; requires a real driver and remains subject to every controller gate")
@@ -162,6 +163,13 @@ func main() {
 			os.Exit(1)
 		}
 		driver = &nvml.Fake{}
+	case *runtimeDevices && !*requireRealDriver:
+		var err error
+		if driver, err = nvml.RuntimeInjected(*nvidiaSMIPath); err != nil {
+			log.Error("no NVIDIA GPUs visible to the agent; the kernel log is still watched", "err", err)
+		} else {
+			log.Info("using nvidia-smi GPU driver from the container runtime")
+		}
 	case nvml.DetectSMI(*nvidiaSMIPath):
 		log.Info("using nvidia-smi GPU driver")
 		driver = nvml.NewSMI(*nvidiaSMIPath)

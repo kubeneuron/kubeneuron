@@ -1021,6 +1021,34 @@ func TestNVIDIAObservationNeverTreatsFakeDriverAsRuntimeEvidence(t *testing.T) {
 	}
 }
 
+// An agent the NVIDIA runtime gave no GPU sends no NVIDIA report and
+// registers none: the controller then verifies a replacement of its node by
+// readiness and advertised capacity, not by a report the new node cannot send.
+func TestRuntimeDeviceAgentWithoutGPUsSendsNoNVIDIAReport(t *testing.T) {
+	driver, err := nvml.RuntimeInjected(t.TempDir() + "/nvidia-smi")
+	if err == nil {
+		t.Fatal("RuntimeInjected found an nvidia-smi in an empty directory")
+	}
+	a, err := New(Config{
+		NodeName:          "gpu-node-1",
+		ControllerURL:     "http://controller.invalid",
+		AllowInsecureHTTP: true,
+		SpoolPath:         t.TempDir() + "/spool.jsonl",
+		ActionJournalPath: t.TempDir() + "/actions.jsonl",
+		NVIDIAObservation: NVIDIAObservationConfig{Enabled: true, PartitionTopology: nvidia.PartitionTopologyNone},
+	}, driver, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if a.nvidia != nil {
+		t.Fatal("an agent without runtime GPUs must not send NVIDIA reports")
+	}
+	gpus, err := driver.ListGPUs(context.Background())
+	if err != nil || len(gpus) != 0 {
+		t.Fatalf("ListGPUs = %v, %v; want none registered", gpus, err)
+	}
+}
+
 func TestNVIDIAControllerProfileRejectsStaticDigestFallbackConfiguration(t *testing.T) {
 	_, err := New(Config{
 		NodeName:          "gpu-node-1",

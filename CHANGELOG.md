@@ -15,6 +15,16 @@ API is `v1alpha1`.
 
 ### Added
 
+- **The agent reads NVIDIA GPUs without node-level actions.** By default
+  (`spec.agent.deviceAccess: NvidiaRuntime`) it asks the NVIDIA container
+  runtime for the node's GPUs and `nvidia-smi`, stays unprivileged with a
+  read-only root filesystem, and mounts no host path. It reports each GPU's
+  model and UUID and the driver version. Where the runtime exposes no GPU, the agent reports none
+  and keeps watching the kernel log; `GPUVisibility` and `kubeneuronctl
+  status` report `RuntimeDidNotExposeGPUs`. `deviceAccess: None` turns it
+  off. The upgrade rolls every agent DaemonSet once. Not yet exercised on
+  real hardware.
+
 - Add-first replacement can use any configured zone of a fixed-size EKS or AKS pool when the remediation policy selects `replacement.successorZone: AnyPoolZone`. The default is `SameZone`. Cross-zone placement was tested with simulated providers only.
 
 - **`kubeneuronctl pools` shows whether a pool's nodes can be replaced at

@@ -934,6 +934,14 @@ func agentDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snaps
 // selector, which is immutable.
 const AgentDaemonSetLabel = "kubeneuron.io/agent"
 
+// runtimeDeviceEnv asks the NVIDIA container runtime for every GPU of the
+// node and for nvidia-smi and NVML only: the utility capability, no compute
+// libraries. A runtime other than NVIDIA's ignores it.
+var runtimeDeviceEnv = []corev1.EnvVar{
+	{Name: "NVIDIA_VISIBLE_DEVICES", Value: "all"},
+	{Name: "NVIDIA_DRIVER_CAPABILITIES", Value: "utility"},
+}
+
 func agentVariantDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot, variant agentVariant, tlsRevision ...string) *appsv1.DaemonSet {
 	labels := resourceLabels(installation, strings.TrimPrefix(variant.suffix, "-"))
 	objectLabels := copyStringMap(labels)
@@ -954,6 +962,12 @@ func agentVariantDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot
 		}
 	}
 	toolingArgs, toolingEnv, toolingMounts, toolingVolumes := agentToolingWiring(*agent)
+	// Not with node-level actions: there the agent is privileged, and the
+	// real driver it may act through comes only from host tooling the owner
+	// declared, which also arms --require-real-driver.
+	if !nodeActions && agent.DeviceAccess != kubeneuronv1alpha1.DeviceAccessNone {
+		toolingArgs, toolingEnv = append(toolingArgs, "--nvidia-runtime-devices"), append(toolingEnv, runtimeDeviceEnv...)
+	}
 	if !nodeActions && installation.Spec.Agent.HostTooling != nil {
 		if endpoint := strings.TrimSpace(installation.Spec.Agent.HostTooling.DCGMEndpoint); endpoint != "" {
 			toolingArgs = append(toolingArgs, "--nvidia-dcgm-endpoint="+endpoint)

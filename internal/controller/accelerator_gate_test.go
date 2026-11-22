@@ -1141,3 +1141,59 @@ func TestInventorySummaryQueryCountIndependentOfFleetSize(t *testing.T) {
 		}
 	}
 }
+
+type deviceInventoryPlatform struct {
+	*fleetSummaryPlatform
+	inventory []types.Node
+}
+
+func (p *deviceInventoryPlatform) NodeInventory(context.Context) ([]types.Node, error) {
+	return p.inventory, nil
+}
+
+// Agents that read the GPUs through the container runtime and see none, on
+// nodes that advertise nvidia.com/gpu, are reported with the number of those
+// nodes; a fleet without NVIDIA devices, or one whose agents have not
+// reported, gets no such diagnostic.
+func TestInventorySummaryNamesAgentsThatSeeNoGPU(t *testing.T) {
+	gpu := []types.DeviceCount{{Resource: "nvidia.com/gpu", Capacity: 1, Allocatable: 1, Unit: types.DeviceUnitGPU}}
+	neuron := []types.DeviceCount{{Resource: "aws.amazon.com/neuron", Capacity: 1, Allocatable: 1, Unit: types.DeviceUnitAWSDevice}}
+	cases := []struct {
+		name       string
+		devices    []types.DeviceCount
+		diagnostic string
+		reporting  bool
+		want       string
+		nvidia     int
+	}{
+		{"runtime exposed nothing", gpu, "RuntimeDidNotExposeGPUs", true, "RuntimeDidNotExposeGPUs", 1},
+		{"device access off", gpu, "DeviceAccessDisabled", true, "DeviceAccessDisabled", 1},
+		{"no NVIDIA node", neuron, "RuntimeDidNotExposeGPUs", true, "", 0},
+		{"no agent report yet", gpu, "RuntimeDidNotExposeGPUs", false, "", 1},
+		{"startup failure", gpu, "SMIMissing", true, "SMIMissing", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := storesqlite.Open(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			s := &fleetSummaryStore{Store: st}
+			node := types.Node{Name: "node-a", UID: "uid-a", AgentLastSeen: time.Now()}
+			if tc.reporting {
+				s.nodes = []*types.Node{&node}
+			}
+			p := &deviceInventoryPlatform{
+				fleetSummaryPlatform: &fleetSummaryPlatform{topoObservingPlatform: wholeDeviceTopologyPlatform(), nodes: []types.Node{{Name: "node-a", UID: "uid-a"}}},
+				inventory:            []types.Node{{Name: "node-a", UID: "uid-a", Devices: tc.devices}, {Name: "cpu", UID: "uid-cpu"}},
+			}
+			c := New(s, nil, nil, nil, nil, p, nil, nil, slog.Default())
+			c.inventoryDiagnostic = func(context.Context) (string, error) { return tc.diagnostic, nil }
+			got, err := c.InventorySummary(t.Context())
+			if err != nil || got.Diagnostic != tc.want || got.NVIDIANodes != tc.nvidia {
+				t.Fatalf("summary = %+v, %v; want diagnostic %q on %d NVIDIA nodes", got, err, tc.want, tc.nvidia)
+			}
+		})
+	}
+}
