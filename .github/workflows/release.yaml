@@ -340,8 +340,8 @@ jobs:
   # new fields the upgraded API does not actually serve.
   #
   # The baseline is the actual previous published release, not a variable.
-  # v1.0.0-rc.1 is the first published release, so it has none: an empty
-  # BASELINE skips the job with "upgrade rehearsal: skipped, no base release".
+  # An empty BASELINE skips the job with "upgrade rehearsal: skipped, no base
+  # release"; only v1.0.0-rc.1, the first published release, shipped that way.
   upgrade-rehearsal:
     if: github.repository == 'kubeneuron/kubeneuron'
     needs: [gates]
@@ -356,7 +356,7 @@ jobs:
       contents: read
       packages: read
     env:
-      BASELINE: "" # Set explicitly to an empty string for a release with no base.
+      BASELINE: v1.0.0-rc.1
       STORES: sqlite postgres
       # The published release (its install manifest and images.txt) lives in
       # the repository the tag is pushed to; the script also uses this to

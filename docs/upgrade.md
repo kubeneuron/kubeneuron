@@ -125,7 +125,9 @@ reconciles with rc.1 placement rules. Reapply the opt-in after upgrading again.
   `last_signal_at`, filled from `updated_at` for existing rows). An rc.1
   controller refuses the migrated store with the error above, so going back
   to rc.1 is the restore described in the previous point; the images-only
-  path does not apply.
+  path does not apply. `make test-upgrade-rollback-kind BASELINE=v1.0.0-rc.1`
+  rehearses this upgrade, the refusal, the restore and a second upgrade on
+  kind for both stores.
 - **Operator/CRDs**: re-apply the previous release's install manifest.
   Kubernetes does not remove already-stored fields; older operators ignore
   spec fields they do not know, and compilation stays fail-closed.

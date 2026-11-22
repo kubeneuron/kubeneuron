@@ -38,6 +38,11 @@ API is `v1alpha1`.
   acknowledgement and resolution errors no longer name 0.x versions. Behaviour
   is unchanged.
 
+- The release workflow's upgrade and rollback rehearsal now starts from
+  `v1.0.0-rc.1` instead of skipping. On kind it upgrades both workflow stores
+  to the new release, checks that rc.1 refuses the migrated store, restores
+  the pre-upgrade snapshot and upgrades again.
+
 ### Fixed
 
 - The `VERIFYING` quiet window now starts from when a signal last joined the
