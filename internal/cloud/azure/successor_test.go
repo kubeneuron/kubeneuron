@@ -252,10 +252,12 @@ func TestAddFirstFailedPoolWithoutANewMachineIsCapacity(t *testing.T) {
 
 func TestAddFirstRefusesMultizoneBeforeGrowth(t *testing.T) {
 	f := newFakeAKS(3)
-	f.zoneCount = 1
+	f.zones = []string{"1"}
 	p := testProvider(f)
 	s := prepare(t, p, newOperation(), cloud.SuccessorPlanned)
-	f.zoneCount = 2
+	// Resume the state shape saved before placement policies existed.
+	s.State = map[string]string{stateMachine: s.State[stateMachine], stateCount: s.State[stateCount], stateMembers: s.State[stateMembers]}
+	f.zones = []string{"2", "1"}
 	refused := func(err error) {
 		t.Helper()
 		var refusal *cloud.PoolRefusal
@@ -272,4 +274,30 @@ func TestAddFirstRefusesMultizoneBeforeGrowth(t *testing.T) {
 	if f.requests != 0 || len(f.calls) != 0 {
 		t.Fatalf("unexpected cloud writes: %v", f.calls)
 	}
+}
+
+func TestAnyPoolZoneRechecksAutoscalingBeforeGrowth(t *testing.T) {
+	f := newFakeAKS(3)
+	f.zones = []string{"2", "1"}
+	p := testProvider(f)
+	var zones []string
+	if err := p.CheckAddFirstInZone(t.Context(), testInstance(1), "AnyPoolZone", &zones); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(zones, ",") != "1,2" {
+		t.Fatalf("configured zones: %v", zones)
+	}
+	s := newOperation()
+	s.State = map[string]string{"successor_zone": "AnyPoolZone"}
+	s = prepare(t, p, s, cloud.SuccessorPlanned)
+	f.autoscaling = true
+	s.RequestedAt = time.Now()
+	_, err := p.PrepareSuccessor(t.Context(), s)
+	var refusal *cloud.PoolRefusal
+	if !errors.As(err, &refusal) || refusal.Code != cloud.PoolAutoscaled || f.requests != 0 {
+		t.Fatalf("autoscaled pool: err=%v requests=%d", err, f.requests)
+	}
+	f.autoscaling = false
+	s = prepare(t, p, s, cloud.SuccessorRequested)
+	prepare(t, p, s, cloud.SuccessorCreated)
 }

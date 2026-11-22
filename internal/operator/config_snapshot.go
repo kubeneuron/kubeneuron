@@ -1544,7 +1544,14 @@ func policyModeName(mode recoverymode.Mode) string {
 // compileReplacement maps the CRD replacement settings to the runtime ones.
 func compileReplacement(spec *kubeneuronv1alpha1.ReplacementSpec) (config.Replacement, error) {
 	out := config.Replacement{Strategy: compileStrategy(spec)}
-	if spec == nil || spec.SuccessorTimeout == "" {
+	if spec == nil {
+		return out, nil
+	}
+	out.SuccessorZone = recoverymode.SuccessorZone(spec.SuccessorZone)
+	if err := out.SuccessorZone.Validate(); err != nil {
+		return out, err
+	}
+	if spec.SuccessorTimeout == "" {
 		return out, nil
 	}
 	d, err := time.ParseDuration(spec.SuccessorTimeout)

@@ -31,6 +31,11 @@ func TestSuccessorCandidate(t *testing.T) {
 				g.Instances = append(g.Instances, at.Instance{InstanceId: sdk.String(id), AvailabilityZone: sdk.String("zone-a"), LifecycleState: at.LifecycleStateInService})
 			}
 			if tc.want != "" {
+				legacyGroup := g
+				legacyGroup.AvailabilityZones = []string{"zone-a", "zone-b"}
+				if _, err := successorCandidate(s, legacyGroup); !errors.Is(err, cloud.ErrNeedsOperator) {
+					t.Fatalf("legacy plan accepted changed pool zones: %v", err)
+				}
 				damaged := s
 				damaged.State = maps.Clone(s.State)
 				damaged.State["members"] += ",i-old"

@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/kubeneuron/kubeneuron/internal/platform"
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
@@ -30,7 +31,24 @@ func (p *Platform) successorProvider() (cloud.SuccessorProvider, error) {
 	return provider, nil
 }
 
+type addFirstChecker interface {
+	CheckAddFirst(context.Context, string) error
+}
+
+func checkAddFirstInZone(ctx context.Context, checker addFirstChecker, instance string, zone recoverymode.SuccessorZone, zones *[]string) error {
+	if aware, ok := checker.(interface {
+		CheckAddFirstInZone(context.Context, string, recoverymode.SuccessorZone, *[]string) error
+	}); ok {
+		return aware.CheckAddFirstInZone(ctx, instance, zone, zones)
+	}
+	return checker.CheckAddFirst(ctx, instance)
+}
+
 func (p *Platform) AddFirstAvailable(ctx context.Context, pin cloud.NodeIdentity) error {
+	return p.AddFirstAvailableInZone(ctx, pin, recoverymode.SameZone, nil)
+}
+
+func (p *Platform) AddFirstAvailableInZone(ctx context.Context, pin cloud.NodeIdentity, zone recoverymode.SuccessorZone, zones *[]string) error {
 	if p.recycler == nil {
 		return fmt.Errorf("%w: no cloud provider is configured", cloud.ErrAddFirstUnavailable)
 	}
@@ -41,7 +59,7 @@ func (p *Platform) AddFirstAvailable(ctx context.Context, pin cloud.NodeIdentity
 	if err := pin.Validate(); err != nil {
 		return err
 	}
-	return provider.CheckAddFirst(ctx, pin.InstanceID)
+	return checkAddFirstInZone(ctx, provider, pin.InstanceID, zone, zones)
 }
 
 // ReplacePermission asks the provider whether the controller holds what a
@@ -60,16 +78,18 @@ func (p *Platform) ReplacePermission(ctx context.Context, pin cloud.NodeIdentity
 // (a *cloud.RecoveryHold). An EKS group can be assessed while successor
 // execution is release-gated.
 func (p *Platform) AssessAddFirstPool(ctx context.Context, pin cloud.NodeIdentity) error {
+	return p.AssessAddFirstPoolInZone(ctx, pin, recoverymode.SameZone, nil)
+}
+
+func (p *Platform) AssessAddFirstPoolInZone(ctx context.Context, pin cloud.NodeIdentity, zone recoverymode.SuccessorZone, zones *[]string) error {
 	if err := pin.Validate(); err != nil {
 		return err
 	}
-	checker, ok := p.recycler.(interface {
-		CheckAddFirst(context.Context, string) error
-	})
+	checker, ok := p.recycler.(addFirstChecker)
 	if !ok {
 		return fmt.Errorf("no pool configuration reader")
 	}
-	if err := checker.CheckAddFirst(ctx, pin.InstanceID); err != nil {
+	if err := checkAddFirstInZone(ctx, checker, pin.InstanceID, zone, zones); err != nil {
 		return err
 	}
 	provider, ok := p.recycler.(cloud.RepairAwareProvider)
@@ -204,7 +224,7 @@ func (p *Platform) cachedNodes(ctx context.Context) ([]*corev1.Node, error) {
 
 func successorNodeOf(n *corev1.Node) platform.SuccessorNode {
 	out := platform.SuccessorNode{
-		Found: true, Name: n.Name, UID: string(n.UID), CreatedAt: n.CreationTimestamp.Time,
+		Zone: n.Labels[corev1.LabelTopologyZone], Found: true, Name: n.Name, UID: string(n.UID), CreatedAt: n.CreationTimestamp.Time,
 		Unschedulable: n.Spec.Unschedulable, Allocatable: extendedResourceValues(n.Status.Allocatable),
 	}
 	for _, condition := range n.Status.Conditions {

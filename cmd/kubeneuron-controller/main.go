@@ -244,7 +244,7 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	}
 	policies := make([]playbook.Policy, 0, len(cfg.Policies))
 	for _, p := range cfg.Policies {
-		policies = append(policies, playbook.Policy{Class: p.Match.Class, Vendor: p.Match.Vendor, Playbook: p.Playbook, Params: p.Params, Name: p.Name, Mode: p.Mode, Automatic: p.Automatic, ReplacementStrategy: p.Replacement.Strategy, SuccessorTimeout: p.Replacement.SuccessorTimeout, RecycleEnabled: p.Recycle.Enabled, InterruptionLead: p.Interruption.Lead})
+		policies = append(policies, playbook.Policy{Class: p.Match.Class, Vendor: p.Match.Vendor, Playbook: p.Playbook, Params: p.Params, Name: p.Name, Mode: p.Mode, Automatic: p.Automatic, ReplacementStrategy: p.Replacement.Strategy, SuccessorZone: p.Replacement.SuccessorZone, SuccessorTimeout: p.Replacement.SuccessorTimeout, RecycleEnabled: p.Recycle.Enabled, InterruptionLead: p.Interruption.Lead})
 	}
 	engine, err := playbook.NewEngine(books, policies)
 	if err != nil {

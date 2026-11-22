@@ -11,6 +11,8 @@ API is `v1alpha1`.
 
 ### Added
 
+- Add-first replacement can use any configured zone of a fixed-size EKS or AKS pool when the remediation policy selects `replacement.successorZone: AnyPoolZone`. The default is `SameZone`. Cross-zone placement was tested with simulated providers only.
+
 - **`kubeneuronctl pools` shows whether a pool's nodes can be replaced at
   all.** A new REPLACEMENT column, before ADD-FIRST, reports `available`,
   `unavailable — <reason> — <action>` or `unknown — <reason>` from the same

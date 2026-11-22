@@ -16,6 +16,7 @@ import (
 	at "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
 	"github.com/aws/aws-sdk-go-v2/service/eks"
 	et "github.com/aws/aws-sdk-go-v2/service/eks/types"
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
@@ -23,11 +24,12 @@ const fixedSizeTag = "kubeneuron.io/fixed-size"
 
 // planSuccessor records the baseline from an already verified EKS backing group.
 func planSuccessor(s cloud.Successor, group at.AutoScalingGroup) (cloud.Successor, error) {
-	if len(group.AvailabilityZones) > 1 {
-		return s, &cloud.PoolRefusal{Code: cloud.PoolMultiZone, Reason: "EKS chooses the zone of a new node in this pool", Action: "use a single-zone node pool, or set RemoveFirst in the remediation policy that applies to these nodes"}
+	anyZone := s.State["successor_zone"] == string(recoverymode.AnyPoolZone)
+	if len(group.AvailabilityZones) > 1 && !anyZone {
+		return s, &cloud.PoolRefusal{Code: cloud.PoolMultiZone, Reason: "EKS chooses the zone of a new node in this pool", Action: "use a single-zone node pool, set RemoveFirst in the remediation policy that applies to these nodes, or set replacement.successorZone: AnyPoolZone if workloads on these nodes do not need the original zone"}
 	}
-	if len(group.AvailabilityZones) == 0 || group.AvailabilityZones[0] == "" {
-		return s, fmt.Errorf("%w: add-first requires a single availability zone", cloud.ErrAddFirstUnavailable)
+	if len(group.AvailabilityZones) == 0 || slices.Contains(group.AvailabilityZones, "") {
+		return s, fmt.Errorf("%w: add-first requires a known availability zone", cloud.ErrAddFirstUnavailable)
 	}
 	if group.DesiredCapacity == nil || group.MaxSize == nil || *group.DesiredCapacity < 1 {
 		return s, fmt.Errorf("%w: group scaling limits are incomplete or desired capacity is below one", cloud.ErrAddFirstUnavailable)
@@ -35,11 +37,15 @@ func planSuccessor(s cloud.Successor, group at.AutoScalingGroup) (cloud.Successo
 	if *group.DesiredCapacity >= *group.MaxSize {
 		return s, &cloud.PoolRefusal{Code: cloud.PoolAtMaximum, Reason: "no room below maxSize", Action: "provide room for one more node, or set RemoveFirst in the remediation policy that applies to these nodes"}
 	}
+	var originalZone string
 	ids := make([]string, 0, len(group.Instances))
 	for _, instance := range group.Instances {
 		id := sdk.ToString(instance.InstanceId)
-		if id == "" || instance.LifecycleState != at.LifecycleStateInService || sdk.ToString(instance.AvailabilityZone) != group.AvailabilityZones[0] {
+		if id == "" || instance.LifecycleState != at.LifecycleStateInService || !slices.Contains(group.AvailabilityZones, sdk.ToString(instance.AvailabilityZone)) {
 			return s, fmt.Errorf("%w: group membership is incomplete or changing", cloud.ErrAddFirstUnavailable)
+		}
+		if id == s.Instance {
+			originalZone = sdk.ToString(instance.AvailabilityZone)
 		}
 		ids = append(ids, id)
 	}
@@ -48,18 +54,32 @@ func planSuccessor(s cloud.Successor, group at.AutoScalingGroup) (cloud.Successo
 		return s, fmt.Errorf("%w: group baseline does not confirm the pinned instance and desired membership", cloud.ErrAddFirstUnavailable)
 	}
 	s.Pool = sdk.ToString(group.AutoScalingGroupName)
-	s.State = map[string]string{"before": strconv.Itoa(len(ids)), "members": strings.Join(ids, ","), "zone": group.AvailabilityZones[0]}
+	s.State = map[string]string{"before": strconv.Itoa(len(ids)), "members": strings.Join(ids, ","), "zone": originalZone}
+	if anyZone {
+		zones := slices.Clone(group.AvailabilityZones)
+		slices.Sort(zones)
+		s.State["pool_zones"] = strings.Join(zones, ",")
+		s.State["successor_zone"] = string(recoverymode.AnyPoolZone)
+	}
 	s.Phase = cloud.SuccessorPlanned
 	return s, nil
 }
 
 // CheckAddFirst checks the same read-only baseline used when preparing a plan.
 func (p *managedProvider) CheckAddFirst(ctx context.Context, instanceID string) error {
-	_, err := p.readSuccessorPlan(ctx, cloud.Successor{Instance: instanceID, Operation: "preflight"})
+	return p.CheckAddFirstInZone(ctx, instanceID, recoverymode.SameZone, nil)
+}
+
+func (p *managedProvider) CheckAddFirstInZone(ctx context.Context, instanceID string, zone recoverymode.SuccessorZone, zones *[]string) error {
+	_, err := p.readSuccessorPlanWithZones(ctx, cloud.Successor{Instance: instanceID, Operation: "preflight", State: map[string]string{"successor_zone": string(zone)}}, zones)
 	return err
 }
 
 func (p *managedProvider) readSuccessorPlan(ctx context.Context, s cloud.Successor) (cloud.Successor, error) {
+	return p.readSuccessorPlanWithZones(ctx, s, nil)
+}
+
+func (p *managedProvider) readSuccessorPlanWithZones(ctx context.Context, s cloud.Successor, zones *[]string) (cloud.Successor, error) {
 	if s.Instance == "" || p.cluster == "" {
 		return s, fmt.Errorf("%w: missing pinned instance or configured cluster", cloud.ErrAddFirstUnavailable)
 	}
@@ -102,6 +122,10 @@ func (p *managedProvider) readSuccessorPlan(ctx context.Context, s cloud.Success
 	ng := out.Nodegroup
 	if sdk.ToString(ng.ClusterName) != p.cluster || sdk.ToString(ng.NodegroupName) != nodegroup || ng.Status != et.NodegroupStatusActive || ng.Resources == nil || len(ng.Resources.AutoScalingGroups) != 1 || sdk.ToString(ng.Resources.AutoScalingGroups[0].Name) != name {
 		return s, fmt.Errorf("%w: EKS must confirm exactly one backing ASG for the active nodegroup", cloud.ErrAddFirstUnavailable)
+	}
+	if zones != nil {
+		*zones = slices.Clone(group.AvailabilityZones)
+		slices.Sort(*zones)
 	}
 	if p.checkAutoscalerGroup == nil {
 		return s, fmt.Errorf("%w: Cluster Autoscaler status reader unavailable", cloud.ErrAddFirstUnavailable)

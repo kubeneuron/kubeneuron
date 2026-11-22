@@ -117,9 +117,15 @@ func (p *managedProvider) confirmCreatedSuccessor(ctx context.Context, s cloud.S
 
 // replacementSettled recognizes the exact post-decrement membership after restart.
 func replacementSettled(s cloud.Successor, g at.AutoScalingGroup) bool {
-	zone := s.State["zone"]
-	newID, ok := strings.CutPrefix(s.ProviderID, "aws:///"+zone+"/")
-	if !ok || newID == "" || newID == s.Instance {
+	var newID string
+	for _, member := range g.Instances {
+		id := sdk.ToString(member.InstanceId)
+		if s.ProviderID == "aws:///"+sdk.ToString(member.AvailabilityZone)+"/"+id {
+			newID = id
+			break
+		}
+	}
+	if newID == "" || newID == s.Instance {
 		return false
 	}
 	expected := strings.Split(s.State["members"], ",")
@@ -132,8 +138,8 @@ func replacementSettled(s cloud.Successor, g at.AutoScalingGroup) bool {
 }
 
 func settledMembership(s cloud.Successor, g at.AutoScalingGroup, expected []string) bool {
-	zone := s.State["zone"]
-	if zone == "" || !slices.Equal(g.AvailabilityZones, []string{zone}) || sdk.ToString(g.AutoScalingGroupName) != s.Pool || s.State["asg_arn"] == "" || sdk.ToString(g.AutoScalingGroupARN) != s.State["asg_arn"] || g.DesiredCapacity == nil || strconv.Itoa(int(*g.DesiredCapacity)) != s.State["before"] {
+	zones := plannedZones(s)
+	if !samePoolZones(zones, g.AvailabilityZones) || sdk.ToString(g.AutoScalingGroupName) != s.Pool || s.State["asg_arn"] == "" || sdk.ToString(g.AutoScalingGroupARN) != s.State["asg_arn"] || g.DesiredCapacity == nil || strconv.Itoa(int(*g.DesiredCapacity)) != s.State["before"] {
 		return false
 	}
 	if len(expected) != int(*g.DesiredCapacity) || !slices.Contains(strings.Split(s.State["members"], ","), s.Instance) || s.Instance == "" {
@@ -141,7 +147,7 @@ func settledMembership(s cloud.Successor, g at.AutoScalingGroup, expected []stri
 	}
 	actual := make([]string, 0, len(g.Instances))
 	for _, member := range g.Instances {
-		if member.LifecycleState != at.LifecycleStateInService || sdk.ToString(member.AvailabilityZone) != zone {
+		if member.LifecycleState != at.LifecycleStateInService || !slices.Contains(zones, sdk.ToString(member.AvailabilityZone)) {
 			return false
 		}
 		actual = append(actual, sdk.ToString(member.InstanceId))

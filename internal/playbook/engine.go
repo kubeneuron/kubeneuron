@@ -27,6 +27,7 @@ type Policy struct {
 	Automatic *recoverymode.Settings
 	// ReplacementStrategy and RecycleEnabled: see config.Policy.
 	ReplacementStrategy recoverymode.Strategy
+	SuccessorZone       recoverymode.SuccessorZone
 	SuccessorTimeout    time.Duration
 	RecycleEnabled      bool
 	// InterruptionLead: see config.Interruption.

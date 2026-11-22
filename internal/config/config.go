@@ -333,7 +333,8 @@ type Interruption struct {
 // Replacement is a policy's replacement strategy: add-first (default) or
 // remove-first (only when named).
 type Replacement struct {
-	Strategy recoverymode.Strategy `yaml:"strategy,omitempty"`
+	Strategy      recoverymode.Strategy      `yaml:"strategy,omitempty"`
+	SuccessorZone recoverymode.SuccessorZone `yaml:"successor_zone,omitempty"`
 	// SuccessorTimeout is how long add-first waits for the successor to be
 	// ready; zero is the default.
 	SuccessorTimeout time.Duration `yaml:"successor_timeout,omitempty"`
@@ -483,6 +484,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: policy %d (class %s): playbook is required", i, p.Match.Class)
 		}
 		if err := recoverymode.ValidateStrategy(p.Replacement.Strategy); err != nil {
+			return fmt.Errorf("config: policy %d (class %s): %w", i, p.Match.Class, err)
+		}
+		if err := p.Replacement.SuccessorZone.Validate(); err != nil {
 			return fmt.Errorf("config: policy %d (class %s): %w", i, p.Match.Class, err)
 		}
 		if err := recoverymode.ValidateSuccessorTimeout(p.Replacement.SuccessorTimeout); err != nil {

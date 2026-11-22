@@ -78,6 +78,24 @@ func ValidateStrategy(s Strategy) error {
 	return fmt.Errorf("unknown replacement strategy %q (want %q or %q)", s, AddFirst, RemoveFirst)
 }
 
+// SuccessorZone selects the placement allowed for an AddFirst successor.
+type SuccessorZone string
+
+const (
+	SameZone    SuccessorZone = "SameZone"
+	AnyPoolZone SuccessorZone = "AnyPoolZone"
+)
+
+// Validate accepts omission for policies created before zone selection.
+func (z SuccessorZone) Validate() error {
+	switch z {
+	case "", SameZone, AnyPoolZone:
+		return nil
+	default:
+		return fmt.Errorf("unknown replacement successor zone %q", z)
+	}
+}
+
 // DefaultMinUnhealthyNodes is the circuit breaker's absolute floor: it never
 // trips on fewer unhealthy nodes than this, so the first fault in a two-node
 // pool does not lock the pool.

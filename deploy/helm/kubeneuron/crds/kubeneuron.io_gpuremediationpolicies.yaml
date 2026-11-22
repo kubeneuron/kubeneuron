@@ -337,6 +337,17 @@ spec:
                       the old node.
                     pattern: ^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$
                     type: string
+                  successorZone:
+                    default: SameZone
+                    description: |-
+                      SuccessorZone controls placement of AddFirst successors in EKS and AKS pools.
+                      SameZone is the default. AnyPoolZone lets the provider choose a configured zone.
+                      KubeNeuron removes the old node after the successor is ready and does not check volumes.
+                      Pods that need the original zone (zonal volumes, zone node affinity) will not schedule on the new node. Use AnyPoolZone only for workloads without such requirements.
+                    enum:
+                    - SameZone
+                    - AnyPoolZone
+                    type: string
                 type: object
                 x-kubernetes-validations:
                 - message: successorTimeout must be between 5m and 2h

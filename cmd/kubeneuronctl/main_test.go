@@ -270,3 +270,32 @@ func TestReplacementLineNamesTheNewNode(t *testing.T) {
 		t.Fatalf("a later transition must hide the line, got %q", got)
 	}
 }
+
+func TestIncidentShowCrossZoneSuccessor(t *testing.T) {
+	at := time.Date(2026, 11, 20, 15, 41, 0, 0, time.UTC)
+	const placement = "Successor worker-b is in zone zone-b; worker-a was in zone zone-a (policy allows any zone of the pool)."
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"incident": types.Incident{ID: "inc-zones", State: types.StateResolved, Class: "xid-79", Target: types.Target{Node: "worker-a"}, Playbook: "gpu-replace", OpenedAt: at.Add(-time.Minute)},
+			"audit": []types.AuditEntry{
+				{Time: at, Actor: "system", Action: "successor-ready", Result: "operation op: successor worker-b is Ready with its accelerators; two nodes run until worker-a is removed. " + placement},
+				{Time: at.Add(time.Minute), Actor: "system", Action: "resolve", Result: "Replaced by node worker-b, named by the cloud operation. " + placement + " Verification used Kubernetes node readiness and advertised accelerator capacity."},
+			},
+		})
+	}))
+	defer server.Close()
+	got, err := runCommand(t, server.URL, "incidents", "show", "inc-zones")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const file = "testdata/incident-cross-zone.golden"
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		if err := os.WriteFile(file, []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(file)
+	if err != nil || got != string(want) {
+		t.Fatalf("incidents show (%v):\n%s", err, got)
+	}
+}

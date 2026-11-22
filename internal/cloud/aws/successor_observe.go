@@ -45,7 +45,12 @@ func (p *managedProvider) observeSuccessor(ctx context.Context, s cloud.Successo
 	if err := checkSuccessorActivities(ctx, p.scaling, s, candidate, ""); err != nil {
 		return s, err
 	}
-	s.ProviderID = "aws:///" + s.State["zone"] + "/" + candidate
+	for _, member := range group.Instances {
+		if sdk.ToString(member.InstanceId) == candidate {
+			s.ProviderID = "aws:///" + sdk.ToString(member.AvailabilityZone) + "/" + candidate
+			break
+		}
+	}
 	s.Phase = cloud.SuccessorCreated
 	return s, nil
 }
@@ -113,14 +118,14 @@ func (p *managedProvider) successorGroup(ctx context.Context, s cloud.Successor)
 // one new instance in the plan's zone that is not InService yet; it returns
 // that instance.
 func launchingMember(s cloud.Successor, g at.AutoScalingGroup, members []string) (string, bool) {
-	zone := s.State["zone"]
-	if g.DesiredCapacity == nil || int(*g.DesiredCapacity) != len(members)+1 || s.State["before"] != strconv.Itoa(len(members)) || len(g.Instances) != len(members)+1 || zone == "" {
+	zones := plannedZones(s)
+	if g.DesiredCapacity == nil || int(*g.DesiredCapacity) != len(members)+1 || s.State["before"] != strconv.Itoa(len(members)) || len(g.Instances) != len(members)+1 || !samePoolZones(zones, g.AvailabilityZones) {
 		return "", false
 	}
 	pending := ""
 	for _, member := range g.Instances {
 		id := sdk.ToString(member.InstanceId)
-		if sdk.ToString(member.AvailabilityZone) != zone || id == "" {
+		if !slices.Contains(zones, sdk.ToString(member.AvailabilityZone)) || id == "" {
 			return "", false
 		}
 		if slices.Contains(members, id) {

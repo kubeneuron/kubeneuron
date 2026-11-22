@@ -1,0 +1,16 @@
+id:        inc-zones
+state:     RESOLVED
+class:     xid-79
+node:      worker-a
+gpu:       
+playbook:  gpu-replace (step 0, attempt 0)
+dry-run:   false
+signals:   0
+opened:    2026-11-20T15:40:00Z
+fault:     unknown (no evidence recorded)
+Affected training jobs: unknown
+
+audit trail:
+TIME                  FROM  TO  ACTOR   ACTION           RESULT
+2026-11-20T15:41:00Z            system  successor-ready  operation op: successor worker-b is Ready with its accelerators; two nodes run until worker-a is removed. Successor worker-b is in zone zone-b; worker-a was in zone zone-a (policy allows any zone of the pool).
+2026-11-20T15:42:00Z            system  resolve          Replaced by node worker-b, named by the cloud operation. Successor worker-b is in zone zone-b; worker-a was in zone zone-a (policy allows any zone of the pool). Verification used Kubernetes node readiness and advertised accelerator capacity.

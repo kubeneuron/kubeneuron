@@ -4,7 +4,7 @@
 completed on a live cluster (CPU nodes, synthetic accelerator capacity;
 verification depth: node readiness and advertised capacity). The controller
 was updated during the incident. Not repeated on v1.0.0-rc.1. It is not
-validated on accelerator hardware. Single-zone managed node groups only.
+validated on accelerator hardware. The live run used a single-zone group; add-first across zones (AnyPoolZone) was tested with simulated providers only.
 
 ## Declare who controls the group size
 
@@ -43,13 +43,15 @@ the old instance.
 
 The plan records the managed node group's ARN, its backing Auto Scaling group's
 ARN, the availability zone, the original desired capacity and the EC2 instance
-IDs. Planning requires one zone and room below the group's maximum size. In a
+IDs. Planning requires room below the group's maximum size. The default placement policy, `SameZone`, also requires one zone. With `replacement.successorZone: AnyPoolZone`, EKS chooses the zone. In a
 multi-zone group the new instance could land outside the zone required by a
 training job's volume or its scheduling constraints.
 
+KubeNeuron does not check volumes. Pods that need the original zone (zonal volumes, zone node affinity) will not schedule on the new node. Use `AnyPoolZone` only for workloads without such requirements.
+
 | Planning refusal | Operator action |
 | --- | --- |
-| EKS chooses the zone of a new node in this pool | Use a single-zone node pool, or set RemoveFirst in the remediation policy that applies to these nodes. |
+| EKS chooses the zone of a new node in this pool | Use a single-zone node pool, set RemoveFirst in the remediation policy that applies to these nodes, or set replacement.successorZone: AnyPoolZone if workloads on these nodes do not need the original zone. |
 | node group is managed by Cluster Autoscaler | Use a single-zone group outside Cluster Autoscaler management, or set RemoveFirst in the remediation policy that applies to these nodes. |
 | EKS does not say whether an autoscaler manages this node group | Tag the managed node group with `kubeneuron.io/fixed-size=true` if nothing else changes its size, or select `RemoveFirst` in its remediation policy. |
 | Cluster Autoscaler publishes a legacy text status report | Upgrade Cluster Autoscaler to a version that publishes YAML or use RemoveFirst. |

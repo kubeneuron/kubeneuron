@@ -23,6 +23,7 @@ a fixed-size GKE Standard node pool in one zone. All three are experimental;
 each completed once on a live cluster with CPU nodes and synthetic
 accelerator capacity, on pre-release builds (see the
 [live cloud evidence table](reference-capabilities.md#live-cloud-evidence)).
+With `replacement.successorZone: AnyPoolZone`, add-first also supports fixed-size multi-zone EKS and AKS pools. This placement was tested with simulated providers only.
 Start in DryRun. Elsewhere,
 an incident whose ladder includes replacement stays in `EVALUATING` before cordon. Its
 audit records `recovery-unavailable` and explains that the provider lacks
@@ -466,9 +467,11 @@ builds; neither is validated on accelerator hardware (see the
 [live cloud evidence table](reference-capabilities.md#live-cloud-evidence)).
 Start in `DryRun` mode. Remove-first terminates the EC2 instance first, then
 its Auto Scaling group launches a successor. The default `AddFirst` strategy
-raises the group's size first; it needs a single-zone managed node group
-whose size you have declared fixed (see [cloud-aws.md](cloud-aws.md)). On any
-other group the incident waits before cordon and says why.
+raises the group's size first. Declare the group size fixed. The default
+`SameZone` placement requires a single-zone group. For a multi-zone group,
+set `replacement.successorZone: AnyPoolZone` if workloads can run in any
+zone of the group. This placement was tested with simulated providers only
+(see [cloud-aws.md](cloud-aws.md)). On an ineligible group the incident waits before cordon and says why.
 
 For an AWS installation, set `spec.cloud.aws.clusterName` on the KubeNeuron
 resource to the name of the EKS cluster. The operator passes it to the

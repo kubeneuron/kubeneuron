@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
@@ -35,22 +36,31 @@ var _ cloud.SuccessorProvider = (*Provider)(nil)
 // CheckAddFirst refuses a pool under the cluster autoscaler: its size is the
 // autoscaler's, so a successor cannot be added and later taken back.
 func (p *Provider) CheckAddFirst(ctx context.Context, instanceID string) error {
+	return p.CheckAddFirstInZone(ctx, instanceID, recoverymode.SameZone, nil)
+}
+
+// CheckAddFirstInZone applies the selected placement policy before any pool write.
+func (p *Provider) CheckAddFirstInZone(ctx context.Context, instanceID string, zone recoverymode.SuccessorZone, zones *[]string) error {
 	t, _, pl, err := p.successorPool(ctx, instanceID)
 	if err != nil {
 		return err
 	}
+	if zones != nil {
+		*zones = slices.Clone(pl.Zones)
+		slices.Sort(*zones)
+	}
 	if t.machine == "" {
 		return &cloud.PoolRefusal{Code: cloud.PoolInstanceMissing, Reason: fmt.Sprintf("instance %s is not a machine of agent pool %s", instanceID, t.pool)}
 	}
-	return addFirstRefusal(t.pool, pl)
+	return addFirstRefusal(t.pool, pl, zone)
 }
 
-func addFirstRefusal(name string, pl pool) error {
+func addFirstRefusal(name string, pl pool, zone recoverymode.SuccessorZone) error {
 	if pl.Autoscaling {
 		return &cloud.PoolRefusal{Code: cloud.PoolAutoscaled, Reason: fmt.Sprintf("agent pool %s is under the cluster autoscaler, which owns its size", name)}
 	}
-	if pl.ZoneCount > 1 {
-		return &cloud.PoolRefusal{Code: cloud.PoolMultiZone, Reason: "AKS chooses the zone of a new node in this pool"}
+	if len(pl.Zones) > 1 && zone != recoverymode.AnyPoolZone {
+		return &cloud.PoolRefusal{Code: cloud.PoolMultiZone, Reason: "AKS chooses the zone of a new node in this pool", Action: "use a single-zone node pool, set RemoveFirst in the remediation policy that applies to these nodes, or set replacement.successorZone: AnyPoolZone if workloads on these nodes do not need the original zone"}
 	}
 	return nil
 }
@@ -106,7 +116,7 @@ func (p *Provider) planSuccessor(s cloud.Successor, t target, machines []machine
 	if t.machine == "" {
 		return s, fmt.Errorf("%w: instance %s is not a machine of agent pool %s", cloud.ErrAddFirstUnavailable, s.Instance, t.pool)
 	}
-	if err := addFirstRefusal(t.pool, pl); err != nil {
+	if err := addFirstRefusal(t.pool, pl, recoverymode.SuccessorZone(s.State["successor_zone"])); err != nil {
 		return s, err
 	}
 	if !strings.EqualFold(pl.ProvisioningState, "Succeeded") {
@@ -114,10 +124,14 @@ func (p *Provider) planSuccessor(s cloud.Successor, t target, machines []machine
 	}
 	names := machineNames(machines)
 	s.Pool, s.Phase = t.pool, cloud.SuccessorPlanned
+	zone := s.State["successor_zone"]
 	s.State = map[string]string{
 		stateMachine: t.machine,
 		stateCount:   strconv.Itoa(int(pl.Count)),
 		stateMembers: strings.Join(names, ","),
+	}
+	if zone == string(recoverymode.AnyPoolZone) {
+		s.State["successor_zone"] = zone
 	}
 	return s, nil
 }
@@ -131,7 +145,7 @@ func (p *Provider) requestSuccessor(ctx context.Context, s cloud.Successor, t ta
 	if marked, _, _ := parseMarker(pl.Tags); marked != "" {
 		return s, fmt.Errorf("azure: agent pool %s is replacing %s; waiting, one replacement per pool at a time", t.pool, marked)
 	}
-	if err := addFirstRefusal(t.pool, pl); err != nil {
+	if err := addFirstRefusal(t.pool, pl, recoverymode.SuccessorZone(s.State["successor_zone"])); err != nil {
 		return s, err
 	}
 	if !strings.EqualFold(pl.ProvisioningState, "Succeeded") {

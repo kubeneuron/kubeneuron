@@ -22,7 +22,7 @@ import (
 // pool is what this package reads from an AKS agent pool. raw is the pool as
 // returned, so a scale writes back everything it did not mean to change.
 type pool struct {
-	ZoneCount         int
+	Zones             []string
 	Count             int32
 	Autoscaling       bool
 	ProvisioningState string
@@ -139,7 +139,12 @@ func (a *sdkAPI) Pool(ctx context.Context, name string) (pool, error) {
 	if props == nil || props.Count == nil {
 		return pool{}, fmt.Errorf("agent pool %q has no node count", name)
 	}
-	p := pool{ZoneCount: len(props.AvailabilityZones), Count: *props.Count, raw: out.AgentPool, Tags: map[string]string{}}
+	p := pool{Count: *props.Count, raw: out.AgentPool, Tags: map[string]string{}}
+	for _, zone := range props.AvailabilityZones {
+		if zone != nil {
+			p.Zones = append(p.Zones, *zone)
+		}
+	}
 	p.Autoscaling = props.EnableAutoScaling != nil && *props.EnableAutoScaling
 	if props.ProvisioningState != nil {
 		p.ProvisioningState = *props.ProvisioningState

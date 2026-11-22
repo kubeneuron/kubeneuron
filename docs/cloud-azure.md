@@ -2,6 +2,7 @@
 
 **Experimental.** Once, on a pre-release build: AKS add-first replacement completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity; device health on the new node was not checked). Not repeated on v1.0.0-rc.1.
 Once, on a pre-release build: AKS remove-first replacement on a fixed-size node pool completed on a live cluster (CPU nodes, synthetic accelerator capacity; verification depth: node readiness and advertised capacity). Not repeated on v1.0.0-rc.1.
+The live runs used a single-zone node pool; add-first across zones (AnyPoolZone) was tested with simulated providers only.
 It is not validated on accelerator hardware. Start in
 KubeNeuron's `DryRun` mode and move a narrow node selector to live recovery
 only after you have watched it decide on your own cluster.
@@ -59,7 +60,9 @@ AKS:
 
 ### Add-first on AKS
 
-On pools configured with multiple availability zones, AKS chooses the zone of a new machine. A workload may require the original zone for its volumes or scheduling constraints, so KubeNeuron refuses add-first before requesting growth. Use a single-zone node pool or set `RemoveFirst` in the remediation policy that applies to these nodes.
+On pools configured with multiple availability zones, AKS chooses the zone of a new machine. With the default `SameZone` policy, KubeNeuron refuses add-first before requesting growth. Use a single-zone node pool, set RemoveFirst in the remediation policy that applies to these nodes, or set replacement.successorZone: AnyPoolZone if workloads on these nodes do not need the original zone.
+
+KubeNeuron does not check volumes. Pods that need the original zone (zonal volumes, zone node affinity) will not schedule on the new node. Use `AnyPoolZone` only for workloads without such requirements.
 
 With no availability zones configured, AKS places regional instances throughout the region without guaranteeing that they share a zone. KubeNeuron does not check machine placement for these pools. [Microsoft Learn](https://learn.microsoft.com/en-us/azure/aks/reliability-availability-zones-configure#regional-node-pools)
 

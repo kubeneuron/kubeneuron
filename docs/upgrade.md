@@ -104,6 +104,13 @@ versions longer than a rolling upgrade needs.
 
 ## Rolling back
 
+Before rolling back to rc.1, let active multi-zone add-first replacements finish.
+Restore the rc.1 CRD as part of the rollback. Its schema omits
+`replacement.successorZone`, so the Kubernetes API server prunes that field
+when serving or writing policies with the old schema. An existing policy
+reconciles with rc.1 placement rules. Reapply the opt-in after upgrading again.
+
+
 - **Images only** (no schema migration in between): patch the root object
   back to the previous digests. The store is untouched.
 - **After a schema migration**: the older controller will refuse the newer

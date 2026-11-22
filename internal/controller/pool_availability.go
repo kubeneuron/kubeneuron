@@ -18,7 +18,7 @@ import (
 
 // recordPools uses the same complete Kubernetes node list as inventory sync.
 // Reading the operator endpoint does not trigger another Kubernetes list.
-func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAcceleratorReport, engine *playbook.Engine, now time.Time, check func(n types.Node, permissionChecked bool) error, replacement func(types.Node) (cloud.RecoveryEligibility, *cloud.RecoveryHold, error)) {
+func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAcceleratorReport, engine *playbook.Engine, now time.Time, check func(n types.Node, permissionChecked bool, zone recoverymode.SuccessorZone, zones *[]string) error, replacement func(types.Node) (cloud.RecoveryEligibility, *cloud.RecoveryHold, error)) {
 	type poolKey struct{ cloud, name string }
 	s.mu.Lock()
 	previous := map[poolKey]types.PoolAvailability{}
@@ -29,7 +29,12 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 	representatives := map[poolKey]types.Node{}
 	counts := map[poolKey]int{}
 	orders := map[poolKey]string{}
-	vendorOrders := map[types.AcceleratorVendor]string{}
+	sameZoneRequired := map[poolKey]bool{}
+	type selection struct {
+		order    string
+		sameZone bool
+	}
+	vendorOrders := map[types.AcceleratorVendor]selection{}
 	type nodeKey struct{ name, uid string }
 	vendors := map[nodeKey][]types.AcceleratorVendor{}
 	for _, report := range reports {
@@ -38,7 +43,7 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 			vendors[key] = append(vendors[key], report.Vendor)
 		}
 	}
-	generic := poolVendorOrder(engine, "")
+	generic, genericSameZone := poolVendorOrder(engine, "")
 
 	for _, n := range nodes {
 		reported := vendors[nodeKey{n.Name, n.UID}]
@@ -53,13 +58,15 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 				}
 				counts[key]++
 				orders[key] = mergePoolOrder(orders[key], generic)
+				sameZoneRequired[key] = sameZoneRequired[key] || genericSameZone
 				for _, vendor := range reported {
 					order, found := vendorOrders[vendor]
 					if !found {
-						order = poolVendorOrder(engine, vendor)
+						order.order, order.sameZone = poolVendorOrder(engine, vendor)
 						vendorOrders[vendor] = order
 					}
-					orders[key] = mergePoolOrder(orders[key], order)
+					orders[key] = mergePoolOrder(orders[key], order.order)
+					sameZoneRequired[key] = sameZoneRequired[key] || order.sameZone
 				}
 				break
 			}
@@ -69,6 +76,11 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 	checksLeft := 4
 	for key, count := range counts {
 		row := types.PoolAvailability{Pool: key.name, Cloud: key.cloud, AcceleratorNodes: count, Status: "unknown", ReplacementPolicy: cmp.Or(orders[key], "none")}
+		zone := recoverymode.SameZone
+		if !sameZoneRequired[key] && (row.ReplacementPolicy == "AddFirst" || row.ReplacementPolicy == "mixed") {
+			zone = recoverymode.AnyPoolZone
+		}
+		row.SuccessorZone = string(zone)
 		removeFirst := row.ReplacementPolicy == "RemoveFirst"
 		if removeFirst {
 			row.Status = ""
@@ -76,7 +88,7 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 		switch {
 		case row.ReplacementPolicy == "none":
 			row.Status, row.ReasonCode, row.Reason = "not applicable", "no-replacement-policy", "no remediation policy replaces these nodes"
-		case previous[key].CheckedAt != nil && previous[key].ReplacementPolicy == row.ReplacementPolicy &&
+		case previous[key].CheckedAt != nil && previous[key].ReplacementPolicy == row.ReplacementPolicy && previous[key].SuccessorZone == row.SuccessorZone &&
 			(now.Sub(*previous[key].CheckedAt) < 10*time.Minute || (checksLeft == 0 && check != nil)):
 			cached := previous[key]
 			cached.AcceleratorNodes = count
@@ -110,7 +122,7 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 				row.Reason, row.Action = row.ReplacementReason, row.ReplacementAction
 				break
 			}
-			err := check(representatives[key], permissionChecked)
+			err := check(representatives[key], permissionChecked, zone, &row.Zones)
 			enabled := true
 			if row.Cloud == "EKS" {
 				caps, _ := cloud.DeclaredCapabilities("aws")
@@ -220,7 +232,8 @@ func mergePoolOrder(current, next string) string {
 	return cmp.Or(current, next)
 }
 
-func poolVendorOrder(engine *playbook.Engine, vendor types.AcceleratorVendor) string {
+func poolVendorOrder(engine *playbook.Engine, vendor types.AcceleratorVendor) (string, bool) {
+	var sameZone bool
 	var order string
 	if engine != nil {
 		for _, class := range engine.PolicyClasses() {
@@ -229,15 +242,17 @@ func poolVendorOrder(engine *playbook.Engine, vendor types.AcceleratorVendor) st
 				next := "AddFirst"
 				if policy.ReplacementStrategy.Effective() == recoverymode.RemoveFirst {
 					next = "RemoveFirst"
+				} else if policy.SuccessorZone != recoverymode.AnyPoolZone {
+					sameZone = true
 				}
 				order = mergePoolOrder(order, next)
 			}
 		}
 	}
-	return order
+	return order, sameZone
 }
 
-func (c *Controller) poolChecker(ctx context.Context) func(types.Node, bool) error {
+func (c *Controller) poolChecker(ctx context.Context) func(types.Node, bool, recoverymode.SuccessorZone, *[]string) error {
 	if p, ok := c.platform.(interface{ CloudRecyclingConfigured() bool }); ok && !p.CloudRecyclingConfigured() {
 		return nil
 	}
@@ -248,7 +263,7 @@ func (c *Controller) poolChecker(ctx context.Context) func(types.Node, bool) err
 	if !ok {
 		return nil
 	}
-	return func(n types.Node, permissionChecked bool) error {
+	return func(n types.Node, permissionChecked bool, zone recoverymode.SuccessorZone, zones *[]string) error {
 		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		ref, err := reader.CloudNode(ctx, n.Name)
@@ -268,11 +283,21 @@ func (c *Controller) poolChecker(ctx context.Context) func(types.Node, bool) err
 			}
 		}
 		if n.Labels["eks.amazonaws.com/nodegroup"] != "" {
+			if aware, ok := c.platform.(interface {
+				AssessAddFirstPoolInZone(context.Context, cloud.NodeIdentity, recoverymode.SuccessorZone, *[]string) error
+			}); ok {
+				return aware.AssessAddFirstPoolInZone(ctx, ref.Identity, zone, zones)
+			}
 			if assessment, ok := c.platform.(interface {
 				AssessAddFirstPool(context.Context, cloud.NodeIdentity) error
 			}); ok {
 				return assessment.AssessAddFirstPool(ctx, ref.Identity)
 			}
+		}
+		if aware, ok := reader.(interface {
+			AddFirstAvailableInZone(context.Context, cloud.NodeIdentity, recoverymode.SuccessorZone, *[]string) error
+		}); ok {
+			return aware.AddFirstAvailableInZone(ctx, ref.Identity, zone, zones)
 		}
 		return reader.AddFirstAvailable(ctx, ref.Identity)
 	}

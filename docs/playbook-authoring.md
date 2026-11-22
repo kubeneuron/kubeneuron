@@ -454,7 +454,7 @@ unavailable there in every mode, the step is held, and no approval is asked.
 Switching a policy back to `Approval` parks the next step of incidents already
 in progress.
 
-Two more fields apply to the steps a policy runs, in every mode; a person's
+The following fields apply to the steps a policy runs, in every mode; a person's
 approval does not lift them:
 
 - `replacement.strategy`: `AddFirst` (default) brings up the new node and
@@ -475,6 +475,12 @@ approval does not lift them:
   within `successorTimeout`, KubeNeuron removes it only when it is the node
   this operation created and no workload runs on it. Otherwise the pool stays
   one node larger until a person removes it, and the incident says so.
+- `replacement.successorZone` applies only to `AddFirst`. The default,
+  `SameZone`, refuses a multi-zone pool. With `AnyPoolZone`, EKS or AKS
+  chooses a configured zone for the successor. KubeNeuron removes the old
+  node after the successor is ready and does not check volumes.
+  Pods that need the original zone (zonal volumes, zone node affinity) will not schedule on the new node. Use `AnyPoolZone` only for workloads without such requirements.
+  Multi-zone GKE pools remain unavailable because the resize adds a node in every zone.
 - `recycle.enabled` (default false): the optional restart through the cloud API.
   Without it, a recycle is skipped as not applicable: it is not attempted, not
   counted as failed or as an escalation, and does not use up the escalation

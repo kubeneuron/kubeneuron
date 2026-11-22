@@ -52,7 +52,7 @@ func TestPoolSaysWhetherAnyReplacementIsPossible(t *testing.T) {
 			var c Controller
 			nodes := []types.Node{{Name: "n1", UID: "uid-1", Labels: map[string]string{"eks.amazonaws.com/nodegroup": "gpu"}, Devices: tpuDevices}}
 			checked, permission := false, false
-			check := func(_ types.Node, permissionChecked bool) error {
+			check := func(_ types.Node, permissionChecked bool, _ recoverymode.SuccessorZone, _ *[]string) error {
 				checked, permission = true, permissionChecked
 				return nil
 			}
@@ -95,7 +95,7 @@ func TestRemoveFirstPoolsShareTheCheckBudget(t *testing.T) {
 		calls++
 		return cloud.RecoveryEligibility{Mode: cloud.RepairOff, ReplaceAllowed: true}, nil, nil
 	}
-	c.inventory.recordPools(nodes, nil, poolOrderEngine(t, recoverymode.RemoveFirst), time.Now().UTC(), func(types.Node, bool) error { return nil }, replacement)
+	c.inventory.recordPools(nodes, nil, poolOrderEngine(t, recoverymode.RemoveFirst), time.Now().UTC(), func(types.Node, bool, recoverymode.SuccessorZone, *[]string) error { return nil }, replacement)
 	if calls != 4 {
 		t.Fatalf("checked %d pools, want the budget of 4", calls)
 	}
@@ -108,5 +108,36 @@ func TestRemoveFirstPoolWithoutProvider(t *testing.T) {
 	row := c.PoolAvailability().Pools[0]
 	if row.ReplacementStatus != "unknown" || row.ReplacementReason != "no cloud provider configured" || row.Status != "" {
 		t.Fatal(row)
+	}
+}
+
+func TestPoolRechecksWhenSuccessorZoneChanges(t *testing.T) {
+	var c Controller
+	nodes := []types.Node{{Name: "n1", UID: "uid", Labels: map[string]string{"kubernetes.azure.com/agentpool": "gpu"}, Devices: tpuDevices}}
+	now := time.Now()
+	for i, zone := range []recoverymode.SuccessorZone{"", recoverymode.SameZone, recoverymode.AnyPoolZone, recoverymode.SameZone} {
+		engine, err := playbook.NewEngine(map[string]*playbook.Playbook{"replace": {Steps: []playbook.Step{{Action: "platform.replace_node"}}}}, []playbook.Policy{{Class: types.ClassFellOffBus, Playbook: "replace", SuccessorZone: zone}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		called := false
+		c.inventory.recordPools(nodes, nil, engine, now, func(_ types.Node, _ bool, got recoverymode.SuccessorZone, _ *[]string) error {
+			called = true
+			want := zone
+			if want == "" {
+				want = recoverymode.SameZone
+			}
+			if got != want {
+				t.Fatalf("checked %s, want %s", got, want)
+			}
+			if got == recoverymode.SameZone {
+				return &cloud.PoolRefusal{Code: cloud.PoolMultiZone, Reason: "two zones"}
+			}
+			return nil
+		}, nil)
+		row := c.PoolAvailability().Pools[0]
+		if called != (i != 1) || (row.Status == "available") != (zone == recoverymode.AnyPoolZone) {
+			t.Fatalf("called=%v row=%+v", called, row)
+		}
 	}
 }

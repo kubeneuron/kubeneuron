@@ -164,3 +164,35 @@ func TestVerifySuccessorBaseline(t *testing.T) {
 		})
 	}
 }
+
+func TestAnyPoolZoneTracksActualEKSPlacement(t *testing.T) {
+	member := func(id, zone string) at.Instance {
+		return at.Instance{InstanceId: sdk.String(id), AvailabilityZone: sdk.String(zone), LifecycleState: at.LifecycleStateInService}
+	}
+	group := at.AutoScalingGroup{
+		AutoScalingGroupARN: sdk.String("arn"), AutoScalingGroupName: sdk.String("gpu"),
+		AvailabilityZones: []string{"b", "a"}, DesiredCapacity: sdk.Int32(1), MaxSize: sdk.Int32(2),
+		Instances: []at.Instance{member("i-old", "a")},
+	}
+	s, err := planSuccessor(cloud.Successor{Instance: "i-old", Operation: "op", State: map[string]string{"successor_zone": "AnyPoolZone"}}, group)
+	if err != nil || s.State["zone"] != "a" || s.State["pool_zones"] != "a,b" {
+		t.Fatalf("plan=%+v err=%v", s, err)
+	}
+	s.State["asg_arn"] = "arn"
+	group.Instances = append(group.Instances, member("i-new", "b"))
+	group.DesiredCapacity = sdk.Int32(2)
+	id, err := successorCandidate(s, group)
+	if err != nil || id != "i-new" {
+		t.Fatalf("candidate=%q err=%v", id, err)
+	}
+	group.Instances = group.Instances[1:]
+	group.DesiredCapacity = sdk.Int32(1)
+	s.ProviderID = "aws:///b/i-new"
+	if !replacementSettled(s, group) {
+		t.Fatal("replacement in the second zone did not settle")
+	}
+	s.ProviderID = "aws:///a/i-new"
+	if replacementSettled(s, group) {
+		t.Fatal("accepted wrong zone in successor identity")
+	}
+}

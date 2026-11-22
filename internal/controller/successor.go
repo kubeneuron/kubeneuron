@@ -172,14 +172,25 @@ func (c *Controller) addFirstAvailable(ctx context.Context, inc *types.Incident)
 	if _, _, err := c.expectedAccelerators(ctx, inc); err != nil {
 		return err
 	}
+	zone := c.incidentPolicy(ctx, inc).SuccessorZone
 	key := successorOperation(inc)
+	if zone == recoverymode.AnyPoolZone {
+		key += "/" + string(zone)
+	}
 	c.addFirst.mu.Lock()
 	entry, cached := c.addFirst.entries[key]
 	c.addFirst.mu.Unlock()
 	if cached && time.Since(entry.at) < addFirstCheckTTL {
 		return entry.err
 	}
-	err := plat.AddFirstAvailable(ctx, *inc.CloudIdentity)
+	var err error
+	if aware, ok := plat.(interface {
+		AddFirstAvailableInZone(context.Context, cloud.NodeIdentity, recoverymode.SuccessorZone, *[]string) error
+	}); ok {
+		err = aware.AddFirstAvailableInZone(ctx, *inc.CloudIdentity, zone, nil)
+	} else {
+		err = plat.AddFirstAvailable(ctx, *inc.CloudIdentity)
+	}
 	c.addFirst.mu.Lock()
 	if c.addFirst.entries == nil {
 		c.addFirst.entries = map[string]addFirstCheck{}
@@ -275,7 +286,11 @@ func (c *Controller) planSuccessor(ctx context.Context, inc *types.Incident) err
 		return err
 	}
 	pin := *inc.CloudIdentity
-	planned, err := plat.PrepareSuccessor(ctx, pin, cloud.Successor{Operation: successorOperation(inc), Instance: pin.InstanceID})
+	request := cloud.Successor{Operation: successorOperation(inc), Instance: pin.InstanceID}
+	if c.incidentPolicy(ctx, inc).SuccessorZone == recoverymode.AnyPoolZone {
+		request.State = map[string]string{"successor_zone": string(recoverymode.AnyPoolZone)}
+	}
+	planned, err := plat.PrepareSuccessor(ctx, pin, request)
 	if err != nil {
 		return err
 	}
@@ -283,6 +298,15 @@ func (c *Controller) planSuccessor(ctx context.Context, inc *types.Incident) err
 		return fmt.Errorf("the provider returned phase %q for operation %q when asked to plan", planned.Phase, planned.Operation)
 	}
 	rec := &types.SuccessorRecord{Successor: planned, Expected: expected, ExpectedGPUs: gpus}
+	if request.State["successor_zone"] == string(recoverymode.AnyPoolZone) {
+		old, err := plat.SuccessorNode(ctx, pin.ProviderID)
+		if err != nil {
+			return err
+		}
+		if old.Found && old.UID == pin.NodeUID {
+			rec.OriginalZone = old.Zone
+		}
+	}
 	return c.saveSuccessor(ctx, inc, rec, "successor-planned",
 		fmt.Sprintf("operation %s: a successor of %s is planned in pool %s", planned.Operation, inc.Target.Node, planned.Pool))
 }
@@ -514,13 +538,29 @@ func (c *Controller) acceptSuccessor(ctx context.Context, inc *types.Incident, p
 	}
 	now := time.Now().UTC()
 	rec.ReadyAt, rec.Reason = &now, ""
+	rec.SuccessorZone = node.Zone
 	// Without the old node's device inventory, no device of the successor's was checked either.
 	ready := "is Ready with its accelerators;"
 	if rec.ExpectedGPUs == 0 {
 		ready = "is Ready and advertises the same accelerator capacity. Device health on it was not checked;"
 	}
+	placement := successorPlacement(rec, inc.Target.Node)
+	if placement != "" {
+		placement = "." + placement
+	}
 	return c.saveSuccessor(ctx, inc, rec, "successor-ready",
-		fmt.Sprintf("operation %s: successor %s %s two nodes run until %s is removed", rec.Operation, node.Name, ready, inc.Target.Node))
+		fmt.Sprintf("operation %s: successor %s %s two nodes run until %s is removed", rec.Operation, node.Name, ready, inc.Target.Node)+placement)
+}
+
+// successorPlacement uses the node labels captured before the original node was removed.
+func successorPlacement(rec *types.SuccessorRecord, original string) string {
+	if rec.SuccessorZone == "" || rec.OriginalZone == "" {
+		return ""
+	}
+	if rec.SuccessorZone == rec.OriginalZone {
+		return fmt.Sprintf(" Successor %s is in zone %s, the same as %s.", rec.Node, rec.SuccessorZone, original)
+	}
+	return fmt.Sprintf(" Successor %s is in zone %s; %s was in zone %s (policy allows any zone of the pool).", rec.Node, rec.SuccessorZone, original, rec.OriginalZone)
 }
 
 func (c *Controller) successorNotReady(ctx context.Context, inc *types.Incident, pin cloud.NodeIdentity, rec *types.SuccessorRecord, node platform.SuccessorNode) string {

@@ -241,7 +241,7 @@ func (c *Controller) replacementNode(ctx context.Context, inc *types.Incident, r
 		case node.Name != s.Node || node.UID != s.NodeUID:
 			return node, "", fmt.Sprintf("New node %s is no longer the node the cloud operation named.", s.Node)
 		}
-		return node, fmt.Sprintf("Replaced by node %s, named by the cloud operation.", node.Name), ""
+		return node, fmt.Sprintf("Replaced by node %s, named by the cloud operation.", node.Name) + successorPlacement(s, inc.Target.Node), ""
 	}
 	if r.pool == "" {
 		return platform.SuccessorNode{}, "", "The replaced node's pool was not recorded, so no node can be tied to the replacement."

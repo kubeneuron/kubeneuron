@@ -40,7 +40,7 @@ func testMachine(i int) machine {
 // fakeAKS is one agent pool of one cluster. A grown pool gets a new machine;
 // a deleted machine shrinks it, unless shrinkOnDelete is off.
 type fakeAKS struct {
-	zoneCount   int
+	zones       []string
 	count       int32
 	autoscaling bool
 	state       string
@@ -77,7 +77,7 @@ func (f *fakeAKS) Pool(_ context.Context, name string) (pool, error) {
 	if name != testPool {
 		return pool{}, errors.New("no such pool")
 	}
-	return pool{ZoneCount: f.zoneCount, Count: f.count, Autoscaling: f.autoscaling, ProvisioningState: f.state, Tags: maps.Clone(f.tags),
+	return pool{Zones: f.zones, Count: f.count, Autoscaling: f.autoscaling, ProvisioningState: f.state, Tags: maps.Clone(f.tags),
 		ETag: strconv.Itoa(f.version), raw: aks.AgentPool{Properties: &aks.ManagedClusterAgentPoolProfileProperties{}}}, nil
 }
 

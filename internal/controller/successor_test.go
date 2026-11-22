@@ -926,3 +926,22 @@ func TestMultiZoneIncidentHoldsBeforeCordon(t *testing.T) {
 		})
 	}
 }
+
+func TestSuccessorPlacementEvidence(t *testing.T) {
+	rec := &types.SuccessorRecord{Node: "worker-b", OriginalZone: "zone-a"}
+	for zone, want := range map[string]string{
+		"":       "",
+		"zone-a": " Successor worker-b is in zone zone-a, the same as worker-a.",
+		"zone-b": " Successor worker-b is in zone zone-b; worker-a was in zone zone-a (policy allows any zone of the pool).",
+	} {
+		rec.SuccessorZone = zone
+		if got := successorPlacement(rec, "worker-a"); got != want {
+			t.Errorf("placement for zone %q = %q, want %q", zone, got, want)
+		}
+	}
+	rec.OriginalZone, rec.SuccessorZone = "", "zone-b"
+	if got := successorPlacement(rec, "worker-a"); got != "" {
+		t.Fatalf("missing original zone: %q", got)
+	}
+
+}

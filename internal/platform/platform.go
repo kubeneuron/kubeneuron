@@ -849,6 +849,7 @@ type PoolNodeLister interface {
 // SuccessorNode is what the controller needs to accept a successor: whether it
 // is there, Ready and schedulable, when it joined, and what it can run.
 type SuccessorNode struct {
+	Zone          string
 	Found         bool
 	Name, UID     string
 	CreatedAt     time.Time

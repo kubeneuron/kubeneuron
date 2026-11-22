@@ -13,6 +13,8 @@ type PoolAvailabilityView struct {
 
 // PoolAvailability describes the leader's latest assessment of an accelerator pool.
 type PoolAvailability struct {
+	Zones             []string   `json:"zones,omitempty"`
+	SuccessorZone     string     `json:"successor_zone,omitempty"`
 	Pool              string     `json:"pool"`
 	Cloud             string     `json:"cloud"`
 	AcceleratorNodes  int        `json:"accelerator_nodes"`

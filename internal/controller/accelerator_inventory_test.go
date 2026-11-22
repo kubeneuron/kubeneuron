@@ -365,7 +365,7 @@ func TestPoolCheckInterval(t *testing.T) {
 	nodes := []types.Node{node, second}
 	now := time.Now().UTC()
 	calls := 0
-	check := func(types.Node, bool) error {
+	check := func(types.Node, bool, recoverymode.SuccessorZone, *[]string) error {
 		calls++
 		if calls == 1 {
 			return errors.New("read failure")
@@ -560,7 +560,7 @@ func TestPoolCheckBudget(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	calls := 0
-	check := func(types.Node, bool) error { calls++; return nil }
+	check := func(types.Node, bool, recoverymode.SuccessorZone, *[]string) error { calls++; return nil }
 	for _, want := range []int{4, 6} {
 		c.inventory.recordPools(nodes, nil, poolTestEngine(t), now, check, nil)
 		pending := 0
@@ -604,7 +604,10 @@ func poolTestEngine(t *testing.T) *playbook.Engine {
 func TestPoolWithoutReplacementPolicySkipsCheck(t *testing.T) {
 	var c Controller
 	nodes := []types.Node{{Name: "a", Labels: map[string]string{"kubernetes.azure.com/agentpool": "train"}, Devices: tpuDevices}}
-	c.inventory.recordPools(nodes, nil, nil, time.Now(), func(types.Node, bool) error { t.Fatal("unexpected cloud check"); return nil }, nil)
+	c.inventory.recordPools(nodes, nil, nil, time.Now(), func(types.Node, bool, recoverymode.SuccessorZone, *[]string) error {
+		t.Fatal("unexpected cloud check")
+		return nil
+	}, nil)
 	row := c.PoolAvailability().Pools[0]
 	if row.ReplacementPolicy != "none" || row.Status != "not applicable" || row.CheckedAt != nil {
 		t.Fatal(row)
@@ -697,7 +700,9 @@ func TestPoolRowShowsRepairHold(t *testing.T) {
 		{unconfirmed, "unknown", unconfirmed.Reason, unconfirmed.Action},
 	} {
 		var c Controller
-		c.inventory.recordPools(nodes, nil, poolTestEngine(t), time.Now().UTC(), func(types.Node, bool) error { return fmt.Errorf("assess: %w", tc.hold) }, nil)
+		c.inventory.recordPools(nodes, nil, poolTestEngine(t), time.Now().UTC(), func(types.Node, bool, recoverymode.SuccessorZone, *[]string) error {
+			return fmt.Errorf("assess: %w", tc.hold)
+		}, nil)
 		row := c.PoolAvailability().Pools[0]
 		if row.Status != tc.status || row.ReasonCode != tc.hold.Code || row.Reason != tc.reason || row.Action != tc.action {
 			t.Fatalf("%s: row %+v", tc.hold.Code, row)
