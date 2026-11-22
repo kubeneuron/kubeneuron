@@ -19,6 +19,8 @@ spec:
     tolerations:
       - operator: Exists
   safety:
+    # Approval rounds include an advisory impact preview by default.
+    # impactPreview: {enabled: false}  # Opt out for this installation.
     executionMode: DryRun
     maxConcurrentRemediations: 2
     maxConcurrentReboots: 1

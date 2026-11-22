@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/utils/ptr"
 	sigsyaml "sigs.k8s.io/yaml"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
@@ -54,7 +55,7 @@ func everyOptIn() *kubeneuronv1alpha1.KubeNeuron {
 		Groups:     &kubeneuronv1alpha1.CheckpointGroupsSpec{Enabled: true, CrossNode: true},
 	}
 	kn.Spec.Safety.ImpactPreview = &kubeneuronv1alpha1.ImpactPreviewSpec{
-		Enabled:            true,
+		Enabled:            ptr.To(true),
 		RequireForApproval: true,
 		WorkloadContext:    &kubeneuronv1alpha1.ImpactWorkloadContextSpec{BatchJobs: true, Kueue: true, KubeRay: true},
 	}

@@ -9,6 +9,7 @@ import (
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
 	"github.com/kubeneuron/kubeneuron/internal/config"
+	"k8s.io/utils/ptr"
 )
 
 // The controller decodes its configuration strictly, so every key the
@@ -28,7 +29,7 @@ func TestCompiledSnapshotLoadsUnderStrictDecoding(t *testing.T) {
 	enabled.Spec.Safety.CheckpointCoordination = &kubeneuronv1alpha1.CheckpointCoordinationSpec{
 		Enabled: true, Namespaces: []string{"training"},
 	}
-	enabled.Spec.Safety.ImpactPreview = &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: true}
+	enabled.Spec.Safety.ImpactPreview = &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: ptr.To(true)}
 	enabled.Spec.Safety.TopologyClassifier = &kubeneuronv1alpha1.TopologyClassifierSpec{
 		DRA: &kubeneuronv1alpha1.TopologyClassifierDRASpec{Enabled: true},
 	}

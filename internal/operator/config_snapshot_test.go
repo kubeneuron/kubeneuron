@@ -12,6 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
 	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
@@ -1284,28 +1285,28 @@ func TestCompileSnapshotEmitsImpactPreviewOnlyWhenEnabled(t *testing.T) {
 		return compiled.Safety.ImpactPreview, snapshot.Digest, nil
 	}
 	ip, baseline, err := compile(t, nil)
-	if err != nil || ip != nil {
+	if err != nil || ip == nil || !ip.Enabled || ip.RequireForApproval || ip.WorkloadContext != (config.ImpactWorkloadContext{}) {
 		t.Fatalf("absent: ip=%+v err=%v", ip, err)
 	}
-	ip, offDigest, err := compile(t, &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: false, Budget: "30s", MaxItems: 50})
-	if err != nil || ip != nil || offDigest != baseline {
-		t.Fatalf("disabled must compile to the absent digest: ip=%+v err=%v same=%v", ip, err, offDigest == baseline)
+	ip, offDigest, err := compile(t, &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: ptr.To(false), Budget: "30s", MaxItems: 50})
+	if err != nil || ip != nil || offDigest == baseline {
+		t.Fatalf("disabled must have a distinct digest: ip=%+v err=%v same=%v", ip, err, offDigest == baseline)
 	}
-	ip, onDigest, err := compile(t, &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: true})
+	ip, onDigest, err := compile(t, &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: ptr.To(true)})
 	if err != nil || ip == nil || !ip.Enabled || ip.Budget != config.ImpactPreviewDefaultBudget || ip.MaxItems != config.ImpactPreviewDefaultItems || ip.RequireForApproval {
 		t.Fatalf("enabled: ip=%+v err=%v, want the defaults", ip, err)
 	}
-	if onDigest == baseline {
-		t.Fatal("an enabled preview must change the digest")
+	if onDigest != baseline {
+		t.Fatal("explicit true must match the default")
 	}
-	ip, _, err = compile(t, &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: true, Budget: "20s", MaxItems: 500, RequireForApproval: true})
+	ip, _, err = compile(t, &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: ptr.To(true), Budget: "20s", MaxItems: 500, RequireForApproval: true})
 	if err != nil || ip.Budget.Std() != 20*time.Second || ip.MaxItems != 500 || !ip.RequireForApproval {
 		t.Fatalf("explicit: ip=%+v err=%v", ip, err)
 	}
 	for name, spec := range map[string]*kubeneuronv1alpha1.ImpactPreviewSpec{
-		"budget above the ceiling": {Enabled: true, Budget: "2m"},
-		"items out of range":       {Enabled: true, MaxItems: 5},
-		"require without enabled":  {Enabled: false, RequireForApproval: true},
+		"budget above the ceiling": {Enabled: ptr.To(true), Budget: "2m"},
+		"items out of range":       {Enabled: ptr.To(true), MaxItems: 5},
+		"require without enabled":  {Enabled: ptr.To(false), RequireForApproval: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, _, err := compile(t, spec); err == nil {
@@ -1372,16 +1373,16 @@ func TestCompileSnapshotCarriesWorkloadContextOnlyWithThePreview(t *testing.T) {
 		}
 		return compiled.Safety.ImpactPreview
 	}
-	if ip := compile(&kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: false, WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{Kueue: true}}); ip != nil {
+	if ip := compile(&kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: ptr.To(false), WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{Kueue: true}}); ip != nil {
 		t.Fatalf("a disabled preview carried its context: %+v", ip)
 	}
-	ip := compile(&kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: true, WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{BatchJobs: true, KubeRay: true}})
+	ip := compile(&kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: ptr.To(true), WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{BatchJobs: true, KubeRay: true}})
 	if ip == nil || !ip.WorkloadContext.BatchJobs || ip.WorkloadContext.Kueue || !ip.WorkloadContext.KubeRay {
 		t.Fatalf("context = %+v", ip)
 	}
 	b, k, r := impactContextSelection(func() *kubeneuronv1alpha1.KubeNeuron {
 		i := testKubeNeuron()
-		i.Spec.Safety.ImpactPreview = &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: true, WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{Kueue: true}}
+		i.Spec.Safety.ImpactPreview = &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: ptr.To(true), WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{Kueue: true}}
 		return i
 	}())
 	if b || !k || r {

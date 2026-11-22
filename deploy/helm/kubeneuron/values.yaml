@@ -3,6 +3,8 @@
 # The chart deploys only the cluster-scoped CRDs and the operator. Creating
 # a KubeNeuron installation (controller, agents, TLS Secrets, tokens) is a
 # separate, deliberate step — see the production install guide.
+# Approval previews default to enabled on that installation. To opt out, set
+# spec.safety.impactPreview.enabled to false on its KubeNeuron resource.
 
 image:
   repository: ghcr.io/kubeneuron/kubeneuron/operator

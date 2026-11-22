@@ -11,6 +11,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/utils/ptr"
 	sigsyaml "sigs.k8s.io/yaml"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
@@ -348,9 +349,9 @@ func TestControllerRBACContextRulesFollowImpactPreviewPolicy(t *testing.T) {
 	}
 	for name, spec := range map[string]*kubeneuronv1alpha1.ImpactPreviewSpec{
 		"omitted":                  nil,
-		"enabled, no context":      {Enabled: true},
-		"disabled with context":    {Enabled: false, WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{BatchJobs: true, Kueue: true, KubeRay: true}},
-		"enabled, context all off": {Enabled: true, WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{}},
+		"enabled, no context":      {Enabled: ptr.To(true)},
+		"disabled with context":    {Enabled: ptr.To(false), WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{BatchJobs: true, Kueue: true, KubeRay: true}},
+		"enabled, context all off": {Enabled: ptr.To(true), WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{}},
 	} {
 		installation := testKubeNeuron()
 		installation.Spec.Safety.ImpactPreview = spec
@@ -360,7 +361,7 @@ func TestControllerRBACContextRulesFollowImpactPreviewPolicy(t *testing.T) {
 	}
 	for i, selection := range []kubeneuronv1alpha1.ImpactWorkloadContextSpec{{BatchJobs: true}, {Kueue: true}, {KubeRay: true}} {
 		installation := testKubeNeuron()
-		installation.Spec.Safety.ImpactPreview = &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: true, WorkloadContext: &selection}
+		installation.Spec.Safety.ImpactPreview = &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: ptr.To(true), WorkloadContext: &selection}
 		role := controllerClusterRole(installation)
 		got := contextRules(role.Rules)
 		if len(got) != 1 || !reflect.DeepEqual(got[0], contextReadOnlyRules[i]) {
@@ -376,7 +377,7 @@ func TestControllerRBACContextRulesFollowImpactPreviewPolicy(t *testing.T) {
 		}
 	}
 	installation := testKubeNeuron()
-	installation.Spec.Safety.ImpactPreview = &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: true, WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{BatchJobs: true, Kueue: true, KubeRay: true}}
+	installation.Spec.Safety.ImpactPreview = &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: ptr.To(true), WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{BatchJobs: true, Kueue: true, KubeRay: true}}
 	all := controllerClusterRole(installation)
 	if got := contextRules(all.Rules); !reflect.DeepEqual(got, contextReadOnlyRules) {
 		t.Fatalf("all selected: %#v", got)
@@ -411,7 +412,7 @@ func TestContextGrantsAreReadOnlyEverywhere(t *testing.T) {
 	}
 	assertReadOnly(t, "config/rbac/operator_role.yaml", operatorRole.Rules)
 	installation := testKubeNeuron()
-	installation.Spec.Safety.ImpactPreview = &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: true, WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{BatchJobs: true, Kueue: true, KubeRay: true}}
+	installation.Spec.Safety.ImpactPreview = &kubeneuronv1alpha1.ImpactPreviewSpec{Enabled: ptr.To(true), WorkloadContext: &kubeneuronv1alpha1.ImpactWorkloadContextSpec{BatchJobs: true, Kueue: true, KubeRay: true}}
 	enabled := controllerClusterRole(installation)
 	assertReadOnly(t, "controllerClusterRole(all)", enabled.Rules)
 	for _, wanted := range contextRules(enabled.Rules) {

@@ -486,8 +486,7 @@ list per group in that namespace; no verb is added. Peer outcomes land in
 `checkpoint-group-request` row per group on the incident's audit trail.
 Start with `crossNode: false`.
 
-**Impact preview.** `spec.safety.impactPreview.enabled:
-true` computes, at every park for approval, a durable record of what the
+**Impact preview.** By default, the controller computes, at every park for approval, a durable record of what the
 pending step would touch (the [REST API reference](reference-api.md#impact-preview-v08-development)
 has the document), hands a three-line summary to the notification channels,
 and shows it in the panel's incident drawer and in

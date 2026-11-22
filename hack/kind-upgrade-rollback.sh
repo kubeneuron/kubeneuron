@@ -1380,7 +1380,7 @@ for store in $STORES; do
 	assert_pod_verbs "$store" "get,list,watch" "v0.8 blocks absent after upgrade"
 	# CEL guards, server-side dry run: nothing persisted.
 	rejected=$("$KUBECTL_BIN" patch kubeneuron "$root" --type=merge --dry-run=server \
-		-p '{"spec":{"safety":{"impactPreview":{"requireForApproval":true}}}}' 2>&1 || true)
+		-p '{"spec":{"safety":{"impactPreview":{"enabled":false,"requireForApproval":true}}}}' 2>&1 || true)
 	grep -Fq 'requireForApproval requires impactPreview.enabled' <<<"$rejected" ||
 		die "[$store] requireForApproval without the preview was not refused by the CRD: ${rejected:-accepted}"
 	rejected=$("$KUBECTL_BIN" patch kubeneuron "$root" --type=merge --dry-run=server \

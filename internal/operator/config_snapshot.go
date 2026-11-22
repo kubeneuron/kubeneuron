@@ -17,6 +17,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	kubeneuronv1alpha1 "github.com/kubeneuron/kubeneuron/api/v1alpha1"
 	"github.com/kubeneuron/kubeneuron/internal/action"
@@ -527,14 +528,13 @@ func checkpointAdvisory(spec *kubeneuronv1alpha1.CheckpointAdvisorySpec) (*confi
 	return &config.CheckpointAdvisory{Enabled: true, Budget: budget}, nil
 }
 
-// impactPreview compiles spec.safety.impactPreview. The key is emitted only
-// when enabled, so an absent or disabled block compiles to the digest of a
-// configuration written before the field existed. The compiler repeats the
-// CEL rules: requireForApproval needs enabled, the budget is bounded, and
-// maxItems stays inside its range.
+// impactPreview applies the installation defaults before compiling the controller configuration.
 func impactPreview(spec *kubeneuronv1alpha1.ImpactPreviewSpec) (*config.ImpactPreview, error) {
-	if spec == nil || !spec.Enabled {
-		if spec != nil && spec.RequireForApproval {
+	if spec == nil {
+		spec = &kubeneuronv1alpha1.ImpactPreviewSpec{}
+	}
+	if !ptr.Deref(spec.Enabled, true) {
+		if spec.RequireForApproval {
 			return nil, fmt.Errorf("spec.safety.impactPreview.requireForApproval requires impactPreview.enabled")
 		}
 		return nil, nil
@@ -567,7 +567,7 @@ func impactPreview(spec *kubeneuronv1alpha1.ImpactPreviewSpec) (*config.ImpactPr
 // selected.
 func impactContextSelection(installation *kubeneuronv1alpha1.KubeNeuron) (batchJobs, kueue, kuberay bool) {
 	spec := installation.Spec.Safety.ImpactPreview
-	if spec == nil || !spec.Enabled || spec.WorkloadContext == nil {
+	if spec == nil || !ptr.Deref(spec.Enabled, true) || spec.WorkloadContext == nil {
 		return false, false, false
 	}
 	return spec.WorkloadContext.BatchJobs, spec.WorkloadContext.Kueue, spec.WorkloadContext.KubeRay

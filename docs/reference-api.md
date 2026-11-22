@@ -306,7 +306,7 @@ guest cannot reset the GPU); nothing is claimed for any other device.
 
 ### Impact preview
 
-With `spec.safety.impactPreview.enabled`, every park and re-park for
+With `spec.safety.impactPreview.enabled` (the default), every park and re-park for
 approval computes, under the policy `budget` (default 15s, at most 60s), a
 durable `impact-preview/v1` record for `(incident, round)`: the node and its
 [device topology classification](#device-topology-read-only-v08-development),

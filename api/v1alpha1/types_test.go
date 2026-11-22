@@ -372,7 +372,7 @@ func xValidations(t *testing.T, schema map[string]any) map[string]string {
 	return out
 }
 
-func TestGeneratedKubeNeuronCRDImpactPreviewIsOptInAndBounded(t *testing.T) {
+func TestGeneratedKubeNeuronCRDImpactPreviewIsEnabledAndBounded(t *testing.T) {
 	data, err := os.ReadFile("../../config/crd/bases/kubeneuron.io_kubeneurons.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -393,7 +393,7 @@ func TestGeneratedKubeNeuronCRDImpactPreviewIsOptInAndBounded(t *testing.T) {
 		t.Errorf("impactPreview must have no structurally required field, got required=%v", block["required"])
 	}
 	for field, want := range map[string]any{
-		"enabled":            false,
+		"enabled":            true,
 		"budget":             "15s",
 		"maxItems":           float64(200),
 		"requireForApproval": false,

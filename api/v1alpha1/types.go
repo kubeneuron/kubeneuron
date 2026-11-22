@@ -530,8 +530,7 @@ type SafetySpec struct {
 	// workloads the downstream disruption would touch and which of them can
 	// checkpoint, and the warnings a human should read before approving. It
 	// is advisory and cannot block an approve; with requireForApproval it
-	// binds the approve to the exact preview the human saw. Omitted means
-	// off.
+	// binds the approve to the exact preview the human saw. Previews are enabled by default.
 	ImpactPreview *ImpactPreviewSpec `json:"impactPreview,omitempty"`
 }
 
@@ -707,9 +706,9 @@ type CheckpointAdvisorySpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.requireForApproval) || !self.requireForApproval || self.enabled",message="impactPreview.requireForApproval requires impactPreview.enabled"
 // +kubebuilder:validation:XValidation:rule="!has(self.budget) || (duration(self.budget) > duration('0s') && duration(self.budget) <= duration('60s'))",message="impactPreview.budget must be a positive duration of at most 60s"
 type ImpactPreviewSpec struct {
-	// Enabled turns the preview on. Default false.
-	// +kubebuilder:default=false
-	Enabled bool `json:"enabled,omitempty"`
+	// Enabled turns the preview on. Defaults to true.
+	// +kubebuilder:default=true
+	Enabled *bool `json:"enabled,omitempty"`
 	// Budget bounds one preview computation (listing the node's workloads and
 	// classifying its topology). A computation that runs out of budget is
 	// recorded as unavailable with its reason. At most 60s.

@@ -25,6 +25,8 @@ API is `v1alpha1`.
 
 ### Changed
 
+- Impact previews are enabled by default at approval rounds. Set `spec.safety.impactPreview.enabled: false` to opt out. Previews are advisory and workload-context resolvers remain opt-in.
+
 - CRD field descriptions (`kubectl explain`), the `kubeneuronctl audit-events`
   help, the API's 503 for an unavailable operations service and the incident
   acknowledgement and resolution errors no longer name 0.x versions. Behaviour

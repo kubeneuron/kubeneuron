@@ -243,7 +243,7 @@ spec:
       advisory:   {enabled: false, budget: 10s}            # S2; requires checkpointCoordination.enabled
       groups:     {enabled: false, maxGroupSize: 64, crossNode: false}   # S3; same requirement
     impactPreview:                 # S4
-      enabled: false
+      enabled: true
       budget: 15s
       maxItems: 200
       requireForApproval: false    # requires impactPreview.enabled
