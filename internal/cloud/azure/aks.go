@@ -40,6 +40,10 @@ type machine struct {
 	ResourceID string
 }
 
+// providerID is the machine as its node's spec.providerID names it, up to
+// case: AKS spells the node resource group differently there.
+func (m machine) providerID() string { return "azure://" + m.ResourceID }
+
 // permission is one entry of the caller's effective permissions at a scope.
 type permission struct {
 	Actions    []string `json:"actions"`

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
@@ -306,4 +307,90 @@ func TestRemoveFirstMalformedPlanOrPool(t *testing.T) {
 	if _, err := p.ContinueRemoveFirst(t.Context(), plan); err == nil {
 		t.Fatal("a pool without groups continued the plan")
 	}
+}
+
+// runRemoveFirst drives a plan from planned to done, calling between before
+// the resize is asked for, and returns the finished plan.
+func runRemoveFirst(t *testing.T, f *fakeGKE, between func()) cloud.RemoveFirstPlan {
+	t.Helper()
+	plan := step(t, f, step(t, f, planRemoveFirst(t, f), cloud.RemoveFirstDeleting), cloud.RemoveFirstDeleting)
+	if between != nil {
+		between()
+	}
+	for i := 0; plan.Phase != cloud.RemoveFirstDone; i++ {
+		p, back := restarted(t, f, plan)
+		next, err := p.ContinueRemoveFirst(t.Context(), back)
+		if err != nil || i > 3 {
+			t.Fatalf("continue from %q: %+v, %v", plan.Phase, next, err)
+		}
+		plan = next
+	}
+	return plan
+}
+
+// The group's members are recorded before the delete; once the size is back,
+// its one new member is the instance that replaced the deleted one.
+func TestRemoveFirstNamesTheOneNewMember(t *testing.T) {
+	f := newFakeGKE(3)
+	deleting := step(t, f, planRemoveFirst(t, f), cloud.RemoveFirstDeleting)
+	if want := strings.Join([]string{testName(testZone, 0), testName(testZone, 1), testName(testZone, 2)}, ","); deleting.State[stateMembers] != want {
+		t.Fatalf("members before the delete %q, want %q", deleting.State[stateMembers], want)
+	}
+	if got := resizediff.FromPlan(deleting); got != "" {
+		t.Fatalf("an open plan names %q", got)
+	}
+	plan := step(t, f, step(t, f, deleting, cloud.RemoveFirstDeleting), cloud.RemoveFirstResizing)
+	if got := resizediff.FromPlan(plan); got != "" {
+		t.Fatalf("a resizing plan names %q", got)
+	}
+	plan = step(t, f, plan, cloud.RemoveFirstDone)
+	if got, want := resizediff.FromPlan(plan), "gce://"+testProject+"/"+testZone+"/"+testName(testZone, 3); got != want {
+		t.Fatalf("new instance %q, want %q", got, want)
+	}
+}
+
+// No instance is named when the comparison cannot single one out: two new
+// members, none, a group too large to record, or a plan recorded without the
+// members (by an earlier release).
+func TestRemoveFirstNamesNoInstanceWhenNotExactlyOne(t *testing.T) {
+	cases := map[string]struct {
+		f       *fakeGKE
+		between func(f *fakeGKE)
+	}{
+		"two new members": {f: newFakeGKE(3), between: func(f *fakeGKE) {
+			f.groups[0].target = 4 // resized past the plan by someone else
+			f.fill()
+		}},
+		"pool resized larger by someone else": {f: newFakeGKE(2, testZone, "us-central1-b"), between: func(f *fakeGKE) {
+			f.groups[0].target, f.groups[1].target = 3, 3
+			f.fill()
+		}},
+		"no new member": {f: newFakeGKE(3), between: func(f *fakeGKE) {
+			f.groups[0].target = 3 // set back by someone else, no instance listed yet
+		}},
+		"group above the limit": {f: newFakeGKE(resizediff.MaxMembers + 1)},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var between func()
+			if tc.between != nil {
+				between = func() { tc.between(tc.f) }
+			}
+			plan := runRemoveFirst(t, tc.f, between)
+			if got := resizediff.FromPlan(plan); got != "" {
+				t.Fatalf("named %q", got)
+			}
+		})
+	}
+
+	t.Run("plan without members", func(t *testing.T) {
+		f := newFakeGKE(3)
+		plan := step(t, f, planRemoveFirst(t, f), cloud.RemoveFirstDeleting)
+		delete(plan.State, stateMembers)
+		plan = step(t, f, plan, cloud.RemoveFirstDeleting)
+		plan = step(t, f, step(t, f, plan, cloud.RemoveFirstResizing), cloud.RemoveFirstDone)
+		if got := resizediff.FromPlan(plan); got != "" {
+			t.Fatalf("named %q", got)
+		}
+	})
 }

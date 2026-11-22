@@ -718,7 +718,10 @@ func replacementLine(audit []*types.AuditEntry) string {
 			return ""
 		}
 		how := "named by the cloud operation"
-		if e.Params["replacement_correlation"] == "pool" {
+		switch e.Params["replacement_correlation"] {
+		case "resize-diff":
+			how = "the only instance that joined the pool during the resize"
+		case "pool":
 			how = "the only node that joined its pool after the removal"
 		}
 		return fmt.Sprintf("replaced:  node %s (uid %s), %s", e.Params["replacement_node"], e.Params["replacement_node_uid"], how)

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/internal/store"
@@ -36,6 +37,18 @@ type poolPlatform struct {
 	// resource is what the new nodes and the successor advertise; nvidia.com/gpu when empty.
 	resource string
 	removed  bool
+	// named is the providerID the replacement returns as the instance the
+	// pool's resize added; namedNode is the node behind it, the first new
+	// pool node when empty.
+	named     string
+	namedNode *platform.SuccessorNode
+}
+
+func (p *poolPlatform) ReplacePinnedNodeNamed(ctx context.Context, pin cloud.NodeIdentity) (string, error) {
+	if err := p.ReplacePinnedNode(ctx, pin); err != nil {
+		return "", err
+	}
+	return p.named, nil
 }
 
 func (p *poolPlatform) CloudNode(ctx context.Context, node string) (cloud.NodeRef, error) {
@@ -82,6 +95,18 @@ func (p *poolPlatform) ReplacePinnedNode(ctx context.Context, pin cloud.NodeIden
 }
 
 func (p *poolPlatform) SuccessorNode(ctx context.Context, providerID string) (platform.SuccessorNode, error) {
+	p.mu.Lock()
+	if p.named != "" && providerID == p.named {
+		defer p.mu.Unlock()
+		if p.namedNode != nil {
+			return *p.namedNode, nil
+		}
+		if !p.removed {
+			return platform.SuccessorNode{}, nil
+		}
+		return p.members[0], nil
+	}
+	p.mu.Unlock()
 	n, err := p.successorPlatform.SuccessorNode(ctx, providerID)
 	if p.resource != "" && n.Allocatable != nil {
 		n.Allocatable = map[string]int64{p.resource: n.Allocatable[topology.ResourceWholeGPU]}
@@ -194,6 +219,7 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 	const (
 		successorSentence = "Replaced by node n9, named by the cloud operation."
 		poolSentence      = "Node n10 is Ready. It was the only node that joined pool train after the removal."
+		resizeSentence    = "Replaced by node n10, the only instance that joined pool train during the resize."
 		driverDepth       = "Fresh accelerator inventory and driver health observed."
 		observedDepth     = "Device presence observed; runtime not attested."
 		capacityDepth     = "Verification used Kubernetes node readiness and advertised accelerator capacity."
@@ -247,6 +273,26 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 				}
 			},
 			node: poolNodeName, how: replacementByPool, sentence: poolSentence, depth: capacityDepth},
+		{name: "remove-first named by the resize", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, vendor: types.AcceleratorVendorNVIDIA,
+			setup: func(_ *testing.T, _ *sqlite.Store, p *poolPlatform) { p.named = "aws:///zone/i-n10" },
+			node:  poolNodeName, how: replacementByResizeDiff, sentence: resizeSentence, depth: driverDepth},
+		{name: "remove-first named by the resize approval, another node joined too", mode: recoverymode.Approval, strategy: recoverymode.RemoveFirst, vendor: types.AcceleratorVendorNVIDIA,
+			setup: func(_ *testing.T, _ *sqlite.Store, p *poolPlatform) { p.named, p.extra = "aws:///zone/i-n10", 1 },
+			node:  poolNodeName, how: replacementByResizeDiff, sentence: resizeSentence, depth: driverDepth},
+		// The named instance's node is not in the pool: found by the pool alone.
+		{name: "remove-first named outside the pool", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, vendor: types.AcceleratorVendorNVIDIA,
+			setup: func(_ *testing.T, _ *sqlite.Store, p *poolPlatform) {
+				p.named = "aws:///zone/i-n77"
+				p.namedNode = &platform.SuccessorNode{Found: true, Name: "n77", UID: "uid-n77", Ready: true}
+			},
+			node: poolNodeName, how: replacementByPool, sentence: poolSentence, depth: driverDepth},
+		// The named instance was in the pool before the removal.
+		{name: "remove-first named an old member", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, vendor: types.AcceleratorVendorNVIDIA,
+			setup: func(_ *testing.T, _ *sqlite.Store, p *poolPlatform) {
+				p.named = "aws:///zone/i-n2"
+				p.namedNode = &platform.SuccessorNode{Found: true, Name: "n2", UID: "uid-n2", Ready: true}
+			},
+			node: poolNodeName, how: replacementByPool, sentence: poolSentence, depth: driverDepth},
 		{name: "remove-first nvidia recreated under the old name", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, vendor: types.AcceleratorVendorNVIDIA,
 			setup: func(_ *testing.T, _ *sqlite.Store, p *poolPlatform) { p.sameName = true },
 			node:  "n1", uid: "uid-n1-new", how: replacementByPool,
@@ -300,6 +346,10 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 				resolved.Params["replacement_node"] != tc.node || resolved.Params["replacement_node_uid"] != uid ||
 				resolved.Params["replacement_correlation"] != tc.how {
 				t.Fatalf("resolve entry = %+v", resolved)
+			}
+			if named := resolved.Params["replacement_provider_id"]; (tc.how == replacementByResizeDiff) != (named != "") ||
+				named != "" && (named != p.named || !auditHasParam(entries, replacementInstanceAction, "provider_id", named)) {
+				t.Fatalf("resolve entry = %+v, named %q%s", resolved, p.named, dump(entries))
 			}
 			if !strings.HasSuffix(resolved.Result, "; "+tc.sentence+" "+tc.depth) {
 				t.Fatalf("resolution %q, want %q then %q", resolved.Result, tc.sentence, tc.depth)
@@ -579,4 +629,36 @@ func successorOrNew(inc *types.Incident) *types.SuccessorRecord {
 	rec := &types.SuccessorRecord{}
 	rec.Operation = "add-1"
 	return rec
+}
+
+// The instance the pool's resize added comes from the row of a replacement
+// made in one call, or from this attempt's restored plan; a plan of another
+// attempt, or one left for an operator, names none.
+func TestResizeDiffInstanceFromThisReplacement(t *testing.T) {
+	pool := &types.AuditEntry{Action: replacementPoolAction, Params: map[string]string{"node": "n1"}}
+	inc := &types.Incident{ID: "inc", Attempt: 2}
+	if got := resizeDiffInstance(inc, pool, &types.AuditEntry{Params: map[string]string{"node": "n1", "provider_id": "azure:///vm/7"}}); got != "azure:///vm/7" {
+		t.Fatalf("one-call replacement: %q", got)
+	}
+	if got := resizeDiffInstance(inc, pool, &types.AuditEntry{Params: map[string]string{"node": "n2", "provider_id": "azure:///vm/7"}}); got != "" {
+		t.Fatalf("a row of another node: %q", got)
+	}
+	plan := func(op, outcome string) *types.RemoveFirstRecord {
+		return &types.RemoveFirstRecord{RemoveFirstPlan: cloud.RemoveFirstPlan{Operation: op, Phase: cloud.RemoveFirstDone,
+			State: resizediff.WithInstance(nil, "gce://p/us-central1-a/n10")}, Outcome: outcome}
+	}
+	for _, tc := range []struct {
+		rec  *types.RemoveFirstRecord
+		want string
+	}{
+		{plan(successorOperation(inc), types.RemoveFirstRestored), "gce://p/us-central1-a/n10"},
+		{plan("inc-a1", types.RemoveFirstRestored), ""},
+		{plan(successorOperation(inc), types.RemoveFirstNeedsOperator), ""},
+		{nil, ""},
+	} {
+		inc.RemoveFirst = tc.rec
+		if got := resizeDiffInstance(inc, pool, nil); got != tc.want {
+			t.Errorf("plan %+v: %q, want %q", tc.rec, got, tc.want)
+		}
+	}
 }

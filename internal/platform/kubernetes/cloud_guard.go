@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
@@ -116,15 +117,23 @@ func holdMessage(err error, fallback string) string {
 }
 
 func (p *Platform) ReplacePinnedNode(ctx context.Context, pin cloud.NodeIdentity) error {
+	_, err := p.ReplacePinnedNodeNamed(ctx, pin)
+	return err
+}
+
+func (p *Platform) ReplacePinnedNodeNamed(ctx context.Context, pin cloud.NodeIdentity) (string, error) {
 	v, err := p.RecoveryEligibility(ctx, pin)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !v.ReplaceAllowed {
-		return fmt.Errorf("cloud replacement unavailable: %s", v.Reason)
+		return "", fmt.Errorf("cloud replacement unavailable: %s", v.Reason)
 	}
 	// Never substitute an instance discovered by a later name lookup.
-	return p.recycler.Replace(ctx, pin.InstanceID)
+	if named, ok := p.recycler.(resizediff.Replacer); ok {
+		return named.ReplaceNamed(ctx, pin.InstanceID)
+	}
+	return "", p.recycler.Replace(ctx, pin.InstanceID)
 }
 
 func (p *Platform) RecyclePinnedNode(ctx context.Context, pin cloud.NodeIdentity) error {

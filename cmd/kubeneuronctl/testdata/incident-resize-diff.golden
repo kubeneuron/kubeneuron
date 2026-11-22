@@ -1,0 +1,17 @@
+id:        inc-resize
+state:     RESOLVED
+class:     xid-79
+node:      gke-training-gpu-a-0001
+gpu:       
+playbook:  gpu-replace (step 0, attempt 0)
+dry-run:   false
+signals:   0
+opened:    2026-11-20T15:40:00Z
+fault:     unknown (no evidence recorded)
+Affected training jobs: unknown
+replaced:  node gke-training-gpu-a-0003 (uid uid-0003), the only instance that joined the pool during the resize
+
+audit trail:
+TIME                  FROM       TO        ACTOR   ACTION             RESULT
+2026-11-20T15:41:00Z                       system  remove-first-done  operation inc-resize-a0: done
+2026-11-20T15:42:00Z  VERIFYING  RESOLVED  system  resolve            Replaced by node gke-training-gpu-a-0003, the only instance that joined pool gpu during the resize. Verification used Kubernetes node readiness and advertised accelerator capacity.

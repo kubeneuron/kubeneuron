@@ -114,9 +114,11 @@ The incident detail panel also shows the owner in **Recovery eligibility**.
 The owner resolves by itself once its replacement is verified on the new
 node. If the cloud operation named that node (`replacement_correlation:
 successor`, add-first), the waiting incident then starts its own
-verification on the same node and asks for no second replacement. If the
-node was found only as the one that joined the pool (`pool`), the waiting
-incident goes to an operator (`NEEDS_HUMAN`). Closing the owner manually
+verification on the same node and asks for no second replacement. The same
+holds when a remove-first replacement found exactly one new instance in its
+pool's resize (`resize-diff`). If the node was found only as the one that
+joined the pool (`pool`), the waiting incident goes to an operator
+(`NEEDS_HUMAN`). Closing the owner manually
 supplies no replacement evidence. The waiting incident's audit retains the
 owner ID so an operator can trace both histories.
 

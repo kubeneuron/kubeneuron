@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
@@ -60,14 +61,49 @@ type replacement struct {
 // It is idempotent: a machine already gone is a finished replacement, and the
 // pool tag carries a started one across retries.
 func (p *Provider) Replace(ctx context.Context, instanceID string) error {
+	_, err := p.ReplaceNamed(ctx, instanceID)
+	return err
+}
+
+var _ resizediff.Replacer = (*Provider)(nil)
+
+// ReplaceNamed is Replace, and returns the providerID of the machine that
+// joined a fixed-size pool for the replacement: the machines are listed
+// before the pool is grown and again once it lists its new size, and exactly
+// one is new. It returns "" when this call did not grow the pool (a retry, or
+// an autoscaled pool), when the pool has more than resizediff.MaxMembers
+// machines, or when not exactly one machine is new.
+func (p *Provider) ReplaceNamed(ctx context.Context, instanceID string) (string, error) {
 	r, err := p.replacement(ctx, instanceID)
 	if err != nil || r == nil {
-		return err
+		return "", err
 	}
+	before, grows := r.machines, !r.started && !r.state.Autoscaling
 	if err := p.ensureSuccessor(ctx, r); err != nil {
-		return err
+		return "", err
 	}
-	return p.deleteMachine(ctx, r)
+	var named string
+	if grows && len(before) <= resizediff.MaxMembers {
+		added := resizediff.Added(names(before), names(r.machines), r.machine)
+		for _, m := range r.machines {
+			if added != "" && m.Name == added && m.ResourceID != "" {
+				named = m.providerID()
+			}
+		}
+	}
+	if err := p.deleteMachine(ctx, r); err != nil {
+		return "", err
+	}
+	return named, nil
+}
+
+// names lists the machines' names.
+func names(machines []machine) []string {
+	out := make([]string, 0, len(machines))
+	for _, m := range machines {
+		out = append(out, m.Name)
+	}
+	return out
 }
 
 // replacement reads the target, its pool and any replacement under way. A nil

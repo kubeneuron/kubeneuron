@@ -16,6 +16,7 @@ import (
 
 	"github.com/kubeneuron/kubeneuron/internal/action"
 	"github.com/kubeneuron/kubeneuron/internal/approval"
+	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/internal/detect"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/notify"
@@ -394,6 +395,21 @@ func sameRepairNode(a, b *types.Incident) bool {
 	return uid != "" && uid == repairNodeUID(b) && a.Target.Node == b.Target.Node
 }
 
+// ownerFoundInstance reports whether the owner recorded providerID as the
+// instance its pool's resize added: in its finished remove-first plan, or in
+// the row written after a replacement made in one call.
+func ownerFoundInstance(owner *types.Incident, trail []*types.AuditEntry, providerID string) bool {
+	if rec := owner.RemoveFirst; rec != nil && rec.Outcome == types.RemoveFirstRestored && resizediff.FromPlan(rec.RemoveFirstPlan) == providerID {
+		return true
+	}
+	for _, e := range trail {
+		if !e.DryRun && e.Action == replacementInstanceAction && e.Params["provider_id"] == providerID {
+			return true
+		}
+	}
+	return false
+}
+
 // verifyAfterOwnersReplacement lets the follower begin its own quiet window
 // only after the pinned owner's live replacement passed inventory verification.
 func (c *Controller) verifyAfterOwnersReplacement(ctx context.Context, inc *types.Incident, ownerID string) error {
@@ -424,6 +440,17 @@ func (c *Controller) verifyAfterOwnersReplacement(ctx context.Context, inc *type
 			proof := map[string]string{"owner_id": ownerID}
 			switch entry.Params["infrastructure_evidence"] {
 			case "verified_replacement_node":
+				if entry.Params["replacement_correlation"] == replacementByResizeDiff {
+					id := entry.Params["replacement_provider_id"]
+					if id == "" || entry.Params["replacement_node"] == "" || entry.Params["replacement_node_uid"] == "" || !ownerFoundInstance(owner, entries, id) {
+						return c.quarantine(ctx, inc, "replacement evidence from owner "+ownerID+" does not identify the instance its pool's resize added")
+					}
+					proof["replacement_node"] = entry.Params["replacement_node"]
+					proof["replacement_node_uid"] = entry.Params["replacement_node_uid"]
+					proof["replacement_provider_id"] = id
+					proof["replacement_correlation"] = replacementByResizeDiff
+					break
+				}
 				s := owner.Successor
 				if entry.Params["replacement_correlation"] != "successor" || s == nil || s.Outcome != types.SuccessorReplaced ||
 					s.ReadyAt == nil || s.Node == "" || s.NodeUID == "" || s.Node != entry.Params["replacement_node"] || s.NodeUID != entry.Params["replacement_node_uid"] {

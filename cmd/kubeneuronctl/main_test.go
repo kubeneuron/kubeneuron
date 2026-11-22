@@ -270,9 +270,45 @@ func TestReplacementLineNamesTheNewNode(t *testing.T) {
 	if got, want := replacementLine([]*types.AuditEntry{resolve("pool")}), "replaced:  node n9 (uid uid-n9), the only node that joined its pool after the removal"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
+	if got, want := replacementLine([]*types.AuditEntry{resolve("resize-diff")}), "replaced:  node n9 (uid uid-n9), the only instance that joined the pool during the resize"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
 	reopened := &types.AuditEntry{FromState: types.StateResolved, ToState: types.StateOpen, Action: "reopen"}
 	if got := replacementLine([]*types.AuditEntry{resolve("pool"), reopened}); got != "" {
 		t.Fatalf("a later transition must hide the line, got %q", got)
+	}
+}
+
+// A remove-first replacement whose node the pool's members singled out.
+func TestIncidentShowResizeDiffReplacement(t *testing.T) {
+	at := time.Date(2026, 11, 20, 15, 41, 0, 0, time.UTC)
+	const node = "gke-training-gpu-a-0003"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"incident": types.Incident{ID: "inc-resize", State: types.StateResolved, Class: "xid-79", Target: types.Target{Node: "gke-training-gpu-a-0001"}, Playbook: "gpu-replace", OpenedAt: at.Add(-time.Minute)},
+			"audit": []types.AuditEntry{
+				{Time: at, Actor: "system", Action: "remove-first-done", Result: "operation inc-resize-a0: done"},
+				{Time: at.Add(time.Minute), FromState: types.StateVerifying, ToState: types.StateResolved, Actor: "system", Action: "resolve",
+					Result: "Replaced by node " + node + ", the only instance that joined pool gpu during the resize. Verification used Kubernetes node readiness and advertised accelerator capacity.",
+					Params: map[string]string{"infrastructure_evidence": "verified_replacement_node", "replacement_node": node, "replacement_node_uid": "uid-0003",
+						"replacement_correlation": "resize-diff", "replacement_provider_id": "gce://ml-project/us-central1-a/" + node}},
+			},
+		})
+	}))
+	defer server.Close()
+	got, err := runCommand(t, server.URL, "incidents", "show", "inc-resize")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const file = "testdata/incident-resize-diff.golden"
+	if os.Getenv("UPDATE_GOLDEN") != "" {
+		if err := os.WriteFile(file, []byte(got), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(file)
+	if err != nil || got != string(want) {
+		t.Fatalf("incidents show (%v):\n%s", err, got)
 	}
 }
 

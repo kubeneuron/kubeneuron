@@ -10,12 +10,15 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
 // State keys of a remove-first plan, besides stateGroup, stateSize and
 // stateOperation: every zonal group of the pool at the plan. stateSize is the
-// node count each zone had, the same in all of them.
+// node count each zone had, the same in all of them. stateMembers is the
+// instance's group before the delete, when it has at most
+// resizediff.MaxMembers members.
 const stateGroups = "groups"
 
 var _ cloud.PlannedRemoveFirstProvider = (*Provider)(nil)
@@ -209,6 +212,11 @@ func (p *Provider) ContinueRemoveFirst(ctx context.Context, plan cloud.RemoveFir
 				return plan, refuse("node pool %s changed since the plan (zones at %s, planned %d each)", pl.Name, joinSizes(sizes), before)
 			}
 		}
+		// The group before the delete, the first change: the one member it
+		// lacks once the size is back is the instance that replaced this one.
+		if len(members) <= resizediff.MaxMembers {
+			plan.State = withState(plan.State, stateMembers, strings.Join(memberNames(members), ","))
+		}
 		plan.Phase = cloud.RemoveFirstDeleting
 		return plan, nil
 	case present && m.Action == "DELETING":
@@ -238,6 +246,11 @@ func (p *Provider) ContinueRemoveFirst(ctx context.Context, plan cloud.RemoveFir
 			}
 		}
 		plan.Phase = cloud.RemoveFirstDone
+		if before := plan.State[stateMembers]; before != "" {
+			if added := resizediff.Added(strings.Split(before, ","), memberNames(members), old.name); added != "" {
+				plan.State = resizediff.WithInstance(plan.State, g.instance(added).providerID())
+			}
+		}
 		return plan, nil
 	}
 	for i, n := range sizes {

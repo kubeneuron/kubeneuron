@@ -674,15 +674,29 @@ accelerators the incident covered:
 | any other, or a pool whose nodes run no agent | no agent report exists for it, so KubeNeuron uses the node's Kubernetes readiness and advertised accelerator capacity; where the old node ran an agent, the new node's agent must have reported too |
 
 The resolution says in its first sentence how the node was found:
-`Replaced by node <new>, named by the cloud operation.` or `Node <new> is
-Ready. It was the only node that joined pool <pool> after the removal.` Its
+`Replaced by node <new>, named by the cloud operation.`, `Replaced by node
+<new>, the only instance that joined pool <pool> during the resize.` or
+`Node <new> is Ready. It was the only node that joined pool <pool> after the
+removal.` Its
 second sentence says what was confirmed: the driver check that passed,
 `Device presence observed; runtime not attested.`, or `Verification used
 Kubernetes node readiness and advertised accelerator capacity.` The same
 text is in the RESOLVED notification. `kubeneuronctl incidents show` prints
 the new node on a `replaced:` line. The audit entry records
 `infrastructure_evidence: verified_replacement_node`, `replacement_node`,
-`replacement_node_uid` and `replacement_correlation` (`successor` or `pool`).
+`replacement_node_uid` and `replacement_correlation`:
+
+| `replacement_correlation` | How the node was found |
+|---|---|
+| `successor` | the cloud operation that added the node returned its instance (add-first). |
+| `resize-diff` | KubeNeuron compared the pool's members before the first change and after the resize finished; exactly one instance was new, and it is this node (remove-first on GKE fixed-size and AKS fixed pools). |
+| `pool` | the only node that joined the pool after the removal; the instance was not identified separately. |
+
+`resize-diff` has been exercised with simulated providers only. A GKE zonal
+group or an AKS pool with more than 100 instances is not compared and stays
+on `pool`; so does a
+replacement whose resize added no instance or more than one. With
+`resize-diff`, the audit entry also records `replacement_provider_id`.
 The incident keeps its original target. `kubeneuronctl report` counts it as
 recovered, and the degraded time ends when the new node is confirmed. This
 says the node was confirmed, not that a workload resumed.

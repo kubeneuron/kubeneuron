@@ -196,7 +196,7 @@ func settleSuccessor(s cloud.Successor, t target, machines []machine, pl pool, b
 		return s, fmt.Errorf("azure: agent pool %s settled at size %d with %d new machines for operation %s, not one at %d: %w",
 			t.pool, pl.Count, len(added), s.Operation, before+1, cloud.ErrNeedsOperator)
 	}
-	s.Phase, s.ProviderID = cloud.SuccessorCreated, "azure://"+added[0].ResourceID
+	s.Phase, s.ProviderID = cloud.SuccessorCreated, added[0].providerID()
 	return s, nil
 }
 

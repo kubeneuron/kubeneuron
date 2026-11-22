@@ -124,6 +124,14 @@ calls, or a call whose answer is lost, still ends with the size set back, or wit
    Setting the size back asks Google Cloud for a new instance; it does not guarantee one. If the zone has no capacity or quota for the machine type, the pool stays a node short until Google Cloud can create it. Add-first avoids deleting a node before its replacement exists.
 4. **Done.** The plan ends when every zone is back at its count.
 
+When the node's zonal group has up to 100 instances, the plan also records
+them before the delete. If exactly one instance is new once the
+resize is done, the resolution names it (`replacement_correlation:
+resize-diff`); otherwise the new node is found as the only one that joined
+the pool (`pool`). This uses the `listManagedInstances` read KubeNeuron
+already makes, so no new permission is needed. It has been exercised with
+simulated providers only.
+
 The replace step ends once the instance is gone; the controller finishes the
 resize on its own, also after a restart or a change of leader, from what the
 plan recorded. A plan that stopped before the delete changed nothing and is

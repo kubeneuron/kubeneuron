@@ -27,6 +27,14 @@ API is `v1alpha1`.
   `replacement_status`, `replacement_reason_code`, `replacement_reason` and
   `replacement_action`; the existing fields are unchanged.
 
+- A remove-first replacement on a fixed-size GKE pool (zonal group of up to
+  100 instances) or a fixed AKS pool (up to 100 instances) compares the pool's members before the first change and
+  after the resize. When exactly one instance is new, the resolution names it
+  (`replacement_correlation: resize-diff`, with `replacement_provider_id`),
+  and a second incident on the same node takes it as evidence instead of
+  going to an operator. Otherwise the node is found by the pool, as before.
+  No new cloud permission or tag. Exercised with simulated providers only.
+
 ### Changed
 
 - Node replacement holds now explain how to configure a cloud provider or check the node’s provider ID when an incident has no matching instance.

@@ -65,11 +65,22 @@ func (c *Controller) recycleNodeStep(ctx context.Context, inc *types.Incident, r
 				return res, err
 			}
 		}
-		if err := guard.ReplacePinnedNode(ctx, pin); err != nil {
+		var named string
+		var err error
+		if namer, ok := guard.(platform.NamedNodeReplacer); ok {
+			named, err = namer.ReplacePinnedNodeNamed(ctx, pin)
+		} else {
+			err = guard.ReplacePinnedNode(ctx, pin)
+		}
+		if err != nil {
 			if errors.Is(err, cloud.ErrReplacementCapacity) {
 				return nil, fmt.Errorf("platform.replace_node: replacement capacity unavailable: %w", err)
 			}
 			return nil, fmt.Errorf("platform.replace_node: %w", err)
+		}
+		if named != "" {
+			// Not written, the replacement is still found by its pool.
+			_ = c.recordReplacementInstance(ctx, inc, pin, named)
 		}
 		// Termination is not proof of replacement or accelerator recovery.
 		return okResult(inc, "terminated the instance behind "+node+"; the autoscaler will replace it"), nil

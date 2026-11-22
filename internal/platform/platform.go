@@ -38,6 +38,13 @@ type GuardedNodeRecycler interface {
 	ReplacePinnedNode(context.Context, cloud.NodeIdentity) error
 }
 
+// NamedNodeReplacer is ReplacePinnedNode that also returns the providerID of
+// the instance that joined the node's pool for the replacement, when the
+// provider can tell; "" when it cannot.
+type NamedNodeReplacer interface {
+	ReplacePinnedNodeNamed(context.Context, cloud.NodeIdentity) (string, error)
+}
+
 // NodeEventType describes an inventory change.
 type NodeEventType string
 

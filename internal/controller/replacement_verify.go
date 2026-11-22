@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
@@ -24,16 +25,24 @@ const (
 )
 
 // How the node that took the target's place was tied to the replacement:
-// the provider named it (add-first), or it is the one node of the target's
-// pool created after the removal (remove-first).
+// the provider named it (add-first); it is the one instance new in the
+// target's pool between before the first change and after the resize
+// (remove-first on a fixed-size pool the provider compares); or it is the
+// one node of the target's pool created after the removal (remove-first).
 const (
-	replacementBySuccessor = "successor"
-	replacementByPool      = "pool"
+	replacementBySuccessor  = "successor"
+	replacementByResizeDiff = "resize-diff"
+	replacementByPool       = "pool"
 )
 
 // replacementPoolAction is the audit row that records, before a remove-first
 // delete, the pool the target's place is looked for in afterwards.
 const replacementPoolAction = "replacement-pool"
+
+// replacementInstanceAction is the audit row that records, after a
+// remove-first replacement the provider carried out in one call, the instance
+// it found new in the pool.
+const replacementInstanceAction = "replacement-instance"
 
 // poolLabels are the node labels that name a managed node pool, per cloud.
 var poolLabels = []struct{ cloud, label string }{
@@ -63,6 +72,9 @@ type cloudReplacement struct {
 	// members are the UIDs of the pool's nodes before the delete; nil when
 	// they could not be read.
 	members []string
+	// instance is the providerID of the one instance the provider found new
+	// in the pool after the resize; "" when it found none.
+	instance string
 	// agent is whether the replaced node ran an agent, so its replacement is
 	// expected to.
 	agent bool
@@ -150,6 +162,18 @@ func (c *Controller) recordReplacementPool(ctx context.Context, inc *types.Incid
 	})
 }
 
+// recordReplacementInstance writes the instance the provider found new in
+// the pool once a remove-first replacement it carried out in one call
+// returned.
+func (c *Controller) recordReplacementInstance(ctx context.Context, inc *types.Incident, pin cloud.NodeIdentity, providerID string) error {
+	return c.store.AppendAudit(ctx, &types.AuditEntry{
+		IncidentID: inc.ID, Time: time.Now(), FromState: inc.State, ToState: inc.State, Actor: "system",
+		Action: replacementInstanceAction, DryRun: inc.DryRun,
+		Result: fmt.Sprintf("the pool of %s lists one new instance after the resize", pin.Node),
+		Params: map[string]string{"node": pin.Node, "provider_id": providerID},
+	})
+}
+
 // findCloudReplacement reads whether the incident's last cloud step replaced
 // the target and succeeded. A replacement whose result is not known yet is
 // not one: it is left to the recycle check, which holds it.
@@ -160,7 +184,7 @@ func (c *Controller) findCloudReplacement(ctx context.Context, inc *types.Incide
 	}
 	const replace = "platform.replace_node"
 	var found *cloudReplacement
-	var pool *types.AuditEntry
+	var pool, named *types.AuditEntry
 	for _, e := range trail {
 		if e.DryRun {
 			continue
@@ -168,7 +192,7 @@ func (c *Controller) findCloudReplacement(ctx context.Context, inc *types.Incide
 		switch {
 		case e.Result == auditStepStartResult(replace) || e.Result == auditExecutingResult(replace) ||
 			e.Result == auditStepStartResult("platform.recycle_node"):
-			found = nil
+			found, named = nil, nil
 			if e.Result == auditStepStartResult("platform.recycle_node") {
 				pool = nil
 			}
@@ -176,6 +200,8 @@ func (c *Controller) findCloudReplacement(ctx context.Context, inc *types.Incide
 			found = &cloudReplacement{since: e.Time}
 		case e.Action == replacementPoolAction:
 			pool = e
+		case e.Action == replacementInstanceAction:
+			named = e
 		}
 	}
 	if found == nil {
@@ -193,8 +219,23 @@ func (c *Controller) findCloudReplacement(ctx context.Context, inc *types.Incide
 			found.members = strings.Split(uids, ",")
 		}
 		found.capacity = parseCapacity(pool.Params["capacity"])
+		found.instance = resizeDiffInstance(inc, pool, named)
 	}
 	return found, nil
+}
+
+// resizeDiffInstance is the instance the provider found new in the pool for
+// this replacement: from the row written after a replacement made in one
+// call, or from this attempt's finished remove-first plan; "" when neither
+// names one.
+func resizeDiffInstance(inc *types.Incident, pool, named *types.AuditEntry) string {
+	if named != nil && named.Params["node"] == pool.Params["node"] {
+		return named.Params["provider_id"]
+	}
+	if rec := inc.RemoveFirst; rec != nil && rec.Outcome == types.RemoveFirstRestored && rec.Operation == successorOperation(inc) {
+		return resizediff.FromPlan(rec.RemoveFirstPlan)
+	}
+	return ""
 }
 
 // verifyReplacement verifies the node that took the target's place: it is
@@ -202,7 +243,7 @@ func (c *Controller) findCloudReplacement(ctx context.Context, inc *types.Incide
 // accelerators since. It returns what was confirmed, or why it waits, and the
 // evidence the resolution records.
 func (c *Controller) verifyReplacement(ctx context.Context, inc *types.Incident, r *cloudReplacement) (bool, string, map[string]string) {
-	node, found, reason := c.replacementNode(ctx, inc, r)
+	node, found, how, reason := c.replacementNode(ctx, inc, r)
 	if reason != "" {
 		return false, reason, nil
 	}
@@ -210,52 +251,55 @@ func (c *Controller) verifyReplacement(ctx context.Context, inc *types.Incident,
 	if !ok {
 		return false, depth, nil
 	}
-	how := replacementByPool
-	if r.successor != nil {
-		how = replacementBySuccessor
-	}
-	return true, found + " " + depth, map[string]string{
+	evidence := map[string]string{
 		"infrastructure_evidence": replacementInfrastructureEvidence,
 		"replacement_node":        node.Name,
 		"replacement_node_uid":    node.UID,
 		"replacement_correlation": how,
 	}
+	if how == replacementByResizeDiff {
+		evidence["replacement_provider_id"] = r.instance
+	}
+	return true, found + " " + depth, evidence
 }
 
-// replacementNode finds the node that took the target's place, and says in
-// one sentence how it was found.
-func (c *Controller) replacementNode(ctx context.Context, inc *types.Incident, r *cloudReplacement) (platform.SuccessorNode, string, string) {
+// replacementNode finds the node that took the target's place, says in one
+// sentence how it was found, and names the correlation.
+func (c *Controller) replacementNode(ctx context.Context, inc *types.Incident, r *cloudReplacement) (node platform.SuccessorNode, found, how, reason string) {
 	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	if s := r.successor; s != nil {
 		plat, ok := c.platform.(platform.SuccessorNodeRecycler)
 		if !ok {
-			return platform.SuccessorNode{}, "", "The successor node cannot be read on this platform."
+			return platform.SuccessorNode{}, "", "", "The successor node cannot be read on this platform."
 		}
 		node, err := plat.SuccessorNode(readCtx, s.ProviderID)
 		switch {
 		case err != nil:
-			return node, "", fmt.Sprintf("New node %s could not be read.", s.Node)
+			return node, "", "", fmt.Sprintf("New node %s could not be read.", s.Node)
 		case !node.Found:
-			return node, "", fmt.Sprintf("New node %s is not in the cluster.", s.Node)
+			return node, "", "", fmt.Sprintf("New node %s is not in the cluster.", s.Node)
 		case node.Name != s.Node || node.UID != s.NodeUID:
-			return node, "", fmt.Sprintf("New node %s is no longer the node the cloud operation named.", s.Node)
+			return node, "", "", fmt.Sprintf("New node %s is no longer the node the cloud operation named.", s.Node)
 		}
-		return node, fmt.Sprintf("Replaced by node %s, named by the cloud operation.", node.Name) + successorPlacement(s, inc.Target.Node), ""
+		return node, fmt.Sprintf("Replaced by node %s, named by the cloud operation.", node.Name) + successorPlacement(s, inc.Target.Node), replacementBySuccessor, ""
 	}
 	if r.pool == "" {
-		return platform.SuccessorNode{}, "", "The replaced node's pool was not recorded, so no node can be tied to the replacement."
+		return platform.SuccessorNode{}, "", "", "The replaced node's pool was not recorded, so no node can be tied to the replacement."
 	}
 	if r.members == nil {
-		return platform.SuccessorNode{}, "", fmt.Sprintf("The nodes of pool %s before the removal were not recorded, so no node can be tied to the replacement.", r.pool)
+		return platform.SuccessorNode{}, "", "", fmt.Sprintf("The nodes of pool %s before the removal were not recorded, so no node can be tied to the replacement.", r.pool)
 	}
 	lister, ok := c.platform.(platform.PoolNodeLister)
 	if !ok {
-		return platform.SuccessorNode{}, "", "The pool's nodes cannot be read on this platform."
+		return platform.SuccessorNode{}, "", "", "The pool's nodes cannot be read on this platform."
 	}
 	members, err := lister.PoolNodes(readCtx, r.label, r.pool)
 	if err != nil {
-		return platform.SuccessorNode{}, "", fmt.Sprintf("The nodes of pool %s could not be read.", r.pool)
+		return platform.SuccessorNode{}, "", "", fmt.Sprintf("The nodes of pool %s could not be read.", r.pool)
+	}
+	if node, ok := c.resizeDiffNode(readCtx, r, members); ok {
+		return node, fmt.Sprintf("Replaced by node %s, the only instance that joined pool %s during the resize.", node.Name, r.pool), replacementByResizeDiff, ""
 	}
 	// A node is new by its UID: a group can recreate an instance under the
 	// old node's name, and the cluster's and the controller's clocks differ.
@@ -267,13 +311,33 @@ func (c *Controller) replacementNode(ctx context.Context, inc *types.Incident, r
 	}
 	switch len(joined) {
 	case 0:
-		return platform.SuccessorNode{}, "", fmt.Sprintf("No node joined pool %s after the removal.", r.pool)
+		return platform.SuccessorNode{}, "", "", fmt.Sprintf("No node joined pool %s after the removal.", r.pool)
 	case 1:
 	default:
-		return platform.SuccessorNode{}, "", fmt.Sprintf("Several nodes joined pool %s after the removal. KubeNeuron could not determine which one replaced the node.", r.pool)
+		return platform.SuccessorNode{}, "", "", fmt.Sprintf("Several nodes joined pool %s after the removal. KubeNeuron could not determine which one replaced the node.", r.pool)
 	}
-	node := joined[0]
-	return node, fmt.Sprintf("Node %s is Ready. It was the only node that joined pool %s after the removal.", node.Name, r.pool), ""
+	node = joined[0]
+	return node, fmt.Sprintf("Node %s is Ready. It was the only node that joined pool %s after the removal.", node.Name, r.pool), replacementByPool, ""
+}
+
+// resizeDiffNode is the node of the instance the provider found new in the
+// pool, when it is in the pool now and was not in it before the delete;
+// false sends the search to the pool alone.
+func (c *Controller) resizeDiffNode(ctx context.Context, r *cloudReplacement, members []platform.SuccessorNode) (platform.SuccessorNode, bool) {
+	finder, ok := c.platform.(platform.SuccessorNodeRecycler)
+	if r.instance == "" || !ok {
+		return platform.SuccessorNode{}, false
+	}
+	node, err := finder.SuccessorNode(ctx, r.instance)
+	if err != nil || !node.Found || node.UID == "" || slices.Contains(r.members, node.UID) {
+		return platform.SuccessorNode{}, false
+	}
+	for _, m := range members {
+		if m.UID == node.UID && m.Name == node.Name {
+			return node, true
+		}
+	}
+	return platform.SuccessorNode{}, false
 }
 
 // parseCapacity reads the capacity param of a replacement-pool row; nil when

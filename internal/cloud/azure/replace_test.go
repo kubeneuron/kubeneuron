@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
@@ -186,4 +187,57 @@ func mustPool(t *testing.T, f *fakeAKS) pool {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// The machine listed new once a fixed-size pool was grown is the one that
+// replaced the deleted machine; nothing is named when this call did not grow
+// the pool, the pool is too large to compare, or the delete failed.
+func TestReplaceNamedNamesTheOneNewMachine(t *testing.T) {
+	f := newFakeAKS(3)
+	got, err := testProvider(f).ReplaceNamed(t.Context(), testInstance(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := testMachine(3).providerID(); got != want {
+		t.Fatalf("named %q, want %q", got, want)
+	}
+	// The node's providerID as AKS sets it: the resource group in lower case.
+	if node := "azure://" + testInstance(3); !strings.EqualFold(got, node) {
+		t.Fatalf("named %q, the node carries %q", got, node)
+	}
+
+	cases := map[string]func(t *testing.T, f *fakeAKS){
+		"autoscaled pool": func(_ *testing.T, f *fakeAKS) { f.autoscaling = true },
+		"retry after the pool was grown": func(t *testing.T, f *fakeAKS) {
+			if err := f.WritePool(t.Context(), testPool, mustPool(t, f), 4, map[string]string{"team": "ml", replacingTag: testMachine(1).Name + ":3"}); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeAKS(3)
+			setup(t, f)
+			got, err := testProvider(f).ReplaceNamed(t.Context(), testInstance(1))
+			if err != nil || got != "" {
+				t.Fatalf("named %q, %v", got, err)
+			}
+		})
+	}
+
+	t.Run("pool above the limit", func(t *testing.T) {
+		f := newFakeAKS(resizediff.MaxMembers + 1)
+		got, err := testProvider(f).ReplaceNamed(t.Context(), testInstance(1))
+		if err != nil || got != "" {
+			t.Fatalf("named %q, %v", got, err)
+		}
+	})
+	t.Run("delete failed", func(t *testing.T) {
+		f := newFakeAKS(3)
+		f.deleteErr = errors.New("500")
+		got, err := testProvider(f).ReplaceNamed(t.Context(), testInstance(1))
+		if err == nil || got != "" {
+			t.Fatalf("named %q, %v", got, err)
+		}
+	})
 }

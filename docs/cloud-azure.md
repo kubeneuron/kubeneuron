@@ -38,6 +38,12 @@ AKS:
       nothing is deleted. Capacity is added before the old instance is
       deleted, but after the drain: workloads are already evicted while the
       new node comes up.
+      If the pool has up to 100 machines and exactly one machine is new
+      after the growth, the resolution names it (`replacement_correlation:
+      resize-diff`). This comparison is kept in memory only, no tag is
+      written for it: a retry or a controller restart between the growth and
+      the delete finds the new node as the only one that joined the pool
+      (`pool`). It has been exercised with simulated providers only.
     - On a pool under the **cluster autoscaler**, the pool's size is left
       alone. The machine is deleted and the autoscaler decides whether a new
       one comes.
