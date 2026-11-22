@@ -29,6 +29,8 @@ API is `v1alpha1`.
 
 ### Changed
 
+- Node replacement holds now explain how to configure a cloud provider or check the node’s provider ID when an incident has no matching instance.
+
 - Impact previews are enabled by default at approval rounds. Set `spec.safety.impactPreview.enabled: false` to opt out. Previews are advisory and workload-context resolvers remain opt-in.
 
 - CRD field descriptions (`kubectl explain`), the `kubeneuronctl audit-events`

@@ -3,6 +3,16 @@
 Symptom-first. `<ns>`/`<name>` are your installation namespace and root
 object name.
 
+## When an incident cannot identify the cloud instance
+
+Run `kubeneuronctl incidents show <id>` and read the reason for
+`provider-recovery-unavailable`. If no cloud provider is configured, set
+`spec.cloud.provider` as described in the [installation guide](install.md).
+If the incident has no matching instance, check the Kubernetes node's provider ID
+and the controller's access to the Kubernetes Node. The controller records
+the match when an incident opens. Once the configuration is corrected,
+run `kubeneuronctl resolve <id> --actor <who>` so the next fault starts a fresh lookup.
+
 ## The root KubeNeuron is not Ready
 
 ```sh

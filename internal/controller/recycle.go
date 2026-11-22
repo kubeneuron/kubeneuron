@@ -42,7 +42,7 @@ func (c *Controller) recycleNodeStep(ctx context.Context, inc *types.Incident, r
 		return nil, fmt.Errorf("cloud recovery unavailable: platform has no guarded mutation contract")
 	}
 	if inc.CloudIdentity == nil {
-		return nil, fmt.Errorf("cloud recovery unavailable: incident has no pinned cloud identity")
+		return nil, fmt.Errorf("cloud recovery unavailable: %s", c.missingCloudIdentityReason(inc.ID))
 	}
 	pin := *inc.CloudIdentity
 	if err := pin.Validate(); err != nil {

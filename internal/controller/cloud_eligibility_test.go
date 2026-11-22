@@ -31,6 +31,29 @@ func TestCloudEligibilityDoesNotAuthorizeMissingOrForeignPin(t *testing.T) {
 	}
 }
 
+type namedRecyclePlatform struct {
+	recyclePlatform
+	name string
+}
+
+func (p *namedRecyclePlatform) CloudProviderName() string { return p.name }
+
+func TestMissingCloudIdentityGuidance(t *testing.T) {
+	for _, name := range []string{"", "aws", "azure", "gcp"} {
+		p := &namedRecyclePlatform{name: name}
+		p.configured = name != ""
+		c := &Controller{platform: p}
+		v, err := c.cloudRecoveryEligibility(context.Background(), &types.Incident{ID: "inc-held"})
+		want := "no cloud provider is configured, so this node cannot be replaced — set spec.cloud.provider (see docs/install.md)"
+		if name != "" {
+			want = "KubeNeuron could not match this node to a cloud instance, so it cannot be replaced — the incident has no record of which instance belonged to the node when it opened; check that the node has a provider ID and that the controller can read the Kubernetes node (see docs/cloud-" + name + ".md), then resolve this incident with kubeneuronctl resolve inc-held --actor <who> so that the next fault opens a new one"
+		}
+		if err != nil || v.Reason != want || v.ReplaceAllowed || v.RecycleAllowed {
+			t.Errorf("provider %q: verdict=%+v err=%v", name, v, err)
+		}
+	}
+}
+
 type checkpointRepairPlatform struct {
 	checkpointPlatform
 	active bool

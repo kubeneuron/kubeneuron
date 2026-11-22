@@ -164,7 +164,7 @@ func (c *Controller) addFirstAvailable(ctx context.Context, inc *types.Incident)
 		return fmt.Errorf("%w: the platform cannot prepare a successor", cloud.ErrAddFirstUnavailable)
 	}
 	if inc.CloudIdentity == nil {
-		return fmt.Errorf("%w: the incident has no pinned cloud identity", cloud.ErrAddFirstUnavailable)
+		return fmt.Errorf("%w: %s", cloud.ErrAddFirstUnavailable, c.missingCloudIdentityReason(inc.ID))
 	}
 	if s := inc.Successor; s.Open() && s.Operation == successorOperation(inc) && s.Phase != "" {
 		return nil // already under way; the provider settles it from here

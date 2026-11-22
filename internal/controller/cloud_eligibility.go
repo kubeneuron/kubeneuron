@@ -13,6 +13,21 @@ import (
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
+func (c *Controller) missingCloudIdentityReason(incidentID string) string {
+	recycler, ok := c.platform.(platform.NodeRecycler)
+	if !ok || !recycler.CloudRecyclingConfigured() {
+		return "no cloud provider is configured, so this node cannot be replaced — set spec.cloud.provider (see docs/install.md)"
+	}
+	guide := "docs/install.md"
+	if provider, ok := c.platform.(interface{ CloudProviderName() string }); ok {
+		switch name := provider.CloudProviderName(); name {
+		case "aws", "azure", "gcp":
+			guide = "docs/cloud-" + name + ".md"
+		}
+	}
+	return "KubeNeuron could not match this node to a cloud instance, so it cannot be replaced — the incident has no record of which instance belonged to the node when it opened; check that the node has a provider ID and that the controller can read the Kubernetes node (see " + guide + "), then resolve this incident with kubeneuronctl resolve " + incidentID + " --actor <who> so that the next fault opens a new one"
+}
+
 // cloudRecoveryEligibility is the shared pre-authorization query. A negative
 // verdict is execution unavailability, not a request for human authorization.
 // It does not change incident state or dispatch a side effect. Callers retain
@@ -21,7 +36,7 @@ import (
 func (c *Controller) cloudRecoveryEligibility(ctx context.Context, inc *types.Incident) (cloud.RecoveryEligibility, error) {
 	v := cloud.RecoveryEligibility{Mode: cloud.RepairUnknown}
 	if inc.CloudIdentity == nil {
-		v.Reason = "incident has no pinned cloud identity; recovery unavailable"
+		v.Reason = c.missingCloudIdentityReason(inc.ID)
 		return v, nil
 	}
 	v.Identity = *inc.CloudIdentity

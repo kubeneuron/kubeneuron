@@ -183,10 +183,12 @@ func TestIncidentShowApprovalRound(t *testing.T) {
 	}
 }
 
-// The texts are the EKS provider's own, from internal/cloud/aws.
+// The audit result carries the controller or provider hold reason.
 func TestIncidentShowProviderHold(t *testing.T) {
 	at := time.Date(2026, 11, 20, 15, 41, 0, 0, time.UTC)
 	for _, tc := range []struct{ golden, reason string }{
+		{"incident-hold-no-provider.golden", "no cloud provider is configured, so this node cannot be replaced — set spec.cloud.provider (see docs/install.md)"},
+		{"incident-hold-unmatched.golden", "KubeNeuron could not match this node to a cloud instance, so it cannot be replaced — the incident has no record of which instance belonged to the node when it opened; check that the node has a provider ID and that the controller can read the Kubernetes node (see docs/cloud-aws.md), then resolve this incident with kubeneuronctl resolve inc-held --actor <who> so that the next fault opens a new one"},
 		{"incident-hold-native-repair.golden", "EKS node auto repair is enabled for node group gpu, so KubeNeuron does not replace its nodes. Leave repairs of this group to EKS, or turn EKS node auto repair off for this group: aws eks update-nodegroup-config --cluster-name training --nodegroup-name gpu --node-repair-config enabled=false. EKS then no longer repairs nodes in this group. KubeNeuron checks again every minute."},
 		{"incident-hold-recent-change.golden", "Node group gpu changed at 15:30 UTC (EKS update: NodeRepairEnabled). KubeNeuron waits 30 minutes after a change and checks again at 16:00 UTC."},
 		{"incident-hold-read-denied.golden", "KubeNeuron could not read node group gpu: eks:ListUpdates was denied. Allow eks:ListUpdates in the controller's IAM role. KubeNeuron retries every minute."},

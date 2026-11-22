@@ -22,6 +22,14 @@ func (p *Platform) SetInstanceRecycler(r platform.InstanceRecycler) {
 	p.recycler = r
 }
 
+// CloudProviderName identifies the configured recycler for operator guidance.
+func (p *Platform) CloudProviderName() string {
+	if named, ok := p.recycler.(interface{ Name() string }); ok {
+		return named.Name()
+	}
+	return ""
+}
+
 // CloudRecyclingConfigured reports whether a cloud provider is available.
 func (p *Platform) CloudRecyclingConfigured() bool { return p.recycler != nil }
 

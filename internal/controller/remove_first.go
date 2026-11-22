@@ -256,7 +256,7 @@ func (c *Controller) sweepRemoveFirst(ctx context.Context) {
 		}
 		if inc.CloudIdentity == nil {
 			if err := c.endRemoveFirst(ctx, inc, types.RemoveFirstNeedsOperator,
-				"the incident has no pinned cloud identity to continue the plan with; to set the size back: "+inc.RemoveFirst.Restore); err != nil {
+				c.missingCloudIdentityReason(inc.ID)+"; to set the size back: "+inc.RemoveFirst.Restore); err != nil {
 				c.log.Error("recording a remove-first plan for an operator failed", "incident", inc.ID, "err", err)
 			}
 			continue
