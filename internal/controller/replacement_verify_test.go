@@ -382,7 +382,7 @@ func TestReplacementWithoutEvidenceGoesToAPerson(t *testing.T) {
 			}
 			// Past the deadline.
 			inc.StateChangedAt = time.Now().Add(-time.Hour)
-			inc.UpdatedAt = inc.StateChangedAt
+			inc.UpdatedAt, inc.LastSignalAt = inc.StateChangedAt, inc.StateChangedAt
 			if err := st.UpdateIncident(ctx, inc); err != nil {
 				t.Fatal(err)
 			}
@@ -521,6 +521,17 @@ func TestVerifyingWritesThatAreNotSignals(t *testing.T) {
 		}, false},
 		{"operator acknowledges", recoverymode.RemoveFirst, func(t *testing.T, c *Controller, inc *types.Incident) {
 			if _, _, err := c.AcknowledgeIncident(context.Background(), inc.ID, "operator", "looking", 0, "ack-1"); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		// Any write that is not a signal, however it moves UpdatedAt.
+		{"another write moves UpdatedAt", recoverymode.RemoveFirst, func(t *testing.T, c *Controller, inc *types.Incident) {
+			fresh, err := c.store.GetIncident(context.Background(), inc.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fresh.UpdatedAt = time.Now().Add(time.Second)
+			if err := c.store.UpdateIncident(context.Background(), fresh); err != nil {
 				t.Fatal(err)
 			}
 		}, false},

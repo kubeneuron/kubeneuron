@@ -111,6 +111,12 @@ versions longer than a rolling upgrade needs.
   the controller to zero, restore the pre-upgrade snapshot onto the state
   PVC, then roll the images back. Incidents and audit rows written after the
   backup are lost — that is the RPO of your backup schedule.
+- **From the release after v1.0.0-rc.1 back to v1.0.0-rc.1**: that release
+  adds one schema migration (SQLite 0038, PostgreSQL 0029: the incident's
+  `last_signal_at`, filled from `updated_at` for existing rows). An rc.1
+  controller refuses the migrated store with the error above, so going back
+  to rc.1 is the restore described in the previous point; the images-only
+  path does not apply.
 - **Operator/CRDs**: re-apply the previous release's install manifest.
   Kubernetes does not remove already-stored fields; older operators ignore
   spec fields they do not know, and compilation stays fail-closed.

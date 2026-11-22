@@ -307,7 +307,7 @@ func (c *Controller) AcknowledgeIncident(ctx context.Context, id, actor, reason 
 			return fmt.Errorf("incident %q is already terminal", id)
 		}
 		ackAt = time.Now().UTC()
-		touchUpdated(incident, ackAt)
+		incident.UpdatedAt = ackAt
 		if err := tx.UpdateIncident(ctx, incident); err != nil {
 			return err
 		}

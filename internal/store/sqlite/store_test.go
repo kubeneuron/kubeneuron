@@ -197,6 +197,57 @@ func TestCreateIncidentDefaultsStateChangedAt(t *testing.T) {
 	}
 }
 
+// Only a signal moves LastSignalAt: it survives writes that move UpdatedAt,
+// defaults to the opening time, and a row from before it existed reads its
+// UpdatedAt.
+func TestLastSignalAtIsOnlyWhatTheWriterSets(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	ctx := context.Background()
+	opened := time.Now().Add(-time.Hour).Truncate(time.Millisecond)
+	inc := testIncident("inc-ls", opened)
+	if err := s.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetIncident(ctx, inc.ID)
+	if err != nil || !got.LastSignalAt.Equal(opened) {
+		t.Fatalf("LastSignalAt = %v (%v), want the opening time %v", got.LastSignalAt, err, opened)
+	}
+	got.UpdatedAt = time.Now()
+	if err := s.UpdateIncident(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = s.GetIncident(ctx, inc.ID); !got.LastSignalAt.Equal(opened) {
+		t.Fatalf("a write that is not a signal moved LastSignalAt to %v", got.LastSignalAt)
+	}
+	signal := opened.Add(30 * time.Minute)
+	got.LastSignalAt = signal
+	if err := s.UpdateIncident(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = s.GetIncident(ctx, inc.ID); !got.LastSignalAt.Equal(signal) {
+		t.Fatalf("LastSignalAt = %v, want %v", got.LastSignalAt, signal)
+	}
+	// A writer that does not know the last signal leaves it as it is.
+	got.LastSignalAt = time.Time{}
+	got.UpdatedAt = time.Now()
+	if err := s.UpdateIncident(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = s.GetIncident(ctx, inc.ID); !got.LastSignalAt.Equal(signal) {
+		t.Fatalf("a zero LastSignalAt overwrote the column: %v, want %v", got.LastSignalAt, signal)
+	}
+	if _, err := s.sqlDB.Exec(`UPDATE incidents SET last_signal_at='' WHERE id=?`, inc.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = s.GetIncident(ctx, inc.ID); !got.LastSignalAt.Equal(opened) {
+		t.Fatalf("an empty LastSignalAt reads %v, want the opening time %v", got.LastSignalAt, opened)
+	}
+}
+
 func TestMigrationsRunOncePerVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	s, err := Open(path)

@@ -9,6 +9,16 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+### Fixed
+
+- The `VERIFYING` quiet window now starts from when a signal last joined the
+  incident, stored as `last_signal_at` (schema migration SQLite 0038,
+  PostgreSQL 0029; existing rows take their `updated_at`). In v1.0.0-rc.1 it
+  read the incident's last update time, and each write that was not a signal
+  had to avoid moving it. Now any write may update the incident, and only a
+  recurring signal escalates. Going back to v1.0.0-rc.1 after this migration
+  needs the pre-upgrade backup (see `docs/upgrade.md`).
+
 ## [v1.0.0-rc.1] - 2026-11-21
 
 ### Added

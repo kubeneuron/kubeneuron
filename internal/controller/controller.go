@@ -816,6 +816,7 @@ func (c *Controller) ingestTx(ctx context.Context, tx store.Tx, sig types.Signal
 	}
 	inc.SignalSeen++
 	inc.UpdatedAt = time.Now()
+	inc.LastSignalAt = inc.UpdatedAt
 	// Backfill the vendor from a later signal. AMD and NVIDIA deliberately
 	// SHARE problem classes (internal/detect/fault.go), and the open-incident
 	// lookup is keyed by (target, class) — so an incident opened by an XID, an
@@ -882,6 +883,7 @@ func (c *Controller) openIncidentTx(ctx context.Context, tx store.Tx, sig types.
 		OpenedAt:       now,
 		UpdatedAt:      now,
 		StateChangedAt: now,
+		LastSignalAt:   now,
 	}
 	// The fault envelope names its vendor; XIDs and alerts do not. Carrying
 	// it onto the incident is what lets the reset preflight distinguish an

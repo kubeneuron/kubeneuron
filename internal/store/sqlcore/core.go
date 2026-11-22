@@ -427,18 +427,22 @@ func (q *Queries) CreateIncident(ctx context.Context, inc *types.Incident) error
 	if stateChanged.IsZero() {
 		stateChanged = inc.OpenedAt
 	}
+	lastSignal := inc.LastSignalAt
+	if lastSignal.IsZero() {
+		lastSignal = inc.OpenedAt
+	}
 	_, err = q.db.ExecContext(ctx, `
 		INSERT INTO incidents (id, node, gpu_uuid, gpu_index, pci_addr, class, state, playbook,
 		                       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
 		                       vendor, opened_at, updated_at, state_changed_at, version, cloud_identity,
-		                       successor, successor_open, remove_first, remove_first_open, accelerators, repair_node_uid)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		                       successor, successor_open, remove_first, remove_first_open, accelerators, repair_node_uid, last_signal_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		inc.ID, inc.Target.Node, inc.Target.GPUUUID, inc.Target.GPUIndex,
 		types.NormalizePCIAddress(inc.Target.PCIAddr),
 		string(inc.Class), string(inc.State), inc.Playbook,
 		inc.StepIndex, inc.Attempt, b2i(inc.DryRun), inc.SignalSeen, b2i(inc.RemediationSlotHeld), inc.ApprovalEpoch,
 		string(inc.Vendor), ts(inc.OpenedAt), ts(inc.UpdatedAt), ts(stateChanged), inc.Version, string(identity),
-		string(successor), b2i(inc.Successor.Open()), string(removeFirst), b2i(inc.RemoveFirst.Open()), string(accelerators), inc.RepairNodeUID)
+		string(successor), b2i(inc.Successor.Open()), string(removeFirst), b2i(inc.RemoveFirst.Open()), string(accelerators), inc.RepairNodeUID, ts(lastSignal))
 	return err
 }
 
@@ -465,16 +469,24 @@ func (q *Queries) UpdateIncident(ctx context.Context, inc *types.Incident) error
 	if inc.ResolvedAt != nil {
 		resolved = ts(*inc.ResolvedAt)
 	}
+	// A writer that does not know the last signal (a zero time) leaves the
+	// column as it is; writing the zero time would anchor the quiet window on
+	// nothing and bring back the recurrence a later write used to fake.
+	lastSignal := ""
+	if !inc.LastSignalAt.IsZero() {
+		lastSignal = ts(inc.LastSignalAt)
+	}
 	res, err := q.db.ExecContext(ctx, `
 		UPDATE incidents SET state=?, playbook=?, step_index=?, attempt=?, dry_run=?,
 		                     signals_seen=?, remediation_slot_held=?, approval_epoch=?, vendor=?, updated_at=?, state_changed_at=?, resolved_at=?,
 		                     version=version+1, cloud_identity=?, successor=?, successor_open=?,
-		                     remove_first=?, remove_first_open=?
+		                     remove_first=?, remove_first_open=?,
+		                     last_signal_at=CASE WHEN ? = '' THEN last_signal_at ELSE ? END
 		WHERE id=? AND version=?`,
 		string(inc.State), inc.Playbook, inc.StepIndex, inc.Attempt, b2i(inc.DryRun),
 		inc.SignalSeen, b2i(inc.RemediationSlotHeld), inc.ApprovalEpoch, string(inc.Vendor),
 		ts(inc.UpdatedAt), ts(inc.StateChangedAt), resolved, string(identity),
-		string(successor), b2i(inc.Successor.Open()), string(removeFirst), b2i(inc.RemoveFirst.Open()), inc.ID, inc.Version)
+		string(successor), b2i(inc.Successor.Open()), string(removeFirst), b2i(inc.RemoveFirst.Open()), lastSignal, lastSignal, inc.ID, inc.Version)
 	if err != nil {
 		return err
 	}
@@ -754,19 +766,19 @@ const incidentSelect = `
 	SELECT id, node, gpu_uuid, gpu_index, pci_addr, class, state, playbook,
 	       step_index, attempt, dry_run, signals_seen, remediation_slot_held, approval_epoch,
 	       vendor, opened_at, updated_at, state_changed_at, resolved_at, version, cloud_identity, successor,
-	       remove_first, accelerators, repair_node_uid
+	       remove_first, accelerators, repair_node_uid, last_signal_at
 	FROM incidents`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
 func scanIncident(r rowScanner) (*types.Incident, error) {
 	var inc types.Incident
-	var class, state, vendor, opened, updated, stateChanged, identity, successor, removeFirst, accelerators string
+	var class, state, vendor, opened, updated, stateChanged, identity, successor, removeFirst, accelerators, lastSignal string
 	var dryRun, slotHeld int
 	var resolved sql.NullString
 	err := r.Scan(&inc.ID, &inc.Target.Node, &inc.Target.GPUUUID, &inc.Target.GPUIndex,
 		&inc.Target.PCIAddr, &class, &state, &inc.Playbook, &inc.StepIndex, &inc.Attempt, &dryRun,
-		&inc.SignalSeen, &slotHeld, &inc.ApprovalEpoch, &vendor, &opened, &updated, &stateChanged, &resolved, &inc.Version, &identity, &successor, &removeFirst, &accelerators, &inc.RepairNodeUID)
+		&inc.SignalSeen, &slotHeld, &inc.ApprovalEpoch, &vendor, &opened, &updated, &stateChanged, &resolved, &inc.Version, &identity, &successor, &removeFirst, &accelerators, &inc.RepairNodeUID, &lastSignal)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
@@ -797,6 +809,13 @@ func scanIncident(r rowScanner) (*types.Incident, error) {
 		// Rows written before migration 0002 have no state-change timestamp;
 		// fall back to the last update rather than the zero time.
 		inc.StateChangedAt = inc.UpdatedAt
+	}
+	inc.LastSignalAt = parseTS(lastSignal)
+	if inc.LastSignalAt.IsZero() {
+		// Migration 0038 (postgres 0029) fills the column, so this is a row a
+		// writer left empty. The opening time is the one anchor that cannot
+		// make a later write look like a recurrence.
+		inc.LastSignalAt = inc.OpenedAt
 	}
 	if resolved.Valid {
 		t := parseTS(resolved.String)

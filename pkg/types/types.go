@@ -328,8 +328,11 @@ type Incident struct {
 	// bumped by attaching duplicate signals, so timeouts that anchor to a
 	// state (approval TTL, verification quiet windows) cannot be postponed
 	// by a signal storm.
-	StateChangedAt time.Time  `json:"state_changed_at"`
-	ResolvedAt     *time.Time `json:"resolved_at,omitempty"`
+	StateChangedAt time.Time `json:"state_changed_at"`
+	// LastSignalAt is when a signal last joined the incident. Only ingest
+	// moves it; a signal after StateChangedAt in VERIFYING is a recurrence.
+	LastSignalAt time.Time  `json:"last_signal_at"`
+	ResolvedAt   *time.Time `json:"resolved_at,omitempty"`
 	// Version is the optimistic-concurrency counter. The store bumps it on
 	// every UpdateIncident and matches on its prior value, so a writer holding
 	// a stale snapshot cannot overwrite a row a concurrent writer has since

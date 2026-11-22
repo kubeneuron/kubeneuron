@@ -349,7 +349,7 @@ func (c *Controller) saveSuccessor(ctx context.Context, inc *types.Incident, rec
 			return store.ErrConflict
 		}
 		fresh.Successor = rec.Clone()
-		touchUpdated(fresh, now)
+		fresh.UpdatedAt = now
 		if err := tx.UpdateIncident(ctx, fresh); err != nil {
 			return err
 		}

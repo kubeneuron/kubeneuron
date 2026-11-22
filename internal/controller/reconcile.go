@@ -472,6 +472,7 @@ func (c *Controller) parkForApproval(ctx context.Context, inc *types.Incident, s
 			return store.ErrConflict
 		}
 		inc.SignalSeen = fresh.SignalSeen
+		inc.LastSignalAt = fresh.LastSignalAt
 		// Only saveSuccessor writes the successor, and it writes through.
 		inc.Successor = fresh.Successor
 		inc.RemoveFirst = fresh.RemoveFirst
@@ -684,7 +685,7 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 		_, err := c.overdueInterruption(ctx, inc)
 		return err
 	}
-	if inc.UpdatedAt.After(inc.StateChangedAt) {
+	if inc.LastSignalAt.After(inc.StateChangedAt) {
 		entries, err := c.store.AuditTrail(ctx, inc.ID)
 		if err != nil {
 			return err
@@ -1114,6 +1115,7 @@ func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.In
 			release = release && fresh.RemediationSlotHeld
 		}
 		inc.SignalSeen = fresh.SignalSeen
+		inc.LastSignalAt = fresh.LastSignalAt
 		// Only saveSuccessor writes the successor, and it writes through.
 		inc.Successor = fresh.Successor
 		inc.RemoveFirst = fresh.RemoveFirst
@@ -1389,16 +1391,6 @@ func (c *Controller) noteVerifyWait(ctx context.Context, inc *types.Incident, re
 		}
 	}
 	return c.appendAudit(ctx, inc, "system", verifyWaitAction, reason)
-}
-
-// touchUpdated moves UpdatedAt for a write that is not a signal. In VERIFYING
-// an UpdatedAt past StateChangedAt is how advanceVerifying sees a signal that
-// recurred during the quiet window, so there a replacement plan's or an
-// operator's write leaves it alone.
-func touchUpdated(inc *types.Incident, now time.Time) {
-	if inc.State != types.StateVerifying {
-		inc.UpdatedAt = now
-	}
 }
 
 // appendAudit records an event that does not change state (e.g. a failed
