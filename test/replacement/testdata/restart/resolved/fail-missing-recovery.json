@@ -1,0 +1,21 @@
+{
+  "incident": {
+    "state": "RESOLVED"
+  },
+  "audit": [
+    {
+      "id": 1,
+      "action": "remove-first-delete-intent",
+      "params": {
+        "operation": "operation-a"
+      }
+    },
+    {
+      "id": 2,
+      "action": "remove-first-delete-confirmed",
+      "params": {
+        "operation": "operation-a"
+      }
+    }
+  ]
+}

@@ -16,6 +16,12 @@
       "params": {
         "operation": "operation-b"
       }
+    },
+    {
+      "id": 3,
+      "action": "recover-confirmed-delete",
+      "actor": "system",
+      "to_state": "VERIFYING"
     }
   ]
 }

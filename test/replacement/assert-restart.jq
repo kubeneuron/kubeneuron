@@ -3,6 +3,7 @@ def entries($action): [.audit[] | select(.action == $action)];
 .incident.id as $id
 | entries("remove-first-delete-intent") as $intent
 | entries("remove-first-delete-confirmed") as $confirmed
+| entries("recover-confirmed-delete") as $recovered
 | entries("remove-first-needs-operator") as $held
 | (if $scenario == "identity-changed" then $held else $confirmed end) as $end
 | ($intent | length) == 1 and ($end | length) == 1
@@ -11,9 +12,11 @@ def entries($action): [.audit[] | select(.action == $action)];
   and $end[0].id > $intent[0].id
   and all(.audit[]; .action != "approval-approved")
   and (if $scenario == "identity-changed" then
-    .incident.state == "NEEDS_HUMAN" and ($confirmed | length) == 0
+    .incident.state == "NEEDS_HUMAN" and ($confirmed | length) == 0 and ($recovered | length) == 0
     and (.incident.id | type == "string" and length > 0)
     and ($end[0].result | contains("cannot confirm that it is the original one, so the removal was not repeated."))
     and ($end[0].result | contains("kubeneuronctl resolve " + $id + " --cloud-operation-settled --reason"))
   else $scenario == "resolved" and .incident.state == "RESOLVED" and ($held | length) == 0
+    and ($recovered | length) == 1 and $recovered[0].id > $confirmed[0].id
+    and $recovered[0].actor == "system" and $recovered[0].to_state == "VERIFYING"
   end)
