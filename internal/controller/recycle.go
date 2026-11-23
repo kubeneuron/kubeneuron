@@ -99,7 +99,7 @@ func (c *Controller) recycleNodeStep(ctx context.Context, inc *types.Incident, r
 				return c.claimDeleteIntent(ctx, inc, pin, pool, machine, successor)
 			})
 			if errors.Is(err, removefirst.ErrRefused) && inc.RemoveFirst.Open() {
-				err = errors.Join(err, c.settleRefusedDelete(ctx, inc))
+				err = errors.Join(err, c.settleRefusedDelete(ctx, inc, err))
 			} else if err == nil && inc.RemoveFirst.Open() {
 				err = c.endRemoveFirst(ctx, inc, types.RemoveFirstDeleteConfirmed, "")
 			}

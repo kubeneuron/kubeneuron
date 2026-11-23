@@ -641,10 +641,17 @@ func TestRefusedDeleteSettlesOnlyWithOriginalTarget(t *testing.T) {
 				t.Fatal(err)
 			}
 			c.platform = p
-			if err := c.settleRefusedDelete(ctx, inc); err != nil {
+			var cause error = removefirst.ErrRefused
+			if state == removefirst.Listed {
+				cause = &removefirst.RefusedAfterGrow{Cause: cause, GrownSize: 2, CurrentSize: 2}
+			}
+			if err := c.settleRefusedDelete(ctx, inc, cause); err != nil {
 				t.Fatal(err)
 			}
 			rec := mustIncident(t, st, id).RemoveFirst
+			if state == removefirst.Listed && rec.Reason != "The cloud provider refused to remove machine old from pool gpu. The machine is still in the pool. Pool gpu was resized to 2 before the removal and now has one node more than planned." {
+				t.Fatal(rec.Reason)
+			}
 			wantOpen := state == removefirst.Unknown
 			if p.reads != 1 || rec.Open() != wantOpen || (!wantOpen && rec.Outcome != types.RemoveFirstNotStarted) {
 				t.Fatalf("reads=%d record=%+v", p.reads, rec)

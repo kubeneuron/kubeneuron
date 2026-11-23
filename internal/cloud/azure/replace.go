@@ -4,12 +4,14 @@ package azure
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
 	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
@@ -201,6 +203,14 @@ func (p *Provider) ensureSuccessor(ctx context.Context, r *replacement) error {
 // back to its size before dropping the tag.
 func (p *Provider) deleteMachine(ctx context.Context, r *replacement) error {
 	if err := p.api.DeleteMachines(ctx, r.pool, []string{r.machine}); err != nil {
+		if errors.Is(err, removefirst.ErrRefused) && r.started && !r.state.Autoscaling {
+			detail := &removefirst.RefusedAfterGrow{Cause: err, GrownSize: r.state.Count}
+			pl, readErr := p.api.Pool(ctx, r.pool)
+			if readErr == nil && !pl.Autoscaling && strings.EqualFold(pl.ProvisioningState, "Succeeded") && pl.Count == r.state.Count {
+				detail.CurrentSize = pl.Count
+			}
+			err = detail
+		}
 		return fmt.Errorf("azure: deleting machine %s from agent pool %s: %w", r.machine, r.pool, err)
 	}
 	if r.state.Autoscaling {

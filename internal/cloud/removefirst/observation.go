@@ -20,3 +20,14 @@ const (
 	Deleting        Observation = "deleting"
 	Deleted         Observation = "deleted"
 )
+
+// RefusedAfterGrow carries the verified pre-delete size of a fixed AKS pool.
+// CurrentSize is zero if the post-refusal read could not confirm that size.
+type RefusedAfterGrow struct {
+	Cause       error
+	GrownSize   int32
+	CurrentSize int32
+}
+
+func (e *RefusedAfterGrow) Error() string { return e.Cause.Error() }
+func (e *RefusedAfterGrow) Unwrap() error { return e.Cause }

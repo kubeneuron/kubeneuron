@@ -326,12 +326,22 @@ func (c *Controller) observeDeleteTarget(ctx context.Context, rec *types.RemoveF
 	return state, err
 }
 
-func (c *Controller) settleRefusedDelete(ctx context.Context, inc *types.Incident) error {
+func (c *Controller) settleRefusedDelete(ctx context.Context, inc *types.Incident, cause error) error {
 	state, err := c.observeDeleteTarget(ctx, inc.RemoveFirst)
 	if err != nil || (state != removefirst.SameMachine && state != removefirst.Listed) {
 		return nil
 	}
-	return c.endRemoveFirst(ctx, inc, types.RemoveFirstNotStarted, "The cloud provider refused the delete. The original machine is still present.")
+	rec := inc.RemoveFirst
+	reason := fmt.Sprintf("The cloud provider refused to remove machine %s from pool %s. The machine is still in the pool.", rec.MachineName, rec.Pool)
+	var grow *removefirst.RefusedAfterGrow
+	if errors.As(cause, &grow) {
+		if grow.CurrentSize == grow.GrownSize && grow.CurrentSize > 0 {
+			reason += fmt.Sprintf(" Pool %s was resized to %d before the removal and now has one node more than planned.", rec.Pool, grow.CurrentSize)
+		} else {
+			reason += fmt.Sprintf(" Pool %s was resized to %d before the removal. Check its current size.", rec.Pool, grow.GrownSize)
+		}
+	}
+	return c.endRemoveFirst(ctx, inc, types.RemoveFirstNotStarted, reason)
 }
 
 func (c *Controller) sweepTargetedDelete(ctx context.Context, inc *types.Incident) error {
