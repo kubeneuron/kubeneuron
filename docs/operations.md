@@ -841,12 +841,13 @@ The agent image carries no NVIDIA userspace. By default
 (`spec.agent.deviceAccess: NvidiaRuntime`) the agent asks the NVIDIA
 container runtime for the node's GPUs and for `nvidia-smi`, through
 `NVIDIA_VISIBLE_DEVICES=all` and `NVIDIA_DRIVER_CAPABILITIES=utility`. The
-agent stays unprivileged, with a read-only root filesystem, and no host path
-is mounted for it. It reads the inventory only: without node-level actions it
-runs no action on the node. This needs the NVIDIA container runtime as the
+agent stays unprivileged, with a read-only root filesystem, and this mode
+adds no hostPath mount for GPU access. It reads the inventory only: without
+node-level actions it runs no action on the node. This needs the NVIDIA container runtime as the
 node's default runtime; a node whose runtime ignores these variables gives
 the agent no GPU, and the agent reports none and keeps watching the kernel
-log. This mode has not yet been exercised on real hardware.
+log. Apart from the EKS image in the table below, this mode has not yet been
+exercised on real hardware.
 
 | Node image | GPUs visible to the agent without node-level actions |
 |---|---|

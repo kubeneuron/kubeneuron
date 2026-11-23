@@ -82,6 +82,10 @@ API is `v1alpha1`.
   incident's node and holds when it cannot tell. Present in v1.0.0-rc.1
   and v1.0.0-rc.2.
 
+- Corrected the operations guide on the default NVIDIA runtime mode: it adds
+  no hostPath mount for GPU access, and it has been exercised on real hardware
+  on the EKS image.
+
 ## [v1.0.0-rc.2] - 2026-11-23
 
 ### Hardware evidence
