@@ -384,10 +384,11 @@ type RemoveFirstRecord struct {
 	cloud.RemoveFirstPlan
 	// Version zero is the original GKE resize plan. Version one also pins
 	// the provider and Kubernetes machine identity before a targeted delete.
-	Version      int                 `json:"version,omitempty"`
-	Provider     string              `json:"provider,omitempty"`
-	DeleteTarget *cloud.NodeIdentity `json:"delete_target,omitempty"`
-	MachineName  string              `json:"machine_name,omitempty"`
+	Version        int                 `json:"version,omitempty"`
+	Provider       string              `json:"provider,omitempty"`
+	DeleteActionID string              `json:"delete_action_id,omitempty"`
+	DeleteTarget   *cloud.NodeIdentity `json:"delete_target,omitempty"`
+	MachineName    string              `json:"machine_name,omitempty"`
 	// EndedAt is when the plan closed with Outcome.
 	EndedAt *time.Time `json:"ended_at,omitempty"`
 	Outcome string     `json:"outcome,omitempty"`

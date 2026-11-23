@@ -129,7 +129,7 @@ func (c *Controller) claimDeleteIntent(ctx context.Context, inc *types.Incident,
 		return errors.New("remove-first delete requires a known pool and machine")
 	}
 	rec := &types.RemoveFirstRecord{
-		Version: 1, Provider: providerOf(inc), DeleteTarget: &pin, MachineName: machine,
+		Version: 1, DeleteActionID: actionID(inc), Provider: providerOf(inc), DeleteTarget: &pin, MachineName: machine,
 		RemoveFirstPlan: cloud.RemoveFirstPlan{Operation: successorOperation(inc), Pool: pool, Instance: pin.InstanceID,
 			Phase: cloud.RemoveFirstDeleting, PlannedAt: time.Now().UTC()},
 	}

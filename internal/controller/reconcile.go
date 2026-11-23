@@ -318,6 +318,22 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 		return c.transition(ctx, inc, types.StateVerifying, "system", "verify",
 			"playbook steps complete; verifying quiet window", nil)
 	}
+	// The cloud delete can finish even if EXECUTING loses its step result.
+	// Advance the exact recorded action without admitting another mutation.
+	if rec := inc.RemoveFirst; step.Action == "platform.replace_node" && rec != nil &&
+		rec.Version == 1 && rec.Outcome == types.RemoveFirstDeleteConfirmed &&
+		rec.Operation == successorOperation(inc) && rec.DeleteActionID == actionID(inc) &&
+		rec.DeleteTarget != nil && inc.CloudIdentity != nil && *rec.DeleteTarget == *inc.CloudIdentity {
+		inc.StepIndex++
+		next := types.StateEvaluating
+		if _, finished, err := c.runtimeConfig(ctx).Engine.NextStep(inc); err != nil {
+			return err
+		} else if finished {
+			next = types.StateVerifying
+		}
+		return c.transitionWithRepairStep(ctx, inc, next, "system", "recover-confirmed-delete",
+			"original machine removal confirmed after restart", nil, "", true)
+	}
 	// A recycle whose instance provably cannot be recycled (an autoscaling-group
 	// member) escalates now — before a human is asked to approve a step the
 	// node group would fight and lose by timeout. Likewise an agent-destructive

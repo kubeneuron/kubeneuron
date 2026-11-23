@@ -601,3 +601,30 @@ func TestRestartRechecksDeleteAuthority(t *testing.T) {
 		})
 	}
 }
+
+func TestConfirmedDeleteAdvancesReevaluatedStep(t *testing.T) {
+	p := newPlannedPlatform()
+	c, st := plannedFixture(t, p)
+	id := openOn(t, c, "n1")
+	inc := mustIncident(t, st, id)
+	inc.Playbook, inc.StepIndex, inc.State = "cloud-replace", 2, types.StateEvaluating
+	ctx := t.Context()
+	if err := st.UpdateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	inc = mustIncident(t, st, id)
+	if err := c.claimDeleteIntent(ctx, inc, *inc.CloudIdentity, "train", "machine", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.endRemoveFirst(ctx, inc, types.RemoveFirstDeleteConfirmed, ""); err != nil {
+		t.Fatal(err)
+	}
+	r := restartWith(t, c, st, p)
+	if err := r.advanceEvaluating(ctx, mustIncident(t, st, id)); err != nil {
+		t.Fatal(err)
+	}
+	got := mustIncident(t, st, id)
+	if got.State != types.StateVerifying || got.StepIndex != 3 || !auditHas(trail(t, st, id), "recover-confirmed-delete", "confirmed after restart") {
+		t.Fatalf("state=%s index=%d %s", got.State, got.StepIndex, dump(trail(t, st, id)))
+	}
+}
