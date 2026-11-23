@@ -151,3 +151,28 @@ func TestAutoscalerStatusAccess(t *testing.T) {
 		}
 	}
 }
+
+// The controller reads the published runtime ConfigMap, that one only.
+func TestRuntimeConfigReaderCanGetOnlyTheRuntimeConfigMap(t *testing.T) {
+	ctx := t.Context()
+	scheme := newOperatorScheme(t)
+	root := testKubeNeuron()
+	root.UID = "installation-a"
+	r := &KubeNeuronReconciler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Scheme: scheme}
+	if err := r.ensureRuntimeConfigAccess(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	key := client.ObjectKey{Namespace: root.Spec.Namespace, Name: root.Name + "-runtime-reader"}
+	var role rbacv1.Role
+	want := []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{root.Name + "-runtime"}, Verbs: []string{"get"}}}
+	if err := r.Get(ctx, key, &role); err != nil || !reflect.DeepEqual(role.Rules, want) || !metav1.IsControlledBy(&role, root) {
+		t.Fatalf("runtime configuration reader: %v %+v", err, role.Rules)
+	}
+	var binding rbacv1.RoleBinding
+	if err := r.Get(ctx, key, &binding); err != nil {
+		t.Fatal(err)
+	}
+	if binding.RoleRef.Name != key.Name || !reflect.DeepEqual(binding.Subjects, []rbacv1.Subject{{Kind: "ServiceAccount", Namespace: key.Namespace, Name: root.Name + "-controller"}}) {
+		t.Fatalf("unexpected reader binding: %+v %+v", binding.RoleRef, binding.Subjects)
+	}
+}

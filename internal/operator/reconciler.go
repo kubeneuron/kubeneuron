@@ -255,6 +255,9 @@ func (r *KubeNeuronReconciler) reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.ensureInventorySummary(ctx, &installation); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile inventory summary: %w", err))
 	}
+	if err := r.ensureRuntimeConfigAccess(ctx, &installation); err != nil {
+		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile runtime configuration access: %w", err))
+	}
 	if err := r.ensureServiceAccount(ctx, &installation, controllerServiceAccount(&installation)); err != nil {
 		return ctrl.Result{}, r.updateReconcileFailure(ctx, &installation, snapshot, fmt.Errorf("reconcile controller ServiceAccount: %w", err))
 	}

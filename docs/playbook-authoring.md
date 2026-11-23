@@ -451,6 +451,8 @@ carries the limits:
 
 Before enabling Automatic, check the policy condition `QualifiedProfilesResolved`. A missing name also appears in the REPLACEMENT column of `kubeneuronctl pools` for affected pools. The condition checks references. Node labels and the incident vendor determine which profile applies when an incident opens.
 
+A policy's conditions show that the operator accepted a change; the controller acts on it once it has loaded the configuration, which can be a minute or more later. Until then an Automatic policy authorises no step: the step is held with `the controller has not yet loaded the published configuration` and retried; it goes on once `source_digest` in `GET /api/v1/runtime-config` equals `config-digest` in the ConfigMap `<name>-runtime`. A step a person approves, and a switch to DryRun, take effect at that reload too: until then an approved step still runs for real. To stop automation at once, use `kubeneuronctl pause`; a cloud operation that has already started may still complete.
+
 A step goes to a person (approval) when the node is outside the policy's pools,
 when the circuit breaker trips, or when the step runs a command on the node
 itself (GPU reset, reboot, driver reload or reinstall, scripts): node-level

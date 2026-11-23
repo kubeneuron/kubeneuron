@@ -65,6 +65,22 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- **An automatic step waits until the controller has loaded a policy
+  change.** The operator publishes a change at once and the policy's
+  conditions show it, but the controller loads it from its mounted copy,
+  which the kubelet refreshed a minute or more later. Until then an
+  Automatic policy authorised steps under the previous revision, also after
+  the change turned Automatic off or removed a qualified profile. Now the
+  controller compares the configuration it has loaded with the one published
+  and, while they differ or the published one cannot be read, holds the step
+  with `the controller has not yet loaded the published configuration` and
+  retries it once that configuration is loaded. The operator grants the
+  controller `get` on the `<name>-runtime` ConfigMap only. A step a person
+  approves, and a switch to DryRun, take effect at that reload too: until
+  then an approved step still runs for real. To stop automation at once, use
+  `kubeneuronctl pause`; a cloud operation that has already started may still
+  complete. Present in v1.0.0-rc.1.
+
 - **Maintenance windows and destructive-scope checks read the node's current
   labels.** A window that selects nodes by label was matched against the labels
   recorded for the node, which were not updated after its agent registered: a node

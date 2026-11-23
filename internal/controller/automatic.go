@@ -61,6 +61,12 @@ func (c *Controller) automaticPolicyFor(ctx context.Context, inc *types.Incident
 // step of an incident now.
 func (c *Controller) authorizeByPolicy(ctx context.Context, inc *types.Incident, step *playbook.Step, pol playbook.Policy) (policyVerdict, string) {
 	auto := pol.Automatic
+	// The policy is the loaded revision. Until the controller has loaded
+	// what the operator published, a newer revision may already say
+	// otherwise, so nothing is authorised under this one.
+	if reason := c.unloadedConfig(ctx); reason != "" {
+		return policyHold, reason
+	}
 	if nodeLevelAction(step) {
 		return policyPark, nodeLevelAlphaReason
 	}

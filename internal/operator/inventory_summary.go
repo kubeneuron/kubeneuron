@@ -35,6 +35,15 @@ func (r *KubeNeuronReconciler) ensureInventorySummary(ctx context.Context, insta
 	return r.ensureConfigMapAccess(ctx, installation, meta, "inventory-summary", meta.Name, []string{"get", "update", "patch"})
 }
 
+// ensureRuntimeConfigAccess lets the controller read the runtime ConfigMap
+// through the API. The copy the kubelet mounts can lag what was published
+// by a minute or more, and automatic steps wait until the configuration the
+// controller loaded is the one published.
+func (r *KubeNeuronReconciler) ensureRuntimeConfigAccess(ctx context.Context, installation *api.KubeNeuron) error {
+	meta := metav1.ObjectMeta{Name: installation.Name + RuntimeConfigSuffix + "-reader", Namespace: installation.Spec.Namespace}
+	return r.ensureConfigMapAccess(ctx, installation, meta, "runtime-config-reader", installation.Name+RuntimeConfigSuffix, []string{"get"})
+}
+
 func (r *KubeNeuronReconciler) ensureAutoscalerStatusAccess(ctx context.Context, installation *api.KubeNeuron) error {
 	meta := metav1.ObjectMeta{Name: installation.Name + "-autoscaler-status", Namespace: metav1.NamespaceSystem}
 	if installation.Spec.Cloud != nil && installation.Spec.Cloud.Provider == "aws" {

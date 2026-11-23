@@ -166,6 +166,7 @@ type Controller struct {
 	inventoryWake       chan struct{}
 	inventoryDiagnostic func(context.Context) (string, error)
 	firstAlert          firstAlertRecord
+	published           publishedConfig
 }
 
 // SetSignalCatalog installs the declarative signal-override catalog.
