@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
@@ -82,4 +83,26 @@ func (p *Platform) RetryListedMachineDelete(ctx context.Context, pin cloud.NodeI
 		return err
 	}
 	return provider.DeleteListedMachine(ctx, pin.InstanceID, pool, machine)
+}
+
+func (p *Platform) SupportsDeleteIntent() bool {
+	_, ok := p.recycler.(interface {
+		ReplaceNamedWithIntent(context.Context, string, func(string, string, string) error) (string, error)
+	})
+	return ok
+}
+
+func (p *Platform) ObservePinnedDelete(ctx context.Context, pin cloud.NodeIdentity, pool, machine string) (removefirst.Observation, error) {
+	switch provider := p.recycler.(type) {
+	case interface {
+		ObserveRemoveFirstDelete(context.Context, string) (removefirst.Observation, error)
+	}:
+		return provider.ObserveRemoveFirstDelete(ctx, pin.InstanceID)
+	case interface {
+		ObserveRemoveFirstDelete(context.Context, string, string, string) (removefirst.Observation, error)
+	}:
+		return provider.ObserveRemoveFirstDelete(ctx, pin.InstanceID, pool, machine)
+	default:
+		return removefirst.Unknown, cloud.ErrRemoveFirstUnplanned
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"maps"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
 	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/store"
@@ -274,6 +275,24 @@ func (c *Controller) sweepRemoveFirst(ctx context.Context) {
 	}
 	for _, inc := range open {
 		if c.isInFlight(inc.ID) {
+			continue
+		}
+		if rec := inc.RemoveFirst; rec.Version != 0 {
+			if rec.Version == 1 && rec.DeleteTarget != nil {
+				sctx, cancel := context.WithTimeout(ctx, successorSweepTimeout)
+				if observer, ok := c.platform.(interface {
+					ObservePinnedDelete(context.Context, cloud.NodeIdentity, string, string) (removefirst.Observation, error)
+				}); ok {
+					state, err := observer.ObservePinnedDelete(sctx, *rec.DeleteTarget, rec.Pool, rec.MachineName)
+					if err == nil && state == removefirst.Deleted {
+						err = c.endRemoveFirst(sctx, inc, types.RemoveFirstDeleteConfirmed, "")
+					}
+					if err != nil {
+						c.log.Warn("checking recorded delete failed", "incident", inc.ID, "err", err)
+					}
+				}
+				cancel()
+			}
 			continue
 		}
 		if inc.RemoveFirst.Phase == cloud.RemoveFirstPlanned {

@@ -372,9 +372,10 @@ type IncidentAccelerator struct {
 // Remove-first outcomes. An empty outcome is a plan still open: the instance
 // may be deleted and the pool's size not yet set back.
 const (
-	RemoveFirstRestored      = "restored"       // the instance was deleted and the pool set back to its size
-	RemoveFirstNotStarted    = "not-started"    // refused or abandoned before the delete
-	RemoveFirstNeedsOperator = "needs-operator" // left for a person, with the reason and the command
+	RemoveFirstDeleteConfirmed = "delete-confirmed" // the targeted delete was acknowledged or observed
+	RemoveFirstRestored        = "restored"         // the instance was deleted and the pool set back to its size
+	RemoveFirstNotStarted      = "not-started"      // refused or abandoned before the delete
+	RemoveFirstNeedsOperator   = "needs-operator"   // left for a person, with the reason and the command
 )
 
 // RemoveFirstRecord is the incident's durable record of a planned

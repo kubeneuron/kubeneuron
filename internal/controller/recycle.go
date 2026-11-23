@@ -65,6 +65,12 @@ func (c *Controller) recycleNodeStep(ctx context.Context, inc *types.Incident, r
 		if err := c.recordReplacementPool(ctx, inc, pin); err != nil {
 			return nil, fmt.Errorf("platform.replace_node: recording the pool: %w", err)
 		}
+		if rec := inc.RemoveFirst; rec != nil && rec.Version != 0 && (rec.Open() || rec.Operation == successorOperation(inc)) {
+			if rec.Version == 1 && rec.Outcome == types.RemoveFirstDeleteConfirmed {
+				return okResult(inc, "confirmed removal of the original machine"), nil
+			}
+			return nil, fmt.Errorf("platform.replace_node: check the recorded outcome of remove-first operation %s before another delete", rec.Operation)
+		}
 		if planned, ok := c.platform.(platform.PlannedRemoveFirstRecycler); ok {
 			if res, handled, err := c.replaceRemoveFirst(ctx, inc, planned, pin); handled {
 				return res, err
@@ -72,7 +78,29 @@ func (c *Controller) recycleNodeStep(ctx context.Context, inc *types.Incident, r
 		}
 		var named string
 		var err error
-		if namer, ok := guard.(platform.NamedNodeReplacer); ok {
+		if target, ok := guard.(interface {
+			SupportsDeleteIntent() bool
+			ReplacePinnedNodeWithIntent(context.Context, cloud.NodeIdentity, func(string, string, string) error) (string, error)
+		}); ok && target.SupportsDeleteIntent() {
+			named, err = target.ReplacePinnedNodeWithIntent(ctx, pin, func(pool, machine, successor string) error {
+				if pool == "" {
+					rows, err := c.store.AuditTrail(ctx, inc.ID)
+					if err != nil {
+						return err
+					}
+					for i := len(rows) - 1; i >= 0; i-- {
+						if rows[i].Action == replacementPoolAction && rows[i].Params["node_uid"] == pin.NodeUID {
+							pool = rows[i].Params["pool"]
+							break
+						}
+					}
+				}
+				return c.claimDeleteIntent(ctx, inc, pin, pool, machine, successor)
+			})
+			if err == nil && inc.RemoveFirst.Open() {
+				err = c.endRemoveFirst(ctx, inc, types.RemoveFirstDeleteConfirmed, "")
+			}
+		} else if namer, ok := guard.(platform.NamedNodeReplacer); ok {
 			named, err = namer.ReplacePinnedNodeNamed(ctx, pin)
 		} else {
 			err = guard.ReplacePinnedNode(ctx, pin)
