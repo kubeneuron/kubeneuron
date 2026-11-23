@@ -241,3 +241,17 @@ func TestReplaceNamedNamesTheOneNewMachine(t *testing.T) {
 		}
 	})
 }
+
+func TestFailedDeleteIntentLeavesGrownPoolAndTargetIntact(t *testing.T) {
+	f := newFakeAKS(2)
+	wantErr := errors.New("intent write failed")
+	_, err := testProvider(f).ReplaceNamedWithIntent(t.Context(), testInstance(0), func(pool, machine, successor string) error {
+		if pool != testPool || machine != testMachine(0).Name || successor == "" || f.count != 3 {
+			t.Fatalf("unexpected delete intent: pool=%s machine=%s successor=%s size=%d", pool, machine, successor, f.count)
+		}
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) || len(f.calls) != 1 || !slices.Contains(f.machines, testMachine(0)) {
+		t.Fatalf("error=%v calls=%v machines=%v", err, f.calls, f.machines)
+	}
+}

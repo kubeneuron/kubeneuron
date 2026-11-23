@@ -74,6 +74,12 @@ var _ resizediff.Replacer = (*Provider)(nil)
 // an autoscaled pool), when the pool has more than resizediff.MaxMembers
 // machines, or when not exactly one machine is new.
 func (p *Provider) ReplaceNamed(ctx context.Context, instanceID string) (string, error) {
+	return p.ReplaceNamedWithIntent(ctx, instanceID, nil)
+}
+
+// ReplaceNamedWithIntent lets the controller persist the target and the
+// observed resize diff after capacity is ready and before sending the delete.
+func (p *Provider) ReplaceNamedWithIntent(ctx context.Context, instanceID string, record func(pool, machine, successor string) error) (string, error) {
 	r, err := p.replacement(ctx, instanceID)
 	if err != nil || r == nil {
 		return "", err
@@ -89,6 +95,11 @@ func (p *Provider) ReplaceNamed(ctx context.Context, instanceID string) (string,
 			if added != "" && m.Name == added && m.ResourceID != "" {
 				named = m.providerID()
 			}
+		}
+	}
+	if record != nil {
+		if err := record(r.pool, r.machine, named); err != nil {
+			return "", err
 		}
 	}
 	if err := p.deleteMachine(ctx, r); err != nil {
