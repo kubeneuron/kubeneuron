@@ -53,6 +53,18 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- A replacement no longer waits for an accelerator report from the new node
+  when the replaced node's agent never reported NVIDIA or AWS Neuron
+  accelerators, for example because the container runtime did not expose the
+  GPUs to it. The new node is then confirmed by its Kubernetes readiness,
+  advertised accelerator capacity and a fresh agent heartbeat, and the
+  resolution says `Verification used Kubernetes node readiness and advertised
+  accelerator capacity.` If the new node reports its devices anyway, they are
+  checked and the resolution says so. What the old node's agent had reported
+  is recorded on a `replaced-node-devices` audit row before the replacement
+  starts. A node whose agent had reported, even one whose report a fault
+  later emptied, still needs the new node's report.
+
 - An incident that opened before its node could be matched to a cloud instance no longer always waits for a manual resolve: the controller checks again every minute and continues once the same Kubernetes node (same UID) is matched. The late match is recorded in the audit trail as cloud-instance-matched. If the node was re-created, or the incident did not record the node's UID, it still needs kubeneuronctl resolve.
 
 - The `VERIFYING` quiet window now starts from when a signal last joined the

@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -43,6 +44,12 @@ const replacementPoolAction = "replacement-pool"
 // remove-first replacement the provider carried out in one call, the instance
 // it found new in the pool.
 const replacementInstanceAction = "replacement-instance"
+
+// replacedDevicesAction is the audit row that records, before the
+// replacement changes anything, whether the replaced node's agent ever
+// reported accelerators of the incident's vendor: a new node is asked for no
+// more evidence than the node it replaces gave.
+const replacedDevicesAction = "replaced-node-devices"
 
 // poolLabels are the node labels that name a managed node pool, per cloud.
 var poolLabels = []struct{ cloud, label string }{
@@ -85,6 +92,61 @@ type cloudReplacement struct {
 	// since is when the new node's evidence may start: the successor's
 	// acceptance, or the moment before the remove-first delete.
 	since time.Time
+	// noDevices is whether the replaced node's agent never reported
+	// accelerators of the incident's vendor before the replacement. False also when this
+	// was not recorded, as for a replacement started by an older release.
+	noDevices bool
+}
+
+// recordReplacedNodeDevices writes, once per node and before the replacement
+// changes anything, whether the agent of the node being replaced ever
+// reported accelerators of the incident's vendor. The node and its report may
+// be gone by the time the new node is verified.
+func (c *Controller) recordReplacedNodeDevices(ctx context.Context, inc *types.Incident, pin cloud.NodeIdentity) error {
+	vendor, reported := replacementReportVendor(inc)
+	reports, ok := c.store.(store.AcceleratorReportStore)
+	if !reported || !ok {
+		return nil
+	}
+	trail, err := c.store.AuditTrail(ctx, inc.ID)
+	if err != nil {
+		return err
+	}
+	// The first row for the node stands: a retried step or a restarted
+	// controller does not ask again, after the fault had longer to hide the
+	// devices.
+	for _, e := range trail {
+		if e.Action == replacedDevicesAction && e.Params["node_uid"] == pin.NodeUID {
+			return nil
+		}
+	}
+	// Any report from this node counts, even one without devices: a fault
+	// that hides the devices leaves its agent still reporting. So does a
+	// registration that lists accelerators.
+	report, err := reports.GetAcceleratorReport(ctx, pin.Node, vendor)
+	if errors.Is(err, store.ErrNotFound) {
+		report, err = nil, nil
+	}
+	if err != nil {
+		return err
+	}
+	devices := report != nil && report.NodeUID == pin.NodeUID
+	if !devices {
+		registered, err := c.store.GetNode(ctx, pin.Node)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		devices = registered != nil && registered.UID == pin.NodeUID && len(registered.GPUs) > 0
+	}
+	result := fmt.Sprintf("the agent on %s has reported %s accelerators; the new node's report is checked", pin.Node, vendor)
+	if !devices {
+		result = fmt.Sprintf("the agent on %s never reported %s accelerators; the new node is checked by its readiness and advertised accelerators unless it reports devices", pin.Node, vendor)
+	}
+	return c.store.AppendAudit(ctx, &types.AuditEntry{
+		IncidentID: inc.ID, Time: time.Now(), FromState: inc.State, ToState: inc.State, Actor: "system",
+		Action: replacedDevicesAction, DryRun: inc.DryRun, Result: result,
+		Params: map[string]string{"node": pin.Node, "node_uid": pin.NodeUID, "vendor": string(vendor), "devices": strconv.FormatBool(devices)},
+	})
 }
 
 // recordReplacementPool writes, before a remove-first delete, which pool the
@@ -184,7 +246,7 @@ func (c *Controller) findCloudReplacement(ctx context.Context, inc *types.Incide
 	}
 	const replace = "platform.replace_node"
 	var found *cloudReplacement
-	var pool, named *types.AuditEntry
+	var pool, named, devices *types.AuditEntry
 	for _, e := range trail {
 		if e.DryRun {
 			continue
@@ -202,10 +264,16 @@ func (c *Controller) findCloudReplacement(ctx context.Context, inc *types.Incide
 			pool = e
 		case e.Action == replacementInstanceAction:
 			named = e
+		case e.Action == replacedDevicesAction && devices == nil && inc.CloudIdentity != nil && e.Params["node_uid"] == inc.CloudIdentity.NodeUID:
+			// Bound to the node, not to the attempt: the first row stands.
+			devices = e
 		}
 	}
 	if found == nil {
 		return nil, nil
+	}
+	if devices != nil {
+		found.noDevices = devices.Params["devices"] == "false"
 	}
 	if s := inc.Successor; s != nil && s.Outcome == types.SuccessorReplaced && s.ReadyAt != nil {
 		// The successor's agent registered before it was accepted.
@@ -414,7 +482,18 @@ func (c *Controller) verifyReplacementInventory(ctx context.Context, inc *types.
 	}
 	vendor, reported := replacementReportVendor(inc)
 	now := time.Now()
-	if !reported || !r.agent {
+	reports, ok := c.store.(store.AcceleratorReportStore)
+	var report *types.AgentAcceleratorReport
+	if reported && r.agent && ok {
+		report, _ = reports.GetAcceleratorReport(ctx, node.Name, vendor)
+		if report != nil && (report.NodeUID != node.UID || !report.ObservedAt.After(r.since) ||
+			report.ObservedAt.After(now) || now.Sub(report.ObservedAt) > verifyEvidenceMaxAge) {
+			report = nil
+		}
+	}
+	// A node whose agent never reported is not asked for a report from the
+	// new node; one that sends devices anyway is checked by them.
+	if !reported || !r.agent || r.noDevices && (report == nil || !inventoryMatches(report, "", r.since, now)) {
 		if len(want) == 0 && r.successor == nil {
 			return false, fmt.Sprintf("The incident recorded no accelerators to compare new node %s against.", node.Name)
 		}
@@ -427,13 +506,10 @@ func (c *Controller) verifyReplacementInventory(ctx context.Context, inc *types.
 		}
 		return true, "Verification used Kubernetes node readiness and advertised accelerator capacity."
 	}
-	reports, ok := c.store.(store.AcceleratorReportStore)
 	if !ok {
 		return false, "The accelerator report store is unavailable."
 	}
-	report, err := reports.GetAcceleratorReport(ctx, node.Name, vendor)
-	if err != nil || report == nil || report.NodeUID != node.UID || !report.ObservedAt.After(r.since) ||
-		report.ObservedAt.After(now) || now.Sub(report.ObservedAt) > verifyEvidenceMaxAge {
+	if report == nil {
 		return false, fmt.Sprintf("No fresh accelerator report from new node %s.", node.Name)
 	}
 	if !inventoryMatches(report, "", r.since, now) {

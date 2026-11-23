@@ -52,6 +52,11 @@ func (c *Controller) recycleNodeStep(ctx context.Context, inc *types.Incident, r
 		return nil, fmt.Errorf("cloud recovery unavailable: incident target differs from pinned node")
 	}
 	node := inc.Target.Node
+	if replace {
+		if err := c.recordReplacedNodeDevices(ctx, inc, pin); err != nil {
+			return nil, fmt.Errorf("platform.replace_node: recording the node's devices: %w", err)
+		}
+	}
 	if replace && (successorReady(inc) || c.runtimeConfig(ctx).Engine != nil &&
 		c.incidentPolicy(ctx, inc).ReplacementStrategy.Effective() == recoverymode.AddFirst) {
 		return c.replaceWithSuccessor(ctx, inc, pin)

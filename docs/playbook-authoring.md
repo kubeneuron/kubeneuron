@@ -673,6 +673,18 @@ accelerators the incident covered:
 | AWS Neuron (`aws.amazon.com/neuron...`) | a fresh agent report from the new node lists a device: device presence observed; runtime not attested |
 | any other, or a pool whose nodes run no agent | no agent report exists for it, so KubeNeuron uses the node's Kubernetes readiness and advertised accelerator capacity; where the old node ran an agent, the new node's agent must have reported too |
 
+The new node is not asked for more than the old one gave. When the old node's
+agent never reported NVIDIA or AWS Neuron accelerators before the replacement
+(no report from that node and no accelerators in its registration), for
+example because the container runtime did not expose the devices to it, the
+new node is checked by its Kubernetes readiness and advertised accelerator
+capacity, and its agent must have been heard after the replacement. If the
+new node's agent reports its devices anyway, they are checked as in the table.
+An agent whose report a fault emptied had still reported, so the new node's
+report is required. The `replaced-node-devices` audit row records, once per
+node, what the old node's agent had reported; a replacement without that row
+is checked as in the table.
+
 The resolution says in its first sentence how the node was found:
 `Replaced by node <new>, named by the cloud operation.`, `Replaced by node
 <new>, the only instance that joined pool <pool> during the resize.` or

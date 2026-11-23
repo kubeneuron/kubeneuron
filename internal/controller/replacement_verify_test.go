@@ -262,6 +262,15 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 		{name: "remove-first amd, agent without devices", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, vendor: types.AcceleratorVendorAMD,
 			setup: func(_ *testing.T, _ *sqlite.Store, p *poolPlatform) { p.resource = "amd.com/gpu" }, blind: true,
 			node: poolNodeName, how: replacementByPool, sentence: poolSentence, depth: capacityDepth},
+		// The old node's agent ran but reported no NVIDIA device, as one the
+		// runtime did not give the GPUs: the new node is held to the same.
+		{name: "add-first nvidia, agent without devices", mode: recoverymode.Automatic, vendor: types.AcceleratorVendorNVIDIA, blind: true,
+			node: successorNodeName, how: replacementBySuccessor, sentence: successorSentence, depth: capacityDepth, heard: true},
+		{name: "remove-first nvidia, agent without devices", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, vendor: types.AcceleratorVendorNVIDIA, blind: true,
+			node: poolNodeName, how: replacementByPool, sentence: poolSentence, depth: capacityDepth},
+		// A new node that reports its devices anyway is checked by them.
+		{name: "remove-first nvidia, agent without devices, new node reports", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, vendor: types.AcceleratorVendorNVIDIA, blind: true,
+			node: poolNodeName, how: replacementByPool, sentence: poolSentence, depth: driverDepth},
 		{name: "remove-first tpu node-health without an agent", mode: recoverymode.Automatic, strategy: recoverymode.RemoveFirst, noAgent: true,
 			setup: func(t *testing.T, st *sqlite.Store, p *poolPlatform) {
 				p.resource = "google.com/tpu"
@@ -302,15 +311,16 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 			p := &poolPlatform{successorPlatform: newSuccessorPlatform()}
 			c, st, notifier := successorFixture(t, tc.mode, p.successorPlatform, tc.strategy)
 			c.platform = p
-			registerSuccessorAgent(t, st, 8)
+			// A blind agent inventories no devices on the new node either.
+			gpus := 8
+			if tc.blind {
+				gpus = 0
+			}
+			registerSuccessorAgent(t, st, gpus)
 			if tc.setup != nil {
 				tc.setup(t, st, p)
 			}
 			if !tc.noAgent {
-				gpus := 8
-				if tc.blind {
-					gpus = 0
-				}
 				registerOldNode(t, st, gpus, tc.vendor)
 			}
 			uid := cmp.Or(tc.uid, "uid-"+tc.node)
@@ -329,6 +339,11 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 			}
 			if tc.node != successorNodeName && !tc.noAgent {
 				registerAgentAs(t, st, tc.node, uid)
+				if tc.blind {
+					if err := st.UpsertAgentRegistration(context.Background(), &types.Node{Name: tc.node, UID: uid, AgentLastSeen: time.Now()}); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			switch tc.depth {
 			case driverDepth:
@@ -358,10 +373,14 @@ func TestReplacementResolvesOnTheNewNode(t *testing.T) {
 				t.Fatalf("target = %+v, want the incident's original target", inc.Target)
 			}
 			// The old node's agent reported its devices: the successor is accepted with its own.
-			if tc.how == replacementBySuccessor && !auditHas(entries, "successor-ready", "is Ready with its accelerators; two nodes run until n1 is removed") {
+			if tc.how == replacementBySuccessor && !tc.blind && !auditHas(entries, "successor-ready", "is Ready with its accelerators; two nodes run until n1 is removed") {
 				t.Fatalf("successor-ready, want the accelerators its agent reported%s", dump(entries))
 			}
-			if tc.blind && (len(inc.Accelerators) != 0 || !auditHasParam(entries, replacementPoolAction, "capacity", "amd.com/gpu=8")) {
+			// It reported none: the new node is held to the same, and the audit says so.
+			if tc.blind && tc.vendor == types.AcceleratorVendorNVIDIA && !auditHas(entries, replacedDevicesAction, "never reported nvidia accelerators") {
+				t.Fatalf("no %s entry says the old node reported no device%s", replacedDevicesAction, dump(entries))
+			}
+			if tc.blind && (len(inc.Accelerators) != 0 || tc.vendor == types.AcceleratorVendorAMD && !auditHasParam(entries, replacementPoolAction, "capacity", "amd.com/gpu=8")) {
 				t.Fatalf("accelerators %+v; want none recorded on the incident and the old node's capacity with the pool%s", inc.Accelerators, dump(entries))
 			}
 			if !notifier.hasMessage(tc.sentence) {
@@ -396,6 +415,7 @@ func TestReplacementWithoutEvidenceGoesToAPerson(t *testing.T) {
 		want     string
 	}{
 		{"no report", "", nil, "", "No fresh accelerator report from new node n9."},
+		{"no report from the pool node", recoverymode.RemoveFirst, nil, "", "No fresh accelerator report from new node n10."},
 		{"no devices", "", nil, types.AcceleratorReadinessNotReady, "New node n9 reports no accelerator devices."},
 		{"not ready", recoverymode.RemoveFirst, func(p *poolPlatform) { p.nodeReady = false }, types.AcceleratorReadinessReady, "New node n10 is not Ready."},
 		{"no new pool node", recoverymode.RemoveFirst, func(p *poolPlatform) { p.extra = -1 }, "", "No node joined pool train after the removal."},
@@ -425,6 +445,20 @@ func TestReplacementWithoutEvidenceGoesToAPerson(t *testing.T) {
 			}
 			if tc.report != "" {
 				reportFrom(t, st, node, "uid-"+node, types.AcceleratorVendorNVIDIA, tc.report)
+			}
+			// The old node's agent had reported its devices, once: the new
+			// node's are checked against its report.
+			rows := 0
+			for _, e := range trail(t, st, id) {
+				if e.Action == replacedDevicesAction {
+					rows++
+					if e.Params["devices"] != "true" || !strings.Contains(e.Result, "has reported nvidia accelerators") {
+						t.Fatalf("%s entry %+v, want the old node's devices", replacedDevicesAction, e)
+					}
+				}
+			}
+			if rows != 1 {
+				t.Fatalf("%d %s entries, want one%s", rows, replacedDevicesAction, dump(trail(t, st, id)))
 			}
 			ctx := context.Background()
 			if ok, reason, _ := c.verifyRecovery(ctx, inc); ok || reason != tc.want {
@@ -482,6 +516,17 @@ func registerOldNode(t *testing.T, st *sqlite.Store, gpus int, vendor types.Acce
 	}
 	if err := st.UpsertAgentRegistration(context.Background(), n); err != nil {
 		t.Fatal(err)
+	}
+	// Its agent reported the devices too, as an agent that reads them does.
+	if gpus > 0 && (vendor == "" || reportingVendors[vendor]) {
+		if vendor == "" {
+			vendor = types.AcceleratorVendorNVIDIA
+		}
+		readiness := types.AcceleratorReadinessReady
+		if vendor == types.AcceleratorVendorAWS {
+			readiness = types.AcceleratorReadinessObserved
+		}
+		reportFrom(t, st, "n1", "uid-n1", vendor, readiness)
 	}
 }
 
@@ -660,5 +705,96 @@ func TestResizeDiffInstanceFromThisReplacement(t *testing.T) {
 		if got := resizeDiffInstance(inc, pool, nil); got != tc.want {
 			t.Errorf("plan %+v: %q, want %q", tc.rec, got, tc.want)
 		}
+	}
+}
+
+// emptyReportFrom has node's agent report no device, as one whose GPU fell off
+// the bus does: the report is overwritten, and the registration lists none.
+func emptyReportFrom(t *testing.T, st *sqlite.Store, node, uid string) {
+	t.Helper()
+	report := readyNVIDIAResetReport(time.Now().Add(time.Second), "profile")
+	report.Node, report.NodeUID, report.Vendor = node, uid, types.AcceleratorVendorNVIDIA
+	report.Readiness, report.ReadinessReasons, report.Devices = types.AcceleratorReadinessNotReady, []string{"nvidia-smi failed"}, nil
+	if err := st.UpsertAcceleratorReport(context.Background(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertAgentRegistration(context.Background(), &types.Node{Name: node, UID: uid, AgentLastSeen: time.Now(), Labels: map[string]string{"pool": "train"}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A GPU that fell off the bus empties its node's report before the
+// replacement: the node had reported, so the new node must report too.
+func TestReplacementAfterTheFaultHidTheDevices(t *testing.T) {
+	for _, tc := range []struct {
+		strategy recoverymode.Strategy
+		want     string
+	}{
+		{"", "No fresh accelerator report from new node n9."},
+		{recoverymode.RemoveFirst, "No fresh accelerator report from new node n10."},
+	} {
+		t.Run(cmp.Or(string(tc.strategy), "add-first"), func(t *testing.T) {
+			p := &poolPlatform{successorPlatform: newSuccessorPlatform()}
+			c, st, _ := successorFixture(t, recoverymode.Automatic, p.successorPlatform, tc.strategy)
+			c.platform = p
+			registerSuccessorAgent(t, st, 8)
+			registerOldNode(t, st, 8, types.AcceleratorVendorNVIDIA)
+			emptyReportFrom(t, st, "n1", "uid-n1")
+			id := openVendorIncident(t, c, "n1", types.AcceleratorVendorNVIDIA)
+			inc := untilState(t, c, st, id, func(inc *types.Incident) bool { return inc.State.Halted() || inc.State == types.StateVerifying })
+			entries := trail(t, st, id)
+			if inc.State != types.StateVerifying || !auditHasParam(entries, replacedDevicesAction, "devices", "true") {
+				t.Fatalf("state = %s, want VERIFYING with the old node's reports on record%s", inc.State, dump(entries))
+			}
+			if tc.strategy == recoverymode.RemoveFirst {
+				registerAgentAs(t, st, poolNodeName, "uid-"+poolNodeName)
+			}
+			inc = step(t, c, st, id, 5)
+			if ok, reason, _ := c.verifyRecovery(context.Background(), inc); inc.State != types.StateVerifying || ok || reason != tc.want {
+				t.Fatalf("state %s, verify = %v %q, want held on %q%s", inc.State, ok, reason, tc.want, dump(trail(t, st, id)))
+			}
+		})
+	}
+}
+
+// What the old node reported is recorded once for the node: a later attempt
+// of the step, or a restarted controller, neither asks again nor loses it.
+func TestReplacedNodeDevicesStandsForTheNode(t *testing.T) {
+	p := &poolPlatform{successorPlatform: newSuccessorPlatform()}
+	c, st, _ := successorFixture(t, recoverymode.Automatic, p.successorPlatform, recoverymode.RemoveFirst)
+	c.platform = p
+	registerSuccessorAgent(t, st, 0)
+	registerOldNode(t, st, 0, types.AcceleratorVendorNVIDIA)
+	id := openVendorIncident(t, c, "n1", types.AcceleratorVendorNVIDIA)
+	inc := untilState(t, c, st, id, func(inc *types.Incident) bool { return inc.State.Halted() || inc.State == types.StateVerifying })
+	if inc.State != types.StateVerifying {
+		t.Fatalf("state = %s, want VERIFYING%s", inc.State, dump(trail(t, st, id)))
+	}
+	ctx := context.Background()
+	// The step runs again, after the old node's agent reported after all.
+	const replace = "platform.replace_node"
+	for _, result := range []string{auditStepStartResult(replace), auditExecutingResult(replace)} {
+		if err := st.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: time.Now(), FromState: inc.State, ToState: inc.State,
+			Actor: "system", Action: "replace", Result: result}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reportFrom(t, st, "n1", "uid-n1", types.AcceleratorVendorNVIDIA, types.AcceleratorReadinessReady)
+	if err := c.recordReplacedNodeDevices(ctx, inc, *inc.CloudIdentity); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: time.Now(), FromState: inc.State, ToState: inc.State,
+		Actor: "system", Action: "replace", Result: auditStepOutcomeResult(replace, false, true)}); err != nil {
+		t.Fatal(err)
+	}
+	rows := 0
+	for _, e := range trail(t, st, id) {
+		if e.Action == replacedDevicesAction {
+			rows++
+		}
+	}
+	r, err := c.findCloudReplacement(ctx, mustIncident(t, st, id))
+	if err != nil || r == nil || !r.noDevices || rows != 1 {
+		t.Fatalf("replacement %+v (%v), %d %s rows; want the first, never-reported row to stand%s", r, err, rows, replacedDevicesAction, dump(trail(t, st, id)))
 	}
 }
