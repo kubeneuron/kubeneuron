@@ -1,0 +1,26 @@
+[
+  {
+    "incident": {
+      "state": "RESOLVED",
+      "id": "zone-case"
+    },
+    "audit": [
+      {
+        "action": "resolve",
+        "actor": "system",
+        "params": {
+          "replacement_node": "successor"
+        },
+        "result": "The replacement joined zone us-east-1b; the removed node was in zone us-east-1a. 1 pod on the removed node was tied to zone us-east-1a and may not start in zone us-east-1b."
+      }
+    ]
+  },
+  {
+    "incident": "another",
+    "version": "impact-preview/v1",
+    "unavailable": null,
+    "warnings": [
+      "The replacement may join another zone of this pool. 1 pod on this node is tied to zone us-east-1a by persistent volumes or required scheduling rules and may not start in another zone."
+    ]
+  }
+]

@@ -25,4 +25,12 @@ for f in testdata/same-zone/*.json; do
     *) echo "assert-same-zone.jq: $f returned $rc" >&2; failed=1 ;;
   esac
 done
+for f in testdata/any-zone/*.json; do
+  rc=0
+  jq -e --arg node successor -f assert-any-zone.jq "$f" >/dev/null || rc=$?
+  case "$(basename "$f"):$rc" in
+    pass-*:0|fail-*:1) ;;
+    *) echo "assert-any-zone.jq: $f returned $rc" >&2; failed=1 ;;
+  esac
+done
 exit "$failed"

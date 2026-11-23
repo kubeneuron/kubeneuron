@@ -58,6 +58,11 @@ audit="$EVIDENCE_DIR/A.json"
 wait_until pool_ready AddFirst
 wait_until policy_loaded kind-nvidia
 initial_uid=$("${k[@]}" get node "$worker" -o jsonpath='{.metadata.uid}')
+if [[ ${ZONE_SCENARIO:-} == AnyPoolZone ]]; then
+  # shellcheck source=test/replacement/any-pool-zone.sh
+  source ./any-pool-zone.sh
+  exit 0
+fi
 if [[ ${ZONE_SCENARIO:-} == SameZone ]]; then
   inject "$worker" 124c:3b:00
   # Called indirectly by wait_until.
