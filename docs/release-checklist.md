@@ -126,6 +126,7 @@ tagging the release.
 
 - [ ] For rc.2, verify that Chart.yaml has `version: 1.0.0-rc.2` and `appVersion: v1.0.0-rc.2`, and that the default image tag in values.yaml is `v1.0.0-rc.2`.
 - [ ] Check the release workflow's `BASELINE` before tagging. It names the previous published release: `v1.0.0-rc.1` for rc.2. Run `make test-upgrade-rollback-kind BASELINE=v1.0.0-rc.1` locally first. Confirm the `upgrade-rehearsal` job passes for both stores and does not report `upgrade rehearsal: skipped, no base release`.
+- [ ] Dispatch the **Release preflight** workflow on the release commit with the version you will tag, for example `v1.0.0-rc.3`, and wait for a successful run. It runs the release's gates, source metadata check, upgrade rehearsal, image builds, install manifest and CLI archives, and publishes nothing. Confirm the commit in the run summary is the one you tag.
 - [ ] Confirm approval before pushing the tag. **Pushing the tag starts public distribution**: the workflow can publish four tagged GHCR images before it creates the GitHub Release draft. For rc.2 the image tag is exactly `v1.0.0-rc.2`.
 - [ ] Wait for `release-verify` to succeed for the draft ID created by this run. Review the install manifest, installer, CLI archives, image digests, SBOMs and signed checksums.
 - [ ] Compare `/licenses/THIRD_PARTY_LICENSES` and `/licenses/NOTICE` from each signed image digest with `THIRD_PARTY_LICENSES` and `NOTICE` in the tagged tree. Require a byte-for-byte match.
