@@ -23,7 +23,9 @@ import (
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/smithy-go"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
@@ -170,6 +172,13 @@ func (r *Recycler) Replace(ctx context.Context, instanceID string) error {
 	if _, err := r.api.TerminateInstances(ctx, &ec2.TerminateInstancesInput{
 		InstanceIds: []string{instanceID},
 	}); err != nil {
+		var api smithy.APIError
+		if errors.As(err, &api) {
+			switch api.ErrorCode() {
+			case "UnauthorizedOperation", "AccessDenied", "AccessDeniedException", "RequestLimitExceeded", "Throttling", "ThrottlingException", "InvalidParameterValue":
+				err = fmt.Errorf("%w: %w", removefirst.ErrRefused, err)
+			}
+		}
 		return fmt.Errorf("aws: terminating %s: %w", instanceID, err)
 	}
 	return nil

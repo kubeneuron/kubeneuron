@@ -4,6 +4,11 @@
 // the original machine after a remove-first delete may have reached the cloud.
 package removefirst
 
+import "errors"
+
+// ErrRefused denotes an explicit rejection of the initial delete request.
+var ErrRefused = errors.New("delete request refused")
+
 type Observation string
 
 const (

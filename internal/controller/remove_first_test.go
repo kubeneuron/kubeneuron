@@ -628,3 +628,33 @@ func TestConfirmedDeleteAdvancesReevaluatedStep(t *testing.T) {
 		t.Fatalf("state=%s index=%d %s", got.State, got.StepIndex, dump(trail(t, st, id)))
 	}
 }
+
+func TestRefusedDeleteSettlesOnlyWithOriginalTarget(t *testing.T) {
+	for _, state := range []removefirst.Observation{removefirst.SameMachine, removefirst.Listed, removefirst.Unknown} {
+		t.Run(string(state), func(t *testing.T) {
+			ctx := t.Context()
+			p := &retryCountingPlatform{plannedPlatform: newPlannedPlatform(), state: state}
+			c, st := plannedFixture(t, p.plannedPlatform)
+			id := openOn(t, c, "n1")
+			inc := mustIncident(t, st, id)
+			if err := c.claimDeleteIntent(ctx, inc, *inc.CloudIdentity, "gpu", "old", ""); err != nil {
+				t.Fatal(err)
+			}
+			c.platform = p
+			if err := c.settleRefusedDelete(ctx, inc); err != nil {
+				t.Fatal(err)
+			}
+			rec := mustIncident(t, st, id).RemoveFirst
+			wantOpen := state == removefirst.Unknown
+			if p.reads != 1 || rec.Open() != wantOpen || (!wantOpen && rec.Outcome != types.RemoveFirstNotStarted) {
+				t.Fatalf("reads=%d record=%+v", p.reads, rec)
+			}
+			other := *inc
+			other.ID = "another-incident"
+			err := st.WithTx(ctx, func(tx store.Tx) error { return poolPlanOpen(ctx, tx, &other, rec) })
+			if wantOpen && !errors.Is(err, errPoolPlanOpen) || !wantOpen && err != nil {
+				t.Fatalf("second incident pool check: %v", err)
+			}
+		})
+	}
+}

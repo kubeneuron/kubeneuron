@@ -14,6 +14,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	aks "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/containerservice/armcontainerservice/v9"
+
+	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
 )
 
 // pool is what this package reads from an AKS agent pool. raw is the pool as
@@ -183,6 +185,13 @@ func (a *sdkAPI) DeleteMachines(ctx context.Context, poolName string, names []st
 	}
 	poller, err := a.pools.BeginDeleteMachines(ctx, a.resourceGroup, a.cluster, poolName, params, nil)
 	if err != nil {
+		var response *azcore.ResponseError
+		if errors.As(err, &response) {
+			switch response.StatusCode {
+			case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+				return fmt.Errorf("%w: %w", removefirst.ErrRefused, err)
+			}
+		}
 		return err
 	}
 	_, err = poller.PollUntilDone(ctx, &runtime.PollUntilDoneOptions{Frequency: a.pollFrequency})

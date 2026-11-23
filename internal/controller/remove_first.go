@@ -313,8 +313,7 @@ func (c *Controller) sweepRemoveFirst(ctx context.Context) {
 	}
 }
 
-func (c *Controller) sweepTargetedDelete(ctx context.Context, inc *types.Incident) error {
-	rec := inc.RemoveFirst
+func (c *Controller) observeDeleteTarget(ctx context.Context, rec *types.RemoveFirstRecord) (removefirst.Observation, error) {
 	state := removefirst.Unknown
 	var err error
 	if observer, ok := c.platform.(interface {
@@ -324,6 +323,20 @@ func (c *Controller) sweepTargetedDelete(ctx context.Context, inc *types.Inciden
 		state, err = observer.ObservePinnedDelete(readCtx, *rec.DeleteTarget, rec.Pool, rec.MachineName)
 		cancel()
 	}
+	return state, err
+}
+
+func (c *Controller) settleRefusedDelete(ctx context.Context, inc *types.Incident) error {
+	state, err := c.observeDeleteTarget(ctx, inc.RemoveFirst)
+	if err != nil || (state != removefirst.SameMachine && state != removefirst.Listed) {
+		return nil
+	}
+	return c.endRemoveFirst(ctx, inc, types.RemoveFirstNotStarted, "The cloud provider refused the delete. The original machine is still present.")
+}
+
+func (c *Controller) sweepTargetedDelete(ctx context.Context, inc *types.Incident) error {
+	rec := inc.RemoveFirst
+	state, err := c.observeDeleteTarget(ctx, rec)
 	if err == nil && state == removefirst.Deleted {
 		return c.endRemoveFirst(ctx, inc, types.RemoveFirstDeleteConfirmed, "")
 	}
@@ -336,13 +349,13 @@ func (c *Controller) sweepTargetedDelete(ctx context.Context, inc *types.Inciden
 		reason = fmt.Sprintf("The removal of machine %s from pool %s was started more than an hour ago, and KubeNeuron could not confirm that it completed.", rec.MachineName, rec.Pool)
 	case err == nil && (state == removefirst.SameMachine || state == removefirst.Listed):
 		var owner string
-		err := c.store.WithTx(ctx, func(tx store.Tx) error {
+		ownerErr := c.store.WithTx(ctx, func(tx store.Tx) error {
 			var err error
 			owner, err = tx.NodeRemediationOwner(ctx, rec.DeleteTarget.Node, rec.DeleteTarget.NodeUID)
 			return err
 		})
-		if err != nil {
-			return err
+		if ownerErr != nil {
+			return ownerErr
 		}
 		if owner == inc.ID {
 			return c.retryTargetedDelete(ctx, inc, state)

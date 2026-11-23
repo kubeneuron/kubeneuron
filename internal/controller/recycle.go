@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
@@ -97,7 +98,9 @@ func (c *Controller) recycleNodeStep(ctx context.Context, inc *types.Incident, r
 				}
 				return c.claimDeleteIntent(ctx, inc, pin, pool, machine, successor)
 			})
-			if err == nil && inc.RemoveFirst.Open() {
+			if errors.Is(err, removefirst.ErrRefused) && inc.RemoveFirst.Open() {
+				err = errors.Join(err, c.settleRefusedDelete(ctx, inc))
+			} else if err == nil && inc.RemoveFirst.Open() {
 				err = c.endRemoveFirst(ctx, inc, types.RemoveFirstDeleteConfirmed, "")
 			}
 		} else if namer, ok := guard.(platform.NamedNodeReplacer); ok {
