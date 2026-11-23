@@ -27,6 +27,12 @@ API is `v1alpha1`.
 ### Fixed
 
 - The pools API and `kubeneuronctl pools` explain why add-first is unavailable on a multi-zone GKE pool and advise using a single-zone pool or selecting RemoveFirst.
+- The optional AMD detection source reads `amd-smi metric --json` both as a
+  device array (ROCm 6.4 and earlier) and as the object with a `gpu_data`
+  array that amd-smi prints from ROCm 7.0. Before, the second form gave no
+  readings and the agent fell back to rocm-smi. Any other output is logged
+  as an unreadable amd-smi result, never read as zero devices. Not validated
+  on AMD hardware.
 
 ## [v1.0.0-rc.2] - 2026-11-24
 

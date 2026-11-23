@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -144,9 +145,9 @@ func (w *Watcher) pollAMDSMI(ctx context.Context) ([]sample, error) {
 // the incident target) is per device, so an unindexed record could only be
 // attributed by guessing.
 func (w *Watcher) parseAMDSMI(out []byte) ([]sample, error) {
-	var devices []amdSMIDevice
-	if err := json.Unmarshal(out, &devices); err != nil {
-		return nil, fmt.Errorf("decode amd-smi JSON: %w", err)
+	devices, err := amdSMIDevices(out)
+	if err != nil {
+		return nil, err
 	}
 	var samples []sample
 	for _, d := range devices {
@@ -204,6 +205,60 @@ func (w *Watcher) parseAMDSMI(out []byte) ([]sample, error) {
 		return nil, fmt.Errorf("amd-smi reported %d devices, none of them attributable", len(devices))
 	}
 	return samples, nil
+}
+
+// amdSMIDevices returns the device records of `amd-smi metric --json` in
+// either of the two shapes amd-smi prints. Up to ROCm 6.4 the output is a bare
+// array of device records. From ROCm 7.0 the CLI groups records by kind into
+// one object, the GPUs under "gpu_data" next to keys such as "cpu_data" on
+// hosts with AMD CPUs. Any other shape is an error, never an empty list: an
+// empty list means "no devices", which the watcher handles as a statement
+// about the tool, while an unreadable shape must say that it was unreadable.
+func amdSMIDevices(out []byte) ([]amdSMIDevice, error) {
+	var top any
+	if err := json.Unmarshal(out, &top); err != nil {
+		return nil, fmt.Errorf("decode amd-smi JSON: %w", err)
+	}
+	var devices []amdSMIDevice
+	switch v := top.(type) {
+	case []any:
+		if err := json.Unmarshal(out, &devices); err != nil {
+			return nil, fmt.Errorf("decode amd-smi JSON device array: %w", err)
+		}
+	case map[string]any:
+		var grouped struct {
+			GPUData *[]amdSMIDevice `json:"gpu_data"`
+		}
+		if err := json.Unmarshal(out, &grouped); err != nil {
+			return nil, fmt.Errorf("decode amd-smi JSON gpu_data: %w", err)
+		}
+		if grouped.GPUData == nil {
+			keys := make([]string, 0, len(v))
+			for k := range v {
+				keys = append(keys, k)
+			}
+			slices.Sort(keys)
+			return nil, fmt.Errorf("unrecognized amd-smi JSON: an object without a gpu_data array (keys: %s)", strings.Join(keys, ", "))
+		}
+		devices = *grouped.GPUData
+	default:
+		return nil, fmt.Errorf("unrecognized amd-smi JSON: top level is %s, not a device array or an object with gpu_data", jsonKind(top))
+	}
+	return devices, nil
+}
+
+func jsonKind(v any) string {
+	switch v.(type) {
+	case nil:
+		return "null"
+	case string:
+		return "a string"
+	case float64:
+		return "a number"
+	case bool:
+		return "a boolean"
+	}
+	return fmt.Sprintf("%T", v)
 }
 
 // warnUnreadableSection reports, once per section, that the tool printed a
