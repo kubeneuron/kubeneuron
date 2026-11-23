@@ -62,7 +62,7 @@ Managed Grafana keeps its administrator account in your cluster. The installatio
 
 ## Deletion and access
 
-After Kubernetes deletes a node whose agent registered, the controller retains its record, including the node name, any recorded UID and labels, and any GPUs the agent reported (model and UUID), with no automatic expiry; the record stays in the workflow store and its backups.
+After Kubernetes deletes a node whose agent registered, the controller retains its record, including the node name, any recorded UID and labels, and any GPUs the agent reported (model and UUID), with no automatic expiry; the record stays in the workflow store and its backups. For an unpaused registration, the controller records when a complete inventory first observes the node missing after the Kubernetes cache has synced.
 
 By default, incidents and their audit records, including the identities of operators who approved, rejected or triggered actions, are kept indefinitely; set `-store-audit-retention` to prune terminal incidents with their audit after that period. Backups keep them for as long as the backups are kept.
 

@@ -32,6 +32,9 @@ const (
 	neuronDeviceResource = corev1.ResourceName("aws.amazon.com/neurondevice")
 )
 
+// NodeInventorySynced reports whether the initial node informer list completed.
+func (p *Platform) NodeInventorySynced() bool { return p.nodeLister.Load() != nil }
+
 // NodeInventory implements platform.AcceleratorInventory: every Node, with
 // its UID, labels and the capacity and allocatable count of each whole
 // accelerator device resource it advertises. It reads the synced node cache,

@@ -362,13 +362,17 @@ func (c *Controller) Nodes(ctx context.Context) ([]*types.Node, error) {
 	if err != nil || !ok {
 		return rows, err
 	}
-	live, err := inventory.NodeInventory(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("listing current nodes: %w", err)
-	}
-	uidByName := make(map[string]string, len(live))
-	for _, node := range live {
-		uidByName[node.Name] = node.UID
+	uidByName := c.inventory.nodeUIDs()
+	if uidByName == nil {
+		// Before the first synced snapshot, verify identities directly.
+		live, err := inventory.NodeInventory(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("listing current nodes: %w", err)
+		}
+		uidByName = make(map[string]string, len(live))
+		for _, node := range live {
+			uidByName[node.Name] = node.UID
+		}
 	}
 	var current []*types.Node
 	for _, row := range rows {

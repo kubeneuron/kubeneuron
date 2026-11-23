@@ -259,8 +259,11 @@ type Store interface {
 	// Kubernetes whose Node object is gone. A row an agent registered, or
 	// one a pause config holds, is kept.
 	DeleteKubernetesInventory(ctx context.Context, name string) error
+	MarkAgentNodeDeleted(ctx context.Context, name, uid string, observed time.Time) error
 	GetNode(ctx context.Context, name string) (*types.Node, error)
 	ListNodes(ctx context.Context) ([]*types.Node, error)
+	// ListRetainedNodes includes deleted registrations for historical reporting.
+	ListRetainedNodes(ctx context.Context) ([]*types.Node, error)
 	// ApplyNodeConfigPauses makes the given set the complete list of paused
 	// nodes: listed nodes become paused (inventory rows are created as
 	// needed), every other node is unpaused, atomically. Node configs are

@@ -642,7 +642,8 @@ type GPUInfo struct {
 
 // Node is an inventory entry: everything the controller knows about a node.
 type Node struct {
-	Name string `json:"name"`
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	Name      string     `json:"name"`
 	// UID is the immutable platform node identity. Kubernetes reports and
 	// acceleration gates bind to it so a deleted/recreated node with the same
 	// name cannot inherit old runtime evidence.

@@ -136,3 +136,48 @@ func TestUpdateNodeLabelsWritesOnlyTheAgentsNode(t *testing.T) {
 		t.Error("a row was created for a node no agent registered")
 	}
 }
+
+func TestNodeDeletionMarkerDefaultsToNull(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	if err := st.UpsertAgentRegistration(ctx, &types.Node{Name: "registered", UID: "uid", AgentLastSeen: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	var live bool
+	if err := st.sqlDB.QueryRowContext(ctx, "SELECT deleted_at IS NULL FROM nodes WHERE name = 'registered'").Scan(&live); err != nil {
+		t.Fatal(err)
+	}
+	if !live {
+		t.Fatal("a newly registered node has a deletion marker")
+	}
+	stamp := time.Now().UTC()
+	if err := st.MarkAgentNodeDeleted(ctx, "registered", "uid", stamp); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkAgentNodeDeleted(ctx, "registered", "uid", stamp.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := st.ListNodes(ctx)
+	if err != nil || len(nodes) != 0 {
+		t.Fatalf("live nodes = %v, err = %v", nodes, err)
+	}
+	retained, err := st.ListRetainedNodes(ctx)
+	if err != nil || len(retained) != 1 || retained[0].UID != "uid" {
+		t.Fatalf("retained nodes = %v, err = %v", retained, err)
+	}
+	node, err := st.GetNode(ctx, "registered")
+	if err != nil || node.DeletedAt == nil || !node.DeletedAt.Equal(stamp) {
+		t.Fatalf("retained record = %+v, err = %v", node, err)
+	}
+	if err := st.UpsertAgentRegistration(ctx, &types.Node{Name: "registered", UID: "replacement", AgentLastSeen: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkAgentNodeDeleted(ctx, "registered", "uid", stamp); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err = st.ListNodes(ctx)
+	if err != nil || len(nodes) != 1 || nodes[0].UID != "replacement" || nodes[0].DeletedAt != nil {
+		t.Fatalf("replacement after delayed sweep = %v, err = %v", nodes, err)
+	}
+
+}

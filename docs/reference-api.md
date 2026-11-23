@@ -155,8 +155,8 @@ replaces a node without approval only when the fault location is
 | Route | Purpose |
 |---|---|
 | `GET /api/v1/pools` | Read the leader’s cached accelerator pool assessments before an incident. The response contains a `pools` array with pool name, cloud, accelerator node count, replacement policy, capability flag, and assessment. When present, `checked_at` gives the UTC assessment time, `reason_code` and `reason` explain the status, and `action` gives the operator a next step. An explicit `RemoveFirst` policy omits the assessment status. Reads require operator authentication. A standby returns `503`. |
-| `GET /api/v1/nodes` | registered nodes with GPU inventory and heartbeat age; on Kubernetes, only records matching a current node name and UID |
-| `GET /api/v1/nodes/{node}` | one retained node record by name |
+| `GET /api/v1/nodes` | registered nodes with GPU inventory and heartbeat age; on Kubernetes, only records matching a node name and UID in the latest successful inventory |
+| `GET /api/v1/nodes/{node}` | one retained node record by name, including optional `deleted_at` when the controller observed its disappearance |
 | `GET /api/v1/nodes/{node}/accelerators` | latest per-vendor accelerator runtime reports |
 | `GET /api/v1/accelerator-health?node=<node>` | the elected leader's last read of every accelerator health source, one row per node, source, profile, rule and device (state `healthy`, `fault`, `unknown`, `ignored`, `no-signal`, `not-read-this-term`, or `available` for an agent's source), at most 5000 rows with `truncated`; `node` is an exact name; a standby answers `503`. See [accelerator health](accelerator-health.md#seeing-what-was-read) |
 | `GET /api/v1/targets?port=<p>` | Prometheus `http_sd` target groups for the same nodes returned by the node list |

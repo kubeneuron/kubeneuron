@@ -41,6 +41,18 @@ kubectl get clusterrole,clusterrolebinding,validatingwebhookconfiguration,mutati
 
 The remaining instructions apply to installations running v1.0.0-rc.1 or later.
 
+## Upgrading from v1.0.0-rc.2
+
+Back up the workflow store before upgrading. The node inventory migration adds
+`deleted_at` to existing records (SQLite 0039, PostgreSQL 0030). Existing rows
+start with a null timestamp. After its node cache has synced, the controller
+can mark a missing agent registration on a successful inventory sweep. Its
+record remains available at `GET /api/v1/nodes/{node}`.
+
+To return to rc.2, stop writes and restore the pre-upgrade store backup before
+starting the rc.2 controller. It refuses databases with a newer schema.
+Restoring the backup also discards workflow changes made after the backup.
+
 ## Before any upgrade
 
 After v1.0.0-rc.1, installations that omit `spec.safety.impactPreview.enabled` compute and store an advisory preview at each approval round and include its summary in configured approval notifications. Set it to `false` to retain the previous behavior. An existing explicit `false` remains effective. The default budget is 15 seconds. Workload-context resolvers and mandatory previews remain opt-in. For a round already awaiting approval, the controller computes a preview on explicit recompute or at the next park for approval; this default change preserves a timely approval already recorded for the same round and step.

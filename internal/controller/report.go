@@ -80,7 +80,7 @@ func (c *Controller) RecoveryReport(ctx context.Context, window time.Duration) (
 				"narrow the window (a truncated total would be wrong rather than merely incomplete)",
 			window, maxReportIncidents)
 	}
-	nodes, err := c.store.ListNodes(ctx)
+	nodes, err := c.store.ListRetainedNodes(ctx)
 	if err != nil {
 		return nil, err
 	}

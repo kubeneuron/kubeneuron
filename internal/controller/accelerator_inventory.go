@@ -22,10 +22,11 @@ import (
 // for vanished nodes saw, so the store is only listed when a Node came or
 // went.
 type inventorySync struct {
-	mu      sync.Mutex
-	written map[string]string
-	swept   *string
-	pools   []types.PoolAvailability
+	mu          sync.Mutex
+	written     map[string]string
+	currentUIDs map[string]string
+	swept       *string
+	pools       []types.PoolAvailability
 }
 
 // syncAcceleratorInventory records the nodes that advertise accelerator
@@ -40,6 +41,8 @@ func (c *Controller) syncAcceleratorInventory(ctx context.Context) {
 	if !ok {
 		return
 	}
+	syncState, tracksSync := inv.(interface{ NodeInventorySynced() bool })
+	canMarkDeleted := tracksSync && syncState.NodeInventorySynced()
 	nodes, err := inv.NodeInventory(ctx)
 	if err != nil {
 		if c.logOnce.first("inventory-read/" + err.Error()) {
@@ -107,8 +110,11 @@ func (c *Controller) syncAcceleratorInventory(ctx context.Context) {
 	c.retireVanishedRepairNodes(ctx, nodes)
 	c.inventory.keep(seen)
 	names := inventoryNames(present)
-	if !c.inventory.sweptFor(names) && c.removeVanishedInventory(ctx, present) {
+	if (canMarkDeleted || !c.inventory.sweptFor(names)) && c.removeVanishedInventory(ctx, present, canMarkDeleted) {
 		c.inventory.markSwept(names)
+	}
+	if canMarkDeleted {
+		c.inventory.rememberUIDs(nodes)
 	}
 	var reports []*types.AgentAcceleratorReport
 	if source, ok := c.store.(store.AcceleratorReportStore); ok {
@@ -149,7 +155,7 @@ func keepLostDevices(now, before []types.DeviceCount) []types.DeviceCount {
 // object was not in the read: the node is gone, and its row must not stay in
 // a pool or a report. Rows an agent registered are not touched. It reports
 // whether every vanished row was removed.
-func (c *Controller) removeVanishedInventory(ctx context.Context, present map[string]bool) bool {
+func (c *Controller) removeVanishedInventory(ctx context.Context, present map[string]bool, canMarkDeleted bool) bool {
 	rows, err := c.store.ListNodes(ctx)
 	if err != nil {
 		if c.logOnce.first("inventory-list/" + err.Error()) {
@@ -159,7 +165,19 @@ func (c *Controller) removeVanishedInventory(ctx context.Context, present map[st
 	}
 	complete := true
 	for _, row := range rows {
-		if row.InventorySource != types.InventoryKubernetes || !row.AgentLastSeen.IsZero() || present[row.Name] {
+		if present[row.Name] {
+			continue
+		}
+		if !row.AgentLastSeen.IsZero() {
+			if canMarkDeleted {
+				if err := c.store.MarkAgentNodeDeleted(ctx, row.Name, row.UID, time.Now().UTC()); err != nil {
+					c.log.Warn("could not mark a vanished agent node", "node", row.Name, "err", err)
+					complete = false
+				}
+			}
+			continue
+		}
+		if row.InventorySource != types.InventoryKubernetes {
 			continue
 		}
 		if err := c.store.DeleteKubernetesInventory(ctx, row.Name); err != nil {
@@ -218,9 +236,27 @@ func (s *inventorySync) markSwept(names string) {
 
 // reset forgets everything, so a new term as leader writes and sweeps once
 // from what the cluster and the store hold now.
+func (s *inventorySync) rememberUIDs(nodes []types.Node) {
+	uids := make(map[string]string, len(nodes))
+	for _, n := range nodes {
+		uids[n.Name] = n.UID
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.currentUIDs = uids
+}
+
+// The published map is immutable until replaced by the next snapshot.
+func (s *inventorySync) nodeUIDs() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.currentUIDs
+}
+
 func (s *inventorySync) reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.currentUIDs = nil
 	s.written = nil
 	s.swept = nil
 	s.pools = nil

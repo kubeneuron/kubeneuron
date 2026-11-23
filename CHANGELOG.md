@@ -19,6 +19,9 @@ API is `v1alpha1`.
 - The controller now has cluster-wide `get` access to persistent volume
   claims and persistent volumes to inspect zone affinity. It reads Kubernetes
   object metadata and specs, without reading volume contents.
+- A retained Kubernetes agent registration now exposes `deleted_at` when a
+  complete inventory observes its node missing. Recovery reports can still
+  use the recorded GPU inventory after the node disappears.
 
 ### Changed
 

@@ -31,9 +31,32 @@ import (
 // inventoryPlatform lists scripted accelerator nodes.
 type inventoryPlatform struct {
 	basePlatform
-	imu   sync.Mutex
-	nodes []types.Node
-	err   error
+	synced bool
+	imu    sync.Mutex
+	nodes  []types.Node
+	err    error
+}
+
+func (p *inventoryPlatform) NodeInventorySynced() bool { return p.synced }
+
+func TestAgentNodeDeletionRequiresSyncedSuccessfulInventory(t *testing.T) {
+	c, st, plat := inventoryFixture(t)
+	ctx := t.Context()
+	if err := st.UpsertAgentRegistration(ctx, &types.Node{Name: "worker", UID: "old", AgentLastSeen: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ synced, failed, deleted bool }{{false, false, false}, {true, true, false}, {true, false, true}} {
+		plat.synced = tc.synced
+		plat.err = nil
+		if tc.failed {
+			plat.err = errors.New("inventory unavailable")
+		}
+		c.syncAcceleratorInventory(ctx)
+		rows, err := st.ListNodes(ctx)
+		if err != nil || (len(rows) == 0) != tc.deleted {
+			t.Fatalf("case %+v: nodes %v, err %v", tc, rows, err)
+		}
+	}
 }
 
 func (p *inventoryPlatform) NodeInventory(context.Context) ([]types.Node, error) {
@@ -755,17 +778,29 @@ func TestNodesAndDiscoveryUseCurrentIdentities(t *testing.T) {
 			}
 		}
 	}
+	inv.synced = true
 	register("first")
 	inv.nodes = []types.Node{{Name: "worker", UID: "first"}}
+	c.syncAcceleratorInventory(ctx)
 	check(http.StatusOK, "first")
 	inv.nodes = nil
+	c.syncAcceleratorInventory(ctx)
 	check(http.StatusOK, "")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/nodes/worker", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	var detail types.Node
+	if err := json.Unmarshal(resp.Body.Bytes(), &detail); err != nil || resp.Code != http.StatusOK || detail.DeletedAt == nil || detail.UID != "first" {
+		t.Fatalf("historical node: HTTP %d %s", resp.Code, resp.Body.String())
+	}
 	inv.nodes = []types.Node{{Name: "worker", UID: "second"}}
+	c.syncAcceleratorInventory(ctx)
 	check(http.StatusOK, "")
 	register("second")
 	check(http.StatusOK, "second")
 	inv.err = errors.New("inventory unavailable")
-	check(http.StatusInternalServerError, "")
+	check(http.StatusOK, "second")
 	c.platform = nil
 	check(http.StatusOK, "second")
 }

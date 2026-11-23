@@ -755,3 +755,27 @@ func TestReportCheckpointAgeAtDrain(t *testing.T) {
 		t.Fatalf("unexpected timings: %+v", job)
 	}
 }
+
+func TestRecoveryReportCountsGPUsOfDeletedAgentNode(t *testing.T) {
+	c, st := newIngestTestController(t)
+	ctx := t.Context()
+	now := time.Now().UTC()
+	node := &types.Node{Name: "retired", UID: "first", AgentLastSeen: now, GPUs: []types.GPUInfo{{UUID: "a"}, {UUID: "b"}}}
+	if err := st.UpsertAgentRegistration(ctx, node); err != nil {
+		t.Fatal(err)
+	}
+	inc := incident("historical", types.ClassFellOffBus, node.Name, "", types.StateResolved, now.Add(-2*time.Hour), now.Add(-time.Hour))
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkAgentNodeDeleted(ctx, node.Name, node.UID, now); err != nil {
+		t.Fatal(err)
+	}
+	report, err := c.RecoveryReport(ctx, 3*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.DegradedGPUHours != 2 || report.AssumedSingleGPU != 0 {
+		t.Fatalf("degraded GPU-hours %v, assumed-single-GPU incidents %d", report.DegradedGPUHours, report.AssumedSingleGPU)
+	}
+}

@@ -1139,6 +1139,8 @@ func (q *Queries) UpsertAgentRegistration(ctx context.Context, n *types.Node) er
 		VALUES (?, ?, 'agent', ?, ?, ?, ?, 'agent')
 		ON CONFLICT(name) DO UPDATE SET
 			node_uid=CASE WHEN excluded.node_uid<>'' THEN excluded.node_uid ELSE nodes.node_uid END,
+			deleted_at=CASE WHEN excluded.node_uid<>'' AND excluded.node_uid<>nodes.node_uid
+				THEN NULL ELSE nodes.deleted_at END,
 			gpus=excluded.gpus, boot_id=excluded.boot_id,
 			agent_last_seen=excluded.agent_last_seen,
 			agent_arming=excluded.agent_arming,
@@ -1205,13 +1207,31 @@ func (c *Core) ApplyNodeConfigPauses(ctx context.Context, pausedNodes []string) 
 	return tx.Commit()
 }
 
+// MarkAgentNodeDeleted records the first observed disappearance. Comparing the
+// UID prevents a delayed sweep from marking a replacement under the same name.
+func (q *Queries) MarkAgentNodeDeleted(ctx context.Context, name, uid string, observed time.Time) error {
+	_, err := q.db.ExecContext(ctx, `UPDATE nodes SET deleted_at=?
+		WHERE name=? AND node_uid=? AND agent_last_seen IS NOT NULL
+		AND paused=0 AND deleted_at IS NULL`, ts(observed), name, uid)
+	return err
+}
+
 func (q *Queries) GetNode(ctx context.Context, name string) (*types.Node, error) {
 	row := q.db.QueryRowContext(ctx, nodeSelect+` WHERE name=?`, name)
 	return scanNode(row)
 }
 
 func (q *Queries) ListNodes(ctx context.Context) ([]*types.Node, error) {
-	rows, err := q.db.QueryContext(ctx, nodeSelect+` ORDER BY name`)
+	return q.listNodes(ctx, nodeSelect+` WHERE deleted_at IS NULL ORDER BY name`)
+}
+
+// ListRetainedNodes includes deleted nodes for historical reports.
+func (q *Queries) ListRetainedNodes(ctx context.Context) ([]*types.Node, error) {
+	return q.listNodes(ctx, nodeSelect+` ORDER BY name`)
+}
+
+func (q *Queries) listNodes(ctx context.Context, query string) ([]*types.Node, error) {
+	rows, err := q.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -1229,21 +1249,25 @@ func (q *Queries) ListNodes(ctx context.Context) ([]*types.Node, error) {
 
 const nodeSelect = `
 	SELECT name, node_uid, platform, labels, ssh_addr, bmc_addr, gpus, boot_id, paused, agent_last_seen, agent_arming,
-		inventory_source, devices
+		inventory_source, devices, deleted_at
 	FROM nodes`
 
 func scanNode(r rowScanner) (*types.Node, error) {
 	var n types.Node
 	var labels, gpus, arming, devices string
 	var paused int
-	var lastSeen sql.NullString
+	var lastSeen, deletedAt sql.NullString
 	err := r.Scan(&n.Name, &n.UID, &n.Platform, &labels, &n.SSHAddr, &n.BMCAddr, &gpus, &n.BootID, &paused, &lastSeen, &arming,
-		&n.InventorySource, &devices)
+		&n.InventorySource, &devices, &deletedAt)
 	if err == sql.ErrNoRows {
 		return nil, store.ErrNotFound
 	}
 	if err != nil {
 		return nil, err
+	}
+	if deletedAt.Valid {
+		at := parseTS(deletedAt.String)
+		n.DeletedAt = &at
 	}
 	n.Paused = paused != 0
 	n.AgentArming = types.AgentArming(arming)
