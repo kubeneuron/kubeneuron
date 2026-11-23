@@ -49,7 +49,9 @@ set -Eeuo pipefail
 #      toggle may roll or restart a Pod: every controller and agent Pod's
 #      UID and container restart counts are snapshotted before the policy is
 #      touched and must be identical after enable and after disable;
-#   5. roll the controller/agent images back to BASELINE with the policies
+#   5. apply the BASELINE install manifest (CRDs and operator: the HEAD
+#      operator starts the agent with arguments a BASELINE agent rejects),
+#      roll the controller/agent images back to BASELINE with the policies
 #      off and prove the BASELINE binary refuses the migrated store with the
 #      schema-version error (docs/upgrade.md "Rolling back"); then perform the documented restore — operator to zero,
 #      controller to zero, the pre-upgrade snapshot copied back (the SQLite
@@ -928,18 +930,57 @@ upgrade_to_head() {
 	done
 	for store in $STORES; do
 		wait_converged "$store" "$label" "kubeneuron-controller:$head_tag" "kubeneuron-agent:$head_tag"
+		note_runtime_reader "$store" "$label"
+	done
+}
+
+note_runtime_reader() {
+	# Whatever operator runs records whether the controller may read its
+	# published runtime ConfigMap: what grants it, and what the API answers
+	# for the controller's ServiceAccount.
+	local store=$1 label=$2 ns root rbac can
+	ns=$(store_ns "$store")
+	root=$(root_name "$store")
+	rbac=$({
+		"$KUBECTL_BIN" -n "$ns" get role "$root-runtime-reader" -o json 2>/dev/null || echo null
+		"$KUBECTL_BIN" -n "$ns" get rolebinding "$root-runtime-reader" -o json 2>/dev/null || echo null
+	} | "$JQ_BIN" -sc '{role: (.[0] | if . then {rules, owner: [.metadata.ownerReferences[]?.kind]} else "absent" end),
+		binding: (.[1] | if . then [.subjects[]? | .name] else "absent" end)}')
+	can=$("$KUBECTL_BIN" auth can-i get "configmap/$root-runtime" -n "$ns" \
+		--as="system:serviceaccount:$ns:$root-controller" 2>/dev/null || true)
+	note "[$store] $label: runtime ConfigMap reader $rbac; controller can get $root-runtime: ${can:-no}"
+}
+
+rollback_operator_to_baseline() {
+	# The BASELINE install manifest goes first: the HEAD operator renders
+	# agent arguments a BASELINE agent does not accept (HEAD's agent takes
+	# --nvidia-runtime-devices, rc.1's exits on it), so BASELINE images under
+	# the HEAD operator never become Ready. The BASELINE CRDs drop the fields
+	# HEAD added from what the API server serves; the root objects record
+	# which HEAD fields they carried before and what is served after.
+	local store fields
+	for store in $STORES; do
+		fields=$("$KUBECTL_BIN" get kubeneuron "$(root_name "$store")" -o json |
+			"$JQ_BIN" -c '{deviceAccess: .spec.agent.deviceAccess, impactPreview: .spec.safety.impactPreview}')
+		note "[$store] before the $BASELINE manifest, the root object serves HEAD fields $fields"
+	done
+	note "rollback step 1/2: $BASELINE install manifest (CRDs and operator) before any image moves"
+	"$KUBECTL_BIN" apply -f "$baseline_manifest" >/dev/null
+	pin_operator_pull_policy
+	for store in $STORES; do
+		fields=$("$KUBECTL_BIN" get kubeneuron "$(root_name "$store")" -o json |
+			"$JQ_BIN" -c '{deviceAccess: .spec.agent.deviceAccess, impactPreview: .spec.safety.impactPreview}')
+		note "[$store] after the $BASELINE manifest, the root object serves $fields"
 	done
 }
 
 rollback_images_to_baseline() {
-	# Patch every root object back to the previous images. The operator and
-	# CRDs stay at HEAD (the separate "Operator/CRDs" path re-applies the
-	# previous install manifest; not what this rehearsal claims), and every
-	# new policy block has already been switched off through the CR, so the
-	# HEAD operator compiles nothing the BASELINE controller does not know.
-	# What the BASELINE controller cannot cross is the store: HEAD migrated it
-	# forward, and the old binary must refuse it rather than downgrade it.
-	note "rollback: controller/agent images back to $BASELINE on every root object (CRDs, operator untouched; the store still carries the HEAD schema)"
+	# Patch every root object back to the previous images, under the
+	# BASELINE operator and CRDs. Every new policy block has already been
+	# switched off through the CR. What the BASELINE controller cannot cross
+	# is the store: HEAD migrated it forward, and the old binary must refuse
+	# it rather than downgrade it.
+	note "rollback step 2/2: controller/agent images back to $BASELINE on every root object (the store still carries the HEAD schema)"
 	local store
 	for store in $STORES; do
 		"$KUBECTL_BIN" patch kubeneuron "$(root_name "$store")" --type=merge -p "{
@@ -1451,6 +1492,7 @@ stop_port_forward
 
 # --- rollback to baseline: refusal, then the documented restore --------------------------
 
+rollback_operator_to_baseline
 rollback_images_to_baseline
 for store in $STORES; do
 	wait_schema_refusal "$store"
@@ -1464,6 +1506,7 @@ done
 scale_operator 1
 for store in $STORES; do
 	wait_converged "$store" "restore + rollback" "${BASELINE_REGISTRY}/controller:${BASELINE}" "${BASELINE_REGISTRY}/agent:${BASELINE}"
+	note_runtime_reader "$store" "restore + rollback"
 done
 
 for store in $STORES; do
@@ -1486,8 +1529,8 @@ for store in $STORES; do
 		code=$(api_code "$store" /dev/null "$path")
 		[[ $code == 200 ]] || die "[$store] rolled-back $BASELINE controller answered $code on ${path#*"${public_port}"}, want 200"
 	done
-	# The policies were disabled before the images moved, and the HEAD
-	# operator keeps reconciling: the BASELINE controller must be running
+	# The policies were disabled before the images moved, and the BASELINE
+	# operator reconciles them: the BASELINE controller must be running
 	# under exactly the read-only pods grant it was built for.
 	assert_pod_verbs "$store" "get,list,watch" "after restore and image rollback"
 	logs=$("$KUBECTL_BIN" -n "$(store_ns "$store")" logs "pod/$(leader_pod "$store")" --tail=-1 2>&1)
@@ -1544,4 +1587,4 @@ if grep -Eiq 'forbidden|panic|fatal' <<<"$operator_logs"; then
 	die "operator logs contain an unexpected RBAC/fatal error"
 fi
 
-note "PASS: $BASELINE -> HEAD -> $BASELINE (refused the migrated schema as documented; restored the pre-upgrade snapshot, then the images) -> HEAD converged for: $STORES; the baseline incident and its audit survived the restore on every store, the runtime contract lifecycle ran to ReadyForApproval with a hash-chained audit both before the rollback and again on the restored, re-migrated store, the checkpoint coordination policy granted pods patch only while enabled, and the workload-safe blocks granted the three read-only context rules only while enabled; both rolled or restarted no Pod when toggled and were off before rollback (CPU-only kind, synthetic accelerator evidence, no hardware claim, no real checkpoint workload)"
+note "PASS: $BASELINE -> HEAD -> $BASELINE (BASELINE install manifest first; refused the migrated schema as documented; restored the pre-upgrade snapshot) -> HEAD converged for: $STORES; the baseline incident and its audit survived the restore on every store, the runtime contract lifecycle ran to ReadyForApproval with a hash-chained audit both before the rollback and again on the restored, re-migrated store, the checkpoint coordination policy granted pods patch only while enabled, and the workload-safe blocks granted the three read-only context rules only while enabled; both rolled or restarted no Pod when toggled and were off before rollback (CPU-only kind, synthetic accelerator evidence, no hardware claim, no real checkpoint workload)"
