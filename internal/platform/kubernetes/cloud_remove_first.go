@@ -64,3 +64,22 @@ func (p *Platform) ContinueRemoveFirst(ctx context.Context, pin cloud.NodeIdenti
 	}
 	return provider.ContinueRemoveFirst(ctx, plan)
 }
+
+// RetryListedMachineDelete checks the live Node before repeating a
+// name-addressed AKS delete. A matching UID alone does not pin its VM.
+func (p *Platform) RetryListedMachineDelete(ctx context.Context, pin cloud.NodeIdentity, pool, machine string) error {
+	provider, ok := p.recycler.(interface {
+		DeleteListedMachine(context.Context, string, string, string) error
+	})
+	if !ok {
+		return cloud.ErrRemoveFirstUnplanned
+	}
+	live, err := p.MatchCloudNodeUID(ctx, pin.Node, pin.NodeUID)
+	if err != nil {
+		return err
+	}
+	if err := pin.Match(live); err != nil {
+		return err
+	}
+	return provider.DeleteListedMachine(ctx, pin.InstanceID, pool, machine)
+}

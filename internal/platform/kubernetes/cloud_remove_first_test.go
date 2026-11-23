@@ -60,3 +60,23 @@ func TestRemoveFirstGuardsOnlyTheCommit(t *testing.T) {
 		t.Fatalf("unplanned provider: %v", err)
 	}
 }
+
+type listedMachineRecycler struct {
+	repairRecycler
+	deletes int
+}
+
+func (r *listedMachineRecycler) DeleteListedMachine(context.Context, string, string, string) error {
+	r.deletes++
+	return nil
+}
+
+func TestRetryListedMachineDeleteChecksLiveProviderID(t *testing.T) {
+	rec := &listedMachineRecycler{}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker", UID: "original"}, Spec: corev1.NodeSpec{ProviderID: "cloud:///zone/i-new"}, Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{BootID: "boot"}}}
+	p := &Platform{client: fake.NewSimpleClientset(node), recycler: rec}
+	pin := cloud.NodeIdentity{Node: "worker", NodeUID: "original", BootID: "boot", InstanceID: "i-old", ProviderID: "cloud:///zone/i-old"}
+	if err := p.RetryListedMachineDelete(t.Context(), pin, "gpu", "machine"); !errors.Is(err, cloud.ErrIdentityChanged) || rec.deletes != 0 {
+		t.Fatalf("changed provider ID: err=%v, deletes=%d", err, rec.deletes)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
 // ObserveRemoveFirstDelete uses the pool and machine saved before deletion.
@@ -35,4 +36,17 @@ func (p *Provider) ObserveRemoveFirstDelete(ctx context.Context, instanceID, poo
 		}
 	}
 	return result, nil
+}
+
+// DeleteListedMachine rechecks membership immediately before sending the
+// name-based delete. Its caller must first check the live Node identity.
+func (p *Provider) DeleteListedMachine(ctx context.Context, instanceID, poolName, machineName string) error {
+	status, err := p.ObserveRemoveFirstDelete(ctx, instanceID, poolName, machineName)
+	if err != nil {
+		return err
+	}
+	if status != removefirst.Listed {
+		return cloud.ErrIdentityChanged
+	}
+	return p.api.DeleteMachines(ctx, poolName, []string{machineName})
 }
