@@ -968,6 +968,23 @@ func (r AcceleratorReadiness) valid() bool {
 		r == AcceleratorReadinessObserved
 }
 
+// Readiness reasons an NVIDIA agent gives when DCGM did not answer it. A
+// reason that names DCGM otherwise, as a version or GPU count that does not
+// match, means DCGM answered.
+const (
+	ReasonDCGMNotAvailable           = "DCGM is not available to the agent; device health is not checked"
+	ReasonDCGMAttestationUnavailable = "DCGM runtime attestation unavailable"
+	ReasonPrefixDCGMVersionProbe     = "DCGM runtime version probe failed: "
+	ReasonPrefixDCGMDiscoveryProbe   = "DCGM discovery probe failed: "
+)
+
+// DCGMNotAvailable reports whether a readiness reason says DCGM did not
+// answer the agent.
+func DCGMNotAvailable(reason string) bool {
+	return reason == ReasonDCGMNotAvailable || reason == ReasonDCGMAttestationUnavailable ||
+		strings.HasPrefix(reason, ReasonPrefixDCGMVersionProbe) || strings.HasPrefix(reason, ReasonPrefixDCGMDiscoveryProbe)
+}
+
 // AgentAcceleratorReport is the vendor-neutral, agent-owned runtime report
 // for one vendor on one node. It intentionally carries no execution request.
 // All topology and capability data is declarative and is later subject to

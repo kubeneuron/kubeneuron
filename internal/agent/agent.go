@@ -18,11 +18,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -834,6 +836,24 @@ func (a *Agent) reportKernelLog() {
 		via = "journal"
 	}
 	reportKernelSource(a.kmsgReadable || journalOK, reason, via)
+}
+
+// stampDriverHealth marks each physical GPU with the time of the node health
+// probe that passed in the same observation, through the real nvidia-smi
+// only.
+func (a *Agent) stampDriverHealth(devices []types.AgentAcceleratorDevice, snapshot nvidia.PreflightReport) {
+	health := snapshot.NodeHealth
+	target := accelerator.Target{NodeName: a.cfg.NodeName, Vendor: accelerator.VendorNVIDIA, Scope: accelerator.ScopeNode}
+	if _, realDriver := a.driver.(*nvml.SMI); !realDriver || health.Target != target || health.Status != accelerator.HealthHealthy ||
+		health.CheckedAt.IsZero() || snapshot.Inventory.ObservedAt.IsZero() || snapshot.Inventory.NodeName != target.NodeName ||
+		snapshot.Inventory.Vendor != target.Vendor {
+		return
+	}
+	for i := range devices {
+		if devices[i].Kind == types.AcceleratorDevicePhysical && devices[i].Family == types.AcceleratorFamilyGPU {
+			devices[i].DriverHealthyAt = &health.CheckedAt
+		}
+	}
 }
 
 // reportKernelSourceAvailability exposes the loss of AMD kernel fault evidence
@@ -1762,12 +1782,18 @@ func (a *Agent) nvidiaAcceleratorReportWithProfile(ctx context.Context, profile 
 		version, probeErr := a.nvidia.runtimeProber.Version(preflightCtx)
 		if probeErr != nil {
 			dcgmUnavailable = true
-			snapshot.Reasons = append(snapshot.Reasons, fmt.Sprintf("DCGM runtime version probe failed: %v", probeErr))
+			reason := types.ReasonPrefixDCGMVersionProbe + probeErr.Error()
+			if errors.Is(probeErr, fs.ErrNotExist) || errors.Is(probeErr, exec.ErrNotFound) {
+				// No dcgmi in the agent's container says nothing of DCGM
+				// elsewhere on the node.
+				reason = types.ReasonDCGMNotAvailable
+			}
+			snapshot.Reasons = append(snapshot.Reasons, reason)
 		} else {
 			gpuCount, discoveryErr := a.nvidia.runtimeProber.GPUCount(preflightCtx)
 			if discoveryErr != nil {
 				dcgmUnavailable = true
-				snapshot.Reasons = append(snapshot.Reasons, fmt.Sprintf("DCGM discovery probe failed: %v", discoveryErr))
+				snapshot.Reasons = append(snapshot.Reasons, types.ReasonPrefixDCGMDiscoveryProbe + discoveryErr.Error())
 			} else if gpuCount != len(snapshot.Inventory.Devices) {
 				snapshot.Reasons = append(snapshot.Reasons,
 					fmt.Sprintf("DCGM discovery found %d GPUs, nvidia-smi inventory found %d", gpuCount, len(snapshot.Inventory.Devices)))
@@ -1799,18 +1825,8 @@ func (a *Agent) nvidiaAcceleratorReportWithProfile(ctx context.Context, profile 
 		// turn a successful health probe into an unverifiable runtime profile.
 		if cleanPreflight && dcgmUnavailable && strings.TrimSpace(report.DriverVersion) != "" && strings.TrimSpace(profile.RuntimeVersion) != "" {
 			report.Readiness = types.AcceleratorReadinessDegraded
-			report.ReadinessReasons = append(report.ReadinessReasons, "NVIDIA runtime is not attested by matching local DCGM version and discovery probes", "DCGM runtime attestation unavailable")
-			health := snapshot.NodeHealth
-			target := accelerator.Target{NodeName: a.cfg.NodeName, Vendor: accelerator.VendorNVIDIA, Scope: accelerator.ScopeNode}
-			if _, realDriver := a.driver.(*nvml.SMI); realDriver && health.Target == target && health.Status == accelerator.HealthHealthy &&
-				!health.CheckedAt.IsZero() && !snapshot.Inventory.ObservedAt.IsZero() && snapshot.Inventory.NodeName == target.NodeName &&
-				snapshot.Inventory.Vendor == target.Vendor {
-				for i := range devices {
-					if devices[i].Kind == types.AcceleratorDevicePhysical && devices[i].Family == types.AcceleratorFamilyGPU {
-						devices[i].DriverHealthyAt = &health.CheckedAt
-					}
-				}
-			}
+			report.ReadinessReasons = append(report.ReadinessReasons, "NVIDIA runtime is not attested by matching local DCGM version and discovery probes", types.ReasonDCGMAttestationUnavailable)
+			a.stampDriverHealth(devices, snapshot)
 		} else if strings.TrimSpace(report.DriverVersion) == "" || strings.TrimSpace(report.RuntimeVersion) == "" || strings.TrimSpace(profile.RuntimeVersion) == "" {
 			report.Readiness = types.AcceleratorReadinessDegraded
 			report.ReadinessReasons = append(report.ReadinessReasons,
@@ -1834,6 +1850,9 @@ func (a *Agent) nvidiaAcceleratorReportWithProfile(ctx context.Context, profile 
 		}
 	case nvidia.PreflightObservedOnly:
 		report.Readiness = types.AcceleratorReadinessDegraded
+		// Observed-only withholds the reset, not the driver: inventory and
+		// the node health probe both passed to get here.
+		a.stampDriverHealth(devices, snapshot)
 	case nvidia.PreflightBlocked:
 		report.Readiness = types.AcceleratorReadinessNotReady
 	default:

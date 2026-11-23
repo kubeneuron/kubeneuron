@@ -841,6 +841,13 @@ allocation, and the driver's management library. It sends the controller each
 GPU's model and UUID and the driver version; see
 [Data and privacy](data-and-privacy.md).
 
+In this mode DCGM is not available to the agent and a cloud GPU usually
+cannot be reset, so the agent's report is `degraded` and the runtime is not
+attested. A replacement is then verified by the new node's readiness,
+advertised capacity and the devices its agent lists, at least as many as the
+old node's agent reported; device health is not checked. The resolution says
+so (see [Verification after a replacement](playbook-authoring.md#verification-after-a-replacement)).
+
 With node-level actions enabled, the agent runs privileged and does not ask
 the runtime for GPUs: it reads them only through the host tooling you mount
 with `hostTooling`, and without it reports none (`HostToolingNotConfigured`).

@@ -416,7 +416,7 @@ func TestReplacementWithoutEvidenceGoesToAPerson(t *testing.T) {
 	}{
 		{"no report", "", nil, "", "No fresh accelerator report from new node n9."},
 		{"no report from the pool node", recoverymode.RemoveFirst, nil, "", "No fresh accelerator report from new node n10."},
-		{"no devices", "", nil, types.AcceleratorReadinessNotReady, "New node n9 reports no accelerator devices."},
+		{"not ready report", "", nil, types.AcceleratorReadinessNotReady, "New node n9 reports its accelerators not ready."},
 		{"not ready", recoverymode.RemoveFirst, func(p *poolPlatform) { p.nodeReady = false }, types.AcceleratorReadinessReady, "New node n10 is not Ready."},
 		{"no new pool node", recoverymode.RemoveFirst, func(p *poolPlatform) { p.extra = -1 }, "", "No node joined pool train after the removal."},
 		{"several new pool nodes", recoverymode.RemoveFirst, func(p *poolPlatform) { p.extra = 1 }, types.AcceleratorReadinessReady,

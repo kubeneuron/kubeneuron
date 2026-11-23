@@ -96,6 +96,9 @@ type cloudReplacement struct {
 	// accelerators of the incident's vendor before the replacement. False also when this
 	// was not recorded, as for a replacement started by an older release.
 	noDevices bool
+	// devices is how many physical devices the replaced node's agent
+	// reported; 0 when it reported none or this was not recorded.
+	devices int
 }
 
 // recordReplacedNodeDevices writes, once per node and before the replacement
@@ -131,12 +134,18 @@ func (c *Controller) recordReplacedNodeDevices(ctx context.Context, inc *types.I
 		return err
 	}
 	devices := report != nil && report.NodeUID == pin.NodeUID
-	if !devices {
+	count := 0
+	if devices {
+		count = physicalDevices(report)
+	}
+	if count == 0 {
 		registered, err := c.store.GetNode(ctx, pin.Node)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
-		devices = registered != nil && registered.UID == pin.NodeUID && len(registered.GPUs) > 0
+		if registered != nil && registered.UID == pin.NodeUID && len(registered.GPUs) > 0 {
+			devices, count = true, len(registered.GPUs)
+		}
 	}
 	result := fmt.Sprintf("the agent on %s has reported %s accelerators; the new node's report is checked", pin.Node, vendor)
 	if !devices {
@@ -145,8 +154,20 @@ func (c *Controller) recordReplacedNodeDevices(ctx context.Context, inc *types.I
 	return c.store.AppendAudit(ctx, &types.AuditEntry{
 		IncidentID: inc.ID, Time: time.Now(), FromState: inc.State, ToState: inc.State, Actor: "system",
 		Action: replacedDevicesAction, DryRun: inc.DryRun, Result: result,
-		Params: map[string]string{"node": pin.Node, "node_uid": pin.NodeUID, "vendor": string(vendor), "devices": strconv.FormatBool(devices)},
+		Params: map[string]string{"node": pin.Node, "node_uid": pin.NodeUID, "vendor": string(vendor), "devices": strconv.FormatBool(devices),
+			"device_count": strconv.Itoa(count)},
 	})
+}
+
+// physicalDevices counts the physical devices a report lists.
+func physicalDevices(report *types.AgentAcceleratorReport) int {
+	n := 0
+	for _, device := range report.Devices {
+		if device.ID != "" && device.Kind == types.AcceleratorDevicePhysical {
+			n++
+		}
+	}
+	return n
 }
 
 // recordReplacementPool writes, before a remove-first delete, which pool the
@@ -274,6 +295,7 @@ func (c *Controller) findCloudReplacement(ctx context.Context, inc *types.Incide
 	}
 	if devices != nil {
 		found.noDevices = devices.Params["devices"] == "false"
+		found.devices, _ = strconv.Atoi(devices.Params["device_count"])
 	}
 	if s := inc.Successor; s != nil && s.Outcome == types.SuccessorReplaced && s.ReadyAt != nil {
 		// The successor's agent registered before it was accepted.
@@ -493,7 +515,7 @@ func (c *Controller) verifyReplacementInventory(ctx context.Context, inc *types.
 	}
 	// A node whose agent never reported is not asked for a report from the
 	// new node; one that sends devices anyway is checked by them.
-	if !reported || !r.agent || r.noDevices && (report == nil || !inventoryMatches(report, "", r.since, now)) {
+	if !reported || !r.agent || r.noDevices && (report == nil || replacementDevicesHeld(report, node.Name, r.devices) != "") {
 		if len(want) == 0 && r.successor == nil {
 			return false, fmt.Sprintf("The incident recorded no accelerators to compare new node %s against.", node.Name)
 		}
@@ -512,14 +534,56 @@ func (c *Controller) verifyReplacementInventory(ctx context.Context, inc *types.
 	if report == nil {
 		return false, fmt.Sprintf("No fresh accelerator report from new node %s.", node.Name)
 	}
-	if !inventoryMatches(report, "", r.since, now) {
-		return false, fmt.Sprintf("New node %s reports no accelerator devices.", node.Name)
+	if reason := replacementDevicesHeld(report, node.Name, r.devices); reason != "" {
+		return false, reason
 	}
+	return true, replacementDepth(report, r.since, now)
+}
+
+// replacementDevicesHeld says why the new node's report does not stand for
+// the replaced node's devices, or "" when it does: it lists physical
+// devices, at least as many as the replaced node's agent reported, and its
+// agent does not call them not ready. A runtime the build cannot attest, as
+// with no DCGM or no runtime profile, does not hold it: the replaced node
+// gave no more than that either.
+func replacementDevicesHeld(report *types.AgentAcceleratorReport, node string, want int) string {
+	have := 0
+	for _, device := range report.Devices {
+		if device.ID != "" && device.Kind == types.AcceleratorDevicePhysical &&
+			(report.Readiness == types.AcceleratorReadinessObserved || device.Family == types.AcceleratorFamilyGPU) {
+			have++
+		}
+	}
+	switch {
+	case have == 0:
+		return fmt.Sprintf("New node %s reports no accelerator devices.", node)
+	case have < want:
+		return fmt.Sprintf("New node %s reports %d of %d accelerator devices.", node, have, want)
+	case report.Readiness == types.AcceleratorReadinessNotReady,
+		report.Readiness == types.AcceleratorReadinessObserved && vendorRuntimeAttested(report.Vendor):
+		return fmt.Sprintf("New node %s reports its accelerators not ready.", node)
+	}
+	return ""
+}
+
+// replacementDepth is the resolution's sentence on what the new node's
+// report confirmed, no more than its evidence says.
+func replacementDepth(report *types.AgentAcceleratorReport, since, now time.Time) string {
 	switch report.Readiness {
-	case types.AcceleratorReadinessDegraded:
-		return true, "Accelerator inventory and driver probe observed; DCGM not present, device health not checked."
+	case types.AcceleratorReadinessReady:
+		return "Fresh accelerator inventory and driver health observed."
 	case types.AcceleratorReadinessObserved:
-		return true, "Device presence observed; runtime not attested."
+		return "Device presence observed; runtime not attested."
 	}
-	return true, "Fresh accelerator inventory and driver health observed."
+	missing := "runtime not attested"
+	for _, reason := range report.ReadinessReasons {
+		if types.DCGMNotAvailable(reason) {
+			missing = "DCGM not available to the agent"
+			break
+		}
+	}
+	if inventoryMatches(report, "", since, now) {
+		return "Accelerator inventory and driver probe observed; " + missing + ", device health not checked."
+	}
+	return "Accelerator inventory observed on the new node; " + missing + ", device health not checked."
 }

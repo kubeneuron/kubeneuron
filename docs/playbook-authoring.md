@@ -671,7 +671,7 @@ accelerators the incident covered:
 
 | Accelerator | What is confirmed |
 |---|---|
-| NVIDIA (`nvidia.com/...`) | a fresh agent report from the new node lists a ready device, or a driver probe ran after the replacement |
+| NVIDIA (`nvidia.com/...`) | a fresh agent report from the new node lists its GPUs, at least as many as the old node's agent reported, and does not call them not ready. A runtime that is not attested (no DCGM available to the agent, no runtime profile, or a GPU that cannot be reset on a virtualized instance) does not hold the new node: the old node gave no more |
 | AWS Neuron (`aws.amazon.com/neuron...`) | a fresh agent report from the new node lists a device: device presence observed; runtime not attested |
 | any other, or a pool whose nodes run no agent | no agent report exists for it, so KubeNeuron uses the node's Kubernetes readiness and advertised accelerator capacity; where the old node ran an agent, the new node's agent must have reported too |
 
@@ -684,17 +684,35 @@ capacity, and its agent must have been heard after the replacement. If the
 new node's agent reports its devices anyway, they are checked as in the table.
 An agent whose report a fault emptied had still reported, so the new node's
 report is required. The `replaced-node-devices` audit row records, once per
-node, what the old node's agent had reported; a replacement without that row
-is checked as in the table.
+node, what the old node's agent had reported and how many devices
+(`device_count`); a replacement without that row, or without the count, is
+checked as in the table with at least one device.
 
 The resolution says in its first sentence how the node was found:
 `Replaced by node <new>, named by the cloud operation.`, `Replaced by node
 <new>, the only instance that joined pool <pool> during the resize.` or
 `Node <new> is Ready. It was the only node that joined pool <pool> after the
 removal.` Its
-second sentence says what was confirmed: the driver check that passed,
-`Device presence observed; runtime not attested.`, or `Verification used
-Kubernetes node readiness and advertised accelerator capacity.` The same
+second sentence says what was confirmed, no more than the new node's report
+says:
+
+- `Fresh accelerator inventory and driver health observed.`: a ready report.
+- `Accelerator inventory and driver probe observed; DCGM not available to the
+  agent, device health not checked.`: the agent listed the devices and its
+  node health probe through `nvidia-smi` passed in the same observation,
+  including on a GPU that cannot be reset. The driver answered; that is not a
+  statement that the GPU is healthy.
+- `Accelerator inventory observed on the new node; DCGM not available to the
+  agent, device health not checked.`: the agent listed the devices; no driver
+  probe is on record.
+- The same two with `runtime not attested` in place of `DCGM not available to
+  the agent`, when DCGM answered but the runtime is not attested.
+- `Device presence observed; runtime not attested.`, or `Verification used
+  Kubernetes node readiness and advertised accelerator capacity.`
+
+KubeNeuron verified the new node by readiness, advertised capacity and the
+device inventory its agent reported; device health was not checked unless the
+sentence says so. The same
 text is in the RESOLVED notification. `kubeneuronctl incidents show` prints
 the new node on a `replaced:` line. The audit entry records
 `infrastructure_evidence: verified_replacement_node`, `replacement_node`,
@@ -723,7 +741,11 @@ goes to `NEEDS_HUMAN` with what is missing, for example:
 - `No node joined pool <pool> after the removal.`
 - `New node <new> is not Ready.`
 - `No fresh accelerator report from new node <new>.`
-- `New node <new> reports no accelerator devices.`
+- `New node <new> reports no accelerator devices.` (its report lists none)
+- `New node <new> reports <k> of <n> accelerator devices.` (`<n>` is what the
+  old node's agent reported)
+- `New node <new> reports its accelerators not ready.` (the agent's reasons
+  are in its report, `GET /api/v1/nodes/<new>/accelerators`)
 - `Several nodes joined pool <pool> after the removal. KubeNeuron could not determine which one replaced the node.`
 
 Such an incident is not counted as recovered, and no second replacement is

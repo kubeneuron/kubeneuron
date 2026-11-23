@@ -65,6 +65,25 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- **A replacement whose new node lists its GPUs resolves without an attested
+  runtime.** With the agent reading NVIDIA GPUs through the container runtime,
+  a typical install (no DCGM available to the agent, no runtime profile, a GPU
+  that cannot be reset on a virtualized instance) sent the old and the new
+  node's devices as `degraded`, and verification went to `NEEDS_HUMAN` with
+  `New node <node> reports no accelerator devices.` although the report listed
+  them. The new node now needs at least as many devices as the old node's
+  agent reported (recorded as `device_count` on `replaced-node-devices`), and
+  a not-ready report or fewer devices go to a person with what they say. An
+  agent whose GPUs cannot be reset now records the node health probe that
+  passed through `nvidia-smi` on its devices, as it already did where reset is
+  available. The resolution says what was observed, for example `Accelerator
+  inventory and driver probe observed; DCGM not available to the agent, device
+  health not checked.`: KubeNeuron verified the new node by readiness,
+  advertised capacity and the device inventory its agent reported, and the
+  driver answered; device health was not checked. An agent without `dcgmi`
+  now says `DCGM is not available to the agent; device health is not checked`
+  instead of the exec error.
+
 - A replacement no longer waits for an accelerator report from the new node
   when the replaced node's agent never reported NVIDIA or AWS Neuron
   accelerators, for example because the container runtime did not expose the

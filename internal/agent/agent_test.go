@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1115,6 +1118,25 @@ func TestNVIDIAAcceleratorReportRequiresRuntimeAttestation(t *testing.T) {
 		!strings.Contains(strings.Join(report.ReadinessReasons, " | "), "DCGM discovery found 2 GPUs") {
 		t.Fatalf("mismatched discovery report = %+v, want degraded inventory mismatch", report)
 	}
+	// No dcgmi in the agent's container is said in words; it says nothing
+	// of DCGM elsewhere on the node. Any other failure keeps its error.
+	_, missing := exec.Command("/nonexistent/dcgmi", "--version").Output()
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("dcgmi --version: %w", missing), "DCGM is not available to the agent; device health is not checked"},
+		{errors.New("no host engine"), "DCGM runtime version probe failed: no host engine"},
+	} {
+		a.nvidia.runtimeProber = staticRuntimeVersionProber{err: tc.err}
+		report, err = a.nvidiaAcceleratorReport(context.Background())
+		if err != nil {
+			t.Fatalf("failed DCGM probe nvidiaAcceleratorReport() error = %v", err)
+		}
+		if report.Readiness != types.AcceleratorReadinessDegraded || !slices.Contains(report.ReadinessReasons, tc.want) {
+			t.Fatalf("failed DCGM probe report reasons = %q, want %q", report.ReadinessReasons, tc.want)
+		}
+	}
 	a.nvidia.runtimeProber = staticRuntimeVersionProber{version: "dcgm-9.9", gpus: 1}
 	report, err = a.nvidiaAcceleratorReport(context.Background())
 	if err != nil {
@@ -1236,6 +1258,47 @@ func TestNVIDIAReportPostsDriverHealthWithoutDCGM(t *testing.T) {
 	defer captured.mu.Unlock()
 	if len(captured.reports) != 2 || captured.reports[1].Readiness != types.AcceleratorReadinessDegraded || captured.reports[1].Devices[0].DriverHealthyAt != nil {
 		t.Fatalf("mixed degradation reports = %+v", captured.reports)
+	}
+}
+
+// A cloud GPU that cannot be reset is observed-only, and the node health
+// probe that passed through the real nvidia-smi still marks its devices. A
+// probe that did not pass, or a driver that is not nvidia-smi, marks none.
+func TestNVIDIAObservedOnlyReportCarriesDriverHealth(t *testing.T) {
+	clock := &testClock{now: time.Now().UTC()}
+	for _, tc := range []struct {
+		name   string
+		driver nvml.GPUDriver
+		status accelerator.HealthStatus
+		marked bool
+	}{
+		{"real nvidia-smi, healthy", &nvml.SMI{}, accelerator.HealthHealthy, true},
+		{"real nvidia-smi, unhealthy", &nvml.SMI{}, accelerator.HealthUnhealthy, false},
+		{"fake driver", &nvml.Fake{}, accelerator.HealthHealthy, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newTestAgent(t, "http://controller.invalid", clock, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			a.driver = tc.driver
+			snapshot := eligibleNVIDIAPreflight(clock.Now())
+			snapshot.Readiness = nvidia.PreflightObservedOnly
+			snapshot.Inventory.NodeName = a.cfg.NodeName
+			snapshot.Reasons = []string{"physical-device reset unavailable: GPU 0 cannot be reset: the kernel exposes no PCI reset for device 0000:00:1e.0; on a virtualized instance the hypervisor withholds it and no GPU reset can succeed"}
+			snapshot.NodeHealth = accelerator.HealthReport{
+				Target: accelerator.Target{NodeName: a.cfg.NodeName, Vendor: accelerator.VendorNVIDIA, Scope: accelerator.ScopeNode},
+				Status: tc.status, CheckedAt: clock.Now(),
+			}
+			a.nvidia = &nvidiaObservation{preflight: staticNVIDIAPreflight{report: snapshot}, useObservedDriverVersion: true}
+			report, err := a.nvidiaAcceleratorReport(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.Readiness != types.AcceleratorReadinessDegraded || len(report.Devices) != 1 {
+				t.Fatalf("report = %+v, want one degraded device", report)
+			}
+			if at := report.Devices[0].DriverHealthyAt; (at != nil) != tc.marked || at != nil && !at.Equal(snapshot.NodeHealth.CheckedAt) {
+				t.Fatalf("driver healthy at = %v, want marked %v at the probe", at, tc.marked)
+			}
+		})
 	}
 }
 
