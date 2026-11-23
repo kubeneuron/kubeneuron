@@ -55,6 +55,9 @@ func cmdPools() *cobra.Command {
 					status = cmp.Or(row.Status, "unknown") + " — see REPLACEMENT"
 				default:
 					status = poolCell(row.Status, row.Reason, row.Action, row.CheckedAt == nil)
+					if row.Status == "available" && row.SuccessorZone == "AnyPoolZone" && len(row.Zones) > 1 && (row.Cloud == "EKS" || row.Cloud == "AKS") {
+						status += " — the new node may join another zone of this pool; pods that need the original zone will not schedule on it"
+					}
 				}
 				if _, err := fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n", row.Pool, row.Cloud, row.AcceleratorNodes, row.ReplacementPolicy, checked, replacement, status); err != nil {
 					return err
