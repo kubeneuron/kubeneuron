@@ -27,17 +27,24 @@ Type=oneshot
 ExecStart=/bin/sh /run/replacement-join
 ExecStopPost=/bin/rm -f /run/replacement-join
 UNIT
+# The node shares the already-running cluster's host kernel. Hosted runners
+# can omit its config module, so kubeadm cannot inspect the kernel config.
 docker exec "$cp" kubeadm token create --ttl 10m --print-join-command |
-  docker exec -i "$node" sh -c 'umask 077; cat >/run/replacement-join'
+  docker exec -i "$node" sh -c 'umask 077; { read -r join; printf "%s --ignore-preflight-errors=SystemVerification\n" "$join"; } >/run/replacement-join'
 docker exec "$node" systemctl daemon-reload
 docker exec "$node" systemctl start --no-block replacement-join.service
 # Allow systemctl to exit the root cgroup before kubelet configures it.
 
 for ((attempt=0; attempt<120; attempt++)); do
   if "${k[@]}" get node "$node" >/dev/null 2>&1; then break; fi
+  if docker exec "$node" systemctl is-failed --quiet replacement-join.service; then break; fi
   sleep 1
 done
-"${k[@]}" get node "$node" >/dev/null
+if ! "${k[@]}" get node "$node" >/dev/null; then
+  docker exec "$node" journalctl -b --no-pager -u replacement-join.service -u kubelet -n 100 |
+    sed -E 's/[a-z0-9]{6}\.[a-z0-9]{16}/[redacted]/g' >&2
+  exit 1
+fi
 docker save "$AGENT_IMAGE" | docker exec -i "$node" ctr -n k8s.io images import - >/dev/null
 "${k[@]}" wait --for=condition=Ready "node/$node" --timeout=2m
 "${k[@]}" get node "$node" -o json | jq -e --arg id "aws:///az/$id" '.spec.providerID==$id and .metadata.labels["eks.amazonaws.com/nodegroup"]=="gpu"' >/dev/null

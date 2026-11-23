@@ -125,6 +125,13 @@ jobs:
             target: test-journal-kind
             kind_sha256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
             kubectl_sha256: fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
+          - name: kind-replacement
+            runner: ubuntu-24.04
+            arch: amd64
+            suite: main
+            target: test-replacement-kind
+            kind_sha256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
+            kubectl_sha256: fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     # Checksums: kind release kind-linux-<arch>.sha256sum and
