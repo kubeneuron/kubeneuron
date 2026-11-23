@@ -17,9 +17,11 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
+	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/internal/store/sqlite"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 // plannedPlatform is a cloud platform on one fixed-size pool whose size the
@@ -515,5 +517,84 @@ func TestUnknownDeleteExpiresFromOpeningTime(t *testing.T) {
 	got := mustIncident(t, st, id)
 	if got.State != types.StateNeedsHuman || got.RemoveFirst.Outcome != types.RemoveFirstNeedsOperator || !strings.Contains(got.RemoveFirst.Reason, "could not confirm its completion") {
 		t.Fatalf("state=%s record=%+v", got.State, got.RemoveFirst)
+	}
+}
+
+type retryCountingPlatform struct {
+	*plannedPlatform
+	reads, deletes int
+	state          removefirst.Observation
+}
+
+func (p *retryCountingPlatform) ObservePinnedDelete(context.Context, cloud.NodeIdentity, string, string) (removefirst.Observation, error) {
+	p.reads++
+	return p.state, nil
+}
+func (p *retryCountingPlatform) RetryPinnedDelete(context.Context, cloud.NodeIdentity, string, string, removefirst.Observation) error {
+	p.deletes++
+	p.state = removefirst.Deleted
+	return nil
+}
+
+func TestRestartRechecksDeleteAuthority(t *testing.T) {
+	for _, name := range []string{"eks", "aks", "digest", "paused", "dry-run", "approval", "lost-owner"} {
+		t.Run(name, func(t *testing.T) {
+			p := &retryCountingPlatform{plannedPlatform: newPlannedPlatform(), state: removefirst.SameMachine}
+			if name == "aks" {
+				p.state = removefirst.Listed
+			}
+			c, st := plannedFixture(t, p.plannedPlatform)
+			id := openOn(t, c, "n1")
+			ctx := t.Context()
+			inc := mustIncident(t, st, id)
+			inc.State, inc.StepIndex, inc.Playbook = types.StateExecuting, 2, "cloud-replace"
+			if err := st.UpdateIncident(ctx, inc); err != nil {
+				t.Fatal(err)
+			}
+			inc = mustIncident(t, st, id)
+			pin := *inc.CloudIdentity
+			if name != "lost-owner" {
+				if err := st.WithTx(ctx, func(tx store.Tx) error {
+					_, err := tx.ClaimNodeRemediation(ctx, pin.Node, pin.NodeUID, id, time.Now())
+					return err
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := c.claimDeleteIntent(ctx, inc, pin, "train", pin.InstanceID, ""); err != nil {
+				t.Fatal(err)
+			}
+			r := restartWith(t, c, st, p)
+			switch name {
+			case "paused":
+				r.gate.Pause()
+			case "dry-run":
+				cfg := *r.runtime.Load()
+				limits := *cfg.SafetyLimits
+				limits.DryRun = true
+				cfg.SafetyLimits = &limits
+				if err := r.InstallRuntimeConfig(cfg); err != nil {
+					t.Fatal(err)
+				}
+			case "approval":
+				r.SetEngine(modeEngine(t, recoverymode.Approval, nil))
+			case "digest":
+				kube := fake.NewSimpleClientset()
+				r.ConfigurePublishedConfig(kube.CoreV1().ConfigMaps("kube-neuron"), "kn")
+				loadDigest(t, r, "before")
+				publishDigest(t, kube, "after")
+			}
+			r.sweepRemoveFirst(ctx)
+			want := 0
+			if name == "eks" || name == "aks" {
+				want = 1
+			}
+			if p.reads != 1 || p.deletes != want {
+				t.Fatalf("reads=%d deletes=%d want deletes=%d", p.reads, p.deletes, want)
+			}
+			if name == "lost-owner" && mustIncident(t, st, id).State != types.StateNeedsHuman {
+				t.Fatal("lost owner did not park")
+			}
+		})
 	}
 }
