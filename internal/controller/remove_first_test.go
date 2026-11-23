@@ -487,3 +487,33 @@ func TestRestartParksReusedAKSMachineName(t *testing.T) {
 		t.Fatal(got.RemoveFirst.Reason)
 	}
 }
+
+func TestUnknownDeleteExpiresFromOpeningTime(t *testing.T) {
+	p := newPlannedPlatform() // No observation available.
+	c, st := plannedFixture(t, p)
+	id := openOn(t, c, "n1")
+	inc := mustIncident(t, st, id)
+	inc.State = types.StateExecuting
+	if err := st.UpdateIncident(t.Context(), inc); err != nil {
+		t.Fatal(err)
+	}
+	inc = mustIncident(t, st, id)
+	if err := c.claimDeleteIntent(t.Context(), inc, *inc.CloudIdentity, "gpu", "machine", ""); err != nil {
+		t.Fatal(err)
+	}
+	r := restartWith(t, c, st, p)
+	r.sweepRemoveFirst(t.Context())
+	inc = mustIncident(t, st, id)
+	if !inc.RemoveFirst.Open() {
+		t.Fatal("deadline restarted or expired too early")
+	}
+	inc.RemoveFirst.PlannedAt = time.Now().Add(-time.Hour)
+	if err := st.UpdateIncident(t.Context(), inc); err != nil {
+		t.Fatal(err)
+	}
+	r.sweepRemoveFirst(t.Context())
+	got := mustIncident(t, st, id)
+	if got.State != types.StateNeedsHuman || got.RemoveFirst.Outcome != types.RemoveFirstNeedsOperator || !strings.Contains(got.RemoveFirst.Reason, "could not confirm its completion") {
+		t.Fatalf("state=%s record=%+v", got.State, got.RemoveFirst)
+	}
+}
