@@ -423,7 +423,7 @@ func sameRepairNode(a, b *types.Incident) bool {
 // instance its pool's resize added: in its finished remove-first plan, or in
 // the row written after a replacement made in one call.
 func ownerFoundInstance(owner *types.Incident, trail []*types.AuditEntry, providerID string) bool {
-	if rec := owner.RemoveFirst; rec != nil && (rec.Outcome == types.RemoveFirstRestored || rec.Version == 1 && rec.Operation == successorOperation(owner)) && providerID != "" && resizediff.FromPlan(rec.RemoveFirstPlan) == providerID {
+	if rec := owner.RemoveFirst; rec != nil && (rec.Outcome == types.RemoveFirstRestored || rec.Version == 1 && rec.Outcome == types.RemoveFirstDeleteConfirmed && rec.Operation == successorOperation(owner)) && providerID != "" && resizediff.FromPlan(rec.RemoveFirstPlan) == providerID {
 		return true
 	}
 	for _, e := range trail {
