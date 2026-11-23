@@ -27,8 +27,10 @@ Type=oneshot
 ExecStart=/bin/sh /run/replacement-join
 ExecStopPost=/bin/rm -f /run/replacement-join
 UNIT
+# The node shares the already-running cluster's host kernel. Hosted runners
+# can omit its config module, so kubeadm cannot inspect the kernel config.
 docker exec "$cp" kubeadm token create --ttl 10m --print-join-command |
-  docker exec -i "$node" sh -c 'umask 077; cat >/run/replacement-join'
+  docker exec -i "$node" sh -c 'umask 077; { read -r join; printf "%s --ignore-preflight-errors=SystemVerification\n" "$join"; } >/run/replacement-join'
 docker exec "$node" systemctl daemon-reload
 docker exec "$node" systemctl start --no-block replacement-join.service
 # Allow systemctl to exit the root cgroup before kubelet configures it.
