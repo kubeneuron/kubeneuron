@@ -7,9 +7,9 @@
 // never enables an action.
 //
 // UNVALIDATED AGAINST REAL HARDWARE. Every parser here, and every fixture under
-// testdata/, was written without access to an AMD accelerator: the field names,
-// the JSON shapes, and the rocm-smi key spellings are plausible reconstructions,
-// not captures. That is why the parsers refuse rather than guess — a field this
+// testdata/, was written without access to an AMD accelerator. The amd-smi
+// field names follow the amd-smi CLI source; the rocm-smi key spellings are
+// plausible reconstructions; none of them is a capture. That is why the parsers refuse rather than guess — a field this
 // package cannot find yields NO fault and a log line naming what was missing,
 // so the honest failure mode on real hardware is "this source saw nothing",
 // never "this source invented a fault on a healthy GPU". Re-verify the fixtures
@@ -21,13 +21,17 @@
 //     PATH; there is no fake AMD driver and no simulated output.
 //   - A missing or unparseable tool degrades to observed-only, logged once, and
 //     is retried on the next tick rather than crashing the agent.
-//   - Monotonic counters (ECC, retired pages, XGMI errors) are baselined on the
+//   - Monotonic counters (ECC, retired pages) are baselined on the
 //     first poll so a long-standing historical aggregate is never replayed as a
 //     fresh fault at startup, and only a genuine increase emits.
 //   - Ambiguity refuses: a temperature with no operator-configured critical
-//     threshold and no explicit throttle flag is observed, never promoted to a
-//     thermal fault, because the critical temperature is SKU-specific and
+//     threshold is observed, never promoted to a thermal fault, because the critical temperature is SKU-specific and
 //     inferring one would be fabrication.
+//
+// From amd-smi the source reads the device list (PCI address, UUID), ECC
+// error counts and hotspot temperature. XGMI link errors, retired pages and
+// thermal throttling are not read from amd-smi in this release; the rocm-smi
+// fallback reads retired pages and temperature.
 //
 // Unlike gpuhealth it keeps NO durable cross-restart state, and that is a
 // decision rather than an omission: gpuhealth needs one because DCGM retains its
@@ -75,9 +79,14 @@ const (
 	// pages that its spare budget is gone". It is a level, not an event — the
 	// GPU is out of spares right now — so it is emitted as a state series.
 	CodePageRetireExhausted = "page-retirement-exhausted"
-	CodeXGMILink            = "xgmi-link-error"
-	CodeThermal             = "thermal-throttle"
-	CodeGPULost             = "gpu-lost"
+	// CodeXGMILink keeps its catalog row; no source emits it in this release.
+	CodeXGMILink = "xgmi-link-error"
+	CodeThermal  = "thermal-throttle"
+	CodeGPULost  = "gpu-lost"
+
+	// pciNotRead is the pci_address attribute of an event whose device
+	// address the tool did not report.
+	pciNotRead = "not read"
 
 	// defaultCorrectableRateMinDelta is how many NEW correctable ECC errors a
 	// GPU must accumulate since the last report before this source raises the
@@ -87,16 +96,6 @@ const (
 	// chosen WITHOUT AMD field data — operators with real fleets should set
 	// CorrectableRateMinDelta from their own observed baseline.
 	defaultCorrectableRateMinDelta = 128
-
-	// defaultXGMILinkMinDelta is how many NEW XGMI link errors must accumulate
-	// before the fabric fault reports again. XGMI link errors are classified
-	// CRITICAL, and the counter increments on corrected link retries as well as
-	// on real degradation: with no delta a single retry under load pages
-	// somebody about a healthy fabric. Like the correctable-ECC delta this
-	// number was chosen WITHOUT AMD field data — it is set low because a
-	// degrading link climbs fast, and operators with real fleets should set
-	// XGMILinkMinDelta from their own observed baseline.
-	defaultXGMILinkMinDelta = 4
 )
 
 // runner abstracts subprocess execution for tests, matching gpuhealth and the
@@ -121,7 +120,8 @@ type Watcher struct {
 	ThermalCriticalC float64
 	// CorrectableRateMinDelta overrides defaultCorrectableRateMinDelta.
 	CorrectableRateMinDelta uint64
-	// XGMILinkMinDelta overrides defaultXGMILinkMinDelta.
+	// XGMILinkMinDelta is kept for configuration compatibility. It has no
+	// effect in this release: no source reads XGMI link errors.
 	XGMILinkMinDelta uint64
 	// BadPageThreshold, when > 0, is the retired-page count at or above which
 	// the device is reported as having exhausted its spare memory — a
@@ -129,7 +129,8 @@ type Watcher struct {
 	// It is deliberately unset by default, for the same reason as
 	// ThermalCriticalC: the bad-page budget differs by SKU and HBM stack, so
 	// with no operator-supplied value KubeNeuron reports retirements and never
-	// claims the device is out of spares.
+	// claims the device is out of spares. Retired pages are read only from
+	// rocm-smi in this release, so it has no effect while amd-smi answers.
 	BadPageThreshold uint64
 	// Logger records source selection, degradation, and every refusal; nil
 	// disables logging, which is only appropriate in tests.
@@ -418,20 +419,15 @@ func (w *Watcher) deviceCandidates(s sample, source string) []candidate {
 			})
 		}
 	}
-	if s.xgmiErrors != nil {
-		add(CodeXGMILink, *s.xgmiErrors, w.xgmiMinDeltaLocked(),
-			map[string]string{"xgmi_link_errors": strconv.FormatUint(*s.xgmiErrors, 10)},
-			fmt.Sprintf("%s: GPU %d XGMI link errors=%d", source, s.index, *s.xgmiErrors))
-	}
 	if c := w.thermalCandidateLocked(s, source); c != nil {
 		out = append(out, *c)
 	}
 	return out
 }
 
-// thermalCandidateLocked decides whether this sample is a thermal fault. The
-// tool's own throttle flag is authoritative when present. A raw temperature is
-// only a fault against an operator-configured critical threshold: the number at
+// thermalCandidateLocked decides whether this sample is a thermal fault. A
+// hotspot temperature is only a fault against an operator-configured critical
+// threshold: the number at
 // which a given SKU is in trouble is not knowable from the reading alone, and
 // picking one here would manufacture faults on hardware nobody has tested.
 // Called with mu held.
@@ -440,13 +436,6 @@ func (w *Watcher) thermalCandidateLocked(s sample, source string) *candidate {
 	var raw string
 	attrs := map[string]string{}
 	switch {
-	case s.thermalThrottled != nil:
-		active = *s.thermalThrottled
-		attrs["throttle_status"] = s.thermalThrottleStatus
-		raw = fmt.Sprintf("%s: GPU %d thermal throttle status=%q", source, s.index, s.thermalThrottleStatus)
-		if s.hotspotC != nil {
-			attrs["hotspot_c"] = strconv.FormatFloat(*s.hotspotC, 'f', -1, 64)
-		}
 	case s.hotspotC != nil && w.ThermalCriticalC > 0:
 		active = *s.hotspotC >= w.ThermalCriticalC
 		attrs["hotspot_c"] = strconv.FormatFloat(*s.hotspotC, 'f', -1, 64)
@@ -455,7 +444,7 @@ func (w *Watcher) thermalCandidateLocked(s sample, source string) *candidate {
 			source, s.index, *s.hotspotC, w.ThermalCriticalC)
 	case s.hotspotC != nil:
 		w.logOnceLocked("thermal-unthresholded", slog.LevelInfo,
-			"AMD hotspot temperature observed but no throttle flag and no thermal critical threshold configured; observing only",
+			"AMD hotspot temperature observed but no thermal critical threshold configured; observing only",
 			"source", source)
 		return nil
 	default:
@@ -533,6 +522,13 @@ func (w *Watcher) filter(candidates []candidate) []types.AgentEvent {
 				attrs[k] = v
 			}
 		}
+		raw := c.raw
+		if c.bdf == "" {
+			// Without a PCI address the incident cannot name the device to
+			// check, so the event says so instead of leaving a blank field.
+			attrs["pci_address"] = pciNotRead
+			raw += " (PCI address not read)"
+		}
 		out = append(out, types.AgentEvent{
 			Node:     w.NodeName,
 			GPUIndex: c.index,
@@ -546,7 +542,7 @@ func (w *Watcher) filter(candidates []candidate) []types.AgentEvent {
 				Code:       c.code,
 				Attributes: attrs,
 			},
-			Raw:       c.raw,
+			Raw:       raw,
 			Timestamp: now,
 		})
 	}
@@ -568,13 +564,6 @@ func (w *Watcher) correctableMinDeltaLocked() uint64 {
 		return w.CorrectableRateMinDelta
 	}
 	return defaultCorrectableRateMinDelta
-}
-
-func (w *Watcher) xgmiMinDeltaLocked() uint64 {
-	if w.XGMILinkMinDelta > 0 {
-		return w.XGMILinkMinDelta
-	}
-	return defaultXGMILinkMinDelta
 }
 
 // logOnce emits a persistent condition's log line exactly once per watcher.
@@ -606,7 +595,7 @@ func seriesKey(code string, index int) string {
 // attributed to hardware that is no longer in the machine.
 var codesWithSeries = []string{
 	CodeECCUncorr, CodeECCCorrRate, CodePageRetire, CodePageRetireExhausted,
-	CodeXGMILink, CodeThermal, CodeGPULost,
+	CodeThermal, CodeGPULost,
 }
 
 // forgetReplacedDeviceLocked drops every series belonging to an index whose

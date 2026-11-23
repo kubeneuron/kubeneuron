@@ -33,6 +33,15 @@ API is `v1alpha1`.
   readings and the agent fell back to rocm-smi. Any other output is logged
   as an unreadable amd-smi result, never read as zero devices. Not validated
   on AMD hardware.
+- The optional AMD detection source reads only the amd-smi fields that the
+  amd-smi CLI prints. From amd-smi the agent reads the device list (PCI
+  address, UUID), ECC error counts and hotspot temperature. XGMI link errors,
+  retired pages and thermal throttling are not read from amd-smi in this
+  release. Not validated on AMD hardware. The PCI address and UUID come from
+  `amd-smi list --json`; if that fails, events still report and say that the
+  PCI address was not read. `--amd-xgmi-link-min-delta` and
+  `--amd-bad-page-threshold` stay accepted; with amd-smi they have no effect
+  in this release.
 
 ## [v1.0.0-rc.2] - 2026-11-24
 

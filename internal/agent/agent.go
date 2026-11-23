@@ -205,7 +205,7 @@ type AMDDetectionConfig struct {
 	AMDSMIPath  string
 	ROCmSMIPath string
 	// ThermalCriticalC is the hotspot temperature at or above which a reading
-	// with no explicit throttle flag becomes a thermal fault. Zero (the
+	// becomes a thermal fault. Zero (the
 	// default) means a bare temperature is never promoted to a fault, because
 	// the critical value is SKU-specific and this code cannot know it.
 	ThermalCriticalC float64
@@ -213,15 +213,15 @@ type AMDDetectionConfig struct {
 	// accumulate before the rate fault reports again; zero uses the package
 	// default.
 	CorrectableRateMinDelta uint64
-	// XGMILinkMinDelta is how many new XGMI link errors must accumulate before
-	// the fabric fault reports again; zero uses the package default. The
-	// counter also moves on corrected link retries, so with no delta a healthy
-	// fabric under load raises a critical fault.
+	// XGMILinkMinDelta is kept for configuration compatibility. It has no
+	// effect in this release: XGMI link errors are not read from amd-smi.
 	XGMILinkMinDelta uint64
 	// BadPageThreshold is the retired-page count at or above which the device
 	// is reported as out of spare memory rather than as having retired a page
 	// successfully. Zero (the default) never makes that claim, because the
-	// bad-page budget is SKU-specific and this code cannot know it.
+	// bad-page budget is SKU-specific and this code cannot know it. Retired
+	// pages are read only from rocm-smi in this release, so it has no effect
+	// while amd-smi answers.
 	BadPageThreshold uint64
 }
 

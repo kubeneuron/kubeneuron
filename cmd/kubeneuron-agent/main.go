@@ -120,7 +120,7 @@ func main() {
 		amdThermalCriticalC = flag.Float64(
 			"amd-thermal-critical-c",
 			0,
-			"hotspot temperature at which an AMD reading with no explicit throttle flag becomes a thermal fault; 0 (default) observes temperatures without ever promoting one, because the critical value is SKU-specific",
+			"hotspot temperature at which an AMD reading becomes a thermal fault; 0 (default) observes temperatures without ever promoting one, because the critical value is SKU-specific",
 		)
 		amdCorrectableRateMinDelta = flag.Uint64(
 			"amd-correctable-ecc-min-delta",
@@ -130,12 +130,12 @@ func main() {
 		amdXGMILinkMinDelta = flag.Uint64(
 			"amd-xgmi-link-min-delta",
 			0,
-			"how many new AMD XGMI link errors must accumulate before the fabric fault reports again; 0 uses the built-in default. The counter also moves on corrected link retries, so reporting every increment pages on a healthy fabric",
+			"kept for configuration compatibility; has no effect in this release, because XGMI link errors are not read from amd-smi",
 		)
 		amdBadPageThreshold = flag.Uint64(
 			"amd-bad-page-threshold",
 			0,
-			"retired-page count at or above which an AMD GPU is reported as OUT OF SPARE MEMORY (a replace-the-device condition) rather than as having retired a page successfully; 0 (default) never makes that claim, because the bad-page budget is SKU-specific",
+			"retired-page count at or above which an AMD GPU is reported as OUT OF SPARE MEMORY (a replace-the-device condition) rather than as having retired a page successfully; 0 (default) never makes that claim, because the bad-page budget is SKU-specific. Has no effect with amd-smi in this release: retired pages are read only from the rocm-smi fallback",
 		)
 		showVersion = flag.Bool("version", false, "print version and exit")
 		adapters    = adapterFlags{}

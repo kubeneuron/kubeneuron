@@ -33,7 +33,7 @@ func TestAMDSMIGroupedOutputParsesLikeTheBareArray(t *testing.T) {
 func TestAMDSMIGroupedOutputReportsCounterIncreases(t *testing.T) {
 	count := "0"
 	w := testWatcher(t, func([]string) ([]byte, error) {
-		return []byte(`{"cpu_data":[{"cpu":0}],"gpu_data":[{"gpu":0,"bdf":"0000:c3:00.0","ecc":{"total_uncorrectable_count":` + count + `}}]}`), nil
+		return []byte(`{"cpu_data":[{"cpu":0}],"gpu_data":[{"gpu":0,"ecc":{"total_uncorrectable_count":` + count + `}}]}`), nil
 	})
 	if got := w.poll(context.Background()); len(got) != 0 {
 		t.Fatalf("first poll = %+v, want only a baseline", got)

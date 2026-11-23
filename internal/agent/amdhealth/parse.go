@@ -28,42 +28,36 @@ type sample struct {
 	eccUncorrectable *uint64
 	eccCorrectable   *uint64
 	retiredPages     *uint64
-	xgmiErrors       *uint64
 	hotspotC         *float64
-	// thermalThrottled is the tool's own verdict when it reports one; it
-	// outranks any temperature comparison.
-	thermalThrottled      *bool
-	thermalThrottleStatus string
 }
 
-// amdSMIDevice is the subset of `amd-smi metric --json` this parser accepts.
+// amdSMIDevice is the subset of one `amd-smi metric --json` device record this
+// parser reads: the GPU index, the ECC totals and the hotspot temperature.
+// The field names follow the amd-smi CLI source (ROCm 6.2 to 7.2); they have
+// not been checked against a capture from AMD hardware.
 //
-// SYNTHETIC SCHEMA. These field names were reconstructed from amd-smi's
-// documented vocabulary without a machine to check them against, so treat this
-// struct as "the shape the parser will accept" rather than "the shape amd-smi
-// emits". Unknown fields are ignored and missing fields simply produce no
-// series, so a wrong guess costs coverage, never a false fault. Every pointer
-// and every amdNumber below is optional for that reason.
+// The record carries no PCI address and no UUID: amd-smi prints those in
+// `list`, which pollAMDSMI joins by GPU index. XGMI errors, retired pages and
+// thermal throttling are not read from amd-smi in this release. In `metric`
+// the XGMI field is a status, not a counter, retired pages come from other
+// commands, and the throttle status covers every cause, not only heat.
 type amdSMIDevice struct {
-	GPU  *int   `json:"gpu"`
-	BDF  string `json:"bdf"`
-	UUID string `json:"uuid"`
-	ECC  *struct {
+	GPU *int `json:"gpu"`
+	ECC *struct {
 		TotalCorrectableCount   amdNumber `json:"total_correctable_count"`
 		TotalUncorrectableCount amdNumber `json:"total_uncorrectable_count"`
 	} `json:"ecc"`
-	RAS *struct {
-		RetiredPageCount amdNumber `json:"retired_page_count"`
-	} `json:"ras"`
-	XGMI *struct {
-		LinkErrorCount amdNumber `json:"link_error_count"`
-	} `json:"xgmi"`
 	Temperature *struct {
 		Hotspot amdNumber `json:"hotspot"`
 	} `json:"temperature"`
-	Throttle *struct {
-		ThermalThrottleStatus string `json:"thermal_throttle_status"`
-	} `json:"throttle"`
+}
+
+// amdSMIListEntry is one device of `amd-smi list --json`: the index that joins
+// it to `metric`, and the device's identity.
+type amdSMIListEntry struct {
+	GPU  *int   `json:"gpu"`
+	BDF  string `json:"bdf"`
+	UUID string `json:"uuid"`
 }
 
 // amdNumber reads the several shapes a numeric metric arrives in: a bare
@@ -127,28 +121,79 @@ func (n amdNumber) temperature() *float64 {
 }
 
 func (w *Watcher) pollAMDSMI(ctx context.Context) ([]sample, error) {
-	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
-	defer cancel()
 	// --json is requested explicitly: the human-readable table is formatted for
 	// eyes and reflows between releases, while a schema drift in the JSON shows
 	// up as a missing field, which this parser turns into silence rather than a
 	// misread number.
-	out, err := w.run(ctx, w.AMDSMIPath, "metric", "--json")
-	if err != nil {
-		return nil, fmt.Errorf("amd-smi metric --json: %w (output: %s)", err, firstLine(out))
-	}
-	return w.parseAMDSMI(out)
-}
-
-// parseAMDSMI converts amd-smi JSON into samples. A device record without a GPU
-// index is dropped with a log line: every downstream identity (the dedup key,
-// the incident target) is per device, so an unindexed record could only be
-// attributed by guessing.
-func (w *Watcher) parseAMDSMI(out []byte) ([]sample, error) {
-	devices, err := amdSMIDevices(out)
+	out, err := w.runAMDSMI(ctx, "metric", "--json")
 	if err != nil {
 		return nil, err
 	}
+	samples, err := w.parseAMDSMI(out)
+	if err != nil {
+		return nil, err
+	}
+	list, listErr := w.runAMDSMI(ctx, "list", "--json")
+	w.joinAMDSMIList(samples, list, listErr)
+	return samples, nil
+}
+
+func (w *Watcher) runAMDSMI(ctx context.Context, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	out, err := w.run(ctx, w.AMDSMIPath, args...)
+	if err != nil {
+		return nil, fmt.Errorf("amd-smi %s: %w (output: %s)", strings.Join(args, " "), err, firstLine(out))
+	}
+	return out, nil
+}
+
+// joinAMDSMIList fills in each sample's PCI address and UUID from
+// `amd-smi list --json`, matched by GPU index. A failed or unreadable list, or
+// a GPU the list does not name, keeps the readings: an event without an address
+// is more use than no event, and the event says the address was not read.
+func (w *Watcher) joinAMDSMIList(samples []sample, out []byte, err error) {
+	var entries []amdSMIListEntry
+	if err == nil {
+		entries, err = amdSMIRecords[amdSMIListEntry](out)
+	}
+	if err != nil {
+		w.logOnce("amd-smi-list-failed", slog.LevelWarn,
+			"amd-smi list failed; amd-smi events carry no PCI address or UUID and say that the address was not read",
+			"err", err)
+		return
+	}
+	byIndex := make(map[int]amdSMIListEntry, len(entries))
+	for _, e := range entries {
+		if e.GPU != nil {
+			byIndex[*e.GPU] = e
+		}
+	}
+	for i := range samples {
+		e, ok := byIndex[samples[i].index]
+		if !ok {
+			w.logOnce("amd-smi-list-missing", slog.LevelWarn,
+				"amd-smi list does not name a GPU that amd-smi metric reports; its events say that the address was not read",
+				"gpu", samples[i].index)
+			continue
+		}
+		samples[i].bdf = normalizeBDF(e.BDF)
+		samples[i].uuid = strings.TrimSpace(e.UUID)
+	}
+}
+
+// parseAMDSMI converts `amd-smi metric --json` into samples. A device record
+// without a GPU index is dropped with a log line: every downstream identity
+// (the dedup key, the incident target) is per device, so an unindexed record
+// could only be attributed by guessing.
+func (w *Watcher) parseAMDSMI(out []byte) ([]sample, error) {
+	devices, err := amdSMIRecords[amdSMIDevice](out)
+	if err != nil {
+		return nil, err
+	}
+	w.logOnce("amd-smi-not-read", slog.LevelInfo,
+		"section not available: XGMI link errors, retired pages and thermal throttling are not read from amd-smi in this release",
+		"sections", "xgmi, retired-pages, thermal-throttle")
 	var samples []sample
 	for _, d := range devices {
 		if d.GPU == nil {
@@ -156,11 +201,7 @@ func (w *Watcher) parseAMDSMI(out []byte) ([]sample, error) {
 				"amd-smi reported a device record without a gpu index; refusing to attribute its metrics")
 			continue
 		}
-		s := sample{
-			index: *d.GPU,
-			uuid:  strings.TrimSpace(d.UUID),
-			bdf:   normalizeBDF(d.BDF),
-		}
+		s := sample{index: *d.GPU}
 		if d.ECC != nil {
 			s.eccUncorrectable = d.ECC.TotalUncorrectableCount.count()
 			s.eccCorrectable = d.ECC.TotalCorrectableCount.count()
@@ -170,29 +211,9 @@ func (w *Watcher) parseAMDSMI(out []byte) ([]sample, error) {
 			// discoverable without a hardware autopsy.
 			w.warnUnreadableSection("ecc", s.index, s.eccUncorrectable == nil && s.eccCorrectable == nil)
 		}
-		if d.RAS != nil {
-			s.retiredPages = d.RAS.RetiredPageCount.count()
-			w.warnUnreadableSection("ras", s.index, s.retiredPages == nil)
-		}
-		if d.XGMI != nil {
-			s.xgmiErrors = d.XGMI.LinkErrorCount.count()
-			w.warnUnreadableSection("xgmi", s.index, s.xgmiErrors == nil)
-		}
 		if d.Temperature != nil {
 			s.hotspotC = d.Temperature.Hotspot.temperature()
 			w.warnUnreadableSection("temperature", s.index, s.hotspotC == nil)
-		}
-		if d.Throttle != nil {
-			if throttled, ok := throttleStatus(d.Throttle.ThermalThrottleStatus); ok {
-				s.thermalThrottled = &throttled
-				s.thermalThrottleStatus = strings.TrimSpace(d.Throttle.ThermalThrottleStatus)
-			} else if strings.TrimSpace(d.Throttle.ThermalThrottleStatus) != "" {
-				// A status string this code does not recognize is exactly the
-				// ambiguity that must not become a verdict in either direction.
-				w.logOnce("throttle-unknown", slog.LevelWarn,
-					"amd-smi reported an unrecognized thermal throttle status; ignoring it rather than guessing",
-					"status", strings.TrimSpace(d.Throttle.ThermalThrottleStatus))
-			}
 		}
 		if s.isEmpty() {
 			w.logOnce("amd-smi-no-fields", slog.LevelWarn,
@@ -207,27 +228,27 @@ func (w *Watcher) parseAMDSMI(out []byte) ([]sample, error) {
 	return samples, nil
 }
 
-// amdSMIDevices returns the device records of `amd-smi metric --json` in
-// either of the two shapes amd-smi prints. Up to ROCm 6.4 the output is a bare
-// array of device records. From ROCm 7.0 the CLI groups records by kind into
-// one object, the GPUs under "gpu_data" next to keys such as "cpu_data" on
-// hosts with AMD CPUs. Any other shape is an error, never an empty list: an
-// empty list means "no devices", which the watcher handles as a statement
-// about the tool, while an unreadable shape must say that it was unreadable.
-func amdSMIDevices(out []byte) ([]amdSMIDevice, error) {
+// amdSMIRecords returns the device records of amd-smi JSON output in either of
+// the two shapes amd-smi prints. Up to ROCm 6.4 the output is a bare array of
+// device records. From ROCm 7.0 the CLI groups records by kind into one object,
+// the GPUs under "gpu_data" next to keys such as "cpu_data" on hosts with AMD
+// CPUs. Any other shape is an error, never an empty list: an empty list means
+// "no devices", which the watcher handles as a statement about the tool, while
+// an unreadable shape must say that it was unreadable.
+func amdSMIRecords[T any](out []byte) ([]T, error) {
 	var top any
 	if err := json.Unmarshal(out, &top); err != nil {
 		return nil, fmt.Errorf("decode amd-smi JSON: %w", err)
 	}
-	var devices []amdSMIDevice
+	var records []T
 	switch v := top.(type) {
 	case []any:
-		if err := json.Unmarshal(out, &devices); err != nil {
+		if err := json.Unmarshal(out, &records); err != nil {
 			return nil, fmt.Errorf("decode amd-smi JSON device array: %w", err)
 		}
 	case map[string]any:
 		var grouped struct {
-			GPUData *[]amdSMIDevice `json:"gpu_data"`
+			GPUData *[]T `json:"gpu_data"`
 		}
 		if err := json.Unmarshal(out, &grouped); err != nil {
 			return nil, fmt.Errorf("decode amd-smi JSON gpu_data: %w", err)
@@ -240,11 +261,11 @@ func amdSMIDevices(out []byte) ([]amdSMIDevice, error) {
 			slices.Sort(keys)
 			return nil, fmt.Errorf("unrecognized amd-smi JSON: an object without a gpu_data array (keys: %s)", strings.Join(keys, ", "))
 		}
-		devices = *grouped.GPUData
+		records = *grouped.GPUData
 	default:
 		return nil, fmt.Errorf("unrecognized amd-smi JSON: top level is %s, not a device array or an object with gpu_data", jsonKind(top))
 	}
-	return devices, nil
+	return records, nil
 }
 
 func jsonKind(v any) string {
@@ -277,22 +298,7 @@ func (w *Watcher) warnUnreadableSection(section string, index int, unreadable bo
 // isEmpty reports whether a sample carries no health field at all — a device
 // this source can see but says nothing about.
 func (s sample) isEmpty() bool {
-	return s.eccUncorrectable == nil && s.eccCorrectable == nil && s.retiredPages == nil &&
-		s.xgmiErrors == nil && s.hotspotC == nil && s.thermalThrottled == nil
-}
-
-// throttleStatus maps the throttle strings amd-smi is expected to print to a
-// verdict. ok is false for anything else, so an unrecognized status neither
-// raises nor clears a thermal fault.
-func throttleStatus(status string) (throttled bool, ok bool) {
-	switch strings.ToUpper(strings.TrimSpace(status)) {
-	case "ACTIVE", "THROTTLED", "TRUE", "YES":
-		return true, true
-	case "INACTIVE", "NOT THROTTLED", "NONE", "FALSE", "NO", "N/A":
-		return false, true
-	default:
-		return false, false
-	}
+	return s.eccUncorrectable == nil && s.eccCorrectable == nil && s.retiredPages == nil && s.hotspotC == nil
 }
 
 func (w *Watcher) pollROCmSMI(ctx context.Context) ([]sample, error) {

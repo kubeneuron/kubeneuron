@@ -19,9 +19,10 @@ import (
 
 // readFixture loads a captured-output fixture.
 //
-// EVERY fixture under testdata/ is SYNTHETIC: it was written by hand from
-// amd-smi/rocm-smi documentation, never captured from an AMD accelerator, which
-// is why each filename says so. They pin this package's PARSING CONTRACT and
+// EVERY fixture under testdata/ is SYNTHETIC: it was written by hand, the
+// amd-smi ones from the amd-smi CLI source and the rocm-smi one from its
+// documentation, never captured from an AMD accelerator, which is why each
+// filename says so. They pin this package's PARSING CONTRACT and
 // its refusal behavior; they are not evidence that real tooling emits these
 // shapes. Re-verify them against a real node before treating a quiet poll on
 // AMD hardware as evidence of health.
@@ -41,6 +42,18 @@ func testWatcher(t *testing.T, output func(args []string) ([]byte, error)) *Watc
 	return w
 }
 
+// amdSMIOutput answers `amd-smi list` with the synthetic list fixture and any
+// other invocation (`metric`) with metric().
+func amdSMIOutput(t *testing.T, metric func() []byte) func([]string) ([]byte, error) {
+	t.Helper()
+	return func(args []string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "list" {
+			return readFixture(t, "synthetic-amd-smi-list.json"), nil
+		}
+		return metric(), nil
+	}
+}
+
 // eventsByCode indexes emitted events by their neutral fault code.
 func eventsByCode(events []types.AgentEvent) map[string][]types.AgentEvent {
 	out := map[string][]types.AgentEvent{}
@@ -52,7 +65,7 @@ func eventsByCode(events []types.AgentEvent) map[string][]types.AgentEvent {
 	return out
 }
 
-func TestParseAMDSMIReadsEveryFirstPassSeries(t *testing.T) {
+func TestParseAMDSMIReadsECCAndHotspot(t *testing.T) {
 	w := testWatcher(t, nil)
 	samples, err := w.parseAMDSMI(readFixture(t, "synthetic-amd-smi-metric-faults.json"))
 	if err != nil {
@@ -62,29 +75,27 @@ func TestParseAMDSMIReadsEveryFirstPassSeries(t *testing.T) {
 		t.Fatalf("samples = %d, want 2", len(samples))
 	}
 	gpu0, gpu1 := samples[0], samples[1]
-	if gpu0.index != 0 || gpu0.uuid != "amd-c3000000-0000-1000-8000-000000000001" {
-		t.Fatalf("gpu0 identity = %+v", gpu0)
+	if gpu0.index != 0 || gpu1.index != 1 {
+		t.Fatalf("indices = %d, %d, want 0, 1", gpu0.index, gpu1.index)
 	}
-	// The BDF is lowercased so the same device compares equal whichever tool
-	// (or kernel line) printed it.
-	if gpu0.bdf != "0000:c3:00.0" {
-		t.Fatalf("gpu0 bdf = %q, want the lowercased address", gpu0.bdf)
+	// `metric` names no device: the identity comes from `list`.
+	if gpu0.uuid != "" || gpu0.bdf != "" {
+		t.Fatalf("gpu0 identity = %+v, want none from metric alone", gpu0)
 	}
 	if gpu0.eccUncorrectable == nil || *gpu0.eccUncorrectable != 2 {
 		t.Fatalf("gpu0 uncorrectable ECC = %v, want 2", gpu0.eccUncorrectable)
 	}
-	if gpu0.retiredPages == nil || *gpu0.retiredPages != 3 {
-		t.Fatalf("gpu0 retired pages = %v, want 3", gpu0.retiredPages)
-	}
-	if gpu1.xgmiErrors == nil || *gpu1.xgmiErrors != 7 {
-		t.Fatalf("gpu1 XGMI errors = %v, want 7", gpu1.xgmiErrors)
-	}
-	if gpu1.thermalThrottled == nil || !*gpu1.thermalThrottled {
-		t.Fatalf("gpu1 thermal throttle = %v, want the tool's ACTIVE verdict", gpu1.thermalThrottled)
+	if gpu1.eccCorrectable == nil || *gpu1.eccCorrectable != 4 {
+		t.Fatalf("gpu1 correctable ECC = %v, want 4", gpu1.eccCorrectable)
 	}
 	// The {"value": N, "unit": "C"} envelope must be understood, not skipped.
 	if gpu1.hotspotC == nil || *gpu1.hotspotC != 108 {
 		t.Fatalf("gpu1 hotspot = %v, want 108", gpu1.hotspotC)
+	}
+	// xgmi_err, power.throttle_status and the throttle block are in the
+	// fixture and are not read.
+	if gpu1.retiredPages != nil {
+		t.Fatalf("gpu1 retired pages = %v, want none from amd-smi", gpu1.retiredPages)
 	}
 }
 
@@ -94,10 +105,14 @@ func TestParseAMDSMIReadsEveryFirstPassSeries(t *testing.T) {
 func TestAMDSMICountersBaselineThenEmitOnIncrease(t *testing.T) {
 	fixture := "synthetic-amd-smi-metric-healthy.json"
 	w := testWatcher(t, func(args []string) ([]byte, error) {
-		if len(args) == 0 || args[0] != "metric" {
-			t.Fatalf("unexpected amd-smi invocation: %v", args)
+		switch strings.Join(args, " ") {
+		case "metric --json":
+			return readFixture(t, fixture), nil
+		case "list --json":
+			return readFixture(t, "synthetic-amd-smi-list.json"), nil
 		}
-		return readFixture(t, fixture), nil
+		t.Fatalf("unexpected amd-smi invocation: %v", args)
+		return nil, nil
 	})
 
 	if first := w.poll(context.Background()); len(first) != 0 {
@@ -114,25 +129,24 @@ func TestAMDSMICountersBaselineThenEmitOnIncrease(t *testing.T) {
 	if ecc[0].Fault.Vendor != FaultVendor || ecc[0].Fault.Source != SourceAMDSMI {
 		t.Fatalf("fault provenance = %+v, want amd/amd-smi", ecc[0].Fault)
 	}
+	if ecc[0].PCIAddr != "0000:c3:00.0" {
+		t.Fatalf("PCI address = %q, want the lowercased address from amd-smi list", ecc[0].PCIAddr)
+	}
 	if ecc[0].Fault.Attributes["uncorrectable_ecc_errors"] != "2" {
 		t.Fatalf("fault attributes = %+v, want the observed counter carried as evidence", ecc[0].Fault.Attributes)
 	}
-	if len(got[CodePageRetire]) != 1 || got[CodePageRetire][0].GPUIndex != 0 {
-		t.Fatalf("page-retirement events = %+v, want one on GPU 0", got[CodePageRetire])
-	}
-	if len(got[CodeXGMILink]) != 1 || got[CodeXGMILink][0].GPUIndex != 1 {
-		t.Fatalf("xgmi-link-error events = %+v, want one on GPU 1", got[CodeXGMILink])
-	}
-	if len(got[CodeThermal]) != 1 || got[CodeThermal][0].GPUIndex != 1 {
-		t.Fatalf("thermal-throttle events = %+v, want one on GPU 1", got[CodeThermal])
+	if _, marked := ecc[0].Fault.Attributes["pci_address"]; marked {
+		t.Fatalf("fault attributes = %+v, want no not-read marker when the address was read", ecc[0].Fault.Attributes)
 	}
 	// GPU 1's correctable count did not move (4 -> 4) and no device vanished.
-	if len(got[CodeECCCorrRate]) != 0 || len(got[CodeGPULost]) != 0 {
+	// Its XGMI errors and THROTTLED status are not read from amd-smi, and its
+	// 108C hotspot has no configured threshold.
+	if len(got) != 1 {
 		t.Fatalf("unexpected events: %+v", got)
 	}
 
 	// A repeat of the SAME reading is not a new fault: the counters have not
-	// grown and the throttle state has not changed.
+	// grown.
 	if repeat := w.poll(context.Background()); len(repeat) != 0 {
 		t.Fatalf("unchanged repeat poll = %+v, want none", repeat)
 	}
@@ -144,7 +158,7 @@ func TestAMDSMICountersBaselineThenEmitOnIncrease(t *testing.T) {
 // permanently rejected payload.
 func TestEmittedEventsCarryNoXID(t *testing.T) {
 	fixture := "synthetic-amd-smi-metric-healthy.json"
-	w := testWatcher(t, func([]string) ([]byte, error) { return readFixture(t, fixture), nil })
+	w := testWatcher(t, amdSMIOutput(t, func() []byte { return readFixture(t, fixture) }))
 	w.poll(context.Background())
 	fixture = "synthetic-amd-smi-metric-faults.json"
 	events := w.poll(context.Background())
@@ -193,7 +207,7 @@ func TestAmbiguousReadingsNeverInventAFault(t *testing.T) {
 		{
 			name:   "unreadable and unindexed records",
 			output: readFixture(t, "synthetic-amd-smi-metric-unreadable.json"),
-			reason: "N/A counters, a null, a negative count, an unknown throttle status and a device with no index",
+			reason: "N/A counters and temperatures, an N/A XGMI and throttle status and a device with no index",
 		},
 		{
 			name:   "empty device list",
@@ -231,15 +245,15 @@ func TestUnreadableSectionsAreReportedNotSilentlySkipped(t *testing.T) {
 	w.Logger = slog.New(slog.NewTextHandler(&logged, nil))
 	w.poll(context.Background())
 	out := logged.String()
-	for _, want := range []string{"ecc", "ras", "xgmi", "temperature"} {
+	for _, want := range []string{"ecc", "temperature"} {
 		if !strings.Contains(out, `section=`+want) {
 			t.Errorf("unreadable %q section was skipped silently; log was: %s", want, out)
 		}
 	}
-	// The device record with no gpu index, and the unrecognized throttle
-	// status, are refusals too and must be named rather than assumed.
-	if !strings.Contains(out, "without a gpu index") || !strings.Contains(out, "unrecognized thermal throttle status") {
-		t.Errorf("an unindexed device and an unknown throttle status must both be reported; log was: %s", out)
+	// The device record with no gpu index is a refusal too and must be named
+	// rather than assumed.
+	if !strings.Contains(out, "without a gpu index") {
+		t.Errorf("an unindexed device must be reported; log was: %s", out)
 	}
 }
 
@@ -257,14 +271,16 @@ func TestUnparseableOutputDegradesToObservedOnly(t *testing.T) {
 
 // TestThermalRefusesWithoutAThresholdAndReportsWithOne is the ambiguity rule
 // made concrete. A hotspot reading alone cannot say whether a GPU is in
-// trouble: the critical temperature is SKU-specific. Without the tool's own
-// throttle flag and without an operator-configured threshold, the temperature
-// is observed and nothing more.
+// trouble: the critical temperature is SKU-specific. Without an
+// operator-configured threshold the temperature is observed and nothing more,
+// and amd-smi's THROTTLED status does not stand in for one: it covers every
+// cause, power capping included.
 func TestThermalRefusesWithoutAThresholdAndReportsWithOne(t *testing.T) {
-	const hot = `[{"gpu":0,"bdf":"0000:c3:00.0","temperature":{"hotspot":{"value":109,"unit":"C"}}}]`
+	const hot = `[{"gpu":0,"temperature":{"hotspot":{"value":109,"unit":"C"}},` +
+		`"power":{"throttle_status":"THROTTLED"},"throttle":{"socket_thermal_violation_status":"ACTIVE"}}]`
 
 	var logged strings.Builder
-	w := testWatcher(t, func([]string) ([]byte, error) { return []byte(hot), nil })
+	w := testWatcher(t, amdSMIOutput(t, func() []byte { return []byte(hot) }))
 	w.Logger = slog.New(slog.NewTextHandler(&logged, nil))
 	w.poll(context.Background())
 	if got := w.poll(context.Background()); len(got) != 0 {
@@ -275,7 +291,7 @@ func TestThermalRefusesWithoutAThresholdAndReportsWithOne(t *testing.T) {
 	}
 
 	// With an operator-supplied threshold the same reading is actionable.
-	withThreshold := testWatcher(t, func([]string) ([]byte, error) { return []byte(hot), nil })
+	withThreshold := testWatcher(t, amdSMIOutput(t, func() []byte { return []byte(hot) }))
 	withThreshold.ThermalCriticalC = 100
 	got := eventsByCode(withThreshold.poll(context.Background()))
 	if len(got[CodeThermal]) != 1 {
@@ -323,12 +339,11 @@ func TestCorrectableRateReportsOnlyOnAMeaningfulDelta(t *testing.T) {
 // reported once rather than on every tick, and its return re-arms the series so
 // a second disappearance is reported again.
 func TestGPULostReportsADisappearanceOnceAndReArms(t *testing.T) {
-	both := `[{"gpu":0,"bdf":"0000:c3:00.0","uuid":"amd-gpu-0","ecc":{"total_uncorrectable_count":0}},` +
-		`{"gpu":1,"bdf":"0000:c6:00.0","uuid":"amd-gpu-1","ecc":{"total_uncorrectable_count":0}}]`
-	one := `[{"gpu":0,"bdf":"0000:c3:00.0","uuid":"amd-gpu-0","ecc":{"total_uncorrectable_count":0}}]`
+	both := `[{"gpu":0,"ecc":{"total_uncorrectable_count":0}},{"gpu":1,"ecc":{"total_uncorrectable_count":0}}]`
+	one := `[{"gpu":0,"ecc":{"total_uncorrectable_count":0}}]`
 
 	output := both
-	w := testWatcher(t, func([]string) ([]byte, error) { return []byte(output), nil })
+	w := testWatcher(t, amdSMIOutput(t, func() []byte { return []byte(output) }))
 	w.poll(context.Background())
 
 	output = one
@@ -339,7 +354,7 @@ func TestGPULostReportsADisappearanceOnceAndReArms(t *testing.T) {
 	}
 	// The vanished device is still named: the identity remembered from the last
 	// poll that saw it is what makes the incident actionable.
-	if lost[0].GPUUUID != "amd-gpu-1" || lost[0].PCIAddr != "0000:c6:00.0" {
+	if lost[0].GPUUUID != "amd-c6000000-0000-1000-8000-000000000002" || lost[0].PCIAddr != "0000:c6:00.0" {
 		t.Fatalf("gpu-lost event = %+v, want the last known identity of GPU 1", lost[0])
 	}
 	if repeat := w.poll(context.Background()); len(repeat) != 0 {
@@ -480,8 +495,8 @@ func TestROCmSMIUsedOnlyWhenAMDSMIFails(t *testing.T) {
 	amdSMIFails = false
 	called = nil
 	w.poll(context.Background())
-	if len(called) != 1 || called[0] != "amd-smi" {
-		t.Fatalf("calls = %v, want only amd-smi once it recovers", called)
+	if len(called) != 2 || called[0] != "amd-smi" || called[1] != "amd-smi" {
+		t.Fatalf("calls = %v, want only amd-smi (metric and list) once it recovers", called)
 	}
 }
 
@@ -549,30 +564,101 @@ func TestWatchStreamsEventsAndStopsWithContext(t *testing.T) {
 	}
 }
 
-// TestXGMILinkErrorsNeedADeltaBeforePagingAnyone covers the fabric counter.
-// XGMI link errors classify CRITICAL and the counter also moves on corrected
-// link retries, so reporting every increment wakes somebody about a healthy
-// fabric under load.
-func TestXGMILinkErrorsNeedADeltaBeforePagingAnyone(t *testing.T) {
-	errs := 0
-	w := testWatcher(t, func([]string) ([]byte, error) {
-		return []byte(`[{"gpu":0,"bdf":"0000:c3:00.0","ecc":{"total_uncorrectable_count":0},` +
-			`"xgmi":{"link_error_count":` + strconv.Itoa(errs) + `}}]`), nil
-	})
-	w.XGMILinkMinDelta = 4
-	w.poll(context.Background()) // baseline
+// TestAMDSMISectionsNotReadStaySilent covers what amd-smi prints but this
+// release does not read. XGMI in `metric` is a status, not a counter, retired
+// pages are in other commands, and the throttle status covers every cause.
+// Those sections give no event and no zero, and the agent log says once that
+// they are not read.
+func TestAMDSMISectionsNotReadStaySilent(t *testing.T) {
+	xgmi, throttle := "AMDSMI_XGMI_STATUS_NO_ERRORS", "UNTHROTTLED"
+	var logged strings.Builder
+	w := testWatcher(t, amdSMIOutput(t, func() []byte {
+		return []byte(`[{"gpu":0,"ecc":{"total_uncorrectable_count":0},"xgmi_err":"` + xgmi + `",` +
+			`"power":{"throttle_status":"` + throttle + `"},"throttle":{"socket_thermal_violation_status":"NOT ACTIVE"}}]`)
+	}))
+	w.Logger = slog.New(slog.NewTextHandler(&logged, nil))
+	w.XGMILinkMinDelta = 1
+	w.BadPageThreshold = 1
+	w.poll(context.Background())
 
-	errs = 3
+	xgmi, throttle = "AMDSMI_XGMI_STATUS_MULTIPLE_ERRORS", "THROTTLED"
+	w.poll(context.Background())
 	if got := w.poll(context.Background()); len(got) != 0 {
-		t.Fatalf("poll = %+v, want silence below the fabric reporting delta", got)
+		t.Fatalf("poll = %+v, want no event from sections that are not read", got)
 	}
-	errs = 4
-	got := eventsByCode(w.poll(context.Background()))
-	if len(got[CodeXGMILink]) != 1 {
-		t.Fatalf("events = %+v, want one XGMI report once the delta is crossed", got)
+	out := logged.String()
+	if n := strings.Count(out, "section not available"); n != 1 {
+		t.Fatalf("not-read notice logged %d times, want once; log was: %s", n, out)
 	}
-	if got[CodeXGMILink][0].Fault.Attributes["xgmi_link_errors"] != "4" {
-		t.Fatalf("attributes = %+v, want the cumulative link error count", got[CodeXGMILink][0].Fault.Attributes)
+	for _, want := range []string{"XGMI link errors", "retired pages", "thermal throttling"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the notice must name %q; log was: %s", want, out)
+		}
+	}
+}
+
+// TestAMDSMIListFailureMarksTheAddressNotRead is the identity half of the
+// join. Without `amd-smi list` the readings still report, and the event says
+// that the PCI address was not read instead of carrying a blank field.
+func TestAMDSMIListFailureMarksTheAddressNotRead(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		list func() ([]byte, error)
+		log  string
+	}{
+		{"list fails", func() ([]byte, error) { return []byte("Unknown command list\n"), errors.New("exit status 2") }, "amd-smi list failed"},
+		{"list unreadable", func() ([]byte, error) { return []byte(`{"cpu_data":[]}`), nil }, "amd-smi list failed"},
+		{"gpu not listed", func() ([]byte, error) { return []byte(`[{"gpu":1,"bdf":"0000:c6:00.0","uuid":"amd-gpu-1"}]`), nil }, "amd-smi list does not name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			uncorr := 0
+			var logged strings.Builder
+			w := testWatcher(t, func(args []string) ([]byte, error) {
+				if args[0] == "list" {
+					return tc.list()
+				}
+				return []byte(`[{"gpu":0,"ecc":{"total_uncorrectable_count":` + strconv.Itoa(uncorr) + `}}]`), nil
+			})
+			w.Logger = slog.New(slog.NewTextHandler(&logged, nil))
+			w.poll(context.Background())
+			uncorr = 1
+			ecc := eventsByCode(w.poll(context.Background()))[CodeECCUncorr]
+			if len(ecc) != 1 {
+				t.Fatalf("ecc events = %+v, want the reading reported without the address", ecc)
+			}
+			ev := ecc[0]
+			if ev.PCIAddr != "" || ev.GPUUUID != "" {
+				t.Fatalf("event = %+v, want no invented identity", ev)
+			}
+			if ev.Fault.Attributes["pci_address"] != "not read" || !strings.Contains(ev.Raw, "PCI address not read") {
+				t.Fatalf("event = %+v, want the missing address named in the attributes and the text", ev)
+			}
+			if n := strings.Count(logged.String(), tc.log); n != 1 {
+				t.Fatalf("%q logged %d times, want once; log was: %s", tc.log, n, logged.String())
+			}
+		})
+	}
+}
+
+// amd-smi prints `list` in the same two shapes as `metric`.
+func TestAMDSMIListJoinsInBothShapes(t *testing.T) {
+	for _, list := range []string{"synthetic-amd-smi-list.json", "synthetic-amd-smi-list-gpu-data.json"} {
+		t.Run(list, func(t *testing.T) {
+			w := testWatcher(t, func(args []string) ([]byte, error) {
+				if args[0] == "list" {
+					return readFixture(t, list), nil
+				}
+				return readFixture(t, "synthetic-amd-smi-metric-faults-gpu-data.json"), nil
+			})
+			samples, err := w.pollAMDSMI(context.Background())
+			if err != nil {
+				t.Fatalf("pollAMDSMI: %v", err)
+			}
+			if len(samples) != 2 || samples[1].bdf != "0000:c6:00.0" ||
+				samples[1].uuid != "amd-c6000000-0000-1000-8000-000000000002" {
+				t.Fatalf("samples = %+v, want GPU 1 named by the list", samples)
+			}
+		})
 	}
 }
 
@@ -580,13 +666,11 @@ func TestXGMILinkErrorsNeedADeltaBeforePagingAnyone(t *testing.T) {
 // the fault table encodes: retiring a page is the recovery mechanism WORKING
 // (ClassRowRemapOK), while retiring past the device's budget means there are
 // no spares left to retire into (ClassRowRemapFailure, the peer of XID 64).
+// Retired pages come from rocm-smi in this release.
 func TestBadPageThresholdSeparatesRetirementFromExhaustion(t *testing.T) {
 	pages := 0
 	newWatcher := func(threshold uint64) *Watcher {
-		w := testWatcher(t, func([]string) ([]byte, error) {
-			return []byte(`[{"gpu":0,"bdf":"0000:c3:00.0","ecc":{"total_uncorrectable_count":0},` +
-				`"ras":{"retired_page_count":` + strconv.Itoa(pages) + `}}]`), nil
-		})
+		w := rocmWatcher(t, func() int { return pages })
 		w.BadPageThreshold = threshold
 		return w
 	}
@@ -643,10 +727,7 @@ func TestBadPageThresholdSeparatesRetirementFromExhaustion(t *testing.T) {
 // agent starts is not history to be absorbed — it is a device that needs
 // replacing right now.
 func TestExhaustedBudgetSurvivesTheStartupBaseline(t *testing.T) {
-	w := testWatcher(t, func([]string) ([]byte, error) {
-		return []byte(`[{"gpu":0,"bdf":"0000:c3:00.0","ecc":{"total_uncorrectable_count":0},` +
-			`"ras":{"retired_page_count":900}}]`), nil
-	})
+	w := rocmWatcher(t, func() int { return 900 })
 	w.BadPageThreshold = 64
 
 	got := eventsByCode(w.poll(context.Background()))
@@ -674,9 +755,11 @@ func TestExhaustedBudgetSurvivesTheStartupBaseline(t *testing.T) {
 // nothing on its own.)
 func TestReplacedDeviceDoesNotInheritCounterHistory(t *testing.T) {
 	uuid, uncorr := "amd-gpu-old", 10
-	w := testWatcher(t, func([]string) ([]byte, error) {
-		return []byte(`[{"gpu":0,"bdf":"0000:c3:00.0","uuid":"` + uuid + `",` +
-			`"ecc":{"total_uncorrectable_count":` + strconv.Itoa(uncorr) + `}}]`), nil
+	w := testWatcher(t, func(args []string) ([]byte, error) {
+		if args[0] == "list" {
+			return []byte(`[{"gpu":0,"bdf":"0000:c3:00.0","uuid":"` + uuid + `"}]`), nil
+		}
+		return []byte(`[{"gpu":0,"ecc":{"total_uncorrectable_count":` + strconv.Itoa(uncorr) + `}}]`), nil
 	})
 	w.poll(context.Background()) // baselines the dying device at 10
 
@@ -699,13 +782,15 @@ func TestReplacedDeviceDoesNotInheritCounterHistory(t *testing.T) {
 // whatever went wrong while it was down.
 func TestMissingUUIDIsNotReadAsAReplacement(t *testing.T) {
 	withUUID, uncorr := true, 100
-	w := testWatcher(t, func([]string) ([]byte, error) {
-		id := ""
-		if withUUID {
-			id = `"uuid":"amd-gpu-0",`
+	w := testWatcher(t, func(args []string) ([]byte, error) {
+		if args[0] == "list" {
+			id := ""
+			if withUUID {
+				id = `,"uuid":"amd-gpu-0"`
+			}
+			return []byte(`[{"gpu":0,"bdf":"0000:c3:00.0"` + id + `}]`), nil
 		}
-		return []byte(`[{"gpu":0,"bdf":"0000:c3:00.0",` + id +
-			`"ecc":{"total_uncorrectable_count":` + strconv.Itoa(uncorr) + `}}]`), nil
+		return []byte(`[{"gpu":0,"ecc":{"total_uncorrectable_count":` + strconv.Itoa(uncorr) + `}}]`), nil
 	})
 	w.poll(context.Background()) // baseline at 100
 
@@ -714,4 +799,15 @@ func TestMissingUUIDIsNotReadAsAReplacement(t *testing.T) {
 	if len(got[CodeECCUncorr]) != 1 {
 		t.Fatalf("events = %+v, want the increase still reported when the tool omits the UUID", got)
 	}
+}
+
+// rocmWatcher is a watcher with only the rocm-smi fallback, reporting card0 at
+// 0000:c3:00.0 with pages() retired pages.
+func rocmWatcher(t *testing.T, pages func() int) *Watcher {
+	t.Helper()
+	w := &Watcher{NodeName: "amd-node-1", ROCmSMIPath: "rocm-smi", Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	w.run = func(context.Context, string, ...string) ([]byte, error) {
+		return []byte(`{"card0":{"PCI Bus":"0000:C3:00.0","Total Retired Pages":"` + strconv.Itoa(pages()) + `"}}`), nil
+	}
+	return w
 }
