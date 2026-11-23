@@ -281,6 +281,13 @@ func (c *Controller) findCloudReplacement(ctx context.Context, inc *types.Incide
 			}
 		case e.Result == auditStepOutcomeResult(replace, false, true):
 			found = &cloudReplacement{since: e.Time}
+		case e.Action == "remove-first-"+types.RemoveFirstDeleteConfirmed:
+			rec := inc.RemoveFirst
+			if rec != nil && rec.Version == 1 && rec.Outcome == types.RemoveFirstDeleteConfirmed &&
+				rec.Operation == successorOperation(inc) && e.Params["operation"] == rec.Operation &&
+				rec.DeleteTarget != nil && inc.CloudIdentity != nil && *rec.DeleteTarget == *inc.CloudIdentity {
+				found = &cloudReplacement{since: e.Time}
+			}
 		case e.Action == replacementPoolAction:
 			pool = e
 		case e.Action == replacementInstanceAction:
@@ -322,7 +329,7 @@ func resizeDiffInstance(inc *types.Incident, pool, named *types.AuditEntry) stri
 	if named != nil && named.Params["node"] == pool.Params["node"] {
 		return named.Params["provider_id"]
 	}
-	if rec := inc.RemoveFirst; rec != nil && rec.Outcome == types.RemoveFirstRestored && rec.Operation == successorOperation(inc) {
+	if rec := inc.RemoveFirst; rec != nil && (rec.Outcome == types.RemoveFirstRestored || rec.Version == 1 && rec.Outcome == types.RemoveFirstDeleteConfirmed) && rec.Operation == successorOperation(inc) {
 		return resizediff.FromPlan(rec.RemoveFirstPlan)
 	}
 	return ""

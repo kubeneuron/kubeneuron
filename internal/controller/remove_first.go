@@ -249,6 +249,9 @@ func (c *Controller) endRemoveFirst(ctx context.Context, inc *types.Incident, ou
 	}
 	now := time.Now().UTC()
 	rec.Outcome, rec.Reason, rec.EndedAt = outcome, reason, &now
+	if rec.Version == 1 && outcome == types.RemoveFirstDeleteConfirmed {
+		rec.Phase = cloud.RemoveFirstDone
+	}
 	result := fmt.Sprintf("operation %s ended %s", rec.Operation, outcome)
 	if reason != "" {
 		result += ": " + reason

@@ -424,3 +424,34 @@ func TestDeleteIntentCannotBeClaimedTwice(t *testing.T) {
 		t.Fatalf("got %d delete intent audit entries", count)
 	}
 }
+
+func TestRestartFindsConfirmedDeleteWithoutStepOutcome(t *testing.T) {
+	c, st := plannedFixture(t, newPlannedPlatform())
+	id := openOn(t, c, "n1")
+	inc := mustIncident(t, st, id)
+	pin := *inc.CloudIdentity
+	ctx := t.Context()
+	if err := c.recordReplacementPool(ctx, inc, pin); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.claimDeleteIntent(ctx, inc, pin, "gpu", "old", "azure:///vm/next"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.endRemoveFirst(ctx, inc, types.RemoveFirstDeleteConfirmed, ""); err != nil {
+		t.Fatal(err)
+	}
+	r := restartWith(t, c, st, c.platform)
+	reloaded := mustIncident(t, st, id)
+	found, err := r.findCloudReplacement(ctx, reloaded)
+	if err != nil || found == nil {
+		t.Fatalf("confirmed delete after restart: %v %v", found, err)
+	}
+	if got := resizeDiffInstance(reloaded, &types.AuditEntry{}, nil); got != "azure:///vm/next" {
+		t.Fatalf("successor ID = %q", got)
+	}
+	reloaded.Attempt++
+	found, err = r.findCloudReplacement(ctx, reloaded)
+	if err != nil || found != nil {
+		t.Fatalf("previous attempt supplied a replacement: %v %v", found, err)
+	}
+}
