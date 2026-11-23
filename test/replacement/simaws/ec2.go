@@ -11,6 +11,8 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/kubeneuron/kubeneuron/test/replacement/restartsim"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	at "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
@@ -20,10 +22,38 @@ import (
 
 // Instances holds the EC2 view of one simulated Auto Scaling group.
 type Instances struct {
-	mu      sync.Mutex
-	Group   string
-	States  map[string]et.InstanceStateName
-	scaling *Scaling
+	mu           sync.Mutex
+	Group        string
+	States       map[string]et.InstanceStateName
+	scaling      *Scaling
+	snapshotPath string
+	snapshot     deleteSnapshot
+}
+
+// deleteSnapshot records actual SDK calls separately from membership changes.
+type deleteSnapshot struct {
+	Calls   int                             `json:"delete_calls"`
+	Effects int                             `json:"delete_effects"`
+	States  map[string]et.InstanceStateName `json:"states"`
+	Group   at.AutoScalingGroup             `json:"group"`
+}
+
+func (c *Instances) EnableLostResponse(path string) error {
+	var snapshot deleteSnapshot
+	exists, err := restartsim.Load(path, &snapshot)
+	if err != nil {
+		return err
+	}
+	if exists {
+		if snapshot.States == nil || snapshot.Group.DesiredCapacity == nil {
+			return errors.New("incomplete simulated AWS snapshot")
+		}
+		c.States = snapshot.States
+		c.scaling.group = snapshot.Group
+	}
+	c.snapshot = snapshot
+	c.snapshotPath = path
+	return nil
 }
 
 func (c *Instances) instance(ids []string) (et.Instance, error) {
@@ -58,7 +88,7 @@ func (c *Instances) DescribeInstanceStatus(_ context.Context, in *ec2.DescribeIn
 	return &ec2.DescribeInstanceStatusOutput{InstanceStatuses: []et.InstanceStatus{{InstanceId: i.InstanceId, InstanceState: i.State}}}, nil
 }
 
-func (c *Instances) TerminateInstances(_ context.Context, in *ec2.TerminateInstancesInput, _ ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error) {
+func (c *Instances) TerminateInstances(ctx context.Context, in *ec2.TerminateInstancesInput, _ ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error) {
 	if c.scaling.traceMutations && !aws.ToBool(in.DryRun) {
 		log.Print("zone rehearsal: delete call")
 	}
@@ -73,7 +103,8 @@ func (c *Instances) TerminateInstances(_ context.Context, in *ec2.TerminateInsta
 	if aws.ToBool(in.DryRun) {
 		return nil, &smithy.GenericAPIError{Code: "DryRunOperation", Message: "simulated permission granted"}
 	}
-	if i.State.Name != et.InstanceStateNameTerminated {
+	changed := i.State.Name != et.InstanceStateNameTerminated
+	if changed {
 		// With unchanged desired capacity the group supplies the final worker.
 		members := c.scaling.group.Instances
 		idx := slices.IndexFunc(members, func(m at.Instance) bool { return aws.ToString(m.InstanceId) == *i.InstanceId })
@@ -83,6 +114,22 @@ func (c *Instances) TerminateInstances(_ context.Context, in *ec2.TerminateInsta
 		members[idx].InstanceId = aws.String("i-final")
 		c.States["i-final"] = et.InstanceStateNameRunning
 		c.States[*i.InstanceId] = et.InstanceStateNameTerminated
+	}
+	if c.snapshotPath != "" {
+		c.snapshot.Calls++
+		if changed {
+			c.snapshot.Effects++
+		}
+		c.snapshot.States = c.States
+		c.snapshot.Group = c.scaling.group
+		if err := restartsim.Save(c.snapshotPath, c.snapshot); err != nil {
+			return nil, err
+		}
+		if c.snapshot.Calls == 1 {
+			// The caller never receives the success response before the pod is replaced.
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
 	}
 	return &ec2.TerminateInstancesOutput{TerminatingInstances: []et.InstanceStateChange{{InstanceId: i.InstanceId, PreviousState: i.State, CurrentState: &et.InstanceState{Name: et.InstanceStateNameTerminated}}}}, nil
 }

@@ -4,6 +4,7 @@ package aws
 
 import (
 	"context"
+	"os"
 
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/test/replacement/simaws"
@@ -16,6 +17,11 @@ func newManagedProvider(_ context.Context, options cloud.Config) (*managedProvid
 		newClients = simaws.NewTwoZoneClients
 	}
 	ec, scaling, eks := newClients(cluster)
+	if path := os.Getenv("REHEARSAL_DELETE_SNAPSHOT"); path != "" {
+		if err := ec.EnableLostResponse(path); err != nil {
+			return nil, err
+		}
+	}
 	return &managedProvider{
 		Recycler:   NewWithAPI(ec),
 		updater:    eks,
