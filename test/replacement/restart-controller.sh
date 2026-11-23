@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Sourced after B opens, before the original controller records the delete.
+: "${id:?}" "${audit:?}" "${successor:?}" "${successor_id:?}"
+k=(kubectl --context "kind-${CLUSTER_NAME:?}")
 selector=$("${k[@]}" -n rehearsal get deploy rehearsal-controller -o json |
   jq -er '.spec.selector.matchLabels | to_entries | map(.key + "=" + .value) | join(",")')
 old=$("${k[@]}" -n rehearsal get pod -l "$selector" -o json | jq -er '.items | select(length==1) | first.metadata.name')
@@ -23,7 +25,7 @@ forward=$!
 trap 'kill "$forward" 2>/dev/null || true' EXIT
 new_port() { port=$(sed -n 's/.*127\.0\.0\.1:\([0-9]*\) -> 8080.*/\1/p' "$EVIDENCE_DIR/restart-forward.log" | head -1); [[ -n $port ]]; }
 wait_until new_port
-API_URL="http://127.0.0.1:$port/api/v1"
+export API_URL="http://127.0.0.1:$port/api/v1"
 restart_outcome() { api "incidents/$id" >"$audit" && jq -e --arg scenario "$RESTART_SCENARIO" -f assert-restart.jq "$audit" >/dev/null; }
 if [[ $RESTART_SCENARIO == resolved ]]; then
   remove_worker "$successor" "$successor_id"
