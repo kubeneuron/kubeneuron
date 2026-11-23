@@ -24,7 +24,7 @@ v1.33.12 to create a digest-pinned Kubernetes v1.33.12 cluster. Kubernetes
 ```sh
 make build      # build all four binaries into bin/
 make test       # run Go unit tests
-make lint       # go vet; also runs golangci-lint when installed
+make lint       # go vet; golangci-lint checks gofmt when installed
 make test-integration-kind  # run the slower, CPU-only real-cluster checks
 ```
 

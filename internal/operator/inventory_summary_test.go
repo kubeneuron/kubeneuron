@@ -114,6 +114,22 @@ func TestInventoryConditionsRejectStaleMalformedAndMissingEvidence(t *testing.T)
 		c.Reason != "RuntimeDidNotExposeGPUs" || !strings.HasPrefix(c.Message, inventory.DiagnosticText(runtime)) {
 		t.Fatalf("GPUVisibility = %+v", c)
 	}
+	// Agents that cannot run with the RuntimeClass are named while others
+	// report GPUs.
+	partial := inventory.Summary{ObservedAt: now, LastReportAt: now, ReportingNodes: 1, AdvertisedNodes: 3, GPUs: 1,
+		Diagnostic: "AgentRuntimeClassNotStarting", DiagnosticNodes: 2}
+	if err := r.Get(ctx, key, &cm); err != nil {
+		t.Fatal(err)
+	}
+	cm.Data = partial.Data()
+	if err := r.Update(ctx, &cm); err != nil {
+		t.Fatal(err)
+	}
+	r.setInventoryConditions(ctx, root, true)
+	if c := meta.FindStatusCondition(root.Status.Conditions, "GPUVisibility"); c == nil || c.Status != metav1.ConditionFalse ||
+		c.Reason != "AgentRuntimeClassNotStarting" || !strings.HasPrefix(c.Message, "Agent Pods with spec.agent.runtimeClassName cannot start on 2 nodes.") {
+		t.Fatalf("GPUVisibility = %+v", c)
+	}
 	r.setInventoryConditions(ctx, root, false)
 	if meta.FindStatusCondition(root.Status.Conditions, "ResetAvailable") != nil || meta.FindStatusCondition(root.Status.Conditions, "GPUVisibility") == nil {
 		t.Fatal("disabling node actions should remove only ResetAvailable")

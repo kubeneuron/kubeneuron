@@ -597,6 +597,20 @@ func (c *Controller) resumeAwaitingApproval(ctx context.Context, inc *types.Inci
 	}
 	if decision != nil {
 		step, done, err := c.runtimeConfig(ctx).Engine.NextStep(inc)
+		// An approval is honoured under the configuration the operator
+		// published, not under one it has replaced: until that is loaded,
+		// nothing below may re-park the round or quarantine the incident
+		// because the loaded playbook no longer matches. A rejection does
+		// not wait.
+		if decision.Decision == types.ApprovalApproved {
+			held := step
+			if err != nil || done {
+				held = &playbook.Step{Name: firstNonBlank(decision.StepName, "the approved step")}
+			}
+			if c.holdUnloadedConfig(ctx, inc, held) {
+				return nil // approval stays recorded; it is decided under the loaded configuration
+			}
+		}
 		if err != nil || done {
 			return c.quarantine(ctx, inc, "approved step no longer exists")
 		}
@@ -975,7 +989,7 @@ func (c *Controller) verifyAgainstObservationReport(ctx context.Context, inc *ty
 // Anything in between — labels unavailable, overlapping profiles — cannot say
 // what the agent was told, and fails closed with the cause in the reason.
 func (c *Controller) verifyWithoutCurrentReport(ctx context.Context, inc *types.Incident, vendor types.AcceleratorVendor, absence string) (bool, string) {
-	selected, err := c.AcceleratorObservationProfile(ctx, inc.Target.Node, vendor)
+	selected, err := c.AcceleratorObservationProfile(ctx, inc.Target.Node, repairNodeUID(inc), vendor)
 	if err != nil {
 		return false, absence + "; cannot tell whether a runtime profile selects the node: " + err.Error()
 	}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kubeneuron/kubeneuron/internal/inventory"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -46,6 +47,9 @@ func cmdHealth() *cobra.Command {
 	return c
 }
 
+// The table explains the missing source; JSON retains the reported condition names.
+const missingGPUConditions = "No GPU health condition is reported on this node. This source needs a platform component that publishes one (on EKS, the node monitoring agent; on AKS, node problem detector). Other sources are not affected."
+
 func printHealth(out io.Writer, view types.AcceleratorHealthView) {
 	if len(view.Rows) == 0 {
 		_, _ = fmt.Fprintln(out, "No accelerator health read yet.")
@@ -58,16 +62,20 @@ func printHealth(out io.Writer, view types.AcceleratorHealthView) {
 		if !r.ReadAt.IsZero() {
 			read = r.ReadAt.UTC().Format(time.RFC3339)
 		}
+		why := r.Why
+		if r.Source == "kubernetes-node" && r.Profile == "nvidia" && r.Rule == "conditions" && r.State == "unknown" {
+			why = missingGPUConditions
+		}
 		node := r.Node
 		if node == "" {
 			node = "(all)"
 		}
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			node, r.Source, dash(r.Profile), dash(r.Rule), dash(string(r.Class)), dash(r.Device), r.State, dash(r.Reason), read, dash(r.Why))
+			node, r.Source, dash(r.Profile), dash(r.Rule), dash(string(r.Class)), dash(r.Device), r.State, dash(r.Reason), read, dash(why))
 	}
 	_ = w.Flush()
 	if view.Truncated {
-		_, _ = fmt.Fprintf(out, "Truncated at %d rows; use --node to see one node.\n", len(view.Rows))
+		_, _ = fmt.Fprintf(out, "Truncated at %d %s; use --node to see one node.\n", len(view.Rows), inventory.Plural(len(view.Rows), "row", "rows"))
 	}
 }
 

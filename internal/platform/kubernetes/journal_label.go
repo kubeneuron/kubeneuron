@@ -48,6 +48,7 @@ func (p *Platform) JournalNodes(ctx context.Context, namespace, installation str
 	for _, n := range nodes {
 		out = append(out, platform.JournalNode{
 			Name:         n.Name,
+			UID:          string(n.UID),
 			OSImage:      n.Status.NodeInfo.OSImage,
 			ProviderID:   n.Spec.ProviderID,
 			Labels:       n.Labels,

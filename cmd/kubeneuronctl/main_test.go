@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kubeneuron/kubeneuron/internal/inventory"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -142,9 +143,9 @@ func TestIncidentShowPolicyHoldAndRecovery(t *testing.T) {
 // incidents impact is named only when the round has a preview to read.
 func TestIncidentShowApprovalRound(t *testing.T) {
 	const (
-		withPreview    = "approval:  round 3 (use --round 3 with approve, reject and incidents impact)\n"
-		unavailable    = "approval:  round 3 (use --round 3 with approve and reject; no impact preview for this round: WorkloadListingTimeout)\n"
-		off            = "approval:  round 3 (use --round 3 with approve and reject; impact preview is off — set spec.safety.impactPreview.enabled to see what this step affects)\n"
+		withPreview = "approval:  round 3 (use --round 3 with approve, reject and incidents impact)\n"
+		unavailable = "approval:  round 3 (use --round 3 with approve and reject; no impact preview for this round: WorkloadListingTimeout)\n"
+		off         = "approval:  round 3 (use --round 3 with approve and reject; impact preview is off — set spec.safety.impactPreview.enabled to see what this step affects)\n"
 	)
 	for _, tc := range []struct {
 		name    string
@@ -339,4 +340,54 @@ func TestIncidentShowCrossZoneSuccessor(t *testing.T) {
 	if err != nil || got != string(want) {
 		t.Fatalf("incidents show (%v):\n%s", err, got)
 	}
+}
+
+func TestStatusInventoryGolden(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		gpus, nodes int
+		mode        inventory.ActionMode
+	}{
+		{"disabled", 1, 2, inventory.ActionsDisabled}, {"enabled", 2, 1, inventory.ActionsEnabled}, {"legacy", 1, 1, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			summary := inventory.Summary{ObservedAt: now, LastReportAt: now, ReportingNodes: tc.nodes, GPUs: tc.gpus, NodeLevelActions: tc.mode}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/incidents":
+					_ = json.NewEncoder(w).Encode([]types.Incident{})
+				case "/api/v1/pause":
+					_ = json.NewEncoder(w).Encode(map[string]bool{"paused": false})
+				case "/api/v1/inventory-summary":
+					_ = json.NewEncoder(w).Encode(summary.Data())
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			out, err := runCommand(t, server.URL, "status")
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkGolden(t, "status-inventory-"+tc.name+".golden", []byte(out))
+		})
+	}
+}
+
+func TestShowMissingGPUIdentity(t *testing.T) {
+	inc := types.Incident{ID: "inc-amd", OpenedAt: time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC), SignalSeen: 1, Vendor: "amd", Class: types.ClassDriverHang, State: types.StateNeedsHuman, Playbook: "gpu-reset", Target: types.Target{Node: "n1", GPUIndex: -1, PCIAddr: "0000:c3:00"}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/incidents/inc-amd" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"incident": inc})
+	}))
+	defer server.Close()
+	out, err := runCommand(t, server.URL, "incidents", "show", inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkGolden(t, "incident-amd-no-uuid.golden", []byte(out))
 }

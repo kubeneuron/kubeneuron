@@ -124,6 +124,9 @@ func cmdStatus() *cobra.Command {
 		}
 		out := cmd.OutOrStdout()
 		_, _ = fmt.Fprintf(out, "automation paused: %v\n", pause.Paused)
+		if line := unloadedConfigLine(c, time.Now()); line != "" {
+			_, _ = fmt.Fprintln(out, line)
+		}
 		_, _ = fmt.Fprintf(out, "incidents: %d total\n", len(incidents))
 		for _, state := range []types.IncidentState{
 			types.StateOpen, types.StateObserving, types.StateEvaluating,
@@ -147,22 +150,52 @@ func cmdStatus() *cobra.Command {
 		case s.Diagnostic != "":
 			_, _ = fmt.Fprintln(out, "GPU inventory:", inventory.DiagnosticText(s))
 		case s.ReportingNodes == 0:
-			_, _ = fmt.Fprintf(out, "GPU inventory unknown: no fresh agent reports (%d nodes advertise accelerator resources)\n", s.AdvertisedNodes)
+			_, _ = fmt.Fprintf(out, "GPU inventory unknown: no fresh agent reports (%d %s accelerator resources)\n", s.AdvertisedNodes, inventory.Plural(s.AdvertisedNodes, "node advertises", "nodes advertise"))
 		case s.GPUs == 0 && s.AdvertisedNodes == 0:
 			_, _ = fmt.Fprintln(out, "GPU inventory: agents report zero GPUs and no node advertises an accelerator resource")
 		case s.GPUs == 0:
 			_, _ = fmt.Fprintln(out, "GPU inventory: agents report zero GPUs; check the driver and nvidia-smi on the selected nodes")
 		default:
-			_, _ = fmt.Fprintf(out, "GPU inventory: %d GPUs across %d reporting nodes\n", s.GPUs, s.ReportingNodes)
+			_, _ = fmt.Fprintf(out, "GPU inventory: %d %s across %d reporting %s\n", s.GPUs, inventory.Plural(s.GPUs, "GPU", "GPUs"), s.ReportingNodes, inventory.Plural(s.ReportingNodes, "node", "nodes"))
 		}
-		if !s.ResetConfirmed {
-			_, _ = fmt.Fprintln(out, "Reset unconfirmed: no fresh DCGM reset attestation. See docs/quickstart.md#check-gpu-visibility.")
-		} else {
+		if s.ResetConfirmed {
 			_, _ = fmt.Fprintln(out, "Reset attested on at least one GPU")
+		} else if s.NodeLevelActions != inventory.ActionsDisabled {
+			_, _ = fmt.Fprintln(out, "Reset unconfirmed: no fresh DCGM reset attestation. See docs/quickstart.md#check-gpu-visibility.")
 		}
 
 		return nil
 	}}
+}
+
+// unloadedConfigThreshold is how long a published configuration may stay
+// unloaded before status reports it: the kubelet refreshes the mounted copy
+// a minute or two after the operator writes it.
+const unloadedConfigThreshold = 5 * time.Minute
+
+// unloadedConfigLine names a configuration the operator published that the
+// controller has not loaded for longer than the threshold; "" otherwise, also
+// when the controller does not say what was published.
+func unloadedConfigLine(c *client, now time.Time) string {
+	var info struct {
+		SourceDigest string `json:"source_digest"`
+		Published    *struct {
+			Digest string    `json:"config_digest"`
+			At     time.Time `json:"published_at"`
+			Error  string    `json:"error"`
+		} `json:"published"`
+	}
+	if err := c.do("GET", "/api/v1/runtime-config", nil, &info); err != nil {
+		return ""
+	}
+	p := info.Published
+	if p == nil || p.Error != "" || p.Digest == "" || p.At.IsZero() || p.Digest == info.SourceDigest {
+		return ""
+	}
+	if age := now.Sub(p.At); age > unloadedConfigThreshold {
+		return fmt.Sprintf("configuration published %s ago is not loaded by the controller", age.Round(time.Second))
+	}
+	return ""
 }
 
 func cmdNodes() *cobra.Command {
@@ -294,8 +327,21 @@ func cmdIncidents() *cobra.Command {
 		}
 		out := cmd.OutOrStdout()
 		inc := detail.Incident
-		_, _ = fmt.Fprintf(out, "id:        %s\nstate:     %s\nclass:     %s\nnode:      %s\ngpu:       %s\nplaybook:  %s (step %d, attempt %d)\ndry-run:   %v\nsignals:   %d\nopened:    %s\n",
-			inc.ID, inc.State, inc.Class, inc.Target.Node, inc.Target.GPUUUID,
+		gpu := inc.Target.GPUUUID
+		if gpu == "" && (inc.Vendor != "" || inc.Target.PCIAddr != "") {
+			gpu = "-"
+		}
+		_, _ = fmt.Fprintf(out, "id:        %s\nstate:     %s\nclass:     %s\nnode:      %s\ngpu:       %s\n",
+			inc.ID, inc.State, inc.Class, inc.Target.Node, gpu)
+		if inc.Target.GPUUUID == "" {
+			if inc.Vendor != "" {
+				_, _ = fmt.Fprintf(out, "vendor:    %s\n", inc.Vendor)
+			}
+			if inc.Target.PCIAddr != "" {
+				_, _ = fmt.Fprintf(out, "pci:       %s\n", inc.Target.PCIAddr)
+			}
+		}
+		_, _ = fmt.Fprintf(out, "playbook:  %s (step %d, attempt %d)\ndry-run:   %v\nsignals:   %d\nopened:    %s\n",
 			inc.Playbook, inc.StepIndex, inc.Attempt, inc.DryRun, inc.SignalSeen,
 			inc.OpenedAt.Format(time.RFC3339))
 		// The round is what approve, reject and incidents impact bind to; without

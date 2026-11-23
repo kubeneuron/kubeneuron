@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package aws
+
+import (
+	"github.com/kubeneuron/kubeneuron/internal/cloud/cloudtest"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
+	"github.com/kubeneuron/kubeneuron/test/replacement/simaws"
+	"testing"
+)
+
+func TestKindSimulatorConformance(t *testing.T) {
+	cloudtest.SuccessorConformance(t, cloudtest.SuccessorCase{
+		Offline:  &managedProvider{},
+		Instance: "i-pinned",
+		New: func(t *testing.T) (cloud.SuccessorProvider, cloudtest.SuccessorCloud) {
+			ec, scaling, eks := simaws.NewClients("training")
+			return &managedProvider{
+				Recycler:   NewWithAPI(ec),
+				updater:    eks,
+				terminator: scaling,
+				repairReader: &repairReader{
+					checkAutoscalerGroup: unmanagedGroup,
+					cluster:              "training",
+					ec2:                  ec,
+					scaling:              scaling,
+					eks:                  eks,
+					updates:              &updateCache{},
+				},
+			}, eks
+		},
+	})
+}

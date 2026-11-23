@@ -35,7 +35,8 @@ type RuntimeConfig struct {
 	// and pause enforcement, but a step's dry-run decision and its destructive
 	// selector must come from the same immutable snapshot.  Nil is retained for
 	// the per-field test hooks and means "keep the current limits" on install.
-	SafetyLimits *safety.Limits
+	SafetyLimits     *safety.Limits
+	NodeLevelActions bool
 	// Engine selects playbooks and yields next steps; never nil after New.
 	Engine *playbook.Engine
 	// Catalog classifies signals; nil means built-ins only (every Catalog
@@ -79,7 +80,7 @@ type RuntimeConfig struct {
 	// came from (the config-digest key the operator writes into the mounted
 	// ConfigMaps). Empty for file-based deployments with no operator. It lets
 	// /readyz, the operator API, and the info metric say WHICH configuration
-	// is live, and automatic steps wait while it is not the one the operator
+	// is live, and steps wait while it is not the one the operator
 	// has published (published_config.go).
 	SourceDigest string
 	// VerifyQuiet and ApprovalTTL are always > 0 (defaulted at seed;

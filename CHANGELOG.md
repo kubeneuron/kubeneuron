@@ -9,6 +9,83 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+### Added
+
+- `spec.agent.runtimeClassName` runs the agent Pods with a RuntimeClass, for
+  nodes where the NVIDIA container runtime is configured but is not the
+  default, such as the NVIDIA GPU Operator 25.10 or later with CDI
+  (`runtimeClassName: nvidia`). Optional and unset by default; nothing
+  changes for existing installations. When no agent Pod can be created with
+  it, or the Pods' sandbox does not start, `GPUVisibility` and
+  `kubeneuronctl status` report `AgentRuntimeClassPodsNotCreated` or
+  `AgentRuntimeClassNotStarting` instead of waiting for agents, also when
+  setting the field stops the rollout of a running installation. Not yet
+  exercised on real hardware. The table in docs/operations.md now says, per
+  node image, whether the agent sees GPUs without node-level actions.
+
+- **`kubeneuronctl status` says when the controller has not loaded a
+  published configuration.** After five minutes it prints `configuration
+  published <t> ago is not loaded by the controller`.
+  `GET /api/v1/runtime-config` now also returns `published`: the
+  `config_digest` the operator published and when (`published_at`), or the
+  `error` reading it.
+
+### Changed
+
+- When a reset playbook has no device ID, the incident now explains why the reset cannot run and asks the operator to check the device and resolve the incident. `kubeneuronctl incidents show` displays the reported vendor and PCI address when the GPU UUID is missing.
+
+- `kubeneuronctl status` uses singular counts where appropriate and omits the unconfirmed reset notice when node-level actions are disabled. On NVIDIA nodes, `kubeneuronctl health` explains why Kubernetes GPU health conditions can be unknown. The JSON output retains the condition names.
+
+### Fixed
+
+- **A step a person approved, a step that needs no approval, and a switch to
+  DryRun wait until the controller has loaded a change.** Only an automatic
+  step waited for the controller to load what the operator published; an
+  approved step, or a step that needs no approval such as cordon, could still
+  start under the configuration being replaced, and after a switch to DryRun
+  still ran for real until the reload. Now no step starts, and no step is
+  parked for approval, while the loaded configuration is not the published
+  one: it is held with `<step> held: the controller has not yet loaded the
+  published configuration` (`held by policy <name>` under an automatic
+  policy), the approval stays recorded, and the decision is taken again under
+  the loaded configuration. Notification steps are not held. The held row
+  and `policy-authorised` record the configuration digests in their params.
+  Present in v1.0.0-rc.1 and v1.0.0-rc.2.
+
+- On Kubernetes, the next inventory summary drops the heartbeat and GPU count
+  of a deleted node, including when a new node reuses its name.
+
+- The node list and Prometheus service discovery filter retained records by
+  current Kubernetes node name and UID, dropping deleted nodes and old
+  registrations for reused names.
+
+- **The record of a node with a registered agent takes the node's current
+  labels.** It kept the labels the node had when KubeNeuron first read it
+  from Kubernetes, or none, for as long as the node existed. The inventory
+  read now updates them while the node is the one the agent registered; a
+  node recreated with the same name is updated once its agent registers.
+  Decisions that select nodes by label already read the cluster; this keeps
+  the recorded labels, as `GET /api/v1/nodes/{node}` shows them, current, and
+  the last labels of a deleted node are those it had when it went. Present in
+  v1.0.0-rc.1 and v1.0.0-rc.2.
+
+- **A node recreated with the same name no longer inherits the earlier
+  node's journal label or observation profile.** The GPUs an agent had
+  reported made a node of that name an accelerator node for
+  `kubeneuron.io/journal-dir`, so a new CPU node could get the label, and a
+  journal mount failure kept the label off the new node for an hour. Both now
+  apply only to the node object (UID) they were seen on. The runtime profile
+  an agent observes with is chosen for the node object it authenticated on:
+  if the node by that name is now another object, or its UID cannot be read,
+  the request fails and the agent sends no report until it succeeds. Verification of an
+  incident without a current accelerator report asks the same about the
+  incident's node and holds when it cannot tell. Present in v1.0.0-rc.1
+  and v1.0.0-rc.2.
+
+- Corrected the operations guide on the default NVIDIA runtime mode: it adds
+  no hostPath mount for GPU access, and it has been exercised on real hardware
+  on the EKS image.
+
 ## [v1.0.0-rc.2] - 2026-11-23
 
 ### Hardware evidence

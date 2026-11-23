@@ -71,7 +71,8 @@ The panel and CLI compute period estimates from the incident store. See [how the
 that KubeNeuron cannot release), `maintenance_window`, `node_paused` (a
 GPUNodeConfig pause), `global_pause` (the fleet-wide switch), `concurrency_cap`,
 `playbook_cooldown`, `automatic_limit` (an automatic policy's concurrency
-limit, cool-down or unreadable pool holds the step), `recovery_unavailable`
+limit, cool-down or unreadable pool holds the step), `config_not_loaded`
+(the controller has not yet loaded the configuration the operator published), `recovery_unavailable`
 (the policy's replacement strategy or recycle setting does not allow the step,
 in any mode), `unarmed_agent`, `confinement` (outside the declared
 destructiveExecution blast radius), `recycle_not_viable`,

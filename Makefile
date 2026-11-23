@@ -381,6 +381,10 @@ test-workload-safe-kind:
 verify-workload-safe-examples:
 	./hack/kind-workload-safe.sh --verify
 
+.PHONY: test-replacement-kind
+test-replacement-kind:
+	./test/replacement/run.sh
+
 kind-clean:
 	$(KIND) delete cluster --name "$(KIND_CLUSTER_NAME)"
 	@echo "left kubeconfig untouched at $(KIND_KUBECONFIG); remove it only if you created it"

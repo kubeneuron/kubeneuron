@@ -250,6 +250,11 @@ type Store interface {
 	// node whose agent has registered is left untouched: the agent is the
 	// source of truth.
 	UpsertKubernetesInventory(ctx context.Context, n *types.Node) error
+	// UpdateNodeLabels records the labels a registered agent's node carries
+	// now, read from its Kubernetes Node object. It writes only while the
+	// row's UID is uid, or unknown: another UID is another machine, whose
+	// agent has yet to register. A row no agent registered is not written.
+	UpdateNodeLabels(ctx context.Context, name, uid string, labels map[string]string) error
 	// DeleteKubernetesInventory removes the row of a node read from
 	// Kubernetes whose Node object is gone. A row an agent registered, or
 	// one a pause config holds, is kept.

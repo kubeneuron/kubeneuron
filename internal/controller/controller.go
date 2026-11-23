@@ -165,8 +165,11 @@ type Controller struct {
 
 	inventoryWake       chan struct{}
 	inventoryDiagnostic func(context.Context) (string, error)
-	firstAlert          firstAlertRecord
-	published           publishedConfig
+	// runtimeClassDiagnostic says why agent Pods do not run with the
+	// RuntimeClass the owner named, and on how many nodes where it counts.
+	runtimeClassDiagnostic func(context.Context) (string, int, error)
+	firstAlert             firstAlertRecord
+	published              publishedConfig
 }
 
 // SetSignalCatalog installs the declarative signal-override catalog.

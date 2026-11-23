@@ -4,6 +4,7 @@ package operator
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,9 +15,11 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	sigsyaml "sigs.k8s.io/yaml"
 
@@ -1357,6 +1360,31 @@ func TestTrainingReportPortOptIn(t *testing.T) {
 // and without host paths, unless deviceAccess is None. A privileged agent,
 // with node-level actions, gets a real driver only from the host tooling its
 // owner declared, never from the runtime.
+// A RuntimeClass the owner names reaches every agent Pod, with or without
+// node-level actions, and changes nothing else; unset, the Pods have none.
+func TestAgentRuntimeClassName(t *testing.T) {
+	for _, nodeActions := range []bool{false, true} {
+		for _, name := range []string{"", "nvidia"} {
+			t.Run(fmt.Sprintf("node-level actions %t, runtime class %q", nodeActions, name), func(t *testing.T) {
+				installation := testKubeNeuron()
+				installation.Spec.Safety.NodeLevelActions = nodeActions
+				base := agentDaemonSets(installation, &Snapshot{})
+				installation.Spec.Agent.RuntimeClassName = name
+				for i, ds := range agentDaemonSets(installation, &Snapshot{}) {
+					pod := ds.Spec.Template.Spec
+					if got := ptr.Deref(pod.RuntimeClassName, ""); got != name || name == "" && pod.RuntimeClassName != nil {
+						t.Fatalf("%s: runtimeClassName = %v, want %q", ds.Name, pod.RuntimeClassName, name)
+					}
+					pod.RuntimeClassName = nil
+					if !equality.Semantic.DeepEqual(pod, base[i].Spec.Template.Spec) {
+						t.Fatalf("%s: the RuntimeClass changed more than the Pod's runtimeClassName", ds.Name)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestAgentDeviceAccess(t *testing.T) {
 	cases := []struct {
 		name        string

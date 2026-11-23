@@ -2,16 +2,19 @@
 package controller
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"slices"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	typedcore "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/utils/ptr"
 
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/inventory"
@@ -52,7 +55,12 @@ func (c *Controller) InventorySummary(ctx context.Context) (inventory.Summary, e
 			currentNodes[n.Name] = n
 		}
 	}
-	profiles := config.Config{AcceleratorProfiles: c.runtimeConfig(ctx).AcceleratorProfiles}
+	rc := c.runtimeConfig(ctx)
+	s.NodeLevelActions = inventory.ActionsDisabled
+	if rc.NodeLevelActions {
+		s.NodeLevelActions = inventory.ActionsEnabled
+	}
+	profiles := config.Config{AcceleratorProfiles: rc.AcceleratorProfiles}
 	var byNode map[string][]*types.AgentAcceleratorReport
 	for _, node := range nodes {
 		if node.AgentLastSeen.After(now) || node.AgentLastSeen.IsZero() {
@@ -99,6 +107,15 @@ func (c *Controller) InventorySummary(ctx context.Context) (inventory.Summary, e
 					break
 				}
 			}
+		}
+	}
+	// Agents that do not run with the owner's RuntimeClass are named even
+	// while others report: a rollout it stopped leaves the old agents running.
+	// A failed read leaves it to the diagnostics below, which read the same.
+	if c.runtimeClassDiagnostic != nil {
+		if reason, nodes, err := c.runtimeClassDiagnostic(ctx); err == nil && reason != "" {
+			s.Diagnostic, s.DiagnosticNodes = reason, nodes
+			return s, nil
 		}
 	}
 	if s.GPUs == 0 && (s.AdvertisedNodes > 0 || s.ReportingNodes == 0) && c.inventoryDiagnostic != nil {
@@ -181,14 +198,39 @@ func (c *Controller) notifyInventory() {
 // ConfigureInventoryDiagnostics binds startup diagnostics to the installed agent
 // DaemonSet. Call before serving requests or starting the publisher.
 func (c *Controller) ConfigureInventoryDiagnostics(kube kubernetes.Interface, namespace, installation, uid string) {
-	c.inventoryDiagnostic = func(ctx context.Context) (string, error) {
+	agents := func(ctx context.Context) (*appsv1.DaemonSet, []corev1.Pod, error) {
 		ds, err := kube.AppsV1().DaemonSets(namespace).Get(ctx, installation+"-agent", metav1.GetOptions{})
 		if err != nil {
-			return "", err
+			return nil, nil, err
 		}
 		owner := metav1.GetControllerOf(ds)
 		if owner == nil || string(owner.UID) != uid {
-			return "", errors.New("agent DaemonSet belongs to another installation")
+			return nil, nil, errors.New("agent DaemonSet belongs to another installation")
+		}
+		pods, err := kube.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.SelectorFromSet(ds.Spec.Selector.MatchLabels).String()})
+		if err != nil {
+			return nil, nil, err
+		}
+		var owned []corev1.Pod
+		for _, pod := range pods.Items {
+			if pod.DeletionTimestamp == nil && metav1.IsControlledBy(&pod, ds) {
+				owned = append(owned, pod)
+			}
+		}
+		return ds, owned, nil
+	}
+	c.runtimeClassDiagnostic = func(ctx context.Context) (string, int, error) {
+		ds, pods, err := agents(ctx)
+		if err != nil || ds.Spec.Template.Spec.RuntimeClassName == nil {
+			return "", 0, err
+		}
+		reason, nodes := runtimeClassDiagnostic(ds, pods, time.Now())
+		return reason, nodes, nil
+	}
+	c.inventoryDiagnostic = func(ctx context.Context) (string, error) {
+		ds, pods, err := agents(ctx)
+		if err != nil {
+			return "", err
 		}
 		for _, container := range ds.Spec.Template.Spec.Containers {
 			switch {
@@ -203,14 +245,7 @@ func (c *Controller) ConfigureInventoryDiagnostics(kube kubernetes.Interface, na
 				return "DeviceAccessDisabled", nil
 			}
 		}
-		pods, err := kube.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.SelectorFromSet(ds.Spec.Selector.MatchLabels).String()})
-		if err != nil {
-			return "", err
-		}
-		for _, pod := range pods.Items {
-			if pod.DeletionTimestamp != nil || !metav1.IsControlledBy(&pod, ds) {
-				continue
-			}
+		for _, pod := range pods {
 			for _, container := range pod.Status.ContainerStatuses {
 				if container.Name != "agent" {
 					continue
@@ -226,6 +261,42 @@ func (c *Controller) ConfigureInventoryDiagnostics(kube kubernetes.Interface, na
 		}
 		return "", nil
 	}
+}
+
+// sandboxGrace is how long an agent Pod may wait for its sandbox before a
+// RuntimeClass the owner named is taken to be what stops it.
+const sandboxGrace = 2 * time.Minute
+
+// runtimeClassDiagnostic says why agent Pods of a DaemonSet with an
+// owner-named RuntimeClass do not run, and on how many nodes where it counts
+// them. No Pod of the current template exists while the DaemonSet wants one
+// and some are unavailable, as when the RuntimeClass does not exist: on a
+// fresh install, or a rollout that removed an old Pod and could not create
+// its successor. Or Pods with the RuntimeClass wait for their sandbox past
+// the grace, as when its handler is not configured on their nodes. "" when
+// neither holds.
+func runtimeClassDiagnostic(ds *appsv1.DaemonSet, pods []corev1.Pod, now time.Time) (string, int) {
+	class := *ds.Spec.Template.Spec.RuntimeClassName
+	current := slices.ContainsFunc(pods, func(pod corev1.Pod) bool { return ptr.Deref(pod.Spec.RuntimeClassName, "") == class })
+	if !current && ds.Status.ObservedGeneration >= ds.Generation && ds.Status.DesiredNumberScheduled > 0 &&
+		ds.Status.UpdatedNumberScheduled == 0 && ds.Status.NumberUnavailable > 0 {
+		return "AgentRuntimeClassPodsNotCreated", 0
+	}
+	nodes := map[string]bool{}
+	for _, pod := range pods {
+		if ptr.Deref(pod.Spec.RuntimeClassName, "") != class || now.Sub(pod.CreationTimestamp.Time) < sandboxGrace {
+			continue
+		}
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == corev1.PodReadyToStartContainers && condition.Status == corev1.ConditionFalse {
+				nodes[cmp.Or(pod.Spec.NodeName, pod.Name)] = true
+			}
+		}
+	}
+	if len(nodes) > 0 {
+		return "AgentRuntimeClassNotStarting", len(nodes)
+	}
+	return "", 0
 }
 
 // nvidiaNodes counts the nodes that advertise nvidia.com/gpu. ListNodes does

@@ -37,7 +37,7 @@ func (r *KubeNeuronReconciler) ensureInventorySummary(ctx context.Context, insta
 
 // ensureRuntimeConfigAccess lets the controller read the runtime ConfigMap
 // through the API. The copy the kubelet mounts can lag what was published
-// by a minute or more, and automatic steps wait until the configuration the
+// by a minute or more, and steps wait until the configuration the
 // controller loaded is the one published.
 func (r *KubeNeuronReconciler) ensureRuntimeConfigAccess(ctx context.Context, installation *api.KubeNeuron) error {
 	meta := metav1.ObjectMeta{Name: installation.Name + RuntimeConfigSuffix + "-reader", Namespace: installation.Spec.Namespace}
@@ -153,6 +153,10 @@ func (r *KubeNeuronReconciler) setInventoryConditions(ctx context.Context, root 
 		unknown("NoFreshAgentReport", "No fresh agent inventory report is available.")
 	default:
 		switch {
+		case inventory.AgentRuntimeClassDiagnostic(s.Diagnostic):
+			// Some agents report, others cannot run: what they report is
+			// not the whole fleet.
+			record("GPUVisibility", metav1.ConditionFalse, s.Diagnostic, inventory.DiagnosticText(s))
 		case s.GPUs > 0:
 			record("GPUVisibility", metav1.ConditionTrue, "InventoryReported", fmt.Sprintf("Agents on %d nodes report %d GPUs.", s.ReportingNodes, s.GPUs))
 		case s.AdvertisedNodes == 0:

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -29,9 +30,9 @@ type inventorySync struct {
 
 // syncAcceleratorInventory records the nodes that advertise accelerator
 // devices but have no registered agent, from their Kubernetes Node objects,
-// and removes the rows of such nodes once their Node object is gone. A node
-// whose agent registered is left as it is: the agent is the source of truth
-// for it. A node without an agent has no agent heartbeat to go stale and no
+// and removes the rows of such nodes once their Node object is gone. Of a
+// node whose agent registered only the labels are recorded: the agent is the
+// source of truth for the rest. A node without an agent has no agent heartbeat to go stale and no
 // agent to run a step, so it raises no agent-down and an agent step on it
 // fails before anything is queued. A failed read changes nothing.
 func (c *Controller) syncAcceleratorInventory(ctx context.Context) {
@@ -66,8 +67,21 @@ func (c *Controller) syncAcceleratorInventory(ctx context.Context) {
 			}
 			continue
 		case !existing.AgentLastSeen.IsZero():
-			// The agent's node; nothing to record, and nothing to re-read
-			// while the Node object stays the same.
+			// The agent's node: the agent owns its record, except for the
+			// labels, which its registration does not carry. They are the
+			// Node object's while it is the node the agent registered; a new
+			// UID is read again until its agent registers it.
+			if existing.UID != "" && existing.UID != n.UID {
+				continue
+			}
+			if !maps.Equal(existing.Labels, n.Labels) {
+				if err := c.store.UpdateNodeLabels(ctx, n.Name, n.UID, n.Labels); err != nil {
+					if c.logOnce.first("inventory-labels/" + n.Name + "/" + err.Error()) {
+						c.log.Warn("could not record a node's labels", "node", n.Name, "err", err)
+					}
+					continue
+				}
+			}
 			seen[n.Name] = digest
 			continue
 		}

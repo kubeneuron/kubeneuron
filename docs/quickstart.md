@@ -46,7 +46,9 @@ needs none of these mounts; see
 [NVIDIA host tooling](operations.md#nvidia-host-tooling-in-the-agent-daemonset).
 `RuntimeDidNotExposeGPUs` means Kubernetes advertises NVIDIA GPUs but the
 agents see none; `DeviceAccessDisabled` means `spec.agent.deviceAccess` is
-`None`.
+`None`. `AgentRuntimeClassPodsNotCreated` and `AgentRuntimeClassNotStarting`
+mean the agent Pods do not run with the RuntimeClass set in
+`spec.agent.runtimeClassName`.
 
 A `GPUVisibility` reason of `SMIMissing` means the agent could not find the
 executable in the mounted binary directory. For `DriverUnavailable`, check

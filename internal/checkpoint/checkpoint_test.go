@@ -191,7 +191,7 @@ func TestBoundedWaitIsPerWorkload(t *testing.T) {
 		"request over budget":         {short, 10 * time.Second, 10 * time.Second},
 		"no budget known":             {silent, 0, 5 * time.Minute},
 		"negative budget means known": {short, -time.Minute, 30 * time.Second},
-		"advisory, group and a stamped deadline change nothing": {decorated, 10 * time.Minute, 30 * time.Second},
+		"advisory, group and a stamped deadline change nothing":   {decorated, 10 * time.Minute, 30 * time.Second},
 		"a stamped far-future deadline cannot extend the default": {stamped, 10 * time.Minute, 5 * time.Minute},
 	} {
 		t.Run(name, func(t *testing.T) {

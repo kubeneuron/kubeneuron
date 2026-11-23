@@ -17,6 +17,12 @@ import (
 // checks. Policy authorization can extend this boundary without changing the
 // recovery ladder or treating a parked state as proof of consent.
 func (c *Controller) authorizeAndStartStep(ctx context.Context, inc *types.Incident, step *playbook.Step) error {
+	// Nothing below decides under a configuration the operator has already
+	// replaced: not a policy, not a park for approval, not a system step.
+	// A parked round is held where its decision is honoured.
+	if inc.State != types.StateAwaitingApproval && c.holdUnloadedConfig(ctx, inc, step) {
+		return nil
+	}
 	// Provider first, so a changed target is superseded whatever the policy
 	// says; then the policy's recovery settings. Both before any approval.
 	// Before a recycle-only rung starts, the provider is asked about its
@@ -75,6 +81,10 @@ func (c *Controller) authorizeAndStartStep(ctx context.Context, inc *types.Incid
 				return err
 			}
 			params, _ := c.authorisedPool(ctx, inc, pol.Automatic)
+			if params == nil {
+				params = map[string]string{}
+			}
+			params["config_digest"] = c.runtimeConfig(ctx).SourceDigest
 			return c.startStepThen(ctx, inc, step, policyActor(pol.Name), func() {
 				now := time.Now()
 				if err := c.store.AppendAudit(ctx, &types.AuditEntry{

@@ -157,7 +157,9 @@ func recordPoolUnder(t *testing.T, st *sqlite.Store, id, label, pool string) {
 	}
 }
 
-func groupLabels(group string) map[string]string { return map[string]string{"pool": "train", "group": group} }
+func groupLabels(group string) map[string]string {
+	return map[string]string{"pool": "train", "group": group}
+}
 
 // The per-pool limit counts an open recovery in the pool its authorisation
 // recorded, wherever its node is now. A recovery authorised before the pool
@@ -243,6 +245,31 @@ func TestPoolLimitCountsTheRecoveriesOfThePool(t *testing.T) {
 				t.Fatalf("state=%s audit=%s, want the step to go ahead once the counted recovery ended", inc.State, parkReason(t, st, id))
 			}
 		})
+	}
+}
+
+// A recovery authorised before its pool was recorded counts, once its node
+// is gone, in the pool of the labels its node had when it went: the
+// inventory recorded them while it existed, not those its agent registered
+// with.
+func TestPoolLimitCountsAGoneNodeByItsLastLabels(t *testing.T) {
+	settings := autoSettings()
+	settings.PoolLabel = "group"
+	settings.MaxConcurrentNodes, settings.MaxConcurrentNodesPerPool, settings.MaxUnhealthyPercent = 8, 1, 100
+	c, st, _ := autoFixture(t, recoverymode.Automatic, settings, 0)
+	c.SetTimings(time.Hour, 0) // the recovery being counted stays verifying
+	registerAgentWithLabels(t, st, "n1", "uid-n1", groupLabels("a"))
+	registerAgentWithLabels(t, st, "n0", "uid-n0", groupLabels("b"))
+	p := clusterOf(types.Node{Name: "n1", UID: "uid-n1", Labels: groupLabels("a")},
+		types.Node{Name: "n0", UID: "uid-n0", Labels: groupLabels("a")})
+	c.platform = p
+	c.syncAcceleratorInventory(context.Background())
+	delete(p.nodes, "n0")
+	authorisedOpen(t, st, "replacing-n0", "n0", &cloud.NodeIdentity{Node: "n0", NodeUID: "uid-n0"})
+	id := openOn(t, c, "n1")
+	const want = "the policy is already recovering 1 node(s) in this pool, its limit"
+	if inc := step(t, c, st, id, 20); inc.State != types.StateEvaluating || !strings.Contains(parkReason(t, st, id), want) {
+		t.Fatalf("state=%s audit=%s, want held by the recovery of n0", inc.State, parkReason(t, st, id))
 	}
 }
 

@@ -18,7 +18,7 @@ const Suffix = "-inventory-summary"
 const FirstAlertAcceptedAt = "firstAlertAcceptedAt"
 
 // schemaKeys are the keys Data may write; Merge replaces exactly these.
-var schemaKeys = []string{"advertisedNodes", "schemaVersion", "observedAt", "reportingNodes", "gpuCount", "resetConfirmed", "diagnostic", "lastReportAt", "undeclaredEKSPool", "nvidiaNodes"}
+var schemaKeys = []string{"advertisedNodes", "schemaVersion", "observedAt", "reportingNodes", "gpuCount", "resetConfirmed", "diagnostic", "lastReportAt", "undeclaredEKSPool", "nvidiaNodes", "diagnosticNodes", "nodeLevelActions"}
 
 const (
 	ExitSMIMissing        = 78
@@ -35,6 +35,10 @@ func DiagnosticMessage(reason string) string {
 		return "NVIDIA host tooling is unset for the managed agent."
 	case "RuntimeDidNotExposeGPUs":
 		return fmt.Sprintf(runtimeExposedNone, "")
+	case "AgentRuntimeClassPodsNotCreated":
+		return "No agent Pod could be created with spec.agent.runtimeClassName. Check that the RuntimeClass it names exists (kubectl get runtimeclass), or clear the field. Until then, on nodes without a running agent, faults that only the agent detects are not detected."
+	case "AgentRuntimeClassNotStarting":
+		return fmt.Sprintf(runtimeClassNotStarting, "some nodes")
 	case "DeviceAccessDisabled":
 		return "Agents do not inventory GPUs because spec.agent.deviceAccess is None. " + replacementCheck
 	default:
@@ -43,25 +47,44 @@ func DiagnosticMessage(reason string) string {
 }
 
 const (
-	replacementCheck   = "Node replacement does not depend on this; after a replacement KubeNeuron checks node readiness and advertised capacity, not device health."
-	runtimeExposedNone = "Kubernetes advertises NVIDIA GPUs%s, but the agents see none. The usual cause is that the NVIDIA container runtime is not the default runtime on these nodes, so the devices were not exposed to the agent (see docs/operations.md). " + replacementCheck
+	runtimeClassNotStarting = "Agent Pods with spec.agent.runtimeClassName cannot start on %s. The usual cause is that the container runtime on those nodes has no handler for that RuntimeClass, for example on CPU nodes. Limit the agent to nodes that have the handler with spec.agent.nodeSelector, configure the handler, or clear the field. Until then faults that only the agent detects are not detected on those nodes."
+	replacementCheck        = "Node replacement does not depend on this; after a replacement KubeNeuron checks node readiness and advertised capacity, not device health."
+	runtimeExposedNone      = "Kubernetes advertises NVIDIA GPUs%s, but the agents see none. The usual cause is that the NVIDIA container runtime is not the default runtime on these nodes, so the devices were not exposed to the agent (see docs/operations.md). " + replacementCheck
 )
 
 // DiagnosticText is s's diagnostic as an operator reads it, with the number
 // of nodes it is about where it names one.
 func DiagnosticText(s Summary) string {
 	if s.Diagnostic == "RuntimeDidNotExposeGPUs" && s.NVIDIANodes > 0 {
-		return fmt.Sprintf(runtimeExposedNone, fmt.Sprintf(" on %d %s", s.NVIDIANodes, plural(s.NVIDIANodes, "node", "nodes")))
+		return fmt.Sprintf(runtimeExposedNone, fmt.Sprintf(" on %d %s", s.NVIDIANodes, Plural(s.NVIDIANodes, "node", "nodes")))
+	}
+	if s.Diagnostic == "AgentRuntimeClassNotStarting" && s.DiagnosticNodes > 0 {
+		return fmt.Sprintf(runtimeClassNotStarting, fmt.Sprintf("%d %s", s.DiagnosticNodes, Plural(s.DiagnosticNodes, "node", "nodes")))
 	}
 	return DiagnosticMessage(s.Diagnostic)
 }
 
-func plural(n int, one, many string) string {
+// AgentRuntimeClassDiagnostic is whether reason says agent Pods do not run
+// with the RuntimeClass the owner named: true also while other agents report.
+func AgentRuntimeClassDiagnostic(reason string) bool {
+	return reason == "AgentRuntimeClassPodsNotCreated" || reason == "AgentRuntimeClassNotStarting"
+}
+
+// Plural selects the noun or phrase for a count.
+func Plural(n int, one, many string) string {
 	if n == 1 {
 		return one
 	}
 	return many
 }
+
+// ActionMode is empty when the summary predates nodeLevelActions.
+type ActionMode string
+
+const (
+	ActionsDisabled ActionMode = "false"
+	ActionsEnabled  ActionMode = "true"
+)
 
 type Summary struct {
 	UndeclaredEKSPool string
@@ -69,12 +92,16 @@ type Summary struct {
 	AdvertisedNodes   int
 	// NVIDIANodes are the nodes that advertise nvidia.com/gpu; 0 also when
 	// the controller did not count them.
-	NVIDIANodes    int
-	ObservedAt     time.Time
-	LastReportAt   time.Time
-	ReportingNodes int
-	GPUs           int
-	ResetConfirmed bool
+	NVIDIANodes int
+	// DiagnosticNodes are the nodes the diagnostic is about, where it counts
+	// them; 0 otherwise.
+	DiagnosticNodes  int
+	ObservedAt       time.Time
+	LastReportAt     time.Time
+	ReportingNodes   int
+	GPUs             int
+	NodeLevelActions ActionMode
+	ResetConfirmed   bool
 }
 
 func (s Summary) Data() map[string]string {
@@ -86,6 +113,9 @@ func (s Summary) Data() map[string]string {
 		"gpuCount":        strconv.Itoa(s.GPUs),
 		"resetConfirmed":  strconv.FormatBool(s.ResetConfirmed),
 	}
+	if s.NodeLevelActions != "" {
+		data["nodeLevelActions"] = string(s.NodeLevelActions)
+	}
 	if s.UndeclaredEKSPool != "" {
 		data["undeclaredEKSPool"] = s.UndeclaredEKSPool
 	}
@@ -94,6 +124,9 @@ func (s Summary) Data() map[string]string {
 	}
 	if s.NVIDIANodes > 0 {
 		data["nvidiaNodes"] = strconv.Itoa(s.NVIDIANodes)
+	}
+	if s.DiagnosticNodes > 0 {
+		data["diagnosticNodes"] = strconv.Itoa(s.DiagnosticNodes)
 	}
 	if !s.LastReportAt.IsZero() {
 		data["lastReportAt"] = s.LastReportAt.UTC().Format(time.RFC3339Nano)
@@ -153,6 +186,13 @@ func Parse(data map[string]string, now time.Time) (Summary, error) {
 		}
 		s.NVIDIANodes = int(nvidia)
 	}
+	if n := data["diagnosticNodes"]; n != "" {
+		count, err := strconv.ParseUint(n, 10, 31)
+		if err != nil || count == 0 {
+			return s, invalid
+		}
+		s.DiagnosticNodes = int(count)
+	}
 	nodes, err := strconv.ParseUint(data["reportingNodes"], 10, 31)
 	if err != nil {
 		return s, invalid
@@ -162,6 +202,12 @@ func Parse(data map[string]string, now time.Time) (Summary, error) {
 		return s, invalid
 	}
 	s.ReportingNodes, s.GPUs = int(nodes), int(gpus)
+	if raw, ok := data["nodeLevelActions"]; ok {
+		s.NodeLevelActions = ActionMode(raw)
+		if s.NodeLevelActions != ActionsEnabled && s.NodeLevelActions != ActionsDisabled {
+			return s, invalid
+		}
+	}
 	switch data["resetConfirmed"] {
 	case "true":
 		if gpus == 0 {

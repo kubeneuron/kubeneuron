@@ -942,6 +942,15 @@ var runtimeDeviceEnv = []corev1.EnvVar{
 	{Name: "NVIDIA_DRIVER_CAPABILITIES", Value: "utility"},
 }
 
+// agentRuntimeClass is the RuntimeClass the owner named for the agent Pods,
+// nil for the node's default runtime.
+func agentRuntimeClass(installation *kubeneuronv1alpha1.KubeNeuron) *string {
+	if name := installation.Spec.Agent.RuntimeClassName; name != "" {
+		return ptr.To(name)
+	}
+	return nil
+}
+
 func agentVariantDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot *Snapshot, variant agentVariant, tlsRevision ...string) *appsv1.DaemonSet {
 	labels := resourceLabels(installation, strings.TrimPrefix(variant.suffix, "-"))
 	objectLabels := copyStringMap(labels)
@@ -1049,6 +1058,7 @@ func agentVariantDaemonSet(installation *kubeneuronv1alpha1.KubeNeuron, snapshot
 					SecurityContext:               &corev1.PodSecurityContext{},
 					SchedulerName:                 corev1.DefaultSchedulerName,
 					HostPID:                       nodeActions,
+					RuntimeClassName:              agentRuntimeClass(installation),
 					NodeSelector:                  agentNodes,
 					Affinity:                      affinity,
 					Tolerations:                   agentTolerations(installation),

@@ -1,0 +1,13 @@
+apiVersion: kubeneuron.io/v1alpha1
+kind: AcceleratorRuntimeProfile
+metadata: {name: kind-nvidia}
+spec:
+  kubeNeuronRef: rehearsal
+  vendor: nvidia
+  nodeSelector:
+    matchLabels: {eks.amazonaws.com/nodegroup: gpu}
+  profileDigest: sha256:2867b597b08ee51fe28e7dc73ca0ac4de7ec5a327eed7600af022e88b781357c
+  driverVersion: "simulated"
+  runtimeVersion: "unattested"
+  maxReportAge: 90s
+  allowedActions: []

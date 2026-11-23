@@ -222,7 +222,7 @@ accelerator_profiles:
 	if err == nil || !errors.Is(err, storeFailure) {
 		t.Fatalf("apply runtime config = %v, want node-config store failure", err)
 	}
-	profile, err := ctrl.AcceleratorObservationProfile(ctx, "node-a", types.AcceleratorVendorNVIDIA)
+	profile, err := ctrl.AcceleratorObservationProfile(ctx, "node-a", "", types.AcceleratorVendorNVIDIA)
 	if err != nil {
 		t.Fatal(err)
 	}

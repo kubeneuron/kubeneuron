@@ -103,6 +103,21 @@ Three independent mechanisms, all fail toward not acting:
    optional `matchLabels` node selector. Incidents hold their position and
    continue after the window closes; recorded approvals survive the wait.
 
+## When a configuration change takes effect
+
+The operator publishes a change to a policy, a playbook or
+`spec.safety.executionMode` in the ConfigMap `<name>-runtime` at once; the
+controller loads it from its mounted copy a minute or more later. Until then
+no step starts and none is parked for approval: the incident's audit shows
+`<step> held: the controller has not yet loaded the published configuration`,
+with the loaded and the published digest in the row's params, and an approval
+already given stays recorded. `GET /api/v1/runtime-config` shows both:
+`source_digest` is what the controller loaded, `published.config_digest` and
+`published.published_at` what the operator published and when. When they still
+differ after five minutes, `kubeneuronctl status` prints
+`configuration published <t> ago is not loaded by the controller`; check the
+controller's log for a rejected reload. A pause does not wait for the reload.
+
 ## When two incidents need to repair the same node
 
 For live repairs, the controller identifies the node by its pinned cloud identity
@@ -666,7 +681,11 @@ operator (CloudNativePG, RDS, …) and own its HA, backups, and PITR there:
 ## External scrape discovery
 
 `GET /api/v1/targets?port=9400` (operator token required) serves Prometheus
-`http_sd` groups for every registered node. vmagent example:
+`http_sd` groups for registered nodes. On Kubernetes, this endpoint and
+`GET /api/v1/nodes` include a record only while its name and UID match a
+current node. A recreated node appears once inventory records its new UID.
+Both endpoints return HTTP 500 if the live inventory read fails. Bare-metal
+discovery continues to use registered nodes. vmagent example:
 
 ```yaml
 scrape_configs:
@@ -822,19 +841,44 @@ The agent image carries no NVIDIA userspace. By default
 (`spec.agent.deviceAccess: NvidiaRuntime`) the agent asks the NVIDIA
 container runtime for the node's GPUs and for `nvidia-smi`, through
 `NVIDIA_VISIBLE_DEVICES=all` and `NVIDIA_DRIVER_CAPABILITIES=utility`. The
-agent stays unprivileged, with a read-only root filesystem, and no host path
-is mounted for it. It reads the inventory only: without node-level actions it
-runs no action on the node. This needs the NVIDIA container runtime as the
+agent stays unprivileged, with a read-only root filesystem, and this mode
+adds no hostPath mount for GPU access. It reads the inventory only: without
+node-level actions it runs no action on the node. This needs the NVIDIA container runtime as the
 node's default runtime; a node whose runtime ignores these variables gives
 the agent no GPU, and the agent reports none and keeps watching the kernel
-log. This mode has not yet been exercised on real hardware.
+log. Apart from the EKS image in the table below, this mode has not yet been
+exercised on real hardware.
 
-| Node image | GPUs visible to the agent by default |
+| Node image | GPUs visible to the agent without node-level actions |
 |---|---|
 | EKS Amazon Linux 2023 NVIDIA AMI | yes — observed once on the Amazon EKS-optimized Amazon Linux 2023 NVIDIA AMI (x86_64) with a Tesla T4 |
 | AKS GPU node images | expected to work; not yet exercised on real hardware |
-| GKE Container-Optimized OS, Bottlerocket | no: KubeNeuron checks a replacement by node readiness and advertised capacity |
-| CDI-only runtime setups | not verified |
+| NVIDIA GPU Operator 25.10 or later, with CDI | with `spec.agent.runtimeClassName: nvidia` (see below); not yet exercised on real hardware. The NRI plugin's management devices and DRA admin access are not supported |
+| GKE Container-Optimized OS, with Google's device plugin | no: GPUs are given only to Pods that request them. Inventory needs host tooling with node-level actions, which runs the agent privileged; a GKE DRA setup is not supported |
+| Bottlerocket NVIDIA variants | no: the node setting `settings.nvidia-container-runtime.visible-devices-envvar-when-unprivileged`, false by default, makes the runtime ignore the request. Enabling it lets any unprivileged container that sets `NVIDIA_VISIBLE_DEVICES=all` see every GPU of the node; the alternative is host tooling with node-level actions |
+
+Platform behaviour as documented by each vendor in November 2026; check their current documentation.
+
+On every one of them node replacement does not depend on this: after a
+replacement KubeNeuron checks node readiness and advertised capacity when the
+replaced node's agent never reported GPUs.
+
+Where the NVIDIA runtime is configured but is not the node's default, set
+`spec.agent.runtimeClassName` to the RuntimeClass that selects it, for
+example `nvidia` with the GPU Operator and CDI. The agent Pods then run with
+that RuntimeClass, with or without node-level actions; nothing else in them
+changes. KubeNeuron never sets it by itself. The RuntimeClass must exist and
+its handler must be configured on every node the agent runs on, CPU nodes
+included, or the agent Pods do not start there. `GPUVisibility` and
+`kubeneuronctl status` then report `AgentRuntimeClassPodsNotCreated` when no
+agent Pod with the RuntimeClass could be created, as when it does not exist:
+on a new installation, or when setting the field on a running one stops the
+rollout after its first Pod while the older agents keep running. They report
+`AgentRuntimeClassNotStarting`, with the number of nodes, when agent Pods
+wait for their sandbox for more than two minutes, as when the handler is
+missing on their nodes. Both are reported while other agents report GPUs. Restrict the
+agent to the nodes that have the handler with `spec.agent.nodeSelector`, or
+clear the field.
 
 When Kubernetes advertises `nvidia.com/gpu` and the agents see no GPU, the
 `GPUVisibility` condition and `kubeneuronctl status` report

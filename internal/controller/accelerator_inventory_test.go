@@ -709,3 +709,139 @@ func TestPoolRowShowsRepairHold(t *testing.T) {
 		}
 	}
 }
+
+func TestNodesAndDiscoveryUseCurrentIdentities(t *testing.T) {
+	c, st, inv := inventoryFixture(t)
+	ctx := t.Context()
+	register := func(uid string) {
+		t.Helper()
+		if err := st.UpsertAgentRegistration(ctx, &types.Node{Name: "worker", UID: uid, AgentLastSeen: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	api := httpapi.New(c)
+	api.EnableOperatorAPI(c, "test-token")
+	api.SetReadyCheck(func() bool { return true })
+	handler := api.Routes()
+	check := func(status int, uid string) {
+		t.Helper()
+		for _, path := range []string{"/api/v1/nodes", "/api/v1/targets"} {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("Authorization", "Bearer test-token")
+			resp := httptest.NewRecorder()
+			handler.ServeHTTP(resp, req)
+			if resp.Code != status {
+				t.Fatalf("%s: HTTP %d: %s", path, resp.Code, resp.Body.String())
+			}
+			if status != http.StatusOK {
+				continue
+			}
+			if uid == "" {
+				if strings.TrimSpace(resp.Body.String()) != "[]" {
+					t.Fatalf("%s: expected empty list, got %s", path, resp.Body.String())
+				}
+				continue
+			}
+			if path == "/api/v1/nodes" {
+				var rows []types.Node
+				if err := json.Unmarshal(resp.Body.Bytes(), &rows); err != nil || len(rows) != 1 || rows[0].Name != "worker" || rows[0].UID != uid {
+					t.Fatalf("%s: %s", path, resp.Body.String())
+				}
+			} else {
+				var groups []struct{ Targets []string }
+				if err := json.Unmarshal(resp.Body.Bytes(), &groups); err != nil || len(groups) != 1 || !slices.Equal(groups[0].Targets, []string{"worker:9400"}) {
+					t.Fatalf("%s: %s", path, resp.Body.String())
+				}
+			}
+		}
+	}
+	register("first")
+	inv.nodes = []types.Node{{Name: "worker", UID: "first"}}
+	check(http.StatusOK, "first")
+	inv.nodes = nil
+	check(http.StatusOK, "")
+	inv.nodes = []types.Node{{Name: "worker", UID: "second"}}
+	check(http.StatusOK, "")
+	register("second")
+	check(http.StatusOK, "second")
+	inv.err = errors.New("inventory unavailable")
+	check(http.StatusInternalServerError, "")
+	c.platform = nil
+	check(http.StatusOK, "second")
+}
+
+func TestInventorySummaryDropsDeletedRegistrations(t *testing.T) {
+	c, st := newIngestTestController(t)
+	p := &inventoryPlatform{}
+	c.platform = p
+	register := func(uid string) {
+		t.Helper()
+		if err := st.UpsertAgentRegistration(t.Context(), &types.Node{Name: "worker", UID: uid, AgentLastSeen: time.Now(), GPUs: []types.GPUInfo{{UUID: "gpu"}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(count int) {
+		t.Helper()
+		s, err := c.InventorySummary(t.Context())
+		if err != nil || s.ReportingNodes != count || s.GPUs != count || s.LastReportAt.IsZero() != (count == 0) {
+			t.Fatalf("summary = %+v, error = %v, want %d reporting nodes and GPUs", s, err, count)
+		}
+	}
+	register("old")
+	p.nodes = []types.Node{{Name: "worker", UID: "old"}}
+	check(1)
+	p.nodes = nil
+	check(0)
+	p.nodes = []types.Node{{Name: "worker", UID: "new"}}
+	check(0)
+	register("new")
+	check(1)
+}
+
+// The labels of an agent's node are its Node object's now, while it is the
+// node the agent registered. The rest of the row stays the agent's, and a
+// new UID under the name waits for its agent.
+func TestInventoryRecordsTheLabelsOfTheAgentsNode(t *testing.T) {
+	c, st, plat := inventoryFixture(t)
+	ctx := context.Background()
+	gpus := []types.GPUInfo{{Index: 0, UUID: "GPU-0"}}
+	register := func(uid string) {
+		t.Helper()
+		if err := st.UpsertAgentRegistration(ctx, &types.Node{Name: "gpu-1", UID: uid, GPUs: gpus, AgentLastSeen: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	labelsNow := func(want string) {
+		t.Helper()
+		c.syncAcceleratorInventory(ctx)
+		got, err := st.GetNode(ctx, "gpu-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Labels["pool"] != want || got.InventorySource != types.InventoryAgent || !reflect.DeepEqual(got.GPUs, gpus) ||
+			len(got.Devices) != 0 || got.AgentLastSeen.IsZero() {
+			t.Fatalf("row = %+v, want pool %q and the agent's row otherwise", got, want)
+		}
+	}
+	register("uid-1")
+	live := func(uid, pool string) {
+		plat.imu.Lock()
+		plat.nodes = []types.Node{{Name: "gpu-1", UID: uid, Labels: map[string]string{"pool": pool}, Devices: []types.DeviceCount{
+			{Resource: "nvidia.com/gpu", Capacity: 8, Allocatable: 8, Unit: types.DeviceUnitGPU},
+		}}}
+		plat.imu.Unlock()
+	}
+	live("uid-1", "a")
+	labelsNow("a")
+	live("uid-1", "b")
+	labelsNow("b")
+	// The node recreated: the earlier machine's row keeps its labels until
+	// the new machine's agent registers.
+	live("uid-2", "c")
+	labelsNow("b")
+	register("uid-2")
+	labelsNow("c")
+	if st.writes != 0 {
+		t.Fatalf("%d Kubernetes inventory writes to the agent's row", st.writes)
+	}
+}

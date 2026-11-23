@@ -260,6 +260,15 @@ type AgentSpec struct {
 	// +kubebuilder:validation:Enum=NvidiaRuntime;None
 	// +kubebuilder:default=NvidiaRuntime
 	DeviceAccess AgentDeviceAccess `json:"deviceAccess,omitempty"`
+	// RuntimeClassName runs the agent Pods with this RuntimeClass, for nodes
+	// where the NVIDIA container runtime is configured but not the default,
+	// such as the GPU Operator with CDI. Unset, the agent uses the node's
+	// default runtime. KubeNeuron never sets it by itself; the RuntimeClass
+	// must exist and its handler must be configured on every node the agent
+	// runs on, or the agent Pods do not start there.
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	RuntimeClassName string `json:"runtimeClassName,omitempty"`
 	// HostTooling opts the agent DaemonSet into read-only host mounts of the
 	// NVIDIA userspace tooling (nvidia-smi, dcgmi, driver libraries) so the
 	// distroless agent image can execute them. Setting it also arms

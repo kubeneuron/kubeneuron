@@ -1,0 +1,1 @@
+{"Replace":{"internal/cloud/aws/clients.go":"test/replacement/overlay/clients.go.in"}}

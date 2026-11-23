@@ -15,6 +15,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/notify"
+	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -354,9 +355,28 @@ func incidentOperationDigest(action, id, actor, reason string, expectedVersion i
 // a later resolution without one lifecycle operation shadowing the other.
 func incidentOperationKey(action, key string) string { return action + ":" + key }
 
-// Nodes lists the persisted inventory.
+// Nodes lists inventory records whose identities still exist on the platform.
 func (c *Controller) Nodes(ctx context.Context) ([]*types.Node, error) {
-	return c.store.ListNodes(ctx)
+	rows, err := c.store.ListNodes(ctx)
+	inventory, ok := c.platform.(platform.AcceleratorInventory)
+	if err != nil || !ok {
+		return rows, err
+	}
+	live, err := inventory.NodeInventory(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing current nodes: %w", err)
+	}
+	uidByName := make(map[string]string, len(live))
+	for _, node := range live {
+		uidByName[node.Name] = node.UID
+	}
+	var current []*types.Node
+	for _, row := range rows {
+		if row.UID != "" && uidByName[row.Name] == row.UID {
+			current = append(current, row)
+		}
+	}
+	return current, nil
 }
 
 // Node returns one inventory record.
@@ -384,12 +404,17 @@ func (c *Controller) AcceleratorReports(ctx context.Context, node string) ([]*ty
 // result is the normal default-deny outcome when no profile selects the node.
 // Ambiguous selectors, invalid configuration, and unavailable node labels are
 // errors so the HTTP layer can fail closed rather than choose an arbitrary
-// profile.
-func (c *Controller) AcceleratorObservationProfile(ctx context.Context, node string, vendor types.AcceleratorVendor) (*types.AgentAcceleratorObservationProfile, error) {
+// profile. A non-empty nodeUID names the node object the profile is for: the
+// labels are those of that object, and a node of the same name with another
+// UID is an error.
+func (c *Controller) AcceleratorObservationProfile(ctx context.Context, node, nodeUID string, vendor types.AcceleratorVendor) (*types.AgentAcceleratorObservationProfile, error) {
 	if node == "" || !vendor.Valid() {
 		return nil, fmt.Errorf("accelerator observation profile requires node and supported vendor")
 	}
-	labels := c.nodeLabels(ctx, node)
+	labels, err := c.nodeLabelsOf(ctx, node, nodeUID)
+	if err != nil {
+		return nil, err
+	}
 	if labels == nil {
 		return nil, fmt.Errorf("node labels are unavailable for runtime profile selection")
 	}
@@ -408,6 +433,37 @@ func (c *Controller) AcceleratorObservationProfile(ctx context.Context, node str
 		ProfileGeneration: profile.ProfileGeneration,
 		RuntimeVersion:    profile.RuntimeVersion,
 	}, nil
+}
+
+// nodeLabelsOf reads the labels of node as nodeLabels does, and, when uid is
+// set and the platform reads node UIDs, only while the node object is uid:
+// the UID is read before and after the labels, so labels of an earlier or a
+// later node of the same name are never taken for it.
+func (c *Controller) nodeLabelsOf(ctx context.Context, node, uid string) (map[string]string, error) {
+	identity, ok := c.platform.(platform.NodeIdentity)
+	if uid == "" || !ok {
+		return c.nodeLabels(ctx, node), nil
+	}
+	same := func() error {
+		live, found, err := identity.NodeUID(ctx, node)
+		switch {
+		case err != nil:
+			return fmt.Errorf("node %s UID is unavailable: %w", node, err)
+		case !found:
+			return fmt.Errorf("node %s does not exist", node)
+		case live != uid:
+			return fmt.Errorf("node %s is another node object (UID %s, not %s)", node, live, uid)
+		}
+		return nil
+	}
+	if err := same(); err != nil {
+		return nil, err
+	}
+	labels := c.nodeLabels(ctx, node)
+	if err := same(); err != nil {
+		return nil, err
+	}
+	return labels, nil
 }
 
 // SetPaused flips the global automation pause (the big red button) only after
