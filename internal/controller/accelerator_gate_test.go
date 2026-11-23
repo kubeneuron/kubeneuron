@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/config"
+	"github.com/kubeneuron/kubeneuron/internal/inventory"
 	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
@@ -1149,6 +1150,32 @@ type deviceInventoryPlatform struct {
 
 func (p *deviceInventoryPlatform) NodeInventory(context.Context) ([]types.Node, error) {
 	return p.inventory, nil
+}
+
+// Agents that cannot run with the owner's RuntimeClass are named while the
+// others report GPUs, with the nodes they are on, and survive the summary's
+// round trip.
+func TestInventorySummaryNamesTheAgentRuntimeClassWhileOthersReport(t *testing.T) {
+	st, err := storesqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	s := &fleetSummaryStore{Store: st, nodes: []*types.Node{{Name: "node-a", UID: "uid-a", AgentLastSeen: time.Now(), GPUs: []types.GPUInfo{{UUID: "GPU-a"}}}}}
+	p := &deviceInventoryPlatform{
+		fleetSummaryPlatform: &fleetSummaryPlatform{topoObservingPlatform: wholeDeviceTopologyPlatform(), nodes: []types.Node{{Name: "node-a", UID: "uid-a"}}},
+		inventory: []types.Node{{Name: "node-a", UID: "uid-a", Devices: []types.DeviceCount{{Resource: "nvidia.com/gpu", Capacity: 1, Allocatable: 1, Unit: types.DeviceUnitGPU}}}},
+	}
+	c := New(s, nil, nil, nil, nil, p, nil, nil, slog.Default())
+	c.runtimeClassDiagnostic = func(context.Context) (string, int, error) { return "AgentRuntimeClassNotStarting", 2, nil }
+	got, err := c.InventorySummary(t.Context())
+	if err != nil || got.GPUs != 1 || got.Diagnostic != "AgentRuntimeClassNotStarting" || got.DiagnosticNodes != 2 {
+		t.Fatalf("summary = %+v, %v; want the reporting GPU and the diagnostic on 2 nodes", got, err)
+	}
+	parsed, err := inventory.Parse(inventory.Merge(nil, got), time.Now())
+	if err != nil || parsed.Diagnostic != got.Diagnostic || parsed.DiagnosticNodes != 2 {
+		t.Fatalf("parsed = %+v, %v", parsed, err)
+	}
 }
 
 // Agents that read the GPUs through the container runtime and see none, on

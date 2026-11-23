@@ -9,6 +9,20 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+### Added
+
+- `spec.agent.runtimeClassName` runs the agent Pods with a RuntimeClass, for
+  nodes where the NVIDIA container runtime is configured but is not the
+  default, such as the NVIDIA GPU Operator 25.10 or later with CDI
+  (`runtimeClassName: nvidia`). Optional and unset by default; nothing
+  changes for existing installations. When no agent Pod can be created with
+  it, or the Pods' sandbox does not start, `GPUVisibility` and
+  `kubeneuronctl status` report `AgentRuntimeClassPodsNotCreated` or
+  `AgentRuntimeClassNotStarting` instead of waiting for agents, also when
+  setting the field stops the rollout of a running installation. Not yet
+  exercised on real hardware. The table in docs/operations.md now says, per
+  node image, whether the agent sees GPUs without node-level actions.
+
 ## [v1.0.0-rc.2] - 2026-11-23
 
 ### Hardware evidence

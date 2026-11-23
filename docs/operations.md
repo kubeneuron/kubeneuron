@@ -829,12 +829,36 @@ node's default runtime; a node whose runtime ignores these variables gives
 the agent no GPU, and the agent reports none and keeps watching the kernel
 log. This mode has not yet been exercised on real hardware.
 
-| Node image | GPUs visible to the agent by default |
+| Node image | GPUs visible to the agent without node-level actions |
 |---|---|
 | EKS Amazon Linux 2023 NVIDIA AMI | yes — observed once on the Amazon EKS-optimized Amazon Linux 2023 NVIDIA AMI (x86_64) with a Tesla T4 |
 | AKS GPU node images | expected to work; not yet exercised on real hardware |
-| GKE Container-Optimized OS, Bottlerocket | no: KubeNeuron checks a replacement by node readiness and advertised capacity |
-| CDI-only runtime setups | not verified |
+| NVIDIA GPU Operator 25.10 or later, with CDI | with `spec.agent.runtimeClassName: nvidia` (see below); not yet exercised on real hardware. The NRI plugin's management devices and DRA admin access are not supported |
+| GKE Container-Optimized OS, with Google's device plugin | no: GPUs are given only to Pods that request them. Inventory needs host tooling with node-level actions, which runs the agent privileged; a GKE DRA setup is not supported |
+| Bottlerocket NVIDIA variants | no: the node setting `settings.nvidia-container-runtime.visible-devices-envvar-when-unprivileged`, false by default, makes the runtime ignore the request. Enabling it lets any unprivileged container that sets `NVIDIA_VISIBLE_DEVICES=all` see every GPU of the node; the alternative is host tooling with node-level actions |
+
+Platform behaviour as documented by each vendor in November 2026; check their current documentation.
+
+On every one of them node replacement does not depend on this: after a
+replacement KubeNeuron checks node readiness and advertised capacity when the
+replaced node's agent never reported GPUs.
+
+Where the NVIDIA runtime is configured but is not the node's default, set
+`spec.agent.runtimeClassName` to the RuntimeClass that selects it, for
+example `nvidia` with the GPU Operator and CDI. The agent Pods then run with
+that RuntimeClass, with or without node-level actions; nothing else in them
+changes. KubeNeuron never sets it by itself. The RuntimeClass must exist and
+its handler must be configured on every node the agent runs on, CPU nodes
+included, or the agent Pods do not start there. `GPUVisibility` and
+`kubeneuronctl status` then report `AgentRuntimeClassPodsNotCreated` when no
+agent Pod with the RuntimeClass could be created, as when it does not exist:
+on a new installation, or when setting the field on a running one stops the
+rollout after its first Pod while the older agents keep running. They report
+`AgentRuntimeClassNotStarting`, with the number of nodes, when agent Pods
+wait for their sandbox for more than two minutes, as when the handler is
+missing on their nodes. Both are reported while other agents report GPUs. Restrict the
+agent to the nodes that have the handler with `spec.agent.nodeSelector`, or
+clear the field.
 
 When Kubernetes advertises `nvidia.com/gpu` and the agents see no GPU, the
 `GPUVisibility` condition and `kubeneuronctl status` report

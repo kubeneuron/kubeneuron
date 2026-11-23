@@ -153,6 +153,10 @@ func (r *KubeNeuronReconciler) setInventoryConditions(ctx context.Context, root 
 		unknown("NoFreshAgentReport", "No fresh agent inventory report is available.")
 	default:
 		switch {
+		case inventory.AgentRuntimeClassDiagnostic(s.Diagnostic):
+			// Some agents report, others cannot run: what they report is
+			// not the whole fleet.
+			record("GPUVisibility", metav1.ConditionFalse, s.Diagnostic, inventory.DiagnosticText(s))
 		case s.GPUs > 0:
 			record("GPUVisibility", metav1.ConditionTrue, "InventoryReported", fmt.Sprintf("Agents on %d nodes report %d GPUs.", s.ReportingNodes, s.GPUs))
 		case s.AdvertisedNodes == 0:
