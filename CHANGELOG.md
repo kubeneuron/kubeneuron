@@ -9,6 +9,10 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+### Changed
+
+- Release images and the checksum file use Cosign 3 Sigstore bundles. The installation guide includes verification commands for both the new format and the detached signatures used by rc.1 and rc.2.
+
 ## [v1.0.0-rc.2] - 2026-11-24
 
 ### Hardware evidence

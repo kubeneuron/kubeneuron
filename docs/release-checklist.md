@@ -166,6 +166,11 @@ Linters are pinned so a local `make lint` and CI agree: golangci-lint
 v2.14.0 (CI `golangci-lint-action` `version:`), shellcheck v0.11.0 (CI installs
 that release by checksum; actionlint uses it too).
 
+For releases after rc.2, confirm the draft includes `checksums-<tag>.txt.sigstore.json`
+and verify it with Cosign 3.1.4 or later. Before publication, confirm the
+`release-verify` job passed for the draft ID and verified the GitHub OIDC
+signatures on both its checksums and image digests. For rc.1 and rc.2 use the
+original signature and certificate as described in [Installation](install.md).
 Release verification (`hack/verify-release.sh`) requires cosign: it verifies
 the checksum file's signature and every image digest in `images.txt` against
 the release workflow identity

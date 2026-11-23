@@ -328,6 +328,29 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
     hack/verify-release.sh "$RELEASE_TAG"
     ```
 
+    For releases after v1.0.0-rc.2, the minimum supported verifier for both
+    checksum bundles and image signatures is Cosign 3.1.4. The standard
+    Cosign 2.5.2 image verification command does not find the new image
+    signatures. To verify the signed
+    checksum file from the release downloads:
+
+    ```sh
+    identity="https://github.com/kubeneuron/kubeneuron/.github/workflows/release.yaml@refs/tags/$RELEASE_TAG"
+    issuer=https://token.actions.githubusercontent.com
+    sums="checksums-$RELEASE_TAG.txt"
+    cosign verify-blob --bundle "$sums.sigstore.json" --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" "$sums"
+    ```
+
+    For v1.0.0-rc.1 and v1.0.0-rc.2 use their original
+    detached signature and certificate. With the same variables, run:
+
+    ```sh
+    cosign verify-blob --signature "$sums.sig" --certificate "$sums.pem" --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" "$sums"
+    ```
+
+    Verify each published image using
+    `cosign verify --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" <image@digest>`.
+
 ## 2. Namespace and root object
 
 Create the runtime namespace yourself (the operator deliberately never

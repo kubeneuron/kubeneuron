@@ -131,11 +131,25 @@ ls -1 "$work"
 # had no pattern. An operator cannot tell a diagnostic tarball from a
 # deliverable, so the set is stated here and anything else fails.
 note "asset allow-list"
+sums="$work/checksums-${TAG}.txt"
+case "$TAG" in
+v1.0.0-rc.1 | v1.0.0-rc.2)
+	signature_assets=("$sums.sig" "$sums.pem")
+	blob_flags=(--signature "$sums.sig" --certificate "$sums.pem")
+	;;
+*)
+	signature_assets=("$sums.sigstore.json")
+	blob_flags=(--bundle "$sums.sigstore.json")
+	;;
+esac
 shopt -s nullglob
 for f in "$work"/*; do
+	for asset in "${signature_assets[@]}"; do
+		[[ $f != "$asset" ]] || continue 2
+	done
 	case "$(basename "$f")" in
 	kubeneuronctl-* | sbom-* | images.txt | install.sh | install-*.sh | \
-		kubeneuron-install-*.yaml | checksums-*.txt | checksums-*.txt.sig | checksums-*.txt.pem) ;;
+		kubeneuron-install-*.yaml | "checksums-${TAG}.txt") ;;
 	*) bad "unexpected asset published to users: $(basename "$f")" ;;
 	esac
 done
@@ -179,15 +193,12 @@ require_one "image digest table" "$work/images.txt"
 require_one "install manifest" "$work/kubeneuron-install-*.yaml"
 require_one "installer script" "$work/install*.sh"
 require_one "checksum file" "$work/checksums-${TAG}.txt"
-# The signature pair is required whether or not this machine can verify it.
-# Absent cosign explains why the signature was not CHECKED; it does not excuse
-# a release published without one.
-require_one "cosign signature" "$work/checksums-${TAG}.txt.sig"
-require_one "cosign certificate" "$work/checksums-${TAG}.txt.pem"
+for asset in "${signature_assets[@]}"; do
+	require_one "checksum signing material" "$asset"
+done
 
 # --- checksums cover everything and match -------------------------------------
 note "checksums"
-sums="$work/checksums-${TAG}.txt"
 if [[ ! -r $sums ]]; then
 	bad "no checksums-${TAG}.txt in the release"
 else
@@ -211,16 +222,13 @@ fi
 note "cosign signature"
 if ! command -v cosign >/dev/null 2>&1; then
 	bad "cosign is required: signatures cannot be skipped, install cosign and run again"
-elif [[ -r "$sums.sig" && -r "$sums.pem" ]]; then
+else
 	cosign verify-blob \
-		--certificate "$sums.pem" \
-		--signature "$sums.sig" \
+		"${blob_flags[@]}" \
 		--certificate-identity "$signer_identity" \
 		--certificate-oidc-issuer "$signer_issuer" \
 		"$sums" >/dev/null 2>&1 ||
 		bad "the cosign signature over checksums-${TAG}.txt does not verify against ${signer_identity}"
-else
-	bad "checksums-${TAG}.txt is published without a .sig/.pem pair"
 fi
 
 # Compare the files without running either platform's image. The source
