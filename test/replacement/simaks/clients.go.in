@@ -4,14 +4,27 @@ package azure
 
 import (
 	"context"
+	"errors"
+	"github.com/kubeneuron/kubeneuron/test/replacement/restartsim"
 	"os"
 	"sync"
 )
 
 // The kind controller reads inventory concurrently with replacement operations.
 type rehearsalClient struct {
-	mu      sync.Mutex
-	fixture *fakeAKS
+	mu       sync.Mutex
+	fixture  *fakeAKS
+	path     string
+	snapshot deleteSnapshot
+}
+
+type deleteSnapshot struct {
+	Calls         int       `json:"delete_calls"`
+	Effects       int       `json:"delete_effects"`
+	Machines      []machine `json:"machines"`
+	Count         int32
+	Tags          map[string]string
+	Version, Next int
 }
 
 func newSDKAPI(_ settings) (aksAPI, error) {
@@ -20,7 +33,21 @@ func newSDKAPI(_ settings) (aksAPI, error) {
 		f.machines[0].Name = first
 	}
 	f.permissions = []permission{{Actions: []string{"*"}}}
-	return &rehearsalClient{fixture: f}, nil
+	c := &rehearsalClient{fixture: f, path: os.Getenv("REHEARSAL_DELETE_SNAPSHOT")}
+	if c.path != "" {
+		found, err := restartsim.Load(c.path, &c.snapshot)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			saved := c.snapshot
+			if saved.Machines == nil || saved.Tags == nil {
+				return nil, errors.New("incomplete simulated AKS snapshot")
+			}
+			f.count, f.tags, f.version, f.next, f.machines = saved.Count, saved.Tags, saved.Version, saved.Next, saved.Machines
+		}
+	}
+	return c, nil
 }
 
 func (c *rehearsalClient) NodeResourceGroup(ctx context.Context) (string, error) {
@@ -50,7 +77,29 @@ func (c *rehearsalClient) WritePool(ctx context.Context, name string, p pool, co
 func (c *rehearsalClient) DeleteMachines(ctx context.Context, pool string, names []string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	before := len(c.fixture.machines)
 	err := c.fixture.DeleteMachines(ctx, pool, names)
+	if err == nil && c.path != "" && len(names) == 1 && names[0] == testMachine(1).Name {
+		f := c.fixture
+		c.snapshot.Calls++
+		c.snapshot.Effects += before - len(f.machines)
+		if c.snapshot.Calls == 1 && os.Getenv("REHEARSAL_REUSE_MACHINE") == "1" {
+			replacement := testMachine(f.next)
+			replacement.Name = names[0]
+			f.next++
+			f.count++
+			f.machines = append(f.machines, replacement)
+		}
+		c.snapshot.Machines, c.snapshot.Count, c.snapshot.Tags, c.snapshot.Version, c.snapshot.Next = f.machines, f.count, f.tags, f.version, f.next
+		if err := restartsim.Save(c.path, c.snapshot); err != nil {
+			return err
+		}
+		if c.snapshot.Calls == 1 {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}
 	// Once the second replacement has deleted its named machine, model
 	// loss of permission to inspect access for the following incident.
 	if err == nil && len(names) == 1 && names[0] == testMachine(1).Name && os.Getenv("REHEARSAL_FIRST_NODE") != "" {

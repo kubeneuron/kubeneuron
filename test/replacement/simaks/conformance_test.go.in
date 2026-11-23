@@ -3,7 +3,9 @@
 package azure
 
 import (
+	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -41,5 +43,46 @@ func TestKindSimulatorARMHold(t *testing.T) {
 		if strings.Contains(text, testSub) || strings.Contains(text, "management.azure.com") {
 			t.Fatalf("operator output includes ARM request details: %q", text)
 		}
+	}
+}
+
+func TestKindSimulatorRestartAfterDelete(t *testing.T) {
+	for _, reuse := range []string{"0", "1"} {
+		t.Run(reuse, func(t *testing.T) {
+			t.Setenv("REHEARSAL_DELETE_SNAPSHOT", filepath.Join(t.TempDir(), "snapshot.json"))
+			t.Setenv("REHEARSAL_REUSE_MACHINE", reuse)
+			api, err := newSDKAPI(settings{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := api.(*rehearsalClient)
+			c.fixture = newFakeAKS(3)
+			target := testMachine(1)
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			if err := c.DeleteMachines(ctx, testPool, []string{target.Name}); !errors.Is(err, context.Canceled) {
+				t.Fatalf("response: %v", err)
+			}
+			api, err = newSDKAPI(settings{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			restored := api.(*rehearsalClient)
+			if restored.snapshot.Calls != 1 || restored.snapshot.Effects != 1 {
+				t.Fatal("unexpected delete counts")
+			}
+			found := false
+			for _, m := range restored.fixture.machines {
+				if m.Name == target.Name {
+					found = true
+					if m.ResourceID == target.ResourceID {
+						t.Fatal("original machine survived")
+					}
+				}
+			}
+			if found != (reuse == "1") {
+				t.Fatalf("reused name present: %t", found)
+			}
+		})
 	}
 }
