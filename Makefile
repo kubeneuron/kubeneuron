@@ -386,6 +386,10 @@ verify-workload-safe-examples:
 test-replacement-kind:
 	./test/replacement/run.sh
 
+.PHONY: test-replacement-restart-kind
+test-replacement-restart-kind:
+	RESTART_SCENARIO="$${RESTART_SCENARIO:-resolved}" ./test/replacement/run.sh
+
 # The kind rehearsal's audit assertions against recorded incidents. No cluster.
 .PHONY: test-replacement-assertions
 test-replacement-assertions:

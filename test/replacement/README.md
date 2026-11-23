@@ -9,3 +9,22 @@ In the AWS scenario, three more faults check policy qualification and configurat
 Live AWS, GKE and AKS behavior, physical GPU health and CUDA execution require separate validation.
 The runner builds images locally, loads them into kind and never publishes them.
 Local image tags default to the kind cluster name. Set `REPLACEMENT_IMAGE_TAG` to override them.
+
+## Controller restart after remove-first
+
+Run the three cases separately, one at a time, with simulated providers only.
+
+```sh
+REPLACEMENT_PROVIDER=aws make test-replacement-restart-kind
+REPLACEMENT_PROVIDER=aks make test-replacement-restart-kind
+REPLACEMENT_PROVIDER=aks RESTART_SCENARIO=identity-changed make test-replacement-restart-kind
+```
+
+During remove-first, the simulator records the accepted delete on the rehearsal
+volume before the controller receives a response. The runner replaces the
+controller pod, reconnects to its API and checks the incident audit against the
+original operation. The resolved cases require one delete call, one deletion
+and release of the incident's remediation ownership. The AKS identity-change
+case reuses the machine name with a different provider ID and requires
+NEEDS_HUMAN with the settlement command for that incident.
+Set `KIND_ARTIFACTS_DIR` to retain the simulator snapshot and incident audit.
