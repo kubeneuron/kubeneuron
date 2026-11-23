@@ -342,6 +342,24 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 				"original machine removal confirmed after restart", nil, "", true)
 		}
 	}
+	// A GKE plan of this attempt past the delete is the sweep's: its node is
+	// gone and is not admitted again. Ended restored, the step is done.
+	if rec := inc.RemoveFirst; step.Action == "platform.replace_node" && rec != nil && rec.Version == 0 &&
+		rec.Operation == successorOperation(inc) && inc.CloudIdentity != nil && rec.Instance == inc.CloudIdentity.InstanceID &&
+		(rec.Open() && (rec.Phase == cloud.RemoveFirstResizing || rec.Phase == cloud.RemoveFirstDone) || rec.Outcome == types.RemoveFirstRestored) {
+		if rec.Open() {
+			return nil
+		}
+		inc.StepIndex++
+		next := types.StateEvaluating
+		if _, finished, err := c.runtimeConfig(ctx).Engine.NextStep(inc); err != nil {
+			return err
+		} else if finished {
+			next = types.StateVerifying
+		}
+		return c.transitionWithRepairStep(ctx, inc, next, "system", "recover-restored-plan",
+			fmt.Sprintf("instance deleted and node pool %s set back to its size before the restart", rec.Pool), nil, "", true)
+	}
 	// A recycle whose instance provably cannot be recycled (an autoscaling-group
 	// member) escalates now — before a human is asked to approve a step the
 	// node group would fight and lose by timeout. Likewise an agent-destructive

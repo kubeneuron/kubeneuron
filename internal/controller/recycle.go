@@ -83,7 +83,18 @@ func (c *Controller) recycleNodeStep(ctx context.Context, inc *types.Incident, r
 			SupportsDeleteIntent() bool
 			ReplacePinnedNodeWithIntent(context.Context, cloud.NodeIdentity, func(string, string, string) error) (string, error)
 		}); ok && target.SupportsDeleteIntent() {
-			named, err = target.ReplacePinnedNodeWithIntent(ctx, pin, func(pool, machine, successor string) error {
+			replace := func(record func(string, string, string) error) (string, error) {
+				if grows, ok := guard.(interface {
+					ReplacePinnedNodeWithIntents(context.Context, cloud.NodeIdentity, removefirst.Intents) (string, error)
+				}); ok {
+					return grows.ReplacePinnedNodeWithIntents(ctx, pin, removefirst.Intents{
+						Grow:   func(g removefirst.Grow) error { return c.claimGrowIntent(ctx, inc, pin, g) },
+						Delete: record,
+					})
+				}
+				return target.ReplacePinnedNodeWithIntent(ctx, pin, record)
+			}
+			named, err = replace(func(pool, machine, successor string) error {
 				if pool == "" {
 					rows, err := c.store.AuditTrail(ctx, inc.ID)
 					if err != nil {
@@ -98,7 +109,11 @@ func (c *Controller) recycleNodeStep(ctx context.Context, inc *types.Incident, r
 				}
 				return c.claimDeleteIntent(ctx, inc, pin, pool, machine, successor)
 			})
-			if errors.Is(err, removefirst.ErrRefused) && inc.RemoveFirst.Open() {
+			if errors.Is(err, removefirst.ErrRefused) && inc.RemoveFirst.Open() && inc.RemoveFirst.Phase == removefirst.PhaseGrowing {
+				err = errors.Join(err, c.settleRefusedGrow(ctx, inc))
+			} else if errors.Is(err, cloud.ErrReplacementCapacity) && inc.RemoveFirst.Open() && inc.RemoveFirst.Phase == removefirst.PhaseGrowing {
+				err = errors.Join(err, c.settleCapacityGrow(ctx, inc))
+			} else if errors.Is(err, removefirst.ErrRefused) && inc.RemoveFirst.Open() {
 				err = errors.Join(err, c.settleRefusedDelete(ctx, inc, err))
 			} else if err == nil && inc.RemoveFirst.Open() {
 				err = c.endRemoveFirst(ctx, inc, types.RemoveFirstDeleteConfirmed, "")

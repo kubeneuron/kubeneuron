@@ -121,13 +121,20 @@ calls, or a call whose answer is lost, still ends with the size set back, or wit
    that the delete is about to be sent, and deletes the instance by name. A
    resent delete carries the same request ID, so Compute Engine runs it
    once.
-3. **Resizing.** Once the instance is gone, KubeNeuron sets the pool's node
-   count back to the planned count through GKE (`setSize`), only while the
-   node's zone is below it, every other zone is at it, and no other GKE
-   operation runs on the pool. The count is absolute, so a resent resize is
-   the same resize, and no zone is ever lowered.
+3. **Resizing.** Once the instance is gone, KubeNeuron records that the
+   resize is about to be sent, then sets the pool's node count back to the
+   planned count through GKE (`setSize`), only while the node's zone is
+   below it, every other zone is at it, and no other GKE operation runs on
+   the pool. The count is absolute, so a resent resize is the same resize,
+   and no zone is ever lowered. The name and location of the GKE operation
+   are recorded on the incident. A recorded resize is never sent again: if
+   its operation ended with an error, or finished with the pool still short,
+   the plan ends as needs-operator.
    Setting the size back asks Google Cloud for a new instance; it does not guarantee one. If the zone has no capacity or quota for the machine type, the pool stays a node short until Google Cloud can create it. Add-first avoids deleting a node before its replacement exists.
-4. **Done.** The plan ends when every zone is back at its count.
+4. **Done.** The plan ends when every zone is back at its count. If the
+   recorded operation could not be read, or its name was never received,
+   the plan ends on the zone sizes alone, and the audit trail says
+   `confirmed by the pool's final state, not by the cloud operation`.
 
 When the node's zonal group has up to 100 instances, the plan also records
 them before the delete. If exactly one instance is new once the
@@ -137,9 +144,32 @@ the pool (`pool`). This uses the `listManagedInstances` read KubeNeuron
 already makes, so no new permission is needed. It has been exercised with
 simulated providers only.
 
-The replace step ends once the instance is gone; the controller finishes the
-resize on its own, also after a restart or a change of leader, from what the
-plan recorded. A plan that stopped before the delete changed nothing and is
+The replace step ends once the resize is sent; the controller finishes the
+plan on its own, also after a restart or a change of leader, from what the
+plan recorded. A resize not yet sent when the controller stopped is a new
+change: the controller sends it only if the policy would start the replace
+step now. While remediation is paused, the policy is in DryRun, or the
+published configuration is not loaded, nothing is sent. The incident's audit
+trail, `kubeneuronctl status` and `kubeneuronctl pools` show the pool's node
+count, read from GKE, and what the resize waits for, for example:
+
+```text
+pool gpu: 3 of 4 nodes — replacement of gke-training-gpu-a-0001 is waiting for remediation to be resumed (incident inc-1)
+```
+
+If the step is interrupted after the node is removed (for example by a
+controller restart), the replace step is not started again and no approval
+can be requested for it. Under a policy in Approval mode, the incident needs
+an operator at once: set the size of the
+pool back, then run `kubeneuronctl resolve <id> --cloud-operation-settled`.
+`kubeneuronctl status` and `kubeneuronctl pools` show, for example:
+
+```text
+pool gpu: 3 of 4 nodes — replacement of gke-training-gpu-a-0001 needs the operator (incident inc-1)
+```
+
+If someone sets the size back in that time, the plan ends on the zone sizes.
+After an hour the incident needs an operator. A plan that stopped before the delete changed nothing and is
 made again. If the pool changed in a way KubeNeuron cannot set back safely
 (its zones now differ in size, it was put under the autoscaler, its zones
 changed), or the plan has not finished within an hour, also while nothing fails, the plan ends as

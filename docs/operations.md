@@ -97,6 +97,10 @@ Three independent mechanisms, all fail toward not acting:
    `platform.restore_accelerator_stack` step is also allowed to start while
    paused; it only completes that recorded undo and cannot begin another
    remediation. It cannot claim or run any other queued action.
+   While remediation is paused, KubeNeuron still removes its own
+   `kubeneuron-replacing` tag from an AKS pool when a replacement that had
+   already removed its machine is confirmed finished. It does not change the
+   pool's size or its machines.
 2. **Per-node pause:** create a `GPUNodeConfig` with `paused: true` for the
    node. The compiled set is authoritative: deleting the CR unpauses.
 3. **Maintenance windows:** `GPUMaintenanceWindow` with a time range and

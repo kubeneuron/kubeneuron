@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
 	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
@@ -20,6 +21,15 @@ import (
 // instance's group before the delete, when it has at most
 // resizediff.MaxMembers members.
 const stateGroups = "groups"
+
+// State keys written while the size is set back, besides the shared
+// removefirst ones: the location of the recorded resize operation.
+const (
+	stateOperationLocation = "operation_location"
+	stateEvidence          = removefirst.StateEvidence
+	EvidenceOperation      = removefirst.EvidenceOperation
+	EvidenceFinalState     = removefirst.EvidenceFinalState
+)
 
 var _ cloud.PlannedRemoveFirstProvider = (*Provider)(nil)
 
@@ -133,7 +143,11 @@ func (p *Provider) PlanRemoveFirst(ctx context.Context, instanceID, operation st
 // request ID of the plan, so a resent delete is the same delete. The size is
 // set back through GKE as an absolute node count, and only while the
 // instance's zone is below it and every other zone is at it: a resent resize
-// is the same resize, and no zone is ever lowered.
+// is the same resize, and no zone is ever lowered. Like the delete, the
+// resize is returned as resizing first, which the caller records before it
+// is sent; its operation and location are recorded after. A recorded
+// operation is read back: one that failed is not sent again, and one that
+// cannot be read leaves the plan to the pool's final state.
 func (p *Provider) ContinueRemoveFirst(ctx context.Context, plan cloud.RemoveFirstPlan) (cloud.RemoveFirstPlan, error) {
 	if plan.Phase == cloud.RemoveFirstDone {
 		return plan, nil
@@ -239,6 +253,21 @@ func (p *Provider) ContinueRemoveFirst(ctx context.Context, plan cloud.RemoveFir
 		return plan, nil
 	}
 	// The instance is gone: set the size back, if its zone is short.
+	evidence := EvidenceFinalState
+	recorded := plan.Phase == cloud.RemoveFirstResizing && plan.State[stateOperation] != ""
+	if recorded {
+		switch op, err := p.api.Operation(ctx, plan.State[stateOperation]); {
+		case err != nil:
+			// Not readable now, or no longer kept: the sizes decide, and
+			// the resize is not sent again.
+		case op.Status != opDone:
+			return plan, nil
+		case op.ErrorCode != 0:
+			return plan, refuse("GKE operation %s that set node pool %s back ended with error %s", op.Name, pl.Name, op.ErrorCode)
+		default:
+			evidence = EvidenceOperation
+		}
+	}
 	if sizes[zone] >= int32(before) {
 		for _, n := range sizes {
 			if n != sizes[zone] {
@@ -246,6 +275,7 @@ func (p *Provider) ContinueRemoveFirst(ctx context.Context, plan cloud.RemoveFir
 			}
 		}
 		plan.Phase = cloud.RemoveFirstDone
+		plan.State = withState(plan.State, stateEvidence, evidence)
 		if before := plan.State[stateMembers]; before != "" {
 			if added := resizediff.Added(strings.Split(before, ","), memberNames(members), old.name); added != "" {
 				plan.State = resizediff.WithInstance(plan.State, g.instance(added).providerID())
@@ -253,16 +283,59 @@ func (p *Provider) ContinueRemoveFirst(ctx context.Context, plan cloud.RemoveFir
 		}
 		return plan, nil
 	}
+	if recorded {
+		if evidence == EvidenceOperation {
+			return plan, refuse("GKE operation %s finished but node pool %s has zones at %s, planned %d each", plan.State[stateOperation], pl.Name, joinSizes(sizes), before)
+		}
+		return plan, nil // the recorded resize is not shown yet; never sent again
+	}
 	for i, n := range sizes {
 		if i != zone && n != int32(before) {
 			return plan, refuse("node pool %s was resized since the plan (zones at %s, planned %d each)", pl.Name, joinSizes(sizes), before)
 		}
 	}
-	plan.Phase = cloud.RemoveFirstResizing
+	if sizes[zone] != int32(before)-1 {
+		return plan, refuse("node pool %s has zones at %s after the delete, planned %d each", pl.Name, joinSizes(sizes), before)
+	}
+	if plan.Phase != cloud.RemoveFirstResizing {
+		// Recorded by the caller before the resize is sent.
+		plan.Phase = cloud.RemoveFirstResizing
+		return plan, nil
+	}
+	if !removefirst.MaySend(ctx) {
+		return plan, nil // held by the caller
+	}
 	name, err := p.api.SetPoolSize(ctx, pl.Name, int32(before))
 	if err != nil {
 		return plan, fmt.Errorf("gcp: setting node pool %s back to %d nodes per zone: %w", pl.Name, before, err)
 	}
 	plan.State = withState(plan.State, stateOperation, name)
+	plan.State = withState(plan.State, stateOperationLocation, p.location)
 	return plan, nil
+}
+
+// ObserveRemoveFirstSize reads the node count of a plan's pool, for a resize
+// that is held: the sum of its zones now, and at the plan. It changes nothing.
+func (p *Provider) ObserveRemoveFirstSize(ctx context.Context, plan cloud.RemoveFirstPlan) (removefirst.PoolSize, error) {
+	before, err := strconv.ParseInt(plan.State[stateSize], 10, 32)
+	if err != nil {
+		return removefirst.PoolSize{}, fmt.Errorf("gcp: remove-first operation %s has no recorded size", plan.Operation)
+	}
+	c, err := p.api.Cluster(ctx)
+	if err != nil {
+		return removefirst.PoolSize{}, fmt.Errorf("gcp: reading GKE cluster %s: %w", p.cluster, err)
+	}
+	pl, ok := c.pool(plan.Pool)
+	if !ok {
+		return removefirst.PoolSize{}, fmt.Errorf("gcp: node pool %s is gone", plan.Pool)
+	}
+	sizes, _, err := p.zoneSizes(ctx, pl)
+	if err != nil {
+		return removefirst.PoolSize{}, err
+	}
+	size := removefirst.PoolSize{Planned: int32(before) * int32(len(strings.Split(plan.State[stateGroups], ",")))}
+	for _, n := range sizes {
+		size.Current += n
+	}
+	return size, nil
 }

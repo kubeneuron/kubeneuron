@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
 	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
@@ -128,8 +129,20 @@ func (p *Platform) ReplacePinnedNodeNamed(ctx context.Context, pin cloud.NodeIde
 // ReplacePinnedNodeWithIntent runs the provider's pre-delete callback only
 // after the normal identity and cloud eligibility checks have passed.
 func (p *Platform) ReplacePinnedNodeWithIntent(ctx context.Context, pin cloud.NodeIdentity, record func(pool, machine, successor string) error) (string, error) {
+	return p.ReplacePinnedNodeWithIntents(ctx, pin, removefirst.Intents{Delete: record})
+}
+
+// ReplacePinnedNodeWithIntents is ReplacePinnedNodeWithIntent with a callback
+// before the grow of a fixed-size pool as well, where the provider grows one.
+func (p *Platform) ReplacePinnedNodeWithIntents(ctx context.Context, pin cloud.NodeIdentity, intents removefirst.Intents) (string, error) {
+	record := intents.Delete
 	if err := p.replaceEligible(ctx, pin); err != nil {
 		return "", err
+	}
+	if provider, ok := p.recycler.(interface {
+		ReplaceWithIntents(context.Context, string, removefirst.Intents) (string, error)
+	}); ok && record != nil {
+		return provider.ReplaceWithIntents(ctx, pin.InstanceID, intents)
 	}
 	if record != nil {
 		provider, ok := p.recycler.(interface {

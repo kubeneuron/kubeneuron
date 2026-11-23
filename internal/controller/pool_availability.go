@@ -317,8 +317,13 @@ func (c *Controller) replacementChecker(ctx context.Context) func(types.Node) (c
 
 func (c *Controller) PoolAvailability() types.PoolAvailabilityView {
 	c.inventory.mu.Lock()
-	defer c.inventory.mu.Unlock()
-	return types.PoolAvailabilityView{Pools: append([]types.PoolAvailability{}, c.inventory.pools...)}
+	pools := append([]types.PoolAvailability{}, c.inventory.pools...)
+	c.inventory.mu.Unlock()
+	held := c.heldResizes()
+	for i := range pools {
+		pools[i].ReplacementHeld = held[pools[i].Pool]
+	}
+	return types.PoolAvailabilityView{Pools: pools}
 }
 
 func mergePoolOrder(current, next string) string {

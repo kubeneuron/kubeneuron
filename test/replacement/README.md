@@ -12,12 +12,14 @@ Local image tags default to the kind cluster name. Set `REPLACEMENT_IMAGE_TAG` t
 
 ## Controller restart after remove-first
 
-Run the three cases separately, one at a time, with simulated providers only.
+Run the cases separately, one at a time, with simulated providers only.
 
 ```sh
 REPLACEMENT_PROVIDER=aws make test-replacement-restart-kind
 REPLACEMENT_PROVIDER=aks make test-replacement-restart-kind
 REPLACEMENT_PROVIDER=aks RESTART_SCENARIO=identity-changed make test-replacement-restart-kind
+REPLACEMENT_PROVIDER=aks RESTART_SCENARIO=lost-grow make test-replacement-restart-kind
+REPLACEMENT_PROVIDER=gke RESTART_SCENARIO=lost-resize make test-replacement-restart-kind
 ```
 
 During remove-first, the simulator records the accepted delete on the rehearsal
@@ -27,4 +29,10 @@ original operation. The resolved cases require one delete call, one deletion
 and release of the incident's remediation ownership. The AKS identity-change
 case reuses the machine name with a different provider ID and requires
 NEEDS_HUMAN with the settlement command for that incident.
+On AKS, the resolved cases also require one grow, the pool back at its node
+count before the grow and no `kubeneuron-replacing` tag. In `lost-grow` the
+grow is applied and its answer lost; only the new controller deletes the
+machine. In `lost-resize` the GKE resize that sets the pool back is applied
+and its answer lost; the new controller sends no second resize and ends the
+plan on the pool's final state.
 Set `KIND_ARTIFACTS_DIR` to retain the simulator snapshot and incident audit.

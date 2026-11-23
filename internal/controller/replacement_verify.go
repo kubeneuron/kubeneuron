@@ -288,6 +288,15 @@ func (c *Controller) findCloudReplacement(ctx context.Context, inc *types.Incide
 				rec.DeleteTarget != nil && inc.CloudIdentity != nil && *rec.DeleteTarget == *inc.CloudIdentity {
 				found = &cloudReplacement{since: e.Time}
 			}
+		case e.Action == "remove-first-"+types.RemoveFirstRestored:
+			// A GKE plan of this attempt that ended restored replaced the
+			// node even when the step's own outcome was lost in a restart.
+			rec := inc.RemoveFirst
+			if rec != nil && rec.Version == 0 && rec.Outcome == types.RemoveFirstRestored &&
+				rec.Operation == successorOperation(inc) && e.Params["operation"] == rec.Operation &&
+				inc.CloudIdentity != nil && rec.Instance == inc.CloudIdentity.InstanceID {
+				found = &cloudReplacement{since: e.Time}
+			}
 		case e.Action == replacementPoolAction:
 			pool = e
 		case e.Action == replacementInstanceAction:

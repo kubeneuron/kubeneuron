@@ -4,10 +4,13 @@ package gcp
 
 import (
 	"context"
+	"errors"
 	"os"
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/kubeneuron/kubeneuron/test/replacement/restartsim"
 )
 
 // The kind controller reads inventory concurrently with replacement operations.
@@ -15,15 +18,66 @@ type rehearsalClient struct {
 	mu        sync.Mutex
 	fixture   *fakeGKE
 	firstNode string
+	path      string
+	snapshot  resizeSnapshot
+}
+
+// resizeSnapshot is the simulated pool on the rehearsal volume: a restarted
+// controller finds the deletes and resizes the one before it made.
+type resizeSnapshot struct {
+	// Calls are the resizes that set the pool back after a remove-first
+	// delete.
+	Calls      int             `json:"resize_calls"`
+	Groups     []snapshotGroup `json:"groups"`
+	Ops        []operation     `json:"ops"`
+	Deleted    []string        `json:"deleted"`
+	RequestIDs map[string]bool `json:"request_ids"`
+}
+
+type snapshotGroup struct {
+	Target  int32    `json:"target"`
+	Members []member `json:"members"`
+	Next    int      `json:"next"`
 }
 
 func newSDKAPI(_ context.Context, _ settings) (gkeAPI, error) {
 	f := newFakeGKE(1)
-	if first := os.Getenv("REHEARSAL_FIRST_NODE"); first != "" {
-		f.groups[0].members[0].Name = first
+	c := &rehearsalClient{fixture: f, firstNode: os.Getenv("REHEARSAL_FIRST_NODE"), path: os.Getenv("REHEARSAL_DELETE_SNAPSHOT")}
+	found := false
+	if c.path != "" {
+		var err error
+		if found, err = restartsim.Load(c.path, &c.snapshot); err != nil {
+			return nil, err
+		}
 	}
+	if !found {
+		if c.firstNode != "" {
+			f.groups[0].members[0].Name = c.firstNode
+		}
+		return c, nil
+	}
+	if len(c.snapshot.Groups) != len(f.groups) {
+		return nil, errors.New("incomplete simulated GKE snapshot")
+	}
+	for i, g := range c.snapshot.Groups {
+		f.groups[i].target, f.groups[i].members, f.groups[i].next = g.Target, g.Members, g.Next
+	}
+	f.ops, f.deleted, f.requestIDs = c.snapshot.Ops, c.snapshot.Deleted, c.snapshot.RequestIDs
+	return c, nil
+}
 
-	return &rehearsalClient{fixture: f, firstNode: os.Getenv("REHEARSAL_FIRST_NODE")}, nil
+// save keeps the simulated pool after a change, before its answer.
+func (c *rehearsalClient) save() error {
+	if c.path == "" {
+		return nil
+	}
+	f := c.fixture
+	c.snapshot.Groups = c.snapshot.Groups[:0]
+	for _, g := range f.groups {
+		c.snapshot.Groups = append(c.snapshot.Groups, snapshotGroup{Target: g.target, Members: slices.Clone(g.members), Next: g.next})
+	}
+	c.snapshot.Ops, c.snapshot.Deleted, c.snapshot.RequestIDs = slices.Clone(f.ops), slices.Clone(f.deleted), f.requestIDs
+	return restartsim.Save(c.path, c.snapshot)
 }
 
 func (c *rehearsalClient) Cluster(ctx context.Context) (cluster, error) {
@@ -75,13 +129,31 @@ func (c *rehearsalClient) SetPoolSize(ctx context.Context, pool string, size int
 			return deleted == c.firstNode
 		})
 	}
-	return name, err
+	if err != nil || c.path == "" {
+		return name, err
+	}
+	if restoring {
+		c.snapshot.Calls++
+	}
+	if err := c.save(); err != nil {
+		return "", err
+	}
+	// With REHEARSAL_LOSE=resize the first resize that sets a size back
+	// is applied and its answer never returns.
+	if restoring && c.snapshot.Calls == 1 && os.Getenv("REHEARSAL_LOSE") == "resize" {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	return name, nil
 }
 
 func (c *rehearsalClient) DeleteInstances(ctx context.Context, g groupRef, names []string, requestID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.fixture.DeleteInstances(ctx, g, names, requestID)
+	if err := c.fixture.DeleteInstances(ctx, g, names, requestID); err != nil {
+		return err
+	}
+	return c.save()
 }
 
 func (c *rehearsalClient) Permissions(ctx context.Context, permissions []string) ([]string, error) {

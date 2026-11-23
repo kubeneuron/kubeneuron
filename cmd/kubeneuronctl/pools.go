@@ -48,6 +48,9 @@ func cmdPools() *cobra.Command {
 				if len(row.MissingQualifiedProfiles) > 0 && len(row.AutomaticQualificationReasons) == 0 {
 					replacement += " — " + types.MissingProfileMessage(row.MissingQualifiedProfiles)
 				}
+				for _, note := range row.ReplacementHeld {
+					replacement += " — " + note
+				}
 				status := "not required"
 				switch {
 				case row.ReplacementPolicy == "RemoveFirst":

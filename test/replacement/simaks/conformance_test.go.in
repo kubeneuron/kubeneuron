@@ -5,11 +5,14 @@ package azure
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/kubeneuron/kubeneuron/internal/cloud/cloudtest"
+	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
+	"github.com/kubeneuron/kubeneuron/test/replacement/restartsim"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
@@ -84,5 +87,69 @@ func TestKindSimulatorRestartAfterDelete(t *testing.T) {
 				t.Fatalf("reused name present: %t", found)
 			}
 		})
+	}
+}
+
+// A grow whose answer is lost is in the snapshot the restarted simulator
+// starts from: the restarted provider sees it applied, deletes the machine
+// once, drops the replacement tag at the size before, and the next
+// replacement in the pool does not wait for it.
+func TestKindSimulatorRestartAfterGrow(t *testing.T) {
+	t.Setenv("REHEARSAL_DELETE_SNAPSHOT", filepath.Join(t.TempDir(), "snapshot.json"))
+	t.Setenv("REHEARSAL_LOSE", "grow")
+	s := settings{subscription: testSub, resourceGroup: testRG, cluster: testCluster}
+	api, err := newSDKAPI(settings{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.(*rehearsalClient).fixture = newFakeAKS(3)
+	// The first incident's grow, for another machine, is neither counted
+	// nor lost.
+	other := api.(*rehearsalClient)
+	if err := other.WritePool(t.Context(), testPool, mustPool(t, other.fixture), 4, map[string]string{"team": "ml", replacingTag: testMachine(0).Name + ":3"}); err != nil {
+		t.Fatal(err)
+	}
+	if other.snapshot.GrowCalls != 0 {
+		t.Fatalf("counted another machine's grow: %+v", other.snapshot)
+	}
+	other.fixture = newFakeAKS(3)
+	var grow removefirst.Grow
+	ctx, cancel := context.WithCancel(t.Context())
+	_, err = newWithAPI(s, api).ReplaceWithIntents(ctx, testInstance(1), removefirst.Intents{
+		Grow:   func(g removefirst.Grow) error { grow = g; cancel(); return nil },
+		Delete: func(string, string, string) error { t.Fatal("delete sent after a lost grow"); return nil },
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("response: %v", err)
+	}
+	if api, err = newSDKAPI(settings{}); err != nil {
+		t.Fatal(err)
+	}
+	restored := api.(*rehearsalClient)
+	if restored.snapshot.GrowCalls != 1 || restored.snapshot.GrowEffects != 1 || restored.snapshot.Calls != 0 {
+		t.Fatalf("snapshot %+v", restored.snapshot)
+	}
+	p := newWithAPI(s, restored)
+	if obs, err := p.ObserveRemoveFirstGrow(t.Context(), grow); err != nil || obs.State != removefirst.GrowApplied {
+		t.Fatalf("observed %+v, %v", obs, err)
+	}
+	if err := p.DeleteListedMachine(t.Context(), testInstance(1), testPool, grow.Machine); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.SettleGrownPool(t.Context(), testPool, grow.Machine); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restartsim.Load(os.Getenv("REHEARSAL_DELETE_SNAPSHOT"), &restored.snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snap := restored.snapshot; snap.Calls != 1 || snap.Count != grow.Before || snap.Tags[replacingTag] != "" {
+		t.Fatalf("after the restart: %+v", snap)
+	}
+	grown := false
+	if _, err := p.ReplaceWithIntents(t.Context(), testInstance(2), removefirst.Intents{
+		Grow:   func(removefirst.Grow) error { grown = true; return errors.New("stop") },
+		Delete: func(string, string, string) error { return errors.New("stop") },
+	}); !grown {
+		t.Fatalf("the next replacement did not reach its grow: %v", err)
 	}
 }

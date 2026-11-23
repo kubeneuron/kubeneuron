@@ -127,6 +127,11 @@ func cmdStatus() *cobra.Command {
 		if line := unloadedConfigLine(c, time.Now()); line != "" {
 			_, _ = fmt.Fprintln(out, line)
 		}
+		for _, inc := range incidents {
+			if line := types.RemoveFirstHeld(inc); line != "" {
+				_, _ = fmt.Fprintln(out, line)
+			}
+		}
 		_, _ = fmt.Fprintf(out, "incidents: %d total\n", len(incidents))
 		for _, state := range []types.IncidentState{
 			types.StateOpen, types.StateObserving, types.StateEvaluating,

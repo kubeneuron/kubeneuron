@@ -1,0 +1,5 @@
+automation paused: false
+pool gpu: 3 of 4 nodes — replacement of n1 is waiting for the operator (policy auto is in Approval mode) (incident inc-1)
+incidents: 1 total
+  EXECUTING          1
+GPU inventory unknown: controller summary unavailable

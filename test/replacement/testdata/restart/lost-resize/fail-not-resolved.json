@@ -1,0 +1,43 @@
+{
+  "incident": {
+    "state": "VERIFYING"
+  },
+  "audit": [
+    {
+      "id": 1,
+      "action": "remove-first-planned",
+      "params": {
+        "operation": "operation-a"
+      }
+    },
+    {
+      "id": 2,
+      "action": "remove-first-deleting",
+      "params": {
+        "operation": "operation-a"
+      }
+    },
+    {
+      "id": 3,
+      "action": "remove-first-resizing",
+      "params": {
+        "operation": "operation-a"
+      }
+    },
+    {
+      "id": 4,
+      "action": "remove-first-done",
+      "params": {
+        "operation": "operation-a"
+      }
+    },
+    {
+      "id": 5,
+      "action": "remove-first-restored",
+      "params": {
+        "operation": "operation-a"
+      },
+      "result": "operation operation-a ended restored: confirmed by the pool's final state, not by the cloud operation"
+    }
+  ]
+}

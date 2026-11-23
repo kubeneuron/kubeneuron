@@ -17,7 +17,7 @@
       "params": {
         "operation": "operation-a"
       },
-      "result": "A machine with this name is listed now, and KubeNeuron cannot confirm that it is the original one, so the removal was not repeated. Check the machine and the size of the pool, then run kubeneuronctl resolve another --cloud-operation-settled --reason \"<what you found>\"."
+      "result": "A machine with this name is listed now, and KubeNeuron cannot confirm that it is the original one, so the removal was not repeated. Check the machine and the size of the pool, then run kubeneuronctl resolve another --cloud-operation-settled --reason \"<what you found>\""
     }
   ]
 }

@@ -142,3 +142,39 @@ func (p *Platform) RetryPinnedDelete(ctx context.Context, pin cloud.NodeIdentity
 	}
 	return cloud.ErrIdentityChanged
 }
+
+// ObservePinnedGrow reads the recorded grow of the pinned node's fixed-size
+// pool. It never writes.
+func (p *Platform) ObservePinnedGrow(ctx context.Context, g removefirst.Grow) (removefirst.GrowObservation, error) {
+	provider, ok := p.recycler.(interface {
+		ObserveRemoveFirstGrow(context.Context, removefirst.Grow) (removefirst.GrowObservation, error)
+	})
+	if !ok {
+		return removefirst.GrowObservation{}, cloud.ErrRemoveFirstUnplanned
+	}
+	return provider.ObserveRemoveFirstGrow(ctx, g)
+}
+
+// SettlePinnedPool finishes a pool grown for machine once the machine is
+// gone. Providers that grow nothing have nothing to settle.
+func (p *Platform) SettlePinnedPool(ctx context.Context, pool, machine string) (removefirst.SettleResult, error) {
+	provider, ok := p.recycler.(interface {
+		SettleGrownPool(context.Context, string, string) (removefirst.SettleResult, error)
+	})
+	if !ok {
+		return removefirst.SettleResult{}, nil
+	}
+	return provider.SettleGrownPool(ctx, pool, machine)
+}
+
+// ObservePinnedPoolSize reads the size of a plan's pool without changing it;
+// a provider that cannot read it returns cloud.ErrRemoveFirstUnplanned.
+func (p *Platform) ObservePinnedPoolSize(ctx context.Context, plan cloud.RemoveFirstPlan) (removefirst.PoolSize, error) {
+	provider, ok := p.recycler.(interface {
+		ObserveRemoveFirstSize(context.Context, cloud.RemoveFirstPlan) (removefirst.PoolSize, error)
+	})
+	if !ok {
+		return removefirst.PoolSize{}, cloud.ErrRemoveFirstUnplanned
+	}
+	return provider.ObserveRemoveFirstSize(ctx, plan)
+}

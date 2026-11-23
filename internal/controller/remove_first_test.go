@@ -91,15 +91,22 @@ func (p *plannedPlatform) ContinueRemoveFirst(_ context.Context, _ cloud.NodeIde
 	defer p.pmu.Unlock()
 	if p.size >= p.before {
 		plan.Phase = cloud.RemoveFirstDone
+		if plan.State["operation"] == "" {
+			plan.State = map[string]string{"size": plan.State["size"], "evidence": "final-state"}
+		}
 		return plan, nil
 	}
-	if p.holdResize && plan.Phase == cloud.RemoveFirstResizing {
+	if plan.Phase != cloud.RemoveFirstResizing {
+		// Recorded by the caller before the resize is sent.
+		plan.Phase = cloud.RemoveFirstResizing
+		return plan, nil
+	}
+	if p.holdResize && plan.State["operation"] != "" {
 		return plan, nil
 	}
 	if p.needsOperator {
 		return plan, fmt.Errorf("pool changed; to set the size back: %s: %w", plan.Restore, cloud.ErrNeedsOperator)
 	}
-	plan.Phase = cloud.RemoveFirstResizing
 	p.resizes[plan.Operation]++
 	if !p.holdResize {
 		p.size = p.before
@@ -110,6 +117,12 @@ func (p *plannedPlatform) ContinueRemoveFirst(_ context.Context, _ cloud.NodeIde
 	}
 	plan.State = map[string]string{"size": plan.State["size"], "operation": "op-" + fmt.Sprint(p.resizes[plan.Operation])}
 	return plan, nil
+}
+
+func (p *plannedPlatform) ObservePinnedPoolSize(context.Context, cloud.RemoveFirstPlan) (removefirst.PoolSize, error) {
+	p.pmu.Lock()
+	defer p.pmu.Unlock()
+	return removefirst.PoolSize{Current: int32(p.size), Planned: int32(p.before)}, nil
 }
 
 func (p *plannedPlatform) set(f func(*plannedPlatform)) {
@@ -219,7 +232,9 @@ func TestRemoveFirstRestartInEveryPhase(t *testing.T) {
 			c, st := plannedFixture(t, p)
 			id := openOn(t, c, "n1")
 			p.set(func(p *plannedPlatform) { tc.hold(p, true) })
-			crashWhen(t, c, st, id, planPhase(tc.phase))
+			crashWhen(t, c, st, id, func(inc *types.Incident) bool {
+				return planPhase(tc.phase)(inc) && (tc.phase != cloud.RemoveFirstResizing || !removefirst.ResizeMaySend(inc.RemoveFirst.RemoveFirstPlan))
+			})
 			p.set(func(p *plannedPlatform) {
 				tc.hold(p, false)
 				if tc.phase == cloud.RemoveFirstResizing {
@@ -646,6 +661,47 @@ func TestConfirmedDeleteAdvancesReevaluatedStep(t *testing.T) {
 	got := mustIncident(t, st, id)
 	if got.State != types.StateVerifying || got.StepIndex != 3 || !auditHas(trail(t, st, id), "recover-confirmed-delete", "confirmed after restart") {
 		t.Fatalf("state=%s index=%d %s", got.State, got.StepIndex, dump(trail(t, st, id)))
+	}
+}
+
+// A GKE plan restored before the restart finishes the re-evaluated step: its
+// node is gone and is not admitted again.
+func TestRestoredPlanAdvancesReevaluatedStep(t *testing.T) {
+	p := newPlannedPlatform()
+	c, st := plannedFixture(t, p)
+	id := openOn(t, c, "n1")
+	inc := mustIncident(t, st, id)
+	inc.Playbook, inc.StepIndex, inc.State = "cloud-replace", 2, types.StateEvaluating
+	ctx := t.Context()
+	if err := st.UpdateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	inc = mustIncident(t, st, id)
+	plan, err := p.PlanRemoveFirst(ctx, *inc.CloudIdentity, successorOperation(inc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.claimRemoveFirst(ctx, inc, plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.endRemoveFirst(ctx, inc, types.RemoveFirstRestored, finalStateEvidence); err != nil {
+		t.Fatal(err)
+	}
+	r := restartWith(t, c, st, p)
+	if err := r.advanceEvaluating(ctx, mustIncident(t, st, id)); err != nil {
+		t.Fatal(err)
+	}
+	got := mustIncident(t, st, id)
+	if got.State != types.StateVerifying || got.StepIndex != 3 || !auditHas(trail(t, st, id), "recover-restored-plan", "node pool gpu set back to its size") {
+		t.Fatalf("state=%s index=%d %s", got.State, got.StepIndex, dump(trail(t, st, id)))
+	}
+	if len(p.deletes) != 0 || p.resizes["gpu"] != 0 {
+		t.Fatalf("deletes=%v resizes=%v", p.deletes, p.resizes)
+	}
+	// Verification looks for the node that replaced it, not for the step's
+	// lost outcome.
+	if found, err := r.findCloudReplacement(ctx, got); err != nil || found == nil {
+		t.Fatalf("the restored plan is not a replacement to verify: %v", err)
 	}
 }
 

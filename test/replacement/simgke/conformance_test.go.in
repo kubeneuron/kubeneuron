@@ -3,10 +3,16 @@
 package gcp
 
 import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kubeneuron/kubeneuron/internal/cloud/cloudtest"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
+	"github.com/kubeneuron/kubeneuron/test/replacement/restartsim"
 )
 
 func TestKindSimulatorConformance(t *testing.T) {
@@ -19,4 +25,54 @@ func TestKindSimulatorConformance(t *testing.T) {
 			return newWithAPI(settings{project: testProject, location: testLocation, cluster: testCluster}, client), fixture
 		},
 	})
+}
+
+// A resize that sets the pool back, applied with its answer lost, is in the
+// snapshot the restarted simulator starts from: the restarted provider ends
+// the plan on the pool's final state and sends no second resize.
+func TestKindSimulatorRestartAfterResize(t *testing.T) {
+	t.Setenv("REHEARSAL_DELETE_SNAPSHOT", filepath.Join(t.TempDir(), "snapshot.json"))
+	t.Setenv("REHEARSAL_LOSE", "resize")
+	t.Setenv("REHEARSAL_FIRST_NODE", testName(testZone, 0))
+	s := settings{project: testProject, location: testLocation, cluster: testCluster}
+	api, err := newSDKAPI(t.Context(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As in the rehearsal: the node replaced is the add-first successor, and
+	// the instance the resize creates takes the first node's name.
+	api.(*rehearsalClient).fixture.groups[0].members[0].Name = testName(testZone, 7)
+	p := newWithAPI(s, api)
+	plan, err := p.PlanRemoveFirst(t.Context(), testProject+"/"+testZone+"/"+testName(testZone, 7), "op-a")
+	for _, want := range []cloud.RemoveFirstPhase{cloud.RemoveFirstDeleting, cloud.RemoveFirstDeleting, cloud.RemoveFirstResizing} {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan, err = p.ContinueRemoveFirst(t.Context(), plan); err == nil && plan.Phase != want {
+			t.Fatalf("phase %q, want %q", plan.Phase, want)
+		}
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := p.ContinueRemoveFirst(ctx, plan); !errors.Is(err, context.Canceled) {
+		t.Fatalf("response: %v", err)
+	}
+	if api, err = newSDKAPI(t.Context(), s); err != nil {
+		t.Fatal(err)
+	}
+	done, err := newWithAPI(s, api).ContinueRemoveFirst(t.Context(), plan)
+	if err != nil || done.Phase != cloud.RemoveFirstDone || done.State[stateEvidence] != EvidenceFinalState ||
+		!strings.HasSuffix(done.State["resize_diff"], "/"+testName(testZone, 0)) {
+		t.Fatalf("after the restart: %+v, %v", done, err)
+	}
+	var snap resizeSnapshot
+	if _, err := restartsim.Load(os.Getenv("REHEARSAL_DELETE_SNAPSHOT"), &snap); err != nil {
+		t.Fatal(err)
+	}
+	if snap.Calls != 1 || snap.Groups[0].Target != 1 {
+		t.Fatalf("snapshot %+v", snap)
+	}
 }

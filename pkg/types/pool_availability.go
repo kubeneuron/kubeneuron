@@ -38,6 +38,9 @@ type PoolAvailability struct {
 	ReplacementReasonCode         string   `json:"replacement_reason_code,omitempty"`
 	ReplacementReason             string   `json:"replacement_reason,omitempty"`
 	ReplacementAction             string   `json:"replacement_action,omitempty"`
+	// ReplacementHeld are the notes of open remove-first replacements in
+	// the pool whose size is not set back yet, from their incident records.
+	ReplacementHeld []string `json:"replacement_held,omitempty"`
 }
 
 // MissingProfileMessage describes unresolved Automatic policy references.

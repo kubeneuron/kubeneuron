@@ -28,14 +28,19 @@ docker build -f build/Dockerfile --target agent -t "$base" .
 docker build -f build/Dockerfile --target operator -t "$OPERATOR_IMAGE" .
 snapshot=
 reuse=0
+lose=
 case ${RESTART_SCENARIO:-} in
   "") ;;
   resolved) snapshot=/var/lib/kube-neuron/delete-snapshot.json ;;
+  lost-grow) [[ ${REPLACEMENT_PROVIDER:-aws} == aks ]] || exit 2
+    snapshot=/var/lib/kube-neuron/delete-snapshot.json; lose=grow ;;
+  lost-resize) [[ ${REPLACEMENT_PROVIDER:-aws} == gke ]] || exit 2
+    snapshot=/var/lib/kube-neuron/delete-snapshot.json; lose=resize ;;
   identity-changed) [[ ${REPLACEMENT_PROVIDER:-aws} == aks ]] || exit 2
     snapshot=/var/lib/kube-neuron/delete-snapshot.json; reuse=1 ;;
   *) echo "Unknown restart scenario" >&2; exit 2 ;;
 esac
-docker build --build-arg REHEARSAL_DELETE_SNAPSHOT="$snapshot" --build-arg REHEARSAL_REUSE_MACHINE="$reuse" --build-arg REHEARSAL_FIRST_NODE="$CLUSTER_NAME-worker" -f "$d/Dockerfile" -t "$control" .
+docker build --build-arg REHEARSAL_DELETE_SNAPSHOT="$snapshot" --build-arg REHEARSAL_REUSE_MACHINE="$reuse" --build-arg REHEARSAL_LOSE="$lose" --build-arg REHEARSAL_FIRST_NODE="$CLUSTER_NAME-worker" -f "$d/Dockerfile" -t "$control" .
 arch=$(docker image inspect "$base" --format '{{.Architecture}}')
 CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -o "$work/nvidia-smi" "./$d/smi"
 docker build --build-arg AGENT_IMAGE="$base" -f "$d/smi/Dockerfile" -t "$AGENT_IMAGE" "$work"

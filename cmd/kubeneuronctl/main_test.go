@@ -375,6 +375,30 @@ func TestStatusInventoryGolden(t *testing.T) {
 	}
 }
 
+// A replacement whose pool size is held is a line of its own, from the
+// incident record.
+func TestStatusHeldResize(t *testing.T) {
+	inc := types.Incident{ID: "inc-1", State: types.StateExecuting, Target: types.Target{Node: "n1", GPUIndex: -1},
+		RemoveFirst: &types.RemoveFirstRecord{RemoveFirstPlan: cloud.RemoveFirstPlan{Pool: "gpu", Phase: cloud.RemoveFirstResizing, State: map[string]string{
+			types.RemoveFirstHeldFor: "the operator (policy auto is in Approval mode)", types.RemoveFirstHeldCurrent: "3", types.RemoveFirstHeldPlanned: "4"}}}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/incidents":
+			_ = json.NewEncoder(w).Encode([]types.Incident{inc})
+		case "/api/v1/pause":
+			_ = json.NewEncoder(w).Encode(map[string]bool{"paused": false})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	out, err := runCommand(t, server.URL, "status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkGolden(t, "status-held-resize.golden", []byte(out))
+}
+
 func TestShowMissingGPUIdentity(t *testing.T) {
 	inc := types.Incident{ID: "inc-amd", OpenedAt: time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC), SignalSeen: 1, Vendor: "amd", Class: types.ClassDriverHang, State: types.StateNeedsHuman, Playbook: "gpu-reset", Target: types.Target{Node: "n1", GPUIndex: -1, PCIAddr: "0000:c3:00"}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

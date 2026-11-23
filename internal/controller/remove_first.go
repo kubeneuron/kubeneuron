@@ -7,12 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
 	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
-	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -82,8 +83,9 @@ func (c *Controller) replaceRemoveFirst(ctx context.Context, inc *types.Incident
 		switch {
 		case !inc.RemoveFirst.Open():
 			return okResult(inc, fmt.Sprintf("deleted the instance behind %s and set node pool %s back to its size (operation %s)", pin.Node, rec.Pool, rec.Operation)), true, nil
-		case inc.RemoveFirst.Phase == cloud.RemoveFirstResizing:
-			// The node is gone; the reconcile pass sees the size set back.
+		case inc.RemoveFirst.Phase == cloud.RemoveFirstResizing && !removefirst.ResizeMaySend(inc.RemoveFirst.RemoveFirstPlan):
+			// The node is gone and the resize sent; the reconcile pass sees
+			// the size set back.
 			return okResult(inc, fmt.Sprintf("deleted the instance behind %s; node pool %s is being set back to its size (operation %s)", pin.Node, rec.Pool, rec.Operation)), true, nil
 		}
 		if !c.pause(ctx) {
@@ -133,8 +135,18 @@ func (c *Controller) claimDeleteIntent(ctx context.Context, inc *types.Incident,
 		RemoveFirstPlan: cloud.RemoveFirstPlan{Operation: successorOperation(inc), Pool: pool, Instance: pin.InstanceID,
 			Phase: cloud.RemoveFirstDeleting, PlannedAt: time.Now().UTC()},
 	}
+	if grown := inc.RemoveFirst; grown.Open() && grown.Version == 1 && grown.Phase == removefirst.PhaseGrowing &&
+		grown.Operation == rec.Operation && grown.DeleteActionID == rec.DeleteActionID && grown.DeleteTarget != nil && *grown.DeleteTarget == pin {
+		// This attempt's own grow, now applied: the same record moves on to
+		// the delete, keeping when it started and what the pool was.
+		if !strings.EqualFold(grown.MachineName, machine) || grown.Pool != pool {
+			return fmt.Errorf("remove-first delete of %s in pool %s does not match the recorded grow for %s in pool %s", machine, pool, grown.MachineName, grown.Pool)
+		}
+		rec = grown.Clone()
+		rec.Phase = cloud.RemoveFirstDeleting
+	}
 	if successor != "" {
-		rec.State = resizediff.WithInstance(nil, successor)
+		rec.State = resizediff.WithInstance(rec.State, successor)
 	}
 	c.removeFirstPools.Lock()
 	defer c.removeFirstPools.Unlock()
@@ -183,11 +195,17 @@ func (c *Controller) continueRemoveFirst(ctx context.Context, inc *types.Inciden
 		return err
 	case err != nil:
 		return errors.Join(err, c.removeFirstOverdue(ctx, inc, inc.RemoveFirst, err.Error()))
+	case next.Phase == cloud.RemoveFirstDone && next.State[removefirst.StateEvidence] == removefirst.EvidenceFinalState:
+		return c.endRemoveFirst(ctx, inc, types.RemoveFirstRestored, finalStateEvidence)
 	case next.Phase == cloud.RemoveFirstDone:
 		return c.endRemoveFirst(ctx, inc, types.RemoveFirstRestored, "")
 	}
 	return c.removeFirstOverdue(ctx, inc, inc.RemoveFirst, "no progress")
 }
+
+// finalStateEvidence is the reason of a plan ended without the resize
+// operation's own report.
+const finalStateEvidence = "confirmed by the pool's final state, not by the cloud operation"
 
 // removeFirstOverdue ends a plan past the delete that is still open after
 // removeFirstDeadline, for an operator. A plan at planned changed nothing
@@ -210,10 +228,15 @@ func (c *Controller) saveRemoveFirst(ctx context.Context, inc *types.Incident, r
 		if err != nil {
 			return err
 		}
-		if action == deleteIntentAction && (fresh.Version != inc.Version || fresh.RemoveFirst != nil && fresh.RemoveFirst.Operation == rec.Operation) {
-			return store.ErrConflict
-		}
-		if rec.Version == 1 && action != deleteIntentAction && (!fresh.RemoveFirst.Open() || fresh.RemoveFirst.Version != 1) {
+		if creating := action == deleteIntentAction || action == growIntentAction; creating {
+			// Only a delete after this attempt's own open grow may follow a
+			// record of the same operation.
+			afterGrow := action == deleteIntentAction && fresh.RemoveFirst.Open() && fresh.RemoveFirst.Version == 1 &&
+				fresh.RemoveFirst.Phase == removefirst.PhaseGrowing && fresh.RemoveFirst.Operation == rec.Operation
+			if fresh.Version != inc.Version || fresh.RemoveFirst != nil && fresh.RemoveFirst.Operation == rec.Operation && !afterGrow {
+				return store.ErrConflict
+			}
+		} else if rec.Version == 1 && (!fresh.RemoveFirst.Open() || fresh.RemoveFirst.Version != 1) {
 			return store.ErrConflict
 		}
 		if fresh.RemoveFirst.Open() && fresh.RemoveFirst.Operation != rec.Operation {
@@ -280,14 +303,28 @@ func (c *Controller) sweepRemoveFirst(ctx context.Context) {
 		c.log.Error("listing open remove-first plans failed", "err", err)
 		return
 	}
+	defer func() {
+		// Pools handed to an operator stay noted until the incident is
+		// resolved.
+		parked, err := c.store.ListIncidents(ctx, store.IncidentFilter{States: []types.IncidentState{types.StateNeedsHuman}})
+		if err != nil {
+			c.log.Warn("listing incidents for held pools failed", "err", err)
+		}
+		c.noteHeldResizes(append(slices.Clone(open), parked...))
+	}()
 	for _, inc := range open {
 		if c.isInFlight(inc.ID) {
 			continue
 		}
 		if rec := inc.RemoveFirst; rec.Version != 0 {
-			if rec.Version == 1 {
-				if err := c.sweepTargetedDelete(ctx, inc); err != nil {
-					c.log.Warn("checking recorded delete failed", "incident", inc.ID, "err", err)
+			if rec.Version == 1 && rec.Phase == removefirst.PhaseGrowing {
+				if err := c.sweepGrow(ctx, inc); err != nil {
+					c.log.Warn("checking recorded grow failed", "incident", inc.ID, "err", err)
+				}
+			} else if rec.Version == 1 {
+				// Once per reason: the delete is not sent until it changes.
+				if err := c.sweepTargetedDelete(ctx, inc); err != nil && c.logOnce.first("remove-first-delete/"+inc.ID+"/"+err.Error()) {
+					c.log.Warn("checking recorded delete failed; the delete is not sent", "incident", inc.ID, "err", err)
 				}
 			}
 			continue
@@ -306,7 +343,13 @@ func (c *Controller) sweepRemoveFirst(ctx context.Context) {
 			continue
 		}
 		sctx, cancel := context.WithTimeout(ctx, successorSweepTimeout)
-		if err := c.continueRemoveFirst(sctx, inc, plat, *inc.CloudIdentity); err != nil {
+		var err error
+		if removefirst.ResizeMaySend(inc.RemoveFirst.RemoveFirstPlan) {
+			err = c.sweepResize(sctx, inc, plat)
+		} else {
+			err = c.continueRemoveFirst(sctx, inc, plat, *inc.CloudIdentity)
+		}
+		if err != nil {
 			c.log.Warn("continuing a remove-first replacement failed; retrying", "incident", inc.ID, "operation", inc.RemoveFirst.Operation, "err", err)
 		}
 		cancel()
@@ -348,7 +391,7 @@ func (c *Controller) sweepTargetedDelete(ctx context.Context, inc *types.Inciden
 	rec := inc.RemoveFirst
 	state, err := c.observeDeleteTarget(ctx, rec)
 	if err == nil && state == removefirst.Deleted {
-		return c.endRemoveFirst(ctx, inc, types.RemoveFirstDeleteConfirmed, "")
+		return c.settleDeletedTarget(ctx, inc)
 	}
 
 	var reason string
@@ -374,13 +417,7 @@ func (c *Controller) sweepTargetedDelete(ctx context.Context, inc *types.Inciden
 	default:
 		return err
 	}
-	reason += fmt.Sprintf(" Check the machine and the size of the pool, then run kubeneuronctl resolve %s --cloud-operation-settled --reason \"<what you found>\".", inc.ID)
-	if inc.State != types.StateNeedsHuman {
-		if err := c.quarantineAfterStep(ctx, inc, reason, false); err != nil {
-			return err
-		}
-	}
-	return c.endRemoveFirst(ctx, inc, types.RemoveFirstNeedsOperator, reason)
+	return c.parkRemoveFirst(ctx, inc, reason)
 }
 
 // Re-evaluate a repeat as a new mutation. An earlier approval alone cannot
@@ -389,32 +426,14 @@ func (c *Controller) retryTargetedDelete(ctx context.Context, inc *types.Inciden
 	rec := inc.RemoveFirst
 	c.runtimeMu.RLock()
 	defer c.runtimeMu.RUnlock()
-	config := c.runtimeConfig(ctx)
-	if config != c.runtime.Load() || config.Engine == nil || (inc.State != types.StateExecuting && inc.State != types.StateEvaluating) ||
-		rec.DeleteActionID != actionID(inc) || rec.Phase != cloud.RemoveFirstDeleting ||
-		inc.CloudIdentity == nil || *inc.CloudIdentity != *rec.DeleteTarget || rec.Operation != successorOperation(inc) ||
-		c.gate.Paused() || c.pauseHolds(ctx, inc) || c.effectiveDryRun(ctx, inc) {
+	if rec.DeleteActionID != actionID(inc) || rec.Phase != cloud.RemoveFirstDeleting {
 		return nil
 	}
-	if reason, _ := c.unloadedConfig(ctx); reason != "" {
-		return nil
-	}
-	step, done, err := config.Engine.NextStep(inc)
-	if err != nil || done || step == nil || step.Action != "platform.replace_node" {
+	if hold, err := c.repeatHold(ctx, inc, types.StateExecuting, types.StateEvaluating); err != nil || hold.kind != "" {
+		if err == nil {
+			c.logHeld(inc, "delete", hold)
+		}
 		return err
-	}
-	pol, ok := c.automaticPolicyFor(ctx, inc)
-	if !ok || pol.ReplacementStrategy.Effective() != recoverymode.RemoveFirst {
-		return nil
-	}
-	if verdict, _ := c.authorizeByPolicy(ctx, inc, step, pol); verdict != policyRun {
-		return nil
-	}
-	if _, result := c.destructiveStepConfinement(ctx, inc, step); result != confinementAllowed {
-		return nil
-	}
-	if hold, skip, _ := c.policyRecoveryPreflight(ctx, inc, step); hold != "" || skip != "" {
-		return nil
 	}
 	target, ok := c.platform.(interface {
 		RetryPinnedDelete(context.Context, cloud.NodeIdentity, string, string, removefirst.Observation) error

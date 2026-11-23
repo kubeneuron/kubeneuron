@@ -172,7 +172,7 @@ func (a *sdkAPI) WritePool(ctx context.Context, name string, p pool, count int32
 	body.Properties = &props
 	poller, err := a.pools.BeginCreateOrUpdate(ctx, a.resourceGroup, a.cluster, name, body, &aks.AgentPoolsClientBeginCreateOrUpdateOptions{IfMatch: &p.ETag})
 	if err != nil {
-		return err
+		return refused(err)
 	}
 	_, err = poller.PollUntilDone(ctx, &runtime.PollUntilDoneOptions{Frequency: a.pollFrequency})
 	return err
@@ -185,14 +185,7 @@ func (a *sdkAPI) DeleteMachines(ctx context.Context, poolName string, names []st
 	}
 	poller, err := a.pools.BeginDeleteMachines(ctx, a.resourceGroup, a.cluster, poolName, params, nil)
 	if err != nil {
-		var response *azcore.ResponseError
-		if errors.As(err, &response) {
-			switch response.StatusCode {
-			case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
-				return fmt.Errorf("%w: %w", removefirst.ErrRefused, err)
-			}
-		}
-		return err
+		return refused(err)
 	}
 	_, err = poller.PollUntilDone(ctx, &runtime.PollUntilDoneOptions{Frequency: a.pollFrequency})
 	return err
@@ -273,4 +266,17 @@ func (e armError) codes() []string {
 		out = append(out, d.codes()...)
 	}
 	return out
+}
+
+// refused marks an initial ARM request that was answered with a rejection:
+// the request was not accepted, so nothing it asked for will happen.
+func refused(err error) error {
+	var response *azcore.ResponseError
+	if errors.As(err, &response) {
+		switch response.StatusCode {
+		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusPreconditionFailed, http.StatusTooManyRequests:
+			return fmt.Errorf("%w: %w", removefirst.ErrRefused, err)
+		}
+	}
+	return err
 }

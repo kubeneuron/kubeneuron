@@ -51,7 +51,18 @@ AKS:
       one comes.
 - One replacement runs per pool at a time. KubeNeuron marks a pool it has
   grown with the `kubeneuron-replacing` tag. A retry continues the same
-  replacement and never grows the pool twice. A pool left a node larger, or
+  replacement and never grows the pool twice. Before the resize is sent, the
+  incident records the pool's node count, the target count and the tag the
+  resize writes. After a controller restart, the pool is compared with that
+  record; the resize is never sent again from it. A pool at the target with
+  the tag and the new machine moves on to the delete, which is decided again
+  like any other change. A pool with neither, still at its count two
+  minutes after the record, ends the replacement with nothing changed. Any
+  other pool needs an operator. Azure does not report the resize operation
+  itself, so the result rests on the pool's final state. Once the machine is
+  deleted, the tag is removed if the pool is back at its count; otherwise
+  the incident needs an operator, with the count read. Tested with simulated
+  providers only. A pool left a node larger, or
   a tag left behind, is reported as needing an operator and is never shrunk
   automatically: shrinking would delete a node AKS chooses.
 - Under `RemoveFirst`, the ready-and-no-auto-repair check runs before the
@@ -191,6 +202,11 @@ machine being replaced and the pool's node count before it was grown. While
 the tag is there, KubeNeuron starts no other replacement in that pool. Remove
 it only after the pool is in the state you want; a tag removed earlier lets
 the next replacement grow the pool again.
+
+While remediation is paused, KubeNeuron still removes its own
+`kubeneuron-replacing` tag from an AKS pool when a replacement that had
+already removed its machine is confirmed finished. It does not change the
+pool's size or its machines. The incident's audit trail records the removal.
 
 Read the pool first:
 

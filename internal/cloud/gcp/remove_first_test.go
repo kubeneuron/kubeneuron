@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
 	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
@@ -56,6 +57,23 @@ func step(t *testing.T, f *fakeGKE, plan cloud.RemoveFirstPlan, want cloud.Remov
 	return next
 }
 
+// resize continues a plan whose instance is gone through the resize: the
+// first step only returns resizing, for the caller to record, and sends
+// nothing; the second sends it.
+func resize(t *testing.T, f *fakeGKE, plan cloud.RemoveFirstPlan) cloud.RemoveFirstPlan {
+	t.Helper()
+	calls := len(f.calls)
+	plan = step(t, f, plan, cloud.RemoveFirstResizing)
+	if len(f.calls) != calls || plan.State[stateOperation] != "" {
+		t.Fatalf("the step to resizing called %q", f.calls[calls:])
+	}
+	plan = step(t, f, plan, cloud.RemoveFirstResizing)
+	if plan.State[stateOperation] == "" || plan.State[stateOperationLocation] != testLocation {
+		t.Fatalf("resize not recorded: %v", plan.State)
+	}
+	return plan
+}
+
 func sizes(f *fakeGKE) []int32 {
 	var out []int32
 	for _, g := range f.groups {
@@ -80,7 +98,7 @@ func TestRemoveFirstDeletesThenRestoresTheSize(t *testing.T) {
 	if !slices.Equal(f.calls, []string{"delete " + testZone + " " + testName(testZone, 1)}) {
 		t.Fatalf("calls %q", f.calls)
 	}
-	plan = step(t, f, plan, cloud.RemoveFirstResizing)
+	plan = resize(t, f, plan)
 	if f.calls[len(f.calls)-1] != "setSize gpu 3" || plan.State[stateOperation] == "" {
 		t.Fatalf("calls %q state %v", f.calls, plan.State)
 	}
@@ -105,7 +123,7 @@ func TestRemoveFirstAcrossEqualZones(t *testing.T) {
 	if !slices.Equal(sizes(f), []int32{1, 2}) {
 		t.Fatalf("sizes %v", sizes(f))
 	}
-	plan = step(t, f, plan, cloud.RemoveFirstResizing)
+	plan = resize(t, f, plan)
 	step(t, f, plan, cloud.RemoveFirstDone)
 	if !slices.Equal(sizes(f), []int32{2, 2}) || f.calls[1] != "setSize gpu 2" {
 		t.Fatalf("sizes %v calls %q", sizes(f), f.calls)
@@ -153,7 +171,7 @@ func TestRemoveFirstLostDeleteAnswer(t *testing.T) {
 	if err == nil || next.Phase != cloud.RemoveFirstDeleting {
 		t.Fatalf("lost answer: %+v, %v", next, err)
 	}
-	next = step(t, f, next, cloud.RemoveFirstResizing)
+	next = resize(t, f, next)
 	step(t, f, next, cloud.RemoveFirstDone)
 	if !slices.Equal(f.calls, []string{"delete " + testZone + " " + testName(testZone, 1), "setSize gpu 3"}) {
 		t.Fatalf("calls %q", f.calls)
@@ -171,7 +189,7 @@ func TestRemoveFirstLostDeleteAnswer(t *testing.T) {
 		t.Fatalf("a running delete was not waited for: %q", f.calls)
 	}
 	f.finishDeletes()
-	next = step(t, f, next, cloud.RemoveFirstResizing)
+	next = resize(t, f, next)
 	step(t, f, next, cloud.RemoveFirstDone)
 	if !slices.Equal(f.calls, []string{"setSize gpu 3"}) || f.groups[0].target != 3 {
 		t.Fatalf("calls %q target %d", f.calls, f.groups[0].target)
@@ -185,18 +203,29 @@ func TestRemoveFirstRestartDuringEachCall(t *testing.T) {
 	f := newFakeGKE(3)
 	deleting := step(t, f, planRemoveFirst(t, f), cloud.RemoveFirstDeleting)
 	step(t, f, deleting, cloud.RemoveFirstDeleting) // the delete; never recorded
-	step(t, f, deleting, cloud.RemoveFirstResizing) // the resize; never recorded
-	step(t, f, deleting, cloud.RemoveFirstDone)
+	resizing := step(t, f, deleting, cloud.RemoveFirstResizing)
+	step(t, f, resizing, cloud.RemoveFirstResizing) // the resize; never recorded
+	done := step(t, f, resizing, cloud.RemoveFirstDone)
 	if !slices.Equal(f.calls, []string{"delete " + testZone + " " + testName(testZone, 1), "setSize gpu 3"}) {
 		t.Fatalf("calls %q", f.calls)
 	}
+	if done.State[stateEvidence] != EvidenceFinalState {
+		t.Fatalf("evidence %q, want the final state: no operation was recorded", done.State[stateEvidence])
+	}
+}
+
+// resizing is a plan whose instance is gone, recorded as resizing.
+func resizing(t *testing.T, f *fakeGKE) cloud.RemoveFirstPlan {
+	t.Helper()
+	plan := step(t, f, step(t, f, planRemoveFirst(t, f), cloud.RemoveFirstDeleting), cloud.RemoveFirstDeleting)
+	return step(t, f, plan, cloud.RemoveFirstResizing)
 }
 
 // A resize whose answer is lost, or that is still running, is waited for and
-// not sent again; a resize that failed is sent again.
+// not sent again; a resize that failed to be sent is sent again.
 func TestRemoveFirstLostAndFailedResize(t *testing.T) {
 	f := newFakeGKE(3)
-	plan := step(t, f, step(t, f, planRemoveFirst(t, f), cloud.RemoveFirstDeleting), cloud.RemoveFirstDeleting)
+	plan := resizing(t, f)
 	f.lose, f.hold = true, true
 	next, err := testProvider(f).ContinueRemoveFirst(t.Context(), plan)
 	if err == nil || next.Phase != cloud.RemoveFirstResizing || next.State[stateOperation] != "" {
@@ -204,22 +233,60 @@ func TestRemoveFirstLostAndFailedResize(t *testing.T) {
 	}
 	next = step(t, f, next, cloud.RemoveFirstResizing)
 	f.Deliver()
-	step(t, f, next, cloud.RemoveFirstDone)
-	if n := strings.Count(strings.Join(f.calls, "\n"), "setSize"); n != 1 {
-		t.Fatalf("calls %q", f.calls)
+	done := step(t, f, next, cloud.RemoveFirstDone)
+	if n := strings.Count(strings.Join(f.calls, "\n"), "setSize"); n != 1 || done.State[stateEvidence] != EvidenceFinalState {
+		t.Fatalf("calls %q evidence %q", f.calls, done.State[stateEvidence])
 	}
 
 	f = newFakeGKE(3)
-	plan = step(t, f, step(t, f, planRemoveFirst(t, f), cloud.RemoveFirstDeleting), cloud.RemoveFirstDeleting)
+	plan = resizing(t, f)
 	f.setSizeErr = errors.New("503")
 	if next, err = testProvider(f).ContinueRemoveFirst(t.Context(), plan); err == nil || next.Phase != cloud.RemoveFirstResizing {
 		t.Fatalf("failed resize: %+v, %v", next, err)
 	}
 	f.setSizeErr = nil
 	next = step(t, f, next, cloud.RemoveFirstResizing)
-	step(t, f, next, cloud.RemoveFirstDone)
-	if n := strings.Count(strings.Join(f.calls, "\n"), "setSize gpu 3"); n != 2 || f.groups[0].target != 3 {
-		t.Fatalf("calls %q target %d", f.calls, f.groups[0].target)
+	done = step(t, f, next, cloud.RemoveFirstDone)
+	if n := strings.Count(strings.Join(f.calls, "\n"), "setSize gpu 3"); n != 2 || f.groups[0].target != 3 || done.State[stateEvidence] != EvidenceOperation {
+		t.Fatalf("calls %q target %d evidence %q", f.calls, f.groups[0].target, done.State[stateEvidence])
+	}
+}
+
+// A recorded resize is never sent again: one that ended with an error, or
+// that finished with the pool still short, needs an operator; one no longer
+// readable is decided by the sizes alone.
+func TestRemoveFirstRecordedResizeIsNotResent(t *testing.T) {
+	f := newFakeGKE(3)
+	plan := step(t, f, resizing(t, f), cloud.RemoveFirstResizing)
+	f.ops[len(f.ops)-1].ErrorCode = 9
+	f.calls = nil
+	if _, err := testProvider(f).ContinueRemoveFirst(t.Context(), plan); !errors.Is(err, cloud.ErrNeedsOperator) || len(f.calls) != 0 {
+		t.Fatalf("operation with an error: %v, calls %q", err, f.calls)
+	}
+
+	f = newFakeGKE(3)
+	plan = step(t, f, resizing(t, f), cloud.RemoveFirstResizing)
+	f.groups[0].target = 2
+	f.calls = nil
+	if _, err := testProvider(f).ContinueRemoveFirst(t.Context(), plan); !errors.Is(err, cloud.ErrNeedsOperator) || len(f.calls) != 0 {
+		t.Fatalf("finished operation, pool short: %v, calls %q", err, f.calls)
+	}
+
+	f = newFakeGKE(3)
+	plan = step(t, f, resizing(t, f), cloud.RemoveFirstResizing)
+	f.ops = nil
+	done := step(t, f, plan, cloud.RemoveFirstDone)
+	if done.State[stateEvidence] != EvidenceFinalState {
+		t.Fatalf("evidence %q, want the final state", done.State[stateEvidence])
+	}
+
+	f = newFakeGKE(3)
+	plan = step(t, f, resizing(t, f), cloud.RemoveFirstResizing)
+	f.ops, f.groups[0].target = nil, 2
+	f.calls = nil
+	step(t, f, plan, cloud.RemoveFirstResizing)
+	if len(f.calls) != 0 {
+		t.Fatalf("calls %q: a recorded resize was sent again", f.calls)
 	}
 }
 
@@ -282,7 +349,7 @@ func TestRemoveFirstAcceptedDeleteNotShownYet(t *testing.T) {
 		t.Fatalf("accepted delete: %+v, %v, target %d", next, err, f.groups[0].target)
 	}
 	next = step(t, f, next, cloud.RemoveFirstDeleting)
-	next = step(t, f, next, cloud.RemoveFirstResizing)
+	next = resize(t, f, next)
 	step(t, f, next, cloud.RemoveFirstDone)
 	if f.groups[0].target != 3 || strings.Count(strings.Join(f.calls, "\n"), "setSize") != 1 {
 		t.Fatalf("calls %q target %d", f.calls, f.groups[0].target)
@@ -339,7 +406,7 @@ func TestRemoveFirstNamesTheOneNewMember(t *testing.T) {
 	if got := resizediff.FromPlan(deleting); got != "" {
 		t.Fatalf("an open plan names %q", got)
 	}
-	plan := step(t, f, step(t, f, deleting, cloud.RemoveFirstDeleting), cloud.RemoveFirstResizing)
+	plan := resize(t, f, step(t, f, deleting, cloud.RemoveFirstDeleting))
 	if got := resizediff.FromPlan(plan); got != "" {
 		t.Fatalf("a resizing plan names %q", got)
 	}
@@ -388,9 +455,27 @@ func TestRemoveFirstNamesNoInstanceWhenNotExactlyOne(t *testing.T) {
 		plan := step(t, f, planRemoveFirst(t, f), cloud.RemoveFirstDeleting)
 		delete(plan.State, stateMembers)
 		plan = step(t, f, plan, cloud.RemoveFirstDeleting)
-		plan = step(t, f, step(t, f, plan, cloud.RemoveFirstResizing), cloud.RemoveFirstDone)
+		plan = step(t, f, resize(t, f, plan), cloud.RemoveFirstDone)
 		if got := resizediff.FromPlan(plan); got != "" {
 			t.Fatalf("named %q", got)
 		}
 	})
+}
+
+// A held resize reads the pool's size and changes nothing; the plan's
+// operation key is the one the controller reads.
+func TestObserveRemoveFirstSize(t *testing.T) {
+	if stateOperation != removefirst.StateResizeOperation {
+		t.Fatalf("operation key %q, controller reads %q", stateOperation, removefirst.StateResizeOperation)
+	}
+	f := newFakeGKE(2, testZone, "us-central1-b")
+	plan := resizing(t, f)
+	f.calls = nil
+	size, err := testProvider(f).ObserveRemoveFirstSize(t.Context(), plan)
+	if err != nil || size != (removefirst.PoolSize{Current: 3, Planned: 4}) || len(f.calls) != 0 {
+		t.Fatalf("size %+v, %v, calls %q", size, err, f.calls)
+	}
+	if !removefirst.ResizeMaySend(plan) {
+		t.Fatal("a plan recorded as resizing with no operation may send the resize")
+	}
 }

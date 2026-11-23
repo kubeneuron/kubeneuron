@@ -1,0 +1,41 @@
+{
+  "incident": {
+    "state": "RESOLVED"
+  },
+  "audit": [
+    {
+      "id": 1,
+      "action": "remove-first-grow-intent",
+      "params": {
+        "operation": "operation-a"
+      }
+    },
+    {
+      "id": 5,
+      "action": "remove-first-delete-intent",
+      "params": {
+        "operation": "operation-a"
+      }
+    },
+    {
+      "id": 2,
+      "action": "remove-first-deleting",
+      "params": {
+        "operation": "operation-a"
+      }
+    },
+    {
+      "id": 3,
+      "action": "remove-first-delete-confirmed",
+      "params": {
+        "operation": "operation-a"
+      }
+    },
+    {
+      "id": 4,
+      "action": "recover-confirmed-delete",
+      "actor": "system",
+      "to_state": "VERIFYING"
+    }
+  ]
+}

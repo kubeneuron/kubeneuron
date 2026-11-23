@@ -7,6 +7,7 @@ import (
 	"errors"
 	"github.com/kubeneuron/kubeneuron/test/replacement/restartsim"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -21,6 +22,8 @@ type rehearsalClient struct {
 type deleteSnapshot struct {
 	Calls         int       `json:"delete_calls"`
 	Effects       int       `json:"delete_effects"`
+	GrowCalls     int       `json:"grow_calls"`
+	GrowEffects   int       `json:"grow_effects"`
 	Machines      []machine `json:"machines"`
 	Count         int32
 	Tags          map[string]string
@@ -68,10 +71,39 @@ func (c *rehearsalClient) Machines(ctx context.Context, pool string) ([]machine,
 	return c.fixture.Machines(ctx, pool)
 }
 
+// WritePool keeps every pool write in the snapshot, so the harness sees the
+// replacement tag dropped and the size after it. With REHEARSAL_LOSE=grow
+// the first grow is applied and its answer never returns.
 func (c *rehearsalClient) WritePool(ctx context.Context, name string, p pool, count int32, tags map[string]string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.fixture.WritePool(ctx, name, p, count, tags)
+	f := c.fixture
+	before := f.count
+	err := f.WritePool(ctx, name, p, count, tags)
+	if err != nil || c.path == "" {
+		return err
+	}
+	// Only the grow for the machine the restart scenarios replace counts:
+	// the first incident grows the pool for its own machine.
+	grow := count > before && strings.HasPrefix(tags[replacingTag], testMachine(1).Name+":")
+	if grow {
+		c.snapshot.GrowCalls++
+		c.snapshot.GrowEffects += int(f.count - before)
+	}
+	c.save()
+	if err := restartsim.Save(c.path, c.snapshot); err != nil {
+		return err
+	}
+	if grow && c.snapshot.GrowCalls == 1 && os.Getenv("REHEARSAL_LOSE") == "grow" {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return nil
+}
+
+func (c *rehearsalClient) save() {
+	f := c.fixture
+	c.snapshot.Machines, c.snapshot.Count, c.snapshot.Tags, c.snapshot.Version, c.snapshot.Next = f.machines, f.count, f.tags, f.version, f.next
 }
 
 func (c *rehearsalClient) DeleteMachines(ctx context.Context, pool string, names []string) error {
@@ -90,11 +122,11 @@ func (c *rehearsalClient) DeleteMachines(ctx context.Context, pool string, names
 			f.count++
 			f.machines = append(f.machines, replacement)
 		}
-		c.snapshot.Machines, c.snapshot.Count, c.snapshot.Tags, c.snapshot.Version, c.snapshot.Next = f.machines, f.count, f.tags, f.version, f.next
+		c.save()
 		if err := restartsim.Save(c.path, c.snapshot); err != nil {
 			return err
 		}
-		if c.snapshot.Calls == 1 {
+		if c.snapshot.Calls == 1 && os.Getenv("REHEARSAL_LOSE") != "grow" {
 			<-ctx.Done()
 			return ctx.Err()
 		}

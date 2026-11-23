@@ -82,11 +82,25 @@ func (p *Provider) ReplaceNamed(ctx context.Context, instanceID string) (string,
 // ReplaceNamedWithIntent lets the controller persist the target and the
 // observed resize diff after capacity is ready and before sending the delete.
 func (p *Provider) ReplaceNamedWithIntent(ctx context.Context, instanceID string, record func(pool, machine, successor string) error) (string, error) {
+	return p.ReplaceWithIntents(ctx, instanceID, removefirst.Intents{Delete: record})
+}
+
+// ReplaceWithIntents is ReplaceNamed with a callback before each change: the
+// grow of a fixed-size pool and the delete.
+func (p *Provider) ReplaceWithIntents(ctx context.Context, instanceID string, intents removefirst.Intents) (string, error) {
+	record := intents.Delete
 	r, err := p.replacement(ctx, instanceID)
 	if err != nil || r == nil {
 		return "", err
 	}
 	before, grows := r.machines, !r.started && !r.state.Autoscaling
+	if grows && intents.Grow != nil {
+		count := r.state.Count
+		if err := intents.Grow(removefirst.Grow{Pool: r.pool, Machine: r.machine, Before: count, Target: count + 1,
+			Marker: marker(r.machine, count)}); err != nil {
+			return "", err
+		}
+	}
 	if err := p.ensureSuccessor(ctx, r); err != nil {
 		return "", err
 	}
@@ -175,7 +189,7 @@ func (p *Provider) ensureSuccessor(ctx context.Context, r *replacement) error {
 		if tags == nil {
 			tags = map[string]string{}
 		}
-		tags[replacingTag] = r.machine + ":" + strconv.Itoa(int(r.before))
+		tags[replacingTag] = marker(r.machine, r.before)
 		if err := p.api.WritePool(ctx, r.pool, r.state, r.before+1, tags); err != nil {
 			if capacityError(err) {
 				return fmt.Errorf("azure: growing agent pool %s to replace %s: %w: %w", r.pool, r.machine, cloud.ErrReplacementCapacity, err)
@@ -236,6 +250,11 @@ func (p *Provider) finish(ctx context.Context, pool string, pl pool, machine str
 		return fmt.Errorf("azure: machine %s is replaced; clearing the replacement tag of agent pool %s failed: %w", machine, pool, err)
 	}
 	return nil
+}
+
+// marker is the replacing tag's value for machine on a pool of size before.
+func marker(machine string, before int32) string {
+	return machine + ":" + strconv.Itoa(int(before))
 }
 
 // parseMarker reads the replacing tag: the machine being replaced and the

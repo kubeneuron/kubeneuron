@@ -67,6 +67,8 @@ type Controller struct {
 	// removeFirstPools serializes the check for an open plan on a pool with
 	// the write of a new one.
 	removeFirstPools sync.Mutex
+	// held are the notes of remove-first resizes held in each pool.
+	held             heldResizeNotes
 	successorPoll    time.Duration // zero: defaultSuccessorPoll
 	holdDispatches   sync.Map      // incident IDs with a notification assessment or dispatch in progress
 	policyAssessedMu sync.Mutex
