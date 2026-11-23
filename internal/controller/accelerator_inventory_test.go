@@ -831,6 +831,12 @@ func TestInventorySummaryDropsDeletedRegistrations(t *testing.T) {
 	check(0)
 	register("new")
 	check(1)
+	c.inventory.rememberUIDs(p.nodes)
+	p.err = errors.New("inventory unavailable")
+	p.listErr = errors.New("list unavailable")
+	check(1)
+	c.inventory.rememberUIDs(nil)
+	check(0)
 }
 
 // The labels of an agent's node are its Node object's now, while it is the

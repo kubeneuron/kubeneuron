@@ -44,13 +44,20 @@ func (c *Controller) InventorySummary(ctx context.Context) (inventory.Summary, e
 	if !ok {
 		return s, errors.New("accelerator report store unavailable")
 	}
+	liveReadFailed := false
 	currentNodes := map[string]types.Node{}
 	if c.platform != nil {
 		current, err := c.platform.ListNodes(ctx)
 		if err != nil {
-			return s, err
+			uids := c.inventory.nodeUIDs()
+			if uids == nil || ctx.Err() != nil {
+				return s, err
+			}
+			liveReadFailed = true
+			s.AdvertisedNodes = len(uids)
+		} else {
+			s.AdvertisedNodes = len(current)
 		}
-		s.AdvertisedNodes = len(current)
 		for _, n := range current {
 			currentNodes[n.Name] = n
 		}
@@ -108,6 +115,10 @@ func (c *Controller) InventorySummary(ctx context.Context) (inventory.Summary, e
 				}
 			}
 		}
+	}
+	// Live labels and diagnostics are unavailable during an API outage.
+	if liveReadFailed {
+		return s, nil
 	}
 	// Agents that do not run with the owner's RuntimeClass are named even
 	// while others report: a rollout it stopped leaves the old agents running.
