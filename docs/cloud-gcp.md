@@ -37,7 +37,12 @@ GKE documents no restart of a single node, so on GKE:
   see [Add-first on GKE](#add-first-on-gke). On a pool under the cluster
   autoscaler, or one that spans several zones, add-first is unavailable and
   the incident is held before the cordon, with the reason: GKE sets a size in
-  every zone of a pool at once. Selecting `AnyPoolZone` therefore leaves add-first unavailable on a multi-zone GKE pool. For workloads with zonal volumes or scheduling constraints, use a single-zone node pool, or set `RemoveFirst` in the remediation policy that applies to these nodes.
+  every zone of a pool at once.
+  Multi-zone GKE Standard pools require `RemoveFirst`. Set it in the remediation
+  policy that applies to these nodes. With an AddFirst policy, the pools API and the ADD-FIRST
+  column of `kubeneuronctl pools` show the restriction before an incident.
+  On GKE, `AnyPoolZone` behaves like `SameZone`: add-first works on a fixed-size
+  single-zone pool, and a multi-zone pool requires remove-first.
 - Under `RemoveFirst`, on a pool under the **cluster autoscaler**, the
   playbook has already cordoned and drained the node, since GKE does
   neither; KubeNeuron deletes the node's instance from the pool's instance

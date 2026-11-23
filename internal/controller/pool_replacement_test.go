@@ -114,6 +114,21 @@ func TestRemoveFirstPoolWithoutProvider(t *testing.T) {
 	}
 }
 
+func TestGKEPoolReportsMultiZoneRefusalForAddFirstPolicy(t *testing.T) {
+	var c Controller
+	nodes := []types.Node{{Name: "n1", Labels: map[string]string{"cloud.google.com/gke-nodepool": "gpu"}, Devices: tpuDevices}}
+	refusal := &cloud.PoolRefusal{Code: cloud.PoolMultiZone, Reason: "multi-zone pool", Action: "select RemoveFirst"}
+	check := func(types.Node, bool, recoverymode.SuccessorZone, *[]string) error { return refusal }
+	replacement := func(types.Node) (cloud.RecoveryEligibility, *cloud.RecoveryHold, error) {
+		return cloud.RecoveryEligibility{Mode: cloud.RepairOff, ReplaceAllowed: true}, nil, nil
+	}
+	c.inventory.recordPools(nodes, nil, &RuntimeConfig{Engine: poolOrderEngine(t, recoverymode.AddFirst)}, time.Now(), check, replacement)
+	row := c.PoolAvailability().Pools[0]
+	if row.ReplacementStatus != "available" || row.Status != "unavailable" || row.ReasonCode != refusal.Code || row.Reason != refusal.Reason || row.Action != refusal.Action {
+		t.Fatalf("replacement assessment: %+v", row)
+	}
+}
+
 func TestPoolRechecksWhenSuccessorZoneChanges(t *testing.T) {
 	var c Controller
 	nodes := []types.Node{{Name: "n1", UID: "uid", Labels: map[string]string{"kubernetes.azure.com/agentpool": "gpu"}, Devices: tpuDevices}}

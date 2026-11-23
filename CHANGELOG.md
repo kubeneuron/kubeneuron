@@ -13,6 +13,10 @@ API is `v1alpha1`.
 
 - Release images and the checksum file use Cosign 3 Sigstore bundles. The installation guide includes verification commands for both the new format and the detached signatures used by rc.1 and rc.2.
 
+### Fixed
+
+- The pools API and `kubeneuronctl pools` explain why add-first is unavailable on a multi-zone GKE pool and advise using a single-zone pool or selecting RemoveFirst.
+
 ## [v1.0.0-rc.2] - 2026-11-24
 
 ### Hardware evidence

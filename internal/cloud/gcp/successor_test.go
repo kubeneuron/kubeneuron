@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/codes"
 
 	"github.com/kubeneuron/kubeneuron/internal/cloud/cloudtest"
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
@@ -111,6 +112,18 @@ func TestAddFirstIsUnavailableWhereGKEOwnsTheSize(t *testing.T) {
 	}
 	if err := testProvider(newFakeGKE(3)).CheckAddFirst(t.Context(), testInstance(1)); err != nil {
 		t.Fatalf("fixed-size pool: %v", err)
+	}
+}
+
+func TestAnyPoolZoneGKEAddFirst(t *testing.T) {
+	if err := testProvider(newFakeGKE(3)).CheckAddFirstInZone(t.Context(), testInstance(1), recoverymode.AnyPoolZone, nil); err != nil {
+		t.Fatal(err)
+	}
+	p := testProvider(newFakeGKE(3, testZone, "us-central1-b"))
+	var refusal *cloud.PoolRefusal
+	err := p.CheckAddFirstInZone(t.Context(), testInstance(1), recoverymode.AnyPoolZone, nil)
+	if !errors.As(err, &refusal) || refusal.Code != cloud.PoolMultiZone || refusal.Reason != "add-first would add a node in every zone of this pool; replacement.successorZone: AnyPoolZone does not change this on GKE" || refusal.Action != "use a single-zone node pool, or set RemoveFirst in the remediation policy that applies to these nodes" {
+		t.Fatalf("multi-zone check: %v", err)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 )
 
@@ -34,21 +35,29 @@ var _ cloud.SuccessorProvider = (*Provider)(nil)
 // size set through GKE applies to every zone, and an autoscaled pool's size
 // is the autoscaler's.
 func (p *Provider) CheckAddFirst(ctx context.Context, instanceID string) error {
+	return p.CheckAddFirstInZone(ctx, instanceID, recoverymode.SameZone, nil)
+}
+
+func (p *Provider) CheckAddFirstInZone(ctx context.Context, instanceID string, zone recoverymode.SuccessorZone, _ *[]string) error {
 	t, c, err := p.resolve(ctx, instanceID)
 	if err != nil {
 		return err
 	}
-	return addFirstRefusal(t.pool, c)
+	return addFirstRefusal(t.pool, c, zone)
 }
 
-func addFirstRefusal(pl nodePool, c cluster) error {
+func addFirstRefusal(pl nodePool, c cluster, zone recoverymode.SuccessorZone) error {
 	switch {
 	case c.Autopilot:
 		return &cloud.PoolRefusal{Code: cloud.PoolAutopilot, Reason: "GKE Autopilot manages its nodes; KubeNeuron only observes them"}
 	case pl.Autoscaling:
 		return &cloud.PoolRefusal{Code: cloud.PoolAutoscaled, Reason: fmt.Sprintf("node pool %s is under the cluster autoscaler, which owns its size", pl.Name)}
 	case len(pl.Groups) != 1:
-		return &cloud.PoolRefusal{Code: cloud.PoolMultiZone, Reason: "add-first would add a node in every zone of this pool"}
+		reason := "add-first would add a node in every zone of this pool"
+		if zone == recoverymode.AnyPoolZone {
+			reason += "; replacement.successorZone: AnyPoolZone does not change this on GKE"
+		}
+		return &cloud.PoolRefusal{Code: cloud.PoolMultiZone, Reason: reason, Action: "use a single-zone node pool, or set RemoveFirst in the remediation policy that applies to these nodes"}
 	}
 	return nil
 }
@@ -77,7 +86,7 @@ func (p *Provider) planSuccessor(ctx context.Context, s cloud.Successor) (cloud.
 	if err != nil {
 		return s, err
 	}
-	if err := addFirstRefusal(t.pool, c); err != nil {
+	if err := addFirstRefusal(t.pool, c, recoverymode.SameZone); err != nil {
 		return s, err
 	}
 	ops, err := p.api.Operations(ctx)
@@ -134,7 +143,7 @@ func (p *Provider) requestSuccessor(ctx context.Context, s cloud.Successor) (clo
 	if err != nil {
 		return s, fmt.Errorf("gcp: reading GKE cluster %s: %w", p.cluster, err)
 	}
-	if err := addFirstRefusal(pl, c); err != nil {
+	if err := addFirstRefusal(pl, c, recoverymode.SameZone); err != nil {
 		return s, err
 	}
 	before, planned, err := plannedPool(s)
