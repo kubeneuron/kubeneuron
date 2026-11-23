@@ -25,6 +25,8 @@ API is `v1alpha1`.
 
 ### Changed
 
+- When a reset playbook has no device ID, the incident now explains why the reset cannot run and asks the operator to check the device and resolve the incident. `kubeneuronctl incidents show` displays the reported vendor and PCI address when the GPU UUID is missing.
+
 - `kubeneuronctl status` uses singular counts where appropriate and omits the unconfirmed reset notice when node-level actions are disabled. On NVIDIA nodes, `kubeneuronctl health` explains why Kubernetes GPU health conditions can be unknown. The JSON output retains the condition names.
 
 ## [v1.0.0-rc.2] - 2026-11-23

@@ -110,8 +110,6 @@ func reconcileRounds(c *Controller, rounds int) {
 // person before the first step, in every mode: nothing is cordoned, drained
 // or reset, also when the node is the only one and runs the controller.
 func TestAMDKernelFaultUnderShippedPolicies(t *testing.T) {
-	const unattributed = "is unattributed (no GPU UUID); a per-device reset is impossible: " +
-		"physical NVIDIA reset requires a GPU UUID target, but this incident is unattributed (empty GPU UUID)"
 	for _, tc := range []struct {
 		line     string
 		class    types.ProblemClass
@@ -140,7 +138,7 @@ func TestAMDKernelFaultUnderShippedPolicies(t *testing.T) {
 				if requests, _, _, _, drained := p.counts(); requests != 0 || drained != 0 || len(p.cordoned) != 0 {
 					t.Fatalf("the platform was asked to act: requests %d drained %d cordoned %v", requests, drained, p.cordoned)
 				}
-				if tc.state == types.StateNeedsHuman && !auditHas(entries, "quarantine", `playbook "`+tc.playbook+`" resets a GPU but incident `+inc.ID+" "+unattributed) {
+				if tc.state == types.StateNeedsHuman && !auditHas(entries, "quarantine", `playbook "`+tc.playbook+`" resets a device, but incident `+inc.ID+` names no device (vendor amd, no device ID); a per-device reset is not possible. Check the device at PCI 0000:c3:00 on node n1, then close the incident with kubeneuronctl resolve `+inc.ID+".") {
 					t.Fatalf("no quarantine saying why%s", dump(entries))
 				}
 			})

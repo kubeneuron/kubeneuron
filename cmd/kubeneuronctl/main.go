@@ -294,8 +294,21 @@ func cmdIncidents() *cobra.Command {
 		}
 		out := cmd.OutOrStdout()
 		inc := detail.Incident
-		_, _ = fmt.Fprintf(out, "id:        %s\nstate:     %s\nclass:     %s\nnode:      %s\ngpu:       %s\nplaybook:  %s (step %d, attempt %d)\ndry-run:   %v\nsignals:   %d\nopened:    %s\n",
-			inc.ID, inc.State, inc.Class, inc.Target.Node, inc.Target.GPUUUID,
+		gpu := inc.Target.GPUUUID
+		if gpu == "" && (inc.Vendor != "" || inc.Target.PCIAddr != "") {
+			gpu = "-"
+		}
+		_, _ = fmt.Fprintf(out, "id:        %s\nstate:     %s\nclass:     %s\nnode:      %s\ngpu:       %s\n",
+			inc.ID, inc.State, inc.Class, inc.Target.Node, gpu)
+		if inc.Target.GPUUUID == "" {
+			if inc.Vendor != "" {
+				_, _ = fmt.Fprintf(out, "vendor:    %s\n", inc.Vendor)
+			}
+			if inc.Target.PCIAddr != "" {
+				_, _ = fmt.Fprintf(out, "pci:       %s\n", inc.Target.PCIAddr)
+			}
+		}
+		_, _ = fmt.Fprintf(out, "playbook:  %s (step %d, attempt %d)\ndry-run:   %v\nsignals:   %d\nopened:    %s\n",
 			inc.Playbook, inc.StepIndex, inc.Attempt, inc.DryRun, inc.SignalSeen,
 			inc.OpenedAt.Format(time.RFC3339))
 		// The round is what approve, reject and incidents impact bind to; without

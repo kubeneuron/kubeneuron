@@ -81,6 +81,9 @@ func TestUnattributedResetIsPermanentNotMissingEvidence(t *testing.T) {
 	if !errors.Is(err, errResetTargetUnattributed) {
 		t.Fatalf("allowAcceleratorStep on an empty-UUID reset = %v, want errResetTargetUnattributed (a permanent, escalatable fact)", err)
 	}
+	if got, want := err.Error(), "the incident names no device ID: a per-device reset is not possible"; got != want {
+		t.Errorf("reset refusal = %q, want %q", got, want)
+	}
 }
 
 // --- Fix R1: destructive controller-side steps confined to the selector ---
@@ -306,5 +309,31 @@ func TestRebuildGateOccupancyIsBestEffort(t *testing.T) {
 	// No EXECUTING incidents: rebuild is a no-op and must succeed.
 	if err := c.RebuildGateOccupancy(context.Background()); err != nil {
 		t.Fatalf("rebuild with no EXECUTING incidents = %v, want nil", err)
+	}
+}
+
+func TestUnattributedResetMessage(t *testing.T) {
+	books, err := playbook.LoadDir("../../configs/playbooks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _, _ := walkFixture(t, false)
+	for _, tc := range []struct {
+		vendor                        types.AcceleratorVendor
+		class                         types.ProblemClass
+		book, wantVendor, pci, object string
+	}{
+		{"amd", types.ClassDriverHang, "gpu-reset", "amd", "0000:c3:00", "the device at PCI 0000:c3:00"},
+		{"amd", types.ClassECCDBE, "drain-and-reset", "amd", "0000:c3:00", "the device at PCI 0000:c3:00"},
+		{"amd", types.ClassRowRemapOK, "reset-when-idle", "amd", "0000:c3:00", "the device at PCI 0000:c3:00"},
+		{"nvidia", types.ClassDriverHang, "gpu-reset", "nvidia", "", "the accelerators"},
+		{"", types.ClassECCDBE, "drain-and-reset", "unknown", "", "the accelerators"},
+	} {
+		inc := &types.Incident{ID: "inc-1", Vendor: tc.vendor, Class: tc.class, Target: types.Target{Node: "n1", GPUIndex: -1, PCIAddr: tc.pci}}
+		err := c.refuseInfeasibleReset(t.Context(), inc, books[tc.book])
+		want := `playbook "` + tc.book + `" resets a device, but incident inc-1 names no device (vendor ` + tc.wantVendor + `, no device ID); a per-device reset is not possible. Check ` + tc.object + ` on node n1, then close the incident with kubeneuronctl resolve inc-1.`
+		if !errors.Is(err, errResetTargetUnattributed) || err.Error() != want {
+			t.Errorf("%s/%s: got %v, want %s", tc.vendor, tc.class, err, want)
+		}
 	}
 }

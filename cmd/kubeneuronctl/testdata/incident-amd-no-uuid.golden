@@ -1,0 +1,16 @@
+id:        inc-amd
+state:     NEEDS_HUMAN
+class:     driver-hang
+node:      n1
+gpu:       -
+vendor:    amd
+pci:       0000:c3:00
+playbook:  gpu-reset (step 0, attempt 0)
+dry-run:   false
+signals:   1
+opened:    2026-11-23T00:00:00Z
+fault:     unknown (no evidence recorded)
+Affected training jobs: unknown
+
+audit trail:
+TIME  FROM  TO  ACTOR  ACTION  RESULT

@@ -374,3 +374,20 @@ func TestStatusInventoryGolden(t *testing.T) {
 		})
 	}
 }
+
+func TestShowMissingGPUIdentity(t *testing.T) {
+	inc := types.Incident{ID: "inc-amd", OpenedAt: time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC), SignalSeen: 1, Vendor: "amd", Class: types.ClassDriverHang, State: types.StateNeedsHuman, Playbook: "gpu-reset", Target: types.Target{Node: "n1", GPUIndex: -1, PCIAddr: "0000:c3:00"}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/incidents/inc-amd" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"incident": inc})
+	}))
+	defer server.Close()
+	out, err := runCommand(t, server.URL, "incidents", "show", inc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkGolden(t, "incident-amd-no-uuid.golden", []byte(out))
+}

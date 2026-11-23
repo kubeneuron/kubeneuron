@@ -112,7 +112,7 @@ func (c *Controller) releaseRecoveredSlot(incidentID string) {
 // UUID. It is a reported fact (a permanent infeasibility), not missing evidence
 // that could still arrive, so it must escalate rather than hold: an empty UUID
 // can never be filled in by a later report.
-var errResetTargetUnattributed = errors.New("physical NVIDIA reset requires a GPU UUID target, but this incident is unattributed (empty GPU UUID)")
+var errResetTargetUnattributed = errors.New("a per-device reset is not possible")
 
 // errResetVendorMismatch marks a reset step that can NEVER run for this
 // incident because the action is scoped to one accelerator vendor and the
@@ -320,7 +320,7 @@ func (c *Controller) acceleratorEvidenceForReset(ctx context.Context, target typ
 		// a wedged nvidia-smi). Return a distinct, permanent error so the caller
 		// escalates to a rung that needs no device target instead of holding in
 		// EVALUATING and re-denying the reset on every tick.
-		return nil, "", nil, errResetTargetUnattributed
+		return nil, "", nil, fmt.Errorf("the incident names no device ID: %w", errResetTargetUnattributed)
 	}
 	// Node names and labels can change with a Kubernetes delete/recreate. Read
 	// both from one current inventory object before considering a report, so a
