@@ -769,3 +769,31 @@ func TestNodesAndDiscoveryUseCurrentIdentities(t *testing.T) {
 	c.platform = nil
 	check(http.StatusOK, "second")
 }
+
+func TestInventorySummaryDropsDeletedRegistrations(t *testing.T) {
+	c, st := newIngestTestController(t)
+	p := &inventoryPlatform{}
+	c.platform = p
+	register := func(uid string) {
+		t.Helper()
+		if err := st.UpsertAgentRegistration(t.Context(), &types.Node{Name: "worker", UID: uid, AgentLastSeen: time.Now(), GPUs: []types.GPUInfo{{UUID: "gpu"}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(count int) {
+		t.Helper()
+		s, err := c.InventorySummary(t.Context())
+		if err != nil || s.ReportingNodes != count || s.GPUs != count || s.LastReportAt.IsZero() != (count == 0) {
+			t.Fatalf("summary = %+v, error = %v, want %d reporting nodes and GPUs", s, err, count)
+		}
+	}
+	register("old")
+	p.nodes = []types.Node{{Name: "worker", UID: "old"}}
+	check(1)
+	p.nodes = nil
+	check(0)
+	p.nodes = []types.Node{{Name: "worker", UID: "new"}}
+	check(0)
+	register("new")
+	check(1)
+}

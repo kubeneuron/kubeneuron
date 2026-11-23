@@ -31,6 +31,9 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- On Kubernetes, the next inventory summary drops the heartbeat and GPU count
+  of a deleted node, including when a new node reuses its name.
+
 - The node list and Prometheus service discovery filter retained records by
   current Kubernetes node name and UID, dropping deleted nodes and old
   registrations for reused names.

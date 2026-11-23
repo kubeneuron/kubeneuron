@@ -36,7 +36,7 @@ func (c *Controller) InventorySummary(ctx context.Context) (inventory.Summary, e
 			break
 		}
 	}
-	nodes, err := c.store.ListNodes(ctx)
+	nodes, err := c.Nodes(ctx)
 	if err != nil {
 		return s, err
 	}
