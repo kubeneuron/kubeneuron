@@ -25,6 +25,8 @@ API is `v1alpha1`.
   off. The upgrade rolls every agent DaemonSet once. Not yet exercised on
   real hardware.
 
+- Before an incident, `kubeneuronctl pools` explains when Automatic replacement would need approval because no profile selects a node, profiles overlap, or the selected profile is absent from the policy. The policy condition `QualifiedProfilesResolved` identifies missing profile references. During an incident the hold explains what to create or change.
+
 - Add-first replacement can use any configured zone of a fixed-size EKS or AKS pool when the remediation policy selects `replacement.successorZone: AnyPoolZone`. The default is `SameZone`. Cross-zone placement was tested with simulated providers only.
 
 - **`kubeneuronctl pools` shows whether a pool's nodes can be replaced at

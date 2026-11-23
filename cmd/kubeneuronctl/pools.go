@@ -5,6 +5,7 @@ package main
 import (
 	"cmp"
 	"fmt"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -40,6 +41,12 @@ func cmdPools() *cobra.Command {
 				replacement := "—"
 				if row.ReplacementPolicy != "none" {
 					replacement = poolCell(row.ReplacementStatus, row.ReplacementReason, row.ReplacementAction, row.CheckedAt == nil)
+				}
+				if len(row.AutomaticQualificationReasons) > 0 {
+					replacement += " — Automatic would wait for approval: " + strings.Join(row.AutomaticQualificationReasons, "; ")
+				}
+				if len(row.MissingQualifiedProfiles) > 0 && len(row.AutomaticQualificationReasons) == 0 {
+					replacement += " — " + types.MissingProfileMessage(row.MissingQualifiedProfiles)
 				}
 				status := "not required"
 				switch {

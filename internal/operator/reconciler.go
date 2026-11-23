@@ -741,12 +741,18 @@ func (r *KubeNeuronReconciler) updateChildConfigurationStatuses(
 			return err
 		}
 	}
+	profileNames := make(map[string]bool, len(acceleratorProfiles))
+	for _, profile := range acceleratorProfiles {
+		if profile.Spec.KubeNeuronRef == installation.Name {
+			profileNames[profile.Name] = true
+		}
+	}
 	for i := range policies {
 		policy := &policies[i]
 		if policy.Spec.KubeNeuronRef != installation.Name {
 			continue
 		}
-		if err := r.updateGPURemediationPolicyStatus(ctx, installation, policy, books, validationErr); err != nil {
+		if err := r.updateGPURemediationPolicyStatus(ctx, installation, policy, books, profileNames, validationErr); err != nil {
 			return err
 		}
 	}
@@ -975,9 +981,11 @@ func (r *KubeNeuronReconciler) updateGPURemediationPolicyStatus(
 	installation *kubeneuronv1alpha1.KubeNeuron,
 	policy *kubeneuronv1alpha1.GPURemediationPolicy,
 	books map[string]*playbook.Playbook,
+	profileNames map[string]bool,
 	validationErr error,
 ) error {
 	before := policy.DeepCopy()
+	setProfileReferencesCondition(policy, profileNames)
 	policy.Status.ObservedGeneration = policy.Generation
 	if validationErr != nil {
 		policy.Status.ResolvedPlaybook = ""
@@ -1454,6 +1462,29 @@ func setAutomaticReplacementCondition(policy *kubeneuronv1alpha1.GPURemediationP
 		condition.Status, condition.Reason = metav1.ConditionTrue, "QualifiedProfilesListed"
 		condition.Message = "replaces without approval only nodes of the listed profiles (" + strings.Join(profiles, ", ") +
 			") when the fault is located on the node; anything else waits for approval"
+	}
+	meta.SetStatusCondition(&policy.Status.Conditions, condition)
+}
+
+// setProfileReferencesCondition checks names independently of whether any
+// particular node matches the profile selector.
+func setProfileReferencesCondition(policy *kubeneuronv1alpha1.GPURemediationPolicy, names map[string]bool) {
+	const key = "QualifiedProfilesResolved"
+	auto := policy.Spec.Automatic
+	if policy.Spec.Mode != "Automatic" || auto == nil || len(auto.QualifiedProfiles) == 0 {
+		meta.RemoveStatusCondition(&policy.Status.Conditions, key)
+		return
+	}
+	var missing []string
+	for _, name := range auto.QualifiedProfiles {
+		if !names[name] {
+			missing = append(missing, name)
+		}
+	}
+	condition := metav1.Condition{Type: key, Status: metav1.ConditionTrue, Reason: "ProfilesFound", Message: "All listed AcceleratorRuntimeProfile objects exist for this installation.", ObservedGeneration: policy.Generation}
+	if len(missing) > 0 {
+		condition.Status, condition.Reason = metav1.ConditionFalse, "MissingQualifiedProfiles"
+		condition.Message = "Missing AcceleratorRuntimeProfile references: " + strings.Join(missing, ", ") + ". Create the profiles or correct spec.automatic.qualifiedProfiles."
 	}
 	meta.SetStatusCondition(&policy.Status.Conditions, condition)
 }

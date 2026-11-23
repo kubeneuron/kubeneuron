@@ -2,7 +2,10 @@
 
 package types
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 const PoolAvailabilityPath = "/api/v1/pools"
 
@@ -29,8 +32,21 @@ type PoolAvailability struct {
 	// all, in any order: "available", "unavailable" (the operator must change
 	// something first) or "unknown". Empty when no remediation policy
 	// replaces these nodes. Status is the add-first assessment on top of it.
-	ReplacementStatus     string `json:"replacement_status,omitempty"`
-	ReplacementReasonCode string `json:"replacement_reason_code,omitempty"`
-	ReplacementReason     string `json:"replacement_reason,omitempty"`
-	ReplacementAction     string `json:"replacement_action,omitempty"`
+	ReplacementStatus             string   `json:"replacement_status,omitempty"`
+	AutomaticQualificationReasons []string `json:"automatic_qualification_reasons,omitempty"`
+	MissingQualifiedProfiles      []string `json:"missing_qualified_profiles,omitempty"`
+	ReplacementReasonCode         string   `json:"replacement_reason_code,omitempty"`
+	ReplacementReason             string   `json:"replacement_reason,omitempty"`
+	ReplacementAction             string   `json:"replacement_action,omitempty"`
+}
+
+// MissingProfileMessage describes unresolved Automatic policy references.
+func MissingProfileMessage(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	if len(names) == 1 {
+		return "profile " + names[0] + " listed in spec.automatic.qualifiedProfiles does not exist"
+	}
+	return "profiles " + strings.Join(names, ", ") + " listed in spec.automatic.qualifiedProfiles do not exist"
 }

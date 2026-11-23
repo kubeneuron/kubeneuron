@@ -197,3 +197,27 @@ func TestCompileInterruptionLead(t *testing.T) {
 		}
 	}
 }
+
+func TestProfileReferencesCondition(t *testing.T) {
+	policy := &kubeneuronv1alpha1.GPURemediationPolicy{}
+	policy.Spec.Mode = "Automatic"
+	policy.Spec.Automatic = automaticSpec()
+	policy.Spec.Automatic.QualifiedProfiles = []string{"existing", "missing"}
+	names := map[string]bool{"existing": true}
+	setProfileReferencesCondition(policy, names)
+	cond := meta.FindStatusCondition(policy.Status.Conditions, "QualifiedProfilesResolved")
+	if cond == nil || cond.Status != metav1.ConditionFalse || !strings.Contains(cond.Message, "missing") || strings.Contains(cond.Message, "existing") {
+		t.Fatalf("missing reference: %+v", cond)
+	}
+	names["missing"] = true
+	setProfileReferencesCondition(policy, names)
+	cond = meta.FindStatusCondition(policy.Status.Conditions, "QualifiedProfilesResolved")
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("restored reference: %+v", cond)
+	}
+	policy.Spec.Mode = "Approval"
+	setProfileReferencesCondition(policy, names)
+	if meta.FindStatusCondition(policy.Status.Conditions, "QualifiedProfilesResolved") != nil {
+		t.Fatal("stale condition")
+	}
+}

@@ -444,6 +444,8 @@ carries the limits:
 - Per-node pause and maintenance windows hold automatic steps exactly as they
   hold every other step.
 
+Before enabling Automatic, check the policy condition `QualifiedProfilesResolved`. A missing name also appears in the REPLACEMENT column of `kubeneuronctl pools` for affected pools. The condition checks references. Node labels and the incident vendor determine which profile applies when an incident opens.
+
 A step goes to a person (approval) when the node is outside the policy's pools,
 when the circuit breaker trips, or when the step runs a command on the node
 itself (GPU reset, reboot, driver reload or reinstall, scripts): node-level

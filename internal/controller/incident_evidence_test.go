@@ -118,14 +118,22 @@ func TestAutomaticNeedsAQualifiedPair(t *testing.T) {
 		unprofiled bool
 		want       string
 	}{
-		"no qualified profile":    {nil, false, "qualifies no node profile"},
-		"another profile":         {[]string{"other-profile"}, false, "is not a qualified pair"},
-		"node matches no profile": {[]string{autoProfile}, true, "cannot be resolved"},
+		"no qualified profile":    {nil, false, "lists no profile"},
+		"overlapping profiles":    {[]string{autoProfile}, false, "leave exactly one"},
+		"another profile":         {[]string{"other-profile"}, false, "is not listed"},
+		"node matches no profile": {[]string{autoProfile}, true, "no AcceleratorRuntimeProfile selects"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			settings := autoSettings()
 			settings.QualifiedProfiles = tc.profiles
 			c, st, _ := autoFixture(t, recoverymode.Automatic, settings, 4)
+			if name == "overlapping profiles" {
+				c.mutateRuntimeConfig(func(rc *RuntimeConfig) {
+					second := rc.AcceleratorProfiles[0]
+					second.Name = "second"
+					rc.AcceleratorProfiles = append(rc.AcceleratorProfiles, second)
+				})
+			}
 			if tc.unprofiled {
 				// A pool node the profile does not select.
 				profile := c.runtimeConfig(context.Background()).AcceleratorProfiles[0]
@@ -135,6 +143,10 @@ func TestAutomaticNeedsAQualifiedPair(t *testing.T) {
 			id := openOn(t, c, "n1")
 			if inc := step(t, c, st, id, 50); inc.State != types.StateAwaitingApproval || !strings.Contains(parkReason(t, st, id), tc.want) {
 				t.Fatalf("state=%s audit=%s, want a park naming %q", inc.State, parkReason(t, st, id), tc.want)
+			}
+			approveRigStep(t, context.Background(), c, id)
+			if inc := step(t, c, st, id, 200); inc.State != types.StateAwaitingApproval || inc.ApprovalEpoch != 2 {
+				t.Fatalf("after approval, want the next approval round; got %s round %d", inc.State, inc.ApprovalEpoch)
 			}
 		})
 	}

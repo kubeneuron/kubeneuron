@@ -6,9 +6,12 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
@@ -18,7 +21,8 @@ import (
 
 // recordPools uses the same complete Kubernetes node list as inventory sync.
 // Reading the operator endpoint does not trigger another Kubernetes list.
-func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAcceleratorReport, engine *playbook.Engine, now time.Time, check func(n types.Node, permissionChecked bool, zone recoverymode.SuccessorZone, zones *[]string) error, replacement func(types.Node) (cloud.RecoveryEligibility, *cloud.RecoveryHold, error)) {
+func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAcceleratorReport, rc *RuntimeConfig, now time.Time, check func(n types.Node, permissionChecked bool, zone recoverymode.SuccessorZone, zones *[]string) error, replacement func(types.Node) (cloud.RecoveryEligibility, *cloud.RecoveryHold, error)) {
+	engine := rc.Engine
 	type poolKey struct{ cloud, name string }
 	s.mu.Lock()
 	previous := map[poolKey]types.PoolAvailability{}
@@ -27,6 +31,12 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 	}
 	s.mu.Unlock()
 	representatives := map[poolKey]types.Node{}
+
+	qualified := map[poolKey]*poolQualification{}
+	known := map[string]bool{}
+	for _, profile := range rc.AcceleratorProfiles {
+		known[profile.Name] = true
+	}
 	counts := map[poolKey]int{}
 	orders := map[poolKey]string{}
 	sameZoneRequired := map[poolKey]bool{}
@@ -57,9 +67,23 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 					representatives[key] = n
 				}
 				counts[key]++
+				if qualified[key] == nil {
+					qualified[key] = &poolQualification{warnings: map[string]int{}}
+				}
+				applicableVendors := slices.Clone(reported)
+				for _, device := range n.Devices {
+					if device.Resource == "nvidia.com/gpu" && !slices.Contains(applicableVendors, types.AcceleratorVendorNVIDIA) {
+						applicableVendors = append(applicableVendors, types.AcceleratorVendorNVIDIA)
+					}
+				}
+				if len(applicableVendors) == 0 {
+					applicableVendors = []types.AcceleratorVendor{""}
+				}
 				orders[key] = mergePoolOrder(orders[key], generic)
 				sameZoneRequired[key] = sameZoneRequired[key] || genericSameZone
-				for _, vendor := range reported {
+				before := qualified[key].assessments
+				for _, vendor := range applicableVendors {
+					qualified[key].assess(rc, known, n.Labels, vendor)
 					order, found := vendorOrders[vendor]
 					if !found {
 						order.order, order.sameZone = poolVendorOrder(engine, vendor)
@@ -67,6 +91,9 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 					}
 					orders[key] = mergePoolOrder(orders[key], order.order)
 					sameZoneRequired[key] = sameZoneRequired[key] || order.sameZone
+				}
+				if qualified[key].assessments > before {
+					qualified[key].nodes++
 				}
 				break
 			}
@@ -151,6 +178,18 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 				row.ReasonCode, row.Reason = "read-failed", "could not read pool configuration; check provider access and permissions"
 			}
 		}
+		// Every node counted under key initializes qualified[key] in the same pass.
+		q := qualified[key]
+		slices.Sort(q.missing)
+		row.MissingQualifiedProfiles = q.missing
+		row.AutomaticQualificationReasons = nil
+		for reason, count := range q.warnings {
+			if count < q.assessments || q.nodes < row.AcceleratorNodes {
+				reason = "for some of this pool's nodes: " + strings.Replace(reason, "this pool's nodes", "the node", 1)
+			}
+			row.AutomaticQualificationReasons = append(row.AutomaticQualificationReasons, reason)
+		}
+		slices.Sort(row.AutomaticQualificationReasons)
 		rows = append(rows, row)
 	}
 	slices.SortFunc(rows, func(a, b types.PoolAvailability) int {
@@ -159,6 +198,63 @@ func (s *inventorySync) recordPools(nodes []types.Node, reports []*types.AgentAc
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pools = rows
+}
+
+type poolQualification struct {
+	missing     []string
+	warnings    map[string]int
+	assessments int
+	nodes       int
+}
+
+func (q *poolQualification) assess(rc *RuntimeConfig, known map[string]bool, labels map[string]string, vendor types.AcceleratorVendor) {
+	if rc.Engine == nil {
+		return
+	}
+	for _, class := range rc.Engine.PolicyClasses() {
+		policy, ok := rc.Engine.PolicyFor(class, vendor)
+		if !ok || policy.Mode != recoverymode.Automatic || policy.Automatic == nil || !policy.Automatic.SelectsNode(labels) || !cloudRecoveryPath(rc.Engine, policy.Playbook).replace {
+			continue
+		}
+		q.assessments++
+		var absent []string
+		for _, name := range policy.Automatic.QualifiedProfiles {
+			if !known[name] {
+				absent = append(absent, name)
+				if !slices.Contains(q.missing, name) {
+					q.missing = append(q.missing, name)
+				}
+			}
+		}
+		if reason := poolQualificationReason(rc, policy.Automatic, labels, vendor, absent); reason != "" {
+			q.warnings[reason]++
+		}
+	}
+}
+
+func poolQualificationReason(rc *RuntimeConfig, auto *recoverymode.Settings, labels map[string]string, vendor types.AcceleratorVendor, missing []string) string {
+	if len(auto.QualifiedProfiles) == 0 {
+		return "the policy lists no profile in spec.automatic.qualifiedProfiles"
+	}
+	match, err := qualificationProfile(rc.AcceleratorProfiles, labels, vendor)
+	if err == nil && auto.Qualifies(match.Name) {
+		return ""
+	}
+	if len(missing) == len(auto.QualifiedProfiles) {
+		slices.Sort(missing)
+		return types.MissingProfileMessage(missing)
+	}
+	var overlap *config.OverlappingProfiles
+	switch {
+	case errors.Is(err, config.ErrNoAcceleratorRuntimeProfile):
+		return "no AcceleratorRuntimeProfile selects this pool's nodes"
+	case errors.As(err, &overlap):
+		return fmt.Sprintf("more than one AcceleratorRuntimeProfile selects this pool's nodes (%s and %s)", overlap.First, overlap.Second)
+	case err != nil:
+		return "correct the invalid AcceleratorRuntimeProfile: " + err.Error()
+	default:
+		return "node profile " + match.Name + " is not listed in spec.automatic.qualifiedProfiles"
+	}
 }
 
 // replacementVerdict records whether an incident on the pool could replace

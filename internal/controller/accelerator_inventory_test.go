@@ -350,7 +350,7 @@ func TestPoolReplacementOrders(t *testing.T) {
 		{"previous", "AddFirst"}, {"", "AddFirst"}, {"current", "mixed"},
 	} {
 		reports := []*types.AgentAcceleratorReport{{Node: "worker", NodeUID: tc.uid, Vendor: "amd"}}
-		c.inventory.recordPools(nodes, reports, engine, time.Now(), nil, nil)
+		c.inventory.recordPools(nodes, reports, &RuntimeConfig{Engine: engine}, time.Now(), nil, nil)
 		if got := c.PoolAvailability().Pools[0].ReplacementPolicy; got != tc.want {
 			t.Fatalf("UID %q: got %s want %s", tc.uid, got, tc.want)
 		}
@@ -377,7 +377,7 @@ func TestPoolCheckInterval(t *testing.T) {
 		calls  int
 		status string
 	}{{0, 1, "unknown"}, {9 * time.Minute, 1, "unknown"}, {10 * time.Minute, 2, "available"}} {
-		c.inventory.recordPools(nodes, nil, poolTestEngine(t), now.Add(tc.after), check, nil)
+		c.inventory.recordPools(nodes, nil, &RuntimeConfig{Engine: poolTestEngine(t)}, now.Add(tc.after), check, nil)
 		row := c.PoolAvailability().Pools[0]
 		if row.Status != tc.status || calls != tc.calls || row.CheckedAt == nil || row.AcceleratorNodes != 2 {
 			t.Fatalf("after %s: calls %d row %+v", tc.after, calls, row)
@@ -562,7 +562,7 @@ func TestPoolCheckBudget(t *testing.T) {
 	calls := 0
 	check := func(types.Node, bool, recoverymode.SuccessorZone, *[]string) error { calls++; return nil }
 	for _, want := range []int{4, 6} {
-		c.inventory.recordPools(nodes, nil, poolTestEngine(t), now, check, nil)
+		c.inventory.recordPools(nodes, nil, &RuntimeConfig{Engine: poolTestEngine(t)}, now, check, nil)
 		pending := 0
 		for _, row := range c.PoolAvailability().Pools {
 			if row.CheckedAt == nil && row.Status == "unknown" {
@@ -574,7 +574,7 @@ func TestPoolCheckBudget(t *testing.T) {
 		}
 	}
 	later := now.Add(11 * time.Minute)
-	c.inventory.recordPools(nodes, nil, poolTestEngine(t), later, check, nil)
+	c.inventory.recordPools(nodes, nil, &RuntimeConfig{Engine: poolTestEngine(t)}, later, check, nil)
 	stale := 0
 	for _, row := range c.PoolAvailability().Pools {
 		if row.Status != "available" || row.CheckedAt == nil {
@@ -604,7 +604,7 @@ func poolTestEngine(t *testing.T) *playbook.Engine {
 func TestPoolWithoutReplacementPolicySkipsCheck(t *testing.T) {
 	var c Controller
 	nodes := []types.Node{{Name: "a", Labels: map[string]string{"kubernetes.azure.com/agentpool": "train"}, Devices: tpuDevices}}
-	c.inventory.recordPools(nodes, nil, nil, time.Now(), func(types.Node, bool, recoverymode.SuccessorZone, *[]string) error {
+	c.inventory.recordPools(nodes, nil, &RuntimeConfig{}, time.Now(), func(types.Node, bool, recoverymode.SuccessorZone, *[]string) error {
 		t.Fatal("unexpected cloud check")
 		return nil
 	}, nil)
@@ -630,12 +630,12 @@ func TestTrainiumPoolOrderMatchesNodeHealthIncident(t *testing.T) {
 	for _, resource := range []string{"aws.amazon.com/neuron", "aws.amazon.com/neurondevice"} {
 		var c Controller
 		nodes := []types.Node{{Name: "trainium", UID: "trn-uid", Labels: map[string]string{"eks.amazonaws.com/nodegroup": "train"}, Devices: []types.DeviceCount{{Resource: resource, Capacity: 1, Unit: types.DeviceUnitAWSDevice}}}}
-		c.inventory.recordPools(nodes, nil, engine, time.Now(), nil, nil)
+		c.inventory.recordPools(nodes, nil, &RuntimeConfig{Engine: engine}, time.Now(), nil, nil)
 		if row := c.PoolAvailability().Pools[0]; row.ReplacementPolicy != "RemoveFirst" {
 			t.Fatalf("%s: %+v", resource, row)
 		}
 		reports := []*types.AgentAcceleratorReport{{Node: "trainium", NodeUID: "trn-uid", Vendor: "aws"}}
-		c.inventory.recordPools(nodes, reports, engine, time.Now(), nil, nil)
+		c.inventory.recordPools(nodes, reports, &RuntimeConfig{Engine: engine}, time.Now(), nil, nil)
 		if row := c.PoolAvailability().Pools[0]; row.ReplacementPolicy != "mixed" {
 			t.Fatalf("%s with authenticated AWS report: %+v", resource, row)
 		}
@@ -700,7 +700,7 @@ func TestPoolRowShowsRepairHold(t *testing.T) {
 		{unconfirmed, "unknown", unconfirmed.Reason, unconfirmed.Action},
 	} {
 		var c Controller
-		c.inventory.recordPools(nodes, nil, poolTestEngine(t), time.Now().UTC(), func(types.Node, bool, recoverymode.SuccessorZone, *[]string) error {
+		c.inventory.recordPools(nodes, nil, &RuntimeConfig{Engine: poolTestEngine(t)}, time.Now().UTC(), func(types.Node, bool, recoverymode.SuccessorZone, *[]string) error {
 			return fmt.Errorf("assess: %w", tc.hold)
 		}, nil)
 		row := c.PoolAvailability().Pools[0]

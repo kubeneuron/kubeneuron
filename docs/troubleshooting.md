@@ -106,3 +106,7 @@ curl -fsS -H "Authorization: Bearer $OPERATOR_TOKEN" \
 
 Include the root's `status.conditions`, the compiled config digest, and
 binary versions (`--version`).
+
+## Automatic replacement waits for profile qualification
+
+Check the policy's `QualifiedProfilesResolved` condition and the REPLACEMENT column in `kubeneuronctl pools` for missing profile names. Create the referenced AcceleratorRuntimeProfile for the same installation or correct the policy. At incident time, exactly one profile must match the node labels and incident vendor, and the policy must list it in `spec.automatic.qualifiedProfiles`. Manual approval authorizes the current step. A later step may ask again.

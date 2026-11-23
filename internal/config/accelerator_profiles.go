@@ -23,6 +23,17 @@ var (
 	ErrAmbiguousAcceleratorRuntimeProfile = errors.New("multiple accelerator runtime profiles match node and vendor")
 )
 
+// OverlappingProfiles identifies the first two profiles that select a node.
+type OverlappingProfiles struct {
+	First, Second string
+}
+
+func (e *OverlappingProfiles) Error() string {
+	return fmt.Sprintf("%s: %q and %q", ErrAmbiguousAcceleratorRuntimeProfile, e.First, e.Second)
+}
+
+func (e *OverlappingProfiles) Unwrap() error { return ErrAmbiguousAcceleratorRuntimeProfile }
+
 var profileDigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
 // AcceleratorRuntimeProfile is the server-owned desired contract for one
@@ -294,7 +305,7 @@ func (c Config) ResolveAcceleratorRuntimeProfile(labels map[string]string, vendo
 			continue
 		}
 		if matched != nil {
-			return nil, fmt.Errorf("%w: %q and %q", ErrAmbiguousAcceleratorRuntimeProfile, matched.Name, profile.Name)
+			return nil, &OverlappingProfiles{First: matched.Name, Second: profile.Name}
 		}
 		matched = profile
 	}
