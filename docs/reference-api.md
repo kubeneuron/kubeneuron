@@ -155,11 +155,11 @@ replaces a node without approval only when the fault location is
 | Route | Purpose |
 |---|---|
 | `GET /api/v1/pools` | Read the leader’s cached accelerator pool assessments before an incident. The response contains a `pools` array with pool name, cloud, accelerator node count, replacement policy, capability flag, and assessment. When present, `checked_at` gives the UTC assessment time, `reason_code` and `reason` explain the status, and `action` gives the operator a next step. An explicit `RemoveFirst` policy omits the assessment status. Reads require operator authentication. A standby returns `503`. |
-| `GET /api/v1/nodes` | registered nodes with GPU inventory and heartbeat age |
-| `GET /api/v1/nodes/{node}` | one node's detail |
+| `GET /api/v1/nodes` | registered nodes with GPU inventory and heartbeat age; on Kubernetes, only records matching a current node name and UID |
+| `GET /api/v1/nodes/{node}` | one retained node record by name |
 | `GET /api/v1/nodes/{node}/accelerators` | latest per-vendor accelerator runtime reports |
 | `GET /api/v1/accelerator-health?node=<node>` | the elected leader's last read of every accelerator health source, one row per node, source, profile, rule and device (state `healthy`, `fault`, `unknown`, `ignored`, `no-signal`, `not-read-this-term`, or `available` for an agent's source), at most 5000 rows with `truncated`; `node` is an exact name; a standby answers `503`. See [accelerator health](accelerator-health.md#seeing-what-was-read) |
-| `GET /api/v1/targets?port=<p>` | Prometheus `http_sd` target groups for registered nodes |
+| `GET /api/v1/targets?port=<p>` | Prometheus `http_sd` target groups for the same nodes returned by the node list |
 | `GET /api/v1/report/recovery?window=<Go duration>` | recovery report aggregated from the incident store over a trailing window (default `168h`, max `8784h`): degraded GPU-hours, time to recover, incident details and optional savings estimates with the manual baseline. `accelerator_groups` counts the window per accelerator resource in its own unit (`saved_estimate` with `cost_estimate` where `spec.recoveryCostRates` sets a rate, `saved_cost_estimate_total`), and `device_count_unknown` the node-hours of incidents with no recorded device count (`classes[]` carry the same two per class, without saved estimate or cost; `incident_details[].accelerators` is what each incident recorded when it opened); the `*_gpu_hours` fields count `nvidia.com/gpu` and `amd.com/gpu` only. See [`kubeneuronctl report`](reference-cli.md#recovery-report) for what each number counts. A controller that cannot compute it answers `503`, never an empty report |
 
 ## Control

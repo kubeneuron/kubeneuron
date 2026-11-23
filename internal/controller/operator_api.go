@@ -15,6 +15,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/notify"
+	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -354,9 +355,28 @@ func incidentOperationDigest(action, id, actor, reason string, expectedVersion i
 // a later resolution without one lifecycle operation shadowing the other.
 func incidentOperationKey(action, key string) string { return action + ":" + key }
 
-// Nodes lists the persisted inventory.
+// Nodes lists inventory records whose identities still exist on the platform.
 func (c *Controller) Nodes(ctx context.Context) ([]*types.Node, error) {
-	return c.store.ListNodes(ctx)
+	rows, err := c.store.ListNodes(ctx)
+	inventory, ok := c.platform.(platform.AcceleratorInventory)
+	if err != nil || !ok {
+		return rows, err
+	}
+	live, err := inventory.NodeInventory(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing current nodes: %w", err)
+	}
+	uidByName := make(map[string]string, len(live))
+	for _, node := range live {
+		uidByName[node.Name] = node.UID
+	}
+	var current []*types.Node
+	for _, row := range rows {
+		if row.UID != "" && uidByName[row.Name] == row.UID {
+			current = append(current, row)
+		}
+	}
+	return current, nil
 }
 
 // Node returns one inventory record.

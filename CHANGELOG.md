@@ -29,6 +29,12 @@ API is `v1alpha1`.
 
 - `kubeneuronctl status` uses singular counts where appropriate and omits the unconfirmed reset notice when node-level actions are disabled. On NVIDIA nodes, `kubeneuronctl health` explains why Kubernetes GPU health conditions can be unknown. The JSON output retains the condition names.
 
+### Fixed
+
+- The node list and Prometheus service discovery filter retained records by
+  current Kubernetes node name and UID, dropping deleted nodes and old
+  registrations for reused names.
+
 ## [v1.0.0-rc.2] - 2026-11-23
 
 ### Hardware evidence

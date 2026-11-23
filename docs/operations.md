@@ -666,7 +666,11 @@ operator (CloudNativePG, RDS, …) and own its HA, backups, and PITR there:
 ## External scrape discovery
 
 `GET /api/v1/targets?port=9400` (operator token required) serves Prometheus
-`http_sd` groups for every registered node. vmagent example:
+`http_sd` groups for registered nodes. On Kubernetes, this endpoint and
+`GET /api/v1/nodes` include a record only while its name and UID match a
+current node. A recreated node appears once inventory records its new UID.
+Both endpoints return HTTP 500 if the live inventory read fails. Bare-metal
+discovery continues to use registered nodes. vmagent example:
 
 ```yaml
 scrape_configs:

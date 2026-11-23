@@ -709,3 +709,63 @@ func TestPoolRowShowsRepairHold(t *testing.T) {
 		}
 	}
 }
+
+func TestNodesAndDiscoveryUseCurrentIdentities(t *testing.T) {
+	c, st, inv := inventoryFixture(t)
+	ctx := t.Context()
+	register := func(uid string) {
+		t.Helper()
+		if err := st.UpsertAgentRegistration(ctx, &types.Node{Name: "worker", UID: uid, AgentLastSeen: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	api := httpapi.New(c)
+	api.EnableOperatorAPI(c, "test-token")
+	api.SetReadyCheck(func() bool { return true })
+	handler := api.Routes()
+	check := func(status int, uid string) {
+		t.Helper()
+		for _, path := range []string{"/api/v1/nodes", "/api/v1/targets"} {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("Authorization", "Bearer test-token")
+			resp := httptest.NewRecorder()
+			handler.ServeHTTP(resp, req)
+			if resp.Code != status {
+				t.Fatalf("%s: HTTP %d: %s", path, resp.Code, resp.Body.String())
+			}
+			if status != http.StatusOK {
+				continue
+			}
+			if uid == "" {
+				if strings.TrimSpace(resp.Body.String()) != "[]" {
+					t.Fatalf("%s: expected empty list, got %s", path, resp.Body.String())
+				}
+				continue
+			}
+			if path == "/api/v1/nodes" {
+				var rows []types.Node
+				if err := json.Unmarshal(resp.Body.Bytes(), &rows); err != nil || len(rows) != 1 || rows[0].Name != "worker" || rows[0].UID != uid {
+					t.Fatalf("%s: %s", path, resp.Body.String())
+				}
+			} else {
+				var groups []struct{ Targets []string }
+				if err := json.Unmarshal(resp.Body.Bytes(), &groups); err != nil || len(groups) != 1 || !slices.Equal(groups[0].Targets, []string{"worker:9400"}) {
+					t.Fatalf("%s: %s", path, resp.Body.String())
+				}
+			}
+		}
+	}
+	register("first")
+	inv.nodes = []types.Node{{Name: "worker", UID: "first"}}
+	check(http.StatusOK, "first")
+	inv.nodes = nil
+	check(http.StatusOK, "")
+	inv.nodes = []types.Node{{Name: "worker", UID: "second"}}
+	check(http.StatusOK, "")
+	register("second")
+	check(http.StatusOK, "second")
+	inv.err = errors.New("inventory unavailable")
+	check(http.StatusInternalServerError, "")
+	c.platform = nil
+	check(http.StatusOK, "second")
+}
