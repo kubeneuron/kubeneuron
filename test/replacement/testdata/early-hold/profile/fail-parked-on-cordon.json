@@ -1,0 +1,46 @@
+{
+  "incident": {
+    "id": "inc-early",
+    "state": "AWAITING_APPROVAL",
+    "class": "fell-off-bus"
+  },
+  "audit": [
+    {
+      "id": 1,
+      "incident_id": "inc-early",
+      "time": "2026-11-23T10:00:01.000000001Z",
+      "from_state": "",
+      "to_state": "EVALUATING",
+      "actor": "system",
+      "action": "open",
+      "result": "fell-off-bus on 124f:3b:00",
+      "dry_run": false
+    },
+    {
+      "id": 2,
+      "incident_id": "inc-early",
+      "time": "2026-11-23T10:00:02.000000001Z",
+      "from_state": "EVALUATING",
+      "to_state": "EVALUATING",
+      "actor": "system",
+      "action": "recovery-held",
+      "result": "cordon held by policy rehearsal-cloud-fell-off-bus: the controller has not yet loaded the published configuration; the step is retried when it is loaded. To check, compare source_digest in /api/v1/runtime-config with config-digest in ConfigMap rehearsal-runtime",
+      "dry_run": false,
+      "params": {
+        "loaded_config_digest": "sha256:before",
+        "published_config_digest": "sha256:after"
+      }
+    },
+    {
+      "id": 3,
+      "incident_id": "inc-early",
+      "time": "2026-11-23T10:00:05.000000001Z",
+      "from_state": "EVALUATING",
+      "to_state": "AWAITING_APPROVAL",
+      "actor": "system",
+      "action": "cordon",
+      "result": "automatic policy rehearsal-cloud-fell-off-bus did not authorise this step: automatic replacement is not allowed on this node — node profile kind-nvidia is not listed in the policy's spec.automatic.qualifiedProfiles for fell-off-bus; add it there if you have qualified it, or approve this step manually",
+      "dry_run": false
+    }
+  ]
+}

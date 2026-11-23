@@ -431,6 +431,9 @@ jobs:
       - name: DCO check accepts a signed-off root commit
         run: make test-verify-dco
 
+      - name: Replacement rehearsal assertions accept and reject recorded incidents
+        run: make test-replacement-assertions
+
       - name: Alert rule unit tests (vmalert-tool, pinned by digest)
         run: make test-alert-rules
 

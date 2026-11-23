@@ -47,7 +47,6 @@ resolved() {
   jq -e --arg node "$1" --arg correlation "$2" -f assert-resolution.jq "$audit"
 }
 policy_loaded() {
-  local digest
   digest=$("${k[@]}" -n rehearsal get cm rehearsal-runtime -o json |
     jq -er --arg marker "$1" 'select(.data["policies.yaml"]|contains($marker)) | .data["config-digest"]') || return 1
   api runtime-config | jq -e --arg digest "$digest" '.source_digest==$digest' >/dev/null
@@ -137,11 +136,36 @@ curl -fsS -H "@$API_HEADER" -H 'Content-Type: application/json' \
   "$API_URL/incidents/$id/resolve" >/dev/null
 "${k[@]}" patch "$policy" --type merge -p '{"spec":{"automatic":{"qualifiedProfiles":["kind-nvidia","kind-warmup"]}}}'
 wait_until policy_loaded kind-warmup
+before=$digest
 "${k[@]}" patch "$policy" --type merge -p '{"spec":{"automatic":{"qualifiedProfiles":["kind-early-missing"]}}}'
 ./inject-xid.sh "$final" 124f:3b:00
 wait_until incident_opened "$final" 124f:3b:00
 audit="$EVIDENCE_DIR/early-xid.json"
 wait_until missing_profile_hold
-jq -e '[.audit[] | select(.action=="recovery-held" and
-  (.result | contains("the controller has not yet loaded the published configuration"))) | .time] as $holds |
-  any(.audit[]; .to_state=="AWAITING_APPROVAL" and .time > $holds[0]) and ($holds | length)>0' "$audit"
+# Held until the reload, then parked for approval: see assert-early-hold.jq.
+wait_until policy_loaded kind-early-missing
+jq -e --arg before "$before" --arg after "$digest" --arg revision profile -f assert-early-hold.jq "$audit"
+
+# The same early fault after the policy leaves Automatic for Approval with a
+# qualified profile: drain waits for a person because the mode says so.
+curl -fsS -H "@$API_HEADER" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: resolve-$id" \
+  -d '{"actor":"rehearsal","reason":"Completed the early fault assertion"}' \
+  "$API_URL/incidents/$id/resolve" >/dev/null
+"${k[@]}" patch "$policy" --type merge -p '{"spec":{"automatic":{"qualifiedProfiles":["kind-nvidia","kind-approval"]}}}'
+wait_until policy_loaded kind-approval
+before=$digest
+"${k[@]}" patch "$policy" --type merge -p '{"spec":{"mode":"Approval","automatic":null}}'
+./inject-xid.sh "$final" 1250:3b:00
+wait_until incident_opened "$final" 1250:3b:00
+audit="$EVIDENCE_DIR/early-approval.json"
+parked() { api "incidents/$id" >"$audit" && jq -e '.incident.state=="AWAITING_APPROVAL"' "$audit" >/dev/null; }
+wait_until parked
+published_since() {
+  digest=$("${k[@]}" -n rehearsal get cm rehearsal-runtime -o json | jq -er '.data["config-digest"]') &&
+    [[ $digest != "$1" ]] && api runtime-config | jq -e --arg digest "$digest" '.source_digest==$digest' >/dev/null
+}
+wait_until published_since "$before"
+# The loaded revision no longer carries the automatic settings.
+"${k[@]}" -n rehearsal get cm rehearsal-runtime -o json | jq -e '.data["policies.yaml"] | contains("kind-approval") | not' >/dev/null
+jq -e --arg before "$before" --arg after "$digest" --arg revision approval -f assert-early-hold.jq "$audit"

@@ -73,8 +73,9 @@ gates:
 	$(MAKE) verify-hw-e2e-observability
 	$(MAKE) verify-tls-scripts
 	$(MAKE) verify-workload-safe-examples
+	$(MAKE) test-replacement-assertions
 	@echo
-	@echo "gates: OK (generate, build, lint, race tests, docs, hw-e2e sweep, hw-e2e observability, TLS helpers, workload-safe examples)"
+	@echo "gates: OK (generate, build, lint, race tests, docs, hw-e2e sweep, hw-e2e observability, TLS helpers, workload-safe examples, replacement assertions)"
 	@echo "note: the PostgreSQL conformance suite and the kind/image/release"
 	@echo "      gates are in 'make gates-full' — this tier proves the code,"
 	@echo "      not the artifact."
@@ -384,6 +385,11 @@ verify-workload-safe-examples:
 .PHONY: test-replacement-kind
 test-replacement-kind:
 	./test/replacement/run.sh
+
+# The kind rehearsal's audit assertions against recorded incidents. No cluster.
+.PHONY: test-replacement-assertions
+test-replacement-assertions:
+	bash test/replacement/test-assertions.sh
 
 kind-clean:
 	$(KIND) delete cluster --name "$(KIND_CLUSTER_NAME)"
