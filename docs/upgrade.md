@@ -55,6 +55,11 @@ records for recovery after a restart. The controller continues existing GKE plan
 To return to rc.2, stop writes and restore the pre-upgrade store backup before
 starting the rc.2 controller. It refuses databases with a newer schema.
 Restoring the backup also discards workflow changes made after the backup.
+A machine deleted after the backup stays deleted in the cloud, even if the
+restored store shows its removal as pending or has no record of it. Before
+restoring, let open replacements finish or pause remediation and check the
+outcome of any cloud calls already in flight. Compare each affected pool’s
+actual size with its planned size before resuming remediation.
 
 ## Before any upgrade
 
