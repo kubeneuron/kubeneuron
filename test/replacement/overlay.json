@@ -1,1 +1,9 @@
-{"Replace":{"internal/cloud/aws/clients.go":"test/replacement/overlay/clients.go.in"}}
+{
+  "Replace": {
+    "internal/cloud/aws/clients.go": "test/replacement/overlay/clients.go.in",
+    "internal/cloud/gcp/clients.go": "test/replacement/simgke/clients.go.in",
+    "internal/cloud/gcp/rehearsal_fixture.go": "internal/cloud/gcp/fake_test.go",
+    "internal/cloud/azure/clients.go": "test/replacement/simaks/clients.go.in",
+    "internal/cloud/azure/rehearsal_fixture.go": "internal/cloud/azure/fake_test.go"
+  }
+}

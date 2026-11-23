@@ -7,7 +7,7 @@ set -euo pipefail
 k=(kubectl --context "kind-$CLUSTER_NAME")
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 "${k[@]}" get node "${CLUSTER_NAME}-worker" -o json |
-  jq -e '.spec.providerID == "aws:///az/i-pinned" and .metadata.labels["eks.amazonaws.com/nodegroup"] == "gpu"' >/dev/null
+  jq -e --arg id "$INITIAL_ID" --arg label "$POOL_LABEL" '.spec.providerID == $id and .metadata.labels[$label] == "gpu"' >/dev/null
 "${k[@]}" apply -k "$repo/config/crd"
 "${k[@]}" apply -f "$repo/config/default/namespace.yaml"
 "${k[@]}" apply -k "$repo/config/rbac"

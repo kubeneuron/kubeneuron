@@ -10,7 +10,6 @@
   "spec": {
     "agent": {
       "deviceAccess": "NvidiaRuntime",
-      "image": "kubeneuron-agent:replacement-test",
       "kernelLog": {
         "journal": {
           "enabled": true,
@@ -18,7 +17,7 @@
             {
               "dir": "run",
               "nodeSelector": {
-                "eks.amazonaws.com/nodegroup": "gpu"
+                "POOL_LABEL": "gpu"
               }
             }
           ]
@@ -30,7 +29,7 @@
         }
       ],
       "nodeSelector": {
-        "eks.amazonaws.com/nodegroup": "gpu"
+        "POOL_LABEL": "gpu"
       }
     },
     "cloud": {
@@ -41,7 +40,7 @@
       "provider": "aws"
     },
     "controller": {
-      "image": "kubeneuron-controller:replacement-test"
+      "image": ""
     },
     "namespace": "rehearsal",
     "notifications": {
@@ -67,7 +66,7 @@
       "destructiveExecution": {
         "acknowledgement": "I understand these nodes may be reset, rebooted, or destroyed",
         "nodeSelector": {
-          "eks.amazonaws.com/nodegroup": "gpu"
+          "POOL_LABEL": "gpu"
         }
       },
       "executionMode": "Enabled",

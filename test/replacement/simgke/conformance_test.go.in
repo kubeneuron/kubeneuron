@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package gcp
+
+import (
+	"testing"
+
+	"github.com/kubeneuron/kubeneuron/internal/cloud/cloudtest"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
+)
+
+func TestKindSimulatorConformance(t *testing.T) {
+	cloudtest.SuccessorConformance(t, cloudtest.SuccessorCase{
+		Offline:  &Provider{},
+		Instance: testInstance(1),
+		New: func(*testing.T) (cloud.SuccessorProvider, cloudtest.SuccessorCloud) {
+			fixture := newFakeGKE(3)
+			client := &rehearsalClient{fixture: fixture}
+			return newWithAPI(settings{project: testProject, location: testLocation, cluster: testCluster}, client), fixture
+		},
+	})
+}

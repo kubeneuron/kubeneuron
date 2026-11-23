@@ -6,9 +6,13 @@ export CLUSTER_NAME=${KIND_CLUSTER_NAME:-replacement-test}
 work=$(mktemp -d)
 export KUBECONFIG=${KIND_KUBECONFIG:-$work/config}
 export EVIDENCE_DIR=${KIND_ARTIFACTS_DIR:-$work/evidence}
-export AGENT_IMAGE=kubeneuron-agent:replacement-test OPERATOR_IMAGE=kubeneuron-operator:replacement-test
-control=kubeneuron-controller:replacement-test
+image_tag=${REPLACEMENT_IMAGE_TAG:-$CLUSTER_NAME}
+export AGENT_IMAGE="kubeneuron-agent:$image_tag" OPERATOR_IMAGE="kubeneuron-operator:$image_tag"
+control="kubeneuron-controller:$image_tag"
+base="kubeneuron-agent-base:$image_tag"
 d=test/replacement
+# shellcheck source=test/replacement/provider.sh
+source "$d/provider.sh"
 mkdir -p "$EVIDENCE_DIR"
 clusters=$(kind get clusters)
 if grep -Fxq "$CLUSTER_NAME" <<<"$clusters"; then echo "Cluster already exists: $CLUSTER_NAME" >&2; exit 1; fi
@@ -20,14 +24,15 @@ cleanup() {
   rm -f "$work/header"
 }
 trap cleanup EXIT
-docker build -f build/Dockerfile --target agent -t kubeneuron-agent:replacement-base .
+docker build -f build/Dockerfile --target agent -t "$base" .
 docker build -f build/Dockerfile --target operator -t "$OPERATOR_IMAGE" .
-docker build -f "$d/Dockerfile" -t "$control" .
-arch=$(docker image inspect kubeneuron-agent:replacement-base --format '{{.Architecture}}')
+docker build --build-arg REHEARSAL_FIRST_NODE="$CLUSTER_NAME-worker" -f "$d/Dockerfile" -t "$control" .
+arch=$(docker image inspect "$base" --format '{{.Architecture}}')
 CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -o "$work/nvidia-smi" "./$d/smi"
-docker build --build-arg AGENT_IMAGE=kubeneuron-agent:replacement-base -f "$d/smi/Dockerfile" -t "$AGENT_IMAGE" "$work"
+docker build --build-arg AGENT_IMAGE="$base" -f "$d/smi/Dockerfile" -t "$AGENT_IMAGE" "$work"
+sed -e "s|POOL_LABEL|$POOL_LABEL|g" -e "s|INITIAL_ID|$INITIAL_ID|g" "$d/kind.yaml" >"$work/kind.yaml"
 created=1
-kind create cluster --name "$CLUSTER_NAME" --config "$d/kind.yaml" --kubeconfig "$KUBECONFIG" --image kindest/node:v1.33.12@sha256:3f5c8443c620245e4d355cfe09e96a91ead32ceaa569d3f1ca9edf0cb2fe2ff4
+kind create cluster --name "$CLUSTER_NAME" --config "$work/kind.yaml" --kubeconfig "$KUBECONFIG" --image kindest/node:v1.33.12@sha256:3f5c8443c620245e4d355cfe09e96a91ead32ceaa569d3f1ca9edf0cb2fe2ff4
 kind load docker-image --name "$CLUSTER_NAME" "$OPERATOR_IMAGE" "$control" "$AGENT_IMAGE"
 "$d/install-operator.sh"
 k=(kubectl --context "kind-$CLUSTER_NAME")
@@ -38,7 +43,8 @@ done
 worker="$CLUSTER_NAME-worker"
 "${k[@]}" cordon "$worker"
 "${k[@]}" taint node "$CLUSTER_NAME-control-plane" node-role.kubernetes.io/control-plane:NoSchedule-
-"${k[@]}" apply -f "$d/installation.json"
+sed "s|POOL_LABEL|$POOL_LABEL|g" "$d/installation.json" | jq --argjson cloud "$CLOUD_CONFIG" --arg agent "$AGENT_IMAGE" --arg controller "$control" '
+  .spec.cloud=$cloud | .spec.agent.image=$agent | .spec.controller.image=$controller' | "${k[@]}" apply -f -
 "${k[@]}" kustomize config/cloud-policies | sed -e 's/kubeneuron-cloud-/rehearsal-cloud-/g' -e 's/kubeNeuronRef: kubeneuron$/kubeNeuronRef: rehearsal/' | "${k[@]}" apply -f -
 "${k[@]}" -n rehearsal wait --for=create deploy/rehearsal-controller --timeout=2m
 "${k[@]}" -n rehearsal rollout status deploy/rehearsal-controller --timeout=3m

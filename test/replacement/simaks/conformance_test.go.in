@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package azure
+
+import (
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/kubeneuron/kubeneuron/internal/cloud/cloudtest"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
+)
+
+func TestKindSimulatorConformance(t *testing.T) {
+	cloudtest.SuccessorConformance(t, cloudtest.SuccessorCase{
+		Offline:  &Provider{},
+		Instance: testInstance(1),
+		New: func(*testing.T) (cloud.SuccessorProvider, cloudtest.SuccessorCloud) {
+			fixture := newFakeAKS(3)
+			client := &rehearsalClient{fixture: fixture}
+			return newWithAPI(settings{subscription: testSub, resourceGroup: testRG, cluster: testCluster}, client), fixture
+		},
+	})
+}
+
+func TestKindSimulatorARMHold(t *testing.T) {
+	f := newFakeAKS(1)
+	f.permissions = []permission{{Actions: replaceActions}}
+	client := &rehearsalClient{fixture: f}
+	provider := newWithAPI(settings{subscription: testSub, resourceGroup: testRG, cluster: testCluster}, client)
+	if err := provider.CheckReplacePermission(t.Context(), testInstance(0)); err != nil {
+		t.Fatal(err)
+	}
+	f.permissionsErr = armDenied()
+	err := provider.CheckReplacePermission(t.Context(), testInstance(0))
+	var hold *cloud.RecoveryHold
+	if !errors.As(err, &hold) || hold.Code != cloud.HoldReadFailed || !strings.Contains(hold.Message(), "AuthorizationFailed") {
+		t.Fatalf("unexpected hold: %v", err)
+	}
+	for _, text := range []string{hold.Message(), hold.PoolReason, hold.PoolAction} {
+		if strings.Contains(text, testSub) || strings.Contains(text, "management.azure.com") {
+			t.Fatalf("operator output includes ARM request details: %q", text)
+		}
+	}
+}

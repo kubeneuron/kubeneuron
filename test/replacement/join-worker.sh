@@ -2,16 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 : "${CLUSTER_NAME:?}" "${KUBECONFIG:?}" "${AGENT_IMAGE:?}"
-node="$CLUSTER_NAME-${1:?worker suffix}"
-id=${2:?simulated instance ID}
-[[ $id =~ ^i-[a-z0-9]+$ ]]
+node=${1:?worker name}
+provider_id=${2:?worker provider ID}
+: "${POOL_LABEL:?}"
 cp="$CLUSTER_NAME-control-plane"
 k=(kubectl --context "kind-$CLUSTER_NAME")
 image=$(docker inspect -f '{{.Config.Image}}' "$cp")
 docker run -d --privileged --network kind --hostname "$node" --name "$node" \
   --cgroupns=private --tmpfs /tmp --tmpfs /run -v /var -v /lib/modules:/lib/modules:ro \
   --label "io.x-k8s.kind.cluster=$CLUSTER_NAME" --label io.x-k8s.kind.role=worker "$image"
-docker exec "$node" sh -c 'printf "KUBELET_EXTRA_ARGS=--provider-id=aws:///az/%s --node-labels=eks.amazonaws.com/nodegroup=gpu,nvidia.com/gpu.present=true\n" "$1" >/etc/default/kubelet' sh "$id"
+docker exec "$node" sh -c 'printf "KUBELET_EXTRA_ARGS=--provider-id=%s --node-labels=%s=gpu,nvidia.com/gpu.present=true\n" "$1" "$2" >/etc/default/kubelet' sh "$provider_id" "$POOL_LABEL"
 # Run kubeadm in a systemd service cgroup. A long-running docker exec
 # in the root cgroup prevents kind from enabling kubelet controllers.
 for ((attempt=0; attempt<60; attempt++)); do
@@ -47,5 +47,5 @@ if ! "${k[@]}" get node "$node" >/dev/null; then
 fi
 docker save "$AGENT_IMAGE" | docker exec -i "$node" ctr -n k8s.io images import - >/dev/null
 "${k[@]}" wait --for=condition=Ready "node/$node" --timeout=2m
-"${k[@]}" get node "$node" -o json | jq -e --arg id "aws:///az/$id" '.spec.providerID==$id and .metadata.labels["eks.amazonaws.com/nodegroup"]=="gpu"' >/dev/null
+"${k[@]}" get node "$node" -o json | jq -e --arg id "$provider_id" --arg label "$POOL_LABEL" '.spec.providerID==$id and .metadata.labels[$label]=="gpu"' >/dev/null
 "${k[@]}" patch node "$node" --subresource=status --type=merge -p '{"status":{"capacity":{"nvidia.com/gpu":"1"},"allocatable":{"nvidia.com/gpu":"1"}}}'

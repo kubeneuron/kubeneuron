@@ -1,0 +1,66 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package azure
+
+import (
+	"context"
+	"os"
+	"sync"
+)
+
+// The kind controller reads inventory concurrently with replacement operations.
+type rehearsalClient struct {
+	mu      sync.Mutex
+	fixture *fakeAKS
+}
+
+func newSDKAPI(_ settings) (aksAPI, error) {
+	f := newFakeAKS(1)
+	if first := os.Getenv("REHEARSAL_FIRST_NODE"); first != "" {
+		f.machines[0].Name = first
+	}
+	f.permissions = []permission{{Actions: []string{"*"}}}
+	return &rehearsalClient{fixture: f}, nil
+}
+
+func (c *rehearsalClient) NodeResourceGroup(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fixture.NodeResourceGroup(ctx)
+}
+
+func (c *rehearsalClient) Pool(ctx context.Context, name string) (pool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fixture.Pool(ctx, name)
+}
+
+func (c *rehearsalClient) Machines(ctx context.Context, pool string) ([]machine, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fixture.Machines(ctx, pool)
+}
+
+func (c *rehearsalClient) WritePool(ctx context.Context, name string, p pool, count int32, tags map[string]string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fixture.WritePool(ctx, name, p, count, tags)
+}
+
+func (c *rehearsalClient) DeleteMachines(ctx context.Context, pool string, names []string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	err := c.fixture.DeleteMachines(ctx, pool, names)
+	// Once the second replacement has deleted its named machine, model
+	// loss of permission to inspect access for the following incident.
+	if err == nil && len(names) == 1 && names[0] == testMachine(1).Name && os.Getenv("REHEARSAL_FIRST_NODE") != "" {
+		c.fixture.permissionsErr = armDenied()
+	}
+	return err
+}
+
+func (c *rehearsalClient) Permissions(ctx context.Context, scope string) ([]permission, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fixture.Permissions(ctx, scope)
+}

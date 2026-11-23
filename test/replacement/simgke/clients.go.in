@@ -1,0 +1,91 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package gcp
+
+import (
+	"context"
+	"os"
+	"slices"
+	"sync"
+	"time"
+)
+
+// The kind controller reads inventory concurrently with replacement operations.
+type rehearsalClient struct {
+	mu        sync.Mutex
+	fixture   *fakeGKE
+	firstNode string
+}
+
+func newSDKAPI(_ context.Context, _ settings) (gkeAPI, error) {
+	f := newFakeGKE(1)
+	if first := os.Getenv("REHEARSAL_FIRST_NODE"); first != "" {
+		f.groups[0].members[0].Name = first
+	}
+
+	return &rehearsalClient{fixture: f, firstNode: os.Getenv("REHEARSAL_FIRST_NODE")}, nil
+}
+
+func (c *rehearsalClient) Cluster(ctx context.Context) (cluster, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fixture.Cluster(ctx)
+}
+
+func (c *rehearsalClient) Instance(ctx context.Context, in instance) (vm, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fixture.Instance(ctx, in)
+}
+
+func (c *rehearsalClient) Group(ctx context.Context, g groupRef) (group, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fixture.Group(ctx, g)
+}
+
+func (c *rehearsalClient) Members(ctx context.Context, g groupRef) ([]member, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fixture.Members(ctx, g)
+}
+
+func (c *rehearsalClient) Operations(ctx context.Context) ([]operation, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fixture.Operations(ctx)
+}
+
+func (c *rehearsalClient) Operation(ctx context.Context, name string) (operation, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fixture.Operation(ctx, name)
+}
+
+func (c *rehearsalClient) SetPoolSize(ctx context.Context, pool string, size int32) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.fixture.now = time.Now().UTC()
+	restoring := c.firstNode != "" && c.fixture.groups[0].target == 0 && size == 1
+	name, err := c.fixture.SetPoolSize(ctx, pool, size)
+	if err == nil && restoring {
+		// Reuse the name freed by AddFirst for the new VM created by RemoveFirst.
+		c.fixture.groups[0].members[0].Name = c.firstNode
+		c.fixture.deleted = slices.DeleteFunc(c.fixture.deleted, func(deleted string) bool {
+			return deleted == c.firstNode
+		})
+	}
+	return name, err
+}
+
+func (c *rehearsalClient) DeleteInstances(ctx context.Context, g groupRef, names []string, requestID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fixture.DeleteInstances(ctx, g, names, requestID)
+}
+
+func (c *rehearsalClient) Permissions(ctx context.Context, permissions []string) ([]string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.fixture.Permissions(ctx, permissions)
+}

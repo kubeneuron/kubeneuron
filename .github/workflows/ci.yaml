@@ -125,13 +125,6 @@ jobs:
             target: test-journal-kind
             kind_sha256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
             kubectl_sha256: fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
-          - name: kind-replacement
-            runner: ubuntu-24.04
-            arch: amd64
-            suite: main
-            target: test-replacement-kind
-            kind_sha256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
-            kubectl_sha256: fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     # Checksums: kind release kind-linux-<arch>.sha256sum and
@@ -242,6 +235,133 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.KIND_ARTIFACTS_DIR }}
+          if-no-files-found: warn
+          retention-days: 7
+
+  kind-replacement:
+    name: kind-replacement (${{ matrix.provider }})
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [aws, gke, aks]
+        include:
+          - name: kind-replacement
+            runner: ubuntu-24.04
+            arch: amd64
+            suite: main
+            target: test-replacement-kind
+            kind_sha256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
+            kubectl_sha256: fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      KIND_VERSION: v0.32.0
+      KIND_SHA256: ${{ matrix.kind_sha256 }}
+      KUBECTL_VERSION: v1.33.12
+      KUBECTL_SHA256: ${{ matrix.kubectl_sha256 }}
+      TOOL_ARCH: ${{ matrix.arch }}
+      KIND_CLUSTER_NAME: kubeneuron-ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The runner context is not available in job-level env — an expression
+      # there invalidates the whole workflow file ("No jobs were run").
+      - name: Set temp paths
+        run: |
+          echo "KIND_KUBECONFIG=$RUNNER_TEMP/kubeneuron-ci.kubeconfig" >> "$GITHUB_ENV"
+          echo "KIND_ARTIFACTS_DIR=$RUNNER_TEMP/kubeneuron-kind-artifacts" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.26.11"
+          cache: true
+
+      - name: Install pinned Kubernetes clients
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$TOOL_ARCH:$(uname -m)" in
+            amd64:x86_64|arm64:aarch64) ;;
+            *) echo "runner architecture does not match $TOOL_ARCH" >&2; exit 1 ;;
+          esac
+          tools="$RUNNER_TEMP/kubeneuron-tools"
+          mkdir -p "$tools"
+          curl --fail --location --retry 3 \
+            --output "$tools/kind" \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${TOOL_ARCH}"
+          printf '%s  %s\n' "$KIND_SHA256" "$tools/kind" | sha256sum --check -
+          curl --fail --location --retry 3 \
+            --output "$tools/kubectl" \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${TOOL_ARCH}/kubectl"
+          printf '%s  %s\n' "$KUBECTL_SHA256" "$tools/kubectl" | sha256sum --check -
+          chmod 0755 "$tools/kind" "$tools/kubectl"
+          echo "$tools" >> "$GITHUB_PATH"
+
+      - name: Raise inotify limits for the multi-node cluster
+        run: |
+          sudo sysctl fs.inotify.max_user_instances=512 \
+            fs.inotify.max_user_watches=524288
+
+      - name: Verify tooling and Docker
+        shell: bash
+        run: |
+          set -euo pipefail
+          kind version
+          kubectl version --client=true -o yaml
+          timeout 30s bash -c 'until docker info >/dev/null 2>&1; do sleep 2; done'
+          docker version
+          docker info --format 'driver={{.Driver}} cgroup={{.CgroupVersion}} os={{.OperatingSystem}}'
+
+      - name: Run pinned kind integration
+        env:
+          KEEP_CLUSTER: "1"
+          KEEP_RESOURCES: "1"
+          REPLACEMENT_PROVIDER: ${{ matrix.provider }}
+          INTEGRATION_SUITE: ${{ matrix.suite }}
+        run: make ${{ matrix.target || 'test-integration-kind' }}
+
+      - name: Collect kind diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p "$KIND_ARTIFACTS_DIR"
+          kind version >"$KIND_ARTIFACTS_DIR/kind-version.txt" 2>&1
+          docker version >"$KIND_ARTIFACTS_DIR/docker-version.txt" 2>&1
+          if kind get clusters 2>/dev/null | grep -Fxq "$KIND_CLUSTER_NAME"; then
+            export KUBECONFIG="$KIND_KUBECONFIG"
+            kubectl version -o yaml >"$KIND_ARTIFACTS_DIR/kubernetes-version.yaml" 2>&1
+            kubectl get nodes,storageclasses -o wide >"$KIND_ARTIFACTS_DIR/cluster.txt" 2>&1
+            kubectl get crds >"$KIND_ARTIFACTS_DIR/crds.txt" 2>&1
+            kubectl get kubeneurons.kubeneuron.io -o yaml >"$KIND_ARTIFACTS_DIR/roots.yaml" 2>&1
+            kubectl get all,pvc,configmap,serviceaccount,poddisruptionbudget \
+              --all-namespaces -o wide >"$KIND_ARTIFACTS_DIR/resources.txt" 2>&1
+            kubectl get events --all-namespaces --sort-by=.metadata.creationTimestamp \
+              >"$KIND_ARTIFACTS_DIR/events.txt" 2>&1
+            kubectl -n kube-neuron logs deployment/kubeneuron-operator \
+              --all-containers --tail=-1 >"$KIND_ARTIFACTS_DIR/operator.log" 2>&1
+            kubectl -n kubeneuron-integration-smoke logs \
+              deployment/integration-smoke-controller --all-containers --tail=-1 \
+              >"$KIND_ARTIFACTS_DIR/controller.log" 2>&1
+            kubectl -n kubeneuron-integration-smoke logs \
+              daemonset/integration-smoke-agent --all-containers --tail=-1 \
+              >"$KIND_ARTIFACTS_DIR/agent.log" 2>&1
+            node="$(kind get nodes --name "$KIND_CLUSTER_NAME" | head -n1)"
+            docker inspect "$node" --format '{{json .Config.Image}}' \
+              >"$KIND_ARTIFACTS_DIR/node-image.txt" 2>&1
+            docker logs "$node" >"$KIND_ARTIFACTS_DIR/kind-node.log" 2>&1
+          fi
+
+      - name: Delete kind cluster
+        if: always()
+        run: make kind-clean || true
+
+      - name: Upload kind diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.provider }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.KIND_ARTIFACTS_DIR }}
           if-no-files-found: warn
           retention-days: 7

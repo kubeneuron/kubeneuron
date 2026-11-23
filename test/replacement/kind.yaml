@@ -10,5 +10,5 @@ nodes:
     kind: JoinConfiguration
     nodeRegistration:
       kubeletExtraArgs:
-        provider-id: aws:///az/i-pinned
-        node-labels: eks.amazonaws.com/nodegroup=gpu,nvidia.com/gpu.present=true
+        provider-id: INITIAL_ID
+        node-labels: POOL_LABEL=gpu,nvidia.com/gpu.present=true

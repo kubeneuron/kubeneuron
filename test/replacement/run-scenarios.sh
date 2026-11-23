@@ -37,7 +37,7 @@ inject() {
   wait_until incident_opened "$1" "$2"
 }
 remove_worker() {
-  test "$("${k[@]}" get node "$1" -o jsonpath='{.spec.providerID}')" = "aws:///az/$2"
+  test "$("${k[@]}" get node "$1" -o jsonpath='{.spec.providerID}')" = "$2"
   test "$(docker inspect -f '{{index .Config.Labels "io.x-k8s.kind.cluster"}}' "$1")" = "$CLUSTER_NAME"
   docker rm -f "$1"
   "${k[@]}" delete node "$1"
@@ -58,22 +58,62 @@ final="$CLUSTER_NAME-final"
 audit="$EVIDENCE_DIR/A.json"
 wait_until pool_ready AddFirst
 wait_until policy_loaded kind-nvidia
+initial_uid=$("${k[@]}" get node "$worker" -o jsonpath='{.metadata.uid}')
 inject "$worker" 124c:3b:00
-wait_until audit_matches '.incident.successor.provider_id=="aws:///az/i-new" and any(.audit[];.action=="successor-created")'
-./join-worker.sh successor i-new
+wait_until audit_matches '(.incident.successor.provider_id | strings | length)>0 and any(.audit[];.action=="successor-created")'
+successor_id=$(jq -er '.incident.successor.provider_id' "$audit")
+case ${REPLACEMENT_PROVIDER:-aws} in
+  aws) test "$successor_id" = aws:///az/i-new ;;
+  aks) test "${successor_id##*/}" = 1; successor=aks-gpu-12345678-vmss000001 ;;
+  gke) successor=${successor_id##*/} ;;
+esac
+./join-worker.sh "$successor" "$successor_id"
 wait_until audit_matches 'any(.audit[];.action=="successor-replaced")'
-remove_worker "$worker" i-pinned
+remove_worker "$worker" "$INITIAL_ID"
 resolved "$successor" successor
 "${k[@]}" patch gpuremediationpolicy rehearsal-cloud-fell-off-bus --type merge -p '{"spec":{"replacement":{"strategy":"RemoveFirst"}}}'
 audit="$EVIDENCE_DIR/B.json"
 wait_until pool_ready mixed
 wait_until policy_loaded "strategy: remove-first"
 inject "$successor" 124d:3b:00
-wait_until audit_matches 'any(.audit[];.action=="replace" and (.result//""|startswith("terminated the instance behind ")))'
-remove_worker "$successor" i-new
-./join-worker.sh final i-final
+if [[ ${REPLACEMENT_PROVIDER:-aws} == gke ]]; then
+  wait_until audit_matches '.incident.remove_first.phase=="done" and .incident.remove_first.state.size=="1" and (.incident.remove_first.state.resize_diff|strings|length)>0 and any(.audit[];.action=="remove-first-planned")'
+  final_id=$(jq -er '.incident.remove_first.state.resize_diff' "$audit")
+  final=${final_id##*/}
+  test "$final" = "$worker"
+  correlation=resize-diff
+else
+  wait_until audit_matches 'any(.audit[];.action=="replace" and (.result//""|startswith("terminated the instance behind ")))'
+  if [[ ${REPLACEMENT_PROVIDER:-aws} == aks ]]; then
+    final_id=$(jq -er --arg old "$successor" '.audit[] | select(.action=="replacement-instance" and .params.node==$old) | .params.provider_id' "$audit")
+    test "$final_id" = "${INITIAL_ID%/*}/2"
+    final=aks-gpu-12345678-vmss000002
+    correlation=resize-diff
+  else
+    final_id=aws:///az/i-final
+    correlation=pool
+  fi
+fi
+remove_worker "$successor" "$successor_id"
+./join-worker.sh "$final" "$final_id"
 wait_until report_ready "$final"
-resolved "$final" pool
+resolved "$final" "$correlation"
+if [[ ${REPLACEMENT_PROVIDER:-aws} == gke ]]; then
+  final_uid=$("${k[@]}" get node "$final" -o jsonpath='{.metadata.uid}')
+  test "$final_uid" != "$initial_uid"
+  jq -e --arg uid "$final_uid" 'any(.audit[];.action=="resolve" and .params.replacement_node_uid==$uid)' "$audit"
+  exit 0
+fi
+
+if [[ ${REPLACEMENT_PROVIDER:-aws} == aks ]]; then
+  audit="$EVIDENCE_DIR/arm-hold.json"
+  inject "$final" 124e:3b:00
+  wait_until audit_matches 'any(.audit[]; .action=="provider-recovery-unavailable" and (.result|contains("AuthorizationFailed")))'
+  jq -e '[.audit[] | select(.action=="provider-recovery-unavailable") | .result] |
+    all(.[]; (contains("management.azure.com") or contains("/subscriptions/")) | not)' "$audit"
+  jq -e 'all(.audit[]; .action!="policy-authorised" and .action!="approval-approved")' "$audit"
+  exit 0
+fi
 
 # A policy that names a missing profile must park a real incident before acting.
 policy=gpuremediationpolicy/rehearsal-cloud-fell-off-bus
