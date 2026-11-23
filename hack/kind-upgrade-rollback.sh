@@ -999,14 +999,17 @@ rollback_images_to_baseline() {
 # release without one rolls back by images alone (docs/upgrade.md "Rolling
 # back"); this check then fails and needs an images-only branch.
 wait_schema_refusal() {
-	local store=$1 root ns deadline pod line=''
+	local store=$1 root ns deadline pod schema line=''
+	local migrations=("$REPO_ROOT/internal/store/$store/migrations/"[0-9][0-9][0-9][0-9]_*.sql)
+	schema=${migrations[${#migrations[@]}-1]##*/}
+	schema=$((10#${schema%%_*}))
 	root=$(root_name "$store")
 	ns=$(store_ns "$store")
 	deadline=$((SECONDS + TIMEOUT_SECONDS))
 	while ((SECONDS < deadline)); do
 		for pod in $("$KUBECTL_BIN" -n "$ns" get pods -l "app.kubernetes.io/instance=$root,app.kubernetes.io/component=controller" 			-o jsonpath="{range .items[?(@.spec.containers[0].image=='${BASELINE_REGISTRY}/controller:${BASELINE}')]}{.metadata.name}{'\n'}{end}" 2>/dev/null); do
 			line=$({ "$KUBECTL_BIN" -n "$ns" logs "pod/$pod" --tail=200 2>/dev/null; "$KUBECTL_BIN" -n "$ns" logs "pod/$pod" --previous --tail=200 2>/dev/null; } |
-				grep -oE 'schema version [0-9]+ is newer than this binary'"'"'s [0-9]+[^"]*' | head -n 1 || true)
+				grep -oE "schema version ${schema}"' is newer than this binary'"'"'s [0-9]+[^"]*' | head -n 1 || true)
 			if [[ -n $line ]]; then
 				note "[$store] $BASELINE refuses the migrated store as documented: $line"
 				return 0

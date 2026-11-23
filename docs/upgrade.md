@@ -49,6 +49,9 @@ start with a null timestamp. After its node cache has synced, the controller
 can mark a missing agent registration on a successful inventory sweep. Its
 record remains available at `GET /api/v1/nodes/{node}`.
 
+The following migration (SQLite 0040, PostgreSQL 0031) indexes open remove-first
+records for recovery after a restart. The controller continues existing GKE plans.
+
 To return to rc.2, stop writes and restore the pre-upgrade store backup before
 starting the rc.2 controller. It refuses databases with a newer schema.
 Restoring the backup also discards workflow changes made after the backup.
