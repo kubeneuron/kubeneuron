@@ -98,6 +98,11 @@ audit="$EVIDENCE_DIR/B.json"
 wait_until pool_ready mixed
 wait_until policy_loaded "strategy: remove-first"
 inject "$successor" 124d:3b:00
+if [[ -n ${RESTART_SCENARIO:-} ]]; then
+  # shellcheck source=test/replacement/restart-controller.sh
+  source ./restart-controller.sh
+  exit 0
+fi
 if [[ ${REPLACEMENT_PROVIDER:-aws} == gke ]]; then
   wait_until audit_matches '.incident.remove_first.phase=="done" and .incident.remove_first.state.size=="1" and (.incident.remove_first.state.resize_diff|strings|length)>0 and any(.audit[];.action=="remove-first-planned")'
   final_id=$(jq -er '.incident.remove_first.state.resize_diff' "$audit")
