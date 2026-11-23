@@ -121,3 +121,24 @@ func (p *Platform) ObservePinnedDelete(ctx context.Context, pin cloud.NodeIdenti
 		return removefirst.Unknown, cloud.ErrRemoveFirstUnplanned
 	}
 }
+
+func (p *Platform) RetryPinnedDelete(ctx context.Context, pin cloud.NodeIdentity, pool, machine string, state removefirst.Observation) error {
+	if err := p.replaceEligible(ctx, pin); err != nil {
+		return err
+	}
+	switch state {
+	case removefirst.Listed:
+		return p.RetryListedMachineDelete(ctx, pin, pool, machine)
+	case removefirst.SameMachine:
+		if pin.InstanceID == machine {
+			current, err := p.ObservePinnedDelete(ctx, pin, pool, machine)
+			if err != nil {
+				return err
+			}
+			if current == removefirst.SameMachine {
+				return p.recycler.Replace(ctx, pin.InstanceID)
+			}
+		}
+	}
+	return cloud.ErrIdentityChanged
+}

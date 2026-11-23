@@ -12,6 +12,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
 	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
+	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -333,6 +334,20 @@ func (c *Controller) sweepTargetedDelete(ctx context.Context, inc *types.Inciden
 		reason = fmt.Sprintf("The removal of machine %s from pool %s was started, but its outcome was not recorded. A machine with this name is listed now, and KubeNeuron cannot confirm that it is the original one, so the removal was not repeated.", rec.MachineName, rec.Pool)
 	case time.Since(rec.PlannedAt) >= removeFirstDeadline:
 		reason = fmt.Sprintf("The removal of machine %s from pool %s was started an hour ago. KubeNeuron could not confirm its completion.", rec.MachineName, rec.Pool)
+	case err == nil && (state == removefirst.SameMachine || state == removefirst.Listed):
+		var owner string
+		err := c.store.WithTx(ctx, func(tx store.Tx) error {
+			var err error
+			owner, err = tx.NodeRemediationOwner(ctx, rec.DeleteTarget.Node, rec.DeleteTarget.NodeUID)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		if owner == inc.ID {
+			return c.retryTargetedDelete(ctx, inc, state)
+		}
+		reason = fmt.Sprintf("Removal of machine %s from pool %s was not repeated because the incident no longer owns remediation of the original node.", rec.MachineName, rec.Pool)
 	default:
 		return err
 	}
@@ -343,4 +358,47 @@ func (c *Controller) sweepTargetedDelete(ctx context.Context, inc *types.Inciden
 		}
 	}
 	return c.endRemoveFirst(ctx, inc, types.RemoveFirstNeedsOperator, reason)
+}
+
+// Re-evaluate a repeat as a new mutation. An earlier approval alone cannot
+// authorize another delete following a controller restart.
+func (c *Controller) retryTargetedDelete(ctx context.Context, inc *types.Incident, state removefirst.Observation) error {
+	rec := inc.RemoveFirst
+	c.runtimeMu.RLock()
+	defer c.runtimeMu.RUnlock()
+	config := c.runtimeConfig(ctx)
+	if config != c.runtime.Load() || config.Engine == nil || inc.State != types.StateExecuting ||
+		inc.CloudIdentity == nil || *inc.CloudIdentity != *rec.DeleteTarget || rec.Operation != successorOperation(inc) ||
+		c.gate.Paused() || c.pauseHolds(ctx, inc) || c.effectiveDryRun(ctx, inc) {
+		return nil
+	}
+	if reason, _ := c.unloadedConfig(ctx); reason != "" {
+		return nil
+	}
+	step, done, err := config.Engine.NextStep(inc)
+	if err != nil || done || step == nil || step.Action != "platform.replace_node" {
+		return err
+	}
+	pol, ok := c.automaticPolicyFor(ctx, inc)
+	if !ok || pol.ReplacementStrategy.Effective() != recoverymode.RemoveFirst {
+		return nil
+	}
+	if verdict, _ := c.authorizeByPolicy(ctx, inc, step, pol); verdict != policyRun {
+		return nil
+	}
+	if _, result := c.destructiveStepConfinement(ctx, inc, step); result != confinementAllowed {
+		return nil
+	}
+	if hold, skip, _ := c.policyRecoveryPreflight(ctx, inc, step); hold != "" || skip != "" {
+		return nil
+	}
+	target, ok := c.platform.(interface {
+		RetryPinnedDelete(context.Context, cloud.NodeIdentity, string, string, removefirst.Observation) error
+	})
+	if !ok {
+		return nil
+	}
+	callCtx, cancel := context.WithTimeout(ctx, successorSweepTimeout)
+	defer cancel()
+	return target.RetryPinnedDelete(callCtx, *rec.DeleteTarget, rec.Pool, rec.MachineName, state)
 }

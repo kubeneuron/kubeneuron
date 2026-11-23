@@ -204,3 +204,13 @@ func (q *Queries) ListRepairNodeIdentities(ctx context.Context) ([]types.Node, e
 	}
 	return nodes, rows.Err()
 }
+
+// NodeRemediationOwner reads the existing owner without taking a new claim.
+func (q *Queries) NodeRemediationOwner(ctx context.Context, node, uid string) (string, error) {
+	var owner string
+	err := q.db.QueryRowContext(ctx, "SELECT incident_id FROM node_remediation_owners WHERE node=? AND node_uid=?", node, uid).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return owner, err
+}
