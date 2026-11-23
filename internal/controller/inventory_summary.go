@@ -55,7 +55,12 @@ func (c *Controller) InventorySummary(ctx context.Context) (inventory.Summary, e
 			currentNodes[n.Name] = n
 		}
 	}
-	profiles := config.Config{AcceleratorProfiles: c.runtimeConfig(ctx).AcceleratorProfiles}
+	rc := c.runtimeConfig(ctx)
+	s.NodeLevelActions = inventory.ActionsDisabled
+	if rc.NodeLevelActions {
+		s.NodeLevelActions = inventory.ActionsEnabled
+	}
+	profiles := config.Config{AcceleratorProfiles: rc.AcceleratorProfiles}
 	var byNode map[string][]*types.AgentAcceleratorReport
 	for _, node := range nodes {
 		if node.AgentLastSeen.After(now) || node.AgentLastSeen.IsZero() {

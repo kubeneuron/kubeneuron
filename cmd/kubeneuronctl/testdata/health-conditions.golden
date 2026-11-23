@@ -1,0 +1,7 @@
+NODE   SOURCE           PROFILE  RULE         CLASS    DEVICE  STATE               REASON                  READ                  WHY
+(all)  dra              -        -            -        -       not-read-this-term  -                       -                     not read since this controller became leader
+gpu-1  kubernetes-node  nvidia   conditions   -        -       fault               XidCriticalError        2026-11-18T12:00:00Z  -
+gpu-1  agent            -        nvidia-kmsg  ecc-dbe  -       unknown             kernel-log-unavailable  -                     -
+gpu-1  agent            -        nvidia-kmsg  xid-app  -       unknown             kernel-log-unavailable  -                     -
+gpu-1  kubernetes-node  nvidia   conditions   -        -       unknown             -                       -                     No GPU health condition is reported on this node. This source needs a platform component that publishes one (on EKS, the node monitoring agent; on AKS, node problem detector). Other sources are not affected.
+Truncated at 5 rows; use --node to see one node.

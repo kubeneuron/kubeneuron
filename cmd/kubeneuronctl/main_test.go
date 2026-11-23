@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kubeneuron/kubeneuron/internal/inventory"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -338,5 +339,38 @@ func TestIncidentShowCrossZoneSuccessor(t *testing.T) {
 	want, err := os.ReadFile(file)
 	if err != nil || got != string(want) {
 		t.Fatalf("incidents show (%v):\n%s", err, got)
+	}
+}
+
+func TestStatusInventoryGolden(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		gpus, nodes int
+		mode        inventory.ActionMode
+	}{
+		{"disabled", 1, 2, inventory.ActionsDisabled}, {"enabled", 2, 1, inventory.ActionsEnabled}, {"legacy", 1, 1, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			summary := inventory.Summary{ObservedAt: now, LastReportAt: now, ReportingNodes: tc.nodes, GPUs: tc.gpus, NodeLevelActions: tc.mode}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/incidents":
+					_ = json.NewEncoder(w).Encode([]types.Incident{})
+				case "/api/v1/pause":
+					_ = json.NewEncoder(w).Encode(map[string]bool{"paused": false})
+				case "/api/v1/inventory-summary":
+					_ = json.NewEncoder(w).Encode(summary.Data())
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			out, err := runCommand(t, server.URL, "status")
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkGolden(t, "status-inventory-"+tc.name+".golden", []byte(out))
+		})
 	}
 }

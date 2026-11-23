@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/inventory"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -25,7 +26,7 @@ func printTrainingRecovery(out io.Writer, jobs []types.AffectedJob) {
 		if job.Owner != nil {
 			name = job.Owner.Kind + "/" + job.Owner.Name
 		}
-		_, _ = fmt.Fprintf(out, "Training job %s (%s, %d observed workers)\n", name, job.Namespace, len(job.Workers))
+		_, _ = fmt.Fprintf(out, "Training job %s (%s, %d observed %s)\n", name, job.Namespace, len(job.Workers), inventory.Plural(len(job.Workers), "worker", "workers"))
 		ready := "unknown"
 		if at := job.Recovery.InfrastructureReadyAt; at != nil {
 			ready = at.Format(time.RFC3339)

@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kubeneuron/kubeneuron/internal/inventory"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -325,7 +326,7 @@ func printReportIncidents(cmd *cobra.Command, rows []types.RecoveryIncident, tot
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
 	if !gpus {
 		if len(rows) < total {
-			_, _ = fmt.Fprintf(w, "\nShowing %d of %d incidents\n", len(rows), total)
+			_, _ = fmt.Fprintf(w, "\nShowing %d of %s\n", len(rows), incidents(total))
 		}
 		_, _ = fmt.Fprintf(w, "\nINCIDENT\tNODE\tVENDOR / RESOURCE\tSTATE\t%s\n", timeLabel)
 		for _, row := range rows {
@@ -334,7 +335,7 @@ func printReportIncidents(cmd *cobra.Command, rows []types.RecoveryIncident, tot
 		return w.Flush()
 	}
 	if len(rows) < total {
-		_, _ = fmt.Fprintf(w, "\nShowing %d of %d incidents (highest degraded GPU-hours)\n", len(rows), total)
+		_, _ = fmt.Fprintf(w, "\nShowing %d of %s (highest degraded GPU-hours)\n", len(rows), incidents(total))
 	}
 	_, _ = fmt.Fprintf(w, "\nINCIDENT\tNODE\tVENDOR\tSTATE\tDEGRADED GPU-HOURS\t%s\n", timeLabel)
 	for _, row := range rows {
@@ -482,10 +483,7 @@ func baseline(v float64) string {
 }
 
 func incidents(n int) string {
-	if n == 1 {
-		return "1 incident"
-	}
-	return fmt.Sprintf("%d incidents", n)
+	return fmt.Sprintf("%d %s", n, inventory.Plural(n, "incident", "incidents"))
 }
 
 func seconds(v float64) string {

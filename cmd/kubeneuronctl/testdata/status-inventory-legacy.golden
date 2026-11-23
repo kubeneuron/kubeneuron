@@ -1,0 +1,4 @@
+automation paused: false
+incidents: 0 total
+GPU inventory: 1 GPU across 1 reporting node
+Reset unconfirmed: no fresh DCGM reset attestation. See docs/quickstart.md#check-gpu-visibility.

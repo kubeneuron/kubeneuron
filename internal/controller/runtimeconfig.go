@@ -35,7 +35,8 @@ type RuntimeConfig struct {
 	// and pause enforcement, but a step's dry-run decision and its destructive
 	// selector must come from the same immutable snapshot.  Nil is retained for
 	// the per-field test hooks and means "keep the current limits" on install.
-	SafetyLimits *safety.Limits
+	SafetyLimits     *safety.Limits
+	NodeLevelActions bool
 	// Engine selects playbooks and yields next steps; never nil after New.
 	Engine *playbook.Engine
 	// Catalog classifies signals; nil means built-ins only (every Catalog

@@ -161,6 +161,7 @@ func applyRuntimeConfigWithNodePauses(
 		CostRates:              cfg.RecoveryCostRates,
 		AgentJournal:           cfg.AgentJournal,
 		SafetyLimits:           &limits,
+		NodeLevelActions:       cfg.Safety.NodeLevelActions,
 		Engine:                 engine,
 		Catalog:                catalog,
 		SourceDigest:           sourceDigest,

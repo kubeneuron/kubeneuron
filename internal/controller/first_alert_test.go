@@ -28,6 +28,33 @@ func firstAlertSummary(uid string) *corev1.ConfigMap {
 	}}
 }
 
+func TestUnchangedInventorySkipsConfigMapUpdate(t *testing.T) {
+	c, _ := newIngestTestController(t)
+	kube := fake.NewClientset(firstAlertSummary("uid-a"))
+	maps := kube.CoreV1().ConfigMaps("kube-neuron")
+	publish := func() {
+		t.Helper()
+		if err := c.publishInventory(t.Context(), maps, "fleet", "uid-a"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publish()
+	cm, err := maps.Get(t.Context(), "fleet"+inventory.Suffix, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cm.Data["nodeLevelActions"]; got != "false" {
+		t.Fatalf("nodeLevelActions = %q, want false", got)
+	}
+	kube.ClearActions()
+	publish()
+	for _, action := range kube.Actions() {
+		if action.Matches("update", "configmaps") {
+			t.Fatal("unchanged inventory updated its ConfigMap")
+		}
+	}
+}
+
 func TestFirstAlertAcceptedSurvivesInventoryPublishes(t *testing.T) {
 	st, err := storesqlite.Open(":memory:")
 	if err != nil {

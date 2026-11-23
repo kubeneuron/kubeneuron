@@ -147,18 +147,18 @@ func cmdStatus() *cobra.Command {
 		case s.Diagnostic != "":
 			_, _ = fmt.Fprintln(out, "GPU inventory:", inventory.DiagnosticText(s))
 		case s.ReportingNodes == 0:
-			_, _ = fmt.Fprintf(out, "GPU inventory unknown: no fresh agent reports (%d nodes advertise accelerator resources)\n", s.AdvertisedNodes)
+			_, _ = fmt.Fprintf(out, "GPU inventory unknown: no fresh agent reports (%d %s accelerator resources)\n", s.AdvertisedNodes, inventory.Plural(s.AdvertisedNodes, "node advertises", "nodes advertise"))
 		case s.GPUs == 0 && s.AdvertisedNodes == 0:
 			_, _ = fmt.Fprintln(out, "GPU inventory: agents report zero GPUs and no node advertises an accelerator resource")
 		case s.GPUs == 0:
 			_, _ = fmt.Fprintln(out, "GPU inventory: agents report zero GPUs; check the driver and nvidia-smi on the selected nodes")
 		default:
-			_, _ = fmt.Fprintf(out, "GPU inventory: %d GPUs across %d reporting nodes\n", s.GPUs, s.ReportingNodes)
+			_, _ = fmt.Fprintf(out, "GPU inventory: %d %s across %d reporting %s\n", s.GPUs, inventory.Plural(s.GPUs, "GPU", "GPUs"), s.ReportingNodes, inventory.Plural(s.ReportingNodes, "node", "nodes"))
 		}
-		if !s.ResetConfirmed {
-			_, _ = fmt.Fprintln(out, "Reset unconfirmed: no fresh DCGM reset attestation. See docs/quickstart.md#check-gpu-visibility.")
-		} else {
+		if s.ResetConfirmed {
 			_, _ = fmt.Fprintln(out, "Reset attested on at least one GPU")
+		} else if s.NodeLevelActions != inventory.ActionsDisabled {
+			_, _ = fmt.Fprintln(out, "Reset unconfirmed: no fresh DCGM reset attestation. See docs/quickstart.md#check-gpu-visibility.")
 		}
 
 		return nil

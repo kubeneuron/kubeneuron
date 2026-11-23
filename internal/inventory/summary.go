@@ -18,7 +18,7 @@ const Suffix = "-inventory-summary"
 const FirstAlertAcceptedAt = "firstAlertAcceptedAt"
 
 // schemaKeys are the keys Data may write; Merge replaces exactly these.
-var schemaKeys = []string{"advertisedNodes", "schemaVersion", "observedAt", "reportingNodes", "gpuCount", "resetConfirmed", "diagnostic", "lastReportAt", "undeclaredEKSPool", "nvidiaNodes", "diagnosticNodes"}
+var schemaKeys = []string{"advertisedNodes", "schemaVersion", "observedAt", "reportingNodes", "gpuCount", "resetConfirmed", "diagnostic", "lastReportAt", "undeclaredEKSPool", "nvidiaNodes", "diagnosticNodes", "nodeLevelActions"}
 
 const (
 	ExitSMIMissing        = 78
@@ -56,10 +56,10 @@ const (
 // of nodes it is about where it names one.
 func DiagnosticText(s Summary) string {
 	if s.Diagnostic == "RuntimeDidNotExposeGPUs" && s.NVIDIANodes > 0 {
-		return fmt.Sprintf(runtimeExposedNone, fmt.Sprintf(" on %d %s", s.NVIDIANodes, plural(s.NVIDIANodes, "node", "nodes")))
+		return fmt.Sprintf(runtimeExposedNone, fmt.Sprintf(" on %d %s", s.NVIDIANodes, Plural(s.NVIDIANodes, "node", "nodes")))
 	}
 	if s.Diagnostic == "AgentRuntimeClassNotStarting" && s.DiagnosticNodes > 0 {
-		return fmt.Sprintf(runtimeClassNotStarting, fmt.Sprintf("%d %s", s.DiagnosticNodes, plural(s.DiagnosticNodes, "node", "nodes")))
+		return fmt.Sprintf(runtimeClassNotStarting, fmt.Sprintf("%d %s", s.DiagnosticNodes, Plural(s.DiagnosticNodes, "node", "nodes")))
 	}
 	return DiagnosticMessage(s.Diagnostic)
 }
@@ -70,12 +70,21 @@ func AgentRuntimeClassDiagnostic(reason string) bool {
 	return reason == "AgentRuntimeClassPodsNotCreated" || reason == "AgentRuntimeClassNotStarting"
 }
 
-func plural(n int, one, many string) string {
+// Plural selects the noun or phrase for a count.
+func Plural(n int, one, many string) string {
 	if n == 1 {
 		return one
 	}
 	return many
 }
+
+// ActionMode is empty when the summary predates nodeLevelActions.
+type ActionMode string
+
+const (
+	ActionsDisabled ActionMode = "false"
+	ActionsEnabled  ActionMode = "true"
+)
 
 type Summary struct {
 	UndeclaredEKSPool string
@@ -86,12 +95,13 @@ type Summary struct {
 	NVIDIANodes int
 	// DiagnosticNodes are the nodes the diagnostic is about, where it counts
 	// them; 0 otherwise.
-	DiagnosticNodes int
-	ObservedAt      time.Time
-	LastReportAt    time.Time
-	ReportingNodes  int
-	GPUs            int
-	ResetConfirmed  bool
+	DiagnosticNodes  int
+	ObservedAt       time.Time
+	LastReportAt     time.Time
+	ReportingNodes   int
+	GPUs             int
+	NodeLevelActions ActionMode
+	ResetConfirmed   bool
 }
 
 func (s Summary) Data() map[string]string {
@@ -102,6 +112,9 @@ func (s Summary) Data() map[string]string {
 		"reportingNodes":  strconv.Itoa(s.ReportingNodes),
 		"gpuCount":        strconv.Itoa(s.GPUs),
 		"resetConfirmed":  strconv.FormatBool(s.ResetConfirmed),
+	}
+	if s.NodeLevelActions != "" {
+		data["nodeLevelActions"] = string(s.NodeLevelActions)
 	}
 	if s.UndeclaredEKSPool != "" {
 		data["undeclaredEKSPool"] = s.UndeclaredEKSPool
@@ -189,6 +202,12 @@ func Parse(data map[string]string, now time.Time) (Summary, error) {
 		return s, invalid
 	}
 	s.ReportingNodes, s.GPUs = int(nodes), int(gpus)
+	if raw, ok := data["nodeLevelActions"]; ok {
+		s.NodeLevelActions = ActionMode(raw)
+		if s.NodeLevelActions != ActionsEnabled && s.NodeLevelActions != ActionsDisabled {
+			return s, invalid
+		}
+	}
 	switch data["resetConfirmed"] {
 	case "true":
 		if gpus == 0 {

@@ -23,6 +23,10 @@ API is `v1alpha1`.
   exercised on real hardware. The table in docs/operations.md now says, per
   node image, whether the agent sees GPUs without node-level actions.
 
+### Changed
+
+- `kubeneuronctl status` uses singular counts where appropriate and omits the unconfirmed reset notice when node-level actions are disabled. On NVIDIA nodes, `kubeneuronctl health` explains why Kubernetes GPU health conditions can be unknown. The JSON output retains the condition names.
+
 ## [v1.0.0-rc.2] - 2026-11-23
 
 ### Hardware evidence

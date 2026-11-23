@@ -30,6 +30,7 @@ func TestHealthCommand(t *testing.T) {
 				ReadAt: time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)},
 			{Node: "gpu-1", Source: "agent", Rule: "nvidia-kmsg", Class: types.ClassECCDBE, State: "unknown", Reason: "kernel-log-unavailable"},
 			{Node: "gpu-1", Source: "agent", Rule: "nvidia-kmsg", Class: types.ClassXIDApp, State: "unknown", Reason: "kernel-log-unavailable"},
+			{Node: "gpu-1", Source: "kubernetes-node", Profile: "nvidia", Rule: "conditions", State: "unknown", Why: "the node reports none of the conditions AcceleratedHardwareReady, GPUMissing, NVLinkDown"},
 		}})
 	}))
 	defer server.Close()
@@ -62,13 +63,14 @@ func TestHealthCommand(t *testing.T) {
 			t.Fatalf("row %q, want class %s", lines[3+i], class)
 		}
 	}
-	for _, want := range []string{"(all)", "not-read-this-term", "gpu-1", "XidCriticalError", "2026-11-18T12:00:00Z", "Truncated at 4 rows"} {
+	for _, want := range []string{"(all)", "not-read-this-term", "gpu-1", "XidCriticalError", "2026-11-18T12:00:00Z", "Truncated at 5 rows"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in\n%s", want, out)
 		}
 	}
+	checkGolden(t, "health-conditions.golden", []byte(out))
 	var view types.AcceleratorHealthView
-	if err := json.Unmarshal([]byte(run("health", "--json")), &view); err != nil || len(view.Rows) != 4 || query != "" {
+	if err := json.Unmarshal([]byte(run("health", "--json")), &view); err != nil || len(view.Rows) != 5 || !strings.Contains(view.Rows[4].Why, "GPUMissing") || query != "" {
 		t.Fatalf("json %+v %v %q", view, err, query)
 	}
 }
