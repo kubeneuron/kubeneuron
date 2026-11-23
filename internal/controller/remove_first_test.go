@@ -537,7 +537,7 @@ func (p *retryCountingPlatform) RetryPinnedDelete(context.Context, cloud.NodeIde
 }
 
 func TestRestartRechecksDeleteAuthority(t *testing.T) {
-	for _, name := range []string{"eks", "aks", "digest", "paused", "dry-run", "approval", "lost-owner"} {
+	for _, name := range []string{"eks", "aks", "recover-first", "digest", "paused", "dry-run", "approval", "lost-owner"} {
 		t.Run(name, func(t *testing.T) {
 			p := &retryCountingPlatform{plannedPlatform: newPlannedPlatform(), state: removefirst.SameMachine}
 			if name == "aks" {
@@ -566,6 +566,16 @@ func TestRestartRechecksDeleteAuthority(t *testing.T) {
 			}
 			r := restartWith(t, c, st, p)
 			switch name {
+			case "recover-first":
+				if err := r.recoverOrphanedExecution(ctx, mustIncident(t, st, id)); err != nil {
+					t.Fatal(err)
+				}
+				if err := r.advanceEvaluating(ctx, mustIncident(t, st, id)); err != nil {
+					t.Fatal(err)
+				}
+				if got := mustIncident(t, st, id); got.State != types.StateEvaluating || r.isInFlight(id) {
+					t.Fatalf("reevaluation started another step: %s", got.State)
+				}
 			case "paused":
 				r.gate.Pause()
 			case "dry-run":
@@ -586,11 +596,21 @@ func TestRestartRechecksDeleteAuthority(t *testing.T) {
 			}
 			r.sweepRemoveFirst(ctx)
 			want := 0
-			if name == "eks" || name == "aks" {
+			if name == "eks" || name == "aks" || name == "recover-first" {
 				want = 1
 			}
 			if p.reads != 1 || p.deletes != want {
 				t.Fatalf("reads=%d deletes=%d want deletes=%d", p.reads, p.deletes, want)
+			}
+			if name == "recover-first" {
+				r.sweepRemoveFirst(ctx)
+				if err := r.advanceEvaluating(ctx, mustIncident(t, st, id)); err != nil {
+					t.Fatal(err)
+				}
+				got := mustIncident(t, st, id)
+				if got.State != types.StateVerifying || got.RemoveFirst.Open() || p.deletes != 1 {
+					t.Fatalf("state=%s open=%v deletes=%d", got.State, got.RemoveFirst.Open(), p.deletes)
+				}
 			}
 			if name == "lost-owner" {
 				got := mustIncident(t, st, id)

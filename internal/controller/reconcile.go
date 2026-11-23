@@ -23,6 +23,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/store"
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -321,18 +322,25 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 	// The cloud delete can finish even if EXECUTING loses its step result.
 	// Advance the exact recorded action without admitting another mutation.
 	if rec := inc.RemoveFirst; step.Action == "platform.replace_node" && rec != nil &&
-		rec.Version == 1 && rec.Outcome == types.RemoveFirstDeleteConfirmed &&
+		rec.Version == 1 &&
 		rec.Operation == successorOperation(inc) && rec.DeleteActionID == actionID(inc) &&
 		rec.DeleteTarget != nil && inc.CloudIdentity != nil && *rec.DeleteTarget == *inc.CloudIdentity {
-		inc.StepIndex++
-		next := types.StateEvaluating
-		if _, finished, err := c.runtimeConfig(ctx).Engine.NextStep(inc); err != nil {
-			return err
-		} else if finished {
-			next = types.StateVerifying
+		// The sweep owns the pinned delete, including retries. Starting the
+		// ordinary replacement step here would race that same operation.
+		if rec.Open() && rec.Phase == cloud.RemoveFirstDeleting {
+			return nil
 		}
-		return c.transitionWithRepairStep(ctx, inc, next, "system", "recover-confirmed-delete",
-			"original machine removal confirmed after restart", nil, "", true)
+		if rec.Outcome == types.RemoveFirstDeleteConfirmed {
+			inc.StepIndex++
+			next := types.StateEvaluating
+			if _, finished, err := c.runtimeConfig(ctx).Engine.NextStep(inc); err != nil {
+				return err
+			} else if finished {
+				next = types.StateVerifying
+			}
+			return c.transitionWithRepairStep(ctx, inc, next, "system", "recover-confirmed-delete",
+				"original machine removal confirmed after restart", nil, "", true)
+		}
 	}
 	// A recycle whose instance provably cannot be recycled (an autoscaling-group
 	// member) escalates now — before a human is asked to approve a step the
@@ -415,7 +423,7 @@ func sameRepairNode(a, b *types.Incident) bool {
 // instance its pool's resize added: in its finished remove-first plan, or in
 // the row written after a replacement made in one call.
 func ownerFoundInstance(owner *types.Incident, trail []*types.AuditEntry, providerID string) bool {
-	if rec := owner.RemoveFirst; rec != nil && (rec.Outcome == types.RemoveFirstRestored || rec.Version == 1 && rec.Outcome == types.RemoveFirstDeleteConfirmed && rec.Operation == successorOperation(owner)) && providerID != "" && resizediff.FromPlan(rec.RemoveFirstPlan) == providerID {
+	if rec := owner.RemoveFirst; rec != nil && (rec.Outcome == types.RemoveFirstRestored || rec.Version == 1 && rec.Operation == successorOperation(owner)) && providerID != "" && resizediff.FromPlan(rec.RemoveFirstPlan) == providerID {
 		return true
 	}
 	for _, e := range trail {

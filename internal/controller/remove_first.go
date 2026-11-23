@@ -390,7 +390,8 @@ func (c *Controller) retryTargetedDelete(ctx context.Context, inc *types.Inciden
 	c.runtimeMu.RLock()
 	defer c.runtimeMu.RUnlock()
 	config := c.runtimeConfig(ctx)
-	if config != c.runtime.Load() || config.Engine == nil || inc.State != types.StateExecuting ||
+	if config != c.runtime.Load() || config.Engine == nil || (inc.State != types.StateExecuting && inc.State != types.StateEvaluating) ||
+		rec.DeleteActionID != actionID(inc) || rec.Phase != cloud.RemoveFirstDeleting ||
 		inc.CloudIdentity == nil || *inc.CloudIdentity != *rec.DeleteTarget || rec.Operation != successorOperation(inc) ||
 		c.gate.Paused() || c.pauseHolds(ctx, inc) || c.effectiveDryRun(ctx, inc) {
 		return nil
