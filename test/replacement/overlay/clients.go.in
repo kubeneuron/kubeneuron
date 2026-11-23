@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package aws
+
+import (
+	"context"
+
+	"github.com/kubeneuron/kubeneuron/pkg/cloud"
+	"github.com/kubeneuron/kubeneuron/test/replacement/simaws"
+)
+
+func newManagedProvider(_ context.Context, options cloud.Config) (*managedProvider, error) {
+	cluster := options.Options["cluster"]
+	ec, scaling, eks := simaws.NewClients(cluster)
+	return &managedProvider{
+		Recycler:   NewWithAPI(ec),
+		updater:    eks,
+		terminator: scaling,
+		repairReader: &repairReader{
+			cluster:              cluster,
+			checkAutoscalerGroup: options.CheckAutoscalerGroup,
+			ec2:                  ec,
+			scaling:              scaling,
+			eks:                  eks,
+			updates:              &updateCache{},
+		},
+	}, nil
+}

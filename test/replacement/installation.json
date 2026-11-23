@@ -1,0 +1,103 @@
+{
+  "apiVersion": "kubeneuron.io/v1alpha1",
+  "kind": "KubeNeuron",
+  "metadata": {
+    "name": "rehearsal",
+    "labels": {
+      "kubeneuron.io/policy-pack": "cloud"
+    }
+  },
+  "spec": {
+    "agent": {
+      "deviceAccess": "NvidiaRuntime",
+      "image": "kubeneuron-agent:replacement-test",
+      "kernelLog": {
+        "journal": {
+          "enabled": true,
+          "nodeOverrides": [
+            {
+              "dir": "run",
+              "nodeSelector": {
+                "eks.amazonaws.com/nodegroup": "gpu"
+              }
+            }
+          ]
+        }
+      },
+      "tolerations": [
+        {
+          "operator": "Exists"
+        }
+      ],
+      "nodeSelector": {
+        "eks.amazonaws.com/nodegroup": "gpu"
+      }
+    },
+    "cloud": {
+      "aws": {
+        "clusterName": "training",
+        "region": "us-east-1"
+      },
+      "provider": "aws"
+    },
+    "controller": {
+      "image": "kubeneuron-controller:replacement-test"
+    },
+    "namespace": "rehearsal",
+    "notifications": {
+      "operatorAPIToken": {
+        "name": "rehearsal-operator-api-token"
+      },
+      "webhookToken": {
+        "name": "rehearsal-webhook-token"
+      }
+    },
+    "observability": {
+      "collector": {
+        "mode": "Disabled"
+      },
+      "grafana": {
+        "mode": "Disabled"
+      },
+      "store": {
+        "mode": "Disabled"
+      }
+    },
+    "safety": {
+      "destructiveExecution": {
+        "acknowledgement": "I understand these nodes may be reset, rebooted, or destroyed",
+        "nodeSelector": {
+          "eks.amazonaws.com/nodegroup": "gpu"
+        }
+      },
+      "executionMode": "Enabled",
+      "flapCount": 3,
+      "flapWindow": "24h",
+      "maxConcurrentReboots": 1,
+      "maxConcurrentRemediations": 2,
+      "nodeLevelActions": false,
+      "verifyQuietWindow": "15s"
+    },
+    "tls": {
+      "clientCASecretRef": {
+        "name": "rehearsal-agent-client-ca"
+      },
+      "clientSecretRef": {
+        "name": "rehearsal-agent-tls"
+      },
+      "issuer": "Operator",
+      "serverCASecretRef": {
+        "name": "rehearsal-controller-server-ca"
+      },
+      "serverSecretRef": {
+        "name": "rehearsal-controller-tls"
+      }
+    },
+    "workflowStore": {
+      "sqlite": {
+        "size": "5Gi"
+      },
+      "type": "SQLite"
+    }
+  }
+}

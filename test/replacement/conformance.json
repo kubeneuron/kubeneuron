@@ -1,0 +1,1 @@
+{"Replace":{"internal/cloud/aws/kind_simulator_test.go":"test/replacement/overlay/conformance_test.go.in"}}
