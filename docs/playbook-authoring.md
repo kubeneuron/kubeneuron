@@ -421,14 +421,19 @@ carries the limits:
 
 - `maxConcurrentNodes` (and optionally `maxConcurrentNodesPerPool` with
   `poolLabel`): nodes the policy recovers at once. A reached limit holds the
-  step until it clears.
+  step until it clears. A recovery counts in the pool its step was authorised
+  in until it ends, also after its node was replaced.
 - `nodeCooldown`: minimum time between two automatic recoveries of one node.
 - `checkpointWait`: the longest wait for a job's checkpoint before a disruption
   (needs `spec.safety.checkpointCoordination`).
 - `maxUnhealthyPercent` and `minUnhealthyNodes` (default 2): the circuit
   breaker. When more than this share of a pool's nodes (selected by
   `poolLabel`) have an open incident or are not Ready, and at least
-  `minUnhealthyNodes` of them, the step goes to a person. The breaker stays
+  `minUnhealthyNodes` of them, the step goes to a person. The pool is the
+  nodes that exist in the cluster now, by the labels they carry now; a node
+  that was replaced or deleted is not counted, nor one still joining (an
+  add-first successor not yet accepted, or a node KubeNeuron has not recorded
+  yet). The breaker stays
   tripped for that revision of the policy; a person returns it to automatic by
   changing the policy.
 - `qualifiedProfiles`: names of `AcceleratorRuntimeProfile` objects. A

@@ -65,6 +65,22 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- **After an automatic replacement, the circuit breaker no longer counts the
+  replaced node.** The breaker read its pool from the nodes KubeNeuron had
+  recorded, which keep a node whose agent registered after the node is
+  deleted, and keep the labels it first had. A later incident in the same pool
+  counted the replaced node as unhealthy and stopped at approval with
+  `circuit breaker: <k> of <n> nodes in the pool are unhealthy`; in a small
+  pool, on the second incident, and the breaker then stayed tripped until the
+  policy was edited. A node relabelled into the pool after its agent
+  registered was not counted at all. The breaker and `maxConcurrentNodesPerPool`
+  now read the pool from the cluster's nodes and their current labels; a node
+  still joining, such as an add-first successor not yet accepted, is not
+  counted. An open recovery counts toward the per-pool limit of the pool its
+  step was authorised in until it ends, also after it removed its node; the
+  `policy-authorised` audit row records that pool as `pool_label` and `pool`.
+  Present in v1.0.0-rc.1.
+
 - **A replacement whose new node lists its GPUs resolves without an attested
   runtime.** With the agent reading NVIDIA GPUs through the container runtime,
   a typical install (no DCGM available to the agent, no runtime profile, a GPU

@@ -74,9 +74,14 @@ func (c *Controller) authorizeAndStartStep(ctx context.Context, inc *types.Incid
 			if held, err := c.holdForRepairOwner(ctx, inc, step); held || err != nil {
 				return err
 			}
+			params, _ := c.authorisedPool(ctx, inc, pol.Automatic)
 			return c.startStepThen(ctx, inc, step, policyActor(pol.Name), func() {
-				if err := c.appendAudit(ctx, inc, policyActor(pol.Name), "policy-authorised",
-					policyAuthorisationNote(pol, time.Now())+": "+step.Name); err != nil {
+				now := time.Now()
+				if err := c.store.AppendAudit(ctx, &types.AuditEntry{
+					IncidentID: inc.ID, Time: now, FromState: inc.State, ToState: inc.State,
+					Actor: policyActor(pol.Name), Action: policyAuthorisedAction, Params: params,
+					Result: policyAuthorisationNote(pol, now) + ": " + step.Name, DryRun: inc.DryRun,
+				}); err != nil {
 					c.log.Error("policy authorisation audit append failed", "incident", inc.ID, "err", err)
 				}
 			})

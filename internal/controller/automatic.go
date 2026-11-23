@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/action"
+	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/internal/store"
@@ -99,19 +100,13 @@ func (c *Controller) authorizeByPolicy(ctx context.Context, inc *types.Incident,
 	if err != nil {
 		return policyHold, fmt.Sprintf("open incidents cannot be read (%v)", err)
 	}
-	nodes, err := c.store.ListNodes(ctx)
+	nodes, err := c.policyPoolOf(ctx, auto, pool, open)
 	if err != nil {
 		return policyHold, fmt.Sprintf("the node inventory cannot be read (%v)", err)
 	}
 	// Circuit breaker: too large a share of the pool is unhealthy at once.
 	// That looks like a monitoring fault or a shared cause, not N broken
 	// nodes, so a person decides.
-	poolNodes := map[string]bool{}
-	for _, n := range nodes {
-		if auto.SelectsNode(n.Labels) && auto.Pool(n.Labels) == pool {
-			poolNodes[n.Name] = true
-		}
-	}
 	// Unhealthy: a node of the pool with an open incident, or one the
 	// platform reports not Ready. An interruption the cloud announced is not
 	// a fault: it does not count toward a repair policy's breaker, so a mass
@@ -120,12 +115,12 @@ func (c *Controller) authorizeByPolicy(ctx context.Context, inc *types.Incident,
 	interruption := inc.Class == types.ClassCloudInterruption
 	unhealthy := map[string]bool{}
 	for _, other := range open {
-		if poolNodes[other.Target.Node] && (other.Class == types.ClassCloudInterruption) == interruption {
+		if nodes.unhealthyMember(other) && (other.Class == types.ClassCloudInterruption) == interruption {
 			unhealthy[other.Target.Node] = true
 		}
 	}
 	if readiness, ok := c.platform.(nodeReadiness); ok && !interruption {
-		for name := range poolNodes {
+		for name := range nodes.members {
 			if unhealthy[name] {
 				continue
 			}
@@ -140,9 +135,9 @@ func (c *Controller) authorizeByPolicy(ctx context.Context, inc *types.Incident,
 			}
 		}
 	}
-	if len(poolNodes) > 0 && len(unhealthy) >= auto.MinUnhealthy() && len(unhealthy)*100 > auto.MaxUnhealthyPercent*len(poolNodes) {
+	if members := len(nodes.members); members > 0 && len(unhealthy) >= auto.MinUnhealthy() && len(unhealthy)*100 > auto.MaxUnhealthyPercent*members {
 		reason := fmt.Sprintf("circuit breaker: %d of %d nodes in the pool are unhealthy, above %d%%",
-			len(unhealthy), len(poolNodes), auto.MaxUnhealthyPercent)
+			len(unhealthy), members, auto.MaxUnhealthyPercent)
 		if err := c.tripBreaker(ctx, pol, inc, reason); err != nil {
 			c.log.Error("recording the circuit breaker trip failed", "policy", pol.Name, "err", err)
 		}
@@ -156,7 +151,7 @@ func (c *Controller) authorizeByPolicy(ctx context.Context, inc *types.Incident,
 		if other.ID == inc.ID || other.Target.Node == inc.Target.Node {
 			continue
 		}
-		authorised, err := c.authorisedBy(ctx, other.ID, actor, time.Time{})
+		authorised, recorded, err := c.policyRecovery(ctx, other.ID, actor)
 		if err != nil {
 			return policyHold, fmt.Sprintf("audit trail cannot be read (%v)", err)
 		}
@@ -164,7 +159,7 @@ func (c *Controller) authorizeByPolicy(ctx context.Context, inc *types.Incident,
 			continue
 		}
 		total++
-		if poolNodes[other.Target.Node] {
+		if nodes.recovering(other.Target.Node, recorded, auto.PoolLabel, pool) {
 			inPool++
 		}
 	}
@@ -199,6 +194,147 @@ func (c *Controller) authorizeByPolicy(ctx context.Context, inc *types.Incident,
 		return policyPark, reason
 	}
 	return policyRun, ""
+}
+
+// policyPool is the pool of a policy, for its circuit breaker and its
+// per-pool limit.
+type policyPool struct {
+	// members are the pool's nodes that exist, by name, with their UID.
+	members map[string]string
+	// exists are all the nodes that exist, when the platform lists them;
+	// elsewhere are nodes that no longer exist and whose recorded labels the
+	// policy selects into another pool.
+	exists, elsewhere map[string]bool
+}
+
+// policyPoolOf reads the pool. Where the platform lists its node objects,
+// the members are read from there, with the labels each carries now: the
+// store keeps the row of a node whose agent registered after the node is
+// deleted or replaced, and does not update that row's labels. Elsewhere the
+// store's inventory is all there is.
+//
+// A node still joining is no member yet: one KubeNeuron has no record of,
+// or the successor an open add-first replacement has not accepted. Its
+// kubelet is NotReady for a while after the node object appears, and that is
+// not a fault; leaving it out of the count as well makes each fault a larger
+// share of the pool, never a smaller one.
+func (c *Controller) policyPoolOf(ctx context.Context, auto *recoverymode.Settings, pool string, open []*types.Incident) (policyPool, error) {
+	in := func(labels map[string]string) bool { return auto.SelectsNode(labels) && auto.Pool(labels) == pool }
+	p := policyPool{members: map[string]string{}}
+	stored, err := c.store.ListNodes(ctx)
+	if err != nil {
+		return p, err
+	}
+	inv, ok := c.platform.(platform.AcceleratorInventory)
+	if !ok {
+		for _, n := range stored {
+			if in(n.Labels) {
+				p.members[n.Name] = n.UID
+			}
+		}
+		return p, nil
+	}
+	live, err := inv.NodeInventory(ctx)
+	if err != nil {
+		return p, err
+	}
+	known := map[string]bool{}
+	for _, n := range stored {
+		known[n.Name] = true
+	}
+	joining := map[string]bool{}
+	for _, other := range open {
+		if s := other.Successor; s.Open() && s.ReadyAt == nil && s.Node != "" {
+			joining[s.Node] = true
+		}
+	}
+	p.exists, p.elsewhere = map[string]bool{}, map[string]bool{}
+	for _, n := range live {
+		p.exists[n.Name] = true
+		if in(n.Labels) && known[n.Name] && !joining[n.Name] {
+			p.members[n.Name] = n.UID
+		}
+	}
+	for _, n := range stored {
+		if !p.exists[n.Name] && auto.SelectsNode(n.Labels) && auto.Pool(n.Labels) != pool {
+			p.elsewhere[n.Name] = true
+		}
+	}
+	return p, nil
+}
+
+// unhealthyMember reports whether an open incident is about a node of the
+// pool as it exists now: not one that is gone, and not an earlier node of the
+// same name.
+func (p policyPool) unhealthyMember(inc *types.Incident) bool {
+	uid, ok := p.members[inc.Target.Node]
+	if !ok {
+		return false
+	}
+	pinned := inc.RepairNodeUID
+	if inc.CloudIdentity != nil && inc.CloudIdentity.NodeUID != "" {
+		pinned = inc.CloudIdentity.NodeUID
+	}
+	return pinned == "" || uid == "" || pinned == uid
+}
+
+// recovering reports whether an open recovery on node counts toward the
+// limit of pool. The pool its authorisation recorded decides; the node may
+// since have left the pool or the cluster, its recovery is not over. A
+// recovery authorised before the pool was recorded, or recorded under a pool
+// label the policy no longer uses, counts by the node's pool now, and, once the node is gone, unless its recorded labels place it
+// in another pool of the policy: they may be empty or never have been
+// updated.
+func (p policyPool) recovering(node string, recorded *recordedPool, poolLabel, pool string) bool {
+	if recorded != nil && recorded.label == poolLabel {
+		return recorded.pool == pool
+	}
+	if _, ok := p.members[node]; ok {
+		return true
+	}
+	return p.exists != nil && !p.exists[node] && !p.elsewhere[node]
+}
+
+// recordedPool is the pool an automatic policy authorised a step in.
+type recordedPool struct{ label, pool string }
+
+// policyAuthorisedAction is the audit row of a step a policy authorised; its
+// params record the pool the step was authorised in.
+const policyAuthorisedAction = "policy-authorised"
+
+// policyRecovery reports whether actor authorised a step of the incident, as
+// authorisedBy does, and the pool the latest such step was authorised in,
+// when it was recorded.
+func (c *Controller) policyRecovery(ctx context.Context, incidentID, actor string) (bool, *recordedPool, error) {
+	trail, err := c.store.AuditTrail(ctx, incidentID)
+	if err != nil {
+		return false, nil, err
+	}
+	authorised := false
+	var recorded *recordedPool
+	for _, e := range trail {
+		if e.Actor != actor {
+			continue
+		}
+		if e.ToState == types.StateExecuting && e.FromState != types.StateExecuting {
+			authorised = true
+		}
+		if pool, ok := e.Params["pool"]; ok && e.Action == policyAuthorisedAction {
+			recorded = &recordedPool{label: e.Params["pool_label"], pool: pool}
+		}
+	}
+	return authorised, recorded, nil
+}
+
+// authorisedPool is the pool of the incident's node under the policy, as the
+// params to record with the step it authorised; none when the node's labels
+// cannot be read.
+func (c *Controller) authorisedPool(ctx context.Context, inc *types.Incident, auto *recoverymode.Settings) (map[string]string, bool) {
+	labels, err := c.nodeLabelsForConfinement(ctx, inc.Target.Node)
+	if err != nil {
+		return nil, false
+	}
+	return map[string]string{"pool_label": auto.PoolLabel, "pool": auto.Pool(labels)}, true
 }
 
 // openIncidents lists the incidents automation is still working on.
