@@ -641,7 +641,7 @@ func TestRefusedDeleteSettlesOnlyWithOriginalTarget(t *testing.T) {
 				t.Fatal(err)
 			}
 			c.platform = p
-			var cause error = removefirst.ErrRefused
+			cause := removefirst.ErrRefused
 			if state == removefirst.Listed {
 				cause = &removefirst.RefusedAfterGrow{Cause: cause, GrownSize: 2, CurrentSize: 2}
 			}
