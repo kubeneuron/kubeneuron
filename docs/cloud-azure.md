@@ -37,7 +37,9 @@ AKS:
       new machine, the step fails as "replacement capacity unavailable" and
       nothing is deleted. Capacity is added before the old instance is
       deleted, but after the drain: workloads are already evicted while the
-      new node comes up.
+      new node comes up. If Azure refuses the removal after the pool was
+      grown, KubeNeuron does not shrink the pool back; the added node keeps
+      running and is billed until you remove it or the pool is resized.
       If the pool has up to 100 machines and exactly one machine is new
       after the growth, the resolution names it (`replacement_correlation:
       resize-diff`). This comparison is kept in memory only, no tag is
