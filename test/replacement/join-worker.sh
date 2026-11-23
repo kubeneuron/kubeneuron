@@ -35,9 +35,14 @@ docker exec "$node" systemctl start --no-block replacement-join.service
 
 for ((attempt=0; attempt<120; attempt++)); do
   if "${k[@]}" get node "$node" >/dev/null 2>&1; then break; fi
+  if docker exec "$node" systemctl is-failed --quiet replacement-join.service; then break; fi
   sleep 1
 done
-"${k[@]}" get node "$node" >/dev/null
+if ! "${k[@]}" get node "$node" >/dev/null; then
+  docker exec "$node" journalctl -b --no-pager -u replacement-join.service -u kubelet -n 100 |
+    sed -E 's/[a-z0-9]{6}\.[a-z0-9]{16}/[redacted]/g' >&2
+  exit 1
+fi
 docker save "$AGENT_IMAGE" | docker exec -i "$node" ctr -n k8s.io images import - >/dev/null
 "${k[@]}" wait --for=condition=Ready "node/$node" --timeout=2m
 "${k[@]}" get node "$node" -o json | jq -e --arg id "aws:///az/$id" '.spec.providerID==$id and .metadata.labels["eks.amazonaws.com/nodegroup"]=="gpu"' >/dev/null
