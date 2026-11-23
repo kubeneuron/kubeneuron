@@ -80,17 +80,21 @@ func (c *Controller) reconcileJournalLabels(ctx context.Context) {
 		}
 		return
 	}
-	accelerators := map[string]bool{}
+	// The GPUs an agent reported count for the node it reported them on: a
+	// node recreated with the same name is another machine, which may have
+	// none.
+	accelerators := map[string]string{}
 	for _, row := range rows {
 		if len(row.GPUs) != 0 || len(row.Devices) != 0 {
-			accelerators[row.Name] = true
+			accelerators[row.Name] = row.UID
 		}
 	}
 	now := time.Now()
 	reasons := map[string]string{}
 	for i := range nodes {
 		n := &nodes[i]
-		accelerator := n.Accelerator || accelerators[n.Name]
+		uid, reported := accelerators[n.Name]
+		accelerator := n.Accelerator || reported && (n.UID == "" || uid == n.UID)
 		dir, reason := c.journal.want(cfg, n, accelerator, now)
 		if accelerator && reason != "" && !cfg.KernelMessages {
 			reasons[n.Name] = reason
@@ -147,7 +151,9 @@ func (j *journalLabels) want(cfg *config.AgentJournal, n *platform.JournalNode, 
 	case "":
 		return "", JournalReasonOSImageNotRecognized
 	}
-	basis := n.OSImage + "\x00" + dir
+	// A mount failure is the node's: the node recreated with the same name
+	// is tried again at once.
+	basis := n.UID + "\x00" + n.OSImage + "\x00" + dir
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if n.Dir == dir && !n.WaitingSince.IsZero() && now.Sub(n.WaitingSince) >= journalMountWait {

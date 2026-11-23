@@ -121,7 +121,7 @@ type AcceleratorReportBackend interface {
 // observation. It intentionally returns only a vendor and immutable digest;
 // action policy and execution decisions never travel to the node agent.
 type AcceleratorObservationProfileBackend interface {
-	AcceleratorObservationProfile(ctx context.Context, node string, vendor types.AcceleratorVendor) (*types.AgentAcceleratorObservationProfile, error)
+	AcceleratorObservationProfile(ctx context.Context, node, nodeUID string, vendor types.AcceleratorVendor) (*types.AgentAcceleratorObservationProfile, error)
 }
 
 // Server carries the route handlers.
@@ -745,7 +745,7 @@ func (s *Server) handleAcceleratorObservationProfile(w http.ResponseWriter, r *h
 		http.Error(w, "accelerator profile service unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	profile, err := profiles.AcceleratorObservationProfile(r.Context(), principal.NodeName, vendor)
+	profile, err := profiles.AcceleratorObservationProfile(r.Context(), principal.NodeName, principal.NodeUID, vendor)
 	if err != nil {
 		http.Error(w, "accelerator profile service unavailable", http.StatusServiceUnavailable)
 		return

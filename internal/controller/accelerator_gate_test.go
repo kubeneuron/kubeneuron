@@ -206,7 +206,7 @@ func TestAcceleratorObservationProfileSelectsServerOwnedDigestOrFailsClosed(t *t
 	}
 	c := New(st, nil, nil, nil, nil, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	profile, err := c.AcceleratorObservationProfile(ctx, "node-a", types.AcceleratorVendorNVIDIA)
+	profile, err := c.AcceleratorObservationProfile(ctx, "node-a", "", types.AcceleratorVendorNVIDIA)
 	if err != nil || profile != nil {
 		t.Fatalf("default-deny profile = %+v, %v; want nil, nil", profile, err)
 	}
@@ -214,12 +214,12 @@ func TestAcceleratorObservationProfileSelectsServerOwnedDigestOrFailsClosed(t *t
 	if err := c.SetAcceleratorRuntimeProfiles([]config.AcceleratorRuntimeProfile{selected}); err != nil {
 		t.Fatal(err)
 	}
-	profile, err = c.AcceleratorObservationProfile(ctx, "node-a", types.AcceleratorVendorNVIDIA)
+	profile, err = c.AcceleratorObservationProfile(ctx, "node-a", "", types.AcceleratorVendorNVIDIA)
 	if err != nil || profile == nil || profile.Vendor != types.AcceleratorVendorNVIDIA || profile.ProfileDigest != selected.ProfileDigest ||
 		profile.ProfileUID != selected.ProfileUID || profile.ProfileGeneration != selected.ProfileGeneration {
 		t.Fatalf("selected observation profile = %+v, %v", profile, err)
 	}
-	if profile, err := c.AcceleratorObservationProfile(ctx, "node-a", types.AcceleratorVendorAMD); err != nil || profile != nil {
+	if profile, err := c.AcceleratorObservationProfile(ctx, "node-a", "", types.AcceleratorVendorAMD); err != nil || profile != nil {
 		t.Fatalf("different vendor profile = %+v, %v; want nil, nil", profile, err)
 	}
 
@@ -228,7 +228,7 @@ func TestAcceleratorObservationProfileSelectsServerOwnedDigestOrFailsClosed(t *t
 	if err := c.SetAcceleratorRuntimeProfiles([]config.AcceleratorRuntimeProfile{selected, overlap}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.AcceleratorObservationProfile(ctx, "node-a", types.AcceleratorVendorNVIDIA); !errors.Is(err, config.ErrAmbiguousAcceleratorRuntimeProfile) {
+	if _, err := c.AcceleratorObservationProfile(ctx, "node-a", "", types.AcceleratorVendorNVIDIA); !errors.Is(err, config.ErrAmbiguousAcceleratorRuntimeProfile) {
 		t.Fatalf("overlapping observation profile error = %v, want ambiguity", err)
 	}
 }

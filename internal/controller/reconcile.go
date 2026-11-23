@@ -975,7 +975,7 @@ func (c *Controller) verifyAgainstObservationReport(ctx context.Context, inc *ty
 // Anything in between — labels unavailable, overlapping profiles — cannot say
 // what the agent was told, and fails closed with the cause in the reason.
 func (c *Controller) verifyWithoutCurrentReport(ctx context.Context, inc *types.Incident, vendor types.AcceleratorVendor, absence string) (bool, string) {
-	selected, err := c.AcceleratorObservationProfile(ctx, inc.Target.Node, vendor)
+	selected, err := c.AcceleratorObservationProfile(ctx, inc.Target.Node, repairNodeUID(inc), vendor)
 	if err != nil {
 		return false, absence + "; cannot tell whether a runtime profile selects the node: " + err.Error()
 	}

@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -26,7 +27,7 @@ func journalPod(name, node, component string, phase corev1.PodPhase, conditions 
 func TestJournalNodesReadsWaitingVariantPods(t *testing.T) {
 	scheduled := metav1.NewTime(time.Now().Add(-5 * time.Minute).Truncate(time.Second))
 	node := func(name, label string) *corev1.Node {
-		n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{}},
+		n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, UID: k8stypes.UID("uid-" + name), Labels: map[string]string{}},
 			Spec:   corev1.NodeSpec{ProviderID: "kind://docker/c/" + name},
 			Status: corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{OSImage: "Debian GNU/Linux 12 (bookworm)"}}}
 		if label != "" {
@@ -55,7 +56,7 @@ func TestJournalNodesReadsWaitingVariantPods(t *testing.T) {
 		byName[n.Name] = i
 	}
 	stuck := nodes[byName["stuck"]]
-	if !stuck.WaitingSince.Equal(scheduled.Time) || stuck.Dir != "run" || !stuck.Accelerator || stuck.ProviderID != "kind://docker/c/stuck" {
+	if !stuck.WaitingSince.Equal(scheduled.Time) || stuck.Dir != "run" || !stuck.Accelerator || stuck.ProviderID != "kind://docker/c/stuck" || stuck.UID != "uid-stuck" {
 		t.Fatalf("stuck = %+v", stuck)
 	}
 	for _, name := range []string{"running", "other", "cpu"} {

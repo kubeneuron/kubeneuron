@@ -447,7 +447,10 @@ type JournalLabeler interface {
 
 // JournalNode is one node as the journal label sees it.
 type JournalNode struct {
-	Name       string
+	Name string
+	// UID identifies the node object: a node recreated with the same name
+	// is a new machine.
+	UID        string
 	OSImage    string
 	ProviderID string
 	Labels     map[string]string

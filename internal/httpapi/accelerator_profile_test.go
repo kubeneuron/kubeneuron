@@ -20,12 +20,14 @@ type acceleratorProfileBackend struct {
 	err     error
 	calls   int
 	node    string
+	nodeUID string
 	vendor  types.AcceleratorVendor
 }
 
-func (b *acceleratorProfileBackend) AcceleratorObservationProfile(_ context.Context, node string, vendor types.AcceleratorVendor) (*types.AgentAcceleratorObservationProfile, error) {
+func (b *acceleratorProfileBackend) AcceleratorObservationProfile(_ context.Context, node, nodeUID string, vendor types.AcceleratorVendor) (*types.AgentAcceleratorObservationProfile, error) {
 	b.calls++
 	b.node = node
+	b.nodeUID = nodeUID
 	b.vendor = vendor
 	return b.profile, b.err
 }
@@ -45,8 +47,8 @@ func TestAcceleratorObservationProfileRouteReturnsOnlyAuthenticatedNodeSelection
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %q", response.Code, response.Body.String())
 	}
-	if backend.calls != 1 || backend.node != "node-a" || backend.vendor != types.AcceleratorVendorNVIDIA {
-		t.Fatalf("profile lookup = calls=%d node=%q vendor=%q, want authenticated node-a NVIDIA", backend.calls, backend.node, backend.vendor)
+	if backend.calls != 1 || backend.node != "node-a" || backend.nodeUID != "node-uid-a" || backend.vendor != types.AcceleratorVendorNVIDIA {
+		t.Fatalf("profile lookup = calls=%d node=%q uid=%q vendor=%q, want authenticated node-a node-uid-a NVIDIA", backend.calls, backend.node, backend.nodeUID, backend.vendor)
 	}
 	var got types.AgentAcceleratorObservationProfile
 	if err := json.NewDecoder(response.Body).Decode(&got); err != nil {

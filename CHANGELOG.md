@@ -38,6 +38,19 @@ API is `v1alpha1`.
   current Kubernetes node name and UID, dropping deleted nodes and old
   registrations for reused names.
 
+- **A node recreated with the same name no longer inherits the earlier
+  node's journal label or observation profile.** The GPUs an agent had
+  reported made a node of that name an accelerator node for
+  `kubeneuron.io/journal-dir`, so a new CPU node could get the label, and a
+  journal mount failure kept the label off the new node for an hour. Both now
+  apply only to the node object (UID) they were seen on. The runtime profile
+  an agent observes with is chosen for the node object it authenticated on:
+  if the node by that name is now another object, or its UID cannot be read,
+  the request fails and the agent sends no report until it succeeds. Verification of an
+  incident without a current accelerator report asks the same about the
+  incident's node and holds when it cannot tell. Present in v1.0.0-rc.1
+  and v1.0.0-rc.2.
+
 ## [v1.0.0-rc.2] - 2026-11-23
 
 ### Hardware evidence
