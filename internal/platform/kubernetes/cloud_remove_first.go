@@ -4,6 +4,7 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
@@ -101,7 +102,21 @@ func (p *Platform) ObservePinnedDelete(ctx context.Context, pin cloud.NodeIdenti
 	case interface {
 		ObserveRemoveFirstDelete(context.Context, string, string, string) (removefirst.Observation, error)
 	}:
-		return provider.ObserveRemoveFirstDelete(ctx, pin.InstanceID, pool, machine)
+		state, err := provider.ObserveRemoveFirstDelete(ctx, pin.InstanceID, pool, machine)
+		if err != nil || state != removefirst.Listed {
+			return state, err
+		}
+		live, err := p.MatchCloudNodeUID(ctx, pin.Node, pin.NodeUID)
+		if err == nil {
+			err = pin.Match(live)
+		}
+		if errors.Is(err, cloud.ErrIdentityChanged) {
+			return removefirst.IdentityChanged, nil
+		}
+		if err != nil {
+			return removefirst.Unknown, err
+		}
+		return removefirst.Listed, nil
 	default:
 		return removefirst.Unknown, cloud.ErrRemoveFirstUnplanned
 	}

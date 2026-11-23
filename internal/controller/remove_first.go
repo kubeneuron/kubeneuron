@@ -212,6 +212,9 @@ func (c *Controller) saveRemoveFirst(ctx context.Context, inc *types.Incident, r
 		if action == deleteIntentAction && (fresh.Version != inc.Version || fresh.RemoveFirst != nil && fresh.RemoveFirst.Operation == rec.Operation) {
 			return store.ErrConflict
 		}
+		if rec.Version == 1 && action != deleteIntentAction && (!fresh.RemoveFirst.Open() || fresh.RemoveFirst.Version != 1) {
+			return store.ErrConflict
+		}
 		if fresh.RemoveFirst.Open() && fresh.RemoveFirst.Operation != rec.Operation {
 			return store.ErrConflict
 		}
@@ -287,6 +290,15 @@ func (c *Controller) sweepRemoveFirst(ctx context.Context) {
 					ObservePinnedDelete(context.Context, cloud.NodeIdentity, string, string) (removefirst.Observation, error)
 				}); ok {
 					state, err := observer.ObservePinnedDelete(sctx, *rec.DeleteTarget, rec.Pool, rec.MachineName)
+					if err == nil && state == removefirst.IdentityChanged && rec.Provider == "azure" {
+						reason := fmt.Sprintf("The removal of machine %s from pool %s was started, but its outcome was not recorded. A machine with this name is listed now, and KubeNeuron cannot confirm that it is the original one, so the removal was not repeated. Check the machine and the size of the pool, then run kubeneuronctl resolve %s --cloud-operation-settled --reason \"<what you found>\".", rec.MachineName, rec.Pool, inc.ID)
+						if inc.State != types.StateNeedsHuman {
+							err = c.quarantineAfterStep(sctx, inc, reason, false)
+						}
+						if err == nil {
+							err = c.endRemoveFirst(sctx, inc, types.RemoveFirstNeedsOperator, reason)
+						}
+					}
 					if err == nil && state == removefirst.Deleted {
 						err = c.endRemoveFirst(sctx, inc, types.RemoveFirstDeleteConfirmed, "")
 					}

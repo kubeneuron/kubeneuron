@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/recoverymode"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
@@ -453,5 +454,36 @@ func TestRestartFindsConfirmedDeleteWithoutStepOutcome(t *testing.T) {
 	found, err = r.findCloudReplacement(ctx, reloaded)
 	if err != nil || found != nil {
 		t.Fatalf("previous attempt supplied a replacement: %v %v", found, err)
+	}
+}
+
+type ambiguousMachinePlatform struct{ *plannedPlatform }
+
+func (*ambiguousMachinePlatform) ObservePinnedDelete(context.Context, cloud.NodeIdentity, string, string) (removefirst.Observation, error) {
+	return removefirst.IdentityChanged, nil
+}
+
+func TestRestartParksReusedAKSMachineName(t *testing.T) {
+	p := &ambiguousMachinePlatform{newPlannedPlatform()}
+	c, st := plannedFixture(t, p.plannedPlatform)
+	id := openOn(t, c, "n1")
+	inc := mustIncident(t, st, id)
+	inc.State = types.StateExecuting
+	inc.CloudIdentity.ProviderID = "azure:///private/subscription/old"
+	if err := st.UpdateIncident(t.Context(), inc); err != nil {
+		t.Fatal(err)
+	}
+	inc = mustIncident(t, st, id)
+	if err := c.claimDeleteIntent(t.Context(), inc, *inc.CloudIdentity, "gpu", "machine-old", ""); err != nil {
+		t.Fatal(err)
+	}
+	r := restartWith(t, c, st, p)
+	r.sweepRemoveFirst(t.Context())
+	got := mustIncident(t, st, id)
+	if got.State != types.StateNeedsHuman || got.RemoveFirst.Outcome != types.RemoveFirstNeedsOperator {
+		t.Fatalf("state=%s outcome=%s", got.State, got.RemoveFirst.Outcome)
+	}
+	if !strings.Contains(got.RemoveFirst.Reason, "kubeneuronctl resolve "+id+" --cloud-operation-settled") || strings.Contains(got.RemoveFirst.Reason, "subscription") {
+		t.Fatal(got.RemoveFirst.Reason)
 	}
 }
