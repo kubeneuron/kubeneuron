@@ -4,6 +4,7 @@ package aws
 
 import (
 	"context"
+	"errors"
 
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
@@ -27,4 +28,16 @@ func (r *Recycler) ObserveRemoveFirstDelete(ctx context.Context, instanceID stri
 	default:
 		return removefirst.Unknown, nil
 	}
+}
+
+// ReplaceNamedWithIntent records the EC2 instance immediately before
+// termination. The controller already recorded the replacement pool.
+func (r *Recycler) ReplaceNamedWithIntent(ctx context.Context, instanceID string, record func(pool, machine, successor string) error) (string, error) {
+	if instanceID == "" {
+		return "", errors.New("aws: instance ID is required")
+	}
+	if err := record("", instanceID, ""); err != nil {
+		return "", err
+	}
+	return "", r.Replace(ctx, instanceID)
 }

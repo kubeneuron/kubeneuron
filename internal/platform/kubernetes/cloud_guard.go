@@ -122,12 +122,23 @@ func (p *Platform) ReplacePinnedNode(ctx context.Context, pin cloud.NodeIdentity
 }
 
 func (p *Platform) ReplacePinnedNodeNamed(ctx context.Context, pin cloud.NodeIdentity) (string, error) {
-	v, err := p.RecoveryEligibility(ctx, pin)
-	if err != nil {
+	return p.ReplacePinnedNodeWithIntent(ctx, pin, nil)
+}
+
+// ReplacePinnedNodeWithIntent runs the provider's pre-delete callback only
+// after the normal identity and cloud eligibility checks have passed.
+func (p *Platform) ReplacePinnedNodeWithIntent(ctx context.Context, pin cloud.NodeIdentity, record func(pool, machine, successor string) error) (string, error) {
+	if err := p.replaceEligible(ctx, pin); err != nil {
 		return "", err
 	}
-	if !v.ReplaceAllowed {
-		return "", fmt.Errorf("cloud replacement unavailable: %s", v.Reason)
+	if record != nil {
+		provider, ok := p.recycler.(interface {
+			ReplaceNamedWithIntent(context.Context, string, func(string, string, string) error) (string, error)
+		})
+		if !ok {
+			return "", cloud.ErrRemoveFirstUnplanned
+		}
+		return provider.ReplaceNamedWithIntent(ctx, pin.InstanceID, record)
 	}
 	// Never substitute an instance discovered by a later name lookup.
 	if named, ok := p.recycler.(resizediff.Replacer); ok {
