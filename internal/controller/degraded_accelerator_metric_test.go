@@ -72,7 +72,9 @@ func TestDegradedAcceleratorSecondsMatchTheGPUSeries(t *testing.T) {
 		return testutil.ToFloat64(metrics.DegradedAcceleratorSeconds.WithLabelValues(class, "expired", "nvidia.com/gpu")) +
 			testutil.ToFloat64(metrics.DegradedAcceleratorSeconds.WithLabelValues(class, "expired", "amd.com/gpu"))
 	}
-	old := func() float64 { return testutil.ToFloat64(metrics.DegradedGPUSeconds.WithLabelValues(class, "expired")) }
+	old := func() float64 {
+		return testutil.ToFloat64(metrics.DegradedGPUSeconds.WithLabelValues(class, "expired"))
+	}
 	gpuBefore, oldBefore := gpu(), old()
 	opened := time.Now().Add(-time.Hour)
 	for _, inc := range []*types.Incident{

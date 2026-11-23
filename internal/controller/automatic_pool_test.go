@@ -157,7 +157,9 @@ func recordPoolUnder(t *testing.T, st *sqlite.Store, id, label, pool string) {
 	}
 }
 
-func groupLabels(group string) map[string]string { return map[string]string{"pool": "train", "group": group} }
+func groupLabels(group string) map[string]string {
+	return map[string]string{"pool": "train", "group": group}
+}
 
 // The per-pool limit counts an open recovery in the pool its authorisation
 // recorded, wherever its node is now. A recovery authorised before the pool

@@ -1793,7 +1793,7 @@ func (a *Agent) nvidiaAcceleratorReportWithProfile(ctx context.Context, profile 
 			gpuCount, discoveryErr := a.nvidia.runtimeProber.GPUCount(preflightCtx)
 			if discoveryErr != nil {
 				dcgmUnavailable = true
-				snapshot.Reasons = append(snapshot.Reasons, types.ReasonPrefixDCGMDiscoveryProbe + discoveryErr.Error())
+				snapshot.Reasons = append(snapshot.Reasons, types.ReasonPrefixDCGMDiscoveryProbe+discoveryErr.Error())
 			} else if gpuCount != len(snapshot.Inventory.Devices) {
 				snapshot.Reasons = append(snapshot.Reasons,
 					fmt.Sprintf("DCGM discovery found %d GPUs, nvidia-smi inventory found %d", gpuCount, len(snapshot.Inventory.Devices)))

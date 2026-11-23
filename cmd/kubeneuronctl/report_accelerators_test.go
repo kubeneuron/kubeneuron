@@ -123,9 +123,9 @@ func TestRecoveryReportTextGolden(t *testing.T) {
 		Resources: []types.AcceleratorResourceReport{resource("google.com/tpu", 1, 12, 6, 3)}}}}
 	dryRun := &types.RecoveryReport{From: to.Add(-168 * time.Hour), To: to, DryRunExcluded: 1, Classes: []types.RecoveryClassReport{}, Open: []types.RecoveryOpenIncident{},
 		Simulated: &types.SimulatedRecovery{Incidents: 1, WouldRecover: 1, DegradedGPUHours: 12, WouldRecoverGPUHours: 6,
-			MTTR:             types.RecoveryLatency{P50Seconds: p50, P90Seconds: p50},
-			WouldHaveSaved:   &types.SavingsEstimate{GPUHoursSaved: 3, ManualBaselineSeconds: baseline},
-			IncidentDetails:  []types.RecoveryIncident{{ID: "inc-3", Node: "tpu-node", State: types.IncidentState("RESOLVED"), DegradedGPUHours: 12, RecoverySeconds: &p50,
+			MTTR:           types.RecoveryLatency{P50Seconds: p50, P90Seconds: p50},
+			WouldHaveSaved: &types.SavingsEstimate{GPUHoursSaved: 3, ManualBaselineSeconds: baseline},
+			IncidentDetails: []types.RecoveryIncident{{ID: "inc-3", Node: "tpu-node", State: types.IncidentState("RESOLVED"), DegradedGPUHours: 12, RecoverySeconds: &p50,
 				Accelerators: []types.IncidentAccelerator{{Resource: "google.com/tpu", Unit: types.DeviceUnitTPUChip, Count: 4}}}},
 			AcceleratorHours: tpuOnly}}
 	for _, tc := range []struct {

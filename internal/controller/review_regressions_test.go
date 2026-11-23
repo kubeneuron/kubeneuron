@@ -200,7 +200,9 @@ func TestPreviewSaysWhenAGroupTotalIsUnknown(t *testing.T) {
 	plat := &checkpointPlatform{basePlatform: basePlatform{workloads: []platform.Workload{
 		grouped("rank-0", "training", "n1", "run-42"), grouped("rank-1", "training", "n1", "run-42"),
 	}}}
-	plat.groups = func(string, string, int) ([]platform.Workload, bool, error) { return nil, false, fmt.Errorf("listing refused") }
+	plat.groups = func(string, string, int) ([]platform.Workload, bool, error) {
+		return nil, false, fmt.Errorf("listing refused")
+	}
 	policy := advisoryPolicy()
 	policy.Groups = checkpoint.GroupPolicy{Enabled: true, MaxGroupSize: 64}
 	c, inc, _ := advisoryFixture(t, gatedPlaybook(), plat, policy)

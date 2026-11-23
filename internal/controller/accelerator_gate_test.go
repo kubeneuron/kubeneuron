@@ -1164,7 +1164,7 @@ func TestInventorySummaryNamesTheAgentRuntimeClassWhileOthersReport(t *testing.T
 	s := &fleetSummaryStore{Store: st, nodes: []*types.Node{{Name: "node-a", UID: "uid-a", AgentLastSeen: time.Now(), GPUs: []types.GPUInfo{{UUID: "GPU-a"}}}}}
 	p := &deviceInventoryPlatform{
 		fleetSummaryPlatform: &fleetSummaryPlatform{topoObservingPlatform: wholeDeviceTopologyPlatform(), nodes: []types.Node{{Name: "node-a", UID: "uid-a"}}},
-		inventory: []types.Node{{Name: "node-a", UID: "uid-a", Devices: []types.DeviceCount{{Resource: "nvidia.com/gpu", Capacity: 1, Allocatable: 1, Unit: types.DeviceUnitGPU}}}},
+		inventory:            []types.Node{{Name: "node-a", UID: "uid-a", Devices: []types.DeviceCount{{Resource: "nvidia.com/gpu", Capacity: 1, Allocatable: 1, Unit: types.DeviceUnitGPU}}}},
 	}
 	c := New(s, nil, nil, nil, nil, p, nil, nil, slog.Default())
 	c.runtimeClassDiagnostic = func(context.Context) (string, int, error) { return "AgentRuntimeClassNotStarting", 2, nil }

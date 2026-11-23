@@ -143,9 +143,9 @@ func TestIncidentShowPolicyHoldAndRecovery(t *testing.T) {
 // incidents impact is named only when the round has a preview to read.
 func TestIncidentShowApprovalRound(t *testing.T) {
 	const (
-		withPreview    = "approval:  round 3 (use --round 3 with approve, reject and incidents impact)\n"
-		unavailable    = "approval:  round 3 (use --round 3 with approve and reject; no impact preview for this round: WorkloadListingTimeout)\n"
-		off            = "approval:  round 3 (use --round 3 with approve and reject; impact preview is off — set spec.safety.impactPreview.enabled to see what this step affects)\n"
+		withPreview = "approval:  round 3 (use --round 3 with approve, reject and incidents impact)\n"
+		unavailable = "approval:  round 3 (use --round 3 with approve and reject; no impact preview for this round: WorkloadListingTimeout)\n"
+		off         = "approval:  round 3 (use --round 3 with approve and reject; impact preview is off — set spec.safety.impactPreview.enabled to see what this step affects)\n"
 	)
 	for _, tc := range []struct {
 		name    string
