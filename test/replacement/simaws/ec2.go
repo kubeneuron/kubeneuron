@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"sync"
 
@@ -58,6 +59,9 @@ func (c *Instances) DescribeInstanceStatus(_ context.Context, in *ec2.DescribeIn
 }
 
 func (c *Instances) TerminateInstances(_ context.Context, in *ec2.TerminateInstancesInput, _ ...func(*ec2.Options)) (*ec2.TerminateInstancesOutput, error) {
+	if c.scaling.traceMutations && !aws.ToBool(in.DryRun) {
+		log.Print("zone rehearsal: delete call")
+	}
 	c.scaling.mu.Lock()
 	defer c.scaling.mu.Unlock()
 	c.mu.Lock()

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"sync"
 	"time"
@@ -18,14 +19,15 @@ import (
 // EKS serves a single managed node group. Grow applies the requested absolute
 // size to its backing Auto Scaling group before the update becomes visible.
 type EKS struct {
-	Group      et.Nodegroup
-	Grow       func(int32, time.Time) error
-	mu         sync.Mutex
-	updates    map[string]*et.Update
-	hold, lose bool
-	launch     func(time.Time)
-	pending    *et.Update
-	scaling    *Scaling
+	traceMutations bool
+	Group          et.Nodegroup
+	Grow           func(int32, time.Time) error
+	mu             sync.Mutex
+	updates        map[string]*et.Update
+	hold, lose     bool
+	launch         func(time.Time)
+	pending        *et.Update
+	scaling        *Scaling
 }
 
 func (e *EKS) group(cluster, name *string) error {
@@ -43,6 +45,9 @@ func (e *EKS) DescribeNodegroup(_ context.Context, in *eks.DescribeNodegroupInpu
 }
 
 func (e *EKS) UpdateNodegroupConfig(_ context.Context, in *eks.UpdateNodegroupConfigInput, _ ...func(*eks.Options)) (*eks.UpdateNodegroupConfigOutput, error) {
+	if e.traceMutations {
+		log.Print("zone rehearsal: grow call")
+	}
 	if err := e.group(in.ClusterName, in.NodegroupName); err != nil {
 		return nil, err
 	}

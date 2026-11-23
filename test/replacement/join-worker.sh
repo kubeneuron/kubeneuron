@@ -45,6 +45,10 @@ if ! "${k[@]}" get node "$node" >/dev/null; then
     sed -E 's/[a-z0-9]{6}\.[a-z0-9]{16}/[redacted]/g' >&2
   exit 1
 fi
+if [[ -n ${ZONE_SCENARIO:-} ]]; then
+  test "$provider_id" = aws:///us-east-1b/i-new
+  "${k[@]}" label node "$node" topology.kubernetes.io/zone=us-east-1b
+fi
 docker save "$AGENT_IMAGE" | docker exec -i "$node" ctr -n k8s.io images import - >/dev/null
 "${k[@]}" wait --for=condition=Ready "node/$node" --timeout=2m
 "${k[@]}" get node "$node" -o json | jq -e --arg id "$provider_id" --arg label "$POOL_LABEL" '.spec.providerID==$id and .metadata.labels[$label]=="gpu"' >/dev/null

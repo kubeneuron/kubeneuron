@@ -5,6 +5,7 @@ package simaws
 import (
 	"context"
 	"errors"
+	"log"
 	"slices"
 	"sync"
 	"time"
@@ -16,9 +17,10 @@ import (
 
 // Scaling records membership and launch activities for a single backing group.
 type Scaling struct {
-	mu         sync.Mutex
-	group      at.AutoScalingGroup
-	activities []at.Activity
+	traceMutations bool
+	mu             sync.Mutex
+	group          at.AutoScalingGroup
+	activities     []at.Activity
 }
 
 func (s *Scaling) DescribeAutoScalingInstances(_ context.Context, in *autoscaling.DescribeAutoScalingInstancesInput, _ ...func(*autoscaling.Options)) (*autoscaling.DescribeAutoScalingInstancesOutput, error) {
@@ -57,6 +59,9 @@ func (s *Scaling) DescribeScalingActivities(_ context.Context, in *autoscaling.D
 }
 
 func (s *Scaling) TerminateInstanceInAutoScalingGroup(_ context.Context, in *autoscaling.TerminateInstanceInAutoScalingGroupInput, _ ...func(*autoscaling.Options)) (*autoscaling.TerminateInstanceInAutoScalingGroupOutput, error) {
+	if s.traceMutations {
+		log.Print("zone rehearsal: delete call")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !aws.ToBool(in.ShouldDecrementDesiredCapacity) || aws.ToInt32(s.group.DesiredCapacity) < 2 {

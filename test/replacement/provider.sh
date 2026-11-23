@@ -21,4 +21,15 @@ case ${REPLACEMENT_PROVIDER:-aws} in
     ;;
   *) echo "Unknown replacement provider: $REPLACEMENT_PROVIDER" >&2; exit 1 ;;
 esac
+case ${ZONE_SCENARIO:-} in
+  "") ;;
+  AnyPoolZone|SameZone)
+    if [[ ${REPLACEMENT_PROVIDER:-aws} != aws ]]; then
+      echo "ZONE_SCENARIO requires the AWS simulator" >&2; exit 1
+    fi
+    INITIAL_ID=aws:///us-east-1a/i-pinned
+    CLOUD_CONFIG=$(jq -c '.aws.clusterName = "training-two-zones"' <<<"$CLOUD_CONFIG")
+    ;;
+  *) echo "Unknown ZONE_SCENARIO: $ZONE_SCENARIO" >&2; exit 1 ;;
+esac
 export INITIAL_ID POOL_LABEL CLOUD_CONFIG

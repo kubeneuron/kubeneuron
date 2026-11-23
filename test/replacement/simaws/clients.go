@@ -17,7 +17,10 @@ func NewClients(cluster string) (*Instances, *Scaling, *EKS) {
 
 // NewTwoZoneClients places the original in zone A and launches its successor in zone B.
 func NewTwoZoneClients(cluster string) (*Instances, *Scaling, *EKS) {
-	return newClients(cluster, []string{"us-east-1a", "us-east-1b"}, "us-east-1b")
+	ec, scaling, eks := newClients(cluster, []string{"us-east-1a", "us-east-1b"}, "us-east-1b")
+	scaling.traceMutations = true
+	eks.traceMutations = true
+	return ec, scaling, eks
 }
 
 func newClients(cluster string, zones []string, launchZone string) (*Instances, *Scaling, *EKS) {

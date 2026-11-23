@@ -41,6 +41,9 @@ for secret in rehearsal-operator-api-token rehearsal-webhook-token; do
   openssl rand -hex 32 | tr -d '\n' | "${k[@]}" -n rehearsal create secret generic "$secret" --from-file=token=/dev/stdin
 done
 worker="$CLUSTER_NAME-worker"
+if [[ -n ${ZONE_SCENARIO:-} ]]; then
+  "${k[@]}" label node "$worker" topology.kubernetes.io/zone=us-east-1a
+fi
 "${k[@]}" cordon "$worker"
 "${k[@]}" taint node "$CLUSTER_NAME-control-plane" node-role.kubernetes.io/control-plane:NoSchedule-
 sed "s|POOL_LABEL|$POOL_LABEL|g" "$d/installation.json" | jq --argjson cloud "$CLOUD_CONFIG" --arg agent "$AGENT_IMAGE" --arg controller "$control" '
