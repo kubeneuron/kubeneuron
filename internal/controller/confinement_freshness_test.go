@@ -4,11 +4,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
@@ -148,5 +150,58 @@ func TestConfinementResolvesForANodeOutsideTheGPUInventory(t *testing.T) {
 	if got != confinementAllowed {
 		t.Fatalf("confinement = %v (%s), want allowed: the node carries the selector label, "+
 			"and being absent from the GPU inventory must not make its blast radius unknowable", got, reason)
+	}
+}
+
+type missingLabelNode struct{ labelerPlatform }
+
+func (*missingLabelNode) NodeLabels(context.Context, string) (map[string]string, bool, error) {
+	return nil, false, nil
+}
+
+type failedLabelLookup struct{ labelerPlatform }
+
+func (*failedLabelLookup) NodeLabels(context.Context, string) (map[string]string, bool, error) {
+	return nil, false, errors.New("node cache unavailable")
+}
+
+type failedInventoryLookup struct{ livePlatform }
+
+func (*failedInventoryLookup) ListNodes(context.Context) ([]types.Node, error) {
+	return nil, errors.New("inventory unavailable")
+}
+
+func TestSelectorWindowLabelResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name, stored       string
+		p                  platform.Platform
+		active, unresolved bool
+	}{
+		{"label added", "old", &labelerPlatform{labels: map[string]string{"rack": "new"}}, true, false},
+		{"label removed", "new", &labelerPlatform{labels: map[string]string{}}, false, false},
+		{"deleted node with cached labels outside the window", "old", &missingLabelNode{}, true, true},
+		{"bare metal", "new", nil, true, false},
+		{"list failure with cached match", "new", &failedInventoryLookup{}, true, true},
+		{"read failure with cached match", "new", &failedLabelLookup{}, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, st, _ := walkFixture(t, true)
+			c.platform = tc.p
+			ctx := context.Background()
+			if err := st.UpsertNode(ctx, &types.Node{Name: "n1", UID: "n1-uid", AgentLastSeen: time.Now(), Labels: map[string]string{"rack": tc.stored}}); err != nil {
+				t.Fatal(err)
+			}
+			c.SetMaintenanceWindows([]config.MaintenanceWindow{{Name: "service", StartsAt: time.Now().Add(-time.Hour), EndsAt: time.Now().Add(time.Hour), MatchLabels: map[string]string{"rack": "new"}}})
+			_, hold := c.activeMaintenanceWindow(ctx, "n1")
+			permit, err := c.autonomyMaintenanceWindowActive(ctx, "n1", []string{"service"})
+			if hold != tc.active || permit != (tc.active && !tc.unresolved) || (err != nil) != tc.unresolved {
+				t.Fatalf("hold=%v permit=%v err=%v", hold, permit, err)
+			}
+			if tc.unresolved {
+				if _, err := c.nodeLabelsForConfinement(ctx, "n1"); err == nil {
+					t.Fatal("confinement used cached labels after a failed live read")
+				}
+			}
+		})
 	}
 }

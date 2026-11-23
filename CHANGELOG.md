@@ -65,6 +65,15 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- **Maintenance windows and destructive-scope checks read the node's current
+  labels.** A window that selects nodes by label was matched against the labels
+  recorded for the node, which were not updated after its agent registered: a node
+  labelled into a window afterwards was not covered, and automation could act on
+  it during the window; a node removed from a window a GPUAutonomyPlan refers to
+  could still pass the plan's window check. Labels are now read from the
+  Kubernetes node; if they cannot be read, automation holds. Present in
+  v1.0.0-rc.1.
+
 - **After an automatic replacement, the circuit breaker no longer counts the
   replaced node.** The breaker read its pool from the nodes KubeNeuron had
   recorded, which keep a node whose agent registered after the node is
