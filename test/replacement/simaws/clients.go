@@ -8,6 +8,7 @@ import (
 	at "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
 	ct "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	et "github.com/aws/aws-sdk-go-v2/service/eks/types"
+	"log"
 	"time"
 )
 
@@ -18,6 +19,7 @@ func NewClients(cluster string) (*Instances, *Scaling, *EKS) {
 // NewTwoZoneClients places the original in zone A and launches its successor in zone B.
 func NewTwoZoneClients(cluster string) (*Instances, *Scaling, *EKS) {
 	ec, scaling, eks := newClients(cluster, []string{"us-east-1a", "us-east-1b"}, "us-east-1b")
+	log.Print("zone rehearsal: simulator ready")
 	scaling.traceMutations = true
 	eks.traceMutations = true
 	return ec, scaling, eks

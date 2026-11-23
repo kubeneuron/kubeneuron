@@ -58,6 +58,24 @@ audit="$EVIDENCE_DIR/A.json"
 wait_until pool_ready AddFirst
 wait_until policy_loaded kind-nvidia
 initial_uid=$("${k[@]}" get node "$worker" -o jsonpath='{.metadata.uid}')
+if [[ ${ZONE_SCENARIO:-} == SameZone ]]; then
+  inject "$worker" 124c:3b:00
+  # Called indirectly by wait_until.
+  # shellcheck disable=SC2329
+  refusal_recorded() {
+    api "incidents/$id" >"$audit" &&
+      jq -e 'any(.audit[]; (.result // "") | contains("EKS chooses the zone of a new node in this pool"))' "$audit" >/dev/null
+  }
+  wait_until refusal_recorded
+  api pools >"$EVIDENCE_DIR/same-zone-pools.json"
+  "${k[@]}" get node "$worker" -o json >"$EVIDENCE_DIR/same-zone-node.json"
+  "${k[@]}" -n rehearsal logs deploy/rehearsal-controller >"$EVIDENCE_DIR/same-zone-controller.log"
+  jq -ne --arg uid "$initial_uid" --slurpfile pool "$EVIDENCE_DIR/same-zone-pools.json" \
+    --slurpfile original "$EVIDENCE_DIR/same-zone-node.json" --rawfile log "$EVIDENCE_DIR/same-zone-controller.log" \
+    '{pools:$pool[0].pools,node:$original[0],log:$log,uid:$uid}' |
+    jq -e -f assert-same-zone.jq
+  exit 0
+fi
 inject "$worker" 124c:3b:00
 wait_until audit_matches '(.incident.successor.provider_id | strings | length)>0 and any(.audit[];.action=="successor-created")'
 successor_id=$(jq -er '.incident.successor.provider_id' "$audit")

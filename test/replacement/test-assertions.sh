@@ -17,4 +17,12 @@ for f in testdata/early-hold/*/*.json; do
     failed=1
   fi
 done
+for f in testdata/same-zone/*.json; do
+  rc=0
+  jq -e -f assert-same-zone.jq "$f" >/dev/null || rc=$?
+  case "$(basename "$f"):$rc" in
+    pass-*:0|fail-*:1) ;;
+    *) echo "assert-same-zone.jq: $f returned $rc" >&2; failed=1 ;;
+  esac
+done
 exit "$failed"
