@@ -58,6 +58,10 @@ Managed Grafana keeps its administrator account in your cluster. The installatio
 
 ## Deletion and access
 
+After Kubernetes deletes a node whose agent registered, the controller retains its record, including the node name, any recorded UID and labels, and any GPUs the agent reported (model and UUID), with no automatic expiry; the record stays in the workflow store and its backups.
+
+By default, incidents and their audit records, including the identities of operators who approved, rejected or triggered actions, are kept indefinitely; set `-store-audit-retention` to prune terminal incidents with their audit after that period. Backups keep them for as long as the backups are kept.
+
 Uninstall retains the controller's state by default. See the [installation guide](install.md) for the explicit state deletion option. Manage an external PostgreSQL database or external metrics store through its own retention and deletion controls.
 
 The operator never deletes the managed metrics volume. `deploy/install.sh --uninstall --delete-data` deletes it together with the controller's state; a plain uninstall keeps it, and it can still contain metrics and node names. To erase the volume, run `kubectl delete pvc <name>-metrics-store -n <namespace>`, substituting the KubeNeuron resource name and its configured namespace. Underlying disk disposal follows the volume's reclaim policy.

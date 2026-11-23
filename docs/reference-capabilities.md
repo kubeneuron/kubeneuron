@@ -60,6 +60,8 @@ skipped.
 
 ## Live cloud evidence
 
+On Amazon EKS, in a node pool with real NVIDIA Tesla T4 GPUs, KubeNeuron replaced a node twice under an Automatic policy, with no manual approvals: add-first, then remove-first on the node that had replaced the first. Each fault was injected as an NVIDIA XID 79 line in the node's kernel log; the GPU itself was healthy. KubeNeuron verified each new node by readiness, advertised capacity and the device inventory its agent reported, and the driver answered; device health was not checked. Separately from KubeNeuron, the run checked the GPU on each new node with nvidia-smi (Tesla T4, driver 580.178.04) and the CUDA vectorAdd sample, which passed. This was done once, on build adcda3d4ae80834dd08f99a99f7b0a3d463ea8d4 — the code released as v1.0.0-rc.2 (the commits after it change only a test script, the version, the changelog and the documentation).
+
 The kind tests run on CPU-only Kubernetes nodes without GPUs or cloud API calls.
 Each live-cloud entry applies only to the path and run shown.
 
@@ -126,7 +128,7 @@ tooling, kernel-log format, or Kubernetes resource names.
 | Capability | NVIDIA | AMD | Intel |
 |---|---|---|---|
 | Kernel-log fault detection (`/dev/kmsg`) | shipped & hardware-validated — `internal/agent/kmsg/watcher.go` | shipped, not hardware-validated — `internal/agent/kmsg/amdgpu.go` | seam only (no implementation) |
-| Polled telemetry fault detection (DCGM / vendor SMI) | shipped & hardware-validated — `internal/agent/gpuhealth/gpuhealth.go` | shipped, not hardware-validated — `internal/agent/amdhealth/amdhealth.go` (fixtures are synthetic: the amd-smi JSON schema is reconstructed, not captured) | seam only (no implementation) |
+| Polled telemetry fault detection (DCGM / vendor SMI) | shipped & hardware-validated — `internal/agent/gpuhealth/gpuhealth.go` | code present, not enabled in an operator-managed installation, not hardware-validated — `internal/agent/amdhealth/amdhealth.go` (the operator does not set the agent's `--amd-detection` flag; fixtures are synthetic: the amd-smi JSON schema is reconstructed, not captured) | seam only (no implementation) |
 | Metric-alert fault detection (vmalert → Alertmanager, or the managed vmalert → controller) | shipped, not hardware-validated — `configs/vmalert/gpu-rules.yaml`, `configs/vmalert/gpu-alert-rules.yaml`, `internal/detect/alertmanager.go` | seam only (no implementation) | seam only (no implementation) |
 | XID catalog (vendor-native fault encoding) | shipped & hardware-validated — `internal/detect/xid.go` | not applicable | not applicable |
 | Neutral fault catalog (`(vendor, code)` → class) | shipped, not hardware-validated — `internal/detect/fault.go` (9 NVIDIA rows; coverage pinned by `fault_coverage_test.go`) | shipped, not hardware-validated — `internal/detect/fault.go` (9 AMD rows; coverage pinned by `fault_coverage_test.go`) | seam only (no implementation) |
@@ -285,10 +287,10 @@ kernel-log XIDs 79 and 92 read off a live node into `ClassFellOffBus` and
 threshold hold.
 
 **Neutral fault catalog — not hardware-validated.** `internal/detect/fault.go`
-holds 18 rows across two vendors: 9 `nvidia` and 9 `amd`. Both vendors' rows
-are emitted by shipping sources — the NVIDIA rows by the `nvidia-smi -q`
-fallback, the AMD rows by `internal/agent/amdhealth` and the `amdgpu` kmsg
-families — and `fault_coverage_test.go` fails the build if any class the XID
+holds 18 rows across two vendors: 9 `nvidia` and 9 `amd`. The NVIDIA source uses the
+`nvidia-smi -q` fallback. The managed agent detects AMD faults from matching
+`amdgpu` kernel-log entries. Additional AMD rows map signals from
+`internal/agent/amdhealth`, which an operator-managed installation does not enable. `fault_coverage_test.go` fails the build if any class the XID
 catalog can reach stops being reachable through a neutral `(vendor, code)` row.
 `GPUSignalMapping.spec.faults[]` can add further rows declaratively
 (`internal/detect/catalog.go`, covered by `catalog_test.go`).

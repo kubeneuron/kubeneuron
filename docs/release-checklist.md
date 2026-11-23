@@ -1,6 +1,6 @@
 # Release checklist
 
-Work through this list, in order, before pushing a release tag, including `v1.0.0-rc.1`.
+Work through this list, in order, before pushing a release tag, including `v1.0.0-rc.2`.
 Release tags (`refs/tags/v*`) and adapter contract module tags
 (`refs/tags/pkg/accelerator/v*`, `refs/tags/pkg/cloud/v*`) can be created,
 moved, or deleted only by repository admins (repository ruleset "release
@@ -124,13 +124,13 @@ tagging the release.
 
 ## 3. Tag and verify
 
-- [ ] For `v1.0.0-rc.1`, verify that Chart.yaml has `version: 1.0.0-rc.1` and `appVersion: v1.0.0-rc.1`. rc.1 has no base release and supports a clean installation.
-- [ ] Check the release workflow's `BASELINE` before tagging. It names the previous published release: `v1.0.0-rc.1` for the next tag. Run `make test-upgrade-rollback-kind BASELINE=v1.0.0-rc.1` locally first. Confirm the `upgrade-rehearsal` job passes for both stores and does not report `upgrade rehearsal: skipped, no base release`.
-- [ ] Confirm approval before pushing the tag. **Pushing the tag starts public distribution**: the workflow can publish four tagged GHCR images before it creates the GitHub Release draft. For rc.1 the image tag is exactly `v1.0.0-rc.1`.
+- [ ] For rc.2, verify that Chart.yaml has `version: 1.0.0-rc.2` and `appVersion: v1.0.0-rc.2`, and that the default image tag in values.yaml is `v1.0.0-rc.2`.
+- [ ] Check the release workflow's `BASELINE` before tagging. It names the previous published release: `v1.0.0-rc.1` for rc.2. Run `make test-upgrade-rollback-kind BASELINE=v1.0.0-rc.1` locally first. Confirm the `upgrade-rehearsal` job passes for both stores and does not report `upgrade rehearsal: skipped, no base release`.
+- [ ] Confirm approval before pushing the tag. **Pushing the tag starts public distribution**: the workflow can publish four tagged GHCR images before it creates the GitHub Release draft. For rc.2 the image tag is exactly `v1.0.0-rc.2`.
 - [ ] Wait for `release-verify` to succeed for the draft ID created by this run. Review the install manifest, installer, CLI archives, image digests, SBOMs and signed checksums.
 - [ ] Compare `/licenses/THIRD_PARTY_LICENSES` and `/licenses/NOTICE` from each signed image digest with `THIRD_PARTY_LICENSES` and `NOTICE` in the tagged tree. Require a byte-for-byte match.
-- [ ] For rc.1, confirm that exact release ID has the expected tag, `draft=true` and `prerelease=true`. After maintainer review, publish the verified draft by ID with `draft=false`, `prerelease=true` and `make_latest="false"`. Verify the published release retains prerelease status and the Latest release pointer has not moved. For stable tags the workflow publishes automatically after verification.
-- [ ] Run `bash hack/verify-release.sh v1.0.0-rc.1 kubeneuron/kubeneuron` against the published candidate.
+- [ ] For rc.2, confirm that exact release ID has the expected tag, `draft=true` and `prerelease=true`. After maintainer review, publish the verified draft by ID with `draft=false`, `prerelease=true` and `make_latest="false"`. Verify the published release retains prerelease status and the Latest release pointer has not moved. For stable tags the workflow publishes automatically after verification.
+- [ ] Run `bash hack/verify-release.sh v1.0.0-rc.2 kubeneuron/kubeneuron` against the published candidate.
 - [ ] For the first stable (GA) release, return the install command in `docs/quickstart.md` and `docs/install.md` to `latest`, and review every "Not repeated on v1.0.0-rc.1" sentence in README and docs against the runs on the release being tagged.
 
 ## Pinned inputs and tool versions

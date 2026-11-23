@@ -9,6 +9,12 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+## [v1.0.0-rc.2] - 2026-11-23
+
+### Hardware evidence
+
+On Amazon EKS, in a node pool with real NVIDIA Tesla T4 GPUs, KubeNeuron replaced a node twice under an Automatic policy, with no manual approvals: add-first, then remove-first on the node that had replaced the first. Each fault was injected as an NVIDIA XID 79 line in the node's kernel log; the GPU itself was healthy. KubeNeuron verified each new node by readiness, advertised capacity and the device inventory its agent reported, and the driver answered; device health was not checked. Separately from KubeNeuron, the run checked the GPU on each new node with nvidia-smi (Tesla T4, driver 580.178.04) and the CUDA vectorAdd sample, which passed. This was done once, on build adcda3d4ae80834dd08f99a99f7b0a3d463ea8d4 — the code released as v1.0.0-rc.2 (the commits after it change only a test script, the version, the changelog and the documentation).
+
 ### Security
 
 - Updated the controller’s transitive OIDC dependency `github.com/go-jose/go-jose/v4` to v4.1.6 to address GHSA-mgcc-cww5-fp2q, GHSA-vvm8-gf78-28g4 and GHSA-4w3g-jfj2-cw2q.
@@ -18,7 +24,7 @@ API is `v1alpha1`.
 - **The agent reads NVIDIA GPUs without node-level actions.** By default
   (`spec.agent.deviceAccess: NvidiaRuntime`) it asks the NVIDIA container
   runtime for the node's GPUs and `nvidia-smi`, stays unprivileged with a
-  read-only root filesystem, and mounts no host path. It reports each GPU's
+  read-only root filesystem, and adds no hostPath mount for GPU access. It reports each GPU's
   model and UUID and the driver version. Where the runtime exposes no GPU, the agent reports none
   and keeps watching the kernel log; `GPUVisibility` and `kubeneuronctl
   status` report `RuntimeDidNotExposeGPUs`. `deviceAccess: None` turns it
@@ -64,6 +70,8 @@ API is `v1alpha1`.
   the pre-upgrade snapshot and upgrades again.
 
 ### Fixed
+
+- Corrected the AMD documentation. The operator-managed agent detects matching kernel-log events and does not enable AMD telemetry polling.
 
 - **An automatic step waits until the controller has loaded a policy
   change.** The operator publishes a change at once and the policy's

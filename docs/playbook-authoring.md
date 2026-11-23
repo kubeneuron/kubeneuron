@@ -443,9 +443,18 @@ carries the limits:
   an unlisted or unknown profile, or a fault that is `shared` or `unknown`,
   the replacement waits for approval and the incident states the reason; the
   policy's `AutomaticReplacement` condition is `False` with reason `NoQualifiedProfiles` when the list is empty.
+  With RemoveFirst, cordon needs no approval and can run before the profile
+  check; the step that first needs authorisation (drain in the supplied
+  playbook) is where an unqualified profile stops the incident, before drain
+  and replacement. With AddFirst, cordon requests the successor, so the check
+  applies already at cordon.
   Listing a profile is the operator's decision; KubeNeuron does not verify
   that automatic replacement is safe for it. Steps that replace no node, and
   DryRun, are unchanged.
+  This release ships no `AcceleratorRuntimeProfile` for AMD nodes. With the
+  supplied configuration, a replacement on an AMD node requires approval.
+  Replacement has not been exercised on AMD nodes; with the supplied policies
+  an incident from an `amdgpu` kernel-log fault goes to an operator.
 - Per-node pause and maintenance windows hold automatic steps exactly as they
   hold every other step.
 
@@ -704,6 +713,9 @@ second sentence says what was confirmed, no more than the new node's report
 says:
 
 - `Fresh accelerator inventory and driver health observed.`: a ready report.
+  On a VM where the hypervisor withholds PCI reset, the agent reports
+  `degraded` even when DCGM discovery finds every GPU. The replacement
+  therefore cannot produce this resolution on that VM.
 - `Accelerator inventory and driver probe observed; DCGM not available to the
   agent, device health not checked.`: the agent listed the devices and its
   node health probe through `nvidia-smi` passed in the same observation,

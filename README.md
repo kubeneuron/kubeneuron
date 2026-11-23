@@ -2,17 +2,19 @@
 
 KubeNeuron helps teams that train models on Kubernetes recover cloud capacity after an accelerator or node fault. It detects the fault, replaces the affected node when policy permits, and closes the incident once the controller verifies the new node. In Automatic mode this can complete without waking an operator to repair the node manually.
 
-## v1.0.0-rc.1 candidate scope and evidence
+## v1.0.0-rc.2 candidate scope and evidence
 
-The cloud policies are written for fleets using NVIDIA GPUs, AMD Instinct on Azure, Google TPU and AWS Trainium. None of these accelerators has been used in a live run of this candidate. In DryRun, operators can inspect proposed actions. Approval mode asks an operator to authorize disruptive steps. Automatic mode executes eligible steps under the configured policy.
+The cloud policies are written for fleets using NVIDIA GPUs, AMD Instinct on Azure, Google TPU and AWS Trainium. AMD Instinct, Google TPU and AWS Trainium have not been used in a live run of this candidate. In DryRun, operators can inspect proposed actions. Approval mode asks an operator to authorize disruptive steps. Automatic mode executes eligible steps under the configured policy.
 
 | Cloud | Simulated provider | Live CPU replacement with synthetic accelerator resource | Live accelerator validation |
 |---|---|---|---|
-| Amazon Elastic Kubernetes Service (EKS) | Replacement tested | Add-first and remove-first each completed once, on pre-release builds | Unverified |
+| Amazon Elastic Kubernetes Service (EKS) | Replacement tested | Add-first and remove-first each completed once, on pre-release builds | Add-first and remove-first on a Tesla T4 node pool each completed once, with a fault injected as an XID 79 kernel-log line on a healthy GPU, on build adcda3d4ae80834dd08f99a99f7b0a3d463ea8d4 — the code released as v1.0.0-rc.2 (the commits after it change only a test script, the version, the changelog and the documentation). Device health was not checked by KubeNeuron. |
 | Azure Kubernetes Service (AKS) | Replacement tested | Add-first and remove-first on a fixed-size single-zone node pool each completed once, on a pre-release build | Unverified |
 | Google Kubernetes Engine (GKE) | Replacement tested | Add-first and remove-first on a fixed-size single-zone Standard node pool each completed once, on pre-release builds | Unverified |
 
-In each live run the nodes were CPU nodes with synthetic accelerator capacity, and the controller verified the new node by node readiness and advertised capacity. Device health on the new node was not checked. On EKS the controller was updated during the add-first incident. On GKE the controller was updated between the two runs. The runs were not repeated on v1.0.0-rc.1. GKE remove-first on autoscaled pools, multi-zone pools and Autopilot were not run live. In those runs, and with the simulated providers, the incident resolved by itself after the controller confirmed the new node. Use `kubeneuronctl pools` to inspect add-first eligibility and `kubeneuronctl incidents show <id>` to see how the controller identified the node and what it verified. The incident records infrastructure recovery. It does not show that a training job resumed. See the [capability and evidence matrix](docs/reference-capabilities.md#live-cloud-evidence) for individual checks.
+On Amazon EKS, in a node pool with real NVIDIA Tesla T4 GPUs, KubeNeuron replaced a node twice under an Automatic policy, with no manual approvals: add-first, then remove-first on the node that had replaced the first. Each fault was injected as an NVIDIA XID 79 line in the node's kernel log; the GPU itself was healthy. KubeNeuron verified each new node by readiness, advertised capacity and the device inventory its agent reported, and the driver answered; device health was not checked. Separately from KubeNeuron, the run checked the GPU on each new node with nvidia-smi (Tesla T4, driver 580.178.04) and the CUDA vectorAdd sample, which passed. This was done once, on build adcda3d4ae80834dd08f99a99f7b0a3d463ea8d4 — the code released as v1.0.0-rc.2 (the commits after it change only a test script, the version, the changelog and the documentation).
+
+In the earlier CPU replacement runs the nodes were CPU nodes with synthetic accelerator capacity, and the controller verified the new node by node readiness and advertised capacity. Device health on the new node was not checked. On EKS the controller was updated during the add-first incident. On GKE the controller was updated between the two runs. The runs were not repeated on v1.0.0-rc.1 or v1.0.0-rc.2. GKE remove-first on autoscaled pools, multi-zone pools and Autopilot were not run live. In those runs, and with the simulated providers, the incident resolved by itself after the controller confirmed the new node. Use `kubeneuronctl pools` to inspect add-first eligibility and `kubeneuronctl incidents show <id>` to see how the controller identified the node and what it verified. The incident records infrastructure recovery. It does not show that a training job resumed. See the [capability and evidence matrix](docs/reference-capabilities.md#live-cloud-evidence) for individual checks.
 
 Upgrading from 0.x releases is not supported. Uninstall the 0.x installation, then install v1.0. See the [clean installation steps](docs/upgrade.md#moving-from-0x-to-v10).
 
@@ -336,7 +338,7 @@ completed safety case:
 - credentials are represented by Secret references, not inline values.
 
 Approval delivery (Slack, generic webhook, PagerDuty), verification before
-resolution, and the pause/resume control path are implemented. The EKS, AKS and GKE replacement paths each completed once on a live cluster with CPU nodes and synthetic accelerator capacity, on pre-release builds. None is validated on accelerator hardware; start in DryRun. See the [live cloud evidence table](docs/reference-capabilities.md#live-cloud-evidence) for what was tested and how.
+resolution, and the pause/resume control path are implemented. The EKS, AKS and GKE replacement paths each completed once on a live cluster with CPU nodes and synthetic accelerator capacity, on pre-release builds. On accelerator hardware, only the EKS Tesla T4 run above was done: each replacement order once, with an injected fault on a healthy GPU. AKS and GKE are not validated on accelerator hardware. Start in DryRun. See the [live cloud evidence table](docs/reference-capabilities.md#live-cloud-evidence) for what was tested and how.
 
 ## Configuration sources
 

@@ -45,7 +45,9 @@ The remaining instructions apply to installations running v1.0.0-rc.1 or later.
 
 After v1.0.0-rc.1, installations that omit `spec.safety.impactPreview.enabled` compute and store an advisory preview at each approval round and include its summary in configured approval notifications. Set it to `false` to retain the previous behavior. An existing explicit `false` remains effective. The default budget is 15 seconds. Workload-context resolvers and mandatory previews remain opt-in. For a round already awaiting approval, the controller computes a preview on explicit recompute or at the next park for approval; this default change preserves a timely approval already recorded for the same round and step.
 
-After v1.0.0-rc.2, the agent reads NVIDIA GPUs through the NVIDIA container runtime by default (`spec.agent.deviceAccess: NvidiaRuntime`). The upgrade rolls every agent DaemonSet of an installation without node-level actions once, node by node, to add two environment variables and one argument; no host path is added. On nodes with the NVIDIA runtime as default, the agents then report each GPU's model and UUID and the driver version (see [Data and privacy](data-and-privacy.md)). Set `deviceAccess: None` before upgrading to keep the previous behaviour: the agent reads no NVIDIA devices unless node-level actions and host tooling are enabled.
+After v1.0.0-rc.1, the agent reads NVIDIA GPUs through the NVIDIA container runtime by default (`spec.agent.deviceAccess: NvidiaRuntime`). The upgrade rolls every agent DaemonSet of an installation without node-level actions once, node by node, to add two environment variables and one argument; no host path is added. On nodes with the NVIDIA runtime as default, the agents then report each GPU's model and UUID and the driver version (see [Data and privacy](data-and-privacy.md)). Set `deviceAccess: None` before upgrading to keep the previous behaviour: the agent reads no NVIDIA devices unless node-level actions and host tooling are enabled.
+
+If a policy's circuit breaker tripped on rc.1, upgrading preserves the trip for that policy revision. Look for `circuit-breaker-tripped` in the policy's operational audit. Review the pool's health before setting a new `spec.automatic.enabledAt` to resume automatic authorisation for new incidents. An incident already in `AWAITING_APPROVAL` still needs an operator decision.
 
 1. Take a fresh workflow-store backup (see
    [operations](operations.md#sqlite-workflow-store-backup-and-restore)) and
@@ -108,12 +110,52 @@ versions longer than a rolling upgrade needs.
 
 ## Rolling back
 
-Before rolling back to rc.1, let active multi-zone add-first replacements finish.
-Restore the rc.1 CRD as part of the rollback. Its schema omits
-`replacement.successorZone`, so the Kubernetes API server prunes that field
-when serving or writing policies with the old schema. An existing policy
-reconciles with rc.1 placement rules. Reapply the opt-in after upgrading again.
+### From v1.0.0-rc.2 to v1.0.0-rc.1
 
+Let active multi-zone add-first replacements finish, then follow these steps
+in order.
+
+1. Apply the rc.1 install manifest and wait for the rc.1 operator rollout
+   to complete. This also restores the rc.1 CRDs.
+
+   ```sh
+   kubectl apply -f https://github.com/kubeneuron/kubeneuron/releases/download/v1.0.0-rc.1/kubeneuron-install-v1.0.0-rc.1.yaml
+   kubectl -n kube-neuron rollout status deployment/kubeneuron-operator
+   ```
+
+2. Set `spec.controller.image` and `spec.agent.image` on each root object to
+   their rc.1 digests. The rc.1 controller refuses to start until the backup
+   is restored because the rc.2 schema (SQLite 0038 or PostgreSQL 0029) is
+   newer than it supports.
+3. Scale the operator to zero, then scale each controller to zero and wait
+   for its pods to terminate. Restore the pre-upgrade backup for each
+   workflow store. Restoring discards incidents and audit entries written
+   since the backup was taken.
+4. Restart the rc.1 operator. Verify the rc.1 controller and agent pods
+   become Ready.
+
+The rc.1 CRD drops `spec.agent.deviceAccess` from the KubeNeuron object.
+If you set it to `None`, reapply that setting when you upgrade again.
+Otherwise rc.2 uses its default, `NvidiaRuntime`. Both CRDs accept an
+explicit `spec.safety.impactPreview.enabled: false`.
+
+The rc.1 GPURemediationPolicy CRD also drops `spec.replacement.successorZone`.
+If a policy used `AnyPoolZone`, reapply it after upgrading again. Otherwise
+rc.2 uses `SameZone` for that policy.
+
+After the rollback, the Role `<name>-runtime-reader` added by rc.2 remains;
+it grants read access to one ConfigMap only and is deleted with the KubeNeuron object.
+
+Rolling back only the controller and agent images fails. The rc.2 operator
+passes `--nvidia-runtime-devices` to the agent. The rc.1 agent exits on
+startup because it does not recognize that flag. Until the rollback is completed in the order above,
+no agent runs and faults the agent detects are not detected.
+
+The upgrade from rc.1, the refusal by rc.1, the rollback in this order and a
+second upgrade were rehearsed on kind for both stores. They were not rehearsed
+on a cloud cluster.
+
+### Other release pairs
 
 - **Images only** (no schema migration in between): patch the root object
   back to the previous digests. The store is untouched.
@@ -122,14 +164,6 @@ reconciles with rc.1 placement rules. Reapply the opt-in after upgrading again.
   the controller to zero, restore the pre-upgrade snapshot onto the state
   PVC, then roll the images back. Incidents and audit rows written after the
   backup are lost — that is the RPO of your backup schedule.
-- **From the release after v1.0.0-rc.1 back to v1.0.0-rc.1**: that release
-  adds one schema migration (SQLite 0038, PostgreSQL 0029: the incident's
-  `last_signal_at`, filled from `updated_at` for existing rows). An rc.1
-  controller refuses the migrated store with the error above, so going back
-  to rc.1 is the restore described in the previous point; the images-only
-  path does not apply. `make test-upgrade-rollback-kind BASELINE=v1.0.0-rc.1`
-  rehearses this upgrade, the refusal, the restore and a second upgrade on
-  kind for both stores.
 - **Operator/CRDs**: re-apply the previous release's install manifest.
   Kubernetes does not remove already-stored fields; older operators ignore
   spec fields they do not know, and compilation stays fail-closed.

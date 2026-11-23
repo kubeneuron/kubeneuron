@@ -4,6 +4,13 @@ Day-2 procedures for a running installation. Everything here assumes the
 operator-managed Kubernetes path; `<ns>` is your `spec.namespace` and
 `<name>` the root `KubeNeuron` object name.
 
+## Checking a policy change
+
+After changing a policy or its mode, compare the `source_digest` returned by
+`GET /api/v1/runtime-config` with `data["config-digest"]` in the runtime
+ConfigMap (`<name>-runtime`) for that installation. Matching digests confirm
+that the controller has loaded the published configuration.
+
 ## Tokens
 
 | Token | Set with | Used by |
@@ -824,8 +831,8 @@ log. This mode has not yet been exercised on real hardware.
 
 | Node image | GPUs visible to the agent by default |
 |---|---|
-| EKS Amazon Linux 2023 NVIDIA AMI | expected: the NVIDIA runtime is the default there; not yet exercised on real hardware |
-| AKS GPU node images | expected: the NVIDIA runtime is the default there; not yet exercised on real hardware |
+| EKS Amazon Linux 2023 NVIDIA AMI | yes — observed once on the Amazon EKS-optimized Amazon Linux 2023 NVIDIA AMI (x86_64) with a Tesla T4 |
+| AKS GPU node images | expected to work; not yet exercised on real hardware |
 | GKE Container-Optimized OS, Bottlerocket | no: KubeNeuron checks a replacement by node readiness and advertised capacity |
 | CDI-only runtime setups | not verified |
 
@@ -883,7 +890,9 @@ installs if needed.
 The agent builds every accelerator adapter that is registered in its image and
 enabled for the installation. NVIDIA observation is always on and needs no
 entry. Enable any other registered adapter, with its options and host tooling,
-in `spec.agent.adapters`:
+in `spec.agent.adapters`. The YAML below illustrates the API for a custom agent
+image with a registered AMD adapter.
+On a managed installation, AMD fault detection reads the kernel log.
 
 ```yaml
 spec:
@@ -897,6 +906,9 @@ spec:
           libDirs: ["/opt/rocm/lib"]   # read-only at /host/adapters/amd/lib/<i>, appended to LD_LIBRARY_PATH
           devices: ["/dev/kfd"]        # character devices, mounted at the same path
 ```
+
+This release registers no AMD adapter: an `amd` entry makes the agent report that
+vendor as not ready. The example shows the shape of the field only.
 
 The operator renders one `--adapter=<vendor>` agent argument per entry and one
 `--adapter-option=<vendor>.<key>=<value>` per option, in vendor and key order,
@@ -923,7 +935,7 @@ same.
 
 **Defaults for every installation.** The operator also takes a list in the
 same shape from `--default-agent-adapters` (JSON), set by the Helm value
-`agentAdapters`:
+`agentAdapters`. This example requires the same custom AMD adapter.
 
 ```yaml
 # values.yaml

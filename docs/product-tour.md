@@ -174,17 +174,21 @@ and [REST API reference](reference-api.md).
 
 ## Proven on real hardware
 
-The same flow, unmodified, has been validated on AWS EKS with a real
-Tesla T4 (g4dn, AL2023 NVIDIA AMI): the agent ran the host's real
+In an earlier AWS EKS run on a Tesla T4 (g4dn, AL2023 NVIDIA AMI),
+the agent ran the host's
 `nvidia-smi` from inside its distroless image via `spec.agent.hostTooling`
-mounts, registered the physical GPU (UUID, model, node boot ID), and a
-genuine kernel-log injection —
+mounts and registered the physical GPU (UUID, model, node boot ID).
+In rc.2, with node-level actions off, the agent asks the NVIDIA container
+runtime for access to the GPUs and driver utilities by default. This
+inventory path uses no host mounts. See the [operations guide](operations.md#nvidia-host-tooling-in-the-agent-daemonset).
+
+The earlier run injected this line into the kernel log:
 
 ```text
 NVRM: Xid (PCI:00000000:00:1E.0): 79, pid=1234, GPU has fallen off the bus.
 ```
 
-— walked the full cordon → drain → **approval** → reboot → uncordon
+The injected signal triggered the full cordon → drain → **approval** → reboot → uncordon
 dry-run ladder with the approver identity in the audit trail:
 
 ```text

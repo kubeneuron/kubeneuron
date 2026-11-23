@@ -9,7 +9,7 @@ uses provider APIs. Reboot through the node agent requires the explicit
 reviewing the policies that can act on workloads.
 
 ```sh
-curl -fsSL https://github.com/kubeneuron/kubeneuron/releases/download/v1.0.0-rc.1/install.sh | bash -s -- --version v1.0.0-rc.1
+curl -fsSL https://github.com/kubeneuron/kubeneuron/releases/download/v1.0.0-rc.2/install.sh | bash -s -- --version v1.0.0-rc.2
 ```
 
 A release candidate is a pre-release and installs only by its explicit
