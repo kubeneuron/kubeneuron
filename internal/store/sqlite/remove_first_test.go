@@ -53,6 +53,21 @@ func TestRemoveFirstPlanSurvivesAndListsWhileOpen(t *testing.T) {
 		t.Fatalf("open plans = %+v, want the incident with %+v", listed, want)
 	}
 	got = listed[0]
+	want = want.Clone()
+	want.Version = 1
+	want.Provider = "aks"
+	want.MachineName = "machine-old"
+	want.DeleteTarget = &cloud.NodeIdentity{Node: "worker", NodeUID: "uid-old", ProviderID: "azure:///machine-old", InstanceID: "instance-old", BootID: "boot-old"}
+	got.RemoveFirst = want.Clone()
+	if err := s.UpdateIncident(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	got.RemoveFirst.DeleteTarget.NodeUID = "changed"
+	listed = open()
+	if len(listed) != 1 || !reflect.DeepEqual(listed[0].RemoveFirst, want) {
+		t.Fatalf("persisted delete intent differs from opening target: %+v", listed)
+	}
+	got = listed[0]
 	got.RemoveFirst.Outcome = types.RemoveFirstRestored
 	got.RemoveFirst.EndedAt = &now
 	if err := s.UpdateIncident(ctx, got); err != nil {

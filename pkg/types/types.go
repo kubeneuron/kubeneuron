@@ -381,6 +381,12 @@ const (
 // remove-first replacement.
 type RemoveFirstRecord struct {
 	cloud.RemoveFirstPlan
+	// Version zero is the original GKE resize plan. Version one also pins
+	// the provider and Kubernetes machine identity before a targeted delete.
+	Version      int                 `json:"version,omitempty"`
+	Provider     string              `json:"provider,omitempty"`
+	DeleteTarget *cloud.NodeIdentity `json:"delete_target,omitempty"`
+	MachineName  string              `json:"machine_name,omitempty"`
 	// EndedAt is when the plan closed with Outcome.
 	EndedAt *time.Time `json:"ended_at,omitempty"`
 	Outcome string     `json:"outcome,omitempty"`
@@ -397,6 +403,10 @@ func (r *RemoveFirstRecord) Clone() *RemoveFirstRecord {
 		return nil
 	}
 	c := *r
+	if r.DeleteTarget != nil {
+		target := *r.DeleteTarget
+		c.DeleteTarget = &target
+	}
 	if r.State != nil {
 		c.State = make(map[string]string, len(r.State))
 		for k, v := range r.State {
