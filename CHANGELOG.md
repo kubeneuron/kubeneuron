@@ -19,7 +19,7 @@ API is `v1alpha1`.
 - The controller now has cluster-wide `get` access to persistent volume
   claims and persistent volumes to inspect zone affinity. It reads Kubernetes
   object metadata and specs, without reading volume contents.
-- EKS and AKS remove-first replacements record the target before deletion so a restarted controller can check the original machine. An ambiguous AKS machine identity requires operator review. Tested with simulated providers only.
+- After a controller restart, a remove-first replacement on EKS and AKS continues from the recorded target instead of stopping: the controller checks whether the original machine is gone and repeats the removal only for that machine. If an AKS machine with the same name cannot be confirmed as the original, the incident waits for the operator. Tested with simulated providers only.
 
 - A retained Kubernetes agent registration now exposes `deleted_at` when a
   complete inventory observes its node missing. Recovery reports can still

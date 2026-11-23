@@ -515,7 +515,7 @@ func TestUnknownDeleteExpiresFromOpeningTime(t *testing.T) {
 	}
 	r.sweepRemoveFirst(t.Context())
 	got := mustIncident(t, st, id)
-	if got.State != types.StateNeedsHuman || got.RemoveFirst.Outcome != types.RemoveFirstNeedsOperator || !strings.Contains(got.RemoveFirst.Reason, "could not confirm its completion") {
+	if got.State != types.StateNeedsHuman || got.RemoveFirst.Outcome != types.RemoveFirstNeedsOperator || !strings.Contains(got.RemoveFirst.Reason, "was started more than an hour ago, and KubeNeuron could not confirm that it completed.") {
 		t.Fatalf("state=%s record=%+v", got.State, got.RemoveFirst)
 	}
 }
@@ -592,8 +592,11 @@ func TestRestartRechecksDeleteAuthority(t *testing.T) {
 			if p.reads != 1 || p.deletes != want {
 				t.Fatalf("reads=%d deletes=%d want deletes=%d", p.reads, p.deletes, want)
 			}
-			if name == "lost-owner" && mustIncident(t, st, id).State != types.StateNeedsHuman {
-				t.Fatal("lost owner did not park")
+			if name == "lost-owner" {
+				got := mustIncident(t, st, id)
+				if got.State != types.StateNeedsHuman || !strings.Contains(got.RemoveFirst.Reason, "This incident is no longer the one handling the original node, so the removal was not repeated.") {
+					t.Fatalf("unexpected ownership handoff: %s %+v", got.State, got.RemoveFirst)
+				}
 			}
 		})
 	}

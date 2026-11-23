@@ -332,8 +332,8 @@ func (c *Controller) sweepTargetedDelete(ctx context.Context, inc *types.Inciden
 	switch {
 	case err == nil && state == removefirst.IdentityChanged && rec.Provider == "azure":
 		reason = fmt.Sprintf("The removal of machine %s from pool %s was started, but its outcome was not recorded. A machine with this name is listed now, and KubeNeuron cannot confirm that it is the original one, so the removal was not repeated.", rec.MachineName, rec.Pool)
-	case time.Since(rec.PlannedAt) >= removeFirstDeadline:
-		reason = fmt.Sprintf("The removal of machine %s from pool %s was started an hour ago. KubeNeuron could not confirm its completion.", rec.MachineName, rec.Pool)
+	case time.Since(rec.PlannedAt) > removeFirstDeadline:
+		reason = fmt.Sprintf("The removal of machine %s from pool %s was started more than an hour ago, and KubeNeuron could not confirm that it completed.", rec.MachineName, rec.Pool)
 	case err == nil && (state == removefirst.SameMachine || state == removefirst.Listed):
 		var owner string
 		err := c.store.WithTx(ctx, func(tx store.Tx) error {
@@ -347,7 +347,7 @@ func (c *Controller) sweepTargetedDelete(ctx context.Context, inc *types.Inciden
 		if owner == inc.ID {
 			return c.retryTargetedDelete(ctx, inc, state)
 		}
-		reason = fmt.Sprintf("Removal of machine %s from pool %s was not repeated because the incident no longer owns remediation of the original node.", rec.MachineName, rec.Pool)
+		reason = fmt.Sprintf("The removal of machine %s from pool %s was started, but its outcome was not recorded. This incident is no longer the one handling the original node, so the removal was not repeated.", rec.MachineName, rec.Pool)
 	default:
 		return err
 	}
