@@ -31,7 +31,7 @@ func Save(path string, state any) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }()
 	if _, err = tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		return err
