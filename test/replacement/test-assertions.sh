@@ -33,4 +33,14 @@ for f in testdata/any-zone/*.json; do
     *) echo "assert-any-zone.jq: $f returned $rc" >&2; failed=1 ;;
   esac
 done
+for f in testdata/restart/*/*.json; do
+  name=$(basename "$f" .json)
+  rc=0
+  jq -e --arg scenario "$(basename "$(dirname "$f")")" -f assert-restart.jq "$f" >/dev/null || rc=$?
+  case $rc in 0) got=pass ;; 1) got=fail ;; *) got="jq error $rc" ;; esac
+  if [[ $name != "$got"-* ]]; then
+    echo "assert-restart.jq: $name: got $got" >&2
+    failed=1
+  fi
+done
 exit "$failed"

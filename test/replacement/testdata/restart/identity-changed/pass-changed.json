@@ -1,0 +1,23 @@
+{
+  "incident": {
+    "id": "incident-b",
+    "state": "NEEDS_HUMAN"
+  },
+  "audit": [
+    {
+      "id": 1,
+      "action": "remove-first-delete-intent",
+      "params": {
+        "operation": "operation-a"
+      }
+    },
+    {
+      "id": 2,
+      "action": "remove-first-needs-operator",
+      "params": {
+        "operation": "operation-a"
+      },
+      "result": "A machine with this name is listed now, and KubeNeuron cannot confirm that it is the original one, so the removal was not repeated. Check the machine and the size of the pool, then run kubeneuronctl resolve incident-b --cloud-operation-settled --reason \"<what you found>\"."
+    }
+  ]
+}
