@@ -1149,11 +1149,23 @@ func writeJSON(w http.ResponseWriter, v any) {
 // config pipeline (operator compiles → ConfigMap → kubelet sync → in-place
 // reload). When this digest lags KubeNeuron.status.configDigest, the rollout
 // has not landed here yet.
-func (s *Server) handleRuntimeConfig(w http.ResponseWriter, _ *http.Request) {
-	info := s.runtimeConfigInfo.Load()
-	if info == nil {
+func (s *Server) handleRuntimeConfig(w http.ResponseWriter, r *http.Request) {
+	loaded := s.runtimeConfigInfo.Load()
+	if loaded == nil {
 		http.Error(w, "runtime configuration identity not published yet", http.StatusServiceUnavailable)
 		return
+	}
+	info := *loaded
+	if reader, ok := s.operator.(interface {
+		PublishedConfig(context.Context) (string, time.Time, bool, error)
+	}); ok {
+		digest, at, configured, err := reader.PublishedConfig(r.Context())
+		switch {
+		case err != nil:
+			info.Published = &PublishedConfigInfo{Error: err.Error()}
+		case configured:
+			info.Published = &PublishedConfigInfo{Digest: digest, At: at}
+		}
 	}
 	writeJSON(w, info)
 }

@@ -80,7 +80,7 @@ type RuntimeConfig struct {
 	// came from (the config-digest key the operator writes into the mounted
 	// ConfigMaps). Empty for file-based deployments with no operator. It lets
 	// /readyz, the operator API, and the info metric say WHICH configuration
-	// is live, and automatic steps wait while it is not the one the operator
+	// is live, and steps wait while it is not the one the operator
 	// has published (published_config.go).
 	SourceDigest string
 	// VerifyQuiet and ApprovalTTL are always > 0 (defaulted at seed;

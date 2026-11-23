@@ -526,6 +526,9 @@ const (
 	// DeferAutomaticLimit: an automatic policy's limit (concurrency or
 	// cool-down) holds the step for now.
 	DeferAutomaticLimit = "automatic_limit"
+	// DeferConfigNotLoaded: the controller has not yet loaded the
+	// configuration the operator published.
+	DeferConfigNotLoaded = "config_not_loaded"
 	// DeferConcurrencyCap: MaxConcurrentRemediations or MaxConcurrentReboots is
 	// full — the guard that stops a fleet-wide fault from draining half the
 	// cluster at once.

@@ -103,6 +103,21 @@ Three independent mechanisms, all fail toward not acting:
    optional `matchLabels` node selector. Incidents hold their position and
    continue after the window closes; recorded approvals survive the wait.
 
+## When a configuration change takes effect
+
+The operator publishes a change to a policy, a playbook or
+`spec.safety.executionMode` in the ConfigMap `<name>-runtime` at once; the
+controller loads it from its mounted copy a minute or more later. Until then
+no step starts and none is parked for approval: the incident's audit shows
+`<step> held: the controller has not yet loaded the published configuration`,
+with the loaded and the published digest in the row's params, and an approval
+already given stays recorded. `GET /api/v1/runtime-config` shows both:
+`source_digest` is what the controller loaded, `published.config_digest` and
+`published.published_at` what the operator published and when. When they still
+differ after five minutes, `kubeneuronctl status` prints
+`configuration published <t> ago is not loaded by the controller`; check the
+controller's log for a rejected reload. A pause does not wait for the reload.
+
 ## When two incidents need to repair the same node
 
 For live repairs, the controller identifies the node by its pinned cloud identity

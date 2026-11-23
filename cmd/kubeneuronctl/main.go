@@ -124,6 +124,9 @@ func cmdStatus() *cobra.Command {
 		}
 		out := cmd.OutOrStdout()
 		_, _ = fmt.Fprintf(out, "automation paused: %v\n", pause.Paused)
+		if line := unloadedConfigLine(c, time.Now()); line != "" {
+			_, _ = fmt.Fprintln(out, line)
+		}
 		_, _ = fmt.Fprintf(out, "incidents: %d total\n", len(incidents))
 		for _, state := range []types.IncidentState{
 			types.StateOpen, types.StateObserving, types.StateEvaluating,
@@ -163,6 +166,36 @@ func cmdStatus() *cobra.Command {
 
 		return nil
 	}}
+}
+
+// unloadedConfigThreshold is how long a published configuration may stay
+// unloaded before status reports it: the kubelet refreshes the mounted copy
+// a minute or two after the operator writes it.
+const unloadedConfigThreshold = 5 * time.Minute
+
+// unloadedConfigLine names a configuration the operator published that the
+// controller has not loaded for longer than the threshold; "" otherwise, also
+// when the controller does not say what was published.
+func unloadedConfigLine(c *client, now time.Time) string {
+	var info struct {
+		SourceDigest string `json:"source_digest"`
+		Published    *struct {
+			Digest string    `json:"config_digest"`
+			At     time.Time `json:"published_at"`
+			Error  string    `json:"error"`
+		} `json:"published"`
+	}
+	if err := c.do("GET", "/api/v1/runtime-config", nil, &info); err != nil {
+		return ""
+	}
+	p := info.Published
+	if p == nil || p.Error != "" || p.Digest == "" || p.At.IsZero() || p.Digest == info.SourceDigest {
+		return ""
+	}
+	if age := now.Sub(p.At); age > unloadedConfigThreshold {
+		return fmt.Sprintf("configuration published %s ago is not loaded by the controller", age.Round(time.Second))
+	}
+	return ""
 }
 
 func cmdNodes() *cobra.Command {

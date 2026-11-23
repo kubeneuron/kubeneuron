@@ -235,6 +235,18 @@ type RuntimeConfigInfo struct {
 	// configured. Also unanswerable before now, and it decides which machines
 	// a playbook may touch.
 	Confinement map[string]string `json:"confinement,omitempty"`
+	// Published is the configuration the operator published, read when the
+	// endpoint is asked; absent without an operator. Automatic and approved
+	// steps wait while its digest differs from SourceDigest.
+	Published *PublishedConfigInfo `json:"published,omitempty"`
+}
+
+// PublishedConfigInfo describes the operator's runtime ConfigMap.
+type PublishedConfigInfo struct {
+	Digest string `json:"config_digest,omitempty"`
+	// At is the ConfigMap's last write.
+	At    time.Time `json:"published_at,omitempty"`
+	Error string    `json:"error,omitempty"`
 }
 
 // SetRuntimeConfigInfo publishes the identity of the configuration a

@@ -23,6 +23,13 @@ API is `v1alpha1`.
   exercised on real hardware. The table in docs/operations.md now says, per
   node image, whether the agent sees GPUs without node-level actions.
 
+- **`kubeneuronctl status` says when the controller has not loaded a
+  published configuration.** After five minutes it prints `configuration
+  published <t> ago is not loaded by the controller`.
+  `GET /api/v1/runtime-config` now also returns `published`: the
+  `config_digest` the operator published and when (`published_at`), or the
+  `error` reading it.
+
 ### Changed
 
 - When a reset playbook has no device ID, the incident now explains why the reset cannot run and asks the operator to check the device and resolve the incident. `kubeneuronctl incidents show` displays the reported vendor and PCI address when the GPU UUID is missing.
@@ -30,6 +37,20 @@ API is `v1alpha1`.
 - `kubeneuronctl status` uses singular counts where appropriate and omits the unconfirmed reset notice when node-level actions are disabled. On NVIDIA nodes, `kubeneuronctl health` explains why Kubernetes GPU health conditions can be unknown. The JSON output retains the condition names.
 
 ### Fixed
+
+- **A step a person approved, a step that needs no approval, and a switch to
+  DryRun wait until the controller has loaded a change.** Only an automatic
+  step waited for the controller to load what the operator published; an
+  approved step, or a step that needs no approval such as cordon, could still
+  start under the configuration being replaced, and after a switch to DryRun
+  still ran for real until the reload. Now no step starts, and no step is
+  parked for approval, while the loaded configuration is not the published
+  one: it is held with `<step> held: the controller has not yet loaded the
+  published configuration` (`held by policy <name>` under an automatic
+  policy), the approval stays recorded, and the decision is taken again under
+  the loaded configuration. Notification steps are not held. The held row
+  and `policy-authorised` record the configuration digests in their params.
+  Present in v1.0.0-rc.1 and v1.0.0-rc.2.
 
 - On Kubernetes, the next inventory summary drops the heartbeat and GPU count
   of a deleted node, including when a new node reuses its name.
