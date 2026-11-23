@@ -9,6 +9,7 @@ import (
 	"maps"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/resizediff"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/store"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
@@ -114,6 +115,30 @@ func (c *Controller) claimRemoveFirst(ctx context.Context, inc *types.Incident, 
 		fmt.Sprintf("planned operation %s: delete the instance, then set node pool %s back to its size", plan.Operation, plan.Pool))
 }
 
+const deleteIntentAction = "remove-first-delete-intent"
+
+// claimDeleteIntent commits the target, optional resize diff and audit before
+// the provider may issue its first delete. A retry must reconcile this record.
+func (c *Controller) claimDeleteIntent(ctx context.Context, inc *types.Incident, pin cloud.NodeIdentity, pool, machine, successor string) error {
+	if err := pin.Validate(); err != nil {
+		return err
+	}
+	if pool == "" || machine == "" {
+		return errors.New("remove-first delete requires a known pool and machine")
+	}
+	rec := &types.RemoveFirstRecord{
+		Version: 1, Provider: providerOf(inc), DeleteTarget: &pin, MachineName: machine,
+		RemoveFirstPlan: cloud.RemoveFirstPlan{Operation: successorOperation(inc), Pool: pool, Instance: pin.InstanceID,
+			Phase: cloud.RemoveFirstDeleting, PlannedAt: time.Now().UTC()},
+	}
+	if successor != "" {
+		rec.State = resizediff.WithInstance(nil, successor)
+	}
+	c.removeFirstPools.Lock()
+	defer c.removeFirstPools.Unlock()
+	return c.saveRemoveFirst(ctx, inc, rec, deleteIntentAction, "recorded the removal target before sending the delete")
+}
+
 // poolPlanOpen is another incident's open plan on the pool of rec, read in tx.
 func poolPlanOpen(ctx context.Context, tx store.Tx, inc *types.Incident, rec *types.RemoveFirstRecord) error {
 	open, err := tx.ListIncidents(ctx, store.IncidentFilter{OpenRemoveFirst: true})
@@ -182,6 +207,9 @@ func (c *Controller) saveRemoveFirst(ctx context.Context, inc *types.Incident, r
 		fresh, err := tx.GetIncident(ctx, inc.ID)
 		if err != nil {
 			return err
+		}
+		if action == deleteIntentAction && (fresh.Version != inc.Version || fresh.RemoveFirst != nil && fresh.RemoveFirst.Operation == rec.Operation) {
+			return store.ErrConflict
 		}
 		if fresh.RemoveFirst.Open() && fresh.RemoveFirst.Operation != rec.Operation {
 			return store.ErrConflict

@@ -398,3 +398,29 @@ func TestRemoveFirstPoolCheckInTheTransaction(t *testing.T) {
 		t.Fatalf("plan written: %+v", got.RemoveFirst)
 	}
 }
+
+func TestDeleteIntentCannotBeClaimedTwice(t *testing.T) {
+	c, st := plannedFixture(t, newPlannedPlatform())
+	id := openOn(t, c, "n1")
+	inc := mustIncident(t, st, id)
+	pin := *inc.CloudIdentity
+	if err := c.claimDeleteIntent(t.Context(), inc, pin, "gpu", "old-machine", "named-successor"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.claimDeleteIntent(t.Context(), inc, pin, "gpu", "other-machine", ""); err == nil {
+		t.Fatal("accepted a second delete intent")
+	}
+	got := mustIncident(t, st, id).RemoveFirst
+	if got == nil || got.MachineName != "old-machine" || got.DeleteTarget == nil || *got.DeleteTarget != pin {
+		t.Fatalf("lost original delete target: %+v", got)
+	}
+	count := 0
+	for _, e := range trail(t, st, id) {
+		if e.Action == deleteIntentAction {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("got %d delete intent audit entries", count)
+	}
+}
