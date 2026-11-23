@@ -159,8 +159,7 @@ dependencies; the version-pinned reference profile under
 independent cluster-administrator workflow.
 
 After verifying the separately owned dependencies, the KubeNeuron preview
-install order is shown below. The generated CRDs use Kubernetes quantity CEL
-functions and conservatively require Kubernetes 1.29 or newer.
+install order is shown below. KubeNeuron requires Kubernetes 1.32 or later. The CRD in this release is rejected by Kubernetes 1.29, 1.30 and 1.31.
 
 ```sh
 kubectl apply -k config/default
@@ -974,7 +973,7 @@ in last-applied annotations, new-identity success, and rejection of both
 retired trust directions.
 The verified cluster has one Kubernetes v1.33.12 node: it proves rejection of
 an arbitrary mismatched node name, not node-A credentials against a real node
-B, and it does not directly exercise the documented Kubernetes 1.29 minimum.
+B, and it does not directly exercise the documented Kubernetes 1.32 minimum.
 
 Still required:
 

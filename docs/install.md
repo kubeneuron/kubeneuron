@@ -1,16 +1,14 @@
 # Production install (operator-managed Kubernetes)
 
 The operator-managed path is the only supported authenticated deployment
-shape. It requires Kubernetes **1.29+** (the CRDs use quantity CEL
-functions); the integration harness pins and tests v1.33.
+shape. It requires Kubernetes 1.32 or later. The CRD in this release is rejected by Kubernetes 1.29, 1.30 and 1.31.
+The integration harness pins and tests v1.33.
 
 ## Recovery policies installed by the script
 
 On a fresh installation, `deploy/install.sh` selects `--policy-pack cloud`
 and sets the installation's execution mode to `DryRun`. The default policies
-use `Approval`. Four classes select the replacement playbook:
-`fell-off-bus`, `gpu-lost`, `ecc-dbe` and `nvlink`. The other bundled
-bindings select observation.
+use `Approval`. Five classes select the replacement playbook: `fell-off-bus`, `gpu-lost`, `ecc-dbe`, `nvlink` and `accelerator-fault`. `cloud-interruption` selects its own playbook, which sends a checkpoint warning and, after approval, cordons the node. The other bundled bindings select observation.
 
 To choose a ladder for one class, edit its `GPURemediationPolicy`.
 Set `spec.playbookRef` to the installation's observe, cloud-replace or

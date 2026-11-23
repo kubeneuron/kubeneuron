@@ -131,10 +131,7 @@ How a message is handled:
   deleted and counted as `kind="unknown"`, `outcome="unrecognised"`.
 
 The controller that leads long-polls the queue (20 seconds per request) and
-records a notice as soon as it arrives. The checkpoint warning then starts on
-the next reconcile, within 10 seconds by default. With EventBridge's own
-delivery time, expect the warning some seconds to tens of seconds after the
-event; AWS states no delivery time.
+records a notice as soon as it arrives. The checkpoint warning then starts on a following reconcile. The controller reconciles every 10 seconds by default, and other work in the same pass can delay the warning. EventBridge adds its own delivery time, and AWS states none. The total time from the event to the warning has not been measured.
 
 The only change KubeNeuron makes in AWS for this is deleting the messages it
 has read from this queue. The long poll runs without pause while the

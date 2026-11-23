@@ -15,7 +15,7 @@ curl -fsSL https://github.com/kubeneuron/kubeneuron/releases/download/v1.0.0-rc.
 A release candidate is a pre-release and installs only by its explicit
 version. There is no latest release yet. Upgrading from 0.x is not supported.
 
-Use a Kubernetes 1.29+ cluster with a default StorageClass. The installer
+Use a cluster running Kubernetes 1.32 or later with a default StorageClass. The installer
 prints the port-forward command and credentials. Run that port-forward in a
 separate terminal. In your working terminal set `SERVER=http://127.0.0.1:8080`
 and supply the printed API token through `KUBENEURONCTL_TOKEN` in the

@@ -91,8 +91,11 @@ Always: **CRDs → operator → controller/agent images.**
    On SQLite installs the controller Deployment uses `Recreate` with a
    single replica: expect a short public-API/webhook outage while the new
    Pod starts (Alertmanager retries deliveries). PostgreSQL HA installs run
-   two replicas with rolling updates and leader-following readiness, so
-   there is no such gap. Each agent DaemonSet rolls node by node; each agent
+   two replicas, but the controller Deployment also uses Recreate, and only
+   the elected leader is Ready: expect an API/webhook outage while a new Pod
+   starts and takes the lease. 1/2 Ready is the normal state, so do not wait
+   with kubectl rollout status on the controller Deployment; check that one
+   controller Pod is Ready. Each agent DaemonSet rolls node by node; each agent
    turns Ready only after a fresh durable registration acknowledgment from
    the new controller.
 

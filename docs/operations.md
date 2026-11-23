@@ -267,14 +267,14 @@ kubeneuronctl incidents --state EXECUTING     # expect none
 
 # The operator reconciles the controller's replica count, so stop it first or
 # the controller comes straight back.
-kubectl -n kube-neuron-system scale deploy/kubeneuron-operator --replicas=0
+kubectl -n kube-neuron scale deploy/kubeneuron-operator --replicas=0
 kubectl -n kube-neuron scale deployment/kubeneuron-controller --replicas=0
 kubectl -n kube-neuron wait --for=delete pod \
   -l app.kubernetes.io/component=controller --timeout=2m
 kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
 # ... maintenance ...
 kubectl uncordon <node>
-kubectl -n kube-neuron-system scale deploy/kubeneuron-operator --replicas=1
+kubectl -n kube-neuron scale deploy/kubeneuron-operator --replicas=1
 kubeneuronctl resume
 ```
 
@@ -317,9 +317,9 @@ is that pod:
 #    appears to succeed, the controller returns within a reconcile, and step 3
 #    replaces the database file underneath a running writer — corrupting the
 #    database this procedure exists to restore.
-kubectl -n kube-neuron-system scale deploy/kubeneuron-operator --replicas=0
-kubectl -n kube-neuron-system wait --for=delete pod \
-  -l app.kubernetes.io/name=kubeneuron-operator --timeout=2m
+kubectl -n kube-neuron scale deploy/kubeneuron-operator --replicas=0
+kubectl -n kube-neuron wait --for=delete pod \
+  -l app.kubernetes.io/name=kube-neuron,app.kubernetes.io/component=operator --timeout=2m
 
 # 1. Stop the controller so nothing writes the database (and the RWO claim
 #    is released).
@@ -347,7 +347,7 @@ kubectl -n <ns> exec kubeneuron-restore-helper -- \
 #    Restarting the OPERATOR is what restores the replica count; scaling the
 #    Deployment by hand here would be undone by the next reconcile anyway.
 kubectl -n <ns> delete pod kubeneuron-restore-helper --wait=true
-kubectl -n kube-neuron-system scale deploy/kubeneuron-operator --replicas=1
+kubectl -n kube-neuron scale deploy/kubeneuron-operator --replicas=1
 #    Again: not `rollout status`. Until the operator reconciles, the controller
 #    is still at zero replicas, and rollout status calls that rolled out.
 kubectl -n <ns> wait --for=condition=Available deploy/<name>-controller --timeout=5m
@@ -639,7 +639,8 @@ Setting `spec.workflowStore.type: Postgres` with a DSN Secret
 (`secretRef`, key `dsn`, e.g.
 `postgres://user:pass@host:5432/kubeneuron?sslmode=require`) makes the
 controller stateless: no state PVC, **two replicas** with Lease-based
-leader election, rolling updates, and readiness that follows leadership —
+leader election, the Recreate update strategy, and readiness that follows
+leadership (only the leader is Ready, so 1/2 Ready is the normal state) —
 Services always route humans, Alertmanager, and agents to the single
 elected writer. A deposed leader exits immediately and rejoins as a
 standby; the new leader reloads persisted cooldowns, flap history, and the
@@ -960,7 +961,7 @@ so editing the list rolls the agent DaemonSet once and reordering it changes
 nothing. Each vendor may appear once; the API server and the operator both
 reject a duplicate, a malformed vendor id, an option key outside
 `[A-Za-z0-9._-]`, a relative or `..` path, a device outside `/dev/`, and
-`/dev/kmsg` (always mounted). Adapter tool directories come after the system
+`/dev/kmsg` (the operator mounts it itself when node-level actions are enabled). Adapter tool directories come after the system
 directories on `PATH`, so a host binary never shadows one the agent image
 ships. When `spec.agent.hostTooling` is unset, the first `libDirs` entry of the
 first adapter (in vendor order) is also mounted at `/lib64`, for the same
