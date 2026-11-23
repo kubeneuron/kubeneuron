@@ -51,6 +51,10 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["create", "get", "list", "update", "watch"]
+  # Delegate read access for zone constraints on volumes bound to workloads.
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create", "get", "list", "update", "watch"]

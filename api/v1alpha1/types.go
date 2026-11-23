@@ -1412,7 +1412,7 @@ type ReplacementSpec struct {
 	Strategy string `json:"strategy,omitempty"`
 	// SuccessorZone controls placement of AddFirst successors in EKS and AKS pools.
 	// SameZone is the default. AnyPoolZone lets the provider choose a configured zone.
-	// KubeNeuron removes the old node after the successor is ready and does not check volumes.
+	// KubeNeuron removes the old node after the successor is ready. Zone constraints on workloads are advisory.
 	// Pods that need the original zone (zonal volumes, zone node affinity) will not schedule on the new node. Use AnyPoolZone only for workloads without such requirements.
 	// +kubebuilder:validation:Enum=SameZone;AnyPoolZone
 	// +kubebuilder:default=SameZone

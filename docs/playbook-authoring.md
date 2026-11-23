@@ -496,7 +496,7 @@ approval does not lift them:
 - `replacement.successorZone` applies only to `AddFirst`. The default,
   `SameZone`, refuses a multi-zone pool. With `AnyPoolZone`, EKS or AKS
   chooses a configured zone for the successor. KubeNeuron removes the old
-  node after the successor is ready and does not check volumes.
+  node after the successor is ready. Zone constraints on workloads are advisory.
   Pods that need the original zone (zonal volumes, zone node affinity) will not schedule on the new node. Use `AnyPoolZone` only for workloads without such requirements.
   Multi-zone GKE pools remain unavailable because the resize adds a node in every zone.
 - `recycle.enabled` (default false): the optional restart through the cloud API.

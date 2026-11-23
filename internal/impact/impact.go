@@ -17,6 +17,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -77,14 +78,16 @@ type Policy struct {
 // Input is the snapshot Compute renders. The controller fills it under the
 // round's budget; Compute itself does no I/O.
 type Input struct {
-	CheckpointReceipts      map[string]time.Time
-	CheckpointReadFailed    bool
-	AffectedJobsUnavailable string
-	TrainingWorkers         []types.TrainingWorker
-	IncidentID              string
-	Round                   int
-	ComputedAt              time.Time
-	Node                    string
+	ZoneConstraintsUnreadable bool
+	ZoneConstraints           *ZoneConstraints
+	CheckpointReceipts        map[string]time.Time
+	CheckpointReadFailed      bool
+	AffectedJobsUnavailable   string
+	TrainingWorkers           []types.TrainingWorker
+	IncidentID                string
+	Round                     int
+	ComputedAt                time.Time
+	Node                      string
 	// Topology is the node's classification, or nil when none could be built
 	// (TopologyUnavailable is then a warning, not an unavailable preview:
 	// the workloads are still worth showing).
@@ -151,8 +154,47 @@ type Preview struct {
 	Devices               DevicesView      `json:"devices"`
 	CheckpointPolicy      CheckpointView   `json:"checkpoint_policy"`
 	Limits                LimitsView       `json:"limits"`
+	ZoneConstraints       *ZoneConstraints `json:"zone_constraints,omitempty"`
 	Warnings              []string         `json:"warnings"`
 	Unavailable           *UnavailableView `json:"unavailable"`
+}
+
+// ZoneConstraints records distinct affected pods and volumes before replacement.
+type ZoneConstraints struct {
+	Zone              string `json:"zone"`
+	Pods              int    `json:"pods"`
+	PersistentVolumes int    `json:"persistent_volumes"`
+}
+
+func (z ZoneConstraints) volumesText() string {
+	switch z.PersistentVolumes {
+	case 0:
+		return ""
+	case 1:
+		return " (1 persistent volume)"
+	default:
+		return fmt.Sprintf(" (%d persistent volumes)", z.PersistentVolumes)
+	}
+}
+
+func (z ZoneConstraints) previewWarning() string {
+	subject := fmt.Sprintf("%d pods on this node are", z.Pods)
+	if z.Pods == 1 {
+		subject = "1 pod on this node is"
+	}
+	return fmt.Sprintf("The replacement may join another zone of this pool. %s tied to zone %s by persistent volumes or required scheduling rules%s and may not start in another zone.", subject, z.Zone, z.volumesText())
+}
+
+// ResolutionWarning describes constraints observed before a confirmed change of zone.
+func (z *ZoneConstraints) ResolutionWarning(newZone string) string {
+	if z == nil || z.Pods <= 0 || z.Zone == "" || newZone == "" || newZone == z.Zone {
+		return ""
+	}
+	subject := fmt.Sprintf("%d pods on the removed node were", z.Pods)
+	if z.Pods == 1 {
+		subject = "1 pod on the removed node was"
+	}
+	return fmt.Sprintf("The replacement joined zone %s; the removed node was in zone %s. %s tied to zone %s%s and may not start in zone %s.", newZone, z.Zone, subject, z.Zone, z.volumesText(), newZone)
 }
 
 // NodeView carries the node and its topology classification.
@@ -383,9 +425,17 @@ func Compute(in Input) Preview {
 	if len(in.ContextNotObserved) > 0 && !contains(p.Warnings, WarningContextNotResolved) {
 		p.Warnings = append(p.Warnings, WarningContextNotResolved)
 	}
+	if in.ZoneConstraintsUnreadable {
+		p.Warnings = append(p.Warnings, zoneConstraintsUnreadableWarning)
+	} else if z := in.ZoneConstraints; z != nil && z.Zone != "" && z.Pods > 0 {
+		p.ZoneConstraints = z
+		p.Warnings = append(p.Warnings, z.previewWarning())
+	}
 	sort.Strings(p.Warnings)
 	return seal(p)
 }
+
+const zoneConstraintsUnreadableWarning = "The replacement may join another zone of this pool. Zone constraints of the pods on this node could not be read."
 
 // Unavailable renders a preview that could not be computed: the identity and
 // the reason, nothing counted, sealed like any other so the record is
@@ -400,6 +450,9 @@ func Unavailable(in Input, reason, detail string) Preview {
 		Limits:                LimitsView{MaxItems: in.MaxItems},
 		Warnings:              []string{},
 		Unavailable:           &UnavailableView{Reason: reason, Detail: strings.TrimSpace(detail)},
+	}
+	if in.ZoneConstraintsUnreadable {
+		p.Warnings = append(p.Warnings, zoneConstraintsUnreadableWarning)
 	}
 	return seal(p)
 }

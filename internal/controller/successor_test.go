@@ -33,6 +33,10 @@ type successorPlatform struct {
 	mu sync.Mutex
 	// unavailable: CheckAddFirst's refusal; capacity / ambiguous: what the
 	// request answers; createAfter: polls before the successor appears.
+	zonePolicy           recoverymode.SuccessorZone
+	poolZones            string
+	constraintReads      int
+	constraintErr        error
 	unavailable          error
 	capacity, ambiguous  bool
 	createAfter          int
@@ -88,7 +92,7 @@ func (p *successorPlatform) PrepareSuccessor(_ context.Context, pin cloud.NodeId
 	case "":
 		p.plans++
 		s.Phase, s.Pool = cloud.SuccessorPlanned, "train"
-		s.State = map[string]string{"members": "4"}
+		s.State = map[string]string{"members": "4", "pool_zones": p.poolZones}
 		if p.dropAfterPlan {
 			p.oldGPUs = 0
 		}
@@ -118,6 +122,9 @@ func (p *successorPlatform) PrepareSuccessor(_ context.Context, pin cloud.NodeId
 func (p *successorPlatform) SuccessorNode(_ context.Context, providerID string) (platform.SuccessorNode, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if providerID == "aws:///zone/i-n1" && p.poolZones != "" {
+		return platform.SuccessorNode{Found: true, Name: "n1", UID: "uid-n1", Zone: "a"}, nil
+	}
 	if providerID == "" || p.created.IsZero() {
 		return platform.SuccessorNode{}, nil
 	}
@@ -255,7 +262,7 @@ func successorFixtureTimeout(t *testing.T, mode recoverymode.Mode, p *successorP
 		{Name: "replace", Action: "platform.replace_node", Approval: "required"},
 	}}
 	pol := playbook.Policy{Name: autoPolicy, Class: types.ClassFellOffBus, Playbook: book.Name, Mode: mode,
-		ReplacementStrategy: strategy, SuccessorTimeout: timeout}
+		ReplacementStrategy: strategy, SuccessorZone: p.zonePolicy, SuccessorTimeout: timeout}
 	if mode == recoverymode.Automatic {
 		pol.Automatic = autoSettings()
 		qualifyAutoProfile(t, c)
@@ -944,4 +951,52 @@ func TestSuccessorPlacementEvidence(t *testing.T) {
 		t.Fatalf("missing original zone: %q", got)
 	}
 
+}
+
+func (p *successorPlatform) NodeZoneConstraints(context.Context, string, string) (int, int, error) {
+	p.constraintReads++
+	return 2, 1, p.constraintErr
+}
+
+func TestZoneConstraintsAtApprovalPark(t *testing.T) {
+	for _, tc := range []struct {
+		name, zones string
+		policy      recoverymode.SuccessorZone
+		readErr     error
+		reads       int
+		warning     string
+	}{
+		{"counts", "a,b", recoverymode.AnyPoolZone, nil, 1, "2 pods on this node are tied to zone a"},
+		{"unreadable", "a,b", recoverymode.AnyPoolZone, errors.New("read failed"), 1, "Zone constraints of the pods on this node could not be read."},
+		{"same zone", "a,b", recoverymode.SameZone, nil, 0, ""},
+		{"single zone", "a", recoverymode.AnyPoolZone, nil, 0, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newSuccessorPlatform()
+			p.zonePolicy, p.poolZones, p.constraintErr = tc.policy, tc.zones, tc.readErr
+			c, st, _ := successorFixture(t, recoverymode.Approval, p, "")
+			c.mutateRuntimeConfig(func(rc *RuntimeConfig) { rc.Impact = impactPolicy(false) })
+			id := openOn(t, c, "n1")
+			inc := step(t, c, st, id, 20)
+			if inc.State != types.StateAwaitingApproval || inc.Successor == nil || p.constraintReads != tc.reads {
+				t.Fatalf("state=%s successor=%+v reads=%d", inc.State, inc.Successor, p.constraintReads)
+			}
+			ctx := context.Background()
+			preview, err := st.LatestImpactPreview(ctx, id, inc.ApprovalEpoch)
+			if err != nil || preview == nil {
+				t.Fatalf("park preview: %v", err)
+			}
+			payload := string(preview.Payload)
+			if strings.Contains(payload, "The replacement may join another zone") != (tc.warning != "") || !strings.Contains(payload, tc.warning) {
+				t.Fatalf("unexpected preview: %s", payload)
+			}
+			rec := *inc.Successor
+			rec.Node, rec.NodeUID, rec.ProviderID, rec.SuccessorZone = successorNodeName, "uid-"+successorNodeName, "aws:///zone/i-"+successorNodeName, "b"
+			p.created = time.Now()
+			_, found, _, reason := c.replacementNode(ctx, inc, &cloudReplacement{successor: &rec})
+			if reason != "" || strings.Contains(found, "2 pods on the removed node were tied to zone a") != (tc.reads == 1 && tc.readErr == nil) {
+				t.Fatalf("resolution=%q reason=%q", found, reason)
+			}
+		})
+	}
 }

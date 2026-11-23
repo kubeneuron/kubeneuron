@@ -47,7 +47,7 @@ IDs. Planning requires room below the group's maximum size. The default placemen
 multi-zone group the new instance could land outside the zone required by a
 training job's volume or its scheduling constraints.
 
-KubeNeuron does not check volumes. Pods that need the original zone (zonal volumes, zone node affinity) will not schedule on the new node. Use `AnyPoolZone` only for workloads without such requirements.
+For multi-zone add-first with `AnyPoolZone`, the controller counts zone restrictions on bound persistent volumes and required pod scheduling rules. The impact preview shows the counts when at least one pod on the node is tied to its zone, and says so when they could not be read. If the successor joins another zone, the resolution includes the saved counts. The warning is advisory in both Approval and Automatic mode. The ADD-FIRST column in `kubeneuronctl pools` shows a general warning without inspecting workloads. Pods that need the original zone (zonal volumes, zone node affinity) will not schedule on the new node. Use `AnyPoolZone` only for workloads without such requirements.
 
 | Planning refusal | Operator action |
 | --- | --- |

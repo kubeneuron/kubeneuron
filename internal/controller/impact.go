@@ -91,6 +91,7 @@ func (c *Controller) previewImpactDurable(ctx context.Context, inc *types.Incide
 		IncidentID: inc.ID, Round: inc.ApprovalEpoch, ComputedAt: c.checkpointNowFunc()(), Node: inc.Target.Node,
 		Checkpoint: c.runtimeConfig(ctx).Checkpoint, Class: inc.Class, MaxItems: policy.MaxItems,
 	}
+	in.ZoneConstraintsUnreadable = inc.Successor != nil && inc.Successor.ZoneConstraintsUnreadable
 	step, done, err := c.runtimeConfig(ctx).Engine.NextStep(inc)
 	if err != nil || done || step == nil {
 		return c.storeImpact(roundCtx, inc, impact.Unavailable(in, impact.UnavailableNoPendingStep, "the round has no pending step"), trigger, started)
@@ -113,6 +114,7 @@ func (c *Controller) previewImpactDurable(ctx context.Context, inc *types.Incide
 		return c.storeImpact(roundCtx, inc, impact.Unavailable(in, reason, "list workloads on "+inc.Target.Node), trigger, started)
 	}
 	in.Workloads = workloads
+	in.ZoneConstraints = successorConstraints(inc.Successor)
 	in.TrainingWorkers, err = c.IncidentTrainingWorkers(roundCtx, inc.ID)
 	if err != nil {
 		in.TrainingWorkers = nil
@@ -493,4 +495,11 @@ func (c *Controller) previewGroupTotals(ctx context.Context, policy checkpoint.P
 		}
 	}
 	return totals, truncated
+}
+
+func successorConstraints(s *types.SuccessorRecord) *impact.ZoneConstraints {
+	if s == nil || s.ZoneConstrainedPods == 0 {
+		return nil
+	}
+	return &impact.ZoneConstraints{Zone: s.OriginalZone, Pods: s.ZoneConstrainedPods, PersistentVolumes: s.ZoneConstrainedVolumes}
 }

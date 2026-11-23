@@ -68,7 +68,7 @@ AKS:
 
 On pools configured with multiple availability zones, AKS chooses the zone of a new machine. With the default `SameZone` policy, KubeNeuron refuses add-first before requesting growth. Use a single-zone node pool, set RemoveFirst in the remediation policy that applies to these nodes, or set replacement.successorZone: AnyPoolZone if workloads on these nodes do not need the original zone.
 
-KubeNeuron does not check volumes. Pods that need the original zone (zonal volumes, zone node affinity) will not schedule on the new node. Use `AnyPoolZone` only for workloads without such requirements.
+For multi-zone add-first with `AnyPoolZone`, the controller counts zone restrictions on bound persistent volumes and required pod scheduling rules. The impact preview shows the counts when at least one pod on the node is tied to its zone, and says so when they could not be read. If the successor joins another zone, the resolution includes the saved counts. The warning is advisory in both Approval and Automatic mode. The ADD-FIRST column in `kubeneuronctl pools` shows a general warning without inspecting workloads. Pods that need the original zone (zonal volumes, zone node affinity) will not schedule on the new node. Use `AnyPoolZone` only for workloads without such requirements.
 
 With no availability zones configured, AKS places regional instances throughout the region without guaranteeing that they share a zone. KubeNeuron does not check machine placement for these pools. [Microsoft Learn](https://learn.microsoft.com/en-us/azure/aks/reliability-availability-zones-configure#regional-node-pools)
 

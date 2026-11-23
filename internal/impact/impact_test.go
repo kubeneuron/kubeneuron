@@ -251,3 +251,50 @@ func TestSummaryIsShort(t *testing.T) {
 		t.Fatalf("summary = %q", s)
 	}
 }
+
+func TestZoneWarningSurvivesStorage(t *testing.T) {
+	for _, tc := range []struct {
+		z                   ZoneConstraints
+		preview, resolution string
+	}{
+		{ZoneConstraints{"a", 1, 0}, "The replacement may join another zone of this pool. 1 pod on this node is tied to zone a by persistent volumes or required scheduling rules and may not start in another zone.", "The replacement joined zone b; the removed node was in zone a. 1 pod on the removed node was tied to zone a and may not start in zone b."},
+		{ZoneConstraints{"a", 2, 1}, "The replacement may join another zone of this pool. 2 pods on this node are tied to zone a by persistent volumes or required scheduling rules (1 persistent volume) and may not start in another zone.", "The replacement joined zone b; the removed node was in zone a. 2 pods on the removed node were tied to zone a (1 persistent volume) and may not start in zone b."},
+	} {
+		p := Compute(Input{ZoneConstraints: &tc.z})
+		rec, err := Record(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		restored, err := Parse(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !contains(restored.Warnings, tc.preview) || !strings.Contains(Summary(restored), tc.preview) {
+			t.Fatalf("missing warning: %v", restored.Warnings)
+		}
+		if got := restored.ZoneConstraints.ResolutionWarning("b"); got != tc.resolution {
+			t.Fatalf("resolution: %q", got)
+		}
+		if got := restored.ZoneConstraints.ResolutionWarning("a"); got != "" {
+			t.Fatalf("same zone: %q", got)
+		}
+	}
+	if p := Compute(Input{ZoneConstraints: &ZoneConstraints{Zone: "a"}}); p.ZoneConstraints != nil {
+		t.Fatal("empty summary was recorded")
+	}
+}
+
+func TestUnreadableZoneConstraints(t *testing.T) {
+	in := Input{ZoneConstraintsUnreadable: true}
+	for _, p := range []Preview{Compute(in), Unavailable(in, UnavailableListingFailed, "")} {
+		found := false
+		for _, warning := range p.Warnings {
+			if warning == "The replacement may join another zone of this pool. Zone constraints of the pods on this node could not be read." {
+				found = true
+			}
+		}
+		if !found || p.ZoneConstraints.ResolutionWarning("another-zone") != "" {
+			t.Fatalf("unexpected zone evidence: warnings=%v counts=%v", p.Warnings, p.ZoneConstraints)
+		}
+	}
+}

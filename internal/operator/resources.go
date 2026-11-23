@@ -223,6 +223,8 @@ func controllerClusterRole(installation *kubeneuronv1alpha1.KubeNeuron) *rbacv1.
 			{APIGroups: []string{""}, Resources: []string{"nodes"}, Verbs: []string{"get", "list", "watch", "patch"}},
 			{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: controllerPodVerbs(installation)},
 			{APIGroups: []string{""}, Resources: []string{"serviceaccounts"}, ResourceNames: []string{installation.Name + "-agent"}, Verbs: []string{"get"}},
+			{APIGroups: []string{""}, Resources: []string{"persistentvolumes"}, Verbs: []string{"get"}},
+			{APIGroups: []string{""}, Resources: []string{"persistentvolumeclaims"}, Verbs: []string{"get"}},
 			{APIGroups: []string{""}, Resources: []string{"pods/eviction"}, Verbs: []string{"create"}},
 			{APIGroups: []string{"apps"}, Resources: []string{"daemonsets"}, ResourceNames: agentDaemonSetNames(installation), Verbs: []string{"get"}},
 			{APIGroups: []string{"authentication.k8s.io"}, Resources: []string{"tokenreviews"}, Verbs: []string{"create"}},

@@ -132,6 +132,9 @@ func (p *Provider) planSuccessor(s cloud.Successor, t target, machines []machine
 	}
 	if zone == string(recoverymode.AnyPoolZone) {
 		s.State["successor_zone"] = zone
+		zones := slices.Clone(pl.Zones)
+		slices.Sort(zones)
+		s.State["pool_zones"] = strings.Join(zones, ",")
 	}
 	return s, nil
 }

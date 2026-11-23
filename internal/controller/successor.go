@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/impact"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/platform"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
@@ -305,6 +306,20 @@ func (c *Controller) planSuccessor(ctx context.Context, inc *types.Incident) err
 		}
 		if old.Found && old.UID == pin.NodeUID {
 			rec.OriginalZone = old.Zone
+			reader, supported := c.platform.(interface {
+				NodeZoneConstraints(context.Context, string, string) (int, int, error)
+			})
+			if supported && old.Zone != "" && strings.Contains(planned.State["pool_zones"], ",") {
+				budgetCtx, cancel := context.WithTimeout(ctx, impact.DefaultBudget)
+				pods, volumes, readErr := reader.NodeZoneConstraints(budgetCtx, pin.Node, old.Zone)
+				cancel()
+				if readErr == nil {
+					rec.ZoneConstrainedPods, rec.ZoneConstrainedVolumes = pods, volumes
+				} else {
+					rec.ZoneConstraintsUnreadable = true
+					c.log.Warn("zone constraints unavailable", "incident", inc.ID)
+				}
+			}
 		}
 	}
 	return c.saveSuccessor(ctx, inc, rec, "successor-planned",

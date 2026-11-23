@@ -425,8 +425,11 @@ const (
 // how long two nodes ran.
 type SuccessorRecord struct {
 	cloud.Successor
-	OriginalZone  string `json:"original_zone,omitempty"`
-	SuccessorZone string `json:"successor_zone,omitempty"`
+	ZoneConstrainedPods       int    `json:"zone_constrained_pods,omitempty"`
+	ZoneConstraintsUnreadable bool   `json:"zone_constraints_unreadable,omitempty"`
+	ZoneConstrainedVolumes    int    `json:"zone_constrained_volumes,omitempty"`
+	OriginalZone              string `json:"original_zone,omitempty"`
+	SuccessorZone             string `json:"successor_zone,omitempty"`
 	// Node is the successor's Kubernetes node name, once it is registered.
 	Node string `json:"node,omitempty"`
 	// NodeUID is that node's UID; the agent registration must match it.

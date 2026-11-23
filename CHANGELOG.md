@@ -9,6 +9,17 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+### Added
+
+- For multi-zone EKS and AKS pools using `AnyPoolZone`, `kubeneuronctl pools`
+  warns that a replacement may join another zone. The incident impact preview
+  reports how many pods have zone constraints from persistent volumes or
+  required scheduling rules. The resolution includes the counts when the
+  successor joins a different zone.
+- The controller now has cluster-wide `get` access to persistent volume
+  claims and persistent volumes to inspect zone affinity. It reads Kubernetes
+  object metadata and specs, without reading volume contents.
+
 ### Changed
 
 - Release images and the checksum file use Cosign 3 Sigstore bundles. The installation guide includes verification commands for both the new format and the detached signatures used by rc.1 and rc.2.
