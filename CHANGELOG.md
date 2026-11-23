@@ -38,6 +38,16 @@ API is `v1alpha1`.
   current Kubernetes node name and UID, dropping deleted nodes and old
   registrations for reused names.
 
+- **The record of a node with a registered agent takes the node's current
+  labels.** It kept the labels the node had when KubeNeuron first read it
+  from Kubernetes, or none, for as long as the node existed. The inventory
+  read now updates them while the node is the one the agent registered; a
+  node recreated with the same name is updated once its agent registers.
+  Decisions that select nodes by label already read the cluster; this keeps
+  the recorded labels, as `GET /api/v1/nodes/{node}` shows them, current, and
+  the last labels of a deleted node are those it had when it went. Present in
+  v1.0.0-rc.1 and v1.0.0-rc.2.
+
 - **A node recreated with the same name no longer inherits the earlier
   node's journal label or observation profile.** The GPUs an agent had
   reported made a node of that name an accelerator node for

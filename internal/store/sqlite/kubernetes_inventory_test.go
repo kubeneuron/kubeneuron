@@ -99,3 +99,40 @@ func TestDeleteKubernetesInventoryKeepsOtherRows(t *testing.T) {
 		}
 	}
 }
+
+// A registered agent's row takes the labels its Node object carries now,
+// while its UID is the agent's or unknown; another UID is another machine.
+// A row no agent registered is not written.
+func TestUpdateNodeLabelsWritesOnlyTheAgentsNode(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	for name, uid := range map[string]string{"same": "uid-1", "unknown": "", "other": "uid-1"} {
+		if err := st.UpsertAgentRegistration(ctx, &types.Node{Name: name, UID: uid, AgentLastSeen: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.ApplyNodeConfigPauses(ctx, []string{"paused"}); err != nil {
+		t.Fatal(err)
+	}
+	now := map[string]string{"pool": "b"}
+	for name, uid := range map[string]string{"same": "uid-1", "unknown": "uid-1", "other": "uid-2", "paused": "uid-1", "absent": "uid-1"} {
+		if err := st.UpdateNodeLabels(ctx, name, uid, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, want := range map[string]map[string]string{"same": now, "unknown": now, "other": {}, "paused": {}} {
+		got, err := st.GetNode(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Labels) != len(want) || got.Labels["pool"] != want["pool"] {
+			t.Errorf("%s labels = %v, want %v", name, got.Labels, want)
+		}
+	}
+	if got, _ := st.GetNode(ctx, "unknown"); got.UID != "" {
+		t.Errorf("the unknown UID became %q", got.UID)
+	}
+	if _, err := st.GetNode(ctx, "absent"); err == nil {
+		t.Error("a row was created for a node no agent registered")
+	}
+}

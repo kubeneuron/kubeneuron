@@ -1167,6 +1167,18 @@ func (q *Queries) UpsertKubernetesInventory(ctx context.Context, n *types.Node) 
 	return err
 }
 
+func (q *Queries) UpdateNodeLabels(ctx context.Context, name, uid string, labels map[string]string) error {
+	data, _ := json.Marshal(labels)
+	if labels == nil {
+		data = []byte("{}")
+	}
+	_, err := q.db.ExecContext(ctx, `
+		UPDATE nodes SET labels=?
+		WHERE name=? AND agent_last_seen IS NOT NULL AND (node_uid=? OR node_uid='')`,
+		string(data), name, uid)
+	return err
+}
+
 func (q *Queries) DeleteKubernetesInventory(ctx context.Context, name string) error {
 	_, err := q.db.ExecContext(ctx, `
 		DELETE FROM nodes

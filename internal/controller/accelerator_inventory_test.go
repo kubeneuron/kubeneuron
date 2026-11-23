@@ -797,3 +797,51 @@ func TestInventorySummaryDropsDeletedRegistrations(t *testing.T) {
 	register("new")
 	check(1)
 }
+
+// The labels of an agent's node are its Node object's now, while it is the
+// node the agent registered. The rest of the row stays the agent's, and a
+// new UID under the name waits for its agent.
+func TestInventoryRecordsTheLabelsOfTheAgentsNode(t *testing.T) {
+	c, st, plat := inventoryFixture(t)
+	ctx := context.Background()
+	gpus := []types.GPUInfo{{Index: 0, UUID: "GPU-0"}}
+	register := func(uid string) {
+		t.Helper()
+		if err := st.UpsertAgentRegistration(ctx, &types.Node{Name: "gpu-1", UID: uid, GPUs: gpus, AgentLastSeen: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	labelsNow := func(want string) {
+		t.Helper()
+		c.syncAcceleratorInventory(ctx)
+		got, err := st.GetNode(ctx, "gpu-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Labels["pool"] != want || got.InventorySource != types.InventoryAgent || !reflect.DeepEqual(got.GPUs, gpus) ||
+			len(got.Devices) != 0 || got.AgentLastSeen.IsZero() {
+			t.Fatalf("row = %+v, want pool %q and the agent's row otherwise", got, want)
+		}
+	}
+	register("uid-1")
+	live := func(uid, pool string) {
+		plat.imu.Lock()
+		plat.nodes = []types.Node{{Name: "gpu-1", UID: uid, Labels: map[string]string{"pool": pool}, Devices: []types.DeviceCount{
+			{Resource: "nvidia.com/gpu", Capacity: 8, Allocatable: 8, Unit: types.DeviceUnitGPU},
+		}}}
+		plat.imu.Unlock()
+	}
+	live("uid-1", "a")
+	labelsNow("a")
+	live("uid-1", "b")
+	labelsNow("b")
+	// The node recreated: the earlier machine's row keeps its labels until
+	// the new machine's agent registers.
+	live("uid-2", "c")
+	labelsNow("b")
+	register("uid-2")
+	labelsNow("c")
+	if st.writes != 0 {
+		t.Fatalf("%d Kubernetes inventory writes to the agent's row", st.writes)
+	}
+}
