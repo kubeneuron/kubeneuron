@@ -65,10 +65,11 @@ backoff (~21 s total); after the final failure the payload is
 **dead-lettered to the controller log** and
 `kubeneuron_notifications_dropped_total{kind="dead_letter"}` increments —
 the `KubeNeuronNotificationsDropped` alert covers both queue overflow and
-dead-letters. For an event the log line (`notification dead-lettered after
-retries`) includes the message, for manual replay. For an approval request
-the line (`approval request dead-lettered after retries`) names only the
-incident and the step; the approve and reject commands are in
+dead-letters. Each line names the channel (`channel`). For an event the log
+line (`notification dead-lettered after retries`) includes the message, for
+manual replay. For an approval request the line (`approval request
+dead-lettered after retries`) names only the channel, the incident and the
+step; the approve and reject commands are in
 `kubeneuronctl incidents show`. The audit trail, not any notification
 channel, remains the system of record.
 

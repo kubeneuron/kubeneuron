@@ -59,6 +59,8 @@ API is `v1alpha1`.
 
 - The description of the `KubeNeuronNotificationsDropped` alert, its runbook entry and the help text of `kubeneuron_notifications_dropped_total` no longer name a full queue as the only cause. They now say to check the `kind` label: `dead_letter` means delivery attempts failed, `event` or `approval_request` means the channel queue was full.
 
+- Notifications: the controller log lines for a failed delivery attempt, a dead-lettered notification or approval request, and a full queue now name the channel (`channel`), so with several channels the log says which channel it was.
+
 - `kubeneuronctl status` says when the CLI and the controller are different versions and links to the release of the controller's version. It compares only what the controller returned; the CLI contacts nothing else.
 
 - Panel: when an Approve or Reject arrives after the approval round was already decided, the panel now shows the recorded decision, who made it, through which channel and when, and offers to refresh the incident. The API answer for this case carries the decision in new `X-Approval-Actor`, `X-Approval-Channel` and `X-Approval-Decided-At` headers next to `X-Approval-Conflict` and `X-Approval-Decision`.

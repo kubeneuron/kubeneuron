@@ -122,7 +122,7 @@ func (a *Async) deliver(ctx context.Context, item asyncItem) {
 			break
 		}
 		a.log.Warn("notification delivery failed; retrying",
-			"attempt", attempt, "backoff", backoff, "err", err)
+			"channel", a.ChannelName(), "attempt", attempt, "backoff", backoff, "err", err)
 		a.sleep(ctx, backoff)
 		backoff *= asyncBackoffFactor
 	}
@@ -131,12 +131,12 @@ func (a *Async) deliver(ctx context.Context, item asyncItem) {
 	metrics.NotificationsDropped.WithLabelValues("dead_letter").Inc()
 	if item.event != nil {
 		a.log.Error("notification dead-lettered after retries",
-			"kind", item.event.Kind, "incident", incidentID(item.event.Incident),
+			"channel", a.ChannelName(), "kind", item.event.Kind, "incident", incidentID(item.event.Incident),
 			"message", item.event.Message, "err", err)
 		return
 	}
 	a.log.Error("approval request dead-lettered after retries",
-		"incident", incidentID(item.incident.incident),
+		"channel", a.ChannelName(), "incident", incidentID(item.incident.incident),
 		"step", item.incident.stepName, "err", err)
 }
 
@@ -149,7 +149,7 @@ func (a *Async) Notify(_ context.Context, ev NotifyEvent) error {
 	case a.queue <- asyncItem{event: &ev}:
 	default:
 		metrics.NotificationsDropped.WithLabelValues("event").Inc()
-		a.log.Warn("notification queue full, dropping", "kind", ev.Kind, "incident", incidentID(ev.Incident))
+		a.log.Warn("notification queue full, dropping", "channel", a.ChannelName(), "kind", ev.Kind, "incident", incidentID(ev.Incident))
 	}
 	return nil
 }
@@ -215,7 +215,7 @@ func (a *Async) RequestApprovalWithContext(_ context.Context, inc *types.Inciden
 	default:
 		a.release(inc)
 		metrics.NotificationsDropped.WithLabelValues("approval_request").Inc()
-		a.log.Warn("notification queue full, dropping approval request", "incident", incidentID(inc))
+		a.log.Warn("notification queue full, dropping approval request", "channel", a.ChannelName(), "incident", incidentID(inc))
 	}
 	return nil
 }

@@ -4,9 +4,11 @@ package notify
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -187,5 +189,48 @@ func TestAsyncQueuesAPendingRoundOnce(t *testing.T) {
 	waitFor(t, func() bool { return len(d.got()) == 2 })
 	if got := d.got(); len(got) != 2 || handed.Load() != 2 {
 		t.Fatalf("a delivered round was not queued again: %v", got)
+	}
+}
+
+// Every channel's dead letter names the channel, so with several channels
+// the log says which one dropped the request.
+func TestAsyncDeadLetterNamesTheChannel(t *testing.T) {
+	var buf syncBuffer
+	inner := &flakyNotifier{failures: 1 << 30}
+	a, _, _ := asyncWithRecordedSleep(inner)
+	a.log = slog.New(slog.NewJSONHandler(&buf, nil))
+	a.Channel = "webhook"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a.Start(ctx)
+	_ = a.RequestApprovalWithContext(context.Background(), &types.Incident{ID: "inc-1", ApprovalEpoch: 1}, "reboot", ApprovalContext{})
+	_ = a.Notify(context.Background(), NotifyEvent{Kind: EventOpened, Incident: &types.Incident{ID: "inc-2"}})
+
+	want := map[string]string{
+		"approval request dead-lettered after retries": "inc-1",
+		"notification dead-lettered after retries":     "inc-2",
+	}
+	lines := func() map[string]map[string]any {
+		got := map[string]map[string]any{}
+		for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+			var rec map[string]any
+			if json.Unmarshal([]byte(line), &rec) == nil {
+				if msg, _ := rec["msg"].(string); want[msg] != "" {
+					got[msg] = rec
+				}
+			}
+		}
+		return got
+	}
+	waitFor(t, func() bool { return len(lines()) == len(want) })
+	got := lines()
+	for msg, incident := range want {
+		rec, ok := got[msg]
+		if !ok {
+			t.Fatalf("no %q line in %s", msg, buf.String())
+		}
+		if rec["channel"] != "webhook" || rec["incident"] != incident {
+			t.Errorf("%q: channel %v, incident %v; want webhook, %s", msg, rec["channel"], rec["incident"], incident)
+		}
 	}
 }
