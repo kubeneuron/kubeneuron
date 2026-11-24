@@ -12,6 +12,9 @@ on:
       - "**.md"
       - "hack/stale-claims.txt"
       - "hack/verify-docs.sh"
+      - "hack/*kubectl-docs.*"
+      - "config/default/operator_deployment.yaml"
+      - "internal/operator/testdata/kubectl-docs.json"
       # Migrations feed the derived-fact check: a commit that adds only a
       # .sql file must still prove the documented heads still match.
       - "internal/store/*/migrations/**"
@@ -20,6 +23,9 @@ on:
       - "**.md"
       - "hack/stale-claims.txt"
       - "hack/verify-docs.sh"
+      - "hack/*kubectl-docs.*"
+      - "config/default/operator_deployment.yaml"
+      - "internal/operator/testdata/kubectl-docs.json"
       - "internal/store/*/migrations/**"
 
 permissions:
