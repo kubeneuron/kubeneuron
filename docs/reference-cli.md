@@ -10,9 +10,16 @@ Every command takes:
 |---|---|---|
 | `--server` | `http://localhost:8080` | controller public URL (use `https://` with `spec.tls.publicServerSecretRef`) |
 | `--token` / `--token-file` / `KUBENEURONCTL_TOKEN` | — | operator API bearer token (prefer the file or env form) |
+| `--ca-file` / `KUBENEURONCTL_CA_FILE` | — | PEM file with the CA that signed the controller's `https://` certificate; added to the system roots, not replacing them |
 
 In-cluster, port-forward first:
 `kubectl -n <ns> port-forward svc/<name>-controller 8080:8080`.
+
+If the HTTPS endpoint in `--server` uses a private CA, pass its PEM certificate with `--ca-file kubeneuron-ca.crt` or set `KUBENEURONCTL_CA_FILE` to the file path. The CLI trusts this CA in addition to the system roots. If the Secret named by `spec.tls.publicServerSecretRef` includes the issuing CA in `ca.crt`, copy it with the command below. Otherwise, obtain the CA certificate from whoever manages TLS for that endpoint. kubeneuronctl has no option to skip certificate verification.
+
+```sh
+kubectl -n <namespace> get secret <secret-name> -o jsonpath='{.data.ca\.crt}' | base64 -d > kubeneuron-ca.crt
+```
 
 ## Commands
 

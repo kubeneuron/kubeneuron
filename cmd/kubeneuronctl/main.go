@@ -45,6 +45,7 @@ func newRootCommand() *cobra.Command {
 	root.PersistentFlags().String("server", "http://localhost:8080", "controller base URL")
 	root.PersistentFlags().String("token", "", "bearer token (prefer --token-file or KUBENEURONCTL_TOKEN)")
 	root.PersistentFlags().String("token-file", "", "file containing the bearer token")
+	root.PersistentFlags().String("ca-file", "", "PEM file with the CA that signed the controller's certificate, added to the system roots (or KUBENEURONCTL_CA_FILE)")
 
 	root.AddCommand(
 		cmdStatus(), cmdNodes(), cmdIncidents(), cmdReport(), cmdApprove(),

@@ -4,6 +4,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -42,11 +44,43 @@ func newClient(cmd *cobra.Command) (*client, error) {
 	} else if env := os.Getenv("KUBENEURONCTL_TOKEN"); token == "" && env != "" {
 		token = env
 	}
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	caFile, _ := cmd.Flags().GetString("ca-file")
+	if caFile == "" {
+		caFile = os.Getenv("KUBENEURONCTL_CA_FILE")
+	}
+	if caFile != "" {
+		roots, err := rootsWithCAFile(caFile)
+		if err != nil {
+			return nil, err
+		}
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+		httpClient.Transport = transport
+	}
 	return &client{
 		base:  strings.TrimRight(base, "/"),
 		token: strings.TrimSpace(token),
-		http:  &http.Client{Timeout: 30 * time.Second},
+		http:  httpClient,
 	}, nil
+}
+
+// rootsWithCAFile adds the PEM certificates in path to the system roots, so a
+// controller serving a private CA's certificate is trusted without trusting
+// that CA for the whole machine.
+func rootsWithCAFile(path string) (*x509.CertPool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("CA file: %w", err)
+	}
+	roots, err := x509.SystemCertPool()
+	if err != nil || roots == nil {
+		roots = x509.NewCertPool()
+	}
+	if !roots.AppendCertsFromPEM(data) {
+		return nil, fmt.Errorf("CA file %s contains no PEM certificate", path)
+	}
+	return roots, nil
 }
 
 type responseError struct {

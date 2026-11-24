@@ -11,6 +11,8 @@ API is `v1alpha1`.
 
 ### Added
 
+- kubeneuronctl --ca-file (or KUBENEURONCTL_CA_FILE) trusts a private CA for the controller's certificate in addition to the system roots.
+
 - `kubeneuronctl status` shows the version of the controller that answered the request.
 
 - For multi-zone EKS and AKS pools using `AnyPoolZone`, `kubeneuronctl pools`
