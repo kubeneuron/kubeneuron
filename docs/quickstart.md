@@ -15,8 +15,8 @@ curl -fsSL https://github.com/kubeneuron/kubeneuron/releases/download/v1.0.0-rc.
 A release candidate is a pre-release and installs only by its explicit
 version. There is no latest release yet. Upgrading from 0.x is not supported.
 
-Use a cluster running Kubernetes 1.32 or later with a default StorageClass.
-Follow the commands for your platform and release. This example uses Linux amd64 and the default
+Use a Kubernetes 1.29+ cluster with a default StorageClass. Follow the commands
+for your platform and release. This example uses Linux amd64 and the default
 installation. Replace every occurrence of `v1.0.0-rc.2` in this example with the
 version you installed. The [installation guide](install.md) explains how to
 verify the signature on that release's checksum file.

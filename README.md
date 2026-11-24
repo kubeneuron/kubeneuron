@@ -141,7 +141,7 @@ multi-node cluster with an agent per worker. The test checks that an agent canno
 ## Operator installation
 
 The CRDs use Kubernetes quantity CEL functions, so the installation requires
-Kubernetes 1.32 or later. The CRD in this release is rejected by Kubernetes 1.29, 1.30 and 1.31. A separately owned, version-pinned GPU/observability
+Kubernetes 1.29 or newer. A separately owned, version-pinned GPU/observability
 dependency profile and its install, upgrade, and removal gates are documented
 in [`deploy/kubernetes/dependencies/`](deploy/kubernetes/dependencies/). Install
 and verify those dependencies first when using the supplied sample endpoints.

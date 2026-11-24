@@ -228,6 +228,30 @@ if [[ -n $kust_tag && -n $chart_tag && $kust_tag != "$chart_tag" ]]; then
 	fail=1
 fi
 
+# --- derived facts: the minimum Kubernetes version ---------------------------
+# The Helm chart's kubeVersion is the source. install.sh and every minimum the
+# install pages state must name the same minor, so a change to one cannot
+# leave the others promising a version the release does not install on. Only
+# the pages that state the install minimum are read; a feature may need a
+# newer one.
+min_minor=$(sed -n 's/^kubeVersion: *">=1\.\([0-9]*\)\..*/\1/p' deploy/helm/kubeneuron/Chart.yaml)
+if [[ -z $min_minor ]]; then
+	echo "MINIMUM KUBERNETES: cannot read kubeVersion from deploy/helm/kubeneuron/Chart.yaml" >&2
+	fail=1
+else
+	if ! grep -q "server_minor -ge ${min_minor} \]\]" deploy/install.sh ||
+		! grep -q "kubectl (>=1\.${min_minor} server)" deploy/install.sh; then
+		echo "MINIMUM KUBERNETES: deploy/install.sh does not check the chart's minimum 1.${min_minor}" >&2
+		fail=1
+	fi
+	while IFS=: read -r file line text; do
+		echo "MINIMUM KUBERNETES: ${file}:${line} states a minimum other than the chart's 1.${min_minor}: ${text}" >&2
+		fail=1
+	done < <(grep -nEo 'Kubernetes \**1\.[0-9]+(\+|\** or newer|\** or later| minimum)' \
+		README.md docs/install.md docs/quickstart.md docs/design.md |
+		grep -v "1\.${min_minor}[^0-9]" || true)
+fi
+
 if ((fail)); then
 	echo "verify-docs: FAILED — fix the claims above (or, if a claim became true again, remove its pattern)" >&2
 	exit 1

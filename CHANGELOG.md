@@ -52,6 +52,8 @@ API is `v1alpha1`.
 ### Fixed
 
 - Store: timestamps with different fractional-second precision were compared as text. Within the same second, a queued action could occasionally be picked before an older one, and time filters and retention cutoffs could misplace a record. Ordering and comparisons of the affected timestamps are now chronological. Existing values are rewritten to a fixed width once, when the controller first starts after the upgrade; the schema version does not change. Records of the operational audit log are not modified.
+
+- The KubeNeuron CRD now installs on Kubernetes 1.29, 1.30 and 1.31. Its validation rules for Secret references named the `namespace` field unescaped, which these versions refuse to compile, so the CRD was rejected there; the rules now write it as `__namespace__` and check the same thing.
 - When a GKE remove-first replacement needs an operator, the incident explains how to check the pool and settle the cloud operation. If the pool has been removed, the incident no longer suggests resizing it.
 - Add-first: a replacement node that KubeNeuron left in the pool — because it was already running a workload, or because its removal could not be confirmed — is no longer dropped from the incident's record when a later attempt plans its own replacement. The incident now waits for the operator and names the pool (and the node, when it was kept for a workload); `kubeneuronctl resolve <id> --cloud-operation-settled --reason "<what you found>"` then closes it. If the command is run while a later attempt is still in progress, it settles only the earlier node's record, and the incident stays open.
 

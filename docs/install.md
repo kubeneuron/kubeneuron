@@ -1,8 +1,8 @@
 # Production install (operator-managed Kubernetes)
 
 The operator-managed path is the only supported authenticated deployment
-shape. It requires Kubernetes 1.32 or later. The CRD in this release is rejected by Kubernetes 1.29, 1.30 and 1.31.
-The integration harness pins and tests v1.33.
+shape. It requires Kubernetes **1.29+** (the CRDs use quantity CEL
+functions); the integration harness pins and tests v1.33.
 
 ## Recovery policies installed by the script
 

@@ -2134,7 +2134,7 @@ spec:
                 - message: sqlite settings are required for SQLite
                   rule: self.type != 'SQLite' || has(self.sqlite)
                 - message: the Postgres DSN Secret must omit namespace and use spec.namespace
-                  rule: self.type != 'Postgres' || !has(self.secretRef) || !has(self.secretRef.namespace)
+                  rule: self.type != 'Postgres' || !has(self.secretRef) || !has(self.secretRef.__namespace__)
                 - message: workflow store type is immutable
                   rule: self.type == oldSelf.type
             required:
@@ -2146,9 +2146,9 @@ spec:
             type: object
             x-kubernetes-validations:
             - message: TLS Secret references must omit namespace and use spec.namespace
-              rule: '!has(self.tls.serverSecretRef.namespace) && !has(self.tls.clientCASecretRef.namespace)
-                && !has(self.tls.clientSecretRef.namespace) && !has(self.tls.serverCASecretRef.namespace)
-                && (!has(self.tls.publicServerSecretRef) || !has(self.tls.publicServerSecretRef.namespace))'
+              rule: '!has(self.tls.serverSecretRef.__namespace__) && !has(self.tls.clientCASecretRef.__namespace__)
+                && !has(self.tls.clientSecretRef.__namespace__) && !has(self.tls.serverCASecretRef.__namespace__)
+                && (!has(self.tls.publicServerSecretRef) || !has(self.tls.publicServerSecretRef.__namespace__))'
             - message: 'executionMode Enabled requires spec.safety.destructiveExecution:
                 real reset and reboot are confined to explicitly declared nodes'
               rule: '!has(self.safety) || self.safety.executionMode != ''Enabled''
@@ -2161,16 +2161,16 @@ spec:
               rule: '!has(self.safety) || self.safety.executionMode != ''Paused''
                 || (has(self.notifications) && has(self.notifications.operatorAPIToken))'
             - message: auth Secret references must omit namespace and use spec.namespace
-              rule: '!has(self.auth) || ((!has(self.auth.users) || !has(self.auth.users.namespace))
-                && (!has(self.auth.oidc) || !has(self.auth.oidc.clientSecretRef.namespace)))'
+              rule: '!has(self.auth) || ((!has(self.auth.users) || !has(self.auth.users.__namespace__))
+                && (!has(self.auth.oidc) || !has(self.auth.oidc.clientSecretRef.__namespace__)))'
             - message: notification Secret references must omit namespace and use
                 spec.namespace
               rule: '!has(self.notifications) || ((!has(self.notifications.slack)
-                || !has(self.notifications.slack.namespace)) && (!has(self.notifications.operatorAPIToken)
-                || !has(self.notifications.operatorAPIToken.namespace)) && (!has(self.notifications.webhookToken)
-                || !has(self.notifications.webhookToken.namespace)) && (!has(self.notifications.webhook)
-                || !has(self.notifications.webhook.namespace)) && (!has(self.notifications.pagerduty)
-                || !has(self.notifications.pagerduty.namespace)))'
+                || !has(self.notifications.slack.__namespace__)) && (!has(self.notifications.operatorAPIToken)
+                || !has(self.notifications.operatorAPIToken.__namespace__)) && (!has(self.notifications.webhookToken)
+                || !has(self.notifications.webhookToken.__namespace__)) && (!has(self.notifications.webhook)
+                || !has(self.notifications.webhook.__namespace__)) && (!has(self.notifications.pagerduty)
+                || !has(self.notifications.pagerduty.__namespace__)))'
             - message: manualRecoveryBaseline must be a positive duration of at most
                 720h
               rule: '!has(self.manualRecoveryBaseline) || (duration(self.manualRecoveryBaseline)
