@@ -322,12 +322,14 @@ replay happens on restore.
 **Restore** (SQLite). The controller image is distroless and the claim is
 `ReadWriteOnce`, so the restore runs with the controller stopped and a
 helper pod holding the volume — `deploy/kubernetes/backup/restore-helper.yaml`
-is that pod:
+is that pod. In the commands below, `kube-neuron` and `kubeneuron-operator`
+are the operator namespace and Deployment name, and `<ns>` and `<name>` are
+the namespace and name of the installation.
 
 ```sh
 # 0. Stop the OPERATOR first, or none of this works.
 #    The operator owns the controller Deployment's replica count and
-#    reconciles a manual scale straight back to one. Skip this and step 1
+#    restores its configured replica count. Skip this and step 1
 #    appears to succeed, the controller returns within a reconcile, and step 3
 #    replaces the database file underneath a running writer — corrupting the
 #    database this procedure exists to restore.
@@ -367,9 +369,6 @@ kubectl -n kube-neuron scale deploy/kubeneuron-operator --replicas=1
 #    Again: not `rollout status`. Until the operator reconciles, the controller
 #    is still at zero replicas, and rollout status calls that rolled out.
 kubectl -n <ns> wait --for=condition=Available deploy/<name>-controller --timeout=5m
-
-# 5. Verify against what you expect from the snapshot's age.
-kubeneuronctl incidents --state RESOLVED | head
 ```
 
 The controller applies schema migrations forward automatically on start
@@ -377,9 +376,63 @@ The controller applies schema migrations forward automatically on start
 of the controller onto an older binary — it refuses to start rather than
 downgrade a schema.
 
-**Restore (PostgreSQL):** there is no KubeNeuron-side restore. Use your
-platform's `pg_restore`/PITR with the controller scaled to zero, then scale
-back up; the schema-version refusal above applies identically.
+**Restore (PostgreSQL).** Identify the target database using the installation's
+`spec.workflowStore.secretRef`. The Secret's `dsn` key holds the connection
+details. The same schema-version restriction applies to PostgreSQL.
+
+1. Follow steps 0 and 1 above. Stop the operator first so it cannot restart
+   the controller, then stop the controller and wait for its Pods to exit.
+2. To restore a custom-format archive into the existing workflow database,
+   verify the target database and the archive. Take a fresh `pg_dump` of the
+   current database and save it separately. The `--clean` option drops the
+   existing objects named in the archive. Those drops cannot be undone.
+
+   ```sh
+   pg_restore --clean --if-exists -d <db> <dump>
+   ```
+
+   Alternatively, restore into a new empty database and point the Secret's
+   `dsn` at that database before restarting the operator.
+
+   A plain restore into a populated database can fail on existing objects yet
+   reset sequences, causing subsequent audit inserts to fail with duplicate
+   keys. Keep the operator and controller stopped until `pg_restore` exits
+   with code 0.
+3. Restart the operator and wait for the controller using the last two
+   commands in step 4. Check the controller logs for `duplicate key` errors
+   on audit writes:
+
+   ```sh
+   kubectl -n <ns> logs deploy/<name>-controller
+   ```
+
+   If an audit write fails with a duplicate key after the restore, stop the
+   operator and controller again and repeat the restore from the backup
+   with `--clean --if-exists`.
+
+**Verify after either restore.** As soon as the controller is available, run
+`kubeneuronctl status`. The automation pause and cooldowns return to their
+state at backup time. If you still need automation paused, run
+`kubeneuronctl pause` and confirm the pause in `status`.
+
+Allow one controller reconciliation pass, then run `kubeneuronctl incidents`
+to see incidents in all states. Run `kubeneuronctl incidents --state AWAITING_APPROVAL`
+to find rounds that need a decision:
+decisions made after the backup are lost, and restoring the store does not
+itself resend the request. Review the current round before approving or
+rejecting it again. Incidents resume from their recorded steps and can finish
+differently, including sending a resolved notification.
+
+List the incident IDs recorded on the nodes:
+
+```sh
+kubectl get nodes -o custom-columns='NODE:.metadata.name,OWNERS:.metadata.annotations.kubeneuron\.io/cordon-owners'
+```
+
+For each owner ID, run `kubeneuronctl incidents show <id>` and compare the
+restored step with the node's cordon. A cordon placed after the backup can still be present even
+when its incident is back at the approval step. Inspect the node before
+deciding whether it can return to service.
 
 **Scheduled backups:** the CronJob template in
 [`deploy/kubernetes/backup/`](https://github.com/kubeneuron/kubeneuron/tree/main/deploy/kubernetes/backup)

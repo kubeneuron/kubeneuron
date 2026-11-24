@@ -4,7 +4,7 @@
 # The controller image is distroless (no shell, no sqlite3), and the restore
 # runs with the controller scaled to zero — so nothing would otherwise mount
 # the claim. Apply this, copy the file in, delete it. See
-# docs/operations.md, "SQLite workflow store: backup and restore".
+# docs/operations.md#sqlite-workflow-store-backup-and-restore.
 #
 # The claim name on the line marked "# <name>" defaults to the installer's
 # default installation, kubeneuron. For another installation, e.g. fleet:
