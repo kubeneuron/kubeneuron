@@ -293,7 +293,7 @@ func TestRemoveFirstRecordedResizeIsNotResent(t *testing.T) {
 // Between the delete and the resize another operation on the pool is waited
 // for; a resize by someone else that left the pool at its size or larger
 // ends the plan with no call, and one that left another zone at another size
-// needs an operator, with the command that sets the size back.
+// needs an operator.
 func TestRemoveFirstForeignResizeBetweenPhases(t *testing.T) {
 	f := newFakeGKE(2, testZone, "us-central1-b")
 	plan := step(t, f, step(t, f, planRemoveFirst(t, f), cloud.RemoveFirstDeleting), cloud.RemoveFirstDeleting)
@@ -315,7 +315,7 @@ func TestRemoveFirstForeignResizeBetweenPhases(t *testing.T) {
 	f.groups[1].target = 3
 	f.calls = nil
 	_, err := testProvider(f).ContinueRemoveFirst(t.Context(), plan)
-	if !errors.Is(err, cloud.ErrNeedsOperator) || !strings.Contains(err.Error(), "gcloud container clusters resize training --node-pool gpu --num-nodes 2") || len(f.calls) != 0 {
+	if !errors.Is(err, cloud.ErrNeedsOperator) || strings.Contains(err.Error(), "gcloud") || len(f.calls) != 0 {
 		t.Fatalf("%v, calls %q", err, f.calls)
 	}
 }
@@ -477,5 +477,16 @@ func TestObserveRemoveFirstSize(t *testing.T) {
 	}
 	if !removefirst.ResizeMaySend(plan) {
 		t.Fatal("a plan recorded as resizing with no operation may send the resize")
+	}
+}
+
+func TestRemoveFirstMissingPoolAfterDelete(t *testing.T) {
+	f := newFakeGKE(3)
+	plan := planRemoveFirst(t, f)
+	plan.Phase = cloud.RemoveFirstResizing
+	plan.Pool = "removed-pool"
+	_, err := testProvider(f).ContinueRemoveFirst(t.Context(), plan)
+	if !errors.Is(err, removefirst.ErrPoolGone) || !errors.Is(err, cloud.ErrNeedsOperator) || len(f.calls) != 0 {
+		t.Fatalf("missing pool: err=%v calls=%v", err, f.calls)
 	}
 }

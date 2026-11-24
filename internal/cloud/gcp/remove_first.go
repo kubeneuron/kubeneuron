@@ -159,7 +159,7 @@ func (p *Provider) ContinueRemoveFirst(ctx context.Context, plan cloud.RemoveFir
 		if !started {
 			return fmt.Errorf("%w: %s", cloud.ErrRemoveFirstUnavailable, fmt.Sprintf(format, args...))
 		}
-		return fmt.Errorf("gcp: %s; to set the size back: %s: %w", fmt.Sprintf(format, args...), plan.Restore, cloud.ErrNeedsOperator)
+		return fmt.Errorf("gcp: %s: %w", fmt.Sprintf(format, args...), cloud.ErrNeedsOperator)
 	}
 	g, err := parseGroup(plan.State[stateGroup])
 	if err != nil {
@@ -179,6 +179,9 @@ func (p *Provider) ContinueRemoveFirst(ctx context.Context, plan cloud.RemoveFir
 	}
 	pl, ok := c.pool(plan.Pool)
 	if !ok {
+		if started {
+			return plan, fmt.Errorf("%w: %w", cloud.ErrNeedsOperator, removefirst.ErrPoolGone)
+		}
 		return plan, refuse("node pool %s is gone", plan.Pool)
 	}
 	var groups []string
