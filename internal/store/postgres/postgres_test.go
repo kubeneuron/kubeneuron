@@ -511,3 +511,39 @@ func TestFailedNodeStepReleaseAllowsGPUReset(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestLegacyEventOrderAndRollbackReader(t *testing.T) {
+	s := openTestStore(t)
+	const second = "2026-01-02T03:04:05"
+	for xid, fraction := range []string{".123401", ".1234", "", ".1", ".123400000"} {
+		if _, err := s.SQL.Exec("INSERT INTO events(node,xid,timestamp) VALUES ('node',$1,$2)", xid, second+fraction+"Z"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := s.NormalizeTimestamps(context.Background())
+	if err != nil || n != 4 {
+		t.Fatalf("updated %d timestamps: %v", n, err)
+	}
+	rows, err := s.SQL.Query("SELECT xid,timestamp FROM events ORDER BY timestamp,id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for _, want := range []int{2, 3, 1, 4, 0} {
+		var xid int
+		var stamp string
+		if !rows.Next() {
+			t.Fatalf("missing event %d: %v", want, rows.Err())
+		}
+		if err := rows.Scan(&xid, &stamp); err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, stamp)
+		if err != nil || xid != want || parsed.UTC().Format("2006-01-02T15:04:05.000000000Z") != stamp {
+			t.Fatalf("expected event %d with fixed UTC time, got %d %q: %v", want, xid, stamp, err)
+		}
+	}
+	if rows.Next() || rows.Err() != nil {
+		t.Fatalf("unexpected rows or error: %v", rows.Err())
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
+	"github.com/kubeneuron/kubeneuron/internal/store/sqlcore"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -39,7 +40,7 @@ func TestTrainingReportsBoundToIncident(t *testing.T) {
 		t.Helper()
 		var facts, progress int
 		err := s.SQL.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM training_checkpoint_facts WHERE received_at=$1 AND step IS NULL),
-		(SELECT COUNT(*) FROM training_progress WHERE received_at=$1 AND step=17)`, now.Format(time.RFC3339Nano)).Scan(&facts, &progress)
+		(SELECT COUNT(*) FROM training_progress WHERE received_at=$1 AND step=17)`, sqlcore.TS(now)).Scan(&facts, &progress)
 		if err != nil || facts != wantFacts || progress != wantProgress {
 			t.Fatalf("facts=%d progress=%d err=%v", facts, progress, err)
 		}

@@ -372,7 +372,7 @@ func (c *Core) Prune(ctx context.Context, dataRetention, auditRetention time.Dur
 				) AND NOT EXISTS (
 					SELECT 1 FROM operational_audit AS newer
 					WHERE newer.kind=event.kind AND newer.resource_id=event.resource_id AND newer.time >= ?
-				)`, cutoff); err != nil {
+				)`, now.Add(-auditRetention).UTC().Format(time.RFC3339Nano)); err != nil {
 				return err
 			}
 			if stats.OperationalAuditHeads, err = q.execCount(ctx, `
@@ -519,7 +519,7 @@ func (q *Queries) GetIncident(ctx context.Context, id string) (*types.Incident, 
 // unattributed device incidents), and QueryRow would then pick an arbitrary
 // one — so which incident a signal joined could differ between two identical
 // calls. Oldest-first makes it the incident that has been waiting longest.
-const openIncidentTail = ` AND state NOT IN ('RESOLVED','EXPIRED','SUPERSEDED') ORDER BY opened_at LIMIT 1`
+const openIncidentTail = ` AND state NOT IN ('RESOLVED','EXPIRED','SUPERSEDED') ORDER BY opened_at, id LIMIT 1`
 
 // GetOpenIncident finds the non-terminal incident a signal belongs to, or
 // ErrNotFound.
@@ -716,7 +716,7 @@ func (q *Queries) ListIncidents(ctx context.Context, f store.IncidentFilter) ([]
 			OR COALESCE(NULLIF(resolved_at, ''), NULLIF(state_changed_at, ''), updated_at) >= ?)`
 		args = append(args, ts(f.ActiveSince.Add(-time.Second)))
 	}
-	qs += ` ORDER BY opened_at DESC`
+	qs += ` ORDER BY opened_at DESC, id`
 	if f.Limit > 0 {
 		qs += ` LIMIT ?`
 		args = append(args, f.Limit)
@@ -831,7 +831,7 @@ func (q *Queries) AppendAudit(ctx context.Context, e *types.AuditEntry) error {
 	_, err := q.db.ExecContext(ctx, `
 		INSERT INTO audit_log (incident_id, time, from_state, to_state, actor, action, params, result, dry_run)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.IncidentID, ts(e.Time), string(e.FromState), string(e.ToState),
+		e.IncidentID, e.Time.UTC().Format(time.RFC3339Nano), string(e.FromState), string(e.ToState),
 		e.Actor, e.Action, string(params), e.Result, b2i(e.DryRun))
 	return err
 }
@@ -2236,7 +2236,9 @@ func b2i(b bool) int {
 	return 0
 }
 
-func ts(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+// ts uses fixed-width UTC so text comparisons preserve chronological order.
+// RFC3339Nano trims trailing zeros and can reverse records within one second.
+func ts(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000000000Z") }
 
 func parseTS(s string) time.Time {
 	t, _ := time.Parse(time.RFC3339Nano, s)

@@ -55,7 +55,9 @@ func (q *Queries) SaveTrainingProgress(ctx context.Context, incidentID, jobUID, 
 	}
 	var ready, confirmed *string
 	if at := types.VerifiedInfrastructureTime(trail); at != nil && received.After(*at) {
-		r, c := ts(*at), ts(received)
+		// This instant identifies the recovery round by exact text equality.
+		// Keep its legacy encoding for readers on either side of a rollback.
+		r, c := at.UTC().Format(time.RFC3339Nano), ts(received)
 		ready, confirmed = &r, &c
 	}
 	_, err = q.db.ExecContext(ctx, `INSERT INTO training_progress (incident_id,job_uid,pod_uid,step,received_at,ready_at,confirmed_at)
@@ -115,7 +117,7 @@ func (q *Queries) RecordAffectedJobReport(ctx context.Context, incidentID, names
 func (q *Queries) TrainingConfirmations(ctx context.Context, id string, ready time.Time) (map[string]time.Time, error) {
 	rows, err := q.db.QueryContext(ctx, `SELECT job_uid, CASE WHEN ready_at=? THEN confirmed_at END
 		FROM training_progress WHERE incident_id=?
-		UNION SELECT job_uid,NULL FROM training_checkpoint_facts WHERE incident_id=?`, ts(ready), id, id)
+		UNION SELECT job_uid,NULL FROM training_checkpoint_facts WHERE incident_id=?`, ready.UTC().Format(time.RFC3339Nano), id, id)
 	if err != nil {
 		return nil, err
 	}

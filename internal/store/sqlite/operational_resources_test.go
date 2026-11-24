@@ -185,3 +185,95 @@ func TestPruneRecognizesTerminalQualificationStatesAndKeepsAudit(t *testing.T) {
 		}
 	}
 }
+
+func TestResourceListContinuesFromLegacyTimestamp(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := t.Context()
+	const prefix = "2026-01-02T03:04:05."
+	kind := types.ResourceCandidateConfiguration
+	for _, row := range []struct{ id, fraction string }{{"a", "1234"}, {"b", "123400000"}, {"c", "123401"}} {
+		resource := &types.OperationalResource{ID: row.id, Kind: kind, State: "uploaded", Payload: []byte("{}")}
+		if err := s.CreateOperationalResource(ctx, resource); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SQL.Exec("UPDATE operational_resources SET created_at=? WHERE id=?", prefix+row.fraction+"Z", row.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.NormalizeTimestamps(ctx); err != nil {
+		t.Fatal(err)
+	}
+	at, err := time.Parse(time.RFC3339Nano, prefix+"1234Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := s.ListOperationalResources(ctx, types.OperationalResourceFilter{Kind: kind, AfterCreatedAt: at, AfterID: "a"})
+	if err != nil || len(items) != 2 || items[0].ID != "b" || items[1].ID != "c" {
+		t.Fatalf("page after legacy timestamp: %#v, error %v", items, err)
+	}
+}
+
+func TestReclaimExpiredKeyWithoutNormalization(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	for _, expiry := range []string{"2020-01-02T03:04:05.1234Z", "2020-01-02T03:04:05.123400000Z"} {
+		record := types.OperationalIdempotencyRecord{Kind: types.ResourceCandidateConfiguration, Actor: "actor", Key: expiry, RequestDigest: "first", ResourceID: "original"}
+		if _, _, err := s.PutOperationalIdempotency(t.Context(), &record); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SQL.Exec("UPDATE operational_idempotency SET expires_at=? WHERE idempotency_key=?", expiry, record.Key); err != nil {
+			t.Fatal(err)
+		}
+		record.ResourceID = "replacement"
+		got, created, err := s.PutOperationalIdempotency(t.Context(), &record)
+		if err != nil || !created || got.ResourceID != "replacement" {
+			t.Fatalf("expiry %s: got %#v, created %t, error %v", expiry, got, created, err)
+		}
+	}
+}
+
+func TestResourceCursorAdvancesAcrossMixedTimestamps(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := t.Context()
+	kind := types.ResourceCandidateConfiguration
+	for id, fraction := range map[string]string{"a": "1234", "b": "123400000", "c": "123401"} {
+		r := types.OperationalResource{ID: id, Kind: kind, State: "uploaded", Payload: []byte("{}")}
+		if err := s.CreateOperationalResource(ctx, &r); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SQL.Exec("UPDATE operational_resources SET created_at=? WHERE id=?", "2026-01-02T03:04:05."+fraction+"Z", id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	filter := types.OperationalResourceFilter{Kind: kind, Limit: 1}
+	seen := map[string]bool{}
+	for {
+		page, err := s.ListOperationalResources(ctx, filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		r := page[0]
+		if seen[r.ID] {
+			t.Fatalf("cursor repeated %s", r.ID)
+		}
+		seen[r.ID] = true
+		filter.AfterID, filter.AfterCreatedAt = r.ID, r.CreatedAt
+	}
+	if len(seen) != 3 {
+		t.Fatalf("visited %v", seen)
+	}
+}

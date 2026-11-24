@@ -158,8 +158,12 @@ func (q *Queries) ListOperationalResources(ctx context.Context, filter types.Ope
 		args = append(args, ts(time.Now()))
 	}
 	if !filter.AfterCreatedAt.IsZero() {
-		clauses = append(clauses, "(created_at > ? OR (created_at = ? AND id > ?))")
-		args = append(args, ts(filter.AfterCreatedAt), ts(filter.AfterCreatedAt), filter.AfterID)
+		// Resume after the stored key even if normalization stopped midway.
+		// Mixed encodings may be out of chronological order within one second.
+		stamp := ts(filter.AfterCreatedAt)
+		legacy := filter.AfterCreatedAt.UTC().Format(time.RFC3339Nano)
+		clauses = append(clauses, "(created_at,id) > (COALESCE((SELECT created_at FROM operational_resources WHERE kind=? AND id=? AND created_at IN (?,?)),?),?)")
+		args = append(args, string(filter.Kind), filter.AfterID, stamp, legacy, stamp, filter.AfterID)
 	}
 	args = append(args, limit)
 	rows, err := q.db.QueryContext(ctx, operationalResourceSelect+` WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at, id LIMIT ?`, args...)
@@ -200,14 +204,15 @@ func (q *Queries) PutOperationalIdempotency(ctx context.Context, record *types.O
 		RETURNING kind, actor, idempotency_key, request_digest, resource_id, created_at, expires_at, result_digest`,
 		string(record.Kind), record.Actor, record.Key, record.RequestDigest, record.ResourceID,
 		ts(record.CreatedAt), ts(record.ExpiresAt), record.ResultDigest)
-	inserted, err := scanOperationalIdempotency(row)
+	inserted, err := scanOperationalIdempotency(row, new(string))
 	if err == nil {
 		return inserted, true, nil
 	}
 	if !errors.Is(err, store.ErrNotFound) {
 		return nil, false, err
 	}
-	existing, err := q.GetOperationalIdempotency(ctx, record.Kind, record.Actor, record.Key)
+	var storedExpiry string
+	existing, err := q.getOperationalIdempotency(ctx, record.Kind, record.Actor, record.Key, &storedExpiry)
 	if err != nil {
 		return nil, false, err
 	}
@@ -221,7 +226,7 @@ func (q *Queries) PutOperationalIdempotency(ctx context.Context, record *types.O
 	if _, err := q.db.ExecContext(ctx, `
 		DELETE FROM operational_idempotency
 		WHERE kind=? AND actor=? AND idempotency_key=? AND expires_at=?`,
-		string(record.Kind), record.Actor, record.Key, ts(existing.ExpiresAt)); err != nil {
+		string(record.Kind), record.Actor, record.Key, storedExpiry); err != nil {
 		return nil, false, fmt.Errorf("reclaim expired idempotency key: %w", err)
 	}
 	row = q.db.QueryRowContext(ctx, `
@@ -232,7 +237,7 @@ func (q *Queries) PutOperationalIdempotency(ctx context.Context, record *types.O
 		RETURNING kind, actor, idempotency_key, request_digest, resource_id, created_at, expires_at, result_digest`,
 		string(record.Kind), record.Actor, record.Key, record.RequestDigest, record.ResourceID,
 		ts(record.CreatedAt), ts(record.ExpiresAt), record.ResultDigest)
-	if inserted, err := scanOperationalIdempotency(row); err == nil {
+	if inserted, err := scanOperationalIdempotency(row, new(string)); err == nil {
 		return inserted, true, nil
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, false, err
@@ -245,10 +250,14 @@ func (q *Queries) PutOperationalIdempotency(ctx context.Context, record *types.O
 }
 
 func (q *Queries) GetOperationalIdempotency(ctx context.Context, kind types.OperationalResourceKind, actor, key string) (*types.OperationalIdempotencyRecord, error) {
+	return q.getOperationalIdempotency(ctx, kind, actor, key, new(string))
+}
+
+func (q *Queries) getOperationalIdempotency(ctx context.Context, kind types.OperationalResourceKind, actor, key string, storedExpiry *string) (*types.OperationalIdempotencyRecord, error) {
 	row := q.db.QueryRowContext(ctx, `
 		SELECT kind, actor, idempotency_key, request_digest, resource_id, created_at, expires_at, result_digest
 		FROM operational_idempotency WHERE kind=? AND actor=? AND idempotency_key=?`, string(kind), actor, key)
-	return scanOperationalIdempotency(row)
+	return scanOperationalIdempotency(row, storedExpiry)
 }
 
 // AppendOperationalAudit appends one hash-chained audit record. Callers use
@@ -328,12 +337,13 @@ func (q *Queries) AppendOperationalAudit(ctx context.Context, event *types.Opera
 	if err != nil {
 		return fmt.Errorf("marshal operational audit params: %w", err)
 	}
+	// Preserve the original timestamp encoding of the immutable audit chain.
 	if err := q.db.QueryRowContext(ctx, `
 		INSERT INTO operational_audit
 			(kind, resource_id, tenant, cluster, time, actor, action, request_id, decision_id, params, result, prev_hash, hash)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id`,
-		string(event.Kind), event.ResourceID, event.Tenant, event.Cluster, ts(event.Time), event.Actor, event.Action,
+		string(event.Kind), event.ResourceID, event.Tenant, event.Cluster, event.Time.UTC().Format(time.RFC3339Nano), event.Actor, event.Action,
 		event.RequestID, event.DecisionID, string(params), event.Result, event.PrevHash, event.Hash).Scan(&event.ID); err != nil {
 		return err
 	}
@@ -417,11 +427,11 @@ func (q *Queries) ListOperationalAuditEvents(ctx context.Context, filter types.O
 	}
 	if !filter.Since.IsZero() {
 		clauses = append(clauses, "time >= ?")
-		args = append(args, ts(filter.Since))
+		args = append(args, filter.Since.UTC().Format(time.RFC3339Nano))
 	}
 	if !filter.Until.IsZero() {
 		clauses = append(clauses, "time <= ?")
-		args = append(args, ts(filter.Until))
+		args = append(args, filter.Until.UTC().Format(time.RFC3339Nano))
 	}
 	args = append(args, limit)
 	rows, err := q.db.QueryContext(ctx, `
@@ -494,10 +504,10 @@ func scanOperationalResource(row rowScanner) (*types.OperationalResource, error)
 	return resource, nil
 }
 
-func scanOperationalIdempotency(row rowScanner) (*types.OperationalIdempotencyRecord, error) {
+func scanOperationalIdempotency(row rowScanner, storedExpiry *string) (*types.OperationalIdempotencyRecord, error) {
 	record := &types.OperationalIdempotencyRecord{}
-	var kind, created, expires string
-	err := row.Scan(&kind, &record.Actor, &record.Key, &record.RequestDigest, &record.ResourceID, &created, &expires, &record.ResultDigest)
+	var kind, created string
+	err := row.Scan(&kind, &record.Actor, &record.Key, &record.RequestDigest, &record.ResourceID, &created, storedExpiry, &record.ResultDigest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -506,7 +516,7 @@ func scanOperationalIdempotency(row rowScanner) (*types.OperationalIdempotencyRe
 	}
 	record.Kind = types.OperationalResourceKind(kind)
 	record.CreatedAt = parseTS(created)
-	record.ExpiresAt = parseTS(expires)
+	record.ExpiresAt = parseTS(*storedExpiry)
 	return record, nil
 }
 
@@ -548,7 +558,7 @@ func operationalAuditHash(event types.OperationalAuditEvent) string {
 		Result     string                        `json:"result"`
 		PrevHash   string                        `json:"prev_hash"`
 	}{
-		Kind: event.Kind, ResourceID: event.ResourceID, Time: ts(event.Time),
+		Kind: event.Kind, ResourceID: event.ResourceID, Time: event.Time.UTC().Format(time.RFC3339Nano),
 		Actor: event.Actor, Action: event.Action, RequestID: event.RequestID,
 		DecisionID: event.DecisionID, Params: event.Params, Result: event.Result,
 		PrevHash: event.PrevHash,

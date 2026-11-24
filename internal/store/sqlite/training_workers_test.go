@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/checkpoint"
+	"github.com/kubeneuron/kubeneuron/internal/store/sqlcore"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
@@ -64,7 +65,7 @@ func TestTrainingProgressRetryAndRetention(t *testing.T) {
 	if err := s.sqlDB.QueryRowContext(ctx, "SELECT step, received_at FROM training_progress").Scan(&step, &received); err != nil {
 		t.Fatal(err)
 	}
-	if step != 10 || received != start.Add(time.Minute).Format(time.RFC3339Nano) {
+	if step != 10 || received != sqlcore.TS(start.Add(time.Minute)) {
 		t.Fatalf("step %d received %s", step, received)
 	}
 	if _, err := s.sqlDB.ExecContext(ctx, "DELETE FROM incidents WHERE id='incident'"); err != nil {
@@ -94,7 +95,7 @@ func TestTrainingCheckpointReceipts(t *testing.T) {
 		}
 	}
 	var count int
-	if err := s.sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM training_checkpoint_facts WHERE received_at=? AND step IS NULL`, start.Format(time.RFC3339Nano)).Scan(&count); err != nil || count != 2 {
+	if err := s.sqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM training_checkpoint_facts WHERE received_at=? AND step IS NULL`, sqlcore.TS(start)).Scan(&count); err != nil || count != 2 {
 		t.Fatalf("original receipts: %d, %v", count, err)
 	}
 	if _, err := s.sqlDB.ExecContext(ctx, "DELETE FROM incidents WHERE id='incident'"); err != nil {
@@ -146,7 +147,7 @@ func TestTrainingConfirmationPreservesFirstAdvance(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	ctx := t.Context()
 	impactIncident(t, s, "i")
-	at := time.Now().UTC()
+	at := time.Date(2026, 1, 2, 3, 4, 5, 123400000, time.UTC)
 	if err := s.AppendAudit(ctx, &types.AuditEntry{IncidentID: "i", Time: at, Actor: "system", Action: "resolve", FromState: types.StateVerifying, ToState: types.StateResolved, Params: map[string]string{"infrastructure_evidence": "verified_recycle_inventory"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -163,6 +164,17 @@ func TestTrainingConfirmationPreservesFirstAdvance(t *testing.T) {
 			t.Fatalf("report %d: confirmation %v", i, got)
 		}
 	}
+	// rc.1 and rc.2 identify the recovery round by its original text.
+	var stamp string
+	err = s.SQL.QueryRowContext(ctx, "SELECT CASE WHEN ready_at=? THEN confirmed_at END FROM training_progress WHERE incident_id=?", at.Format(time.RFC3339Nano), "i").Scan(&stamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed, err := time.Parse(time.RFC3339Nano, stamp)
+	if err != nil || !confirmed.Equal(at.Add(2*time.Minute)) {
+		t.Fatalf("rollback reader got %q: %v", stamp, err)
+	}
+
 }
 
 func TestTrainingConfirmationDistinguishesSilentAndReportingJobs(t *testing.T) {

@@ -43,6 +43,8 @@ The remaining instructions apply to installations running v1.0.0-rc.1 or later.
 
 ## Upgrading from v1.0.0-rc.2
 
+The controller becomes Ready after it normalizes stored timestamps. Startup time depends on the size of the store and how many timestamps need rewriting. If normalization does not finish, the controller logs a warning and starts anyway; it repeats the normalization on its next start.
+
 Back up the workflow store before upgrading. The node inventory migration adds
 `deleted_at` to existing records (SQLite 0039, PostgreSQL 0030). Existing rows
 start with a null timestamp. After its node cache has synced, the controller

@@ -192,6 +192,7 @@ type runtimeConfigPaths struct {
 // runtimeStore is the store surface the controller needs; both the SQLite
 // and PostgreSQL backends satisfy it via the shared sqlcore engine.
 type runtimeStore interface {
+	NormalizeTimestamps(context.Context) (int64, error)
 	store.Store
 	store.EventOutbox
 	store.AcceleratorReportStore
@@ -347,6 +348,9 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	// leading is true when this replica may write: always without leader
 	// election, only while holding the Lease with it.
 	var leading atomic.Bool
+	if !election.enabled {
+		normalizeTimestamps(ctx, st, log)
+	}
 	leading.Store(!election.enabled)
 
 	// Hourly retention pass: the store must not grow without bound. Audit
@@ -729,6 +733,10 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 			ReleaseOnCancel: true,
 			Callbacks: leaderelection.LeaderCallbacks{
 				OnStartedLeading: func(leadCtx context.Context) {
+					normalizeTimestamps(leadCtx, st, log)
+					if leadCtx.Err() != nil {
+						return
+					}
 					// Reload persisted cooldowns/flap history: the previous
 					// leader may have written since this process started.
 					if err := gate.RestoreAndPersist(leadCtx, st, log); err != nil {
@@ -788,6 +796,16 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	default:
 		return nil
 	}
+}
+
+func normalizeTimestamps(ctx context.Context, st runtimeStore, log *slog.Logger) {
+	started := time.Now()
+	count, err := st.NormalizeTimestamps(ctx)
+	if err != nil {
+		log.Warn("Store timestamp normalization did not finish; within the same second, older records may be ordered inexactly until it completes on the next controller start", "timestamp_updates", count, "elapsed", time.Since(started), "err", err)
+		return
+	}
+	log.Info("Store timestamps normalized", "timestamp_updates", count, "elapsed", time.Since(started))
 }
 
 // configureAlertmanagerWebhook keeps the unauthenticated development escape
