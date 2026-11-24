@@ -12,6 +12,7 @@ import (
 
 type handover struct {
 	What, Check, Command string
+	auditParams          map[string]string
 	legacy               *string
 }
 
@@ -41,5 +42,5 @@ func (c *Controller) handOver(ctx context.Context, inc *types.Incident, actor, a
 	if err := h.validate(inc.ID); err != nil {
 		return err
 	}
-	return c.transitionWithRepairStep(ctx, inc, types.StateNeedsHuman, actor, action, h.message(), nil, "", completed)
+	return c.transitionWithRepairStep(ctx, inc, types.StateNeedsHuman, actor, action, h.message(), h.auditParams, "", completed)
 }

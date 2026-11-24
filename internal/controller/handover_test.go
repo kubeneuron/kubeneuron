@@ -26,7 +26,7 @@ func TestTransitionRejectsUntypedHandover(t *testing.T) {
 
 // Lower this ceiling whenever a legacy message gains structured instructions.
 func TestLegacyHandoverCeiling(t *testing.T) {
-	const ceiling = 21
+	const ceiling = 14
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)

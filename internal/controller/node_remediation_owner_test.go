@@ -285,7 +285,7 @@ func checkInventoryRepairApproval(t *testing.T, ending string) {
 			t.Fatal(err)
 		}
 		waitSettled(t, c, st, owner, func(i *types.Incident) bool { return i.State == types.StateNeedsHuman })
-		wantReason = "approval rejected"
+		wantReason = "The operator rejected step "
 	default:
 		c.SetTimings(0, time.Nanosecond)
 		drive(t, c, st, owner, types.StateExpired)

@@ -888,12 +888,21 @@ func (c *Controller) escalateAfterStep(ctx context.Context, inc *types.Incident,
 		// The ladder has climbed as far as it is allowed to on its own. Fail
 		// closed to a human instead of continuing to drive destructive rungs.
 		return c.quarantineAfterStep(ctx, inc,
-			legacyHandover(fmt.Sprintf("%s; escalation cap reached (%d attempts) — stopping automation and handing off to a human",
-				reason, inc.Attempt)), completed)
+			handover{
+				What:        fmt.Sprintf("KubeNeuron stopped automatic repair after %d attempts.", inc.Attempt),
+				Check:       "Review the steps recorded in this incident and check whether the affected node still needs repair. Then run",
+				Command:     "kubeneuronctl resolve " + inc.ID,
+				auditParams: map[string]string{"cause": reason},
+			}, completed)
 	}
 	next, ok := c.runtimeConfig(ctx).Engine.Escalation(inc.Playbook)
 	if !ok {
-		return c.quarantineAfterStep(ctx, inc, legacyHandover(reason+"; no escalation playbook"), completed)
+		return c.quarantineAfterStep(ctx, inc, handover{
+			What:        fmt.Sprintf("KubeNeuron could not continue the repair: no next playbook is configured after playbook %s.", inc.Playbook),
+			Check:       "Review the last step in the incident and check whether the affected node needs further repair. Then run",
+			Command:     "kubeneuronctl resolve " + inc.ID,
+			auditParams: map[string]string{"cause": reason},
+		}, completed)
 	}
 	metrics.EscalationsTotal.Inc()
 	previous := inc.Playbook

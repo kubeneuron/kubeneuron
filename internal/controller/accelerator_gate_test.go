@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	"github.com/kubeneuron/kubeneuron/internal/config"
 	"github.com/kubeneuron/kubeneuron/internal/inventory"
 	"github.com/kubeneuron/kubeneuron/internal/notify"
+	"github.com/kubeneuron/kubeneuron/internal/notify/webhook"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
 	"github.com/kubeneuron/kubeneuron/internal/safety"
 	storesqlite "github.com/kubeneuron/kubeneuron/internal/store/sqlite"
@@ -759,12 +762,27 @@ func TestNVIDIAIncidentWithoutASelectingProfileVerifiesOnTheHeartbeat(t *testing
 
 	t.Run("no profile and a stale heartbeat: still fails closed", func(t *testing.T) {
 		c, st, ctx := newFixture(t, time.Now().Add(-time.Hour))
+		payload := make(chan string, 1)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			payload <- string(body)
+		}))
+		defer server.Close()
+		c.notifier = webhook.New(server.URL, "")
 		got := advance(t, c, st, ctx, incident("inc-no-profile-dead-agent", pastDeadline))
+		body := <-payload
+		want := "KubeNeuron could not confirm recovery before the verification deadline. Check the affected node's health yourself, and that the KubeNeuron agent on that node is running. Then run kubeneuronctl resolve " + got.ID
+		if !strings.Contains(body, want) || strings.Contains(body, "agent heartbeat is stale") {
+			t.Fatalf("unexpected webhook payload: %s", body)
+		}
 		if got.State != types.StateNeedsHuman {
 			t.Fatalf("state = %s, want NEEDS_HUMAN: the heartbeat is the evidence this path rests on", got.State)
 		}
-		if entry := lastAudit(t, st, ctx, got.ID); !strings.Contains(entry.Result, "agent heartbeat is stale") {
-			t.Fatalf("audit result = %q, want the stale heartbeat named", entry.Result)
+		if entry := lastAudit(t, st, ctx, got.ID); !strings.Contains(entry.Params["cause"], "agent heartbeat is stale") {
+			t.Fatalf("audit cause = %q, want the stale heartbeat named", entry.Params["cause"])
 		}
 	})
 
@@ -784,8 +802,8 @@ func TestNVIDIAIncidentWithoutASelectingProfileVerifiesOnTheHeartbeat(t *testing
 		if got.State != types.StateNeedsHuman {
 			t.Fatalf("state = %s, want NEEDS_HUMAN past the deadline", got.State)
 		}
-		if entry := lastAudit(t, st, ctx, got.ID); !strings.Contains(entry.Result, "no nvidia accelerator report for the node") {
-			t.Fatalf("audit result = %q, want the missing report named", entry.Result)
+		if entry := lastAudit(t, st, ctx, got.ID); !strings.Contains(entry.Params["cause"], "no nvidia accelerator report for the node") {
+			t.Fatalf("audit cause = %q, want the missing report named", entry.Params["cause"])
 		}
 	})
 
@@ -802,8 +820,8 @@ func TestNVIDIAIncidentWithoutASelectingProfileVerifiesOnTheHeartbeat(t *testing
 		if got.State != types.StateNeedsHuman {
 			t.Fatalf("state = %s, want NEEDS_HUMAN", got.State)
 		}
-		if entry := lastAudit(t, st, ctx, got.ID); !strings.Contains(entry.Result, "accelerator report is stale") {
-			t.Fatalf("audit result = %q, want the stale report named", entry.Result)
+		if entry := lastAudit(t, st, ctx, got.ID); !strings.Contains(entry.Params["cause"], "accelerator report is stale") {
+			t.Fatalf("audit cause = %q, want the stale report named", entry.Params["cause"])
 		}
 	})
 
@@ -837,8 +855,8 @@ func TestNVIDIAIncidentWithoutASelectingProfileVerifiesOnTheHeartbeat(t *testing
 		if got.State != types.StateNeedsHuman {
 			t.Fatalf("state = %s, want NEEDS_HUMAN", got.State)
 		}
-		if entry := lastAudit(t, st, ctx, got.ID); !strings.Contains(entry.Result, "multiple accelerator runtime profiles match") {
-			t.Fatalf("audit result = %q, want the overlapping profiles named", entry.Result)
+		if entry := lastAudit(t, st, ctx, got.ID); !strings.Contains(entry.Params["cause"], "multiple accelerator runtime profiles match") {
+			t.Fatalf("audit cause = %q, want the overlapping profiles named", entry.Params["cause"])
 		}
 	})
 
@@ -851,8 +869,8 @@ func TestNVIDIAIncidentWithoutASelectingProfileVerifiesOnTheHeartbeat(t *testing
 		if got.State != types.StateNeedsHuman {
 			t.Fatalf("state = %s, want NEEDS_HUMAN when profile selection cannot be resolved", got.State)
 		}
-		if entry := lastAudit(t, st, ctx, got.ID); !strings.Contains(entry.Result, "cannot tell whether a runtime profile selects the node") {
-			t.Fatalf("audit result = %q, want the unresolved selection named", entry.Result)
+		if entry := lastAudit(t, st, ctx, got.ID); !strings.Contains(entry.Params["cause"], "cannot tell whether a runtime profile selects the node") {
+			t.Fatalf("audit cause = %q, want the unresolved selection named", entry.Params["cause"])
 		}
 	})
 

@@ -442,3 +442,14 @@ func TestShowMissingGPUIdentity(t *testing.T) {
 	}
 	checkGolden(t, "incident-amd-no-uuid.golden", []byte(out))
 }
+
+func TestIncidentShowHandoverCause(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"incident": types.Incident{ID: "inc-cause", State: types.StateNeedsHuman}, "audit": []types.AuditEntry{{Action: "verify-evidence", Result: "operator guidance", Params: map[string]string{"cause": "agent heartbeat is stale", "private": "undisplayed value"}}}})
+	}))
+	defer server.Close()
+	out, err := runCommand(t, server.URL, "incidents", "show", "inc-cause")
+	if err != nil || !strings.Contains(out, "operator guidance\n  cause: agent heartbeat is stale\n") || strings.Contains(out, "undisplayed value") {
+		t.Fatalf("show: %v\n%s", err, out)
+	}
+}

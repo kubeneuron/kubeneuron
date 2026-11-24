@@ -424,6 +424,9 @@ func cmdIncidents() *cobra.Command {
 		for _, e := range detail.Audit {
 			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 				e.Time.Format(time.RFC3339), e.FromState, e.ToState, e.Actor, e.Action, e.Result)
+			if cause := e.Params["cause"]; cause != "" {
+				_, _ = fmt.Fprintf(w, "  cause: %s\n", cause)
+			}
 		}
 		return w.Flush()
 	}}

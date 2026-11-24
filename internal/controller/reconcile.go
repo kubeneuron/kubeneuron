@@ -153,7 +153,15 @@ func (c *Controller) advanceOpen(ctx context.Context, inc *types.Incident) error
 		return err
 	}
 	if c.flap != nil && c.flap.RecordReopen(inc.Target, inc.Class) {
-		return c.quarantine(ctx, inc, legacyHandover("flap threshold reached: automation stopped"))
+		target := inc.Target.Node
+		if id := firstNonBlank(inc.Target.GPUUUID, inc.Target.PCIAddr); id != "" {
+			target += " (" + id + ")"
+		}
+		return c.quarantine(ctx, inc, handover{
+			What:    fmt.Sprintf("The same problem (%s) keeps coming back on %s, so KubeNeuron stopped automatic repair for it.", inc.Class, target),
+			Check:   "Review the earlier incidents for this target and check that the problem has been corrected. Then run",
+			Command: "kubeneuronctl resolve " + inc.ID,
+		})
 	}
 	if reason, ok := detect.ObserveOnly(inc.Class); ok {
 		return c.transition(ctx, inc, types.StateObserving, "system", "observe-only", reason, nil)
@@ -624,7 +632,11 @@ func (c *Controller) resumeAwaitingApproval(ctx context.Context, inc *types.Inci
 		// round first; the human re-decides that one.
 		step, done, err := c.runtimeConfig(ctx).Engine.NextStep(inc)
 		if err != nil || done {
-			return c.quarantine(ctx, inc, legacyHandover("parked step no longer exists"))
+			return c.quarantine(ctx, inc, handover{
+				What:    "KubeNeuron could not find the step that was waiting for approval.",
+				Check:   "Compare the approval request in the incident history with the current playbook and check whether the node still needs that action. Then run",
+				Command: "kubeneuronctl resolve " + inc.ID,
+			})
 		}
 		return c.parkForApproval(ctx, inc, step,
 			"re-parking: this park predates approval rounds; a fresh approval is required")
@@ -658,7 +670,11 @@ func (c *Controller) resumeAwaitingApproval(ctx context.Context, inc *types.Inci
 			}
 		}
 		if err != nil || done {
-			return c.quarantine(ctx, inc, legacyHandover("approved step no longer exists"))
+			return c.quarantine(ctx, inc, handover{
+				What:    "KubeNeuron received an approval decision, but could no longer find the step it applied to.",
+				Check:   "Compare the recorded decision with the current playbook and check whether the node still needs that action. Then run",
+				Command: "kubeneuronctl resolve " + inc.ID,
+			})
 		}
 		switch decision.Decision {
 		case types.ApprovalApproved:
@@ -688,12 +704,18 @@ func (c *Controller) resumeAwaitingApproval(ctx context.Context, inc *types.Inci
 			// step is current now (a hot-swap may have changed it; the
 			// rejection deliberately fails closed regardless of the swap).
 			rejected := firstNonBlank(decision.StepName, step.Name)
-			if err := c.handOver(ctx, inc, decision.Actor, rejected, legacyHandover("approval rejected"), false); err != nil {
+			h := handover{
+				auditParams: map[string]string{"approval_decision": string(types.ApprovalRejected)},
+				What:        fmt.Sprintf("The operator rejected step %s, so KubeNeuron did not run it.", rejected),
+				Check:       "Review the rejected step in the incident history and check whether the node needs another repair. Then run",
+				Command:     "kubeneuronctl resolve " + inc.ID,
+			}
+			if err := c.handOver(ctx, inc, decision.Actor, rejected, h, false); err != nil {
 				return err
 			}
 			return c.notifier.Notify(ctx, notify.NotifyEvent{
 				Kind: notify.EventNeedsHuman, Incident: inc,
-				Message: fmt.Sprintf("step %s rejected by %s", rejected, decision.Actor),
+				Message: h.message(),
 			})
 		}
 	}
@@ -804,12 +826,18 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 					"incident", inc.ID, "reason", reason)
 				return c.noteVerifyWait(ctx, inc, reason)
 			}
-			if err := c.handOver(ctx, inc, "system", "verify-evidence", legacyHandover("verification evidence unavailable: "+reason), false); err != nil {
+			h := handover{
+				What:        "KubeNeuron could not confirm recovery before the verification deadline.",
+				Check:       "Check the affected node's health yourself, and that the KubeNeuron agent on that node is running. Then run",
+				Command:     "kubeneuronctl resolve " + inc.ID,
+				auditParams: map[string]string{"cause": reason},
+			}
+			if err := c.handOver(ctx, inc, "system", "verify-evidence", h, false); err != nil {
 				return err
 			}
 			return c.notifier.Notify(ctx, notify.NotifyEvent{
 				Kind: notify.EventNeedsHuman, Incident: inc,
-				Message: "cannot verify remediation: " + reason,
+				Message: h.message(),
 			})
 		}
 		depth, evidence = reason, proof
@@ -1214,7 +1242,7 @@ func (c *Controller) transitionWithRepairStep(ctx context.Context, inc *types.In
 		}
 		releaseRepair := to.Terminal() && !cloudOperationUnsettled(fresh)
 		// A rejected first approval can also release the node before execution.
-		if from == types.StateAwaitingApproval && to == types.StateNeedsHuman && result == "approval rejected" && !cloudOperationUnsettled(fresh) {
+		if from == types.StateAwaitingApproval && to == types.StateNeedsHuman && params["approval_decision"] == string(types.ApprovalRejected) && !cloudOperationUnsettled(fresh) {
 			entries, err := tx.AuditTrail(ctx, inc.ID)
 			if err != nil {
 				return err

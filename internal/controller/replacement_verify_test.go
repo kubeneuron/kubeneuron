@@ -475,7 +475,7 @@ func TestReplacementWithoutEvidenceGoesToAPerson(t *testing.T) {
 			}
 			inc = mustIncident(t, st, id)
 			entries := trail(t, st, id)
-			if inc.State != types.StateNeedsHuman || !auditHas(entries, "verify-evidence", tc.want) {
+			if inc.State != types.StateNeedsHuman || !auditHasParam(entries, "verify-evidence", "cause", tc.want) {
 				t.Fatalf("state = %s, want NEEDS_HUMAN naming %q%s", inc.State, tc.want, dump(entries))
 			}
 			if _, _, replaced, plain, _ := p.counts(); replaced+plain != 1 {
@@ -658,7 +658,7 @@ func TestVerifyingWritesThatAreNotSignals(t *testing.T) {
 			entries := trail(t, st, id)
 			recurred := false
 			for _, e := range entries {
-				recurred = recurred || strings.Contains(e.Result, "signal recurred")
+				recurred = recurred || strings.Contains(e.Params["cause"], "signal recurred")
 			}
 			if tc.recurs != recurred || tc.recurs == (inc.State == types.StateResolved) {
 				t.Fatalf("state = %s, recurred = %v, want recurred = %v%s", inc.State, recurred, tc.recurs, dump(entries))
