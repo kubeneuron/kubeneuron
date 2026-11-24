@@ -33,6 +33,8 @@ API is `v1alpha1`.
 
 ### Changed
 
+- Panel: when an Approve or Reject arrives after the approval round was already decided, the panel now shows the recorded decision, who made it, through which channel and when, and offers to refresh the incident. The API answer for this case carries the decision in new `X-Approval-Actor`, `X-Approval-Channel` and `X-Approval-Decided-At` headers next to `X-Approval-Conflict` and `X-Approval-Decision`.
+
 - kubeneuronctl connection, authentication and TLS errors now say what to do next and print the underlying error on a separate cause: line. If you parse these error texts, update your parser.
 
 - Approval requests now say when they expire and what approving, rejecting or not deciding does, in Slack, webhook, PagerDuty, the panel and kubeneuronctl incidents show. Webhook and PagerDuty messages carry both the approve and the reject command. If an approval request expires after earlier steps already changed the node, the incident now waits for the operator instead of closing as expired. If you parse the text of these notifications, update your parser.

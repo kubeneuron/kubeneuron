@@ -3,15 +3,18 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/kubeneuron/kubeneuron/internal/approval"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -557,6 +560,72 @@ func TestVersionRequiresAuthenticatedLeader(t *testing.T) {
 		s.Routes().ServeHTTP(rec, operatorRequest("GET", "/api/v1/version", tc.token, ""))
 		if rec.Code != tc.code || (tc.code == 200 && strings.TrimSpace(rec.Body.String()) != `{"version":"test-build"}`) {
 			t.Fatalf("version: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// An already-decided conflict names the recorded decision for the panel.
+func TestAlreadyDecidedConflictNamesTheRecordedDecision(t *testing.T) {
+	prior := &types.Approval{Decision: types.ApprovalApproved, Actor: "oidc:Ann Lee/ops", Channel: "slack", At: time.Date(2026, 11, 24, 9, 30, 0, 0, time.FixedZone("x", 3600))}
+	// The server logs nothing that names the operator.
+	var logged bytes.Buffer
+	savedLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer func() {
+		slog.SetDefault(savedLogger)
+		if strings.Contains(logged.String(), "Ann") {
+			t.Errorf("log names the operator: %s", logged.String())
+		}
+	}()
+	rec := httptest.NewRecorder()
+	operatorServer(&fakeOperator{decisionErr: approval.AlreadyDecided{IncidentID: "inc", Round: 2, Prior: prior}}, "secret").
+		ServeHTTP(rec, operatorRequest("POST", "/api/v1/incidents/inc/reject", "secret", `{"actor":"test"}`))
+	h := rec.Header()
+	if rec.Code != 409 || h.Get("X-Approval-Conflict") != "already-decided" || h.Get("X-Approval-Decision") != "approved" ||
+		h.Get("X-Approval-Actor") != "oidc:Ann%20Lee%2Fops" || h.Get("X-Approval-Channel") != "slack" || h.Get("X-Approval-Decided-At") != "2026-11-24T08:30:00Z" {
+		t.Fatalf("conflict: %d %v", rec.Code, h)
+	}
+	// A caller that does not authenticate never reaches the decision, so it
+	// learns nothing about it.
+	rec = httptest.NewRecorder()
+	operatorServer(&fakeOperator{decisionErr: approval.AlreadyDecided{IncidentID: "inc", Round: 2, Prior: prior}}, "secret").
+		ServeHTTP(rec, operatorRequest("POST", "/api/v1/incidents/inc/reject", "wrong", `{"actor":"test"}`))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated: %d", rec.Code)
+	}
+	noDecision := func(what string, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		for k := range rec.Header() {
+			if strings.HasPrefix(k, "X-Approval-") {
+				t.Fatalf("%s answer carries %s: %v", what, k, rec.Header())
+			}
+		}
+		if strings.Contains(rec.Body.String(), "Ann") {
+			t.Fatalf("%s answer names the operator: %q", what, rec.Body)
+		}
+	}
+	noDecision("unauthenticated", rec)
+	// Nor does a caller whose credential is refused, or lacks the role.
+	for _, refused := range []struct {
+		err  error
+		code int
+	}{{&statusError{status: http.StatusForbidden}, http.StatusForbidden}, {errors.New("bad token"), http.StatusUnauthorized}} {
+		s := New(&registrationBackend{})
+		s.EnableOperatorAPI(&fakeOperator{decisionErr: approval.AlreadyDecided{IncidentID: "inc", Round: 2, Prior: prior}}, "secret")
+		s.SetOperatorAuthenticator(&fakeOperatorAuthenticator{err: refused.err})
+		rec := httptest.NewRecorder()
+		s.Routes().ServeHTTP(rec, operatorRequest("POST", "/api/v1/incidents/inc/reject", "caller-credential", `{"actor":"test"}`))
+		if rec.Code != refused.code {
+			t.Fatalf("refused credential: %d, want %d", rec.Code, refused.code)
+		}
+		noDecision(fmt.Sprint(refused.code), rec)
+	}
+	rec = httptest.NewRecorder()
+	operatorServer(&fakeOperator{decisionErr: approval.RequestChanged(fmt.Errorf("different round"))}, "secret").
+		ServeHTTP(rec, operatorRequest("POST", "/api/v1/incidents/inc/approve", "secret", `{"actor":"test"}`))
+	for _, k := range []string{"X-Approval-Actor", "X-Approval-Channel", "X-Approval-Decided-At", "X-Approval-Decision"} {
+		if v, ok := rec.Header()[k]; ok {
+			t.Fatalf("request-changed carries %s: %q", k, v)
 		}
 	}
 }

@@ -23,7 +23,9 @@ in `sessionStorage` only). Surfaces:
    the controller answers an Approve / Reject with 409 (the round or the
    preview changed), the panel drops its copy, reloads the preview, and
    asks the operator to review it and decide again — nothing is
-   resubmitted on its own.
+   resubmitted on its own. When the round was already decided, the panel
+   shows that decision (what, by whom, through which channel and when) and
+   offers to refresh the incident instead.
 4. Node inventory with agent heartbeat age, per-node pause state, and the
    read-only device topology classification (topology, whether device
    actions are eligible or refused, reason codes) fetched per node while

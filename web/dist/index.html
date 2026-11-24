@@ -417,6 +417,13 @@ let openIncident = null;
 let filter = sessionStorage.getItem("kn-filter") || "active";
 
 /* ---------- api ---------- */
+/* The decision a 409 "already-decided" names; the actor and channel arrive
+   escaped. */
+function decidedHeaders(h){
+  const unescape = v => { try { return decodeURIComponent(v || ""); } catch(_) { return v || ""; } };
+  return {decision: h.get("X-Approval-Decision") || "", actor: unescape(h.get("X-Approval-Actor")),
+    channel: unescape(h.get("X-Approval-Channel")), at: h.get("X-Approval-Decided-At") || ""};
+}
 async function api(path, method, body, extraHeaders){
   const opts = { method: method || "GET", headers: {} , credentials: "same-origin"};
   if(token) opts.headers["Authorization"] = "Bearer " + token;
@@ -424,7 +431,7 @@ async function api(path, method, body, extraHeaders){
   if(body){ opts.headers["Content-Type"]="application/json"; opts.body = JSON.stringify(body); }
   const resp = await fetch(path, opts);
   if(resp.status === 401){ showLogin(); throw new Error("unauthorized"); }
-  if(!resp.ok){ const err = new Error((await resp.text()).trim() || String(resp.status)); err.status = resp.status; err.approvalConflict = resp.headers.get("X-Approval-Conflict"); err.decision = resp.headers.get("X-Approval-Decision"); throw err; }
+  if(!resp.ok){ const err = new Error((await resp.text()).trim() || String(resp.status)); err.status = resp.status; err.approvalConflict = resp.headers.get("X-Approval-Conflict"); err.decided = decidedHeaders(resp.headers); throw err; }
   if(resp.status === 204) return null;
   return resp.json();
 }
@@ -509,7 +516,7 @@ const impactSeen = {};
    is no longer what the server holds. The decision is never resubmitted:
    the stale preview is dropped, the drawer reloads it, and this notice asks
    the human to read it again and decide again. */
-let impactNotice = null; // {id, verb, text}
+let impactNotice = null; // {id, verb, text} or, for a round already decided, {id, verb, decided:{decision, actor, channel, at}}
 function dropImpactSeen(id){ for(const k of Object.keys(impactSeen)) if(k.startsWith(id + "#")) delete impactSeen[k]; }
 async function decide(id, verb, round){
   try {
@@ -523,7 +530,8 @@ async function decide(id, verb, round){
     await tick();
   } catch(e){
     if(e.status === 409 && e.approvalConflict === "already-decided"){
-      toast(`This request was already decided: ${e.decision}. The first decision is final. Reload the incident to see its current state.`, "bad");
+      impactNotice = {id, verb, decided: e.decided};
+      if(openIncident === id) await renderDrawer(); else await openDrawer(id);
       return;
     }
     if(e.status === 409 && e.approvalConflict === "request-changed"){
@@ -534,6 +542,10 @@ async function decide(id, verb, round){
     }
     toast(e.message, "bad");
   }
+}
+async function refreshDecidedIncident(){
+  if(impactNotice && impactNotice.id === openIncident) impactNotice = null;
+  await tick(); // rerenders the open drawer
 }
 async function acknowledgeIncident(id, version){
   try {
@@ -1109,7 +1121,14 @@ async function renderDrawer(){
   // A 409 from approve/reject left a notice for this incident: shown above
   // the (reloaded) preview until the operator decides again or closes.
   const notice = $("dImpactNotice");
-  if(impactNotice && impactNotice.id === inc.id){
+  if(impactNotice && impactNotice.id === inc.id && impactNotice.decided){
+    const d = impactNotice.decided;
+    const by = d.actor ? ` by <span class="mono" style="display:inline">${esc(d.actor)}</span>` : "";
+    const via = d.channel ? ` via ${esc(d.channel)}` : "";
+    const at = d.at ? ` at ${esc(d.at.replace("T"," ").replace("Z",""))} UTC` : "";
+    notice.style.display = "block";
+    notice.innerHTML = `<b>${esc(impactNotice.verb || "decision")} not recorded.</b> This approval round was already decided: <b>${esc(d.decision || "decided")}</b>${by}${via}${at}. The first decision is final. <button class="btn" type="button" onclick="refreshDecidedIncident()">Refresh incident</button>`;
+  } else if(impactNotice && impactNotice.id === inc.id){
     notice.style.display = "block";
     notice.innerHTML = `<b>${esc(impactNotice.verb || "decision")} not recorded.</b> The approval request or its impact preview changed since it was displayed. The preview below was reloaded from the controller — review it and click Approve or Reject again. Nothing was resubmitted.<span class="mono">${esc(impactNotice.text || "")}</span>`;
   } else { notice.style.display = "none"; notice.innerHTML = ""; }

@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -843,6 +844,14 @@ func (s *Server) handleDecision(decision types.ApprovalDecision) http.HandlerFun
 			case errors.As(err, &decided):
 				w.Header().Set("X-Approval-Conflict", "already-decided")
 				w.Header().Set("X-Approval-Decision", string(decided.Prior.Decision))
+				// Who decided, how and when, so the panel can show the
+				// recorded decision. The actor is escaped: a header value
+				// carries no arbitrary text.
+				w.Header().Set("X-Approval-Actor", url.PathEscape(decided.Prior.Actor))
+				w.Header().Set("X-Approval-Channel", url.PathEscape(decided.Prior.Channel))
+				if !decided.Prior.At.IsZero() {
+					w.Header().Set("X-Approval-Decided-At", decided.Prior.At.UTC().Format(time.RFC3339))
+				}
 			case errors.As(err, &changed):
 				w.Header().Set("X-Approval-Conflict", "request-changed")
 			}

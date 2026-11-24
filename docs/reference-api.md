@@ -91,7 +91,16 @@ preview is refused with `409`, and under
 or while the round's preview is unavailable, is refused the same way. A
 reject is never held back by the preview. The detail response carries
 `impact_preview_digest` (and `impact_preview_unavailable` with its reason)
-for the current round when a preview exists. With a Kubernetes credential the audit
+for the current round when a preview exists. A refused decision answers `409`
+with the header `X-Approval-Conflict`: `request-changed` when the round or its
+preview changed (read the incident again and decide again), or
+`already-decided` when the round already has a decision, which is final. An
+`already-decided` answer names that decision in `X-Approval-Decision` and, in
+headers added next to it, `X-Approval-Actor` (the operator identifier recorded
+in the incident's audit trail), `X-Approval-Channel` (both percent-encoded)
+and, when recorded, `X-Approval-Decided-At` (RFC 3339, UTC). Only an
+authenticated caller receives them.
+With a Kubernetes credential the audit
 actor is the authenticated principal and the body `actor` is ignored; with
 the static token the claim is recorded as `token:<actor>`.
 

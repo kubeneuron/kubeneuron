@@ -9,14 +9,17 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/kubeneuron/kubeneuron/internal/approval"
 	"github.com/kubeneuron/kubeneuron/internal/metrics"
 	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"github.com/kubeneuron/kubeneuron/internal/playbook"
@@ -474,5 +477,40 @@ func TestDegradedGPUsCountsWhatTheCounterCannot(t *testing.T) {
 	// and must be visible here.
 	if got[metrics.DegradedKey{Class: string(types.ClassECCDBE), Owner: "human"}] == 0 {
 		t.Fatal("an incident parked in NEEDS_HUMAN is degrading the fleet and must be counted somewhere")
+	}
+}
+
+// The operator who decided an approval round is shown to an authenticated
+// operator in the panel, never sent to notification channels: nothing the
+// controller hands a notifier after a decision, and after a refused second
+// decision, names that operator.
+func TestDecisionActorStaysOutOfNotifications(t *testing.T) {
+	c, _, id := approvalEpochFixture(t)
+	notifier := &recordingNotifier{}
+	c.notifier = notifier
+	ctx := context.Background()
+	const actor = "oidc:ann@example.com"
+	if err := c.DecideApproval(ctx, id, actor, "web", types.ApprovalRejected, 1, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	c.reconcile(ctx)
+	var decided approval.AlreadyDecided
+	if err := c.DecideApproval(ctx, id, "oidc:bob@example.com", "web", types.ApprovalApproved, 1, "", ""); !errors.As(err, &decided) || decided.Prior.Actor != actor {
+		t.Fatalf("second decision: %v", err)
+	}
+	c.reconcile(ctx)
+	notifier.mu.Lock()
+	defer notifier.mu.Unlock()
+	if len(notifier.events) == 0 {
+		t.Fatal("no notification after the decision")
+	}
+	for _, ev := range notifier.events {
+		raw, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "example.com") {
+			t.Fatalf("notification %s names the operator: %s", ev.Kind, raw)
+		}
 	}
 }
