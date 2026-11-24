@@ -106,3 +106,50 @@ func TestHandoverValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestDirectNeedsHumanTransition(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	allowed := 0
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok || len(call.Args) != 2 {
+					return true
+				}
+				target, ok := call.Args[1].(*ast.SelectorExpr)
+				if !ok || target.Sel.Name != "StateNeedsHuman" {
+					return true
+				}
+				method, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || method.Sel.Name != "Transition" {
+					return true
+				}
+				if path == "cloud_settlement.go" && fn.Name.Name == "ResolveSettledCloudOperation" && allowed == 0 {
+					allowed++
+				} else {
+					t.Errorf("%s: direct transition to NEEDS_HUMAN outside the single settlement exception", fset.Position(call.Pos()))
+				}
+				return true
+			})
+		}
+	}
+	if allowed != 1 {
+		t.Fatal("expected one internal NEEDS_HUMAN transition in ResolveSettledCloudOperation")
+	}
+}

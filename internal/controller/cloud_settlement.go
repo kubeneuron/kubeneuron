@@ -91,6 +91,8 @@ func (c *Controller) ResolveSettledCloudOperation(ctx context.Context, id, actor
 			}
 			// A restart may leave the handover durable before quarantine. Record
 			// that transition and the operator's resolution in one transaction.
+			// This is the sole direct NEEDS_HUMAN transition: the operator is
+			// already settling the record, and no intermediate state is published.
 			if err := playbook.Transition(inc, types.StateNeedsHuman); err != nil {
 				return err
 			}
