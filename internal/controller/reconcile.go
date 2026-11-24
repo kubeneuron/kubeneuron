@@ -153,7 +153,7 @@ func (c *Controller) advanceOpen(ctx context.Context, inc *types.Incident) error
 		return err
 	}
 	if c.flap != nil && c.flap.RecordReopen(inc.Target, inc.Class) {
-		return c.quarantine(ctx, inc, "flap threshold reached: automation stopped")
+		return c.quarantine(ctx, inc, legacyHandover("flap threshold reached: automation stopped"))
 	}
 	if reason, ok := detect.ObserveOnly(inc.Class); ok {
 		return c.transition(ctx, inc, types.StateObserving, "system", "observe-only", reason, nil)
@@ -285,7 +285,11 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 				// swap in the reboot rung, so fail closed to a human with the reason —
 				// the task-sanctioned outcome — instead of holding here forever. A
 				// human can identify the affected GPU (or reboot the node) by hand.
-				return c.quarantine(ctx, inc, err.Error())
+				var reset resetHandoverError
+				if errors.As(err, &reset) {
+					return c.quarantine(ctx, inc, reset.handover)
+				}
+				return c.quarantine(ctx, inc, legacyHandover(err.Error()))
 			}
 			return c.escalate(ctx, inc, err.Error())
 		}
@@ -313,7 +317,7 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 	}
 	step, done, err := c.runtimeConfig(ctx).Engine.NextStep(inc)
 	if err != nil {
-		return c.quarantine(ctx, inc, err.Error())
+		return c.quarantine(ctx, inc, legacyHandover(err.Error()))
 	}
 	if done {
 		return c.transition(ctx, inc, types.StateVerifying, "system", "verify",
@@ -463,7 +467,7 @@ func (c *Controller) verifyAfterOwnersReplacement(ctx context.Context, inc *type
 		return nil
 	}
 	if !sameRepairNode(inc, owner) {
-		return c.quarantine(ctx, inc, "repair owner "+ownerID+" resolved against a different node identity")
+		return c.quarantine(ctx, inc, legacyHandover("repair owner "+ownerID+" resolved against a different node identity"))
 	}
 	entries, err := c.store.AuditTrail(ctx, ownerID)
 	if err != nil {
@@ -485,7 +489,7 @@ func (c *Controller) verifyAfterOwnersReplacement(ctx context.Context, inc *type
 				if entry.Params["replacement_correlation"] == replacementByResizeDiff {
 					id := entry.Params["replacement_provider_id"]
 					if id == "" || entry.Params["replacement_node"] == "" || entry.Params["replacement_node_uid"] == "" || !ownerFoundInstance(owner, entries, id) {
-						return c.quarantine(ctx, inc, "replacement evidence from owner "+ownerID+" does not identify the instance its pool's resize added")
+						return c.quarantine(ctx, inc, legacyHandover("replacement evidence from owner "+ownerID+" does not identify the instance its pool's resize added"))
 					}
 					proof["replacement_node"] = entry.Params["replacement_node"]
 					proof["replacement_node_uid"] = entry.Params["replacement_node_uid"]
@@ -496,7 +500,7 @@ func (c *Controller) verifyAfterOwnersReplacement(ctx context.Context, inc *type
 				s := owner.Successor
 				if entry.Params["replacement_correlation"] != "successor" || s == nil || s.Outcome != types.SuccessorReplaced ||
 					s.ReadyAt == nil || s.Node == "" || s.NodeUID == "" || s.Node != entry.Params["replacement_node"] || s.NodeUID != entry.Params["replacement_node_uid"] {
-					return c.quarantine(ctx, inc, "replacement evidence from owner "+ownerID+" does not identify a confirmed successor for this incident")
+					return c.quarantine(ctx, inc, legacyHandover("replacement evidence from owner "+ownerID+" does not identify a confirmed successor for this incident"))
 				}
 				proof["replacement_node"] = s.Node
 				proof["replacement_node_uid"] = s.NodeUID
@@ -620,7 +624,7 @@ func (c *Controller) resumeAwaitingApproval(ctx context.Context, inc *types.Inci
 		// round first; the human re-decides that one.
 		step, done, err := c.runtimeConfig(ctx).Engine.NextStep(inc)
 		if err != nil || done {
-			return c.quarantine(ctx, inc, "parked step no longer exists")
+			return c.quarantine(ctx, inc, legacyHandover("parked step no longer exists"))
 		}
 		return c.parkForApproval(ctx, inc, step,
 			"re-parking: this park predates approval rounds; a fresh approval is required")
@@ -654,7 +658,7 @@ func (c *Controller) resumeAwaitingApproval(ctx context.Context, inc *types.Inci
 			}
 		}
 		if err != nil || done {
-			return c.quarantine(ctx, inc, "approved step no longer exists")
+			return c.quarantine(ctx, inc, legacyHandover("approved step no longer exists"))
 		}
 		switch decision.Decision {
 		case types.ApprovalApproved:
@@ -684,8 +688,7 @@ func (c *Controller) resumeAwaitingApproval(ctx context.Context, inc *types.Inci
 			// step is current now (a hot-swap may have changed it; the
 			// rejection deliberately fails closed regardless of the swap).
 			rejected := firstNonBlank(decision.StepName, step.Name)
-			if err := c.transition(ctx, inc, types.StateNeedsHuman, decision.Actor, rejected,
-				"approval rejected", nil); err != nil {
+			if err := c.handOver(ctx, inc, decision.Actor, rejected, legacyHandover("approval rejected"), false); err != nil {
 				return err
 			}
 			return c.notifier.Notify(ctx, notify.NotifyEvent{
@@ -779,7 +782,7 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 				continue
 			}
 			if entry.Action == "verify-owner-replacement" {
-				return c.quarantine(ctx, inc, "signal recurred after replacement verified by incident "+entry.Params["owner_id"])
+				return c.quarantine(ctx, inc, legacyHandover("signal recurred after replacement verified by incident "+entry.Params["owner_id"]))
 			}
 			break
 		}
@@ -801,8 +804,7 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 					"incident", inc.ID, "reason", reason)
 				return c.noteVerifyWait(ctx, inc, reason)
 			}
-			if err := c.transition(ctx, inc, types.StateNeedsHuman, "system", "verify-evidence",
-				"verification evidence unavailable: "+reason, nil); err != nil {
+			if err := c.handOver(ctx, inc, "system", "verify-evidence", legacyHandover("verification evidence unavailable: "+reason), false); err != nil {
 				return err
 			}
 			return c.notifier.Notify(ctx, notify.NotifyEvent{
@@ -1095,6 +1097,9 @@ func (c *Controller) recoverOrphanedExecution(ctx context.Context, inc *types.In
 var errRepairStepBusy = errors.New("another repair step is active on the node")
 
 func (c *Controller) transition(ctx context.Context, inc *types.Incident, to types.IncidentState, actor, action, result string, params map[string]string) error {
+	if to == types.StateNeedsHuman {
+		return errors.New("NEEDS_HUMAN requires a handover")
+	}
 	return c.transitionWithRepairStep(ctx, inc, to, actor, action, result, params, "", false)
 }
 

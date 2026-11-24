@@ -191,10 +191,10 @@ func (c *Controller) continueRemoveFirst(ctx context.Context, inc *types.Inciden
 		}
 		return err
 	case errors.Is(err, removefirst.ErrPoolGone):
-		return c.parkRemoveFirstWithCheck(ctx, inc, fmt.Sprintf("Pool %s no longer exists, so its size cannot be restored. Nothing more will be changed. Check the cluster, then run", rec.Pool))
+		return c.parkWithHandover(ctx, inc, handover{What: fmt.Sprintf("Pool %s no longer exists, so its size cannot be restored. Nothing more will be changed.", rec.Pool), Check: "Check the cluster, then run", Command: settlementCommand(inc.ID)})
 	case errors.Is(err, cloud.ErrNeedsOperator):
 		c.log.Warn("remove-first plan needs an operator", "incident", inc.ID, "operation", rec.Operation, "err", err)
-		return c.parkRemoveFirstWithCheck(ctx, inc, fmt.Sprintf("KubeNeuron could not safely restore the size of pool %s. Check the original machine and the size of the pool; if it is one node short, set it back to %s. Then run", rec.Pool, c.plannedPoolSize(ctx, inc)))
+		return c.parkWithHandover(ctx, inc, restoreHandover(err, rec.Pool, c.plannedPoolSize(ctx, inc), inc.ID))
 	case err != nil:
 		if time.Since(rec.PlannedAt) > removeFirstDeadline && rec.Phase != cloud.RemoveFirstPlanned {
 			c.log.Warn("remove-first plan needs an operator", "incident", inc.ID, "operation", rec.Operation, "err", err)
@@ -212,8 +212,11 @@ func (c *Controller) continueRemoveFirst(ctx context.Context, inc *types.Inciden
 func (c *Controller) parkMissingRemoveFirstIdentity(ctx context.Context, inc *types.Incident) error {
 	pool := inc.RemoveFirst.Pool
 	planned := c.plannedPoolSize(ctx, inc)
-	instruction := fmt.Sprintf("KubeNeuron cannot confirm which cloud machine belonged to node %s when the replacement in pool %s started. Check the original machine and the size of pool %s; if the pool is one node short, set it back to %s. Then run", inc.Target.Node, pool, pool, planned)
-	return c.parkRemoveFirstWithCheck(ctx, inc, instruction)
+	return c.parkWithHandover(ctx, inc, handover{
+		What:    fmt.Sprintf("KubeNeuron cannot confirm which cloud machine belonged to node %s when the replacement in pool %s started.", inc.Target.Node, pool),
+		Check:   fmt.Sprintf("Check the original machine and the size of pool %s; if the pool is one node short, set it back to %s. Then run", pool, planned),
+		Command: settlementCommand(inc.ID),
+	})
 }
 
 func (c *Controller) plannedPoolSize(ctx context.Context, inc *types.Incident) string {
@@ -469,4 +472,22 @@ func (c *Controller) retryTargetedDelete(ctx context.Context, inc *types.Inciden
 	callCtx, cancel := context.WithTimeout(ctx, successorSweepTimeout)
 	defer cancel()
 	return target.RetryPinnedDelete(callCtx, *rec.DeleteTarget, rec.Pool, rec.MachineName, state)
+}
+
+func restoreHandover(err error, pool, planned, id string) handover {
+	h := handover{
+		What:    fmt.Sprintf("KubeNeuron could not safely restore the size of pool %s.", pool),
+		Check:   fmt.Sprintf("Check the original machine and the size of the pool; if it is one node short, set it back to %s. Then run", planned),
+		Command: settlementCommand(id),
+	}
+	switch {
+	case errors.Is(err, removefirst.ErrAutoscaled):
+		h.What = fmt.Sprintf("KubeNeuron did not set the size of pool %s back because the pool is now autoscaled.", pool)
+		h.Check = "Check the size of the pool; the autoscaler may already have replaced the node. Then run"
+	case errors.Is(err, removefirst.ErrUnequalZones):
+		h.What = fmt.Sprintf("KubeNeuron did not set the size of pool %s back because its zones now have different sizes, so it cannot tell which zone is one node short.", pool)
+	case errors.Is(err, removefirst.ErrChangedZones):
+		h.What = fmt.Sprintf("KubeNeuron did not set the size of pool %s back because the zones of the pool changed after the replacement started.", pool)
+	}
+	return h
 }

@@ -223,10 +223,14 @@ func (c *Controller) parkUnapprovableResize(ctx context.Context, inc *types.Inci
 		reason = fmt.Sprintf("Pool %s has %d of %d nodes: node %s was removed and the pool size was not set back.", rec.Pool, size.Current, size.Planned, inc.Target.Node)
 		planned = fmt.Sprintf("%d nodes", size.Planned)
 	}
-	reason += fmt.Sprintf(" Policy %s requires approval for this step, and the approval can no longer be requested because the step was interrupted after the node was removed. Set the size of pool %s back to %s, then run kubeneuronctl resolve %s --cloud-operation-settled --reason \"<what you found>\"",
-		hold.policy, rec.Pool, planned, inc.ID)
+	h := handover{
+		What:    reason + fmt.Sprintf(" Policy %s requires approval for this step, and the approval can no longer be requested because the step was interrupted after the node was removed.", hold.policy),
+		Check:   fmt.Sprintf("Set the size of pool %s back to %s, then run", rec.Pool, planned),
+		Command: settlementCommand(inc.ID),
+	}
+	reason = h.message()
 	if inc.State != types.StateNeedsHuman {
-		if err := c.quarantineAfterStep(ctx, inc, reason, false); err != nil {
+		if err := c.quarantineAfterStep(ctx, inc, h, false); err != nil {
 			return err
 		}
 	}

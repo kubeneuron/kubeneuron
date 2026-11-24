@@ -57,7 +57,7 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 	// The last stop for an observe-only class: the state walk never brings
 	// one here, so reaching it means a path that walk does not know about.
 	if reason, ok := detect.ObserveOnly(inc.Class); ok && !strings.HasPrefix(step.Action, "notify.") {
-		return c.quarantine(ctx, inc, "step "+step.Name+" refused: "+reason)
+		return c.quarantine(ctx, inc, legacyHandover("step "+step.Name+" refused: "+reason))
 	}
 	c.runtimeMu.RLock()
 	defer c.runtimeMu.RUnlock()
@@ -128,7 +128,7 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 	case confinementOutOfScope:
 		// Confirmed outside the blast radius: fail closed to a human. Never execute.
 		c.deferStep(inc, step, metrics.DeferConfinement)
-		return c.quarantine(ctx, inc, reason)
+		return c.quarantine(ctx, inc, legacyHandover(reason))
 	case confinementUnresolved:
 		c.deferStep(inc, step, metrics.DeferConfinement)
 		// The node's labels could not be resolved right now (a transient
@@ -142,7 +142,7 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 				"incident", inc.ID, "node", inc.Target.Node, "step", step.Name, "reason", reason)
 			return nil
 		}
-		return c.quarantine(ctx, inc, reason+"; still unresolvable past the confinement deadline")
+		return c.quarantine(ctx, inc, legacyHandover(reason+"; still unresolvable past the confinement deadline"))
 	}
 	// Capability evidence is a precondition, not an execution failure. If a
 	// reset cannot be admitted because its runtime profile/report is absent,
@@ -155,7 +155,7 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 			// never be filled in by a later report, so a per-device reset here can
 			// never succeed. Fail closed to a human with the reason rather than
 			// re-deny this reset on every tick after the node was cordoned/drained.
-			return c.quarantine(ctx, inc, err.Error())
+			return c.quarantine(ctx, inc, legacyHandover(err.Error()))
 		}
 		// Everything else here is missing/stale/mismatched evidence: the step is
 		// HELD, so the device keeps running whatever it is running. That is a
@@ -188,7 +188,7 @@ func (c *Controller) startStepThen(ctx context.Context, inc *types.Incident, ste
 			return nil
 		}
 		return c.quarantine(ctx, inc,
-			"accelerator reset evidence still unavailable past the evidence deadline: "+err.Error())
+			legacyHandover("accelerator reset evidence still unavailable past the evidence deadline: "+err.Error()))
 	}
 	action := gateAction(step)
 	// A checkpoint warning only asks the node's jobs to save their state
@@ -328,7 +328,7 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 			c.log.Error("audit append failed", "incident", inc.ID, "err", auditErr)
 		}
 		if errors.Is(err, errDeviceOutcomeUnknown) {
-			if qErr := c.quarantine(ctx, inc, err.Error()); qErr != nil {
+			if qErr := c.quarantine(ctx, inc, legacyHandover(err.Error())); qErr != nil {
 				c.log.Error("device action handoff failed", "incident", inc.ID, "err", qErr)
 			}
 			return
@@ -346,7 +346,7 @@ func (c *Controller) runStep(ctx context.Context, engine *playbook.Engine, inc *
 			// so nothing new lands on it while the decision is pending.
 			reason := fmt.Sprintf("%s did not clear the device (%v); automation stops here "+
 				"rather than escalating to a more destructive step", step.Name, err)
-			if qErr := c.quarantine(ctx, inc, reason); qErr != nil {
+			if qErr := c.quarantine(ctx, inc, legacyHandover(reason)); qErr != nil {
 				c.log.Error("quarantine after an idle refusal failed", "incident", inc.ID, "err", qErr)
 			}
 			return
@@ -888,12 +888,12 @@ func (c *Controller) escalateAfterStep(ctx context.Context, inc *types.Incident,
 		// The ladder has climbed as far as it is allowed to on its own. Fail
 		// closed to a human instead of continuing to drive destructive rungs.
 		return c.quarantineAfterStep(ctx, inc,
-			fmt.Sprintf("%s; escalation cap reached (%d attempts) — stopping automation and handing off to a human",
-				reason, inc.Attempt), completed)
+			legacyHandover(fmt.Sprintf("%s; escalation cap reached (%d attempts) — stopping automation and handing off to a human",
+				reason, inc.Attempt)), completed)
 	}
 	next, ok := c.runtimeConfig(ctx).Engine.Escalation(inc.Playbook)
 	if !ok {
-		return c.quarantineAfterStep(ctx, inc, reason+"; no escalation playbook", completed)
+		return c.quarantineAfterStep(ctx, inc, legacyHandover(reason+"; no escalation playbook"), completed)
 	}
 	metrics.EscalationsTotal.Inc()
 	previous := inc.Playbook
@@ -926,18 +926,18 @@ func (c *Controller) cancelPendingActions(ctx context.Context, inc *types.Incide
 }
 
 // quarantine fails the incident closed to NEEDS_HUMAN.
-func (c *Controller) quarantine(ctx context.Context, inc *types.Incident, reason string) error {
+func (c *Controller) quarantine(ctx context.Context, inc *types.Incident, reason handover) error {
 	return c.quarantineAfterStep(ctx, inc, reason, false)
 }
 
-func (c *Controller) quarantineAfterStep(ctx context.Context, inc *types.Incident, reason string, completed bool) error {
+func (c *Controller) quarantineAfterStep(ctx context.Context, inc *types.Incident, reason handover, completed bool) error {
 	c.cancelPendingActions(ctx, inc)
-	if err := c.transitionWithRepairStep(ctx, inc, types.StateNeedsHuman, "system", "quarantine", reason, nil, "", completed); err != nil {
+	if err := c.handOver(ctx, inc, "system", "quarantine", reason, completed); err != nil {
 		return err
 	}
 	return c.notify(ctx, notify.NotifyEvent{
 		Kind: notify.EventNeedsHuman, Incident: inc,
-		Message: reason,
+		Message: reason.message(),
 	})
 }
 

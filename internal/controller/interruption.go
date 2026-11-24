@@ -866,5 +866,5 @@ func (c *Controller) overdueInterruption(ctx context.Context, inc *types.Inciden
 	}
 	reason := fmt.Sprintf("the cloud announced %s for %s, but %s after the deadline %s the node is still there and the notice is still on it; the signal may be stuck, and the cordon is kept",
 		notice.Kind, inc.Target.Node, interruptionOverdue, notice.due().UTC().Format(time.RFC3339))
-	return true, c.quarantine(ctx, inc, reason)
+	return true, c.quarantine(ctx, inc, legacyHandover(reason))
 }

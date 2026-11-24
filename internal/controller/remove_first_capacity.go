@@ -224,13 +224,19 @@ func (c *Controller) settleDeletedTarget(ctx context.Context, inc *types.Inciden
 // parkRemoveFirst leaves the record and the incident for an operator, with
 // what to check and the command that settles it.
 func (c *Controller) parkRemoveFirst(ctx context.Context, inc *types.Incident, reason string) error {
-	return c.parkRemoveFirstWithCheck(ctx, inc, reason+" Check the machine and the size of the pool, then run")
+	return c.parkWithHandover(ctx, inc, handover{
+		What: reason, Check: "Check the machine and the size of the pool, then run", Command: settlementCommand(inc.ID),
+	})
 }
 
-func (c *Controller) parkRemoveFirstWithCheck(ctx context.Context, inc *types.Incident, instruction string) error {
-	reason := fmt.Sprintf(`%s kubeneuronctl resolve %s --cloud-operation-settled --reason "<what you found>"`, instruction, inc.ID)
+func settlementCommand(id string) string {
+	return fmt.Sprintf(`kubeneuronctl resolve %s --cloud-operation-settled --reason "<what you found>"`, id)
+}
+
+func (c *Controller) parkWithHandover(ctx context.Context, inc *types.Incident, h handover) error {
+	reason := h.message()
 	if inc.State != types.StateNeedsHuman && inc.State != types.StateResolved {
-		if err := c.quarantineAfterStep(ctx, inc, reason, false); err != nil {
+		if err := c.quarantineAfterStep(ctx, inc, h, false); err != nil {
 			return err
 		}
 	}

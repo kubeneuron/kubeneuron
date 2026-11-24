@@ -67,7 +67,7 @@ func TestFailedTransitionWithdrawsNothing(t *testing.T) {
 	if err := c.store.UpdateIncident(ctx, moved); err != nil {
 		t.Fatal(err)
 	}
-	err = c.transition(ctx, fresh, types.StateNeedsHuman, "alice", "manual-resolve", "racing", nil)
+	err = c.handOver(ctx, fresh, "alice", "manual-resolve", legacyHandover("racing"), false)
 	if !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("transition err = %v, want ErrConflict", err)
 	}

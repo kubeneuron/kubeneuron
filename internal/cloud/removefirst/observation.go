@@ -17,6 +17,12 @@ var ErrRefused = errors.New("delete request refused")
 // ErrPoolGone means a successful cluster read no longer lists the planned pool.
 var ErrPoolGone = errors.New("node pool no longer exists")
 
+var (
+	ErrAutoscaled   = errors.New("pool is autoscaled")
+	ErrUnequalZones = errors.New("zones have different sizes")
+	ErrChangedZones = errors.New("pool zones changed")
+)
+
 type Observation string
 
 const (

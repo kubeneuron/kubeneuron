@@ -189,13 +189,16 @@ func (p *Provider) ContinueRemoveFirst(ctx context.Context, plan cloud.RemoveFir
 		groups = append(groups, gr.url())
 	}
 	if strings.Join(groups, ",") != plan.State[stateGroups] {
-		return plan, refuse("the zones of node pool %s changed since the plan", pl.Name)
+		return plan, errors.Join(removefirst.ErrChangedZones, refuse("the zones of node pool %s changed since the plan", pl.Name))
 	}
 	zone := slices.Index(pl.Groups, g)
 	if zone < 0 {
 		return plan, refuse("instance group %s of the plan is not in node pool %s", g.name, pl.Name)
 	}
-	if pl.Autoscaling || c.Autopilot {
+	if pl.Autoscaling {
+		return plan, errors.Join(removefirst.ErrAutoscaled, refuse("node pool %s is no longer fixed-size", pl.Name))
+	}
+	if c.Autopilot {
 		return plan, refuse("node pool %s is no longer fixed-size", pl.Name)
 	}
 	ops, err := p.api.Operations(ctx)
@@ -274,7 +277,7 @@ func (p *Provider) ContinueRemoveFirst(ctx context.Context, plan cloud.RemoveFir
 	if sizes[zone] >= int32(before) {
 		for _, n := range sizes {
 			if n != sizes[zone] {
-				return plan, refuse("node pool %s has zones of different sizes (%s) after the delete", pl.Name, joinSizes(sizes))
+				return plan, errors.Join(removefirst.ErrUnequalZones, refuse("node pool %s has zones of different sizes (%s) after the delete", pl.Name, joinSizes(sizes)))
 			}
 		}
 		plan.Phase = cloud.RemoveFirstDone
