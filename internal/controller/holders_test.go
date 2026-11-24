@@ -253,6 +253,15 @@ func TestVendorlessIncidentRefusesAResetTheNodeCannotServe(t *testing.T) {
 		t.Fatalf("refuseInfeasibleReset = %v, want errResetVendorMismatch: the node reports an AMD "+
 			"runtime and no NVIDIA one, so this reset can never run and must be refused BEFORE the cordon", err)
 	}
+	var reset resetHandoverError
+	if !errors.As(err, &reset) {
+		t.Fatalf("missing reset handover: %v", err)
+	}
+	want := "Playbook " + book.Name + " includes an accelerator reset that cannot run for this incident: the vendor of the incident's device or the accelerator runtime on node node-amd does not match the reset step. Check the playbook bound to this incident class and the accelerator runtime on the node. After you repair the node by hand, run kubeneuronctl resolve inc-vendorless"
+	if reset.message() != want || reset.auditParams["cause"] != err.Error() {
+		t.Fatalf("message %q, audit cause %q", reset.message(), reset.auditParams["cause"])
+	}
+
 }
 
 // A node that has simply not reported yet must be left alone: "no evidence

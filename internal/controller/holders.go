@@ -212,6 +212,7 @@ func (c *Controller) refuseInfeasibleReset(ctx context.Context, inc *types.Incid
 			device = "the device at PCI " + inc.Target.PCIAddr
 		}
 		return resetHandoverError{
+			cause: errResetTargetUnattributed,
 			handover: handover{
 				What:    fmt.Sprintf("playbook %q resets a device, but incident %s names no device (vendor %s, no device ID); %s.", book.Name, inc.ID, cmp.Or(inc.Vendor, "unknown"), errResetTargetUnattributed),
 				Check:   fmt.Sprintf("Check %s on node %s, then close the incident with", device, inc.Target.Node),
@@ -220,12 +221,12 @@ func (c *Controller) refuseInfeasibleReset(ctx context.Context, inc *types.Incid
 		}
 	}
 	if vendor, mismatched := resetVendorMismatch(inc, book); mismatched {
-		return fmt.Errorf("playbook %q resets a %s GPU but incident %s is about a %s device; that reset can never run: %w",
-			book.Name, vendor, inc.ID, inc.Vendor, errResetVendorMismatch)
+		return mismatchedResetHandover(inc, book.Name, fmt.Errorf("playbook %q resets a %s GPU but incident %s is about a %s device; that reset can never run: %w",
+			book.Name, vendor, inc.ID, inc.Vendor, errResetVendorMismatch))
 	}
 	if vendor, mismatched := c.resetVendorAbsentFromNode(ctx, inc, book); mismatched {
-		return fmt.Errorf("playbook %q resets a %s GPU but node %s reports no %s runtime; that reset can never run: %w",
-			book.Name, vendor, inc.Target.Node, vendor, errResetVendorMismatch)
+		return mismatchedResetHandover(inc, book.Name, fmt.Errorf("playbook %q resets a %s GPU but node %s reports no %s runtime; that reset can never run: %w",
+			book.Name, vendor, inc.Target.Node, vendor, errResetVendorMismatch))
 	}
 	if c.simulating(ctx, inc) {
 		return nil // the holder check below reads live state; see above
@@ -349,7 +350,24 @@ func FormatObstructions(obstructions []ResetObstruction) string {
 	return strings.Join(parts, "; ")
 }
 
-type resetHandoverError struct{ handover }
+type resetHandoverError struct {
+	handover
+	cause error
+}
 
-func (e resetHandoverError) Error() string { return e.message() }
-func (e resetHandoverError) Unwrap() error { return errResetTargetUnattributed }
+func (e resetHandoverError) Error() string {
+	if cause := e.auditParams["cause"]; cause != "" {
+		return cause
+	}
+	return e.message()
+}
+func (e resetHandoverError) Unwrap() error { return e.cause }
+
+func mismatchedResetHandover(inc *types.Incident, book string, cause error) resetHandoverError {
+	return resetHandoverError{cause: cause, handover: handover{
+		What:        fmt.Sprintf("Playbook %s includes an accelerator reset that cannot run for this incident: the vendor of the incident's device or the accelerator runtime on node %s does not match the reset step.", book, inc.Target.Node),
+		Check:       "Check the playbook bound to this incident class and the accelerator runtime on the node. After you repair the node by hand, run",
+		Command:     "kubeneuronctl resolve " + inc.ID,
+		auditParams: map[string]string{"cause": cause.Error()},
+	}}
+}

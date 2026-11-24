@@ -279,26 +279,15 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 		if err := c.refuseInfeasibleReset(ctx, inc, book); err != nil {
 			c.log.Info("reset playbook refused before any disruptive step",
 				"incident", inc.ID, "playbook", inc.Playbook, "reason", err.Error())
-			if !errors.Is(err, errResetTargetUnattributed) && !errors.Is(err, errResetVendorMismatch) {
-				// Only the holder refusal is protection: processes are using the
-				// device, so nothing was disrupted for a reset that could not
-				// have worked. An unattributed incident is a structural dead end
-				// — the ladder escalates to a rung that DOES run — so counting it
-				// as protection would claim a disruption that still happens.
-				c.deferPlaybook(ctx, inc, metrics.DeferDeviceHolders)
+			// Escalation would re-enter EVALUATING, which the state machine forbids.
+			// Hand an infeasible reset to the operator here.
+			var reset resetHandoverError
+			if errors.As(err, &reset) {
+				return c.quarantine(ctx, inc, reset.handover)
 			}
-			if errors.Is(err, errResetTargetUnattributed) || errors.Is(err, errResetVendorMismatch) {
-				// An unattributed incident has no device to reset and can never gain
-				// one. From EVALUATING the ladder cannot legally re-enter EVALUATING to
-				// swap in the reboot rung, so fail closed to a human with the reason —
-				// the task-sanctioned outcome — instead of holding here forever. A
-				// human can identify the affected GPU (or reboot the node) by hand.
-				var reset resetHandoverError
-				if errors.As(err, &reset) {
-					return c.quarantine(ctx, inc, reset.handover)
-				}
-				return c.quarantine(ctx, inc, legacyHandover(err.Error()))
-			}
+			// Only a holder refusal counts as protection: it prevents disruption to
+			// processes using the device. An infeasible reset provides no such protection.
+			c.deferPlaybook(ctx, inc, metrics.DeferDeviceHolders)
 			return c.escalate(ctx, inc, err.Error())
 		}
 		// Same principle for the arming boundary: if any rung of this playbook
@@ -325,7 +314,12 @@ func (c *Controller) advanceEvaluating(ctx context.Context, inc *types.Incident)
 	}
 	step, done, err := c.runtimeConfig(ctx).Engine.NextStep(inc)
 	if err != nil {
-		return c.quarantine(ctx, inc, legacyHandover(err.Error()))
+		return c.quarantine(ctx, inc, handover{
+			What:        fmt.Sprintf("KubeNeuron cannot continue this incident: playbook %s is not in the current configuration.", inc.Playbook),
+			Check:       fmt.Sprintf("Check the playbook name in the remediation policy. After you handle node %s by hand, run", inc.Target.Node),
+			Command:     "kubeneuronctl resolve " + inc.ID,
+			auditParams: map[string]string{"cause": err.Error()},
+		})
 	}
 	if done {
 		return c.transition(ctx, inc, types.StateVerifying, "system", "verify",
@@ -475,7 +469,11 @@ func (c *Controller) verifyAfterOwnersReplacement(ctx context.Context, inc *type
 		return nil
 	}
 	if !sameRepairNode(inc, owner) {
-		return c.quarantine(ctx, inc, legacyHandover("repair owner "+ownerID+" resolved against a different node identity"))
+		return c.quarantine(ctx, inc, handover{
+			What:    fmt.Sprintf("Incident %s finished its repair of node %s, but KubeNeuron cannot confirm that both incidents concern the same machine.", ownerID, owner.Target.Node),
+			Check:   fmt.Sprintf("Check whether node %s still has the problem. Then run", inc.Target.Node),
+			Command: "kubeneuronctl resolve " + inc.ID,
+		})
 	}
 	entries, err := c.store.AuditTrail(ctx, ownerID)
 	if err != nil {
@@ -497,7 +495,11 @@ func (c *Controller) verifyAfterOwnersReplacement(ctx context.Context, inc *type
 				if entry.Params["replacement_correlation"] == replacementByResizeDiff {
 					id := entry.Params["replacement_provider_id"]
 					if id == "" || entry.Params["replacement_node"] == "" || entry.Params["replacement_node_uid"] == "" || !ownerFoundInstance(owner, entries, id) {
-						return c.quarantine(ctx, inc, legacyHandover("replacement evidence from owner "+ownerID+" does not identify the instance its pool's resize added"))
+						return c.quarantine(ctx, inc, handover{
+							What:    fmt.Sprintf("Incident %s replaced the node and verified the replacement, but KubeNeuron cannot confirm which machine the pool's resize added.", ownerID),
+							Check:   "Check that the pool has its planned number of nodes and that the new node is healthy. Then run",
+							Command: "kubeneuronctl resolve " + inc.ID,
+						})
 					}
 					proof["replacement_node"] = entry.Params["replacement_node"]
 					proof["replacement_node_uid"] = entry.Params["replacement_node_uid"]
@@ -508,7 +510,11 @@ func (c *Controller) verifyAfterOwnersReplacement(ctx context.Context, inc *type
 				s := owner.Successor
 				if entry.Params["replacement_correlation"] != "successor" || s == nil || s.Outcome != types.SuccessorReplaced ||
 					s.ReadyAt == nil || s.Node == "" || s.NodeUID == "" || s.Node != entry.Params["replacement_node"] || s.NodeUID != entry.Params["replacement_node_uid"] {
-					return c.quarantine(ctx, inc, legacyHandover("replacement evidence from owner "+ownerID+" does not identify a confirmed successor for this incident"))
+					return c.quarantine(ctx, inc, handover{
+						What:    fmt.Sprintf("Incident %s replaced a node and verified the replacement, but KubeNeuron cannot confirm that the replacement is the successor of the node in this incident.", ownerID),
+						Check:   fmt.Sprintf("Check that node %s was replaced and that the new node is healthy. Then run", inc.Target.Node),
+						Command: "kubeneuronctl resolve " + inc.ID,
+					})
 				}
 				proof["replacement_node"] = s.Node
 				proof["replacement_node_uid"] = s.NodeUID
@@ -804,7 +810,11 @@ func (c *Controller) advanceVerifying(ctx context.Context, inc *types.Incident) 
 				continue
 			}
 			if entry.Action == "verify-owner-replacement" {
-				return c.quarantine(ctx, inc, legacyHandover("signal recurred after replacement verified by incident "+entry.Params["owner_id"]))
+				return c.quarantine(ctx, inc, handover{
+					What:    fmt.Sprintf("The same signal came back on %s while KubeNeuron was verifying the replacement made by incident %s.", inc.Target.Node, entry.Params["owner_id"]),
+					Check:   "Check for a cause outside the node, for example the workload or the driver. Then run",
+					Command: "kubeneuronctl resolve " + inc.ID,
+				})
 			}
 			break
 		}

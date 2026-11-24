@@ -864,7 +864,10 @@ func (c *Controller) overdueInterruption(ctx context.Context, inc *types.Inciden
 			return false, nil
 		}
 	}
-	reason := fmt.Sprintf("the cloud announced %s for %s, but %s after the deadline %s the node is still there and the notice is still on it; the signal may be stuck, and the cordon is kept",
-		notice.Kind, inc.Target.Node, interruptionOverdue, notice.due().UTC().Format(time.RFC3339))
-	return true, c.quarantine(ctx, inc, legacyHandover(reason))
+	return true, c.quarantine(ctx, inc, handover{
+		What:        fmt.Sprintf("The cloud announced %s for node %s, but %s after the deadline the node is still there and the notice is still on it. KubeNeuron keeps its cordon on the node until this incident is closed.", notice.Kind, inc.Target.Node, interruptionOverdue),
+		Check:       "Check the instance with the cloud provider. Then run",
+		Command:     "kubeneuronctl resolve " + inc.ID,
+		auditParams: map[string]string{"deadline": notice.due().UTC().Format(time.RFC3339)},
+	})
 }

@@ -686,7 +686,7 @@ func TestInterruptionOverdueGoesToAPerson(t *testing.T) {
 				t.Fatalf("cordons %v, released %v; want the cordon kept", plat.cordoned(), plat.released)
 			}
 			if tc.want == types.StateNeedsHuman {
-				if _, results := trailActions(t, st, inc.ID); !containsText(results, "the signal may be stuck") {
+				if _, results := trailActions(t, st, inc.ID); !containsText(results, "The cloud announced spot-reclaim for node n1, but 1h0m0s after the deadline the node is still there and the notice is still on it. KubeNeuron keeps its cordon on the node until this incident is closed. Check the instance with the cloud provider. Then run kubeneuronctl resolve "+inc.ID) {
 					t.Fatalf("no reason recorded: %v", results)
 				}
 			}
