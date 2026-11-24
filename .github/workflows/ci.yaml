@@ -49,6 +49,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Verify kind suite coverage
+        run: make verify-kind-groups
+
+
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: "1.26.11"
@@ -89,25 +93,75 @@ jobs:
         # on re-run, which is the most expensive kind of CI failure there is.
         run: go test -race -count=1 -timeout 30m ./...
 
+  kind-amd64-groups:
+    name: kind-integration (${{ matrix.suite }})
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [functional, tls]
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+            kind_sha256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
+            kubectl_sha256: fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
+    uses: ./.github/workflows/kind-suite.yaml
+    with:
+      runner: ${{ matrix.runner }}
+      arch: ${{ matrix.arch }}
+      kind_sha256: ${{ matrix.kind_sha256 }}
+      kubectl_sha256: ${{ matrix.kubectl_sha256 }}
+      suite: ${{ matrix.suite }}
+      target: test-integration-kind
+      artifact: kind-amd64-${{ matrix.suite }}
+
   kind-integration:
+    needs: kind-amd64-groups
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both kind groups
+        env:
+          GROUP_RESULT: ${{ needs.kind-amd64-groups.result }}
+        run: test "$GROUP_RESULT" = success
+
+  kind-arm64-groups:
+    name: kind-integration-arm64 (${{ matrix.suite }})
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [functional, tls]
+        include:
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            kind_sha256: b92cd615e97585de8ddade28ed5cd7feb4248d717c233eea5b03c37298900f5d
+            kubectl_sha256: d1a1f7b86859108406e997430a59c95c72a77cc33cdc4faccd046407aff2cfac
+    uses: ./.github/workflows/kind-suite.yaml
+    with:
+      runner: ${{ matrix.runner }}
+      arch: ${{ matrix.arch }}
+      kind_sha256: ${{ matrix.kind_sha256 }}
+      kubectl_sha256: ${{ matrix.kubectl_sha256 }}
+      suite: ${{ matrix.suite }}
+      target: test-integration-kind
+      artifact: kind-arm64-${{ matrix.suite }}
+
+  kind-integration-arm64:
+    needs: kind-arm64-groups
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both kind groups
+        env:
+          GROUP_RESULT: ${{ needs.kind-arm64-groups.result }}
+        run: test "$GROUP_RESULT" = success
+
+  kind-other:
     # Hosted runners: free and unlimited on public repositories.
     name: ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: kind-integration
-            runner: ubuntu-24.04
-            arch: amd64
-            suite: main
-            kind_sha256: 50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54
-            kubectl_sha256: fe80ae4133b44fa2077db4af144e80765eb1b3b2eede55fbff6933c4374d8c6e
-          - name: kind-integration-arm64
-            runner: ubuntu-24.04-arm
-            arch: arm64
-            suite: main
-            kind_sha256: b92cd615e97585de8ddade28ed5cd7feb4248d717c233eea5b03c37298900f5d
-            kubectl_sha256: d1a1f7b86859108406e997430a59c95c72a77cc33cdc4faccd046407aff2cfac
           # The installer's lifecycle and the Managed metrics path, beside
           # the rest on its own runner. amd64 only: the images are the same
           # build per arch, and arm64 runs the main suite.

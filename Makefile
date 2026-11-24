@@ -8,7 +8,8 @@ KIND      ?= kind
 KUBECTL   ?= kubectl
 KIND_CLUSTER_NAME ?= kubeneuron-integration
 KIND_KUBECONFIG   ?= /tmp/$(KIND_CLUSTER_NAME).kubeconfig
-# test-integration-kind suites: all, main, or installer (hack/kind-integration.sh)
+# all runs all leaf suites; main runs functional and tls.
+INTEGRATION_LEAF_SUITES := functional tls installer
 INTEGRATION_SUITE ?= all
 
 BINARIES := kubeneuron-operator kubeneuron-controller kubeneuron-agent kubeneuronctl
@@ -447,3 +448,7 @@ test-verify-dco:
 .PHONY: test-cloud-pack-render
 test-cloud-pack-render:
 	bash hack/test-cloud-pack-render.sh
+
+.PHONY: verify-kind-groups
+verify-kind-groups:
+	ruby hack/verify-kind-groups.rb .github/workflows/ci.yaml $(INTEGRATION_LEAF_SUITES)
