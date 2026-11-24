@@ -399,6 +399,16 @@ The Job needs only the operator-token Secret (`<name>-operator-api-token`)
 and network reach to the controller Service — no `pods/exec` RBAC and nothing extra in the distroless
 image. The kind integration suite includes a SQLite backup, wipe and restore scenario.
 
+The Job downloads to a hidden temporary file on the backup volume and keeps
+it as a dated copy only when its length matches the response and the SQLite
+header. Otherwise the Job fails and the existing copies are unchanged.
+Retention (`KEEP`) counts complete copies only; an incomplete copy, for
+example one left by an earlier version of the template, is named in the Job
+log as a warning and kept for you to inspect or remove. `MAX_TIME` limits one
+download attempt in seconds and `RETRIES` sets how often a timeout or a 5xx is
+retried; keep `(RETRIES + 1) × MAX_TIME` under the Job's
+`activeDeadlineSeconds`.
+
 A fresh installer run selects the cloud recovery pack. See [Recovery policies](install.md#recovery-policies-installed-by-the-script) for ladder selection and the node-level alpha option.
 
 **Retention:** `deploy/install.sh --uninstall --name NAME --namespace NS`

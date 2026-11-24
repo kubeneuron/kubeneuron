@@ -2791,6 +2791,103 @@ exercise_backup_restore() {
 	note "backup snapshot restored through the documented helper-pod procedure; $after incident(s) survived a wiped database"
 }
 
+# exercise_backup_cronjob runs the shipped backup CronJob the way
+# docs/operations.md applies it, then cuts one download off halfway: a stub
+# controller announces the whole snapshot's length and closes the connection
+# after half of it. The Job must fail without a new dated copy and leave the
+# existing copies byte for byte; an incomplete copy an earlier template could
+# have left is reported by name and not counted or removed.
+exercise_backup_cronjob() {
+	note "exercising the backup CronJob, including a download cut off halfway"
+	local cronjob=kubeneuron-backup stub=kubeneuron-backup-cut seed=kubeneuron-20000101T000000Z.db
+	local before after log cleanup_done=0
+	cleanup_backup_cronjob() {
+		((cleanup_done)) && return 0
+		cleanup_done=1
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete job -l kubeneuron.io/backup-test=1 --ignore-not-found --wait=true >/dev/null 2>&1 || true
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete pod,configmap "$stub" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete service cut-controller --ignore-not-found --wait=true >/dev/null 2>&1 || true
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete cronjob "$cronjob" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" delete pvc kubeneuron-backups --ignore-not-found --wait=true >/dev/null 2>&1 || true
+	}
+	trap cleanup_backup_cronjob RETURN
+
+	# The documented command (docs/operations.md, "Scheduled backups"), then
+	# suspended so the schedule cannot start a Job of its own.
+	sed -e "/# <name>/s/kubeneuron/${ROOT_NAME}/" -e "/# <ns>/s/kube-neuron/${TARGET_NAMESPACE}/" \
+		"$REPO_ROOT/deploy/kubernetes/backup/backup-cronjob.yaml" |
+		"$KUBECTL_BIN" apply -f - >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" patch cronjob "$cronjob" --type=merge -p '{"spec":{"suspend":true}}' >/dev/null
+	# backup_job NAME CONDITION: one Job from the CronJob, its log afterwards.
+	backup_job() {
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create job "$1" --from="cronjob/$cronjob" >/dev/null
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" label job "$1" kubeneuron.io/backup-test=1 >/dev/null
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" wait --for="condition=$2" "job/$1" --timeout=180s >/dev/null ||
+			die "backup Job $1 did not reach $2: $("$KUBECTL_BIN" -n "$TARGET_NAMESPACE" logs "job/$1" 2>&1 | tail -n 5)"
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" logs "job/$1" 2>&1
+	}
+	backup_job kubeneuron-backup-first Complete >/dev/null
+
+	# The stub controller doubles as the reader of the backup volume.
+	cat >"$work_dir/backup-cut.sh" <<-'SH'
+		#!/bin/sh
+		# One request: the newest copy's whole length, then half its bytes.
+		cr=$(printf '\r')
+		while read -r line && [ -n "${line%"$cr"}" ]; do :; done
+		for f in /backups/kubeneuron-*.db; do :; done
+		size=$(wc -c <"$f")
+		printf 'HTTP/1.1 200 OK\r\nContent-Length: %s\r\nConnection: close\r\n\r\n' "$size"
+		head -c $((size / 2)) "$f"
+	SH
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" create configmap "$stub" --from-file=cut.sh="$work_dir/backup-cut.sh" >/dev/null
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" apply -f - >/dev/null <<-JSON
+		{"apiVersion":"v1","kind":"List","items":[
+		 {"apiVersion":"v1","kind":"Pod","metadata":{"name":"$stub","labels":{"app":"$stub"}},
+		  "spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":100,"runAsGroup":101,"fsGroup":101,
+		    "seccompProfile":{"type":"RuntimeDefault"}},
+		   "containers":[{"name":"stub","image":"busybox:1.36","command":["nc","-lk","-p","8080","-e","/stub/cut.sh"],
+		    "securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}},
+		    "volumeMounts":[{"name":"backups","mountPath":"/backups"},{"name":"stub","mountPath":"/stub"}]}],
+		   "volumes":[{"name":"backups","persistentVolumeClaim":{"claimName":"kubeneuron-backups"}},
+		    {"name":"stub","configMap":{"name":"$stub","defaultMode":365}}]}},
+		 {"apiVersion":"v1","kind":"Service","metadata":{"name":"cut-controller"},
+		  "spec":{"selector":{"app":"$stub"},"ports":[{"port":8080}]}}]}
+	JSON
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" wait --for=condition=Ready "pod/$stub" --timeout=120s >/dev/null ||
+		die "backup stub pod did not start"
+	backup_files() {
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" exec "$stub" -- sh -c 'cd /backups && ls -A | sort && sha256sum kubeneuron-*.db'
+	}
+	# A truncated copy as an earlier template could leave one, older than the rest.
+	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" exec "$stub" -- sh -c \
+		"cd /backups && for f in kubeneuron-*.db; do :; done && head -c 4096 \"\$f\" >$seed"
+	before=$(backup_files)
+
+	# The Job's controller URL is "$INSTALLATION-controller" (env[0]);
+	# INSTALLATION=cut points it at the stub's Service.
+	set_installation() {
+		"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" patch cronjob "$cronjob" --type=json -p "[
+			{\"op\":\"test\",\"path\":\"/spec/jobTemplate/spec/template/spec/containers/0/env/0/name\",\"value\":\"INSTALLATION\"},
+			{\"op\":\"replace\",\"path\":\"/spec/jobTemplate/spec/template/spec/containers/0/env/0/value\",\"value\":\"$1\"}]" >/dev/null
+	}
+	set_installation cut
+	log=$(backup_job kubeneuron-backup-cut Failed)
+	[[ $log == *"existing copies are unchanged"* ]] ||
+		die "the cut-off backup Job did not report the incomplete download: $log"
+	after=$(backup_files)
+	[[ $after == "$before" ]] ||
+		die "a cut-off download changed the backup volume: before: $before after: $after"
+
+	set_installation "$ROOT_NAME"
+	log=$(backup_job kubeneuron-backup-after Complete)
+	[[ $log == *"warning: /backups/$seed is not a complete SQLite database"* ]] ||
+		die "the backup Job did not name the incomplete copy $seed: $log"
+	after=$(backup_files)
+	[[ $(grep -c '^kubeneuron-.*\.db$' <<<"$after") == 3 && $after == *"$seed"* ]] ||
+		die "after a good backup the volume should hold $seed and two dated copies: $after"
+	note "backup CronJob: a download cut off halfway failed the Job and left the copies unchanged; the incomplete $seed was reported and kept"
+}
+
 # exercise_real_cordon_and_uncordon is the only phase in this suite that lets a
 # playbook actually change the cluster.
 #
@@ -4532,6 +4629,7 @@ exercise_accelerator_health
 exercise_real_cordon_and_uncordon
 exercise_workload_safe_recovery
 exercise_backup_restore
+exercise_backup_cronjob
 wait_root_condition True RuntimeAvailable
 assert_runtime_ready
 exercise_routine_tls_rotation

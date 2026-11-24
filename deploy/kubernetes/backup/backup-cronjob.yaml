@@ -72,6 +72,13 @@ spec:
                   value: http                 # https with publicServerSecretRef
                 - name: KEEP
                   value: "14"                 # dated copies to retain
+                # One download attempt may take MAX_TIME seconds and is
+                # repeated up to RETRIES times on a timeout or a 5xx; keep
+                # (RETRIES + 1) * MAX_TIME under activeDeadlineSeconds.
+                - name: MAX_TIME
+                  value: "200"
+                - name: RETRIES
+                  value: "3"
                 - name: OPERATOR_TOKEN
                   valueFrom:
                     secretKeyRef:
@@ -80,16 +87,66 @@ spec:
               command: ["/bin/sh", "-ceu"]
               args:
                 - |
+                  # whole_db FILE: FILE is a whole SQLite database. The
+                  # header must be intact and the file as long as the page
+                  # size and page count in that header say.
+                  whole_db() {
+                    [ "$(head -c 15 "$1")" = "SQLite format 3" ] || return 1
+                    # shellcheck disable=SC2046 # one word per header byte
+                    set -- "$1" $(od -An -tu1 -j15 -N3 "$1") $(od -An -tu1 -j24 -N8 "$1") $(od -An -tu1 -j92 -N4 "$1")
+                    [ $# -eq 16 ] && [ "$2" -eq 0 ] || return 1
+                    page=$(($3 * 256 + $4))
+                    [ "$page" -ne 1 ] || page=65536
+                    pages=$((($9 << 24) + (${10} << 16) + (${11} << 8) + ${12}))
+                    # The page count is valid only while the change counter
+                    # matches "version-valid-for".
+                    [ "$5 $6 $7 $8" = "${13} ${14} ${15} ${16}" ] && [ "$pages" -gt 0 ] &&
+                      [ "$(wc -c <"$1")" -eq $((page * pages)) ]
+                  }
                   stamp=$(date -u +%Y%m%dT%H%M%SZ)
                   out="/backups/kubeneuron-$stamp.db"
+                  # The download goes to a name outside the retention pattern
+                  # and becomes a dated copy only once it is verified.
+                  part="/backups/.kubeneuron-$stamp.db.partial"
+                  rm -f /backups/.kubeneuron-*.db.partial
+                  trap 'rm -f "$part"' EXIT
                   echo "downloading snapshot -> $out"
-                  curl --fail --silent --show-error --retry 3 \
+                  got=$(curl --fail --silent --show-error \
+                    --max-time "$MAX_TIME" --retry "$RETRIES" \
                     -H "Authorization: Bearer $OPERATOR_TOKEN" \
                     "$SCHEME://$INSTALLATION-controller:8080/api/v1/backup" \
-                    -o "$out"
+                    -o "$part" -w '%{size_download} %header{content-length}') ||
+                    { echo "download failed; existing copies are unchanged" >&2; exit 1; }
                   # For https, add: --cacert /etc/kubeneuron-ca/ca.crt
-                  test -s "$out"
-                  ls -1t /backups/kubeneuron-*.db | tail -n +$((KEEP + 1)) | xargs -r rm -v
+                  # The byte count decides, not curl's status alone: curl 8.14
+                  # exits 0 when --retry gives up on a refused connection.
+                  # shellcheck disable=SC2086 # two numbers
+                  set -- $got
+                  if [ $# -ne 2 ] || [ "$1" != "$2" ]; then
+                    echo "download failed or incomplete: ${1:-0} of ${2:-unknown} bytes; existing copies are unchanged" >&2
+                    exit 1
+                  fi
+                  whole_db "$part" ||
+                    { echo "download is not a complete SQLite database; existing copies are unchanged" >&2; exit 1; }
+                  mv "$part" "$out"
+                  # Retention counts whole copies only and removes the oldest
+                  # (the dated names sort by time). An incomplete one (an
+                  # earlier version of this template could leave one) is kept
+                  # and reported, not removed silently.
+                  copies=0
+                  for f in /backups/kubeneuron-*.db; do
+                    if whole_db "$f"; then
+                      copies=$((copies + 1))
+                    else
+                      echo "warning: $f is not a complete SQLite database; it is not counted in KEEP and not removed"
+                    fi
+                  done
+                  for f in /backups/kubeneuron-*.db; do
+                    [ "$copies" -gt "$KEEP" ] || break
+                    whole_db "$f" || continue
+                    rm -v "$f"
+                    copies=$((copies - 1))
+                  done
                   echo "retained:"; ls -lh /backups
               securityContext:
                 allowPrivilegeEscalation: false

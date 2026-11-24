@@ -83,6 +83,7 @@ API is `v1alpha1`.
 ### Fixed
 
 - Backups: the scheduled-backup CronJob template did not work as shipped. It named the controller of an installation called `fleet` but the token Secret of the default installation, so it made no backup for either without further edits. Its defaults now match the installer's defaults; for another installation, one documented `sed` command sets the name and the namespace together. The CronJob and the restore helper now set the fields the Pod Security `restricted` profile requires. The CronJob also sets fsGroup, so on volume types that apply it the Job's non-root user can write to a newly provisioned backup volume.
+- Backups: an interrupted download in the scheduled-backup CronJob could leave a truncated file under a dated name, and retention counted it as a copy. The Job now downloads to a temporary name and keeps the copy only after checking its length against the response and against the SQLite header; otherwise the Job fails and the existing copies stay as they were. Retention counts only complete copies. An incomplete copy left by an earlier version of the template is reported in the Job log by name and is not removed. The download time limit and the number of retries are set in the template (`MAX_TIME`, `RETRIES`).
 
 - PagerDuty: an alert summary that reaches the Events v2 length limit is now cut between characters, so it no longer ends in a broken character. The approve and reject commands stay complete in the alert's custom details.
 

@@ -73,6 +73,48 @@ def check_cronjob_volume(text):
     return errors
 
 
+def embedded_script(text):
+    # The CronJob's shell script: the block under "args: - |".
+    m = re.search(r"^(\s+)args:\n\s+- \|\n((?:\1\s+.*\n|\n)+)", text, re.MULTILINE)
+    if not m:
+        raise ValueError("the CronJob script (args: - |) not found")
+    lines = m.group(2).splitlines()
+    indent = min(len(l) - len(l.lstrip()) for l in lines if l.strip())
+    return "\n".join(l[indent:] for l in lines) + "\n"
+
+
+def check_cronjob_download(text):
+    # The download must not write the dated copy itself: an interrupted
+    # transfer would leave a truncated file that retention counts as a copy.
+    errors = []
+    try:
+        script = embedded_script(text)
+    except ValueError as e:
+        return [str(e)]
+    targets = re.findall(r'-o "\$(\w+)"', script)
+    names = dict(re.findall(r'^(\w+)="([^"]*)"', script, re.MULTILINE))
+    if len(targets) != 1:
+        return [f"want one curl -o target in the script, found {len(targets)}"]
+    target = targets[0]
+    final = names.get("out", "")
+    if target == "out" or names.get(target, "").startswith("/backups/kubeneuron-"):
+        errors.append(f"curl writes ${target}, a name the retention counts; download to a temporary name")
+    if not names.get(target, "").startswith("/backups/."):
+        errors.append(f"the download target ${target} is not a hidden name in /backups")
+    move = script.find(f'mv "${target}" "$out"')
+    verify = script.find(f'whole_db "${target}"')
+    if move < 0:
+        errors.append(f"the verified download is not renamed with mv \"${target}\" \"$out\"")
+    elif verify < 0 or verify > move:
+        errors.append(f"${target} is not checked with whole_db before the rename")
+    if not final.startswith("/backups/kubeneuron-"):
+        errors.append("the dated copy name no longer matches the retention pattern")
+    result = subprocess.run(["sh", "-n"], input=script, capture_output=True, text=True)
+    if result.returncode != 0:
+        errors.append(f"sh -n: {result.stderr.strip()}")
+    return errors
+
+
 def marked(text, marker):
     # Lines of YAML (not comments) that carry the marker.
     return sum(1 for line in text.splitlines() if marker in line and not line.lstrip().startswith("#"))
@@ -80,7 +122,7 @@ def marked(text, marker):
 
 # Names in the templates that do not depend on the installation.
 FIXED_NAMES = ("kubeneuron-backups", "kubeneuron-backup", "kubeneuron-restore-helper",
-               "kubeneuron-public-ca", "/backups/kubeneuron-", "app.kubernetes.io/name: kube-neuron")
+               "kubeneuron-public-ca", "/backups/kubeneuron-", "/backups/.kubeneuron-", "app.kubernetes.io/name: kube-neuron")
 
 
 def unmarked(text):
@@ -108,7 +150,7 @@ def main():
         errors.append(f"{HELPER.name}: want one line marked '# <name>'")
     for path, text in ((CRONJOB, cronjob), (HELPER, helper)):
         errors += [f"{path.name}: {e}" for e in check_restricted(text) + unmarked(text)]
-    errors += [f"{CRONJOB.name}: {e}" for e in check_cronjob_volume(cronjob)]
+    errors += [f"{CRONJOB.name}: {e}" for e in check_cronjob_volume(cronjob) + check_cronjob_download(cronjob)]
     for name, ns in ((DEFAULT_NAME, DEFAULT_NS), ("fleet", "ops")):
         try:
             errors += [f"{CRONJOB.name} for {name} in {ns}: {e}" for e in check_cronjob(render(CRONJOB, name, ns), name, ns)]
