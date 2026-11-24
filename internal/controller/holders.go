@@ -212,7 +212,7 @@ func (c *Controller) refuseInfeasibleReset(ctx context.Context, inc *types.Incid
 			device = "the device at PCI " + inc.Target.PCIAddr
 		}
 		//nolint:staticcheck // This full message is displayed verbatim in the incident audit.
-		return fmt.Errorf("playbook %q resets a device, but incident %s names no device (vendor %s, no device ID); %w. Check %s on node %s, then close the incident with kubeneuronctl resolve %s.",
+		return fmt.Errorf("playbook %q resets a device, but incident %s names no device (vendor %s, no device ID); %w. Check %s on node %s, then close the incident with kubeneuronctl resolve %s",
 			book.Name, inc.ID, cmp.Or(inc.Vendor, "unknown"), errResetTargetUnattributed, device, inc.Target.Node, inc.ID)
 	}
 	if vendor, mismatched := resetVendorMismatch(inc, book); mismatched {

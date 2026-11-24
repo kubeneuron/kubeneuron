@@ -138,7 +138,7 @@ func TestAMDKernelFaultUnderShippedPolicies(t *testing.T) {
 				if requests, _, _, _, drained := p.counts(); requests != 0 || drained != 0 || len(p.cordoned) != 0 {
 					t.Fatalf("the platform was asked to act: requests %d drained %d cordoned %v", requests, drained, p.cordoned)
 				}
-				if tc.state == types.StateNeedsHuman && !auditHas(entries, "quarantine", `playbook "`+tc.playbook+`" resets a device, but incident `+inc.ID+` names no device (vendor amd, no device ID); a per-device reset is not possible. Check the device at PCI 0000:c3:00 on node n1, then close the incident with kubeneuronctl resolve `+inc.ID+".") {
+				if tc.state == types.StateNeedsHuman && !auditHas(entries, "quarantine", `playbook "`+tc.playbook+`" resets a device, but incident `+inc.ID+` names no device (vendor amd, no device ID); a per-device reset is not possible. Check the device at PCI 0000:c3:00 on node n1, then close the incident with kubeneuronctl resolve `+inc.ID) {
 					t.Fatalf("no quarantine saying why%s", dump(entries))
 				}
 			})

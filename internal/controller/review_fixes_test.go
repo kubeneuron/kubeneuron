@@ -331,7 +331,7 @@ func TestUnattributedResetMessage(t *testing.T) {
 	} {
 		inc := &types.Incident{ID: "inc-1", Vendor: tc.vendor, Class: tc.class, Target: types.Target{Node: "n1", GPUIndex: -1, PCIAddr: tc.pci}}
 		err := c.refuseInfeasibleReset(t.Context(), inc, books[tc.book])
-		want := `playbook "` + tc.book + `" resets a device, but incident inc-1 names no device (vendor ` + tc.wantVendor + `, no device ID); a per-device reset is not possible. Check ` + tc.object + ` on node n1, then close the incident with kubeneuronctl resolve inc-1.`
+		want := `playbook "` + tc.book + `" resets a device, but incident inc-1 names no device (vendor ` + tc.wantVendor + `, no device ID); a per-device reset is not possible. Check ` + tc.object + ` on node n1, then close the incident with kubeneuronctl resolve inc-1`
 		if !errors.Is(err, errResetTargetUnattributed) || err.Error() != want {
 			t.Errorf("%s/%s: got %v, want %s", tc.vendor, tc.class, err, want)
 		}
