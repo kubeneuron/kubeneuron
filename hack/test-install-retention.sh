@@ -188,6 +188,12 @@ other_metrics_uid=$("$KUBECTL_BIN" -n "$namespace" get pvc "$name-b-metrics-stor
 install
 [[ $("$KUBECTL_BIN" get kubeneuron "$name" -o jsonpath='{.spec.safety.executionMode}') == Paused ]] ||
 	fail "a re-run reset the installation's execution mode"
+grep -Fxq "  kubectl -n $namespace port-forward service/$name-controller 8080:8080" "$work/install.log" || fail "missing fallback port-forward"
+grep -Fxq "  KUBENEURONCTL_TOKEN=\$(kubectl -n $namespace get secret $name-operator-api-token -o jsonpath='{.data.token}' | base64 -d) && export KUBENEURONCTL_TOKEN && kubeneuronctl --server http://127.0.0.1:8080 status" "$work/install.log" || fail "missing fallback status command"
+if grep -Fq 'remediate quickstart-demo' "$work/install.log"; then fail "paused installation printed a DryRun command"; fi
+if grep -Fq -f <("$KUBECTL_BIN" -n "$namespace" get secret "$name-operator-api-token" -o jsonpath='{.data.token}' | base64 -d) "$work/install.log"; then
+	fail "installer printed the API token"
+fi
 grep -Fq "API token     stored in the $name-operator-api-token Secret" "$work/install.log" || fail "missing token Secret location"
 "$KUBECTL_BIN" patch kubeneuron "$name" --type merge -p '{"spec":{"safety":{"executionMode":"DryRun"}}}' >/dev/null
 [[ $("$KUBECTL_BIN" get kubeneuron "$name" -o jsonpath='{.spec.observability.store.mode}/{.spec.observability.store.endpoint}/{.spec.observability.grafana.mode}') == External/http://metrics.example.invalid:8428/opentelemetry/Disabled ]] ||

@@ -19,7 +19,8 @@ Use a cluster running Kubernetes 1.32 or later with a default StorageClass.
 Follow the commands for your platform and release. This example uses Linux amd64 and the default
 installation. Replace every occurrence of `v1.0.0-rc.2` in this example with the
 version you installed. The [installation guide](install.md) explains how to
-verify the signature on that release’s checksum file.
+verify the signature on that release's checksum file.
+On macOS the installer prints `shasum -a 256 -c` instead of `sha256sum -c`; use the commands it printed.
 
 The third command reads the API token from the Kubernetes Secret
 and passes it to kubeneuronctl through the KUBENEURONCTL_TOKEN environment variable.

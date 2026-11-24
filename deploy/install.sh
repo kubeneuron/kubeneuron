@@ -1188,33 +1188,35 @@ EOF
 
 release_page="https://github.com/kubeneuron/kubeneuron/releases"
 case $(uname -s) in
- Linux) cli_os=linux; checksum='sha256sum -c' ;;
- Darwin) cli_os=darwin; checksum='shasum -a 256 -c' ;;
- *) cli_os='' ;;
+	Linux) cli_os=linux; checksum='sha256sum -c' ;;
+	Darwin) cli_os=darwin; checksum='shasum -a 256 -c' ;;
+	*) cli_os='' ;;
 esac
 case $(uname -m) in
- x86_64|amd64) cli_arch=amd64 ;;
- arm64|aarch64) cli_arch=arm64 ;;
- *) cli_arch='' ;;
+	x86_64|amd64) cli_arch=amd64 ;;
+	arm64|aarch64) cli_arch=arm64 ;;
+	*) cli_arch='' ;;
 esac
 # Shell variables in the printed commands are expanded in the operator's terminal.
 # shellcheck disable=SC2016
 if [[ -z $cli_os || -z $cli_arch || -z $VERSION || $VERSION == latest || $REPO_SLUG != kubeneuron/kubeneuron ]]; then
- printf '  CLI downloads: %s\n' "$release_page"
- if [[ -n $cli_os && -n $cli_arch ]]; then printf '  Open the panel: kubectl -n %q port-forward service/%q-controller 8080:8080\n' "$NS" "$NAME"; fi
+	printf '  CLI downloads: %s\n' "$release_page"
+	cli_command=kubeneuronctl
 else
- bundle="kubeneuronctl-$VERSION-$cli_os-$cli_arch"
- archive="$bundle.tar.gz"
- base="$release_page/download/$VERSION"
- echo '  In this terminal, download the CLI for the installed release and verify its checksum.'
- printf '  cli_dir=$(mktemp -d) && (cd "$cli_dir" && curl -fsSLO %q && curl -fsSLO %q && awk -v file=%q '\''$2 == file {print; found++} END {exit found != 1}'\'' %q > cli.sha256 && %s cli.sha256 && tar -xzf %q %q && mv %q kubeneuronctl)\n' "$base/$archive" "$base/checksums-$VERSION.txt" "$archive" "checksums-$VERSION.txt" "$checksum" "$archive" "$bundle" "$bundle"
- echo '  In a second terminal, start port forwarding to the controller and leave it running.'
- printf '  kubectl -n %q port-forward service/%q-controller 8080:8080\n' "$NS" "$NAME"
- echo "  Back in the first terminal, load the API token from the Kubernetes Secret and check the controller's status."
- printf '  KUBENEURONCTL_TOKEN=$(kubectl -n %q get secret %q -o jsonpath='\''{.data.token}'\'' | base64 -d) && export KUBENEURONCTL_TOKEN && "$cli_dir/kubeneuronctl" --server http://127.0.0.1:8080 status\n' "$NS" "$NAME-operator-api-token"
- if [[ $execution_mode == DryRun ]]; then
-  echo '  In the first terminal, open a DryRun incident for the fictitious node quickstart-demo.'
-  echo '  "$cli_dir/kubeneuronctl" --server http://127.0.0.1:8080 remediate quickstart-demo --class xid-app'
-  echo '  KubeNeuron records the incident and shows what it would do. It performs no node actions.'
- fi
+	bundle="kubeneuronctl-$VERSION-$cli_os-$cli_arch"
+	archive="$bundle.tar.gz"
+	base="$release_page/download/$VERSION"
+	echo '  In this terminal, download the CLI for the installed release and verify its checksum.'
+	printf '  cli_dir=$(mktemp -d) && (cd "$cli_dir" && curl -fsSLO %q && curl -fsSLO %q && awk -v file=%q '\''$2 == file {print; found++} END {exit found != 1}'\'' %q > cli.sha256 && %s cli.sha256 && tar -xzf %q %q && mv %q kubeneuronctl)\n' "$base/$archive" "$base/checksums-$VERSION.txt" "$archive" "checksums-$VERSION.txt" "$checksum" "$archive" "$bundle" "$bundle"
+	cli_command='"$cli_dir/kubeneuronctl"'
+fi
+echo '  In a second terminal, start port forwarding to the controller and leave it running.'
+printf '  kubectl -n %q port-forward service/%q-controller 8080:8080\n' "$NS" "$NAME"
+echo "  Back in the first terminal, load the API token from the Kubernetes Secret and check the controller's status."
+# shellcheck disable=SC2016
+printf '  KUBENEURONCTL_TOKEN=$(kubectl -n %q get secret %q -o jsonpath='\''{.data.token}'\'' | base64 -d) && export KUBENEURONCTL_TOKEN && %s --server http://127.0.0.1:8080 status\n' "$NS" "$NAME-operator-api-token" "$cli_command"
+if [[ $execution_mode == DryRun ]]; then
+	echo '  In the first terminal, open a DryRun incident for the fictitious node quickstart-demo.'
+	printf '  %s --server http://127.0.0.1:8080 remediate quickstart-demo --class xid-app\n' "$cli_command"
+	echo '  KubeNeuron records the incident and shows what it would do. It performs no node actions.'
 fi

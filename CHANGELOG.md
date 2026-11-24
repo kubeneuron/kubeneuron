@@ -33,7 +33,7 @@ API is `v1alpha1`.
 
 - Replacement incidents use the cloud provider's error code to explain capacity failures and suggest an operator action. When the code does not distinguish capacity from quota, the incident asks the operator to check both. The classification follows provider documentation and has been tested with simulated errors. These failures have not been observed on live clusters.
 
-- After installation, use the printed port-forward and status commands. The status command reads the API token from the installation’s Kubernetes Secret. The installer no longer prints the token value.
+- After installation, use the printed port-forward and status commands. The status command reads the API token from the installation's Kubernetes Secret. The installer no longer prints the token value.
 
 - Release images and the checksum file use Cosign 3 Sigstore bundles. The installation guide includes verification commands for both the new format and the detached signatures used by rc.1 and rc.2.
 
