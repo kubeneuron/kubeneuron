@@ -159,7 +159,10 @@ in order.
 3. Scale the operator to zero, then scale each controller to zero and wait
    for its pods to terminate. Restore the pre-upgrade backup for each
    workflow store. Restoring discards incidents and audit entries written
-   since the backup was taken.
+   since the backup was taken. Signals that the controller accepted after the
+   backup are not in the restored store, and their senders do not send them
+   again. After the rollback, check the nodes and pools that had incidents
+   since the backup.
 4. Restart the rc.1 operator. Verify the rc.1 controller and agent pods
    become Ready.
 
