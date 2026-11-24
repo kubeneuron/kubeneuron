@@ -38,8 +38,8 @@ type plannedPlatform struct {
 	holdPlanned, holdResize bool
 	// loseDelete / loseResize fail the answer of the next call, which is
 	// made; needsOperator fails the next resize for good.
-	loseDelete, loseResize, needsOperator bool
-	deletes, resizes                      map[string]int
+	loseDelete, loseResize, needsOperator, poolGone bool
+	deletes, resizes                                map[string]int
 	// atDelete runs before each delete is sent.
 	atDelete func(op string)
 }
@@ -103,6 +103,9 @@ func (p *plannedPlatform) ContinueRemoveFirst(_ context.Context, _ cloud.NodeIde
 	}
 	if p.holdResize && plan.State["operation"] != "" {
 		return plan, nil
+	}
+	if p.poolGone {
+		return plan, fmt.Errorf("private-project: %w: %w", cloud.ErrNeedsOperator, removefirst.ErrPoolGone)
 	}
 	if p.needsOperator {
 		return plan, fmt.Errorf("pool changed; to set the size back: %s: %w", plan.Restore, cloud.ErrNeedsOperator)
@@ -295,17 +298,32 @@ func TestRemoveFirstLostResizeAnswer(t *testing.T) {
 
 // A pool that cannot be set back ends the plan for an operator, with the
 // command that sets the size back.
-func TestRemoveFirstNeedsOperatorKeepsTheCommand(t *testing.T) {
+func TestRemoveFirstNeedsOperatorShowsSettlement(t *testing.T) {
 	p := newPlannedPlatform()
 	p.needsOperator = true
 	c, st := plannedFixture(t, p)
 	id := openOn(t, c, "n1")
 	inc := waitSettled(t, c, st, id, planEnded)
-	if inc.RemoveFirst.Outcome != types.RemoveFirstNeedsOperator || !strings.Contains(inc.RemoveFirst.Reason, "resize gpu --num-nodes 4") {
+	if inc.RemoveFirst.Outcome != types.RemoveFirstNeedsOperator || !strings.Contains(inc.RemoveFirst.Reason, "set it back to 4 nodes") {
 		t.Fatalf("plan %+v", inc.RemoveFirst)
 	}
-	if !auditHas(trail(t, st, id), "remove-first-needs-operator", "resize gpu --num-nodes 4") {
+	if !auditHas(trail(t, st, id), "remove-first-needs-operator", "set it back to 4 nodes") {
 		t.Fatalf("trail%s", dump(trail(t, st, id)))
+	}
+}
+
+func TestMissingPoolSettlementMessage(t *testing.T) {
+	p := newPlannedPlatform()
+	p.poolGone = true
+	c, st := plannedFixture(t, p)
+	id := openOn(t, c, "n1")
+	inc := waitSettled(t, c, st, id, planEnded)
+	want := fmt.Sprintf(`Pool gpu no longer exists, so its size cannot be restored. Nothing more will be changed. Check the cluster, then run kubeneuronctl resolve %s --cloud-operation-settled --reason "<what you found>"`, id)
+	if inc.State != types.StateNeedsHuman || inc.RemoveFirst.Reason != want || !auditHas(trail(t, st, id), "remove-first-needs-operator", want) {
+		t.Fatalf("incident %s: %+v", inc.State, inc.RemoveFirst)
+	}
+	if strings.Contains(dump(trail(t, st, id)), "private-project") {
+		t.Fatal("provider error in incident audit")
 	}
 }
 
@@ -361,8 +379,8 @@ func TestRemoveFirstDeadlineWithoutProgress(t *testing.T) {
 	c, st := plannedFixture(t, p)
 	id := openOn(t, c, "n1")
 	inc := waitSettled(t, c, st, id, planEnded)
-	if inc.RemoveFirst.Outcome != types.RemoveFirstNeedsOperator || !strings.Contains(inc.RemoveFirst.Reason, "no progress") ||
-		!strings.Contains(inc.RemoveFirst.Reason, "resize gpu --num-nodes 4") {
+	if inc.RemoveFirst.Outcome != types.RemoveFirstNeedsOperator || !strings.Contains(inc.RemoveFirst.Reason, "Pool gpu has had 3 of 4 nodes for more than an hour") ||
+		!strings.Contains(inc.RemoveFirst.Reason, "--cloud-operation-settled") {
 		t.Fatalf("plan %+v", inc.RemoveFirst)
 	}
 }

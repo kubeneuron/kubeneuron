@@ -81,6 +81,8 @@ func (c *Controller) replaceRemoveFirst(ctx context.Context, inc *types.Incident
 			continue
 		}
 		switch {
+		case inc.RemoveFirst.Outcome == types.RemoveFirstNeedsOperator:
+			return nil, true, errors.New(inc.RemoveFirst.Reason)
 		case !inc.RemoveFirst.Open():
 			return okResult(inc, fmt.Sprintf("deleted the instance behind %s and set node pool %s back to its size (operation %s)", pin.Node, rec.Pool, rec.Operation)), true, nil
 		case inc.RemoveFirst.Phase == cloud.RemoveFirstResizing && !removefirst.ResizeMaySend(inc.RemoveFirst.RemoveFirstPlan):
@@ -188,29 +190,35 @@ func (c *Controller) continueRemoveFirst(ctx context.Context, inc *types.Inciden
 			return errors.Join(err, eerr)
 		}
 		return err
+	case errors.Is(err, removefirst.ErrPoolGone):
+		return c.parkRemoveFirstWithCheck(ctx, inc, fmt.Sprintf("Pool %s no longer exists, so its size cannot be restored. Nothing more will be changed. Check the cluster, then run", rec.Pool))
 	case errors.Is(err, cloud.ErrNeedsOperator):
-		if eerr := c.endRemoveFirst(ctx, inc, types.RemoveFirstNeedsOperator, err.Error()); eerr != nil {
-			return errors.Join(err, eerr)
+		return c.parkRemoveFirstWithCheck(ctx, inc, fmt.Sprintf("KubeNeuron could not safely restore the size of pool %s. Check the original machine and the size of the pool; if it is one node short, set it back to %s. Then run", rec.Pool, c.plannedPoolSize(ctx, inc)))
+	case err != nil:
+		if time.Since(rec.PlannedAt) > removeFirstDeadline && rec.Phase != cloud.RemoveFirstPlanned {
+			return c.removeFirstOverdue(ctx, inc, rec)
 		}
 		return err
-	case err != nil:
-		return errors.Join(err, c.removeFirstOverdue(ctx, inc, inc.RemoveFirst, err.Error()))
 	case next.Phase == cloud.RemoveFirstDone && next.State[removefirst.StateEvidence] == removefirst.EvidenceFinalState:
 		return c.endRemoveFirst(ctx, inc, types.RemoveFirstRestored, finalStateEvidence)
 	case next.Phase == cloud.RemoveFirstDone:
 		return c.endRemoveFirst(ctx, inc, types.RemoveFirstRestored, "")
 	}
-	return c.removeFirstOverdue(ctx, inc, inc.RemoveFirst, "no progress")
+	return c.removeFirstOverdue(ctx, inc, inc.RemoveFirst)
 }
 
 func (c *Controller) parkMissingRemoveFirstIdentity(ctx context.Context, inc *types.Incident) error {
 	pool := inc.RemoveFirst.Pool
-	planned := "its size before the replacement"
-	if size, read := c.observePoolSize(ctx, inc); read {
-		planned = fmt.Sprintf("%d nodes", size.Planned)
-	}
+	planned := c.plannedPoolSize(ctx, inc)
 	instruction := fmt.Sprintf("KubeNeuron cannot confirm which cloud machine belonged to node %s when the replacement in pool %s started. Check the original machine and the size of pool %s; if the pool is one node short, set it back to %s. Then run", inc.Target.Node, pool, pool, planned)
 	return c.parkRemoveFirstWithCheck(ctx, inc, instruction)
+}
+
+func (c *Controller) plannedPoolSize(ctx context.Context, inc *types.Incident) string {
+	if size, read := c.observePoolSize(ctx, inc); read {
+		return fmt.Sprintf("%d nodes", size.Planned)
+	}
+	return "its size before the replacement"
 }
 
 // finalStateEvidence is the reason of a plan ended without the resize
@@ -220,12 +228,18 @@ const finalStateEvidence = "confirmed by the pool's final state, not by the clou
 // removeFirstOverdue ends a plan past the delete that is still open after
 // removeFirstDeadline, for an operator. A plan at planned changed nothing
 // and is left to its step.
-func (c *Controller) removeFirstOverdue(ctx context.Context, inc *types.Incident, rec *types.RemoveFirstRecord, last string) error {
+func (c *Controller) removeFirstOverdue(ctx context.Context, inc *types.Incident, rec *types.RemoveFirstRecord) error {
 	if !rec.Open() || rec.Phase == cloud.RemoveFirstPlanned || time.Since(rec.PlannedAt) <= removeFirstDeadline {
 		return nil
 	}
-	return c.endRemoveFirst(ctx, inc, types.RemoveFirstNeedsOperator,
-		fmt.Sprintf("not finished within %s (last: %s, phase %s); to set the size back: %s", removeFirstDeadline, last, rec.Phase, rec.Restore))
+	reason := fmt.Sprintf("Replacement of node %s in pool %s started more than an hour ago, and KubeNeuron could not confirm that the machine was removed.", inc.Target.Node, rec.Pool)
+	if rec.Phase == cloud.RemoveFirstResizing {
+		reason = fmt.Sprintf("Node %s was removed from pool %s, and after more than an hour KubeNeuron could not confirm that the pool size was set back.", inc.Target.Node, rec.Pool)
+		if size, read := c.observePoolSize(ctx, inc); read && size.Current < size.Planned {
+			reason = fmt.Sprintf("Pool %s has had %d of %d nodes for more than an hour: node %s was removed and the pool size was not set back.", rec.Pool, size.Current, size.Planned, inc.Target.Node)
+		}
+	}
+	return c.parkRemoveFirst(ctx, inc, reason)
 }
 
 // saveRemoveFirst persists rec on the incident with one audit row, and keeps

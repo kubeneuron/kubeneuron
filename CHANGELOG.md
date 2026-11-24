@@ -33,6 +33,8 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- When a GKE remove-first replacement needs an operator, the incident explains how to check the pool and settle the cloud operation. If the pool has been removed, the incident no longer suggests resizing it.
+
 - The pools API and `kubeneuronctl pools` explain why add-first is unavailable on a multi-zone GKE pool and advise using a single-zone pool or selecting RemoveFirst.
 - The optional AMD detection source reads `amd-smi metric --json` both as a
   device array (ROCm 6.4 and earlier) and as the object with a `gpu_data`

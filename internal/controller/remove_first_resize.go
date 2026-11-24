@@ -192,7 +192,7 @@ func (c *Controller) sweepResize(ctx context.Context, inc *types.Incident, plat 
 	}
 	if time.Since(rec.PlannedAt) > removeFirstDeadline {
 		if !read {
-			return c.removeFirstOverdue(ctx, inc, rec, "the resize is held")
+			return c.removeFirstOverdue(ctx, inc, rec)
 		}
 		return c.parkRemoveFirst(ctx, inc, fmt.Sprintf("Pool %s has had %d of %d nodes for more than an hour: node %s was removed and the pool size was not set back.",
 			rec.Pool, size.Current, size.Planned, inc.Target.Node))
