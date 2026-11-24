@@ -193,9 +193,11 @@ func (c *Controller) continueRemoveFirst(ctx context.Context, inc *types.Inciden
 	case errors.Is(err, removefirst.ErrPoolGone):
 		return c.parkRemoveFirstWithCheck(ctx, inc, fmt.Sprintf("Pool %s no longer exists, so its size cannot be restored. Nothing more will be changed. Check the cluster, then run", rec.Pool))
 	case errors.Is(err, cloud.ErrNeedsOperator):
+		c.log.Warn("remove-first plan needs an operator", "incident", inc.ID, "operation", rec.Operation, "err", err)
 		return c.parkRemoveFirstWithCheck(ctx, inc, fmt.Sprintf("KubeNeuron could not safely restore the size of pool %s. Check the original machine and the size of the pool; if it is one node short, set it back to %s. Then run", rec.Pool, c.plannedPoolSize(ctx, inc)))
 	case err != nil:
 		if time.Since(rec.PlannedAt) > removeFirstDeadline && rec.Phase != cloud.RemoveFirstPlanned {
+			c.log.Warn("remove-first plan needs an operator", "incident", inc.ID, "operation", rec.Operation, "err", err)
 			return c.removeFirstOverdue(ctx, inc, rec)
 		}
 		return err

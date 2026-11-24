@@ -39,6 +39,7 @@ type plannedPlatform struct {
 	// loseDelete / loseResize fail the answer of the next call, which is
 	// made; needsOperator fails the next resize for good.
 	loseDelete, loseResize, needsOperator, poolGone bool
+	resizeErr                                       error
 	deletes, resizes                                map[string]int
 	// atDelete runs before each delete is sent.
 	atDelete func(op string)
@@ -106,6 +107,9 @@ func (p *plannedPlatform) ContinueRemoveFirst(_ context.Context, _ cloud.NodeIde
 	}
 	if p.poolGone {
 		return plan, fmt.Errorf("private-project: %w: %w", cloud.ErrNeedsOperator, removefirst.ErrPoolGone)
+	}
+	if p.resizeErr != nil {
+		return plan, p.resizeErr
 	}
 	if p.needsOperator {
 		return plan, fmt.Errorf("pool changed; to set the size back: %s: %w", plan.Restore, cloud.ErrNeedsOperator)
@@ -309,6 +313,47 @@ func TestRemoveFirstNeedsOperatorShowsSettlement(t *testing.T) {
 	}
 	if !auditHas(trail(t, st, id), "remove-first-needs-operator", "set it back to 4 nodes") {
 		t.Fatalf("trail%s", dump(trail(t, st, id)))
+	}
+}
+
+func TestRemoveFirstHandoffLogsProviderError(t *testing.T) {
+	const detail = "provider-specific diagnostic"
+	for _, tc := range []struct {
+		name string
+		err  error
+		age  time.Duration
+	}{
+		{"refusal", fmt.Errorf("%s: %w", detail, cloud.ErrNeedsOperator), time.Minute},
+		{"deadline", errors.New(detail), 2 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPlannedPlatform()
+			p.gone["i-3"] = true
+			p.size--
+			p.resizeErr = tc.err
+			c, st := plannedFixture(t, p)
+			var log strings.Builder
+			c.log = slog.New(slog.NewTextHandler(&log, nil))
+			now := time.Now()
+			inc := &types.Incident{ID: "rf-error", State: types.StateExecuting, Target: types.Target{Node: "n3"}, Class: types.ClassFellOffBus, OpenedAt: now, UpdatedAt: now, StateChangedAt: now,
+				RemoveFirst: &types.RemoveFirstRecord{RemoveFirstPlan: cloud.RemoveFirstPlan{Pool: "gpu", Operation: "rf-error-a1", Instance: "i-3", Phase: cloud.RemoveFirstResizing, PlannedAt: now.Add(-tc.age)}}}
+			ctx := t.Context()
+			if err := st.CreateIncident(ctx, inc); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.continueRemoveFirst(ctx, inc, p, cloud.NodeIdentity{}); err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"level=WARN", "incident=rf-error", "operation=rf-error-a1", "err=", detail} {
+				if !strings.Contains(log.String(), field) {
+					t.Fatalf("missing %q in %s", field, log.String())
+				}
+			}
+			got := mustIncident(t, st, inc.ID)
+			if got.RemoveFirst.Outcome != types.RemoveFirstNeedsOperator || strings.Contains(got.RemoveFirst.Reason, detail) || strings.Contains(dump(trail(t, st, inc.ID)), detail) {
+				t.Fatalf("unexpected handoff: %+v", got.RemoveFirst)
+			}
+		})
 	}
 }
 
