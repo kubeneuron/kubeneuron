@@ -261,7 +261,13 @@ if ((UNINSTALL)); then
 		[[ -z $metrics_uid ]] || say "retained metrics store PVC $NS/$metrics_claim: up to 30 days of metrics, including node names. Erase them with: kubectl delete pvc $metrics_claim -n $NS"
 	fi
 	say "left in place: the operator, CRDs, namespace '$NS', and any external database"
-	say "remove the operator too with: kubectl delete -f <install manifest>"
+	say "Do not delete the full install manifest if you want to keep the data: it deletes the kube-neuron namespace, including any retained volume claims in it, and all KubeNeuron CRDs and custom resources in the cluster."
+	say "If no other KubeNeuron installation needs this operator, remove only the operator and its permissions:"
+	cat <<'COMMANDS'
+kubectl -n kube-neuron delete deployment/kubeneuron-operator serviceaccount/kubeneuron-operator role/kubeneuron-operator-leader-election rolebinding/kubeneuron-operator-leader-election --ignore-not-found
+kubectl -n default delete role/kubeneuron-operator-root-events rolebinding/kubeneuron-operator-root-events --ignore-not-found
+kubectl delete clusterrole/kubeneuron-operator clusterrolebinding/kubeneuron-operator --ignore-not-found
+COMMANDS
 	exit 0
 fi
 

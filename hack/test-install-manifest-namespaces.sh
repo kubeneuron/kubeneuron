@@ -32,3 +32,26 @@ for kind in Role RoleBinding; do
 	[[ $got == default ]] || { echo "$kind kubeneuron-operator-root-events is in '${got:-<missing>}', want default" >&2; exit 1; }
 done
 echo "install manifest namespaces: OK"
+
+# Exercise the actual uninstall output without connecting to a cluster.
+mkdir "$tmp/bin"
+printf '#!/bin/sh\nexit 0\n' >"$tmp/bin/kubectl"
+chmod +x "$tmp/bin/kubectl"
+PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall >"$tmp/uninstall.log"
+grep -Fq 'Do not delete the full install manifest if you want to keep the data' "$tmp/uninstall.log"
+if grep -Fq 'kubectl delete -f' "$tmp/uninstall.log"; then
+	echo "uninstall suggests deleting a manifest" >&2
+	exit 1
+fi
+
+yq -o=json -I=0 '.' "$tmp/manifest.yaml" |
+	jq -r 'select(.kind != "Namespace" and .kind != "CustomResourceDefinition") |
+		[(.metadata.namespace // "-"), ((.kind | ascii_downcase) + "/" + .metadata.name)] | @tsv' |
+	LC_ALL=C sort >"$tmp/operator-objects"
+awk '/^kubectl / {
+	ns = "-"; i = 2
+	if ($i == "-n") { ns = $(i+1); i += 2 }
+	if ($i != "delete" || $NF != "--ignore-not-found") exit 1
+	for (++i; i < NF; i++) print ns "\t" $i
+}' "$tmp/uninstall.log" | LC_ALL=C sort >"$tmp/hinted-objects"
+diff -u "$tmp/operator-objects" "$tmp/hinted-objects"
