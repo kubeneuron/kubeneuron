@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -131,7 +132,13 @@ func (n *Notifier) RequestApprovalWithContext(ctx context.Context, inc *types.In
 
 func (n *Notifier) eventPayload(inc *types.Incident, severity, summary string) *payload {
 	if len(summary) > 1024 { // Events v2 summary limit
-		summary = summary[:1024]
+		// Cut on a character boundary, so the summary does not end in a
+		// broken character.
+		cut := 1024
+		for cut > 0 && !utf8.RuneStart(summary[cut]) {
+			cut--
+		}
+		summary = summary[:cut]
 	}
 	return &payload{
 		Summary:  summary,

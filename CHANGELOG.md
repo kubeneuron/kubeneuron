@@ -59,6 +59,8 @@ API is `v1alpha1`.
 
 ### Fixed
 
+- PagerDuty: an alert summary that reaches the Events v2 length limit is now cut between characters, so it no longer ends in a broken character. The approve and reject commands stay complete in the alert's custom details.
+
 - Store: timestamps with different fractional-second precision were compared as text. Within the same second, a queued action could occasionally be picked before an older one, and time filters and retention cutoffs could misplace a record. Ordering and comparisons of the affected timestamps are now chronological. Existing values are rewritten to a fixed width once, when the controller first starts after the upgrade; the schema version does not change. Records of the operational audit log are not modified.
 
 - The KubeNeuron CRD now installs on Kubernetes 1.29, 1.30 and 1.31. Its validation rules for Secret references named the `namespace` field unescaped, which these versions refuse to compile, so the CRD was rejected there; the rules now write it as `__namespace__` and check the same thing.

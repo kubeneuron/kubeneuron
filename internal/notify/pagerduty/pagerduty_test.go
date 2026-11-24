@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -81,6 +82,50 @@ func TestApprovalRequestPagesCritical(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in %q", want, body)
 		}
+	}
+}
+
+func TestApprovalRequestWithoutPreviewCarriesBothCommands(t *testing.T) {
+	n, got, done := capture(t)
+	defer done()
+	if err := n.RequestApprovalWithContext(context.Background(), &types.Incident{ID: "inc-2", ApprovalEpoch: 3}, "reboot", notify.ApprovalContext{}); err != nil {
+		t.Fatal(err)
+	}
+	d := got.Payload.CustomDetails
+	if d["approve"] != "kubeneuronctl approve inc-2 --round 3" || d["reject"] != "kubeneuronctl reject inc-2 --round 3" {
+		t.Fatalf("approve = %q, reject = %q", d["approve"], d["reject"])
+	}
+	if _, ok := d["impact_digest"]; ok {
+		t.Fatalf("impact_digest without a preview: %v", d)
+	}
+}
+
+// The summary is cut at the Events v2 limit; the commands in custom details
+// are not, however long the incident ID.
+func TestApprovalCommandsSurviveTheSummaryLimit(t *testing.T) {
+	n, got, done := capture(t)
+	defer done()
+	id := "inc-" + strings.Repeat("x", 1100)
+	ac := notify.ApprovalContext{ImpactDigest: "sha256:abc", ImpactSummary: "one workload"}
+	if err := n.RequestApprovalWithContext(context.Background(), &types.Incident{ID: id, ApprovalEpoch: 3, Target: types.Target{Node: "nöde-1"}}, "reboot", ac); err != nil {
+		t.Fatal(err)
+	}
+	if s := got.Payload.Summary; len(s) > 1024 || !utf8.ValidString(s) {
+		t.Fatalf("summary is %d bytes, valid UTF-8 %v", len(s), utf8.ValidString(s))
+	}
+	d := got.Payload.CustomDetails
+	if d["approve"] != "kubeneuronctl approve "+id+" --round 3 --impact-digest sha256:abc" || d["reject"] != "kubeneuronctl reject "+id+" --round 3" {
+		t.Fatalf("commands cut: approve %d bytes, reject %d bytes", len(fmt.Sprint(d["approve"])), len(fmt.Sprint(d["reject"])))
+	}
+}
+
+// A cut that would land inside a multi-byte character backs off to its start.
+func TestSummaryIsCutOnACharacterBoundary(t *testing.T) {
+	n := New("rk")
+	summary := strings.Repeat("a", 1023) + "—tail"
+	p := n.eventPayload(&types.Incident{}, "info", summary)
+	if p.Summary != strings.Repeat("a", 1023) {
+		t.Fatalf("summary ends %q", p.Summary[len(p.Summary)-4:])
 	}
 }
 
