@@ -846,8 +846,12 @@ exercise_azure_cloud_wiring() {
       ($pods | length) > 0 and
       all($pods[]; all(.status.containerStatuses[]?; .restartCount == 0 and .state.running != null))
     ' <<<"$pods_json" >/dev/null || die "controller restarted with the Azure provider and no workload identity"
-	"$KUBECTL_BIN" -n "$TARGET_NAMESPACE" logs deployment/"${ROOT_NAME}-controller" --tail=-1 2>/dev/null |
-		grep -Fq '"provider":"azure"' || die "controller did not enable the Azure provider"
+	local deadline=$((SECONDS + TIMEOUT_SECONDS))
+	until "$KUBECTL_BIN" -n "$TARGET_NAMESPACE" logs deployment/"${ROOT_NAME}-controller" --tail=-1 2>/dev/null |
+		grep -F '"provider":"azure"' >/dev/null; do
+		((SECONDS < deadline)) || die "controller did not enable the Azure provider"
+		sleep 2
+	done
 	note "Azure provider: node-event Role granted in default only, controller up without workload identity"
 
 	"$KUBECTL_BIN" patch kubeneuron "$ROOT_NAME" --type=json -p '[{"op":"remove","path":"/spec/cloud"}]' >/dev/null
