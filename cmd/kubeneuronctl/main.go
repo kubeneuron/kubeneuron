@@ -6,6 +6,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"io"
 	"net/http"
 	"net/url"
@@ -338,6 +339,8 @@ func cmdIncidents() *cobra.Command {
 			Evidence                  *types.IncidentEvidence      `json:"evidence"`
 			NodeConditions            *types.NodeConditionSnapshot `json:"node_conditions"`
 			NodeConditionsUnavailable string                       `json:"node_conditions_unavailable"`
+			ApprovalStep              string                       `json:"approval_step"`
+			ApprovalDeadline          time.Time                    `json:"approval_deadline"`
 			ImpactPreviewDigest       string                       `json:"impact_preview_digest"`
 			ImpactPreviewUnavailable  string                       `json:"impact_preview_unavailable"`
 			AffectedJobs              []types.AffectedJob          `json:"affected_jobs"`
@@ -381,6 +384,17 @@ func cmdIncidents() *cobra.Command {
 				hint = "approve and reject; impact preview is off — set spec.safety.impactPreview.enabled to see what this step affects"
 			}
 			_, _ = fmt.Fprintf(out, "approval:  round %d (use --round %d with %s)\n", inc.ApprovalEpoch, inc.ApprovalEpoch, hint)
+			if detail.ApprovalStep != "" {
+				ac := notify.ApprovalContext{Deadline: detail.ApprovalDeadline}
+				fmt.Fprintln(out, ac.Guidance(detail.ApprovalStep))
+			}
+			digest := detail.ImpactPreviewDigest
+			if detail.ImpactPreviewUnavailable != "" {
+				digest = ""
+			}
+			approve, reject := notify.ApprovalCommands(inc.ID, inc.ApprovalEpoch, digest)
+			fmt.Fprintln(out, approve)
+			fmt.Fprintln(out, reject)
 		}
 		// The current reason recovery is held comes first, before the evidence.
 		recovery := detail.RecoveryAvailability
@@ -579,6 +593,12 @@ func decisionCommand(use, short, route string, withRound bool) *cobra.Command {
 			return err
 		}
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", strings.TrimPrefix(route, "/"), args[0])
+		switch route {
+		case "/approve":
+			fmt.Fprintln(cmd.OutOrStdout(), "Approval recorded. The controller will check the step again before it runs it.")
+		case "/reject":
+			fmt.Fprintln(cmd.OutOrStdout(), "Rejection recorded. The controller will stop this repair and hand the incident to the operator.")
+		}
 		return nil
 	}}
 	c.Flags().String("actor", "", "audited actor (default: $USER)")

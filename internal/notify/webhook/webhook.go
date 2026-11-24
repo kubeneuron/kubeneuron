@@ -69,17 +69,7 @@ func (n *Notifier) Notify(ctx context.Context, ev notify.NotifyEvent) error {
 
 // RequestApproval implements notify.Notifier.
 func (n *Notifier) RequestApproval(ctx context.Context, inc *types.Incident, stepName string) error {
-	if inc == nil {
-		return fmt.Errorf("webhook: approval request for step %q carries no incident", stepName)
-	}
-	// The incident payload carries approval_epoch; the hint repeats it as
-	// --round so a receiver that only forwards the message text still hands
-	// the human a round-pinned command.
-	return n.post(ctx, Payload{
-		Version: 1, Kind: "approval_required", Step: stepName,
-		Message:  fmt.Sprintf("approve with: kubeneuronctl approve %s --round %d", inc.ID, inc.ApprovalEpoch),
-		Incident: inc,
-	})
+	return n.RequestApprovalWithContext(ctx, inc, stepName, notify.ApprovalContext{})
 }
 
 var _ notify.ContextualNotifier = (*Notifier)(nil)
@@ -89,9 +79,10 @@ func (n *Notifier) RequestApprovalWithContext(ctx context.Context, inc *types.In
 	if inc == nil {
 		return fmt.Errorf("webhook: approval request for step %q carries no incident", stepName)
 	}
+	approve, reject := notify.ApprovalCommands(inc.ID, inc.ApprovalEpoch, ac.ImpactDigest)
 	payload := Payload{
 		Version: 1, Kind: "approval_required", Step: stepName,
-		Message:  notify.ApproveHint(inc, ac),
+		Message:  "approve with: " + approve + "\nreject with: " + reject + "\n" + ac.Guidance(stepName),
 		Incident: inc,
 	}
 	if ac.ImpactSummary != "" {

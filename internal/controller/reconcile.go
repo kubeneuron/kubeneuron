@@ -610,7 +610,9 @@ func (c *Controller) parkForApproval(ctx context.Context, inc *types.Incident, s
 		c.adviseCheckpoint(ctx, inc)
 	}()
 	preview := c.previewImpact(ctx, inc, "computed at park")
-	err := notify.RequestApprovalWithContext(ctx, c.notifier, inc, step.Name, approvalContext(preview))
+	ac := approvalContext(preview)
+	ac.Deadline = inc.StateChangedAt.Add(c.runtimeConfig(ctx).ApprovalTTL)
+	err := notify.RequestApprovalWithContext(ctx, c.notifier, inc, step.Name, ac)
 	advised.Wait()
 	return err
 }

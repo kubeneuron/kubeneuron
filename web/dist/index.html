@@ -424,7 +424,7 @@ async function api(path, method, body, extraHeaders){
   if(body){ opts.headers["Content-Type"]="application/json"; opts.body = JSON.stringify(body); }
   const resp = await fetch(path, opts);
   if(resp.status === 401){ showLogin(); throw new Error("unauthorized"); }
-  if(!resp.ok){ const err = new Error((await resp.text()).trim() || String(resp.status)); err.status = resp.status; throw err; }
+  if(!resp.ok){ const err = new Error((await resp.text()).trim() || String(resp.status)); err.status = resp.status; err.approvalConflict = resp.headers.get("X-Approval-Conflict"); err.decision = resp.headers.get("X-Approval-Decision"); throw err; }
   if(resp.status === 204) return null;
   return resp.json();
 }
@@ -522,7 +522,11 @@ async function decide(id, verb, round){
     toast(`${verb} recorded for ${id.slice(0,34)}…`, verb === "reject" ? "bad" : "good");
     await tick();
   } catch(e){
-    if(e.status === 409){
+    if(e.status === 409 && e.approvalConflict === "already-decided"){
+      toast(`This request was already decided: ${e.decision}. The first decision is final. Reload the incident to see its current state.`, "bad");
+      return;
+    }
+    if(e.status === 409 && e.approvalConflict === "request-changed"){
       dropImpactSeen(id);
       impactNotice = {id, verb, text: e.message};
       if(openIncident === id) await renderDrawer(); else await openDrawer(id);
@@ -579,7 +583,7 @@ function rowActions(inc){
   if(inc.state === "AWAITING_APPROVAL"){
     const round = inc.approval_epoch || 0;
     out += `<button class="btn good" onclick="event.stopPropagation();decide('${esc(inc.id)}','approve',${round})">Approve</button>
-      <button class="btn danger" onclick="event.stopPropagation();decide('${esc(inc.id)}','reject',${round})">Reject</button> `;
+      <button class="btn danger" onclick="event.stopPropagation();decide('${esc(inc.id)}','reject',${round})">Reject</button> <span class="small">Clicking records your decision immediately. Reject stops this repair; the incident then waits for the operator.</span> `;
   }
   if(ACTIVE(inc.state))
     out += `<button class="btn" onclick="event.stopPropagation();acknowledgeIncident('${esc(inc.id)}',${Number(inc.resource_version)||0})">Acknowledge</button> <button class="btn" onclick="event.stopPropagation();resolveIncident('${esc(inc.id)}',${Number(inc.resource_version)||0})">Resolve</button>`;

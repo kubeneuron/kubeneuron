@@ -46,6 +46,15 @@ func (c *Controller) IncidentDetail(ctx context.Context, id string) (*types.Inci
 	return inc, trail, nil
 }
 
+// PendingApproval reads the durable request that identifies this round.
+func (c *Controller) PendingApproval(ctx context.Context, inc *types.Incident) (string, time.Time, error) {
+	req, err := c.store.GetApprovalRequest(ctx, inc.ID, inc.ApprovalEpoch)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return req.StepName, inc.StateChangedAt.Add(c.runtimeConfig(ctx).ApprovalTTL), nil
+}
+
 // RoundDecision returns the human decision recorded on one approval round
 // (0 = the incident's current round), or store.ErrNotFound when the round
 // has none yet. It is what the incident detail shows beside the preview
@@ -98,8 +107,8 @@ func (c *Controller) DecideApproval(ctx context.Context, id, actor, channel stri
 	// carry a round (older CLI, raw curl) and keeps the bind-to-current
 	// behavior, which the resume-time requestMismatch still guards.
 	if expectedEpoch > 0 && expectedEpoch != inc.ApprovalEpoch {
-		return fmt.Errorf("the approval request for %s changed since it was displayed (you decided round %d; round %d is current) — re-read the incident and decide again",
-			id, expectedEpoch, inc.ApprovalEpoch)
+		return approval.RequestChanged(fmt.Errorf("the approval request for %s changed since it was displayed (you decided round %d; round %d is current) — re-read the incident and decide again",
+			id, expectedEpoch, inc.ApprovalEpoch))
 	}
 	request, err := c.store.GetApprovalRequest(ctx, id, inc.ApprovalEpoch)
 	if err != nil {

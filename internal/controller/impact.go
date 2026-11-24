@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/kubeneuron/kubeneuron/internal/approval"
 	"sort"
 	"strings"
 	"time"
@@ -456,7 +457,7 @@ func (c *Controller) bindImpactDigest(ctx context.Context, inc *types.Incident, 
 	}
 	if current == nil || current.Digest != sent {
 		if decision == types.ApprovalApproved {
-			return "", "", ErrImpactDigestMismatch
+			return "", "", approval.RequestChanged(ErrImpactDigestMismatch)
 		}
 		return "", "round", nil // a reject with a stale digest is still a reject
 	}

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/internal/notify"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -56,13 +57,15 @@ func TestNotifyPostsFormattedMessage(t *testing.T) {
 
 func TestRequestApprovalIncludesDecisionCommands(t *testing.T) {
 	n, texts := capture(t, http.StatusOK)
-	if err := n.RequestApproval(context.Background(), incident(), "reboot"); err != nil {
+	ac := notify.ApprovalContext{Deadline: time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC), ImpactDigest: "sha256:abc", ImpactSummary: "one workload"}
+	if err := n.RequestApprovalWithContext(context.Background(), &types.Incident{ID: "inc-2", ApprovalEpoch: 3}, "reboot", ac); err != nil {
 		t.Fatal(err)
 	}
-	got := (*texts)[0]
-	if !strings.Contains(got, "kubeneuronctl approve ecc-dbe-n1-abcd") ||
-		!strings.Contains(got, "kubeneuronctl reject ecc-dbe-n1-abcd") {
-		t.Fatalf("approval message %q missing decision commands", got)
+	body := (*texts)[0]
+	for _, want := range []string{"kubeneuronctl approve inc-2 --round 3 --impact-digest sha256:abc", "kubeneuronctl reject inc-2 --round 3", "Step reboot does not run until someone approves it. Without a decision by 2026-11-24 12:00:00 UTC, the step will not run. Reject stops this repair; the incident then waits for the operator."} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in %q", want, body)
+		}
 	}
 }
 

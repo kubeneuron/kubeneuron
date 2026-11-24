@@ -15,6 +15,22 @@ import (
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
 
+// ChangedRequest marks a decision bound to an outdated round or impact preview.
+type ChangedRequest struct{ error }
+
+func RequestChanged(err error) error   { return ChangedRequest{err} }
+func (e ChangedRequest) Unwrap() error { return e.error }
+
+type AlreadyDecided struct {
+	IncidentID string
+	Round      int
+	Prior      *types.Approval
+}
+
+func (e AlreadyDecided) Error() string {
+	return fmt.Sprintf("approval round %d of %s is already decided (%s by %s); the first decision is final", e.Round, e.IncidentID, e.Prior.Decision, e.Prior.Actor)
+}
+
 // Manager records approval decisions and expires stale requests. The
 // controller consults it before resuming an AWAITING_APPROVAL incident.
 type Manager struct {
@@ -67,8 +83,7 @@ func (m *Manager) Decide(ctx context.Context, incidentID string, step StepIdenti
 	prior, err := m.store.FirstApprovalDecision(ctx, incidentID, step.ParkEpoch)
 	switch {
 	case err == nil:
-		return fmt.Errorf("approval round %d of %s is already decided (%s by %s); the first decision is final",
-			step.ParkEpoch, incidentID, prior.Decision, prior.Actor)
+		return AlreadyDecided{incidentID, step.ParkEpoch, prior}
 	case !errors.Is(err, store.ErrNotFound):
 		return err
 	}

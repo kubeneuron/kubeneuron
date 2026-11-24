@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/kubeneuron/kubeneuron/pkg/types"
 )
@@ -46,6 +47,7 @@ type Notifier interface {
 // it came from, so the human's command can bind to what they were shown.
 // Zero values mean "no preview".
 type ApprovalContext struct {
+	Deadline      time.Time
 	ImpactSummary string
 	ImpactDigest  string
 }
@@ -102,18 +104,7 @@ func (l *Log) Notify(ctx context.Context, ev NotifyEvent) error {
 
 // RequestApproval implements Notifier.
 func (l *Log) RequestApproval(ctx context.Context, inc *types.Incident, stepName string) error {
-	if inc == nil {
-		return fmt.Errorf("log: approval request for step %q carries no incident", stepName)
-	}
-	l.Logger.Warn("approval required",
-		"incident", inc.ID,
-		"node", inc.Target.Node,
-		"class", inc.Class,
-		"step", stepName,
-		"round", inc.ApprovalEpoch,
-		"hint", fmt.Sprintf("approve with: kubeneuronctl approve %s --round %d", inc.ID, inc.ApprovalEpoch),
-	)
-	return nil
+	return l.RequestApprovalWithContext(ctx, inc, stepName, ApprovalContext{})
 }
 
 // RequestApprovalWithContext implements ContextualNotifier: the summary is
@@ -122,9 +113,7 @@ func (l *Log) RequestApprovalWithContext(ctx context.Context, inc *types.Inciden
 	if inc == nil {
 		return fmt.Errorf("log: approval request for step %q carries no incident", stepName)
 	}
-	if ac.ImpactSummary == "" {
-		return l.RequestApproval(ctx, inc, stepName)
-	}
+	approve, reject := ApprovalCommands(inc.ID, inc.ApprovalEpoch, ac.ImpactDigest)
 	l.Logger.Warn("approval required",
 		"incident", inc.ID,
 		"node", inc.Target.Node,
@@ -133,22 +122,31 @@ func (l *Log) RequestApprovalWithContext(ctx context.Context, inc *types.Inciden
 		"round", inc.ApprovalEpoch,
 		"impact", ac.ImpactSummary,
 		"impact_digest", ac.ImpactDigest,
-		"hint", ApproveHint(inc, ac),
+		"hint", approve, "reject", reject, "guidance", ac.Guidance(stepName),
 	)
 	return nil
 }
 
-// ApproveHint is the command a notification suggests: the approve pinned to
-// the round it displayed and, when the notification carried a preview, to
-// that preview's digest — so the suggested command approves exactly what
-// was shown, and a preview recomputed in between is refused (409), not
-// silently approved.
-func ApproveHint(inc *types.Incident, ac ApprovalContext) string {
-	hint := fmt.Sprintf("approve with: kubeneuronctl approve %s --round %d", inc.ID, inc.ApprovalEpoch)
-	if ac.ImpactDigest != "" {
-		hint += " --impact-digest " + ac.ImpactDigest
+// ApprovalCommands pins both decisions to the displayed round.
+func ApprovalCommands(id string, round int, digest string) (approve, reject string) {
+	approve = fmt.Sprintf("kubeneuronctl approve %s --round %d", id, round)
+	if digest != "" {
+		approve += " --impact-digest " + digest
 	}
-	return hint
+	return approve, fmt.Sprintf("kubeneuronctl reject %s --round %d", id, round)
+}
+
+func (ac ApprovalContext) Guidance(step string) string {
+	msg := "Step " + step + " does not run until someone approves it."
+	if !ac.Deadline.IsZero() {
+		msg += " Without a decision by " + ac.Deadline.UTC().Format("2006-01-02 15:04:05 UTC") + ", the step will not run."
+	}
+	return msg + " Reject stops this repair; the incident then waits for the operator."
+}
+
+func ApproveHint(inc *types.Incident, ac ApprovalContext) string {
+	approve, _ := ApprovalCommands(inc.ID, inc.ApprovalEpoch, ac.ImpactDigest)
+	return "approve with: " + approve
 }
 
 // Multi fans out to several notifiers, returning the first error.

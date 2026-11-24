@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/kubeneuron/kubeneuron/internal/approval"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,10 +18,11 @@ import (
 
 // fakeOperator records operator-API calls.
 type fakeOperator struct {
-	incidents []*types.Incident
-	decisions []string
-	resolved  []string
-	paused    bool
+	decisionErr error
+	incidents   []*types.Incident
+	decisions   []string
+	resolved    []string
+	paused      bool
 }
 
 type acceleratorReportOperator struct {
@@ -55,7 +57,7 @@ func (f *fakeOperator) DecideApproval(_ context.Context, id, actor, channel stri
 		entry += ":" + impactDigest
 	}
 	f.decisions = append(f.decisions, entry)
-	return nil
+	return f.decisionErr
 }
 
 func (f *fakeOperator) ResolveIncident(_ context.Context, id, actor, reason string) error {
@@ -555,6 +557,23 @@ func TestVersionRequiresAuthenticatedLeader(t *testing.T) {
 		s.Routes().ServeHTTP(rec, operatorRequest("GET", "/api/v1/version", tc.token, ""))
 		if rec.Code != tc.code || (tc.code == 200 && strings.TrimSpace(rec.Body.String()) != `{"version":"test-build"}`) {
 			t.Fatalf("version: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestApprovalConflictHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		err            error
+		kind, decision string
+	}{
+		{approval.AlreadyDecided{IncidentID: "inc", Round: 2, Prior: &types.Approval{Decision: types.ApprovalRejected}}, "already-decided", "rejected"},
+		{approval.RequestChanged(fmt.Errorf("different round")), "request-changed", ""},
+		{fmt.Errorf("expired"), "", ""},
+	} {
+		rec := httptest.NewRecorder()
+		operatorServer(&fakeOperator{decisionErr: tc.err}, "secret").ServeHTTP(rec, operatorRequest("POST", "/api/v1/incidents/inc/approve", "secret", `{"actor":"test"}`))
+		if rec.Code != 409 || rec.Header().Get("X-Approval-Conflict") != tc.kind || rec.Header().Get("X-Approval-Decision") != tc.decision || strings.TrimSpace(rec.Body.String()) != tc.err.Error() {
+			t.Fatalf("unexpected conflict: %d %v %s", rec.Code, rec.Header(), rec.Body)
 		}
 	}
 }

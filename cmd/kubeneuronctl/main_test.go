@@ -74,7 +74,7 @@ func TestIncidentsListAndApprove(t *testing.T) {
 	if approved.Actor != "alice" {
 		t.Fatalf("approved actor = %q", approved.Actor)
 	}
-	if out != "approve: ecc-dbe-n1-abc\n" {
+	if out != "approve: ecc-dbe-n1-abc\nApproval recorded. The controller will check the step again before it runs it.\n" {
 		t.Fatalf("approve output = %q", out)
 	}
 }
@@ -162,6 +162,8 @@ func TestIncidentShowApprovalRound(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				body := map[string]any{"incident": types.Incident{ID: "parked", State: tc.state, ApprovalEpoch: 3}}
+				body["approval_step"] = "drain"
+				body["approval_deadline"] = "2026-11-23T19:13:00Z"
 				for k, v := range tc.preview {
 					body[k] = v
 				}
@@ -176,6 +178,11 @@ func TestIncidentShowApprovalRound(t *testing.T) {
 			for _, line := range strings.SplitAfter(out, "\n") {
 				if strings.HasPrefix(line, "approval:") {
 					got = line
+				}
+			}
+			for _, phrase := range []string{"Step drain does not run", "2026-11-23 19:13:00 UTC", "kubeneuronctl approve parked --round 3", "kubeneuronctl reject parked --round 3"} {
+				if strings.Contains(out, phrase) != (tc.state == types.StateAwaitingApproval) {
+					t.Fatalf("unexpected presence of %q in %s", phrase, out)
 				}
 			}
 			if got != tc.want {

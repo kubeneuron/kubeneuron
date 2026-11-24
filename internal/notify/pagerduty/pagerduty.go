@@ -90,14 +90,7 @@ func (n *Notifier) Notify(ctx context.Context, ev notify.NotifyEvent) error {
 // RequestApproval implements notify.Notifier. An approval request pages:
 // automation is deliberately stopped until a human decides.
 func (n *Notifier) RequestApproval(ctx context.Context, inc *types.Incident, stepName string) error {
-	if inc == nil {
-		return fmt.Errorf("pagerduty: approval request for step %q carries no incident", stepName)
-	}
-	return n.post(ctx, event{
-		RoutingKey: n.RoutingKey, EventAction: "trigger", DedupKey: inc.ID,
-		Payload: n.eventPayload(inc, "critical",
-			fmt.Sprintf("KubeNeuron approval required: step %s on %s — kubeneuronctl approve %s --round %d", stepName, inc.Target.Node, inc.ID, inc.ApprovalEpoch)),
-	})
+	return n.RequestApprovalWithContext(ctx, inc, stepName, notify.ApprovalContext{})
 }
 
 var _ notify.ContextualNotifier = (*Notifier)(nil)
@@ -109,8 +102,12 @@ func (n *Notifier) RequestApprovalWithContext(ctx context.Context, inc *types.In
 	if inc == nil {
 		return fmt.Errorf("pagerduty: approval request for step %q carries no incident", stepName)
 	}
+	approve, reject := notify.ApprovalCommands(inc.ID, inc.ApprovalEpoch, ac.ImpactDigest)
 	p := n.eventPayload(inc, "critical",
-		fmt.Sprintf("KubeNeuron approval required: step %s on %s — kubeneuronctl approve %s --round %d", stepName, inc.Target.Node, inc.ID, inc.ApprovalEpoch))
+		fmt.Sprintf("KubeNeuron approval required: step %s on %s — %s", stepName, inc.Target.Node, approve))
+	p.CustomDetails["approve"] = approve
+	p.CustomDetails["reject"] = reject
+	p.CustomDetails["guidance"] = ac.Guidance(stepName)
 	if ac.ImpactSummary != "" {
 		p.CustomDetails["impact"] = ac.ImpactSummary
 		p.CustomDetails["impact_digest"] = ac.ImpactDigest

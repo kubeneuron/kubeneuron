@@ -77,7 +77,7 @@ requests page at `critical`; lifecycle updates re-trigger at
 The generic webhook receives `POST` JSON
 `{"version":1,"kind":"<event|approval_required>","step?","message?","incident":{...}}`
 with an optional `Authorization: Bearer` header from the Secret's `token`
-key. Consumers must ignore unknown fields.
+key. For an approval request, the message includes the approve and reject commands for its round, the decision deadline when available, and the effect of rejecting the step. When the notification includes an impact digest, the approve command carries it. Consumers must ignore unknown fields.
 
 ## Pausing automation
 

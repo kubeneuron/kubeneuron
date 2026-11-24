@@ -62,15 +62,7 @@ func (n *Notifier) Notify(ctx context.Context, ev notify.NotifyEvent) error {
 
 // RequestApproval implements notify.Notifier.
 func (n *Notifier) RequestApproval(ctx context.Context, inc *types.Incident, stepName string) error {
-	if inc == nil {
-		return fmt.Errorf("slack: approval request for step %q carries no incident", stepName)
-	}
-	// The suggested commands carry --round so the decision is refused if a
-	// re-park mints a newer round between this message and the human's click.
-	text := fmt.Sprintf(
-		":raised_hand: KubeNeuron approval required: `%s` (round %d)\n*node:* %s   *class:* %s   *step:* %s\nDecide with:\n```kubeneuronctl approve %s --round %d\nkubeneuronctl reject %s --round %d```",
-		inc.ID, inc.ApprovalEpoch, inc.Target.Node, inc.Class, stepName, inc.ID, inc.ApprovalEpoch, inc.ID, inc.ApprovalEpoch)
-	return n.post(ctx, text)
+	return n.RequestApprovalWithContext(ctx, inc, stepName, notify.ApprovalContext{})
 }
 
 var _ notify.ContextualNotifier = (*Notifier)(nil)
@@ -81,18 +73,12 @@ func (n *Notifier) RequestApprovalWithContext(ctx context.Context, inc *types.In
 	if inc == nil {
 		return fmt.Errorf("slack: approval request for step %q carries no incident", stepName)
 	}
-	if ac.ImpactSummary == "" {
-		return n.RequestApproval(ctx, inc, stepName)
+	approve, reject := notify.ApprovalCommands(inc.ID, inc.ApprovalEpoch, ac.ImpactDigest)
+	text := fmt.Sprintf(":raised_hand: KubeNeuron approval required: `%s` (round %d)\n*node:* %s   *class:* %s   *step:* %s", inc.ID, inc.ApprovalEpoch, inc.Target.Node, inc.Class, stepName)
+	if ac.ImpactSummary != "" {
+		text += "\n" + ac.ImpactSummary
 	}
-	// The approve carries the preview digest this message shows, so running
-	// it approves exactly this preview; a recompute in between is refused.
-	approve := fmt.Sprintf("kubeneuronctl approve %s --round %d", inc.ID, inc.ApprovalEpoch)
-	if ac.ImpactDigest != "" {
-		approve += " --impact-digest " + ac.ImpactDigest
-	}
-	text := fmt.Sprintf(
-		":raised_hand: KubeNeuron approval required: `%s` (round %d)\n*node:* %s   *class:* %s   *step:* %s\n%s\nDecide with:\n```%s\nkubeneuronctl reject %s --round %d```",
-		inc.ID, inc.ApprovalEpoch, inc.Target.Node, inc.Class, stepName, ac.ImpactSummary, approve, inc.ID, inc.ApprovalEpoch)
+	text += "\n" + ac.Guidance(stepName) + "\nDecide with:\n```" + approve + "\n" + reject + "```"
 	return n.post(ctx, text)
 }
 

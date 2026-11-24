@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/kubeneuron/kubeneuron/internal/approval"
 	"io"
 	"log/slog"
 	"net/http"
@@ -554,6 +555,8 @@ func (s *Server) handleListIncidents(w http.ResponseWriter, r *http.Request) {
 // was not bound to a preview): the two digests agree only when the human
 // decided on the preview that is still current.
 type IncidentDetail struct {
+	ApprovalStep     string     `json:"approval_step,omitempty"`
+	ApprovalDeadline *time.Time `json:"approval_deadline,omitempty"`
 	// Evidence is the latest evidence block recorded for the incident: fault
 	// location, vendor software and network resource. Absent when none was
 	// recorded; every row in it that could not be read says unknown.
@@ -654,6 +657,15 @@ func (s *Server) handleIncidentDetail(w http.ResponseWriter, r *http.Request) {
 		if preview, err := backend.ImpactPreview(r.Context(), inc.ID, inc.ApprovalEpoch); err == nil && preview != nil {
 			detail.ImpactPreviewDigest = preview.Digest
 			detail.ImpactPreviewUnavailable = preview.UnavailableReason
+		}
+	}
+	if inc.State == types.StateAwaitingApproval && inc.ApprovalEpoch > 0 {
+		if reader, ok := s.operator.(interface {
+			PendingApproval(context.Context, *types.Incident) (string, time.Time, error)
+		}); ok {
+			if step, deadline, err := reader.PendingApproval(r.Context(), inc); err == nil {
+				detail.ApprovalStep, detail.ApprovalDeadline = step, &deadline
+			}
 		}
 	}
 	if backend, ok := s.operator.(RoundDecisionBackend); ok && inc.ApprovalEpoch > 0 {
@@ -825,6 +837,15 @@ func (s *Server) handleDecision(decision types.ApprovalDecision) http.HandlerFun
 			return
 		}
 		if err := s.operator.DecideApproval(r.Context(), r.PathValue("id"), actor, "api", decision, req.ParkEpoch, req.Reason, req.ImpactDigest); err != nil {
+			var decided approval.AlreadyDecided
+			var changed approval.ChangedRequest
+			switch {
+			case errors.As(err, &decided):
+				w.Header().Set("X-Approval-Conflict", "already-decided")
+				w.Header().Set("X-Approval-Decision", string(decided.Prior.Decision))
+			case errors.As(err, &changed):
+				w.Header().Set("X-Approval-Conflict", "request-changed")
+			}
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
