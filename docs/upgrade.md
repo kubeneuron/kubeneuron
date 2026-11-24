@@ -119,7 +119,13 @@ Always: **CRDs → operator → controller/agent images.**
    turns Ready only after a fresh durable registration acknowledgment from
    the new controller.
 
-3. **Verify**: root `Ready=True`, controller `/metrics` serving, agent
+3. **Verify the upgrade.** After the upgrade, repeat `kubeneuronctl status`
+   until its first line reads `controller: <version>` with the release you just
+   installed. If you roll back to a release that does not report its version,
+   the expected first line from this release's `kubeneuronctl` is
+   `controller: version not reported (this controller is from a release that does not report it)`.
+
+   Also verify: root `Ready=True`, controller `/metrics` serving, agent
    DaemonSets fully available, and a synthetic signal walks to an incident
    (see [quickstart](quickstart.md) step 5). With node-level actions disabled, check the kernel-log source in `kubeneuronctl health` after rollout. See [Kernel log from the node's journal](install.md#kernel-log-from-the-nodes-journal) for the unprivileged agent's read-only mount and fault coverage.
 

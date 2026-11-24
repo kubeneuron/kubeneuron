@@ -652,6 +652,10 @@ leader-owned `GPUNodeConfig` pause set before its first reconcile pass.
 Standbys reload local policies and playbooks but never write the shared pause
 set.
 
+Connect to the controller API through its Kubernetes Service, not to a Pod
+directly. Only the elected leader is Ready, and a standby Pod answers most
+requests with HTTP 503.
+
 KubeNeuron does **not** deploy or manage PostgreSQL. Use your platform's
 operator (CloudNativePG, RDS, …) and own its HA, backups, and PITR there:
 
