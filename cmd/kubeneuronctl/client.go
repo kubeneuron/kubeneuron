@@ -20,9 +20,10 @@ import (
 
 // client is a thin authenticated JSON client for the controller API.
 type client struct {
-	base  string
-	token string
-	http  *http.Client
+	base    string
+	token   string
+	command string
+	http    *http.Client
 }
 
 // newClient resolves the server and token from flags/environment. Token
@@ -59,9 +60,10 @@ func newClient(cmd *cobra.Command) (*client, error) {
 		httpClient.Transport = transport
 	}
 	return &client{
-		base:  strings.TrimRight(base, "/"),
-		token: strings.TrimSpace(token),
-		http:  httpClient,
+		base:    strings.TrimRight(base, "/"),
+		token:   strings.TrimSpace(token),
+		command: cmd.CommandPath(),
+		http:    httpClient,
 	}, nil
 }
 
@@ -121,21 +123,27 @@ func (c *client) doHeaders(method, path string, in, out any, headers map[string]
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return err
+		return explainTransport(c.base, c.command, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
-		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		msg := strings.TrimSpace(string(detail))
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusServiceUnavailable {
-			msg += " (set --token-file or KUBENEURONCTL_TOKEN; the controller needs -api-token-file)"
-		}
-		return &responseError{resp.StatusCode, fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, msg)}
+		return c.responseFailure(method, path, resp)
 	}
 	if out == nil {
 		return nil
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(out)
+}
+
+// responseFailure reads an error response. A status the person can act on is
+// explained; any other keeps the method, path, status and body.
+func (c *client) responseFailure(method, path string, resp *http.Response) error {
+	detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	body := string(detail)
+	if explained := explainResponse(resp, body, c.command, c.token != ""); explained != nil {
+		return &responseError{resp.StatusCode, explained}
+	}
+	return &responseError{resp.StatusCode, fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(body))}
 }
 
 func (c *client) doBytes(method, path string, payload []byte, contentType string, out any, headers map[string]string) error {
@@ -154,12 +162,11 @@ func (c *client) doBytes(method, path string, payload []byte, contentType string
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return err
+		return explainTransport(c.base, c.command, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
-		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(detail)))
+		return c.responseFailure(method, path, resp)
 	}
 	if out == nil {
 		return nil

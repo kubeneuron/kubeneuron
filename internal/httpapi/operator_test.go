@@ -104,6 +104,9 @@ func TestOperatorAPIFailsClosedWithoutToken(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("disabled API status = %d, want 503", rec.Code)
 	}
+	if got := rec.Header().Get(UnavailableHeader); got != UnavailableOperatorAPIDisabled {
+		t.Fatalf("disabled API %s = %q, want %q", UnavailableHeader, got, UnavailableOperatorAPIDisabled)
+	}
 
 	// Token configured but caller presents a wrong one.
 	handler := operatorServer(&fakeOperator{}, "secret")
@@ -237,6 +240,14 @@ func TestOperatorMutationIsRejectedOnStandby(t *testing.T) {
 	s.Routes().ServeHTTP(rec, operatorRequest("POST", "/api/v1/pause", "secret", `{"actor":"alice"}`))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("standby pause status = %d, want 503", rec.Code)
+	}
+	if got := rec.Header().Get(UnavailableHeader); got != UnavailableStandby {
+		t.Fatalf("standby pause %s = %q, want %q", UnavailableHeader, got, UnavailableStandby)
+	}
+	rec = httptest.NewRecorder()
+	s.Routes().ServeHTTP(rec, operatorRequest("GET", "/api/v1/version", "secret", ""))
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get(UnavailableHeader) != UnavailableStandby {
+		t.Fatalf("standby version = %d %s=%q, want 503 %s", rec.Code, UnavailableHeader, rec.Header().Get(UnavailableHeader), UnavailableStandby)
 	}
 	if op.paused {
 		t.Fatal("a standby must not mutate its private pause state")

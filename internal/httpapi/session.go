@@ -137,7 +137,7 @@ func (s *Server) sessionIdentity(r *http.Request) (OperatorIdentity, bool) {
 // handleLogin signs a human in with username/password from the users Secret.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if s.operator == nil || s.operatorToken == "" {
-		http.Error(w, "operator API disabled: no API token configured", http.StatusServiceUnavailable)
+		writeOperatorAPIDisabled(w)
 		return
 	}
 	if !s.BasicAuthEnabled() {
@@ -184,7 +184,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.authLimiter.record(source)
 		metrics.AuthFailures.WithLabelValues("operator").Inc()
 		if s.authLimiter.blocked(source) {
-			http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
+			http.Error(w, TooManyFailedAuthentications, http.StatusTooManyRequests)
 			return
 		}
 		http.Error(w, "invalid username or password", http.StatusUnauthorized)

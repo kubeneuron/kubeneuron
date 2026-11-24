@@ -195,10 +195,33 @@ func (s *Server) SetReadyCheck(ready func() bool) { s.leaderCheck = ready }
 
 func (s *Server) isLeader() bool { return s.leaderCheck == nil || s.leaderCheck() }
 
+// UnavailableHeader names why a 503 was returned when a client can act on the
+// reason: UnavailableStandby (this Pod is not the elected leader) or
+// UnavailableOperatorAPIDisabled (no operator API token is configured).
+const (
+	UnavailableHeader              = "KubeNeuron-Unavailable"
+	UnavailableStandby             = "standby"
+	UnavailableOperatorAPIDisabled = "operator-api-disabled"
+)
+
+// TooManyFailedAuthentications is the 429 body after repeated failed sign-ins
+// from one address; kubeneuronctl recognises it to explain the wait.
+const TooManyFailedAuthentications = "too many failed authentication attempts"
+
+func writeStandby(w http.ResponseWriter) {
+	w.Header().Set(UnavailableHeader, UnavailableStandby)
+	http.Error(w, "standby: not the elected leader", http.StatusServiceUnavailable)
+}
+
+func writeOperatorAPIDisabled(w http.ResponseWriter) {
+	w.Header().Set(UnavailableHeader, UnavailableOperatorAPIDisabled)
+	http.Error(w, "operator API disabled: no API token configured", http.StatusServiceUnavailable)
+}
+
 func (s *Server) requireLeader(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.isLeader() {
-			http.Error(w, "standby: not the elected leader", http.StatusServiceUnavailable)
+			writeStandby(w)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -355,7 +378,7 @@ func (s *Server) Routes() http.Handler {
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
 		if !s.isLeader() {
-			http.Error(w, "standby: not the elected leader", http.StatusServiceUnavailable)
+			writeStandby(w)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -530,7 +553,7 @@ func (s *Server) authorizeWebhook(w http.ResponseWriter, r *http.Request) bool {
 		if !bearerMatches(r, token) {
 			source := remoteSource(r)
 			if s.authLimiter.blocked(source) {
-				http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
+				http.Error(w, TooManyFailedAuthentications, http.StatusTooManyRequests)
 				return false
 			}
 			s.authLimiter.record(source)

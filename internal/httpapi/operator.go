@@ -213,7 +213,7 @@ func (s *Server) requireOperator(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) requireOperatorMutation(next http.HandlerFunc) http.HandlerFunc {
 	return s.requireOperatorVerb("update", func(w http.ResponseWriter, r *http.Request) {
 		if !s.isLeader() {
-			http.Error(w, "standby: not the elected leader", http.StatusServiceUnavailable)
+			writeStandby(w)
 			return
 		}
 		next(w, r)
@@ -249,7 +249,7 @@ func (s *Server) requireOperationalMutation(operation string, limit int, next ht
 func (s *Server) requireOperatorVerb(verb string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.operator == nil || s.operatorToken == "" {
-			http.Error(w, "operator API disabled: no API token configured", http.StatusServiceUnavailable)
+			writeOperatorAPIDisabled(w)
 			return
 		}
 		source := remoteSource(r)
@@ -305,7 +305,7 @@ func (s *Server) requireOperatorVerb(verb string, next http.HandlerFunc) http.Ha
 			}
 			if s.authLimiter.blocked(source) && s.negativeAuth.seen(credKey) {
 				metrics.AuthFailures.WithLabelValues("operator").Inc()
-				http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
+				http.Error(w, TooManyFailedAuthentications, http.StatusTooManyRequests)
 				return
 			}
 			// Bounded, like the agent path. Without it a wedged apiserver holds
@@ -328,7 +328,7 @@ func (s *Server) requireOperatorVerb(verb string, next http.HandlerFunc) http.Ha
 					slog.Warn("operator authentication failed", "remote", source, "status", status)
 				}
 				if s.authLimiter.blocked(source) {
-					http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
+					http.Error(w, TooManyFailedAuthentications, http.StatusTooManyRequests)
 					return
 				}
 				if status == http.StatusUnauthorized {
@@ -339,7 +339,7 @@ func (s *Server) requireOperatorVerb(verb string, next http.HandlerFunc) http.Ha
 			}
 			identity = authenticated
 		case s.authLimiter.blocked(source):
-			http.Error(w, "too many failed authentication attempts", http.StatusTooManyRequests)
+			http.Error(w, TooManyFailedAuthentications, http.StatusTooManyRequests)
 			return
 		default:
 			s.authLimiter.record(source)

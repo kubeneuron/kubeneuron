@@ -49,6 +49,11 @@ diagnostics.
 Without a configured operator token the operator API is disabled entirely
 (fail closed).
 
+When a `503` means the request went to a standby Pod or the operator API is
+disabled, the response carries `KubeNeuron-Unavailable: standby` or
+`KubeNeuron-Unavailable: operator-api-disabled`, so a client can tell the two
+apart without parsing the error text.
+
 ## Health and metrics
 
 | Route | Auth | Purpose |
