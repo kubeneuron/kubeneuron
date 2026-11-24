@@ -61,6 +61,11 @@ while IFS= read -r pattern; do
 	fi
 done < hack/stale-claims.txt
 
+# Check kubectl examples against the installed workloads.
+if ! python3 hack/verify-kubectl-docs.py; then
+    fail=1
+fi
+
 # --- derived facts: migration heads ----------------------------------------
 head_of() {
 	local f head=""
