@@ -505,9 +505,10 @@ func (c *Controller) advanceSuccessor(ctx context.Context, inc *types.Incident, 
 	next, err := plat.PrepareSuccessor(ctx, pin, rec.Successor)
 	switch {
 	case errors.Is(err, cloud.ErrReplacementCapacity):
-		why := "no capacity or quota for a replacement: " + err.Error()
+		why := c.capacityFailureReason(inc.ID, err).Guidance()
 		if rerr := c.releaseSuccessor(ctx, inc, why); rerr != nil {
-			return fmt.Errorf("add-first replacement: replacement capacity unavailable: %w; removing what was requested failed and is retried: %v", err, rerr)
+			c.log.Warn("releasing successor after capacity failure", "incident", inc.ID, "err", rerr)
+			return fmt.Errorf("add-first replacement: replacement capacity unavailable: %w: %s Removing what was requested failed and is retried.", cloud.ErrReplacementCapacity, why)
 		}
 		if inc.Successor.Outcome == types.SuccessorNotCreated || inc.Successor.Outcome == types.SuccessorReleased {
 			inc.Successor.Outcome = types.SuccessorCapacityDenied
@@ -515,7 +516,7 @@ func (c *Controller) advanceSuccessor(ctx context.Context, inc *types.Incident, 
 				return serr
 			}
 		}
-		return fmt.Errorf("add-first replacement: replacement capacity unavailable: %w; %s was not cordoned or drained", err, inc.Target.Node)
+		return fmt.Errorf("add-first replacement: replacement capacity unavailable: %w: %s Node %s was not cordoned or drained.", cloud.ErrReplacementCapacity, why, inc.Target.Node)
 	case errors.Is(err, cloud.ErrNeedsOperator):
 		if serr := c.endSuccessor(ctx, inc, types.SuccessorHandedOver, err.Error()); serr != nil {
 			return serr

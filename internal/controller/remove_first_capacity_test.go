@@ -291,13 +291,13 @@ func TestAcceptedGrowThatRanOutOfCapacity(t *testing.T) {
 		want  string
 	}{
 		{"unchanged", removefirst.GrowObservation{State: removefirst.GrowNotApplied, Size: 2}, false,
-			"The resize of pool gpu to replace machine machine-old failed in the cloud (no capacity or quota for this machine type). Nothing was changed."},
+			"The resize of pool gpu to replace machine machine-old failed in the cloud (no capacity or quota for this machine type). The cloud could not add a machine of this type; its answer does not tell capacity from quota. Check the account's quota for this machine type first, then the provider's status for the zone. Nothing was changed."},
 		{"left failed", removefirst.GrowObservation{State: removefirst.GrowChanged, Detail: "its last update failed"}, true,
-			"The resize of pool gpu to replace machine machine-old failed in the cloud (no capacity or quota for this machine type). Machine machine-old was not removed. Check its current size. Check the machine"},
+			"The resize of pool gpu to replace machine machine-old failed in the cloud (no capacity or quota for this machine type). The cloud could not add a machine of this type; its answer does not tell capacity from quota. Check the account's quota for this machine type first, then the provider's status for the zone. Machine machine-old was not removed. Check its current size. Check the machine"},
 		{"left grown", removefirst.GrowObservation{State: removefirst.GrowChanged, Size: 3, Detail: "it has 3 nodes"}, true,
-			"The resize of pool gpu to replace machine machine-old failed in the cloud (no capacity or quota for this machine type). Machine machine-old was not removed. Pool gpu now has 3 nodes; it had 2 before the replacement. Check the machine"},
+			"The resize of pool gpu to replace machine machine-old failed in the cloud (no capacity or quota for this machine type). The cloud could not add a machine of this type; its answer does not tell capacity from quota. Check the account's quota for this machine type first, then the provider's status for the zone. Machine machine-old was not removed. Pool gpu now has 3 nodes; it had 2 before the replacement. Check the machine"},
 		{"left at its size", removefirst.GrowObservation{State: removefirst.GrowChanged, Size: 2, Detail: "it is now autoscaled"}, true,
-			"The resize of pool gpu to replace machine machine-old failed in the cloud (no capacity or quota for this machine type). Machine machine-old was not removed. Pool gpu still has 2 nodes. Check the machine"},
+			"The resize of pool gpu to replace machine machine-old failed in the cloud (no capacity or quota for this machine type). The cloud could not add a machine of this type; its answer does not tell capacity from quota. Check the account's quota for this machine type first, then the provider's status for the zone. Machine machine-old was not removed. Pool gpu still has 2 nodes. Check the machine"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &capacityGrowPlatform{growPlatform: &growPlatform{plannedPlatform: newPlannedPlatform(), reads: []removefirst.GrowObservation{tc.obs}}}

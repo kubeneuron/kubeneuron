@@ -125,7 +125,8 @@ func (c *Controller) recycleNodeStep(ctx context.Context, inc *types.Incident, r
 		}
 		if err != nil {
 			if errors.Is(err, cloud.ErrReplacementCapacity) {
-				return nil, fmt.Errorf("platform.replace_node: replacement capacity unavailable: %w", err)
+				reason := c.capacityFailureReason(inc.ID, err)
+				return nil, fmt.Errorf("platform.replace_node: replacement capacity unavailable: %w: %s", cloud.ErrReplacementCapacity, reason.Guidance())
 			}
 			return nil, fmt.Errorf("platform.replace_node: %w", err)
 		}

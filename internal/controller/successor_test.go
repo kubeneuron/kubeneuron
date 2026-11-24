@@ -4,8 +4,10 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/kubeneuron/kubeneuron/internal/cloud/capacityreason"
 	"io"
 	"log/slog"
 	"strings"
@@ -38,7 +40,8 @@ type successorPlatform struct {
 	constraintReads      int
 	constraintErr        error
 	unavailable          error
-	capacity, ambiguous  bool
+	capacity             error
+	ambiguous            bool
 	createAfter          int
 	polls                int
 	requests             int
@@ -98,8 +101,8 @@ func (p *successorPlatform) PrepareSuccessor(_ context.Context, pin cloud.NodeId
 		}
 	case cloud.SuccessorPlanned:
 		p.requests++
-		if p.capacity {
-			return s, fmt.Errorf("pool train: %w", cloud.ErrReplacementCapacity)
+		if p.capacity != nil {
+			return s, p.capacity
 		}
 		s.Phase = cloud.SuccessorRequested
 	case cloud.SuccessorRequested:
@@ -362,11 +365,19 @@ func TestAddFirstPreparesTheSuccessorBeforeTheCordon(t *testing.T) {
 
 func TestAddFirstNoCapacityLeavesTheNodeAlone(t *testing.T) {
 	p := newSuccessorPlatform()
-	p.capacity = true
+	const secret = "arn:aws:private-test /subscriptions/private-test projects/private-test"
+	p.capacity = fmt.Errorf("%s: %w", secret, &capacityreason.Failure{Reason: capacityreason.Quota, Cause: errors.New(secret)})
 	c, st, _ := successorFixture(t, recoverymode.Automatic, p, "")
 	id := openOn(t, c, "n1")
 	inc := waitSettled(t, c, st, id, func(inc *types.Incident) bool { return inc.State.Halted() })
 	entries := trail(t, st, id)
+	data, err := json.Marshal([]any{inc, entries})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), secret) || !auditHas(entries, "successor-capacity-denied", "Request a quota increase from the cloud provider.") {
+		t.Fatalf("unexpected capacity audit: %s", data)
+	}
 	if p.cordonedNode("n1") {
 		t.Fatalf("the node was cordoned without a successor%s", dump(entries))
 	}
