@@ -83,6 +83,7 @@ Flags:
   --delete-data          with --uninstall: also delete the SQLite PVC with the audit
                          data and the Managed metrics store's PVC. For the last installation,
                          also clear /var/lib/kube-neuron on nodes, including diagnostic bundles.
+                         The action journal exists only on the node; copy it first if you need the record.
   --skip-open-incident-check   uninstall without checking for unfinished cloud replacements
   --yes                  confirm --delete-data without an interactive prompt
 USAGE
@@ -270,23 +271,33 @@ restore_karpenter_pin() {
 	say "Check who owns the Karpenter annotation on $node. If it is safe to remove, run: kubectl annotate node $node karpenter.sh/do-not-disrupt-"
 }
 
-clean_node_agent_data() {
+create_cleanup_pod() {
 	local node=$1 image=$2 pod
 	[[ -n $image ]] || return 1
 	pod=$(jq -n --arg node "$node" --arg image "$image" '{
 		apiVersion:"v1", kind:"Pod", metadata:{generateName:"kubeneuron-agent-cleanup-"},
 		spec:{nodeName:$node, restartPolicy:"Never", activeDeadlineSeconds:45,
-			automountServiceAccountToken:false, securityContext:{seccompProfile:{type:"RuntimeDefault"}},
+			tolerations:[{operator:"Exists"}], automountServiceAccountToken:false, securityContext:{seccompProfile:{type:"RuntimeDefault"}},
 			containers:[{name:"cleanup",image:$image,args:["--clean-agent-data"],
 				securityContext:{allowPrivilegeEscalation:false,readOnlyRootFilesystem:true,capabilities:{drop:["ALL"]}},
 				volumeMounts:[{name:"state",mountPath:"/cleanup-agent-data"}]}],
 			volumes:[{name:"state",hostPath:{path:"/var/lib/kube-neuron",type:"Directory"}}]}}' |
 		kubectl -n "$NS" create -f - -o name) || return 1
 	[[ $pod == pod/kubeneuron-agent-cleanup-* ]] || return 1
-	local result=0
-	kubectl -n "$NS" wait --for=jsonpath='{.status.phase}'=Succeeded "$pod" --timeout=50s >/dev/null || result=1
-	kubectl -n "$NS" delete "$pod" --ignore-not-found --wait=false >/dev/null || result=1
-	return "$result"
+	printf '%s\n' "$pod"
+}
+
+agent_nodes_before_uninstall() {
+	local owners
+	owners=$(kubectl -n "$NS" get daemonsets -l "$agent_selector" -o json |
+		jq -ce --arg uid "$root_uid" '[.items[] |
+			select(any(.metadata.ownerReferences[]?; .controller == true and .uid == $uid)) |
+			.metadata.uid | strings]') || return 1
+	kubectl -n "$NS" get pods -l "$agent_selector" -o json |
+		jq -r --argjson owners "$owners" '[.items[] |
+			select(any(.metadata.ownerReferences[]?; .controller == true and .kind == "DaemonSet" and
+				(.uid as $id | $owners | index($id) != null))) |
+			.spec.nodeName | strings | select(length > 0)] | unique[]'
 }
 
 operator_namespaces() {
@@ -314,7 +325,7 @@ if ((UNINSTALL)); then
 	fi
 	if [[ -n $root_uid ]] && ((DELETE_DATA == 0)); then
 		operator_names=$(operator_namespaces) || die "Uninstall stopped: could not check for the operator Deployment. Check that your kubectl account can list Deployments across namespaces."
-		[[ -n $operator_names ]] || die "Uninstall stopped: the KubeNeuron operator is not installed, so it cannot confirm that the stored data is kept. Nothing was removed. Install the operator again (release manifest or Helm chart) and repeat the uninstall, or, to delete the installation and its managed volume claims, repeat with --delete-data."
+		[[ -n $operator_names ]] || die "Uninstall stopped: the KubeNeuron operator is not installed, so it cannot confirm that the stored data is kept. Nothing was removed. Install the operator again (release manifest or Helm chart) and repeat the uninstall, or, to delete the installation and its managed volume claims, repeat with --delete-data"
 	fi
 	if [[ -n $root_uid ]] && ((SKIP_INCIDENT_CHECK == 0)); then
 		# This snapshot cannot prevent new repairs before the controller stops.
@@ -342,6 +353,7 @@ if ((UNINSTALL)); then
 		say "PERMANENT DATA REMOVAL: SQLite PVC $NS/$claim, including incidents and audit history. External PostgreSQL is not deleted."
 		[[ -z $metrics_uid ]] || say "PERMANENT DATA REMOVAL: metrics store PVC $NS/$metrics_claim. An External metrics store is not deleted."
 		say "For the last installation this also permanently removes agent data in /var/lib/kube-neuron on nodes, including the event queue, action journal, read positions, state files and NVIDIA diagnostic bundles."
+		say "The action journal exists only on the node; copy it first if you need the record."
 		if ((ASSUME_YES == 0)); then
 			[[ -t 0 ]] || die "use --yes to confirm --delete-data in non-interactive execution"
 			read -r -p "Type '$NAME' to confirm: " confirmation
@@ -361,7 +373,10 @@ if ((UNINSTALL)); then
 		[[ -z $owners ]] || die "operator did not acknowledge state retention; installation NOT removed. Upgrade the operator or inspect its logs."
 	fi
 	cleanup_image=""
+	agent_nodes=""
+	agent_selector="app.kubernetes.io/instance=$NAME,app.kubernetes.io/component in (agent,agent-detect,agent-detect-journal-var,agent-detect-journal-run)"
 	if ((DELETE_DATA)) && [[ -n $root_uid ]]; then
+		agent_nodes=$(agent_nodes_before_uninstall) || die "Uninstall stopped: could not list the nodes where this installation's agent runs. Nothing was removed. Check that your kubectl account can read DaemonSets and Pods in $NS and retry."
 		cleanup_image=$(kubectl get kubeneuron "$NAME" -o json |
 			jq -er --arg uid "$root_uid" 'select(.metadata.uid == $uid) | .spec.agent.image | strings | select(length > 0)') || cleanup_image=""
 	fi
@@ -378,6 +393,16 @@ if ((UNINSTALL)); then
 		((SECONDS < deadline)) || die "controller is still present in namespace '$NS'; check its Deployment and Pods before retrying uninstall"
 		sleep 2
 	done
+	# Garbage collection can leave terminating agents on their host mounts.
+	# After the deadline each remaining mount is checked before cleanup.
+	if ((DELETE_DATA)) && [[ -n $agent_nodes ]]; then
+		deadline=$((SECONDS + 120))
+		while ((SECONDS < deadline)); do
+			agent_pods=$(kubectl --request-timeout=5s -n "$NS" get pods -l "$agent_selector" -o name) || break
+			[[ -n $agent_pods ]] || break
+			sleep 2
+		done
+	fi
 	# Another installation keeps using the shared journal label.
 	remaining_installations=$(kubectl get kubeneuron -o name)
 	if [[ -z $remaining_installations ]]; then
@@ -391,17 +416,55 @@ if ((UNINSTALL)); then
 	fi
 	nodes=$(kubectl get nodes -o json)
 	if ((DELETE_DATA)) && [[ -z $remaining_installations ]]; then
-		while IFS= read -r node; do
-			[[ -n $node ]] || continue
-			if [[ -n $cleanup_image ]] && active_mounts=$(kubectl get pods -A --field-selector "spec.nodeName=$node" -o json |
-				jq -er '[.items[] | select(.status.phase != "Succeeded" and .status.phase != "Failed")
-					| .spec.volumes[]? | select(.hostPath.path == "/var/lib/kube-neuron")] | length') &&
-				[[ $active_mounts == 0 ]] && clean_node_agent_data "$node" "$cleanup_image"; then
-				say "Emptied /var/lib/kube-neuron on $node."
-			else
-				say "Cleanup was not confirmed on $node. After verifying no installation uses the directory, run on that node: sudo rm -rf -- /var/lib/kube-neuron"
+		cleanup_pods=()
+		unconfirmed=""
+		emptied=0
+		if [[ -z $root_uid ]]; then
+			say "The installation was already removed, so the nodes where its agent ran are not known and /var/lib/kube-neuron was not emptied. On each node where the agent ran, after verifying no installation uses the directory, run: sudo rm -rf -- /var/lib/kube-neuron"
+		elif [[ -z $agent_nodes ]]; then
+			say "Emptied /var/lib/kube-neuron on 0 nodes."
+		elif [[ -z $cleanup_image ]]; then
+			say "Node cleanup was skipped: the installation's agent image could not be determined. /var/lib/kube-neuron was not emptied on: ${agent_nodes//$'\n'/, }. After verifying no installation uses the directory, run on each of these nodes: sudo rm -rf -- /var/lib/kube-neuron"
+		else
+			while IFS= read -r node; do
+				[[ -n $node ]] || continue
+				if active_mounts=$(kubectl get pods -A --field-selector "spec.nodeName=$node" -o json |
+					jq -er '[.items[] | select(.status.phase != "Succeeded" and .status.phase != "Failed")
+						| .spec.volumes[]? | select(.hostPath.path == "/var/lib/kube-neuron")] | length') &&
+					[[ $active_mounts == 0 ]] && pod=$(create_cleanup_pod "$node" "$cleanup_image"); then
+					cleanup_pods+=("$pod")
+				else
+					unconfirmed="${unconfirmed:+$unconfirmed, }$node"
+				fi
+			done <<<"$agent_nodes"
+			if ((${#cleanup_pods[@]})); then
+				deadline=$((SECONDS + 50))
+				while :; do
+					if statuses=$(kubectl --request-timeout=5s -n "$NS" get "${cleanup_pods[@]}" -o json); then
+						# kubectl returns a Pod for a single name and a List for several.
+						phases=$(jq -ce '[.items // [.] | .[] | {node:.spec.nodeName, phase:.status.phase}]' <<<"$statuses") || phases='[]'
+					fi
+					if jq -e --argjson count "${#cleanup_pods[@]}" 'length == $count and all(.phase == "Succeeded" or .phase == "Failed")' <<<"${phases:-[]}" >/dev/null ||
+						((SECONDS >= deadline)); then break; fi
+					sleep 1
+				done
+				for node in ${agent_nodes}; do
+					case ", $unconfirmed, " in *", $node, "*) continue ;; esac
+					if jq -e --arg node "$node" 'any(.node == $node and .phase == "Succeeded")' <<<"${phases:-[]}" >/dev/null; then
+						emptied=$((emptied + 1))
+					else
+						unconfirmed="${unconfirmed:+$unconfirmed, }$node"
+					fi
+				done
+				kubectl -n "$NS" delete "${cleanup_pods[@]}" --ignore-not-found --wait=false >/dev/null || say "Check for remaining cleanup Pods in $NS."
 			fi
-		done < <(jq -r '.items[].metadata.name' <<<"$nodes")
+			if [[ $emptied == 1 ]]; then
+				say "Emptied /var/lib/kube-neuron on 1 node."
+			else
+				say "Emptied /var/lib/kube-neuron on $emptied nodes."
+			fi
+			[[ -z $unconfirmed ]] || say "Cleanup of /var/lib/kube-neuron was not confirmed on: $unconfirmed. After verifying no installation uses the directory, run on each of these nodes: sudo rm -rf -- /var/lib/kube-neuron"
+		fi
 	fi
 	while IFS= read -r node_snapshot; do
 		[[ -n $node_snapshot ]] || continue

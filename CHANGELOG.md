@@ -24,6 +24,8 @@ API is `v1alpha1`.
   is available, the controller uses live API reads for these resources. It logs
   a warning when a cache has not synchronized and counts these reads in
   `kubeneuron_agent_auth_live_gets_total`.
+- `install.sh --uninstall --delete-data` on the last installation now also empties the agent data directory `/var/lib/kube-neuron` on the nodes where this installation's agent Pods were running at the time of the uninstall, including the action journal and NVIDIA diagnostic bundles; it lists the nodes where this could not be confirmed. This cannot be undone: the action journal exists only on the node, so copy it first if you need the record.
+- Helm chart: `helm uninstall` now runs a check and stops when a KubeNeuron installation still exists; `--no-hooks` skips the check.
 
 ### Added
 
@@ -58,6 +60,7 @@ API is `v1alpha1`.
 - Approval requests now say when they expire and what approving, rejecting or not deciding does, in Slack, webhook, PagerDuty, the panel and kubeneuronctl incidents show. Webhook and PagerDuty messages carry both the approve and the reject command. If an approval request expires after earlier steps already changed the node, the incident now waits for the operator instead of closing as expired. If you parse the text of these notifications, update your parser.
 
 - Agents now space out action polls when the queue is empty or the controller is unavailable, and stagger registration heartbeats. On an idle node, the agent now waits up to 15 seconds between polls (previously about 5 seconds), so a newly queued action is picked up later than before.
+- `install.sh --uninstall` now stops before removing anything when the operator is not installed and the stored data is to be kept, names the operator's namespace in its closing commands, and on the last installation removes the `karpenter.sh/do-not-disrupt` annotation that KubeNeuron itself had set.
 
 - install.sh --uninstall stops when an incident has a cloud replacement in progress (override with --skip-open-incident-check), turns back on the NVIDIA GPU Operator components that KubeNeuron had turned off on a node, and lists nodes that still have a KubeNeuron cordon or taint with the commands to remove them. Uninstall now needs jq, curl and openssl on the machine that runs it.
 

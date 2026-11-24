@@ -327,12 +327,12 @@ func nvidiaPartitionTopologyValue(value string) nvidia.PartitionTopology {
 	return nvidia.PartitionTopology(value)
 }
 
-func emptyAgentData(mount string) error {
+func emptyAgentData(mount string) (err error) {
 	root, err := os.OpenRoot(mount)
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	defer func() { err = errors.Join(err, root.Close()) }()
 	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
 		return err

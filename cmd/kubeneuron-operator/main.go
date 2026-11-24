@@ -20,6 +20,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -84,10 +85,10 @@ func main() {
 		if err == nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			var roots kubeneuronv1alpha1.KubeNeuronList
-			err = reader.List(ctx, &roots, client.Limit(1))
-			if err == nil && len(roots.Items) > 0 {
-				fmt.Fprintf(os.Stderr, "KubeNeuron installation '%s' still exists. Run install.sh --uninstall first, then repeat helm uninstall. To remove only the operator anyway, repeat with --no-hooks\n", roots.Items[0].Name)
+			var remaining string
+			remaining, err = remainingInstallation(ctx, reader)
+			if remaining != "" {
+				fmt.Fprintf(os.Stderr, "KubeNeuron installation '%s' still exists. Run install.sh --uninstall first, then repeat helm uninstall. To remove only the operator anyway, repeat with --no-hooks\n", remaining)
 				os.Exit(1)
 			}
 		}
@@ -175,4 +176,16 @@ func main() {
 		fmt.Fprintln(os.Stderr, "running manager:", err)
 		os.Exit(1)
 	}
+}
+
+func remainingInstallation(ctx context.Context, reader client.Reader) (string, error) {
+	var roots kubeneuronv1alpha1.KubeNeuronList
+	err := reader.List(ctx, &roots, client.Limit(1))
+	if meta.IsNoMatchError(err) {
+		return "", nil
+	}
+	if err != nil || len(roots.Items) == 0 {
+		return "", err
+	}
+	return roots.Items[0].Name, nil
 }

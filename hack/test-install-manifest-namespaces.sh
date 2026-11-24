@@ -75,14 +75,30 @@ if grep -Eq 'left in place: the operator|delete deployment/kubeneuron-operator' 
 cat >"$tmp/bin/kubectl" <<'MOCK'
 #!/usr/bin/env bash
 case " $* " in
+*" get daemonsets -l "*)
+	echo '{"items":[{"metadata":{"uid":"agent-ds","ownerReferences":[{"controller":true,"uid":"uid-1"}]}}]}' ;;
+*" get pods -l "*"component in "*" -o name "*)
+	if [[ ! -e $CLEANUP_DIR/terminating ]]; then
+		touch "$CLEANUP_DIR/terminating"
+		echo pod/terminating-agent
+	else
+		touch "$CLEANUP_DIR/agents-gone"
+	fi ;;
+*" get pods -l "*"component in "*" -o json "*)
+	jq -n '{items:(["ready","busy","timeout","foreign"] | map(. as $node | {metadata:{ownerReferences:[
+		{controller:true,kind:"DaemonSet",uid:(if $node == "foreign" then "another-ds" else "agent-ds" end)}]},
+		spec:{nodeName:$node}}))}' ;;
 *" get pods -A --field-selector spec.nodeName=busy "*) echo '{"items":[{"spec":{"volumes":[{"hostPath":{"path":"/var/lib/kube-neuron"}}]}}]}' ;;
 *" get pods -A --field-selector "*) echo '{"items":[]}' ;;
 *" create -f - -o name "*)
+	[[ -e $CLEANUP_DIR/agents-gone ]] || exit 1
 	manifest=$(cat)
 	node=$(jq -er '.spec.nodeName' <<<"$manifest") || exit 1
 	printf '%s\n' "$manifest" >"$CLEANUP_DIR/$node.json"
 	echo "pod/kubeneuron-agent-cleanup-$node" ;;
-*" wait "*"pod/kubeneuron-agent-cleanup-timeout "*) exit 1 ;;
+*" get pod/kubeneuron-agent-cleanup-ready pod/kubeneuron-agent-cleanup-timeout -o json "*)
+	[[ -e $CLEANUP_DIR/ready.json && -e $CLEANUP_DIR/timeout.json ]] || exit 1
+	echo '{"items":[{"spec":{"nodeName":"ready"},"status":{"phase":"Succeeded"}},{"spec":{"nodeName":"timeout"},"status":{"phase":"Failed"}}]}' ;;
 *" patch node "*)
 	printf '%s\n' "$*" >>"$UNINSTALL_MUTATIONS"
 	[[ $2 != node || $3 != changed ]] || exit 1 ;;
@@ -170,13 +186,11 @@ grep -Fq 'kubectl annotate node unknown karpenter.sh/do-not-disrupt-' "$tmp/pins
 
 export CLEANUP_DIR="$tmp/cleanup-pods"
 mkdir "$CLEANUP_DIR"
-jq -n '{items:(["ready","busy","timeout"] | map({metadata:{name:.}}))}' >"$NODE_LIST"
+jq -n '{items:(["ready","busy","timeout","foreign","cpu"] | map({metadata:{name:.}}))}' >"$NODE_LIST"
 PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall --delete-data --yes --skip-open-incident-check >"$tmp/cleanup-output"
-grep -Fq 'Emptied /var/lib/kube-neuron on ready.' "$tmp/cleanup-output"
-for node in busy timeout; do
-	grep -Fq "Cleanup was not confirmed on $node." "$tmp/cleanup-output"
-done
-[[ ! -e $CLEANUP_DIR/busy.json ]]
+grep -Fq 'Emptied /var/lib/kube-neuron on 1 node.' "$tmp/cleanup-output"
+grep -Fq 'was not confirmed on: busy, timeout.' "$tmp/cleanup-output"
+[[ ! -e $CLEANUP_DIR/busy.json && ! -e $CLEANUP_DIR/foreign.json && ! -e $CLEANUP_DIR/cpu.json ]]
 for node in ready timeout; do
 	jq -e '.spec | .automountServiceAccountToken == false and
 		.volumes == [{name:"state",hostPath:{path:"/var/lib/kube-neuron",type:"Directory"}}] and
@@ -184,3 +198,8 @@ for node in ready timeout; do
 		(.containers[0] | .image == "example/agent:test" and .args == ["--clean-agent-data"] and
 			.securityContext.capabilities.drop == ["ALL"])' "$CLEANUP_DIR/$node.json" >/dev/null
 done
+
+ROOT_GONE=1 PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall --delete-data --yes >"$tmp/retry"
+grep -Fq 'The installation was already removed' "$tmp/retry"
+grep -Fq 'run: sudo rm -rf -- /var/lib/kube-neuron' "$tmp/retry"
+if grep -Fq 'Emptied /var/lib/kube-neuron' "$tmp/retry"; then exit 1; fi
