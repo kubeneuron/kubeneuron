@@ -264,6 +264,12 @@ else
 	done < <(grep -nEo 'Kubernetes \**1\.[0-9]+(\+|\** or newer|\** or later| minimum)' \
 		README.md docs/install.md docs/quickstart.md docs/design.md |
 		grep -v "1\.${min_minor}[^0-9]" || true)
+	# The optional CI job on the oldest version runs this image.
+	oldest_minor=$(sed -n "s/^OLDEST_NODE_IMAGE='kindest\/node:v1\.\([0-9]*\)\..*/\1/p" hack/kind-integration.sh)
+	if [[ $oldest_minor != "$min_minor" ]]; then
+		echo "MINIMUM KUBERNETES: hack/kind-integration.sh OLDEST_NODE_IMAGE is 1.${oldest_minor:-?}, the chart's minimum is 1.${min_minor}" >&2
+		fail=1
+	fi
 fi
 
 if ((fail)); then

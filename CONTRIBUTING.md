@@ -126,6 +126,13 @@ not install the GPU Operator or observability
 dependencies and makes no NVIDIA, NVML, DCGM, GPU-action, automated-PKI,
 emergency-revocation, or remediation claim.
 
+`KIND_NODE_IMAGE=oldest` runs the harness on the oldest Kubernetes version the
+Helm chart's `kubeVersion` allows, from the digest-pinned image in
+`hack/kind-integration.sh`; `make verify-docs` fails when that image and the
+chart's minimum differ. CI runs the functional suite this way in the
+`kind-oldest-kubernetes` job, which is not required: it reports a failure
+without blocking the pull request.
+
 For a manual Kustomize-only smoke check against another cluster:
 
 ```sh

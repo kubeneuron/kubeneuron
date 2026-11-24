@@ -34,7 +34,10 @@ func TestGroupCoverage(t *testing.T) {
 			Strategy struct {
 				Matrix struct {
 					Suite   []string
-					Include []struct{ Suite, Target string }
+					Include []struct {
+						Suite, Target string
+						NodeImage     string `yaml:"node_image"`
+					}
 				}
 			}
 		}
@@ -44,6 +47,11 @@ func TestGroupCoverage(t *testing.T) {
 	}
 	var installer []string
 	for _, row := range ci.Jobs["kind-other"].Strategy.Matrix.Include {
+		// A row on another Kubernetes version repeats a suite; it is not
+		// part of the coverage on the default version.
+		if row.NodeImage != "" {
+			continue
+		}
 		if row.Target == "" || row.Target == "test-integration-kind" {
 			installer = append(installer, row.Suite)
 		}

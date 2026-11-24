@@ -36,7 +36,9 @@ Configuration is through environment variables:
   TIMEOUT_SECONDS       wait timeout in seconds (default: 240)
   KIND_NODE_IMAGE       another digest-pinned node image,
                         kindest/node:vX.Y.Z@sha256:<digest>; the server must
-                        then report vX.Y.Z (default: the image below)
+                        then report vX.Y.Z (default: the image below), or
+                        "oldest" for the oldest Kubernetes version the Helm
+                        chart supports
   KIND_BIN, KUBECTL_BIN, DOCKER_BIN, JQ_BIN
                         command paths (each must be one executable)
 
@@ -67,7 +69,11 @@ readonly EXPECTED_KUBECTL_VERSION=v1.33.12
 DEFAULT_NODE_IMAGE='kindest/node:v1.33.12@sha256:3f5c8443c620245e4d355cfe09e96a91ead32ceaa569d3f1ca9edf0cb2fe2ff4'
 # Another Kubernetes version, such as the oldest one the docs support, is
 # pinned the same way: by digest, with the server version from its tag.
+# OLDEST_NODE_IMAGE is the minor of the Helm chart's kubeVersion; verify-docs
+# fails when the two part.
+OLDEST_NODE_IMAGE='kindest/node:v1.29.14@sha256:8703bd94ee24e51b778d5556ae310c6c0fa67d761fae6379c8e0bb480e6fea29'
 NODE_IMAGE=${KIND_NODE_IMAGE:-$DEFAULT_NODE_IMAGE}
+[[ $NODE_IMAGE == oldest ]] && NODE_IMAGE=$OLDEST_NODE_IMAGE
 [[ $NODE_IMAGE =~ ^kindest/node:(v[0-9]+\.[0-9]+\.[0-9]+)@sha256:[0-9a-f]{64}$ ]] || {
 	printf 'KIND_NODE_IMAGE must be kindest/node:vX.Y.Z@sha256:<64 hex digits>, got %s\n' "$NODE_IMAGE" >&2
 	exit 2
