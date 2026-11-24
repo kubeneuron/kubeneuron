@@ -203,6 +203,16 @@ func (c *Controller) continueRemoveFirst(ctx context.Context, inc *types.Inciden
 	return c.removeFirstOverdue(ctx, inc, inc.RemoveFirst, "no progress")
 }
 
+func (c *Controller) parkMissingRemoveFirstIdentity(ctx context.Context, inc *types.Incident) error {
+	pool := inc.RemoveFirst.Pool
+	planned := "its size before the replacement"
+	if size, read := c.observePoolSize(ctx, inc); read {
+		planned = fmt.Sprintf("%d nodes", size.Planned)
+	}
+	instruction := fmt.Sprintf("KubeNeuron cannot confirm which cloud machine belonged to node %s when the replacement in pool %s started. Check the original machine and the size of pool %s; if the pool is one node short, set it back to %s. Then run", inc.Target.Node, pool, pool, planned)
+	return c.parkRemoveFirstWithCheck(ctx, inc, instruction)
+}
+
 // finalStateEvidence is the reason of a plan ended without the resize
 // operation's own report.
 const finalStateEvidence = "confirmed by the pool's final state, not by the cloud operation"
@@ -336,8 +346,7 @@ func (c *Controller) sweepRemoveFirst(ctx context.Context) {
 			continue
 		}
 		if inc.CloudIdentity == nil {
-			if err := c.endRemoveFirst(ctx, inc, types.RemoveFirstNeedsOperator,
-				c.missingCloudIdentityReason(inc.ID)+"; to set the size back: "+inc.RemoveFirst.Restore); err != nil {
+			if err := c.parkMissingRemoveFirstIdentity(ctx, inc); err != nil {
 				c.log.Error("recording a remove-first plan for an operator failed", "incident", inc.ID, "err", err)
 			}
 			continue

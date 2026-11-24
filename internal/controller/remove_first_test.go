@@ -370,21 +370,39 @@ func TestRemoveFirstDeadlineWithoutProgress(t *testing.T) {
 // An open plan the reconcile pass cannot continue, for want of the pinned
 // identity, is left for an operator, not skipped for good.
 func TestRemoveFirstSweepWithoutIdentity(t *testing.T) {
-	p := newPlannedPlatform()
-	c, st := plannedFixture(t, p)
-	ctx := context.Background()
-	now := time.Now()
-	inc := &types.Incident{ID: "rf-orphan", Target: types.Target{Node: "n3"}, Class: types.ClassFellOffBus, State: types.StateResolved,
-		OpenedAt: now, UpdatedAt: now, StateChangedAt: now,
-		RemoveFirst: &types.RemoveFirstRecord{RemoveFirstPlan: cloud.RemoveFirstPlan{Operation: "rf-orphan-a1", Instance: "i-3", Pool: "gpu",
-			Phase: cloud.RemoveFirstDeleting, PlannedAt: now, Restore: "resize gpu --num-nodes 4"}}}
-	if err := st.CreateIncident(ctx, inc); err != nil {
-		t.Fatal(err)
-	}
-	c.sweepRemoveFirst(ctx)
-	got := mustIncident(t, st, inc.ID)
-	if got.RemoveFirst.Outcome != types.RemoveFirstNeedsOperator || !strings.Contains(got.RemoveFirst.Reason, "resize gpu --num-nodes 4") {
-		t.Fatalf("plan %+v", got.RemoveFirst)
+	for _, state := range []types.IncidentState{types.StateExecuting, types.StateResolved} {
+		t.Run(string(state), func(t *testing.T) {
+			p := newPlannedPlatform()
+			c, st := plannedFixture(t, p)
+			ctx := context.Background()
+			now := time.Now()
+			inc := &types.Incident{ID: "rf-orphan", Target: types.Target{Node: "n3"}, Class: types.ClassFellOffBus, State: state,
+				OpenedAt: now, UpdatedAt: now, StateChangedAt: now,
+				RemoveFirst: &types.RemoveFirstRecord{RemoveFirstPlan: cloud.RemoveFirstPlan{Operation: "rf-orphan-a1", Instance: "i-3", Pool: "gpu",
+					Phase: cloud.RemoveFirstDeleting, PlannedAt: now, Restore: "resize gpu --num-nodes 4"}}}
+			if err := st.CreateIncident(ctx, inc); err != nil {
+				t.Fatal(err)
+			}
+			c.sweepRemoveFirst(ctx)
+			got := mustIncident(t, st, inc.ID)
+			wantState := types.StateNeedsHuman
+			if state == types.StateResolved {
+				wantState = types.StateResolved
+			}
+			wantReason := `KubeNeuron cannot confirm which cloud machine belonged to node n3 when the replacement in pool gpu started. Check the original machine and the size of pool gpu; if the pool is one node short, set it back to 4 nodes. Then run kubeneuronctl resolve rf-orphan --cloud-operation-settled --reason "<what you found>"`
+			if got.State != wantState || got.RemoveFirst.Outcome != types.RemoveFirstNeedsOperator || got.RemoveFirst.Reason != wantReason {
+				t.Fatalf("plan %+v", got.RemoveFirst)
+			}
+			resolved, _, err := c.ResolveSettledCloudOperation(ctx, inc.ID, "operator", "checked the original machine and pool size", 0, "confirm")
+			if err != nil || resolved.State != types.StateResolved {
+				t.Fatalf("settlement: incident=%+v err=%v", resolved, err)
+			}
+			next := mustIncident(t, st, openOn(t, c, "n1"))
+			result, handled, err := c.replaceRemoveFirst(ctx, next, p, *next.CloudIdentity)
+			if err != nil || !handled || result == nil || !result.OK || p.deletes[successorOperation(next)] != 1 {
+				t.Fatalf("next replacement: result=%+v handled=%v deletes=%v err=%v", result, handled, p.deletes, err)
+			}
+		})
 	}
 }
 
