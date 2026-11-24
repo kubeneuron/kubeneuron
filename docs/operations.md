@@ -398,8 +398,29 @@ details. The same schema-version restriction applies to PostgreSQL.
    reset sequences, causing subsequent audit inserts to fail with duplicate
    keys. Keep the operator and controller stopped until `pg_restore` exits
    with code 0.
-3. Restart the operator and wait for the controller using the last two
-   commands in step 4. Check the controller logs for `duplicate key` errors
+3. Before restarting the operator, connect `psql` to the restored workflow
+   database with the workflow store's schema as the current schema. Run this
+   read-only check for sequences whose stored value is below the largest ID
+   in the corresponding column:
+
+   ```sql
+   SELECT * FROM (
+     SELECT c.table_name, c.column_name,
+            (xpath('/row/m/text()', query_to_xml(format('SELECT max(%I) AS m FROM %I.%I', c.column_name, c.table_schema, c.table_name), false, true, '')))[1]::text::bigint AS max_id,
+            (xpath('/row/v/text()', query_to_xml(format('SELECT last_value AS v FROM %s', pg_get_serial_sequence(format('%I.%I', c.table_schema, c.table_name), c.column_name)), false, true, '')))[1]::text::bigint AS sequence_at
+     FROM information_schema.columns c
+     WHERE c.table_schema = current_schema()
+       AND pg_get_serial_sequence(format('%I.%I', c.table_schema, c.table_name), c.column_name) IS NOT NULL
+   ) s
+   WHERE max_id > sequence_at;
+   ```
+
+   Expect zero rows. Each returned row identifies a sequence that fell behind.
+   Keep the operator and controller stopped, repeat the restore with
+   `--clean --if-exists`, and rerun the check.
+
+4. Restart the operator and wait for the controller using the last two
+   commands in SQLite step 4 above. Check the controller logs for `duplicate key` errors
    on audit writes:
 
    ```sh
