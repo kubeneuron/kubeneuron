@@ -97,3 +97,27 @@ func TestRejectionSurfacesAsError(t *testing.T) {
 		t.Fatal("400 must surface as an error so the retry/dead-letter path engages")
 	}
 }
+
+// A node_kept notice pages with the node as its source and no incident fields
+// it does not have.
+func TestNodeKeptNoticePagesWithoutAnIncident(t *testing.T) {
+	n, got, done := capture(t)
+	defer done()
+	err := n.Notify(context.Background(), notify.NotifyEvent{
+		Kind: notify.EventNodeKept, Node: "n1", IncidentID: "inc-old", Message: "Node n1 carries a KubeNeuron cordon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.EventAction != "trigger" || got.DedupKey != "node-kept/n1/inc-old" || got.Payload == nil {
+		t.Fatalf("event = %+v", got)
+	}
+	p := got.Payload
+	if p.Summary != "KubeNeuron: node n1 needs an operator: Node n1 carries a KubeNeuron cordon" ||
+		p.Source != "n1" || p.Severity != "critical" || p.Component != "" {
+		t.Fatalf("payload = %+v", p)
+	}
+	if len(p.CustomDetails) != 1 || p.CustomDetails["incident_id"] != "inc-old" {
+		t.Fatalf("custom details = %v, want only the incident ID", p.CustomDetails)
+	}
+}

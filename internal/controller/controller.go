@@ -148,6 +148,11 @@ type Controller struct {
 	// cordonReported remembers which stuck cordons have been announced.
 	cordonReported cordonReportedKeys
 
+	// firstJanitorPass is closed when this process completes its first janitor
+	// pass. See FirstJanitorPass.
+	firstJanitorPass     chan struct{}
+	firstJanitorPassOnce sync.Once
+
 	cloudAssessmentMu sync.Mutex
 	cloudAssessments  map[string]*cloudAssessment
 
@@ -338,10 +343,11 @@ func New(
 		inFlight:         map[string]bool{},
 		// Sized well past any real fleet's distinct (condition, node) pairs, so
 		// eviction is a backstop rather than something a normal install meets.
-		logOnce:         newLogOnce(4096),
-		armingHoldSince: map[string]time.Time{},
-		recoveredSlots:  map[string]recoveredSlot{},
-		reconcileEvery:  defaultReconcileInterval,
+		logOnce:          newLogOnce(4096),
+		armingHoldSince:  map[string]time.Time{},
+		recoveredSlots:   map[string]recoveredSlot{},
+		reconcileEvery:   defaultReconcileInterval,
+		firstJanitorPass: make(chan struct{}),
 	}
 	c.runtime.Store(&RuntimeConfig{
 		SafetyLimits: &limits,
@@ -374,6 +380,12 @@ func (c *Controller) SetReconcileInterval(d time.Duration) {
 		c.reconcileEvery = d
 	}
 }
+
+// FirstJanitorPass is closed once the janitors have completed their first pass
+// in this process. Store retention waits for it, so a cordon left by an incident
+// that resolved while the controller was down is released by the janitor
+// before retention can prune the row that explains it.
+func (c *Controller) FirstJanitorPass() <-chan struct{} { return c.firstJanitorPass }
 
 // Run starts the reconcile loop and blocks until ctx is done.
 func (c *Controller) Run(ctx context.Context) error {
@@ -444,11 +456,16 @@ func (c *Controller) runJanitors(ctx context.Context) {
 		c.syncAcceleratorInventory(passCtx)
 		c.pollNodeHealth(passCtx)
 		c.restoreAbandonedAcceleratorStacks(passCtx)
-		c.reconcileCordonedNodes(passCtx)
-		c.reconcileDegradedTaints(passCtx)
+		cordonsSeen := c.reconcileCordonedNodes(passCtx)
+		taintsSeen := c.reconcileDegradedTaints(passCtx)
 		c.reconcileJournalLabels(passCtx)
 		c.resolveIncidentsOnVanishedNodes(passCtx)
 		c.pollInterruptions(passCtx)
+		// Retention waits for a pass that saw every cordon and taint; after a
+		// pass that could not list them it starts on its own next tick.
+		if cordonsSeen && taintsSeen {
+			c.firstJanitorPassOnce.Do(func() { close(c.firstJanitorPass) })
+		}
 	wait:
 		for {
 			select {

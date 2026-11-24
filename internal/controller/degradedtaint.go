@@ -142,6 +142,11 @@ func (c *Controller) syncDegradedTaint(ctx context.Context, inc *types.Incident,
 			}
 			return
 		}
+		// A taint kept for an incident the store has no record of is not
+		// this incident's to remove; the janitor reports it.
+		if verdict, _, err := c.closedTaintVerdict(ctx, inc.Target.Node); err != nil || verdict != taintRemovable {
+			return
+		}
 		if err := tainter.RemoveDegradedTaint(ctx, inc.Target.Node); err != nil {
 			c.log.Warn("removing the degraded taint failed; the janitor will retry",
 				"node", inc.Target.Node, "incident", inc.ID, "err", err)
@@ -164,6 +169,7 @@ func (c *Controller) syncDegradedTaint(ctx context.Context, inc *types.Incident,
 				"node", inc.Target.Node, "incident", inc.ID, "err", err)
 			return
 		}
+		c.recordTaintOwner(ctx, inc.Target.Node, inc.ID)
 		c.log.Info("marked a node degraded so the scheduler stops sending it new work",
 			"node", inc.Target.Node, "incident", inc.ID, "effect", policy.Effect)
 	}
@@ -180,15 +186,19 @@ func (c *Controller) syncDegradedTaint(ctx context.Context, inc *types.Incident,
 // Reading the marks back from the cluster rather than remembering them is what
 // makes recovery independent of this process's lifetime, exactly as the cordon
 // janitor does.
-func (c *Controller) reconcileDegradedTaints(ctx context.Context) {
+//
+// It reports false when it could not list the marks or read the open
+// incidents, so store retention does not take that pass as having seen them.
+func (c *Controller) reconcileDegradedTaints(ctx context.Context) bool {
 	tainter := c.nodeTainter()
 	if tainter == nil {
-		return
+		return true
 	}
+	c.clearDegradedTaintRecords(ctx)
 	marked, err := tainter.DegradedTaintedNodes(ctx)
 	if err != nil {
 		c.log.Warn("listing degraded-tainted nodes failed, will retry", "err", err)
-		return
+		return false
 	}
 	policy := c.degradedTaintPolicy(ctx)
 	// Disabled is not "do nothing": a switch turned back off (or an
@@ -199,9 +209,9 @@ func (c *Controller) reconcileDegradedTaints(ctx context.Context) {
 	// never-enabled install the list is empty and it does nothing at all.
 	if !policy.Enabled {
 		for _, node := range marked {
-			c.removeDegradedTaint(ctx, tainter, node, "the degraded-node taint is not enabled")
+			c.releaseClosedTaint(ctx, tainter, node, "the degraded-node taint is not enabled")
 		}
-		return
+		return true
 	}
 	open, err := c.nodesUnderOpenIncidents(ctx)
 	if err != nil {
@@ -210,12 +220,13 @@ func (c *Controller) reconcileDegradedTaints(ctx context.Context) {
 		// rotation precisely when the control plane cannot see what is wrong
 		// with it.
 		c.log.Warn("reading open incidents failed, leaving degraded taints as they are", "err", err)
-		return
+		return false
 	}
 	isMarked := make(map[string]bool, len(marked))
 	for _, node := range marked {
 		isMarked[node] = true
 		if _, stillOpen := open[node]; stillOpen {
+			c.syncTaintOwners(ctx, node)
 			continue
 		}
 		// The two reads above are not a snapshot: the marked-node list was
@@ -234,7 +245,7 @@ func (c *Controller) reconcileDegradedTaints(ctx context.Context) {
 		if stillOpen {
 			continue
 		}
-		c.removeDegradedTaint(ctx, tainter, node, "no incident on it is open any more")
+		c.releaseClosedTaint(ctx, tainter, node, "no incident on it is open any more")
 	}
 	for node, inc := range open {
 		if isMarked[node] {
@@ -261,9 +272,11 @@ func (c *Controller) reconcileDegradedTaints(ctx context.Context) {
 			c.log.Warn("marking a node degraded failed, will retry", "node", node, "incident", inc.ID, "err", err)
 			continue
 		}
+		c.recordTaintOwner(ctx, node, inc.ID)
 		c.log.Info("marked a node degraded from the janitor",
 			"node", node, "incident", inc.ID, "effect", policy.Effect)
 	}
+	return true
 }
 
 // activeIncidentStates is every state in which an incident is still being

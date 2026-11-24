@@ -78,3 +78,19 @@ func TestWebhookErrorSurfaces(t *testing.T) {
 		t.Fatalf("err = %v, want webhook status error", err)
 	}
 }
+
+// A node_kept notice has no incident behind it, so the message names the node
+// and nothing renders an empty class, state or incident command.
+func TestNodeKeptNoticeShowsOnlyTheNodeAndMessage(t *testing.T) {
+	n, texts := capture(t, http.StatusOK)
+	err := n.Notify(context.Background(), notify.NotifyEvent{
+		Kind: notify.EventNodeKept, Node: "n1", IncidentID: "inc-old", Message: "Node n1 carries a KubeNeuron cordon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ":no_entry: KubeNeuron: node `n1` needs an operator\nNode n1 carries a KubeNeuron cordon"
+	if got := (*texts)[0]; got != want {
+		t.Fatalf("text = %q, want %q", got, want)
+	}
+}

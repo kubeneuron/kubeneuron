@@ -162,17 +162,21 @@ func TestRunningIncidentKeepsItsOwnCordon(t *testing.T) {
 	}
 }
 
-// A cordon whose incident has been deleted will never be cleared by anything
-// else, so the node would stay out of service forever.
-func TestCordonWithNoIncidentIsReleased(t *testing.T) {
+// A cordon whose incident this store has no record of is kept. The store may
+// never have held the row: a reinstall with a new store, or a backup taken
+// before the incident opened, and the node may still have its fault.
+func TestCordonWithNoIncidentIsKeptAndHeld(t *testing.T) {
 	p := &janitorPlatform{cordoned: []platform.CordonedNode{
 		{Name: "node-a", Reason: "kubeneuron: row-remap-ok (vanished-incident)"},
 	}}
 	c, _ := stackTestController(t, p)
 
 	c.reconcileCordonedNodes(context.Background())
-	if len(p.uncordoned) != 1 {
-		t.Fatalf("uncordoned = %v, want the orphaned cordon released", p.uncordoned)
+	if len(p.uncordoned) != 0 {
+		t.Fatalf("uncordoned = %v, want the cordon of an unknown incident kept", p.uncordoned)
+	}
+	if !p.held["node-a"] {
+		t.Fatal("the kept cordon was not marked held, so a later pass could still release it")
 	}
 }
 
@@ -785,17 +789,10 @@ func TestOneHumanHeldHoldDoesNotStrandTheOtherHoldsOnTheSameNode(t *testing.T) {
 	}
 
 	// inc-2 then resolves without ever reaching its uncordon step — the leak this
-	// janitor exists for — and its row is swept by retention before the next pass
-	// (a controller down overnight, or a store restored from backup).
+	// janitor exists for.
 	leaked.State = types.StateResolved
 	if err := st.UpdateIncident(ctx, leaked); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := st.Prune(ctx, time.Nanosecond, time.Nanosecond); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.GetIncident(ctx, "inc-2"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("GetIncident(inc-2) = %v, want the row to have been pruned", err)
 	}
 
 	c.reconcileCordonedNodes(ctx)

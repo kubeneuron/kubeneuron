@@ -407,6 +407,65 @@ type CordonOwnership interface {
 	MarkCordonHeldIfOwner(ctx context.Context, node, owner string) (marked bool, err error)
 }
 
+// UnknownCordonKeeper is implemented by platforms that can keep a cordon whose
+// incident the controller's store has no record of, and hand it to a human.
+//
+// A missing incident row is not evidence that the remediation finished. A
+// controller reinstalled with a new store, or started on a backup taken before
+// the incident opened, knows none of the cordons the old one placed, and
+// releasing them returned machines with real faults to the scheduler. The
+// janitor keeps them instead, marks them held, and tells a person once.
+type UnknownCordonKeeper interface {
+	// MarkCordonUnknownIfOwner records on the node that owner holds the cordon
+	// for an incident the store does not know, and marks that hold held. It
+	// reports true only when it wrote the record now, so the caller notifies
+	// once even across restarts. owner is an owner-set entry, or the legacy
+	// owner of an untracked cordon.
+	MarkCordonUnknownIfOwner(ctx context.Context, node, owner string) (marked bool, err error)
+	// ClearUnknownCordonsReleasedByHand removes the cordon bookkeeping from
+	// nodes a human has uncordoned after MarkCordonUnknownIfOwner kept them, so
+	// one `kubectl uncordon` returns the node to service. It removes
+	// karpenter.sh/do-not-disrupt only when KubeNeuron set it. It reports the
+	// nodes it cleaned.
+	ClearUnknownCordonsReleasedByHand(ctx context.Context) ([]string, error)
+	// ForgetUnknownCordon undoes MarkCordonUnknownIfOwner for one hold when
+	// the notice could not be sent, so the next pass marks and notifies
+	// again. The cordon stays.
+	ForgetUnknownCordon(ctx context.Context, node, owner string) error
+}
+
+// DegradedTaintOwnership is implemented by platforms that record on the node
+// which incidents put the degraded taint there.
+//
+// The janitor used to remove the taint from any node with no open incident.
+// On a controller with a new store, or one restored from an older backup, no
+// incident is open, so every taint the old store had placed went, including
+// those on nodes with a real fault. With the owners on the node, the janitor
+// removes a taint only when the store knows every incident that placed it, and
+// keeps the rest for a human.
+type DegradedTaintOwnership interface {
+	// UpdateDegradedTaintOwners adds and drops recorded owners. It is a no-op
+	// on a node without the taint or when nothing would change. Removing the
+	// taint also removes the record.
+	UpdateDegradedTaintOwners(ctx context.Context, node string, add, drop []string) error
+	// DegradedTaintOwners reads the node's recorded owners, from the node
+	// cache when there is one. recorded is false
+	// for a taint placed by a build that did not record them. unknown is true
+	// once MarkDegradedTaintUnknown has kept the taint.
+	DegradedTaintOwners(ctx context.Context, node string) (owners []string, recorded, unknown bool, err error)
+	// MarkDegradedTaintUnknown records that the taint is kept for an incident
+	// the store has no record of. It reports true only when it wrote the
+	// record now, so the caller notifies once.
+	MarkDegradedTaintUnknown(ctx context.Context, node string) (marked bool, err error)
+	// ForgetDegradedTaintUnknown undoes MarkDegradedTaintUnknown when the
+	// notice could not be sent, so the next pass marks and notifies again.
+	ForgetDegradedTaintUnknown(ctx context.Context, node string) error
+	// ClearDegradedTaintRecords removes the owner and unknown records from
+	// nodes that no longer carry the taint, such as after a human removed a
+	// kept one. It reports the nodes it cleaned.
+	ClearDegradedTaintRecords(ctx context.Context) ([]string, error)
+}
+
 // NodeTainter is implemented by platforms whose scheduler can be told to
 // prefer other nodes.
 //

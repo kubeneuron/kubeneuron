@@ -64,10 +64,24 @@ var eventSeverity = map[notify.EventKind]string{
 	notify.EventActionTaken: "info",
 	notify.EventNeedsHuman:  "critical",
 	notify.EventExpired:     "critical",
+	notify.EventNodeKept:    "critical",
 }
 
 // Notify implements notify.Notifier.
 func (n *Notifier) Notify(ctx context.Context, ev notify.NotifyEvent) error {
+	if ev.Kind == notify.EventNodeKept {
+		summary := fmt.Sprintf("KubeNeuron: node %s needs an operator: %s", ev.Node, ev.Message)
+		if len(summary) > 1024 { // Events v2 summary limit
+			summary = summary[:1024]
+		}
+		return n.post(ctx, event{
+			RoutingKey: n.RoutingKey, EventAction: "trigger", DedupKey: "node-kept/" + ev.Node + "/" + ev.IncidentID,
+			Payload: &payload{
+				Summary: summary, Source: ev.Node, Severity: eventSeverity[ev.Kind],
+				CustomDetails: map[string]any{"incident_id": ev.IncidentID},
+			},
+		})
+	}
 	if ev.Incident == nil {
 		return fmt.Errorf("pagerduty: notify event %q carries no incident", ev.Kind)
 	}

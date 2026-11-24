@@ -73,11 +73,21 @@ PagerDuty mapping: one KubeNeuron incident = one PagerDuty alert
 (`dedup_key` = incident ID). `needs_human`, `expired`, and approval
 requests page at `critical`; lifecycle updates re-trigger at
 `warning`/`info`; incident resolution resolves the PagerDuty alert.
+`node_kept` pages at `critical` with `dedup_key`
+`node-kept/<node>/<incident>`: KubeNeuron keeps a cordon or degraded taint
+because its store has no record of the incident that placed it (after a
+reinstall with a new store, or after restoring an older backup). This covers
+the cordon and the degraded taint only. The notice is sent once; the alert
+is not resolved automatically. Resolve it in PagerDuty after you have checked
+the node.
 
 The generic webhook receives `POST` JSON
-`{"version":1,"kind":"<event|approval_required>","step?","message?","incident":{...}}`
-with an optional `Authorization: Bearer` header from the Secret's `token`
-key. For an approval request, the message includes the approve and reject commands for its round, the decision deadline when available, and the effect of rejecting the step. When the notification includes an impact digest, the approve command carries it. Consumers must ignore unknown fields.
+`{"version":1,"kind":"<event|approval_required>","step?","message?","incident":{...}}`.
+A `node_kept` notice has no `incident` object; it carries
+`{"version":1,"kind":"node_kept","message","node","incident_id?"}`, with
+`incident_id` absent when the taint records no incident. The request has an
+optional `Authorization: Bearer` header from the Secret's `token` key.
+For an approval request, the message includes the approve and reject commands for its round, the decision deadline when available, and the effect of rejecting the step. When the notification includes an impact digest, the approve command carries it. Consumers must ignore unknown fields.
 
 ## Pausing automation
 

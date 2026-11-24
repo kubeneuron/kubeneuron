@@ -353,42 +353,6 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	}
 	leading.Store(!election.enabled)
 
-	// Hourly retention pass: the store must not grow without bound. Audit
-	// history is only pruned when the operator opted in via
-	// -store-audit-retention.
-	if storeRetention > 0 || auditRetention > 0 {
-		go func() {
-			tick := time.NewTicker(time.Hour)
-			defer tick.Stop()
-			for {
-				if !leading.Load() {
-					select {
-					case <-ctx.Done():
-						return
-					case <-tick.C:
-					}
-					continue
-				}
-				pruneCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-				stats, err := st.Prune(pruneCtx, storeRetention, auditRetention)
-				cancel()
-				if err != nil {
-					log.Warn("store retention pass failed", "err", err)
-				} else if stats != (sqlcore.PruneStats{}) {
-					log.Info("store retention pass",
-						"events", stats.Events, "outbox", stats.Outbox, "actions", stats.Actions,
-						"incidents", stats.Incidents, "audit", stats.Audit, "approvals", stats.Approvals,
-						"impact_previews", stats.ImpactPreviews)
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-tick.C:
-				}
-			}
-		}()
-	}
-
 	notifier := notify.Multi{&notify.Log{Logger: log}}
 	// Each external channel gets its own async worker with retry/backoff and
 	// dead-lettering: one channel's outage never stalls another, and neither
@@ -426,6 +390,30 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 		addAsync(pagerduty.New(key))
 	}
 	ctrl := controller.New(st, st, engine, gate, flap, plat, act, notifier, log)
+
+	// Hourly retention pass: the store must not grow without bound. Audit
+	// history is only pruned when the operator opted in via
+	// -store-audit-retention.
+	if storeRetention > 0 || auditRetention > 0 {
+		go func() {
+			tick := time.NewTicker(time.Hour)
+			defer tick.Stop()
+			runRetention(ctx, ctrl.FirstJanitorPass(), tick.C, leading.Load, func(ctx context.Context) {
+				pruneCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+				stats, err := st.Prune(pruneCtx, storeRetention, auditRetention)
+				cancel()
+				if err != nil {
+					log.Warn("store retention pass failed", "err", err)
+				} else if stats != (sqlcore.PruneStats{}) {
+					log.Info("store retention pass",
+						"events", stats.Events, "outbox", stats.Outbox, "actions", stats.Actions,
+						"incidents", stats.Incidents, "audit", stats.Audit, "approvals", stats.Approvals,
+						"impact_previews", stats.ImpactPreviews)
+				}
+			})
+		}()
+	}
+
 	if kubePlatform != nil && agentServer.InstallationUID != "" {
 		ctrl.ConfigureInventoryDiagnostics(kubePlatform.Client(), agentServer.Namespace, agentServer.InstallationName, agentServer.InstallationUID)
 		ctrl.ConfigureFirstAlertRecord(kubePlatform.Client().CoreV1().ConfigMaps(agentServer.Namespace), agentServer.InstallationName, agentServer.InstallationUID)
@@ -917,4 +905,30 @@ func splitNonEmpty(s, sep string) []string {
 		}
 	}
 	return out
+}
+
+// runRetention runs prune on every tick while this replica leads.
+//
+// The first pass waits for the janitors' first pass. A cordon whose incident is
+// pruned before the janitor saw it resolved looks exactly like one the store
+// never knew, and the janitor keeps those for a human instead of releasing
+// them. A janitor pass that never completes must not stop retention for good,
+// so the first tick starts it as well.
+func runRetention(ctx context.Context, firstJanitorPass <-chan struct{}, tick <-chan time.Time, leading func() bool, prune func(context.Context)) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-firstJanitorPass:
+	case <-tick:
+	}
+	for {
+		if leading() {
+			prune(ctx)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick:
+		}
+	}
 }

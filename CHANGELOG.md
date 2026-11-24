@@ -40,6 +40,11 @@ API is `v1alpha1`.
 - Agents now space out action polls when the queue is empty or the controller is unavailable, and stagger registration heartbeats. On an idle node, the agent now waits up to 15 seconds between polls (previously about 5 seconds), so a newly queued action is picked up later than before.
 
 - install.sh --uninstall stops when an incident has a cloud replacement in progress (override with --skip-open-incident-check), turns back on the NVIDIA GPU Operator components that KubeNeuron had turned off on a node, and lists nodes that still have a KubeNeuron cordon or taint with the commands to remove them. Uninstall now needs jq, curl and openssl on the machine that runs it.
+
+- After the upgrade, a KubeNeuron cordon or degraded taint whose incident is no longer in the store is kept and reported to the operator instead of being removed. Check those nodes and remove the cordon or taint yourself.
+
+- New notice kind `node_kept` for a kept cordon or degraded taint. The webhook payload has no `incident` object, only `node` and, when recorded, `incident_id`. PagerDuty receives a `critical` event that is not resolved automatically. Consumers that expect an `incident` object in every notice need to handle it.
+
 - When automatic repair stops after repeated failures, an approval decision, or missing recovery evidence, the incident now tells the operator what to check and how to close it.
 
 - When an add-first replacement node is kept because it runs a workload or its removal cannot be confirmed, the incident names the pool, explains the possible extra charge and gives the command to record the outcome.
@@ -58,6 +63,7 @@ API is `v1alpha1`.
 
 - install.sh --uninstall no longer suggests deleting the full install manifest. That command also deleted the kube-neuron namespace, with any volume claims the uninstall had just kept there, and all KubeNeuron CRDs and custom resources. The script now prints commands that remove only the operator.
 
+- The controller no longer removes a KubeNeuron cordon or degraded taint when its store has no record of the incident that placed it (after a reinstall with a new store, or after restoring an older backup). It keeps the cordon or taint and tells the operator once, naming the node and, when it is recorded, the incident.
 - When a GKE remove-first replacement needs an operator, the incident explains how to check the pool and settle the cloud operation. If the pool has been removed, the incident no longer suggests resizing it.
 - Add-first: a replacement node that KubeNeuron left in the pool — because it was already running a workload, or because its removal could not be confirmed — is no longer dropped from the incident's record when a later attempt plans its own replacement. The incident now waits for the operator and names the pool (and the node, when it was kept for a workload); `kubeneuronctl resolve <id> --cloud-operation-settled --reason "<what you found>"` then closes it. If the command is run while a later attempt is still in progress, it settles only the earlier node's record, and the incident stays open.
 

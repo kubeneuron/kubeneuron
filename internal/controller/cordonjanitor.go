@@ -68,15 +68,19 @@ func incidentFromCordonReason(reason string) (string, bool) {
 // that ended in NEEDS_HUMAN or expired is *not* uncordoned: something decided
 // the node was not fit, and putting it back silently would undo that judgement.
 // Those are reported instead, once.
-func (c *Controller) reconcileCordonedNodes(ctx context.Context) {
+//
+// It reports false when it could not list the cordoned nodes, so store
+// retention does not take that pass as having seen them.
+func (c *Controller) reconcileCordonedNodes(ctx context.Context) bool {
 	janitor, ok := c.platform.(platform.CordonJanitor)
 	if !ok {
-		return
+		return true
 	}
+	c.clearUnknownCordonsReleasedByHand(ctx)
 	nodes, err := janitor.CordonedNodes(ctx)
 	if err != nil {
 		c.log.Warn("listing cordoned nodes failed, will retry", "err", err)
-		return
+		return false
 	}
 	for _, node := range nodes {
 		// Every remediation holding this node, not just the one whose reason is
@@ -93,6 +97,7 @@ func (c *Controller) reconcileCordonedNodes(ctx context.Context) {
 			c.reconcileCordonOwner(ctx, janitor, node, owner)
 		}
 	}
+	return true
 }
 
 // reconcileCordonOwner decides what to do about ONE remediation's hold on a
@@ -134,7 +139,15 @@ func (c *Controller) reconcileCordonOwner(ctx context.Context, janitor platform.
 				"node", node.Name, "incident", incidentID)
 			return
 		}
-		c.uncordonAbandoned(ctx, node, owner, incidentID, "its incident no longer exists")
+		// Nor is it proof that the remediation finished. A store that never
+		// held the row — a reinstall with a new store, a backup taken before the
+		// incident opened — looks exactly like one that pruned it, and
+		// releasing on that basis returned machines with real faults to the
+		// scheduler. A live controller releases a resolved incident's cordon on
+		// its next pass, long before retention prunes the row, so a missing row
+		// with the cordon still in place is the unknown case: keep it and tell a
+		// human.
+		c.keepUnknownCordon(ctx, janitor, node, owner, incidentID)
 		return
 	}
 	if isActiveIncidentState(inc.State) {
@@ -150,6 +163,81 @@ func (c *Controller) reconcileCordonOwner(ctx context.Context, janitor platform.
 		c.markCordonHeld(ctx, janitor, node, owner)
 	}
 	c.reportStuckCordon(ctx, node.Name, inc)
+}
+
+// keepUnknownCordon keeps a cordon whose incident this store has no record of,
+// marks the hold held, and notifies once.
+//
+// Once is enforced on the node, not in memory: the platform reports a write
+// only the first time it records this hold as unknown, so a restart does not
+// repeat the notice.
+func (c *Controller) keepUnknownCordon(ctx context.Context, janitor platform.CordonJanitor, node platform.CordonedNode, owner, incidentID string) {
+	keeper, ok := c.platform.(platform.UnknownCordonKeeper)
+	if !ok {
+		// Fail closed all the same: the held mark alone stops every later pass
+		// from releasing this hold.
+		c.markCordonHeld(ctx, janitor, node, owner)
+		return
+	}
+	marked, err := keeper.MarkCordonUnknownIfOwner(ctx, node.Name, owner)
+	if err != nil {
+		c.log.Warn("recording a cordon kept for an unknown incident failed, will retry",
+			"node", node.Name, "incident", incidentID, "err", err)
+		return
+	}
+	if !marked {
+		return
+	}
+	withTaint := c.keepTaintWithCordon(ctx, node.Name, incidentID)
+	c.log.Warn("keeping a cordon whose incident this store has no record of",
+		"node", node.Name, "incident", incidentID)
+	if c.notifier == nil {
+		return
+	}
+	if err := c.notifier.Notify(ctx, notify.NotifyEvent{
+		Kind: notify.EventNodeKept, Node: node.Name, IncidentID: incidentID,
+		Message: unknownCordonMessage(node.Name, incidentID, withTaint),
+	}); err != nil {
+		// The record is what stops a second notice, so a notice that was not
+		// sent must not leave it: forget it, and the next pass tries again.
+		// The cordon stays either way.
+		c.log.Warn("reporting a cordon kept for an unknown incident failed, will retry", "node", node.Name, "err", err)
+		if err := keeper.ForgetUnknownCordon(ctx, node.Name, owner); err != nil {
+			c.log.Warn("clearing the record of an unreported kept cordon failed", "node", node.Name, "err", err)
+		}
+		if withTaint {
+			c.forgetUnknownTaint(ctx, node.Name)
+		}
+	}
+}
+
+// unknownCordonMessage is the notice for a kept cordon. withTaint covers a
+// degraded taint kept for the same incident, so one notice names both.
+func unknownCordonMessage(node, incidentID string, withTaint bool) string {
+	release := "kubectl uncordon " + node
+	if withTaint {
+		release += " and kubectl taint nodes " + node + " kubeneuron.io/degraded-"
+	}
+	return fmt.Sprintf("Node %s carries a KubeNeuron cordon for incident %s, but this controller's store has no "+
+		"record of that incident (for example after a reinstall or after restoring an older backup). "+
+		"KubeNeuron keeps the cordon and will not remove it. Check the node; when it can return to service, "+
+		"run %s", node, incidentID, release)
+}
+
+// clearUnknownCordonsReleasedByHand finishes what a human's `kubectl uncordon`
+// started on a node whose cordon was kept for an unknown incident.
+func (c *Controller) clearUnknownCordonsReleasedByHand(ctx context.Context) {
+	keeper, ok := c.platform.(platform.UnknownCordonKeeper)
+	if !ok {
+		return
+	}
+	cleared, err := keeper.ClearUnknownCordonsReleasedByHand(ctx)
+	for _, node := range cleared {
+		c.log.Info("removed the cordon bookkeeping from a node a human uncordoned", "node", node)
+	}
+	if err != nil {
+		c.log.Warn("clearing the cordon bookkeeping of uncordoned nodes failed, will retry", "err", err)
+	}
 }
 
 // markCordonHeld records that a human owns this node's cordon, scoped to the

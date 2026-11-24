@@ -79,3 +79,35 @@ func TestNon2xxIsAnError(t *testing.T) {
 		t.Fatal("502 must surface as an error so the retry/dead-letter path engages")
 	}
 }
+
+// A node_kept notice carries the node and the incident ID, and no incident
+// object: the controller's store has no record of one.
+func TestNodeKeptNoticeCarriesNoIncident(t *testing.T) {
+	var raw map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	err := New(server.URL, "").Notify(context.Background(), notify.NotifyEvent{
+		Kind: notify.EventNodeKept, Node: "n1", IncidentID: "inc-old", Message: "Node n1 carries a KubeNeuron cordon",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"version": float64(1), "kind": "node_kept", "message": "Node n1 carries a KubeNeuron cordon",
+		"node": "n1", "incident_id": "inc-old",
+	}
+	if len(raw) != len(want) {
+		t.Fatalf("payload = %v, want %v", raw, want)
+	}
+	for k, v := range want {
+		if raw[k] != v {
+			t.Fatalf("payload[%s] = %v, want %v (payload %v)", k, raw[k], v, raw)
+		}
+	}
+}

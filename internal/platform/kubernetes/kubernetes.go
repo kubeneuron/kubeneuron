@@ -540,6 +540,13 @@ const cordonHeldAnnotation = "kubeneuron.io/cordon-held"
 // holder and it cannot be wrong. See platform.CordonedNode.HeldBy.
 const cordonHeldOwnersAnnotation = "kubeneuron.io/cordon-held-owners"
 
+// cordonUnknownOwnersAnnotation records which holds on this node the janitor
+// kept because the controller's store had no record of their incident, as a
+// JSON array of owner names. Those holds are also held, so the janitor never
+// releases them; this record is what lets it tidy up after a human uncordons
+// the node, and what keeps it from notifying about the same hold twice.
+const cordonUnknownOwnersAnnotation = "kubeneuron.io/cordon-unknown-owners"
+
 // cordonAnnotations is everything this product writes to hold a node cordoned,
 // listed once. Every release path removes the whole list: an annotation left
 // behind on a node that is back in service makes the next janitor pass read it
@@ -572,6 +579,7 @@ var cordonAnnotations = []string{
 	cordonRestoreAnnotation,
 	cordonHeldAnnotation,
 	cordonHeldOwnersAnnotation,
+	cordonUnknownOwnersAnnotation,
 }
 
 // Cordon marks the node unschedulable, records the reason, and protects it from
@@ -870,27 +878,32 @@ func (p *Platform) releaseUntrackedCordon(ctx context.Context, node string, curr
 // the fleet for good. Its own compare-and-swap comes from the owner-set test op
 // this is appended to — the two annotations only ever move together here.
 func (p *Platform) dropHeldOwnersOps(node string, current *corev1.Node, leaving []string) ([]map[string]any, error) {
-	rawHeld, present := current.Annotations[cordonHeldOwnersAnnotation]
-	if !present {
-		return nil, nil
+	var ops []map[string]any
+	// The unknown-incident record is a subset of the held set and leaves with it.
+	for _, ann := range []string{cordonHeldOwnersAnnotation, cordonUnknownOwnersAnnotation} {
+		rawHeld, present := current.Annotations[ann]
+		if !present {
+			continue
+		}
+		held, err := decodeCordonOwners(rawHeld)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s on %s: %w", ann, node, err)
+		}
+		kept := slices.DeleteFunc(slices.Clone(held), func(o string) bool { return slices.Contains(leaving, o) })
+		switch {
+		case len(kept) == len(held):
+		case len(kept) == 0:
+			// Removed rather than written empty. An empty set left behind is another
+			// annotation the next release has to reason about, and "present but says
+			// nothing" is the shape that keeps producing these defects.
+			ops = append(ops, map[string]any{
+				"op": "remove", "path": "/metadata/annotations/" + escapeJSONPointer(ann),
+			})
+		default:
+			ops = append(ops, setAnnotationOp(ann, encodeCordonOwners(kept)))
+		}
 	}
-	held, err := decodeCordonOwners(rawHeld)
-	if err != nil {
-		return nil, fmt.Errorf("reading the held cordon owners of %s: %w", node, err)
-	}
-	kept := slices.DeleteFunc(slices.Clone(held), func(o string) bool { return slices.Contains(leaving, o) })
-	if len(kept) == len(held) {
-		return nil, nil
-	}
-	if len(kept) == 0 {
-		// Removed rather than written empty. An empty set left behind is another
-		// annotation the next release has to reason about, and "present but says
-		// nothing" is the shape that keeps producing these defects.
-		return []map[string]any{{
-			"op": "remove", "path": "/metadata/annotations/" + escapeJSONPointer(cordonHeldOwnersAnnotation),
-		}}, nil
-	}
-	return []map[string]any{setAnnotationOp(cordonHeldOwnersAnnotation, encodeCordonOwners(kept))}, nil
+	return ops, nil
 }
 
 // restoreOps builds the patch operations that put a node back the way its first
@@ -1054,6 +1067,238 @@ func (p *Platform) MarkCordonHeldIfOwner(ctx context.Context, node, owner string
 		return false, err
 	}
 	return true, nil
+}
+
+var _ platform.UnknownCordonKeeper = (*Platform)(nil)
+
+// MarkCordonUnknownIfOwner implements platform.UnknownCordonKeeper.
+//
+// It writes the held mark and the unknown-incident record in one patch, tested
+// against the owner set (or the reason, for an untracked cordon) and against
+// both records as read, so a hold that left or a verdict that landed since the
+// janitor's listing makes the write fail and the next pass decide again.
+func (p *Platform) MarkCordonUnknownIfOwner(ctx context.Context, node, owner string) (bool, error) {
+	current, err := p.client.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading %s before keeping its cordon: %w", node, err)
+	}
+	rawUnknown, hasUnknown := current.Annotations[cordonUnknownOwnersAnnotation]
+	unknown, err := decodeCordonOwners(rawUnknown)
+	if err != nil {
+		return false, fmt.Errorf("reading the unknown cordon owners of %s: %w", node, err)
+	}
+	if slices.Contains(unknown, owner) {
+		return false, nil // already kept and reported
+	}
+	ops := []map[string]any{annotationTestOp(cordonUnknownOwnersAnnotation, rawUnknown, hasUnknown)}
+	if raw, counted := current.Annotations[cordonOwnersAnnotation]; counted {
+		owners, err := decodeCordonOwners(raw)
+		if err != nil {
+			return false, fmt.Errorf("reading the cordon owners of %s: %w", node, err)
+		}
+		if !slices.Contains(owners, owner) {
+			return false, nil // this owner has left since we listed it
+		}
+		rawHeld := current.Annotations[cordonHeldOwnersAnnotation]
+		held, err := decodeCordonOwners(rawHeld)
+		if err != nil {
+			return false, fmt.Errorf("reading the held cordon owners of %s: %w", node, err)
+		}
+		ops = append(ops,
+			annotationTestOp(cordonOwnersAnnotation, raw, true),
+			heldOwnerSetGuard(rawHeld, current.Annotations))
+		if !slices.Contains(held, owner) {
+			ops = append(ops, setAnnotationOp(cordonHeldOwnersAnnotation, encodeCordonOwners(append(held, owner))))
+		}
+	} else {
+		reason := current.Annotations[cordonReasonAnnotation]
+		if platform.LegacyCordonOwner(reason) != owner {
+			return false, nil // replaced since we listed it
+		}
+		ops = append(ops, annotationTestOp(cordonReasonAnnotation, reason, true))
+	}
+	ops = append(ops,
+		setAnnotationOp(cordonHeldAnnotation, "true"),
+		setAnnotationOp(cordonUnknownOwnersAnnotation, encodeCordonOwners(append(unknown, owner))))
+	patch, _ := json.Marshal(ops)
+	if _, err := p.client.CoreV1().Nodes().Patch(
+		ctx, node, k8stypes.JSONPatchType, patch, metav1.PatchOptions{}); err != nil {
+		if apierrors.IsInvalid(err) || apierrors.IsConflict(err) {
+			return false, nil // the node moved under us; the next pass re-decides
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// ClearUnknownCordonsReleasedByHand implements platform.UnknownCordonKeeper.
+//
+// Only nodes that carry the unknown-incident record and are schedulable again
+// qualify: the record says the janitor handed this cordon to a human, and the
+// missing unschedulable flag says the human has decided. The handoff annotation
+// is a human's and stays; everything KubeNeuron wrote goes, and so does
+// karpenter.sh/do-not-disrupt unless it was on the node before KubeNeuron
+// cordoned it.
+func (p *Platform) ClearUnknownCordonsReleasedByHand(ctx context.Context) ([]string, error) {
+	nodes, err := p.listNodesForJanitor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var candidates []string
+	for _, node := range nodes {
+		if releasedUnknownCordon(node) {
+			candidates = append(candidates, node.Name)
+		}
+	}
+	var cleared []string
+	for _, name := range candidates {
+		current, err := p.client.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return cleared, fmt.Errorf("reading %s before clearing its released cordon: %w", name, err)
+		}
+		if !releasedUnknownCordon(current) {
+			continue
+		}
+		ops, err := releasedUnknownCordonOps(current)
+		if err != nil {
+			return cleared, fmt.Errorf("reading the cordon owners of %s: %w", name, err)
+		}
+		patch, _ := json.Marshal(ops)
+		if _, err := p.client.CoreV1().Nodes().Patch(ctx, name, k8stypes.JSONPatchType, patch, metav1.PatchOptions{}); err != nil {
+			if apierrors.IsInvalid(err) || apierrors.IsConflict(err) {
+				continue // the node moved under us; the next pass re-reads
+			}
+			return cleared, err
+		}
+		cleared = append(cleared, name)
+	}
+	return cleared, nil
+}
+
+// releasedUnknownCordonOps is the write that follows a human's uncordon of a
+// node with holds kept for unknown incidents.
+//
+// When only unknown holds are left, everything KubeNeuron wrote goes. When
+// the node also has holds for incidents the store knows, only the unknown
+// holds leave the owner, held and unknown sets; the rest of the bookkeeping
+// and karpenter.sh/do-not-disrupt are those incidents' and stay.
+func releasedUnknownCordonOps(current *corev1.Node) ([]map[string]any, error) {
+	rawUnknown := current.Annotations[cordonUnknownOwnersAnnotation]
+	// Tested on the record itself: a hold kept or released since this read
+	// changes it, and the next pass decides again. A human re-cordoning in
+	// the gap loses only our bookkeeping, never their cordon.
+	ops := []map[string]any{annotationTestOp(cordonUnknownOwnersAnnotation, rawUnknown, true)}
+	unknown, err := decodeCordonOwners(rawUnknown)
+	if err != nil {
+		return nil, err
+	}
+	rawOwners, counted := current.Annotations[cordonOwnersAnnotation]
+	owners, err := decodeCordonOwners(rawOwners)
+	if err != nil {
+		return nil, err
+	}
+	notUnknown := func(o string) bool { return !slices.Contains(unknown, o) }
+	if counted && slices.ContainsFunc(owners, notUnknown) {
+		rawHeld := current.Annotations[cordonHeldOwnersAnnotation]
+		held, err := decodeCordonOwners(rawHeld)
+		if err != nil {
+			return nil, err
+		}
+		held = slices.DeleteFunc(held, func(o string) bool { return !notUnknown(o) })
+		ops = append(ops,
+			annotationTestOp(cordonOwnersAnnotation, rawOwners, true),
+			heldOwnerSetGuard(rawHeld, current.Annotations),
+			setAnnotationOp(cordonOwnersAnnotation, encodeCordonOwners(slices.DeleteFunc(owners, func(o string) bool { return !notUnknown(o) }))),
+			setAnnotationOp(cordonHeldOwnersAnnotation, encodeCordonOwners(held)),
+			map[string]any{"op": "remove", "path": "/metadata/annotations/" + escapeJSONPointer(cordonUnknownOwnersAnnotation)},
+		)
+		return ops, nil
+	}
+	_, keepPinned, _ := priorMarks(current.Annotations)
+	ops = append(ops, removeOurAnnotationOps(current)...)
+	if _, pinned := current.Annotations[doNotDisruptAnnotation]; pinned && !keepPinned {
+		ops = append(ops, map[string]any{
+			"op": "remove", "path": "/metadata/annotations/" + escapeJSONPointer(doNotDisruptAnnotation),
+		})
+	}
+	return ops, nil
+}
+
+// ForgetUnknownCordon implements platform.UnknownCordonKeeper.
+func (p *Platform) ForgetUnknownCordon(ctx context.Context, node, owner string) error {
+	current, err := p.client.CoreV1().Nodes().Get(ctx, node, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("reading %s before forgetting its kept cordon: %w", node, err)
+	}
+	rawUnknown := current.Annotations[cordonUnknownOwnersAnnotation]
+	unknown, err := decodeCordonOwners(rawUnknown)
+	if err != nil {
+		return fmt.Errorf("reading the unknown cordon owners of %s: %w", node, err)
+	}
+	if !slices.Contains(unknown, owner) {
+		return nil
+	}
+	ops := []map[string]any{annotationTestOp(cordonUnknownOwnersAnnotation, rawUnknown, true)}
+	if rest := slices.DeleteFunc(slices.Clone(unknown), func(o string) bool { return o == owner }); len(rest) > 0 {
+		ops = append(ops, setAnnotationOp(cordonUnknownOwnersAnnotation, encodeCordonOwners(rest)))
+	} else {
+		ops = append(ops, map[string]any{"op": "remove", "path": "/metadata/annotations/" + escapeJSONPointer(cordonUnknownOwnersAnnotation)})
+	}
+	if _, counted := current.Annotations[cordonOwnersAnnotation]; counted {
+		rawHeld := current.Annotations[cordonHeldOwnersAnnotation]
+		held, err := decodeCordonOwners(rawHeld)
+		if err != nil {
+			return fmt.Errorf("reading the held cordon owners of %s: %w", node, err)
+		}
+		ops = append(ops, heldOwnerSetGuard(rawHeld, current.Annotations),
+			setAnnotationOp(cordonHeldOwnersAnnotation, encodeCordonOwners(
+				slices.DeleteFunc(held, func(o string) bool { return o == owner }))))
+	} else if _, held := current.Annotations[cordonHeldAnnotation]; held {
+		ops = append(ops, map[string]any{"op": "remove", "path": "/metadata/annotations/" + escapeJSONPointer(cordonHeldAnnotation)})
+	}
+	patch, _ := json.Marshal(ops)
+	if _, err := p.client.CoreV1().Nodes().Patch(ctx, node, k8stypes.JSONPatchType, patch, metav1.PatchOptions{}); err != nil {
+		if apierrors.IsInvalid(err) || apierrors.IsConflict(err) {
+			return nil // the node moved under us; the next pass re-decides
+		}
+		return err
+	}
+	return nil
+}
+
+// listNodesForJanitor serves the informer cache once synced and falls back to
+// a live List, like CordonedNodes. Every write it leads to re-reads live.
+func (p *Platform) listNodesForJanitor(ctx context.Context) ([]*corev1.Node, error) {
+	if lp := p.nodeLister.Load(); lp != nil {
+		if cached, err := (*lp).List(labels.Everything()); err == nil {
+			return cached, nil
+		}
+	}
+	nodes, err := p.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*corev1.Node, len(nodes.Items))
+	for i := range nodes.Items {
+		out[i] = &nodes.Items[i]
+	}
+	return out, nil
+}
+
+// releasedUnknownCordon reports whether a human has uncordoned a node whose
+// cordon the janitor kept for an unknown incident.
+func releasedUnknownCordon(node *corev1.Node) bool {
+	_, kept := node.Annotations[cordonUnknownOwnersAnnotation]
+	return kept && !node.Spec.Unschedulable
 }
 
 // ownerSetGuard returns the compare-and-swap prefix for a write to the owner

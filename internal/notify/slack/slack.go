@@ -43,10 +43,14 @@ var eventEmoji = map[notify.EventKind]string{
 	notify.EventResolved:    ":white_check_mark:",
 	notify.EventNeedsHuman:  ":no_entry:",
 	notify.EventExpired:     ":hourglass:",
+	notify.EventNodeKept:    ":no_entry:",
 }
 
 // Notify implements notify.Notifier.
 func (n *Notifier) Notify(ctx context.Context, ev notify.NotifyEvent) error {
+	if ev.Kind == notify.EventNodeKept {
+		return n.post(ctx, fmt.Sprintf("%s KubeNeuron: node `%s` needs an operator\n%s", eventEmoji[ev.Kind], ev.Node, ev.Message))
+	}
 	if ev.Incident == nil {
 		return fmt.Errorf("slack: notify event %q carries no incident", ev.Kind)
 	}

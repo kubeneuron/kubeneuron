@@ -23,12 +23,21 @@ const (
 	EventResolved    EventKind = "resolved"
 	EventNeedsHuman  EventKind = "needs_human"
 	EventExpired     EventKind = "expired"
+	// EventNodeKept says a node keeps a KubeNeuron cordon or taint for an
+	// incident this controller's store has no record of. It carries no
+	// Incident, only Node and IncidentID: there is no incident to show, and a
+	// link to one would lead nowhere.
+	EventNodeKept EventKind = "node_kept"
 )
 
 // NotifyEvent is a notification about an incident.
 type NotifyEvent struct {
 	Kind     EventKind
 	Incident *types.Incident
+	// Node and IncidentID identify an EventNodeKept notice, which has no
+	// Incident.
+	Node       string
+	IncidentID string
 	// Message is a human-readable one-liner (action, result, denial reason).
 	Message string
 }
@@ -88,6 +97,11 @@ var _ Notifier = (*Log)(nil)
 // rather than an error returned to a queue. slack, webhook and pagerduty all
 // check; this one dereferenced.
 func (l *Log) Notify(ctx context.Context, ev NotifyEvent) error {
+	if ev.Kind == EventNodeKept {
+		l.Logger.Warn("node notification",
+			"kind", ev.Kind, "node", ev.Node, "incident", ev.IncidentID, "message", ev.Message)
+		return nil
+	}
 	if ev.Incident == nil {
 		return fmt.Errorf("log: notify event %q carries no incident", ev.Kind)
 	}
