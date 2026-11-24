@@ -302,7 +302,7 @@ kubectl -n kube-neuron get deployment kubeneuron-operator
     `--observability`. `--uninstall` removes the
     installation while retaining SQLite state and the metrics store's claim;
     `--uninstall --delete-data` explicitly removes both after confirmation.
-    Reinstall with the same name, namespace and storage settings to reuse it.
+    Reinstall with the same name, namespace and storage settings to reuse it. See the [uninstall guide](uninstall.md) for Helm removal, data retention and node cleanup.
 
     The one-liner:
     ```sh
