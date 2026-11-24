@@ -5,6 +5,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -302,6 +303,8 @@ func TestAcceptedGrowThatRanOutOfCapacity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &capacityGrowPlatform{growPlatform: &growPlatform{plannedPlatform: newPlannedPlatform(), reads: []removefirst.GrowObservation{tc.obs}}}
 			c, st := plannedFixture(t, p.plannedPlatform)
+			var logs bytes.Buffer
+			c.log = slog.New(slog.NewTextHandler(&logs, nil))
 			c.platform = p
 			id := openOn(t, c, "n1")
 			_, err := c.recycleNodeStep(t.Context(), mustIncident(t, st, id), true)
@@ -315,6 +318,17 @@ func TestAcceptedGrowThatRanOutOfCapacity(t *testing.T) {
 			got := mustIncident(t, st, id)
 			if got.State == types.StateNeedsHuman != tc.human || !strings.HasPrefix(got.RemoveFirst.Reason, tc.want) {
 				t.Fatalf("state=%s record=%+v", got.State, got.RemoveFirst)
+			}
+			trail, readErr := st.AuditTrail(t.Context(), id)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			public, marshalErr := json.Marshal([]any{got, trail, err.Error()})
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			if bytes.Contains(public, []byte("AllocationFailed")) || !strings.Contains(logs.String(), "AllocationFailed") {
+				t.Fatal("provider diagnostic must be present only in the controller log")
 			}
 			if p.grows != 1 || p.resizes["gpu"] != 0 {
 				t.Fatalf("grows=%d resizes=%v", p.grows, p.resizes)
