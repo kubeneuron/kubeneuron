@@ -527,3 +527,23 @@ func TestOperatorTokenProviderEnablesHotRotation(t *testing.T) {
 		t.Fatalf("post-rotation old token status = %d, want 401", rec.Code)
 	}
 }
+
+func TestVersionRequiresAuthenticatedLeader(t *testing.T) {
+	s := New(&registrationBackend{})
+	s.EnableOperatorAPI(&fakeOperator{}, "secret")
+	s.SetControllerVersion("test-build")
+	for _, tc := range []struct {
+		token  string
+		leader bool
+		code   int
+	}{
+		{"wrong", true, 401}, {"secret", false, 503}, {"secret", true, 200},
+	} {
+		s.SetReadyCheck(func() bool { return tc.leader })
+		rec := httptest.NewRecorder()
+		s.Routes().ServeHTTP(rec, operatorRequest("GET", "/api/v1/version", tc.token, ""))
+		if rec.Code != tc.code || (tc.code == 200 && strings.TrimSpace(rec.Body.String()) != `{"version":"test-build"}`) {
+			t.Fatalf("version: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+}

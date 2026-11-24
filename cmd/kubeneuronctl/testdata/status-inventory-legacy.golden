@@ -1,3 +1,4 @@
+controller: version not reported (this controller is from a release that does not report it)
 automation paused: false
 incidents: 0 total
 GPU inventory: 1 GPU across 1 reporting node

@@ -16,6 +16,8 @@ func statusServer(t *testing.T, runtimeConfig string) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/api/v1/version":
+			http.NotFound(w, r)
 		case "/api/v1/incidents":
 			_, _ = w.Write([]byte("[]"))
 		case "/api/v1/pause":

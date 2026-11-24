@@ -462,6 +462,9 @@ func (s *Server) registerOperatorRoutes(mux routeMux) {
 	mux.HandleFunc("GET /api/v1/report/recovery", s.requireOperator(s.handleRecoveryReport))
 	mux.HandleFunc("GET /api/v1/targets", s.requireOperator(s.handleTargets))
 	mux.HandleFunc("GET /api/v1/runtime-config", s.requireOperator(s.handleRuntimeConfig))
+	mux.HandleFunc("GET /api/v1/version", s.requireOperator(s.requireLeader(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, map[string]string{"version": s.controllerVersion})
+	})).ServeHTTP))
 	mux.HandleFunc("GET /api/v1/pause", s.requireOperator(s.handleGetPause))
 	mux.HandleFunc("POST /api/v1/pause", s.requireOperatorMutation(s.handleSetPause(true)))
 	mux.HandleFunc("DELETE /api/v1/pause", s.requireOperatorMutation(s.handleSetPause(false)))

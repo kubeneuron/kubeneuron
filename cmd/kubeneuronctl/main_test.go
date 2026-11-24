@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -342,6 +343,26 @@ func TestIncidentShowCrossZoneSuccessor(t *testing.T) {
 	}
 }
 
+func TestStatusContinuesAfterEmptyVersion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/version":
+			_, _ = io.WriteString(w, `{"version":""}`)
+		case "/api/v1/incidents":
+			_, _ = io.WriteString(w, "[]")
+		case "/api/v1/pause":
+			_, _ = io.WriteString(w, `{"paused":true}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	out, err := runCommand(t, server.URL, "status")
+	if err != nil || !strings.HasPrefix(out, "controller: version not reported\nautomation paused: true\n") {
+		t.Fatalf("status: %q, %v", out, err)
+	}
+}
+
 func TestStatusInventoryGolden(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -355,6 +376,12 @@ func TestStatusInventoryGolden(t *testing.T) {
 			summary := inventory.Summary{ObservedAt: now, LastReportAt: now, ReportingNodes: tc.nodes, GPUs: tc.gpus, NodeLevelActions: tc.mode}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
+				case "/api/v1/version":
+					if tc.name == "legacy" {
+						http.NotFound(w, r)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]string{"version": "v1.0.0-rc.3"})
 				case "/api/v1/incidents":
 					_ = json.NewEncoder(w).Encode([]types.Incident{})
 				case "/api/v1/pause":

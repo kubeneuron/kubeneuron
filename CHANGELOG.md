@@ -11,6 +11,8 @@ API is `v1alpha1`.
 
 ### Added
 
+- `kubeneuronctl status` shows the version of the controller that answered the request.
+
 - For multi-zone EKS and AKS pools using `AnyPoolZone`, `kubeneuronctl pools`
   warns that a replacement may join another zone. The incident impact preview
   reports how many pods have zone constraints from persistent volumes or

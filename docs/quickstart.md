@@ -43,6 +43,8 @@ Back in the first terminal, load the API token from the Kubernetes Secret and ch
 KUBENEURONCTL_TOKEN=$(kubectl -n kube-neuron get secret kubeneuron-operator-api-token -o jsonpath='{.data.token}' | base64 -d) && export KUBENEURONCTL_TOKEN && "$cli_dir/kubeneuronctl" --server http://127.0.0.1:8080 status
 ```
 
+The first line, `controller: <version>`, identifies the controller that answered.
+
 ## Check GPU visibility
 
 ```sh

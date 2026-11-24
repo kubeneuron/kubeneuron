@@ -53,7 +53,9 @@ import (
 	"github.com/kubeneuron/kubeneuron/web"
 )
 
-var version = "dev"
+const developmentVersion = "dev"
+
+var version = developmentVersion
 
 type agentServerConfig struct {
 	TrainingListenAddr string
@@ -77,6 +79,9 @@ const (
 )
 
 func main() {
+	if version == "" {
+		version = developmentVersion
+	}
 	var (
 		listenAddr             = flag.String("listen", ":8080", "webhook, health, and public API listen address")
 		publicTLSCert          = flag.String("public-tls-cert", "", "serving certificate for the public listener; empty serves plain HTTP")
@@ -423,6 +428,7 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 		ctrl.ConfigurePublishedConfig(kubePlatform.Client().CoreV1().ConfigMaps(agentServer.Namespace), agentServer.InstallationName)
 	}
 	api := httpapi.New(ctrl)
+	api.SetControllerVersion(version)
 	// Install the leader fence before either listener starts.  A standby may be
 	// addressed directly even though it is unready, so readiness alone cannot
 	// protect the short startup interval before leader election begins.

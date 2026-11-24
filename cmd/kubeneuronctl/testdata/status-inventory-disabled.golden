@@ -1,3 +1,4 @@
+controller: v1.0.0-rc.3
 automation paused: false
 incidents: 0 total
 GPU inventory: 1 GPU across 2 reporting nodes

@@ -166,6 +166,7 @@ replaces a node without approval only when the fault location is
 
 | Route | Purpose |
 |---|---|
+| `GET /api/v1/version` | responding leader's build version as `{"version":"<tag>"}`; requires operator authentication, returns 503 on standby |
 | `GET /api/v1/pause` | current global pause state |
 | `POST /api/v1/pause` | pause all automated remediation (big red button) |
 | `DELETE /api/v1/pause` | resume |

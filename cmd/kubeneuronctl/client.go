@@ -49,6 +49,11 @@ func newClient(cmd *cobra.Command) (*client, error) {
 	}, nil
 }
 
+type responseError struct {
+	code int
+	error
+}
+
 // do performs a request; when out is non-nil the JSON response is decoded
 // into it.
 func (c *client) do(method, path string, in, out any) error {
@@ -91,7 +96,7 @@ func (c *client) doHeaders(method, path string, in, out any, headers map[string]
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusServiceUnavailable {
 			msg += " (set --token-file or KUBENEURONCTL_TOKEN; the controller needs -api-token-file)"
 		}
-		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, msg)
+		return &responseError{resp.StatusCode, fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, msg)}
 	}
 	if out == nil {
 		return nil

@@ -126,10 +126,11 @@ type AcceleratorObservationProfileBackend interface {
 
 // Server carries the route handlers.
 type Server struct {
-	backend       Backend
-	operator      OperatorBackend
-	operatorToken string
-	operatorAuth  OperatorAuthenticator
+	controllerVersion string
+	backend           Backend
+	operator          OperatorBackend
+	operatorToken     string
+	operatorAuth      OperatorAuthenticator
 	// operatorTokenFn / webhookTokenFn, when set, resolve the current token
 	// on every request so a rotated Secret takes effect without a restart.
 	operatorTokenFn func() string
@@ -183,6 +184,9 @@ func (s *Server) SetBackupStore(store BackupStore, dir string) {
 	s.backupStore = store
 	s.backupDir = dir
 }
+
+// SetControllerVersion sets the build version reported to operator clients.
+func (s *Server) SetControllerVersion(version string) { s.controllerVersion = version }
 
 // SetReadyCheck installs the elected-leader predicate. It gates GET /readyz
 // and every state-changing route; readiness alone is not an authorization

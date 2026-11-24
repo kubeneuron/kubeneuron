@@ -4,8 +4,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -108,6 +110,18 @@ func cmdStatus() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		var build struct {
+			Version string `json:"version"`
+		}
+		if err := c.do("GET", "/api/v1/version", nil, &build); err != nil {
+			var response *responseError
+			if !errors.As(err, &response) || response.code != http.StatusNotFound {
+				return err
+			}
+			build.Version = "version not reported (this controller is from a release that does not report it)"
+		} else if build.Version == "" {
+			build.Version = "version not reported"
+		}
 		var incidents []*types.Incident
 		if err := c.do("GET", "/api/v1/incidents", nil, &incidents); err != nil {
 			return err
@@ -123,6 +137,7 @@ func cmdStatus() *cobra.Command {
 			byState[inc.State]++
 		}
 		out := cmd.OutOrStdout()
+		_, _ = fmt.Fprintln(out, "controller:", build.Version)
 		_, _ = fmt.Fprintf(out, "automation paused: %v\n", pause.Paused)
 		if line := unloadedConfigLine(c, time.Now()); line != "" {
 			_, _ = fmt.Fprintln(out, line)
