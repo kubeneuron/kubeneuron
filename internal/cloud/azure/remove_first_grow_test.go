@@ -125,7 +125,7 @@ func TestSettleGrownPool(t *testing.T) {
 // A rejected initial request is a refusal; capacity codes still read through.
 func TestRefusedKeepsCapacityCodes(t *testing.T) {
 	err := refused(armFailure("BadRequest", "QuotaExceeded"))
-	if !errors.Is(err, removefirst.ErrRefused) || !capacityError(err) {
+	if !errors.Is(err, removefirst.ErrRefused) || capacityFailure(err) == nil {
 		t.Fatalf("err=%v", err)
 	}
 	if plain := errors.New("context deadline exceeded"); refused(plain) != plain {

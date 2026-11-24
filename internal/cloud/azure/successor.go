@@ -168,8 +168,8 @@ func (p *Provider) requestSuccessor(ctx context.Context, s cloud.Successor, t ta
 	}
 	tags[successorTag] = operationToken(s.Operation) + ":" + strconv.Itoa(int(before))
 	if err := p.api.WritePool(ctx, t.pool, pl, before+1, tags); err != nil {
-		if capacityError(err) {
-			return s, fmt.Errorf("azure: growing agent pool %s for a successor of %s: %w: %w", t.pool, t.machine, cloud.ErrReplacementCapacity, err)
+		if failure := capacityFailure(err); failure != nil {
+			return s, failure
 		}
 		return s, fmt.Errorf("azure: growing agent pool %s for a successor of %s: %w", t.pool, t.machine, err)
 	}

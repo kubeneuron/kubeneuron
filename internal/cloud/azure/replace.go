@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/kubeneuron/kubeneuron/internal/cloud/capacityreason"
 	"maps"
 	"slices"
 	"strconv"
@@ -32,13 +33,13 @@ var capacityCodes = []string{
 	"PublicIPCountLimitReached",
 }
 
-func capacityError(err error) bool {
+func capacityFailure(err error) *capacityreason.Failure {
 	for _, code := range errorCodes(err) {
 		if slices.ContainsFunc(capacityCodes, func(c string) bool { return strings.EqualFold(c, code) }) {
-			return true
+			return &capacityreason.Failure{Reason: CapacityReason(code), Cause: err}
 		}
 	}
-	return false
+	return nil
 }
 
 // replacement is one machine's replacement as the pool shows it now.
@@ -191,8 +192,8 @@ func (p *Provider) ensureSuccessor(ctx context.Context, r *replacement) error {
 		}
 		tags[replacingTag] = marker(r.machine, r.before)
 		if err := p.api.WritePool(ctx, r.pool, r.state, r.before+1, tags); err != nil {
-			if capacityError(err) {
-				return fmt.Errorf("azure: growing agent pool %s to replace %s: %w: %w", r.pool, r.machine, cloud.ErrReplacementCapacity, err)
+			if failure := capacityFailure(err); failure != nil {
+				return failure
 			}
 			return fmt.Errorf("azure: growing agent pool %s to replace %s: %w; nothing was deleted", r.pool, r.machine, err)
 		}

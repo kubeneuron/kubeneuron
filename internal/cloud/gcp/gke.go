@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/kubeneuron/kubeneuron/internal/cloud/capacityreason"
 	"net/http"
 	"regexp"
 	"slices"
@@ -341,10 +342,10 @@ func capacityCode(code string) bool { return slices.Contains(capacityCodes, code
 // capacityError is a GKE or Compute Engine call refused for quota or
 // capacity. A rate limit, which the same status codes report, is neither: it
 // is an ordinary error, retried.
-func capacityError(err error) bool {
+func capacityFailure(err error) *capacityreason.Failure {
 	var ae *apierror.APIError
 	if !errors.As(err, &ae) {
-		return false
+		return nil
 	}
 	reasons := []string{ae.Reason()}
 	var ge *googleapi.Error
@@ -353,15 +354,21 @@ func capacityError(err error) bool {
 			reasons = append(reasons, item.Reason)
 		}
 	}
-	capacity := false
+	var failure *capacityreason.Failure
 	for _, r := range reasons {
 		norm := strings.ToUpper(strings.ReplaceAll(r, "_", ""))
 		switch {
 		case strings.Contains(norm, "RATELIMIT"):
-			return false
+			return nil
 		case strings.Contains(norm, "QUOTA"), strings.Contains(norm, "RESOURCEPOOLEXHAUSTED"), strings.Contains(norm, "STOCKOUT"):
-			capacity = true
+			reason := CapacityReason(r)
+			if norm == "QUOTAEXCEEDED" {
+				reason = capacityreason.Quota
+			}
+			if failure == nil || failure.Reason == capacityreason.Unspecified {
+				failure = &capacityreason.Failure{Reason: reason, Cause: err}
+			}
 		}
 	}
-	return capacity
+	return failure
 }

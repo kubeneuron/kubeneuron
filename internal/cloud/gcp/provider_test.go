@@ -286,7 +286,7 @@ func TestCapacityErrorIsNotARateLimit(t *testing.T) {
 		wrap(503, "ZONE_RESOURCE_POOL_EXHAUSTED"): true,
 		errors.New("quota"):                       false,
 	} {
-		if got := capacityError(err); got != want {
+		if got := capacityFailure(err) != nil; got != want {
 			t.Fatalf("capacityError(%v) = %t, want %t", err, got, want)
 		}
 	}

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/kubeneuron/kubeneuron/internal/cloud/capacityreason"
 	"maps"
 	"math"
 	"strconv"
@@ -43,6 +44,11 @@ func sendScaleRequest(ctx context.Context, client nodegroupUpdater, cluster stri
 		if errors.As(err, &api) && (api.ErrorCode() == "AccessDeniedException" || api.ErrorCode() == "AccessDenied") {
 			return s, fmt.Errorf("%w: eks:UpdateNodegroupConfig: %w", cloud.ErrNeedsOperator, err)
 		}
+		if api != nil {
+			if reason := CapacityReason(api.ErrorCode()); reason != capacityreason.Unspecified {
+				return s, &capacityreason.Failure{Reason: reason, Cause: err}
+			}
+		}
 		return s, err
 	}
 	if out == nil || out.Update == nil || sdk.ToString(out.Update.Id) == "" {
@@ -76,7 +82,7 @@ func (p *managedProvider) scalingUpdateComplete(ctx context.Context, s cloud.Suc
 		for _, detail := range update.Errors {
 			switch detail.ErrorCode {
 			case et.ErrorCodeEniLimitReached, et.ErrorCodeIpNotAvailable, et.ErrorCodeInsufficientFreeAddresses:
-				return false, fmt.Errorf("%w: EKS update %s: %s", cloud.ErrReplacementCapacity, s.State["update"], detail.ErrorCode)
+				return false, &capacityreason.Failure{Reason: CapacityReason(string(detail.ErrorCode)), Cause: fmt.Errorf("EKS update %s: %s", s.State["update"], detail.ErrorCode)}
 			}
 		}
 	}

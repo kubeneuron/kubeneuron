@@ -173,10 +173,10 @@ func TestCheckReplacePermissionHoldsWithoutTheRawError(t *testing.T) {
 }
 
 func TestCapacityCodesReadInnerErrors(t *testing.T) {
-	if !capacityError(armFailure("ScaleVMSSAgentPoolFailed", "ZonalAllocationFailed")) {
+	if capacityFailure(armFailure("ScaleVMSSAgentPoolFailed", "ZonalAllocationFailed")) == nil {
 		t.Fatal("an inner allocation failure is capacity")
 	}
-	if capacityError(errors.New("QuotaExceeded")) {
+	if capacityFailure(errors.New("QuotaExceeded")) != nil {
 		t.Fatal("only an ARM response carries an error code")
 	}
 }

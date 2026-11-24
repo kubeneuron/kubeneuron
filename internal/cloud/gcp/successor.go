@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/kubeneuron/kubeneuron/internal/cloud/capacityreason"
 	"slices"
 	"strconv"
 	"strings"
@@ -156,8 +157,8 @@ func (p *Provider) requestSuccessor(ctx context.Context, s cloud.Successor) (clo
 	}
 	name, err := p.api.SetPoolSize(ctx, pl.Name, before+1)
 	if err != nil {
-		if capacityError(err) {
-			return s, fmt.Errorf("gcp: growing node pool %s for a successor: %w: %w", pl.Name, cloud.ErrReplacementCapacity, err)
+		if failure := capacityFailure(err); failure != nil {
+			return s, failure
 		}
 		return s, fmt.Errorf("gcp: growing node pool %s for a successor: %w", pl.Name, err)
 	}
@@ -183,7 +184,7 @@ func (p *Provider) settleSuccessor(ctx context.Context, s cloud.Successor) (clou
 	if op.Status == opDone && op.Error != "" && len(added) == 0 {
 		err := fmt.Errorf("gcp: growing node pool %s failed: %s", pl.Name, op.Error)
 		if op.ErrorCode == codes.ResourceExhausted {
-			err = fmt.Errorf("%w: %w", cloud.ErrReplacementCapacity, err)
+			err = &capacityreason.Failure{Reason: capacityreason.Unspecified, Cause: err}
 		}
 		return s, err
 	}
@@ -195,8 +196,8 @@ func (p *Provider) settleSuccessor(ctx context.Context, s cloud.Successor) (clou
 		return s, fmt.Errorf("gcp: node pool %s has %d members that were not there at the plan of operation %s, not one: %w", pl.Name, len(added), s.Operation, cloud.ErrNeedsOperator)
 	}
 	m := added[0]
-	if slices.ContainsFunc(m.Errors, capacityCode) {
-		return s, fmt.Errorf("gcp: node pool %s could not create instance %s (%s): %w", pl.Name, m.Name, strings.Join(m.Errors, ", "), cloud.ErrReplacementCapacity)
+	if index := slices.IndexFunc(m.Errors, capacityCode); index >= 0 {
+		return s, &capacityreason.Failure{Reason: CapacityReason(m.Errors[index]), Cause: fmt.Errorf("gcp: node pool %s could not create instance %s (%s)", pl.Name, m.Name, strings.Join(m.Errors, ", "))}
 	}
 	if m.Action != "NONE" || m.Status != "RUNNING" {
 		return s, nil // still creating
