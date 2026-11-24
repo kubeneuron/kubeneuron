@@ -160,7 +160,7 @@ func TestPlanningWithEarlierHandedOverSuccessorParksIncident(t *testing.T) {
 	if err := st.CreateIncident(ctx, inc); err != nil {
 		t.Fatal(err)
 	}
-	want := unconfirmedSuccessorRemoval("n1", "train") + successorSettlementCommand(inc.ID)
+	want := `KubeNeuron could not confirm that the replacement node for n1 was removed from pool train. The pool may have one node more than planned, and that node is billed. Check which machines remain in pool train and its size. Then run kubeneuronctl resolve ` + inc.ID + ` --cloud-operation-settled --reason "<what you found>"`
 	if err := c.planSuccessor(ctx, inc); err == nil || err.Error() != want {
 		t.Fatalf("planning returned %v, want operator handover", err)
 	}

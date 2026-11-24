@@ -276,17 +276,18 @@ func (c *Controller) planSuccessor(ctx context.Context, inc *types.Incident) err
 		return nil
 	}
 	if s := inc.Successor; s != nil && s.Outcome == types.SuccessorHandedOver {
-		reason := s.Reason
-		command := successorSettlementCommand(inc.ID)
-		if !strings.HasSuffix(reason, command) {
-			reason = unconfirmedSuccessorRemoval(inc.Target.Node, s.Pool) + command
+		h := unconfirmedSuccessorHandover(inc.Target.Node, s.Pool, inc.ID)
+		// Recover the operator check for a previously retained busy successor.
+		check := busySuccessorCheck
+		if what, ok := strings.CutSuffix(s.Reason, " "+check+" "+h.Command); ok && strings.HasPrefix(what, "Replacement node ") {
+			h.What, h.Check = what, check
 		}
 		if !inc.State.Halted() {
-			if err := c.quarantineAfterStep(ctx, inc, reason, false); err != nil {
+			if err := c.quarantineAfterStep(ctx, inc, h, false); err != nil {
 				return err
 			}
 		}
-		return errors.New(reason)
+		return errors.New(h.message())
 	}
 	if s := inc.Successor; s.Open() {
 		return fmt.Errorf("the successor operation %s of an earlier attempt is still open", s.Operation)
@@ -732,8 +733,8 @@ func (c *Controller) releaseSuccessor(ctx context.Context, inc *types.Incident, 
 				if _, _, err := c.platform.ReleaseCordonOwners(ctx, node.Name, []string{owner}); err != nil {
 					return err
 				}
-				reason := fmt.Sprintf("Replacement node %s in pool %s is running %s, so KubeNeuron did not remove it. Pool %s may now have one node more than planned, and that node is billed. Check its workloads and the size of the pool, and remove the extra node when it is safe.", node.Name, rec.Pool, busy, rec.Pool)
-				return c.handOverSuccessorCleanup(ctx, inc, reason)
+				what := fmt.Sprintf("Replacement node %s in pool %s is running %s, so KubeNeuron did not remove it. Pool %s may now have one node more than planned, and that node is billed.", node.Name, rec.Pool, busy, rec.Pool)
+				return c.handOverSuccessorCleanup(ctx, inc, handover{What: what, Check: busySuccessorCheck, Command: settlementCommand(inc.ID)})
 			}
 		}
 	}
@@ -744,8 +745,7 @@ func (c *Controller) releaseSuccessor(ctx context.Context, inc *types.Incident, 
 				return rerr
 			}
 		}
-		reason := unconfirmedSuccessorRemoval(inc.Target.Node, rec.Pool)
-		return c.handOverSuccessorCleanup(ctx, inc, reason)
+		return c.handOverSuccessorCleanup(ctx, inc, unconfirmedSuccessorHandover(inc.Target.Node, rec.Pool, inc.ID))
 	}
 	if err != nil {
 		return err
@@ -756,22 +756,19 @@ func (c *Controller) releaseSuccessor(ctx context.Context, inc *types.Incident, 
 	return c.endSuccessor(ctx, inc, types.SuccessorNotCreated, why)
 }
 
-func unconfirmedSuccessorRemoval(node, pool string) string {
-	return fmt.Sprintf("KubeNeuron could not confirm that the replacement node for %s was removed from pool %s. The pool may have one node more than planned, and that node is billed. Check which machines remain in pool %s and its size.", node, pool, pool)
+const busySuccessorCheck = "Check its workloads and the size of the pool, and remove the extra node when it is safe. Then run"
+
+func unconfirmedSuccessorHandover(node, pool, id string) handover {
+	return handover{What: fmt.Sprintf("KubeNeuron could not confirm that the replacement node for %s was removed from pool %s. The pool may have one node more than planned, and that node is billed.", node, pool), Check: fmt.Sprintf("Check which machines remain in pool %s and its size. Then run", pool), Command: settlementCommand(id)}
 }
 
-func successorSettlementCommand(id string) string {
-	return fmt.Sprintf(` Then run kubeneuronctl resolve %s --cloud-operation-settled --reason "<what you found>"`, id)
-}
-
-func (c *Controller) handOverSuccessorCleanup(ctx context.Context, inc *types.Incident, reason string) error {
-	reason += successorSettlementCommand(inc.ID)
+func (c *Controller) handOverSuccessorCleanup(ctx context.Context, inc *types.Incident, h handover) error {
 	current := inc.Successor.Operation == successorOperation(inc)
-	if err := c.endSuccessor(ctx, inc, types.SuccessorHandedOver, reason); err != nil {
+	if err := c.endSuccessor(ctx, inc, types.SuccessorHandedOver, h.message()); err != nil {
 		return err
 	}
 	if current && !inc.State.Halted() {
-		return c.quarantineAfterStep(ctx, inc, reason, false)
+		return c.quarantineAfterStep(ctx, inc, h, false)
 	}
 	return nil
 }
