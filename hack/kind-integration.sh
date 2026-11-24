@@ -34,10 +34,14 @@ Configuration is through environment variables:
   WORKER_NODES          worker nodes beside the control plane (default: 2;
                         0 reproduces the old single-node shape)
   TIMEOUT_SECONDS       wait timeout in seconds (default: 240)
+  KIND_NODE_IMAGE       another digest-pinned node image,
+                        kindest/node:vX.Y.Z@sha256:<digest>; the server must
+                        then report vX.Y.Z (default: the image below)
   KIND_BIN, KUBECTL_BIN, DOCKER_BIN, JQ_BIN
                         command paths (each must be one executable)
 
-The cluster always uses kind v0.32.0 and this immutable node image:
+The cluster always uses kind v0.32.0 and, unless KIND_NODE_IMAGE is set,
+this immutable node image:
   kindest/node:v1.33.12@sha256:3f5c8443c620245e4d355cfe09e96a91ead32ceaa569d3f1ca9edf0cb2fe2ff4
 
 If the current login predates membership in the docker group, invoke it as:
@@ -60,8 +64,16 @@ fi
 
 readonly EXPECTED_KIND_VERSION=v0.32.0
 readonly EXPECTED_KUBECTL_VERSION=v1.33.12
-readonly NODE_IMAGE='kindest/node:v1.33.12@sha256:3f5c8443c620245e4d355cfe09e96a91ead32ceaa569d3f1ca9edf0cb2fe2ff4'
-readonly EXPECTED_SERVER_VERSION=v1.33.12
+DEFAULT_NODE_IMAGE='kindest/node:v1.33.12@sha256:3f5c8443c620245e4d355cfe09e96a91ead32ceaa569d3f1ca9edf0cb2fe2ff4'
+# Another Kubernetes version, such as the oldest one the docs support, is
+# pinned the same way: by digest, with the server version from its tag.
+NODE_IMAGE=${KIND_NODE_IMAGE:-$DEFAULT_NODE_IMAGE}
+[[ $NODE_IMAGE =~ ^kindest/node:(v[0-9]+\.[0-9]+\.[0-9]+)@sha256:[0-9a-f]{64}$ ]] || {
+	printf 'KIND_NODE_IMAGE must be kindest/node:vX.Y.Z@sha256:<64 hex digits>, got %s\n' "$NODE_IMAGE" >&2
+	exit 2
+}
+readonly NODE_IMAGE
+readonly EXPECTED_SERVER_VERSION=${BASH_REMATCH[1]}
 readonly OPERATOR_NAMESPACE=kube-neuron
 readonly OPERATOR_DEPLOYMENT=kubeneuron-operator
 readonly ROOT_NAME=integration-smoke
