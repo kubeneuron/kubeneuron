@@ -319,6 +319,74 @@ CA. Alternatively snapshot the PVC with your CSI driver's VolumeSnapshot —
 take the snapshot while the controller is scaled to zero, or accept that WAL
 replay happens on restore.
 
+**Retrieve a scheduled SQLite backup.** To use a snapshot from the backup
+CronJob, wait until the Job has finished and released the `kubeneuron-backups`
+claim. The claim uses `ReadWriteOnce`: an active Job on another node can
+prevent the reader Pod from mounting it. Replace `<ns>` with the installation
+namespace. The reader mounts the backup volume read-only and uses the same
+user and group as the CronJob.
+
+```sh
+kubectl -n <ns> apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kubeneuron-backup-reader
+  labels:
+    app.kubernetes.io/name: kube-neuron
+    app.kubernetes.io/component: backup-reader
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 100
+    runAsGroup: 101
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: reader
+      image: busybox:1.36
+      command: ["sh", "-c", "sleep 3600"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: backups
+          mountPath: /backups
+          readOnly: true
+  volumes:
+    - name: backups
+      persistentVolumeClaim:
+        claimName: kubeneuron-backups
+        readOnly: true
+EOF
+kubectl -n <ns> wait --for=condition=Ready pod/kubeneuron-backup-reader --timeout=2m
+kubectl -n <ns> exec kubeneuron-backup-reader -- ls -l /backups
+```
+
+Choose a backup from a successful Job. Replace `<stamp>` with the UTC
+timestamp in its filename. From the directory where you want the local copy,
+run:
+
+```sh
+kubectl -n <ns> exec kubeneuron-backup-reader -- sha256sum /backups/kubeneuron-<stamp>.db
+kubectl -n <ns> cp kubeneuron-backup-reader:/backups/kubeneuron-<stamp>.db ./kubeneuron-<stamp>.db
+sha256sum ./kubeneuron-<stamp>.db
+```
+
+On macOS, use `shasum -a 256 ./kubeneuron-<stamp>.db` for the local file.
+If the two checksums differ, repeat the copy and compare them again.
+
+The backup file is a full copy of the workflow store, including incident and audit records with operator identities; protect the local copy and delete it when you no longer need it.
+
+Once they match, remove the reader and use the verified local file in
+step 3 of the SQLite restore below.
+
+```sh
+kubectl -n <ns> delete pod kubeneuron-backup-reader --wait=true
+```
+
 **Restore** (SQLite). The controller image is distroless and the claim is
 `ReadWriteOnce`, so the restore runs with the controller stopped and a
 helper pod holding the volume — `deploy/kubernetes/backup/restore-helper.yaml`
@@ -356,7 +424,8 @@ kubectl -n <ns> wait --for=condition=Ready pod/kubeneuron-restore-helper --timeo
 
 # 3. Copy the snapshot in and remove any stale WAL sidecars: they belong to
 #    the OLD database file and would corrupt the restored one.
-kubectl -n <ns> cp ./kubeneuron-YYYY-MM-DD.db \
+#    Substitute the local backup filename you verified.
+kubectl -n <ns> cp ./kubeneuron-<stamp>.db \
   kubeneuron-restore-helper:/state/kubeneuron.db
 kubectl -n <ns> exec kubeneuron-restore-helper -- \
   sh -c 'rm -f /state/kubeneuron.db-wal /state/kubeneuron.db-shm; ls -l /state'
