@@ -63,9 +63,11 @@ grep -Fq "The volume claims retained by this uninstall are in namespace 'trainin
 cat >"$tmp/bin/kubectl" <<'MOCK'
 #!/usr/bin/env bash
 case " $* " in
-*" port-forward "*) echo 'Forwarding from 127.0.0.1:43210 -> 8080'; exec sleep 30 ;;
-*" get kubeneuron kubeneuron -o json "*) echo '{"spec":{"notifications":{"operatorAPIToken":{"name":"operator-test"}}}}' ;;
-*" get secret operator-test -o json "*) echo '{"data":{"token":"dGVzdA=="}}' ;;
+*" get kubeneuron kubeneuron --ignore-not-found "*) [[ -n ${ROOT_GONE:-} ]] || echo uid-1 ;;
+*" get kubeneuron kubeneuron -o jsonpath={.spec.namespace} "*) echo kube-neuron ;;
+*" port-forward "*) [[ ${FAIL_AT:-} != tunnel ]] || exit 1; echo 'Forwarding from 127.0.0.1:43210 -> 8080'; exec sleep 30 ;;
+*" get kubeneuron kubeneuron -o json "*) if [[ ${FAIL_AT:-} == token ]]; then echo "{}"; exit; fi; echo '{"spec":{"notifications":{"operatorAPIToken":{"name":"operator-test"}}}}' ;;
+*" get secret operator-test -o json "*) [[ ${FAIL_AT:-} != secret ]] || exit 1; echo '{"data":{"token":"dGVzdA=="}}' ;;
 *" get nodes -o json "*) echo '{"items":[]}' ;;
 *" delete "*) echo delete >>"$UNINSTALL_MUTATIONS" ;;
 esac
@@ -91,3 +93,17 @@ done
 echo '[{"id":"inc-42","successor":{"outcome":"settled-by-operator"}}]' >"$INCIDENT_LIST"
 PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall >"$tmp/preflight"
 [[ -s $UNINSTALL_MUTATIONS ]]
+
+# After the root was removed, cleanup can resume without an available API.
+echo invalid >"$INCIDENT_LIST"
+ROOT_GONE=1 PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall >"$tmp/retry"
+grep -Fq 'remove only the operator' "$tmp/retry"
+
+for stage in token secret tunnel; do
+	if FAIL_AT=$stage PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall >"$tmp/error" 2>&1; then exit 1; fi
+	case "$stage" in
+	token) grep -Fq 'this installation has no operator API token' "$tmp/error" ;;
+	secret) grep -Fq "API token Secret 'operator-test' in namespace 'kube-neuron' could not be read" "$tmp/error" ;;
+	tunnel) grep -Fq "no connection to Service 'kubeneuron-controller' in namespace 'kube-neuron' could be opened" "$tmp/error" ;;
+	esac
+done

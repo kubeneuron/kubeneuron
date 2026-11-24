@@ -39,7 +39,7 @@ set -euo pipefail
 #                        store's claim (confirmation required)
 #   --yes                confirm --uninstall --delete-data non-interactively
 #
-# Requirements: kubectl (>=1.29 server), openssl. For --version: gh.
+# Requirements: kubectl (>=1.29 server), openssl. For uninstall: jq and curl. For --version: gh.
 # For the panel password hash: htpasswd, or a kubeneuronctl binary.
 
 NAME=kubeneuron
@@ -184,22 +184,23 @@ unfinished_cloud_incidents() (
 	dir=$(mktemp -d) || return 1
 	trap 'if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || :; wait "$pid" 2>/dev/null || :; fi; rm -rf "$dir"' EXIT
 	root=$(kubectl get kubeneuron "$NAME" -o json) || return 1
-	auth=$(jq -er '.spec.notifications.operatorAPIToken.name' <<<"$root") || return 1
+	auth=$(jq -r '.spec.notifications.operatorAPIToken.name // empty' <<<"$root") || return 1
+	[[ -n $auth ]] || return 20
 	key=$(jq -r '.spec.notifications.operatorAPIToken.key // "token"' <<<"$root") || return 1
-	bearer=$(kubectl -n "$NS" get secret "$auth" -o json | jq -er --arg k "$key" '.data[$k] | @base64d') || return 1
-	[[ -n $bearer && $bearer != *[[:cntrl:]]* ]] || return 1
+	bearer=$(kubectl -n "$NS" get secret "$auth" -o json | jq -er --arg k "$key" '.data[$k] | @base64d') || { printf '%s' "$auth"; return 21; }
+	[[ -n $bearer && $bearer != *[[:cntrl:]]* ]] || { printf '%s' "$auth"; return 21; }
 	printf 'Authorization: Bearer %s\n' "$bearer" >"$dir/header"
 	tls=$(jq -r '.spec.tls.publicServerSecretRef.name // empty' <<<"$root") || return 1
 	kubectl -n "$NS" port-forward --address=127.0.0.1 "service/$NAME-controller" :8080 >"$dir/forward" 2>&1 &
 	pid=$!
 	deadline=$((SECONDS + 15))
 	while ((SECONDS < deadline)); do
-		kill -0 "$pid" 2>/dev/null || return 1
+		kill -0 "$pid" 2>/dev/null || return 22
 		port=$(sed -n 's/^Forwarding from 127[.]0[.]0[.]1:\([0-9][0-9]*\) -> .*/\1/p' "$dir/forward")
 		[[ -z $port ]] || break
 		sleep 0.2
 	done
-	[[ -n $port ]] || return 1
+	[[ -n $port ]] || return 22
 	host="http://127.0.0.1:$port"
 	if [[ -n $tls ]]; then
 		host="https://$NAME-controller.$NS.svc:$port"
@@ -210,7 +211,7 @@ unfinished_cloud_incidents() (
 	curl --disable --noproxy '*' -fsS --max-time 30 ${transport[@]+"${transport[@]}"} -H "@$dir/header" "$host/api/v1/incidents" |
 		jq -er 'if type != "array" then error("invalid incident list") else
 			[.[] | select(any(.successor, .remove_first; . != null and ((.outcome // "") == "" or .outcome == "needs-operator"))) |
-			 .id | if type == "string" and test("^[a-zA-Z0-9._-]+$") then . else error("invalid incident ID") end] | join(", ") end'
+			 .id | if type == "string" and test("^[a-zA-Z0-9._-]+$") then . else error("invalid incident ID") end] | join(", ") end' || return 1
 )
 
 restore_gpu_labels() {
@@ -236,6 +237,7 @@ restore_gpu_labels() {
 			snapshot=$(kubectl get node "$node" -o json) || break
 		fi
 	done
+	[[ -n $labels ]] || return 0
 	say "Could not restore NVIDIA GPU Operator labels on $node. Check the node before applying these commands:"
 	while IFS= read -r label; do
 		[[ -z $label ]] || printf 'kubectl label node %s %s=true --overwrite\n' "$node" "$label"
@@ -243,6 +245,7 @@ restore_gpu_labels() {
 }
 
 if ((UNINSTALL)); then
+	command -v curl >/dev/null || die "curl is required for uninstall"
 	command -v jq >/dev/null || die "jq is required for uninstall"
 	claim="$NAME-controller-state"
 	# The Managed metrics store's claim outlives the installation (the
@@ -260,9 +263,20 @@ if ((UNINSTALL)); then
 		[[ $actual_ns == "$NS" ]] || die "installation is in namespace $actual_ns; pass --namespace $actual_ns"
 		[[ -z $(kubectl get kubeneuron "$NAME" -o jsonpath='{.metadata.deletionTimestamp}') ]] || die "root is already being deleted; retention cannot be guaranteed"
 	fi
-	if ((SKIP_INCIDENT_CHECK == 0)); then
-		risky_incidents=$(unfinished_cloud_incidents 2>/dev/null) || die "Uninstall stopped: KubeNeuron could not check for open incidents. Restore access to the controller and try again, or repeat with --skip-open-incident-check"
-		[[ -z $risky_incidents ]] || die "Uninstall stopped: these incidents have a cloud replacement in progress or waiting for the operator: $risky_incidents. Uninstalling now leaves their cloud changes (for example a resized pool or tags) without a record. Finish or resolve them first, or repeat with --skip-open-incident-check"
+	if [[ -n $root_uid ]] && ((SKIP_INCIDENT_CHECK == 0)); then
+		# This snapshot cannot prevent new repairs before the controller stops.
+		if check_output=$(unfinished_cloud_incidents 2>/dev/null); then
+			risky_incidents=$check_output
+		else
+			case $? in
+			20) die "Uninstall stopped: this installation has no operator API token, so open incidents cannot be checked. Check with your cloud provider that no node replacement is in progress for this cluster, then repeat with --skip-open-incident-check" ;;
+			21) secret_name=$check_output
+				die "Uninstall stopped: KubeNeuron could not check for open incidents: the API token Secret '$secret_name' in namespace '$NS' could not be read. Check that your kubectl account can read it and try again, or repeat with --skip-open-incident-check" ;;
+			22) die "Uninstall stopped: KubeNeuron could not check for open incidents: no connection to Service '$NAME-controller' in namespace '$NS' could be opened. Check that the controller Pod is running and try again, or repeat with --skip-open-incident-check" ;;
+			*) die "Uninstall stopped: KubeNeuron could not check for open incidents: the controller API did not return the incident list. Check the controller's logs and try again, or repeat with --skip-open-incident-check" ;;
+			esac
+		fi
+		[[ -z $risky_incidents ]] || die "Uninstall stopped: these incidents have a cloud replacement in progress or waiting for the operator: $risky_incidents. Uninstalling now leaves their cloud changes (for example a resized pool or tags) without a record. Wait for a replacement in progress to finish. For one that waits for the operator, check the pool and run kubeneuronctl resolve <id> --cloud-operation-settled --reason \"<what you found>\". Then repeat the uninstall, or skip this check with --skip-open-incident-check"
 	fi
 	claim_uid=$(kubectl -n "$NS" get pvc "$claim" --ignore-not-found -o jsonpath='{.metadata.uid}')
 	if [[ -n $claim_uid ]]; then
@@ -319,8 +333,7 @@ if ((UNINSTALL)); then
 		if [[ -z $remaining_installations ]]; then
 			restore_gpu_labels "$node_snapshot"
 		else
-			say "NVIDIA GPU Operator labels were left in place because another KubeNeuron installation may still be using them."
-			break
+			say "NVIDIA GPU Operator labels were left in place on $(jq -r '.metadata.name' <<<"$node_snapshot") because another KubeNeuron installation may still be using them."
 		fi
 	done < <(jq -c '.items[] | select(.metadata.annotations["kubeneuron.io/quiesced-accelerator-stack"] != null)' <<<"$nodes")
 	node_commands=$(jq -r '.items[] | .metadata.name as $n |
@@ -536,7 +549,7 @@ if [[ $PROFILE == auto ]]; then
     PROFILE=none
     if gpu_nodes=$(kubectl get nodes -l "$gpu_selector" -o 'go-template={{range .items}}{{.status.nodeInfo.architecture}}|{{.status.nodeInfo.osImage}}|{{index .metadata.labels "nvidia.com/gpu.deploy.driver"}}{{"\n"}}{{end}}') && [[ -n $gpu_nodes ]]; then
         if ! grep -Evq '^amd64\|Amazon Linux 2023[^|]*\|(false|<no value>)$' <<<"$gpu_nodes"; then
-            PROFILE=host-al2023
+            PROFILE='host-al2023'
         elif ! grep -Evq '^amd64\|Ubuntu [^|]*\|true$' <<<"$gpu_nodes"; then
             PROFILE=gpu-operator-ubuntu
         fi
