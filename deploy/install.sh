@@ -304,6 +304,18 @@ operator_namespaces() {
 	kubectl get deployments --all-namespaces -l 'app.kubernetes.io/name=kube-neuron,app.kubernetes.io/component=operator' --field-selector metadata.name=kubeneuron-operator -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}'
 }
 
+report_interrupted_cleanup() {
+	local status=$1 node remaining=""
+	while IFS= read -r node; do
+		[[ -n $node && $confirmed_nodes != *" $node "* ]] || continue
+		remaining="${remaining:+$remaining, }$node"
+	done <<<"$pending_nodes"
+	if [[ -n $remaining ]]; then
+		printf 'Uninstall stopped while %s. Cleanup of /var/lib/kube-neuron was not confirmed on: %s. If the installation still exists, repeat the uninstall. If it was already removed, after verifying no installation uses the directory, run on each of these nodes: sudo rm -rf -- /var/lib/kube-neuron\n' "$cleanup_step" "$remaining" >&2
+	fi
+	return "$status"
+}
+
 if ((UNINSTALL)); then
 	command -v curl >/dev/null || die "curl is required for uninstall"
 	command -v jq >/dev/null || die "jq is required for uninstall"
@@ -377,13 +389,25 @@ if ((UNINSTALL)); then
 	agent_selector="app.kubernetes.io/instance=$NAME,app.kubernetes.io/component in (agent,agent-detect,agent-detect-journal-var,agent-detect-journal-run)"
 	if ((DELETE_DATA)) && [[ -n $root_uid ]]; then
 		agent_nodes=$(agent_nodes_before_uninstall) || die "Uninstall stopped: could not list the nodes where this installation's agent runs. Nothing was removed. Check that your kubectl account can read DaemonSets and Pods in $NS and retry."
+		other_roots=$(kubectl get kubeneuron -o name --field-selector "metadata.name!=$NAME") || die "Uninstall stopped: could not check for other KubeNeuron installations. Nothing was removed. Check that your kubectl account can list KubeNeuron objects and retry."
+		if [[ -z $other_roots && -n $agent_nodes ]]; then
+			say "Agent data in /var/lib/kube-neuron will be emptied on these nodes: ${agent_nodes//$'\n'/, }. Keep this list: if the uninstall is interrupted, it is needed to finish the cleanup by hand."
+			pending_nodes=$agent_nodes
+			confirmed_nodes=" "
+			cleanup_step="preparing to remove the installation"
+			trap 'report_interrupted_cleanup "$?"' EXIT
+			trap 'exit 130' INT
+			trap 'exit 143' TERM
+		fi
 		cleanup_image=$(kubectl get kubeneuron "$NAME" -o json |
 			jq -er --arg uid "$root_uid" 'select(.metadata.uid == $uid) | .spec.agent.image | strings | select(length > 0)') || cleanup_image=""
 	fi
 	say "removing KubeNeuron installation '$NAME' (namespace $NS)"
+	cleanup_step="removing the installation"
 	kubectl delete kubeneuron "$NAME" --ignore-not-found --wait=true --timeout=120s
 	# Stop every controller replica before restoring node labels. Deleting
 	# the root returns before Kubernetes finishes deleting its dependants.
+	cleanup_step="waiting for the controller to stop"
 	controller_selector="app.kubernetes.io/instance=$NAME,app.kubernetes.io/component=controller,app.kubernetes.io/managed-by=kubeneuron-operator"
 	deadline=$((SECONDS + 120))
 	while :; do
@@ -393,6 +417,7 @@ if ((UNINSTALL)); then
 		((SECONDS < deadline)) || die "controller is still present in namespace '$NS'; check its Deployment and Pods before retrying uninstall"
 		sleep 2
 	done
+	cleanup_step="waiting for the agents to stop"
 	# Garbage collection can leave terminating agents on their host mounts.
 	# After the deadline each remaining mount is checked before cleanup.
 	if ((DELETE_DATA)) && [[ -n $agent_nodes ]]; then
@@ -404,18 +429,23 @@ if ((UNINSTALL)); then
 		done
 	fi
 	# Another installation keeps using the shared journal label.
+	cleanup_step="checking for other installations"
 	remaining_installations=$(kubectl get kubeneuron -o name)
 	if [[ -z $remaining_installations ]]; then
+		cleanup_step="removing the journal directory label"
 		kubectl label nodes --all kubeneuron.io/journal-dir- >/dev/null
 		say "removed the kubeneuron.io/journal-dir node label"
 	else
 		say "left the kubeneuron.io/journal-dir node label: another KubeNeuron installation uses it"
 		if ((DELETE_DATA)); then
+			pending_nodes=""
 			say "Agent data in /var/lib/kube-neuron was retained because another KubeNeuron installation may use the same directory."
 		fi
 	fi
+	cleanup_step="reading the node list"
 	nodes=$(kubectl get nodes -o json)
 	if ((DELETE_DATA)) && [[ -z $remaining_installations ]]; then
+		cleanup_step="checking mounts and cleaning agent data"
 		cleanup_pods=()
 		unconfirmed=""
 		emptied=0
@@ -452,6 +482,7 @@ if ((UNINSTALL)); then
 					case ", $unconfirmed, " in *", $node, "*) continue ;; esac
 					if jq -e --arg node "$node" 'any(.node == $node and .phase == "Succeeded")' <<<"${phases:-[]}" >/dev/null; then
 						emptied=$((emptied + 1))
+						confirmed_nodes+="$node "
 					else
 						unconfirmed="${unconfirmed:+$unconfirmed, }$node"
 					fi
@@ -466,6 +497,7 @@ if ((UNINSTALL)); then
 			[[ -z $unconfirmed ]] || say "Cleanup of /var/lib/kube-neuron was not confirmed on: $unconfirmed. After verifying no installation uses the directory, run on each of these nodes: sudo rm -rf -- /var/lib/kube-neuron"
 		fi
 	fi
+	pending_nodes=""
 	while IFS= read -r node_snapshot; do
 		[[ -n $node_snapshot ]] || continue
 		if [[ -z $remaining_installations ]]; then

@@ -117,7 +117,7 @@ case " $* " in
 *" port-forward "*) [[ ${FAIL_AT:-} != tunnel ]] || exit 1; echo 'Forwarding from 127.0.0.1:43210 -> 8080'; exec sleep 30 ;;
 *" get kubeneuron kubeneuron -o json "*) if [[ ${FAIL_AT:-} == token ]]; then echo "{}"; exit; fi; echo '{"metadata":{"uid":"uid-1"},"spec":{"agent":{"image":"example/agent:test"},"notifications":{"operatorAPIToken":{"name":"operator-test"}}}}' ;;
 *" get secret operator-test -o json "*) [[ ${FAIL_AT:-} != secret ]] || exit 1; echo '{"data":{"token":"dGVzdA=="}}' ;;
-*" get nodes -o json "*) if [[ -n ${NODE_LIST:-} ]]; then cat "$NODE_LIST"; else echo '{"items":[]}'; fi ;;
+*" get nodes -o json "*) if [[ ${FAIL_AT:-} == node-list ]]; then exit 17; fi; if [[ -n ${NODE_LIST:-} ]]; then cat "$NODE_LIST"; else echo '{"items":[]}'; fi ;;
 *" delete "*) echo delete >>"$UNINSTALL_MUTATIONS" ;;
 esac
 MOCK
@@ -203,3 +203,11 @@ ROOT_GONE=1 PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall --delete-da
 grep -Fq 'The installation was already removed' "$tmp/retry"
 grep -Fq 'run: sudo rm -rf -- /var/lib/kube-neuron' "$tmp/retry"
 if grep -Fq 'Emptied /var/lib/kube-neuron' "$tmp/retry"; then exit 1; fi
+
+status=0
+FAIL_AT=node-list PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall --delete-data --yes --skip-open-incident-check >"$tmp/interrupted.out" 2>"$tmp/interrupted.err" || status=$?
+[[ $status == 17 ]]
+grep -Fq 'Agent data in /var/lib/kube-neuron will be emptied on these nodes: busy, ready, timeout. Keep this list:' "$tmp/interrupted.out"
+grep -Fq 'while reading the node list' "$tmp/interrupted.err"
+grep -Fq 'not confirmed on: busy, ready, timeout.' "$tmp/interrupted.err"
+grep -Fq 'If the installation still exists, repeat the uninstall. If it was already removed, after verifying no installation uses the directory, run on each of these nodes: sudo rm -rf -- /var/lib/kube-neuron' "$tmp/interrupted.err"
