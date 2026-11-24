@@ -25,6 +25,8 @@ cluster.
     document using it on the instance group of a node pool. Every change to a
     pool's size goes through the GKE API.
 
+When a replacement fails for lack of capacity, check the incident for the provider's reported cause and a suggested action. If the error code leaves capacity and quota ambiguous, check the account quota for the machine type, then the provider's status for the zone.
+
 ## What KubeNeuron does on GKE
 
 GKE documents no restart of a single node, so on GKE:

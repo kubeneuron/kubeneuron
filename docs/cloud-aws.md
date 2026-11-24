@@ -6,6 +6,8 @@ verification depth: node readiness and advertised capacity). The controller
 was updated during the incident. Not repeated on v1.0.0-rc.1. It is not
 validated on accelerator hardware. The live run used a single-zone group; add-first across zones (AnyPoolZone) was tested with simulated providers only.
 
+When a replacement fails for lack of capacity, check the incident for the provider's reported cause and a suggested action. If the error code leaves capacity and quota ambiguous, check the account quota for the machine type, then the provider's status for the zone.
+
 ## Declare who controls the group size
 
 Before configuring add-first, confirm that no autoscaler or other automation

@@ -17,6 +17,8 @@ only after you have watched it decide on your own cluster.
     operator, are responsible for the instances this step deletes and for the
     capacity it leaves.
 
+When a replacement fails for lack of capacity, check the incident for the provider's reported cause and a suggested action. If the error code leaves capacity and quota ambiguous, check the account quota for the machine type, then the provider's status for the zone.
+
 ## What KubeNeuron does on AKS
 
 AKS has no supported way to restart a single node: rebooting, deallocating or
