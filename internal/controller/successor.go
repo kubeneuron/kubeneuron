@@ -719,8 +719,8 @@ func (c *Controller) releaseSuccessor(ctx context.Context, inc *types.Incident, 
 				if _, _, err := c.platform.ReleaseCordonOwners(ctx, node.Name, []string{owner}); err != nil {
 					return err
 				}
-				return c.endSuccessor(ctx, inc, types.SuccessorHandedOver,
-					fmt.Sprintf("%s; the pool is one node larger: successor %s runs %s and was not removed", why, node.Name, busy))
+				reason := fmt.Sprintf("Replacement node %s in pool %s is running %s, so KubeNeuron did not remove it. Pool %s may now have one node more than planned, and that node is billed. Check its workloads and the size of the pool, and remove the extra node when it is safe.", node.Name, rec.Pool, busy, rec.Pool)
+				return c.handOverSuccessorCleanup(ctx, inc, reason)
 			}
 		}
 	}
@@ -731,7 +731,8 @@ func (c *Controller) releaseSuccessor(ctx context.Context, inc *types.Incident, 
 				return rerr
 			}
 		}
-		return c.endSuccessor(ctx, inc, types.SuccessorHandedOver, why+"; "+err.Error())
+		reason := fmt.Sprintf("KubeNeuron could not confirm that the replacement node for %s was removed from pool %s. The pool may have one node more than planned, and that node is billed. Check which machines remain in pool %s and its size.", inc.Target.Node, rec.Pool, rec.Pool)
+		return c.handOverSuccessorCleanup(ctx, inc, reason)
 	}
 	if err != nil {
 		return err
@@ -740,6 +741,18 @@ func (c *Controller) releaseSuccessor(ctx context.Context, inc *types.Incident, 
 		return c.endSuccessor(ctx, inc, types.SuccessorReleased, why)
 	}
 	return c.endSuccessor(ctx, inc, types.SuccessorNotCreated, why)
+}
+
+func (c *Controller) handOverSuccessorCleanup(ctx context.Context, inc *types.Incident, reason string) error {
+	reason += fmt.Sprintf(` Then run kubeneuronctl resolve %s --cloud-operation-settled --reason "<what you found>"`, inc.ID)
+	current := inc.Successor.Operation == successorOperation(inc)
+	if err := c.endSuccessor(ctx, inc, types.SuccessorHandedOver, reason); err != nil {
+		return err
+	}
+	if current && !inc.State.Halted() {
+		return c.quarantineAfterStep(ctx, inc, reason, false)
+	}
+	return nil
 }
 
 // runningWork names a workload on the node that is neither infrastructure nor

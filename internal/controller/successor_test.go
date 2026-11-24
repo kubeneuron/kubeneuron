@@ -480,6 +480,10 @@ func TestAddFirstTimeoutRemovesAnIdleSuccessor(t *testing.T) {
 					t.Fatalf("a busy successor: released=%d outcome=%s cordoned=%t, want it kept, in service, for an operator",
 						released, inc.Successor.Outcome, p.cordonedNode(successorNodeName))
 				}
+				want := fmt.Sprintf(`Replacement node n9 in pool train is running workload ml/trainer-0, so KubeNeuron did not remove it. Pool train may now have one node more than planned, and that node is billed. Check its workloads and the size of the pool, and remove the extra node when it is safe. Then run kubeneuronctl resolve %s --cloud-operation-settled --reason "<what you found>"`, id)
+				if inc.Successor.Reason != want {
+					t.Fatalf("successor reason = %q, want %q", inc.Successor.Reason, want)
+				}
 				return
 			}
 			if released != 1 || inc.Successor.Outcome != types.SuccessorReleased {
