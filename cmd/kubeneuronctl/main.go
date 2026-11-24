@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -535,8 +536,8 @@ func printImpactPreview(out io.Writer, p map[string]any) {
 		{"PENDING STEP", str(get("pending_step"))},
 		{"DOWNSTREAM", str(get("downstream_disruptions"))},
 		{"WORKLOADS", str(get("workloads", "total")) + " total, " + str(get("workloads", "gpu_holders")) + " GPU holders, " + str(get("workloads", "namespaces")) + " namespaces"},
-		{"CHECKPOINT", str(get("workloads", "eligible_for_checkpoint")) + " eligible; ineligible " + str(get("workloads", "ineligible"))},
-		{"GROUPS", str(get("workloads", "groups"))},
+		{"CHECKPOINT", str(get("workloads", "eligible_for_checkpoint")) + " eligible; not eligible: " + impactIneligible(get("workloads", "ineligible"))},
+		{"GROUPS", impactGroups(get("workloads", "groups"))},
 		{"ATTRIBUTION", str(get("devices", "attribution"))},
 		{"WARNINGS", str(get("warnings"))},
 	}
@@ -547,6 +548,133 @@ func printImpactPreview(out io.Writer, p map[string]any) {
 		_, _ = fmt.Fprintf(w, "%s\t%s\n", row[0], row[1])
 	}
 	_ = w.Flush()
+	if get("unavailable") == nil {
+		items, _ := get("workloads", "items").([]any)
+		truncated, _ := get("limits", "items_truncated").(bool)
+		total, _ := get("workloads", "total").(float64)
+		printImpactItems(out, items, total, truncated, str(get("limits", "max_items")))
+	}
+}
+
+// impactItemsShown is how many workloads the text output lists, as many as
+// the panel shows before "show all".
+const impactItemsShown = 12
+
+// impactIneligible renders the reasons workloads cannot checkpoint, in the
+// panel's order (by reason).
+func impactIneligible(v any) string {
+	m, _ := v.(map[string]any)
+	if len(m) == 0 {
+		return "—"
+	}
+	reasons := make([]string, 0, len(m))
+	for reason := range m {
+		reasons = append(reasons, reason)
+	}
+	sort.Strings(reasons)
+	parts := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		parts = append(parts, reason+" "+numberOr(m[reason]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// impactGroups renders the checkpoint groups as the panel does. The on-node
+// count is a lower bound and is never presented as the total.
+func impactGroups(v any) string {
+	groups, _ := v.([]any)
+	parts := make([]string, 0, len(groups))
+	for _, raw := range groups {
+		g, _ := raw.(map[string]any)
+		total := "total unknown"
+		if known, _ := g["members_total_known"].(bool); known {
+			total = "total " + numberOr(g["members_total"])
+		}
+		var flags []string
+		if cross, _ := g["cross_node_requested"].(bool); cross {
+			flags = append(flags, "cross-node requested")
+		}
+		if large, _ := g["too_large"].(bool); large {
+			flags = append(flags, "too large")
+		}
+		detail := fmt.Sprintf("%s on node, %s", numberOr(g["members_on_node"]), total)
+		if len(flags) > 0 {
+			detail += ", " + strings.Join(flags, ", ")
+		}
+		parts = append(parts, fmt.Sprintf("%s/%s (%s)", dashOr(g["namespace"]), dashOr(g["name"]), detail))
+	}
+	if len(parts) == 0 {
+		return "—"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// printImpactItems lists the workloads on the node, the same items the panel
+// shows from the same preview.
+func printImpactItems(out io.Writer, items []any, total float64, truncated bool, maxItems string) {
+	_, _ = fmt.Fprintln(out)
+	if len(items) == 0 {
+		// "none" only when the counts agree; a listing the controller left
+		// empty is not evidence that nothing runs on the node.
+		if total > 0 {
+			_, _ = fmt.Fprintln(out, "WORKLOADS ON THE NODE  not listed")
+		} else {
+			_, _ = fmt.Fprintln(out, "WORKLOADS ON THE NODE  none")
+		}
+		return
+	}
+	_, _ = fmt.Fprintln(out, "WORKLOADS ON THE NODE")
+	w := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
+	for i, raw := range items {
+		if i == impactItemsShown {
+			break
+		}
+		it, _ := raw.(map[string]any)
+		cp, _ := it["checkpoint"].(map[string]any)
+		gpu := ""
+		if uses, _ := it["uses_gpu"].(bool); uses {
+			gpu = "GPU"
+		}
+		verdict := stringOr(cp["ineligibility"])
+		if eligible, _ := cp["eligible"].(bool); eligible {
+			verdict = strings.TrimSpace("eligible for a checkpoint request " + stringOr(cp["effective_wait"]))
+		}
+		if group := stringOr(cp["group"]); group != "" {
+			verdict += " (group " + group + ")"
+		}
+		_, _ = fmt.Fprintf(w, "  %s/%s\t%s\t%s\t%s\n", dashOr(it["namespace"]), dashOr(it["name"]), stringOr(it["kind"]), gpu, verdict)
+	}
+	_ = w.Flush()
+	if rest := len(items) - impactItemsShown; rest > 0 {
+		if truncated {
+			_, _ = fmt.Fprintf(out, "  … and %d more; --json lists them\n", rest)
+		} else {
+			_, _ = fmt.Fprintf(out, "  … and %d more; --json lists them all\n", rest)
+		}
+	}
+	if truncated {
+		_, _ = fmt.Fprintf(out, "  The controller listed the first %s workloads only.\n", maxItems)
+	}
+}
+
+func stringOr(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
+// dashOr and numberOr render a field the document left out as "—".
+func dashOr(v any) string {
+	if s := stringOr(v); s != "" {
+		return s
+	}
+	return "—"
+}
+
+func numberOr(v any) string {
+	if f, ok := v.(float64); ok {
+		return strconv.FormatFloat(f, 'f', -1, 64)
+	}
+	return "—"
 }
 
 func decisionCommand(use, short, route string, withRound bool) *cobra.Command {

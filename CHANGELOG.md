@@ -45,6 +45,8 @@ API is `v1alpha1`.
 
 - New notice kind `node_kept` for a kept cordon or degraded taint. The webhook payload has no `incident` object, only `node` and, when recorded, `incident_id`. PagerDuty receives a `critical` event that is not resolved automatically. Consumers that expect an `incident` object in every notice need to handle it.
 
+- `kubeneuronctl incidents impact` lists the workloads on the node by namespace and name, the first 12 as in the panel, and shows the reasons workloads cannot checkpoint and the checkpoint groups as readable text. `--json` output, the digest and webhook notices are unchanged.
+
 - When automatic repair stops after repeated failures, an approval decision, or missing recovery evidence, the incident now tells the operator what to check and how to close it.
 
 - When an add-first replacement node is kept because it runs a workload or its removal cannot be confirmed, the incident names the pool, explains the possible extra charge and gives the command to record the outcome.

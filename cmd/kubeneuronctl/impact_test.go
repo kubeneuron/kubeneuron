@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -143,5 +144,112 @@ func TestApproveAgainstAControllerWithoutPreviewsStaysUnbound(t *testing.T) {
 	}
 	if _, has := seen[1].body["impact_digest"]; has {
 		t.Fatalf("approve body = %v, want no digest", seen[1].body)
+	}
+}
+
+func impactItem(i int, eligible bool) map[string]any {
+	cp := map[string]any{"opted_in": eligible, "eligible": eligible}
+	if eligible {
+		cp["effective_wait"], cp["group"] = "5m0s", "team/run-1"
+	} else {
+		cp["ineligibility"] = "no-disruption"
+	}
+	return map[string]any{"namespace": "ml", "name": fmt.Sprintf("train-%02d", i), "kind": "Pod", "uses_gpu": eligible, "checkpoint": cp}
+}
+
+func renderImpact(t *testing.T, mutate func(doc map[string]any)) string {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(impactDoc), &doc); err != nil {
+		t.Fatal(err)
+	}
+	mutate(doc)
+	// Through JSON, so numbers arrive as the client decodes them.
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc = nil
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	printImpactPreview(&out, doc)
+	return out.String()
+}
+
+// The reasons read as the panel shows them, in a stable order, not as a Go
+// map, and the groups name their on-node and total counts.
+func TestImpactSummaryRendersReasonsAndGroupsReadably(t *testing.T) {
+	out := renderImpact(t, func(doc map[string]any) {
+		doc["workloads"].(map[string]any)["groups"] = []any{
+			map[string]any{"namespace": "team", "name": "run-1", "members_on_node": 2, "members_total": 2, "members_total_known": false, "cross_node_requested": true},
+			map[string]any{"namespace": "team", "name": "run-2", "members_on_node": 1, "members_total": 4, "members_total_known": true},
+		}
+	})
+	for _, want := range []string{
+		"2 eligible; not eligible: drain-excluded 1, not-opted-in 2",
+		"team/run-1 (2 on node, total unknown, cross-node requested), team/run-2 (1 on node, total 4)",
+		"WORKLOADS ON THE NODE  not listed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "map[") {
+		t.Errorf("output renders a Go map:\n%s", out)
+	}
+	empty := renderImpact(t, func(doc map[string]any) {
+		doc["workloads"].(map[string]any)["total"] = 0
+		doc["workloads"].(map[string]any)["groups"] = []any{map[string]any{"name": "g"}}
+	})
+	if !strings.Contains(empty, "WORKLOADS ON THE NODE  none") || !strings.Contains(empty, "—/g (— on node, total unknown)") {
+		t.Errorf("no workloads, or a group with fields missing:\n%s", empty)
+	}
+	none := renderImpact(t, func(doc map[string]any) { doc["workloads"].(map[string]any)["ineligible"] = map[string]any{} })
+	if !strings.Contains(none, "2 eligible; not eligible: —") {
+		t.Errorf("no reasons:\n%s", none)
+	}
+}
+
+// The workloads are listed by namespace/name, up to as many as the panel
+// shows before "show all", and the rest are counted.
+func TestImpactListsTheWorkloadsOnTheNode(t *testing.T) {
+	out := renderImpact(t, func(doc map[string]any) {
+		items := []any{impactItem(0, true)}
+		for i := 1; i < 15; i++ {
+			items = append(items, impactItem(i, false))
+		}
+		doc["workloads"].(map[string]any)["items"] = items
+		doc["limits"] = map[string]any{"items_truncated": true, "max_items": 15}
+	})
+	for _, want := range []string{
+		"WORKLOADS ON THE NODE\n",
+		"ml/train-00  Pod  GPU  eligible for a checkpoint request 5m0s (group team/run-1)",
+		"ml/train-01  Pod       no-disruption",
+		"ml/train-11",
+		"… and 3 more; --json lists them\n",
+		"The controller listed the first 15 workloads only.",
+		"DIGEST        sha256:cur",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "ml/train-12") {
+		t.Errorf("listed more than the panel shows:\n%s", out)
+	}
+}
+
+func TestImpactListWithoutTruncationSaysJSONListsAll(t *testing.T) {
+	out := renderImpact(t, func(doc map[string]any) {
+		var items []any
+		for i := range 13 {
+			items = append(items, impactItem(i, false))
+		}
+		doc["workloads"].(map[string]any)["items"] = items
+	})
+	if !strings.Contains(out, "… and 1 more; --json lists them all") || strings.Contains(out, "listed the first") {
+		t.Errorf("output:\n%s", out)
 	}
 }
