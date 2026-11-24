@@ -24,38 +24,8 @@ func TestTransitionRejectsUntypedHandover(t *testing.T) {
 	}
 }
 
-// Lower this ceiling whenever a legacy message gains structured instructions.
-func TestLegacyHandoverCeiling(t *testing.T) {
-	const ceiling = 0
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	fset := token.NewFileSet()
-	var calls []string
-	for _, path := range files {
-		if strings.HasSuffix(path, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, path, nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			ident, ok := call.Fun.(*ast.Ident)
-			if ok && ident.Name == "legacyHandover" {
-				calls = append(calls, fset.Position(call.Pos()).String())
-			}
-			return true
-		})
-	}
-	if len(calls) != ceiling {
-		t.Fatalf("found %d legacy handovers, ceiling %d; migrate new calls or lower the ceiling after migration:\n%s", len(calls), ceiling, strings.Join(calls, "\n"))
-	}
+func testOperatorHandover(id string) handover {
+	return handover{What: "The repair stopped.", Check: "Check the node. Then run", Command: "kubeneuronctl resolve " + id}
 }
 
 func TestRestoreHandoverMessages(t *testing.T) {
@@ -113,7 +83,7 @@ func TestDirectNeedsHumanTransition(t *testing.T) {
 		t.Fatal(err)
 	}
 	fset := token.NewFileSet()
-	allowed := 0
+	settlement, handovers := 0, 0
 	for _, path := range files {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
@@ -129,27 +99,42 @@ func TestDirectNeedsHumanTransition(t *testing.T) {
 			}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
-				if !ok || len(call.Args) != 2 {
-					return true
-				}
-				target, ok := call.Args[1].(*ast.SelectorExpr)
-				if !ok || target.Sel.Name != "StateNeedsHuman" {
+				if !ok {
 					return true
 				}
 				method, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || method.Sel.Name != "Transition" {
+				if !ok {
 					return true
 				}
-				if path == "cloud_settlement.go" && fn.Name.Name == "ResolveSettledCloudOperation" && allowed == 0 {
-					allowed++
-				} else {
-					t.Errorf("%s: direct transition to NEEDS_HUMAN outside the single settlement exception", fset.Position(call.Pos()))
+				var targetIndex int
+				switch method.Sel.Name {
+				case "Transition":
+					targetIndex = 1
+				case "transition", "transitionWithRepairStep":
+					targetIndex = 2
+				default:
+					return true
+				}
+				if len(call.Args) <= targetIndex {
+					return true
+				}
+				target, ok := call.Args[targetIndex].(*ast.SelectorExpr)
+				if !ok || target.Sel.Name != "StateNeedsHuman" {
+					return true
+				}
+				switch {
+				case method.Sel.Name == "Transition" && path == "cloud_settlement.go" && fn.Name.Name == "ResolveSettledCloudOperation":
+					settlement++
+				case method.Sel.Name == "transitionWithRepairStep" && path == "handover.go" && fn.Name.Name == "handOver":
+					handovers++
+				default:
+					t.Errorf("%s: transition to NEEDS_HUMAN bypasses handOver", fset.Position(call.Pos()))
 				}
 				return true
 			})
 		}
 	}
-	if allowed != 1 {
-		t.Fatal("expected one internal NEEDS_HUMAN transition in ResolveSettledCloudOperation")
+	if settlement != 1 || handovers != 1 {
+		t.Fatalf("expected one NEEDS_HUMAN transition each in settlement and handOver, got %d and %d", settlement, handovers)
 	}
 }

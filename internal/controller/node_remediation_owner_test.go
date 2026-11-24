@@ -452,7 +452,7 @@ func TestExecutingTransactionExcludesDrainAndGPUReset(t *testing.T) {
 	if err := start("drain", "platform.drain"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.handOver(ctx, mustIncident(t, st, "drain"), "system", "escalate", legacyHandover("drain failed"), false); err != nil {
+	if err := c.handOver(ctx, mustIncident(t, st, "drain"), "system", "escalate", testOperatorHandover("drain"), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := start("next-reset", "agent.gpu_reset"); err != nil {

@@ -391,7 +391,7 @@ func TestRecoveryOutcomeMetricsRecordedOnce(t *testing.T) {
 	// measured exactly once. NEEDS_HUMAN is halted but reversible, and
 	// measuring there charged the whole incident again at every park.
 	inc := open("inc-outcome", false)
-	if err := c.handOver(ctx, inc, "system", "escalate", legacyHandover("needs a human"), false); err != nil {
+	if err := c.handOver(ctx, inc, "system", "escalate", testOperatorHandover(inc.ID), false); err != nil {
 		t.Fatal(err)
 	}
 	if got := testutil.ToFloat64(metrics.IncidentsRecovered.WithLabelValues(class, "true")); got != before {

@@ -453,3 +453,15 @@ func TestIncidentShowHandoverCause(t *testing.T) {
 		t.Fatalf("show: %v\n%s", err, out)
 	}
 }
+
+func TestIncidentShowHistoricalHandover(t *testing.T) {
+	const old = "parked step no longer exists"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"incident": types.Incident{ID: "old", State: types.StateNeedsHuman}, "audit": []types.AuditEntry{{Action: "quarantine", Result: old}}})
+	}))
+	defer server.Close()
+	out, err := runCommand(t, server.URL, "incidents", "show", "old")
+	if err != nil || !strings.Contains(out, old) || strings.Contains(out, "cause:") {
+		t.Fatalf("show: %v\n%s", err, out)
+	}
+}

@@ -239,3 +239,23 @@ func TestSettleHandedOverSuccessorWithoutOperation(t *testing.T) {
 		t.Fatalf("unexpected settlement: %+v", got)
 	}
 }
+
+func TestSettlementPreservesHistoricalHandover(t *testing.T) {
+	c, st, _ := walkFixture(t, false)
+	ctx := t.Context()
+	const old = "device action outcome is unknown (agent.gpu_reset): context deadline exceeded"
+	inc := &types.Incident{ID: "old", State: types.StateNeedsHuman, Target: types.Target{Node: "n1"}, Successor: &types.SuccessorRecord{Outcome: types.SuccessorHandedOver, Reason: old}}
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.appendAudit(ctx, inc, "system", "quarantine", old); err != nil {
+		t.Fatal(err)
+	}
+	resolved, _, err := c.ResolveSettledCloudOperation(ctx, inc.ID, "operator", "checked the replacement", 0, "confirm")
+	if err != nil || resolved.State != types.StateResolved {
+		t.Fatalf("settlement: %+v, %v", resolved, err)
+	}
+	if !auditHas(trail(t, st, inc.ID), "quarantine", old) {
+		t.Fatal("historical handover lost during settlement")
+	}
+}

@@ -179,7 +179,7 @@ func TestNeedsHumanAlsoRemovesTheMark(t *testing.T) {
 	if err := c.transition(ctx, inc, types.StateEvaluating, "system", "evaluate", "", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.handOver(ctx, inc, "system", "quarantine", legacyHandover(""), false); err != nil {
+	if err := c.handOver(ctx, inc, "system", "quarantine", testOperatorHandover(inc.ID), false); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := p.marked("n1"); ok {
@@ -384,7 +384,7 @@ func TestUnparkedIncidentIsMarkedAgain(t *testing.T) {
 	if _, ok := p.marked("n1"); !ok {
 		t.Fatal("precondition: the node should be marked while the incident is worked")
 	}
-	if err := c.handOver(ctx, inc, "system", "park", legacyHandover(""), false); err != nil {
+	if err := c.handOver(ctx, inc, "system", "park", testOperatorHandover(inc.ID), false); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := p.marked("n1"); ok {

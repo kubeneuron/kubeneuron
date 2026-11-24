@@ -294,7 +294,7 @@ func TestRebuildGateOccupancyHoldsCapsAcrossFailover(t *testing.T) {
 	}
 	gate.StepDone(types.Target{Node: "node-a"}, types.ActionReboot, 0)
 	// Terminalizing the incident releases the remediation slot — no leak.
-	if err := c.handOver(ctx, inc, "system", "recover", legacyHandover("parked for a human"), false); err != nil {
+	if err := c.handOver(ctx, inc, "system", "recover", testOperatorHandover(inc.ID), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := gate.Allow(types.Target{Node: "node-b"}, types.ActionReboot); err != nil {

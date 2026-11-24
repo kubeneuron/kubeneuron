@@ -92,7 +92,7 @@ func TestHaltingTransitionClearsTheDurableBitAndFreesTheSlot(t *testing.T) {
 	}
 	gate.OccupyRemediation(inc.Target) // the in-memory projection of the bit
 
-	if err := c.quarantine(ctx, inc, legacyHandover("operator takeover")); err != nil {
+	if err := c.quarantine(ctx, inc, testOperatorHandover(inc.ID)); err != nil {
 		t.Fatal(err)
 	}
 	got, err := st.GetIncident(ctx, inc.ID)

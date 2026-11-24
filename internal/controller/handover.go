@@ -13,22 +13,13 @@ import (
 type handover struct {
 	What, Check, Command string
 	auditParams          map[string]string
-	legacy               *string
 }
 
-func legacyHandover(reason string) handover { return handover{legacy: &reason} }
-
 func (h handover) message() string {
-	if h.legacy != nil {
-		return *h.legacy
-	}
 	return strings.Join([]string{h.What, h.Check, h.Command}, " ")
 }
 
 func (h handover) validate(id string) error {
-	if h.legacy != nil {
-		return nil
-	}
 	if strings.TrimSpace(h.What) == "" || strings.TrimSpace(h.Check) == "" {
 		return errors.New("handover requires a reason and an operator check")
 	}

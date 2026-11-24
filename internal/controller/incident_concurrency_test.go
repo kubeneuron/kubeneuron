@@ -92,7 +92,7 @@ func TestTransitionConflictsWhenStateMovedUnderneath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.handOver(ctx, fresh, "system", "quarantine", legacyHandover("boom"), false); err != nil {
+	if err := c.handOver(ctx, fresh, "system", "quarantine", testOperatorHandover(fresh.ID), false); err != nil {
 		t.Fatal(err)
 	}
 
