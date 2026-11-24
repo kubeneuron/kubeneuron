@@ -76,3 +76,36 @@ func TestFollowerShowsOwnerSettlementCommand(t *testing.T) {
 		t.Fatalf("missing no-open-operation explanation: %v", err)
 	}
 }
+
+func TestResolveEarlierSuccessorReportsContinuingAttempt(t *testing.T) {
+	ctx := t.Context()
+	st, err := sqlite.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	inc := &types.Incident{
+		ID: "inc-earlier", Attempt: 2, State: types.StateExecuting,
+		Target: types.Target{Node: "worker"},
+		Successor: &types.SuccessorRecord{
+			Outcome: types.SuccessorHandedOver,
+			Successor: cloud.Successor{Operation: "inc-earlier-a1", Pool: "training"},
+		},
+	}
+	if err := st.WithTx(ctx, func(tx store.Tx) error { return tx.CreateIncident(ctx, inc) }); err != nil {
+		t.Fatal(err)
+	}
+	c := controller.New(st, st, nil, nil, nil, nil, nil, nil, slog.Default())
+	api := httpapi.New(nil)
+	api.EnableOperatorAPI(c, "test-token")
+	server := httptest.NewServer(api.Routes())
+	defer server.Close()
+	got, err := runCommand(t, server.URL, "resolve", inc.ID, "--cloud-operation-settled", "--reason", "checked training pool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Recorded: the replacement node left by an earlier attempt of incident inc-earlier is settled. The incident stays open; its current attempt continues."
+	if strings.TrimSpace(got) != want {
+		t.Fatalf("resolve output = %q, want %q", got, want)
+	}
+}

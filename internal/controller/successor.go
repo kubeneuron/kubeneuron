@@ -275,6 +275,19 @@ func (c *Controller) planSuccessor(ctx context.Context, inc *types.Incident) err
 	if s := inc.Successor; s != nil && s.Operation == successorOperation(inc) {
 		return nil
 	}
+	if s := inc.Successor; s != nil && s.Outcome == types.SuccessorHandedOver {
+		reason := s.Reason
+		command := successorSettlementCommand(inc.ID)
+		if !strings.HasSuffix(reason, command) {
+			reason = unconfirmedSuccessorRemoval(inc.Target.Node, s.Pool) + command
+		}
+		if !inc.State.Halted() {
+			if err := c.quarantineAfterStep(ctx, inc, reason, false); err != nil {
+				return err
+			}
+		}
+		return errors.New(reason)
+	}
 	if s := inc.Successor; s.Open() {
 		return fmt.Errorf("the successor operation %s of an earlier attempt is still open", s.Operation)
 	}
@@ -384,7 +397,7 @@ func (c *Controller) saveSuccessor(ctx context.Context, inc *types.Incident, rec
 		if err != nil {
 			return err
 		}
-		if fresh.Successor != nil && fresh.Successor.Operation != rec.Operation && fresh.Successor.Open() {
+		if fresh.Successor != nil && fresh.Successor.Operation != rec.Operation && (fresh.Successor.Open() || fresh.Successor.Outcome == types.SuccessorHandedOver) {
 			return store.ErrConflict
 		}
 		fresh.Successor = rec.Clone()
@@ -731,7 +744,7 @@ func (c *Controller) releaseSuccessor(ctx context.Context, inc *types.Incident, 
 				return rerr
 			}
 		}
-		reason := fmt.Sprintf("KubeNeuron could not confirm that the replacement node for %s was removed from pool %s. The pool may have one node more than planned, and that node is billed. Check which machines remain in pool %s and its size.", inc.Target.Node, rec.Pool, rec.Pool)
+		reason := unconfirmedSuccessorRemoval(inc.Target.Node, rec.Pool)
 		return c.handOverSuccessorCleanup(ctx, inc, reason)
 	}
 	if err != nil {
@@ -743,8 +756,16 @@ func (c *Controller) releaseSuccessor(ctx context.Context, inc *types.Incident, 
 	return c.endSuccessor(ctx, inc, types.SuccessorNotCreated, why)
 }
 
+func unconfirmedSuccessorRemoval(node, pool string) string {
+	return fmt.Sprintf("KubeNeuron could not confirm that the replacement node for %s was removed from pool %s. The pool may have one node more than planned, and that node is billed. Check which machines remain in pool %s and its size.", node, pool, pool)
+}
+
+func successorSettlementCommand(id string) string {
+	return fmt.Sprintf(` Then run kubeneuronctl resolve %s --cloud-operation-settled --reason "<what you found>"`, id)
+}
+
 func (c *Controller) handOverSuccessorCleanup(ctx context.Context, inc *types.Incident, reason string) error {
-	reason += fmt.Sprintf(` Then run kubeneuronctl resolve %s --cloud-operation-settled --reason "<what you found>"`, inc.ID)
+	reason += successorSettlementCommand(inc.ID)
 	current := inc.Successor.Operation == successorOperation(inc)
 	if err := c.endSuccessor(ctx, inc, types.SuccessorHandedOver, reason); err != nil {
 		return err

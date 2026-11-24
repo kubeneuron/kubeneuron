@@ -36,6 +36,7 @@ API is `v1alpha1`.
 ### Fixed
 
 - When a GKE remove-first replacement needs an operator, the incident explains how to check the pool and settle the cloud operation. If the pool has been removed, the incident no longer suggests resizing it.
+- Add-first: a replacement node that KubeNeuron kept because it was already running a workload is no longer dropped from the incident's record when a later attempt plans its own replacement. The incident now waits for the operator, names the node and the pool, and continues after `kubeneuronctl resolve <id> --cloud-operation-settled`.
 
 - The pools API and `kubeneuronctl pools` explain why add-first is unavailable on a multi-zone GKE pool and advise using a single-zone pool or selecting RemoveFirst.
 - The optional AMD detection source reads `amd-smi metric --json` both as a

@@ -103,3 +103,76 @@ func TestVerifiedClosureRetainsOwnerForHandedOverCloudPlan(t *testing.T) {
 		})
 	}
 }
+
+func TestEarlierSuccessorSettlementWhileExecuting(t *testing.T) {
+	c, st, _ := walkFixture(t, false)
+	ctx := t.Context()
+	inc := &types.Incident{ID: "active", Target: types.Target{Node: "n1"}, State: types.StateExecuting, Attempt: 1, RemediationSlotHeld: true}
+	inc.Successor = &types.SuccessorRecord{Outcome: types.SuccessorHandedOver}
+	inc.Successor.Operation = successorOperation(inc)
+	inc.Attempt++
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	for _, wantReplay := range []bool{false, true} {
+		got, replay, err := c.ResolveSettledCloudOperation(ctx, inc.ID, "operator", "checked pool", 0, "settle-earlier")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if replay != wantReplay || got.State != types.StateExecuting || !got.RemediationSlotHeld || got.Successor.Outcome != "settled-by-operator" {
+			t.Fatalf("unexpected settlement: replay=%t incident=%+v", replay, got)
+		}
+	}
+	entries := trail(t, st, inc.ID)
+	if len(entries) != 1 || entries[0].Action != "earlier-successor-settled" || entries[0].Params["operation"] != inc.Successor.Operation {
+		t.Fatalf("unexpected settlement audit: %v", entries)
+	}
+}
+
+func TestCurrentExecutingSuccessorCannotBeSettled(t *testing.T) {
+	for _, outcome := range []string{"", types.SuccessorHandedOver} {
+		c, st, _ := walkFixture(t, false)
+		ctx := t.Context()
+		inc := &types.Incident{ID: "current", State: types.StateExecuting, Attempt: 1, RemediationSlotHeld: true}
+		inc.Successor = &types.SuccessorRecord{Outcome: outcome}
+		inc.Successor.Operation = successorOperation(inc)
+		if err := st.CreateIncident(ctx, inc); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := c.ResolveSettledCloudOperation(ctx, inc.ID, "operator", "checked pool", 0, "confirm")
+		if err == nil || err.Error() != "the current replacement is still active; check the incident again when it needs an operator" {
+			t.Fatalf("outcome %q: unexpected error %v", outcome, err)
+		}
+		got := mustIncident(t, st, inc.ID)
+		if got.State != types.StateExecuting || !got.RemediationSlotHeld || got.Successor.Outcome != outcome || len(trail(t, st, inc.ID)) != 0 {
+			t.Fatalf("refused settlement changed incident %s", inc.ID)
+		}
+	}
+}
+
+func TestPlanningWithEarlierHandedOverSuccessorParksIncident(t *testing.T) {
+	c, st, _ := walkFixture(t, false)
+	ctx := t.Context()
+	inc := &types.Incident{ID: "planning", Target: types.Target{Node: "n1"}, State: types.StateExecuting, Attempt: 2}
+	inc.Successor = &types.SuccessorRecord{Outcome: types.SuccessorHandedOver, Reason: "legacy provider diagnostic"}
+	inc.Successor.Operation = "planning-a1"
+	inc.Successor.Pool = "train"
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	want := unconfirmedSuccessorRemoval("n1", "train") + successorSettlementCommand(inc.ID)
+	if err := c.planSuccessor(ctx, inc); err == nil || err.Error() != want {
+		t.Fatalf("planning returned %v, want operator handover", err)
+	}
+	got := mustIncident(t, st, inc.ID)
+	if got.State != types.StateNeedsHuman || got.Successor.Operation != "planning-a1" || got.Successor.Outcome != types.SuccessorHandedOver {
+		t.Fatalf("unexpected state after planning: %+v", got)
+	}
+	if !auditHas(trail(t, st, inc.ID), "quarantine", want) {
+		t.Fatal("missing operator command in quarantine audit")
+	}
+	got, _, err := c.ResolveSettledCloudOperation(ctx, inc.ID, "operator", "checked pool", 0, "settle-parked")
+	if err != nil || got.State != types.StateResolved {
+		t.Fatalf("parked settlement: incident=%v err=%v", got, err)
+	}
+}

@@ -73,6 +73,17 @@ func (c *Controller) ResolveSettledCloudOperation(ctx context.Context, id, actor
 		}
 		now := time.Now()
 		from := inc.State
+		if s := inc.Successor; s != nil && !from.Halted() && (s.Open() || s.Outcome == types.SuccessorHandedOver) {
+			if s.Outcome != types.SuccessorHandedOver || s.Operation == "" || s.Operation == successorOperation(inc) {
+				return fmt.Errorf("the current replacement is still active; check the incident again when it needs an operator")
+			}
+			s.Outcome, s.Reason, s.EndedAt = "settled-by-operator", reason, &now
+			inc.UpdatedAt = now
+			if err := tx.UpdateIncident(ctx, inc); err != nil {
+				return err
+			}
+			return tx.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: now, FromState: from, ToState: from, Actor: actor, Action: "earlier-successor-settled", Result: reason, Params: map[string]string{"operation": s.Operation}})
+		}
 		if err := settleCloudOperation(inc, reason, now); err != nil {
 			return err
 		}

@@ -626,8 +626,15 @@ func cmdResolve() *cobra.Command {
 				}
 				body["cloud_operation_settled"] = true
 			}
-			var incident types.Incident
+			var incident struct {
+				types.Incident
+				EarlierSuccessorSettled bool `json:"earlier_successor_settled"`
+			}
 			if err := client.doHeaders("POST", "/api/v1/incidents/"+url.PathEscape(args[0])+"/resolve", body, &incident, map[string]string{"Idempotency-Key": operationKey()}); err != nil {
+				return err
+			}
+			if incident.EarlierSuccessorSettled {
+				_, err = fmt.Fprintf(cmd.OutOrStdout(), "Recorded: the replacement node left by an earlier attempt of incident %s is settled. The incident stays open; its current attempt continues.\n", incident.ID)
 				return err
 			}
 			if hint := incident.CloudSettlementHint(); hint != "" {

@@ -897,6 +897,13 @@ func (s *Server) handleIdempotentResolve(w http.ResponseWriter, r *http.Request,
 	if replayed {
 		w.Header().Set("Idempotent-Replay", "true")
 	}
+	if request.CloudOperationSettled && incident.State != types.StateResolved {
+		writeOperationalJSON(w, http.StatusOK, struct {
+			*types.Incident
+			EarlierSuccessorSettled bool `json:"earlier_successor_settled"`
+		}{incident, true})
+		return
+	}
 	writeOperationalJSON(w, http.StatusOK, incident)
 }
 
