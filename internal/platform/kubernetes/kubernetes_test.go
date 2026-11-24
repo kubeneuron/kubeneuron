@@ -2091,3 +2091,11 @@ func TestATakeoverPlacedMidReleaseIsNotRacedPast(t *testing.T) {
 		t.Fatal("the retry after the rejected write released the node anyway")
 	}
 }
+
+func TestInjectedAgentAuthClient(t *testing.T) {
+	client := fake.NewClientset()
+	p := &Platform{client: client}
+	if p.AgentAuthClient() != client {
+		t.Fatal("expected injected client for authentication")
+	}
+}

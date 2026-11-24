@@ -19,6 +19,8 @@ import (
 )
 
 var (
+	AgentAuthLiveGets = promauto.NewCounterVec(prometheus.CounterOpts{Name: "kubeneuron_agent_auth_live_gets_total", Help: "Agent authentication object reads that fell back to the Kubernetes API."}, []string{"resource"})
+
 	// SignalsTotal counts normalized signals entering the incident pipeline.
 	SignalsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "kubeneuron_signals_total",

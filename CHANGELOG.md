@@ -9,6 +9,22 @@ API is `v1alpha1`.
 
 ## [Unreleased]
 
+### Read before upgrading
+
+- Agent authentication no longer asks the Kubernetes API on every request. The
+  controller reuses a successful token review for up to 60 seconds and never
+  past the token's expiry; after that it asks the Kubernetes API again. On
+  every request it checks the Pod and ServiceAccount UIDs from the token
+  against its cached view of the cluster, which follows the API through a
+  watch. So an agent's access ends when the controller sees the Pod's deletion
+  through the watch, or, if the watch lags, when the next token review is
+  rejected by the Kubernetes API.
+- The operator grants the controller a Role with list and watch access to
+  ServiceAccounts and DaemonSets in the installation namespace. Until the Role
+  is available, the controller uses live API reads for these resources. It logs
+  a warning when a cache has not synchronized and counts these reads in
+  `kubeneuron_agent_auth_live_gets_total`.
+
 ### Added
 
 - kubeneuronctl --ca-file (or KUBENEURONCTL_CA_FILE) trusts a private CA for the controller's certificate in addition to the system roots.

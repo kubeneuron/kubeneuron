@@ -3,12 +3,20 @@
 package agentauth
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
+	"fmt"
+	"github.com/kubeneuron/kubeneuron/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	listers "k8s.io/client-go/listers/core/v1"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +29,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/cache"
 
 	"github.com/kubeneuron/kubeneuron/internal/httpapi"
 )
@@ -389,5 +398,166 @@ func TestAuthenticateAgentAcceptsEveryAgentDaemonSet(t *testing.T) {
 				t.Fatal("an unknown component authenticated")
 			}
 		})
+	}
+}
+
+func TestAuthenticateAgentObjectCaches(t *testing.T) {
+	a, req := newFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a.StartObjectCaches(ctx, testNodeLister(t, a), slog.Default())
+	deadline, stop := context.WithTimeout(ctx, 5*time.Second)
+	defer stop()
+	if !cache.WaitForCacheSync(deadline.Done(), a.objects.pods.synced, a.objects.nodes.synced, a.objects.daemonSets.synced, a.objects.serviceAccounts.synced) {
+		t.Fatal("identity caches did not sync")
+	}
+	client := a.client.(*fake.Clientset)
+	for _, miss := range []bool{false, true} {
+		if miss {
+			a.objects.pods.get = func(name string) (*corev1.Pod, error) {
+				return nil, apierrors.NewNotFound(corev1.Resource("pods"), name)
+			}
+		}
+		client.ClearActions()
+		if _, err := a.AuthenticateAgent(req); err != nil {
+			t.Fatal(err)
+		}
+		var gets, reviews int
+		for _, action := range client.Actions() {
+			if action.GetVerb() == "get" {
+				gets++
+				if action.GetResource().Resource != "pods" {
+					t.Fatalf("unexpected GET %v", action.GetResource())
+				}
+			}
+			if action.GetResource().Resource == "tokenreviews" {
+				reviews++
+			}
+		}
+		want := 0
+		if miss {
+			want = 1
+		}
+		if gets != want || reviews != 1 {
+			t.Fatalf("miss=%v: %d GETs, %d reviews", miss, gets, reviews)
+		}
+	}
+}
+
+func TestRepeatedReviewedToken(t *testing.T) {
+	for _, scenario := range []string{"repeat", "missing TLS", "deleted Pod", "replacement Pod", "expired review", "changed audience"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newTestingFixture(t)
+			a := f.authenticator
+			now := a.now()
+			a.now = func() time.Time { return now }
+			claims := fmt.Sprintf(`{"exp":%d}`, now.Add(time.Hour).Unix())
+			token := "header." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + ".sig"
+			f.request.Header.Set("Authorization", "Bearer "+token)
+			if scenario == "repeat" {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				a.StartObjectCaches(ctx, testNodeLister(t, a), slog.Default())
+				timeout, stop := context.WithTimeout(ctx, 5*time.Second)
+				defer stop()
+				if !cache.WaitForCacheSync(timeout.Done(), a.objects.pods.synced, a.objects.nodes.synced, a.objects.serviceAccounts.synced, a.objects.daemonSets.synced) {
+					t.Fatal("cache sync timed out")
+				}
+				f.client.ClearActions()
+			}
+			reviews := 0
+			f.client.PrependReactor("create", "tokenreviews", func(action clienttesting.Action) (bool, runtime.Object, error) {
+				reviews++
+				res := f.review.DeepCopy()
+				if reviews > 1 {
+					res.Status.Authenticated = false
+				}
+				return true, res, nil
+			})
+			if _, err := a.AuthenticateAgent(f.request); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "repeat" {
+				actions := f.client.Actions()
+				if len(actions) != 1 || actions[0].GetResource().Resource != "tokenreviews" {
+					t.Fatalf("unexpected cold review actions: %v", actions)
+				}
+				f.client.ClearActions()
+			}
+			pods := f.client.CoreV1().Pods(testNamespace)
+			switch scenario {
+			case "missing TLS":
+				f.request.TLS = nil
+			case "deleted Pod", "replacement Pod":
+				if err := pods.Delete(context.Background(), testPod, metav1.DeleteOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "replacement Pod" {
+					p := f.pod.DeepCopy()
+					p.UID = "new"
+					if _, err := pods.Create(context.Background(), p, metav1.CreateOptions{}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "expired review":
+				// Model a disconnected watch retaining the Pod after deletion.
+				if err := pods.Delete(context.Background(), testPod, metav1.DeleteOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				a.objects.pods = objectReader[*corev1.Pod]{synced: func() bool { return true }, get: func(string) (*corev1.Pod, error) { return f.pod, nil }}
+				if _, err := a.AuthenticateAgent(f.request); err != nil {
+					t.Fatalf("stale view before expiry: %v", err)
+				}
+				now = now.Add(positiveReviewTTL)
+			case "changed audience":
+				a.cfg.Audience = "other"
+			}
+			_, err := a.AuthenticateAgent(f.request)
+			if (err == nil) != (scenario == "repeat") {
+				t.Fatalf("unexpected authentication result: %v", err)
+			}
+			if scenario == "repeat" && len(f.client.Actions()) != 0 {
+				t.Fatalf("cache hit made API calls: %v", f.client.Actions())
+			}
+			want := 1
+			if scenario == "expired review" || scenario == "changed audience" {
+				want = 2
+			}
+			if reviews != want {
+				t.Fatalf("got %d TokenReviews, want %d", reviews, want)
+			}
+		})
+	}
+}
+
+func testNodeLister(t *testing.T, a *Authenticator) func() listers.NodeLister {
+	t.Helper()
+	n, err := a.client.CoreV1().Nodes().Get(context.Background(), testNode, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := cache.NewIndexer(cache.MetaNamespaceKeyFunc, nil)
+	if err := index.Add(n); err != nil {
+		t.Fatal(err)
+	}
+	l := listers.NewNodeLister(index)
+	return func() listers.NodeLister { return l }
+}
+
+func TestUnsyncedCacheDiagnostics(t *testing.T) {
+	var out bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&out, nil))
+	warnUnsynced(context.Background(), map[string]cache.InformerSynced{"pods": func() bool { return false }, "nodes": func() bool { return true }}, log, 0)
+	if strings.Count(out.String(), "\n") != 1 || !strings.Contains(out.String(), `"resource":"pods"`) {
+		t.Fatalf("unexpected warnings: %s", out.String())
+	}
+	metric := metrics.AgentAuthLiveGets.WithLabelValues("pods")
+	before := testutil.ToFloat64(metric)
+	f := newTestingFixture(t)
+	if _, err := f.authenticator.AuthenticateAgent(f.request); err != nil {
+		t.Fatal(err)
+	}
+	if got := testutil.ToFloat64(metric) - before; got != 1 {
+		t.Fatalf("fallback count delta = %v", got)
 	}
 }

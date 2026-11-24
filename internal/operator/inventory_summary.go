@@ -68,13 +68,25 @@ func (r *KubeNeuronReconciler) ensureAutoscalerStatusAccess(ctx context.Context,
 }
 
 func (r *KubeNeuronReconciler) ensureConfigMapAccess(ctx context.Context, installation *api.KubeNeuron, meta metav1.ObjectMeta, component, configMap string, verbs []string) error {
+	return r.ensureControllerRoleAccess(ctx, installation, meta, component, []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{configMap}, Verbs: verbs}})
+}
+
+func (r *KubeNeuronReconciler) ensureAgentAuthAccess(ctx context.Context, installation *api.KubeNeuron) error {
+	meta := metav1.ObjectMeta{Name: installation.Name + "-agent-auth-reader", Namespace: installation.Spec.Namespace}
+	return r.ensureControllerRoleAccess(ctx, installation, meta, "agent-auth-reader", []rbacv1.PolicyRule{
+		{APIGroups: []string{""}, Resources: []string{"serviceaccounts"}, Verbs: []string{"list", "watch"}},
+		{APIGroups: []string{"apps"}, Resources: []string{"daemonsets"}, Verbs: []string{"list", "watch"}},
+	})
+}
+
+func (r *KubeNeuronReconciler) ensureControllerRoleAccess(ctx context.Context, installation *api.KubeNeuron, meta metav1.ObjectMeta, component string, rules []rbacv1.PolicyRule) error {
 	role := &rbacv1.Role{ObjectMeta: meta}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, role, func() error {
 		if err := ensureControlledBy(installation, role, "Role"); err != nil {
 			return err
 		}
 		role.Labels = resourceLabels(installation, component)
-		role.Rules = []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{configMap}, Verbs: verbs}}
+		role.Rules = rules
 		return setOwner(r.Scheme, installation, role)
 	})
 	if err != nil {

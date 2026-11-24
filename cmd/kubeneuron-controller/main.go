@@ -574,7 +574,7 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	if kubePlatform == nil {
 		return fmt.Errorf("authenticated agent API currently requires the kubernetes platform")
 	}
-	authenticator, err := agentauth.New(kubePlatform.Client(), agentauth.Config{
+	authenticator, err := agentauth.New(kubePlatform.AgentAuthClient(), agentauth.Config{
 		Audience:         agentServer.TokenAudience,
 		Namespace:        agentServer.Namespace,
 		ServiceAccount:   agentServer.ServiceAccount,
@@ -585,6 +585,7 @@ func run(log *slog.Logger, listenAddr string, agentServer agentServerConfig, pat
 	if err != nil {
 		return fmt.Errorf("configure agent identity: %w", err)
 	}
+	authenticator.StartObjectCaches(ctx, kubePlatform.NodeLister, log)
 	agentTLSConfig, err := loadAgentTLSConfig(agentServer.ClientCAFile)
 	if err != nil {
 		return err

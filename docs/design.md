@@ -248,10 +248,16 @@ ephemeral local CAs.
 The shared fleet leaf proves installation membership only. Node authorization
 comes from a second proof on every request: a one-hour projected,
 Pod-bound ServiceAccount token with audience `kubeneuron-controller`. The
-agent rereads the token file for every request. The controller performs
-TokenReview and requires the exact ServiceAccount identity and current UID,
-then verifies the bound live Running Pod's UID, labels, ServiceAccount,
-DaemonSet controller owner, node binding, and live Node. The JSON node name
+agent rereads the token file for every request. The controller reuses a
+successful token review for up to 60 seconds and never past the token's
+expiry; after that it asks the Kubernetes API again. On every request it
+checks the Pod and ServiceAccount UIDs from the token against its cached view
+of the cluster, which follows the API through a watch. So an agent's access
+ends when the controller sees the Pod's deletion through the watch, or, if the
+watch lags, when the next token review is rejected by the Kubernetes API.
+The controller also checks the Running Pod's labels, ServiceAccount, DaemonSet
+owner, node binding and Node. An unsynchronized informer or missing object
+triggers a live GET. The JSON node name
 must equal this server-derived principal; a mismatch is rejected before any
 backend mutation. Missing/invalid credentials return 401, valid credentials
 for the wrong identity return 403, and Kubernetes API infrastructure failures

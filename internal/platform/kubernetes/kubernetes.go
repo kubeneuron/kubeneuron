@@ -231,8 +231,9 @@ var drainPollInterval = 5 * time.Second
 
 // Platform implements platform.Platform on Kubernetes.
 type Platform struct {
-	client   kubernetes.Interface
-	recycler platform.InstanceRecycler
+	agentAuthClient kubernetes.Interface
+	client          kubernetes.Interface
+	recycler        platform.InstanceRecycler
 	// cloudHealthTimeout overrides the bound of one read of the cloud's
 	// monitoring; zero is cloudHealthTimeout.
 	cloudHealthTimeout time.Duration
@@ -299,7 +300,13 @@ func New(kubeconfig string) (*Platform, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Platform{client: client, dynamic: dyn}, nil
+	authCfg := rest.CopyConfig(cfg)
+	authCfg.UserAgent = "kubeneuron-controller-agent-auth"
+	authClient, err := kubernetes.NewForConfig(authCfg)
+	if err != nil {
+		return nil, fmt.Errorf("create agent auth client: %w", err)
+	}
+	return &Platform{client: client, dynamic: dyn, agentAuthClient: authClient}, nil
 }
 
 // Name implements platform.Platform.
@@ -309,6 +316,23 @@ func (p *Platform) Name() string { return "kubernetes" }
 // that must validate Kubernetes-native workload identity, such as the agent
 // TokenReview authenticator. Callers must still use narrowly scoped RBAC.
 func (p *Platform) Client() kubernetes.Interface { return p.client }
+
+// AgentAuthClient has a separate client-go rate limiter for agent traffic.
+func (p *Platform) AgentAuthClient() kubernetes.Interface {
+	if p.agentAuthClient != nil {
+		return p.agentAuthClient
+	}
+	// Platforms constructed with an injected client share it for authentication.
+	return p.client
+}
+
+// NodeLister returns the shared reader after initial synchronization.
+func (p *Platform) NodeLister() corev1listers.NodeLister {
+	if l := p.nodeLister.Load(); l != nil {
+		return *l
+	}
+	return nil
+}
 
 // StartNodeCache begins an informer-backed watch of Nodes and, once the cache
 // has synced, serves ListNodes from it instead of a per-call apiserver List.

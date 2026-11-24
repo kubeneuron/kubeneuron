@@ -6,8 +6,10 @@
 package agentauth
 
 import (
+	"crypto/sha256"
 	"crypto/x509"
 	"fmt"
+	"k8s.io/utils/lru"
 	"net/http"
 	"net/url"
 	"strings"
@@ -44,9 +46,11 @@ type Config struct {
 
 // Authenticator validates projected tokens using the Kubernetes API.
 type Authenticator struct {
-	client kubernetes.Interface
-	cfg    Config
-	now    func() time.Time
+	reviews positiveReviews
+	objects identityObjects
+	client  kubernetes.Interface
+	cfg     Config
+	now     func() time.Time
 }
 
 // agentComponents are the component labels of the agent DaemonSets: the
@@ -97,7 +101,7 @@ func New(client kubernetes.Interface, cfg Config) (*Authenticator, error) {
 	if cfg.MaximumCertPeriod < 0 {
 		return nil, fmt.Errorf("maximum certificate period must be positive")
 	}
-	return &Authenticator{client: client, cfg: cfg, now: time.Now}, nil
+	return &Authenticator{reviews: positiveReviews{entries: lru.New(4096)}, client: client, cfg: cfg, now: time.Now}, nil
 }
 
 // AuthenticateAgent implements httpapi.AgentAuthenticator.
@@ -110,40 +114,26 @@ func (a *Authenticator) AuthenticateAgent(r *http.Request) (httpapi.AgentPrincip
 		return httpapi.AgentPrincipal{}, err
 	}
 
-	review, err := a.client.AuthenticationV1().TokenReviews().Create(r.Context(), &authenticationv1.TokenReview{
-		Spec: authenticationv1.TokenReviewSpec{
-			Token:     token,
-			Audiences: []string{a.cfg.Audience},
-		},
-	}, metav1.CreateOptions{})
-	if err != nil {
-		return httpapi.AgentPrincipal{}, unavailable("TokenReview failed", err)
+	started := a.now()
+	key := reviewKey{tokenDigest: sha256.Sum256([]byte(token)), audience: a.cfg.Audience}
+	binding, hit := a.reviews.get(key, started)
+	if !hit {
+		binding, err = a.reviewBinding(r, token)
+		if err != nil {
+			return httpapi.AgentPrincipal{}, err
+		}
 	}
-	if !review.Status.Authenticated || !contains(review.Status.Audiences, a.cfg.Audience) {
-		return httpapi.AgentPrincipal{}, unauthorized("token is not authenticated for the agent audience")
-	}
-	wantUsername := "system:serviceaccount:" + a.cfg.Namespace + ":" + a.cfg.ServiceAccount
-	if review.Status.User.Username != wantUsername {
-		return httpapi.AgentPrincipal{}, forbidden("token belongs to an unexpected ServiceAccount")
-	}
-	podName, ok := singleExtra(review.Status.User.Extra, podNameExtra)
-	if !ok {
-		return httpapi.AgentPrincipal{}, forbidden("token has no unique Pod name binding")
-	}
-	podUID, ok := singleExtra(review.Status.User.Extra, podUIDExtra)
-	if !ok {
-		return httpapi.AgentPrincipal{}, forbidden("token has no unique Pod UID binding")
-	}
+	podName, podUID := binding.podName, binding.podUID
 
-	serviceAccount, err := a.client.CoreV1().ServiceAccounts(a.cfg.Namespace).Get(r.Context(), a.cfg.ServiceAccount, metav1.GetOptions{})
+	serviceAccount, err := a.objects.serviceAccounts.lookup(r.Context(), "serviceaccounts", a.cfg.ServiceAccount, a.client.CoreV1().ServiceAccounts(a.cfg.Namespace).Get)
 	if err != nil {
 		return httpapi.AgentPrincipal{}, lookupError("ServiceAccount", err)
 	}
-	if serviceAccount.DeletionTimestamp != nil || string(serviceAccount.UID) != review.Status.User.UID {
+	if serviceAccount.DeletionTimestamp != nil || string(serviceAccount.UID) != binding.serviceAccountUID {
 		return httpapi.AgentPrincipal{}, forbidden("token ServiceAccount UID is not current")
 	}
 
-	pod, err := a.client.CoreV1().Pods(a.cfg.Namespace).Get(r.Context(), podName, metav1.GetOptions{})
+	pod, err := a.objects.pods.lookup(r.Context(), "pods", podName, a.client.CoreV1().Pods(a.cfg.Namespace).Get)
 	if err != nil {
 		return httpapi.AgentPrincipal{}, lookupError("Pod", err)
 	}
@@ -176,7 +166,7 @@ func (a *Authenticator) AuthenticateAgent(r *http.Request) (httpapi.AgentPrincip
 		!a.allowedDaemonSet(owner.Name) {
 		return httpapi.AgentPrincipal{}, forbidden("Pod is not controlled by an expected agent DaemonSet")
 	}
-	daemonSet, err := a.client.AppsV1().DaemonSets(a.cfg.Namespace).Get(r.Context(), owner.Name, metav1.GetOptions{})
+	daemonSet, err := a.objects.daemonSets.lookup(r.Context(), "daemonsets", owner.Name, a.client.AppsV1().DaemonSets(a.cfg.Namespace).Get)
 	if err != nil {
 		return httpapi.AgentPrincipal{}, lookupError("DaemonSet", err)
 	}
@@ -187,7 +177,7 @@ func (a *Authenticator) AuthenticateAgent(r *http.Request) (httpapi.AgentPrincip
 		return httpapi.AgentPrincipal{}, forbidden("Pod is not controlled by an expected agent DaemonSet")
 	}
 
-	node, err := a.client.CoreV1().Nodes().Get(r.Context(), pod.Spec.NodeName, metav1.GetOptions{})
+	node, err := a.objects.nodes.lookup(r.Context(), "nodes", pod.Spec.NodeName, a.client.CoreV1().Nodes().Get)
 	if err != nil {
 		return httpapi.AgentPrincipal{}, lookupError("Node", err)
 	}
@@ -195,6 +185,9 @@ func (a *Authenticator) AuthenticateAgent(r *http.Request) (httpapi.AgentPrincip
 		return httpapi.AgentPrincipal{}, forbidden("Node is terminating")
 	}
 
+	if !hit {
+		a.reviews.admit(key, token, binding, started, a.now())
+	}
 	return httpapi.AgentPrincipal{
 		Namespace:      a.cfg.Namespace,
 		ServiceAccount: a.cfg.ServiceAccount,
@@ -203,6 +196,34 @@ func (a *Authenticator) AuthenticateAgent(r *http.Request) (httpapi.AgentPrincip
 		NodeName:       node.Name,
 		NodeUID:        string(node.UID),
 	}, nil
+}
+
+func (a *Authenticator) reviewBinding(r *http.Request, token string) (reviewedBinding, error) {
+	review, err := a.client.AuthenticationV1().TokenReviews().Create(r.Context(), &authenticationv1.TokenReview{
+		Spec: authenticationv1.TokenReviewSpec{
+			Token:     token,
+			Audiences: []string{a.cfg.Audience},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		return reviewedBinding{}, unavailable("TokenReview failed", err)
+	}
+	if !review.Status.Authenticated || !contains(review.Status.Audiences, a.cfg.Audience) {
+		return reviewedBinding{}, unauthorized("token is not authenticated for the agent audience")
+	}
+	wantUsername := "system:serviceaccount:" + a.cfg.Namespace + ":" + a.cfg.ServiceAccount
+	if review.Status.User.Username != wantUsername {
+		return reviewedBinding{}, forbidden("token belongs to an unexpected ServiceAccount")
+	}
+	podName, ok := singleExtra(review.Status.User.Extra, podNameExtra)
+	if !ok {
+		return reviewedBinding{}, forbidden("token has no unique Pod name binding")
+	}
+	podUID, ok := singleExtra(review.Status.User.Extra, podUIDExtra)
+	if !ok {
+		return reviewedBinding{}, forbidden("token has no unique Pod UID binding")
+	}
+	return reviewedBinding{serviceAccountUID: review.Status.User.UID, podName: podName, podUID: podUID}, nil
 }
 
 func (a *Authenticator) verifyTLSIdentity(r *http.Request) error {

@@ -214,8 +214,15 @@ then creates the four referenced Secrets. The kind harness demonstrates this
 with ephemeral local CAs. The shared leaf proves installation membership, not
 node identity. Every agent request also carries an explicitly projected,
 one-hour Pod-bound ServiceAccount token with audience
-`kubeneuron-controller`; the controller performs TokenReview and verifies the
-live ServiceAccount UID, Pod UID/owner/labels/node binding, DaemonSet, and Node.
+`kubeneuron-controller`. The controller reuses a successful token review for
+up to 60 seconds and never past the token's expiry; after that it asks the
+Kubernetes API again. On every request it checks the Pod and ServiceAccount
+UIDs from the token against its cached view of the cluster, which follows the
+API through a watch. So an agent's access ends when the controller sees the
+Pod's deletion through the watch, or, if the watch lags, when the next token
+review is rejected by the Kubernetes API.
+The controller also checks the Running Pod's labels, ServiceAccount, DaemonSet
+owner, node binding and Node.
 The agent rereads the projected token for every request.
 
 Both proofs are intentional: server authentication prevents the bearer token

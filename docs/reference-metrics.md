@@ -63,6 +63,7 @@ The panel and CLI compute period estimates from the incident store. See [how the
 | `kubeneuron_gate_denials_total` | counter | — | steps denied by the safety gate (pause, cooldown, concurrency, capability) |
 | `kubeneuron_escalations_total` | counter | — | ladder escalations after step/verification failures |
 | `kubeneuron_notifications_dropped_total` | counter | `kind` (`event`, `approval_request`, `dead_letter`) | notifications lost to queue overflow or dead-lettered after delivery retries |
+| `kubeneuron_agent_auth_live_gets_total` | counter | `resource` | Agent authentication reads that fell back to the Kubernetes API, by resource. The counter increases when the cache has not synchronized or when an object is missing from it. If it grows steadily, check the controller's Role and its log. |
 | `kubeneuron_auth_failures_total` | counter | `api` (`operator`, `webhook`, `agent`) | rejected authentication attempts; repeated failures from one source are throttled with `429` |
 | `kubeneuron_tls_certificate_not_after_seconds` | gauge | `certificate` | NotAfter (unix s) of every loaded TLS artifact; bundles report their earliest expiry |
 
