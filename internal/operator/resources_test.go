@@ -40,7 +40,16 @@ func TestKubectlDocsWorkloads(t *testing.T) {
 	}
 	grafana := grafanaDeployment(installation, "grafana", snapshot.Digest)
 	agent := agentDaemonSet(installation, snapshot)
+	manifest, err := os.ReadFile("../../config/default/operator_deployment.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var operator appsv1.Deployment
+	if err := sigsyaml.Unmarshal(manifest, &operator); err != nil {
+		t.Fatal(err)
+	}
 	workloads := map[string]any{
+		"operator":     map[string]any{"name": operator.Name, "namespace": operator.Namespace, "pod_labels": operator.Spec.Template.Labels},
 		"installation": installation.Name,
 		"deployments":  []string{controller.Name, grafana.Name},
 		"pod_labels":   []map[string]string{controller.Spec.Template.Labels, grafana.Spec.Template.Labels, agent.Spec.Template.Labels},

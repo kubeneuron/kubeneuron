@@ -5,7 +5,13 @@ import re
 import sys
 from pathlib import Path
 
-import yaml
+# External components used in examples, scoped to their namespace and resource.
+EXTERNAL_OBJECTS = {
+    "gpu-operator": (("ds/nvidia-dcgm-exporter",), ("daemonset/nvidia-dcgm-exporter",)),
+    "kubeneuron-monitoring": (("vmagent", "kubeneuron"),),
+    "ops": (("create", "token", "sre-bot"),),
+    "kube-system": (("deployment/coredns",),),
+}
 
 
 def commands(text):
@@ -18,6 +24,8 @@ def commands(text):
             current = index
             tokens = []
             while True:
+                if line[:start.start()].endswith("$("):
+                    fragment = fragment.split(")", 1)[0]
                 part = re.split(r"[`|;]|\s+#", fragment, maxsplit=1)[0]
                 tokens.extend((m.group().strip("'\x22"), current + 1)
                               for m in re.finditer(r"[^\s\\]+", part))
@@ -33,6 +41,12 @@ def check(path, namespace, deployments, labels):
     errors = []
     for tokens in commands(path.read_text()):
         words = [word for word, _ in tokens]
+        command_namespace = ""
+        for index, word in enumerate(words):
+            if word in ("--namespace", "-n") and index + 1 < len(words):
+                command_namespace = words[index + 1]
+            elif word.startswith("--namespace="):
+                command_namespace = word.split("=", 1)[1].strip("'\"")
         for i, (word, line) in enumerate(tokens):
             following = words[i + 1] if i + 1 < len(words) else ""
             if word in ("-n", "--namespace") or word.startswith("--namespace="):
@@ -40,11 +54,9 @@ def check(path, namespace, deployments, labels):
                 # Runtime namespaces may be supplied by the reader.
                 if value in ("<ns>", "<namespace>"):
                     continue
-                # External examples: NVIDIA exporter, VictoriaMetrics, SRE token.
-                if ((value == "gpu-operator" and "ds/nvidia-dcgm-exporter" in words)
-                    or (value == "gpu-operator" and "daemonset/nvidia-dcgm-exporter" in words)
-                    or (value == "kubeneuron-monitoring" and "vmagent" in words)
-                    or (value == "ops)" and "sre-bot" in words)):
+                external = EXTERNAL_OBJECTS.get(value, ())
+                if any(list(resource) == words[pos:pos + len(resource)]
+                       for resource in external for pos in range(len(words))):
                     continue
                 if value != namespace:
                     errors.append((line, f"namespace {value!r}, expected {namespace!r}"))
@@ -53,7 +65,8 @@ def check(path, namespace, deployments, labels):
             if word in ("deploy", "deployment") and following and not following.startswith("-"):
                 name = following
             # The operator generates controller and Grafana Deployments per installation.
-            if name and name not in deployments:
+            external_names = EXTERNAL_OBJECTS.get(command_namespace, ())
+            if name and name not in deployments and (word,) not in external_names:
                 errors.append((line, f"unknown Deployment {name!r}"))
             if word in ("-l", "--selector") or word.startswith(("--selector=", "-l=")):
                 inline = "=" in word
@@ -68,16 +81,14 @@ def check(path, namespace, deployments, labels):
 
 
 def main():
-    manifest = yaml.safe_load(Path("config/default/operator_deployment.yaml").read_text())
-    meta = manifest["metadata"]
-    operator = manifest["spec"]["template"]["metadata"]["labels"]
     rendered = json.loads(Path("internal/operator/testdata/kubectl-docs.json").read_text())
-    labels = [operator, *rendered["pod_labels"]]
-    deployments = {meta["name"], *rendered["deployments"]}
+    operator = rendered["operator"]
+    labels = [operator["pod_labels"], *rendered["pod_labels"]]
+    deployments = {operator["name"], *rendered["deployments"]}
     for name in rendered["deployments"]:
         deployments.add(name.replace(rendered["installation"], "<name>", 1))
     paths = [Path(arg) for arg in sys.argv[1:]] or [Path("README.md"), *sorted(Path("docs").glob("*.md"))]
-    errors = [error for path in paths for error in check(path, meta["namespace"], deployments, labels)]
+    errors = [error for path in paths for error in check(path, operator["namespace"], deployments, labels)]
     for error in errors:
         print(error, file=sys.stderr)
     return bool(errors)

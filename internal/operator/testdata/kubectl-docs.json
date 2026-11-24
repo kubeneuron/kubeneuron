@@ -4,6 +4,14 @@
     "kubeneuron-grafana"
   ],
   "installation": "kubeneuron",
+  "operator": {
+    "name": "kubeneuron-operator",
+    "namespace": "kube-neuron",
+    "pod_labels": {
+      "app.kubernetes.io/component": "operator",
+      "app.kubernetes.io/name": "kube-neuron"
+    }
+  },
   "pod_labels": [
     {
       "app.kubernetes.io/component": "controller",
