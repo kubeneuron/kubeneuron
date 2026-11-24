@@ -112,7 +112,7 @@ func (c *Controller) recycleNodeStep(ctx context.Context, inc *types.Incident, r
 			if errors.Is(err, removefirst.ErrRefused) && inc.RemoveFirst.Open() && inc.RemoveFirst.Phase == removefirst.PhaseGrowing {
 				err = errors.Join(err, c.settleRefusedGrow(ctx, inc))
 			} else if errors.Is(err, cloud.ErrReplacementCapacity) && inc.RemoveFirst.Open() && inc.RemoveFirst.Phase == removefirst.PhaseGrowing {
-				err = errors.Join(err, c.settleCapacityGrow(ctx, inc))
+				err = errors.Join(err, c.settleCapacityGrow(ctx, inc, err))
 			} else if errors.Is(err, removefirst.ErrRefused) && inc.RemoveFirst.Open() {
 				err = errors.Join(err, c.settleRefusedDelete(ctx, inc, err))
 			} else if err == nil && inc.RemoveFirst.Open() {

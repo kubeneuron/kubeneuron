@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/kubeneuron/kubeneuron/internal/cloud/capacityreason"
 	"github.com/kubeneuron/kubeneuron/internal/cloud/removefirst"
 	"github.com/kubeneuron/kubeneuron/pkg/cloud"
 	"github.com/kubeneuron/kubeneuron/pkg/types"
@@ -111,17 +112,21 @@ const noCapacity = "no capacity or quota for this machine type"
 // A pool read as it was is freed at once, and the step fails as any
 // capacity shortage does. Otherwise the failure is recorded for the sweep,
 // which reports a changed pool as that failure.
-func (c *Controller) settleCapacityGrow(ctx context.Context, inc *types.Incident) error {
+func (c *Controller) settleCapacityGrow(ctx context.Context, inc *types.Incident, failure error) error {
 	g, err := growOf(inc.RemoveFirst)
 	if err != nil {
 		return nil
 	}
+	reason := capacityreason.FromError(failure)
 	if obs, err := c.observeGrow(ctx, g); err == nil && obs.State == removefirst.GrowNotApplied {
 		return c.endRemoveFirst(ctx, inc, types.RemoveFirstNotStarted,
-			fmt.Sprintf("The resize of pool %s to replace machine %s failed in the cloud (%s). Nothing was changed.", g.Pool, g.Machine, noCapacity))
+			fmt.Sprintf("The resize of pool %s to replace machine %s failed in the cloud (%s). Nothing was changed.", g.Pool, g.Machine, reason))
 	}
 	next := inc.RemoveFirst.Clone()
 	next.State[stateGrowFailed] = "capacity"
+	if reason != capacityreason.Unspecified {
+		next.CapacityReason = string(reason)
+	}
 	return c.saveRemoveFirst(ctx, inc, next, "remove-first-grow-failed",
 		fmt.Sprintf("the resize of pool %s to replace machine %s failed for lack of capacity", g.Pool, g.Machine))
 }
@@ -152,7 +157,7 @@ func (c *Controller) sweepGrow(ctx context.Context, inc *types.Incident) error {
 		return c.endRemoveFirst(ctx, inc, types.RemoveFirstNotStarted,
 			fmt.Sprintf("Pool %s was not resized and still has %d nodes. Nothing was changed.", g.Pool, g.Before))
 	case err == nil && obs.State == removefirst.GrowChanged && rec.State[stateGrowFailed] != "":
-		reason := fmt.Sprintf("The resize of pool %s to replace machine %s failed in the cloud (%s). Machine %s was not removed.", g.Pool, g.Machine, noCapacity, g.Machine)
+		reason := fmt.Sprintf("The resize of pool %s to replace machine %s failed in the cloud (%s). Machine %s was not removed.", g.Pool, g.Machine, capacityreason.Known(rec.CapacityReason), g.Machine)
 		switch {
 		case obs.Size == g.Before:
 			reason += fmt.Sprintf(" Pool %s still has %d nodes.", g.Pool, obs.Size)

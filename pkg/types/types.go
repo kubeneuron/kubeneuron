@@ -389,6 +389,8 @@ type RemoveFirstRecord struct {
 	DeleteActionID string              `json:"delete_action_id,omitempty"`
 	DeleteTarget   *cloud.NodeIdentity `json:"delete_target,omitempty"`
 	MachineName    string              `json:"machine_name,omitempty"`
+	// CapacityReason records the classified cause of a failed pool grow.
+	CapacityReason string `json:"capacity_reason,omitempty"`
 	// EndedAt is when the plan closed with Outcome.
 	EndedAt *time.Time `json:"ended_at,omitempty"`
 	Outcome string     `json:"outcome,omitempty"`
