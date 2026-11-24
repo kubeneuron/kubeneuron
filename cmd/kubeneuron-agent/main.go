@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -33,6 +34,7 @@ var version = "dev"
 
 func main() {
 	var (
+		cleanAgentData    = flag.Bool("clean-agent-data", false, "empty the agent data volume mounted for uninstall and exit")
 		controllerURL     = flag.String("controller", "https://localhost:8443", "controller agent-API base URL")
 		nodeName          = flag.String("node", "", "node name (default: hostname)")
 		token             = flag.String("token", "", "static bearer token for controller auth (development only)")
@@ -147,6 +149,13 @@ func main() {
 		"pass an option to an accelerator adapter as vendor.key=value (repeatable, e.g. -adapter-option=amd.tool=amd-smi)",
 		adapters.option)
 	flag.Parse()
+	if *cleanAgentData {
+		if err := emptyAgentData("/cleanup-agent-data"); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *showVersion {
 		fmt.Println("kubeneuron-agent", version)
@@ -316,4 +325,22 @@ func (f *adapterFlags) option(value string) error {
 
 func nvidiaPartitionTopologyValue(value string) nvidia.PartitionTopology {
 	return nvidia.PartitionTopology(value)
+}
+
+func emptyAgentData(mount string) error {
+	root, err := os.OpenRoot(mount)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	entries, err := fs.ReadDir(root.FS(), ".")
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := root.RemoveAll(entry.Name()); err != nil {
+			return err
+		}
+	}
+	return nil
 }

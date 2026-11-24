@@ -43,6 +43,8 @@ esac
 MOCK
 chmod +x "$tmp/bin/kubectl"
 PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall --skip-open-incident-check >"$tmp/uninstall.log"
+grep -Fq 'Agent data was left in /var/lib/kube-neuron on every node where the agent ran, control-plane nodes included' "$tmp/uninstall.log"
+grep -Fq 'and no other KubeNeuron installation in the cluster uses it' "$tmp/uninstall.log"
 grep -Fq 'Do not delete the full install manifest if you want to keep the data' "$tmp/uninstall.log"
 if grep -Fq 'kubectl delete -f' "$tmp/uninstall.log"; then
 	echo "uninstall suggests deleting a manifest" >&2
@@ -73,12 +75,21 @@ if grep -Eq 'left in place: the operator|delete deployment/kubeneuron-operator' 
 cat >"$tmp/bin/kubectl" <<'MOCK'
 #!/usr/bin/env bash
 case " $* " in
+*" get pods -A --field-selector spec.nodeName=busy "*) echo '{"items":[{"spec":{"volumes":[{"hostPath":{"path":"/var/lib/kube-neuron"}}]}}]}' ;;
+*" get pods -A --field-selector "*) echo '{"items":[]}' ;;
+*" create -f - -o name "*)
+	manifest=$(cat)
+	node=$(jq -er '.spec.nodeName' <<<"$manifest") || exit 1
+	printf '%s\n' "$manifest" >"$CLEANUP_DIR/$node.json"
+	echo "pod/kubeneuron-agent-cleanup-$node" ;;
+*" wait "*"pod/kubeneuron-agent-cleanup-timeout "*) exit 1 ;;
 *" patch node "*)
 	printf '%s\n' "$*" >>"$UNINSTALL_MUTATIONS"
 	[[ $2 != node || $3 != changed ]] || exit 1 ;;
 *" get node changed -o json "*)
 	jq '.items[] | select(.metadata.name == "changed") | .metadata.resourceVersion = "2" |
 		.metadata.annotations["kubeneuron.io/cordon-restore"] = "do-not-disrupt"' "$NODE_LIST" ;;
+*" get kubeneuron -o name "*) echo "${REMAINING_ROOTS:-}" ;;
 *" get kubeneuron kubeneuron --ignore-not-found "*) [[ -n ${ROOT_GONE:-} ]] || echo uid-1 ;;
 *" get kubeneuron kubeneuron -o jsonpath={.spec.namespace} "*) echo kube-neuron ;;
 *" get deployments --all-namespaces "*)
@@ -88,7 +99,7 @@ case " $* " in
 	*) echo kube-neuron ;;
 	esac ;;
 *" port-forward "*) [[ ${FAIL_AT:-} != tunnel ]] || exit 1; echo 'Forwarding from 127.0.0.1:43210 -> 8080'; exec sleep 30 ;;
-*" get kubeneuron kubeneuron -o json "*) if [[ ${FAIL_AT:-} == token ]]; then echo "{}"; exit; fi; echo '{"spec":{"notifications":{"operatorAPIToken":{"name":"operator-test"}}}}' ;;
+*" get kubeneuron kubeneuron -o json "*) if [[ ${FAIL_AT:-} == token ]]; then echo "{}"; exit; fi; echo '{"metadata":{"uid":"uid-1"},"spec":{"agent":{"image":"example/agent:test"},"notifications":{"operatorAPIToken":{"name":"operator-test"}}}}' ;;
 *" get secret operator-test -o json "*) [[ ${FAIL_AT:-} != secret ]] || exit 1; echo '{"data":{"token":"dGVzdA=="}}' ;;
 *" get nodes -o json "*) if [[ -n ${NODE_LIST:-} ]]; then cat "$NODE_LIST"; else echo '{"items":[]}'; fi ;;
 *" delete "*) echo delete >>"$UNINSTALL_MUTATIONS" ;;
@@ -132,6 +143,9 @@ echo invalid >"$INCIDENT_LIST"
 ROOT_GONE=1 PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall >"$tmp/retry"
 grep -Fq 'remove only the operator' "$tmp/retry"
 
+ROOT_GONE=1 REMAINING_ROOTS=kubeneuron/other PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall --delete-data --yes >"$tmp/shared-data"
+grep -Fq 'Agent data in /var/lib/kube-neuron was retained because another KubeNeuron installation may use the same directory.' "$tmp/shared-data"
+
 for stage in token secret tunnel; do
 	if FAIL_AT=$stage PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall >"$tmp/error" 2>&1; then exit 1; fi
 	case "$stage" in
@@ -153,3 +167,20 @@ ROOT_GONE=1 PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall >"$tmp/pins
 grep -Fq 'patch node ours --type=merge -p {"metadata":{"resourceVersion":"1","annotations":{"karpenter.sh/do-not-disrupt":null}}}' "$UNINSTALL_MUTATIONS"
 grep -Fq 'patch node changed ' "$UNINSTALL_MUTATIONS"
 grep -Fq 'kubectl annotate node unknown karpenter.sh/do-not-disrupt-' "$tmp/pins"
+
+export CLEANUP_DIR="$tmp/cleanup-pods"
+mkdir "$CLEANUP_DIR"
+jq -n '{items:(["ready","busy","timeout"] | map({metadata:{name:.}}))}' >"$NODE_LIST"
+PATH="$tmp/bin:$PATH" bash deploy/install.sh --uninstall --delete-data --yes --skip-open-incident-check >"$tmp/cleanup-output"
+grep -Fq 'Emptied /var/lib/kube-neuron on ready.' "$tmp/cleanup-output"
+for node in busy timeout; do
+	grep -Fq "Cleanup was not confirmed on $node." "$tmp/cleanup-output"
+done
+[[ ! -e $CLEANUP_DIR/busy.json ]]
+for node in ready timeout; do
+	jq -e '.spec | .automountServiceAccountToken == false and
+		.volumes == [{name:"state",hostPath:{path:"/var/lib/kube-neuron",type:"Directory"}}] and
+		(.containers | length == 1) and
+		(.containers[0] | .image == "example/agent:test" and .args == ["--clean-agent-data"] and
+			.securityContext.capabilities.drop == ["ALL"])' "$CLEANUP_DIR/$node.json" >/dev/null
+done

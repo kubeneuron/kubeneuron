@@ -56,12 +56,18 @@ kubectl get kubeneurons -o custom-columns='NAME:.metadata.name,RUNTIME-NAMESPACE
    every KubeNeuron custom resource cluster-wide, and deletes the
    `kube-neuron` namespace with every PVC there. Retained claims in a different
    runtime namespace survive. To remove only the operator and its permissions,
-   use the commands printed by the script for the release manifest. Those
-   commands assume the operator is in `kube-neuron`.
+   use the commands printed by the script for the release manifest. The script prints the namespace where it found the operator Deployment.
 
    **Helm.** Run `install.sh --uninstall` first (step 3), and only then remove the operator release:
    use `helm list -A` to find the operator's release and namespace,
-   then run `helm uninstall <release> -n <operator-namespace>`. If you already
+   then run `helm uninstall <release> -n <operator-namespace>`.
+   Before removing the operator, Helm runs a Job that checks for remaining
+   KubeNeuron installations. If the check fails, use the Helm release namespace for `<namespace>` and read its output with
+   `kubectl -n <namespace> logs job/kubeneuron-operator-uninstall-check`.
+   If you intend to remove only the operator and leave the installations running
+   without it, run `helm uninstall <release> -n <operator-namespace> --no-hooks`.
+   This also bypasses the check if the Job cannot start or cannot list installations.
+   If you already
    removed the operator with Helm while the installation was still present,
    the controller and agents are still running. To keep the stored data,
    reinstall the operator and repeat the uninstall in this order.
@@ -70,6 +76,8 @@ kubectl get kubeneurons -o custom-columns='NAME:.metadata.name,RUNTIME-NAMESPACE
    claims. The script asks for confirmation; in a non-interactive run add `--yes`.
 
 ## Remove the installation and clean up its data
+
+Before confirming `--delete-data`, copy any node-local agent records you need, including NVIDIA diagnostic bundles.
 
 **Deleting the managed claims can destroy SQLite incidents, their audit history
 and stored metrics.** Check backups and settle cloud operations first. A PV's
@@ -91,9 +99,9 @@ the names from your installation before running a deletion command.
 | --- | --- |
 | Storage and backups | Inspect `kubectl get pvc -A` and `kubectl get pv`. External PostgreSQL, external metrics stores and user backups remain under their owners' retention policies. For the optional backup example, remove its schedule with `kubectl -n <namespace> delete cronjob kubeneuron-backup`. Copy needed backups before deleting its separate PVC with `kubectl -n <namespace> delete pvc kubeneuron-backups`. |
 | CRDs and user-created resources | CRDs and user-created policies, playbooks and other custom resources remain. Inventory types with `kubectl api-resources --api-group=kubeneuron.io`, then `kubectl get <resource-type>`. Delete individual resources with `kubectl delete <resource-type> <name>`. **Deleting a CRD deletes every object of that type across the cluster.** Only after checking all installations and exporting needed resources, use `kubectl delete crd <full-crd-name>` for each definition you intend to retire. |
-| Node scheduling and annotations | Inspect `kubectl get node <node> -o yaml` for cordon owners, held and restore annotations, the degraded taint and `karpenter.sh/do-not-disrupt`. Once the node is healthy and safe to schedule, use the commands printed for that node: `kubectl uncordon <node>` and, if present, `kubectl taint nodes <node> kubeneuron.io/degraded-`. Review prior values and other owners before using `kubectl annotate node <node> <annotation-key>-` to remove an obsolete annotation. Preserve any pre-existing Karpenter setting. |
+| Node scheduling and annotations | Inspect `kubectl get node <node> -o yaml` for cordon owners, held and restore annotations, the degraded taint and `karpenter.sh/do-not-disrupt`. Once the node is healthy and safe to schedule, use the commands printed for that node: `kubectl uncordon <node>` and, if present, `kubectl taint nodes <node> kubeneuron.io/degraded-`. Review prior values and other owners before using `kubectl annotate node <node> <annotation-key>-` to remove an obsolete annotation. When removing the last installation, the script removes `karpenter.sh/do-not-disrupt=true` if the cordon restore record shows that the annotation was absent before KubeNeuron cordoned the node. It preserves pre-existing settings. If ownership is unclear, check who needs the annotation before running the printed removal command. |
 | NVIDIA GPU Operator | On the last installation, uninstall restores to `true` only components recorded in `kubeneuron.io/quiesced-accelerator-stack` whose `nvidia.com/gpu.deploy.<component>` label is still `false`. It removes the stack annotation in the same update. Leave other disabled components alone. If an update fails, review and run the printed label command for that node. If another installation remains, the script leaves its labels in place. |
-| Agent files | Inspect `/var/lib/kube-neuron` on every host where an agent ran, including control-plane nodes. The directory remains even with `--delete-data`. It contains the event queue (`spool.jsonl`) and local action journal (`actions.jsonl`), and can contain read positions, device state and NVIDIA diagnostic archives in `bundles/`. These archives come from `nvidia-bug-report.sh` and can include kernel logs, process names and device serial numbers. If delivery is delayed, the queue can contain the matching kernel message read from `/dev/kmsg`. Copy any records you need. Restrict access to any copy of the action journal: it can contain per-action lease tokens. Once no agent or other installation uses the directory and its contents can be erased, run `sudo rm -r -- /var/lib/kube-neuron` on that host. Nodes already removed from the cluster require host access. |
+| Agent files | Inspect `/var/lib/kube-neuron` on every host where an agent ran, including control-plane nodes. Ordinary uninstall retains these files. With `--delete-data`, removing the last installation also attempts to empty this directory on each cluster node. The script reports success for each completed cleanup Pod and prints a manual command for each unconfirmed node. When another installation remains, it retains the shared directory on every node. It contains the event queue (`spool.jsonl`) and local action journal (`actions.jsonl`), and can contain read positions, device state and NVIDIA diagnostic archives in `bundles/`. These archives come from `nvidia-bug-report.sh` and can include kernel logs, process names and device serial numbers. If delivery is delayed, the queue can contain the matching kernel message read from `/dev/kmsg`. Copy any records you need. Restrict access to any copy of the action journal: it can contain per-action lease tokens. Once no agent or other installation uses the directory and its contents can be erased, run `sudo rm -r -- /var/lib/kube-neuron` on that host. Nodes already removed from the cluster require host access. |
 | Certificates and Secrets | For user-installed cert-manager resources, inspect `kubectl -n <namespace> get certificates,issuers,secrets`. Remove only dedicated Certificate and Issuer resources first, then delete their unused leaf or CA Secrets with `kubectl -n <namespace> delete secret <name>`. Check other consumers before deleting a CA private key. |
 | Monitoring dependencies | Follow the [dependency removal order](../deploy/kubernetes/dependencies/README.md#removal-order-and-retained-data) while the VictoriaMetrics operator is still running. Remove routes to the old controller and copied webhook Secrets. Inspect remaining claims and workloads before deleting a dedicated namespace with `kubectl delete namespace kubeneuron-monitoring`. |
 | Leases and namespaces | Inspect `kubectl -n <namespace> get leases` for the operator or controller Lease. When its component is gone and no other installation uses it, run `kubectl -n <namespace> delete lease <name>`. Delete a dedicated namespace only after checking its remaining workloads, Secrets and claims. |

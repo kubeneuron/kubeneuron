@@ -36,7 +36,8 @@ set -euo pipefail
 #                        installation, an existing one keeps its own
 #   --uninstall          remove the installation, retaining SQLite state
 #   --delete-data        also remove SQLite state and the Managed metrics
-#                        store's claim (confirmation required)
+#                        store's claim, and clear node agent data for the last installation
+#                        (confirmation required)
 #   --yes                confirm --uninstall --delete-data non-interactively
 #
 # Requirements: kubectl (>=1.29 server), openssl. For uninstall: jq and curl. For --version: gh.
@@ -80,7 +81,8 @@ Flags:
                          for a new installation; an existing one keeps its own
   --uninstall            remove this installation; retain SQLite state and metrics by default
   --delete-data          with --uninstall: also delete the SQLite PVC with the audit
-                         data and the Managed metrics store's PVC
+                         data and the Managed metrics store's PVC. For the last installation,
+                         also clear /var/lib/kube-neuron on nodes, including diagnostic bundles.
   --skip-open-incident-check   uninstall without checking for unfinished cloud replacements
   --yes                  confirm --delete-data without an interactive prompt
 USAGE
@@ -268,6 +270,25 @@ restore_karpenter_pin() {
 	say "Check who owns the Karpenter annotation on $node. If it is safe to remove, run: kubectl annotate node $node karpenter.sh/do-not-disrupt-"
 }
 
+clean_node_agent_data() {
+	local node=$1 image=$2 pod
+	[[ -n $image ]] || return 1
+	pod=$(jq -n --arg node "$node" --arg image "$image" '{
+		apiVersion:"v1", kind:"Pod", metadata:{generateName:"kubeneuron-agent-cleanup-"},
+		spec:{nodeName:$node, restartPolicy:"Never", activeDeadlineSeconds:45,
+			automountServiceAccountToken:false, securityContext:{seccompProfile:{type:"RuntimeDefault"}},
+			containers:[{name:"cleanup",image:$image,args:["--clean-agent-data"],
+				securityContext:{allowPrivilegeEscalation:false,readOnlyRootFilesystem:true,capabilities:{drop:["ALL"]}},
+				volumeMounts:[{name:"state",mountPath:"/cleanup-agent-data"}]}],
+			volumes:[{name:"state",hostPath:{path:"/var/lib/kube-neuron",type:"Directory"}}]}}' |
+		kubectl -n "$NS" create -f - -o name) || return 1
+	[[ $pod == pod/kubeneuron-agent-cleanup-* ]] || return 1
+	local result=0
+	kubectl -n "$NS" wait --for=jsonpath='{.status.phase}'=Succeeded "$pod" --timeout=50s >/dev/null || result=1
+	kubectl -n "$NS" delete "$pod" --ignore-not-found --wait=false >/dev/null || result=1
+	return "$result"
+}
+
 operator_namespaces() {
 	kubectl get deployments --all-namespaces -l 'app.kubernetes.io/name=kube-neuron,app.kubernetes.io/component=operator' --field-selector metadata.name=kubeneuron-operator -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}'
 }
@@ -320,6 +341,7 @@ if ((UNINSTALL)); then
 	if ((DELETE_DATA)); then
 		say "PERMANENT DATA REMOVAL: SQLite PVC $NS/$claim, including incidents and audit history. External PostgreSQL is not deleted."
 		[[ -z $metrics_uid ]] || say "PERMANENT DATA REMOVAL: metrics store PVC $NS/$metrics_claim. An External metrics store is not deleted."
+		say "For the last installation this also permanently removes agent data in /var/lib/kube-neuron on nodes, including the event queue, action journal, read positions, state files and NVIDIA diagnostic bundles."
 		if ((ASSUME_YES == 0)); then
 			[[ -t 0 ]] || die "use --yes to confirm --delete-data in non-interactive execution"
 			read -r -p "Type '$NAME' to confirm: " confirmation
@@ -337,6 +359,11 @@ if ((UNINSTALL)); then
 			sleep 2
 		done
 		[[ -z $owners ]] || die "operator did not acknowledge state retention; installation NOT removed. Upgrade the operator or inspect its logs."
+	fi
+	cleanup_image=""
+	if ((DELETE_DATA)) && [[ -n $root_uid ]]; then
+		cleanup_image=$(kubectl get kubeneuron "$NAME" -o json |
+			jq -er --arg uid "$root_uid" 'select(.metadata.uid == $uid) | .spec.agent.image | strings | select(length > 0)') || cleanup_image=""
 	fi
 	say "removing KubeNeuron installation '$NAME' (namespace $NS)"
 	kubectl delete kubeneuron "$NAME" --ignore-not-found --wait=true --timeout=120s
@@ -358,8 +385,24 @@ if ((UNINSTALL)); then
 		say "removed the kubeneuron.io/journal-dir node label"
 	else
 		say "left the kubeneuron.io/journal-dir node label: another KubeNeuron installation uses it"
+		if ((DELETE_DATA)); then
+			say "Agent data in /var/lib/kube-neuron was retained because another KubeNeuron installation may use the same directory."
+		fi
 	fi
 	nodes=$(kubectl get nodes -o json)
+	if ((DELETE_DATA)) && [[ -z $remaining_installations ]]; then
+		while IFS= read -r node; do
+			[[ -n $node ]] || continue
+			if [[ -n $cleanup_image ]] && active_mounts=$(kubectl get pods -A --field-selector "spec.nodeName=$node" -o json |
+				jq -er '[.items[] | select(.status.phase != "Succeeded" and .status.phase != "Failed")
+					| .spec.volumes[]? | select(.hostPath.path == "/var/lib/kube-neuron")] | length') &&
+				[[ $active_mounts == 0 ]] && clean_node_agent_data "$node" "$cleanup_image"; then
+				say "Emptied /var/lib/kube-neuron on $node."
+			else
+				say "Cleanup was not confirmed on $node. After verifying no installation uses the directory, run on that node: sudo rm -rf -- /var/lib/kube-neuron"
+			fi
+		done < <(jq -r '.items[].metadata.name' <<<"$nodes")
+	fi
 	while IFS= read -r node_snapshot; do
 		[[ -n $node_snapshot ]] || continue
 		if [[ -z $remaining_installations ]]; then
@@ -413,6 +456,7 @@ if ((UNINSTALL)); then
 			fi
 		fi
 	else
+		say "Agent data was left in /var/lib/kube-neuron on every node where the agent ran, control-plane nodes included: the event queue, the action journal, read positions and state files, and any NVIDIA diagnostic bundles collected there. Delete this directory on each node if you no longer need it and no other KubeNeuron installation in the cluster uses it."
 		say "retained SQLite PVC $NS/$claim and its data (if present); reinstall with the same name, namespace and storage settings"
 		[[ -z $metrics_uid ]] || say "retained metrics store PVC $NS/$metrics_claim: up to 30 days of metrics, including node names. Erase them with: kubectl delete pvc $metrics_claim -n $NS"
 	fi
