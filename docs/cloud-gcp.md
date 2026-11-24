@@ -176,7 +176,14 @@ changed), or the plan has not finished within an hour, also while nothing fails,
 needs-operator. The audit trail explains what to check. If the pool no longer
 exists, check the cluster. If the original machine cannot be identified,
 check the machine and the size of the pool. Restore the planned size if the
-pool is one node short. After checking the outcome, record what you found:
+pool is one node short. To set the size back, for example:
+
+```sh
+gcloud container clusters resize <cluster> --node-pool <pool> --num-nodes <count> --location <location>
+```
+
+For a multi-zone GKE pool, `--num-nodes` is the count per zone. After
+checking the outcome, record what you found:
 
 ```sh
 kubeneuronctl resolve <id> --cloud-operation-settled --reason "<what you found>"
