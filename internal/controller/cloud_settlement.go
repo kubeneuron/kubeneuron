@@ -78,10 +78,7 @@ func (c *Controller) ResolveSettledCloudOperation(ctx context.Context, id, actor
 			return fmt.Errorf("the current replacement is still active; check the incident again when it needs an operator")
 		}
 		if !from.Halted() && s != nil && s.Outcome == types.SuccessorHandedOver {
-			if s.Operation == "" {
-				return fmt.Errorf("cannot identify the attempt that handed over the replacement")
-			}
-			if s.Operation != successorOperation(inc) {
+			if s.Operation != "" && s.Operation != successorOperation(inc) {
 				s.Outcome, s.Reason, s.EndedAt = "settled-by-operator", reason, &now
 				inc.UpdatedAt = now
 				if err := tx.UpdateIncident(ctx, inc); err != nil {

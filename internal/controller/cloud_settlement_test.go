@@ -202,3 +202,20 @@ func TestSettleCurrentSuccessorAfterDurableHandover(t *testing.T) {
 		})
 	}
 }
+
+func TestSettleHandedOverSuccessorWithoutOperation(t *testing.T) {
+	c, st, _ := walkFixture(t, false)
+	ctx := t.Context()
+	inc := &types.Incident{ID: "missing-operation", State: types.StateExecuting, Attempt: 2, RemediationSlotHeld: true,
+		Successor: &types.SuccessorRecord{Outcome: types.SuccessorHandedOver}}
+	if err := st.CreateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := c.ResolveSettledCloudOperation(ctx, inc.ID, "alice", "checked pool", 0, "settled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != types.StateResolved || got.Successor.Outcome != "settled-by-operator" || got.RemediationSlotHeld {
+		t.Fatalf("unexpected settlement: %+v", got)
+	}
+}
