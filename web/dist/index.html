@@ -1101,7 +1101,9 @@ async function renderDrawer(){
       : '<span class="dimmer">unknown — no recorded assessment</span>'],
     ["Signals", String(inc.signals_seen)],
     ["Opened", `<span class="mono">${esc((inc.opened_at||"").replace("T"," ").slice(0,19))}</span>`],
-  ]).concat(d.decision ? [["Decision", decisionBinding(d)]] : [])
+  ]).concat(inc.state === "AWAITING_APPROVAL" && d.approval_step && d.approval_deadline
+    ? [["Approval request", `Step ${esc(d.approval_step)} does not run until someone approves it. Without a decision by ${esc(new Date(d.approval_deadline).toISOString().replace("T"," ").slice(0,19))} UTC, the step will not run.`]] : [])
+   .concat(d.decision ? [["Decision", decisionBinding(d)]] : [])
    .map(([k,v]) => `<div class="k">${k}</div><div>${v}</div>`).join("");
 
   // A 409 from approve/reject left a notice for this incident: shown above

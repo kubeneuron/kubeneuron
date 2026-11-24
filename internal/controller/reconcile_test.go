@@ -280,6 +280,103 @@ func TestWalkApprovalExpiresAfterTTL(t *testing.T) {
 	}
 }
 
+func TestRestartAfterApprovalDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name, wire, owner string
+		state             types.IncidentState
+	}{
+		{"own cordon", "", "self", types.StateNeedsHuman},
+		{"foreign cordon", "", "other-incident", types.StateExpired},
+		{"dispatch without result", "platform.drain", "", types.StateNeedsHuman},
+		{"observation", "notify.observe", "", types.StateExpired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			c, st, _ := walkFixture(t, true)
+			id := openIncidentFor(t, c, types.ClassFellOffBus)
+			inc := drive(t, c, st, id, types.StateAwaitingApproval)
+			p := &ownedPlatform{}
+			if tc.owner != "" {
+				owner := tc.owner
+				if owner == "self" {
+					owner = id
+				}
+				if err := p.CordonForOwner(ctx, inc.Target.Node, owner, cordonReason(inc)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.wire != "" {
+				if err := st.AppendAudit(ctx, &types.AuditEntry{IncidentID: id, Time: inc.StateChangedAt.Add(-time.Second), ToState: types.StateExecuting, Action: "earlier", Result: auditStepStartResult(tc.wire)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c = restartWith(t, c, st, p)
+			c.SetTimings(0, time.Nanosecond)
+			drive(t, c, st, id, tc.state)
+			for _, round := range []int{inc.ApprovalEpoch, inc.ApprovalEpoch + 1} {
+				for _, decision := range []types.ApprovalDecision{types.ApprovalApproved, types.ApprovalRejected} {
+					err := c.DecideApproval(ctx, id, "operator", "cli", decision, round, "", "")
+					if err == nil || err.Error() != "The approval request for "+id+" has already expired, so this decision was not recorded. See the incident's current state with kubeneuronctl incidents show "+id {
+						t.Fatalf("late decision: %v", err)
+					}
+				}
+			}
+			if tc.owner == "self" {
+				c.reconcileCordonedNodes(ctx)
+				if !p.cordoned(inc.Target.Node) {
+					t.Fatal("cordon released before operator resolution")
+				}
+				if err := c.ResolveIncident(ctx, id, "operator", "verified"); err != nil {
+					t.Fatal(err)
+				}
+				c.reconcileCordonedNodes(ctx)
+				if p.cordoned(inc.Target.Node) {
+					t.Fatal("cordon retained after operator resolution")
+				}
+			}
+		})
+	}
+}
+
+func TestApprovalExpiryMissingRequest(t *testing.T) {
+	c, st, _ := walkFixture(t, true)
+	ctx := context.Background()
+	id := openIncidentFor(t, c, types.ClassFellOffBus)
+	inc := drive(t, c, st, id, types.StateAwaitingApproval)
+	inc.ApprovalEpoch++
+	if err := st.UpdateIncident(ctx, inc); err != nil {
+		t.Fatal(err)
+	}
+	c.SetTimings(0, time.Nanosecond)
+	drive(t, c, st, id, types.StateExpired)
+	if !auditHas(trail(t, st, id), "approval-ttl", "The approval request on node n1 expired") {
+		t.Fatal("missing expiry fallback")
+	}
+	for _, round := range []int{inc.ApprovalEpoch - 1, inc.ApprovalEpoch} {
+		err := c.DecideApproval(ctx, id, "operator", "cli", types.ApprovalApproved, round, "", "")
+		if err == nil || !strings.Contains(err.Error(), "already expired") {
+			t.Fatalf("round %d: %v", round, err)
+		}
+	}
+}
+
+func TestApprovalExpiryHistory(t *testing.T) {
+	for _, tc := range []struct {
+		wire            string
+		simulated, want bool
+	}{
+		{"platform.drain", false, true}, {"platform.drain", true, false}, {"notify.observe", false, false}, {"verify.node_health", false, false}, {"agent.idle_check", false, false}, {"old.unknown", false, true},
+	} {
+		entries := []*types.AuditEntry{{ToState: types.StateExecuting, Result: auditStepStartResult(tc.wire)}}
+		if tc.simulated {
+			entries = append(entries, &types.AuditEntry{Result: auditStepOutcomeResult(tc.wire, true, true)})
+		}
+		if got := approvalRepairStarted(entries); got != tc.want {
+			t.Errorf("%s simulated=%v: got %v", tc.wire, tc.simulated, got)
+		}
+	}
+}
+
 func TestWalkObserveThresholdEscalates(t *testing.T) {
 	c, st, _ := walkFixture(t, true)
 	ctx := context.Background()

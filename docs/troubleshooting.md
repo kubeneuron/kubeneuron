@@ -57,7 +57,7 @@ plain text. Common holds (all deliberate, all retried every tick):
 | Stuck in | Likely hold |
 |---|---|
 | `EVALUATING`, step 0 | global pause, per-node pause (`GPUNodeConfig`), an active maintenance window, playbook cooldown, or a gate concurrency cap |
-| `AWAITING_APPROVAL` | nobody decided; check Slack/panel; expires to `EXPIRED` after the TTL |
+| `AWAITING_APPROVAL` | nobody decided; check Slack/panel; after the deadline check `NEEDS_HUMAN` for a node already changed, or `EXPIRED` for an untouched node |
 | `OBSERVING` | below the policy threshold — that's the design |
 | `NEEDS_HUMAN` | ladder exhausted, flap quarantine, or a rejected approval; fix the node, then `kubeneuronctl resolve <id>` |
 | `NEEDS_HUMAN` with `verify-evidence` | a real incident could not be verified: the agent heartbeat went stale, or — on a node an `AcceleratorRuntimeProfile` selects — the agent never posted a fresh accelerator report (check its logs). A node **no** profile selects verifies on the heartbeat instead and does not park here. Fix the agent, then `kubeneuronctl resolve <id>` |

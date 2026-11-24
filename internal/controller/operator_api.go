@@ -100,6 +100,20 @@ func (c *Controller) DecideApproval(ctx context.Context, id, actor, channel stri
 	if inc.ApprovalEpoch == 0 {
 		return fmt.Errorf("cannot record a decision for %s: its park predates approval rounds; the controller will re-park it — decide the fresh request", id)
 	}
+	if inc.State != types.StateAwaitingApproval {
+		if inc.State == types.StateExpired {
+			return approval.ExpiredRequest(id)
+		}
+		trail, err := c.store.AuditTrail(ctx, id)
+		if err != nil {
+			return err
+		}
+		for _, entry := range trail {
+			if entry.FromState == types.StateAwaitingApproval && entry.Action == "approval-expired" {
+				return approval.ExpiredRequest(id)
+			}
+		}
+	}
 	// expectedEpoch closes the notification-to-click half of the hot-swap
 	// window: when the client passes the round it DISPLAYED (>0) and a
 	// re-park has since minted a newer round, the click must not be recorded
@@ -109,6 +123,15 @@ func (c *Controller) DecideApproval(ctx context.Context, id, actor, channel stri
 	if expectedEpoch > 0 && expectedEpoch != inc.ApprovalEpoch {
 		return approval.RequestChanged(fmt.Errorf("the approval request for %s changed since it was displayed (you decided round %d; round %d is current) — re-read the incident and decide again",
 			id, expectedEpoch, inc.ApprovalEpoch))
+	}
+	if inc.State != types.StateAwaitingApproval {
+		prior, err := c.store.FirstApprovalDecision(ctx, id, inc.ApprovalEpoch)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if prior != nil {
+			return approval.AlreadyDecided{IncidentID: id, Round: inc.ApprovalEpoch, Prior: prior}
+		}
 	}
 	request, err := c.store.GetApprovalRequest(ctx, id, inc.ApprovalEpoch)
 	if err != nil {

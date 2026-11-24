@@ -21,6 +21,11 @@ type ChangedRequest struct{ error }
 func RequestChanged(err error) error   { return ChangedRequest{err} }
 func (e ChangedRequest) Unwrap() error { return e.error }
 
+func ExpiredRequest(id string) error {
+	//nolint:staticcheck // This operator-facing message starts a complete sentence.
+	return fmt.Errorf("The approval request for %s has already expired, so this decision was not recorded. See the incident's current state with kubeneuronctl incidents show %s", id, id)
+}
+
 type AlreadyDecided struct {
 	IncidentID string
 	Round      int
@@ -78,7 +83,7 @@ func (m *Manager) Decide(ctx context.Context, incidentID string, step StepIdenti
 	}
 	now := time.Now()
 	if m.expiredAt(inc, now) {
-		return fmt.Errorf("the approval request for %s expired (older than %s); it is not awaiting approval any more", incidentID, m.ttl)
+		return ExpiredRequest(incidentID)
 	}
 	prior, err := m.store.FirstApprovalDecision(ctx, incidentID, step.ParkEpoch)
 	switch {

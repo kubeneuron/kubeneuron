@@ -254,7 +254,7 @@ func checkInventoryRepairApproval(t *testing.T, ending string) {
 	if got := step(t, c, st, third.ID, 10); got.State != types.StateNeedsHuman || len(notifier.approvals) != 1 {
 		t.Fatalf("missing node: state=%s approvals=%d", got.State, len(notifier.approvals))
 	}
-	wantReason := "no decision"
+	wantReason := "expired without a decision"
 	c.store = st
 	switch ending {
 	case "superseded":
@@ -699,7 +699,7 @@ func TestApprovedDrainWaitsForGPURepairStep(t *testing.T) {
 }
 
 func TestTerminalOwnerAfterCordonReleasesFollower(t *testing.T) {
-	for _, ending := range []types.IncidentState{types.StateExpired, types.StateSuperseded} {
+	for _, ending := range []types.IncidentState{types.StateResolved, types.StateSuperseded} {
 		t.Run(string(ending), func(t *testing.T) {
 			ctx := t.Context()
 			p := newSuccessorPlatform()
@@ -723,9 +723,19 @@ func TestTerminalOwnerAfterCordonReleasesFollower(t *testing.T) {
 			if !auditHas(trail(t, st, follower), "wait-for-node-repair", owner) {
 				t.Fatal("missing follower wait")
 			}
-			if ending == types.StateExpired {
+			if ending == types.StateResolved {
 				c.SetTimings(0, time.Nanosecond)
 				if err := c.advance(ctx, parked); err != nil {
+					t.Fatal(err)
+				}
+				if got := mustIncident(t, st, owner).State; got != types.StateNeedsHuman {
+					t.Fatalf("owner after expiry = %s", got)
+				}
+				step(t, c, st, follower, 8)
+				if got := mustIncident(t, st, follower).State; got != types.StateEvaluating {
+					t.Fatalf("follower before resolve = %s", got)
+				}
+				if err := c.ResolveIncident(ctx, owner, "operator", "node checked"); err != nil {
 					t.Fatal(err)
 				}
 				c.SetTimings(0, time.Hour)

@@ -386,15 +386,21 @@ func cmdIncidents() *cobra.Command {
 			_, _ = fmt.Fprintf(out, "approval:  round %d (use --round %d with %s)\n", inc.ApprovalEpoch, inc.ApprovalEpoch, hint)
 			if detail.ApprovalStep != "" {
 				ac := notify.ApprovalContext{Deadline: detail.ApprovalDeadline}
-				fmt.Fprintln(out, ac.Guidance(detail.ApprovalStep))
+				if _, err := fmt.Fprintln(out, ac.Guidance(detail.ApprovalStep)); err != nil {
+					return err
+				}
 			}
 			digest := detail.ImpactPreviewDigest
 			if detail.ImpactPreviewUnavailable != "" {
 				digest = ""
 			}
 			approve, reject := notify.ApprovalCommands(inc.ID, inc.ApprovalEpoch, digest)
-			fmt.Fprintln(out, approve)
-			fmt.Fprintln(out, reject)
+			if _, err := fmt.Fprintln(out, approve); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(out, reject); err != nil {
+				return err
+			}
 		}
 		// The current reason recovery is held comes first, before the evidence.
 		recovery := detail.RecoveryAvailability
@@ -595,9 +601,13 @@ func decisionCommand(use, short, route string, withRound bool) *cobra.Command {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", strings.TrimPrefix(route, "/"), args[0])
 		switch route {
 		case "/approve":
-			fmt.Fprintln(cmd.OutOrStdout(), "Approval recorded. The controller will check the step again before it runs it.")
+			if _, err := fmt.Fprintln(cmd.OutOrStdout(), "Approval recorded. The controller will check the step again before it runs it."); err != nil {
+				return err
+			}
 		case "/reject":
-			fmt.Fprintln(cmd.OutOrStdout(), "Rejection recorded. The controller will stop this repair and hand the incident to the operator.")
+			if _, err := fmt.Fprintln(cmd.OutOrStdout(), "Rejection recorded. The controller will stop this repair and hand the incident to the operator."); err != nil {
+				return err
+			}
 		}
 		return nil
 	}}

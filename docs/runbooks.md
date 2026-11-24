@@ -339,22 +339,21 @@ transport down fleet-wide.
 
 ### KubeNeuronIncidentExpired
 
-An approval request timed out (default TTL 12h) and the incident moved to
-`EXPIRED`. **Nothing uncordons the node on expiry** — if the ladder had
-already run its cordon/drain rungs, the node is still unschedulable and
-its workloads are gone.
+`KubeNeuronIncidentExpired` reports incidents in `EXPIRED`. With the bundled
+observability rules, an incident that goes to `NEEDS_HUMAN` triggers
+`KubeNeuronIncidentNeedsHuman`. When the approval deadline passes (default
+12h), the requested step does not run.
+An incident that previously changed the node or still holds its cordon goes to
+`NEEDS_HUMAN`. Inspect the history with `kubeneuronctl incidents show <id>`,
+check the node and its workloads, and finish with `kubeneuronctl resolve <id>`
+when the node is safe. The cordon janitor then releases this incident's hold.
 
-1. Find it and see how far it got:
-   `kubeneuronctl incidents --state EXPIRED` then
-   `kubeneuronctl incidents show <id>` — the audit trail names the last
-   executed step.
-2. Decide the disposition. An expired incident is closed: it cannot be
-   approved. Either fix the fault out of band and release the node, or
-   re-open remediation with
-   `kubeneuronctl remediate <node> --class <class> --actor <you>`.
-3. Release the node when you are done:
-   `kubectl uncordon <node>` (check `kubectl get node <node>` first — a
-   node cordoned by something else must not be uncordoned by reflex).
+An untouched incident closes as `EXPIRED`. A fresh signal can open another
+incident. To start remediation again without waiting for a signal, run
+`kubeneuronctl remediate <node> --class <class> --actor <you>`.
+Incidents already closed as expired before the upgrade retain their
+history. Check the node for a cordon left by those older incidents before
+returning it to service.
 
 Prevention: shorten `spec.approvals.ttl` so a forgotten request fails fast,
 or route approvals to a channel with an on-call rotation. Notifications are

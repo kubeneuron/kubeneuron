@@ -728,16 +728,107 @@ func (c *Controller) resumeAwaitingApproval(ctx context.Context, inc *types.Inci
 		}
 	}
 	if time.Since(inc.StateChangedAt) > ttl {
-		if err := c.transition(ctx, inc, types.StateExpired, "system", "approval-ttl",
-			fmt.Sprintf("no decision within %s", ttl), nil); err != nil {
-			return err
-		}
-		return c.notifier.Notify(ctx, notify.NotifyEvent{
-			Kind: notify.EventExpired, Incident: inc,
-			Message: "approval request expired without a decision",
-		})
+		return c.expireApproval(ctx, inc)
 	}
 	return nil
+}
+
+func (c *Controller) expireApproval(ctx context.Context, inc *types.Incident) error {
+	subject := "The approval request"
+	if request, err := c.store.GetApprovalRequest(ctx, inc.ID, inc.ApprovalEpoch); err == nil && request.StepName != "" {
+		subject += " for step " + request.StepName
+	}
+	trail, err := c.store.AuditTrail(ctx, inc.ID)
+	if err != nil {
+		return err
+	}
+	changed := approvalRepairStarted(trail)
+	if !changed {
+		if janitor, ok := c.platform.(platform.CordonJanitor); ok {
+			nodes, err := janitor.CordonedNodes(ctx)
+			if err != nil {
+				return err
+			}
+			for _, node := range nodes {
+				for _, owner := range node.Holds() {
+					id, valid := incidentFromCordonOwner(owner)
+					if valid && id == inc.ID {
+						changed = true
+					}
+				}
+			}
+		}
+	}
+	what := fmt.Sprintf("%s on node %s expired without a decision", subject, inc.Target.Node)
+	if changed {
+		h := handover{What: what + ", so the step was not run.", Check: "Earlier steps of this incident changed the node; it may be cordoned or drained. Check the node and decide whether it still needs repair. Then run", Command: "kubeneuronctl resolve " + inc.ID}
+		if err := c.handOver(ctx, inc, "system", "approval-expired", h, false); err != nil {
+			return err
+		}
+		return c.notifier.Notify(ctx, notify.NotifyEvent{Kind: notify.EventNeedsHuman, Incident: inc, Message: h.message()})
+	}
+	msg := what + ". The step was not run and incident " + inc.ID + " is closed as expired. This incident did not change the node. A new signal for this node opens a new incident."
+	if err := c.transition(ctx, inc, types.StateExpired, "system", "approval-ttl", msg, nil); err != nil {
+		return err
+	}
+	return c.notifier.Notify(ctx, notify.NotifyEvent{Kind: notify.EventExpired, Incident: inc, Message: msg})
+}
+
+type approvalAuditKind int
+
+const (
+	approvalAuditNone approvalAuditKind = iota
+	approvalAuditStart
+	approvalAuditOutcome
+	approvalAuditSimulation
+)
+
+func approvalAuditStep(entry *types.AuditEntry) (kind approvalAuditKind, wire string) {
+	result, outcome := strings.CutPrefix(entry.Result, auditStepOutcomePrefix)
+	if !outcome && entry.ToState != types.StateExecuting {
+		return approvalAuditNone, ""
+	}
+	switch {
+	case strings.HasPrefix(result, auditStepStartPrefix):
+		return approvalAuditStart, strings.TrimPrefix(result, auditStepStartPrefix)
+	case strings.HasPrefix(result, auditExecutingPrefix):
+		return approvalAuditOutcome, strings.TrimPrefix(result, auditExecutingPrefix)
+	case strings.HasPrefix(result, "unknown "):
+		return approvalAuditOutcome, strings.TrimPrefix(result, "unknown ")
+	case outcome && strings.HasPrefix(result, auditSimulatingPrefix):
+		return approvalAuditSimulation, strings.TrimPrefix(result, auditSimulatingPrefix)
+	default:
+		return approvalAuditNone, ""
+	}
+}
+
+// Every started action except notify, verify and idle guards counts as a change,
+// including unknown actions, unless a simulated outcome accounts for its start.
+func approvalRepairStarted(trail []*types.AuditEntry) bool {
+	pending := map[string]int{}
+	for _, entry := range trail {
+		kind, wire := approvalAuditStep(entry)
+		def, known := action.ByWire(wire)
+		if known && (def.Kind == action.KindNotify || def.Kind == action.KindVerify || def.IdleGuard) {
+			continue
+		}
+		switch kind {
+		case approvalAuditStart:
+			pending[wire]++
+		case approvalAuditOutcome:
+			return true
+		case approvalAuditSimulation:
+			if pending[wire] > 0 {
+				pending[wire]--
+			}
+		}
+	}
+	for _, count := range pending {
+		if count > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // stepContentHash hashes the meaningful content of a step — its playbook, name,

@@ -35,6 +35,8 @@ API is `v1alpha1`.
 
 - kubeneuronctl connection, authentication and TLS errors now say what to do next and print the underlying error on a separate cause: line. If you parse these error texts, update your parser.
 
+- Approval requests now say when they expire and what approving, rejecting or not deciding does, in Slack, webhook, PagerDuty, the panel and kubeneuronctl incidents show. Webhook and PagerDuty messages carry both the approve and the reject command. If an approval request expires after earlier steps already changed the node, the incident now waits for the operator instead of closing as expired. If you parse the text of these notifications, update your parser.
+
 - When automatic repair stops after repeated failures, an approval decision, or missing recovery evidence, the incident now tells the operator what to check and how to close it.
 
 - When an add-first replacement node is kept because it runs a workload or its removal cannot be confirmed, the incident names the pool, explains the possible extra charge and gives the command to record the outcome.
